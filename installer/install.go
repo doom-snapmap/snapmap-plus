@@ -27,7 +27,7 @@ type backup struct {
 func recordPath() (string, error) {
 	base := os.Getenv("LOCALAPPDATA")
 	if base == "" {
-		return "", fmt.Errorf("LOCALAPPDATA is not set")
+		return "", fmt.Errorf("couldn't find your local app-data folder (the LOCALAPPDATA environment variable is not set)")
 	}
 	dir := filepath.Join(base, "open-snaphak")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -69,6 +69,9 @@ func cmdInstall(f flags) error {
 	if err != nil {
 		return err
 	}
+	if doomIsRunning() {
+		return fmt.Errorf("DOOM is running -- close it and run this again (SnapHak's files can't be replaced while the game has them open)")
+	}
 	b, cleanup, err := acquireBundle(f)
 	if err != nil {
 		return err
@@ -88,7 +91,7 @@ func cmdInstall(f flags) error {
 			bak := target + ".snaphak-bak"
 			if _, err := os.Stat(bak); err != nil { // never clobber an existing backup
 				if err := os.Rename(target, bak); err != nil {
-					return fmt.Errorf("back up %s: %w", e.rel, err)
+					return fmt.Errorf("couldn't back up the existing %s (%v) -- check you can write to your DOOM folder (try running as administrator)", e.rel, err)
 				}
 				rec.Backups = append(rec.Backups, backup{Rel: e.rel, Backup: bak})
 			}
@@ -97,7 +100,7 @@ func cmdInstall(f flags) error {
 			return err
 		}
 		if err := copyFile(filepath.Join(b.root, e.rel), target); err != nil {
-			return fmt.Errorf("install %s: %w", e.rel, err)
+			return fmt.Errorf("couldn't write %s into your DOOM folder (%v) -- check you have permission (try running as administrator)", e.rel, err)
 		}
 		rec.Files = append(rec.Files, e.rel)
 		fmt.Printf("  + %s\n", e.rel)
@@ -125,11 +128,14 @@ func cmdUpdate(f flags) error {
 func cmdUninstall(f flags) error {
 	rec, err := loadRecord()
 	if err != nil {
-		return fmt.Errorf("no install record found (nothing to uninstall): %w", err)
+		return fmt.Errorf("SnapHak doesn't appear to be installed (no install record found) -- nothing to uninstall")
 	}
 	doom := rec.DoomPath
 	if f.doom != "" {
 		doom = f.doom
+	}
+	if doomIsRunning() {
+		return fmt.Errorf("DOOM is running -- close it and run this again (its files are in use)")
 	}
 	fmt.Printf("Removing SnapHak from %s\n", doom)
 
@@ -137,7 +143,7 @@ func cmdUninstall(f flags) error {
 	for _, rel := range rec.Files {
 		target := filepath.Join(doom, rel)
 		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "  ! could not remove %s: %v\n", rel, err)
+			fmt.Fprintf(os.Stderr, "  ! couldn't remove %s (%v) -- is DOOM still running?\n", rel, err)
 			continue
 		}
 		fmt.Printf("  - %s\n", rel)
@@ -146,7 +152,7 @@ func cmdUninstall(f flags) error {
 	for _, bk := range rec.Backups {
 		target := filepath.Join(doom, bk.Rel)
 		if err := os.Rename(bk.Backup, target); err != nil {
-			fmt.Fprintf(os.Stderr, "  ! could not restore %s: %v\n", bk.Rel, err)
+			fmt.Fprintf(os.Stderr, "  ! couldn't restore %s (%v)\n", bk.Rel, err)
 			continue
 		}
 		fmt.Printf("  ~ restored %s\n", bk.Rel)

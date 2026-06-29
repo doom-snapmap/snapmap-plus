@@ -55,7 +55,7 @@ func acquireBundle(f flags) (*bundle, func(), error) {
 func loadBundle(root string) (*bundle, error) {
 	f, err := os.Open(filepath.Join(root, "MANIFEST.sha256"))
 	if err != nil {
-		return nil, fmt.Errorf("no MANIFEST.sha256 in %q (not a dist/ bundle): %w", root, err)
+		return nil, fmt.Errorf("%q isn't a SnapHak build folder (no MANIFEST.sha256) -- point --local at a dist/ folder built by package.ps1", root)
 	}
 	defer f.Close()
 
@@ -68,7 +68,7 @@ func loadBundle(root string) (*bundle, error) {
 		}
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
-			return nil, fmt.Errorf("malformed MANIFEST line: %q", line)
+			return nil, fmt.Errorf("the build's MANIFEST is malformed (%q) -- re-download or rebuild with package.ps1", line)
 		}
 		entries = append(entries, manifestEntry{
 			rel:    filepath.FromSlash(fields[1]),
@@ -76,15 +76,15 @@ func loadBundle(root string) (*bundle, error) {
 		})
 	}
 	if len(entries) == 0 {
-		return nil, fmt.Errorf("empty MANIFEST.sha256 in %q", root)
+		return nil, fmt.Errorf("%q has an empty MANIFEST -- the build looks incomplete", root)
 	}
 	for _, e := range entries {
 		got, err := fileSHA256(filepath.Join(root, e.rel))
 		if err != nil {
-			return nil, fmt.Errorf("bundle file missing: %s (%w)", e.rel, err)
+			return nil, fmt.Errorf("the build is incomplete -- %s is missing. Rebuild with package.ps1, or re-download", e.rel)
 		}
 		if got != e.sha256 {
-			return nil, fmt.Errorf("bundle file hash mismatch: %s", e.rel)
+			return nil, fmt.Errorf("integrity check failed on %s (hash mismatch) -- the download may be corrupted or tampered. Try again", e.rel)
 		}
 	}
 	return &bundle{root: root, files: entries}, nil
@@ -138,7 +138,7 @@ func downloadRelease(f flags) (dir string, cleanup func(), err error) {
 		}
 	}
 	if asset == nil {
-		return "", noop, fmt.Errorf("release %s has no %s asset", rel.TagName, releaseAsset)
+		return "", noop, fmt.Errorf("release %s is missing its download -- it may still be publishing, so try again in a minute", rel.TagName)
 	}
 
 	tmp, err := os.MkdirTemp("", "snaphak-bundle-")
@@ -175,7 +175,7 @@ func fetchRelease(f flags, token string) (*ghRelease, error) {
 				return &list[i], nil
 			}
 		}
-		return nil, fmt.Errorf("no beta (pre-release) build is published yet")
+		return nil, fmt.Errorf("no beta build is available yet")
 	default:
 		var r ghRelease
 		return &r, apiGet(base+"/latest", token, &r)
@@ -194,18 +194,30 @@ func apiGet(url, token string, out interface{}) error {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("couldn't reach GitHub (%v) -- check your internet connection and try again", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 400))
-		hint := ""
-		if resp.StatusCode == http.StatusNotFound && token == "" {
-			hint = " (a private repo needs a token: run `snaphak set-token <tok>`)"
-		}
-		return fmt.Errorf("GitHub API HTTP %d%s: %s", resp.StatusCode, hint, strings.TrimSpace(string(body)))
+		return fmt.Errorf("%s", friendlyHTTP(resp.StatusCode, token))
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// friendlyHTTP turns a GitHub API status code into a plain-English, actionable message.
+func friendlyHTTP(code int, token string) string {
+	switch code {
+	case http.StatusUnauthorized: // 401
+		return "your access token was rejected (401) -- double-check it with whoever gave it to you, then run: snaphak set-token <token>"
+	case http.StatusForbidden: // 403
+		return "GitHub denied or rate-limited the request (403) -- wait a few minutes and try again"
+	case http.StatusNotFound: // 404
+		if token == "" {
+			return "couldn't find the release (404) -- if this is a private or beta build, set your access token first: snaphak set-token <token>"
+		}
+		return "release not found (404) -- check the version, or your token may not have access to this repository"
+	default:
+		return fmt.Sprintf("GitHub returned an error (HTTP %d) -- try again in a moment", code)
+	}
 }
 
 // downloadAsset fetches the asset: with a token, the API asset URL + octet-stream (the only way to pull a
@@ -228,11 +240,11 @@ func downloadAsset(a *ghAsset, token, dest string) error {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("couldn't download %s (%v) -- check your internet connection and try again", a.Name, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: HTTP %d", a.Name, resp.StatusCode)
+		return fmt.Errorf("couldn't download %s (HTTP %d) -- try again in a moment", a.Name, resp.StatusCode)
 	}
 	out, err := os.Create(dest)
 	if err != nil {
@@ -248,7 +260,7 @@ func downloadAsset(a *ghAsset, token, dest string) error {
 func tokenPath() (string, error) {
 	base := os.Getenv("LOCALAPPDATA")
 	if base == "" {
-		return "", fmt.Errorf("LOCALAPPDATA is not set")
+		return "", fmt.Errorf("couldn't find your local app-data folder (the LOCALAPPDATA environment variable is not set)")
 	}
 	return filepath.Join(base, "open-snaphak", "token"), nil
 }

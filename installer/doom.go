@@ -21,11 +21,11 @@ func resolveDoom(explicit string) (string, error) {
 		if hasDoomExe(explicit) {
 			return explicit, nil
 		}
-		return "", fmt.Errorf("%s not found under --doom %q", doomExe, explicit)
+		return "", fmt.Errorf("no %s in %q -- point --doom at your DOOM 2016 folder (the one containing %s)", doomExe, explicit, doomExe)
 	}
 	dir, err := detectDoomViaSteam()
 	if err != nil {
-		return "", fmt.Errorf("could not auto-detect DOOM (%v); pass --doom <the folder with %s>", err, doomExe)
+		return "", fmt.Errorf("couldn't find your DOOM 2016 install automatically -- pass --doom <the folder containing %s> (usually ...\\steamapps\\common\\DOOM)", doomExe)
 	}
 	return dir, nil
 }
@@ -33,6 +33,17 @@ func resolveDoom(explicit string) (string, error) {
 func hasDoomExe(dir string) bool {
 	st, err := os.Stat(filepath.Join(dir, doomExe))
 	return err == nil && !st.IsDir()
+}
+
+// doomIsRunning reports whether DOOM 2016 (DOOMx64vk.exe) is currently running, so we can say "close DOOM
+// first" instead of surfacing a raw file-lock error -- Windows won't let us replace a DLL the running game
+// has loaded. Best-effort: if we can't tell (e.g. tasklist unavailable), we don't block.
+func doomIsRunning() bool {
+	out, err := exec.Command("tasklist", "/FI", "IMAGENAME eq "+doomExe, "/NH").Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), doomExe)
 }
 
 // detectDoomViaSteam: SteamPath (registry) -> every library in libraryfolders.vdf -> the one holding appid 379720.

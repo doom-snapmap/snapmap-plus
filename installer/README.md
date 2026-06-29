@@ -33,6 +33,8 @@ With no `--local`, `install`/`update` download from GitHub (the latest stable by
 
 ## What it does
 
+- **DOOM must be closed** for install / update / uninstall — a running game locks its DLLs. The installer
+  detects a running DOOM and asks you to close it, instead of failing with a cryptic Windows file error.
 - Verifies the bundle against its `MANIFEST.sha256` (every file present + hash-correct) **before** touching DOOM.
 - **Backs up** any pre-existing file it would overwrite (e.g. a genuine `XINPUT1_3.dll`) to `<file>.snaphak-bak`.
 - Records the install (files placed + backups taken) in `%LOCALAPPDATA%\open-snaphak\install.json`.
