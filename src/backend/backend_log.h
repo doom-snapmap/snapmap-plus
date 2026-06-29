@@ -1,6 +1,6 @@
 /* backend_log.h -- the SnapHak backend's minimal log sink (OutputDebugStringA + a log file next to
  * the DLL). Independent of the fault-shield's fault_record. OutputDebugStringA -> in-game console +
- * the daemon console ring (the smoke proof surface). */
+ * any attached debugger's output sink (the smoke proof surface). */
 #ifndef BACKEND_LOG_H
 #define BACKEND_LOG_H
 

@@ -1,6 +1,6 @@
 # Capabilities
 
-What the clone does, grouped by kind. This is the product-facing inventory; for how the pieces
+What the clone does, grouped by kind. This is the user-facing feature inventory; for how the pieces
 fit together see [`architecture.md`](architecture.md), and for the intentionally-faithful quirks
 see [`fidelity.md`](fidelity.md).
 

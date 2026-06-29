@@ -1,5 +1,5 @@
 /* signatures.h -- version-portable masked-byte engine-function resolver for the SnapHak BACKEND
- * (our clean-room XINPUT1_3.dll). C port of the prototype's signature table.
+ * (our clean-room XINPUT1_3.dll). C port of the reference implementation's signature table.
  *
  * SnapHak hardcodes `engineBase + rva` (build-locked to its 2021 DOOM). We instead carry a masked
  * byte SIGNATURE per engine function and scan the live DOOM module's executable bytes for it, so the

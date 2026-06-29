@@ -148,15 +148,15 @@ typedef int          (*sh_enum_valid_classes_fn)(struct sh_iface *self, const ch
 
 /* ------------------------------------------------------------------ heavy apply slots --------
  * The heavy serialize/deserialize/apply slots the SnapStack APPLY-ops (bss/bsi/bsf/bsb/bse/accl/
- * acctargets/mkcmd) need. These are the native port of the prototype's +0xc8 serialize / +0xd0 deserialize-
+ * acctargets/mkcmd) need. These are the native port of the reference implementation's +0xc8 serialize / +0xd0 deserialize-
  * apply / +0xb8 mkcmd-submit. ALL are BACKEND-OWNED (the backend resolves the engine fns by signature +
  * SEH-guards every body); the FRONTEND (Qt) calls them through the vtable at the pinned offsets, doing
- * ONLY the JSON patch in between (QJson for structure + a raw-token splice for the float leaf -- the prototype
+ * ONLY the JSON patch in between (QJson for structure + a raw-token splice for the float leaf -- the reference implementation
  * patchFullJsonEdit). The HEAVY structured-deserialize is AV-prone mid-frame (a stale reflection-handler),
  * so the apply does NOT run inline: the frontend SCHEDULEs it (sh_schedule_apply) and the backend drains
- * it at the engine command-buffer exec point (clone_bss_apply -- the prototype FIX B). */
+ * it at the engine command-buffer exec point (clone_bss_apply -- the reference implementation FIX B). */
 
-/* +0xc8 serialize entity id -> the FULL ~type/|pointer idSnapEntity JSON (the prototype serializeEntityToJson).
+/* +0xc8 serialize entity id -> the FULL ~type/|pointer idSnapEntity JSON (the reference implementation serializeEntityToJson).
  * Writes up to cap-1 bytes into out_json (NUL-terminated); returns the byte length written (0 on failure /
  * no map / unbound). The frontend QJson-patches this string, then schedules the apply on the patched text. */
 typedef int          (*sh_serialize_entity_fn)(struct sh_iface *self, int id, char *out_json, int cap); /* +0xc8 */
@@ -174,7 +174,7 @@ typedef struct sh_apply_item {
     const char *text;       /* the patched entity JSON (kind 0) / prefab JSON (kind 1) */
 } sh_apply_item;
 
-/* +0xd0 SCHEDULE a batch of apply-items at the engine command-exec point (the prototype doBulkSet/doMkcmd ->
+/* +0xd0 SCHEDULE a batch of apply-items at the engine command-exec point (the reference implementation doBulkSet/doMkcmd ->
  * BufferCommandText). Copies `items` (deep, incl. the text strings) into the backend's pending store,
  * registers the clone_bss_apply engine command once, then enqueues it on the command buffer so the engine
  * drains it on the DOOM main thread (the decl-safe exec point). `op_label` is the op name for the result
@@ -182,7 +182,7 @@ typedef struct sh_apply_item {
 typedef int          (*sh_schedule_apply_fn)(struct sh_iface *self, const sh_apply_item *items, int count,
                                              const char *op_label);                              /* +0xd0 */
 
-/* +0xb8 serialize the editor's pending prefab (editor+0x209a8) -> idSnapEntityPrefab JSON (the prototype
+/* +0xb8 serialize the editor's pending prefab (editor+0x209a8) -> idSnapEntityPrefab JSON (the reference implementation
  * readPrefabStagingJson / shReadPrefabStaging). The mkcmd READ-BACK + the +0x209a8 BUILD-MISMATCH check:
  * a round-trip that returns the staged prefab proves the paste-slot offset on this build. Writes up to
  * cap-1 bytes; returns the length (0 on failure). */

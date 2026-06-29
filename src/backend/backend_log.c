@@ -29,7 +29,7 @@ void backend_log(const char *msg)
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
         msg ? msg : "");
 
-    OutputDebugStringA(line);   /* -> in-game console + daemon ring buffer */
+    OutputDebugStringA(line);   /* -> in-game console + any attached debugger */
 
     if (g_logpath[0]) {
         HANDLE h = CreateFileA(g_logpath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,

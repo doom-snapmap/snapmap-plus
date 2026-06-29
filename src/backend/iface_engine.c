@@ -1,9 +1,9 @@
 /* iface_engine.c -- see iface_engine.h. The BACKEND engine-touch bodies for the UI-interface vtable
  * the LIGHT engine touches the SnapStack STORE-ops need.
  *
- * Faithful port of the prototype's editor bridge (the live-proven mechanism):
+ * Faithful port of the reference implementation's editor bridge (the live-proven mechanism):
  *   - editor singleton  = *module_base + 0x3056748* is the INLINE idSnapEditorLocal object (NOT a ptr;
- *     daemon addresses.json snap_editor_singleton_rva -- the OBJECT, in-place ctor 0x51A8E0). A hardcoded
+ *     the editor-singleton RVA (see the re-derive recipe) -- the OBJECT, in-place ctor 0x51A8E0). A hardcoded
  *     DATA RVA, exactly like cmdSystem/cvarSystem (non-unique data global, not sig-able).
  *   - selection object  = editor+0x204d0 (ptr); ids @ sel+0x80, count @ sel+0x88; hovered @ sel+0x2c.
  *   - screen (toast)    = editor+0x21088 (ptr; Toast arg0).
@@ -12,7 +12,7 @@
  *   - classname (filtcls): *(ent+8)->+0x1c8->+0x38 decl-SOURCE blob, parse `class = "..."`.
  *   - inherit  (filtinh): *(ent+0x158)->+0x38 decl-SOURCE blob, parse `inherit = "..."`.
  *   - id-string (id_to_string / mkcmd): the entity name -- not byte-captured on this build, so we fall
- *     back to the decimal id (faithful per the prototype entityIdString; the serialize-name path is bound later).
+ *     back to the decimal id (faithful per the reference implementation entityIdString; the serialize-name path is bound later).
  * The ENGINE FUNCTIONS (AddToSelection 0x59f210 / ClearSelection 0x59fa00 / Toast 0xcfa0b0 + the idStr
  * ctor/dtor for the toast args) are resolved by SIGNATURE from the shared sig DB -- never a hardcoded RVA.
  *
@@ -34,15 +34,15 @@
 #include "class_universe.h" /* SH_CLASS_UNIVERSE[] -- the +0x270 valid-class dropdown enumerator */
 #include "valid_class_map.h" /* SH_VCM_* -- inherit->Y->classes thread-safe fallback (off-game-thread UI) */
 
-/* ---- editor-struct field offsets (this-live-build; ported from the prototype, SEH-guarded) ------------ */
+/* ---- editor-struct field offsets (this-live-build; ported from the reference implementation, SEH-guarded) ------------ */
 /* EDITOR_SINGLETON_RVA: the INLINE idSnapEditorLocal OBJECT (NOT a pointer) at module_base + this. A
  * NON-SIG-ABLE DATA GLOBAL (a .data object, no unique code fingerprint), like cmdSystem/cvarSystem ->
  * recipe-tagged base+RVA literal. The fault-shield carries the SAME object + the SAME recipe
  * (fault_shield/engine_layout.h RVA_EDITOR_SINGLETON). RE-DERIVE per build: it is the inline
  * idSnapEditorLocal singleton, IN-PLACE-CONSTRUCTED by its ctor at 0x51A8E0 -- decompile that ctor
  * (decompile_rva.py -Program <DOOM> -ScriptArgs @('0x51A8E0')); its `this` (the rcx it writes the vtable +
- * fields through) IS this object's address; RVA = that - module_base. (daemon addresses.json
- * snap_editor_singleton_rva.) */
+ * fields through) IS this object's address; RVA = that - module_base. (RVA derived from the live
+ * editor singleton; see the re-derive recipe above.) */
 #define EDITOR_SINGLETON_RVA   0x3056748u   /* inline idSnapEditorLocal object = module_base + this (in-place ctor 0x51A8E0; re-derive per-build) */
 #define ED_SEL_OBJ_OFF         0x204d0      /* editor+0x204d0 -> selection object ptr */
 #define ED_CAMERA_ORIGIN_OFF   0x170        /* editor+0x170 -> camera-origin vec3 {x,y,z} (3 floats). DIRECT: the OG
@@ -175,7 +175,7 @@ static int ie_read_u32(const void *src, uint32_t *out)
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-/* "editor up" guard, matching the prototype editorSession: the loaded-map ptr (+0x204c8) is non-null in-editor.
+/* "editor up" guard, matching the reference implementation editorSession: the loaded-map ptr (+0x204c8) is non-null in-editor.
  * Returns the editor object base, or NULL when the editor isn't live (so every op fails CLEANLY). */
 static const uint8_t *editor_session(void)
 {
@@ -190,7 +190,7 @@ static const uint8_t *editor_session(void)
  * NB: this must NOT use editor_session() (the loaded-map ptr +0x204c8) -- that ptr PERSISTS as a stale value
  * in the HUB after a map was loaded, so it false-positives there (the window stayed up on exit). The editor
  * SCREEN object (+0x21088, the Toast target) goes NULL on editor->HUB exit -- the reliable editor-vs-HUB
- * signal. Live A/B (subagents window-hide diff): editor -> non-null, HUB -> null; map + selection both persist.
+ * signal. Live A/B (window-hide diff): editor -> non-null, HUB -> null; map + selection both persist.
  * RE-DERIVE per build: snapshot the editor edit-session region (0x20400..0x21100) in-editor vs in-HUB; the
  * offset that flips non-null(editor)->null(HUB) is this (also the documented ED_SCREEN_OFF). */
 static int slot_editor_ready(sh_iface *self)
@@ -330,9 +330,9 @@ static int slot_get_selection(sh_iface *self, int *out_ids, int max)
     int n = count < max ? count : max;
     int written = 0;
     for (int i = 0; i < n; i++) {
-        /* the prototype readSelection reads each id as readU32 (unsigned); read it the same way for
+        /* the reference implementation readSelection reads each id as readU32 (unsigned); read it the same way for
          * lock-step fidelity, then store into the int* out-buffer (real entity ids are small
-         * non-negative, so the value is identical -- this just matches the prototype's read width). */
+         * non-negative, so the value is identical -- this just matches the reference implementation's read width). */
         uint32_t id = 0;
         if (!ie_read_u32((const uint8_t *)arr + (size_t)i * 4, &id)) break;
         out_ids[written++] = (int)id;
@@ -514,7 +514,7 @@ static const char *slot_get_inherit(sh_iface *self, int id, char *buf, int cap)
 }
 
 /* +0x1b8 TOAST(title,text): build two idStr temporaries, call Toast(screen,title,text), free. Faithful to
- * the prototype showToast (the 48-byte idStr stack objects + the ctor/dtor pairing). */
+ * the reference implementation showToast (the 48-byte idStr stack objects + the ctor/dtor pairing). */
 static void slot_toast(sh_iface *self, const char *title, const char *text)
 {
     (void)self;
@@ -540,7 +540,7 @@ static void slot_toast(sh_iface *self, const char *title, const char *text)
         g_idstr_ctor(xStr, text  ? text  : "");
         g_toast(screen, tStr, xStr);
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    /* free heap the idStr may have attached (dtor is SSO/heap-guarded). order mirrors the prototype (x then t). */
+    /* free heap the idStr may have attached (dtor is SSO/heap-guarded). order mirrors the reference implementation (x then t). */
     __try { g_idstr_dtor(xStr); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     __try { g_idstr_dtor(tStr); } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
@@ -769,7 +769,7 @@ static int slot_enum_decls_of_resclass(sh_iface *self, const char *res_class, ch
      * LOGS "Unknown resource class '%s'" to the in-game console on a decl-type miss -- the spam seen when
      * clicking timeline events with decl-pointer args. The decl-combo feed is the NON-LOGGING declManager
      * decl-type enumerator in sh_typeinfo (reflect = declMgr->[+0x80]; FindByName + the instance-list walk;
-     * RE: subagent timeline-decl-resclass-re, OG XINPUT +0x100 FUN_180006eb0). `res_class` IS the decl-type
+     * RE: timeline-decl-resclass-re, OG XINPUT +0x100 FUN_180006eb0). `res_class` IS the decl-type
      * short-name (the frontend reduces the arg type-name to it, e.g. "sound"/"projectile"); an unknown type
      * degrades to 0 SILENTLY -> the combo stays editable, no console spam. (g_get_decls/GetDeclsOfType stays
      * resolved for any future asset-registry use but is no longer on this path.) */

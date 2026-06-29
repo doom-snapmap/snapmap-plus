@@ -1,6 +1,6 @@
 /* apply_engine.c -- see apply_engine.h. The BACKEND 8-pass full-entity APPLY CHAIN.
  *
- * Native, instruction-faithful port of the prototype (the proven mechanism):
+ * Native, instruction-faithful port of the reference implementation (the proven mechanism):
  *   serializeEntityToJson  -> slot_serialize_entity   (+0xc8): clone live->temp -> reflection-serialize
  *                             struct->tree -> render tree->JSON text.
  *   deserializeTextToObject -> ae_deserialize_to_obj  (the FUN_180004950 lex+structDeserialize chain,
@@ -23,7 +23,7 @@
  * deref / call is SEH-guarded -> a wrong/shifted-build offset or a partial bind degrades to a clean failure
  * (toast "0 applied"), never a crash.
  *
- * Clean-room: ported from our own RE + the prototype. Zero OG SnapHak bytes.
+ * Clean-room: ported from our own RE + the reference implementation. Zero OG SnapHak bytes.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -39,7 +39,7 @@
 #include "backend_log.h"
 
 /* ============================================================ editor-struct field offsets ========== */
-/* SAME this-live-build offsets iface_engine.c uses (ported from the prototype, SEH-guarded). The editor
+/* SAME this-live-build offsets iface_engine.c uses (ported from the reference implementation, SEH-guarded). The editor
  * singleton is a hardcoded data RVA (like cmdSystem/cvarSystem). The entity ARRAY + defsub reach is the
  * SAME the apply (FUN_180004b80) + serialize (FUN_1800044a0) resolve. */
 #define EDITOR_SINGLETON_RVA   0x3056748u   /* module_base + this = the inline idSnapEditorLocal object */
@@ -53,7 +53,7 @@
 #define ENT_COUNT_CAP         1000000u      /* sanity cap on the entity array count */
 
 /* mkcmd / prefab paste-staging slot: editor+0x209a8 (the in-game Ctrl+V target). LIVE-CONFIRMED 2026-06-25,
- * 3x DIRECT (subagent paste-slot-rederive, manager-ratified vs the Copy-handler 0xCE3960 decompile): the
+ * 3x DIRECT (paste-slot re-derive, verified vs the Copy-handler 0xCE3960 decompile): the
  * idSnapEditorLocal ctor 0x51A8E0 constructs an idSnapEntityPrefab at this[0x4135] (=0x209a8); the Copy handler
  * 0xCE3960 writes it via FUN_14054e410(editor+0x209a8, editor, &err); the Paste/Ctrl+V 0xCE1810 instantiates it
  * via FUN_14054f950(editor+0x209a8, editor). NOT stale -- open-problems A2's "stale 2021 offset" was OVERTURNED.
@@ -86,7 +86,7 @@
 
 /* ============================================================ apply-chain struct sizes ============== */
 /* DIRECT from the XINPUT1_3 FUN_180004b80 / FUN_180004950 / FUN_1800044a0 decompiles + the engine ctors
- * (the prototype LEXER_SIZE/PARSE_NODE_SIZE/TEMP_DEF_SIZE + the history notes). */
+ * (the reference implementation LEXER_SIZE/PARSE_NODE_SIZE/TEMP_DEF_SIZE + the history notes). */
 #define LEXER_SIZE             0xC0         /* sizeof(idLexer) -- ctor touches to +0xB8 (0x40 was the freeze) */
 #define LEXER_IDSTR0_OFF       0x30         /* idLexer embedded idStr #1 (ctor FUN_1419fd040 @ self+0x30) */
 #define LEXER_IDSTR1_OFF       0x88         /* idLexer embedded idStr #2 (ctor FUN_1419fd040 @ self+0x88) */
@@ -98,7 +98,7 @@
 #define TDEF_INHERIT_OFF       0x58         /* temp-def normalized inherit idStr (tmp+0x58) */
 #define TDEF_CLASS_OFF         0x60         /* temp-def normalized classname idStr (tmp+0x60) */
 #define TDEF_SOURCE_OFF        0x140        /* temp-def normalized decl-source idStr data-ptr (tmp+0x140) */
-#define VSLOT_REFLECT_ACCESSOR 0x80         /* declMgr vtable +0x80 -> reflection mgr (the prototype + sh_typeinfo) */
+#define VSLOT_REFLECT_ACCESSOR 0x80         /* declMgr vtable +0x80 -> reflection mgr (the reference implementation + sh_typeinfo) */
 #define SER_TREE_KIND          7            /* the out parse-tree is built with parse-node kind 7 */
 #define SER_TAG_KIND           7            /* the {tag} arg5 node is also kind 7 */
 
@@ -176,7 +176,7 @@ static volatile LONG       g_cmd_registered = 0;   /* clone_bss_apply registered
 
 /* ============================================================ the pending-apply store =============== */
 /* The frontend SCHEDULEs a batch; the clone_bss_apply handler consumes it on the DOOM main thread. One
- * batch pending at a time (matching the prototype: one apply per enqueue). Guarded so the
+ * batch pending at a time (matching the reference implementation: one apply per enqueue). Guarded so the
  * frontend (UI thread) writer + the engine (main thread) drainer don't tear. */
 typedef struct apply_item_copy {
     int   kind;     /* 0 = bss-style deserialize+commit on `id`; 1 = mkcmd prefab paste (stage-only, OG-faithful);
@@ -209,7 +209,7 @@ static int ae_read_u32_safe(const void *src, int *out)
     __except (EXCEPTION_EXECUTE_HANDLER) { *out = 0; return 0; }
 }
 
-/* "editor up" guard, matching the prototype editorSession: the loaded-map ptr (+0x204c8) is non-null in-editor. */
+/* "editor up" guard, matching the reference implementation editorSession: the loaded-map ptr (+0x204c8) is non-null in-editor. */
 static const uint8_t *ae_editor_session(void)
 {
     if (!g_editor) return NULL;
@@ -245,7 +245,7 @@ static void *ae_entity_ptr(void *array, uint32_t count, int id)
 }
 
 /* declMgr -> reflection mgr: reflect = (*(*declMgr + 0x80))(declMgr). SEH-guarded; NULL on any fault.
- * Mirrors sh_typeinfo's ti_get_reflect + the prototype declMgr.readPointer().add(0x80).readPointer(). */
+ * Mirrors sh_typeinfo's ti_get_reflect + the reference implementation declMgr.readPointer().add(0x80).readPointer(). */
 static void *ae_get_reflect(void)
 {
     void *declmgr = sh_typeinfo_get_declmgr();
@@ -303,7 +303,7 @@ static int ae_commit_bound(void)
 }
 
 /* ============================================================ PASS 1: serialize entity -> JSON =====
- * the prototype serializeEntityToJson (the +0xc8 serializer, XINPUT1_3 FUN_1800044a0). Specialized to a decl
+ * the reference implementation serializeEntityToJson (the +0xc8 serializer, XINPUT1_3 FUN_1800044a0). Specialized to a decl
  * type name (typeName) + a clone SOURCE ADDRESS (cloneBase). For an entity: cloneBase = ent+8 (the clone
  * 0x5a6460 reads cloneBase+0x150 = the defsub, == ent+0x158). Returns the byte length written into
  * out_json (0 on any failure). SEH-guarded throughout; every alloc dtor'd in the finally-equivalent. */
@@ -324,7 +324,7 @@ static int ae_serialize_to_json(const char *typeName, void *cloneBase, char *out
     AE_SER_DIAG("ser[%s]: tid=%lu cloneBase=%p reflect=%p", typeName ? typeName : "?",
                 GetCurrentThreadId(), cloneBase, reflect);
 
-    /* temp idSnapEntity (the clone target). Zero the stack buffers for parity with the prototype's zeroed
+    /* temp idSnapEntity (the clone target). Zero the stack buffers for parity with the reference implementation's zeroed
      * Memory.alloc (a raw stack array would otherwise feed trailing garbage into the engine ctors/copies). */
     uint8_t tmpDef[TEMP_DEF_SIZE];
     uint8_t node7[PARSE_NODE_SIZE];
@@ -353,7 +353,7 @@ static int ae_serialize_to_json(const char *typeName, void *cloneBase, char *out
                         typeName ? typeName : "?", got ? "" : "(read-fault)", defsub);
         }
 
-        /* arg5 {1,1,0} tag + node@+0x08 (matches the prototype + the deserialize layout). NOTE: a "+0x10 node"
+        /* arg5 {1,1,0} tag + node@+0x08 (matches the reference implementation + the deserialize layout). NOTE: a "+0x10 node"
          * variant (claimed from the StructSerialize decompile) was tried and CRASHED StructSerialize
          * (live AV FUN_141a21b40+0x5b) -- so +0x08 is the correct node placement here. The empty-output
          * cause is the THREAD (this runs off the DOOM main thread), NOT arg5. */
@@ -379,7 +379,7 @@ static int ae_serialize_to_json(const char *typeName, void *cloneBase, char *out
         AE_SER_DIAG("ser[%s]: SEH fault in serialize body", typeName ? typeName : "?");
     }
 
-    /* teardown (order mirrors the prototype: jsStr -> outTree -> node7 -> tmpDef). */
+    /* teardown (order mirrors the reference implementation: jsStr -> outTree -> node7 -> tmpDef). */
     if (js_ctored)    { __try { g_idstr_dtor(jsStr); }   __except (EXCEPTION_EXECUTE_HANDLER) {} }
     if (tree_ctored)  { __try { g_node_dtor(outTree); }  __except (EXCEPTION_EXECUTE_HANDLER) {} }
     if (node7_ctored) { __try { g_node_dtor(node7); }    __except (EXCEPTION_EXECUTE_HANDLER) {} }
@@ -388,7 +388,7 @@ static int ae_serialize_to_json(const char *typeName, void *cloneBase, char *out
 }
 
 /* ============================================================ PASS 4+5: deserialize text -> object ==
- * the prototype deserializeTextToObject (FUN_180004950): parse-node(kind7) -> idLexer ctor(0xC0) ->
+ * the reference implementation deserializeTextToObject (FUN_180004950): parse-node(kind7) -> idLexer ctor(0xC0) ->
  * parse-node(kind0) -> src idStr -> lexer parse -> reflect -> structDeserialize(typeName,...) (SIX args).
  * FIX A teardown: src idStr -> parseNode(kind0) -> idLexer's two embedded idStrs (+0x30/+0x88, SSO-guarded)
  * -> node7(kind7). Does NOT call the OG raw lexer-buffer free 0x1ab32e0 (corruption-cookie fatal on our
@@ -479,7 +479,7 @@ static int ae_extract_field(const char *text, const char *field, char *buf, size
 }
 
 /* ============================================================ the per-id bss/bse apply (steps 4-7) ==
- * the prototype doApplyBssOne tail: deserialize the FULL patched entity text onto a TEMP def, then commit the
+ * the reference implementation doApplyBssOne tail: deserialize the FULL patched entity text onto a TEMP def, then commit the
  * temp's normalized source/class/inherit onto the LIVE defsub, then dtor the temp. The patched text is the
  * frontend's QJson-patched full entity (the serialize already happened on the frontend's +0xc8 call). A
  * full entity carries the entity's REAL class/inherit (NOT the ctor "snapmaps/unknown" sentinel) so the
@@ -532,7 +532,7 @@ static int ae_apply_one(int id, const char *patched_text)
 }
 
 /* ============================================================ mkcmd apply (deserialize -> +0x209a8) =
- * the prototype doMkcmdApplyNow: deserialize the prefab text as "idSnapEntityPrefab" into editor+0x209a8 (the
+ * the reference implementation doMkcmdApplyNow: deserialize the prefab text as "idSnapEntityPrefab" into editor+0x209a8 (the
  * +0xb8 paste path). Reuses the SAME deserialize chain (only the type name + the destination differ).
  * Returns 1 on a successful deserialize. */
 static int ae_mkcmd_one(const char *prefab_text)
@@ -566,8 +566,8 @@ static int ae_mkcmd_instantiate_one(const char *prefab_text)
 /* ============================================================ the clone_bss_apply command (FIX B) ===
  * The engine drains this on the DOOM main thread at ExecuteCommandBuffer (the decl-safe exec point). It
  * consumes the pending batch the frontend stashed, runs the heavy apply per item, frees the batch, and
- * toasts the result count (so the manager reads it from the backend toast log). __cdecl(void) -- the
- * engine AddCommand callback shape (matches the prototype's NativeCallback('void', [])). */
+ * toasts the result count (so the result can be read from the backend toast log). __cdecl(void) -- the
+ * engine AddCommand callback shape (matches the reference implementation's NativeCallback('void', [])). */
 static void ae_toast_result(const char *op, int applied, int total)
 {
     /* Reach the toast through the bound interface vtable slot (sh_iface_engine bound +0x1b8). */
@@ -614,7 +614,7 @@ static void __cdecl ae_clone_bss_apply_cmd(void)
 
 /* register clone_bss_apply ONCE (lazy, on the first schedule). AddCommand takes the cmd-system lock; the
  * frontend's schedule runs on the UI thread (the +0x1a0 drain), which is a safe point for AddCommand
- * (the prototype registers it on the menu pump). Returns 1 if registered (or already was). */
+ * (the reference implementation registers it on the menu pump). Returns 1 if registered (or already was). */
 static int ae_ensure_command(void)
 {
     if (InterlockedCompareExchange(&g_cmd_registered, 1, 0) != 0) return 1;   /* already registered */
@@ -635,7 +635,7 @@ static int ae_ensure_command(void)
 
 /* ============================================================ the vtable slot bodies =============== */
 
-/* +0xc8 serialize entity id -> the FULL idSnapEntity JSON. the prototype serializeEntityToJson: cloneBase =
+/* +0xc8 serialize entity id -> the FULL idSnapEntity JSON. the reference implementation serializeEntityToJson: cloneBase =
  * ent+8 (the clone 0x5a6460 reads cloneBase+0x150 = ent+0x158 = the defsub). */
 static int slot_serialize_entity(sh_iface *self, int id, char *out_json, int cap)
 {
@@ -645,7 +645,7 @@ static int slot_serialize_entity(sh_iface *self, int id, char *out_json, int cap
     if (!ae_entity_array(&array, &count)) return 0;
     void *ent = ae_entity_ptr(array, count, id);
     if (!ent) return 0;
-    /* cloneBase = ent+8 (the ADDRESS, not a deref) -- the prototype ent.add(ENT_VALID_OFF). */
+    /* cloneBase = ent+8 (the ADDRESS, not a deref) -- the reference implementation ent.add(ENT_VALID_OFF). */
     void *cloneBase = (void *)((uint8_t *)ent + ENT_VALID_OFF);
     return ae_serialize_to_json("idSnapEntity", cloneBase, out_json, cap);
 }
@@ -678,7 +678,7 @@ static int slot_schedule_apply(sh_iface *self, const sh_apply_item *items, int c
     }
     if (built == 0) { free(copy); return 0; }
 
-    /* publish the pending batch (replace any stale one -- one apply per enqueue, the prototype). */
+    /* publish the pending batch (replace any stale one -- one apply per enqueue, the reference implementation). */
     if (g_pending_lock_init) EnterCriticalSection(&g_pending_lock);
     apply_item_copy *stale = g_pending_items; int stale_n = g_pending_count;
     g_pending_items = copy; g_pending_count = built;
@@ -694,7 +694,7 @@ static int slot_schedule_apply(sh_iface *self, const sh_apply_item *items, int c
     return enq;
 }
 
-/* +0xb8 READ-BACK the editor's pending prefab (editor+0x209a8) -> idSnapEntityPrefab JSON (the prototype
+/* +0xb8 READ-BACK the editor's pending prefab (editor+0x209a8) -> idSnapEntityPrefab JSON (the reference implementation
  * readPrefabStagingJson -- the +0xb0 serialize INVERSE; the +0x209a8 build-mismatch verification). The
  * slot already holds a live idSnapEntityPrefab after a paste/mkcmd, so a direct reflection-serialize of
  * it is the read-back (cloneBase = the staging address -- StructSerialize reads the object directly, no
@@ -713,7 +713,7 @@ static int slot_read_prefab(sh_iface *self, char *out_json, int cap)
     uint8_t node7[PARSE_NODE_SIZE];
     uint8_t outTree[PARSE_NODE_SIZE];
     uint8_t jsStr[IDSTR_SIZE];
-    memset(node7, 0, sizeof node7);     /* parity with the prototype zeroed Memory.alloc */
+    memset(node7, 0, sizeof node7);     /* parity with the reference implementation zeroed Memory.alloc */
     memset(outTree, 0, sizeof outTree);
     memset(jsStr, 0, sizeof jsStr);
     int node7_ctored = 0, tree_ctored = 0, js_ctored = 0;

@@ -7,13 +7,13 @@
  * assigned) -> the AddRenderModel(NULL) re-fault loop. The ONLY path that destroys the render-world +
  * resets its model count is the editor-exit cycle.
  *
- * HOW (the daemon's LIVE-PROVEN editor->browser exit, `openStartMenu`+`exitEditor`,
+ * HOW (the live-proven editor->browser exit, `openStartMenu`+`exitEditor`,
  * ported to native + driven from a main-thread frame-hook): SetState(editor,0xb) opens the StartMenu
  * (synchronous), then write EXIT-pending + force the GDM dialog result to Yes(0); the StartMenu Think's
  * resolver calls ExitEditor 0x522680 in-frame -> EDITOR->BROWSER.
  *
- * Frame-hook target = idCommonLocal::Frame 0x17ce360 (collision-free: the daemon hooks the editor/menu
- * pumps 0x523140/0x1702ba0, NOT Frame). The detour runs on the main thread,
+ * Frame-hook target = idCommonLocal::Frame 0x17ce360 (collision-free: an external instrumentation tool may
+ * hook the editor/menu pumps 0x523140/0x1702ba0, NOT Frame). The detour runs on the main thread,
  * before the engine's frame body, exactly the safe context the proven drives use.
  */
 #include <windows.h>
@@ -114,7 +114,7 @@ void notice_request_msg(void) { InterlockedExchange(&g_notice_armed, 2); }
 /* ---- MESSAGE HARVEST: read the engine's own last-formatted-error text (Class-B / Error(6)/FatalError) ---
  * A plain SEH-guarded READ of the engine global the dispatcher 0x1A08E80 strncpy's the formatted message
  * into right before it throws -- the same buffer the Frame catch funclet 0x1F5B937 prints as the error.
- * NO new hook (zero added Frida-conflict surface). A shifted build could land the recipe-tagged RVA on an
+ * NO new hook (zero added instrumentation-conflict surface). A shifted build could land the recipe-tagged RVA on an
  * unmapped page, so SEH-guard the read (mirrors the suppressor-write guard in veh.c). Returns the captured
  * C-string in `out` (NUL-terminated) and 1 if a non-empty message was harvested, else 0 (caller falls back
  * to the generic NOTICE_TEXT_STR). */
@@ -184,8 +184,8 @@ static void notice_tick(void)
 /* ---- LAYER 2: keep the dispatcher's throw-gate OPEN ---------------------------------------------------
  * The level>=6 dispatcher 0x1A08E80 throws the RECOVERABLE idException only `if (DAT_146faf820==0 &&
  * DAT_146faf8b0==0)`, else it ExitProcess(1)'s (error-dispatcher-and-recovery.md, the terminal-gate
- * footgun). 0x6faf820 doubles as the render-cap suppressor. The CLONE never arms either (grep: only the
- * daemon's render-cap Frida harness does, and it self-resets), so clearing them each frame is a no-op for
+ * footgun). 0x6faf820 doubles as the render-cap suppressor. The CLONE never arms either (only an
+ * external render-cap instrumentation harness does, and it self-resets), so clearing them each frame is a no-op for
  * the end user AND supersedes that harness -- a render-pool overflow now RECOVERS (drop-to-menu) instead
  * of truncating. SEH-guarded: a shifted suppressor RVA must never fault inside the frame hook. */
 static void keep_throw_gate_open(void)
@@ -203,9 +203,9 @@ static void keep_throw_gate_open(void)
  * DeleteBadSaveSlots 0x1737C90 does NOT unlink files (DIRECT decompile: it validates each slot via the save
  * load-test 0x563220 and on any bad slot SHOWS the corrupt-save dialog); the actual delete is the dialog's
  * Delete button ACTION (dispatcher 0xE67BF0, action 0x1f). DISMISS-A (DESC_CLEARFLAG_OFF=1, id-agnostic, runs
- * NO button action) closes the prompt WITHOUT deleting -- the daemon's LIVE-PROVEN dismiss, now resident.
+ * NO button action) closes the prompt WITHOUT deleting -- the live-proven dismiss, now resident.
  * Runs every frame (the dialog lives in the browser/menu, where idCommonLocal::Frame still ticks). SEH-guarded
- * (the menu shell is null pre-Initialize / off-menu). Access pattern ported from the live Frida drive
+ * (the menu shell is null pre-Initialize / off-menu). Access pattern ported from the live instrumentation drive
  * lcScanCorruptDialog: S=*(base+RVA_SHELL_PTR_SLOT); dlg=*(S+0x8); arr=*(dlg+0x900);
  * cnt=*(int*)(dlg+0x908); desc[i]=arr+i*0x1b0; desc+0x00=GDM id, desc+0x08=clear-flag (0=pending). */
 static int is_corrupt_save_gdm(int gdm)

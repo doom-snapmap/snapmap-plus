@@ -7,7 +7,7 @@
  * GetDeclsOfType (signature-resolved by the signature resolver); the flag flips are pure memory writes.
  *
  * Clean-room: ported from our own RE of the OG XINPUT1_3 unhide + the live-validated JS reimpl
- * (the prototype doUnhide). Zero OG SnapHak bytes.
+ * (the reference implementation doUnhide). Zero OG SnapHak bytes.
  */
 #ifndef BACKEND_B1_UNHIDE_H
 #define BACKEND_B1_UNHIDE_H

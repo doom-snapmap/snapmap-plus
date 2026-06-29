@@ -64,8 +64,8 @@
  * ===================================================================================================
  * IMPLEMENTATION  (the clean-room port + the on-disk shape + the apply path)
  * ===================================================================================================
- * Clean-room FAITHFUL port of the OG snaphakui.dll Timeline-Editor. The RE'd OG call-map (subagent
- * create-timeline-re, DIRECT decompile): OPEN = FUN_1800127a0 (sets TL+0xf8 = the selected entity index) ->
+ * Clean-room FAITHFUL port of the OG snaphakui.dll Timeline-Editor. The RE'd OG call-map (the
+ * create-timeline-re RE, DIRECT decompile): OPEN = FUN_1800127a0 (sets TL+0xf8 = the selected entity index) ->
  * FUN_1800120a4 (populate the tabs from the parsed componentTimeLine). COMMIT-BUILDER = FUN_180012458 (rebuild
  * the entity JSON, FORCING className="idTarget_Timeline" + inherit="snapmaps/unknown", write componentTimeLine),
  * fired by the save handler FUN_1800173bc setting WIN flag |0x80, applied by the per-frame dispatch FUN_180014e7c
@@ -358,7 +358,7 @@ static void tl_connect_dirty(ShTimelineEditor *ed, QWidget *root)
  * source-of-record reference/snaphak_info/alldecls/ dirs): idSoundShader* is the "sound" decl-type, NOT
  * "soundshader". idActorModifier* and idMaterial* DO reduce mechanically but are listed for explicitness. The rest
  * of the catalog's id<X>* (idMD6Anim*, idEventReceiver*, …) are assets/objects, NOT decls -> no entry -> they
- * stay editable enum boxes. RE: subagent timeline-decl-resclass-re (the OG +0x100 path; FUN_18000994c is
+ * stay editable enum boxes. RE: timeline-decl-resclass-re (the OG +0x100 path; FUN_18000994c is
  * idDecl*-only and PREPENDS "idDecl"; the inner-key is the alldecls dir name, not a mechanical reduction). */
 static const char *tl_decl_alias(const std::string &typeName)
 {
@@ -1332,7 +1332,7 @@ void sh_timeline_open(ShWinController *win, int id)
     /* build the SHARED combo models ONCE (parented to tl_tabs -> auto-freed with it in tl_destroy). The event
      * model is the freeze fix (built once, shared by every event combo); the entity model backs the entity
      * combo + every entity-typed arg dropdown. */
-    /* [DIAGNOSTIC] time each open phase -> a toast (daemon-readable) to root-cause the busy-timeline freeze. */
+    /* [DIAGNOSTIC] time each open phase -> a toast (debugger-readable) to root-cause the busy-timeline freeze. */
     QElapsedTimer __tt; __tt.start();
     int __nent = (ed->iface && ed->iface->vtbl && ed->iface->vtbl->entity_count)
                  ? ed->iface->vtbl->entity_count(ed->iface) : -1;
@@ -1374,7 +1374,7 @@ void sh_timeline_insert_event(ShWinController *win)
     /* OG "Insert Entity Event" (top-level, FUN_180011e9c) = ADD A NEW ENTITY TAB (a new entityEvents item / a
      * new target entity). Adding EVENTS to an existing entity is the per-tab "Add Eventcall" button built in
      * tl_build_entity_tab. (Was: append an event row to the current tab -- that conflated the OG's two levels.
-     * RE: subagent timeline-multievent-re.) */
+     * RE: timeline-multievent-re.) */
     ShTimelineEditor *ed = tl_get(win);
     if (!ed) return;
     ShEntityTab *tab = tl_build_entity_tab(ed, QJsonObject());   /* empty -> entity combo + "Add Eventcall" + empty area */

@@ -1,7 +1,7 @@
 /* smoke.h -- the foundation smoke proof for the SnapHak backend.
  *
  * Proves the two foundation pieces work end-to-end against the LIVE DOOM module, with a visible
- * signal the daemon console ring captures (OutputDebugStringA via backend_log):
+ * signal an attached debugger captures (OutputDebugStringA via backend_log):
  *   1. the signature resolver re-finds the engine fns by SIGNATURE (no hardcoded RVA), and
  *   2. the inline-detour installer patches + invokes + reverses a detour.
  *

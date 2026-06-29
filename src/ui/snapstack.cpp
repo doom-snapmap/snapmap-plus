@@ -1,6 +1,6 @@
 /* snapstack.cpp -- the SnapStack STORES + the 9 STORE-op handlers + the 20-subcommand registrar.
  *
- * Clean-room, FAITHFUL port of the prototype (the proven
+ * Clean-room, FAITHFUL port of the reference implementation (the proven
  * proven mechanism). The stores (StackStore/GroupStore) are PURE; the op handlers reach the editor through
  * the backend-owned interface vtable's engine-touch slots (selection read/write, hovered, toast, class/
  * inherit read). Toast strings + the filtcls "had inherit" mislabel are reproduced VERBATIM from the OG
@@ -222,7 +222,7 @@ static int iface_apply_class_inherit(sh_iface *iface, int id, const std::string 
     return iface->vtbl->apply_class_inherit(iface, id, cls.c_str(), inh.c_str());
 }
 
-/* the id-STRING the bse/accl/acctargets/mkcmd ops use as the leaf value (the +0x18 resolve; the prototype
+/* the id-STRING the bse/accl/acctargets/mkcmd ops use as the leaf value (the +0x18 resolve; the reference implementation
  * entityIdString -- the entity NAME, decimal-id fallback). The backend slot writes the resolved string. */
 static std::string iface_id_string(sh_iface *iface, int id)
 {
@@ -239,7 +239,7 @@ static std::string iface_id_string(sh_iface *iface, int id)
 /* ============================================================ the heavy apply bridge ========
  * The 8 APPLY-ops (bss/bsi/bsf/bsb/bse/accl/acctargets/mkcmd) reach the engine through THREE heavy slots
  * the backend owns (apply_engine.c). The frontend does ONLY the JSON patch in between -- a native port
- * of the prototype's doApplyBssOne (serialize -> patch leaf -> schedule deserialize+commit). The serialize +
+ * of the reference implementation's doApplyBssOne (serialize -> patch leaf -> schedule deserialize+commit). The serialize +
  * the deserialize/commit are engine work behind the vtable; the patch is here (QJson + a RAW-TOKEN splice
  * for the float leaf -- NEVER QJson re-serialize, which drops the engine-required .0). */
 
@@ -435,17 +435,17 @@ static void h_filtcls(void *ctx, int argc, const char **argv)
 }
 
 /* ============================================================ the 8-pass apply chain ====== */
-/* The 8 engine-apply ops are the native port of the prototype's proven full-entity round-trip. Each
+/* The 8 engine-apply ops are the native port of the reference implementation's proven full-entity round-trip. Each
  * handler runs on the +0x1a0 work-queue drain (the UI thread). The HEAVY engine work (serialize entity ->
  * JSON, deserialize patched JSON -> commit) is behind the backend's three heavy vtable slots; the FRONTEND
  * does only the JSON PATCH between them (QJson for structure + a RAW-TOKEN splice for the bsf float leaf).
  *
- * Threading (FIX B, the prototype): the structured-deserialize AVs if run mid-frame (a stale reflection-handler),
+ * Threading (FIX B, the reference implementation): the structured-deserialize AVs if run mid-frame (a stale reflection-handler),
  * so the apply does NOT run inline on the drain. The frontend builds the patched text + SCHEDULEs it via
  * the +0xd0 slot; the backend BufferCommandTexts clone_bss_apply and the engine drains the heavy apply on
  * the DOOM main thread (the decl-safe exec point). The result toasts from the backend. */
 
-/* --- C atoi / atof (the prototype _c_atoi / _c_atof; the prototype cAtoi / cAtof) --- */
+/* --- C atoi / atof (the reference implementation _c_atoi / _c_atof; the reference implementation cAtoi / cAtof) --- */
 static long sh_c_atoi(const char *s)
 {
     if (!s) return 0;
@@ -459,11 +459,11 @@ static long sh_c_atoi(const char *s)
 }
 static double sh_c_atof(const char *s) { return s ? atof(s) : 0.0; }   /* atof = leading-token, else 0.0 */
 
-/* --- renderEngineFloat: the ENGINE-FORMAT float token (the prototype pyFloatRepr + the C-exponent strip;
+/* --- renderEngineFloat: the ENGINE-FORMAT float token (the reference implementation pyFloatRepr + the C-exponent strip;
  * matches rawmap_codec._format_float = Python repr with C-style exponents). MUST keep `.0` on whole floats
  * (2.0 not 2) + switch to scientific at exp<-4 or exp>=16, like Python repr. We build it from the shortest
  * round-trip digits printf gives (%.17g over-prints; we trim to the shortest that round-trips, then format
- * exactly as Python repr does -- the same algorithm the prototype reproduces from toExponential). --- */
+ * exactly as Python repr does -- the same algorithm the reference implementation reproduces from toExponential). --- */
 static std::string sh_shortest_digits(double f, int &out_exp, bool &out_neg)
 {
     /* find the shortest %.Ne that round-trips to f, then split mantissa digits + decimal exponent E. */
@@ -527,7 +527,7 @@ static std::string render_engine_float(double f)
     return s;
 }
 
-/* --- the per-op leaf-value ENCODING (the prototype encodeBulkSetLeafJson; the prototype bulkset_leaf_json):
+/* --- the per-op leaf-value ENCODING (the reference implementation encodeBulkSetLeafJson; the reference implementation bulkset_leaf_json):
  * bss -> a JSON string literal; bsi -> a bare int (cAtoi); bsf -> renderEngineFloat(fround(cAtof));
  * bsb -> "true" iff value=="true" else "false". Returns the RAW JSON leaf TOKEN (spliced VERBATIM). --- */
 static std::string encode_bulkset_leaf_json(const std::string &op, const std::string &value)
@@ -549,12 +549,12 @@ static std::string encode_bulkset_leaf_json(const std::string &op, const std::st
     return std::string(inner.constData(), (size_t)inner.size());
 }
 
-/* The unique sentinel the prototype uses: set the leaf to it, stringify, then string-replace it with the raw
+/* The unique sentinel the reference implementation uses: set the leaf to it, stringify, then string-replace it with the raw
  * value token VERBATIM (preserves the float `2.0` that a QJson re-serialize would drop). */
 static const char *SH_RAW_LEAF = "__RAW_LEAF__";
 
 /* Patch one entityDef.state.edit.<propPath> SCALAR leaf into the full-entity JSON, returning the modified
- * compact JSON (or "" on a parse/shape failure). the prototype patchFullJsonEdit: ensure entityDef.state.edit,
+ * compact JSON (or "" on a parse/shape failure). the reference implementation patchFullJsonEdit: ensure entityDef.state.edit,
  * walk the '.'-split propPath creating intermediates, set the leaf to the sentinel, compact-emit, then
  * string-replace the sentinel literal with the raw `leaf_token` VERBATIM. */
 static std::string patch_full_json_edit(const std::string &full_json, const std::string &prop_path,
@@ -600,7 +600,7 @@ static std::string patch_full_json_edit(const std::string &full_json, const std:
 }
 
 /* Patch a num/item[] LIST into entityDef.state.edit.<propPath> on the full-entity JSON (accl/acctargets).
- * the prototype patchFullJsonRefList: the engine list object is {"item[0]":s0,...,"num":N}. The members are
+ * the reference implementation patchFullJsonRefList: the engine list object is {"item[0]":s0,...,"num":N}. The members are
  * id-STRINGS (JSON string literals), so a plain QJson re-emit is safe here (no float). Returns "" on shape
  * failure. */
 static std::string patch_full_json_reflist(const std::string &full_json, const std::string &prop_path,

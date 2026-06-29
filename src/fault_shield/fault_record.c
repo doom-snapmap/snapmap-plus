@@ -40,7 +40,7 @@ void shield_emit(const shield_fault *f)
         "[shield] %04d-%02d-%02d %02d:%02d:%02d.%03d %s\n",
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, body);
 
-    OutputDebugStringA(line);   /* -> in-game console + daemon ring buffer */
+    OutputDebugStringA(line);   /* -> in-game console + any attached debugger */
 
     if (g_logpath[0]) {
         HANDLE h = CreateFileA(g_logpath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,

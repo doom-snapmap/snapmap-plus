@@ -38,12 +38,12 @@ typedef int (*deser_fn_t)(const char *json, void *out_map);
 
 static deser_fn_t g_deser_orig = NULL;   /* the trampoline -> the real engine DeserializeFromJson */
 
-/* Gate (OG DAT_18003e819 / the prototype _gate). Default DISARMED -- the manager arms for the test. */
+/* Gate (OG DAT_18003e819 / the reference impl _gate). Default DISARMED -- the test harness arms for the test. */
 static volatile LONG g_gate = 0;
 static volatile LONG g_swap_count = 0;
 
-/* File-backed rawmap source. Default mirrors OG's path (%USERPROFILE%\snaphak\rawmap.json). The manager
- * may override via sh_rawmap_swap_set_source. */
+/* File-backed rawmap source. Default mirrors OG's path (%USERPROFILE%\snaphak\rawmap.json). The test
+ * harness may override via sh_rawmap_swap_set_source. */
 static char g_src_path[MAX_PATH] = {0};
 
 static void default_source_path(char *out, size_t cap)
@@ -91,7 +91,7 @@ static void flag_file_path(char *out, size_t cap)
 }
 
 /* TEST arm trigger: is the sibling arm.flag file present? A single GetFileAttributes per interception
- * (deserializes are infrequent map-loads, so this is cheap). The manager creates/deletes this file to
+ * (deserializes are infrequent map-loads, so this is cheap). The test harness creates/deletes this file to
  * arm/disarm the swap for a controlled live test, with no console/RPC needed. Additive to the explicit
  * sh_rawmap_swap_arm() gate (they are OR'd in the detour). */
 static int flag_file_present(void)
@@ -144,7 +144,7 @@ static int sh_deser_detour(const char *json, void *out_map)
     if (g_deser_orig == NULL) return 0;   /* defensive: should never happen once installed */
 
     /* armed = explicit-arm (sh_rawmap_swap_arm) OR the TEST flag-file is present. The flag-file is the
-     * manager's no-console arm trigger; the explicit gate is the production-style arm. Either arms. */
+     * test harness's no-console arm trigger; the explicit gate is the production-style arm. Either arms. */
     int explicit_armed = (InterlockedCompareExchange(&g_gate, 0, 0) != 0);
     int flag_armed = flag_file_present();
     if (explicit_armed || flag_armed) {
@@ -176,10 +176,10 @@ int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok)
         return 0;
     }
     if (!deser_status_ok) {
-        /* Hook-tolerant fallback resolve (SIG_OK_HOOKED): the live prologue is already a detour (the
-         * daemon's Frida oracle hooks this fn during testing). Installing our detour over that would
-         * steal detour bytes, not the real prologue -> corruption. Refuse; the manager handles the
-         * daemon-hook coexistence at test time. */
+        /* Hook-tolerant fallback resolve (SIG_OK_HOOKED): the live prologue is already a detour (e.g.
+         * an external instrumentation tool has hooked this fn during testing). Installing our detour over
+         * that would steal detour bytes, not the real prologue -> corruption. Refuse; coexistence with an
+         * existing hook is handled at test time. */
         backend_log("B1: rawmap LOAD-swap SKIPPED -- DeserializeFromJson resolved via hook-tolerant "
                     "fallback (prologue already hooked); not installing over an existing detour");
         return 0;
@@ -201,7 +201,7 @@ int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok)
         "B1: rawmap LOAD-swap installed at %p (trampoline %p, stolen %d); source=%s; gate=DISARMED",
         deser_fn, tramp, DESER_STOLEN, g_src_path);
     backend_log(line);
-    /* Tell the manager the exact TEST arm flag-file path (create it to arm the swap, delete to disarm). */
+    /* Log the exact TEST arm flag-file path (create it to arm the swap, delete to disarm). */
     {
         char flag[MAX_PATH];
         flag_file_path(flag, sizeof flag);
@@ -274,7 +274,7 @@ unsigned long sh_rawmap_swap_count(void)
 #define SAVE_STOLEN 20
 
 /* idStr field offsets (DIRECT: the OG decompile of
- * FUN_180023e60 reads *(int*)(out+8)=len and *(void**)(out+0x10)=data; the prototype IDSTR_LEN_OFF/DATA_OFF). */
+ * FUN_180023e60 reads *(int*)(out+8)=len and *(void**)(out+0x10)=data; the reference impl IDSTR_LEN_OFF/DATA_OFF). */
 #define IDSTR_LEN_OFF   0x08   /* int  len  (character count, excl NUL) */
 #define IDSTR_DATA_OFF  0x10   /* char* data (inline baseBuffer for short strings, else heap) */
 
@@ -288,7 +288,7 @@ static volatile LONG     g_shadow_count = 0;
 static volatile LONGLONG g_last_bytes   = 0;
 
 /* Shadow destination. Default mirrors OG's path + the LOAD swap's source (%USERPROFILE%\snaphak\rawmap.json)
- * so a save-then-load round-trips OG-faithfully. The manager may override via sh_rawmap_save_set_dest. */
+ * so a save-then-load round-trips OG-faithfully. The test harness may override via sh_rawmap_save_set_dest. */
 static char g_dest_path[MAX_PATH] = {0};
 
 static void default_dest_path(char *out, size_t cap)
@@ -381,10 +381,10 @@ int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok)
         return 0;
     }
     if (!serialize_status_ok) {
-        /* Hook-tolerant fallback resolve (SIG_OK_HOOKED): the live prologue is already a detour (e.g. the
-         * daemon's Frida oracle hooks this fn during testing). Installing our detour over that would steal
-         * detour bytes, not the real prologue -> corruption. Refuse; the manager handles the daemon-hook
-         * coexistence at test time (same conservative policy as the LOAD swap). */
+        /* Hook-tolerant fallback resolve (SIG_OK_HOOKED): the live prologue is already a detour (e.g.
+         * an external instrumentation tool has hooked this fn during testing). Installing our detour over
+         * that would steal detour bytes, not the real prologue -> corruption. Refuse; coexistence with an
+         * existing hook is handled at test time (same conservative policy as the LOAD swap). */
         backend_log("B1: rawmap SAVE shadow SKIPPED -- SerializeToJson resolved via hook-tolerant "
                     "fallback (prologue already hooked); not installing over an existing detour");
         return 0;

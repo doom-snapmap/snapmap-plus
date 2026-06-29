@@ -57,7 +57,7 @@ int sh_overrides_install(void *ctor_fn, int ctor_status_ok);
 int sh_overrides_set_root(const char *path);
 
 /* How many times the shadow has FIRED (served an override file instead of the packaged resource).
- * Observability for the manager's differential test. */
+ * Observability for the test harness. */
 unsigned long sh_overrides_shadow_count(void);
 
 /* Restore the engine open vtable slot to the saved original (LIFO-safe; idempotent). Returns 1 if a

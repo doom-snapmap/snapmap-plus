@@ -1,6 +1,6 @@
 /* snapstack.h -- the SnapStack STORES (the DECISION half) + the 20-subcommand registrar.
  *
- * A clean-room, FAITHFUL port of the prototype (the proven mechanism). Hosts:
+ * A clean-room, FAITHFUL port of the reference implementation (the proven mechanism). Hosts:
  *   - the STACK-OF-STACKS: std::vector<std::vector<int>> -- OG DAT_180031800 (a vec-of-vec, stride 0x18).
  *     Numbered entity-id stacks; auto-grow on reference; dedup-on-push.
  *   - the named GROUPS: std::map<std::string, std::vector<int>> -- OG group nil-node DAT_180031830.
@@ -11,9 +11,9 @@
  * The stores are PURE + offline-testable (no engine state). The op handlers reach the editor (selection
  * read/write, hovered id, toast, class/inherit read) through the BACKEND-owned interface vtable (the
  * engine-touch slots iface_engine.c fills) -- so the DECISION (store mutation, toast text) lives here
- * and the engine touch is behind the vtable, exactly the the prototype split.
+ * and the engine touch is behind the vtable, exactly the the reference implementation split.
  *
- * Clean-room: ported from our own RE + the prototype. Zero OG SnapHak bytes.
+ * Clean-room: ported from our own RE + the reference implementation. Zero OG SnapHak bytes.
  */
 #ifndef SNAPSTACK_H
 #define SNAPSTACK_H

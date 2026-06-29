@@ -1,7 +1,7 @@
 /* fault_shield.c -- the in-process fault shield, MERGED into the backend XINPUT1_3.dll (2026-06-22).
  *
  * Was a separate winmm.dll proxy; DOOM's loader REJECTED that proxy at load (the winmm boot-wedge --
- * CAMPAIGN.md: DllMain never ran, despite the proxy being valid + loading fine in isolation; the real
+ * DllMain never ran, despite the proxy being valid + loading fine in isolation; the real
  * winmm + our XINPUT1_3/dinput8 proxies all load, only our winmm did not). The shield now installs from
  * the BACKEND's bootstrap_thread (backend/dllmain.c) via shield_install(), AFTER the backend's SteamStub
  * decrypt-poll -- so the shield's engine signatures resolve on DECRYPTED .text (the standalone shield
@@ -23,7 +23,7 @@ size_t   g_doom_size = 0;
 /* Raw kernel-only persistent log (CreateFile/WriteFile, NO CRT -> safe from any context). In -Diag builds it
  * records the arming timeline to <DOOM>\snaphak_logs\shield_arm.log (WRITE_THROUGH, survives a termination).
  * In a RELEASE build it is a file-wise no-op -- the arm sequence still flows to OutputDebugString (the in-game
- * console + the daemon ring), so release leaves no shield_arm.log in the DOOM dir. */
+ * console + any attached debugger), so release leaves no shield_arm.log in the DOOM dir. */
 void shield_raw(const char *msg)
 {
 #ifdef SNAPHAK_DIAG
@@ -65,21 +65,21 @@ static int shield_install_hooks(void)
     return veh_install() && recovery_install();
 }
 
-/* ---- Frida-coexistence gate (defense-in-depth; veh.c already early-outs on any non-DOOM first-chance AV,
- * so the shield's VEH never competes with Frida's injection exceptions regardless of order) --------------
- * The daemon creates a manual-reset named event BEFORE launching DOOM and SetEvent's it at its verified-
- * attach commit point. The shield waits on it (bounded) so the common testing case arms AFTER Frida:
- *   event EXISTS (daemon present) -> wait until SetEvent OR the bounded fallback, then arm.
+/* ---- instrumentation-coexistence gate (defense-in-depth; veh.c already early-outs on any non-DOOM first-chance AV,
+ * so the shield's VEH never competes with an external tool's injection exceptions regardless of order) --------------
+ * An external instrumentation tool may create a manual-reset named event BEFORE launching DOOM and SetEvent it at its
+ * verified-attach commit point. The shield waits on it (bounded) so the common testing case arms AFTER the tool attaches:
+ *   event EXISTS (tool present) -> wait until SetEvent OR the bounded fallback, then arm.
  *   event ABSENT (end user) -> arm IMMEDIATELY (zero added latency). The shield is NEVER skipped. */
-#define SHIELD_FRIDA_EVENT_NAME   "Local\\SnaphakFridaAttached"
-#define SHIELD_ARM_FALLBACK_MS    10000   /* bounded: a stalled/dead daemon still lets the shield arm */
+#define SHIELD_INSTR_EVENT_NAME   "Local\\SnaphakInstrAttached"
+#define SHIELD_ARM_FALLBACK_MS    10000   /* bounded: a stalled/dead attach event still lets the shield arm */
 
-static void shield_wait_for_frida(void)
+static void shield_wait_for_instr(void)
 {
-    HANDLE ev = OpenEventA(SYNCHRONIZE, FALSE, SHIELD_FRIDA_EVENT_NAME);
+    HANDLE ev = OpenEventA(SYNCHRONIZE, FALSE, SHIELD_INSTR_EVENT_NAME);
     if (ev == NULL) {
-        OutputDebugStringA("[shield] no Frida-attach event (end-user path) -> arming now\n");
-        shield_raw("wait: OpenEvent NULL (no daemon event) -> arming NOW");
+        OutputDebugStringA("[shield] no instrumentation-attach event (end-user path) -> arming now\n");
+        shield_raw("wait: OpenEvent NULL (no attach event) -> arming NOW");
         return;
     }
     shield_raw("wait: event FOUND -> blocking until attach signal or fallback");
@@ -99,7 +99,7 @@ void shield_install(uint8_t *doom_base, size_t doom_size)
     g_doom_size = doom_size;
     if (g_doom_base == NULL) { shield_raw("shield_install: NULL base -> skipped"); return; }
     shield_raw("shield_install: entered (merged into backend XINPUT1_3)");
-    shield_wait_for_frida();
+    shield_wait_for_instr();
     if (shield_install_hooks()) {
         shield_raw("shield_install: ARMED (VEH + frame-hook installed)");
         OutputDebugStringA("[shield] armed (merged into backend XINPUT1_3)\n");

@@ -1,6 +1,6 @@
 /* unhide.c -- see unhide.h. Native C port of OG FUN_180021EE0 (the `sh_target_any` unhide).
  *
- * MECHANISM (DIRECT, the live JS reimpl the prototype doUnhide):
+ * MECHANISM (DIRECT, the live JS reimpl the reference implementation doUnhide):
  *   list  = GetDeclsOfType("idDeclSnapEditorEntity")   // engine fn; returns the typed decl-manager node
  *   array = *(list + 0x20)                              // decl-pointer array  (LIST_ARRAY_OFF)
  *   count = *(uint*)(list + 0x28)                       // decl count          (LIST_COUNT_OFF)
@@ -33,7 +33,7 @@
  * on a worker thread; the flag writes + the decl-array read are benign there, but to mirror OG's "apply
  * when the entity list is ready" timing we POLL until the registry is populated before the single pass.
  * (A later pass will move this onto a frame/command hook for the on-demand toggle, per the
- * frida-drive convention -- the prototype runOnMainThread.)
+ * instrumentation-drive convention -- the reference implementation runOnMainThread.)
  */
 #include <windows.h>
 #include <stdint.h>
@@ -68,7 +68,7 @@ static int safe_read_u32(const void *src, uint32_t *out)
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-/* SEH-guarded: is the decl's entityDef class-name == "idInfoPath"? Mirrors the prototype's try/guarded read
+/* SEH-guarded: is the decl's entityDef class-name == "idInfoPath"? Mirrors the reference implementation's try/guarded read
  * `decl+0x1C8 -> +0x60 -> strcmp "idInfoPath"`. Any unreadable hop -> 0 (treat as not-idInfoPath). */
 static int decl_class_is_infopath(const uint8_t *decl)
 {

@@ -326,8 +326,8 @@ void sh_entity_context_menu(ShWinController *win, int id, const std::vector<int>
         /* Copy ID -> QClipboard::setText of the FULL in-game id string (Qt clipboard, NOT iface +0x178).
          * DIVERGENCE (known, tied to the id-string-not-byte-captured limitation): the OG FUN_180018304
          * copies the entity NAME from snaphakui's DAT_180031818 name table (stride 0xa8, string at
-         * record+0x88); the clone copies the +0x18 id-string which falls back to the DECIMAL id (the prototype
-         * entityIdString). So the clone yields e.g. "42" where the OG yields the entity name. The list
+         * record+0x88); the clone copies the +0x18 id-string which falls back to the DECIMAL id (the reference
+         * implementation entityIdString). So the clone yields e.g. "42" where the OG yields the entity name. The list
          * items are labeled by the same decimal id, so it is internally consistent; capturing the real
          * name table is a later cleanup item (capabilities gui_tab_entities.faithful_quirk). */
         std::string idStr = iface_id_string(iface, id);

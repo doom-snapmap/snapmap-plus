@@ -9,10 +9,10 @@
  * a non-unique data global, NOT sig-able); EVERY engine FUNCTION (AddToSelection/ClearSelection/Toast/
  * IdStr ctor/dtor) is resolved by SIGNATURE off the same sig DB the rest of the backend uses -- never a
  * hardcoded base+RVA. The editor-struct field offsets (selection obj, ids array, hovered id, defsub,
- * classname/inherit source-text blobs) are this-live-build offsets ported from the prototype (the proven Frida
+ * classname/inherit source-text blobs) are this-live-build offsets ported from the reference implementation (the proven
  * mechanism) -- SEH-guarded so a shifted-build offset degrades to a clean no-op, never a crash.
  *
- * Clean-room: ported from our own RE + the prototype (the live-proven editor bridge). Zero
+ * Clean-room: ported from our own RE + the reference implementation (the live-proven editor bridge). Zero
  * OG SnapHak bytes.
  */
 #ifndef B2_IFACE_ENGINE_H

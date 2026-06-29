@@ -1,4 +1,4 @@
-/* signatures.c -- see signatures.h. C port of the prototype's signature table for the SnapHak backend.
+/* signatures.c -- see signatures.h. C port of the reference implementation's signature table for the SnapHak backend.
  *
  * The scanner mirrors the Python resolver byte-for-byte in behaviour: compile an IDA-style hex
  * pattern to (pattern,mask), find the longest fixed (mask==0xFF) run as a memmem anchor, then verify
@@ -125,7 +125,7 @@ static int collect_exec_sections(const uint8_t *module_base, exec_section *out, 
 
 /* ------------------------------------------------------------------------ hook-tolerant fallback --
  * When the masked-byte scan misses a function because its PROLOGUE was inline-hooked at runtime (the
- * stolen first bytes were overwritten with a detour jump -- our daemon's Frida oracle does exactly this
+ * stolen first bytes were overwritten with a detour jump -- an external instrumentation tool does exactly this
  * to DeserializeFromJson / AddCommand / MenuPump during testing), the function is still present and
  * callable (the detour trampolines through to the original). So if the scan finds 0 matches, we fall
  * back to the DB's known_rva: if the bytes there start with a detour jump AND the sig's fixed-byte TAIL
@@ -263,8 +263,8 @@ sig_status sig_resolve_one(const uint8_t *module_base, const sig_entry *sig, sig
 
     if (hits == 0) {
         /* Scan missed. Before declaring NOT_FOUND, try the hook-tolerant known_rva fallback: the
-         * prologue may be inline-hooked (our daemon's Frida oracle does this to a few engine fns during
-         * testing), so the fixed bytes the scan needs are overwritten -- but the fn is present + callable. */
+         * prologue may be inline-hooked (an external instrumentation tool may do this to a few engine fns
+         * during testing), so the fixed bytes the scan needs are overwritten -- but the fn is present + callable. */
         if (try_hooked_known_rva(module_base, sig, pat, mask, n, out))
             return out->status;   /* SIG_OK_HOOKED */
         out->status = SIG_NOT_FOUND;
@@ -306,7 +306,7 @@ uintptr_t sig_addr_by_name(const sig_result *results, size_t n, const char *name
 }
 
 /* ------------------------------------------------------------ the shipped engine signature DB ----
- * Verbatim port of the prototype's ENGINE_SIGNATURES table (the authoring source). Each `pattern`
+ * Verbatim port of the reference implementation's ENGINE_SIGNATURES table (the authoring source). Each `pattern`
  * is the same masked-byte string; `known_rva` is the extraction-build RVA (validation/documentation
  * only -- the scanner re-finds the function with NO hardcoded RVA). Re-run the Python extractor
  * (tools/re/sig_extract.py) and re-sync this table when the DOOM build changes. */

@@ -1,4 +1,4 @@
-# CI -- the pull-request gate (the supply-chain defense; see the distribution spec, contributor-security).
+# CI -- the pull-request gate (the supply-chain defense).
 #
 # Runs on every PR in a SECRETLESS sandbox: the `pull_request` trigger gives fork PRs a read-only token and
 # zero repo secrets. NEVER switch this to `pull_request_target` -- that runs fork code with secrets + base

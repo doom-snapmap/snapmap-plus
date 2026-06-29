@@ -59,7 +59,7 @@ static int rip_in_doom(void *rip)
 }
 
 /* "wild" = a data address NOT backed by committed memory (the conn_oor out-of-range-index -> garbage-
- * pointer class). Mirrors the Frida prototype's findModuleByAddress(fa)==null intent. A committed-but-
+ * pointer class). Mirrors the reference implementation's findModuleByAddress(fa)==null intent. A committed-but-
  * garbage heap address would slip past this; tighten to a module/heap check if a fixture needs it. */
 static int is_wild(void *addr)
 {
@@ -130,7 +130,7 @@ static int writable_int(uintptr_t addr)
 /* ---- In-shield REVERT: neutralize the corrupt connection so the resolver stops re-faulting ----------
  * The Class-A unwind survives the fault, but if the bad CSR value PERSISTS the resolver re-faults every
  * frame -> the module-view draw is aborted each frame -> editor interaction degrades (LIVE 2026-06-19:
- * objects stopped highlighting / grabbing). Unlike the daemon (which knew the original value), the shield
+ * objects stopped highlighting / grabbing). Unlike an external instrumentation tool (which knew the original value), the shield
  * neutralizes the bad connection BLIND, from the fault context: the visibility leaf 0xD32A30 is frameless,
  * so at the leaf/resolver fault RBP still holds the RESOLVER 0x5E0AD0 frame. The faulting connection entry
  * = *( *(RBP-CSR_FRAME_COL_HOLDER) ) + lVar19*4  (lVar19 = *(RBP-CSR_FRAME_LOOPIDX)); the out-of-range
@@ -279,11 +279,11 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
     void *fault_addr = is_av ? (void *)er->ExceptionInformation[1] : NULL;
     int   data       = is_av && (fault_addr != rip);
 
-    /* COEXISTENCE hardening (defense-in-depth beyond the install-time Frida gate): do NO work on a
-     * non-DOOM first-chance AV. Frida's injection (and other non-DOOM modules) raise first-chance AVs the
+    /* COEXISTENCE hardening (defense-in-depth beyond the install-time instrumentation gate): do NO work on a
+     * non-DOOM first-chance AV. An external tool's injection (and other non-DOOM modules) raise first-chance AVs the
      * shield never acts on anyway (the act-gate below already requires rip_in_doom); early-out here so the
      * shield's handler is a near-instant pass-through for any exception not originating in DOOM -- it never
-     * runs the diagnostic VirtualQuery+emit on Frida's loader exceptions. Cheap + narrows the conflict
+     * runs the diagnostic VirtualQuery+emit on an external tool's loader exceptions. Cheap + narrows the conflict
      * surface even if a race ever left the shield armed during injection. */
     if (!rip_in_doom(rip))
         return EXCEPTION_CONTINUE_SEARCH;

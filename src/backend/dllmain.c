@@ -10,7 +10,7 @@
  * and the sh apply chain -- all riding on the signature-resolved engine fns + this installer.
  *
  * Clean-room: ported from our own RE of the OG hook-install + DLL architecture
- * + the prototype's signature table. Zero OG SnapHak bytes.
+ * + the reference implementation's signature table. Zero OG SnapHak bytes.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -170,8 +170,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * soon as the engine fn is resolved -- it does NOT depend on the editor being up (the detour
          * just sits in front of the engine deserialize; it only swaps when ARMED + a source reads). We
          * pass the resolve STATUS so the installer refuses to patch over an already-hooked prologue
-         * (SIG_OK_HOOKED) -- e.g. when the daemon's Frida oracle has hooked the same fn during testing.
-         * The gate starts DISARMED; the manager arms it for the differential test. */
+         * (SIG_OK_HOOKED) -- e.g. when an external instrumentation tool has hooked the same fn during testing.
+         * The gate starts DISARMED; the test harness arms it for testing. */
         void *deser = NULL;
         int   deser_clean = 0;
         for (size_t i = 0; i < db; i++) {
@@ -189,7 +189,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * editor being up (the detour sits in front of the engine serialize; on every save it calls the
          * engine original to fill the out-idStr, then mirrors that JSON to rawmap.json). No arm gate: OG
          * writes the shadow on EVERY save. Same clean-scan-only policy as the LOAD swap -- refuse to patch
-         * over an already-hooked prologue (SIG_OK_HOOKED, e.g. the daemon's Frida oracle). See
+         * over an already-hooked prologue (SIG_OK_HOOKED, e.g. an external instrumentation tool). See
          * rawmap.c. */
         void *serialize = NULL;
         int   serialize_clean = 0;
@@ -335,8 +335,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
     /* FAULT-SHIELD (merged 2026-06-22): install the recover-in-place shield -- a first-in-chain VEH +
      * the idCommonLocal::Frame recovery hook -- AFTER the decrypt-poll above, so the shield's engine
      * sigs resolve on DECRYPTED .text. Was a separate winmm.dll proxy that DOOM's loader rejected at
-     * load (CAMPAIGN.md); rides the backend's PROVEN XINPUT1_3 load now. The sanctioned divergence
-     * (recover-in-place vs OG's TerminateProcess). Blocks briefly on the Frida-coexistence wait. */
+     * load; rides the backend's PROVEN XINPUT1_3 load now. The sanctioned divergence
+     * (recover-in-place vs OG's TerminateProcess). Blocks briefly on the instrumentation-coexistence wait. */
     shield_install(g_doom_base, g_doom_size);
 
     return 0;

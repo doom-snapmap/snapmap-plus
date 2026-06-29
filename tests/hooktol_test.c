@@ -2,7 +2,7 @@
  *
  * Builds an in-memory RVA-mapped image of the unpacked DOOM (like sig_test.c), then SYNTHESIZES the
  * exact live condition that defeats the masked-byte scan: it overwrites a few functions' PROLOGUES with
- * an inline detour (E9 rel32 jmp) -- mimicking the daemon's Frida oracle hooks on DeserializeFromJson /
+ * an inline detour (E9 rel32 jmp) -- mimicking an external instrumentation tool's hooks on DeserializeFromJson /
  * AddCommand / MenuPump. With the prologue clobbered the masked scan can no longer find those fns by
  * pattern; the test asserts the resolver still resolves them via the known_rva fallback as SIG_OK_HOOKED
  * (with the right RVA), and that every UN-hooked fn still resolves cleanly as SIG_OK. NOT shipped.
@@ -66,13 +66,13 @@ int main(int argc, char **argv)
     uint8_t *base = map_pe_by_rva(argv[1], &image_sz);
     if (!base) return 2;
 
-    /* The three functions the daemon's Frida oracle hooks live -- clobber their prologues here. Steal
+    /* The three functions an external instrumentation tool would hook -- clobber their prologues here. Steal
      * widths span the realistic detour sizes (E9 rel32 = 5; a wider whole-instruction window = 8). Each
      * stays within the sig's fixed length so a matchable tail remains -- the resolver's premise is that a
      * hooked-but-present fn keeps >=HOOK_MIN_TAIL fixed bytes past the stolen window (true for these
      * sigs; MenuPump's 11-byte pattern keeps exactly 6 fixed bytes past a 5-byte steal). A detour that
      * over-clobbers a fn's ENTIRE fixed length cannot be tail-recovered -- a real but accepted limit for
-     * ultra-short sigs (see report). */
+     * ultra-short sigs (a documented limitation). */
     struct { const char *name; int stolen; } hooks[] = {
         { "DeserializeFromJson", 5 },   /* exactly the E9 rel32 width */
         { "AddCommand",          8 },   /* a wider whole-instruction steal (34-byte sig, long tail) */

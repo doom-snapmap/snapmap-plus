@@ -39,7 +39,7 @@
 #define RVA_ONDEACTIVATE   0x526570u    /* idSnapEditorLocal OnDeactivate (render-world reset path) */
 
 /* ---- Editor singleton + the live-proven editor->browser exit (recovery.c) ----------------------
- * The recovery replicates the daemon's PROVEN `openStartMenu` + `exitEditor` (editor-exit drive, 2026-06-15): SetState(editor,0xb) opens the StartMenu (edState->0xb, synchronous),
+ * The recovery replicates the live-proven `openStartMenu` + `exitEditor` (editor-exit drive, 2026-06-15): SetState(editor,0xb) opens the StartMenu (edState->0xb, synchronous),
  * then write EXIT-pending + force the GDM result to Yes(0); the StartMenu Think's resolver then calls
  * ExitEditor 0x522680 in-frame -> EDITOR->BROWSER. (NOTE: the editor-recovery RE report's +0x2366C/
  * +0x2120D "exit trigger" offsets were Wall-corrected against this proven mechanism -- +0x2366C is
@@ -49,8 +49,8 @@
  * SAME re-derive recipe lives on the backend's copy (backend/iface_engine.c EDITOR_SINGLETON_RVA).
  * RE-DERIVE per build: it is the inline idSnapEditorLocal singleton, IN-PLACE-CONSTRUCTED by its ctor at
  * 0x51A8E0 -- decompile that ctor (decompile_rva.py 0x51A8E0); its `this` (the rcx the ctor writes its
- * vtable + fields through) IS this object's address; RVA = that - module_base. (daemon addresses.json
- * snap_editor_singleton_rva.) */
+ * vtable + fields through) IS this object's address; RVA = that - module_base. (RVA derived from the live
+ * editor singleton; see the re-derive recipe above.) */
 #define RVA_EDITOR_SINGLETON  0x3056748u  /* idSnapEditorLocal object = doomBase + this (NOT a pointer; in-place ctor 0x51A8E0) */
 /* RVA_SETSTATE / RVA_FRAME / RVA_EDITOR_PUMP are FUNCTION entries -- sig-resolved at install (shield_sigs.c
  * -> g_eng.setstate / g_eng.frame / g_eng.editor_pump). The RVAs here are the pinned-build values: the sig
@@ -78,14 +78,14 @@
  * The per-frame editor Think 0x523140 (RVA_EDITOR_PUMP) calls the module-view draw orchestrator 0x521D90,
  * whose subtree (0x5E7380 -> dispatcher 0x5E6410 -> connection resolver 0x5E0AD0 -> visibility leaf
  * 0xD32A30) walks the connection CSR. A corrupt / out-of-range CSR column -> a wild-pointer deref -> AV.
- * KEY (DIRECT, decompiles 0x5E0AD0 / 0x5E6410 / 0x5E5CB0, manager-ratified 2026-06-19): the resolver
+ * KEY (DIRECT, decompiles 0x5E0AD0 / 0x5E6410 / 0x5E5CB0, verified 2026-06-19): the resolver
  * appends connection records into a CALLER stack idList, and the consumer 0x5E5CB0 draws it ONLY
  * `if (0 < count)` -- so a partial / empty list is safe. Recovery = RtlVirtualUnwind the faulting thread
  * back to the editor frame and EXCEPTION_CONTINUE_EXECUTION: the faulting module-view draw is aborted,
  * the frame completes, the editor stays live + responsive. NO Error(6), NO thread-parking modal. C8
  * (DIRECT, decompile 0x523140): 0x521D90 is a single void mid-frame call; the editor Think runs
  * substantial unconditional work after it + returns through its cookie check, so resuming right after the
- * 0x521D90 call is a clean frame continuation. (nonmodal-recovery RE; refined by the manager against the
+ * 0x521D90 call is a clean frame continuation. (nonmodal-recovery RE; refined against the
  * leaf disasm -- a leaf-return-0 alone re-faults at entity_table[col] inside the resolver, so we abort the
  * whole faulting dispatch instead.) */
 /* PORTABILITY: the LO bound of each range is a FUNCTION ENTRY -- sig-resolved at install (shield_sigs.c:
@@ -122,7 +122,7 @@
 /* ---- In-game NON-TRAPPING notice (Class-A): a GDM "OK to continue" dialog the player acknowledges -----
  * After the shield reverts an in-editor fault, raise a benign single-OK GDM dialog (NOT the Error(6)
  * thread-parking modal) from the MAIN-thread frame-hook. The frame loop keeps running; the player clicks
- * OK and continues editing. DIRECT (notice-dialog-raise RE + manager re-derivation against the primary
+ * OK and continues editing. DIRECT (notice-dialog-raise RE + re-derivation against the primary
  * decompiles 0xE643C0 / 0xE67BF0 / 0xE66690, 2026-06-19):
  *   - Raise = AddDialog `FUN_140e643c0(dlgMgr, req)` (dlgMgr = *(S+0x08)) then set the visible byte
  *     *(*(S+0x18)+0xa8)=1. (This is what the wrapper FUN_1417363a0 does, minus its allocator-scope
@@ -156,7 +156,7 @@
  * decompile -- it validates each slot via the save load-test 0x563220 and, on any bad slot, SHOWS one of
  * these dialogs); the actual delete is the dialog's Delete button ACTION (dispatcher 0xE67BF0, action 0x1f).
  * So the shield dismisses the family via DISMISS-A (DESC_CLEARFLAG_OFF=1, id-agnostic, runs NO button action
- * -> the save is never deleted -- the daemon's LIVE-PROVEN dismiss, ported resident in recovery.c). Detect
+ * -> the save is never deleted -- the live-proven dismiss, ported resident in recovery.c). Detect
  * by DESC_GDMID_OFF. DIRECT: menu-shell-dialog-chain.md + the GDM-id->name table 0x1447DAB60.
  * RE-DERIVE per build: the four ids from the name table; the dialog-queue model from the truth file. */
 #define GDM_LOAD_DAMAGED_FILE          0x1d   /* single-map LOAD reject (Delete/Cancel prompt) */
@@ -173,7 +173,7 @@
  * `*(editor+0x21088)` (= ED_MENU_SCREEN). BYTE-IDENTICAL to the engine's own "limits reached" toast
  * (FUN_140531e60): build a title idStr + a text idStr, call FUN_140cfa0b0(screen, title, text), free both.
  * The toast auto-fades (cvar snapEdit_SWF_MessageToast_DisplayTime) + self-dedups (a "shown" byte at
- * toast+0x1b0). DIRECT (editor-native-notice RE + manager re-derivation against 0xCFA0B0 + the engine
+ * toast+0x1b0). DIRECT (editor-native-notice RE + re-derivation against 0xCFA0B0 + the engine
  * call site 0x531E60). NO reference to *(base+0x4DF7FC8) / AddDialog 0xE643C0 / the browser. */
 #define RVA_IDSTR_CTOR     0x19FCEF0u  /* FUN_1419fcef0(idStr* buf, const char* s): idStr from a C-string */
 #define RVA_IDSTR_DTOR     0x19FD120u  /* FUN_1419fd120(idStr* buf): idStr dtor (frees heap if any) */
@@ -186,7 +186,7 @@
  * The error dispatcher 0x1A08E80 formats every Error/FatalError into a stack buffer and, right before it
  * throws (idException / idFatalException via _CxxThrowException 0x1E9844C), copies it VERBATIM into this
  * 0x800-byte global -- the severity-prefixed text ("^1...ERROR... <msg> ^7while loading <map> from <src>").
- * The shield reads it (a plain SEH-guarded memory READ -- NO new hook, so zero added Frida-conflict surface)
+ * The shield reads it (a plain SEH-guarded memory READ -- NO new hook, so zero added instrumentation-conflict surface)
  * to carry the engine's real message into the recover-in-place toast, informative like OG's popup but
  * survivable. For the Class-A wild-AV path a raw AV has NO error string, so the buffer is only read on the
  * Class-B (Error(6)) recovery; Class-A keeps the generic NOTICE_TEXT_STR.

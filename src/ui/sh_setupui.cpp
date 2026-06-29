@@ -300,7 +300,7 @@ static void sh_wire_stub_handlers(ShWinController *win)
                      });
 
     /* Timeline Editor: save_entity_timeline.clicked -> |0x80 (the per-frame |0x80 consumer runs
-     * sh_timeline_commit on the UI thread, the prototype FIX-B style). */
+     * sh_timeline_commit on the UI thread, the reference implementation FIX-B style). */
     QObject::connect(static_cast<QPushButton *>(UIGET(SH_UI_save_entity_timeline)),
                      &QPushButton::clicked, [win]() { win->flagword |= SH_FLAG_APPLY_TIMELINE; });
     /* Timeline Editor: insert_entity_event.clicked -> append an empty event-row (FUN_180011e9c). */

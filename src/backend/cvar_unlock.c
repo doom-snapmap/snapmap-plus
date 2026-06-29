@@ -14,9 +14,9 @@
  * WHY LAUNCH OPTIONS NEED THIS (the bug it fixes)
  *   The engine resolves a startup `+cvar` at the DEVELOPER gate, which reads a cvar table that only
  *   contains CVAR_EXPOSE-flagged cvars. A normal cvar (e.g. hydra_signInWhenOnline) isn't in it, so
- *   FindCvar misses and the launch option is SILENTLY DROPPED. (Proven: campaign engine-pending-cvar-
- *   apply -- a vanilla boot with `+hydra_signInWhenOnline 0` on the command line still signs in
- *   ONLINE.) DLM fixes this by flagging every cvar EXPOSE before main; we achieve the same result.
+ *   FindCvar misses and the launch option is SILENTLY DROPPED. (Proven by our RE: a vanilla boot with
+ *   `+hydra_signInWhenOnline 0` on the command line still signs in ONLINE.) DLM fixes this by flagging
+ *   every cvar EXPOSE before main; we achieve the same result.
  *
  * SCOPE: ALL LOCKED CVARS, NOT ONE.
  *   The alias points the developer lookup at the FULL table (= every registered cvar); the settability
@@ -24,7 +24,7 @@
  *   `+cvar` launch option becomes applicable.
  *
  * CLEAN-ROOM
- *   This is OUR mechanism, live-validated in the prototype (unlockCvars + setCvarsSettable,
+ *   This is OUR mechanism, live-validated in the reference implementation (unlockCvars + setCvarsSettable,
  *   2026-06-14) and ported here verbatim. It contains ZERO DLM bytes. We mirror DLM's STRATEGY
  *   (expose all cvars before the boot apply); we do NOT copy its IMPLEMENTATION (DLM inline-detours the
  *   registration fn behind a QPC/IAT hook -- see README "Alias vs detour"). The alias is simpler and is
@@ -247,13 +247,13 @@ static int apply_unlock(uint8_t *base)
         return 0; /* list not populated yet / implausible cvarSys (wrong/torn) -> not ready -> retry */
 
     /* (1) FINDABILITY for ALL cvars -- alias the developer (gate!=0) table onto the full (gate==0) table, so
-     *     a gate-1 FindCvar resolves every registered cvar (== the prototype unlockCvars). Safe: cvarSys validated. */
+     *     a gate-1 FindCvar resolves every registered cvar (== the reference implementation unlockCvars). Safe: cvarSys validated. */
     if (!alias_dev_to_full(cvarSys))
         return 0; /* half-constructed cvarSys -> not ready, retry */
 
     /* (2) SETTABILITY for ALL cvars -- OR NOCHEAT into every cvar's flags so idCVar::Set won't FATAL
      *     ("Attempting to set a developer cvar") when the startup +cvar apply sets them at gate!=0
-     *     (== the prototype setCvarsSettable). Each per-cvar flags write is SEH-guarded inside set_settable_one. */
+     *     (== the reference implementation setCvarsSettable). Each per-cvar flags write is SEH-guarded inside set_settable_one. */
     for (uint32_t i = 0; i < count; i++) {
         void *cvar_v = NULL;
         __try { cvar_v = arr[i]; }

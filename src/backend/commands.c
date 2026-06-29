@@ -41,9 +41,9 @@
  * cmd[3]=param_4, cmd[4]=flags). We register help in param_4 (-> cmd[3]) -- this is FAITHFUL to OG SnapHak:
  * its own registrar (xreg_0x229b1.txt) calls AddCommand(cmdsys, name, handler, help) with the help string
  * as param_4 and nothing for param_5/param_6, and chrispy's commands display their help in-game -> cmd[3]
- * (param_4) IS the help-display slot the engine reads. (the prototype's clone_bss_apply uses the other order --
+ * (param_4) IS the help-display slot the engine reads. (the reference implementation's clone_bss_apply uses the other order --
  * help in param_5, NULL in param_4 -- but it is an INTERNAL command never shown to users, so its help-slot
- * placement is immaterial; apply_engine.c matches the prototype there byte-for-byte and stays as-is.) So this
+ * placement is immaterial; apply_engine.c matches the reference implementation there byte-for-byte and stays as-is.) So this
  * (cmdsys, name, handler, help, argComp=NULL, flags) order is correct for the user-facing OG command set;
  * load-bearing arg = handler=param_3, correctly placed everywhere. */
 typedef void (*add_command_fn)(void *cmdsys, const char *name, void *handler,
@@ -1300,7 +1300,7 @@ static const cmd_entry CMD_TABLE[] = {
  * console whether or not dev mode is active (a developer tool flips dev-mode on -> the typed console then
  * scans the DEV table; with flags=0 our commands are FULL-only and read "Unknown command" there). The
  * engine's own always-typeable commands (`where`/`getviewpos`) use exactly flags=2.
- *   RE: subagent command-console-exposure -- ExecuteCommandText 0x141aa4950 (gate getter *(cmdSys+0x200a8):
+ *   RE: command-console-exposure -- ExecuteCommandText 0x141aa4950 (gate getter *(cmdSys+0x200a8):
  *   0=>FULL@+0x08, !=0=>DEV@+0x20), AddCommand 0x141aa3630 (`flags|4 if flags&2`; cheat guard 0x1419fcb60).
  *   DELIBERATE divergence from OG-faithful: the OG passes NO flag (~stack garbage, effectively 0), so the
  *   OG's own commands are ALSO dev-gated -- flags=2 EXCEEDS OG (a console-usability fix). */

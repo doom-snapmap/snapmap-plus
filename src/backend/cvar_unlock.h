@@ -17,7 +17,7 @@
  *   - the +cvar boot-arg apply mechanism (FindCvar's gate-keyed
  *     two-table lookup FUN_141a05a90, idCVar::Set's dev-gate guard FUN_141a06e80).
  *   - the gate-0/gate-1 tables (CVAR_NOCHEAT/CVAR_EXPOSE).
- *   - the prototype unlockCvars/setCvarsSettable (the live-validated 2026-06-14 mechanism this
+ *   - the reference implementation unlockCvars/setCvarsSettable (the live-validated 2026-06-14 mechanism this
  *     header's constants are taken from verbatim).
  */
 #ifndef B2_CVAR_UNLOCK_H
@@ -50,11 +50,11 @@
 #define CVARSYS_FULL_HASH_OFF   0x38u   /* idHashIndex,     full table */
 #define CVARSYS_DEV_LIST_OFF    0x20u   /* idList<idCVar*>, developer table */
 #define CVARSYS_DEV_HASH_OFF    0x60u   /* idHashIndex,     developer table */
-#define SIZEOF_IDLIST           0x18u   /* embedded idList struct size (the prototype: readByteArray(0x18)) */
-#define SIZEOF_IDHASHINDEX      0x28u   /* embedded idHashIndex struct size (the prototype: readByteArray(0x28)) */
+#define SIZEOF_IDLIST           0x18u   /* embedded idList struct size (the reference implementation: readByteArray(0x18)) */
+#define SIZEOF_IDHASHINDEX      0x28u   /* embedded idHashIndex struct size (the reference implementation: readByteArray(0x28)) */
 
 /* Inside the FULL idList (at cvarSys + CVARSYS_FULL_LIST_OFF): the idCVar* array pointer and the count.
- * the prototype setCvarsSettable: arr = *(cvarSys+0x08); count = *(uint32*)(cvarSys+0x10). */
+ * the reference implementation setCvarsSettable: arr = *(cvarSys+0x08); count = *(uint32*)(cvarSys+0x10). */
 #define CVARSYS_LIST_ARRAY_OFF  0x08u   /* idCVar** -- 8-byte entries */
 #define CVARSYS_LIST_COUNT_OFF  0x10u   /* uint32 element count */
 #define CVAR_LIST_SANITY_MAX    100000u /* refuse an absurd count (uninitialized / wrong build) */

@@ -1,8 +1,8 @@
 # package.ps1 -- assemble the deployable SnapHak overlay into dist\ (the tree you drop into a DOOM install).
 # Pure ASCII (PS 5.1 reads BOM-less UTF-8 as 1252).
 #
-# This is the PRODUCT's packaging step: shipping the snaphak\ + plugins\ Qt runtime alongside the two clone
-# DLLs is the product's job. It consumes the DLLs built by build.ps1 (in build\) and copies the Qt 5.9.9
+# This is SnapHak's packaging step: shipping the snaphak\ + plugins\ Qt runtime alongside the two clone
+# DLLs is done here. It consumes the DLLs built by build.ps1 (in build\) and copies the Qt 5.9.9
 # runtime from the Qt SDK. Output is the 6-file overlay documented in docs\packaging.md, plus a
 # MANIFEST.sha256 (the install/verify map + hash transparency for releases).
 #

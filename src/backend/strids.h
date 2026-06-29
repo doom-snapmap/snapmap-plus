@@ -5,7 +5,7 @@
  * mappings from %USERPROFILE%\snaphak\strings\strids.json into the engine's runtime string-id table
  * (idLangDict), so the engine resolves those custom ids just like its own built-in localized strings.
  *
- * MECHANISM (DIRECT, RE of the OG XINPUT1_3.dll + the engine, this campaign):
+ * MECHANISM (DIRECT, RE of the OG XINPUT1_3.dll + the engine, this work):
  *   OG detours the engine idLangDict radix-sort wrapper `0x1A2B480` with FUN_1800102e0, whose body is:
  *       FUN_18000FF10(engineBase + 0x55B7F18);                 // INJECT: load strids.json, append rows
  *       (engineBase + 0x1A2B490)(ctx, table[0], count, 0x20);  // tail-call the ORIGINAL sort
@@ -64,7 +64,7 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
  * resets to default. Returns 1 if a path is set. */
 int sh_strids_set_source(const char *path);
 
-/* How many #str_ rows the injector has appended (observability for the manager's differential test). */
+/* How many #str_ rows the injector has appended (observability for the test harness). */
 unsigned long sh_strids_injected_count(void);
 
 #endif /* BACKEND_B1_STRIDS_H */

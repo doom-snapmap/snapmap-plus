@@ -30,13 +30,13 @@
  * push rbx; sub rsp,0x30; SEH cookie slot; lazy-init the declMgr singleton; return its ptr in RAX). Its
  * fixed prologue is shared by ~47 .text functions and only becomes unique via the build-volatile RIP
  * displacement -- which is WHY it is not signature-able (a stable sig can't pin the volatile disp).
- * Resolved off g_doom_base, the established precedent (loader.py DECL_MGR_ACCESSOR_RVA / the prototype
+ * Resolved off g_doom_base, the established precedent (loader.py DECL_MGR_ACCESSOR_RVA / the reference implementation
  * _declMgrAccessor -- both hardcoded data RVAs, no sig). 0-arg, returns the declMgr object in RAX. */
 typedef void *(*declmgr_getter_fn)(void);
 #define DECLMGR_ACCESSOR_KNOWN_RVA  0x17F7030u
 
 /* declMgr -> reflection/type-info manager: vtable slot +0x80 (the reflection accessor; matches
- * the prototype declMgr.readPointer().add(0x80).readPointer()). __fastcall(self) -> reflect. */
+ * the reference implementation declMgr.readPointer().add(0x80).readPointer()). __fastcall(self) -> reflect. */
 #define VSLOT_REFLECT_ACCESSOR  0x80
 
 /* FindTypeInfoByName(reflect, name, scope=0) -> the type record (sig "FindTypeInfoByName" 0x1A1D590).

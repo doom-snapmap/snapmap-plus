@@ -50,8 +50,8 @@ static const sig_entry SHIELD_ENGINE_SIGNATURES[] = {
     { "SetState",
       "48 89 5C 24 08 57 48 83 EC 20 8B DA 48 8B F9 8B 91 18 36 02 00",
       0x5298A0u },
-    /* idCommonLocal::Frame 0x17CE360 -- the recovery frame-hook target (collision-free; the daemon hooks
-     * the editor/menu pumps, NOT Frame). Prologue = 5 pushes (rdi,r12-r15) + `mov eax,0x119c0`
+    /* idCommonLocal::Frame 0x17CE360 -- the recovery frame-hook target (collision-free; an external
+     * instrumentation tool may hook the editor/menu pumps, NOT Frame). Prologue = 5 pushes (rdi,r12-r15) + `mov eax,0x119c0`
      * (40 57 41 54 41 55 41 56 41 57 B8 C0 19 01 00) = the 15 position-independent stolen bytes
      * recovery.c's FRAME_STOLEN steals. Unique at 15 bytes. */
     { "Frame",

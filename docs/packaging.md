@@ -69,4 +69,4 @@ DOOMx64vk.exe  SHA256  139763E94F1A75B5310179F9EEEB8A949A1F53C49ACBC722FCFC5DFE7
 A DOOM update changes this hash, which means a re-port (signature re-resolve + build-specific offset
 re-derive). The clone is built to survive that: engine functions are signature-resolved (fail-loud),
 data globals are RIP-decoded, and build-specific offsets carry re-derive recipes. The auto-re-patcher
-that automates this on each DOOM update is future work (see `docs/architecture.md`).
+that automates this on each DOOM update is future work (see the release workflow, `.github/workflows/release.yml`).

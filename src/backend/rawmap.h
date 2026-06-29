@@ -11,10 +11,10 @@
  * Its body, when the `snapHak_rawmaps_on` gate (OG DAT_18003e819) is set: build the rawmap.json path,
  *   fopen_s(...,"rb"), read the whole file into a fresh malloc'd buffer, OVERWRITE the engine's input
  *   JSON pointer (param_1) with it, log "SnapHak: Rawmap size %lld, read %lld.", then parse THAT buffer.
- * The clean-room JS reimpl (the prototype item 1, doDeserializeSwap) does the identical thing on
- *   the Frida side: `onEnter: if (_gate && _rawmapBuf) { args[0] = _rawmapBuf; ... }`.
+ * The clean-room reference implementation (item 1, doDeserializeSwap) does the identical thing with
+ *   an external instrumentation tool: `onEnter: if (_gate && _rawmapBuf) { args[0] = _rawmapBuf; ... }`.
  *
- * NATIVE PORT (the difference from the Frida form): a Frida Interceptor can mutate `args[0]` in place;
+ * NATIVE PORT (the difference from the instrumentation-hook form): an interceptor hook can mutate `args[0]` in place;
  * an inline detour CANNOT -- it REPLACES the function. So our detour has the SAME prototype as the
  * target and, when armed, calls the engine ORIGINAL (via the trampoline) with OUR buffer as arg0
  * instead of the engine's json. That is the exact semantic of "overwrite param_1" / "args[0] = buf",
@@ -22,7 +22,7 @@
  * parse, so there is nothing to keep in sync with the engine codec. We free OUR buffer after the call
  * (OG frees its substitute buffer too).
  *
- * Clean-room: ported from our own RE (the truth above) + the proven JS reimpl. Zero OG SnapHak bytes.
+ * Clean-room: ported from our own RE (the truth above) + the proven reference implementation. Zero OG SnapHak bytes.
  */
 #ifndef BACKEND_RAWMAP_H
 #define BACKEND_RAWMAP_H
@@ -35,10 +35,10 @@
  *                       "DeserializeFromJson"). 0 => not resolved; logs SKIPPED and returns 0.
  *   `deser_status_ok` = 1 iff the resolve was a CLEAN scan hit (SIG_OK), NOT the hook-tolerant
  *                       known_rva fallback (SIG_OK_HOOKED). When the prologue is already inline-hooked
- *                       (e.g. the daemon's Frida oracle hooks this same fn during testing), the live
+ *                       (e.g. an external instrumentation tool hooks this same fn during testing), the live
  *                       prologue bytes are a detour, not the real instructions -- installing our own
  *                       detour over that would corrupt the steal window. So we install ONLY on a clean
- *                       resolve. (Coexistence with the daemon hook is the manager's testing concern.)
+ *                       resolve. (Coexistence with such an external hook is a testing concern.)
  * Returns 1 if the detour was installed, 0 otherwise (logs the reason). Emits a "B1: rawmap LOAD-swap
  * installed ..." marker on success. */
 int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok);
@@ -51,18 +51,18 @@ int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok);
  * "arm.flag" placed as a SIBLING of the rawmap source (i.e. <dir-of-rawmap.json>\arm.flag, derived from
  * the same path resolver so it tracks set_source). Each interception does one GetFileAttributes check;
  * if the flag exists AND the source reads, the swap fires and the log line carries "[flag-armed]". This
- * lets the manager arm/disarm ONE controlled live map-load by creating/deleting the file -- no console
+ * lets the test harness arm/disarm ONE controlled live map-load by creating/deleting the file -- no console
  * or RPC. The exact path is logged at install. The PRODUCTION arm is OG's snapHak_rawmaps_on console
- * command (later work); this flag-file is the manager's TEST stand-in. */
+ * command (later work); this flag-file is the TEST stand-in. */
 int sh_rawmap_swap_arm(int on);
 
 /* Set the file-backed rawmap source path (the bytes the swap delivers). For this slice a simple
  * file-backed source matches how OG sources its rawmap (%USERPROFILE%\snaphak\rawmap.json). Pass NULL
- * to reset to the default path. The manager wires the real source later. Returns 1 if a path is set. */
+ * to reset to the default path. The real source is wired later. Returns 1 if a path is set. */
 int sh_rawmap_swap_set_source(const char *path);
 
-/* How many times the swap has fired (substituted our bytes into a load). Observability for the manager's
- * differential test. */
+/* How many times the swap has fired (substituted our bytes into a load). Observability for the
+ * test harness. */
 unsigned long sh_rawmap_swap_count(void);
 
 /* rawmap.h -- the rawmap SAVE shadow, native C
@@ -88,8 +88,8 @@ unsigned long sh_rawmap_swap_count(void);
  * trampoline) to fill the engine's out-idStr `out` -- the normal save proceeds byte-for-byte untouched --
  * and THEN reads out.len/out.data and writes those bytes to rawmap.json. This reuses the engine's own
  * serializer (nothing to keep in sync with the engine codec) and is byte-identical in outcome to OG (the
- * engine serializer fills `out` either way). It is exactly what the proven Frida reimpl does
- * (the prototype _saveHook: capture args[1] onEnter, read len@0x8/data@0x10 onLeave, write).
+ * engine serializer fills `out` either way). It is exactly what the proven reference implementation does
+ * (the reference _saveHook: capture args[1] onEnter, read len@0x8/data@0x10 onLeave, write).
  *
  * Unlike the LOAD swap there is NO arm gate: OG writes the shadow on EVERY save (the only gate OG has on
  * the WHOLE rawmap feature is snapHak_rawmaps_on, which gates LOAD substitution; the save-shadow handler
@@ -105,10 +105,10 @@ unsigned long sh_rawmap_swap_count(void);
  *                           not resolved; logs SKIPPED and returns 0.
  *   `serialize_status_ok` = 1 iff the resolve was a CLEAN scan hit (SIG_OK), NOT the hook-tolerant
  *                           known_rva fallback (SIG_OK_HOOKED). When the prologue is already inline-hooked
- *                           (e.g. the daemon's Frida oracle hooks this same fn during testing), the live
+ *                           (e.g. an external instrumentation tool hooks this same fn during testing), the live
  *                           prologue bytes are a detour, not the real instructions -- installing our own
  *                           detour over that would corrupt the steal window. So we install ONLY on a clean
- *                           resolve. (Coexistence with the daemon hook is the manager's testing concern.)
+ *                           resolve. (Coexistence with such an external hook is a testing concern.)
  * Returns 1 if the detour was installed, 0 otherwise (logs the reason). Emits a "B1: rawmap SAVE shadow
  * installed ..." marker on success. */
 int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok);
@@ -119,11 +119,11 @@ int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok);
  * path is set. */
 int sh_rawmap_save_set_dest(const char *path);
 
-/* How many times the shadow has fired (mirrored a save to rawmap.json). Observability for the manager's
- * differential test -- mirrors the LOAD swap's sh_rawmap_swap_count(). */
+/* How many times the shadow has fired (mirrored a save to rawmap.json). Observability for the
+ * test harness -- mirrors the LOAD swap's sh_rawmap_swap_count(). */
 unsigned long sh_rawmap_save_count(void);
 
-/* Bytes written by the most recent shadow (0 if none yet) -- mirrors the Frida reimpl's _lastSaveBytes. */
+/* Bytes written by the most recent shadow (0 if none yet) -- mirrors the reference impl's _lastSaveBytes. */
 unsigned long long sh_rawmap_save_last_bytes(void);
 
 #endif /* BACKEND_RAWMAP_H */
