@@ -13,10 +13,12 @@ go build -ldflags "-X main.version=v1.2.3" -o snaphak.exe .   # stamp a release 
 ## Use
 
 ```
-snaphak install   [--doom <path>] [--local <dist-dir>] [--release <tag>]
-snaphak update    [--doom <path>] [--release <tag>]
+snaphak install   [--doom <path>] [--local <dist-dir>] [--release <tag>] [--beta]
+snaphak update    [--doom <path>] [--release <tag>] [--beta]
 snaphak uninstall [--doom <path>]
 snaphak status
+snaphak version
+snaphak help
 ```
 
 - **`--doom <path>`** — the DOOM install dir (the folder with `DOOMx64vk.exe`). If omitted, the installer
@@ -24,9 +26,10 @@ snaphak status
   `libraryfolders.vdf` for the library holding appid `379720`, and verifies `DOOMx64vk.exe` is there).
 - **`--local <dist-dir>`** — install from a local `dist/` tree (built by the repo's `package.ps1`) instead of
   downloading. This is the contributor / local-test path.
-- **`--release <tag>`** — install a specific release tag instead of the latest.
+- **`--release <tag>`** — install a specific release version instead of the latest.
+- **`--beta`** — install the latest **beta** (pre-release) instead of the latest stable.
 
-With no `--local`, `install`/`update` download the latest release bundle from GitHub.
+With no `--local`, `install`/`update` download from GitHub (the latest stable by default).
 
 ## What it does
 
@@ -44,8 +47,21 @@ With no `--local`, `install`/`update` download the latest release bundle from Gi
 install (auto-detect DOOM → confirm → install).
 
 - **Stable** (`snaphak update`): the latest plain `vX.Y.Z` release.
-- **Beta**: a `vX.Y.Z-beta.N` pre-release — opt in with `snaphak install --release vX.Y.Z-beta.N`.
+- **Beta**: a `vX.Y.Z-beta.N` pre-release — `snaphak update --beta` (latest beta) or
+  `snaphak install --release <tag>` (a specific one).
 - Pin any version with `--release <tag>` on install/update.
+
+### Private (closed-beta) access
+
+While the release repo is private, downloading a release needs a GitHub token. Save one once:
+
+```
+snaphak set-token <github-token>      # stored in %LOCALAPPDATA%\open-snaphak\token
+```
+
+Then `snaphak update --beta` (and any install/update) authenticates with it. The installer also honors a
+`SNAPHAK_TOKEN` env var or a `--token <tok>` flag. Use a **fine-grained** token scoped to this repo with
+**Contents: read-only**. Once the repo is public, no token is needed.
 
 (The release path goes live once the first GitHub Release is published; until then, use `--local <dist>` to
 install from a local `package.ps1` build.)

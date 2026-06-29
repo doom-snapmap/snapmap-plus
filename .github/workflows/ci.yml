@@ -99,6 +99,11 @@ jobs:
             throw "XInput ordinals must be 2=GetState, 3=SetState"
           }
           Write-Host "ordinals OK (2=GetState, 3=SetState)"
+      - name: C unit tests (self-contained)
+        shell: pwsh
+        run: |
+          .\tests\run-tests.ps1
+          if ($LASTEXITCODE -ne 0) { throw "C unit tests failed" }
       - name: Installer -- gofmt + vet + test + build
         shell: pwsh
         working-directory: installer
