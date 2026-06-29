@@ -1,0 +1,3 @@
+# Go source MUST be LF: `gofmt -l` flags CRLF, and CI runners check out with autocrlf (which would otherwise
+# make the .go files CRLF and fail the installer's gofmt gate). Force LF for Go regardless of platform.
+*.go text eol=lf
