@@ -23,7 +23,11 @@ void shield_set_logpath_from_module(HINSTANCE self)
     if (len == 0 || len >= MAX_PATH) { strcpy_s(g_logpath, MAX_PATH, "shield_faults.log"); return; }
     char *slash = strrchr(path, '\\');
     if (slash) *(slash + 1) = '\0'; else path[0] = '\0';
-    _snprintf_s(g_logpath, MAX_PATH, _TRUNCATE, "%sshield_faults.log", path);
+    /* group logs under <DOOM>\snaphak_logs\ (same dir the backend log uses) */
+    char dir[MAX_PATH];
+    _snprintf_s(dir, MAX_PATH, _TRUNCATE, "%ssnaphak_logs", path);
+    CreateDirectoryA(dir, NULL);   /* idempotent */
+    _snprintf_s(g_logpath, MAX_PATH, _TRUNCATE, "%s\\shield_faults.log", dir);
 }
 
 void shield_emit(const shield_fault *f)

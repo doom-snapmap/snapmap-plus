@@ -151,7 +151,9 @@ func cmdUninstall(f flags) error {
 		}
 		fmt.Printf("  ~ restored %s\n", bk.Rel)
 	}
-	// 3) clean up the dirs we created -- only if now empty (a pre-existing tree is left intact)
+	// 3) clean up the dirs we created. snaphak_logs/ is unambiguously ours (runtime logs) -> remove it whole;
+	//    snaphak/ + plugins/ only if now empty (a pre-existing tree is left intact).
+	os.RemoveAll(filepath.Join(doom, "snaphak_logs"))
 	removeIfEmpty(filepath.Join(doom, "snaphak"))
 	removeIfEmpty(filepath.Join(doom, "plugins", "platforms"))
 	removeIfEmpty(filepath.Join(doom, "plugins"))

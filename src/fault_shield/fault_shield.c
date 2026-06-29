@@ -20,10 +20,13 @@
 uint8_t *g_doom_base = NULL;   /* shield's view of the DOOM module (set by shield_install from the backend) */
 size_t   g_doom_size = 0;
 
-/* Raw kernel-only persistent log (CreateFile/WriteFile, NO CRT -> safe from any context). Records the
- * arming timeline to shield_arm.log next to DOOMx64vk.exe; WRITE_THROUGH so it survives a termination. */
+/* Raw kernel-only persistent log (CreateFile/WriteFile, NO CRT -> safe from any context). In -Diag builds it
+ * records the arming timeline to <DOOM>\snaphak_logs\shield_arm.log (WRITE_THROUGH, survives a termination).
+ * In a RELEASE build it is a file-wise no-op -- the arm sequence still flows to OutputDebugString (the in-game
+ * console + the daemon ring), so release leaves no shield_arm.log in the DOOM dir. */
 void shield_raw(const char *msg)
 {
+#ifdef SNAPHAK_DIAG
     static HANDLE h = INVALID_HANDLE_VALUE;
     static int tried = 0;
     if (h == INVALID_HANDLE_VALUE) {
@@ -35,7 +38,10 @@ void shield_raw(const char *msg)
         char *slash = NULL, *q;
         for (q = path; *q; q++) if (*q == '\\') slash = q;
         if (!slash) return;
-        lstrcpyA(slash + 1, "shield_arm.log");
+        /* <DOOM>\snaphak_logs\shield_arm.log -- CRT-free path build (lstrcpy/lstrcat + CreateDirectory) */
+        lstrcpyA(slash + 1, "snaphak_logs");
+        CreateDirectoryA(path, NULL);
+        lstrcatA(path, "\\shield_arm.log");
         h = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                         OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
         if (h == INVALID_HANDLE_VALUE) return;
@@ -43,6 +49,9 @@ void shield_raw(const char *msg)
     DWORD wr;
     WriteFile(h, msg, lstrlenA(msg), &wr, NULL);
     WriteFile(h, "\r\n", 2, &wr, NULL);
+#else
+    (void)msg;
+#endif
 }
 
 /* Install the catch points: the VEH (raw AVs) + the recovery frame-hook. The engine fns both touch are
