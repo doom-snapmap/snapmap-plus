@@ -1,0 +1,21 @@
+; xinput1_3.def -- pin the XInput export ORDINALS to match the real XInput1_3.dll.
+;
+; DOOM imports XINPUT1_3.dll BY ORDINAL (dumpbin /imports DOOMx64vk: "Ordinal 2", "Ordinal 3" = the only
+; two it pulls -- XInputGetState + XInputSetState). MSVC's default __declspec(dllexport) numbers exports
+; ALPHABETICALLY, which put XInputGetBatteryInformation at ordinal 2 and XInputGetCapabilities at 3. So
+; DOOM's per-frame controller poll (XInputGetState, ord 2) landed in our XInputGetBatteryInformation, whose
+; real-fn forward writes a battery struct through an uninitialised 3rd pointer -> wild heap write ->
+; 0xC0000374 heap corruption, but ONLY on a machine with a controller (keyboard/mouse never polls XInput).
+;
+; This .def fixes the ordinals. The function BODIES stay in xinput_proxy.c (the dllexport there is removed
+; so this .def is the SOLE export source -- avoids an LNK4197 double-export). Ordinals are verified against
+; C:\Windows\System32\XInput1_3.dll (2=GetState 3=SetState 4=GetCapabilities 5=Enable 6=DSound 7=Battery
+; 8=Keystroke). The OG SnapHak XINPUT1_3.dll had the same alphabetical defect (latent; few used a pad).
+EXPORTS
+    XInputGetState                  @2
+    XInputSetState                  @3
+    XInputGetCapabilities           @4
+    XInputEnable                    @5
+    XInputGetDSoundAudioDeviceGuids @6
+    XInputGetBatteryInformation     @7
+    XInputGetKeystroke              @8

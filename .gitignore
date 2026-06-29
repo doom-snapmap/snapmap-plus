@@ -1,0 +1,13 @@
+# Build artifacts -- the source is the deliverable; the DLLs are rebuilt via build.ps1,
+# and the deployable overlay bundle is assembled into dist/ by package.ps1.
+build/
+dist/
+*.obj
+*.dll
+*.exe
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.cod
+*.log
