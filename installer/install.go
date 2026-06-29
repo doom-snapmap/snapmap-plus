@@ -65,6 +65,9 @@ func saveRecord(rec *installRecord) error {
 }
 
 func cmdInstall(f flags) error {
+	if f.local == "" {
+		selfInstall() // a real (release) install -> keep a stable copy of snaphak.exe; skip for dev --local builds
+	}
 	doom, err := resolveDoom(f.doom)
 	if err != nil {
 		return err
@@ -176,11 +179,10 @@ func cmdUninstall(f flags) error {
 	removeIfEmpty(filepath.Join(doom, "snaphak"))
 	removeIfEmpty(filepath.Join(doom, "plugins", "platforms"))
 	removeIfEmpty(filepath.Join(doom, "plugins"))
-	// 4) drop the record. The user's %USERPROFILE%\snaphak data is NEVER touched.
-	if p, err := recordPath(); err == nil {
-		os.Remove(p)
-	}
-	fmt.Println("Done. DOOM restored to vanilla. (Your SnapHak user data folder was left untouched.)")
+	// 4) auto-cleanup our app-data folder: the record, the saved token, and the stable snaphak.exe copy.
+	//    The user's %USERPROFILE%\snaphak modding data is NEVER touched.
+	cleanupAppData()
+	fmt.Println("Done. DOOM restored to vanilla. (Your SnapHak modding data was left untouched.)")
 	return nil
 }
 

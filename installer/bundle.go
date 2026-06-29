@@ -295,6 +295,7 @@ func cmdSetToken(args []string) error {
 	if len(args) < 1 || strings.TrimSpace(args[0]) == "" {
 		return fmt.Errorf("usage: snaphak set-token <github-token>")
 	}
+	selfInstall() // a tester's first command -> keep a stable copy of snaphak.exe
 	p, err := tokenPath()
 	if err != nil {
 		return err
