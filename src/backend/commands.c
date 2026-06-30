@@ -5,7 +5,7 @@
  * clone" stubs that print the OG help. snapHak_rawmaps_on/off + sh_unhide are wired (the
  * first two to the SHIPPED sh_rawmap_swap_arm gate, sh_unhide to the SHIPPED sh_unhide_apply). The OG
  * binary registers this unhide under the name sh_target_any; the clone renames it sh_unhide and frees
- * sh_target_any for the changelog's link-any toggle (linkany.c -> h_link_any).
+ * sh_target_any for the changelog's interactive wire-any toggle (wiring_mode.c -> h_wiring_mode).
  * snaphak_algo (cs_dontuse [18] + sh_alginfo) now lives in algo.c -- cs_dontuse toggles the 4 f64
  * engine-math overrides, sh_alginfo reports the reimpl present; both extern-declared near CMD_TABLE.
  *
@@ -204,7 +204,7 @@ static void h_rawmaps_off(idCmdArgs *a)
 }
 /* [13] sh_unhide -> the SHIPPED sh_unhide_apply (toggle show/hide over snapEditorEntityDef). CLONE
  * RENAME: the OG binary registers this unhide under the name `sh_target_any` (0x21ee0); the clone
- * exposes it as `sh_unhide` and frees `sh_target_any` for the OG changelog's link-any toggle (h_link_any). */
+ * exposes it as `sh_unhide` and frees `sh_target_any` for the OG changelog's wire-any toggle (h_wiring_mode). */
 static void h_unhide(idCmdArgs *a)
 {
     (void)a;
@@ -1250,15 +1250,16 @@ void h_sh_validclasses(idCmdArgs *a);
 void h_cs_dontuse(idCmdArgs *a);
 void h_alginfo(idCmdArgs *a);
 
-/* sh_target_any link-any toggle lives in linkany.c (h_link_any flips the connect-tool instance-filter
- * lever DAT_14571c660 1=ON/0=OFF). Its DOOM module base is cached by sh_linkany_install (dllmain).
- * Extern-declared here so CMD_TABLE references it without drift; it shares sh_commands' idCmdArgs/sh_printf. */
-void h_link_any(idCmdArgs *a);
+/* sh_target_any interactive wire-any toggle lives in wiring_mode.c (h_wiring_mode flips a flag that gates
+ * an inline detour on the editor wire tool's pick processor: ON lets two picks lay a direct connection
+ * between any two entities). The detour is installed by sh_wiring_mode_install (dllmain). Extern-declared
+ * here so CMD_TABLE references it without drift; it shares sh_commands' idCmdArgs/sh_printf. */
+void h_wiring_mode(idCmdArgs *a);
 
 /* ------------------------------------------------------------------------ the command table -------
  * VERBATIM from the OG XINPUT1_3.dll string table (read 2026-06-21), except the clone's renamed/added
  * commands carry clone help: sh_unhide (= the OG's sh_target_any unhide, renamed) + sh_target_any
- * (the clone's NEW link-any toggle, linkany.c). Order mirrors the [1]-[22] command numbering. */
+ * (the clone's NEW wire-any toggle, wiring_mode.c). Order mirrors the [1]-[22] command numbering. */
 typedef struct cmd_entry {
     const char *name;
     void       *handler;
@@ -1280,7 +1281,7 @@ static const cmd_entry CMD_TABLE[] = {
     { "sh_genbmodel",        (void *)h_sh_genbmodel,"sh_genbmodel <input file> <output file> Generate a bmodel from a .obj/.ase/.lwo file. " },
     { "sh_genmd6model",      (void *)h_sh_genmd6model,"sh_genmd6model <input file> <output file> Compiles a .md6model into a bmd6model" },
     { "sh_unhide",           (void *)h_unhide,      "Toggles the editor palette unhide: reveals / re-hides the campaign-only / normally-hidden placeable entity decls." },
-    { "sh_target_any",       (void *)h_link_any,    "Toggles 'link any entities' mode: while ON, the editor Add-Logic tool wires ANY two entities with a raw connection (no compatibility gate)." },
+    { "sh_target_any",       (void *)h_wiring_mode, "Toggles 'link any entities' mode: while ON, pick a source then a target with the editor wire tool to lay a direct connection between ANY two entities (even node-less targets)." },
     { "sh_listres",          (void *)h_sh_listres,  "<resource classname (ex:idMaterial)> <optional: filter> list all resources of a given type" },
     { "sh_alginfo",          (void *)h_alginfo,     "Prints CPU dispatcher info for snaphak_algo." },
     { "sh_debugrender",      (void *)h_sh_debugrender,"Not for users, for chrispy to test renderer stuff" },

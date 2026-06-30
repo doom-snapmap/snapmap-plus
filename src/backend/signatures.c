@@ -368,20 +368,39 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                            * capstone scan HITS:1. RE'd DIRECT from our own decompile. */
       "48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 A8 F7 FF FF 48 81 EC 20 09 00 00",
       0x54F950u },
-    { "ConnectOutputCreator", /* FUN_140cdbb40 -- the editor Add-Logic OUTPUT-list creator. linkany.c
-                               * (sh_target_any link-any, option A) resolves THIS to RIP-decode the
-                               * connect-tool instance-filter lever DAT_14571c660: scan the body for the
-                               * first `83 3D ?? ?? ?? ?? 00` (cmp dword[rip+lever],0) -> rip_next+disp32 =
-                               * the lever SLOT (RVA 0x571c660; 41 xrefs ALL-READ, no writer -> safe to
-                               * poke 1=open/0=restore the instance filter). The lever opens the target
-                               * compatibility gate so ANY instance is a valid connect target while KEEPING
-                               * the native node-mediation (blue/logic wires). Unique @ 34-byte prologue
-                               * (3 reg-saves + MOV R9,[RDX+0x204c8] + MOVSXD R10,[RCX+0x10] -- distinct
-                               * from the 3 sibling creators cdb610/cdb860/cdb990). Re-derive (per DOOM
-                               * build): re-derive: decompile FUN_140cdbb40. */
+    { "ConnectOutputCreator", /* FUN_140cdbb40 -- the editor Add-Logic OUTPUT-list creator. wiring_mode.c
+                               * (sh_target_any interactive wire-any) resolves THIS as the version-portable
+                               * anchor for the connection primitive FUN_1405a70d0: the primitive shares its
+                               * prologue with a byte-identical edge-REMOVE sibling (FUN_1405a72a0, differs
+                               * only in its inner call target) so it cannot be isolated by its own bytes;
+                               * the creator lays exactly ONE such edge, so wiring_mode scans this body for
+                               * the single `call rel32` whose target carries the primitive's prologue and
+                               * decodes it. Unique @ 34-byte prologue (3 reg-saves + MOV R9,[RDX+0x204c8] +
+                               * MOVSXD R10,[RCX+0x10] -- distinct from the 3 sibling creators cdb610/cdb860/
+                               * cdb990). Re-derive (per DOOM build): decompile FUN_140cdbb40. */
       "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 "
       "4C 8B 8A C8 04 02 00 48 8B EA 4C 63 51 10",
       0xCDBB40u },
+    { "PickProcessor",     /* FUN_140cdad70 -- the editor wire tool's central pick processor (a vtable
+                            * slot; also called internally on deactivate cdb110 / re-pick cdb440). It
+                            * classifies every picked entity and drives the stock node-mediated connect
+                            * flow. wiring_mode.c inline-detours it for the interactive wire-any mode (the
+                            * detour is flag-gated + off by default, so OFF is a transparent passthrough).
+                            * ABI: void(tool, passthrough, WORLD, pickedIndex[uint]); WORLD+0x204c8=ET.
+                            * Unique @ 27-byte prologue (3 reg-saves + push rdi + sub rsp,0x20 + MOV RAX,
+                            * [R8+0x204c8]); zero wildcards, file-wide unique (scan HITS:1 @ 0xcdad70 vs an
+                            * unpacked DOOM image). Re-derive (per DOOM build): re-extract the prologue. */
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 49 8B 80 C8 04 02 00",
+      0xCDAD70u },
+    { "ToolReset",         /* FUN_140cdb3e0 -- the wire tool reset: sets the four pick slots
+                            * (tool+0x10..+0x1c) to -1 and clears the flag/picker-result fields. wiring_mode
+                            * calls it after each handled pick to keep the tool clean (and on OFF to clear a
+                            * half-done pick). ABI: void(tool). Unique @ 27-byte prologue (xor r10d,r10d;
+                            * lea rax,[rcx+0x10]; lea rdx,[rax+0x10]; mov r9d,4; cmp rax,rdx; mov r8d,r10d;
+                            * cmova r9d,r10d -- stops before the build-volatile rel8 branch); zero wildcards,
+                            * file-wide unique (HITS:1 @ 0xcdb3e0). Re-derive (per DOOM build): re-extract. */
+      "45 33 D2 48 8D 41 10 48 8D 50 10 41 B9 04 00 00 00 48 3B C2 45 8B C2 45 0F 47 CA",
+      0xCDB3E0u },
     { "Toast",
       "40 57 48 83 EC 20 48 8B F9 48 8B 89 F0 08 00 00",
       0xCFA0B0u },
