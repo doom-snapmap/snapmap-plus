@@ -23,14 +23,6 @@
  *   pass walks the ENTIRE cvar list. hydra_signInWhenOnline was only the test case -- every locked
  *   `+cvar` launch option becomes applicable.
  *
- * ALSO: THE CONSOLE COMMANDS (the command twin of the cvar unlock).
- *   The same developer gate also splits the console COMMAND tables. A fresh console scans the FULL command
- *   list, but the instant a developer command (e.g. `god`) flips developer mode on, the console scans the
- *   DEV list (+ a cheat guard) -- so every command that isn't dev-flagged (all of DOOM's `noclip`/`give`/...
- *   and the clone's own) reads "Unknown command" right after `god`. apply_command_unlock fixes this the same
- *   way: alias the DEV command list onto the FULL list + flag every command cheat-exempt. The original
- *   enabling mod did both halves (cvars AND commands); this matches that. See cvar_unlock.h CMDSYS_*.
- *
  * CLEAN-ROOM
  *   This is OUR mechanism, live-validated in the reference implementation (unlockCvars + setCvarsSettable,
  *   2026-06-14) and ported here verbatim. It contains ZERO DLM bytes. We mirror DLM's STRATEGY
@@ -86,45 +78,6 @@ static void set_settable_one(void *cvar_v)
         *flags |= CVAR_FLAG_NOCHEAT;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         /* unreadable/stale idCVar* during the boot race -> skip; the re-assert pass catches it later */
-    }
-}
-
-/* ---- the COMMAND unlock (the console-command twin of the cvar unlock above) ------------------
- * Same problem, sibling table: a normal console scans the FULL command list (gate 0), but the moment a
- * developer tool/command (e.g. `god`) flips developer mode on, ExecuteCommandText scans the DEV list and
- * applies a cheat guard -- so a command that is FULL-only (every engine + clone command, registered with
- * no dev flag) becomes "Unknown command" / "developer command" right after `god`. The original cvar/command
- * enabling mod fixed BOTH (its dinput8 ORs the dev bits into every command at registration); we mirror that
- * effect on the FINISHED tables, the same way unlock_cvars does for cvars: alias the DEV command list onto
- * the FULL list (commands have no hash index -- ExecuteCommandText linear-scans -- so one idList copy makes
- * every command findable in either gate state) + OR the dev bits into every command (cheat-exempt). */
-
-/* SEH-guarded alias of the DEV command idList onto the FULL command idList. Returns 1 on success, 0 on a
- * torn read during the boot race (caller retries). The command idList carries no hash index, so this single
- * copy is sufficient (unlike alias_dev_to_full, which also copies the cvar idHashIndex). */
-static int alias_cmd_dev_to_full(uint8_t *cmdSys)
-{
-    __try {
-        memcpy(cmdSys + CMDSYS_DEV_LIST_OFF, cmdSys + CMDSYS_FULL_LIST_OFF, SIZEOF_IDLIST);
-        return 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-}
-
-/* SEH-guarded per-command cheat-exemption OR: set the developer-command bits (0x2 cheat-exempt + 0x4
- * dev-table membership) on a command object so ExecuteCommandText's "Attempting to call a developer command"
- * guard passes once dev-mode is active. Mirrors set_settable_one (cvars). */
-static void set_cmd_exempt_one(void *cmd_v)
-{
-    __try {
-        uint8_t *cmd = (uint8_t *)cmd_v;
-        if (cmd == NULL)
-            return;
-        uint32_t *flags = (uint32_t *)(cmd + CMD_FLAGS_OFF);
-        *flags |= CMD_FLAG_DEV_EXPOSE;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        /* unreadable/stale idCommand* during the boot race -> skip; the re-assert pass catches it later */
     }
 }
 
@@ -310,65 +263,6 @@ static int apply_unlock(uint8_t *base)
     return 1;
 }
 
-/* Resolve the cmdSystem OBJECT, reusing the slot the cvar resolver already decoded. The cvarSys and
- * cmdSystem singleton pointers are adjacent .data slots (cvarSys == cmdSystem-slot + 0x10), so the
- * CmdSystemLea decode g_cvu_cmdsys_slot IS the cmdSystem slot: object = *(slot). Fallback to the
- * build-locked RVA when the sig hasn't resolved yet (early boot, .text still SteamStub-encrypted).
- * MUST be called AFTER cvu_resolve_cvarsys_portable so g_cvu_cmdsys_slot is populated on the sig path. */
-static uint8_t *cvu_resolve_cmdsys(const uint8_t *base)
-{
-    uint8_t *cmdSys = NULL;
-    __try {
-        if (g_cvu_cmdsys_slot != NULL)
-            cmdSys = *(uint8_t **)g_cvu_cmdsys_slot;                  /* sig path: object = *(slot) */
-        else
-            cmdSys = *(uint8_t **)(base + RVA_CMD_SYSTEM_PTR);        /* fallback: build-locked RVA */
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return NULL;
-    }
-    return cmdSys;
-}
-
-/* Apply the COMMAND unlock once (the console-command twin of apply_unlock). Returns 1 if applied (the
- * command system is up + populated), 0 if not ready yet (caller retries via the re-assert window). Touches
- * only DATA (the cmdSystem object + idCommand structs are writable engine memory) -- no code patching. Every
- * engine-memory access is SEH-guarded: a torn read during the boot race degrades to "not ready -> retry" /
- * "skip this element", never a crash. */
-static int apply_command_unlock(const uint8_t *base)
-{
-    uint8_t *cmdSys = cvu_resolve_cmdsys(base);
-    if (cmdSys == NULL)
-        return 0; /* cmd system not constructed yet / sig+RVA both unreadable -> retry */
-
-    /* VALIDATE before any write: read the FULL command list (array ptr + count) + sanity-check the count,
-     * so a garbage cmdSys (wrong RVA pre-sig, or a torn boot-race read) never aliases to a wrong address. */
-    void   **arr   = NULL;
-    uint32_t count = 0;
-    __try {
-        arr   = *(void ***)(cmdSys + CMDSYS_LIST_ARRAY_OFF);
-        count = *(uint32_t *)(cmdSys + CMDSYS_LIST_COUNT_OFF);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-    if (arr == NULL || count == 0 || count > CMD_LIST_SANITY_MAX)
-        return 0; /* list not populated yet / implausible cmdSys (wrong/torn) -> not ready -> retry */
-
-    /* (1) FINDABILITY for ALL commands -- alias the developer (gate!=0) command list onto the full (gate==0)
-     *     list, so a dev-mode ExecuteCommandText finds every registered command. Safe: cmdSys validated. */
-    if (!alias_cmd_dev_to_full(cmdSys))
-        return 0; /* half-constructed cmdSys -> not ready, retry */
-
-    /* (2) CHEAT-EXEMPTION for ALL commands -- OR the dev bits into every command's flags so the
-     *     "Attempting to call a developer command" guard passes once dev-mode is active. */
-    for (uint32_t i = 0; i < count; i++) {
-        void *cmd_v = NULL;
-        __try { cmd_v = arr[i]; }
-        __except (EXCEPTION_EXECUTE_HANDLER) { break; } /* array tail AV during a torn realloc -> stop */
-        set_cmd_exempt_one(cmd_v);
-    }
-    return 1;
-}
-
 /* Deferred init: the engine constructs its cvar system AFTER the SteamStub unpack + early static init,
  * so we cannot touch it from DllMain. Poll until apply_unlock succeeds, then keep re-applying for a
  * short window so (a) the alias snapshot stays fresh as more cvars register and (b) we cover the boot
@@ -392,17 +286,11 @@ static DWORD WINAPI unlock_thread(LPVOID param)
         return 0; /* engine never readied the cvar system -- give up quietly */
     backend_log("B2: cvar-unlock APPLIED -- all cvars findable+settable (dev-table alias + NOCHEAT); +cvar launch options now apply");
 
-    /* The command system comes up alongside the cvar system (adjacent singletons, built by the same engine
-     * init), so attempt the command unlock now; if it isn't quite ready it rides the phase-2 re-assert. */
-    if (apply_command_unlock(base))
-        backend_log("B2: command-unlock APPLIED -- all console commands findable in dev mode + cheat-exempt (dev-table alias + dev-flag); god/noclip/give stay usable after a developer command toggles dev mode");
-
-    /* Phase 2: re-assert BOTH unlocks for a short window to keep the developer-table alias snapshots current
-     * as late cvars/commands register, and (cvars) to be in place before the startup +cvar apply. ~10s @ 50ms.
+    /* Phase 2: re-assert for a short window to keep the developer-table alias snapshot current as
+     * late cvars register, and to ensure it is in place before the startup +cvar apply. ~10s @ 50ms.
      * (See README "Timing": if the boot apply ever beats this window, switch to the detour variant.) */
     for (int i = 0; i < 200; i++) {
         apply_unlock(base);
-        apply_command_unlock(base);
         Sleep(50);
     }
     return 0;

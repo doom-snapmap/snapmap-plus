@@ -410,6 +410,63 @@ void h_sh_dumpmap(idCmdArgs *a)
         sh_printf("Failed to write map file %s\n", path);   /* OG verbatim; MapWriter also Printf's "writing %s..." */
 }
 
+/* ------------------------------------------------- player cheat commands (OG / DLM parity) ----------
+ * OG SnapHak ships emoose's DoomLegacyMod (dinput8), which ADDS 5 custom console commands the stock SnapMap
+ * editor lacks: noClip / infiniteHealth / noPlayerDeath / noPlayerKill / noTarget. Each is a pure TOGGLE of
+ * one runtime bit on the local idPlayer's cheat-flags byte (DLM builds an idClientGameMsg_PlayerCommand_*
+ * whose server setter just flips that bit). We reproduce them clean-room: resolve the local player the same
+ * way sh_spawn does -- FindEntity("player1") -- and XOR the bit directly.
+ *
+ * THE ENFORCEMENT BITS (what the engine actually reads). DIRECT from the 5 message setters
+ * (DOOM 0x14035fa50..0x14035fb50: `movzx eax,[rdx+OFF]; <toggle BIT>; mov [rdx+OFF],cl`) + the godMode
+ * enforcement getter 0x140b72ca0 (`*(byte*)(player+0x45ea8) & 2`). TRAP: idPlayer's reflected bool PROPERTIES
+ * (godMode/infiniteHealth/...) touch the bit ONE LOWER (runtime = property<<1) and are NOT what enforcement
+ * reads -- we toggle the RUNTIME bit.
+ *
+ * BUILD-SPECIFIC OFFSETS (re-derive per DOOM build -- portability discipline; idPlayer struct offsets, NOT
+ * sig-resolvable). Recipe: disasm the 5 setters above for OFF+BIT; cross-check the flags byte via the godMode
+ * getter 0x140b72ca0, or reflection (FindTypeInfoByName("idPlayer") field "godMode" -> the flags byte). */
+#define PLAYER_CHEAT_FLAGS_OFF  0x45ea8u   /* infiniteHealth 0x04 / noPlayerDeath 0x08 / noPlayerKill 0x10 / noTarget 0x20 (godMode 0x02) */
+#define PLAYER_NOCLIP_OFF       0x0ce46u   /* noclip = bit 0x04 in a SEPARATE idPlayer byte */
+#define CHEAT_BIT_INFHEALTH     0x04u
+#define CHEAT_BIT_NOPLYDEATH    0x08u
+#define CHEAT_BIT_NOPLYKILL     0x10u
+#define CHEAT_BIT_NOTARGET      0x20u
+#define CHEAT_BIT_NOCLIP        0x04u
+
+/* SEH-guarded pure toggle of `bit` in the idPlayer byte at `field_off` (the OG/DLM setters ignore the arg).
+ * Resolves the local player exactly as sh_spawn does (FindEntity("player1")); needs a live map/playtest. */
+static void cheat_toggle(uint32_t field_off, uint8_t bit, const char *label)
+{
+    void *gm = get_gamemgr();
+    if (gm == NULL) {
+        sh_printf("%s: load a map / start a playtest first.\n", label);
+        return;
+    }
+    void *player = gm_find_entity(gm, "player1");
+    if (player == NULL) {
+        sh_printf("%s: no local player (start a playtest first).\n", label);
+        return;
+    }
+    int on = 0, ok = 0;
+    __try {
+        uint8_t *p = (uint8_t *)player + field_off;
+        *p ^= bit;
+        on = (*p & bit) != 0;
+        ok = 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    if (ok)
+        sh_printf("%s %s\n", label, on ? "ON" : "OFF");
+    else
+        sh_printf("%s: player cheat-flags unreadable (offset may be wrong on this build).\n", label);
+}
+
+void h_noclip(idCmdArgs *a)         { (void)a; cheat_toggle(PLAYER_NOCLIP_OFF,      CHEAT_BIT_NOCLIP,     "noClip"); }
+void h_infinitehealth(idCmdArgs *a) { (void)a; cheat_toggle(PLAYER_CHEAT_FLAGS_OFF, CHEAT_BIT_INFHEALTH,  "infiniteHealth"); }
+void h_noplayerdeath(idCmdArgs *a)  { (void)a; cheat_toggle(PLAYER_CHEAT_FLAGS_OFF, CHEAT_BIT_NOPLYDEATH, "noPlayerDeath"); }
+void h_noplayerkill(idCmdArgs *a)   { (void)a; cheat_toggle(PLAYER_CHEAT_FLAGS_OFF, CHEAT_BIT_NOPLYKILL,  "noPlayerKill"); }
+void h_notarget(idCmdArgs *a)       { (void)a; cheat_toggle(PLAYER_CHEAT_FLAGS_OFF, CHEAT_BIT_NOTARGET,   "noTarget"); }
+
 /* ------------------------------------------------------------------------------- install ---------- */
 
 int sh_entity_install(const sig_result *results, size_t n, const uint8_t *module_base, void *cmdsys)

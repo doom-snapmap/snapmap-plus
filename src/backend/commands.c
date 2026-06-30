@@ -28,6 +28,7 @@
 #include "rawmap.h"
 #include "unhide.h"
 #include "ui_bridge.h"   /* sh_ui_get_iface() -- the `sh` dispatcher gates on the interface */
+#include "hook.h"        /* install_inline_hook -- the AddCommand detour for the command unlock */
 #include "backend_log.h"
 
 /* ------------------------------------------------------------------------ engine fn typedefs ------ */
@@ -1234,6 +1235,13 @@ void h_sh_dumpdef(idCmdArgs *a);
 void h_sh_spawninfo(idCmdArgs *a);
 void h_sh_spawn(idCmdArgs *a);
 void h_sh_dumpmap(idCmdArgs *a);   /* T5 -- real port in entity.c (MapGetter+MapWriter, reuses gameMgr) */
+/* The 5 player-cheat commands (OG/DLM parity -- DLM's dinput8 adds them; stock SnapMap lacks them) live in
+ * entity.c: each toggles one runtime bit on the local idPlayer (FindEntity("player1")). */
+void h_noclip(idCmdArgs *a);
+void h_infinitehealth(idCmdArgs *a);
+void h_noplayerdeath(idCmdArgs *a);
+void h_noplayerkill(idCmdArgs *a);
+void h_notarget(idCmdArgs *a);
 
 /* The type-introspection handlers live in typeinfo.c -- they reach the reflection/type-info
  * manager via the hardcoded declMgr accessor RVA 0x17F7030 (+vtable+0x80) + FindTypeInfoByName /
@@ -1291,8 +1299,160 @@ static const cmd_entry CMD_TABLE[] = {
     { "cs_start_render_logging", (void *)h_cs_start_render_logging, "Sets up the renderlog hook " },
     { "sh_spawninfo",        (void *)h_sh_spawninfo,"Generate spawnOrientation/spawnPosition from current position in map" },
     { "sh",                  (void *)h_sh_dispatch, "Dispatches a snaphak command" },
+    /* The 5 player-cheat commands (OG/DLM parity): DLM's dinput8 adds these to SnapMap; we reproduce them
+     * clean-room (toggle one runtime bit on the local idPlayer -- entity.c). Match OG's names exactly. */
+    { "noClip",              (void *)h_noclip,         "Toggle noclip (no-collision flight) for the local player." },
+    { "infiniteHealth",      (void *)h_infinitehealth, "Toggle infinite health for the local player." },
+    { "noPlayerDeath",       (void *)h_noplayerdeath,  "Toggle no-death (the player cannot die) for the local player." },
+    { "noPlayerKill",        (void *)h_noplayerkill,   "Toggle no-kill (the player cannot be killed) for the local player." },
+    { "noTarget",            (void *)h_notarget,       "Toggle notarget (enemies ignore the local player)." },
 };
 #define CMD_COUNT ((int)(sizeof(CMD_TABLE) / sizeof(CMD_TABLE[0])))
+
+/* ====================================================================== command unlock ===========
+ * Make EVERY console command usable once a developer command (e.g. `god`) flips developer mode on.
+ *
+ * THE PROBLEM. DOOM splits commands across a two-table developer gate exactly like cvars: a fresh
+ * console scans the FULL list (cmdSys+0x08), but the instant dev mode turns on the console scans the
+ * DEV list (cmdSys+0x20) AND applies a cheat guard (`ExecuteCommandText` 0x1aa4950: throws unless
+ * cmd->flags@+0x20 & 2). The engine's native cheats (noclip/give/...) and the clone's own commands are
+ * registered without the dev flag, so they read "Unknown command" right after `god` -- the regression
+ * vs the original SnapHak (whose bundled mod flagged every command).
+ *
+ * THE FAITHFUL FIX (what the original mod's dinput8 does). It detours the engine AddCommand
+ * (0x1aa3630) and ORs flags|6 (=0x2 cheat-exempt | 0x4 dev-table-membership) into EVERY registration,
+ * so the engine's OWN AddCommand inserts each command into BOTH tables, growing each list's own buffer
+ * correctly. We mirror that: (1) detour AddCommand the same way for all FUTURE registrations (incl. the
+ * gameplay commands that only register on level load); (2) a one-time pass for commands ALREADY
+ * registered before our detour installed -- OR flags|6 + insert into the DEV list via the engine's OWN
+ * idList grow. NO table aliasing: an earlier attempt pointed the DEV idList at the FULL backing array
+ * with a stale DEV.count, so AddCommand's DEV-append wrote into the shared buffer at the wrong index and
+ * duplicated/lost commands. The engine never shares those buffers; neither do we.
+ *
+ * Offsets DIRECT from the AddCommand (0x1aa3630) + ExecuteCommandText (0x1aa4950) decompiles:
+ *   cmdSys: FULL idList {array@+0x08, count@+0x10}, DEV idList {array@+0x20, count@+0x28, cap@+0x2c}.
+ *   idCommand (operator_new(0x28)): name@0, handler@8, argComp@0x10, help@0x18, flags@+0x20. */
+#define CMD_FULL_ARRAY_OFF  0x08u
+#define CMD_FULL_COUNT_OFF  0x10u
+#define CMD_DEV_ARRAY_OFF   0x20u
+#define CMD_DEV_COUNT_OFF   0x28u
+#define CMD_DEV_CAP_OFF     0x2cu
+#define CMD_OBJ_FLAGS_OFF   0x20u
+#define CMD_DEV_FLAGS       0x6u        /* 0x2 cheat-exempt | 0x4 dev-table membership */
+#define CMD_COUNT_SANITY    100000u
+
+/* idList grow (engine FUN_140699a60): ensures room for one more element on the idList at `list`
+ * (granularity-or-double then idList::Resize, the engine allocator). BUILD-LOCKED RVA + recipe:
+ * re-derive by decompiling AddCommand (0x1aa3630) -- it calls THIS on cmdSys+0x08 (FULL) and
+ * cmdSys+0x20 (DEV) before each append. A wrong RVA degrades to a skipped insert (SEH), never a crash. */
+#define IDLIST_GROW_RVA     0x699a60u
+typedef void (*idlist_grow_fn)(void *idlist);
+
+/* The AddCommand detour: OR flags|6 then call through the trampoline (= the original mod's
+ * `or [rsp+0x30],6`). 6-arg passthrough; flags is the 6th (stack) arg. */
+typedef void (*add_command6_fn)(void *cmdsys, const char *name, void *handler, const char *help,
+                                void *argComp, unsigned int flags);
+static add_command6_fn g_addcmd_tramp = NULL;
+#define ADDCMD_STOLEN 15   /* 3 whole `mov [rsp+N],reg` prologue movs (5B each) -- >=14, no RIP/rel */
+
+static void hook_add_command(void *cmdsys, const char *name, void *handler, const char *help,
+                             void *argComp, unsigned int flags)
+{
+    if (g_addcmd_tramp)
+        g_addcmd_tramp(cmdsys, name, handler, help, argComp, flags | CMD_DEV_FLAGS);
+}
+
+/* SEH-guarded: is `cmd` already in the DEV idList? (A torn read -> treat as present, i.e. skip.) */
+static int cmd_in_dev(uint8_t *cmdSys, void *cmd)
+{
+    __try {
+        void   **dev = *(void ***)(cmdSys + CMD_DEV_ARRAY_OFF);
+        uint32_t n   = *(uint32_t *)(cmdSys + CMD_DEV_COUNT_OFF);
+        if (dev == NULL) return 0;
+        if (n > CMD_COUNT_SANITY) return 1;
+        for (uint32_t i = 0; i < n; i++)
+            if (dev[i] == cmd) return 1;
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 1; }
+}
+
+/* SEH-guarded: append `cmd` to the DEV idList, growing via the engine's OWN idList grow if full.
+ * Mirrors AddCommand's DEV-append exactly (engine-managed buffer; never shares the FULL array). */
+static void cmd_dev_append(uint8_t *cmdSys, void *cmd, idlist_grow_fn grow)
+{
+    __try {
+        uint32_t count = *(uint32_t *)(cmdSys + CMD_DEV_COUNT_OFF);
+        uint32_t cap   = *(uint32_t *)(cmdSys + CMD_DEV_CAP_OFF);
+        if (count >= cap) {
+            if (!grow) return;                       /* can't grow safely -> skip (never corrupt) */
+            grow(cmdSys + CMD_DEV_ARRAY_OFF);        /* engine realloc; array + cap move */
+            count = *(uint32_t *)(cmdSys + CMD_DEV_COUNT_OFF);
+            cap   = *(uint32_t *)(cmdSys + CMD_DEV_CAP_OFF);
+        }
+        if (count < cap) {
+            void **dev = *(void ***)(cmdSys + CMD_DEV_ARRAY_OFF);   /* re-read after grow */
+            if (dev != NULL) {
+                dev[count] = cmd;
+                *(uint32_t *)(cmdSys + CMD_DEV_COUNT_OFF) = count + 1;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { /* skip on fault */ }
+}
+
+/* One-time pass: OR flags|6 on every FULL command + insert any not yet in DEV. Catches every command
+ * registered BEFORE our detour installed (the engine's core commands). Returns the count walked. */
+static uint32_t command_unlock_pass(uint8_t *cmdSys, idlist_grow_fn grow)
+{
+    void   **full = NULL;
+    uint32_t n = 0;
+    __try {
+        full = *(void ***)(cmdSys + CMD_FULL_ARRAY_OFF);
+        n    = *(uint32_t *)(cmdSys + CMD_FULL_COUNT_OFF);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    if (full == NULL || n == 0 || n > CMD_COUNT_SANITY) return 0;
+
+    for (uint32_t i = 0; i < n; i++) {
+        void *cmd = NULL;
+        __try { cmd = full[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
+        if (cmd == NULL) continue;
+        __try { *(uint32_t *)((uint8_t *)cmd + CMD_OBJ_FLAGS_OFF) |= CMD_DEV_FLAGS; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { continue; }
+        if (!cmd_in_dev(cmdSys, cmd))
+            cmd_dev_append(cmdSys, cmd, grow);
+    }
+    return n;
+}
+
+/* Install the command unlock: detour AddCommand (all FUTURE registrations) + a one-time pass over the
+ * commands already registered. Idempotent-latched by the caller (one-shot). cmdsys/add_command already
+ * resolved; module_base anchors the engine idList-grow. */
+static void sh_command_unlock_install(void *cmdsys, void *add_command, const uint8_t *module_base)
+{
+    if (cmdsys == NULL || add_command == NULL) {
+        backend_log("B2: command-unlock SKIPPED -- cmdsys/AddCommand unresolved");
+        return;
+    }
+    idlist_grow_fn grow = module_base ? (idlist_grow_fn)(module_base + IDLIST_GROW_RVA) : NULL;
+
+    /* (1) detour AddCommand: every FUTURE registration (incl. gameplay commands on level load) gets
+     *     flags|6, so the engine's own AddCommand inserts it into BOTH tables, growing properly. */
+    void *tramp = install_inline_hook(add_command, (void *)hook_add_command, ADDCMD_STOLEN);
+    if (tramp != NULL) {
+        g_addcmd_tramp = (add_command6_fn)tramp;
+        backend_log("B2: command-unlock -- AddCommand detour installed (flags|6 on every registration)");
+    } else {
+        backend_log("B2: command-unlock -- AddCommand detour FAILED (one-time pass still runs)");
+    }
+
+    /* (2) one-time pass over already-registered commands (the engine's core set): OR flags|6 + insert
+     *     into the DEV list via the engine's own idList grow. */
+    uint32_t walked = command_unlock_pass((uint8_t *)cmdsys, grow);
+    char line[160];
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+        "B2: command-unlock APPLIED -- %u commands now in DEV table + cheat-exempt (god/noclip/give stay usable after dev mode toggles)",
+        walked);
+    backend_log(line);
+}
 
 /* Register one command via the 6-arg engine AddCommand. flags=2 (developer-EXEMPT): AddCommand massages
  * 2 -> stored 6 (bits 0x2|0x4), so the command is appended into BOTH the cmdSystem FULL table (+0x08) AND
@@ -1339,5 +1499,10 @@ int sh_commands_install(void *add_command, void *cmdsys, void *printf_disp, void
         "B2: registered %d/%d console commands (cmdsys=%p add=%p printf=%p)",
         n, CMD_COUNT, cmdsys, add_command, printf_disp);
     backend_log(line);
+
+    /* Command unlock: detour AddCommand (flags|6 on every future registration) + a one-time pass over
+     * the already-registered set, so every command stays usable once a dev command flips dev mode.
+     * Runs AFTER our own registrations are in the FULL table (the pass mirrors them into DEV too). */
+    sh_command_unlock_install(g_cmdsys, (void *)g_add_command, g_module_base);
     return n;
 }
