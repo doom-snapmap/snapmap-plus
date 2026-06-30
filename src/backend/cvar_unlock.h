@@ -64,6 +64,27 @@
 #define CVAR_FLAG_NOCHEAT       0x10u      /* dev-set-exempt: idCVar::Set FATALs at gate!=0 WITHOUT it */
 #define CVAR_FLAG_EXPOSE        0x200000u  /* developer-table membership (engine normalizes NOCHEAT->EXPOSE) */
 
+/* idCmdSystem two-table layout -- the COMMAND twin of the cvar tables above (the console console-command
+ * unlock). ExecuteCommandText (FUN_141aa4950) picks the command idList by the SAME dev-gate the cvar
+ * FindCvar keys off (cmdSystem vtable +0x10 getter, *(cmdSystem+0x200a8)):
+ *   gate == 0 -> FULL list (every registered command)   -- what a fresh console scans
+ *   gate != 0 -> DEV  list (only commands flagged 0x4)   -- what the console scans once a dev tool/command
+ *                                                            (e.g. `god`) flips developer mode on
+ * Each list is an embedded idList<idCommand*> on the cmdSystem object. Unlike the cvar system there is NO
+ * hash index -- ExecuteCommandText (and AddCommand's dup-check) LINEAR-scan the idList -- so a single idList
+ * alias (DEV <- FULL) makes every command findable in either gate state. RVAs/offsets DIRECT from the
+ * AddCommand (FUN_141aa3630) + ExecuteCommandText (FUN_141aa4950) decompiles. */
+#define CMDSYS_FULL_LIST_OFF    0x08u   /* idList<idCommand*>, full table (== cvar FULL list offset) */
+#define CMDSYS_DEV_LIST_OFF     0x20u   /* idList<idCommand*>, developer table */
+#define CMDSYS_LIST_ARRAY_OFF   0x08u   /* FULL list: idCommand** array ptr (cmdSystem+0x08) */
+#define CMDSYS_LIST_COUNT_OFF   0x10u   /* FULL list: uint32 element count   (cmdSystem+0x10) */
+#define CMD_LIST_SANITY_MAX     100000u /* refuse an absurd count (uninitialized / wrong build) */
+
+/* idCommand object (operator_new(0x28): name@0, handler@8, argComp@0x10, help@0x18, flags@0x20). */
+#define CMD_FLAGS_OFF           0x20u
+#define CMD_FLAG_DEV_EXPOSE     0x6u    /* 0x2 cheat-exempt (passes the "developer command" guard) |
+                                         * 0x4 dev-table membership; matches the OG mod's per-command OR-6 */
+
 
 /* Backend entry (merged from the former standalone dinput8 cvar-unlock; bundle minimization).
  * Spawns the deferred cvar-unlock thread from the backend DllMain (DLL_PROCESS_ATTACH). */
