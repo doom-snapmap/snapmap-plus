@@ -368,60 +368,6 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                            * capstone scan HITS:1. RE'd DIRECT from our own decompile. */
       "48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 A8 F7 FF FF 48 81 EC 20 09 00 00",
       0x54F950u },
-    { "WorldToModuleLocal", /* FUN_1405a8be0 -- convert a WORLD position into a module's LOCAL frame:
-                             * void*(modTbl = loaded-map+0x750 {tableBase, moduleCount}, out[3], moduleIdx,
-                             * world[3]). moduleIdx == moduleCount (the global sentinel) -> identity copy; else
-                             * apply module moduleIdx's inverse transform (FUN_140554fe0 on tableBase+idx*0x98 =
-                             * R_inv*world + T_inv, rotation + translation). Used after the birth-in-module SPAWN to
-                             * re-base the pasted entity's world grab position into its module's local frame (the
-                             * engine stores + renders a module entity's position module-origin-relative). 17-byte
-                             * zero-wildcard prologue (push rbx; sub rsp,0x20; mov rbx,rdx; mov rdx,rcx; cmp r8d,
-                             * [rcx+8]; jnz). Re-derive per build: decompile FUN_1405a8be0. */
-      "53 48 83 EC 20 48 8B DA 48 8B D1 44 3B 41 08 75 19",
-      0x5A8BE0u },
-    { "ViewForward", /* FUN_141a6ac60 -- camera aim direction from the editor view angles: float*(*)(const
-                      * float angles[2] = editor+0x17c {pitch,yaw}, float out[3]). out = spherical->cartesian unit
-                      * forward (cos/sin of pitch*scale, yaw*scale). PasteInstantiate uses it to place the spawn at
-                      * camOrigin + forward*grabDistance; the clone reuses it to compute the spawn point for the
-                      * spatial module pick. 23-byte zero-wildcard prologue. Re-derive: decompile FUN_141a6ac60. */
-      "53 48 83 EC 50 0F 29 74 24 40 48 8B DA 0F 29 7C 24 30 F3 0F 10 79 04",
-      0x1A6AC60u },
-    { "ModuleContainTransform", /* FUN_1405546b0 -- world -> module-LOCAL for OBB containment: void(*)(const void*
-                                 * tableEntry = *(lm+0x750)+m*0x98, float out[3], const float world[3]). DISTINCT from
-                                 * WorldToModuleLocal 0x5a8be0 (the re-base transform) -- this one applies an extra
-                                 * FUN_141a82c70 on the module matrix (the OBB frame). Paired with the module OBB at
-                                 * modObj+0xa0. Re-derive: decompile FUN_1405546b0 (it is the transform the editor pick
-                                 * FUN_14059a520 feeds into the AABB test). */
-      "48 89 5C 24 18 57 48 81 EC C0 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 B0 00 00 00 F2 0F 10 41 0C",
-      0x5546B0u },
-    { "SegVsAabb", /* FUN_141a60c20 -- segment-vs-AABB SAT test: bool(*)(const float aabb6[6] {min[0..2],max[3..5]},
-                    * const float a[3], const float b[3]). With a==b it is point-in-AABB. The clone tests the
-                    * module-local spawn point against each module's OBB (modObj+0xa0) to resolve the spawn module.
-                    * Re-derive: decompile FUN_141a60c20. */
-      "48 8B C4 48 81 EC A8 00 00 00 F3 0F 10 05 ?? ?? ?? ?? F3 0F 10 49 0C F3 0F 58 09",
-      0x1A60C20u },
-    { "ModuleWorldToLocal", /* FUN_140554620 -- the engine's CANONICAL full 3x4 world->module-LOCAL storage
-                             * converter: void(const void *E = *(lm+0x750)+M*0x98, float out[12], const float
-                             * world[12]). translation via FUN_1405546b0, basis via FUN_140554160; output in the
-                             * entity-transform layout (+0..2 translation, +0xc.. basis). The Edit-Entity move op
-                             * FUN_1405329a0 uses it to store a dropped world position as module-local -- so it IS
-                             * the frame the engine stores + renders module entities in. Re-derive: decompile
-                             * FUN_140554620. */
-      "48 89 5C 24 20 55 56 57 48 83 EC 60 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 58",
-      0x554620u },
-    { "SetOwningModule", /* FUN_140544be0 -- set an entity's owning-module OBJECT back-ref: void(void *entBody,
-                          * void *moduleObj). `if(*(ent+0x338)!=modObj){ ent+0x160 |= 0x20; ent+0x338 = modObj; }`.
-                          * Every native module entity has this (birth FUN_1405949a0, drag commit FUN_1405d81c0) --
-                          * it + the 0x20 module-dirty bit mark the entity a SETTLED member of its module so the
-                          * per-entity refresh does not re-derive its +0x288. Re-derive: decompile FUN_140544be0. */
-      "48 39 91 38 03 00 00 74 0E 83 89 60 01 00 00 20 48 89 91 38 03 00 00",
-      0x544BE0u },
-    { "EntityFinalize", /* FUN_140544c00 -- finalize a just-created module entity: void(void *entBody, void
-                         * *moduleObj). If ent+0x350 is valid, stores the module into it + sets ent+0x160 |= 0x20.
-                         * The last step of native module birth (FUN_1405949a0) after SetOwningModule. Re-derive:
-                         * decompile FUN_140544c00. */
-      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B D9 48 8B FA 48 81 C1 50 03 00 00",
-      0x544C00u },
     { "ConnectOutputCreator", /* FUN_140cdbb40 -- the editor wire tool's connect creator (a vtable-dispatched
                                * FSM leaf reached on the target pick). wiring_mode.c inline-detours it (Hook 2
                                * of the interactive wire-any mode): in wire-mode it records the target into the
