@@ -385,12 +385,15 @@ static void ti_emit_long(const char *s)
     }
 }
 
-/* [3] sh_type <name> -- dump a CLASS's fields or an ENUM's members as C-struct/enum text, print it, and
- * copy it to the clipboard. Port of OG FUN_180021090.
+/* [3] sh_type <name> [-v] -- dump a CLASS's fields or an ENUM's members as C-struct/enum text, print it,
+ * and copy it to the clipboard. Port of OG FUN_180021090.
  *   reflect = declMgr->reflect; rec = FindTypeInfoByName(reflect,name);
- *   if rec  -> CLASS branch (Inherits + per-field "type name;//offset N size M")
+ *   if rec  -> CLASS branch (Inherits + per-field "type name;")
  *   else en = FindEnumByName(reflect,name); if en -> ENUM branch ("enum NAME { name = val, ... };")
- *   else "Couldn't find type %s!". */
+ *   else "Couldn't find type %s!".
+ * OG always prints a trailing "//offset N size M" on each field; here the default is CLEAN and the
+ * optional "-v" flag restores that offset/size (build-specific info -- handy for memory work, noise for
+ * browsing). The clipboard copy matches the on-screen text (both come from the one `dump` buffer). */
 void h_sh_type(idCmdArgs *a)
 {
     const char *type = cmd_argv(a, 1);
@@ -398,6 +401,11 @@ void h_sh_type(idCmdArgs *a)
         sh_printf("No type provided!\n");                      /* OG verbatim (the OG handler @0x21090) */
         return;
     }
+    /* clone extension: an optional "-v" (arg 2) restores the per-field reflection offset/size that OG
+     * always prints. Default = clean (no //offset size). Only the CLASS branch has offset/size, so -v is
+     * a no-op for enums. arg 2 never collides with OG (OG sh_type takes only the type name). */
+    const char *vflag = cmd_argv(a, 2);
+    int verbose = (vflag != NULL && _stricmp(vflag, "-v") == 0);
 
     void *reflect = ti_get_reflect();
     if (reflect == NULL) {
@@ -440,15 +448,21 @@ void h_sh_type(idCmdArgs *a)
 
             /* OG fmt-selects on strstr(varOps,"*") -- the QUALIFIER, not the type. Both forms print
              * THREE %s; the arg ORDER differs per form (copy OG exactly, @0x21090 L240-253):
-             *   star    (varOps has '*'): "\t%s%s %s;..." = (varType, varOps, varName)
-             *   no-star                 : "\t%s %s%s;..." = (varType, varName, varOps) */
+             *   star    (varOps has '*'): "\t%s%s %s" = (varType, varOps, varName)
+             *   no-star                 : "\t%s %s%s" = (varType, varName, varOps)
+             * The trailing ";" + optional "//offset N size M" is appended below so the offset/size can be
+             * gated on -v without duplicating both format arms. */
             int is_ptr = (strstr(varops, "*") != NULL);
             if (is_ptr)
-                _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "\t%s%s %s;//offset %d size %d\n",
-                            vartype, varops, fname, foff, fsize);
+                _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "\t%s%s %s", vartype, varops, fname);
             else
-                _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "\t%s %s%s;//offset %d size %d\n",
-                            vartype, fname, varops, foff, fsize);
+                _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "\t%s %s%s", vartype, fname, varops);
+            ti_dump_append(dump, sizeof dump, &dlen, tmp);
+            /* default: a clean "type name;"; -v restores OG's build-specific offset/size comment. */
+            if (verbose)
+                _snprintf_s(tmp, sizeof tmp, _TRUNCATE, ";//offset %d size %d\n", foff, fsize);
+            else
+                _snprintf_s(tmp, sizeof tmp, _TRUNCATE, ";\n");
             ti_dump_append(dump, sizeof dump, &dlen, tmp);
             if (fcmt && fcmt[0]) {
                 _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "\t// %s\n", fcmt);

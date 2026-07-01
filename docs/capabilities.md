@@ -18,7 +18,7 @@ Registered with the engine command system; run from the DOOM console.
 | `sh_spawninfo` | Generate `spawnOrientation` / `spawnPosition` from the current map position. |
 | `sh_entlist` | List the editor entities. |
 | `sh_listres` | List all resources of a given class (optionally copy to clipboard). |
-| `sh_type` | Print the members of an idTech class or the values of an enum (runtime introspection). |
+| `sh_type` | Print the members of an idTech class or the values of an enum (runtime introspection). Add `-v` to also show each field's byte offset and size. |
 | `sh_dumpmap` | Dump the current generated `.map` from memory (debugging). |
 | `sh_genbmodel` | Generate a bmodel from a `.obj` / `.ase` / `.lwo`. |
 | `sh_genmd6model` | Compile a `.md6model` into a `bmd6model`. |
