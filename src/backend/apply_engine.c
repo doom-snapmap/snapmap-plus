@@ -722,17 +722,16 @@ static void ae_finalize_module_birth(const uint8_t *ed, void *lm, int M)
  * each entity + AddToSelection's it, at a camera-relative grab transform; it does NOT consume the slot, so we
  * call it ONCE per staged prefab.
  *
- * BIRTH-IN-MODULE: a normally-placed entity is registered into the module it is dropped in; PasteInstantiate
- * instead files into the GLOBAL bucket, whose index is read from *(lm+0x758) (the module count) inside the
- * register wrapper -- the SOLE reader of that field during the entire paste. So to make the SPAWN land in the
- * active module M we point *(lm+0x758) at M for the duration of the call and restore it immediately after
- * (swap-safe: nothing else in the paste reads +0x758). PasteInstantiate then places at a WORLD grab transform,
- * but a module entity is stored module-LOCAL AND must be a "settled member" (owning-module back-ref +0x338 +
- * finalize) or the engine's per-entity refresh re-derives + clobbers its +0x288 -- so afterward we replicate
- * native module birth via ae_finalize_module_birth (world->local + SetOwningModule + Finalize). M<0 / out-of-range
- * => the spawn stays GLOBAL, unchanged (no finalize).
- * Class-independent: ANY spawned inherit/classname is anchored, not just timelines. SEH-guarded (a garbage slot /
- * map-not-loaded would AV in the engine); the restore always runs. Returns 1 iff staged AND instantiate fired. */
+ * GLOBAL SPAWN (safe + position-correct -- the current shipped behavior): the timeline spawns into the GLOBAL
+ * bucket at the camera grab, exactly like a toybox prop. A GLOBAL entity's position is identity-mapped (no module
+ * fold), so PasteInstantiate's world grab transform renders at the correct spot -- NO hand-computed position, NO
+ * new engine calls, NO crash surface. Anchoring to a module AT BIRTH was tried (temp-swap register into M + a
+ * replica of native finalize) and REVERTED: (a) every hand-computed module-local +0x288 was re-derived away by the
+ * engine's per-entity refresh (FUN_140595fb0), and (b) the native finalize step FUN_140544c00 AV'd on a paste-built
+ * entity's uninitialized ent+0x350. The engine's OWN drag/drop IS a correct + PERSISTENT in-session re-bucket, so a
+ * spawned logic entity is module-anchored by dragging it into a module. (The birth-in-module machinery -- spatial
+ * pick, converter, finalize -- is retained below, unused, for a future crash-safe re-enable once ent+0x350 is
+ * initialized like native birth.) SEH-guarded. Returns 1 iff staged AND instantiate fired. */
 static int ae_mkcmd_instantiate_one(const char *prefab_text)
 {
     const uint8_t *ed = ae_editor_session();
@@ -741,23 +740,10 @@ static int ae_mkcmd_instantiate_one(const char *prefab_text)
     if (!g_paste_instantiate) { backend_log("create-timeline: PasteInstantiate unresolved -- staged only"); return 0; }
     void *staging = (void *)(ed + PASTE_STAGING_OFF);
 
-    void *lm = NULL;
-    if (!ae_read_ptr(ed + ED_MAP_OBJ_OFF, &lm) || lm == NULL) { backend_log("create-timeline: no loaded map"); return 0; }
-    int M = ae_active_module_for_spawn(ed, lm);
-    volatile uint32_t *modcnt = (volatile uint32_t *)((uint8_t *)lm + LM_INSTANCES_CNT_OFF);
-    uint32_t saved = 0;
-    int anchor = (ae_read_u32((const void *)modcnt, &saved) && M >= 0 && (uint32_t)M < saved);
-
     int ok = 0;
-    if (anchor) *modcnt = (uint32_t)M;                 /* the register wrapper reads THIS as the bucket key */
     __try { g_paste_instantiate(staging, (void *)ed); ok = 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("create-timeline: PasteInstantiate SEH (slot/map not ready?)"); ok = 0; }
-    if (anchor) *modcnt = saved;                       /* ALWAYS restore the true module count */
-    if (anchor && ok) ae_finalize_module_birth(ed, lm, M);  /* make it a proper module member (local xform + owning-module + finalize) */
-
-    char line[96];
-    _snprintf_s(line, sizeof line, _TRUNCATE, "create-timeline: instantiate module=%d (anchor=%d)", M, anchor);
-    backend_log(line);
+    backend_log("create-timeline: instantiate GLOBAL at cursor (position-correct; drag into a module to anchor)");
     return ok;
 }
 
