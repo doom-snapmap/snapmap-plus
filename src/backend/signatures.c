@@ -368,6 +368,17 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                            * capstone scan HITS:1. RE'd DIRECT from our own decompile. */
       "48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 A8 F7 FF FF 48 81 EC 20 09 00 00",
       0x54F950u },
+    { "WorldToModuleLocal", /* FUN_1405a8be0 -- convert a WORLD position into a module's LOCAL frame:
+                             * void*(modTbl = loaded-map+0x750 {tableBase, moduleCount}, out[3], moduleIdx,
+                             * world[3]). moduleIdx == moduleCount (the global sentinel) -> identity copy; else
+                             * apply module moduleIdx's inverse transform (FUN_140554fe0 on tableBase+idx*0x98 =
+                             * R_inv*world + T_inv, rotation + translation). Used after the birth-in-module SPAWN to
+                             * re-base the pasted entity's world grab position into its module's local frame (the
+                             * engine stores + renders a module entity's position module-origin-relative). 17-byte
+                             * zero-wildcard prologue (push rbx; sub rsp,0x20; mov rbx,rdx; mov rdx,rcx; cmp r8d,
+                             * [rcx+8]; jnz). Re-derive per build: decompile FUN_1405a8be0. */
+      "53 48 83 EC 20 48 8B DA 48 8B D1 44 3B 41 08 75 19",
+      0x5A8BE0u },
     { "ConnectOutputCreator", /* FUN_140cdbb40 -- the editor wire tool's connect creator (a vtable-dispatched
                                * FSM leaf reached on the target pick). wiring_mode.c inline-detours it (Hook 2
                                * of the interactive wire-any mode): in wire-mode it records the target into the

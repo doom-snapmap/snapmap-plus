@@ -48,6 +48,12 @@
 #define SEL_HOVERED_OFF        0x2c         /* selObj+0x2c -> looked-at/hovered entity id (-1 = none) */
 #define LM_ENTINST_ARR_OFF     0x6f0        /* loaded-map+0x6f0 -> per-entity instance(module)-index array (s32[id]) */
 #define LM_INSTANCES_CNT_OFF   0x758        /* loaded-map+0x758 -> module COUNT (== the global/no-module sentinel bucket) */
+#define LM_MODXFORM_OFF        0x750        /* loaded-map+0x750 -> the {moduleXformTableBase, moduleCount} struct that
+                                            * WorldToModuleLocal takes (world->module-local re-base for birth-in-module) */
+#define SEL_IDS_OFF            0x80         /* selObj+0x80 -> selected-id array (the paste AddToSelection's the new ents) */
+#define SEL_COUNT_OFF          0x88         /* selObj+0x88 -> selected-id count */
+#define ENT_XFORM_OFF          0x288        /* entity+0x288 -> 3x4 transform: [0..2] translation, [3..11] basis */
+#define ENT_DIRTY_OFF          0x160        /* entity+0x160 -> transform dirty flags (|= 3 forces a re-render) */
 #define ARR_ENT_ARRAY_OFF      0x6a0        /* arrObj+0x6a0 -> entity-ptr array (8-byte entries) */
 #define ARR_ENT_COUNT_OFF      0x6a8        /* arrObj+0x6a8 -> entity count (u32) */
 #define ENT_VALID_OFF          0x8          /* entity[id]+8 != 0 => valid; ALSO the clone base (ent+8) */
@@ -87,6 +93,8 @@
                                             * create-from-scratch timeline SPAWN (kind=2) calls it AFTER staging.
                                             * sig-resolved ("PasteInstantiate"); this RVA = hook-tolerant fallback.
                                             * RE'd DIRECT from our own decompile. */
+#define WORLD_TO_LOCAL_RVA     0x5a8be0u   /* WorldToModuleLocal FUN_1405a8be0 (world->module-local re-base for the
+                                            * birth-in-module SPAWN); sig-resolved ("WorldToModuleLocal"), RVA fallback. */
 
 /* ============================================================ apply-chain struct sizes ============== */
 /* DIRECT from the XINPUT1_3 FUN_180004b80 / FUN_180004950 / FUN_1800044a0 decompiles + the engine ctors
@@ -150,6 +158,7 @@ typedef void  (*prefab_ctor_fn)(void *self);                                    
 typedef char  (*prefab_populate_fn)(void *self, void *editor);                        /* PrefabPopulate 0x54e410 */
 typedef void  (*prefab_dtor_fn)(void *self);                                          /* PrefabDtor 0x51d870 */
 typedef void  (*paste_instantiate_fn)(void *staging, void *editor);                   /* PasteInstantiate 0x54f950 */
+typedef void *(*world_to_local_fn)(void *modtbl, float *out, int mi, const float *world); /* WorldToModuleLocal 0x5a8be0 */
 
 /* ============================================================ module state (resolved once) ========== */
 static const uint8_t      *g_doom_base   = NULL;
@@ -175,6 +184,7 @@ static prefab_ctor_fn      g_prefab_ctor     = NULL;   /* +0xb0 serialize-select
 static prefab_populate_fn  g_prefab_populate = NULL;
 static prefab_dtor_fn      g_prefab_dtor     = NULL;
 static paste_instantiate_fn g_paste_instantiate = NULL;  /* create-from-scratch SPAWN: place staged prefab */
+static world_to_local_fn   g_world_to_local = NULL;      /* world->module-local re-base for the birth-in-module SPAWN */
 static volatile LONG       g_installed   = 0;
 static volatile LONG       g_cmd_registered = 0;   /* clone_bss_apply registered once (lazy) */
 
@@ -578,6 +588,42 @@ static int ae_active_module_for_spawn(const uint8_t *ed, const void *lm)
     return -1;                                          /* leave it global (always save-safe) */
 }
 
+/* Re-base the just-spawned (now-selected) entities from a WORLD grab position into module M's local frame.
+ * PasteInstantiate stores a WORLD transform (correct for the global bucket), but a module entity's position is
+ * stored + rendered module-origin-relative, so a world value in bucket M renders at moduleOrigin+world -- way
+ * off (proven live: the spawned entity sat outside the module and moved rigidly with it). Convert the translation
+ * world->local via WorldToModuleLocal (the exact inverse the engine applies at render) and re-dirty. TRANSLATION
+ * only: the basis is left world-oriented (correct for an axis-aligned module; a rotated module leaves only a
+ * cosmetic icon-orientation delta). The SPAWN branch had nothing selected before the paste, so the selection now
+ * IS the new entity set. All reads SEH-guarded; a fault leaves the entity as-is (no worse than the pre-fix global
+ * position). No-op unless anchored to a real module AND the convert resolved. */
+static void ae_rebase_selection_to_module(const uint8_t *ed, void *lm, int M)
+{
+    if (!g_world_to_local || M < 0) return;
+    void *sel = NULL, *ids = NULL, *arr = NULL;
+    int count = 0;
+    if (!ae_read_ptr(ed + ED_SEL_OBJ_OFF, &sel) || sel == NULL) return;
+    if (!ae_read_u32_safe((const uint8_t *)sel + SEL_COUNT_OFF, &count) || count <= 0) return;
+    if (!ae_read_ptr((const uint8_t *)sel + SEL_IDS_OFF, &ids) || ids == NULL) return;
+    if (!ae_read_ptr((const uint8_t *)lm + ARR_ENT_ARRAY_OFF, &arr) || arr == NULL) return;
+    void *modtbl = (void *)((uint8_t *)lm + LM_MODXFORM_OFF);
+    for (int i = 0; i < count && i < 64; i++) {
+        int id = -1;
+        if (!ae_read_u32_safe((const uint8_t *)ids + (size_t)i * 4, &id) || id < 0) continue;
+        void *ent = NULL;
+        if (!ae_read_ptr((const uint8_t *)arr + (size_t)id * 8, &ent) || ent == NULL) continue;
+        __try {
+            float *xf = (float *)((uint8_t *)ent + ENT_XFORM_OFF);
+            float world[3] = { xf[0], xf[1], xf[2] };
+            float local[3] = { 0.0f, 0.0f, 0.0f };
+            g_world_to_local(modtbl, local, M, world);       /* world -> module-M-local (identity if M==modCnt) */
+            xf[0] = local[0]; xf[1] = local[1]; xf[2] = local[2];
+            *(volatile uint32_t *)((uint8_t *)ent + ENT_DIRTY_OFF) |= 3u;   /* force a transform re-render */
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("create-timeline: rebase SEH (entity transform)"); }
+    }
+}
+
 /* kind=2: stage the prefab into editor+0x209a8 (like mkcmd) THEN paste-INSTANTIATE it (engine PasteInstantiate
  * FUN_14054f950) so it is actually PLACED in the live map -- the create-from-scratch SPAWN. Plain mkcmd stays
  * kind=1 (stage-only: the user Ctrl+V's it). PasteInstantiate reads editor+0x209a8, instantiates + registers
@@ -587,12 +633,13 @@ static int ae_active_module_for_spawn(const uint8_t *ed, const void *lm)
  * BIRTH-IN-MODULE: a normally-placed entity is registered into the module it is dropped in; PasteInstantiate
  * instead files into the GLOBAL bucket, whose index is read from *(lm+0x758) (the module count) inside the
  * register wrapper -- the SOLE reader of that field during the entire paste. So to make the SPAWN land in the
- * active module M we point *(lm+0x758) at M for the duration of the call and restore it immediately after.
- * PROVEN position-correct + swap-safe by our own decompile: the entity transform (+0x288) is world-absolute for
- * EVERY bucket (render/save/load never fold it by the module index, so no re-base is needed), and nothing else
- * in the paste reads +0x758. M<0 / out-of-range => the spawn stays GLOBAL, unchanged. Class-independent: ANY
- * spawned inherit/classname is anchored, not just timelines. SEH-guarded (a garbage slot / map-not-loaded would
- * AV in the engine); the restore always runs. Returns 1 iff staged AND instantiate fired. */
+ * active module M we point *(lm+0x758) at M for the duration of the call and restore it immediately after
+ * (swap-safe: nothing else in the paste reads +0x758). PasteInstantiate then places at a WORLD grab transform --
+ * but a module entity's position is stored + rendered module-origin-RELATIVE, so the world value must be re-based
+ * into module M's local frame afterward (ae_rebase_selection_to_module) or it renders at moduleOrigin+world, way
+ * outside the module (live-proven). M<0 / out-of-range => the spawn stays GLOBAL, unchanged (no re-base).
+ * Class-independent: ANY spawned inherit/classname is anchored, not just timelines. SEH-guarded (a garbage slot /
+ * map-not-loaded would AV in the engine); the restore always runs. Returns 1 iff staged AND instantiate fired. */
 static int ae_mkcmd_instantiate_one(const char *prefab_text)
 {
     const uint8_t *ed = ae_editor_session();
@@ -613,6 +660,7 @@ static int ae_mkcmd_instantiate_one(const char *prefab_text)
     __try { g_paste_instantiate(staging, (void *)ed); ok = 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("create-timeline: PasteInstantiate SEH (slot/map not ready?)"); ok = 0; }
     if (anchor) *modcnt = saved;                       /* ALWAYS restore the true module count */
+    if (anchor && ok) ae_rebase_selection_to_module(ed, lm, M);  /* world grab -> module M's local frame (position-correct) */
 
     char line[96];
     _snprintf_s(line, sizeof line, _TRUNCATE, "create-timeline: instantiate module=%d (anchor=%d)", M, anchor);
@@ -897,6 +945,7 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
     /* PasteInstantiate (create-from-scratch SPAWN): sig-resolved (portable) with the known_rva hook-tolerant
      * fallback baked into the sig DB; the RVA fallback below covers a clean scan-miss on this build. */
     g_paste_instantiate = (paste_instantiate_fn) sig_addr_by_name(results, n, "PasteInstantiate");
+    g_world_to_local    = (world_to_local_fn)    sig_addr_by_name(results, n, "WorldToModuleLocal");
 
     /* the prefab-from-selection serialize engine fns (+0xb0). These jumptable/inline-prone leaves
      * resolve by FALLBACK RVA off module_base (re-derive-tagged like the editor singleton); a wrong/shifted
@@ -907,6 +956,8 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
         g_prefab_dtor     = (prefab_dtor_fn)    (module_base + PREFAB_DTOR_RVA);
         if (!g_paste_instantiate)   /* sig scan missed -> this-build RVA fallback (re-derive-tagged) */
             g_paste_instantiate = (paste_instantiate_fn)(module_base + PASTE_INSTANTIATE_RVA);
+        if (!g_world_to_local)      /* sig scan missed -> this-build RVA fallback (re-derive-tagged) */
+            g_world_to_local = (world_to_local_fn)(module_base + WORLD_TO_LOCAL_RVA);
     }
 
     char line[256];
