@@ -22,6 +22,7 @@
 #include "snaphak_iface.h"
 #include "sh_timeline.h"   /* C3b: the Timeline-Editor (the |0x80 commit + the dblclick open) */
 #include "sh_entity_desc.h" /* GENERATED: OUR RE-extracted Inherit/Classname descriptions (the desc box) */
+#include "sh_inherit_universe.h" /* SH_INHERIT_UNIVERSE[] -- the static inherit-list fallback (pre-boot) */
 
 #include <string>
 #include <unordered_map>   /* CLONE EXTENSION: the entity-desc name->ShEntDesc lookup map */
@@ -194,6 +195,28 @@ void sh_repopulate_class_combo(ShWinController *win, const QString &inherit)
         cls->clearEditText();                             /* unresolvable inherit -> empty editable hatch */
     }
     cls->blockSignals(false);
+}
+
+/* Populate the Entity-State INHERIT combo from the LIVE entityDef registry via the +0x278 enum_inherits slot
+ * (every loaded entityDef is a valid inherit, ~2,500 -- a raw decl-array walk, thread-safe on this UI thread).
+ * Falls back to the static placeable-inherit list only if the registry is unreachable (pre-boot). The combo
+ * stays editable so a custom OR EMPTY inherit can still be typed (an empty inherit is engine-valid -> a
+ * class-only entity). The caller manages blockSignals + the default edit-text. */
+int sh_populate_inherit_combo(ShWinController *win, QComboBox *inh)
+{
+    if (!inh) return 0;
+    inh->clear();
+    static char buf[512 * 1024]; int count = 0;
+    int ok = (win && win->iface && win->iface->vtbl && win->iface->vtbl->enum_inherits)
+                 ? win->iface->vtbl->enum_inherits(win->iface, buf, (int)sizeof(buf), &count) : 0;
+    if (ok && count > 0) {
+        for (const char *p = buf; *p; p += std::strlen(p) + 1)   /* packed NUL-terminated strings, double-NUL end */
+            inh->addItem(QString::fromLocal8Bit(p));
+        return 1;                                               /* live registry */
+    }
+    for (int i = 0; i < SH_INHERIT_UNIVERSE_N; i++)             /* pre-boot fallback: the static placeable list */
+        inh->addItem(QString::fromLatin1(SH_INHERIT_UNIVERSE[i]));
+    return 0;
 }
 
 static bool iface_editor_ready(sh_iface *iface)
@@ -449,6 +472,18 @@ static void entity_state_read_sync(ShWinController *win)
     QComboBox *inh = static_cast<QComboBox *>(WUI(SH_UI_entity_inherit_edit));
     QLineEdit *dnm = static_cast<QLineEdit *>(WUI(SH_UI_entity_displayname_lineedit));
     QLineEdit *idl = static_cast<QLineEdit *>(WUI(SH_UI_entity_id_lineedit));
+
+    /* CLONE EXTENSION: the Qt window inits BEFORE the entityDef registry is parsed, so the INHERIT combo starts
+     * on the static fallback. Once the editor is ready (registry loaded), re-populate it from the LIVE registry
+     * ONCE (latched) -- preserving the current edit text + not while the user is browsing the dropdown. */
+    if (!win->inherit_combo_live && inh && iface && iface_editor_ready(iface)
+        && !inh->hasFocus() && !inh->view()->isVisible()) {
+        const QString keep = inh->currentText();
+        inh->blockSignals(true);
+        if (sh_populate_inherit_combo(win, inh) == 1) win->inherit_combo_live = true;
+        inh->setEditText(keep);
+        inh->blockSignals(false);
+    }
 
     /* GAP-2 clear-on-deselect (OG FUN_180014e7c L250-264): when a synced entity goes invalid (deleted /
      * map-switch / editor-down) the OG BLANKS the panel + resets the synced id. Our old code just early-

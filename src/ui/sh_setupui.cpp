@@ -266,8 +266,9 @@ static void sh_wire_stub_handlers(ShWinController *win)
     {
         QComboBox *inhCombo = static_cast<QComboBox *>(UIGET(SH_UI_entity_inherit_edit));
         inhCombo->blockSignals(true);
-        for (int i = 0; i < SH_INHERIT_UNIVERSE_N; i++)
-            inhCombo->addItem(QString::fromLatin1(SH_INHERIT_UNIVERSE[i]));
+        /* LIVE entityDef registry (every valid inherit, ~2,500) via the +0x278 slot; static list is the
+         * pre-boot fallback. Editable, so a custom or EMPTY inherit can still be typed (empty is engine-valid). */
+        sh_populate_inherit_combo(win, inhCombo);
         inhCombo->setEditText(QStringLiteral("snapmaps/unknown"));
         inhCombo->blockSignals(false);
         sh_repopulate_class_combo(win, QStringLiteral("snapmaps/unknown"));

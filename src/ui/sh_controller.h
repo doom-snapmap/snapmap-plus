@@ -145,6 +145,10 @@ struct ShWinController {
     std::string   last_class_combo_inherit; /* CLONE EXTENSION: the inherit the class dropdown was last
                                           * repopulated for -- sh_repopulate_class_combo no-ops if unchanged, so
                                           * the class isn't reset on a spurious editingFinished (dropdown open). */
+    bool          inherit_combo_live = false; /* CLONE EXTENSION: latched true once the INHERIT combo has been
+                                          * populated from the LIVE entityDef registry (the Qt window inits
+                                          * before the registry is parsed, so init uses the static fallback; the
+                                          * read-sync re-populates live ONCE the editor is ready, then latches). */
     int           last_entity_count = -1;/* the entity_count last seen -- a change (map load / add / delete)
                                           * auto-raises |1 so the list populates without a manual Refresh. */
     int           spawn_rebuild_frames = 0; /* QOL: a from-scratch timeline SPAWN places the entity on the game
@@ -199,6 +203,11 @@ void sh_entity_state_save_clicked(ShWinController *win);
 /* ENTITY-STATE tab: repopulate the class QComboBox with the engine-valid classes for `inherit` (the
  * linked dropdown). Driven by the inherit combo's commit (activated / editingFinished) + the read-sync. */
 void sh_repopulate_class_combo(ShWinController *win, const class QString &inherit);
+
+/* ENTITY-STATE tab: populate the INHERIT combo from the LIVE entityDef registry (the complete valid-inherit
+ * set, ~2,500) via the +0x278 slot, with the static placeable list as the pre-boot fallback. Returns 1 if the
+ * LIVE registry was used, 0 if it fell back to the static list (the caller latches on 1). */
+int sh_populate_inherit_combo(ShWinController *win, class QComboBox *inh);
 
 /* PREFABS tab: create (QInputDialog -> resolve path -> addItem -> raise |0x40; port FUN_180013c50) +
  * double-click load (fread the file -> raise |0x20; port FUN_180017538). */

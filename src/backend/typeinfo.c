@@ -307,19 +307,40 @@ const char *sh_typeinfo_inherit_base(const char *inheritName, char *buf, size_t 
 #define REGISTRY_TYPEBASE_OFF   0x20      /* container P -> type-record array base (*(P+0x20)) */
 #define REGISTRY_RECORD_STRIDE  0x38      /* per-record stride */
 #define REGISTRY_NAME_OFF       0x00      /* record -> className char* (NULL name terminates the array) */
+#define REGISTRY_SUPER_OFF      0x08      /* record -> superclass name char* ("" for a root) */
 #define REGISTRY_WALK_CAP       65536u    /* stale/garbage-array guard (this build has ~10,190 records) */
+#define TYPE_CONTAINER_RVA      0x3082b10u /* the reflection container object P (reflect+0 holds &this). Used as
+                                           * the thread-safe fallback when reflect is null (the Qt UI thread):
+                                           * P is a fixed static global, so B=*(P+0x20) is a pure raw read.
+                                           * BUILD-SPECIFIC -- re-derive per build: it's *(reflect+0) on the
+                                           * game thread, per our RE of the reflection registry). */
+
+/* Root B = the type-record array base, THREAD-SAFELY. Primary (portable): reflect (game thread) -> P=*(reflect).
+ * Fallback (Qt UI thread, where the reflect vtable accessor returns null): the container global P=base+0x3082b10
+ * (a fixed static object -- raw read, no vtable call). Either way B=*(P+0x20). NULL only if neither roots. */
+static const uint8_t *ti_type_array_base(void)
+{
+    const uint8_t *P = NULL;
+    void *reflect = ti_get_reflect();
+    if (reflect) {
+        __try { P = *(const uint8_t * const *)reflect; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { P = NULL; }
+    }
+    if (P == NULL && g_doom_base) P = g_doom_base + TYPE_CONTAINER_RVA;   /* UI-thread fallback (fixed global) */
+    if (P == NULL) return NULL;
+    const uint8_t *B = NULL;
+    __try { B = *(const uint8_t * const *)(P + REGISTRY_TYPEBASE_OFF); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { B = NULL; }
+    return B;
+}
 
 int sh_typeinfo_collect_classnames(const char **out_names, int cap)
 {
     if (!out_names || cap <= 0) return -1;
-    void *reflect = ti_get_reflect();
-    if (!reflect) return -1;                          /* pre-boot / unresolved -> caller falls back */
+    const uint8_t *B = ti_type_array_base();
+    if (!B) return -1;                                /* pre-boot / unrooted -> caller falls back */
     int n = 0;
     __try {
-        const uint8_t *P = *(const uint8_t * const *)reflect;                 /* container = *(reflect+0) */
-        if (!P) return -1;
-        const uint8_t *B = *(const uint8_t * const *)(P + REGISTRY_TYPEBASE_OFF);  /* type-record array base */
-        if (!B) return -1;
         for (uint32_t i = 0; i < REGISTRY_WALK_CAP && n < cap; i++) {
             const uint8_t *rec = B + (size_t)i * REGISTRY_RECORD_STRIDE;
             const char *name = *(const char * const *)(rec + REGISTRY_NAME_OFF);
@@ -329,6 +350,52 @@ int sh_typeinfo_collect_classnames(const char **out_names, int cap)
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         /* a shifted/garbage array degrades to whatever we collected -- never a crash */
     }
+    return n;
+}
+
+int sh_typeinfo_collect_records(sh_ti_record *out, int cap)
+{
+    if (!out || cap <= 0) return -1;
+    const uint8_t *B = ti_type_array_base();
+    if (!B) return -1;
+    int n = 0;
+    __try {
+        for (uint32_t i = 0; i < REGISTRY_WALK_CAP && n < cap; i++) {
+            const uint8_t *rec = B + (size_t)i * REGISTRY_RECORD_STRIDE;
+            const char *name = *(const char * const *)(rec + REGISTRY_NAME_OFF);
+            if (name == NULL) break;
+            out[n].name  = name;
+            out[n].super = *(const char * const *)(rec + REGISTRY_SUPER_OFF);
+            n++;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return n;
+}
+
+/* Enumerate the LIVE entityDef decl manager (the valid-INHERIT set). The mgr @ RESOURCE_MGR_CTX_RVA (0x59BD8F0
+ * -- the SAME ctx sh_typeinfo_inherit_base uses) is a flat array: count @ mgr+0x28, array @ mgr+0x20, each
+ * element an idDeclEntityDef* whose name (the decl PATH) is the generic idDecl name slot @ decl+0x08. Pure raw
+ * reads -> thread-safe on the Qt UI thread. */
+#define ENTITYDEF_MGR_ARRAY_OFF  0x20
+#define ENTITYDEF_MGR_COUNT_OFF  0x28
+#define DECL_NAME_OFF            0x08
+int sh_typeinfo_collect_inherits(const char **out_names, int cap)
+{
+    if (!out_names || cap <= 0 || !g_doom_base) return -1;
+    int n = 0;
+    __try {
+        const uint8_t *mgr = g_doom_base + RESOURCE_MGR_CTX_RVA;
+        int count = *(const int *)(mgr + ENTITYDEF_MGR_COUNT_OFF);
+        const uint8_t * const *arr = *(const uint8_t * const * const *)(mgr + ENTITYDEF_MGR_ARRAY_OFF);
+        if (arr == NULL || count <= 0 || (uint32_t)count > REGISTRY_WALK_CAP) return -1;  /* stale-mgr guard */
+        if (count > cap) count = cap;
+        for (int i = 0; i < count; i++) {
+            const uint8_t *decl = arr[i];
+            if (decl == NULL) continue;
+            const char *name = *(const char * const *)(decl + DECL_NAME_OFF);
+            if (name != NULL && name[0] != '\0') out_names[n++] = name;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return n;
 }
 

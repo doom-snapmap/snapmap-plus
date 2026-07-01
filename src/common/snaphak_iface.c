@@ -270,6 +270,8 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     g_iface_vtbl_live.apply_class_inherit    = s->apply_class_inherit;    /* +0x268 */
     /* clone-extension (the class-dropdown enumerator). */
     g_iface_vtbl_live.enum_valid_classes     = s->enum_valid_classes;     /* +0x270 */
+    /* clone-extension (the inherit-dropdown enumerator). */
+    g_iface_vtbl_live.enum_inherits          = s->enum_inherits;          /* +0x278 */
 }
 
 /* --------------------------------------------------------------------- the factory -----------------

@@ -30,9 +30,8 @@
 #include "apply_engine.h"   /* the heavy slots (serialize/schedule-apply/read-prefab) */
 #include "signatures.h"
 #include "backend_log.h"
-#include "typeinfo.h"       /* sh_typeinfo_class_derives -- the LAYER-C class-lineage prevention guard */
-#include "class_universe.h" /* SH_CLASS_UNIVERSE[] -- the +0x270 valid-class dropdown enumerator */
-#include "valid_class_map.h" /* SH_VCM_* -- inherit->Y->classes thread-safe fallback (off-game-thread UI) */
+#include "typeinfo.h"       /* sh_typeinfo_class_derives + the LIVE registry walks (collect_records/inherits) */
+#include "valid_class_map.h" /* SH_VCM_* -- the class-dropdown static snapshot (used only if the live walk fails) */
 
 /* ---- editor-struct field offsets (this-live-build; ported from the reference implementation, SEH-guarded) ------------ */
 /* EDITOR_SINGLETON_RVA: the INLINE idSnapEditorLocal OBJECT (NOT a pointer) at module_base + this. A
@@ -787,57 +786,116 @@ static int vcm_pack(char *out_buf, int cap, int *pw, const char *s)
     return 1;
 }
 
-/* +0x270 (clone-extension slot 1) ENUMERATE the valid classes for `inherit` (the linked class dropdown).
- * Two paths -> SAME packed-string ABI as +0x110 (consecutive NUL-terminated names, double-NUL end):
- *  - LIVE (game thread): Y = sh_typeinfo_inherit_base(inherit); every SH_CLASS_UNIVERSE class == Y or
- *    sh_typeinfo_class_derives(C,Y)==1. The SAME engine derive-check the apply-guard uses -> the dropdown
- *    offers EXACTLY what a Save accepts.
- *  - FALLBACK (the live lookup returns null -- it is GAME-THREAD-AFFINE and fails on the Qt UI thread, where
- *    the dropdown enumerator actually runs): serve from the corpus snapshot inherit -> Y -> classes
- *    (valid_class_map.h). Pure static data == thread-safe. A UI hint; the live apply-guard stays the source
- *    of truth, so a stale snapshot can only mis-OFFER (the Save still validates live + the combo is editable).
- * An inherit unknown to BOTH -> a clean 0 (the frontend keeps the editable free-text hatch). */
+/* ---- local derive-from-Y over the walked type records. The Qt UI thread (where these dropdowns run) cannot
+ * call the engine's reflect-based derive check, so we sort the LIVE registry records by name once and chain
+ * each candidate's super up the tree by bsearch -- all raw reads, thread-safe. ---- */
+static int ec_rec_cmp(const void *a, const void *b)
+{
+    return strcmp(((const sh_ti_record *)a)->name, ((const sh_ti_record *)b)->name);
+}
+static const char *ec_super_of(const sh_ti_record *sorted, int n, const char *name)
+{
+    sh_ti_record key; key.name = name; key.super = NULL;
+    const sh_ti_record *r = (const sh_ti_record *)bsearch(&key, sorted, (size_t)n, sizeof(sh_ti_record), ec_rec_cmp);
+    return r ? r->super : NULL;
+}
+/* Does C derive from (or == ) Y, chaining via the records' super names? Bounded (128 levels). */
+static int ec_derives(const sh_ti_record *sorted, int n, const char *C, const char *Y)
+{
+    const char *cur = C;
+    for (int g = 0; cur && cur[0] && g < 128; g++) {
+        if (strcmp(cur, Y) == 0) return 1;
+        cur = ec_super_of(sorted, n, cur);
+    }
+    return 0;
+}
+/* the static-snapshot fallback (used only if the live registry is unreachable) -- the old corpus map. */
+static int ec_fallback_valid_classes(const char *inherit, char *out_buf, int cap, int *written, int *names)
+{
+    const char *ey = NULL;
+    for (int i = 0; i < SH_VCM_INHERIT_Y_N; i++)
+        if (strcmp(SH_VCM_INHERIT_Y[i].inherit, inherit) == 0) { ey = SH_VCM_INHERIT_Y[i].y; break; }
+    if (!ey) return 0;
+    for (int i = 0; i < SH_VCM_Y_CLASSES_N; i++)
+        if (strcmp(SH_VCM_Y_CLASSES[i].y, ey) == 0) {
+            const vcm_yc *e = &SH_VCM_Y_CLASSES[i];
+            for (int j = 0; j < e->n; j++) { if (!vcm_pack(out_buf, cap, written, e->classes[j])) break; (*names)++; }
+            return 1;
+        }
+    return 0;
+}
+
+/* +0x270 (clone-extension slot 1) ENUMERATE the valid classes for `inherit` (the linked class dropdown) ->
+ * packed NUL-terminated strings (double-NUL end). Resolves Y = the inherit's base className; an EMPTY or
+ * unresolvable inherit -> "idEntity" (the universal entity set -- the engine accepts a class-only entity, so
+ * an empty inherit admits any idEntity class, per our RE of the engine). Then walks the LIVE
+ * reflection type registry and packs every className that == Y or derives from Y. COMPLETE + THREAD-SAFE: the
+ * walk roots the type array via the container global on the Qt UI thread (reflect is null there), and
+ * derive-from-Y chains LOCALLY via each record's super -- NO reflect-based engine call. Fallback: if the live
+ * registry is unreachable, the static valid_class_map corpus snapshot. (Replaces the old SH_CLASS_UNIVERSE(412)
+ * candidates + live derive-check, which returned null off the game thread -> fell back to the 70-group map.) */
 static int slot_enum_valid_classes(sh_iface *self, const char *inherit, char *out_buf, int cap, int *out_count)
 {
     (void)self;
     if (out_count) *out_count = 0;
     if (cap > 0 && out_buf) out_buf[0] = '\0';
-    if (!inherit || !inherit[0] || !out_buf || cap <= 1) return 0;
+    if (!out_buf || cap <= 1) return 0;
 
     char ybuf[256];
-    const char *Y = sh_typeinfo_inherit_base(inherit, ybuf, sizeof ybuf);   /* LIVE (works on the game thread) */
-    int written = 0, names = 0;
+    const char *Y = NULL;
+    if (inherit && inherit[0]) Y = sh_typeinfo_inherit_base(inherit, ybuf, sizeof ybuf);
+    if (!Y || !Y[0]) Y = "idEntity";      /* empty/unresolvable inherit -> the universal class-only set */
 
-    if (Y && Y[0]) {
-        /* LIVE path: filter the class universe by the engine derive-check. */
-        int y_in_universe = 0;
-        for (int i = 0; i < SH_CLASS_UNIVERSE_N; i++) {
-            const char *C = SH_CLASS_UNIVERSE[i];
-            int is_y = (strcmp(C, Y) == 0);
-            if (is_y) y_in_universe = 1;
-            if (is_y || sh_typeinfo_class_derives(C, Y) == 1) {
+    static sh_ti_record recs[SH_REGISTRY_MAX];   /* dropdown repopulate is UI-thread-serial -> static ok */
+    int k = sh_typeinfo_collect_records(recs, SH_REGISTRY_MAX);
+    int written = 0, names = 0;
+    if (k > 0) {
+        qsort(recs, (size_t)k, sizeof(sh_ti_record), ec_rec_cmp);   /* sorted -> bsearch super chain + alpha output */
+        for (int i = 0; i < k; i++) {
+            const char *C = recs[i].name;
+            if (C && C[0] && ec_derives(recs, k, C, Y)) {           /* C==Y is handled inside ec_derives */
                 if (!vcm_pack(out_buf, cap, &written, C)) break;
                 names++;
             }
         }
-        if (!y_in_universe && vcm_pack(out_buf, cap, &written, Y)) names++;   /* Y itself derives from itself */
-    } else {
-        /* FALLBACK (off the game thread): inherit -> Y -> classes from the corpus snapshot. */
-        const char *ey = NULL;
-        for (int i = 0; i < SH_VCM_INHERIT_Y_N; i++)
-            if (strcmp(SH_VCM_INHERIT_Y[i].inherit, inherit) == 0) { ey = SH_VCM_INHERIT_Y[i].y; break; }
-        if (ey)
-            for (int i = 0; i < SH_VCM_Y_CLASSES_N; i++)
-                if (strcmp(SH_VCM_Y_CLASSES[i].y, ey) == 0) {
-                    const vcm_yc *e = &SH_VCM_Y_CLASSES[i];
-                    for (int j = 0; j < e->n; j++) { if (!vcm_pack(out_buf, cap, &written, e->classes[j])) break; names++; }
-                    break;
-                }
+    } else if (inherit && inherit[0]) {
+        ec_fallback_valid_classes(inherit, out_buf, cap, &written, &names);   /* live registry unreachable */
     }
 
     out_buf[written] = '\0';               /* double-NUL end marker */
     if (out_count) *out_count = names;
     return names > 0 ? 1 : 0;
+}
+
+/* +0x278 (clone-extension slot 2) ENUMERATE the complete valid-INHERIT set -- every loaded entityDef (the
+ * inherit dropdown). Raw walk of the entityDef decl manager (sh_typeinfo_collect_inherits) -> thread-safe on
+ * the UI thread. Packs the decl paths (sorted + adjacent-deduped) into out_buf. Returns 0 if the manager is
+ * unreachable (the frontend then keeps its static list). Replaces the frozen 272-entry inherit list with the
+ * engine's full ~2,500. */
+static int ec_cstr_ptr_cmp(const void *a, const void *b)
+{
+    return strcmp(*(const char * const *)a, *(const char * const *)b);
+}
+static int slot_enum_inherits(sh_iface *self, char *out_buf, int cap, int *out_count)
+{
+    (void)self;
+    if (out_count) *out_count = 0;
+    if (cap > 0 && out_buf) out_buf[0] = '\0';
+    if (!out_buf || cap <= 1) return 0;
+
+    static const char *names[SH_REGISTRY_MAX];   /* UI-thread-serial -> static ok */
+    int k = sh_typeinfo_collect_inherits(names, SH_REGISTRY_MAX);
+    if (k <= 0) return 0;
+    qsort((void *)names, (size_t)k, sizeof(const char *), ec_cstr_ptr_cmp);   /* alpha + adjacent-dedup (cast: C4090) */
+    int written = 0, cnt = 0;
+    for (int i = 0; i < k; i++) {
+        if (i > 0 && strcmp(names[i], names[i - 1]) == 0) continue;   /* dedup (sorted) */
+        if (!vcm_pack(out_buf, cap, &written, names[i])) break;
+        cnt++;
+    }
+    out_buf[written] = '\0';
+    if (out_count) *out_count = cnt;
+    return cnt > 0 ? 1 : 0;
 }
 
 /* +0xc0 RESOLVE prefab path: %USERPROFILE%\snaphak\<prefix><name>.json. OG FUN_18000ce50:
@@ -919,6 +977,8 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     slots.apply_class_inherit    = slot_apply_class_inherit;  /* +0x268 ext 0 */
     /* clone-extension: the class-dropdown enumerator. */
     slots.enum_valid_classes     = slot_enum_valid_classes;   /* +0x270 ext 1 */
+    /* clone-extension: the inherit-dropdown enumerator (the complete entityDef set). */
+    slots.enum_inherits          = slot_enum_inherits;        /* +0x278 ext 2 */
     /* fold in the heavy apply-chain slots (serialize entity +0xc8 / schedule-apply +0xd0 /
      * read-prefab +0xb8). sh_apply_engine_install must have run first (dllmain orders it before this) so
      * its engine fns are resolved; the slot bodies themselves null-check + degrade if a dep is missing. */

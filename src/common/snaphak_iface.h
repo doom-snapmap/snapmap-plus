@@ -146,6 +146,15 @@ typedef int          (*sh_apply_class_inherit_fn)(struct sh_iface *self, int id,
 typedef int          (*sh_enum_valid_classes_fn)(struct sh_iface *self, const char *inherit,
                                                  char *out_buf, int cap, int *out_count);          /* +0x270 (ext 1) */
 
+/* +0x278 (clone-extension slot 2) ENUMERATE the complete valid-INHERIT set (the inherit dropdown). Walks the
+ * LIVE entityDef decl manager (every loaded entityDef is a valid inherit -- NOT gated by placeable/path) and
+ * packs the decl paths into out_buf as consecutive NUL-terminated strings (double-NUL end -- SAME packed ABI
+ * as +0x270). Returns 1 + *out_count on success, 0 if the manager is unreachable (the frontend then falls back
+ * to its static list). A raw decl-array read -> thread-safe on the Qt UI thread. Replaces the frozen 272-entry
+ * static inherit list with the engine's full ~2,500. */
+typedef int          (*sh_enum_inherits_fn)(struct sh_iface *self,
+                                            char *out_buf, int cap, int *out_count);               /* +0x278 (ext 2) */
+
 /* ------------------------------------------------------------------ heavy apply slots --------
  * The heavy serialize/deserialize/apply slots the SnapStack APPLY-ops (bss/bsi/bsf/bsb/bse/accl/
  * acctargets/mkcmd) need. These are the native port of the reference implementation's +0xc8 serialize / +0xd0 deserialize-
@@ -313,6 +322,7 @@ typedef struct sh_iface_vtbl {
      * a vtbl POINTER so the 0x60 object size is unchanged; both DLLs rebuild from this header as a pair). ---- */
     sh_apply_class_inherit_fn apply_class_inherit;   /* +0x268 (ext 0) ATOMIC class+inherit set */
     sh_enum_valid_classes_fn  enum_valid_classes;    /* +0x270 (ext 1) class-dropdown enumerator */
+    sh_enum_inherits_fn       enum_inherits;         /* +0x278 (ext 2) inherit-dropdown enumerator */
 } sh_iface_vtbl;
 
 /* ------------------------------------------------------------------ the interface object -----------
@@ -430,6 +440,8 @@ typedef struct sh_iface_engine_slots {
     sh_apply_class_inherit_fn    apply_class_inherit;   /* +0x268 (ext 0) */
     /* clone-extension: the class-dropdown enumerator. */
     sh_enum_valid_classes_fn     enum_valid_classes;    /* +0x270 (ext 1) */
+    /* clone-extension: the inherit-dropdown enumerator. */
+    sh_enum_inherits_fn          enum_inherits;         /* +0x278 (ext 2) */
 } sh_iface_engine_slots;
 
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *slots);
