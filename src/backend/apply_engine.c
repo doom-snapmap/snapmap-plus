@@ -540,6 +540,15 @@ static int ae_mkcmd_one(const char *prefab_text)
     const uint8_t *ed = ae_editor_session();
     if (!ed || !prefab_text) return 0;
     void *staging = (void *)(ed + PASTE_STAGING_OFF);   /* editor+0x209a8 (BUILD-MISMATCH risk -- R3) */
+    /* Reset the REUSED staging slot to a clean idSnapEntityPrefab before deserializing. After a delete (and/or a
+     * Play round-trip) the slot can retain a nested entity whose className idStr is NULL; the engine's reflection
+     * deserialize then does a compare-then-assign (FUN_141800320) that reads that NULL className -> an
+     * access-violation in the engine string compare (the observed delete-then-create-timeline crash). Re-ctor'ing
+     * the slot makes the deserialize build the nested entities FRESH instead of reusing the stale one. Verified
+     * crash-safe on a live slot: the ctor (FUN_14054d0a0) rewrites every field unconditionally with no reads/
+     * branches, so it cannot double-free; it only leaks the slot's prior list allocations (small, one-shot per
+     * create -- acceptable vs a crash). SEH-guarded: a failed reset falls through to the pre-existing behavior. */
+    if (g_prefab_ctor) { __try { g_prefab_ctor(staging); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
     return ae_deserialize_to_obj(prefab_text, staging, "idSnapEntityPrefab");
 }
 
