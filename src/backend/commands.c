@@ -3,8 +3,8 @@
  *
  * Register the command NAMES; Tier B/C handlers are faithful "not yet implemented in
  * clone" stubs that print the OG help. snapHak_rawmaps_on/off are wired to the SHIPPED
- * sh_rawmap_swap_arm gate. sh_target_any is the clone's interactive wire-any toggle
- * (wiring_mode.c -> h_wiring_mode), which EXCEEDS the 2021 SnapHak binary.
+ * sh_rawmap_swap_arm gate. sh_target_any is the editor-decl visibility toggle (target_any.c ->
+ * h_target_any), a pair-for-pair port of OG SnapHak's own sh_target_any (FUN_180021EE0).
  * snaphak_algo (cs_dontuse [18] + sh_alginfo) now lives in algo.c -- cs_dontuse toggles the 4 f64
  * engine-math overrides, sh_alginfo reports the reimpl present; both extern-declared near CMD_TABLE.
  *
@@ -1259,15 +1259,16 @@ void h_sh_validclasses(idCmdArgs *a);
 void h_cs_dontuse(idCmdArgs *a);
 void h_alginfo(idCmdArgs *a);
 
-/* sh_target_any interactive wire-any toggle lives in wiring_mode.c (h_wiring_mode flips a flag that gates
- * an inline detour on the editor wire tool's pick processor: ON lets two picks lay a direct connection
- * between any two entities). The detour is installed by sh_wiring_mode_install (dllmain). Extern-declared
- * here so CMD_TABLE references it without drift; it shares sh_commands' idCmdArgs/sh_printf. */
-void h_wiring_mode(idCmdArgs *a);
+/* sh_target_any: the editor-decl visibility toggle (target_any.c -> h_target_any), a pair-for-pair port of
+ * OG SnapHak's own sh_target_any (FUN_180021EE0) -- it flips the visibility pair (bits 7-6 of decl+0x3CD)
+ * over every idDeclSnapEditorEntity decl to reveal / re-hide the normally-hidden placeable entity decls.
+ * GetDeclsOfType is handed to it by sh_target_any_install (dllmain). Extern-declared here (matching
+ * target_any.h) so CMD_TABLE references it without drift; it shares sh_commands' idCmdArgs/sh_printf. */
+void h_target_any(idCmdArgs *a);
 
 /* ------------------------------------------------------------------------ the command table -------
- * VERBATIM from the OG XINPUT1_3.dll string table (read 2026-06-21), except the clone's added
- * command carries clone help: sh_target_any (the clone's NEW wire-any toggle, wiring_mode.c).
+ * VERBATIM from the OG XINPUT1_3.dll string table (read 2026-06-21). sh_target_any carries lightly
+ * reworded help but the OG behavior (the editor-decl visibility toggle, target_any.c).
  * Order mirrors the [1]-[22] command numbering. */
 typedef struct cmd_entry {
     const char *name;
@@ -1289,7 +1290,7 @@ static const cmd_entry CMD_TABLE[] = {
     { "cs_fieldinfo",        (void *)h_cs_fieldinfo,"for chrispy only, you dont need this" },
     { "sh_genbmodel",        (void *)h_sh_genbmodel,"sh_genbmodel <input file> <output file> Generate a bmodel from a .obj/.ase/.lwo file. " },
     { "sh_genmd6model",      (void *)h_sh_genmd6model,"sh_genmd6model <input file> <output file> Compiles a .md6model into a bmd6model" },
-    { "sh_target_any",       (void *)h_wiring_mode, "Toggles 'link any entities' mode: while ON, pick a source then a target with the editor wire tool to lay a direct connection between ANY two entities (even node-less targets)." },
+    { "sh_target_any",       (void *)h_target_any,  "Toggles targetting for entities. Reveals / re-hides the campaign-only and normally-hidden placeable entity decls in the SnapMap editor palette." },
     { "sh_listres",          (void *)h_sh_listres,  "<resource classname (ex:idMaterial)> <optional: filter> list all resources of a given type" },
     { "sh_alginfo",          (void *)h_alginfo,     "Prints CPU dispatcher info for snaphak_algo." },
     { "sh_debugrender",      (void *)h_sh_debugrender,"Not for users, for chrispy to test renderer stuff" },

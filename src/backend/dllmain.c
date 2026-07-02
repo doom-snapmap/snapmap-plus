@@ -32,7 +32,7 @@
 #include "typeinfo.h"
 #include "patch.h"
 #include "algo.h"
-#include "wiring_mode.h"   /* sh_target_any interactive wire-any toggle (the connect-tool detour) */
+#include "target_any.h"   /* sh_target_any editor-decl visibility toggle (OG FUN_180021EE0 port) */
 #include "ui_bridge.h"
 #include "iface_engine.h"
 #include "apply_engine.h"
@@ -313,13 +313,10 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * AFTER sh_typeinfo_install. See algo.c. */
         sh_algo_install(g_doom_base);
 
-        /* sh_target_any interactive WIRE-ANY toggle: resolve the editor wire tool's pick processor
-         * (FUN_140cdad70), the tool-reset helper (FUN_140cdb3e0), and the connection primitive
-         * (FUN_1405a70d0, decoded via the output-creator anchor) by signature, then -- only if all three
-         * resolve -- install a flag-gated inline detour on the pick processor. OFF BY DEFAULT (the detour
-         * is a transparent passthrough until toggled); the sh_target_any handler is already registered by
-         * the sh_commands CMD_TABLE. Clean-room wire-any (NOT in the OG binary). See wiring_mode.c. */
-        sh_wiring_mode_install(g_doom_base);
+        /* sh_target_any: hand GetDeclsOfType (resolved above) to the editor-decl visibility toggle so its
+         * handler can walk the idDeclSnapEditorEntity registry on demand. The handler is registered by the
+         * sh_commands CMD_TABLE. Pair-for-pair port of OG SnapHak's sh_target_any (FUN_180021EE0). */
+        sh_target_any_install(get_decls);
     }
 
     /* FAULT-SHIELD (merged 2026-06-22): install the recover-in-place shield -- a first-in-chain VEH +
