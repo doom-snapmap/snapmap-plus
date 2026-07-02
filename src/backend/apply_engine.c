@@ -66,6 +66,21 @@
  * FUN_14054f950(editor+0x209a8, editor) after staging (0x54F950, the engine Ctrl+V; not yet wired). */
 #define PASTE_STAGING_OFF      0x209a8
 
+/* GRAB/place-tool sub-object of the editor (editor+0x22330). Captured LIVE by instrumenting the paste handler
+ * 0xce1810 -- rdx (its 2nd arg) == editor+0x22330 across 500 hits, editor == r8 (the +0x3056748 singleton). The
+ * real Ctrl+V does PasteInstantiate THEN a grab-mode flag-set on this object (FUN_140cf35e0) so the pasted entity
+ * is HELD for placement -- and the DROP is what assigns its module. The clone's spawn previously called
+ * PasteInstantiate ALONE, leaving the new timeline selected-but-not-grabbed (the orange highlight that won't clear
+ * + never joins a module). Mirroring the flag-set makes a from-scratch timeline spawn grabbed, so placing it drops
+ * it into the module under the cursor -- true auto-module via the same path copy/paste uses. ALL offsets here are
+ * BUILD-SPECIFIC -- RE-DERIVE per build: watch_arm instrument 0xce1810 (rdx-editor = this off) + decompile the
+ * grab-mode setter 0xcf35e0 (the 4 field writes below). */
+#define GRAB_TOOL_OFF          0x22330      /* editor -> grab/place-tool sub-object */
+#define GRAB_TOOL_FLAG_2D0     0x2d0        /* byte: &= ~0x04 then |= 0x08 (enter place/grab) */
+#define GRAB_TOOL_FLAG_2D1     0x2d1        /* byte: |= 0x01 */
+#define GRAB_TOOL_MODE_1AC     0x1ac        /* u32 = 4 (tool mode) */
+#define GRAB_TOOL_FLAG_BB8     0xbb8        /* byte = 1 (tool active) */
+
 /* the prefab-from-selection serialize (+0xb0) engine fns. RE-DERIVE off the OG XINPUT1_3
  * FUN_180004210 (the serialize-SELECTION body): a temp prefab is ctor'd via `(DAT_18003e120 + 0x54d0a0)`
  * then populated from the editor via `(DAT_18003e120 + 0x54e410)(temp, editor)`; on success it is reflection-
@@ -579,7 +594,29 @@ static int ae_mkcmd_instantiate_one(const char *prefab_text)
     int ok = 0;
     __try { g_paste_instantiate(staging, (void *)ed); ok = 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("create-timeline: PasteInstantiate SEH (slot/map not ready?)"); ok = 0; }
-    backend_log("create-timeline: instantiate GLOBAL at cursor (position-correct; drag into a module to anchor)");
+
+    /* Enter GRAB mode on the just-instantiated entity -- mirror FUN_140cf35e0 on the editor's grab-tool sub-object
+     * (editor+0x22330) so the timeline is HELD for placement exactly like a Ctrl+V paste. Dropping it then assigns
+     * the module it's placed in (true auto-module, via the engine's own place-then-drop path), and it avoids the
+     * selected-but-not-grabbed "orange highlight won't clear" state. The real paste is PasteInstantiate THEN these
+     * flags; we replicate the 4 writes directly (a trivial leaf) rather than resolve a fragile tiny fn. SEH-guarded:
+     * a shifted-build offset degrades to the prior grab-less behavior, never a crash. */
+    if (ok) {
+        __try {
+            uint8_t *tool = (uint8_t *)(uintptr_t)ed + GRAB_TOOL_OFF;
+            *(volatile uint8_t  *)(tool + GRAB_TOOL_FLAG_2D0) =
+                (uint8_t)((*(volatile uint8_t *)(tool + GRAB_TOOL_FLAG_2D0) & 0xfb) | 0x08);
+            *(volatile uint8_t  *)(tool + GRAB_TOOL_FLAG_2D1) =
+                (uint8_t)( *(volatile uint8_t *)(tool + GRAB_TOOL_FLAG_2D1) | 0x01);
+            *(volatile uint32_t *)(tool + GRAB_TOOL_MODE_1AC)  = 4u;
+            *(volatile uint8_t  *)(tool + GRAB_TOOL_FLAG_BB8)  = 1u;
+            backend_log("create-timeline: entered grab mode -- held for placement (drop assigns the module)");
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            backend_log("create-timeline: grab-mode enter SEH (skipped; spawned selected-only)");
+        }
+    } else {
+        backend_log("create-timeline: instantiate GLOBAL at cursor (position-correct; drag into a module to anchor)");
+    }
     return ok;
 }
 
