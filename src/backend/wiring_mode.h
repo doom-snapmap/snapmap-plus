@@ -4,7 +4,7 @@
  * player use the NORMAL in-editor wire tool to connect ANY source entity to ANY target entity --
  * including node-less targets such as a timeline host that the stock connect tool refuses -- by laying a
  * direct connection, repeatedly, until the mode is turned OFF again. This EXCEEDS the 2021 SnapHak binary
- * (whose own sh_target_any is only the editor-palette unhide, which the clone exposes as `sh_unhide`); it
+ * (whose own sh_target_any is only the editor-palette unhide); it
  * is a clean-room build from our own reverse-engineering of the editor connect tool.
  *
  * MECHANISM (two flag-gated inline detours on FSM LEAVES of the wire tool -- NOT on its central pick

@@ -22,7 +22,6 @@
 #include "signatures.h"
 #include "hook.h"
 #include "smoke.h"
-#include "unhide.h"
 #include "rawmap.h"
 #include "rawmap.h"
 #include "strids.h"
@@ -155,11 +154,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
      * ..." or a specific FAIL. See algo.c. */
     sh_algo_selftest();
 
-    /* editor UNHIDE (port of OG FUN_180021EE0 / `sh_target_any`). Pull GetDeclsOfType from a
-     * final resolve pass (the poll above already proved the whole DB resolves), then poll the decl
-     * registry until the SnapMap editor has mounted its snapEditorEntityDef decls and apply ONE unhide
-     * pass. Emits "B1: unhide applied N/174". The flag flips are pure memory writes; the only engine
-     * CALL is GetDeclsOfType. See unhide.c. */
+    /* Resolve the engine fns the feature ops ride on (from a final resolve pass -- the poll above
+     * already proved the whole DB resolves): the rawmap save/load swap, the strids injector, the
+     * OVERRIDES file-shadow, and the cvar + console-command registration. */
     {
         sig_result results[64];
         sig_resolve_all(g_doom_base, results, 64);   /* fills results[0..sig_db_count) by DB index */
@@ -204,17 +201,10 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_rawmap_save_install(serialize, serialize_clean);
 
         void *get_decls = (void *)sig_addr_by_name(results, db, "GetDeclsOfType");
-        /* BOOT AUTO-UNHIDE DISABLED (OG-faithful, 2026-06-24). OG did NOT unhide at boot -- it relied on the
-         * OVERRIDES (the persistent snapeditorentitydef file-shadow) for the editor-palette expansion, which
-         * does NOT touch decl+0x3cd, so OG kept BLUE wires while still showing the unlocked content. Our boot
-         * pass set +0x3cd |= 0xC0 on all ~1362 editor decls; bit 0x80 is ALSO the blueprint wire-color "path"
-         * (green) gate (RE blueprint-wire-color-re: resolver FUN_1405e0ad0 greens a wire iff BOTH endpoints
-         * have 0x80) -- so it greened every wire. Removing the boot apply -> BLUE wires; the OVERRIDES keep
-         * the unlocked content visible/placeable, because palette enumeration is manifest- + port-bit-driven
-         * and reads NEITHER 0x80 nor 0x40 (decouple RE, full decompile of FUN_1404F8180 / FUN_14054aee0). The
-         * resolved GetDeclsOfType stays available for a future on-demand `sh_target_any` "reveal-everything"
-         * escape hatch. To restore the old boot behavior: `sh_unhide_apply_when_ready(get_decls);`. */
-        (void)get_decls;
+        /* GetDeclsOfType is resolved here and handed to the command layer below (sh_commands_install),
+         * where sh_listres + the material-lookup handlers walk the typed decl-manager node it returns.
+         * The editor-palette expansion is driven by the OVERRIDES file-shadow (manifest- + port-bit-driven
+         * palette enumeration), not by any decl-visibility bit flip. */
 
         /* the strids #str_ INJECTOR. Detour the engine idLangDict sort body (StridsSortBody) so
          * the first top-level sort first appends our #str_<id> rows from strings/strids.json into the
@@ -264,9 +254,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * cmdSystem dependency and FIRE as soon as CvarRegister resolves (we only CALL the engine fn, so
          * SIG_OK and SIG_OK_HOOKED are both fine). COMMANDS need the idCmdSystemLocal* global, decoded
          * build-portably from the CmdSystemLea accessor's RIP-relative MOV (sh_resolve_cmdsys); they
-         * degrade gracefully (cmdsys==NULL -> log + skip, no crash). get_decls (fetched above for
-         * sh_unhide_apply_when_ready) is reused so sh_target_any can drive the SHIPPED sh_unhide_apply.
-         * See cvars.c / commands.c. */
+         * degrade gracefully (cmdsys==NULL -> log + skip, no crash). get_decls (fetched above) is
+         * passed to the command layer for sh_listres + the material lookups. See cvars.c / commands.c. */
         void *cvar_reg = (void *)sig_addr_by_name(results, db, "CvarRegister");
         sh_cvars_install(cvar_reg, g_doom_base);
 

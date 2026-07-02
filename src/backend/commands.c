@@ -1,11 +1,10 @@
 /* commands.c -- see commands.h. The console-command surface (clone of OG FUN_1800229b1's
  * AddCommand spine + handlers).
  *
- * Register all 22 command NAMES; Tier B/C handlers are faithful "not yet implemented in
- * clone" stubs that print the OG help. snapHak_rawmaps_on/off + sh_unhide are wired (the
- * first two to the SHIPPED sh_rawmap_swap_arm gate, sh_unhide to the SHIPPED sh_unhide_apply). The OG
- * binary registers this unhide under the name sh_target_any; the clone renames it sh_unhide and frees
- * sh_target_any for the changelog's interactive wire-any toggle (wiring_mode.c -> h_wiring_mode).
+ * Register the command NAMES; Tier B/C handlers are faithful "not yet implemented in
+ * clone" stubs that print the OG help. snapHak_rawmaps_on/off are wired to the SHIPPED
+ * sh_rawmap_swap_arm gate. sh_target_any is the clone's interactive wire-any toggle
+ * (wiring_mode.c -> h_wiring_mode), which EXCEEDS the 2021 SnapHak binary.
  * snaphak_algo (cs_dontuse [18] + sh_alginfo) now lives in algo.c -- cs_dontuse toggles the 4 f64
  * engine-math overrides, sh_alginfo reports the reimpl present; both extern-declared near CMD_TABLE.
  *
@@ -26,7 +25,6 @@
 #include "patch.h"
 #include "signatures.h"
 #include "rawmap.h"
-#include "unhide.h"
 #include "ui_bridge.h"   /* sh_ui_get_iface() -- the `sh` dispatcher gates on the interface */
 #include "hook.h"        /* install_inline_hook -- the AddCommand detour for the command unlock */
 #include "backend_log.h"
@@ -55,7 +53,7 @@ typedef void (*add_command_fn)(void *cmdsys, const char *name, void *handler,
  * safe fixed-arg form dispatch(1, "%s", &bufptr) so we never re-derive the engine va layout. */
 typedef void (*printf_dispatch_fn)(int level, const char *fmt, void *vaptr);
 
-/* GetDeclsOfType(typeName) -> the typed decl-manager node (same engine fn sh_unhide uses; sig
+/* GetDeclsOfType(typeName) -> the typed decl-manager node (same engine fn sh_listres uses; sig
  * "GetDeclsOfType" @0x1800D20). Returns NULL for an unknown type. */
 typedef void *(*get_decls_fn)(const char *type_name);
 
@@ -67,10 +65,9 @@ typedef void *(*get_decls_fn)(const char *type_name);
 static add_command_fn     g_add_command = NULL;
 static void              *g_cmdsys      = NULL;
 static printf_dispatch_fn g_printf      = NULL;
-static void              *g_get_decls   = NULL;   /* cached for sh_unhide -> sh_unhide_apply */
+static void              *g_get_decls   = NULL;   /* cached for sh_listres + the material lookups */
 static const uint8_t     *g_module_base = NULL;   /* DOOM module base (devmode resolves its sig at FIRE) */
 static volatile LONG      g_installed   = 0;      /* one-shot install latch */
-static volatile LONG      g_unhide_shown = 0;     /* sh_unhide toggle state (0=hidden, 1=shown) */
 
 /* [15][16] devmode: ONE static restore-handle, gated on g_devmode_handle.live (static zero-init => .live==0
  * => "not currently disabled"). disable_devmode code_patch_sig's the SessionDevModeGetter head to
@@ -203,31 +200,12 @@ static void h_rawmaps_off(idCmdArgs *a)
     sh_rawmap_swap_arm(0);
     sh_printf("Disabling raw snapmap save/load.\n");
 }
-/* [13] sh_unhide -> the SHIPPED sh_unhide_apply (toggle show/hide over snapEditorEntityDef). CLONE
- * RENAME: the OG binary registers this unhide under the name `sh_target_any` (0x21ee0); the clone
- * exposes it as `sh_unhide` and frees `sh_target_any` for the OG changelog's wire-any toggle (h_wiring_mode). */
-static void h_unhide(idCmdArgs *a)
-{
-    (void)a;
-    if (!g_get_decls) {
-        sh_printf("sh_unhide: GetDeclsOfType unresolved -- cannot toggle.\n");
-        return;
-    }
-    LONG show = InterlockedExchange(&g_unhide_shown, !g_unhide_shown);
-    show = !show;   /* the NEW state after the toggle */
-    sh_unhide_result r = sh_unhide_apply(g_get_decls, (int)show);
-    if (r.ok)
-        sh_printf("sh_unhide: %s %u/%u placeable decls.\n",
-                  show ? "unhid" : "re-hid", r.touched, r.count);
-    else
-        sh_printf("sh_unhide: could not run (%s).\n", r.error ? r.error : "unknown");
-}
 /* [3] sh_alginfo -> algo.c (h_alginfo: reports our snaphak_algo reimpl PRESENT). [18] cs_dontuse ->
  * algo.c (h_cs_dontuse: the toggle that installs/uninstalls the 4 f64 math overrides). Both are
  * extern-declared near the CMD_TABLE (like the sh_entity / sh_typeinfo handlers). */
 
 /* ----------------------------------------------------------------- decl-walk SEH helpers --------
- * sh_listres walks the SAME decl-manager node layout unhide.c LIVE-VERIFIED: the decl-ptr array @
+ * sh_listres walks the decl-manager node layout (LIVE-VERIFIED: the decl-ptr array @
  * node+0x20, the count @ node+0x28. Each decl's NAME is a char* @ *decl+8 (the generic idDecl name slot
  * -- DIRECT from OG behavior: sh_listres passes *(*decl+8) as the Printf %s arg; it is an engine RUNTIME
  * offset not in the source-of-record, so LIVE-CONFIRM at FIRE: `sh_listres idMaterial` must print real
@@ -235,7 +213,7 @@ static void h_unhide(idCmdArgs *a)
 #define LISTRES_ARRAY_OFF   0x20    /* decl-manager node -> decl-pointer array */
 #define LISTRES_COUNT_OFF   0x28    /* decl-manager node -> decl count (uint) */
 #define LISTRES_NAME_OFF    0x08    /* decl object -> name char* (*decl + 8) */
-#define LISTRES_COUNT_CAP   (1u << 20)  /* same sanity cap sh_unhide uses (stale-node guard) */
+#define LISTRES_COUNT_CAP   (1u << 20)  /* stale-node guard */
 
 static int lr_read_ptr(const void *src, void **out)
 {
@@ -1288,9 +1266,9 @@ void h_alginfo(idCmdArgs *a);
 void h_wiring_mode(idCmdArgs *a);
 
 /* ------------------------------------------------------------------------ the command table -------
- * VERBATIM from the OG XINPUT1_3.dll string table (read 2026-06-21), except the clone's renamed/added
- * commands carry clone help: sh_unhide (= the OG's sh_target_any unhide, renamed) + sh_target_any
- * (the clone's NEW wire-any toggle, wiring_mode.c). Order mirrors the [1]-[22] command numbering. */
+ * VERBATIM from the OG XINPUT1_3.dll string table (read 2026-06-21), except the clone's added
+ * command carries clone help: sh_target_any (the clone's NEW wire-any toggle, wiring_mode.c).
+ * Order mirrors the [1]-[22] command numbering. */
 typedef struct cmd_entry {
     const char *name;
     void       *handler;
@@ -1311,7 +1289,6 @@ static const cmd_entry CMD_TABLE[] = {
     { "cs_fieldinfo",        (void *)h_cs_fieldinfo,"for chrispy only, you dont need this" },
     { "sh_genbmodel",        (void *)h_sh_genbmodel,"sh_genbmodel <input file> <output file> Generate a bmodel from a .obj/.ase/.lwo file. " },
     { "sh_genmd6model",      (void *)h_sh_genmd6model,"sh_genmd6model <input file> <output file> Compiles a .md6model into a bmd6model" },
-    { "sh_unhide",           (void *)h_unhide,      "Toggles the editor palette unhide: reveals / re-hides the campaign-only / normally-hidden placeable entity decls." },
     { "sh_target_any",       (void *)h_wiring_mode, "Toggles 'link any entities' mode: while ON, pick a source then a target with the editor wire tool to lay a direct connection between ANY two entities (even node-less targets)." },
     { "sh_listres",          (void *)h_sh_listres,  "<resource classname (ex:idMaterial)> <optional: filter> list all resources of a given type" },
     { "sh_alginfo",          (void *)h_alginfo,     "Prints CPU dispatcher info for snaphak_algo." },

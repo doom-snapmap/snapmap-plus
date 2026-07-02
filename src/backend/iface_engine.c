@@ -117,13 +117,13 @@
  * len/data/realloc idStr::operator= body, distinct from 0x1a03e10's pool-ptr write). */
 #define IDSTR_OPASSIGN_RVA      0x19fd5f0u
 
-/* (+0x110 enum-decls-of-resclass): the typed decl-manager node walk -- SAME shape sh_unhide +
- * sh_listres use (GetDeclsOfType(typeName) -> node; array @ node+0x20, count @ node+0x28; each decl's name
+/* (+0x110 enum-decls-of-resclass): the typed decl-manager node walk -- SAME shape sh_listres
+ * uses (GetDeclsOfType(typeName) -> node; array @ node+0x20, count @ node+0x28; each decl's name
  * @ *decl+8). The engine GetDeclsOfType is SIGNATURE-resolved off the shared sig DB ("GetDeclsOfType"). */
 #define DECLNODE_ARRAY_OFF      0x20        /* decl-manager node -> decl-pointer array */
 #define DECLNODE_COUNT_OFF      0x28        /* decl-manager node -> decl count (u32) */
 #define DECL_NAME_OFF           0x08        /* decl object -> name char* (*decl + 8) */
-#define DECLNODE_COUNT_CAP      (1u << 20)  /* stale-node guard (same cap sh_unhide/sh_listres use) */
+#define DECLNODE_COUNT_CAP      (1u << 20)  /* stale-node guard (same cap sh_listres uses) */
 
 #define SEL_MAX_IDS            65536        /* sanity cap on a selection/array count (stale-obj guard) */
 #define ENT_COUNT_CAP         1000000u      /* sanity cap on the entity array count */
@@ -756,7 +756,7 @@ static void slot_remove_from_selection(sh_iface *self, int id)
  * frontend (FUN_18000994c port) reduces an idDecl* arg-type-name to its lowercased resource-class string
  * (e.g. "idDeclSoundShader*" -> "soundshader") and calls this. We GetDeclsOfType(res_class), walk the typed
  * decl-manager node (array @ +0x20, count @ +0x28, each decl's name @ *decl+8 -- the SAME node shape
- * sh_unhide + sh_listres walk), and PACK the names into out_buf as consecutive NUL-terminated strings.
+ * sh_listres walks), and PACK the names into out_buf as consecutive NUL-terminated strings.
  * Returns 1 on success (+ *out_count set), 0 on unknown type / no decls / unresolved GetDeclsOfType (the
  * frontend then falls back to a plain string box -- faithful to the OG cVar8=='\0' branch). SEH-guarded:
  * a stale/shifted node degrades to a clean 0. */

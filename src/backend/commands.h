@@ -10,7 +10,7 @@
  *
  * All 22 command NAMES are registered (Tier B/C handlers are faithful "not yet implemented in
  * clone" stubs that print the OG help). The trivial handlers wire to the ALREADY-SHIPPED
- * ops: snapHak_rawmaps_on/off -> sh_rawmap_swap_arm; sh_target_any -> sh_unhide_apply. Later tranches
+ * ops: snapHak_rawmaps_on/off -> sh_rawmap_swap_arm. Later tranches
  * fill the decl/entity/type handlers.
  *
  * ABI (DIRECT, from the engine command-register decompiles):
@@ -72,8 +72,8 @@ void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *modu
  *   add_command   = resolved engine AddCommand (sig "AddCommand"; 0 => SKIPPED).
  *   cmdsys        = the idCmdSystemLocal* from sh_resolve_cmdsys (NULL => SKIPPED; commands cannot FIRE).
  *   printf_disp   = resolved engine idCommon dispatch (sig "Printf"; 0 => handlers can't print, SKIPPED).
- *   get_decls     = resolved engine GetDeclsOfType (sig "GetDeclsOfType"); cached for sh_target_any's
- *                   sh_unhide_apply call. May be 0 (sh_target_any then logs it can't run).
+ *   get_decls     = resolved engine GetDeclsOfType (sig "GetDeclsOfType"); cached for sh_listres
+ *                   + the material lookups. May be 0 (those handlers then log they can't run).
  *   module_base   = the DOOM module base; cached so the devmode [15][16] handlers resolve the
  *                   SessionDevModeGetter signature at FIRE (the engine-code patch site) off it.
  * Returns the number of commands registered (0 on SKIP). Emits "B2: registered N/22 console commands".

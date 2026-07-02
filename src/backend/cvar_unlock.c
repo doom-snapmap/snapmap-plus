@@ -38,8 +38,8 @@
  *   window (see unlock_thread); this is the first in-game test of the cvar-unlock.
  *
  * SEH: every engine-memory access (the two table-alias memcpys + the per-cvar flags OR) is SEH-guarded,
- *   matching the house style of the sibling backend modules (cvars.c register_one/verify_one,
- *   unhide.c the per-element flag walk). The thread re-asserts the alias during the early-boot
+ *   matching the house style of the sibling backend modules (cvars.c register_one/verify_one).
+ *   The thread re-asserts the alias during the early-boot
  *   registration race; a torn/stale idCVar* there becomes a skipped element + retry, never an
  *   unhandled access violation that would take the game down.
  */
@@ -53,7 +53,7 @@
 
 /* SEH-guarded table alias (the two memcpys). Returns 1 if both copies completed, 0 on access violation
  * (a torn/half-constructed cvarSys during the boot race -> caller retries). Matches the house pattern of
- * unhide.c's safe_read_* / cvars.c's register_one. */
+ * cvars.c's register_one. */
 static int alias_dev_to_full(uint8_t *cvarSys)
 {
     __try {
@@ -67,7 +67,7 @@ static int alias_dev_to_full(uint8_t *cvarSys)
 
 /* SEH-guarded per-cvar settability OR. The flags write dereferences a per-cvar pointer that, during the
  * early-boot registration race the re-assert thread runs against, may be torn/stale; guard each so a bad
- * pointer becomes a skipped element, never an unhandled AV (mirrors unhide.c's per-element __try). */
+ * pointer becomes a skipped element, never an unhandled AV (mirrors cvars.c's per-element __try). */
 static void set_settable_one(void *cvar_v)
 {
     __try {

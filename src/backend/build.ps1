@@ -10,7 +10,7 @@
 # dllmain (bootstrap), signatures (the masked-byte engine resolver), hook (the inline-detour installer),
 # smoke (the resolver + installer self-proof), backend_log, xinput_proxy (the XInput export-forwarding
 # thunks -- DOOM's input keeps working).
-# unhide (the editor UNHIDE, port of OG FUN_180021EE0); rawmap (the keystone rawmap LOAD swap, port of OG
+# rawmap (the keystone rawmap LOAD swap, port of OG
 # FUN_180023ad0's DeserializeFromJson detour, plus the SAVE shadow -- the inverse, port of OG
 # FUN_180023e60's SerializeToJson detour: on every editor save, call the engine serialize then mirror the
 # out-idStr JSON to rawmap.json); strids (the #str_ string injector, port of OG FUN_1800102e0/FUN_18000FF10
@@ -19,7 +19,7 @@
 # resource-provider's open-by-name method, serving %USERPROFILE%\snaphak\overrides\<name> from disk).
 # cvars (register the 9 cvars via the engine OUTER cvar register 0x1A04F00); commands (register the 22
 # console commands via the engine AddCommand 0x1AA3630, cmdSystem global decoded from the CmdSystemLea
-# accessor; the trivial handlers wire snapHak_rawmaps_on/off + sh_unhide to the shipped ops -- both ports of
+# accessor; the trivial handlers wire snapHak_rawmaps_on/off to the shipped ops -- ports of
 # OG FUN_1800229b1's install spine). clipboard (CF_TEXT clipboard-set/get, port of OG FUN_1800053f0) feeds
 # the sh_listres clipboard copy; sh_listres (port of FUN_180022000, GetDeclsOfType decl walk) + sh_entlist
 # (port of FUN_180021b50, vendored class list in entlist_classes.h) are real handlers in commands. entity
@@ -46,7 +46,7 @@
 # Needs Build Tools for Visual Studio 2022 (C++ workload).
 param(
     [string[]]$Sources = @("dllmain.c", "signatures.c", "hook.c", "smoke.c",
-                           "unhide.c", "rawmap.c", "strids.c",
+                           "rawmap.c", "strids.c",
                            "overrides.c", "cvars.c", "commands.c", "clipboard.c",
                            "entity.c", "typeinfo.c", "patch.c", "algo.c", "wiring_mode.c", "ui_bridge.c",
                            "iface_engine.c", "apply_engine.c", "../common/snaphak_iface.c",

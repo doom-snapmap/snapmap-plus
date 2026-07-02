@@ -1,6 +1,6 @@
 /* hook.h -- the SnapHak backend's inline-detour installer (port of OG FUN_180001790).
  *
- * The backend places the real engine detours (rawmap save/load swap, unhide, the sh apply chain in
+ * The backend places the real engine detours (rawmap save/load swap, the sh apply chain in
  * the feature ops). This installer ports SnapHak's own installer (truth snaphak/hook-install-mechanism.md):
  * VirtualProtect RWX -> overwrite the target prologue with a jump to the detour -> restore page
  * protection -> record the original bytes in a global un-patch list so every patch is reversible

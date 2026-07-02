@@ -22,7 +22,6 @@ Registered with the engine command system; run from the DOOM console.
 | `sh_dumpmap` | Dump the current generated `.map` from memory (debugging). |
 | `sh_genbmodel` | Generate a bmodel from a `.obj` / `.ase` / `.lwo`. |
 | `sh_genmd6model` | Compile a `.md6model` into a `bmd6model`. |
-| `sh_unhide` | Reveal hidden placeable editor entities (the unhide toggle). |
 | `sh_debugrender` | Renderer debug toggle (developer tool). |
 | `sh_alginfo` | Report the math-acceleration status. |
 | `sh_superscriptop` | Dump SuperScript / eventDef data (e.g. emit the eventDef table as a header). |
@@ -99,7 +98,6 @@ Engine detours and resource-loader shadows the backend installs.
 |---|---|
 | Rawmap load | When rawmaps are on, load the map from `%USERPROFILE%\snaphak\rawmap.json` instead of the engine's own save. |
 | Rawmap save | On every editor save, mirror the serialized map JSON to `%USERPROFILE%\snaphak\rawmap.json`. |
-| Unhide | Flip the visibility bits so hidden placeable entities appear in the palette (the `sh_unhide` toggle). |
 | Overrides file-shadow | Serve same-named resource files from `%USERPROFILE%\snaphak\overrides\` when present (the overrides loader). |
 | Strids injector | Inject custom `#str_` strings from `overrides\strings\strids.json` into the engine string table. |
 | Fault handling | The clone replaces the original's two kill-detours (which terminate DOOM) with the recover-in-place fault-shield (see [`fidelity.md`](fidelity.md)). |
