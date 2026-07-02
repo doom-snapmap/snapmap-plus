@@ -368,6 +368,20 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                            * capstone scan HITS:1. RE'd DIRECT from our own decompile. */
       "48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 A8 F7 FF FF 48 81 EC 20 09 00 00",
       0x54F950u },
+    { "WireConnectCreator1", /* FUN_140cdb990 -- the editor wire tool's connect creator for an OUTPUT-NODE
+                              * source (the pick processor's creator-selector 1, vs cdbb40's selector 0 for a
+                              * base-entity source). wiring_direct.c inline-detours it: while sh_target_any is in
+                              * the reveal state it forces the direct source->target edge for ANY target
+                              * (including a node-less target the stock creator would node-mediate = the "which
+                              * input" radial). ABI: void(tool, world, idx[int]); world+0x204c8 = the editor
+                              * entity table. Unique @ a 52-byte body: the generic save prologue + MOVSXD RDI,R8D
+                              * (49 63 F8 -- distinct from the 3 sibling creators cdb610/cdb860/cdbb40) + the
+                              * source/world deref chain (world+0x204c8 -> +0x6a0 -> entity, TEST +0x164,0x20);
+                              * the 4 wildcard bytes are the rel32 jz disp (build-volatile). Re-derive (per DOOM
+                              * build): decompile FUN_140cdb990. */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 49 63 F8 48 8B F2 48 8B D9 83 FF FF "
+      "0F 84 ?? ?? ?? ?? 48 8B 8A C8 04 02 00 48 8B 81 A0 06 00 00 48 8B 04 F8 F6 80 64 01 00 00 20",
+      0xCDB990u },
     { "Toast",
       "40 57 48 83 EC 20 48 8B F9 48 8B 89 F0 08 00 00",
       0xCFA0B0u },

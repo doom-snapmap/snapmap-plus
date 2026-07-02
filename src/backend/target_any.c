@@ -133,6 +133,11 @@ void sh_target_any_install(void *get_decls_of_type)
     g_get_decls = get_decls_of_type;
 }
 
+int sh_target_any_is_shown(void)
+{
+    return (int)g_shown;
+}
+
 void h_target_any(struct idCmdArgs *a)
 {
     (void)a;

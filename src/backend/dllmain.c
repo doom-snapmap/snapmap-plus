@@ -33,6 +33,7 @@
 #include "patch.h"
 #include "algo.h"
 #include "target_any.h"   /* sh_target_any editor-decl visibility toggle (OG FUN_180021EE0 port) */
+#include "wiring_direct.h" /* sh_target_any direct-edge wire hook (output-node source -> any target) */
 #include "ui_bridge.h"
 #include "iface_engine.h"
 #include "apply_engine.h"
@@ -317,6 +318,12 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * handler can walk the idDeclSnapEditorEntity registry on demand. The handler is registered by the
          * sh_commands CMD_TABLE. Pair-for-pair port of OG SnapHak's sh_target_any (FUN_180021EE0). */
         sh_target_any_install(get_decls);
+
+        /* sh_target_any direct-edge hook: resolve the editor wire tool's output-node-source connect creator
+         * (cdb990) by signature and install a flag-gated inline detour that forces a direct source->target
+         * edge (no input radial) while sh_target_any is in the reveal state. Off until then; frees no node;
+         * never touches the tool's think/input state. */
+        sh_wiring_direct_install(g_doom_base);
     }
 
     /* FAULT-SHIELD (merged 2026-06-22): install the recover-in-place shield -- a first-in-chain VEH +
