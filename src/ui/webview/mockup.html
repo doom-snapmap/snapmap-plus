@@ -5,75 +5,103 @@
 <title>SnapHak Studio</title>
 <style>
   * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 12px; background: #f0f0f0; color: #1a1a1a; height: 100%; }
-  .app { display: flex; flex-direction: column; height: 100vh; }
+  html, body { margin: 0; padding: 0; font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 11px; height: 100%; }
+  :root {
+    --bg:#eef0f3; --chrome:#f7f8fa; --panel:#ffffff; --panel2:#fbfbfc; --border:#e4e6ea; --border2:#d3d6db;
+    --text:#1b1d21; --muted:#6b7280; --accent:#2f7ad6; --accentText:#ffffff; --sel:#e7f0fb; --selText:#123a63;
+    --link:#2a68b8; --field:#ffffff;
+    color-scheme: light;
+  }
+  :root.dark {
+    --bg:#191a1d; --chrome:#232428; --panel:#26272b; --panel2:#2b2d31; --border:#33353b; --border2:#45474e;
+    --text:#e7e8ea; --muted:#9aa0a8; --accent:#4a9eff; --accentText:#0c1116; --sel:#2d4257; --selText:#cfe4fb;
+    --link:#6fb2ff; --field:#1f2024; color-scheme: dark;
+  }
+  .app { display: flex; flex-direction: column; height: 100vh; background: var(--bg); color: var(--text); user-select: none; -webkit-user-select: none; }
 
-  .titlebar { display: flex; align-items: center; background: #2b2b2b; color: #eee; height: 24px; padding: 0 8px; flex-shrink: 0; user-select: none; }
-  .titlebar .icon { width: 11px; height: 11px; background: #4a9; margin-right: 8px; }
-  .titlebar .t { font-size: 11px; }
+  .menubar { display: flex; align-items: center; height: 30px; background: var(--chrome); border-bottom: 1px solid var(--border); padding: 0 6px; gap: 2px; flex-shrink: 0; user-select: none; }
+  .menubar .icon { width: 12px; height: 12px; border-radius: 3px; background: var(--accent); margin: 0 8px 0 4px; }
+  .menubar .brand { font-weight: 600; margin-right: 14px; }
+  .menubar .menu { padding: 4px 9px; border-radius: 5px; color: var(--muted); cursor: default; }
+  .menubar .menu:hover { background: var(--panel2); color: var(--text); }
+  .menubar .spacer { flex: 1; }
+  .theme-toggle { display: inline-flex; border: 1px solid var(--border2); border-radius: 20px; overflow: hidden; cursor: pointer; }
+  .theme-toggle span { padding: 3px 11px; color: var(--muted); }
+  .theme-toggle span.on { background: var(--accent); color: var(--accentText); }
 
-  .tabstrip { display: flex; background: #e4e4e4; border-bottom: 1px solid #b9b9b9; flex-shrink: 0; }
-  .tab { padding: 6px 14px; cursor: pointer; border-right: 1px solid #cfcfcf; color: #444; }
-  .tab.active { background: #f7f7f7; border-bottom: 2px solid #2b78c4; color: #111; font-weight: 600; }
-  .tab:hover:not(.active) { background: #ececec; }
+  .tabstrip { display: flex; background: var(--chrome); border-bottom: 1px solid var(--border); flex-shrink: 0; padding: 0 6px; gap: 2px; }
+  .tab { padding: 7px 14px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+  .tab:hover:not(.active) { color: var(--text); }
 
-  .content { flex: 1; display: flex; overflow: hidden; background: #f7f7f7; min-height: 0; }
+  .content { flex: 1; display: flex; overflow: hidden; background: var(--bg); min-height: 0; padding: 8px; gap: 8px; }
 
-  .left-pane { width: 40%; min-width: 260px; display: flex; flex-direction: column; padding: 8px; border-right: 1px solid #c9c9c9; }
-  .opts { display: flex; flex-direction: column; gap: 3px; margin-bottom: 6px; }
-  .opts label { color: #333; display: flex; align-items: center; gap: 5px; }
-  .entity-list { flex: 1; background: #fff; border: 1px solid #9a9a9a; overflow-y: auto; user-select: none; -webkit-user-select: none; }
-  .entity-item { padding: 2px 6px; color: #1a4fbf; white-space: nowrap; cursor: default; line-height: 1.5; }
-  .entity-item .name { color: #1a1a1a; }
-  .entity-item.hidden-ent { color: #999; font-style: italic; }
-  .entity-item.hidden-ent .name { color: #999; }
-  .entity-item.selected { background: #cfe2f7; }
-  .entity-item.selected .name { color: #10305f; }
-  .list-empty { padding: 10px; color: #888; font-style: italic; }
-  .list-controls { display: flex; gap: 6px; margin-top: 6px; }
-  .list-controls input { flex: 1; padding: 3px 6px; border: 1px solid #9a9a9a; font-size: 12px; }
+  .left-pane { width: 40%; min-width: 240px; display: flex; flex-direction: column; gap: 7px; }
+  .opts { display: flex; flex-direction: column; gap: 4px; }
+  .opts label { color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .entity-list { flex: 1; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; overflow-y: auto; user-select: none; -webkit-user-select: none; padding: 3px; }
+  .entity-item { padding: 3px 7px; border-radius: 4px; color: var(--link); white-space: nowrap; cursor: default; line-height: 1.45; }
+  .entity-item .name { color: var(--text); }
+  .entity-item.hidden-ent { color: var(--muted); font-style: italic; }
+  .entity-item.hidden-ent .name { color: var(--muted); }
+  .entity-item:hover { background: var(--panel2); }
+  .entity-item.selected { background: var(--sel); color: var(--link); }
+  .entity-item.selected .name { color: var(--selText); }
+  .list-empty { padding: 10px; color: var(--muted); font-style: italic; }
+  .list-controls { display: flex; gap: 6px; }
+  .list-controls input { flex: 1; }
 
-  .btn { padding: 3px 10px; border: 1px solid #8e8e8e; background: linear-gradient(#fdfdfd, #e9e9e9); cursor: pointer; border-radius: 2px; font-size: 12px; }
-  .btn:hover:not(:disabled) { background: #f3f3f3; }
-  .btn:active:not(:disabled) { background: #dcdcdc; }
+  input[type=text], textarea { background: var(--field); color: var(--text); border: 1px solid var(--border2); border-radius: 5px; padding: 4px 7px; font-size: 11px; font-family: inherit; user-select: text; -webkit-user-select: text; }
+  input[type=text]:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  input[type=checkbox] { accent-color: var(--accent); }
+
+  .btn { padding: 4px 12px; border: 1px solid var(--border2); background: var(--panel2); color: var(--text); cursor: pointer; border-radius: 5px; font-size: 11px; }
+  .btn:hover:not(:disabled) { border-color: var(--accent); }
+  .btn:active:not(:disabled) { transform: translateY(1px); }
   .btn:disabled { opacity: 0.5; cursor: default; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accentText); }
 
-  .right-pane { flex: 1; display: flex; flex-direction: column; padding: 8px; min-width: 0; }
-  .placeholder { flex: 1; background: #fff; border: 1px solid #9a9a9a; display: flex; align-items: center; justify-content: center; text-align: center; color: #999; font-style: italic; padding: 20px; }
-  .editor { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-  .decl-text { flex: 1; min-height: 0; resize: none; background: #fff; border: 1px solid #9a9a9a; font-family: Consolas, "Courier New", monospace; font-size: 12px; line-height: 1.45; padding: 6px 8px; color: #333; white-space: pre; }
-  .fields { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin-top: 8px; }
+  .right-pane { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .placeholder { flex: 1; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; display: flex; align-items: center; justify-content: center; text-align: center; color: var(--muted); font-style: italic; padding: 20px; }
+  .editor { flex: 1; display: flex; flex-direction: column; min-height: 0; gap: 8px; }
+  .decl-text { flex: 1; min-height: 0; resize: none; font-family: Consolas, "Courier New", monospace; line-height: 1.5; white-space: pre; }
+  .fields { display: flex; flex-wrap: wrap; gap: 7px 12px; align-items: center; }
   .field { display: flex; align-items: center; gap: 5px; }
-  .field label { color: #333; }
-  .field input { padding: 2px 5px; border: 1px solid #9a9a9a; font-size: 12px; }
+  .field label { color: var(--muted); white-space: nowrap; flex-shrink: 0; }
   .field.grow { flex: 1; min-width: 140px; }
   .field.grow input { width: 100%; }
-  .save-msg { font-size: 11px; color: #555; }
+  .save-msg { font-size: 11px; color: var(--muted); }
 
   .combo { position: relative; display: inline-flex; }
   .combo.grow { flex: 1; min-width: 150px; }
-  .combo input { flex: 1; padding: 2px 5px; border: 1px solid #9a9a9a; border-right: none; font-size: 12px; min-width: 0; }
-  .combo-arrow { width: 18px; border: 1px solid #9a9a9a; background: #ececec; cursor: pointer; font-size: 9px; color: #444; padding: 0; }
-  .combo-arrow:hover { background: #e0e0e0; }
-  .combo-list { position: absolute; bottom: 100%; left: 0; right: 0; max-height: 220px; overflow-y: auto; background: #fff; border: 1px solid #888; box-shadow: 0 -3px 8px rgba(0,0,0,0.2); z-index: 1500; display: none; }
-  .combo-opt { padding: 2px 7px; cursor: default; white-space: nowrap; }
-  .combo-opt:hover { background: #cfe2f7; }
-  .combo-hint, .combo-empty { padding: 3px 7px; color: #888; font-size: 11px; font-style: italic; }
+  .combo input { flex: 1; border-top-right-radius: 0; border-bottom-right-radius: 0; border-right: none; min-width: 0; }
+  .combo-arrow { width: 20px; border: 1px solid var(--border2); border-top-right-radius: 5px; border-bottom-right-radius: 5px; background: var(--panel2); cursor: pointer; font-size: 9px; color: var(--muted); padding: 0; }
+  .combo-arrow:hover { color: var(--text); }
+  .combo-list { position: absolute; bottom: 100%; right: 0; left: auto; min-width: 100%; width: max-content; max-width: 560px; max-height: 220px; overflow-y: auto; background: var(--panel); border: 1px solid var(--border2); border-radius: 6px; box-shadow: 0 -4px 12px rgba(0,0,0,0.18); z-index: 1500; display: none; padding: 3px; }
+  .combo-opt { padding: 3px 7px; border-radius: 4px; cursor: default; white-space: nowrap; }
+  .combo-opt:hover { background: var(--sel); color: var(--selText); }
+  .combo-hint, .combo-empty { padding: 3px 7px; color: var(--muted); font-size: 11px; font-style: italic; }
 
-  .ctxmenu { position: absolute; z-index: 1000; background: #fff; border: 1px solid #888; box-shadow: 2px 2px 6px rgba(0,0,0,0.25); min-width: 130px; padding: 3px 0; display: none; }
-  .ctxmenu div { padding: 4px 16px; cursor: default; }
-  .ctxmenu div:hover { background: #cfe2f7; }
+  .camera { flex-shrink: 0; display: flex; align-items: center; gap: 12px; padding: 6px 10px; background: var(--chrome); border-top: 1px solid var(--border); font-size: 11px; }
+  .camera .cam-title { color: var(--muted); }
+  .camera label { display: flex; align-items: center; gap: 4px; color: var(--text); }
+  .camera input[type=text] { width: 92px; }
+  .camera .cam-lock { margin-left: 6px; color: var(--muted); }
 
-  .statusbar { flex-shrink: 0; display: flex; align-items: center; gap: 14px; background: #2b2b2b; color: #ddd; padding: 5px 10px; font-size: 11px; }
-  .statusbar .dot { width: 9px; height: 9px; border-radius: 50%; background: #888; display: inline-block; margin-right: 5px; }
-  .statusbar .dot.ok { background: #4ad07d; }
-  .statusbar .dot.no { background: #d0704a; }
-  .statusbar b { color: #fff; }
-  .statusbar .muted { color: #999; }
+  .ctxmenu { position: absolute; z-index: 1000; background: var(--panel); border: 1px solid var(--border2); border-radius: 6px; box-shadow: 2px 4px 12px rgba(0,0,0,0.22); min-width: 140px; padding: 4px; display: none; }
+  .ctxmenu div { padding: 5px 12px; border-radius: 4px; cursor: default; }
+  .ctxmenu div:hover { background: var(--sel); color: var(--selText); }
+
+  .statusbar { flex-shrink: 0; display: flex; align-items: center; gap: 14px; background: var(--panel2); border-top: 1px solid var(--border); color: var(--muted); padding: 6px 10px; font-size: 11px; }
+  .statusbar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; margin-right: 5px; }
+  .statusbar .dot.ok { background: #2e9e5b; }
+  .statusbar .dot.no { background: #c9483d; }
+  .statusbar b { color: var(--text); }
+  .statusbar .muted { color: var(--muted); }
   .statusbar .spacer { flex: 1; }
 
-  #toastHost { position: fixed; top: 32px; right: 12px; display: flex; flex-direction: column; gap: 8px; z-index: 2000; pointer-events: none; }
-  .toast { min-width: 150px; max-width: 320px; padding: 8px 12px; background: #333; color: #fff; border-radius: 5px; font-size: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.32); opacity: 0; transform: translateX(120%); transition: opacity .28s ease, transform .28s cubic-bezier(.2,.8,.2,1); }
+  #toastHost { position: fixed; top: 40px; right: 12px; display: flex; flex-direction: column; gap: 8px; z-index: 2000; pointer-events: none; }
+  .toast { min-width: 150px; max-width: 320px; padding: 8px 12px; background: #333; color: #fff; border-radius: 6px; font-size: 11px; box-shadow: 0 4px 14px rgba(0,0,0,0.32); opacity: 0; transform: translateX(120%); transition: opacity .28s ease, transform .28s cubic-bezier(.2,.8,.2,1); }
   .toast.show { opacity: 1; transform: translateX(0); }
   .toast.ok   { background: #2e7d46; }
   .toast.warn { background: #9a6a1a; }
@@ -82,7 +110,19 @@
 </head>
 <body>
 <div class="app">
-  <div class="titlebar"><div class="icon"></div><div class="t">SnapHak Studio</div></div>
+  <div class="menubar">
+    <div class="icon"></div>
+    <div class="brand">SnapHak Studio</div>
+    <div class="menu">File</div>
+    <div class="menu">Edit</div>
+    <div class="menu">View</div>
+    <div class="menu" id="menuSettings">Settings</div>
+    <div class="spacer"></div>
+    <div class="theme-toggle" id="themeToggle">
+      <span class="on" id="segLight">Light</span>
+      <span id="segDark">Dark</span>
+    </div>
+  </div>
 
   <div class="tabstrip">
     <div class="tab active">Entities</div>
@@ -94,8 +134,8 @@
     <div class="left-pane">
       <div class="opts">
         <label><input type="checkbox" id="showHidden"> Show hidden entities</label>
-        <label><input type="checkbox" id="syncEditor"> Synchronize with editor</label>
-        <label><input type="checkbox" id="selectInEditor"> Select in editor</label>
+        <label title="The list follows whatever you select in the SnapMap 3D editor"><input type="checkbox" id="syncEditor"> Follow editor selection</label>
+        <label title="Selecting entities here selects them in the SnapMap 3D editor"><input type="checkbox" id="selectInEditor"> Select in 3D editor</label>
       </div>
       <div class="entity-list" id="entityList"><div class="list-empty">Waiting for the map...</div></div>
       <div class="list-controls">
@@ -113,11 +153,18 @@
           <div class="field grow"><label>Classname</label><div class="combo grow" id="cClassname"><input type="text" id="fClassname" autocomplete="off"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div></div>
           <div class="field grow"><label>Displayname</label><input type="text" id="fDisplayname"></div>
           <button class="btn" id="revertBtn" disabled>Revert</button>
-          <button class="btn" id="saveBtn" disabled>Save to Decl</button>
-          <span class="save-msg" id="saveMsg"></span>
+          <button class="btn primary" id="saveBtn" disabled>Save to Decl</button>
         </div>
       </div>
     </div>
+  </div>
+
+  <div class="camera">
+    <span class="cam-title">Camera Origin</span>
+    <label>X <input type="text" id="camX" value="797.638489"></label>
+    <label>Y <input type="text" id="camY" value="183.456985"></label>
+    <label>Z <input type="text" id="camZ" value="-950.475159"></label>
+    <label class="cam-lock"><input type="checkbox" id="camLockChk"> Lock Position</label>
   </div>
 
   <div class="statusbar">
@@ -224,6 +271,7 @@
     else if (o.cmd === 'enumInherits') { onMessage({kind:'inherits', items:['snapmaps/volume/blocking','snapmaps/volume/trigger','player/coop','snapmaps/ai','snapmaps/variable','snapmaps/action/variable/integer','snapmaps/light','light','snapmaps/listener/ai']}); }
     else if (o.cmd === 'enumClasses') { onMessage({kind:'classes', inherit:o.inherit, items:['idVolume_Blocking','idVolume_Trigger','idVolume_Damage','idVolume_Water']}); }
     else if (o.cmd === 'selectInEditor') { /* no 3D editor in browser preview */ }
+    else if (o.cmd === 'camLock' || o.cmd === 'camSet') { /* no editor in browser preview */ }
   }
   function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
   function selCount() { var c = 0; for (var k in selectedEids) if (selectedEids[k]) c++; return c; }
@@ -351,7 +399,6 @@
     document.getElementById('fClassname').value = d.classname || '';
     document.getElementById('fDisplayname').value = d.displayname || '';
     loaded = { decl:d.decl||'', inherit:d.inherit||'', classname:d.classname||'', displayname:d.displayname||'' };
-    document.getElementById('saveMsg').textContent = '';
     updateDirty();
     if (!inheritsRequested) { inheritsRequested = true; post({cmd:'enumInherits'}); }  // full inherit list, once
     post({cmd:'enumClasses', inherit: d.inherit || ''});                                // classes valid for THIS inherit
@@ -373,7 +420,6 @@
     if (primaryEid < 0 || !isDirty()) return;
     var c = curState();
     if (!c.classname.replace(/\s/g,'') || !c.inherit.replace(/\s/g,'')) { toast("Classname and Inherit can't be blank", 'err'); return; }
-    document.getElementById('saveMsg').textContent = 'saving...';
     post({ cmd:'save', eid:primaryEid, decl:c.decl, classname:c.classname, inherit:c.inherit, displayname:c.displayname });
   }
   function doRevert() { if (loaded) { document.getElementById('declText').value=loaded.decl; document.getElementById('fInherit').value=loaded.inherit; document.getElementById('fClassname').value=loaded.classname; document.getElementById('fDisplayname').value=loaded.displayname; updateDirty(); } }
@@ -408,10 +454,9 @@
       if (d.auto && (isDirty() || d.eid !== primaryEid)) return;   // never clobber unsaved edits
       if (d.eid === primaryEid || !d.auto) showState(d);
     } else if (d.kind === 'saveResult') {
-      var m = document.getElementById('saveMsg');
-      if (d.result === 1) { m.textContent = 'saved to decl.'; toast('Saved to decl', 'ok'); }
-      else if (d.result === 0) { m.textContent = 'refused: incompatible class + inherit.'; toast('Save refused: incompatible class + inherit', 'warn'); }
-      else { m.textContent = 'save failed (see log).'; toast('Save failed (see log)', 'err'); }
+      if (d.result === 1) toast('Saved to decl', 'ok');
+      else if (d.result === 0) toast('Save refused: incompatible class + inherit', 'warn');
+      else toast('Save failed (see log)', 'err');
     } else if (d.kind === 'editorSelect') {
       selectedEids = {}; var esel = d.eids || []; for (var ei=0; ei<esel.length; ei++) selectedEids[esel[ei]] = true;
       anchorEid = esel.length ? esel[esel.length-1] : -1;
@@ -422,6 +467,8 @@
       classItems = d.items || []; if (classCombo) classCombo.refresh();
     } else if (d.kind === 'info') {
       toast(d.text || '', 'warn');
+    } else if (d.kind === 'camera') {
+      setCamField('camX', d.x); setCamField('camY', d.y); setCamField('camZ', d.z);
     }
   }
 
@@ -458,6 +505,27 @@
   classCombo = Combo('cClassname', function(){ return classItems; }, updateDirty, updateDirty);
   // typing an inherit then blurring/Enter also re-fetches its valid classes
   document.getElementById('fInherit').addEventListener('change', function(){ post({cmd:'enumClasses', inherit: this.value}); });
+
+  // Camera Origin: fields track the live camera (when unfocused); Lock pins it; a committed edit writes back.
+  function fmtNum(v) { return String(parseFloat((+v).toFixed(6))); }
+  function camVal(id) { return parseFloat(document.getElementById(id).value) || 0; }
+  function setCamField(id, v) { var el = document.getElementById(id); if (document.activeElement !== el) el.value = fmtNum(v); }
+  document.getElementById('camLockChk').addEventListener('change', function(){
+    if (this.checked) post({cmd:'camLock', on:1, x:camVal('camX'), y:camVal('camY'), z:camVal('camZ')});
+    else post({cmd:'camLock', on:0});
+  });
+  ['camX','camY','camZ'].forEach(function(id){ document.getElementById(id).addEventListener('change', function(){ post({cmd:'camSet', x:camVal('camX'), y:camVal('camY'), z:camVal('camZ')}); }); });
+
+  // theme: light/dark toggle in the menu bar, remembered across sessions.
+  function setTheme(dark) {
+    document.documentElement.classList.toggle('dark', dark);
+    document.getElementById('segLight').classList.toggle('on', !dark);
+    document.getElementById('segDark').classList.toggle('on', dark);
+    try { localStorage.setItem('sh_theme', dark ? 'dark' : 'light'); } catch (e) {}
+  }
+  document.getElementById('segLight').addEventListener('click', function(){ setTheme(false); });
+  document.getElementById('segDark').addEventListener('click', function(){ setTheme(true); });
+  (function(){ var t = 'light'; try { t = localStorage.getItem('sh_theme') || 'light'; } catch (e) {} setTheme(t === 'dark'); })();
 
   post({cmd:'refresh'});
 </script>

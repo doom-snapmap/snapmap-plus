@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 
 #include "WebView2.h"
 #include "snaphak_iface.h"
@@ -62,6 +63,10 @@ static std::vector<int> g_delete_eids;
 static volatile bool g_pending_select = false;   /* list -> editor selection push ("Select in editor") */
 static std::vector<int> g_select_eids;
 static char g_enumbuf[262144];                   /* packed-string scratch for enum_inherits / enum_valid_classes */
+
+static volatile bool g_cam_lock = false;         /* Camera Origin "Lock Position" */
+static float         g_cam_xyz[3] = {0.0f, 0.0f, 0.0f};
+static volatile bool g_cam_write_once = false;   /* a committed field edit -> write the vec3 once */
 
 #define POC_MAX_ENTS 8192
 #define POC_ID_CAP   384
@@ -171,6 +176,22 @@ static void json_get_intarray(const std::wstring &j, const wchar_t *key, std::ve
     }
 }
 
+static bool json_get_double(const std::wstring &j, const wchar_t *key, double *out)
+{
+    std::wstring needle = L"\""; needle += key; needle += L"\"";
+    size_t p = j.find(needle);
+    if (p == std::wstring::npos) return false;
+    p += needle.size();
+    while (p < j.size() && j[p] != L':') p++;
+    if (p >= j.size()) return false; p++;
+    while (p < j.size() && (j[p] == L' ' || j[p] == L'\t')) p++;
+    wchar_t *end = nullptr;
+    double v = wcstod(j.c_str() + p, &end);
+    if (end == j.c_str() + p) return false;
+    *out = v;
+    return true;
+}
+
 static void poc_read_version()
 {
     char *la = nullptr; size_t n = 0;
@@ -241,6 +262,33 @@ static bool poc_collect_state(int id, char *decl, int dcap, char *cls, int ccap,
     } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
     return ok;
 }
+static void poc_post_json(const wchar_t *json);   /* fwd */
+
+/* Camera Origin: write the stored vec3 to the editor (+0x00). Used every frame while Lock is on, and once
+ * per committed field edit. SEH-guarded. */
+static void poc_cam_write()
+{
+    __try {
+        if (g_iface && g_iface->vtbl && g_iface->vtbl->set_editor_vec3)
+            g_iface->vtbl->set_editor_vec3(g_iface, g_cam_xyz);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { }
+}
+/* Camera Origin: read the live vec3 (+0x08); if it moved, cache + push it to the fields. SEH-guarded. */
+static void poc_cam_read_send()
+{
+    float cam[3] = {0.0f, 0.0f, 0.0f};
+    int ok = 0;
+    __try {
+        if (g_iface && g_iface->vtbl && g_iface->vtbl->get_editor_vec3) { g_iface->vtbl->get_editor_vec3(g_iface, cam); ok = 1; }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    if (!ok) return;
+    if (fabsf(cam[0]-g_cam_xyz[0]) < 1e-4f && fabsf(cam[1]-g_cam_xyz[1]) < 1e-4f && fabsf(cam[2]-g_cam_xyz[2]) < 1e-4f) return;
+    g_cam_xyz[0] = cam[0]; g_cam_xyz[1] = cam[1]; g_cam_xyz[2] = cam[2];
+    wchar_t m[192];
+    _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"camera\",\"x\":%.6f,\"y\":%.6f,\"z\":%.6f}", cam[0], cam[1], cam[2]);
+    poc_post_json(m);
+}
+
 static int poc_get_selection(int *out, int max)
 {
     int n = 0;
@@ -448,6 +496,21 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 std::wstring inh; json_get_wstr(json, L"inherit", inh);
                 std::string i8 = w_to_utf8(inh);
                 poc_send_enum(1, i8.c_str());
+            } else if (cmd == L"camLock") {
+                int on = 0; json_get_int(json, L"on", &on);
+                g_cam_lock = (on != 0);
+                if (g_cam_lock) {   /* freeze to the current field values */
+                    double x, y, z;
+                    if (json_get_double(json, L"x", &x)) g_cam_xyz[0] = (float)x;
+                    if (json_get_double(json, L"y", &y)) g_cam_xyz[1] = (float)y;
+                    if (json_get_double(json, L"z", &z)) g_cam_xyz[2] = (float)z;
+                }
+            } else if (cmd == L"camSet") {
+                double x, y, z;
+                if (json_get_double(json, L"x", &x)) g_cam_xyz[0] = (float)x;
+                if (json_get_double(json, L"y", &y)) g_cam_xyz[1] = (float)y;
+                if (json_get_double(json, L"z", &z)) g_cam_xyz[2] = (float)z;
+                g_cam_write_once = true;
             } else if (cmd == L"pushStack") {
                 std::vector<int> ids; json_get_intarray(json, L"eids", ids);
                 wchar_t m[160];
@@ -519,6 +582,8 @@ static void poc_think_loop()
             if (g_select_eids.size() == 1) g_displayed_eid = g_select_eids[0];
             g_select_eids.clear(); g_pending_select = false;
         }
+        /* Camera Origin: hold the locked origin every frame (or flush one committed edit). */
+        if (g_cam_lock || g_cam_write_once) { poc_cam_write(); g_cam_write_once = false; }
         LeaveCriticalSection(&g_loop->mtx);
 
         if (did_save) {
@@ -559,6 +624,7 @@ static void poc_think_loop()
                     }
                 }
                 if (g_displayed_eid >= 0) poc_send_state(g_displayed_eid, true);
+                if (!g_cam_lock) poc_cam_read_send();   /* live camera readout (unless locked) */
             }
         }
 

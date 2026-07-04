@@ -59,6 +59,7 @@ The frontend holds no engine addresses; it calls the backend only through the vt
 | Synchronize with editor (editor -> list) | `get_selection` +0x150 |
 | Select in editor (list -> editor) | `clear_selection` +0x148, `add_to_selection` +0x138 |
 | Class / Inherit autocomplete | `enum_valid_classes` +0x270, `enum_inherits` +0x278 |
+| Camera Origin (X/Y/Z + Lock Position) | `get_editor_vec3` +0x08, `set_editor_vec3` +0x00 |
 | Installed version readout | reads `%LOCALAPPDATA%\open-snaphak\install.json` (written by the installer) |
 
 Heavy engine writes (Save, Delete, Select-in-editor) are snapshotted in the JS message callback and
@@ -79,8 +80,12 @@ dispatch, which keeps them off the re-entrant callback and on the main-thread ex
   placeholder when 2+ are selected (its actions live in the context menu).
 - Right-click context menu: Copy ID (clipboard), Delete, Push to stack 0 (a stub -- see limitations).
 - Sliding toasts for Copy / Save / Delete / Push, color-coded (success / warning / error).
-- "Synchronize with editor" (editor selection -> list, any N) and "Select in editor" (list selection ->
+- "Follow editor selection" (editor selection -> list, any N) and "Select in 3D editor" (list selection ->
   editor, hidden entities skipped). The two are mutually exclusive to avoid a selection feedback loop.
+- Camera Origin bar (always visible): X/Y/Z fields track the live editor camera; "Lock Position" pins it
+  (writes the stored vec3 every frame); a committed field edit writes back. Mirrors the Qt camera sync.
+- Modern light/dark theme with a menu bar toggle (remembered via localStorage); a menu bar with a Settings
+  placeholder for future feature toggles. Native controls (scrollbars, checkboxes) follow the theme.
 - Installed-version + connection status in the status bar.
 - Browser preview mode: `mockup.html` self-populates with sample data and is fully interactive when
   opened without a WebView2 host (for fast UI iteration); inert in DOOM.
