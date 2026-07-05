@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>SnapHak Studio</title>
+<title>Snapmap+</title>
 <style>
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 11px; height: 100%; }
@@ -100,6 +100,57 @@
   .camera input[type=text] { width: 92px; }
   .camera .cam-lock { margin-left: 6px; color: var(--muted); }
 
+  .tl-head { color: var(--muted); flex-shrink: 0; }
+  .tl-head b { color: var(--text); }
+  .tl-inner-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .tl-inner-tab { padding: 4px 11px; color: var(--muted); cursor: default; border-bottom: 2px solid transparent; }
+  .tl-inner-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tl-inner-tab:hover:not(.active) { color: var(--text); }
+  .tl-inner-tab.tl-add { font-weight: 600; }
+  .tl-inner-body { flex: 1; display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: auto; padding-top: 2px; }
+  .event-list { display: flex; flex-direction: column; gap: 6px; }
+  .event-row { display: flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
+  .event-row > label { color: var(--muted); }
+  .event-row .ev-time { width: 54px; }
+  .event-row > .combo { flex: 0 0 170px; }
+  .ev-args { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; }
+  .ev-args label { color: var(--muted); }
+  .ev-args .combo { flex: 1; }
+  .ev-del { width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; color: var(--muted); cursor: default; border-radius: 4px; flex-shrink: 0; }
+  .ev-del:hover { background: #a3352f; color: #fff; }
+
+  .pf-folder-head { display: flex; align-items: center; gap: 4px; padding: 3px 6px; color: var(--text); cursor: default; font-weight: 500; }
+  .pf-folder-head:hover { background: var(--panel2); }
+  .pf-caret { width: 12px; display: inline-block; color: var(--muted); font-size: 9px; }
+  .pf-folder:not(.pf-open) .pf-folder-body { display: none; }
+  .pf-folder:not(.pf-open) .pf-caret { transform: rotate(-90deg); }
+  .pf-folder-body { padding-left: 14px; }
+  .pf-item { padding: 3px 8px; border-radius: 4px; color: var(--link); white-space: nowrap; cursor: default; }
+  .pf-item:hover { background: var(--panel2); }
+  .pf-item.selected { background: var(--sel); color: var(--selText); }
+  .pf-item.dragging { opacity: 0.4; }
+  .pf-folder.drop-target > .pf-folder-head { background: var(--sel); color: var(--selText); }
+  .pf-folder-del { margin-left: auto; padding: 0 4px; color: var(--muted); opacity: 0; }
+  .pf-folder-head:hover .pf-folder-del { opacity: 1; }
+  .pf-folder-del:hover { color: #a3352f; }
+  .pf-folder-name { width: 130px; padding: 1px 5px; }
+  .pf-item-name { width: 100%; padding: 1px 4px; }
+  .prefab-card { flex: 1; display: flex; flex-direction: column; gap: 6px; overflow: auto; }
+  .prefab-card label { color: var(--muted); margin-top: 4px; }
+  .pc-header { display: flex; align-items: center; gap: 8px; }
+  .pc-name { flex: 1; font-size: 13px; font-weight: 600; }
+  .pc-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .pc-chip { background: var(--panel2); border: 1px solid var(--border); border-radius: 20px; padding: 2px 9px; color: var(--text); font-size: 11px; }
+  .pc-desc { min-height: 60px; resize: vertical; }
+  .pc-actions { display: flex; gap: 8px; margin-top: 10px; }
+
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 3000; display: flex; align-items: center; justify-content: center; }
+  .modal { background: var(--panel); border: 1px solid var(--border2); border-radius: 10px; padding: 16px 18px; width: 340px; display: flex; flex-direction: column; gap: 5px; box-shadow: 0 12px 34px rgba(0,0,0,0.42); }
+  .modal-title { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+  .modal label { color: var(--muted); margin-top: 4px; }
+  .modal textarea { min-height: 54px; resize: vertical; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+
   .ctxmenu { position: absolute; z-index: 1000; background: var(--panel); border: 1px solid var(--border2); border-radius: 6px; box-shadow: 2px 4px 12px rgba(0,0,0,0.22); min-width: 140px; padding: 4px; display: none; }
   .ctxmenu div { padding: 5px 12px; border-radius: 4px; cursor: default; }
   .ctxmenu div:hover { background: var(--sel); color: var(--selText); }
@@ -124,7 +175,7 @@
 <div class="app">
   <div class="menubar">
     <div class="icon"></div>
-    <div class="brand">SnapHak Studio</div>
+    <div class="brand">Snapmap+</div>
     <div class="menu">File</div>
     <div class="menu">Edit</div>
     <div class="menu">View</div>
@@ -141,12 +192,12 @@
   </div>
 
   <div class="tabstrip">
-    <div class="tab active">Entities</div>
-    <div class="tab">Prefabs</div>
-    <div class="tab">Timelines</div>
+    <div class="tab active" data-tab="entities">Entities</div>
+    <div class="tab" data-tab="prefabs">Prefabs</div>
+    <div class="tab" data-tab="timelines">Timelines</div>
   </div>
 
-  <div class="content">
+  <div class="content" id="panel-entities">
     <div class="left-pane">
       <div class="opts">
         <label><input type="checkbox" id="showHidden"> Show hidden entities</label>
@@ -175,6 +226,106 @@
     </div>
   </div>
 
+  <div class="content" id="panel-prefabs" style="display:none;">
+    <div class="left-pane">
+      <div class="entity-list" id="prefabTree">
+        <div class="pf-folder pf-open">
+          <div class="pf-folder-head"><span class="pf-caret">&#9662;</span> <span class="pf-fname">Doors</span><span class="pf-folder-del" title="Delete folder">&#10005;</span></div>
+          <div class="pf-folder-body">
+            <div class="pf-item selected" draggable="true">AirLock Door</div>
+          </div>
+        </div>
+        <div class="pf-folder pf-open">
+          <div class="pf-folder-head"><span class="pf-caret">&#9662;</span> <span class="pf-fname">Encounters</span><span class="pf-folder-del" title="Delete folder">&#10005;</span></div>
+          <div class="pf-folder-body">
+            <div class="pf-item" draggable="true">Corpse Dropper</div>
+            <div class="pf-item" draggable="true">Loadout Station 01</div>
+          </div>
+        </div>
+        <div class="pf-folder pf-open">
+          <div class="pf-folder-head"><span class="pf-caret">&#9662;</span> <span class="pf-fname">Uncategorized</span><span class="pf-folder-del" title="Delete folder">&#10005;</span></div>
+          <div class="pf-folder-body">
+            <div class="pf-item" draggable="true">Stairs 384x192</div>
+            <div class="pf-item" draggable="true">UAC VTOL (Static) - Dredge</div>
+          </div>
+        </div>
+      </div>
+      <div class="list-controls">
+        <input type="text" id="prefabFilter" placeholder="Filter prefabs...">
+        <button class="btn" id="newFolderBtn">New Folder</button>
+      </div>
+      <div style="margin-top:6px;"><button class="btn primary" id="prefabCreateBtn">Create from selection</button></div>
+    </div>
+    <div class="right-pane">
+      <div class="prefab-card" id="prefabCard">
+        <div class="pc-header">
+          <input type="text" class="pc-name" id="pcName" value="AirLock Door">
+        </div>
+        <div class="pc-chips">
+          <span class="pc-chip">1 Blocking</span>
+          <span class="pc-chip">1 Door</span>
+          <span class="pc-chip">1 Trigger</span>
+        </div>
+        <div class="pc-meta muted">3 entities &middot; created Jul 3, 2026</div>
+        <label>Description</label>
+        <textarea class="pc-desc" id="pcDesc" placeholder="What is this prefab for?">A sealed two-door airlock with a trigger volume between.</textarea>
+        <label>Tags</label>
+        <input type="text" id="pcTags" placeholder="doors, encounter, ..." value="doors, industrial">
+        <div class="pc-actions">
+          <button class="btn primary" id="prefabLoadBtn">Load / Place</button>
+          <button class="btn" id="prefabDeleteBtn">Delete</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="content" id="panel-timelines" style="display:none;">
+    <div class="left-pane">
+      <div class="entity-list" id="timelineList">
+        <div class="entity-item selected">room_4x/snapmaps/timeline/main_01: <span class="name">Intro Sequence</span></div>
+        <div class="entity-item">room_4x/snapmaps/timeline/wave_02: <span class="name">Wave 1 Spawns</span></div>
+        <div class="entity-item">room_4x/snapmaps/timeline/boss_03: <span class="name">Boss Cue</span></div>
+      </div>
+      <div class="list-controls">
+        <input type="text" id="timelineFilter" placeholder="Filter timelines...">
+        <button class="btn primary" id="createTimelineBtn">Create New Timeline</button>
+      </div>
+    </div>
+    <div class="right-pane">
+      <div class="tl-head">Current Timeline: <b>Intro Sequence</b></div>
+      <div class="tl-inner-tabs">
+        <div class="tl-inner-tab active">Heavy Gunner</div>
+        <div class="tl-inner-tab">Door Mover</div>
+        <div class="tl-inner-tab tl-add" title="Add an entity-event list">+</div>
+      </div>
+      <div class="tl-inner-body">
+        <div class="field"><label>Runs on</label><div class="combo grow"><input type="text" value="room_4x/snapmaps/ai/ai_74 (Heavy Gunner)"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div></div>
+        <div class="event-list">
+          <div class="event-row">
+            <label>Time</label><input class="ev-time" value="0.0">
+            <div class="combo"><input type="text" value="ai/spawn"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div>
+            <span class="ev-args muted">no parameters</span>
+            <div class="ev-del" title="Remove event">&#10005;</div>
+          </div>
+          <div class="event-row">
+            <label>Time</label><input class="ev-time" value="2.5">
+            <div class="combo"><input type="text" value="ai/set_target"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div>
+            <div class="ev-args"><label>Target</label><div class="combo"><input type="text" value="player_start_61"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div></div>
+            <div class="ev-del" title="Remove event">&#10005;</div>
+          </div>
+          <div class="event-row">
+            <label>Time</label><input class="ev-time" value="5.0">
+            <div class="combo"><input type="text" value="sound/play_shader"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div>
+            <div class="ev-args"><label>Sound</label><div class="combo"><input type="text" value="decl: alert_klaxon"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div></div>
+            <div class="ev-del" title="Remove event">&#10005;</div>
+          </div>
+        </div>
+        <div><button class="btn" id="insertEventBtn">Insert Entity Event</button></div>
+      </div>
+      <div class="fields" style="justify-content:flex-end;"><button class="btn primary" id="saveTimelineBtn">Save Timeline</button></div>
+    </div>
+  </div>
+
   <div class="camera">
     <span class="cam-title">Camera Origin</span>
     <label>X <input type="text" id="camX" value="797.638489"></label>
@@ -184,9 +335,8 @@
   </div>
 
   <div class="statusbar">
-    <span><span class="dot" id="bridgeDot"></span><b id="verText">SnapHak</b> <span id="connText">connecting...</span></span>
+    <span><span class="dot" id="bridgeDot"></span><b id="verText">Snapmap+</b> <span id="connText">connecting...</span></span>
     <span>Entities: <b id="entCount">?</b> <span class="muted" id="hiddenNote"></span></span>
-    <span>Editor ready: <b id="edReady">?</b></span>
     <span>Selected: <b id="selCount">0</b></span>
     <span class="spacer"></span>
     <span id="stamp"></span>
@@ -197,6 +347,23 @@
 <div id="toastHost"></div>
 <div class="rz rz-t"></div><div class="rz rz-b"></div><div class="rz rz-l"></div><div class="rz rz-r"></div>
 <div class="rz rz-tl"></div><div class="rz rz-tr"></div><div class="rz rz-bl"></div><div class="rz rz-br"></div>
+<div class="modal-overlay" id="prefabCreateModal" style="display:none;">
+  <div class="modal">
+    <div class="modal-title">Create prefab from selection</div>
+    <div class="muted" id="npSelInfo" style="margin-bottom:4px;">From 5 selected entities</div>
+    <label>Name</label><input type="text" id="npName" placeholder="e.g. AirLock Door">
+    <label>Description</label><textarea id="npDesc" placeholder="Optional"></textarea>
+    <label>Tags</label><input type="text" id="npTags" placeholder="Optional, comma-separated">
+    <div class="modal-actions"><button class="btn" id="npCancel">Cancel</button><button class="btn primary" id="npCreate">Create</button></div>
+  </div>
+</div>
+<div class="modal-overlay" id="confirmModal" style="display:none;">
+  <div class="modal">
+    <div class="modal-title">Confirm</div>
+    <div class="muted" id="confirmMsg" style="margin-bottom:4px;"></div>
+    <div class="modal-actions"><button class="btn" id="confirmCancel">Cancel</button><button class="btn primary" id="confirmOk">OK</button></div>
+  </div>
+</div>
 
 <script>
   var allEntities = [];      // last list from backend
@@ -460,9 +627,8 @@
   function onMessage(d) {
     if (d.kind === 'list') {
       document.getElementById('bridgeDot').className = 'dot ok';
-      document.getElementById('verText').textContent = 'SnapHak ' + (d.version || '');
+      document.getElementById('verText').textContent = 'Snapmap+ ' + (d.version || '');
       document.getElementById('connText').textContent = '(Connected)';
-      document.getElementById('edReady').textContent = d.editorReady ? 'yes' : 'no';
       flash('updated ' + new Date().toLocaleTimeString());
       allEntities = d.entities || [];
       // drop selections for entities that no longer exist
@@ -495,7 +661,7 @@
     window.chrome.webview.addEventListener('message', function(e){ onMessage(e.data); });
   } else {
     // browser preview: populate + auto-select the Block Box so the panel shows populated on load.
-    document.getElementById('connText').textContent = '(Preview - no backend)';
+    document.getElementById('connText').textContent = '(Disconnected)';
     document.getElementById('bridgeDot').className = 'dot ok';
     setTimeout(function(){
       onMessage(previewList());
@@ -556,6 +722,213 @@
   [['rz-t','t'],['rz-b','b'],['rz-l','l'],['rz-r','r'],['rz-tl','tl'],['rz-tr','tr'],['rz-bl','bl'],['rz-br','br']].forEach(function(p){
     var el = document.querySelector('.'+p[0]);
     if (el) el.addEventListener('mousedown', function(e){ if (e.button === 0) { e.preventDefault(); post({cmd:'winResize', dir:p[1]}); } });
+  });
+
+  // top-level tab switching (Entities / Prefabs / Timelines)
+  document.querySelectorAll('.tabstrip .tab').forEach(function(tab){
+    tab.addEventListener('click', function(){
+      document.querySelectorAll('.tabstrip .tab').forEach(function(t){ t.classList.remove('active'); });
+      this.classList.add('active');
+      var which = this.getAttribute('data-tab');
+      ['entities','prefabs','timelines'].forEach(function(name){
+        document.getElementById('panel-' + name).style.display = (name === which) ? 'flex' : 'none';
+      });
+    });
+  });
+  // timeline inner-tab switching (mockup: visual only for now)
+  document.querySelectorAll('.tl-inner-tab:not(.tl-add)').forEach(function(t){
+    t.addEventListener('click', function(){
+      document.querySelectorAll('.tl-inner-tab').forEach(function(x){ x.classList.remove('active'); });
+      this.classList.add('active');
+    });
+  });
+  // timeline list selection (mockup)
+  (function(){
+    var el = document.getElementById('timelineList');
+    if (el) el.addEventListener('click', function(e){
+      var item = e.target.closest('.entity-item'); if (!item) return;
+      el.querySelectorAll('.entity-item.selected').forEach(function(s){ s.classList.remove('selected'); });
+      item.classList.add('selected');
+    });
+  })();
+
+  // prefabs: folder tree -- collapse, select, and drag-drop items between folders (mockup)
+  var prefabTree = document.getElementById('prefabTree');
+  var draggingItem = null;
+  if (prefabTree) {
+    prefabTree.addEventListener('click', function(e){
+      var del = e.target.closest('.pf-folder-del');
+      if (del) { deleteFolder(del.closest('.pf-folder')); return; }
+      if (e.target.closest('input')) return;   // clicking the inline rename field shouldn't toggle the folder
+      var head = e.target.closest('.pf-folder-head');
+      if (head) { head.parentNode.classList.toggle('pf-open'); return; }
+      var item = e.target.closest('.pf-item');
+      if (item) {
+        prefabTree.querySelectorAll('.pf-item.selected').forEach(function(s){ s.classList.remove('selected'); });
+        item.classList.add('selected');
+      }
+    });
+    prefabTree.addEventListener('dragstart', function(e){
+      var item = e.target.closest('.pf-item'); if (!item) return;
+      draggingItem = item; item.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move';
+    });
+    prefabTree.addEventListener('dragend', function(){
+      if (draggingItem) draggingItem.classList.remove('dragging'); draggingItem = null;
+      prefabTree.querySelectorAll('.drop-target').forEach(function(f){ f.classList.remove('drop-target'); });
+    });
+    prefabTree.addEventListener('dragover', function(e){
+      var folder = e.target.closest('.pf-folder'); if (!folder || !draggingItem) return;
+      e.preventDefault();
+      prefabTree.querySelectorAll('.drop-target').forEach(function(f){ f.classList.remove('drop-target'); });
+      folder.classList.add('drop-target');
+    });
+    prefabTree.addEventListener('drop', function(e){
+      var folder = e.target.closest('.pf-folder'); if (!folder || !draggingItem) return;
+      e.preventDefault();
+      folder.classList.add('pf-open');
+      folder.querySelector('.pf-folder-body').appendChild(draggingItem);
+      folder.classList.remove('drop-target');
+    });
+  }
+  var newFolderBtn = document.getElementById('newFolderBtn');
+  if (newFolderBtn) newFolderBtn.addEventListener('click', function(){
+    if (!prefabTree) return;
+    var f = document.createElement('div'); f.className = 'pf-folder pf-open';
+    f.innerHTML = '<div class="pf-folder-head"><span class="pf-caret">▾</span> <input class="pf-folder-name" value="New Folder"><span class="pf-folder-del" title="Delete folder">✕</span></div><div class="pf-folder-body"></div>';
+    prefabTree.appendChild(f);
+    var inp = f.querySelector('.pf-folder-name');
+    function commit(){ var nm = inp.value || 'New Folder'; inp.parentNode.innerHTML = '<span class="pf-caret">▾</span> <span class="pf-fname">' + nm.replace(/</g,'&lt;') + '</span><span class="pf-folder-del" title="Delete folder">✕</span>'; }
+    inp.addEventListener('keydown', function(e){ if (e.key === 'Enter') { e.preventDefault(); commit(); } });
+    inp.addEventListener('blur', commit);
+    inp.focus(); inp.select();
+  });
+  function findOrCreateUncategorized(){
+    if (!prefabTree) return null;
+    var heads = prefabTree.querySelectorAll('.pf-folder-head');
+    for (var i=0;i<heads.length;i++){ if (heads[i].textContent.indexOf('Uncategorized') !== -1) return heads[i].parentNode; }
+    var f = document.createElement('div'); f.className = 'pf-folder pf-open';
+    f.innerHTML = '<div class="pf-folder-head"><span class="pf-caret">▾</span> <span class="pf-fname">Uncategorized</span><span class="pf-folder-del" title="Delete folder">✕</span></div><div class="pf-folder-body"></div>';
+    prefabTree.appendChild(f); return f;
+  }
+  function deleteFolder(folder){
+    if (!folder) return;
+    var items = folder.querySelectorAll('.pf-item');
+    if (items.length === 0) { folder.remove(); if (typeof toast==='function') toast('Folder deleted','ok'); return; }
+    showConfirm('Move ' + items.length + ' prefab(s) to Uncategorized and delete this folder?', function(){
+      var unc = findOrCreateUncategorized();
+      if (!unc || unc === folder) return;   // can't fold Uncategorized into itself
+      var body = unc.querySelector('.pf-folder-body');
+      var its = folder.querySelectorAll('.pf-item');
+      for (var i=0;i<its.length;i++) body.appendChild(its[i]);
+      folder.remove();
+      if (typeof toast==='function') toast('Folder deleted; ' + its.length + ' prefab(s) moved to Uncategorized','ok');
+    });
+  }
+  // reusable confirm modal
+  var confirmModal = document.getElementById('confirmModal');
+  var confirmCb = null;
+  function showConfirm(msg, onOk){
+    if (!confirmModal) { onOk(); return; }
+    document.getElementById('confirmMsg').textContent = msg;
+    confirmCb = onOk; confirmModal.style.display = 'flex';
+  }
+  if (confirmModal) {
+    document.getElementById('confirmCancel').addEventListener('click', function(){ confirmModal.style.display='none'; confirmCb=null; });
+    document.getElementById('confirmOk').addEventListener('click', function(){ confirmModal.style.display='none'; var cb=confirmCb; confirmCb=null; if (cb) cb(); });
+  }
+  // inline prefab rename (no native prompt)
+  function renamePrefabItem(item){
+    var old = item.textContent;
+    item.setAttribute('draggable','false');
+    item.innerHTML = '<input class="pf-item-name" value="">';
+    var inp = item.querySelector('.pf-item-name'); inp.value = old;
+    function finish(txt){ item.textContent = txt; item.setAttribute('draggable','true'); }
+    inp.addEventListener('keydown', function(e){ if (e.key==='Enter'){ e.preventDefault(); finish(inp.value||old); } else if (e.key==='Escape'){ finish(old); } });
+    inp.addEventListener('blur', function(){ finish(inp.value||old); });
+    inp.focus(); inp.select();
+  }
+  function renameFolder(folder){
+    var lbl = folder.querySelector('.pf-fname'); if (!lbl) return;
+    var name = lbl.textContent;
+    lbl.innerHTML = '<input class="pf-folder-name" value="">';
+    var inp = lbl.querySelector('.pf-folder-name'); inp.value = name;
+    function finish(nm){ lbl.textContent = nm || name; }
+    inp.addEventListener('keydown', function(e){ if (e.key==='Enter'){ e.preventDefault(); finish(inp.value); } else if (e.key==='Escape'){ finish(name); } });
+    inp.addEventListener('blur', function(){ finish(inp.value); });
+    inp.focus(); inp.select();
+  }
+  // card actions (mockup)
+  var prefabLoadBtn = document.getElementById('prefabLoadBtn');
+  if (prefabLoadBtn) prefabLoadBtn.addEventListener('click', function(){
+    if (typeof toast==='function') toast('Loaded "' + (document.getElementById('pcName').value || 'prefab') + '" — click in the editor to place', 'ok');
+  });
+  var prefabDeleteBtn = document.getElementById('prefabDeleteBtn');
+  if (prefabDeleteBtn) prefabDeleteBtn.addEventListener('click', function(){
+    var name = document.getElementById('pcName').value || 'prefab';
+    showConfirm('Delete "' + name + '"?', function(){
+      var sel = prefabTree ? prefabTree.querySelector('.pf-item.selected') : null; if (sel) sel.remove();
+      if (typeof toast==='function') toast('Deleted "' + name + '"', 'ok');
+    });
+  });
+  // selection-aware Create button (mockup: editorSelCount would come from get_selection in DOOM)
+  var editorSelCount = 5;
+  function updateCreateBtn(){
+    var b = document.getElementById('prefabCreateBtn'); if (!b) return;
+    if (editorSelCount > 0){ b.disabled = false; b.textContent = 'Create from selection (' + editorSelCount + ')'; b.removeAttribute('title'); }
+    else { b.disabled = true; b.textContent = 'Create from selection'; b.setAttribute('title', 'Select entities in the editor first'); }
+  }
+  updateCreateBtn();
+  var npSelInfo = document.getElementById('npSelInfo');
+  if (pcCreateBtn) pcCreateBtn.addEventListener('click', function(){ if (npSelInfo) npSelInfo.textContent = 'From ' + editorSelCount + ' selected ' + (editorSelCount === 1 ? 'entity' : 'entities'); });
+  // right-click menu on prefab items (reuses the entities #ctxmenu)
+  if (prefabTree) prefabTree.addEventListener('contextmenu', function(e){
+    var fhead = e.target.closest('.pf-folder-head');
+    if (fhead) {
+      e.preventDefault();
+      var folder = fhead.parentNode;
+      ctx.innerHTML = '';
+      addCtx('Rename', function(){ renameFolder(folder); });
+      addCtx('Delete', function(){ deleteFolder(folder); });
+      ctx.style.left = e.pageX + 'px'; ctx.style.top = e.pageY + 'px'; ctx.style.display = 'block';
+      return;
+    }
+    var item = e.target.closest('.pf-item'); if (!item) return;
+    e.preventDefault();
+    prefabTree.querySelectorAll('.pf-item.selected').forEach(function(s){ s.classList.remove('selected'); });
+    item.classList.add('selected');
+    ctx.innerHTML = '';
+    addCtx('Load / Place', function(){ if (typeof toast==='function') toast('Loaded "' + item.textContent + '" — click to place', 'ok'); });
+    addCtx('Rename', function(){ renamePrefabItem(item); });
+    addCtx('Move to Uncategorized', function(){ var unc = findOrCreateUncategorized(); if (unc) unc.querySelector('.pf-folder-body').appendChild(item); });
+    addCtx('Open in Explorer', function(){ if (typeof toast==='function') toast('Opening prefabs folder...', 'ok'); });
+    addCtx('Delete', function(){ item.remove(); if (typeof toast==='function') toast('Deleted', 'ok'); });
+    ctx.style.left = e.pageX + 'px'; ctx.style.top = e.pageY + 'px'; ctx.style.display = 'block';
+  });
+
+  // suppress WebView2's / the browser's default right-click menu everywhere (our own menus still show
+  // because their handlers run first). Ctrl+V still works in fields; only the native menu is gone.
+  document.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+  // create-from-selection prompt (mockup)
+  var pcModal = document.getElementById('prefabCreateModal');
+  function showPrefabModal(s){ if (pcModal) pcModal.style.display = s ? 'flex' : 'none'; }
+  var pcCreateBtn = document.getElementById('prefabCreateBtn');
+  if (pcCreateBtn) pcCreateBtn.addEventListener('click', function(){ showPrefabModal(true); document.getElementById('npName').focus(); });
+  var npCancel = document.getElementById('npCancel');
+  if (npCancel) npCancel.addEventListener('click', function(){ showPrefabModal(false); });
+  var npCreate = document.getElementById('npCreate');
+  if (npCreate) npCreate.addEventListener('click', function(){
+    var name = document.getElementById('npName').value || 'New Prefab';
+    var bodies = prefabTree ? prefabTree.querySelectorAll('.pf-folder-body') : [];
+    var target = bodies.length ? bodies[bodies.length - 1] : null;   // drop into the last folder (Uncategorized)
+    if (target) {
+      var item = document.createElement('div');
+      item.className = 'pf-item'; item.setAttribute('draggable', 'true'); item.textContent = name;
+      target.appendChild(item);
+      target.parentNode.classList.add('pf-open');
+    }
+    showPrefabModal(false);
+    document.getElementById('npName').value=''; document.getElementById('npDesc').value=''; document.getElementById('npTags').value='';
+    if (typeof toast === 'function') toast('Created "' + name + '"', 'ok');
   });
 
   post({cmd:'refresh'});

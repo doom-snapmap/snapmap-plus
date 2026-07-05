@@ -458,25 +458,21 @@ static LRESULT CALLBACK PocWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SIZE: if (g_controller) { RECT rc; GetClientRect(hwnd, &rc); g_controller->put_Bounds(rc); } return 0;
     case WM_CLOSE: return 0;   /* inert: don't let the user close the UI while in the editor (would need a map reload) */
     case WM_NCCALCSIZE:
-        /* frameless: consume the whole non-client area so the client (WebView2) fills the window and the
-         * native title bar is gone. WS_THICKFRAME is kept so Aero Snap + maximize still work. */
-        if (wp) return 0;
-        break;
-    case WM_GETMINMAXINFO: {
-        /* a frameless maximize would cover the taskbar -- clamp it to the monitor work area. */
-        MINMAXINFO *mmi = (MINMAXINFO *)lp;
-        HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        MONITORINFO mi; mi.cbSize = sizeof(mi);
-        if (GetMonitorInfoW(mon, &mi)) {
-            mmi->ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left;
-            mmi->ptMaxPosition.y = mi.rcWork.top  - mi.rcMonitor.top;
-            mmi->ptMaxSize.x      = mi.rcWork.right  - mi.rcWork.left;
-            mmi->ptMaxSize.y      = mi.rcWork.bottom - mi.rcWork.top;
-            mmi->ptMaxTrackSize.x = mmi->ptMaxSize.x;
-            mmi->ptMaxTrackSize.y = mmi->ptMaxSize.y;
+        /* frameless: consume the non-client area so the client (WebView2) fills the window and the native
+         * title bar is gone. WS_THICKFRAME stays so Aero Snap + maximize work; the default maximize sizing
+         * already respects the taskbar. When MAXIMIZED, Windows adds the resize-frame overhang beyond the
+         * work area, so inset the client by that frame or the top/bottom clip off-screen. */
+        if (wp) {
+            if (IsZoomed(hwnd)) {
+                NCCALCSIZE_PARAMS *p = (NCCALCSIZE_PARAMS *)lp;
+                int fx = GetSystemMetrics(SM_CXFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+                int fy = GetSystemMetrics(SM_CYFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+                p->rgrc[0].left += fx; p->rgrc[0].right -= fx;
+                p->rgrc[0].top  += fy; p->rgrc[0].bottom -= fy;
+            }
+            return 0;
         }
-        return 0;
-    }
+        break;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);   /* MUST be W: ANSI DefWindowProcA truncates the wide caption to "S" */
 }
@@ -487,8 +483,13 @@ static void poc_create_window()
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW); wc.lpszClassName = L"SnapHakStudioWebView";
     wc.style = CS_NOCLOSE;   /* remove the native close (X) button -- can't close the UI from the editor */
     RegisterClassExW(&wc);
-    g_hwnd = CreateWindowExW(0, L"SnapHakStudioWebView", L"SnapHak Studio",
+    g_hwnd = CreateWindowExW(0, L"SnapHakStudioWebView", L"Snapmap+",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1040, 720, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    /* force a frame recalculation now so WM_NCCALCSIZE strips the title bar BEFORE the window is first
+     * shown -- otherwise the native frame lingers until the first resize/move. */
+    if (g_hwnd)
+        SetWindowPos(g_hwnd, nullptr, 0, 0, 0, 0,
+                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     poc_logf("window created (hwnd=%lu)", (unsigned long)(uintptr_t)g_hwnd);
 }
 static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventArgs *args)
@@ -573,6 +574,13 @@ static HRESULT on_controller_created(HRESULT result, ICoreWebView2Controller *co
     g_controller = controller; g_controller->AddRef();
     g_controller->get_CoreWebView2(&g_webview);
     if (!g_webview) { poc_log("get_CoreWebView2 null"); return E_FAIL; }
+    { /* disable WebView2's default (browser) right-click menu app-wide; our own menus are HTML. */
+        ICoreWebView2Settings *settings = nullptr;
+        if (SUCCEEDED(g_webview->get_Settings(&settings)) && settings) {
+            settings->put_AreDefaultContextMenusEnabled(FALSE);
+            settings->Release();
+        }
+    }
     RECT rc; GetClientRect(g_hwnd, &rc); g_controller->put_Bounds(rc);
     EventRegistrationToken tok;
     g_webview->add_WebMessageReceived(Callback<ICoreWebView2WebMessageReceivedEventHandler>(on_message).Get(), &tok);
