@@ -30,6 +30,16 @@ class+inherit pair is **refused** ("Save refused: incompatible class+inherit com
 than written, and any access violation that still slips through is caught by the fault-shield
 (below). So the faithful "no full check" stance is preserved, but the catastrophic case is fenced off.
 
+### Create-from-selection requires hovering a selected entity
+The engine's own `populate()` (the `+0xb0` serialize-selection body) refuses to run unless the
+editor is currently hovering an entity that's part of the selection — it prints its own message,
+`"Failed to create prefab: not hovering entity in selection."`, and returns failure rather than
+populating the temp prefab. This was initially mistaken for a clone bug (see
+[`backend-changes.md`](backend-changes.md) for the actual crash root-causes it got tangled up with)
+but is a genuine, faithfully-carried-over engine requirement, confirmed once those crashes were
+fixed. The webview UI checks for it up front (the hovered-id slot, `+0x198`) and surfaces an
+accurate "hover over an entity first" message instead of a crash or a misleading generic one.
+
 ## Fixed (the original was wrong; the clone is now right)
 
 ### `bsb` no longer pops `MessageBoxA("FUCK","fuckedy")`

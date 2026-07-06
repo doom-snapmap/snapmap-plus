@@ -82,7 +82,21 @@
  * needs at least ~0x590+ bytes, ~2.6x the old allocation. The old size was a silent stack-buffer overflow
  * on every create-from-selection call (writes landing on valid stack memory just past our buffer -- not a
  * clean AV, so neither the fault-shield VEH nor our own SEH guard ever caught it; this is what crashed
- * DOOM outright). Bumped to 0x2000 for comfortable headroom over the confirmed-required size. */
+ * DOOM outright). Bumped to 0x2000 for comfortable headroom over the confirmed-required size.
+ *
+ * PrefabPopulate is a 3-ARG function, not 2 -- CONFIRMED (2026-07-06). The 3rd (R8) is an out int* status/
+ * reason code the engine writes through (seen storing 1, 2, and a cleared 0 on different validation paths).
+ * Our call only ever passed 2 args, so R8 held whatever was left over from the prior call in the sequence
+ * -- an intermittent crash (write through garbage/unmapped R8, e.g. observed 0x10) at two sites inside
+ * PrefabPopulate: +0x2D7 and +0xE91. Fixed by adding the missing out-param and passing a real local's
+ * address so the write always lands somewhere harmless.
+ *
+ * Separately CONFIRMED: not hovering an entity in the selection is a REAL engine requirement, not a red
+ * herring -- with the crash fixed, status code 2 turns out to mean exactly that (the engine prints "Failed
+ * to create prefab: not hovering entity in selection." itself before returning it). So the create flow now
+ * checks the hovered-id slot (+0x198) up front (see poc_apply_create_prefab in snaphak_ui_webview.cpp)
+ * instead of relying on this out-param at all -- simpler, and gives the UI an accurate "not hovering"
+ * result instead of the generic "nothing selected". */
 #define PREFAB_CTOR_RVA        0x54d0a0u   /* idSnapEntityPrefab ctor (OG FUN_180004210 local_6d8 ctor) */
 #define PREFAB_POPULATE_RVA    0x54e410u   /* populate prefab from editor selection (returns char success) */
 #define PREFAB_DTOR_RVA        0x51d870u   /* idSnapEntityPrefab dtor (OG FUN_180004210 cleanup) */
@@ -158,7 +172,7 @@ typedef void  (*buffer_cmd_fn)(void *cmdSys, const char *text);                 
 typedef void  (*add_command_fn)(void *cmdSys, const char *name, void *cb, void *p3,
                                 const char *help, unsigned int flags);                /* AddCommand 0x1aa3630 */
 typedef void  (*prefab_ctor_fn)(void *self);                                          /* PrefabCtor 0x54d0a0 */
-typedef char  (*prefab_populate_fn)(void *self, void *editor);                        /* PrefabPopulate 0x54e410 */
+typedef char  (*prefab_populate_fn)(void *self, void *editor, int *outStatus);        /* PrefabPopulate 0x54e410 */
 typedef void  (*prefab_dtor_fn)(void *self);                                          /* PrefabDtor 0x51d870 */
 
 /* ============================================================ module state (resolved once) ========== */
@@ -899,7 +913,8 @@ static int slot_serialize_selection(sh_iface *self, char *out_json, int cap)
 
     __try {
         g_prefab_ctor(prefab); prefab_ctored = 1;
-        char populated = g_prefab_populate(prefab, (void *)ed);   /* fill from editor selection */
+        int populateStatus = 0;
+        char populated = g_prefab_populate(prefab, (void *)ed, &populateStatus);   /* fill from editor selection */
         if (populated & 0xff) {
             g_node_ctor(node7, SER_TAG_KIND);   node7_ctored = 1;
             g_node_ctor(outTree, SER_TREE_KIND); tree_ctored = 1;

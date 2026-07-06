@@ -186,6 +186,7 @@ behavior change with stale docs will be sent back. Use this map:
 | a console command, cvar, SnapStack op, or GUI tab (`src/backend/`, `src/ui/`) | [`docs/capabilities.md`](capabilities.md) — the feature inventory |
 | the object model, the think-loop, the interface vtable, or the backend↔frontend boundary | [`docs/architecture.md`](architecture.md) |
 | a deliberately-reproduced original quirk, or a sanctioned divergence | [`docs/fidelity.md`](fidelity.md) |
+| a correctness bugfix in the shared `src/backend/` engine-call layer (not a fidelity divergence -- our own code was wrong) | [`docs/backend-changes.md`](backend-changes.md) |
 | the shipped file set / the Qt runtime / what's deliberately dropped (`package.ps1`) | [`docs/packaging.md`](packaging.md) |
 | the install / update / uninstall flow, its flags, or release channels (`installer/`) | [`installer/README.md`](../installer/README.md) and, if user-facing, the top-level [`README.md`](../README.md) |
 | the build, test, or contribution process | this file (`docs/contributing.md`) |

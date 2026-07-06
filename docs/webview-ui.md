@@ -125,35 +125,15 @@ dispatch, which keeps them off the re-entrant callback and on the main-thread ex
 
 ## Known limitations / TODO
 
-- **Create from selection: FIXED (2026-07-06).** `serialize_selection` (+0xb0) used to hard-crash DOOM
-  outright. Root cause: `apply_engine.c`'s `PREFAB_TEMP_SIZE` (was `0x220`, "generous" per the old comment)
-  was far too small for the real `idSnapEntityPrefab` object -- the ctor chain writes fields past `+0x590`
-  into the temp object, a stack buffer overflow on every call. Because the overwritten bytes land on valid,
-  mapped stack memory (just not memory meant for this object), it was never a clean access violation, so
-  neither the fault-shield VEH nor our own SEH guard ever caught it -- that's why it crashed DOOM outright
-  instead of failing gracefully. Fixed by bumping `PREFAB_TEMP_SIZE` to `0x2000`. The Qt Prefabs tab was
-  always a "Coming soon" stub (see `sh_tabs.cpp`), so this backend path had never been exercised by either
-  frontend before this webview UI's first real call into it.
-- **Create from selection: a SEPARATE, intermittent crash remains -- likely tied to 3D-view HOVER state,
-  not selection size/complexity.** Initially looked size-related (first repro was a large ~60-entity
-  selection), but a second test round disproved that: the *identical* tiny 2-entity selection both
-  succeeded and failed across repeated attempts with no reselection in between. The user's own empirical
-  finding: hovering the mouse over one of the selected entities in the 3D view right before clicking
-  Create makes it reliably succeed; not hovering anything reliably fails. Two distinct crash locations seen
-  so far inside the engine's `populate()` function (base `+0x54e410`), both a `c0000005 ACCESS_VIOLATION`
-  reading near-null address `0x10`, both caught cleanly by the fault-shield (recovers by exiting the
-  editor to the menu, not crashing DOOM outright):
-  - `+0x54e6e7` = `populate()+0x2D7` (from the first, size-theory test round)
-  - `+0x54f2a1` = `populate()+0xE91` (from the second, hover-theory test round)
-  Working theory: `populate()` reads the selection object's separate `hovered_id` field (see
-  `slot_hovered_id`, `selObj+0x2c`) unconditionally and dereferences through it without a
-  "nothing hovered" sentinel check -- consistent with the `addr=0x10` near-null signature and with hover
-  state (not selection content) determining success/failure. Not yet confirmed, and the two offsets
-  aren't reconciled against each other -- possible the first (size-theory) repro was actually the same
-  hover-state issue and the tester simply wasn't hovering an entity at the time. No UI hint/workaround
-  added deliberately -- the hover behavior isn't reliable/consistent enough yet to tell users to rely on
-  it. Deferred (time-constrained); needs further investigation to confirm what `populate()` dereferences,
-  and more create-from-selection testing generally.
+- **Create from selection: two crash bugs -- FIXED (2026-07-06).** `serialize_selection` (+0xb0) used to
+  hard-crash DOOM outright (an undersized `PREFAB_TEMP_SIZE` stack buffer), then, once that was fixed, crash
+  intermittently inside the engine's `populate()` (a missing 3rd call argument). Full root-cause writeup:
+  [`backend-changes.md`](backend-changes.md#2026-07-06--apply_enginec-prefab-create-from-selection-crashes).
+  Fixing the second bug also surfaced a genuine, non-bug engine requirement: Create-from-selection needs the
+  editor to be hovering a selected entity (see [`fidelity.md`](fidelity.md)). The webview UI now checks the
+  hovered-id slot (+0x198) up front before attempting create, so it can show an accurate "hover over an
+  entity first" result instead of the old misleading "nothing selected" toast or a crash -- the Create modal
+  also has an inline tip to that effect.
 - **Load / Place is a separate, simpler gap: not yet implemented (not a crash).** The plan is `apply_edit`
   kind=2 (stage into the paste slot, `PasteInstantiate`, enter grab mode) mirroring the working
   Timeline-spawn precedent, plus an auto-`clear_selection` first so nothing else is selected when the

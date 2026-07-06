@@ -74,7 +74,7 @@ static volatile bool g_cam_write_once = false;   /* a committed field edit -> wr
 
 static volatile bool g_pending_create_prefab = false;
 static std::string   g_create_prefab_name;
-static int           g_create_result = 0;        /* 1 ok; 0 empty editor selection; -1 resolve/serialize/write failure */
+static int           g_create_result = 0;        /* 1 ok; 0 empty editor selection; 2 not hovering an entity in selection; -1 resolve/serialize/write failure */
 static int           g_last_selcount = -1;       /* last broadcast editor-selection count (Create-button gating) */
 
 static volatile bool g_pending_delete_prefab = false;
@@ -416,14 +416,26 @@ static int poc_serialize_selection_raw(char *buf, int cap)
 }
 /* Create-from-selection: resolve the file path (+0xc0), serialize the CURRENT editor selection (+0xb0,
  * same slot the Qt sh_prefab_create_clicked uses), fwrite it. g_create_result: 1 ok, 0 nothing was
- * selected (serialize returned empty), -1 resolve/serialize/write failure. Real prefabs on disk run up
- * to ~370 KB (Sync Entities for Demons.json), so the scratch buffer is generously sized at 4 MB. */
+ * selected (serialize returned empty), 2 not hovering an entity in the selection, -1 resolve/serialize/
+ * write failure. Real prefabs on disk run up to ~370 KB (Sync Entities for Demons.json), so the scratch
+ * buffer is generously sized at 4 MB.
+ *
+ * The hover check (+0x198) is a real, CONFIRMED (2026-07-06) engine requirement, not a UI nicety: the
+ * engine's own PrefabPopulate refuses to run without a hovered entity in the selection (it prints
+ * "Failed to create prefab: not hovering entity in selection." itself). Checking it here up front, before
+ * ever touching serialize_selection, gives an accurate result code instead of the generic "nothing
+ * selected" for what is actually a distinct failure. */
 static void poc_apply_create_prefab()
 {
     g_create_result = -1;
     { char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: START name='%s'", g_create_prefab_name.c_str()); poc_log(l); }
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->resolve_prefab_path || !g_iface->vtbl->serialize_selection || g_create_prefab_name.empty()) {
         poc_log("create-prefab: ABORT (iface/slot/name missing)");
+        return;
+    }
+    if (g_iface->vtbl->hovered_id && g_iface->vtbl->hovered_id(g_iface) < 0) {
+        poc_log("create-prefab: ABORT (not hovering an entity in the selection)");
+        g_create_result = 2;
         return;
     }
     char path[1024]; path[0] = '\0';

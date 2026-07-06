@@ -331,6 +331,7 @@
   <div class="modal">
     <div class="modal-title">Create prefab from selection</div>
     <div class="muted" id="npSelInfo" style="margin-bottom:4px;">From 5 selected entities</div>
+    <div class="muted" style="margin-bottom:8px;font-size:0.9em;">Tip: hover your mouse over one of the selected entities in the 3D view before clicking Create -- the editor requires it.</div>
     <label>Name</label><input type="text" id="npName" placeholder="e.g. AirLock Door">
     <label>Description</label><textarea id="npDesc" placeholder="Optional"></textarea>
     <label>Tags</label><input type="text" id="npTags" placeholder="Optional, comma-separated">
@@ -721,6 +722,7 @@
     } else if (d.kind === 'createPrefabResult') {
       if (d.result === 1) toast('Created "' + d.name + '"', 'ok');
       else if (d.result === 0) toast('Nothing selected in the editor -- select entities first', 'warn');
+      else if (d.result === 2) toast('Hover over one of the selected entities in the 3D view, then try again', 'warn');
       else toast('Could not create "' + d.name + '" (see log)', 'err');
     } else if (d.kind === 'deletePrefabResult') {
       if (d.result === 1) {
