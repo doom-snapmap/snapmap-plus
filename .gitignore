@@ -14,3 +14,6 @@ dist/
 
 # Local Claude Code config (per-machine; not part of the public package)
 .claude/
+
+# Personal local-dev convenience script (not for upstream)
+/sync-and-build-webview.ps1
