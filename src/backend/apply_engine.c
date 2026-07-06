@@ -89,10 +89,12 @@
  * (tagged for per-build re-derive, exactly like the editor singleton).
  *
  * PREFAB_TEMP_SIZE was previously 0x220, based on the OG local_6d8 frame slot (0x210 bytes) -- CONFIRMED
- * (2026-07-06) far too small for the real idSnapEntityPrefab object's actual constructor chain. The old
- * size was a silent stack-buffer overflow on every create-from-selection call (writes landing on valid
- * stack memory just past our buffer -- not a clean AV, so neither the fault-shield VEH nor our own SEH
- * guard ever caught it; this is what crashed DOOM outright). Bumped to 0x2000 for comfortable headroom. */
+ * (2026-07-06) far too small: the ctor at +0x54d0a0 writes its own fields up to ~+0x118 then makes a
+ * small forward call into a SECOND, larger ctor that keeps writing fields past +0x590 -- the real object
+ * needs at least ~0x590+ bytes, ~2.6x the old allocation. The old size was a silent stack-buffer overflow
+ * on every create-from-selection call (writes landing on valid stack memory just past our buffer -- not a
+ * clean AV, so neither the fault-shield VEH nor our own SEH guard ever caught it; this is what crashed
+ * DOOM outright). Bumped to 0x2000 for comfortable headroom over the confirmed-required size. */
 #define PREFAB_CTOR_RVA        0x54d0a0u   /* idSnapEntityPrefab ctor (OG FUN_180004210 local_6d8 ctor) */
 #define PREFAB_POPULATE_RVA    0x54e410u   /* populate prefab from editor selection (returns char success) */
 #define PREFAB_DTOR_RVA        0x51d870u   /* idSnapEntityPrefab dtor (OG FUN_180004210 cleanup) */
