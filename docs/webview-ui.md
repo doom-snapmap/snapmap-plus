@@ -63,9 +63,9 @@ The frontend holds no engine addresses; it calls the backend only through the vt
 | Installed version readout | reads `%LOCALAPPDATA%\open-snaphak\install.json` (written by the installer) |
 | Deselect (explicit button, "Select in 3D editor" mode) | `clear_selection` +0x148 |
 | Live "Create from selection (N)" button count | `get_selection` +0x150, polled every ~330 ms independent of the sync checkboxes |
-| Prefabs list, detail pane, delete/rename, folders (create/rename/delete/move) | `resolve_prefab_path` +0xc0 only -- pure Win32 file/directory ops (`FindFirstFileA`, `DeleteFileA`, `MoveFileA`, `CreateDirectoryA`, `RemoveDirectoryA`) on the resolved path. No other engine slot involved, so none of this can hit the +0xb0 crash below. |
-| Create from selection -- **BLOCKED, see Known limitations** | `serialize_selection` +0xb0 (hard-crashes DOOM on this build) |
-| Load / Place -- **deferred, see Known limitations** | would need `apply_edit` kind=2 (stage + `PasteInstantiate` + enter grab mode), blocked on the same crash |
+| Prefabs list, detail pane, delete/rename, folders (create/rename/delete/move) | `resolve_prefab_path` +0xc0 only -- pure Win32 file/directory ops (`FindFirstFileA`, `DeleteFileA`, `MoveFileA`, `CreateDirectoryA`, `RemoveDirectoryA`) on the resolved path. No other engine slot involved, unaffected by the +0xb0 issues below. |
+| Create from selection | `serialize_selection` +0xb0 -- works for normal selections; see Known limitations for a remaining intermittent edge case |
+| Load / Place -- **not yet implemented, see Known limitations** | would need `apply_edit` kind=2 (stage + `PasteInstantiate` + enter grab mode) |
 
 Heavy engine writes (Save, Delete, Select-in-editor) are snapshotted in the JS message callback and
 applied on the next think-loop frame under the loop mutex -- mirroring the Qt frontend's flag-word
@@ -116,23 +116,46 @@ dispatch, which keeps them off the re-entrant callback and on the main-thread ex
     to the root list, then removes the now-empty directory). Folders render above root-level items.
   - Filter/search box narrows the list client-side over the last real fetch (same pattern as the Entities
     tab's filter); folders with zero matches are hidden while filtering, with a "No matches." empty state.
-  - "Create from selection" and "Load / Place" are visible but intentionally neutered to a "coming soon"
-    toast -- see Known limitations for why.
+  - "Create from selection" works end-to-end (see Known limitations for a remaining intermittent edge
+    case). "Load / Place" is still a "coming soon" toast -- not yet implemented.
+  - Live "Create from selection (N)" button count and the create modal's "From N selected entities" text
+    both track the real editor selection continuously (two separate display bugs fixed: the count used to
+    silently cap at 64 regardless of the real selection size, and the modal text never updated at all --
+    it was stuck on its original static placeholder).
 
 ## Known limitations / TODO
 
-- **Create from selection / Load-Place are BLOCKED on a backend crash, not a frontend gap.**
-  `serialize_selection` (+0xb0) hard-crashes DOOM -- confirmed via `webview_poc.log`: the last durable log
-  line is immediately before the +0xb0 call, and neither the fault-shield VEH nor the frontend's own SEH
-  guard catches anything, meaning it's a stack/heap fault inside the engine's prefab ctor/populate/
-  serialize/render chain, not a clean access violation. The Qt Prefabs tab was always a "Coming soon" stub
-  (see `sh_tabs.cpp`), so this backend path has *never* been exercised by either frontend -- this webview
-  attempt was the first real call. The frontend code for both features is written and correct (native
-  `poc_apply_create_prefab` with step-by-step logging, the JS create modal + overwrite guard, the planned
-  `PasteInstantiate` + grab-mode flow for Load/Place mirroring the working Timeline-spawn precedent) but
-  both buttons are neutered to a safe "coming soon" toast until the backend's prefab RVAs are fixed/
-  re-derived (expected as part of the mentioned backend rewrite). Delete/Rename/Folders are unaffected --
-  they're pure Win32 file ops through `resolve_prefab_path` (+0xc0) only, no `serialize_selection` involved.
+- **Create from selection: FIXED (2026-07-06).** `serialize_selection` (+0xb0) used to hard-crash DOOM
+  outright. Root cause: `apply_engine.c`'s `PREFAB_TEMP_SIZE` (was `0x220`, "generous" per the old comment)
+  was far too small for the real `idSnapEntityPrefab` object -- a stack buffer overflow on every call.
+  Because the overwritten bytes land on valid, mapped stack memory (just not memory meant for this
+  object), it was never a clean access violation, so neither the fault-shield VEH nor our own SEH guard
+  ever caught it -- that's why it crashed DOOM outright instead of failing gracefully. Fixed by bumping
+  `PREFAB_TEMP_SIZE` to `0x2000`. The Qt Prefabs tab was always a "Coming soon" stub (see `sh_tabs.cpp`),
+  so this backend path had never been exercised by either frontend before this webview UI's first real
+  call into it.
+- **Create from selection: a SEPARATE, intermittent crash remains -- likely tied to 3D-view HOVER state,
+  not selection size/complexity.** Initially looked size-related (first repro was a large ~60-entity
+  selection), but a second test round disproved that: the *identical* tiny 2-entity selection both
+  succeeded and failed across repeated attempts with no reselection in between. The user's own empirical
+  finding: hovering the mouse over one of the selected entities in the 3D view right before clicking
+  Create makes it reliably succeed; not hovering anything reliably fails. Two distinct crash locations seen
+  so far inside the engine's `populate()` function, both a `c0000005 ACCESS_VIOLATION` reading a near-null
+  address, both caught cleanly by the fault-shield (recovers by exiting the editor to the menu, not
+  crashing DOOM outright). Working theory: `populate()` reads the selection object's separate `hovered_id`
+  field (see `slot_hovered_id`, `selObj+0x2c`) unconditionally and dereferences through it without a
+  "nothing hovered" sentinel check -- consistent with the near-null crash signature and with hover state
+  (not selection content) determining success/failure. Not yet confirmed, and the two crash locations
+  aren't reconciled against each other -- possible the first (size-theory) repro was actually the same
+  hover-state issue and the tester simply wasn't hovering an entity at the time. No UI hint/workaround
+  added deliberately -- the hover behavior isn't reliable/consistent enough yet to tell users to rely on
+  it. Deferred (time-constrained); needs further investigation to confirm what `populate()` dereferences,
+  and more create-from-selection testing generally.
+- **Load / Place is a separate, simpler gap: not yet implemented (not a crash).** The plan is `apply_edit`
+  kind=2 (stage into the paste slot, `PasteInstantiate`, enter grab mode) mirroring the working
+  Timeline-spawn precedent, plus an auto-`clear_selection` first so nothing else is selected when the
+  placed prefab lands. Delete/Rename/Folders are unaffected by any of the above -- they're pure Win32 file
+  ops through `resolve_prefab_path` (+0xc0) only, no `serialize_selection` or `populate()` involved.
 - **Timelines / Timeline Editor** tab is not ported (the Qt frontend has it, and per `sh_timeline.cpp` even
   the OG Qt behavior has a faithfully-reproduced "Create New Timeline" brokenness). Deferred.
 - **Push to stack 0** is a stub: the SnapStack subsystem (`snapstack.cpp`) is Qt-bound and its consuming

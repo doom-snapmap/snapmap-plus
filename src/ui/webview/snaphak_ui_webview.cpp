@@ -1067,9 +1067,10 @@ static void poc_think_loop()
                 if (sig != g_last_list_sig) { g_last_list_sig = sig; poc_emit_list(n, rdy); }
 
                 /* live editor-selection COUNT, independent of "Follow editor selection" -- the Prefabs tab's
-                 * "Create from selection (N)" button needs this regardless of sync mode. */
-                int selids[64];
-                int sn = poc_get_selection(selids, 64);
+                 * "Create from selection (N)" button needs this regardless of sync mode. POC_MAX_ENTS (not
+                 * a fresh 64-cap) since a selection can't exceed the total entity list, already capped there. */
+                static int selids[POC_MAX_ENTS];
+                int sn = poc_get_selection(selids, POC_MAX_ENTS);
                 if (sn != g_last_selcount) {
                     g_last_selcount = sn;
                     wchar_t m[64]; _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"selCount\",\"count\":%d}", sn);

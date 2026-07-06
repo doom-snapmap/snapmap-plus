@@ -1071,7 +1071,6 @@
   }
   updateCreateBtn();
   var npSelInfo = document.getElementById('npSelInfo');
-  if (pcCreateBtn) pcCreateBtn.addEventListener('click', function(){ if (npSelInfo) npSelInfo.textContent = 'From ' + editorSelCount + ' selected ' + (editorSelCount === 1 ? 'entity' : 'entities'); });
   // right-click menu on prefab items (reuses the entities #ctxmenu)
   if (prefabTree) prefabTree.addEventListener('contextmenu', function(e){
     var fhead = e.target.closest('.pf-folder-head');
@@ -1105,12 +1104,10 @@
   // create-from-selection prompt (mockup)
   var pcModal = document.getElementById('prefabCreateModal');
   function showPrefabModal(s){ if (pcModal) pcModal.style.display = s ? 'flex' : 'none'; }
-  // Create from selection is deferred: the engine serialize path (serialize_selection +0xb0) hard-crashes
-  // DOOM on this build (backend prefab machinery never validated). Keep the live selection count for
-  // feedback, but the button reports the status instead of opening the modal until the backend is fixed.
   var pcCreateBtn = document.getElementById('prefabCreateBtn');
   if (pcCreateBtn) pcCreateBtn.addEventListener('click', function(){
-    toast('Create from selection is coming soon (needs a backend fix)', 'warn');
+    if (npSelInfo) npSelInfo.textContent = 'From ' + editorSelCount + ' selected ' + (editorSelCount === 1 ? 'entity' : 'entities');
+    showPrefabModal(true); document.getElementById('npName').focus();
   });
   var npCancel = document.getElementById('npCancel');
   if (npCancel) npCancel.addEventListener('click', function(){ showPrefabModal(false); });

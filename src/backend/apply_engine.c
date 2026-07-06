@@ -86,12 +86,17 @@
  * then populated from the editor via `(DAT_18003e120 + 0x54e410)(temp, editor)`; on success it is reflection-
  * serialized as "idSnapEntityPrefab" + tree-rendered to JSON. The two prefab fns are jumptable/inline-prone
  * leaves the byte-sig scanner cannot reliably anchor, so they resolve by FALLBACK RVA off g_doom_base
- * (tagged for per-build re-derive, exactly like the editor singleton). The temp-prefab struct size is taken
- * generous (the OG local_6d8 frame slot is 0x210 bytes; we alloc 0x220 zeroed). */
+ * (tagged for per-build re-derive, exactly like the editor singleton).
+ *
+ * PREFAB_TEMP_SIZE was previously 0x220, based on the OG local_6d8 frame slot (0x210 bytes) -- CONFIRMED
+ * (2026-07-06) far too small for the real idSnapEntityPrefab object's actual constructor chain. The old
+ * size was a silent stack-buffer overflow on every create-from-selection call (writes landing on valid
+ * stack memory just past our buffer -- not a clean AV, so neither the fault-shield VEH nor our own SEH
+ * guard ever caught it; this is what crashed DOOM outright). Bumped to 0x2000 for comfortable headroom. */
 #define PREFAB_CTOR_RVA        0x54d0a0u   /* idSnapEntityPrefab ctor (OG FUN_180004210 local_6d8 ctor) */
 #define PREFAB_POPULATE_RVA    0x54e410u   /* populate prefab from editor selection (returns char success) */
 #define PREFAB_DTOR_RVA        0x51d870u   /* idSnapEntityPrefab dtor (OG FUN_180004210 cleanup) */
-#define PREFAB_TEMP_SIZE       0x220       /* generous sizeof(temp idSnapEntityPrefab) */
+#define PREFAB_TEMP_SIZE       0x2000      /* was 0x220 -- confirmed too small, see comment above */
 #define PASTE_INSTANTIATE_RVA  0x54f950u   /* PasteInstantiate FUN_14054f950: void(prefab=editor+0x209a8, editor)
                                             * -- instantiate the staged prefab into the live map + AddToSelection,
                                             * camera-relative grab placement; does NOT consume the slot. The
