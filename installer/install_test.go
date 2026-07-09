@@ -22,7 +22,7 @@ func TestInstallUninstallRoundTrip(t *testing.T) {
 	writeF(t, filepath.Join(doom, "DOOMx64vk.exe"), "exe")
 	writeF(t, filepath.Join(doom, "XINPUT1_3.dll"), "ORIGINAL")
 
-	// a synthetic dist with a MANIFEST.sha256 (matches package.ps1's "hash  relpath" format)
+	// a synthetic dist with a MANIFEST.sha256 (matches package-qt.ps1's "hash  relpath" format)
 	overlay := map[string]string{
 		"XINPUT1_3.dll": "backend",
 		filepath.Join("snaphak", "snaphakui.dll"):  "ui",

@@ -1,7 +1,7 @@
 # package-webview.ps1 -- assemble the deployable Qt-free WebView2 SnapHak overlay into dist\ (the tree you
 # drop into a DOOM install). Pure ASCII (PS 5.1 reads BOM-less UTF-8 as 1252).
 #
-# Unlike package.ps1 (the Qt frontend variant, which also bundles the Qt 5.9.9 runtime DLLs), this ships
+# Unlike package-qt.ps1 (the Qt frontend variant, which also bundles the Qt 5.9.9 runtime DLLs), this ships
 # ONLY the two clone DLLs -- the WebView2 frontend has no Qt dependency and uses the system-installed
 # WebView2 runtime (preinstalled on Windows 11; evergreen on most Windows 10) at run time, so there is
 # nothing else to bundle.
@@ -16,11 +16,13 @@ $here  = Split-Path -Parent $MyInvocation.MyCommand.Path   # open-snaphak\
 $build = Join-Path $here "build"
 $dist  = Join-Path $here "dist"
 
-# --- consume build\ : both clone DLLs must be present ---
+# --- consume build\ : both clone DLLs must be present. The webview frontend lands in build\webview\
+#     (kept separate from build\qt\, which package-qt.ps1 reads instead -- both frontends build a file
+#     literally named snaphakui.dll, so a shared build\ path would let one silently overwrite the other). ---
 $backendDll = Join-Path $build "XINPUT1_3.dll"
-$uiDll      = Join-Path $build "snaphakui.dll"
+$uiDll      = Join-Path $build "webview\snaphakui.dll"
 foreach ($d in @($backendDll, $uiDll)) {
-    if (-not (Test-Path $d)) { throw "missing $(Split-Path -Leaf $d) in build\ -- run src\backend\build.ps1 and src\ui\build-webview.ps1 first." }
+    if (-not (Test-Path $d)) { throw "missing $d -- run build-webview.ps1 first (repo root; builds backend + webview frontend together)." }
 }
 
 # --- refuse a -Diag (troubleshooting) backend: it is self-labelled DO NOT DISTRIBUTE. The diagnostic

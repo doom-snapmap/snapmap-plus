@@ -1,5 +1,5 @@
 # run-tests.ps1 -- compile + run SnapHak's C unit tests with MSVC (x64). Pure ASCII.
-# Needs Build Tools for Visual Studio 2022 (C++ workload) -- the same toolchain build.ps1 uses.
+# Needs Build Tools for Visual Studio 2022 (C++ workload) -- the same toolchain the build scripts use.
 #
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
@@ -45,11 +45,11 @@ $fail = 0
 foreach ($t in $tests) {
     $exe = Join-Path $obj ($t.name + ".exe")
     # Output paths are RELATIVE (cwd=tests via cd /d) -- a quoted absolute path with a trailing backslash
-    # is the cmd `\"` footgun build.ps1 documents (cl D8036). obj\ exists (created above); names have no spaces.
+    # is the cmd `\"` footgun the build scripts document (cl D8036). obj\ exists (created above); names have no spaces.
     $cl  = "cl /nologo /O2 /MT /I..\src\backend /I..\src\fault_shield $($t.src) /Fe:obj\$($t.name).exe /Foobj\"
     $log = Join-Path $obj ($t.name + ".build.log")
     # vcvars64.bat prints a spurious 'vswhere not recognized' line to stderr; gate on cl's real exit only
-    # (the same cmd /c pattern build.ps1 uses) instead of letting that stderr trip $ErrorActionPreference.
+    # (the same cmd /c pattern the build scripts use) instead of letting that stderr trip $ErrorActionPreference.
     cmd /c "cd /d `"$here`" && `"$vcvars`" && $cl > `"$log`" 2>&1"
     if ($LASTEXITCODE -ne 0) { Get-Content $log | Write-Host; Write-Host "[FAIL] compile $($t.name)"; $fail++; continue }
     if ($t.arg) { & $exe $t.arg } else { & $exe }

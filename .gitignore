@@ -1,5 +1,6 @@
-# Build artifacts -- the source is the deliverable; the DLLs are rebuilt via build.ps1,
-# and the deployable overlay bundle is assembled into dist/ by package.ps1.
+# Build artifacts -- the source is the deliverable; the DLLs are rebuilt via build-backend.ps1 /
+# build-qt.ps1 / build-webview.ps1, and the deployable overlay bundle is assembled into dist/ by
+# package-qt.ps1 (Qt) or package-webview.ps1 (webview).
 build/
 dist/
 *.obj

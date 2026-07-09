@@ -29,8 +29,11 @@ snaphak help
 - **`--doom <path>`** — the DOOM install dir (the folder with `DOOMx64vk.exe`). If omitted, the installer
   auto-detects it from your Steam libraries (reads `SteamPath` from the registry, scans
   `libraryfolders.vdf` for the library holding appid `379720`, and verifies `DOOMx64vk.exe` is there).
-- **`--local <dist-dir>`** — install from a local `dist/` tree (built by the repo's `package.ps1`) instead of
-  downloading. This is the contributor / local-test path.
+- **`--local <dist-dir>`** — install from a local `dist/` tree (built by the repo's `package-qt.ps1` for the Qt
+  frontend, or `package-webview.ps1` for the experimental webview one -- see
+  [`docs/webview-ui.md`](../docs/webview-ui.md)) instead of downloading. This is the contributor / local-test
+  path. The installer reads whatever files `MANIFEST.sha256` lists and installs exactly those -- it has no
+  hardcoded assumption about which frontend's bundle shape it's given.
 - **`--release <tag>`** — install a specific release version instead of the latest.
 - **`--beta`** — install the latest **beta** (pre-release) instead of the latest stable.
 
@@ -71,4 +74,4 @@ Then `snaphak update --beta` (and any install/update) authenticates with it. The
 **Contents: read-only**. Once the repo is public, no token is needed.
 
 (The release path goes live once the first GitHub Release is published; until then, use `--local <dist>` to
-install from a local `package.ps1` build.)
+install from a local `package-qt.ps1` / `package-webview.ps1` build.)

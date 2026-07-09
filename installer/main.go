@@ -29,8 +29,8 @@ Usage:
 Options:
   --doom <path>       The DOOM install dir (the folder with DOOMx64vk.exe).
                       Auto-detected from your Steam libraries if omitted.
-  --local <dist-dir>  Install from a local dist/ tree (built by package.ps1) instead of
-                      downloading a release.
+  --local <dist-dir>  Install from a local dist/ tree (built by package-qt.ps1 or
+                      package-webview.ps1) instead of downloading a release.
   --release <tag>     Install a specific release version instead of the latest.
   --beta              Install the latest beta (pre-release) instead of the latest stable.
   --no-self           With "update": don't also update snaphak.exe itself (overlay only).

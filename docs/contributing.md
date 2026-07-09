@@ -62,7 +62,7 @@ installer, so get it from the offline archive:
 2. Run it (a free Qt account may be required). In the component tree, tick **"MSVC 2017 64-bit"** under
    Qt 5.9.9.
 3. Install to the default `C:\Qt`. The build expects **`C:\Qt\5.9.9\msvc2017_64`**; if you install elsewhere,
-   pass `-QtDir <path>` to `build.ps1` / `package.ps1`.
+   pass `-QtDir <path>` to `build-qt.ps1` / `package-qt.ps1`.
 
 **Go** is only needed to build the installer (`snaphak.exe`); you can skip it if you only touch the DLLs.
 
@@ -83,18 +83,24 @@ cd open-snaphak
 ## 4. Build the DLLs
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File build-qt.ps1
 # If Qt is somewhere other than C:\Qt\5.9.9\msvc2017_64:
-powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1 -QtDir D:\Qt\5.9.9\msvc2017_64
+powershell -NoProfile -ExecutionPolicy Bypass -File build-qt.ps1 -QtDir D:\Qt\5.9.9\msvc2017_64
 ```
 
-This compiles both DLLs into **`build/`**: the backend `XINPUT1_3.dll` and the frontend `snaphakui.dll`.
-`build/` is gitignored. (`build.ps1` first builds the backend, then the Qt frontend.)
+This compiles both DLLs into **`build/`**: the backend `XINPUT1_3.dll` and the frontend
+`build/qt/snaphakui.dll`. `build/` is gitignored. (`build-qt.ps1` first builds the backend, then the
+Qt frontend, so the two never drift out of ABI sync -- see [`architecture.md`](architecture.md).)
+
+Three top-level build scripts exist, one per concern: `build-backend.ps1` (backend only),
+`build-qt.ps1` (backend + the faithful Qt UI, used above and by CI), and `build-webview.ps1`
+(backend + the experimental Qt-free WebView2 UI -- see [`webview-ui.md`](webview-ui.md), not covered
+further in this guide).
 
 ## 5. Package the overlay
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File package.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File package-qt.ps1
 ```
 
 This assembles the deployable **6-file overlay** into **`dist/`**: the two DLLs plus the Qt 5.9.9 runtime
@@ -162,16 +168,24 @@ CI runs the self-contained C tests and the installer tests on every PR; the DOOM
 
 1. **Branch:** `git switch -c fix/steam-path-detection` (or `feature/<thing>`).
 2. **Change** code under `src/` (or `installer/`). Keep each PR focused on one thing.
-3. **Build + package + test in DOOM:** `build.ps1` → `package.ps1` → `snaphak.exe install --local dist`.
+3. **Build + package + test in DOOM:** `build-qt.ps1` → `package-qt.ps1` → `snaphak.exe install --local dist`.
+   **If your change touches `src/backend/`, `src/common/snaphak_iface.h`, or `src/ui/webview/`**, ALSO build
+   + test the experimental webview frontend (`build-webview.ps1` → `package-webview.ps1` → install
+   `--local`) before pushing. CI will catch a break here too (see step 8), but a local round-trip is much
+   faster than waiting on CI, and lets you actually see it working in DOOM rather than just "the build
+   didn't fail." See [`architecture.md`](architecture.md)'s note on the vtable's extension slots for why a
+   backend/frontend version mismatch is a real failure mode, not a theoretical one.
 4. **Run the tests** (section 7) — both the Go and C suites.
 5. **Update the docs** your change affects (section 9).
 6. **Commit** with a clear, imperative message that names the area, e.g.
    `installer: fix Steam library path detection` or `backend: add sh_listwires command`.
 7. **Push** to your fork and open a **pull request against `main`**.
-8. The **CI gate** runs automatically: a security scan (no-new-binaries · capability-surface scan · gitleaks),
-   the Windows build + package, the XInput ordinal-parity check, the C unit tests, and the installer's
-   `gofmt` / `vet` / `test`. It runs in a **secretless** sandbox — fork PRs get a read-only token and zero
-   repo secrets.
+8. The **CI gate** runs automatically, as three parallel jobs: a security scan (no-new-binaries ·
+   capability-surface scan · gitleaks); the Qt path (`build-qt.ps1` / `package-qt.ps1`, a bundle-layout guard,
+   XInput ordinal parity, the C unit tests, and the installer's `gofmt` / `vet` / `test`); and the webview
+   path (`build-webview.ps1` / `package-webview.ps1`, its own bundle guard that also asserts the overlay
+   stayed genuinely Qt-free, and the same ordinal-parity check). It runs in a **secretless** sandbox — fork
+   PRs get a read-only token and zero repo secrets.
 9. A **maintainer reviews** and merges (changes under `.github/`, `*.ps1`, and `installer/` are
    CODEOWNERS-gated). Releases are cut from reviewed, tagged commits — see the README's
    ["Versioning & releases"](../README.md#versioning--releases).
@@ -187,7 +201,7 @@ behavior change with stale docs will be sent back. Use this map:
 | the object model, the think-loop, the interface vtable, or the backend↔frontend boundary | [`docs/architecture.md`](architecture.md) |
 | a deliberately-reproduced original quirk, or a sanctioned divergence | [`docs/fidelity.md`](fidelity.md) |
 | a correctness bugfix in the shared `src/backend/` engine-call layer (not a fidelity divergence -- our own code was wrong) | [`docs/backend-changes.md`](backend-changes.md) |
-| the shipped file set / the Qt runtime / what's deliberately dropped (`package.ps1`) | [`docs/packaging.md`](packaging.md) |
+| the shipped file set / the Qt runtime / what's deliberately dropped (`package-qt.ps1`) | [`docs/packaging.md`](packaging.md) |
 | the install / update / uninstall flow, its flags, or release channels (`installer/`) | [`installer/README.md`](../installer/README.md) and, if user-facing, the top-level [`README.md`](../README.md) |
 | the build, test, or contribution process | this file (`docs/contributing.md`) |
 
@@ -218,7 +232,8 @@ release. **Do not open a public issue for a security problem.** Use GitHub's **p
 | `installer/` | `snaphak.exe` — the Go install / update / uninstall CLI |
 | `tests/` | the C unit tests + `run-tests.ps1` |
 | `docs/` | architecture · fidelity · capabilities · packaging · this guide |
-| `build.ps1` / `package.ps1` | compile the DLLs → `build/` · assemble the overlay → `dist/` |
+| `build-backend.ps1` / `build-qt.ps1` / `build-webview.ps1` | compile the DLLs → `build/` (backend only · backend+Qt · backend+webview) |
+| `package-qt.ps1` / `package-webview.ps1` | assemble the overlay → `dist/` (Qt, with its runtime bundled · webview, no Qt) |
 | `.github/workflows/` | `ci.yml` (the PR gate) · `release.yml` (tag-triggered release) |
 | `LICENSE` | MIT |
 

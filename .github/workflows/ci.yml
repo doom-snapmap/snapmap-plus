@@ -110,15 +110,15 @@ jobs:
         shell: pwsh
         run: |
           # The .ps1 throws on failure (its ErrorActionPreference=Stop) -> a non-zero step exit. Do NOT gate on
-          # $LASTEXITCODE: a pure-cmdlet .ps1 (e.g. package.ps1) runs no native command, so it stays $null and
+          # $LASTEXITCODE: a pure-cmdlet .ps1 (e.g. package-qt.ps1) runs no native command, so it stays $null and
           # "$null -ne 0" is TRUE -> a false failure.
           $ErrorActionPreference = 'Stop'
-          .\build.ps1 -QtDir "$env:QT_ROOT_DIR"
+          .\build-qt.ps1 -QtDir "$env:QT_ROOT_DIR"
       - name: Package the overlay
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          .\package.ps1 -QtDir "$env:QT_ROOT_DIR"
+          .\package-qt.ps1 -QtDir "$env:QT_ROOT_DIR"
       - name: Clean-room bundle guard (layout + Qt self-containment)
         shell: pwsh
         run: |
@@ -179,3 +179,57 @@ jobs:
           go vet ./...;   if ($LASTEXITCODE -ne 0) { throw "go vet failed" }
           go test ./...;  if ($LASTEXITCODE -ne 0) { throw "go test failed" }
           go build -o snaphak.exe .; if ($LASTEXITCODE -ne 0) { throw "go build failed" }
+
+  build-webview:
+    name: Build + test (webview, Windows)
+    # The experimental Qt-free frontend (docs/webview-ui.md). A separate job, not folded into `build`
+    # above, because it shares NOTHING build-wise with the Qt path (no Qt install, no Qt bundle-closure
+    # check) but DOES share the backend + the shared ABI header (src/common/snaphak_iface.h) -- so a PR
+    # that grows the vtable and only gets tested against Qt can still silently break this frontend (see
+    # architecture.md's note on the vtable's extension slots). This job is that missing safety net; the
+    # C unit tests and the installer's gofmt/vet/test are NOT duplicated here since they're identical
+    # regardless of which frontend was built (the `build` job above already covers that ground).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Build backend + webview frontend
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\build-webview.ps1
+      - name: Package the webview overlay
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\package-webview.ps1
+      - name: Clean-room bundle guard (webview layout + genuinely Qt-free)
+        shell: pwsh
+        run: |
+          # The webview bundle is deliberately lean -- just the two clone DLLs, no Qt runtime to bundle
+          # (that's the whole point of this frontend). Assert the required files exist AND that nothing
+          # Qt-shaped snuck in -- a regression here would silently defeat the "Qt-free" value proposition.
+          $ErrorActionPreference = 'Stop'
+          $dist = "dist"
+          $must = @("XINPUT1_3.dll", "snaphak\snaphakui.dll", "MANIFEST.sha256")
+          foreach ($f in $must) {
+            if (-not (Test-Path (Join-Path $dist $f))) { throw "bundle guard: missing $f in dist\" }
+          }
+          if (Test-Path (Join-Path $dist "platforms")) {
+            throw "bundle guard: dist\platforms\ must not exist -- the webview bundle ships no Qt platform plugin"
+          }
+          $present = @(Get-ChildItem -Recurse -File $dist | ForEach-Object { $_.Name.ToLower() })
+          $qtish = $present | Where-Object { $_ -match '^qt5|^qwindows\.dll$' }
+          if ($qtish) {
+            throw "bundle guard: Qt-shaped file(s) found in the webview dist\ ($($qtish -join ', ')) -- this frontend must stay Qt-free"
+          }
+          Write-Host "bundle guard OK: webview layout is the lean 3-file overlay, no Qt runtime present"
+      - name: XInput ordinal parity (must match System32)
+        shell: pwsh
+        run: |
+          $dumpbin = (Get-ChildItem "C:\Program Files*\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1).FullName
+          $ex = & $dumpbin /exports build\XINPUT1_3.dll
+          if (-not ($ex -match '(?m)^\s*2\s.*XInputGetState') -or -not ($ex -match '(?m)^\s*3\s.*XInputSetState')) {
+            $ex | Write-Host
+            throw "XInput ordinals must be 2=GetState, 3=SetState"
+          }
+          Write-Host "ordinals OK (2=GetState, 3=SetState)"

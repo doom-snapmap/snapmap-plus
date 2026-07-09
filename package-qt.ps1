@@ -1,14 +1,15 @@
-# package.ps1 -- assemble the deployable SnapHak overlay into dist\ (the tree you drop into a DOOM install).
-# Pure ASCII (PS 5.1 reads BOM-less UTF-8 as 1252).
+# package-qt.ps1 -- assemble the deployable SnapHak overlay into dist\ (the tree you drop into a DOOM
+# install). Pure ASCII (PS 5.1 reads BOM-less UTF-8 as 1252).
 #
-# This is SnapHak's packaging step: shipping the snaphak\ + platforms\ Qt runtime alongside the two clone
-# DLLs is done here. It consumes the DLLs built by build.ps1 (in build\) and copies the Qt 5.9.9
-# runtime from the Qt SDK. Output is the 6-file overlay documented in docs\packaging.md, plus a
-# MANIFEST.sha256 (the install/verify map + hash transparency for releases).
+# This is SnapHak's packaging step for the Qt frontend: shipping the snaphak\ + platforms\ Qt runtime
+# alongside the two clone DLLs is done here. It consumes the DLLs built by build-qt.ps1 (in build\) and
+# copies the Qt 5.9.9 runtime from the Qt SDK. Output is the 6-file overlay documented in
+# docs\packaging.md, plus a MANIFEST.sha256 (the install/verify map + hash transparency for releases).
+# See package-webview.ps1 for the experimental webview frontend's (much leaner, no-Qt) equivalent.
 #
 # Usage:
-#   powershell -NoProfile -ExecutionPolicy Bypass -File package.ps1
-#   powershell -NoProfile -ExecutionPolicy Bypass -File package.ps1 -QtDir D:\Qt\5.9.9\msvc2017_64
+#   powershell -NoProfile -ExecutionPolicy Bypass -File package-qt.ps1
+#   powershell -NoProfile -ExecutionPolicy Bypass -File package-qt.ps1 -QtDir D:\Qt\5.9.9\msvc2017_64
 param(
     [string]$QtDir = "C:\Qt\5.9.9\msvc2017_64"
 )
@@ -17,18 +18,21 @@ $here  = Split-Path -Parent $MyInvocation.MyCommand.Path   # open-snaphak\
 $build = Join-Path $here "build"
 $dist  = Join-Path $here "dist"
 
-# --- consume build\ : both clone DLLs must be present (built by build.ps1) ---
+# --- consume build\ : both clone DLLs must be present (built by build-qt.ps1). The Qt frontend lands in
+#     build\qt\ (kept separate from build\webview\, which package-webview.ps1 reads instead -- both
+#     frontends build a file literally named snaphakui.dll, so a shared build\ path would let one
+#     silently overwrite the other). ---
 $backendDll = Join-Path $build "XINPUT1_3.dll"
-$uiDll      = Join-Path $build "snaphakui.dll"
+$uiDll      = Join-Path $build "qt\snaphakui.dll"
 foreach ($d in @($backendDll, $uiDll)) {
-    if (-not (Test-Path $d)) { throw "missing $(Split-Path -Leaf $d) in build\ -- run build.ps1 first." }
+    if (-not (Test-Path $d)) { throw "missing $d -- run build-qt.ps1 first." }
 }
 
 # --- refuse a -Diag (troubleshooting) backend: it is self-labelled DO NOT DISTRIBUTE. The diagnostic
 #     logger (shield_diag.c) is the only source of the string "snaphak_crash.dmp"; a release build has none. ---
 $ascii = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($backendDll))
 if ($ascii.Contains("snaphak_crash.dmp")) {
-    throw "build\XINPUT1_3.dll is a -Diag build (DO NOT DISTRIBUTE). Rebuild release with build.ps1 (no -Diag)."
+    throw "build\XINPUT1_3.dll is a -Diag build (DO NOT DISTRIBUTE). Rebuild release with build-backend.ps1 (no -Diag)."
 }
 
 # --- Qt 5.9.9 runtime from the SDK (never committed; copied at package time) ---

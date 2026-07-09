@@ -18,8 +18,8 @@ research; the third-party runtime it links against (Qt, the DOOM engine) is not 
 | `src/ui/` | the frontend DLL (`snaphakui.dll`): the Qt **"SnapHak Studio"** window |
 | `src/common/` | the shared backend↔frontend interface ABI (`snaphak_iface.h`) |
 | `src/fault_shield/` | the recover-in-place vectored-exception fault shield (compiled into the backend) |
-| `build.ps1` | compile both DLLs → `build/` |
-| `package.ps1` | assemble the deployable overlay → `dist/` (the DLLs + the Qt runtime) |
+| `build-backend.ps1` / `build-qt.ps1` / `build-webview.ps1` | compile the DLLs → `build/` (backend only · backend+Qt · backend + the experimental webview UI) |
+| `package-qt.ps1` / `package-webview.ps1` | assemble the deployable overlay → `dist/` (Qt, with its runtime bundled · webview, no Qt) |
 | `installer/` | `snaphak.exe` — the end-user install / update / uninstall CLI (Go) |
 | `docs/` | architecture · fidelity · capabilities · packaging |
 
@@ -44,15 +44,18 @@ auto-detects your DOOM install via Steam, asks you to confirm, and installs. (Fr
 - **Go 1.21+** (only to build the installer)
 
 ```powershell
-# 1. compile both DLLs -> build/
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File build.ps1
+# 1. compile both DLLs -> build/XINPUT1_3.dll + build/qt/snaphakui.dll
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File build-qt.ps1
 
 # 2. assemble the deployable overlay -> dist/ (the 6-file DOOM tree: DLLs + Qt runtime)
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File package.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File package-qt.ps1
 
 # 3. (optional) build the installer
 cd installer ; go build -o snaphak.exe .
 ```
+
+(There's also an experimental Qt-free WebView2 frontend -- `build-webview.ps1` / `package-webview.ps1` --
+see [`docs/webview-ui.md`](docs/webview-ui.md). Not the default; CI still builds the Qt path above.)
 
 ## Deploy a local build (contributors / testing)
 
@@ -108,7 +111,7 @@ build → package → test loop, the pull-request workflow, and the rule that th
 code — is in **[`docs/contributing.md`](docs/contributing.md)**. The short version:
 
 1. **Fork** this repo (or branch, if you have write access).
-2. Make your change under `src/`. Build (`build.ps1`), package (`package.ps1`), and test it in your own DOOM
+2. Make your change under `src/`. Build (`build-qt.ps1`), package (`package-qt.ps1`), and test it in your own DOOM
    via `installer\snaphak.exe install --local dist`.
 3. Open a **pull request** against `main`. The CI gate runs a security scan (no new binaries · capability-surface
    scan · gitleaks), the Windows build + package, the XInput ordinal-parity check, the C unit tests

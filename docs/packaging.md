@@ -1,7 +1,7 @@
 # Packaging — the deployable bundle
 
-`package.ps1` assembles the **deployable overlay** into `dist/`: the two clone DLLs (built by
-`build.ps1`) plus the Qt 5.9.9 runtime, laid out exactly as it drops into a DOOM install. This is the
+`package-qt.ps1` assembles the **deployable overlay** into `dist/`: the two clone DLLs (built by
+`build-qt.ps1`) plus the Qt 5.9.9 runtime, laid out exactly as it drops into a DOOM install. This is the
 artifact an end user installs; `dist/` is gitignored (binaries are never committed — the Qt runtime is
 copied from the contributor's Qt SDK at package time).
 
@@ -10,7 +10,7 @@ copied from the contributor's Qt SDK at package time).
 | File | Source | What |
 |---|---|---|
 | `XINPUT1_3.dll` | `build/` | the backend: XInput proxy + hook layer + cvar-unlock + fault-shield (all merged in) |
-| `snaphak\snaphakui.dll` | `build/` | the frontend: the "SnapHak Studio" Qt window |
+| `snaphak\snaphakui.dll` | `build/qt/` | the frontend: the "SnapHak Studio" Qt window. (The experimental Qt-free webview frontend builds to `build/webview/` instead and packages via `package-webview.ps1` -- see [`webview-ui.md`](webview-ui.md).) |
 | `snaphak\Qt5Core.dll` | Qt SDK | Qt 5.9.9 runtime (5,842,040 B) |
 | `snaphak\Qt5Gui.dll` | Qt SDK | Qt 5.9.9 runtime (6,061,688 B) |
 | `snaphak\Qt5Widgets.dll` | Qt SDK | Qt 5.9.9 runtime (5,599,352 B) |

@@ -60,7 +60,7 @@ func acquireBundle(f flags) (*bundle, func(), error) {
 func loadBundle(root string) (*bundle, error) {
 	f, err := os.Open(filepath.Join(root, "MANIFEST.sha256"))
 	if err != nil {
-		return nil, fmt.Errorf("%q isn't a SnapHak build folder (no MANIFEST.sha256) -- point --local at a dist/ folder built by package.ps1", root)
+		return nil, fmt.Errorf("%q isn't a SnapHak build folder (no MANIFEST.sha256) -- point --local at a dist/ folder built by package-qt.ps1 or package-webview.ps1", root)
 	}
 	defer f.Close()
 
@@ -73,7 +73,7 @@ func loadBundle(root string) (*bundle, error) {
 		}
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
-			return nil, fmt.Errorf("the build's MANIFEST is malformed (%q) -- re-download or rebuild with package.ps1", line)
+			return nil, fmt.Errorf("the build's MANIFEST is malformed (%q) -- re-download or rebuild with package-qt.ps1 / package-webview.ps1", line)
 		}
 		entries = append(entries, manifestEntry{
 			rel:    filepath.FromSlash(fields[1]),
@@ -86,7 +86,7 @@ func loadBundle(root string) (*bundle, error) {
 	for _, e := range entries {
 		got, err := fileSHA256(filepath.Join(root, e.rel))
 		if err != nil {
-			return nil, fmt.Errorf("the build is incomplete -- %s is missing. Rebuild with package.ps1, or re-download", e.rel)
+			return nil, fmt.Errorf("the build is incomplete -- %s is missing. Rebuild with package-qt.ps1 / package-webview.ps1, or re-download", e.rel)
 		}
 		if got != e.sha256 {
 			return nil, fmt.Errorf("integrity check failed on %s (hash mismatch) -- the download may be corrupted or tampered. Try again", e.rel)

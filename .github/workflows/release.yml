@@ -39,10 +39,10 @@ jobs:
         shell: pwsh
         run: |
           # The .ps1 throw on failure (ErrorActionPreference=Stop); do NOT gate on $LASTEXITCODE -- a pure-cmdlet
-          # package.ps1 runs no native command, so it stays $null and "$null -ne 0" is TRUE (a false failure).
+          # package-qt.ps1 runs no native command, so it stays $null and "$null -ne 0" is TRUE (a false failure).
           $ErrorActionPreference = 'Stop'
-          .\build.ps1 -QtDir "$env:QT_ROOT_DIR"
-          .\package.ps1 -QtDir "$env:QT_ROOT_DIR"
+          .\build-qt.ps1 -QtDir "$env:QT_ROOT_DIR"
+          .\package-qt.ps1 -QtDir "$env:QT_ROOT_DIR"
       - name: Build installer (version-stamped)
         shell: pwsh
         working-directory: installer

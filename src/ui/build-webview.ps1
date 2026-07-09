@@ -92,8 +92,13 @@ $libArgs = @(
 ) -join " "
 $implib = $Out -replace '\.dll$', '.lib'
 
+# Output -> build\webview\ (its OWN subfolder, distinct from build\qt\ -- both frontends build a file
+# literally named snaphakui.dll; without separate folders, building one after the other would silently
+# overwrite the other in build\. The backend, XINPUT1_3.dll, has no per-frontend variant and stays
+# directly in build\.)
+New-Item -ItemType Directory -Force (Join-Path $build "webview") | Out-Null
 $cl  = "cl /nologo /LD /O2 /W3 /EHsc /std:c++17 /MD /DWIN32 /D_WINDOWS /Fo..\..\build\obj\uiwv\ " +
-       "$incArgs $srcArgs /Fe:..\..\build\$Out " +
+       "$incArgs $srcArgs /Fe:..\..\build\webview\$Out " +
        "/link /DEF:snaphakui.def /IMPLIB:..\..\build\obj\uiwv\$implib $libArgs"
 $cmd = "cd /d `"$here`" && `"$vcvars`" && $cl"
 
@@ -102,4 +107,4 @@ cmd /c "$cmd > `"$buildLog`" 2>&1"
 $clExit = $LASTEXITCODE
 Get-Content $buildLog | Write-Host
 if ($clExit -ne 0) { throw "cl failed (exit $clExit) -- see $buildLog" }
-Write-Host "built $(Join-Path $build $Out) (Qt-free WebView2 POC)"
+Write-Host "built $(Join-Path $build "webview\$Out") (Qt-free WebView2 POC)"

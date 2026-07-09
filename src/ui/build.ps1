@@ -71,10 +71,13 @@ $libArgs = @(
 
 # C++ Qt build: /LD shared, /EHsc C++ EH, /std:c++17, /MD (match Qt's dynamic CRT), Qt + common
 # includes, the Qt libs, /Fe:snaphakui.dll, /DEF for the OG export ordinal + the sl_* name set.
-# Output -> the TOP-LEVEL open-snaphak\build\ (out of src\), paths RELATIVE to cwd=$here (..\..\ = repo root)
+# Output -> open-snaphak\build\qt\ (its OWN subfolder, distinct from build\webview\ -- both the Qt and
+# webview frontends build a file literally named snaphakui.dll; without separate folders, building one
+# after the other would silently overwrite the other in build\. The backend, XINPUT1_3.dll, has no
+# per-frontend variant and stays directly in build\.). Paths RELATIVE to cwd=$here (..\..\ = repo root)
 # so the quoted-trailing-backslash cmd footgun is avoided; /DEF:snaphakui.def stays cwd-relative.
 $cl  = "cl /nologo /LD /O2 /W3 /EHsc /std:c++17 /MD /DWIN32 /D_WINDOWS /Fo..\..\build\obj\ui\ $incArgs $srcArgs " +
-       "/Fe:..\..\build\$Out /link /DEF:snaphakui.def /IMPLIB:..\..\build\obj\ui\$implib $libArgs"
+       "/Fe:..\..\build\qt\$Out /link /DEF:snaphakui.def /IMPLIB:..\..\build\obj\ui\$implib $libArgs"
 $cmd = "cd /d `"$here`" && `"$vcvars`" && $cl"
 # vcvars64.bat emits a spurious "'vswhere.exe' is not recognized" line on stderr (it probes a bare-PATH
 # vswhere before falling back); under $ErrorActionPreference='Stop' a native-command stderr line can trip
@@ -82,9 +85,10 @@ $cmd = "cd /d `"$here`" && `"$vcvars`" && $cl"
 # gate ONLY on the real signal -- $LASTEXITCODE from `cmd /c`.
 $outDir = Join-Path (Split-Path -Parent (Split-Path -Parent $here)) "build"   # open-snaphak\build (out of src\)
 New-Item -ItemType Directory -Force (Join-Path $outDir "obj\ui") | Out-Null
+New-Item -ItemType Directory -Force (Join-Path $outDir "qt") | Out-Null
 $buildLog = Join-Path $outDir "build.log"
 cmd /c "$cmd > `"$buildLog`" 2>&1"
 $clExit = $LASTEXITCODE
 Get-Content $buildLog | Write-Host
 if ($clExit -ne 0) { throw "cl failed (exit $clExit) -- see $buildLog" }
-Write-Host "built $(Join-Path $outDir $Out)"
+Write-Host "built $(Join-Path $outDir "qt\$Out")"
