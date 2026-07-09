@@ -617,9 +617,18 @@ static int ae_apply_one(int id, const char *patched_text)
             void *inhPtr = *(void * const *)(tmpDef + TDEF_INHERIT_OFF);  /* normalized inherit idStr-data */
             /* the source rebuild carries the EDIT (the temp's canonical source includes the leaf) -- always. */
             g_decl_rebuild(defsub, (const char *)srcPtr, 1);             /* 0x17ae560 */
-            /* class/inherit: with a full entity these are real values; null -> skip (defensive). */
-            if (clsPtr) g_idstr_assign((uint8_t *)defsub + DEFSUB_CLASS_OFF, (const char *)clsPtr);
-            if (inhPtr) g_idstr_assign((uint8_t *)defsub + DEFSUB_INHERIT_OFF, (const char *)inhPtr);
+            /* class/inherit: with a full entity these are real values; null OR EMPTY -> skip (keep the live
+             * defsub value). The empty-string guard is the timeline-save CRASH FIX: a complex componentTimeLine
+             * can make StructDeserialize("idSnapEntity") choke and leave the temp's class/inherit BLANK; without
+             * this guard we idstr_assign "" onto the live entity -> "No class specified"/"inherit = " on the
+             * next map load -> the entity vanishes from the list + Save Map/play crashes (shield: "Couldn't find
+             * map entity in entity palette '' inherit = "). Committing an empty class is never valid for ANY
+             * kind=0 caller (Entities edit / wire-target / timeline), so this guard is universal, not
+             * timeline-specific: keep-live also correctly preserves a placeholder timeline's real inherit
+             * (snapmaps/editor_only/placeholder_target) instead of blanking it. This makes a choked timeline
+             * edit fail SAFE (entity intact, edit didn't apply) rather than fatal. */
+            if (clsPtr && *(const char *)clsPtr) g_idstr_assign((uint8_t *)defsub + DEFSUB_CLASS_OFF, (const char *)clsPtr);
+            if (inhPtr && *(const char *)inhPtr) g_idstr_assign((uint8_t *)defsub + DEFSUB_INHERIT_OFF, (const char *)inhPtr);
             applied = 1;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {

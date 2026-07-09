@@ -6,6 +6,33 @@ where our own reimplementation was wrong, not the original SnapHak's behavior; a
 (or faithful reproduction of) the *original's* behavior belongs in [`fidelity.md`](fidelity.md)
 instead. Entries are chronological, newest first.
 
+## 2026-07-08 — `apply_engine.c`: `ae_apply_one` could commit an empty class/inherit
+
+Found while root-causing a hard crash-to-desktop / hang on returning to the SnapMap editor after
+editing a Timeline, saving, and reloading the map (full investigation, including why the crash
+turned out **not** to be caused by this bug, in [`webview-ui.md`](webview-ui.md)).
+
+`ae_apply_one` (the shared `kind=0` commit body behind Save-to-Decl, Save Timeline, and
+`wire-target`) deserializes the caller's full patched entity JSON onto a temp def, then copies that
+temp def's normalized class/inherit/source back onto the live entity. The class/inherit copy only
+null-checked the pointer (`if (clsPtr) ...`), not the string it pointed to — if the engine's own
+`StructDeserialize` ever populated the temp def with a **non-null pointer to an empty string** (a
+real, observed case, though not the one that turned out to matter for the Timeline crash — see
+`webview-ui.md`), the guard let it through and committed `""` onto the live entity's classname or
+inherit. A blank class/inherit is never valid; the next full map load fails with the engine's own
+`"No class specified"` / `"Couldn't find map entity in entity palette '' inherit = "` and the entity
+is unrecoverable.
+
+**Fix:** the guard now also checks the first byte of the string
+(`if (clsPtr && *(const char *)clsPtr) ...`, same for inherit) — an empty result is treated the same
+as a null one and simply skipped (keep the live value), rather than committed. This degrades a choked
+deserialize into "the edit didn't apply, entity intact" instead of "entity destroyed." Universal
+across all three `kind=0` callers, not Timeline-specific — a blank class/inherit is never the right
+outcome for any of them. Also confirmed to correctly *preserve* a non-standard inherit (e.g.
+`snapmaps/editor_only/placeholder_target`) rather than requiring or defaulting to anything, unlike
+the original's own Timeline-commit path, which hardcodes `inherit = "snapmaps/unknown"` on every
+save (see `fidelity.md`) — the clone's keep-live behavior is strictly safer here.
+
 ## 2026-07-06 — `apply_engine.c`: `APPLY_TEXT_CAP` silently truncated large prefabs on Load/Place
 
 Once Load/Place (staging via `kind=1`/mkcmd) was wired up and exercised against real prefab files,

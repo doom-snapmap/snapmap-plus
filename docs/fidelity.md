@@ -40,6 +40,26 @@ but is a genuine, faithfully-carried-over engine requirement, confirmed once tho
 fixed. The webview UI checks for it up front (the hovered-id slot, `+0x198`) and surfaces an
 accurate "hover over an entity first" message instead of a crash or a misleading generic one.
 
+### A freshly placed/reclassed Timeline needs a map save+reload before it accepts data
+Placing (or reclassing) an `idTarget_Timeline`/`idEncounterManager` entity produces something that
+*looks* fully real — it shows in the Timelines list, opens to a normal (empty) editor — but Save
+Timeline silently does nothing on the very first attempt, every time, regardless of content.
+**Save the map, reload it once, and it works from then on** — confirmed to hold indefinitely across
+repeated edit/save/reload cycles afterward, with no further crash or corruption. Copy/paste (the
+previous workaround for the same "won't save" symptom) is a *different*, unsafe path — it also
+"unblocks" the entity, but was independently confirmed (via a hard crash reproduced identically in
+`snaphak_ui_webview.cpp`'s clone **and** the genuine, unmodified original SnapHak 2 Beta tool) to
+corrupt something that only surfaces much later, typically on the next full map reload. **Avoid
+copy/paste for Timelines; use save+reload instead.**
+
+This was extensively investigated as a suspected clone bug this session — live Ghidra disassembly of
+the engine's `PasteInstantiate` (the native Ctrl+V handler, a large multi-field entity clone) and
+`DeclSourceRebuild`, plus direct testing against the real, unmodified SnapHak 2 Beta and v1.3.1 tools
+— before concluding it is a genuine, pre-existing engine/tool limitation around how a just-instantiated
+entity's internal state settles, not something introduced by the clone. Full investigation trail in
+[`webview-ui.md`](webview-ui.md); the exact internal mechanism (what specifically a save+reload fixes)
+remains un-RE'd — flagged as an open item, not a settled root cause.
+
 ## Fixed (the original was wrong; the clone is now right)
 
 ### `bsb` no longer pops `MessageBoxA("FUCK","fuckedy")`

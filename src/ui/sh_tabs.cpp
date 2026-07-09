@@ -625,15 +625,16 @@ static void apply_entity_state(ShWinController *win)
      * fields, guard-bypassed -- so a cross-family MORPH applies instead of being rejected at its invalid
      * intermediate. The +0x40 rebuild + the re-assert are GATED on r != 0: on a REJECTED fatal pair (r==0)
      * feeding the fatal new headers (save_decl_text) to DeclSourceRebuild would re-introduce the unrecoverable
-     * reparse fault the guard just prevented, so we SKIP the rebuild + re-assert. displayname (+0x128) is an
-     * independent field -- it always lands (now after the pair instead of between class+inherit; inert). The
-     * r==-1 legacy branch (slot absent / old backend) keeps the prior unconditional behavior. */
+     * reparse fault the guard just prevented, so we SKIP the rebuild + re-assert. BUGFIX (contributor-reported,
+     * matched in the webview's poc_apply_save): displayname (+0x128) used to be unguarded and always land, even
+     * on a refused pair -- a partial apply on a "failed" save. It's now GATED behind r!=0 too, so a refusal is
+     * fully atomic: nothing lands until the pair is accepted. The r==-1 legacy branch (slot absent / old
+     * backend) keeps the prior unconditional behavior (no guard exists there to gate against). */
     int r = iface_apply_class_inherit(iface, id, win->save_classname, win->save_inherit);  /* +0x268 */
     if (r == -1) {                                              /* slot absent (old backend) -> legacy guarded */
         iface_set_classname(iface, id, win->save_classname);    /* +0x78 */
         iface_set_inherit(iface, id, win->save_inherit);        /* +0x80 */
     }
-    iface_set_displayname(iface, id, win->save_displayname);    /* +0x128 (unguarded; always lands) */
     if (r != 0) {                                              /* applied (1) or legacy (-1): rebuild + re-assert */
         iface_rebuild_declsource(iface, id, win->save_decl_text);   /* +0x40 Save-to-Decl route */
         /* re-assert AFTER the rebuild so the explicit boxes win over the rebuild's re-emitted headers. */
@@ -642,7 +643,7 @@ static void apply_entity_state(ShWinController *win)
             iface_set_classname(iface, id, win->save_classname);    /* +0x78 */
             iface_set_inherit(iface, id, win->save_inherit);        /* +0x80 */
         }
-        iface_set_displayname(iface, id, win->save_displayname);    /* +0x128 re-assert */
+        iface_set_displayname(iface, id, win->save_displayname);    /* +0x128 (only lands here now -- gated on r != 0) */
         /* a Save-to-Decl className change can add/remove this entity from the Timelines filter, and a displayName
          * change updates its list label -- both leave entity_count UNCHANGED, so the count-gated poll misses them.
          * Force a list re-scan so the Entities + Timelines lists reflect the edit without a manual Refresh (Task B). */
