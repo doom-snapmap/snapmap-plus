@@ -33,6 +33,9 @@
 #include "WebView2.h"
 #include "snaphak_iface.h"
 #include "mockup_html.h"
+#include "../sh_entity_desc.h" /* GENERATED: OUR RE-extracted Inherit/Classname descriptions (same table sh_tabs.cpp uses) */
+#include "../sh_event_catalog.h" /* GENERATED: OUR event-def catalog, 1611 events (same table sh_timeline.cpp uses) */
+#include "../sh_entity_asset_lists.h" /* GENERATED: OUR per-entity-class model/anim asset lists (same table sh_timeline.cpp uses) */
 
 using namespace Microsoft::WRL;
 
@@ -111,11 +114,42 @@ static volatile bool g_pending_move_prefab = false;
 static std::string   g_move_prefab_name, g_move_prefab_from, g_move_prefab_to;
 static int           g_move_prefab_result = 0;      /* 1 ok; 0 MoveFile failed (dest name collision); -1 resolve failed */
 
+/* Timelines Stage 2: OPEN a timeline -> serialize the entity (+0xc8) and ship its raw JSON to the page, which
+ * JSON.parses it and walks entityDef.state.edit.componentTimeLine/encounterComponent (same shape the Qt
+ * tl_collect_from_decl parses). Serialize is an engine touch -> done in the think-loop drain under the loop
+ * mutex, like the prefab ops. */
+static volatile bool g_pending_open_timeline = false;
+static int           g_open_timeline_eid = -1;
+static int           g_tl_json_len = 0;             /* bytes serialized into g_tl_json this drain (0 = failed) */
+
+/* Timelines Stage 3: resolve one entity's class (for the asset dropdowns) -- same deferred-to-drain shape as
+ * opening a timeline, but a separate eid/len pair (see poc_serialize_entity_into's buffer-separation note). */
+static volatile bool g_pending_resolve_entity = false;
+static int           g_resolve_entity_eid = -1;
+static int           g_resolve_json_len = 0;
+
+/* Timelines Stage 5 (Save): the page ships the FULL patched entity JSON (fresh-reserialized by the page
+ * itself via a plain openTimeline round-trip, then patched client-side -- see mockup.html's doSaveTimeline)
+ * -- committed via apply_edit kind=0 (the SAME "deserialize patched_text -> commit" path the prefab
+ * kind=1/mkcmd flow already uses in this file, just id-targeted instead of paste-targeted). */
+static volatile bool g_pending_save_timeline = false;
+static int           g_save_timeline_eid = -1;
+static std::string   g_save_timeline_json;          /* UTF-8; the page's JSON.stringify output, already fully patched */
+static int           g_save_timeline_result = 0;     /* 1 ok, 0 apply_edit refused/failed */
+
 #define POC_MAX_ENTS 8192
 #define POC_ID_CAP   384
 #define POC_NAME_CAP 192
 struct PocEnt { int eid; char id[POC_ID_CAP]; char name[POC_NAME_CAP]; int hidden; };
 static PocEnt *g_ents = nullptr;
+
+/* Timelines list: dual-added from the entity walk (OG quirk, sh_tabs.cpp populate_one_entity). Filled by
+ * poc_rescan_timelines, which runs ONLY when the cheap entities signature changed (same cadence as the OG's
+ * sh_rebuild_entity_list) -- never a fixed timer, and never touches classname on every poll. */
+#define POC_MAX_TLS 2048
+struct PocTl { int eid; char id[POC_ID_CAP]; char name[POC_NAME_CAP]; };
+static PocTl *g_tls = nullptr;
+static int    g_tl_count = 0;
 
 /* ------------------------------------------------------------------ tiny file log ------------------ */
 static void poc_log(const char *msg)
@@ -291,6 +325,38 @@ static int poc_collect(int *out_ready)
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
     return n;
 }
+/* Rescan g_ents[0..n) for Timelines and refill g_tls/g_tl_count. Called ONLY when the cheap entities-list
+ * signature just changed (mirrors the OG sh_rebuild_entity_list cadence -- NOT a fixed timer). Reads the
+ * classname of EVERY entity, exactly like the OG populate_one_entity (sh_tabs.cpp), and dual-adds any
+ * idTarget_Timeline / idEncounterManager into the Timelines list (the OG quirk -- both classes, so encounter
+ * managers show too). The classname read was live-debug-proven a clean pure-memory pointer walk
+ * (ent->+0x158->+0x60), so it's cheap + safe; the per-call SEH guard keeps one bad entity from aborting the
+ * rescan. (An earlier version pre-filtered on the id-string containing "unknown"/"placeholder_target" to save
+ * calls, but that skipped idEncounterManager -- whose inherit is neither -- so it's dropped in favor of the
+ * faithful "read every entity's class" behavior.) */
+static void poc_rescan_timelines(int n)
+{
+    int tn = 0;
+    if (!g_tls || !g_iface || !g_iface->vtbl || !g_iface->vtbl->get_classname_copy) { g_tl_count = 0; return; }
+    for (int i = 0; i < n && tn < POC_MAX_TLS; i++) {
+        if (g_ents[i].hidden) continue;   /* dev-layer hidden -> excluded from BOTH lists, matching the OG quirk */
+        char clsbuf[128]; clsbuf[0] = 0;
+        const char *c = NULL;
+        __try {
+            c = g_iface->vtbl->get_classname_copy(g_iface, g_ents[i].eid, clsbuf, sizeof clsbuf);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            c = NULL;
+            poc_logf("poc_rescan_timelines: get_classname_copy FAULTED for id=%lu (skipped)", (unsigned long)g_ents[i].eid);
+        }
+        if (c && (strcmp(c, "idTarget_Timeline") == 0 || strcmp(c, "idEncounterManager") == 0)) {
+            g_tls[tn].eid = g_ents[i].eid;
+            strncpy_s(g_tls[tn].id, POC_ID_CAP, g_ents[i].id, _TRUNCATE);
+            strncpy_s(g_tls[tn].name, POC_NAME_CAP, g_ents[i].name, _TRUNCATE);
+            tn++;
+        }
+    }
+    g_tl_count = tn;
+}
 static bool poc_collect_state(int id, char *decl, int dcap, char *cls, int ccap, char *inh, int icap, char *dnm, int ncap)
 {
     bool ok = false; decl[0] = cls[0] = inh[0] = dnm[0] = 0;
@@ -358,7 +424,10 @@ static void poc_apply_save()
             if (g_iface->vtbl->set_classname) g_iface->vtbl->set_classname(g_iface, id, g_save_class.c_str());
             if (g_iface->vtbl->set_inherit)   g_iface->vtbl->set_inherit(g_iface, id, g_save_inherit.c_str());
         }
-        if (g_iface->vtbl->set_entity_0x170) g_iface->vtbl->set_entity_0x170(g_iface, id, g_save_dname.c_str());
+        /* BUGFIX (contributor-reported): displayname used to be written HERE, unconditionally -- so a REJECTED
+         * class+inherit pair (r==0) still silently landed the displayname, a partial apply on a "failed" save.
+         * Moved inside the r!=0 branch below so a refusal is fully atomic: nothing lands until the pair is
+         * accepted. */
         if (r != 0) {
             if (g_iface->vtbl->rebuild_set_declsource) g_iface->vtbl->rebuild_set_declsource(g_iface, id, g_save_decl.c_str());
             int r2 = -1;
@@ -381,6 +450,55 @@ static void poc_apply_deletes()
                 if (id >= 0) g_iface->vtbl->selection_guard(g_iface, id);
             }
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
+}
+/* Timelines Stage 2: serialize an entity (+0xc8) into a caller-supplied buffer. SEH-guarded, no engine
+ * exceptions escape. Returns bytes written (0 = failed / no slot / SEH). Shared by the timeline-open path
+ * (g_tl_json below) and the entity-inherit-resolution path (Stage 3 asset dropdowns, g_resolve_json) -- two
+ * SEPARATE buffers, not one shared one, so a resolve request mid-timeline-open can't clobber the open's data
+ * if both land in the same think-loop drain. */
+static int poc_serialize_entity_into(int id, char *buf, int cap)
+{
+    int n = 0;
+    __try {
+        if (g_iface && g_iface->vtbl && g_iface->vtbl->serialize_entity && id >= 0)
+            n = g_iface->vtbl->serialize_entity(g_iface, id, buf, cap - 1);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { n = 0; }
+    if (n < 0) n = 0;
+    if (n > cap - 1) n = cap - 1;
+    buf[n] = 0;
+    return n;
+}
+/* Timelines Stage 2: serialize the timeline entity itself. Timeline entities are far smaller than prefabs,
+ * but a 1 MB buffer is comfortably safe for a heavily-authored one. */
+static char g_tl_json[1024 * 1024];
+static int poc_serialize_entity_raw(int id) { return poc_serialize_entity_into(id, g_tl_json, (int)sizeof g_tl_json); }
+/* Post {kind:"timelineData", eid, ok, json:"<the serialized entity JSON, escaped>"}. The page JSON.parses
+ * `json` and walks entityDef.state.edit.componentTimeLine / encounterComponent itself (the entity JSON is
+ * valid JSON -- the Qt side parses the identical bytes with QJsonDocument). */
+static void poc_emit_timeline_data(int eid, int json_len)
+{
+    if (!g_webview) return;
+    bool ok = json_len > 0;
+    std::wstring m = L"{\"kind\":\"timelineData\",\"eid\":"; m += std::to_wstring(eid);
+    m += L",\"ok\":"; m += ok ? L"true" : L"false";
+    m += L",\"json\":\""; if (ok) m += poc_json_w(g_tl_json); m += L"\"}";
+    g_webview->PostWebMessageAsJson(m.c_str());
+}
+/* Timelines Stage 3 (per-entity asset dropdowns): resolve the CLASS (entityDef.inherit) of the "Runs on"
+ * entity of an event-tab -- NOT the timeline entity itself. Reuses the same serialize_entity call, into its
+ * OWN buffer (see poc_serialize_entity_into's comment). The page JSON.parses the result and reads .entityDef
+ * .inherit itself (matches tl_entity_inherit_slug's "serialize + read one field" approach, but ships the
+ * whole doc rather than adding a second raw-string field-scanner in C++ -- one parsing path, not two). */
+static char g_resolve_json[1024 * 1024];
+static int poc_serialize_entity_resolve(int id) { return poc_serialize_entity_into(id, g_resolve_json, (int)sizeof g_resolve_json); }
+static void poc_emit_entity_inherit(int eid, int json_len)
+{
+    if (!g_webview) return;
+    bool ok = json_len > 0;
+    std::wstring m = L"{\"kind\":\"entityInherit\",\"eid\":"; m += std::to_wstring(eid);
+    m += L",\"ok\":"; m += ok ? L"true" : L"false";
+    m += L",\"json\":\""; if (ok) m += poc_json_w(g_resolve_json); m += L"\"}";
+    g_webview->PostWebMessageAsJson(m.c_str());
 }
 /* "Select in editor": drive the 3D editor selection from the list -- clear, then add each. (+0x148/+0x138)
  * BRACKETED LOGGING: a hang (not a crash -- the backend slots are SEH-guarded) leaves the last line on
@@ -569,6 +687,21 @@ static void poc_apply_load_prefab()
     char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: name='%s' staged=%d", g_load_prefab_name.c_str(), g_load_result);
     poc_log(l);
 }
+/* Timelines Stage 5 (Save): kind=0 (deserialize the FULL patched entity JSON -> temp def -> commit
+ * class/inherit/source on `id`) -- the SAME apply_edit path as kind=1 above, just id-targeted instead of
+ * paste-targeted. The page already did the hard part (fresh-reserialize + JSON-patch the componentTimeLine/
+ * encounterComponent field, matching Qt's tl_patch_component); this is purely "hand the opaque blob to the
+ * engine and report whether it took." */
+static void poc_apply_save_timeline()
+{
+    g_save_timeline_result = 0;
+    if (g_save_timeline_eid < 0 || g_save_timeline_json.empty()) return;
+    if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->apply_edit) { poc_log("save-timeline: ABORT (iface/slot missing)"); return; }
+    sh_apply_item it; it.kind = 0; it.id = g_save_timeline_eid; it.text = g_save_timeline_json.c_str();
+    g_save_timeline_result = poc_apply_edit_seh(&it, 1, "save-timeline");
+    char l[128]; _snprintf_s(l, sizeof l, _TRUNCATE, "save-timeline: eid=%d ok=%d", g_save_timeline_eid, g_save_timeline_result);
+    poc_log(l);
+}
 /* Move a prefab from one folder to another (drag-and-drop target): MoveFileA across the two resolved
  * paths. Refuses to overwrite an existing same-named file at the destination (JS pre-checks too). */
 static void poc_apply_move_prefab()
@@ -646,7 +779,7 @@ static uint64_t poc_list_sig(int n)
 static void poc_emit_list(int n, int ready)
 {
     if (!g_webview || !g_ents) return;
-    std::wstring json; json.reserve((size_t)n * 96 + 96);
+    std::wstring json; json.reserve((size_t)(n + g_tl_count) * 96 + 96);
     json += L"{\"kind\":\"list\",\"version\":\""; json += poc_json_w(g_version.c_str());
     json += L"\",\"editorReady\":"; json += ready ? L"true" : L"false";
     json += L",\"count\":"; json += std::to_wstring(n);
@@ -659,13 +792,25 @@ static void poc_emit_list(int n, int ready)
         json += L"\",\"hidden\":"; json += g_ents[i].hidden ? L"true" : L"false";
         json += L"}";
     }
+    json += L"],\"timelines\":[";
+    for (int i = 0; i < g_tl_count; i++) {
+        if (i) json += L",";
+        json += L"{\"eid\":"; json += std::to_wstring(g_tls[i].eid);
+        json += L",\"id\":\""; json += poc_json_w(g_tls[i].id);
+        json += L"\",\"name\":\""; json += poc_json_w(g_tls[i].name);
+        json += L"\"}";   /* close the "name" string BEFORE the object brace (the missing \" was the empty-list bug) */
+    }
     json += L"]}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 static void poc_send_list()
 {
     int ready = 0; int n = poc_collect(&ready);
-    g_last_list_sig = poc_list_sig(n);
+    uint64_t sig = poc_list_sig(n);
+    /* the one get_classname_copy call site (the Timeline rescan) rides the SAME "did the cheap entities
+     * signature change" gate as the OG's sh_rebuild_entity_list -- not a fixed timer. */
+    if (sig != g_last_list_sig) poc_rescan_timelines(n);
+    g_last_list_sig = sig;
     poc_emit_list(n, ready);
 }
 static void poc_send_state(int id, bool autoflag)
@@ -707,6 +852,140 @@ static void poc_send_enum(int classes, const char *inherit)
             emitted++;
         }
         p += len + 1;
+    }
+    json += L"]}";
+    g_webview->PostWebMessageAsJson(json.c_str());
+}
+/* Run enum_decls_of_resclass (+0x110) into buf. SEH-guarded, no C++ objects -- split out from
+ * poc_send_arg_resclass below because MSVC (C2712) forbids __try in a function that also has a C++ object
+ * (std::wstring/std::string) requiring unwind cooperation, same reason poc_run_enum is split from
+ * poc_send_enum. */
+static int poc_run_arg_resclass(const char *resClass, char *buf, int cap, int *pcount)
+{
+    int r = 0; *pcount = 0; if (cap >= 2) { buf[0] = 0; buf[1] = 0; }
+    __try {
+        if (g_iface && g_iface->vtbl && g_iface->vtbl->enum_decls_of_resclass && resClass && resClass[0])
+            r = g_iface->vtbl->enum_decls_of_resclass(g_iface, resClass, buf, cap, pcount);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { r = 0; *pcount = 0; }
+    return r;
+}
+/* Timelines Stage 3 (DECL + ENUM arg widgets): the valid-values list for ONE decl resource-class or ONE
+ * engine enum type, via the SAME shared +0x110 slot the Qt clone's tl_iface_enum_decls uses for both --
+ * decl args pass the reduced short-name ("sound"), enum args pass the raw catalog type verbatim
+ * ("fxCondition_t"). A shifted-build offset or unknown resClass degrades to an empty list (the combo then
+ * falls back to a plain editable box, faithful to the OG/Qt behavior). */
+static void poc_send_arg_resclass(const char *resClass)
+{
+    if (!g_webview) return;
+    int count = 0;
+    poc_run_arg_resclass(resClass, g_enumbuf, (int)sizeof g_enumbuf, &count);
+    if (count < 0) count = 0;
+    std::wstring json = L"{\"kind\":\"argResclass\",\"resClass\":\""; json += poc_json_w(resClass ? resClass : ""); json += L"\",\"items\":[";
+    const char *p = g_enumbuf;
+    const char *end = g_enumbuf + sizeof g_enumbuf;
+    int emitted = 0;
+    for (int i = 0; i < count && p < end; i++) {
+        size_t len = strnlen(p, (size_t)(end - p));
+        if (len > 0) {
+            if (emitted) json += L",";
+            std::string s(p, len);
+            json += L"\""; json += poc_json_w(s.c_str()); json += L"\"";
+            emitted++;
+        }
+        p += len + 1;
+    }
+    json += L"]}";
+    g_webview->PostWebMessageAsJson(json.c_str());
+}
+/* CLONE EXTENSION: the Entities-tab Inherit/Classname description panel -- same source table + name->desc
+ * lookup as the Qt clone's es_lookup_desc (sh_tabs.cpp), reused here so both frontends read one canonical
+ * generated table (sh_entity_desc.h) instead of duplicating the text. */
+static const ShEntDesc *poc_lookup_desc(const std::string &name)
+{
+    static std::map<std::string, const ShEntDesc *> *idx = nullptr;
+    if (!idx) {
+        idx = new std::map<std::string, const ShEntDesc *>();
+        for (int i = 0; i < SH_ENTITY_DESCS_N; i++) (*idx)[SH_ENTITY_DESCS[i].name] = &SH_ENTITY_DESCS[i];
+    }
+    if (name.empty()) return nullptr;
+    auto it = idx->find(name);
+    return it == idx->end() ? nullptr : it->second;
+}
+static void poc_json_desc_obj(std::wstring &json, const ShEntDesc *d)
+{
+    if (!d) { json += L"null"; return; }
+    json += L"{\"summary\":\"";    json += poc_json_w(d->summary);    json += L"\"";
+    json += L",\"confidence\":\""; json += poc_json_w(d->confidence); json += L"\"";
+    json += L",\"source\":\"";     json += poc_json_w(d->source);     json += L"\"}";
+}
+static void poc_send_desc(const char *inherit, const char *classname)
+{
+    if (!g_webview) return;
+    std::wstring json = L"{\"kind\":\"desc\",\"inherit\":";
+    poc_json_desc_obj(json, poc_lookup_desc(inherit ? inherit : ""));
+    json += L",\"class\":";
+    poc_json_desc_obj(json, poc_lookup_desc(classname ? classname : ""));
+    json += L"}";
+    g_webview->PostWebMessageAsJson(json.c_str());
+}
+/* Timelines Stage 3: the full event-def catalog, sent ONCE per session (like enumInherits' full list) --
+ * the page caches it and filters client-side, same "first N shown, type to narrow" Combo() convention as
+ * Inherit/Classname. Each event carries its arg SCHEMA (name+type per position, matching sh_timeline.cpp's
+ * ShEvtArg) -- not just the bare event name -- so the page can label each argument ("<name> (<type>)",
+ * same convention as the Qt clone's tl_arg_label) and know how many args a freshly-picked event expects,
+ * instead of only being able to describe args that already have a stored value. Static data
+ * (sh_event_catalog.h), no engine touch. */
+static void poc_send_events()
+{
+    if (!g_webview) return;
+    std::wstring json; json.reserve((size_t)SH_EVENT_CATALOG_N * 96 + 32);
+    json = L"{\"kind\":\"events\",\"items\":[";
+    for (int i = 0; i < SH_EVENT_CATALOG_N; i++) {
+        if (i) json += L",";
+        const ShEvtDef &d = SH_EVENT_CATALOG[i];
+        json += L"{\"name\":\""; json += poc_json_w(d.name); json += L"\",\"args\":[";
+        for (int a = 0; a < d.argc; a++) {
+            if (a) json += L",";
+            const ShEvtArg &arg = d.args[a];
+            json += L"{\"name\":\""; json += poc_json_w(arg.name ? arg.name : ""); json += L"\"";
+            json += L",\"type\":\""; json += poc_json_w(arg.type ? arg.type : ""); json += L"\"}";
+        }
+        json += L"]}";
+    }
+    json += L"]}";
+    g_webview->PostWebMessageAsJson(json.c_str());
+}
+static void poc_json_asset_items(std::wstring &json, const ShAssetItem *items, int n)
+{
+    json += L"[";
+    for (int i = 0; i < n; i++) {
+        if (i) json += L",";
+        json += L"{\"display\":\""; json += poc_json_w(items[i].display ? items[i].display : ""); json += L"\"";
+        json += L",\"value\":\"";   json += poc_json_w(items[i].value   ? items[i].value   : ""); json += L"\"}";
+    }
+    json += L"]";
+}
+/* Timelines Stage 3 (per-entity asset dropdowns, "exceed-the-OG" -- the original Qt UI never had this,
+ * it just made you type a raw model index or anim path): the full per-entity-class asset table, sent ONCE
+ * per session, same "ship the canonical generated table, cache client-side" pattern as poc_send_events.
+ * Only 45 entity classes carry asset lists (sh_entity_asset_lists.h), far smaller than the event catalog.
+ * Static data, no engine touch -- resolving WHICH class applies to a given "Runs on" entity is the separate
+ * poc_emit_entity_inherit round-trip above. */
+static void poc_send_entity_assets()
+{
+    if (!g_webview) return;
+    std::wstring json; json.reserve((size_t)SH_ENTITY_ASSETS_N * 512 + 32);
+    json = L"{\"kind\":\"entityAssets\",\"items\":[";
+    for (int i = 0; i < SH_ENTITY_ASSETS_N; i++) {
+        if (i) json += L",";
+        const ShEntityAssets &ea = SH_ENTITY_ASSETS[i];
+        json += L"{\"slug\":\""; json += poc_json_w(ea.slug ? ea.slug : ""); json += L"\"";
+        json += L",\"models\":";    poc_json_asset_items(json, ea.models,    ea.nModels);
+        json += L",\"animWeb\":";   poc_json_asset_items(json, ea.animWeb,   ea.nAnimWeb);
+        json += L",\"md6Anim\":";   poc_json_asset_items(json, ea.md6Anim,   ea.nMd6Anim);
+        json += L",\"animAlias\":"; poc_json_asset_items(json, ea.animAlias, ea.nAnimAlias);
+        json += L",\"tagName\":";   poc_json_asset_items(json, ea.tagName,   ea.nTagName);
+        json += L"}";
     }
     json += L"]}";
     g_webview->PostWebMessageAsJson(json.c_str());
@@ -924,6 +1203,17 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
             } else if (cmd == L"select") {
                 int eid = -1;
                 if (json_get_int(json, L"eid", &eid)) { g_displayed_eid = eid; poc_send_state(eid, false); }
+            } else if (cmd == L"openTimeline") {
+                int eid = -1;
+                if (json_get_int(json, L"eid", &eid) && eid >= 0) { g_open_timeline_eid = eid; g_pending_open_timeline = true; }
+            } else if (cmd == L"resolveEntityInherit") {
+                int eid = -1;
+                if (json_get_int(json, L"eid", &eid) && eid >= 0) { g_resolve_entity_eid = eid; g_pending_resolve_entity = true; }
+            } else if (cmd == L"saveTimeline") {
+                int eid = -1; std::wstring j;
+                if (json_get_int(json, L"eid", &eid) && eid >= 0 && json_get_wstr(json, L"json", j) && !j.empty()) {
+                    g_save_timeline_eid = eid; g_save_timeline_json = w_to_utf8(j); g_pending_save_timeline = true;
+                }
             } else if (cmd == L"setSync") {
                 int on = 0; json_get_int(json, L"on", &on); g_sync_on = (on != 0); g_last_editor_sel = -1; g_last_sel_sig = 0;
             } else if (cmd == L"delete") {
@@ -940,6 +1230,18 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 std::wstring inh; json_get_wstr(json, L"inherit", inh);
                 std::string i8 = w_to_utf8(inh);
                 poc_send_enum(1, i8.c_str());
+            } else if (cmd == L"enumEvents") {
+                poc_send_events();
+            } else if (cmd == L"enumEntityAssets") {
+                poc_send_entity_assets();
+            } else if (cmd == L"enumArgResclass") {
+                std::wstring rc; json_get_wstr(json, L"resClass", rc);
+                std::string rc8 = w_to_utf8(rc);
+                poc_send_arg_resclass(rc8.c_str());
+            } else if (cmd == L"lookupDesc") {
+                std::wstring inh, cls; json_get_wstr(json, L"inherit", inh); json_get_wstr(json, L"classname", cls);
+                std::string i8 = w_to_utf8(inh), c8 = w_to_utf8(cls);
+                poc_send_desc(i8.c_str(), c8.c_str());
             } else if (cmd == L"camLock") {
                 int on = 0; json_get_int(json, L"on", &on);
                 g_cam_lock = (on != 0);
@@ -1039,6 +1341,7 @@ static void poc_think_loop()
         bool did_save = false, did_delete = false, did_create_prefab = false;
         bool did_delete_prefab = false, did_rename_prefab = false, did_load_prefab = false;
         bool did_create_folder = false, did_rename_folder = false, did_delete_folder = false, did_move_prefab = false;
+        bool did_open_timeline = false, did_resolve_entity = false, did_save_timeline = false;
         EnterCriticalSection(&g_loop->mtx);
         if (g_iface && g_iface->vtbl && g_iface->vtbl->drain_work_queue) g_iface->vtbl->drain_work_queue(g_iface);
         if (g_pending_save)   { poc_apply_save();    g_pending_save = false;   did_save = true; }
@@ -1067,6 +1370,9 @@ static void poc_think_loop()
         if (g_pending_rename_folder) { poc_apply_rename_folder(); g_pending_rename_folder = false; did_rename_folder = true; }
         if (g_pending_delete_folder) { poc_apply_delete_folder(); g_pending_delete_folder = false; did_delete_folder = true; }
         if (g_pending_move_prefab)   { poc_apply_move_prefab();   g_pending_move_prefab = false;   did_move_prefab = true; }
+        if (g_pending_open_timeline) { g_tl_json_len = poc_serialize_entity_raw(g_open_timeline_eid); g_pending_open_timeline = false; did_open_timeline = true; }
+        if (g_pending_resolve_entity) { g_resolve_json_len = poc_serialize_entity_resolve(g_resolve_entity_eid); g_pending_resolve_entity = false; did_resolve_entity = true; }
+        if (g_pending_save_timeline) { poc_apply_save_timeline(); g_pending_save_timeline = false; did_save_timeline = true; }
         /* Camera Origin: hold the locked origin every frame (or flush one committed edit). */
         if (g_cam_lock || g_cam_write_once) { poc_cam_write(); g_cam_write_once = false; }
         LeaveCriticalSection(&g_loop->mtx);
@@ -1100,6 +1406,13 @@ static void poc_think_loop()
         if (did_load_prefab) {
             std::wstring m = L"{\"kind\":\"loadPrefabResult\",\"result\":"; m += std::to_wstring(g_load_result);
             m += L",\"name\":\""; m += poc_json_w(g_load_prefab_name.c_str()); m += L"\"}";
+            poc_post_json(m.c_str());
+        }
+        if (did_open_timeline) poc_emit_timeline_data(g_open_timeline_eid, g_tl_json_len);
+        if (did_resolve_entity) poc_emit_entity_inherit(g_resolve_entity_eid, g_resolve_json_len);
+        if (did_save_timeline) {
+            std::wstring m = L"{\"kind\":\"saveTimelineResult\",\"eid\":"; m += std::to_wstring(g_save_timeline_eid);
+            m += L",\"result\":"; m += std::to_wstring(g_save_timeline_result); m += L"}";
             poc_post_json(m.c_str());
         }
         if (did_create_folder) {
@@ -1139,7 +1452,11 @@ static void poc_think_loop()
             if (was_visible && (frame % 10 == 0)) {
                 int rdy = 0; int n = poc_collect(&rdy);
                 uint64_t sig = poc_list_sig(n);
-                if (sig != g_last_list_sig) { g_last_list_sig = sig; poc_emit_list(n, rdy); }
+                if (sig != g_last_list_sig) {
+                    poc_rescan_timelines(n);   /* the one classname call site -- change-gated, not a fixed timer */
+                    g_last_list_sig = sig;
+                    poc_emit_list(n, rdy);
+                }
 
                 /* live editor-selection COUNT, independent of "Follow editor selection" -- the Prefabs tab's
                  * "Create from selection (N)" button needs this regardless of sync mode. POC_MAX_ENTS (not
@@ -1185,6 +1502,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI snaphak_ui_init(LPVOID param_1)
     if (args && args->out_slot) *reinterpret_cast<void **>(args->out_slot) = g_loop;
     g_iface = args ? args->iface : nullptr;
     g_ents = (PocEnt *)malloc(sizeof(PocEnt) * POC_MAX_ENTS);
+    g_tls  = (PocTl  *)malloc(sizeof(PocTl)  * POC_MAX_TLS);
     poc_read_version();
 
     poc_log("=== snaphak_ui_init (WebView2 POC, entities-deep) entered ===");

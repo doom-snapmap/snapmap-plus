@@ -77,12 +77,35 @@
   .placeholder { flex: 1; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; display: flex; align-items: center; justify-content: center; text-align: center; color: var(--muted); font-style: italic; padding: 20px; }
   .editor { flex: 1; display: flex; flex-direction: column; min-height: 0; gap: 8px; }
   .decl-text { flex: 1; min-height: 0; resize: none; font-family: Consolas, "Courier New", monospace; line-height: 1.5; white-space: pre; }
+  /* CLONE EXTENSION: restores the Qt clone's read-only entity_id_lineedit (the resolved id-string --
+   * module path + inherit leaf) that this webview dropped -- sits as its own row above the decl text so it
+   * doesn't crowd the Inherit/Classname/Displayname row. Same value the entity list already shows + "Copy ID"
+   * already copies; this just makes it visible + selectable while editing a single entity. */
+  .entity-id-row { display: flex; align-items: center; gap: 7px; flex-shrink: 0; }
+  .entity-id-row label { color: var(--muted); white-space: nowrap; flex-shrink: 0; }
+  .entity-id-row input { flex: 1; min-width: 0; font-family: Consolas, "Courier New", monospace; color: var(--muted); }
   .fields { display: flex; flex-wrap: wrap; gap: 7px 12px; align-items: center; }
   .field { display: flex; align-items: center; gap: 5px; }
   .field label { color: var(--muted); white-space: nowrap; flex-shrink: 0; }
   .field.grow { flex: 1; min-width: 140px; }
   .field.grow input { width: 100%; }
   .save-msg { font-size: 11px; color: var(--muted); }
+
+  /* CLONE EXTENSION: collapsible Inherit/Classname description panel -- content from sh_entity_desc.h
+   * (OUR RE-extracted descriptions), mirrors the Qt clone's always-open desc box but tucked away by
+   * default so it doesn't cost permanent screen real estate. */
+  .desc-panel { flex-shrink: 0; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); cursor: pointer; }
+  .desc-toggle { display: flex; align-items: center; gap: 6px; padding: 6px 9px; color: var(--muted); user-select: none; border-radius: 6px; }
+  .desc-toggle:hover { color: var(--selText); background: var(--sel); }   /* same hover pair as .combo-opt -- visible in both themes */
+  .desc-caret { width: 12px; display: inline-block; font-size: 12px; transition: transform 0.1s; }
+  .desc-panel.open .desc-caret { transform: rotate(90deg); }
+  .desc-body { display: none; padding: 0 9px 9px 9px; font-size: 11px; line-height: 1.5; }
+  .desc-panel.open .desc-body { display: block; }
+  .desc-block + .desc-block { margin-top: 9px; }
+  .desc-block-title { color: var(--text); font-weight: 600; }
+  .desc-tier { color: var(--muted); font-weight: 400; font-style: italic; }
+  .desc-summary { color: var(--text); white-space: pre-wrap; cursor: text; }   /* text stays selectable even though the panel around it collapses on click */
+  .desc-summary.muted { color: var(--muted); font-style: italic; }
 
   .combo { position: relative; display: inline-flex; }
   .combo.grow { flex: 1; min-width: 150px; }
@@ -93,6 +116,8 @@
   .combo-opt { padding: 3px 7px; border-radius: 4px; cursor: default; white-space: nowrap; }
   .combo-opt:hover { background: var(--sel); color: var(--selText); }
   .combo-hint, .combo-empty { padding: 3px 7px; color: var(--muted); font-size: 11px; font-style: italic; }
+  /* blank / not-in-the-enumerated-list Inherit or Classname -- same red as .toast.err, so it reads as the same "this will be refused" signal */
+  .combo.invalid input, .combo.invalid .combo-arrow { border-color: #a3352f; }
 
   .camera { flex-shrink: 0; display: flex; align-items: center; gap: 12px; padding: 6px 10px; background: var(--chrome); border-top: 1px solid var(--border); font-size: 11px; }
   .camera .cam-title { color: var(--muted); }
@@ -103,21 +128,55 @@
   .tl-head { color: var(--muted); flex-shrink: 0; }
   .tl-head b { color: var(--text); }
   .tl-inner-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-  .tl-inner-tab { padding: 4px 11px; color: var(--muted); cursor: default; border-bottom: 2px solid transparent; }
+  .tl-inner-tab { display: flex; align-items: center; gap: 6px; padding: 4px 8px 4px 11px; color: var(--muted); cursor: default; border-bottom: 2px solid transparent; }
   .tl-inner-tab.active { color: var(--text); border-bottom-color: var(--accent); }
   .tl-inner-tab:hover:not(.active) { color: var(--text); }
   .tl-inner-tab.tl-add { font-weight: 600; }
+  .tl-tab-del { width: 15px; height: 15px; display: flex; align-items: center; justify-content: center; border-radius: 3px; color: var(--muted); font-size: 10px; flex-shrink: 0; }
+  .tl-tab-del:hover { background: #a3352f; color: #fff; }
   .tl-inner-body { flex: 1; display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: auto; padding-top: 2px; }
   .event-list { display: flex; flex-direction: column; gap: 6px; }
-  .event-row { display: flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
-  .event-row > label { color: var(--muted); }
-  .event-row .ev-time { width: 54px; }
-  .event-row > .combo { flex: 0 0 170px; }
-  .ev-args { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; }
-  .ev-args label { color: var(--muted); }
-  .ev-args .combo { flex: 1; }
-  .ev-del { width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; color: var(--muted); cursor: default; border-radius: 4px; flex-shrink: 0; }
+  /* event row = a compact top line (Time | eventDef | delete) + parameters stacked BELOW it, one per line.
+     This matches the OG's real structure too (each arg lands in a QFormLayout under the eventDef combo, not
+     beside it) -- and it's the only layout that scales once each parameter becomes a real editable widget
+     (an entity-picker, a decl-constrained combo, a 3-field vec3, etc.) rather than a plain read-only summary. */
+  .event-row { display: flex; flex-direction: column; gap: 6px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; }
+  .ev-top { display: flex; align-items: center; gap: 8px; }
+  .ev-top > label { color: var(--muted); flex-shrink: 0; }
+  .ev-top .ev-time { width: 52px; text-align: center; }
+  .ev-top > .combo { flex: 1; }
+  .ev-args-list { display: flex; flex-direction: column; gap: 4px; padding-left: 60px; }
+  .ev-args-list.muted { padding-left: 60px; font-style: italic; }
+  .ev-arg-row { display: flex; align-items: center; gap: 8px; }
+  .ev-arg-row label { color: var(--muted); min-width: 140px; flex-shrink: 0; }   /* wider now: "<name>  (<type>)" is longer than the old raw JSON key */
+  .ev-arg-row .arg-val { color: var(--text); }
+  .ev-arg-row input[type=text].ev-arg-input { flex: 1; min-width: 0; }
+  .ev-arg-row input[type=checkbox].ev-arg-input { flex-shrink: 0; }
+  .ev-vecn-fields { display: flex; gap: 6px; flex: 1; min-width: 0; }
+  .ev-vecn-fields input.ev-arg-input { flex: 1; min-width: 0; text-align: center; }   /* per-component (x/y/z, r/g/b/a, ...) -- placeholder names the component, no separate <label> per field */
+  .ev-arg-row .combo.ev-arg-combo { flex: 1; min-width: 0; }   /* decl/enum -- fills the row same as the plain-text arg inputs */
+  .ev-del { width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; color: var(--muted); cursor: default; border-radius: 5px; flex-shrink: 0; }
   .ev-del:hover { background: #a3352f; color: #fff; }
+
+  /* the OG "Runs on" entity-picker (FUN_180008180, live-decompiled from the original snaphakui.dll for
+     behavior reference only -- reimplemented here from scratch, zero OG bytes/code): editable combo + a
+     "Use current selection" button (renamed from the OG's "Use ingame selection" -- same behavior, clearer
+     wording). The OG also has a "Use Display Names" checkbox here -- deliberately dropped (see tlEntityLabel).
+     Also reused for entity-typed args (Stage 3, not yet wired). */
+  .entity-picker { display: flex; flex-direction: column; gap: 5px; }
+  .entity-picker > .combo { align-self: stretch; }
+  /* the base .combo-list opens UPWARD (bottom:100%), which is right for the Entities-tab Inherit/Classname
+     fields (near the bottom of their panel) but wrong here: "Runs on" sits at the very TOP of the scrollable
+     .tl-inner-body, so an upward-opening list has no room and renders clipped/invisible above the container's
+     own top edge. Override to open DOWNWARD instead. */
+  .entity-picker .combo-list { bottom: auto; top: 100%; box-shadow: 0 4px 12px rgba(0,0,0,0.18); max-height: 420px; }
+  /* the eventDef picker's list -- same downward-open fix as .entity-picker above (event rows are stacked
+     down a scrollable list, so an upward-open list can clip against whatever's above it too) + a taller
+     max-height than the base .combo-list's 220px, since this one browses a 1611-entry catalog. */
+  .event-row .combo-list { bottom: auto; top: 100%; box-shadow: 0 4px 12px rgba(0,0,0,0.18); max-height: 420px; }
+  .entity-picker-opts { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .entity-picker-opts label { display: flex; align-items: center; gap: 4px; color: var(--muted); white-space: nowrap; }
+  .entity-picker-opts .btn { font-size: 10px; padding: 3px 8px; }
 
   .pf-folder-head { display: flex; align-items: center; gap: 4px; padding: 3px 6px; color: var(--text); cursor: default; font-weight: 500; }
   .pf-folder-head:hover { background: var(--panel2); }
@@ -226,6 +285,15 @@
           <button class="btn" id="revertBtn" disabled>Revert</button>
           <button class="btn primary" id="saveBtn" disabled>Save to Decl</button>
         </div>
+        <div class="entity-id-row" id="entityIdRow">
+          <label>ID</label>
+          <input type="text" id="fEntityId" readonly>
+          <button type="button" class="btn" id="copyIdBtn" title="Copy this entity's ID to the clipboard">Copy</button>
+        </div>
+        <div class="desc-panel" id="descPanel">
+          <div class="desc-toggle" id="descToggle"><span class="desc-caret">&#9656;</span>Inherit / Class Descriptions</div>
+          <div class="desc-body" id="descBody"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -261,48 +329,17 @@
 
   <div class="content" id="panel-timelines" style="display:none;">
     <div class="left-pane">
-      <div class="entity-list" id="timelineList">
-        <div class="entity-item selected">room_4x/snapmaps/timeline/main_01: <span class="name">Intro Sequence</span></div>
-        <div class="entity-item">room_4x/snapmaps/timeline/wave_02: <span class="name">Wave 1 Spawns</span></div>
-        <div class="entity-item">room_4x/snapmaps/timeline/boss_03: <span class="name">Boss Cue</span></div>
-      </div>
+      <div class="entity-list" id="timelineList"><div class="list-empty">Waiting for the map...</div></div>
       <div class="list-controls">
         <input type="text" id="timelineFilter" placeholder="Filter timelines...">
-        <button class="btn primary" id="createTimelineBtn">Create New Timeline</button>
+        <button class="btn primary" id="createTimelineBtn" disabled title="Not implemented -- place a timeline from the in-game SnapMap palette instead.">Create New Timeline</button>
       </div>
     </div>
     <div class="right-pane">
-      <div class="tl-head">Current Timeline: <b>Intro Sequence</b></div>
-      <div class="tl-inner-tabs">
-        <div class="tl-inner-tab active">Heavy Gunner</div>
-        <div class="tl-inner-tab">Door Mover</div>
-        <div class="tl-inner-tab tl-add" title="Add an entity-event list">+</div>
-      </div>
-      <div class="tl-inner-body">
-        <div class="field"><label>Runs on</label><div class="combo grow"><input type="text" value="room_4x/snapmaps/ai/ai_74 (Heavy Gunner)"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div></div>
-        <div class="event-list">
-          <div class="event-row">
-            <label>Time</label><input class="ev-time" value="0.0">
-            <div class="combo"><input type="text" value="ai/spawn"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div>
-            <span class="ev-args muted">no parameters</span>
-            <div class="ev-del" title="Remove event">&#10005;</div>
-          </div>
-          <div class="event-row">
-            <label>Time</label><input class="ev-time" value="2.5">
-            <div class="combo"><input type="text" value="ai/set_target"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div>
-            <div class="ev-args"><label>Target</label><div class="combo"><input type="text" value="player_start_61"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div></div>
-            <div class="ev-del" title="Remove event">&#10005;</div>
-          </div>
-          <div class="event-row">
-            <label>Time</label><input class="ev-time" value="5.0">
-            <div class="combo"><input type="text" value="sound/play_shader"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div>
-            <div class="ev-args"><label>Sound</label><div class="combo"><input type="text" value="decl: alert_klaxon"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div></div>
-            <div class="ev-del" title="Remove event">&#10005;</div>
-          </div>
-        </div>
-        <div><button class="btn" id="insertEventBtn">Insert Entity Event</button></div>
-      </div>
-      <div class="fields" style="justify-content:flex-end;"><button class="btn primary" id="saveTimelineBtn">Save Timeline</button></div>
+      <div class="tl-head" id="tlHead">Select a timeline from the list.</div>
+      <div class="tl-inner-tabs" id="tlTabs"></div>
+      <div class="tl-inner-body" id="tlBody"></div>
+      <div class="fields" style="justify-content:flex-end;"><button class="btn" id="revertTimelineBtn" disabled title="Discard local edits and re-fetch this timeline as it currently exists on the map">Revert</button><button class="btn primary" id="saveTimelineBtn" disabled>Save Timeline</button></div>
     </div>
   </div>
 
@@ -353,6 +390,34 @@
   var primaryEid = -1;       // anchor shown in the state editor
   var anchorEid = -1;        // shift-range anchor
   var loaded = null;         // last-loaded state (for dirty compare + revert)
+  var allTimelines = [];     // last timelines list from backend (dual-added idTarget_Timeline/idEncounterManager)
+  var selectedTlEid = -1;    // timeline row currently highlighted in the Timelines list
+  var tlModel = null;        // parsed open-timeline model {eid,isEncounter,name,tabs:[{entity,events:[...]}],active}
+  var tlSavePendingEid = -1; // -1 = no save in flight; else the eid whose NEXT 'timelineData' response is a
+                              // fresh-reserialize-for-save (patch + commit), not a normal open/re-render
+  var tlDirty = false;       // true once the open tlModel has any UNSAVED local edit -- gates tlMaybeAutoRefresh
+                              // (never silently overwrite in-progress work). Reset on a fresh open/render and
+                              // after a successful save; set by tlMarkDirty() from every real mutation site.
+  function tlMarkDirty() { tlDirty = true; }
+  // Silently re-fetch the currently open timeline (same round-trip Revert uses) if it's safe to do so -- i.e.
+  // nothing loaded, a save is already in flight, or the user has unsaved local edits. Exists because the panel
+  // otherwise never re-syncs after it's first opened: play-mode + a map reload can change (or, per the
+  // save-corruption investigation, silently DROP) an entity's componentTimeLine entirely server-side, and
+  // without this the panel would keep showing stale content indefinitely -- confusing at best, and a real risk
+  // that a later Save would blindly recommit the stale data over whatever actually happened during play.
+  function tlMaybeAutoRefresh() {
+    if (!tlModel || tlDirty || tlSavePendingEid !== -1) return;
+    post({cmd:'openTimeline', eid: tlModel.eid});
+  }
+  var eventsRequested = false;
+  var eventItems = [];       // the full 1611-event catalog: [{name, args:[{name,type}]}, ...]
+  var eventCatalogByName = {};   // name -> {name, args} -- O(1) schema lookup while rendering/editing args
+  var argResclassCache = {};     // resClass (decl short-name OR raw enum type) -> [valid value, ...], fetched lazily
+  var argResclassRequested = {}; // resClass -> true once a lookupArgResclass round-trip has been fired for it
+  var entityAssetsRequested = false;
+  var entityAssetsBySlug = {};   // entity class slug -> {models,animWeb,md6Anim,animAlias,tagName}: [{display,value}]
+  var entityInheritCache = {};   // eid -> resolved entityDef.inherit slug (or '' if resolved-but-none)
+  var entityInheritRequested = {};   // eid -> true once a resolveEntityInherit round-trip has been fired for it
   var selectMode = false;    // "Select in editor": push list selection -> 3D editor
   var inheritsRequested = false;
   var inheritItems = [], classItems = [];
@@ -384,6 +449,11 @@
     input.addEventListener('keydown', function(e){ if (e.key === 'Escape') hide(); });
     list.addEventListener('mousedown', function(e){ if (e.target && e.target.className === 'combo-opt') { e.preventDefault(); input.value = e.target.textContent; hide(); if (onPick) onPick(); } });
     document.addEventListener('mousedown', function(e){ if (!c.contains(e.target)) hide(); });
+    // Tabbing away doesn't fire a mousedown, so the click-outside listener above never catches it -- the list
+    // was staying open after keyboard-only navigation. focusout (bubbles, unlike blur) + relatedTarget lets us
+    // tell "left the combo entirely" apart from "focus moved to the arrow button inside it" (arrow/option
+    // mousedown already preventDefault, so this never fires mid-pick).
+    c.addEventListener('focusout', function(e){ if (!c.contains(e.relatedTarget)) hide(); });
     return { refresh: function(){ if (open) render(); } };
   }
   function pushSelectionToEditor() {
@@ -427,14 +497,55 @@
     'Stairs 384x192': {count: 1, types: [{className:'idVolume_Blocking', count:1}]},
     'UAC VTOL (Static) - Dredge': {count: 4, types: [{className:'idProp_Coop', count:1}, {className:'idVolume_Blocking', count:3}]}
   };
+  var previewDescs = {
+    'snapmaps/volume/blocking': {summary:"A volume that blocks demon navigation/pathing through its bounds -- a placeable box, not a scriptable logic node.", confidence:'low', source:'decl'},
+    'idVolume_Blocking': {summary:"Runtime class for a blocking volume -- occludes AI navmesh inside the box.", confidence:'low', source:'decl'},
+    'player/coop': {summary:"A co-op player start point. Placed once per spawn location; no SnapMap wiring of its own.", confidence:'low', source:'decl'},
+    'idPlayerStart_Coop': {summary:"Runtime class for a co-op player spawn point.", confidence:'low', source:'decl'}
+  };
   var previewStates = {
     65: {decl:'edit = {\n\trenderModelInfo = {\n\t\tmodel = "models/mapobjects/snapmaps/box_trigger.lwo";\n\t\tscale = { x = 16; y = 128; z = 64; }\n\t}\n\tblockDemons = false;\n\tisVisible = true;\n\tisNetworkStatic = true;\n}', classname:'idVolume_Blocking', inherit:'snapmaps/volume/blocking', displayname:'Block Box'},
     61: {decl:'edit = {\n\tteam = "coop";\n\tisVisible = true;\n}', classname:'idPlayerStart_Coop', inherit:'player/coop', displayname:'My Player Start'},
     74: {decl:'edit = {\n\taiType = "heavy";\n\thealth = 300;\n}', classname:'idAI_Snapmap', inherit:'snapmaps/ai', displayname:'Heavy Gunner'}
   };
-  function previewList() { return {kind:'list', version:'local (preview)', editorReady:true, count:0, entities:previewEnts}; }
+  var previewTimelines = [
+    {eid:101, id:'0_ind_totally_blank_room_4x/snapmaps/unknown_101', name:'Intro Sequence'},
+    {eid:102, id:'0_ind_totally_blank_room_4x/snapmaps/unknown_102', name:'Wave 1 Spawns'},
+    {eid:103, id:'0_ind_totally_blank_room_4x/snapmaps/unknown_103', name:''}
+  ];
+  // sample serialized-entity JSON per preview timeline (the shape parseTimeline walks). 101 = populated,
+  // 102 = empty componentTimeLine, 103 = no timeline data at all.
+  var previewTimelineJson = {
+    101: JSON.stringify({ entityDef: { state: { edit: { componentTimeLine: { entityEvents: {
+      num: 2,
+      'item[0]': { entity: '0_ind_totally_blank_room_4x/snapmaps/ai/ai', events: {
+        num: 3,
+        'item[0]': { eventTime: 0, eventCall: { eventDef: 'ai/spawn', args: { num: 0 } } },
+        'item[1]': { eventTime: 2, eventCall: { eventDef: 'ai/set_target', args: { num: 1, 'item[0]': { entity: 'player_start_61' } } } },
+        'item[2]': { eventTime: 5, eventCall: { eventDef: 'sound/play_shader', args: { num: 1, 'item[0]': { decl: { sound: 'alert_klaxon' } } } } }
+      } },
+      'item[1]': { entity: '0_ind_totally_blank_room_4x/snapmaps/action/door/close', events: {
+        num: 1,
+        'item[0]': { eventTime: 1, eventCall: { eventDef: 'door/open', args: { num: 0 } } }
+      } }
+    } } } } } }),
+    102: JSON.stringify({ entityDef: { state: { edit: { componentTimeLine: { entityEvents: { num: 0 } } } } } }),
+    103: JSON.stringify({ entityDef: { state: { edit: {} } } })
+  };
+  function previewList() { return {kind:'list', version:'local (preview)', editorReady:true, count:0, entities:previewEnts, timelines:previewTimelines}; }
   function previewHandle(o) {
     if (o.cmd === 'refresh') { onMessage(previewList()); }
+    else if (o.cmd === 'openTimeline') {
+      var tj = previewTimelineJson[o.eid];
+      onMessage(tj ? {kind:'timelineData', eid:o.eid, ok:true, json:tj} : {kind:'timelineData', eid:o.eid, ok:false});
+    }
+    else if (o.cmd === 'saveTimeline') {
+      // preview only: no real backend to commit to -- just prove the patched JSON is well-formed and
+      // contains what we expect, then fake success. Real validation happens in-game against the real engine.
+      var ok = false;
+      try { var doc = JSON.parse(o.json); ok = !!(doc && doc.entityDef && doc.entityDef.state && doc.entityDef.state.edit); } catch (e) { ok = false; }
+      onMessage({kind:'saveTimelineResult', eid:o.eid, result: ok ? 1 : 0});
+    }
     else if (o.cmd === 'select') { var s = previewStates[o.eid] || {decl:'(no sample decl for this entity)', classname:'', inherit:'', displayname:''}; onMessage({kind:'state', auto:false, eid:o.eid, ok:true, decl:s.decl, classname:s.classname, inherit:s.inherit, displayname:s.displayname}); }
     else if (o.cmd === 'save') {
       // preview only: fake the backend's validation so all three toast colors are demoable.
@@ -514,6 +625,57 @@
     else if (o.cmd === 'pushStack') { onMessage({kind:'info', text:'Push to stack 0: ' + o.eids.length + ' selected (preview only).'}); }
     else if (o.cmd === 'enumInherits') { onMessage({kind:'inherits', items:['snapmaps/volume/blocking','snapmaps/volume/trigger','player/coop','snapmaps/ai','snapmaps/variable','snapmaps/action/variable/integer','snapmaps/light','light','snapmaps/listener/ai']}); }
     else if (o.cmd === 'enumClasses') { onMessage({kind:'classes', inherit:o.inherit, items:['idVolume_Blocking','idVolume_Trigger','idVolume_Damage','idVolume_Water']}); }
+    else if (o.cmd === 'lookupDesc') {
+      onMessage({kind:'desc', inherit: previewDescs[o.inherit] || null, class: previewDescs[o.classname] || null});
+    }
+    else if (o.cmd === 'enumEvents') {
+      // varied arg kinds on purpose -- exercises every tlClassifyArg branch in the browser demo without
+      // needing the real 1611-event catalog. Every kind is now a real editable widget.
+      onMessage({kind:'events', items:[
+        {name:'ai/spawn', args:[{name:'origin', type:'vec3'}]},
+        {name:'ai/set_target', args:[{name:'target', type:'entity'}]},
+        {name:'ai/kill', args:[{name:'silent', type:'bool'}]},
+        {name:'ai/heal', args:[{name:'amount', type:'float'}]},
+        {name:'sound/play_shader', args:[{name:'shader', type:'idSoundShader*'}]},
+        {name:'sound/stop_shader', args:[{name:'channel', type:'int'}]},
+        {name:'door/open', args:[{name:'instant', type:'bool'}]},
+        {name:'door/close', args:[{name:'delay', type:'float'}]},
+        {name:'light/on', args:[{name:'color', type:'color'}]},
+        {name:'light/off', args:[]},
+        {name:'fx/play', args:[{name:'condition', type:'fxCondition_t'}]},
+        {name:'anim/play', args:[{name:'facing', type:'angles'}, {name:'anim', type:'md6Anim'}]},
+        {name:'model/set_index', args:[{name:'modelIndex', type:'int'}]}
+      ]});
+    }
+    else if (o.cmd === 'enumArgResclass') {
+      // preview only: a couple of sample resource-classes so the decl/enum combos have real options to
+      // demo -- "sound" is what sound/play_shader's shader arg resolves to; fxCondition_t is a raw enum type
+      // (passed verbatim, not reduced). Anything else -> empty (the combo falls back to "free text is fine").
+      var sample = {
+        sound: ['alert_klaxon', 'door_open_heavy', 'ui_menu_select', 'demon_growl_01'],
+        fxCondition_t: ['FX_ALWAYS', 'FX_ON_DEATH', 'FX_ON_HIT', 'FX_ON_SPAWN']
+      };
+      onMessage({kind:'argResclass', resClass:o.resClass, items: sample[o.resClass] || []});
+    }
+    else if (o.cmd === 'resolveEntityInherit') {
+      // preview only: fake a serialize_entity round-trip -- eid 74 ("Heavy Gunner") resolves to the class
+      // slug previewEntityAssets has data for, so the modelIndex/md6Anim asset dropdowns are demoable.
+      var slugs = { 74: 'snapmaps/ai' };
+      var slug = slugs[o.eid];
+      var doc = { entityDef: { inherit: slug || '' } };
+      onMessage({kind:'entityInherit', eid:o.eid, ok:true, json: JSON.stringify(doc)});
+    }
+    else if (o.cmd === 'enumEntityAssets') {
+      onMessage({kind:'entityAssets', items:[
+        { slug:'snapmaps/ai',
+          models:    [{display:'heavy_gunner_v1', value:'0'}, {display:'heavy_gunner_v2_battledamage', value:'1'}],
+          animWeb:   [],
+          md6Anim:   [{display:'salute_v1', value:'md6/characters/humans/mp_male/motion/taunts/salute_v1.md6anim'}, {display:'idle', value:'md6/characters/humans/male/base/motion/shared/rifle/attention/idle.md6anim'}],
+          animAlias: [],
+          tagName:   [{display:'fx_head', value:'fx_head'}, {display:'left_hand_weapon_attach', value:'left_hand_weapon_attach'}]
+        }
+      ]});
+    }
     else if (o.cmd === 'selectInEditor') { /* no 3D editor in browser preview */ }
     else if (o.cmd === 'camLock' || o.cmd === 'camSet') { /* no editor in browser preview */ }
     else if (o.cmd && o.cmd.indexOf('win') === 0) { /* window controls: no-op in browser preview */ }
@@ -562,6 +724,619 @@
       items[j].addEventListener('contextmenu', onRowContext);
     }
     updateSelCount();
+  }
+
+  function renderTimelineList() {
+    var listEl = document.getElementById('timelineList'); if (!listEl) return;
+    var filterEl = document.getElementById('timelineFilter');
+    var filter = filterEl ? filterEl.value.toLowerCase() : '';
+    var scroll = listEl.scrollTop;
+
+    var rows = allTimelines.filter(function(t){
+      if (!filter) return true;
+      return (t.name && t.name.toLowerCase().indexOf(filter) !== -1) || t.id.toLowerCase().indexOf(filter) !== -1;
+    });
+
+    if (rows.length === 0) {
+      listEl.innerHTML = '<div class="list-empty">' + (allTimelines.length === 0 ? 'No timelines (place one from the in-game SnapMap palette).' : 'No matches.') + '</div>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < rows.length; i++) {
+      var t = rows[i];
+      var cls = 'entity-item' + (selectedTlEid === t.eid ? ' selected' : '');
+      var label = t.name ? esc(t.name) : esc(t.id);
+      html += '<div class="' + cls + '" data-eid="' + t.eid + '" title="' + esc(t.id) + '">' + label + '</div>';
+    }
+    listEl.innerHTML = html;
+    listEl.scrollTop = scroll;
+  }
+
+  // ---- Timeline Editor (Stage 2: parse the serialized entity JSON + render the real entity tabs / events) ----
+  // The engine decl uses numbered pseudo-lists: { num: N, "item[0]": .., "item[1]": .. }. Mirrors tl_list_items.
+  function tlListItems(obj) {
+    if (!obj || typeof obj !== 'object') return [];
+    var num = obj.num || obj['\nnum'] || 0;
+    var out = [];
+    for (var i = 0; i < num; i++) { var k = 'item[' + i + ']'; if (obj[k] !== undefined) out.push(obj[k]); }
+    return out;
+  }
+  // the eventDef key has three OG spellings (tl_event_def).
+  function tlEventDef(eventCall) {
+    if (!eventCall) return '';
+    return eventCall['eventDef'] || eventCall['eventHandle_t eventDef'] || eventCall['\neventHandle_t eventDef'] || '';
+  }
+  // Read one arg item { "<typeName>": value } into {label, value} pairs (usually just one pair; a decl arg
+  // unwraps its nested {declType:name}). Fallback display for arg KINDS we don't build a real widget for yet
+  // (decl/vecn/enum -- see tlClassifyArg) and for args on an eventDef we have no catalog schema for (a typo
+  // or hand-typed name); the label here is the raw JSON key, not the catalog's friendly arg name.
+  function tlArgPairs(argObj) {
+    if (!argObj || typeof argObj !== 'object') return [];
+    var pairs = [];
+    for (var k in argObj) {
+      if (!argObj.hasOwnProperty(k)) continue;
+      var v = argObj[k];
+      if (k === 'decl' && v && typeof v === 'object') {          // nested {declType:{name}}
+        for (var dt in v) { if (v.hasOwnProperty(dt)) pairs.push({label: dt, value: String(v[dt])}); }
+      } else if (v && typeof v === 'object') {                   // vec3/color {x,y,z}
+        var comps = []; for (var c in v) { if (v.hasOwnProperty(c)) comps.push(v[c]); }
+        pairs.push({label: k, value: comps.join(' ')});
+      } else {
+        pairs.push({label: k, value: String(v)});
+      }
+    }
+    return pairs;
+  }
+  // Classify a catalog arg TYPE NAME into a widget kind -- ports the Qt clone's tl_classify_arg (sh_timeline.cpp).
+  // Every kind now gets a real editable widget: 'bool' a checkbox, 'vecn' a per-component field row, 'decl'
+  // and 'enum' a dropdown constrained to real engine values (via the shared enum_decls_of_resclass
+  // round-trip -- see tlRenderArgCombo/argResclassCache), everything else a plain text box. 'entity' still
+  // stays plain text rather than the "Runs on" picker's dropdown -- that's the one remaining gap.
+  var TL_DECL_ALIASES = { 'idSoundShader*': 'sound', 'idActorModifier*': 'actormodifier', 'idMaterial*': 'material' };   // non-"idDecl" decl-pointers -> their decl-type short-name
+  function tlClassifyArg(typeName) {
+    if (typeName === 'float') return 'float';
+    if (typeName === 'int') return 'int';
+    if (typeName === 'bool') return 'bool';
+    if (typeName === 'vec3' || typeName === 'angles' || typeName === 'color') return 'vecn';
+    if (typeName === 'string' || typeName === 'entity' || typeName === 'animWebPath' || typeName === 'jointName' ||
+        typeName === 'jointTag' || typeName === 'animAlias' || typeName === 'md6Anim')
+      return 'text';   // plain text box for now -- entity gets a real picker dropdown in a later pass
+    if (typeName && typeName.indexOf('idDecl') === 0) return 'decl';
+    if (TL_DECL_ALIASES[typeName]) return 'decl';
+    return 'enum';   // catch-all (matches Qt's SH_ARG_ENUM default: a non-builtin, non-decl type name)
+  }
+  // Reduce a decl-pointer arg-type-name to its decl-type SHORT-NAME -- the on-disk nested key, {"decl":{<short>:name}}.
+  // idDecl<X>* -> strip "idDecl" + lowercase + drop '*' ("idDeclProjectile*" -> "projectile"); a non-"idDecl"
+  // decl-pointer (idSoundShader* etc.) takes the explicit alias. Ports tl_decl_resclass (sh_timeline.cpp).
+  function tlDeclResclass(typeName) {
+    if (TL_DECL_ALIASES[typeName]) return TL_DECL_ALIASES[typeName];
+    var s = typeName || '';
+    if (s.length > 6 && s.substring(0, 6) === 'idDecl') s = s.substring(6);
+    var out = '';
+    for (var i = 0; i < s.length; i++) { if (s[i] === '*') break; out += s[i].toLowerCase(); }
+    return out;
+  }
+  // The component KEY NAMES for a vecn arg, by engine type -- idVec3={x,y,z} / idAngles={pitch,yaw,roll} /
+  // idColor={r,g,b,a}, each read/written as a STRUCTURED object (not a space-separated string). Ports
+  // tl_vecn_keys (sh_timeline.cpp). Defaults to vec3 (x/y/z).
+  function tlVecnKeys(typeName) {
+    if (typeName === 'color') return ['r', 'g', 'b', 'a'];
+    if (typeName === 'angles') return ['pitch', 'yaw', 'roll'];
+    return ['x', 'y', 'z'];
+  }
+  // The blank value object a freshly-picked event's arg starts as, keyed by its type name (matching the
+  // engine's item[k]-by-type-name convention) -- so a picked event immediately has the right SHAPE to edit,
+  // not just an empty {}. assetCommitKey overrides the flat key for an asset-dropdown-matched arg (tlAssetCategoryFor)
+  // whose forced on-disk key doesn't match its own catalog type -- tag/tagName is the one real case (forced
+  // to "string" regardless of the arg's actual type) -- so the seed and the write path agree on the SAME key
+  // from the start, instead of the write path later adding a second, differently-keyed entry alongside a
+  // stale seed.
+  function tlDefaultArgValue(typeName, assetCommitKey) {
+    if (assetCommitKey) { var a2 = {}; a2[assetCommitKey] = ''; return a2; }
+    var kind = tlClassifyArg(typeName);
+    if (kind === 'bool') return { bool: false };
+    if (kind === 'float') return { float: '0' };
+    if (kind === 'int') return { int: '0' };
+    if (kind === 'text') { var o = {}; o[typeName] = ''; return o; }
+    if (kind === 'decl') { var d = {}; d[tlDeclResclass(typeName)] = ''; return { decl: d }; }
+    if (kind === 'vecn') {
+      var keys = tlVecnKeys(typeName), comp = {};
+      for (var i = 0; i < keys.length; i++) comp[keys[i]] = '0';
+      var v = {}; v[typeName] = comp; return v;
+    }
+    if (kind === 'enum') { var e2 = {}; e2[typeName] = ''; return e2; }   // flat {<enumType>:<MEMBER>}, same shape as 'text'
+    return {};
+  }
+  // "<name>  (<type>)" -- same label convention as the Qt clone's tl_arg_label. Falls back to the type name
+  // alone if the catalog didn't give this arg a name (some engine args are positional-only), and to
+  // "(unknown arg)" if there's no schema at all for this position (an unrecognized/hand-typed eventDef, or
+  // more stored args than the catalog says this event takes).
+  function tlArgLabel(argSchema) {
+    if (!argSchema) return '(unknown arg)';
+    var nm = (argSchema.name && argSchema.name.length) ? argSchema.name : argSchema.type;
+    return nm + '  (' + argSchema.type + ')';
+  }
+  // Render ONE arg's row: a real editable widget for the kinds this stage supports (bool/float/int/text),
+  // else the tlArgPairs read-only fallback (decl/vecn/enum, or no schema at all). data-argidx addresses it
+  // for the delegated input/change listeners (the SAME .event-row is rebuilt wholesale, like everything else
+  // in this panel, so per-widget listeners would leak -- delegation on #tlBody, not per-row wiring).
+  function tlRenderArgRow(argSchema, argIdx, argVal, tabEntitySlug) {
+    var kind = argSchema ? tlClassifyArg(argSchema.type) : 'unknown';
+    var label = esc(tlArgLabel(argSchema));
+    // per-entity asset dropdown (Stage 3, "exceed-the-OG") -- checked BEFORE the normal kind dispatch below,
+    // same order as Qt's tl_build_arg_widget. An unmatched category (wrong arg name/type, no resolved slug,
+    // or the entity's asset list for that category is empty) falls through to the normal widget untouched.
+    var asset = tlAssetCategoryFor(argSchema, tabEntitySlug);
+    if (asset) {
+      var assetRaw = (argVal && argVal[asset.commitKey] !== undefined) ? String(argVal[asset.commitKey]) : '';
+      var assetDisp = assetRaw ? tlAssetDisplayFor(asset.items, assetRaw) : '';
+      var assetResKey = 'asset:' + asset.category + ':' + tabEntitySlug;
+      argResclassCache[assetResKey] = asset.items;   // already have the data client-side -- no fetch needed
+      return '<div class="ev-arg-row"><label>' + label + '</label>'
+           + '<div class="combo ev-arg-combo" data-resclass="' + esc(assetResKey) + '">'
+           +   '<input type="text" class="ev-arg-input" data-argidx="' + argIdx + '" data-assetkey="' + esc(asset.commitKey) + '" autocomplete="off" value="' + esc(assetDisp) + '">'
+           +   '<button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div>'
+           + '</div></div>';
+    }
+    if (kind === 'bool') {
+      var checked = !!(argVal && argVal[argSchema.type]);
+      return '<div class="ev-arg-row"><label>' + label + '</label><input type="checkbox" class="ev-arg-input" data-argidx="' + argIdx + '"' + (checked ? ' checked' : '') + '></div>';
+    }
+    if (kind === 'float' || kind === 'int' || kind === 'text') {
+      var val = (argVal && argVal[argSchema.type] !== undefined) ? argVal[argSchema.type] : '';
+      return '<div class="ev-arg-row"><label>' + label + '</label><input type="text" class="ev-arg-input" data-argidx="' + argIdx + '" value="' + esc(String(val)) + '"></div>';
+    }
+    if (kind === 'decl') {
+      // {"decl":{<shortName>:value}} -- nested one level deeper than the scalar kinds above. data-argidx +
+      // data-declkey live on the <input> itself (matching every other arg widget -- the delegated listener
+      // always reads them off e.target), while data-resclass lives on the WRAPPING .ev-arg-combo (the element
+      // tlRenderArgCombo/the arrow-click handler operate on, not the input inside it).
+      var declKey = tlDeclResclass(argSchema.type);
+      var declVal = (argVal && argVal.decl && argVal.decl[declKey] !== undefined) ? argVal.decl[declKey] : '';
+      if (!argResclassCache[declKey] && !argResclassRequested[declKey]) { argResclassRequested[declKey] = true; post({cmd:'enumArgResclass', resClass: declKey}); }
+      return '<div class="ev-arg-row"><label>' + label + '</label>'
+           + '<div class="combo ev-arg-combo" data-resclass="' + esc(declKey) + '">'
+           +   '<input type="text" class="ev-arg-input" data-argidx="' + argIdx + '" data-declkey="' + esc(declKey) + '" autocomplete="off" value="' + esc(String(declVal)) + '">'
+           +   '<button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div>'
+           + '</div></div>';
+    }
+    if (kind === 'enum') {
+      // {"<enumType>":<MEMBER>} -- FLAT, same shape as the plain scalar kinds above (no data-declkey), just
+      // rendered as a combo constrained to the engine's real enum members instead of a bare text box.
+      var enumType = argSchema.type;
+      var enumVal = (argVal && argVal[enumType] !== undefined) ? argVal[enumType] : '';
+      if (!argResclassCache[enumType] && !argResclassRequested[enumType]) { argResclassRequested[enumType] = true; post({cmd:'enumArgResclass', resClass: enumType}); }
+      return '<div class="ev-arg-row"><label>' + label + '</label>'
+           + '<div class="combo ev-arg-combo" data-resclass="' + esc(enumType) + '">'
+           +   '<input type="text" class="ev-arg-input" data-argidx="' + argIdx + '" autocomplete="off" value="' + esc(String(enumVal)) + '">'
+           +   '<button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div>'
+           + '</div></div>';
+    }
+    if (kind === 'vecn') {
+      // {"<type>":{<comp>:value, ...}} -- a ROW of small per-component fields (x/y/z, pitch/yaw/roll, or
+      // r/g/b/a), each carrying data-veckey + data-vectype so the delegated listener writes into the right
+      // nested slot. Placeholder (not a separate <label> per field) names the component -- the row's own
+      // label already says the arg's name+type once.
+      var vecKeys = tlVecnKeys(argSchema.type);
+      var vecComp = (argVal && argVal[argSchema.type] && typeof argVal[argSchema.type] === 'object') ? argVal[argSchema.type] : {};
+      var vecFields = '';
+      for (var vk = 0; vk < vecKeys.length; vk++) {
+        var vecVal = vecComp[vecKeys[vk]] !== undefined ? vecComp[vecKeys[vk]] : '0';
+        vecFields += '<input type="text" class="ev-arg-input ev-arg-vecn" data-argidx="' + argIdx + '" data-vectype="' + esc(argSchema.type) + '" data-veckey="' + esc(vecKeys[vk]) + '" placeholder="' + esc(vecKeys[vk]) + '" value="' + esc(String(vecVal)) + '">';
+      }
+      return '<div class="ev-arg-row"><label>' + label + '</label><div class="ev-vecn-fields">' + vecFields + '</div></div>';
+    }
+    // no schema at all (an unrecognized/hand-typed eventDef, or more stored args than the catalog says this
+    // event takes) -- still the tlArgPairs read-only fallback, since there's no type to build a widget from.
+    var pairs = tlArgPairs(argVal);
+    if (pairs.length === 0) return '<div class="ev-arg-row"><label>' + label + '</label><span class="arg-val muted">(not editable yet)</span></div>';
+    // ONE pair -- prefer the SCHEMA label over the raw pair label (tlArgPairs would give the coincidental
+    // on-disk key, not the parameter's actual name -- less useful, even if not wrong).
+    if (pairs.length === 1) return '<div class="ev-arg-row"><label>' + label + '</label><span class="arg-val">' + esc(pairs[0].value) + '</span></div>';
+    // multiple pairs (a raw multi-field object with no clean 1:1 schema mapping) -- each keeps its own raw key.
+    var out = '';
+    for (var p = 0; p < pairs.length; p++) out += '<div class="ev-arg-row"><label>' + esc(pairs[p].label) + '</label><span class="arg-val">' + esc(pairs[p].value) + '</span></div>';
+    return out;
+  }
+  // Parse a serialized timeline entity into tlModel. Mirrors tl_collect_from_decl.
+  function parseTimeline(eid, entityJson) {
+    var doc;
+    try { doc = JSON.parse(entityJson); } catch (e) { return {eid:eid, ok:false, err:'parse'}; }
+    var edit = (((doc.entityDef || {}).state || {}).edit) || {};
+    var comp = null, isEnc = false;
+    if (edit.componentTimeLine) comp = edit.componentTimeLine;
+    else if (edit.encounterComponent) { comp = edit.encounterComponent; isEnc = true; }
+    if (!comp) return {eid:eid, ok:true, isEncounter:false, tabs:[], noData:true};
+    var entityEvents = comp.entityEvents || {};
+    var tabs = tlListItems(entityEvents).map(function(ee){
+      var events = tlListItems(ee.events || {}).map(function(ev){
+        var call = ev.eventCall || {};
+        // PRESERVE absent-ness: an event with NO eventTime keeps time '' (not 0) so the commit omits eventTime
+        // entirely, matching the OG (FUN_180011a88 only emits eventTime when the Time field is a non-empty uint).
+        // Collapsing absent -> 0 re-injected "eventTime":0 on every save, diverging from the engine's own shape.
+        return { time: (ev.eventTime === undefined || ev.eventTime === null ? '' : ev.eventTime), eventDef: tlEventDef(call), args: tlListItems(call.args || {}) };
+      });
+      return { entity: (ee.entity || ''), events: events };
+    });
+    return {eid:eid, ok:true, isEncounter:isEnc, tabs:tabs};
+  }
+
+  // ================================================================ COMMIT (tlModel -> nested decl JSON) ====
+  // Ports the Qt clone's COMMIT side (sh_timeline.cpp tl_build_component_json/tl_build_entity_event_json/
+  // tl_build_event_json/tl_build_arg_json/tl_resolve_entity_ref/tl_patch_component + sh_timeline_commit) --
+  // rebuild componentTimeLine/encounterComponent from the LIVE UI model, patch it into a FRESH re-serialize
+  // of the entity (not the stale open-time snapshot -- something else may have edited the entity while this
+  // panel was open, e.g. moved it in the 3D view; patching onto stale data would silently revert that), then
+  // hand the whole patched entity JSON to apply_edit kind=0.
+
+  // The engine's OWN id_to_string appends " (no module)" for a global/no-module entity -- real live-entity
+  // display text (tlEntityLabel already shows it), but NOT part of the engine's own name-intern table, so
+  // committing it verbatim produces an entity ref that can never resolve: the map "saves" fine and then
+  // faults at PLAY time when the timeline tries to resolve it. Must be stripped before commit (Qt does the
+  // same in tl_resolve_entity_ref).
+  function tlStripNoModuleSuffix(ref) {
+    var suffix = ' (no module)';
+    if (ref && ref.length >= suffix.length && ref.slice(-suffix.length) === suffix) return ref.slice(0, -suffix.length);
+    return ref;
+  }
+  // Resolve tab.entity back to the engine's RESOLVABLE ref before commit. The #tlRunsOn box DISPLAYS the label
+  // "<id>: <name>" (tlEntityLabel), and the type-handler stores that label text into tab.entity -- but the
+  // engine interns a timeline event's target by EXACT name, so committing the label yields an unresolvable ref
+  // (dangling managed ptr -> deref crash). The OG commits the combo's stored DATA (the ref), never the display
+  // text (FUN_180011a88 reads the entity index, not the label). Map the stored string to its canonical id:
+  // a raw ref stays as-is; the exact "<id>: <name>" label (or any string containing a known id) resolves to
+  // that id; a genuinely free-typed ref with no live match (e.g. "player1") is kept verbatim.
+  function tlResolveCommitRef(entityStr) {
+    if (!entityStr) return '';
+    for (var i = 0; i < allEntities.length; i++) {
+      var e = allEntities[i];
+      if (entityStr === e.id) return e.id;                              // already the ref
+      if (e.name && entityStr === (e.id + ': ' + e.name)) return e.id;  // the exact display label -> ref
+    }
+    for (var j = 0; j < allEntities.length; j++)                        // fallback: any string containing a known id
+      if (allEntities[j].id && entityStr.indexOf(allEntities[j].id) !== -1) return allEntities[j].id;
+    return entityStr;                                                   // free-typed ref, no live match
+  }
+  // Coerce a stored arg value back to the JSON TYPES the engine's arg reader expects -- our live-edit model
+  // keeps float/int/vecn components as STRINGS (so a half-typed "2." mid-edit doesn't get mangled -- see the
+  // .ev-time/.ev-arg-input input handlers), but the on-disk shape needs real JSON numbers there (Qt's
+  // tl_build_arg_json does QJsonValue(atof(...))/atoi(...) for exactly this reason -- a JSON STRING where the
+  // engine expects a NUMBER either fails to parse or silently misbehaves). bool/decl/enum/text/asset values
+  // are already the right JS type and pass through untouched.
+  function tlCommitArgValue(argVal, argSchema) {
+    if (!argVal || typeof argVal !== 'object') return argVal;
+    var kind = argSchema ? tlClassifyArg(argSchema.type) : 'unknown';
+    var out = {};
+    for (var k in argVal) {
+      if (!argVal.hasOwnProperty(k)) continue;
+      var v = argVal[k];
+      if ((kind === 'float' || kind === 'int') && typeof v !== 'object') {
+        var n = parseFloat(v); out[k] = isNaN(n) ? 0 : n;
+      } else if (kind === 'vecn' && v && typeof v === 'object') {
+        var vc = {};
+        for (var ck in v) { if (v.hasOwnProperty(ck)) { var cn = parseFloat(v[ck]); vc[ck] = isNaN(cn) ? 0 : cn; } }
+        out[k] = vc;
+      } else {
+        out[k] = v;   // bool (already a real boolean) / decl (already {shortName:string}) / enum / text / asset-string
+      }
+    }
+    return out;
+  }
+  // One event: {eventCall:{"\neventHandle_t eventDef":name, args:{item[0]:..,"\nnum":K}}, eventTime?:N}.
+  // eventTime is OMITTED unless the typed value parses as a clean non-negative integer -- matches Qt's exact
+  // gate (OG FUN_180011a88's toUInt check); a fractional or non-numeric Time field silently drops eventTime
+  // rather than committing something the engine's own reader would reject.
+  function tlBuildEventJson(ev, schema) {
+    var argsObj = {};
+    for (var a = 0; a < ev.args.length; a++) {
+      var argSchema = schema && schema.args[a];
+      argsObj['item[' + a + ']'] = tlCommitArgValue(ev.args[a], argSchema);
+    }
+    argsObj['\nnum'] = ev.args.length;   // args' count key is "\nnum" (leading newline) -- matches the engine's own raw dump spelling for THIS pseudo-list specifically; events/entityEvents below use plain "num" (verified against Qt's tl_build_event_json/tl_build_entity_event_json/tl_build_component_json -- NOT a typo, an asymmetry in the real dump).
+    var out = { eventCall: { '\neventHandle_t eventDef': ev.eventDef || '', args: argsObj } };
+    var t = String(ev.time).trim();
+    if (/^\d+$/.test(t)) out.eventTime = parseInt(t, 10);
+    return out;
+  }
+  // One entity-event-list tab: {entity:<stripped ref>, events:{item[0]:..,num:K}}.
+  function tlBuildEntityEventJson(tab) {
+    var eventsObj = {};
+    for (var e = 0; e < tab.events.length; e++) {
+      var schema = eventCatalogByName[tab.events[e].eventDef];
+      eventsObj['item[' + e + ']'] = tlBuildEventJson(tab.events[e], schema);
+    }
+    eventsObj.num = tab.events.length;
+    return { entity: tlStripNoModuleSuffix(tlResolveCommitRef(tab.entity) || ''), events: eventsObj };
+  }
+  // The full componentTimeLine/encounterComponent object: {entityEvents:{item[0]:..,num:K}}. Deliberately NO
+  // top-level "num" beside entityEvents -- the engine serializes this as an OBJECT (not a list), so only
+  // entityEvents itself carries a count (Qt's tl_build_component_json comment: a spurious top-level num
+  // measurably diverged from the engine's own baseline in their round-trip test).
+  function tlBuildComponentJson() {
+    var entityEvents = {};
+    for (var t = 0; t < tlModel.tabs.length; t++) entityEvents['item[' + t + ']'] = tlBuildEntityEventJson(tlModel.tabs[t]);
+    entityEvents.num = tlModel.tabs.length;
+    return { entityEvents: entityEvents };
+  }
+  // Patch entityDef.state.edit.<compKey> = (the rebuilt component) into a FRESH full-entity JSON string
+  // (fetched via a plain openTimeline round-trip right before calling this -- see doSaveTimeline). Returns
+  // the patched document as a JSON string, or null if the fresh JSON didn't parse / didn't have the expected
+  // entityDef shape (an editor-down or shape-mismatch situation -- Save should fail loudly, not guess).
+  function tlBuildPatchedEntityJson(freshEntityJson) {
+    var doc;
+    try { doc = JSON.parse(freshEntityJson); } catch (e) { return null; }
+    if (!doc || typeof doc.entityDef !== 'object') return null;
+    if (typeof doc.entityDef.state !== 'object') doc.entityDef.state = {};
+    if (typeof doc.entityDef.state.edit !== 'object') doc.entityDef.state.edit = {};
+    var compKey = tlModel.isEncounter ? 'encounterComponent' : 'componentTimeLine';
+    doc.entityDef.state.edit[compKey] = tlBuildComponentJson();
+    return JSON.stringify(doc);
+  }
+  // Save Timeline: fresh-reserialize the entity (reuses the SAME openTimeline round-trip Open/Revert use --
+  // tlSavePendingEid tells the 'timelineData' handler to divert this particular response to the patch+commit
+  // path below instead of a normal re-render, which would otherwise blow away the local edits we're trying
+  // to save), patch in the rebuilt component, then hand the whole patched JSON to the backend.
+  function doSaveTimeline() {
+    if (!tlModel) return;
+    tlSavePendingEid = tlModel.eid;
+    post({cmd:'openTimeline', eid: tlModel.eid});
+  }
+  // FULL label for an entity ref -- "<id>: <displayname>" (matches the Entities-tab list convention exactly),
+  // the id alone when unnamed. Used for the "Runs on" field: deliberately shows BOTH, not a name-only label,
+  // since the id carries the module path and disambiguates same-named entities -- a user request, replacing
+  // an earlier "Use Display Names" toggle that hid the id and didn't persist its state across tab/timeline
+  // switches (showing both makes the toggle unnecessary).
+  function tlEntityLabel(ref) {
+    if (!ref) return '(no entity)';
+    for (var i = 0; i < allEntities.length; i++) {
+      var e = allEntities[i];
+      if (e.id === ref || (ref.indexOf(e.id) !== -1)) return e.name ? (e.id + ': ' + e.name) : e.id;
+    }
+    return ref;
+  }
+  // Match a "Runs on" ref string back to its eid in allEntities -- same matching rule as tlEntityLabel, just
+  // returning the eid instead of a display label. -1 if unmatched (a free-typed ref with no live entity, e.g.
+  // "player1" -- there's nothing to resolve a class for, so the asset dropdowns can't apply to it).
+  function tlResolveEntityEid(ref) {
+    if (!ref) return -1;
+    for (var i = 0; i < allEntities.length; i++) {
+      var e = allEntities[i];
+      if (e.id === ref || ref.indexOf(e.id) !== -1) return e.eid;
+    }
+    return -1;
+  }
+  // The "Runs on" entity's class slug (entityDef.inherit), used to scope the per-entity asset dropdowns
+  // (Stage 3, "exceed-the-OG"). Lazily fetched + cached per eid via resolveEntityInherit -- returns null
+  // while unresolved (the caller's asset-lookup then finds nothing and the arg falls back to its normal
+  // widget, same tolerance as the decl/enum resclass cache).
+  function tlResolveEntitySlug(ref) {
+    var eid = tlResolveEntityEid(ref);
+    if (eid < 0) return null;
+    if (entityInheritCache[eid] !== undefined) return entityInheritCache[eid] || null;
+    if (!entityInheritRequested[eid]) { entityInheritRequested[eid] = true; post({cmd:'resolveEntityInherit', eid: eid}); }
+    return null;
+  }
+  // Does this arg qualify for a per-entity asset dropdown, and if so which category? Ports the Qt clone's
+  // tl_build_arg_widget asset-list special-cases (checked BEFORE the normal tlClassifyArg dispatch): modelIndex
+  // is matched by ARG NAME (its catalog type is already "int"); animWebPath/md6Anim/animAlias by ARG TYPE;
+  // tag/tagName by ARG NAME with the on-disk key forced to "string" regardless of the arg's own catalog type
+  // (matches tl_reduce_arg_key's explicit "name-keyed; on-disk key stays string" comment). An entity class with
+  // no data for a category (or no resolved slug at all) returns null -- the caller's normal dispatch still
+  // applies, faithful to Qt's own "empty enumeration -> plain box" fallback.
+  function tlAssetCategoryFor(argSchema, slug) {
+    if (!argSchema || !slug) return null;
+    var ea = entityAssetsBySlug[slug];
+    if (!ea) return null;
+    var an = argSchema.name || '';
+    // "category" is purely a cache-key discriminator (asset:<category>:<slug>) -- kept separate from
+    // commitKey (the actual on-disk write key) since e.g. a hypothetical second int-keyed asset category
+    // would otherwise collide in argResclassCache under the same commitKey.
+    if (an === 'modelIndex' && ea.models && ea.models.length) return { category: 'models', commitKey: 'int', items: ea.models };
+    if (argSchema.type === 'animWebPath' && ea.animWeb && ea.animWeb.length) return { category: 'animWeb', commitKey: 'animWebPath', items: ea.animWeb };
+    if (argSchema.type === 'md6Anim' && ea.md6Anim && ea.md6Anim.length) return { category: 'md6Anim', commitKey: 'md6Anim', items: ea.md6Anim };
+    if (argSchema.type === 'animAlias' && ea.animAlias && ea.animAlias.length) return { category: 'animAlias', commitKey: 'animAlias', items: ea.animAlias };
+    if ((an === 'tag' || an === 'tagName') && ea.tagName && ea.tagName.length) return { category: 'tagName', commitKey: 'string', items: ea.tagName };
+    return null;
+  }
+  // Reverse-lookup: given a stored raw VALUE (e.g. a model index "0", or a full md6anim path), find the
+  // friendly DISPLAY text to show in the field. Falls back to the raw value itself when it isn't in the
+  // list (an entity whose asset data changed since this event was authored, or a hand-typed value) --
+  // matches Qt's QComboBox::findData -> setEditText(raw) fallback.
+  function tlAssetDisplayFor(items, rawValue) {
+    for (var i = 0; i < items.length; i++) if (items[i].value === rawValue) return items[i].display;
+    return rawValue;
+  }
+  // Fill the entity-picker's dropdown ('.combo-list' next to #tlRunsOn) from allEntities, filtered by the
+  // CURRENT text in #tlRunsOn against both id and name (matches the Entities-tab filter behavior). Each
+  // option carries the raw id in data-id (the label shown is "id: name", which is NOT what gets stored --
+  // see the pick handler). Free text always stays allowed (an unmatched entity, e.g. "player1", is a valid
+  // decl ref the widget must not block).
+  // showAll=true (arrow click / focus -- "browse everything") ignores the current value for filtering
+  // purposes, even if the field already holds a picked entity; only actual TYPING (the 'input' handler,
+  // showAll omitted) narrows the list. Otherwise opening a pre-filled field self-filters down to just its
+  // own value, which defeats "browse the other options."
+  function tlRenderEntityCombo(showAll) {
+    var listEl = document.querySelector('#tlBody .entity-picker .combo-list');
+    var inputEl = document.getElementById('tlRunsOn');
+    if (!listEl || !inputEl) return;
+    var q = showAll ? '' : inputEl.value.toLowerCase();
+    // cap raised to match POC_MAX_ENTS (snaphak_ui_webview.cpp) -- the native entity list itself never
+    // exceeds that, so this never truncates a real map's entity list (same reasoning as the eventDef cap).
+    var out = [], cap = 8192;
+    for (var i = 0; i < allEntities.length; i++) {
+      var e = allEntities[i];
+      var label = e.name ? (e.id + ': ' + e.name) : e.id;
+      if (!q || label.toLowerCase().indexOf(q) !== -1) { out.push({id: e.id, label: label}); if (out.length >= cap) break; }
+    }
+    var h = '';
+    for (var j = 0; j < out.length; j++) h += '<div class="combo-opt" data-id="' + esc(out[j].id) + '">' + esc(out[j].label) + '</div>';
+    if (out.length === 0) h = '<div class="combo-empty">no matches -- free text is fine (e.g. player1)</div>';
+    else if (out.length >= cap) h += '<div class="combo-hint">first ' + cap + ' shown -- type to narrow</div>';
+    listEl.innerHTML = h;
+  }
+  // Fill ONE event row's eventDef dropdown ('.combo-list' inside its OWN .combo, found via rowEl -- there's
+  // one of these per event row, unlike the single #tlRunsOn) from the full eventItems catalog. Same
+  // showAll/typed-filter split as tlRenderEntityCombo.
+  function tlRenderEventCombo(rowEl, showAll) {
+    var inputEl = rowEl.querySelector('.ev-eventdef');
+    var listEl = rowEl.querySelector('.combo-list');
+    if (!inputEl || !listEl) return;
+    var q = showAll ? '' : inputEl.value.toLowerCase();
+    // cap comfortably above the catalog's 1611 events (unlike the 300-cap entity-picker, which is meant to
+    // stay narrow-by-default on a big map) -- browsing the whole catalog unfiltered is the point here.
+    var out = [], cap = 2000;
+    for (var i = 0; i < eventItems.length; i++) {
+      var nm = eventItems[i].name;
+      if (!q || nm.toLowerCase().indexOf(q) !== -1) { out.push(nm); if (out.length >= cap) break; }
+    }
+    var h = '';
+    for (var j = 0; j < out.length; j++) h += '<div class="combo-opt">' + esc(out[j]) + '</div>';
+    if (out.length === 0) h = '<div class="combo-empty">no matches</div>';
+    else if (out.length >= cap) h += '<div class="combo-hint">first ' + cap + ' shown -- type to narrow</div>';
+    listEl.innerHTML = h;
+  }
+  // Fill a DECL/ENUM/asset arg's dropdown from argResclassCache[data-resclass] -- same showAll/typed-filter
+  // split as the other combos. Items are either plain strings (decl/enum -- display===value) or
+  // {display,value} objects (asset lists, where e.g. a model's shown NAME differs from its stored index/path);
+  // each option's data-value carries the real value to write, separate from the friendly text shown/typed.
+  // An empty/not-yet-fetched cache degrades to "no known values -- free text is fine" rather than blocking
+  // the field, matching Qt's own fallback when the engine enumeration (or the asset list) comes back empty.
+  function tlRenderArgCombo(comboEl, showAll) {
+    var inputEl = comboEl.querySelector('.ev-arg-input');
+    var listEl = comboEl.querySelector('.combo-list');
+    if (!inputEl || !listEl) return;
+    var resClass = comboEl.getAttribute('data-resclass');
+    var items = argResclassCache[resClass] || [];
+    var q = showAll ? '' : inputEl.value.toLowerCase();
+    var out = [];
+    for (var i = 0; i < items.length; i++) {
+      var disp = (typeof items[i] === 'string') ? items[i] : items[i].display;
+      if (!q || disp.toLowerCase().indexOf(q) !== -1) out.push(items[i]);
+    }
+    var h = '';
+    for (var j = 0; j < out.length; j++) {
+      var it = out[j];
+      var dispJ = (typeof it === 'string') ? it : it.display;
+      var valJ = (typeof it === 'string') ? it : it.value;
+      h += '<div class="combo-opt" data-value="' + esc(String(valJ)) + '">' + esc(dispJ) + '</div>';
+    }
+    if (out.length === 0) h = '<div class="combo-empty">' + (items.length === 0 ? 'no known values -- free text is fine' : 'no matches') + '</div>';
+    listEl.innerHTML = h;
+  }
+  function renderTimelineEditor(d) {
+    var head = document.getElementById('tlHead');
+    var tabsEl = document.getElementById('tlTabs');
+    var bodyEl = document.getElementById('tlBody');
+    if (!head || !tabsEl || !bodyEl) return;
+    if (!d.ok) {
+      tlModel = null; head.textContent = 'Could not open this timeline (see log).'; tabsEl.innerHTML = ''; bodyEl.innerHTML = '';
+      document.getElementById('revertTimelineBtn').disabled = true;
+      document.getElementById('saveTimelineBtn').disabled = true;   // was left clickable here -- doSaveTimeline's
+      // `if (!tlModel) return;` guard then made Save a silent no-op (no toast, nothing happens): this is the
+      // "edited a from-scratch timeline, hit Save, got nothing" symptom. Disabling it here at least surfaces the
+      // real problem honestly (the head text above) instead of a dead click.
+      return;
+    }
+    var tlName = 'timeline';
+    for (var i = 0; i < allTimelines.length; i++) if (allTimelines[i].eid === d.eid) { tlName = allTimelines[i].name || allTimelines[i].id; break; }
+    tlModel = { eid: d.eid, isEncounter: !!d.isEncounter, name: tlName, tabs: d.tabs || [], active: 0 };
+    tlDirty = false;   // fresh load from the backend -- nothing unsaved yet (gates tlMaybeAutoRefresh, not Save/Revert below)
+    head.innerHTML = 'Current Timeline: <b>' + esc(tlName) + '</b>' + (d.isEncounter ? ' <span class="muted">(encounter)</span>' : '');
+    if (!eventsRequested) { eventsRequested = true; post({cmd:'enumEvents'}); }   // full event catalog, once
+    if (!entityAssetsRequested) { entityAssetsRequested = true; post({cmd:'enumEntityAssets'}); }   // full per-entity-class asset table, once
+    renderTlTabs();
+    renderTlBody();
+    // Save + Revert both enabled unconditionally once a timeline is open (tlDirty only gates the SILENT
+    // auto-refresh below, not these buttons -- matching the rest of this panel's tolerance) -- Revert
+    // re-fetches fresh (the "get my edits back out" escape hatch); Save commits whatever's currently in
+    // tlModel, even if nothing was actually changed (a harmless no-op re-save in that case, not a correctness
+    // issue).
+    document.getElementById('saveTimelineBtn').disabled = false;
+    document.getElementById('revertTimelineBtn').disabled = false;
+  }
+  // Tab labels: "Item N" (0-indexed, matching the decl's own item[0]/item[1]/... keys exactly -- the OG's
+  // own tab title, live-decompiled, is the literal "item[N]"; ours drops the brackets/lowercase for
+  // readability but keeps the 0-indexing so the number always matches the raw JSON key) -- not the driven
+  // entity's name, which already shows in full in "Runs on" and would make the tab strip itself
+  // redundant/wrap-prone. The trailing "+" appends a new (empty) entity tab.
+  function renderTlTabs() {
+    var tabsEl = document.getElementById('tlTabs'); if (!tabsEl || !tlModel) return;
+    var html = '';
+    for (var i = 0; i < tlModel.tabs.length; i++) {
+      var cls = 'tl-inner-tab' + (i === tlModel.active ? ' active' : '');
+      html += '<div class="' + cls + '" data-tlidx="' + i + '">Item ' + i
+            + '<span class="tl-tab-del" title="Remove this entity event list">&#10005;</span></div>';
+    }
+    html += '<div class="tl-inner-tab tl-add" title="Add an entity-event list">+</div>';
+    tabsEl.innerHTML = html;
+  }
+  // The OG "Runs on" entity-picker (FUN_180008180, live-decompiled from the original snaphakui.dll for
+  // behavior reference; reimplemented from scratch here). The OG also has a "Use Display Names" checkbox
+  // there -- deliberately DROPPED here (user request): it hid the id (which carries the module path and
+  // disambiguates same-named entities) behind a toggle that didn't persist across tab/timeline switches.
+  // tlEntityLabel always shows both ("<id>: <name>") instead, so there's nothing to toggle. The
+  // "Use current selection" button is a VISUAL mockup only -- reading the live editor selection needs a new
+  // native round-trip, not yet wired.
+  function renderTlBody() {
+    var bodyEl = document.getElementById('tlBody'); if (!bodyEl || !tlModel) return;
+    if (tlModel.tabs.length === 0) {
+      bodyEl.innerHTML = '<div class="muted" style="padding:8px;">This timeline has no entity events yet.</div>';
+      return;
+    }
+    var tab = tlModel.tabs[tlModel.active];
+    // resolved ONCE per render (not per-arg) -- the class slug that scopes the per-entity asset dropdowns.
+    // null while unresolved (tlResolveEntitySlug fires the lazy fetch as a side effect; the eventual
+    // 'entityInherit' response re-renders this same tab, per the onMessage handler above).
+    var tabEntitySlug = tab.entity ? tlResolveEntitySlug(tab.entity) : null;
+    // "(no entity)" is a HINT, not real text -- it must be a placeholder, never the input's actual value.
+    // Putting it in value="" (as an earlier version did) meant the dropdown filter read the literal string
+    // "(no entity)" as if the user had typed it, matching nothing -> an empty/broken-looking dropdown on any
+    // freshly-added ("+") tab, whose entity starts as ''.
+    var entityText = tab.entity ? tlEntityLabel(tab.entity) : '';
+
+    var h = '<div class="entity-picker">'
+       + '<div class="combo grow"><input type="text" id="tlRunsOn" value="' + esc(entityText) + '" placeholder="(no entity)" autocomplete="off"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div>'
+       + '<div class="entity-picker-opts">'
+       +   '<button type="button" class="btn" id="tlUseSelection" title="Not wired yet -- will read the currently selected entity in the 3D editor (Stage 3)">Use current selection</button>'
+       + '</div>'
+       + '</div>';
+
+    // "Add Eventcall" (OG: FUN_1800114fc, right below the entity-picker) -- appends a blank event to THIS
+    // tab, same local-model-only pattern as the "+" tab button and both deletes (no native round-trip).
+    h += '<div><button type="button" class="btn" id="tlAddEventcall">Add Eventcall</button></div>';
+
+    h += '<div class="event-list">';
+    if (tab.events.length === 0) {
+      h += '<div class="muted" style="padding:4px 2px;">No events on this entity.</div>';
+    } else {
+      for (var j = 0; j < tab.events.length; j++) {
+        var ev = tab.events[j];
+        // schema = the catalog's arg list for THIS eventDef (or undefined for an unrecognized/hand-typed
+        // name) -- ev.args[a] is matched to schema.args[a] BY POSITION (the on-disk shape only keys each arg
+        // by its type name, not its name, so position is the only reliable correlation -- same as Qt).
+        var schema = eventCatalogByName[ev.eventDef];
+
+        h += '<div class="event-row" data-evidx="' + j + '">'
+           + '<div class="ev-top">'
+           +   '<label>Time</label><input type="text" class="ev-time" value="' + esc(String(ev.time)) + '">'
+           +   '<div class="combo"><input type="text" class="ev-eventdef" value="' + esc(ev.eventDef) + '" autocomplete="off" placeholder="(pick an event)"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div>'
+           +   '<div class="ev-del" title="Remove event call">&#10005;</div>'
+           + '</div>';
+        if (ev.args.length === 0) {
+          h += '<div class="ev-args-list muted">no parameters</div>';
+        } else {
+          h += '<div class="ev-args-list">';
+          for (var a = 0; a < ev.args.length; a++) {
+            var argSchema = schema && schema.args[a];
+            h += tlRenderArgRow(argSchema, a, ev.args[a], tabEntitySlug);
+          }
+          h += '</div>';
+        }
+        h += '</div>';
+      }
+    }
+    h += '</div>';
+    bodyEl.innerHTML = h;
   }
 
   function updateSelDom() {
@@ -636,9 +1411,14 @@
     else { primaryEid = -1; showPlaceholder(n + ' entities selected.<br>Select a single entity to edit its decl.<br><span style="color:#aaa;">Right-click for actions on all ' + n + '.</span>'); }
     if (push !== false) pushSelectionToEditor();
   }
+  function entityIdString(eid) {
+    for (var i=0;i<allEntities.length;i++) if (allEntities[i].eid === eid) return allEntities[i].id;
+    return '';
+  }
   function showState(d) {
     document.getElementById('selInfo').style.display='none';
     document.getElementById('editor').style.display='flex';
+    document.getElementById('fEntityId').value = entityIdString(d.eid);
     document.getElementById('declText').value = d.decl || '';
     document.getElementById('fInherit').value = d.inherit || '';
     document.getElementById('fClassname').value = d.classname || '';
@@ -647,6 +1427,22 @@
     updateDirty();
     if (!inheritsRequested) { inheritsRequested = true; post({cmd:'enumInherits'}); }  // full inherit list, once
     post({cmd:'enumClasses', inherit: d.inherit || ''});                                // classes valid for THIS inherit
+    requestDesc();
+  }
+  function requestDesc() {
+    post({cmd:'lookupDesc', inherit: document.getElementById('fInherit').value, classname: document.getElementById('fClassname').value});
+  }
+  function descBlock(title, name, d) {
+    if (!name) return '';
+    var h = '<div class="desc-block"><div class="desc-block-title">' + title + esc(name) + '</div>'
+          + (d ? '<div class="desc-tier">' + esc(d.source) + ' evidence, ' + esc(d.confidence) + ' confidence</div>' : '');
+    h += d ? '<div class="desc-summary">' + esc(d.summary) + '</div>'
+           : '<div class="desc-summary muted">No reverse-engineered description on file for this ' + (title === 'INHERIT ' ? 'inherit' : 'class') + '.</div>';
+    return h + '</div>';
+  }
+  function renderDesc(d) {
+    var inh = document.getElementById('fInherit').value, cls = document.getElementById('fClassname').value;
+    document.getElementById('descBody').innerHTML = descBlock('INHERIT ', inh, d.inherit) + descBlock('CLASS ', cls, d.class);
   }
   function curState() {
     return { decl:document.getElementById('declText').value, inherit:document.getElementById('fInherit').value,
@@ -656,15 +1452,37 @@
     if (!loaded) return false; var c = curState();
     return c.decl!==loaded.decl || c.inherit!==loaded.inherit || c.classname!==loaded.classname || c.displayname!==loaded.displayname;
   }
+  // blank -> always rejected by the engine. "unknown" -> not blank, but not in the enumerated list we already
+  // fetched for the combos (inheritItems is the full list; classItems is scoped to the CURRENTLY selected
+  // inherit) -- catches a typo/rejected combo client-side instead of waiting on a native round-trip to refuse it.
+  function fieldProblems(c) {
+    var inhBlank = !c.inherit.replace(/\s/g,''), clsBlank = !c.classname.replace(/\s/g,'');
+    var inhUnknown = !inhBlank && inheritItems.length > 0 && inheritItems.indexOf(c.inherit) === -1;
+    var clsUnknown = !clsBlank && classItems.length > 0 && classItems.indexOf(c.classname) === -1;
+    return { inherit: inhBlank ? 'blank' : (inhUnknown ? 'unknown' : null),
+             classname: clsBlank ? 'blank' : (clsUnknown ? 'unknown' : null) };
+  }
   function updateDirty() {
     var d = isDirty();
-    document.getElementById('saveBtn').disabled = !d;
-    document.getElementById('revertBtn').disabled = !d;
+    var p = fieldProblems(curState());
+    document.getElementById('cInherit').classList.toggle('invalid', !!p.inherit);
+    document.getElementById('cClassname').classList.toggle('invalid', !!p.classname);
+    document.getElementById('saveBtn').disabled = !d || !!p.inherit || !!p.classname;
+    document.getElementById('revertBtn').disabled = !d;   // Revert stays available even with an invalid edit -- it's the way OUT of a bad edit
   }
   function doSave() {
     if (primaryEid < 0 || !isDirty()) return;
     var c = curState();
-    if (!c.classname.replace(/\s/g,'') || !c.inherit.replace(/\s/g,'')) { toast("Classname and Inherit can't be blank", 'err'); return; }
+    var p = fieldProblems(c);
+    if (p.inherit || p.classname) {
+      // this is a LOCAL check against the enum lists we already fetched -- distinct from the native "Save
+      // refused" round-trip (saveResult result:0), which is the backend's own +0x268 morph-guard verdict.
+      var msg = (p.inherit === 'blank' || p.classname === 'blank')
+        ? "Classname and Inherit can't be blank"
+        : "Unrecognized Inherit/Classname (not in the known list) -- pick one from the dropdown";
+      toast(msg, 'err');
+      return;
+    }
     post({ cmd:'save', eid:primaryEid, decl:c.decl, classname:c.classname, inherit:c.inherit, displayname:c.displayname });
   }
   function doRevert() { if (loaded) { document.getElementById('declText').value=loaded.decl; document.getElementById('fInherit').value=loaded.inherit; document.getElementById('fClassname').value=loaded.classname; document.getElementById('fDisplayname').value=loaded.displayname; updateDirty(); } }
@@ -694,6 +1512,10 @@
       var exist = {}; for (var i=0;i<allEntities.length;i++) exist[allEntities[i].eid]=true;
       for (var k in selectedEids) if (selectedEids[k] && !exist[k]) delete selectedEids[k];
       renderList();
+      allTimelines = d.timelines || [];
+      var tlExist = {}; for (var ti=0; ti<allTimelines.length; ti++) tlExist[allTimelines[ti].eid] = true;
+      if (selectedTlEid !== -1 && !tlExist[selectedTlEid]) selectedTlEid = -1;
+      renderTimelineList();
     } else if (d.kind === 'state') {
       if (d.auto && (isDirty() || d.eid !== primaryEid)) return;   // never clobber unsaved edits
       if (d.eid === primaryEid || !d.auto) showState(d);
@@ -709,6 +1531,34 @@
       inheritItems = d.items || []; if (inheritCombo) inheritCombo.refresh();
     } else if (d.kind === 'classes') {
       classItems = d.items || []; if (classCombo) classCombo.refresh();
+    } else if (d.kind === 'desc') {
+      renderDesc(d);
+    } else if (d.kind === 'events') {
+      eventItems = d.items || [];
+      eventCatalogByName = {};
+      for (var evi = 0; evi < eventItems.length; evi++) eventCatalogByName[eventItems[evi].name] = eventItems[evi];
+    } else if (d.kind === 'argResclass') {
+      argResclassCache[d.resClass] = d.items || [];
+      // no live-refresh of an already-open combo here (matches the eventDef/entity-picker's own tolerance --
+      // the round-trip is near-instant locally; the list just populates properly the NEXT time this combo opens).
+    } else if (d.kind === 'entityAssets') {
+      entityAssetsBySlug = {};
+      var eaItems = d.items || [];
+      for (var eai = 0; eai < eaItems.length; eai++) entityAssetsBySlug[eaItems[eai].slug] = eaItems[eai];
+    } else if (d.kind === 'entityInherit') {
+      var slug = '';
+      if (d.ok && d.json) {
+        try { var edoc = JSON.parse(d.json); slug = ((edoc.entityDef || {}).inherit) || ''; } catch (eiErr) { slug = ''; }
+      }
+      entityInheritCache[d.eid] = slug;
+      // re-render if the currently-active tab's "Runs on" entity is the ONE we just resolved -- upgrades any
+      // asset-eligible args from their plain fallback to the real dropdown, rather than waiting for some
+      // unrelated edit to trigger the next render (unlike decl/enum, an unresolved slug means the arg falls
+      // all the way back to a DIFFERENT widget kind entirely, not just an empty dropdown list).
+      if (tlModel && tlModel.tabs.length) {
+        var activeRef = tlModel.tabs[tlModel.active].entity;
+        if (activeRef && tlResolveEntityEid(activeRef) === d.eid) renderTlBody();
+      }
     } else if (d.kind === 'info') {
       toast(d.text || '', 'warn');
     } else if (d.kind === 'camera') {
@@ -754,6 +1604,22 @@
     } else if (d.kind === 'movePrefabResult') {
       if (d.result === 1) toast('Moved "' + d.name + '"' + (d.toFolder ? ' to "' + d.toFolder + '"' : ' to the root list'), 'ok');
       else toast('Could not move "' + d.name + '" (a name collision, most likely)', 'err');
+    } else if (d.kind === 'timelineData') {
+      if (tlSavePendingEid === d.eid) {
+        tlSavePendingEid = -1;
+        if (!d.ok) { toast('Save failed: could not re-read the entity (editor down?)', 'err'); return; }
+        var patched = tlBuildPatchedEntityJson(d.json);
+        if (!patched) { toast('Save failed: could not patch the entity JSON', 'err'); return; }
+        post({cmd:'saveTimeline', eid: d.eid, json: patched});
+      } else {
+        renderTimelineEditor(d.ok ? parseTimeline(d.eid, d.json) : {eid:d.eid, ok:false});
+      }
+    } else if (d.kind === 'saveTimelineResult') {
+      // A failure here most commonly means the entity hasn't survived a map save+reload since it was
+      // placed/reclassed yet (a known engine limitation, not a webview bug -- copy/paste does NOT fix this
+      // and risks its own corruption; save the map and reload it instead, then retry).
+      if (d.result === 1) { toast('Timeline saved', 'ok'); tlDirty = false; }   // just-committed local model is the new clean baseline
+      else toast('Save failed -- if this entity was just placed or reclassed, save the map and reload it, then try again', 'err');
     }
   }
 
@@ -834,6 +1700,8 @@
   var prefabFilterEl = document.getElementById('prefabFilter');
   if (prefabFilterEl) prefabFilterEl.addEventListener('input', renderPrefabTree);
   document.getElementById('showHidden').addEventListener('change', renderList);
+  var timelineFilterEl = document.getElementById('timelineFilter');
+  if (timelineFilterEl) timelineFilterEl.addEventListener('input', renderTimelineList);
   // The two sync directions are mutually exclusive for now (both-on could freeze on multi-select).
   document.getElementById('syncEditor').addEventListener('change', function(){
     if (this.checked) { document.getElementById('selectInEditor').checked = false; selectMode = false; document.getElementById('deselectBtn').style.display = 'none'; }
@@ -851,12 +1719,34 @@
     updateSelDom(); refreshEditorForSelection(false);   // false: we already told native directly, don't push again
   });
   document.getElementById('saveBtn').addEventListener('click', doSave);
+  document.getElementById('copyIdBtn').addEventListener('click', function(){
+    var v = document.getElementById('fEntityId').value;
+    if (v) { copyText(v); toast('Copied ID', 'ok'); }
+  });
   document.getElementById('revertBtn').addEventListener('click', doRevert);
+  // Ctrl/Cmd+S saves the decl, but only while focus is inside the state editor (declText/fields/desc-panel) --
+  // scoped so it doesn't fight a future Ctrl+S on the Prefabs/Timelines tabs. doSave() already no-ops when
+  // there's nothing dirty, same as the (then-disabled) Save button.
+  document.addEventListener('keydown', function(e){
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 's'
+        && document.getElementById('editor').contains(document.activeElement)) {
+      e.preventDefault();
+      doSave();
+    }
+  });
   ['declText','fDisplayname'].forEach(function(id){ document.getElementById(id).addEventListener('input', updateDirty); });
-  inheritCombo = Combo('cInherit', function(){ return inheritItems; }, updateDirty, function(){ updateDirty(); post({cmd:'enumClasses', inherit: document.getElementById('fInherit').value}); });
-  classCombo = Combo('cClassname', function(){ return classItems; }, updateDirty, updateDirty);
-  // typing an inherit then blurring/Enter also re-fetches its valid classes
-  document.getElementById('fInherit').addEventListener('change', function(){ post({cmd:'enumClasses', inherit: this.value}); });
+  inheritCombo = Combo('cInherit', function(){ return inheritItems; }, updateDirty, function(){ updateDirty(); post({cmd:'enumClasses', inherit: document.getElementById('fInherit').value}); requestDesc(); });
+  classCombo = Combo('cClassname', function(){ return classItems; }, updateDirty, function(){ updateDirty(); requestDesc(); });
+  // typing an inherit/classname then blurring/Enter also re-fetches its valid classes + description
+  document.getElementById('fInherit').addEventListener('change', function(){ post({cmd:'enumClasses', inherit: this.value}); requestDesc(); });
+  document.getElementById('fClassname').addEventListener('change', requestDesc);
+  // collapsed: only the header row opens it. expanded: click ANYWHERE in the panel closes it, EXCEPT
+  // right after the user just drag-selected description text (don't yank the panel out from under a copy).
+  document.getElementById('descPanel').addEventListener('click', function(e){
+    var open = this.classList.contains('open');
+    if (open) { if (!window.getSelection().toString()) this.classList.remove('open'); }
+    else if (e.target.closest('#descToggle')) this.classList.add('open');
+  });
 
   // Camera Origin: fields track the live camera (when unfocused); Lock pins it; a committed edit writes back.
   function fmtNum(v) { return String(parseFloat((+v).toFixed(6))); }
@@ -901,24 +1791,328 @@
         document.getElementById('panel-' + name).style.display = (name === which) ? 'flex' : 'none';
       });
       if (which === 'prefabs') post({cmd:'listPrefabs'});
+      if (which === 'timelines') tlMaybeAutoRefresh();   // catch stale content from a play-mode round-trip that happened while this tab wasn't visible
     });
   });
-  // timeline inner-tab switching (mockup: visual only for now)
-  document.querySelectorAll('.tl-inner-tab:not(.tl-add)').forEach(function(t){
-    t.addEventListener('click', function(){
-      document.querySelectorAll('.tl-inner-tab').forEach(function(x){ x.classList.remove('active'); });
-      this.classList.add('active');
-    });
+  // also refresh on regaining focus/visibility WITHOUT a tab click -- e.g. the Timelines tab was already
+  // active before Play mode took the window away, so there's no tab-click to hang the refresh off of when
+  // the user comes back. Same tlMaybeAutoRefresh gate (skips if dirty/no timeline open/save in flight).
+  window.addEventListener('focus', function(){
+    if (document.getElementById('panel-timelines').style.display !== 'none') tlMaybeAutoRefresh();
   });
-  // timeline list selection (mockup)
+  document.addEventListener('visibilitychange', function(){
+    if (!document.hidden && document.getElementById('panel-timelines').style.display !== 'none') tlMaybeAutoRefresh();
+  });
+  // remove entity tab `idx` (the tl-tab-del click), re-pointing `active` so it stays a valid index (or 0 if
+  // the timeline is now empty -- renderTlBody's own tabs.length===0 check handles that display).
+  function tlRemoveTab(idx) {
+    if (!tlModel || idx < 0 || idx >= tlModel.tabs.length) return;
+    tlMarkDirty();
+    tlModel.tabs.splice(idx, 1);
+    if (tlModel.active > idx) tlModel.active--;
+    if (tlModel.active >= tlModel.tabs.length) tlModel.active = tlModel.tabs.length - 1;
+    if (tlModel.active < 0) tlModel.active = 0;
+    renderTlTabs();
+    renderTlBody();
+  }
+  // timeline inner-tab switching + the "+" add-tab button + the per-tab "x" delete -- delegated (tabs are
+  // rebuilt per open in renderTlTabs).
+  (function(){
+    var tabsEl = document.getElementById('tlTabs');
+    if (tabsEl) tabsEl.addEventListener('click', function(e){
+      var delBtn = e.target.closest('.tl-tab-del');
+      if (delBtn && tlModel) {
+        var delTab = delBtn.closest('.tl-inner-tab');
+        var delIdx = delTab ? parseInt(delTab.getAttribute('data-tlidx'), 10) : NaN;
+        if (!isNaN(delIdx)) tlRemoveTab(delIdx);
+        return;
+      }
+      var t = e.target.closest('.tl-inner-tab'); if (!t || !tlModel) return;
+      if (t.classList.contains('tl-add')) {
+        tlMarkDirty();
+        tlModel.tabs.push({ entity: '', events: [] });
+        tlModel.active = tlModel.tabs.length - 1;
+        renderTlTabs();
+        renderTlBody();
+        return;
+      }
+      var idx = parseInt(t.getAttribute('data-tlidx'), 10);
+      if (isNaN(idx)) return;
+      tlModel.active = idx;
+      renderTlTabs();
+      renderTlBody();
+    });
+  })();
+  // timeline list selection -> highlight the row AND open it (serialize + parse + render, Stage 2).
   (function(){
     var el = document.getElementById('timelineList');
     if (el) el.addEventListener('click', function(e){
       var item = e.target.closest('.entity-item'); if (!item) return;
-      el.querySelectorAll('.entity-item.selected').forEach(function(s){ s.classList.remove('selected'); });
-      item.classList.add('selected');
+      selectedTlEid = parseInt(item.getAttribute('data-eid'), 10);
+      renderTimelineList();
+      post({cmd:'openTimeline', eid: selectedTlEid});
     });
   })();
+  // Runs-on entity-picker ("Use current selection" is a visual placeholder until Stage 3 wires a real
+  // "what's currently selected in the 3D editor" round-trip) + "Add Eventcall" + per-event delete.
+  (function(){
+    var bodyEl = document.getElementById('tlBody');
+    if (!bodyEl) return;
+    bodyEl.addEventListener('click', function(e){
+      if (e.target && e.target.id === 'tlUseSelection') {
+        toast('Use current selection: not wired yet (Stage 3)', 'warn');
+        return;
+      }
+      if (e.target && e.target.id === 'tlAddEventcall' && tlModel) {
+        tlMarkDirty();
+        tlModel.tabs[tlModel.active].events.push({ time: '', eventDef: '', args: [] });   // blank time -> no eventTime committed (OG default)
+        renderTlBody();
+        return;
+      }
+      var delBtn = e.target.closest('.ev-del');
+      if (delBtn && tlModel) {
+        var row = delBtn.closest('.event-row');
+        var evIdx = row ? parseInt(row.getAttribute('data-evidx'), 10) : NaN;
+        if (!isNaN(evIdx)) {
+          tlMarkDirty();
+          tlModel.tabs[tlModel.active].events.splice(evIdx, 1);
+          renderTlBody();
+        }
+      }
+    });
+    // #tlRunsOn entity-picker: editable + free-text, backed by allEntities. mousedown (not click) for the
+    // arrow/option-pick to match the existing Combo() convention (fires before blur would otherwise hide
+    // the list first). Typing is a LOCAL model edit only -- updates tlModel.tabs[active].entity directly
+    // and refreshes just the dropdown list (never calls the full renderTlBody(), which would blow away the
+    // input's focus/cursor mid-keystroke).
+    bodyEl.addEventListener('focusin', function(e){
+      if (e.target && e.target.id === 'tlRunsOn') {
+        tlRenderEntityCombo(true);
+        var listEl = document.querySelector('#tlBody .entity-picker .combo-list');
+        if (listEl) listEl.style.display = 'block';
+      } else if (e.target && e.target.classList.contains('ev-eventdef')) {
+        var row = e.target.closest('.event-row');
+        if (row) { tlRenderEventCombo(row, true); var evListEl = row.querySelector('.combo-list'); if (evListEl) evListEl.style.display = 'block'; }
+      } else if (e.target && e.target.closest && e.target.closest('.ev-arg-combo')) {
+        var argCombo3 = e.target.closest('.ev-arg-combo');
+        tlRenderArgCombo(argCombo3, true);
+        var argListEl3 = argCombo3.querySelector('.combo-list');
+        if (argListEl3) argListEl3.style.display = 'block';
+      }
+    });
+    bodyEl.addEventListener('input', function(e){
+      if (tlModel) tlMarkDirty();   // one gate for every typed edit below (Runs-on, time, eventDef, arg inputs incl. combo picks that re-dispatch 'input')
+      if (e.target && e.target.id === 'tlRunsOn' && tlModel) {
+        tlModel.tabs[tlModel.active].entity = e.target.value;
+        tlRenderEntityCombo();
+        var listEl = document.querySelector('#tlBody .entity-picker .combo-list');
+        if (listEl) listEl.style.display = 'block';
+      } else if (e.target && e.target.classList.contains('ev-time') && tlModel) {
+        var timeRow = e.target.closest('.event-row');
+        var timeIdx = timeRow ? parseInt(timeRow.getAttribute('data-evidx'), 10) : NaN;
+        // kept as the raw typed string (not parsed to a float on every keystroke -- "2." mid-type would get
+        // mangled); Save (Stage 5, not built yet) is where this needs to become a real number.
+        if (!isNaN(timeIdx)) tlModel.tabs[tlModel.active].events[timeIdx].time = e.target.value;
+      } else if (e.target && e.target.classList.contains('ev-eventdef') && tlModel) {
+        var evRow = e.target.closest('.event-row');
+        var evIdx2 = evRow ? parseInt(evRow.getAttribute('data-evidx'), 10) : NaN;
+        if (!isNaN(evIdx2)) tlModel.tabs[tlModel.active].events[evIdx2].eventDef = e.target.value;
+        if (evRow) { tlRenderEventCombo(evRow); var evListEl2 = evRow.querySelector('.combo-list'); if (evListEl2) evListEl2.style.display = 'block'; }
+      } else if (e.target && e.target.classList.contains('ev-arg-input') && e.target.type === 'text' && tlModel) {
+        var argRow = e.target.closest('.event-row');
+        var argEvIdx = argRow ? parseInt(argRow.getAttribute('data-evidx'), 10) : NaN;
+        var argIdx = parseInt(e.target.getAttribute('data-argidx'), 10);
+        // a combo-opt pick stashes the REAL value here (may differ from the displayed text -- an asset
+        // option's friendly name vs its raw index/path); a free-typed edit has none, so the shown text IS
+        // the value. Consumed once, then cleared, so a later free-type doesn't keep reusing a stale pick.
+        var pickedVal = e.target.getAttribute('data-picked-value');
+        var writeVal = (pickedVal !== null) ? pickedVal : e.target.value;
+        if (pickedVal !== null) e.target.removeAttribute('data-picked-value');
+        if (!isNaN(argEvIdx) && !isNaN(argIdx)) {
+          var argEv = tlModel.tabs[tlModel.active].events[argEvIdx];
+          var argEntry = (eventCatalogByName[argEv.eventDef] || {}).args;
+          argEntry = argEntry && argEntry[argIdx];
+          var declKey = e.target.getAttribute('data-declkey');
+          var assetKey = e.target.getAttribute('data-assetkey');
+          var vecKey = e.target.getAttribute('data-veckey');
+          var vecType = e.target.getAttribute('data-vectype');
+          if (vecKey && vecType) {
+            // vecn kind -- nested one level deeper ({"<type>":{<comp>:value}}), same shape as decl but keyed
+            // by the arg's own type name instead of "decl".
+            if (!argEv.args[argIdx] || typeof argEv.args[argIdx][vecType] !== 'object') { var vecSeed = {}; vecSeed[vecType] = {}; argEv.args[argIdx] = vecSeed; }
+            argEv.args[argIdx][vecType][vecKey] = writeVal;
+          } else if (declKey) {
+            // decl kind -- nested one level deeper ({"decl":{<shortName>:value}}), so it needs its own write
+            // path rather than the flat argEntry.type/assetKey the scalar/asset kinds below use.
+            if (!argEv.args[argIdx] || typeof argEv.args[argIdx].decl !== 'object') argEv.args[argIdx] = { decl: {} };
+            argEv.args[argIdx].decl[declKey] = writeVal;
+          } else if (assetKey) {
+            // asset kind -- FLAT, same shape as the plain scalar kinds, just keyed by the category's forced
+            // commit key (asset.commitKey) instead of the arg's own catalog type (modelIndex's real type is
+            // "int" already so this happens to match anyway; tagName/tag is the case where it genuinely
+            // overrides -- see tlAssetCategoryFor).
+            if (!argEv.args[argIdx]) argEv.args[argIdx] = {};
+            argEv.args[argIdx][assetKey] = writeVal;
+          } else if (argEntry) {
+            // argEntry.type is the on-disk KEY (matches the engine's item[k]-by-type-name shape) -- writing
+            // through it, not a hardcoded key, is what lets one input handle float/int/text/entity uniformly.
+            if (!argEv.args[argIdx]) argEv.args[argIdx] = {};
+            argEv.args[argIdx][argEntry.type] = writeVal;
+          }
+        }
+        // decl/enum/asset arg-combo -- re-render + keep the list open while typing, same live-filter
+        // behavior as the entity-picker/eventDef combos (separate from the write logic above, which applies
+        // regardless of whether this input happens to live inside a combo).
+        var argCombo3b = e.target.closest('.ev-arg-combo');
+        if (argCombo3b) { tlRenderArgCombo(argCombo3b); var argListEl3b = argCombo3b.querySelector('.combo-list'); if (argListEl3b) argListEl3b.style.display = 'block'; }
+      }
+    });
+    bodyEl.addEventListener('change', function(e){
+      if (e.target && e.target.classList.contains('ev-arg-input') && e.target.type === 'checkbox' && tlModel) {
+        tlMarkDirty();
+        var boolRow = e.target.closest('.event-row');
+        var boolEvIdx = boolRow ? parseInt(boolRow.getAttribute('data-evidx'), 10) : NaN;
+        var boolArgIdx = parseInt(e.target.getAttribute('data-argidx'), 10);
+        if (!isNaN(boolEvIdx) && !isNaN(boolArgIdx)) {
+          var boolEv = tlModel.tabs[tlModel.active].events[boolEvIdx];
+          var boolEntry = (eventCatalogByName[boolEv.eventDef] || {}).args;
+          boolEntry = boolEntry && boolEntry[boolArgIdx];
+          if (boolEntry) { if (!boolEv.args[boolArgIdx]) boolEv.args[boolArgIdx] = {}; boolEv.args[boolArgIdx][boolEntry.type] = e.target.checked; }
+        }
+      }
+    });
+    bodyEl.addEventListener('mousedown', function(e){
+      var arrow = e.target.closest('.entity-picker .combo-arrow');
+      if (arrow) {
+        e.preventDefault();
+        var listEl = arrow.parentNode.querySelector('.combo-list');
+        if (!listEl) return;
+        if (listEl.style.display === 'block') { listEl.style.display = 'none'; }
+        else { tlRenderEntityCombo(true); listEl.style.display = 'block'; document.getElementById('tlRunsOn').focus(); }
+        return;
+      }
+      var opt = e.target.closest('.entity-picker .combo-opt');
+      if (opt && tlModel) {
+        e.preventDefault();
+        tlMarkDirty();
+        document.getElementById('tlRunsOn').value = opt.textContent;
+        tlModel.tabs[tlModel.active].entity = opt.getAttribute('data-id');
+        var ownList = opt.closest('.combo-list');
+        if (ownList) ownList.style.display = 'none';
+        return;
+      }
+      // decl/enum arg-combo -- MUST come before the generic .event-row .combo-arrow/.combo-opt checks below,
+      // since an arg-combo also lives inside .event-row (same as the eventDef combo) and would otherwise be
+      // misrouted into the eventDef-specific handling (which hardcodes tlRenderEventCombo + .ev-eventdef).
+      var argArrow = e.target.closest('.ev-arg-combo .combo-arrow');
+      if (argArrow) {
+        e.preventDefault();
+        var argCombo = argArrow.closest('.ev-arg-combo');
+        var argListEl = argCombo.querySelector('.combo-list');
+        if (!argListEl) return;
+        if (argListEl.style.display === 'block') { argListEl.style.display = 'none'; }
+        else { tlRenderArgCombo(argCombo, true); argListEl.style.display = 'block'; argCombo.querySelector('.ev-arg-input').focus(); }
+        return;
+      }
+      var argOpt = e.target.closest('.ev-arg-combo .combo-opt');
+      if (argOpt) {
+        e.preventDefault();
+        var argCombo2 = argOpt.closest('.ev-arg-combo');
+        var argInput = argCombo2.querySelector('.ev-arg-input');
+        argInput.value = argOpt.textContent;   // the FRIENDLY display text stays in the field (decl/enum: same as the value; asset: e.g. a model name, not its raw index/path)
+        // data-value carries what actually gets WRITTEN -- decl/enum options set it equal to their own text
+        // (tlRenderArgCombo), asset options set it to the real index/path. Stash it for the input listener
+        // (dispatched next) to prefer over e.target.value, then clear it so a later free-typed edit doesn't
+        // keep reusing a stale picked value.
+        argInput.setAttribute('data-picked-value', argOpt.getAttribute('data-value'));
+        // dispatch 'input' instead of duplicating the nested/flat write logic a third time -- the existing
+        // delegated input listener (below) already writes to the right slot based on data-declkey/data-assetkey.
+        argInput.dispatchEvent(new Event('input', { bubbles: true }));
+        var argListEl2 = argCombo2.querySelector('.combo-list');
+        if (argListEl2) argListEl2.style.display = 'none';
+        return;
+      }
+      var evArrow = e.target.closest('.event-row .combo-arrow');
+      if (evArrow) {
+        e.preventDefault();
+        var evRow2 = evArrow.closest('.event-row');
+        var evListEl3 = evArrow.parentNode.querySelector('.combo-list');
+        if (!evListEl3 || !evRow2) return;
+        if (evListEl3.style.display === 'block') { evListEl3.style.display = 'none'; }
+        else { tlRenderEventCombo(evRow2, true); evListEl3.style.display = 'block'; evRow2.querySelector('.ev-eventdef').focus(); }
+        return;
+      }
+      var evOpt = e.target.closest('.event-row .combo-opt');
+      if (evOpt && tlModel) {
+        e.preventDefault();
+        var evRow3 = evOpt.closest('.event-row');
+        var evIdx3 = evRow3 ? parseInt(evRow3.getAttribute('data-evidx'), 10) : NaN;
+        if (!isNaN(evIdx3)) {
+          tlMarkDirty();
+          var picked = evOpt.textContent;
+          evRow3.querySelector('.ev-eventdef').value = picked;
+          var pickedEv = tlModel.tabs[tlModel.active].events[evIdx3];
+          pickedEv.eventDef = picked;
+          // a PICKED eventDef (unlike free-typing) replaces the schema entirely -- old args from a DIFFERENT
+          // event would show the wrong parameter labels/values, which is worse than starting fresh. Seed
+          // ev.args from the catalog schema (not just []) so the row immediately shows N blank, correctly-
+          // shaped, editable widgets instead of "no parameters" until something else touches it.
+          var pickedSchema = eventCatalogByName[picked];
+          var pickedSlug = tlModel.tabs[tlModel.active].entity ? tlResolveEntitySlug(tlModel.tabs[tlModel.active].entity) : null;
+          pickedEv.args = pickedSchema ? pickedSchema.args.map(function(a){
+            var pickedAsset = tlAssetCategoryFor(a, pickedSlug);
+            return tlDefaultArgValue(a.type, pickedAsset ? pickedAsset.commitKey : null);
+          }) : [];
+        }
+        var ownEvList = evOpt.closest('.combo-list');
+        if (ownEvList) ownEvList.style.display = 'none';
+        renderTlBody();   // args just changed -- safe to re-render (this isn't a mid-keystroke input)
+      }
+    });
+    // same fix as Combo()'s focusout: Tab away from #tlRunsOn doesn't fire a mousedown, so the outside-click
+    // listener below never catches it. Checking the whole .combo (not just the #tlRunsOn input) matters: the
+    // FIRST Tab from the input lands on the combo's own arrow button (still inside .combo -- relatedTarget
+    // check correctly leaves it open), and THAT focusout has e.target = the arrow button, not #tlRunsOn -- a
+    // target.id==='tlRunsOn' filter (the earlier, buggy version) would miss it and never close on the 2nd Tab.
+    // Same logic covers each event row's own eventDef combo.
+    bodyEl.addEventListener('focusout', function(e){
+      var combo = e.target && e.target.closest && e.target.closest('.entity-picker .combo');
+      if (combo && !combo.contains(e.relatedTarget)) {
+        var listEl = combo.querySelector('.combo-list');
+        if (listEl) listEl.style.display = 'none';
+      }
+      var evCombo = e.target && e.target.closest && e.target.closest('.event-row .combo');
+      if (evCombo && !evCombo.contains(e.relatedTarget)) {
+        var evListEl4 = evCombo.querySelector('.combo-list');
+        if (evListEl4) evListEl4.style.display = 'none';
+      }
+    });
+  })();
+  // close the entity-picker + any open event-row eventDef dropdown on an outside click (registered once --
+  // #tlBody is rebuilt often, but this listener doesn't depend on any element inside it existing at
+  // registration time; querySelectorAll re-walks the CURRENT DOM on every click).
+  document.addEventListener('mousedown', function(e){
+    var evCombos = document.querySelectorAll('#tlBody .event-row .combo');
+    for (var i = 0; i < evCombos.length; i++) {
+      if (!evCombos[i].contains(e.target)) {
+        var evListEl5 = evCombos[i].querySelector('.combo-list');
+        if (evListEl5) evListEl5.style.display = 'none';
+      }
+    }
+    var combo = document.querySelector('#tlBody .entity-picker .combo');
+    if (combo && !combo.contains(e.target)) {
+      var listEl = combo.querySelector('.combo-list');
+      if (listEl) listEl.style.display = 'none';
+    }
+  });
+  // Revert: re-fetch the currently open timeline fresh from the real decl, discarding every local edit
+  // (tab/event deletes, adds -- none of which have ever touched the map). This is the "get my deleted
+  // tabs/events back" answer; re-clicking the timeline in the list does the exact same thing.
+  document.getElementById('revertTimelineBtn').addEventListener('click', function(){
+    if (!tlModel) return;
+    post({cmd:'openTimeline', eid: tlModel.eid});
+  });
+  document.getElementById('saveTimelineBtn').addEventListener('click', doSaveTimeline);
 
   // prefabs: real folders (one level of actual subdirectories under prefabs\ -- root items have
   // data-folder=""). Collapse/select/drag-drop all route through native file ops; the DOM here is

@@ -6,6 +6,56 @@ where our own reimplementation was wrong, not the original SnapHak's behavior; a
 (or faithful reproduction of) the *original's* behavior belongs in [`fidelity.md`](fidelity.md)
 instead. Entries are chronological, newest first.
 
+## 2026-07-08 — `apply_engine.c`: `ae_apply_one` could commit an empty class/inherit
+
+Found while root-causing a hard crash-to-desktop / hang on returning to the SnapMap editor after
+editing a Timeline, saving, and reloading the map (full investigation, including why the crash
+turned out **not** to be caused by this bug, in [`webview-ui.md`](webview-ui.md)).
+
+`ae_apply_one` (the shared `kind=0` commit body behind Save-to-Decl, Save Timeline, and
+`wire-target`) deserializes the caller's full patched entity JSON onto a temp def, then copies that
+temp def's normalized class/inherit/source back onto the live entity. The class/inherit copy only
+null-checked the pointer (`if (clsPtr) ...`), not the string it pointed to — if the engine's own
+`StructDeserialize` ever populated the temp def with a **non-null pointer to an empty string** (a
+real, observed case, though not the one that turned out to matter for the Timeline crash — see
+`webview-ui.md`), the guard let it through and committed `""` onto the live entity's classname or
+inherit. A blank class/inherit is never valid; the next full map load fails with the engine's own
+`"No class specified"` / `"Couldn't find map entity in entity palette '' inherit = "` and the entity
+is unrecoverable.
+
+**Fix:** the guard now also checks the first byte of the string
+(`if (clsPtr && *(const char *)clsPtr) ...`, same for inherit) — an empty result is treated the same
+as a null one and simply skipped (keep the live value), rather than committed. This degrades a choked
+deserialize into "the edit didn't apply, entity intact" instead of "entity destroyed." Universal
+across all three `kind=0` callers, not Timeline-specific — a blank class/inherit is never the right
+outcome for any of them. Also confirmed to correctly *preserve* a non-standard inherit (e.g.
+`snapmaps/editor_only/placeholder_target`) rather than requiring or defaulting to anything, unlike
+the original's own Timeline-commit path, which hardcodes `inherit = "snapmaps/unknown"` on every
+save (see `fidelity.md`) — the clone's keep-live behavior is strictly safer here.
+
+## 2026-07-06 — `apply_engine.c`: `APPLY_TEXT_CAP` silently truncated large prefabs on Load/Place
+
+Once Load/Place (staging via `kind=1`/mkcmd) was wired up and exercised against real prefab files,
+some staged cleanly and some silently failed (backend log: `applied 0/1`, no crash, no fault-shield
+entry -- nothing visibly wrong, the prefab just never showed up in the paste slot).
+
+Root cause: `APPLY_TEXT_CAP` (a sanity ceiling on the JSON text carried in a scheduled apply item) was
+`256 * 1024` -- sized for small per-entity edits, the only thing this pipeline used to carry. Real
+prefab files can run well past that. `slot_schedule_apply`'s batch deep-copy silently truncated
+anything over the cap with no error at all, so an oversized prefab got cut off mid-JSON before it ever
+reached the deserializer, which then failed to lex the truncated text.
+
+Diagnosed with a step-by-step trace added to `ae_deserialize_to_obj` (gated behind `AE_DESER_DIAG_ON`,
+mirroring the existing `AE_SER_DIAG` pattern on the serialize side) -- it pinpointed the exact failing
+prefab's text arriving already truncated to one byte under the old cap, confirming the truncation
+happened upstream in scheduling, not in the deserialize call itself.
+
+**Fix:** raised `APPLY_TEXT_CAP` to 4 MB, matching the scratch buffer already used elsewhere for
+prefab content. Retested against every prefab that had been failing (all `applied 1/1` now) and
+live-tested up to 2 MB with no issue -- comfortable headroom over anything hit so far. This cap is also
+used as a sanity bound when reading a serialized result back out (`ae_read_idstr`), so raising it
+benefits the Create-from-selection direction too, not just Load/Place.
+
 ## 2026-07-06 — `apply_engine.c`: prefab create-from-selection crashes
 
 Two independent bugs, both in the `+0xb0` serialize-selection path (`slot_serialize_selection`),
