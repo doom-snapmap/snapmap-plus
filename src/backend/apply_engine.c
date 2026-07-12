@@ -818,7 +818,16 @@ static void ae_toast_result(const char *op, int applied, int total)
      * new information (it's the same op every Qt sh_apply-style caller shares, hence the fixed
      * "SnapStack" label, which reads as unrelated to a Prefabs-tab action). Skip it for that op only;
      * the Qt mkcmd command has no toast of its own, so it still needs this one. */
-    if (iface && iface->vtbl && iface->vtbl->toast && strcmp(op, "load-prefab") != 0)
+    /* quiet the generic "applied N/N" toast for ops that either show their OWN actionable toast or are
+     * internal housekeeping the user never triggered:
+     *   load-prefab        -> the Prefabs tab already toasts "staged -- press Ctrl+V".
+     *   tl-inherit-portable -> the one-shot palette-timeline inherit normalize (sh_timeline_normalize_inherit),
+     *                          fired by the sh_tabs poll, NOT a user action -> a toast on every logic selection
+     *                          is pure noise.
+     *   accl / acctargets   -> do_acc emits a nicer, target-count + receiver toast instead. */
+    int quiet = (strcmp(op, "load-prefab") == 0) || (strcmp(op, "tl-inherit-portable") == 0) ||
+                (strcmp(op, "accl") == 0)         || (strcmp(op, "acctargets") == 0);
+    if (iface && iface->vtbl && iface->vtbl->toast && !quiet)
         iface->vtbl->toast(iface, "SnapStack", text);
     /* ALSO log directly -- the toast slot logs too, but a no-editor/late drain might skip the engine toast. */
     char line[200];
@@ -937,19 +946,21 @@ static int slot_schedule_apply(sh_iface *self, const sh_apply_item *items, int c
     return enq;
 }
 
-/* PUBLIC (Fix B): enqueue a kind=3 targets-write {source, target}. The target id travels as a decimal string in
- * the item text (the drain parses it back). The actual serialize+splice+apply runs on the DOOM main thread via
- * the clone_bss_apply command. Called by the sh_target_any confirm hook (wiring_cleandirect) once per wire-any
- * timeline pick, INSTEAD of the stock creator laying an (invalid, dangling) CSR edge to the timeline. */
+/* PUBLIC: write the timeline TARGET's id into the SOURCE entity's state.edit.targets (serialize -> splice ->
+ * ae_apply_one). Called by the sh_target_any confirm hook (wiring_cleandirect) INSTEAD of laying an (invalid,
+ * dangling) CSR edge to a bare timeline target.
+ *
+ * COMMITS INLINE (OG-faithful, 2026-07-12): runs NOW on the calling thread, NOT deferred to clone_bss_apply.
+ * The wire hook already runs on the DOOM main thread (a decl-safe point where reflect resolves), so an inline
+ * commit is correct and avoids the deferred double-free the SnapStack decl-edits hit (the +0x290 sync-apply
+ * fix -- see docs/backend-changes.md). This path is DORMANT today (sh_target_any targets via SnapMap's native
+ * input/output nodes and writes NO decl; only `acctargets` writes a targets list), but it is the natural
+ * primitive for a future UI-driven "add target" feature -- keeping it on the inline path means that feature is
+ * crash-correct by default. SEH-guarded inside ae_apply_target_write; a bad state degrades to a no-op. */
 void ae_schedule_target_write(int source_id, int target_id)
 {
-    char tgt[16];
-    _snprintf_s(tgt, sizeof tgt, _TRUNCATE, "%d", target_id);
-    sh_apply_item it;
-    it.kind = 3;
-    it.id   = source_id;
-    it.text = tgt;
-    slot_schedule_apply(NULL, &it, 1, "wire-target");
+    __try { ae_apply_target_write(source_id, target_id); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
 /* +0xb8 READ-BACK the editor's pending prefab (editor+0x209a8) -> idSnapEntityPrefab JSON (the reference implementation

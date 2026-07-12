@@ -961,8 +961,21 @@ static void do_acc(sh_iface *iface, const char *op, int argc, const char **argv,
 
     sh_apply_item it; it.kind = 0; it.id = popped; it.text = patched.c_str();
     std::vector<sh_apply_item> items(1, it);
-    if (!iface_apply(iface, items, op))   /* +0x290 SYNCHRONOUS inline commit (OG-faithful); deferred fallback */
+    if (!iface_apply(iface, items, op)) {   /* +0x290 SYNCHRONOUS inline commit (OG-faithful); deferred fallback */
         iface_toast(iface, "SnapStack", "accl: apply failed (editor down?)");
+        return;
+    }
+    /* informative result toast: how many targets/refs, and WHICH receiver entity got them. The backend's
+     * generic "applied N/N (engine round-trip)" toast is suppressed for accl/acctargets (ae_toast_result) so
+     * this is the only one the user sees. */
+    {
+        std::string rcv = iface_id_string(iface, popped);   /* receiver entity name / id-string (+0x18) */
+        if (rcv.empty()) rcv = std::to_string(popped);
+        char t[160];
+        _snprintf_s(t, sizeof t, _TRUNCATE, "%s: %d %s applied to \"%s\"",
+                    op, (int)idStrings.size(), hardcoded_targets ? "target(s)" : "ref(s)", rcv.c_str());
+        iface_toast(iface, "SnapStack", t);
+    }
 }
 static void h_accl(void *ctx, int argc, const char **argv)       { do_acc((sh_iface *)ctx, "accl", argc, argv, /*hardcoded=*/false); }
 static void h_acctargets(void *ctx, int argc, const char **argv) { do_acc((sh_iface *)ctx, "acctargets", argc, argv, /*hardcoded=*/true); }

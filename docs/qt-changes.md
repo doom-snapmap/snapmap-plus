@@ -102,13 +102,42 @@ The **class / inherit** commands (`bscls`, `bsincls`, and the single class/inher
 the deferred path — they already commit synchronously via `+0x78`/`+0x80`/`+0x268` (set idStr) → `+0x40`
 (`DeclSourceRebuild`) directly, the same crash-free path as the manual Save. They needed no change.
 
+### Also fixed the same day — Timeline Save, the inherit-normalize, and the toasts
+
+The same synchronous-inline commit was applied to `sh_timeline.cpp` (`tl_iface_schedule_apply`, used by
+both Timeline Save and the palette-timeline inherit-normalize). Three wins:
+
+- **Timeline Save** no longer crashes on Play → teardown — and the *downstream* timeline symptoms it had
+  been causing are gone too: copy/paste of timelines getting wiped, and having to "save-backout" before a
+  timeline save. Those were the same double-free surfacing elsewhere.
+- **The `tl-inherit-portable` toast that popped on every logic-entity selection is gone.** That op is a
+  one-shot inherit rewrite fired by the sh_tabs poll (`sh_timeline_normalize_inherit`, to make palette
+  timelines portable). On the deferred path the rewrite never persisted, so the poll saw the placeholder
+  inherit and re-fired it every frame → a toast each selection. Synchronous commit makes it stick
+  immediately (true one-shot), and `ae_toast_result` now also suppresses it as internal, non-user-triggered
+  housekeeping.
+- **acctargets/accl now show a friendly result toast** — `acctargets: N target(s) applied to "<ref>"`,
+  naming the receiver entity — instead of the generic backend `applied N/N (engine round-trip)`, which is
+  suppressed for these two ops.
+
+> **Convention going forward:** any new SnapStack / decl-edit op must commit via `iface_apply()` (the
+> `+0x290` synchronous inline apply), **not** the deferred `+0xd0` schedule. The command handlers already run
+> on the UI/think-loop thread where reflect resolves; deferring splits the op across frames and double-owns
+> the decl-source block. See [`backend-changes.md`](backend-changes.md) for the full rationale.
+
 ### Still TODO
 
-- **Timeline Save** hits the same root cause but through its own path (the `|0x80` consumer in
-  `sh_timeline.cpp`); migrate it to `iface_apply()` too.
+- **`ae_schedule_target_write` (kind=3) is DORMANT, not a live crash risk.** `sh_target_any` targets via
+  SnapMap's native input/output-node logic and writes **nothing** to the decl (an entity's state never shows
+  a `targets` list from any wiring action — that only comes from `acctargets`). So this decl-write path never
+  fires in normal use. It IS, however, the natural backend primitive for a *future* **UI-driven "add target"**
+  feature (write a real `state.edit.targets` from a SnapHak panel instead of a SnapMap wire) — and if that's
+  ever built, this function MUST commit through the `+0x290` sync path, or it reintroduces the identical
+  deferred double-free. Migrating it to inline now is cheap, zero-risk future-proofing (it doesn't fire today).
 - **Pre-release cleanup:** quiet the diagnostics left on for this hunt (`AE_APPLY_DIAG` / `AE_DESER_DIAG`
   in `apply_engine.c`, the `+0x40 rebuild` trace in `iface_engine.c`, the `C2 SYNC apply` marker), and
   decide whether to keep or delete the unused `splice_decl_reflist` reference implementation.
 - **WebView UI:** the `+0x290` slot is frontend-agnostic (the WebView host drains the same `+0x1a0`
   work-queue on its own UI thread), so the fix carries over — but the SnapStack command *logic* is still
-  Qt-only and would need porting, ideally into the backend so both frontends share one path.
+  Qt-only (and its apply path still calls the deferred `+0xd0`); porting it, ideally into the backend so both
+  frontends share one path, is the follow-up.

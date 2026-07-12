@@ -189,14 +189,24 @@ static std::string tl_iface_serialize_entity(sh_iface *iface, int id)
     out.resize((size_t)n);
     return out;
 }
+/* Commit a patched timeline-entity JSON. OG-FAITHFUL: run it SYNCHRONOUSLY INLINE on this (UI/think-loop)
+ * thread via +0x290 -- exactly like the SnapStack decl-edit ops (snapstack.cpp iface_apply). The old deferred
+ * +0xd0 route double-owned the committed decl-source block (Timeline Save play->teardown crash) AND, for the
+ * one-shot inherit-normalize below, did NOT persist reliably -- the sh_tabs poll kept seeing the placeholder
+ * inherit and re-firing it, so a "tl-inherit-portable" toast popped on EVERY logic-entity selection. Sync
+ * makes the commit stick immediately (true one-shot) with a single clean owner. Falls back to the deferred
+ * +0xd0 schedule only on an old backend without +0x290. See [[snapstack-deferred-apply-double-free-solved]]
+ * / docs/qt-changes.md. */
 static bool tl_iface_schedule_apply(sh_iface *iface, int id, const std::string &patched, const char *op)
 {
-    if (!iface || !iface->vtbl || !iface->vtbl->apply_edit || patched.empty() || id < 0) return false;
+    if (!iface || !iface->vtbl || patched.empty() || id < 0) return false;
     sh_apply_item it;
     it.kind = 0;                 /* bss-style deserialize+commit on the timeline entity id */
     it.id   = id;
     it.text = patched.c_str();
-    return iface->vtbl->apply_edit(iface, &it, 1, op) != 0;
+    if (iface->vtbl->apply_sync) return iface->vtbl->apply_sync(iface, &it, 1, op) > 0;  /* +0x290 sync inline */
+    if (iface->vtbl->apply_edit) return iface->vtbl->apply_edit(iface, &it, 1, op) != 0; /* old-backend fallback */
+    return false;
 }
 static void tl_iface_toast(sh_iface *iface, const char *title, const char *text)
 {

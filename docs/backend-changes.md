@@ -42,9 +42,33 @@ schedule is kept only as a fallback for an old backend without `+0x290`, and for
 `C2 SYNC apply: N item(s) INLINE on this thread (op)` confirms the inline path at runtime.
 
 This supersedes the earlier "JSON round-trip vs in-memory node-tree edit" theory: our round-trip matched
-OG's, so it was never the problem. **TODO:** migrate Timeline Save (its own `|0x80` path in `sh_timeline.cpp`)
-to `+0x290` as well, and quiet the `AE_APPLY_DIAG` / `AE_DESER_DIAG` / `+0x40 rebuild` / `C2 SYNC apply`
-diagnostics before release.
+OG's, so it was never the problem.
+
+**Also migrated to `+0x290` the same day:** **Timeline Save** and the palette-timeline **inherit-normalize**
+(`sh_timeline.cpp`, `tl_iface_schedule_apply`). The inherit-normalize is a one-shot fired by the sh_tabs
+poll; on the deferred path it never persisted reliably, so the poll kept re-firing it (a `tl-inherit-portable`
+toast on every logic-entity selection) — synchronous commit makes it a true one-shot. Fixing Timeline Save's
+double-free also cleared the downstream timeline symptoms (copy/paste being wiped, needing to "save-backout"
+before a timeline save).
+
+> **Convention going forward — commit decl edits SYNCHRONOUSLY.** Any new operation that edits an entity's
+> decl (serialize → patch → `ae_apply_one`) MUST commit inline via the `+0x290` `apply_sync` slot
+> (`iface_apply()` in the Qt frontend), NOT the deferred `+0xd0` `clone_bss_apply` schedule. The command
+> handlers already run on the UI/think-loop thread where reflect resolves; deferring to the main-thread
+> command buffer splits the operation across frames and double-owns the decl-source block. The deferred
+> `+0xd0` path is retained only as an old-backend fallback and for prefab/mkcmd staging (`kind=1`), which
+> stages into the paste slot rather than rewriting a decl.
+
+**Still deferred (but DORMANT):** `ae_schedule_target_write` (`kind=3`, `wiring_cleandirect.c`) writes
+`state.edit.targets` onto the source entity's decl — but it **never fires in normal use**. `sh_target_any`
+targets via SnapMap's native input/output-node logic and writes nothing to the decl (only `acctargets` ever
+produces a `targets` list). So it is NOT a live crash risk. It IS the natural primitive for a *future*
+UI-driven "add target" feature, and if wired up it MUST use the `+0x290` sync path — migrating it now is
+zero-risk future-proofing. Prefab Load/Place + `mkcmd` (`kind=1`) stage into the paste slot (different
+mechanism, never crashed). The WebView frontend's apply path is not yet on `+0x290`.
+
+**TODO:** quiet the `AE_APPLY_DIAG` / `AE_DESER_DIAG` / `+0x40 rebuild` / `C2 SYNC apply` diagnostics before
+release.
 
 ## 2026-07-08 — `apply_engine.c`: `ae_apply_one` could commit an empty class/inherit
 
