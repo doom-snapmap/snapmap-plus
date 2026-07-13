@@ -381,7 +381,7 @@ static void tl_connect_dirty(ShTimelineEditor *ed, QWidget *root)
 /* Non-"idDecl" pointer arg-types whose decl-type short-name is NOT the mechanical strip-"id" (verified vs the
  * source-of-record entity decls): idSoundShader* is the "sound" decl-type, NOT
  * "soundshader". idActorModifier* and idMaterial* DO reduce mechanically but are listed for explicitness. The rest
- * of the catalog's id<X>* (idMD6Anim*, idEventReceiver*, …) are assets/objects, NOT decls -> no entry -> they
+ * of the catalog's id<X>* (idMD6Anim*, idEventReceiver*, ...) are assets/objects, NOT decls -> no entry -> they
  * stay editable enum boxes. RE: timeline-decl-resclass-re (the OG +0x100 path; FUN_18000994c is
  * idDecl*-only and PREPENDS "idDecl"; the inner-key is the engine's decl-type dir name, not a mechanical reduction). */
 static const char *tl_decl_alias(const std::string &typeName)
