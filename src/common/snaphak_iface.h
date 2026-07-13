@@ -176,6 +176,24 @@ typedef int          (*sh_wire_edit_generation_fn)(struct sh_iface *self);      
 typedef int          (*sh_apply_sync_fn)(struct sh_iface *self, const struct sh_apply_item *items,
                                          int count, const char *op_label);                        /* +0x290 (ext 5) */
 
+/* +0x298 (ext 6) TIMELINE PORTABLE-INHERIT NORMALIZE. A Timeline placed from the in-game SnapMap palette
+ * is spawned from a repurposed `snapmaps/editor_only/placeholder_target` entityDef (installed only so a
+ * Timeline is selectable in the palette at all -- the clone cannot fabricate a Timeline entity directly;
+ * see sh_timeline.cpp's header comment for the create-path history), so the fresh entity records THAT as
+ * its `inherit` -- a saved map would then only reload where our override is installed. This slot: given a
+ * live entity id, cheaply checks (a raw defsub-inherit read, no serialize) whether it is still that
+ * placeholder; if so, serializes the entity (+0xc8-equivalent), raw-splices the inherit to the portable
+ * `snapmaps/unknown` (NOT a JSON re-parse, which would drop the engine-required float ".0"), and commits
+ * INLINE on the CALLING thread (same guarantee as +0x290 apply_sync -- no deferred double-free risk).
+ * `className` is left untouched (idTarget_Timeline stays -- no reclass, no render-node/crash surface).
+ * NOTE (2026-07-12): live-testing showed this can commit multiple times in quick succession for the same
+ * entity before the placeholder stops re-matching -- confirmed to be a PRE-EXISTING characteristic shared
+ * by Qt's original, unmodified sh_timeline_normalize_inherit (same repeated-commit pattern observed in the
+ * backend log for both), not something this port introduced; harmless in Qt. Ported 2026-07-13 from the
+ * Qt-only sh_timeline_normalize_inherit so both frontends share ONE implementation instead of Qt carrying
+ * logic WebView silently lacked. */
+typedef int          (*sh_normalize_timeline_inherit_fn)(struct sh_iface *self, int id);          /* +0x298 (ext 6) */
+
 /* ------------------------------------------------------------------ heavy apply slots --------
  * The heavy serialize/deserialize/apply slots the SnapStack APPLY-ops (bss/bsi/bsf/bsb/bse/accl/
  * acctargets/mkcmd) need. These are the native port of the reference implementation's +0xc8 serialize / +0xd0 deserialize-
@@ -350,6 +368,7 @@ typedef struct sh_iface_vtbl {
     sh_wire_edit_generation_fn wire_edit_generation; /* +0x288 (ext 4) wire-any connect-edit generation counter
                                                       * (entity-list re-read signal; see wiring_cleandirect.c) */
     sh_apply_sync_fn           apply_sync;           /* +0x290 (ext 5) SYNCHRONOUS inline apply (OG-faithful) */
+    sh_normalize_timeline_inherit_fn normalize_timeline_inherit; /* +0x298 (ext 6) palette-timeline portable-inherit one-shot */
 } sh_iface_vtbl;
 
 /* ------------------------------------------------------------------ the interface object -----------
@@ -475,6 +494,8 @@ typedef struct sh_iface_engine_slots {
     sh_wire_edit_generation_fn   wire_edit_generation;  /* +0x288 (ext 4) */
     /* clone-extension: the synchronous inline apply (OG-faithful commit; SnapStack decl-edit ops). */
     sh_apply_sync_fn             apply_sync;            /* +0x290 (ext 5) */
+    /* clone-extension: the palette-timeline portable-inherit one-shot normalize (shared by both frontends). */
+    sh_normalize_timeline_inherit_fn normalize_timeline_inherit; /* +0x298 (ext 6) */
 } sh_iface_engine_slots;
 
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *slots);

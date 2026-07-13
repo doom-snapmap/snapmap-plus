@@ -1517,8 +1517,20 @@
       if (selectedTlEid !== -1 && !tlExist[selectedTlEid]) selectedTlEid = -1;
       renderTimelineList();
     } else if (d.kind === 'state') {
-      if (d.auto && (isDirty() || d.eid !== primaryEid)) return;   // never clobber unsaved edits
-      if (d.eid === primaryEid || !d.auto) showState(d);
+      if (d.eid !== primaryEid) return;
+      if (!d.auto) { showState(d); return; }   // explicit (non-auto) refresh always applies
+      if (!isDirty()) { showState(d); return; }   // panel clean -- apply the whole snapshot as before
+      // Panel is dirty (an in-progress local edit to at least one field) -- don't clobber anything the
+      // user has actually touched, but DO let an authoritative external backend correction land on a
+      // field the user hasn't touched. Known source: the palette-timeline portable-inherit normalize
+      // (snaphak_iface.h +0x298) can commit out from under an edit in progress on a DIFFERENT field --
+      // silently leaving the old (non-portable) value sitting in the box would risk a later Save-to-Decl
+      // resubmitting it and undoing the fix. Scoped to `inherit` (the one field with a known external-
+      // correction source today); extend this per-field pattern if others gain one.
+      var inhBox = document.getElementById('fInherit');
+      if (inhBox.value === loaded.inherit && d.inherit !== loaded.inherit) {
+        inhBox.value = d.inherit; loaded.inherit = d.inherit; updateDirty();
+      }
     } else if (d.kind === 'saveResult') {
       if (d.result === 1) toast('Saved to decl', 'ok');
       else if (d.result === 0) toast('Save refused: incompatible class + inherit', 'warn');

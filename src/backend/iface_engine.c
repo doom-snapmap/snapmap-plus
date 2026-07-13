@@ -1088,7 +1088,8 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
      * read-prefab +0xb8). sh_apply_engine_install must have run first (dllmain orders it before this) so
      * its engine fns are resolved; the slot bodies themselves null-check + degrade if a dep is missing. */
     sh_apply_engine_get_slots(&slots.serialize_entity, &slots.apply_edit, &slots.read_prefab,
-                              &slots.apply_sync);   /* +0x290 SYNCHRONOUS inline apply (OG-faithful) */
+                              &slots.apply_sync,        /* +0x290 SYNCHRONOUS inline apply (OG-faithful) */
+                              &slots.normalize_timeline_inherit); /* +0x298 palette-timeline portable-inherit */
     /* the +0xb0 serialize-SELECTION->prefab slot also lives in the apply engine (it needs the
      * serialize engine fns). Fold it into the same bind. */
     sh_apply_engine_get_serialize_selection(&slots.serialize_selection);

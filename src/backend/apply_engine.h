@@ -46,7 +46,8 @@ void ae_schedule_target_write(int source_id, int target_id);
 void sh_apply_engine_get_slots(sh_serialize_entity_fn *serialize_entity,
                                sh_schedule_apply_fn   *apply_edit,
                                sh_read_prefab_fn      *read_prefab,
-                               sh_apply_sync_fn       *apply_sync);   /* +0x290 SYNCHRONOUS inline apply */
+                               sh_apply_sync_fn       *apply_sync,   /* +0x290 SYNCHRONOUS inline apply */
+                               sh_normalize_timeline_inherit_fn *normalize_timeline_inherit); /* +0x298 */
 
 /* expose the +0xb0 serialize-SELECTION->idSnapEntityPrefab slot body (the Prefabs create body)
  * so sh_iface_engine folds it into the single sh_iface_bind_engine_slots call. */

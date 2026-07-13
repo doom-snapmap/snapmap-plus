@@ -278,6 +278,8 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     g_iface_vtbl_live.wire_edit_generation   = s->wire_edit_generation;   /* +0x288 */
     /* clone-extension (the synchronous inline apply -- OG-faithful commit for the SnapStack decl-edit ops). */
     g_iface_vtbl_live.apply_sync             = s->apply_sync;             /* +0x290 */
+    /* clone-extension (the palette-timeline portable-inherit one-shot normalize; shared by both frontends). */
+    g_iface_vtbl_live.normalize_timeline_inherit = s->normalize_timeline_inherit; /* +0x298 */
 }
 
 /* --------------------------------------------------------------------- the factory -----------------

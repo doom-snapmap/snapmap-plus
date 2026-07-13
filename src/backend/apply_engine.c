@@ -52,6 +52,9 @@
  * editor's wire-overlay render buckets; a timeline is placed by the engine via the in-game palette.) */
 #define DEFSUB_CLASS_OFF       0x60         /* defsub+0x60 -> classname idStr (commit dst) */
 #define DEFSUB_INHERIT_OFF     0x58         /* defsub+0x58 -> inherit idStr (commit dst) */
+#define DECL_BLOB_OFF          0x38         /* defsub+0x38 -> decl-SOURCE text blob ptr (what get_inherit reads
+                                             * + the map save serializes; LAGS the raw idStr by one commit --
+                                             * see slot_normalize_timeline_inherit's re-fire gate) */
 #define ENT_COUNT_CAP         1000000u      /* sanity cap on the entity array count */
 
 /* mkcmd / prefab paste-staging slot: editor+0x209a8 (the in-game Ctrl+V target). LIVE-CONFIRMED 2026-06-25,
@@ -902,6 +905,100 @@ static int slot_serialize_entity(sh_iface *self, int id, char *out_json, int cap
     return ae_serialize_to_json("idSnapEntity", cloneBase, out_json, cap);
 }
 
+/* PLACEHOLDER inherit a palette-placed Timeline is spawned with (see the +0x298 slot doc in
+ * snaphak_iface.h for the why) -- and the portable value it gets normalized to. */
+#define TL_PLACEHOLDER_INHERIT "snapmaps/editor_only/placeholder_target"
+#define TL_PORTABLE_INHERIT    "snapmaps/unknown"
+/* Matches sh_timeline.cpp's own SH_TL_JSON_CAP exactly -- Qt's tl_iface_serialize_entity has used this
+ * size (heap via std::string::resize, freed after the call) for the same "full timeline-entity JSON"
+ * job all along with no issue. An earlier version of this function used two STATIC 1 MB buffers instead
+ * (2 MB of permanently-resident BSS the Qt path never carries) -- confirmed via a controller-freelook
+ * regression during live testing to be a real problem, reverted, and redesigned to this transient
+ * heap-alloc/free shape specifically to match Qt's already-proven-safe footprint. */
+#define TL_NORMALIZE_BUF_CAP   (256 * 1024)
+
+/* Raw string splice (NOT a JSON re-parse, which would drop the engine-required float ".0"): replace every
+ * occurrence of TL_PLACEHOLDER_INHERIT in `src` with TL_PORTABLE_INHERIT into `out` (cap-bounded). Returns
+ * the number of replacements made (0 = no match / didn't fit -> caller treats as "nothing to do"). */
+static int tl_splice_portable_inherit(const char *src, char *out, int cap)
+{
+    static const char ph[] = TL_PLACEHOLDER_INHERIT;
+    static const char pv[] = TL_PORTABLE_INHERIT;
+    const int phlen = (int)(sizeof(ph) - 1), pvlen = (int)(sizeof(pv) - 1);
+    int replaced = 0, w = 0;
+    const char *p = src;
+    while (*p) {
+        if (strncmp(p, ph, (size_t)phlen) == 0) {
+            if (w + pvlen >= cap) return 0;   /* would overflow -- bail, no partial commit */
+            memcpy(out + w, pv, (size_t)pvlen); w += pvlen; p += phlen;
+            replaced++;
+        } else {
+            if (w + 1 >= cap) return 0;
+            out[w++] = *p++;
+        }
+    }
+    out[w] = '\0';
+    return replaced;
+}
+
+/* +0x298 (ext 6) TIMELINE PORTABLE-INHERIT NORMALIZE -- see the full doc comment on
+ * sh_normalize_timeline_inherit_fn in snaphak_iface.h. Cheap defsub-inherit read first (no serialize/no
+ * alloc) so this is safe to call every tick on every Timeline-classed id; only a placeholder match pays
+ * for the malloc+serialize+splice+commit+free. Commits via ae_apply_one directly (the SAME body +0x290
+ * apply_sync calls for kind=0) INLINE on the calling thread -- whichever thread that is is, by
+ * construction, the caller's own safe commit point (matching the +0x290 guarantee). Both scratch buffers
+ * are heap-allocated per call and freed before returning -- no persistent static/BSS footprint, matching
+ * Qt's own tl_iface_serialize_entity (std::string::resize, same 256 KB cap, same freed-after-use shape). */
+static int slot_normalize_timeline_inherit(sh_iface *self, int id)
+{
+    (void)self;
+    int result = 0;
+    char *json = NULL, *patched = NULL;
+    __try {
+        void *array = NULL; uint32_t count = 0;
+        if (!ae_entity_array(&array, &count)) { result = 0; goto done; }
+        void *ent = ae_entity_ptr(array, count, id);
+        if (!ent) { result = 0; goto done; }
+        void *defsub = NULL;
+        if (!ae_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL) { result = 0; goto done; }
+        /* RE-FIRE GATE -- check the decl-source BLOB (defsub+0x38), NOT the raw inherit idStr (defsub+0x58).
+         * ae_apply_one rebuilds the blob from the CURRENT defsub+0x58 (DeclSourceRebuild) BEFORE it assigns
+         * the new inherit, so the blob lags one commit behind the raw field: after the first commit the raw
+         * field reads 'snapmaps/unknown' but the blob still reads the placeholder. get_inherit reads this
+         * blob AND the map save serializes it, so if we gated on the raw field we'd commit exactly ONCE and
+         * leave the blob (hence the Inherit box + the saved map) stuck on the placeholder forever. Gating on
+         * the blob instead keeps this firing across successive rescans (each triggered by the raw field's
+         * id-string change) until a commit's DeclSourceRebuild finally bakes 'unknown' into the blob -- this
+         * is the exact self-correcting behavior Qt's original sh_tabs get_inherit gate relied on (the
+         * "repeated commits" seen in the log are load-bearing, not waste). A raw-field gate here was tried
+         * 2026-07-12 and confirmed to leave both frontends stuck on the placeholder. */
+        void *blob = NULL;
+        if (!ae_read_ptr((const uint8_t *)defsub + DECL_BLOB_OFF, &blob) || !blob) { result = 0; goto done; }
+        if (!strstr((const char *)blob, TL_PLACEHOLDER_INHERIT)) { result = 0; goto done; }   /* blob already portable */
+
+        json = (char *)malloc(TL_NORMALIZE_BUF_CAP);
+        if (!json) { result = 0; goto done; }
+        int n = slot_serialize_entity(self, id, json, TL_NORMALIZE_BUF_CAP);
+        if (n <= 0) { result = 0; goto done; }
+
+        patched = (char *)malloc(TL_NORMALIZE_BUF_CAP);
+        if (!patched) { result = 0; goto done; }
+        if (tl_splice_portable_inherit(json, patched, TL_NORMALIZE_BUF_CAP) <= 0) { result = 0; goto done; }
+
+        result = ae_apply_one(id, patched) ? 1 : 0;
+        if (result) {
+            char dbg[160];
+            _snprintf_s(dbg, sizeof dbg, _TRUNCATE,
+                        "normalize-timeline-inherit: id=%d placeholder -> " TL_PORTABLE_INHERIT " committed", id);
+            backend_log(dbg);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { result = 0; }
+done:
+    if (json) free(json);
+    if (patched) free(patched);
+    return result;
+}
+
 /* +0xd0 SCHEDULE a batch of apply-items at the engine command-exec point (FIX B). Deep-copies the items
  * (incl. the text strings) into the pending store, registers clone_bss_apply, BufferCommandTexts it. */
 static int slot_schedule_apply(sh_iface *self, const sh_apply_item *items, int count, const char *op_label)
@@ -1104,12 +1201,14 @@ static int slot_apply_sync(sh_iface *self, const sh_apply_item *items, int count
 void sh_apply_engine_get_slots(sh_serialize_entity_fn *serialize_entity,
                                sh_schedule_apply_fn   *apply_edit,
                                sh_read_prefab_fn      *read_prefab,
-                               sh_apply_sync_fn       *apply_sync)
+                               sh_apply_sync_fn       *apply_sync,
+                               sh_normalize_timeline_inherit_fn *normalize_timeline_inherit)
 {
     if (serialize_entity) *serialize_entity = slot_serialize_entity;
     if (apply_edit)       *apply_edit       = slot_schedule_apply;
     if (read_prefab)      *read_prefab      = slot_read_prefab;
     if (apply_sync)       *apply_sync       = slot_apply_sync;
+    if (normalize_timeline_inherit) *normalize_timeline_inherit = slot_normalize_timeline_inherit;
 }
 
 /* expose the +0xb0 serialize-selection body so sh_iface_engine folds it into the single bind. */

@@ -362,6 +362,20 @@ static void poc_rescan_timelines(int n)
             poc_logf("poc_rescan_timelines: get_classname_copy FAULTED for id=%lu (skipped)", (unsigned long)g_ents[i].eid);
         }
         if (c && (strcmp(c, "idTarget_Timeline") == 0 || strcmp(c, "idEncounterManager") == 0)) {
+            /* PORTABLE-INHERIT NORMALIZE (2026-07-13): a Timeline placed from the in-game palette is
+             * spawned from a repurposed placeholder entityDef, so it records that as its `inherit` -- a
+             * saved map would then only reload where our override is installed. This was Qt-only until
+             * now (sh_timeline.cpp sh_timeline_normalize_inherit); the logic is ported to the shared
+             * backend slot +0x298 so WebView gets it too. Cheap on a non-match (a raw defsub-inherit read,
+             * no serialize/no alloc) and idempotent, so it's safe to call unconditionally on every
+             * Timeline-classed id every rescan -- only idTarget_Timeline can carry the placeholder
+             * (idEncounterManager's inherit is unrelated), matching Qt's own gating. The displayed Inherit
+             * box (if this entity is open in the Entity-State panel) self-corrects via the regular auto
+             * state poll -- see the per-field dirty exception in mockup.html's 'state' handler. */
+            if (strcmp(c, "idTarget_Timeline") == 0 && g_iface->vtbl->normalize_timeline_inherit) {
+                __try { g_iface->vtbl->normalize_timeline_inherit(g_iface, g_ents[i].eid); }
+                __except (EXCEPTION_EXECUTE_HANDLER) {}
+            }
             g_tls[tn].eid = g_ents[i].eid;
             strncpy_s(g_tls[tn].id, POC_ID_CAP, g_ents[i].id, _TRUNCATE);
             strncpy_s(g_tls[tn].name, POC_NAME_CAP, g_ents[i].name, _TRUNCATE);
@@ -682,6 +696,19 @@ static int poc_apply_edit_seh(const sh_apply_item *it, int count, const char *op
     __try { return g_iface->vtbl->apply_edit(g_iface, it, count, op) ? 1 : 0; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
+/* Decl-edit (kind=0) commits MUST go inline via +0x290, never the deferred +0xd0 schedule -- that's the
+ * deferred-apply double-free the Qt frontend hit and fixed (docs/backend-changes.md, docs/qt-changes.md,
+ * 2026-07-12). Mirrors sh_timeline.cpp's tl_iface_schedule_apply: try apply_sync first, fall back to the
+ * deferred apply_edit only on an old backend that lacks +0x290. kind=1 (mkcmd staging, e.g. Load/Place) is
+ * unaffected by this bug and stays on poc_apply_edit_seh/apply_edit. */
+static int poc_apply_sync_seh(const sh_apply_item *it, int count, const char *op)
+{
+    __try {
+        if (g_iface->vtbl->apply_sync) return g_iface->vtbl->apply_sync(g_iface, it, count, op) > 0 ? 1 : 0;
+        if (g_iface->vtbl->apply_edit) return g_iface->vtbl->apply_edit(g_iface, it, count, op) ? 1 : 0;
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
 static void poc_apply_load_prefab()
 {
     g_load_result = -1;
@@ -708,17 +735,22 @@ static void poc_apply_load_prefab()
     poc_log(l);
 }
 /* Timelines Stage 5 (Save): kind=0 (deserialize the FULL patched entity JSON -> temp def -> commit
- * class/inherit/source on `id`) -- the SAME apply_edit path as kind=1 above, just id-targeted instead of
- * paste-targeted. The page already did the hard part (fresh-reserialize + JSON-patch the componentTimeLine/
- * encounterComponent field, matching Qt's tl_patch_component); this is purely "hand the opaque blob to the
- * engine and report whether it took." */
+ * class/inherit/source on `id`) -- id-targeted instead of paste-targeted. The page already did the hard
+ * part (fresh-reserialize + JSON-patch the componentTimeLine/encounterComponent field, matching Qt's
+ * tl_patch_component); this is purely "hand the opaque blob to the engine and report whether it took."
+ * COMMITS VIA +0x290 SYNC (OG-faithful, matches Qt): this is a decl-edit commit, same class of op as
+ * SnapStack's acctargets/bss/bse and Qt's Timeline Save -- the deferred +0xd0 schedule double-frees the
+ * committed decl-source block on the next Play->teardown, exactly the crash Qt fixed. See poc_apply_sync_seh
+ * and docs/qt-changes.md. */
 static void poc_apply_save_timeline()
 {
     g_save_timeline_result = 0;
     if (g_save_timeline_eid < 0 || g_save_timeline_json.empty()) return;
-    if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->apply_edit) { poc_log("save-timeline: ABORT (iface/slot missing)"); return; }
+    if (!g_iface || !g_iface->vtbl || (!g_iface->vtbl->apply_sync && !g_iface->vtbl->apply_edit)) {
+        poc_log("save-timeline: ABORT (iface/slot missing)"); return;
+    }
     sh_apply_item it; it.kind = 0; it.id = g_save_timeline_eid; it.text = g_save_timeline_json.c_str();
-    g_save_timeline_result = poc_apply_edit_seh(&it, 1, "save-timeline");
+    g_save_timeline_result = poc_apply_sync_seh(&it, 1, "save-timeline");
     char l[128]; _snprintf_s(l, sizeof l, _TRUNCATE, "save-timeline: eid=%d ok=%d", g_save_timeline_eid, g_save_timeline_result);
     poc_log(l);
 }

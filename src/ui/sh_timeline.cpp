@@ -218,14 +218,25 @@ static void tl_iface_toast(sh_iface *iface, const char *title, const char *text)
  * `inherit` -> the saved map only reloads where our override is installed. Rewrite the inherit to
  * `snapmaps/unknown` (the universal SnapMap base a morph-made timeline carried) so the map is portable. The
  * `className` STAYS `idTarget_Timeline` (NO reclass -> no node-cap change, no render-node re-bucket -- none of
- * the create-crash surface); the edit rides the same main-thread bss apply (backend ae_apply_one) the
- * Timeline-Editor commit uses, and the backend's class/inherit compat gate makes a bad pair a safe no-op. A RAW
- * string splice on the serialized JSON (NOT a QJson re-serialize, which would drop the engine-required float
- * ".0"). Idempotent one-shot: after the rewrite the inherit is snapmaps/unknown and never re-matches. */
+ * the create-crash surface).
+ *
+ * PORTED TO THE BACKEND 2026-07-13 (+0x298 `normalize_timeline_inherit`, snaphak_iface.h) so both frontends
+ * share ONE implementation instead of this logic living Qt-only (WebView silently lacked it -- a palette
+ * Timeline saved from WebView would keep the non-portable inherit forever). This wrapper tries the shared
+ * slot first; the old local C++ logic (a raw string splice on the serialized JSON -- NOT a QJson re-
+ * serialize, which would drop the engine-required float ".0") is kept ONLY as a fallback for an old backend
+ * that predates the +0x298 slot -- this exact logic is what the backend port mirrors. Idempotent one-shot
+ * either way: after the rewrite the inherit is snapmaps/unknown and never re-matches (though live-testing
+ * showed it can take a few rapid re-commits before that sticks -- confirmed harmless, matches this
+ * function's own long-standing behavior; see the +0x298 slot doc for detail). */
 bool sh_timeline_normalize_inherit(sh_iface *iface, int id)
 {
-    static const char PLACEHOLDER[] = "snapmaps/editor_only/placeholder_target";
     if (!iface || id < 0) return false;
+    if (iface->vtbl && iface->vtbl->normalize_timeline_inherit)
+        return iface->vtbl->normalize_timeline_inherit(iface, id) != 0;
+
+    /* old-backend fallback (pre-+0x298) */
+    static const char PLACEHOLDER[] = "snapmaps/editor_only/placeholder_target";
     std::string full = tl_iface_serialize_entity(iface, id);
     if (full.empty() || full.find(PLACEHOLDER) == std::string::npos) return false;
     std::string patched = full;
