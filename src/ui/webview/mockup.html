@@ -412,6 +412,9 @@
   var eventsRequested = false;
   var eventItems = [];       // the full 1611-event catalog: [{name, args:[{name,type}]}, ...]
   var eventCatalogByName = {};   // name -> {name, args} -- O(1) schema lookup while rendering/editing args
+  var eventDocsRequested = false;
+  var eventDocsByName = {};  // name -> {summary, confidence, source, args: {argName: desc}} -- the EXPLAIN box's data
+  var tlDescOpen = {};       // "<tabIdx>:<evIdx>" -> bool, survives the wholesale event-row rebuild on add/delete/tab-switch
   var argResclassCache = {};     // resClass (decl short-name OR raw enum type) -> [valid value, ...], fetched lazily
   var argResclassRequested = {}; // resClass -> true once a lookupArgResclass round-trip has been fired for it
   var entityAssetsRequested = false;
@@ -626,6 +629,14 @@
       var n = (o.eids || []).length;
       onMessage({kind:'pushStackResult', result: n > 0 ? 1 : 0, count: n});
     }
+    else if (o.cmd === 'clearStack') {
+      var had = previewStack0Count; previewStack0Count = 0;
+      onMessage({kind:'clearStackResult', result:1, count: had});
+    }
+    else if (o.cmd === 'tlUseSelection') {
+      // preview only: fake exactly one entity selected (Block Box, eid 65) to demo the success path.
+      onMessage({kind:'tlUseSelectionResult', ok:true, eid:65});
+    }
     else if (o.cmd === 'enumInherits') { onMessage({kind:'inherits', items:['snapmaps/volume/blocking','snapmaps/volume/trigger','player/coop','snapmaps/ai','snapmaps/variable','snapmaps/action/variable/integer','snapmaps/light','light','snapmaps/listener/ai']}); }
     else if (o.cmd === 'enumClasses') { onMessage({kind:'classes', inherit:o.inherit, items:['idVolume_Blocking','idVolume_Trigger','idVolume_Damage','idVolume_Water']}); }
     else if (o.cmd === 'lookupDesc') {
@@ -648,6 +659,17 @@
         {name:'fx/play', args:[{name:'condition', type:'fxCondition_t'}]},
         {name:'anim/play', args:[{name:'facing', type:'angles'}, {name:'anim', type:'md6Anim'}]},
         {name:'model/set_index', args:[{name:'modelIndex', type:'int'}]}
+      ]});
+    }
+    else if (o.cmd === 'enumEventDocs') {
+      // preview only: a small sample matching a few of the enumEvents fakes above, enough to demo the
+      // EXPLAIN box's three states -- a full doc (summary + confidence + handler check), a doc with no
+      // per-arg description on file (falls back to tlArgRole), and an event with NO doc at all (fallback
+      // signature). Everything else in the preview catalog intentionally has no matching entry here.
+      onMessage({kind:'eventDocs', items:[
+        {name:'ai/spawn', summary:'Spawns the AI actor into the world at the given origin.', confidence:'high', source:'handler', args:[{name:'origin', desc:'World-space spawn position.'}]},
+        {name:'ai/set_target', summary:'Sets the AI actor\'s current target entity.', confidence:'medium', source:'generated', args:[]},
+        {name:'sound/play_shader', summary:'Plays a sound shader on this entity.', confidence:'low', source:'generated', args:[]}
       ]});
     }
     else if (o.cmd === 'enumArgResclass') {
@@ -791,19 +813,21 @@
     return pairs;
   }
   // Classify a catalog arg TYPE NAME into a widget kind -- ports the Qt clone's tl_classify_arg (sh_timeline.cpp).
-  // Every kind now gets a real editable widget: 'bool' a checkbox, 'vecn' a per-component field row, 'decl'
-  // and 'enum' a dropdown constrained to real engine values (via the shared enum_decls_of_resclass
-  // round-trip -- see tlRenderArgCombo/argResclassCache), everything else a plain text box. 'entity' still
-  // stays plain text rather than the "Runs on" picker's dropdown -- that's the one remaining gap.
+  // Every kind gets a real editable widget: 'bool' a checkbox, 'vecn' a per-component field row, 'decl'/'enum'
+  // a dropdown constrained to real engine values (via the shared enum_decls_of_resclass round-trip -- see
+  // tlRenderArgCombo/argResclassCache), 'entity' the SAME "Runs on" picker dropdown sourced from allEntities
+  // (data-resclass="entity", populated locally -- no native round-trip needed, same as the asset dropdowns),
+  // everything else a plain text box.
   var TL_DECL_ALIASES = { 'idSoundShader*': 'sound', 'idActorModifier*': 'actormodifier', 'idMaterial*': 'material' };   // non-"idDecl" decl-pointers -> their decl-type short-name
   function tlClassifyArg(typeName) {
     if (typeName === 'float') return 'float';
     if (typeName === 'int') return 'int';
     if (typeName === 'bool') return 'bool';
     if (typeName === 'vec3' || typeName === 'angles' || typeName === 'color') return 'vecn';
-    if (typeName === 'string' || typeName === 'entity' || typeName === 'animWebPath' || typeName === 'jointName' ||
+    if (typeName === 'entity') return 'entity';
+    if (typeName === 'string' || typeName === 'animWebPath' || typeName === 'jointName' ||
         typeName === 'jointTag' || typeName === 'animAlias' || typeName === 'md6Anim')
-      return 'text';   // plain text box for now -- entity gets a real picker dropdown in a later pass
+      return 'text';
     if (typeName && typeName.indexOf('idDecl') === 0) return 'decl';
     if (TL_DECL_ALIASES[typeName]) return 'decl';
     return 'enum';   // catch-all (matches Qt's SH_ARG_ENUM default: a non-builtin, non-decl type name)
@@ -854,6 +878,60 @@
   // alone if the catalog didn't give this arg a name (some engine args are positional-only), and to
   // "(unknown arg)" if there's no schema at all for this position (an unrecognized/hand-typed eventDef, or
   // more stored args than the catalog says this event takes).
+  // A short, FACTUAL role hint for a known arg name/type (NO fabricated behavior) -- fallback for an arg the
+  // generated doc (sh_event_docs.h) doesn't cover by name. Ports tl_arg_role (sh_timeline.cpp) verbatim.
+  function tlArgRole(name, type) {
+    if (name === 'modelIndex') return 'which render-model (index)';
+    if (name === 'tag' || name === 'tagName') return 'skeleton attach point (joint tag)';
+    if (name === 'anim' || name === 'animHandle') return 'an animation';
+    if (name === 'animAlias') return 'a named animation';
+    if (type === 'animWebPath') return 'an anim-web path';
+    if (name === 'shader' || type === 'idSoundShader*') return 'a sound shader';
+    if (type === 'soundChannel_t') return 'the audio channel';
+    if (type === 'entity') return 'a target entity';
+    if (type === 'bool') return 'on / off';
+    if (type === 'vec3') return 'an x y z vector';
+    if (type === 'color') return 'an r g b a color';
+    if (type === 'int' || type === 'float') return 'a number';
+    return null;
+  }
+  // The EXPLAIN box's content for one event row's .desc-body -- ports tl_set_event_description (sh_timeline.cpp)
+  // verbatim: event name (+ a checkmark when RE-verified from the engine handler decompile) and, when
+  // sh_event_docs.h has a generated summary, that summary (flagged "(inferred)" at low confidence) plus one
+  // line per arg (the doc's own description, or tlArgRole as a factual fallback). No doc at all -> the
+  // honest fallback signature (name + category + per-arg role hints, no fabricated summary).
+  function tlEventDescHtml(eventDef) {
+    var def = eventCatalogByName[eventDef];
+    if (!def) return '<span class="muted">Unrecognized event -- no description available.</span>';
+    var doc = eventDocsByName[eventDef];
+    var s = '<b>' + esc(eventDef) + '</b>';
+    if (doc && doc.source === 'handler') s += ' <span style="color:#6aa84f">&#10003;</span>';
+    if (doc && doc.summary) {
+      s += ' &mdash; ' + esc(doc.summary);
+      if (doc.confidence === 'low') s += ' <span class="muted">(inferred)</span>';
+      for (var j = 0; j < def.args.length; j++) {
+        var an = (def.args[j].name && def.args[j].name.length) ? def.args[j].name : def.args[j].type;
+        var ad = (doc.args && doc.args[def.args[j].name]) || tlArgRole(def.args[j].name || '', def.args[j].type || '');
+        s += '<br>&nbsp;&nbsp;<b>' + esc(an) + '</b>' + (ad ? (' &mdash; ' + esc(ad)) : '');
+      }
+    } else {
+      var isAnim = eventDef.indexOf('ae_') === 0;
+      s += ' &mdash; ' + (isAnim ? 'animation-frame event' : 'timeline event');
+      if (def.args.length === 0) s += ', no parameters.';
+      else {
+        var parts = [];
+        for (var k = 0; k < def.args.length; k++) {
+          var an2 = (def.args[k].name && def.args[k].name.length) ? def.args[k].name : def.args[k].type;
+          var role = tlArgRole(def.args[k].name || '', def.args[k].type || '');
+          var p = '<b>' + esc(an2) + '</b>';
+          if (role) p += ' = ' + esc(role);
+          parts.push(p);
+        }
+        s += '&nbsp;&middot;&nbsp; ' + parts.join(',&nbsp; ');
+      }
+    }
+    return s;
+  }
   function tlArgLabel(argSchema) {
     if (!argSchema) return '(unknown arg)';
     var nm = (argSchema.name && argSchema.name.length) ? argSchema.name : argSchema.type;
@@ -912,6 +990,27 @@
       return '<div class="ev-arg-row"><label>' + label + '</label>'
            + '<div class="combo ev-arg-combo" data-resclass="' + esc(enumType) + '">'
            +   '<input type="text" class="ev-arg-input" data-argidx="' + argIdx + '" autocomplete="off" value="' + esc(String(enumVal)) + '">'
+           +   '<button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div>'
+           + '</div></div>';
+    }
+    if (kind === 'entity') {
+      // {"entity":<ref>} -- FLAT, same shape/write-path as the plain scalar kinds (the delegated input
+      // listener already writes through argEntry.type generically). Sourced from allEntities, same
+      // "<id>: <name>" display convention as the "Runs on" picker (tlEntityLabel) -- but items are
+      // {display,value} pairs so the FRIENDLY label shows while the raw id is what actually commits, same
+      // split the asset dropdowns use for their display-name-vs-stored-index case. Rebuilt on every render
+      // (not fetched/cached once like decl/enum) since it's already local data, same as the asset branch above.
+      var entVal = (argVal && argVal.entity !== undefined) ? argVal.entity : '';
+      var entItems = [];
+      for (var ei = 0; ei < allEntities.length; ei++) {
+        var ent = allEntities[ei];
+        entItems.push({ display: ent.name ? (ent.id + ': ' + ent.name) : ent.id, value: ent.id });
+      }
+      argResclassCache['entity'] = entItems;
+      var entDisp = entVal ? tlEntityLabel(entVal) : '';
+      return '<div class="ev-arg-row"><label>' + label + '</label>'
+           + '<div class="combo ev-arg-combo" data-resclass="entity">'
+           +   '<input type="text" class="ev-arg-input" data-argidx="' + argIdx + '" autocomplete="off" value="' + esc(entDisp) + '">'
            +   '<button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div>'
            + '</div></div>';
     }
@@ -1273,8 +1372,10 @@
     for (var i = 0; i < allTimelines.length; i++) if (allTimelines[i].eid === d.eid) { tlName = allTimelines[i].name || allTimelines[i].id; break; }
     tlModel = { eid: d.eid, isEncounter: !!d.isEncounter, name: tlName, tabs: d.tabs || [], active: 0 };
     tlDirty = false;   // fresh load from the backend -- nothing unsaved yet (gates tlMaybeAutoRefresh, not Save/Revert below)
+    tlDescOpen = {};   // a different timeline's event indices don't mean anything here -- start every EXPLAIN box closed
     head.innerHTML = 'Current Timeline: <b>' + esc(tlName) + '</b>' + (d.isEncounter ? ' <span class="muted">(encounter)</span>' : '');
     if (!eventsRequested) { eventsRequested = true; post({cmd:'enumEvents'}); }   // full event catalog, once
+    if (!eventDocsRequested) { eventDocsRequested = true; post({cmd:'enumEventDocs'}); }   // the EXPLAIN box's data, once
     if (!entityAssetsRequested) { entityAssetsRequested = true; post({cmd:'enumEntityAssets'}); }   // full per-entity-class asset table, once
     renderTlTabs();
     renderTlBody();
@@ -1307,8 +1408,9 @@
   // there -- deliberately DROPPED here (user request): it hid the id (which carries the module path and
   // disambiguates same-named entities) behind a toggle that didn't persist across tab/timeline switches.
   // tlEntityLabel always shows both ("<id>: <name>") instead, so there's nothing to toggle. The
-  // "Use current selection" button is a VISUAL mockup only -- reading the live editor selection needs a new
-  // native round-trip, not yet wired.
+  // "Use current selection" button posts {cmd:'tlUseSelection'}; native replies with a FRESH on-demand read
+  // of the live editor selection (tlUseSelectionResult, see onMessage) -- exactly one entity required, else
+  // a toast warning (0 selected / N>1 selected).
   function renderTlBody() {
     var bodyEl = document.getElementById('tlBody'); if (!bodyEl || !tlModel) return;
     if (tlModel.tabs.length === 0) {
@@ -1329,7 +1431,7 @@
     var h = '<div class="entity-picker">'
        + '<div class="combo grow"><input type="text" id="tlRunsOn" value="' + esc(entityText) + '" placeholder="(no entity)" autocomplete="off"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div>'
        + '<div class="entity-picker-opts">'
-       +   '<button type="button" class="btn" id="tlUseSelection" title="Not wired yet -- will read the currently selected entity in the 3D editor (Stage 3)">Use current selection</button>'
+       +   '<button type="button" class="btn" id="tlUseSelection" title="Set Runs on to the entity currently selected in the SnapMap editor (must be exactly one)">Use current selection</button>'
        + '</div>'
        + '</div>';
 
@@ -1363,6 +1465,19 @@
             h += tlRenderArgRow(argSchema, a, ev.args[a], tabEntitySlug);
           }
           h += '</div>';
+        }
+        // EXPLAIN box (Option B, see docs/webview-ui.md) -- collapsed by default, same interaction pattern
+        // as the Entities tab's "Inherit / Class Descriptions" panel (.desc-panel/.desc-toggle/.desc-body,
+        // reused as-is, no new CSS). Below the params (not above -- keeps the eventDef/args the first thing
+        // you see, matching the approved mockup). Only shown once an event is actually picked -- an empty
+        // eventDef has nothing to explain yet. data-desckey lets the click handler persist open/closed in
+        // tlDescOpen across the wholesale re-render a tab-switch/add/delete triggers.
+        if (ev.eventDef) {
+          var descKey = tlModel.active + ':' + j;
+          h += '<div class="desc-panel' + (tlDescOpen[descKey] ? ' open' : '') + '" data-desckey="' + esc(descKey) + '">'
+             +   '<div class="desc-toggle"><span class="desc-caret">&#9656;</span>What does this event do?</div>'
+             +   '<div class="desc-body">' + tlEventDescHtml(ev.eventDef) + '</div>'
+             + '</div>';
         }
         h += '</div>';
       }
@@ -1599,12 +1714,29 @@
       inheritItems = d.items || []; if (inheritCombo) inheritCombo.refresh();
     } else if (d.kind === 'classes') {
       classItems = d.items || []; if (classCombo) classCombo.refresh();
+      // showState() ran fieldProblems() synchronously right after posting enumClasses -- against the
+      // PREVIOUS entity's classItems, since this response hadn't landed yet. That's a real race: a valid
+      // classname could get wrongly flagged red (or a stale false negative left uncorrected) until something
+      // else happened to touch the field. Re-run it now that classItems actually matches this entity's inherit.
+      updateDirty();
     } else if (d.kind === 'desc') {
       renderDesc(d);
     } else if (d.kind === 'events') {
       eventItems = d.items || [];
       eventCatalogByName = {};
       for (var evi = 0; evi < eventItems.length; evi++) eventCatalogByName[eventItems[evi].name] = eventItems[evi];
+    } else if (d.kind === 'eventDocs') {
+      // no live-refresh of an already-open EXPLAIN box here (same tolerance as argResclass below -- the
+      // round-trip is near-instant locally; it just reads correctly the next time a box is opened/rendered).
+      var docItems = d.items || [];
+      eventDocsByName = {};
+      for (var edi = 0; edi < docItems.length; edi++) {
+        var it = docItems[edi];
+        var argMap = {};
+        var itArgs = it.args || [];
+        for (var eda = 0; eda < itArgs.length; eda++) argMap[itArgs[eda].name] = itArgs[eda].desc;
+        eventDocsByName[it.name] = { summary: it.summary, confidence: it.confidence, source: it.source, args: argMap };
+      }
     } else if (d.kind === 'argResclass') {
       argResclassCache[d.resClass] = d.items || [];
       // no live-refresh of an already-open combo here (matches the eventDef/entity-picker's own tolerance --
@@ -1635,6 +1767,20 @@
       renderPrefabList(d.root || [], d.folders || []);
     } else if (d.kind === 'prefabDetail') {
       renderPrefabDetail(d);
+    } else if (d.kind === 'tlUseSelectionResult') {
+      if (!tlModel) { /* panel closed before the reply came back (e.g. editorReopened) -- nothing to apply it to */ }
+      else if (!d.ok) {
+        toast((d.count === 0 ? 'Nothing selected in the editor' : d.count + ' entities selected') + ' -- select exactly one entity', 'warn');
+      } else {
+        var match = null;
+        for (var mi = 0; mi < allEntities.length; mi++) if (allEntities[mi].eid === d.eid) { match = allEntities[mi]; break; }
+        if (!match) { toast('Selected entity not found in the list -- try Refresh', 'warn'); }
+        else {
+          tlMarkDirty();
+          tlModel.tabs[tlModel.active].entity = match.id;
+          renderTlBody();
+        }
+      }
     } else if (d.kind === 'selCount') {
       editorSelCount = d.count; updateCreateBtn();
     } else if (d.kind === 'createPrefabResult') {
@@ -1920,19 +2066,38 @@
     var el = document.getElementById('timelineList');
     if (el) el.addEventListener('click', function(e){
       var item = e.target.closest('.entity-item'); if (!item) return;
-      selectedTlEid = parseInt(item.getAttribute('data-eid'), 10);
+      var eid = parseInt(item.getAttribute('data-eid'), 10);
+      if (eid === selectedTlEid && tlModel) return;   // already open -- don't silently discard unsaved edits on a re-click; use Revert for that
+      selectedTlEid = eid;
       renderTimelineList();
       post({cmd:'openTimeline', eid: selectedTlEid});
     });
   })();
-  // Runs-on entity-picker ("Use current selection" is a visual placeholder until Stage 3 wires a real
-  // "what's currently selected in the 3D editor" round-trip) + "Add Eventcall" + per-event delete.
+  // Runs-on entity-picker ("Use current selection" reads the live SnapMap editor selection) + "Add
+  // Eventcall" + per-event delete.
   (function(){
     var bodyEl = document.getElementById('tlBody');
     if (!bodyEl) return;
     bodyEl.addEventListener('click', function(e){
       if (e.target && e.target.id === 'tlUseSelection') {
-        toast('Use current selection: not wired yet (Stage 3)', 'warn');
+        if (!tlModel) return;
+        post({cmd:'tlUseSelection'});
+        return;
+      }
+      var descPanel = e.target.closest('.desc-panel');
+      if (descPanel) {
+        // same asymmetric rule as the Entities tab's #descPanel: collapsed -> only the header row opens it;
+        // expanded -> click ANYWHERE in the panel closes it, except right after a text-selection drag (don't
+        // yank the panel out from under a copy). No re-render (renderTlBody would blow away any in-progress
+        // edit elsewhere in the row) -- just toggles the class and keeps tlDescOpen in sync so the state
+        // survives the NEXT wholesale rebuild (add/delete event, switch tab, etc.).
+        var descKey2 = descPanel.getAttribute('data-desckey');
+        var isOpen2 = descPanel.classList.contains('open');
+        if (isOpen2) {
+          if (!window.getSelection().toString()) { tlDescOpen[descKey2] = false; descPanel.classList.remove('open'); }
+        } else if (e.target.closest('.desc-toggle')) {
+          tlDescOpen[descKey2] = true; descPanel.classList.add('open');
+        }
         return;
       }
       if (e.target && e.target.id === 'tlAddEventcall' && tlModel) {
