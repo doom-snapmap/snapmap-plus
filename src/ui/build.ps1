@@ -44,8 +44,8 @@ if (-not $vs) { throw "VC Tools (x86/x64) not found in any VS install." }
 $vcvars = "$vs\VC\Auxiliary\Build\vcvars64.bat"
 if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
 
-$Sources = @("snaphak_ui_init.cpp", "sh_setupui.cpp", "sl_exports.cpp", "snapstack.cpp", "sh_tabs.cpp",
-             "sh_timeline.cpp")
+$Sources = @("snaphak_ui_init.cpp", "sh_setupui.cpp", "sl_exports.cpp", "sh_tabs.cpp",
+             "sh_timeline.cpp")   # SnapStack is backend-hosted (src/backend/snapstack.c) -- no Qt-side copy
 $srcArgs = ($Sources | ForEach-Object { '"' + $_.Trim() + '"' }) -join " "
 $implib  = $Out -replace '\.dll$', '.lib'   # import lib + .exp -> build\obj\ui (build\ root stays shippable DLLs only)
 

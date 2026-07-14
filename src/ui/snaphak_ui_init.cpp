@@ -37,7 +37,6 @@
 
 #include "snaphak_iface.h"
 #include "sh_controller.h"
-#include "snapstack.h"   /* the 20-subcommand registrar (FUN_180003c80 port) */
 
 /* ------------------------------------------------------------------ the controller (WIN) -----------
  * The OG WIN (`local_258`) holds the flag-word at WIN[0], the QApplication at WIN[1], the QMainWindow at
@@ -73,14 +72,14 @@ static char       **g_argv = nullptr;
  * vtable + the WIN struct so adding them does not move anything. */
 static void sh_think_loop(ShWinController *win)
 {
-    /* OG: DAT_1800314e8 = WIN[4]; FUN_180003c80() registers the 20 subcommands. */
+    /* OG: DAT_1800314e8 = WIN[4]. */
     g_iface = win->iface;
 
-    /* the OG registrar FUN_180003c80 -- register the 20 SnapStack subcommands on the interface
-     * (+0x188) ONCE, here on UI-init (before the pump). After this, the backend `sh` dispatcher's cmd-map
-     * lookup hits for all 20 (9 real store-ops + 8 apply stubs + 3 deferred refusing handlers). */
-    if (win->iface)
-        sh_register_snapstack_commands(win->iface);
+    /* SnapStack's 20 subcommands are registered by the BACKEND (XINPUT1_3.dll, src/backend/snapstack.c via
+     * ui_bridge.c) before any frontend loads -- ONE implementation + ONE store, shared by BOTH the Qt and
+     * webview frontends. The Qt-only registrar (the OG FUN_180003c80 port that lived in src/ui/snapstack.cpp)
+     * was RETIRED, so the Qt frontend no longer registers its own copy; it reaches the shared backend store
+     * through the interface slots (e.g. the Entities-tab "Push to stack 0" -> +0x2A0 push_to_stack). */
 
     for (;;) {
         EnterCriticalSection(&g_loop_state->mtx);

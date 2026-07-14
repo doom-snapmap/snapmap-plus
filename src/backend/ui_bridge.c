@@ -71,18 +71,14 @@ int sh_ui_bridge_install(void)
         return 0;
     }
 
-    /* 1.5) Register the backend's OWN copy of the 20 SnapStack subcommands (snapstack.c) BEFORE any
-     *    frontend loads. This is purely additive: if the Qt frontend loads below, its OWN registrar
-     *    (snaphak_ui_init.cpp -> snapstack.cpp, unmodified) still runs afterward and OVERWRITES these
-     *    with Qt's own handlers for all 20 names (the cmd-map replaces on duplicate name -- see
-     *    iface_register_cmd), so a Qt build's behavior is unaffected. Only a frontend that never
-     *    registers its own copy (the webview host) ends up actually running this module's handlers --
-     *    which is the whole point: `sh psel`/`sh acctargets`/etc. were previously unregistered (and thus
-     *    "command not registered yet") under the webview build, since SnapStack registration used to be
-     *    Qt-only. Run `sh snapstack_diag` in-game at any point afterward to see, per command, which
-     *    actual DLL currently owns it (this backend, or a frontend that re-registered over it). */
+    /* 1.5) Register the 20 SnapStack subcommands (snapstack.c) here in the backend, once, before any
+     *    frontend loads. This is now the SOLE registration, shared by BOTH the Qt and webview frontends:
+     *    the Qt-only registrar that used to live in snaphak_ui_init.cpp -> src/ui/snapstack.cpp was RETIRED,
+     *    so no frontend re-registers/overwrites these anymore. `sh psel`/`sh acctargets`/etc. resolve to
+     *    this module's handlers on both builds, against ONE shared store. Run `sh snapstack_diag` in-game
+     *    to see, per command, which DLL owns it (this backend, on both builds). */
     sh_register_snapstack_commands_backend(g_iface);
-    backend_log("C0: backend SnapStack commands registered -- run `sh snapstack_diag` to check what's actually active");
+    backend_log("C0: backend SnapStack commands registered (sole owner, both frontends) -- `sh snapstack_diag` to verify");
 
     /* 2) Fill the matched-pair arg block: [0]=out-slot, [1]=argc, [2]=argv, [3]=interface. */
     g_argblock.out_slot = &g_ui_out_slot;

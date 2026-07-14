@@ -18,7 +18,6 @@
  *   - the prefab path = %USERPROFILE%/snaphak/prefabs/<name>.json (the +0xc0 resolver).
  */
 #include "sh_controller.h"
-#include "snapstack.h"
 #include "snaphak_iface.h"
 #include "sh_timeline.h"   /* C3b: the Timeline-Editor (the |0x80 commit + the dblclick open) */
 #include "sh_entity_desc.h" /* GENERATED: OUR RE-extracted Inherit/Classname descriptions (the desc box) */
@@ -55,7 +54,7 @@
 /* ================================================================ iface-call wrappers ==============
  * Thin null-checked wrappers over the interface vtable's engine-touch slots (the backend SEH-guards each
  * body). Every one null-checks the slot so a partial backend build degrades cleanly (empty string / no-op),
- * never crashes. Mirror the snapstack.cpp helper style. */
+ * never crashes. */
 
 static int iface_entity_count(sh_iface *iface)
 {
@@ -136,6 +135,13 @@ static void iface_remove_from_selection(sh_iface *iface, int id)
 {
     if (iface && iface->vtbl && iface->vtbl->selection_guard)
         iface->vtbl->selection_guard(iface, id);
+}
+/* Push ids onto the BACKEND-owned SnapStack stack `index` (dedup on push) via the +0x2A0 slot -- the SAME
+ * store the `sh` subcommands mutate, now that SnapStack lives entirely in the backend. Null-safe. */
+static void iface_push_to_stack(sh_iface *iface, int index, const int *ids, int count)
+{
+    if (iface && iface->vtbl && iface->vtbl->push_to_stack && ids && count > 0)
+        iface->vtbl->push_to_stack(iface, index, ids, count);
 }
 static std::string iface_serialize_selection(sh_iface *iface)
 {
@@ -390,11 +396,12 @@ void sh_entity_context_menu(ShWinController *win, int id, const std::vector<int>
         /* rebuild so the deleted entity drops out of the list. */
         win->flagword |= SH_FLAG_REBUILD_LIST;
     } else if (chosen == pushStk0) {
-        /* Push to stack 0. Multi-pick (Ctrl/Shift-selected 2+ rows) -> stack ALL selected (dedup happens on
-         * the stack push). Single -> push the right-clicked row (the handler already collapsed the selection
-         * to it). Repeat right-click -> push to build a stack one at a time, or multi-select to do it at once. */
-        if (multi) sh_snapstack_push_ids(0, selected_ids);
-        else       sh_snapstack_push_one(0, id);
+        /* Push to stack 0 -> the BACKEND-owned SnapStack store (the +0x2A0 push_to_stack slot), the SAME store
+         * the `sh` subcommands now mutate (SnapStack lives entirely in the backend since the Qt copy was
+         * retired). Multi-pick (Ctrl/Shift-selected 2+ rows) -> stack ALL selected (dedup on push). Single ->
+         * push the right-clicked row (the handler already collapsed the selection to it). */
+        if (multi) iface_push_to_stack(iface, 0, selected_ids.data(), (int)selected_ids.size());
+        else       { int one = id; iface_push_to_stack(iface, 0, &one, 1); }
     }
 }
 

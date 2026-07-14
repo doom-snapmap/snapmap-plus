@@ -491,9 +491,11 @@ Genuinely open items only -- fixed bugs and completed work live in the Changelog
   commit every `kind=0` decl-edit through the synchronous `+0x290` `apply_sync` path. New backend-exclusive
   `chkstk`/`chkgrp`/`clrgrp`/`snapstack_diag` commands were added for store inspection/management (WebView-
   scoped — see the note below). Full design + the `json_patch` empty-`edit` fix are in
-  [`backend-changes.md`](backend-changes.md) (2026-07-13 entry). **Still open:** `mkcmd` is ported but not
-  live-verified; and **Phase 2** — retiring Qt's own `snapstack.cpp` copy so Qt also runs the shared
-  handlers/stores (which would make `chkstk`/`chkgrp`/`clrgrp` correct under Qt too, not just WebView).
+  [`backend-changes.md`](backend-changes.md) (2026-07-13 entry). **Phase 2 DONE (2026-07-14):** Qt's own
+  `snapstack.cpp` copy was retired — Qt now runs the shared backend handlers/stores too (one implementation,
+  one store; `chkstk`/`chkgrp`/`clrgrp` + the push/clear slots are correct under Qt as well). Qt's "Push to
+  stack 0" reaches the shared store via the `+0x2A0` slot. **Still open:** `mkcmd` is ported but not
+  live-verified.
 - Editing an entity's decl does not re-present it live in the editor (a decl commit updates the definition
   but not the already-spawned instance -- same as Save-to-Decl in the Qt UI). A live in-editor re-present
   via the engine's per-entity refresh is a possible future experiment.

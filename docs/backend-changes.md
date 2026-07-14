@@ -6,6 +6,28 @@ where our own reimplementation was wrong, not the original SnapHak's behavior; a
 (or faithful reproduction of) the *original's* behavior belongs in [`fidelity.md`](fidelity.md)
 instead. Entries are chronological, newest first.
 
+## 2026-07-14 — SnapStack is now backend-only: retired the Qt-side `snapstack.cpp` copy (Phase 2)
+
+The SnapStack subsystem now lives **entirely in the backend** (`src/backend/snapstack.c` + `json_patch.c`).
+The Qt frontend's own copy (`src/ui/snapstack.cpp` + `snapstack.h`, ~1.3k lines) is **removed**, along with its
+startup registrar call in `snaphak_ui_init.cpp` — so there is now ONE implementation and ONE store, shared by
+both the Qt and WebView frontends, instead of two copies with the backend's overwritten under Qt.
+
+- **Registration:** the backend registers all 20 `sh` subcommands in `ui_bridge.c` before any frontend loads;
+  with the Qt registrar gone, that registration is authoritative on **both** builds (no frontend overwrites it).
+  `sh snapstack_diag` now reports the backend as the owner of every command on the Qt build too.
+- **The Qt Entities-tab "Push to stack 0"** context action (`sh_tabs.cpp`) reaches the shared backend store via
+  the `+0x2A0` `push_to_stack` slot (the same slot the WebView host uses), replacing the removed in-process
+  `sh_snapstack_push_ids`/`push_one` helpers. Multi-select pushes the whole selection, single pushes the clicked
+  row (dedup on push) — behavior unchanged.
+- **Builds:** `snapstack.cpp` dropped from the Qt source list (`src/ui/build.ps1`); the backend already compiles
+  `snapstack.c`. Both `build-qt.ps1` and `build-webview.ps1` build clean.
+
+**This resolves the store-duplication limitation** from the 2026-07-13 port entry below: the `chkstk`/`chkgrp`/
+`clrgrp` inspection commands and the push/clear slots now operate on the same store the ops use, on both
+frontends. This is a deliberate structural choice — SnapStack is hosted in the shared backend so both frontends
+run one copy — with behavior identical to before.
+
 ## 2026-07-14 — `+0x2A8` `clear_stack` slot (WebView "Clear stack 0")
 
 A new vtable ext slot (ext 8), the out-of-process counterpart to the `+0x2A0` `push_to_stack` slot above:
