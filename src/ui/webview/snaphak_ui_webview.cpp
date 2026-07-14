@@ -7,7 +7,8 @@
  *
  * ITERATION 4 -- deeper Entities tab.
  *   - multi-select (JS), context menu: Copy ID (clipboard), Delete (+0x130 selection_guard),
- *     Push to stack 0 (honest stub -- SnapStack ops not ported to this UI yet).
+ *     Push to stack 0 (+0x2A0 push_to_stack -- pushes onto the backend-owned SnapStack stack; see
+ *     src/backend/snapstack.c for the `sh <subcommand>` console ops that then consume it).
  *   - auto-refresh: a cheap content signature over the walk; the list is re-emitted only when it
  *     changes (add/delete/rename/reclass/hide), so no needless re-renders.
  *   - synchronize with editor: when the checkbox is on, poll get_selection (+0x150); a single changed
@@ -1326,9 +1327,11 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 if (ht) { ReleaseCapture(); SendMessageW(g_hwnd, WM_NCLBUTTONDOWN, ht, 0); }
             } else if (cmd == L"pushStack") {
                 std::vector<int> ids; json_get_intarray(json, L"eids", ids);
+                bool ok = g_iface && g_iface->vtbl && g_iface->vtbl->push_to_stack && !ids.empty();
+                if (ok) g_iface->vtbl->push_to_stack(g_iface, 0, ids.data(), (int)ids.size());
                 wchar_t m[160];
                 _snwprintf_s(m, _countof(m), _TRUNCATE,
-                    L"{\"kind\":\"info\",\"text\":\"Push to stack 0: %d selected -- SnapStack ops not ported to this UI yet.\"}", (int)ids.size());
+                    L"{\"kind\":\"pushStackResult\",\"result\":%d,\"count\":%d}", ok ? 1 : 0, (int)ids.size());
                 poc_post_json(m);
             } else if (cmd == L"save") {
                 int eid = -1; json_get_int(json, L"eid", &eid);

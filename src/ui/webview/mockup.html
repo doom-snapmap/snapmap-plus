@@ -622,7 +622,10 @@
       onMessage({kind:'movePrefabResult', result:1, name:o.name, toFolder:o.toFolder});
       previewSendPrefabs();
     }
-    else if (o.cmd === 'pushStack') { onMessage({kind:'info', text:'Push to stack 0: ' + o.eids.length + ' selected (preview only).'}); }
+    else if (o.cmd === 'pushStack') {
+      var n = (o.eids || []).length;
+      onMessage({kind:'pushStackResult', result: n > 0 ? 1 : 0, count: n});
+    }
     else if (o.cmd === 'enumInherits') { onMessage({kind:'inherits', items:['snapmaps/volume/blocking','snapmaps/volume/trigger','player/coop','snapmaps/ai','snapmaps/variable','snapmaps/action/variable/integer','snapmaps/light','light','snapmaps/listener/ai']}); }
     else if (o.cmd === 'enumClasses') { onMessage({kind:'classes', inherit:o.inherit, items:['idVolume_Blocking','idVolume_Trigger','idVolume_Damage','idVolume_Water']}); }
     else if (o.cmd === 'lookupDesc') {
@@ -1591,6 +1594,9 @@
       else if (d.result === 0) toast('Nothing selected in the editor -- select entities first', 'warn');
       else if (d.result === 2) toast('Hover over one of the selected entities in the 3D view, then try again', 'warn');
       else toast('Could not create "' + d.name + '" (see log)', 'err');
+    } else if (d.kind === 'pushStackResult') {
+      if (d.result === 1) toast('Pushed ' + d.count + ' onto stack 0 (dedup) -- try `sh popsel`/`sh bss`/etc. in the console', 'ok');
+      else toast('Push to stack 0: ' + d.count + ' selected -- failed (editor down, or nothing selected)', 'err');
     } else if (d.kind === 'loadPrefabResult') {
       if (d.result === 1) toast('"' + d.name + '" staged -- press Ctrl+V in the 3D view to place it', 'ok');
       else if (d.result === -1) toast('Could not read "' + d.name + '" (see log)', 'err');
