@@ -390,6 +390,9 @@
   var primaryEid = -1;       // anchor shown in the state editor
   var anchorEid = -1;        // shift-range anchor
   var loaded = null;         // last-loaded state (for dirty compare + revert)
+  var loadedEid = -1;        // eid `loaded` actually corresponds to -- NOT primaryEid (onRowMouseDown sets
+                              // primaryEid to the clicked eid before refreshEditorForSelection runs, so
+                              // comparing against primaryEid there would always read as "unchanged")
   var allTimelines = [];     // last timelines list from backend (dual-added idTarget_Timeline/idEncounterManager)
   var selectedTlEid = -1;    // timeline row currently highlighted in the Timelines list
   var tlModel = null;        // parsed open-timeline model {eid,isEncounter,name,tabs:[{entity,events:[...]}],active}
@@ -1546,7 +1549,7 @@
   function showPlaceholder(html) {
     document.getElementById('editor').style.display = 'none';
     var el = document.getElementById('selInfo'); el.style.display = 'flex'; el.innerHTML = html;
-    loaded = null; updateDirty();
+    loaded = null; loadedEid = -1; updateDirty();
   }
   function hideEditor() { showPlaceholder('Select an entity from the list.'); }
   // Close the Entity State panel and drop the entity-list selection entirely. Fired on 'editorReopened'
@@ -1568,7 +1571,16 @@
   // that points at the right-click menu (the multi-entity actions). Called after any selection change.
   function refreshEditorForSelection(push) {
     var n = selCount();
-    if (n === 1) { primaryEid = selList()[0]; post({cmd:'select', eid: primaryEid}); }
+    if (n === 1) {
+      var eid = selList()[0];
+      primaryEid = eid;
+      // same eid as what's already LOADED in the form -- a re-click/re-sync of the entity already open, not
+      // a real selection change. Skip the re-fetch: 'select' always applies (auto:false), so re-firing it
+      // would silently discard any unsaved decl-editor edit. Use Revert for that (an explicit action).
+      // Compares against loadedEid, not primaryEid -- callers (onRowMouseDown) already reassign primaryEid
+      // to the clicked eid before calling this, so primaryEid itself can't tell "new" from "same" here.
+      if (eid !== loadedEid) post({cmd:'select', eid: primaryEid});
+    }
     else if (n === 0) { primaryEid = -1; showPlaceholder('Select an entity from the list.'); }
     else { primaryEid = -1; showPlaceholder(n + ' entities selected.<br>Select a single entity to edit its decl.<br><span style="color:#aaa;">Right-click for actions on all ' + n + '.</span>'); }
     if (push !== false) pushSelectionToEditor();
@@ -1580,6 +1592,7 @@
   function showState(d) {
     document.getElementById('selInfo').style.display='none';
     document.getElementById('editor').style.display='flex';
+    loadedEid = d.eid;
     document.getElementById('fEntityId').value = entityIdString(d.eid);
     document.getElementById('declText').value = d.decl || '';
     document.getElementById('fInherit').value = d.inherit || '';
