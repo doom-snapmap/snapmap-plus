@@ -497,17 +497,19 @@ static int ae_deserialize_to_obj(const char *text, void *dstObj, const char *typ
 
     __try {
         g_node_ctor(node7, 7);          node7_ctored = 1;  /* the {tag} arg5 sub-node (kind 7) */
-        /* ROOT-CAUSE FIX (2026-07-10, save->reload "Memory corruption before block" crash): LexCtxCtor
-         * (g_lex_ctor, 0x1a5bb70) does NOT construct the lexer's two embedded idStrs at +0x30/+0x88. OG's
-         * deserialize wrapper FUN_180004370 constructs them SEPARATELY (0x19fd040) BEFORE LexCtxCtor -- proving
-         * LexCtxCtor leaves them untouched. We used to call g_lex_ctor alone on an un-memset buffer, so those two
-         * idStrs held stack GARBAGE; the lexer grows them while tokenizing and the teardown (g_idstr_dtor at
-         * lexer+0x30/+0x88 below) frees a garbage/heap pointer -> heap corruption, detected as an IdStrDtor AV on
-         * the NEXT map load. Shared by EVERY kind=0 commit (acctargets/timeline/bss), which is why they all
-         * crashed on save/reload. Construct the two idStrs explicitly (empty), matching OG's order. */
+        /* Defensive zero-init of the lexer's two embedded idStrs at +0x30/+0x88 before g_lex_ctor. NOTE:
+         * LexCtxCtor (g_lex_ctor, 0x1a5bb70) ALREADY constructs both of these idStrs itself -- it calls the
+         * idStr ctor (0x19fd040) on lexer+0x30 and lexer+0x88 -- so these two explicit ctor calls are REDUNDANT
+         * on this build; they are kept only as a harmless cross-build guard (in case a build ever factors the
+         * lexer ctor so the embedded idStrs aren't constructed). This was once mis-documented as THE fix for the
+         * save->reload "Memory corruption before block" crash, on a theory that g_lex_ctor left these idStrs
+         * holding stack garbage that got freed at teardown -- that theory does not hold, since g_lex_ctor
+         * constructs them regardless of prior buffer contents. The actual fix for that crash was committing the
+         * decl-edit INLINE/synchronously (see the +0x290 apply_sync path) instead of deferring it off-thread,
+         * which had left the freshly-committed decl-source block double-owned. */
         g_idstr_ctor(lexer + LEXER_IDSTR0_OFF, "");
         g_idstr_ctor(lexer + LEXER_IDSTR1_OFF, "");
-        g_lex_ctor(lexer);              lex_ctored = 1;    /* LexCtxCtor -- context fields only, NOT the +0x30/+0x88 idStrs */
+        g_lex_ctor(lexer);              lex_ctored = 1;    /* LexCtxCtor -- also constructs the +0x30/+0x88 idStrs itself (the two ctors above are redundant/defensive) */
         g_node_ctor(parseNode, 0);      pn_ctored = 1;     /* the tree the lexer fills + deser reads (kind 0) */
         g_idstr_ctor(srcStr, text);     src_ctored = 1;    /* src idStr from the C string */
 
@@ -634,12 +636,15 @@ static int ae_apply_one(int id, const char *patched_text)
      * -- while a normally-placed entity's decl IS registered; registration is the likely blob-permanence factor.) */
 
     uint8_t tmpDef[TEMP_DEF_SIZE];
-    memset(tmpDef, 0, sizeof tmpDef);   /* CRITICAL: zero before the ctor -- matches the serialize/prefab paths
-                                         * (lines ~395/916/964) AND OG's commit FUN_1800045a0, which zeros its
-                                         * whole temp-def stack region before 0x5e9400. Without this, members the
-                                         * ctor doesn't fully init keep stack GARBAGE; g_def_dtor below then frees a
-                                         * garbage idStr pointer -> "Memory corruption before block" AV in IdStrDtor
-                                         * on reload-teardown (the acctargets/bss/timeline save->reload crash). */
+    memset(tmpDef, 0, sizeof tmpDef);   /* Defensive zero-init before the ctor -- matches the serialize/prefab
+                                         * paths (lines ~395/916/964), cheap insurance for any member the ctor
+                                         * chain doesn't explicitly set before g_def_dtor runs. NOTE: g_def_ctor
+                                         * (0x5e9400 -> sub-ctor 0x17acbf0) DOES construct the def's key idStr
+                                         * members itself (class/inherit at +0x58/+0x60 default to the sentinel;
+                                         * the +0x130/+0x168 idStrs are ctor-initialized), so this is a guard, not
+                                         * the fix for the save->reload "Memory corruption before block" crash --
+                                         * that fix was the inline/synchronous commit (the +0x290 apply_sync
+                                         * path), not buffer zeroing. */
     int def_ctored = 0, applied = 0;
     __try {
         g_def_ctor(tmpDef); def_ctored = 1;                /* 0x5e9400 */
