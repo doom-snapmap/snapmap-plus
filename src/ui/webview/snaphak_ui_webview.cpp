@@ -1377,6 +1377,13 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 _snwprintf_s(m, _countof(m), _TRUNCATE,
                     L"{\"kind\":\"pushStackResult\",\"result\":%d,\"count\":%d}", ok ? 1 : 0, (int)ids.size());
                 poc_post_json(m);
+            } else if (cmd == L"clearStack") {
+                bool ok = g_iface && g_iface->vtbl && g_iface->vtbl->clear_stack;
+                int had = ok ? g_iface->vtbl->clear_stack(g_iface, 0) : 0;
+                wchar_t m[128];
+                _snwprintf_s(m, _countof(m), _TRUNCATE,
+                    L"{\"kind\":\"clearStackResult\",\"result\":%d,\"count\":%d}", ok ? 1 : 0, had);
+                poc_post_json(m);
             } else if (cmd == L"save") {
                 int eid = -1; json_get_int(json, L"eid", &eid);
                 std::wstring decl, cls, inh, dnm;

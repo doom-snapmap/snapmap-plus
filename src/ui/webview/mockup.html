@@ -475,6 +475,7 @@
 
   // ---- browser preview: when opened in a plain browser (no DOOM backend), fake the native side so the
   // file is self-demoing and fully interactive. Inert in DOOM (PREVIEW is false there). ----
+  var previewStack0Count = 0;   // fake backend-owned stack 0 count, so Push/Clear feel connected in the demo
   var previewEnts = [
     {eid:65, id:'0_ind_totally_blank_room_4x/snapmaps/volume/blocking', name:'Block Box', hidden:false},
     {eid:61, id:'0_ind_totally_blank_room_4x/player/coop/player_start', name:'My Player Start', hidden:false},
@@ -630,6 +631,7 @@
     }
     else if (o.cmd === 'pushStack') {
       var n = (o.eids || []).length;
+      previewStack0Count += n;   // rough demo count, not dedup-aware -- good enough to make Clear feel real
       onMessage({kind:'pushStackResult', result: n > 0 ? 1 : 0, count: n});
     }
     else if (o.cmd === 'clearStack') {
@@ -1537,6 +1539,7 @@
       toast('Deleted ' + n + ' entit' + (n>1?'ies':'y'), 'ok');
     });
     addCtx('Push to stack 0' + (n>1?' ('+n+')':''), function(){ post({cmd:'pushStack', eids: ids}); });
+    addCtx('Clear stack 0', function(){ post({cmd:'clearStack'}); });   // not scoped to the current selection -- empties the whole stack, same as `sh cstk 0`
     ctx.style.left = x+'px'; ctx.style.top = y+'px'; ctx.style.display = 'block';
   }
   function addCtx(label, fn) { var d=document.createElement('div'); d.textContent=label; d.addEventListener('click', function(){ hideCtx(); fn(); }); ctx.appendChild(d); }
@@ -1802,8 +1805,11 @@
       else if (d.result === 2) toast('Hover over one of the selected entities in the 3D view, then try again', 'warn');
       else toast('Could not create "' + d.name + '" (see log)', 'err');
     } else if (d.kind === 'pushStackResult') {
-      if (d.result === 1) toast('Pushed ' + d.count + ' onto stack 0 (dedup) -- try `sh popsel`/`sh bss`/etc. in the console', 'ok');
+      if (d.result === 1) toast('Pushed ' + d.count + ' onto stack 0 -- try `sh popsel`/`sh bss`/etc. in the console', 'ok');
       else toast('Push to stack 0: ' + d.count + ' selected -- failed (editor down, or nothing selected)', 'err');
+    } else if (d.kind === 'clearStackResult') {
+      if (d.result === 1) toast('Cleared stack 0 (' + d.count + ' id' + (d.count === 1 ? '' : 's') + ' removed)', 'ok');
+      else toast('Clear stack 0 failed (editor down?)', 'err');
     } else if (d.kind === 'loadPrefabResult') {
       if (d.result === 1) toast('"' + d.name + '" staged -- press Ctrl+V in the 3D view to place it', 'ok');
       else if (d.result === -1) toast('Could not read "' + d.name + '" (see log)', 'err');

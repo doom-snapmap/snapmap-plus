@@ -282,6 +282,8 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     g_iface_vtbl_live.normalize_timeline_inherit = s->normalize_timeline_inherit; /* +0x298 */
     /* clone-extension (push onto the backend-owned SnapStack stack; out-of-process frontends only). */
     g_iface_vtbl_live.push_to_stack          = s->push_to_stack;          /* +0x2A0 */
+    /* clone-extension (empty the backend-owned SnapStack stack; out-of-process frontends only). */
+    g_iface_vtbl_live.clear_stack            = s->clear_stack;            /* +0x2A8 */
 }
 
 /* --------------------------------------------------------------------- the factory -----------------

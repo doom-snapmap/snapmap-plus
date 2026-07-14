@@ -1198,3 +1198,10 @@ void sh_snapstack_push_ids_backend(int index, const int *ids, int count)
 {
     if (count > 0) stack_push(index, ids, count);
 }
+
+int sh_snapstack_clear_stack_backend(int index)
+{
+    int had = stack_get(index)->count;
+    stack_clear(index);
+    return had;
+}

@@ -1017,6 +1017,15 @@ static void slot_push_to_stack(sh_iface *self, int index, const int *ids, int co
     sh_snapstack_push_ids_backend(index, ids, count);
 }
 
+/* +0x2A8 ext 8: empty the backend-owned SnapStack stack `index` -- the out-of-process counterpart to
+ * slot_push_to_stack above, lets the webview host's "Clear stack 0" context-menu action reach the same
+ * stack without needing the DOOM console. Qt has no need of this either, for the same reason as push. */
+static int slot_clear_stack(sh_iface *self, int index)
+{
+    (void)self;
+    return sh_snapstack_clear_stack_backend(index);
+}
+
 /* ================================================================ install ========================== */
 
 int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *module_base)
@@ -1092,6 +1101,8 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     sh_apply_engine_get_serialize_selection(&slots.serialize_selection);
     /* clone-extension: push onto the backend-owned SnapStack stack (out-of-process frontends only). */
     slots.push_to_stack          = slot_push_to_stack;        /* +0x2A0 ext 7 */
+    /* clone-extension: empty the backend-owned SnapStack stack (out-of-process frontends only). */
+    slots.clear_stack            = slot_clear_stack;          /* +0x2A8 ext 8 */
     sh_iface_bind_engine_slots(&slots);
 
     char line[200];

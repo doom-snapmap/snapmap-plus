@@ -34,4 +34,10 @@ void sh_register_snapstack_commands_backend(sh_iface *iface);
  * Dedup-on-push, same as every other path into the stores. */
 void sh_snapstack_push_ids_backend(int index, const int *ids, int count);
 
+/* The Entities-tab "Clear stack 0" context-menu action, exposed for the clear_stack vtable slot
+ * (iface_engine.c) so ANY frontend can empty the SAME backend-owned stack a `sh cstk` console command
+ * would -- lets a user work purely from the UI without ever touching the DOOM console. Returns the number
+ * of ids that were on the stack before clearing (so the caller can toast a count, same as `sh cstk` itself). */
+int sh_snapstack_clear_stack_backend(int index);
+
 #endif /* BACKEND_SNAPSTACK_H */
