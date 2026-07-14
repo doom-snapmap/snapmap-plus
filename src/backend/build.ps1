@@ -50,6 +50,10 @@ param(
                            "overrides.c", "cvars.c", "commands.c", "clipboard.c",
                            "entity.c", "typeinfo.c", "patch.c", "algo.c", "target_any.c", "wiring_cleandirect.c", "ui_bridge.c",
                            "iface_engine.c", "apply_engine.c", "../common/snaphak_iface.c",
+                           # backend-hosted SnapStack (snapstack.c + json_patch.c): the `sh psel`/`sh acctargets`/
+                           # etc. console commands, additive to (never replacing) src/ui/snapstack.cpp's own Qt
+                           # copy -- see the registration comment in ui_bridge.c for why both can coexist safely.
+                           "snapstack.c", "json_patch.c",
                            # cvar-unlock MERGED in: the former standalone dinput8 cvar-unlock now rides
                            # the backend (one fewer shipped DLL; no System32 dinput8 shadow). dinput8 forwarder
                            # dropped -- DOOM loads the real System32 dinput8. Spawned from dllmain (b2_cvar_unlock_start).

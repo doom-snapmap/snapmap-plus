@@ -33,6 +33,7 @@
 #include "typeinfo.h"       /* sh_typeinfo_class_derives + the LIVE registry walks (collect_records/inherits) */
 #include "valid_class_map.h" /* SH_VCM_* -- the class-dropdown static snapshot (used only if the live walk fails) */
 #include "wiring_cleandirect.h" /* sh_wiring_cleandirect_generation -- the wire-any connect-edit counter (+0x288) */
+#include "snapstack.h"          /* sh_snapstack_push_ids_backend -- the SnapStack stack push (+0x2A0) */
 
 /* ---- editor-struct field offsets (this-live-build; ported from the reference implementation, SEH-guarded) ------------ */
 /* EDITOR_SINGLETON_RVA: the INLINE idSnapEditorLocal OBJECT (NOT a pointer) at module_base + this. A
@@ -1006,6 +1007,16 @@ static int slot_id_dev_layer_hidden(sh_iface *self, int id)
  * labels auto-settle after a wire (via the wire_rebuild_frames re-scan window). */
 static int slot_wire_edit_generation(sh_iface *self) { (void)self; return sh_wiring_cleandirect_generation(); }
 
+/* +0x2A0 ext 7: push `ids` onto the backend-owned SnapStack stack `index` (dedup-on-push). Lets an
+ * out-of-process frontend (the webview host) reach the SAME stack a `sh <subcommand>` console command
+ * typed afterward will see -- the Qt frontend has no need of this (its own Entities-tab "Push to stack
+ * 0" reaches its in-process g_stacks directly via sh_snapstack_push_ids in snapstack.cpp). */
+static void slot_push_to_stack(sh_iface *self, int index, const int *ids, int count)
+{
+    (void)self;
+    sh_snapstack_push_ids_backend(index, ids, count);
+}
+
 /* ================================================================ install ========================== */
 
 int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *module_base)
@@ -1079,6 +1090,8 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     /* the +0xb0 serialize-SELECTION->prefab slot also lives in the apply engine (it needs the
      * serialize engine fns). Fold it into the same bind. */
     sh_apply_engine_get_serialize_selection(&slots.serialize_selection);
+    /* clone-extension: push onto the backend-owned SnapStack stack (out-of-process frontends only). */
+    slots.push_to_stack          = slot_push_to_stack;        /* +0x2A0 ext 7 */
     sh_iface_bind_engine_slots(&slots);
 
     char line[200];

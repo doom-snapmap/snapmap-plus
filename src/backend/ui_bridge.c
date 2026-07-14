@@ -24,6 +24,7 @@
 #include "snaphak_iface.h"
 #include "ui_bridge.h"
 #include "backend_log.h"
+#include "snapstack.h"
 
 /* The shared interface object the frontend consumes (OG DAT_18003e608). Created once at spine install;
  * the `sh` dispatcher gates on it. */
@@ -69,6 +70,19 @@ int sh_ui_bridge_install(void)
         backend_log("C0: ui-bridge abort -- no interface object");
         return 0;
     }
+
+    /* 1.5) Register the backend's OWN copy of the 20 SnapStack subcommands (snapstack.c) BEFORE any
+     *    frontend loads. This is purely additive: if the Qt frontend loads below, its OWN registrar
+     *    (snaphak_ui_init.cpp -> snapstack.cpp, unmodified) still runs afterward and OVERWRITES these
+     *    with Qt's own handlers for all 20 names (the cmd-map replaces on duplicate name -- see
+     *    iface_register_cmd), so a Qt build's behavior is unaffected. Only a frontend that never
+     *    registers its own copy (the webview host) ends up actually running this module's handlers --
+     *    which is the whole point: `sh psel`/`sh acctargets`/etc. were previously unregistered (and thus
+     *    "command not registered yet") under the webview build, since SnapStack registration used to be
+     *    Qt-only. Run `sh snapstack_diag` in-game at any point afterward to see, per command, which
+     *    actual DLL currently owns it (this backend, or a frontend that re-registered over it). */
+    sh_register_snapstack_commands_backend(g_iface);
+    backend_log("C0: backend SnapStack commands registered -- run `sh snapstack_diag` to check what's actually active");
 
     /* 2) Fill the matched-pair arg block: [0]=out-slot, [1]=argc, [2]=argv, [3]=interface. */
     g_argblock.out_slot = &g_ui_out_slot;
