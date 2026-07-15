@@ -175,6 +175,13 @@ static decl_src_rebuild_fn g_decl_rebuild = NULL;  /* +0x40 Save-to-Decl rebuild
 static remove_from_sel_fn g_remove_sel    = NULL;  /* +0x130 Delete */
 static get_decls_fn       g_get_decls     = NULL;  /* +0x110 enum-decls-of-resclass (GetDeclsOfType) */
 static const uint8_t     *g_module_base   = NULL;  /* cached for the dev-layer cvar read (cvarSys RVA fallback) */
+static size_t             g_module_size    = 0;     /* DOOMx64vk SizeOfImage (from PE hdr); bounds the editor scan */
+static int                g_editor_verified = 0;    /* 1 once g_editor is confirmed real (boot RVA ok OR scan hit) */
+/* editor-scan DIAG cascade (see sh_scan_for_editor): last scan's survivor counts per fingerprint stage. */
+static unsigned g_scan_diag_wsec, g_scan_diag_vt, g_scan_diag_mode, g_scan_diag_screen,
+                g_scan_diag_map, g_scan_diag_sel, g_scan_diag_full, g_scan_diag_ents;
+static const uint8_t *g_scan_cand[6];   /* up to 6 full-fingerprint candidate addresses (DIAG disambiguation) */
+static int            g_scan_cand_n;
 static void              *g_devlayer_cvar = NULL;  /* cached snapEdit_enableDevLayer idCVar* (lazy; dev-layer gate) */
 static volatile LONG  g_installed = 0;
 
@@ -194,15 +201,208 @@ static int ie_read_u32(const void *src, uint32_t *out)
     __try { *out = *(const uint32_t *)src; return 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
+static int ie_read_u16(const void *src, uint16_t *out)
+{
+    __try { *out = *(const uint16_t *)src; return 1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+static int ie_read_f32x3(const void *src, float out[3])
+{
+    __try { out[0]=((const float*)src)[0]; out[1]=((const float*)src)[1]; out[2]=((const float*)src)[2]; return 1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+/* a camera-origin coord is SANE iff finite + within a generous map bound. The `> && <` form is false for
+ * NaN/Inf too (all comparisons with NaN are false), so this one test rejects garbage + out-of-range in one. */
+static int ie_cam_sane(const float c[3])
+{
+    for (int i = 0; i < 3; i++) if (!(c[i] > -1.0e7f && c[i] < 1.0e7f)) return 0;
+    return 1;
+}
+
+/* ------------------------------------------------------------ editor-singleton FINGERPRINT RESOLVE ---
+ * The editor object (idSnapEditorLocal) is a DATA global: no unique code byte-shape to signature. It was
+ * historically a hardcoded RVA (EDITOR_SINGLETON_RVA), which the April 2024 DOOM patch relocated -> the UI
+ * window never showed on the new build (slot_editor_ready read a stale address -> garbage screen ptr). Fix:
+ * since the backend runs IN-PROCESS, it can FIND the object by its STRUCTURE instead of a fixed address --
+ * inherently build-independent (no RVA to ever re-derive; more portable than a signature). We scan the
+ * module's writable sections for the one object whose field layout matches the editor's known shape:
+ *   [+0]        vtable ptr INTO the module (C++ object; GetCameraOrigin lives at vtbl+0xd8)
+ *   [+0x23618]  editor state id == 1 (ModuleMode) or 2 (EntityMode)   -- only ever these in-editor
+ *   [+0x21088]  screen (Toast) object ptr, non-null   -- the in-editor signal
+ *   [+0x204c8]  loaded-map object ptr, non-null
+ *   [+0x204d0]  selection object ptr, non-null
+ * plus a hardening check that screen+map are themselves real engine objects (module vtable at their +0).
+ * That 7-way fingerprint is effectively unique; the scan requires EXACTLY ONE match (ambiguous -> refuse,
+ * so a false object can never be adopted). The fingerprint only matches while the editor is UP (screen/map
+ * non-null), which is exactly when the UI needs the address, so the scan self-times: it finds nothing at the
+ * HUB/menu and resolves the instant the editor comes up. All reads SEH-guarded (a bad candidate is skipped,
+ * never a crash). Offsets are the SAME ones the rest of this file already depends on -- no new assumptions. */
+static int ie_ptr_in_module(const void *p)
+{
+    return g_module_base && g_module_size &&
+           (const uint8_t *)p >= g_module_base &&
+           (const uint8_t *)p <  g_module_base + g_module_size;
+}
+
+static int editor_fingerprint_ok(const uint8_t *E)
+{
+    void *vt = NULL, *screen = NULL, *map = NULL, *sel = NULL, *sv = NULL, *mv = NULL;
+    int mode = 0; float cam[3];
+    if (!ie_read_ptr(E, &vt) || !ie_ptr_in_module(vt)) return 0;                 /* vtable in module */
+    if (!ie_read_s32(E + ED_ENTITY_MODE_OFF, &mode) || (mode != 1 && mode != 2)) return 0;
+    if (!ie_read_ptr(E + ED_SCREEN_OFF,  &screen) || screen == NULL) return 0;
+    if (!ie_read_ptr(E + ED_MAP_OBJ_OFF, &map)    || map    == NULL) return 0;
+    if (!ie_read_ptr(E + ED_SEL_OBJ_OFF, &sel)    || sel    == NULL) return 0;
+    if (!ie_read_ptr(screen, &sv) || !ie_ptr_in_module(sv)) return 0;            /* screen is a real object */
+    if (!ie_read_ptr(map,    &mv) || !ie_ptr_in_module(mv)) return 0;            /* map is a real object */
+    /* DISAMBIGUATOR: the camera-origin (3 floats @ +0x170) must be finite + in a sane coord range. The core
+     * fingerprint can match at TWO 16-byte-aligned offsets within the same large object region (live-observed
+     * on the post-April-2024 build); the TRUE editor base reads clean camera floats, while a shifted
+     * coincidental match reads astronomical garbage there. (The old entity-array disambiguator was dropped --
+     * the map's entity array/count offsets moved on this build; the camera field is a cleaner unique tell.) */
+    if (!ie_read_f32x3(E + ED_CAMERA_ORIGIN_OFF, cam) || !ie_cam_sane(cam)) return 0;
+    return 1;
+}
+
+/* Scan the module's WRITABLE PE sections (.data/.bss) for the one editor-fingerprint match. Returns the
+ * object address, or NULL (no match yet / ambiguous). Parses the PE header for SizeOfImage + the section
+ * table; all reads SEH-guarded. Cheap in practice: the vtable-in-module check (a NEAR read) rejects almost
+ * every 16-byte slot before the far field reads happen. */
+static const uint8_t *sh_scan_for_editor(void)
+{
+    if (!g_module_base) return NULL;
+    uint32_t e_lfanew = 0;
+    if (!ie_read_u32(g_module_base + 0x3C, &e_lfanew) || e_lfanew == 0 || e_lfanew > 0x1000) return NULL;
+    const uint8_t *nt = g_module_base + e_lfanew;   /* IMAGE_NT_HEADERS ("PE\0\0") */
+    uint16_t numSec = 0, optSize = 0;
+    if (!ie_read_u16(nt + 6,  &numSec)  || numSec == 0 || numSec > 96) return NULL;   /* FileHeader.NumberOfSections */
+    if (!ie_read_u16(nt + 20, &optSize) || optSize == 0)               return NULL;   /* FileHeader.SizeOfOptionalHeader */
+    const uint8_t *secTab = nt + 24 + optSize;      /* 4 sig + 20 file-hdr + optional-hdr */
+
+    const uint8_t *found = NULL;
+    int matches = 0;
+    /* DIAG cascade counters: how many candidates survive each successive fingerprint condition. When the
+     * scan fails, editor_base() logs these -- the level where the count collapses to 0 pinpoints the cause
+     * (c_vt==0 => module-size/PE parse bad; a later collapse => that offset moved on this build). c_full is
+     * the pre-disambiguator count (through the screen/map vtable checks); c_ents adds the map-entity-array
+     * disambiguator (== editor_fingerprint_ok) -- that's the one we adopt on. */
+    unsigned c_wsec = 0, c_vt = 0, c_mode = 0, c_screen = 0, c_map = 0, c_sel = 0, c_full = 0, c_ents = 0;
+    g_scan_cand_n = 0;
+    for (uint16_t s = 0; s < numSec; s++) {
+        const uint8_t *sec = secTab + (size_t)s * 40;   /* IMAGE_SECTION_HEADER = 40 bytes */
+        uint32_t vsize = 0, vaddr = 0, chars = 0;
+        if (!ie_read_u32(sec + 8,  &vsize) || vsize == 0) continue;   /* VirtualSize    */
+        if (!ie_read_u32(sec + 12, &vaddr))               continue;   /* VirtualAddress */
+        if (!ie_read_u32(sec + 36, &chars))               continue;   /* Characteristics */
+        if (!(chars & 0x80000000u)) continue;                          /* IMAGE_SCN_MEM_WRITE only */
+        c_wsec++;
+        const uint8_t *start = g_module_base + vaddr;
+        const uint8_t *end   = start + vsize;
+        /* only slots where the whole fingerprint span (up to +0x23618) still fits inside the section. */
+        for (const uint8_t *E = start; E + ED_ENTITY_MODE_OFF + 4 <= end; E += 16) {
+            void *vt = NULL, *screen = NULL, *map = NULL, *sel = NULL, *sv = NULL, *mv = NULL;
+            int mode = 0; float cam[3];
+            if (!ie_read_ptr(E, &vt) || !ie_ptr_in_module(vt)) continue;            c_vt++;
+            if (!ie_read_s32(E + ED_ENTITY_MODE_OFF, &mode) || (mode != 1 && mode != 2)) continue; c_mode++;
+            if (!ie_read_ptr(E + ED_SCREEN_OFF,  &screen) || screen == NULL) continue; c_screen++;
+            if (!ie_read_ptr(E + ED_MAP_OBJ_OFF, &map)    || map    == NULL) continue; c_map++;
+            if (!ie_read_ptr(E + ED_SEL_OBJ_OFF, &sel)    || sel    == NULL) continue; c_sel++;
+            if (!ie_read_ptr(screen, &sv) || !ie_ptr_in_module(sv)) continue;
+            if (!ie_read_ptr(map,    &mv) || !ie_ptr_in_module(mv)) continue;         c_full++;
+            /* record the CORE-fingerprint survivors here (before the camera disambiguator) so an ambiguous
+             * scan still dumps the candidates for inspection. */
+            if (g_scan_cand_n < (int)(sizeof g_scan_cand / sizeof g_scan_cand[0]))
+                g_scan_cand[g_scan_cand_n++] = E;
+            if (!ie_read_f32x3(E + ED_CAMERA_ORIGIN_OFF, cam) || !ie_cam_sane(cam)) continue;
+            c_ents++;   /* camera-sane survivors (the adopt count) */
+            if (!found) found = E;
+            if (matches < 1000000) matches++;
+        }
+    }
+    /* stash the cascade for editor_base's throttled diag log. */
+    g_scan_diag_wsec = c_wsec; g_scan_diag_vt = c_vt; g_scan_diag_mode = c_mode;
+    g_scan_diag_screen = c_screen; g_scan_diag_map = c_map; g_scan_diag_sel = c_sel;
+    g_scan_diag_full = c_full; g_scan_diag_ents = c_ents;
+    return (matches == 1) ? found : NULL;   /* exactly one match -> adopt; else refuse (never a wrong object) */
+}
+
+/* Resolve (once) + return the real editor object, or NULL if it isn't up yet. Fast path after resolution.
+ * Before resolution: accept the boot RVA if it fingerprints (old build), else THROTTLED-scan for it (new
+ * build) -- the scan only succeeds in-editor, so it naturally no-ops at the HUB and resolves on entry. Once
+ * found, g_editor is corrected in place so every existing g_editor/editor_session user gets the right base. */
+static const uint8_t *editor_base(void)
+{
+    if (g_editor_verified) return g_editor;
+
+    if (g_editor && editor_fingerprint_ok(g_editor)) {   /* boot RVA was right (old build) */
+        g_editor_verified = 1;
+        backend_log("C2: editor confirmed at boot RVA (fingerprint ok)");
+        return g_editor;
+    }
+
+    static DWORD s_last_scan = 0;
+    DWORD now = GetTickCount();
+    if (s_last_scan != 0 && (now - s_last_scan) < 1000u) return NULL;   /* throttle: <=1 scan/sec pre-resolve */
+    s_last_scan = now;
+
+    const uint8_t *found = sh_scan_for_editor();
+    if (found) {
+        char line[160];
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+            "C2: editor resolved by fingerprint scan @ %p (RVA 0x%llX; boot RVA guess was 0x%X)",
+            (const void *)found, (unsigned long long)((size_t)(found - g_module_base)),
+            (unsigned)EDITOR_SINGLETON_RVA);
+        backend_log(line);
+        g_editor = found;
+        g_editor_verified = 1;
+        return g_editor;
+    }
+    /* DIAG: log the cascade a few times so a failing scan is explainable (module-size + where the
+     * fingerprint collapses). Capped so an in-menu / never-resolving state doesn't spam the log. When there
+     * are surviving candidates (ambiguous), dump each one's distinguishing fields so the right editor can be
+     * told apart (RVA, mode, camera x/y/z, map entity-count). */
+    {
+        static int s_diag_left = 8;
+        if (s_diag_left > 0) {
+            s_diag_left--;
+            char line[240];
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                "C2 editor-scan DIAG: modsize=0x%llX wsec=%u | vt=%u mode=%u screen=%u map=%u sel=%u full=%u cam=%u (need cam==1)",
+                (unsigned long long)g_module_size, g_scan_diag_wsec, g_scan_diag_vt, g_scan_diag_mode,
+                g_scan_diag_screen, g_scan_diag_map, g_scan_diag_sel, g_scan_diag_full, g_scan_diag_ents);
+            backend_log(line);
+            for (int i = 0; i < g_scan_cand_n; i++) {
+                const uint8_t *E = g_scan_cand[i];
+                int mode = 0; uint32_t entCnt = 0; void *map = NULL, *entArr = NULL; float cam[3] = {0,0,0};
+                unsigned long long mapRVA = 0;
+                ie_read_s32(E + ED_ENTITY_MODE_OFF, &mode);
+                ie_read_ptr(E + ED_MAP_OBJ_OFF, &map);
+                if (map) {
+                    mapRVA = ie_ptr_in_module(map) ? (unsigned long long)((const uint8_t *)map - g_module_base) : 0;
+                    ie_read_ptr((const uint8_t *)map + ARR_ENT_ARRAY_OFF, &entArr);   /* map+0x6a0 raw */
+                    ie_read_u32((const uint8_t *)map + ARR_ENT_COUNT_OFF, &entCnt);    /* map+0x6a8 raw */
+                }
+                { __try { cam[0]=*(const float*)(E+ED_CAMERA_ORIGIN_OFF); cam[1]=*(const float*)(E+ED_CAMERA_ORIGIN_OFF+4); cam[2]=*(const float*)(E+ED_CAMERA_ORIGIN_OFF+8); } __except(EXCEPTION_EXECUTE_HANDLER){} }
+                _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "C2 editor-scan CAND[%d]: RVA=0x%llX mode=%d cam=(%.1f,%.1f,%.1f) map=%p(RVA0x%llX inMod=%d) [+0x6a0]=%p [+0x6a8]=%u",
+                    i, (unsigned long long)((size_t)(E - g_module_base)), mode, cam[0], cam[1], cam[2],
+                    map, mapRVA, ie_ptr_in_module(map) ? 1 : 0, entArr, entCnt);
+                backend_log(line);
+            }
+        }
+    }
+    return NULL;   /* editor not up yet (or unresolved) -- callers treat as "editor down", a clean no-op */
+}
 
 /* "editor up" guard, matching the reference implementation editorSession: the loaded-map ptr (+0x204c8) is non-null in-editor.
  * Returns the editor object base, or NULL when the editor isn't live (so every op fails CLEANLY). */
 static const uint8_t *editor_session(void)
 {
-    if (!g_editor) return NULL;
+    const uint8_t *ed = editor_base();
+    if (!ed) return NULL;
     void *mapObj = NULL;
-    if (!ie_read_ptr(g_editor + ED_MAP_OBJ_OFF, &mapObj) || mapObj == NULL) return NULL;
-    return g_editor;
+    if (!ie_read_ptr(ed + ED_MAP_OBJ_OFF, &mapObj) || mapObj == NULL) return NULL;
+    return ed;
 }
 
 /* +0x88 editor-ready poll: 1 in the live editor, 0 in the HUB/menu. The OG gates the Qt window's visibility +
@@ -216,9 +416,13 @@ static const uint8_t *editor_session(void)
 static int slot_editor_ready(sh_iface *self)
 {
     (void)self;
-    if (!g_editor) return 0;
+    /* editor_base() drives the one-time fingerprint resolve (see its comment) -- this poll is the frontend's
+     * steady heartbeat, so it's also what times the scan: it resolves the instant the editor comes up. Once
+     * resolved, g_editor is stable; the screen ptr then reflects the live in-editor / HUB signal. */
+    const uint8_t *ed = editor_base();
+    if (!ed) return 0;
     void *screen = NULL;
-    if (!ie_read_ptr(g_editor + ED_SCREEN_OFF, &screen)) return 0;
+    if (!ie_read_ptr(ed + ED_SCREEN_OFF, &screen)) return 0;
     return screen != NULL ? 1 : 0;
 }
 
@@ -1033,8 +1237,15 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;   /* one-shot */
 
     if (module_base) {
-        g_editor = module_base + EDITOR_SINGLETON_RVA;   /* recipe-tagged data RVA (inline ctor 0x51A8E0; see the #define) */
+        g_editor = module_base + EDITOR_SINGLETON_RVA;   /* boot GUESS (old build's RVA); editor_base() confirms
+                                                          * it or fingerprint-scans for the real object at editor entry */
         g_module_base = module_base;                     /* for the dev-layer cvar read (cvarSys RVA fallback) */
+        /* SizeOfImage (PE optional header +0x38) -- bounds the editor fingerprint scan. SEH-guarded parse. */
+        uint32_t e_lfanew = 0, sizeOfImage = 0;
+        if (ie_read_u32(module_base + 0x3C, &e_lfanew) && e_lfanew != 0 && e_lfanew <= 0x1000 &&
+            ie_read_u32(module_base + e_lfanew + 24 + 0x38, &sizeOfImage) && sizeOfImage != 0) {
+            g_module_size = sizeOfImage;   /* nt(=base+e_lfanew) + 4 sig + 20 file-hdr + 0x38 = optional-hdr SizeOfImage */
+        }
     }
 
     g_add_sel    = (add_to_sel_fn)sig_addr_by_name(results, n, "AddToSelection");
