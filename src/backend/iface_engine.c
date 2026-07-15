@@ -326,12 +326,133 @@ static const uint8_t *sh_scan_for_editor(void)
     return (matches == 1) ? found : NULL;   /* exactly one match -> adopt; else refuse (never a wrong object) */
 }
 
+/* ONE-TIME map-object DIAG (new-build offset re-derivation): the entity array/count offsets inside the
+ * loaded-map (*(editor+0x204c8)) moved on the post-April-2024 build. Scan the map for the entity-pointer
+ * array -- an offset whose value points to >=4 consecutive objects that each carry a module vtable (real
+ * entities) -- and log it plus the surrounding u32s (the count is one of those). Lets us read the new
+ * ARR_ENT_ARRAY_OFF / ARR_ENT_COUNT_OFF straight from the log. All reads SEH-guarded; capped output. */
+static void sh_diag_dump_map(const uint8_t *editor)
+{
+    void *map = NULL;
+    char line[256];
+    if (!ie_read_ptr(editor + ED_MAP_OBJ_OFF, &map) || map == NULL) { backend_log("C2 map-DIAG: no map object"); return; }
+    _snprintf_s(line, sizeof line, _TRUNCATE, "C2 map-DIAG: editor RVA=0x%llX  map=%p (RVA 0x%llX)",
+        (unsigned long long)((size_t)(editor - g_module_base)), map,
+        ie_ptr_in_module(map) ? (unsigned long long)((const uint8_t *)map - g_module_base) : 0ull);
+    backend_log(line);
+
+    /* WIDE + RELAXED entity-array scan: an offset O whose value `arr` points to >=2 consecutive objects
+     * each carrying a module vtable (real entities). For each hit, DERIVE the count by walking arr (non-null
+     * entries with a module vtable, NULLs allowed, capped) and log it + the surrounding u32s -- the real
+     * ARR_ENT_COUNT is whichever nearby u32 matches the walked count. */
+    int logged = 0;
+    for (unsigned O = 0; O <= 0x8000 && logged < 8; O += 8) {
+        void *arr = NULL;
+        if (!ie_read_ptr((const uint8_t *)map + O, &arr) || arr == NULL) continue;
+        void *e0 = NULL, *v0 = NULL;
+        if (!ie_read_ptr((const uint8_t *)arr, &e0) || e0 == NULL || !ie_read_ptr(e0, &v0) || !ie_ptr_in_module(v0)) continue;
+        /* walk to derive the count -- a module vtable per slot, generous NULL-gap tolerance for a sparse
+         * (by-id) array. The REAL entity array walks to many (hundreds); the 0x90-stride noise walked only 4. */
+        unsigned walked = 0, gaps = 0;
+        for (unsigned k = 0; k < 100000; k++) {
+            void *ent = NULL, *evt = NULL;
+            if (!ie_read_ptr((const uint8_t *)arr + (size_t)k * 8, &ent)) break;
+            if (ent == NULL) { if (++gaps > 64) break; continue; }
+            if (!ie_read_ptr(ent, &evt) || !ie_ptr_in_module(evt)) break;
+            walked = k + 1;
+        }
+        if (walked < 16) continue;   /* filter the walked=4 struct-array noise; keep only real long arrays */
+        uint32_t uM16 = 0, uM8 = 0, uP8 = 0, uP16 = 0;
+        ie_read_u32((const uint8_t *)map + O - 16, &uM16);
+        ie_read_u32((const uint8_t *)map + O - 8,  &uM8);
+        ie_read_u32((const uint8_t *)map + O + 8,  &uP8);
+        ie_read_u32((const uint8_t *)map + O + 16, &uP16);
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+            "C2 map-DIAG: LONG-arr @ map+0x%X arr=%p walked=%u | u32 [-16]=%u [-8]=%u [+8]=%u [+16]=%u",
+            O, arr, walked, uM16, uM8, uP8, uP16);
+        backend_log(line);
+        /* identify the element TYPE: dump arr[0]'s vtable RVA + candidate entity fields (valid@+8,
+         * defsub@+0x158, layer@+0x160) so we can tell the ENTITY list from module/decl lists. */
+        void *ent0 = NULL, *evt0 = NULL, *f8 = NULL, *f158 = NULL, *f160 = NULL;
+        if (ie_read_ptr((const uint8_t *)arr, &ent0) && ent0) {
+            ie_read_ptr(ent0, &evt0);
+            ie_read_ptr((const uint8_t *)ent0 + 0x8,   &f8);
+            ie_read_ptr((const uint8_t *)ent0 + 0x158, &f158);
+            ie_read_ptr((const uint8_t *)ent0 + 0x160, &f160);
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                "C2 map-DIAG:   ent0=%p vtblRVA=0x%llX [+8]=%p [+0x158]=%p [+0x160]=%p",
+                ent0, (unsigned long long)(ie_ptr_in_module(evt0) ? (const uint8_t *)evt0 - g_module_base : 0),
+                f8, f158, f160);
+            backend_log(line);
+        }
+        logged++;
+    }
+    if (logged == 0) backend_log("C2 map-DIAG: NO long entity-array (>=16) in map[0..0x8000]");
+
+    /* raw structural dump: the map object's first pointers + the old-offset (0x6a0) neighborhood, so the
+     * layout can be reasoned about by hand if the auto-scan misses. */
+    for (unsigned O = 0x00; O <= 0x60; O += 0x10) {
+        void *p0 = NULL, *p1 = NULL;
+        ie_read_ptr((const uint8_t *)map + O, &p0); ie_read_ptr((const uint8_t *)map + O + 8, &p1);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "C2 map-DIAG raw: map+0x%02X=%p  map+0x%02X=%p", O, p0, O + 8, p1);
+        backend_log(line);
+    }
+    for (unsigned O = 0x690; O <= 0x6C0; O += 0x10) {
+        void *p0 = NULL, *p1 = NULL;
+        ie_read_ptr((const uint8_t *)map + O, &p0); ie_read_ptr((const uint8_t *)map + O + 8, &p1);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "C2 map-DIAG raw: map+0x%X=%p  map+0x%X=%p", O, p0, O + 8, p1);
+        backend_log(line);
+    }
+}
+
+/* ONE-TIME, FLAG-GATED dump of the DECRYPTED module image to disk (SteamStub has already decrypted .text by
+ * the time the game runs), so it can be imported into Ghidra for proper DECOMPILATION-based offset
+ * re-derivation -- the reliable way to read the new struct offsets straight from the engine's own code
+ * (vs. ambiguous memory-scanning). Gated on %USERPROFILE%\snaphak\dump_module.flag so it only fires when
+ * armed; latched so it runs at most once per process. Dumps base..+min(SizeOfImage, 0x7000000) -- ~112MB
+ * covers .text/.rdata/.pdata/.data (the code + metadata); the .bss tail beyond that is just zeros. File
+ * offset == RVA (dumped from base), so addresses map cleanly in Ghidra. Unreadable pages -> zero-filled. */
+static void sh_diag_dump_module(void)
+{
+    static LONG s_done = 0;
+    if (InterlockedCompareExchange(&s_done, 1, 0) != 0) return;
+    if (!g_module_base || !g_module_size) { s_done = 0; return; }
+    char *up = NULL; size_t n = 0;
+    if (_dupenv_s(&up, &n, "USERPROFILE") != 0 || !up) return;
+    char flag[MAX_PATH], outp[MAX_PATH];
+    _snprintf_s(flag, sizeof flag, _TRUNCATE, "%s\\snaphak\\dump_module.flag", up);
+    FILE *ff = NULL;
+    if (fopen_s(&ff, flag, "rb") != 0 || !ff) { free(up); return; }   /* not armed -> skip */
+    fclose(ff);
+    _snprintf_s(outp, sizeof outp, _TRUNCATE, "%s\\snaphak\\doomx64vk_dump.bin", up);
+    free(up);
+    FILE *out = NULL;
+    if (fopen_s(&out, outp, "wb") != 0 || !out) { backend_log("C2 module-dump: open failed"); return; }
+    static uint8_t buf[0x10000];
+    size_t cap = g_module_size > 0x7000000u ? 0x7000000u : g_module_size;
+    size_t written = 0;
+    for (size_t off = 0; off < cap; off += sizeof buf) {
+        size_t chunk = (cap - off < sizeof buf) ? (cap - off) : sizeof buf;
+        __try { memcpy(buf, g_module_base + off, chunk); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { memset(buf, 0, chunk); }
+        fwrite(buf, 1, chunk, out);
+        written += chunk;
+    }
+    fclose(out);
+    char line[256];
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+        "C2 module-dump: wrote %zu bytes -> %s (module base=%p, SizeOfImage=0x%llX; file offset == RVA)",
+        written, outp, (const void *)g_module_base, (unsigned long long)g_module_size);
+    backend_log(line);
+}
+
 /* Resolve (once) + return the real editor object, or NULL if it isn't up yet. Fast path after resolution.
  * Before resolution: accept the boot RVA if it fingerprints (old build), else THROTTLED-scan for it (new
  * build) -- the scan only succeeds in-editor, so it naturally no-ops at the HUB and resolves on entry. Once
  * found, g_editor is corrected in place so every existing g_editor/editor_session user gets the right base. */
 static const uint8_t *editor_base(void)
 {
+    sh_diag_dump_module();   /* flag-gated one-time module dump for the Ghidra decompilation workflow */
     if (g_editor_verified) return g_editor;
 
     if (g_editor && editor_fingerprint_ok(g_editor)) {   /* boot RVA was right (old build) */
@@ -355,6 +476,7 @@ static const uint8_t *editor_base(void)
         backend_log(line);
         g_editor = found;
         g_editor_verified = 1;
+        sh_diag_dump_map(found);   /* one-time: re-derive the moved entity-array/count offsets (see fn) */
         return g_editor;
     }
     /* DIAG: log the cascade a few times so a failing scan is explainable (module-size + where the
