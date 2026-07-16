@@ -9,22 +9,23 @@
   :root {
     --bg:#eef0f3; --chrome:#f7f8fa; --panel:#ffffff; --panel2:#fbfbfc; --border:#e4e6ea; --border2:#d3d6db;
     --text:#1b1d21; --muted:#6b7280; --accent:#2f7ad6; --accentText:#ffffff; --sel:#e7f0fb; --selText:#123a63;
-    --link:#2a68b8; --field:#ffffff;
+    --link:#2a68b8; --field:#ffffff; --danger:#a3352f;
+    --tkKey:#0550ae; --tkStr:#9a3b22; --tkNum:#116329; --tkBool:#8250df; --sqErr:#d1372c; --sqWarn:#b58a1f;
     color-scheme: light;
   }
   :root.dark {
     --bg:#191a1d; --chrome:#232428; --panel:#26272b; --panel2:#2b2d31; --border:#33353b; --border2:#45474e;
     --text:#e7e8ea; --muted:#9aa0a8; --accent:#4a9eff; --accentText:#0c1116; --sel:#2d4257; --selText:#cfe4fb;
-    --link:#6fb2ff; --field:#1f2024; color-scheme: dark;
+    --link:#6fb2ff; --field:#1f2024; --danger:#c9483d;
+    --tkKey:#7cb5ff; --tkStr:#ce9178; --tkNum:#9fd394; --tkBool:#c39ce8; --sqErr:#f14c4c; --sqWarn:#d7a944;
+    color-scheme: dark;
   }
   .app { display: flex; flex-direction: column; height: 100vh; background: var(--bg); color: var(--text); user-select: none; -webkit-user-select: none; }
 
-  .menubar { display: flex; align-items: center; height: 30px; background: var(--chrome); border-bottom: 1px solid var(--border); padding: 0 6px; gap: 2px; flex-shrink: 0; user-select: none; }
-  .menubar .icon { width: 12px; height: 12px; border-radius: 3px; background: var(--accent); margin: 0 8px 0 4px; }
-  .menubar .brand { font-weight: 600; margin-right: 14px; }
-  .menubar .menu { padding: 4px 9px; border-radius: 5px; color: var(--muted); cursor: default; }
-  .menubar .menu:hover { background: var(--panel2); color: var(--text); }
-  .menubar .spacer { flex: 1; }
+  .menubar { display: flex; align-items: center; height: 30px; background: var(--chrome); border-bottom: 1px solid var(--border); padding: 0 6px; gap: 8px; flex-shrink: 0; user-select: none; }
+  .menubar .icon { width: 12px; height: 12px; border-radius: 3px; background: var(--accent); margin-left: 4px; }
+  .menubar .brand { font-weight: 600; }
+  .spacer { flex: 1; }
   .theme-toggle { display: inline-flex; border: 1px solid var(--border2); border-radius: 20px; overflow: hidden; cursor: pointer; }
   .theme-toggle span { padding: 3px 11px; color: var(--muted); }
   .theme-toggle span.on { background: var(--accent); color: var(--accentText); }
@@ -41,17 +42,34 @@
   .rz-bl { bottom: 0; left: 0; width: 9px; height: 9px; cursor: nesw-resize; }
   .rz-br { bottom: 0; right: 0; width: 9px; height: 9px; cursor: nwse-resize; }
 
-  .tabstrip { display: flex; background: var(--chrome); border-bottom: 1px solid var(--border); flex-shrink: 0; padding: 0 6px; gap: 2px; }
+  .tabstrip { display: flex; align-items: center; background: var(--chrome); border-bottom: 1px solid var(--border); flex-shrink: 0; padding: 0 6px; gap: 2px; }
   .tab { padding: 7px 14px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; }
   .tab.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
   .tab:hover:not(.active) { color: var(--text); }
+  /* the global camera group lives in the tabstrip's spare right-side space */
+  .camera { display: flex; align-items: center; gap: 8px; padding: 2px 6px; color: var(--muted); }
+  .camera label { display: flex; align-items: center; gap: 4px; color: var(--text); }
+  .camera input[type=text] { width: 76px; }
+  .camera .cam-lock { color: var(--muted); }
 
   .content { flex: 1; display: flex; overflow: hidden; background: var(--bg); min-height: 0; padding: 8px; gap: 8px; }
 
-  .left-pane { width: 40%; min-width: 240px; display: flex; flex-direction: column; gap: 7px; }
-  .opts { display: flex; flex-direction: column; gap: 4px; }
-  .opts label { color: var(--muted); display: flex; align-items: center; gap: 6px; }
-  .entity-list { flex: 1; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; overflow-y: auto; user-select: none; -webkit-user-select: none; padding: 3px; }
+  /* shared panel skeleton: header (title + count badge, actions right) -> toolbar (filter on top) -> body */
+  .left-pane { width: 40%; min-width: 260px; }
+  .right-pane { flex: 1; min-width: 0; }
+  .panel { display: flex; flex-direction: column; min-height: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .panel-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; min-height: 36px; border-bottom: 1px solid var(--border); background: var(--panel2); flex-shrink: 0; }
+  .panel-title { font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+  .badge { background: var(--sel); color: var(--selText); border-radius: 10px; padding: 1px 7px; font-size: 10px; }
+  .panel-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  .panel-actions .hint { color: var(--muted); font-style: italic; margin-right: 2px; }
+  .panel-toolbar { padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .panel-toolbar input[type=text] { width: 100%; }
+  .opts-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; color: var(--muted); }
+  .opts-row label { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .panel-body { flex: 1; overflow-y: auto; min-height: 0; }
+  .panel-body.pad { padding: 10px; }
+  .list { padding: 3px; }
   .entity-item { padding: 3px 7px; border-radius: 4px; color: var(--link); white-space: nowrap; cursor: default; line-height: 1.45; }
   .entity-item .name { color: var(--text); }
   .entity-item.hidden-ent { color: var(--muted); font-style: italic; }
@@ -60,8 +78,6 @@
   .entity-item.selected { background: var(--sel); color: var(--link); }
   .entity-item.selected .name { color: var(--selText); }
   .list-empty { padding: 10px; color: var(--muted); font-style: italic; }
-  .list-controls { display: flex; gap: 6px; }
-  .list-controls input { flex: 1; }
 
   input[type=text], textarea { background: var(--field); color: var(--text); border: 1px solid var(--border2); border-radius: 5px; padding: 4px 7px; font-size: 11px; font-family: inherit; user-select: text; -webkit-user-select: text; }
   input[type=text]:focus, textarea:focus { outline: none; border-color: var(--accent); }
@@ -72,24 +88,57 @@
   .btn:active:not(:disabled) { transform: translateY(1px); }
   .btn:disabled { opacity: 0.5; cursor: default; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accentText); }
+  .btn.danger:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+  .btn.icon { padding: 3px 8px; font-size: 12px; }
 
-  .right-pane { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-  .placeholder { flex: 1; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; display: flex; align-items: center; justify-content: center; text-align: center; color: var(--muted); font-style: italic; padding: 20px; }
-  .editor { flex: 1; display: flex; flex-direction: column; min-height: 0; gap: 8px; }
-  .decl-text { flex: 1; min-height: 0; resize: none; font-family: Consolas, "Courier New", monospace; line-height: 1.5; white-space: pre; }
+  .placeholder { display: flex; align-items: center; justify-content: center; text-align: center; color: var(--muted); font-style: italic; padding: 20px; }
+  .editor-col { display: flex; flex-direction: column; min-height: 0; height: 100%; }
   /* CLONE EXTENSION: restores the Qt clone's read-only entity_id_lineedit (the resolved id-string --
-   * module path + inherit leaf) that this webview dropped -- sits as its own row above the decl text so it
-   * doesn't crowd the Inherit/Classname/Displayname row. Same value the entity list already shows + "Copy ID"
-   * already copies; this just makes it visible + selectable while editing a single entity. */
-  .entity-id-row { display: flex; align-items: center; gap: 7px; flex-shrink: 0; }
-  .entity-id-row label { color: var(--muted); white-space: nowrap; flex-shrink: 0; }
-  .entity-id-row input { flex: 1; min-width: 0; font-family: Consolas, "Courier New", monospace; color: var(--muted); }
-  .fields { display: flex; flex-wrap: wrap; gap: 7px 12px; align-items: center; }
+   * module path + inherit leaf) that this webview dropped -- the identity block at the top of the Entity
+   * State panel. Same value the entity list already shows + "Copy ID" already copies; this just makes it
+   * visible + selectable while editing a single entity. */
+  .ident { display: flex; flex-direction: column; gap: 3px; padding-bottom: 8px; border-bottom: 1px solid var(--border); margin-bottom: 8px; flex-shrink: 0; }
+  .ident-sub { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  .ident-sub label { white-space: nowrap; flex-shrink: 0; }
+  .ident-sub input { flex: 1; min-width: 0; font-family: Consolas, "Courier New", monospace; color: var(--muted); }
+  .fields { display: flex; flex-wrap: wrap; gap: 7px 12px; align-items: center; flex-shrink: 0; }
   .field { display: flex; align-items: center; gap: 5px; }
   .field label { color: var(--muted); white-space: nowrap; flex-shrink: 0; }
   .field.grow { flex: 1; min-width: 140px; }
   .field.grow input { width: 100%; }
-  .save-msg { font-size: 11px; color: var(--muted); }
+  .section-label { display: flex; align-items: baseline; gap: 8px; font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 10px 0 4px; flex-shrink: 0; }
+  .schema-note { font-weight: 400; letter-spacing: 0; text-transform: none; font-style: italic; }
+  .prob-count { font-weight: 400; letter-spacing: 0; text-transform: none; margin-left: auto; }
+  .prob-count .n-err { color: var(--sqErr); } .prob-count .n-warn { color: var(--sqWarn); }
+
+  /* decl code editor: token-colored <pre> behind a transparent <textarea> */
+  .code-editor { position: relative; flex: 1; min-height: 120px; border: 1px solid var(--border2); border-radius: 5px; background: var(--field); overflow: hidden; }
+  .code-editor pre, .code-editor textarea {
+    position: absolute; inset: 0; margin: 0; padding: 6px 8px; border: none; border-radius: 0;
+    font-family: Consolas, "Courier New", monospace; font-size: 11.5px; line-height: 1.5;
+    white-space: pre; tab-size: 4; -moz-tab-size: 4;
+  }
+  .code-editor pre { overflow: hidden; pointer-events: none; color: var(--text); }
+  .code-editor textarea { overflow: auto; background: transparent; color: transparent; caret-color: var(--text); resize: none; }
+  .code-editor textarea::selection { background: var(--sel); color: transparent; }
+  .tk-key { color: var(--tkKey); } .tk-str { color: var(--tkStr); } .tk-num { color: var(--tkNum); }
+  .tk-bool { color: var(--tkBool); } .tk-cmt { color: var(--muted); font-style: italic; }
+  .tk-punc, .tk-ident { color: var(--text); } .tk-bad { color: var(--sqErr); }
+  .sq-err { text-decoration: underline; text-decoration-style: wavy; text-decoration-color: var(--sqErr); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  .sq-warn { text-decoration: underline; text-decoration-style: wavy; text-decoration-color: var(--sqWarn); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+  .ac-popup { position: absolute; z-index: 1600; background: var(--panel); border: 1px solid var(--border2); border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.18); max-height: 200px; overflow-y: auto; display: none; padding: 3px; min-width: 240px; max-width: 440px; }
+  .ac-item { display: flex; align-items: baseline; gap: 12px; padding: 2px 7px; border-radius: 4px; cursor: default; white-space: nowrap; font-family: Consolas, "Courier New", monospace; font-size: 11px; }
+  .ac-item .ac-type { margin-left: auto; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
+  .ac-item.active { background: var(--sel); color: var(--selText); }
+
+  .problems { flex-shrink: 0; display: none; max-height: 84px; overflow-y: auto; margin-top: 6px; padding: 4px 8px; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; }
+  .problems.has { display: block; }
+  .prob { display: flex; gap: 7px; padding: 1px 0; border-radius: 3px; cursor: default; }
+  .prob:hover { background: var(--sel); color: var(--selText); }
+  .prob .sev { flex-shrink: 0; font-weight: 600; }
+  .prob .sev.err { color: var(--sqErr); } .prob .sev.warn { color: var(--sqWarn); }
+  .prob .loc { color: var(--muted); flex-shrink: 0; }
 
   /* CLONE EXTENSION: collapsible Inherit/Classname description panel -- content from sh_entity_desc.h
    * (OUR RE-extracted descriptions), mirrors the Qt clone's always-open desc box but tucked away by
@@ -112,20 +161,16 @@
   .combo input { flex: 1; border-top-right-radius: 0; border-bottom-right-radius: 0; border-right: none; min-width: 0; }
   .combo-arrow { width: 20px; border: 1px solid var(--border2); border-top-right-radius: 5px; border-bottom-right-radius: 5px; background: var(--panel2); cursor: pointer; font-size: 9px; color: var(--muted); padding: 0; }
   .combo-arrow:hover { color: var(--text); }
-  .combo-list { position: absolute; bottom: 100%; right: 0; left: auto; min-width: 100%; width: max-content; max-width: 560px; max-height: 220px; overflow-y: auto; background: var(--panel); border: 1px solid var(--border2); border-radius: 6px; box-shadow: 0 -4px 12px rgba(0,0,0,0.18); z-index: 1500; display: none; padding: 3px; }
+  /* the base .combo-list opens DOWNWARD: every combo now sits at the TOP of its panel (the Entities-tab
+     Inherit/Classname fields moved above the decl editor), so down is always the roomy direction. */
+  .combo-list { position: absolute; top: 100%; left: 0; min-width: 100%; width: max-content; max-width: 560px; max-height: 260px; overflow-y: auto; background: var(--panel); border: 1px solid var(--border2); border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.18); z-index: 1500; display: none; padding: 3px; }
   .combo-opt { padding: 3px 7px; border-radius: 4px; cursor: default; white-space: nowrap; }
   .combo-opt:hover { background: var(--sel); color: var(--selText); }
   .combo-hint, .combo-empty { padding: 3px 7px; color: var(--muted); font-size: 11px; font-style: italic; }
   /* blank / not-in-the-enumerated-list Inherit or Classname -- same red as .toast.err, so it reads as the same "this will be refused" signal */
   .combo.invalid input, .combo.invalid .combo-arrow { border-color: #a3352f; }
 
-  .camera { flex-shrink: 0; display: flex; align-items: center; gap: 12px; padding: 6px 10px; background: var(--chrome); border-top: 1px solid var(--border); font-size: 11px; }
-  .camera .cam-title { color: var(--muted); }
-  .camera label { display: flex; align-items: center; gap: 4px; color: var(--text); }
-  .camera input[type=text] { width: 92px; }
-  .camera .cam-lock { margin-left: 6px; color: var(--muted); }
-
-  .tl-head { color: var(--muted); flex-shrink: 0; }
+  .tl-head { color: var(--muted); flex-shrink: 0; padding-bottom: 6px; }
   .tl-head b { color: var(--text); }
   .tl-inner-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
   .tl-inner-tab { display: flex; align-items: center; gap: 6px; padding: 4px 8px 4px 11px; color: var(--muted); cursor: default; border-bottom: 2px solid transparent; }
@@ -165,15 +210,9 @@
      Also reused for entity-typed args (Stage 3, not yet wired). */
   .entity-picker { display: flex; flex-direction: column; gap: 5px; }
   .entity-picker > .combo { align-self: stretch; }
-  /* the base .combo-list opens UPWARD (bottom:100%), which is right for the Entities-tab Inherit/Classname
-     fields (near the bottom of their panel) but wrong here: "Runs on" sits at the very TOP of the scrollable
-     .tl-inner-body, so an upward-opening list has no room and renders clipped/invisible above the container's
-     own top edge. Override to open DOWNWARD instead. */
-  .entity-picker .combo-list { bottom: auto; top: 100%; box-shadow: 0 4px 12px rgba(0,0,0,0.18); max-height: 420px; }
-  /* the eventDef picker's list -- same downward-open fix as .entity-picker above (event rows are stacked
-     down a scrollable list, so an upward-open list can clip against whatever's above it too) + a taller
-     max-height than the base .combo-list's 220px, since this one browses a 1611-entry catalog. */
-  .event-row .combo-list { bottom: auto; top: 100%; box-shadow: 0 4px 12px rgba(0,0,0,0.18); max-height: 420px; }
+  /* taller than the base .combo-list -- these browse a whole map's entity list / the 1611-entry event catalog */
+  .entity-picker .combo-list { max-height: 420px; }
+  .event-row .combo-list { max-height: 420px; }
   .entity-picker-opts { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .entity-picker-opts label { display: flex; align-items: center; gap: 4px; color: var(--muted); white-space: nowrap; }
   .entity-picker-opts .btn { font-size: 10px; padding: 3px 8px; }
@@ -202,7 +241,6 @@
   .pc-chips { display: flex; flex-wrap: wrap; gap: 5px; }
   .pc-chip { background: var(--panel2); border: 1px solid var(--border); border-radius: 20px; padding: 2px 9px; color: var(--text); font-size: 11px; }
   .pc-desc { min-height: 60px; resize: vertical; }
-  .pc-actions { display: flex; gap: 8px; margin-top: 10px; }
 
   .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 3000; display: flex; align-items: center; justify-content: center; }
   .modal { background: var(--panel); border: 1px solid var(--border2); border-radius: 10px; padding: 16px 18px; width: 340px; display: flex; flex-direction: column; gap: 5px; box-shadow: 0 12px 34px rgba(0,0,0,0.42); }
@@ -236,10 +274,6 @@
   <div class="menubar">
     <div class="icon"></div>
     <div class="brand">Snapmap+</div>
-    <div class="menu">File</div>
-    <div class="menu">Edit</div>
-    <div class="menu">View</div>
-    <div class="menu" id="menuSettings">Settings</div>
     <div class="spacer"></div>
     <div class="theme-toggle" id="themeToggle">
       <span class="on" id="segLight">Light</span>
@@ -255,41 +289,70 @@
     <div class="tab active" data-tab="entities">Entities</div>
     <div class="tab" data-tab="prefabs">Prefabs</div>
     <div class="tab" data-tab="timelines">Timelines</div>
+    <div class="spacer"></div>
+    <div class="camera">
+      <span class="cam-title">Camera</span>
+      <label>X <input type="text" id="camX" value="797.638489"></label>
+      <label>Y <input type="text" id="camY" value="183.456985"></label>
+      <label>Z <input type="text" id="camZ" value="-950.475159"></label>
+      <label class="cam-lock"><input type="checkbox" id="camLockChk"> Lock</label>
+    </div>
   </div>
 
   <div class="content" id="panel-entities">
-    <div class="left-pane">
-      <div class="opts">
-        <label><input type="checkbox" id="showHidden"> Show hidden entities</label>
-        <label title="The list follows whatever you select in the SnapMap 3D editor"><input type="checkbox" id="syncEditor"> Follow editor selection</label>
-        <div style="display:flex; align-items:center; gap:8px;">
-          <label title="Selecting entities here selects them in the SnapMap 3D editor"><input type="checkbox" id="selectInEditor"> Select in 3D editor</label>
-          <button class="btn" id="deselectBtn" style="display:none; padding:2px 8px; font-size:10px;" title="Clear the 3D editor selection (native click-off can get stuck)">Deselect</button>
+    <div class="panel left-pane">
+      <div class="panel-head">
+        <span class="panel-title">Entities</span><span class="badge" id="entBadge">0</span>
+        <div class="panel-actions">
+          <button class="btn icon" id="refreshBtn" title="Refresh the entity list">&#8635;</button>
         </div>
       </div>
-      <div class="entity-list" id="entityList"><div class="list-empty">Waiting for the map...</div></div>
-      <div class="list-controls">
+      <div class="panel-toolbar">
         <input type="text" id="filterBox" placeholder="Filter entities...">
-        <button class="btn" id="refreshBtn">Refresh</button>
+        <div class="opts-row">
+          <label><input type="checkbox" id="showHidden"> Show hidden</label>
+          <label title="The list follows whatever you select in the SnapMap 3D editor"><input type="checkbox" id="syncEditor"> Follow selection</label>
+          <label title="Selecting entities here selects them in the SnapMap 3D editor"><input type="checkbox" id="selectInEditor"> Select in 3D</label>
+          <button class="btn icon" id="deselectBtn" style="display:none;" title="Clear the 3D editor selection (native click-off can get stuck)">Deselect</button>
+        </div>
       </div>
+      <div class="panel-body list" id="entityList"><div class="list-empty">Waiting for the map...</div></div>
     </div>
 
-    <div class="right-pane">
-      <div class="placeholder" id="selInfo">Select an entity from the list.</div>
-      <div class="editor" id="editor" style="display:none;">
-        <textarea class="decl-text" id="declText" spellcheck="false"></textarea>
+    <div class="panel right-pane">
+      <div class="panel-head">
+        <span class="panel-title">Entity State</span>
+        <div class="panel-actions">
+          <span class="hint" id="dirtyNote"></span>
+          <button class="btn" id="revertBtn" disabled>Revert</button>
+          <button class="btn primary" id="saveBtn" disabled>Save to Decl</button>
+        </div>
+      </div>
+      <div class="panel-body placeholder" id="selInfo">Select an entity from the list.</div>
+      <div class="panel-body pad editor-col" id="editor" style="display:none;">
+        <div class="ident" id="entityIdRow">
+          <div class="ident-sub">
+            <label>ID</label>
+            <input type="text" id="fEntityId" readonly>
+            <button type="button" class="btn icon" id="copyIdBtn" title="Copy this entity's ID to the clipboard">Copy</button>
+          </div>
+        </div>
         <div class="fields">
           <div class="field grow"><label>Inherit</label><div class="combo grow" id="cInherit"><input type="text" id="fInherit" autocomplete="off"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div></div>
           <div class="field grow"><label>Classname</label><div class="combo grow" id="cClassname"><input type="text" id="fClassname" autocomplete="off"><button type="button" class="combo-arrow">&#9662;</button><div class="combo-list"></div></div></div>
           <div class="field grow"><label>Displayname</label><input type="text" id="fDisplayname"></div>
-          <button class="btn" id="revertBtn" disabled>Revert</button>
-          <button class="btn primary" id="saveBtn" disabled>Save to Decl</button>
         </div>
-        <div class="entity-id-row" id="entityIdRow">
-          <label>ID</label>
-          <input type="text" id="fEntityId" readonly>
-          <button type="button" class="btn" id="copyIdBtn" title="Copy this entity's ID to the clipboard">Copy</button>
+        <div class="section-label">Decl Text
+          <span class="schema-note" id="declStatus"></span>
+          <span class="prob-count" id="probCount"></span>
         </div>
+        <div class="code-editor" id="codeEditor">
+          <pre aria-hidden="true"><code id="declHl"></code></pre>
+          <textarea id="declText" spellcheck="false" autocomplete="off" wrap="off"></textarea>
+          <div class="ac-popup" id="acPopup"></div>
+        </div>
+        <div class="problems" id="problemsBar"></div>
+        <div style="height:8px; flex-shrink:0;"></div>
         <div class="desc-panel" id="descPanel">
           <div class="desc-toggle" id="descToggle"><span class="desc-caret">&#9656;</span>Inherit / Class Descriptions</div>
           <div class="desc-body" id="descBody"></div>
@@ -299,17 +362,29 @@
   </div>
 
   <div class="content" id="panel-prefabs" style="display:none;">
-    <div class="left-pane">
-      <div class="entity-list" id="prefabTree"></div>
-      <div class="list-controls">
-        <input type="text" id="prefabFilter" placeholder="Filter prefabs...">
-        <button class="btn" id="newFolderBtn">New Folder</button>
+    <div class="panel left-pane">
+      <div class="panel-head">
+        <span class="panel-title">Prefabs</span><span class="badge" id="pfBadge">0</span>
+        <div class="panel-actions">
+          <button class="btn" id="newFolderBtn">New Folder</button>
+          <button class="btn primary" id="prefabCreateBtn">Create from selection</button>
+        </div>
       </div>
-      <div style="margin-top:6px;"><button class="btn primary" id="prefabCreateBtn">Create from selection</button></div>
+      <div class="panel-toolbar">
+        <input type="text" id="prefabFilter" placeholder="Filter prefabs...">
+      </div>
+      <div class="panel-body list" id="prefabTree"></div>
     </div>
-    <div class="right-pane">
-      <div class="muted" id="pcEmpty" style="padding:8px;">Select a prefab to see its details.</div>
-      <div class="prefab-card" id="prefabCard" style="display:none;">
+    <div class="panel right-pane">
+      <div class="panel-head">
+        <span class="panel-title">Prefab Details</span>
+        <div class="panel-actions">
+          <button class="btn danger" id="prefabDeleteBtn">Delete</button>
+          <button class="btn primary" id="prefabLoadBtn">Load / Place</button>
+        </div>
+      </div>
+      <div class="panel-body placeholder" id="pcEmpty">Select a prefab to see its details.</div>
+      <div class="panel-body pad prefab-card" id="prefabCard" style="display:none;">
         <div class="pc-header">
           <input type="text" class="pc-name" id="pcName" value="" readonly>
         </div>
@@ -319,36 +394,37 @@
         <textarea class="pc-desc" id="pcDesc" placeholder="Descriptions aren't stored yet -- a later step" disabled></textarea>
         <label>Tags</label>
         <input type="text" id="pcTags" placeholder="Tags aren't stored yet -- a later step" disabled>
-        <div class="pc-actions">
-          <button class="btn primary" id="prefabLoadBtn">Load / Place</button>
-          <button class="btn" id="prefabDeleteBtn">Delete</button>
-        </div>
       </div>
     </div>
   </div>
 
   <div class="content" id="panel-timelines" style="display:none;">
-    <div class="left-pane">
-      <div class="entity-list" id="timelineList"><div class="list-empty">Waiting for the map...</div></div>
-      <div class="list-controls">
+    <div class="panel left-pane">
+      <div class="panel-head">
+        <span class="panel-title">Timelines</span><span class="badge" id="tlBadge">0</span>
+        <div class="panel-actions">
+          <button class="btn" id="createTimelineBtn" disabled title="Not implemented -- place a timeline from the in-game SnapMap palette instead.">Create New Timeline</button>
+        </div>
+      </div>
+      <div class="panel-toolbar">
         <input type="text" id="timelineFilter" placeholder="Filter timelines...">
-        <button class="btn primary" id="createTimelineBtn" disabled title="Not implemented -- place a timeline from the in-game SnapMap palette instead.">Create New Timeline</button>
+      </div>
+      <div class="panel-body list" id="timelineList"><div class="list-empty">Waiting for the map...</div></div>
+    </div>
+    <div class="panel right-pane">
+      <div class="panel-head">
+        <span class="panel-title">Timeline</span>
+        <div class="panel-actions">
+          <button class="btn" id="revertTimelineBtn" disabled title="Discard local edits and re-fetch this timeline as it currently exists on the map">Revert</button>
+          <button class="btn primary" id="saveTimelineBtn" disabled>Save Timeline</button>
+        </div>
+      </div>
+      <div class="panel-body pad editor-col">
+        <div class="tl-head" id="tlHead">Select a timeline from the list.</div>
+        <div class="tl-inner-tabs" id="tlTabs"></div>
+        <div class="tl-inner-body" id="tlBody"></div>
       </div>
     </div>
-    <div class="right-pane">
-      <div class="tl-head" id="tlHead">Select a timeline from the list.</div>
-      <div class="tl-inner-tabs" id="tlTabs"></div>
-      <div class="tl-inner-body" id="tlBody"></div>
-      <div class="fields" style="justify-content:flex-end;"><button class="btn" id="revertTimelineBtn" disabled title="Discard local edits and re-fetch this timeline as it currently exists on the map">Revert</button><button class="btn primary" id="saveTimelineBtn" disabled>Save Timeline</button></div>
-    </div>
-  </div>
-
-  <div class="camera">
-    <span class="cam-title">Camera Origin</span>
-    <label>X <input type="text" id="camX" value="797.638489"></label>
-    <label>Y <input type="text" id="camY" value="183.456985"></label>
-    <label>Z <input type="text" id="camZ" value="-950.475159"></label>
-    <label class="cam-lock"><input type="checkbox" id="camLockChk"> Lock Position</label>
   </div>
 
   <div class="statusbar">
@@ -383,6 +459,10 @@
   </div>
 </div>
 
+<!-- the decl editor's schema table (generated from the game's own reflection schema and shipped
+     declaration data by maintainer tooling). In-game the build inlines it into this file; this src tag
+     is how the browser preview loads it. Absent table -> the editor degrades to structural checks only. -->
+<script src="schema_slice.js"></script>
 <script>
   var allEntities = [];      // last list from backend
   var visibleEids = [];      // eids currently rendered (in order)
@@ -720,6 +800,523 @@
   }
   function fallbackCopy(t) { var ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');}catch(e){} document.body.removeChild(ta); }
 
+  // ================================================================
+  // ==== the decl editor: tokenize -> parse -> schema check     ====
+  // ==== -> colored overlay + squiggles + problems + completion ====
+  // ================================================================
+  // Schema table (DECL_SCHEMA) is generated from the game's own reflection schema and shipped
+  // declaration data by maintainer tooling; absent, the editor degrades to structural checks only.
+  function $(id) { return document.getElementById(id); }
+  // ==DECL-CORE-BEGIN== (the audit harness extracts this region verbatim -- keep the markers)
+  var SCHEMA = (typeof DECL_SCHEMA !== 'undefined') ? DECL_SCHEMA : null;
+  var declTokens = [];
+  var rollupCache = {};
+
+  // schema field specs are compact strings: "b" bool | "n:<t>" number | "s" string | "r:<t>" ref
+  // (string-valued pointer) | "S:<struct>" nested block | "e:<enum>" | "A:<elem-spec>" array |
+  // "o:<label>" unchecked
+  function specArg(spec) { return spec.length > 2 ? spec.slice(2) : ''; }
+  function specLabel(spec) {
+    var k = spec[0], a = specArg(spec);
+    if (k === 'A') return specLabel(a) + '[]';
+    return k === 'b' ? 'bool' : k === 's' ? 'string' : (a || '?');
+  }
+  function unq(s) {
+    if (s.charAt(0) === '"') s = s.slice(1);
+    if (s.charAt(s.length - 1) === '"') s = s.slice(0, -1);
+    return s;
+  }
+  function stripIdx(s) { return s.replace(/\[\d+\]$/, ''); }
+  // runtime inheritance rollup: a struct's own fields merged over its parent chain (child wins).
+  // The slice stores own-fields + a parent pointer; resolving here keeps the table ~4x smaller.
+  function fieldsFor(structName) {
+    if (!SCHEMA || !structName) return null;
+    if (rollupCache.hasOwnProperty(structName)) return rollupCache[structName];
+    var chain = [], seen = {}, cur = structName;
+    while (cur && SCHEMA.structs[cur] && !seen[cur]) { seen[cur] = true; chain.push(SCHEMA.structs[cur]); cur = SCHEMA.structs[cur].p; }
+    var merged = null;
+    if (chain.length) {
+      merged = {};
+      for (var i = chain.length - 1; i >= 0; i--) { var f = chain[i].f; for (var k in f) merged[k] = f[k]; }
+    }
+    rollupCache[structName] = merged;
+    return merged;
+  }
+
+  // -- tokenizer: comments, strings, numbers, identifiers (incl. list keys like item[0] and
+  //    path idents like af/heavy), and the punctuation {}=;(),! the real decl corpus uses
+  function tokenizeDecl(text) {
+    var toks = [], i = 0, n = text.length, line = 0, m;
+    function push(type, start, end, extra) {
+      var tk = {type:type, start:start, end:end, line:line, text:text.slice(start,end)};
+      if (extra) for (var k in extra) tk[k] = extra[k];
+      toks.push(tk);
+    }
+    while (i < n) {
+      var ch = text[i];
+      if (ch === '\n') { line++; i++; continue; }
+      if (ch === ' ' || ch === '\t' || ch === '\r') { i++; continue; }
+      if (ch === '/' && text[i+1] === '/') { var c1 = i; while (i < n && text[i] !== '\n') i++; push('cmt', c1, i); continue; }
+      if (ch === '/' && text[i+1] === '*') {
+        var c2 = i, startLine = line; i += 2;
+        while (i < n && !(text[i] === '*' && text[i+1] === '/')) { if (text[i] === '\n') line++; i++; }
+        var closed = i < n; i = Math.min(n, i + 2);
+        var save = line; line = startLine; push('cmt', c2, i, {unterminated: !closed}); line = save;
+        continue;
+      }
+      if (ch === '"') {
+        var s = i; i++;
+        var term = false;
+        while (i < n) {
+          if (text[i] === '\\') { i += 2; continue; }
+          if (text[i] === '"') { term = true; i++; break; }
+          if (text[i] === '\n') break;
+          i++;
+        }
+        push('str', s, i, {unterminated: !term});
+        continue;
+      }
+      if (/[0-9]/.test(ch) || (ch === '-' && /[0-9.]/.test(text[i+1] || '')) || (ch === '.' && /[0-9]/.test(text[i+1] || ''))) {
+        m = /^-?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?/.exec(text.slice(i));
+        push('num', i, i + m[0].length); i += m[0].length; continue;
+      }
+      if (/[A-Za-z_#$]/.test(ch)) {
+        var s2 = i; while (i < n && /[A-Za-z0-9_#$/.]/.test(text[i])) i++;
+        // list keys serialize as name[N] -- absorb the index into the identifier
+        if (text[i] === '[') { var j = i + 1; while (j < n && /[0-9]/.test(text[j])) j++; if (j > i + 1 && text[j] === ']') i = j + 1; }
+        push('ident', s2, i); continue;
+      }
+      if ('{}=;(),!'.indexOf(ch) !== -1) { push('punc', i, i + 1); i++; continue; }
+      push('bad', i, i + 1); i++;
+    }
+    return toks;
+  }
+
+  // -- parser: entries of `key = value;` / `key { ... }`; value = { block } | ( tuple ) |
+  //    scalar | bare multi-scalar (`size = 32 32 32;`) | `! { ... }` (override-block prefix).
+  //    Wrappers (`entityDef <name> { ... }`, a bare outer `{ ... }`) parse as normal entries.
+  function parseDecl(toks) {
+    var diags = [];
+    var sig = []; for (var i = 0; i < toks.length; i++) if (toks[i].type !== 'cmt') sig.push(toks[i]);
+    var pos = 0;
+    function peek(o) { return sig[pos + (o || 0)] || null; }
+    function next() { return sig[pos++] || null; }
+    function diag(tok, sev, msg) { if (tok) diags.push({tok: tok, sev: sev, msg: msg, cat: 'structural'}); }
+
+    for (var k = 0; k < sig.length; k++) {
+      var tk = sig[k], nx = sig[k + 1];
+      if (tk.type === 'ident') {
+        if (tk.text === 'true' || tk.text === 'false') tk.isBool = true;
+        else if (nx && (nx.text === '=' || nx.text === '{')) tk.isKey = true;
+      }
+      // quoted keys exist too: `"bool" "" "zeroTransform" = true;` -- the last string is the key
+      else if (tk.type === 'str' && nx && (nx.text === '=' || nx.text === '{')) tk.isKey = true;
+    }
+    for (var u = 0; u < toks.length; u++) {
+      if (toks[u].unterminated) diag(toks[u], 'err', toks[u].type === 'str' ? 'Unterminated string.' : "Unterminated '/*' comment.");
+      if (toks[u].type === 'bad') diag(toks[u], 'err', "Unexpected character '" + toks[u].text + "'.");
+    }
+
+    function isScalarTok(t) { return t && (t.type === 'num' || t.type === 'str' || t.type === 'ident'); }
+    function parseTuple(open) {
+      var items = [];
+      while (true) {
+        var t = peek();
+        // stop (without consuming) at a token that clearly belongs to the enclosing statement,
+        // so one unclosed '(' doesn't cascade into unrelated diagnostics
+        if (!t || t.text === '}' || t.text === ';') { diag(open, 'err', "Unclosed '(' -- missing ')'."); return {kind:'tuple', items:items, closed:false}; }
+        if (t.text === ')') { next(); return {kind:'tuple', items:items, closed:true}; }
+        if (t.text === ',') { next(); continue; }
+        if (t.text === '(') { next(); var inner = parseTuple(t); items = items.concat(inner.items); continue; }
+        if (isScalarTok(t)) { items.push(next()); continue; }
+        diag(next(), 'err', "Unexpected '" + t.text + "' inside ( ... ).");
+      }
+    }
+    function parseValue(keyTok, depth) {
+      var v = peek();
+      if (v && v.text === '!') { next(); v = peek(); }   // override-block prefix: `key = ! { ... }`
+      if (!v) { diag(keyTok, 'err', "Missing value for '" + keyTok.text + "'."); return null; }
+      if (v.text === '{') {
+        next();
+        var blk = parseEntries(depth + 1);
+        if (!blk.closed) diag(v, 'err', "Unclosed '{' -- missing '}'.");
+        if (peek() && peek().text === ';') next();   // ';' after '}' is optional
+        return {kind:'block', entries: blk.entries};
+      }
+      if (v.text === '(') {
+        next();
+        var tp = parseTuple(v);
+        if (peek() && peek().text === ';') next();
+        else if (tp.closed) diag(v, 'err', "Missing ';' after ( ... ).");
+        return tp;
+      }
+      if (isScalarTok(v)) {
+        next();
+        // bare multi-scalar: `size = 32 32 32;` -- absorb following non-key scalars into a tuple
+        var items = [v];
+        while (isScalarTok(peek()) && !peek().isKey) items.push(next());
+        if (peek() && peek().text === ';') next();
+        else diag(items[items.length - 1], 'err', "Missing ';' after this value.");
+        return items.length > 1 ? {kind:'tuple', items: items} : {kind:'scalar', val: v};
+      }
+      diag(v, 'err', "Unexpected '" + v.text + "' after '" + keyTok.text + "'.");
+      next();
+      return null;
+    }
+    function parseEntries(depth) {
+      var entries = [];
+      while (true) {
+        var t = peek();
+        if (!t) return {entries: entries, closed: depth === 0};
+        if (t.text === '}') {
+          if (depth === 0) { diag(next(), 'err', "Unmatched '}'."); continue; }
+          next(); return {entries: entries, closed: true};
+        }
+        if (t.text === '{') {   // anonymous block (a decl file's outer { ... } wrapper)
+          var open = next();
+          var blk = parseEntries(depth + 1);
+          if (!blk.closed) diag(open, 'err', "Unclosed '{' -- missing '}'.");
+          entries = entries.concat(blk.entries);
+          continue;
+        }
+        if (t.type === 'str' && !t.isKey) { next(); continue; }   // stray annotation strings ("idReferenceMap" "" edit = {) -- shipped decls carry them
+        if ((t.type === 'ident' && !t.isBool) || (t.type === 'str' && t.isKey)) {
+          var key = next();
+          // `entityDef <name> { ... }` -- the name token sits between the key and its block
+          if (peek() && (peek().type === 'ident' || peek().type === 'str') && peek(1) && peek(1).text === '{') next();
+          var nx2 = peek();
+          if (nx2 && (nx2.text === '=' || nx2.text === '{')) {
+            if (nx2.text === '=') next();
+            var val = parseValue(key, depth);
+            if (val) entries.push({key: key, kind: val.kind, entries: val.entries, items: val.items, val: val.val});
+            continue;
+          }
+          diag(key, 'err', "Expected '=' after '" + key.text + "'.");
+          // recover to the end of this statement so one typo doesn't cascade into noise
+          while (peek() && peek().text !== ';' && peek().text !== '}') next();
+          if (peek() && peek().text === ';') next();
+          continue;
+        }
+        diag(next(), 'err', "Unexpected '" + t.text + "' -- expected a field name" + (depth ? " or '}'" : '') + '.');
+      }
+    }
+    var root = parseEntries(0);
+    return {rootEntries: root.entries, diags: diags};
+  }
+
+  // -- schema walk: categorized diagnostics with an audit-tunable severity per category.
+  //    The schema table is BUILD-DERIVED data (SCHEMA.build); schema findings are advisory by
+  //    design -- the engine's own Save path stays the authority (fail-soft, per the port doctrine).
+  var SCHEMA_SEV = { 'unknown-field': 'warn', 'type': 'warn', 'enum-value': 'warn', 'top': 'warn' };
+  var DECL_META_KEYS = { inherit:1, 'class':1, expandInheritance:1, poolCount:1, poolGranularity:1,
+                         editorVars:1, systemVars:1, entity:1, entityDef:1 };
+  function kindWord(spec) {
+    var k = spec[0];
+    return k === 'b' ? 'true or false' : k === 'n' ? 'a number (' + specArg(spec) + ')'
+         : k === 's' ? 'a string' : k === 'r' ? 'a name/path (' + specArg(spec) + ')'
+         : k === 'e' ? 'a ' + specArg(spec) + ' value' : 'a value';
+  }
+  function sdiag(diags, tok, cat, msg) { diags.push({tok: tok, sev: SCHEMA_SEV[cat] || 'warn', cat: cat, msg: msg}); }
+  function checkEntry(e, spec, owner, diags) {
+    var k = spec[0];
+    if (k === 'o') return;   // lists/templates/unmapped types: unchecked by design
+    if (k === 'A') {
+      var elem = specArg(spec);
+      if (e.kind === 'block') {
+        // array wrapper block: `mat = { mat[0] = {...}; mat[1] = {...}; }` -- check indexed rows
+        // against the element spec; tolerate serializer bookkeeping keys (num etc.)
+        var base = stripIdx(unq(e.key.text));
+        for (var j = 0; j < e.entries.length; j++) {
+          var se = e.entries[j], sk = unq(se.key.text);
+          if (stripIdx(sk) === base && sk !== base) checkEntry(se, elem, owner, diags);
+        }
+      } else if (e.kind === 'tuple') {
+        if (elem[0] === 'n') {
+          for (var m = 0; m < e.items.length; m++)
+            if (e.items[m].type !== 'num') sdiag(diags, e.items[m], 'type', "'" + e.key.text + "' ( ... ) components should be numbers.");
+        }
+      } else if (e.kind === 'scalar') {
+        checkEntry({key: e.key, kind: 'scalar', val: e.val}, elem, owner, diags);
+      }
+      return;
+    }
+    if (k === 'S') {
+      if (e.kind === 'block') { var sub = fieldsFor(specArg(spec)); if (sub) checkBlock(e.entries, sub, specArg(spec), diags); }
+      else if (e.kind === 'tuple') {
+        for (var j2 = 0; j2 < e.items.length; j2++)
+          if (e.items[j2].type !== 'num') sdiag(diags, e.items[j2], 'type', "'" + e.key.text + "' ( ... ) components should be numbers (" + specArg(spec) + ').');
+      }
+      else sdiag(diags, e.key, 'type', "'" + e.key.text + "' expects a { ... } block or ( ... ) tuple (" + specArg(spec) + ').');
+      return;
+    }
+    if (e.kind === 'block' || e.kind === 'tuple') { sdiag(diags, e.key, 'type', "'" + e.key.text + "' expects " + kindWord(spec) + '.'); return; }
+    var v = e.val;
+    if (k === 'b') {
+      var boolOk = (v.type === 'ident' && v.isBool) || (v.type === 'num' && (v.text === '0' || v.text === '1'));
+      if (!boolOk) sdiag(diags, v, 'type', "'" + e.key.text + "' expects true or false (bool).");
+    }
+    else if (k === 'n' && v.type !== 'num') sdiag(diags, v, 'type', "'" + e.key.text + "' expects a number (" + specArg(spec) + ').');
+    else if ((k === 's' || k === 'r') && !(v.type === 'str' || v.type === 'ident')) sdiag(diags, v, 'type', "'" + e.key.text + "' expects " + kindWord(spec) + '.');
+    else if (k === 'e' && v.type !== 'num') {
+      var vals = SCHEMA.enums[specArg(spec)];
+      if (vals && vals.length) {
+        // flag enums serialize as ONE string of space-separated constants -- check each token
+        var parts = unq(v.text).split(/\s+/).filter(Boolean);
+        for (var q = 0; q < parts.length; q++)
+          if (vals.indexOf(parts[q]) === -1)
+            sdiag(diags, v, 'enum-value', "'" + parts[q] + "' is not among the known " + specArg(spec) + ' values (' + vals.slice(0, 4).join(', ') + (vals.length > 4 ? ', …' : '') + ') -- double-check.');
+      }
+    }
+  }
+  function checkBlock(entries, table, owner, diags, suppressUnknown) {
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i], keyName = unq(e.key.text), spec = table[keyName];
+      if (!spec) {
+        // inline array rows: `additiveLag[0] = {...}` looks up its base name's element spec
+        var base = stripIdx(keyName);
+        if (base !== keyName && table[base]) { var as = table[base]; spec = as[0] === 'A' ? specArg(as) : as; }
+      }
+      if (!spec) {
+        // engine-attested deserializer aliases (audit-observed in shipped game data) don't warn
+        var isAlias = SCHEMA.aliases && SCHEMA.aliases.indexOf(stripIdx(keyName)) !== -1;
+        if (!suppressUnknown && !isAlias) sdiag(diags, e.key, 'unknown-field', "'" + keyName + "' is not a known field of " + owner + '.');
+        continue;
+      }
+      checkEntry(e, spec, owner, diags);
+    }
+  }
+  // Returns 'exact' (class in the schema), 'base' (unknown class -> checked against the idEntity
+  // base fields, unknown-key warnings suppressed since we can't know its own fields), or false.
+  function schemaCheck(rootEntries, className, diags) {
+    var mode = 'exact';
+    var clsFields = fieldsFor(className);
+    if (!clsFields) { clsFields = fieldsFor('idEntity'); mode = clsFields ? 'base' : false; }
+    function walk(entries) {
+      for (var i = 0; i < entries.length; i++) {
+        var e = entries[i], key = unq(e.key.text);
+        if ((key === 'entity' || key === 'entityDef') && e.kind === 'block') { walk(e.entries); continue; }
+        if (key === 'edit') {
+          if (e.kind !== 'block') diags.push({tok: e.key, sev: 'err', cat: 'structural', msg: "'edit' expects a { ... } block."});
+          else if (clsFields) checkBlock(e.entries, clsFields, mode === 'base' ? 'idEntity (base)' : className, diags, mode === 'base');
+          continue;
+        }
+        if (DECL_META_KEYS[key]) continue;
+        sdiag(diags, e.key, 'top', "'" + key + "' -- unexpected top-level key (expected inherit / class / edit / editorVars ...).");
+      }
+    }
+    walk(rootEntries);
+    return mode;
+  }
+  // ==DECL-CORE-END==
+
+  // -- overlay renderer: colored tokens + squiggles into the <pre> behind the textarea --
+  function renderHl(text, toks, diags) {
+    var byStart = {};
+    for (var i = 0; i < diags.length; i++) {
+      var d = diags[i], id = d.tok.start;
+      if (!byStart[id] || (d.sev === 'err' && byStart[id].sev !== 'err')) byStart[id] = d;
+    }
+    var h = '', last = 0;
+    for (var j = 0; j < toks.length; j++) {
+      var tk = toks[j];
+      h += esc(text.slice(last, tk.start));
+      var cls = tk.type === 'cmt' ? 'tk-cmt'
+              : tk.type === 'str' ? 'tk-str'
+              : tk.type === 'num' ? 'tk-num'
+              : tk.isBool ? 'tk-bool'
+              : tk.isKey ? 'tk-key'
+              : tk.type === 'ident' ? 'tk-ident'
+              : tk.type === 'bad' ? 'tk-bad' : 'tk-punc';
+      var dg = byStart[tk.start];
+      if (dg) cls += dg.sev === 'err' ? ' sq-err' : ' sq-warn';
+      h += '<span class="' + cls + '">' + esc(tk.text) + '</span>';
+      last = tk.end;
+    }
+    h += esc(text.slice(last)) + '\n';
+    $('declHl').innerHTML = h;
+  }
+
+  function renderProblems(diags) {
+    var bar = $('problemsBar');
+    var errs = 0, warns = 0;
+    diags.sort(function(a, b){ return a.tok.start - b.tok.start; });
+    var h = '';
+    for (var i = 0; i < diags.length; i++) {
+      var d = diags[i];
+      if (d.sev === 'err') errs++; else warns++;
+      h += '<div class="prob" data-start="' + d.tok.start + '" data-end="' + d.tok.end + '">'
+         + '<span class="sev ' + d.sev + '">' + (d.sev === 'err' ? '&#9888;' : '&#9432;') + '</span>'
+         + '<span class="loc">Ln ' + (d.tok.line + 1) + '</span><span>' + esc(d.msg) + '</span></div>';
+    }
+    bar.innerHTML = h;
+    bar.classList.toggle('has', diags.length > 0);
+    $('probCount').innerHTML = diags.length
+      ? (errs ? '<span class="n-err">' + errs + ' error' + (errs > 1 ? 's' : '') + '</span>' : '')
+        + (errs && warns ? ' &middot; ' : '')
+        + (warns ? '<span class="n-warn">' + warns + ' warning' + (warns > 1 ? 's' : '') + '</span>' : '')
+      : 'no problems';
+    var rows = bar.querySelectorAll('.prob');
+    for (var r = 0; r < rows.length; r++) rows[r].addEventListener('mousedown', function(e){
+      e.preventDefault();
+      var ta = $('declText');
+      ta.focus();
+      ta.setSelectionRange(parseInt(this.getAttribute('data-start'), 10), parseInt(this.getAttribute('data-end'), 10));
+      refreshDeclScroll();
+    });
+  }
+
+  function refreshDecl() {
+    var text = $('declText').value;
+    declTokens = tokenizeDecl(text);
+    var p = parseDecl(declTokens);
+    var cls = $('fClassname').value;
+    var known = schemaCheck(p.rootEntries, cls, p.diags);
+    renderHl(text, declTokens, p.diags);
+    renderProblems(p.diags);
+    var st = $('declStatus');
+    if (!SCHEMA) st.textContent = '· schema_slice.js not found -- structural checks only';
+    else if (known === 'base') st.textContent = "· '" + cls + "' not in the " + (SCHEMA.classes.length) + '-class schema -- checking against the idEntity base fields';
+    else if (!known) st.textContent = '· schema unavailable -- structural checks only';
+    else st.textContent = '· schema: ' + cls + ' · ' + Object.keys(fieldsFor(cls)).length + ' fields';
+    refreshDeclScroll();
+  }
+  function refreshDeclScroll() {
+    var ta = $('declText'), pre = $('codeEditor').querySelector('pre');
+    pre.scrollTop = ta.scrollTop; pre.scrollLeft = ta.scrollLeft;
+  }
+
+  // -- autocomplete: field names scoped to the { } nesting at the cursor; true/false for bool fields --
+  var acItems = [], acActive = 0, acStart = 0, charW = 0, lineH = 0;
+  function measureFont() {
+    var pre = $('codeEditor').querySelector('pre');
+    var probe = document.createElement('span');
+    probe.textContent = 'XXXXXXXXXX';
+    pre.appendChild(probe);
+    charW = probe.getBoundingClientRect().width / 10;
+    lineH = parseFloat(getComputedStyle($('declText')).lineHeight) || 17;
+    pre.removeChild(probe);
+  }
+  function acContext() {
+    // walk the significant tokens before the cursor, tracking the {key -> block} nesting stack and
+    // whether the cursor sits in key position or in value position (after 'key =')
+    var ta = $('declText'), cur = ta.selectionStart;
+    var stack = [], pendingKey = null, lastIdent = null, state = 'key', touched = null;
+    for (var i = 0; i < declTokens.length; i++) {
+      var tk = declTokens[i];
+      if (tk.type === 'cmt') continue;
+      if (tk.start >= cur) break;
+      if (tk.end >= cur && (tk.type === 'ident' || tk.type === 'num')) { touched = tk; break; }
+      if (tk.type === 'ident' && !tk.isBool) lastIdent = tk;
+      if (tk.text === '=') { pendingKey = lastIdent; state = 'value'; }
+      else if (tk.text === '{') { stack.push(pendingKey ? pendingKey.text : null); pendingKey = null; state = 'key'; }
+      else if (tk.text === '}') { stack.pop(); pendingKey = null; state = 'key'; }
+      else if (tk.text === ';') { pendingKey = null; state = 'key'; }
+      else if (state === 'value' && (tk.type === 'str' || tk.type === 'num' || tk.isBool)) state = 'done';
+    }
+    var prefix = '', replaceFrom = cur;
+    if (touched) { prefix = touched.text.slice(0, cur - touched.start); replaceFrom = touched.start; }
+    return {stack: stack, state: state, pendingKey: pendingKey, prefix: prefix, replaceFrom: replaceFrom};
+  }
+  function tableForStack(stack, cls) {
+    if (!SCHEMA) return null;
+    if (stack.length === 0) return {edit: 'o:the editable block'};
+    // tolerate the entity/entityDef wrapper levels a full decl blob carries
+    while (stack.length && (stack[0] === 'entity' || stack[0] === 'entityDef' || stack[0] === null)) stack = stack.slice(1);
+    if (!stack.length || stack[0] !== 'edit') return null;
+    var table = fieldsFor(cls) || fieldsFor('idEntity');   // unknown class -> base-field completion
+    if (!table) return null;
+    for (var i = 1; i < stack.length; i++) {
+      var key = stripIdx(unq(stack[i]));
+      var spec = table[key];
+      if (spec && spec[0] === 'A') spec = specArg(spec);   // array rows complete as their element type
+      if (!spec || spec[0] !== 'S') return null;
+      table = fieldsFor(specArg(spec));
+      if (!table) return null;
+    }
+    return table;
+  }
+  function acCollect(forced) {
+    var ctx = acContext();
+    var out = [];
+    if (ctx.state === 'key') {
+      var table = tableForStack(ctx.stack, $('fClassname').value);
+      if (table) for (var k in table) {
+        if (!ctx.prefix || k.toLowerCase().indexOf(ctx.prefix.toLowerCase()) === 0)
+          out.push({label: k, type: specLabel(table[k])});
+      }
+      out.sort(function(a, b){ return a.label < b.label ? -1 : 1; });
+    } else if (ctx.state === 'value' && ctx.pendingKey) {
+      var tbl = tableForStack(ctx.stack, $('fClassname').value);
+      var spec = tbl && tbl[ctx.pendingKey.text];
+      if (spec && spec[0] === 'b') {
+        ['true', 'false'].forEach(function(v){ if (!ctx.prefix || v.indexOf(ctx.prefix) === 0) out.push({label: v, type: 'bool'}); });
+      } else if (spec && spec[0] === 'e') {
+        var vals = SCHEMA.enums[specArg(spec)] || [];
+        var pq = unq(ctx.prefix);
+        vals.forEach(function(v){ if (!pq || v.toLowerCase().indexOf(pq.toLowerCase()) === 0) out.push({label: '"' + v + '"', type: specArg(spec)}); });
+      }
+    }
+    if (!forced && !ctx.prefix) return {items: [], from: ctx.replaceFrom};   // only pop up unprompted once the user is typing a name
+    return {items: out.slice(0, 60), from: ctx.replaceFrom};
+  }
+  function caretXY() {
+    var ta = $('declText'), pos = ta.selectionStart, before = ta.value.slice(0, pos);
+    var lineNo = (before.match(/\n/g) || []).length;
+    var lineText = before.slice(before.lastIndexOf('\n') + 1);
+    var vcol = 0;
+    for (var i = 0; i < lineText.length; i++) vcol = lineText[i] === '\t' ? (Math.floor(vcol / 4) + 1) * 4 : vcol + 1;
+    return {x: 8 + vcol * charW - ta.scrollLeft, y: 6 + (lineNo + 1) * lineH - ta.scrollTop};
+  }
+  function acRender() {
+    var pop = $('acPopup');
+    if (!acItems.length) { pop.style.display = 'none'; return; }
+    pop.innerHTML = acItems.map(function(it, i){
+      return '<div class="ac-item' + (i === acActive ? ' active' : '') + '" data-i="' + i + '">' + esc(it.label) + '<span class="ac-type">' + esc(it.type) + '</span></div>';
+    }).join('');
+    var xy = caretXY();
+    pop.style.left = Math.max(0, Math.min(xy.x, $('codeEditor').clientWidth - 260)) + 'px';
+    pop.style.top = xy.y + 'px';
+    pop.style.display = 'block';
+    var rows = pop.querySelectorAll('.ac-item');
+    for (var r = 0; r < rows.length; r++) rows[r].addEventListener('mousedown', function(e){ e.preventDefault(); acActive = parseInt(this.getAttribute('data-i'), 10); acAccept(); });
+    var act = pop.querySelector('.ac-item.active');
+    if (act) act.scrollIntoView({block: 'nearest'});
+  }
+  function acOpen(forced) {
+    var got = acCollect(forced);
+    acItems = got.items; acStart = got.from; acActive = 0;
+    acRender();
+  }
+  function acClose() { acItems = []; $('acPopup').style.display = 'none'; }
+  function acAccept() {
+    if (!acItems.length) return;
+    var ta = $('declText'), it = acItems[acActive];
+    ta.setRangeText(it.label, acStart, ta.selectionStart, 'end');
+    acClose();
+    refreshDecl(); updateDirty();
+  }
+
+  var taEl = $('declText');
+  taEl.addEventListener('input', function(e){
+    refreshDecl(); updateDirty();
+    var ch = e.data;
+    if (ch && /[A-Za-z_]/.test(ch)) acOpen(false);
+    else if (acItems.length) acOpen(false);
+    else acClose();
+  });
+  taEl.addEventListener('scroll', function(){ refreshDeclScroll(); acClose(); });
+  taEl.addEventListener('mousedown', acClose);
+  taEl.addEventListener('blur', function(){ setTimeout(acClose, 120); });
+  taEl.addEventListener('keydown', function(e){
+    if (e.ctrlKey && e.code === 'Space') { e.preventDefault(); acOpen(true); return; }
+    if (!acItems.length) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); acActive = Math.min(acItems.length - 1, acActive + 1); acRender(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); acActive = Math.max(0, acActive - 1); acRender(); }
+    else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); acAccept(); }
+    else if (e.key === 'Escape') { acClose(); }
+  });
+
+
   function renderList() {
     var listEl = document.getElementById('entityList');
     var showHidden = document.getElementById('showHidden').checked;
@@ -735,6 +1332,7 @@
     document.getElementById('hiddenNote').textContent = hiddenCount>0 ? ('('+hiddenCount+(showHidden?' hidden shown':' hidden')+')') : '';
 
     visibleEids = rows.map(function(e){return e.eid;});
+    document.getElementById('entBadge').textContent = rows.length;   // panel-header count: rows actually shown
     if (rows.length === 0) {
       listEl.innerHTML = '<div class="list-empty">'+(allEntities.length===0?'No entities (open a map in the SnapMap editor).':'No matches.')+'</div>';
       return;
@@ -766,6 +1364,7 @@
       if (!filter) return true;
       return (t.name && t.name.toLowerCase().indexOf(filter) !== -1) || t.id.toLowerCase().indexOf(filter) !== -1;
     });
+    document.getElementById('tlBadge').textContent = rows.length;   // panel-header count: rows actually shown
 
     if (rows.length === 0) {
       listEl.innerHTML = '<div class="list-empty">' + (allTimelines.length === 0 ? 'No timelines (place one from the in-game SnapMap palette).' : 'No matches.') + '</div>';
@@ -1550,6 +2149,7 @@
 
   // ---- state editor ----
   function showPlaceholder(html) {
+    acClose();   // the editor pane is going away -- never leave a stale completion popup/state behind
     document.getElementById('editor').style.display = 'none';
     var el = document.getElementById('selInfo'); el.style.display = 'flex'; el.innerHTML = html;
     loaded = null; loadedEid = -1; updateDirty();
@@ -1593,6 +2193,7 @@
     return '';
   }
   function showState(d) {
+    acClose();   // selection changed -- drop any completion popup from the previous entity
     document.getElementById('selInfo').style.display='none';
     document.getElementById('editor').style.display='flex';
     loadedEid = d.eid;
@@ -1602,6 +2203,7 @@
     document.getElementById('fClassname').value = d.classname || '';
     document.getElementById('fDisplayname').value = d.displayname || '';
     loaded = { decl:d.decl||'', inherit:d.inherit||'', classname:d.classname||'', displayname:d.displayname||'' };
+    refreshDecl();   // programmatic .value writes fire no 'input' event -- re-tokenize/lint/paint explicitly
     updateDirty();
     if (!inheritsRequested) { inheritsRequested = true; post({cmd:'enumInherits'}); }  // full inherit list, once
     post({cmd:'enumClasses', inherit: d.inherit || ''});                                // classes valid for THIS inherit
@@ -1647,6 +2249,7 @@
     document.getElementById('cClassname').classList.toggle('invalid', !!p.classname);
     document.getElementById('saveBtn').disabled = !d || !!p.inherit || !!p.classname;
     document.getElementById('revertBtn').disabled = !d;   // Revert stays available even with an invalid edit -- it's the way OUT of a bad edit
+    document.getElementById('dirtyNote').textContent = d ? 'unsaved changes' : '';
   }
   function doSave() {
     if (primaryEid < 0 || !isDirty()) return;
@@ -1663,7 +2266,7 @@
     }
     post({ cmd:'save', eid:primaryEid, decl:c.decl, classname:c.classname, inherit:c.inherit, displayname:c.displayname });
   }
-  function doRevert() { if (loaded) { document.getElementById('declText').value=loaded.decl; document.getElementById('fInherit').value=loaded.inherit; document.getElementById('fClassname').value=loaded.classname; document.getElementById('fDisplayname').value=loaded.displayname; updateDirty(); } }
+  function doRevert() { if (loaded) { document.getElementById('declText').value=loaded.decl; document.getElementById('fInherit').value=loaded.inherit; document.getElementById('fClassname').value=loaded.classname; document.getElementById('fDisplayname').value=loaded.displayname; refreshDecl(); updateDirty(); } }
 
   function flash(t) { document.getElementById('stamp').textContent = t; }
 
@@ -1880,6 +2483,9 @@
   function renderPrefabTree() {
     var tree = document.getElementById('prefabTree'); if (!tree) return;
     var root = prefabData.root, folders = prefabData.folders;
+    var pfTotal = root.length;   // panel-header count: total prefabs on disk (root + folders)
+    for (var pfi = 0; pfi < folders.length; pfi++) pfTotal += (folders[pfi].items || []).length;
+    document.getElementById('pfBadge').textContent = pfTotal;
     if (!root.length && !folders.length) {
       tree.innerHTML = '<div class="muted" style="padding:8px;">No prefabs yet -- select entities in the editor and use "Create from selection".</div>';
       return;
@@ -1972,8 +2578,11 @@
     }
   });
   ['declText','fDisplayname'].forEach(function(id){ document.getElementById(id).addEventListener('input', updateDirty); });
+  // the decl checker's schema scope follows the Classname field -- re-lint on typing (a combo PICK sets
+  // .value programmatically, no 'input' event, so the classCombo onPick below also calls refreshDecl)
+  document.getElementById('fClassname').addEventListener('input', refreshDecl);
   inheritCombo = Combo('cInherit', function(){ return inheritItems; }, updateDirty, function(){ updateDirty(); post({cmd:'enumClasses', inherit: document.getElementById('fInherit').value}); requestDesc(); });
-  classCombo = Combo('cClassname', function(){ return classItems; }, updateDirty, function(){ updateDirty(); requestDesc(); });
+  classCombo = Combo('cClassname', function(){ return classItems; }, updateDirty, function(){ updateDirty(); refreshDecl(); requestDesc(); });
   // typing an inherit/classname then blurring/Enter also re-fetches its valid classes + description
   document.getElementById('fInherit').addEventListener('change', function(){ post({cmd:'enumClasses', inherit: this.value}); requestDesc(); });
   document.getElementById('fClassname').addEventListener('change', requestDesc);
@@ -2010,7 +2619,7 @@
   document.getElementById('winMin').addEventListener('click', function(){ post({cmd:'winMin'}); });
   document.getElementById('winMax').addEventListener('click', function(){ post({cmd:'winMax'}); });
   var menubarEl = document.querySelector('.menubar');
-  function barInteractive(t){ return t.closest('.menu, .theme-toggle, .win-controls, button, input'); }
+  function barInteractive(t){ return t.closest('.theme-toggle, .win-controls, button, input'); }
   menubarEl.addEventListener('mousedown', function(e){ if (e.button === 0 && !barInteractive(e.target)) post({cmd:'winDrag'}); });
   menubarEl.addEventListener('dblclick', function(e){ if (!barInteractive(e.target)) post({cmd:'winMax'}); });
   [['rz-t','t'],['rz-b','b'],['rz-l','l'],['rz-r','r'],['rz-tl','tl'],['rz-tr','tr'],['rz-bl','bl'],['rz-br','br']].forEach(function(p){
@@ -2021,6 +2630,7 @@
   // top-level tab switching (Entities / Prefabs / Timelines)
   document.querySelectorAll('.tabstrip .tab').forEach(function(tab){
     tab.addEventListener('click', function(){
+      acClose();   // the decl editor's completion popup shouldn't survive a tab switch
       document.querySelectorAll('.tabstrip .tab').forEach(function(t){ t.classList.remove('active'); });
       this.classList.add('active');
       var which = this.getAttribute('data-tab');
@@ -2581,6 +3191,7 @@
     else doCreate();
   });
 
+  measureFont();   // once at boot -- the completion popup positions itself off the editor's char/line metrics
   post({cmd:'refresh'});
 </script>
 </body>

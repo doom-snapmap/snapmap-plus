@@ -60,9 +60,26 @@ Write-Host "WebView2 SDK ready at $sdkDir"
 $htmlPath = Join-Path $here "webview\mockup.html"
 if (-not (Test-Path $htmlPath)) { throw "mockup.html not found at $htmlPath" }
 $html = Get-Content -Raw -Path $htmlPath
+
+# Inline the decl editor's generated schema table (webview\schema_slice.js) in place of its <script src>
+# tag: the page is loaded via NavigateToString in-game, so a relative src never resolves there -- the
+# table must ride inside the single embedded HTML string. Both the tag and the file are REQUIRED: a
+# silent miss would ship a schema-less decl editor (structural checks only, no completion).
+$slicePath = Join-Path $here "webview\schema_slice.js"
+$sliceTag  = '<script src="schema_slice.js"></script>'
+if (-not (Test-Path $slicePath)) { throw "schema_slice.js not found at $slicePath -- required (the decl editor would ship schema-less)" }
+if ($html.IndexOf($sliceTag) -lt 0) { throw "mockup.html does not contain the literal tag $sliceTag -- cannot inline the schema table" }
+$slice = Get-Content -Raw -Path $slicePath
+if ($slice.IndexOf(')SNAPHAK') -ge 0) { throw "schema_slice.js contains the raw-literal delimiter )SNAPHAK -- cannot embed" }
+if ($slice.IndexOf('</script') -ge 0) { throw "schema_slice.js contains '</script' -- would terminate the inline script tag early" }
+$html = $html.Replace($sliceTag, "<script>`n$slice</script>")
+if ($html.IndexOf($sliceTag) -ge 0) { throw "schema_slice.js inlining left a residual src tag -- duplicate tag in mockup.html?" }
+
 # MSVC caps a single string literal at ~16 KB (error C2026). Split into <16 KB chunks emitted as
 # ADJACENT raw string literals -- the compiler concatenates them into one array. Raw literals need no
-# escaping; any byte is safe except the exact ")SNAPHAK" delimiter, which the HTML never contains.
+# escaping; any byte is safe except the exact ")SNAPHAK" delimiter, which neither the HTML nor the
+# inlined schema table contains (guarded above for the slice).
+if ($html.IndexOf(')SNAPHAK') -ge 0) { throw "embedded HTML contains the raw-literal delimiter )SNAPHAK -- cannot chunk" }
 $chunkSize = 8000
 $sb = New-Object System.Text.StringBuilder
 [void]$sb.AppendLine("/* generated from webview/mockup.html by src/ui/build.ps1 -- do not edit */")
