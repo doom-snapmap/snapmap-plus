@@ -16,6 +16,14 @@
  * unpacked DOOM image (do not hand-edit) -- it re-emits each minimal-unique pattern + asserts
  * resolved==known on the new build, for:
  *       Error6=0x1a089a0 SetState=0x5298A0 Frame=0x17CE360 EditorPump=0x523140 Resolver=0x5E0AD0
+ *
+ * FALLBACK POLICY (changed): `known_rva` is NEVER used as a bare substitute. It is only ever accepted
+ * through the resolver's hook-tolerant path, which VALIDATES the live bytes at that address first. If a
+ * signature does not resolve and the known site does not validate, the entry stays 0 and the shield
+ * DECLINES TO ARM (fault_shield.c). Rationale: DOOM's April 2024 patch relocated code wholesale, so on
+ * that build a `known_rva` from the older build addresses an unrelated function; hooking or calling it
+ * corrupts the SEH frame, which not even __try can catch. A shield that does not arm leaves DOOM's own
+ * error handling intact -- a shield that arms on wrong addresses removes it and crashes the process.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -82,11 +90,19 @@ static const sig_entry SHIELD_ENGINE_SIGNATURES[] = {
     { NULL, NULL, 0 }
 };
 
-/* Resolve one sig; on a unique scan hit return its absolute addr + (optionally) its RVA. On any miss
- * (NOT_FOUND / AMBIGUOUS / OK_HOOKED-at-known) fall back to module_base+known_rva and log the miss so a
- * shifted build that needs a re-derive is visible. Returns 1 if resolved by the portable SCAN (SIG_OK),
- * 0 if it fell back to the recipe-tagged RVA. SEH wraps the whole thing (the resolver self-guards, but a
- * torn module during boot must never fault inside the install path). */
+/* Resolve one sig. Accepts EXACTLY the two outcomes the resolver can VALIDATE:
+ *   SIG_OK        -- a unique masked-byte scan hit. Portable; correct on any build.
+ *   SIG_OK_HOOKED -- the scan missed because the prologue is inline-hooked, and the resolver CHECKED the
+ *                    live bytes at known_rva (a real detour + the sig's fixed tail still matching) before
+ *                    accepting it. That is a validated identity, not an assumption.
+ * Anything else (NOT_FOUND / AMBIGUOUS / BAD_*) means the resolver looked at module_base+known_rva and
+ * REFUSED it. Substituting that address anyway would hand the shield whatever code now lives there.
+ *
+ * On a DOOM build whose code has been relocated, `known_rva` points at an unrelated function -- and a call
+ * through a wrong address corrupts the SEH frame, so not even __try can catch the result. A wrong address
+ * is therefore strictly WORSE than no address: unresolved must stay 0 and the caller must decline to arm.
+ * Returns 1 on a validated resolve, 0 otherwise (leaving *out_addr == 0). SEH wraps the whole thing (the
+ * resolver self-guards, but a torn module during boot must never fault inside the install path). */
 static int resolve_fn(const uint8_t *module_base, const char *name,
                       uintptr_t *out_addr, uint32_t *out_rva)
 {
@@ -98,18 +114,20 @@ static int resolve_fn(const uint8_t *module_base, const char *name,
 
         sig_result r;
         sig_status st = sig_resolve_one(module_base, e, &r);
-        if (st == SIG_OK) {
+        if (st == SIG_OK || st == SIG_OK_HOOKED) {
             if (out_addr) *out_addr = r.addr;
             if (out_rva)  *out_rva  = r.rva;
-            return 1;   /* portable scan hit */
+            return 1;   /* validated: a unique scan hit, or a checked detour at the known site */
         }
-        /* Scan missed (or only a hooked-known_rva hit): use the recipe-tagged RVA backstop + log it. */
-        if (out_addr) *out_addr = (uintptr_t)(module_base + e->known_rva);
-        if (out_rva)  *out_rva  = e->known_rva;
+        /* Unvalidated: refuse. Leave 0 so shield_install_hooks declines to arm rather than hooking or
+         * calling an address that belongs to some other function on this build. */
+        if (out_addr) *out_addr = 0;
+        if (out_rva)  *out_rva  = 0;
         {
-            char msg[160];
+            char msg[192];
             _snprintf_s(msg, sizeof msg, _TRUNCATE,
-                "sig miss for %s (status=%d) -> fell back to known_rva 0x%x (re-derive on patch)",
+                "sig REFUSED for %s (status=%d): not found by scan and known_rva 0x%x did not validate "
+                "-- this DOOM build needs a re-derived signature; not arming",
                 name, (int)st, (unsigned)e->known_rva);
             shield_fault f = { "sig", (int)st, msg, e->known_rva, 0 };
             shield_emit(&f);
@@ -117,21 +135,31 @@ static int resolve_fn(const uint8_t *module_base, const char *name,
         return 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         if (out_addr) *out_addr = 0;
+        if (out_rva)  *out_rva  = 0;
         return 0;
     }
 }
 
+/* Every entry the shield actually calls, hooks, patches or uses as a classifier bound. All of them are
+ * load-bearing, so the arm gate below requires the full set -- see shield_engine_expected(). */
+int shield_engine_expected(void)
+{
+    int n = 0;
+    for (const sig_entry *e = SHIELD_ENGINE_SIGNATURES; e->name; e++) n++;
+    return n;
+}
+
 int shield_resolve_engine(const uint8_t *module_base)
 {
-    int scanned = 0;
-    scanned += resolve_fn(module_base, "Error6",      &g_eng.error6,       NULL);
-    scanned += resolve_fn(module_base, "FatalError7", &g_eng.fatalerror7,  NULL);
-    scanned += resolve_fn(module_base, "SetState",    &g_eng.setstate,     NULL);
-    scanned += resolve_fn(module_base, "Frame",      &g_eng.frame,       NULL);
-    scanned += resolve_fn(module_base, "EditorPump", &g_eng.editor_pump, &g_eng.editor_pump_rva);
-    scanned += resolve_fn(module_base, "Resolver",   &g_eng.resolver,    &g_eng.resolver_rva);
-    scanned += resolve_fn(module_base, "Toast",      &g_eng.toast_show,  NULL);
-    scanned += resolve_fn(module_base, "IdStrCtor",  &g_eng.idstr_ctor,  NULL);
-    scanned += resolve_fn(module_base, "IdStrDtor",  &g_eng.idstr_dtor,  NULL);
-    return scanned;
+    int resolved = 0;
+    resolved += resolve_fn(module_base, "Error6",      &g_eng.error6,       NULL);
+    resolved += resolve_fn(module_base, "FatalError7", &g_eng.fatalerror7,  NULL);
+    resolved += resolve_fn(module_base, "SetState",    &g_eng.setstate,     NULL);
+    resolved += resolve_fn(module_base, "Frame",      &g_eng.frame,       NULL);
+    resolved += resolve_fn(module_base, "EditorPump", &g_eng.editor_pump, &g_eng.editor_pump_rva);
+    resolved += resolve_fn(module_base, "Resolver",   &g_eng.resolver,    &g_eng.resolver_rva);
+    resolved += resolve_fn(module_base, "Toast",      &g_eng.toast_show,  NULL);
+    resolved += resolve_fn(module_base, "IdStrCtor",  &g_eng.idstr_ctor,  NULL);
+    resolved += resolve_fn(module_base, "IdStrDtor",  &g_eng.idstr_dtor,  NULL);
+    return resolved;
 }

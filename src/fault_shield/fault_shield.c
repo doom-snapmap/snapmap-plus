@@ -55,13 +55,32 @@ void shield_raw(const char *msg)
 }
 
 /* Install the catch points: the VEH (raw AVs) + the recovery frame-hook. The engine fns both touch are
- * resolved by SIGNATURE (shield_resolve_engine -> g_eng) -- a sig miss falls back to the recipe RVA + is
- * logged. Runs AFTER the backend's decrypt-poll, so the scan sees real decrypted .text. */
+ * resolved by SIGNATURE (shield_resolve_engine -> g_eng). Runs AFTER the backend's decrypt-poll, so the
+ * scan sees real decrypted .text.
+ *
+ * ARM GATE: every entry in the shield's sig table is load-bearing -- the shield CALLS some (SetState,
+ * the toast trio), HOOKS one (Frame), PATCHES one (FatalError7's level byte), redirects RIP into one
+ * (Error6), and uses two as classifier range bounds (EditorPump, Resolver). So a partial resolve is not
+ * "degraded but useful", it is a shield operating on addresses it could not identify. If ANY entry fails
+ * to validate we decline to arm and say so in the log: DOOM keeps its own error handling, the rest of the
+ * mod is unaffected, and the log names the build problem instead of the process dying somewhere else. */
 int veh_install(void);        /* veh.c */
 int recovery_install(void);   /* recovery.c */
 static int shield_install_hooks(void)
 {
-    shield_resolve_engine(g_doom_base);   /* portable: fill g_eng by signature (RVA fallback if a sig misses) */
+    int resolved = shield_resolve_engine(g_doom_base);
+    int expected = shield_engine_expected();
+    if (resolved != expected) {
+        char msg[192];
+        _snprintf_s(msg, sizeof msg, _TRUNCATE,
+                    "shield_install: NOT ARMING -- only %d/%d engine functions validated on this DOOM "
+                    "build (see the sig REFUSED lines); DOOM's own error handling is left intact",
+                    resolved, expected);
+        shield_raw(msg);                 /* -Diag file */
+        OutputDebugStringA("[shield] NOT ARMING: engine functions did not validate on this DOOM build "
+                           "-- needs re-derived signatures\n");   /* always, incl. release */
+        return 0;
+    }
     return veh_install() && recovery_install();
 }
 

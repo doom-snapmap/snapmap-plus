@@ -9,9 +9,16 @@
  *
  * Resolved ONCE at install time (after g_doom_base is known, before veh_install/recovery_install). Each
  * resolved address is cached in g_eng (below); the VEH / recovery call sites read g_eng.<fn> instead of a
- * literal g_doom_base+RVA. If a single sig fails to resolve on a shifted build, that one falls back to its
- * documented known_rva (so a partial-resolve build still arms) and the miss is logged -- the scan stays
- * primary, the RVA is the recipe-tagged backstop.
+ * literal g_doom_base+RVA.
+ *
+ * ARM POLICY: a `known_rva` is accepted ONLY through the resolver's hook-tolerant path, which validates the
+ * live bytes at that address first. An entry that neither scans nor validates stays 0 and the shield DOES
+ * NOT ARM (fault_shield.c). Every entry here is load-bearing -- the shield calls, hooks, patches, redirects
+ * RIP into, or range-checks against each one -- so a partial resolve is not a degraded shield, it is a
+ * shield operating on unidentified addresses. (This replaces an earlier policy of substituting known_rva
+ * unconditionally so a partial-resolve build "still arms": that was safe while only one DOOM build existed,
+ * but DOOM's April 2024 patch relocated code wholesale, so there a stale known_rva addresses an unrelated
+ * function -- and a call through a wrong address corrupts the SEH frame, which __try cannot catch.)
  *
  * DATA globals (the editor singleton, the throw-gate suppressors) are NOT sig-able (non-unique .data) and
  * stay as recipe-tagged base+RVA literals in engine_layout.h -- see the re-derive comments there.
@@ -54,9 +61,13 @@ typedef struct shield_engine {
 extern shield_engine g_eng;
 
 /* Resolve the shield's engine functions by signature over the live DOOM module at `module_base`. Fills
- * g_eng; for any sig that does not resolve UNIQUELY, falls back to module_base+known_rva and logs the
- * miss. Returns the count that resolved by signature (the rest are on their recipe-tagged RVA backstop).
- * SEH-guarded internally (the resolver's scan + every fallback deref). */
+ * g_eng. An entry resolves only if the scan finds it uniquely, or the known site VALIDATES as a detoured
+ * copy of it; otherwise the entry is left 0 and the refusal is logged. Returns the count that resolved.
+ * SEH-guarded internally. Compare against shield_engine_expected() -- anything less must not arm. */
 int shield_resolve_engine(const uint8_t *module_base);
+
+/* How many entries shield_resolve_engine tries to resolve (the sig table's size). The arm gate requires
+ * shield_resolve_engine() == this: every entry is load-bearing, so a partial resolve must not arm. */
+int shield_engine_expected(void);
 
 #endif /* SHIELD_SIGS_H */
