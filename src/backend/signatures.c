@@ -678,5 +678,35 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "89 B3 A8 02 00 00 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? "
       "48 85 C9 74 12 66 C7",
       0x5E4C28u },
+
+    /* ============================================================================================
+     * BACKEND-ADDED, NOT from the reference implementation's ENGINE_SIGNATURES / the project's
+     * extractor tool. This entry has no upstream counterpart -- it exists only for OUR OWN
+     * command-unlock feature (commands.c's AddCommand detour, see IDLIST_GROW comment there). If
+     * the table above is ever wholesale-regenerated from a fresh extractor run, this entry must be
+     * re-added by hand afterward -- it will NOT survive a blind overwrite of this array. */
+    { "IdListGrow",        /* idList grow-policy dispatcher (mode check -> +1/double/cap/custom ->
+                            * tail-jump to the shared resize routine). AddCommand (see the "AddCommand"
+                            * sig above) calls this on cmdSys+0x08 (FULL list) and cmdSys+0x20 (DEV
+                            * list) before each append -- commands.c's one-time unlock pass + the
+                            * AddCommand detour both need a growable-DEV-list append and previously used
+                            * a raw hardcoded RVA (BUILD-LOCKED, broke on the April 2024 DOOM patch --
+                            * see docs/backend-changes.md). Captured 2026-07-15 via live-debug read of
+                            * the post-patch DOOMx64vk.exe (Ghidra attach, NOT an unpacked static file --
+                            * the RVA is process-independent, ASLR only moves the module's base, never
+                            * its internal layout). 127 bytes, 5 wildcarded spans: the leading CMP's
+                            * RIP-relative data displacement + 4 JMP rel32 targets (each points at the
+                            * shared tail-resize routine or elsewhere; those addresses move independently
+                            * of this function's own code and are NOT part of its identity). known_rva
+                            * below is the PRE-April-2024 build's address (0x699a60) -- kept only for the
+                            * hook-tolerant known_rva fallback (see try_hooked_known_rva above), NOT
+                            * trusted blindly: if the scan finds nothing on some future build, the caller
+                            * (commands.c) gets a NULL and skips the grow entirely rather than guessing. */
+      "80 3D ?? ?? ?? ?? 00 4C 8B C9 74 0F 44 8B 41 0C 41 FF C0 41 8B D0 E9 ?? ?? ?? ?? "
+      "0F B7 41 10 66 85 C0 75 42 44 8B 41 0C 45 85 C0 75 11 41 B8 01 00 00 00 49 8B C9 "
+      "41 8B D0 E9 ?? ?? ?? ?? 41 81 F8 00 00 00 40 7C 11 41 B8 FF FF FF 7F 49 8B C9 41 "
+      "8B D0 E9 ?? ?? ?? ?? 45 03 C0 49 8B C9 41 8B D0 E9 ?? ?? ?? ?? 45 8B 41 0C 0F BF "
+      "C8 44 03 C1 41 8B C0 99 F7 F9 49 8B C9 44 2B C2 41 8B D0",
+      0x699A60u },
     { NULL, NULL, 0 }   /* terminator */
 };

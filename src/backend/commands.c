@@ -1343,10 +1343,19 @@ static const cmd_entry CMD_TABLE[] = {
 #define CMD_COUNT_SANITY    100000u
 
 /* idList grow (engine FUN_140699a60): ensures room for one more element on the idList at `list`
- * (granularity-or-double then idList::Resize, the engine allocator). BUILD-LOCKED RVA + recipe:
- * re-derive by decompiling AddCommand (0x1aa3630) -- it calls THIS on cmdSys+0x08 (FULL) and
- * cmdSys+0x20 (DEV) before each append. A wrong RVA degrades to a skipped insert (SEH), never a crash. */
-#define IDLIST_GROW_RVA     0x699a60u
+ * (granularity-or-double then idList::Resize, the engine allocator). AddCommand calls THIS on
+ * cmdSys+0x08 (FULL) and cmdSys+0x20 (DEV) before each append.
+ *
+ * FORMERLY a raw hardcoded RVA here -- broke silently on the April 2024 DOOM patch (the address moved,
+ * as any BUILD-LOCKED literal can), and NOT as safely as the old comment claimed: calling through a
+ * WRONG-but-still-valid-looking address can execute a few garbage instructions and corrupt the stack
+ * BEFORE it faults, which can break the SEH unwind needed to even reach the enclosing __except -- so
+ * "a wrong RVA degrades to a skipped insert, never a crash" was false in practice (see the
+ * post-patch crash writeup in docs/backend-changes.md). Now resolved via the "IdListGrow" signature
+ * (signatures.c, hand-added -- see that entry's comment for why it isn't in the ported reference
+ * table) at install time and passed in as `idlist_grow`; NULL (signature genuinely not found on some
+ * future build) correctly falls through to the existing "can't grow safely -> skip" no-op path below,
+ * rather than trusting a stale address. */
 typedef void (*idlist_grow_fn)(void *idlist);
 
 /* The AddCommand detour: OR flags|6 then call through the trampoline (= the original mod's
@@ -1425,15 +1434,17 @@ static uint32_t command_unlock_pass(uint8_t *cmdSys, idlist_grow_fn grow)
 }
 
 /* Install the command unlock: detour AddCommand (all FUTURE registrations) + a one-time pass over the
- * commands already registered. Idempotent-latched by the caller (one-shot). cmdsys/add_command already
- * resolved; module_base anchors the engine idList-grow. */
-static void sh_command_unlock_install(void *cmdsys, void *add_command, const uint8_t *module_base)
+ * commands already registered. Idempotent-latched by the caller (one-shot). cmdsys/add_command/
+ * idlist_grow already resolved by the caller (dllmain.c, via the "IdListGrow" signature). */
+static void sh_command_unlock_install(void *cmdsys, void *add_command, void *idlist_grow)
 {
     if (cmdsys == NULL || add_command == NULL) {
         backend_log("B2: command-unlock SKIPPED -- cmdsys/AddCommand unresolved");
         return;
     }
-    idlist_grow_fn grow = module_base ? (idlist_grow_fn)(module_base + IDLIST_GROW_RVA) : NULL;
+    if (idlist_grow == NULL)
+        backend_log("B2: command-unlock -- IdListGrow unresolved, DEV-list growth will skip past capacity (SEH-safe no-op)");
+    idlist_grow_fn grow = (idlist_grow_fn)idlist_grow;
 
     /* (1) detour AddCommand: every FUTURE registration (incl. gameplay commands on level load) gets
      *     flags|6, so the engine's own AddCommand inserts it into BOTH tables, growing properly. */
@@ -1477,7 +1488,7 @@ static int register_cmd(const cmd_entry *e)
 }
 
 int sh_commands_install(void *add_command, void *cmdsys, void *printf_disp, void *get_decls,
-                        const uint8_t *module_base)
+                        const uint8_t *module_base, void *idlist_grow)
 {
     if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;   /* one-shot */
 
@@ -1504,6 +1515,6 @@ int sh_commands_install(void *add_command, void *cmdsys, void *printf_disp, void
     /* Command unlock: detour AddCommand (flags|6 on every future registration) + a one-time pass over
      * the already-registered set, so every command stays usable once a dev command flips dev mode.
      * Runs AFTER our own registrations are in the FULL table (the pass mirrors them into DEV too). */
-    sh_command_unlock_install(g_cmdsys, (void *)g_add_command, g_module_base);
+    sh_command_unlock_install(g_cmdsys, (void *)g_add_command, idlist_grow);
     return n;
 }

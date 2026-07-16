@@ -278,7 +278,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         void *add_cmd  = (void *)sig_addr_by_name(results, db, "AddCommand");
         void *printf_d = (void *)sig_addr_by_name(results, db, "Printf");
         void *cmdsys   = sh_resolve_cmdsys(results, db, g_doom_base);
-        sh_commands_install(add_cmd, cmdsys, printf_d, get_decls, g_doom_base);
+        void *idl_grow = (void *)sig_addr_by_name(results, db, "IdListGrow");
+        sh_commands_install(add_cmd, cmdsys, printf_d, get_decls, g_doom_base, idl_grow);
 
         /* backend touch: AFTER `sh` is registered (sh_commands above registers the "sh" command),
          * create the shared UI-interface object + LoadLibraryA(".\\snaphak\\snaphakui.dll") +

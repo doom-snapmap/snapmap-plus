@@ -76,9 +76,11 @@ void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *modu
  *                   + the material lookups. May be 0 (those handlers then log they can't run).
  *   module_base   = the DOOM module base; cached so the devmode [15][16] handlers resolve the
  *                   SessionDevModeGetter signature at FIRE (the engine-code patch site) off it.
+ *   idlist_grow   = resolved engine idList-grow helper (sig "IdListGrow"); feeds the command-unlock
+ *                   pass's DEV-list append (NULL => that pass skips growth safely, never a guess).
  * Returns the number of commands registered (0 on SKIP). Emits "B2: registered N/22 console commands".
  */
 int sh_commands_install(void *add_command, void *cmdsys, void *printf_disp, void *get_decls,
-                        const uint8_t *module_base);
+                        const uint8_t *module_base, void *idlist_grow);
 
 #endif /* BACKEND_B2_COMMANDS_H */
