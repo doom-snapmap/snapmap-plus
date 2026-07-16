@@ -740,6 +740,12 @@ static void sh_diag_dump_true_editor(const uint8_t *E)
  * Before resolution: accept the boot RVA if it fingerprints (old build), else THROTTLED-scan for it (new
  * build) -- the scan only succeeds in-editor, so it naturally no-ops at the HUB and resolves on entry. Once
  * found, g_editor is corrected in place so every existing g_editor/editor_session user gets the right base. */
+/* Public accessor -- see iface_engine.h. Exists so other translation units share THIS resolution instead
+ * of each keeping a private `module_base + <editor RVA>` (apply_engine.c did exactly that, which is why
+ * its editor pointer was stale on the current DOOM build while this one was correct). */
+static const uint8_t *editor_base(void);   /* defined just below */
+const uint8_t *sh_iface_editor(void) { return editor_base(); }
+
 static const uint8_t *editor_base(void)
 {
     sh_diag_dump_module();   /* flag-gated one-time module dump for the Ghidra decompilation workflow */
@@ -752,7 +758,7 @@ static const uint8_t *editor_base(void)
      * yet (cheap return). The full scan below stays as the portable fallback if this slot ever fails. */
     if (g_module_base && EDITOR_GLOBAL_PTR_RVA) {
         void *P = NULL, *vt = NULL;
-        if (ie_read_ptr(g_module_base + EDITOR_GLOBAL_PTR_RVA, &P)) {   /* slot READABLE => it is our source of truth */
+        if (ie_read_ptr(g_module_base + EDITOR_GLOBAL_PTR_RVA, &P)) {   /* slot readable */
             if (P &&
                 ie_read_ptr(P, &vt) &&
                 (vt == (const void *)(g_module_base + EDITOR_VTABLE_RVA) ||
@@ -767,7 +773,13 @@ static const uint8_t *editor_base(void)
                 sh_diag_dump_true_editor(g_editor);
                 return g_editor;
             }
-            return NULL;   /* editor not up yet (slot null / not-yet-valid) -- cheap no-op, do NOT run the slow scan */
+            if (P == NULL) return NULL;   /* the slot IS this build's, the editor is simply not up yet:
+                                           * cheap no-op, and deliberately NOT the slow scan. */
+            /* Slot is readable but its target is not an editor. That does NOT mean "no editor": this RVA is
+             * a constant for ONE DOOM build, and it is below SizeOfImage on the other build too, so the read
+             * SUCCEEDS there and returns unrelated data. Returning NULL here made the editor unresolvable on
+             * any build this constant does not belong to -- the boot-RVA and scan paths below were never
+             * reached. Fall through to them instead; they identify the editor by SHAPE, not by a constant. */
         }
         /* slot READ FAULTED (RVA out of this build's range) -> fall through to the portable pointer-scan. */
     }

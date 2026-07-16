@@ -27,6 +27,7 @@
 #include "rawmap.h"
 #include "ui_bridge.h"   /* sh_ui_get_iface() -- the `sh` dispatcher gates on the interface */
 #include "hook.h"        /* install_inline_hook -- the AddCommand detour for the command unlock */
+#include "iface_engine.h" /* sh_iface_editor -- the ONE identified editor pointer (showcursor writes to it) */
 #include "backend_log.h"
 
 /* ------------------------------------------------------------------------ engine fn typedefs ------ */
@@ -720,7 +721,7 @@ static void h_sh_genbmodel(idCmdArgs *a)
  * *(engineBase+0x57216f0) -- a .data SLOT. We resolve it BUILD-PORTABLY: the RenderWorldGetter sig anchors a
  * unique engine window carrying `LEA RCX,[rip+slot]`; sh_decode_rip_slot decodes it to the slot RVA, then we
  * deref once for the live idRenderWorld*. Fallback: *(g_module_base + 0x57216f0). The editor singleton (for
- * showcursor) is the SAME recipe-tagged data RVA sh_iface_engine uses (module_base + 0x3056748).
+ * showcursor) is obtained from sh_iface_editor() -- the one resolver that identifies it per build.
  *
  * PORTED (safe, read-only): dumprenderinfo (=OG dumpmodelinfo: walk the rendermodel list, Printf each name),
  * showcursor (write byte[editor+0x23624]=0), togglefpsupdate (cosmetic flag toggle -- clone-local state),
@@ -745,9 +746,8 @@ static void h_sh_genbmodel(idCmdArgs *a)
 #define RW_MODEL_NAME_OFF         0x10        /* render model -> name char* (model+0x10) (BUILD-SPECIFIC) */
 #define ED_SHOWCURSOR_OFF         0x23624u    /* editor -> showcursor byte (OG writes 0) (BUILD-SPECIFIC) */
 #define RW_MODEL_COUNT_CAP        1000000u    /* stale-renderWorld guard on the model count */
-#define EDITOR_SINGLETON_RVA      0x3056748u  /* inline idSnapEditorLocal object = module_base + this (SAME recipe
-                                               * as iface_engine.c EDITOR_SINGLETON_RVA; in-place ctor 0x51A8E0;
-                                               * re-derive per build). showcursor writes byte[editor+0x23624]=0. */
+/* (no editor RVA here: showcursor asks sh_iface_editor() for the identified editor. A private copy of the
+ * constant is how this file came to address unrelated memory on the current DOOM build.) */
 
 /* GetDeclsOfType typedef already declared above (get_decls_fn); reuse it for the material lookups. */
 
@@ -796,11 +796,17 @@ static const char *dr_model_name(void *model)
     __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
 /* SEH-guarded write of byte[editor+0x23624]=0 (showcursor). Returns 1 if the write ran. */
+/* Writes byte[editor+0x23624]=0. The editor comes from sh_iface_editor() -- the one resolver, which
+ * IDENTIFIES the object rather than trusting a constant. This used to write through
+ * `g_module_base + EDITOR_SINGLETON_RVA`, and the __try around it gave no protection whatsoever: SEH
+ * catches an access violation, and on a build where that constant is wrong the address is still mapped,
+ * so the write SUCCEEDS -- into whatever else lives there. A guard is not a validation. */
 static int dr_showcursor(void)
 {
-    if (!g_module_base) return 0;
+    const uint8_t *ed = sh_iface_editor();
+    if (!ed) return 0;   /* editor not up / not identified on this build -- do nothing, report it */
     __try {
-        *(volatile unsigned char *)(g_module_base + EDITOR_SINGLETON_RVA + ED_SHOWCURSOR_OFF) = 0;
+        *(volatile unsigned char *)(ed + ED_SHOWCURSOR_OFF) = 0;
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }

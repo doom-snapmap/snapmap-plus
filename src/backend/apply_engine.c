@@ -42,7 +42,8 @@
 /* SAME this-live-build offsets iface_engine.c uses (ported from the reference implementation, SEH-guarded). The editor
  * singleton is a hardcoded data RVA (like cmdSystem/cvarSystem). The entity ARRAY + defsub reach is the
  * SAME the apply (FUN_180004b80) + serialize (FUN_1800044a0) resolve. */
-#define EDITOR_SINGLETON_RVA   0x3056748u   /* module_base + this = the inline idSnapEditorLocal object */
+/* (EDITOR_SINGLETON_RVA removed: this file no longer locates the editor itself. The constant described the
+ * pre-April-2024 build's inline object only; sh_iface_editor() identifies the editor on either build.) */
 #define ED_MAP_OBJ_OFF         0x204c8      /* editor+0x204c8 -> loaded-map object ptr (null off-editor) */
 #define ARR_ENT_ARRAY_OFF      0x6a0        /* arrObj+0x6a0 -> entity-ptr array (8-byte entries) */
 #define ARR_ENT_COUNT_OFF      0x6a8        /* arrObj+0x6a8 -> entity count (u32) */
@@ -226,7 +227,7 @@ typedef void  (*prefab_dtor_fn)(void *self);                                    
 
 /* ============================================================ module state (resolved once) ========== */
 static const uint8_t      *g_doom_base   = NULL;
-static const uint8_t      *g_editor      = NULL;   /* module_base + 0x3056748 (inline editor object) */
+/* (no private editor pointer here -- ae_editor_session() asks sh_iface_editor() for the identified one) */
 static void               *g_cmdsys      = NULL;   /* idCmdSystemLocal* (for BufferCommandText/AddCommand) */
 static entity_clone_fn     g_entity_clone = NULL;
 static entity_def_ctor_fn  g_def_ctor    = NULL;
@@ -286,13 +287,23 @@ static int ae_read_u32_safe(const void *src, int *out)
     __except (EXCEPTION_EXECUTE_HANDLER) { *out = 0; return 0; }
 }
 
-/* "editor up" guard, matching the reference implementation editorSession: the loaded-map ptr (+0x204c8) is non-null in-editor. */
+/* "editor up" guard, matching the reference implementation editorSession: the loaded-map ptr (+0x204c8) is
+ * non-null in-editor.
+ *
+ * The editor pointer comes from sh_iface_editor() -- the ONE resolver, which IDENTIFIES the object (global
+ * pointer slot with an editor vtable, else a shape fingerprint) instead of trusting a constant. This file
+ * previously computed `module_base + EDITOR_SINGLETON_RVA` itself; that constant describes the pre-April-2024
+ * build (where the editor is an inline object) and addresses unrelated memory on the current one (where it is
+ * heap-allocated and reached through a pointer). The map!=NULL test below could not catch that: on a wrong
+ * base it is a coincidence test on unrelated memory, not an identity check. Resolve per call -- the editor
+ * does not exist until a map is open, and it is not stable across map loads. */
 static const uint8_t *ae_editor_session(void)
 {
-    if (!g_editor) return NULL;
+    const uint8_t *ed = sh_iface_editor();
+    if (!ed) return NULL;
     void *mapObj = NULL;
-    if (!ae_read_ptr(g_editor + ED_MAP_OBJ_OFF, &mapObj) || mapObj == NULL) return NULL;
-    return g_editor;
+    if (!ae_read_ptr(ed + ED_MAP_OBJ_OFF, &mapObj) || mapObj == NULL) return NULL;
+    return ed;
 }
 
 /* the entity-ptr array {array, count} off the loaded-map object; 0 on no map / fault. */
@@ -1214,7 +1225,9 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
     if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;   /* one-shot */
 
     g_doom_base = module_base;
-    if (module_base) g_editor = module_base + EDITOR_SINGLETON_RVA;
+    /* (the editor is NOT captured here: it does not exist until a map is open, and it is identified per
+     * use by sh_iface_editor() -- see ae_editor_session(). Capturing module_base + a constant at install
+     * is what made this file's editor pointer stale on the current DOOM build.) */
     g_cmdsys = cmdsys;
 
     if (!g_pending_lock_init) { InitializeCriticalSection(&g_pending_lock); g_pending_lock_init = 1; }

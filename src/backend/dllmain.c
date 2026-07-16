@@ -302,7 +302,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* backend touch: bind the UI-interface's engine-touch vtable slots -- the LIGHT touches
          * the SnapStack STORE-ops need (selection read/write, hovered id, toast, class/inherit read, id
          * validity/count) PLUS the heavy serialize/apply/read-prefab slots (+0xc8/+0xd0/+0xb8, folded
-         * in from sh_apply_engine). The editor singleton is a hardcoded data RVA (0x3056748, like cmdSystem);
+         * in from sh_apply_engine). The editor singleton is IDENTIFIED at use time by sh_iface_editor()
+         * (global-pointer slot with an editor vtable, else a shape fingerprint scan) -- not a hardcoded RVA,
+         * which describes only one DOOM build and silently addresses unrelated memory on the other;
          * the selection/toast/idStr engine FNS are resolved by name from `results` (signature-based). AFTER
          * sh_ui_bridge_install (the interface + its shared vtable must exist) + sh_apply_engine_install (its
          * slot bodies must be ready). See iface_engine.c. */

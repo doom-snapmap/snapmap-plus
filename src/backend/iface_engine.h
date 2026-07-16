@@ -41,4 +41,15 @@ int sh_iface_class_inherit_ok(int id, const char *newClass, const char *newInher
  * yields the "... (no module)" form (no resolvable ref -- the caller rejects it). SEH-guarded. */
 const char *ie_resolve_id_string(int id, char *buf, int cap);
 
+/* THE editor singleton, identified and cached, or NULL if it is not up yet / could not be identified on
+ * this DOOM build. Resolution is by IDENTITY (a global-pointer slot whose target carries an editor vtable,
+ * else a shape fingerprint scan) -- never by trusting a constant.
+ *
+ * Any backend translation unit that needs the editor MUST call this. Do not compute `module_base + <an
+ * editor RVA>` privately: the editor is an inline object on the pre-April-2024 build but a heap-allocated,
+ * pointer-indirect object on the current one, so a private copy of either constant silently addresses
+ * unrelated memory on the other build -- and reads through it do not fault, they return plausible garbage.
+ * Call it per use rather than caching at install: the editor does not exist until a map is opened. */
+const uint8_t *sh_iface_editor(void);
+
 #endif /* B2_IFACE_ENGINE_H */
