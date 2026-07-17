@@ -170,8 +170,8 @@ static char ov_ret_false(ov_stream *s)          { (void)s; return 0; }
  *     total += seekread(this, base_off + off, bufs[i], 0x10000)
  * advancing off by 0x10000 per iteration while off < total_len, and returns the accumulated count. The
  * length-0 guard and the advance-then-compare ordering match the engine's (it is a do/while). This is the
- * method a >64KB resource read goes through -- our built-in settings decl is 70,016 bytes, so this path is
- * live on any normal boot, not an exotic one. */
+ * method any override larger than 64KB is read through, so it is reachable by nothing more exotic than a
+ * user dropping a large file in the overrides folder. */
 static long long ov_scatter_read(ov_stream *s, long long base_off, void **bufs, long long total_len)
 {
     if (!s || !bufs || total_len <= 0) return 0;
