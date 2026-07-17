@@ -1103,7 +1103,7 @@
         var parts = unq(v.text).split(/\s+/).filter(Boolean);
         for (var q = 0; q < parts.length; q++)
           if (vals.indexOf(parts[q]) === -1)
-            sdiag(diags, v, 'enum-value', "'" + parts[q] + "' is not among the known " + specArg(spec) + ' values (' + vals.slice(0, 4).join(', ') + (vals.length > 4 ? ', …' : '') + ') -- double-check.');
+            sdiag(diags, v, 'enum-value', "'" + parts[q] + "' is not among the known " + specArg(spec) + ' values (' + vals.slice(0, 4).join(', ') + (vals.length > 4 ? ', ...' : '') + ') -- double-check.');
       }
     }
   }
@@ -3108,7 +3108,7 @@
   if (newFolderBtn) newFolderBtn.addEventListener('click', function(){
     if (!prefabTree) return;
     var f = document.createElement('div'); f.className = 'pf-folder pf-open';
-    f.innerHTML = '<div class="pf-folder-head"><span class="pf-caret">▾</span> <input class="pf-folder-name" value="New Folder"><span class="pf-folder-del" title="Delete folder">✕</span></div><div class="pf-folder-body"></div>';
+    f.innerHTML = '<div class="pf-folder-head"><span class="pf-caret">&#9662;</span> <input class="pf-folder-name" value="New Folder"><span class="pf-folder-del" title="Delete folder">&#10005;</span></div><div class="pf-folder-body"></div>';
     prefabTree.appendChild(f);
     var inp = f.querySelector('.pf-folder-name');
     var done = false;
