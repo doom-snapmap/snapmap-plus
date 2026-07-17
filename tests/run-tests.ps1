@@ -8,6 +8,7 @@
 # Default: the self-contained tests (no game, no built DLL needed):
 #   shield_format_test  -- the fault record string formatter (pure logic)
 #   hook_test           -- the inline-detour installer, on a hand-laid scratch stub
+#   vcm_fallback_test   -- the class/inherit dropdown corpus-snapshot fallback (pure logic)
 # -Doom <unpacked DOOMx64vk.exe>: ALSO the signature-resolver tests, which scan a real
 #   (Steamless-unpacked) DOOM image:
 #   sig_test            -- every engine signature resolves to its known RVA
@@ -33,6 +34,7 @@ if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
 $tests = @(
     @{ name = "shield_format_test"; src = 'shield_format_test.c ..\src\fault_shield\fault_record.c'; arg = "" }
     @{ name = "hook_test";          src = 'hook_test.c ..\src\backend\hook.c';                       arg = "" }
+    @{ name = "vcm_fallback_test";  src = 'vcm_fallback_test.c ..\src\backend\vcm_fallback.c';       arg = "" }
 )
 if ($Doom) {
     if (-not (Test-Path $Doom)) { throw "-Doom path not found: $Doom" }

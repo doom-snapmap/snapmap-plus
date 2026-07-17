@@ -365,7 +365,12 @@ static const uint8_t *ti_type_array_base(void)
         __try { P = *(const uint8_t * const *)reflect; }
         __except (EXCEPTION_EXECUTE_HANDLER) { P = NULL; }
     }
-    if (P == NULL && g_doom_base) P = g_doom_base + TYPE_CONTAINER_RVA;   /* UI-thread fallback (fixed global) */
+    /* The UI-thread fallback is a BUILD-LOCKED data RVA. Gate it on the declMgr-accessor prologue check
+     * (the build detector): on a build where that accessor moved, this sibling constant is stale too, and
+     * a read through a wrong-but-mapped address does not fault -- it returns garbage records that would
+     * PREEMPT the static-snapshot fallback downstream. Refuse instead (callers degrade to the snapshot). */
+    if (P == NULL && g_doom_base && sh_typeinfo_get_declmgr() != NULL)
+        P = g_doom_base + TYPE_CONTAINER_RVA;   /* UI-thread fallback (fixed global) */
     if (P == NULL) return NULL;
     const uint8_t *B = NULL;
     __try { B = *(const uint8_t * const *)(P + REGISTRY_TYPEBASE_OFF); }
@@ -421,6 +426,10 @@ int sh_typeinfo_collect_records(sh_ti_record *out, int cap)
 int sh_typeinfo_collect_inherits(const char **out_names, int cap)
 {
     if (!out_names || cap <= 0 || !g_doom_base) return -1;
+    /* RESOURCE_MGR_CTX_RVA is build-locked (same hazard as ti_type_array_base's fallback: a stale data RVA
+     * reads wrong-but-mapped memory without faulting). Same gate: if the declMgr accessor moved on this
+     * build, refuse -- the caller serves the static snapshot instead. */
+    if (!sh_typeinfo_get_declmgr()) return -1;
     int n = 0;
     __try {
         const uint8_t *mgr = g_doom_base + RESOURCE_MGR_CTX_RVA;

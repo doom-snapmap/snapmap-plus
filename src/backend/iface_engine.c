@@ -31,7 +31,7 @@
 #include "signatures.h"
 #include "backend_log.h"
 #include "typeinfo.h"       /* sh_typeinfo_class_derives + the LIVE registry walks (collect_records/inherits) */
-#include "valid_class_map.h" /* SH_VCM_* -- the class-dropdown static snapshot (used only if the live walk fails) */
+#include "vcm_fallback.h"    /* the class/inherit-dropdown static snapshot (used only if the live walk fails) */
 #include "wiring_cleandirect.h" /* sh_wiring_cleandirect_generation -- the wire-any connect-edit counter (+0x288) */
 #include "snapstack.h"          /* sh_snapstack_push_ids_backend -- the SnapStack stack push (+0x2A0) */
 
@@ -1505,17 +1505,6 @@ static int slot_enum_decls_of_resclass(sh_iface *self, const char *res_class, ch
     return sh_typeinfo_enum_decls_of_type(res_class, out_buf, cap, out_count);
 }
 
-/* pack a NUL string into out_buf at *pw (double-NUL-able); bumps *pw + returns 1 if it fit, else 0. */
-static int vcm_pack(char *out_buf, int cap, int *pw, const char *s)
-{
-    int nlen = (int)strlen(s);
-    if (*pw + nlen + 1 > cap - 1) return 0;          /* leave room for the trailing arena NUL */
-    memcpy(out_buf + *pw, s, (size_t)nlen);
-    out_buf[*pw + nlen] = '\0';
-    *pw += nlen + 1;
-    return 1;
-}
-
 /* ---- local derive-from-Y over the walked type records. The Qt UI thread (where these dropdowns run) cannot
  * call the engine's reflect-based derive check, so we sort the LIVE registry records by name once and chain
  * each candidate's super up the tree by bsearch -- all raw reads, thread-safe. ---- */
@@ -1539,22 +1528,6 @@ static int ec_derives(const sh_ti_record *sorted, int n, const char *C, const ch
     }
     return 0;
 }
-/* the static-snapshot fallback (used only if the live registry is unreachable) -- the old corpus map. */
-static int ec_fallback_valid_classes(const char *inherit, char *out_buf, int cap, int *written, int *names)
-{
-    const char *ey = NULL;
-    for (int i = 0; i < SH_VCM_INHERIT_Y_N; i++)
-        if (strcmp(SH_VCM_INHERIT_Y[i].inherit, inherit) == 0) { ey = SH_VCM_INHERIT_Y[i].y; break; }
-    if (!ey) return 0;
-    for (int i = 0; i < SH_VCM_Y_CLASSES_N; i++)
-        if (strcmp(SH_VCM_Y_CLASSES[i].y, ey) == 0) {
-            const vcm_yc *e = &SH_VCM_Y_CLASSES[i];
-            for (int j = 0; j < e->n; j++) { if (!vcm_pack(out_buf, cap, written, e->classes[j])) break; (*names)++; }
-            return 1;
-        }
-    return 0;
-}
-
 /* +0x270 (clone-extension slot 1) ENUMERATE the valid classes for `inherit` (the linked class dropdown) ->
  * packed NUL-terminated strings (double-NUL end). Resolves Y = the inherit's base className; an EMPTY or
  * unresolvable inherit -> "idEntity" (the universal entity set -- the engine accepts a class-only entity, so
@@ -1584,13 +1557,13 @@ static int slot_enum_valid_classes(sh_iface *self, const char *inherit, char *ou
         for (int i = 0; i < k; i++) {
             const char *C = recs[i].name;
             if (C && C[0] && ec_derives(recs, k, C, Y)) {           /* C==Y is handled inside ec_derives */
-                if (!vcm_pack(out_buf, cap, &written, C)) break;
+                if (!sh_vcm_pack(out_buf, cap, &written, C)) break;
                 names++;
             }
         }
-    } else if (inherit && inherit[0]) {
-        ec_fallback_valid_classes(inherit, out_buf, cap, &written, &names);   /* live registry unreachable */
     }
+    if (names == 0 && inherit && inherit[0])                        /* live registry unreachable (or a dry walk) */
+        sh_vcm_fallback_valid_classes(inherit, out_buf, cap, &written, &names);
 
     out_buf[written] = '\0';               /* double-NUL end marker */
     if (out_count) *out_count = names;
@@ -1599,9 +1572,10 @@ static int slot_enum_valid_classes(sh_iface *self, const char *inherit, char *ou
 
 /* +0x278 (clone-extension slot 2) ENUMERATE the complete valid-INHERIT set -- every loaded entityDef (the
  * inherit dropdown). Raw walk of the entityDef decl manager (sh_typeinfo_collect_inherits) -> thread-safe on
- * the UI thread. Packs the decl paths (sorted + adjacent-deduped) into out_buf. Returns 0 if the manager is
- * unreachable (the frontend then keeps its static list). Replaces the frozen 272-entry inherit list with the
- * engine's full ~2,500. */
+ * the UI thread. Packs the decl paths (sorted + adjacent-deduped) into out_buf: the engine's full ~2,500 on
+ * a build where the manager is reachable. Fallback: the static snapshot's 272 inherits -- the frontend keeps
+ * NO list of its own (it renders whatever this slot returns, and an empty reply is an empty dropdown), so
+ * this slot must never come back empty just because the live walk refused on the running build. */
 static int ec_cstr_ptr_cmp(const void *a, const void *b)
 {
     return strcmp(*(const char * const *)a, *(const char * const *)b);
@@ -1615,12 +1589,13 @@ static int slot_enum_inherits(sh_iface *self, char *out_buf, int cap, int *out_c
 
     static const char *names[SH_REGISTRY_MAX];   /* UI-thread-serial -> static ok */
     int k = sh_typeinfo_collect_inherits(names, SH_REGISTRY_MAX);
-    if (k <= 0) return 0;
+    if (k <= 0)
+        return sh_vcm_fallback_inherits(out_buf, cap, out_count);   /* live manager unreachable -> snapshot */
     qsort((void *)names, (size_t)k, sizeof(const char *), ec_cstr_ptr_cmp);   /* alpha + adjacent-dedup (cast: C4090) */
     int written = 0, cnt = 0;
     for (int i = 0; i < k; i++) {
         if (i > 0 && strcmp(names[i], names[i - 1]) == 0) continue;   /* dedup (sorted) */
-        if (!vcm_pack(out_buf, cap, &written, names[i])) break;
+        if (!sh_vcm_pack(out_buf, cap, &written, names[i])) break;
         cnt++;
     }
     out_buf[written] = '\0';

@@ -176,6 +176,15 @@ validates the accessor's prologue bytes before calling; `sh_typeinfo_inherit_bas
 mismatch they return NULL → the whole type registry **degrades to a static class list** instead of
 crashing. (Live registry restoration = re-derive those RVAs; see TODO.)
 
+**Follow-up (the degradation is now real, not just intended):** the refusal originally left the inherit
+dropdown EMPTY ("no matches") — the slot behind it had no fallback (only the class dropdown did), and the
+frontend keeps no list of its own. Both dropdown slots now serve `valid_class_map.h` (the snapshot generated
+from the game's own shipped entityDef declarations: 272 inherits, inherit → base class → valid classes) when
+the live walk refuses, and the two remaining raw data-RVA reads (`0x3082B10` type-container, `0x59BD8F0`
+resource-mgr ctx) are gated on the same prologue check — a stale data RVA reads wrong-but-mapped memory
+without faulting, so an ungated read returns garbage instead of a clean refusal. Fallback logic factored to
+`src/backend/vcm_fallback.c` + covered by `tests/vcm_fallback_test.c`.
+
 ### 6. Editing: classname / inherit / decl / displayname
 - **classname / inherit / decl-source** use **signature-resolved** engine functions (`IdStrAssign`,
   `DeclSourceRebuild`) — correct on the new build. Gated behind `SH_NEWBUILD_WRITE_VERIFIED` (now `1`).

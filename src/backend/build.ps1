@@ -49,7 +49,7 @@ param(
                            "rawmap.c", "palette_guard.c", "strids.c",
                            "overrides.c", "cvars.c", "commands.c", "clipboard.c",
                            "entity.c", "typeinfo.c", "patch.c", "algo.c", "target_any.c", "wiring_cleandirect.c", "ui_bridge.c",
-                           "iface_engine.c", "apply_engine.c", "../common/snaphak_iface.c",
+                           "iface_engine.c", "apply_engine.c", "vcm_fallback.c", "../common/snaphak_iface.c",
                            # backend-hosted SnapStack (snapstack.c + json_patch.c): the `sh psel`/`sh acctargets`/
                            # etc. console commands + the stores -- the SOLE SnapStack implementation, shared by both
                            # the Qt and webview frontends (the Qt-side src/ui/snapstack.cpp copy was retired).
