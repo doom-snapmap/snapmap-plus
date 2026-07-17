@@ -93,6 +93,33 @@
 
   .placeholder { display: flex; align-items: center; justify-content: center; text-align: center; color: var(--muted); font-style: italic; padding: 20px; }
   .editor-col { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+  /* distraction-free Decl Text editor: the Decl Text label/problem-count/editor/problems bar stay exactly
+     where they are in the flex column -- only the identity/fields/description chrome above and below them
+     is hidden, and the whole column takes over the viewport so the editor gets the freed-up space. The
+     textarea itself is never touched, so its scroll position, selection, undo history and listeners survive
+     the toggle untouched. Save/Revert/dirty-note (normally in the covered .panel-head) are the one thing
+     that DOES move -- .focus-head below receives them for the duration, then they're moved back on exit
+     (see setDeclFocus()); they're the same nodes with the same listeners, just reparented. */
+  .editor-col.focus-mode {
+    position: fixed; inset: 14px; z-index: 1800; background: var(--panel);
+    border: 1px solid var(--border2); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,0.35);
+    padding: 12px;
+  }
+  .editor-col.focus-mode .ident,
+  .editor-col.focus-mode .fields,
+  .editor-col.focus-mode .desc-panel { display: none; }
+  .editor-col.focus-mode .section-label { margin-top: 0; }
+  .editor-col.focus-mode .code-editor { min-height: 0; }
+  #declFocusBtn.active { color: var(--accent); border-color: var(--accent); }
+  /* .focus-head: NOT a duplicate panel-head bar -- lives right in the "Decl Text" section-label row, next
+     to the distraction-free toggle button itself, and holds the reparented Save/Revert/dirty-note only for
+     the duration of focus mode (prob-count's margin-left:auto already pushes this + the toggle button to
+     the row's right edge, so it reads as one control cluster). No pill/background of its own -- Revert/Save
+     get the "icon" class added while here (see setDeclFocus()), the SAME class declFocusBtn already uses,
+     so they come out the identical rounded-square shape/height, no separate styling to keep in sync. */
+  .focus-head { display: none; align-items: center; gap: 6px; }
+  .editor-col.focus-mode .focus-head { display: flex; }
+  .focus-head .hint { font-size: 10px; }
   /* CLONE EXTENSION: restores the Qt clone's read-only entity_id_lineedit (the resolved id-string --
    * module path + inherit leaf) that this webview dropped -- the identity block at the top of the Entity
    * State panel. Same value the entity list already shows + "Copy ID" already copies; this just makes it
@@ -106,7 +133,11 @@
   .field label { color: var(--muted); white-space: nowrap; flex-shrink: 0; }
   .field.grow { flex: 1; min-width: 140px; }
   .field.grow input { width: 100%; }
-  .section-label { display: flex; align-items: baseline; gap: 8px; font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 10px 0 4px; flex-shrink: 0; }
+  /* align-items: center, not baseline -- this row can hold #dirtyNote (a hint span that's EMPTY when
+     nothing's dirty), and baseline alignment shifts depending on whether an inline sibling has any text to
+     establish a baseline from -- an empty vs. non-empty #dirtyNote was visibly nudging the Revert/Save/
+     focus-toggle buttons up and down as the dirty state changed. center is stable regardless of content. */
+  .section-label { display: flex; align-items: center; gap: 8px; font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 10px 0 4px; flex-shrink: 0; }
   .schema-note { font-weight: 400; letter-spacing: 0; text-transform: none; font-style: italic; }
   .prob-count { font-weight: 400; letter-spacing: 0; text-transform: none; margin-left: auto; }
   .prob-count .n-err { color: var(--sqErr); } .prob-count .n-warn { color: var(--sqWarn); }
@@ -120,7 +151,10 @@
   }
   .code-editor pre { overflow: hidden; pointer-events: none; color: var(--text); }
   .code-editor textarea { overflow: auto; background: transparent; color: transparent; caret-color: var(--text); resize: none; }
-  .code-editor textarea::selection { background: var(--sel); color: transparent; }
+  /* the textarea text is normally transparent (the colored <pre> shows through), but a transparent
+     SELECTION would hide the highlighted text under the --sel background. Give selected text a visible,
+     contrasting color (--selText) so you can read what you're highlighting. */
+  .code-editor textarea::selection { background: var(--sel); color: var(--selText); }
   .tk-key { color: var(--tkKey); } .tk-str { color: var(--tkStr); } .tk-num { color: var(--tkNum); }
   .tk-bool { color: var(--tkBool); } .tk-cmt { color: var(--muted); font-style: italic; }
   .tk-punc, .tk-ident { color: var(--text); } .tk-bad { color: var(--sqErr); }
@@ -213,6 +247,10 @@
   /* taller than the base .combo-list -- these browse a whole map's entity list / the 1611-entry event catalog */
   .entity-picker .combo-list { max-height: 420px; }
   .event-row .combo-list { max-height: 420px; }
+  /* Classname + Inherit dropdowns: WIDER so long class/inherit slugs (e.g. snapmaps/editor_only/...) fit
+     without a horizontal scrollbar, and TALLER so more options are visible at once. overflow-x:hidden is a
+     belt-and-suspenders against any stray horizontal scrollbar; the generous max-width keeps content unclipped. */
+  #cInherit .combo-list, #cClassname .combo-list { max-width: min(80vw, 820px); max-height: 440px; overflow-x: hidden; }
   .entity-picker-opts { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .entity-picker-opts label { display: flex; align-items: center; gap: 4px; color: var(--muted); white-space: nowrap; }
   .entity-picker-opts .btn { font-size: 10px; padding: 3px 8px; }
@@ -320,9 +358,9 @@
     </div>
 
     <div class="panel right-pane">
-      <div class="panel-head">
+      <div class="panel-head" id="entityStateHead">
         <span class="panel-title">Entity State</span>
-        <div class="panel-actions">
+        <div class="panel-actions" id="panelActions">
           <span class="hint" id="dirtyNote"></span>
           <button class="btn" id="revertBtn" disabled>Revert</button>
           <button class="btn primary" id="saveBtn" disabled>Save to Decl</button>
@@ -343,8 +381,9 @@
           <div class="field grow"><label>Displayname</label><input type="text" id="fDisplayname"></div>
         </div>
         <div class="section-label">Decl Text
-          <span class="schema-note" id="declStatus"></span>
           <span class="prob-count" id="probCount"></span>
+          <div class="focus-head" id="focusHead"></div>
+          <button type="button" class="btn icon" id="declFocusBtn" title="Focus mode (Esc to exit)">&#10531;</button>
         </div>
         <div class="code-editor" id="codeEditor">
           <pre aria-hidden="true"><code id="declHl"></code></pre>
@@ -1170,14 +1209,12 @@
     declTokens = tokenizeDecl(text);
     var p = parseDecl(declTokens);
     var cls = $('fClassname').value;
-    var known = schemaCheck(p.rootEntries, cls, p.diags);
+    /* still run the schema check -- it fills p.diags, which drives the problem/warning count on the right.
+     * The schema-status note itself (schema:<cls> N fields / "not in the schema") is intentionally not shown:
+     * users don't need it, and a class missing from the current schema is a non-issue to surface. */
+    schemaCheck(p.rootEntries, cls, p.diags);
     renderHl(text, declTokens, p.diags);
     renderProblems(p.diags);
-    var st = $('declStatus');
-    if (!SCHEMA) st.textContent = '· schema_slice.js not found -- structural checks only';
-    else if (known === 'base') st.textContent = "· '" + cls + "' not in the " + (SCHEMA.classes.length) + '-class schema -- checking against the idEntity base fields';
-    else if (!known) st.textContent = '· schema unavailable -- structural checks only';
-    else st.textContent = '· schema: ' + cls + ' · ' + Object.keys(fieldsFor(cls)).length + ' fields';
     refreshDeclScroll();
   }
   function refreshDeclScroll() {
@@ -2567,6 +2604,40 @@
     if (v) { copyText(v); toast('Copied ID', 'ok'); }
   });
   document.getElementById('revertBtn').addEventListener('click', doRevert);
+  // Distraction-free Decl Text editor: toggles .focus-mode on the editor-col (pure CSS -- the identity/
+  // fields/description chrome hides, the column takes over the viewport, the code-editor grows into the
+  // freed space). No DOM nodes move, so the textarea's scroll/selection/undo/listeners are untouched.
+  // Re-sync the <pre> highlight overlay's scroll after the layout change (its own scroll listener only
+  // fires on user-driven scroll, not on a resize that happens to reveal more/less of the same content).
+  function setDeclFocus(on) {
+    var col = document.getElementById('editor'), btn = document.getElementById('declFocusBtn');
+    col.classList.toggle('focus-mode', on);
+    btn.classList.toggle('active', on);
+    btn.title = on ? 'Exit focus mode (Esc)' : 'Focus mode (Esc to exit)';
+    // Save/Revert/dirty-note live in .panel-head, which focus-mode's fixed overlay covers -- move the SAME
+    // node (not a clone) into .focus-head for the duration so they stay usable, then move it back on exit.
+    // updateDirty()/doSave()/doRevert() already target these elements by id, so nothing else needs to change.
+    var dest = document.getElementById(on ? 'focusHead' : 'entityStateHead');
+    dest.appendChild(document.getElementById('panelActions'));
+    // Match declFocusBtn's own compact "icon" look exactly (reuses its CSS, not a new style to keep in
+    // sync), same as declFocusBtn itself: swap the button's REAL textContent to a plain glyph (not a CSS
+    // ::before hack -- that rendered inconsistently) + set a title so the icon is still explained on hover.
+    // Both restored to their normal word + no title on exit.
+    var revertBtn = document.getElementById('revertBtn'), saveBtn = document.getElementById('saveBtn');
+    revertBtn.classList.toggle('icon', on);
+    saveBtn.classList.toggle('icon', on);
+    // U+21A9/U+2913 (JS escapes, not raw UTF-8 chars) to match this file's existing HTML-entity-icon
+    // convention and stay encoding-safe -- mockup.html gets embedded into a generated C++ header at build time.
+    revertBtn.textContent = on ? '\u21A9' : 'Revert';       // hooked back-arrow -- deliberately NOT the circular-loop shape
+                                                             // refreshBtn uses (Entities panel), which reads too similar at icon size
+    saveBtn.textContent   = on ? '\u2913' : 'Save to Decl'; // downwards-arrow-to-bar -- save/commit
+    if (on) { revertBtn.title = 'Revert'; saveBtn.title = 'Save to Decl'; }
+    else    { revertBtn.removeAttribute('title'); saveBtn.removeAttribute('title'); }
+    refreshDeclScroll();
+  }
+  document.getElementById('declFocusBtn').addEventListener('click', function(){
+    setDeclFocus(!document.getElementById('editor').classList.contains('focus-mode'));
+  });
   // Ctrl/Cmd+S saves the decl, but only while focus is inside the state editor (declText/fields/desc-panel) --
   // scoped so it doesn't fight a future Ctrl+S on the Prefabs/Timelines tabs. doSave() already no-ops when
   // there's nothing dirty, same as the (then-disabled) Save button.
@@ -2575,6 +2646,8 @@
         && document.getElementById('editor').contains(document.activeElement)) {
       e.preventDefault();
       doSave();
+    } else if (e.key === 'Escape' && document.getElementById('editor').classList.contains('focus-mode')) {
+      setDeclFocus(false);
     }
   });
   ['declText','fDisplayname'].forEach(function(id){ document.getElementById(id).addEventListener('input', updateDirty); });

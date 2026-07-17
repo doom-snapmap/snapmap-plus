@@ -84,6 +84,48 @@ for why decl-edits must NOT go through it).
 Newest first. Each dated entry covers one working session's worth of change; the undated **Baseline**
 entry at the bottom is the original POC buildout, before this doc tracked dates per entry.
 
+### 2026-07-17 -- Decl Text focus mode, dropdown sizing, and a batch of small editor fixes
+
+A round of small, user-reported polish items on the Entities tab's decl editor, found and fixed one at a
+time during live testing.
+
+- **Decl Text focus mode.** A new toggle button next to the problem count expands the Decl Text editor into
+  a distraction-free view: the ID/Inherit/Classname/Displayname fields and the description panel hide, the
+  editor column takes over the window (pure CSS -- `position: fixed` on the existing `.editor-col`, no DOM
+  nodes moved, so the textarea's scroll position/selection/undo history/listeners are untouched), and Save/
+  Revert/the "unsaved changes" note are reparented into the same row as the toggle button for the duration
+  (they normally live in `.panel-head`, which the fixed overlay covers). Escape or the button again exits.
+  Went through several rounds of live visual feedback: a first pass with a separate floating pill in the
+  corner and custom CSS `::before`-injected glyphs looked bad and was scrapped for something simpler --
+  Revert/Save now just borrow the `.btn.icon` class the toggle button already uses (identical shape/height,
+  nothing new to keep in sync) and swap their real `textContent` to a glyph while focused (the same pattern
+  the toggle button itself already used), restored to their normal word on exit. Two bugs found + fixed in
+  the process: the row's `align-items: baseline` shifted the buttons up/down depending on whether the
+  (sometimes-empty) "unsaved changes" hint had text -- switched to `align-items: center`, stable regardless
+  of content; and the first icon choice for Revert (a counterclockwise circular arrow) read too close to the
+  Entities panel's clockwise refresh icon at icon size, swapped for a visually distinct hooked back-arrow.
+- **Selected text was invisible in the Decl Text editor.** The editor overlays a transparent `<textarea>`
+  over a token-colored `<pre>` (so syntax highlighting shows through); the selection style set the
+  highlighted text's color to `transparent` too, so highlighting a range of text hid it under the selection
+  background instead of showing it. Now uses the theme's `--selText` color (already defined for exactly this
+  purpose, just never wired to the textarea's `::selection`).
+- **Dropped the schema-status note** ("schema: `<class>` · N fields" / "not in the N-class schema") above
+  the Decl Text editor -- not something users need day to day. The problem/warning count next to it (and the
+  schema check that feeds it) is untouched; only the note itself is gone.
+- **Classname/Inherit dropdowns were too small.** Long decl-class slugs (e.g.
+  `snapmaps/editor_only/placeholder_target`) forced a horizontal scrollbar, and the list only showed a few
+  options vertically. `#cInherit`/`#cClassname .combo-list` (not the base `.combo-list`, so every other
+  dropdown in the app is unaffected) now gets `max-width: min(80vw, 820px)` + `max-height: 440px`, with
+  `overflow-x: hidden` as a backstop against any stray horizontal scrollbar.
+- **`doorState_t` enum values were wrong**, not just stale -- missing the `DOOR_STATE_` prefix entirely,
+  missing two real members (`LOCKED_SECRET`, `NO_DOOR`), and padded with garbage duplicate entries. Hand-
+  patched in `schema_slice.js` against the real engine enum (`DOOR_STATE_UNLOCKED/LOCKED/OPEN/LOCKED_SECRET/
+  NO_DOOR`, confirmed from a live decompile). The same corruption pattern (missing prefixes / dropped members
+  / garbage duplicates) was spotted in several other generated enums during this pass (`walkState_t`,
+  `snapAmmoFilter_t`, `snapDropStyle_t`, and more) -- `schema_slice.js` is a static generated artifact with
+  no in-repo generator to regenerate from, so those are left as-is for now and will get the same
+  ground-truth-verified treatment individually as they're found, rather than guessed at in bulk.
+
 ### 2026-07-14 -- Timelines EXPLAIN box, entity-arg picker, live Runs-on selection, Clear stack 0, and stale-render fixes
 
 A polish pass over the Timelines and Entities tabs, built on top of the SnapStack port below.
