@@ -97,6 +97,11 @@ A few practical notes:
   `uninstall`, `status` — right there, no terminal needed.
 - **Updating later:** run `snaphak update` — it updates both the overlay and `snaphak.exe` itself.
   You never need to re-download anything from the site.
+- **Coming from the original SnapHak?** If your DOOM folder still has the original (closed-source)
+  SnapHak in it, the installer notices, tells you, and removes its files as part of the install —
+  Snapmap+ fully replaces it, so nothing of the old tool needs to stay behind. Your maps, prefabs and
+  overrides carry straight over (both tools keep them in the same `%USERPROFILE%\snaphak` folder,
+  which is never touched).
 - **Uninstalling:** `snaphak uninstall` restores your DOOM folder to exactly what it was before.
   Your own Snapmap+ data (prefabs, rawmaps, overrides under `%USERPROFILE%\snaphak`) is left untouched.
 - `snaphak help` in a terminal lists everything else: `status`, `changelog`, `version`.
