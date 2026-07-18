@@ -32,7 +32,9 @@ auto-detects your DOOM install via Steam, asks you to confirm, and installs. (Fr
 
 `snaphak.exe` installs itself to `%LOCALAPPDATA%\open-snaphak\`. Run it again any time for `snaphak update`,
 `snaphak status`, `snaphak version`, and `snaphak uninstall` (which restores DOOM to vanilla and leaves your
-`%USERPROFILE%\snaphak` data untouched). See [`installer/README.md`](installer/README.md).
+`%USERPROFILE%\snaphak` data untouched). Coming from the **original SnapHak**? Install/update detects it in
+your DOOM folder and removes its files as part of the install — your maps, prefabs and overrides carry
+straight over. See [`installer/README.md`](installer/README.md).
 
 > Releases are produced by CI. Until the first release is published, build from source (below).
 
