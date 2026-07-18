@@ -167,7 +167,8 @@ func downloadRelease(f flags) (dir string, tag string, cleanup func(), err error
 	return tmp, rel.TagName, cleanup, nil
 }
 
-// fetchRelease picks: an explicit --release tag, the latest --beta pre-release, or the latest stable.
+// fetchRelease picks: an explicit --release tag, the latest --beta pre-release, or the latest stable
+// (falling back to the newest beta while no stable has been published yet).
 func fetchRelease(f flags, token string) (*ghRelease, error) {
 	base := "https://api.github.com/repos/" + repoSlug + "/releases"
 	switch {
@@ -187,8 +188,43 @@ func fetchRelease(f flags, token string) (*ghRelease, error) {
 		return nil, fmt.Errorf("no beta build is available yet")
 	default:
 		var r ghRelease
-		return &r, apiGet(base+"/latest", token, &r)
+		err := apiGet(base+"/latest", token, &r)
+		if err == nil {
+			return &r, nil
+		}
+		// GitHub's "latest" endpoint excludes pre-releases, so before the first stable release it
+		// 404s even though betas exist. Fall back to the release list: prefer a stable if one shows
+		// up after all (a transient /latest failure), else take the newest beta and say so. Once a
+		// stable release exists this fallback never picks a beta again.
+		var list []ghRelease
+		if lerr := apiGet(base+"?per_page=30", token, &list); lerr == nil {
+			if pick, isBeta := pickDefaultRelease(list); pick != nil {
+				if isBeta {
+					fmt.Printf("No stable release has been published yet -- using the newest beta (%s).\n", pick.TagName)
+				}
+				return pick, nil
+			}
+		}
+		return nil, err
 	}
+}
+
+// pickDefaultRelease picks what a no-flags install/update should get from the release list
+// (newest-first, the GitHub API order): the newest stable release, or -- while no stable has been
+// published yet -- the newest pre-release. The bool reports that beta fallback so the caller can tell
+// the user. Returns nil when the list is empty. Pure (no I/O) so it is unit-testable.
+func pickDefaultRelease(list []ghRelease) (*ghRelease, bool) {
+	for i := range list {
+		if !list[i].Prerelease {
+			return &list[i], false
+		}
+	}
+	for i := range list {
+		if list[i].Prerelease {
+			return &list[i], true
+		}
+	}
+	return nil, false
 }
 
 func apiGet(url, token string, out interface{}) error {
