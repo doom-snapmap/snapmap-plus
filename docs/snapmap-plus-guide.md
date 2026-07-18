@@ -22,6 +22,8 @@ title: Guide to Snapmap+
 - [Rawmaps](#rawmaps)
 - [SnapStack (Bulk Editing)](#snapstack-bulk-editing)
 - [Overrides](#overrides)
+- [Advanced: Every Console Command](#advanced-every-console-command)
+- [Reporting Bugs and Requesting Features](#reporting-bugs-and-requesting-features)
 
 ---
 
@@ -608,4 +610,122 @@ resource you want to replace — the same folder the built-in overrides live in.
 
 Actually authoring an override's *contents* is a separate skill from placing the file — the format
 depends entirely on which resource you're replacing, and isn't covered in this guide.
+
+### How a file gets picked
+
+Every time the game asks to open a resource, Snapmap+ resolves it in three steps, in order:
+
+1. **Your file**, if you've placed one at that path under `overrides\` — always wins.
+2. **Snapmap+'s own built-in default** for that same path (this is how the Custom palette tab ships) —
+   served from memory, never written into your `overrides\` folder. Because it's never written to disk,
+   the built-in updates automatically with every new release, and you can always get back to the default
+   by simply deleting your file at that name.
+3. **The game's own packaged resource** — used when neither of the above applies.
+
+If your `overrides` folder ever ends up with something broken in it and you want to rule overrides out
+while you track it down, set `snaphak_user_overrides` to `0` in the console — that skips straight to step
+2/3 for every file without you having to move or delete anything, and setting it back to `1` restores your
+files. Snapmap+ also writes a list of every active override it found to the log each time it starts, so
+you can always check what's currently shadowing what.
+
+---
+
+## Advanced: Every Console Command
+
+Everything above covers Snapmap+ through its window. Snapmap+ also adds a set of commands straight to
+DOOM's own console (press **~** to open it) — some are shortcuts for things the window already does,
+others are console-only tools with no window equivalent. Run **`sh_help`** at any time to print the
+full, current list with descriptions directly from the running build; the tables below are the same
+list, organized by what each command is for. (Not repeated here: `sh` and its bulk-edit subcommands,
+`sh_target_any`, and `snapHak_rawmaps_on` / `snapHak_rawmaps_off` — those are covered in their own
+sections above.)
+
+### Inspecting entities and resources
+
+| Command | What it does |
+|---|---|
+| `sh_spawn <entitydef> <name>` | Spawn an entity definition at your position and teleport to it. |
+| `sh_dumpdef <entity name>` | Print — and copy to your clipboard — an existing entity's resolved entity definition. |
+| `sh_spawninfo` | Generate `spawnOrientation` / `spawnPosition` values from your current position in the map. |
+| `sh_entlist` | List every editor entity type the engine knows about. |
+| `sh_listres <resource class> [filter]` | List every resource of a given class (e.g. `idMaterial`), optionally filtered by name. |
+| `sh_type <type or enum> [-v]` | Print the fields of an idTech class, or the values of an enum. Add `-v` to also see each field's byte offset and size. |
+| `sh_validclasses <inherit>` | List the engine-valid classnames for a given inherit — the same list that fills the Classname dropdown in the [Entity State Panel](#the-entity-state-panel). |
+| `sh_dumpmap <file path>` | Dump the currently generated `.map` (including SnapMap's own auto-generated version) to a file, for debugging. |
+
+### Compiling assets
+
+| Command | What it does |
+|---|---|
+| `sh_genbmodel <input> <output>` | Generate a bmodel from a `.obj`, `.ase`, or `.lwo` file. |
+| `sh_genmd6model <input> <output>` | Compile a `.md6model` into a `bmd6model`. |
+
+### Player cheats
+
+Five toggles for your own player, mainly useful while testing a map solo:
+
+| Command | What it does |
+|---|---|
+| `noClip` | No-collision flight. |
+| `infiniteHealth` | You can't lose health. |
+| `noPlayerDeath` | You can't die. |
+| `noPlayerKill` | You can't be killed outright. |
+| `noTarget` | Enemies ignore you. |
+
+### Cvars
+
+Settings you read or change with `<name>` or `<name> <value>` in the console:
+
+| Cvar | Default | What it does |
+|---|---|---|
+| `snaphak_pretty_on` | `0` | Pretty-print the JSON Snapmap+ writes for [rawmaps](#rawmaps). |
+| `snaphak_show_rmcount` | `0` | Draw the current number of active rendermodels on-screen. |
+| `snaphak_copy_reslist_to_clipboard` | `0` | Copy `sh_listres` output to the clipboard automatically. |
+| `snaphak_user_overrides` | `1` | Set to `0` to temporarily ignore your [override](#overrides) files. |
+
+### Developer and diagnostic tools
+
+The rest exist mainly for Snapmap+'s own developers to debug the engine hooks — you're unlikely to need
+them, but they're listed here for completeness since `sh_help` shows them too:
+
+| Command | What it does |
+|---|---|
+| `sh_alginfo` | Report the status of Snapmap+'s optional math-acceleration layer. |
+| `sh_debugrender` | Renderer debug toggle. |
+| `cs_dontuse` | Toggle higher-precision engine-math overrides — a performance tradeoff, off by default; the name is the warning. |
+| `sh_superscriptop` | Dump SuperScript / eventDef data. |
+| `cs_dumpeventdefs` | Dump every eventDef to a file. |
+| `cs_fieldinfo` | Print field info for a type. |
+| `cs_start_render_logging` | Set up the render-logging hook. |
+| `snaphak_disable_devmode` / `snaphak_reenable_devmode` | Turn DOOM's developer features off, or back on, without losing your Bethesda.net connection. |
+
+---
+
+## Reporting Bugs and Requesting Features
+
+Snapmap+ has a built-in way to send feedback straight to the developers — no GitHub account, no email,
+no leaving the game. Click the small **?** button in the bottom-right corner of the status bar to open
+the **Send feedback** dialog.
+
+Fill in:
+
+- **Category** — Bug report, Feature request, Incorrect description / info (something in this guide or
+  the app's own text is wrong), or Other.
+- **Title** — a one-line summary.
+- **Details** — what happened, what you expected instead, and steps to reproduce if it's a bug. The more
+  specific, the more useful.
+- **Contact** *(optional)* — an email, Discord handle, or GitHub username, only if you want a reply.
+
+Click **Send** and it's filed as a public issue on the project's tracker under the category you picked.
+If someone's already reported the same thing, Snapmap+ recognizes the duplicate and adds your report as
+a note on the existing issue instead of creating a new one.
+
+The same reporting pipeline also backs Snapmap+'s **crash report** dialog: if the game hits a serious
+fault, a crash dialog opens (right away if Snapmap+ recovered in place, or on your next launch otherwise)
+with the error, an optional description of what you were doing, and a checkbox to attach recent log text
+(anonymized — your Windows account and machine name are stripped before anything is sent). Sending it
+files a `crash`-labeled issue the same way, and repeat crashes at the same spot get grouped onto one
+issue rather than filing duplicates.
+
+Nothing is sent unless you click Send — Snapmap+ makes no other network requests on its own.
 
