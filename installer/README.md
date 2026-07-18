@@ -45,6 +45,13 @@ stable release has been published yet, they fall back to the newest beta (and sa
   detects a running DOOM and asks you to close it, instead of failing with a cryptic Windows file error.
 - Verifies the bundle against its `MANIFEST.sha256` (every file present + hash-correct) **before** touching DOOM.
 - **Backs up** any pre-existing file it would overwrite (e.g. a genuine `XINPUT1_3.dll`) to `<file>.snaphak-bak`.
+- **Migrates away from the original SnapHak.** If the DOOM folder carries the original (closed-source)
+  SnapHak — its proxy DLLs (`dinput8.dll`, `XINPUT1_3.dll`, `snaphak_algo.dll`, `snaphak_ext.dll`), the Qt UI
+  runtime in `snaphak\`, the Qt platform plugin, `changelog.txt` / `doomlegacymod.txt` — install / update
+  detects it, says so, and removes all of it before deploying this SnapHak (none of those are vanilla game
+  files, and nothing loads them once replaced). Detection is conservative: it keys on files *only* the
+  original ships, so a lone `dinput8.dll` from some other mod is never touched. Your maps, prefabs and
+  overrides under `%USERPROFILE%\snaphak` are user data — both tools share that folder and it is **never** touched.
 - Records the install (files placed + backups taken) in `%LOCALAPPDATA%\open-snaphak\install.json`.
 - **`uninstall`** reverses *exactly* that record: removes the files it placed, restores the backups, and cleans
   the dirs it created **only if they're empty** — a pre-existing `platforms/` or other content is left intact. Your

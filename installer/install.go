@@ -17,6 +17,8 @@ type installRecord struct {
 	InstalledAt string   `json:"installed_at"`
 	Files       []string `json:"files"`   // overlay-relative paths placed under DoomPath
 	Backups     []backup `json:"backups"` // pre-existing files moved aside
+	// LegacyRemoved: original-SnapHak files a migration deleted (informational; carried forward).
+	LegacyRemoved []string `json:"legacy_removed,omitempty"`
 }
 
 type backup struct {
@@ -87,29 +89,47 @@ func cmdInstall(f flags) error {
 	// record (a first install) just yields empty sets.
 	ours := map[string]bool{}
 	var priorBackups []backup
+	var priorLegacy []string
 	if prior, err := loadRecord(); err == nil {
 		for _, rel := range prior.Files {
 			ours[rel] = true
 		}
 		priorBackups = prior.Backups
+		priorLegacy = prior.LegacyRemoved
 	}
 
 	rec := &installRecord{
-		Version:     b.version,
-		DoomPath:    doom,
-		InstalledAt: time.Now().UTC().Format(time.RFC3339),
-		Backups:     priorBackups,
+		Version:       b.version,
+		DoomPath:      doom,
+		InstalledAt:   time.Now().UTC().Format(time.RFC3339),
+		Backups:       priorBackups,
+		LegacyRemoved: priorLegacy,
 	}
-	backedUp := map[string]bool{}
-	for _, bk := range priorBackups {
-		backedUp[bk.Rel] = true
+	// The original SnapHak in this DOOM folder? This SnapHak replaces it -- migrate (remove its files)
+	// as part of the install, after the confirmation below.
+	legacy := detectLegacy(doom)
+	confirmMsg := fmt.Sprintf("About to install SnapHak %s into\n  %s\nContinue?", rec.Version, doom)
+	if len(legacy) > 0 {
+		fmt.Println("Found the original SnapHak in this DOOM folder. This SnapHak replaces it, so its")
+		fmt.Printf("files (%d) will be removed. Your maps, prefabs and overrides under\n", len(legacy))
+		fmt.Printf("%%USERPROFILE%%\\snaphak are yours and are kept.\n")
+		confirmMsg = fmt.Sprintf("About to remove the original SnapHak and install SnapHak %s into\n  %s\nContinue?", rec.Version, doom)
 	}
 	// FINAL gate -- runs only after every check passed (DOOM found, DOOM closed, bundle downloaded + verified).
 	if !f.yes && isInteractive() {
-		if !confirm(fmt.Sprintf("About to install SnapHak %s into\n  %s\nContinue?", rec.Version, doom)) {
+		if !confirm(confirmMsg) {
 			fmt.Println("Cancelled -- nothing was changed.")
 			return nil
 		}
+	}
+	if len(legacy) > 0 {
+		fmt.Println("Removing the original SnapHak:")
+		rec.Backups = dropLegacyBackups(doom, rec.Backups)
+		rec.LegacyRemoved = append(rec.LegacyRemoved, removeLegacy(doom, legacy)...)
+	}
+	backedUp := map[string]bool{}
+	for _, bk := range rec.Backups {
+		backedUp[bk.Rel] = true
 	}
 	fmt.Printf("Installing SnapHak into %s\n", doom)
 	for _, e := range b.files {
