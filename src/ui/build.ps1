@@ -141,7 +141,8 @@ $srcArgs = "webview\snaphak_ui_webview.cpp sl_exports.cpp"
 $libArgs = @(
     "`"$wvLib`"",
     "ole32.lib", "oleaut32.lib", "shell32.lib", "shlwapi.lib",
-    "version.lib", "advapi32.lib", "user32.lib", "gdi32.lib"
+    "version.lib", "advapi32.lib", "user32.lib", "gdi32.lib",
+    "winhttp.lib"   # the feedback dialog's single user-initiated POST (see the capability note in snaphak_ui_webview.cpp)
 ) -join " "
 $implib = $Out -replace '\.dll$', '.lib'
 

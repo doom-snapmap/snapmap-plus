@@ -1,0 +1,80 @@
+# Feedback hygiene 1/2 -- release retest prompts.
+#
+# When a release is published, open user-filed reports (label: user-report, filed by the in-app feedback
+# dialog via the feedback/ relay) that were reported on an OLDER version get a "still reproducible?"
+# comment + the needs-retest label. The stale sweep (issues-stale.yml) then closes them if nobody
+# responds. Deliberately NOT auto-close-on-release: a bug reported on an old version usually still
+# exists on the new one -- real fixes are closed by a maintainer with "fixed in vX".
+#
+# Channel rule: a pre-release (tag with "-") only prompts beta-channel reports; a stable release
+# prompts everything older. Secretless by design: the built-in GITHUB_TOKEN, least-privilege
+# permissions, no repo secrets -- same posture as ci.yml (which this deliberately does not touch).
+name: Issues -- release retest
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  issues: write
+
+jobs:
+  retest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const tag = context.payload.release.tag_name.replace(/^v/, '');
+            const releaseIsPre = tag.includes('-');
+
+            // semver compare (numeric core, then prerelease identifiers per the spec: a prerelease
+            // precedes its release; numeric identifiers compare numerically and precede alphanumeric).
+            function parseV(v) {
+              const m = String(v).replace(/^v/, '').match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/);
+              return m ? { n: [+m[1], +m[2], +m[3]], pre: m[4] || null } : null;
+            }
+            function lt(a, b) {
+              const A = parseV(a), B = parseV(b);
+              if (!A || !B) return false;
+              for (let i = 0; i < 3; i++) if (A.n[i] !== B.n[i]) return A.n[i] < B.n[i];
+              if (!!A.pre !== !!B.pre) return !!A.pre;
+              if (!A.pre) return false;
+              const as = A.pre.split('.'), bs = B.pre.split('.');
+              for (let i = 0; i < Math.max(as.length, bs.length); i++) {
+                if (as[i] === undefined) return true;
+                if (bs[i] === undefined) return false;
+                const an = /^\d+$/.test(as[i]), bn = /^\d+$/.test(bs[i]);
+                if (an && bn) { if (+as[i] !== +bs[i]) return +as[i] < +bs[i]; }
+                else if (an !== bn) return an;
+                else if (as[i] !== bs[i]) return as[i] < bs[i];
+              }
+              return false;
+            }
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'user-report', per_page: 100,
+            });
+            let prompted = 0;
+            for (const issue of issues) {
+              if (issue.pull_request) continue;
+              const names = issue.labels.map(l => typeof l === 'string' ? l : l.name);
+              if (names.includes('needs-retest')) continue;                 // already prompted
+              if (releaseIsPre && !names.includes('beta')) continue;        // betas only prompt beta reports
+              const m = (issue.body || '').match(/^- Version: (\S+)/m);
+              if (!m || !lt(m[1], tag)) continue;
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number,
+                body: 'A newer version (**v' + tag + '**) has been released since this was reported (on v' + m[1] + '). '
+                    + 'If you can, please update and check whether this still happens -- a quick "still broken" or '
+                    + '"fixed for me" comment is all that\'s needed. With no response, this report will eventually '
+                    + 'close automatically.',
+              });
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: issue.number,
+                labels: ['needs-retest'],
+              });
+              prompted++;
+            }
+            core.info('release v' + tag + ': prompted ' + prompted + ' of ' + issues.length + ' open user reports');

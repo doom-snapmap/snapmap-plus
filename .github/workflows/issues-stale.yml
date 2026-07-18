@@ -1,0 +1,37 @@
+# Feedback hygiene 2/2 -- the stale sweep.
+#
+# Nightly garbage collector for user-filed reports that are waiting on their reporter: anything labeled
+# needs-retest (a release superseded it -- see issues-retest.yml) or awaiting-response (a maintainer
+# asked a question) gets a warning after 21 quiet days and closes 14 days later. Scoped by
+# any-of-issue-labels, so ordinary confirmed bugs/features NEVER auto-close; PRs are exempt entirely.
+# Secretless: built-in GITHUB_TOKEN, least-privilege permissions -- same posture as ci.yml.
+name: Issues -- stale sweep
+
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@1e223db275d687790206a7acac4d1a11bd6fe629 # v10.4.0
+        with:
+          any-of-issue-labels: 'needs-retest,awaiting-response'
+          days-before-issue-stale: 21
+          days-before-issue-close: 14
+          stale-issue-label: 'stale'
+          stale-issue-message: >
+            This report is waiting on a response (see the comment above). It will close automatically in
+            14 days if there's no update -- a one-line reply keeps it open.
+          close-issue-message: >
+            Closed automatically: no response. If this is still an issue on the current version, please
+            send a fresh report from the in-app feedback dialog (or comment here) and it will be looked
+            at again.
+          days-before-pr-stale: -1
+          days-before-pr-close: -1
+          operations-per-run: 100

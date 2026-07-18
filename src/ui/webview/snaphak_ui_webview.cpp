@@ -19,6 +19,7 @@
  */
 #include <windows.h>
 #include <shlobj.h>
+#include <winhttp.h>
 #include <wrl.h>
 #include <string>
 #include <vector>
@@ -1317,6 +1318,82 @@ static void poc_apply_save_prefab_meta(const std::string &name, const std::strin
     if (result == 1) poc_send_prefabs();
 }
 
+/* ------------------------------------------------------------------ feedback report ("?" dialog) --- */
+/* CAPABILITY NOTE (this is the frontend's ONLY network touch, and why winhttp appears in the import
+ * table): one user-initiated HTTPS POST per click on the feedback dialog's Send button, carrying exactly
+ * what the user typed (category/title/details/optional contact) plus the installed version string, to
+ * the project's feedback relay -- which files it as a public issue on the project's GitHub tracker.
+ * Nothing is downloaded or executed, nothing runs periodically, nothing is sent without that explicit
+ * click. Full pipeline + the relay's own source: docs/feedback.md + feedback/.
+ *
+ * The POST runs on its own short-lived thread: the think loop and the WebView2 callbacks share ONE STA
+ * thread, so a synchronous WinHTTP call there would freeze the whole UI for up to the timeout. The
+ * thread only touches the g_report_* cells; the think loop polls g_report_done and posts the result to
+ * the page from the correct (loop) thread, like every other *Result message. */
+static const wchar_t *kReportHost = L"REPLACE-WITH-DEPLOYED-RELAY.workers.dev";   /* set at release-bake time; unreachable -> red toast, nothing else */
+static const wchar_t *kReportPath = L"/report";
+#define REPORT_PAYLOAD_CAP (64 * 1024)
+
+static volatile bool g_report_inflight = false;   /* one submit at a time (the page disables Send too) */
+static volatile bool g_report_done     = false;   /* worker thread -> think loop handoff */
+static volatile int  g_report_ok       = 0;
+static int           g_report_number   = 0;       /* filed issue number (0 = unknown) */
+static char          g_report_mode[16] = "";      /* "created" | "appended" (dedup comment) */
+static std::string   g_report_payload;            /* owned by the worker thread while in flight */
+
+/* find `"key":<int>` in the relay's small JSON response (same targeted-scan approach as json_get_int,
+ * narrow-string flavor -- no JSON library) */
+static int rp_scan_int(const char *s, const char *key)
+{
+    const char *p = strstr(s, key);
+    if (!p) return 0;
+    p += strlen(key);
+    while (*p == ' ' || *p == ':') p++;
+    return atoi(p);
+}
+static DWORD WINAPI report_thread(LPVOID)
+{
+    int ok = 0, number = 0; char mode[16] = "";
+    HINTERNET ses = nullptr, con = nullptr, req = nullptr;
+    DWORD status = 0;
+    do {
+        ses = WinHttpOpen(L"SnapmapPlus", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!ses) break;
+        WinHttpSetTimeouts(ses, 10000, 10000, 10000, 15000);
+        con = WinHttpConnect(ses, kReportHost, INTERNET_DEFAULT_HTTPS_PORT, 0);
+        if (!con) break;
+        req = WinHttpOpenRequest(con, L"POST", kReportPath, nullptr, WINHTTP_NO_REFERER,
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+        if (!req) break;
+        if (!WinHttpSendRequest(req, L"Content-Type: application/json\r\n", (DWORD)-1,
+                                (LPVOID)g_report_payload.data(), (DWORD)g_report_payload.size(),
+                                (DWORD)g_report_payload.size(), 0)) break;
+        if (!WinHttpReceiveResponse(req, nullptr)) break;
+        DWORD sl = sizeof status;
+        WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &sl, WINHTTP_NO_HEADER_INDEX);
+        char resp[4096]; DWORD got = 0, total = 0;
+        while (total < sizeof resp - 1 &&
+               WinHttpReadData(req, resp + total, (DWORD)(sizeof resp - 1 - total), &got) && got)
+            total += got;
+        resp[total] = 0;
+        if (status == 200 && strstr(resp, "\"ok\":true")) {
+            ok = 1;
+            number = rp_scan_int(resp, "\"number\"");
+            strcpy_s(mode, sizeof mode, strstr(resp, "\"mode\":\"appended\"") ? "appended" : "created");
+        }
+    } while (0);
+    if (req) WinHttpCloseHandle(req);
+    if (con) WinHttpCloseHandle(con);
+    if (ses) WinHttpCloseHandle(ses);
+    poc_logf(ok ? "report: sent ok (http %lu)" : "report: send FAILED (http %lu)", (unsigned long)status);
+    g_report_ok = ok; g_report_number = number;
+    strcpy_s(g_report_mode, sizeof g_report_mode, mode[0] ? mode : "created");
+    g_report_done = true;   /* the think loop posts reportResult to the page */
+    return 0;
+}
+
 /* ------------------------------------------------------------------ window / WebView2 -------------- */
 static LRESULT CALLBACK PocWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -1469,6 +1546,23 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 if (json_get_double(json, L"y", &y)) g_cam_xyz[1] = (float)y;
                 if (json_get_double(json, L"z", &z)) g_cam_xyz[2] = (float)z;
                 g_cam_write_once = true;
+            } else if (cmd == L"reportSubmit") {
+                /* opaque transport: the page composed the full report JSON; this side only size-caps it
+                 * and ships it to the relay on a worker thread (see the feedback section above). */
+                std::wstring payload;
+                if (json_get_wstr(json, L"payload", payload) && !payload.empty() && !g_report_inflight) {
+                    std::string p8 = w_to_utf8(payload);
+                    if (p8.size() <= REPORT_PAYLOAD_CAP) {
+                        g_report_payload.swap(p8);
+                        g_report_inflight = true;
+                        HANDLE h = CreateThread(nullptr, 0, report_thread, nullptr, 0, nullptr);
+                        if (h) CloseHandle(h);
+                        else {
+                            g_report_inflight = false;
+                            poc_post_json(L"{\"kind\":\"reportResult\",\"ok\":false}");
+                        }
+                    } else poc_post_json(L"{\"kind\":\"reportResult\",\"ok\":false}");
+                }
             } else if (cmd == L"winMin") {
                 ShowWindow(g_hwnd, SW_MINIMIZE);
             } else if (cmd == L"winMax") {
@@ -1672,6 +1766,14 @@ static void poc_think_loop()
             m += L"\",\"toFolder\":\""; m += poc_json_w(g_move_prefab_to.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
             if (g_move_prefab_result == 1) poc_send_prefabs();
+        }
+        if (g_report_done) {   /* feedback POST finished on its worker thread -- relay the result */
+            g_report_done = false;
+            std::wstring m = L"{\"kind\":\"reportResult\",\"ok\":"; m += g_report_ok ? L"true" : L"false";
+            m += L",\"mode\":\""; m += poc_json_w(g_report_mode);
+            m += L"\",\"number\":"; m += std::to_wstring(g_report_number); m += L"}";
+            poc_post_json(m.c_str());
+            g_report_inflight = false;
         }
 
         if (g_webview_ready) {

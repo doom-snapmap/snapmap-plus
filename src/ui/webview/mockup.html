@@ -79,8 +79,8 @@
   .entity-item.selected .name { color: var(--selText); }
   .list-empty { padding: 10px; color: var(--muted); font-style: italic; }
 
-  input[type=text], textarea { background: var(--field); color: var(--text); border: 1px solid var(--border2); border-radius: 5px; padding: 4px 7px; font-size: 11px; font-family: inherit; user-select: text; -webkit-user-select: text; }
-  input[type=text]:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  input[type=text], textarea, select { background: var(--field); color: var(--text); border: 1px solid var(--border2); border-radius: 5px; padding: 4px 7px; font-size: 11px; font-family: inherit; user-select: text; -webkit-user-select: text; }
+  input[type=text]:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
   input[type=checkbox] { accent-color: var(--accent); }
 
   .btn { padding: 4px 12px; border: 1px solid var(--border2); background: var(--panel2); color: var(--text); cursor: pointer; border-radius: 5px; font-size: 11px; }
@@ -104,6 +104,10 @@
     position: fixed; inset: 14px; z-index: 1800; background: var(--panel);
     border: 1px solid var(--border2); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,0.35);
     padding: 12px;
+    /* height:auto so BOTH insets govern -- the base .editor-col's height:100% would otherwise win over
+       the bottom inset and push the panel's bottom edge (border + 12px padding) below the viewport,
+       which read as "no bottom padding" while top/sides showed theirs. */
+    height: auto;
   }
   .editor-col.focus-mode .ident,
   .editor-col.focus-mode .fields,
@@ -297,6 +301,17 @@
   .modal label { color: var(--muted); margin-top: 4px; }
   .modal textarea { min-height: 54px; resize: vertical; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+
+  /* feedback: the bottom-right "?" launcher + its report dialog. The button floats just above the
+     statusbar; z-index below the modal layer (3000) so an open dialog covers it. */
+  #reportBtn { position: fixed; right: 12px; bottom: 34px; width: 30px; height: 30px; border-radius: 50%;
+    border: 1px solid var(--border2); background: var(--panel); color: var(--muted); font-size: 14px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: 1900;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.25); }
+  #reportBtn:hover { color: var(--text); border-color: var(--accent); }
+  .modal.report { width: 430px; }
+  .modal.report textarea { min-height: 110px; }
+  .report-hp { display: none; }   /* honeypot -- humans never see or fill it; bots that blind-fill every field do */
 
   .ctxmenu { position: absolute; z-index: 1000; background: var(--panel); border: 1px solid var(--border2); border-radius: 6px; box-shadow: 2px 4px 12px rgba(0,0,0,0.22); min-width: 140px; padding: 4px; display: none; }
   .ctxmenu div { padding: 5px 12px; border-radius: 4px; cursor: default; }
@@ -511,6 +526,26 @@
   </div>
 </div>
 
+<button type="button" id="reportBtn" title="Report a bug or suggest a feature">?</button>
+<div class="modal-overlay" id="reportModal" style="display:none;">
+  <div class="modal report">
+    <div class="modal-title">Send feedback</div>
+    <div class="muted" style="margin-bottom:4px;">Goes straight to the developers as a public issue on the project's tracker. No account needed.</div>
+    <label>Category</label>
+    <select id="rpCategory">
+      <option value="bug">Bug report</option>
+      <option value="feature">Feature request</option>
+      <option value="docs">Incorrect description / info</option>
+      <option value="other">Other</option>
+    </select>
+    <label>Title</label><input type="text" id="rpTitle" maxlength="120" placeholder="One-line summary">
+    <label>Details</label><textarea id="rpBody" maxlength="8000" placeholder="What happened? What did you expect instead? Steps to reproduce help a lot."></textarea>
+    <label>Contact (optional)</label><input type="text" id="rpContact" maxlength="200" placeholder="Email / Discord / GitHub -- only if you want a reply">
+    <input type="text" id="rpWebsite" class="report-hp" tabindex="-1" autocomplete="off" aria-hidden="true">
+    <div class="modal-actions"><button class="btn" id="rpCancel">Cancel</button><button class="btn primary" id="rpSend">Send</button></div>
+  </div>
+</div>
+
 <!-- the decl editor's schema table (generated from the game's own reflection schema and shipped
      declaration data by maintainer tooling). In-game the build inlines it into this file; this src tag
      is how the browser preview loads it. Absent table -> the editor degrades to structural checks only. -->
@@ -608,6 +643,7 @@
   // ---- browser preview: when opened in a plain browser (no DOOM backend), fake the native side so the
   // file is self-demoing and fully interactive. Inert in DOOM (PREVIEW is false there). ----
   var previewStack0Count = 0;   // fake backend-owned stack 0 count, so Push/Clear feel connected in the demo
+  var previewReportSigs = {};   // fake dedup memory for the feedback dialog demo (category|title -> seen)
   var previewEnts = [
     {eid:65, id:'0_ind_totally_blank_room_4x/snapmaps/volume/blocking', name:'Block Box', hidden:false},
     {eid:61, id:'0_ind_totally_blank_room_4x/player/coop/player_start', name:'My Player Start', hidden:false},
@@ -685,6 +721,16 @@
     else if (o.cmd === 'openTimeline') {
       var tj = previewTimelineJson[o.eid];
       onMessage(tj ? {kind:'timelineData', eid:o.eid, ok:true, json:tj} : {kind:'timelineData', eid:o.eid, ok:false});
+    }
+    else if (o.cmd === 'reportSubmit') {
+      // preview only: prove the payload is well-formed JSON, then fake the round-trip (created, then a
+      // dedup "appended" on an identical re-send) so both green-toast paths are demoable in a browser.
+      var rOk = false, rp = null;
+      try { rp = JSON.parse(o.payload); rOk = !!(rp && rp.category && rp.title && rp.body); } catch (e) { rOk = false; }
+      var rSig = rOk ? (rp.category + '|' + rp.title.toLowerCase()) : '';
+      var rMode = (rOk && previewReportSigs[rSig]) ? 'appended' : 'created';
+      if (rOk) previewReportSigs[rSig] = true;
+      setTimeout(function(){ onMessage({kind:'reportResult', ok:rOk, mode:rMode, number:42}); }, 600);
     }
     else if (o.cmd === 'saveTimeline') {
       // preview only: no real backend to commit to -- just prove the patched JSON is well-formed and
@@ -2402,6 +2448,7 @@
   function onMessage(d) {
     if (d.kind === 'list') {
       document.getElementById('bridgeDot').className = 'dot ok';
+      appVersion = d.version || '';   // rides along in feedback reports
       document.getElementById('verText').textContent = 'Snapmap+ ' + (d.version || '');
       document.getElementById('connText').textContent = '(Connected)';
       flash('updated ' + new Date().toLocaleTimeString());
@@ -2442,6 +2489,16 @@
       if (d.result === 1) toast('Saved to decl', 'ok');
       else if (d.result === 0) toast('Save refused: incompatible class + inherit', 'warn');
       else toast('Save failed (see log)', 'err');
+    } else if (d.kind === 'reportResult') {
+      reportSendDone();
+      if (d.ok) {
+        showReportModal(false);
+        toast(d.mode === 'appended' ? 'Thanks! This matched a known report -- your confirmation was added.'
+                                    : 'Report sent -- thank you!', 'ok');
+      } else {
+        // keep the dialog open with everything the user typed -- nothing is lost on a failed send
+        toast('Could not send the report -- check your connection and try again', 'err');
+      }
     } else if (d.kind === 'editorSelect') {
       selectedEids = {}; var esel = d.eids || []; for (var ei=0; ei<esel.length; ei++) selectedEids[esel[ei]] = true;
       anchorEid = esel.length ? esel[esel.length-1] : -1;
@@ -3410,6 +3467,40 @@
   // create-from-selection prompt (mockup)
   var pcModal = document.getElementById('prefabCreateModal');
   function showPrefabModal(s){ if (pcModal) pcModal.style.display = s ? 'flex' : 'none'; }
+
+  // ---- feedback report dialog (the bottom-right "?") ----
+  var appVersion = '';          // from the list message; "" until the first list arrives
+  var reportInFlight = false;   // one submit at a time (the host guards too)
+  var rpModal = document.getElementById('reportModal');
+  function showReportModal(s){ if (rpModal) rpModal.style.display = s ? 'flex' : 'none'; }
+  function reportSendDone(){
+    reportInFlight = false;
+    var b = document.getElementById('rpSend');
+    b.disabled = false; b.textContent = 'Send';
+  }
+  document.getElementById('reportBtn').addEventListener('click', function(){
+    showReportModal(true);
+    document.getElementById('rpTitle').focus();
+  });
+  document.getElementById('rpCancel').addEventListener('click', function(){ showReportModal(false); });
+  document.getElementById('rpSend').addEventListener('click', function(){
+    if (reportInFlight) return;
+    var title = (document.getElementById('rpTitle').value || '').trim();
+    var body  = (document.getElementById('rpBody').value  || '').trim();
+    if (title.length < 3)  { toast('Please give the report a short title', 'warn'); return; }
+    if (body.length  < 10) { toast('Please describe it in a little more detail', 'warn'); return; }
+    reportInFlight = true;
+    var b = document.getElementById('rpSend');
+    b.disabled = true; b.textContent = 'Sending...';
+    post({cmd:'reportSubmit', payload: JSON.stringify({
+      category: document.getElementById('rpCategory').value,
+      title: title,
+      body: body,
+      contact: (document.getElementById('rpContact').value || '').trim(),
+      version: appVersion,
+      website: document.getElementById('rpWebsite').value || ''   // honeypot -- must stay empty
+    })});
+  });
   var pcCreateBtn = document.getElementById('prefabCreateBtn');
   if (pcCreateBtn) pcCreateBtn.addEventListener('click', function(){
     if (npSelInfo) npSelInfo.textContent = 'From ' + editorSelCount + ' selected ' + (editorSelCount === 1 ? 'entity' : 'entities');

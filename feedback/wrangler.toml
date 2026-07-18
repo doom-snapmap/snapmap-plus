@@ -1,0 +1,5 @@
+# feedback/wrangler.toml -- deploy config for the feedback relay (see worker.js + README.md).
+# Deploy from this directory: npx wrangler deploy
+name = "snaphak-feedback"
+main = "worker.js"
+compatibility_date = "2026-07-01"

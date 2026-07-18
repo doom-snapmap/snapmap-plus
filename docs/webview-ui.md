@@ -68,6 +68,7 @@ The frontend holds no engine addresses; it calls the backend only through the vt
 | Open a timeline (tabs + events) | `serialize_entity` +0xc8 -- the same slot Save-to-Decl and Push-to-stack already use, JSON-parsed client-side |
 | Timeline event-arg dropdowns (decl / enum / per-entity asset lists) | `enum_decls_of_resclass` +0x110 -- the same shared slot for both decl-name and enum-member enumeration |
 | Save Timeline (commit `componentTimeLine` / `encounterComponent`) | `apply_edit` kind=0 -- the same path Save-to-Decl already uses, id-targeted instead of paste-targeted |
+| Send feedback (the bottom-right "?" dialog) | no engine slot -- the page posts `reportSubmit` with an opaque JSON payload; the host POSTs it to the feedback relay on a short-lived worker thread (WinHTTP, the frontend's only network touch -- see the capability note in `snaphak_ui_webview.cpp`) and answers `reportResult {ok, mode, number}` -> green/red toast. Pipeline: [`feedback.md`](feedback.md) |
 
 Heavy engine writes (Save, Delete, Select-in-editor) are snapshotted in the JS message callback and
 applied on the next think-loop frame under the loop mutex, keeping them off the re-entrant callback.
@@ -82,6 +83,24 @@ through it).
 
 Newest first. Each dated entry covers one working session's worth of change; the undated **Baseline**
 entry at the bottom is the original POC buildout, before this doc tracked dates per entry.
+
+### 2026-07-18 -- Send-feedback dialog ("?"), and the focus-mode bottom-padding fix
+
+- **In-app feedback.** A "?" circle button floats bottom-right (above the statusbar); it opens a
+  Send-feedback modal (category / title / details / optional contact, plus a hidden honeypot field).
+  Send posts `reportSubmit` with the whole report as one opaque JSON payload (the page composes it,
+  including the installed version from the `list` message); the host ships it to the feedback relay on
+  a short-lived WinHTTP thread (the think loop + WebView2 callbacks share one STA thread -- a
+  synchronous POST there would freeze the UI) and the think loop relays `reportResult {ok, mode,
+  number}` back. Green toast on success ("matched a known report" when the relay deduped it into an
+  existing issue's comments), red toast on failure -- with the dialog left open so nothing typed is
+  lost. One submit in flight at a time (button disabled + a host-side guard). Preview mode fakes the
+  round-trip, including the dedup path on an identical re-send. Full pipeline: [`feedback.md`](feedback.md).
+- **Focus-mode bottom padding fixed.** The expanded Decl Text editor (`.editor-col.focus-mode`,
+  `position:fixed; inset:14px`) inherited the base `.editor-col`'s `height:100%`, and an explicit
+  height wins over the bottom inset -- so the panel's bottom edge (border + 12px padding) sat 14px
+  below the viewport and looked like missing bottom padding. `height:auto` in the focus-mode rule lets
+  both insets govern; the panel now shows the same 14px gap + 12px padding on all four sides.
 
 ### 2026-07-17 -- Prefab selection gating + metadata sidecars, decl-editor line numbers, placeholder layout fix
 
