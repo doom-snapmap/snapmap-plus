@@ -84,6 +84,20 @@ a:hover { color: var(--argent-hi); }
 
 code, pre { font-family: var(--mono); }
 
+/* ---------- scrollbars (page + every inner scroll surface) ---------- */
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--panel-2); }
+::-webkit-scrollbar-thumb { background: var(--line); }
+::-webkit-scrollbar-thumb:hover { background: rgba(74, 201, 240, 0.45); }
+::-webkit-scrollbar-corner { background: var(--panel-2); }
+
+/* Firefox (no ::-webkit-scrollbar; the standard properties would disable the
+   fine-grained styling above in Chromium, so scope them to Firefox only) */
+@supports not selector(::-webkit-scrollbar) {
+  * { scrollbar-width: thin; scrollbar-color: var(--line) var(--panel-2); }
+}
+
 /* ---------- header ---------- */
 
 .site-header {
