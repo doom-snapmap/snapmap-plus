@@ -387,6 +387,30 @@
     root.appendChild(area);
     root.appendChild(file);
 
+    /* comment-style editors dock their actions INSIDE the editor (bottom-right footer);
+       the full post composer keeps its actions on the page below instead */
+    var submitBtn = null, cancelBtn = null;
+    if (opts.submit) {
+      var footer = document.createElement("div");
+      footer.className = "rte-footer";
+      footer.appendChild(note);
+      if (opts.cancel) {
+        cancelBtn = document.createElement("button");
+        cancelBtn.type = "button";
+        cancelBtn.className = "btn btn-ghost";
+        cancelBtn.textContent = opts.cancel.label || "Cancel";
+        cancelBtn.addEventListener("click", function () { opts.cancel.onClick(); });
+        footer.appendChild(cancelBtn);
+      }
+      submitBtn = document.createElement("button");
+      submitBtn.type = "button";
+      submitBtn.className = "btn btn-primary";
+      submitBtn.textContent = opts.submit.label;
+      submitBtn.addEventListener("click", function () { opts.submit.onClick(); });
+      footer.appendChild(submitBtn);
+      root.appendChild(footer);
+    }
+
     function setNote(t) { note.textContent = t; }
 
     function exec(cmd, val) {
@@ -491,6 +515,9 @@
       root: root,
       area: area,
       note: note,
+      submitBtn: submitBtn,
+      cancelBtn: cancelBtn,
+      setNote: setNote,
       isEmpty: function () { return !area.textContent.trim() && !area.querySelector("img"); },
       getHTML: function () { return area.innerHTML; },
       setHTML: function (h) { area.innerHTML = h; },
@@ -873,32 +900,25 @@
 
         function renderOpenComposer(hostEl, u) {
           hostEl.innerHTML = "";
-          var ed = createEditor({ compact: true, placeholder: "Write a comment — share what worked, ask a follow-up…" });
+          var ed = createEditor({
+            compact: true,
+            placeholder: "Write a comment — share what worked, ask a follow-up…",
+            cancel: { label: "Cancel", onClick: function () { renderCollapsedComposer(hostEl, u); } },
+            submit: { label: "Comment", onClick: function () {
+              if (ed.isEmpty()) { toast("Write something first.", true); return; }
+              ed.submitBtn.disabled = true; ed.submitBtn.textContent = "Posting…";
+              api("/community/discussions/" + n + "/comments", { method: "POST", json: { body: ed.getMarkdown() } })
+                .then(function (r2) {
+                  if (r2.ok) { toast("Comment posted."); render(); }
+                  else {
+                    ed.submitBtn.disabled = false; ed.submitBtn.textContent = "Comment";
+                    toast("Could not post: " + apiError(r2, "try again"), true);
+                  }
+                });
+            } },
+          });
           hostEl.appendChild(ed.root);
-          hostEl.appendChild(ed.note);
-          var actions = document.createElement("div");
-          actions.className = "composer-actions";
-          actions.innerHTML =
-            '<button class="btn btn-ghost" type="button" data-c-cancel>Cancel</button>' +
-            '<button class="btn btn-primary" type="button" data-c-send>Comment</button>';
-          hostEl.appendChild(actions);
           ed.focus();
-          actions.querySelector("[data-c-cancel]").addEventListener("click", function () {
-            renderCollapsedComposer(hostEl, u);
-          });
-          actions.querySelector("[data-c-send]").addEventListener("click", function () {
-            if (ed.isEmpty()) { toast("Write something first.", true); return; }
-            var btn = this;
-            btn.disabled = true; btn.textContent = "Posting…";
-            api("/community/discussions/" + n + "/comments", { method: "POST", json: { body: ed.getMarkdown() } })
-              .then(function (r2) {
-                if (r2.ok) { toast("Comment posted."); render(); }
-                else {
-                  btn.disabled = false; btn.textContent = "Comment";
-                  toast("Could not post: " + apiError(r2, "try again"), true);
-                }
-              });
-          });
         }
 
       });
@@ -928,26 +948,25 @@
             var slot = thread.querySelector('[data-slot="' + cid + '"]');
             if (!slot || slot.firstChild) return;
             slot.closest(".replies").style.display = "";
-            var red = createEditor({ compact: true, placeholder: "Write a reply…" });
-            slot.appendChild(red.root);
-            slot.appendChild(red.note);
-            var ra = document.createElement("div");
-            ra.className = "composer-actions";
-            ra.innerHTML =
-              '<button class="btn btn-ghost" type="button">Cancel</button>' +
-              '<button class="btn btn-primary" type="button">Reply</button>';
-            slot.appendChild(ra);
-            red.focus();
-            ra.children[0].addEventListener("click", function () { slot.innerHTML = ""; });
-            ra.children[1].addEventListener("click", function () {
-              if (red.isEmpty()) { toast("Write something first.", true); return; }
-              this.disabled = true; this.textContent = "Posting…";
-              api("/community/discussions/" + n + "/comments", { method: "POST", json: { body: red.getMarkdown(), replyToId: cid } })
-                .then(function (r2) {
-                  if (r2.ok) { expandedReplies[cid] = true; toast("Reply posted."); render(); }
-                  else { toast("Could not post: " + apiError(r2, "try again"), true); }
-                });
+            var red = createEditor({
+              compact: true,
+              placeholder: "Write a reply…",
+              cancel: { label: "Cancel", onClick: function () { slot.innerHTML = ""; } },
+              submit: { label: "Reply", onClick: function () {
+                if (red.isEmpty()) { toast("Write something first.", true); return; }
+                red.submitBtn.disabled = true; red.submitBtn.textContent = "Posting…";
+                api("/community/discussions/" + n + "/comments", { method: "POST", json: { body: red.getMarkdown(), replyToId: cid } })
+                  .then(function (r2) {
+                    if (r2.ok) { expandedReplies[cid] = true; toast("Reply posted."); render(); }
+                    else {
+                      red.submitBtn.disabled = false; red.submitBtn.textContent = "Reply";
+                      toast("Could not post: " + apiError(r2, "try again"), true);
+                    }
+                  });
+              } },
             });
+            slot.appendChild(red.root);
+            red.focus();
             return;
           }
 
@@ -955,29 +974,29 @@
             if (article.classList.contains("comment-editing")) return;
             article.classList.add("comment-editing");
             var body = article.querySelector(".comment-body");
-            var eed = createEditor({ compact: true, initialHTML: body.innerHTML });
-            var ea = document.createElement("div");
-            ea.className = "composer-actions";
-            ea.innerHTML =
-              '<button class="btn btn-ghost" type="button">Cancel</button>' +
-              '<button class="btn btn-primary" type="button">Save</button>';
-            body.parentNode.insertBefore(eed.root, body.nextSibling);
-            eed.root.parentNode.insertBefore(ea, eed.root.nextSibling);
-            eed.focus();
-            ea.children[0].addEventListener("click", function () {
-              eed.root.remove(); ea.remove();
-              article.classList.remove("comment-editing");
-            });
             var cid2 = article.getAttribute("data-cid");
-            ea.children[1].addEventListener("click", function () {
-              if (eed.isEmpty()) { toast("Write something first.", true); return; }
-              this.disabled = true; this.textContent = "Saving…";
-              api("/community/comments/" + encodeURIComponent(cid2), { method: "PATCH", json: { body: eed.getMarkdown() } })
-                .then(function (r2) {
-                  if (r2.ok) { toast("Comment updated."); render(); }
-                  else { toast("Edit failed: " + apiError(r2, "try again"), true); }
-                });
+            var eed = createEditor({
+              compact: true,
+              initialHTML: body.innerHTML,
+              cancel: { label: "Cancel", onClick: function () {
+                eed.root.remove();
+                article.classList.remove("comment-editing");
+              } },
+              submit: { label: "Save", onClick: function () {
+                if (eed.isEmpty()) { toast("Write something first.", true); return; }
+                eed.submitBtn.disabled = true; eed.submitBtn.textContent = "Saving…";
+                api("/community/comments/" + encodeURIComponent(cid2), { method: "PATCH", json: { body: eed.getMarkdown() } })
+                  .then(function (r2) {
+                    if (r2.ok) { toast("Comment updated."); render(); }
+                    else {
+                      eed.submitBtn.disabled = false; eed.submitBtn.textContent = "Save";
+                      toast("Edit failed: " + apiError(r2, "try again"), true);
+                    }
+                  });
+              } },
             });
+            body.parentNode.insertBefore(eed.root, body.nextSibling);
+            eed.focus();
             return;
           }
 
