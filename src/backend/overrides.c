@@ -191,14 +191,20 @@ static void      ov_flush_b(ov_stream *s)       { if (s && s->fp) fflush(s->fp);
 static long long ov_ret1(ov_stream *s)          { (void)s; return 1; }   /* [23] return 1 */
 
 /* The stream vtable -- one 24-entry table shared by every stream we hand back (the methods are
- * stateless w.r.t. the object beyond `this`). Order MATCHES the OG PTR_FUN_18003d050 slot order
- * exactly (every slot decompiled in pb1-overrides), so the engine calls the right method per slot. */
+ * stateless w.r.t. the object beyond `this`). Slot order follows the engine idFile vtable:
+ * GetName @+0x18, GetFullPath @+0x20, Read @+0x28, GetLength @+0x58, GetTimestamp @+0x98 --
+ * so the engine calls the right method per slot. */
 static void *g_stream_vtable[24] = {
     (void *)ov_dtor,          /* 0  +0x00 close/dtor */
     (void *)ov_ret0_a,        /* 1  +0x08 */
     (void *)ov_ret0_b,        /* 2  +0x10 */
-    (void *)ov_length,        /* 3  +0x18 Length */
-    (void *)ov_name,          /* 4  +0x20 Name */
+    /* +0x18 = the engine idFile GetName slot: idLexer::LoadFile reads it and copies the result
+     * into an idStr, so it must be a valid name pointer -- NOT a length. Renderprog decls (and
+     * their #include files) load through this slot; entity decls use the +0x20 path below.
+     * GetLength is a separate slot (+0x58, ov_length_byseek). Returning ov_length here would
+     * deref the file size as a char* and crash. */
+    (void *)ov_name,          /* 3  +0x18 GetName -> name char* */
+    (void *)ov_name,          /* 4  +0x20 GetFullPath -> name char* */
     (void *)ov_read,          /* 5  +0x28 Read */
     (void *)ov_write,         /* 6  +0x30 Write */
     (void *)ov_seekread,      /* 7  +0x38 */
