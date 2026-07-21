@@ -1,8 +1,9 @@
 /* Snapmap+ site — Community section behavior.
    Renders GitHub Discussions (via the community service) natively on the site:
    1. Index — category tabs + the post list (community.html).
-   2. Post view — one discussion: body, reactions, comment thread + comment box (community-post.html).
-   3. Composer — write a post: markdown, image upload, preview (community-compose.html).
+   2. Post view — one discussion: body, reactions, comment thread + comment box, and
+      author controls (edit/delete your own post and comments) (community-post.html).
+   3. Composer — write or edit a post: markdown, image upload, preview (community-compose.html).
    4. Sign-in — GitHub OAuth via the service; the browser holds only an opaque session id.
    Each feature activates only when its markup is present, same as site.js. */
 
@@ -52,7 +53,8 @@
   function api(path, opts) {
     opts = opts || {};
     var headers = opts.headers || {};
-    Object.keys(authHeaders()).forEach(function (k) { headers[k] = authHeaders()[k]; });
+    var ah = authHeaders();
+    Object.keys(ah).forEach(function (k) { headers[k] = ah[k]; });
     if (opts.json) {
       headers["Content-Type"] = "application/json";
       opts.body = JSON.stringify(opts.json);
@@ -198,22 +200,6 @@
     });
   }
 
-  /* ---------- reactions (delegated) ---------- */
-
-  function bindReactions(container, refresh) {
-    container.addEventListener("click", function (e) {
-      var btn = e.target.closest("[data-react]");
-      if (!btn) return;
-      if (!sessionId()) { location.href = WORKER + "/auth/login"; return; }
-      btn.disabled = true;
-      api("/community/reactions", { method: "POST", json: { subjectId: btn.getAttribute("data-react"), content: "THUMBS_UP" } })
-        .then(function (r) {
-          if (r.ok) refresh();
-          else btn.disabled = false;
-        });
-    });
-  }
-
   /* ---------- 1. index ---------- */
 
   function initIndex() {
@@ -302,11 +288,16 @@
     var n = parseInt(params.get("n") || "", 10);
     if (!n) { location.replace("community.html"); return; }
 
+    var rawBodies = {};   // node id -> raw markdown, for inline comment editing
+
     function render() {
-      api("/community/discussions/" + n).then(function (r) {
+      Promise.all([api("/community/discussions/" + n), me()]).then(function (results) {
+        var r = results[0];
+        var user = results[1];
         if (!r.ok) { failNote(host, "this post"); return; }
         var d = r.data;
         document.title = d.title + " — Snapmap+ Community";
+        var mine = function (a) { return !!(user && a && a.login === user.login); };
 
         var head =
           '<div class="section-head"><h1 class="section-title">' + esc(d.title) + "</h1></div>" +
@@ -321,22 +312,43 @@
           head +
           '<div class="post-body">' + d.bodyHTML + "</div>" +
           '<div class="post-foot">' + reactionsHtml(d.reactions) + reactButton(d.id) +
+            (mine(d.author)
+              ? '<a class="reply-toggle" href="community-compose.html?edit=' + n + '">Edit</a>' +
+                '<button class="reply-toggle danger" type="button" data-del-post>Delete</button>'
+              : "") +
             '<a class="gh-link" href="' + esc(d.url) + '" rel="noopener">View on GitHub &rarr;</a>' +
           "</div>";
         enhanceVideos(host.querySelector(".post-body"));
+
+        var delPost = host.querySelector("[data-del-post]");
+        if (delPost) {
+          delPost.addEventListener("click", function () {
+            if (!confirm("Delete this post? This cannot be undone.")) return;
+            delPost.disabled = true;
+            api("/community/discussions/" + n, { method: "DELETE" }).then(function (r2) {
+              if (r2.ok) location.href = "community.html";
+              else { delPost.disabled = false; alert("Delete failed (" + ((r2.data && r2.data.error) || "error") + ")."); }
+            });
+          });
+        }
 
         var thread = document.getElementById("community-comments");
         if (!thread) return;
 
         function commentHtml(c, isReply, topId) {
+          rawBodies[c.id] = c.body || "";
           return (
-            '<article class="comment' + (isReply ? " comment-reply" : "") + '">' +
+            '<article class="comment' + (isReply ? " comment-reply" : "") + '" data-cid="' + esc(c.id) + '">' +
               '<div class="post-meta">' + authorHtml(c.author) +
                 '<span class="sep">&middot;</span><time datetime="' + esc(c.createdAt) + '">' + fmtDate(c.createdAt) + "</time>" +
               "</div>" +
               '<div class="comment-body">' + c.bodyHTML + "</div>" +
               '<div class="comment-foot">' + reactionsHtml(c.reactions) + reactButton(c.id) +
                 (!isReply ? '<button class="reply-toggle" type="button" data-reply="' + esc(topId) + '">Reply</button>' : "") +
+                (mine(c.author)
+                  ? '<button class="reply-toggle" type="button" data-edit-c="' + esc(c.id) + '">Edit</button>' +
+                    '<button class="reply-toggle danger" type="button" data-del-c="' + esc(c.id) + '">Delete</button>'
+                  : "") +
               "</div>" +
             "</article>"
           );
@@ -355,69 +367,135 @@
         Array.prototype.slice.call(thread.querySelectorAll(".comment-body")).forEach(enhanceVideos);
 
         /* the comment box (or a sign-in prompt) */
-        me().then(function (user) {
-          var box = document.getElementById("comment-box");
-          if (!box) return;
+        var box = document.getElementById("comment-box");
+        if (box) {
           if (!user) {
             box.innerHTML = '<div class="changelog-fallback">' + signInButtonHtml("Sign in with GitHub") +
               ' <span class="signin-note">to comment and react.</span></div>';
+          } else {
+            box.innerHTML =
+              '<form class="comment-form"><textarea rows="4" maxlength="60000" ' +
+              'placeholder="Write a comment (markdown works)"></textarea>' +
+              '<div class="form-row"><button class="btn btn-primary" type="submit">Comment</button></div></form>';
+            box.querySelector("form").addEventListener("submit", function (e) {
+              e.preventDefault();
+              var ta = box.querySelector("textarea");
+              var text = ta.value.trim();
+              if (!text) return;
+              var btn = box.querySelector("button");
+              btn.disabled = true; btn.textContent = "Posting…";
+              api("/community/discussions/" + n + "/comments", { method: "POST", json: { body: text } })
+                .then(function (r2) {
+                  if (r2.ok) { render(); }
+                  else { btn.disabled = false; btn.textContent = "Comment"; alert("Could not post the comment (" + ((r2.data && r2.data.error) || "error") + ")."); }
+                });
+            });
+          }
+        }
+
+        /* thread interactions: replies, inline edit, delete, reactions */
+        thread.addEventListener("click", function (e) {
+          var t;
+
+          if ((t = e.target.closest("[data-reply]"))) {
+            if (!sessionId()) { location.href = WORKER + "/auth/login"; return; }
+            var id = t.getAttribute("data-reply");
+            var slot = thread.querySelector('[data-slot="' + id + '"]');
+            if (!slot || slot.firstChild) return;
+            slot.innerHTML =
+              '<form class="comment-form comment-form-reply"><textarea rows="3" maxlength="60000" ' +
+              'placeholder="Write a reply"></textarea>' +
+              '<div class="form-row"><button class="btn btn-primary" type="submit">Reply</button></div></form>';
+            slot.querySelector("textarea").focus();
+            slot.querySelector("form").addEventListener("submit", function (ev) {
+              ev.preventDefault();
+              var text = slot.querySelector("textarea").value.trim();
+              if (!text) return;
+              var btn = slot.querySelector("button");
+              btn.disabled = true; btn.textContent = "Posting…";
+              api("/community/discussions/" + n + "/comments", { method: "POST", json: { body: text, replyToId: id } })
+                .then(function (r2) {
+                  if (r2.ok) { render(); }
+                  else { btn.disabled = false; btn.textContent = "Reply"; alert("Could not post the reply (" + ((r2.data && r2.data.error) || "error") + ")."); }
+                });
+            });
             return;
           }
-          box.innerHTML =
-            '<form class="comment-form"><textarea rows="4" maxlength="60000" ' +
-            'placeholder="Write a comment (markdown works)"></textarea>' +
-            '<div class="form-row"><button class="btn btn-primary" type="submit">Comment</button></div></form>';
-          box.querySelector("form").addEventListener("submit", function (e) {
-            e.preventDefault();
-            var ta = box.querySelector("textarea");
-            var text = ta.value.trim();
-            if (!text) return;
-            var btn = box.querySelector("button");
-            btn.disabled = true; btn.textContent = "Posting…";
-            api("/community/discussions/" + n + "/comments", { method: "POST", json: { body: text } })
+
+          if ((t = e.target.closest("[data-edit-c]"))) {
+            var cid = t.getAttribute("data-edit-c");
+            var article = thread.querySelector('[data-cid="' + cid + '"]');
+            if (!article || article.querySelector(".comment-edit-form")) return;
+            var bodyDiv = article.querySelector(".comment-body");
+            bodyDiv.style.display = "none";
+            var form = document.createElement("form");
+            form.className = "comment-form comment-edit-form";
+            form.innerHTML =
+              '<textarea rows="4" maxlength="60000"></textarea>' +
+              '<div class="form-row"><button class="btn btn-primary" type="submit">Save</button>' +
+              '<button class="btn btn-ghost" type="button" data-cancel>Cancel</button></div>';
+            form.querySelector("textarea").value = rawBodies[cid] || "";
+            bodyDiv.parentNode.insertBefore(form, bodyDiv.nextSibling);
+            form.querySelector("[data-cancel]").addEventListener("click", function () {
+              form.remove();
+              bodyDiv.style.display = "";
+            });
+            form.addEventListener("submit", function (ev) {
+              ev.preventDefault();
+              var text = form.querySelector("textarea").value.trim();
+              if (!text) return;
+              var btn = form.querySelector('button[type="submit"]');
+              btn.disabled = true; btn.textContent = "Saving…";
+              api("/community/comments/" + encodeURIComponent(cid), { method: "PATCH", json: { body: text } })
+                .then(function (r2) {
+                  if (r2.ok) { render(); }
+                  else { btn.disabled = false; btn.textContent = "Save"; alert("Edit failed (" + ((r2.data && r2.data.error) || "error") + ")."); }
+                });
+            });
+            return;
+          }
+
+          if ((t = e.target.closest("[data-del-c]"))) {
+            if (!confirm("Delete this comment?")) return;
+            t.disabled = true;
+            api("/community/comments/" + encodeURIComponent(t.getAttribute("data-del-c")), { method: "DELETE" })
               .then(function (r2) {
                 if (r2.ok) { render(); }
-                else { btn.disabled = false; btn.textContent = "Comment"; alert("Could not post the comment (" + ((r2.data && r2.data.error) || "error") + ")."); }
+                else { t.disabled = false; alert("Delete failed (" + ((r2.data && r2.data.error) || "error") + ")."); }
               });
-          });
+            return;
+          }
+
+          if ((t = e.target.closest("[data-react]"))) {
+            if (!sessionId()) { location.href = WORKER + "/auth/login"; return; }
+            t.disabled = true;
+            api("/community/reactions", { method: "POST", json: { subjectId: t.getAttribute("data-react"), content: "THUMBS_UP" } })
+              .then(function (r2) {
+                if (r2.ok) render();
+                else t.disabled = false;
+              });
+          }
         });
 
-        /* reply toggles */
-        thread.addEventListener("click", function (e) {
-          var t = e.target.closest("[data-reply]");
+        /* the post's own react button lives in `host`, not the thread */
+        host.addEventListener("click", function (e) {
+          var t = e.target.closest("[data-react]");
           if (!t) return;
           if (!sessionId()) { location.href = WORKER + "/auth/login"; return; }
-          var id = t.getAttribute("data-reply");
-          var slot = thread.querySelector('[data-slot="' + id + '"]');
-          if (!slot || slot.firstChild) return;
-          slot.innerHTML =
-            '<form class="comment-form comment-form-reply"><textarea rows="3" maxlength="60000" ' +
-            'placeholder="Write a reply"></textarea>' +
-            '<div class="form-row"><button class="btn btn-primary" type="submit">Reply</button></div></form>';
-          slot.querySelector("textarea").focus();
-          slot.querySelector("form").addEventListener("submit", function (ev) {
-            ev.preventDefault();
-            var text = slot.querySelector("textarea").value.trim();
-            if (!text) return;
-            var btn = slot.querySelector("button");
-            btn.disabled = true; btn.textContent = "Posting…";
-            api("/community/discussions/" + n + "/comments", { method: "POST", json: { body: text, replyToId: id } })
-              .then(function (r2) {
-                if (r2.ok) { render(); }
-                else { btn.disabled = false; btn.textContent = "Reply"; alert("Could not post the reply (" + ((r2.data && r2.data.error) || "error") + ")."); }
-              });
-          });
-        }, { once: false });
-
-        bindReactions(thread, render);
-        bindReactions(host, render);
+          t.disabled = true;
+          api("/community/reactions", { method: "POST", json: { subjectId: t.getAttribute("data-react"), content: "THUMBS_UP" } })
+            .then(function (r2) {
+              if (r2.ok) render();
+              else t.disabled = false;
+            });
+        });
       });
     }
 
     render();
   }
 
-  /* ---------- 3. composer ---------- */
+  /* ---------- 3. composer (write + edit) ---------- */
 
   function insertAtCursor(ta, text) {
     var start = ta.selectionStart || 0;
@@ -448,6 +526,8 @@
   function initCompose() {
     var host = document.getElementById("community-compose");
     if (!host) return;
+    var params = new URLSearchParams(location.search);
+    var editN = parseInt(params.get("edit") || "", 10) || null;
 
     me().then(function (user) {
       if (!user) {
@@ -457,12 +537,30 @@
         return;
       }
 
-      api("/community/categories").then(function (r) {
+      var loads = [api("/community/categories")];
+      if (editN) loads.push(api("/community/discussions/" + editN));
+      Promise.all(loads).then(function (results) {
+        var r = results[0];
         if (!r.ok) { failNote(host, "the composer"); return; }
+        var editing = null;
+        if (editN) {
+          var pr = results[1];
+          if (!pr.ok) { failNote(host, "the post to edit"); return; }
+          if (pr.data.author.login !== user.login) {
+            host.innerHTML = '<div class="changelog-fallback">Only the author can edit this post.</div>';
+            return;
+          }
+          editing = pr.data;
+          var titleEl = document.querySelector(".section-title");
+          if (titleEl) titleEl.textContent = "Edit post";
+          document.title = "Edit post — Snapmap+ Community";
+        }
+
         /* Announcements is maintainer-posted; leave it out of the picker */
         var cats = r.data.categories.filter(function (c) { return c.slug !== "announcements"; });
         var options = cats.map(function (c) {
-          return '<option value="' + esc(c.id) + '">' + esc(c.name) + "</option>";
+          var sel = editing && editing.category && editing.category.slug === c.slug ? " selected" : "";
+          return '<option value="' + esc(c.id) + '"' + sel + ">" + esc(c.name) + "</option>";
         }).join("");
 
         host.innerHTML =
@@ -478,7 +576,7 @@
               '<label class="btn btn-ghost btn-file">Add image<input id="c-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden></label>' +
               '<button id="c-preview" class="btn btn-ghost" type="button">Preview</button>' +
               '<span id="c-note" class="compose-note" aria-live="polite"></span>' +
-              '<button class="btn btn-primary compose-submit" type="submit">Publish</button>' +
+              '<button class="btn btn-primary compose-submit" type="submit">' + (editing ? "Save changes" : "Publish") + "</button>" +
             "</div>" +
             '<div id="c-preview-box" class="preview-box" hidden></div>' +
           "</form>";
@@ -487,18 +585,23 @@
         var ta = host.querySelector("#c-body");
         var note = host.querySelector("#c-note");
 
-        /* draft autosave (title+body only) */
-        try {
-          var draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null");
-          if (draft) { host.querySelector("#c-title").value = draft.title || ""; ta.value = draft.body || ""; }
-        } catch (e) {}
-        form.addEventListener("input", function () {
+        if (editing) {
+          host.querySelector("#c-title").value = editing.title;
+          ta.value = editing.body || "";
+        } else {
+          /* draft autosave (new posts only — edits always start from the published source) */
           try {
-            localStorage.setItem(DRAFT_KEY, JSON.stringify({
-              title: host.querySelector("#c-title").value, body: ta.value,
-            }));
+            var draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null");
+            if (draft) { host.querySelector("#c-title").value = draft.title || ""; ta.value = draft.body || ""; }
           } catch (e) {}
-        });
+          form.addEventListener("input", function () {
+            try {
+              localStorage.setItem(DRAFT_KEY, JSON.stringify({
+                title: host.querySelector("#c-title").value, body: ta.value,
+              }));
+            } catch (e) {}
+          });
+        }
 
         /* image upload: file picker, drag-drop, paste */
         host.querySelector("#c-file").addEventListener("change", function () {
@@ -532,21 +635,24 @@
         form.addEventListener("submit", function (e) {
           e.preventDefault();
           var btn = host.querySelector(".compose-submit");
-          btn.disabled = true; btn.textContent = "Publishing…";
-          api("/community/discussions", {
-            method: "POST",
-            json: {
-              title: host.querySelector("#c-title").value.trim(),
-              categoryId: host.querySelector("#c-cat").value,
-              body: ta.value.trim(),
-            },
-          }).then(function (r2) {
-            if (r2.ok && r2.data.number) {
-              try { localStorage.removeItem(DRAFT_KEY); } catch (err) {}
-              location.href = "community-post.html?n=" + r2.data.number;
+          var busy = editing ? "Saving…" : "Publishing…";
+          var idle = editing ? "Save changes" : "Publish";
+          btn.disabled = true; btn.textContent = busy;
+          var payload = {
+            title: host.querySelector("#c-title").value.trim(),
+            categoryId: host.querySelector("#c-cat").value,
+            body: ta.value.trim(),
+          };
+          var call = editing
+            ? api("/community/discussions/" + editN, { method: "PATCH", json: payload })
+            : api("/community/discussions", { method: "POST", json: payload });
+          call.then(function (r2) {
+            if (r2.ok && (editing || r2.data.number)) {
+              if (!editing) { try { localStorage.removeItem(DRAFT_KEY); } catch (err) {} }
+              location.href = "community-post.html?n=" + (editing ? editN : r2.data.number);
             } else {
-              btn.disabled = false; btn.textContent = "Publish";
-              note.textContent = "Publish failed: " + ((r2.data && r2.data.error) || "error");
+              btn.disabled = false; btn.textContent = idle;
+              note.textContent = (editing ? "Save" : "Publish") + " failed: " + ((r2.data && r2.data.error) || "error");
             }
           });
         });

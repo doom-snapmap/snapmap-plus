@@ -926,6 +926,8 @@ section.deck { background: var(--deck); border-top: 1px solid var(--line-soft); 
   padding: 0;
 }
 .reply-toggle:hover { text-decoration: underline; }
+.reply-toggle.danger { color: var(--blood); }
+.comment-edit-form { margin: 8px 0; }
 
 .community-thread { margin: 44px 0 0; }
 .thread-title { font-size: 20px; }

@@ -65,7 +65,7 @@ const STATE_TTL = 600;               // 10 minutes to complete the GitHub round-
 
 const MAX_UPLOAD = 8 * 1024 * 1024;  // 8 MB per image
 /* per-session hourly write budgets -- generous for a human, a wall for a loop */
-const LIMITS = { post: 10, comment: 60, reaction: 120, upload: 30, preview: 120 };
+const LIMITS = { post: 10, comment: 60, reaction: 120, upload: 30, preview: 120, edit: 60 };
 
 /* ---------------- small helpers ---------------- */
 
@@ -110,7 +110,7 @@ function preflight(req) {
     status: 204,
     headers: {
       'Access-Control-Allow-Origin': origin,
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Authorization, Content-Type',
       'Access-Control-Max-Age': '86400',
       'Vary': 'Origin',
@@ -211,24 +211,26 @@ query($first: Int!, $after: String, $categoryId: ID) {
   }
 }`;
 
+/* `body` (raw markdown) rides along with `bodyHTML` so the author's Edit flow can prefill the
+ * original source -- rendered HTML is not reversible */
 const Q_POST = FRAG_AUTHOR + `
 query($number: Int!) {
   repository(owner: "${REPO_OWNER}", name: "${REPO_NAME}") {
     discussion(number: $number) {
-      id number title bodyHTML createdAt url
+      id number title body bodyHTML createdAt url
       author { ...authorFields }
       category { name slug }
       reactionGroups { content reactors { totalCount } }
       comments(first: ${COMMENT_PAGE}) {
         totalCount
         nodes {
-          id bodyHTML createdAt url
+          id body bodyHTML createdAt url
           author { ...authorFields }
           reactionGroups { content reactors { totalCount } }
           replies(first: ${REPLY_PAGE}) {
             totalCount
             nodes {
-              id bodyHTML createdAt url
+              id body bodyHTML createdAt url
               author { ...authorFields }
               reactionGroups { content reactors { totalCount } }
             }
@@ -260,6 +262,37 @@ mutation($subjectId: ID!, $content: ReactionContent!) {
   }
 }`;
 
+/* author controls -- GitHub enforces authorship server-side (an author can edit/delete their own
+ * discussions and comments; repo maintainers can moderate anything), so these carry no
+ * authorization logic of their own: a non-author's attempt simply comes back as an error */
+const M_UPDATE_DISCUSSION = `
+mutation($discussionId: ID!, $title: String, $body: String, $categoryId: ID) {
+  updateDiscussion(input: { discussionId: $discussionId, title: $title, body: $body, categoryId: $categoryId }) {
+    discussion { number }
+  }
+}`;
+
+const M_DELETE_DISCUSSION = `
+mutation($id: ID!) {
+  deleteDiscussion(input: { id: $id }) {
+    clientMutationId
+  }
+}`;
+
+const M_UPDATE_COMMENT = `
+mutation($commentId: ID!, $body: String!) {
+  updateDiscussionComment(input: { commentId: $commentId, body: $body }) {
+    comment { id }
+  }
+}`;
+
+const M_DELETE_COMMENT = `
+mutation($id: ID!) {
+  deleteDiscussionComment(input: { id: $id }) {
+    comment { id }
+  }
+}`;
+
 const REACTION_CONTENTS = ['THUMBS_UP', 'THUMBS_DOWN', 'LAUGH', 'HOORAY', 'CONFUSED', 'HEART', 'ROCKET', 'EYES'];
 
 /* ---------------- shaping ---------------- */
@@ -281,6 +314,7 @@ function shapeReactions(groups) {
 function shapeComment(c) {
   return {
     id: c.id,
+    body: c.body,
     bodyHTML: c.bodyHTML,
     createdAt: c.createdAt,
     url: c.url,
@@ -288,6 +322,7 @@ function shapeComment(c) {
     reactions: shapeReactions(c.reactionGroups),
     replies: (c.replies ? c.replies.nodes : []).map(r => ({
       id: r.id,
+      body: r.body,
       bodyHTML: r.bodyHTML,
       createdAt: r.createdAt,
       url: r.url,
@@ -477,6 +512,7 @@ async function getDiscussion(env, number) {
     id: d.id,
     number: d.number,
     title: d.title,
+    body: d.body,
     bodyHTML: d.bodyHTML,
     createdAt: d.createdAt,
     url: d.url,
@@ -533,6 +569,63 @@ async function addReaction(env, req, session, body) {
   if (!subjectId || !REACTION_CONTENTS.includes(content)) return { error: 'bad reaction', status: 400 };
   const data = await gql(session.user.token, M_ADD_REACTION, { subjectId, content });
   if (!(data && data.addReaction)) return { error: 'upstream', status: 502 };
+  memCache.clear();
+  return { ok: true };
+}
+
+async function editPost(env, req, session, number, body) {
+  if (!(await rateOk(env, session.sid, 'edit'))) return { error: 'rate limited', status: 429 };
+  const title = String(body.title || '').trim();
+  const text = String(body.body || '').trim();
+  if (title.length < 3 || title.length > 200) return { error: 'bad title', status: 400 };
+  if (text.length < 10 || text.length > 60000) return { error: 'bad body', status: 400 };
+  const post = await getDiscussion(env, number);
+  if (post.error) return post;
+  const vars = { discussionId: post.id, title, body: text, categoryId: null };
+  if (body.categoryId) {
+    const cats = await getCategories(env);
+    if (cats.error) return cats;
+    if (!cats.categories.some(c => c.id === body.categoryId)) return { error: 'bad category', status: 400 };
+    vars.categoryId = body.categoryId;
+  }
+  const data = await gql(session.user.token, M_UPDATE_DISCUSSION, vars);
+  if (!(data && data.updateDiscussion && data.updateDiscussion.discussion)) {
+    return { error: 'GitHub rejected the edit (only the author can edit)', status: 403 };
+  }
+  memCache.clear();
+  return { number };
+}
+
+async function deletePost(env, req, session, number) {
+  if (!(await rateOk(env, session.sid, 'edit'))) return { error: 'rate limited', status: 429 };
+  const post = await getDiscussion(env, number);
+  if (post.error) return post;
+  const data = await gql(session.user.token, M_DELETE_DISCUSSION, { id: post.id });
+  if (!(data && data.deleteDiscussion)) {
+    return { error: 'GitHub rejected the delete (only the author can delete)', status: 403 };
+  }
+  memCache.clear();
+  return { ok: true };
+}
+
+async function editComment(env, req, session, id, body) {
+  if (!(await rateOk(env, session.sid, 'edit'))) return { error: 'rate limited', status: 429 };
+  const text = String(body.body || '').trim();
+  if (text.length < 1 || text.length > 60000) return { error: 'bad body', status: 400 };
+  const data = await gql(session.user.token, M_UPDATE_COMMENT, { commentId: id, body: text });
+  if (!(data && data.updateDiscussionComment && data.updateDiscussionComment.comment)) {
+    return { error: 'GitHub rejected the edit (only the author can edit)', status: 403 };
+  }
+  memCache.clear();
+  return { ok: true };
+}
+
+async function deleteComment(env, req, session, id) {
+  if (!(await rateOk(env, session.sid, 'edit'))) return { error: 'rate limited', status: 429 };
+  const data = await gql(session.user.token, M_DELETE_COMMENT, { id });
+  if (!(data && data.deleteDiscussionComment)) {
+    return { error: 'GitHub rejected the delete (only the author can delete)', status: 403 };
+  }
   memCache.clear();
   return { ok: true };
 }
@@ -662,6 +755,24 @@ export default {
         } else {
           const m = path.match(/^\/community\/discussions\/(\d+)\/comments$/);
           if (m) result = await createComment(env, req, session, parseInt(m[1], 10), body);
+        }
+      }
+    } else if (req.method === 'PATCH' || req.method === 'DELETE') {
+      const session = await getSession(env, req);
+      if (!session) {
+        result = { error: 'not signed in', status: 401 };
+      } else {
+        const mp = path.match(/^\/community\/discussions\/(\d+)$/);
+        const mc = path.match(/^\/community\/comments\/([A-Za-z0-9_=-]+)$/);
+        if (req.method === 'DELETE') {
+          if (mp) result = await deletePost(env, req, session, parseInt(mp[1], 10));
+          else if (mc) result = await deleteComment(env, req, session, mc[1]);
+        } else {
+          let body;
+          try { body = await req.json(); } catch { body = null; }
+          if (!body) result = { error: 'bad json', status: 400 };
+          else if (mp) result = await editPost(env, req, session, parseInt(mp[1], 10), body);
+          else if (mc) result = await editComment(env, req, session, mc[1], body);
         }
       }
     }
