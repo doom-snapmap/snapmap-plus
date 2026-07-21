@@ -66,6 +66,12 @@ typedef int (*name_hash_fn)(const char *name);
  * the registered name lives at g_cvar_objs[i][0x40]. We hash CVARS[i].name (identical bytes) directly. */
 #define IDCVAR_NAME_OFF           0x40
 
+/* CVAR_NOCHEAT (0x10): the set-exemption flag -- without it the engine cheat-gates console writes to the
+ * cvar whenever dev mode is off ("not in dev mode" refusals on e.g. `sh_user_overrides 0`). The cvar-unlock
+ * pass ORs this onto every cvar it sweeps, but that sweep runs BEFORE our own rows register, so our cvars
+ * would miss it -- register with the flag up front instead. */
+#define CVAR_FLAG_NOCHEAT         0x10u
+
 /* The cvar table: rows 0..8 are the 9 OG cvars from our cvar-descriptor RE (default / typecode 1=BOOL
  * 2=INT 4=FLOAT / description verbatim; the OG's snaphak_* name prefix is renamed to our sh_* -- a
  * deliberate post-rebrand divergence); order matches the descriptor dump. Row 9 (sh_user_overrides) is
@@ -74,7 +80,7 @@ typedef int (*name_hash_fn)(const char *name);
 typedef struct cvar_row {
     const char *name;
     const char *def;
-    uint32_t    type;   /* 1=BOOL, 2=INT, 4=FLOAT (passed verbatim as the engine flags arg) */
+    uint32_t    type;   /* 1=BOOL, 2=INT, 4=FLOAT (ORed with CVAR_FLAG_NOCHEAT into the engine flags arg) */
     const char *desc;
 } cvar_row;
 
@@ -88,7 +94,7 @@ static const cvar_row CVARS[] = {
     { "sh_pretty_on",                        "0",    1, "enables pretty printing of saved rawmap json" },
     { "sh_show_rmcount",                     "0",    1, "draws the current number of rendermodels active" },
     { "sh_copy_reslist_to_clipboard",        "0",    1, "when sh_listres is used the contents will be copied to the clipboard" },
-    { "sh_user_overrides",                   "1",    1, "when 0, override files in your Snapmap+ data folder are ignored (built-in defaults and the game's own resources serve instead); use to bisect a broken override set" },
+    { "sh_user_overrides",                   "1",    1, "when 0, override files in your Snapmap+ data folder are ignored (built-in defaults and the game's own resources serve instead); set at the main menu BEFORE entering SnapMap (resets each launch) -- or create an overrides.disabled file next to the overrides folder to keep the layer off across restarts" },
 };
 #define CVAR_COUNT ((int)(sizeof(CVARS) / sizeof(CVARS[0])))
 
@@ -106,7 +112,8 @@ static volatile LONG g_installed = 0;
 static int register_one(cvar_register_fn reg, int i)
 {
     __try {
-        reg(&g_cvar_objs[i][0], CVARS[i].name, CVARS[i].def, CVARS[i].type, CVARS[i].desc, NULL);
+        reg(&g_cvar_objs[i][0], CVARS[i].name, CVARS[i].def,
+            CVARS[i].type | CVAR_FLAG_NOCHEAT, CVARS[i].desc, NULL);
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
@@ -307,7 +314,7 @@ int sh_cvars_install(void *cvar_register, const void *module_base)
         ok += register_one(reg, i);
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B2: cvars registered %d/%d (register=%p, non-EXPOSE / gate-1-invisible; 9 OG rows + sh_user_overrides)",
+        "B2: cvars registered %d/%d (register=%p, non-EXPOSE / gate-1-invisible, NOCHEAT so console sets work without dev mode; 9 OG rows + sh_user_overrides)",
         ok, CVAR_COUNT, cvar_register);
     backend_log(line);
 

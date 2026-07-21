@@ -52,6 +52,13 @@ static volatile LONG g_shadow_count = 0;
 /* The overrides ROOT (holds overrides\ + overrides\shader_includes\). Default %LOCALAPPDATA%\snapmap-plus. */
 static char g_root[MAX_PATH] = {0};
 
+/* PERSISTENT user-layer kill switch: a marker FILE `<root>\overrides.disabled` (contents ignored).
+ * The sh_user_overrides cvar covers the same bisect but resets to 1 every launch and can only take
+ * effect before the first SnapMap entry of a session -- the marker survives restarts and needs no
+ * console. Evaluated once at install (i.e. per game launch): create or delete the file, then restart.
+ * Built-in defaults and the game's own resources still serve while it is present. */
+static volatile LONG g_user_layer_off = 0;
+
 /* ============================================================ our idFile-subclass stream ===========
  * A reimplementation of OG's PTR_FUN_18003d050 stream (the engine idFile interface, 24 virtual
  * methods -- every slot decompiled in pb1-overrides). The object layout keeps OG's public head:
@@ -293,6 +300,15 @@ static void resolve_root(char *out, size_t cap)
     else default_root(out, cap);
 }
 
+/* The persistent kill-switch marker check (see g_user_layer_off above). */
+static int user_layer_marker_present(void)
+{
+    char root[MAX_PATH], p[MAX_PATH];
+    resolve_root(root, sizeof root);
+    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\overrides.disabled", root);
+    return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
+}
+
 /* Build the on-disk override path for engine resource `name` into `out`. Returns 1 if a path was built
  * (always, for a non-empty name). The selection mirrors OG FUN_18000b110 EXACTLY (see the block comment
  * above): the shader_includes branch is the RARE exception for ".inc"-suffixed shader-include names; every
@@ -465,7 +481,8 @@ static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsign
         const char *src = NULL;
         __try {
             const ov_baked_decl_t *baked = find_baked(name);
-            int user_on = sh_cvar_value_int_reg(B2_CVAR_SH_USER_OVERRIDES, 1);
+            int user_on = (g_user_layer_off == 0)
+                       && sh_cvar_value_int_reg(B2_CVAR_SH_USER_OVERRIDES, 1);
             if (user_on) {
                 if (baked) {
                     int malformed = 0;
@@ -624,11 +641,19 @@ static void audit_user_overrides(void)
         _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\overrides", root);
         int count = 0, named = 0, warned = 0;
         audit_walk(dir, "", 0, &count, &named, &warned);
-        char msg[MAX_PATH + 128];
-        _snprintf_s(msg, sizeof msg, _TRUNCATE,
-                    "B1: overrides audit -- %d user override file(s) active under %s%s%s "
-                    "(disable the user layer with sh_user_overrides 0 to bisect)",
-                    count, dir, warned ? ", " : "", warned ? "with structural warnings above" : "");
+        char msg[MAX_PATH + 192];
+        if (g_user_layer_off) {
+            _snprintf_s(msg, sizeof msg, _TRUNCATE,
+                        "B1: overrides audit -- user layer DISABLED by overrides.disabled marker; "
+                        "%d file(s) under %s are ignored (delete the marker + restart to re-enable)",
+                        count, dir);
+        } else {
+            _snprintf_s(msg, sizeof msg, _TRUNCATE,
+                        "B1: overrides audit -- %d user override file(s) active under %s%s%s "
+                        "(bisect: sh_user_overrides 0 before entering SnapMap, or create "
+                        "overrides.disabled next to the overrides folder + restart)",
+                        count, dir, warned ? ", " : "", warned ? "with structural warnings above" : "");
+        }
         backend_log(msg);
     } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("B1: overrides audit skipped (fault)"); }
 }
@@ -684,6 +709,7 @@ int sh_overrides_install(void *ctor_fn, int ctor_status_ok)
     g_slot = slot;
 
     if (!g_root[0]) default_root(g_root, sizeof g_root);
+    g_user_layer_off = user_layer_marker_present();   /* persistent kill switch, read once per launch */
     reclaim_baked_overrides();   /* delete OUR untouched previously-written defaults (memory layer serves now) */
     audit_user_overrides();      /* log what the user's folder actively shadows */
     _snprintf_s(line, sizeof line, _TRUNCATE,
