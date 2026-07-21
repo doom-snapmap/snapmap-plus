@@ -1,7 +1,9 @@
 /* Snapmap+ site — Community section behavior.
-   Renders GitHub Discussions (via the community proxy) natively on the site:
+   Renders GitHub Discussions (via the community service) natively on the site:
    1. Index — category tabs + the post list (community.html).
-   2. Post view — one discussion: body, reactions, comment thread (community-post.html).
+   2. Post view — one discussion: body, reactions, comment thread + comment box (community-post.html).
+   3. Composer — write a post: markdown, image upload, preview (community-compose.html).
+   4. Sign-in — GitHub OAuth via the service; the browser holds only an opaque session id.
    Each feature activates only when its markup is present, same as site.js. */
 
 (function () {
@@ -10,6 +12,8 @@
   var WORKER = "https://snapmap-plus-community.doom-snapmap.workers.dev";
   var REPO_URL = "https://github.com/doom-snapmap/snapmap-plus";
   var DISCUSSIONS_URL = REPO_URL + "/discussions";
+  var SESSION_KEY = "smp_session";
+  var DRAFT_KEY = "smp_draft";
 
   function esc(s) {
     return String(s == null ? "" : s)
@@ -17,11 +21,62 @@
       .replace(/"/g, "&quot;");
   }
 
-  function api(path) {
-    return fetch(WORKER + path)
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .catch(function () { return null; });
+  /* ---------- session ---------- */
+
+  function captureSession() {
+    if (location.hash.indexOf("#session=") === 0) {
+      var sid = location.hash.slice("#session=".length);
+      if (/^[0-9a-f]{64}$/i.test(sid)) {
+        try { localStorage.setItem(SESSION_KEY, sid); } catch (e) {}
+      }
+      history.replaceState(null, "", location.pathname + location.search);
+    } else if (location.hash === "#login_error") {
+      history.replaceState(null, "", location.pathname + location.search);
+      window.__smpLoginError = true;
+    }
   }
+
+  function sessionId() {
+    try { return localStorage.getItem(SESSION_KEY); } catch (e) { return null; }
+  }
+
+  function clearSession() {
+    try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
+  }
+
+  function authHeaders() {
+    var sid = sessionId();
+    return sid ? { "Authorization": "Bearer " + sid } : {};
+  }
+
+  function api(path, opts) {
+    opts = opts || {};
+    var headers = opts.headers || {};
+    Object.keys(authHeaders()).forEach(function (k) { headers[k] = authHeaders()[k]; });
+    if (opts.json) {
+      headers["Content-Type"] = "application/json";
+      opts.body = JSON.stringify(opts.json);
+    }
+    return fetch(WORKER + path, {
+      method: opts.method || "GET",
+      headers: headers,
+      body: opts.body || undefined,
+    }).then(function (r) {
+      if (r.status === 401 && sessionId()) clearSession();   // stale session — drop it
+      return r.json().then(function (data) { return { ok: r.ok, status: r.status, data: data }; });
+    }).catch(function () { return { ok: false, status: 0, data: null }; });
+  }
+
+  var mePromise = null;
+  function me() {
+    if (!sessionId()) return Promise.resolve(null);
+    if (!mePromise) {
+      mePromise = api("/auth/me").then(function (r) { return r.ok ? r.data : null; });
+    }
+    return mePromise;
+  }
+
+  /* ---------- shared rendering ---------- */
 
   function fmtDate(iso) {
     var d = new Date(iso);
@@ -54,6 +109,11 @@
     return html + "</span>";
   }
 
+  function reactButton(subjectId) {
+    return '<button class="react-btn" type="button" data-react="' + esc(subjectId) +
+      '" title="React with 👍">👍<span class="react-plus">+</span></button>';
+  }
+
   function authorHtml(a) {
     var login = esc(a && a.login || "ghost");
     var avatar = "";
@@ -82,6 +142,7 @@
   }
 
   function enhanceVideos(container) {
+    if (!container) return;
     var anchors = Array.prototype.slice.call(container.querySelectorAll("a[href]"));
     anchors.forEach(function (a) {
       var src = videoEmbed(a.getAttribute("href") || "");
@@ -107,6 +168,52 @@
       'The community also lives on <a href="' + DISCUSSIONS_URL + '">GitHub Discussions</a>.</div>';
   }
 
+  /* ---------- auth widget ---------- */
+
+  function signInButtonHtml(label) {
+    return '<a class="btn btn-ghost btn-signin" href="' + WORKER + '/auth/login" rel="nofollow">' +
+      (label || "Sign in with GitHub") + "</a>";
+  }
+
+  function initAuthWidget() {
+    var host = document.getElementById("community-auth");
+    if (!host) return;
+    if (window.__smpLoginError) {
+      host.innerHTML = '<span class="auth-error">Sign-in didn’t complete — try again.</span> ' + signInButtonHtml();
+      return;
+    }
+    me().then(function (user) {
+      if (!user) { host.innerHTML = signInButtonHtml(); return; }
+      var sized = user.avatar + (user.avatar.indexOf("?") >= 0 ? "&" : "?") + "s=64";
+      host.innerHTML =
+        '<span class="auth-chip"><img class="avatar" src="' + esc(sized) + '" alt="">' +
+        '<span>' + esc(user.login) + "</span>" +
+        '<button class="auth-signout" type="button">Sign out</button></span>';
+      host.querySelector(".auth-signout").addEventListener("click", function () {
+        api("/auth/logout", { method: "POST" }).then(function () {
+          clearSession();
+          location.reload();
+        });
+      });
+    });
+  }
+
+  /* ---------- reactions (delegated) ---------- */
+
+  function bindReactions(container, refresh) {
+    container.addEventListener("click", function (e) {
+      var btn = e.target.closest("[data-react]");
+      if (!btn) return;
+      if (!sessionId()) { location.href = WORKER + "/auth/login"; return; }
+      btn.disabled = true;
+      api("/community/reactions", { method: "POST", json: { subjectId: btn.getAttribute("data-react"), content: "THUMBS_UP" } })
+        .then(function (r) {
+          if (r.ok) refresh();
+          else btn.disabled = false;
+        });
+    });
+  }
+
   /* ---------- 1. index ---------- */
 
   function initIndex() {
@@ -117,10 +224,10 @@
     var params = new URLSearchParams(location.search);
     var active = params.get("category") || "";
 
-    api("/community/categories").then(function (data) {
-      if (!data || !tabs) return;
+    api("/community/categories").then(function (r) {
+      if (!r.ok || !tabs) return;
       var html = '<a class="cat-tab' + (active ? "" : " active") + '" href="community.html">All</a>';
-      data.categories.forEach(function (c) {
+      r.data.categories.forEach(function (c) {
         html += '<a class="cat-tab' + (c.slug === active ? " active" : "") +
           '" href="community.html?category=' + esc(encodeURIComponent(c.slug)) + '">' +
           esc(c.name) + "</a>";
@@ -156,12 +263,13 @@
       if (active) qs.push("category=" + encodeURIComponent(active));
       if (after) qs.push("after=" + encodeURIComponent(after));
       if (qs.length) q += "?" + qs.join("&");
-      api(q).then(function (data) {
-        if (!data) { if (!append) failNote(list, "community posts"); return; }
+      api(q).then(function (r) {
+        if (!r.ok) { if (!append) failNote(list, "community posts"); return; }
+        var data = r.data;
         if (!data.discussions.length && !append) {
           list.innerHTML =
-            '<div class="changelog-fallback">No posts here yet. Be the first — ' +
-            '<a href="' + DISCUSSIONS_URL + '/new/choose">start one on GitHub</a>.</div>';
+            '<div class="changelog-fallback">No posts here yet. ' +
+            '<a href="community-compose.html">Be the first to write one</a>.</div>';
           if (more) more.innerHTML = "";
           return;
         }
@@ -194,64 +302,267 @@
     var n = parseInt(params.get("n") || "", 10);
     if (!n) { location.replace("community.html"); return; }
 
-    api("/community/discussions/" + n).then(function (d) {
-      if (!d) { failNote(host, "this post"); return; }
-      document.title = d.title + " — Snapmap+ Community";
+    function render() {
+      api("/community/discussions/" + n).then(function (r) {
+        if (!r.ok) { failNote(host, "this post"); return; }
+        var d = r.data;
+        document.title = d.title + " — Snapmap+ Community";
 
-      var head =
-        '<div class="section-head"><h1 class="section-title">' + esc(d.title) + "</h1></div>" +
-        '<div class="post-meta post-meta-page">' +
-          authorHtml(d.author) +
-          '<span class="sep">&middot;</span><time datetime="' + esc(d.createdAt) + '">' + fmtDate(d.createdAt) + "</time>" +
-          (d.category ? '<span class="sep">&middot;</span><span class="cat-pill">' + esc(d.category.name) + "</span>" : "") +
-        "</div>";
+        var head =
+          '<div class="section-head"><h1 class="section-title">' + esc(d.title) + "</h1></div>" +
+          '<div class="post-meta post-meta-page">' +
+            authorHtml(d.author) +
+            '<span class="sep">&middot;</span><time datetime="' + esc(d.createdAt) + '">' + fmtDate(d.createdAt) + "</time>" +
+            (d.category ? '<span class="sep">&middot;</span><span class="cat-pill">' + esc(d.category.name) + "</span>" : "") +
+          "</div>";
 
-      /* bodyHTML arrives already rendered + sanitized by GitHub's own pipeline */
-      host.innerHTML =
-        head +
-        '<div class="post-body">' + d.bodyHTML + "</div>" +
-        '<div class="post-foot">' + reactionsHtml(d.reactions) +
-          '<a class="gh-link" href="' + esc(d.url) + '" rel="noopener">React or reply on GitHub &rarr;</a>' +
-        "</div>";
-      enhanceVideos(host.querySelector(".post-body"));
+        /* bodyHTML arrives already rendered + sanitized by GitHub's own pipeline */
+        host.innerHTML =
+          head +
+          '<div class="post-body">' + d.bodyHTML + "</div>" +
+          '<div class="post-foot">' + reactionsHtml(d.reactions) + reactButton(d.id) +
+            '<a class="gh-link" href="' + esc(d.url) + '" rel="noopener">View on GitHub &rarr;</a>' +
+          "</div>";
+        enhanceVideos(host.querySelector(".post-body"));
 
-      var thread = document.getElementById("community-comments");
-      if (!thread) return;
+        var thread = document.getElementById("community-comments");
+        if (!thread) return;
 
-      function commentHtml(c, isReply) {
+        function commentHtml(c, isReply, topId) {
+          return (
+            '<article class="comment' + (isReply ? " comment-reply" : "") + '">' +
+              '<div class="post-meta">' + authorHtml(c.author) +
+                '<span class="sep">&middot;</span><time datetime="' + esc(c.createdAt) + '">' + fmtDate(c.createdAt) + "</time>" +
+              "</div>" +
+              '<div class="comment-body">' + c.bodyHTML + "</div>" +
+              '<div class="comment-foot">' + reactionsHtml(c.reactions) + reactButton(c.id) +
+                (!isReply ? '<button class="reply-toggle" type="button" data-reply="' + esc(topId) + '">Reply</button>' : "") +
+              "</div>" +
+            "</article>"
+          );
+        }
+
         var html =
-          '<article class="comment' + (isReply ? " comment-reply" : "") + '">' +
-            '<div class="post-meta">' + authorHtml(c.author) +
-              '<span class="sep">&middot;</span><time datetime="' + esc(c.createdAt) + '">' + fmtDate(c.createdAt) + "</time>" +
-            "</div>" +
-            '<div class="comment-body">' + c.bodyHTML + "</div>" +
-            reactionsHtml(c.reactions) +
-          "</article>";
-        return html;
+          '<div class="section-head"><h2 class="section-title thread-title">' +
+          d.commentCount + (d.commentCount === 1 ? " comment" : " comments") + "</h2></div>";
+        d.comments.forEach(function (c) {
+          html += commentHtml(c, false, c.id);
+          c.replies.forEach(function (rp) { html += commentHtml(rp, true, c.id); });
+          html += '<div class="reply-slot" data-slot="' + esc(c.id) + '"></div>';
+        });
+        html += '<div id="comment-box" class="comment-form-slot"></div>';
+        thread.innerHTML = html;
+        Array.prototype.slice.call(thread.querySelectorAll(".comment-body")).forEach(enhanceVideos);
+
+        /* the comment box (or a sign-in prompt) */
+        me().then(function (user) {
+          var box = document.getElementById("comment-box");
+          if (!box) return;
+          if (!user) {
+            box.innerHTML = '<div class="changelog-fallback">' + signInButtonHtml("Sign in with GitHub") +
+              ' <span class="signin-note">to comment and react.</span></div>';
+            return;
+          }
+          box.innerHTML =
+            '<form class="comment-form"><textarea rows="4" maxlength="60000" ' +
+            'placeholder="Write a comment (markdown works)"></textarea>' +
+            '<div class="form-row"><button class="btn btn-primary" type="submit">Comment</button></div></form>';
+          box.querySelector("form").addEventListener("submit", function (e) {
+            e.preventDefault();
+            var ta = box.querySelector("textarea");
+            var text = ta.value.trim();
+            if (!text) return;
+            var btn = box.querySelector("button");
+            btn.disabled = true; btn.textContent = "Posting…";
+            api("/community/discussions/" + n + "/comments", { method: "POST", json: { body: text } })
+              .then(function (r2) {
+                if (r2.ok) { render(); }
+                else { btn.disabled = false; btn.textContent = "Comment"; alert("Could not post the comment (" + ((r2.data && r2.data.error) || "error") + ")."); }
+              });
+          });
+        });
+
+        /* reply toggles */
+        thread.addEventListener("click", function (e) {
+          var t = e.target.closest("[data-reply]");
+          if (!t) return;
+          if (!sessionId()) { location.href = WORKER + "/auth/login"; return; }
+          var id = t.getAttribute("data-reply");
+          var slot = thread.querySelector('[data-slot="' + id + '"]');
+          if (!slot || slot.firstChild) return;
+          slot.innerHTML =
+            '<form class="comment-form comment-form-reply"><textarea rows="3" maxlength="60000" ' +
+            'placeholder="Write a reply"></textarea>' +
+            '<div class="form-row"><button class="btn btn-primary" type="submit">Reply</button></div></form>';
+          slot.querySelector("textarea").focus();
+          slot.querySelector("form").addEventListener("submit", function (ev) {
+            ev.preventDefault();
+            var text = slot.querySelector("textarea").value.trim();
+            if (!text) return;
+            var btn = slot.querySelector("button");
+            btn.disabled = true; btn.textContent = "Posting…";
+            api("/community/discussions/" + n + "/comments", { method: "POST", json: { body: text, replyToId: id } })
+              .then(function (r2) {
+                if (r2.ok) { render(); }
+                else { btn.disabled = false; btn.textContent = "Reply"; alert("Could not post the reply (" + ((r2.data && r2.data.error) || "error") + ")."); }
+              });
+          });
+        }, { once: false });
+
+        bindReactions(thread, render);
+        bindReactions(host, render);
+      });
+    }
+
+    render();
+  }
+
+  /* ---------- 3. composer ---------- */
+
+  function insertAtCursor(ta, text) {
+    var start = ta.selectionStart || 0;
+    ta.value = ta.value.slice(0, start) + text + ta.value.slice(ta.selectionEnd || start);
+    ta.selectionStart = ta.selectionEnd = start + text.length;
+    ta.focus();
+  }
+
+  function uploadImage(file, ta, note) {
+    if (!file) return;
+    note.textContent = "Uploading " + (file.name || "image") + "…";
+    fetch(WORKER + "/media/upload", {
+      method: "POST",
+      headers: authHeaders(),
+      body: file,
+    }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+      .then(function (r) {
+        if (r.ok && r.data.url) {
+          insertAtCursor(ta, "\n![screenshot](" + r.data.url + ")\n");
+          note.textContent = "";
+        } else {
+          note.textContent = "Upload failed: " + ((r.data && r.data.error) || "error");
+        }
+      })
+      .catch(function () { note.textContent = "Upload failed."; });
+  }
+
+  function initCompose() {
+    var host = document.getElementById("community-compose");
+    if (!host) return;
+
+    me().then(function (user) {
+      if (!user) {
+        host.innerHTML =
+          '<div class="changelog-fallback">' + signInButtonHtml() +
+          ' <span class="signin-note">to write a post. Your GitHub account is the author — no separate registration.</span></div>';
+        return;
       }
 
-      var html =
-        '<div class="section-head"><h2 class="section-title thread-title">' +
-        d.commentCount + (d.commentCount === 1 ? " comment" : " comments") + "</h2></div>";
-      if (!d.comments.length) {
-        html += '<div class="changelog-fallback">No comments yet. ' +
-          '<a href="' + esc(d.url) + '">Reply on GitHub</a> to start the thread.</div>';
-      } else {
-        d.comments.forEach(function (c) {
-          html += commentHtml(c, false);
-          c.replies.forEach(function (r) { html += commentHtml(r, true); });
+      api("/community/categories").then(function (r) {
+        if (!r.ok) { failNote(host, "the composer"); return; }
+        /* Announcements is maintainer-posted; leave it out of the picker */
+        var cats = r.data.categories.filter(function (c) { return c.slug !== "announcements"; });
+        var options = cats.map(function (c) {
+          return '<option value="' + esc(c.id) + '">' + esc(c.name) + "</option>";
+        }).join("");
+
+        host.innerHTML =
+          '<form class="compose-form">' +
+            '<div class="field"><label for="c-title">Title</label>' +
+            '<input id="c-title" type="text" maxlength="200" placeholder="e.g. How to wire a door to a switch" required></div>' +
+            '<div class="field"><label for="c-cat">Category</label>' +
+            '<select id="c-cat">' + options + "</select></div>" +
+            '<div class="field"><label for="c-body">Post (markdown)</label>' +
+            '<textarea id="c-body" rows="14" maxlength="60000" required ' +
+            'placeholder="Write your guide or tip in markdown.\n\nDrag-drop or paste a screenshot to upload it.\nPaste a YouTube/Streamable link on its own line to embed the video."></textarea></div>' +
+            '<div class="form-row">' +
+              '<label class="btn btn-ghost btn-file">Add image<input id="c-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden></label>' +
+              '<button id="c-preview" class="btn btn-ghost" type="button">Preview</button>' +
+              '<span id="c-note" class="compose-note" aria-live="polite"></span>' +
+              '<button class="btn btn-primary compose-submit" type="submit">Publish</button>' +
+            "</div>" +
+            '<div id="c-preview-box" class="preview-box" hidden></div>' +
+          "</form>";
+
+        var form = host.querySelector("form");
+        var ta = host.querySelector("#c-body");
+        var note = host.querySelector("#c-note");
+
+        /* draft autosave (title+body only) */
+        try {
+          var draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null");
+          if (draft) { host.querySelector("#c-title").value = draft.title || ""; ta.value = draft.body || ""; }
+        } catch (e) {}
+        form.addEventListener("input", function () {
+          try {
+            localStorage.setItem(DRAFT_KEY, JSON.stringify({
+              title: host.querySelector("#c-title").value, body: ta.value,
+            }));
+          } catch (e) {}
         });
-        html += '<div class="post-foot"><a class="gh-link" href="' + esc(d.url) +
-          '" rel="noopener">Join the conversation on GitHub &rarr;</a></div>';
-      }
-      thread.innerHTML = html;
-      Array.prototype.slice.call(thread.querySelectorAll(".comment-body")).forEach(enhanceVideos);
+
+        /* image upload: file picker, drag-drop, paste */
+        host.querySelector("#c-file").addEventListener("change", function () {
+          uploadImage(this.files[0], ta, note);
+          this.value = "";
+        });
+        ta.addEventListener("dragover", function (e) { e.preventDefault(); });
+        ta.addEventListener("drop", function (e) {
+          e.preventDefault();
+          if (e.dataTransfer.files.length) uploadImage(e.dataTransfer.files[0], ta, note);
+        });
+        ta.addEventListener("paste", function (e) {
+          var files = e.clipboardData && e.clipboardData.files;
+          if (files && files.length) { e.preventDefault(); uploadImage(files[0], ta, note); }
+        });
+
+        /* preview through GitHub's own renderer, so it matches the published look exactly */
+        host.querySelector("#c-preview").addEventListener("click", function () {
+          var box = host.querySelector("#c-preview-box");
+          if (!box.hidden) { box.hidden = true; this.textContent = "Preview"; return; }
+          var self = this;
+          api("/community/preview", { method: "POST", json: { text: ta.value } }).then(function (r2) {
+            if (!r2.ok) { note.textContent = "Preview failed."; return; }
+            box.innerHTML = '<div class="post-body">' + r2.data.html + "</div>";
+            enhanceVideos(box);
+            box.hidden = false;
+            self.textContent = "Hide preview";
+          });
+        });
+
+        form.addEventListener("submit", function (e) {
+          e.preventDefault();
+          var btn = host.querySelector(".compose-submit");
+          btn.disabled = true; btn.textContent = "Publishing…";
+          api("/community/discussions", {
+            method: "POST",
+            json: {
+              title: host.querySelector("#c-title").value.trim(),
+              categoryId: host.querySelector("#c-cat").value,
+              body: ta.value.trim(),
+            },
+          }).then(function (r2) {
+            if (r2.ok && r2.data.number) {
+              try { localStorage.removeItem(DRAFT_KEY); } catch (err) {}
+              location.href = "community-post.html?n=" + r2.data.number;
+            } else {
+              btn.disabled = false; btn.textContent = "Publish";
+              note.textContent = "Publish failed: " + ((r2.data && r2.data.error) || "error");
+            }
+          });
+        });
+      });
     });
   }
 
   /* ---------- boot ---------- */
 
-  function boot() { initIndex(); initPost(); }
+  function boot() {
+    captureSession();
+    initAuthWidget();
+    initIndex();
+    initPost();
+    initCompose();
+  }
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", boot);

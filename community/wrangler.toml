@@ -3,3 +3,13 @@
 name = "snapmap-plus-community"
 main = "worker.js"
 compatibility_date = "2026-07-01"
+
+# Session store + rate-limit counters (opaque session id -> GitHub user token, server-side only)
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "4fce15ae690b4c5e8a66555bd4a2171f"
+
+# Screenshot uploads (served back through GET /media/:key)
+[[r2_buckets]]
+bucket_name = "snapmap-plus-media"
+binding = "MEDIA"

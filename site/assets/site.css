@@ -836,6 +836,97 @@ section.deck { background: var(--deck); border-top: 1px solid var(--line-soft); 
 }
 .gh-link { color: var(--wire); }
 
+/* auth widget + composer + comment forms */
+.community-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.auth-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.auth-chip .avatar { width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--line); }
+.auth-signout {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+.auth-signout:hover { color: var(--wire); }
+.auth-error { color: var(--blood); font-size: 13.5px; }
+.signin-note { color: var(--muted); }
+
+.compose-form .field { margin: 0 0 18px; }
+.compose-form label {
+  display: block;
+  font-family: var(--display);
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 6px;
+}
+.compose-form input[type="text"],
+.compose-form select,
+.compose-form textarea,
+.comment-form textarea {
+  width: 100%;
+  background: var(--deck);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font: inherit;
+  font-size: 15px;
+  padding: 10px 12px;
+}
+.compose-form textarea, .comment-form textarea { font-family: var(--mono); font-size: 13.5px; line-height: 1.6; resize: vertical; }
+.compose-form input:focus, .compose-form select:focus,
+.compose-form textarea:focus, .comment-form textarea:focus {
+  outline: none;
+  border-color: var(--wire-soft);
+  box-shadow: 0 0 0 1px var(--wire-faint);
+}
+.form-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 12px 0 0; }
+.form-row .compose-submit { margin-left: auto; }
+.btn-file { position: relative; overflow: hidden; cursor: pointer; }
+.compose-note { color: var(--muted); font-size: 13.5px; }
+.preview-box {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 18px 22px;
+  margin: 16px 0 0;
+}
+.comment-form { margin: 6px 0 0; }
+.comment-form-slot { margin: 22px 0 0; }
+.comment-form-reply { margin: 0 0 12px 34px; }
+.comment-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.react-btn {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 13px;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.react-btn:hover { border-color: var(--wire-soft); }
+.react-btn:disabled { opacity: 0.5; cursor: default; }
+.react-plus { color: var(--muted); margin-left: 2px; font-size: 11px; }
+.reply-toggle {
+  background: none;
+  border: none;
+  color: var(--wire);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0;
+}
+.reply-toggle:hover { text-decoration: underline; }
+
 .community-thread { margin: 44px 0 0; }
 .thread-title { font-size: 20px; }
 .page-doc .thread-title { font-size: 20px; }

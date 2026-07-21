@@ -1,0 +1,61 @@
+---
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Write a post — Snapmap+ Community</title>
+<meta name="description" content="Write a tip or how-to guide for the Snapmap+ community.">
+<link rel="icon" type="image/png" href="https://github.com/doom-snapmap.png?size=64">
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+{% include header.html current="community" base="./" download="true" %}
+
+<main class="page-doc">
+  <div class="wrap">
+    <p class="crumb"><a href="community.html">&larr; All community posts</a></p>
+
+    <div class="section-head">
+      <h1 class="section-title">Write a post</h1>
+    </div>
+    <p class="section-sub">
+      Share a tip, a how-to, or a question. Markdown works; drag-drop a screenshot to upload it;
+      paste a YouTube or Streamable link on its own line to embed the video. Your post is published
+      under your GitHub account and also appears on
+      <a href="https://github.com/doom-snapmap/snapmap-plus/discussions">GitHub Discussions</a>.
+    </p>
+
+    <div id="community-compose" aria-live="polite">
+      <div class="changelog-fallback">Loading the composer&hellip;</div>
+    </div>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="footer-links">
+      <a href="./">Home</a>
+      <a href="snapmap-plus-guide.html">Guide</a>
+      <a href="https://github.com/doom-snapmap/snapmap-plus">Source on GitHub</a>
+      <a href="https://github.com/doom-snapmap/snapmap-plus/blob/main/LICENSE">MIT License</a>
+      <a href="privacy.html">Privacy policy</a>
+      <a href="./#code-signing">Code signing policy</a>
+    </div>
+    <div>
+      Snapmap+ is an open-source recreation of the original <strong>SnapHak</strong> tool.
+      Not affiliated with id Software or Bethesda. DOOM is a trademark of id Software LLC.
+    </div>
+  </div>
+</footer>
+
+<script src="assets/site.js" defer></script>
+<script src="assets/community.js" defer></script>
+</body>
+</html>
