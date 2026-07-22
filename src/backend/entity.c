@@ -22,6 +22,7 @@
 #include "commands.h"
 #include "clipboard.h"
 #include "backend_log.h"
+#include "dumpmap_path.h"
 
 /* ------------------------------------------------------------------------ engine fn typedefs ------ */
 
@@ -373,6 +374,85 @@ void h_sh_spawn(idCmdArgs *a)
         sh_printf("sh_spawn: teleport dispatch failed.\n");
 }
 
+/* sh_dumpmap output-path resolution (ours, not in the original) -------------------------------------
+ *
+ * The writer takes a GAME-RELATIVE path rooted at <game dir>\base\ and gives no clue where the file
+ * landed: it Printf's "writing %s..." BEFORE the open and prints nothing at all on success, so a
+ * perfectly good dump reads as a command that did nothing. It also silently CLOBBERS a previous dump of
+ * the same name, and forces the extension, so the name on disk is not necessarily the one that was
+ * typed. We resolve the destination ourselves first -- default subdirectory, collision-free filename --
+ * hand the writer that path, then STAT the result so the line we print is a file we have actually seen.
+ *
+ * The string half of the resolution lives in dumpmap_path.h (pure, unit-tested off-game); what is left
+ * here is everything that touches the disk. */
+static BOOL dumpmap_base_dir(char *out, size_t outcap)
+{
+    char exe[MAX_PATH] = {0};
+    if (!GetModuleFileNameA(NULL, exe, MAX_PATH)) return FALSE;
+    char *slash = strrchr(exe, '\\');
+    if (!slash) return FALSE;
+    *slash = '\0';
+    _snprintf_s(out, outcap, _TRUNCATE, "%s\\base", exe);
+    return TRUE;
+}
+
+static BOOL dumpmap_file_size(const char *ospath, unsigned long long *size_out)
+{
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (!GetFileAttributesExA(ospath, GetFileExInfoStandard, &fad)) return FALSE;
+    if (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return FALSE;
+    if (size_out) *size_out = ((unsigned long long)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+    return TRUE;
+}
+
+/* mkdir -p over every directory component (the last component is the file). The file system may well
+ * create these itself; doing it here makes a typed subdirectory behave the same either way. Every
+ * failure is ignored on purpose -- an already-existing directory and a bare drive prefix both fail. */
+static void dumpmap_make_dirs(char *ospath)
+{
+    for (char *p = ospath; *p; p++) {
+        if (*p != '\\') continue;
+        *p = '\0';
+        CreateDirectoryA(ospath, NULL);
+        *p = '\\';
+    }
+}
+
+/* Resolve the typed name into the game-relative path we hand the writer (`rel`) and the OS path it
+ * lands at (`os`). `base` may be "" when the game directory could not be located: we then skip the
+ * collision check and leave `os` empty, degrading to the original pass-the-name-through behaviour.
+ * FALSE = the name is unusable; *why is then a one-line reason fit to print. */
+static BOOL dumpmap_resolve(const char *arg, const char *base, char *rel, size_t relcap,
+                            char *os, size_t oscap, const char **why)
+{
+    *why = NULL;
+    os[0] = '\0';
+
+    if (!dumpmap_validate(arg, why))
+        return FALSE;
+
+    char stem[MAX_PATH];
+    if (!dumpmap_stem(arg, stem, sizeof stem)) {
+        *why = "that name has no filename in it";
+        return FALSE;
+    }
+
+    if (base[0] == '\0') {
+        dumpmap_candidate(stem, 1, rel, relcap);
+        return TRUE;
+    }
+
+    /* Never clobber an earlier dump: name.map -> name_2.map -> name_3.map -> ... */
+    for (int seq = 1; seq <= DUMPMAP_MAX_SEQ; seq++) {
+        dumpmap_candidate(stem, seq, rel, relcap);
+        dumpmap_ospath(base, rel, os, oscap);
+        if (!dumpmap_file_size(os, NULL))
+            return TRUE;
+    }
+    *why = "too many dumps already saved under that name";
+    return FALSE;
+}
+
 /* [6] sh_dumpmap <mapfile> (T5, READ-ONLY-ish: writes a file) -- dump the live SnapMap to a file. Port of
  * OG FUN_180021c20: argc<2 -> "You need to provide a mapfile to write to"; map = MapGetter(gameMgr);
  * ok = MapWriter(map, argv[1]); if (!ok) "Failed to write map file <path>". MapWriter no-ops off a v5 map
@@ -383,6 +463,7 @@ void h_sh_dumpmap(idCmdArgs *a)
     const char *path = cmd_argv(a, 1);
     if (path == NULL) {
         sh_printf("You need to provide a mapfile to write to\n");   /* OG verbatim */
+        sh_printf("usage: sh_dumpmap <name>  -- writes <game dir>\\base\\%s\\<name>.map\n", DUMPMAP_SUBDIR);
         return;
     }
     void *gm = get_gamemgr();
@@ -403,11 +484,33 @@ void h_sh_dumpmap(idCmdArgs *a)
         return;
     }
 
+    char base[MAX_PATH] = {0};
+    char rel[MAX_PATH]  = {0};
+    char os[MAX_PATH]   = {0};
+    const char *why = NULL;
+    if (!dumpmap_base_dir(base, sizeof base))
+        base[0] = '\0';                     /* unknown game dir -> no collision check, no full path */
+    if (!dumpmap_resolve(path, base, rel, sizeof rel, os, sizeof os, &why)) {
+        sh_printf("sh_dumpmap: %s.\n", why);
+        sh_printf("usage: sh_dumpmap <name>  -- writes <game dir>\\base\\%s\\<name>.map\n", DUMPMAP_SUBDIR);
+        return;
+    }
+    if (os[0] != '\0')
+        dumpmap_make_dirs(os);
+
     int ok = 0;
-    __try { ok = g_map_writer(map, path); }
+    __try { ok = g_map_writer(map, rel); }
     __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
-    if (!ok)
-        sh_printf("Failed to write map file %s\n", path);   /* OG verbatim; MapWriter also Printf's "writing %s..." */
+    if (!ok) {
+        sh_printf("Failed to write map file %s\n", rel);   /* OG verbatim; MapWriter also Printf's "writing %s..." */
+        return;
+    }
+
+    unsigned long long bytes = 0;
+    if (os[0] != '\0' && dumpmap_file_size(os, &bytes))
+        sh_printf("sh_dumpmap: wrote %s (%llu bytes)\n", os, bytes);
+    else
+        sh_printf("sh_dumpmap: wrote '%s' (game-relative -- look under <game dir>\\base\\)\n", rel);
 }
 
 /* ------------------------------------------------- player cheat commands (OG / DLM parity) ----------

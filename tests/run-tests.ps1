@@ -10,6 +10,7 @@
 #   hook_test           -- the inline-detour installer, on a hand-laid scratch stub
 #   crash_record_test   -- the crash-record JSON formatter + escaping (pure logic)
 #   report_scrub_test   -- the crash-report log anonymization scrub + tail (pure logic)
+#   dumpmap_path_test   -- sh_dumpmap's output-path resolution (pure logic)
 # -Doom <unpacked DOOMx64vk.exe>: ALSO the signature-resolver tests, which scan a real
 #   (Steamless-unpacked) DOOM image:
 #   sig_test            -- every engine signature resolves to its known RVA
@@ -37,6 +38,7 @@ $tests = @(
     @{ name = "hook_test";          src = 'hook_test.c ..\src\backend\hook.c';                       arg = "" }
     @{ name = "crash_record_test";  src = 'crash_record_test.c ..\src\fault_shield\crash_record_format.c'; arg = "" }
     @{ name = "report_scrub_test";  src = 'report_scrub_test.c';                                     arg = "" }
+    @{ name = "dumpmap_path_test";  src = 'dumpmap_path_test.c';                                     arg = "" }
 )
 if ($Doom) {
     if (-not (Test-Path $Doom)) { throw "-Doom path not found: $Doom" }

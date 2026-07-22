@@ -21,7 +21,7 @@ Registered with the engine command system; run from the DOOM console.
 | `sh_type` | Print the members of an idTech class or the values of an enum (runtime introspection). Add `-v` to also show each field's byte offset and size. |
 | `sh_validclasses` | List the engine-valid classnames for a given inherit (the same enumerator that feeds the Classname dropdown). |
 | `sh_target_any` | Reveal / re-hide the campaign-only and normally-hidden placeable entity decls in the SnapMap editor palette. |
-| `sh_dumpmap` | Dump the current generated `.map` from memory (debugging). |
+| `sh_dumpmap` | Dump the current generated `.map` from memory to `<game dir>\base\mapdumps\<name>.map` (debugging). Never overwrites an earlier dump. |
 | `sh_genbmodel` | Generate a bmodel from a `.obj` / `.ase` / `.lwo`. |
 | `sh_genmd6model` | Compile a `.md6model` into a `bmd6model`. |
 | `sh_debugrender` | Renderer debug toggle (developer tool). |

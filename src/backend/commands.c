@@ -1292,7 +1292,7 @@ static const cmd_entry CMD_TABLE[] = {
     { "sh_entlist",          (void *)h_sh_entlist,  "Dumps the list of idEntity types in the engine" },
     { "sh_disable_devmode",  (void *)h_disable_devmode,  "disable devmode" },
     { "sh_reenable_devmode", (void *)h_reenable_devmode, "re-enable devmode" },
-    { "sh_dumpmap",          (void *)h_sh_dumpmap,  "sh_dumpmap <file path> dumps the current mapfile, even the generated snapmap mapfile to the given path" },
+    { "sh_dumpmap",          (void *)h_sh_dumpmap,  "sh_dumpmap <name> dumps the current mapfile, even the generated snapmap mapfile, to <game dir>\\base\\mapdumps\\<name>.map (never overwrites: repeats get _2, _3, ...)" },
     { "sh_spawn",            (void *)h_sh_spawn,    "sh_spawn <entitydef> <entity name after spawning>" },
     { "sh_dumpdef",          (void *)h_sh_dumpdef,  "sh_dumpdef <entity name>, dumps the entitydef of an existing ingame entity" },
     { "cs_fieldinfo",        (void *)h_cs_fieldinfo,"Internal type-field diagnostic -- you dont need this" },
