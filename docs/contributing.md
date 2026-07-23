@@ -135,7 +135,7 @@ cd ..
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 ```
 
-By default this compiles and runs eleven **self-contained native tests** (no game needed):
+By default this compiles and runs twelve **self-contained native tests** (no game needed):
 
 - **`shield_format_test`** — the fault-record string formatter (pure logic).
 - **`hook_test`** — the inline-detour installer, exercised on a hand-laid scratch stub.
@@ -149,6 +149,7 @@ By default this compiles and runs eleven **self-contained native tests** (no gam
 - **`config_message_test`** — bounded raw WebView config-message extraction before UTF-8 conversion.
 - **`theme_bootstrap_test`** — pre-navigation root-class seeding for a saved dark theme.
 - **`theme_contract_test`** — the HTML config-message contract and PREVIEW-only browser storage.
+- **`entity_settings_contract_test`** — persisted Entities controls, startup hydration, and the exclusive selection-direction contract.
 
 Two more tests scan a **real DOOM image** — a `DOOMx64vk.exe` that's been unpacked from its Steam DRM wrapper
 (e.g. with Steamless). Run them only if you're touching the signature resolver (`src/backend/signatures.c`):
@@ -163,7 +164,7 @@ A third test, `xinput_ordinal_test.c`, is a **runtime** cross-check of the XInpu
 a built DLL and calls its exports by ordinal. CI verifies that same invariant *statically* with `dumpbin` (the
 "XInput ordinal parity" step), so you normally don't need to run it by hand.
 
-CI runs the eleven self-contained native tests and the installer tests on every PR; the DOOM-image tests are local-only
+CI runs the twelve self-contained native tests and the installer tests on every PR; the DOOM-image tests are local-only
 (CI has no game image).
 
 ## 8. The pull-request workflow

@@ -154,23 +154,27 @@ describing the change instead.
 ## Persistent settings
 
 The backend owns `%LOCALAPPDATA%\snapmap-plus\config.json`. It creates the file on the first Snapmap+
-startup after install (not during installation), and the Studio window's **Light / Dark** choice is the
-first registered setting:
+startup after install (not during installation), and the Studio window's **Light / Dark**, **Show hidden**,
+and Entity selection-direction choices are registered settings:
 
 ```json
 {
   "schema_version": 1,
   "settings": {
-    "theme": "light"
+    "theme": "light",
+    "entities.show_hidden": false,
+    "entities.selection_mode": "off"
   }
 }
 ```
 
-The choice survives restarts, updates, uninstall, and reinstall. Deleting `config.json` is the supported
-"reset preferences" operation: the next startup recreates it with defaults. The registry-backed format is
-designed for more settings without adding a new backend↔frontend ABI slot for each one; unknown values are
-preserved when a supported-schema file is rewritten. See [`docs/architecture.md`](docs/architecture.md)
-for validation, recovery, and I/O-failure behavior.
+`entities.selection_mode` accepts `off`, `follow`, and `select_in_3d`; the two Entity selection directions
+cannot be active together. These choices survive restarts, updates, uninstall, and reinstall. Deleting
+`config.json` is the supported "reset preferences" operation: the next startup recreates the light theme,
+Show Hidden off, and selection mode off defaults. The registry-backed format is designed for more settings
+without adding a new backend↔frontend ABI slot for each one; unknown values are preserved when a
+supported-schema file is rewritten. See [`docs/architecture.md`](docs/architecture.md) for validation,
+recovery, and I/O-failure behavior.
 
 ## Overrides (runtime)
 

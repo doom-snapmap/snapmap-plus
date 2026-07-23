@@ -121,10 +121,11 @@ theme automatically — pick whichever you prefer. Snapmap+ remembers the choice
 window first appears on later launches, so a saved dark theme does not flash light while loading.
 
 `config.json` is safe to leave alone. If you deliberately delete it, Snapmap+ treats that as **Reset
-preferences** and recreates the default light setting on the next startup. If the file is damaged,
-Snapmap+ keeps a timestamped `.corrupt.json` backup, restores defaults, and tells you once; if it cannot
-save, your new theme still works for the current session and the window explains that it was not
-remembered. Updates, uninstall, and reinstall preserve the file.
+preferences** and recreates the default light setting, Show Hidden off, and Entity selection mode off on
+the next startup. If the file is damaged, Snapmap+ keeps a timestamped `.corrupt.json` backup, restores
+defaults, and tells you once; if it cannot save, any changed preference still works for the current
+session and the window explains that it was not remembered. Updates, uninstall, and reinstall preserve
+the file.
 
 **Camera Origin** (top-right) shows your editor camera's live X/Y/Z position, and updates continuously
 while you move around — handy for finding coordinates to paste into a property. Check **Lock** to pin the
@@ -144,12 +145,16 @@ if you ever want to force an immediate re-sync yourself.
 - **Filter entities...** narrows the list by typing part of an ID or name.
 - **Show hidden** reveals the entities that exist in every map by default (the built-in filters like "any
   player" / "any AI", etc.) — left unchecked, those are hidden so the list stays focused on what you
-  actually placed.
+  actually placed. Snapmap+ remembers the choice.
 - **Follow selection** makes the list track whatever you have selected in the SnapMap 3D editor — select
   something in-game, and its row (and the Entity State panel) update to match. Turn it off if you'd
   rather browse the list independently of what's selected in-game.
 - **Select in 3D** — the reverse direction: selecting a row (or rows) here also selects the matching
   entity in the SnapMap 3D editor.
+
+Follow Selection and Select in 3D are opposite directions of one mode, so they cannot be enabled together.
+Snapmap+ remembers the direction you choose (or that both are off) for the next launch.
+
 - **Deselect** clears whatever's selected in the 3D editor. Occasionally clicking off an object in-game
   doesn't fully deselect it — this button is a reliable way to force it.
 

@@ -60,7 +60,7 @@ The frontend holds no engine addresses; it calls the backend only through the vt
 | Class / Inherit autocomplete | `enum_valid_classes` +0x270, `enum_inherits` +0x278 |
 | Camera Origin (X/Y/Z + Lock Position) | `get_editor_vec3` +0x08, `set_editor_vec3` +0x00 |
 | Installed version readout | reads `%LOCALAPPDATA%\snapmap-plus\install.json` (written by the installer) |
-| Persistent settings (currently Light / Dark) | `config_get_json` +0x2B0, `config_set_json` +0x2B8 — registered UTF-8 JSON fragments owned by the backend |
+| Persistent settings (Light / Dark and Entities controls) | `config_get_json` +0x2B0, `config_set_json` +0x2B8 — registered UTF-8 JSON fragments owned by the backend |
 | Deselect (explicit button, "Select in 3D editor" mode) | `clear_selection` +0x148 |
 | Live "Create from selection (N)" button count | `get_selection` +0x150, polled every ~330 ms independent of the sync checkboxes |
 | Prefabs list, detail pane, delete/rename, folders (create/rename/delete/move) | `resolve_prefab_path` +0xc0 only -- pure Win32 file/directory ops (`FindFirstFileA`, `DeleteFileA`, `MoveFileA`, `CreateDirectoryA`, `RemoveDirectoryA`) on the resolved path. No other engine slot involved, unaffected by the +0xb0 issues below. |
@@ -73,7 +73,7 @@ The frontend holds no engine addresses; it calls the backend only through the vt
 | Send feedback (the bottom-right "?" dialog) | no engine slot -- the page posts `reportSubmit` with an opaque JSON payload; the host POSTs it to the feedback relay on a short-lived worker thread (WinHTTP, the frontend's only network touch -- see the capability note in `snapmap_plus_ui_webview.cpp`) and answers `reportResult {ok, mode, number}` -> green/red toast. Pipeline: [`feedback.md`](feedback.md) |
 | Crash-report dialog (auto-opens on a recorded crash) | no engine slot -- the host polls `<game>\snapmap-plus\crash\` (~2 s) for a crash record the backend wrote at fault time and posts `crashPending {record, count}`; the page auto-opens the dialog. Send composes the payload host-side (`crashSubmit` -> `category:"crash"`, optional anonymized log tails) and rides the SAME WinHTTP thread + `reportResult` as feedback; `crashDismiss` clears the pending record. Pipeline: [`feedback.md`](feedback.md) |
 
-### Configuration bridge and theme startup
+### Configuration bridge and settings startup
 
 The page never opens `%LOCALAPPDATA%\snapmap-plus\config.json` itself. Production reads and writes use
 generic `configGet {key}` / `configSet {key, valueJson}` WebMessages; the host bounds and decodes those
@@ -86,12 +86,17 @@ embedded `<html lang="en">` marker; light and invalid/unavailable values retain 
 native host starts hidden and can be shown only after a successful `NavigationCompleted`, so the first
 visible frame already has the saved colors and a failed navigation never exposes a blank controller.
 
-Clicking Light or Dark applies immediately, then asks the backend to persist the new value. A rejected or
-session-only result keeps the visual change but warns that it could not be saved. Startup status similarly
-warns when a corrupt file was backed up, a newer schema was left untouched, or the service had to fall
-back to volatile settings. `localStorage` is used **only** when `mockup.html` is opened directly in a
-normal browser (`PREVIEW`); it is never the in-game source of truth. The file format and recovery rules
-are documented in [`architecture.md`](architecture.md#persistent-configuration).
+The page also sends one startup `configGet` each for `entities.show_hidden` and
+`entities.selection_mode`. It aggregates both responses before changing either Entity control, so startup
+side effects run only after the pair is known. The single selection-mode value makes Follow Selection and
+Select in 3D mutually exclusive; restoring `select_in_3d` updates the control without pushing an empty
+list selection into the editor. Clicking Light, Dark, Show Hidden, or either Entity direction applies the
+choice immediately, then asks the backend to persist it. A rejected or session-only result keeps the
+session behavior but warns that it could not be saved. Startup status similarly warns when a corrupt file
+was backed up, a newer schema was left untouched, or the service had to fall back to volatile settings.
+`localStorage` is used **only** when `mockup.html` is opened directly in a normal browser (`PREVIEW`); it
+is never the in-game source of truth. The file format and recovery rules are documented in
+[`architecture.md`](architecture.md#persistent-configuration).
 
 Heavy engine writes (Save, Delete, Select-in-editor) are snapshotted in the JS message callback and
 applied on the next think-loop frame under the loop mutex, keeping them off the re-entrant callback.
@@ -106,6 +111,16 @@ through it).
 
 Newest first. Each dated entry covers one working session's worth of change; the undated **Baseline**
 entry at the bottom is the original POC buildout, before this doc tracked dates per entry.
+
+### 2026-07-23 -- Persistent Entities controls
+
+- **Show Hidden and the Entity selection direction now persist through the backend-owned configuration
+  service.** Page startup requests `entities.show_hidden` and `entities.selection_mode`, aggregates both
+  responses before applying them, and writes later changes through the existing generic config messages.
+- **Selection direction is a single exclusive mode.** `off`, `follow`, and `select_in_3d` represent the
+  entire state, so Follow Selection and Select in 3D cannot be enabled together. Restoring
+  `select_in_3d` deliberately does not push an empty list selection to the editor; persistence failures
+  keep the changed session behavior and show a warning.
 
 ### 2026-07-22 -- Persistent settings and flash-free theme startup
 

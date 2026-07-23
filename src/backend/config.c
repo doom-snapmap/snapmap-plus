@@ -65,6 +65,9 @@ typedef enum config_fault {
 
 static int validate_theme(const char *value_json);
 static const char *normalize_theme(const char *value_json);
+static const char *normalize_bool(const char *value_json);
+static int validate_entity_selection_mode(const char *value_json);
+static const char *normalize_entity_selection_mode(const char *value_json);
 
 static const config_descriptor g_registry[] = {
     {
@@ -73,6 +76,20 @@ static const config_descriptor g_registry[] = {
         SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,
         validate_theme,
         normalize_theme
+    },
+    {
+        "entities.show_hidden", SH_JSON_BOOL, "false",
+        SH_CONFIG_BACKEND_READ | SH_CONFIG_BACKEND_WRITE |
+        SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,
+        NULL,
+        normalize_bool
+    },
+    {
+        "entities.selection_mode", SH_JSON_STRING, "\"off\"",
+        SH_CONFIG_BACKEND_READ | SH_CONFIG_BACKEND_WRITE |
+        SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,
+        validate_entity_selection_mode,
+        normalize_entity_selection_mode
     }
 };
 
@@ -246,6 +263,59 @@ static const char *normalize_theme(const char *value_json)
         return NULL;
     if (length == 5 && memcmp(decoded, "light", 5) == 0) return "\"light\"";
     if (length == 4 && memcmp(decoded, "dark", 4) == 0) return "\"dark\"";
+    return NULL;
+}
+
+static const char *normalize_bool(const char *value_json)
+{
+    const char *begin, *end;
+    size_t length;
+    if (!value_json) return NULL;
+    begin = value_json;
+    while (*begin == ' ' || *begin == '\t' ||
+           *begin == '\r' || *begin == '\n')
+        begin++;
+    end = value_json + strlen(value_json);
+    while (end > begin &&
+           (end[-1] == ' ' || end[-1] == '\t' ||
+            end[-1] == '\r' || end[-1] == '\n'))
+        end--;
+    length = (size_t)(end - begin);
+    if (length == 4 && memcmp(begin, "true", 4) == 0) return "true";
+    if (length == 5 && memcmp(begin, "false", 5) == 0) return "false";
+    return NULL;
+}
+
+static int validate_entity_selection_mode(const char *value_json)
+{
+    return normalize_entity_selection_mode(value_json) != NULL;
+}
+
+static const char *normalize_entity_selection_mode(const char *value_json)
+{
+    char decoded[32];
+    const char *begin, *end;
+    size_t length = 0;
+    if (!value_json) return NULL;
+    begin = value_json;
+    while (*begin == ' ' || *begin == '\t' ||
+           *begin == '\r' || *begin == '\n')
+        begin++;
+    end = value_json + strlen(value_json);
+    while (end > begin &&
+           (end[-1] == ' ' || end[-1] == '\t' ||
+            end[-1] == '\r' || end[-1] == '\n'))
+        end--;
+    if (!sh_json_decode_string(begin, (size_t)(end - begin),
+                               decoded, sizeof(decoded), &length))
+        return NULL;
+    if (length == 3 && memcmp(decoded, "off", 3) == 0)
+        return "\"off\"";
+    if (length == 6 && memcmp(decoded, "follow", 6) == 0)
+        return "\"follow\"";
+    if (length == 12 &&
+        memcmp(decoded, "select_in_3d", 12) == 0)
+        return "\"select_in_3d\"";
     return NULL;
 }
 

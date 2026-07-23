@@ -100,15 +100,20 @@ and creates this version-1 document when the file is absent:
 {
   "schema_version": 1,
   "settings": {
-    "theme": "light"
+    "theme": "light",
+    "entities.show_hidden": false,
+    "entities.selection_mode": "off"
   }
 }
 ```
 
 Deleting the file deliberately is therefore a clean reset: the next startup, or the next setting write
 in a running session, recreates it. The one descriptor table in `src/backend/config.c` declares each
-setting's key, JSON type, default, validator/normalizer, and backend/frontend read/write permissions.
-Adding a setting means adding a descriptor and its behavior/tests; the wire contract remains generic.
+setting's key, JSON type, default, validator/normalizer, and backend/frontend read/write permissions. In
+addition to `theme`, the registry has the `entities.show_hidden` boolean and `entities.selection_mode`
+enum (`off`, `follow`, or `select_in_3d`); the schema version and generic backend↔frontend ABI are
+unchanged. Adding a setting means adding a descriptor and its behavior/tests; the wire contract remains
+generic.
 
 Values cross the matched-pair ABI as complete UTF-8 JSON fragments. `config_get_json` at `+0x2B0`
 supports a size query and reports status flags; `config_set_json` at `+0x2B8` validates the registered

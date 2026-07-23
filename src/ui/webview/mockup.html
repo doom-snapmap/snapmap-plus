@@ -617,6 +617,10 @@
   var entityInheritCache = {};   // eid -> resolved entityDef.inherit slug (or '' if resolved-but-none)
   var entityInheritRequested = {};   // eid -> true once a resolveEntityInherit round-trip has been fired for it
   var selectMode = false;    // "Select in editor": push list selection -> 3D editor
+  var ENTITY_SHOW_HIDDEN_KEY = 'entities.show_hidden';
+  var ENTITY_SELECTION_MODE_KEY = 'entities.selection_mode';
+  var entitySettingsPending = { showHidden:null, selectionMode:null };
+  var entitySettingsHydrated = false;
   var inheritsRequested = false;
   var inheritItems = [], classItems = [];
   var inheritCombo = null, classCombo = null;
@@ -666,6 +670,67 @@
   function post(o) { if (!PREVIEW) { window.chrome.webview.postMessage(o); return; } previewHandle(o); }
   function configGet(key) { post({cmd:'configGet', key:key}); }
   function configSet(key, value) { post({cmd:'configSet', key:key, valueJson:JSON.stringify(value)}); }
+  function entityModeValid(mode) {
+    return mode === 'off' || mode === 'follow' || mode === 'select_in_3d';
+  }
+  function applyEntitySelectionMode(mode, pushSelection) {
+    if (!entityModeValid(mode)) mode = 'off';
+    var follow = mode === 'follow';
+    var select = mode === 'select_in_3d';
+    document.getElementById('syncEditor').checked = follow;
+    document.getElementById('selectInEditor').checked = select;
+    if (follow) {
+      selectMode = false;
+      document.getElementById('deselectBtn').style.display = 'none';
+      post({cmd:'setSync', on:1});
+    } else {
+      post({cmd:'setSync', on:0});
+      selectMode = select;
+      document.getElementById('deselectBtn').style.display =
+        select ? 'inline-block' : 'none';
+      if (select && pushSelection) pushSelectionToEditor();
+    }
+  }
+  function applyLoadedEntitySettings() {
+    if (entitySettingsHydrated ||
+        entitySettingsPending.showHidden === null ||
+        entitySettingsPending.selectionMode === null) return;
+    entitySettingsHydrated = true;
+    document.getElementById('showHidden').checked =
+      entitySettingsPending.showHidden;
+    renderList();
+    applyEntitySelectionMode(entitySettingsPending.selectionMode, false);
+  }
+  function receiveEntitySetting(d) {
+    if (d.key === ENTITY_SHOW_HIDDEN_KEY) {
+      var showHidden = false;
+      if (d.result === 1) {
+        try {
+          var parsedShowHidden = JSON.parse(d.valueJson);
+          if (typeof parsedShowHidden === 'boolean')
+            showHidden = parsedShowHidden;
+        } catch (e) {}
+      }
+      entitySettingsPending.showHidden = showHidden;
+    } else if (d.key === ENTITY_SELECTION_MODE_KEY) {
+      var selectionMode = 'off';
+      if (d.result === 1) {
+        try {
+          var parsedSelectionMode = JSON.parse(d.valueJson);
+          if (entityModeValid(parsedSelectionMode))
+            selectionMode = parsedSelectionMode;
+        } catch (e) {}
+      }
+      entitySettingsPending.selectionMode = selectionMode;
+    } else {
+      return false;
+    }
+    applyLoadedEntitySettings();
+    return true;
+  }
+  function persistEntitySetting(key, value) {
+    if (!PREVIEW) configSet(key, value);
+  }
 
   // ---- browser preview: when opened in a plain browser (no DOOM backend), fake the native side so the
   // file is self-demoing and fully interactive. Inert in DOOM (PREVIEW is false there). ----
@@ -2485,10 +2550,15 @@
           if (savedTheme === 'light' || savedTheme === 'dark')
             applyTheme(savedTheme === 'dark', false);
         } catch (e) {}
+      } else {
+        receiveEntitySetting(d);
       }
     } else if (d.kind === 'configSetResult') {
-      if (d.key === 'theme' && d.result !== 1)
-        toast("Theme changed for this session, but couldn't be saved.", 'warn');
+      var knownSetting = d.key === 'theme' ||
+        d.key === ENTITY_SHOW_HIDDEN_KEY ||
+        d.key === ENTITY_SELECTION_MODE_KEY;
+      if (knownSetting && d.result !== 1)
+        toast("Setting changed for this session, but couldn't be saved.", 'warn');
     } else if (d.kind === 'configStatus') {
       if (d.flags & 1)
         toast('Your settings file was damaged. Snapmap+ backed it up and restored defaults.', 'warn');
@@ -2813,19 +2883,21 @@
   document.getElementById('filterBox').addEventListener('input', renderList);
   var prefabFilterEl = document.getElementById('prefabFilter');
   if (prefabFilterEl) prefabFilterEl.addEventListener('input', renderPrefabTree);
-  document.getElementById('showHidden').addEventListener('change', renderList);
+  document.getElementById('showHidden').addEventListener('change', function(){
+    renderList();
+    persistEntitySetting(ENTITY_SHOW_HIDDEN_KEY, this.checked);
+  });
   var timelineFilterEl = document.getElementById('timelineFilter');
   if (timelineFilterEl) timelineFilterEl.addEventListener('input', renderTimelineList);
-  // The two sync directions are mutually exclusive for now (both-on could freeze on multi-select).
   document.getElementById('syncEditor').addEventListener('change', function(){
-    if (this.checked) { document.getElementById('selectInEditor').checked = false; selectMode = false; document.getElementById('deselectBtn').style.display = 'none'; }
-    post({cmd:'setSync', on: this.checked ? 1 : 0});
+    var mode = this.checked ? 'follow' : 'off';
+    applyEntitySelectionMode(mode, false);
+    persistEntitySetting(ENTITY_SELECTION_MODE_KEY, mode);
   });
   document.getElementById('selectInEditor').addEventListener('change', function(){
-    if (this.checked) { document.getElementById('syncEditor').checked = false; post({cmd:'setSync', on:0}); }
-    selectMode = this.checked;
-    document.getElementById('deselectBtn').style.display = selectMode ? 'inline-block' : 'none';
-    if (selectMode) pushSelectionToEditor();
+    var mode = this.checked ? 'select_in_3d' : 'off';
+    applyEntitySelectionMode(mode, this.checked);
+    persistEntitySetting(ENTITY_SELECTION_MODE_KEY, mode);
   });
   document.getElementById('deselectBtn').addEventListener('click', function(){
     post({cmd:'deselect'});
@@ -2937,7 +3009,11 @@
     var dark = document.documentElement.classList.contains('dark');
     if (PREVIEW) dark = previewThemeRead() === 'dark';
     applyTheme(dark, false);
-    if (!PREVIEW) configGet('theme');
+    if (!PREVIEW) {
+      configGet('theme');
+      configGet(ENTITY_SHOW_HIDDEN_KEY);
+      configGet(ENTITY_SELECTION_MODE_KEY);
+    }
   })();
 
   // frameless window controls: minimize / maximize, drag on the menu bar, resize on the edge handles.

@@ -17,6 +17,7 @@
 #   config_message_test -- bounded raw WebView config-message extraction
 #   theme_bootstrap_test -- pre-navigation dark-class injection (pure C++ helper)
 #   theme_contract_test -- native/preview theme bridge contract in the embedded HTML source
+#   entity_settings_contract_test -- persisted Entities controls + exclusive selection-mode contract
 # -Doom <unpacked DOOMx64vk.exe>: ALSO the signature-resolver tests, which scan a real
 #   (Steamless-unpacked) DOOM image:
 #   sig_test            -- every engine signature resolves to its known RVA
@@ -51,6 +52,7 @@ $tests = @(
     @{ name = "config_message_test"; src = 'config_message_test.cpp ..\src\ui\webview\config_message.cpp'; cxx = $true; arg = "" }
     @{ name = "theme_bootstrap_test"; src = 'theme_bootstrap_test.cpp ..\src\ui\webview\theme_bootstrap.cpp'; cxx = $true; arg = "" }
     @{ name = "theme_contract_test"; src = 'theme_contract_test.c'; arg = (Join-Path $here '..\src\ui\webview\mockup.html') }
+    @{ name = "entity_settings_contract_test"; src = 'entity_settings_contract_test.c'; arg = (Join-Path $here '..\src\ui\webview\mockup.html') }
 )
 if ($Doom) {
     if (-not (Test-Path $Doom)) { throw "-Doom path not found: $Doom" }

@@ -132,7 +132,7 @@ static void test_first_run_creates_defaults_and_getter_contract(void)
 {
     wchar_t root[MAX_PATH], path[MAX_PATH];
     char *disk = NULL;
-    char value[16];
+    char value[32];
     char short_buffer[4] = { 'X', 'X', 'X', 0 };
     size_t disk_length = 0;
     unsigned int flags = 99;
@@ -141,7 +141,9 @@ static void test_first_run_creates_defaults_and_getter_contract(void)
         "{\n"
         "  \"schema_version\": 1,\n"
         "  \"settings\": {\n"
-        "    \"theme\": \"light\"\n"
+        "    \"theme\": \"light\",\n"
+        "    \"entities.show_hidden\": false,\n"
+        "    \"entities.selection_mode\": \"off\"\n"
         "  }\n"
         "}\n";
 
@@ -166,6 +168,12 @@ static void test_first_run_creates_defaults_and_getter_contract(void)
     CHECK(strcmp(value, "\"light\"") == 0);
     CHECK(sh_config_get_string("theme", value, (int)sizeof(value)) == 5);
     CHECK(strcmp(value, "light") == 0);
+    CHECK(sh_config_get_json("entities.show_hidden", value,
+                             (int)sizeof(value), NULL) == 5);
+    CHECK(strcmp(value, "false") == 0);
+    CHECK(sh_config_get_json("entities.selection_mode", value,
+                             (int)sizeof(value), NULL) == 5);
+    CHECK(strcmp(value, "\"off\"") == 0);
     CHECK(sh_config_get_json("missing", value, (int)sizeof(value), NULL) < 0);
 
     free(disk);
@@ -181,7 +189,9 @@ static void test_loads_existing_theme_without_rewriting(void)
     size_t disk_length = 0;
     const char existing[] =
         "{\"schema_version\":1,\"future_root\":{\"enabled\":true},"
-        "\"settings\":{\"future_array\":[1,null],\"theme\":\"dark\"}}";
+        "\"settings\":{\"future_array\":[1,null],\"theme\":\"dark\","
+        "\"entities.show_hidden\":false,"
+        "\"entities.selection_mode\":\"off\"}}";
 
     CHECK(make_temp_root(root, MAX_PATH));
     CHECK(make_config_dir(root, dir, path));
@@ -217,7 +227,9 @@ static void test_sets_valid_theme_and_preserves_unknown_values(void)
         "\"future_array\":[1,false],"
         "\"future_object\":{\"nested\":\"yes\"},"
         "\"future_null\":null,"
-        "\"theme\":\"light\""
+        "\"theme\":\"light\","
+        "\"entities.show_hidden\":false,"
+        "\"entities.selection_mode\":\"off\""
         "}"
         "}";
 
@@ -265,13 +277,19 @@ static void test_repairs_missing_and_invalid_registered_values(void)
         "{\"schema_version\":1,\"future\":true}",
         "{\"schema_version\":1,\"settings\":{\"future\":42}}",
         "{\"schema_version\":1,\"settings\":{\"theme\":\"system\",\"future\":42}}",
-        "{\"schema_version\":1,\"settings\":{\"theme\":false,\"future\":42}}"
+        "{\"schema_version\":1,\"settings\":{\"theme\":false,\"future\":42}}",
+        "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
+        "\"entities.show_hidden\":\"yes\","
+        "\"entities.selection_mode\":\"off\",\"future\":42}}",
+        "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
+        "\"entities.show_hidden\":false,"
+        "\"entities.selection_mode\":\"both\",\"future\":42}}"
     };
     size_t i;
 
     for (i = 0; i < sizeof(documents) / sizeof(documents[0]); i++) {
         wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH];
-        char value[16];
+        char value[32];
         char *disk = NULL;
         unsigned int flags = 0;
 
@@ -285,9 +303,18 @@ static void test_repairs_missing_and_invalid_registered_values(void)
         CHECK(sh_config_get_string("theme", value, (int)sizeof(value)) == 5);
         CHECK(strcmp(value, "light") == 0);
         CHECK(sh_config_get_json("theme", NULL, 0, &flags) == 7);
+        CHECK(sh_config_get_json("entities.show_hidden", value,
+                                 (int)sizeof(value), NULL) == 5);
+        CHECK(strcmp(value, "false") == 0);
+        CHECK(sh_config_get_json("entities.selection_mode", value,
+                                 (int)sizeof(value), NULL) == 5);
+        CHECK(strcmp(value, "\"off\"") == 0);
         CHECK((flags & SH_CONFIG_STATUS_REPAIRED) != 0);
         CHECK(read_file(path, &disk, NULL));
         CHECK(disk && strstr(disk, "\"theme\": \"light\"") != NULL);
+        CHECK(disk && strstr(disk, "\"entities.show_hidden\": false") != NULL);
+        CHECK(disk && strstr(disk,
+              "\"entities.selection_mode\": \"off\"") != NULL);
         if (strstr(documents[i], "\"future\":true"))
             CHECK(disk && strstr(disk, "\"future\": true") != NULL);
         if (strstr(documents[i], "\"future\":42"))
@@ -299,15 +326,89 @@ static void test_repairs_missing_and_invalid_registered_values(void)
     }
 }
 
+static void test_entity_settings_validation_and_persistence(void)
+{
+    wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH];
+    char value[32];
+    char *disk = NULL;
+    const char existing[] =
+        "{\"schema_version\":1,\"settings\":{"
+        "\"theme\":\"light\","
+        "\"entities.show_hidden\":false,"
+        "\"entities.selection_mode\":\"off\","
+        "\"future\":42}}";
+
+    CHECK(make_temp_root(root, MAX_PATH));
+    CHECK(make_config_dir(root, dir, path));
+    CHECK(write_file(path, existing, sizeof(existing) - 1));
+    sh_config_test_reset();
+    sh_config_test_set_local_appdata(root);
+    CHECK(sh_config_init() == 1);
+
+    CHECK(sh_config_set_json("entities.show_hidden", " \r\n true \t") ==
+          SH_CONFIG_SET_PERSISTED);
+    CHECK(sh_config_get_json("entities.show_hidden", value,
+                             (int)sizeof(value), NULL) == 4);
+    CHECK(strcmp(value, "true") == 0);
+    CHECK(sh_config_set_json("entities.selection_mode",
+                             "\"select_in_3d\"") ==
+          SH_CONFIG_SET_PERSISTED);
+    CHECK(sh_config_get_json("entities.selection_mode", value,
+                             (int)sizeof(value), NULL) == 14);
+    CHECK(strcmp(value, "\"select_in_3d\"") == 0);
+
+    CHECK(sh_config_set_json("entities.show_hidden", "\"true\"") ==
+          SH_CONFIG_SET_REJECTED);
+    CHECK(sh_config_set_json("entities.show_hidden", "1") ==
+          SH_CONFIG_SET_REJECTED);
+    CHECK(sh_config_set_json("entities.selection_mode", "\"both\"") ==
+          SH_CONFIG_SET_REJECTED);
+    CHECK(sh_config_set_json("entities.selection_mode", "true") ==
+          SH_CONFIG_SET_REJECTED);
+
+    CHECK(read_file(path, &disk, NULL));
+    CHECK(disk && strstr(disk, "\"entities.show_hidden\": true") != NULL);
+    CHECK(disk && strstr(disk,
+          "\"entities.selection_mode\": \"select_in_3d\"") != NULL);
+    CHECK(disk && strstr(disk, "\"future\": 42") != NULL);
+    if (disk) {
+        const char *theme = strstr(disk, "\"theme\": \"light\"");
+        const char *hidden = strstr(disk, "\"entities.show_hidden\": true");
+        const char *mode = strstr(
+            disk, "\"entities.selection_mode\": \"select_in_3d\"");
+        const char *future = strstr(disk, "\"future\": 42");
+        CHECK(theme && hidden && mode && future);
+        if (theme && hidden && mode && future)
+            CHECK(theme < hidden && hidden < mode && mode < future);
+    }
+
+    free(disk);
+    sh_config_test_reset();
+    cleanup_temp_root(root);
+}
+
 static void test_setter_rereads_external_edits_and_recreates_deleted_file(void)
 {
     wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH];
     char *disk = NULL;
     const char initial[] =
-        "{\"schema_version\":1,\"settings\":{\"theme\":\"light\"},\"sentinel\":1}";
+        "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
+        "\"entities.show_hidden\":false,"
+        "\"entities.selection_mode\":\"off\"},\"sentinel\":1}";
     const char external[] =
-        "{\"schema_version\":1,\"settings\":{\"theme\":\"light\",\"external\":true},"
+        "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
+        "\"entities.show_hidden\":false,"
+        "\"entities.selection_mode\":\"off\",\"external\":true},"
         "\"sentinel\":2}";
+    const char *defaults =
+        "{\n"
+        "  \"schema_version\": 1,\n"
+        "  \"settings\": {\n"
+        "    \"theme\": \"light\",\n"
+        "    \"entities.show_hidden\": false,\n"
+        "    \"entities.selection_mode\": \"off\"\n"
+        "  }\n"
+        "}\n";
 
     CHECK(make_temp_root(root, MAX_PATH));
     CHECK(make_config_dir(root, dir, path));
@@ -325,9 +426,22 @@ static void test_setter_rereads_external_edits_and_recreates_deleted_file(void)
     disk = NULL;
 
     CHECK(DeleteFileW(path));
-    CHECK(sh_config_set_json("theme", "\"dark\"") == SH_CONFIG_SET_PERSISTED);
+    sh_config_test_reset();
+    sh_config_test_set_local_appdata(root);
+    CHECK(sh_config_init() == 1);
     CHECK(read_file(path, &disk, NULL));
-    CHECK(disk && strstr(disk, "\"theme\": \"dark\"") != NULL);
+    CHECK(disk && strcmp(disk, defaults) == 0);
+    free(disk);
+    disk = NULL;
+
+    CHECK(DeleteFileW(path));
+    CHECK(sh_config_set_json("entities.selection_mode", "\"follow\"") ==
+          SH_CONFIG_SET_PERSISTED);
+    CHECK(read_file(path, &disk, NULL));
+    CHECK(disk && strstr(disk, "\"theme\": \"light\"") != NULL);
+    CHECK(disk && strstr(disk, "\"entities.show_hidden\": false") != NULL);
+    CHECK(disk && strstr(disk,
+          "\"entities.selection_mode\": \"follow\"") != NULL);
 
     free(disk);
     sh_config_test_reset();
@@ -341,9 +455,13 @@ static void test_accepts_bom_and_canonicalizes_registered_strings(void)
     char *disk = NULL;
     unsigned int flags = 0;
     const char bom_document[] =
-        "\xEF\xBB\xBF{\"schema_version\":1,\"settings\":{\"theme\":\"dark\"}}";
+        "\xEF\xBB\xBF{\"schema_version\":1,\"settings\":{\"theme\":\"dark\","
+        "\"entities.show_hidden\":false,"
+        "\"entities.selection_mode\":\"off\"}}";
     const char escaped_document[] =
-        "{\"schema_version\":1,\"settings\":{\"theme\":\"d\\u0061rk\"}}";
+        "{\"schema_version\":1,\"settings\":{\"theme\":\"d\\u0061rk\","
+        "\"entities.show_hidden\":false,"
+        "\"entities.selection_mode\":\"off\"}}";
 
     CHECK(make_temp_root(root, MAX_PATH));
     CHECK(make_config_dir(root, dir, path));
@@ -503,7 +621,9 @@ static void test_mutation_failures_keep_old_file_and_session_value(void)
         SH_CONFIG_TEST_FAIL_REPLACE
     };
     const char original[] =
-        "{\"schema_version\":1,\"settings\":{\"theme\":\"light\"},\"keep\":true}";
+        "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
+        "\"entities.show_hidden\":false,"
+        "\"entities.selection_mode\":\"off\"},\"keep\":true}";
     size_t i;
 
     for (i = 0; i < sizeof(faults) / sizeof(faults[0]); i++) {
@@ -539,7 +659,9 @@ static void test_mutation_failures_keep_old_file_and_session_value(void)
 static void test_partial_existing_replace_keeps_old_file(void)
 {
     const char original[] =
-        "{\"schema_version\":1,\"settings\":{\"theme\":\"light\"},\"keep\":true}";
+        "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
+        "\"entities.show_hidden\":false,"
+        "\"entities.selection_mode\":\"off\"},\"keep\":true}";
     wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH];
     char value[16];
     char *disk = NULL;
@@ -572,7 +694,9 @@ static void test_partial_existing_replace_keeps_old_file(void)
 static void test_partial_existing_replace_restores_moved_old_file(void)
 {
     const char original[] =
-        "{\"schema_version\":1,\"settings\":{\"theme\":\"light\"},\"keep\":true}";
+        "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
+        "\"entities.show_hidden\":false,"
+        "\"entities.selection_mode\":\"off\"},\"keep\":true}";
     wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH];
     char value[16];
     char *disk = NULL;
@@ -637,9 +761,13 @@ static void test_partial_startup_repair_restores_moved_old_file(void)
 static void test_startup_restores_interrupted_existing_replace(void)
 {
     const char original[] =
-        "{\"schema_version\":1,\"settings\":{\"theme\":\"dark\"},\"keep\":true}";
+        "{\"schema_version\":1,\"settings\":{\"theme\":\"dark\","
+        "\"entities.show_hidden\":false,"
+        "\"entities.selection_mode\":\"off\"},\"keep\":true}";
     const char replacement[] =
-        "{\"schema_version\":1,\"settings\":{\"theme\":\"light\"},\"keep\":true}";
+        "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
+        "\"entities.show_hidden\":false,"
+        "\"entities.selection_mode\":\"off\"},\"keep\":true}";
     wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH];
     wchar_t rollback[MAX_PATH], temp[MAX_PATH];
     char value[16];
@@ -940,6 +1068,8 @@ static void test_process_writers_are_serialized(void)
     char *disk = NULL;
     const char initial[] =
         "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
+        "\"entities.show_hidden\":false,"
+        "\"entities.selection_mode\":\"off\","
         "\"future\":{\"keep\":true}},\"sentinel\":\"preserve\"}";
 
     CHECK(make_temp_root(root, MAX_PATH));
@@ -971,7 +1101,7 @@ static void test_shared_interface_uses_registered_config_service(void)
 {
     wchar_t root[MAX_PATH];
     sh_iface *iface;
-    char value[16] = {0};
+    char value[32] = {0};
     unsigned int flags = 99;
 
     CHECK(make_temp_root(root, MAX_PATH));
@@ -989,6 +1119,17 @@ static void test_shared_interface_uses_registered_config_service(void)
                   iface, "theme", value, (int)sizeof(value), &flags) == 7);
         CHECK(strcmp(value, "\"light\"") == 0);
         CHECK(flags == 0);
+        CHECK(iface->vtbl->config_get_json(
+                  iface, "entities.show_hidden", value,
+                  (int)sizeof(value), NULL) == 5);
+        CHECK(strcmp(value, "false") == 0);
+        CHECK(iface->vtbl->config_set_json(
+                  iface, "entities.selection_mode", "\"follow\"") ==
+              SH_CONFIG_SET_PERSISTED);
+        CHECK(iface->vtbl->config_get_json(
+                  iface, "entities.selection_mode", value,
+                  (int)sizeof(value), NULL) == 8);
+        CHECK(strcmp(value, "\"follow\"") == 0);
         CHECK(iface->vtbl->config_set_json(iface, "theme", "\"dark\"") ==
               SH_CONFIG_SET_PERSISTED);
         CHECK(iface->vtbl->config_set_json(iface, "unknown", "true") ==
@@ -1026,6 +1167,7 @@ int wmain(int argc, wchar_t **argv)
     test_first_run_creates_defaults_and_getter_contract();
     test_loads_existing_theme_without_rewriting();
     test_sets_valid_theme_and_preserves_unknown_values();
+    test_entity_settings_validation_and_persistence();
     test_repairs_missing_and_invalid_registered_values();
     test_setter_rereads_external_edits_and_recreates_deleted_file();
     test_accepts_bom_and_canonicalizes_registered_strings();
