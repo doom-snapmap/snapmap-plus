@@ -154,6 +154,14 @@ entry at the bottom is the original POC buildout, before this doc tracked dates 
   hold a grabbed entity or a staged prefab, push a selection from the Entities list, place the held
   object, and still have your selection. Minor known inconsistency, not considered a problem: after
   placing, a prefab leaves the pushed selection highlighted while a pre-existing-entity grab clears it.
+- **New capability that falls out of this: list-assembled group grab.** With a selection pushed from
+  the Entities list, grabbing any one of the selected entities in the 3D view grabs *all* of them.
+  There was no way to do this before. It makes a practical workflow possible: browse a logic chain in
+  the 3D view, find the other entities you want to bring along in the Entities list, include them in
+  the selection, then grab the logic-chain node you are on and move the whole group together.
+  Confirmed working in logic chain mode, which also means that mode is inside the idle/selected pair
+  the guard permits -- the earlier worry that the logic sub-mode might sit outside it did not
+  materialise.
 - Known remaining gap: if you have one entity selected from the list and then natively click a
   *different* one, the selection count is unchanged, so no broadcast fires and the list keeps
   highlighting the original. Fixing that means broadcasting selection identity, not just count, in
