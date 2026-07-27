@@ -196,16 +196,21 @@ static int paste_at_selection(const uint8_t *ti)
     if (clip == NULL) return 0;
     if (!sh_clipboard_get(clip, (int)CLIP_MAX)) { HeapFree(GetProcessHeap(), 0, clip); return 0; }
 
-    /* Normalise line endings: CR is never wanted, and LF only where the field accepts ENTER. */
+    /* Normalise line endings. CR is never wanted. A multi-line field keeps LF verbatim -- blank lines
+     * are real formatting in a datapad body. A single-line field cannot represent line structure at
+     * all, so any RUN of newlines collapses to ONE space, and a run at the very start or very end is
+     * dropped outright. (Emitting one space per newline instead just leaks the original's blank lines
+     * as runs of spaces -- pasted prose is full of them.) */
     int multiline = (*(const int *)(ti + TI_MULTILINE_OFF) != 0);
-    int ci = 0, co = 0;
+    int ci = 0, co = 0, pending_break = 0;
     for (; clip[ci] != '\0'; ci++) {
         char c = clip[ci];
         if (c == '\r') continue;
-        if (c == '\n' && !multiline) { clip[co++] = ' '; continue; }
+        if (c == '\n' && !multiline) { pending_break = 1; continue; }
+        if (pending_break) { if (co > 0) clip[co++] = ' '; pending_break = 0; }
         clip[co++] = c;
     }
-    clip[co] = '\0';
+    clip[co] = '\0';   /* a trailing run leaves pending_break set and is intentionally dropped */
 
     const char *data = NULL;
     int len = 0;

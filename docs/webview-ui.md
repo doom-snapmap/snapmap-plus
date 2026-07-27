@@ -112,6 +112,33 @@ through it).
 Newest first. Each dated entry covers one working session's worth of change; the undated **Baseline**
 entry at the bottom is the original POC buildout, before this doc tracked dates per entry.
 
+### 2026-07-27 -- Keyboard paging for every list and dropdown; built-in filter entities hidden
+
+- **ArrowUp/ArrowDown now page the Entities, Timelines and Prefabs lists.** Moving the highlight
+  selects the row, exactly as clicking it does (Timelines also opens it; Prefabs also loads its
+  detail card), and the row is scrolled into view. With no current selection, ArrowDown lands on the
+  first row and ArrowUp on the last.
+  The Entities and Prefabs handlers are scoped to the **document**, not to their filter box: "Follow
+  selection" mode drives the Entities list purely from the live 3D-editor pick, so the user may never
+  click into the filter box or a row at all, and a listener scoped to one input would never fire.
+  Excluded from both: the Entity State editor (`#editor` -- its decl textarea needs real caret
+  movement), the Prefab Details card (`#prefabCard` -- same, for the description textarea), an
+  in-progress folder rename, and any `.combo` input (those have their own arrow handling, below).
+- **The Inherit / Classname combos and the Timelines "Runs on" entity picker page their dropdowns.**
+  Arrow keys move a highlighted option, Enter accepts it, and -- unlike the lists -- this only applies
+  **while the dropdown is open**, so arrows are free for normal use otherwise. Typing still filters;
+  paging a narrowed list re-renders against the current text rather than snapping back to the full
+  set. The highlight reuses `.combo-opt`'s existing hover styling via a new `.active` class.
+- **SnapMap's own built-in filter/droppable helper entities are excluded from every entity list and
+  picker** (`renderList`, the "Runs on" picker, and the per-event entity-arg dropdown). These are the
+  engine-seeded prefilters and droppable slots (`any player` / `any ai`, per-team/player/race,
+  keycards, flags, power cores) -- dev-layer-only, never placed or edited by a mapper, and previously
+  they buried the real entities whenever Show Hidden was on.
+  Matched by the id **starting with** `snapmaps/filter/`, not containing it: a mapper's own filter
+  always carries its map/module path first (e.g. `0_c_ind_cross/snapmaps/filter/ai_151`), so
+  user-placed filters are unaffected. The `" (no module)"` suffix is deliberately NOT used as the
+  signal -- it also appears on any real entity not yet assigned to a module.
+
 ### 2026-07-23 -- Persistent Entities controls
 
 - **Show Hidden and the Entity selection direction now persist through the backend-owned configuration
