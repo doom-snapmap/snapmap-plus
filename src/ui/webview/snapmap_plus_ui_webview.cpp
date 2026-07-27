@@ -79,7 +79,7 @@ static std::vector<int> g_delete_eids;
 
 static volatile bool g_pending_select = false;   /* list -> editor selection push ("Select in editor") */
 static std::vector<int> g_select_eids;
-static volatile bool g_pending_deselect = false;  /* explicit "Deselect" button -- clear_selection escape hatch */
+static volatile bool g_pending_deselect = false;  /* explicit "Deselect" button -- clear_selection convenience */
 static char g_enumbuf[262144];                   /* packed-string scratch for enum_inherits / enum_valid_classes */
 
 static volatile bool g_cam_lock = false;         /* Camera Origin "Lock Position" */
@@ -574,9 +574,11 @@ static void poc_apply_select_in_editor()
     } __except (EXCEPTION_EXECUTE_HANDLER) { poc_log("select-in-editor: SEH in apply"); }
     poc_log("select-in-editor: apply done");
 }
-/* explicit Deselect: clear_selection only, no re-add. A reliable escape hatch since a native click on
- * empty space doesn't clear a selection that was set via add_to_selection (confirmed: native click/drag
- * selection deselects fine on its own -- only our externally-driven selection gets stuck). */
+/* explicit Deselect: clear_selection only, no re-add. A convenience (deselect without going back to the 3D
+ * view) and the escape hatch if the editor's mode state is ever out of sync. NB: this button used to be the
+ * ONLY way to clear a list-driven selection -- a native empty-space click wouldn't do it. That root cause was
+ * found and fixed 2026-07-27 (iface_engine.c syncs the EntityMode selection state alongside the selection
+ * array; see ED_MODE_OBJ_OFF there), so a native click now deselects normally. */
 static void poc_apply_deselect()
 {
     __try {

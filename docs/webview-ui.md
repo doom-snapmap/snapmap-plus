@@ -62,6 +62,8 @@ The frontend holds no engine addresses; it calls the backend only through the vt
 | Installed version readout | reads `%LOCALAPPDATA%\snapmap-plus\install.json` (written by the installer) |
 | Persistent settings (Light / Dark and Entities controls) | `config_get_json` +0x2B0, `config_set_json` +0x2B8 — registered UTF-8 JSON fragments owned by the backend |
 | Deselect (explicit button, "Select in 3D editor" mode) | `clear_selection` +0x148 |
+| List-driven selections behave natively (empty-space click deselects; Delete / Move / bottom-bar controls all apply) | `add_to_selection` +0x138, `clear_selection` +0x148 and `remove_from_selection` +0x130 additionally sync the editor's EntityMode selection-state field (`editor+0x22330`, state `+0x1ac`, dirty `+0xBB8`) -- the field the engine's own empty-space-click handler consults. Direct SEH-guarded field writes, gated on the editor already being in EntityMode. Re-derive recipe at the constant block in `src/backend/iface_engine.c`. |
+| Entities list clears its highlight on a native deselect ("Select in 3D" mode) | the existing `selCount` broadcast (`get_selection` +0x150, ~330 ms poll); the UI now acts on its >0 -> 0 transition |
 | Live "Create from selection (N)" button count | `get_selection` +0x150, polled every ~330 ms independent of the sync checkboxes |
 | Prefabs list, detail pane, delete/rename, folders (create/rename/delete/move) | `resolve_prefab_path` +0xc0 only -- pure Win32 file/directory ops (`FindFirstFileA`, `DeleteFileA`, `MoveFileA`, `CreateDirectoryA`, `RemoveDirectoryA`) on the resolved path. No other engine slot involved, unaffected by the +0xb0 issues below. |
 | Create from selection | `serialize_selection` +0xb0 |
@@ -111,6 +113,38 @@ through it).
 
 Newest first. Each dated entry covers one working session's worth of change; the undated **Baseline**
 entry at the bottom is the original POC buildout, before this doc tracked dates per entry.
+
+### 2026-07-27 -- Native 3D-viewport deselect fixed at the root
+
+- **A selection pushed from the Entities list now behaves exactly like a native one.** Empty-space click
+  deselects it, Delete deletes all of it, Move works, and every bottom-bar control applies -- for single
+  and multi-entity selections, and when switching between entities. Previously only the explicit
+  **Deselect** button worked, and Delete/Move misbehaved (Move could soft-lock the game).
+- **Root cause** (reverse-engineered in the companion doom-re project, campaign `native-click-deselect`):
+  the editor keeps a per-mode object inline in the editor object, and its state field says whether
+  anything is selected. The native click handler sets that field on a successful hit *and* adds to the
+  selection array; on an empty-space miss it deliberately does nothing at all. So an empty click only
+  deselects because the editor is in the "something is selected" state. `add_to_selection` wrote the
+  array only, leaving the editor believing nothing was selected -- so the miss path correctly did
+  nothing. That one inconsistency explains every symptom, including Delete and Move, which were never
+  separate bugs. It also explains the old workaround (clicking one of the already-selected entities in
+  the 3D view runs the native hit path, which sets the state regardless of how the selection was made).
+- **Fix:** `src/backend/iface_engine.c` now syncs that mode state alongside every selection-array write --
+  `add_to_selection` -> "selected", `clear_selection` -> "idle", and `remove_from_selection` -> "idle"
+  only once the selection is empty (so a full Delete can't leave the inverse inconsistency). All writes
+  are SEH-guarded and gated on the editor already being in EntityMode, matching the file's existing
+  conventions. The offsets and the per-build re-derive recipe are documented at the constant block.
+- **List sync:** deselecting natively in the 3D view now clears the Entities-list highlight too, in
+  "Select in 3D" mode. The backend already broadcast the live editor selection count on every change;
+  the UI simply wasn't acting on it reaching zero. Gated to that mode only ("Follow selection" already
+  mirrors the whole editor selection, and with both off the list selection is local), to a real
+  greater-than-zero-to-zero transition, and to the case where the list actually has a highlight.
+- The **Deselect** button is kept -- it saves a trip back to the 3D view and stays useful if the mode
+  state is ever out of sync -- but its tooltip no longer describes the (now fixed) stuck behavior.
+- Known remaining gap: if you have one entity selected from the list and then natively click a
+  *different* one, the selection count is unchanged, so no broadcast fires and the list keeps
+  highlighting the original. Fixing that means broadcasting selection identity, not just count, in
+  "Select in 3D" mode.
 
 ### 2026-07-27 -- Keyboard paging for every list and dropdown; built-in filter entities hidden
 
@@ -627,10 +661,10 @@ that doc for the write-up.
 - Default window size bumped to 1440x900 (from 1040x720) so the Entities and Prefabs tabs fit without a
   manual resize on first launch.
 - Explicit **Deselect** button next to "Select in 3D editor" (only visible while that mode is on): calls
-  `clear_selection` directly. A native click on empty space in the 3D view doesn't clear a selection that
-  was set via `add_to_selection` (confirmed: a purely native selection deselects fine on its own -- only
-  our externally-driven selection gets stuck), and the root cause is unRE'd in this codebase, so this is a
-  reliable escape hatch rather than a fix for the underlying click behavior.
+  `clear_selection` directly. Added here as a workaround, because at the time a native empty-space click
+  would not clear a list-driven selection. That root cause was reverse-engineered and fixed on
+  2026-07-27 (see the entry at the top of this changelog); the button remains, now purely as a
+  convenience and as the escape hatch if the editor mode state is ever out of sync.
 - **Prefabs tab, wired to the real filesystem** (`%LOCALAPPDATA%\snapmap-plus\prefabs\`) -- no fake/mockup data:
   - Live list of real `.json` prefab files, refreshed from disk on every Prefabs-tab click; an empty-state
     message when there are none yet.

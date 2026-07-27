@@ -387,7 +387,7 @@
           <label><input type="checkbox" id="showHidden"> Show hidden</label>
           <label title="The list follows whatever you select in the SnapMap 3D editor"><input type="checkbox" id="syncEditor"> Follow selection</label>
           <label title="Selecting entities here selects them in the SnapMap 3D editor"><input type="checkbox" id="selectInEditor"> Select in 3D</label>
-          <button class="btn icon" id="deselectBtn" style="display:none;" title="Clear the 3D editor selection (native click-off can get stuck)">Deselect</button>
+          <button class="btn icon" id="deselectBtn" style="display:none;" title="Clear the 3D editor selection">Deselect</button>
         </div>
       </div>
       <div class="panel-body list" id="entityList"><div class="list-empty">Waiting for the map...</div></div>
@@ -2786,7 +2786,18 @@
         }
       }
     } else if (d.kind === 'selCount') {
+      var prevEditorSel = editorSelCount;
       editorSelCount = d.count; updateCreateBtn();
+      // "Select in 3D": the 3D editor owns the selection, so a native deselect there (an empty-space click)
+      // has to clear the list highlight too -- otherwise the list keeps showing entities that are no longer
+      // selected. Mirrors exactly what the Deselect button does. Gated three ways: only in select mode
+      // ("Follow selection" already mirrors the whole editor selection via editorSelect, empty case included;
+      // with both off the list selection is purely local and editor activity must not disturb it), only on a
+      // real >0 -> 0 transition, and only when the list actually has something highlighted to clear.
+      if (selectMode && prevEditorSel > 0 && d.count === 0 && selCount() > 0) {
+        selectedEids = {}; anchorEid = -1;
+        updateSelDom(); refreshEditorForSelection(false);   // false: native already cleared, don't push back
+      }
     } else if (d.kind === 'createPrefabResult') {
       if (d.result === 1) toast('Created "' + d.name + '"', 'ok');
       else if (d.result === 0) toast('Nothing selected in the editor -- select entities first', 'warn');

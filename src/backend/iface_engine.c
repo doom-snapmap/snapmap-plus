@@ -61,6 +61,32 @@
                                             * Create-New-Timeline gate (the feature spawns/morphs a timeline host,
                                             * valid ONLY while tabbed inside a module). RE-DERIVE per build via the
                                             * state-machine recipe. */
+/* the EntityMode object + its selection state -- the native-click-deselect fix. The engine keeps a per-editor-state
+ * mode object INLINE in the editor; GetMode(editor, stateId) (engine RVA 0x1183c40 on this build) is a plain switch
+ * returning editor+OFF, and `case 2:` (EntityMode, i.e. ED_ENTITY_MODE_OFF == 2) returns editor+0x22330. Its +0x1ac
+ * is a small state enum: 1 = base/idle (nothing selected), 2 = an entity IS selected; +0xBB8 is the redraw/dirty
+ * flag. The engine's own setters are one-liners -- SetSelected (RVA 0x1255120) is `{mode+0x1ac = 2; mode+0xBB8 = 1;}`
+ * and SetIdle (RVA 0x1255100) is the same with 1 -- so we replicate the writes DIRECT rather than resolve two
+ * trivial functions. NB: these RVAs are documentation for the re-derive only, never resolved at runtime -- and note
+ * this file's older AddToSelection/ClearSelection RVAs (0x59f210/0x59fa00) were PROVEN STALE by the same campaign
+ * (the real offsets on this build are 0x11fad50/0x11fb540), which is exactly why they resolve by signature.
+ * WHY: the native base-mode click handler (RVA 0x1264ba0) calls AddToSelection *and* SetSelected on a hit, and does
+ * NOTHING at all on an empty-space miss. So an empty click only deselects because the editor is in state 2; a
+ * selection pushed via add_to_selection alone leaves +0x1ac == 1, the editor believes nothing is selected, and the
+ * miss path correctly does nothing -- the long-standing "list selection won't native-deselect" bug. Same root cause
+ * as Delete-not-deleting-all and Move soft-locking on a list-driven selection. DIRECT (doom-re campaign
+ * native-click-deselect, 2026-07-27); empirically corroborated: a native click on top of a list-driven selection
+ * sets +0x1ac = 2 and every one of those symptoms clears.
+ * RE-DERIVE per build: decompile the editor's OnDeactivate (it self-identifies via
+ * "idSnapEditorLocal::OnDeactivate - User is quitting SnapEditor.") -- it types the editor as longlong* and calls
+ * SetIdle(editor + 0x4466) => 0x4466*8 = 0x22330. Cross-check the index math in that same function against the
+ * offsets we already trust: editor[0x409a] == ED_SEL_OBJ_OFF and editor[0x4211] == ED_SCREEN_OFF. */
+#define ED_MODE_OBJ_OFF        0x22330      /* editor+0x22330 -> inline EntityMode object (= GetMode(editor, 2)) */
+#define MODE_SEL_STATE_OFF     0x1ac        /* mode+0x1ac -> 1 = idle/nothing selected, 2 = an entity is selected */
+#define MODE_DIRTY_OFF         0xBB8        /* mode+0xBB8 -> redraw/dirty flag (set alongside every state write) */
+#define MODE_STATE_IDLE        1
+#define MODE_STATE_SELECTED    2
+
 #define SEL_IDS_OFF            0x80         /* selObj+0x80 -> int* selected ids */
 #define SEL_COUNT_OFF          0x88         /* selObj+0x88 -> int selected count */
 #define SEL_HOVERED_OFF        0x2c         /* selObj+0x2c -> looked-at/hovered entity id */
@@ -360,22 +386,47 @@ static int slot_get_selection(sh_iface *self, int *out_ids, int max)
     return written;
 }
 
-/* +0x148 CLEAR selection (psel). */
+/* Sync the EntityMode selection state to match what we just did to the selection ARRAY -- the native-click-deselect
+ * fix (see ED_MODE_OBJ_OFF). The engine's empty-space-click handler does nothing unless the mode is in the
+ * "something is selected" state, so a selection we push has to announce itself the same way a native click does.
+ * Gated on ED_ENTITY_MODE_OFF == 2 (tabbed inside a module) because that is precisely the state for which
+ * editor+0x22330 is the live mode object; anywhere else the write would land on an inactive sub-object.
+ * SEH-guarded like every other editor deref here: a shifted offset degrades to a clean no-op. */
+static void mode_set_selection_state(int state)
+{
+    const uint8_t *ed = editor_session();
+    if (!ed) return;
+    int editor_state = 0;
+    if (!ie_read_s32(ed + ED_ENTITY_MODE_OFF, &editor_state)) return;
+    if (editor_state != 2) return;              /* not EntityMode -> +0x22330 isn't the active mode object */
+    __try {
+        *(int *)((uintptr_t)ed + ED_MODE_OBJ_OFF + MODE_SEL_STATE_OFF) = state;
+        *(uint8_t *)((uintptr_t)ed + ED_MODE_OBJ_OFF + MODE_DIRTY_OFF) = 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+/* +0x148 CLEAR selection (psel). Also drops the mode back to idle so the editor doesn't keep believing something is
+ * selected after a programmatic clear (empty array + idle is the consistent pairing -- it is what makes the
+ * Deselect button leave the editor immediately usable natively). */
 static void slot_clear_selection(sh_iface *self)
 {
     (void)self;
     void *sel = selection_object();
     if (!sel || !g_clear_sel) return;
     __try { g_clear_sel(sel); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    mode_set_selection_state(MODE_STATE_IDLE);
 }
 
-/* +0x138 ADD to selection (popsel). */
+/* +0x138 ADD to selection (popsel). Also puts the mode into the "selected" state, exactly as the native click
+ * handler does after a successful hit -- without this the pushed selection is invisible to the editor's own
+ * empty-space-click / Delete / Move logic. */
 static void slot_add_to_selection(sh_iface *self, int id)
 {
     (void)self;
     void *sel = selection_object();
     if (!sel || !g_add_sel) return;
     __try { g_add_sel(sel, id); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    mode_set_selection_state(MODE_STATE_SELECTED);
 }
 
 /* +0x198 hovered id (phov): selObj+0x2c. <0 / fault -> -1. */
@@ -770,7 +821,9 @@ static void slot_rebuild_declsource(sh_iface *self, int id, const char *cstr)
 }
 
 /* +0x130 REMOVE id from selection (Entities ctx-menu Delete): gated on editor+0x204d0 != 0 && id != -1.
- * OG FUN_1800073c0 -> engine 0x59fda0 (RemoveFromSelection). */
+ * OG FUN_1800073c0 -> engine 0x59fda0 (RemoveFromSelection).
+ * Drops the mode back to idle once the removal empties the selection -- the mirror of the add/clear sync, so the
+ * editor is never left believing something is selected over an empty array (see ED_MODE_OBJ_OFF). */
 static void slot_remove_from_selection(sh_iface *self, int id)
 {
     (void)self;
@@ -780,6 +833,9 @@ static void slot_remove_from_selection(sh_iface *self, int id)
     void *sel = NULL;
     if (!ie_read_ptr(ed + ED_SEL_OBJ_OFF_C3, &sel) || sel == NULL) return;
     __try { g_remove_sel(sel, id); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    int remaining = 0;
+    if (ie_read_s32((const uint8_t *)sel + SEL_COUNT_OFF, &remaining) && remaining <= 0)
+        mode_set_selection_state(MODE_STATE_IDLE);
 }
 
 /* +0x110 ENUMERATE the decls of a resource class (the Timeline-Editor constrained decl-comboboxes). The
