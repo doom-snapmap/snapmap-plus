@@ -696,5 +696,21 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 9C 24 00 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 C0 00 00 00 "
       "49 8B F9 49 8B E8 4C 8B F2 45 33 FF",
       0x17505E0u },
+    { "IdStrAssignFromStr", /* idStr::operator=(const idStr&) (0x33a380) -- the REAL idStr assignment:
+                             * grows the destination when needed (engine allocator, frees the old heap
+                             * buffer), memcpys, NUL-terminates and writes the new length. This is the
+                             * one the engine's own SWF text-edit backspace/delete path uses to write
+                             * a spliced string back into a live text field, and swf_textedit.c's paste
+                             * uses it the same way.
+                             * NOTE: distinct from this DB's "IdStrAssign" (0x32b3d0), which despite the
+                             * name is an INTERN-AND-STORE-POINTER for decl name fields, not an idStr
+                             * assign -- do not substitute one for the other.
+                             * ABI: void(idStr *dst, const idStr *src). Reads only src's +0x08 len and
+                             * +0x10 data (its +0x18 flags only select a steal/swap fast path, which a
+                             * zeroed flags word declines), so a caller may hand it a stack-built src.
+                             * 27 bytes, 1 wildcard = the build-volatile jz disp8. */
+      "48 89 74 24 18 57 48 83 EC 40 48 8B F2 48 8B F9 8B 49 18 8B D1 C1 EA 1F 80 E2 01 74 ?? "
+      "44 8B 46 18 41 8B C0",
+      0x33A380u },
     { NULL, NULL, 0 }   /* terminator */
 };
