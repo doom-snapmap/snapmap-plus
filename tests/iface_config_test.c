@@ -6,7 +6,11 @@
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_set_json) == 0x2B8);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x2C0);
+/* ext 11, appended 2026-07-27: the "editor is mid-manipulation" query that gates every selection
+ * mutation (see the typedef in snapmap_plus_iface.h). Appended at the tail, so every pre-existing
+ * offset above is unchanged -- only the total size grows. */
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, manipulation_in_progress) == 0x2C0);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x2C8);
 SH_STATIC_ASSERT(offsetof(sh_iface, sub) == 0x58);
 SH_STATIC_ASSERT(sizeof(sh_iface) == 0x60);
 

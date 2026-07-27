@@ -80,6 +80,7 @@ static std::vector<int> g_delete_eids;
 static volatile bool g_pending_select = false;   /* list -> editor selection push ("Select in editor") */
 static std::vector<int> g_select_eids;
 static volatile bool g_pending_deselect = false;  /* explicit "Deselect" button -- clear_selection convenience */
+static volatile bool g_select_refused   = false;  /* last selection push was refused (editor mid-grab/hold) */
 static char g_enumbuf[262144];                   /* packed-string scratch for enum_inherits / enum_valid_classes */
 
 static volatile bool g_cam_lock = false;         /* Camera Origin "Lock Position" */
@@ -559,6 +560,17 @@ static void poc_emit_entity_inherit(int eid, int json_len)
 static void poc_apply_select_in_editor()
 {
     poc_logf("select-in-editor: apply start ids=%lu", (unsigned long)g_select_eids.size());
+    /* Refused while the editor is grabbing/holding: the engine's Escape/cancel path restores a snapshot
+     * indexed positionally against the live selection array, so changing that array mid-manipulation
+     * makes Escape swap entity pointers into the wrong slots -- duplicated entities, entities deleted
+     * outright, freezes. Pre-existing engine behaviour (reproduced on v0.2.1-beta.2). The backend
+     * enforces this too; checking here as well lets us tell the user why nothing happened. */
+    if (g_iface && g_iface->vtbl && g_iface->vtbl->manipulation_in_progress
+        && g_iface->vtbl->manipulation_in_progress(g_iface)) {
+        poc_log("select-in-editor: REFUSED -- editor is mid-manipulation (grab/hold)");
+        g_select_refused = true;
+        return;
+    }
     __try {
         if (g_iface && g_iface->vtbl) {
             if (g_iface->vtbl->clear_selection) { poc_log("select-in-editor: clear"); g_iface->vtbl->clear_selection(g_iface); }
@@ -1970,7 +1982,7 @@ static void poc_think_loop()
     unsigned frame = 0;
     for (;;) {
         frame++;
-        bool did_save = false, did_delete = false, did_create_prefab = false;
+        bool did_save = false, did_delete = false, did_create_prefab = false, did_select_refused = false;
         bool did_delete_prefab = false, did_rename_prefab = false, did_load_prefab = false;
         bool did_create_folder = false, did_rename_folder = false, did_delete_folder = false, did_move_prefab = false;
         bool did_open_timeline = false, did_resolve_entity = false, did_save_timeline = false;
@@ -1990,6 +2002,7 @@ static void poc_think_loop()
             g_last_editor_sel = -1; g_last_sel_sig = 0;
             g_pending_deselect = false;
         }
+        if (g_select_refused) { g_select_refused = false; did_select_refused = true; }
         if (g_pending_create_prefab) {
             poc_apply_create_prefab();
             g_pending_create_prefab = false;
@@ -2016,6 +2029,7 @@ static void poc_think_loop()
             if (g_save_eid >= 0) poc_send_state(g_save_eid, false);
         }
         if (did_delete) poc_send_list();
+        if (did_select_refused) poc_post_json(L"{\"kind\":\"selectRefused\"}");
         if (did_create_prefab) {
             std::wstring m = L"{\"kind\":\"createPrefabResult\",\"result\":"; m += std::to_wstring(g_create_result);
             m += L",\"name\":\""; m += poc_json_w(g_create_prefab_name.c_str()); m += L"\"}";

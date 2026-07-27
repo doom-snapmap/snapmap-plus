@@ -2785,6 +2785,15 @@
           renderTlBody();
         }
       }
+    } else if (d.kind === 'selectRefused') {
+      // The 3D editor is mid-grab (an entity picked up, or a staged prefab being held). Changing the
+      // editor selection now would corrupt the map on the next Escape -- the engine's cancel path
+      // restores a snapshot keyed positionally to the selection that was live when the grab started.
+      // Refused by the backend; roll the list highlight back so the UI doesn't claim a selection the
+      // editor never took.
+      selectedEids = {}; anchorEid = -1;
+      updateSelDom(); refreshEditorForSelection(false);
+      toast('Place or cancel what you are holding in the 3D view first, then select', 'warn');
     } else if (d.kind === 'selCount') {
       var prevEditorSel = editorSelCount;
       editorSelCount = d.count; updateCreateBtn();

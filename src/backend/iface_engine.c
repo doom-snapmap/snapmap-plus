@@ -92,6 +92,20 @@
 #define SEL_HOVERED_OFF        0x2c         /* selObj+0x2c -> looked-at/hovered entity id */
 #define ARR_ENT_ARRAY_OFF      0x6a0        /* arrObj+0x6a0 -> entity-ptr array (8-byte entries) */
 #define ARR_ENT_COUNT_OFF      0x6a8        /* arrObj+0x6a8 -> entity count (u32) */
+/* per-entity layer index + the editor's scratch/working layer -- the "is a manipulation in progress?"
+ * test. When the user grabs (or holds a staged prefab), the engine's snapshot-capture moves every
+ * selected entity onto the scratch layer and stashes its REAL layer in a snapshot record, restoring it
+ * on cancel. So "a selected entity currently sits on the scratch layer" == "a manipulation snapshot is
+ * outstanding". DIRECT: capture is engine RVA 0x11b08d0, which reads `*(int*)(mapObj+0x6f0 + id*4)` per
+ * entity and compares it against `*(int*)(mapObj+0x758)`, calling the layer setter when they differ.
+ * WHY WE CARE: that snapshot is indexed POSITIONALLY against the live selection array and is never
+ * re-validated, so mutating the selection while it is outstanding makes the cancel path (Escape) write
+ * each saved record onto the wrong entity -- swapping entity pointers in the live map. Observed live:
+ * duplicated entities, entities vanishing from the map entirely, "(no module)", and hard freezes.
+ * PRE-EXISTING engine behaviour, reproduced on the v0.2.1-beta.2 release which has none of this file's
+ * selection-state work. Tracked in the doom-re campaign `cancel-selection-escape-path`. */
+#define MAP_ENT_LAYER_ARR_OFF  0x6f0        /* mapObj+0x6f0 -> int* per-entity layer/module index */
+#define MAP_SCRATCH_LAYER_OFF  0x758        /* mapObj+0x758 -> int, the scratch/working layer id */
 /* the loaded-map MODULE table -- for the OG Entities-list id-string "<modidx>_<modname>/<inherit>_<id>" (port of
  * FUN_180003ba0 + FUN_180003c80). All build-specific (same loaded-map object the entity array lives in; re-derive
  * per build alongside ARR_ENT_*). */
@@ -392,6 +406,53 @@ static int slot_get_selection(sh_iface *self, int *out_ids, int max)
  * Gated on ED_ENTITY_MODE_OFF == 2 (tabbed inside a module) because that is precisely the state for which
  * editor+0x22330 is the live mode object; anywhere else the write would land on an inactive sub-object.
  * SEH-guarded like every other editor deref here: a shifted offset degrades to a clean no-op. */
+/* Is a manipulation snapshot outstanding? (see MAP_ENT_LAYER_ARR_OFF for the full rationale)
+ *
+ * True while the user is grabbing/moving entities or holding a staged prefab. Callers must NOT mutate
+ * the editor selection while this is true: the engine's cancel path restores a positionally-indexed
+ * snapshot against the live selection array, so changing that array corrupts the map on Escape.
+ *
+ * Implemented as "does any currently-selected entity sit on the scratch layer", which is exactly what
+ * the engine's snapshot-capture arranges. Fails CLOSED on any read error -- an unreadable editor is
+ * treated as "in progress" so we refuse rather than risk the corrupting path. */
+static int manipulation_in_progress(void)
+{
+    const uint8_t *ed = editor_session();
+    if (!ed) return 1;                       /* can't tell -> refuse */
+    void *mapObj = NULL, *sel = NULL;
+    if (!ie_read_ptr(ed + ED_MAP_OBJ_OFF, &mapObj) || !mapObj) return 1;
+    if (!ie_read_ptr(ed + ED_SEL_OBJ_OFF, &sel) || !sel) return 0;   /* no selection -> nothing at risk */
+
+    int count = 0;
+    if (!ie_read_s32((const uint8_t *)sel + SEL_COUNT_OFF, &count)) return 1;
+    if (count <= 0) return 0;                /* empty selection -> no snapshot can be keyed to it */
+    if (count > SEL_MAX_IDS) return 1;       /* implausible -> refuse */
+
+    void *ids = NULL, *layers = NULL;
+    if (!ie_read_ptr((const uint8_t *)sel + SEL_IDS_OFF, &ids) || !ids) return 1;
+    if (!ie_read_ptr((const uint8_t *)mapObj + MAP_ENT_LAYER_ARR_OFF, &layers) || !layers) return 1;
+    int scratch = 0;
+    if (!ie_read_s32((const uint8_t *)mapObj + MAP_SCRATCH_LAYER_OFF, &scratch)) return 1;
+
+    for (int i = 0; i < count; i++) {
+        uint32_t id = 0;
+        if (!ie_read_u32((const uint8_t *)ids + (size_t)i * 4, &id)) return 1;
+        int layer = 0;
+        if (!ie_read_s32((const uint8_t *)layers + (size_t)id * 4, &layer)) return 1;
+        if (layer == scratch) return 1;      /* mid-manipulation */
+    }
+    return 0;
+}
+
+/* +0x2C0 (ext 11) query: 1 while the editor is grabbing/holding, so the UI can refuse and explain
+ * rather than silently no-op. Exposed because the refusal is a user-visible restriction, not an
+ * internal detail. */
+static int slot_manipulation_in_progress(sh_iface *self)
+{
+    (void)self;
+    return manipulation_in_progress() ? 1 : 0;
+}
+
 static void mode_set_selection_state(int state)
 {
     const uint8_t *ed = editor_session();
@@ -425,6 +486,11 @@ static void mode_set_selection_state(int state)
 static void slot_clear_selection(sh_iface *self)
 {
     (void)self;
+    /* HARD SAFETY GATE -- see MAP_ENT_LAYER_ARR_OFF. Mutating the selection while the editor holds a
+     * manipulation snapshot corrupts the live map on the next Escape (entity pointers swapped into the
+     * wrong slots: duplicated entities, entities deleted outright, freezes). Pre-existing engine
+     * behaviour; refusing is the only safe option until the cancel path itself is fixed. */
+    if (manipulation_in_progress()) return;
     void *sel = selection_object();
     if (!sel || !g_clear_sel) return;
     __try { g_clear_sel(sel); } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -437,6 +503,7 @@ static void slot_clear_selection(sh_iface *self)
 static void slot_add_to_selection(sh_iface *self, int id)
 {
     (void)self;
+    if (manipulation_in_progress()) return;   /* see slot_clear_selection */
     void *sel = selection_object();
     if (!sel || !g_add_sel) return;
     __try { g_add_sel(sel, id); } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -842,6 +909,7 @@ static void slot_remove_from_selection(sh_iface *self, int id)
 {
     (void)self;
     if (!g_remove_sel || id == -1) return;
+    if (manipulation_in_progress()) return;   /* see slot_clear_selection */
     const uint8_t *ed = editor_session();
     if (!ed) return;
     void *sel = NULL;
@@ -1173,6 +1241,9 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     slots.push_to_stack          = slot_push_to_stack;        /* +0x2A0 ext 7 */
     /* clone-extension: empty the backend-owned SnapStack stack (out-of-process frontends only). */
     slots.clear_stack            = slot_clear_stack;          /* +0x2A8 ext 8 */
+    /* clone-extension: "the editor is mid-manipulation" -- every selection mutation is refused while
+     * true, because the engine's Escape/cancel path would then corrupt the live map. */
+    slots.manipulation_in_progress = slot_manipulation_in_progress;  /* +0x2C0 ext 11 */
     sh_iface_bind_engine_slots(&slots);
 
     char line[200];

@@ -222,6 +222,15 @@ typedef void          (*sh_push_to_stack_fn)(struct sh_iface *self, int index, c
  * backend (the webview host) drive "Clear stack 0" from a context-menu click instead of needing the DOOM
  * console. */
 typedef int           (*sh_clear_stack_fn)(struct sh_iface *self, int index);                      /* +0x2A8 (ext 8) */
+/* +0x2C0 (ext 11) 1 while the editor is mid-manipulation -- the user is grabbing/moving entities, or
+ * holding a staged prefab awaiting placement. While this is 1 the backend REFUSES every selection
+ * mutation (add / clear / remove), because the engine's cancel path (Escape) restores a snapshot that
+ * is indexed positionally against the live selection array and is never re-validated: changing that
+ * array mid-manipulation makes Escape swap entity pointers into the wrong slots, which duplicates
+ * entities, deletes others outright, and can freeze the game. Pre-existing engine behaviour --
+ * reproduced on v0.2.1-beta.2, which has none of the selection-state work. Frontends should call this
+ * before pushing a selection so they can explain the refusal instead of appearing to do nothing. */
+typedef int           (*sh_manipulation_in_progress_fn)(struct sh_iface *self);                     /* +0x2C0 (ext 11) */
 
 /* +0x2B0/+0x2B8 (ext 9/10) backend-owned persistent configuration. Values cross the matched-pair
  * boundary as complete UTF-8 JSON fragments so future booleans/numbers/objects do not need new ABI
@@ -423,11 +432,14 @@ typedef struct sh_iface_vtbl {
                                                       * stack `index` -- see the typedef comment */
     sh_config_get_json_fn      config_get_json;      /* +0x2B0 (ext 9) registered setting -> JSON */
     sh_config_set_json_fn      config_set_json;      /* +0x2B8 (ext 10) validate + persist JSON */
+    sh_manipulation_in_progress_fn manipulation_in_progress; /* +0x2C0 (ext 11) editor is grabbing/holding
+                                                      * -> every selection mutation is refused; see typedef */
 } sh_iface_vtbl;
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_set_json) == 0x2B8);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x2C0);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, manipulation_in_progress) == 0x2C0);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x2C8);
 
 /* ------------------------------------------------------------------ the interface object -----------
  * Object layout PINNED to FUN_1800229b1: +0x00 vtable, +0x08 mutex, +0x58 sub-object. The mutex is an
@@ -572,6 +584,8 @@ typedef struct sh_iface_engine_slots {
     sh_push_to_stack_fn          push_to_stack;         /* +0x2A0 (ext 7) */
     /* clone-extension: empty the backend-owned SnapStack stack (out-of-process frontends only). */
     sh_clear_stack_fn            clear_stack;           /* +0x2A8 (ext 8) */
+    /* clone-extension: "the editor is mid-manipulation" -- selection mutations are refused while true. */
+    sh_manipulation_in_progress_fn manipulation_in_progress; /* +0x2C0 (ext 11) */
 } sh_iface_engine_slots;
 
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *slots);

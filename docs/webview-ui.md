@@ -114,6 +114,35 @@ through it).
 Newest first. Each dated entry covers one working session's worth of change; the undated **Baseline**
 entry at the bottom is the original POC buildout, before this doc tracked dates per entry.
 
+### 2026-07-27 -- Selection changes refused while the editor is holding something
+
+- **Selecting from the Entities list is now refused while you are grabbing an entity or holding a
+  staged prefab**, with a toast: *"Place or cancel what you are holding in the 3D view first, then
+  select"*. The list highlight rolls back so the UI never claims a selection the editor didn't take.
+- **Why.** The engine captures a snapshot of the selection when a manipulation starts, and its
+  cancel path (Escape) restores that snapshot **indexed positionally against the live selection
+  array**, with no re-validation. Change the selection in between and Escape writes each saved record
+  onto the wrong entity -- swapping entity pointers inside the live map. Observed live: duplicated
+  entities, entities vanishing from the map entirely, "(no module)", and hard freezes. The capture
+  also stashes each entity's real layer/module index, which is why the module association is what
+  visibly breaks.
+- **This is a pre-existing engine bug, not a regression.** It reproduces on the v0.2.1-beta.2
+  release, which has none of the selection-state work. Only *cancellation* triggers it -- accept
+  paths (mouse click, controller accept, space) are unaffected.
+- **Detection** is the capture's own side effect: it moves the manipulated entities onto the editor's
+  scratch layer, so "any selected entity is on the scratch layer" is a precise test for "a snapshot is
+  outstanding". Enforced in the backend across `add_to_selection`, `clear_selection` and
+  `remove_from_selection`, and fails closed -- an unreadable editor is treated as in-progress.
+  Exposed to frontends as vtable ext 11 (`manipulation_in_progress`, +0x2C0) so the UI can explain the
+  refusal rather than silently doing nothing.
+- Deliberately NOT keyed off the "currently held" indicator: placing a **new** entity from the palette
+  sets that indicator but captures no snapshot, and is provably safe (Escape behaves correctly there).
+  Keying off it would have blocked a state that never needed blocking.
+- Unaffected: native click select/deselect, Create-from-selection's own "hover one of the selected
+  entities" requirement, and selecting *before* grabbing (the list-assembled group grab).
+- Known cosmetic issue, not addressed: while an entity is grabbed, the other selected entities render
+  in the move/grab colour rather than the normal selection colour.
+
 ### 2026-07-27 -- Native 3D-viewport deselect fixed at the root
 
 - **A selection pushed from the Entities list now behaves exactly like a native one.** Empty-space click

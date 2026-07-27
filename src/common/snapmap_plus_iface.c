@@ -295,6 +295,7 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     g_iface_vtbl_live.push_to_stack          = s->push_to_stack;          /* +0x2A0 */
     /* clone-extension (empty the backend-owned SnapStack stack; out-of-process frontends only). */
     g_iface_vtbl_live.clear_stack            = s->clear_stack;            /* +0x2A8 */
+    g_iface_vtbl_live.manipulation_in_progress = s->manipulation_in_progress; /* +0x2C0 */
 }
 
 /* --------------------------------------------------------------------- the factory -----------------
