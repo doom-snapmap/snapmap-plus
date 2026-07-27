@@ -34,6 +34,7 @@
 #include "algo.h"
 #include "target_any.h"   /* sh_target_any editor-decl visibility toggle (OG FUN_180021EE0 port) */
 #include "wiring_cleandirect.h" /* sh_target_any wire-any: force the stock clean-direct connect branch (bind to any target ENTITY, no input radial) */
+#include "swf_textedit.h"       /* SWF text-field clipboard: Ctrl+C out of the editor's free-text property fields */
 #include "ui_bridge.h"
 #include "config.h"
 #include "user_overrides.h"
@@ -350,6 +351,13 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * the target ENTITY, no picker, no node mediation. Transient-flag technique; forces no slots, frees no
          * node (so none of the placeholder / stray-wire / "(no module)" artifacts). Off until reveal. */
         sh_wiring_cleandirect_install(g_doom_base);
+
+        /* SWF text-field clipboard (clone improvement -- vanilla has NO text copy/paste in the editor at
+         * all, and it is genuinely absent rather than disabled: the stock SWF text-edit key handler has no
+         * Ctrl branch, only a shift flag). Detours that handler so Ctrl+C copies the focused field's
+         * selection (whole field when nothing is selected). Read-only against the engine for now; paste
+         * lands once this half is confirmed live. */
+        sh_swf_textedit_install(g_doom_base);
     }
 
     /* FAULT-SHIELD (merged 2026-06-22): install the recover-in-place shield -- a first-in-chain VEH +

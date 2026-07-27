@@ -678,5 +678,23 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "89 B3 A8 02 00 00 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? "
       "48 85 C9 74 12 66 C7",
       0x5E4C28u },
+    { "SwfTextOnKeyCall",   /* idSWFScriptObject_TextInstancePrototype::idSWFScriptFunction_onKey::Call
+                             * (0x17505e0) -- THE keyboard entry point for a FOCUSED Scaleform text field,
+                             * i.e. every SnapMap free-text property (datapad/transmission bodies, anything
+                             * using the `textinspector`). swf_textedit.c detours it to add the clipboard
+                             * copy/paste vanilla never had: the stock body has no Ctrl branch at all, only
+                             * a shift flag, so there is nothing to unlock.
+                             * ABI: void*(self, sretRetVal, thisObject, parms) -- `thisObject` is the
+                             * "TextField" script object (its +0xC0 = the idSWFTextInstance), `parms` points
+                             * at an idSWFScriptValue[2] = (scancode, isDown).
+                             * Located by RTTI-walking the onKey/onChar script-function classes and diffing
+                             * their 11-slot vtables (slot 10 is the differing `Call` override; onChar's is
+                             * 0x1750500). 63-byte prologue, 4 wildcards = the security-cookie rip-disp.
+                             * Re-derive per DOOM build: decompile it -- the idSWFTextInstance offsets
+                             * swf_textedit.c uses are exactly the constants this function dereferences. */
+      "40 55 56 57 41 56 41 57 48 81 EC D0 00 00 00 48 C7 44 24 28 FE FF FF FF "
+      "48 89 9C 24 00 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 C0 00 00 00 "
+      "49 8B F9 49 8B E8 4C 8B F2 45 33 FF",
+      0x17505E0u },
     { NULL, NULL, 0 }   /* terminator */
 };
