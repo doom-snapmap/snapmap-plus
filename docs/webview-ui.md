@@ -141,6 +141,19 @@ entry at the bottom is the original POC buildout, before this doc tracked dates 
   greater-than-zero-to-zero transition, and to the case where the list actually has a highlight.
 - The **Deselect** button is kept -- it saves a trip back to the 3D view and stays useful if the mode
   state is ever out of sync -- but its tooltip no longer describes the (now fixed) stuck behavior.
+- **The mode-state write is guarded to idle/selected only.** That field is not a two-value flag: the
+  engine drives it to other values while a manipulation is in flight (grabbing an entity, holding a
+  staged prefab) and for sub-screens and the logic sub-mode, and it has its own "is the mode busy"
+  predicate. An unconditional write tore the editor out of the gesture mid-manipulation so its
+  completion bookkeeping never ran -- caught in testing as the held object being dropped and
+  permanently losing its module association. `mode_set_selection_state()` now reads the current value
+  and only ever moves between idle and selected. Consequence, accepted deliberately: in a mode outside
+  that pair with nothing selected, the sync sits out and that mode keeps the old (pre-fix) behavior --
+  strictly better than risking editor state.
+- Side effect of the guard, and a nice one: because a manipulation is no longer interrupted, you can
+  hold a grabbed entity or a staged prefab, push a selection from the Entities list, place the held
+  object, and still have your selection. Minor known inconsistency, not considered a problem: after
+  placing, a prefab leaves the pushed selection highlighted while a pre-existing-entity grab clears it.
 - Known remaining gap: if you have one entity selected from the list and then natively click a
   *different* one, the selection count is unchanged, so no broadcast fires and the list keeps
   highlighting the original. Fixing that means broadcasting selection identity, not just count, in

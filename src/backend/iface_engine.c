@@ -399,6 +399,20 @@ static void mode_set_selection_state(int state)
     int editor_state = 0;
     if (!ie_read_s32(ed + ED_ENTITY_MODE_OFF, &editor_state)) return;
     if (editor_state != 2) return;              /* not EntityMode -> +0x22330 isn't the active mode object */
+
+    /* NEVER stomp a state we don't recognise. mode+0x1ac is not a two-value flag: the engine drives it
+     * to other values while a manipulation is in flight (grabbing/moving an entity, holding a staged
+     * prefab awaiting placement) and while sub-screens are up, and it has its own "is the mode busy"
+     * predicate (engine RVA 0x1254e20, literally `return mode+0x1ac != 1`). Overwriting one of those
+     * mid-gesture tears the editor out of the manipulation so its completion bookkeeping never runs --
+     * observed live 2026-07-27 as the grabbed entity (or held prefab) being dropped and losing its
+     * module association, unrecoverable by a list refresh. So only ever move between idle and selected,
+     * and leave every other value strictly alone. */
+    int cur = 0;
+    if (!ie_read_s32(ed + ED_MODE_OBJ_OFF + MODE_SEL_STATE_OFF, &cur)) return;
+    if (cur != MODE_STATE_IDLE && cur != MODE_STATE_SELECTED) return;   /* busy -> hands off */
+    if (cur == state) return;                                           /* already there -> no write */
+
     __try {
         *(int *)((uintptr_t)ed + ED_MODE_OBJ_OFF + MODE_SEL_STATE_OFF) = state;
         *(uint8_t *)((uintptr_t)ed + ED_MODE_OBJ_OFF + MODE_DIRTY_OFF) = 1;
