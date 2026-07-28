@@ -339,8 +339,19 @@ static void *ae_get_reflect(void)
     }
 }
 
-/* read an idStr (48-byte layout: int len@+8; char* data@+0x10 [heap] or inline [SSO]). Copies up to cap-1
- * bytes into out + NUL. Returns the byte length written (0 on fault / empty). SEH-guarded. */
+/* read an idStr (48-byte layout: int len@+8; char* data@+0x10). Copies up to cap-1 bytes into out + NUL.
+ * Returns the byte length written (0 on fault / empty). SEH-guarded.
+ *
+ * NB: `data` at +0x10 is ALWAYS a real pointer -- for a short string it points at the object's own
+ * inline buffer at +0x1c. There is NO small-string-optimization branch to take. This function used to
+ * carry one (`len < 0x10 ? inline-at-+0x10 : heap-pointer`), which reads the pointer field's own bytes
+ * as text and garbles every string under 16 characters. DIRECT, settled from the engine's own
+ * idStr::Left (RVA 0x33e640) during the doom-re campaign `text-inspector-input-path`, where the same
+ * bug shipped briefly in swf_textedit.c and was caught live. `rawmap.c` always read it correctly.
+ *
+ * In THIS file the bug was latent rather than live: all three call sites read a rendered-JSON idStr,
+ * and a serialized entity/prefab is far longer than 16 bytes, so the short-string path was effectively
+ * unreachable. Fixed anyway -- the branch is simply wrong, and the next caller might not be so lucky. */
 static int ae_read_idstr(const void *p, char *out, int cap)
 {
     if (cap > 0) out[0] = '\0';
@@ -349,9 +360,7 @@ static int ae_read_idstr(const void *p, char *out, int cap)
     __try {
         int len = *(const int *)((const uint8_t *)p + IDSTR_LEN_OFF);
         if (len <= 0 || len > APPLY_TEXT_CAP) return 0;
-        const char *base;
-        if (len >= 0x10) base = *(const char * const *)((const uint8_t *)p + IDSTR_DATA_OFF);
-        else             base = (const char *)((const uint8_t *)p + IDSTR_DATA_OFF);
+        const char *base = *(const char * const *)((const uint8_t *)p + IDSTR_DATA_OFF);
         if (!base) return 0;
         int n = len < (cap - 1) ? len : (cap - 1);
         for (int i = 0; i < n; i++) out[i] = base[i];
