@@ -1630,6 +1630,11 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
     g_paste_instantiate = (paste_instantiate_fn)sig_addr_by_name(results, n, "PasteInstantiate");
     g_enter_prefab_grab = (enter_prefab_grab_fn)sig_addr_by_name(results, n, "EnterAddPrefabGrab");
 
+    /* Run the staging-slot Play watchdog once per frontend think-loop tick. Registered as a hook rather
+     * than called directly from the shared iface file, which is also built standalone by the C unit
+     * tests and must not reference the engine layer. */
+    sh_iface_set_tick_hook(sh_apply_prefab_poll_play);
+
     /* the prefab-from-selection serialize engine fns (+0xb0). These jumptable/inline-prone leaves
      * resolve by FALLBACK RVA off module_base (re-derive-tagged like the editor singleton); a wrong/shifted
      * offset just makes the serialize SEH-fail -> a clean 0-length result, never a crash. */

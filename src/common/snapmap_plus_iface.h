@@ -503,6 +503,12 @@ typedef struct sh_ui_argblock {
  * interface doesnt exist yet!". Returns NULL on allocation failure. */
 sh_iface *sh_iface_create(void);
 
+/* Register an optional per-tick callback run at the head of the DRAIN (+0x1a0), i.e. once per frontend
+ * think-loop tick. Deliberately a registered hook rather than a direct call so this shared-ABI file keeps
+ * no link dependency on the backend's engine layer -- it is also compiled standalone into the C unit
+ * tests, which link none of it. Pass NULL to clear. */
+void sh_iface_set_tick_hook(void (*fn)(void));
+
 /* ------------------------------------------------------------------ cmd-map lookup -------------
  * Look the subcommand `name` up in the interface's runtime cmd-map (the obj+0x58 RB-tree the OG's
  * register path populates; our backing store is the sub_impl's linear map). On a hit, fills *handler +
