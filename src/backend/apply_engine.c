@@ -1595,18 +1595,25 @@ void sh_apply_prefab_poll_play(void)
      * did not exist, so it is removed rather than left in as a harmless-looking write. */
 }
 
-/* Resolve an engine leaf by SIGNATURE, with a historical raw RVA as fallback, and REFUSE a signature
- * that disagrees with that RVA on this build.
+/* Resolve an engine leaf by SIGNATURE, with a historical raw RVA kept only as a fallback and as a
+ * drift tripwire.
  *
- * Why the cross-check rather than just trusting the scan: these leaves are called on live editor state
- * (the prefab ctor runs on every stage and on the Play watchdog's slot re-init), so a signature that
- * resolved to a wrong-but-valid address would corrupt silently and on a timer. Preferring the RVA on a
- * mismatch makes the worst case exactly the pre-existing behaviour, never something new.
+ * POLICY (revised 2026-07-28): on a disagreement the SIGNATURE WINS. The stale RVA is never preferred
+ * over a live scan hit.
  *
- * The point of the migration is build portability: a raw base+RVA is locked to one DOOM build and fails
- * SILENTLY into arbitrary code if the game is patched, whereas a signature matches bytes wherever the
- * loader put them. Logs which path was taken so a future build's drift is visible at a glance instead of
- * being discovered as a crash. */
+ * The earlier policy refused the signature and used the RVA, reasoning that a bad scan hit could corrupt
+ * live editor state silently (these leaves run on every stage and on the Play watchdog's slot re-init).
+ * That trade is backwards on the only case it actually fires in. A mismatch means the recorded RVA no
+ * longer describes this build -- either the game was patched, or the RVA was wrong when it was written
+ * (all four of this DB's contaminated entries were exactly that: derived from a mis-imported binary).
+ * In both cases the RVA points into arbitrary code while the signature is correct, so preferring the RVA
+ * guarantees the very outcome the check was meant to prevent. The scan is also not a loose match:
+ * sig_resolve_one enforces UNIQUENESS across the whole executable range and reports AMBIGUOUS rather
+ * than guessing, so a lone hit is a strong result.
+ *
+ * The RVA still earns its place two ways: it makes drift VISIBLE (the MISMATCH line names the leaf), and
+ * it is still used when the scan misses ENTIRELY -- the one case where there is nothing better, and where
+ * the caller's own guards have to carry the risk. */
 static void *ae_pick_engine_fn(const sig_result *results, size_t n, const char *sig_name,
                                const uint8_t *base, uint32_t fallback_rva, const char *label)
 {
@@ -1621,10 +1628,10 @@ static void *ae_pick_engine_fn(const sig_result *results, size_t n, const char *
     }
     if (s && r) {
         _snprintf_s(l, sizeof l, _TRUNCATE,
-                    "C2 sig: %s sig=%p rva=%p MISMATCH -> signature REFUSED, using rva", label,
-                    (void *)s, (void *)r);
+                    "C2 sig: %s sig=%p rva=%p MISMATCH -> TRUSTING SIGNATURE (recorded rva is stale "
+                    "for this build; re-derive it)", label, (void *)s, (void *)r);
         backend_log(l);
-        return (void *)r;
+        return (void *)s;
     }
     if (s) {
         _snprintf_s(l, sizeof l, _TRUNCATE, "C2 sig: %s sig=%p (no rva to cross-check)", label, (void *)s);
