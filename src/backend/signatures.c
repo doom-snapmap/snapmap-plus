@@ -712,5 +712,64 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 74 24 18 57 48 83 EC 40 48 8B F2 48 8B F9 8B 49 18 8B D1 C1 EA 1F 80 E2 01 74 ?? "
       "44 8B 46 18 41 8B C0",
       0x33A380u },
+    { "PasteInstantiate",   /* idSnapEntityPrefab instantiate -- void(prefab [rcx], editor [rdx]).
+                             * Takes the STAGED prefab at editor+0x209a8 and builds its entities into the
+                             * live map: snapshots the map's nine id-allocation counters, computes a
+                             * camera-relative placement transform from editor+0x170 (camera origin) /
+                             * +0x180 (yaw) against the prefab's own saved yaw, then per entity
+                             * deserializes the blob (stride 0x1b0), registers it, sets its visibility bit
+                             * and calls AddToSelection; finally rebuilds connections + var-refs and sets
+                             * the hovered id to the first new entity.
+                             *
+                             * HARD PRECONDITION -- the selection MUST be empty on entry. The connection/
+                             * var-ref remap translates every stored old index i through
+                             * *(int*)(selObj+0x80 + i*4), i.e. it uses the SELECTION ARRAY as its
+                             * old->new id map, and AddToSelection APPENDS. With a live selection of k the
+                             * remap reads selection[i] instead of selection[k+i], so the pasted entities
+                             * get wired to the pre-existing selected ones and the tail reads run past the
+                             * count -- a map that still loads and is silently mis-wired. The engine never
+                             * hits this because its own paste branch lives in the IDLE sub-state.
+                             *
+                             * The engine's only call site is the idle sub-state dispatcher, on abstract
+                             * action 0x5C, gated on substate+0x41 & 0x40 (= snapEdit_enableCopyPaste != 0
+                             * AND editor+0x209e0 >= 1 AND not hovering an entity). Immediately followed
+                             * there by EnterAddPrefabGrab -- calling this ALONE leaves the placed prefab
+                             * in an inconsistent tool state (the 2026-07-06 "placed but undraggable, then
+                             * AV on the next Play transition" failure).
+                             *
+                             * 40-byte prologue, no wildcards (frame-size + xmm-save shape; no rip-relative
+                             * or rel32 in range). Unique on the pinned build.
+                             * RE-DERIVE per build: byte-search the EnterAddPrefabGrab body below (unique),
+                             * take its sole xref -- that is the paste branch -- and back up 8 bytes from
+                             * that call site (CALL rel32 = 5 + MOV RCX,RBP = 3); the instruction there is
+                             * CALL PasteInstantiate, preceded by LEA RCX,[reg+0x209A8] / MOV RDX,reg.
+                             * DIRECT (doom-re campaign synthetic-action-injection, 2026-07-27). */
+      "48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 A8 F7 FF FF "
+      "48 81 EC 20 09 00 00 48 C7 45 E0 FE FF FF FF 48 89 58 18",
+      0x11AF070u },
+    { "EnterAddPrefabGrab",  /* void(mode) -- the editor-state transition the engine runs IMMEDIATELY after
+                             * PasteInstantiate, on the EntityMode object (editor+0x22330). Puts the mode
+                             * into the "holding an unplaced prefab" manipulation state so the placement is
+                             * draggable and its completion bookkeeping runs on click:
+                             *   mode[0x2d0] &= 0xfb;          clear DUPLICATE flavour
+                             *   mode[0x2d0] |= 0x08;          set ADD-PREFAB flavour
+                             *   mode[0x2d1] |= 0x01;          memo: restore "selected" after placing
+                             *   *(u32*)(mode+0x1ac) = 4;      -> manipulation sub-state
+                             *   mode[0xBB8] = 1;              redraw
+                             * mode+0x2d0/+0x2d1 are the manipulation sub-state's own +0x40/+0x41 flag
+                             * bytes (that sub-object is inline at mode+0x290), which is what the
+                             * place-commit handler reads to pick its "Add Prefab" vs "Duplicate" vs "Edit"
+                             * behaviour -- so the flavour bits are load-bearing, not cosmetic.
+                             * Two siblings differ ONLY in the +0x2d0 mask: &0xf7|0x04 = Duplicate,
+                             * &0xf3 = Edit/Move. Do not confuse them.
+                             *
+                             * The signature is the ENTIRE function body (38 bytes incl. the RET), fully
+                             * absolute -- no wildcards, no relocations. Its first 7 bytes alone are
+                             * already unique in the image, so this is a very strong anchor and is the
+                             * recommended starting point for re-deriving the whole paste path per build.
+                             * DIRECT (doom-re campaign synthetic-action-injection, 2026-07-27). */
+      "80 A1 D0 02 00 00 FB 80 89 D0 02 00 00 08 80 89 D1 02 00 00 01 "
+      "C7 81 AC 01 00 00 04 00 00 00 C6 81 B8 0B 00 00 01 C3",
+      0x1254B80u },
     { NULL, NULL, 0 }   /* terminator */
 };

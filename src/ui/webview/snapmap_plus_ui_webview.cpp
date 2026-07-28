@@ -790,11 +790,35 @@ static void poc_apply_load_prefab()
     fclose(fp);
     if (body.empty()) { poc_log("load-prefab: ABORT (empty file)"); return; }
 
+    /* Clear first: PasteInstantiate uses the selection array as its old->new id map and AddToSelection
+     * APPENDS, so instantiating with a live selection silently mis-wires every pasted connection. The
+     * backend re-verifies this immediately before placing (the clear can legitimately be refused while a
+     * manipulation snapshot is outstanding) and falls back to stage-only rather than risk it. */
     poc_clear_selection_seh();
 
+    /* kind=2 = stage THEN place -- runs the engine's own paste pair (PasteInstantiate + the Add-Prefab
+     * grab transition), the exact sequence its Ctrl+V branch runs, so the user no longer has to press
+     * Ctrl+V in the 3D view. Deferred (not sync) on purpose: the place MUST happen on the DOOM main
+     * thread, which is where the clone_bss_apply drain runs it. If anything is unavailable -- sig
+     * unresolved, not in EntityMode, selection not empty -- it degrades to the old stage-only behaviour
+     * and the toast says so; there is no half-placed outcome. */
+    /* TEMPORARILY BACK TO kind=1 (stage-only). kind=2 (stage + auto pick-up) is implemented and its
+     * mechanism is proven -- action injection reaches the engine's own paste branch and the first-press
+     * grab works -- but it is DISABLED because the prefab we stage is not structurally equivalent to one
+     * the engine's own CreatePrefab builds. Established live 2026-07-27/28:
+     *   - a vanilla Ctrl+C clipboard survives Play, survives a fresh post-Play copy, and repeat-pastes
+     *     forever with zero faults (clean control run, Load/Place never pressed);
+     *   - with OUR prefab in the slot: Ctrl+V pastes nothing, Ctrl+C faults inside the engine's
+     *     lexer/string free (0x1ab32ee) while CreatePrefab tears the slot down, and repeated pastes end
+     *     in "Memory corruption before block!".
+     * One paste works and it degrades from there, which points at the object our deserialize builds --
+     * not at the call site, and not at a Play-lifetime issue (the map object survives the round-trip, so
+     * neither the session-null nor the map-pointer teardown detector ever fired).
+     * Re-enable by setting this back to 2 once the deserialized prefab matches CreatePrefab's output. */
     sh_apply_item it; it.kind = 1; it.id = 0; it.text = body.c_str();
     g_load_result = poc_apply_edit_seh(&it, 1, "load-prefab");
-    char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: name='%s' staged=%d", g_load_prefab_name.c_str(), g_load_result);
+    char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: name='%s' scheduled=%d (place result reported by the drain)",
+                             g_load_prefab_name.c_str(), g_load_result);
     poc_log(l);
 }
 /* Timelines Stage 5 (Save): kind=0 (deserialize the FULL patched entity JSON -> temp def -> commit

@@ -105,8 +105,16 @@ static void iface_unregister_cmd(sh_iface *self, const char *name)
  * C without the engine's fault surface; a handler fault here would already be the SnapStack op's concern
  * (op execution wraps it). There are no producers yet, so the queue is always empty -- this just
  * proves the drain is wired + callable from the frontend's think-loop. */
+/* Backend-side per-tick housekeeping. Declared extern rather than #included so this shared-ABI file
+ * keeps no compile dependency on the backend's engine layer; it is only ever linked into the backend.
+ * Currently: invalidate a prefab staging slot left dangling by a Play round-trip (a Ctrl+V on one
+ * instantiates freed memory -> heap corruption). The drain is the one thing the frontend calls on every
+ * think-loop tick, which is exactly the cadence this needs. */
+extern void sh_apply_prefab_poll_play(void);
+
 static void iface_drain_work_queue(sh_iface *self)
 {
+    sh_apply_prefab_poll_play();
     if (!self || !self->sub) return;
     sub_impl *si = (sub_impl *)self->sub;
     sh_iface_sub *sub = &si->pinned;

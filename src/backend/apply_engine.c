@@ -71,6 +71,72 @@
  * FUN_14054f950(editor+0x209a8, editor) after staging (0x54F950, the engine Ctrl+V; not yet wired). */
 #define PASTE_STAGING_OFF      0x209a8
 
+/* --- kind=2 (stage THEN place) support: the engine's own Ctrl+V follow-through ----------------------
+ * editor+0x209e0 is the staged prefab's ENTITY COUNT -- it is literally PASTE_STAGING_OFF + 0x38, the
+ * same field PasteInstantiate loops over (prefab[0xe]). The engine's paste-available gate tests exactly
+ * this (`>= 1`) alongside the snapEdit_enableCopyPaste cvar, so it doubles as our "did the stage actually
+ * produce anything" check -- a stage that deserialized to zero entities must NOT be instantiated.
+ * The mode object + editor-state id mirror iface_engine.c's ED_MODE_OBJ_OFF / ED_ENTITY_MODE_OFF (same
+ * live build, same re-derive recipe -- see that file's comment block for the OnDeactivate derivation).
+ * The selection count is read to VERIFY the clear actually took effect before instantiating, because a
+ * non-empty selection silently mis-wires the paste (see the PasteInstantiate signature comment).
+ * DIRECT (doom-re campaign synthetic-action-injection, 2026-07-27). */
+#define PASTE_PREFAB_ENTCOUNT_OFF 0x209e0   /* = editor+0x209a8+0x38 -> staged prefab entity count (s32) */
+#define ED_MODE_OBJ_OFF           0x22330   /* editor+0x22330 -> inline EntityMode object */
+#define ED_ENTITY_MODE_OFF        0x23618   /* editor+0x23618 -> active editor state id (2 == EntityMode) */
+#define ED_SEL_OBJ_OFF            0x204d0   /* editor+0x204d0 -> selection object ptr */
+#define SEL_COUNT_OFF             0x88      /* selObj+0x88 -> selected count (s32) */
+#define SEL_HOVERED_OFF           0x2c      /* selObj+0x2c -> hovered entity id (-1 == hovering nothing) */
+#define PREFAB_MAX_ENTITIES       100000    /* stale-slot sanity guard on the staged entity count */
+
+/* --- ACTION INJECTION (how we ask the engine to paste, instead of pasting ourselves) ----------------
+ * WHY NOT JUST CALL IT: we did, and it corrupts the map. Calling PasteInstantiate + the grab setter
+ * directly from the command-buffer drain creates the entities fine (cancelling out of it is clean), but
+ * COMMITTING the placement afterwards damages the heap -- an idStr destructor later frees a block whose
+ * header is already bad, surfacing as an AV + "Memory corruption before block!" on the next Play. Proven
+ * live 2026-07-27: same crash with 93 entities and with 1, while the SAME staged prefab pasted with a
+ * real Ctrl+V and placed is completely clean. So the prefab data and our staging are fine; the fault is
+ * the call SITE. The engine runs the paste inside the idle sub-state's per-frame handler during the mode
+ * Think, and the place-commit depends on per-frame bookkeeping that only holds on that path.
+ *
+ * So: don't call it. ASK. The mode's context-menu descriptor doubles as a queued-action slot -- the base
+ * dispatcher reads it and handles the result IDENTICALLY to a live key press:
+ *     actionId = (*(int *)(mode+0x420) == -1) ? -1 : *(int *)(mode+0x424);
+ * and the paste branch matches on `IsActionPressed(0x5C) || actionId == 0x5C`. We write the id, arm the
+ * slot, and the engine dispatches it from exactly the right place on its own next frame -- so the paste
+ * lands on the engine's own code path, on the engine's own thread, with all surrounding state correct.
+ * We only ever write two ints. The mode's Think RESETS the descriptor after the sub-object's per-frame
+ * handler has consumed it, so an injected action fires EXACTLY ONCE with no repeat-firing.
+ *
+ * Store order matters: the action id must be visible before the arming word, or the dispatcher can
+ * observe an armed slot with a stale id.
+ *
+ * The dispatcher additionally gates paste on `substate+0x41 & 0x40`, which the engine recomputes every
+ * frame as (snapEdit_enableCopyPaste != 0) AND (staged entity count >= 1) AND (hovered id == -1). We
+ * check what we can see so a request that the engine would silently ignore degrades to an honest
+ * stage-only toast instead of a lie. `substate` here is the IDLE sub-state, inline at mode+0x1B0.
+ * DIRECT (doom-re campaign synthetic-action-injection, 2026-07-27). */
+#define MODE_IDLE_SUBSTATE_OFF    0x1B0      /* mode+0x1B0 -> the idle sub-state object (active when +0x1ac==1) */
+#define SUBSTATE_FLAGS1_OFF       0x41       /* substate+0x41 -> capability byte; bit 0x40 = paste available */
+#define SUBSTATE_PASTE_AVAIL_BIT  0x40
+/* substate+0x42 bit 0 = "recompute the capability bytes". The action gates in +0x40/+0x41 are a CACHE,
+ * not live state: the dispatcher rebuilds them (engine 0x1264dd0 on-disk, which opens by zeroing
+ * +0x40/+0x41/+0x42) only on the frame this bit is set, and that rebuild path RETURNS without reading
+ * the queued action. Consequences we hit live 2026-07-27:
+ *   - staging a prefab changes the entity count but dirties nothing, so the cached "paste available" bit
+ *     stays clear and the FIRST Load/Place after staging was refused; any user action that dirtied the
+ *     cache (a manual Ctrl+V) made every later press work.
+ *   - after a Play round-trip the whole byte comes back stale, so Ctrl+C AND Ctrl+V are both dead until
+ *     something dirties it -- which a Load/Place did incidentally, via the engine ClearSelection.
+ * So: dirty it on the post-Play edge (where there is no queued action to lose), but for our own paste we
+ * set the one bit directly instead -- dirtying in the same tick would consume our armed action. */
+#define SUBSTATE_FLAGS2_OFF       0x42
+#define SUBSTATE_RECOMPUTE_BIT    0x01
+#define MODE_ACTION_ARM_OFF       0x420      /* mode+0x420 -> descriptor arming word (-1 == empty) */
+#define MODE_ACTION_ID_OFF        0x424      /* mode+0x424 -> the queued action id the dispatcher reads */
+#define EDITOR_ACTION_PASTE       0x5C       /* the abstract action id the paste branch matches on */
+#define MODE_ACTION_ARMED         0          /* any value != -1 arms it; 0 is the menu's own first slot */
+
 
 /* the prefab-from-selection serialize (+0xb0) engine fns. RE-DERIVE off the OG XINPUT1_3
  * FUN_180004210 (the serialize-SELECTION body): a temp prefab is ctor'd via `(DAT_18003e120 + 0x54d0a0)`
@@ -223,6 +289,8 @@ typedef void  (*add_command_fn)(void *cmdSys, const char *name, void *cb, void *
 typedef void  (*prefab_ctor_fn)(void *self);                                          /* PrefabCtor 0x54d0a0 */
 typedef char  (*prefab_populate_fn)(void *self, void *editor, int *outStatus);        /* PrefabPopulate 0x54e410 */
 typedef void  (*prefab_dtor_fn)(void *self);                                          /* PrefabDtor 0x51d870 */
+typedef void  (*paste_instantiate_fn)(void *prefab, void *editor);                    /* PasteInstantiate (SIG-resolved) */
+typedef void  (*enter_prefab_grab_fn)(void *mode);                                    /* EnterAddPrefabGrab (SIG-resolved) */
 
 /* ============================================================ module state (resolved once) ========== */
 static const uint8_t      *g_doom_base   = NULL;
@@ -248,6 +316,32 @@ static add_command_fn      g_add_command = NULL;
 static prefab_ctor_fn      g_prefab_ctor     = NULL;   /* +0xb0 serialize-selection */
 static prefab_populate_fn  g_prefab_populate = NULL;
 static prefab_dtor_fn      g_prefab_dtor     = NULL;
+/* kind=2 place-after-stage. BOTH are SIGNATURE-resolved (never a raw RVA): the engine's paste worker and
+ * the tool-state transition the engine always runs immediately after it. If either fails to resolve,
+ * kind=2 degrades to kind=1 (stage-only) and tells the user to press Ctrl+V -- never a partial place. */
+static paste_instantiate_fn g_paste_instantiate = NULL;
+static enter_prefab_grab_fn g_enter_prefab_grab = NULL;
+/* Engine load_state (module_base + LOAD_STATE_RVA): 0 boot / 2 LOADING / 3 RUNNING. THE Play detector.
+ * Two earlier attempts failed and are recorded so they are not retried:
+ *   - "editor session went null and came back" -- the session stays live across a Play round-trip;
+ *   - "the loaded-map object pointer changed" -- the map object survives the round-trip too.
+ * Neither ever fired (proven live 2026-07-27/28: no C2 stage line on any Play return), which is why the
+ * slot cleanup never ran. load_state DOES move for a play/boot load, and per the fault-shield's own note
+ * an in-editor in-place load never writes it -- so leaving 3 is specifically "we are going to Play". */
+#define LOAD_STATE_RVA        0x6dde198u
+#define LOAD_STATE_RUNNING    3
+static volatile LONG        g_last_load_state = -1;
+/* "WE were the last thing to stage the prefab slot, and this is the entity count we left in it."
+ * Set by ae_mkcmd_one. Used to tell OUR staged prefab apart from an engine-made Ctrl+C clipboard, which
+ * must never be disturbed -- see sh_apply_prefab_poll_play. The count is a cheap overwrite heuristic: if
+ * it no longer matches, something else (a Ctrl+C) rewrote the slot and it is not ours to touch. */
+static volatile LONG        g_we_staged      = 0;
+static volatile LONG        g_we_staged_count = 0;
+/* Outcome of the most recent kind=2 item (AE_PASTE_*), so the Load/Place toast can say "held, ready to
+ * position" vs "staged -- press Ctrl+V" instead of guessing. Written on the DOOM main thread during the drain, read
+ * by the UI afterwards; a torn read is impossible (aligned int) and a stale read is harmless (worst case
+ * the toast wording lags one action). */
+static volatile LONG        g_last_place_result = 0;
 static volatile LONG       g_installed   = 0;
 static volatile LONG       g_cmd_registered = 0;   /* clone_bss_apply registered once (lazy) */
 
@@ -280,6 +374,12 @@ static int ae_read_u32(const void *src, uint32_t *out)
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 /* int-typed sibling for the diagnostic's idStr-len read (idStr len@+8 is a signed int). */
+static int ae_read_u8_safe(const void *src, unsigned *out)
+{
+    __try { *out = *(const unsigned char *)src; return 1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { *out = 0; return 0; }
+}
+
 static int ae_read_u32_safe(const void *src, int *out)
 {
     __try { *out = *(const int *)src; return 1; }
@@ -813,7 +913,170 @@ static int ae_mkcmd_one(const char *prefab_text)
      * branches, so it cannot double-free; it only leaks the slot's prior list allocations (small, one-shot per
      * create -- acceptable vs a crash). SEH-guarded: a failed reset falls through to the pre-existing behavior. */
     if (g_prefab_ctor) { __try { g_prefab_ctor(staging); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
-    return ae_deserialize_to_obj(prefab_text, staging, "idSnapEntityPrefab");
+    int ok = ae_deserialize_to_obj(prefab_text, staging, "idSnapEntityPrefab");
+    /* Remember that the slot now holds OUR prefab, and how many entities we left in it. Unlike an
+     * engine-made Ctrl+C clipboard, ours does not survive a Play round-trip -- see
+     * sh_apply_prefab_poll_play, which uses this to clean up only what we put there. */
+    if (ok) {
+        int n = 0;
+        const uint8_t *ed2 = ae_editor_session();
+        if (ed2 && ae_read_u32_safe(ed2 + PASTE_PREFAB_ENTCOUNT_OFF, &n)) {
+            InterlockedExchange(&g_we_staged_count, n);
+            InterlockedExchange(&g_we_staged, 1);
+        }
+    }
+    return ok;
+}
+
+/* ============================================================ kind=2: stage THEN place ==============
+ * Load/Place without the manual Ctrl+V. Runs the engine's OWN paste sequence -- the exact pair its idle
+ * sub-state dispatcher runs on action 0x5C -- rather than synthesizing input (the Snapmap+ window holds
+ * focus when the button is clicked and DOOM reads through DirectInput, so a synthetic Ctrl+V goes to the
+ * wrong window; a previous attempt also produced a spurious ESC-menu popup from the OS focus switch).
+ * A memory-level call bypasses the input stack entirely, so focus is irrelevant.
+ *
+ * Order is NOT negotiable:
+ *   1. stage                     -- deserialize the prefab text into editor+0x209a8 (kind=1)
+ *   2. CLEAR the selection       -- PasteInstantiate uses the selection array as its old->new id map and
+ *                                   AddToSelection appends, so a live selection silently mis-wires every
+ *                                   pasted connection. Routed through the iface slot so it inherits the
+ *                                   manipulation-snapshot guard (mutating the selection mid-grab corrupts
+ *                                   the map on the next Escape -- cancel-selection-escape-path).
+ *   3. VERIFY the clear took     -- the guard can legitimately REFUSE the clear; instantiating anyway is
+ *                                   the corrupting case, so a non-empty selection aborts to stage-only.
+ *   4. PasteInstantiate          -- build the entities into the live map
+ *   5. EnterAddPrefabGrab        -- the tool-state transition the engine always runs next; skipping it is
+ *                                   what left the 2026-07-06 attempt placed-but-undraggable and crashing
+ *                                   on the following Play transition.
+ *
+ * NOTHING IS PLACED INTO THE MAP HERE. This reproduces Ctrl+V exactly: the prefab's entities are
+ * instantiated and handed to the editor HELD (the Add-Prefab grab state), so the user still moves them
+ * and clicks to drop. That click is the engine's own place-commit handler and is untouched by us. The
+ * point of this function is purely to remove the manual keystroke, not to decide where anything lands.
+ *
+ * MUST run on the DOOM main thread -- callers reach it via the clone_bss_apply drain or apply_sync.
+ * TRI-STATE return, because "staged but not handed over" is a success for the apply batch but a
+ * different outcome for the user:
+ *   0 = the stage itself failed (nothing usable happened)
+ *   1 = STAGED ONLY -- every abort path lands here, leaving exactly the old stage-only behaviour, so the
+ *       caller falls back to the "press Ctrl+V" toast. There is no partially-instantiated outcome.
+ *   2 = HELD -- instantiated and now grabbed, awaiting the user's positioning click.
+ * DIRECT (doom-re campaign synthetic-action-injection, 2026-07-27). */
+#define AE_PASTE_FAILED  0
+#define AE_PASTE_STAGED  1
+#define AE_PASTE_HELD    2
+
+static int ae_mkcmd_instantiate(const char *prefab_text)
+{
+    if (!ae_mkcmd_one(prefab_text)) return AE_PASTE_FAILED;   /* stage failed -> nothing to place */
+
+    /* NB: g_paste_instantiate / g_enter_prefab_grab are resolved but DELIBERATELY NOT CALLED -- see the
+     * ACTION INJECTION block above for why calling them directly corrupts the map. They are kept
+     * resolved purely as a diagnostic (the install log prints them, which is how we confirmed the
+     * signatures match this build) and as the documented direct path should it ever become viable. */
+    const uint8_t *ed = ae_editor_session();
+    if (!ed) { backend_log("C2 place: no editor session -> staged only"); return AE_PASTE_STAGED; }
+
+    /* editor+0x22330 is the live mode object ONLY while the editor is in EntityMode (state 2); anywhere
+     * else the grab-state write would land on an inactive sub-object. */
+    int editor_state = 0;
+    if (!ae_read_u32_safe(ed + ED_ENTITY_MODE_OFF, &editor_state) || editor_state != 2) {
+        backend_log("C2 place: not EntityMode -> staged only");
+        return AE_PASTE_STAGED;
+    }
+
+    /* the stage must have produced at least one entity -- this is the same field the engine's own
+     * paste-available gate tests, and PasteInstantiate loops over it. */
+    int ent_count = 0;
+    if (!ae_read_u32_safe(ed + PASTE_PREFAB_ENTCOUNT_OFF, &ent_count) ||
+        ent_count < 1 || ent_count > PREFAB_MAX_ENTITIES) {
+        char l[128];
+        _snprintf_s(l, sizeof l, _TRUNCATE, "C2 place: staged entity count %d out of range -> staged only", ent_count);
+        backend_log(l);
+        return AE_PASTE_STAGED;
+    }
+
+    /* THE decisive gate: the engine dispatches paste ONLY from the mode's IDLE sub-state. mode+0x1ac
+     * selects which sub-object drives (1 = idle at mode+0x1B0, 2 = an entity is selected, 4 = the
+     * EditEntity manipulation sub-state at mode+0x290), and PasteInstantiate's sole call site lives in
+     * the idle one -- so "not idle-or-selected" means the editor is mid-gesture and a pick-up here would
+     * be a state the engine never produces for itself.
+     *
+     * This is what makes a SECOND Load/Place while the first prefab is still held safe: holding puts
+     * +0x1ac at 4, so we abort to stage-only instead of deselecting the held entities out from under the
+     * user (which is the map-corrupting act -- cancel-selection-escape-path).
+     *
+     * Checked BEFORE the clear, because the clear itself drives the state to idle and would mask this.
+     * Deliberately NOT relying on manipulation_in_progress() for this: that test is layer-based, and the
+     * layer move happens in the EditEntity sub-state's own enter (0x125f010) a frame AFTER our grab
+     * transition -- so it is racy for a rapid second press. mode+0x1ac is set synchronously by
+     * EnterAddPrefabGrab itself, so it is true the instant we hand over. */
+    int mode_state = 0;
+    if (!ae_read_u32_safe(ed + ED_MODE_OBJ_OFF + 0x1ac, &mode_state) ||
+        (mode_state != 1 && mode_state != 2)) {
+        char l[128];
+        _snprintf_s(l, sizeof l, _TRUNCATE,
+                    "C2 place: mode busy (mode+0x1ac=%d, likely already holding) -> staged only", mode_state);
+        backend_log(l);
+        return AE_PASTE_STAGED;
+    }
+
+    /* clear via the iface slot so the manipulation-snapshot guard applies too (it may refuse -- that is
+     * why the next step verifies rather than assumes). */
+    sh_iface *iface = sh_ui_get_iface();
+    if (iface && iface->vtbl && iface->vtbl->clear_selection)
+        iface->vtbl->clear_selection(iface);
+
+    void *sel = NULL;
+    int   sel_count = -1;
+    if (!ae_read_ptr(ed + ED_SEL_OBJ_OFF, &sel) || !sel ||
+        !ae_read_u32_safe((const uint8_t *)sel + SEL_COUNT_OFF, &sel_count) || sel_count != 0) {
+        char l[128];
+        _snprintf_s(l, sizeof l, _TRUNCATE,
+                    "C2 place: selection not empty (count=%d) -> staged only (placing would mis-wire)", sel_count);
+        backend_log(l);
+        return AE_PASTE_STAGED;
+    }
+
+    /* The engine only offers paste while nothing is hovered -- it is part of the same gate bit. Reading
+     * it ourselves lets us say WHY instead of silently doing nothing. */
+    int hovered = 0;
+    if (!ae_read_u32_safe((const uint8_t *)sel + SEL_HOVERED_OFF, &hovered) || hovered != -1) {
+        backend_log("C2 place: hovering an entity (engine refuses paste there) -> staged only");
+        return AE_PASTE_STAGED;
+    }
+
+    /* SET the engine's paste-available bit rather than requiring it. It is a stale cache immediately
+     * after staging (see SUBSTATE_FLAGS2_OFF), so requiring it made the first press after every stage
+     * fail. We have already verified the two conditions that bit actually encodes and that we can see --
+     * staged entity count >= 1 and hovered id == -1 -- so setting it states the truth a frame earlier
+     * than the engine's own recompute would. Deliberately a single-bit OR, not a byte write: every other
+     * gate in that byte (delete, duplicate, wire, ...) must keep whatever the engine last computed.
+     *
+     * The remaining condition we cannot cheaply see is the snapEdit_enableCopyPaste cvar. It defaults on
+     * and the engine's own recompute will clear this bit again on its next dirty pass, so forcing it
+     * cannot make paste permanently available against the user's setting -- at worst one paste. */
+    unsigned char *flags1 = (unsigned char *)((uintptr_t)ed + ED_MODE_OBJ_OFF +
+                                              MODE_IDLE_SUBSTATE_OFF + SUBSTATE_FLAGS1_OFF);
+    /* Ask, don't call. Action id BEFORE the arming word. */
+    int armed = 0;
+    __try {
+        *(volatile unsigned char *)flags1 = (unsigned char)(*(volatile unsigned char *)flags1 |
+                                                            SUBSTATE_PASTE_AVAIL_BIT);
+        *(volatile int *)((uintptr_t)ed + ED_MODE_OBJ_OFF + MODE_ACTION_ID_OFF)  = EDITOR_ACTION_PASTE;
+        _ReadWriteBarrier();
+        *(volatile int *)((uintptr_t)ed + ED_MODE_OBJ_OFF + MODE_ACTION_ARM_OFF) = MODE_ACTION_ARMED;
+        armed = 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("C2 place: arming the action slot faulted -> staged only");
+        armed = 0;
+    }
+    if (!armed) return AE_PASTE_STAGED;
+
+    char l[128];
+    _snprintf_s(l, sizeof l, _TRUNCATE, "C2 place: placed %d entities, editor now holding them", ent_count);
+    backend_log(l);
+    return AE_PASTE_HELD;
 }
 
 
@@ -844,6 +1107,13 @@ static void ae_toast_result(const char *op, int applied, int total)
      *   accl / acctargets   -> do_acc emits a nicer, target-count + receiver toast instead. */
     int quiet = (strcmp(op, "load-prefab") == 0) || (strcmp(op, "tl-inherit-portable") == 0) ||
                 (strcmp(op, "accl") == 0)         || (strcmp(op, "acctargets") == 0);
+    /* load-prefab is now stage-THEN-place (kind=2), and only the drain knows which of the two actually
+     * happened -- so it owns the toast rather than the page guessing at schedule time. "Placed" means the
+     * editor is holding the prefab for positioning; "staged" is the old manual-Ctrl+V fallback, which is
+     * still a correct, usable outcome (see sh_apply_last_place_result). */
+    /* (While Load/Place is back on kind=1 the page owns this toast again -- see poc_apply_load_prefab.
+     * Restore this block alongside kind=2 when the staged-prefab structure issue is fixed, since only
+     * the drain knows whether the pick-up actually happened.) */
     if (iface && iface->vtbl && iface->vtbl->toast && !quiet)
         iface->vtbl->toast(iface, "SnapStack", text);
     /* ALSO log directly -- the toast slot logs too, but a no-editor/late drain might skip the engine toast. */
@@ -869,9 +1139,19 @@ static void __cdecl ae_clone_bss_apply_cmd(void)
     int applied = 0;
     for (int i = 0; i < count; i++) {
         if (!items[i].text) continue;
-        int ok = (items[i].kind == 1) ? ae_mkcmd_one(items[i].text)
+        /* kind=2 is stage-then-place; its tri-state collapses to "the item succeeded" for the batch count
+         * (both STAGED and PLACED leave a usable prefab), while g_last_place_result carries the
+         * distinction the Load/Place toast needs. */
+        int ok;
+        if (items[i].kind == 2) {
+            int pr = ae_mkcmd_instantiate(items[i].text);
+            g_last_place_result = pr;
+            ok = (pr != AE_PASTE_FAILED);
+        } else {
+            ok = (items[i].kind == 1) ? ae_mkcmd_one(items[i].text)
                : (items[i].kind == 3) ? ae_apply_target_write(items[i].id, atoi(items[i].text))
                                       : ae_apply_one(items[i].id, items[i].text);
+        }
         if (ok) applied++;
     }
     ae_toast_result(op, applied, count);
@@ -1187,9 +1467,19 @@ static int slot_apply_sync(sh_iface *self, const sh_apply_item *items, int count
     int applied = 0;
     for (int i = 0; i < count; i++) {
         if (!items[i].text) continue;
-        int ok = (items[i].kind == 1) ? ae_mkcmd_one(items[i].text)
+        /* kind=2 is stage-then-place; its tri-state collapses to "the item succeeded" for the batch count
+         * (both STAGED and PLACED leave a usable prefab), while g_last_place_result carries the
+         * distinction the Load/Place toast needs. */
+        int ok;
+        if (items[i].kind == 2) {
+            int pr = ae_mkcmd_instantiate(items[i].text);
+            g_last_place_result = pr;
+            ok = (pr != AE_PASTE_FAILED);
+        } else {
+            ok = (items[i].kind == 1) ? ae_mkcmd_one(items[i].text)
                : (items[i].kind == 3) ? ae_apply_target_write(items[i].id, atoi(items[i].text))
                                       : ae_apply_one(items[i].id, items[i].text);
+        }
         if (ok) applied++;
     }
     ae_toast_result(op_label ? op_label : "apply", applied, count);
@@ -1214,6 +1504,97 @@ void sh_apply_engine_get_slots(sh_serialize_entity_fn *serialize_entity,
 void sh_apply_engine_get_serialize_selection(sh_serialize_selection_fn *serialize_selection)
 {
     if (serialize_selection) *serialize_selection = slot_serialize_selection;
+}
+
+/* Outcome of the most recent kind=2 (stage-then-pick-up) item: AE_PASTE_FAILED / _STAGED / _HELD.
+ * Lets the Load/Place caller word its toast accurately instead of assuming the pick-up happened. */
+int sh_apply_last_place_result(void)
+{
+    return (int)g_last_place_result;
+}
+
+/* ============================================================ post-Play staging invalidation ========
+ * A Play round-trip tears the staged prefab's contents out from under editor+0x209a8 while LEAVING its
+ * entity count non-zero. The engine's paste-available gate only tests that count, so coming back to the
+ * editor and pressing Ctrl+V instantiates from freed memory -> heap corruption / crash. Reported live
+ * 2026-07-27 (crash on Ctrl+V after returning from Play).
+ *
+ * This is PRE-EXISTING and independent of the Load/Place work -- it fires for any prefab staged before a
+ * Play, including one staged by the old stage-only build. The clone already half-knew: ae_mkcmd_one
+ * re-ctors the slot before every stage precisely because it "can retain a nested entity whose className
+ * idStr is NULL" after "a delete (and/or a Play round-trip)". That protects re-staging but does nothing
+ * for a bare Ctrl+V.
+ *
+ * Fix: on the editor-session edge (gone -> back, i.e. we just returned from Play) zero the staged entity
+ * count. That is the exact field the engine's gate reads, so paste simply becomes unavailable instead of
+ * dangerous -- and it is a single int store, no frees and no ctor call, so it cannot itself corrupt
+ * anything. The prefab is one Load/Place away from being staged again (which re-reads it from disk), so
+ * nothing the user cares about is lost.
+ *
+ * Called from the UI think loop; safe from any thread (one aligned store to a field the engine only
+ * reads while building its per-frame capability flags). */
+void sh_apply_prefab_poll_play(void)
+{
+    if (!g_doom_base) return;
+
+    int cur = 0;
+    if (!ae_read_u32_safe(g_doom_base + LOAD_STATE_RVA, &cur)) return;
+    LONG prev = InterlockedExchange(&g_last_load_state, (LONG)cur);
+    /* React on the way OUT (RUNNING -> a load starting), not on the way back. At this moment our staged
+     * prefab is about to become garbage but its memory is still intact, so re-initialising is safe and
+     * leaves a clean empty slot for the whole Play session and everything after it. Cleaning on the way
+     * back would be too late: the engine can touch the dangling slot first. */
+    if (prev != LOAD_STATE_RUNNING || cur == LOAD_STATE_RUNNING) return;
+
+    const uint8_t *ed = ae_editor_session();
+    if (!ed) return;
+
+    int ent_count = 0;
+    (void)ae_read_u32_safe(ed + PASTE_PREFAB_ENTCOUNT_OFF, &ent_count);
+
+    /* Re-initialise the staging slot IF AND ONLY IF the prefab in it is one WE put there and nothing has
+     * overwritten it since. Established live 2026-07-27:
+     *   - an engine-made Ctrl+C clipboard survives a Play round-trip and across maps, and must be left
+     *     strictly alone (an earlier revision zeroed the count unconditionally and broke exactly that);
+     *   - OUR JSON-deserialised prefab does NOT survive. After Play, Ctrl+V pasted nothing, and Ctrl+C
+     *     then faulted with heap corruption -- because the engine's copy handler calls CreatePrefab on
+     *     this slot, and CreatePrefab's first act is to tear down the existing contents. Tearing down
+     *     pointers the map teardown already freed is a double free.
+     * So the danger is not reading the dead slot, it is the NEXT Ctrl+C writing over it. Re-ctor'ing
+     * fixes that: the ctor rewrites every field unconditionally with no reads and no frees, so it turns
+     * the dangling pointers into a clean empty prefab -- it LEAKS the already-dead allocations rather
+     * than double-freeing them, which is exactly what we want when they are already gone.
+     *
+     * The user loses our staged prefab across Play (press Load/Place again, which re-reads it from disk).
+     * That is a real limitation, not the intended end state: the durable fix is to make our staging
+     * allocate the way CreatePrefab does so it survives like the engine's own clipboard. That needs RE of
+     * what CreatePrefab allocates differently, and is tracked as an open question rather than guessed at. */
+    int mine = (InterlockedCompareExchange(&g_we_staged, 0, 1) == 1);
+    if (mine && ent_count != 0 && ent_count == (int)g_we_staged_count && g_prefab_ctor) {
+        __try {
+            g_prefab_ctor((void *)(ed + PASTE_STAGING_OFF));
+            char l[200];
+            _snprintf_s(l, sizeof l, _TRUNCATE,
+                        "C2 stage: our %d-entity prefab did not survive Play -> slot re-initialised "
+                        "(prevents the double-free a later Ctrl+C would hit); re-press Load/Place", ent_count);
+            backend_log(l);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            backend_log("C2 stage: slot re-init faulted (left as-is)");
+        }
+    } else if (ent_count != 0) {
+        char l[200];
+        _snprintf_s(l, sizeof l, _TRUNCATE,
+                    "C2 stage: staging slot holds %d entities that are NOT ours (engine clipboard) "
+                    "-> left strictly intact", ent_count);
+        backend_log(l);
+    }
+
+    /* NOTE: an earlier revision also forced a rebuild of the editor's cached action-gate byte here, on the
+     * theory that Ctrl+C / Ctrl+V were being GATED OFF after Play. That theory is dead: the shield log
+     * shows Ctrl+C actually RUNS and faults (repeated first-chance AVs at runtime rip+0x1ab32ee reading
+     * -1, classified "in-editor draw fault -> aborted draw"), i.e. it was tripping over the poisoned slot,
+     * not refusing to run. Cleaning the slot is the fix; poking the gate cache was treating a symptom that
+     * did not exist, so it is removed rather than left in as a harmless-looking write. */
 }
 
 int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *module_base, void *cmdsys)
@@ -1242,6 +1623,12 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
     g_decl_rebuild = (decl_src_rebuild_fn)sig_addr_by_name(results, n, "DeclSourceRebuild");
     g_buffer_cmd   = (buffer_cmd_fn)      sig_addr_by_name(results, n, "BufferCommandText");
     g_add_command  = (add_command_fn)     sig_addr_by_name(results, n, "AddCommand");
+    /* kind=2 place-after-stage. SIGNATURE-resolved deliberately -- NO raw-RVA fallback. On this build the
+     * on-disk RVAs these were extracted at do not necessarily equal the runtime ones, so a hardcoded
+     * address could land mid-instruction; a signature matches the BYTES wherever the loader put them, and
+     * an unresolved sig cleanly degrades kind=2 to stage-only rather than calling into nothing. */
+    g_paste_instantiate = (paste_instantiate_fn)sig_addr_by_name(results, n, "PasteInstantiate");
+    g_enter_prefab_grab = (enter_prefab_grab_fn)sig_addr_by_name(results, n, "EnterAddPrefabGrab");
 
     /* the prefab-from-selection serialize engine fns (+0xb0). These jumptable/inline-prone leaves
      * resolve by FALLBACK RVA off module_base (re-derive-tagged like the editor singleton); a wrong/shifted
@@ -1255,9 +1642,11 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
 
     char line[256];
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "C2 wave B: apply-engine install -- ser=%d deser=%d commit=%d cmdsys=%p buf_cmd=%p add_cmd=%p",
+        "C2 wave B: apply-engine install -- ser=%d deser=%d commit=%d cmdsys=%p buf_cmd=%p add_cmd=%p "
+        "paste=%p grab=%p",
         ae_serialize_bound(), ae_deserialize_bound(), ae_commit_bound(),
-        g_cmdsys, (void *)g_buffer_cmd, (void *)g_add_command);
+        g_cmdsys, (void *)g_buffer_cmd, (void *)g_add_command,
+        (void *)g_paste_instantiate, (void *)g_enter_prefab_grab);
     backend_log(line);
     return ae_serialize_bound() && ae_deserialize_bound() && ae_commit_bound();
 }

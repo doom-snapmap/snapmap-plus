@@ -6,6 +6,49 @@ where our own reimplementation was wrong, not the original SnapHak's behavior; a
 (or faithful reproduction of) the *original's* behavior belongs in [`fidelity.md`](fidelity.md)
 instead. Entries are chronological, newest first.
 
+## 2026-07-28 — a staged prefab poisoned the paste slot and killed vanilla Ctrl+C / Ctrl+V after Play
+
+**Symptom.** Stage a prefab with Load/Place, press Play, come back to the editor — and the game's own
+copy and paste were dead. They stayed dead until you pressed Load/Place again, which appeared to "fix"
+them. Vanilla copy/paste with no Load/Place involved was completely unaffected, which is what made this
+look like an editor-state problem for a long time.
+
+**What was actually happening.** Ctrl+C was not being refused — it was *running and faulting*. The
+shield log showed repeated first-chance access violations at `rip+0x1AB32EE` reading `-1`, classified
+`in-editor draw fault -> aborted draw, resumed editor frame`. The engine's copy handler calls
+`CreatePrefab` on the shared staging slot at `editor+0x209a8`, and `CreatePrefab`'s first act is to tear
+down whatever is already in that slot. Our staged prefab does not survive a Play round-trip, so that
+teardown walked pointers the map teardown had already freed. Pressing Load/Place "fixed" it only because
+`ae_mkcmd_one` re-ctors the slot before staging, which happens to heal it.
+
+This is **pre-existing** and independent of any Load/Place automation work — it reproduces with plain
+stage-only behaviour, and would hit anyone who staged a prefab and then played their map.
+
+**Fix.** `sh_apply_prefab_poll_play()` (polled from the per-tick drain) watches the engine `load_state`
+global and re-initialises the staging slot on the way **into** Play, while its memory is still intact.
+Re-ctor'ing is the right tool: the prefab ctor rewrites every field unconditionally with no reads and no
+frees, so it turns dangling pointers into a clean empty prefab — it leaks the already-dead allocations
+rather than double-freeing them.
+
+Two guards matter as much as the fix:
+
+- **Ownership.** We only touch the slot when *we* staged it and the entity count is unchanged. An
+  engine-made Ctrl+C clipboard is left strictly alone — it legitimately survives a Play round-trip and
+  across maps, and an earlier revision of this fix that cleared the slot unconditionally destroyed the
+  user's clipboard and disabled paste. Don't do that.
+- **Direction.** Cleaning on the way *back* is too late; the engine can touch the dangling slot first.
+
+**Detecting Play is harder than it looks.** Two obvious signals do **not** work and should not be
+retried: the editor session going null (`editor+0x204c8`), and the loaded-map object pointer changing.
+Both survive a Play round-trip, so neither ever fired. The engine's `load_state` global
+(`base+0x6DDE198`; `3` = RUNNING) does move, and per the fault-shield's own notes an in-editor in-place
+load never writes it.
+
+**Known limitation.** Our staged prefab still does not survive a Play — we now discard it deliberately
+rather than leave a landmine. Press Load/Place again after returning; it re-reads from disk. The durable
+fix is to make `ae_deserialize_to_obj` build an object structurally equivalent to what `CreatePrefab`
+produces, which is not yet understood.
+
 ## 2026-07-13/14 — SnapStack lives in the backend (`snapstack.c` + `json_patch.c`); the `json_patch` empty-`edit` fix; store slots + management commands
 
 **What & why.** The SnapStack subsystem — the stack-of-stacks + named-group stores and all 20 `sh`

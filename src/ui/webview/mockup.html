@@ -2819,6 +2819,9 @@
       if (d.result === 1) toast('Cleared stack 0 (' + d.count + ' id' + (d.count === 1 ? '' : 's') + ' removed)', 'ok');
       else toast('Clear stack 0 failed (editor down?)', 'err');
     } else if (d.kind === 'loadPrefabResult') {
+      /* The backend drain owns the OUTCOME toast ("Ready -- move it into position..." vs the
+         "press Ctrl+V" fallback), because only it knows whether the pick-up actually happened.
+         This one just confirms the request was accepted. */
       if (d.result === 1) toast('"' + d.name + '" staged -- press Ctrl+V in the 3D view to place it', 'ok');
       else if (d.result === -1) toast('Could not read "' + d.name + '" (see log)', 'err');
       else toast('Could not stage "' + d.name + '" (editor down?)', 'err');
