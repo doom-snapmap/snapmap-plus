@@ -217,11 +217,22 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * empty string is copied instead of the freed one. A valid entry is untouched; nothing is freed (the stale
          * buffer is simply never read). No editor/sig dependency (recipe-tagged RVA off the module base). See
          * palette_guard.c. */
-        /* TEMP-DISABLED (shield-off diagnostic 2026-07-05): the render-node guard is one of OUR injected detours
-         * and it WRITES into the render-node array -- disabled here to prove our own code isn't the corruptor.
-         * RE-ENABLE by uncommenting. */
+        /* DISABLED since 2026-07-05, and deliberately left that way. The render-node guard is one of OUR
+         * injected detours and it WRITES into the render-node array, so it was commented out to prove our
+         * own code was not the corruptor.
+         *
+         * READ THIS BEFORE PANICKING AT THE LOG LINE: the FAULT-SHIELD IS NOT DISABLED. It was turned off
+         * alongside this guard for that same 2026-07-05 diagnostic, was cleared by it, and was RE-ENABLED
+         * the same day -- see shield_install() at the end of this function. This guard is the ONLY thing
+         * still off, and the old log wording ("shield-off diagnostic build") wrongly implied otherwise.
+         *
+         * It stays off because the render-node root cause (a reclassed node-less timeline keeping the
+         * pasted command's stale render-node +0x70) was fixed AT THE SOURCE in ae_apply_one, which makes
+         * this guard a redundant mitigation rather than a load-bearing one. RE-ENABLE by uncommenting if
+         * the 0xd32a39 render face is ever reproduced again. */
         /* sh_palette_guard_install(g_doom_base); */
-        backend_log("rendernode-guard: TEMP-DISABLED (shield-off diagnostic build)");
+        backend_log("rendernode-guard: DISABLED (redundant since the ae_apply_one root fix; "
+                    "fault-shield itself is ACTIVE)");
 
         void *get_decls = (void *)sig_addr_by_name(results, db, "GetDeclsOfType");
         /* GetDeclsOfType is resolved here and handed to the command layer below (sh_commands_install),
