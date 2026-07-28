@@ -712,6 +712,37 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 74 24 18 57 48 83 EC 40 48 8B F2 48 8B F9 8B 49 18 8B D1 C1 EA 1F 80 E2 01 74 ?? "
       "44 8B 46 18 41 8B C0",
       0x33A380u },
+    { "PrefabCtor",         /* idSnapEntityPrefab ctor -- idSnapEntityPrefab *(self [rcx]).
+                             * Was a raw base+RVA leaf (`PREFAB_CTOR_RVA`), which is build-locked; this is
+                             * now the primary resolve with that RVA kept only as a fallback. It matters:
+                             * ae_mkcmd_one calls it before every stage AND the Play watchdog calls it to
+                             * re-initialise the staging slot, so a wrong address here corrupts on a timer.
+                             * IDENTIFIED BEHAVIOURALLY, not by arithmetic (on-disk and runtime RVAs differ
+                             * per region on this build, so no delta is reliable): it writes every field
+                             * unconditionally with no reads and no branches -- which is exactly why
+                             * re-ctor'ing a slot with dangling pointers is safe, it leaks rather than
+                             * double-frees -- fills the identity transform from a constants block, zeroes
+                             * each list member (capacity word 0x50000), writes up to +0x118, then makes a
+                             * forward call into a second, larger ctor for the tail sub-object at +0x120.
+                             * That is a field-for-field match to this project's own description of the
+                             * runtime ctor. Unique at 23 bytes; deliberately stopped before the first
+                             * RIP-relative operand so the pattern carries NO build-volatile bytes and
+                             * needs no wildcards.
+                             * Extracted from the on-disk image at 0x11AC8D0; known_rva below is the
+                             * RUNTIME address, because that is the only address space the fallback can
+                             * legitimately be used in. */
+      "4C 8B DC 49 89 4B 08 53 48 83 EC 30 49 C7 43 E8 FE FF FF FF 48 8B D9",
+      0x54D0A0u },
+    { "PrefabPopulate",     /* CreatePrefab -- char(prefab [rcx], editor [rdx], int *outStatus [r8]).
+                             * Fills a prefab from the current editor selection; the Create-from-selection
+                             * (+0xb0) path. Also a former raw base+RVA leaf. Located from its own error
+                             * strings ("Failed to create prefab: not hovering entity in selection." and
+                             * the three siblings), so the identification is anchored on data it prints,
+                             * not on an address delta. 46-byte prologue, fully absolute, unique.
+                             * Extracted on-disk at 0x11ADB30; known_rva is the RUNTIME address. */
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 40 F7 FF FF "
+      "48 81 EC C0 09 00 00 48 C7 85 10 01 00 00 FE FF FF FF 48 89 9C 24 18 0A 00 00",
+      0x54E410u },
     { "PasteInstantiate",   /* idSnapEntityPrefab instantiate -- void(prefab [rcx], editor [rdx]).
                              * Takes the STAGED prefab at editor+0x209a8 and builds its entities into the
                              * live map: snapshots the map's nine id-allocation counters, computes a

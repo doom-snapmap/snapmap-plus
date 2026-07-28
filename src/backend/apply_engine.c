@@ -1597,6 +1597,47 @@ void sh_apply_prefab_poll_play(void)
      * did not exist, so it is removed rather than left in as a harmless-looking write. */
 }
 
+/* Resolve an engine leaf by SIGNATURE, with a historical raw RVA as fallback, and REFUSE a signature
+ * that disagrees with that RVA on this build.
+ *
+ * Why the cross-check rather than just trusting the scan: these leaves are called on live editor state
+ * (the prefab ctor runs on every stage and on the Play watchdog's slot re-init), so a signature that
+ * resolved to a wrong-but-valid address would corrupt silently and on a timer. Preferring the RVA on a
+ * mismatch makes the worst case exactly the pre-existing behaviour, never something new.
+ *
+ * The point of the migration is build portability: a raw base+RVA is locked to one DOOM build and fails
+ * SILENTLY into arbitrary code if the game is patched, whereas a signature matches bytes wherever the
+ * loader put them. Logs which path was taken so a future build's drift is visible at a glance instead of
+ * being discovered as a crash. */
+static void *ae_pick_engine_fn(const sig_result *results, size_t n, const char *sig_name,
+                               const uint8_t *base, uint32_t fallback_rva, const char *label)
+{
+    uintptr_t s = sig_addr_by_name(results, n, sig_name);
+    uintptr_t r = base ? (uintptr_t)(base + fallback_rva) : 0;
+    char l[192];
+
+    if (s && r && s == r) {
+        _snprintf_s(l, sizeof l, _TRUNCATE, "C2 sig: %s sig=%p rva=%p MATCH", label, (void *)s, (void *)r);
+        backend_log(l);
+        return (void *)s;
+    }
+    if (s && r) {
+        _snprintf_s(l, sizeof l, _TRUNCATE,
+                    "C2 sig: %s sig=%p rva=%p MISMATCH -> signature REFUSED, using rva", label,
+                    (void *)s, (void *)r);
+        backend_log(l);
+        return (void *)r;
+    }
+    if (s) {
+        _snprintf_s(l, sizeof l, _TRUNCATE, "C2 sig: %s sig=%p (no rva to cross-check)", label, (void *)s);
+        backend_log(l);
+        return (void *)s;
+    }
+    _snprintf_s(l, sizeof l, _TRUNCATE, "C2 sig: %s sig=MISS -> using rva=%p (build-locked)", label, (void *)r);
+    backend_log(l);
+    return (void *)r;
+}
+
 int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *module_base, void *cmdsys)
 {
     if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;   /* one-shot */
@@ -1639,8 +1680,14 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
      * resolve by FALLBACK RVA off module_base (re-derive-tagged like the editor singleton); a wrong/shifted
      * offset just makes the serialize SEH-fail -> a clean 0-length result, never a crash. */
     if (module_base) {
-        g_prefab_ctor     = (prefab_ctor_fn)    (module_base + PREFAB_CTOR_RVA);
-        g_prefab_populate = (prefab_populate_fn)(module_base + PREFAB_POPULATE_RVA);
+        /* ctor + populate are now SIGNATURE-first with the old RVA as a cross-checked fallback (see
+         * ae_pick_engine_fn). dtor + deshare remain raw RVAs: they have not been located in a way that
+         * would let a signature be extracted and proven unique, and guessing one is worse than a
+         * build-locked address that demonstrably works. Migrate them the same way when they are. */
+        g_prefab_ctor     = (prefab_ctor_fn)    ae_pick_engine_fn(results, n, "PrefabCtor",
+                                                                  module_base, PREFAB_CTOR_RVA, "prefab ctor");
+        g_prefab_populate = (prefab_populate_fn)ae_pick_engine_fn(results, n, "PrefabPopulate",
+                                                                  module_base, PREFAB_POPULATE_RVA, "prefab populate");
         g_prefab_dtor     = (prefab_dtor_fn)    (module_base + PREFAB_DTOR_RVA);
         g_deshare         = (ent_deshare_fn)    (module_base + ENT_DESHARE_RVA);
     }
