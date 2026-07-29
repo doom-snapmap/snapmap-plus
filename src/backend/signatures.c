@@ -770,6 +770,59 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 40 F7 FF FF "
       "48 81 EC C0 09 00 00 48 C7 85 10 01 00 00 FE FF FF FF 48 89 9C 24 18 0A 00 00",
       0x54E410u },
+    { "MemLocalGet",        /* idMemLocal accessor -- idMemLocal *(void). MSVC magic-static getter that
+                             * returns the ONE process-wide idMemLocal instance (and caches a pointer to it
+                             * in the global at RVA 0x6F8E2C8). Needed as the `this` for the PushHeap/PopHeap
+                             * pair below.
+                             *
+                             * Why a signature and not the object's address: the instance lives at VA
+                             * 0x1455B7190 in the Ghidra image. Computing its RVA by hand is exactly where
+                             * this went wrong once -- 0x1455B7190 - 0x140000000 is 0x55B7190, and a dropped
+                             * digit (0x155B7190) put it ~256 MB past the mapped module, so the read faulted
+                             * and the scope push silently never happened. Resolving the getter and calling
+                             * it removes the arithmetic entirely.
+                             *
+                             * CAUTION: MSVC emits many near-identical magic-static getters, so this pattern
+                             * is the most ambiguity-prone entry in this table. It is pinned by the exact
+                             * frame size (0x30), the MOV R8D,4 and the GS:[0x58] TLS load. If the scan
+                             * reports AMBIGUOUS or MISS the resolver falls back to known_rva and logs it --
+                             * check that log before trusting the heap-scope behaviour on a new build.
+                             * Wildcards: the _tls_index rip-relative and the LEA that materialises the
+                             * instance address. */
+      "40 53 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 8B 0D ?? ?? ?? ?? "
+      "65 48 8B 04 25 58 00 00 00 41 B8 04 00 00 00 48 8B 14 C8 48 8D 1D ?? ?? ?? ??",
+      0x1A04BF0u },
+    { "MemLocalPushHeap",  /* idMemLocal::PushHeap -- void(this [rcx], int heapId [edx]). Pushes heapId onto
+                             * the allocator's 32-deep heap-scope stack (ids at this+0x44, depth at
+                             * this+0xC4). Every idlib container allocation asks Mem_Alloc for heap id -1,
+                             * meaning "top of this stack", so this is the ONLY lever for making an engine
+                             * allocation outlive the map: PushHeap(0) selects heap-table slot 0, which is
+                             * NULL, and Mem_Alloc falls through to GetProcessHeap() -- the same heap the
+                             * engine's own Ctrl+C clipboard lands in. The engine uses this exact
+                             * PushHeap(0)/PopHeap() idiom itself (e.g. RVA 0x4F71F0).
+                             *
+                             * Names itself: the overflow assert reads "idMemLocal::PopHeap: Heap stack
+                             * overflow" (id's own copy-paste slip -- this is the push).
+                             *
+                             * MAIN-THREAD ONLY. Both this and Mem_Alloc's -1 scope lookup are gated on the
+                             * predicate at RVA 0x19FC900, which compares GetCurrentThreadId() against the
+                             * engine main-thread DWORD at RVA 0x6DDE190. Off that thread this is a silent
+                             * no-op AND allocation falls through to the process heap anyway.
+                             *
+                             * Unique: the this+0xC4 depth access and the [rbx+rax*4+0x44] indexed store are
+                             * specific to this function. Wildcard: the rel32 call to the gate predicate. */
+      "48 89 5C 24 08 57 48 83 EC 20 8B FA 48 8B D9 E8 ?? ?? ?? ?? 84 C0 74 16 "
+      "48 63 83 C4 00 00 00 83 F8 20 7D 15 89 7C 83 44",
+      0x1AC57A0u },
+    { "MemLocalPopHeap",   /* idMemLocal::PopHeap -- void(this [rcx]). Decrements the heap-scope depth at
+                             * this+0xC4 and FATALS on underflow ("idMemLocal::PopHeap: Heap stack
+                             * underflow", a non-returning error), so pushes and pops must be balanced
+                             * across early returns and exceptions -- the caller pairs them with
+                             * __try/__finally for that reason. Same main-thread gate as PushHeap.
+                             * Unique: the SUB dword [rbx+0xC4],1 followed by JS to the fatal path.
+                             * Wildcard: the rel32 call to the gate predicate. */
+      "40 53 48 83 EC 20 48 8B D9 E8 ?? ?? ?? ?? 84 C0 74 09 83 AB C4 00 00 00 01 78",
+      0x1AC5770u },
     { "PasteInstantiate",   /* idSnapEntityPrefab instantiate -- void(prefab [rcx], editor [rdx]).
                              * Takes the STAGED prefab at editor+0x209a8 and builds its entities into the
                              * live map: snapshots the map's nine id-allocation counters, computes a

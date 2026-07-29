@@ -57,6 +57,34 @@ on the think-loop thread; the manual pump plus the `+0x1a0` work-queue drain *ar
 main-thread execution point (a UI-thread or RPC-thread engine call deadlocks the engine's command-system
 lock). Replicate the pump.
 
+## Engine allocations inherit a heap scope — mind the lifetime
+
+Any engine object we build through idlib containers is allocated from **whatever heap is currently on top
+of `idMemLocal`'s heap-scope stack**, because idlib always asks `Mem_Alloc` for heap id `-1` ("current
+scope"). The engine keeps three heaps — global/process, persist, and **map** — and the map heap is
+`HeapDestroy`d at map load. So the lifetime of an engine allocation is decided by **when it runs**, not by
+what is allocated, and while the SnapMap editor is up the ambient scope is the *map* heap.
+
+Practical rule: **anything we build that must outlive the current map has to be allocated inside an
+explicit `idMemLocal::PushHeap(0)` / `PopHeap()` pair.** Everything else is fine as-is — an object created
+and destroyed within one call cannot outlive its heap, and objects that genuinely belong to the map
+*should* die with it.
+
+Today exactly one thing we build outlives its call: the prefab staged into `editor+0x209a8` by
+`ae_mkcmd_one`. Every other engine ctor in the backend is paired with its dtor in the same function. That
+one site is scope-pushed; see [`backend-changes.md`](backend-changes.md) for the failure it caused before
+it was, and doom-re `docs/truth/engine/memory-heaps-and-allocator.md` for the engine-side derivation.
+
+Two properties of the mechanism worth knowing before using it:
+
+- It is **main-thread-only.** `PushHeap`, `PopHeap` and `Mem_Alloc`'s `-1` lookup share a
+  `GetCurrentThreadId()` gate; off the engine's main thread all three are silently inert.
+- The scope stack is **global, not per-thread**, so a push briefly changes the ambient heap for other
+  threads. That is a leak risk, never corruption — each block records its own heap in its header and
+  `Mem_Free` reads it back, so a block is always freed into the heap it came from.
+
+`PopHeap` **fatals on underflow**, so pushes and pops must be balanced across early returns and exceptions.
+
 ## The interface vtable (the matched-pair ABI)
 
 The shared interface object is defined once, in `src/common/snapmap_plus_iface.h`, and **both DLLs

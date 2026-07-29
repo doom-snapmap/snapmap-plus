@@ -82,11 +82,107 @@
  * non-empty selection silently mis-wires the paste (see the PasteInstantiate signature comment).
  * DIRECT (our own reverse-engineering, 2026-07-27). */
 #define PASTE_PREFAB_ENTCOUNT_OFF 0x209e0   /* = editor+0x209a8+0x38 -> staged prefab entity count (s32) */
+/* ...and the very next dword is that same idList's CAPACITY. The staged prefab's entities member is an
+ * idList at prefab+0x30 (= editor+0x209d8) whose layout is ptr@+0x00 / num@+0x08 / capacity@+0x0C, so
+ * PASTE_PREFAB_ENTCOUNT_OFF is that list's `num` and capacity sits 4 bytes later. Reading it is the whole
+ * capacity-tail diagnostic: the engine's teardown of this list (doom-re pinned RVA 0x5202F0, reached from
+ * CreatePrefab 0x54E410 -> prefab operator= 0x54D480 -> idList operator= 0x51EC90) iterates CAPACITY, not
+ * num, destructing an idStr at blob+0x168 every 0x1B0 bytes. The generic reflection idList deserializer
+ * (0x1A87BA0) sets num == capacity when it GROWS the list, but when the list already has capacity >=
+ * the incoming JSON count it skips the grow entirely and leaves capacity at its old, larger value -- so
+ * re-staging a SHORTER prefab over a longer one leaves slots in [num, capacity) that the deserializer
+ * never touched but the teardown still walks. DIRECT (doom-re campaign staged-prefab-equivalence,
+ * 2026-07-28); see that campaign's analysis/fault-chain-end-to-end.md. */
+#define PASTE_PREFAB_ENTCAP_OFF   0x209e4   /* = editor+0x209a8+0x3c -> that idList's capacity (s32) */
+#define PASTE_PREFAB_ENTPTR_OFF   0x209d8   /* = editor+0x209a8+0x30 -> that idList's buffer ptr */
+
+/* --- idMemLocal heap-scope API: the fix for "our staged prefab does not survive Play" --------------
+ * doom-re (docs/truth/engine/memory-heaps-and-allocator.md) established, and a live read confirmed:
+ *
+ *   engine Ctrl+C clipboard blob array -> tag 0x05, flags 0x00 -> PROCESS heap -> survives Play
+ *   our staged prefab   blob array     -> tag 0x05, flags 0x04 -> MAP heap     -> HeapDestroy'd at map load
+ *
+ * Same element type, same tag, different heap. idlib containers always ask Mem_Alloc for heap id -1,
+ * meaning "whatever heap is on top of idMemLocal's scope stack", so the lifetime of an allocation is
+ * decided by WHEN it runs, not by what is allocated. Our deserialize runs while the MAP heap (id 2) is
+ * the ambient scope, so the blob array is allocated in a heap the engine destroys on the next map load --
+ * leaving the prefab's idList header pointing at unmapped pages.
+ *
+ * The engine's own fix for exactly this situation is an explicit scope push/pop, reached through the
+ * allocator object's vtable (the object is the process-wide idMemLocal at module+0x155b7190):
+ *
+ *   vtable +0x48  idMemLocal::PushHeap(int heapId)   (RVA 0x1AC57A0) -- names itself in its own assert
+ *   vtable +0x50  idMemLocal::PopHeap(void)          (RVA 0x1AC5770)
+ *
+ * Wrapping the stage in PushHeap(0)/PopHeap() puts the blob array in the process heap, exactly where the
+ * engine's own clipboard lives, WITHOUT changing how any member is copied.
+ *
+ * Two safety notes, both established from the engine's code rather than assumed:
+ *   - The scope stack is GLOBAL, not per-thread (idMemLocal is one process-wide object; its _tls_index
+ *     use is only the magic-static once-init guard). So this briefly changes the ambient heap for other
+ *     threads too.
+ *   - That is a LEAK risk, never a corruption risk: every block records its own heap in its header and
+ *     Mem_Free reads it back, so a block is always freed into the heap it came from no matter what the
+ *     scope is at free time. The worst case is an unrelated allocation made inside our window outliving
+ *     its intended owner.
+ * The window is one deserialize, and push/pop are balanced with __try/__finally so an exception cannot
+ * leave the stack unbalanced (PopHeap fatals on underflow, so balance matters).
+ *
+ * ===== CONFIRMED FIXED 2026-07-28 =====
+ * With the push in place the staged blob array allocates in the process heap, and the prefab survives BOTH
+ * a Play round-trip and a map change with Ctrl+V still working afterwards -- matching the engine's own
+ * clipboard. Live heap table at the time: heap[0]=NULL, heap[1]=persist, heap[2]=map, and the ambient scope
+ * depth was already 1 (the engine keeps the map heap pushed while the editor is up, which is why our
+ * allocations were landing there). Mem_Alloc falls through to GetProcessHeap() when the selected handle is
+ * NULL, so PushHeap(0) is what yields the process heap.
+ *
+ * The three functions are resolved by SIGNATURE (MemLocalGet / MemLocalPushHeap / MemLocalPopHeap in
+ * signatures.c) rather than by raw RVA, and every call is range-checked against the DOOM module first,
+ * because a wrong pointer here would be CALLED, not merely read. If any of that fails the push simply does
+ * not happen, the allocation lands in the map heap, ae_block_survives_map returns 0, and the protective
+ * re-ctor runs -- i.e. the old behaviour, not a crash. */
+/* The scope machinery is MAIN-THREAD-ONLY. idMemLocal::PushHeap/PopHeap and Mem_Alloc's heapId==-1 scope
+ * lookup are all gated on the same predicate (RVA 0x19FC900):
+ *     if (mainThreadId != 0 && mainThreadId != GetCurrentThreadId()) return 0;
+ * where mainThreadId is the DWORD at RVA 0x6DDE190 (8 bytes below the load-state word we already read) and
+ * the thread call is literally GetCurrentThreadId (0x1A40C10). Off the main thread PushHeap silently does
+ * nothing -- and so does the scope lookup, so an off-thread allocation lands in the process heap by
+ * default. That means a MAP-heap allocation can only have happened ON the main thread. */
+#define MEMLOCAL_SCOPE_DEPTH  0xc4      /* idMemLocal +0xC4 -> heap-scope stack depth (ids at +0x44) */
+/* idMemLocal is reached by SIGNATURE ONLY: MemLocalGet / MemLocalPushHeap / MemLocalPopHeap in
+ * signatures.c, each cross-checked against a known_rva exactly like every other engine leaf here. Calling
+ * the resolved getter yields the instance, so nothing computes the object's address and nothing reads its
+ * vtable -- both of which were the earlier failure mode (a dropped digit turned RVA 0x55B7190 into
+ * 0x155B7190, ~256 MB past the mapped module, and the scope push silently never happened).
+ *
+ * There is deliberately NO raw-address path to the instance. If a signature does not resolve we skip the
+ * push entirely; see ae_memlocal. */
+#define MEMLOCAL_GET_RVA      0x1a04bf0u   /* idMemLocal *(void) -- the magic-static accessor */
+#define MEMLOCAL_PUSHHEAP_RVA 0x1ac57a0u   /* void(this, int heapId) */
+#define MEMLOCAL_POPHEAP_RVA  0x1ac5770u   /* void(this) -- fatals on underflow */
+#define MEMLOCAL_HEAP_GLOBAL  0     /* 0 global/process, 1 persist, 2 map */
+typedef void *(*memlocal_get_fn)(void);
+typedef void (*memlocal_pushheap_fn)(void *self, int heapId);
+typedef void (*memlocal_popheap_fn)(void *self);
+#define PREFAB_BLOB_STRIDE        0x1b0     /* per-entity blob stride inside that buffer */
+/* The idStr the engine's blob teardown destructs, at blob+0x168. snapmap-plus's own ae_mkcmd_one comment
+ * calls this the nested entity's className ("can retain a nested entity whose className idStr is NULL"
+ * after a delete and/or Play round-trip), which is consistent with doom-re's read of the teardown
+ * (pinned RVA 0x5202F0: idStr dtor at blob+0x168 + decl dtor at blob+0x00, every 0x1B0 bytes). */
+#define PREFAB_BLOB_NAMESTR_OFF   0x168
 #define ED_MODE_OBJ_OFF           0x22330   /* editor+0x22330 -> inline EntityMode object */
 #define ED_ENTITY_MODE_OFF        0x23618   /* editor+0x23618 -> active editor state id (2 == EntityMode) */
 #define ED_SEL_OBJ_OFF            0x204d0   /* editor+0x204d0 -> selection object ptr */
 #define SEL_COUNT_OFF             0x88      /* selObj+0x88 -> selected count (s32) */
 #define SEL_HOVERED_OFF           0x2c      /* selObj+0x2c -> hovered entity id (-1 == hovering nothing) */
+/* selObj+0x80 is a POINTER to the selected-entity id array (s32 each), with the count at +0x88 -- i.e. the
+ * usual idList ptr/num shape, not an inline array. Established 2026-07-28 by a probe that read it inline and
+ * got the pointer's own halves back as "ids": low dword -797462928, high dword 479 (= 0x1DF, matching the
+ * 0x000001DF… entity pointers in the same log), then the count itself. An inline array here could only ever
+ * have held two entries before colliding with the count, which was the tell.
+ * This is the same array PasteInstantiate uses as its old->new id map, which is why the selection must be
+ * empty before calling it. */
+#define SEL_ID_ARRAY_PTR_OFF      0x80
 #define PREFAB_MAX_ENTITIES       100000    /* stale-slot sanity guard on the staged entity count */
 
 /* --- ACTION INJECTION (how we ask the engine to paste, instead of pasting ourselves) ----------------
@@ -201,6 +297,10 @@
 #define IDSTR_SIZE             0x30         /* sizeof(idStr) -- the SSO size */
 #define IDSTR_LEN_OFF          0x8          /* idStr: int len @ +0x8 */
 #define IDSTR_DATA_OFF         0x10         /* idStr: char* data @ +0x10 (heap when len>=0x10 else inline SSO) */
+#define IDSTR_FLAGS_OFF        0x18         /* idStr: allocedAndFlag @ +0x18 -- alloced size masked 0x3FFFFFFF,
+                                             * bit31 = dynamic, bit30 = buffer is heap-owned and MUST be freed.
+                                             * A fresh ctor writes 0x80000014 (dynamic, 20-byte SSO base). */
+#define IDSTR_SSO_OFF          0x1c         /* idStr: inline SSO buffer @ +0x1C -- data==self+0x1C means self-owned */
 #define TDEF_INHERIT_OFF       0x58         /* temp-def normalized inherit idStr (tmp+0x58) */
 #define TDEF_CLASS_OFF         0x60         /* temp-def normalized classname idStr (tmp+0x60) */
 #define TDEF_SOURCE_OFF        0x140        /* temp-def normalized decl-source idStr data-ptr (tmp+0x140) */
@@ -251,6 +351,25 @@
     _snprintf_s(_ld, sizeof _ld, _TRUNCATE, __VA_ARGS__); backend_log(_ld); } while (0)
 #else
 #define AE_DESER_DIAG(...) do { } while (0)
+#endif
+
+/* staged-prefab idList capacity diagnostic (2026-07-28, the Ctrl+C-after-Play fault hunt). Logs the staged
+ * entities idList's num and capacity right after a stage. num != capacity means the engine's teardown --
+ * which walks CAPACITY -- will destruct slots the deserializer never wrote, which is the current prime
+ * suspect for the fault.
+ *
+ * RESOLVED -- flipped OFF 2026-07-28. The capacity-tail theory was DISCONFIRMED live: num always equals
+ * capacity, because the g_prefab_ctor reset above zeroes capacity so the reflection deserializer always
+ * takes its grow path (which sets both from the same JSON length). The real cause was the ALLOCATION HEAP,
+ * not the list header -- see the MEMLOCAL_* block. This gate also carries the STAGE-DIAG scope-depth trace
+ * and the idMemLocal/heap-table dump, which is what caught a bad object RVA that was silently making the
+ * scope push a no-op. Worth flipping back to 1 for any future "is the push actually landing?" question. */
+#define AE_STAGE_DIAG_ON  0
+#if AE_STAGE_DIAG_ON
+#define AE_STAGE_DIAG(...) do { char _ls[256]; \
+    _snprintf_s(_ls, sizeof _ls, _TRUNCATE, __VA_ARGS__); backend_log(_ls); } while (0)
+#else
+#define AE_STAGE_DIAG(...) do { } while (0)
 #endif
 
 /* apply-commit diagnostic (2026-07-10, save->reload heap-corruption hunt): log the ACTUAL srcPtr/clsPtr/inhPtr
@@ -386,6 +505,230 @@ static int ae_read_u32_safe(const void *src, int *out)
     __except (EXCEPTION_EXECUTE_HANDLER) { *out = 0; return 0; }
 }
 
+/* ---- idMemLocal heap scope: push the process heap around an allocation that must outlive the map ----
+ * See the MEMLOCAL_* block above for why. Returns 1 if a scope was pushed and the caller MUST pair it with
+ * ae_pop_heap(); 0 means nothing was pushed and the caller must NOT pop (PopHeap fatals on underflow). */
+/* Signature-resolved at install (see sh_apply_engine_install). */
+static memlocal_get_fn      g_memlocal_get   = NULL;
+static memlocal_pushheap_fn g_memlocal_push  = NULL;
+static memlocal_popheap_fn  g_memlocal_pop   = NULL;
+
+/* Module-range guard. Everything we call must live inside the DOOM module, so a resolver miss that yields
+ * a plausible-looking-but-wrong pointer is refused rather than called. Reading a bad pointer is caught by
+ * SEH; CALLING one is not recoverable, so this check is the real protection. g_doom_module_span is the
+ * mapped size of the module, taken from its own PE headers. */
+static size_t g_doom_module_span = 0;
+
+static void ae_init_module_span(void)
+{
+    if (g_doom_module_span || !g_doom_base) return;
+    __try {
+        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)g_doom_base;
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+        const IMAGE_NT_HEADERS64 *nt = (const IMAGE_NT_HEADERS64 *)(g_doom_base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+        g_doom_module_span = (size_t)nt->OptionalHeader.SizeOfImage;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { g_doom_module_span = 0; }
+}
+
+static int ae_in_doom_module(const void *p)
+{
+    if (!p || !g_doom_base) return 0;
+    ae_init_module_span();
+    if (!g_doom_module_span) return 0;          /* unknown span -> refuse rather than guess */
+    const unsigned char *b = (const unsigned char *)p;
+    return (b >= g_doom_base) && (b < g_doom_base + g_doom_module_span);
+}
+
+/* The idMemLocal instance, obtained ONLY by calling the signature-resolved getter.
+ *
+ * Deliberately no raw-address fallback. An earlier revision read the instance from a hardcoded data RVA when
+ * the getter was unresolved, which is the one thing this codebase does not do: a data address cannot be
+ * signature-verified, so it is either right for exactly one build or silently wrong -- and this pointer gets
+ * CALLED through, not merely read. If the getter cannot be resolved, we return NULL and the caller simply
+ * does not push a heap scope; the allocation then lands where it used to and the protective re-ctor covers
+ * it. Degraded behaviour beats an unverifiable address. */
+static void *ae_memlocal(void)
+{
+    if (!g_memlocal_get || !ae_in_doom_module((const void *)g_memlocal_get)) return NULL;
+    void *self = NULL;
+    __try { self = g_memlocal_get(); } __except (EXCEPTION_EXECUTE_HANDLER) { self = NULL; }
+    return self;
+}
+
+/* why: 0 pushed, 1 no instance, 2 push fn unresolved, 3 push fn outside the DOOM module, 4 faulted */
+static int ae_push_heap_global_why(int *why)
+{
+    *why = 1;
+    void *self = ae_memlocal();
+    if (!self) return 0;
+    if (!g_memlocal_push) { *why = 2; return 0; }
+    if (!ae_in_doom_module((const void *)g_memlocal_push)) { *why = 3; return 0; }
+    __try {
+        g_memlocal_push(self, MEMLOCAL_HEAP_GLOBAL);
+        *why = 0;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { *why = 4; return 0; }
+}
+
+static int ae_push_heap_global(void) { int why = 0; return ae_push_heap_global_why(&why); }
+
+#if AE_STAGE_DIAG_ON
+/* Dump what we actually believe idMemLocal is, so a bad instance pointer cannot masquerade as a
+ * "push did nothing" -- which is exactly how the earlier wrong object address hid. Also prints the
+ * heap-handle table, which is what established that slot 0 is NULL and therefore that PushHeap(0) yields
+ * the process heap. Whether the instance is sane is judged by the readability of its own fields plus the
+ * scope-depth delta across the push, NOT by comparing against a hardcoded expected vtable address. */
+static void ae_log_memlocal_state(const char *when)
+{
+    const unsigned char *self = (const unsigned char *)ae_memlocal();
+    if (!self) { backend_log("MEMLOCAL: instance unavailable (MemLocalGet unresolved)"); return; }
+    void *vt = NULL, *h0 = NULL, *h1 = NULL, *h2 = NULL;
+    int depth = -1;
+    int gotVt = ae_read_ptr(self, &vt);
+    (void)ae_read_u32_safe(self + MEMLOCAL_SCOPE_DEPTH, &depth);
+    int g0 = ae_read_ptr(self + 0xc8, &h0);
+    int g1 = ae_read_ptr(self + 0xd0, &h1);
+    int g2 = ae_read_ptr(self + 0xd8, &h2);
+    char l[360];
+    _snprintf_s(l, sizeof l, _TRUNCATE,
+                "MEMLOCAL %s: obj=%p vt=%s%p inModule=%d depth=%d | heap[0]=%s%p heap[1]=%s%p "
+                "heap[2]=%s%p | GetProcessHeap()=%p",
+                when, (const void *)self, gotVt ? "" : "(unreadable)", vt,
+                ae_in_doom_module(vt), depth,
+                g0 ? "" : "(unreadable)", h0, g1 ? "" : "(unreadable)", h1,
+                g2 ? "" : "(unreadable)", h2, (void *)GetProcessHeap());
+    backend_log(l);
+}
+#endif /* AE_STAGE_DIAG_ON */
+
+/* ============================================================ paste-outcome DIAGNOSTIC ==============
+ * WHY. Auto-grab (kind=2) is implemented but disabled: one "Memory corruption before block!" followed two
+ * auto-grab pastes, while repeated MANUAL pastes of the same prefab are clean. That message is the guarded
+ * Mem_Free's cookie check (doom-re: engine/memory-heaps-and-allocator.md) -- it fires when the allocator is
+ * handed a pointer it never returned. So the question is which pointer, and what our sequence leaves
+ * different from a real Ctrl+V.
+ *
+ * WHAT THIS MEASURES. After ANY paste -- ours or a real Ctrl+V -- dump each newly selected entity's own
+ * allocation header: owning heap, tag, size, and whether the guard cookie still validates. Then compare the
+ * two. This is the same engine-vs-us control that cracked the staged-prefab case, applied to the paste's
+ * OUTPUT instead of its input.
+ *
+ * IMPORTANT SCOPE NOTE. kind=2 does not call PasteInstantiate itself -- it arms the action slot and the
+ * ENGINE performs the paste on a later frame, in its own dispatcher. So the entity allocations are made by
+ * engine code at the engine's own point in the frame, and the ambient heap scope should already match a
+ * manual Ctrl+V. That makes a heap-scope difference UNLIKELY for the injection route (it remains a strong
+ * candidate for the abandoned direct-call route, where our drain was the caller). If this probe shows both
+ * paths allocating identically, heap scope is eliminated for injection and the two remaining suspects --
+ * we SET the paste-available bit rather than letting the engine recompute it, and we ClearSelection
+ * immediately before arming -- become the front. Either outcome is progress.
+ *
+ * Because the paste lands a frame or more after we arm, the probe is driven from the per-tick hook on the
+ * hold transition (mode+0x1ac reaching 4), which catches a manual Ctrl+V too and so supplies the control.
+ *
+ * RESULT (2026-07-28) -- flipped OFF, question answered. Eight auto-grab pastes across two sessions, one on
+ * a fresh map, produced NO corruption, and the post-paste editor state was identical to a manual Ctrl+V:
+ *     mode+0x1ac=4  arm(+0x420)=-1  action=0x0  flags1(+0x41)=0x64 pasteAvail=1  flags2=0x00 dirty=0
+ * So both suspects are eliminated (forcing the paste-available bit; ClearSelection before arming), and the
+ * original corruption was the staged-prefab map-heap bug fixed the same day. kind=2 shipped on that basis.
+ *
+ * ⚠ KNOWN DEFECT if you re-enable this. The trigger fires on mode+0x1ac reaching 4, which is the
+ * MANIPULATION sub-state -- entered by a paste-hold AND by an ordinary grab of existing entities. So plain
+ * grabs get logged and MISLABELLED as "MANUAL (engine Ctrl+V)". Live example: entries showing
+ * flags1=0x0b pasteAvail=0 flags2=0x04 with selection counts of 106/90/104 were the maintainer moving
+ * entities pasted two minutes earlier, not pastes at all. (The pasteAvail=0 there is correct engine
+ * behaviour -- with something selected the gate recompute takes its other branch and never sets bit 0x40.)
+ * To fix properly, correlate against a paste actually having happened -- e.g. require the staged entity
+ * count to equal the new selection count, or latch on the arm word being consumed -- rather than trusting
+ * the sub-state alone. */
+#define AE_PASTE_DIAG_ON  0
+#if AE_PASTE_DIAG_ON
+#define AE_PASTE_DIAG(...) do { char _ld[320]; \
+    _snprintf_s(_ld, sizeof _ld, _TRUNCATE, __VA_ARGS__); backend_log(_ld); } while (0)
+#define AE_PASTE_DIAG_MAX_ENTS 8    /* cover a typical test prefab whole -- a truncated tail hides exactly
+                                     * the entity that might differ. Raised from 4 after it silently clipped
+                                     * the 5th of a 5-entity paste. */
+
+/* Set when WE armed a paste, so the probe can label whose paste it is observing. Decays after a few ticks
+ * so a later manual Ctrl+V is not misattributed to us. */
+static LONG g_armed_paste_ticks = 0;
+
+/* Report one engine pointer's allocation header. Shared shape with ae_block_survives_map, but this one
+ * prints rather than judges. */
+static void ae_log_ptr_alloc(const void *p, const char *label, int idx, int id)
+{
+    if (!p) { AE_PASTE_DIAG("PASTE-DIAG %s: ent[%d] id=%d ptr=NULL", label, idx, id); return; }
+    const unsigned char *b = (const unsigned char *)p;
+    unsigned tag = 0, flags = 0, lo = 0, hi = 0; int cookie = 0; void *sizeRaw = NULL;
+    if (!ae_read_u8_safe(b - 0x10, &tag) || !ae_read_u8_safe(b - 0x0f, &flags) ||
+        !ae_read_u8_safe(b - 0x0e, &lo)  || !ae_read_u8_safe(b - 0x0d, &hi) ||
+        !ae_read_u32_safe(b - 0x0c, &cookie) || !ae_read_ptr(b - 0x08, &sizeRaw)) {
+        AE_PASTE_DIAG("PASTE-DIAG %s: ent[%d] id=%d ptr=%p header UNREADABLE", label, idx, id, p);
+        return;
+    }
+    unsigned long long size = (unsigned long long)sizeRaw;
+    unsigned long long x = size ^ (unsigned long long)(b - 0x10);
+    unsigned expect = ((((unsigned)((lo | (hi << 8)) & 0xffff) << 8) | (tag & 0xff)) << 8) | (flags & 0xff);
+    expect ^= (unsigned)(x >> 32) ^ (unsigned)x;
+
+    /* The cookie is the ONLY thing that tells us the 16 bytes behind this pointer are actually an allocator
+     * header. If it does not validate, the tag/flags/size we just read are unrelated memory and must NOT be
+     * reported as a heap -- doing so once already produced a "heap=process size=10952820267294361465" line
+     * that looked like data. Most likely cause when this happens: the pointer is not a block START (an
+     * interior pointer, or an object sub-allocated out of a pool/arena), so there is no header to find. */
+    if ((unsigned)cookie != expect) {
+        AE_PASTE_DIAG("PASTE-DIAG %s: ent[%d] id=%d ptr=%p NOT AN ALLOCATOR BLOCK START "
+                      "(cookie mismatch -- heap/size unknowable from here)", label, idx, id, p);
+        return;
+    }
+    const char *heap = (flags & 3) ? "NOT-A-HEAP-BLOCK"
+                     : (flags & 4) ? "MAP"
+                     : (flags & 8) ? "PERSIST" : "process";
+    AE_PASTE_DIAG("PASTE-DIAG %s: ent[%d] id=%d ptr=%p tag=0x%02x flags=0x%02x size=%llu heap=%s cookie=VALID",
+                  label, idx, id, p, tag & 0xff, flags & 0xff, size, heap);
+}
+
+/* ae_probe_paste_outcome is defined further down, after the entity-array helpers it needs. */
+#else
+#define AE_PASTE_DIAG(...) do { } while (0)
+#endif
+
+/* LOAD-BEARING (pairs with ae_push_heap_global) -- must never be inside a diagnostic gate. */
+static void ae_pop_heap(void)
+{
+    void *self = ae_memlocal();
+    if (!self || !g_memlocal_pop) return;
+    if (!ae_in_doom_module((const void *)g_memlocal_pop)) return;
+    __try { g_memlocal_pop(self); } __except (EXCEPTION_EXECUTE_HANDLER) { }
+}
+
+/* ---- does this block live in a heap that survives a map teardown? ---------------------------------
+ * LOAD-BEARING, not a diagnostic -- sh_apply_prefab_poll_play uses this to decide whether the staged
+ * prefab may be left alone across Play. Never gate it behind a diagnostic flag.
+ * Reads the engine allocator's own 16-byte header from behind the pointer (see ae_log_alloc_heap for the
+ * layout) and requires the guard cookie to validate before trusting any of it. Returns 1 only when the
+ * block is a live allocation in the process or persist heap; 0 for the map heap, for a non-heap block, for
+ * a failed cookie, or for anything unreadable. Deliberately fail-safe: an unknown answer is 0, so callers
+ * keep their protective behaviour rather than betting on memory they could not verify. */
+static int ae_block_survives_map(const void *p)
+{
+    if (!p) return 0;
+    const unsigned char *b = (const unsigned char *)p;
+    unsigned tag = 0, flags = 0, lo = 0, hi = 0; int cookie = 0; void *sizeRaw = NULL;
+    if (!ae_read_u8_safe(b - 0x10, &tag) || !ae_read_u8_safe(b - 0x0f, &flags) ||
+        !ae_read_u8_safe(b - 0x0e, &lo)  || !ae_read_u8_safe(b - 0x0d, &hi) ||
+        !ae_read_u32_safe(b - 0x0c, &cookie) || !ae_read_ptr(b - 0x08, &sizeRaw))
+        return 0;
+    unsigned long long size = (unsigned long long)sizeRaw;
+    unsigned long long x = size ^ (unsigned long long)(b - 0x10);
+    unsigned expect = ((((unsigned)((lo | (hi << 8)) & 0xffff) << 8) | (tag & 0xff)) << 8) | (flags & 0xff);
+    expect ^= (unsigned)(x >> 32) ^ (unsigned)x;
+    if ((unsigned)cookie != expect) return 0;   /* not a live block -- do not trust it */
+    if (flags & 3) return 0;                    /* not a heap block at all */
+    if (flags & 4) return 0;                    /* MAP heap -> dies at map teardown */
+    return 1;                                   /* persist (bit3) or process heap -> survives */
+}
+
 /* "editor up" guard, matching the reference implementation editorSession: the loaded-map ptr (+0x204c8) is non-null in-editor. */
 static const uint8_t *ae_editor_session(void)
 {
@@ -420,6 +763,68 @@ static void *ae_entity_ptr(void *array, uint32_t count, int id)
     if (!ae_read_ptr((const uint8_t *)array + (size_t)id * 8, &e)) return NULL;
     return e;
 }
+
+#if AE_PASTE_DIAG_ON
+/* Walk the current selection and dump each selected entity's allocation header. Lives here rather than
+ * beside the other PASTE-DIAG helpers because it needs the entity-array accessors just above. */
+static void ae_probe_paste_outcome(const uint8_t *ed, const char *label)
+{
+    void *sel = NULL;
+    int count = 0;
+    if (!ae_read_ptr(ed + ED_SEL_OBJ_OFF, &sel) || !sel) return;
+    if (!ae_read_u32_safe((const uint8_t *)sel + SEL_COUNT_OFF, &count)) return;
+
+    void *array = NULL; uint32_t arrCount = 0;
+    int haveArray = ae_entity_array(&array, &arrCount);
+    AE_PASTE_DIAG("PASTE-DIAG %s: selection count=%d (entity array %s)", label, count,
+                  haveArray ? "ok" : "UNAVAILABLE");
+    if (!haveArray) return;
+
+    void *idArray = NULL;
+    if (!ae_read_ptr((const uint8_t *)sel + SEL_ID_ARRAY_PTR_OFF, &idArray) || !idArray) {
+        AE_PASTE_DIAG("PASTE-DIAG %s: selection id-array pointer unreadable/NULL", label);
+        return;
+    }
+
+    int n = count > AE_PASTE_DIAG_MAX_ENTS ? AE_PASTE_DIAG_MAX_ENTS : count;
+    for (int i = 0; i < n; i++) {
+        int id = -1;
+        if (!ae_read_u32_safe((const uint8_t *)idArray + (size_t)i * 4, &id)) continue;
+        ae_log_ptr_alloc(ae_entity_ptr(array, arrCount, id), label, i, id);
+    }
+
+    /* ---- editor state after the paste -------------------------------------------------------------
+     * Established 2026-07-28: entity objects are NOT guarded-allocator block starts (all four probed
+     * entities failed the cookie check, and their addresses are non-contiguous within a ~0x7000 region),
+     * so they are pool/arena-suballocated and there is no header to compare. The allocator-level
+     * engine-vs-us comparison is therefore unavailable for entities.
+     *
+     * So compare EDITOR STATE instead, which is what the two remaining suspects actually touch: we OR the
+     * paste-available bit into substate+0x41 rather than letting the engine recompute it, and we
+     * ClearSelection immediately before arming. Anything that differs here between a manual Ctrl+V and our
+     * injected one is a state the engine never produces for itself -- which is the whole question. */
+    const uint8_t *mode = ed + ED_MODE_OBJ_OFF;
+    const uint8_t *sub  = mode + MODE_IDLE_SUBSTATE_OFF;
+    int  edState = -1, modeState = -1, armWord = -1, actionId = -1, hovered = -1, stagedNum = -1, stagedCap = -1;
+    unsigned flags1 = 0, flags2 = 0;
+    (void)ae_read_u32_safe(ed + ED_ENTITY_MODE_OFF, &edState);
+    (void)ae_read_u32_safe(mode + 0x1ac, &modeState);
+    (void)ae_read_u32_safe(mode + MODE_ACTION_ARM_OFF, &armWord);
+    (void)ae_read_u32_safe(mode + MODE_ACTION_ID_OFF, &actionId);
+    (void)ae_read_u8_safe(sub + SUBSTATE_FLAGS1_OFF, &flags1);
+    (void)ae_read_u8_safe(sub + SUBSTATE_FLAGS2_OFF, &flags2);
+    (void)ae_read_u32_safe((const uint8_t *)sel + SEL_HOVERED_OFF, &hovered);
+    (void)ae_read_u32_safe(ed + PASTE_PREFAB_ENTCOUNT_OFF, &stagedNum);
+    (void)ae_read_u32_safe(ed + PASTE_PREFAB_ENTCAP_OFF, &stagedCap);
+    AE_PASTE_DIAG("PASTE-DIAG %s: STATE edState=%d mode+0x1ac=%d arm(+0x420)=%d action(+0x424)=0x%X "
+                  "flags1(+0x41)=0x%02x pasteAvail=%d flags2(+0x42)=0x%02x dirty=%d hovered=%d "
+                  "staged num=%d cap=%d",
+                  label, edState, modeState, armWord, (unsigned)actionId,
+                  flags1 & 0xff, (flags1 & SUBSTATE_PASTE_AVAIL_BIT) ? 1 : 0,
+                  flags2 & 0xff, (flags2 & SUBSTATE_RECOMPUTE_BIT) ? 1 : 0,
+                  hovered, stagedNum, stagedCap);
+}
+#endif
 
 /* declMgr -> reflection mgr: reflect = (*(*declMgr + 0x80))(declMgr). SEH-guarded; NULL on any fault.
  * Mirrors sh_typeinfo's ti_get_reflect + the reference implementation declMgr.readPointer().add(0x80).readPointer(). */
@@ -912,8 +1317,47 @@ static int ae_mkcmd_one(const char *prefab_text)
      * crash-safe on a live slot: the ctor (FUN_14054d0a0) rewrites every field unconditionally with no reads/
      * branches, so it cannot double-free; it only leaks the slot's prior list allocations (small, one-shot per
      * create -- acceptable vs a crash). SEH-guarded: a failed reset falls through to the pre-existing behavior. */
-    if (g_prefab_ctor) { __try { g_prefab_ctor(staging); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
-    int ok = ae_deserialize_to_obj(prefab_text, staging, "idSnapEntityPrefab");
+    /* Allocate the prefab's contents in the PROCESS heap rather than the map heap, so they survive a Play
+     * round-trip the way the engine's own Ctrl+C clipboard does. See the MEMLOCAL_* block for the full
+     * derivation; __try/__finally so the scope is always popped, since PopHeap fatals on underflow. */
+#if AE_STAGE_DIAG_ON
+    /* Snapshot the scope depth around the push. The delta is what distinguishes "the push took effect" from
+     * "the push silently did nothing" -- which is exactly how the earlier bad instance pointer hid, and it
+     * covers the off-main-thread no-op case too without needing to read the engine's main-thread id from a
+     * raw address (the thread gate is checked inside PushHeap itself). */
+    int myTid = (int)GetCurrentThreadId(), depth0 = -1, depth1 = -1, depth2 = -1;
+    const void *memlocal = ae_memlocal();
+    if (memlocal) (void)ae_read_u32_safe((const unsigned char *)memlocal + MEMLOCAL_SCOPE_DEPTH, &depth0);
+    ae_log_memlocal_state("at-stage");
+#endif
+
+    int pushWhy = 0;
+    int pushed = ae_push_heap_global_why(&pushWhy);
+    (void)pushWhy;
+
+#if AE_STAGE_DIAG_ON
+    if (memlocal) (void)ae_read_u32_safe((const unsigned char *)memlocal + MEMLOCAL_SCOPE_DEPTH, &depth1);
+#endif
+
+    int ok = 0;
+    __try {
+        if (g_prefab_ctor) { __try { g_prefab_ctor(staging); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+        ok = ae_deserialize_to_obj(prefab_text, staging, "idSnapEntityPrefab");
+    } __finally {
+        if (pushed) ae_pop_heap();
+    }
+
+#if AE_STAGE_DIAG_ON
+    if (memlocal) (void)ae_read_u32_safe((const unsigned char *)memlocal + MEMLOCAL_SCOPE_DEPTH, &depth2);
+    AE_STAGE_DIAG("STAGE-DIAG: tid=%d | pushCall=%d why=%s "
+                  "scopeDepth %d -> %d -> %d (%s)",
+                  myTid, pushed,
+                  pushWhy == 0 ? "pushed" : pushWhy == 1 ? "no-instance" :
+                  pushWhy == 2 ? "pushfn-unresolved" : pushWhy == 3 ? "pushfn-outside-module" : "FAULTED",
+                  depth0, depth1, depth2,
+                  (depth1 == depth0 + 1) ? "push TOOK EFFECT"
+                                         : (depth1 == depth0 ? "push DID NOTHING" : "unexpected"));
+#endif
     /* Remember that the slot now holds OUR prefab, and how many entities we left in it. Unlike an
      * engine-made Ctrl+C clipboard, ours does not survive a Play round-trip -- see
      * sh_apply_prefab_poll_play, which uses this to clean up only what we put there. */
@@ -921,6 +1365,12 @@ static int ae_mkcmd_one(const char *prefab_text)
         int n = 0;
         const uint8_t *ed2 = ae_editor_session();
         if (ed2 && ae_read_u32_safe(ed2 + PASTE_PREFAB_ENTCOUNT_OFF, &n)) {
+            int cap = 0;
+            if (ae_read_u32_safe(ed2 + PASTE_PREFAB_ENTCAP_OFF, &cap))
+                AE_STAGE_DIAG("stage: entities num=%d capacity=%d%s", n, cap,
+                              (n != cap) ? "  <-- CAPACITY TAIL" : "");
+            else
+                AE_STAGE_DIAG("stage: entities num=%d capacity=<unreadable>", n);
             InterlockedExchange(&g_we_staged_count, n);
             InterlockedExchange(&g_we_staged, 1);
         }
@@ -1072,6 +1522,12 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
         armed = 0;
     }
     if (!armed) return AE_PASTE_STAGED;
+
+#if AE_PASTE_DIAG_ON
+    /* Mark the next few ticks as "our paste" so the outcome probe can label whose it is. The engine
+     * consumes the armed action on a later frame, so the probe cannot run here. */
+    InterlockedExchange(&g_armed_paste_ticks, 8);
+#endif
 
     char l[128];
     _snprintf_s(l, sizeof l, _TRUNCATE, "C2 place: placed %d entities, editor now holding them", ent_count);
@@ -1511,6 +1967,294 @@ int sh_apply_last_place_result(void)
     return (int)g_last_place_result;
 }
 
+/* ============================================================ Play-round-trip slot DIAGNOSTIC =======
+ * WHY THIS EXISTS. doom-re campaign staged-prefab-equivalence proved (2026-07-28) that staging leaves the
+ * entities idList well-formed -- a live measurement showed num == capacity after every stage, because the
+ * g_prefab_ctor reset above zeroes capacity so the reflection deserializer always takes its grow path.
+ * So the invalidation is a PLAY-TIME event, and the open question is what exactly Play does to the slot.
+ *
+ * THE MEASUREMENT PROBLEM. sh_apply_prefab_poll_play re-ctors the slot on the way OUT (when Play starts),
+ * deliberately, while the memory is still intact. That means by the time Play ends the slot is already a
+ * clean empty prefab -- so simply logging after Play measures the mitigation, not the bug. To observe the
+ * real post-Play state the protective re-ctor has to be skipped, which re-arms the very crash it prevents.
+ * Hence two flags: the logging is harmless and on; the skip is DANGEROUS and off.
+ *
+ * WHAT IT RECORDS. On the way out: the entities idList header (ptr/num/capacity) plus, for the first few
+ * blobs, the teardown-relevant idStr at blob+0x168 (len / data / flags, and whether data points at that
+ * idStr's own SSO buffer, i.e. is self-owned). On the way back: the same fields again, with a diff. That
+ * discriminates the three candidate mechanisms directly -- header unchanged means the damage is inside the
+ * blobs; ptr changed or zeroed means Play released or moved the buffer; a data pointer that was self-owned
+ * going in but is not coming back means Play rewrote the string.
+ *
+ * ===== RESULT (2026-07-28, HOLD_SLOT run) -- THE MECHANISM =====
+ * Before Play: entities ptr=0x1D8F2C106C0, num=5, capacity=5, all blobs readable and well-formed.
+ * After Play:  the idList header is BYTE-IDENTICAL (same ptr, same num, same capacity) but the memory it
+ *              points at is UNMAPPED -- reading blob+0x0 faults. Not freed-and-reused (that would read as
+ *              garbage); unmapped.
+ * Control:     the engine's own Ctrl+C clipboard is byte-identical across Play INCLUDING its buffer
+ *              contents, so its blob array is NOT released.
+ *
+ * So Play releases the heap region holding OUR blob array to the OS, while the prefab keeps a live-looking
+ * header pointing into it. The next Ctrl+C then runs CreatePrefab -> prefab operator= -> idList operator=,
+ * which sees src->capacity(0) != dst->capacity(5), and calls the blob teardown with (ptr, capacity=5) --
+ * walking five blobs of unmapped-or-recycled memory and handing whatever it finds to the guarded free.
+ * That accounts for BOTH reported symptoms from one cause: read it while still unmapped and you get an AV;
+ * read it after the region has been re-committed by other allocations and you get plausible garbage with
+ * the heap-owned bit set, which trips the guarded free's cookie check ("Memory corruption before block!").
+ *
+ * The divergence is therefore NOT the contents of any member -- every member we probed matches the engine's
+ * own prefab exactly. It is WHICH HEAP the blob array is allocated from. Our staging allocates it through
+ * the reflection idList handler's element-supplied resize, the engine's through its own tag-aware resize;
+ * one lands in a map-lifetime heap and the other does not. Note the engine's guarded allocator selects
+ * between GetProcessHeap() and two other heaps on flag bits in each block's header, which is consistent
+ * with a map-scoped heap being torn down wholesale. Fixing this means getting our blob array allocated the
+ * way CreatePrefab's is; that is the open RE question, not a guess to code now. */
+#define AE_PLAY_DIAG_ON  0
+/* DANGER -- flip to 1 only for a deliberate diagnostic run, on a throwaway map, with your work saved.
+ * It SKIPS the protective re-ctor so the post-Play slot state is observable, which re-arms the known
+ * heap-corruption crash on the next Ctrl+C. "Memory corruption before block!" is a FATAL engine error
+ * (non-returning), so this can hard-kill the process, not just trip the fault shield. Leave at 0 for
+ * any normal build. */
+/* ANSWERED 2026-07-28 by a HOLD_SLOT run -- see the RESULT note below. Back to 0; there is no reason to
+ * turn this on again unless a NEW post-Play question needs the slot held. */
+#define AE_PLAY_DIAG_HOLD_SLOT  0
+
+#if AE_PLAY_DIAG_ON
+#define AE_PLAY_DIAG(...) do { char _lp[320]; \
+    _snprintf_s(_lp, sizeof _lp, _TRUNCATE, __VA_ARGS__); backend_log(_lp); } while (0)
+
+#define AE_PLAY_DIAG_MAX_BLOBS 3   /* enough to spot a pattern; keeps the log readable */
+
+typedef struct {
+    int   ok;        /* the idStr fields were readable at all */
+    int   len;       /* idStr +0x08 */
+    void *data;      /* idStr +0x10 */
+    int   flags;     /* idStr +0x18 */
+    int   selfOwned; /* data == thatIdStr + 0x1C (points at its own inline SSO buffer) */
+    char  head[20];  /* first chars of the string, when len > 0 -- NUL-terminated, best effort */
+    int   declOk;    /* blob+0x00 was readable */
+    void *decl;      /* blob+0x00 -- the OTHER thing the teardown destructs (decl dtor 0x17ACE70).
+                      * Live data 2026-07-28 showed the +0x168 idStr is self-owned with bit30 clear, so its
+                      * dtor frees nothing and cannot be the crash; this pointer and the array base are the
+                      * remaining candidates. */
+} ae_namestr_probe;
+
+/* Field-by-field probing has now ruled out every field it looks at: the control run (2026-07-28) showed the
+ * engine's OWN surviving clipboard has the same vtable at blob+0x00 and the same empty self-owned idStr at
+ * blob+0x168 as ours does. So the divergence is elsewhere in the 0x1B0-byte blob. Rather than guess members
+ * one at a time, snapshot the raw bytes and diff them -- the changed offsets then name the member directly. */
+#define AE_PLAY_DIAG_RAW_BLOBS  2       /* raw-diff the first two blobs (2 * 0x1B0 = 864 bytes of state) */
+#define AE_PLAY_DIAG_MAX_DIFFS  24      /* cap the diff report so one bad run cannot flood the log */
+
+typedef struct {
+    int   valid;     /* a snapshot was taken on the way out */
+    void *listPtr;
+    int   num, cap;
+    int   probed;    /* how many blobs were probed */
+    ae_namestr_probe s[AE_PLAY_DIAG_MAX_BLOBS];
+    int   rawOk[AE_PLAY_DIAG_RAW_BLOBS];                      /* the blob was fully readable */
+    unsigned char raw[AE_PLAY_DIAG_RAW_BLOBS][PREFAB_BLOB_STRIDE];
+} ae_play_snap;
+
+static ae_play_snap g_play_snap;
+
+/* ---- which heap did this block come from? -------------------------------------------------------
+ * The engine's guarded allocator (Mem_Alloc, pinned RVA 0x1AB2D00) writes a 16-byte header immediately
+ * BEHIND every pointer it returns, and Mem_Free (0x1AB32E0) reads it back to decide which heap to free
+ * into. Layout, relative to the returned pointer:
+ *
+ *   -0x10  u8   memory tag (statistics only -- NOT the heap selector)
+ *   -0x0f  u8   flags: bit2 => MAP heap, bit3 => PERSIST heap, neither => process heap.
+ *               bit0/bit1 => not a heap block at all (freed via a different routine).
+ *   -0x0e  u16  distance back to the raw HeapAlloc base
+ *   -0x0c  u32  guard cookie (address-dependent; Mem_Free fatals on mismatch)
+ *   -0x08  u64  requested size
+ *
+ * So a pointer can be asked, for free, which heap owns it -- and the cookie can be recomputed to check
+ * whether it still looks like a live allocation at all. That is the point of this probe: doom-re
+ * established (docs/truth/engine/memory-heaps-and-allocator.md) that the engine keeps three heaps and
+ * destroys the MAP heap wholesale on map load (ResetMapHeap, 0x1AC5920, calls HeapDestroy), which is why
+ * our staged blob array reads as UNMAPPED after Play rather than as garbage. If this reports our blob
+ * array in the map heap and the engine clipboard's in another, that is the mechanism confirmed at the
+ * allocation site. If it reports both the same, this whole reading is wrong. */
+static void ae_log_alloc_heap(const void *p, const char *label)
+{
+    if (!p) { AE_PLAY_DIAG("PLAY-DIAG HEAP %s: ptr=NULL", label); return; }
+    const unsigned char *b = (const unsigned char *)p;
+    unsigned tag = 0, flags = 0; int hdrBack = 0, cookie = 0; void *sizeRaw = NULL;
+    if (!ae_read_u8_safe(b - 0x10, &tag) || !ae_read_u8_safe(b - 0x0f, &flags) ||
+        !ae_read_u32_safe(b - 0x0c, &cookie) || !ae_read_ptr(b - 0x08, &sizeRaw)) {
+        AE_PLAY_DIAG("PLAY-DIAG HEAP %s: header behind %p UNREADABLE", label, p);
+        return;
+    }
+    { unsigned lo = 0, hi = 0;
+      (void)ae_read_u8_safe(b - 0x0e, &lo); (void)ae_read_u8_safe(b - 0x0d, &hi);
+      hdrBack = (int)(lo | (hi << 8)); }
+
+    const char *heap = (flags & 1) || (flags & 2) ? "NOT-A-HEAP-BLOCK"
+                     : (flags & 4)                ? "MAP heap  <-- dies at map teardown"
+                     : (flags & 8)                ? "PERSIST heap"
+                                                  : "process heap";
+    /* Recompute Mem_Free's cookie: x = size ^ (ptr-0x10);
+     * c = (((u16 hdrBack << 8 | tag) << 8) | flags) ^ (u32)(x >> 32) ^ (u32)x   */
+    unsigned long long size = (unsigned long long)sizeRaw;
+    unsigned long long x = size ^ (unsigned long long)(b - 0x10);
+    unsigned expect = ((((unsigned)(hdrBack & 0xffff) << 8) | (tag & 0xff)) << 8) | (flags & 0xff);
+    expect ^= (unsigned)(x >> 32) ^ (unsigned)x;
+    AE_PLAY_DIAG("PLAY-DIAG HEAP %s: ptr=%p tag=0x%02x flags=0x%02x size=%llu -> %s | cookie %s",
+                 label, p, tag & 0xff, flags & 0xff, size, heap,
+                 ((unsigned)cookie == expect) ? "VALID (live block)" : "MISMATCH (not a live block)");
+}
+
+/* Read the idList header + the first few blobs' teardown idStr. Every access is SEH-guarded, because after
+ * Play these pointers may be freed (garbage but mapped) or unmapped (faults) -- and which of those we get
+ * is itself part of the answer. */
+static void ae_play_probe(const uint8_t *ed, ae_play_snap *out)
+{
+    memset(out, 0, sizeof *out);
+    if (!ae_read_ptr(ed + PASTE_PREFAB_ENTPTR_OFF, &out->listPtr)) return;
+    (void)ae_read_u32_safe(ed + PASTE_PREFAB_ENTCOUNT_OFF, &out->num);
+    (void)ae_read_u32_safe(ed + PASTE_PREFAB_ENTCAP_OFF,   &out->cap);
+    out->valid = 1;
+    if (!out->listPtr) return;
+
+    int n = out->cap;
+    if (n > AE_PLAY_DIAG_MAX_BLOBS) n = AE_PLAY_DIAG_MAX_BLOBS;
+    if (n < 0) n = 0;
+    for (int i = 0; i < n; i++) {
+        const uint8_t *blob = (const uint8_t *)out->listPtr + (size_t)i * PREFAB_BLOB_STRIDE;
+        const uint8_t *str  = blob + PREFAB_BLOB_NAMESTR_OFF;
+        ae_namestr_probe *p = &out->s[i];
+        int gotLen = ae_read_u32_safe(str + IDSTR_LEN_OFF, &p->len);
+        int gotPtr = ae_read_ptr(str + IDSTR_DATA_OFF, &p->data);
+        int gotFlg = ae_read_u32_safe(str + IDSTR_FLAGS_OFF, &p->flags);
+        p->ok = (gotLen && gotPtr && gotFlg);
+        p->selfOwned = (p->ok && p->data == (void *)(str + IDSTR_SSO_OFF));
+        p->declOk = ae_read_ptr(blob, &p->decl);
+        /* capture the actual text when there is any -- the engine's own clipboard should have a real
+         * className here, ours (live 2026-07-28) has len=0. Best effort, guarded, always NUL-terminated. */
+        p->head[0] = '\0';
+        if (p->ok && p->len > 0 && p->data) {
+            int k = p->len < (int)sizeof p->head - 1 ? p->len : (int)sizeof p->head - 1;
+            __try {
+                for (int j = 0; j < k; j++) {
+                    char c = ((const char *)p->data)[j];
+                    p->head[j] = (c >= 32 && c < 127) ? c : '?';
+                }
+                p->head[k] = '\0';
+            } __except (EXCEPTION_EXECUTE_HANDLER) { p->head[0] = '\0'; }
+        }
+        out->probed = i + 1;
+    }
+
+    /* Raw byte snapshot of the first blobs. Copied one byte at a time under SEH so a partially-unmapped
+     * blob still yields whatever prefix is readable, and rawOk records whether the whole thing was. */
+    int nr = out->cap;
+    if (nr > AE_PLAY_DIAG_RAW_BLOBS) nr = AE_PLAY_DIAG_RAW_BLOBS;
+    if (nr < 0) nr = 0;
+    for (int i = 0; i < nr; i++) {
+        const unsigned char *src = (const unsigned char *)out->listPtr + (size_t)i * PREFAB_BLOB_STRIDE;
+        int got = 0;
+        __try {
+            for (; got < PREFAB_BLOB_STRIDE; got++) out->raw[i][got] = src[got];
+        } __except (EXCEPTION_EXECUTE_HANDLER) { }
+        out->rawOk[i] = (got == PREFAB_BLOB_STRIDE);
+        if (got < PREFAB_BLOB_STRIDE)
+            AE_PLAY_DIAG("PLAY-DIAG: blob[%d] raw read stopped at +0x%x (unmapped beyond that)", i, got);
+    }
+}
+
+/* Diff the raw blob bytes as 8-byte words and report the changed offsets. This is the instrument that
+ * names the invalidated member: a heap pointer that Play released shows up here as a specific offset whose
+ * value changed, and the offset is directly comparable against doom-re's blob layout work. */
+static void ae_play_diff_raw(const ae_play_snap *before, const ae_play_snap *after)
+{
+    int shown = 0;
+    for (int i = 0; i < AE_PLAY_DIAG_RAW_BLOBS; i++) {
+        if (!before->rawOk[i]) continue;
+        if (!after->rawOk[i]) {
+            AE_PLAY_DIAG("PLAY-DIAG RAW: blob[%d] was fully readable before Play and is NOT now "
+                         "(buffer released or unmapped)", i);
+            continue;
+        }
+        int changedWords = 0;
+        for (int off = 0; off + 8 <= PREFAB_BLOB_STRIDE; off += 8) {
+            unsigned long long b, a;
+            memcpy(&b, before->raw[i] + off, 8);
+            memcpy(&a, after->raw[i] + off, 8);
+            if (b == a) continue;
+            changedWords++;
+            if (shown < AE_PLAY_DIAG_MAX_DIFFS) {
+                AE_PLAY_DIAG("PLAY-DIAG RAW: blob[%d]+0x%03x  %016llx -> %016llx", i, off, b, a);
+                shown++;
+            }
+        }
+        if (changedWords == 0)
+            AE_PLAY_DIAG("PLAY-DIAG RAW: blob[%d] IDENTICAL across Play (all 0x%x bytes) -- the blob itself "
+                         "is untouched, so look at what it POINTS AT", i, PREFAB_BLOB_STRIDE);
+        else
+            AE_PLAY_DIAG("PLAY-DIAG RAW: blob[%d] %d of %d 8-byte words changed%s", i, changedWords,
+                         PREFAB_BLOB_STRIDE / 8,
+                         (shown >= AE_PLAY_DIAG_MAX_DIFFS) ? " (report truncated)" : "");
+    }
+}
+
+static void ae_play_log(const char *when, const ae_play_snap *s)
+{
+    AE_PLAY_DIAG("PLAY-DIAG %s: entities ptr=%p num=%d capacity=%d%s",
+                 when, s->listPtr, s->num, s->cap, (s->num != s->cap) ? "  <-- num!=cap" : "");
+    for (int i = 0; i < s->probed; i++) {
+        const ae_namestr_probe *p = &s->s[i];
+        if (!p->ok) { AE_PLAY_DIAG("PLAY-DIAG %s:   blob[%d] +0x168 UNREADABLE (faulted)", when, i); continue; }
+        AE_PLAY_DIAG("PLAY-DIAG %s:   blob[%d] +0x00 decl=%s%p | +0x168 len=%d data=%p flags=%08x "
+                     "alloced=%d dyn=%d owned=%d%s str=\"%s\"",
+                     when, i, p->declOk ? "" : "(unreadable)", p->decl,
+                     p->len, p->data, (unsigned)p->flags,
+                     p->flags & 0x3FFFFFFF, (p->flags < 0) ? 1 : 0, (p->flags >> 30) & 1,
+                     p->selfOwned ? " SELF-OWNED(SSO)" : (p->data ? "" : " data=NULL"),
+                     p->head);
+    }
+}
+
+/* The whole point: what CHANGED across Play. A heap-owned (bit30) data pointer that no longer looks like
+ * a live allocation is exactly what the next Ctrl+C teardown hands to the guarded free. */
+static void ae_play_log_diff(const ae_play_snap *before, const ae_play_snap *after)
+{
+    if (before->listPtr != after->listPtr)
+        AE_PLAY_DIAG("PLAY-DIAG DIFF: entities ptr CHANGED %p -> %p", before->listPtr, after->listPtr);
+    if (before->num != after->num || before->cap != after->cap)
+        AE_PLAY_DIAG("PLAY-DIAG DIFF: header CHANGED num %d->%d capacity %d->%d",
+                     before->num, after->num, before->cap, after->cap);
+    int nb = before->probed < after->probed ? before->probed : after->probed;
+    for (int i = 0; i < nb; i++) {
+        const ae_namestr_probe *b = &before->s[i], *a = &after->s[i];
+        if (b->ok && !a->ok) { AE_PLAY_DIAG("PLAY-DIAG DIFF: blob[%d] +0x168 became UNREADABLE", i); continue; }
+        if (!b->ok || !a->ok) continue;
+        if (b->len != a->len || b->data != a->data || b->flags != a->flags)
+            AE_PLAY_DIAG("PLAY-DIAG DIFF: blob[%d] +0x168 len %d->%d data %p->%p flags %08x->%08x%s",
+                         i, b->len, a->len, b->data, a->data,
+                         (unsigned)b->flags, (unsigned)a->flags,
+                         (b->selfOwned && !a->selfOwned) ? "  <-- WAS self-owned, NOW IS NOT" : "");
+        if (b->decl != a->decl)
+            AE_PLAY_DIAG("PLAY-DIAG DIFF: blob[%d] +0x00 decl CHANGED %p -> %p  <-- teardown destructs this",
+                         i, b->decl, a->decl);
+    }
+    if (before->listPtr == after->listPtr && before->num == after->num && before->cap == after->cap)
+        AE_PLAY_DIAG("PLAY-DIAG DIFF: idList header IDENTICAL across Play "
+                     "(so any damage is INSIDE the blobs, not in the header)");
+    /* Only meaningful when the buffer did not move -- otherwise we would be diffing two different blobs. */
+    if (before->listPtr == after->listPtr && before->listPtr != NULL)
+        ae_play_diff_raw(before, after);
+    else if (after->listPtr == NULL)
+        AE_PLAY_DIAG("PLAY-DIAG RAW: skipped (slot was cleared; with HOLD_SLOT off that is the re-ctor)");
+    else
+        AE_PLAY_DIAG("PLAY-DIAG RAW: skipped (buffer moved %p -> %p, so a byte diff would be meaningless)",
+                     before->listPtr, after->listPtr);
+}
+#else
+#define AE_PLAY_DIAG(...) do { } while (0)
+#endif
+
 /* ============================================================ post-Play staging invalidation ========
  * A Play round-trip tears the staged prefab's contents out from under editor+0x209a8 while LEAVING its
  * entity count non-zero. The engine's paste-available gate only tests that count, so coming back to the
@@ -1535,9 +2279,61 @@ void sh_apply_prefab_poll_play(void)
 {
     if (!g_doom_base) return;
 
+#if AE_PASTE_DIAG_ON
+    /* Paste-outcome probe. Trigger on mode+0x1ac reaching 4 -- the manipulation sub-state, i.e. the paste
+     * has COMPLETED and the editor is now holding the result.
+     *
+     * It used to trigger on the selection count going 0 -> N, which was wrong: AddToSelection APPENDS one
+     * entity at a time, so that fires on the first appended entity and samples mid-paste. Live proof from
+     * 2026-07-28: two readings showed "count=18" and "count=25" for a paste that placed 93, with
+     * arm(+0x420)=0 action=0x5C still pending and mode+0x1ac=1 -- which looked like a state divergence from
+     * a manual Ctrl+V but was just an early snapshot. Waiting for the hold transition samples once, after
+     * the engine has finished. A manual Ctrl+V ends in the same sub-state, so the control still comes free. */
+    {
+        static int s_prev_mode_state = -1;
+        const uint8_t *edp = ae_editor_session();
+        if (edp) {
+            int ms = -1, selc = -1;
+            void *selp = NULL;
+            if (ae_read_u32_safe(edp + ED_MODE_OBJ_OFF + 0x1ac, &ms)) {
+                if (s_prev_mode_state != 4 && ms == 4 &&
+                    ae_read_ptr(edp + ED_SEL_OBJ_OFF, &selp) && selp &&
+                    ae_read_u32_safe((const uint8_t *)selp + SEL_COUNT_OFF, &selc) && selc > 0) {
+                    LONG mine = InterlockedCompareExchange(&g_armed_paste_ticks, 0, 0);
+                    ae_probe_paste_outcome(edp, mine > 0 ? "OURS (injected)" : "MANUAL (engine Ctrl+V)");
+                }
+                s_prev_mode_state = ms;
+            }
+        }
+        LONG t = InterlockedCompareExchange(&g_armed_paste_ticks, 0, 0);
+        if (t > 0) InterlockedDecrement(&g_armed_paste_ticks);
+    }
+#endif
+
     int cur = 0;
     if (!ae_read_u32_safe(g_doom_base + LOAD_STATE_RVA, &cur)) return;
     LONG prev = InterlockedExchange(&g_last_load_state, (LONG)cur);
+
+#if AE_PLAY_DIAG_ON
+    /* Way BACK into the editor (a load finished -> RUNNING again). Re-probe and diff against the way-out
+     * snapshot. With AE_PLAY_DIAG_HOLD_SLOT off this will show the re-ctor'd empty slot (i.e. it confirms
+     * the mitigation ran, not what Play did); with it on, it shows the real post-Play state. */
+    if (prev != LOAD_STATE_RUNNING && cur == LOAD_STATE_RUNNING && g_play_snap.valid) {
+        const uint8_t *edb = ae_editor_session();
+        if (edb) {
+            ae_play_snap after;
+            ae_play_probe(edb, &after);
+            ae_play_log("after-Play", &after);
+            ae_play_log_diff(&g_play_snap, &after);
+#if !AE_PLAY_DIAG_HOLD_SLOT
+            AE_PLAY_DIAG("PLAY-DIAG note: HOLD_SLOT is off, so the slot was re-ctor'd on the way out -- "
+                         "the reading above reflects that reset, NOT what Play did to our prefab");
+#endif
+        }
+        g_play_snap.valid = 0;
+    }
+#endif
+
     /* React on the way OUT (RUNNING -> a load starting), not on the way back. At this moment our staged
      * prefab is about to become garbage but its memory is still intact, so re-initialising is safe and
      * leaves a clean empty slot for the whole Play session and everything after it. Cleaning on the way
@@ -1549,6 +2345,20 @@ void sh_apply_prefab_poll_play(void)
 
     int ent_count = 0;
     (void)ae_read_u32_safe(ed + PASTE_PREFAB_ENTCOUNT_OFF, &ent_count);
+
+#if AE_PLAY_DIAG_ON
+    /* Snapshot BEFORE the re-ctor below, while the contents are still intact -- this is the baseline the
+     * way-back probe is diffed against. Taken unconditionally (even for an engine-made clipboard), because
+     * the engine's own prefab SURVIVING Play is the control case for ours not surviving. */
+    if (ent_count != 0) {
+        const char *whose = g_we_staged ? "before-Play (OURS)" : "before-Play (engine clipboard)";
+        ae_play_probe(ed, &g_play_snap);
+        ae_play_log(whose, &g_play_snap);
+        /* THE decisive read: which heap owns the blob array. Comparing ours against the engine
+         * clipboard's is the whole experiment -- see ae_log_alloc_heap. */
+        ae_log_alloc_heap(g_play_snap.listPtr, whose);
+    }
+#endif
 
     /* Re-initialise the staging slot IF AND ONLY IF the prefab in it is one WE put there and nothing has
      * overwritten it since. Established live 2026-07-27:
@@ -1567,8 +2377,38 @@ void sh_apply_prefab_poll_play(void)
      * That is a real limitation, not the intended end state: the durable fix is to make our staging
      * allocate the way CreatePrefab does so it survives like the engine's own clipboard. That needs RE of
      * what CreatePrefab allocates differently, and is tracked as an open question rather than guessed at. */
+    /* Since the stage now runs under PushHeap(0) the blob array should be in the PROCESS heap, which a map
+     * teardown does not touch -- in which case the prefab survives Play like the engine's own clipboard and
+     * must be left alone, exactly as an engine-made clipboard is. Ask the block itself rather than assuming
+     * the fix took: ae_block_survives_map validates the allocator's guard cookie and reads the owning heap
+     * out of the block header, and answers 0 for anything it cannot verify. So if the fix ever regresses, or
+     * the scope push silently does not apply, this falls straight back to the protective re-ctor. */
+    void *blobArray = NULL;
+    int survives = 0;
+    if (ae_read_ptr(ed + PASTE_PREFAB_ENTPTR_OFF, &blobArray) && blobArray)
+        survives = ae_block_survives_map(blobArray);
+
     int mine = (InterlockedCompareExchange(&g_we_staged, 0, 1) == 1);
-    if (mine && ent_count != 0 && ent_count == (int)g_we_staged_count && g_prefab_ctor) {
+    if (mine && survives && ent_count != 0) {
+        /* Re-arm the "ours" marker: the slot still holds our prefab after Play, so a later Play must make
+         * this same decision again rather than treating it as an engine clipboard. */
+        InterlockedExchange(&g_we_staged, 1);
+        char l[220];
+        _snprintf_s(l, sizeof l, _TRUNCATE,
+                    "C2 stage: our %d-entity prefab is in a heap that survives a map teardown "
+                    "(process/persist, cookie verified) -> left staged across Play; Ctrl+V should work",
+                    ent_count);
+        backend_log(l);
+    }
+    else if (mine && ent_count != 0 && ent_count == (int)g_we_staged_count && g_prefab_ctor) {
+#if AE_PLAY_DIAG_HOLD_SLOT
+        /* DIAGNOSTIC MODE: deliberately do NOT re-ctor, so the post-Play state of our prefab is observable
+         * on the way back. This re-arms the heap-corruption crash a later Ctrl+C would hit -- that is the
+         * point, and it is why this is behind a default-off flag. */
+        AE_PLAY_DIAG("PLAY-DIAG: HOLDING our %d-entity slot -- protective re-ctor SKIPPED. "
+                     "The next Ctrl+C may hard-crash (fatal 'Memory corruption before block!'). "
+                     "Diagnostic build only.", ent_count);
+#else
         __try {
             g_prefab_ctor((void *)(ed + PASTE_STAGING_OFF));
             char l[200];
@@ -1579,6 +2419,7 @@ void sh_apply_prefab_poll_play(void)
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             backend_log("C2 stage: slot re-init faulted (left as-is)");
         }
+#endif
     } else if (ent_count != 0) {
         char l[200];
         _snprintf_s(l, sizeof l, _TRUNCATE,
@@ -1693,6 +2534,16 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
                                                                   module_base, PREFAB_CTOR_RVA, "prefab ctor");
         g_prefab_populate = (prefab_populate_fn)ae_pick_engine_fn(results, n, "PrefabPopulate",
                                                                   module_base, PREFAB_POPULATE_RVA, "prefab populate");
+        /* idMemLocal heap-scope trio -- lets the prefab stage allocate in the process heap so it survives a
+         * Play round-trip and map changes, like the engine's own clipboard. Signature-first with known_rva
+         * cross-check; every call site additionally range-checks these against the DOOM module before
+         * calling, since a wrong pointer here would be called, not merely read. */
+        g_memlocal_get  = (memlocal_get_fn)     ae_pick_engine_fn(results, n, "MemLocalGet",
+                                                                  module_base, MEMLOCAL_GET_RVA, "idMemLocal get");
+        g_memlocal_push = (memlocal_pushheap_fn)ae_pick_engine_fn(results, n, "MemLocalPushHeap",
+                                                                  module_base, MEMLOCAL_PUSHHEAP_RVA, "idMemLocal PushHeap");
+        g_memlocal_pop  = (memlocal_popheap_fn) ae_pick_engine_fn(results, n, "MemLocalPopHeap",
+                                                                  module_base, MEMLOCAL_POPHEAP_RVA, "idMemLocal PopHeap");
         g_prefab_dtor     = (prefab_dtor_fn)    (module_base + PREFAB_DTOR_RVA);
         g_deshare         = (ent_deshare_fn)    (module_base + ENT_DESHARE_RVA);
     }
