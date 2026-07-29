@@ -6,6 +6,109 @@ where our own reimplementation was wrong, not the original SnapHak's behavior; a
 (or faithful reproduction of) the *original's* behavior belongs in [`fidelity.md`](fidelity.md)
 instead. Entries are chronological, newest first.
 
+## 2026-07-28 — Load/Place now picks the prefab up (auto-grab enabled): the corruption was the heap bug
+
+**What changed.** `kind=2` (stage → pick up) is enabled. Load/Place no longer asks the user to press Ctrl+V.
+
+**Why it was off.** An unexplained `"Memory corruption before block!"` had followed two auto-grab pastes,
+while repeated manual pastes looked clean, so auto-grab was implemented and left disabled. Two suspects were
+on record, both states the engine never produces for itself: we **set** the paste-available bit rather than
+letting the engine recompute it, and we **ClearSelection** immediately before arming.
+
+**Why it is on now.** Re-tested after the map-heap fix below, with instrumentation:
+
+- **Eight auto-grab pastes across two sessions** — including three on a fresh map followed by several
+  minutes of ordinary editing — produced **no corruption**.
+- **Post-paste editor state is identical to a manual Ctrl+V:**
+  `mode+0x1ac=4  arm(+0x420)=-1  action=0x0  flags1(+0x41)=0x64 pasteAvail=1  flags2=0x00 dirty=0`.
+  So neither suspect leaves any residue, and the arm word self-clears — an injected action cannot re-fire.
+- The original corruption is therefore attributed to the **staged-prefab map-heap bug** fixed the same day
+  (entry below), which was live at the time of every earlier auto-grab observation. Consistent with the fact
+  that the "auto-grab specifically" reading rested on a manual control whose two recorded accounts
+  contradicted each other.
+
+**We do not bypass a capacity check.** Read from the engine's gate recompute, the paste-available bit is
+*exactly* two conditions — the copy/paste cvar AND staged entity count ≥ 1 — inside the nothing-hovered
+branch. **No budget term.** And because this route injects an action rather than calling `PasteInstantiate`
+directly, the engine still runs its own paste branch and every check inside it. Separately confirmed: the
+in-editor budget rows are **soft** (the editor deliberately allows exceeding them), so they are not something
+to gate on either.
+
+**The one honest residue:** we set the bit without reading `snapEdit_enableCopyPaste`, so a paste is possible
+while the user has copy/paste disabled. Minor — the engine's next recompute clears the bit again.
+
+**Degradation is unchanged and still load-bearing.** Any of "not in EntityMode", "already holding"
+(`mode+0x1ac` is 4), "hovering an entity", or "selection could not be cleared" aborts to stage-only with a
+toast. All were observed firing correctly during the test, including five consecutive `mode busy` refusals
+while the editor was holding.
+
+**Not fixed here, and unrelated:** under deliberately heavy load (several hundred entities pasted in ~2
+minutes) the engine raised `"Cannot map buffer with usage BU_STATIC"`, showed a modal and returned to the
+map-select menu. That is the engine's documented `level>=6` recoverable path, not corruption, and it was not
+reproduced on the fresh-map run. `snapEdit_skipLimits` was **not** set. Cause unattributed; nothing links it
+to this code path, and a vanilla session could plausibly reach the same state.
+
+## 2026-07-28 — the staged prefab now survives Play and map changes: it was in the wrong heap
+
+**Supersedes the "Known limitation" of the entry below.** That entry stopped the crash by discarding our
+staged prefab on the way into Play. This one removes the need to discard it at all.
+
+**Root cause.** Not structural inequivalence — the object we deserialize is member-for-member identical to
+`CreatePrefab`'s. The difference is **which heap its entity-blob array is allocated from.** Read live from
+each block's own allocator header:
+
+| block | tag | flags | size | heap |
+|---|---|---|---|---|
+| engine Ctrl+C clipboard, 1 entity | `0x05` | `0x00` | 432 = `1 × 0x1B0` | **process heap** |
+| our staged prefab, 5 entities | `0x05` | `0x04` | 2160 = `5 × 0x1B0` | **map heap** |
+
+Same element type, same tag, different heap. The engine keeps three heaps — global, persist, map — and
+`ResetMapHeap` calls `HeapDestroy` on the map heap at map load. So our array's pages were handed back to
+the OS while the prefab's `idList` header still pointed at them with `num == capacity == 5`. Measured
+directly: after Play the header was **byte-identical** but reading blob byte 0 **faulted**. Unmapped, not
+freed — which is the distinction that identified the mechanism, since a freed block's pages stay committed
+and read as garbage.
+
+That also explains why the same bug produced two different symptoms. Touch it while still unmapped and you
+get an access violation; touch it after unrelated allocations have re-committed that address range and you
+get plausible garbage with the heap-owned bit set, which fails the allocator's guard-cookie check and
+raises the fatal `Memory corruption before block!`.
+
+**Why the allocation lands there.** Every idlib container asks `Mem_Alloc` for heap id `-1`, meaning
+"whatever is on top of `idMemLocal`'s 32-deep heap-scope stack". An allocation's lifetime is therefore
+decided by *when* it runs, not by what is allocated — and while the SnapMap editor is up the engine already
+keeps the **map heap pushed** (observed scope depth 1). Our deserialize inherited it.
+
+**Fix.** Wrap the stage in the engine's own scope API — `idMemLocal::PushHeap(0)` / `PopHeap()`, reached
+through the instance returned by the allocator's magic-static getter. Heap-table slot 0 is `NULL` and
+`Mem_Alloc` falls through to `GetProcessHeap()` when the selected handle is null, so pushing `0` puts the
+blob array exactly where the engine's own clipboard lives. The engine uses this same `PushHeap(0)`/
+`PopHeap()` idiom itself. **No member copying changed.**
+
+`sh_apply_prefab_poll_play()` then stops discarding our prefab — but it asks the block rather than
+assuming: `ae_block_survives_map()` validates the allocator's guard cookie and reads the owning heap out of
+the block header, returning 0 for anything it cannot verify. So if the push ever stops working, the old
+protective re-ctor runs and the user gets the previous behaviour rather than a crash.
+
+**Verified.** Survives a Play round-trip *and* a map change, with Ctrl+V working afterwards — matching the
+engine's own clipboard.
+
+**Two things worth carrying forward.**
+
+- *Balance matters.* `PopHeap` **fatals on underflow**, so push/pop are paired with `__try/__finally`.
+- *The scope stack is global, not per-thread*, so this briefly changes the ambient heap for other threads.
+  That is a **leak** risk, never corruption: every block records its own heap in its header and `Mem_Free`
+  reads it back, so a block is always freed into the heap it came from regardless of the scope at free
+  time. Also note the whole mechanism is **main-thread-only** — `PushHeap`, `PopHeap` and `Mem_Alloc`'s
+  `-1` lookup share a `GetCurrentThreadId()` gate, and off that thread all of it is silently inert.
+
+The three engine functions are resolved by **signature** (`MemLocalGet`, `MemLocalPushHeap`,
+`MemLocalPopHeap`), not raw RVA, and each call is range-checked against the DOOM module before being made
+— a wrong pointer here would be *called*, not merely read. An earlier revision used a hand-computed RVA
+with a dropped digit, which put the object ~256 MB past the module and made the push a silent no-op.
+
+Full engine-side derivation: doom-re `docs/truth/engine/memory-heaps-and-allocator.md`.
+
 ## 2026-07-28 — a staged prefab poisoned the paste slot and killed vanilla Ctrl+C / Ctrl+V after Play
 
 **Symptom.** Stage a prefab with Load/Place, press Play, come back to the editor — and the game's own
@@ -44,10 +147,11 @@ Both survive a Play round-trip, so neither ever fired. The engine's `load_state`
 (`base+0x6DDE198`; `3` = RUNNING) does move, and per the fault-shield's own notes an in-editor in-place
 load never writes it.
 
-**Known limitation.** Our staged prefab still does not survive a Play — we now discard it deliberately
-rather than leave a landmine. Press Load/Place again after returning; it re-reads from disk. The durable
-fix is to make `ae_deserialize_to_obj` build an object structurally equivalent to what `CreatePrefab`
-produces, which is not yet understood.
+**Known limitation.** ~~Our staged prefab still does not survive a Play~~ — **RESOLVED later the same
+day, see the entry above.** The cause was not structural inequivalence at all: the object we build is
+member-for-member identical to `CreatePrefab`'s. It was allocated in the wrong **heap**. Note the
+hypothesis recorded here — "make `ae_deserialize_to_obj` build an object structurally equivalent to what
+`CreatePrefab` produces" — was **wrong**, and chasing it cost several rounds; the members already matched.
 
 ## 2026-07-13/14 — SnapStack lives in the backend (`snapstack.c` + `json_patch.c`); the `json_patch` empty-`edit` fix; store slots + management commands
 

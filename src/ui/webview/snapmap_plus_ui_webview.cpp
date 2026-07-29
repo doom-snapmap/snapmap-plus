@@ -802,22 +802,48 @@ static void poc_apply_load_prefab()
      * thread, which is where the clone_bss_apply drain runs it. If anything is unavailable -- sig
      * unresolved, not in EntityMode, selection not empty -- it degrades to the old stage-only behaviour
      * and the toast says so; there is no half-placed outcome. */
-    /* TEMPORARILY BACK TO kind=1 (stage-only). kind=2 (stage + auto pick-up) is implemented and its
-     * mechanism is proven -- action injection reaches the engine's own paste branch and the first-press
-     * grab works -- but it is DISABLED because the prefab we stage is not structurally equivalent to one
-     * the engine's own CreatePrefab builds. Established live 2026-07-27/28:
-     *   - a vanilla Ctrl+C clipboard survives Play, survives a fresh post-Play copy, and repeat-pastes
-     *     forever with zero faults (clean control run, Load/Place never pressed);
-     *   - with OUR prefab in the slot: Ctrl+V pastes nothing, Ctrl+C faults inside the engine's
-     *     lexer/string free (0x1ab32ee) while CreatePrefab tears the slot down, and repeated pastes end
-     *     in "Memory corruption before block!".
-     * One paste works and it degrades from there, which points at the object our deserialize builds --
-     * not at the call site, and not at a Play-lifetime issue (the map object survives the round-trip, so
-     * neither the session-null nor the map-pointer teardown detector ever fired).
-     * Re-enable by setting this back to 2 once the deserialized prefab matches CreatePrefab's output. */
-    sh_apply_item it; it.kind = 1; it.id = 0; it.text = body.c_str();
+    /* STILL kind=1 (stage-only), but the RECORDED REASON BELOW IS DISPROVEN -- read this before acting.
+     *
+     * The old note said kind=2 was disabled "because the prefab we stage is not structurally equivalent to
+     * one the engine's own CreatePrefab builds", and to re-enable "once the deserialized prefab matches
+     * CreatePrefab's output". Both are wrong:
+     *   - the object IS member-for-member equivalent; nothing about its layout ever differed;
+     *   - the real cause was that its entity-blob array was allocated in the engine's MAP heap, which
+     *     ResetMapHeap destroys with HeapDestroy at map load. Fixed 2026-07-28 by staging inside an
+     *     idMemLocal::PushHeap(0) scope (see apply_engine.c's MEMLOCAL_* block and docs/backend-changes.md).
+     * The symptoms that note cites -- "Ctrl+V pastes nothing, Ctrl+C faults at 0x1ab32ee, repeated pastes
+     * end in Memory corruption before block!" -- are exactly that bug, and it is fixed and verified: the
+     * staged prefab now survives a Play round-trip and a map change with Ctrl+V working afterwards.
+     *
+     * So the stated precondition for re-enabling is MET. It is still kind=1 only because the separate
+     * auto-grab corruption report has not been re-tested against the fixed build, and every observation
+     * behind it was made while the staged prefab lived in the map heap.
+     *
+     * ALSO NOTE the two records of the manual control CONTRADICT each other: this comment said repeated
+     * manual pastes of OUR prefab ended in "Memory corruption before block!", while the campaign recorded
+     * "the same repeated manual pasting under stage-only is clean". The "auto-grab specifically is at
+     * fault" conclusion rests on that control, so it is weaker than it looks.
+     *
+     * SHIPPED 2026-07-28 as kind=2 after a measured re-test. Evidence: eight auto-grab pastes across two
+     * sessions (one on a fresh map, followed by several minutes of normal editing) produced no corruption,
+     * and the post-paste editor state was IDENTICAL to a manual Ctrl+V --
+     *     mode+0x1ac=4  arm(+0x420)=-1  action=0x0  flags1(+0x41)=0x64 pasteAvail=1  flags2=0x00 dirty=0
+     * -- which eliminates both suspects that had kept this off (that we force the paste-available bit rather
+     * than let the engine recompute it, and that we ClearSelection immediately before arming). The arm word
+     * self-clears, so an injected action cannot re-fire either.
+     *
+     * Also verified while testing: the engine's paste gate contains NO capacity/budget term (it is exactly
+     * the copy/paste cvar AND staged count >= 1, inside the nothing-hovered branch), so forcing that bit
+     * cannot bypass a map-full check. And because this route INJECTS an action rather than calling
+     * PasteInstantiate directly, the engine still runs its own paste branch and every check inside it.
+     *
+     * The one honest residue: we set the bit without reading snapEdit_enableCopyPaste, so we could paste
+     * while the user has copy/paste disabled. Minor, and the engine's next recompute clears it again.
+     *
+     * REVERT: set kind back to 1 and rebuild -- that is the whole switch. */
+    sh_apply_item it; it.kind = 2; it.id = 0; it.text = body.c_str();
     g_load_result = poc_apply_edit_seh(&it, 1, "load-prefab");
-    char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: name='%s' staged=%d (kind=1: staged only, user presses Ctrl+V)",
+    char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: name='%s' staged=%d (kind=2: stage + auto pick-up)",
                              g_load_prefab_name.c_str(), g_load_result);
     poc_log(l);
 }
