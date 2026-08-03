@@ -312,6 +312,10 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     /* clone-extension (empty the backend-owned SnapStack stack; out-of-process frontends only). */
     g_iface_vtbl_live.clear_stack            = s->clear_stack;            /* +0x2A8 */
     g_iface_vtbl_live.manipulation_in_progress = s->manipulation_in_progress; /* +0x2C0 */
+    /* clone-extension (FIND a material decl by name; cached-only lookup, asset-viewport tab probe). */
+    g_iface_vtbl_live.find_material           = s->find_material;           /* +0x2C8 */
+    g_iface_vtbl_live.get_preview             = s->get_preview;             /* +0x2D0 */
+    g_iface_vtbl_live.request_preview         = s->request_preview;         /* +0x2D8 */
 }
 
 /* --------------------------------------------------------------------- the factory -----------------

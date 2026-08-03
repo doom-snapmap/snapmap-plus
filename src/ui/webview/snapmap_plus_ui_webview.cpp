@@ -1119,6 +1119,74 @@ static void poc_send_desc(const char *inherit, const char *classname)
     json += L"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
+
+/* Asset-viewport tab, first probe: resolve a MATERIAL decl by name (+0x2C8 find_material -- see
+ * typeinfo.c) and report found/not-found + whatever info the engine gave back. No image yet -- this is the
+ * resolve-only test (doom-re revenant-asset-index-and-viewport campaign, evidence 05); the render+capture
+ * side is a separate, larger unsolved piece. Live-tested in-game (2026-07-30): this resolves ANY shipped
+ * material name (the full catalog), not just ones already placed/rendered this session -- a miss means the
+ * name genuinely isn't a real material, not "not loaded yet". */
+static void poc_send_material_result(const char *name)
+{
+    if (!g_webview) return;
+    char info[256] = "";
+    int found = 0;
+    if (g_iface && g_iface->vtbl && g_iface->vtbl->find_material && name && name[0]) {
+        found = g_iface->vtbl->find_material(g_iface, name, info, (int)sizeof info);
+    }
+    std::wstring json = L"{\"kind\":\"materialResult\",\"name\":\"";
+    json += poc_json_w(name ? name : "");
+    json += L"\",\"found\":"; json += found ? L"true" : L"false";
+    json += L",\"info\":\""; json += poc_json_w(info); json += L"\"}";
+    g_webview->PostWebMessageAsJson(json.c_str());
+}
+/* Asset-viewport tab: fetch the latest published preview (+0x2D0 get_preview -- see preview.c). The
+ * backend encodes the pixels as a BMP data URI, so this is a pure fetch: no rendering, no engine touch.
+ * Two-step size probe because the image can be a few hundred KB and the required size is only known
+ * once something has actually been published. */
+static void poc_send_preview()
+{
+    if (!g_webview) return;
+    std::string uri;
+    int rc = 0;
+    if (g_iface && g_iface->vtbl && g_iface->vtbl->get_preview) {
+        char probe[8] = "";
+        rc = g_iface->vtbl->get_preview(g_iface, probe, (int)sizeof probe);
+        if (rc < 0) {                       /* -(required size) */
+            size_t need = (size_t)(-rc);
+            uri.resize(need);
+            rc = g_iface->vtbl->get_preview(g_iface, &uri[0], (int)need);
+            if (rc > 0) uri.resize((size_t)rc); else uri.clear();
+        } else if (rc > 0) {
+            uri.assign(probe, (size_t)rc);  /* implausibly small, but handle it */
+        }
+    }
+    std::wstring json = L"{\"kind\":\"previewImage\",\"ok\":";
+    json += uri.empty() ? L"false" : L"true";
+    json += L",\"uri\":\"";
+    json += poc_json_w(uri.c_str());
+    json += L"\"}";
+    g_webview->PostWebMessageAsJson(json.c_str());
+}
+
+/* Asset-viewport tab: ask the backend to render a NAMED material (+0x2D8 request_preview). Staging
+ * only -- the capture runs on the engine's render thread and needs a few frames, so the page polls
+ * getPreview afterwards rather than expecting an image back from this call. */
+static void poc_request_preview(const char *name)
+{
+    if (!g_webview) return;
+    int ok = 0;
+    if (g_iface && g_iface->vtbl && g_iface->vtbl->request_preview && name && *name)
+        ok = g_iface->vtbl->request_preview(g_iface, name);
+
+    std::wstring json = L"{\"kind\":\"previewRequested\",\"ok\":";
+    json += ok ? L"true" : L"false";
+    json += L",\"name\":\"";
+    json += poc_json_w(name ? name : "");
+    json += L"\"}";
+    g_webview->PostWebMessageAsJson(json.c_str());
+}
+
 /* Timelines Stage 3: the full event-def catalog, sent ONCE per session (like enumInherits' full list) --
  * the page caches it and filters client-side, same "first N shown, type to narrow" Combo() convention as
  * Inherit/Classname. Each event carries its arg SCHEMA (name+type per position)
@@ -1902,6 +1970,16 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 std::wstring inh, cls; json_get_wstr(json, L"inherit", inh); json_get_wstr(json, L"classname", cls);
                 std::string i8 = w_to_utf8(inh), c8 = w_to_utf8(cls);
                 poc_send_desc(i8.c_str(), c8.c_str());
+            } else if (cmd == L"findMaterial") {
+                std::wstring nm; json_get_wstr(json, L"name", nm);
+                std::string n8 = w_to_utf8(nm);
+                poc_send_material_result(n8.c_str());
+            } else if (cmd == L"getPreview") {
+                poc_send_preview();
+            } else if (cmd == L"requestPreview") {
+                std::wstring nm; json_get_wstr(json, L"name", nm);
+                std::string n8 = w_to_utf8(nm);
+                poc_request_preview(n8.c_str());
             } else if (cmd == L"camLock") {
                 int on = 0; json_get_int(json, L"on", &on);
                 g_cam_lock = (on != 0);

@@ -30,7 +30,8 @@
 #include "apply_engine.h"   /* the heavy slots (serialize/schedule-apply/read-prefab) */
 #include "signatures.h"
 #include "backend_log.h"
-#include "typeinfo.h"       /* sh_typeinfo_class_derives + the LIVE registry walks (collect_records/inherits) */
+#include "typeinfo.h"        /* sh_typeinfo_class_derives + the LIVE registry walks (collect_records/inherits) */
+#include "preview.h"         /* sh_preview_get / sh_preview_request -- the asset-preview transport */
 #include "valid_class_map.h" /* SH_VCM_* -- the class-dropdown static snapshot (used only if the live walk fails) */
 #include "wiring_cleandirect.h" /* sh_wiring_cleandirect_generation -- the wire-any connect-edit counter (+0x288) */
 #include "snapstack.h"          /* sh_snapstack_push_ids_backend -- the SnapStack stack push (+0x2A0) */
@@ -460,6 +461,37 @@ static int slot_manipulation_in_progress(sh_iface *self)
 {
     (void)self;
     return manipulation_in_progress() ? 1 : 0;
+}
+
+/* +0x2C8 (ext 12) FIND MATERIAL by name -- pure passthrough to sh_typeinfo_find_material (see typeinfo.c
+ * for the cached-only-lookup rationale and the FatalError/INT3-trap warning about the primitive this
+ * deliberately does NOT call). No editor/entity state involved, so no session gate here. */
+static int slot_find_material(sh_iface *self, const char *name, char *out_info, int cap)
+{
+    (void)self;
+    return sh_typeinfo_find_material(name, out_info, (size_t)cap);
+}
+
+/* +0x2D0 (ext 13) Latest asset-preview image (preview.c). Pure passthrough; no engine state touched
+ * here -- the pixels were produced and encoded elsewhere. Returns length, 0 if nothing published yet,
+ * or -(required) if the UI's buffer is too small. */
+static int slot_get_preview(sh_iface *self, char *out, int cap)
+{
+    (void)self;
+    return sh_preview_get(out, (size_t)(cap > 0 ? cap : 0));
+}
+
+/* +0x2D8 (ext 14) Ask for a NAMED asset to be previewed. Staging only -- production happens on another
+ * thread, so this returns as soon as the name is recorded and the caller polls get_preview (+0x2D0) for
+ * the result. NOTE: no producer is installed yet (the megatexture page decoder is unwritten), so this
+ * currently always times out on the UI side. The ABI slot is deliberately kept: it is route-independent
+ * and appending it later would move no offsets but would need another matched-pair rollout. */
+static int slot_request_preview(sh_iface *self, const char *name)
+{
+    (void)self;
+    if (!name || !*name) return 0;
+    sh_preview_request(name);
+    return 1;
 }
 
 static void mode_set_selection_state(int state)
@@ -1253,6 +1285,11 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     /* clone-extension: "the editor is mid-manipulation" -- every selection mutation is refused while
      * true, because the engine's Escape/cancel path would then corrupt the live map. */
     slots.manipulation_in_progress = slot_manipulation_in_progress;  /* +0x2C0 ext 11 */
+    /* clone-extension: FIND a material decl by name (cached-only lookup; the Revenant asset-viewport
+     * tab's first probe -- see typeinfo.c / sh_typeinfo_find_material). */
+    slots.find_material           = slot_find_material;              /* +0x2C8 ext 12 */
+    slots.get_preview             = slot_get_preview;                /* +0x2D0 ext 13 */
+    slots.request_preview         = slot_request_preview;            /* +0x2D8 ext 14 */
     sh_iface_bind_engine_slots(&slots);
 
     char line[200];

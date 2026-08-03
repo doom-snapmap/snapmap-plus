@@ -46,6 +46,9 @@
   .tab { padding: 7px 14px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; }
   .tab.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
   .tab:hover:not(.active) { color: var(--text); }
+  .mat-result { font-weight: 600; }
+  .mat-result.ok  { color: #2e7d46; }
+  .mat-result.err { color: var(--danger); }
   /* the global camera group lives in the tabstrip's spare right-side space */
   .camera { display: flex; align-items: center; gap: 8px; padding: 2px 6px; color: var(--muted); }
   .camera label { display: flex; align-items: center; gap: 4px; color: var(--text); }
@@ -363,6 +366,7 @@
     <div class="tab active" data-tab="entities">Entities</div>
     <div class="tab" data-tab="prefabs">Prefabs</div>
     <div class="tab" data-tab="timelines">Timelines</div>
+    <div class="tab" data-tab="assets">Assets</div>
     <div class="spacer"></div>
     <div class="camera">
       <span class="cam-title">Camera</span>
@@ -470,6 +474,34 @@
         <textarea class="pc-desc" id="pcDesc" placeholder="What is this prefab for? Saved automatically when you leave the field."></textarea>
         <label>Tags</label>
         <input type="text" id="pcTags" placeholder="comma, separated, tags -- the filter box matches them">
+      </div>
+    </div>
+  </div>
+
+  <div class="content" id="panel-assets" style="display:none;">
+    <div class="panel left-pane">
+      <div class="panel-head">
+        <span class="panel-title">Assets</span>
+      </div>
+      <div class="panel-body pad">
+        <p style="color:var(--muted); margin-top:0;">
+          Resolve-only test: checks whether a material of this name exists in the shipped catalog
+          (works for any real material, not just ones already placed or rendered). No image preview yet.
+        </p>
+        <label style="display:block; margin-bottom:8px;">
+          Material name
+          <input type="text" id="matNameBox" placeholder="e.g. textures/users/joconnell/doom1/doortrak" style="width:100%; margin-top:4px;">
+        </label>
+        <button class="btn primary" id="matCheckBtn">Check</button>
+        <div id="matResult" class="mat-result" style="margin-top:12px;"></div>
+<div style="margin-top:10px">
+  <button id="previewBtn" class="btn">Render preview</button>
+  <span id="previewStatus" style="margin-left:8px;opacity:.75;font-size:12px"></span>
+  <div style="margin-top:8px">
+    <img id="previewImg" alt="asset preview" style="display:none;width:256px;height:256px;
+         image-rendering:pixelated;border:1px solid rgba(255,255,255,.18);border-radius:4px;background:#111">
+  </div>
+</div>
       </div>
     </div>
   </div>
@@ -2876,6 +2908,12 @@
       updateDirty();
     } else if (d.kind === 'desc') {
       renderDesc(d);
+    } else if (d.kind === 'previewImage') {
+      onPreviewImage(d);
+    } else if (d.kind === 'previewRequested') {
+      onPreviewRequested(d);
+    } else if (d.kind === 'materialResult') {
+      renderMaterialResult(d);
     } else if (d.kind === 'events') {
       eventItems = d.items || [];
       eventCatalogByName = {};
@@ -3364,13 +3402,92 @@
       document.querySelectorAll('.tabstrip .tab').forEach(function(t){ t.classList.remove('active'); });
       this.classList.add('active');
       var which = this.getAttribute('data-tab');
-      ['entities','prefabs','timelines'].forEach(function(name){
+      ['entities','prefabs','timelines','assets'].forEach(function(name){
         document.getElementById('panel-' + name).style.display = (name === which) ? 'flex' : 'none';
       });
       if (which === 'prefabs') post({cmd:'listPrefabs'});
       if (which === 'timelines') tlMaybeAutoRefresh();   // catch stale content from a play-mode round-trip that happened while this tab wasn't visible
     });
   });
+  document.getElementById('matCheckBtn').addEventListener('click', function(){
+    var nm = document.getElementById('matNameBox').value.trim();
+    var out = document.getElementById('matResult');
+    if (!nm) { out.textContent = 'Type a material name first.'; out.className = 'mat-result'; return; }
+    out.textContent = 'Checking...'; out.className = 'mat-result';
+    post({cmd:'findMaterial', name: nm});
+  });
+  document.getElementById('matNameBox').addEventListener('keydown', function(e){
+    if (e.key === 'Enter') document.getElementById('matCheckBtn').click();
+  });
+  /* Preview any material: ask the backend to render the name in the box, then poll for the pixels.
+   * The capture happens on the engine's render thread and only becomes readable a few frames after the
+   * copy is recorded, so a request cannot answer synchronously -- hence poll rather than await. */
+  var pvTimer = null, pvTries = 0;
+  var PV_MAX_TRIES = 40, PV_INTERVAL_MS = 250;   /* ~10 s, comfortably past the readback delay */
+
+  function pvStatus(msg) {
+    var st = document.getElementById('previewStatus');
+    if (st) st.textContent = msg;
+  }
+  function pvStopPolling() {
+    if (pvTimer) { clearInterval(pvTimer); pvTimer = null; }
+    pvTries = 0;
+  }
+  function onPreviewRequested(d) {
+    if (!d.ok) {
+      pvStopPolling();
+      pvStatus('Backend refused the request - is the engine hook installed?');
+      return;
+    }
+    pvStatus('Loading a preview of "' + (d.name || '') + '"...');
+    pvStopPolling();
+    pvTimer = setInterval(function(){
+      if (++pvTries > PV_MAX_TRIES) {
+        pvStopPolling();
+        pvStatus('Timed out waiting for the preview. No image producer is installed yet.');
+        return;
+      }
+      post({cmd:'getPreview'});
+    }, PV_INTERVAL_MS);
+  }
+  function onPreviewImage(d) {
+    var img = document.getElementById('previewImg');
+    if (d.ok && d.uri) {
+      pvStopPolling();
+      if (img) { img.src = d.uri; img.style.display = 'block'; }
+      pvStatus('Engine-rendered preview (256x256).');
+    } else if (!pvTimer) {
+      /* Only report emptiness when we are NOT mid-poll -- during a poll an empty answer just means
+       * the capture has not landed yet, and saying so every 250 ms would be noise. */
+      if (img) img.style.display = 'none';
+      pvStatus('No capture yet - click Render preview with a material name.');
+    }
+  }
+
+  var pvBtn = document.getElementById('previewBtn');
+  if (pvBtn) pvBtn.addEventListener('click', function(){
+    var box  = document.getElementById('matNameBox');
+    var name = box ? (box.value || '').trim() : '';
+    if (!name) { pvStatus('Enter a material name above first.'); return; }
+    pvStatus('Requesting "' + name + '"...');
+    post({cmd:'requestPreview', name:name});
+  });
+  function renderMaterialResult(d) {
+    var out = document.getElementById('matResult');
+    if (!out) return;
+    /* String.fromCharCode (not a literal glyph / \u escape) -- the mockup.html -> C++ header embedding
+     * pipeline does not appear to preserve non-ASCII source bytes as valid UTF-8 (a literal check/cross
+     * character here rendered as three mangled "?" glyphs in-game). Plain ASCII source, built up at
+     * runtime, sidesteps the embedding step entirely regardless of what it does with encoding. */
+    var CHECK = String.fromCharCode(0x2713), CROSS = String.fromCharCode(0x2717);
+    if (d.found) {
+      out.textContent = CHECK + ' ' + d.name + ' -- ' + (d.info || 'found');
+      out.className = 'mat-result ok';
+    } else {
+      out.textContent = CROSS + ' ' + d.name + ' -- not found (not a real material name)';
+      out.className = 'mat-result err';
+    }
+  }
   // also refresh on regaining focus/visibility WITHOUT a tab click -- e.g. the Timelines tab was already
   // active before Play mode took the window away, so there's no tab-click to hang the refresh off of when
   // the user comes back. Same tlMaybeAutoRefresh gate (skips if dirty/no timeline open/save in flight).

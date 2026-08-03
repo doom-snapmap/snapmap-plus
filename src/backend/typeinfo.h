@@ -113,4 +113,25 @@ int sh_typeinfo_collect_records(sh_ti_record *out, int cap);
  * or -1 if the manager is unreachable (caller falls back to a static list). */
 int sh_typeinfo_collect_inherits(const char **out_names, int cap);
 
+/* Resolve a MATERIAL decl by name via the SAME pure decl-find primitive sh_typeinfo_inherit_base uses
+ * (DECL_PURE_FIND_RVA -- read-lock -> hash -> probe -> cached-decl-or-NULL -> unlock; no load/parse/
+ * FatalError trap), pointed at the material type-manager's own ctx instead of the entityDef one.
+ *
+ * Live-tested in-game (2026-07-30): resolves ANY shipped material decl (the full ~9,805-entry catalog),
+ * with no placement/rendering/prior use required -- an earlier "cached-only, session-so-far" assumption in
+ * the .c file's comment was WRONG and is corrected there; a genuinely made-up name still correctly reports
+ * "not found" (confirmed with a negative-control test). Material decls are cheap text metadata registered
+ * for the whole catalog at boot, independent of whether the material has actually been drawn.
+ *
+ * Deliberately still NOT the load-or-create primitive (FUN_1417b36f0 in the doom-re
+ * revenant-asset-index-and-viewport campaign's numbering), which has FatalError/INT3 traps on an
+ * unresolvable name and must never be called here -- no reason to touch it now that the pure find already
+ * covers the whole catalog. On a hit, best-effort (SEH-guarded, degrades gracefully) also reads the
+ * material's bound-image width/height via the engine's own getters rather than reimplementing their
+ * fallback logic -- CONFIRMED live (2026-07-30) to return real per-material dimensions (varying sensibly,
+ * 4096x4096 down to very small), not a fixed fallback, even for a never-rendered material. Writes a short
+ * human-readable result into buf ("found (WxH)" / "found" / empty on a miss) and returns 1 on a hit, 0
+ * otherwise (miss, bad args, or engine unavailable -- never a crash). */
+int sh_typeinfo_find_material(const char *name, char *buf, size_t cap);
+
 #endif /* BACKEND_B2_TYPEINFO_H */

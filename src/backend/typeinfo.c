@@ -297,6 +297,196 @@ const char *sh_typeinfo_inherit_base(const char *inheritName, char *buf, size_t 
     } __except (EXCEPTION_EXECUTE_HANDLER) { buf[0] = '\0'; return NULL; }
 }
 
+/* -------------------------------------------------- MATERIAL decl-find (Revenant asset-viewport tab) -----
+ * Resolves a MATERIAL decl by name using the SAME pure decl-find primitive as sh_typeinfo_inherit_base
+ * above (DECL_PURE_FIND_RVA -- read-lock -> hash -> probe -> cached-decl-or-NULL -> unlock; no load/parse/
+ * FatalError trap), pointed at the MATERIAL type-manager's own ctx instead of the entityDef resource-mgr's.
+ *
+ * MATERIAL_MGR_CTX_RVA is DIRECT: read off the live `idSWFSpriteInstance::material` setter's own decl-find
+ * call in the doom-re `revenant-asset-index-and-viewport` campaign (evidence 05 SS8.2 -- that project's
+ * Ghidra numbering, image base 0x140000000, address 0x1459bd9d0 => RVA 0x59BD9D0). Reusing
+ * DECL_PURE_FIND_RVA against this different ctx is an ASSUMPTION that the pure-find primitive generalizes
+ * across resource-manager instances of the same shape -- corroborated (not proven) by the material ctx
+ * sitting only 0xE0 bytes from RESOURCE_MGR_CTX_RVA (0x59BD8F0), suggestive of a common per-decl-type
+ * context table. SEH-guarded either way: a wrong assumption degrades to "not found", never a crash.
+ *
+ * CORRECTED 2026-07-30 by live in-game test (user): this is NOT a "cached-only, session-so-far" lookup as
+ * first assumed here -- it resolves ANY of the shipped material decls (the full ~9,805-entry catalog),
+ * with no placement/rendering/prior use required, while a genuinely made-up name still correctly reports
+ * "not found" (confirmed with a negative-control test). The likely reason: material DECLS (unlike the GPU
+ * image data they may reference) are cheap text metadata the engine registers into the type manager's hash
+ * table for the whole catalog at boot, independent of whether any given material has actually been drawn
+ * yet -- so "pure find" here means "is this decl NAME known to the registry", not "has this material's
+ * resource been loaded". This is materially better than first thought: the resolve step already covers the
+ * full asset index, not just an in-use subset. Still NOT the load-or-create primitive (FUN_1417b36f0 in
+ * that campaign's numbering, which the same evidence flags as FatalError/INT3-trapping on a miss) -- no
+ * reason to touch that now that the pure find already covers the whole catalog.
+ *
+ * On a hit, ALSO best-effort calls the engine's own materialWidth/materialHeight getters (the same two
+ * functions the SWF native vars `materialWidth`/`materialHeight` call in that campaign -- RVAs 0xD75D40 /
+ * 0xD75B40, DIRECT from its decompile) on the resolved idMaterial*, rather than reimplementing their
+ * branchy fallback logic ourselves. A dimension-read fault degrades to "found" with no dimensions, never a
+ * crash -- the decl-find result is the useful part either way. CONFIRMED live (2026-07-30, user): the
+ * reported dimensions vary sensibly across materials (4096x4096 down to very small) -- real per-material
+ * image metadata, not a fixed fallback value, even for materials never placed/rendered this session. Safe
+ * to use for real dimension data, not just as a found/not-found signal. */
+#define MATERIAL_MGR_CTX_RVA    0x59BD9D0u  /* material type-mgr ctx (DIRECT, revenant-asset-index-and-viewport evidence 05 SS8.2) */
+#define MATERIAL_WIDTH_FN_RVA   0xD75D40u   /* idMaterial width getter (DIRECT, same campaign) */
+#define MATERIAL_HEIGHT_FN_RVA  0xD75B40u   /* idMaterial height getter (DIRECT, same campaign) */
+
+/* Structural probe only (2026-07-30) -- reads two more pointer hops WITHOUT touching Vulkan/GPU state, to
+ * confirm the offsets before any capture code is written. Traced from `idVirtualTexture::SetSource`
+ * (FUN_140E11C50 in the doom-re campaign's numbering): a VMTR-backed material's `+0x170` field (the SAME
+ * one the width/height getters above already read) is an `idVirtualTexture*`, and that object keeps an
+ * ALWAYS-RESIDENT low-res fallback texture -- a genuine `idImage` (built via the same ScratchImage /
+ * idImage_Vulkan_PC path evidence 05 SS13.2 already proved reusable, name-suffixed "_minlod", with its own
+ * FatalError check on allocation failure) -- at a fixed offset on the idVirtualTexture object.
+ * MATERIAL_VTEX_OFF is the SAME offset the width/height getters dereference (0x170); VTEX_MINLOD_IMAGE_OFF
+ * is DIRECT from SetSource's own `ScratchImage(..., "..._minlod", ...)` call site writing to `this+0x3F0`.
+ * This is INFERRED to generalize (SetSource's `this` and the getter's `*(material+0x170)` write/read the
+ * SAME header-derived field at the SAME +0x20 offset, which is the corroborating link -- not yet confirmed
+ * any further). Purely additive to the existing find/dimension result; never touches the material-find
+ * result or return value, so a wrong offset here degrades to blank probe fields, nothing else.
+ *
+ * THIRD ATTEMPT at the image's real pixel size (2026-07-31), after two live-tested failures. Both earlier
+ * guesses read a field that some OTHER code path happened to write; this one reads the field the Vulkan
+ * image-creation path ITSELF consumes, so it cannot be path-specific:
+ *
+ *   idImage_Vulkan_PC::Create (FUN_140DADB70 in the campaign's numbering -- identified by its own assertion
+ *   naming Image_Vulkan_PC.cpp) memsets a 0x58-byte stack struct, fills it, and passes it to vkCreateImage
+ *   as pCreateInfo. 0x58 is sizeof(VkImageCreateInfo) exactly, and the fill is a byte-exact match to that
+ *   struct's layout, confirmed by FIVE independent constants that could not all line up by chance:
+ *     +0x00 sType    = 0xE  == VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
+ *     +0x10 flags    = 0x10 == VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT (set only on the cube branch)
+ *     +0x14 type     = 1 or 2 == VK_IMAGE_TYPE_2D / _3D (selected by the same cube/3D discriminator)
+ *     +0x30 samples  = 1|2|4|8 exactly (VkSampleCountFlagBits' only legal values, from a 4-way switch)
+ *     +0x3C/+0x40/+0x48 = sharingMode / queueFamilyIndexCount=2 / pQueueFamilyIndices -- all three set
+ *                    together off one global, the textbook CONCURRENT-sharing triple
+ *   With the layout pinned, the extent fields are read verbatim from the image object:
+ *     extent.width  (+0x1C) <- *(int *)(image + 0x60)
+ *     extent.height (+0x20) <- *(int *)(image + 0x64)
+ *     mipLevels     (+0x28) <- *(int *)(image + 0x70)
+ *   These are populated by the opts->image field copy at the TOP of Create (image field = opts field +
+ *   0x54), and idImageManager::ScratchImage (FUN_140DA3600, named by its own "called with empty name"
+ *   error) performs the IDENTICAL copy on its deferred branch too -- so the fields are valid whether or not
+ *   the VkImage itself exists yet. This is why it beats both dead ends: it is the universal path every
+ *   engine image passes through, not one creation variant.
+ *
+ * The min-LOD call site supplies KNOWN LITERALS for three of these, which this probe reads back as built-in
+ * negative controls -- the thing both failed attempts lacked. SetSource's "_minlod" ScratchImage opts have
+ * type=0 (2D), engine format=0x13, mipLevels=1, so IMAGE_TYPE_OFF/IMAGE_FMT_OFF/IMAGE_MIPS_OFF must read
+ * back exactly 0 / 0x13 / 1. If they do, the offset family is confirmed by three literal matches and the
+ * width/height read beside them is trustworthy; if they do not, the mapping is wrong and the dimensions
+ * must be discarded regardless of how plausible they look. IMAGE_CREATEFAIL_OFF is the same +0xBD byte
+ * SetSource itself tests to decide whether to FatalError on min-LOD allocation failure (expect 0), and
+ * IMAGE_VKIMAGE_OFF is the live VkImage handle vkCreateImage writes (expect non-NULL) -- together they say
+ * whether the image is really GPU-resident and thus copyable.
+ *
+ * PRIOR DEAD ENDS, both live-tested wrong, retained so neither gets retried:
+ *   0x38/0x3C -- came from a FILE-LOADING creation variant (FUN_140D9D240); those are decoded-source-art
+ *     dimensions, a different field family from the created VkImage's extent. Not populated on a
+ *     ScratchImage-created image.
+ *   VTEX +0x1C -- SetSource really does pass this as both width and height, so the static read was right,
+ *     but the value is in PAGES, not pixels (the same function computes it as `1 << (numLodLevels-1)` and
+ *     derives the pixel size as `that * 120`, the known page quantum -- 2048 pages * 120 = 245760, the
+ *     atlas width from promoted truth). It is also only overwritten on ONE of SetSource's two branches; on
+ *     the other it retains raw .vmtr header bytes that happen to sit at that offset, which is exactly the
+ *     large non-power-of-two garbage the live test saw. Kept below purely as a cross-check to print
+ *     alongside the extent, NOT as a size. */
+#define MATERIAL_VTEX_OFF        0x170u  /* material -> idVirtualTexture* (0 if not virtual-textured) */
+#define VTEX_MINLOD_IMAGE_OFF    0x3F0u  /* idVirtualTexture -> idImage* (always-resident low-res fallback) */
+/* LIVE-CORRECTED 2026-07-31: +0x1C is the material's atlas Y COORDINATE, not a page count. The probe read
+ * 149760 for skull_key_gray, exactly that material's atlas y (its .vmtr row is `9600 149760 1920 1920` =
+ * x y w h). SetSource's two 8-byte header stores lay the row out as x@+0x18, y@+0x1C, w@+0x20, h@+0x24;
+ * the `1 << (numLodLevels-1)` write that suggested "pages" is on a branch these materials do not take.
+ * CONFIRMED as a by-product: +0x20 really is the atlas width -- the engine's own material width getter
+ * computes `*(vtex+0x20) * 128 / 120`, and 1920*128/120 = 2048 matched the live reported dimensions. */
+#define VTEX_ATLAS_Y_OFF         0x1Cu   /* idVirtualTexture -> atlas Y coordinate (px) -- cross-check only */
+#define VTEX_ATLAS_W_OFF         0x20u   /* idVirtualTexture -> atlas width (px); getter does *128/120 */
+#define IMAGE_TYPE_OFF           0x54u   /* idImage -> image type; min-LOD control value: 0 (2D) */
+#define IMAGE_FMT_OFF            0x58u   /* idImage -> engine format enum; min-LOD control value: 0x13 */
+#define IMAGE_EXTENT_W_OFF       0x60u   /* idImage -> VkImageCreateInfo.extent.width  (authoritative) */
+#define IMAGE_EXTENT_H_OFF       0x64u   /* idImage -> VkImageCreateInfo.extent.height (authoritative) */
+#define IMAGE_MIPS_OFF           0x70u   /* idImage -> VkImageCreateInfo.mipLevels; min-LOD control value: 1 */
+#define IMAGE_CREATEFAIL_OFF     0xBDu   /* idImage -> creation-failure byte SetSource tests (expect 0) */
+#define IMAGE_VKIMAGE_OFF        0xE0u   /* idImage -> live VkImage handle (expect non-NULL if resident) */
+
+int sh_typeinfo_find_material(const char *name, char *buf, size_t cap)
+{
+    if (buf && cap) buf[0] = '\0';
+    if (!g_doom_base || !name || !name[0] || !buf || cap < 2) return 0;
+    __try {
+        typedef void *(*decl_find_fn)(void *ctx, const char *name);
+        void *ctx = (void *)(g_doom_base + MATERIAL_MGR_CTX_RVA);
+        decl_find_fn find = (decl_find_fn)(g_doom_base + DECL_PURE_FIND_RVA);
+        void *material = find(ctx, name);
+        if (!material) return 0;
+
+        int w = -1, h = -1;
+        __try {
+            typedef int (*dim_fn)(void *material);
+            dim_fn get_w = (dim_fn)(g_doom_base + MATERIAL_WIDTH_FN_RVA);
+            dim_fn get_h = (dim_fn)(g_doom_base + MATERIAL_HEIGHT_FN_RVA);
+            w = get_w(material);
+            h = get_h(material);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { w = -1; h = -1; }
+
+        /* structural probe -- see the comment above; never affects found/dims, best-effort only */
+        int has_vtex = 0, has_minlod = 0;
+        int img_w = -1, img_h = -1, img_type = -1, img_fmt = -1, img_mips = -1;
+        int pages = -1, fail = -1, resident = 0;
+        __try {
+            void *vtex = *(void * const *)((const uint8_t *)material + MATERIAL_VTEX_OFF);
+            if (vtex) {
+                has_vtex = 1;
+                pages = *(const int *)((const uint8_t *)vtex + VTEX_ATLAS_Y_OFF);
+                void *minlod = *(void * const *)((const uint8_t *)vtex + VTEX_MINLOD_IMAGE_OFF);
+                if (minlod) {
+                    const uint8_t *im = (const uint8_t *)minlod;
+                    has_minlod = 1;
+                    img_type = *(const int *)(im + IMAGE_TYPE_OFF);
+                    img_fmt  = *(const int *)(im + IMAGE_FMT_OFF);
+                    img_w    = *(const int *)(im + IMAGE_EXTENT_W_OFF);
+                    img_h    = *(const int *)(im + IMAGE_EXTENT_H_OFF);
+                    img_mips = *(const int *)(im + IMAGE_MIPS_OFF);
+                    fail     = *(const uint8_t *)(im + IMAGE_CREATEFAIL_OFF);
+                    resident = *(void * const *)(im + IMAGE_VKIMAGE_OFF) != NULL;
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            has_vtex = 0; has_minlod = 0;
+            img_w = -1; img_h = -1; img_type = -1; img_fmt = -1; img_mips = -1;
+            pages = -1; fail = -1; resident = 0;
+        }
+
+        char tag[192] = "";
+        if (has_vtex) {
+            char pagetag[32] = "";
+            if (pages > 0) _snprintf_s(pagetag, sizeof pagetag, _TRUNCATE, " atlasY=%d", pages);
+            if (has_minlod) {
+                /* the three literals SetSource itself wrote -- if these do not read back exactly, the
+                 * offset mapping is wrong and img_w/img_h must NOT be believed, however plausible */
+                int ctl = (img_type == 0 && img_fmt == 0x13 && img_mips == 1);
+                _snprintf_s(tag, sizeof tag, _TRUNCATE,
+                            " [vt+minlod %dx%d ctl=%s(t%d/f%#x/m%d) fail=%d vk=%s%s]",
+                            img_w, img_h, ctl ? "OK" : "BAD", img_type, (unsigned)img_fmt, img_mips,
+                            fail, resident ? "yes" : "no", pagetag);
+            } else {
+                _snprintf_s(tag, sizeof tag, _TRUNCATE, " [vt, no minlod%s]", pagetag);
+            }
+        }
+
+        if (w > 0 && h > 0)
+            _snprintf_s(buf, cap, _TRUNCATE, "found (%dx%d)%s", w, h, tag);
+        else
+            _snprintf_s(buf, cap, _TRUNCATE, "found%s", tag);
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (cap) buf[0] = '\0';
+        return 0;
+    }
+}
+
 /* -------------------------------------------------- LIVE reflection type-registry walk (enumerate all) ----
  * The registry is a NULL-name-sentinel flat array reachable from the SAME reflect sh_type uses: P =
  * *(reflect+0) (the container global), type-record array B = *(P+0x20), records stride 0x38, className @

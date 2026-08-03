@@ -232,6 +232,28 @@ typedef int           (*sh_clear_stack_fn)(struct sh_iface *self, int index);   
  * before pushing a selection so they can explain the refusal instead of appearing to do nothing. */
 typedef int           (*sh_manipulation_in_progress_fn)(struct sh_iface *self);                     /* +0x2C0 (ext 11) */
 
+/* +0x2C8 (ext 12) FIND MATERIAL by name (the Revenant asset-viewport tab's first probe). Resolves a
+ * MATERIAL decl through the engine's PURE decl-find (never the load-or-create primitive, which has
+ * FatalError/INT3 traps on a miss -- see typeinfo.c). Live-tested in-game (2026-07-30): resolves ANY
+ * shipped material (the full ~9,805-entry catalog) with no placement/prior use required -- material decls
+ * are registered for the whole catalog at boot, independent of whether the material has been drawn; a
+ * genuinely made-up name still correctly reports "not found". Writes a short human-readable result into
+ * out_info ("found (WxH)" / "found" / empty), returns 1 on a hit, 0 otherwise (miss / bad name / engine
+ * down). */
+/* +0x2D0 (ext 13) Fetch the latest rendered asset preview as a `data:image/bmp;base64,...` URI.
+ * Returns length, 0 if nothing captured yet, or -(required size) when `cap` is too small. */
+typedef int           (*sh_get_preview_fn)(struct sh_iface *self, char *out, int cap);
+
+/* +0x2D8 (ext 14) Request that `name` be previewed. ASYNCHRONOUS: it stages the name and invalidates the
+ * current image; pixels are produced on another thread and take some time to arrive. Poll get_preview
+ * (+0x2D0) until it returns > 0. Returns 1 if the request was staged, 0 if it was rejected (null/empty
+ * name, or the engine side is not installed). Staging always succeeds even when no image producer is
+ * installed -- in that case the poll simply times out. */
+typedef int           (*sh_request_preview_fn)(struct sh_iface *self, const char *name);
+
+typedef int           (*sh_find_material_fn)(struct sh_iface *self, const char *name,
+                                             char *out_info, int cap);                              /* +0x2C8 (ext 12) */
+
 /* +0x2B0/+0x2B8 (ext 9/10) backend-owned persistent configuration. Values cross the matched-pair
  * boundary as complete UTF-8 JSON fragments so future booleans/numbers/objects do not need new ABI
  * slots. `get` returns the required byte count excluding NUL; a NULL/zero buffer is a size query and an
@@ -434,12 +456,21 @@ typedef struct sh_iface_vtbl {
     sh_config_set_json_fn      config_set_json;      /* +0x2B8 (ext 10) validate + persist JSON */
     sh_manipulation_in_progress_fn manipulation_in_progress; /* +0x2C0 (ext 11) editor is grabbing/holding
                                                       * -> every selection mutation is refused; see typedef */
+    sh_find_material_fn        find_material;        /* +0x2C8 (ext 12) FIND a material decl by name
+                                                      * (cached-only; the Revenant asset-viewport tab probe) */
+    sh_get_preview_fn          get_preview;          /* +0x2D0 (ext 13) latest engine-rendered asset
+                                                      * preview as a data:image/bmp;base64 URI */
+    sh_request_preview_fn      request_preview;      /* +0x2D8 (ext 14) ask for a NAMED asset to be
+                                                      * produced into that preview */
 } sh_iface_vtbl;
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_set_json) == 0x2B8);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, manipulation_in_progress) == 0x2C0);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x2C8);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, find_material) == 0x2C8);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, get_preview) == 0x2D0);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, request_preview) == 0x2D8);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x2E0);
 
 /* ------------------------------------------------------------------ the interface object -----------
  * Object layout PINNED to FUN_1800229b1: +0x00 vtable, +0x08 mutex, +0x58 sub-object. The mutex is an
@@ -592,6 +623,10 @@ typedef struct sh_iface_engine_slots {
     sh_clear_stack_fn            clear_stack;           /* +0x2A8 (ext 8) */
     /* clone-extension: "the editor is mid-manipulation" -- selection mutations are refused while true. */
     sh_manipulation_in_progress_fn manipulation_in_progress; /* +0x2C0 (ext 11) */
+    /* clone-extension: FIND a material decl by name (cached-only lookup; asset-viewport tab probe). */
+    sh_find_material_fn        find_material;               /* +0x2C8 (ext 12) */
+    sh_get_preview_fn          get_preview;                 /* +0x2D0 (ext 13) */
+    sh_request_preview_fn      request_preview;             /* +0x2D8 (ext 14) */
 } sh_iface_engine_slots;
 
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *slots);
