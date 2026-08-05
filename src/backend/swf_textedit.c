@@ -57,8 +57,8 @@
 
 /* DirectInput scancodes -- consistent with every case in the stock handler (0x0e BACKSPACE,
  * 0x2a/0x36 SHIFT, 0xcb LEFT, 0xcd RIGHT, 0xc7 HOME, 0xcf END, 0xd3 DELETE). */
-#define SC_LCTRL          0x1d
-#define SC_RCTRL          0x9d
+/* No SC_LCTRL/SC_RCTRL here on purpose: Ctrl is read from the OS at the moment C or V arrives
+ * (ctrl_is_held), never tracked from this key stream. See the note above swf_onkey_detour. */
 #define SC_C              0x2e
 #define SC_V              0x2f
 
@@ -102,7 +102,6 @@ typedef void  (*idstr_assign_fn)(void *dst_idstr, const void *src_idstr);
 static onkey_fn        g_orig_onkey   = NULL;
 static const void     *g_textfield_id = NULL;   /* the engine's interned "TextField" string pointer */
 static idstr_assign_fn g_idstr_assign = NULL;   /* idStr::operator=(const idStr&) -- NULL => paste off */
-static volatile LONG   g_ctrl_down    = 0;
 
 /* Ask the script object whether it is a TextField, exactly the way the stock handler does. Returns 0
  * on anything unexpected -- we only ever proceed on a positive answer. */
@@ -267,17 +266,38 @@ static int paste_at_selection(const uint8_t *ti)
     return 1;
 }
 
-/* The detour. Tracks Ctrl exactly the way the stock handler tracks Shift (from the isDown it is
- * handed), acts on Ctrl+C / Ctrl+V, and ALWAYS chains -- we never swallow a key. */
+/* Is Ctrl PHYSICALLY held, right now?
+ *
+ * This deliberately does NOT track Ctrl from the onKey stream. The first version did, latching a
+ * static flag on the Ctrl key-down and clearing it on the key-up, "the way the stock handler tracks
+ * Shift" -- and it shipped a bug that made the editor's text fields unusable: after one Ctrl+C, a
+ * bare `c` copied and a bare `v` pasted, forever. Typing the word "variable" pasted the clipboard
+ * into the field once per `v`.
+ *
+ * The cause is that the latch outlives the keystroke. The stock handler reads Shift only while
+ * processing the keystroke it was handed, so a Ctrl/Shift release it never sees costs nothing;
+ * ours was consulted on LATER keystrokes, so a single missed key-up left it stuck on. Modifier
+ * key-ups are not reliably delivered to a focused SWF script object -- the field can lose focus, the
+ * window can lose focus, or the engine may simply not dispatch them -- and any one of those arms the
+ * bug permanently.
+ *
+ * So: no state. Ask the OS for the real key state at the instant C or V arrives. There is nothing to
+ * go stale, alt-tabbing mid-chord cannot poison it, and it covers both Ctrl keys without caring
+ * which scancode the engine reports. GetAsyncKeyState reads physical key state directly rather than
+ * this thread's message queue, which matters because the hook runs on the engine's input path. */
+static int ctrl_is_held(void)
+{
+    return (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+}
+
+/* The detour. Acts on Ctrl+C / Ctrl+V, and ALWAYS chains -- we never swallow a key. */
 static void *swf_onkey_detour(void *self, void *retbuf, void *thisObject, void *parms)
 {
     __try {
         const uint8_t *pv = (parms != NULL) ? *(const uint8_t *const *)parms : NULL;
         int64_t key = 0, down = 0;
         if (pv != NULL && swfv_int(pv, &key) && swfv_int(pv + SWFV_STRIDE, &down)) {
-            if (key == SC_LCTRL || key == SC_RCTRL) {
-                InterlockedExchange(&g_ctrl_down, down ? 1 : 0);
-            } else if (down && (key == SC_C || key == SC_V) && g_ctrl_down && is_textfield(thisObject)) {
+            if (down && (key == SC_C || key == SC_V) && ctrl_is_held() && is_textfield(thisObject)) {
                 const uint8_t *ti = *(const uint8_t *const *)((const uint8_t *)thisObject + TF_TEXTINST_OFF);
                 if (ti != NULL) {
                     if (key == SC_C) copy_selection(ti);
