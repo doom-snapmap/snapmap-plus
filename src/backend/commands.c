@@ -1401,7 +1401,8 @@ static idlist_grow_fn sh_decode_idlist_grow(void *add_command, const uint8_t *mo
 
     /* `LEA RCX,[RSI+8]` = 48 8D 4E 08, then E8 rel32. The first such pair in AddCommand is the FULL
      * list; the DEV one (LEA RCX,[RSI+0x20]) calls the same function. 256 bytes covers both on the
-     * pinned build, where the first sits at +0xC3. */
+     * pinned build, where the first pair starts at +0xBF (its CALL opcode is at +0xC3 -- the logged
+     * offset below is the start of the 9-byte window, not the call). */
     const uint8_t *p = (const uint8_t *)add_command;
     for (unsigned i = 0; i + 9 <= 256; ++i) {
         uint8_t win[9];
