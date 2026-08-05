@@ -374,11 +374,11 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * decodes a named material's megatexture pages by calling DOOM's own page decoder
          * (FUN_14196E140) in-process -- a pure function, so no renderer, no GPU and no map
          * residency, which is what lets this cover the whole catalog instead of only what the
-         * loaded map happens to render. Verifies the decoder's prologue against a byte signature
-         * and REFUSES to install on a mismatch, so a game update degrades to "no previews" rather
-         * than a call into the wrong code. Hooks nothing. See megapreview.c and the doom-re
-         * campaign revenant-asset-index-and-viewport (evidence 06/07/08). */
-        sh_megapreview_install(g_doom_base);
+         * loaded map happens to render. The decoder comes from the signature DB (Mega2PageDecode),
+         * so an unrecognised build degrades to "no previews" rather than a call into the wrong
+         * code. Hooks nothing. See megapreview.c and the doom-re campaign
+         * revenant-asset-index-and-viewport (evidence 06/07/08). */
+        sh_megapreview_install(results, db, g_doom_base);
         /* imgpreview: the fallback half of the same feature -- materials with no megatexture rect,
          * decoded from the shipped .index/.resources containers (BC1/BC3/BC7). Reads files only;
          * no engine call, no hook. megapreview's worker calls it when the atlas route declines. */

@@ -53,9 +53,18 @@ int main(int argc, char **argv)
     uint8_t *base = map_pe_by_rva(argv[1], &image_sz);
     if (!base) return 2;
 
+    /* SIG_RESULTS_MAX, never a bare literal: the loop below indexes `results` by sig_db_count(), so a
+     * short array reads (and sig_resolve_all writes) past the end the moment the DB outgrows it. That
+     * is exactly what happened at entry 67 -- garbage statuses and an access violation in the test
+     * itself, which is a far worse failure than the silent truncation the constant was added to fix. */
     size_t total = sig_db_count();
-    sig_result results[64];
-    size_t ok = sig_resolve_all(base, results, 64);
+    sig_result results[SIG_RESULTS_MAX];
+    size_t ok = sig_resolve_all(base, results, SIG_RESULTS_MAX);
+    if (total > SIG_RESULTS_MAX) {
+        printf("SIGNATURE DB OVERFLOW: %zu entries > SIG_RESULTS_MAX %d -- raise it\n",
+               total, (int)SIG_RESULTS_MAX);
+        return 1;
+    }
 
     int bad = 0;
     for (size_t i = 0; i < total; i++) {

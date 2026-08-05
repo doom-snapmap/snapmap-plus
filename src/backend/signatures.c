@@ -928,5 +928,46 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 41 54 41 56 41 57 48 83 EC 50 "
       "4C 8B E1 4D 8B F0 49 8B C8 4C 8B FA E8 ?? ?? ?? ?? 33 F6 8B E8 39 35 ?? ?? ?? ?? 7E 5E",
       0x1855660u },
+    { "Mega2PageDecode",    /* the megatexture PAGE DECODER --
+                             *   void(const u8 *header16, const u8 *payload, void *unused, u8 *out)
+                             * where `unused` is NULL in every observed call and `out` is 0x50000 bytes.
+                             *
+                             * id's own DCT codec (YCoCg-R colour transform, so NOT libjpeg), anchored in
+                             * the binary by engine\renderer\jobs\transcode\Transcode.cpp. It is a PURE
+                             * function -- no engine globals, no renderer, no GPU, no virtual-texture
+                             * state and no map residency -- which is why the asset browser can call it
+                             * directly to turn one `.mega2` page into pixels. Proven by decoding 68/68
+                             * pages in a bare console process with DOOM not running at all.
+                             *
+                             * Output is 5 planes of 128x128 RGBA at +0/+0x10000/.../+0x40000; plane 0 is
+                             * albedo and the only one a preview needs. Callers MUST pre-clear the output
+                             * (skipped streams are left untouched, not zeroed) and MUST give the page
+                             * buffer >= 0x40000 of zero-filled slack -- it reads a measured mean of
+                             * 73,172 and a max of 167,220 bytes past the end of the page data.
+                             *
+                             * The prologue is whole, position-independent instructions with a single
+                             * rip-relative read at the tail, so the only wildcards are that displacement.
+                             * Previously called as a raw module_base + 0x196E140 guarded by a local
+                             * memcmp of these same bytes; that is what this entry replaces.
+                             * DIRECT (our own reverse-engineering, 2026-08-03). */
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 81 EC 30 01 00 00 48 8D 6C 24 40 "
+      "48 C7 45 10 FE FF FF FF 48 89 9D 40 01 00 00 48 8B 05 ?? ?? ?? ??",
+      0x196E140u },
+    { "PrefabDtor",         /* idSnapEntityPrefab::~idSnapEntityPrefab -- void(this [rcx]).
+                             * Pairs with PrefabCtor/PrefabPopulate; tears down the temp prefab the
+                             * serialize-from-selection path builds. Wildcards are the two rel32 call
+                             * displacements (the idStr member dtor and the base dtor).
+                             * DIRECT (our own reverse-engineering, 2026-08-05). */
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B F9 "
+      "48 81 C1 20 01 00 00 E8 ?? ?? ?? ?? 90 48 8D 8F F0 00 00 00",
+      0x51D870u },
+    { "EntityDeshare",      /* COW make-unique -- void *(entitySlot [rcx]). De-shares an entity's 0x6f8
+                             * block before an in-place edit; the refcount test `cmp dword [rcx],1` and
+                             * the 0x6F8 allocation size are both visible in the pattern, which is what
+                             * makes it unique. Wildcard is the rel32 to the allocator.
+                             * DIRECT (our own reverse-engineering, 2026-08-05). */
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 8B F9 "
+      "48 8B 01 83 38 01 74 3C B9 F8 06 00 00 E8 ?? ?? ?? ?? 48 8B D8",
+      0x52C920u },
     { NULL, NULL, 0 }   /* terminator */
 };

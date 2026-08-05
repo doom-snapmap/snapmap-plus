@@ -1375,11 +1375,59 @@ static void h_sh_help(idCmdArgs *a)
 #define CMD_COUNT_SANITY    100000u
 
 /* idList grow (engine FUN_140699a60): ensures room for one more element on the idList at `list`
- * (granularity-or-double then idList::Resize, the engine allocator). BUILD-LOCKED RVA + recipe:
- * re-derive by decompiling AddCommand (0x1aa3630) -- it calls THIS on cmdSys+0x08 (FULL) and
- * cmdSys+0x20 (DEV) before each append. A wrong RVA degrades to a skipped insert (SEH), never a crash. */
-#define IDLIST_GROW_RVA     0x699a60u
+ * (granularity-or-double then idList::Resize, the engine allocator).
+ *
+ * NOT signature-resolvable, and not for want of trying: it is ONE of 1,560 byte-identical
+ * instantiations of the same idList template in the image, differing only in rip-relative and rel32
+ * displacements. No lengthening of a prologue pattern separates them -- the same lesson the sound
+ * module learned from StopSound's clone (doom-re evidence 10 SS4.3): a byte signature answers "where
+ * is this function", and is the wrong tool when the answer is "in 1,560 places".
+ *
+ * So it is resolved RELATIONALLY instead, off AddCommand, which IS signature-resolved: AddCommand
+ * calls this on cmdSys+0x08 (the FULL list) before appending, and that call site is the instruction
+ * pair `LEA RCX,[RSI+8]` / `CALL rel32`. Scanning AddCommand's own body for those five bytes and
+ * decoding the displacement yields the callee wherever this build put it. The old build-locked
+ * `module_base + 0x699a60` is retained below only as the documented cross-check.
+ *
+ * A miss degrades to a skipped insert (the caller SEH-guards), never a crash. */
+#define IDLIST_GROW_RVA     0x699a60u   /* pinned-build value -- cross-check only, never used to locate */
 typedef void (*idlist_grow_fn)(void *idlist);
+
+/* Decode the idList-grow callee out of AddCommand's body. Returns NULL if the call site is not found
+ * within the scanned window or the decoded target lands outside the DOOM module. */
+static idlist_grow_fn sh_decode_idlist_grow(void *add_command, const uint8_t *module_base)
+{
+    if (!add_command || !module_base) return NULL;
+
+    /* `LEA RCX,[RSI+8]` = 48 8D 4E 08, then E8 rel32. The first such pair in AddCommand is the FULL
+     * list; the DEV one (LEA RCX,[RSI+0x20]) calls the same function. 256 bytes covers both on the
+     * pinned build, where the first sits at +0xC3. */
+    const uint8_t *p = (const uint8_t *)add_command;
+    for (unsigned i = 0; i + 9 <= 256; ++i) {
+        uint8_t win[9];
+        if (!sh_safe_read(p + i, win, sizeof win)) return NULL;
+        if (win[0] != 0x48 || win[1] != 0x8D || win[2] != 0x4E || win[3] != 0x08 || win[4] != 0xE8)
+            continue;
+        int32_t rel;
+        memcpy(&rel, win + 5, sizeof rel);
+        const uint8_t *tgt = p + i + 9 + rel;
+
+        /* Range-check against the module before handing back something that will be CALLED. */
+        uint8_t probe;
+        if (tgt < module_base || !sh_safe_read(tgt, &probe, 1)) return NULL;
+
+        char l[160];
+        uintptr_t rva = (uintptr_t)(tgt - module_base);
+        _snprintf_s(l, sizeof l, _TRUNCATE,
+                    "B2: idList-grow decoded from AddCommand+0x%X -> rva=0x%llX (pinned 0x%X)%s",
+                    i, (unsigned long long)rva, IDLIST_GROW_RVA,
+                    rva == IDLIST_GROW_RVA ? "" : " MISMATCH -- trusting the decode");
+        backend_log(l);
+        return (idlist_grow_fn)tgt;
+    }
+    backend_log("B2: idList-grow call site NOT found in AddCommand; command-unlock insert skipped");
+    return NULL;
+}
 
 /* The AddCommand detour: OR flags|6 then call through the trampoline (= the original mod's
  * `or [rsp+0x30],6`). 6-arg passthrough; flags is the 6th (stack) arg. */
@@ -1465,7 +1513,7 @@ static void sh_command_unlock_install(void *cmdsys, void *add_command, const uin
         backend_log("B2: command-unlock SKIPPED -- cmdsys/AddCommand unresolved");
         return;
     }
-    idlist_grow_fn grow = module_base ? (idlist_grow_fn)(module_base + IDLIST_GROW_RVA) : NULL;
+    idlist_grow_fn grow = sh_decode_idlist_grow(add_command, module_base);
 
     /* (1) detour AddCommand: every FUTURE registration (incl. gameplay commands on level load) gets
      *     flags|6, so the engine's own AddCommand inserts it into BOTH tables, growing properly. */

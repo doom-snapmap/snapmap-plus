@@ -85,9 +85,16 @@ int main(int argc, char **argv)
         hook_prologue(base, s->known_rva, hooks[i].stolen);
     }
 
+    /* SIG_RESULTS_MAX, never a bare literal -- see the note in sig_test.c. */
     size_t total = sig_db_count();
-    sig_result results[64];
-    size_t ok = sig_resolve_all(base, results, 64);
+    sig_result results[SIG_RESULTS_MAX];
+    size_t ok = sig_resolve_all(base, results, SIG_RESULTS_MAX);
+    if (total > SIG_RESULTS_MAX) {
+        printf("SIGNATURE DB OVERFLOW: %zu entries > SIG_RESULTS_MAX %d -- raise it\n",
+               total, (int)SIG_RESULTS_MAX);
+        free(base);
+        return 1;
+    }
 
     int fail = 0, hooked = 0;
     for (size_t i = 0; i < total; i++) {

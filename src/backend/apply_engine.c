@@ -2625,10 +2625,10 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
      * resolve by FALLBACK RVA off module_base (re-derive-tagged like the editor singleton); a wrong/shifted
      * offset just makes the serialize SEH-fail -> a clean 0-length result, never a crash. */
     if (module_base) {
-        /* ctor + populate are now SIGNATURE-first with the old RVA as a cross-checked fallback (see
-         * ae_pick_engine_fn). dtor + deshare remain raw RVAs: they have not been located in a way that
-         * would let a signature be extracted and proven unique, and guessing one is worse than a
-         * build-locked address that demonstrably works. Migrate them the same way when they are. */
+        /* All four are SIGNATURE-first with the old RVA as a cross-checked fallback (see
+         * ae_pick_engine_fn). dtor + deshare were raw RVAs until 2026-08-05, when both turned out to
+         * have prologues that are unique in the whole executable image once the rel32 call
+         * displacements are wildcarded -- `PrefabDtor` and `EntityDeshare` in the signature DB. */
         g_prefab_ctor     = (prefab_ctor_fn)    ae_pick_engine_fn(results, n, "PrefabCtor",
                                                                   module_base, PREFAB_CTOR_RVA, "prefab ctor");
         g_prefab_populate = (prefab_populate_fn)ae_pick_engine_fn(results, n, "PrefabPopulate",
@@ -2643,8 +2643,10 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
                                                                   module_base, MEMLOCAL_PUSHHEAP_RVA, "idMemLocal PushHeap");
         g_memlocal_pop  = (memlocal_popheap_fn) ae_pick_engine_fn(results, n, "MemLocalPopHeap",
                                                                   module_base, MEMLOCAL_POPHEAP_RVA, "idMemLocal PopHeap");
-        g_prefab_dtor     = (prefab_dtor_fn)    (module_base + PREFAB_DTOR_RVA);
-        g_deshare         = (ent_deshare_fn)    (module_base + ENT_DESHARE_RVA);
+        g_prefab_dtor     = (prefab_dtor_fn)    ae_pick_engine_fn(results, n, "PrefabDtor",
+                                                                  module_base, PREFAB_DTOR_RVA, "prefab dtor");
+        g_deshare         = (ent_deshare_fn)    ae_pick_engine_fn(results, n, "EntityDeshare",
+                                                                  module_base, ENT_DESHARE_RVA, "entity deshare");
     }
 
     char line[256];

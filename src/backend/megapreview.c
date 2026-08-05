@@ -24,15 +24,12 @@
  * 5 planes of 128x128 RGBA at +0, +0x10000, +0x20000, +0x30000, +0x40000. Plane 0 is albedo, which
  * is the only one a browser needs (campaign evidence 04 SS9, confirmed by observation in 08 SS2).
  *
- * The RVA is build-specific, so it is NOT trusted on its own -- the prologue is checked against the
- * bytes below before the pointer is ever called. That prologue is whole, position-independent
- * instructions (push regs; sub rsp,0x130; lea rbp,[rsp+0x40]) with no RIP-relative operand, so it is
- * a safe signature. If DOOM updates and the function moves, this refuses to install. */
-#define DECODE_RVA   0x196E140u
-static const unsigned char DECODE_SIG[] = {
-    0x40,0x55,0x56,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,
-    0x48,0x81,0xEC,0x30,0x01,0x00,0x00,0x48,0x8D,0x6C,0x24,0x40
-};
+ * Resolved through the shared signature database as `Mega2PageDecode`, NOT as a hardcoded
+ * module_base + RVA. This used to be the latter, guarded by a local memcmp of the prologue -- which
+ * caught a moved function but could not FIND one, so any build that shifted the address lost previews
+ * entirely. A signature matches the bytes wherever the loader put them, and a resolve that is not
+ * unique is rejected rather than guessed, so an unrecognised build still degrades to "no previews"
+ * rather than a call into the wrong code. */
 typedef void (*decode_fn)(const unsigned char *hdr, const unsigned char *payload,
                           void *unused, unsigned char *out);
 
@@ -446,18 +443,15 @@ static DWORD WINAPI megapreview_worker(LPVOID unused)
     }
 }
 
-int sh_megapreview_install(const uint8_t *module_base)
+int sh_megapreview_install(const sig_result *results, size_t n, const uint8_t *module_base)
 {
     if (!module_base) { backend_log("B2: megapreview -- no module base; not installed"); return 0; }
     if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;
 
-    const unsigned char *fn = (const unsigned char *)(module_base + DECODE_RVA);
-    int match = 0;
-    __try { match = (memcmp(fn, DECODE_SIG, sizeof DECODE_SIG) == 0); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { match = 0; }
-    if (!match) {
-        backend_log("B2: megapreview -- decoder signature MISMATCH at RVA 0x196E140; "
-                    "this DOOM build is not the pinned one. Previews disabled (nothing called).");
+    uintptr_t fn = sig_addr_by_name(results, n, "Mega2PageDecode");
+    if (!fn) {
+        backend_log("B2: megapreview -- Mega2PageDecode did not resolve; this DOOM build is not the "
+                    "pinned one. Previews disabled (nothing called).");
         return 0;
     }
     g_decode = (decode_fn)fn;

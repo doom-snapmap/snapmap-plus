@@ -23,14 +23,17 @@
 
 #include <stdint.h>
 
-/* Start the producer. `module_base` is the DOOM module base; the decoder is resolved from it by
- * pinned RVA AND verified against a byte signature, so a game update that moves the function makes
- * this refuse to run rather than call into the wrong code. Spawns one low-priority worker that
- * serves preview requests staged through sh_preview_request.
+#include "signatures.h"
+
+/* Start the producer. The decoder is resolved from the shared signature database as
+ * `Mega2PageDecode` -- no hardcoded RVA -- so it is found wherever the loader put it, and a build
+ * whose bytes do not match simply fails to resolve rather than calling into the wrong code.
+ * `module_base` is still needed for the on-disk `virtualtextures` directory next to the exe.
+ * Spawns one low-priority worker that serves preview requests staged through sh_preview_request.
  *
- * Returns 1 if the worker started, 0 otherwise (NULL base, signature mismatch, already installed).
+ * Returns 1 if the worker started, 0 otherwise (NULL base, unresolved decoder, already installed).
  * Failure is non-fatal and only costs previews. */
-int sh_megapreview_install(const uint8_t *module_base);
+int sh_megapreview_install(const sig_result *results, size_t n, const uint8_t *module_base);
 
 /* A material's `.vmtr` atlas rect, written to out_xywh as {x, y, w, h} in atlas pixels. Returns 1
  * if the material is virtual-textured, 0 if it has no rect (which is the answer to "can this take
