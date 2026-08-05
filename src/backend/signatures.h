@@ -49,6 +49,13 @@ typedef struct sig_result {
     uint32_t    rva;    /* recovered RVA, or 0 */
 } sig_result;
 
+/* How many sig_result slots every caller of sig_resolve_all must provide. Callers used to size that
+ * array with a bare 64 and CLAMP the DB count down to it, so growing the database past 64 silently
+ * dropped the last entries -- they never resolved, never failed, and never appeared in the resolve
+ * report. That cost a debugging session when SoundStopSound became entry 65 (2026-08-04). Size the
+ * array with this and never clamp; sh_smoke_run logs loudly if the DB ever outgrows it. */
+#define SIG_RESULTS_MAX 128
+
 /* The shipped engine signature database. NULL-terminated
  * (the final entry has name==NULL). */
 extern const sig_entry BACKEND_ENGINE_SIGNATURES[];

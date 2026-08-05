@@ -254,6 +254,46 @@ typedef int           (*sh_request_preview_fn)(struct sh_iface *self, const char
 typedef int           (*sh_find_material_fn)(struct sh_iface *self, const char *name,
                                              char *out_info, int cap);                              /* +0x2C8 (ext 12) */
 
+/* +0x2E0 (ext 15) Enumerate material names for the Assets browser, newline-separated, starting at
+ * `start`. Returns how many were written; 0 means no more. The catalog is ~9,805 names (~400 KB),
+ * so the caller pages: add the returned count to `start` and ask again until it returns 0. */
+typedef int           (*sh_list_materials_fn)(struct sh_iface *self, int start, char *out, int cap);
+
+/* Asset types the browser can enumerate, in the order it lists them. These values ARE ABI -- the UI
+ * sends one to list_assets -- so append only, never renumber. MATERIAL and IMAGE are 0 and 1
+ * because the preview producers address container records by those same ids.
+ *
+ * The set is exactly the decl types in the shipped containers that a mapper can act on. Engine
+ * internals present in the same index (renderProg, anim, cm, aas, table, ...) are deliberately
+ * absent: there is nothing to place or apply, so listing them would only be noise. */
+#define SH_ASSET_MATERIAL    0
+#define SH_ASSET_IMAGE       1
+#define SH_ASSET_MODEL       2
+#define SH_ASSET_SOUND       3
+#define SH_ASSET_FX          4
+#define SH_ASSET_PARTICLE    5
+#define SH_ASSET_DECALATLAS  6
+#define SH_ASSET_SNAPDEF     7    /* snapEditorEntityDef -- the SnapMap editor's placeable list */
+#define SH_ASSET_ENTITYDEF   8
+#define SH_ASSET_COUNT       9
+
+/* Page ONE asset type's catalog. `kind` is an SH_ASSET_* value (backend/imgpreview.h); `start` is
+ * how many names of that type to skip. Supersedes list_materials, which is kind 0 and stays put
+ * because the vtable is append-only. */
+typedef int           (*sh_list_assets_fn)(struct sh_iface *self, int kind, int start, char *out, int cap);
+/* A material's .vmtr atlas rect -> out_xywh = {x,y,w,h} in atlas pixels; 1 if virtual-textured,
+ * 0 if it has no rect. Divide by 245760 for the `virtualmapping` renderParm value form. */
+typedef int           (*sh_material_rect_fn)(struct sh_iface *self, const char *name, int *out_xywh);
+/* Audition a soundshader by name through the editor's own preview path, or -- with a NULL/empty
+ * name -- stop whatever is auditioning. One preview exists at a time; playing a second stops the
+ * first, so the caller never has to pair the calls. Returns 1 if something is now playing.
+ * Backend-side this drives live audio state, so the UI must reach it from the main-thread drain. */
+typedef int           (*sh_sound_preview_fn)(struct sh_iface *self, const char *name);
+/* Hold sound-preview mode open while the asset browser is on screen (on=1) and drop it on the way
+ * out (on=0, which also stops playback). The cvars an audition needs cost an audio-engine suspend
+ * and resume to change, so they are established once per session rather than per click. */
+typedef void          (*sh_sound_session_fn)(struct sh_iface *self, int on);
+
 /* +0x2B0/+0x2B8 (ext 9/10) backend-owned persistent configuration. Values cross the matched-pair
  * boundary as complete UTF-8 JSON fragments so future booleans/numbers/objects do not need new ABI
  * slots. `get` returns the required byte count excluding NUL; a NULL/zero buffer is a size query and an
@@ -462,6 +502,16 @@ typedef struct sh_iface_vtbl {
                                                       * preview as a data:image/bmp;base64 URI */
     sh_request_preview_fn      request_preview;      /* +0x2D8 (ext 14) ask for a NAMED asset to be
                                                       * produced into that preview */
+    sh_list_materials_fn       list_materials;       /* +0x2E0 (ext 15) page the material catalog
+                                                      * for the Assets browser list */
+    sh_list_assets_fn          list_assets;          /* +0x2E8 (ext 16) page ANY indexed asset type
+                                                      * (models, sounds, fx, particles, defs, ...) */
+    sh_material_rect_fn        material_rect;        /* +0x2F0 (ext 17) a material's atlas rect,
+                                                      * for the virtualmapping carrier */
+    sh_sound_preview_fn        sound_preview;        /* +0x2F8 (ext 18) audition a sound decl;
+                                                      * NULL/empty name = stop */
+    sh_sound_session_fn        sound_session;        /* +0x300 (ext 19) hold preview mode open
+                                                      * while the browser is on screen */
 } sh_iface_vtbl;
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
@@ -470,7 +520,12 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, manipulation_in_progress) == 0x2C0);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, find_material) == 0x2C8);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, get_preview) == 0x2D0);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, request_preview) == 0x2D8);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x2E0);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, list_materials) == 0x2E0);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, list_assets) == 0x2E8);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, material_rect) == 0x2F0);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, sound_preview) == 0x2F8);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, sound_session) == 0x300);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x308);
 
 /* ------------------------------------------------------------------ the interface object -----------
  * Object layout PINNED to FUN_1800229b1: +0x00 vtable, +0x08 mutex, +0x58 sub-object. The mutex is an
@@ -627,6 +682,11 @@ typedef struct sh_iface_engine_slots {
     sh_find_material_fn        find_material;               /* +0x2C8 (ext 12) */
     sh_get_preview_fn          get_preview;                 /* +0x2D0 (ext 13) */
     sh_request_preview_fn      request_preview;             /* +0x2D8 (ext 14) */
+    sh_list_materials_fn       list_materials;              /* +0x2E0 (ext 15) */
+    sh_list_assets_fn          list_assets;                 /* +0x2E8 (ext 16) */
+    sh_material_rect_fn        material_rect;               /* +0x2F0 (ext 17) */
+    sh_sound_preview_fn        sound_preview;               /* +0x2F8 (ext 18) */
+    sh_sound_session_fn        sound_session;               /* +0x300 (ext 19) */
 } sh_iface_engine_slots;
 
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *slots);

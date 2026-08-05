@@ -131,8 +131,8 @@ static void log_sig_failure_diag(const uint8_t *doom_base, const sig_entry *e, s
 /* ---- lightweight resolve pass (the bootstrap poll uses this) ----------------------------------- */
 size_t sh_resolve_count(const uint8_t *doom_base)
 {
-    sig_result results[64];
-    return sig_resolve_all(doom_base, results, 64);
+    sig_result results[SIG_RESULTS_MAX];
+    return sig_resolve_all(doom_base, results, SIG_RESULTS_MAX);
 }
 
 /* ---- the proof --------------------------------------------------------------------------------- */
@@ -142,9 +142,19 @@ int sh_smoke_run(const uint8_t *doom_base, unsigned long deferred_ms)
 
     /* (A) resolver -------------------------------------------------------------------------------- */
     size_t total = sig_db_count();
-    sig_result results[64];
-    if (total > 64) total = 64;
-    size_t ok = sig_resolve_all(doom_base, results, 64);
+    sig_result results[SIG_RESULTS_MAX];
+    /* NOT a silent clamp. Truncating here is what hid an unresolved signature once already: the
+     * report said "64/64 resolved" while entry 65 had never been looked at. Say so instead. */
+    if (total > SIG_RESULTS_MAX) {
+        char over[160];
+        _snprintf_s(over, sizeof over, _TRUNCATE,
+            "PB0: SIGNATURE DB OVERFLOW -- %zu entries but only %d result slots; raise "
+            "SIG_RESULTS_MAX. The last %zu signature(s) were NOT resolved.",
+            total, SIG_RESULTS_MAX, total - (size_t)SIG_RESULTS_MAX);
+        backend_log(over);
+        total = SIG_RESULTS_MAX;
+    }
+    size_t ok = sig_resolve_all(doom_base, results, SIG_RESULTS_MAX);
 
     int rva_match = 0, rva_diff = 0, hooked = 0;
     char hooked_names[160] = {0};   /* comma-list of the hook-tolerant sigs for the success line */

@@ -62,8 +62,7 @@ void sh_preview_request(const char *name)
 
     char line[600];
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B2: preview REQUEST #%ld -- '%s' staged (no producer installed yet; see preview.h)",
-        gen, name);
+        "B2: preview REQUEST #%ld -- '%s' staged", gen, name);
     backend_log(line);
 }
 
@@ -83,42 +82,104 @@ void sh_preview_publish(const unsigned char *rgba, unsigned w, unsigned h)
 {
     static const char b64[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    const char *prefix = "data:image/bmp;base64,";
+    const char *prefix = "data:image/png;base64,";
 
     if (!rgba || w == 0 || h == 0) return;
 
     __try {
-        /* BMP rows are padded to a 4-byte boundary. 256*3 and 128*3 both happen to be aligned already,
-         * but the producer picks the size, so do it properly rather than relying on that. */
-        const unsigned rowBytes = ((w * 3u) + 3u) & ~3u;
-        const unsigned pixBytes = rowBytes * h;
-        const unsigned fileSize = 54u + pixBytes;
+        /* PNG, not BMP, and the reason is load-bearing: a 24bpp BMP has nowhere to put ALPHA.
+         * Many DOOM assets are a flat white RGB plane with the entire image carried in the alpha
+         * channel -- GUI icons, decals, POI markers. Encoded as BMP those arrive as a solid white
+         * square, which reads as "the decoder failed" when in fact the decode was perfect and the
+         * ENCODER threw the answer away. (Observed live 2026-08-03: snap_talk_poi blank while
+         * snap_poi_dope_fish, which has real colour, was fine.)
+         *
+         * No compressor is needed. PNG's IDAT is a zlib stream, and DEFLATE permits STORED
+         * (uncompressed) blocks, so this emits a valid zlib stream with zero compression: a 2-byte
+         * header, stored blocks of at most 65535 bytes, and an Adler-32. Every chunk gets a CRC-32.
+         * Slightly larger than a BMP; correct, which the BMP was not. */
+        const unsigned raw_stride = w * 4u + 1u;              /* +1 = per-scanline filter byte */
+        const size_t   raw_len    = (size_t)raw_stride * h;
 
-        unsigned char *bmp = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, fileSize);
-        if (!bmp) { backend_log("B2: preview -- BMP alloc failed"); return; }
-
-        bmp[0] = 'B'; bmp[1] = 'M';
-        *(unsigned *)(bmp + 2)  = fileSize;
-        *(unsigned *)(bmp + 10) = 54u;              /* pixel data offset */
-        *(unsigned *)(bmp + 14) = 40u;              /* BITMAPINFOHEADER  */
-        *(int *)     (bmp + 18) = (int)w;
-        *(int *)     (bmp + 22) = -(int)h;          /* negative = top-down */
-        *(unsigned short *)(bmp + 26) = 1;          /* planes   */
-        *(unsigned short *)(bmp + 28) = 24;         /* bpp      */
-        *(unsigned *)(bmp + 34) = pixBytes;
-
-        /* Source is RGBA8 (that is what the engine's page decoder emits, and it was also the capture
-         * format of the retired route); BMP wants BGR -- hence the swap. Alpha is dropped. */
+        unsigned char *raw = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, raw_len);
+        if (!raw) { backend_log("B2: preview -- PNG raw alloc failed"); return; }
         for (unsigned y = 0; y < h; ++y) {
-            const unsigned char *src = rgba + (size_t)y * w * 4u;
-            unsigned char       *dst = bmp + 54u + (size_t)y * rowBytes;
-            for (unsigned x = 0; x < w; ++x) {
-                dst[x * 3u + 0] = src[x * 4u + 2];   /* B */
-                dst[x * 3u + 1] = src[x * 4u + 1];   /* G */
-                dst[x * 3u + 2] = src[x * 4u + 0];   /* R */
-            }
+            unsigned char *dst = raw + (size_t)y * raw_stride;
+            dst[0] = 0;                                        /* filter type 0 (None) */
+            memcpy(dst + 1, rgba + (size_t)y * w * 4u, w * 4u);
         }
 
+        /* CRC-32 table, built once. */
+        static unsigned crcTab[256];
+        static LONG crcReady = 0;
+        if (InterlockedCompareExchange(&crcReady, 1, 0) == 0) {
+            for (unsigned i = 0; i < 256; ++i) {
+                unsigned c = i;
+                for (int k = 0; k < 8; ++k) c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+                crcTab[i] = c;
+            }
+            InterlockedExchange(&crcReady, 2);
+        }
+        while (InterlockedCompareExchange(&crcReady, 2, 2) != 2) Sleep(0);
+
+        const size_t nblocks  = (raw_len + 65534u) / 65535u;
+        const size_t idat_len = 2u + nblocks * 5u + raw_len + 4u;   /* hdr + blocks + adler */
+        const size_t pngCap = 8u + (12u + 13u) + (12u + idat_len) + 12u;
+
+        unsigned char *png = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, pngCap);
+        if (!png) { HeapFree(GetProcessHeap(), 0, raw); backend_log("B2: preview -- PNG alloc failed"); return; }
+
+        size_t o = 0;
+        static const unsigned char SIG[8] = {0x89,'P','N','G',0x0D,0x0A,0x1A,0x0A};
+        memcpy(png + o, SIG, 8); o += 8;
+
+        #define PUT32(p, v) do { unsigned v_ = (unsigned)(v); \
+            (p)[0]=(unsigned char)(v_>>24); (p)[1]=(unsigned char)(v_>>16); \
+            (p)[2]=(unsigned char)(v_>>8);  (p)[3]=(unsigned char)(v_); } while (0)
+
+        size_t ihdr = o;
+        PUT32(png + o, 13); o += 4;
+        memcpy(png + o, "IHDR", 4); o += 4;
+        PUT32(png + o, w); o += 4;
+        PUT32(png + o, h); o += 4;
+        png[o++] = 8;    /* bit depth   */
+        png[o++] = 6;    /* colour type 6 = RGBA */
+        png[o++] = 0; png[o++] = 0; png[o++] = 0;   /* deflate / filter 0 / no interlace */
+        {   unsigned c = 0xFFFFFFFFu;
+            for (size_t i = ihdr + 4; i < o; ++i) c = crcTab[(c ^ png[i]) & 0xFFu] ^ (c >> 8);
+            PUT32(png + o, c ^ 0xFFFFFFFFu); o += 4; }
+
+        size_t idat = o;
+        PUT32(png + o, (unsigned)idat_len); o += 4;
+        memcpy(png + o, "IDAT", 4); o += 4;
+        png[o++] = 0x78; png[o++] = 0x01;                     /* zlib: deflate, 32K, no dict */
+        for (size_t b = 0, done = 0; b < nblocks; ++b) {
+            size_t n = raw_len - done; if (n > 65535u) n = 65535u;
+            png[o++] = (b + 1u == nblocks) ? 1u : 0u;         /* BFINAL on the last, BTYPE = stored */
+            png[o++] = (unsigned char)(n & 0xFFu);
+            png[o++] = (unsigned char)(n >> 8);
+            png[o++] = (unsigned char)(~n & 0xFFu);
+            png[o++] = (unsigned char)((~n >> 8) & 0xFFu);
+            memcpy(png + o, raw + done, n); o += n; done += n;
+        }
+        {   unsigned a = 1, b2 = 0;                            /* Adler-32 over the RAW bytes */
+            for (size_t i = 0; i < raw_len; ++i) { a = (a + raw[i]) % 65521u; b2 = (b2 + a) % 65521u; }
+            PUT32(png + o, (b2 << 16) | a); o += 4; }
+        {   unsigned c = 0xFFFFFFFFu;
+            for (size_t i = idat + 4; i < o; ++i) c = crcTab[(c ^ png[i]) & 0xFFu] ^ (c >> 8);
+            PUT32(png + o, c ^ 0xFFFFFFFFu); o += 4; }
+
+        PUT32(png + o, 0); o += 4;
+        memcpy(png + o, "IEND", 4); o += 4;
+        {   unsigned c = 0xFFFFFFFFu;
+            for (size_t i = o - 4; i < o; ++i) c = crcTab[(c ^ png[i]) & 0xFFu] ^ (c >> 8);
+            PUT32(png + o, c ^ 0xFFFFFFFFu); o += 4; }
+        #undef PUT32
+
+        HeapFree(GetProcessHeap(), 0, raw);
+
+        const unsigned char *bmp = png;      /* the base64 stage below is format-agnostic */
+        const unsigned fileSize = (unsigned)o;
         size_t prefixLen = strlen(prefix);
         size_t outCap    = prefixLen + ((size_t)fileSize + 2) / 3 * 4 + 1;
         char  *out       = (char *)HeapAlloc(GetProcessHeap(), 0, outCap);
@@ -129,7 +190,7 @@ void sh_preview_publish(const unsigned char *rgba, unsigned w, unsigned h)
         }
         memcpy(out, prefix, prefixLen);
 
-        size_t o = prefixLen;
+        o = prefixLen;
         unsigned i = 0;
         while (i + 2 < fileSize) {
             unsigned v = ((unsigned)bmp[i] << 16) | ((unsigned)bmp[i+1] << 8) | bmp[i+2];
@@ -159,7 +220,7 @@ void sh_preview_publish(const unsigned char *rgba, unsigned w, unsigned h)
 
         char line[200];
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "B2: preview PUBLISHED -- %ux%u BMP, %zu base64 chars; fetch via iface ext 13", w, h, o);
+            "B2: preview PUBLISHED -- %ux%u RGBA PNG, %zu base64 chars; fetch via iface ext 13", w, h, o);
         backend_log(line);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("B2: preview -- FAULTED encoding the preview");

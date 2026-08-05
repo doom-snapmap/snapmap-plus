@@ -31,6 +31,9 @@
 #include "cvars.h"
 #include "entity.h"
 #include "typeinfo.h"
+#include "megapreview.h"  /* Assets-tab material preview: megatexture pages -> RGBA, CPU-only */
+#include "imgpreview.h"   /* ...and its fallback for materials with no megatexture rect */
+#include "soundpreview.h" /* Assets-tab sound auditioning: the editor's own preview path */
 #include "patch.h"
 #include "algo.h"
 #include "target_any.h"   /* sh_target_any editor-decl visibility toggle (OG FUN_180021EE0 port) */
@@ -167,10 +170,10 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
      * already proved the whole DB resolves): the rawmap save/load swap, the strids injector, the
      * OVERRIDES file-shadow, and the cvar + console-command registration. */
     {
-        sig_result results[64];
-        sig_resolve_all(g_doom_base, results, 64);   /* fills results[0..sig_db_count) by DB index */
+        sig_result results[SIG_RESULTS_MAX];
+        sig_resolve_all(g_doom_base, results, SIG_RESULTS_MAX);   /* fills results[0..sig_db_count) by DB index */
         size_t db = sig_db_count();
-        if (db > 64) db = 64;
+        if (db > SIG_RESULTS_MAX) db = SIG_RESULTS_MAX;   /* smoke.c logs the overflow */
 
         /* the rawmap LOAD swap (the keystone feature). Install the DeserializeFromJson detour as
          * soon as the engine fn is resolved -- it does NOT depend on the editor being up (the detour
@@ -366,6 +369,27 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * are already registered by the sh_commands CMD_TABLE; this only caches their engine deps. AFTER
          * sh_entity_install. See typeinfo.c. */
         sh_typeinfo_install(results, db, g_doom_base);
+
+        /* megapreview: the Assets-tab preview PRODUCER. Reads <game>\virtualtextures off disk and
+         * decodes a named material's megatexture pages by calling DOOM's own page decoder
+         * (FUN_14196E140) in-process -- a pure function, so no renderer, no GPU and no map
+         * residency, which is what lets this cover the whole catalog instead of only what the
+         * loaded map happens to render. Verifies the decoder's prologue against a byte signature
+         * and REFUSES to install on a mismatch, so a game update degrades to "no previews" rather
+         * than a call into the wrong code. Hooks nothing. See megapreview.c and the doom-re
+         * campaign revenant-asset-index-and-viewport (evidence 06/07/08). */
+        sh_megapreview_install(g_doom_base);
+        /* imgpreview: the fallback half of the same feature -- materials with no megatexture rect,
+         * decoded from the shipped .index/.resources containers (BC1/BC3/BC7). Reads files only;
+         * no engine call, no hook. megapreview's worker calls it when the atlas route declines. */
+        sh_imgpreview_install();
+        /* soundpreview: the same browser's AUDIO half. Calls the editor's own audition path
+         * (sound-world vtbl +0x30) and keeps the emitter handle it returns, so a preview can be
+         * stopped and a second click replaces the first instead of stacking on it -- the two things
+         * the `testSound` console command cannot do. Needs cmdsys for the s_soloSound /
+         * s_forceListener / s_playSoundInBackground cvars. Refuses to arm unless BOTH the play and
+         * the stop resolve. Hooks nothing. See soundpreview.c. */
+        sh_soundpreview_install(results, db, g_doom_base, cmdsys);
 
         /* snaphak_algo (cs_dontuse [18] + sh_alginfo): cache the DOOM module base so the cs_dontuse
          * TOGGLE can resolve the 4 AlgoMatMul/AlgoInverse/AlgoPackRGBA/AlgoCurveEval sigs at FIRE and

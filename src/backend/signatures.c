@@ -882,5 +882,51 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "80 A1 D0 02 00 00 FB 80 89 D0 02 00 00 08 80 89 D1 02 00 00 01 "
       "C7 81 AC 01 00 00 04 00 00 00 C6 81 B8 0B 00 00 01 C3",
       0xCF35E0u },
+    { "SoundWorldLea",      /* idSoundSystemLocal::Update -- void(void). Only wanted for its FIRST
+                             * instruction: `MOV RBX,[rip+disp32]` reading the CURRENT SOUND WORLD
+                             * global (RVA 0x6223A18 on the pinned build). That global is a plain
+                             * .data pointer with no unique code fingerprint of its own -- exactly the
+                             * cmdSystem/gameMgr situation -- so it is decoded from this accessor
+                             * instead of hardcoded. NOTE the modrm is 0x1D (-> RBX), which the SHARED
+                             * sh_decode_rip_slot does not accept (it only takes ->RAX/->RCX); the
+                             * sound module carries its own any-register variant. See soundpreview.c.
+                             *
+                             * Unique on the pinned build: the 0xFF00FF00 profile colour immediately
+                             * after the null test is what makes it so. Wildcards: the two rip-relative
+                             * displacements (the global and the profile-label string).
+                             * DIRECT (our own reverse-engineering, 2026-08-04). */
+      "40 53 48 83 EC 20 48 8B 1D ?? ?? ?? ?? 48 85 DB 74 1E 48 8D 15 ?? ?? ?? ?? B9 00 FF 00 FF",
+      0x18514F0u },
+    { "SoundPreview",       /* idSoundWorld PREVIEW -- void*(this [rcx], uint64 *outHandle [rdx],
+                             * const char *name [r8]). Sound-world vtable slot +0x30.
+                             *
+                             * This is the editor's own audition path, not a general play call, and it
+                             * is what makes previewing usable:
+                             *   - sets cvar s_soloSound = "preview" so the audition is the only thing
+                             *     audible, and forces the listener, so the sound arrives at the ear
+                             *     rather than positioned somewhere in the world;
+                             *   - plays through vtbl+0x40 with the label "preview" at a fixed origin
+                             *     and axis, and writes the emitter HANDLE to *outHandle;
+                             *   - when the name resolves to nothing it instead CLEARS s_soloSound and
+                             *     s_forceListener and writes handle 0 -- that branch is the whole of
+                             *     "leave preview mode".
+                             *
+                             * It DOES stack: each call allocates a fresh emitter (StartSound_wwise
+                             * @0x1854600 does `operator new(0x2200)` and appends to the emitter array
+                             * at world+0x1F70). So the caller MUST stop the previous handle first --
+                             * see the vtable +0x98 stop in soundpreview.c. That is the difference
+                             * between this and the
+                             * `testSound` console command, which throws its handle away and therefore
+                             * cannot be stopped or prevented from piling up.
+                             *
+                             * DANGER: it resolves the name through the find-OR-CREATE decl primitive
+                             * (0x17B36F0) with allowCreate=1, which fatals on a name that is not a
+                             * real decl. Only ever call it with a name sh_imgpreview_has() confirmed.
+                             *
+                             * Wildcards: the rel32 to the name-hash helper and the rip-relative read
+                             * of the solo-list count. DIRECT (our own reverse-engineering, 2026-08-04). */
+      "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 41 54 41 56 41 57 48 83 EC 50 "
+      "4C 8B E1 4D 8B F0 49 8B C8 4C 8B FA E8 ?? ?? ?? ?? 33 F6 8B E8 39 35 ?? ?? ?? ?? 7E 5E",
+      0x1855660u },
     { NULL, NULL, 0 }   /* terminator */
 };

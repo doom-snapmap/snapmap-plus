@@ -32,6 +32,9 @@
 #include "backend_log.h"
 #include "typeinfo.h"        /* sh_typeinfo_class_derives + the LIVE registry walks (collect_records/inherits) */
 #include "preview.h"         /* sh_preview_get / sh_preview_request -- the asset-preview transport */
+#include "imgpreview.h"      /* sh_imgpreview_list -- the Assets browser's material catalog */
+#include "megapreview.h"     /* sh_megapreview_rect -- the virtualmapping carrier's atlas rect */
+#include "soundpreview.h"    /* sh_soundpreview_play/stop -- auditioning a sound decl */
 #include "valid_class_map.h" /* SH_VCM_* -- the class-dropdown static snapshot (used only if the live walk fails) */
 #include "wiring_cleandirect.h" /* sh_wiring_cleandirect_generation -- the wire-any connect-edit counter (+0x288) */
 #include "snapstack.h"          /* sh_snapstack_push_ids_backend -- the SnapStack stack push (+0x2A0) */
@@ -492,6 +495,53 @@ static int slot_request_preview(sh_iface *self, const char *name)
     if (!name || !*name) return 0;
     sh_preview_request(name);
     return 1;
+}
+
+/* +0x2E0 (ext 15) Page the material catalog for the Assets browser's list. Pure file/index read
+ * (imgpreview.c owns the containers); no engine state touched, so no session gate. */
+static int slot_list_materials(sh_iface *self, int start, char *out, int cap)
+{
+    (void)self;
+    if (!out || cap <= 1) return 0;
+    return sh_imgpreview_list(SH_ASSET_MATERIAL, (unsigned)(start > 0 ? start : 0), out, (size_t)cap);
+}
+
+/* +0x2E8 (ext 16) The same, for any indexed asset type. `kind` is an SH_ASSET_* value; out-of-range
+ * returns 0 rather than falling back to materials, so a UI/backend version mismatch shows up as an
+ * empty list instead of silently serving the wrong catalog. */
+static int slot_list_assets(sh_iface *self, int kind, int start, char *out, int cap)
+{
+    (void)self;
+    if (!out || cap <= 1) return 0;
+    return sh_imgpreview_list(kind, (unsigned)(start > 0 ? start : 0), out, (size_t)cap);
+}
+
+/* +0x2F0 (ext 17) A material's atlas rect, so the browser can build a `virtualmapping` renderParm
+ * value and can tell when that carrier does not apply at all. Pure .vmtr read; no engine state. */
+static int slot_material_rect(sh_iface *self, const char *name, int *out_xywh)
+{
+    (void)self;
+    return sh_megapreview_rect(name, out_xywh);
+}
+
+/* +0x2F8 (ext 18) Audition a sound decl, or stop the current one when `name` is NULL/empty. The
+ * play half validates the name against our own container index before it reaches the engine, so a
+ * bad name here is a refusal and not a fatal error. MAIN THREAD: the UI reaches this through its
+ * apply drain, never straight off the WebView thread -- this touches live audio state. */
+static int slot_sound_preview(sh_iface *self, const char *name)
+{
+    (void)self;
+    if (!name || !name[0]) { sh_soundpreview_stop(); return 0; }
+    return sh_soundpreview_play(name);
+}
+
+/* +0x300 (ext 19) Hold preview mode open while the asset browser is on screen. The audition cvars
+ * cost an audio-engine suspend/resume to change, so they are set once here rather than around every
+ * click -- doing it per click made short sounds fade in or miss their start entirely. MAIN THREAD. */
+static void slot_sound_session(sh_iface *self, int on)
+{
+    (void)self;
+    sh_soundpreview_set_session(on);
 }
 
 static void mode_set_selection_state(int state)
@@ -1290,6 +1340,11 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     slots.find_material           = slot_find_material;              /* +0x2C8 ext 12 */
     slots.get_preview             = slot_get_preview;                /* +0x2D0 ext 13 */
     slots.request_preview         = slot_request_preview;            /* +0x2D8 ext 14 */
+    slots.list_materials          = slot_list_materials;             /* +0x2E0 ext 15 */
+    slots.list_assets             = slot_list_assets;                /* +0x2E8 ext 16 */
+    slots.material_rect           = slot_material_rect;              /* +0x2F0 ext 17 */
+    slots.sound_preview           = slot_sound_preview;              /* +0x2F8 ext 18 */
+    slots.sound_session           = slot_sound_session;              /* +0x300 ext 19 */
     sh_iface_bind_engine_slots(&slots);
 
     char line[200];

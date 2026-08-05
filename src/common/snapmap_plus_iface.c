@@ -316,6 +316,11 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     g_iface_vtbl_live.find_material           = s->find_material;           /* +0x2C8 */
     g_iface_vtbl_live.get_preview             = s->get_preview;             /* +0x2D0 */
     g_iface_vtbl_live.request_preview         = s->request_preview;         /* +0x2D8 */
+    g_iface_vtbl_live.list_materials          = s->list_materials;          /* +0x2E0 */
+    g_iface_vtbl_live.list_assets             = s->list_assets;             /* +0x2E8 */
+    g_iface_vtbl_live.material_rect           = s->material_rect;           /* +0x2F0 */
+    g_iface_vtbl_live.sound_preview           = s->sound_preview;           /* +0x2F8 */
+    g_iface_vtbl_live.sound_session           = s->sound_session;           /* +0x300 */
 }
 
 /* --------------------------------------------------------------------- the factory -----------------

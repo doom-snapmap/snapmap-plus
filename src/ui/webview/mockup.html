@@ -49,6 +49,106 @@
   .mat-result { font-weight: 600; }
   .mat-result.ok  { color: #2e7d46; }
   .mat-result.err { color: var(--danger); }
+
+  /* ---- asset browser -------------------------------------------------------------------------
+   * Three columns: type rail | catalog | asset inspector. Mounted twice -- once as the Assets tab
+   * (open browsing) and once inside a modal opened from the Entities tab (scoped to the selection).
+   * Everything below is built from the existing tokens and .panel/.entity-item/.btn skeleton so the
+   * browser reads as part of the app rather than a bolted-on pane. */
+  .ab-grid { display: flex; gap: 8px; align-items: stretch; flex: 1; min-height: 0; }
+  .ab-rail { width: 138px; flex: 0 0 138px; }
+  .ab-mid  { flex: 1 1 auto; min-width: 200px; }
+  .ab-insp { width: 268px; flex: 0 0 268px; }
+  /* Narrow window: drop the type rail first (only one type is indexed, and the filter reaches
+     everything anyway). The inspector is never dropped -- it holds the preview and the copy
+     button, which are the whole point of the pane. */
+  @media (max-width: 1000px) { .ab-rail { display: none; } }
+  @media (max-width: 760px)  { .ab-insp { width: 208px; flex: 0 0 208px; } }
+
+  .ab-rail .rail-head { font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+                        color: var(--muted); padding: 8px 7px 3px; }
+  .ab-rail .rail-head:first-child { padding-top: 3px; }
+  .ab-rail .entity-item { display: flex; align-items: baseline; gap: 6px; color: var(--text); cursor: pointer; }
+  .ab-rail .entity-item.off { color: var(--muted); opacity: .6; cursor: default; }
+  .ab-rail .entity-item.off:hover { background: transparent; }
+  .ab-rail .entity-item .n { margin-left: auto; color: var(--muted); font-family: Consolas, "Courier New", monospace;
+                             font-size: 10px; font-variant-numeric: tabular-nums; }
+  .ab-rail .entity-item.selected .n { color: var(--selText); }
+
+  /* Keyboard cursor. Distinct from .selected on purpose: arrowing through a 3,000-entry folder moves
+     this, and only Enter/Space commits it to the selection -- so the two have to be tellable apart
+     while both are on screen. An outline rather than a fill, drawn inside the row so it does not
+     shift anything. */
+  .ab-grid .entity-item.kb { outline: 1px solid var(--accent); outline-offset: -1px; border-radius: 4px; }
+
+  /* Breadcrumbs, because the catalog is drilled one folder at a time (see renderAbTree). */
+  .ab-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; color: var(--muted);
+               font-family: Consolas, "Courier New", monospace; font-size: 10.5px; line-height: 1.5; }
+  .ab-crumbs .cb { color: var(--link); cursor: pointer; padding: 0 2px; border-radius: 3px; }
+  .ab-crumbs .cb:hover { background: var(--sel); color: var(--selText); }
+  .ab-crumbs .cb-flat { font-style: italic; }
+
+  .ab-row { display: flex; align-items: center; gap: 6px; }
+  .ab-row .tw { width: 10px; flex: 0 0 10px; color: var(--muted); font-size: 9px; text-align: center; }
+  .ab-row .nm { overflow: hidden; text-overflow: ellipsis; }
+  .ab-row .leaf { font-family: Consolas, "Courier New", monospace; font-size: 11px; }
+  .ab-row .cnt { margin-left: auto; color: var(--muted); font-family: Consolas, "Courier New", monospace;
+                 font-size: 10px; font-variant-numeric: tabular-nums; }
+  /* Copy rides ON the row: pasting a path into the Decl Text editor is the most common thing done
+     with a name here, so it must not be buried behind selecting the asset first. */
+  .ab-row .cp { margin-left: auto; opacity: 0; border: 1px solid var(--border2); background: var(--panel);
+                color: var(--muted); border-radius: 4px; padding: 0 5px; font-size: 10px; cursor: pointer;
+                font-family: inherit; flex-shrink: 0; }
+  .entity-item:hover .cp, .entity-item.selected .cp { opacity: 1; }
+  .ab-row .cp:hover { border-color: var(--accent); color: var(--text); }
+
+  .ab-insp .panel-body { padding: 10px; display: flex; flex-direction: column; gap: 9px; }
+  /* Checkerboard: many assets are white-on-transparent (GUI icons, decals, POI markers). On a flat
+     dark background those read as an empty pane; on a checker the shape is legible. */
+  .ab-thumb { width: 100%; aspect-ratio: 1; border: 1px solid var(--border2); border-radius: 5px; display: block;
+    background-color: #2a2a30; image-rendering: pixelated; object-fit: contain;
+    background-image: linear-gradient(45deg,#3a3a42 25%,transparent 25%,transparent 75%,#3a3a42 75%),
+                      linear-gradient(45deg,#3a3a42 25%,transparent 25%,transparent 75%,#3a3a42 75%);
+    background-size: 16px 16px; background-position: 0 0, 8px 8px; }
+  .ab-nothumb { width: 100%; aspect-ratio: 1; border: 1px dashed var(--border2); border-radius: 5px;
+                display: flex; align-items: center; justify-content: center; text-align: center;
+                color: var(--muted); font-style: italic; padding: 14px; line-height: 1.45; }
+  /* The audition card takes the preview square for sounds, which have no pixels to show. Same
+     footprint as .ab-thumb / .ab-nothumb so the panel below it does not move between asset types. */
+  .ab-audition { width: 100%; aspect-ratio: 1; border: 1px solid var(--border2); border-radius: 5px;
+                 display: flex; flex-direction: column; align-items: center; justify-content: center;
+                 gap: 10px; background: var(--panel2); }
+  .ab-audition.playing { border-color: var(--accent); }
+  .ab-audition .ab-play { width: 54px; height: 54px; border-radius: 50%; font-size: 17px; line-height: 1;
+                          padding: 0; display: flex; align-items: center; justify-content: center; }
+  .ab-audition.playing .ab-play { border-color: var(--accent); color: var(--accent); }
+  .ab-audition-note { color: var(--muted); font-size: 11px; }
+  .ab-audition.playing .ab-audition-note { color: var(--text); }
+  .ab-pathrow { display: flex; gap: 5px; }
+  .ab-pathrow input { flex: 1; min-width: 0; font-family: Consolas, "Courier New", monospace; color: var(--muted); }
+  .ab-sect { border-top: 1px solid var(--border); padding-top: 8px; display: flex; flex-direction: column; gap: 5px; }
+  .ab-sect > .panel-title { padding: 0; }
+  .ab-opt { display: flex; gap: 6px; align-items: flex-start; line-height: 1.4; }
+  .ab-opt input { margin: 2px 0 0; }
+  .ab-opt .why { color: var(--muted); display: block; }
+  .ab-opt.off { opacity: .55; }
+  .ab-meta { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 0; }
+  .ab-meta dt { color: var(--muted); }
+  .ab-meta dd { margin: 0; text-align: right; font-family: Consolas, "Courier New", monospace;
+                font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; }
+
+  /* the asset browser opened from the Entities tab: a wide modal, not the narrow prompt-sized one */
+  .modal.assets { width: min(1040px, 94vw); height: min(660px, 88vh); padding: 0; gap: 0;
+                  overflow: hidden; }
+  .modal.assets .modal-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+                              border-bottom: 1px solid var(--border); background: var(--panel2); flex-shrink: 0; }
+  .modal.assets .ab-grid { padding: 8px; }
+  .modal.assets .modal-foot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+                              padding: 8px 12px; border-top: 1px solid var(--border);
+                              background: var(--panel2); flex-shrink: 0; }
+  .modal.assets .modal-foot .grow { flex: 1; min-width: 140px; color: var(--muted);
+                                    font-family: Consolas, "Courier New", monospace;
+                                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* the global camera group lives in the tabstrip's spare right-side space */
   .camera { display: flex; align-items: center; gap: 8px; padding: 2px 6px; color: var(--muted); }
   .camera label { display: flex; align-items: center; gap: 4px; color: var(--text); }
@@ -363,10 +463,13 @@
   </div>
 
   <div class="tabstrip">
+    <!-- Assets sits first, but Entities is what OPENS: `active` here and the panel display states
+         below are the only thing that picks the starting tab, so tab ORDER and DEFAULT tab are
+         independent. Moving this row does not move the default. -->
+    <div class="tab" data-tab="assets">Assets</div>
     <div class="tab active" data-tab="entities">Entities</div>
     <div class="tab" data-tab="prefabs">Prefabs</div>
     <div class="tab" data-tab="timelines">Timelines</div>
-    <div class="tab" data-tab="assets">Assets</div>
     <div class="spacer"></div>
     <div class="camera">
       <span class="cam-title">Camera</span>
@@ -392,6 +495,9 @@
           <label title="The list follows whatever you select in the SnapMap 3D editor"><input type="checkbox" id="syncEditor"> Follow selection</label>
           <label title="Selecting entities here selects them in the SnapMap 3D editor"><input type="checkbox" id="selectInEditor"> Select in 3D</label>
           <button class="btn icon" id="deselectBtn" style="display:none;" title="Clear the 3D editor selection">Deselect</button>
+          <!-- Far right of this row, not over in the Entity State panel-head: next to Save to Decl it
+               sat among the commit buttons and read as one of them, so it went unnoticed. -->
+          <button class="btn" id="browseAssetsBtn" style="margin-left:auto" disabled title="Select an entity first">Browse assets...</button>
         </div>
       </div>
       <div class="panel-body list" id="entityList"><div class="list-empty">Waiting for the map...</div></div>
@@ -478,32 +584,10 @@
     </div>
   </div>
 
+  <!-- Assets tab: open browsing. The same three-column browser is mounted again inside
+       #assetModal, scoped to the Entities-tab selection. See abMount(). -->
   <div class="content" id="panel-assets" style="display:none;">
-    <div class="panel left-pane">
-      <div class="panel-head">
-        <span class="panel-title">Assets</span>
-      </div>
-      <div class="panel-body pad">
-        <p style="color:var(--muted); margin-top:0;">
-          Resolve-only test: checks whether a material of this name exists in the shipped catalog
-          (works for any real material, not just ones already placed or rendered). No image preview yet.
-        </p>
-        <label style="display:block; margin-bottom:8px;">
-          Material name
-          <input type="text" id="matNameBox" placeholder="e.g. textures/users/joconnell/doom1/doortrak" style="width:100%; margin-top:4px;">
-        </label>
-        <button class="btn primary" id="matCheckBtn">Check</button>
-        <div id="matResult" class="mat-result" style="margin-top:12px;"></div>
-<div style="margin-top:10px">
-  <button id="previewBtn" class="btn">Render preview</button>
-  <span id="previewStatus" style="margin-left:8px;opacity:.75;font-size:12px"></span>
-  <div style="margin-top:8px">
-    <img id="previewImg" alt="asset preview" style="display:none;width:256px;height:256px;
-         image-rendering:pixelated;border:1px solid rgba(255,255,255,.18);border-radius:4px;background:#111">
-  </div>
-</div>
-      </div>
-    </div>
+    <div class="ab-grid" id="abTabHost"></div>
   </div>
 
   <div class="content" id="panel-timelines" style="display:none;">
@@ -548,6 +632,24 @@
 <div id="toastHost"></div>
 <div class="rz rz-t"></div><div class="rz rz-b"></div><div class="rz rz-l"></div><div class="rz rz-r"></div>
 <div class="rz rz-tl"></div><div class="rz rz-tr"></div><div class="rz rz-bl"></div><div class="rz rz-br"></div>
+<!-- Asset browser opened from the Entities tab. Same browser as the Assets tab, mounted a second
+     time into #abModalHost, plus a header/footer that name the entity it is scoped to. -->
+<div class="modal-overlay" id="assetModal" style="display:none;">
+  <div class="modal assets">
+    <div class="modal-head">
+      <span class="modal-title" style="margin:0">Browse assets</span>
+      <span class="muted" id="amFor" style="font-family:Consolas,'Courier New',monospace"></span>
+      <div style="margin-left:auto"><button class="btn icon" id="amClose" title="Close (Esc)">&#10005;</button></div>
+    </div>
+    <div class="ab-grid" id="abModalHost"></div>
+    <div class="modal-foot">
+      <span class="grow" id="amPath">Nothing selected.</span>
+      <button class="btn" id="amCancel">Close</button>
+      <button class="btn primary" id="amApply" disabled>Apply to entity</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="prefabCreateModal" style="display:none;">
   <div class="modal">
     <div class="modal-title">Create prefab from selection</div>
@@ -864,6 +966,80 @@
     103: JSON.stringify({ entityDef: { state: { edit: {} } } })
   };
   function previewList() { return {kind:'list', version:'local (preview)', editorReady:true, count:0, entities:previewEnts, timelines:previewTimelines}; }
+  var PREVIEW_MATERIALS =
+    'default\nmaterial/snapmap/dynamic_block_textured_gore_floor\n' +
+    'models/characters/doommarine/doommarine_eye\n' +
+    'models/characters/doommarine_playerhands/doommarine_playerhands\n' +
+    'models/characters/doommarine_playerhands/doommarine_playerhands_bloody\n' +
+    'models/characters/male_scientist/male_scientist_wounds\n' +
+    'models/characters/mp/doom_marine/doom_marine_helmet\nmodels/characters/olivia/olivia_eye_occ2\n' +
+    'models/characters/olivia/olivia_head\nmodels/characters/player/hands\n' +
+    'models/characters/spencer/spencer_uvset03\nmodels/mapobjects/crates/barrel_a\n' +
+    'models/mapobjects/crates/ind_cratex128\nmodels/mapobjects/gore/hand\n' +
+    'models/mapobjects/gore/head_mummy\nmodels/mapobjects/hell/hell_door_frame\n' +
+    'models/mapobjects/hell_ext/pillars/1st_floor_pillar_med\n' +
+    'models/mapobjects/hell_terrain/hell_rib_01\nmodels/mapobjects/hell_terrain/spire_kit_02\n' +
+    'models/mapobjects/industrial/large_props/fan_large\nmodels/mapobjects/lights/light_covered\n' +
+    'models/mapobjects/mp/ca_mp_graphite_specimentank/ca_mp_graphite_specimentank\n' +
+    'models/mapobjects/pickups/ammodispenser/ammodispenser\n' +
+    'models/mapobjects/polar_core/modules/train_rail\nmodels/mapobjects/vehicles/forklift_01_ext\n' +
+    'models/mapobjects/vehicles/tram/tram_door\nmodels/mapobjects/white_collar/modularconsole_main\n' +
+    'models/mapobjects/white_collar/modularconsole_short\n' +
+    'models/monsters/hellknight_2/hellknight_fbg\nmodels/monsters/imp/imp\n' +
+    'models/monsters/mancubus/mancubus_body_gibs\nmodels/monsters/mp_baron/mp_baron_gore\n' +
+    'models/monsters/mp_mancubus/mp_cybermancubus\n' +
+    'models/monsters/mp_mancubus/mp_cybermancubus_heart\n' +
+    'models/monsters/mp_pinky/mp_pinky_armor_cloaked_allied\nmodels/monsters/mp_prowler/mp_prowler\n' +
+    'models/monsters/mphands_prowler/mphands_prowler\nmodels/monsters/pinky/pinky_body_fbg\n' +
+    'models/monsters/revenant/rev_body\nmodels/monsters/revenant/rev_body_gibs\n' +
+    'models/monsters/welder_zombie/welder_zombie_torso\nmodels/pickups/mp_armor/mp_armor_medium\n' +
+    'models/snapmaps/doors/door_horizontal\nmodels/weapons/ammo/combatshotgun_ammo\n' +
+    'models/weapons/arc_canon/arc_3rdp\nmodels/weapons/autoturret/autoturret\n' +
+    'models/weapons/boost_pack/boost_boot\nmodels/weapons/chaingun/chaingun_mod_gatling\n' +
+    'models/weapons/chainsaw/chainsaw_blood1\nmodels/weapons/grenade/grenade\n' +
+    'models/weapons/har/har_scope\nmodels/weapons/heavyassaultrifle/custom/har_base_3rd_custom\n' +
+    'models/weapons/kinetic_mine/kinetic_mine_enemy\nmodels/weapons/mp_flare_rifle/mp_flare_rifle\n' +
+    'models/weapons/mp_flare_rifle/mp_flare_rifle_3rdp\n' +
+    'models/weapons/mp_static_rifle/custom/static_rifle_custom\n' +
+    'models/weapons/mp_static_rifle/static_rifle_3rdp\n' +
+    'models/weapons/plasmarifle/custom/plasmariflebase_3rd_custom\n' +
+    'models/weapons/salvo_cannon/salvo_cannon_lod\nmodels/weapons/shotgun/mods/pop_rockets_mod\n' +
+    'models/weapons/vortex_rifle/custom/vortex_rifle_3rd_custom\n' +
+    'models/weapons/vortex_rifle/vortex_rifle_3rdp\nmodels/weapons/weapon_crate_01/weapon_crate_01\n' +
+    'snap/decals/blood/blood_runes_05\nsnap/decals/damage/scratches_3\n' +
+    'snap/decals/glass/shattered_02\nsnap/decals/markings/strips_med_c45\n' +
+    'snap/decals/science/equation_2\nsnap/decals/science/equation_6\nsnap/decals/science/equation_8\n' +
+    'snap/decals/signs/warning_flammable\nsteel\ntextures/biomechanic/tan_tile_01\n' +
+    'textures/bluecollar/bc_floor_1b_192_320\ntextures/bluecollar/bc_tile_02\n' +
+    'textures/bluecollar/walls/bc_panels_steel\ntextures/bluecollar/walls/bc_walls_detailed\n' +
+    'textures/ca/pipes_mp/mp_pipe_simple_01_orange\ntextures/common/prototype\n' +
+    'textures/effects/misc/backpack\ntextures/exterior/walls/ind_panels_exterior_orange\n' +
+    'textures/gameplay/general_suitmod_container\ntextures/gore/gore_column_01\n' +
+    'textures/guis/snapmaps/module_icons/b_ind_engineroom\ntextures/hell/brickpattern03\n' +
+    'textures/hell/floor_tile01\ntextures/hell_terrain/ht_ground_sand_01\n' +
+    'textures/industrial/catwalks/catwalk01_bottom_192\n' +
+    'textures/industrial/catwalks/catwalk01_top_256\ntextures/industrial/floors/ind_lrg_floor_02\n' +
+    'textures/industrial/greeble_panel_1\ntextures/industrial/greeble_panels_dark_grey_ind_drk\n' +
+    'textures/industrial/ind_caps_1\ntextures/industrial/walls/panel_maint_1_green_iwk\n' +
+    'textures/industrial_large/ceiling_lrg_ind\ntextures/industrial_large/elevator_trims_01_purple\n' +
+    'textures/industrial_large/frame_large_tile_01_grey\ntextures/mp/glass/ca_mp_glass_dirty_01\n' +
+    'textures/mp/mp_basin/ca_mp_basin_uac_trim_03\ntextures/mp/mp_cliffside/ca_mp_uac_tech_1b\n' +
+    'textures/mp/mp_concise/ca_mp_concise_panel_03\n' +
+    'textures/mp/mp_disposal/ca_mp_disposal_metal_tiles_lrg_sbs\n' +
+    'textures/mp/tech/ca_mp_tech_servers_02\ntextures/mp/walls/ca_mp_ind_panels_painted\n' +
+    'textures/mp/walls/ca_mp_metal_walls_02\ntextures/mp/wires/ca_mp_wires_01\n' +
+    'textures/pipes/handrail_01_blue\ntextures/pipes/handrail_01_steel_clean\n' +
+    'textures/pipes/ind_pipe_huge\ntextures/pipes/ind_pipe_huge_copper_s\n' +
+    'textures/pipes/ind_pipe_huge_grey\ntextures/pipes/ind_pipe_huge_red\n' +
+    'textures/pipes/ind_pipe_huge_steel\ntextures/pipes/pipe_detailed_red_bc\n' +
+    'textures/pipes/pipe_simple_01_grey\ntextures/pipes/pipe_simple_01_wc_yellow\n' +
+    'textures/pipes/wc_cooling_pipe\ntextures/props/cardboard_tiles_inner\n' +
+    'textures/props/cardboard_tiles_outer_brown_b\n' +
+    'textures/props/cardboard_tiles_outer_white_damaged\ntextures/sfx/glass_1_sided\n' +
+    'textures/uac/floors/grate_rect2\ntextures/uac/panels/uac_metal_tile_01a\n' +
+    'textures/whitecollar/wc_floor_red\ntextures/whitecollar/wc_panel_2b\n' +
+    'textures/whitecollar/wc_panel_maint_1e\ntextures/whitecollar/wc_panel_maint_tall_1a\n' +
+    'textures/whitecollar/wc_panel_tall_1d\nweapons/har/harbase\nweapons/har/harbase_bloody\n';
   function previewHandle(o) {
     if (o.cmd === 'refresh') { onMessage(previewList()); }
     else if (o.cmd === 'openTimeline') {
@@ -889,6 +1065,30 @@
       if (cOk) previewReportSigs[cSig] = true;
       setTimeout(function(){ onMessage({kind:'reportResult', ok:cOk, mode:cMode, number:43}); }, 600);
     }
+    // ---- asset browser, browser-preview side ----
+    // A 130-name sample of the REAL SnapMap material catalog (sampled from the campaign's
+    // vt-backed-snap-materials.txt), so the folder tree in a plain browser has the same shape and
+    // depth the in-game one does. The in-game catalog is ~9,800 names and comes from the backend.
+    // Only materials have a browser-preview sample; every other type answers empty, which the rail's
+    // "-" count then reflects honestly. Faking nine catalogs would be inventing game data.
+    else if (o.cmd === 'listAssets') {
+      onMessage({kind:'assetList', assetKind: o.assetKind,
+                 names: (o.assetKind === 0 ? PREVIEW_MATERIALS : '')});
+    }
+    // No decoder outside the game, so the preview honestly reports that rather than faking pixels.
+    else if (o.cmd === 'requestPreview') { onMessage({kind:'previewRequested', ok:false, name:o.name,
+      note:'Previews only decode in-game - there is no codec on the browser side.'}); }
+    else if (o.cmd === 'getPreview')     { onMessage({kind:'previewImage', ok:false}); }
+    else if (o.cmd === 'findMaterial')   { onMessage({kind:'materialResult', found:false, name:o.name}); }
+    // A real rect, so the browser-preview build can exercise the virtualmapping patch end to end:
+    // material/snapmap/dynamic_block_textured_hell_cave_facade's actual .vmtr row.
+    else if (o.cmd === 'newEntity') {
+      // preview only: no engine to stage into, so just prove the authored prefab parses.
+      var neOk = false; try { neOk = !!JSON.parse(o.json); } catch (e) { neOk = false; }
+      onMessage({kind:'newEntityResult', result: neOk ? 1 : -1, label: o.label});
+    }
+    else if (o.cmd === 'materialRect')   { onMessage({kind:'materialRect', name:o.name, ok:true,
+                                                      x:88320, y:138240, w:3840, h:3840}); }
     else if (o.cmd === 'crashDismiss') { /* preview: nothing to clear */ }
     else if (o.cmd === 'saveTimeline') {
       // preview only: no real backend to commit to -- just prove the patched JSON is well-formed and
@@ -2691,6 +2891,17 @@
     else if (n === 0) { primaryEid = -1; showPlaceholder('Select an entity from the list.'); }
     else { primaryEid = -1; showPlaceholder(n + ' entities selected.<br>Select a single entity to edit its decl.<br><span style="opacity:0.75;">Right-click for actions on all ' + n + '.</span>'); }
     if (push !== false) pushSelectionToEditor();
+    // The asset browser applies to ONE entity, so it follows the same single-selection rule the
+    // decl editor does.
+    var bab = document.getElementById('browseAssetsBtn');
+    if (bab) {
+      bab.disabled = (n !== 1);
+      bab.title = (n === 1) ? 'Browse the asset catalog and apply to this entity'
+                            : (n ? 'Select a single entity' : 'Select an entity first');
+    }
+    /* The Apply button is gated on the selection's class, so it has to be re-evaluated whenever
+     * the selection moves -- the browser can be open the whole time. */
+    abRefreshInspectors();
   }
   function entityIdString(eid) {
     for (var i=0;i<allEntities.length;i++) if (allEntities[i].eid === eid) return allEntities[i].id;
@@ -2719,6 +2930,10 @@
     if (!inheritsRequested) { inheritsRequested = true; post({cmd:'enumInherits'}); }  // full inherit list, once
     post({cmd:'enumClasses', inherit: d.inherit || ''});                                // classes valid for THIS inherit
     requestDesc();
+    /* Apply is gated on `loaded` and on this entity's classname, and BOTH only become known here.
+     * Without this the button stays greyed after every save -- the post-save state round-trip nulls
+     * and re-fills `loaded`, and nothing was re-rendering the inspector against the new value. */
+    abRefreshInspectors();
   }
   function requestDesc() {
     post({cmd:'lookupDesc', inherit: document.getElementById('fInherit').value, classname: document.getElementById('fClassname').value});
@@ -2908,6 +3123,14 @@
       updateDirty();
     } else if (d.kind === 'desc') {
       renderDesc(d);
+    } else if (d.kind === 'materialRect') {
+      onMaterialRect(d);
+    } else if (d.kind === 'newEntityResult') {
+      onNewEntityResult(d);
+    } else if (d.kind === 'soundPreviewResult') {
+      onSoundPreviewResult(d);
+    } else if (d.kind === 'assetList') {
+      onAssetList(d);
     } else if (d.kind === 'previewImage') {
       onPreviewImage(d);
     } else if (d.kind === 'previewRequested') {
@@ -3208,6 +3431,7 @@
   document.addEventListener('keydown', function(e){
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
     if (document.getElementById('panel-entities').style.display === 'none') return;
+    if (assetModalOpen()) return;   // the modal owns the arrow keys while it is up
     var ae = document.activeElement;
     if (ae && (ae.closest('#editor') || ae.closest('.combo'))) return;
     e.preventDefault();
@@ -3222,6 +3446,7 @@
   document.addEventListener('keydown', function(e){
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
     if (document.getElementById('panel-prefabs').style.display === 'none') return;
+    if (assetModalOpen()) return;
     var ae = document.activeElement;
     if (ae && (ae.closest('#prefabCard') || ae.classList.contains('pf-folder-name'))) return;
     e.preventDefault();
@@ -3407,87 +3632,1251 @@
       });
       if (which === 'prefabs') post({cmd:'listPrefabs'});
       if (which === 'timelines') tlMaybeAutoRefresh();   // catch stale content from a play-mode round-trip that happened while this tab wasn't visible
+      // The catalog is cached after the first fetch, so this is a no-op on every later visit.
+      if (which === 'assets') { abActive = abTabMount; abFetchAll(); }
+      /* One decision point for the session, here and everywhere else: it wants the browser on
+       * screen AND this window focused. Navigating away closes it, which stops any audition and
+       * hands the editor back its audio -- neither may outlive the tab that started it. */
+      abSyncSoundSession();
     });
   });
-  document.getElementById('matCheckBtn').addEventListener('click', function(){
-    var nm = document.getElementById('matNameBox').value.trim();
-    var out = document.getElementById('matResult');
-    if (!nm) { out.textContent = 'Type a material name first.'; out.className = 'mat-result'; return; }
-    out.textContent = 'Checking...'; out.className = 'mat-result';
-    post({cmd:'findMaterial', name: nm});
-  });
-  document.getElementById('matNameBox').addEventListener('keydown', function(e){
-    if (e.key === 'Enter') document.getElementById('matCheckBtn').click();
-  });
-  /* Preview any material: ask the backend to render the name in the box, then poll for the pixels.
-   * The capture happens on the engine's render thread and only becomes readable a few frames after the
-   * copy is recorded, so a request cannot answer synchronously -- hence poll rather than await. */
-  var pvTimer = null, pvTries = 0;
-  var PV_MAX_TRIES = 40, PV_INTERVAL_MS = 250;   /* ~10 s, comfortably past the readback delay */
+  /* ==== decl text patching ======================================================================
+   * Apply edits the decl TEXT the editor already shows, not a parsed model of it. Two reasons:
+   * the engine requires floats to keep their ".0" and a JSON round-trip drops it (the same trap
+   * the timeline normalize path documents), and editing the text means every change Apply makes is
+   * visible in the Decl Text box and undoable with the Revert button that is already there.
+   *
+   * The decl is the entity's `edit = { ... }` override block. Braces inside quoted values are real
+   * -- a renderParm value is the string "{ 0.015625, ... }" -- so every scan below skips strings. */
 
-  function pvStatus(msg) {
-    var st = document.getElementById('previewStatus');
-    if (st) st.textContent = msg;
+  function dpMatchBrace(s, open) {          /* index of the '}' closing the '{' at `open` */
+    var depth = 0, inStr = false;
+    for (var i = open; i < s.length; i++) {
+      var c = s.charAt(i);
+      if (inStr) { if (c === '"') inStr = false; continue; }
+      if (c === '"') { inStr = true; continue; }
+      if (c === '{') depth++;
+      else if (c === '}' && --depth === 0) return i;
+    }
+    return -1;
   }
-  function pvStopPolling() {
-    if (pvTimer) { clearInterval(pvTimer); pvTimer = null; }
-    pvTries = 0;
+  /* Walk one block's DIRECT children, skipping nested blocks and strings. Calls back with the
+   * key name and the index just past it. */
+  function dpEachEntry(s, open, close, fn) {
+    var i = open + 1, inStr = false;
+    while (i < close) {
+      var c = s.charAt(i);
+      if (inStr) { if (c === '"') inStr = false; i++; continue; }
+      if (c === '"') { inStr = true; i++; continue; }
+      if (c === '{') { i = dpMatchBrace(s, i); if (i < 0) return; i++; continue; }
+      var m = /^([A-Za-z_]\w*(?:\[\d+\])?)\s*=?\s*/.exec(s.slice(i, i + 96));
+      if (m && (i === open + 1 || /[\s;}{]/.test(s.charAt(i - 1)))) {
+        if (fn(m[1], i, i + m[0].length) === false) return;
+        i += m[1].length;
+        continue;
+      }
+      i++;
+    }
   }
-  function onPreviewRequested(d) {
+  function dpFindChild(s, open, close, key) {   /* direct child by name -> {at, after} or null */
+    var hit = null;
+    dpEachEntry(s, open, close, function (k, at, after) {
+      if (k === key) { hit = {at: at, after: after}; return false; }
+    });
+    return hit;
+  }
+  function dpFindBlock(s, open, close, key) {   /* direct child that is a { } block */
+    var h = dpFindChild(s, open, close, key);
+    if (!h) return null;
+    var o = s.indexOf('{', h.after - 1);
+    if (o < 0) return null;
+    var c = dpMatchBrace(s, o);
+    return c < 0 ? null : {at: h.at, open: o, close: c};
+  }
+  function dpIndentOf(s, at) {                  /* the whitespace starting the line `at` sits on */
+    var ls = s.lastIndexOf('\n', at - 1) + 1;
+    var m = /^[ \t]*/.exec(s.slice(ls, at));
+    return m ? m[0] : '\t';
+  }
+  /* The indent one level inside a block: copy a sibling's, else add to the block's own. */
+  function dpInnerIndent(s, open, close) {
+    var inner = null;
+    dpEachEntry(s, open, close, function (k, at) { inner = dpIndentOf(s, at); return false; });
+    if (inner) return inner;
+    var base = dpIndentOf(s, s.lastIndexOf('\n', open) + 1 === 0 ? open : open);
+    return base + (base.indexOf('\t') >= 0 || base === '' ? '\t' : '    ');
+  }
+
+  /* Set `key = <literal>;` among a block's direct children -- replacing the existing line if there
+   * is one, otherwise inserting just before the block's closing brace. */
+  function dpSetScalar(s, open, close, key, literal) {
+    var h = dpFindChild(s, open, close, key);
+    if (h) {
+      var end = s.indexOf(';', h.after);
+      var nl  = s.indexOf('\n', h.after);
+      if (end < 0 || (nl >= 0 && nl < end)) end = (nl < 0 ? close : nl) - 1;
+      return s.slice(0, h.at) + key + ' = ' + literal + ';' + s.slice(end + 1);
+    }
+    var ind = dpInnerIndent(s, open, close);
+    var lineStart = s.lastIndexOf('\n', close) + 1;
+    return s.slice(0, lineStart) + ind + key + ' = ' + literal + ';\n' + s.slice(lineStart);
+  }
+  /* Find `key = { }` among direct children, creating an empty one if absent. Returns the new text
+   * plus the block's brace positions. */
+  function dpEnsureBlock(s, open, close, key) {
+    var b = dpFindBlock(s, open, close, key);
+    if (b) return {text: s, open: b.open, close: b.close};
+    var ind = dpInnerIndent(s, open, close);
+    var lineStart = s.lastIndexOf('\n', close) + 1;
+    var ins = ind + key + ' = {\n' + ind + '}\n';
+    var text = s.slice(0, lineStart) + ins + s.slice(lineStart);
+    var o = text.indexOf('{', lineStart + ind.length + key.length);
+    return {text: text, open: o, close: dpMatchBrace(text, o)};
+  }
+
+  /* renderParms is an INDEXED array: `num = N;` then item[0..N-1], each `{ parm = ..; value = ..; }`.
+   * Replace the item whose parm is `parm` if there is one -- a second item with the same parm would
+   * be ambiguous -- otherwise append item[num] and bump num. */
+  function dpSetRenderParm(s, rmOpen, rmClose, parm, value) {
+    var made = dpEnsureBlock(s, rmOpen, rmClose, 'renderParms');
+    s = made.text;
+    var open = made.open, close = made.close;
+
+    var items = [], num = 0;
+    dpEachEntry(s, open, close, function (k, at, after) {
+      var im = /^item\[(\d+)\]$/.exec(k);
+      if (im) items.push({idx: +im[1], at: at, after: after});
+      else if (k === 'num') {
+        var vm = /\s*(\d+)/.exec(s.slice(after));
+        if (vm) num = +vm[1];
+      }
+    });
+    for (var i = 0; i < items.length; i++) {
+      var o = s.indexOf('{', items[i].after - 1);
+      if (o < 0) continue;
+      var c = dpMatchBrace(s, o);
+      var p = dpFindChild(s, o, c, 'parm');
+      if (!p) continue;
+      var pm = /\s*"([^"]*)"/.exec(s.slice(p.after));
+      if (pm && pm[1] === parm) return dpSetScalar(s, o, c, 'value', '"' + value + '"');
+    }
+    /* Not present -- append. The index is `num`, which is what the engine reads, not items.length:
+     * they can disagree if a decl was hand-edited, and num is the authority. */
+    var next = Math.max(num, items.length);
+    var ind  = dpInnerIndent(s, open, close);
+    var deep = ind + (ind.indexOf('\t') >= 0 ? '\t' : '    ');
+    var lineStart = s.lastIndexOf('\n', close) + 1;
+    var block = ind + 'item[' + next + '] = {\n'
+              + deep + 'parm = "' + parm + '";\n'
+              + deep + 'value = "' + value + '";\n'
+              + ind + '}\n';
+    s = s.slice(0, lineStart) + block + s.slice(lineStart);
+    /* re-locate the block: the insert moved its closing brace */
+    var re = dpFindBlock(s, rmOpen, dpMatchBrace(s, rmOpen), 'renderParms');
+    return dpSetScalar(s, re.open, re.close, 'num', String(next + 1));
+  }
+
+  /* The whole decl is one `edit = { }`; some entities' text is just the braces' contents. Return
+   * the edit block's braces, creating the wrapper if the text is empty. */
+  function dpEditBlock(s) {
+    var end = s.length;
+    var b = dpFindBlock(s, -1, end, 'edit');
+    if (b) return {text: s, open: b.open, close: b.close};
+    var o = s.indexOf('{');
+    if (o >= 0) { var c = dpMatchBrace(s, o); if (c > 0) return {text: s, open: o, close: c}; }
+    var text = 'edit = {\n}\n';
+    return {text: text, open: text.indexOf('{'), close: dpMatchBrace(text, text.indexOf('{'))};
+  }
+
+  /* Build the patched decl for one carrier. Returns null when the carrier cannot be written. */
+  /* The generic dynamic block surface -- itself virtual-textured, so a virtualmapping parm applied
+   * on top of it actually displays. A new blocking volume would otherwise inherit
+   * material/snapmap/entitybase, which does not. dynamic_block_solid is the flat-colour sibling. */
+  var VM_BLOCK_MATERIAL = 'material/snapmap/dynamic_block_textured';
+
+  function dpApply(decl, type, carrier, name, rect) {
+    var e = dpEditBlock(decl || '');
+    var s = e.text, open = e.open, close = e.close;
+
+    /* customMaterial and model both live in renderModelInfo, which is created when missing --
+     * absence does NOT mean the entity cannot render (a trigger legitimately can), and the engine
+     * refuses the save if it really is wrong. */
+    if (carrier === 'cm' || carrier === 'm') {
+      var rm = dpEnsureBlock(s, open, close, 'renderModelInfo');
+      return dpSetScalar(rm.text, rm.open, rm.close,
+                         carrier === 'cm' ? 'customMaterial' : 'model', '"' + name + '"');
+    }
+    if (carrier === 'vm') {
+      if (!rect) return null;
+      var rm2 = dpEnsureBlock(s, open, close, 'renderModelInfo');
+      /* Only the renderParm. customMaterial is deliberately NOT touched here: an entity already on
+       * the map carries whatever surface the mapper chose for it, and replacing that would undo
+       * their work. The entitybase->dynamic_block swap belongs to New Entity, which is the only
+       * path that creates a box still carrying the def's placeholder. */
+      /* (w, h, x, y) / 245760 -- verified against a known atlas rect. */
+      var v = '{ ' + [rect.w, rect.h, rect.x, rect.y]
+              .map(function (n) { return String(n / 245760); }).join(', ') + ' }';
+      return dpSetRenderParm(rm2.text, rm2.open, rm2.close, 'virtualmapping', v);
+    }
+    var flat = {f: 'fxDecl', s: 'sound', p: 'particleSystem'}[carrier];
+    if (flat) return dpSetScalar(s, open, close, flat, '"' + name + '"');
+    return null;
+  }
+
+  /* ==== asset browser =========================================================================
+   * ONE catalog, mounted TWICE: the Assets tab (open browsing) and a modal opened from the
+   * Entities tab (scoped to the current selection). Both mounts share the fetched catalog and the
+   * built folder tree; each keeps its own view state (type / folder / filter / selection).
+   *
+   * Nothing in the Apply section is wired yet -- the controls are laid out and type-aware so the
+   * shape can be reviewed, but they do not write to any entity. */
+
+  /* Asset types, each backed by a real decl type in the shipped containers. `kind` is the
+   * SH_ASSET_* id the backend's list_assets (ext 16, +0x2E8) takes -- keep it in step with
+   * common/snapmap_plus_iface.h. `ref` marks a type you can browse and copy but not apply.
+   *
+   * Counts observed in snap_gameresources.index: model 12,630 / material 9,805 / sound 5,658 /
+   * image 3,423 / entityDef 2,520 / decalatlas 1,673 / particle 1,523 / snapEditorEntityDef
+   * 1,362 / fx 476. */
+  var AB_TYPES = [
+    {id:'material',  kind:0, label:'Materials'},
+    {id:'model',     kind:2, label:'Models'},
+    {id:'sound',     kind:3, label:'Sounds'},
+    {id:'fx',        kind:4, label:'FX'},
+    {id:'particle',  kind:5, label:'Particles'},
+    {id:'snapDef',   kind:7, label:'Editor defs', ref:true},
+    {id:'entityDef', kind:8, label:'Entity defs', ref:true},
+    {id:'image',     kind:1, label:'Images',      ref:true},
+    {id:'decal',     kind:6, label:'Decal atlases', ref:true}
+  ];
+  function abType(id) {
+    for (var i = 0; i < AB_TYPES.length; i++) if (AB_TYPES[i].id === id) return AB_TYPES[i];
+    return null;
+  }
+  var AB_MAX_HITS = 400;              /* cap the filter result DOM; the filter is what narrows */
+
+  var abNames = {};                   /* type -> sorted name array (undefined = never fetched) */
+  var abTrees = {};                   /* type -> folder tree built from abNames[type] */
+  var abMounts = [];                  /* every mounted browser */
+  var abActive = null;                /* the mount that owns the in-flight preview request */
+
+  /* --- folder tree ---------------------------------------------------------------------------
+   * Names are paths ("textures/guis/snapmaps/poi/snap_poi_talk"), so the folder structure is
+   * implied by the '/' segments. Built once per type, then drilled. */
+  function abBuildTree(names) {
+    var root = {dirs:{}, dirKeys:[], files:[], n:0};
+    for (var i = 0; i < names.length; i++) {
+      var p = names[i].split('/'), node = root;
+      for (var j = 0; j < p.length - 1; j++) {
+        if (!node.dirs[p[j]]) { node.dirs[p[j]] = {dirs:{}, dirKeys:[], files:[], n:0}; node.dirKeys.push(p[j]); }
+        node = node.dirs[p[j]];
+      }
+      node.files.push({name: p[p.length - 1], path: names[i]});
+    }
+    (function count(n) {
+      n.n = n.files.length;
+      n.dirKeys.sort();
+      for (var k = 0; k < n.dirKeys.length; k++) n.n += count(n.dirs[n.dirKeys[k]]);
+      n.files.sort(function(a,b){ return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
+      return n.n;
+    })(root);
+    return root;
+  }
+  function abTree(type) {
+    if (!abTrees[type]) abTrees[type] = abBuildTree(abNames[type] || []);
+    return abTrees[type];
+  }
+  function abNodeAt(type, dir) {
+    var n = abTree(type);
+    if (!dir) return n;
+    var parts = dir.split('/');
+    for (var i = 0; i < parts.length; i++) { if (!n.dirs[parts[i]]) return null; n = n.dirs[parts[i]]; }
+    return n;
+  }
+  function abEsc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+
+  /* --- how each asset type reaches an entity ---------------------------------------------------
+   * This is the part that has to be right: it decides what Apply will eventually write. Sourced
+   * from the campaign's placement-carrier map, not guessed from the UI's convenience. */
+  function abCarriers(type, path) {
+    if (type === 'material') return [
+      {id:'cm', label:'Custom Material', ok:true,
+       why:'Applies the material by name. Works for any material in the catalog.'},
+      {id:'vm', label:'Virtual Mapping', ok:true,
+       why:'Applies the material by renderParms virtualmapping. Only works for materials that are '
+         + 'in the megatexture, and may not be the same texture on other platforms.'}
+    ];
+    if (type === 'model')    return [{id:'m', label:'Model', ok:true,
+                                      why:'Applies the model by name under renderModelInfo.'}];
+    /* Music is not special-cased. A music track is a soundshader decl like any other, so it both
+     * previews and applies; put one on a speaker and it plays as a sound, it just does not behave
+     * like a real music entity (no music-system control over it). That is the mapper's call to
+     * make, not a reason to refuse the write. */
+    if (type === 'sound')    return [{id:'s', label:'Sound', ok:true,
+                                      why:'Applies the sound to a sound entity line. A music track works '
+                                        + 'here too, but on a speaker it is just a sound -- it will not '
+                                        + 'behave like a music entity.'}];
+    if (type === 'fx')       return [{id:'f', label:'FX', ok:true,
+                                      why:'Replaces the fxDecl line, or inherits a new FX entity from this one.'}];
+    if (type === 'particle') return [{id:'p', label:'Particle', ok:true,
+                                      why:'Changes the particle property, or builds a new emitter entity.'}];
+    if (type === 'snapDef' || type === 'entityDef')
+                             return [{id:'e', label:'Reference only', ok:false,
+                                      why:'Entity defs are picked from the Inherit dropdown in Entity State. '
+                                        + 'Listed here so you can search and copy one, not as a second '
+                                        + 'place to set it.'}];
+    if (type === 'decal')    return [{id:'d', label:'Reference only', ok:false,
+                                      why:'A decal atlas is the sheet many decal materials are baked into. '
+                                        + 'You apply one of those materials, not the atlas.'}];
+    return [{id:'n', label:'Reference only', ok:false,
+             why:'Browse and copy the name -- there is nothing to apply an image to directly.'}];
+  }
+
+  /* --- a mount ---------------------------------------------------------------------------------
+   * `mode` is 'tab' (open browsing) or 'modal' (scoped to the Entities-tab selection). */
+  function abMount(host, mode) {
+    var m = {host:host, mode:mode, type:'material', dir:'', q:'', sel:null, carrier:'cm',
+             pvTimer:null, pvTries:0};
+    host.innerHTML =
+        '<div class="panel ab-rail"><div class="panel-head"><span class="panel-title">Asset type</span></div>'
+      +   '<div class="panel-body"><div class="list" data-ab="rail"></div></div></div>'
+      + '<div class="panel ab-mid"><div class="panel-head"><span class="panel-title">Catalog</span>'
+      +     '<span class="badge" data-ab="cnt">0</span>'
+      +     '<div class="panel-actions"><button class="btn icon" data-ab="reload" title="Re-fetch the catalog from the backend">&#8635;</button></div></div>'
+      +   '<div class="panel-toolbar"><input type="text" data-ab="q" placeholder="Filter every folder...">'
+      +     '<div class="ab-crumbs" data-ab="crumbs"></div></div>'
+      +   '<div class="panel-body"><div class="list" data-ab="tree"></div></div></div>'
+      + '<div class="panel ab-insp"><div class="panel-head"><span class="panel-title">Asset</span>'
+      +     '<span class="hint" data-ab="pvstatus" style="margin-left:auto;font-style:normal"></span></div>'
+      +   '<div class="panel-body" data-ab="insp"></div></div>';
+    m.el = function(n){ return host.querySelector('[data-ab="' + n + '"]'); };
+
+    m.el('q').addEventListener('input', function(){ m.q = this.value; abRenderTree(m); });
+    m.el('reload').addEventListener('click', function(){ abFetch(m, true); });
+    m.el('rail').addEventListener('click', function(e){
+      var it = e.target.closest ? e.target.closest('[data-type]') : null;
+      if (!it) return;
+      m.type = it.getAttribute('data-type'); m.dir = ''; m.sel = null;
+      abRenderRail(m); abRenderTree(m); abRenderInsp(m);
+      abFetch(m, false);
+    });
+    m.el('tree').addEventListener('click', function(e){
+      var cp = e.target.closest ? e.target.closest('[data-copy]') : null;
+      if (cp) { e.stopPropagation(); abCopy(cp.getAttribute('data-copy')); return; }
+      var ck = e.target.closest ? e.target.closest('[data-check]') : null;
+      if (ck) { post({cmd:'findMaterial', name: m.q.trim()}); ck.textContent = 'Checking...'; return; }
+      var row = e.target.closest ? e.target.closest('.entity-item') : null;
+      if (!row) return;
+      if (row.getAttribute('data-up')) { m.dir = m.dir.split('/').slice(0,-1).join('/'); abRenderTree(m); return; }
+      if (row.getAttribute('data-dir')) { m.dir = row.getAttribute('data-path'); abRenderTree(m); return; }
+      abSelect(m, row.getAttribute('data-path'));
+    });
+    m.el('crumbs').addEventListener('click', function(e){
+      var cb = e.target.closest ? e.target.closest('.cb') : null;
+      if (!cb) return;
+      m.dir = cb.getAttribute('data-dir') || ''; abRenderTree(m);
+    });
+    m.el('insp').addEventListener('click', function(e){
+      var cp = e.target.closest ? e.target.closest('[data-copy]') : null;
+      if (cp) { abCopy(cp.getAttribute('data-copy')); return; }
+      var ap = e.target.closest ? e.target.closest('[data-ab-apply]') : null;
+      if (ap && !ap.disabled) { abApply(m); return; }
+      var ne = e.target.closest ? e.target.closest('[data-ab-new]') : null;
+      if (ne && !ne.disabled) { abNewEntity(m); return; }
+      var au = e.target.closest ? e.target.closest('[data-ab-audition]') : null;
+      if (au) abAudition(m.sel);
+    });
+    m.el('insp').addEventListener('change', function(e){
+      if (e.target && e.target.name === 'abCarrier') m.carrier = e.target.value;
+    });
+    abMounts.push(m);
+    abRenderRail(m); abRenderTree(m); abRenderInsp(m);
+    return m;
+  }
+
+  /* ---- Apply to selection ---------------------------------------------------------------------
+   * Patches the decl the editor is already showing and COMMITS it. A button labelled Apply that
+   * only stages an edit invites the user to believe they applied something when they did not, and
+   * costs a second click to do what they already asked for. The edit is still visible in Decl Text
+   * afterwards, and a refused save leaves it dirty so it can be fixed rather than silently lost.
+   *
+   * Virtual Mapping is the one carrier that needs a value the page does not have, so it asks the
+   * backend for the material's atlas rect first and finishes in onMaterialRect. */
+  var abPendingVM = null;         /* {mount, name} while a rect lookup is in flight */
+
+  /* The ONLY classes a material or model may be applied to. An allowlist, not a denylist: the owner
+   * ruled that a material on a speaker, particle emitter or FX entity is never wanted, and refusing
+   * outright beats warning and writing it anyway.
+   *
+   * Anchored deliberately. A loose /trigger/ or /mover/ substring test also matches
+   * idSnapMapAction_SetTriggerActivatable, idSnapMapAction_SetTriggerVisible and
+   * idSnapMapAction_Mover_Start, which are logic actions with no geometry -- exactly the entities
+   * this is meant to exclude. Hence the idSnapMapAction guard first.
+   *
+   * Covers (shipped-def counts): idVolume_Blocking, idProp* (5 classes / 500 defs), idTrigger*,
+   * idVolume_Trigger_Editable, idAI2, idMover. */
+  function abRenderTargetOk(cls) {
+    cls = cls || '';
+    if (/^idSnapMapAction/i.test(cls)) return false;
+    return /^idVolume_Blocking/i.test(cls)
+        || /^idVolume_Trigger/i.test(cls)
+        || /^idTrigger/i.test(cls)
+        || /_Trigger$/i.test(cls)
+        || /^idProp/i.test(cls)
+        || /^idAI2/i.test(cls)
+        || /^idMover/i.test(cls)
+        || /^idSnapMapCapEntity/i.test(cls)
+        || /^idDynamicSnapMapEntity/i.test(cls);
+  }
+
+  /* The player spawn. Its appearance is not the mapper's to change and nothing it could carry means
+   * anything, so it is refused for every carrier before any per-carrier rule is consulted. */
+  function abNoApplyEver(cls) { return /^idSnapMapGameEntity_ComboStart/i.test(cls); }
+
+  /* Doors and interactables. An FX, particle or sound bolted onto one of these is refused: they own
+   * their own audio and effects as part of the interaction, and an override fights it.
+   * idInteractable_Obstacle_SnapDoor is the SnapMap door; the other two are the door-ish classes
+   * that are not idInteractable at all. */
+  function abIsDoorOrInteractable(cls) {
+    return /^idInteractable/i.test(cls)
+        || /^idVolume_SnapLockdownDoor/i.test(cls)
+        || /^idSoundDoor/i.test(cls);
+  }
+
+  /* MODELS only (not materials) may also be swapped on most interactables -- they are props with a
+   * use-prompt, and re-skinning them is a normal thing to want. The exceptions are the ones whose
+   * model IS the mechanic: a door that no longer looks like a door, a world cache the player has to
+   * recognise, a coop elite guard. Exact matches, not prefixes, so idInteractable_EliteGuard and
+   * idInteractable_Obstacle stay allowed -- only the named subclasses are refused.
+   * All 16 idInteractable classes in the build: (allowed) idInteractable, _Minigame, _Moveable,
+   * _LootDrop, _GiveItems, _LootCrate, _EliteGuard, _Tutorial, _WeaponModBot, _VegaTraining,
+   * _Obstacle, _PowerCoreReceptacle, _NightmareMarker; (refused) the three below. */
+  var AB_MODEL_DENY = ['idInteractable_Obstacle_SnapDoor',
+                       'idInteractable_WorldCache',
+                       'idInteractable_EliteGuard_Coop'];
+  function abModelTargetOk(cls) {
+    cls = cls || '';
+    for (var i = 0; i < AB_MODEL_DENY.length; i++)
+      if (cls.toLowerCase() === AB_MODEL_DENY[i].toLowerCase()) return false;
+    return abRenderTargetOk(cls) || /^idInteractable/i.test(cls);
+  }
+
+  /* The one place that decides whether `carrier` may be written to `cls`. Returns null when it may,
+   * or the reason it may not. */
+  function abApplyDenied(carrier, cls) {
+    cls = cls || '';
+    if (abNoApplyEver(cls)) return 'Nothing can be applied to ' + cls;
+    if (carrier === 'm')  return abModelTargetOk(cls) ? null : cls + ' cannot wear a model';
+    if (carrier === 'cm' || carrier === 'vm')
+      return abRenderTargetOk(cls) ? null : cls + ' cannot wear a material';
+    if (carrier === 'f' || carrier === 'p' || carrier === 's')
+      return abIsDoorOrInteractable(cls)
+           ? cls + ' owns its own effects and audio -- an FX, particle or sound cannot be applied to it'
+           : null;
+    return null;
+  }
+
+  function abApply(m) {
+    if (!m.sel || primaryEid < 0 || !loaded) { toast('Select a single entity first', 'err'); return; }
+    var cls = document.getElementById('fClassname').value || '';
+    var denied = abApplyDenied(m.carrier, cls);
+    if (denied) { toast(denied, 'err'); return; }
+    if (m.carrier === 'vm') { abPendingVM = {m: m, name: m.sel}; post({cmd:'materialRect', name: m.sel}); return; }
+    abApplyNow(m, m.sel, m.carrier, null);
+  }
+  function abApplyNow(m, name, carrier, rect) {
+    var box = document.getElementById('declText');
+    var next = dpApply(box.value, m.type, carrier, name, rect);
+    if (next === null) { toast('That carrier cannot be written', 'err'); return; }
+    if (next === box.value) { toast('Already set to that -- nothing changed'); return; }
+    box.value = next;
+    refreshDecl(); updateDirty();
+    /* Name the property that changed -- the saveResult toast that follows says whether it stuck,
+     * but not what was touched, and Decl Text is scrolled wherever the user left it. */
+    var PROP = {cm:'customMaterial', vm:'renderParms virtualmapping', m:'model',
+                f:'fxDecl', s:'sound', p:'particleSystem'};
+    toast((PROP[carrier] || 'property') + ' = ' + name);
+    /* The speaker classes are the one case the owner called out as meaningless for a render asset.
+     * A note, not a block: the class list cannot tell a renderable trigger from a non-renderable
+     * one, so refusing would block legitimate edits. */
+    /* Commit. doSave() re-checks inherit/classname and refuses with its own message if they are
+     * bad; the edit then stays dirty in the editor, which is the recoverable outcome. The backend's
+     * saveResult toast is what reports success or a morph-guard refusal. */
+    doSave();
+    if (m.mode === 'modal') abCloseModal();
+  }
+  function onMaterialRect(d) {
+    /* Both Apply and New entity can be waiting on a rect; only one is ever outstanding. */
+    var pa = abPendingVM, pn = (typeof abPendingNewVM !== 'undefined' ? abPendingNewVM : null);
+    abPendingVM = null; if (typeof abPendingNewVM !== 'undefined') abPendingNewVM = null;
+    var p = (pa && d.name === pa.name) ? pa : ((pn && d.name === pn.name) ? pn : null);
+    if (!p) return;
     if (!d.ok) {
-      pvStopPolling();
-      pvStatus('Backend refused the request - is the engine hook installed?');
+      toast('"' + d.name + '" is not in the megatexture, so it has no virtualmapping', 'err');
       return;
     }
-    pvStatus('Loading a preview of "' + (d.name || '') + '"...');
-    pvStopPolling();
-    pvTimer = setInterval(function(){
-      if (++pvTries > PV_MAX_TRIES) {
-        pvStopPolling();
-        pvStatus('Timed out waiting for the preview. No image producer is installed yet.');
+    var rect = {x: d.x, y: d.y, w: d.w, h: d.h};
+    if (p === pa) abApplyNow(p.m, d.name, 'vm', rect);
+    else          abNewEntityNow(p.m, p.opt, d.name, rect);
+  }
+
+  function abCopy(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function(){ toast('Copied ' + text); },
+                                               function(){ abCopyFallback(text); });
+    } else abCopyFallback(text);
+  }
+  function abCopyFallback(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); toast('Copied ' + text); } catch (e) { toast('Copy failed'); }
+    document.body.removeChild(ta);
+  }
+
+  /* Placeable types first, then the reference-only ones under their own heading. The split is the
+   * honest answer to "what can I actually do with this?" -- a decal atlas or an image is real and
+   * searchable, but nothing on the map takes one directly. */
+  function abRenderRail(m) {
+    var place = '', ref = '';
+    for (var i = 0; i < AB_TYPES.length; i++) {
+      var t = AB_TYPES[i];
+      var n = abNames[t.id] ? abNames[t.id].length : 0;
+      var row = '<div class="entity-item' + (m.type === t.id ? ' selected' : '')
+              + '" data-type="' + t.id + '"'
+              + (t.ref ? ' title="Browse and copy only - nothing on the map takes one directly"' : '') + '>'
+              + '<span class="nm">' + t.label + '</span>'
+              + '<span class="n">' + (n ? n.toLocaleString() : '-') + '</span></div>';
+      if (t.ref) ref += row; else place += row;
+    }
+    m.el('rail').innerHTML = '<div class="rail-head">Placeable</div>' + place
+                           + '<div class="rail-head">Reference</div>' + ref;
+  }
+
+  /* ONE FOLDER AT A TIME, not a nested tree.
+   * A nested tree grows without bound as folders open -- expand textures/ and its subfolders push
+   * everything else down the pane, and the deeper you go the more ancestor siblings you keep
+   * paying screen space for. Drilling shows only the current folder, so the list height is
+   * constant however deep the path is, and the breadcrumb gets you back in one click. */
+  function abRenderTree(m) {
+    var el = m.el('tree'), crumbs = m.el('crumbs'), cnt = m.el('cnt');
+    var names = abNames[m.type];
+    if (!names) {
+      el.innerHTML = '<div class="list-empty">Loading the catalog...</div>';
+      crumbs.innerHTML = ''; cnt.textContent = '...';
+      return;
+    }
+    var q = m.q.trim().toLowerCase();
+    if (q) {
+      var hits = [];
+      for (var k = 0; k < names.length && hits.length < AB_MAX_HITS; k++)
+        if (names[k].toLowerCase().indexOf(q) >= 0) hits.push(names[k]);
+      var h = '';
+      for (var j = 0; j < hits.length; j++) h += abRow(m, hits[j], hits[j], false, null);
+      /* The catalog only holds SnapMap materials. A name that isn't here may still be a real decl
+       * elsewhere in the game, so offer the resolve-by-name check exactly where the question comes
+       * up rather than as permanent chrome. */
+      el.innerHTML = h || ('<div class="list-empty">Nothing matches &ldquo;' + abEsc(m.q) + '&rdquo;.'
+        + (m.type === 'material'
+            ? '<div style="margin-top:8px"><button class="btn" data-check="1">Check the full decl set</button>'
+            + '<div class="mat-result" data-ab-res="1" style="margin-top:6px"></div></div>' : '')
+        + '</div>');
+      crumbs.innerHTML = '<span class="cb-flat">Searching every folder</span>';
+      cnt.textContent = hits.length + (hits.length >= AB_MAX_HITS ? '+' : '');
+      return;
+    }
+    var parts = m.dir ? m.dir.split('/') : [], cb = '<span class="cb" data-dir="">All</span>';
+    for (var c = 0; c < parts.length; c++)
+      cb += ' / <span class="cb" data-dir="' + abEsc(parts.slice(0, c + 1).join('/')) + '">' + abEsc(parts[c]) + '</span>';
+    crumbs.innerHTML = cb;
+
+    var node = abNodeAt(m.type, m.dir);
+    if (!node) { el.innerHTML = '<div class="list-empty">That folder is gone.</div>'; return; }
+    var out = '';
+    if (m.dir) out += '<div class="entity-item" data-up="1"><div class="ab-row">'
+                    + '<span class="tw">&#8593;</span><span class="nm">..</span></div></div>';
+    for (var d = 0; d < node.dirKeys.length; d++) {
+      var name = node.dirKeys[d];
+      out += abRow(m, name, (m.dir ? m.dir + '/' : '') + name, true, node.dirs[name].n);
+    }
+    for (var f = 0; f < node.files.length; f++)
+      out += abRow(m, node.files[f].name, node.files[f].path, false, null);
+    el.innerHTML = out || '<div class="list-empty">Empty folder.</div>';
+    cnt.textContent = node.n.toLocaleString();
+  }
+  /* ---- auditioning a sound ----------------------------------------------------------------------
+   * The backend plays through the editor's own preview path and holds the emitter handle it gets
+   * back, so there is exactly one preview at a time and a second Play replaces the first instead of
+   * piling onto it. An empty name means stop.
+   *
+   * It also raises s_playSoundInBackground for the duration -- Snapmap+ has focus and DOOM does
+   * not, so without that the preview plays to nobody -- and puts it back on stop, so the game goes
+   * quiet again when the user alt-tabs away later.
+   *
+   * abSoundPlaying mirrors that one backend slot; soundPreviewResult corrects it. */
+  var abSoundPlaying = null;
+
+  /* Preview MODE is held open across clicks rather than toggled around each one. The cvars it needs
+   * cost DOOM an audio-engine suspend and resume to change, so doing that per Play made sounds fade
+   * in and let short ones finish before the resume did.
+   *
+   * It is held while the browser is on screen AND THIS WINDOW HAS FOCUS. Focus is what makes the
+   * mode correct rather than merely convenient:
+   *   - s_playSoundInBackground only matters BECAUSE DOOM does not have focus. Click into DOOM and
+   *     it is not wanted at all.
+   *   - the engine's preview sets s_soloSound "preview", which mutes everything else in the editor.
+   *     Held across a whole browsing session that leaves the editor silent until you switch tabs --
+   *     the reported symptom. Dropping the mode on blur hands the editor its audio back at exactly
+   *     the moment the user goes back to it, with no tab dance.
+   * Closing the session also stops playback backend-side, so nothing survives the blur. */
+  var abSessionOn = false;
+  var abWinFocused = (typeof document.hasFocus === 'function') ? document.hasFocus() : true;
+  function abBrowserOnScreen() {
+    return assetModalOpen() ||
+           document.getElementById('panel-assets').style.display !== 'none';
+  }
+  function abSyncSoundSession() { abSoundSession(abBrowserOnScreen() && abWinFocused); }
+  function abSoundSession(on) {
+    on = !!on;
+    if (on === abSessionOn) return;
+    abSessionOn = on;
+    /* The backend stops the emitter as part of closing the session, so the page only has to stop
+     * CLAIMING something is playing -- posting a separate stop would be a redundant round trip. */
+    if (!on && abSoundPlaying) { abSoundPlaying = null; abRefreshInspectors(); }
+    post({cmd:'soundSession', on: on ? 1 : 0});
+  }
+  window.addEventListener('focus', function(){ abWinFocused = true;  abSyncSoundSession(); });
+  window.addEventListener('blur',  function(){ abWinFocused = false; abSyncSoundSession(); });
+
+  function abAudition(path) {
+    if (!path) return;
+    if (abSoundPlaying === path) { abAuditionStop(); return; }
+    abSoundPlaying = path;                 /* optimistic, so the button answers the click at once */
+    abRefreshInspectors();
+    post({cmd:'soundPreview', name: path});
+  }
+  function abAuditionStop() {
+    if (!abSoundPlaying) return;
+    abSoundPlaying = null;
+    abRefreshInspectors();
+    post({cmd:'soundPreview', name: ''});
+  }
+  function onSoundPreviewResult(d) {
+    /* Believe the backend over the optimistic guess -- but only about the request still on screen.
+     * A refusal that lands after the user already started something else must not blank the new one. */
+    if (d.playing) { if (d.name) abSoundPlaying = d.name; }
+    else if (d.name && abSoundPlaying === d.name) {
+      toast('Could not preview that sound (see log)', 'err');
+      abSoundPlaying = null;
+    }
+    abRefreshInspectors();
+  }
+
+  /* ---- keyboard --------------------------------------------------------------------------------
+   * Up/Down move a cursor through the catalog list; Enter or Space acts on the cursor row -- open a
+   * folder, or select a file. Selecting is what fires the preview fetch and arms Apply, so moving
+   * and selecting are deliberately two separate keys: arrowing through a 3,000-entry folder must not
+   * fire 3,000 preview requests.
+   *
+   * Enter and Space are NEVER routed to Apply or New entity from here. Those are real buttons, so
+   * tabbing to one and pressing Enter or Space activates it the way the browser already does -- the
+   * handler bails out on a button target rather than doing anything itself. */
+  function abRows(m) { return m.el('tree').querySelectorAll('.entity-item'); }
+  function abSetCursor(m, row) {
+    var rows = abRows(m);
+    for (var k = 0; k < rows.length; k++) rows[k].classList.remove('kb');
+    if (!row) return;
+    row.classList.add('kb');
+    if (row.scrollIntoView) row.scrollIntoView({block:'nearest'});
+  }
+  /* First row, used after any navigation that re-renders the list. */
+  function abCursorHome(m) { var r = abRows(m); abSetCursor(m, r.length ? r[0] : null); }
+  function abMoveCursor(m, delta) {
+    var rows = abRows(m);
+    if (!rows.length) return;
+    var t = m.el('tree'), cur = t.querySelector('.entity-item.kb') || t.querySelector('.entity-item.selected');
+    var i = -1;
+    for (var k = 0; k < rows.length; k++) if (rows[k] === cur) { i = k; break; }
+    /* No cursor yet: the first Down lands on the top row, the first Up on the bottom one. */
+    i = (i < 0) ? (delta > 0 ? 0 : rows.length - 1) : i + delta;
+    if (i < 0) i = 0;
+    if (i > rows.length - 1) i = rows.length - 1;
+    abSetCursor(m, rows[i]);
+  }
+  function abUpDir(m) {
+    if (!m.dir) return;
+    m.dir = m.dir.split('/').slice(0, -1).join('/');
+    abRenderTree(m); abCursorHome(m);
+  }
+  function abActivateCursor(m) {
+    var row = m.el('tree').querySelector('.entity-item.kb');
+    if (!row) { abMoveCursor(m, 1); return; }      /* nothing under the cursor -- start at the top */
+    if (row.getAttribute('data-up')) { abUpDir(m); return; }
+    if (row.getAttribute('data-dir')) { m.dir = row.getAttribute('data-path'); abRenderTree(m); abCursorHome(m); return; }
+    abSelect(m, row.getAttribute('data-path'));
+  }
+  /* Which mount the keys drive. Bound at DOCUMENT level, not on the mount element: catalog rows are
+   * plain divs and take no focus, so after clicking one the keydown target is <body> and a listener
+   * on the mount never sees it. Same document-scoped approach the Entities list and Prefabs tree
+   * already use, and for the same reason -- it has to work with focus in the filter box, on a row,
+   * or nowhere in particular. */
+  function abKeyMount() {
+    if (assetModalOpen()) return abModalMount;
+    if (document.getElementById('panel-assets').style.display !== 'none') return abTabMount;
+    return null;
+  }
+  function abOnKey(m, e) {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    var t = e.target || {}, tag = (t.tagName || '').toUpperCase();
+    var isBtn  = tag === 'BUTTON' || tag === 'SELECT' || (tag === 'INPUT' && t.type !== 'text');
+    var isText = tag === 'INPUT' && t.type === 'text';
+    var k = e.key;
+    if (k === 'ArrowDown' || k === 'ArrowUp') {
+      if (isBtn) return;                     /* radio groups and buttons keep their native behaviour */
+      e.preventDefault(); e.stopPropagation();
+      abMoveCursor(m, k === 'ArrowDown' ? 1 : -1);
+      return;
+    }
+    if (k === 'ArrowLeft' || k === 'Backspace') {
+      if (isBtn || isText) return;           /* Backspace still edits the filter box */
+      if (!m.dir) return;
+      e.preventDefault(); e.stopPropagation(); abUpDir(m);
+      return;
+    }
+    if (k === 'Enter' || k === ' ') {
+      if (isBtn) return;                     /* tabbed to Apply / New entity -- let it fire */
+      if (isText && k === ' ') return;       /* a space belongs in the filter box */
+      e.preventDefault(); e.stopPropagation();
+      abActivateCursor(m);
+    }
+  }
+
+  function abRow(m, label, path, isDir, count) {
+    var sel = (!isDir && m.sel === path) ? ' selected' : '';
+    return '<div class="entity-item' + sel + '" data-path="' + abEsc(path) + '"' + (isDir ? ' data-dir="1"' : '')
+         + '><div class="ab-row"><span class="tw">' + (isDir ? '&#9656;' : '') + '</span>'
+         + '<span class="nm' + (isDir ? '' : ' leaf') + '">' + abEsc(label) + '</span>'
+         + (isDir ? '<span class="cnt">' + count.toLocaleString() + '</span>'
+                  : '<button class="cp" data-copy="' + abEsc(path) + '" title="Copy the full path">copy</button>')
+         + '</div></div>';
+  }
+
+  function abRenderInsp(m) {
+    var body = m.el('insp');
+    if (!m.sel) { body.innerHTML = '<div class="placeholder">Select an asset to preview it.</div>'; return; }
+    var path = m.sel, cut = path.lastIndexOf('/');
+    var leaf = path.slice(cut + 1), folder = cut > 0 ? path.slice(0, cut) : '/';
+    var opts = abCarriers(m.type, path), okAny = false, cur = null;
+    for (var i = 0; i < opts.length; i++) { if (opts[i].ok) okAny = true; if (opts[i].id === m.carrier && opts[i].ok) cur = opts[i]; }
+    if (!cur) { for (var j = 0; j < opts.length; j++) if (opts[j].ok) { m.carrier = opts[j].id; break; } }
+    var newOpts = abNewOptions(m.type);
+    /* A sound has no pixels, so the preview slot -- the square the thumbnail would occupy -- carries
+     * the audition control instead of an empty dashed box.
+     *
+     * EVERY sound, music included. Music is excluded from the Apply carrier below, but that is a
+     * statement about wiring a music entity up, not about whether the file can be played: a music
+     * track is a soundshader decl the same as a footstep, and it is listed in the same catalog.
+     * Playing one is also safe to be wrong about -- the backend only auditions names it can find in
+     * that catalog, so a name it cannot resolve is a refusal and a log line, never a fault. */
+    var audible = (m.type === 'sound');
+    var h;
+    if (audible) {
+      var on = (abSoundPlaying === path);
+      h = '<div class="ab-audition' + (on ? ' playing' : '') + '">'
+        + '<button class="btn ab-play" data-ab-audition="1" title="'
+        +   (on ? 'Stop the preview' : 'Play this sound through the 3D editor') + '">'
+        +   (on ? '&#9632;' : '&#9654;') + '</button>'
+        + '<div class="ab-audition-note">' + (on ? 'Playing' : 'Preview this sound') + '</div>'
+        + '</div>';
+    } else {
+      h = '<img class="ab-thumb" data-ab="img" alt="" style="display:none">'
+        + '<div class="ab-nothumb" data-ab="nothumb">Loading a preview...</div>';
+    }
+    h += '<div><b>' + abEsc(leaf) + '</b></div>'
+          + '<div class="ab-pathrow"><input type="text" readonly value="' + abEsc(path) + '">'
+          +   '<button class="btn" data-copy="' + abEsc(path) + '" title="Copy the full path">Copy</button></div>'
+          + '<dl class="ab-meta"><dt>Folder</dt><dd title="' + abEsc(folder) + '">' + abEsc(folder) + '</dd>'
+          +   '<dt>Preview</dt><dd data-ab="dims">' + (audible ? 'audio' : '-') + '</dd></dl>'
+          + '<div class="ab-sect"><div class="panel-title">Apply to selection as</div>';
+    for (var k = 0; k < opts.length; k++)
+      h += '<label class="ab-opt' + (opts[k].ok ? '' : ' off') + '">'
+         + '<input type="radio" name="abCarrier" value="' + opts[k].id + '"' + (opts[k].ok ? '' : ' disabled')
+         + (m.carrier === opts[k].id ? ' checked' : '') + '>'
+         + '<span><b>' + opts[k].label + '</b><span class="why">' + opts[k].why + '</span></span></label>';
+    /* Apply needs a single entity whose decl is loaded (it edits that text), and -- for the
+     * renderModelInfo carriers -- an entity whose class can actually wear a material or model. */
+    var selCls  = document.getElementById('fClassname');
+    var clsName = selCls ? (selCls.value || '') : '';
+    var haveEnt = primaryEid >= 0 && !!loaded;
+    var denied  = haveEnt ? abApplyDenied(m.carrier, clsName) : null;
+    var canApply = okAny && haveEnt && !denied;
+    var applyWhy = !okAny  ? 'Nothing to apply this asset to'
+                 : !haveEnt ? 'Select a single entity first'
+                 : denied   ? denied
+                            : 'Write this into the selected entity\'s decl';
+    h += '</div><div style="display:flex;gap:6px">'
+       + '<button class="btn primary" style="flex:1" data-ab-apply="1"' + (canApply ? '' : ' disabled')
+       + ' title="' + abEsc(applyWhy) + '">'
+       + (m.mode === 'modal' ? 'Apply to entity' : 'Apply to selection') + '</button>'
+       /* New entity lives in BOTH mounts. In the modal you may well find something that cannot
+        * attach to the entity you came from (a particle needs its own emitter), and closing the
+        * modal to go find it again on the Assets tab is the wrong answer. It is gated on the asset
+        * type rather than on which mount you are in. */
+       + '<button class="btn" data-ab-new="1"' + (newOpts ? '' : ' disabled')
+       + ' title="' + (newOpts ? 'Create a new entity carrying this asset'
+            : 'A ' + m.type + ' is a property of an entity, not an entity of its own') + '">New entity</button>'
+       + '</div>';
+    /* Sounds are the one type with more than one way to be created, and the three differ only in a
+     * flag their defs already carry -- so this picks the def, it does not write a flag. */
+    if (newOpts && newOpts.length > 1) {
+      var sel = '<label class="ab-opt" style="margin-top:6px"><span style="flex:1">Create as'
+              + '<select data-ab="newvariant" style="width:100%;margin-top:3px">';
+      for (var v = 0; v < newOpts.length; v++)
+        sel += '<option value="' + newOpts[v].id + '">' + newOpts[v].label + '</option>';
+      h += sel + '</select></span></label>';
+    }
+    body.innerHTML = h;
+    abApplyImage(m);
+  }
+  /* Paint whatever pixels this mount already has for its selection. Kept separate from
+   * abRenderInsp so a poll answer does not have to rebuild the whole inspector. */
+  function abApplyImage(m) {
+    var img = m.el('img'), no = m.el('nothumb'), dims = m.el('dims');
+    if (!img || !no) return;
+    if (m.pvUri) {
+      img.onload = function(){ if (dims) dims.textContent = img.naturalWidth + ' x ' + img.naturalHeight; };
+      img.src = m.pvUri; img.style.display = 'block'; no.style.display = 'none';
+    } else {
+      img.style.display = 'none'; img.removeAttribute('src');
+      no.style.display = 'flex'; no.textContent = m.pvNote || 'Loading a preview...';
+      if (dims) dims.textContent = '-';
+    }
+  }
+  function abStatus(m, s) { var e = m.el('pvstatus'); if (e) e.textContent = s || ''; }
+
+  /* --- preview round-trip ----------------------------------------------------------------------
+   * Decoding runs on the backend and answers a frame or two later, so the request cannot return
+   * synchronously -- ask, then poll for the pixels. Decoding is CPU-only and measures ~30-90 ms, so
+   * a success lands on the first or second poll; the budget only bounds how long we take to say an
+   * asset has no preview at all. */
+  var AB_MAX_TRIES = 12, AB_INTERVAL_MS = 250;   /* ~3 s */
+  function abStopPoll(m) { if (m.pvTimer) { clearInterval(m.pvTimer); m.pvTimer = null; } m.pvTries = 0; }
+
+  /* Only materials and images have a pixel route today (megapreview + imgpreview). Asking for a
+   * preview of a sound or an entity def would burn the full poll budget and then blame the atlas,
+   * so those say what they are up front instead. */
+  function abPreviewable(type) { return type === 'material' || type === 'image'; }
+
+  function abSelect(m, path) {
+    m.sel = path;
+    m.pvUri = null;
+    abStopPoll(m);
+    abActive = m;
+    if (m.mode === 'modal') {
+      var pe = document.getElementById('amPath'), ce = document.getElementById('amCopy');
+      if (pe) pe.textContent = path;
+      if (ce) ce.disabled = false;
+    }
+    if (!abPreviewable(m.type)) {
+      m.pvNote = 'No preview for this asset type - only materials and images decode to pixels.';
+      abStatus(m, '');
+      abRenderTree(m); abRenderInsp(m);
+      return;
+    }
+    m.pvNote = 'Loading a preview...';
+    abRenderTree(m); abRenderInsp(m);
+    abStatus(m, 'Requesting...');
+    post({cmd:'requestPreview', name: path});
+  }
+
+  function onPreviewRequested(d) {
+    var m = abActive; if (!m) return;
+    if (!d.ok) {
+      abStopPoll(m);
+      /* `note` is only ever set by the browser-preview stand-in; the real backend answers ok/not-ok
+       * with no reason, so the generic message below stays the in-game text. */
+      m.pvUri = null;
+      m.pvNote = d.note || 'The backend refused the request - is the engine hook installed?';
+      abStatus(m, d.note ? '' : 'refused'); abApplyImage(m);
+      return;
+    }
+    abStopPoll(m);
+    abStatus(m, 'decoding...');
+    m.pvTimer = setInterval(function(){
+      if (++m.pvTries > AB_MAX_TRIES) {
+        abStopPoll(m);
+        m.pvUri = null;
+        m.pvNote = 'No preview for this one. Its pixels live in a shared atlas rather than a texture '
+                 + 'of its own (decals and particles mostly). The backend log has the exact reason.';
+        abStatus(m, 'no preview'); abApplyImage(m);
         return;
       }
       post({cmd:'getPreview'});
-    }, PV_INTERVAL_MS);
+    }, AB_INTERVAL_MS);
   }
   function onPreviewImage(d) {
-    var img = document.getElementById('previewImg');
+    var m = abActive; if (!m) return;
     if (d.ok && d.uri) {
-      pvStopPolling();
-      if (img) { img.src = d.uri; img.style.display = 'block'; }
-      pvStatus('Engine-rendered preview (256x256).');
-    } else if (!pvTimer) {
-      /* Only report emptiness when we are NOT mid-poll -- during a poll an empty answer just means
-       * the capture has not landed yet, and saying so every 250 ms would be noise. */
-      if (img) img.style.display = 'none';
-      pvStatus('No capture yet - click Render preview with a material name.');
+      abStopPoll(m);
+      m.pvUri = d.uri; m.pvNote = null;
+      abStatus(m, ''); abApplyImage(m);
     }
+    /* An empty answer mid-poll only means the decode has not landed yet -- saying so every 250 ms
+     * would be noise. The try budget is what reports a real miss. */
   }
 
-  var pvBtn = document.getElementById('previewBtn');
-  if (pvBtn) pvBtn.addEventListener('click', function(){
-    var box  = document.getElementById('matNameBox');
-    var name = box ? (box.value || '').trim() : '';
-    if (!name) { pvStatus('Enter a material name above first.'); return; }
-    pvStatus('Requesting "' + name + '"...');
-    post({cmd:'requestPreview', name:name});
-  });
+  /* --- catalog fetch ---------------------------------------------------------------------------
+   * The full list (~9,800 names) crosses the bridge ONCE per session and is cached here, so
+   * filtering and drilling stay instant and never round-trip. */
+  function abFetch(m, force) {
+    var t = abType(m.type);
+    if (!t) return;
+    if (abNames[m.type] && !force) return;
+    if (force) { abNames[m.type] = undefined; abTrees[m.type] = null; abRenderTree(m); }
+    m.el('cnt').textContent = '...';
+    post({cmd:'listAssets', assetKind: t.kind});
+  }
+  /* Pull EVERY catalog the first time the browser is opened, not just the selected one. The rail
+   * shows each type's size, and a rail of dashes until you click each row tells you nothing about
+   * what is in there -- the count is the whole point of putting it in the rail. It is one pass over
+   * files the backend has already parsed, and it makes switching types instant afterwards. */
+  function abFetchAll() {
+    for (var i = 0; i < AB_TYPES.length; i++)
+      if (!abNames[AB_TYPES[i].id]) post({cmd:'listAssets', assetKind: AB_TYPES[i].kind});
+  }
+  function onAssetList(d) {
+    var t = null;
+    for (var i = 0; i < AB_TYPES.length; i++) if (AB_TYPES[i].kind === d.assetKind) t = AB_TYPES[i];
+    if (!t) return;
+    var names = (d.names || '').split('\n').filter(function(s){ return s.length > 0; });
+    names.sort();
+    abNames[t.id] = names;
+    abTrees[t.id] = null;
+    for (var j = 0; j < abMounts.length; j++) {
+      abRenderRail(abMounts[j]);
+      if (abMounts[j].type === t.id) abRenderTree(abMounts[j]);
+    }
+    if (!names.length)
+      toast('The ' + t.label.toLowerCase() + ' catalog came back empty - is base\\snap_gameresources.index readable?');
+  }
   function renderMaterialResult(d) {
-    var out = document.getElementById('matResult');
-    if (!out) return;
     /* String.fromCharCode (not a literal glyph / \u escape) -- the mockup.html -> C++ header embedding
      * pipeline does not appear to preserve non-ASCII source bytes as valid UTF-8 (a literal check/cross
      * character here rendered as three mangled "?" glyphs in-game). Plain ASCII source, built up at
      * runtime, sidesteps the embedding step entirely regardless of what it does with encoding. */
     var CHECK = String.fromCharCode(0x2713), CROSS = String.fromCharCode(0x2717);
-    if (d.found) {
-      out.textContent = CHECK + ' ' + d.name + ' -- ' + (d.info || 'found');
-      out.className = 'mat-result ok';
-    } else {
-      out.textContent = CROSS + ' ' + d.name + ' -- not found (not a real material name)';
-      out.className = 'mat-result err';
+    var outs = document.querySelectorAll('[data-ab-res]');
+    for (var i = 0; i < outs.length; i++) {
+      outs[i].textContent = d.found ? (CHECK + ' ' + d.name + ' -- ' + (d.info || 'found'))
+                                    : (CROSS + ' ' + d.name + ' -- not a material name the game knows');
+      outs[i].className = 'mat-result ' + (d.found ? 'ok' : 'err');
     }
   }
+
+  /* ==== New entity ==============================================================================
+   * Authors a ONE-entity prefab and stages it through the same path Load/Place uses, so the engine's
+   * own PasteInstantiate does the creating and the new entity arrives on the cursor to be placed.
+   *
+   * The JSON is written as TEXT rather than via JSON.stringify. Two reasons, both observed in real
+   * saved prefabs: indexed arrays are string KEYS ("item[0]", "mat[0]"), not arrays, and the engine
+   * wants floats to keep a decimal point -- the same trap the timeline normalize path documents. */
+
+  /* Which inherit + class each asset type is created as. `variants` gives a type more than one
+   * option; sounds have three speaker flavours that differ only in a flag the def already carries,
+   * so New Entity picks the def and writes no flag of its own. */
+  var AB_NEW = {
+    material: [{id:'blocking', label:'Blocking volume',
+                inherit:'snapmaps/volume/blocking',        cls:'idVolume_Blocking'}],
+    model:    [{id:'prop',     label:'Prop',
+                inherit:'snapmaps/props/new/barrel01',     cls:'idProp_Coop'}],
+    fx:       [{id:'fx',       label:'FX volume',
+                inherit:'snapmaps/hazards/windy_dust',     cls:'idVolume_ToggleableDamageOverTime'}],
+    sound:    [{id:'2d',       label:'2D speaker',
+                inherit:'snapmaps/audio/2d_speaker',       cls:'idSnapMapGameEntity_Speaker'},
+               {id:'3d',       label:'3D speaker',
+                inherit:'snapmaps/audio/3d_speaker',       cls:'idSnapMapGameEntity_Speaker'},
+               {id:'room',     label:'Roomtone',
+                inherit:'snapmaps/audio/roomtone_speaker', cls:'idSnapMapGameEntity_Speaker'}],
+    /* The one type with no def to inherit. snapmaps/func/snap_emitter LOOKS like the right base --
+     * it is a one-line SnapMap reclass of func/emitter -- but its editor def sets
+     * `flags { placeable = false; }` and it cannot be placed. So an emitter is built the way a real
+     * placed one looks: inherit the empty snapmaps/unknown, override the classname, and carry the
+     * whole edit block itself. */
+    particle: [{id:'emitter',  label:'Particle emitter',
+                inherit:'snapmaps/unknown',                cls:'idSnapMapParticleEmitter'}]
+  };
+  function abNewOptions(type) { return AB_NEW[type] || null; }
+
+  function neNum(v) {                       /* always keep a decimal point */
+    if (!isFinite(v)) v = 0;
+    var s = String(v);
+    return s.indexOf('.') >= 0 || s.indexOf('e') >= 0 ? s : s + '.0';
+  }
+  function neStr(s) { return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'; }
+  /* Where a pasted entity lands, read straight out of PasteInstantiate (RVA 0x54F950, pinned build):
+   *
+   *   prefabOrigin = cameraOrigin(editor+0x170) + forward(editor+0x17c angles) * grabDistance
+   *   entityPos    = prefabOrigin + Rz(editorYaw - prefab.cameraYaw) * spawnPosition
+   *
+   * So the two fields ADD. Shipping grabDistance 200 AND spawnPosition {200,0,0} put every new
+   * entity ~400 units out, which is what "pasting much further than 200" was.
+   *
+   * grabDistance is the one to use: it follows the FULL view ray, so looking down places the entity
+   * down, while spawnPosition is only re-oriented about the up axis (yaw) and always stays level.
+   * spawnPosition is therefore an intra-prefab offset -- correct for a multi-entity prefab, wrong as
+   * a placement distance -- and a one-entity prefab wants it at the origin.
+   *
+   * This supersedes the experiment/entity-creation finding that "grabDistance is ignored on paste"
+   * (commit 3e6c198). That test compared 256 against 1024 written as JSON INTEGERS; the field is a
+   * float, so neither parsed and both behaved as 0 -- which is exactly the reported symptom, the
+   * entity landing on the camera. We write 200.0, and the live 400-unit placement proves it parses. */
+  var NE_GRAB_DISTANCE = 200;   /* the editor's own minimum cursor distance */
+  function neCam() { return {x: 0, y: 0, z: 0}; }
+
+  /* The blocking volume def ships renderParms num=3. An instance override REPLACES the block rather
+   * than merging into it, so a new entity that wants virtualmapping has to restate those three and
+   * append its own as item[3] -- exactly the shape the def has, plus one. */
+  var NE_BLOCKING_PARMS = [
+    {parm:'custompatternalbedo0',  value:'{ 0.5, 0.5, 0.5, 1 }'},
+    {parm:'custompattern2albedo0', value:'{ 0.5, 0.5, 0.5, 1 }'},
+    {parm:'custombloomalbedo',     value:'{ 0.5, 0.5, 0.5, 0 }'}
+  ];
+  function neParms(list, ind) {
+    var out = ind + '"renderParms" : {\n' + ind + '   "num" : ' + list.length + ',\n';
+    for (var i = 0; i < list.length; i++)
+      out += ind + '   "item[' + i + ']" : { "parm" : ' + neStr(list[i].parm)
+           + ', "value" : ' + neStr(list[i].value) + ' }'
+           + (i < list.length - 1 ? ',' : '') + '\n';
+    return out + ind + '}';
+  }
+
+  /* The `edit` object for a new entity of this type. Mirrors the decl, but in the prefab's JSON
+   * spelling (nested objects, "item[N]" keys). */
+  function neEditBody(type, carrier, name, rect, cam) {
+    var I = '               ';
+    var pos = I + '"spawnPosition" : { "x" : ' + neNum(cam.x) + ', "y" : ' + neNum(cam.y)
+                + ', "z" : ' + neNum(cam.z) + ' }';
+    if (type === 'material') {
+      var inner;
+      if (carrier === 'vm' && rect) {
+        var v = '{ ' + [rect.w, rect.h, rect.x, rect.y]
+                .map(function (n) { return String(n / 245760); }).join(', ') + ' }';
+        /* Override the def's customMaterial too. snapmaps/volume/blocking inherits
+         * material/snapmap/entitybase, which will not show a virtual-textured surface -- the parm
+         * would land and the box would look untouched. */
+        inner = I + '   "customMaterial" : ' + neStr(VM_BLOCK_MATERIAL) + ',\n'
+              + neParms(NE_BLOCKING_PARMS.concat([{parm:'virtualmapping', value:v}]), I + '   ');
+      } else {
+        inner = I + '   "customMaterial" : ' + neStr(name);
+      }
+      return I + '"renderModelInfo" : {\n' + inner + '\n' + I + '},\n' + pos;
+    }
+    if (type === 'model')
+      return I + '"renderModelInfo" : {\n' + I + '   "model" : ' + neStr(name) + '\n' + I + '},\n' + pos;
+    if (type === 'fx')    return I + '"fxDecl" : ' + neStr(name) + ',\n' + pos;
+    if (type === 'sound') return I + '"sound" : ' + neStr(name) + ',\n' + pos;
+    if (type === 'particle')
+      /* Inheriting snapmaps/unknown means nothing comes for free, so this restates every field a
+       * real placed emitter carries -- including the four func/emitter would have supplied. */
+      return I + '"castShadows" : true,\n'
+           + I + '"dormancy" : { "delay" : 5, "distance" : 4096 },\n'
+           + I + '"fadeIn" : 0,\n'
+           + I + '"fadeOut" : 0,\n'
+           + I + '"flags" : { "canBecomeDormant" : true },\n'
+           + I + '"particleSystem" : ' + neStr(name) + ',\n'
+           + I + '"spawnOrientation" : { "mat" : { "mat[0]" : { "x" : 0.0000001311, "y" : 1.0 },\n'
+           + I + '                                 "mat[1]" : { "x" : -1.0, "y" : 0.0000001311 } } },\n'
+           + pos + ',\n'
+           + I + '"translucencyScale" : 1';
+    return pos;
+  }
+
+  /* The prefab ROOT needs all nine members, not just cameraYaw + entities. Staging a two-key object
+   * deserializes without complaint and then places nothing -- grabAxis and grabDistance are what the
+   * grab state reads to put the prefab on your cursor, and "~type" is what identifies the object as
+   * an idSnapEntityPrefab at all. Shapes taken from real saved prefabs; the empty index-multimaps
+   * and the all-zero allocCount are the one-entity, no-connections, no-variables case. */
+  function nePersistentInts(n) {
+    var one = '{ "bounds" : { "maxRange" : 10000, "minRange" : -10000, "~type" : "idRange < int >" },'
+            + ' "info" : { "customIcon" : { "targetType" : "idDeclSnapCustomIcon", "value" : null,'
+            + ' "~type" : "|pointer" }, "name" : "", "~type" : "snapVarInfo_t" },'
+            + ' "initialValue" : 0, "~type" : "snapVarInteger_t" }';
+    var out = [];
+    for (var i = 0; i < n; i++) out.push(one);
+    return out.join(', ');
+  }
+
+  function neeSkeleton() {
+    function vec(x, y, z) {
+      return '{ "x" : ' + neNum(x) + ', "y" : ' + neNum(y) + ', "z" : ' + neNum(z)
+           + ', "~type" : "idVec3" }';
+    }
+    var mm = '{ "keyValues" : [ 0, 0 ], "values" : [], "~type" : "idIndexMultimap" }';
+    var emptyMM = '{ "keyValues" : [], "values" : [], "~type" : "idIndexMultimap" }';
+    return '   "cameraYaw" : 0.0,\n'
+      + '   "grabAxis" : {\n'
+      + '      "mat" : [ ' + vec(1,0,0) + ', ' + vec(0,1,0) + ', ' + vec(0,0,1) + ' ],\n'
+      + '      "~type" : "idMat3"\n'
+      + '   },\n'
+      /* The ONLY placement distance -- see neCam(). Must keep its decimal point: written as an
+       * integer the float field does not parse and the entity lands on the camera. */
+      + '   "grabDistance" : ' + neNum(NE_GRAB_DISTANCE) + ',\n'
+      + '   "references" : {\n'
+      + '      "entityEntRefs" : ' + mm + ',\n'
+      + '      "entityVarRefs" : ' + mm + ',\n'
+      + '      "~type" : "idSnapReferences"\n'
+      + '   },\n'
+      + '   "targets" : {\n'
+      + '      "connections" : [],\n'
+      + '      "entitySources" : ' + emptyMM + ',\n'
+      + '      "entityTargets" : ' + emptyMM + ',\n'
+      + '      "~type" : "idSnapTargets"\n'
+      + '   },\n'
+      /* The 16-slot persistentInteger block every real prefab carries, with allocCount's last
+       * element matching. Emitted rather than left empty because this is the shape a prefab that
+       * is known to place in-game has, and an empty variables table is not worth the risk. */
+      + '   "variables" : {\n'
+      + '      "allocCount" : [ 0, 0, 0, 0, 0, 0, 0, 0, 0, 16 ],\n'
+      + '      "boolean" : [], "cachedEntity" : [], "color" : [], "customEvent" : [],\n'
+      + '      "integer" : [], "number" : [],\n'
+      + '      "persistentInteger" : [ ' + nePersistentInts(16) + ' ],\n'
+      + '      "playerResource" : [], "string" : [], "teamResource" : [],\n'
+      + '      "~type" : "idSnapVariables"\n'
+      + '   },\n'
+      + '   "~type" : "idSnapEntityPrefab",\n'
+      + '   "~version" : 0,\n';
+  }
+
+  function neePrefab(opt, editBody, displayName) {
+    return '{\n'
+      + neeSkeleton()
+      + '   "entities" : [\n'
+      + '      {\n'
+      + '         "customIcon" : { "targetType" : "idDeclSnapCustomIcon", "value" : null, "~type" : "|pointer" },\n'
+      + '         "displayName" : ' + neStr(displayName || opt.cls) + ',\n'
+      + '         "entityDef" : {\n'
+      + '            "className" : ' + neStr(opt.cls) + ',\n'
+      + '            "inherit" : ' + neStr(opt.inherit) + ',\n'
+      + '            "name" : "",\n'
+      + '            "state" : {\n'
+      + '               "edit" : {\n'
+      + editBody + '\n'
+      + '               }\n'
+      + '            },\n'
+      + '            "targetType" : "idDeclEntityDef",\n'
+      + '            "~type" : "idDeclEntityDef",\n'
+      + '            "~version" : 26\n'
+      + '         },\n'
+      + '         "isMegaModel" : false,\n'
+      + '         "layerMask" : 1,\n'
+      + '         "pinned" : true,\n'
+      + '         "restrictionMask" : 0,\n'
+      + '         "uniqueId" : 0,\n'
+      + '         "~type" : "idSnapEntity"\n'
+      + '      }\n'
+      + '   ]\n'
+      + '}\n';
+  }
+
+  var abPendingNewVM = null;      /* {mount, opt, name} while a rect lookup is in flight */
+
+  function abNewEntity(m) {
+    var opts = abNewOptions(m.type);
+    if (!opts || !m.sel) return;
+    /* The engine will not paste over a live selection, and the backend refuses rather than degrading
+     * to stage-only (which used to report success with nothing on the cursor). editorSelCount is the
+     * live editor count, broadcast regardless of "Follow selection", so the refusal can be immediate
+     * here; the hover half of the same gate is only readable native-side and comes back as -2. */
+    if (editorSelCount > 0) {
+      toast('Deselect in the 3D view first -- a new entity cannot be pasted over a selection', 'warn');
+      return;
+    }
+    var sel = m.el('newvariant');
+    var opt = opts[0];
+    if (sel) for (var i = 0; i < opts.length; i++) if (opts[i].id === sel.value) opt = opts[i];
+    if (m.type === 'material' && m.carrier === 'vm') {
+      abPendingNewVM = {m: m, opt: opt, name: m.sel};
+      post({cmd:'materialRect', name: m.sel});
+      return;
+    }
+    abNewEntityNow(m, opt, m.sel, null);
+  }
+  function abNewEntityNow(m, opt, name, rect) {
+    var body = neEditBody(m.type, m.carrier, name, rect, neCam());
+    /* Name it after the asset, so the placed entity is identifiable in the entity list rather than
+     * arriving as a bare class name among however many others share that class. */
+    var leaf = name.slice(name.lastIndexOf('/') + 1);
+    post({cmd:'newEntity', label: opt.label + ': ' + name,
+          json: neePrefab(opt, body, opt.label + ' ' + leaf)});
+    abNewFromModal = (m.mode === 'modal');
+  }
+  /* Nothing is toasted or closed optimistically: the backend can still refuse on a state the page
+   * cannot see (hover), and a "staging..." toast followed by a refusal reads as two contradictory
+   * messages. The drain runs on the next engine frame, so the real answer is ~a frame away. */
+  var abNewFromModal = false;
+  function onNewEntityResult(d) {
+    if (d.result === -2) { toast('Move the mouse off that entity first -- the editor will not paste while hovering one', 'warn'); return; }
+    if (d.result === -3) { toast('Deselect in the 3D view first -- a new entity cannot be pasted over a selection', 'warn'); return; }
+    if (d.result !== 1)  { toast('Could not stage that entity (see log)', 'err'); return; }
+    toast('Ready to place: ' + d.label, 'ok');
+    if (abNewFromModal) abCloseModal();
+  }
+
+  /* --- mounts ---------------------------------------------------------------------------------- */
+  var abTabMount = abMount(document.getElementById('abTabHost'), 'tab');
+  var abModalMount = abMount(document.getElementById('abModalHost'), 'modal');
+
+  /* Re-render every mounted browser's inspector. Called whenever the thing Apply is gated on
+   * changes: the selection, or the entity state landing from the backend. */
+  function abRefreshInspectors() {
+    for (var i = 0; i < abMounts.length; i++) abRenderInsp(abMounts[i]);
+  }
+
+  /* The asset modal sits over the Entities/Prefabs panels, whose own ArrowUp/Down handlers are bound
+   * at document level so they work with focus nowhere in particular. That is exactly what makes them
+   * fire under an open modal, scrolling a list the user cannot see, so both consult this first. */
+  function assetModalOpen() {
+    var o = document.getElementById('assetModal');
+    return !!o && o.style.display !== 'none' && o.style.display !== '';
+  }
+
+  document.addEventListener('keydown', function(e){
+    var m = abKeyMount();
+    if (m) abOnKey(m, e);
+  });
+
+  var amOverlay = document.getElementById('assetModal');
+  function abOpenModal() {
+    var nameEl = document.getElementById('fDisplayname');
+    var label = nameEl && nameEl.value ? nameEl.value : ('entity ' + primaryEid);
+    document.getElementById('amFor').textContent = 'for ' + label;
+    document.getElementById('amPath').textContent = abModalMount.sel || 'Nothing selected.';
+    amOverlay.style.display = 'flex';
+    abActive = abModalMount;
+    abFetchAll();
+    abSyncSoundSession();   /* the modal is the browser too -- same mode, same one decision */
+    var q = abModalMount.el('q'); if (q) q.focus();
+  }
+  function abCloseModal() {
+    amOverlay.style.display = 'none';
+    abStopPoll(abModalMount);
+    abActive = abTabMount;
+    /* Leaving the browser with a sound still playing is nobody's intent, and it would also leave
+     * the editor soloed and background audio on. abSyncSoundSession keeps the session open when
+     * the Assets TAB is what we are returning to -- that is still the browser. */
+    abAuditionStop();
+    abSyncSoundSession();
+  }
+  document.getElementById('browseAssetsBtn').addEventListener('click', abOpenModal);
+  document.getElementById('amClose').addEventListener('click', abCloseModal);
+  document.getElementById('amCancel').addEventListener('click', abCloseModal);
+  /* No Copy-path button down here: every row already carries its own copy affordance, and the
+   * inspector repeats it for the selected asset. A third one in the footer just crowded the
+   * commit row next to Apply. */
+  amOverlay.addEventListener('mousedown', function(e){ if (e.target === amOverlay) abCloseModal(); });
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'Escape' && amOverlay.style.display !== 'none') abCloseModal();
+  });
   // also refresh on regaining focus/visibility WITHOUT a tab click -- e.g. the Timelines tab was already
   // active before Play mode took the window away, so there's no tab-click to hang the refresh off of when
   // the user comes back. Same tlMaybeAutoRefresh gate (skips if dirty/no timeline open/save in flight).

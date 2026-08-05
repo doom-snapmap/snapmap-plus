@@ -20,7 +20,18 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, get_preview) == 0x2D0);
 /* ext 14, appended 2026-08-02: REQUEST PREVIEW -- render a NAMED material into the preview target, so
  * the tab can preview any material instead of a hardcoded one. Append-only again. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, request_preview) == 0x2D8);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x2E0);
+/* ext 15, appended 2026-08-03: LIST MATERIALS -- pages the ~9,805-name catalog so the Assets tab
+ * can show a clickable list instead of requiring a pasted name. Append-only again. */
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, list_materials) == 0x2E0);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, list_assets) == 0x2E8);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, material_rect) == 0x2F0);
+/* ext 18, appended 2026-08-04: SOUND PREVIEW -- audition a soundshader through the editor's own
+ * preview path, NULL name to stop. Append-only again. */
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, sound_preview) == 0x2F8);
+/* ext 19, appended 2026-08-04: SOUND SESSION -- hold preview mode open while the browser is up, so
+ * the audition cvars are not churned per click. Append-only again. */
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, sound_session) == 0x300);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x308);
 SH_STATIC_ASSERT(offsetof(sh_iface, sub) == 0x58);
 SH_STATIC_ASSERT(sizeof(sh_iface) == 0x60);
 

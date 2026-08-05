@@ -111,6 +111,23 @@ static int           g_rename_result = 0;        /* 1 ok; 0 MoveFile failed (des
 
 static volatile bool g_pending_load_prefab = false;
 static std::string   g_load_prefab_name, g_load_prefab_folder;
+/* Assets browser "New entity": the page authors a one-entity prefab and we stage it through the
+ * SAME path Load/Place uses. No temp file -- apply_edit takes the JSON text, and the file in the
+ * Load/Place case is only where that text happens to come from. */
+static volatile bool g_pending_new_entity = false;
+static std::string   g_new_entity_json, g_new_entity_label;
+/* Sound auditioning. Empty name = stop. Deferred like every other engine-touching command: the
+ * backend drives live audio state and must be entered from the DOOM main thread, not the WebView
+ * one. Only the LATEST request survives to the drain -- clicking down a list faster than frames go
+ * by should audition what you landed on, not queue up everything you passed over. */
+static volatile bool g_pending_sound_preview = false;
+static std::string   g_sound_preview_name;
+static int           g_sound_preview_result = 0;
+/* Preview-mode session, held while the asset browser is on screen. Separate pending flag from the
+ * play above so opening the browser and clicking Play in the same frame still arrive in order. */
+static volatile bool g_pending_sound_session = false;
+static volatile int  g_sound_session_on = 0;
+static int           g_new_entity_result = -1;
 static int           g_load_result = 0;          /* 1 staged ok (now press Ctrl+V in the 3D view to place it);
                                                    * 0/-1 resolve/read/schedule failure (see log). Deliberately
                                                    * stage-only -- see backend-changes.md for why we don't try to
@@ -791,6 +808,65 @@ static int poc_apply_sync_seh(const sh_apply_item *it, int count, const char *op
         return 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
+static void poc_apply_new_entity()
+{
+    g_new_entity_result = -1;
+    if (g_new_entity_json.empty()) return;
+    if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->apply_edit) {
+        poc_log("new-entity: ABORT (iface/slot missing)");
+        return;
+    }
+    /* PREFLIGHT -- refuse instead of degrading. Both of these are the engine's own paste gate, and
+     * the place step silently falls back to stage-only when either fails, which reported success
+     * while nothing arrived on the cursor:
+     *   - hovering an entity: the engine's paste branch is gated on hovered id == -1.
+     *   - a live selection: PasteInstantiate uses the selection array as its old->new id map and
+     *     AddToSelection appends, so pasting over one mis-wires every connection.
+     * Auto-clearing the selection was the old behaviour; it hid from the user that the state they
+     * could see on screen was the reason, so say it instead. */
+    if (g_iface->vtbl->hovered_id && g_iface->vtbl->hovered_id(g_iface) >= 0) {
+        poc_log("new-entity: REFUSED (hovering an entity -- the engine will not paste there)");
+        g_new_entity_result = -2;
+        return;
+    }
+    static int ne_selids[POC_MAX_ENTS];
+    if (poc_get_selection(ne_selids, POC_MAX_ENTS) > 0) {
+        poc_log("new-entity: REFUSED (editor selection is not empty)");
+        g_new_entity_result = -3;
+        return;
+    }
+    sh_apply_item it; it.kind = 2; it.id = 0; it.text = g_new_entity_json.c_str();
+    g_new_entity_result = poc_apply_edit_seh(&it, 1, "new-entity");
+    char l[320];
+    _snprintf_s(l, sizeof l, _TRUNCATE, "new-entity: '%s' staged=%d (kind=2: stage + auto pick-up), %zu bytes",
+                g_new_entity_label.c_str(), g_new_entity_result, g_new_entity_json.size());
+    poc_log(l);
+}
+
+/* Audition the staged sound name, or stop when it is empty. The backend refuses a name that is not
+ * in its own catalog rather than handing it to the engine's find-or-create, so a bad name costs a
+ * log line and nothing else. */
+/* Open or close the preview-mode session. Drained BEFORE the play below, so the browser opening and
+ * the first Play in the same frame still establish the mode before the sound starts. */
+static void poc_apply_sound_session()
+{
+    if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->sound_session) return;
+    __try { g_iface->vtbl->sound_session(g_iface, g_sound_session_on); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static void poc_apply_sound_preview()
+{
+    g_sound_preview_result = 0;
+    if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->sound_preview) {
+        poc_log("sound-preview: ABORT (iface/slot missing -- backend too old?)");
+        return;
+    }
+    const char *n = g_sound_preview_name.empty() ? nullptr : g_sound_preview_name.c_str();
+    __try { g_sound_preview_result = g_iface->vtbl->sound_preview(g_iface, n); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { g_sound_preview_result = 0; }
+}
+
 static void poc_apply_load_prefab()
 {
     g_load_result = -1;
@@ -1183,6 +1259,41 @@ static void poc_request_preview(const char *name)
     json += ok ? L"true" : L"false";
     json += L",\"name\":\"";
     json += poc_json_w(name ? name : "");
+    json += L"\"}";
+    g_webview->PostWebMessageAsJson(json.c_str());
+}
+
+/* Assets browser: one asset type's catalog (+0x2E8 list_assets), sent ONCE per type per session and
+ * cached by the page, which then filters client-side -- same convention as the event-def catalog
+ * below. Materials alone are ~9,805 names and a few hundred KB, so each type is paged out of the
+ * backend in chunks and concatenated here rather than crossing the bridge in one enormous message.
+ *
+ * Falls back to +0x2E0 list_materials when the backend predates ext 16, so a UI DLL paired with an
+ * older backend still lists materials instead of coming up empty. */
+static void poc_send_asset_list(int kind)
+{
+    if (!g_webview) return;
+    std::string all;
+    int total = 0;
+    if (g_iface && g_iface->vtbl) {
+        std::string chunk(64 * 1024, '\0');
+        for (int guard = 0; guard < 512; ++guard) {      /* guard: never spin if the backend lies */
+            int n = 0;
+            if (g_iface->vtbl->list_assets)
+                n = g_iface->vtbl->list_assets(g_iface, kind, total, &chunk[0], (int)chunk.size());
+            else if (kind == SH_ASSET_MATERIAL && g_iface->vtbl->list_materials)
+                n = g_iface->vtbl->list_materials(g_iface, total, &chunk[0], (int)chunk.size());
+            if (n <= 0) break;
+            all += chunk.c_str();                        /* NUL-terminated, newline-separated */
+            total += n;
+        }
+    }
+    std::wstring json = L"{\"kind\":\"assetList\",\"assetKind\":";
+    json += std::to_wstring(kind);
+    json += L",\"count\":";
+    json += std::to_wstring(total);
+    json += L",\"names\":\"";
+    json += poc_json_w(all.c_str());
     json += L"\"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
@@ -1974,6 +2085,36 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 std::wstring nm; json_get_wstr(json, L"name", nm);
                 std::string n8 = w_to_utf8(nm);
                 poc_send_material_result(n8.c_str());
+            } else if (cmd == L"newEntity") {
+                std::wstring js, lab;
+                json_get_wstr(json, L"json", js); json_get_wstr(json, L"label", lab);
+                g_new_entity_json = w_to_utf8(js); g_new_entity_label = w_to_utf8(lab);
+                g_pending_new_entity = true;
+            } else if (cmd == L"soundSession") {
+                int on = 0; json_get_int(json, L"on", &on);
+                g_sound_session_on = on ? 1 : 0;
+                g_pending_sound_session = true;
+            } else if (cmd == L"soundPreview") {
+                std::wstring nm; json_get_wstr(json, L"name", nm);
+                g_sound_preview_name = w_to_utf8(nm);   /* empty = stop */
+                g_pending_sound_preview = true;
+            } else if (cmd == L"materialRect") {
+                /* The Assets browser asks before offering the Virtual Mapping carrier: only
+                 * virtual-textured materials have a rect, and the rect IS the renderParm value. */
+                std::wstring nm; json_get_wstr(json, L"name", nm);
+                std::string n8 = w_to_utf8(nm);
+                int r[4] = {0,0,0,0}, ok = 0;
+                if (g_iface && g_iface->vtbl && g_iface->vtbl->material_rect)
+                    ok = g_iface->vtbl->material_rect(g_iface, n8.c_str(), r);
+                std::wstring m = L"{\"kind\":\"materialRect\",\"name\":\"";
+                m += poc_json_w(n8.c_str());
+                m += L"\",\"ok\":"; m += (ok ? L"true" : L"false");
+                m += L",\"x\":" + std::to_wstring(r[0]) + L",\"y\":" + std::to_wstring(r[1]);
+                m += L",\"w\":" + std::to_wstring(r[2]) + L",\"h\":" + std::to_wstring(r[3]) + L"}";
+                if (g_webview) g_webview->PostWebMessageAsJson(m.c_str());
+            } else if (cmd == L"listAssets") {
+                int akind = SH_ASSET_MATERIAL; json_get_int(json, L"assetKind", &akind);
+                poc_send_asset_list(akind);
             } else if (cmd == L"getPreview") {
                 poc_send_preview();
             } else if (cmd == L"requestPreview") {
@@ -2176,6 +2317,8 @@ static void poc_think_loop()
         frame++;
         bool did_save = false, did_delete = false, did_create_prefab = false, did_select_refused = false;
         bool did_delete_prefab = false, did_rename_prefab = false, did_load_prefab = false;
+        bool did_new_entity = false;
+        bool did_sound_preview = false;
         bool did_create_folder = false, did_rename_folder = false, did_delete_folder = false, did_move_prefab = false;
         bool did_open_timeline = false, did_resolve_entity = false, did_save_timeline = false;
         EnterCriticalSection(&g_loop->mtx);
@@ -2203,6 +2346,9 @@ static void poc_think_loop()
         if (g_pending_delete_prefab) { poc_apply_delete_prefab(); g_pending_delete_prefab = false; did_delete_prefab = true; }
         if (g_pending_rename_prefab) { poc_apply_rename_prefab(); g_pending_rename_prefab = false; did_rename_prefab = true; }
         if (g_pending_load_prefab)   { poc_apply_load_prefab();   g_pending_load_prefab = false;   did_load_prefab = true; }
+        if (g_pending_new_entity)    { poc_apply_new_entity();    g_pending_new_entity = false;    did_new_entity = true; }
+        if (g_pending_sound_session) { poc_apply_sound_session(); g_pending_sound_session = false; }
+        if (g_pending_sound_preview) { poc_apply_sound_preview(); g_pending_sound_preview = false; did_sound_preview = true; }
         if (g_pending_create_folder) { poc_apply_create_folder(); g_pending_create_folder = false; did_create_folder = true; }
         if (g_pending_rename_folder) { poc_apply_rename_folder(); g_pending_rename_folder = false; did_rename_folder = true; }
         if (g_pending_delete_folder) { poc_apply_delete_folder(); g_pending_delete_folder = false; did_delete_folder = true; }
@@ -2244,6 +2390,17 @@ static void poc_think_loop()
         if (did_load_prefab) {
             std::wstring m = L"{\"kind\":\"loadPrefabResult\",\"result\":"; m += std::to_wstring(g_load_result);
             m += L",\"name\":\""; m += poc_json_w(g_load_prefab_name.c_str()); m += L"\"}";
+            poc_post_json(m.c_str());
+        }
+        if (did_sound_preview) {
+            std::wstring m = L"{\"kind\":\"soundPreviewResult\",\"playing\":";
+            m += (g_sound_preview_result ? L"true" : L"false");
+            m += L",\"name\":\""; m += poc_json_w(g_sound_preview_name.c_str()); m += L"\"}";
+            poc_post_json(m.c_str());
+        }
+        if (did_new_entity) {
+            std::wstring m = L"{\"kind\":\"newEntityResult\",\"result\":"; m += std::to_wstring(g_new_entity_result);
+            m += L",\"label\":\""; m += poc_json_w(g_new_entity_label.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
         }
         if (did_open_timeline) poc_emit_timeline_data(g_open_timeline_eid, g_tl_json_len);
