@@ -159,9 +159,9 @@ typedef struct { const char *name; unsigned long long roff; unsigned usz, csz;
  *
  * MODELS is the one category that is not a straight type mapping. `renderModelInfo.model` takes
  * .lwo and .md6 values, and .md6 models live in their own decl type, so the category is the union
- * of the two. The `model` type's other 9,961 records are .bmodel, which is baked per-map world and
- * combo geometry (`maps/.../_combo/_world`, `dynamicsnapmap/...`) sharing no name with any .lwo --
- * not a prop anyone places, so it is filtered out rather than padding the list four-fold. */
+ * of the two. The `model` type's other 9,961 snap-box records are .bmodel -- baked brush geometry,
+ * sharing no name with any .lwo. Those are not padding for Models; they get their own two categories
+ * (MODULE / BMODEL) so the props list stays a props list. */
 static const struct { const char *type; unsigned len; unsigned char kind; const char *suffix; unsigned slen; } g_kinds[] = {
     { "material",            8, SH_ASSET_MATERIAL,   NULL,   0 },
     { "image",               5, SH_ASSET_IMAGE,      NULL,   0 },
@@ -172,7 +172,12 @@ static const struct { const char *type; unsigned len; unsigned char kind; const 
     { "particle",            8, SH_ASSET_PARTICLE,   NULL,   0 },
     { "decalatlas",         10, SH_ASSET_DECALATLAS, NULL,   0 },
     { "snapEditorEntityDef",19, SH_ASSET_SNAPDEF,    NULL,   0 },
-    { "entityDef",           9, SH_ASSET_ENTITYDEF,  NULL,   0 }
+    { "entityDef",           9, SH_ASSET_ENTITYDEF,  NULL,   0 },
+    /* The `model` type's OTHER half: baked BRUSH geometry under maps/. Split from Models on purpose --
+     * .bmodel and .lwo share ZERO stems, so these are disjoint content, not duplicates of the props.
+     * The 232 palette modules are promoted out of this kind in imgpreview_load. */
+    { "model",               5, SH_ASSET_BMODEL,     ".bmodel", 7 },
+    { "cm",                  2, SH_ASSET_CLIPMODEL,  NULL,   0 }
 };
 #define KIND_COUNT ((int)(sizeof g_kinds / sizeof g_kinds[0]))
 
@@ -245,10 +250,13 @@ static int imgpreview_load_box(int b, const char *stem)
             if (tl != g_kinds[k].len || memcmp(type, g_kinds[k].type, tl) != 0) continue;
             /* Names are not NUL-terminated here (that happens below), so match the suffix against
              * the known length rather than with strcmp. */
+            /* `continue`, NOT `break`: one decl type can map to several kinds discriminated only by
+             * extension (`model` -> .lwo Models and .bmodel Brush models). Breaking here on the
+             * first entry whose suffix misses would drop every record the later entry owns. */
             if (g_kinds[k].suffix &&
                 (nl < g_kinds[k].slen ||
                  _strnicmp(name + nl - g_kinds[k].slen, g_kinds[k].suffix, g_kinds[k].slen) != 0))
-                break;                              /* right type, wrong extension -> skip it */
+                continue;                           /* right type, wrong extension -> try next kind */
             kind = g_kinds[k].kind;
             break;
         }
@@ -363,6 +371,18 @@ static int imgpreview_load(void)
     int a = imgpreview_load_box(0, "snap_gameresources");
     int b = imgpreview_load_box(1, "gameresources");
 
+    /* Promote the 232 SnapMap MODULES out of the brush-model pile. They are the only .bmodel
+     * records that pair 1:1 with a collision model, so they are the only ones that can be placed
+     * as something both visible AND solid -- a different proposition from the wall/floor pieces
+     * they are assembled from, and worth its own category rather than being lost among 9,729
+     * fragments and invisible internals. */
+    int modules = 0;
+    for (int i = 0; i < g_recCount; ++i)
+        if (g_rec[i].kind == SH_ASSET_BMODEL && strstr(g_rec[i].name, "/palettes/mega_blessed/")) {
+            g_rec[i].kind = SH_ASSET_MODULE;
+            modules++;
+        }
+
     imgpreview_load_wwise();
 
     /* Decide, once, which records the browser will LIST.
@@ -390,9 +410,9 @@ static int imgpreview_load(void)
 
     char line[260];
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B2: imgpreview -- indexed %d records (snap=%s game=%s); campaign sounds offered: %d "
-        "(%d duplicates of SnapMap sounds dropped)",
-        g_recCount, a ? "ok" : "MISSING", b ? "ok" : "missing", extra, dup);
+        "B2: imgpreview -- indexed %d records (snap=%s game=%s); %d SnapMap modules; "
+        "campaign sounds offered: %d (%d duplicates of SnapMap sounds dropped)",
+        g_recCount, a ? "ok" : "MISSING", b ? "ok" : "missing", modules, extra, dup);
     backend_log(line);
     g_loaded = (g_recCount > 0) ? 1 : -1;
     return g_loaded > 0;

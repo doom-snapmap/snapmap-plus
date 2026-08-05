@@ -275,7 +275,19 @@ typedef int           (*sh_list_materials_fn)(struct sh_iface *self, int start, 
 #define SH_ASSET_DECALATLAS  6
 #define SH_ASSET_SNAPDEF     7    /* snapEditorEntityDef -- the SnapMap editor's placeable list */
 #define SH_ASSET_ENTITYDEF   8
-#define SH_ASSET_COUNT       9
+/* Appended 2026-08-04. Baked BRUSH geometry -- the `maps/...` half of the `model` decl type, which
+ * the Models category deliberately excludes (it keeps `models/...` props: .lwo + md6Def).
+ *   MODULE    the 232 `palettes/mega_blessed` SnapMap modules. Each pairs 1:1 with a `_combo/world.bcm`,
+ *             so one of these can be placed as a prop that is BOTH visible and solid -- see
+ *             abModuleClip() in the UI and the doom-re campaign's evidence 10 §3.2.
+ *   BMODEL    every other .bmodel: the individual wall/floor pieces those modules are assembled from,
+ *             plus the invisible internals (navmesh, occlusion, umbra, clip). Render-only; the
+ *             component pieces have no collision of their own because it is baked at the combo level.
+ *   CLIPMODEL the `cm` decl type (.bcm/.lwo/.md6), appliable on its own as clipModelInfo.clipModelName. */
+#define SH_ASSET_MODULE      9
+#define SH_ASSET_BMODEL      10
+#define SH_ASSET_CLIPMODEL   11
+#define SH_ASSET_COUNT       12
 
 /* Page ONE asset type's catalog. `kind` is an SH_ASSET_* value (backend/imgpreview.h); `start` is
  * how many names of that type to skip. Supersedes list_materials, which is kind 0 and stays put

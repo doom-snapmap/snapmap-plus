@@ -3788,6 +3788,17 @@
     return {text: text, open: text.indexOf('{'), close: dpMatchBrace(text, text.indexOf('{'))};
   }
 
+  /* Write several scalars into ONE nested block of `edit`. The block is re-resolved before every
+   * write because dpSetScalar returns text, not offsets, so every position shifts under it. */
+  function dpSetInBlock(s, blockKey, pairs) {
+    for (var i = 0; i < pairs.length; i++) {
+      var e = dpEditBlock(s);
+      var b = dpEnsureBlock(e.text, e.open, e.close, blockKey);
+      s = dpSetScalar(b.text, b.open, b.close, pairs[i][0], pairs[i][1]);
+    }
+    return s;
+  }
+
   /* Build the patched decl for one carrier. Returns null when the carrier cannot be written. */
   /* The generic dynamic block surface -- itself virtual-textured, so a virtualmapping parm applied
    * on top of it actually displays. A new blocking volume would otherwise inherit
@@ -3818,6 +3829,20 @@
               .map(function (n) { return String(n / 245760); }).join(', ') + ' }';
       return dpSetRenderParm(rm2.text, rm2.open, rm2.close, 'virtualmapping', v);
     }
+    /* clipModelName is a member of idClipModelInfo, so it nests inside clipModelInfo -- NOT at the
+     * edit level. `type` is deliberately left alone: the confirmed-solid test kept the inherited
+     * CLIPMODEL_AUTO and the named clip model still took effect, so AUTO means "derive collision
+     * from the render model UNLESS a name is given". Writing CLIPMODEL_CUSTOM would change the
+     * inherited mode for no gain. */
+    if (carrier === 'cl')
+      return dpSetInBlock(decl || '', 'clipModelInfo', [['clipModelName', '"' + name + '"']]);
+    /* A module writes BOTH halves: the geometry, then the collision derived from its path. */
+    if (carrier === 'mod') {
+      var clip = abModuleClip(name);
+      if (!clip) return null;
+      var withModel = dpSetInBlock(decl || '', 'renderModelInfo', [['model', '"' + name + '"']]);
+      return dpApply(withModel, type, 'cl', clip, null);
+    }
     var flat = {f: 'fxDecl', s: 'sound', p: 'particleSystem'}[carrier];
     if (flat) return dpSetScalar(s, open, close, flat, '"' + name + '"');
     return null;
@@ -3841,14 +3866,31 @@
   var AB_TYPES = [
     {id:'material',  kind:0, label:'Materials'},
     {id:'model',     kind:2, label:'Models'},
+    {id:'module',    kind:9, label:'Modules'},
     {id:'sound',     kind:3, label:'Sounds'},
     {id:'fx',        kind:4, label:'FX'},
     {id:'particle',  kind:5, label:'Particles'},
     {id:'snapDef',   kind:7, label:'Editor defs', ref:true},
     {id:'entityDef', kind:8, label:'Entity defs', ref:true},
+    {id:'bmodel',    kind:10, label:'Brush models'},
+    {id:'clipmodel', kind:11, label:'Clip models'},
     {id:'image',     kind:1, label:'Images',      ref:true},
     {id:'decal',     kind:6, label:'Decal atlases', ref:true}
   ];
+
+  /* A SnapMap module ships its geometry and its collision at DIFFERENT paths -- the render half is
+   * baked into the palette, the collision stays in the module's own folder. Matching by stem finds
+   * nothing and makes it look like the modules have no collision at all; this is the real rule, and
+   * it holds for 232 of 232 modules with no exceptions.
+   *
+   *   maps/modules/palettes/mega_blessed/<family>/<name>.bmodel
+   *   maps/modules/<family>/<name>/_combo/world.bcm
+   *
+   * Returns null for anything that is not a palette module. */
+  function abModuleClip(path) {
+    var m = /^maps\/modules\/palettes\/mega_blessed\/([^\/]+)\/(.+)\.bmodel$/i.exec(path || '');
+    return m ? 'maps/modules/' + m[1] + '/' + m[2] + '/_combo/world.bcm' : null;
+  }
   function abType(id) {
     for (var i = 0; i < AB_TYPES.length; i++) if (AB_TYPES[i].id === id) return AB_TYPES[i];
     return null;
@@ -3908,6 +3950,25 @@
     ];
     if (type === 'model')    return [{id:'m', label:'Model', ok:true,
                                       why:'Applies the model by name under renderModelInfo.'}];
+    /* A module is the one asset that writes TWO fields. Geometry alone renders but you walk
+     * through it -- collision lives in a separate .bcm, at a different path. */
+    if (type === 'module')   return [{id:'mod', label:'Module (solid)', ok:!!abModuleClip(path),
+                                      why: abModuleClip(path)
+                                        ? 'Writes the geometry into renderModelInfo.model AND its paired '
+                                        + 'collision into clipModelInfo.clipModelName, so the module is '
+                                        + 'both visible and solid.'
+                                        : 'This one does not follow the module path rule, so its collision '
+                                        + 'cannot be derived.'},
+                                     {id:'m', label:'Geometry only', ok:true,
+                                      why:'Just the render model. It will look right and you will walk '
+                                        + 'straight through it.'}];
+    if (type === 'bmodel')   return [{id:'m', label:'Model', ok:true,
+                                      why:'Render geometry only. These are the wall/floor pieces a module '
+                                        + 'is built from (and its invisible navmesh/occlusion brushes); '
+                                        + 'collision is baked at the module level, so they are not solid.'}];
+    if (type === 'clipmodel')return [{id:'cl', label:'Clip model', ok:true,
+                                      why:'Writes clipModelInfo.clipModelName -- the collision shape. Use it '
+                                        + 'to solidify an entity that already carries geometry.'}];
     /* Music is not special-cased. A music track is a soundshader decl like any other, so it both
      * previews and applies; put one on a speaker and it plays as a sound, it just does not behave
      * like a real music entity (no music-system control over it). That is the mapper's call to
@@ -4066,7 +4127,10 @@
   function abApplyDenied(carrier, cls) {
     cls = cls || '';
     if (abNoApplyEver(cls)) return 'Nothing can be applied to ' + cls;
-    if (carrier === 'm')  return abModelTargetOk(cls) ? null : cls + ' cannot wear a model';
+    /* Geometry and collision follow the model rule -- anything that can wear a model can wear brush
+     * geometry, and the clip model is the same surface seen by physics rather than the renderer. */
+    if (carrier === 'm' || carrier === 'mod' || carrier === 'cl')
+      return abModelTargetOk(cls) ? null : cls + ' cannot wear a model';
     if (carrier === 'cm' || carrier === 'vm')
       return abRenderTargetOk(cls) ? null : cls + ' cannot wear a material';
     if (carrier === 'f' || carrier === 'p' || carrier === 's')
@@ -4094,7 +4158,8 @@
     /* Name the property that changed -- the saveResult toast that follows says whether it stuck,
      * but not what was touched, and Decl Text is scrolled wherever the user left it. */
     var PROP = {cm:'customMaterial', vm:'renderParms virtualmapping', m:'model',
-                f:'fxDecl', s:'sound', p:'particleSystem'};
+                f:'fxDecl', s:'sound', p:'particleSystem',
+                cl:'clipModelInfo.clipModelName', mod:'model + clipModelName (solid)'};
     toast((PROP[carrier] || 'property') + ' = ' + name);
     /* The speaker classes are the one case the owner called out as meaningless for a render asset.
      * A note, not a block: the class list cannot tell a renderable trigger from a non-renderable
@@ -4478,7 +4543,15 @@
       if (ce) ce.disabled = false;
     }
     if (!abPreviewable(m.type)) {
-      m.pvNote = 'No preview for this asset type - only materials and images decode to pixels.';
+      /* Modules are worth saying more about than "no preview": the pane is the only place to
+       * explain that this one asset places as BOTH geometry and collision. */
+      m.pvNote = (m.type === 'module')
+        ? 'A whole SnapMap module. Placed as a prop it brings its own geometry AND its paired '
+          + 'collision, so it is solid. No thumbnail - only materials and images decode to pixels.'
+        : (m.type === 'bmodel')
+        ? 'Baked brush geometry - a piece of a module, or one of its invisible navmesh/occlusion '
+          + 'brushes. Render-only: it will not be solid.'
+        : 'No preview for this asset type - only materials and images decode to pixels.';
       abStatus(m, '');
       abRenderTree(m); abRenderInsp(m);
       return;
@@ -4589,6 +4662,14 @@
                 inherit:'snapmaps/volume/blocking',        cls:'idVolume_Blocking'}],
     model:    [{id:'prop',     label:'Prop',
                 inherit:'snapmaps/props/new/barrel01',     cls:'idProp_Coop'}],
+    /* A whole SnapMap module as a placeable prop, geometry AND collision. Same barrel-prop base as
+     * an ordinary model -- what makes it solid is the paired .bcm, not a different class. Solid vs
+     * geometry-only comes from the CARRIER radio, not a second variant here; two controls saying
+     * the same thing is one too many. */
+    module:   [{id:'prop',     label:'Module',
+                inherit:'snapmaps/props/new/barrel01',     cls:'idProp_Coop'}],
+    bmodel:   [{id:'prop',     label:'Prop (geometry only)',
+                inherit:'snapmaps/props/new/barrel01',     cls:'idProp_Coop'}],
     fx:       [{id:'fx',       label:'FX volume',
                 inherit:'snapmaps/hazards/windy_dust',     cls:'idVolume_ToggleableDamageOverTime'}],
     sound:    [{id:'2d',       label:'2D speaker',
@@ -4671,8 +4752,20 @@
       }
       return I + '"renderModelInfo" : {\n' + inner + '\n' + I + '},\n' + pos;
     }
-    if (type === 'model')
+    if (type === 'model' || type === 'bmodel')
       return I + '"renderModelInfo" : {\n' + I + '   "model" : ' + neStr(name) + '\n' + I + '},\n' + pos;
+    if (type === 'module') {
+      var geo = I + '"renderModelInfo" : {\n' + I + '   "model" : ' + neStr(name) + '\n' + I + '}';
+      /* carrier 'm' is the geometry-only choice; 'mod' pairs the collision in. */
+      var clip = (carrier === 'm') ? null : abModuleClip(name);
+      if (!clip) return geo + ',\n' + pos;
+      /* No `type` line: the inherited CLIPMODEL_AUTO honours clipModelName (confirmed solid in
+       * game with AUTO left in place), so naming the clip model is the whole edit. */
+      return geo + ',\n'
+           + I + '"clipModelInfo" : {\n'
+           + I + '   "clipModelName" : ' + neStr(clip) + '\n'
+           + I + '},\n' + pos;
+    }
     if (type === 'fx')    return I + '"fxDecl" : ' + neStr(name) + ',\n' + pos;
     if (type === 'sound') return I + '"sound" : ' + neStr(name) + ',\n' + pos;
     if (type === 'particle')
