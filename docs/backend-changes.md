@@ -6,6 +6,51 @@ where our own reimplementation was wrong, not the original SnapHak's behavior; a
 (or faithful reproduction of) the *original's* behavior belongs in [`fidelity.md`](fidelity.md)
 instead. Entries are chronological, newest first.
 
+## 2026-08-05 — the last hardcoded engine RVAs are gone, and the `[64]` that hid a truncated signature DB bit again
+
+**What changed.** Three engine functions were still reached as a raw `module_base + RVA`, which is
+build-locked in exactly the way the signature resolver exists to avoid. All three are now ordinary
+signature entries, verified unique across the whole executable image:
+
+| Signature | Pinned RVA | What it is |
+|---|---|---|
+| `Mega2PageDecode` | `0x196E140` | the megatexture page decoder the asset browser calls |
+| `PrefabDtor` | `0x51D870` | `idSnapEntityPrefab::~idSnapEntityPrefab` |
+| `EntityDeshare` | `0x52C920` | COW make-unique, before an in-place entity edit |
+
+The two prefab functions join the ctor/populate/`MemLocal` group on `ae_pick_engine_fn` — signature
+wins, `known_rva` cross-checks and logs a mismatch loudly rather than silently preferring either.
+
+The decoder previously carried a **local `memcmp` of its own prologue** at the hardcoded address.
+That is strictly weaker than a signature and the difference is not academic: a byte check can detect
+that a function moved but can never *find* it, so any build with a shifted `.text` lost previews
+outright. It now resolves wherever the loader put it, and a build whose bytes genuinely differ fails
+to resolve — which still disables previews, but by refusing rather than by calling into whatever now
+occupies that address.
+
+**One function could not be signatured, and is not pretending to be.** idList-grow (pinned
+`0x699A60`) is **one of 1,560 byte-identical instantiations** of the same idList template in the
+image, separable only by their displacements. No lengthening of a prologue pattern gets past that —
+the same wall `StopSound`'s clone hit. It is resolved *relationally* instead: `AddCommand` (which is
+signatured) calls it on `cmdSys+0x08` via `LEA RCX,[RSI+8]` / `CALL rel32`, so the callee is decoded
+out of that call site, range-checked against the module, and logged with the pinned RVA as a
+cross-check. The decode runs before our own `AddCommand` detour is installed, and the call site sits
+well past the 15 stolen prologue bytes either way.
+
+**The bug this uncovered.** `tests/sig_test.c` and `tests/hooktol_test.c` both still declared
+`sig_result results[64]` — the same fixed array that silently truncated the database at entry 65 and
+prompted `SIG_RESULTS_MAX` in the first place. The constant was applied to the shipping callers and
+missed in the tests. At 67 entries it stopped being silent and became a stack overwrite:
+`sig_resolve_all` wrote past the end of the array, producing garbage status values and an access
+violation **inside the test process**. Both now size with `SIG_RESULTS_MAX` and print a loud
+`SIGNATURE DB OVERFLOW` and fail if the database ever outgrows it.
+
+The general lesson is worth keeping: a constant introduced to fix a class of bug only fixes the call
+sites it is actually applied to. Grep for the literal, not just for the symptom.
+
+**Verified.** `sig_test` 67/67 signatures resolve to their known RVAs; `hooktol_test` 3/3
+hook-tolerant fallbacks; 16/16 native tests; `go test ./...` clean.
+
 ## 2026-07-28 — Load/Place now picks the prefab up (auto-grab enabled): the corruption was the heap bug
 
 **What changed.** `kind=2` (stage → pick up) is enabled. Load/Place no longer asks the user to press Ctrl+V.

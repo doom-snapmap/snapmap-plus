@@ -113,9 +113,49 @@ editor (run `sh` in the console if it doesn't auto-open). Full detail: [`webview
 | Selection guard while holding | Selecting from the Entities list is refused (with an explanatory toast) while you're grabbing an entity or holding a staged prefab. The engine's Escape/cancel path restores a snapshot keyed positionally to the selection that was live when the grab began, so changing the selection first makes Escape swap entity pointers inside the live map — duplicating entities, deleting others outright, and freezing the game. A pre-existing engine bug (reproduces on released builds); only cancellation triggers it, never accept. Placing a *new* palette entity captures no snapshot and is left unrestricted. |
 | List-assembled group grab | With a selection pushed from the Entities list, grabbing any one of those entities in the 3D view grabs **all** of them — not previously possible. Practical use: browse a logic chain in the 3D view, add the other entities you want to bring along from the Entities list, then grab the node you're on and move the whole group. You can also hold a grabbed entity or a staged prefab, push a selection from the list, and place the held object without losing the selection. |
 | Prefabs tab | Save and load selection prefabs as JSON files under `%LOCALAPPDATA%\snapmap-plus\prefabs\` — one folder level with rename/delete/drag-between-folders; per-prefab description + tags (stored in a `<name>.meta.json` sidecar; the filter box matches tags across folders); "Load / Place" stages the prefab **and picks it up for you** — no Ctrl+V needed; you position it and click to drop, exactly as after a vanilla Ctrl+V. It does this by injecting the editor's own paste action, so the engine runs its real paste path rather than anything reimplemented. It degrades to stage-only (with a toast saying why) whenever the engine itself would refuse — not in EntityMode, already holding something, hovering an entity, or a selection that could not be cleared. A staged prefab also **survives a Play round-trip and a map change** — come back and Ctrl+V still works, matching the engine's own Ctrl+C clipboard. (Both were previously broken: the prefab had to be discarded on the way into Play to avoid a crash, because its entity-blob array was allocated in the engine's map heap, which is `HeapDestroy`d at map load. See [`backend-changes.md`](backend-changes.md).) |
+| Assets tab | The asset browser — the shipped game catalog, searchable, with a live preview pane, and one click to put an asset on the map. Full detail in the section below. Also reachable as a modal from the Entities tab ("Browse assets"), scoped to the entity you came from. |
 | Timelines tab | The list of timeline entities; opening one edits its events and per-event parameters, with reference/decl/enum parameters constrained to valid choices, entity pickers for entity-typed args, and per-event documentation. |
 | Feedback ("?") | The "?" button at the statusbar's right edge opens the Send-feedback dialog: category (bug / feature / incorrect info / other), title, details, optional contact. Sending files it as a labeled issue on this repo's tracker — no GitHub account needed. See the network note below + [`feedback.md`](feedback.md). |
 | Crash reports | When the game hits a serious fault, a crash record is saved locally and the crash-report dialog auto-opens (in-session for a survived fault, next launch otherwise): the error + call stack, an optional description, and an opt-out checkbox to attach anonymized log tails. Sending files a `crash`-labeled issue; repeat crashes at the same location group onto one issue. See [`feedback.md`](feedback.md). |
+
+## The asset browser (Assets tab)
+
+Every category is enumerated **live from the game's own shipped containers** at startup — no
+pre-extraction step, no bundled asset list, and nothing shipped in this repo. Only assets from
+`snap_gameresources` are listed, with sounds as the deliberate exception (see below): SnapMap never
+mounts the campaign's `gameresources.resources`, so a campaign-only model resolves in the editor as a
+black cube.
+
+| Category | What it holds |
+|---|---|
+| Materials | Surfaces. Previewed as real pixels — see below. |
+| Images | The lower-level image records the materials sample. |
+| Models | Props: `.lwo` plus the `md6Def` set. |
+| **Modules** | The 232 `mega_blessed` palette modules — whole SnapMap rooms, placeable as a single entity that is both visible **and solid**. |
+| **Brush models** | Every other baked `.bmodel`: the individual wall, floor and detail pieces those modules are assembled from. Render-only. |
+| **Clip models** | The `cm` type (`.bcm` / `.lwo` / `.md6`) — collision shapes, appliable on their own. |
+| Sounds | The **union** of `sound` decls and Wwise events, deduplicated case-insensitively. Neither set contains the other, and the event-only half is ~2,600 names including the generic SnapMap VO, so a decl-only list is missing thousands of sounds a mapper can hear in the editor. Campaign-box sounds are offered too, and they work. |
+| FX, Particles, Decal atlases, Entity defs | The remaining placeable decl types. |
+
+**Previews are real, and cover the catalog.** A material's pixels are produced by locating its pages
+in the shipped megatexture set and decoding them with **DOOM's own page decoder, called in-process**.
+That decoder is a pure function — no renderer, no GPU, no virtual-texture state and no map residency
+— so a preview does not depend on the loaded map having the material on screen, which is what makes
+whole-catalog browsing possible at all. Materials with no atlas rect (roughly half) fall back to
+reading the image out of the `.index`/`.resources` containers and decoding BC1/BC3/BC7 directly.
+Sounds are auditioned through the editor's own preview path with working play/stop.
+
+**Apply to selection** writes the asset into the selected entity's decl and commits immediately —
+one entity at a time, since it patches the decl the editor has open. Which carriers are legal is
+decided per target class: nothing at all applies to the player start; FX, particles and sounds are
+refused on doors and interactables, which own their own effects and audio; models may still be
+swapped on most interactables. **New entity** authors a one-entity prefab and stages it through the
+engine's own paste path, so it arrives held and ready to place.
+
+A module is placed by writing **both** halves — the baked geometry into `renderModelInfo.model` and
+its paired collision into `clipModelInfo.clipModelName`. The two live at different paths and pair
+232-for-232; the browser derives the collision name for you. The def's inherited `CLIPMODEL_AUTO` is
+left alone, because naming a clip model overrides the automatic derivation on its own.
 
 ## Persistent settings
 

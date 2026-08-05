@@ -92,12 +92,13 @@ include that header** — it is a matched pair. The backend writes the vtable an
 frontend reads them at the same offsets.
 
 - The backend builds it (`operator_new(0x60)`), installs the vtable — the **77 original-faithful
-  slots** (`+0x00..+0x260`) plus the **clone-extension slots** appended after them (`+0x268..+0x2B8`
-  today: the atomic class+inherit apply, the class/inherit enumerators, the dev-layer query, the
-  wire-edit generation counter, the synchronous `apply_sync`, the timeline inherit-normalize,
-  push/clear-stack, and the generic configuration getter/setter) — initializes the mutex at `+0x08`,
-  and hangs a sub-object off `+0x58` that holds the SnapStack subcommand map and the main-thread
-  work-queue.
+  slots** (`+0x00..+0x260`) plus the **clone-extension slots** appended after them (`+0x268..+0x300`
+  today, `sizeof(sh_iface_vtbl) == 0x308`: the atomic class+inherit apply, the class/inherit
+  enumerators, the dev-layer query, the wire-edit generation counter, the synchronous `apply_sync`,
+  the timeline inherit-normalize, push/clear-stack, the generic configuration getter/setter, and the
+  asset-browser group — preview request/publish, request-by-name, the material atlas rect, the
+  catalog pager, and sound preview/session) — initializes the mutex at `+0x08`, and hangs a
+  sub-object off `+0x58` that holds the SnapStack subcommand map and the main-thread work-queue.
 - **Extension slots are append-only**: a new capability gets the next slot after the current end;
   original-block offsets never move. This is also a real failure mode, not a formality — a frontend
   calling an extension slot that an older backend never installed would call through garbage. That is

@@ -114,6 +114,43 @@ through it).
 Newest first. Each dated entry covers one working session's worth of change; the undated **Baseline**
 entry at the bottom is the original POC buildout, before this doc tracked dates per entry.
 
+### 2026-08-05 -- The Assets tab: the whole shipped catalog, previewed and placeable
+
+- **New Assets tab**, mounted twice from one implementation: as an open-browsing tab, and as a modal
+  opened from the Entities tab ("Browse assets") scoped to the current selection. Both share the
+  fetched catalog and folder tree; each keeps its own type / folder / filter / selection state.
+- **Materials preview as real pixels.** The backend locates the material's pages in the shipped
+  megatexture set and decodes them with DOOM's own decoder in-process. Materials with no atlas rect
+  (roughly half the catalog) fall back to decoding BC1/BC3/BC7 out of the `.index` containers.
+- **Sounds audition** with real play/stop, through the editor's own preview path rather than the
+  `testSound` console command -- which throws its emitter handle away, so it can neither be stopped
+  nor prevented from stacking a new voice on every click. The preview session is scoped to **window
+  focus**: background audio is only wanted while DOOM lacks focus, so blurring the Snapmap+ window
+  ends the session and hands the editor its audio back.
+- **The sound list is the union of two sources.** A `sound` decl and a Wwise event are different
+  sets and neither contains the other; listing only decls was missing ~2,600 names, including the
+  generic SnapMap VO. Deduplicated case-insensitively, since the manifest spells events `Play_Vo_...`
+  and decls are lowercase.
+- **Three new categories** -- Modules, Brush models, Clip models -- out of the two decl types the
+  catalog previously discarded. A **module** places as one entity that is both visible and solid:
+  the baked geometry goes to `renderModelInfo.model` and its paired collision to
+  `clipModelInfo.clipModelName`, which the browser derives for you (232/232 pair, no orphans).
+  The inherited `CLIPMODEL_AUTO` is left in place -- naming a clip model overrides the automatic
+  derivation on its own.
+- **Apply to selection** commits into the selected entity's decl immediately rather than staging an
+  edit. One entity at a time, since it patches the decl the editor has open; with 2+ selected the
+  button is disabled and the "Browse assets" entry point is too. What may be applied is decided per
+  target class by a single gate: nothing applies to the player start, FX/particles/sounds are refused
+  on doors and interactables, models may still be swapped on most interactables.
+- **New entity** authors a one-entity prefab and stages it through the engine's own paste path, so it
+  arrives held and ready to place. `grabDistance` (not `spawnPosition`) carries the placement
+  distance -- the two ADD, and only `grabDistance` follows the full view ray.
+- **Keyboard navigation** throughout: Up/Down move the row selection, Enter/Space open folders,
+  Backspace goes up a level. Placement is deliberately *not* bound to Enter/Space -- you have to tab
+  to the button -- so browsing can never place something by accident. The modal takes precedence over
+  the tab when both are open.
+- Tab order is alphabetical, with Assets first; the tab that opens on load is still Entities.
+
 ### 2026-07-27 -- Selection changes refused while the editor is holding something
 
 - **Selecting from the Entities list is now refused while you are grabbing an entity or holding a
