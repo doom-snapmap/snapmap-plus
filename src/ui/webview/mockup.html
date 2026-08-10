@@ -974,6 +974,288 @@
     102: JSON.stringify({ entityDef: { state: { edit: { componentTimeLine: { entityEvents: { num: 0 } } } } } }),
     103: JSON.stringify({ entityDef: { state: { edit: {} } } })
   };
+  /* A 182-name sample of the REAL sound catalog with each name's REAL soundbank, taken straight
+   * from soundbanksinfo.xml across 14 banks. Sampled, not invented -- same rule PREVIEW_MATERIALS
+   * follows: the browser-preview side may carry a SLICE of shipped data so the UI can be exercised
+   * without launching the game, but it must never make game data up. It exists so the soundbank
+   * filter and its interaction with search can be driven in a plain browser. */
+  var PREVIEW_SOUNDS =
+    'Play_wpn_HAR_dryFire\nPlay_wpn_sp_HAR_dryfire\n' +
+    'Play_wpn_sp_HAR_fire\nPlay_wpn_sp_HAR_Zoom_02\n' +
+    'Play_wpn_sp_HAR_Zoom_out_02\nPlay_wpn_sp_chainsaw_rev_high_rpm_decel_mid\n' +
+    'Play_wpn_sp_chainsaw_start_up\nPlay_wpn_sp_fireball_summon\n' +
+    'Play_wpn_sp_gauss_dryFire\nPlay_wpn_sp_HAR_MASTERY_fire\n' +
+    'Play_wpn_sp_HAR_missile_ready\nPlay_wpn_sp_HAR_MissileCantFire\n' +
+    'Play_wpn_sp_HAR_missileChamber_Close_S\nPlay_wpn_sp_HAR_missileChamber_mastered\n' +
+    'Play_wpn_sp_HAR_missileChamber_S\nPlay_wpn_sp_HAR_StickyBomb\n' +
+    'Play_wpn_sp_HAR_stickyshot_explode\nPlay_wpn_sp_plasma_hellified_soldier_charge\n' +
+    'Play_wpn_sp_plasma_hellified_soldier_fire\nPlay_air_res_mid\n' +
+    'Play_air_res_mid_01\nPlay_amb_3d_air_01\n' +
+    'Play_amb_3d_air_02\nPlay_amb_3d_air_03\n' +
+    'Play_amb_3d_air_04\nPlay_amb_3d_air_05\n' +
+    'Play_amb_3d_alarm_01\nPlay_amb_3d_alarm_02\n' +
+    'Play_amb_3d_alarm_03\nPlay_amb_3d_alarm_04\n' +
+    'Play_amb_3d_alarm_05\nPlay_amb_3d_computer_01\n' +
+    'Play_amb_3d_computer_02\nPlay_amb_3d_computer_03\n' +
+    'Play_amb_3d_computer_04\nPlay_amb_3d_electrical_01\n' +
+    'Play_amb_3d_electrical_02\nPlay_amb_3d_fire_01\n' +
+    'Play_amb_3d_fire_02\nPlay_amb_3d_fire_03\n' +
+    'Play__avoid_enemy_grenade\nPlay__behind_enemy\n' +
+    'Play__breath\nPlay__breathe_in_out\n' +
+    'Play__call_reinforcements\nPlay__chatter\n' +
+    'Play__death\nPlay__death_glorykill\n' +
+    'Play__enemy_behind\nPlay__enemy_charging\n' +
+    'Play__enemy_down_there\nPlay__enemy_flanking\n' +
+    'Play__enemy_lost\nPlay__enemy_on_left\n' +
+    'Play__enemy_on_right\nPlay__enemy_over_here\n' +
+    'Play__enemy_resighted\nPlay__enemy_retreating\n' +
+    'Play__enemy_sighted\nPlay__enemy_surprise\n' +
+    'Play__enemy_up_there\nPlay__exertion\n' +
+    'Play_action_failed\nPlay_adjust_success\n' +
+    'Play_alarm\nPlay_automap_on\n' +
+    'Play_bottom_block_UI_on\nPlay_button_press\n' +
+    'Play_button_rollover\nPlay_Challenge_Complete\n' +
+    'Play_challenge_start_clock\nPlay_codex_entry\n' +
+    'Play_empty_error\nPlay_endOfLevel_challenges_01\n' +
+    'Play_endOfLevel_collectables\nPlay_endOfLevel_combat_score_01\n' +
+    'Play_chainsaw_impact_metal_loop\nPlay_Gauss_charge_mechanism\n' +
+    'Play_Gauss_charge_short_tonal\nPlay_gauss_spiny_Charge\n' +
+    'Play_handgun_fire_charge_01\nplay_melee_impact_default_player_npc_glory\n' +
+    'Play_pistol_pickup\nPlay_pistol_vent\n' +
+    'Play_plasma_readyToFire\nPlay_plasma_stun_larger_impact\n' +
+    'Play_pop_rocket_explode_01\nPlay_sfx_chaingun_intro\n' +
+    'Play_sfx_chaingun_pickup\nPlay_sfx_wpn_sp_switchToSpin\n' +
+    'Play_amb_buzzer_gritty_01\nPlay_amb_buzzer_gritty_lpf\n' +
+    'Play_amb_dirt_debris_rand_looping\nPlay_amb_drySparks\n' +
+    'Play_amb_drySparks_distant\nPlay_amb_fan_small\n' +
+    'Play_amb_hor_influence_quad_lp_02\nPlay_amb_light_buzz\n' +
+    'Play_amb_low_whistle_wind\nPlay_amb_metal_bending_3d\n' +
+    'Play_amb_metal_creaking_3d\nPlay_amb_metal_taps_3d\n' +
+    'Play_bossfight_cyberdemon_kill\nPlay_D4_MX_combat_UAC_03_140bpm_wip_GLORY_02\n' +
+    'Play_D4_MX_combat_UAC_03_140bpm_wip_GLORY_02_softer\nPlay_D4_QuakeCon_imp_scare_v1\n' +
+    'Play_D4_QuakeCon_Sting_TheHand\nPlay_e1m1_looped_temp_for_challenge\n' +
+    'Play_enter_dos\nplay_EOL_01_intro\n' +
+    'play_EOL_02_res\nPlay_leaving_dos\n' +
+    'Play_Argent_tower_final_filter_explosion\nPlay_bot_wake_oneshot\n' +
+    'Play_breath_bubbles\nPlay_chainsaw_hellknight\n' +
+    'Play_chainsaw_mancubus_back\nPlay_chainsaw_mancubus_front\n' +
+    'Play_chainsaw_mancubus_head\nPlay_chainsawGlory_long\n' +
+    'Play_chainsawGlory_med\nPlay_chainsawGlory_short\n' +
+    'Play_amb_gore_nest_falloff\nPlay_ambient_wind\n' +
+    'Play_bloody_punch_switch\nPlay_boss_shield_off\n' +
+    'Play_boss_shield_on\nPlay_buckshot_impact_concrete_local\n' +
+    'Play_buckshot_impact_dirt_local\nPlay_buckshot_impact_flesh_local\n' +
+    'Play_buckshot_impact_glass\nPlay_buckshot_impact_glass_local\n' +
+    'Play_armor_s01\nPlay_Armored_Offensive\n' +
+    'Play_berzerk\nPlay_bezerk_off\n' +
+    'Play_bezerk_on\nPlay_bezerk_time_out_beep_01\n' +
+    'Play_blood_fueled\nPlay_branch_hitbyplayer_standing02_finish01\n' +
+    'Play_airlock_close_01\nPlay_airlock_open_01\n' +
+    'Play_argent_top_shutters\nplay_bounce_01\n' +
+    'Play_close\nPlay_door_slide_close\n' +
+    'Play_door_slide_open\nPlay_dor_floodgate_slam_01\n' +
+    'Play_8Bit_stinger_secret_lever\nPlay_Adrenaline_shot\n' +
+    'Play_apophis_infusion\nPlay_bobblehead_01\n' +
+    'Play_console_uac_beeps\nPlay_damage_weapon_ending\n' +
+    'Play_demonic_scream_1\nPlay_electric_hand\n' +
+    'Play_ability_on\nPlay_invuln_active_lp\n' +
+    'Play_invulnerability_activate\nPlay_mp_pickup_quad_Switch\n' +
+    'Play_pop_rocket_explode_large\nPlay_quad_active_lp\n' +
+    'Play_quad_damage_activate_switch\nPlay_quad_fire_1Shot\n' +
+    'Play_counter_tick_02\nPlay_counter_tick_03\n' +
+    'Play_counter_tick_04\nPlay_counter_tick_05\n' +
+    'Play_mp_vega_callout_overtime_01\nPlay_mp_vega_callout_overtime_02\n' +
+    'Play_mp_vega_callout_overtime_03\nPlay_stop_vo_facilityvoice_002_020_powerofflineall\n' +
+    'Play_UAC_Spokesperson_2022_FullyIndoctrinated_02\nPlay_vo_argent_intro\n' +
+    'Play_vo_snapmaps_genericfemale1_absolutely_01\nPlay_vo_snapmaps_genericfemale1_accidentreported_01\n' +
+    'Play_vo_snapmaps_genericfemale1_activatethatpanel_01\nPlay_vo_snapmaps_genericfemale1_activatethis_01\n' +
+    'Play_vo_snapmaps_genericfemale1_ahsomeonenew_01\nPlay_vo_snapmaps_genericfemale1_allnewarrivals_01\n' +
+    'Play_vo_snapmaps_genericfemale1_areaisoverrun_01\nPlay_vo_snapmaps_genericfemale1_argh1_01\n';
+
+  var PREVIEW_SNDBANKS =
+    'Play_wpn_HAR_dryFire|doom_snapmaps\n' +
+    'Play_wpn_sp_HAR_dryfire|doom_snapmaps\n' +
+    'Play_wpn_sp_HAR_fire|doom_snapmaps\n' +
+    'Play_wpn_sp_HAR_Zoom_02|doom_snapmaps\n' +
+    'Play_wpn_sp_HAR_Zoom_out_02|doom_snapmaps\n' +
+    'Play_wpn_sp_chainsaw_rev_high_rpm_decel_mid|doom_snapmaps\n' +
+    'Play_wpn_sp_chainsaw_start_up|doom_snapmaps\n' +
+    'Play_wpn_sp_fireball_summon|doom_snapmaps\n' +
+    'Play_wpn_sp_gauss_dryFire|doom_snapmaps\n' +
+    'Play_wpn_sp_HAR_MASTERY_fire|doom_snapmaps\n' +
+    'Play_wpn_sp_HAR_missile_ready|doom_snapmaps\n' +
+    'Play_wpn_sp_HAR_MissileCantFire|doom_snapmaps\n' +
+    'Play_wpn_sp_HAR_missileChamber_Close_S|doom_snapmaps\n' +
+    'Play_wpn_sp_HAR_missileChamber_mastered|doom_snapmaps\n' +
+    'Play_wpn_sp_HAR_missileChamber_S|doom_snapmaps\n' +
+    'Play_wpn_sp_HAR_StickyBomb|doom_snapmaps\n' +
+    'Play_wpn_sp_HAR_stickyshot_explode|doom_snapmaps\n' +
+    'Play_wpn_sp_plasma_hellified_soldier_charge|doom_snapmaps\n' +
+    'Play_wpn_sp_plasma_hellified_soldier_fire|doom_snapmaps\n' +
+    'Play_air_res_mid|doom_snapmaps\n' +
+    'Play_air_res_mid_01|doom_snapmaps\n' +
+    'Play_amb_3d_air_01|doom_snapmaps\n' +
+    'Play_amb_3d_air_02|doom_snapmaps\n' +
+    'Play_amb_3d_air_03|doom_snapmaps\n' +
+    'Play_amb_3d_air_04|doom_snapmaps\n' +
+    'Play_amb_3d_air_05|doom_snapmaps\n' +
+    'Play_amb_3d_alarm_01|doom_snapmaps\n' +
+    'Play_amb_3d_alarm_02|doom_snapmaps\n' +
+    'Play_amb_3d_alarm_03|doom_snapmaps\n' +
+    'Play_amb_3d_alarm_04|doom_snapmaps\n' +
+    'Play_amb_3d_alarm_05|doom_snapmaps\n' +
+    'Play_amb_3d_computer_01|doom_snapmaps\n' +
+    'Play_amb_3d_computer_02|doom_snapmaps\n' +
+    'Play_amb_3d_computer_03|doom_snapmaps\n' +
+    'Play_amb_3d_computer_04|doom_snapmaps\n' +
+    'Play_amb_3d_electrical_01|doom_snapmaps\n' +
+    'Play_amb_3d_electrical_02|doom_snapmaps\n' +
+    'Play_amb_3d_fire_01|doom_snapmaps\n' +
+    'Play_amb_3d_fire_02|doom_snapmaps\n' +
+    'Play_amb_3d_fire_03|doom_snapmaps\n' +
+    'Play__avoid_enemy_grenade|doom_monsters\n' +
+    'Play__behind_enemy|doom_monsters\n' +
+    'Play__breath|doom_monsters\n' +
+    'Play__breathe_in_out|doom_monsters\n' +
+    'Play__call_reinforcements|doom_monsters\n' +
+    'Play__chatter|doom_monsters\n' +
+    'Play__death|doom_monsters\n' +
+    'Play__death_glorykill|doom_monsters\n' +
+    'Play__enemy_behind|doom_monsters\n' +
+    'Play__enemy_charging|doom_monsters\n' +
+    'Play__enemy_down_there|doom_monsters\n' +
+    'Play__enemy_flanking|doom_monsters\n' +
+    'Play__enemy_lost|doom_monsters\n' +
+    'Play__enemy_on_left|doom_monsters\n' +
+    'Play__enemy_on_right|doom_monsters\n' +
+    'Play__enemy_over_here|doom_monsters\n' +
+    'Play__enemy_resighted|doom_monsters\n' +
+    'Play__enemy_retreating|doom_monsters\n' +
+    'Play__enemy_sighted|doom_monsters\n' +
+    'Play__enemy_surprise|doom_monsters\n' +
+    'Play__enemy_up_there|doom_monsters\n' +
+    'Play__exertion|doom_monsters\n' +
+    'Play_action_failed|doom_ui\n' +
+    'Play_adjust_success|doom_ui\n' +
+    'Play_alarm|doom_ui\n' +
+    'Play_automap_on|doom_ui\n' +
+    'Play_bottom_block_UI_on|doom_ui\n' +
+    'Play_button_press|doom_ui\n' +
+    'Play_button_rollover|doom_ui\n' +
+    'Play_Challenge_Complete|doom_ui\n' +
+    'Play_challenge_start_clock|doom_ui\n' +
+    'Play_codex_entry|doom_ui\n' +
+    'Play_empty_error|doom_ui\n' +
+    'Play_endOfLevel_challenges_01|doom_ui\n' +
+    'Play_endOfLevel_collectables|doom_ui\n' +
+    'Play_endOfLevel_combat_score_01|doom_ui\n' +
+    'Play_chainsaw_impact_metal_loop|doom_weapon_sp\n' +
+    'Play_Gauss_charge_mechanism|doom_weapon_sp\n' +
+    'Play_Gauss_charge_short_tonal|doom_weapon_sp\n' +
+    'Play_gauss_spiny_Charge|doom_weapon_sp\n' +
+    'Play_handgun_fire_charge_01|doom_weapon_sp\n' +
+    'play_melee_impact_default_player_npc_glory|doom_weapon_sp\n' +
+    'Play_pistol_pickup|doom_weapon_sp\n' +
+    'Play_pistol_vent|doom_weapon_sp\n' +
+    'Play_plasma_readyToFire|doom_weapon_sp\n' +
+    'Play_plasma_stun_larger_impact|doom_weapon_sp\n' +
+    'Play_pop_rocket_explode_01|doom_weapon_sp\n' +
+    'Play_sfx_chaingun_intro|doom_weapon_sp\n' +
+    'Play_sfx_chaingun_pickup|doom_weapon_sp\n' +
+    'Play_sfx_wpn_sp_switchToSpin|doom_weapon_sp\n' +
+    'Play_amb_buzzer_gritty_01|doom_ambience\n' +
+    'Play_amb_buzzer_gritty_lpf|doom_ambience\n' +
+    'Play_amb_dirt_debris_rand_looping|doom_ambience\n' +
+    'Play_amb_drySparks|doom_ambience\n' +
+    'Play_amb_drySparks_distant|doom_ambience\n' +
+    'Play_amb_fan_small|doom_ambience\n' +
+    'Play_amb_hor_influence_quad_lp_02|doom_ambience\n' +
+    'Play_amb_light_buzz|doom_ambience\n' +
+    'Play_amb_low_whistle_wind|doom_ambience\n' +
+    'Play_amb_metal_bending_3d|doom_ambience\n' +
+    'Play_amb_metal_creaking_3d|doom_ambience\n' +
+    'Play_amb_metal_taps_3d|doom_ambience\n' +
+    'Play_bossfight_cyberdemon_kill|doom_music\n' +
+    'Play_D4_MX_combat_UAC_03_140bpm_wip_GLORY_02|doom_music\n' +
+    'Play_D4_MX_combat_UAC_03_140bpm_wip_GLORY_02_softer|doom_music\n' +
+    'Play_D4_QuakeCon_imp_scare_v1|doom_music\n' +
+    'Play_D4_QuakeCon_Sting_TheHand|doom_music\n' +
+    'Play_e1m1_looped_temp_for_challenge|doom_music\n' +
+    'Play_enter_dos|doom_music\n' +
+    'play_EOL_01_intro|doom_music\n' +
+    'play_EOL_02_res|doom_music\n' +
+    'Play_leaving_dos|doom_music\n' +
+    'Play_Argent_tower_final_filter_explosion|doom_scripted_events\n' +
+    'Play_bot_wake_oneshot|doom_scripted_events\n' +
+    'Play_breath_bubbles|doom_scripted_events\n' +
+    'Play_chainsaw_hellknight|doom_scripted_events\n' +
+    'Play_chainsaw_mancubus_back|doom_scripted_events\n' +
+    'Play_chainsaw_mancubus_front|doom_scripted_events\n' +
+    'Play_chainsaw_mancubus_head|doom_scripted_events\n' +
+    'Play_chainsawGlory_long|doom_scripted_events\n' +
+    'Play_chainsawGlory_med|doom_scripted_events\n' +
+    'Play_chainsawGlory_short|doom_scripted_events\n' +
+    'Play_amb_gore_nest_falloff|doom_effects\n' +
+    'Play_ambient_wind|doom_effects\n' +
+    'Play_bloody_punch_switch|doom_effects\n' +
+    'Play_boss_shield_off|doom_effects\n' +
+    'Play_boss_shield_on|doom_effects\n' +
+    'Play_buckshot_impact_concrete_local|doom_effects\n' +
+    'Play_buckshot_impact_dirt_local|doom_effects\n' +
+    'Play_buckshot_impact_flesh_local|doom_effects\n' +
+    'Play_buckshot_impact_glass|doom_effects\n' +
+    'Play_buckshot_impact_glass_local|doom_effects\n' +
+    'Play_armor_s01|doom_player\n' +
+    'Play_Armored_Offensive|doom_player\n' +
+    'Play_berzerk|doom_player\n' +
+    'Play_bezerk_off|doom_player\n' +
+    'Play_bezerk_on|doom_player\n' +
+    'Play_bezerk_time_out_beep_01|doom_player\n' +
+    'Play_blood_fueled|doom_player\n' +
+    'Play_branch_hitbyplayer_standing02_finish01|doom_player\n' +
+    'Play_airlock_close_01|doom_movers\n' +
+    'Play_airlock_open_01|doom_movers\n' +
+    'Play_argent_top_shutters|doom_movers\n' +
+    'play_bounce_01|doom_movers\n' +
+    'Play_close|doom_movers\n' +
+    'Play_door_slide_close|doom_movers\n' +
+    'Play_door_slide_open|doom_movers\n' +
+    'Play_dor_floodgate_slam_01|doom_movers\n' +
+    'Play_8Bit_stinger_secret_lever|doom_items\n' +
+    'Play_Adrenaline_shot|doom_items\n' +
+    'Play_apophis_infusion|doom_items\n' +
+    'Play_bobblehead_01|doom_items\n' +
+    'Play_console_uac_beeps|doom_items\n' +
+    'Play_damage_weapon_ending|doom_items\n' +
+    'Play_demonic_scream_1|doom_items\n' +
+    'Play_electric_hand|doom_items\n' +
+    'Play_ability_on|doom_mp\n' +
+    'Play_invuln_active_lp|doom_mp\n' +
+    'Play_invulnerability_activate|doom_mp\n' +
+    'Play_mp_pickup_quad_Switch|doom_mp\n' +
+    'Play_pop_rocket_explode_large|doom_mp\n' +
+    'Play_quad_active_lp|doom_mp\n' +
+    'Play_quad_damage_activate_switch|doom_mp\n' +
+    'Play_quad_fire_1Shot|doom_mp\n' +
+    'Play_counter_tick_02|doom_vo\n' +
+    'Play_counter_tick_03|doom_vo\n' +
+    'Play_counter_tick_04|doom_vo\n' +
+    'Play_counter_tick_05|doom_vo\n' +
+    'Play_mp_vega_callout_overtime_01|doom_vo\n' +
+    'Play_mp_vega_callout_overtime_02|doom_vo\n' +
+    'Play_mp_vega_callout_overtime_03|doom_vo\n' +
+    'Play_stop_vo_facilityvoice_002_020_powerofflineall|doom_vo\n' +
+    'Play_UAC_Spokesperson_2022_FullyIndoctrinated_02|doom_vo\n' +
+    'Play_vo_argent_intro|doom_vo\n' +
+    'Play_vo_snapmaps_genericfemale1_absolutely_01|doom_dlc3_vo\n' +
+    'Play_vo_snapmaps_genericfemale1_accidentreported_01|doom_dlc3_vo\n' +
+    'Play_vo_snapmaps_genericfemale1_activatethatpanel_01|doom_dlc3_vo\n' +
+    'Play_vo_snapmaps_genericfemale1_activatethis_01|doom_dlc3_vo\n' +
+    'Play_vo_snapmaps_genericfemale1_ahsomeonenew_01|doom_dlc3_vo\n' +
+    'Play_vo_snapmaps_genericfemale1_allnewarrivals_01|doom_dlc3_vo\n' +
+    'Play_vo_snapmaps_genericfemale1_areaisoverrun_01|doom_dlc3_vo\n' +
+    'Play_vo_snapmaps_genericfemale1_argh1_01|doom_dlc3_vo\n';
+
   function previewList() { return {kind:'list', version:'local (preview)', editorReady:true, count:0, entities:previewEnts, timelines:previewTimelines}; }
   var PREVIEW_MATERIALS =
     'default\nmaterial/snapmap/dynamic_block_textured_gore_floor\n' +
@@ -1078,11 +1360,18 @@
     // A 130-name sample of the REAL SnapMap material catalog (sampled from the campaign's
     // vt-backed-snap-materials.txt), so the folder tree in a plain browser has the same shape and
     // depth the in-game one does. The in-game catalog is ~9,800 names and comes from the backend.
-    // Only materials have a browser-preview sample; every other type answers empty, which the rail's
-    // "-" count then reflects honestly. Faking nine catalogs would be inventing game data.
+    // Materials and SOUNDS have a browser-preview sample (both sliced from real shipped data, see
+    // PREVIEW_MATERIALS / PREVIEW_SOUNDS); every other type answers empty, which the rail's "-"
+    // count then reflects honestly. Faking the rest would be inventing game data.
+    //
+    // Sounds carry their soundbank map too (kind 13), so the bank filter -- and the fact that search
+    // narrows WITHIN the selected bank -- can both be exercised here without launching the game.
     else if (o.cmd === 'listAssets') {
-      onMessage({kind:'assetList', assetKind: o.assetKind,
-                 names: (o.assetKind === 0 ? PREVIEW_MATERIALS : '')});
+      var sample = '';
+      if (o.assetKind === 0)       sample = PREVIEW_MATERIALS;   /* SH_ASSET_MATERIAL */
+      else if (o.assetKind === 3)  sample = PREVIEW_SOUNDS;      /* SH_ASSET_SOUND    */
+      else if (o.assetKind === 13) sample = PREVIEW_SNDBANKS;    /* SH_ASSET_SNDBANK  */
+      onMessage({kind:'assetList', assetKind: o.assetKind, names: sample});
     }
     // No decoder outside the game, so the preview honestly reports that rather than faking pixels.
     else if (o.cmd === 'requestPreview') { onMessage({kind:'previewRequested', ok:false, name:o.name,
