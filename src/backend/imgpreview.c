@@ -198,6 +198,15 @@ typedef struct { unsigned char *idx; size_t idxLen; HANDLE res; } box_t;
  * So the browser lists the UNION and dedupes case-insensitively -- the manifest spells events
  * `Play_Vo_...` while decls are lowercase, so a naive merge would double 5,058 entries.
  *
+ * That exact-name dedup is necessary but NOT sufficient, because the two sources name the same
+ * sound two different ways. 5,160 decls are flat and literally named `play_*`, so they equal their
+ * event outright and collapse here. The other 449 are PATH-FORM, where the rule is instead
+ * `<twin> == "Play_" + the decl's LEAF` (`scripted_events/cyberdemon/head_splat_01` <->
+ * `Play_head_splat_01`). Those slipped through as a second row for an already-listed sound.
+ * imgpreview_hide_wrapped_sounds below is the pass that collapses them; note that the twin may be
+ * either a Wwise event OR a flat `play_*` decl, and checking only the events fixes barely half of
+ * them. Its comment carries the split and the evidence that dropping the decl side is lossless.
+ *
  * `soundbanksinfo.xml` is the Wwise-generated manifest id shipped with the game (26 MB, next to the
  * .bnk files). Parsed for `<Event Id="..." Name="..."/>` only; everything else is ignored. */
 static unsigned char *g_wwise;           /* the manifest text, kept alive: names point into it */
@@ -378,6 +387,78 @@ static void imgpreview_load_wwise(void)
     backend_log(line);
 }
 
+/* Hide a sound decl that is nothing but a wrapper around a Wwise event already in the catalog.
+ *
+ * The exact-name dedup in imgpreview_load_wwise catches the 5,160 decls literally NAMED `play_*`,
+ * because those equal their event's name outright. It cannot catch the other 449, which are
+ * PATH-FORM -- and those were showing up as a second row for a sound already listed:
+ *
+ *     decl   scripted_events/cyberdemon/head_splat_01      <- this row, redundant
+ *     event  Play_head_splat_01                            <- same sound
+ *
+ * The naming rule is `event == "Play_" + the decl's LEAF`, and it is safe to apply mechanically:
+ * NONE of the 449 path-form decls already has a `play_` leaf, so the prefix can never double up.
+ *
+ * Dropping the decl side loses NOTHING. Measured across the shipped set, 5,657 of 5,658 sound decls
+ * are empty wrappers -- `inherit = "default"` and an empty `edit` block. The single exception is
+ * `default.decl` itself, the base they all inherit. A sound decl carries no volume, no falloff, no
+ * randomisation the event does not already have, so the two rows are the same sound and the event is
+ * the one that actually plays. What is lost is only the folder path, which the owner explicitly did
+ * not want to keep for sounds ("I don't think we need the folder structure").
+ *
+ * Where two decls map to one event -- 8 pairs, e.g. monster/baron/attacks/groundpound and
+ * monster/hellknight/attacks/groundpound both -> Play_groundpound -- collapsing them is correct
+ * rather than lossy, for the same reason: neither decl adds anything to distinguish them.
+ *
+ * The twin is looked for in BOTH sources, because it can be either one and checking only the events
+ * fixes only half the rows. Of the 449 path-form decls:
+ *
+ *     181  twin is a Wwise EVENT in g_ev          (no flat decl of that name exists)
+ *     129  twin is a flat `play_<leaf>` DECL      (so the event was exact-matched OUT of g_ev)
+ *     139  no twin at all -- genuinely unique, and correctly kept
+ *
+ * That second bucket is the trap: `g_ev` deliberately holds only events with NO exact-name decl, so
+ * for `effects/explosions/rocket_explosion_default` the event `Play_rocket_explosion_default` is
+ * absent from g_ev -- it was claimed by the flat decl `play_rocket_explosion_default`, which is
+ * itself a listed row. Searching g_ev alone leaves that pair on screen.
+ *
+ * Only PATH-FORM records are ever hidden, and the name looked up (`play_` + leaf) never contains a
+ * '/', so a flat row can never be hidden by this pass and two records can never hide each other.
+ * The decl array is built from the records still VISIBLE at this point, so a campaign-box twin that
+ * the box dedup already hid cannot suppress the row that survived it.
+ *
+ * Deliberately does NOT touch flat-named records (no '/'), which the exact-name pass already
+ * settled. Returns how many rows it hid. */
+static int imgpreview_hide_wrapped_sounds(void)
+{
+    /* The sound rows the browser would list right now, sorted for a binary search. */
+    const char **snd = (const char **)malloc((size_t)g_recCount * sizeof *snd);
+    int sn = 0;
+    if (snd) {
+        for (int i = 0; i < g_recCount; ++i)
+            if (g_rec[i].kind == SH_ASSET_SOUND && !g_rec[i].hidden) snd[sn++] = g_rec[i].name;
+        qsort(snd, (size_t)sn, sizeof *snd, cmp_ci);
+    }
+
+    int hid = 0;
+    for (int i = 0; i < g_recCount; ++i) {
+        if (g_rec[i].kind != SH_ASSET_SOUND || g_rec[i].hidden) continue;
+        const char *leaf = strrchr(g_rec[i].name, '/');
+        if (!leaf) continue;                    /* flat name -- already exact-deduped */
+        char want[320];
+        _snprintf_s(want, sizeof want, _TRUNCATE, "Play_%s", leaf + 1);
+        const char *key = want;                 /* both arrays are sorted case-insensitively */
+        int twin = 0;
+        if (g_ev && g_evCount > 0 && bsearch(&key, g_ev, (size_t)g_evCount, sizeof *g_ev, cmp_ci))
+            twin = 1;                           /* twin is a Wwise event */
+        else if (snd && sn > 0 && bsearch(&key, snd, (size_t)sn, sizeof *snd, cmp_ci))
+            twin = 1;                           /* twin is a flat `play_*` decl */
+        if (twin) { g_rec[i].hidden = 1; hid++; }
+    }
+    free(snd);
+    return hid;
+}
+
 /* Fold the `.vmtr` atlas rows that have NO material decl into the material catalog. Same shape as
  * imgpreview_load_wwise: sort the decl names once, then binary-search each atlas row against them.
  * Names point into megapreview's parsed table, which lives for the process, so nothing is copied.
@@ -478,15 +559,20 @@ static int imgpreview_load(void)
         if (!g_rec[i].hidden) extra++;
     }
 
+    /* AFTER the box dedup, so a campaign sound already hidden as a box-0 duplicate is not counted
+     * twice, and the tally reports only rows this pass is actually responsible for removing. */
+    int wrapped = imgpreview_hide_wrapped_sounds();
+
     /* AFTER the hide pass: it dedupes against the decls the browser will actually list, so a
      * campaign-box material that got hidden above must not suppress its atlas twin. */
     imgpreview_load_vmtr();
 
-    char line[260];
+    char line[340];
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "B2: imgpreview -- indexed %d records (snap=%s game=%s); %d SnapMap modules; "
-        "campaign sounds offered: %d (%d duplicates of SnapMap sounds dropped)",
-        g_recCount, a ? "ok" : "MISSING", b ? "ok" : "missing", modules, extra, dup);
+        "campaign sounds offered: %d (%d duplicates of SnapMap sounds dropped); "
+        "%d wrapper sound decl(s) hidden behind their Play_ event",
+        g_recCount, a ? "ok" : "MISSING", b ? "ok" : "missing", modules, extra, dup, wrapped);
     backend_log(line);
     g_loaded = (g_recCount > 0) ? 1 : -1;
     return g_loaded > 0;
