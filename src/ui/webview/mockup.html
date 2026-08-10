@@ -1385,8 +1385,8 @@
     // PREVIEW_MATERIALS / PREVIEW_SOUNDS); every other type answers empty, which the rail's "-"
     // count then reflects honestly. Faking the rest would be inventing game data.
     //
-    // Sounds carry their soundbank map too (kind 13), so the bank filter -- and the fact that search
-    // narrows WITHIN the selected bank -- can both be exercised here without launching the game.
+    // Sounds carry their soundbank map too (kind 13), so the bank folder tree -- and the fact that
+    // search cuts ACROSS the banks rather than within one -- are both exercisable without the game.
     else if (o.cmd === 'listAssets') {
       var sample = '';
       if (o.assetKind === 0)       sample = PREVIEW_MATERIALS;   /* SH_ASSET_MATERIAL */
@@ -4211,10 +4211,11 @@
   /* Deliberately NOT an AB_TYPES row: it is a qualifier on Materials, not a category to browse.
    * Must match SH_ASSET_VTONLY in src/common/snapmap_plus_iface.h. */
   var AB_KIND_VTONLY = 12;
-  /* Sound -> soundbank, a QUALIFIER on the sound list rather than a category of its own. Sound names
-   * are almost all flat, so the folder tree is one huge root; the <SoundBank> grouping in the Wwise
-   * manifest is the only real structure the catalog has -- 26 banks, and `doom_snapmaps` in
-   * particular is the 485 events that are SnapMap's own. Each line arrives as `event|bank`. */
+  /* Sound -> soundbank, a QUALIFIER on the sound list rather than a category of its own -- but it is
+   * what the sound list is FILED BY. Sound names are almost all flat, so their own folder tree is one
+   * huge root; the <SoundBank> grouping in the Wwise manifest is the only real structure the catalog
+   * has -- 26 banks, and `doom_snapmaps` in particular is the 485 events that are SnapMap's own.
+   * Each line arrives as `event|bank`. */
   var AB_KIND_SNDBANK = 13;
 
   var AB_TYPES = [
@@ -4549,12 +4550,11 @@
     return !abVtOnly[(name || '').toLowerCase()];
   }
 
-  /* Sound -> soundbank (backend SH_ASSET_SNDBANK), plus the bank list for the filter, sorted by size
-   * so the banks worth looking in are at the top. Null until the fetch lands; the filter hides
-   * itself until then rather than offering an empty dropdown. Names not in the map are sounds the
-   * manifest does not cover -- the path-form decls -- and they land under "(no bank)". */
+  /* Sound -> soundbank (backend SH_ASSET_SNDBANK). This IS the sound catalog's folder structure --
+   * see abBankPlace. Null until the fetch lands, and the tree stays flat until then rather than
+   * filing everything under a bank it has not been told yet. Names the manifest does not cover --
+   * the path-form decls -- land under "(no bank)". */
   var abSndBank = null;               /* lowercased sound name -> bank */
-  var abBanks = null;                 /* [{bank, n}] sorted by n desc */
   var AB_NO_BANK = '(no bank)';
 
   /* ---- pinned assets --------------------------------------------------------------------------
@@ -4730,22 +4730,7 @@
    * `material` record at all, so filtering the catalog would silently hide the majority of them. */
   function abListType(m) {
     if (m.type === 'material' && m.xplat) return 'material@xplat';
-    /* Same trick as the cross-platform set: a bank is a SEPARATE derived list keyed by a
-     * pseudo-type, so the folder tree, the search and the paging all work on it unchanged. */
-    if (m.type === 'sound' && m.bank) return 'sound@' + m.bank;
     return m.type;
-  }
-  /* Derive (once) the name array behind a `sound@<bank>` pseudo-type. Needs both the sound catalog
-   * and the bank map; until both have landed this returns nothing, and abRenderTree shows its
-   * normal "Loading the catalog..." state rather than an empty folder. */
-  function abEnsureBankNames(type) {
-    if (abNames[type] || type.indexOf('sound@') !== 0) return;
-    var want = type.slice(6);
-    var all = abNames['sound'];
-    if (!all || !abSndBank) return;
-    var out = [];
-    for (var i = 0; i < all.length; i++) if (abBankOf(all[i]) === want) out.push(all[i]);
-    abNames[type] = out;
   }
 
   /* Show the checkbox only on Materials, and keep the DOM control in step with the mount's own state
@@ -4755,23 +4740,6 @@
     if (!wrap || !box) return;
     wrap.style.display = (m.type === 'material') ? 'flex' : 'none';
     box.checked = !!m.xplat;
-  }
-
-  /* Sounds only, and hidden until the bank map has arrived -- an empty dropdown is worse than none.
-   * Options are rebuilt from abBanks each time rather than cached, because the map lands after the
-   * first render and the control has to pick it up without the mount being touched. */
-  function abSyncBank(m) {
-    var wrap = m.el('bankwrap'), sel = m.el('bank');
-    if (!wrap || !sel) return;
-    var show = (m.type === 'sound') && !!abBanks && abBanks.length > 0;
-    wrap.style.display = show ? 'flex' : 'none';
-    if (!show) return;
-    var h = '<option value="">All banks</option>';
-    for (var i = 0; i < abBanks.length; i++)
-      h += '<option value="' + abEsc(abBanks[i].bank) + '">'
-         + abEsc(abBanks[i].bank) + ' (' + abBanks[i].n.toLocaleString() + ')</option>';
-    sel.innerHTML = h;
-    sel.value = m.bank || '';
   }
 
   var abNames = {};                   /* type -> sorted name array (undefined = never fetched) */
@@ -4787,11 +4755,17 @@
 
   /* --- folder tree ---------------------------------------------------------------------------
    * Names are paths ("textures/guis/snapmaps/poi/snap_poi_talk"), so the folder structure is
-   * implied by the '/' segments. Built once per type, then drilled. */
-  function abBuildTree(names) {
+   * implied by the '/' segments. Built once per type, then drilled.
+   *
+   * WHERE a name sits and WHAT it is called are two different things, and this is the one place the
+   * distinction matters. `place` may put a name somewhere its own text does not say -- sounds are
+   * filed under their soundbank -- so the tree structure comes from the placed path while
+   * `path` stays the REAL asset name. Everything downstream (Copy, selection, preview, Apply) reads
+   * `path`, so a synthetic folder prefix must never leak into it. */
+  function abBuildTree(names, place) {
     var root = {dirs:{}, dirKeys:[], files:[], n:0};
     for (var i = 0; i < names.length; i++) {
-      var p = names[i].split('/'), node = root;
+      var p = (place ? place(names[i]) : names[i]).split('/'), node = root;
       for (var j = 0; j < p.length - 1; j++) {
         if (!node.dirs[p[j]]) { node.dirs[p[j]] = {dirs:{}, dirKeys:[], files:[], n:0}; node.dirKeys.push(p[j]); }
         node = node.dirs[p[j]];
@@ -4807,8 +4781,22 @@
     })(root);
     return root;
   }
+  /* Sounds are filed by SOUNDBANK. Their own names carry almost no structure -- after the duplicate
+   * collapse nearly every one is a flat `Play_something`, so the catalog was a single 7,000-row
+   * folder. The bank is the grouping the content actually has: 24 non-empty ones, none of them
+   * enormous, and `doom_snapmaps` is the set SnapMap itself loads.
+   *
+   * An event can be listed in more than one bank; abSndBank has already picked it a single home
+   * (preferring a specific bank over the always-loaded doom_initial). One home is the point -- filing
+   * a sound under every bank that lists it would put the same name on screen several times, which is
+   * exactly the duplication the catalog work just removed. */
+  function abBankPlace(name) { return abBankOf(name) + '/' + name; }
   function abTree(type) {
-    if (!abTrees[type]) abTrees[type] = abBuildTree(abNames[type] || []);
+    /* Not cached while the bank map is still in flight: the tree built without it would be flat and
+     * would stick. onAssetList drops it again when the map lands, for the other order. */
+    if (type === 'sound' && !abSndBank) return abBuildTree(abNames['sound'] || []);
+    if (!abTrees[type])
+      abTrees[type] = abBuildTree(abNames[type] || [], type === 'sound' ? abBankPlace : null);
     return abTrees[type];
   }
   function abNodeAt(type, dir) {
@@ -4915,7 +4903,7 @@
    * `mode` is 'tab' (open browsing) or 'modal' (scoped to the Entities-tab selection). */
   function abMount(host, mode) {
     var m = {host:host, mode:mode, type:'material', dir:'', q:'', sel:null, carrier:'cm',
-             bank:'', pvTimer:null, pvTries:0, kbSelectTimer:null};
+             pvTimer:null, pvTries:0, kbSelectTimer:null};
     host.innerHTML =
         '<div class="panel ab-rail"><div class="panel-head"><span class="panel-title">Asset type</span></div>'
       +   '<div class="panel-body"><div class="list" data-ab="rail"></div></div></div>'
@@ -4932,16 +4920,6 @@
       +       'hand-tested list, not everything the megatexture can address. Apply them with Virtual '
       +       'Mapping &mdash; most have no material decl SnapMap can load, so they cannot go on by name.">'
       +       '<input type="checkbox" data-ab="xplat"> Cross Platform Textures Only</label>'
-      /* Sounds only. Sound names are almost all flat, so the folder tree barely helps; the bank a
-       * sound ships in is the structure that actually separates them -- and `doom_snapmaps` is the
-       * set SnapMap itself uses. */
-      +     '<label class="ab-xplat" data-ab="bankwrap" style="display:none;align-items:center;gap:5px;'
-      +       'margin-top:5px;font-size:12px" '
-      +       'title="Filter by the Wwise soundbank a sound ships in. Sound names are mostly flat, so '
-      +       'this is the only real grouping the catalog has. doom_snapmaps is SnapMap&rsquo;s own set; '
-      +       'the campaign and DLC banks are listed too, but a sound the running session never loads '
-      +       'may audition silently.">'
-      +       'Soundbank <select data-ab="bank" style="flex:1;min-width:0"></select></label>'
       +     '<div class="ab-crumbs" data-ab="crumbs"></div></div>'
       +   '<div class="panel-body"><div class="list" data-ab="tree"></div></div></div>'
       + '<div class="panel ab-insp"><div class="panel-head"><span class="panel-title">Asset</span>'
@@ -4958,17 +4936,11 @@
       m.xplat = this.checked; m.dir = ''; m.sel = null;
       abRenderTree(m); abRenderInsp(m);
     });
-    /* Same reset as the cross-platform toggle: a different bank is a different list, so the folder
-     * path and the selection from the previous one are both meaningless afterwards. */
-    m.el('bank').addEventListener('change', function(){
-      m.bank = this.value; m.dir = ''; m.sel = null;
-      abRenderTree(m); abRenderInsp(m);
-    });
     m.el('rail').addEventListener('click', function(e){
       var it = e.target.closest ? e.target.closest('[data-type]') : null;
       if (!it) return;
-      m.type = it.getAttribute('data-type'); m.dir = ''; m.sel = null; m.bank = '';
-      abSyncXplat(m); abSyncBank(m);
+      m.type = it.getAttribute('data-type'); m.dir = ''; m.sel = null;
+      abSyncXplat(m);
       abRenderRail(m); abRenderTree(m); abRenderInsp(m);
       abFetch(m, false);
     });
@@ -5020,7 +4992,7 @@
       }
     });
     abMounts.push(m);
-    abSyncXplat(m); abSyncBank(m);
+    abSyncXplat(m);
     abRenderRail(m); abRenderTree(m); abRenderInsp(m);
     return m;
   }
@@ -5245,7 +5217,6 @@
   function abRenderTree(m) {
     var el = m.el('tree'), crumbs = m.el('crumbs'), cnt = m.el('cnt');
     var lt = abListType(m);
-    abEnsureBankNames(lt);            /* derives sound@<bank> the first time it is asked for */
     var names = abNames[lt];
     if (!names) {
       el.innerHTML = '<div class="list-empty">Loading the catalog...</div>';
@@ -5719,11 +5690,6 @@
     if (abNames[m.type] && !force) return;
     if (force) {
       abNames[m.type] = undefined; abTrees[m.type] = null;
-      /* The per-bank lists are DERIVED from abNames['sound'], so a refetch has to drop them too --
-       * otherwise the filter keeps serving rows built from the catalog we just threw away. */
-      if (m.type === 'sound')
-        for (var bk in abNames)
-          if (abNames.hasOwnProperty(bk) && bk.indexOf('sound@') === 0) { abNames[bk] = undefined; abTrees[bk] = null; }
       abRenderTree(m);
     }
     m.el('cnt').textContent = '...';
@@ -5746,7 +5712,7 @@
   var abPinsFetched = 0;
   function onAssetList(d) {
     if (d.assetKind === AB_KIND_SNDBANK) {
-      var map = {}, tally = {};
+      var map = {};
       var bl = (d.names || '').split('\n');
       for (var b = 0; b < bl.length; b++) {
         if (!bl[b]) continue;
@@ -5755,18 +5721,14 @@
         var nm = bl[b].slice(0, cut), bk = bl[b].slice(cut + 1);
         if (!nm || !bk) continue;
         map[nm.toLowerCase()] = bk;
-        tally[bk] = (tally[bk] || 0) + 1;
       }
       abSndBank = map;
-      var list = [];
-      for (var kb in tally) if (tally.hasOwnProperty(kb)) list.push({bank: kb, n: tally[kb]});
-      list.sort(function (x, y) { return y.n - x.n; });
-      abBanks = list;
-      /* The dropdown is built from this, and the sound list may already be on screen. */
-      for (var mb = 0; mb < abMounts.length; mb++) {
-        abSyncBank(abMounts[mb]);
-        if (abMounts[mb].type === 'sound') abRenderTree(abMounts[mb]);
-      }
+      /* This map IS the sound folder structure, and the catalog may have landed first -- so drop the
+       * flat tree built without it, and redraw anyone already looking at sounds. A mount sitting in
+       * a folder from the flat tree has to come back to the root: that folder no longer exists. */
+      abTrees['sound'] = null;
+      for (var mb = 0; mb < abMounts.length; mb++)
+        if (abMounts[mb].type === 'sound') { abMounts[mb].dir = ''; abRenderTree(abMounts[mb]); }
       return;
     }
     if (d.assetKind === AB_KIND_VTONLY) {
