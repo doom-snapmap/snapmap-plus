@@ -4987,7 +4987,13 @@
       +   '<div class="panel-body"><div class="list" data-ab="rail"></div></div></div>'
       + '<div class="panel ab-mid"><div class="panel-head"><span class="panel-title">Catalog</span>'
       +     '<span class="badge" data-ab="cnt">0</span>'
-      +     '<div class="panel-actions"><button class="btn icon" data-ab="reload" title="Re-fetch the catalog from the backend">&#8635;</button></div></div>'
+      /* No Refresh control. The catalog is indexed ONCE per process (imgpreview_load's g_loaded
+       * guard) out of .resources files that cannot change while the game is running, so re-fetching
+       * returned the same bytes every time. It could not pick up changed files, could not recover a
+       * failed index -- that failure is sticky for the life of the process -- and did nothing at all
+       * on Pinned. The one case it looked useful for, a type stuck on "Loading the catalog...", is
+       * already covered: clicking the rail row re-posts whenever the names are missing. */
+      +     '</div>'
       +   '<div class="panel-toolbar"><input type="text" data-ab="q" placeholder="Filter every folder...">'
       /* Materials only, and hidden for every other type rather than shown disabled -- it is
        * meaningless outside the megatexture atlas. */
@@ -5006,7 +5012,6 @@
     m.el = function(n){ return host.querySelector('[data-ab="' + n + '"]'); };
 
     m.el('q').addEventListener('input', function(){ m.q = this.value; abRenderTree(m); });
-    m.el('reload').addEventListener('click', function(){ abFetch(m, true); });
     /* Toggling the set changes which list you are in, so the folder path and the selection from the
      * other set are both meaningless afterwards -- drop them rather than leaving a stale crumb trail
      * pointing at a folder the new list does not have. */
@@ -5020,7 +5025,7 @@
       m.type = it.getAttribute('data-type'); m.dir = ''; m.sel = null;
       abSyncXplat(m);
       abRenderRail(m); abRenderTree(m); abRenderInsp(m);
-      abFetch(m, false);
+      abFetch(m);
     });
     m.el('tree').addEventListener('click', function(e){
       /* Checked BEFORE the copy button and before row selection: pinning is a decision about the
@@ -5773,14 +5778,12 @@
   /* --- catalog fetch ---------------------------------------------------------------------------
    * The full list (~9,800 names) crosses the bridge ONCE per session and is cached here, so
    * filtering and drilling stay instant and never round-trip. */
-  function abFetch(m, force) {
+  function abFetch(m) {
     var t = abType(m.type);
-    if (!t) return;
-    if (abNames[m.type] && !force) return;
-    if (force) {
-      abNames[m.type] = undefined; abTrees[m.type] = null;
-      abRenderTree(m);
-    }
+    if (!t) return;                       /* pseudo-types (Pinned) have no catalog behind them */
+    if (abNames[m.type]) return;
+    /* This IS the retry path: a type whose names never arrived asks again the next time it is
+     * selected, which is why removing the Refresh button cost nothing. */
     m.el('cnt').textContent = '...';
     post({cmd:'listAssets', assetKind: t.kind});
   }
