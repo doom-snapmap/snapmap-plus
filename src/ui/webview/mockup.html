@@ -4465,7 +4465,7 @@
    * `mode` is 'tab' (open browsing) or 'modal' (scoped to the Entities-tab selection). */
   function abMount(host, mode) {
     var m = {host:host, mode:mode, type:'material', dir:'', q:'', sel:null, carrier:'cm',
-             pvTimer:null, pvTries:0};
+             pvTimer:null, pvTries:0, kbSelectTimer:null};
     host.innerHTML =
         '<div class="panel ab-rail"><div class="panel-head"><span class="panel-title">Asset type</span></div>'
       +   '<div class="panel-body"><div class="list" data-ab="rail"></div></div></div>'
@@ -4871,10 +4871,12 @@
   }
 
   /* ---- keyboard --------------------------------------------------------------------------------
-   * Up/Down move a cursor through the catalog list; Enter or Space acts on the cursor row -- open a
-   * folder, or select a file. Selecting is what fires the preview fetch and arms Apply, so moving
-   * and selecting are deliberately two separate keys: arrowing through a 3,000-entry folder must not
-   * fire 3,000 preview requests.
+   * Up/Down move a cursor through the catalog list. Landing on a FILE auto-selects it (see
+   * abQueueCursorSelect below) -- no Enter needed to see what it is. Landing on a FOLDER does
+   * nothing by itself; Enter or Space is still required to open it, because entering a folder
+   * discards the current list position the way selecting a file does not, and that should stay a
+   * deliberate step. Enter/Space on a file re-selects it (harmless -- abSelect is idempotent on the
+   * same path) so the one key still works for a mapper who has not internalised the auto-select.
    *
    * Enter and Space are NEVER routed to Apply or New entity from here. Those are real buttons, so
    * tabbing to one and pressing Enter or Space activates it the way the browser already does -- the
@@ -4900,6 +4902,27 @@
     if (i < 0) i = 0;
     if (i > rows.length - 1) i = rows.length - 1;
     abSetCursor(m, rows[i]);
+  }
+  var AB_KB_SELECT_DELAY = 120;
+  /* Auto-select the row the cursor just landed on -- but ONLY a file. A folder is left alone; entering
+   * one is a bigger, list-replacing step than previewing a file, so it keeps requiring Enter/Space
+   * (abActivateCursor), matching the folder-vs-leaf split everywhere else in this browser.
+   *
+   * Debounced, not immediate: abSelect fires a real backend preview request, and holding an arrow key
+   * walks the cursor across many rows a second. Selecting on every row the cursor passes through would
+   * be the exact "3,000 preview requests" flood the surrounding comment already warns about -- so this
+   * waits for the cursor to sit still for a beat, and only then selects whatever it is still on. */
+  function abQueueCursorSelect(m) {
+    if (m.kbSelectTimer) { clearTimeout(m.kbSelectTimer); m.kbSelectTimer = null; }
+    var row = m.el('tree').querySelector('.entity-item.kb');
+    if (!row || row.getAttribute('data-dir') || row.getAttribute('data-up')) return;
+    var path = row.getAttribute('data-path');
+    m.kbSelectTimer = setTimeout(function () {
+      m.kbSelectTimer = null;
+      var stillRow = m.el('tree').querySelector('.entity-item.kb');
+      if (!stillRow || stillRow.getAttribute('data-path') !== path) return;
+      abSelect(m, path);
+    }, AB_KB_SELECT_DELAY);
   }
   function abUpDir(m) {
     if (!m.dir) return;
@@ -4933,6 +4956,7 @@
       if (isBtn) return;                     /* radio groups and buttons keep their native behaviour */
       e.preventDefault(); e.stopPropagation();
       abMoveCursor(m, k === 'ArrowDown' ? 1 : -1);
+      abQueueCursorSelect(m);
       return;
     }
     if (k === 'ArrowLeft' || k === 'Backspace') {
