@@ -4099,6 +4099,56 @@
     return dpSetScalar(s, re.open, re.close, 'num', String(next + 1));
   }
 
+  /* Delete a renderParm outright, rather than blanking its value.
+   *
+   * The list is an ARRAY, not a bag: the engine reads `num` and then indexes item[0..num-1], so a
+   * hole would make it read an entry that is not there. Removing therefore means cutting the entry,
+   * renumbering every survivor to close the gap, and correcting `num` -- all three, or the decl is
+   * worse off than before it was touched.
+   *
+   * Renumbering runs BACKWARDS over the survivors: each rewrite changes the string length, and going
+   * forwards would invalidate every offset after the one just written. Returns the text unchanged if
+   * there is no renderParms block or nothing in it carries this parm, so calling it speculatively is
+   * safe. */
+  function dpRemoveRenderParm(s, rmOpen, parm) {
+    var b = dpFindBlock(s, rmOpen, dpMatchBrace(s, rmOpen), 'renderParms');
+    if (!b) return s;
+    var items = [];
+    dpEachEntry(s, b.open, b.close, function (k, at, after) {
+      if (/^item\[\d+\]$/.test(k)) items.push({at: at, after: after});
+    });
+    var cutFrom = -1, cutTo = -1;
+    for (var i = 0; i < items.length; i++) {
+      var o = s.indexOf('{', items[i].after - 1);
+      if (o < 0) continue;
+      var c = dpMatchBrace(s, o);
+      if (c < 0) continue;
+      var p = dpFindChild(s, o, c, 'parm');
+      if (!p) continue;
+      var pm = /\s*"([^"]*)"/.exec(s.slice(p.after));
+      if (!pm || pm[1] !== parm) continue;
+      /* Cut whole LINES, so the entry leaves no blank line and no orphaned indent behind. */
+      cutFrom = s.lastIndexOf('\n', items[i].at) + 1;
+      cutTo = s.indexOf('\n', c);
+      cutTo = (cutTo < 0) ? s.length : cutTo + 1;
+      break;
+    }
+    if (cutFrom < 0) return s;
+    s = s.slice(0, cutFrom) + s.slice(cutTo);
+
+    var b2 = dpFindBlock(s, rmOpen, dpMatchBrace(s, rmOpen), 'renderParms');
+    if (!b2) return s;
+    var keys = [];
+    dpEachEntry(s, b2.open, b2.close, function (k, at) {
+      if (/^item\[\d+\]$/.test(k)) keys.push({at: at, len: k.length});
+    });
+    for (var j = keys.length - 1; j >= 0; j--)
+      s = s.slice(0, keys[j].at) + 'item[' + j + ']' + s.slice(keys[j].at + keys[j].len);
+
+    var b3 = dpFindBlock(s, rmOpen, dpMatchBrace(s, rmOpen), 'renderParms');
+    return dpSetScalar(s, b3.open, b3.close, 'num', String(keys.length));
+  }
+
   /* The whole decl is one `edit = { }`; some entities' text is just the braces' contents. Return
    * the edit block's braces, creating the wrapper if the text is empty. */
   function dpEditBlock(s) {
@@ -4171,6 +4221,14 @@
         var e2 = dpEditBlock(out);
         var rmN = dpEnsureBlock(e2.text, e2.open, e2.close, 'renderModelInfo');
         out = dpSetRenderParm(rmN.text, rmN.open, rmN.close, pairs[pi][0], pairs[pi][1]);
+      }
+      /* "No ramp" REMOVES one the entity is carrying. Skipping the write instead left the previous
+       * mapper's tiling in place, so the option did the one thing its label promises not to. Last,
+       * because the writes above move the offsets a removal would depend on. */
+      if (extra && extra.rampRemove) {
+        var e3 = dpEditBlock(out);
+        var rmR = dpEnsureBlock(e3.text, e3.open, e3.close, 'renderModelInfo');
+        out = dpRemoveRenderParm(rmR.text, rmR.open, 'ramp1');
       }
       return out;
     }
@@ -5126,7 +5184,13 @@
    * "Keep existing" is honoured only when there IS an existing ramp1. The material ships
    * `ramp1 1.000000` = one tile every 426 units, so leaving it unset on an entity that has none
    * would show about a fifth of the texture -- a silent wrong-looking result rather than a neutral
-   * one. So: preserve a value the mapper tuned, but never leave a texture at the stretched default. */
+   * one. So: preserve a value the mapper tuned, but never leave a texture at the stretched default.
+   *
+   * "No ramp" DELETES an existing one rather than declining to write. The two are not the same on an
+   * entity that already carries a ramp: skipping the write left the previous mapper's tiling in
+   * place, so the option quietly did nothing on exactly the entities someone would pick it for. It
+   * is the only choice here that has to reach into the decl and take something out -- see
+   * dpRemoveRenderParm, which renumbers the survivors because renderParms is an indexed array. */
   function abVmExtra(m, name) {
     if (m.carrier !== 'vm') return null;
     var xp = abRectOf(name);
@@ -5134,7 +5198,8 @@
     var box = document.getElementById('declText');
     var hasRamp = box && /\bramp1\b/.test(box.value || '');
     if (m.ramp === 'keep') { if (!hasRamp) out.ramp = abRampValue(xp, AB_RAMP_DEFAULT); }
-    else if (m.ramp !== 'none')  out.ramp = abRampValue(xp, m.ramp || AB_RAMP_DEFAULT);
+    else if (m.ramp === 'none') { if (hasRamp) out.rampRemove = 1; }
+    else out.ramp = abRampValue(xp, m.ramp || AB_RAMP_DEFAULT);
     if (m.bloom !== 'none')
       out.bloom = abBloomValue(m.bloom === undefined ? AB_BLOOM_DEFAULT : m.bloom);
     return out;
