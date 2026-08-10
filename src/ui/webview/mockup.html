@@ -1,4 +1,11 @@
 <!DOCTYPE html>
+<!-- KEEP THIS FILE PURE ASCII.
+     It is embedded into the DLL by src/ui/build.ps1, which reads it with PowerShell 5.1 and writes
+     the generated header with -Encoding ascii. PS 5.1 reads a BOM-less UTF-8 file as Windows-1252,
+     so a literal non-ASCII byte is decoded as the wrong character and then flattened to '?'. An
+     em-dash typed directly here reaches the user as "???".
+     Use HTML entities in markup (&mdash; &rsquo; &times; &ldquo;) and String.fromCharCode(0x2713)
+     in JavaScript that builds text at runtime. Both survive the pipeline unchanged. -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -182,9 +189,12 @@
   .entity-item.selected .name { color: var(--selText); }
   .list-empty { padding: 10px; color: var(--muted); font-style: italic; }
 
-  input[type=text], textarea, select { background: var(--field); color: var(--text); border: 1px solid var(--border2); border-radius: 5px; padding: 4px 7px; font-size: 11px; font-family: inherit; user-select: text; -webkit-user-select: text; }
-  input[type=text]:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+  input[type=text], input[type=number], textarea, select { background: var(--field); color: var(--text); border: 1px solid var(--border2); border-radius: 5px; padding: 4px 7px; font-size: 11px; font-family: inherit; user-select: text; -webkit-user-select: text; }
+  input[type=text]:focus, input[type=number]:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
   input[type=checkbox] { accent-color: var(--accent); }
+  /* Chromium's native number-input spinner is its own separate control with its own sizing --
+   * it never picks up the field styling above and looks visibly foreign next to it. Suppress it. */
+  input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 
   .btn { padding: 4px 12px; border: 1px solid var(--border2); background: var(--panel2); color: var(--text); cursor: pointer; border-radius: 5px; font-size: 11px; }
   .btn:hover:not(:disabled) { border-color: var(--accent); }
@@ -645,7 +655,6 @@
     <div class="modal-foot">
       <span class="grow" id="amPath">Nothing selected.</span>
       <button class="btn" id="amCancel">Close</button>
-      <button class="btn primary" id="amApply" disabled>Apply to entity</button>
     </div>
   </div>
 </div>
@@ -3135,8 +3144,6 @@
       onPreviewImage(d);
     } else if (d.kind === 'previewRequested') {
       onPreviewRequested(d);
-    } else if (d.kind === 'materialResult') {
-      renderMaterialResult(d);
     } else if (d.kind === 'events') {
       eventItems = d.items || [];
       eventCatalogByName = {};
@@ -3805,13 +3812,19 @@
    * material/snapmap/entitybase, which does not. dynamic_block_solid is the flat-colour sibling. */
   var VM_BLOCK_MATERIAL = 'material/snapmap/dynamic_block_textured';
 
-  function dpApply(decl, type, carrier, name, rect) {
+  function dpApply(decl, type, carrier, name, rect, extra) {
     var e = dpEditBlock(decl || '');
     var s = e.text, open = e.open, close = e.close;
 
     /* customMaterial and model both live in renderModelInfo, which is created when missing --
      * absence does NOT mean the entity cannot render (a trigger legitimately can), and the engine
      * refuses the save if it really is wrong. */
+    /* No ramp1/bloommaskscale here. They are read by the TRIPLANAR ambientprogram, and a by-name
+     * apply lands on whatever program the named material already declares -- `outsidesnapbox`,
+     * `alphatintoutside` and friends, none of which reference `$ramp1`. Tested in-editor: the parms
+     * take effect only on the SnapMap palette's own triplanar materials, not on textures applied by
+     * name, so writing them on this path would be inert for nearly every material in the catalog.
+     * Virtual Mapping is the carrier that always brings the triplanar program with it. */
     if (carrier === 'cm' || carrier === 'm') {
       var rm = dpEnsureBlock(s, open, close, 'renderModelInfo');
       return dpSetScalar(rm.text, rm.open, rm.close,
@@ -3827,7 +3840,23 @@
       /* (w, h, x, y) / 245760 -- verified against a known atlas rect. */
       var v = '{ ' + [rect.w, rect.h, rect.x, rect.y]
               .map(function (n) { return String(n / 245760); }).join(', ') + ' }';
-      return dpSetRenderParm(rm2.text, rm2.open, rm2.close, 'virtualmapping', v);
+      var out = dpSetRenderParm(rm2.text, rm2.open, rm2.close, 'virtualmapping', v);
+      /* The two companions. `extra` carries the caller's choices; each is written only when it has a
+       * value, so "keep existing" genuinely leaves the entity's own alone. An absent ramp is NOT
+       * neutral (see the ramp1 note), but resolving that policy belongs to the caller, not here.
+       *
+       * Each write re-derives its block from the CURRENT text, the same way dpSetInBlock does --
+       * every write shifts the offsets after it, so reusing rm2's bounds would splice at a stale
+       * position once virtualmapping had changed the string length. */
+      var pairs = [];
+      if (extra && extra.ramp)  pairs.push(['ramp1', extra.ramp]);
+      if (extra && extra.bloom) pairs.push(['bloommaskscale', extra.bloom]);
+      for (var pi = 0; pi < pairs.length; pi++) {
+        var e2 = dpEditBlock(out);
+        var rmN = dpEnsureBlock(e2.text, e2.open, e2.close, 'renderModelInfo');
+        out = dpSetRenderParm(rmN.text, rmN.open, rmN.close, pairs[pi][0], pairs[pi][1]);
+      }
+      return out;
     }
     /* clipModelName is a member of idClipModelInfo, so it nests inside clipModelInfo -- NOT at the
      * edit level. `type` is deliberately left alone: the confirmed-solid test kept the inherited
@@ -3863,6 +3892,10 @@
    * Counts observed in snap_gameresources.index: model 12,630 / material 9,805 / sound 5,658 /
    * image 3,423 / entityDef 2,520 / decalatlas 1,673 / particle 1,523 / snapEditorEntityDef
    * 1,362 / fx 476. */
+  /* Deliberately NOT an AB_TYPES row: it is a qualifier on Materials, not a category to browse.
+   * Must match SH_ASSET_VTONLY in src/common/snapmap_plus_iface.h. */
+  var AB_KIND_VTONLY = 12;
+
   var AB_TYPES = [
     {id:'material',  kind:0, label:'Materials'},
     {id:'model',     kind:2, label:'Models'},
@@ -3897,7 +3930,383 @@
   }
   var AB_MAX_HITS = 400;              /* cap the filter result DOM; the filter is what narrows */
 
+  /* ---- Cross-platform textures -----------------------------------------------------------------
+   * The 195 megatexture rects known to render as the same art on PC, Xbox and PlayStation.
+   *
+   * THIS SET IS EMPIRICAL AND CANNOT BE DERIVED. Most virtual-mapped textures are NOT the same
+   * across platforms -- the atlas is not laid out identically everywhere, so an arbitrary rect can be
+   * completely different art on a console. These 195 are the survivors of somebody's vigorous
+   * platform-by-platform testing, supplied to this project as a working rawmap. There is no rule in
+   * the .vmtr tables that separates them from the rest, so DO NOT try to compute a larger list: the
+   * only way to add an entry is to test it on the actual hardware. Treat any name not in this table
+   * as unknown rather than as excluded.
+   *
+   * What was verified here is only the transcription: every displayName in that rawmap matched, byte
+   * for byte, the name in the authoritative `.vmtr` atlas row at the same rect -- 195/195, no misses
+   * either direction. That makes the names and rects below trustworthy; it says nothing about why
+   * these particular ones are portable.
+   *
+   * BAKED rather than read from the owner's rawmap.json at runtime, because a collaborator who
+   * installs the build has no such file and this has to work for them too.
+   *
+   * Two things about this set are easy to get wrong:
+   *   1. The texture identity is the RECT, not a material name. All 344 source entities used just
+   *      two carrier materials and varied only the virtualmapping value, so `d` below (does a
+   *      `material` decl of this name exist?) is TRUE for only 33 of the 195.
+   *   2. Because of that, Custom Material cannot be offered for the other 162 -- there is no decl
+   *      to name. Virtual Mapping is the only carrier that can carry them. abCarriers enforces it.
+   *
+   * Format: name|w|h|x|y|hasDecl, atlas pixels. virtualmapping = (w, h, x, y) / 245760.
+   * Previews need nothing extra: megapreview resolves names straight out of the .vmtr tables and
+   * never consults the material decl, so all 195 preview even without one. */
+  var AB_XPLAT_RAW = [
+    'material/snapmap/dynamic_block_textured_hell_cave_facade|3840|3840|88320|138240|1',
+    'models/mapobjects/ca/ca_mp_sacrilegious/ca_hell_hellsack_flat|3840|3840|92160|203520|0',
+    'models/mapobjects/hell_terrain/cave_facade_b|3840|3840|15360|203520|0',
+    'models/mapobjects/hell_terrain/cave_facade|3840|3840|19200|138240|1',
+    'models/mapobjects/prop/jump_pads/jump_pad_templar_tile|3840|3840|7680|199680|0',
+    'models/mapobjects/templar/vortex_arch|960|3840|66240|195840|0',
+    'models/maps/game/dlc_3/mp_boneyard/egg_sack_pile|1920|1920|99840|228480|0',
+    'models/monsters/cacodemon/cacodemon_e_eye_mp|120|120|7200|189120|1',
+    'models/monsters/cyberdemon/cyberdemon_eyes|960|960|52800|13440|1',
+    'mp/wires/mp_ca_wires_01|1920|1920|67200|224640|1',
+    'textures/biomechanic/metal_tile_floor_01|1920|1920|15360|190080|0',
+    'textures/biomechanic/pipe_red_01|240|1920|5040|192000|1',
+    'textures/biomechanic/red_tile_01|1920|1920|17280|190080|1',
+    'textures/biomechanic/tan_tile_01|1920|1920|19200|190080|1',
+    'textures/bluecollar/walls/bc_panels_steel|3840|3840|153600|161280|1',
+    'textures/bone/boneyard/by_bone_ground_01|3840|3840|69120|215040|0',
+    'textures/bone/boneyard/by_bone_wall_01|3840|3840|111360|211200|0',
+    'textures/bone/decay|1920|1920|96000|224640|0',
+    'textures/bone/id_bone_ivory|1920|1920|97920|224640|0',
+    'textures/ca/blockout/walls/beige|240|240|7200|189360|0',
+    'textures/ca/blockout/walls/grey_3_white|240|240|7440|189120|0',
+    'textures/common/red|120|120|66600|214680|0',
+    'textures/exterior/pipes/ext_pipe_huge_copper|960|7680|77760|15360|0',
+    'textures/exterior/pipes/pc_ext_pipe_huge_steel|960|7680|76800|15360|0',
+    'textures/exterior/trims_steel_ext|3840|3840|119040|7680|0',
+    'textures/exterior/walls/wall_tiles_04_drk_02|3840|3840|107520|0|0',
+    'textures/gore/boneyard/by_gore_ground_01|3840|3840|107520|211200|0',
+    'textures/gore/boneyard/by_gore_ground_02|3840|3840|111360|207360|0',
+    'textures/gore/boneyard/by_gore_wall_01|3840|1920|80640|238080|0',
+    'textures/gore/boneyard/by_gore_wall_02|3840|3840|107520|207360|0',
+    'textures/gore/boneyard/by_gore_wall_03|3840|3840|111360|203520|0',
+    'textures/gore/boneyard/by_meat_01|1920|1920|96000|226560|0',
+    'textures/gore/egg_skin|3840|3840|107520|203520|0',
+    'textures/gore/sinue|960|3840|66240|192000|0',
+    'textures/gore/tendril_floor|3840|3840|111360|199680|0',
+    'textures/gore/tendril_lrg|1920|3840|67200|195840|0',
+    'textures/gore/tendril_tile|3840|3840|107520|199680|0',
+    'textures/hell_ext/walls/stone_wall_02_tile_tall|1920|1920|49920|128640|1',
+    'textures/hell_ext/walls/stone_wall_02|1920|1920|51840|128640|1',
+    'textures/industrial/catwalks/catwalk01_top_256_dirty|7680|7680|153600|184320|0',
+    'textures/industrial/catwalks/catwalk01_top_256|7680|7680|168960|176640|1',
+    'textures/industrial/floors/gratefloor_t_junction_centers_iwk|3840|3840|149760|203520|0',
+    'textures/industrial/greeble_panels_darker_grey_ind_drk|3840|3840|11520|207360|1',
+    'textures/industrial/walls/metal_tiles_lrg_drk|3840|3840|157440|157440|1',
+    'textures/industrial/walls/panel_maint_1_cyan|3840|3840|111360|7680|1',
+    'textures/industrial/walls/panel_maint_1_darkgrey_darker|3840|3840|7680|211200|1',
+    'textures/industrial/walls/panel_maint_1_yellow|3840|3840|19200|211200|0',
+    'textures/mp/mp_cataclysm/cable_bundle_01_blue|1920|3840|67200|199680|1',
+    'textures/mp/mp_cataclysm/cable_bundle_01_red|1920|3840|53760|130560|1',
+    'textures/mp/mp_graphite/ca_mp_graphite_elevator_trim|3840|3840|119040|103680|1',
+    'textures/mp/mp_graphite/ca_mp_graphite_hangar_panels_01|3840|3840|142080|0|0',
+    'textures/pipes/ind_pipe_huge_grey|960|7680|222720|122880|1',
+    'textures/skies/dlc1/hell/hell_buildings/brick_top|960|480|6720|128160|0',
+    'textures/skies/dlc2/cliff_kit/gears|120|120|7320|189240|0',
+    'textures/skies/dlc2/cliff_kit/vista_cliff_wall|3840|3840|11520|211200|0',
+    'textures/skies/dlc2/cliff_kit/wood|120|120|7200|189240|0',
+    'textures/skies/dlc3/outbreak/ob_ship_lights_engine|120|120|66840|214560|0',
+    'textures/skies/dlc3/outbreak/ob_ship_lights_small|480|120|66240|214560|0',
+    'textures/skies/dlc3/outbreak/ob_vista_ship_haul|1920|1920|113280|226560|0',
+    'textures/skies/dlc3/outbreak/ob_vista_ship_paint|1920|1920|111360|228480|0',
+    'textures/skies/dlc3/outbreak/ob_vistaship_haul_black|120|120|66840|214320|0',
+    'textures/skies/dlc3/outbreak/ob_vistaship_haul_smooth|1920|1920|92160|230400|0',
+    'textures/skies/dlc3/outbreak/ob_vistaship_haul_white|1920|1920|103680|232320|0',
+    'textures/skies/dlc3/vortex/vortex_brick_detail|3840|1920|111360|190080|0',
+    'textures/skies/dlc3/vortex/vortex_brick|3840|3840|76800|226560|0',
+    'textures/skies/dlc3/vortex/vortex_marble_trim|1920|1920|111360|232320|0',
+    'textures/skies/dlc3/vortex/vortex_metal|3840|1920|72960|190080|0',
+    'textures/skies/mars_terrain/mars_dunes|3840|3840|88320|49920|0',
+    'textures/snapmaps/snapedit_logic_model_icon_bg|3840|3840|215040|11520|1',
+    'textures/swatches/mp_molten/ind_molten_dark_gray|480|480|6720|189600|0',
+    'textures/swatches/mp_molten/ind_molten_green|480|480|7200|189600|0',
+    'textures/swatches/mp_outbreak/outbreak_blk|1920|1920|107520|236160|0',
+    'textures/swatches/mp_outbreak/outbreak_blu|1920|1920|109440|236160|0',
+    'textures/swatches/mp_outbreak/outbreak_drkgry|1920|1920|97920|238080|0',
+    'textures/swatches/mp_outbreak/outbreak_green|1920|1920|96000|238080|0',
+    'textures/swatches/mp_outbreak/outbreak_gry|1920|1920|94080|238080|0',
+    'textures/swatches/mp_outbreak/outbreak_org|1920|1920|92160|238080|0',
+    'textures/swatches/mp_outbreak/outbreak_red|1920|1920|107520|215040|0',
+    'textures/swatches/mp_outbreak/outbreak_tan|1920|1920|99840|234240|0',
+    'textures/swatches/mp_outbreak/outbreak_wht|1920|1920|99840|236160|0',
+    'textures/templar/banners_02|1920|1920|103680|234240|0',
+    'textures/templar/banners|1920|1920|97920|128640|0',
+    'textures/templar/brick01|3840|3840|99840|142080|0',
+    'textures/templar/brick02|3840|3840|103680|138240|0',
+    'textures/templar/cave_facade|3840|3840|69120|234240|0',
+    'textures/templar/column_02_dark_marble|3840|3840|72960|230400|0',
+    'textures/templar/floor|1920|1920|113280|149760|0',
+    'textures/templar/glass_stain|1920|1920|115200|144000|0',
+    'textures/templar/gold_bright_01_hotspot|1920|1920|103680|236160|0',
+    'textures/templar/gold_dull_01_hotspot|1920|1920|113280|232320|0',
+    'textures/templar/gold_smooth_01_hotspot|1920|1920|107520|234240|0',
+    'textures/templar/grate|960|960|88320|148800|0',
+    'textures/templar/metal01|1920|1920|105600|128640|0',
+    'textures/templar/metal_dull|1920|1920|92160|128640|0',
+    'textures/templar/metal_trim_clock|3840|1920|99840|140160|0',
+    'textures/templar/metal_trim_dull|3840|1920|111360|128640|0',
+    'textures/templar/metal_trim|3840|1920|84480|151680|0',
+    'textures/templar/metal_vortex_brass|1920|1920|109440|234240|0',
+    'textures/templar/releif_marble_dark|3840|3840|84480|222720|0',
+    'textures/templar/releif_marble_white|3840|3840|76800|234240|0',
+    'textures/templar/releif_marble|3840|3840|88320|222720|0',
+    'textures/templar/releif_sandstone|3840|3840|107520|145920|0',
+    'textures/templar/releif|3840|3840|92160|145920|0',
+    'textures/templar/rocks_vortex|1920|1920|105600|236160|0',
+    'textures/templar/rocks|1920|1920|115200|134400|0',
+    'textures/templar/rubble_01_vortex|1920|1920|109440|232320|0',
+    'textures/templar/rubble_01|1920|1920|107520|128640|0',
+    'textures/templar/stairs|3840|3840|76800|153600|0',
+    'textures/templar/stone01_brown|1920|1920|103680|136320|0',
+    'textures/templar/stone01_vortex_dark|1920|1920|109440|230400|0',
+    'textures/templar/stone01_vortex|1920|1920|107520|232320|0',
+    'textures/templar/stone01|1920|1920|94080|128640|0',
+    'textures/templar/stone_floor|3840|3840|103680|142080|0',
+    'textures/templar/stone_wall_01_hotspot_gold|1920|1920|107520|230400|0',
+    'textures/templar/stone_wall_01_hotspot_marble|1920|1920|105600|238080|0',
+    'textures/templar/stone_wall_01_hotspot_wide_gold|1920|1920|103680|238080|0',
+    'textures/templar/stone_wall_01_hotspot_wide|1920|1920|115200|132480|0',
+    'textures/templar/stone_wall_01_hotspot|1920|1920|111360|140160|0',
+    'textures/templar/stone_wall_01_marble|1920|1920|101760|238080|0',
+    'textures/templar/stone_wall_01_sandstone_hotspot_wide|1920|1920|107520|140160|0',
+    'textures/templar/stone_wall_01_sandstone_hotspot|1920|1920|109440|142080|0',
+    'textures/templar/stone_wall_02_hotspot_marble_dark|1920|1920|111360|215040|0',
+    'textures/templar/stone_wall_02_hotspot_marble_white|1920|1920|109440|216960|0',
+    'textures/templar/stone_wall_02_hotspot_marble|1920|1920|99840|238080|0',
+    'textures/templar/stone_wall_02_hotspot_wide_gold|1920|1920|67200|220800|0',
+    'textures/templar/stone_wall_02_hotspot_wide_marble_dark|1920|1920|103680|228480|0',
+    'textures/templar/stone_wall_02_hotspot_wide_marble_white|1920|1920|105600|226560|0',
+    'textures/templar/stone_wall_02_hotspot_wide_marble|1920|1920|105600|228480|0',
+    'textures/templar/stone_wall_02_hotspot_wide|1920|1920|115200|128640|0',
+    'textures/templar/stone_wall_02_hotspot|1920|1920|107520|142080|0',
+    'textures/templar/stone_wall_02_marble_dark_dirt|1920|1920|99840|226560|0',
+    'textures/templar/stone_wall_02_marble_dark|1920|1920|101760|228480|0',
+    'textures/templar/stone_wall_02_marble_dirt|1920|1920|103680|224640|0',
+    'textures/templar/stone_wall_02_marble_white_dirt|1920|1920|103680|222720|0',
+    'textures/templar/stone_wall_02_marble_white|1920|1920|105600|222720|0',
+    'textures/templar/stone_wall_02_marble|1920|1920|103680|226560|0',
+    'textures/templar/stone_wall_02_sandstone_hotspot_wide|1920|1920|113280|140160|0',
+    'textures/templar/stone_wall_02_sandstone_hotspot|1920|1920|109440|140160|0',
+    'textures/templar/stone_wall_02_sandstone_vortex_hotspot_wide|1920|1920|96000|228480|0',
+    'textures/templar/stone_wall_02_sandstone_vortex_hotspot|1920|1920|101760|222720|0',
+    'textures/templar/stone_wall_02_tiling_sandstone_dark|1920|1920|115200|213120|0',
+    'textures/templar/stone_wall_02_tiling_sandstone|1920|1920|67200|218880|0',
+    'textures/templar/stone_wall_03_hotspot_marble_dark|1920|1920|115200|209280|0',
+    'textures/templar/stone_wall_03_hotspot_marble_white|1920|1920|115200|207360|0',
+    'textures/templar/stone_wall_03_hotspot_marble|1920|1920|115200|211200|0',
+    'textures/templar/stone_wall_03_hotspot_wide_marble_dark|1920|1920|115200|203520|0',
+    'textures/templar/stone_wall_03_hotspot_wide_marble_white|1920|1920|115200|201600|0',
+    'textures/templar/stone_wall_03_hotspot_wide_marble|1920|1920|115200|205440|0',
+    'textures/templar/templar_wood|3840|3840|96000|138240|0',
+    'textures/templar/trim_01_sandstone|3840|1920|111360|138240|0',
+    'textures/templar/trim_01|3840|1920|99840|138240|0',
+    'textures/templar/trim_02_sandstone|3840|1920|103680|134400|0',
+    'textures/templar/trim_02|3840|1920|84480|149760|0',
+    'textures/templar/vortex/bricks_marble_large_01_bright|3840|3840|88320|226560|0',
+    'textures/templar/vortex/bricks_marble_large_01_dark|3840|3840|69120|230400|0',
+    'textures/templar/vortex/bricks_marble_large_01|3840|3840|84480|226560|0',
+    'textures/templar/vortex/keystone_large_01|3840|3840|72960|234240|0',
+    'textures/templar/vortex/rocks_sandstone_small_01|1920|1920|67200|230400|0',
+    'textures/templar/vortex/shrine_column_large_01|3840|3840|76800|230400|0',
+    'textures/templar/vortex/shrine_crate_small_01|1920|1920|103680|220800|0',
+    'textures/templar/vortex/shrine_inset_large_01|3840|3840|80640|230400|0',
+    'textures/templar/vortex/shrine_inset_large_02|3840|3840|80640|226560|0',
+    'textures/templar/vortex/shrine_inset_small_01|3840|3840|80640|234240|0',
+    'textures/templar/vortex/shrine_inset_small_02|3840|3840|84480|230400|0',
+    'textures/templar/vortex/stairs_marble_large_01_bright|3840|3840|84480|234240|0',
+    'textures/templar/vortex/stairs_marble_large_01_dark|3840|3840|88320|234240|0',
+    'textures/templar/vortex/stairs_marble_large_01|3840|3840|88320|230400|0',
+    'textures/templar/vortex/vortex_column_01|3840|3840|92160|215040|0',
+    'textures/templar/vortex_grate|1920|120|92160|189120|0',
+    'textures/templar/wood_tile|3840|3840|92160|138240|0',
+    'textures/terrain/ground/marsrock_ground_02_tiled_c_dark|1920|1920|97920|222720|1',
+    'textures/terrain/lava/lava_molten_metal|960|960|4800|191040|0',
+    'textures/users/dorian/frame_large_tile_01_lightgrey_0s|3840|3840|99840|84480|1',
+    'textures/whitecollar/lab/black_tile_01|1920|1920|115200|192000|0',
+    'textures/whitecollar/lab/dark_grey_01|1920|1920|101760|218880|0',
+    'textures/whitecollar/lab/grey_tile_01|1920|1920|101760|215040|0',
+    'textures/whitecollar/lab/orange_tile_01|1920|1920|97920|226560|0',
+    'textures/whitecollar/lab/red_tile_01|1920|1920|94080|228480|0',
+    'textures/whitecollar/lab/steel_tile_01|1920|1920|92160|228480|0',
+    'textures/whitecollar/lab/tan_tile_01|1920|1920|92160|226560|0',
+    'textures/whitecollar/lab/wc_trim_1_lab|1920|1920|92160|224640|0',
+    'textures/whitecollar/lab/wc_trim_2_lab|1920|1920|94080|222720|0',
+    'textures/whitecollar/lab/wc_trim_3_lab|1920|1920|92160|222720|0',
+    'textures/whitecollar/lab/white_tile_01|1920|1920|67200|207360|0',
+    'textures/whitecollar/wc_floor_marble_pink|3840|3840|3840|69120|1',
+    'textures/whitecollar/wc_floor_org|3840|3840|107520|49920|1',
+    'textures/whitecollar/wc_floor_red|3840|3840|38400|138240|1',
+    'textures/whitecollar/wc_greeble_d3_2c|3840|3840|92160|218880|1',
+    'textures/whitecollar/wc_greeble_d3_4b_darker|3840|3840|26880|149760|1',
+    'textures/whitecollar/wc_panel_1a|3840|3840|145920|157440|1',
+    'textures/whitecollar/wc_panel_1b|3840|3840|149760|153600|1',
+    'textures/whitecollar/wc_panel_maint_1d|3840|3840|138240|157440|1',
+    'textures/whitecollar/wc_panel_maint_tall_1a|3840|3840|142080|153600|1',
+    'textures/whitecollar/wc_panel_tall_1_darkblue|3840|3840|103680|207360|1',
+    'textures/whitecollar/wc_space_caps|1920|1920|32640|128640|0'
+  ];
+
+  /* Why 162 of the 195 have no `material` decl, since it reads like an error and is not:
+   *
+   * The `.vmtr` table and the material decls are DIFFERENT registries. A `.vmtr` row says "this named
+   * texture occupies this rectangle of the megatexture" -- pure coordinates. A `material` record is a
+   * definition the engine resolves BY NAME. All 195 are in the .vmtr (that is what gives each one a
+   * virtualmapping at all); 33 are `material` decls in the snap box, and the other **162 are material
+   * decls in the CAMPAIGN box**, which SnapMap never mounts.
+   *
+   * That is what makes the technique reach this art at all. `customMaterial` asks SnapMap to resolve
+   * a NAME, and for those 162 it cannot -- the decl is in a box it does not load, so you would get
+   * nothing. `virtualmapping` asks for a RECTANGLE, so no name lookup happens and the box rule never
+   * applies: the pixels are in `virtualtextures/`, which SnapMap does read.
+   *
+   * It does NOT follow that a rect means the same art on every platform -- it usually does not. See
+   * the note on AB_XPLAT_RAW above: that is exactly why this table is a tested list rather than a
+   * query. */
+  var AB_XPLAT = (function () {
+    var m = {};
+    for (var i = 0; i < AB_XPLAT_RAW.length; i++) {
+      var p = AB_XPLAT_RAW[i].split('|');
+      m[p[0].toLowerCase()] = { n: p[0], w: +p[1], h: +p[2], x: +p[3], y: +p[4], d: p[5] === '1' };
+    }
+    return m;
+  })();
+  var AB_XPLAT_NAMES = AB_XPLAT_RAW.map(function (s) { return s.split('|')[0]; }).sort();
+  function abXplatOf(name) { return AB_XPLAT[(name || '').toLowerCase()] || null; }
+
+  /* The atlas-only materials: names in the Materials list that have NO `material` decl (backend
+   * SH_ASSET_VTONLY). They are fully applyable -- by RECTANGLE, via the virtualmapping renderParm --
+   * but NOT by name, because customMaterial resolves through the decl manager and there is no decl
+   * to resolve. Fetched once per session and kept as a lookup, so the carrier gate is answered
+   * locally for any name instead of costing a round-trip per selection.
+   *
+   * Until the fetch lands this is null, which abHasDecl reports as "unknown". Unknown is treated as
+   * "has a decl" so the common case (most materials) is not needlessly disabled during startup. */
+  var abVtOnly = null;
+  function abHasDecl(name) {
+    if (!abVtOnly) return true;                    /* not fetched yet -- do not disable on a guess */
+    return !abVtOnly[(name || '').toLowerCase()];
+  }
+
+  /* Atlas rects learned at runtime, for materials outside the baked table. Filled by onMaterialRect
+   * from the same backend lookup the preview uses (.vmtr by name), so it costs one round-trip per
+   * asset per session and nothing thereafter. */
+  var abRectCache = {};
+  /* The dimensions to derive a ramp aspect from: the baked table first (it is authoritative and
+   * needs no round-trip), then anything the backend has told us. Null means "not atlas-backed, or
+   * not looked up yet" -- callers fall back to a square rate, which is correct for the 173 of 195
+   * square textures and simply un-corrected for the rest until the rect lands. */
+  function abRectOf(name) {
+    return abXplatOf(name) || abRectCache[(name || '').toLowerCase()] || null;
+  }
+
+  /* ---- ramp1: the tiling rate -------------------------------------------------------------------
+   * The carrier material is TRIPLANAR (`ambientprogram triplanartintoutside`), so it projects the
+   * texture in world space and needs to be told how big one copy is. `ramp1` is that scale, and it
+   * follows one rule taken from a working library:
+   *
+   *     ramp1 component = 426 / N        N = the world-unit period of one texture repeat
+   *
+   * Every value in that library falls out of it exactly: 5.325 = 426/80, 6.65625 = 426/64,
+   * 13.3125 = 426/32, 26.625 = 426/16, 106.5 = 426/4. 426/2^n stays exact in binary floating point,
+   * so there is no rounding drift and no "keep a decimal point" trap.
+   *
+   * NOT WRITING IT IS NOT NEUTRAL. The material ships `ramp1 1.000000` = one tile every 426 units,
+   * so an unset ramp shows about a fifth of the texture on an 80-unit box. That is why every virtual
+   * texture in both libraries we have seen carries one.
+   *
+   * NON-SQUARE TEXTURES NEED NON-SQUARE RATES. In the contributor's words: "some textures do not have
+   * equal length and width, so some volumes have different scaling to fit the single texture." The
+   * longer axis takes the base rate and the shorter is scaled by the aspect, which reproduces their
+   * hand-picked pairs exactly -- a 1:8 texture at base 256 gives 32x256, a 1:2 gives 128x256. Since
+   * the baked table already carries each texture's atlas w/h, this is computed rather than chosen. */
+  var AB_RAMP_CONST = 426;
+  /* Observed in the two source libraries: 4, 16, 32, 64, 80 (the cross-platform map) and 64, 256, 80
+   * (the 2,820-surface library). 128, 192, 384, 512, 768 and 1024 are not observed but were asked
+   * for and are the obvious neighbours. Every one of these divides 426 into a value whose shortest
+   * decimal representation round-trips exactly and multiplies back to 426.0 -- checked, because a
+   * rate that printed as 3.3281250000000004 would be a "keep a decimal point" bug waiting to
+   * happen. */
+  var AB_RAMP_RATES = [4, 16, 32, 64, 80, 128, 192, 256, 384, 512, 768, 1024];
+  var AB_RAMP_DEFAULT = 80;          /* the most-used rate in the source library, and the one the
+                                      * owner reports looks best (179 boxes + all 60 hotspots) */
+  var AB_BLOOM_DEFAULT = 100;        /* what working libraries default to; the renderparm's own is 8 */
+
+  /* Bloom is OFFERED, not decided. 100 is the value working libraries default to, but it is a 12.5x
+   * boost over the renderparm's own default of 8 and it blows out anything already emissive -- monster
+   * eyes, engine lights, jump pads all get tuned down by hand in practice.
+   *
+   * An earlier version baked a per-texture table of those tuned values. That was dropped
+   * deliberately: it covered four textures out of 195, it would need extending every time somebody
+   * tuned another, and it presented one author's taste as if it were a property of the texture. The
+   * dropdown gives the mapper the same range shipped content uses and lets them look at the surface.
+   *
+   * A free NUMBER rather than a fixed list, because a fixed list is provably too narrow: across a
+   * 2,820-surface library the tuned values include 0.125, 1.5, 32, 80, 128 and 300 alongside the
+   * round ones. The list below is only the quick-pick suggestions. */
+  var AB_BLOOM_VALUES = [0, 1, 5, 8, 10, 20, 32, 50, 80, 100, 128, 200, 300];
+  function abBloomValue(v) { return '{ ' + v + ', 0, 0, 0 }'; }
+
+  /* Tile periods (Nx, Ny) for a texture at a base rate, aspect-corrected. */
+  function abRampPeriods(xp, base) {
+    if (!xp || !xp.w || !xp.h || xp.w === xp.h) return {x: base, y: base};
+    return (xp.w > xp.h) ? {x: base, y: base * (xp.h / xp.w)}
+                         : {x: base * (xp.w / xp.h), y: base};
+  }
+  /* The renderparm value. First component is negated, reproducing the source library exactly -- the
+   * mirror is consistent across every entry there, and nothing observed says it is incidental. */
+  function abRampValue(xp, base) {
+    var p = abRampPeriods(xp, base);
+    var fmt = function (n) { return String(AB_RAMP_CONST / n); };
+    return '{ -' + fmt(p.x) + ', ' + fmt(p.y) + ', 0, 0 }';
+  }
+  /* The option label. ALWAYS both axes when the texture size is known -- "128 x 128" for a square
+   * one, "8 x 64" for a 1:8 one. An earlier version collapsed the square case to a bare "128", which
+   * read as an unexplained single number: 173 of the 195 cross-platform textures are square, so in
+   * practice the two-axis form was almost never on screen and there was nothing to compare against.
+   * When the rect has not arrived yet we CANNOT know the aspect, so say the size is unknown rather
+   * than print "128 x 128" and be wrong for a non-square texture. */
+  /* Single number when the texture is square (by far the common case -- x period == y period, so
+   * a second number adds nothing a mapper can act on in the half-second they look at this list).
+   * Two numbers only when it would actually be wrong to collapse them. Unknown size (rect not
+   * fetched yet) falls back to the bare base rather than guess an aspect. */
+  function abRampLabel(xp, base) {
+    var r = function (n) { return Math.round(n * 1000) / 1000; };
+    if (!xp || !xp.w || !xp.h) return base + ' units';
+    var p = abRampPeriods(xp, base);
+    return (p.x === p.y) ? (base + ' units') : (r(p.x) + ' &times; ' + r(p.y) + ' units');
+  }
+
+  /* The list a mount is currently showing. The cross-platform set is a SEPARATE source keyed off a
+   * pseudo-type, not a filter over the fetched material catalog -- 162 of its 195 names have no
+   * `material` record at all, so filtering the catalog would silently hide the majority of them. */
+  function abListType(m) {
+    return (m.type === 'material' && m.xplat) ? 'material@xplat' : m.type;
+  }
+
+  /* Show the checkbox only on Materials, and keep the DOM control in step with the mount's own state
+   * (each mount keeps its own view state, and the Assets tab and the modal are two mounts). */
+  function abSyncXplat(m) {
+    var wrap = m.el('xplatwrap'), box = m.el('xplat');
+    if (!wrap || !box) return;
+    wrap.style.display = (m.type === 'material') ? 'flex' : 'none';
+    box.checked = !!m.xplat;
+  }
+
   var abNames = {};                   /* type -> sorted name array (undefined = never fetched) */
+  /* The cross-platform set is baked, so seed it here: it is never fetched, and leaving it undefined
+   * would make abRenderTree show "Loading the catalog..." forever. */
+  abNames['material@xplat'] = AB_XPLAT_NAMES;
   var abTrees = {};                   /* type -> folder tree built from abNames[type] */
   var abMounts = [];                  /* every mounted browser */
   var abActive = null;                /* the mount that owns the in-flight preview request */
@@ -3941,13 +4350,48 @@
    * This is the part that has to be right: it decides what Apply will eventually write. Sourced
    * from the campaign's placement-carrier map, not guessed from the UI's convenience. */
   function abCarriers(type, path) {
-    if (type === 'material') return [
-      {id:'cm', label:'Custom Material', ok:true,
-       why:'Applies the material by name. Works for any material in the catalog.'},
-      {id:'vm', label:'Virtual Mapping', ok:true,
-       why:'Applies the material by renderParms virtualmapping. Only works for materials that are '
-         + 'in the megatexture, and may not be the same texture on other platforms.'}
-    ];
+    if (type === 'material') {
+      /* A cross-platform texture whose decl lives in the campaign box is refused BY NAME.
+       *
+       * INFERRED (2026-08-05), not live-tested for materials specifically -- the reasoning, so it can
+       * be overturned cheaply if wrong: SnapMap does not mount `gameresources.resources` (live-proven
+       * for MODELS -- a campaign-box model renders as a black cube), and a customMaterial name is
+       * resolved through the decl manager out of that same box, so the same lookup fails the same way.
+       *
+       * Campaign-box SOUNDS do work, which looks like a counterexample and is not: a sound decl is a
+       * thin wrapper and the audio itself lives in .bnk/.pck soundbanks loaded independently of the
+       * .resources boxes. Sounds have a side door; materials do not.
+       *
+       * The gate is the conservative direction. If it is wrong we lose one option on 162 textures
+       * that already have a working carrier; if it were missing, the control would silently produce
+       * untextured surfaces. To settle it: set customMaterial to one of the d===false names by hand
+       * in Decl Text and look at the surface. If it renders, delete this gate. */
+      var xp = abXplatOf(path);
+      /* TWO separate reasons a name can be unappliable, and they are not the same check:
+       *   - NO DECL AT ALL. The catalog lists the union of `material` decls and `.vmtr` atlas rows,
+       *     and thousands of atlas rows never had a decl authored. Nothing to resolve by name.
+       *   - DECL IS IN THE CAMPAIGN BOX (the INFERRED case above). A decl exists, but not in a box
+       *     SnapMap mounts. */
+      var noDecl = !abHasDecl(path);
+      var byName = !noDecl && (!xp || xp.d);
+      return [
+        {id:'cm', label:'Custom Material', ok:byName,
+         why: byName ? 'Applies the material by name. Works for materials that have a decl SnapMap '
+                     + 'can load &mdash; most, but not all, of this list.'
+             : noDecl ? 'This texture has no material decl &mdash; it exists only as a rectangle in the '
+                      + 'megatexture atlas, so there is no name for the engine to resolve. Use '
+                      + 'Virtual Mapping.'
+                      : 'This texture&rsquo;s material decl is in the campaign box, which SnapMap does not '
+                      + 'load, so it cannot be applied by name. Use Virtual Mapping &mdash; that addresses '
+                      + 'the atlas by rectangle and needs no decl.'},
+        {id:'vm', label:'Virtual Mapping', ok:true,
+         why: xp ? 'Applies the texture by renderParms virtualmapping &mdash; a rectangle of the '
+                 + 'megatexture, not a name. This one is on the tested cross-platform list, so it '
+                 + 'shows the same art on PC, Xbox and PlayStation.'
+                 : 'Applies the material by renderParms virtualmapping. Only works for materials that '
+                 + 'are in the megatexture, and may not be the same texture on other platforms.'}
+      ];
+    }
     if (type === 'model')    return [{id:'m', label:'Model', ok:true,
                                       why:'Applies the model by name under renderModelInfo.'}];
     /* A module is the one asset that writes TWO fields. Geometry alone renders but you walk
@@ -4005,6 +4449,15 @@
       +     '<span class="badge" data-ab="cnt">0</span>'
       +     '<div class="panel-actions"><button class="btn icon" data-ab="reload" title="Re-fetch the catalog from the backend">&#8635;</button></div></div>'
       +   '<div class="panel-toolbar"><input type="text" data-ab="q" placeholder="Filter every folder...">'
+      /* Materials only, and hidden for every other type rather than shown disabled -- it is
+       * meaningless outside the megatexture atlas. */
+      +     '<label class="ab-xplat" data-ab="xplatwrap" style="display:none;align-items:center;gap:5px;'
+      +       'margin-top:5px;font-size:12px;cursor:pointer" '
+      +       'title="Show only the 195 textures tested to show the same art on PC, Xbox and '
+      +       'PlayStation. Most virtual-mapped textures do NOT match across platforms; this is a '
+      +       'hand-tested list, not everything the megatexture can address. Apply them with Virtual '
+      +       'Mapping &mdash; most have no material decl SnapMap can load, so they cannot go on by name.">'
+      +       '<input type="checkbox" data-ab="xplat"> Cross Platform Textures Only</label>'
       +     '<div class="ab-crumbs" data-ab="crumbs"></div></div>'
       +   '<div class="panel-body"><div class="list" data-ab="tree"></div></div></div>'
       + '<div class="panel ab-insp"><div class="panel-head"><span class="panel-title">Asset</span>'
@@ -4014,18 +4467,24 @@
 
     m.el('q').addEventListener('input', function(){ m.q = this.value; abRenderTree(m); });
     m.el('reload').addEventListener('click', function(){ abFetch(m, true); });
+    /* Toggling the set changes which list you are in, so the folder path and the selection from the
+     * other set are both meaningless afterwards -- drop them rather than leaving a stale crumb trail
+     * pointing at a folder the new list does not have. */
+    m.el('xplat').addEventListener('change', function(){
+      m.xplat = this.checked; m.dir = ''; m.sel = null;
+      abRenderTree(m); abRenderInsp(m);
+    });
     m.el('rail').addEventListener('click', function(e){
       var it = e.target.closest ? e.target.closest('[data-type]') : null;
       if (!it) return;
       m.type = it.getAttribute('data-type'); m.dir = ''; m.sel = null;
+      abSyncXplat(m);
       abRenderRail(m); abRenderTree(m); abRenderInsp(m);
       abFetch(m, false);
     });
     m.el('tree').addEventListener('click', function(e){
       var cp = e.target.closest ? e.target.closest('[data-copy]') : null;
       if (cp) { e.stopPropagation(); abCopy(cp.getAttribute('data-copy')); return; }
-      var ck = e.target.closest ? e.target.closest('[data-check]') : null;
-      if (ck) { post({cmd:'findMaterial', name: m.q.trim()}); ck.textContent = 'Checking...'; return; }
       var row = e.target.closest ? e.target.closest('.entity-item') : null;
       if (!row) return;
       if (row.getAttribute('data-up')) { m.dir = m.dir.split('/').slice(0,-1).join('/'); abRenderTree(m); return; }
@@ -4048,9 +4507,22 @@
       if (au) abAudition(m.sel);
     });
     m.el('insp').addEventListener('change', function(e){
-      if (e.target && e.target.name === 'abCarrier') m.carrier = e.target.value;
+      if (e.target && e.target.name === 'abCarrier') { m.carrier = e.target.value; abRenderInsp(m); return; }
+      if (e.target && e.target.getAttribute) {
+        var w = e.target.getAttribute('data-ab');
+        /* The ramp select carries numbers plus the two string modes, so only digits are coerced. */
+        if (w === 'ramp')  { var rv = e.target.value; m.ramp = /^\d+$/.test(rv) ? +rv : rv; return; }
+        /* Blank means "do not write it". Anything unparseable is treated the same rather than
+         * writing NaN into a renderparm. */
+        if (w === 'bloom') {
+          var bvv = (e.target.value || '').trim();
+          m.bloom = (bvv === '' || isNaN(parseFloat(bvv))) ? 'none' : parseFloat(bvv);
+          return;
+        }
+      }
     });
     abMounts.push(m);
+    abSyncXplat(m);
     abRenderRail(m); abRenderTree(m); abRenderInsp(m);
     return m;
   }
@@ -4145,12 +4617,41 @@
     var cls = document.getElementById('fClassname').value || '';
     var denied = abApplyDenied(m.carrier, cls);
     if (denied) { toast(denied, 'err'); return; }
-    if (m.carrier === 'vm') { abPendingVM = {m: m, name: m.sel}; post({cmd:'materialRect', name: m.sel}); return; }
+    if (m.carrier === 'vm') {
+      /* A cross-platform entry already carries its rect, verified against the .vmtr row it came from,
+       * so skip the backend round-trip. It would return the same numbers -- megapreview reads the same
+       * tables -- but there is no reason to wait a frame for an answer we shipped with. */
+      var xp = abRectOf(m.sel);
+      if (xp) { abApplyNow(m, m.sel, 'vm', {w: xp.w, h: xp.h, x: xp.x, y: xp.y}); return; }
+      abPendingVM = {m: m, name: m.sel}; post({cmd:'materialRect', name: m.sel}); return;
+    }
     abApplyNow(m, m.sel, m.carrier, null);
+  }
+  /* The ramp/bloom choices only make sense for Virtual Mapping. `ramp1`/`bloommaskscale` are read
+   * by the TRIPLANAR ambientprogram, and a by-name customMaterial apply lands on whatever program
+   * that material already declares -- confirmed in-editor that only the SnapMap palette's own
+   * triplanar materials respond; arbitrary by-name textures do not. Virtual Mapping always carries
+   * the triplanar program with it, so it is the only carrier these controls can affect.
+   *
+   * "Keep existing" is honoured only when there IS an existing ramp1. The material ships
+   * `ramp1 1.000000` = one tile every 426 units, so leaving it unset on an entity that has none
+   * would show about a fifth of the texture -- a silent wrong-looking result rather than a neutral
+   * one. So: preserve a value the mapper tuned, but never leave a texture at the stretched default. */
+  function abVmExtra(m, name) {
+    if (m.carrier !== 'vm') return null;
+    var xp = abRectOf(name);
+    var out = {};
+    var box = document.getElementById('declText');
+    var hasRamp = box && /\bramp1\b/.test(box.value || '');
+    if (m.ramp === 'keep') { if (!hasRamp) out.ramp = abRampValue(xp, AB_RAMP_DEFAULT); }
+    else if (m.ramp !== 'none')  out.ramp = abRampValue(xp, m.ramp || AB_RAMP_DEFAULT);
+    if (m.bloom !== 'none')
+      out.bloom = abBloomValue(m.bloom === undefined ? AB_BLOOM_DEFAULT : m.bloom);
+    return out;
   }
   function abApplyNow(m, name, carrier, rect) {
     var box = document.getElementById('declText');
-    var next = dpApply(box.value, m.type, carrier, name, rect);
+    var next = dpApply(box.value, m.type, carrier, name, rect, abVmExtra(m, name));
     if (next === null) { toast('That carrier cannot be written', 'err'); return; }
     if (next === box.value) { toast('Already set to that -- nothing changed'); return; }
     box.value = next;
@@ -4171,6 +4672,16 @@
     if (m.mode === 'modal') abCloseModal();
   }
   function onMaterialRect(d) {
+    /* Cache every rect that comes back, whoever asked for it. The ramp dropdown needs the texture's
+     * ASPECT to offer an aspect-corrected rate, and only the baked cross-platform table carries w/h
+     * -- for the other ~4,800 atlas materials this reply is where those dimensions come from. Cached
+     * before the pending-request check below, because the selection fetch has no pending entry. */
+    if (d.ok) {
+      abRectCache[(d.name || '').toLowerCase()] = {w: d.w, h: d.h, x: d.x, y: d.y};
+      /* Re-render whichever mount is showing this asset so the rate labels pick the aspect up. */
+      for (var mi = 0; mi < abMounts.length; mi++)
+        if (abMounts[mi].sel === d.name) abRenderInsp(abMounts[mi]);
+    }
     /* Both Apply and New entity can be waiting on a rect; only one is ever outstanding. */
     var pa = abPendingVM, pn = (typeof abPendingNewVM !== 'undefined' ? abPendingNewVM : null);
     abPendingVM = null; if (typeof abPendingNewVM !== 'undefined') abPendingNewVM = null;
@@ -4225,7 +4736,7 @@
    * constant however deep the path is, and the breadcrumb gets you back in one click. */
   function abRenderTree(m) {
     var el = m.el('tree'), crumbs = m.el('crumbs'), cnt = m.el('cnt');
-    var names = abNames[m.type];
+    var names = abNames[abListType(m)];
     if (!names) {
       el.innerHTML = '<div class="list-empty">Loading the catalog...</div>';
       crumbs.innerHTML = ''; cnt.textContent = '...';
@@ -4238,14 +4749,12 @@
         if (names[k].toLowerCase().indexOf(q) >= 0) hits.push(names[k]);
       var h = '';
       for (var j = 0; j < hits.length; j++) h += abRow(m, hits[j], hits[j], false, null);
-      /* The catalog only holds SnapMap materials. A name that isn't here may still be a real decl
-       * elsewhere in the game, so offer the resolve-by-name check exactly where the question comes
-       * up rather than as permanent chrome. */
-      el.innerHTML = h || ('<div class="list-empty">Nothing matches &ldquo;' + abEsc(m.q) + '&rdquo;.'
-        + (m.type === 'material'
-            ? '<div style="margin-top:8px"><button class="btn" data-check="1">Check the full decl set</button>'
-            + '<div class="mat-result" data-ab-res="1" style="margin-top:6px"></div></div>' : '')
-        + '</div>');
+      /* No "check the full decl set" escape hatch here any more. It called the engine's CACHED-ONLY
+       * material find, which answers "is this loaded in memory right now" -- browsing loads nothing,
+       * so it reported "not found" for names that plainly exist and taught the reader the opposite
+       * of the truth. It also predated the catalog being complete: Materials is now the UNION of
+       * `material` decls and `.vmtr` atlas rows, so a miss here really is a miss. */
+      el.innerHTML = h || ('<div class="list-empty">Nothing matches &ldquo;' + abEsc(m.q) + '&rdquo;.</div>');
       crumbs.innerHTML = '<span class="cb-flat">Searching every folder</span>';
       cnt.textContent = hits.length + (hits.length >= AB_MAX_HITS ? '+' : '');
       return;
@@ -4255,7 +4764,7 @@
       cb += ' / <span class="cb" data-dir="' + abEsc(parts.slice(0, c + 1).join('/')) + '">' + abEsc(parts[c]) + '</span>';
     crumbs.innerHTML = cb;
 
-    var node = abNodeAt(m.type, m.dir);
+    var node = abNodeAt(abListType(m), m.dir);
     if (!node) { el.innerHTML = '<div class="list-empty">That folder is gone.</div>'; return; }
     var out = '';
     if (m.dir) out += '<div class="entity-item" data-up="1"><div class="ab-row">'
@@ -4468,6 +4977,42 @@
          + '<input type="radio" name="abCarrier" value="' + opts[k].id + '"' + (opts[k].ok ? '' : ' disabled')
          + (m.carrier === opts[k].id ? ' checked' : '') + '>'
          + '<span><b>' + opts[k].label + '</b><span class="why">' + opts[k].why + '</span></span></label>';
+    /* The two companion renderParms, shown for Virtual Mapping only -- confirmed in-editor that a
+     * by-name customMaterial does NOT respond to them; only the SnapMap palette's own triplanar
+     * materials do. Both are visible controls rather than silent writes: they change how the
+     * surface LOOKS, and a mapper should be able to see and change that before committing. */
+    if (m.type === 'material' && m.carrier === 'vm') {
+      var xpSel = abRectOf(path);
+      var rampSel = (m.ramp === undefined) ? AB_RAMP_DEFAULT : m.ramp;
+      h += '<label class="ab-opt" style="margin-top:6px"><span style="flex:1">Tile every'
+         + '<select data-ab="ramp" style="width:100%;margin-top:3px">'
+         + '<option value="keep"' + (rampSel === 'keep' ? ' selected' : '') + '>'
+         +   'Keep the entity&rsquo;s own (write ' + AB_RAMP_DEFAULT + ' if it has none)</option>'
+         + '<option value="none"' + (rampSel === 'none' ? ' selected' : '') + '>'
+         +   'No ramp &mdash; leave it unset (one tile per 426 units)</option>';
+      for (var ri = 0; ri < AB_RAMP_RATES.length; ri++) {
+        var rr = AB_RAMP_RATES[ri];
+        h += '<option value="' + rr + '"' + (rampSel === rr ? ' selected' : '') + '>'
+           + abRampLabel(xpSel, rr) + '</option>';
+      }
+      h += '</select>'
+         + '<span class="why">' + (xpSel && xpSel.w !== xpSel.h
+              ? 'This texture is ' + xpSel.w + '&times;' + xpSel.h + ', so the rate is aspect-corrected '
+              + 'to fit one undistorted copy.'
+              : 'One copy of the texture per N world units &mdash; this is what sets its scale on the '
+              + 'surface.') + '</span></span></label>'
+         + '<label class="ab-opt" style="margin-top:6px"><span style="flex:1">Bloom mask'
+         + '<input type="number" step="any" min="0" data-ab="bloom" list="abBloomList" '
+         +   'style="width:100%;margin-top:3px" placeholder="leave blank to not write it" value="'
+         +   (m.bloom === 'none' ? '' : (m.bloom === undefined ? AB_BLOOM_DEFAULT : m.bloom)) + '">'
+         + '<datalist id="abBloomList">';
+      for (var bi = 0; bi < AB_BLOOM_VALUES.length; bi++)
+        h += '<option value="' + AB_BLOOM_VALUES[bi] + '">';
+      h += '</datalist>'
+         + '<span class="why">Raises or lowers how emissive this material is. 100 is a good default. '
+         + 'Turn it down for anything already emissive. Leave it blank to leave the entity&rsquo;s '
+         + 'own setting alone.</span></span></label>';
+    }
     /* Apply needs a single entity whose decl is loaded (it edits that text), and -- for the
      * renderModelInfo carriers -- an entity whose class can actually wear a material or model. */
     var selCls  = document.getElementById('fClassname');
@@ -4560,6 +5105,12 @@
     abRenderTree(m); abRenderInsp(m);
     abStatus(m, 'Requesting...');
     post({cmd:'requestPreview', name: path});
+    /* Learn this material's atlas rect too, so the tiling dropdown can offer an aspect-corrected
+     * rate for it. Only for materials we do not already have dimensions for -- the baked
+     * cross-platform table and the session cache both answer without a round-trip. The reply is
+     * handled in onMaterialRect, which caches it and re-renders this mount. A material with no
+     * atlas rect simply never answers ok, and the square fallback is then correct anyway. */
+    if (m.type === 'material' && !abRectOf(path)) post({cmd:'materialRect', name: path});
   }
 
   function onPreviewRequested(d) {
@@ -4616,8 +5167,21 @@
   function abFetchAll() {
     for (var i = 0; i < AB_TYPES.length; i++)
       if (!abNames[AB_TYPES[i].id]) post({cmd:'listAssets', assetKind: AB_TYPES[i].kind});
+    /* Not an AB_TYPES row -- see abVtOnly. Fetched alongside the catalogs so the carrier gate is
+     * accurate by the time anything is selected. */
+    if (!abVtOnly) post({cmd:'listAssets', assetKind: AB_KIND_VTONLY});
   }
   function onAssetList(d) {
+    if (d.assetKind === AB_KIND_VTONLY) {
+      var vt = {};
+      var vn = (d.names || '').split('\n');
+      for (var v = 0; v < vn.length; v++) if (vn[v]) vt[vn[v].toLowerCase()] = 1;
+      abVtOnly = vt;
+      /* Re-render: any inspector already on screen was drawn under the "assume it has a decl"
+       * default and may be offering a carrier this name cannot actually use. */
+      for (var k = 0; k < abMounts.length; k++) abRenderInsp(abMounts[k]);
+      return;
+    }
     var t = null;
     for (var i = 0; i < AB_TYPES.length; i++) if (AB_TYPES[i].kind === d.assetKind) t = AB_TYPES[i];
     if (!t) return;
@@ -4632,20 +5196,6 @@
     if (!names.length)
       toast('The ' + t.label.toLowerCase() + ' catalog came back empty - is base\\snap_gameresources.index readable?');
   }
-  function renderMaterialResult(d) {
-    /* String.fromCharCode (not a literal glyph / \u escape) -- the mockup.html -> C++ header embedding
-     * pipeline does not appear to preserve non-ASCII source bytes as valid UTF-8 (a literal check/cross
-     * character here rendered as three mangled "?" glyphs in-game). Plain ASCII source, built up at
-     * runtime, sidesteps the embedding step entirely regardless of what it does with encoding. */
-    var CHECK = String.fromCharCode(0x2713), CROSS = String.fromCharCode(0x2717);
-    var outs = document.querySelectorAll('[data-ab-res]');
-    for (var i = 0; i < outs.length; i++) {
-      outs[i].textContent = d.found ? (CHECK + ' ' + d.name + ' -- ' + (d.info || 'found'))
-                                    : (CROSS + ' ' + d.name + ' -- not a material name the game knows');
-      outs[i].className = 'mat-result ' + (d.found ? 'ok' : 'err');
-    }
-  }
-
   /* ==== New entity ==============================================================================
    * Authors a ONE-entity prefab and stages it through the same path Load/Place uses, so the engine's
    * own PasteInstantiate does the creating and the new entity arrives on the cursor to be placed.
@@ -4733,7 +5283,7 @@
 
   /* The `edit` object for a new entity of this type. Mirrors the decl, but in the prefab's JSON
    * spelling (nested objects, "item[N]" keys). */
-  function neEditBody(type, carrier, name, rect, cam) {
+  function neEditBody(type, carrier, name, rect, cam, extra) {
     var I = '               ';
     var pos = I + '"spawnPosition" : { "x" : ' + neNum(cam.x) + ', "y" : ' + neNum(cam.y)
                 + ', "z" : ' + neNum(cam.z) + ' }';
@@ -4745,9 +5295,23 @@
         /* Override the def's customMaterial too. snapmaps/volume/blocking inherits
          * material/snapmap/entitybase, which will not show a virtual-textured surface -- the parm
          * would land and the box would look untouched. */
+        /* A NEW entity has no prior ramp to preserve, and the carrier ships ramp1 = 1 (one tile per
+         * 426 units), so it must be written or the texture arrives badly stretched. Bloom follows
+         * the same per-texture table Apply uses. */
+        var nePar = NE_BLOCKING_PARMS.concat([{parm:'virtualmapping', value:v}]);
+        var neXp  = abRectOf(name);
+        var neRamp = (extra && extra.ramp) ? extra.ramp : abRampValue(neXp, AB_RAMP_DEFAULT);
+        nePar = nePar.concat([{parm:'ramp1', value: neRamp}]);
+        if (!extra || extra.bloom)
+          nePar = nePar.concat([{parm:'bloommaskscale',
+                                 value: (extra && extra.bloom) ? extra.bloom
+                                                               : abBloomValue(AB_BLOOM_DEFAULT)}]);
         inner = I + '   "customMaterial" : ' + neStr(VM_BLOCK_MATERIAL) + ',\n'
-              + neParms(NE_BLOCKING_PARMS.concat([{parm:'virtualmapping', value:v}]), I + '   ');
+              + neParms(nePar, I + '   ');
       } else {
+        /* By-name carrier. ramp1/bloommaskscale are inert here -- confirmed in-editor that only
+         * Virtual Mapping carries the triplanar program that reads them -- so this stays a bare
+         * customMaterial write with no parms attached. */
         inner = I + '   "customMaterial" : ' + neStr(name);
       }
       return I + '"renderModelInfo" : {\n' + inner + '\n' + I + '},\n' + pos;
@@ -4888,6 +5452,9 @@
     var opt = opts[0];
     if (sel) for (var i = 0; i < opts.length; i++) if (opts[i].id === sel.value) opt = opts[i];
     if (m.type === 'material' && m.carrier === 'vm') {
+      /* Same shortcut as abApply: a baked cross-platform entry already knows its rect. */
+      var xpn = abRectOf(m.sel);
+      if (xpn) { abNewEntityNow(m, opt, m.sel, {w: xpn.w, h: xpn.h, x: xpn.x, y: xpn.y}); return; }
       abPendingNewVM = {m: m, opt: opt, name: m.sel};
       post({cmd:'materialRect', name: m.sel});
       return;
@@ -4895,7 +5462,7 @@
     abNewEntityNow(m, opt, m.sel, null);
   }
   function abNewEntityNow(m, opt, name, rect) {
-    var body = neEditBody(m.type, m.carrier, name, rect, neCam());
+    var body = neEditBody(m.type, m.carrier, name, rect, neCam(), abVmExtra(m, name));
     /* Name it after the asset, so the placed entity is identifiable in the entity list rather than
      * arriving as a bare class name among however many others share that class. */
     var leaf = name.slice(name.lastIndexOf('/') + 1);
