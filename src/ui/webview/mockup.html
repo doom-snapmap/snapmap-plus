@@ -4791,7 +4791,27 @@
    * a sound under every bank that lists it would put the same name on screen several times, which is
    * exactly the duplication the catalog work just removed. */
   function abBankPlace(name) { return abBankOf(name) + '/' + name; }
+  /* Pinned is a FLAT list, deliberately -- the one list in the browser with no folders at all.
+   * Everywhere else the tree pays for itself: thousands of names, and the folder is how you narrow
+   * them. A shortlist is a handful of things the mapper chose by hand, and making them drill to
+   * reach those is asking them to navigate their own answer to navigating. It was also incoherent
+   * across types -- pinned materials nested by their path while pinned sounds, whose names are flat,
+   * did not -- so the same list looked organised or not depending on what happened to be in it.
+   *
+   * Rows are labelled with the FULL name rather than the leaf: the list is cross-type and unsorted
+   * by origin, so the path is the only thing that says which of two similarly-named things this is,
+   * and it matches what Copy hands you. */
+  function abBuildFlat(names) {
+    var root = {dirs:{}, dirKeys:[], files:[], n: names.length};
+    for (var i = 0; i < names.length; i++) root.files.push({name: names[i], path: names[i]});
+    root.files.sort(function(a,b){ return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
+    return root;
+  }
   function abTree(type) {
+    if (type === 'pinned') {
+      if (!abTrees['pinned']) abTrees['pinned'] = abBuildFlat(abNames['pinned'] || []);
+      return abTrees['pinned'];
+    }
     /* Not cached while the bank map is still in flight: the tree built without it would be flat and
      * would stick. onAssetList drops it again when the map lands, for the other order. */
     if (type === 'sound' && !abSndBank) return abBuildTree(abNames['sound'] || []);
@@ -5256,7 +5276,11 @@
     }
     for (var f = 0; f < node.files.length; f++)
       out += abRow(m, node.files[f].name, node.files[f].path, false, null);
-    el.innerHTML = out || '<div class="list-empty">Empty folder.</div>';
+    /* "Empty folder" is right for a folder and useless for an empty shortlist -- a user who has not
+     * pinned anything yet is exactly the one who needs telling what the star does. */
+    el.innerHTML = out || ('<div class="list-empty">' + (m.type === 'pinned'
+      ? 'Nothing pinned yet. Click the star beside any asset to keep it here.'
+      : 'Empty folder.') + '</div>');
     cnt.textContent = node.n.toLocaleString();
   }
   /* ---- auditioning a sound ----------------------------------------------------------------------
