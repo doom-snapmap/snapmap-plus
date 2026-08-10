@@ -108,6 +108,26 @@
                 font-family: inherit; flex-shrink: 0; }
   .entity-item:hover .cp, .entity-item.selected .cp { opacity: 1; }
   .ab-row .cp:hover { border-color: var(--accent); color: var(--text); }
+  /* The pin flag is a GUTTER on the left, not one of the right-hand actions: it reports state, and
+     mixing a state indicator in with Copy made the row read lopsided. Fixed width so every name
+     starts on the same column whether or not the row is pinned or is a folder -- a ragged left edge
+     is worse than a blank cell. Borderless and transparent: it should look like a margin mark, not
+     a second button competing with Copy. */
+  /* Sized UP from the row text, not matched to it: the name is an 11px monospace string that you
+     read, the star is a single mark you scan for at a glance down the left edge. At 11px it was not
+     legible as a star at all, and 15px still read as a speck -- so it gets its own much larger size.
+     The BOX is pinned to the row's ~16px line box while the glyph is allowed to overflow it, so the
+     star can grow past the text without every row in the list getting taller. */
+  .ab-row .ab-pin, .ab-row .ab-pin-gap { width: 18px; flex: 0 0 18px; }
+  .ab-row .ab-pin { opacity: 0; border: 0; background: none; color: var(--muted);
+                    padding: 0; font-size: 18px; line-height: 1; height: 16px; cursor: pointer;
+                    font-family: inherit; display: inline-flex; align-items: center;
+                    justify-content: center; }
+  .entity-item:hover .ab-pin { opacity: .55; }
+  .ab-row .ab-pin:hover { opacity: 1; color: var(--accent); }
+  /* A PINNED row keeps its flag visible without hover -- otherwise the only way to see what you
+     pinned is to hover every row one at a time, which defeats the point of a shortlist. */
+  .ab-row .ab-pin.on { opacity: 1; color: var(--accent); }
 
   .ab-insp .panel-body { padding: 10px; display: flex; flex-direction: column; gap: 9px; }
   /* Checkerboard: many assets are white-on-transparent (GUI icons, decals, POI markers). On a flat
@@ -901,6 +921,7 @@
 
   // ---- browser preview: when opened in a plain browser (no DOOM backend), fake the native side so the
   // file is self-demoing and fully interactive. Inert in DOOM (PREVIEW is false there). ----
+  var previewPinsDoc = '';      // session-only stand-in for %LOCALAPPDATA%\snapmap-plus\pinned.json
   var previewStack0Count = 0;   // fake backend-owned stack 0 count, so Push/Clear feel connected in the demo
   var previewReportSigs = {};   // fake dedup memory for the feedback dialog demo (category|title -> seen)
   var previewEnts = [
@@ -1373,6 +1394,10 @@
       else if (o.assetKind === 13) sample = PREVIEW_SNDBANKS;    /* SH_ASSET_SNDBANK  */
       onMessage({kind:'assetList', assetKind: o.assetKind, names: sample});
     }
+    /* Pins live in a real file in DOOM; in a plain browser they are session-only, which is enough
+     * to exercise pin/unpin, the Pinned rail row and the cross-type behaviour. */
+    else if (o.cmd === 'pinsLoad') { onMessage({kind:'pins', doc: previewPinsDoc}); }
+    else if (o.cmd === 'pinsSave') { previewPinsDoc = o.doc || ''; }
     // No decoder outside the game, so the preview honestly reports that rather than faking pixels.
     else if (o.cmd === 'requestPreview') { onMessage({kind:'previewRequested', ok:false, name:o.name,
       note:'Previews only decode in-game - there is no codec on the browser side.'}); }
@@ -3429,6 +3454,8 @@
       onSoundPreviewResult(d);
     } else if (d.kind === 'assetList') {
       onAssetList(d);
+    } else if (d.kind === 'pins') {
+      abPinsLoad(d.doc);
     } else if (d.kind === 'previewImage') {
       onPreviewImage(d);
     } else if (d.kind === 'previewRequested') {
@@ -4529,6 +4556,87 @@
   var abSndBank = null;               /* lowercased sound name -> bank */
   var abBanks = null;                 /* [{bank, n}] sorted by n desc */
   var AB_NO_BANK = '(no bank)';
+
+  /* ---- pinned assets --------------------------------------------------------------------------
+   * The mapper's own shortlist, ONE list across every asset type -- "the three things I am working
+   * with right now" is rarely all of one kind. Each pin therefore carries its OWN type: the carriers
+   * a material can wear are not the ones a sound can, so a pinned row has to be able to say what it
+   * is independently of whichever rail row is highlighted. See abSelType.
+   *
+   * Persisted host-side to %LOCALAPPDATA%\snapmap-plus\pinned.json, NOT to the settings config: the
+   * settings file is all-or-nothing (a parse failure restores every default), and an unbounded list
+   * the user grows should never be able to reset their theme. Load is best-effort and a malformed
+   * file degrades to "no pins", never to an error the mapper has to deal with. */
+  var AB_PINS_VERSION = 1;
+  var abPins = [];                    /* [{type, name}] in the order they were pinned */
+  var abPinIx = {};                   /* lowercased name -> type, for O(1) lookup while rendering */
+
+  function abPinKey(name) { return (name || '').toLowerCase(); }
+  function abPinTypeOf(name) { return abPinIx[abPinKey(name)] || null; }
+  function abIsPinned(name) { return !!abPinIx[abPinKey(name)]; }
+
+  /* Rebuild the derived index + the name list the Pinned pseudo-type renders from. Called after any
+   * change to abPins, including the initial load. */
+  function abPinsRebuild() {
+    abPinIx = {};
+    var names = [];
+    for (var i = 0; i < abPins.length; i++) {
+      var p = abPins[i];
+      if (!p || !p.name || !p.type) continue;
+      abPinIx[abPinKey(p.name)] = p.type;
+      names.push(p.name);
+    }
+    abNames['pinned'] = names;
+    abTrees['pinned'] = null;         /* the folder tree is derived; force a rebuild */
+  }
+
+  function abPinsSave() {
+    if (PREVIEW) { abPinsRebuild(); return; }   /* no host to write to in a plain browser */
+    post({cmd:'pinsSave', doc: JSON.stringify({version: AB_PINS_VERSION, pins: abPins})});
+  }
+
+  /* Toggle. Pinning stores the type the asset was found under, which is what makes the cross-type
+   * list work. Unpinning drops it wherever it is. */
+  function abPinToggle(type, name) {
+    if (!name) return;
+    if (abIsPinned(name)) {
+      var keep = [];
+      for (var i = 0; i < abPins.length; i++)
+        if (abPinKey(abPins[i].name) !== abPinKey(name)) keep.push(abPins[i]);
+      abPins = keep;
+    } else {
+      abPins.push({type: type, name: name});
+    }
+    abPinsRebuild();
+    abPinsSave();
+    for (var k = 0; k < abMounts.length; k++) { abRenderRail(abMounts[k]); abRenderTree(abMounts[k]); abRenderInsp(abMounts[k]); }
+  }
+
+  /* The host hands back whatever bytes are in the file. Everything about shape is checked HERE --
+   * the host deliberately does not parse it -- so a hand-edited or truncated file costs the pins
+   * and nothing else. */
+  function abPinsLoad(doc) {
+    var parsed = null;
+    try { parsed = JSON.parse(doc || ''); } catch (e) { parsed = null; }
+    var list = (parsed && parsed.pins && parsed.pins.length) ? parsed.pins : [];
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var p = list[i];
+      if (p && typeof p.name === 'string' && typeof p.type === 'string' && p.name) out.push({type: p.type, name: p.name});
+    }
+    abPins = out;
+    abPinsRebuild();
+    for (var k = 0; k < abMounts.length; k++) { abRenderRail(abMounts[k]); abRenderTree(abMounts[k]); }
+  }
+
+  /* The type to treat the CURRENT SELECTION as. Normally the rail's type, but the Pinned list is
+   * cross-type so its rows carry their own. Everything acting on the SELECTED ASSET -- carriers,
+   * the preview route, New entity, Apply -- must go through this; everything acting on the LIST
+   * (fetching, the folder tree, the rail highlight) keeps using m.type. */
+  function abSelType(m) {
+    if (m.type !== 'pinned') return m.type;
+    return (m.sel && abPinTypeOf(m.sel)) || 'material';
+  }
   function abBankOf(name) {
     if (!abSndBank) return null;
     return abSndBank[(name || '').toLowerCase()] || AB_NO_BANK;
@@ -4670,6 +4778,9 @@
   /* The cross-platform set is baked, so seed it here: it is never fetched, and leaving it undefined
    * would make abRenderTree show "Loading the catalog..." forever. */
   abNames['material@xplat'] = AB_XPLAT_NAMES;
+  /* Seeded empty for the same reason: Pinned is never fetched from the catalog, it is rebuilt from
+   * abPins. Left undefined it would sit on "Loading the catalog..." forever for a user with no pins. */
+  abNames['pinned'] = [];
   var abTrees = {};                   /* type -> folder tree built from abNames[type] */
   var abMounts = [];                  /* every mounted browser */
   var abActive = null;                /* the mount that owns the in-flight preview request */
@@ -4862,6 +4973,14 @@
       abFetch(m, false);
     });
     m.el('tree').addEventListener('click', function(e){
+      /* Checked BEFORE the copy button and before row selection: pinning is a decision about the
+       * row, not a request to look at it, so it must not drag the preview along with it. */
+      var pb = e.target.closest ? e.target.closest('[data-pin]') : null;
+      if (pb) {
+        e.stopPropagation();
+        abPinToggle(pb.getAttribute('data-pintype'), pb.getAttribute('data-pin'));
+        return;
+      }
       var cp = e.target.closest ? e.target.closest('[data-copy]') : null;
       if (cp) { e.stopPropagation(); abCopy(cp.getAttribute('data-copy')); return; }
       var row = e.target.closest ? e.target.closest('.entity-item') : null;
@@ -5030,7 +5149,7 @@
   }
   function abApplyNow(m, name, carrier, rect) {
     var box = document.getElementById('declText');
-    var next = dpApply(box.value, m.type, carrier, name, rect, abVmExtra(m, name));
+    var next = dpApply(box.value, abSelType(m), carrier, name, rect, abVmExtra(m, name));
     if (next === null) { toast('That carrier cannot be written', 'err'); return; }
     if (next === box.value) { toast('Already set to that -- nothing changed'); return; }
     box.value = next;
@@ -5104,7 +5223,17 @@
               + '<span class="n">' + (n ? n.toLocaleString() : '-') + '</span></div>';
       if (t.ref) ref += row; else place += row;
     }
-    m.el('rail').innerHTML = '<div class="rail-head">Placeable</div>' + place
+    /* Pinned sits ABOVE the type groups, and is a pseudo-type rather than a group of its own: it
+     * holds whatever the mapper put there, of any kind, so it belongs to neither Placeable nor
+     * Reference. Always shown, including empty -- a row that only appears once you have used a
+     * feature you have not discovered yet is a feature nobody discovers. */
+    var pn = abPins.length;
+    var pinned = '<div class="entity-item' + (m.type === 'pinned' ? ' selected' : '') + '" data-type="pinned"'
+               + ' title="Assets you pinned with the star beside their name. Any type, kept across restarts.">'
+               + '<span class="nm">' + String.fromCharCode(0x2605) + ' Pinned</span>'
+               + '<span class="n">' + (pn ? pn.toLocaleString() : '-') + '</span></div>';
+    m.el('rail').innerHTML = pinned
+                           + '<div class="rail-head">Placeable</div>' + place
                            + '<div class="rail-head">Reference</div>' + ref;
   }
 
@@ -5332,8 +5461,35 @@
 
   function abRow(m, label, path, isDir, count) {
     var sel = (!isDir && m.sel === path) ? ' selected' : '';
+    /* Folders are not pinnable -- a pin is a thing you apply, and a folder is not one. The pin
+     * carries the type the row was found under (abSelType for the Pinned list itself, so
+     * unpinning from inside Pinned keeps working). */
+    var pinned = !isDir && abIsPinned(path);
+    /* The type of THIS ROW, which is not abSelType -- that answers for the current selection. Inside
+     * the Pinned list a row's type is whatever it was pinned as; anywhere else it is the rail's. */
+    var ptype = (m.type === 'pinned') ? (abPinTypeOf(path) || 'material') : m.type;
+    /* LEFT of the name, in its own fixed-width gutter beside the folder twisty -- not floated right
+     * next to Copy, where it made every row look lopsided and put a state indicator in among the
+     * actions. A pinned row's flag reads down the left edge like a margin mark, which is what a
+     * shortlist wants.
+     *
+     * Filled U+2605 / hollow U+2606 -- the favourites idiom, and it doubles up with the gutter's own
+     * colour and opacity states (invisible at rest, faint on hover, solid accent when pinned) so the
+     * pinned/unpinned distinction survives even where colour is hard to judge. Both are BMP, so
+     * fromCharCode is safe: an ASTRAL glyph (a real pushpin, U+1F588) would need its surrogate pair,
+     * because fromCharCode truncates to 16 bits and would silently yield a private-use codepoint
+     * that renders as tofu -- a failure indistinguishable from the font simply lacking the glyph.
+     *
+     * Built with fromCharCode rather than typed literally to keep this file pure ASCII (see the
+     * note at the top of the file -- the build pipeline flattens any non-ASCII byte to '?'). */
+    var pinBtn = isDir ? '<span class="ab-pin-gap"></span>'
+      : '<button class="ab-pin' + (pinned ? ' on' : '') + '" data-pin="' + abEsc(path) + '"'
+      + ' data-pintype="' + abEsc(ptype) + '"'
+      + ' title="' + (pinned ? 'Unpin this asset' : 'Pin this asset to the Pinned list') + '">'
+      + String.fromCharCode(pinned ? 0x2605 : 0x2606) + '</button>';
     return '<div class="entity-item' + sel + '" data-path="' + abEsc(path) + '"' + (isDir ? ' data-dir="1"' : '')
          + '><div class="ab-row"><span class="tw">' + (isDir ? '&#9656;' : '') + '</span>'
+         + pinBtn
          + '<span class="nm' + (isDir ? '' : ' leaf') + '">' + abEsc(label) + '</span>'
          + (isDir ? '<span class="cnt">' + count.toLocaleString() + '</span>'
                   : '<button class="cp" data-copy="' + abEsc(path) + '" title="Copy the full path">copy</button>')
@@ -5345,10 +5501,10 @@
     if (!m.sel) { body.innerHTML = '<div class="placeholder">Select an asset to preview it.</div>'; return; }
     var path = m.sel, cut = path.lastIndexOf('/');
     var leaf = path.slice(cut + 1), folder = cut > 0 ? path.slice(0, cut) : '/';
-    var opts = abCarriers(m.type, path), okAny = false, cur = null;
+    var opts = abCarriers(abSelType(m), path), okAny = false, cur = null;
     for (var i = 0; i < opts.length; i++) { if (opts[i].ok) okAny = true; if (opts[i].id === m.carrier && opts[i].ok) cur = opts[i]; }
     if (!cur) { for (var j = 0; j < opts.length; j++) if (opts[j].ok) { m.carrier = opts[j].id; break; } }
-    var newOpts = abNewOptions(m.type);
+    var newOpts = abNewOptions(abSelType(m));
     /* A sound has no pixels, so the preview slot -- the square the thumbnail would occupy -- carries
      * the audition control instead of an empty dashed box.
      *
@@ -5357,7 +5513,7 @@
      * track is a soundshader decl the same as a footstep, and it is listed in the same catalog.
      * Playing one is also safe to be wrong about -- the backend only auditions names it can find in
      * that catalog, so a name it cannot resolve is a refusal and a log line, never a fault. */
-    var audible = (m.type === 'sound');
+    var audible = (abSelType(m) === 'sound');
     var h;
     if (audible) {
       var on = (abSoundPlaying === path);
@@ -5386,7 +5542,7 @@
      * by-name customMaterial does NOT respond to them; only the SnapMap palette's own triplanar
      * materials do. Both are visible controls rather than silent writes: they change how the
      * surface LOOKS, and a mapper should be able to see and change that before committing. */
-    if (m.type === 'material' && m.carrier === 'vm') {
+    if (abSelType(m) === 'material' && m.carrier === 'vm') {
       var xpSel = abRectOf(path);
       var rampSel = (m.ramp === undefined) ? AB_RAMP_DEFAULT : m.ramp;
       h += '<label class="ab-opt" style="margin-top:6px"><span style="flex:1">Tile every'
@@ -5439,7 +5595,7 @@
         * type rather than on which mount you are in. */
        + '<button class="btn" data-ab-new="1"' + (newOpts ? '' : ' disabled')
        + ' title="' + (newOpts ? 'Create a new entity carrying this asset'
-            : 'A ' + m.type + ' is a property of an entity, not an entity of its own') + '">New entity</button>'
+            : 'A ' + abSelType(m) + ' is a property of an entity, not an entity of its own') + '">New entity</button>'
        + '</div>';
     /* Sounds are the one type with more than one way to be created, and the three differ only in a
      * flag their defs already carry -- so this picks the def, it does not write a flag. */
@@ -5492,13 +5648,13 @@
       if (pe) pe.textContent = path;
       if (ce) ce.disabled = false;
     }
-    if (!abPreviewable(m.type)) {
+    if (!abPreviewable(abSelType(m))) {
       /* Modules are worth saying more about than "no preview": the pane is the only place to
        * explain that this one asset places as BOTH geometry and collision. */
-      m.pvNote = (m.type === 'module')
+      m.pvNote = (abSelType(m) === 'module')
         ? 'A whole SnapMap module. Placed as a prop it brings its own geometry AND its paired '
           + 'collision, so it is solid. No thumbnail - only materials and images decode to pixels.'
-        : (m.type === 'bmodel')
+        : (abSelType(m) === 'bmodel')
         ? 'Baked brush geometry - a piece of a module, or one of its invisible navmesh/occlusion '
           + 'brushes. Render-only: it will not be solid.'
         : 'No preview for this asset type - only materials and images decode to pixels.';
@@ -5515,7 +5671,7 @@
      * cross-platform table and the session cache both answer without a round-trip. The reply is
      * handled in onMaterialRect, which caches it and re-renders this mount. A material with no
      * atlas rect simply never answers ok, and the square fallback is then correct anyway. */
-    if (m.type === 'material' && !abRectOf(path)) post({cmd:'materialRect', name: path});
+    if (abSelType(m) === 'material' && !abRectOf(path)) post({cmd:'materialRect', name: path});
   }
 
   function onPreviewRequested(d) {
@@ -5584,7 +5740,10 @@
      * accurate by the time anything is selected. */
     if (!abVtOnly) post({cmd:'listAssets', assetKind: AB_KIND_VTONLY});
     if (!abSndBank) post({cmd:'listAssets', assetKind: AB_KIND_SNDBANK});
+    /* Pins come from their own file, not the catalog -- asked for once per session alongside it. */
+    if (!abPinsFetched) { abPinsFetched = 1; post({cmd:'pinsLoad'}); }
   }
+  var abPinsFetched = 0;
   function onAssetList(d) {
     if (d.assetKind === AB_KIND_SNDBANK) {
       var map = {}, tally = {};
@@ -5876,7 +6035,7 @@
   var abPendingNewVM = null;      /* {mount, opt, name} while a rect lookup is in flight */
 
   function abNewEntity(m) {
-    var opts = abNewOptions(m.type);
+    var opts = abNewOptions(abSelType(m));
     if (!opts || !m.sel) return;
     /* The engine will not paste over a live selection, and the backend refuses rather than degrading
      * to stage-only (which used to report success with nothing on the cursor). editorSelCount is the
@@ -5889,7 +6048,7 @@
     var sel = m.el('newvariant');
     var opt = opts[0];
     if (sel) for (var i = 0; i < opts.length; i++) if (opts[i].id === sel.value) opt = opts[i];
-    if (m.type === 'material' && m.carrier === 'vm') {
+    if (abSelType(m) === 'material' && m.carrier === 'vm') {
       /* Same shortcut as abApply: a baked cross-platform entry already knows its rect. */
       var xpn = abRectOf(m.sel);
       if (xpn) { abNewEntityNow(m, opt, m.sel, {w: xpn.w, h: xpn.h, x: xpn.x, y: xpn.y}); return; }
@@ -5900,7 +6059,7 @@
     abNewEntityNow(m, opt, m.sel, null);
   }
   function abNewEntityNow(m, opt, name, rect) {
-    var body = neEditBody(m.type, m.carrier, name, rect, neCam(), abVmExtra(m, name));
+    var body = neEditBody(abSelType(m), m.carrier, name, rect, neCam(), abVmExtra(m, name));
     /* Name it after the asset, so the placed entity is identifiable in the entity list rather than
      * arriving as a bare class name among however many others share that class. */
     var leaf = name.slice(name.lastIndexOf('/') + 1);

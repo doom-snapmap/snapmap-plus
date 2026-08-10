@@ -336,6 +336,69 @@ static bool json_get_double(const std::wstring &j, const wchar_t *key, double *o
     return true;
 }
 
+/* ---- pinned assets ---------------------------------------------------------------------------
+ * The mapper's own shortlist, kept in %LOCALAPPDATA%\snapmap-plus\pinned.json -- deliberately its
+ * OWN file rather than a key in the settings config.
+ *
+ * The settings file is all-or-nothing: a parse failure or a schema mismatch sends the whole document
+ * to "damaged -> restored defaults". Settings are a handful of validated scalars and can afford that;
+ * pins are unbounded data the user grows themselves, and a malformed pin list has no business being
+ * able to reset somebody's theme and Show Hidden along with it. Keeping them apart means the worst a
+ * broken pins file can do is cost the pins. It also sits next to rawmap.json, which is already that
+ * folder's convention for user data, and stays hand-editable and easy to back up or share.
+ *
+ * The host does no parsing -- it moves the bytes and nothing else. Shape and validation belong to the
+ * UI, which is the only side that knows what a pin means. A missing file is simply "no pins yet". */
+static std::string poc_pins_path()
+{
+    char *la = nullptr; size_t n = 0;
+    if (_dupenv_s(&la, &n, "LOCALAPPDATA") != 0 || !la) return std::string();
+    std::string dir = std::string(la) + "\\snapmap-plus";
+    free(la);
+    SHCreateDirectoryExA(nullptr, dir.c_str(), nullptr);   /* no-op when it already exists */
+    return dir + "\\pinned.json";
+}
+
+static void poc_send_pins()
+{
+    std::string data;
+    std::string path = poc_pins_path();
+    if (!path.empty()) {
+        FILE *f = nullptr;
+        if (fopen_s(&f, path.c_str(), "rb") == 0 && f) {
+            char buf[4096]; size_t r;
+            while ((r = fread(buf, 1, sizeof buf, f)) > 0) data.append(buf, r);
+            fclose(f);
+        }
+    }
+    /* Sent as an escaped STRING, not spliced in as raw JSON: a hand-edited file that is not valid
+     * JSON must not be able to corrupt the message envelope itself. The UI parses it in a try/catch
+     * and falls back to an empty list. */
+    std::wstring m = L"{\"kind\":\"pins\",\"doc\":\"";
+    m += poc_json_w(data.c_str());
+    m += L"\"}";
+    if (g_webview) g_webview->PostWebMessageAsJson(m.c_str());
+}
+
+/* Write-through: the UI owns the list and hands over the whole document each time it changes. Small
+ * enough that rewriting it beats maintaining a diff, and it keeps the host free of pin semantics.
+ * Written to a temp file and moved into place, so an interrupted write cannot truncate the real one. */
+static void poc_save_pins(const std::string &doc)
+{
+    std::string path = poc_pins_path();
+    if (path.empty()) return;
+    std::string tmp = path + ".tmp";
+    FILE *f = nullptr;
+    if (fopen_s(&f, tmp.c_str(), "wb") != 0 || !f) { poc_log("pins: could not open the temp file"); return; }
+    size_t w = doc.empty() ? 0 : fwrite(doc.data(), 1, doc.size(), f);
+    fclose(f);
+    if (w != doc.size()) { DeleteFileA(tmp.c_str()); poc_log("pins: short write, kept the previous file"); return; }
+    if (!MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileA(tmp.c_str());
+        poc_log("pins: could not replace pinned.json");
+    }
+}
+
 static void poc_read_version()
 {
     char *la = nullptr; size_t n = 0;
@@ -2115,6 +2178,11 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
             } else if (cmd == L"listAssets") {
                 int akind = SH_ASSET_MATERIAL; json_get_int(json, L"assetKind", &akind);
                 poc_send_asset_list(akind);
+            } else if (cmd == L"pinsLoad") {
+                poc_send_pins();
+            } else if (cmd == L"pinsSave") {
+                std::wstring doc; json_get_wstr(json, L"doc", doc);
+                poc_save_pins(w_to_utf8(doc));
             } else if (cmd == L"getPreview") {
                 poc_send_preview();
             } else if (cmd == L"requestPreview") {
