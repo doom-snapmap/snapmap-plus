@@ -19,6 +19,7 @@
 #include "imgpreview.h"
 #include "preview.h"
 #include "bcn.h"
+#include "megapreview.h"   /* the .vmtr atlas: the other half of the material catalog */
 #include "backend_log.h"
 
 #define MAX_PREVIEW 240u        /* matches megapreview's 2x2-page budget, so both routes agree */
@@ -203,6 +204,25 @@ static unsigned char *g_wwise;           /* the manifest text, kept alive: names
 static const char   **g_ev;              /* event names NOT already present as a decl */
 static int            g_evCount;
 
+/* ---- .vmtr-only materials: the OTHER half of the MATERIAL catalog --------------------------------
+ * Exactly the same shape of problem as the Wwise/sound split above, for the same reason: a material
+ * has TWO independent ways to be addressed, and neither set contains the other.
+ *
+ *   - by NAME, through a `material` decl -> the `customMaterial` field.
+ *   - by RECTANGLE, through the `.vmtr` megatexture atlas -> the `virtualmapping` renderParm.
+ *
+ * The atlas does not need a decl. A row in `_vmtr.vmtr` is paintable as a virtualmapping value
+ * whether or not anyone ever authored a `material` decl of that name, and thousands of shipped
+ * rows have no decl at all. Listing only decls therefore hides them completely -- they cannot be
+ * searched for, so they cannot be applied, even though the art is right there in the atlas.
+ *
+ * So MATERIALS list the UNION, deduped case-insensitively, exactly like sounds. The decl record
+ * wins where both exist (it can do both carriers); an atlas-only name is offered as a material
+ * that supports Virtual Mapping but not Custom Material, which is what `has_decl` reports to the
+ * UI so it can gate the carrier honestly instead of guessing. */
+static const char   **g_vt;              /* .vmtr names with NO material decl; point into megapreview */
+static int            g_vtCount;
+
 static box_t   g_box[2];                 /* 0 = snap_gameresources, 1 = gameresources */
 static rec_t  *g_rec;
 static int     g_recCount;
@@ -358,6 +378,56 @@ static void imgpreview_load_wwise(void)
     backend_log(line);
 }
 
+/* Fold the `.vmtr` atlas rows that have NO material decl into the material catalog. Same shape as
+ * imgpreview_load_wwise: sort the decl names once, then binary-search each atlas row against them.
+ * Names point into megapreview's parsed table, which lives for the process, so nothing is copied.
+ * Failure is non-fatal -- a missing atlas just leaves the catalog decl-only, as it was before. */
+static void imgpreview_load_vmtr(void)
+{
+    const char **decl = (const char **)malloc((size_t)g_recCount * sizeof *decl);
+    int dn = 0;
+    if (decl) {
+        for (int i = 0; i < g_recCount; ++i)
+            if (g_rec[i].kind == SH_ASSET_MATERIAL && !g_rec[i].hidden) decl[dn++] = g_rec[i].name;
+        qsort(decl, (size_t)dn, sizeof *decl, cmp_ci);
+    }
+
+    int cap = 1024, dup = 0;
+    g_vt = (const char **)malloc((size_t)cap * sizeof *g_vt);
+    if (!g_vt) { free(decl); return; }
+
+    for (int i = 0; ; ++i) {
+        const char *nm = sh_megapreview_name_at(i);
+        if (!nm) break;
+        if (decl && bsearch(&nm, decl, (size_t)dn, sizeof *decl, cmp_ci)) { dup++; continue; }
+        if (g_vtCount == cap) {
+            const char **bigger = (const char **)realloc(g_vt, (size_t)(cap * 2) * sizeof *bigger);
+            if (!bigger) break;
+            g_vt = bigger; cap *= 2;
+        }
+        g_vt[g_vtCount++] = nm;
+    }
+    free(decl);
+
+    /* The atlas lists a name once per shard it appears in, so collapse adjacent equals after
+     * sorting -- same reason the Wwise manifest needs it. */
+    int raw = g_vtCount;
+    if (g_vtCount > 1) {
+        qsort(g_vt, (size_t)g_vtCount, sizeof *g_vt, cmp_ci);
+        int w = 1;
+        for (int i = 1; i < g_vtCount; ++i)
+            if (_stricmp(g_vt[i], g_vt[w - 1]) != 0) g_vt[w++] = g_vt[i];
+        g_vtCount = w;
+    }
+
+    char line[240];
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+        "B2: imgpreview -- .vmtr atlas: %d distinct decl-less material(s) added to the material "
+        "catalog (%d shard-repeats collapsed, %d already had a decl)",
+        g_vtCount, raw - g_vtCount, dup);
+    backend_log(line);
+}
+
 static int imgpreview_load(void)
 {
     if (g_loaded) return g_loaded > 0;
@@ -407,6 +477,10 @@ static int imgpreview_load(void)
         }
         if (!g_rec[i].hidden) extra++;
     }
+
+    /* AFTER the hide pass: it dedupes against the decls the browser will actually list, so a
+     * campaign-box material that got hidden above must not suppress its atlas twin. */
+    imgpreview_load_vmtr();
 
     char line[260];
     _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -651,6 +725,19 @@ int sh_imgpreview_list(int kind, unsigned start, char *out, size_t cap)
                 size_t n = strlen(g_ev[e]);
                 if (used + n + 2 > cap) break;
                 memcpy(out + used, g_ev[e], n); used += n;
+                out[used++] = '\n';
+                written++;
+            }
+        }
+        /* Same continuation for the decl-less `.vmtr` materials -- they are as applyable as any
+         * decl-backed one (by rectangle rather than by name), so they belong in the same list.
+         * SH_ASSET_VTONLY serves the SAME array on its own, so the UI can tell the two apart. */
+        if (kind == SH_ASSET_MATERIAL || kind == SH_ASSET_VTONLY) {
+            for (int v = 0; v < g_vtCount; ++v) {
+                if (seen++ < start) continue;
+                size_t n = strlen(g_vt[v]);
+                if (used + n + 2 > cap) break;
+                memcpy(out + used, g_vt[v], n); used += n;
                 out[used++] = '\n';
                 written++;
             }

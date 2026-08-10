@@ -184,6 +184,18 @@ int sh_megapreview_rect(const char *name, int *out_xywh)
     return got;
 }
 
+/* Row `i` of the parsed atlas, or NULL past the end. Loads the tables on first use like the rect
+ * lookup does, so the caller need not care who touched it first. Takes the same lock. */
+const char *sh_megapreview_name_at(int i)
+{
+    if (i < 0) return NULL;
+    const char *out = NULL;
+    EnterCriticalSection(&g_lock);
+    if (megapreview_load_rects() && i < g_rectCount) out = g_rects[i].name;
+    LeaveCriticalSection(&g_lock);
+    return out;
+}
+
 /* Open a shard and read its two tables. Layout, all DIRECT from idMegaTexture2::Load
  * (FUN_140e10bf0) and verified against every shipped shard -- campaign evidence 07 SS1:
  *

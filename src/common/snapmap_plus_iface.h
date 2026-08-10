@@ -287,7 +287,18 @@ typedef int           (*sh_list_materials_fn)(struct sh_iface *self, int start, 
 #define SH_ASSET_MODULE      9
 #define SH_ASSET_BMODEL      10
 #define SH_ASSET_CLIPMODEL   11
-#define SH_ASSET_COUNT       12
+/* Appended 2026-08-06. NOT a browser category -- a QUALIFIER on SH_ASSET_MATERIAL.
+ *
+ * A material can be addressed two independent ways: by NAME through a `material` decl
+ * (`customMaterial`), or by RECTANGLE through the `.vmtr` megatexture atlas (`virtualmapping`).
+ * Neither set contains the other, and thousands of shipped atlas rows have no decl at all. The
+ * MATERIAL list is therefore the union of both, so every applyable texture is searchable.
+ *
+ * This kind lists the atlas-only subset -- the names in MATERIAL that have NO decl. The UI fetches
+ * it once and keeps it as a set, so "can this take customMaterial?" is answered locally and
+ * instantly for any name, instead of a per-selection round-trip. */
+#define SH_ASSET_VTONLY      12
+#define SH_ASSET_COUNT       13
 
 /* Page ONE asset type's catalog. `kind` is an SH_ASSET_* value (backend/imgpreview.h); `start` is
  * how many names of that type to skip. Supersedes list_materials, which is kind 0 and stays put

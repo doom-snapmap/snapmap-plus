@@ -41,4 +41,14 @@ int sh_megapreview_install(const sig_result *results, size_t n, const uint8_t *m
  * 245760 to get the renderParm's value form. */
 int sh_megapreview_rect(const char *name, int *out_xywh);
 
+/* Enumerate the `.vmtr` atlas by index: the name of row `i`, or NULL once `i` is past the end.
+ * Returns names in file order and does not filter -- the caller decides what to do with them.
+ *
+ * This exists because a material does NOT need a `material` decl to be usable. The atlas addresses
+ * art by RECTANGLE, so a `virtualmapping` renderParm can paint any row here whether or not anyone
+ * authored a decl for that name. Enumerating decls alone therefore under-reports the real catalog,
+ * and the missing names are unreachable in a browser that only lists decls -- they cannot be
+ * searched for, so they cannot be applied. imgpreview_load_vmtr_names folds these in. */
+const char *sh_megapreview_name_at(int i);
+
 #endif /* BACKEND_MEGAPREVIEW_H */
