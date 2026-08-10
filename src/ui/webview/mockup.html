@@ -3931,18 +3931,19 @@
   var AB_MAX_HITS = 400;              /* cap the filter result DOM; the filter is what narrows */
 
   /* ---- Cross-platform textures -----------------------------------------------------------------
-   * The 195 megatexture rects known to render as the same art on PC, Xbox and PlayStation.
+   * The 224 megatexture rects known to render as the same art on PC, Xbox and PlayStation.
    *
    * THIS SET IS EMPIRICAL AND CANNOT BE DERIVED. Most virtual-mapped textures are NOT the same
    * across platforms -- the atlas is not laid out identically everywhere, so an arbitrary rect can be
-   * completely different art on a console. These 195 are the survivors of somebody's vigorous
-   * platform-by-platform testing, supplied to this project as a working rawmap. There is no rule in
-   * the .vmtr tables that separates them from the rest, so DO NOT try to compute a larger list: the
-   * only way to add an entry is to test it on the actual hardware. Treat any name not in this table
-   * as unknown rather than as excluded.
+   * completely different art on a console. These 224 are the survivors of somebody's vigorous
+   * platform-by-platform testing, supplied to this project as a working rawmap (195 original, plus
+   * 29 added 2026-08-09 from an updated rawmap.json covering more hell/industrial/hotspot textures).
+   * There is no rule in the .vmtr tables that separates them from the rest, so DO NOT try to compute
+   * a larger list: the only way to add an entry is to test it on the actual hardware. Treat any name
+   * not in this table as unknown rather than as excluded.
    *
    * What was verified here is only the transcription: every displayName in that rawmap matched, byte
-   * for byte, the name in the authoritative `.vmtr` atlas row at the same rect -- 195/195, no misses
+   * for byte, the name in the authoritative `.vmtr` atlas row at the same rect -- 224/224, no misses
    * either direction. That makes the names and rects below trustworthy; it says nothing about why
    * these particular ones are portable.
    *
@@ -3950,15 +3951,15 @@
    * installs the build has no such file and this has to work for them too.
    *
    * Two things about this set are easy to get wrong:
-   *   1. The texture identity is the RECT, not a material name. All 344 source entities used just
+   *   1. The texture identity is the RECT, not a material name. All 374 source entities used just
    *      two carrier materials and varied only the virtualmapping value, so `d` below (does a
-   *      `material` decl of this name exist?) is TRUE for only 33 of the 195.
-   *   2. Because of that, Custom Material cannot be offered for the other 162 -- there is no decl
+   *      `material` decl of this name exist?) is TRUE for only 48 of the 224.
+   *   2. Because of that, Custom Material cannot be offered for the other 176 -- there is no decl
    *      to name. Virtual Mapping is the only carrier that can carry them. abCarriers enforces it.
    *
    * Format: name|w|h|x|y|hasDecl, atlas pixels. virtualmapping = (w, h, x, y) / 245760.
    * Previews need nothing extra: megapreview resolves names straight out of the .vmtr tables and
-   * never consults the material decl, so all 195 preview even without one. */
+   * never consults the material decl, so all 224 preview even without one. */
   var AB_XPLAT_RAW = [
     'material/snapmap/dynamic_block_textured_hell_cave_facade|3840|3840|88320|138240|1',
     'models/mapobjects/ca/ca_mp_sacrilegious/ca_hell_hellsack_flat|3840|3840|92160|203520|0',
@@ -4154,19 +4155,48 @@
     'textures/whitecollar/wc_panel_maint_1d|3840|3840|138240|157440|1',
     'textures/whitecollar/wc_panel_maint_tall_1a|3840|3840|142080|153600|1',
     'textures/whitecollar/wc_panel_tall_1_darkblue|3840|3840|103680|207360|1',
-    'textures/whitecollar/wc_space_caps|1920|1920|32640|128640|0'
+    'textures/whitecollar/wc_space_caps|1920|1920|32640|128640|0',
+    'material/snapmap/dynamic_block_textured_gore_blobby|1920|1920|80640|149760|1',
+    'material/snapmap/dynamic_block_textured_gore_floor|3840|3840|84480|145920|1',
+    'material/snapmap/dynamic_block_textured_gore_floor_02|1920|1920|82560|149760|1',
+    'material/snapmap/dynamic_block_textured_gore_meat_01|1920|1920|80640|151680|1',
+    'material/snapmap/dynamic_block_textured_gore_wormy|1920|1920|82560|151680|1',
+    'material/snapmap/dynamic_block_textured_hell_brickpattern01|3840|3840|84480|138240|1',
+    'material/snapmap/dynamic_block_textured_hell_cave_rock_01|3840|3840|84480|142080|1',
+    'material/snapmap/dynamic_block_textured_hell_floor_tile01|3840|3840|88320|142080|1',
+    'material/snapmap/dynamic_block_textured_hell_skull_tile|960|960|81600|142080|1',
+    'material/snapmap/dynamic_block_textured_industrial_floor_interior_02|3840|3840|76800|145920|1',
+    'material/snapmap/dynamic_block_textured_industrial_floor_interior_04|1920|1920|82560|142080|1',
+    'material/snapmap/dynamic_block_textured_industrial_metal_tile|3840|3840|80640|145920|1',
+    'material/snapmap/dynamic_block_textured_industrial_snap_non_slip|3840|3840|76800|149760|1',
+    'material/snapmap/dynamic_block_textured_industrial_tile_diamondplate|1920|1920|80640|144000|1',
+    'material/snapmap/dynamic_block_textured_industrial_tile_hex|1920|1920|82560|144000|1',
+    'textures/snapmaps/hotspots/bc_wall_panel_darkred|3840|3840|19200|192000|0',
+    'textures/snapmaps/hotspots/brick_01_tile|1920|1920|7680|190080|0',
+    'textures/snapmaps/hotspots/ind_panels_02_grey_hotspot|3840|3840|7680|195840|0',
+    'textures/snapmaps/hotspots/ind_panels_02_org|3840|3840|15360|195840|0',
+    'textures/snapmaps/hotspots/ind_panels_light_grey_hotspot|3840|3840|11520|195840|0',
+    'textures/snapmaps/hotspots/ind_panels_steel|3840|3840|19200|195840|0',
+    'textures/snapmaps/hotspots/panel_maint_1_gray_hotspot|3840|3840|15360|192000|0',
+    'textures/snapmaps/hotspots/panel_maint_1_green|3840|3840|23040|192000|0',
+    'textures/snapmaps/hotspots/stone_wall_01_hotspot|1920|1920|9600|190080|0',
+    'textures/snapmaps/hotspots/stone_wall_02_sandstone_hotspot|1920|1920|11520|190080|0',
+    'textures/snapmaps/hotspots/stone_wall_02_tile|1920|1920|5760|190080|0',
+    'textures/snapmaps/hotspots/wc_panel_1b|3840|3840|34560|222720|0',
+    'textures/snapmaps/hotspots/wc_panel_1c|3840|3840|30720|226560|0',
+    'textures/snapmaps/hotspots/wc_panel_maint_1a_red|3840|3840|23040|195840|0'
   ];
 
-  /* Why 162 of the 195 have no `material` decl, since it reads like an error and is not:
+  /* Why 176 of the 224 have no `material` decl, since it reads like an error and is not:
    *
    * The `.vmtr` table and the material decls are DIFFERENT registries. A `.vmtr` row says "this named
    * texture occupies this rectangle of the megatexture" -- pure coordinates. A `material` record is a
-   * definition the engine resolves BY NAME. All 195 are in the .vmtr (that is what gives each one a
-   * virtualmapping at all); 33 are `material` decls in the snap box, and the other **162 are material
+   * definition the engine resolves BY NAME. All 224 are in the .vmtr (that is what gives each one a
+   * virtualmapping at all); 48 are `material` decls in the snap box, and the other **176 are material
    * decls in the CAMPAIGN box**, which SnapMap never mounts.
    *
    * That is what makes the technique reach this art at all. `customMaterial` asks SnapMap to resolve
-   * a NAME, and for those 162 it cannot -- the decl is in a box it does not load, so you would get
+   * a NAME, and for those 176 it cannot -- the decl is in a box it does not load, so you would get
    * nothing. `virtualmapping` asks for a RECTANGLE, so no name lookup happens and the box rule never
    * applies: the pixels are in `virtualtextures/`, which SnapMap does read.
    *
@@ -4204,7 +4234,7 @@
   var abRectCache = {};
   /* The dimensions to derive a ramp aspect from: the baked table first (it is authoritative and
    * needs no round-trip), then anything the backend has told us. Null means "not atlas-backed, or
-   * not looked up yet" -- callers fall back to a square rate, which is correct for the 173 of 195
+   * not looked up yet" -- callers fall back to a square rate, which is correct for the 202 of 224
    * square textures and simply un-corrected for the rest until the rect lands. */
   function abRectOf(name) {
     return abXplatOf(name) || abRectCache[(name || '').toLowerCase()] || null;
@@ -4247,7 +4277,7 @@
    * eyes, engine lights, jump pads all get tuned down by hand in practice.
    *
    * An earlier version baked a per-texture table of those tuned values. That was dropped
-   * deliberately: it covered four textures out of 195, it would need extending every time somebody
+   * deliberately: it covered four textures out of 224, it would need extending every time somebody
    * tuned another, and it presented one author's taste as if it were a property of the texture. The
    * dropdown gives the mapper the same range shipped content uses and lets them look at the surface.
    *
@@ -4270,12 +4300,6 @@
     var fmt = function (n) { return String(AB_RAMP_CONST / n); };
     return '{ -' + fmt(p.x) + ', ' + fmt(p.y) + ', 0, 0 }';
   }
-  /* The option label. ALWAYS both axes when the texture size is known -- "128 x 128" for a square
-   * one, "8 x 64" for a 1:8 one. An earlier version collapsed the square case to a bare "128", which
-   * read as an unexplained single number: 173 of the 195 cross-platform textures are square, so in
-   * practice the two-axis form was almost never on screen and there was nothing to compare against.
-   * When the rect has not arrived yet we CANNOT know the aspect, so say the size is unknown rather
-   * than print "128 x 128" and be wrong for a non-square texture. */
   /* Single number when the texture is square (by far the common case -- x period == y period, so
    * a second number adds nothing a mapper can act on in the half-second they look at this list).
    * Two numbers only when it would actually be wrong to collapse them. Unknown size (rect not
@@ -4288,7 +4312,7 @@
   }
 
   /* The list a mount is currently showing. The cross-platform set is a SEPARATE source keyed off a
-   * pseudo-type, not a filter over the fetched material catalog -- 162 of its 195 names have no
+   * pseudo-type, not a filter over the fetched material catalog -- 176 of its 224 names have no
    * `material` record at all, so filtering the catalog would silently hide the majority of them. */
   function abListType(m) {
     return (m.type === 'material' && m.xplat) ? 'material@xplat' : m.type;
@@ -4453,7 +4477,7 @@
        * meaningless outside the megatexture atlas. */
       +     '<label class="ab-xplat" data-ab="xplatwrap" style="display:none;align-items:center;gap:5px;'
       +       'margin-top:5px;font-size:12px;cursor:pointer" '
-      +       'title="Show only the 195 textures tested to show the same art on PC, Xbox and '
+      +       'title="Show only the 224 textures tested to show the same art on PC, Xbox and '
       +       'PlayStation. Most virtual-mapped textures do NOT match across platforms; this is a '
       +       'hand-tested list, not everything the megatexture can address. Apply them with Virtual '
       +       'Mapping &mdash; most have no material decl SnapMap can load, so they cannot go on by name.">'
