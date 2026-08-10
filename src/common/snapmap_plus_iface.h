@@ -298,7 +298,15 @@ typedef int           (*sh_list_materials_fn)(struct sh_iface *self, int start, 
  * it once and keeps it as a set, so "can this take customMaterial?" is answered locally and
  * instantly for any name, instead of a per-selection round-trip. */
 #define SH_ASSET_VTONLY      12
-#define SH_ASSET_COUNT       13
+/* Appended 2026-08-10. Like SH_ASSET_VTONLY this is NOT a browser category -- a QUALIFIER on
+ * SH_ASSET_SOUND. Each line is `event|bank`, the soundbank a sound came from.
+ *
+ * Sound names are almost entirely FLAT, so a folder tree built from them is one giant root. The
+ * only real structure the catalog has is the <SoundBank> grouping in soundbanksinfo.xml -- 26
+ * banks, sensibly sized, and `doom_snapmaps` in particular is the 485 events that are SnapMap's
+ * own. The UI fetches this once and keeps it as a map, so filtering by bank costs no round-trip. */
+#define SH_ASSET_SNDBANK     13
+#define SH_ASSET_COUNT       14
 
 /* Page ONE asset type's catalog. `kind` is an SH_ASSET_* value (backend/imgpreview.h); `start` is
  * how many names of that type to skip. Supersedes list_materials, which is kind 0 and stays put

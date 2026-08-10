@@ -232,6 +232,32 @@ static int            g_evCount;
 static const char   **g_vt;              /* .vmtr names with NO material decl; point into megapreview */
 static int            g_vtCount;
 
+/* ---- which soundbank a sound came from -----------------------------------------------------------
+ * `soundbanksinfo.xml` groups its events under <SoundBank><ShortName>doom_snapmaps</ShortName>...,
+ * and that grouping is the only meaningful structure the sound catalog has. The names themselves are
+ * almost entirely FLAT (5,160 of the decls are `play_*` with no path at all), so a folder tree built
+ * from names is ~95% one giant root -- which is what it looks like in the browser today.
+ *
+ * 26 distinct banks, sensibly sized (doom_vo 1666, doom_initial 1551, doom_snapmaps 485,
+ * doom_monsters 424, ... only 3 under 20 events), so they make a usable filter where a name-prefix
+ * split does not: prefixes give 835 buckets, 585 of them holding a single event, and `vo` alone
+ * swallowing 46% of the catalog.
+ *
+ * ONE EVENT CAN BE IN SEVERAL BANKS -- 1,619 of 7,649 are. That sounds fatal for a single-valued
+ * filter and is not, because the overlap is almost entirely `doom_initial` (the always-loaded base
+ * bank) paired with the bank that actually means something:
+ *
+ *     345  doom_initial + doom_monsters        121  doom_initial + doom_effects
+ *     180  doom_initial + doom_scripted_events 114  doom_initial + doom_ui
+ *     162  doom_initial + doom_weapon_sp       109  doom_initial + doom_ambience
+ *
+ * So the tie-break is "prefer the specific bank over doom_initial", which resolves nearly all of it.
+ * doom_snapmaps is cleaner still: 485 events, only 27 of which appear in any other bank. */
+typedef struct { const char *name; const char *bank; } sndbank_t;
+static sndbank_t     *g_sb;              /* one row per DISTINCT event; both ptrs into g_wwise      */
+static int            g_sbCount;
+#define SB_BASE_BANK  "doom_initial"     /* the always-loaded bank a specific one should win over   */
+
 static box_t   g_box[2];                 /* 0 = snap_gameresources, 1 = gameresources */
 static rec_t  *g_rec;
 static int     g_recCount;
@@ -314,6 +340,12 @@ static int __cdecl cmp_ci(const void *a, const void *b)
     return _stricmp(*(const char * const *)a, *(const char * const *)b);
 }
 
+/* Same, over the (event, bank) pair table -- groups an event's per-bank repeats together. */
+static int __cdecl cmp_sb_name(const void *a, const void *b)
+{
+    return _stricmp(((const sndbank_t *)a)->name, ((const sndbank_t *)b)->name);
+}
+
 /* Parse the Wwise manifest into g_ev, keeping only events with no `sound` decl of the same name.
  * Failure is non-fatal: a missing or unreadable manifest just means the catalog stays as it was. */
 static void imgpreview_load_wwise(void)
@@ -347,7 +379,31 @@ static void imgpreview_load_wwise(void)
     g_ev = (const char **)malloc((size_t)cap * sizeof *g_ev);
     if (!g_ev) { free(decl); return; }
 
-    for (char *s = (char *)buf; (s = strstr(s, "<Event ")) != NULL; ) {
+    /* Every (event, bank) pair, before dedup. The manifest repeats an event once per bank that
+     * includes it -- 39,971 elements for 7,649 names -- so this is the raw pair list that the
+     * prefer-specific-bank collapse below reduces to one row per event. */
+    int sbCap = 4096;
+    sndbank_t *sbRaw = (sndbank_t *)malloc((size_t)sbCap * sizeof *sbRaw);
+    int sbRawCount = 0;
+
+    /* The bank whose <IncludedEvents> we are currently inside. The manifest is ordered, so tracking
+     * the most recent <SoundBank>'s <ShortName> is enough. Deliberately NOT any <ShortName>: the
+     * <StreamedFiles> block earlier in the file uses that tag too, for .wav paths. Those precede
+     * the first <SoundBank> and contain no <Event>, so anchoring to <SoundBank> skips them. */
+    const char *bank = "";
+
+    for (char *s = (char *)buf; ; ) {
+        char *nb = strstr(s, "<SoundBank ");
+        char *ne = strstr(s, "<Event ");
+        if (!ne) break;                                       /* no events left */
+        if (nb && nb < ne) {                                  /* a new bank starts first */
+            char *sn = strstr(nb, "<ShortName>");
+            char *se = sn ? strstr(sn + 11, "</ShortName>") : NULL;
+            if (sn && se && sn < ne) { *se = '\0'; bank = sn + 11; s = se + 1; }
+            else s = nb + 11;
+            continue;
+        }
+        s = ne;
         char *nm = strstr(s, "Name=\"");
         char *end = strchr(s, '>');
         if (!nm || (end && nm > end)) { s += 7; continue; }   /* no Name on this element */
@@ -356,6 +412,14 @@ static void imgpreview_load_wwise(void)
         if (!q) break;
         *q = '\0';                                            /* terminate in place */
         s = q + 1;
+
+        if (sbRaw) {                                          /* record the pair before any dedup */
+            if (sbRawCount == sbCap) {
+                sndbank_t *bigger = (sndbank_t *)realloc(sbRaw, (size_t)(sbCap * 2) * sizeof *bigger);
+                if (bigger) { sbRaw = bigger; sbCap *= 2; }
+            }
+            if (sbRawCount < sbCap) { sbRaw[sbRawCount].name = nm; sbRaw[sbRawCount].bank = bank; sbRawCount++; }
+        }
 
         if (decl && bsearch(&nm, decl, (size_t)dn, sizeof *decl, cmp_ci)) { dup++; continue; }
         if (g_evCount == cap) {
@@ -379,11 +443,36 @@ static void imgpreview_load_wwise(void)
         g_evCount = w;
     }
 
-    char line[240];
+    /* Collapse the raw (event, bank) pairs to one row per event, preferring a specific bank over
+     * the always-loaded base one. Sorting by name groups the repeats; within a group the first
+     * non-base bank wins, and a group that is ONLY the base bank keeps it. */
+    if (sbRaw && sbRawCount > 0) {
+        qsort(sbRaw, (size_t)sbRawCount, sizeof *sbRaw, cmp_sb_name);
+        g_sb = sbRaw;
+        int w = 0;
+        for (int i = 0; i < sbRawCount; ) {
+            int j = i;
+            const char *best = sbRaw[i].bank;
+            while (j < sbRawCount && _stricmp(sbRaw[j].name, sbRaw[i].name) == 0) {
+                if (_stricmp(best, SB_BASE_BANK) == 0 && _stricmp(sbRaw[j].bank, SB_BASE_BANK) != 0)
+                    best = sbRaw[j].bank;
+                j++;
+            }
+            g_sb[w].name = sbRaw[i].name;
+            g_sb[w].bank = best;
+            w++;
+            i = j;
+        }
+        g_sbCount = w;
+    } else {
+        free(sbRaw);
+    }
+
+    char line[300];
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "B2: imgpreview -- Wwise manifest: %d distinct event(s) with no decl added to the sound "
-        "catalog (%d bank-repeats collapsed, %d already had a decl)",
-        g_evCount, raw - g_evCount, dup);
+        "catalog (%d bank-repeats collapsed, %d already had a decl); %d event(s) mapped to a bank",
+        g_evCount, raw - g_evCount, dup, g_sbCount);
     backend_log(line);
 }
 
@@ -811,6 +900,21 @@ int sh_imgpreview_list(int kind, unsigned start, char *out, size_t cap)
                 size_t n = strlen(g_ev[e]);
                 if (used + n + 2 > cap) break;
                 memcpy(out + used, g_ev[e], n); used += n;
+                out[used++] = '\n';
+                written++;
+            }
+        }
+        /* The sound -> soundbank map, served on its own pseudo-kind as `event|bank` lines. Not
+         * folded into SH_ASSET_SOUND: that list is names the UI applies verbatim, and appending a
+         * bank to them would corrupt every one. The UI keeps this as a side map instead. */
+        if (kind == SH_ASSET_SNDBANK) {
+            for (int b = 0; b < g_sbCount; ++b) {
+                if (seen++ < start) continue;
+                size_t n = strlen(g_sb[b].name), m = strlen(g_sb[b].bank);
+                if (used + n + m + 3 > cap) break;               /* name + '|' + bank + '\n' + NUL */
+                memcpy(out + used, g_sb[b].name, n); used += n;
+                out[used++] = '|';
+                memcpy(out + used, g_sb[b].bank, m); used += m;
                 out[used++] = '\n';
                 written++;
             }
