@@ -340,6 +340,22 @@ static int __cdecl cmp_ci(const void *a, const void *b)
     return _stricmp(*(const char * const *)a, *(const char * const *)b);
 }
 
+/* Sorts RECORD INDICES by (kind, box, name, original index) so repeats of one name inside one box
+ * land next to each other. The index is the last key on purpose: it makes the order total, so the
+ * pass that walks the result can rely on the earlier-indexed record always coming first and keep
+ * that one. Reads through g_sortRec because qsort gives the comparator no context of its own. */
+static const rec_t *g_sortRec;
+static int __cdecl cmp_rec_kind_name(const void *a, const void *b)
+{
+    int ia = *(const int *)a, ib = *(const int *)b;
+    const rec_t *x = &g_sortRec[ia], *y = &g_sortRec[ib];
+    if (x->kind != y->kind) return (int)x->kind - (int)y->kind;
+    if (x->box  != y->box)  return (int)x->box  - (int)y->box;
+    int c = _stricmp(x->name, y->name);
+    if (c) return c;
+    return ia - ib;
+}
+
 /* Same, over the (event, bank) pair table -- groups an event's per-bank repeats together. */
 static int __cdecl cmp_sb_name(const void *a, const void *b)
 {
@@ -623,6 +639,39 @@ static int imgpreview_load(void)
             modules++;
         }
 
+    /* Collapse records that repeat a name WITHIN one box, before anything else looks at the list.
+     *
+     * The index is a record-per-blob table, not a catalog of distinct assets: the same decl can be
+     * baked into the .resources file more than once, at different offsets. `decalatlas` is where it
+     * shows -- 1,673 records for 1,024 distinct names -- and the browser was faithfully listing all
+     * of them, so a mapper saw every decal twice. Clicking one selected both rows and starring one
+     * starred both, because the two rows ARE the same name and the UI keys off the name.
+     *
+     * Measured across snap_gameresources: decalatlas 649 repeats, image 1, and exactly zero for
+     * material, model, md6Def, sound, fx, particle, entityDef, snapEditorEntityDef and cm. So this
+     * is general on purpose but only ever fires where the data actually repeats.
+     *
+     * The FIRST record wins, which is also what find_rec would have resolved to, so nothing that
+     * already previewed changes which blob it reads. */
+    int boxdup = 0;
+    {
+        int *ord = (int *)malloc((size_t)g_recCount * sizeof *ord);
+        if (ord) {
+            for (int i = 0; i < g_recCount; ++i) ord[i] = i;
+            g_sortRec = g_rec;
+            qsort(ord, (size_t)g_recCount, sizeof *ord, cmp_rec_kind_name);
+            for (int i = 1; i < g_recCount; ++i) {
+                const rec_t *a = &g_rec[ord[i - 1]], *b = &g_rec[ord[i]];
+                if (a->kind != b->kind || a->box != b->box) continue;
+                if (_stricmp(a->name, b->name) != 0) continue;
+                /* Sorted by (kind, box, name, ORIGINAL INDEX), so ord[i] is always the later
+                 * record of the pair and the first one indexed is the one left standing. */
+                if (!g_rec[ord[i]].hidden) { g_rec[ord[i]].hidden = 1; boxdup++; }
+            }
+            free(ord);
+        }
+    }
+
     imgpreview_load_wwise();
 
     /* Decide, once, which records the browser will LIST.
@@ -656,12 +705,13 @@ static int imgpreview_load(void)
      * campaign-box material that got hidden above must not suppress its atlas twin. */
     imgpreview_load_vmtr();
 
-    char line[340];
+    char line[420];
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "B2: imgpreview -- indexed %d records (snap=%s game=%s); %d SnapMap modules; "
+        "%d record(s) collapsed as a repeat of a name in the same box; "
         "campaign sounds offered: %d (%d duplicates of SnapMap sounds dropped); "
         "%d wrapper sound decl(s) hidden behind their Play_ event",
-        g_recCount, a ? "ok" : "MISSING", b ? "ok" : "missing", modules, extra, dup, wrapped);
+        g_recCount, a ? "ok" : "MISSING", b ? "ok" : "missing", modules, boxdup, extra, dup, wrapped);
     backend_log(line);
     g_loaded = (g_recCount > 0) ? 1 : -1;
     return g_loaded > 0;
