@@ -306,7 +306,32 @@ typedef int           (*sh_list_materials_fn)(struct sh_iface *self, int start, 
  * banks, sensibly sized, and `doom_snapmaps` in particular is the 485 events that are SnapMap's
  * own. The UI fetches this once and keeps it as a map, so filtering by bank costs no round-trip. */
 #define SH_ASSET_SNDBANK     13
-#define SH_ASSET_COUNT       14
+/* Appended 2026-08-10. Two REAL categories, both reference-only.
+ *
+ * PERK: the `perks` decl type, 190 of them. A perk is activated by idTarget_Command rather than
+ * placed, and the command structure is not worked out yet, so this is a name you copy and wire by
+ * hand. Listed because the alternative is not knowing the names exist.
+ *
+ * SWF: the Flash movies, 193 of them. NOT a decl type at all -- they are `file` records, which is
+ * exactly why they are reference-only: a .swf belongs to some other entity that owns a screen, and
+ * that entity's shape is unknown the same way the perk command is. Names are rewritten to the form
+ * decls actually reference (`swf/interactables/elite_guard.swf`), NOT the baked artifact on disk
+ * (`generated/swf/interactables/elite_guard.bswf`) -- the baked name appears in no decl anywhere and
+ * would be uncopyable. Verified both directions: all 193 live under generated/swf/, and all 30 swf
+ * names referenced by entity defs resolve to one. */
+#define SH_ASSET_PERK        14
+#define SH_ASSET_SWF         15
+/* LIGHT: the light MATERIALS -- the projection/falloff textures a light shines through, which is
+ * what `lightMaterial` names. NOT the light entity: point vs spot is which entity carries the
+ * material, and that is the Create-as choice, not the asset. The editor def exposes the same field
+ * as `#str_snapproperty_light_type`, so this list is that dropdown.
+ *
+ * The union of two sources, the same shape Materials has: `material` decls under `lights/` (78) plus
+ * `lightatlas` rows that have no decl (28) = 106. The decls are PROMOTED out of Materials rather
+ * than copied -- a light projection is not a surface anyone would put on a wall, so listing it in
+ * both places would only ever be the wrong answer in one of them. */
+#define SH_ASSET_LIGHT       16
+#define SH_ASSET_COUNT       17
 
 /* Page ONE asset type's catalog. `kind` is an SH_ASSET_* value (backend/imgpreview.h); `start` is
  * how many names of that type to skip. Supersedes list_materials, which is kind 0 and stays put

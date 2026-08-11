@@ -187,6 +187,11 @@ static const struct { const char *type; unsigned len; unsigned char kind; const 
      * actually load rather than rendering as a black cube. They take renderModelInfo.model like any
      * other model, so they belong in the same category rather than a separate one. */
     { "discreteAnimation",  17, SH_ASSET_MODEL,      NULL,   0 },
+    { "perks",               5, SH_ASSET_PERK,       NULL,   0 },
+    /* `file` is a mixed bag -- .bimage, .tome, .sbsp, .ambientsh -- and only the .bswf half is worth
+     * offering, so the suffix does the filtering the type cannot. See imgpreview_swf_name for why
+     * the listed name is not the name stored here. */
+    { "file",                4, SH_ASSET_SWF,        ".bswf", 5 }
 };
 #define KIND_COUNT ((int)(sizeof g_kinds / sizeof g_kinds[0]))
 
@@ -277,6 +282,26 @@ static unsigned be32(const unsigned char *p) { return ((unsigned)p[0]<<24)|((uns
 static unsigned long long be64(const unsigned char *p)
 { unsigned long long v=0; for (int i=0;i<8;++i) v=(v<<8)|p[i]; return v; }
 
+/* Turn the stored SWF record name into the one decls actually use.
+ *
+ *     generated/swf/interactables/elite_guard.bswf   <- what the index stores
+ *     swf/interactables/elite_guard.swf              <- what an entityDef references
+ *
+ * The baked `.bswf` under `generated/` is the compiled artifact, the same relationship `.bimage`
+ * has to an image decl. It appears in no decl anywhere, so listing it would give the mapper a name
+ * that cannot be pasted into anything.
+ *
+ * Rewritten IN PLACE, which is safe only because the wanted form is strictly SHORTER: dropping
+ * `generated/` frees ten bytes and `.bswf` -> `.swf` one more. The prefix is skipped by moving the
+ * POINTER (no copying), and the extension is overwritten across its own five bytes. Anything not
+ * shaped as expected is returned untouched rather than half-converted. */
+static const char *imgpreview_swf_name(char *name, unsigned nl)
+{
+    if (nl >= 5 && _stricmp(name + nl - 5, ".bswf") == 0)
+        memcpy(name + nl - 5, ".swf", 5);           /* copies the terminator too */
+    return (_strnicmp(name, "generated/", 10) == 0) ? name + 10 : name;
+}
+
 static int imgpreview_load_box(int b, const char *stem)
 {
     char p[MAX_PATH];
@@ -338,6 +363,7 @@ static int imgpreview_load_box(int b, const char *stem)
         /* Names are NOT NUL-terminated in the file; terminate in place. The byte we overwrite
          * is the first of the next length prefix, which we have already consumed. */
         ((char *)name)[nl] = '\0';
+        if (kind == SH_ASSET_SWF) r->name = imgpreview_swf_name((char *)name, nl);
     }
     return 1;
 }
@@ -647,6 +673,40 @@ static int imgpreview_load(void)
             modules++;
         }
 
+    /* Lights is material DECLS only, and that is not an arbitrary choice -- it is what makes the
+     * list agree with a known-good one. Including `lightatlas` rows too gave 117 names; filtering to
+     * decls gives 89, which is exactly the 88 the whitelist is known to accept plus
+     * `lights/defaultprojectedlight`, sibling of defaultpointlight and defaultparallellight, both
+     * already known good.
+     *
+     * The 28 dropped rows are atlas entries with NO material decl -- the light IMAGES, several with
+     * a `.tga` on the end and five not even under lights/ (textures/common/white.tga and friends).
+     * `lightMaterial` names a material, so an image with no decl has nothing to resolve, the same
+     * reason a decl-less atlas row cannot take customMaterial.
+     *
+     * COPY, do not move. Promoting these out of Materials the way palette modules are promoted was
+     * wrong: a move is only right when the source list should not contain the rows at all, and a
+     * `lights/` material is still a material. */
+    int lights = 0;
+    for (int i = 0, n0 = g_recCount; i < n0; ++i) {
+        if (g_rec[i].kind != SH_ASSET_MATERIAL) continue;
+        /* BOTH prefixes. `lights_blended/` is a real second family -- 11 of them, and 11 of the 88
+         * names on the known-good list live there -- and matching only `lights/` silently dropped
+         * every one. It is not a subfolder of `lights/`; the underscore makes it a sibling. */
+        if (_strnicmp(g_rec[i].name, "lights/", 7) != 0 &&
+            _strnicmp(g_rec[i].name, "lights_blended/", 15) != 0)
+            continue;
+        if ((g_recCount & 1023) == 0) {
+            rec_t *bigger = (rec_t *)realloc(g_rec, (size_t)(g_recCount + 1024) * sizeof *bigger);
+            if (!bigger) break;
+            g_rec = bigger;
+        }
+        g_rec[g_recCount] = g_rec[i];
+        g_rec[g_recCount].kind = SH_ASSET_LIGHT;
+        g_recCount++;
+        lights++;
+    }
+
     /* Collapse records that repeat a name WITHIN one box, before anything else looks at the list.
      *
      * The index is a record-per-blob table, not a catalog of distinct assets: the same decl can be
@@ -716,10 +776,11 @@ static int imgpreview_load(void)
     char line[480];
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "B2: imgpreview -- indexed %d records (snap=%s game=%s); %d SnapMap modules; "
+        "%d light material(s) also listed under Lights; "
         "%d record(s) collapsed as a repeat of a name in the same box; "
         "campaign sounds offered: %d (%d duplicates of SnapMap sounds dropped); "
         "%d wrapper sound decl(s) hidden behind their Play_ event",
-        g_recCount, a ? "ok" : "MISSING", b ? "ok" : "missing", modules, boxdup, extra, dup, wrapped);
+        g_recCount, a ? "ok" : "MISSING", b ? "ok" : "missing", modules, lights, boxdup, extra, dup, wrapped);
     backend_log(line);
     g_loaded = (g_recCount > 0) ? 1 : -1;
     return g_loaded > 0;

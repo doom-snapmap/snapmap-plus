@@ -4246,7 +4246,7 @@
       var withModel = dpSetInBlock(decl || '', 'renderModelInfo', [['model', '"' + name + '"']]);
       return dpApply(withModel, type, 'cl', clip, null);
     }
-    var flat = {f: 'fxDecl', s: 'sound', p: 'particleSystem'}[carrier];
+    var flat = {f: 'fxDecl', s: 'sound', p: 'particleSystem', li: 'lightMaterial'}[carrier];
     if (flat) return dpSetScalar(s, open, close, flat, '"' + name + '"');
     return null;
   }
@@ -4288,8 +4288,12 @@
     {id:'bmodel',    kind:10, label:'Brush models'},
     {id:'clipmodel', kind:11, label:'Clip models'},
     {id:'image',     kind:1, label:'Images',      ref:true},
-    {id:'decal',     kind:6, label:'Decal atlases', ref:true}
+    {id:'decal',     kind:6, label:'Decal atlases', ref:true},
+    {id:'light',     kind:16, label:'Lights'},
+    {id:'perk',      kind:14, label:'Perks',      ref:true},
+    {id:'swf',       kind:15, label:'SWF / Flash', ref:true}
   ];
+
 
   /* A SnapMap module ships its geometry and its collision at DIFFERENT paths -- the render half is
    * baked into the palette, the collision stays in the module's own folder. Matching by stem finds
@@ -4807,6 +4811,7 @@
   /* Seeded empty for the same reason: Pinned is never fetched from the catalog, it is rebuilt from
    * abPins. Left undefined it would sit on "Loading the catalog..." forever for a user with no pins. */
   abNames['pinned'] = [];
+
   var abTrees = {};                   /* type -> folder tree built from abNames[type] */
   var abMounts = [];                  /* every mounted browser */
   var abActive = null;                /* the mount that owns the in-flight preview request */
@@ -4970,6 +4975,21 @@
                                       why:'Entity defs are picked from the Inherit dropdown in Entity State. '
                                         + 'Listed here so you can search and copy one, not as a second '
                                         + 'place to set it.'}];
+    /* The light MATERIAL is the asset; point vs spot is only which entity carries it, and that is
+     * the Create-as dropdown. Writes lightMaterial, which sits flat in the edit block -- the same
+     * field the editor surfaces as the light's own type dropdown. */
+    if (type === 'light')    return [{id:'li', label:'Light material', ok:true,
+                                      why:'Writes lightMaterial &mdash; the projection the light shines '
+                                        + 'through. Apply it to a light you have already placed, or use '
+                                        + 'New entity and pick point or spot below.'}];
+    if (type === 'perk')     return [{id:'pk', label:'Reference only', ok:false,
+                                      why:'A perk is granted by an idTarget_Command entity, not placed. '
+                                        + 'The command structure is not worked out yet, so copy the name '
+                                        + 'and wire it by hand for now.'}];
+    if (type === 'swf')      return [{id:'sw', label:'Reference only', ok:false,
+                                      why:'A Flash movie belongs to an entity that owns a screen. Copy the '
+                                        + 'name onto one you have already placed &mdash; building that '
+                                        + 'entity from scratch is not something we can do yet.'}];
     if (type === 'decal')    return [{id:'d', label:'Reference only', ok:false,
                                       why:'A decal atlas is the sheet many decal materials are baked into. '
                                         + 'You apply one of those materials, not the atlas.'}];
@@ -5885,7 +5905,23 @@
      * placed one looks: inherit the empty snapmaps/unknown, override the classname, and carry the
      * whole edit block itself. */
     particle: [{id:'emitter',  label:'Particle emitter',
-                inherit:'snapmaps/unknown',                cls:'idSnapMapParticleEmitter'}]
+                inherit:'snapmaps/unknown',                cls:'idSnapMapParticleEmitter'}],
+    /* Read out of the shipped defs rather than guessed. The editor def is what the mapper places and
+     * it names the entity underneath it:
+     *
+     *     snapEditorEntityDef light/user_point -> entityDef snapmaps/light/user_dynamic_point
+     *                                          -> inherit light/point -> class idLight
+     *
+     * `placeable = false` on the user_dynamic_* defs is NOT a problem and cost me a detour: every
+     * base def already used here carries it, snapmaps/audio/2d_speaker and snapmaps/props/new/barrel01
+     * included. It means "place the editor def that points at me", which is what we are doing.
+     *
+     * The spot def ships its own cone (lightTarget.x 640, lightRight.y -640, lightUp.z 640) and both
+     * ship white lightColorParam, so a placed light looks like one without any parms from us. */
+    light:    [{id:'point',    label:'Point light',
+                inherit:'snapmaps/light/user_dynamic_point', cls:'idSnapMapGameEntity_Light'},
+               {id:'spot',     label:'Spotlight',
+                inherit:'snapmaps/light/user_dynamic_spot',  cls:'idSnapMapGameEntity_Light'}]
   };
   function abNewOptions(type) { return AB_NEW[type] || null; }
 
@@ -5981,6 +6017,10 @@
            + I + '   "clipModelName" : ' + neStr(clip) + '\n'
            + I + '},\n' + pos;
     }
+    /* Straight into the edit block, exactly as the shipped defs do it -- snapmaps/light/dynamic_spot
+     * is literally `edit = { lightMaterial = "lights/biground1"; }`. Everything else about the light
+     * -- cone, colour, intensity -- comes from the inherited def. */
+    if (type === 'light') return I + '"lightMaterial" : ' + neStr(name) + ',\n' + pos;
     if (type === 'fx')    return I + '"fxDecl" : ' + neStr(name) + ',\n' + pos;
     if (type === 'sound') return I + '"sound" : ' + neStr(name) + ',\n' + pos;
     if (type === 'particle')
