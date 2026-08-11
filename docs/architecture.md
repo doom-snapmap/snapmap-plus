@@ -121,6 +121,14 @@ the backend, where they are re-derived per build.
 
 ## Persistent configuration
 
+Two files, owned by different sides on purpose. The backend owns `config.json` — the registered
+settings, validated and versioned. The **frontend host** owns `pinned.json`, the asset browser's
+shortlist, and deliberately keeps it out of the settings registry: `config.json` is all-or-nothing,
+so any parse failure resets the whole document to defaults, which is an acceptable trade for a
+handful of validated scalars and not for unbounded data a user grows themselves. The host moves those
+bytes and parses none of them; shape and validation live in the UI, the only side that knows what a
+pin means. See [`capabilities.md`](capabilities.md#persistent-settings).
+
 The backend is the sole owner of `%LOCALAPPDATA%\snapmap-plus\config.json`; the installer does not
 generate, parse, or replace it. `sh_config_init` runs after the common per-user directories are available
 and creates this version-1 document when the file is absent:

@@ -108,7 +108,7 @@ editor (run `sh` in the console if it doesn't auto-open). Full detail: [`webview
 |---|---|
 | Window shell | The Win32 host window + the manual 30 Hz think-loop; a menu bar with a persistent light/dark theme toggle (seeded before the page is first shown, so a saved dark theme never flashes light); the always-visible Camera-Origin bar (X/Y/Z track the live editor camera; "Lock Position" pins it). |
 | Entities tab | A filterable entity list (multi-select, a persistent Show Hidden toggle, and one persistent selection direction: Follow Selection or Select in 3D; right-click for Copy ID / Delete / Push to stack 0 / Clear stack 0) plus the Entity State panel: classname / inherit / displayname fields and the Decl Text editor — line numbers, syntax coloring, structural lint, advisory schema checks, a distraction-free focus mode. "Save to Decl" commits the edits in memory. SnapMap's own built-in filter/droppable helper entities are excluded from the list and from every entity picker (dev-layer-only; a mapper's own filters are unaffected). |
-| Keyboard paging | ArrowUp/ArrowDown page the Entities, Timelines and Prefabs lists, and — while their dropdown is open — the Inherit / Classname combos and the Timelines "Runs on" picker. Filtering still works alongside it; text editors and rename fields keep normal caret movement. |
+| Keyboard paging | ArrowUp/ArrowDown page the Entities, Timelines and Prefabs lists, and — while their dropdown is open — the Inherit / Classname combos and the Timelines "Runs on" picker. Filtering still works alongside it; text editors and rename fields keep normal caret movement. In the asset browser, paging onto a **file** row also selects it (debounced, so holding the key down previews only the row you stop on); **folder** rows still need Enter/Space, since opening one replaces the whole list. |
 | Native selection parity ("Select in 3D") | Entities selected from the list behave exactly like ones clicked in the 3D view: an empty-space click deselects them, Delete removes all of them, Move works, and the bottom-bar controls apply — single or multi-entity, including switching between entities. Deselecting natively also clears the list highlight. Previously only the explicit Deselect button worked, and Delete/Move misbehaved (Move could soft-lock the game); the cause was that the editor's own mode state was never told a selection existed. |
 | Selection guard while holding | Selecting from the Entities list is refused (with an explanatory toast) while you're grabbing an entity or holding a staged prefab. The engine's Escape/cancel path restores a snapshot keyed positionally to the selection that was live when the grab began, so changing the selection first makes Escape swap entity pointers inside the live map — duplicating entities, deleting others outright, and freezing the game. A pre-existing engine bug (reproduces on released builds); only cancellation triggers it, never accept. Placing a *new* palette entity captures no snapshot and is left unrestricted. |
 | List-assembled group grab | With a selection pushed from the Entities list, grabbing any one of those entities in the 3D view grabs **all** of them — not previously possible. Practical use: browse a logic chain in the 3D view, add the other entities you want to bring along from the Entities list, then grab the node you're on and move the whole group. You can also hold a grabbed entity or a staged prefab, push a selection from the list, and place the held object without losing the selection. |
@@ -128,14 +128,17 @@ black cube.
 
 | Category | What it holds |
 |---|---|
-| Materials | Surfaces. Previewed as real pixels — see below. |
+| **Pinned** | The mapper's own shortlist, at the top of the rail. Any asset, of any type, starred from its row; one shared list rather than one per type, because "the things I am working with right now" is rarely all of one kind. Kept in `%LOCALAPPDATA%\snapmap-plus\pinned.json` — deliberately **not** in `config.json`, so a malformed pin list can only ever cost the pins (see [Persistent settings](#persistent-settings)). |
+| Materials | Surfaces. Previewed as real pixels — see below. The **union** of `material` decls and `.vmtr` megatexture atlas rows: a material is addressable by name *or* by rectangle and neither set contains the other, so a decl-only list hid thousands of rows that are paintable via Virtual Mapping. A **Cross Platform Textures** filter narrows the list to the 224 megatexture rects hand-tested to render identically on PC, Xbox and PlayStation. |
 | Images | The lower-level image records the materials sample. |
-| Models | Props: `.lwo` plus the `md6Def` set. |
+| Models | Props: `.lwo`, the `md6Def` set, and the `discreteAnimation` set — the last of these being the breakable/gib models that a `breakable` decl names, which are indexed under their own decl type and were invisible to a `model`-only catalog. |
 | **Modules** | The 232 `mega_blessed` palette modules — whole SnapMap rooms, placeable as a single entity that is both visible **and solid**. |
 | **Brush models** | Every other baked `.bmodel`: the individual wall, floor and detail pieces those modules are assembled from. Render-only. |
 | **Clip models** | The `cm` type (`.bcm` / `.lwo` / `.md6`) — collision shapes, appliable on their own. |
-| Sounds | The **union** of `sound` decls and Wwise events, deduplicated case-insensitively. Neither set contains the other, and the event-only half is ~2,600 names including the generic SnapMap VO, so a decl-only list is missing thousands of sounds a mapper can hear in the editor. Campaign-box sounds are offered too, and they work. |
+| Sounds | The **union** of `sound` decls and Wwise events, deduplicated case-insensitively. Neither set contains the other, and the event-only half is ~2,600 names including the generic SnapMap VO, so a decl-only list is missing thousands of sounds a mapper can hear in the editor. Campaign-box sounds are offered too, and they work. Filed by **soundbank** rather than by name — see below. |
+| **Lights** | The light **materials**: the projection a light shines through, written as `lightMaterial`. Point vs spot is not the asset — it is which entity carries it, so it is the Create-as choice. |
 | FX, Particles, Decal atlases, Entity defs | The remaining placeable decl types. |
+| **Perks**, **SWF / Flash** | Reference-only. A perk is granted by an `idTarget_Command` entity and a `.swf` belongs to an entity that owns a screen; neither structure is worked out, so both are names to copy and wire by hand. They are listed under Reference rather than Placeable on purpose — a category under Placeable whose Apply button does nothing reads as a broken tool. |
 
 **Previews are real, and cover the catalog.** A material's pixels are produced by locating its pages
 in the shipped megatexture set and decoding them with **DOOM's own page decoder, called in-process**.
@@ -157,6 +160,24 @@ its paired collision into `clipModelInfo.clipModelName`. The two live at differe
 232-for-232; the browser derives the collision name for you. The def's inherited `CLIPMODEL_AUTO` is
 left alone, because naming a clip model overrides the automatic derivation on its own.
 
+A **light** is placed by picking the light material and then choosing Point light or Spotlight under
+Create as. Only `lightMaterial` is written; the cone, the colour and the intensity come from the
+inherited def. Applying a light material to a light already on the map replaces its existing value.
+Three of the shipped light materials contain a literal **space** in the name (`lights/gaus
+_slowpulse` and two more) and the unspaced forms do not exist, so they are listed verbatim — anything
+that trims or splits on whitespace corrupts them.
+
+**Sounds are filed by soundbank, not by name.** After the duplicate collapse nearly every sound name
+is a flat `Play_something`, so a name-derived folder tree was one root folder of ~8,000 rows. The
+Wwise `<SoundBank>` grouping is the only real structure the catalog has — 24 non-empty banks, none of
+them enormous, with `doom_snapmaps` being the set SnapMap itself loads. An event listed in several
+banks is filed under one home (a specific bank in preference to the always-loaded `doom_initial`), so
+no sound appears twice. Search deliberately cuts **across** banks rather than within the open one.
+
+**No Refresh control, by design.** The catalog is indexed once per process out of `.resources` files
+that cannot change while the game is running, so re-fetching returned identical bytes; a type whose
+names never arrived re-asks when it is selected, which is the only retry that was ever needed.
+
 ## Persistent settings
 
 `%LOCALAPPDATA%\snapmap-plus\config.json` holds player preferences shared through the backend-owned
@@ -169,6 +190,16 @@ edits are consumed at the next startup; a successful `sh_user_overrides 0` or `s
 uses the existing settings setter and recreates a deleted file. If the command cannot save, it reports the
 failure, leaves this launch unchanged, and does not establish a next-launch change. The generic bridge already
 permits a future frontend control for this setting.
+
+**Pinned assets live in their own file**, `%LOCALAPPDATA%\snapmap-plus\pinned.json`, not in
+`config.json`. The settings file is all-or-nothing: a parse failure or a schema mismatch sends the
+whole document to "damaged → restored defaults". Settings are a handful of validated scalars and can
+afford that; pins are unbounded data the user grows themselves, and a malformed pin list has no
+business being able to reset somebody's theme along with it. The frontend host moves the bytes and
+does no parsing — shape and validation live in the UI, the only side that knows what a pin means — so
+the worst a broken file can do is cost the pins. Writes go to a temporary file and are moved into
+place, so an interrupted write cannot truncate the real one. A missing file simply means "no pins
+yet"; deleting it clears the shortlist and nothing else.
 
 The schema and registry are intentionally extensible: registered values are type-checked and repaired
 individually, while unrecognized root and `settings` members survive normal rewrites. A damaged file is

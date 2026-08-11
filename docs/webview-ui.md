@@ -114,6 +114,48 @@ through it).
 Newest first. Each dated entry covers one working session's worth of change; the undated **Baseline**
 entry at the bottom is the original POC buildout, before this doc tracked dates per entry.
 
+### 2026-08-10 -- Asset browser: Pinned, soundbanks, four more categories, and the duplicate rows
+
+- **Pinned**, a per-user shortlist at the top of the type rail. A star in the left gutter of every
+  asset row; one shared list across all types, since the handful of things a mapper is holding at
+  once is rarely all of one kind. Stored in its own `%LOCALAPPDATA%\snapmap-plus\pinned.json` rather
+  than in the settings config -- a malformed pin list must not be able to reset somebody's theme.
+  The list renders **flat**, with full names: everywhere else the folder tree earns its keep against
+  thousands of names, but making the mapper drill to reach their own shortlist is asking them to
+  navigate their answer to navigating.
+- **This forced a list-vs-selection split** that is worth knowing about before touching this code.
+  Every other list is one type, so `m.type` answered both "which names do I show" and "what kind of
+  thing is selected". Pinned breaks that -- a pinned row can be any type regardless of which rail
+  entry is lit. `abListType` keeps the list question; `abSelType` answers the selection question from
+  the row itself, and the call sites that decide carriers, previewability and Apply now ask it.
+- **Sounds are filed by soundbank.** Their own names carry almost no structure, so the catalog was
+  one root folder of ~8,000 rows; the Wwise `<SoundBank>` grouping gives 24 sensibly-sized folders.
+  The tree builder now separates *where a name sits* from *what it is called*: `abBuildTree` takes a
+  `place` function for the folder path while the leaf keeps the REAL asset name, so a synthetic
+  `doom_snapmaps/` prefix can never leak into Copy, selection, preview or Apply. This replaced an
+  earlier bank **filter** dropdown -- two controls doing one job is how a browser gets confusing.
+- **Duplicate sound rows removed, twice over.** 449 path-form `sound` decls are wrappers around a
+  Wwise event already in the catalog (`scripted_events/cyberdemon/head_splat_01` and
+  `Play_head_splat_01` are one sound); the first pass caught only the ones whose twin was a bare
+  event, missing the 129 whose twin was another flat decl.
+- **Duplicate rows removed catalog-wide.** Decal atlases listed everything twice -- 1,673 records
+  for 1,024 distinct names -- because the game index is a record-per-blob table, not a catalog of
+  distinct assets. Clicking one row selected both and starring one starred both, since the UI keys
+  off the name. Decal atlases now reads 1,024, Images 3,422.
+- **Four more categories.** **Lights** (89) applies the light *material* as `lightMaterial`, with
+  Point light / Spotlight as the Create-as choice. **Models** gained 108 breakable/gib models that a
+  `model`-only catalog could not see. **Perks** (190) and **SWF / Flash** (193) are reference-only,
+  listed under Reference rather than Placeable so no Apply button pretends to work; SWFs are listed
+  in the `swf/x.swf` form decls actually reference, not the baked `generated/swf/x.bswf` on disk.
+- **"No ramp" now removes the ramp** instead of declining to write one, which on an entity that
+  already carried a `ramp1` left the previous mapper's tiling in place -- the option did nothing on
+  exactly the entities somebody picks it for. `renderParms` is an indexed array, so removing means
+  cutting the entry, renumbering the survivors and fixing `num`.
+- **The catalog Refresh button is gone.** It promised the list could be stale and made fresh, and
+  neither half was true.
+- Browser-preview stand-in gained a real sound + soundbank sample taken from the shipped manifest, so
+  the bank tree and search can be exercised without launching the game.
+
 ### 2026-08-05 -- The Assets tab: the whole shipped catalog, previewed and placeable
 
 - **New Assets tab**, mounted twice from one implementation: as an open-browsing tab, and as a modal

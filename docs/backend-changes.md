@@ -6,6 +6,67 @@ where our own reimplementation was wrong, not the original SnapHak's behavior; a
 (or faithful reproduction of) the *original's* behavior belongs in [`fidelity.md`](fidelity.md)
 instead. Entries are chronological, newest first.
 
+## 2026-08-10 — the asset catalog listed the same asset twice, because the game index is not a catalog
+
+**What changed.** `imgpreview.c` now collapses records that repeat a name within one resource box,
+before anything else reads the record list.
+
+**The bug.** Decal atlases appeared twice per asset in the browser. Clicking one row selected both and
+starring one starred both — which looked like a selection bug and was not: the UI keys off the asset
+name, and the catalog genuinely held two rows carrying the same one.
+
+**Why.** We had been treating `snap_gameresources.index` as a catalog of distinct assets. It is a
+record-per-blob table: the same decl can be baked into the `.resources` file more than once, at
+different offsets, and the index lists each copy. Measured across the box — `decalatlas` 1,673 records
+for 1,024 distinct names, `image` 3,423 for 3,422, and exactly zero repeats for `material`, `model`,
+`md6Def`, `sound`, `fx`, `particle`, `entityDef`, `snapEditorEntityDef` and `cm`. So the collapse is
+written generally but only ever fires where the data actually repeats.
+
+The first record wins, which is what `find_rec` would have resolved to anyway, so nothing that already
+previewed changes which blob it reads.
+
+**Adjacent, unresolved.** The sound catalog files 8,028 rows against 7,649 distinct Wwise events with
+378 unbanked, which leaves one more row carrying a bank than there are events to carry. Sound names are
+unique in both boxes, so the obvious explanation — two names differing only by case — is ruled out. One
+row in 8,028, no known consequence, recorded here rather than chased.
+
+## 2026-08-05 — a sound preview could take the whole sound engine down: the emitter list is published before it is initialised
+
+**What changed.** Every audition now runs on the main thread instead of the caller's.
+
+**The bug.** Previewing a sound could fault and then freeze the game (owner-reported: an access
+violation followed by a hang).
+
+**Why.** The race is in the engine, not in our code — but we were the ones exercising it. DOOM's
+`StartSound_wwise` publishes a brand-new emitter into the sound world's **live list** before
+initialising it: the emitter is allocated and base-constructed, written into the world's array and the
+count bumped, and only *then* is its sound-shader pointer set. `idSoundWorld::Update` walks that same
+list on an audio worker thread, and `idSound::Update` opens by dereferencing exactly the pointer that
+is still null inside that window.
+
+Calling the preview from any thread but the main one widened a window the engine gets away with
+internally. Serialising our calls onto the main thread closes it from our side without patching engine
+code.
+
+## 2026-08-05 — the SWF text editor latched Ctrl: a bare `c` copied and a bare `v` pasted
+
+**What changed.** `swf_textedit.c` no longer tracks Ctrl in a static flag consulted on later
+keystrokes.
+
+**The bug.** After one Ctrl+C or Ctrl+V, every subsequent bare `c` or `v` typed into any editor text
+field copied or pasted — typing "variable" pasted the clipboard once per `v`. Owner-reported, confirmed
+fixed live.
+
+**Why, and the lesson.** The flag was set on Ctrl key-down and cleared on key-up. Modifier key-ups are
+not reliably delivered to a focused SWF script object — the field or the window can lose focus, or the
+engine may simply not dispatch them — and one missed key-up left the flag stuck on for the session.
+
+The design had been justified in a comment as tracking Ctrl "exactly the way the stock handler tracks
+Shift", and that is precisely where the reasoning failed: the stock handler reads Shift only while
+processing the keystroke it was handed, so a release it never sees costs nothing. Ours was consulted on
+*later* keystrokes, which turns the same pattern into a permanent latch. The mechanism was copied
+without its lifetime assumption.
+
 ## 2026-08-05 — the last hardcoded engine RVAs are gone, and the `[64]` that hid a truncated signature DB bit again
 
 **What changed.** Three engine functions were still reached as a raw `module_base + RVA`, which is
