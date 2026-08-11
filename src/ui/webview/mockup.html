@@ -5139,15 +5139,13 @@
    * anything, so it is refused for every carrier before any per-carrier rule is consulted. */
   function abNoApplyEver(cls) { return /^idSnapMapGameEntity_ComboStart/i.test(cls); }
 
-  /* Doors and interactables. An FX, particle or sound bolted onto one of these is refused: they own
-   * their own audio and effects as part of the interaction, and an override fights it.
-   * idInteractable_Obstacle_SnapDoor is the SnapMap door; the other two are the door-ish classes
-   * that are not idInteractable at all. */
-  function abIsDoorOrInteractable(cls) {
-    return /^idInteractable/i.test(cls)
-        || /^idVolume_SnapLockdownDoor/i.test(cls)
-        || /^idSoundDoor/i.test(cls);
-  }
+  /* The door/interactable denylist that used to gate FX, particles and sounds is gone. It was the
+   * right shape when those three carriers had no rule of their own -- "these own their effects, keep
+   * out" -- but each is now gated to the classes that actually own the field it writes, and a door
+   * is not a speaker, an emitter or an FX entity, so it is already refused by all three. Keeping a
+   * second rule that can only ever agree with the first is a place for them to disagree later.
+   * Models keep their own exception list below, which is a different judgement: those classes CAN
+   * wear a model, we simply do not want them to. */
 
   /* MODELS only (not materials) may also be swapped on most interactables -- they are props with a
    * use-prompt, and re-skinning them is a normal thing to want. The exceptions are the ones whose
@@ -5167,21 +5165,58 @@
     return abRenderTargetOk(cls) || /^idInteractable/i.test(cls);
   }
 
+  /* The three single-purpose carriers, each gated to the classes that OWN the field it writes.
+   *
+   * These were previously governed only by the door/interactable denylist, which let a sound land on
+   * a prop, a particle on a trigger volume and -- once Lights shipped -- a light material on
+   * anything at all. Writing a field onto a class that does not read it is inert rather than
+   * destructive, but it leaves a key in the decl that nothing will ever act on, and the mapper has
+   * no way to tell that from a change that worked.
+   *
+   * Derived from the shipped defs, not guessed: of every entityDef in the snap box, `sound` is
+   * carried by exactly one class (idSnapMapGameEntity_Speaker, 8 defs) and `lightMaterial` by the
+   * light classes. `particleSystem` is carried by NO shipped def -- the emitter is built by
+   * overriding the class on snapmaps/unknown rather than inheriting a def that has one -- so its two
+   * classes come from the SnapMap editor's own emitter entities instead. */
+  function abIsSpeaker(cls)  { return /^idSnapMapGameEntity_Speaker/i.test(cls) || /^idSpeaker/i.test(cls); }
+  function abIsLight(cls)    { return /^idSnapMapGameEntity_Light/i.test(cls) || /^idLight/i.test(cls); }
+  function abIsEmitter(cls)  { return /^idSnapMapParticleEmitter/i.test(cls) || /^idParticleEmitter/i.test(cls); }
+  /* FX belongs on the same list, and the wide read of `fxDecl` is a red herring worth recording so
+   * nobody re-opens it: 371 shipped defs across 39 classes carry one, but those are campaign props,
+   * gore entities, AI and weapons -- none of them placeable in SnapMap. The set a mapper can
+   * actually select is the editor's own `fx/` category, and that resolves to just three runtime
+   * classes: idVolume_ToggleableDamageOverTime (45 of its 49 entries, and what this browser's own
+   * New Entity FX option creates), plus the laser hazard and the coop decal stamp. */
+  function abIsFxEntity(cls) {
+    return /^idVolume_ToggleableDamageOverTime/i.test(cls)
+        || /^idLaserHazard/i.test(cls)
+        || /^idDynamicStampEntity/i.test(cls);
+  }
+
   /* The one place that decides whether `carrier` may be written to `cls`. Returns null when it may,
    * or the reason it may not. */
   function abApplyDenied(carrier, cls) {
     cls = cls || '';
     if (abNoApplyEver(cls)) return 'Nothing can be applied to ' + cls;
     /* Geometry and collision follow the model rule -- anything that can wear a model can wear brush
-     * geometry, and the clip model is the same surface seen by physics rather than the renderer. */
+     * geometry, and the clip model is the same surface seen by physics rather than the renderer.
+     * Variables and the player spawn are excluded by abRenderTargetOk matching neither. */
     if (carrier === 'm' || carrier === 'mod' || carrier === 'cl')
       return abModelTargetOk(cls) ? null : cls + ' cannot wear a model';
     if (carrier === 'cm' || carrier === 'vm')
       return abRenderTargetOk(cls) ? null : cls + ' cannot wear a material';
-    if (carrier === 'f' || carrier === 'p' || carrier === 's')
-      return abIsDoorOrInteractable(cls)
-           ? cls + ' owns its own effects and audio -- an FX, particle or sound cannot be applied to it'
-           : null;
+    if (carrier === 's')
+      return abIsSpeaker(cls) ? null
+           : 'A sound goes on a speaker -- ' + cls + ' has no sound to replace';
+    if (carrier === 'li')
+      return abIsLight(cls) ? null
+           : 'A light material goes on a light -- ' + cls + ' would ignore it';
+    if (carrier === 'p')
+      return abIsEmitter(cls) ? null
+           : 'A particle goes on an emitter -- ' + cls + ' has no particle system to replace';
+    if (carrier === 'f')
+      return abIsFxEntity(cls) ? null
+           : 'An FX goes on an FX entity -- ' + cls + ' has no fxDecl of its own to replace';
     return null;
   }
 
