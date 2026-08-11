@@ -149,11 +149,32 @@ reading the image out of the `.index`/`.resources` containers and decoding BC1/B
 Sounds are auditioned through the editor's own preview path with working play/stop.
 
 **Apply to selection** writes the asset into the selected entity's decl and commits immediately —
-one entity at a time, since it patches the decl the editor has open. Which carriers are legal is
-decided per target class: nothing at all applies to the player start; FX, particles and sounds are
-refused on doors and interactables, which own their own effects and audio; models may still be
-swapped on most interactables. **New entity** authors a one-entity prefab and stages it through the
-engine's own paste path, so it arrives held and ready to place.
+one entity at a time, since it patches the decl the editor has open. **New entity** authors a
+one-entity prefab and stages it through the engine's own paste path, so it arrives held and ready to
+place.
+
+**What may be applied is decided per target class**, in one place, and each carrier is gated to the
+classes that own the field it writes:
+
+| Asset | Writes | Allowed on |
+|---|---|---|
+| Material (by name or Virtual Mapping) | `customMaterial` / `virtualmapping` | the render-capable classes: blocking volumes, triggers, props, movers, `idAI2*`, cap entities, dynamic SnapMap entities |
+| Model · Brush model · Module · Clip model | `renderModelInfo.model` (+ `clipModelInfo.clipModelName`) | the same set, **plus** interactables — minus three whose model *is* the mechanic (`idInteractable_Obstacle_SnapDoor`, `idInteractable_WorldCache`, `idInteractable_EliteGuard_Coop`) |
+| Sound | `sound` | speakers (`idSnapMapGameEntity_Speaker`, `idSpeaker*`) |
+| Light material | `lightMaterial` | lights (`idSnapMapGameEntity_Light`, `idLight`) |
+| Particle | `particleSystem` | emitters (`idSnapMapParticleEmitter`, `idParticleEmitter`) |
+| FX | `fxDecl` | FX entities (`idVolume_ToggleableDamageOverTime`, `idLaserHazard`, `idDynamicStampEntity*`) |
+| anything | — | never the player start (`idSnapMapGameEntity_ComboStart*`), and never a variable or a SnapMap action |
+
+Materials and models deliberately share one list: anything that can wear a model can wear a surface,
+and re-texturing a mover or making a trigger volume visible are ordinary techniques.
+
+The gate keys on the entity's **class**, never on whether that class is placeable from the editor's
+palette — those are different questions. `idSnapMapParticleEmitter` has no placeable palette entry at
+all, yet Snapmap+ creates one by overriding the classname on `snapmaps/unknown`, so gating on
+placeability would refuse the emitter this tool just made.
+
+A refusal names the class and says what it lacks, rather than greying the button out silently.
 
 A module is placed by writing **both** halves — the baked geometry into `renderModelInfo.model` and
 its paired collision into `clipModelInfo.clipModelName`. The two live at different paths and pair
