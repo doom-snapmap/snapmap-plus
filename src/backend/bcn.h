@@ -1,7 +1,7 @@
 /* bcn.h -- block-compressed texture decoders (BC1, BC3, BC7) -> RGBA8.
  *
  * DOOM's `.bimage` container stores its mips in these formats; the format code in the bimage
- * header maps to them as (doom-re campaign `revenant-asset-index-and-viewport`, evidence 09 §3d):
+ * header maps to them as (doom-re campaign `revenant-asset-index-and-viewport`, evidence 09 sec 3d):
  *
  *     code 10 -> BC1   (8 bytes / 4x4 block, RGB + 1-bit alpha)
  *     code 11 -> BC3   (16 bytes / 4x4, BC4 alpha block + BC1 colour block)

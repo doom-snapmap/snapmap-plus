@@ -26,7 +26,7 @@
 
 /* ------------------------------------------------------------------ raw DEFLATE ---------------
  * The backend links no zlib, and the payloads are raw DEFLATE terminated by a Z_SYNC_FLUSH
- * marker rather than a BFINAL block (evidence 03 §5). We always know the uncompressed size from
+ * marker rather than a BFINAL block (evidence 03 sec 5). We always know the uncompressed size from
  * the index record, so this stops on output-full and never needs to see the terminator. */
 
 typedef struct { const unsigned char *src; size_t len, pos; unsigned bitbuf, bitcnt; } inf_t;
@@ -322,7 +322,7 @@ static int imgpreview_load_box(int b, const char *stem)
     if (g_box[b].res == INVALID_HANDLE_VALUE) { g_box[b].res = NULL; return 0; }
 
     /* Header: magic "\x05SER", BE count at +0x20, records at +0x28. Each record is three
-     * length-prefixed ASCII strings then a 25-byte fixed block (evidence 03 §2). */
+     * length-prefixed ASCII strings then a 25-byte fixed block (evidence 03 sec 2). */
     if (buf[0] != 0x05 || memcmp(buf+1, "SER", 3) != 0) return 0;
     unsigned n = be32(buf + 0x20);
     size_t o = 0x28;
