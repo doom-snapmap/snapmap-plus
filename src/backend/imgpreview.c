@@ -178,7 +178,15 @@ static const struct { const char *type; unsigned len; unsigned char kind; const 
      * .bmodel and .lwo share ZERO stems, so these are disjoint content, not duplicates of the props.
      * The 232 palette modules are promoted out of this kind in imgpreview_load. */
     { "model",               5, SH_ASSET_BMODEL,     ".bmodel", 7 },
-    { "cm",                  2, SH_ASSET_CLIPMODEL,  NULL,   0 }
+    { "cm",                  2, SH_ASSET_CLIPMODEL,  NULL,   0 },
+    /* The THIRD source of Models, and the reason breakable props looked missing. A `breakable` decl
+     * describes how something shatters and NAMES a model -- `breakable/barrel2` points at
+     * `models/mapobjects/prop/destroyables/barrel2gib.lwo` -- and every one of those models is
+     * indexed under `discreteAnimation`, not `model`. All 108 are .lwo, none of them duplicates a
+     * name already in Models, and they are in the SNAP box, so unlike a campaign-box model they
+     * actually load rather than rendering as a black cube. They take renderModelInfo.model like any
+     * other model, so they belong in the same category rather than a separate one. */
+    { "discreteAnimation",  17, SH_ASSET_MODEL,      NULL,   0 },
 };
 #define KIND_COUNT ((int)(sizeof g_kinds / sizeof g_kinds[0]))
 
@@ -705,7 +713,7 @@ static int imgpreview_load(void)
      * campaign-box material that got hidden above must not suppress its atlas twin. */
     imgpreview_load_vmtr();
 
-    char line[420];
+    char line[480];
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "B2: imgpreview -- indexed %d records (snap=%s game=%s); %d SnapMap modules; "
         "%d record(s) collapsed as a repeat of a name in the same box; "
