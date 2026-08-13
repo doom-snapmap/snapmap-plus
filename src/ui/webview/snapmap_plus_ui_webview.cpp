@@ -621,10 +621,53 @@ static int poc_serialize_entity_into(int id, char *buf, int cap)
     buf[n] = 0;
     return n;
 }
-/* Timelines Stage 2: serialize the timeline entity itself. Timeline entities are far smaller than prefabs,
- * but a 1 MB buffer is comfortably safe for a heavily-authored one. */
-static char g_tl_json[1024 * 1024];
-static int poc_serialize_entity_raw(int id) { return poc_serialize_entity_into(id, g_tl_json, (int)sizeof g_tl_json); }
+/* Serialize `id` into a buffer that GROWS until the result fits, and report how many bytes it took.
+ *
+ * A fixed cap was wrong here, not merely tight. `serialize_entity` never reports the length it needed --
+ * a buffer that is too small comes back as 0, exactly like a real failure -- so the caller cannot say
+ * "your timeline is bigger than the buffer", only "could not open this timeline". Doubling and retrying
+ * is the only way to tell the two apart, and it is the same trick sh_read_growing_text uses for engine
+ * strings, for the same reason.
+ *
+ * A serialize that fills the buffer to its cap is treated as too-small as well: that is what a truncating
+ * writer looks like from here, and half a JSON document would reach the page as `ok` and fail to parse
+ * there instead. An entity whose real size happens to land exactly on the cap costs one extra call and
+ * then resolves, which is the same harmless case that header documents.
+ *
+ * Growth is kept for the session, so the cost is a few extra calls on the ONE open that outgrows the
+ * buffer and nothing afterwards. */
+#define POC_SERIALIZE_INITIAL_CAP (1u * 1024 * 1024)    /* every hand-authored timeline fits here */
+#define POC_SERIALIZE_MAX_CAP     (32u * 1024 * 1024)   /* honest boundary, not a guess at the maximum */
+
+static int poc_serialize_entity_grow(int id, std::vector<char> &buf, const char *what)
+{
+    char l[192];
+    if (buf.size() < POC_SERIALIZE_INITIAL_CAP) buf.resize(POC_SERIALIZE_INITIAL_CAP);
+    for (;;) {
+        int n = poc_serialize_entity_into(id, buf.data(), (int)buf.size());
+        if (n > 0 && (size_t)n < buf.size() - 1) {
+            if (buf.size() > POC_SERIALIZE_INITIAL_CAP) {
+                _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d serialized %d bytes (buffer grown to %lu)",
+                            what, id, n, (unsigned long)buf.size());
+                poc_log(l);
+            }
+            return n;
+        }
+        if (buf.size() >= POC_SERIALIZE_MAX_CAP) {
+            _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d does not fit in %lu bytes (last result %d); refusing",
+                        what, id, (unsigned long)buf.size(), n);
+            poc_log(l);
+            return 0;
+        }
+        buf.resize(buf.size() * 2);
+    }
+}
+/* Timelines Stage 2: serialize the timeline entity itself. A hand-authored timeline is small -- this
+ * buffer was a fixed 1 MB on that basis -- but a GENERATED one is not: a snapmap-midi song exported to a
+ * rawmap serialized to 1.67 MB across 8470 events, 67% past that cap, and every such timeline refused to
+ * open with no way to see why. */
+static std::vector<char> g_tl_json;
+static int poc_serialize_entity_raw(int id) { return poc_serialize_entity_grow(id, g_tl_json, "timeline-open"); }
 /* Post {kind:"timelineData", eid, ok, json:"<the serialized entity JSON, escaped>"}. The page JSON.parses
  * `json` and walks entityDef.state.edit.componentTimeLine / encounterComponent itself (the engine's
  * serialized entity is valid JSON). */
@@ -634,7 +677,7 @@ static void poc_emit_timeline_data(int eid, int json_len)
     bool ok = json_len > 0;
     std::wstring m = L"{\"kind\":\"timelineData\",\"eid\":"; m += std::to_wstring(eid);
     m += L",\"ok\":"; m += ok ? L"true" : L"false";
-    m += L",\"json\":\""; if (ok) m += poc_json_w(g_tl_json); m += L"\"}";
+    m += L",\"json\":\""; if (ok) m += poc_json_w(g_tl_json.data()); m += L"\"}";
     g_webview->PostWebMessageAsJson(m.c_str());
 }
 /* Timelines Stage 3 (per-entity asset dropdowns): resolve the CLASS (entityDef.inherit) of the "Runs on"
@@ -642,15 +685,15 @@ static void poc_emit_timeline_data(int eid, int json_len)
  * OWN buffer (see poc_serialize_entity_into's comment). The page JSON.parses the result and reads .entityDef
  * .inherit itself (matches tl_entity_inherit_slug's "serialize + read one field" approach, but ships the
  * whole doc rather than adding a second raw-string field-scanner in C++ -- one parsing path, not two). */
-static char g_resolve_json[1024 * 1024];
-static int poc_serialize_entity_resolve(int id) { return poc_serialize_entity_into(id, g_resolve_json, (int)sizeof g_resolve_json); }
+static std::vector<char> g_resolve_json;
+static int poc_serialize_entity_resolve(int id) { return poc_serialize_entity_grow(id, g_resolve_json, "entity-resolve"); }
 static void poc_emit_entity_inherit(int eid, int json_len)
 {
     if (!g_webview) return;
     bool ok = json_len > 0;
     std::wstring m = L"{\"kind\":\"entityInherit\",\"eid\":"; m += std::to_wstring(eid);
     m += L",\"ok\":"; m += ok ? L"true" : L"false";
-    m += L",\"json\":\""; if (ok) m += poc_json_w(g_resolve_json); m += L"\"}";
+    m += L",\"json\":\""; if (ok) m += poc_json_w(g_resolve_json.data()); m += L"\"}";
     g_webview->PostWebMessageAsJson(m.c_str());
 }
 /* "Select in editor": drive the 3D editor selection from the list -- clear, then add each. (+0x148/+0x138)
