@@ -609,13 +609,24 @@ static void poc_apply_deletes()
  * (g_tl_json below) and the entity-inherit-resolution path (Stage 3 asset dropdowns, g_resolve_json) -- two
  * SEPARATE buffers, not one shared one, so a resolve request mid-timeline-open can't clobber the open's data
  * if both land in the same think-loop drain. */
+/* Three outcomes, not two. `serialize_entity` reports only a byte count, and 0 means both "your
+ * buffer was too small" and "this entity could not be written" -- that ambiguity is why the grow
+ * loop below exists. But an engine exception is a THIRD thing, and growing the buffer can never
+ * fix it. Collapsing it into 0 made a raise indistinguishable from a tight buffer, so a timeline
+ * that crashed the engine call reported itself as too large and sent the reader hunting for a
+ * bigger buffer that was never the answer. */
+#define POC_SER_UNAVAILABLE (-1)  /* no interface, no vtable, or a bad id -- never even called */
+#define POC_SER_THREW       (-2)  /* the engine call raised; SEH caught it */
+
 static int poc_serialize_entity_into(int id, char *buf, int cap)
 {
     int n = 0;
+    if (cap > 0) buf[0] = 0;
+    if (!(g_iface && g_iface->vtbl && g_iface->vtbl->serialize_entity && id >= 0))
+        return POC_SER_UNAVAILABLE;
     __try {
-        if (g_iface && g_iface->vtbl && g_iface->vtbl->serialize_entity && id >= 0)
-            n = g_iface->vtbl->serialize_entity(g_iface, id, buf, cap - 1);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { n = 0; }
+        n = g_iface->vtbl->serialize_entity(g_iface, id, buf, cap - 1);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return POC_SER_THREW; }
     if (n < 0) n = 0;
     if (n > cap - 1) n = cap - 1;
     buf[n] = 0;
@@ -641,7 +652,7 @@ static int poc_serialize_entity_into(int id, char *buf, int cap)
 
 static int poc_serialize_entity_grow(int id, std::vector<char> &buf, const char *what)
 {
-    char l[192];
+    char l[256];
     if (buf.size() < POC_SERIALIZE_INITIAL_CAP) buf.resize(POC_SERIALIZE_INITIAL_CAP);
     for (;;) {
         int n = poc_serialize_entity_into(id, buf.data(), (int)buf.size());
@@ -653,6 +664,28 @@ static int poc_serialize_entity_grow(int id, std::vector<char> &buf, const char 
             }
             return n;
         }
+        /* Neither of these is a size problem, so stop rather than doubling six more times into the
+         * same answer. Each one names a different bug: UNAVAILABLE means the interface was not
+         * handed over or the id is negative, THREW means the engine call itself raised. */
+        if (n == POC_SER_UNAVAILABLE) {
+            _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d NOT ATTEMPTED -- interface/vtable missing or bad id",
+                        what, id);
+            poc_log(l);
+            return 0;
+        }
+        if (n == POC_SER_THREW) {
+            _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d RAISED inside serialize_entity at %lu bytes -- "
+                        "engine fault, not a buffer size", what, id, (unsigned long)buf.size());
+            poc_log(l);
+            return 0;
+        }
+        /* A clean 0, or a result that filled the buffer. Only these two can be a tight buffer, so
+         * only these two are worth another rung. Log every rung: a run that never succeeds should
+         * show its whole ladder, because "0 at every size" and "filled at every size" are different
+         * findings and the old log printed only the last one. */
+        _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d attempt at %lu bytes returned %d",
+                    what, id, (unsigned long)buf.size(), n);
+        poc_log(l);
         if (buf.size() >= POC_SERIALIZE_MAX_CAP) {
             _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d does not fit in %lu bytes (last result %d); refusing",
                         what, id, (unsigned long)buf.size(), n);
