@@ -7,7 +7,6 @@
  *
  * Read-only against the shipped containers, and no engine call at all: DEFLATE and BCn are public
  * formats, unlike the megatexture page codec which had to be called rather than reimplemented.
- * See the doom-re campaign `revenant-asset-index-and-viewport`, evidence 09.
  */
 #ifndef BACKEND_IMGPREVIEW_H
 #define BACKEND_IMGPREVIEW_H
@@ -20,7 +19,7 @@ int sh_imgpreview_install(void);
  * Returns 1 if something was published, 0 otherwise (no material record, decl names no usable
  * image, image missing, or an image format we do not decode). Call it only AFTER the megatexture
  * route has declined, since a VT-backed material has no image asset to find. */
-int sh_imgpreview_produce(const char *name);
+int sh_imgpreview_produce(const char *name, unsigned long generation);
 
 /* The SH_ASSET_* type ids live in the shared ABI header -- the UI sends one across the iface. */
 #include "../common/snapmap_plus_iface.h"

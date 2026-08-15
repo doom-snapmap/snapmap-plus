@@ -37,6 +37,7 @@
 #include "mockup_html.h"
 #include "config_message.h"
 #include "growing_text_buffer.h"
+#include "serialization_buffer.h"
 #include "theme_bootstrap.h"
 #include "report_scrub.h"   /* pure anonymization scrub + tail for the crash-report log attachment */
 #include "../sh_entity_desc.h" /* GENERATED: OUR RE-extracted Inherit/Classname descriptions (same table sh_tabs.cpp uses) */
@@ -615,18 +616,15 @@ static void poc_apply_deletes()
  * fix it. Collapsing it into 0 made a raise indistinguishable from a tight buffer, so a timeline
  * that crashed the engine call reported itself as too large and sent the reader hunting for a
  * bigger buffer that was never the answer. */
-#define POC_SER_UNAVAILABLE (-1)  /* no interface, no vtable, or a bad id -- never even called */
-#define POC_SER_THREW       (-2)  /* the engine call raised; SEH caught it */
-
 static int poc_serialize_entity_into(int id, char *buf, int cap)
 {
     int n = 0;
     if (cap > 0) buf[0] = 0;
     if (!(g_iface && g_iface->vtbl && g_iface->vtbl->serialize_entity && id >= 0))
-        return POC_SER_UNAVAILABLE;
+        return SH_SERIALIZE_UNAVAILABLE;
     __try {
         n = g_iface->vtbl->serialize_entity(g_iface, id, buf, cap - 1);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return POC_SER_THREW; }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return SH_SERIALIZE_THREW; }
     if (n < 0) n = 0;
     if (n > cap - 1) n = cap - 1;
     buf[n] = 0;
@@ -653,47 +651,43 @@ static int poc_serialize_entity_into(int id, char *buf, int cap)
 static int poc_serialize_entity_grow(int id, std::vector<char> &buf, const char *what)
 {
     char l[256];
-    if (buf.size() < POC_SERIALIZE_INITIAL_CAP) buf.resize(POC_SERIALIZE_INITIAL_CAP);
-    for (;;) {
-        int n = poc_serialize_entity_into(id, buf.data(), (int)buf.size());
-        if (n > 0 && (size_t)n < buf.size() - 1) {
-            if (buf.size() > POC_SERIALIZE_INITIAL_CAP) {
-                _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d serialized %d bytes (buffer grown to %lu)",
-                            what, id, n, (unsigned long)buf.size());
-                poc_log(l);
-            }
-            return n;
-        }
-        /* Neither of these is a size problem, so stop rather than doubling six more times into the
-         * same answer. Each one names a different bug: UNAVAILABLE means the interface was not
-         * handed over or the id is negative, THREW means the engine call itself raised. */
-        if (n == POC_SER_UNAVAILABLE) {
+    int n = sh_serialize_growing_buffer(
+        buf, POC_SERIALIZE_INITIAL_CAP, POC_SERIALIZE_MAX_CAP,
+        [&](char *out, int cap) { return poc_serialize_entity_into(id, out, cap); },
+        [&](size_t cap, int result, bool terminal) {
+        /* Neither negative result is a size problem. Stop rather than doubling into the same answer,
+         * and keep the distinction visible in the log. */
+        if (result == SH_SERIALIZE_UNAVAILABLE) {
             _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d NOT ATTEMPTED -- interface/vtable missing or bad id",
                         what, id);
             poc_log(l);
-            return 0;
+            return;
         }
-        if (n == POC_SER_THREW) {
+        if (result == SH_SERIALIZE_THREW) {
             _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d RAISED inside serialize_entity at %lu bytes -- "
-                        "engine fault, not a buffer size", what, id, (unsigned long)buf.size());
+                        "engine fault, not a buffer size", what, id, (unsigned long)cap);
             poc_log(l);
-            return 0;
+            return;
         }
         /* A clean 0, or a result that filled the buffer. Only these two can be a tight buffer, so
          * only these two are worth another rung. Log every rung: a run that never succeeds should
          * show its whole ladder, because "0 at every size" and "filled at every size" are different
          * findings and the old log printed only the last one. */
         _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d attempt at %lu bytes returned %d",
-                    what, id, (unsigned long)buf.size(), n);
+                    what, id, (unsigned long)cap, result);
         poc_log(l);
-        if (buf.size() >= POC_SERIALIZE_MAX_CAP) {
+        if (terminal) {
             _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d does not fit in %lu bytes (last result %d); refusing",
-                        what, id, (unsigned long)buf.size(), n);
+                        what, id, (unsigned long)cap, result);
             poc_log(l);
-            return 0;
         }
-        buf.resize(buf.size() * 2);
+    });
+    if (n > 0 && buf.size() > POC_SERIALIZE_INITIAL_CAP) {
+        _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d serialized %d bytes (buffer grown to %lu)",
+                    what, id, n, (unsigned long)buf.size());
+        poc_log(l);
     }
+    return n > 0 ? n : 0;
 }
 /* Timelines Stage 2: serialize the timeline entity itself. A hand-authored timeline is small -- this
  * buffer was a fixed 1 MB on that basis -- but a GENERATED one is not: a snapmap-midi song exported to a
@@ -1335,10 +1329,8 @@ static void poc_send_desc(const char *inherit, const char *classname)
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
-/* Asset-viewport tab, first probe: resolve a MATERIAL decl by name (+0x2C8 find_material -- see
- * typeinfo.c) and report found/not-found + whatever info the engine gave back. No image yet -- this is the
- * resolve-only test (doom-re revenant-asset-index-and-viewport campaign, evidence 05); the render+capture
- * side is a separate, larger unsolved piece. Live-tested in-game (2026-07-30): this resolves ANY shipped
+/* Resolve a MATERIAL decl by name (+0x2C8 find_material -- see typeinfo.c) and report
+ * found/not-found plus the metadata the engine supplied. Live-tested in-game (2026-07-30): this resolves ANY shipped
  * material name (the full catalog), not just ones already placed/rendered this session -- a miss means the
  * name genuinely isn't a real material, not "not loaded yet". */
 static void poc_send_material_result(const char *name)

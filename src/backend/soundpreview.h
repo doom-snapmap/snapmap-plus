@@ -8,12 +8,11 @@
  * preview, forces the listener so it plays at the ear, and hands back the emitter handle. Holding
  * that handle is what makes the difference: one preview at a time, stoppable on demand.
  *
- * The two engine entry points and the sound-world global are resolved by byte signature; see the
- * SoundPreview / SoundStopSound / SoundWorldLea entries in signatures.c for the full derivation.
- * Every engine call is SEH-guarded and every one degrades to "no preview", never to a crash.
+ * The engine entry points and the sound-world global are resolved by byte signature, while StopSound
+ * is verified and bound from the live sound-world vtable. Engine calls are SEH-guarded.
  *
- * THREADING: play and stop drive live engine audio state and must run on the DOOM main thread. Call
- * them from the apply drain, the same way the entity-staging path does -- not from the UI thread.
+ * THREADING: the public functions may be called from the UI thread. They queue every sound-world
+ * mutation through DOOM's command buffer so the registered drain executes it on the main thread.
  */
 #ifndef BACKEND_SOUNDPREVIEW_H
 #define BACKEND_SOUNDPREVIEW_H
@@ -38,13 +37,13 @@ int sh_soundpreview_install(const sig_result *results, size_t n,
  * The name is validated against our own asset index FIRST. That is not politeness: the engine
  * resolves the name with a find-or-create that fatals on a miss, so an unchecked name is a crash.
  *
- * Returns 1 if a preview started, 0 if it was refused (not installed, unknown name, engine
- * declined). MAIN THREAD ONLY. */
+ * Returns 1 if the preview was accepted for main-thread execution, 0 if it was refused synchronously
+ * (not installed, unknown name, missing world, or unavailable command buffer). */
 int sh_soundpreview_play(const char *name);
 
 /* Stop the current preview. While a session is open (below) this silences the emitter and nothing
  * else, leaving preview mode up so the next Play is instant; with no session it also drops the mode
- * and DOOM goes quiet again. Safe to call with nothing playing. MAIN THREAD ONLY. */
+ * and DOOM goes quiet again. Safe to call from any thread with nothing playing. */
 void sh_soundpreview_stop(void);
 
 /* Hold preview mode open for as long as the asset browser is on screen (on=1), and tear it down on
@@ -53,7 +52,7 @@ void sh_soundpreview_stop(void);
  * This exists because toggling the mode per click was audibly wrong: each preview ran
  * s_playSoundInBackground 0 then 1, suspending and resuming DOOM's whole audio engine and
  * re-entering solo every time. Sounds faded in, and short ones could finish before the resume did.
- * Establishing the mode once, before the first click, removes that. MAIN THREAD ONLY. */
+ * Establishing the mode once, before the first click, removes that. Safe to call from any thread. */
 void sh_soundpreview_set_session(int on);
 
 /* Is something previewing right now? For the UI's play/stop button state. Thread-safe (plain read). */

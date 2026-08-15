@@ -63,12 +63,29 @@ static void bc4_palette(const u8 *s, size_t len, size_t off, u8 pal[8])
     }
 }
 
-size_t bcn_rgba_size(unsigned w, unsigned h) { return (size_t)BCN_PAD(w) * BCN_PAD(h) * 4u; }
+static int bcn_dimensions(unsigned w, unsigned h, unsigned *pw, unsigned *ph, size_t *rgba_size)
+{
+    unsigned x = BCN_PAD(w), y = BCN_PAD(h);
+    if (!w || !h || !x || !y) return 0;
+    if ((size_t)x > (size_t)-1 / (size_t)y) return 0;
+    size_t pixels = (size_t)x * y;
+    if (pixels > (size_t)-1 / 4u) return 0;
+    if (pw) *pw = x;
+    if (ph) *ph = y;
+    if (rgba_size) *rgba_size = pixels * 4u;
+    return 1;
+}
+
+size_t bcn_rgba_size(unsigned w, unsigned h)
+{
+    size_t size = 0;
+    return bcn_dimensions(w, h, NULL, NULL, &size) ? size : 0;
+}
 
 int bcn_decode_bc1(const u8 *src, size_t src_len, unsigned w, unsigned h, u8 *dst)
 {
-    if (!src || !dst || !w || !h) return 0;
-    unsigned pw = BCN_PAD(w), ph = BCN_PAD(h);
+    unsigned pw = 0, ph = 0;
+    if (!src || !dst || !bcn_dimensions(w, h, &pw, &ph, NULL)) return 0;
     size_t bi = 0;
     for (unsigned by = 0; by < ph; by += 4) {
         for (unsigned bx = 0; bx < pw; bx += 4, bi += 8) {
@@ -90,8 +107,8 @@ int bcn_decode_bc1(const u8 *src, size_t src_len, unsigned w, unsigned h, u8 *ds
 
 int bcn_decode_bc3(const u8 *src, size_t src_len, unsigned w, unsigned h, u8 *dst)
 {
-    if (!src || !dst || !w || !h) return 0;
-    unsigned pw = BCN_PAD(w), ph = BCN_PAD(h);
+    unsigned pw = 0, ph = 0;
+    if (!src || !dst || !bcn_dimensions(w, h, &pw, &ph, NULL)) return 0;
     size_t bi = 0;
     for (unsigned by = 0; by < ph; by += 4) {
         for (unsigned bx = 0; bx < pw; bx += 4, bi += 16) {
@@ -241,8 +258,8 @@ static int interp(int a, int b, int wt) { return (a * (64 - wt) + b * wt + 32) >
 
 int bcn_decode_bc7(const u8 *src, size_t src_len, unsigned w, unsigned h, u8 *dst)
 {
-    if (!src || !dst || !w || !h) return 0;
-    unsigned pw = BCN_PAD(w), ph = BCN_PAD(h);
+    unsigned pw = 0, ph = 0;
+    if (!src || !dst || !bcn_dimensions(w, h, &pw, &ph, NULL)) return 0;
 
     for (unsigned by = 0; by < ph; by += 4) {
         for (unsigned bx = 0; bx < pw; bx += 4) {

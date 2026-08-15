@@ -22,6 +22,12 @@
 #   theme_contract_test -- native/preview theme bridge contract in the embedded HTML source
 #   entity_settings_contract_test -- persisted Entities controls + exclusive selection-mode contract
 #   growing_text_buffer_test -- large declaration reads, exact boundary, and explicit safety-cap signal
+#   preview_test       -- generation-safe request/publish handoff and RGBA PNG payload
+#   bcn_test           -- BC1/BC3/BC7 vectors, padded dimensions, and overflow guards
+#   soundpreview_queue_test -- failed-kick rollback, FIFO preservation, overflow, and name bounds
+#   imgpreview_index_test -- bounded index parsing, catalog routing, SWF rewriting, and rollback
+#   imgpreview_catalog_test -- Wwise/decl union, bank preference, wrapper collapse, and VMTR paging
+#   serialization_buffer_test -- timeline growth, terminal failures, retained capacity, and 32 MB cap
 # The JS checks run after the native suite:
 #   decl_overlay_test -- syntax-paint/text alignment for the Entity State editor
 #   decl_index_order_test -- numeric item[n] presentation, nesting, and 1000-boundary regression
@@ -64,6 +70,12 @@ $tests = @(
     @{ name = "theme_contract_test"; src = 'theme_contract_test.c'; arg = (Join-Path $here '..\src\ui\webview\mockup.html') }
     @{ name = "entity_settings_contract_test"; src = 'entity_settings_contract_test.c'; arg = (Join-Path $here '..\src\ui\webview\mockup.html') }
     @{ name = "growing_text_buffer_test"; src = 'growing_text_buffer_test.cpp'; cxx = $true; arg = "" }
+    @{ name = "preview_test";     src = 'preview_test.c ..\src\backend\preview.c';              arg = "" }
+    @{ name = "bcn_test";         src = 'bcn_test.c ..\src\backend\bcn.c';                      arg = "" }
+    @{ name = "soundpreview_queue_test"; src = 'soundpreview_queue_test.c';                       arg = "" }
+    @{ name = "imgpreview_index_test"; src = 'imgpreview_index_test.c ..\src\backend\bcn.c';      arg = "" }
+    @{ name = "imgpreview_catalog_test"; src = 'imgpreview_catalog_test.c ..\src\backend\bcn.c';  arg = "" }
+    @{ name = "serialization_buffer_test"; src = 'serialization_buffer_test.cpp'; cxx = $true;     arg = "" }
 )
 if ($Doom) {
     if (-not (Test-Path $Doom)) { throw "-Doom path not found: $Doom" }
@@ -95,7 +107,7 @@ Write-Host ""; Write-Host "all native tests passed ($($tests.Count))"
 
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) { Write-Host "[FAIL] node not found (required for decl editor tests)"; exit 1 }
-$jsTests = @("decl_overlay_test.js", "decl_index_order_test.js")
+$jsTests = @("decl_overlay_test.js", "decl_index_order_test.js", "asset_browser_test.js")
 foreach ($jsTest in $jsTests) {
     & $node.Source (Join-Path $here $jsTest)
     if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] $jsTest (exit $LASTEXITCODE)"; exit 1 }

@@ -297,14 +297,13 @@ const char *sh_typeinfo_inherit_base(const char *inheritName, char *buf, size_t 
     } __except (EXCEPTION_EXECUTE_HANDLER) { buf[0] = '\0'; return NULL; }
 }
 
-/* -------------------------------------------------- MATERIAL decl-find (Revenant asset-viewport tab) -----
+/* -------------------------------------------------- MATERIAL decl-find ------------------------------------
  * Resolves a MATERIAL decl by name using the SAME pure decl-find primitive as sh_typeinfo_inherit_base
  * above (DECL_PURE_FIND_RVA -- read-lock -> hash -> probe -> cached-decl-or-NULL -> unlock; no load/parse/
  * FatalError trap), pointed at the MATERIAL type-manager's own ctx instead of the entityDef resource-mgr's.
  *
- * MATERIAL_MGR_CTX_RVA is DIRECT: read off the live `idSWFSpriteInstance::material` setter's own decl-find
- * call in the doom-re `revenant-asset-index-and-viewport` campaign (evidence 05 SS8.2 -- that project's
- * Ghidra numbering, image base 0x140000000, address 0x1459bd9d0 => RVA 0x59BD9D0). Reusing
+ * MATERIAL_MGR_CTX_RVA comes from the live `idSWFSpriteInstance::material` setter's own decl-find
+ * call (image base 0x140000000, address 0x1459bd9d0 => RVA 0x59BD9D0). Reusing
  * DECL_PURE_FIND_RVA against this different ctx is an ASSUMPTION that the pure-find primitive generalizes
  * across resource-manager instances of the same shape -- corroborated (not proven) by the material ctx
  * sitting only 0xE0 bytes from RESOURCE_MGR_CTX_RVA (0x59BD8F0), suggestive of a common per-decl-type
@@ -318,28 +317,28 @@ const char *sh_typeinfo_inherit_base(const char *inheritName, char *buf, size_t 
  * table for the whole catalog at boot, independent of whether any given material has actually been drawn
  * yet -- so "pure find" here means "is this decl NAME known to the registry", not "has this material's
  * resource been loaded". This is materially better than first thought: the resolve step already covers the
- * full asset index, not just an in-use subset. Still NOT the load-or-create primitive (FUN_1417b36f0 in
- * that campaign's numbering, which the same evidence flags as FatalError/INT3-trapping on a miss) -- no
- * reason to touch that now that the pure find already covers the whole catalog.
+ * full asset index, not just an in-use subset. Still NOT the load-or-create primitive at FUN_1417b36f0,
+ * which has FatalError/INT3 traps on a miss -- no reason to touch that now that the pure find already
+ * covers the whole catalog.
  *
  * On a hit, ALSO best-effort calls the engine's own materialWidth/materialHeight getters (the same two
- * functions the SWF native vars `materialWidth`/`materialHeight` call in that campaign -- RVAs 0xD75D40 /
- * 0xD75B40, DIRECT from its decompile) on the resolved idMaterial*, rather than reimplementing their
+ * functions the SWF native vars `materialWidth`/`materialHeight` call at RVAs 0xD75D40 / 0xD75B40) on
+ * the resolved idMaterial*, rather than reimplementing their
  * branchy fallback logic ourselves. A dimension-read fault degrades to "found" with no dimensions, never a
  * crash -- the decl-find result is the useful part either way. CONFIRMED live (2026-07-30, user): the
  * reported dimensions vary sensibly across materials (4096x4096 down to very small) -- real per-material
  * image metadata, not a fixed fallback value, even for materials never placed/rendered this session. Safe
  * to use for real dimension data, not just as a found/not-found signal. */
-#define MATERIAL_MGR_CTX_RVA    0x59BD9D0u  /* material type-mgr ctx (DIRECT, revenant-asset-index-and-viewport evidence 05 SS8.2) */
-#define MATERIAL_WIDTH_FN_RVA   0xD75D40u   /* idMaterial width getter (DIRECT, same campaign) */
-#define MATERIAL_HEIGHT_FN_RVA  0xD75B40u   /* idMaterial height getter (DIRECT, same campaign) */
+#define MATERIAL_MGR_CTX_RVA    0x59BD9D0u  /* material type-manager context from material setter */
+#define MATERIAL_WIDTH_FN_RVA   0xD75D40u   /* verified idMaterial width getter                 */
+#define MATERIAL_HEIGHT_FN_RVA  0xD75B40u   /* verified idMaterial height getter                */
 
 /* Structural probe only (2026-07-30) -- reads two more pointer hops WITHOUT touching Vulkan/GPU state, to
  * confirm the offsets before any capture code is written. Traced from `idVirtualTexture::SetSource`
- * (FUN_140E11C50 in the doom-re campaign's numbering): a VMTR-backed material's `+0x170` field (the SAME
+ * (FUN_140E11C50): a VMTR-backed material's `+0x170` field (the SAME
  * one the width/height getters above already read) is an `idVirtualTexture*`, and that object keeps an
- * ALWAYS-RESIDENT low-res fallback texture -- a genuine `idImage` (built via the same ScratchImage /
- * idImage_Vulkan_PC path evidence 05 SS13.2 already proved reusable, name-suffixed "_minlod", with its own
+ * ALWAYS-RESIDENT low-res fallback texture -- a genuine `idImage` (built through ScratchImage /
+ * idImage_Vulkan_PC, name-suffixed "_minlod", with its own
  * FatalError check on allocation failure) -- at a fixed offset on the idVirtualTexture object.
  * MATERIAL_VTEX_OFF is the SAME offset the width/height getters dereference (0x170); VTEX_MINLOD_IMAGE_OFF
  * is DIRECT from SetSource's own `ScratchImage(..., "..._minlod", ...)` call site writing to `this+0x3F0`.
@@ -352,7 +351,7 @@ const char *sh_typeinfo_inherit_base(const char *inheritName, char *buf, size_t 
  * guesses read a field that some OTHER code path happened to write; this one reads the field the Vulkan
  * image-creation path ITSELF consumes, so it cannot be path-specific:
  *
- *   idImage_Vulkan_PC::Create (FUN_140DADB70 in the campaign's numbering -- identified by its own assertion
+ *   idImage_Vulkan_PC::Create (FUN_140DADB70, identified by its own assertion
  *   naming Image_Vulkan_PC.cpp) memsets a 0x58-byte stack struct, fills it, and passes it to vkCreateImage
  *   as pCreateInfo. 0x58 is sizeof(VkImageCreateInfo) exactly, and the fill is a byte-exact match to that
  *   struct's layout, confirmed by FIVE independent constants that could not all line up by chance:

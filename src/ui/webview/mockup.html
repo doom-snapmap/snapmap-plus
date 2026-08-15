@@ -1378,8 +1378,8 @@
       setTimeout(function(){ onMessage({kind:'reportResult', ok:cOk, mode:cMode, number:43}); }, 600);
     }
     // ---- asset browser, browser-preview side ----
-    // A 130-name sample of the REAL SnapMap material catalog (sampled from the campaign's
-    // vt-backed-snap-materials.txt), so the folder tree in a plain browser has the same shape and
+    // A 130-name representative sample of the shipped SnapMap material catalog, so the folder tree
+    // in a plain browser has the same shape and
     // depth the in-game one does. The in-game catalog is ~9,800 names and comes from the backend.
     // Materials and SOUNDS have a browser-preview sample (both sliced from real shipped data, see
     // PREVIEW_MATERIALS / PREVIEW_SOUNDS); every other type answers empty, which the rail's "-"
@@ -4576,8 +4576,8 @@
    * The `.vmtr` table and the material decls are DIFFERENT registries. A `.vmtr` row says "this named
    * texture occupies this rectangle of the megatexture" -- pure coordinates. A `material` record is a
    * definition the engine resolves BY NAME. All 224 are in the .vmtr (that is what gives each one a
-   * virtualmapping at all); 48 are `material` decls in the snap box, and the other **176 are material
-   * decls in the CAMPAIGN box**, which SnapMap never mounts.
+   * virtualmapping at all); 48 are `material` decls in the SnapMap box, and the other **176 are
+   * material decls in the base-game resource box**, which SnapMap never mounts.
    *
    * That is what makes the technique reach this art at all. `customMaterial` asks SnapMap to resolve
    * a NAME, and for those 176 it cannot -- the decl is in a box it does not load, so you would get
@@ -4681,10 +4681,13 @@
     var parsed = null;
     try { parsed = JSON.parse(doc || ''); } catch (e) { parsed = null; }
     var list = (parsed && parsed.pins && parsed.pins.length) ? parsed.pins : [];
-    var out = [];
+    var out = [], seen = {};
     for (var i = 0; i < list.length; i++) {
       var p = list[i];
-      if (p && typeof p.name === 'string' && typeof p.type === 'string' && p.name) out.push({type: p.type, name: p.name});
+      if (p && typeof p.name === 'string' && typeof p.type === 'string' && p.name) {
+        var key = abPinKey(p.name);
+        if (!seen[key]) { seen[key] = 1; out.push({type: p.type, name: p.name}); }
+      }
     }
     abPins = out;
     abPinsRebuild();
@@ -4892,18 +4895,18 @@
   function abEsc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
 
   /* --- how each asset type reaches an entity ---------------------------------------------------
-   * This is the part that has to be right: it decides what Apply will eventually write. Sourced
-   * from the campaign's placement-carrier map, not guessed from the UI's convenience. */
+   * This is the part that has to be right: it decides what Apply will eventually write. It follows
+   * the engine fields owned by each shipped entity class. */
   function abCarriers(type, path) {
     if (type === 'material') {
-      /* A cross-platform texture whose decl lives in the campaign box is refused BY NAME.
+      /* A cross-platform texture whose decl lives in the base-game resource box is refused BY NAME.
        *
        * INFERRED (2026-08-05), not live-tested for materials specifically -- the reasoning, so it can
        * be overturned cheaply if wrong: SnapMap does not mount `gameresources.resources` (live-proven
-       * for MODELS -- a campaign-box model renders as a black cube), and a customMaterial name is
+       * for MODELS -- a base-game-only model renders as a black cube), and a customMaterial name is
        * resolved through the decl manager out of that same box, so the same lookup fails the same way.
        *
-       * Campaign-box SOUNDS do work, which looks like a counterexample and is not: a sound decl is a
+       * Base-game-only SOUNDS do work, which looks like a counterexample and is not: a sound decl is a
        * thin wrapper and the audio itself lives in .bnk/.pck soundbanks loaded independently of the
        * .resources boxes. Sounds have a side door; materials do not.
        *
@@ -4915,7 +4918,7 @@
       /* TWO separate reasons a name can be unappliable, and they are not the same check:
        *   - NO DECL AT ALL. The catalog lists the union of `material` decls and `.vmtr` atlas rows,
        *     and thousands of atlas rows never had a decl authored. Nothing to resolve by name.
-       *   - DECL IS IN THE CAMPAIGN BOX (the INFERRED case above). A decl exists, but not in a box
+       *   - DECL IS IN THE BASE-GAME RESOURCE BOX (the INFERRED case above). A decl exists, but not in a box
        *     SnapMap mounts. */
       var noDecl = !abHasDecl(path);
       var byName = !noDecl && (!xp || xp.d);
@@ -4926,7 +4929,7 @@
              : noDecl ? 'This texture has no material decl &mdash; it exists only as a rectangle in the '
                       + 'megatexture atlas, so there is no name for the engine to resolve. Use '
                       + 'Virtual Mapping.'
-                      : 'This texture&rsquo;s material decl is in the campaign box, which SnapMap does not '
+                      : 'This texture&rsquo;s material decl is in the base-game resource box, which SnapMap does not '
                       + 'load, so it cannot be applied by name. Use Virtual Mapping &mdash; that addresses '
                       + 'the atlas by rectangle and needs no decl.'},
         {id:'vm', label:'Virtual Mapping', ok:true,
@@ -5182,7 +5185,7 @@
   function abIsLight(cls)    { return /^idSnapMapGameEntity_Light/i.test(cls) || /^idLight/i.test(cls); }
   function abIsEmitter(cls)  { return /^idSnapMapParticleEmitter/i.test(cls) || /^idParticleEmitter/i.test(cls); }
   /* FX belongs on the same list, and the wide read of `fxDecl` is a red herring worth recording so
-   * nobody re-opens it: 371 shipped defs across 39 classes carry one, but those are campaign props,
+   * nobody re-opens it: 371 shipped defs across 39 classes carry one, but those are story-mode props,
    * gore entities, AI and weapons -- none of them placeable in SnapMap. The set a mapper can
    * actually select is the editor's own `fx/` category, and that resolves to just three runtime
    * classes: idVolume_ToggleableDamageOverTime (45 of its 49 entries, and what this browser's own

@@ -3,7 +3,7 @@
  *
  * megapreview.c covers the 5,033 materials that have a `.vmtr` atlas rect. The other ~4,772
  * render fine in game but are backed by ordinary image assets, so the atlas route cannot see
- * them at all. Chain (doom-re campaign `revenant-asset-index-and-viewport`, evidence 09):
+ * them at all. The decode chain is:
  *
  *     name -> material record -> inflate decl -> `*map` field -> image record
  *          -> inflate .bimage -> first mip record -> BC1/BC3/BC7 -> RGBA
@@ -26,7 +26,7 @@
 
 /* ------------------------------------------------------------------ raw DEFLATE ---------------
  * The backend links no zlib, and the payloads are raw DEFLATE terminated by a Z_SYNC_FLUSH
- * marker rather than a BFINAL block (evidence 03 sec 5). We always know the uncompressed size from
+ * marker rather than a BFINAL block. We always know the uncompressed size from
  * the index record, so this stops on output-full and never needs to see the terminator. */
 
 typedef struct { const unsigned char *src; size_t len, pos; unsigned bitbuf, bitcnt; } inf_t;
@@ -146,8 +146,8 @@ static size_t inflate_raw(const unsigned char *src, size_t src_len, unsigned cha
 typedef struct { const char *name; unsigned long long roff; unsigned usz, csz;
                  unsigned char kind, box, hidden; } rec_t;
 /* kind: one of SH_ASSET_*, below.  box: which .resources file.
- * hidden: excluded from the browser listing (a campaign duplicate of a SnapMap record, or a
- * campaign record of a type we do not offer). Still findable by name -- see find_rec. */
+ * hidden: excluded from the browser listing (a duplicate of a SnapMap record, or a base-game
+ * record of a type we do not offer). Still findable by name -- see find_rec. */
 
 /* The decl types we index. `suffix`, when set, additionally requires the record NAME to end with
  * it -- that is how one browser category draws from more than one decl type, and how a decl type
@@ -183,7 +183,7 @@ static const struct { const char *type; unsigned len; unsigned char kind; const 
      * describes how something shatters and NAMES a model -- `breakable/barrel2` points at
      * `models/mapobjects/prop/destroyables/barrel2gib.lwo` -- and every one of those models is
      * indexed under `discreteAnimation`, not `model`. All 108 are .lwo, none of them duplicates a
-     * name already in Models, and they are in the SNAP box, so unlike a campaign-box model they
+     * name already in Models, and they are in the SNAP box, so unlike a base-game-only model they
      * actually load rather than rendering as a black cube. They take renderModelInfo.model like any
      * other model, so they belong in the same category rather than a separate one. */
     { "discreteAnimation",  17, SH_ASSET_MODEL,      NULL,   0 },
@@ -281,6 +281,8 @@ static CRITICAL_SECTION g_lock;
 static unsigned be32(const unsigned char *p) { return ((unsigned)p[0]<<24)|((unsigned)p[1]<<16)|((unsigned)p[2]<<8)|p[3]; }
 static unsigned long long be64(const unsigned char *p)
 { unsigned long long v=0; for (int i=0;i<8;++i) v=(v<<8)|p[i]; return v; }
+static unsigned le32(const unsigned char *p)
+{ return (unsigned)p[0]|((unsigned)p[1]<<8)|((unsigned)p[2]<<16)|((unsigned)p[3]<<24); }
 
 /* Turn the stored SWF record name into the one decls actually use.
  *
@@ -302,36 +304,53 @@ static const char *imgpreview_swf_name(char *name, unsigned nl)
     return (_strnicmp(name, "generated/", 10) == 0) ? name + 10 : name;
 }
 
-static int imgpreview_load_box(int b, const char *stem)
+static int imgpreview_take_field(unsigned char *buf, size_t len, size_t *offset,
+                                 unsigned char **value, unsigned *value_len)
 {
-    char p[MAX_PATH];
-    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\%s.index", g_baseDir, stem);
-    HANDLE f = CreateFileA(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-    if (f == INVALID_HANDLE_VALUE) return 0;
-    LARGE_INTEGER sz; GetFileSizeEx(f, &sz);
-    unsigned char *buf = (unsigned char *)malloc((size_t)sz.QuadPart);
-    DWORD got = 0;
-    if (!buf || !ReadFile(f, buf, (DWORD)sz.QuadPart, &got, NULL) || got != sz.QuadPart) {
-        CloseHandle(f); free(buf); return 0;
-    }
-    CloseHandle(f);
-    g_box[b].idx = buf; g_box[b].idxLen = (size_t)sz.QuadPart;
+    if (!buf || !offset || !value || !value_len || *offset > len || len - *offset < 4u) return 0;
+    unsigned n = le32(buf + *offset);
+    *offset += 4u;
+    if ((size_t)n > len - *offset) return 0;
+    *value = buf + *offset;
+    *value_len = n;
+    *offset += n;
+    return 1;
+}
 
-    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\%s.resources", g_baseDir, stem);
-    g_box[b].res = CreateFileA(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-    if (g_box[b].res == INVALID_HANDLE_VALUE) { g_box[b].res = NULL; return 0; }
+/* Parse one complete index buffer. A malformed record rejects the whole box and rolls back every
+ * record appended from it, so callers never expose a partial catalog assembled from corrupt input. */
+static int imgpreview_parse_box_index(int b, unsigned char *buf, size_t len)
+{
+    if (b < 0 || b >= (int)(sizeof g_box / sizeof g_box[0]) || !buf || len < 0x28u) return 0;
+    if (buf[0] != 0x05 || memcmp(buf + 1, "SER", 3) != 0) return 0;
 
-    /* Header: magic "\x05SER", BE count at +0x20, records at +0x28. Each record is three
-     * length-prefixed ASCII strings then a 25-byte fixed block (evidence 03 sec 2). */
-    if (buf[0] != 0x05 || memcmp(buf+1, "SER", 3) != 0) return 0;
     unsigned n = be32(buf + 0x20);
     size_t o = 0x28;
-    for (unsigned i = 0; i < n && o + 12 < g_box[b].idxLen; ++i) {
-        unsigned tl = *(unsigned *)(buf + o); const char *type = (const char *)(buf + o + 4); o += 4 + tl;
-        unsigned nl = *(unsigned *)(buf + o); const char *name = (const char *)(buf + o + 4); o += 4 + nl;
-        unsigned pl = *(unsigned *)(buf + o);                                                   o += 4 + pl;
-        if (o + 25 > g_box[b].idxLen) break;
-        const unsigned char *blk = buf + o; o += 25;
+    int first_record = g_recCount;
+    for (unsigned i = 0; i < n; ++i) {
+        unsigned char *type_bytes = NULL, *name_bytes = NULL, *path_bytes = NULL;
+        unsigned tl = 0, nl = 0, pl = 0;
+        if (!imgpreview_take_field(buf, len, &o, &type_bytes, &tl) ||
+            !imgpreview_take_field(buf, len, &o, &name_bytes, &nl) ||
+            !imgpreview_take_field(buf, len, &o, &path_bytes, &pl) ||
+            o > len) {
+            g_recCount = first_record;
+            return 0;
+        }
+        /* Every non-final record carries a 25-byte block. Both shipped indexes omit the final
+         * four inter-record bytes at EOF, leaving a complete 21-byte terminal block. Accept that
+         * exact terminal shape; any other short block is truncation and rejects the whole box. */
+        size_t block_len = 25u;
+        if (i + 1u == n && len - o == 21u) block_len = 21u;
+        if (len - o < block_len) {
+            g_recCount = first_record;
+            return 0;
+        }
+        (void)path_bytes; (void)pl;
+        const char *type = (const char *)type_bytes;
+        const char *name = (const char *)name_bytes;
+        const unsigned char *blk = buf + o;
+        o += block_len;
 
         int kind = -1;
         for (int k = 0; k < KIND_COUNT; ++k) {
@@ -344,7 +363,7 @@ static int imgpreview_load_box(int b, const char *stem)
             if (g_kinds[k].suffix &&
                 (nl < g_kinds[k].slen ||
                  _strnicmp(name + nl - g_kinds[k].slen, g_kinds[k].suffix, g_kinds[k].slen) != 0))
-                continue;                           /* right type, wrong extension -> try next kind */
+                continue;
             kind = g_kinds[k].kind;
             break;
         }
@@ -352,19 +371,57 @@ static int imgpreview_load_box(int b, const char *stem)
 
         if ((g_recCount & 1023) == 0) {
             rec_t *bigger = (rec_t *)realloc(g_rec, (size_t)(g_recCount + 1024) * sizeof *bigger);
-            if (!bigger) break;
+            if (!bigger) {
+                g_recCount = first_record;
+                return 0;
+            }
             g_rec = bigger;
         }
         rec_t *r = &g_rec[g_recCount++];
-        r->name = name; r->roff = be64(blk); r->usz = be32(blk+8); r->csz = be32(blk+12);
-        /* `hidden` MUST be set here: the record array grows by realloc, which does not zero, so
-         * leaving it uninitialised would hide records at random. */
+        r->name = name; r->roff = be64(blk); r->usz = be32(blk + 8); r->csz = be32(blk + 12);
         r->kind = (unsigned char)kind; r->box = (unsigned char)b; r->hidden = 0;
-        /* Names are NOT NUL-terminated in the file; terminate in place. The byte we overwrite
-         * is the first of the next length prefix, which we have already consumed. */
+        /* The path-length prefix immediately follows the name. It has already been decoded, so its
+         * first byte can safely terminate the retained name in place. */
         ((char *)name)[nl] = '\0';
         if (kind == SH_ASSET_SWF) r->name = imgpreview_swf_name((char *)name, nl);
     }
+    return 1;
+}
+
+static int imgpreview_load_box(int b, const char *stem)
+{
+    char p[MAX_PATH];
+    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\%s.index", g_baseDir, stem);
+    HANDLE f = CreateFileA(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    LARGE_INTEGER sz;
+    if (!GetFileSizeEx(f, &sz) || sz.QuadPart <= 0 ||
+        (unsigned long long)sz.QuadPart > 0xFFFFFFFFull ||
+        (unsigned long long)sz.QuadPart > (size_t)-1) {
+        CloseHandle(f);
+        return 0;
+    }
+    size_t len = (size_t)sz.QuadPart;
+    unsigned char *buf = (unsigned char *)malloc(len);
+    DWORD got = 0;
+    if (!buf || !ReadFile(f, buf, (DWORD)len, &got, NULL) || got != (DWORD)len) {
+        CloseHandle(f); free(buf); return 0;
+    }
+    CloseHandle(f);
+    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\%s.resources", g_baseDir, stem);
+    HANDLE res = CreateFileA(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (res == INVALID_HANDLE_VALUE) { free(buf); return 0; }
+
+    /* Header: magic "\x05SER", BE count at +0x20, records at +0x28. Each record is three
+     * length-prefixed ASCII strings then a 25-byte fixed block. */
+    if (!imgpreview_parse_box_index(b, buf, len)) {
+        CloseHandle(res);
+        free(buf);
+        return 0;
+    }
+    g_box[b].idx = buf;
+    g_box[b].idxLen = len;
+    g_box[b].res = res;
     return 1;
 }
 
@@ -396,23 +453,12 @@ static int __cdecl cmp_sb_name(const void *a, const void *b)
     return _stricmp(((const sndbank_t *)a)->name, ((const sndbank_t *)b)->name);
 }
 
-/* Parse the Wwise manifest into g_ev, keeping only events with no `sound` decl of the same name.
- * Failure is non-fatal: a missing or unreadable manifest just means the catalog stays as it was. */
-static void imgpreview_load_wwise(void)
+/* Parse a mutable, NUL-padded Wwise manifest into g_ev, keeping only events with no `sound` decl of
+ * the same name. The catalog retains pointers into `buf` and therefore takes ownership of it. */
+static void imgpreview_parse_wwise_buffer(unsigned char *buf, size_t len)
 {
-    char p[MAX_PATH];
-    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\sound\\soundbanks\\pc\\soundbanksinfo.xml", g_baseDir);
-    HANDLE f = CreateFileA(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-    if (f == INVALID_HANDLE_VALUE) { backend_log("B2: imgpreview -- no soundbanksinfo.xml; Wwise events unavailable"); return; }
-    LARGE_INTEGER sz; GetFileSizeEx(f, &sz);
-    /* +1 so a name ending at EOF still has a byte to take the NUL. */
-    unsigned char *buf = (unsigned char *)malloc((size_t)sz.QuadPart + 1);
-    DWORD got = 0;
-    if (!buf || !ReadFile(f, buf, (DWORD)sz.QuadPart, &got, NULL) || got != sz.QuadPart) {
-        CloseHandle(f); free(buf); return;
-    }
-    CloseHandle(f);
-    buf[got] = '\0';
+    if (!buf) return;
+    buf[len] = '\0';
     g_wwise = buf;
 
     /* The decl names, sorted case-insensitively, so the dedup is a binary search rather than a
@@ -526,6 +572,35 @@ static void imgpreview_load_wwise(void)
     backend_log(line);
 }
 
+/* Read and parse the Wwise manifest. Failure is non-fatal: an unavailable or unreasonably large
+ * manifest simply leaves the catalog as it was. */
+static void imgpreview_load_wwise(void)
+{
+    char p[MAX_PATH];
+    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\sound\\soundbanks\\pc\\soundbanksinfo.xml", g_baseDir);
+    HANDLE f = CreateFileA(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) {
+        backend_log("B2: imgpreview -- no soundbanksinfo.xml; Wwise events unavailable");
+        return;
+    }
+    LARGE_INTEGER sz;
+    if (!GetFileSizeEx(f, &sz) || sz.QuadPart < 0 ||
+        (unsigned long long)sz.QuadPart > 0xFFFFFFFFull ||
+        (unsigned long long)sz.QuadPart > (size_t)-1 - 1u) {
+        CloseHandle(f);
+        backend_log("B2: imgpreview -- soundbanksinfo.xml is too large to read safely");
+        return;
+    }
+    size_t len = (size_t)sz.QuadPart;
+    unsigned char *buf = (unsigned char *)malloc(len + 1u);
+    DWORD got = 0;
+    if (!buf || !ReadFile(f, buf, (DWORD)len, &got, NULL) || got != (DWORD)len) {
+        CloseHandle(f); free(buf); return;
+    }
+    CloseHandle(f);
+    imgpreview_parse_wwise_buffer(buf, len);
+}
+
 /* Hide a sound decl that is nothing but a wrapper around a Wwise event already in the catalog.
  *
  * The exact-name dedup in imgpreview_load_wwise catches the 5,160 decls literally NAMED `play_*`,
@@ -563,7 +638,7 @@ static void imgpreview_load_wwise(void)
  *
  * Only PATH-FORM records are ever hidden, and the name looked up (`play_` + leaf) never contains a
  * '/', so a flat row can never be hidden by this pass and two records can never hide each other.
- * The decl array is built from the records still VISIBLE at this point, so a campaign-box twin that
+ * The decl array is built from the records still VISIBLE at this point, so a box-1 twin that
  * the box dedup already hid cannot suppress the row that survived it.
  *
  * Deliberately does NOT touch flat-named records (no '/'), which the exact-name pass already
@@ -745,12 +820,10 @@ static int imgpreview_load(void)
     /* Decide, once, which records the browser will LIST.
      *
      * Box 0 (`snap_gameresources`) is everything SnapMap ships with. Box 1 (`gameresources`) is
-     * the campaign's set; most of it is unreferencable from SnapMap, which is why it is not
+     * the base game's broader set; most of it is unreferencable from SnapMap, which is why it is not
      * offered wholesale. SOUNDS are the exception worth making: 1,186 sound decls exist only in
-     * the campaign box and 231 of those are `vo_*`, which is a category a mapper visibly misses.
-     * Whether the engine will actually SOUND one from a SnapMap session is campaign question Q11
-     * and is not answerable from the files -- but the browser now has a working play/stop, so
-     * offering them turns an unanswerable question into a one-click test.
+     * box 1 and 231 of those are `vo_*`, which is a category a mapper visibly misses. The browser's
+     * working play/stop path makes each offered event directly testable from a SnapMap session.
      *
      * Duplicates are dropped rather than shown twice: 2,401 sound names appear in both boxes. The
      * box-0 record wins, so nothing that already worked changes route. */
@@ -765,12 +838,12 @@ static int imgpreview_load(void)
         if (!g_rec[i].hidden) extra++;
     }
 
-    /* AFTER the box dedup, so a campaign sound already hidden as a box-0 duplicate is not counted
+    /* AFTER the box dedup, so a box-1 sound already hidden as a box-0 duplicate is not counted
      * twice, and the tally reports only rows this pass is actually responsible for removing. */
     int wrapped = imgpreview_hide_wrapped_sounds();
 
     /* AFTER the hide pass: it dedupes against the decls the browser will actually list, so a
-     * campaign-box material that got hidden above must not suppress its atlas twin. */
+     * base-game-only material that got hidden above must not suppress its atlas twin. */
     imgpreview_load_vmtr();
 
     char line[480];
@@ -778,7 +851,7 @@ static int imgpreview_load(void)
         "B2: imgpreview -- indexed %d records (snap=%s game=%s); %d SnapMap modules; "
         "%d light material(s) also listed under Lights; "
         "%d record(s) collapsed as a repeat of a name in the same box; "
-        "campaign sounds offered: %d (%d duplicates of SnapMap sounds dropped); "
+        "base-game sounds offered: %d (%d duplicates of SnapMap sounds dropped); "
         "%d wrapper sound decl(s) hidden behind their Play_ event",
         g_recCount, a ? "ok" : "MISSING", b ? "ok" : "missing", modules, lights, boxdup, extra, dup, wrapped);
     backend_log(line);
@@ -914,7 +987,7 @@ static void downscale(const unsigned char *src, unsigned sw, unsigned sh, unsign
     }
 }
 
-int sh_imgpreview_produce(const char *name)
+int sh_imgpreview_produce(const char *name, unsigned long generation)
 {
     EnterCriticalSection(&g_lock);
     int ok = 0;
@@ -945,7 +1018,7 @@ int sh_imgpreview_produce(const char *name)
         if (!bim || blen < 0x40 || memcmp(bim + 4, "\x07MIB", 4) != 0) {
             backend_log("B2: imgpreview -- not a .bimage"); __leave;
         }
-        unsigned fmt = *(unsigned *)(bim + 0x20);
+        unsigned fmt = le32(bim + 0x20);
         /* First mip record at +0x30: BE u32 level, BE u16 w @+4, BE u16 h @+8, BE u32 size @+0x0A. */
         unsigned w  = ((unsigned)bim[0x34] << 8) | bim[0x35];
         unsigned h  = ((unsigned)bim[0x38] << 8) | bim[0x39];
@@ -974,13 +1047,13 @@ int sh_imgpreview_produce(const char *name)
         if (!thumb) __leave;
         downscale(rgba, w, h, pw, thumb, dw, dh);
 
-        sh_preview_publish(thumb, dw, dh);
+        ok = sh_preview_publish(generation, thumb, dw, dh);
+        if (ok != SH_PREVIEW_PUBLISHED) __leave;
         char l[360];
         _snprintf_s(l, sizeof l, _TRUNCATE,
             "B2: imgpreview -- '%s' -> image '%s' %ux%u fmt=%u -> %ux%u preview",
             name, img, w, h, fmt, dw, dh);
         backend_log(l);
-        ok = 1;
     } __finally {
         free(decl); free(bim); free(rgba); free(thumb);
         LeaveCriticalSection(&g_lock);
@@ -1001,8 +1074,8 @@ int sh_imgpreview_list(int kind, unsigned start, char *out, size_t cap)
         size_t used = 0;
         unsigned seen = 0;
         for (int i = 0; i < g_recCount; ++i) {
-            /* `hidden` is decided once at load: everything in the campaign box except sounds, and
-             * campaign sounds that duplicate a SnapMap one. See imgpreview_load. */
+            /* `hidden` is decided once at load: everything in box 1 except sounds, and box-1
+             * sounds that duplicate a SnapMap one. See imgpreview_load. */
             if (g_rec[i].kind != kind || g_rec[i].hidden) continue;
             if (seen++ < start) continue;
             size_t n = strlen(g_rec[i].name);

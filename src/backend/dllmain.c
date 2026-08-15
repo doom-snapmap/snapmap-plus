@@ -376,8 +376,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * residency, which is what lets this cover the whole catalog instead of only what the
          * loaded map happens to render. The decoder comes from the signature DB (Mega2PageDecode),
          * so an unrecognised build degrades to "no previews" rather than a call into the wrong
-         * code. Hooks nothing. See megapreview.c and the doom-re campaign
-         * revenant-asset-index-and-viewport (evidence 06/07/08). */
+         * code. Hooks nothing. See megapreview.c for the format and decoder details. */
         sh_megapreview_install(results, db, g_doom_base);
         /* imgpreview: the fallback half of the same feature -- materials with no megatexture rect,
          * decoded from the shipped .index/.resources containers (BC1/BC3/BC7). Reads files only;

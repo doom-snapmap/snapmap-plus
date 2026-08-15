@@ -1,7 +1,7 @@
 /* bcn.h -- block-compressed texture decoders (BC1, BC3, BC7) -> RGBA8.
  *
  * DOOM's `.bimage` container stores its mips in these formats; the format code in the bimage
- * header maps to them as (doom-re campaign `revenant-asset-index-and-viewport`, evidence 09 sec 3d):
+ * header maps to them as:
  *
  *     code 10 -> BC1   (8 bytes / 4x4 block, RGB + 1-bit alpha)
  *     code 11 -> BC3   (16 bytes / 4x4, BC4 alpha block + BC1 colour block)
@@ -19,16 +19,18 @@
 #ifndef BACKEND_BCN_H
 #define BACKEND_BCN_H
 
+#include <limits.h>
 #include <stddef.h>
 
-/* Padded dimension helper: BCn always encodes whole 4x4 blocks. */
-#define BCN_PAD(x) (((x) + 3u) & ~3u)
+/* Padded dimension helper: BCn always encodes whole 4x4 blocks. Zero means the input cannot be
+ * represented after padding. Do not pass expressions with side effects. */
+#define BCN_PAD(x) ((unsigned)(x) > UINT_MAX - 3u ? 0u : (((unsigned)(x) + 3u) & ~3u))
 
 /* Bytes of RGBA output needed for a w x h image (i.e. padded w * padded h * 4). */
 size_t bcn_rgba_size(unsigned w, unsigned h);
 
 /* Decode into `dst` (must hold bcn_rgba_size(w,h) bytes). Returns 1 on success, 0 if the
- * arguments are unusable. Out-of-range input is clamped, never trusted. */
+ * arguments or dimensions are unusable. Out-of-range input is clamped, never trusted. */
 int bcn_decode_bc1(const unsigned char *src, size_t src_len, unsigned w, unsigned h, unsigned char *dst);
 int bcn_decode_bc3(const unsigned char *src, size_t src_len, unsigned w, unsigned h, unsigned char *dst);
 int bcn_decode_bc7(const unsigned char *src, size_t src_len, unsigned w, unsigned h, unsigned char *dst);

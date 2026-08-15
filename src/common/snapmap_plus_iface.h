@@ -279,7 +279,7 @@ typedef int           (*sh_list_materials_fn)(struct sh_iface *self, int start, 
  * the Models category deliberately excludes (it keeps `models/...` props: .lwo + md6Def).
  *   MODULE    the 232 `palettes/mega_blessed` SnapMap modules. Each pairs 1:1 with a `_combo/world.bcm`,
  *             so one of these can be placed as a prop that is BOTH visible and solid -- see
- *             abModuleClip() in the UI and the doom-re campaign's evidence 10 sec 3.2.
+ *             abModuleClip() in the UI.
  *   BMODEL    every other .bmodel: the individual wall/floor pieces those modules are assembled from,
  *             plus the invisible internals (navmesh, occlusion, umbra, clip). Render-only; the
  *             component pieces have no collision of their own because it is baked at the combo level.

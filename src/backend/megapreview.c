@@ -3,8 +3,8 @@
  *
  * Nothing here hooks or mutates the engine. It reads three kinds of file the game ships
  * (`*.vmtr` tables and `_vmtr_sq*.mega2` shards, both under <game>\virtualtextures) and makes one
- * call into a pure decode function. Every constant is cited to the doom-re campaign evidence that
- * established it. */
+ * call into a pure decode function. The layout and sizing constants below were verified against
+ * the shipped files and controlled decoder runs. */
 
 #include <windows.h>
 #include <stdio.h>
@@ -22,7 +22,7 @@
  *     void decode(const u8 *header16, const u8 *payload, void *unused, u8 *out);   out is 0x50000
  *
  * 5 planes of 128x128 RGBA at +0, +0x10000, +0x20000, +0x30000, +0x40000. Plane 0 is albedo, which
- * is the only one a browser needs (campaign evidence 04 SS9, confirmed by observation in 08 SS2).
+ * is the only one a browser needs; controlled decodes confirmed the plane assignment.
  *
  * Resolved through the shared signature database as `Mega2PageDecode`, NOT as a hardcoded
  * module_base + RVA. This used to be the latter, guarded by a local memcmp of the prologue -- which
@@ -36,11 +36,11 @@ typedef void (*decode_fn)(const unsigned char *hdr, const unsigned char *payload
 #define OUT_SIZE     0x50000u    /* 5 planes x 128 x 128 x 4                                       */
 #define PLANE_STRIDE 0x10000u
 #define PAGE_FULL    128u        /* decoded page edge                                              */
-#define PAGE_CORE    120u        /* usable pixels; the rest is a 4px border per side (evidence 07) */
+#define PAGE_CORE    120u        /* usable pixels; the rest is a 4px border per side               */
 #define PAGE_BORDER  4u
 
-/* THE TRAP (evidence 08 SS3). The decoder reads a LONG way past the end of the page data -- measured
- * mean 73,172 B and max 167,220 B over 120 sampled pages. In the engine the page sits inside a much
+/* The decoder reads a LONG way past the end of the page data -- measured mean 73,172 B and max
+ * 167,220 B over 120 sampled pages. In the engine the page sits inside a much
  * larger staging allocation so this is invisible; a tight buffer faults inside the plane codec.
  * 256 KB is ~1.6x the measured worst case. The tail is zeroed so the read-ahead is deterministic
  * rather than whatever the heap happened to hold. */
@@ -48,8 +48,8 @@ typedef void (*decode_fn)(const unsigned char *hdr, const unsigned char *payload
 #define PAGE_MAX     0x40000u    /* largest observed payload is ~50 KB; this is a sanity ceiling    */
 
 /* ------------------------------------------------------------------------ the atlas --------------
- * All from campaign evidence 04 SS5 and 07. The atlas is 245760 x 245760 px = 2048 x 2048 pages of
- * 120 px, split into a 4x4 grid of shards each covering 512 x 512 pages. */
+ * The atlas is 245760 x 245760 px = 2048 x 2048 pages of 120 px, split into a 4x4 grid of shards
+ * each covering 512 x 512 pages. */
 #define ATLAS_PAGE_PX 120u
 #define SHARD_PAGES   512u
 #define MAX_LEVELS    10         /* 512x512, 256x256, ... 1x1                                      */
@@ -111,8 +111,9 @@ static void megapreview_load_one_vmtr(const char *path, int *cap)
     while (fgets(line, sizeof line, f)) {
         int x, y, w, h, flags; long long ts, chk;
         char name[192];
-        if (sscanf(line, " %d %d %d %d %d %lld %lld \"%191[^\"]\"",
-                   &x, &y, &w, &h, &flags, &ts, &chk, name) != 8) continue;
+        if (sscanf_s(line, " %d %d %d %d %d %lld %lld \"%191[^\"]\"",
+                     &x, &y, &w, &h, &flags, &ts, &chk, name,
+                     (unsigned)sizeof name) != 8) continue;
         if (w <= 0 || h <= 0 || x < 0 || y < 0) continue;
         if (g_rectCount == *cap) {
             int grown = *cap ? *cap * 2 : 1024;
@@ -196,8 +197,8 @@ const char *sh_megapreview_name_at(int i)
     return out;
 }
 
-/* Open a shard and read its two tables. Layout, all DIRECT from idMegaTexture2::Load
- * (FUN_140e10bf0) and verified against every shipped shard -- campaign evidence 07 SS1:
+/* Open a shard and read its two tables. The layout follows idMegaTexture2::Load
+ * (FUN_140e10bf0) and was verified against every shipped shard:
  *
  *     0x000        0x170-byte header (magic 0xA63FBB21, version 2)
  *     0x170        page payloads, contiguous
@@ -326,12 +327,12 @@ static int megapreview_page_core(int level, unsigned px, unsigned py, unsigned c
 /* --------------------------------------------------------------------------- produce ------------*/
 
 /* Preview budget. A preview of P pixels costs (P/120)^2 pages regardless of the material's native
- * size, so this is a straight quality/cost dial (campaign evidence 08 SS5b). 2x2 = 240x240 for
+ * size, so this is a straight quality/cost dial. 2x2 = 240x240 for
  * ~4 pages and ~85 KB is the measured sweet spot: a large visible gain over a single page, with
  * diminishing returns past it. */
 #define PREVIEW_MAX_PAGES_PER_AXIS 2u
 
-static int megapreview_produce(const char *name)
+static int megapreview_produce(const char *name, unsigned long generation)
 {
     const vmtr_rect *r = megapreview_find(name);
     if (!r) {
@@ -404,7 +405,7 @@ static int megapreview_produce(const char *name)
                    canvas + (((size_t)(sy + row) * cw) + sx) * 4, (size_t)sw * 4);
     }
 
-    sh_preview_publish(crop, sw, sh);
+    int published = sh_preview_publish(generation, crop, sw, sh);
 
     char line[320];
     _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -414,7 +415,7 @@ static int megapreview_produce(const char *name)
 
     if (crop != canvas) free(crop);
     free(canvas);
-    return 1;
+    return published;
 }
 
 /* ---------------------------------------------------------------------------- worker ------------*/
@@ -425,33 +426,33 @@ static int megapreview_produce(const char *name)
 static DWORD WINAPI megapreview_worker(LPVOID unused)
 {
     (void)unused;
-    char want[512], failed[512] = { 0 };
+    char want[512];
+    unsigned long failed_generation = 0;
 
     for (;;) {
         Sleep(100);
-        if (!sh_preview_take_request(want, sizeof want)) continue;
+        unsigned long generation = 0;
+        if (!sh_preview_take_request(want, sizeof want, &generation)) continue;
 
-        /* take_request keeps reporting the same request until something publishes, so a name that
+        /* take_request keeps reporting the same request until something publishes, so a request that
          * CANNOT be produced would otherwise be retried ten times a second forever. Suppress only
-         * that case -- keyed on the name that actually failed.
-         *
-         * It must not be keyed on "the last name we attempted": that also swallows a repeat request
-         * for a name that SUCCEEDED, which is a thing users do constantly (click the same asset
-         * again, or re-preview after changing something). Doing so leaves the UI polling a request
-         * nobody is serving until it times out, while the pane still shows the previous image. */
-        if (failed[0] && strcmp(want, failed) == 0) continue;
+         * that generation. A new click gets a new generation even when it repeats the same name. */
+        if (failed_generation == generation) continue;
 
         EnterCriticalSection(&g_lock);
-        int ok = megapreview_load_rects() && megapreview_produce(want);
+        int ok = megapreview_load_rects() ? megapreview_produce(want, generation) : SH_PREVIEW_FAILED;
         LeaveCriticalSection(&g_lock);
+
+        if (ok == SH_PREVIEW_STALE) continue;
 
         /* Atlas route declined -> the material is not virtual-textured. Roughly half the catalog
          * is like that; those are backed by ordinary image assets, which imgpreview reads out of
          * the .index/.resources containers. Outside the lock: different scratch, different files. */
-        if (!ok) ok = sh_imgpreview_produce(want);
+        if (!ok) ok = sh_imgpreview_produce(want, generation);
 
-        if (ok) failed[0] = '\0';
-        else    strncpy_s(failed, sizeof failed, want, _TRUNCATE);
+        if (ok == SH_PREVIEW_STALE) continue;
+        if (ok == SH_PREVIEW_PUBLISHED) failed_generation = 0;
+        else                            failed_generation = generation;
     }
 }
 

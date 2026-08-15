@@ -1379,9 +1379,8 @@ static void h_sh_help(idCmdArgs *a)
  *
  * NOT signature-resolvable, and not for want of trying: it is ONE of 1,560 byte-identical
  * instantiations of the same idList template in the image, differing only in rip-relative and rel32
- * displacements. No lengthening of a prologue pattern separates them -- the same lesson the sound
- * module learned from StopSound's clone (doom-re evidence 10 SS4.3): a byte signature answers "where
- * is this function", and is the wrong tool when the answer is "in 1,560 places".
+ * displacements. No lengthening of a prologue pattern separates them: a byte signature answers
+ * "where is this function", and is the wrong tool when the answer is "in 1,560 places".
  *
  * So it is resolved RELATIONALLY instead, off AddCommand, which IS signature-resolved: AddCommand
  * calls this on cmdSys+0x08 (the FULL list) before appending, and that call site is the instruction

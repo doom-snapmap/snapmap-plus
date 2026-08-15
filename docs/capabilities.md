@@ -123,8 +123,8 @@ editor (run `sh` in the console if it doesn't auto-open). Full detail: [`webview
 Every category is enumerated **live from the game's own shipped containers** at startup — no
 pre-extraction step, no bundled asset list, and nothing shipped in this repo. Only assets from
 `snap_gameresources` are listed, with sounds as the deliberate exception (see below): SnapMap never
-mounts the campaign's `gameresources.resources`, so a campaign-only model resolves in the editor as a
-black cube.
+mounts the base game's broader `gameresources.resources`, so a base-game-only model resolves in the
+editor as a black cube.
 
 | Category | What it holds |
 |---|---|
@@ -135,7 +135,7 @@ black cube.
 | **Modules** | The 232 `mega_blessed` palette modules — whole SnapMap rooms, placeable as a single entity that is both visible **and solid**. |
 | **Brush models** | Every other baked `.bmodel`: the individual wall, floor and detail pieces those modules are assembled from. Render-only. |
 | **Clip models** | The `cm` type (`.bcm` / `.lwo` / `.md6`) — collision shapes, appliable on their own. |
-| Sounds | The **union** of `sound` decls and Wwise events, deduplicated case-insensitively. Neither set contains the other, and the event-only half is ~2,600 names including the generic SnapMap VO, so a decl-only list is missing thousands of sounds a mapper can hear in the editor. Campaign-box sounds are offered too, and they work. Filed by **soundbank** rather than by name — see below. |
+| Sounds | The **union** of `sound` decls and Wwise events, deduplicated case-insensitively. Neither set contains the other, and the event-only half is ~2,600 names including the generic SnapMap VO, so a decl-only list is missing thousands of sounds a mapper can hear in the editor. Base-game-only sounds are offered too, and they work. Filed by **soundbank** rather than by name — see below. |
 | **Lights** | The light **materials**: the projection a light shines through, written as `lightMaterial`. Point vs spot is not the asset — it is which entity carries it, so it is the Create-as choice. |
 | FX, Particles, Decal atlases, Entity defs | The remaining placeable decl types. |
 | **Perks**, **SWF / Flash** | Reference-only. A perk is granted by an `idTarget_Command` entity and a `.swf` belongs to an entity that owns a screen; neither structure is worked out, so both are names to copy and wire by hand. They are listed under Reference rather than Placeable on purpose — a category under Placeable whose Apply button does nothing reads as a broken tool. |

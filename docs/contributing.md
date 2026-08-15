@@ -135,21 +135,33 @@ cd ..
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 ```
 
-By default this compiles and runs twelve **self-contained native tests** (no game needed):
+By default this compiles and runs 22 **self-contained native tests** (no game needed):
 
 - **`shield_format_test`** — the fault-record string formatter (pure logic).
 - **`hook_test`** — the inline-detour installer, exercised on a hand-laid scratch stub.
 - **`crash_record_test`** — crash-record JSON formatting and escaping.
 - **`report_scrub_test`** — report-log anonymization and bounded tail selection.
 - **`dumpmap_path_test`** — `sh_dumpmap` path validation and output-name construction.
+- **`json_pretty_test`** — rawmap JSON re-layout, byte preservation, and refusal cases.
 - **`config_json_test`** — bounded UTF-8 JSON parsing, duplicate-key rejection, mutation, and serialization.
 - **`iface_config_test`** — the pinned `+0x2B0` / `+0x2B8` config ABI and callback binding.
 - **`config_test`** — config creation, validation/repair/recovery, preservation, atomic-failure behavior,
   deletion reset, external/process writers, and the registered service.
+- **`user_overrides_test`** — immutable launch snapshots, persistence reporting, and marker independence.
+- **`user_overrides_contract_test`** — startup, command, cvar, and loader source-wiring contracts.
 - **`config_message_test`** — bounded raw WebView config-message extraction before UTF-8 conversion.
 - **`theme_bootstrap_test`** — pre-navigation root-class seeding for a saved dark theme.
 - **`theme_contract_test`** — the HTML config-message contract and PREVIEW-only browser storage.
 - **`entity_settings_contract_test`** — persisted Entities controls, startup hydration, and the exclusive selection-direction contract.
+- **`growing_text_buffer_test`** — large declaration reads, exact-boundary growth, and the safety-cap signal.
+- **`preview_test`** — generation-safe request/publish handoff and RGBA-to-PNG payloads.
+- **`bcn_test`** — BC1/BC3/BC7 vectors, padded dimensions, truncation, and overflow guards.
+- **`soundpreview_queue_test`** — failed-kick rollback, FIFO preservation, overflow, and name bounds.
+- **`imgpreview_index_test`** — bounded index parsing, catalog routing, SWF rewriting, and rollback.
+- **`imgpreview_catalog_test`** — Wwise/decl union, bank preference, wrapper collapse, and VMTR paging.
+- **`serialization_buffer_test`** — timeline growth, terminal failures, retained capacity, and the 32 MB cap.
+
+The same command then runs three JavaScript contract tests for the declaration editor and asset browser.
 
 Two more tests scan a **real DOOM image** — a `DOOMx64vk.exe` that's been unpacked from its Steam DRM wrapper
 (e.g. with Steamless). **Running these is REQUIRED if you add or change any entry in the engine signature
@@ -185,7 +197,7 @@ A third test, `xinput_ordinal_test.c`, is a **runtime** cross-check of the XInpu
 a built DLL and calls its exports by ordinal. CI verifies that same invariant *statically* with `dumpbin` (the
 "XInput ordinal parity" step), so you normally don't need to run it by hand.
 
-CI runs the twelve self-contained native tests and the installer tests on every PR; the DOOM-image tests are local-only
+CI runs the 22 self-contained native tests, three JavaScript contract tests, and the installer tests on every PR; the DOOM-image tests are local-only
 (CI has no game image).
 
 ## 8. The pull-request workflow

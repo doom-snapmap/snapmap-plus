@@ -9,12 +9,10 @@
  * virtual-texture state, and critically NO MAP RESIDENCY. So this works for the full ~6,800-material
  * catalog regardless of which map is open, which is exactly what an asset browser needs.
  *
- * Everything here was derived and proven in the doom-re campaign
- * `revenant-asset-index-and-viewport`:
- *   - evidence 06: the codec is id's own DCT + YCoCg-R, not libjpeg -- CALL it, do not reimplement.
- *   - evidence 07: page addressing. `.vmtr` rect -> shard -> mip cell -> page id -> file offset.
- *   - evidence 08: the decoder run offline on 68/68 pages, plus the three rules the port must obey
- *                  (buffer slack, pre-clear the output, plane 0 is albedo).
+ * The codec is id's own DCT + YCoCg-R rather than libjpeg, so this calls the engine decoder instead
+ * of reimplementing it. Page addressing follows `.vmtr` rect -> shard -> mip cell -> page id ->
+ * file offset. Controlled runs across 68 pages established the required input slack, output
+ * pre-clear, and plane-0 albedo selection.
  *
  * It produces into the transport in preview.h and touches nothing else.
  */

@@ -71,15 +71,17 @@ typedef enum { SP_OP_PLAY = 0, SP_OP_STOP, SP_OP_SESSION_ON, SP_OP_SESSION_OFF }
 
 /* A small ring rather than a single last-wins slot: ordering between ops is meaningful (a
  * session-off that arrives after a play must still stop it), so they cannot be collapsed. 8 is
- * generous -- the UI produces at most one op per click. On overflow the OLDEST is dropped and said
- * so, because the newest op is the one that reflects what the user last did. */
+ * generous -- the UI produces at most one op per click. On overflow the OLDEST is dropped and logged,
+ * because the newest op is the one that reflects what the user last did. */
 #define SP_QUEUE_MAX 8
-typedef struct { sp_op op; char name[256]; } sp_item;
+#define SP_NAME_CAP 512
+typedef struct { sp_op op; unsigned long sequence; char name[SP_NAME_CAP]; } sp_item;
 static sp_item          g_queue[SP_QUEUE_MAX];
 static int              g_qhead, g_qcount;
 static CRITICAL_SECTION g_qlock;
 static int              g_qlock_init;
 static volatile LONG    g_cmd_registered;
+static volatile LONG    g_post_sequence;
 static snd_buffer_cmd_fn  g_buffer_cmd;
 static snd_add_command_fn g_add_command;
 
@@ -263,6 +265,10 @@ static int sp_ensure_command(void)
 /* Queue one op and kick the buffer. Returns 1 if it was accepted for main-thread execution. */
 static int sp_post(sp_op op, const char *name)
 {
+    if (name && strnlen_s(name, SP_NAME_CAP) == SP_NAME_CAP) {
+        backend_log("soundpreview: REFUSED -- sound name exceeds the queue limit");
+        return 0;
+    }
     if (!g_buffer_cmd || !g_cmdsys) {
         backend_log("soundpreview: REFUSED -- no command buffer, so nothing can run on the main thread");
         return 0;
@@ -272,21 +278,50 @@ static int sp_post(sp_op op, const char *name)
         return 0;
     }
 
+    unsigned long sequence = (unsigned long)InterlockedIncrement(&g_post_sequence);
+    sp_item dropped;
+    int dropped_oldest = 0;
+
     if (g_qlock_init) EnterCriticalSection(&g_qlock);
     if (g_qcount == SP_QUEUE_MAX) {          /* full: drop the oldest, keep the newest intent */
+        dropped = g_queue[g_qhead];
+        dropped_oldest = 1;
         g_qhead = (g_qhead + 1) % SP_QUEUE_MAX;
         g_qcount--;
     }
     sp_item *slot = &g_queue[(g_qhead + g_qcount) % SP_QUEUE_MAX];
     slot->op = op;
+    slot->sequence = sequence;
     if (name) strncpy_s(slot->name, sizeof slot->name, name, _TRUNCATE);
     else      slot->name[0] = '\0';
     g_qcount++;
-    if (g_qlock_init) LeaveCriticalSection(&g_qlock);
-
+    /* Hold the queue lock through BufferCommandText. The command only appends text for a later
+     * main-thread drain; holding the lock prevents an already-buffered drain from consuming this
+     * item before a throwing kick can roll it back. */
     int enq = 0;
     __try { g_buffer_cmd(g_cmdsys, SP_CMD_NAME "\n"); enq = 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { enq = 0; }
+
+    if (!enq) {
+        int pos = -1;
+        for (int i = 0; i < g_qcount; ++i)
+            if (g_queue[(g_qhead + i) % SP_QUEUE_MAX].sequence == sequence) { pos = i; break; }
+        if (pos >= 0) {
+            for (int i = pos; i + 1 < g_qcount; ++i)
+                g_queue[(g_qhead + i) % SP_QUEUE_MAX] =
+                    g_queue[(g_qhead + i + 1) % SP_QUEUE_MAX];
+            g_qcount--;
+        }
+        if (dropped_oldest && g_qcount < SP_QUEUE_MAX) {
+            g_qhead = (g_qhead + SP_QUEUE_MAX - 1) % SP_QUEUE_MAX;
+            g_queue[g_qhead] = dropped;
+            g_qcount++;
+        }
+    }
+    if (g_qlock_init) LeaveCriticalSection(&g_qlock);
+
+    if (!enq) backend_log("soundpreview: REFUSED -- main-thread command could not be buffered");
+    else if (dropped_oldest) backend_log("soundpreview: queue full -- dropped the oldest pending operation");
     return enq;
 }
 
