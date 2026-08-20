@@ -27,3 +27,5 @@ community/.wrangler/
 
 # wrangler local-dev secrets (per-machine; never commit)
 .dev.vars
+deploy.ps1
+docs/rawmap-save-load-system.md
