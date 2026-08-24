@@ -231,10 +231,12 @@ overrides/cyberdemon/package.json
 overrides/cyberdemon/decls/<type>/<logical-name>.decl
 overrides/cyberdemon/resources/<name>.manifest
 overrides/cyberdemon/requirements/<name>.requirements
+overrides/cyberdemon/shaders/generated/spirv/<name>.{vspv,fspv,cspv}
+overrides/cyberdemon/shaders/generated/renderprogs/<name>_pc_vulkan.bin
 ```
 
 Installing is copying the folder in; uninstalling is deleting it. There is no compile, staging or merge step:
-DOOM never sees this layout, so the three consumers below each read N package roots instead of one shared root.
+DOOM never sees this layout, so the four consumers below each read N package roots instead of one shared root.
 Nothing is duplicated on disk, no generated copy can go stale, and no package can leave artefacts behind after
 its folder is gone.
 
@@ -260,7 +262,7 @@ refuses rather than running on a partial set.
 
 Two packages overlapping is the normal case, not an error -- shared gore, FX and animation assets belong to no
 single demon, and a package that vendors its own prerequisites is being self-contained, not wrong. So the same
-rule applies at all three layers:
+rule applies at every layer:
 
 | Layer | Two packages ship the same thing | They ship *different* things under one name |
 |---|---|---|
@@ -279,6 +281,35 @@ the request with it.
 
 The pre-package layout -- a single shared `overrides/generated` tree -- is still read, reported as a package
 named `generated`, so existing installs keep working unchanged.
+
+### The file shadow resolves across packages too
+
+The decl server publishes an identity, but the bytes the engine parses come from the file shadow, and the
+engine only ever asks for a decl by its canonical virtual name -- `generated/decls/<type>/<name>.decl`. Before
+packages that mapped one-to-one onto `overrides/generated/decls/...`, so joining the requested name onto the
+overrides root *was* the resolver. A package owns its own root, so that join can never reach it: DOOM has no
+idea `overrides/cyberdemon/` exists and will never ask for `cyberdemon/decls/...`.
+
+So a `generated/decls/<rest>` request is resolved against the legacy tree first -- an install that predates
+packages therefore resolves exactly where it always did -- and then against each installed package as
+`<package root>/decls/<rest>`, in the same deterministic order. Only that one namespace is package-resolved,
+and only a package's own `decls/` subdirectory, so a package can never expose its `package.json` as an engine
+resource. The package set is captured once at install, because this sits on the engine's file-open path.
+
+Without this the failure is silent and total: the identity registers, the engine opens nothing, and the parse
+yields an empty default -- which for a `snapEditorEntityDef` means no resolved `entityDef`, a rejection by the
+native palette validator, and a terminal materialization failure that refuses every decl behind it.
+
+The same resolution serves a package's shaders. A render program is an ordinary decl type, so its
+`decls/renderprog/<name>.decl` needs nothing new; but the compiled module is opened separately, by the engine
+name `generated/spirv/<name>.{vspv,fspv,cspv}`, and its pre-translated source blob as
+`generated/renderprogs/<name>_pc_vulkan.bin`. Both go through the same provider slot this layer hooks, with a
+mode the hook admits. Under `shaders/` the package path mirrors the engine name verbatim, so a package can
+carry a genuinely new render program and still uninstall by deleting its folder -- and two packages shipping
+different programs can never address the same file, because the program name is part of the resource name.
+
+Only the namespaces in that table are package-resolved, and each only out of the subdirectory named for it.
+Everything else a package contains stays unreachable to the engine.
 
 ## Existing shadows versus genuinely new decls
 

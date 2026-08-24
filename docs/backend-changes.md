@@ -6,6 +6,65 @@ where our own reimplementation was wrong, not the original SnapHak's behavior; a
 (or faithful reproduction of) the *original's* behavior belongs in [`fidelity.md`](fidelity.md)
 instead. Entries are chronological, newest first.
 
+## 2026-08-23 — Let a package own its shaders, not just its decls
+
+**What changed.** The cross-package resolver is now a namespace table rather than
+one hardcoded prefix. `generated/decls/` still maps to a package's `decls`
+subdirectory as before; `generated/spirv/` and `generated/renderprogs/` now map
+into a new `shaders` subdirectory, where the package path mirrors the engine
+resource name verbatim. Only the enumerated namespaces are package-resolved and
+each only out of its named subdirectory, so nothing else a package contains
+becomes reachable.
+
+**Why.** A render program is an ordinary decl type, so its
+`decls/renderprog/<name>.decl` already rode the existing path -- but the compiled
+module is opened separately, by the engine name
+`generated/spirv/<name>.{vspv,fspv,cspv}`, through the same provider vtable slot
+this layer hooks (the call site at RVA 0xD923A3 passes mode 0, which the open
+hook admits). Without a package-scoped route those files would have to sit in the
+shared tree, where two packages could overwrite each other's shaders on disk --
+the exact failure packages exist to prevent -- and deleting a package folder would
+no longer fully uninstall it.
+
+**Status.** The resolution path is covered by `override_packages_test`. Nothing
+has yet bound a custom shader in a running game; the remaining unknown is whether
+a renderprog decl registered at load-state RUNNING reaches the bind cleanly.
+
+## 2026-08-23 — Resolve a shadowed decl out of any installed package, not just the shared tree
+
+**What changed.** `overrides.c` now resolves an engine resource name across every
+installed override package instead of joining it straight onto the overrides
+root. A `generated/decls/<rest>` request is tried against the legacy shared tree
+first, then against each package as `<package root>\decls\<rest>` in
+`sh_packages_enumerate` order; the first existing file serves it. Only that one
+namespace is package-resolved, and only a package's own `decls` subdirectory, so
+a package cannot expose its `package.json` or anything else as an engine
+resource. The package set is captured once at install, alongside the existing
+audit and reclaim passes, because this sits on the engine's file-open path.
+
+**Why.** The per-package migration taught the decl server, the resource bridge
+and the package requirements reader to read N roots, but not the file shadow --
+and the file shadow is what actually hands decl bytes to the parser. The engine
+only ever asks for a decl by its canonical virtual name,
+`generated/decls/<type>/<name>.decl`, which reached `overrides\generated\decls\...`
+and therefore only ever matched a package literally named `generated`. Every
+other package's decls were unreachable. The failure was silent: the identity
+registered, the engine opened nothing, and the parse produced an empty default.
+For `snapeditorentitydef/demons/cyberdemon_enc` that meant no resolved
+`entityDef`, rejection by the native palette validator, and a terminal
+materialization failure that refused the 292 decls queued behind it -- so the
+Cyberdemon never appeared in the Toybox. A package's own patched copy of an
+identity DOOM also ships was likewise ignored in favour of the archive original.
+
+**Proof.** Live, on the pinned build: `file-shadow FIRED [user]` went from 50
+fires (all under `generated/`) to 66 including 11 from the `cyberdemon` package;
+`entitydef/ai/demon/cyberdemon_hell` now serves the package's 3023-byte patched
+copy instead of the archive's 2869-byte original; and the decl server went from
+`293 REFUSED; materialization was terminal` to `289 live objects materialized,
+0 REFUSED` with `palette-refresh FIRED`. Covered by `override_packages_test`,
+which fails on the package cases when the cross-package search is disabled while
+the legacy-tree case still passes.
+
 ## 2026-08-21 — Keep published decl identities resolvable across a gameplay map load
 
 **What changed.** A new service, `decl_visibility`, answers DOOM's decl-resource

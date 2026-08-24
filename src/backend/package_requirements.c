@@ -19,7 +19,6 @@
 #include "packages.h"
 #include "package_requirements.h"
 
-#define PR_ROOT_SUFFIX          "\\overrides\\generated\\requirements"
 #define PR_MAX_FILES            64u
 #define PR_MAX_FILE_BYTES       (64u * 1024u)
 #define PR_MAX_TOTAL_BYTES      (256u * 1024u)

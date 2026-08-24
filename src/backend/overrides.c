@@ -40,6 +40,7 @@
 #include "overrides.h"
 #include "backend_log.h"
 #include "decl_text.h"
+#include "packages.h"
 #include "resource_bridge.h"
 #include "user_overrides.h"
 #include "overrides_baked.h"        /* the built-in "*Custom"-tab default decls (Timeline + Unknown) */
@@ -753,12 +754,127 @@ static int build_override_path(const char *name, char *out, size_t cap)
     return 1;
 }
 
+/* ============================================================ package resolution ==================*/
+
+/* The engine names every decl `generated/decls/<type>/<name>.decl` -- one flat
+ * virtual namespace, regardless of who published the decl. Before packages that
+ * mapped one-to-one onto `overrides\generated\decls\...`, so joining the name
+ * onto the overrides root WAS the resolver.
+ *
+ * A package owns its own root (`overrides\cyberdemon\decls\...`), so that join
+ * can never reach it: the engine has no idea the folder exists and will never
+ * ask for `cyberdemon/decls/...`. Left unhandled the package's decl bodies are
+ * silently never served -- the decl server registers the identity, the engine
+ * opens nothing, and the parse yields an empty default with no resolved
+ * entityDef. That is what kept the Cyberdemon out of the Toybox.
+ *
+ * So `generated/decls/<rest>` is resolved against every installed package in
+ * turn as `<package root>\decls\<rest>`.
+ *
+ * The same problem applies to every OTHER engine namespace a package may own.
+ * A custom render program is the case that forced this to be a table: the module
+ * loader at RVA 0xD922D0 builds `generated/spirv/<name>.{vspv|fspv|cspv}` and
+ * opens it through this very vtable slot, and its call site passes mode 0, so the
+ * open hook admits it. Its pre-translated source blob arrives the same way as
+ * `generated/renderprogs/<name>_pc_vulkan.bin`. Both must be package-scoped, or a
+ * shader would have to live in the shared tree and two packages could clobber
+ * each other's shaders on disk -- exactly what packages exist to prevent.
+ *
+ * A package therefore serves only these enumerated namespaces, and only out of
+ * the subdirectory named here. Nothing else it contains is reachable: its
+ * package.json can never become an engine resource. Under `shaders` the package
+ * path mirrors the engine name verbatim, which keeps the mapping obvious and
+ * costs nothing to extend. */
+typedef struct ov_namespace {
+    const char *engine_prefix;   /* what the engine asks for */
+    const char *package_subdir;  /* which package subdirectory may answer */
+    int strip_prefix;            /* 1: path is <subdir>\<rest>; 0: <subdir>\<whole name> */
+} ov_namespace;
+
+static const ov_namespace g_ov_namespaces[] = {
+    { "generated/decls/",       "decls",   1 },
+    { "generated/spirv/",       "shaders", 0 },
+    { "generated/renderprogs/", "shaders", 0 },
+};
+
+/* The installed package set, captured once at install. The overrides layer is
+ * already an immutable launch snapshot -- the audit, the reclaim pass and the
+ * user-layer gate all read the tree exactly once -- and this is on the engine's
+ * file-open path, so re-enumerating the tree per open is not an option. */
+static sh_package g_ov_packages[SH_PACKAGES_MAX];
+static size_t g_ov_package_count;
+
+static void ov_capture_packages(void)
+{
+    char root[MAX_PATH];
+    size_t count = 0;
+    g_ov_package_count = 0;
+    resolve_root(root, sizeof root);
+    if (!root[0]) return;
+    /* A partial enumeration still resolves whatever it did find: unlike the decl
+     * server, a miss here degrades to the packaged resource rather than
+     * publishing a wrong identity, so serving fewer packages is safe. */
+    (void)sh_packages_enumerate(root, g_ov_packages, SH_PACKAGES_MAX, &count);
+    g_ov_package_count = count;
+}
+
+static int ov_is_regular_file(const char *path)
+{
+    DWORD attrs = GetFileAttributesA(path);
+    return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* Resolve engine resource `name` to an existing file under overrides\, or 0 if
+ * no layer provides it. The legacy whole-tree path is tried first so an install
+ * that predates packages resolves byte-for-byte where it always did; installed
+ * packages are then tried in `sh_packages_enumerate`'s deterministic order, so
+ * two machines with the same packages pick the same file. */
+static int ov_resolve_existing(const char *name, char *out, size_t cap)
+{
+    size_t i, n;
+
+    if (!name || !name[0] || !out || cap == 0) return 0;
+    if (!build_override_path(name, out, cap)) return 0;
+    if (ov_is_regular_file(out)) return 1;
+
+    for (n = 0; n < sizeof(g_ov_namespaces) / sizeof(g_ov_namespaces[0]); n++) {
+        const ov_namespace *ns = &g_ov_namespaces[n];
+        size_t prefix_length = strlen(ns->engine_prefix);
+        const char *relative;
+
+        if (_strnicmp(name, ns->engine_prefix, prefix_length) != 0) continue;
+        relative = ns->strip_prefix ? name + prefix_length : name;
+        if (!relative[0]) break;
+
+        for (i = 0; i < g_ov_package_count; i++) {
+            char *p;
+            if (_snprintf_s(out, cap, _TRUNCATE, "%s\\%s\\%s",
+                            g_ov_packages[i].root, ns->package_subdir, relative) < 0)
+                continue;
+            for (p = out; *p; ++p)
+                if (*p == '/') *p = '\\';
+            if (ov_is_regular_file(out)) return 1;
+        }
+        break;                      /* prefixes are disjoint; one match is all */
+    }
+    out[0] = '\0';
+    return 0;
+}
+
+#ifdef SH_OVERRIDES_TESTING
+int sh_overrides_test_resolve_existing(const char *name, char *out, size_t cap)
+{
+    ov_capture_packages();
+    return ov_resolve_existing(name, out, cap);
+}
+#endif
+
 /* SEH-guarded open of the override file; returns an ov_stream* (caller returns it to the engine) or
  * NULL if no file / open failed. On success the FILE* is owned by the stream (its dtor fcloses). */
 static ov_stream *try_open_override(const char *name)
 {
     char path[MAX_PATH];
-    if (!build_override_path(name, path, sizeof path)) return NULL;
+    if (!ov_resolve_existing(name, path, sizeof path)) return NULL;
 
     /* exists? (cheap negative for the common no-override case before fopen) */
     DWORD attrs = GetFileAttributesA(path);
@@ -835,7 +951,7 @@ static ov_stream *open_user_for_baked_name(const char *name, int *malformed)
 {
     *malformed = 0;
     char path[MAX_PATH];
-    if (!build_override_path(name, path, sizeof path)) return NULL;
+    if (!ov_resolve_existing(name, path, sizeof path)) return NULL;
     DWORD attrs = GetFileAttributesA(path);
     if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY)) return NULL;
 
@@ -1234,6 +1350,7 @@ int sh_overrides_install(const uint8_t *module_base,
     g_slot = slot;
 
     sh_resource_bridge_set_provider_ready(1);
+    ov_capture_packages();       /* one enumeration; the open path resolves against this snapshot */
     reclaim_baked_overrides();   /* delete OUR untouched previously-written defaults (memory layer serves now) */
     audit_user_overrides();      /* log what the user's folder actively shadows */
     _snprintf_s(line, sizeof line, _TRUNCATE,

@@ -145,6 +145,10 @@ int sh_overrides_test_supported_build_abi(const uint8_t *module_base,
                                           const void *write_string);
 void *sh_overrides_test_stream_open_file(const char *path);
 void sh_overrides_test_stream_close(void *stream);
+/* Resolve an engine resource name to the existing override file that serves it
+ * -- the legacy shared tree first, then each installed package's decls. Returns
+ * 0 (and empties `out`) when no layer provides the name. */
+int sh_overrides_test_resolve_existing(const char *name, char *out, size_t cap);
 #endif
 
 #endif /* BACKEND_B1_OVERRIDES_H */
