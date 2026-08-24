@@ -112,10 +112,20 @@ static int rb_path_cmp_ci(const char *a, const char *b)
     }
 }
 
+/* Order every key CASE-INSENSITIVELY FIRST, then break ties exactly.
+ *
+ * The leading case-insensitive pass is what makes rb_collapse_identical_rows
+ * correct: it collapses adjacent rows using rb_path_cmp_ci on type, name AND
+ * alias, so rows this comparator considers equal under that same rule must come
+ * out adjacent. Sorting the alias tie-break with strcmp alone broke that -- two
+ * rows differing only in the case of their alias could be separated by a third
+ * row, escape the collapse, and then be refused by the case-insensitive alias
+ * check below as if two packages disagreed. */
 static int rb_identity_cmp(const rb_entry *a, const rb_entry *b)
 {
     int c = rb_path_cmp_ci(a->type, b->type);
     if (!c) c = rb_path_cmp_ci(a->name, b->name);
+    if (!c) c = rb_path_cmp_ci(a->alias, b->alias);
     if (!c) c = strcmp(a->type, b->type);
     if (!c) c = strcmp(a->name, b->name);
     if (!c) c = strcmp(a->alias, b->alias);
