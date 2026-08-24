@@ -135,7 +135,7 @@ cd ..
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 ```
 
-By default this compiles and runs 31 **self-contained native tests** (no game needed):
+By default this compiles and runs 33 **self-contained native tests** (no game needed):
 
 - **`shield_format_test`** — the fault-record string formatter (pure logic).
 - **`hook_test`** — the inline-detour installer, exercised on a hand-laid scratch stub.
@@ -152,6 +152,10 @@ By default this compiles and runs 31 **self-contained native tests** (no game ne
 - **`overrides_internal_test`** — exact reserved-source matching, user gating, the pinned 31-slot provider
   ABI, all-or-nothing native-helper publication, and read-only memory/file-stream behavior.
 - **`decl_server_test`** — path-derived decl identities and shared bounded text validation.
+- **`packages_test`** — per-package override discovery: markers, grouping folders, order, and bounds.
+- **`override_packages_test`** — the file shadow resolving a decl or shader out of any installed package.
+- **`resource_bridge_test`** — manifest resolution, sparse archive decode, the provider gate, and collisions.
+- **`package_requirements_test`** — allowlisted package cvars, strict parsing, and the one-shot apply.
 - **`decl_server_contract_test`** — startup ordering, signature pins, one-shot main-thread wiring, and fail-closed guards.
 - **`palette_refresh_test`** / **`palette_refresh_contract_test`** — new-decl success gating, exactly-once palette rebuild state, and clean signature/editor wiring.
 - **`config_message_test`** — bounded raw WebView config-message extraction before UTF-8 conversion.
@@ -211,7 +215,7 @@ A third test, `xinput_ordinal_test.c`, is a **runtime** cross-check of the XInpu
 a built DLL and calls its exports by ordinal. CI verifies that same invariant *statically* with `dumpbin` (the
 "XInput ordinal parity" step), so you normally don't need to run it by hand.
 
-CI runs the 31 self-contained native tests, seven JavaScript tests, and the installer tests on every PR; the DOOM-image tests are local-only
+CI runs the 33 self-contained native tests, seven JavaScript tests, and the installer tests on every PR; the DOOM-image tests are local-only
 (CI has no game image).
 
 After the normal test run has built its executables, contributors with DOOM installed can also
@@ -237,10 +241,9 @@ in place; they do not write to the game directory.
 4. **Run the tests** (section 7) — both the Go and C suites.
 5. **Update the docs** your change affects (section 9).
 6. **Commit** with a clear, imperative subject; a simple area prefix such as `installer:` or `backend:` is
-   fine. Follow it with a natural body of one to three complete sentences explaining what changed and how
-   Snapmap+ will behave differently. The release process publishes that body in the public changelog, so
-   write it for people rather than as internal shorthand, labeled fields, a checklist, or generated boilerplate.
-   Do not add agent/tool attribution or generated-by trailers.
+   fine. Follow it with a body of **one to three short sentences** -- see
+   [Writing the commit body](#writing-the-commit-body) below, which is a hard requirement, not a style
+   preference. Do not add agent/tool attribution or generated-by trailers.
 7. **Push** to your fork and open a **pull request against `main`**.
 8. The **CI gate** runs automatically, as two parallel jobs: a security scan (no-new-binaries ·
    capability-surface scan · gitleaks); and the build (`build.ps1` / `package.ps1`, a bundle guard that
@@ -251,12 +254,46 @@ in place; they do not write to the game directory.
    CODEOWNERS-gated). Releases are cut from reviewed, tagged commits — see the README's
    ["Versioning & releases"](../README.md#versioning--releases).
 
+### Writing the commit body
+
+**Your commit body is the changelog.** The release workflow copies each user-facing commit's body verbatim
+into the GitHub release notes, and from there it is what people read on the website and in
+`snapmap-plus changelog`. Nobody edits it afterwards. A body written as an engineering write-up becomes a wall
+of text in a player's release notes.
+
+So the body is **one to three short sentences -- about 60 words, never more than 80.** Write the change and
+what it means for someone using Snapmap+, in plain language:
+
+> Prefab previews now keep a prop's saved rotation and a block's real dimensions instead of resetting them.
+> Logic hexagons stay full size while I/O circles and filter diamonds render smaller, so a graph is easier to
+> read at a glance.
+
+Keep out of it: internal symbol names, RVAs, file paths, test counts, "what changed / why / status" headings,
+bullet lists, checklists, and any restatement of the subject line. If the change genuinely needs a longer
+explanation, that belongs in the PR description or in `docs/` -- the PR body is not published, so it can be as
+long as it needs to be.
+
+Rationale that matters to reviewers rather than to players -- proof, evidence, alternatives considered -- goes
+in the PR description too, or in the matching `docs/` file from the table in section 9.
+
+Two things that are **not** exceptions:
+
+- **A big change is not a long body.** Summarize the outcome in a sentence and let the diff and the docs carry
+  the detail.
+- **A squashed PR is not a concatenation.** Write one fresh body for the whole PR; never paste the individual
+  commit bodies together. That is what produced release notes tens of kilobytes long, and it is the failure
+  this rule exists to prevent.
+
+Purely internal commits (`ci:`, `chore:`, `docs:`, `test:`, `refactor:`, `build:`, `style:`, `meta:`) are
+filtered out of the changelog entirely, so they are free to say whatever is useful to the next maintainer.
+
 Before merging, the maintainer reads the complete pull request: its description, every commit message, the
 full diff, review discussion, linked issues, and reported validation. Coherent commits are rebased and
-preserved. Fixup-heavy history may be squashed, but the resulting subject and one-to-three-sentence body must
-summarize the entire pull request rather than merely copying its title. A merge commit is reserved for cases
-where retaining the original commit IDs or branch topology has concrete value. Every merge method must
-preserve the contributor's authorship and credit.
+preserved. Fixup-heavy history may be squashed, and the maintainer then writes a **fresh** subject and body for
+the whole pull request under the rule above -- never the individual commit bodies pasted end to end, which is
+exactly how a release ends up with kilobyte-long notes. A merge commit is reserved for cases where retaining
+the original commit IDs or branch topology has concrete value. Every merge method must preserve the
+contributor's authorship and credit.
 
 ## 9. Keep the docs in sync (required)
 
