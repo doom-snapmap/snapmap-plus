@@ -20,15 +20,18 @@
  * input and output targets -- before the palette rebuild is called;
  * source-only abstract bodies are retained as NON-PALETTE without that call.
  * Each source-path argument is a native 48-byte idStr temporary, constructed
- * and destroyed around its one call. A non-empty snapshot is armed at install
- * and queued only after engine load_state reaches RUNNING. Returns 1 when work
- * was armed or there was nothing to do, 0 when the service was refused. */
+ * and destroyed around its one call.
+ *
+ * A non-empty snapshot is armed at install, and published from a one-shot
+ * detour on the engine's whole-registry resource promotion -- the single pass
+ * in idCommonLocal::Init that makes every resource alive at that instant
+ * permanent. Publishing immediately before it is what puts new content in the
+ * same static set, by the same engine pass, as the shipped editor content it
+ * depends on; publishing after it (the former load-state RUNNING trigger) left
+ * new content map-scoped, so the first playtest destroyed it. Returns 1 when
+ * work was armed or there was nothing to do, 0 when the service was refused. */
 int sh_decl_server_install(const sig_result *results, size_t count,
                            const uint8_t *module_base, void *cmdsys);
-
-/* Existing backend tick hook: queues an armed immutable snapshot exactly once
- * after startup parsing is complete. */
-void sh_decl_server_poll(void);
 
 /* Returns 1 only after the one-shot command has registered every missing
  * candidate, materialized required editor decls, and completed the palette

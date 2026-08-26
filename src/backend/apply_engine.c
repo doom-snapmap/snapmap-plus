@@ -2379,11 +2379,15 @@ static void ae_play_log_diff(const ae_play_snap *before, const ae_play_snap *aft
 void sh_apply_prefab_poll_play(void)
 {
     /* This tick already has the engine's true load-state word. Give declarative package requirements
-     * their one safe post-startup opportunity before doing editor-specific work. */
+     * their one safe post-startup opportunity before doing editor-specific work.
+     *
+     * This is now the FALLBACK path. The decl server applies the same requirements itself, and
+     * synchronously, just before it publishes inside idCommonLocal::Init -- the cut-content gates
+     * have to be live before a new FX or model-backed decl is parsed, and that parse now happens
+     * during boot, so waiting for RUNNING would be far too late. Both entry points share one CAS,
+     * so whichever runs first wins. This one still matters on a build where the decl server
+     * refused, and on a launch with no packages at all. */
     sh_package_requirements_poll();
-    /* Queue dynamic decl publication after requirements in the same engine command buffer. That ordering
-     * makes cut-content blacklist policy effective before a new FX or model-backed decl is parsed. */
-    sh_decl_server_poll();
     if (!g_doom_base) return;
 
 #if AE_PASTE_DIAG_ON

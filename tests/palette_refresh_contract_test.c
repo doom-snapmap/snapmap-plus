@@ -113,7 +113,14 @@ int main(int argc, char **argv)
     CHECK(refresh_call && success_set && refresh_call < success_set);
     CHECK(success_set && done_after_call && success_set < done_after_call);
     CHECK(strstr(server, "sh_palette_refresh_after_decl_registration,") != NULL);
-    CHECK(strstr(server, "palette refresh failed after native registration; no retry") != NULL);
+    /* The decl server still calls this one-shot, in the same place, ordered before it publishes
+     * success -- but a refusal is no longer terminal for the registration. Publication moved into
+     * idCommonLocal::Init (ahead of the engine's whole-registry resource promotion, which is what
+     * makes published content survive a playtest), and at that point the editor has not built a
+     * placeable roster yet, so this service correctly refuses on its editor-singleton/palette-vtable
+     * validation. When the editor does build the roster, our identities are already registered. */
+    CHECK(strstr(server, "the editor had not built one yet") != NULL);
+    CHECK(strstr(server, "palette refresh failed after native registration; no retry") == NULL);
     CHECK(strstr(dllmain, "21088") == NULL);
     CHECK(strstr(server, "21088") == NULL);
     missing_end = missing_zero ? strstr(missing_zero, "ds_free_candidates();") : NULL;

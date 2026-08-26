@@ -35,6 +35,7 @@ enum {
 };
 
 typedef void (*pr_buffer_command_fn)(void *cmdsys, const char *text);
+typedef void (*pr_execute_buffer_fn)(void *cmdsys);
 
 typedef struct pr_file {
     char path[MAX_PATH];
@@ -345,16 +346,16 @@ int sh_package_requirements_install(const char *data_root,
     return 1;
 }
 
-void sh_package_requirements_poll(void)
+/* Build the admitted command text, buffer it, and -- when `execute` is supplied -- drain the engine
+ * command buffer so the values are live before the caller's very next engine call. The claim on
+ * ARMED is a CAS, so whichever entry point runs first wins and the other becomes a no-op. */
+static void pr_apply(pr_execute_buffer_fn execute, const char *when)
 {
     char command[160] = "";
     char line[224];
     size_t used = 0, i;
-    int load_state = -1, queued = 0;
-    if (InterlockedCompareExchange(&g_state, PR_STATE_ARMED, PR_STATE_ARMED) != PR_STATE_ARMED)
-        return;
-    if (!pr_read_load_state(&load_state) || load_state != PR_LOAD_STATE_RUNNING)
-        return;
+    int queued = 0;
+
     if (InterlockedCompareExchange(&g_state, PR_STATE_APPLYING, PR_STATE_ARMED) != PR_STATE_ARMED)
         return;
     for (i = 0; i < sizeof(g_allowed) / sizeof(g_allowed[0]); i++) {
@@ -370,6 +371,10 @@ void sh_package_requirements_poll(void)
     }
     __try {
         g_buffer_command(g_cmdsys, command);
+        /* Buffering only appends text. Nothing drains the command buffer between the decl server's
+         * publication point inside idCommonLocal::Init and the engine's whole-registry promotion, so
+         * that path must run the engine's own drain itself or the gates land far too late. */
+        if (execute) execute(g_cmdsys);
         queued = 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         queued = 0;
@@ -379,10 +384,48 @@ void sh_package_requirements_poll(void)
         return;
     }
     _snprintf_s(line, sizeof(line), _TRUNCATE,
-                "package-requirements applied: %zu safe cvar(s) queued once at load-state RUNNING",
-                g_requirement_count);
+                "package-requirements applied: %zu safe cvar(s) %s once %s",
+                g_requirement_count, execute ? "executed" : "queued", when);
     backend_log(line);
     InterlockedExchange(&g_state, PR_STATE_DONE);
+}
+
+void sh_package_requirements_poll(void)
+{
+    int load_state = -1;
+    if (InterlockedCompareExchange(&g_state, PR_STATE_ARMED, PR_STATE_ARMED) != PR_STATE_ARMED)
+        return;
+    if (!pr_read_load_state(&load_state) || load_state != PR_LOAD_STATE_RUNNING)
+        return;
+    pr_apply(NULL, "at load-state RUNNING");
+}
+
+/* THE STARTUP-FRAGILITY BOUNDARY, RESTATED. The RUNNING gate above exists because applying the
+ * blacklist gates while the engine was still parsing startup declarations made cold boot fragile.
+ * That hazard is about being MID-PARSE, not about the load-state number.
+ *
+ * The window this entry point is called from is quiescent by measurement, not by assumption. A live
+ * capture (Frida interceptor on the promotion, 2026-08-26) timed the boot: the last of the engine's
+ * 64 startup decl loads served through our own provider completed 3.637s BEFORE the engine's
+ * whole-registry resource promotion (0x1801830, called from idCommonLocal::Init at 0x17C6479), and
+ * load-state RUNNING arrived 0.821s AFTER it. The decl server publishes in that gap. Startup decl
+ * parsing is over; nothing else is in flight.
+ *
+ * Applying here is also the only ordering that still means anything: the gates are read by the
+ * blacklist matcher (0x31D0B0) inside idResourceList::LoadResource (0x1801380) and the static
+ * resource-handle resolve (0x18008F0), both of which refuse a blacklisted name before the type
+ * parser ever sees it. If they are not live before the decl server publishes, cut content does not
+ * load at all.
+ *
+ * `execute_command_buffer` is the engine's own drain (CmdExecuteBuffer, 0x1AA46B0). Passing NULL
+ * degrades this to a plain buffer, which is exactly the pre-existing RUNNING behaviour. */
+int sh_package_requirements_apply_now(void *execute_command_buffer)
+{
+    LONG state = InterlockedCompareExchange(&g_state, PR_STATE_ARMED, PR_STATE_ARMED);
+    if (state == PR_STATE_DONE) return 1;
+    if (state != PR_STATE_ARMED) return 0;
+    pr_apply((pr_execute_buffer_fn)execute_command_buffer, "before the engine boot promotion");
+    return InterlockedCompareExchange(&g_state, PR_STATE_DONE, PR_STATE_DONE) == PR_STATE_DONE;
 }
 
 #ifdef SH_PACKAGE_REQUIREMENTS_TESTING

@@ -50,6 +50,23 @@ int sh_decl_visibility_install(const unsigned char *module_base,
     return 1;
 }
 
+/* Publication is triggered by a one-shot detour on the engine's whole-registry
+ * resource promotion, and applies the package requirement cvars synchronously
+ * just before it. Neither reaches an engine in this unit test, so both seams
+ * record nothing and report the outcome that keeps sh_decl_server_install on
+ * its refusal path. */
+void *install_inline_hook(void *target, void *detour, size_t stolen)
+{
+    (void)target; (void)detour; (void)stolen;
+    return NULL;
+}
+
+int sh_package_requirements_apply_now(void *execute_command_buffer)
+{
+    (void)execute_command_buffer;
+    return 1;
+}
+
 int sh_overrides_get_root(char *out, size_t cap)
 {
     if (out && cap) out[0] = '\0';

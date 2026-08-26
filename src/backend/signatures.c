@@ -415,6 +415,49 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 8B C4 55 57 41 54 41 56 41 57 48 8D A8 38 FE FF FF 48 81 EC A0 02 00 00 "
       "48 C7 44 24 20 FE FF FF FF 48 89 58 18 48 89 70 20",
       0x17B34B0u },
+    { "ResourceStaticPromote", /* void(void) -- the engine's WHOLE-REGISTRY resource promotion
+                            * (0x1801830). It takes the resource lock (0x18018A0 / 0x1A40CB0), walks the
+                            * global singly-linked list of per-type resource lists at 0x6217F90 (next at
+                            * +0x18, entry array at +0x20, count at +0x28) and writes 4 into the resource
+                            * level at +0x28 of every entry of every list, then unlocks (0x1A40D00).
+                            *
+                            * Level 4 is what the map-transition purge cannot free: idResource's ctor
+                            * (0x17FEAC0) stamps 1 or 2, and the purge (0x1800E80, driven by 0x1800E10
+                            * from UnloadMap 0x17C79C0 with mask 1 always and mask 2 on a full teardown)
+                            * frees by a BITWISE AND against that mask, which 4 escapes. The engine calls
+                            * this exactly once, from idCommonLocal::Init at 0x17C6479; that single
+                            * snapshot is the entire reason shipped editor content survives a playtest.
+                            *
+                            * The decl server calls it a second time, after publishing, so content that
+                            * did not exist at boot gets the same treatment. See decl_server.c.
+                            *
+                            * The anchor is the promotion store itself (C7 42 28 04 00 00 00 =
+                            * `mov dword [rdx+0x28], 4`), which is why these 79 bytes resolve UNIQUE.
+                            * Wildcards are the two rel32 lock calls, the rip-relative read of the list
+                            * head, and the two short-branch displacements.
+                            * DIRECT (our own reverse-engineering, 2026-08-26). */
+      "40 53 48 83 EC 30 48 C7 44 24 20 FE FF FF FF E8 ?? ?? ?? ?? 48 8B D8 B2 01 "
+      "48 8B C8 E8 ?? ?? ?? ?? 4C 8B 05 ?? ?? ?? ?? 4D 85 C0 74 ?? 0F 1F 00 "
+      "41 8B 48 28 83 E9 01 48 63 C9 78 ?? 0F 1F 40 00 49 8B 40 20 48 8B 14 C8 "
+      "C7 42 28 04 00 00 00",
+      0x1801830u },
+    { "CmdExecuteBuffer",  /* idCmdSystemLocal::ExecuteCommandBuffer -- void(cmdSystem [rcx]). The
+                            * public no-argument drain: it calls the worker (0x1AA46E0) twice, once with
+                            * exec context 0 and once with 1, so both command text buffers
+                            * (cmdSystem+0x40 and +0x10070, selected on +0x200A8 exactly as
+                            * BufferCommandText selects them) are executed. This is the same function
+                            * idCommonLocal::Init reaches through cmdSystem vtbl+0x60 right after it
+                            * buffers `resourceExec default.cfg -s`.
+                            *
+                            * Needed because the decl server now publishes INSIDE Init, and the package
+                            * requirement cvars must be live before that publication parses anything --
+                            * buffering alone would not run until Init returns. Wildcards are the rel32
+                            * call and the rel32 tail jmp; the anchor is the second dispatch
+                            * (BA 01 00 00 00 48 8B CB ... 5B E9), which resolves UNIQUE.
+                            * DIRECT (our own reverse-engineering, 2026-08-26). */
+      "40 53 48 83 EC 20 33 D2 48 8B D9 E8 ?? ?? ?? ?? BA 01 00 00 00 48 8B CB "
+      "48 83 C4 20 5B E9 ?? ?? ?? ??",
+      0x1AA46B0u },
     { "GameMgrLea",        /* thin RET-leaf bool getter (0xb10870) whose prologue loads the
                             * gameMgr global via MOV RAX,[rip+gameMgr] (48 8B 05, the FIRST decode-target
                             * opcode, byte offset 0), then CMP [RAX+0xA54A0],0 / SETZ. Decode = rip_next +

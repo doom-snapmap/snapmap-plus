@@ -33,6 +33,8 @@
 
 #include "backend_log.h"
 #include "decl_server.h"
+#include "hook.h"
+#include "package_requirements.h"
 #include "decl_server_path.h"
 #include "decl_text.h"
 #include "overrides.h"
@@ -53,8 +55,6 @@
 #define DS_IDSTR_SIZE          0x30u
 #define DS_ANCHOR_MOV_OFFSET    0x10u
 #define DS_ANCHOR_MOV_LENGTH    7u
-#define DS_LOAD_STATE_RVA       0x6dde198u
-#define DS_LOAD_STATE_RUNNING   3
 #define DS_PINNED_ANCHOR_RVA    0x184E1D0u
 #define DS_PINNED_TYPE_RVA      0x17B43B0u
 #define DS_PINNED_REGISTER_RVA  0x17B7330u
@@ -62,6 +62,22 @@
 #define DS_PINNED_SOURCE_FIND_RVA 0x17B34B0u
 #define DS_PINNED_IDSTR_CTOR_RVA 0x19FCEF0u
 #define DS_PINNED_IDSTR_DTOR_RVA 0x19FD120u
+/* The engine's whole-registry resource promotion, and the engine's own command-buffer drain. See
+ * "publishing into the engine's boot snapshot" below for why the decl server hooks the first and
+ * calls the second. */
+#define DS_PINNED_BOOT_PROMOTE_RVA 0x1801830u
+#define DS_PINNED_CMD_EXECUTE_RVA  0x1AA46B0u
+/* The resource level the map-transition purge tests, and the value that escapes it. This service
+ * READS these and never writes them: the whole point of publishing before the engine's promotion is
+ * that the engine does the writing. The read exists so a live run can PROVE the ordering worked
+ * instead of asserting it -- see ds_report_promotion_outcome. */
+#define DS_RESOURCE_LEVEL_OFFSET   0x28u
+#define DS_RESOURCE_LEVEL_STATIC   4u
+/* The promotion's first three instructions -- push rbx / sub rsp,0x30 / mov qword [rsp+0x20],-2 --
+ * are 15 bytes of whole, position-independent code with no rip-relative operand and no relative
+ * branch, so they are safe to steal for the 14-byte absolute jump. The next instruction is a rel32
+ * call and must not be touched. */
+#define DS_BOOT_PROMOTE_STOLEN_BYTES 15u
 #define DS_DECL_STATE_OFFSET    0x2cu
 #define DS_DECL_IN_PROGRESS    0x01u
 #define DS_DECL_ENTITYDEF_OFFSET 0x1c8u
@@ -78,7 +94,6 @@ enum {
 
 typedef void (*add_command_fn)(void *cmdsys, const char *name, void *handler,
                                const char *help, void *arg_comp, unsigned int flags);
-typedef void (*buffer_command_fn)(void *cmdsys, const char *text);
 typedef void *(*decl_type_by_name_fn)(void *registry, const char *short_name);
 typedef unsigned char (*decl_register_file_fn)(void *registry, const void *source_name,
                                                void *default_type_manager);
@@ -89,6 +104,8 @@ typedef void *(__fastcall *decl_source_find_fn)(void *type_manager,
 typedef void *(*decl_find_fn)(void *type_manager, const char *logical_name,
                               unsigned char make_default);
 typedef int (*decl_palette_refresh_fn)(void);
+typedef void (*resource_promote_static_fn)(void);
+typedef void (*cmd_execute_buffer_fn)(void *cmdsys);
 typedef HANDLE (WINAPI *ds_find_first_fn)(LPCSTR pattern, LPWIN32_FIND_DATAA found);
 typedef BOOL (WINAPI *ds_find_next_fn)(HANDLE search, LPWIN32_FIND_DATAA found);
 typedef BOOL (WINAPI *ds_find_close_fn)(HANDLE search);
@@ -226,7 +243,6 @@ static int g_capture_refused;
 static size_t g_total_bytes;
 static void *g_cmdsys;
 static add_command_fn g_add_command;
-static buffer_command_fn g_buffer_command;
 static const uint8_t *g_module_base;
 static const uint8_t *g_registry_anchor;
 static decl_type_by_name_fn g_expected_type_by_name;
@@ -235,6 +251,11 @@ static idstr_ctor_fn g_idstr_ctor;
 static idstr_dtor_fn g_idstr_dtor;
 static decl_source_find_fn g_find_source;
 static decl_find_fn g_find_decl;
+static cmd_execute_buffer_fn g_execute_commands;
+static resource_promote_static_fn g_boot_promotion_original;
+static volatile LONG g_boot_promotion_entered;
+static char g_probe_type[SH_DECL_SERVER_TYPE_CAP];
+static char g_probe_name[SH_DECL_SERVER_NAME_CAP];
 static ds_find_first_fn g_find_first = FindFirstFileA;
 static ds_find_next_fn g_find_next = FindNextFileA;
 static ds_find_close_fn g_find_close = FindClose;
@@ -2014,7 +2035,7 @@ static void __cdecl ds_apply_command(void)
         int registered = 0;
         int failed = 0;
         int materialization_failed = 0;
-        int palette_failed = 0;
+        int palette_skipped = 0;
         int materialized = 0;
         int failure_phase = DS_PHASE_FAILURE_NONE;
         const char *failed_source = NULL;
@@ -2029,8 +2050,22 @@ static void __cdecl ds_apply_command(void)
                 materialization_failed = 1;
                 backend_log("decl-server FAILED: native source scans completed but a new snapEditorEntityDef could not be materialized; no palette refresh; no retry");
             } else {
-                palette_failed = 1;
-                backend_log("decl-server FAILED: palette refresh failed after native registration; no retry");
+                /* NOT TERMINAL ANY MORE.
+                 *
+                 * A first draft of this predicted the rebuild would REFUSE during Init because the
+                 * editor did not exist yet. That prediction was wrong, and the live log says so:
+                 * "the palette rebuild was completed". The editor singleton is a STATIC object at a
+                 * fixed data RVA (0x3056748) with the palette embedded at +0x20660, so its vtable
+                 * (0x20499A0) is written by CRT static initialization, long before Init -- and that
+                 * vtable identity is exactly what palette_refresh validates. The object is
+                 * constructed from the start; what does not exist yet is a POPULATED roster.
+                 *
+                 * So the rebuild does run, against a registry publication has just extended, and it
+                 * is simply no longer load-bearing: publication now precedes any roster the editor
+                 * builds for real. That is why a refusal must not be terminal -- on another build or
+                 * another timing it would discard a registration that completely succeeded, in
+                 * order to report the absence of something nothing depends on. */
+                palette_skipped = 1;
             }
         }
         if (failed) {
@@ -2048,22 +2083,178 @@ static void __cdecl ds_apply_command(void)
                         registered, shadowed, refused);
             backend_log(line);
             InterlockedExchange(&g_state, DS_STATE_FAILED);
-        } else if (palette_failed) {
-            backend_log("decl-server FAILED: palette refresh was terminal; native registration success was not published; no retry");
-            InterlockedExchange(&g_state, DS_STATE_FAILED);
         } else {
-            char line[384];
+            char line[448];
             _snprintf_s(line, sizeof(line), _TRUNCATE,
-                        "decl-server registration succeeded: %d MISSING registered in dependency order, %d live objects materialized, %d of them new editor entities held to the native palette contract, %d SHADOWED, %d REFUSED; native registration, materialization, and palette refresh completed",
+                        "decl-server registration succeeded: %d MISSING registered in dependency order, %d live objects materialized, %d of them new editor entities held to the native palette contract, %d SHADOWED, %d REFUSED; published before the engine boot promotion, so the palette rebuild was %s",
                         registered, materialized, ds_admitted_root_count(),
-                        shadowed, refused);
+                        shadowed, refused,
+                        palette_skipped ? "not needed (the editor had not built one yet)"
+                                        : "completed");
             backend_log(line);
+            /* Keep one published identity addressable past ds_free_candidates so the caller can
+             * read its resource level back after the engine's promotion returns. Identity only --
+             * no decl pointer is retained, so nothing here can outlive what it describes. */
+            for (i = 0; i < g_candidate_count; i++) {
+                if (g_candidates[i].outcome != DS_CANDIDATE_MISSING) continue;
+                strcpy_s(g_probe_type, sizeof(g_probe_type), g_candidates[i].type);
+                strcpy_s(g_probe_name, sizeof(g_probe_name), g_candidates[i].name);
+                break;
+            }
             InterlockedExchange(&g_registration_succeeded, 1);
             InterlockedExchange(&g_state, DS_STATE_DONE);
         }
     }
     ds_free_candidates();
 }
+
+/* ========================= publishing into the engine's boot snapshot ============================
+ *
+ * WHAT MAKES CONTENT PERMANENT. Every idResource is born map-scoped: the constructor (RVA 0x17FEAC0)
+ * writes 1 or 2 into the resource level at +0x28, and the map-transition purge (0x1800E80, driven by
+ * 0x1800E10 from UnloadMap 0x17C79C0 with mask 1 always and mask 2 on a full teardown) destructs
+ * every entry whose level ANDs with the mask. Level 4 shares no bit with 1 or 2 and is exempt.
+ *
+ * Level 4 is reached in exactly one wholesale way: the engine's whole-registry promotion
+ * (0x1801830), called ONCE from idCommonLocal::Init at 0x17C6479, which walks the global list of
+ * per-type resource lists at 0x6217F90 and writes 4 into every entry of every list. Shipped editor
+ * content is not permanent because the engine knows what it is. It is permanent because it happened
+ * to be alive when that one snapshot was taken.
+ *
+ * WHY THE SERVICE PUBLISHES HERE AND NOT AT LOAD-STATE RUNNING. It used to publish at RUNNING, and a
+ * live capture (Frida interceptor on the promotion, 2026-08-26) measured exactly how badly that
+ * misses, relative to T = the promotion:
+ *     T-146.9s   this service is armed; the override provider is installed
+ *     T-131.6s   the provider begins serving the engine's own decls
+ *     T-3.637s   the 64th and last startup decl load (snapEditorSettings/settings.decl, 70 KB)
+ *     T          the engine's whole-registry promotion runs
+ *     T+0.821s   load-state RUNNING
+ *     T+2.267s   publication used to complete -- 2.3 seconds too late, every launch
+ * Our content was therefore born map-scoped and the first playtest destroyed it, while the editor's
+ * render entity kept the raw decl pointer it had cached and is never rebuilt on the return leg.
+ *
+ * WHY NOT PROMOTE OUR OWN CONTENT AFTERWARDS. Six attempts did, and every one failed:
+ *   - a pinned md6Def whose model was not pinned -> the animator read a freed model
+ *   - a surviving animWeb indexing an md6Def that had been rebuilt -> cyberdemon model, mancubus anim
+ *   - a survivor enumerated by teardown after its peers were freed -> call through a freed vtable
+ *   - a re-parse whose FreeData 0xFF-filled joint buffers the render thread was reading
+ *   - promotion that followed one edge (md6Def -> the model at +0x60) and died on the first edge
+ *     nobody had special-cased: entityDef -> edit.renderModelInfo.model
+ *   - calling the engine's own promotion at RUNNING, which IS complete, but by then a map is loaded,
+ *     so it also made that map's resources permanent and the engine could never free them again
+ * A subset needs a closure the engine does not record: an idResource carries a name, an id, two flag
+ * bytes and this level, and the purge decides by the level ALONE -- no refcount, no child list, no
+ * back-reference table. The whole registry needs no closure but destroys the engine's own lifecycle,
+ * because level 1 and level 2 are two deliberately different scopes, not one.
+ *
+ * SO WE DO NEITHER. We publish BEFORE the snapshot and let the engine take it. Our content is then
+ * promoted by the same pass, at the same instant, as the content it depends on -- identical
+ * treatment to shipped editor content because it IS the same treatment. No second promotion, no
+ * subset, no edges, no per-type knowledge, and nothing that was map-scoped is made permanent,
+ * because at 0x17C6479 no map exists yet.
+ *
+ * WHY IT IS SAFE TO PUBLISH HERE. The capture again: the engine's startup decl parsing finished 3.6
+ * seconds earlier, and our provider had been serving the engine's own decls for over two minutes.
+ * The decl registry is not merely constructed at this point -- the engine has just finished driving
+ * the entire SnapMap decl type set through our file-shadow. The window is quiescent by measurement,
+ * not by assumption.
+ *
+ * REFUSE AND CONTINUE IS THE CONTRACT. A publication failure now happens during boot, so it must
+ * never be able to stop one. Everything this detour does is inside SEH, the engine's promotion is
+ * called unconditionally on the way out, and a failure stays terminal exactly as it would at
+ * RUNNING. The worst outcome is a launch with no published content -- never a launch that does not
+ * happen. */
+static void ds_publish_before_boot_promotion(void)
+{
+    /* The cut-content gates first, and synchronously. The blacklist matcher (0x31D0B0) is consulted
+     * by idResourceList::LoadResource (0x1801380) and the static resource-handle resolve
+     * (0x18008F0), which refuse a blacklisted name before the type parser ever sees it -- so a
+     * package made of cut content does not load at all unless these are already live. Buffering
+     * alone will not do: nothing drains the command buffer between here and the promotion. */
+    if (!sh_package_requirements_apply_now((void *)g_execute_commands))
+        backend_log("decl-server: package requirements were not applied before publication; cut-content gates may refuse some packages");
+
+    /* Claim the same ARMED -> QUEUED transition the command buffer used to make. ds_apply_command
+     * keeps its own QUEUED -> APPLYING claim, so its contract is unchanged; only delivery moved. */
+    if (InterlockedCompareExchange(&g_state, DS_STATE_QUEUED, DS_STATE_ARMED) != DS_STATE_ARMED)
+        return;
+    ds_apply_command();
+}
+
+/* PROVE THE ORDERING, DO NOT ASSERT IT. Every log line this service writes about publishing before
+ * the engine boot promotion is its own prose, and prose is not evidence: it would read exactly the
+ * same if the hook were on the wrong function, or if the engine reached the promotion by some path
+ * we never intercepted. So after the trampoline returns, read one published identity's resource
+ * level straight back out of the engine.
+ *
+ * That reading is decisive because the level is the exact field the map-transition purge (0x1800E80)
+ * tests, and the only thing that could have written 4 into it is the promotion we just called.
+ * Level 4 means publication landed inside the engine's snapshot. Anything else means it did not,
+ * and the line says so -- which is the failure this whole design exists to prevent, caught during
+ * boot instead of at the first playtest.
+ *
+ * Read-only, SEH-guarded, and lookup-only (makeDefault=0, so it cannot fabricate the object it is
+ * measuring). It never fails the run: a diagnostic that can break a boot is not a diagnostic. */
+static void ds_report_promotion_outcome(void)
+{
+    void *registry = NULL;
+    decl_type_by_name_fn type_by_name = NULL;
+    decl_register_file_fn register_file = NULL;
+    void *type_manager = NULL;
+    void *decl = NULL;
+    unsigned int level = 0;
+    char line[352];
+
+    if (!InterlockedCompareExchange(&g_registration_succeeded, 0, 0) || !g_probe_name[0]) return;
+    if (!ds_decode_registry(&registry, &type_by_name, &register_file)) {
+        backend_log("decl-server boot-promotion PROOF unavailable: the registry could not be re-decoded after the promotion; publication itself is unaffected");
+        return;
+    }
+    __try {
+        type_manager = type_by_name(registry, g_probe_type);
+        decl = type_manager ? g_find_decl(type_manager, g_probe_name, 0) : NULL;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        decl = NULL;
+    }
+    if (!decl || !ds_safe_read((const uint8_t *)decl + DS_RESOURCE_LEVEL_OFFSET,
+                               &level, sizeof(level))) {
+        _snprintf_s(line, sizeof(line), _TRUNCATE,
+                    "decl-server boot-promotion PROOF unavailable: published identity '%s' '%s' could not be read back after the promotion",
+                    g_probe_type, g_probe_name);
+        backend_log(line);
+        return;
+    }
+    _snprintf_s(line, sizeof(line), _TRUNCATE,
+                level == DS_RESOURCE_LEVEL_STATIC
+                    ? "decl-server boot-promotion PROOF: the engine whole-registry promotion returned and published identity '%s' '%s' now reads resource level %u -- it is inside the engine static set and the map-transition purge (masks 1|2) cannot free it"
+                    : "decl-server boot-promotion PROOF FAILED: published identity '%s' '%s' reads resource level %u after the engine promotion returned, so publication did NOT land inside the engine snapshot and a playtest will destroy it",
+                g_probe_type, g_probe_name, level);
+    backend_log(line);
+}
+
+/* Runs on the engine main thread, inside idCommonLocal::Init, in place of the first 15 bytes of the
+ * whole-registry promotion. Publishes, then calls the promotion through the trampoline so the
+ * engine's own snapshot includes everything publication just created, then reads the result back. */
+static void ds_boot_promotion_detour(void)
+{
+    /* The engine calls the promotion exactly once (single xref, 0x17C6479), but a detour may not
+     * assume its target's call count. Publish on the first entry only; any later entry is a plain
+     * pass-through. */
+    if (InterlockedCompareExchange(&g_boot_promotion_entered, 1, 0) == 0) {
+        __try {
+            ds_publish_before_boot_promotion();
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            backend_log("decl-server FAILED: publication faulted inside the engine boot promotion; the engine promotion still runs and startup continues");
+            InterlockedExchange(&g_state, DS_STATE_FAILED);
+        }
+    }
+    /* Unconditional, and last. Never NULL in practice -- the hook is not installed unless
+     * install_inline_hook returned a trampoline -- but skipping it would leave the ENTIRE engine's
+     * content map-scoped, which is far worse than anything publication can get wrong. */
+    if (g_boot_promotion_original) g_boot_promotion_original();
+    ds_report_promotion_outcome();
+}
+
 
 int sh_decl_server_registration_succeeded(void)
 {
@@ -2079,9 +2270,10 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     const sig_result *find_decl;
     const sig_result *source_find;
     uintptr_t add_command;
-    uintptr_t buffer_command;
     uintptr_t idstr_ctor;
     uintptr_t idstr_dtor;
+    uintptr_t boot_promote;
+    uintptr_t execute_commands;
     int command_registered = 0;
     if (InterlockedCompareExchange(&g_state, DS_STATE_INSTALLING, DS_STATE_NEW) != DS_STATE_NEW)
         return 0;
@@ -2114,23 +2306,32 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     find_decl = ds_result(results, count, "DeclFind");
     source_find = ds_result(results, count, "DeclSourceFind");
     add_command = ds_clean_addr(results, count, "AddCommand");
-    buffer_command = ds_clean_addr(results, count, "BufferCommandText");
     idstr_ctor = ds_clean_addr(results, count, "IdStrCtor");
     idstr_dtor = ds_clean_addr(results, count, "IdStrDtor");
+    /* Both are required, not optional. Without the promotion this service has no publication
+     * trigger at all, and without the drain the cut-content gates would not be live when it
+     * publishes. Refusing is the correct outcome on a build we cannot serve correctly. */
+    boot_promote = ds_clean_addr(results, count, "ResourceStaticPromote");
+    execute_commands = ds_clean_addr(results, count, "CmdExecuteBuffer");
     if (!anchor || anchor->status != SIG_OK || !type_method || !register_file || !find_decl ||
         !source_find || source_find->status != SIG_OK || !source_find->addr ||
         type_method->status != SIG_OK || register_file->status != SIG_OK ||
         find_decl->status != SIG_OK || !type_method->addr ||
         !register_file->addr || !find_decl->addr ||
-        !idstr_ctor || !idstr_dtor || !add_command || !buffer_command || !cmdsys || !module_base ||
+        !idstr_ctor || !idstr_dtor || !boot_promote || !execute_commands ||
+        !add_command || !cmdsys || !module_base ||
         !ds_clean_at_pinned_rva(results, count, "DeclRegistryAnchor", module_base, DS_PINNED_ANCHOR_RVA) ||
         !ds_clean_at_pinned_rva(results, count, "DeclTypeByName", module_base, DS_PINNED_TYPE_RVA) ||
         !ds_clean_at_pinned_rva(results, count, "DeclRegisterFile", module_base, DS_PINNED_REGISTER_RVA) ||
         !ds_clean_at_pinned_rva(results, count, "DeclFind", module_base, DS_PINNED_FIND_RVA) ||
         !ds_clean_at_pinned_rva(results, count, "DeclSourceFind", module_base, DS_PINNED_SOURCE_FIND_RVA) ||
         !ds_clean_at_pinned_rva(results, count, "IdStrCtor", module_base, DS_PINNED_IDSTR_CTOR_RVA) ||
-        !ds_clean_at_pinned_rva(results, count, "IdStrDtor", module_base, DS_PINNED_IDSTR_DTOR_RVA)) {
-        backend_log("decl-server REFUSED: clean pinned-build registry/idStr ABI, command-system, or module-base dependency missing");
+        !ds_clean_at_pinned_rva(results, count, "IdStrDtor", module_base, DS_PINNED_IDSTR_DTOR_RVA) ||
+        !ds_clean_at_pinned_rva(results, count, "ResourceStaticPromote", module_base,
+                                DS_PINNED_BOOT_PROMOTE_RVA) ||
+        !ds_clean_at_pinned_rva(results, count, "CmdExecuteBuffer", module_base,
+                                DS_PINNED_CMD_EXECUTE_RVA)) {
+        backend_log("decl-server REFUSED: clean pinned-build registry/idStr/boot-promotion ABI, command-system, or module-base dependency missing");
         InterlockedExchange(&g_state, DS_STATE_FAILED);
         ds_free_candidates();
         return 0;
@@ -2139,7 +2340,6 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     g_cmdsys = cmdsys;
     g_module_base = module_base;
     g_add_command = (add_command_fn)add_command;
-    g_buffer_command = (buffer_command_fn)buffer_command;
     g_registry_anchor = (const uint8_t *)anchor->addr;
     g_expected_type_by_name = (decl_type_by_name_fn)type_method->addr;
     g_expected_register_file = (decl_register_file_fn)register_file->addr;
@@ -2147,9 +2347,12 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     g_idstr_dtor = (idstr_dtor_fn)idstr_dtor;
     g_find_source = (decl_source_find_fn)source_find->addr;
     g_find_decl = (decl_find_fn)find_decl->addr;
+    g_execute_commands = (cmd_execute_buffer_fn)execute_commands;
 
-    /* Register only the one-shot main-thread command. This architecture
-     * installs no DeclFind detour or other engine code patch. */
+    /* Register the one-shot apply command. It is no longer the delivery vehicle -- the boot
+     * promotion detour below calls ds_apply_command directly, already on the engine main
+     * thread -- but it stays registered so the pass has a named, state-guarded entry point
+     * that can be re-issued for diagnostics without a second code path. */
     __try {
         g_add_command(g_cmdsys, DS_INTERNAL_COMMAND, (void *)ds_apply_command,
                       "Snapmap+ internal one-shot decltree registration", NULL, 2u);
@@ -2164,41 +2367,30 @@ int sh_decl_server_install(const sig_result *results, size_t count,
         return 0;
     }
 
+    /* ARM BEFORE HOOKING, never after. The engine reaches the promotion on its own schedule and
+     * the detour claims ARMED -> QUEUED; if the hook were live first, a fast boot could enter it
+     * while this service was still NEW and the claim would silently fail. */
     InterlockedExchange(&g_state, DS_STATE_ARMED);
-    {
-        char line[256];
-        _snprintf_s(line, sizeof(line), _TRUNCATE,
-                    "decl-server armed: immutable launch snapshot has %d candidate(s), %zu body bytes; waiting for load-state RUNNING; no hot reload",
-                    g_candidate_count, g_total_bytes);
-        backend_log(line);
-    }
-    sh_decl_server_poll();
-    return 1;
-}
 
-void sh_decl_server_poll(void)
-{
-    int load_state = -1;
-    int queued = 0;
-    if (InterlockedCompareExchange(&g_state, DS_STATE_ARMED, DS_STATE_ARMED) != DS_STATE_ARMED)
-        return;
-    if (!g_module_base ||
-        !ds_safe_read(g_module_base + DS_LOAD_STATE_RVA, &load_state, sizeof(load_state)) ||
-        load_state != DS_LOAD_STATE_RUNNING)
-        return;
-    if (InterlockedCompareExchange(&g_state, DS_STATE_QUEUED, DS_STATE_ARMED) != DS_STATE_ARMED)
-        return;
-    __try {
-        g_buffer_command(g_cmdsys, DS_INTERNAL_COMMAND "\n");
-        queued = 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        queued = 0;
-    }
-    if (!queued) {
-        backend_log("decl-server REFUSED: post-startup main-thread command enqueue failed");
+    /* The publication trigger. This is the ONLY engine code patch this service installs: there is
+     * still no DeclFind detour, no lookup interception, no raw object cache and no hot reload. The
+     * target is an engine function we do not modify -- the detour publishes, then calls it. */
+    g_boot_promotion_original =
+        (resource_promote_static_fn)install_inline_hook((void *)boot_promote,
+                                                        (void *)ds_boot_promotion_detour,
+                                                        DS_BOOT_PROMOTE_STOLEN_BYTES);
+    if (!g_boot_promotion_original) {
+        backend_log("decl-server REFUSED: the engine boot-promotion detour could not be installed; nothing is published rather than publishing content a playtest would destroy");
         InterlockedExchange(&g_state, DS_STATE_FAILED);
         ds_free_candidates();
-        return;
+        return 0;
     }
-    backend_log("decl-server queued once at load-state RUNNING (after package requirements in command-buffer order)");
+    {
+        char line[320];
+        _snprintf_s(line, sizeof(line), _TRUNCATE,
+                    "decl-server armed: immutable launch snapshot has %d candidate(s), %zu body bytes; publishes inside idCommonLocal::Init immediately before the engine whole-registry resource promotion (0x%X); no hot reload",
+                    g_candidate_count, g_total_bytes, DS_PINNED_BOOT_PROMOTE_RVA);
+        backend_log(line);
+    }
+    return 1;
 }
