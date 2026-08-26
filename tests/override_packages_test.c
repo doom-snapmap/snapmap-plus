@@ -170,6 +170,13 @@ int main(void)
          "overrides\\cyberdemon\\shaders\\generated\\renderprogs\\cyberdemonshockwave_pc_vulkan.bin");
     CHECK(write_file(path, "blob-bytes"));
 
+    /* A package shipping its own Toybox tile icon: the material is an ordinary decl, and
+     * the pixels it names live under images\\. Both halves have to be servable or the
+     * tile draws black, which is exactly what shipping only the material produced. */
+    join(path, sizeof(path), root,
+         "overrides\\cyberdemon\\images\\textures\\guis\\snapmaps\\entity_icons\\demons\\cyberdemon_enc.bimage");
+    CHECK(write_file(path, "bimage-bytes"));
+
     /* A package the user filed inside grouping folders. */
     join(path, sizeof(path), root, "overrides\\demons\\hell\\imps\\package.json");
     CHECK(write_file(path, "{ \"name\": \"imps\" }\n"));
@@ -231,6 +238,21 @@ int main(void)
               resolved, sizeof(resolved)));
     CHECK(ends_with_ci(resolved,
                        "\\overrides\\cyberdemon\\shaders\\generated\\renderprogs\\cyberdemonshockwave_pc_vulkan.bin"));
+
+    /* 9b. A package's tile IMAGE resolves. Images were the one content class with no
+     *     package route, so a package could ship a Toybox material but never the pixels
+     *     behind it. The prefix is stripped here, unlike shaders: every engine image name
+     *     starts with the same constant, so repeating it in each package buys nothing. */
+    CHECK(sh_overrides_test_resolve_existing(
+              "generated/image/textures/guis/snapmaps/entity_icons/demons/cyberdemon_enc.bimage",
+              resolved, sizeof(resolved)));
+    CHECK(ends_with_ci(resolved,
+                       "\\overrides\\cyberdemon\\images\\textures\\guis\\snapmaps\\entity_icons\\demons\\cyberdemon_enc.bimage"));
+
+    /* 9c. An image nothing ships stays unresolved. */
+    CHECK(!sh_overrides_test_resolve_existing(
+              "generated/image/textures/guis/snapmaps/entity_icons/demons/nope.bimage",
+              resolved, sizeof(resolved)));
 
     /* 10. A shader name nothing ships stays unresolved. */
     CHECK(!sh_overrides_test_resolve_existing(

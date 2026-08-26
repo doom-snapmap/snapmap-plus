@@ -780,6 +780,14 @@ static int build_override_path(const char *name, char *out, size_t cap)
  * shader would have to live in the shared tree and two packages could clobber
  * each other's shaders on disk -- exactly what packages exist to prevent.
  *
+ * Images are the fourth, and the SnapMap Toybox is what forced them. A tile draws a
+ * material, that material names a .tga, and the engine resolves the pair to an image
+ * resource `generated/image/<path>.bimage`. A package could already ship the material --
+ * a material is an ordinary decl -- but not the pixels behind it, so a package could
+ * never contribute a tile icon of its own. The prefix is STRIPPED here, unlike `shaders`:
+ * every engine image name begins with that same constant, so repeating it inside each
+ * package would add depth and no information.
+ *
  * A package therefore serves only these enumerated namespaces, and only out of
  * the subdirectory named here. Nothing else it contains is reachable: its
  * package.json can never become an engine resource. Under `shaders` the package
@@ -795,6 +803,7 @@ static const ov_namespace g_ov_namespaces[] = {
     { "generated/decls/",       "decls",   1 },
     { "generated/spirv/",       "shaders", 0 },
     { "generated/renderprogs/", "shaders", 0 },
+    { "generated/image/",       "images",  1 },
 };
 
 /* The installed package set, captured once at install. The overrides layer is
