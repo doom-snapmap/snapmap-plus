@@ -13,6 +13,12 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Manual re-run, maintainer-only. A push to main normally covers this, but a run can be
+  # missed -- v0.2.1-beta.5's commit reached main with no CI run at all -- and without a
+  # dispatch trigger there is no way to validate an already-pushed commit short of another
+  # push. Safe to add: workflow_dispatch needs repo write, so no fork can reach it, and this
+  # workflow stays secretless either way.
+  workflow_dispatch:
 
 permissions:
   contents: read
