@@ -27,6 +27,8 @@
 #include "strids_baked.h"   /* the compiled-in canonical #str_ set (baked strids) */
 #include "hook.h"
 #include "backend_log.h"
+#include "overrides.h"
+#include "packages.h"
 
 /* StridsSortBody prologue steal window (DIRECT, disasm of 0x1a2b490):
  *   48 89 5C 24 18        mov [rsp+0x18],rbx        (5)
@@ -109,13 +111,10 @@ static void *decode_table_global(const uint8_t *table_lea_fn)
  * value's \" \\ \n \t the same way the engine lang loader does. Keys/values are bounded; a malformed
  * file degrades to "fewer / zero rows injected", never a crash. */
 
-/* Read the whole source file into a fresh NUL-terminated heap buffer (caller HeapFrees), or NULL. */
-static char *read_source_file(size_t *out_len)
+/* Read a whole file into a fresh NUL-terminated heap buffer (caller HeapFrees), or NULL if it is
+ * absent, unreadable, empty or implausibly large. Shared by the user's document and every package's. */
+static char *read_file(const char *path, size_t *out_len)
 {
-    char path[MAX_PATH];
-    if (g_src_path[0]) strncpy_s(path, sizeof path, g_src_path, _TRUNCATE);
-    else default_source_path(path, sizeof path);
-
     HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return NULL;
@@ -138,6 +137,15 @@ static char *read_source_file(size_t *out_len)
     buf[n] = '\0';
     *out_len = n;
     return buf;
+}
+
+/* The user's own document: %LOCALAPPDATA%\snapmap-plus\strings\strids.json unless redirected. */
+static char *read_source_file(size_t *out_len)
+{
+    char path[MAX_PATH];
+    if (g_src_path[0]) strncpy_s(path, sizeof path, g_src_path, _TRUNCATE);
+    else default_source_path(path, sizeof path);
+    return read_file(path, out_len);
 }
 
 /* Scan one JSON "string" starting at *p (which must point AT the opening quote). Copies the unescaped
@@ -175,24 +183,75 @@ static int scan_json_string(const char **p, char *out, size_t cap)
  * injects the user's strids.json FIRST and the baked defaults second, so for a key the user defines their
  * value WINS and the baked duplicate is skipped (a user's explicit override beats our default, matching the
  * decl file-shadow). Case-insensitive (the engine lowercases the #str_ hash). */
-#define STRIDS_DEDUP_CAP 512
-static char g_injected_ids[STRIDS_DEDUP_CAP][96];
-static int  g_injected_n;
+#define STRIDS_DEDUP_CAP 1024
 
-static int already_injected(const char *id)
+/* Who supplied a row, so a cross-package disagreement can name both sides. The user's file and the
+ * baked defaults are not packages and never conflict-report: the user outranks a package by design and
+ * the baked set is only a backstop, so both use STRIDS_OWNER_NONE. */
+#define STRIDS_OWNER_NONE (-1)
+
+typedef struct strids_row {
+    char         id[96];
+    unsigned int text_hash;   /* FNV-1a of the text: "same value?" without storing every value */
+    int          owner;       /* index into g_str_packages, or STRIDS_OWNER_NONE */
+} strids_row;
+
+static strids_row g_injected_ids[STRIDS_DEDUP_CAP];
+static int        g_injected_n;
+
+/* The package set, captured once per inject pass. Static for the same reason the decl server's is: it
+ * is 10 KB and this runs on an engine callback with a live stack. */
+static sh_package g_str_packages[SH_PACKAGES_MAX];
+static size_t     g_str_package_count;
+
+static unsigned int strids_text_hash(const char *text)
+{
+    unsigned int h = 2166136261u;
+    for (; text && *text; text++) { h ^= (unsigned char)*text; h *= 16777619u; }
+    return h;
+}
+
+static strids_row *find_injected(const char *id)
 {
     for (int i = 0; i < g_injected_n; i++)
-        if (_stricmp(g_injected_ids[i], id) == 0) return 1;
-    return 0;
+        if (_stricmp(g_injected_ids[i].id, id) == 0) return &g_injected_ids[i];
+    return NULL;
+}
+
+static const char *strids_owner_name(int owner)
+{
+    if (owner < 0 || (size_t)owner >= g_str_package_count) return "<user>";
+    return g_str_packages[owner].name;
 }
 
 /* Append one #str_<id> -> text row to the live table via the engine fns. Skips a key already injected
  * this pass (baked-wins dedup). */
-static void inject_row(const char *id, const char *text, size_t text_len)
+static void inject_row_owned(const char *id, const char *text, size_t text_len, int owner)
 {
-    if (already_injected(id)) return;                       /* first-writer-wins dedup: never append twice */
-    if (g_injected_n < STRIDS_DEDUP_CAP)
-        strncpy_s(g_injected_ids[g_injected_n++], sizeof g_injected_ids[0], id, _TRUNCATE);
+    strids_row *seen = find_injected(id);
+    if (seen != NULL) {
+        /* Two PACKAGES claiming one id is the case worth reporting. Identical text composes silently --
+         * a shared prerequisite vendored into two packages is being self-contained, not wrong. Different
+         * text is a real disagreement: keep the first and NAME BOTH, rather than letting enumeration
+         * order silently decide what the player reads. A collision with the user's file or a baked
+         * default is neither, so it stays quiet. */
+        if (owner != STRIDS_OWNER_NONE && seen->owner != STRIDS_OWNER_NONE &&
+            seen->text_hash != strids_text_hash(text)) {
+            char line[320];
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                        "B1: strids REFUSED '#str_%s' from package '%s' -- package '%s' already defines "
+                        "it with different text; the first definition stands",
+                        id, strids_owner_name(owner), strids_owner_name(seen->owner));
+            backend_log(line);
+        }
+        return;                                             /* first-writer-wins: never append twice */
+    }
+    if (g_injected_n < STRIDS_DEDUP_CAP) {
+        strncpy_s(g_injected_ids[g_injected_n].id, sizeof g_injected_ids[0].id, id, _TRUNCATE);
+        g_injected_ids[g_injected_n].text_hash = strids_text_hash(text);
+        g_injected_ids[g_injected_n].owner = owner;
+        g_injected_n++;
+    }
 
     char key[256];
     _snprintf_s(key, sizeof key, _TRUNCATE, "#str_%s", id);
@@ -212,6 +271,71 @@ static void inject_row(const char *id, const char *text, size_t text_len)
     InterlockedIncrement(&g_inject_count);
 }
 
+static void inject_row(const char *id, const char *text, size_t text_len)
+{
+    inject_row_owned(id, text, text_len, STRIDS_OWNER_NONE);
+}
+
+/* Walk one flat { "id" : "text" } document, injecting each pair on behalf of `owner`. Anything that is
+ * not a well-formed quoted pair is skipped a character at a time, so braces, commas, whitespace and
+ * stray text never trip the scan: a malformed file degrades to fewer rows, never a crash. */
+static void inject_pairs(const char *buf, int owner)
+{
+    const char *p = buf;
+    char id[256], text[4096];
+    while (*p) {
+        if (*p != '"') { p++; continue; }
+        int idlen = scan_json_string(&p, id, sizeof id);
+        if (idlen < 0) { p++; continue; }
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        if (*p != ':') continue;     /* not a key:value pair -- resume scanning from here */
+        p++;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        if (*p != '"') continue;
+        int vlen = scan_json_string(&p, text, sizeof text);
+        if (vlen < 0) continue;
+        if (idlen > 0) inject_row_owned(id, text, (size_t)vlen, owner);
+    }
+}
+
+/* Inject every installed package's strings\*.json. A package's strings are ITS OWN: they ship with it
+ * and they uninstall with it, so adding an entity no longer means hand-editing one global document that
+ * every other package also has to share.
+ *
+ * Only first-level .json files under the package's strings\ directory are read, matching the manifest
+ * rule elsewhere: a package's subdirectories mean what the package layout says they mean. */
+static void inject_packages(void)
+{
+    char root[MAX_PATH], dir[MAX_PATH], pattern[MAX_PATH], path[MAX_PATH];
+    WIN32_FIND_DATAA found;
+    size_t i;
+
+    g_str_package_count = 0;
+    if (!sh_overrides_get_root(root, sizeof root) || !root[0]) return;
+    /* A partial enumeration still injects what it did find: a missed package's labels fall back to the
+     * engine's own text, which is a worse label but never a wrong one. */
+    (void)sh_packages_enumerate(root, g_str_packages, SH_PACKAGES_MAX, &g_str_package_count);
+
+    for (i = 0; i < g_str_package_count; i++) {
+        HANDLE search;
+        if (!sh_package_subdir(&g_str_packages[i], "strings", dir, sizeof dir)) continue;
+        if (_snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*.json", dir) < 0) continue;
+        search = FindFirstFileA(pattern, &found);
+        if (search == INVALID_HANDLE_VALUE) continue;
+        do {
+            size_t len = 0;
+            char *buf;
+            if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (_snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, found.cFileName) < 0) continue;
+            buf = read_file(path, &len);
+            if (buf == NULL) continue;
+            inject_pairs(buf, (int)i);
+            HeapFree(GetProcessHeap(), 0, buf);
+        } while (FindNextFileA(search, &found));
+        FindClose(search);
+    }
+}
+
 /* Load + inject all rows from strids.json. Returns the count injected. Failure-tolerant. */
 static long do_inject(void)
 {
@@ -226,28 +350,17 @@ static long do_inject(void)
     size_t len = 0;
     char *buf = read_source_file(&len);
     if (buf != NULL) {
-        const char *p = buf;
-        char id[256], text[4096];
-        /* Walk "key" : "value" pairs. Anything that isn't a well-formed quoted string is skipped over a
-         * char at a time, so braces/commas/whitespace/comments don't trip the scan. */
-        while (*p) {
-            if (*p != '"') { p++; continue; }
-            int idlen = scan_json_string(&p, id, sizeof id);
-            if (idlen < 0) { p++; continue; }
-            /* expect a ':' (skip ws) then the value string */
-            while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
-            if (*p != ':') continue;     /* not a key:value pair -- resume scanning from here */
-            p++;
-            while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
-            if (*p != '"') continue;
-            int vlen = scan_json_string(&p, text, sizeof text);
-            if (vlen < 0) continue;
-            if (idlen > 0) inject_row(id, text, (size_t)vlen);
-        }
+        inject_pairs(buf, STRIDS_OWNER_NONE);
         HeapFree(GetProcessHeap(), 0, buf);
     } else {
-        backend_log("B1: strids -- no user strids.json (optional); baked defaults cover the shipped pack");
+        backend_log("B1: strids -- no user strids.json (optional); packages and baked defaults still apply");
     }
+
+    /* (1b) PACKAGE rows: each installed package's own strings\*.json, so a package that adds an entity
+     * can name it. AFTER the user's document, because their explicit value still outranks a package's;
+     * BEFORE the baked defaults, because a package shipping a key we also bake is deliberately replacing
+     * our fallback with something specific to its content. */
+    inject_packages();
 
     /* (2) BAKED defaults: fill every shipped key the user did NOT override (the dedup skips a key the json
      * already injected in (1)), so the "*Custom" tab + Timeline/Unknown strings ALWAYS resolve -- including
@@ -405,3 +518,30 @@ unsigned long sh_strids_injected_count(void)
 {
     return (unsigned long)InterlockedCompareExchange(&g_inject_count, 0, 0);
 }
+
+#ifdef SH_STRIDS_TESTING
+/* Test seam: bind stand-ins for the four engine entry points and run ONE inject pass, returning the
+ * number of rows appended. The engine fns cannot be reimplemented (they intern into an engine-private
+ * string pool and grow an engine-owned idList), so a test supplies doubles and inspects what the
+ * injector asked them to append. */
+int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idstr_ctor)
+{
+    g_table_desc = table_desc;
+    g_insert     = (insert_fn_t)insert;
+    g_hash       = (hash_fn_t)hash;
+    g_idstr_ctor = (idstr_ctor_fn_t)idstr_ctor;
+    InterlockedExchange(&g_inject_count, 0);
+    g_injected_n = 0;
+    return (int)do_inject();
+}
+
+/* How the injector attributed each row this pass: the id, and the owning package name ("<user>" for
+ * the user's own document and for the baked defaults). Returns 0 past the end. */
+int sh_strids_test_row(int index, const char **id_out, const char **owner_out)
+{
+    if (index < 0 || index >= g_injected_n) return 0;
+    if (id_out)    *id_out    = g_injected_ids[index].id;
+    if (owner_out) *owner_out = strids_owner_name(g_injected_ids[index].owner);
+    return 1;
+}
+#endif /* SH_STRIDS_TESTING */

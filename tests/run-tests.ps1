@@ -27,6 +27,7 @@
 #   packages_test -- per-package override discovery: markers, legacy tree, order, bounds
 #   override_packages_test -- the file shadow resolves a decl out of any installed package
 #   package_requirements_test -- allowlisted package cvars, strict parsing, RUNNING gate + one-shot apply
+#   strids_packages_test -- a package ships its own #str_ strings; user > packages > baked
 #   config_message_test -- bounded raw WebView config-message extraction
 #   theme_bootstrap_test -- pre-navigation dark-class injection (pure C++ helper)
 #   theme_contract_test -- native/preview theme bridge contract in the embedded HTML source
@@ -90,6 +91,7 @@ $tests = @(
     @{ name = "packages_test"; src = 'packages_test.c ..\src\backend\packages.c'; arg = "" }
     @{ name = "override_packages_test"; src = 'override_packages_test.c ..\src\backend\overrides.c ..\src\backend\packages.c ..\src\backend\decl_text.c'; defs = '/DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
     @{ name = "package_requirements_test"; src = 'package_requirements_test.c ..\src\backend\package_requirements.c ..\src\backend\packages.c'; defs = '/DSH_PACKAGE_REQUIREMENTS_TESTING'; arg = "" }
+    @{ name = "strids_packages_test"; src = 'strids_packages_test.c ..\src\backend\strids.c ..\src\backend\packages.c ..\src\backend\overrides.c ..\src\backend\decl_text.c'; defs = '/DSH_STRIDS_TESTING /DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
     @{ name = "config_message_test"; src = 'config_message_test.cpp ..\src\ui\webview\config_message.cpp'; cxx = $true; arg = "" }
     @{ name = "theme_bootstrap_test"; src = 'theme_bootstrap_test.cpp ..\src\ui\webview\theme_bootstrap.cpp'; cxx = $true; arg = "" }
     @{ name = "theme_contract_test"; src = 'theme_contract_test.c'; arg = (Join-Path $here '..\src\ui\webview\mockup.html') }

@@ -231,6 +231,7 @@ overrides/cyberdemon/package.json
 overrides/cyberdemon/decls/<type>/<logical-name>.decl
 overrides/cyberdemon/resources/<name>.manifest
 overrides/cyberdemon/requirements/<name>.requirements
+overrides/cyberdemon/strings/<name>.json
 overrides/cyberdemon/shaders/generated/spirv/<name>.{vspv,fspv,cspv}
 overrides/cyberdemon/shaders/generated/renderprogs/<name>_pc_vulkan.bin
 ```
@@ -269,6 +270,7 @@ rule applies at every layer:
 | Decls | Byte-identical decls compose: the first copy serves the identity, the rest collapse (`decl-server COMPOSED`) | Refused, naming the packages that disagree |
 | Resource manifests | Identical rows compose into one served entry | Refused, naming both provider rows |
 | Requirements | The first request queues the command, the rest compose into it -- so `g_useResourceBlackList 0` asked for by three packages is issued once | A different value for an allowlisted name is refused |
+| Strings | Identical text for one `#str_` id composes into one row | Refused, naming both packages; the first definition stands |
 
 Nothing overwrites anything and nothing wins by ordering. A package never has to know which other packages are
 installed, and a genuine conflict fails closed with a diagnostic naming who conflicted rather than silently
@@ -316,6 +318,24 @@ different programs can never address the same file, because the program name is 
 
 Only the namespaces in that table are package-resolved, and each only out of the subdirectory named for it.
 Everything else a package contains stays unreachable to the engine.
+
+### A package names its own content
+
+The editor labels an entity through the engine's `idLangDict`, so a decl's `displayNameTag` is only ever a
+`#str_` id -- and until packages could carry strings, the single place to define one was the user's global
+`strings/strids.json`. A package that added an entity therefore had no way to name it without the user
+hand-editing a document every other package also shared. That is the exact namespace collision packages
+exist to remove, and it is why the Cyberdemon's Toybox tile shipped showing the Baron's description.
+
+A package now carries `strings/<name>.json`, a flat `{ "id": "text" }` map, injected on the engine's first
+string-table sort. The order is the user's own document, then every installed package, then Snapmap+'s baked
+defaults: the user's explicit value still outranks a package's, and a package shipping a key we also bake is
+deliberately replacing our fallback. A key is never appended twice -- a duplicate corrupts the engine's
+sorted-by-hash dictionary and makes lookups collapse onto the wrong text.
+
+Prefer an id the game already ships when one exists: it is localized in every language the game supports,
+where a string a package carries is only as translated as its author made it. The Cyberdemon package uses
+the game's own codex text for that reason.
 
 ## Existing shadows versus genuinely new decls
 
