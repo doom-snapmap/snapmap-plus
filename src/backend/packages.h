@@ -38,9 +38,16 @@
  * compiled, staged or merged anywhere, so a package cannot leave artefacts
  * behind and two packages cannot quietly overwrite each other's files on disk.
  *
- * The pre-package layout -- a single shared overrides\generated tree -- is still
- * read, reported as a package named "generated", so existing installs keep
- * working unchanged.
+ * The pre-package layout -- a single shared overrides\generated tree -- is no
+ * longer enumerated as a package; the installer migrates it into a real one
+ * (overrides\my-overrides) so this file carries one rule rather than two.
+ *
+ * That migration does not change which BYTES the engine can be served. The file
+ * shadow resolves every engine resource name against the overrides root
+ * directly (overrides\<engine name>), which is a separate path from package
+ * resolution and is unaffected: dropping a file at overrides\<name> still
+ * shadows that resource. What a package adds on top is publishing identities
+ * DOOM never shipped, and being uninstallable by deleting one folder.
  *
  * Identity collisions BETWEEN packages are not resolved here. They are left to
  * the decl server's existing case-insensitive collision rule, which already

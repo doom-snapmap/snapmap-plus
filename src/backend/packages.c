@@ -23,8 +23,6 @@
 
 #define PK_OVERRIDES_SUFFIX "\\overrides"
 #define PK_MARKER           "package.json"
-/* The pre-package shared tree, still read so existing installs keep working. */
-#define PK_LEGACY_NAME      "generated"
 /* Engine-meaningful, never a package or a grouping folder: the file shadow
  * serves ".inc" shader includes straight out of it. */
 #define PK_RESERVED_NAME    "shader_includes"
@@ -135,9 +133,12 @@ static int pk_scan(const char *directory, const char *prefix, unsigned depth,
             complete = 0; continue;
         }
 
-        /* The legacy shared tree has no package.json but is still a package. */
-        if ((depth == 0 && _stricmp(found.cFileName, PK_LEGACY_NAME) == 0) ||
-            pk_has_marker(child)) {
+        /* The marker is the ONLY thing that makes a package. The pre-package
+         * `generated` tree used to be special-cased here as a nameless package;
+         * the installer now migrates it into a real one, so this stays a single
+         * rule instead of a rule plus an exception. A directory without a marker
+         * is a grouping folder and is searched, exactly like any other. */
+        if (pk_has_marker(child)) {
             if (!pk_append(out, capacity, count, name, child)) complete = 0;
             continue;                       /* a package is a leaf */
         }

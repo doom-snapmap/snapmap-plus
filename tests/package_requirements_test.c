@@ -51,21 +51,24 @@ static int write_text(const char *path, const char *text)
 
 int main(void)
 {
-    char temp[MAX_PATH], root[MAX_PATH], overrides[MAX_PATH], generated[MAX_PATH];
-    char requirements[MAX_PATH], first[MAX_PATH], second[MAX_PATH];
+    char temp[MAX_PATH], root[MAX_PATH], overrides[MAX_PATH], package[MAX_PATH];
+    char requirements[MAX_PATH], first[MAX_PATH], second[MAX_PATH], marker[MAX_PATH];
     volatile int load_state = 2;
     DWORD n = GetTempPathA(sizeof(temp), temp);
     CHECK(n > 0 && n < sizeof(temp));
     _snprintf_s(root, sizeof(root), _TRUNCATE, "%ssnapmap-plus-package-requirements-%lu",
                 temp, GetCurrentProcessId());
     _snprintf_s(overrides, sizeof(overrides), _TRUNCATE, "%s\\overrides", root);
-    _snprintf_s(generated, sizeof(generated), _TRUNCATE, "%s\\generated", overrides);
-    _snprintf_s(requirements, sizeof(requirements), _TRUNCATE, "%s\\requirements", generated);
+    _snprintf_s(package, sizeof(package), _TRUNCATE, "%s\\my-overrides", overrides);
+    _snprintf_s(requirements, sizeof(requirements), _TRUNCATE, "%s\\requirements", package);
     _snprintf_s(first, sizeof(first), _TRUNCATE, "%s\\a.requirements", requirements);
     _snprintf_s(second, sizeof(second), _TRUNCATE, "%s\\z.requirements", requirements);
     CHECK(make_dir(root));
     CHECK(make_dir(overrides));
-    CHECK(make_dir(generated));
+    CHECK(make_dir(package));
+    /* Only the marker makes this a package; without it nothing enumerates it. */
+    _snprintf_s(marker, sizeof(marker), _TRUNCATE, "%s\\package.json", package);
+    CHECK(write_text(marker, "{}"));
     CHECK(make_dir(requirements));
     CHECK(write_text(first,
                      "# audited cut-content gates\n"
@@ -106,7 +109,8 @@ int main(void)
 
     DeleteFileA(first);
     RemoveDirectoryA(requirements);
-    RemoveDirectoryA(generated);
+    DeleteFileA(marker);
+    RemoveDirectoryA(package);
     RemoveDirectoryA(overrides);
     RemoveDirectoryA(root);
     if (g_failed) {

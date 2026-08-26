@@ -115,19 +115,19 @@ int main(void)
     install(overrides, "cyberdemon", 1);
     install(overrides, "four-demon-runes", 1);
     install(overrides, "notes", 0);          /* no marker: not a package */
-    install(overrides, "generated", 0);      /* legacy tree: a package anyway */
+    install(overrides, "generated", 0);      /* no marker: a grouping folder like any other */
     install(overrides, "shader_includes", 0);/* reserved: never a package */
     join(sub, sizeof(sub), overrides, "loose-file.txt");
     CHECK(touch(sub));                       /* a file is never a package */
 
     CHECK(sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count) == 1);
-    CHECK(count == 3);
+    CHECK(count == 2);
     CHECK(index_of(packages, count, "notes") < 0);
     CHECK(index_of(packages, count, "shader_includes") < 0);
     CHECK(index_of(packages, count, "loose-file.txt") < 0);
     CHECK(index_of(packages, count, "cyberdemon") == 0);
     CHECK(index_of(packages, count, "four-demon-runes") == 1);
-    CHECK(index_of(packages, count, "generated") == 2);
+    CHECK(index_of(packages, count, "generated") < 0);
 
     /* A user may organise installs into grouping folders to any depth. A
      * grouping folder is searched, never returned, and its name becomes part of
@@ -137,7 +137,7 @@ int main(void)
     install(overrides, "editor/scratch", 0);
     install(overrides, "demons/hell/imps", 1);
     CHECK(sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count) == 1);
-    CHECK(count == 6);
+    CHECK(count == 5);
     CHECK(index_of(packages, count, "editor") < 0);
     CHECK(index_of(packages, count, "editor/scratch") < 0);
     CHECK(index_of(packages, count, "editor/lifts") >= 0);
@@ -153,7 +153,7 @@ int main(void)
      * package, so its layout always means what the package layout says. */
     install(overrides, "cyberdemon/decls", 1);
     CHECK(sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count) == 1);
-    CHECK(count == 6);
+    CHECK(count == 5);
     CHECK(index_of(packages, count, "cyberdemon/decls") < 0);
 
     /* The root each package reports is its own folder, and subdirectories are

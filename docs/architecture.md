@@ -279,8 +279,13 @@ package is *permitted* to ask for; it sets nothing on its own. The cut-content b
 needs live in `overrides/cyberdemon/requirements/cyberdemon.requirements`, so uninstalling that package removes
 the request with it.
 
-The pre-package layout -- a single shared `overrides/generated` tree -- is still read, reported as a package
-named `generated`, so existing installs keep working unchanged.
+The pre-package layout -- a single shared `overrides/generated` tree -- is no longer a package. Installing or
+updating migrates it into `overrides/my-overrides`, a real package with its own marker, and a fresh install
+gets that folder empty so there is an obvious place to drop your own content. The move never overwrites and
+removes the old tree only once every file is verified present at the new location.
+
+That migration does not change which bytes the engine can be served, because the root file shadow below is a
+separate path from package resolution.
 
 ### The file shadow resolves across packages too
 
@@ -290,9 +295,10 @@ packages that mapped one-to-one onto `overrides/generated/decls/...`, so joining
 overrides root *was* the resolver. A package owns its own root, so that join can never reach it: DOOM has no
 idea `overrides/cyberdemon/` exists and will never ask for `cyberdemon/decls/...`.
 
-So a `generated/decls/<rest>` request is resolved against the legacy tree first -- an install that predates
-packages therefore resolves exactly where it always did -- and then against each installed package as
-`<package root>/decls/<rest>`, in the same deterministic order. Only that one namespace is package-resolved,
+So a request is resolved against the overrides root first -- `overrides/<engine name>`, the plain file shadow,
+which serves ANY engine resource and is how a loose file dropped in the overrides root still works -- and
+then, for the namespaces in the table above, against each installed package as `<package root>/decls/<rest>`,
+in the same deterministic order. Only that one namespace is package-resolved,
 and only a package's own `decls/` subdirectory, so a package can never expose its `package.json` as an engine
 resource. The package set is captured once at install, because this sits on the engine's file-open path.
 

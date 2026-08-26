@@ -250,9 +250,11 @@ static void cleanup_tree(const char *root, const char *base, const char *manifes
     _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\gameresources.resources", base);
     DeleteFileA(path);
     RemoveDirectoryA(base);
-    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\generated\\resources", root);
+    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\my-overrides\\resources", root);
     RemoveDirectoryA(path);
-    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\generated", root);
+    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\my-overrides\\package.json", root);
+    DeleteFileA(path);
+    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\my-overrides", root);
     RemoveDirectoryA(path);
     _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides", root);
     RemoveDirectoryA(path);
@@ -284,10 +286,12 @@ static void test_sparse_snapshot(void)
     CHECK(make_dir(root));
     CHECK(make_dir(base));
     _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides", root); CHECK(make_dir(path));
-    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\generated", root); CHECK(make_dir(path));
-    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\generated\\resources", root); CHECK(make_dir(path));
+    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\my-overrides", root); CHECK(make_dir(path));
+    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\my-overrides\\package.json", root);
+    CHECK(write_bytes(path, "{}", 2));
+    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\my-overrides\\resources", root); CHECK(make_dir(path));
     _snprintf_s(manifest, sizeof(manifest), _TRUNCATE,
-                "%s\\overrides\\generated\\resources\\cyberdemon.manifest", root);
+                "%s\\overrides\\my-overrides\\resources\\cyberdemon.manifest", root);
     CHECK(write_bytes(manifest, manifest_text, sizeof(manifest_text) - 1));
 
     pindex_length = build_pindex(pindex, sizeof(pindex), sizeof(expected), sizeof(compressed));
@@ -544,16 +548,18 @@ static void test_packages_compose(void)
     CHECK(make_dir(base));
     _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides", root); CHECK(make_dir(path));
 
-    /* Package one: the legacy shared tree. */
-    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\generated", root);
+    /* Package one. */
+    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\my-overrides", root);
     CHECK(make_dir(path));
-    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\generated\\resources", root);
+    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\my-overrides\\package.json", root);
+    CHECK(write_bytes(path, "{}", 2));
+    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\my-overrides\\resources", root);
     CHECK(make_dir(path));
     _snprintf_s(first, sizeof(first), _TRUNCATE,
-                "%s\\overrides\\generated\\resources\\shared.manifest", root);
+                "%s\\overrides\\my-overrides\\resources\\shared.manifest", root);
     CHECK(write_bytes(first, shared_row, sizeof(shared_row) - 1));
 
-    /* Package two: sorts AFTER "generated", so if collection restarted at index
+    /* Package two: sorts AFTER "my-overrides", so if collection restarted at index
      * zero per package this package would erase package one's manifest. */
     _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\zz-second", root);
     CHECK(make_dir(path));
@@ -604,9 +610,11 @@ static void test_packages_compose(void)
     _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\gameresources.resources", base);
     DeleteFileA(path);
     RemoveDirectoryA(base);
-    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\generated\\resources", root);
+    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\my-overrides\\resources", root);
     RemoveDirectoryA(path);
-    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\generated", root);
+    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\my-overrides\\package.json", root);
+    DeleteFileA(path);
+    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides\\my-overrides", root);
     RemoveDirectoryA(path);
     _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\overrides", root);
     RemoveDirectoryA(path);

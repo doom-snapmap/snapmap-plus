@@ -92,11 +92,7 @@ static void resolve_doom(void)
  * mirror every <data-root>\<sub> path the backend builds. */
 static void ensure_user_dirs(void)
 {
-    static const char *subs[] = { "", "\\strings", "\\overrides",
-                                  "\\overrides\\generated", "\\overrides\\generated\\decls",
-                                  "\\overrides\\generated\\resources",
-                                  "\\overrides\\generated\\requirements",
-                                  "\\prefabs" };
+    static const char *subs[] = { "", "\\strings", "\\overrides", "\\prefabs" };
     char base[MAX_PATH], path[MAX_PATH];
     int i;
     if (FAILED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base))) {
@@ -112,7 +108,7 @@ static void ensure_user_dirs(void)
             backend_log(line);
         }
     }
-    backend_log("snapmap-plus user-data dirs ensured (root + strings/overrides/generated/{decls,resources,requirements} + prefabs)");
+    backend_log("snapmap-plus user-data dirs ensured (root + strings/overrides/prefabs)");
 }
 
 static DWORD WINAPI bootstrap_thread(LPVOID p)
