@@ -177,6 +177,23 @@ static int mpkg_gate_guarded(const char *json)
     }
 }
 
+/* Strip the delivery payload, guarded like the gate itself.
+ *
+ * Returns a HeapAlloc'd stripped buffer (caller frees) or NULL meaning "use the original". A
+ * fault in here is not allowed to change what the engine parses: on a fault we return NULL and
+ * the original buffer is used, which is exactly today's behaviour. */
+static char *mpkg_strip_guarded(const char *json)
+{
+    __try {
+        size_t len = json ? strlen(json) : 0;
+        size_t out_len = 0;
+        if (len == 0) return NULL;
+        return sh_mpkg_strip(json, len, &out_len);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return NULL;
+    }
+}
+
 /* The detour. Same prototype as the engine target. When armed + a source reads, call the engine
  * original through the trampoline with OUR buffer as arg0; else pass the engine's json through.
  * Either way the chosen buffer passes the map-package gate first; a refused load returns 0 (the
@@ -204,15 +221,26 @@ static int sh_deser_detour(const char *json, void *out_map)
                 HeapFree(GetProcessHeap(), 0, ours);
                 return 0;   /* refused: the engine never sees the bytes */
             }
-            int rc = g_deser_orig(ours, out_map);   /* engine parses OUR bytes (overwrite of param_1) */
-            InterlockedIncrement(&g_swap_complete_count); /* only after the substituted parse returns */
-            HeapFree(GetProcessHeap(), 0, ours);     /* OG frees its substitute buffer too */
-            return rc;
+            {
+                char *stripped = mpkg_strip_guarded(ours);
+                int rc = g_deser_orig(stripped ? stripped : ours, out_map);
+                InterlockedIncrement(&g_swap_complete_count); /* only after the substituted parse returns */
+                if (stripped) HeapFree(GetProcessHeap(), 0, stripped);
+                HeapFree(GetProcessHeap(), 0, ours);     /* OG frees its substitute buffer too */
+                return rc;
+            }
         }
         /* armed but no readable source -> fall through to a vanilla load (OG bVar2==false). */
     }
     if (!mpkg_gate_guarded(json)) return 0;   /* refused: engine json never parsed */
-    return g_deser_orig(json, out_map);
+    {
+        char *stripped = mpkg_strip_guarded(json);
+        int rc;
+        if (!stripped) return g_deser_orig(json, out_map);
+        rc = g_deser_orig(stripped, out_map);
+        HeapFree(GetProcessHeap(), 0, stripped);
+        return rc;
+    }
 }
 
 int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok)

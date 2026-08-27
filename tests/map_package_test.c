@@ -127,6 +127,58 @@ static void check_unpacked_members(const char *dest)
     }
 }
 
+/* Is `json` structurally balanced outside string literals? Not a parser -- just enough to catch
+ * the ways a bad splice breaks a document: an unclosed container, or a comma left with nothing
+ * on one side of it. */
+static int json_well_formed(const char *json, size_t len)
+{
+    size_t i;
+    int depth = 0, in_string = 0;
+    char prev = 0;
+    for (i = 0; i < len; i++) {
+        char c = json[i];
+        if (in_string) {
+            if (c == '\\') { i++; continue; }
+            if (c == '"') in_string = 0;
+            continue;
+        }
+        if (c == '"') { in_string = 1; prev = c; continue; }
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
+        if (c == '{' || c == '[') depth++;
+        if (c == '}' || c == ']') {
+            if (prev == ',') return 0;          /* trailing comma before a close */
+            depth--;
+            if (depth < 0) return 0;
+        }
+        if (c == ',' && (prev == ',' || prev == '[' || prev == '{')) return 0;
+        prev = c;
+    }
+    return depth == 0 && !in_string;
+}
+
+/* Strip `json` and assert the shape of the result. Frees the stripped buffer. */
+static void check_strip(const char *json, size_t len, int expect_stripped)
+{
+    size_t out_len = 0;
+    char *out = sh_mpkg_strip(json, len, &out_len);
+    sh_mpkg_decl after[SH_MPKG_MAX_PACKAGES];
+
+    if (!expect_stripped) {
+        CHECK(out == NULL);
+        if (out) HeapFree(GetProcessHeap(), 0, out);
+        return;
+    }
+
+    CHECK(out != NULL);
+    if (!out) return;
+    CHECK(out_len > 0);
+    CHECK(out_len < len);                      /* something actually came out */
+    CHECK(strlen(out) == out_len);             /* NUL-terminated at the reported length */
+    CHECK(json_well_formed(out, out_len));
+    CHECK(sh_mpkg_scan(out, out_len, after, SH_MPKG_MAX_PACKAGES) == 0);   /* no shards left */
+    HeapFree(GetProcessHeap(), 0, out);
+}
+
 int main(void)
 {
     char temp[MAX_PATH], root[MAX_PATH], overrides[MAX_PATH], sub[MAX_PATH];
@@ -336,6 +388,24 @@ int main(void)
         CHECK(!dir_exists(evil3));
         remove_tree(root3);
     }
+
+    /* ---- strip: the payload never reaches the engine ---------------------
+     * An 8 KiB shard against the playtest's 4 KiB message budget is an idBitMsg overflow, so a
+     * map that still carries its payload cannot be played -- installed package or not. The gate
+     * reads the envelope; the engine must be handed the letter. */
+    check_strip(fix_map_happy, fix_map_happy_len, 1);
+    check_strip(fix_map_happy_pretty, fix_map_happy_pretty_len, 1);
+
+    /* A broken payload strips too: the shards are unusable either way, and leaving them in is
+     * exactly what makes the map unplayable. */
+    check_strip(fix_map_incomplete, fix_map_incomplete_len, 1);
+    check_strip(fix_map_duplicate, fix_map_duplicate_len, 1);
+    check_strip(fix_map_wrongdigest, fix_map_wrongdigest_len, 1);
+
+    /* No payload, no rewrite -- NULL means "use the original buffer", and an ordinary map must
+     * never be copied, let alone edited, by this feature. */
+    check_strip("{\"variables\":{\"string\":[]}}", 27, 0);
+    check_strip(fix_map_prose, fix_map_prose_len, 0);   /* prose is an author's words, not ours */
 
     remove_tree(root);
 

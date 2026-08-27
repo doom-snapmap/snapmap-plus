@@ -130,6 +130,19 @@ void sh_mpkg_boot_capture(const char *data_root);
  * refuses THIS load, because registration is restart-only. */
 int sh_mpkg_gate(const char *json, size_t len);
 
+/* Remove the delivery payload from a map buffer, AFTER the gate has read
+ * it. Returns a new NUL-terminated HeapAlloc'd buffer (caller HeapFrees)
+ * with *out_len set, or NULL when there is nothing to strip or the
+ * document cannot be stripped safely -- either way the caller then uses
+ * the original buffer.
+ *
+ * This is not an optimisation. A shard is 8 KiB and the playtest
+ * serialises map variables into a 4 KiB message, so a map that still
+ * carries its payload cannot be played at all (measured: idBitMsg
+ * overflow, numBits=65544). The payload is an envelope; the engine's map
+ * object must never contain it. */
+char *sh_mpkg_strip(const char *json, size_t len, size_t *out_len);
+
 #ifdef SH_MAP_PACKAGE_TESTING
 /* Consent modes for tests: production raises an async prompt; tests run
  * the decision synchronously. */

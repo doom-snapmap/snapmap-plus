@@ -25,8 +25,11 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
-#pragma comment(lib, "user32.lib")   /* MessageBoxA (the consent prompt) */
+#include <shellapi.h>
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "shell32.lib")   /* ShellExecuteA -- the relaunch */   /* MessageBoxA (the consent prompt) */
 
+#include <stdlib.h>
 #include "map_package.h"
 #include "packages.h"
 #include "decl_server.h"
@@ -300,6 +303,250 @@ static int mpkg_next_shard(const char *json, size_t len, size_t *pos,
         return 1;
     }
     return 0;
+}
+
+/* ==================================================================== */
+/* strip                                                                 */
+/* ==================================================================== */
+
+/* Structural map of the document: for every container ('{' or '[') its open and close offsets
+ * and its parent. Built in one forward pass that understands string literals and escapes, so
+ * a brace inside an author's map name is never mistaken for structure.
+ *
+ * This exists because removing a shard means removing the whole ARRAY ELEMENT that holds it,
+ * and the element's bounds cannot be found by scanning backwards through JSON -- backwards, you
+ * cannot tell whether a '{' you just passed was structure or text. Forwards, you always can. */
+#define MPKG_MAX_CONTAINERS 8192u
+#define MPKG_MAX_DEPTH      256u
+
+typedef struct mpkg_container {
+    size_t open;        /* offset of '{' or '[' */
+    size_t close;       /* offset of the matching '}' or ']' */
+    int    parent;      /* index into the container array, -1 for the root */
+    char   kind;        /* '{' or '[' */
+} mpkg_container;
+
+typedef struct mpkg_structure {
+    mpkg_container *c;
+    size_t          count;
+} mpkg_structure;
+
+/* Returns 1 and fills `st` (caller HeapFrees st->c), 0 if the document is not structurally
+ * clean or is larger than the caps. A 0 return means "do not touch this buffer". */
+static int mpkg_structure_build(const char *json, size_t len, mpkg_structure *st)
+{
+    mpkg_container *c;
+    unsigned stack[MPKG_MAX_DEPTH];
+    size_t count = 0, i;
+    unsigned depth = 0;
+    int in_string = 0;
+
+    st->c = NULL;
+    st->count = 0;
+    c = (mpkg_container *)HeapAlloc(GetProcessHeap(), 0,
+                                    MPKG_MAX_CONTAINERS * sizeof(mpkg_container));
+    if (!c) return 0;
+
+    for (i = 0; i < len; i++) {
+        char ch = json[i];
+        if (in_string) {
+            if (ch == '\\') { i++; continue; }
+            if (ch == '"') in_string = 0;
+            continue;
+        }
+        if (ch == '"') { in_string = 1; continue; }
+        if (ch == '{' || ch == '[') {
+            if (count >= MPKG_MAX_CONTAINERS || depth >= MPKG_MAX_DEPTH) goto fail;
+            c[count].open = i;
+            c[count].close = 0;
+            c[count].kind = ch;
+            c[count].parent = depth ? (int)stack[depth - 1] : -1;
+            stack[depth++] = (unsigned)count;
+            count++;
+            continue;
+        }
+        if (ch == '}' || ch == ']') {
+            unsigned idx;
+            if (depth == 0) goto fail;
+            idx = stack[--depth];
+            if (c[idx].kind != (ch == '}' ? '{' : '[')) goto fail;
+            c[idx].close = i;
+        }
+    }
+    if (depth != 0 || in_string || count == 0) goto fail;
+
+    st->c = c;
+    st->count = count;
+    return 1;
+
+fail:
+    HeapFree(GetProcessHeap(), 0, c);
+    return 0;
+}
+
+/* The innermost container holding `off`. Containers are recorded in open order, so the LAST one
+ * whose span contains the offset is the innermost. */
+static int mpkg_innermost(const mpkg_structure *st, size_t off)
+{
+    int best = -1;
+    size_t i;
+    for (i = 0; i < st->count; i++) {
+        if (st->c[i].open < off && off < st->c[i].close) best = (int)i;
+    }
+    return best;
+}
+
+/* Walk up from `idx` to the object that is a direct element of an array -- the map variable
+ * itself. Returns -1 if there is no such ancestor (the shard is not where we think it is, so
+ * nothing is removed). */
+static int mpkg_array_element(const mpkg_structure *st, int idx)
+{
+    int guard = 0;
+    while (idx >= 0 && guard++ < (int)MPKG_MAX_DEPTH) {
+        int p = st->c[idx].parent;
+        if (st->c[idx].kind == '{' && p >= 0 && st->c[p].kind == '[') return idx;
+        idx = p;
+    }
+    return -1;
+}
+
+typedef struct mpkg_cut { size_t from, to; } mpkg_cut;
+
+static int mpkg_cut_cmp(const void *a, const void *b)
+{
+    const mpkg_cut *x = (const mpkg_cut *)a, *y = (const mpkg_cut *)b;
+    if (x->from < y->from) return -1;
+    if (x->from > y->from) return 1;
+    return 0;
+}
+
+/* Remove every shard variable from `json`, returning a new NUL-terminated HeapAlloc'd buffer
+ * (caller HeapFrees) with *out_len set, or NULL when there is nothing to remove or the document
+ * cannot be stripped safely -- in which case the caller uses the original buffer unchanged.
+ *
+ * Refusing rather than half-stripping is deliberate. A map with a mangled payload still has to
+ * load; a map with mangled JSON does not load at all. */
+char *sh_mpkg_strip(const char *json, size_t len, size_t *out_len)
+{
+    mpkg_structure st;
+    mpkg_cut *cuts = NULL;
+    size_t cut_count = 0, pos = 0, i, w = 0, elements = 0;
+    mpkg_hdr hdr;
+    const char *chunk;
+    size_t chunk_len;
+    char *out = NULL;
+    char line[192];
+
+    if (out_len) *out_len = 0;
+    if (!json || len == 0) return NULL;
+
+    /* Cheap reject first: the overwhelming majority of maps carry no payload at all, and they
+     * must not pay for the structural pass. */
+    if (!mpkg_find(json, len, MPKG_HEADER_MAGIC, MPKG_MAGIC_LEN)) return NULL;
+    if (!mpkg_structure_build(json, len, &st)) {
+        backend_log("MPKG: payload strip SKIPPED -- the map's JSON structure did not read "
+                    "cleanly; handing the engine the original buffer");
+        return NULL;
+    }
+
+    cuts = (mpkg_cut *)HeapAlloc(GetProcessHeap(), 0, SH_MPKG_MAX_SHARDS * sizeof(mpkg_cut));
+    if (!cuts) { HeapFree(GetProcessHeap(), 0, st.c); return NULL; }
+
+    while (cut_count < SH_MPKG_MAX_SHARDS &&
+           mpkg_next_shard(json, len, &pos, &hdr, &chunk, &chunk_len)) {
+        int el = mpkg_array_element(&st, mpkg_innermost(&st, pos));
+        size_t from, to;
+        int dup = 0;
+        if (el < 0) continue;
+        from = st.c[el].open;
+        to   = st.c[el].close + 1;
+        for (i = 0; i < cut_count; i++) if (cuts[i].from == from) { dup = 1; break; }
+        if (dup) continue;
+
+        cuts[cut_count].from = from;
+        cuts[cut_count].to = to;
+        cut_count++;
+        elements++;
+    }
+
+    if (cut_count == 0) {
+        HeapFree(GetProcessHeap(), 0, cuts);
+        HeapFree(GetProcessHeap(), 0, st.c);
+        return NULL;
+    }
+
+    qsort(cuts, cut_count, sizeof(mpkg_cut), mpkg_cut_cmp);
+
+    /* Merge runs of ADJACENT elements -- ones separated by nothing but whitespace and a single
+     * comma -- into one cut. Shards are consecutive by construction, and asking each element to
+     * claim a comma for itself makes neighbours fight over the one between them. */
+    {
+        size_t w2 = 0;
+        for (i = 1; i < cut_count; i++) {
+            size_t g = cuts[w2].to;
+            while (g < len && mpkg_is_ws(json[g])) g++;
+            if (g < len && json[g] == ',') {
+                g++;
+                while (g < len && mpkg_is_ws(json[g])) g++;
+                if (g == cuts[i].from) { cuts[w2].to = cuts[i].to; continue; }
+            }
+            cuts[++w2] = cuts[i];
+        }
+        cut_count = w2 + 1;
+    }
+
+    /* Now take ONE adjacent comma per run so the array stays valid: the one BEFORE the run, or,
+     * when the run starts the array, the one after it. */
+    for (i = 0; i < cut_count; i++) {
+        size_t b = cuts[i].from;
+        while (b > 0 && mpkg_is_ws(json[b - 1])) b--;
+        if (b > 0 && json[b - 1] == ',') {
+            cuts[i].from = b - 1;
+        } else {
+            size_t a = cuts[i].to;
+            while (a < len && mpkg_is_ws(json[a])) a++;
+            if (a < len && json[a] == ',') cuts[i].to = a + 1;
+        }
+    }
+    /* Overlapping cuts would mean two shards resolved to the same element by different spans;
+     * that should be impossible, but splicing overlapping ranges silently corrupts, so refuse. */
+    for (i = 1; i < cut_count; i++) {
+        if (cuts[i].from < cuts[i - 1].to) {
+            backend_log("MPKG: payload strip SKIPPED -- shard elements overlap; handing the "
+                        "engine the original buffer");
+            HeapFree(GetProcessHeap(), 0, cuts);
+            HeapFree(GetProcessHeap(), 0, st.c);
+            return NULL;
+        }
+    }
+
+    out = (char *)HeapAlloc(GetProcessHeap(), 0, len + 1);
+    if (!out) {
+        HeapFree(GetProcessHeap(), 0, cuts);
+        HeapFree(GetProcessHeap(), 0, st.c);
+        return NULL;
+    }
+    pos = 0;
+    for (i = 0; i < cut_count; i++) {
+        size_t run = cuts[i].from - pos;
+        memcpy(out + w, json + pos, run);
+        w += run;
+        pos = cuts[i].to;
+    }
+    memcpy(out + w, json + pos, len - pos);
+    w += len - pos;
+    out[w] = '\0';
+
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "MPKG: payload STRIPPED before the engine parse -- %u shard variable(s) removed "
+                "in %u contiguous run(s), %zu -> %zu bytes; the delivery envelope never becomes "
+                "map state", (unsigned)elements, (unsigned)cut_count, len, w);
+    backend_log(line);
+
+    HeapFree(GetProcessHeap(), 0, cuts);
+    HeapFree(GetProcessHeap(), 0, st.c);
+    if (out_len) *out_len = w;
+    return out;
 }
 
 /* ==================================================================== */
@@ -1070,10 +1317,108 @@ static void mpkg_record_decline(const char *id, const char *digest)
     backend_log(line);
 }
 
+/* Relaunch DOOM through Steam and close this instance.
+ *
+ * WHY. A package installed mid-session registers its decls and the map opens in the editor,
+ * but the demon's render model is never built and PLAYING it faults. With the package present
+ * at BOOT the same map plays correctly, so the shortest honest route to a playable map is a
+ * relaunch -- performed for the player rather than asked of them.
+ *
+ * Steam's rungameid URL rather than exec'ing the exe: DOOM expects to be started by Steam, and
+ * the launch options the player already has are applied by Steam, not by us. If the shell
+ * refuses, say so and leave this process alone -- a failed relaunch must not also close the
+ * game the player is still using. */
+static void mpkg_relaunch_doom(void)
+{
+    /* Two things have to be true at once, and they fight each other.
+     *
+     * (1) Steam refuses to launch a game it still believes is running, so the URL must not be
+     *     fired until after this process is gone -- measured: firing it from here and then
+     *     exiting does nothing at all.
+     * (2) Anything we spawn to fire it later is inside Steam's job object and is killed when we
+     *     exit -- measured three times, with `start`, with a detached cmd, and with explorer;
+     *     the helper always spawned, we always exited, and the game never came back.
+     *     CREATE_BREAKAWAY_FROM_JOB is refused outright, so the job does not permit escape.
+     *
+     * WMI resolves the contradiction. Win32_Process::Create runs the helper under WmiPrvSE
+     * rather than under us, so it is in none of our jobs and our exit cannot reach it. The
+     * powershell that carries the request is still our child and still in the job -- which is
+     * fine, because we WAIT for it before exiting, and the helper it created already exists by
+     * then.
+     *
+     * The helper itself waits out our exit with `ping` (`timeout` needs a console it has not
+     * got) and then hands the protocol URL to explorer, which is what actually resolves
+     * steam:// in the logged-in session. The Steam URL rather than the exe because DOOM expects
+     * to be started by Steam, and the player's launch options are applied by Steam, not by us.
+     *
+     * If any of it fails, say so and leave this process alone: a failed relaunch must never
+     * also close the game the player is still using. */
+    static const char *HELPER =
+        "cmd.exe /c ping -n 8 127.0.0.1 >nul & explorer.exe \"steam://rungameid/379720\"";
+    char cmd[768];
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    DWORD code = 1;
+
+    ZeroMemory(&si, sizeof si);
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    ZeroMemory(&pi, sizeof pi);
+
+    _snprintf_s(cmd, sizeof cmd, _TRUNCATE,
+                "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command "
+                "\"$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create "
+                "-Arguments @{CommandLine='%s'}; exit [int]$r.ReturnValue\"",
+                HELPER);
+
+    if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW,
+                       NULL, NULL, &si, &pi)) {
+        /* 30s is generous for a CIM call; if it hangs we fall through to the direct spawn
+         * rather than leaving the player staring at a game that will not close. */
+        if (WaitForSingleObject(pi.hProcess, 30000) != WAIT_OBJECT_0 ||
+            !GetExitCodeProcess(pi.hProcess, &code))
+            code = 1;
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+
+    if (code != 0) {
+        /* WMI unavailable or refused. Try the plain in-job spawn anyway: it is what failed
+         * before, but it costs nothing here and a machine without the job restriction will be
+         * served by it. */
+        char line[192];
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "MPKG: WMI relaunch helper unavailable (result %lu); falling back to a "
+                    "detached spawn, which Steam's job may kill", (unsigned long)code);
+        backend_log(line);
+        ZeroMemory(&pi, sizeof pi);
+        _snprintf_s(cmd, sizeof cmd, _TRUNCATE, "%s", HELPER);
+        if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE,
+                            CREATE_NO_WINDOW | DETACHED_PROCESS, NULL, NULL, &si, &pi)) {
+            backend_log("MPKG: could not spawn the relaunch helper; leaving this instance up");
+            MessageBoxA(NULL,
+                        "Could not restart DOOM automatically.\r\n\r\n"
+                        "Close and reopen the game yourself, then load the map again.",
+                        "Snapmap+ -- restart failed",
+                        MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
+            return;
+        }
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    } else {
+        backend_log("MPKG: relaunch helper created outside this process's job via WMI");
+    }
+
+    backend_log("MPKG: exiting so Steam can start a fresh instance");
+    ExitProcess(0);
+}
+
 /* The production consent prompt, on its OWN thread so the engine's main
  * thread (which is inside the refused DeserializeFromJson) is never
  * blocked. The load this rode in on is already refused; whatever the user
- * answers only affects FUTURE loads (after a restart).
+ * answers only affects FUTURE loads -- but 'future' now means the next load
+ * in THIS session, because installing re-arms the decl server on the tick.
  *
  * This is deliberately a native Win32 prompt rather than the engine's
  * idMenuManager_Dialog: AddDialog's body text resolves in the SWF layer,
@@ -1093,7 +1438,8 @@ static DWORD WINAPI mpkg_consent_thread(LPVOID param)
         "    payload:  %u bytes, %u file(s)\r\n\r\n"
         "The load was cancelled: loading this map without its package would crash DOOM.\r\n\r\n"
         "Install the package into the snapmap-plus overrides folder now?\r\n"
-        "DOOM must be RESTARTED afterward before the map can load.",
+        "The map opens for editing straight away; playing it needs one restart,\r\n"
+        "which Snapmap+ will offer to do for you.",
         s->id, s->digest, (unsigned)s->payload_len, s->files);
 
     answer = MessageBoxA(NULL, text, "Snapmap+ -- map requires a mod package",
@@ -1102,12 +1448,23 @@ static DWORD WINAPI mpkg_consent_thread(LPVOID param)
     if (answer == IDYES) {
         char err[SH_MPKG_ERR_CAP];
         if (mpkg_install_staged(s, err, sizeof err)) {
-            char done[512];
+            char done[640];
+            int relaunch;
             _snprintf_s(done, sizeof done, _TRUNCATE,
                 "Package '%s' installed (%u files).\r\n\r\n"
-                "Restart DOOM, then load the map again.", s->id, s->files);
-            MessageBoxA(NULL, done, "Snapmap+ -- package installed",
-                        MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
+                "You can open and edit the map now.\r\n"
+                "PLAYING it needs DOOM restarted so the pack loads with the game.\r\n\r\n"
+                "Restart DOOM now?", s->id, s->files);
+            /* EDITING works in this session -- the decl server re-arms on the tick and the
+             * map opens with no restart. PLAYING does not: a mid-session install leaves the
+             * demon's RENDER MODEL unbuilt and the spawn faults, while the same map plays
+             * correctly when the pack is present at boot. So offer the relaunch rather than
+             * pretend, and perform it rather than leave it to the player. */
+            relaunch = MessageBoxA(NULL, done, "Snapmap+ -- package installed",
+                                   MB_YESNO | MB_ICONINFORMATION | MB_TOPMOST |
+                                   MB_SETFOREGROUND | MB_DEFBUTTON1) == IDYES;
+            if (relaunch)
+                mpkg_relaunch_doom();
         } else {
             char fail[512], line[512];
             _snprintf_s(line, sizeof line, _TRUNCATE,
