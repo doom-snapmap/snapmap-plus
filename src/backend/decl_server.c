@@ -81,6 +81,13 @@
 #define DS_BOOT_PROMOTE_STOLEN_BYTES 15u
 #define DS_DECL_STATE_OFFSET    0x2cu
 #define DS_DECL_IN_PROGRESS    0x01u
+/* "pending load": the manager lookup helper (0x1800A40) clears this and runs the
+ * generic load (0x17FF5F0), so setting it makes the next ordinary lookup re-read the
+ * decl through the file shadow and re-parse it with its own type parser. */
+#define DS_DECL_PENDING_LOAD   0x02u
+/* "generic load acquired a source": the decl already holds real parsed data, so it must NOT
+ * be asked to load again -- that re-enters the parser over live allocations. */
+#define DS_DECL_HAS_SOURCE     0x04u
 #define DS_DECL_ENTITYDEF_OFFSET 0x1c8u
 
 enum {
@@ -246,6 +253,9 @@ static volatile LONG g_state = DS_STATE_NEW;
  * every identity is created fresh and the engine's own promotion covers them all. */
 static volatile LONG g_rearm_is_runtime;
 static volatile LONG g_rearm_touched_promoted;
+static volatile LONG g_rearm_marked_pending;
+static volatile LONG g_rearm_left_loaded;
+static volatile LONG g_rearm_drain_faults;
 static volatile LONG g_registration_succeeded = 0;
 static ds_candidate *g_candidates;
 static int g_candidate_count;
@@ -1587,6 +1597,76 @@ static int ds_materialize_identity(ds_materialize_context *context, int index)
             unsigned int *lvl = (unsigned int *)((unsigned char *)decl + DS_RES_LEVEL_OFF);
             if (*lvl != 4u) { *lvl = 4u; InterlockedIncrement(&g_rearm_touched_promoted); }
         } __except (EXCEPTION_EXECUTE_HANDLER) { /* skip a torn decl */ }
+
+        /* RE-PARSE A REUSED DECL. Promotion keeps a reused decl alive; it cannot fill one.
+         * A runtime pass REUSES decls that already exist, and those are typically empty --
+         * the materializer only calls makeDefault when nothing is there, so a decl created
+         * before the package arrived is handed back as-is and never re-read against the
+         * source this pass just registered. Measured: boot materializes 292 of 296, a runtime
+         * pass materializes 1 of 294. The map then spawns against an EMPTY decl and dies:
+         *
+         *     idStr::Icmp (0x1A008C0) on a NULL name, from a by-name lookup over a
+         *     0x148-stride table (0x14B7700), from animator setup (0x3FEB60) -- the map's
+         *     animWebDefaults naming a node inside an animWeb whose node table is allocated
+         *     but unpopulated.
+         *
+         * The engine already has the mechanism: idDecl+0x2c bit 0x02 is "pending load", and
+         * the manager lookup helper (0x1800A40) clears it and runs the generic load
+         * (0x17FF5F0) before returning -- which reads through our file shadow and parses with
+         * the type's own parser. So we do not free, re-enter the parser, or race the render
+         * thread (all of which prior attempts tried and lost). We ask, and the engine reloads
+         * on the next ordinary lookup, which is during the next map load.
+         *
+         * Bit 0x01 is "parse in progress" and is deliberately left alone. */
+        /* ONLY a decl that never acquired a source. Bit 0x04 records that the generic load
+         * already ran and the decl holds real parsed data; asking such a decl to load AGAIN
+         * re-enters the parser over live allocations and the engine's own heap guard catches
+         * it mid-map-load:
+         *
+         *     ERROR: Memory corruption before block! while loading
+         *            edit.actorConstants.footstepEffectTable
+         *
+         * which is the same hazard a prior attempt recorded as "a re-parse whose FreeData
+         * 0xFF-filled joint buffers the render thread was reading". A decl WITHOUT 0x04 is a
+         * bare default that never loaded anything, so there is nothing live to corrupt and the
+         * generic load fills it for the first time -- which is exactly the empty-placeholder
+         * case this is for. */
+        /* AND DRAIN IT HERE, NOT LATER. Marking alone defers the generic load to the next
+         * ordinary lookup -- which is during the next MAP LOAD, with the render thread live
+         * and the entity already being built. Doing it then produced a different failure on
+         * each run (a heap guard on footstepEffectTable one time, a null DeclFind deref on
+         * renderModelInfo.model the next): re-parsing under a live map is racy.
+         *
+         * So mark, then immediately look the decl up again so the manager helper (0x1800A40)
+         * clears the bit and runs the generic load RIGHT NOW -- at the browser, no map loaded,
+         * nothing referencing it. Same engine mechanism, chosen instant. */
+        if (!made_default) {
+            int marked = 0;
+            __try {
+                unsigned char *st = (unsigned char *)decl + DS_DECL_STATE_OFFSET;
+                if ((*st & DS_DECL_HAS_SOURCE) == 0) {
+                    *st = (unsigned char)(*st | DS_DECL_PENDING_LOAD);
+                    marked = 1;
+                } else {
+                    InterlockedIncrement(&g_rearm_left_loaded);
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) { marked = 0; }
+
+            if (marked) {
+                __try {
+                    (void)context->find_decl(type_manager, candidate->name, 0);
+                    InterlockedIncrement(&g_rearm_marked_pending);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    /* The drain faulted. Clear the bit again rather than leave a decl armed to
+                     * re-parse at map-load time, which is the failure this exists to avoid. */
+                    __try {
+                        unsigned char *st = (unsigned char *)decl + DS_DECL_STATE_OFFSET;
+                        *st = (unsigned char)(*st & ~DS_DECL_PENDING_LOAD);
+                    } __except (EXCEPTION_EXECUTE_HANDLER) { }
+                    InterlockedIncrement(&g_rearm_drain_faults);
+                }
+            }
+        }
     }
 
     ds_log(made_default ? "MATERIALIZED" : "REUSED", candidate->source,
@@ -2318,14 +2398,21 @@ static void __cdecl ds_rearm_command(void)
         int marked = ds_res_watermark();
         char tline[160];
         InterlockedExchange(&g_rearm_touched_promoted, 0);
+        InterlockedExchange(&g_rearm_marked_pending, 0);
+        InterlockedExchange(&g_rearm_left_loaded, 0);
+        InterlockedExchange(&g_rearm_drain_faults, 0);
         InterlockedExchange(&g_rearm_is_runtime, 1);
         ds_apply_command();
         InterlockedExchange(&g_rearm_is_runtime, 0);
         if (marked) ds_res_promote_delta(4);
         _snprintf_s(tline, sizeof tline, _TRUNCATE,
                     "decl-server: %ld pre-existing decl(s) the pass REUSED were also raised to "
-                    "level 4 -- they predate the watermark and the teardown would free them",
-                    (long)InterlockedCompareExchange(&g_rearm_touched_promoted, 0, 0));
+                    "level 4; %ld empty one(s) re-parsed here at the browser, %ld left alone "
+                    "(already loaded), %ld drain fault(s)",
+                    (long)InterlockedCompareExchange(&g_rearm_touched_promoted, 0, 0),
+                    (long)InterlockedCompareExchange(&g_rearm_marked_pending, 0, 0),
+                    (long)InterlockedCompareExchange(&g_rearm_left_loaded, 0, 0),
+                    (long)InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0));
         backend_log(tline);
     }
 }
