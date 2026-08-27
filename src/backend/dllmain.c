@@ -230,6 +230,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
             }
         }
         sh_rawmap_save_install(serialize, serialize_clean);
+        /* and the AUTHOR side of map packages: a saved map carries the packages it uses. */
+        sh_rawmap_embed_install(g_doom_base);
 
         /* the RELOAD-crash GUARD (palette_guard.c). After a heavy edit session (repeated create/delete of logic
          * entities), one entry in the editor's entity palette is left with a freed name string. On the next full

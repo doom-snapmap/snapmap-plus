@@ -137,6 +137,12 @@ unsigned long sh_rawmap_swap_complete_count(void);
  * installed ..." marker on success. */
 int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok);
 
+/* Arm embed-on-save: resolve the engine idStr assignment the save path needs
+ * to hand back a map with its packages inside it. Without this the feature is
+ * dark and saves are byte-for-byte unchanged, which is why it resolves its own
+ * signature rather than accepting an address. */
+void sh_rawmap_embed_install(const void *module_base);
+
 /* Set the on-disk SHADOW destination path (the file each save is mirrored to). Pass NULL to reset to the
  * default %LOCALAPPDATA%\snapmap-plus\rawmap.json (the OG used %USERPROFILE%\snaphak; the same file the
  * LOAD swap reads). The default deliberately matches the LOAD source so a save-then-load round-trips.

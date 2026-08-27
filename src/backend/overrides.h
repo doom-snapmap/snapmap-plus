@@ -104,6 +104,11 @@ int sh_overrides_get_root(char *out, size_t cap);
  * Read-only: it never opens or copies a body. */
 int sh_overrides_internal_decl_published(const char *name);
 
+/* How many identities the published table holds, or 0 when nothing is
+ * published. Zero means no package identity is live in this process, which
+ * is a different statement from "this name is not published". */
+size_t sh_overrides_internal_decl_published_count(void);
+
 int sh_overrides_internal_decl_table_can_install(void);
 int sh_overrides_internal_decl_table_install(
     const sh_overrides_internal_decl_entry *entries, size_t count);

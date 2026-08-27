@@ -22,6 +22,10 @@
 #include "hook.h"
 #include "backend_log.h"
 #include "map_package.h"
+#include "signatures.h"
+#include "config.h"
+#include "overrides.h"
+#include "map_embed.h"
 
 /* DeserializeFromJson prologue steal window. Decoded from the signature DB pattern
  *   40 55            push rbp                      (2)
@@ -481,6 +485,157 @@ static char *pretty_copy(const char *data, size_t len, size_t *out_len)
     return buf;
 }
 
+/* ==== embed-on-save: the packages a map uses travel inside it ==== */
+
+#define EMBED_CONFIG_KEY   "packages.embed_in_saved_maps"
+#define EMBED_MAX_PACKAGES 8
+
+/* idStr layout, the same three offsets swf_textedit.c writes through. */
+#ifndef IDSTR_FLAGS_OFF
+#define IDSTR_FLAGS_OFF 0x00
+#endif
+#ifndef IDSTR_SIZE
+#define IDSTR_SIZE 0x30
+#endif
+
+typedef void (*idstr_assign_fn)(void *dst, const void *src);
+static idstr_assign_fn g_idstr_assign = NULL;
+
+void sh_rawmap_embed_install(const void *module_base)
+{
+    size_t i;
+    if (module_base == NULL) {
+        backend_log("MPKG: embed-on-save DARK -- no module base to resolve the idStr assignment");
+        return;
+    }
+    /* Resolved independently and never guessed: this writes into the engine's out-idStr on the
+     * save path, so a wrong address would corrupt a player's map rather than merely fail. */
+    for (i = 0; BACKEND_ENGINE_SIGNATURES[i].name != NULL; i++) {
+        sig_result ra;
+        sig_status st;
+        if (strcmp(BACKEND_ENGINE_SIGNATURES[i].name, "IdStrAssignFromStr") != 0) continue;
+        st = sig_resolve_one(module_base, &BACKEND_ENGINE_SIGNATURES[i], &ra);
+        if (st == SIG_OK || st == SIG_OK_HOOKED) g_idstr_assign = (idstr_assign_fn)ra.addr;
+        break;
+    }
+    backend_log(g_idstr_assign != NULL
+        ? "MPKG: embed-on-save ready -- a saved map will carry the packages it uses"
+        : "MPKG: embed-on-save DARK -- idStr assignment unresolved; saves are unchanged");
+}
+
+/* Build the map JSON with every used package embedded, or NULL for "leave the save alone".
+ * Pure: reads the engine's bytes, touches no engine state. */
+static char *embed_used_packages(const char *json, size_t len, size_t *out_len)
+{
+    sh_mpkg_used used[EMBED_MAX_PACKAGES];
+    char root[MAX_PATH];
+    char *cur = NULL;
+    size_t cur_len = len, count, i;
+    int enabled = 1;
+
+    *out_len = 0;
+    (void)sh_config_get_bool(EMBED_CONFIG_KEY, &enabled, NULL);
+    if (!enabled) return NULL;
+    if (!sh_overrides_get_root(root, sizeof root)) return NULL;
+
+    count = sh_mpkg_used_packages(json, len, root, used, EMBED_MAX_PACKAGES);
+    if (count == 0) return NULL;
+
+    for (i = 0; i < count; i++) {
+        unsigned char *payload;
+        size_t payload_len = 0, next_len = 0;
+        char err[SH_MPKG_ERR_CAP];
+        char *next;
+        char line[SH_MPKG_ERR_CAP + 128];
+
+        payload = sh_mpkg_pack_dir(used[i].root, &payload_len, err, sizeof err);
+        if (!payload) {
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                        "MPKG: package '%s' could NOT be packed for this save (%s); the map is "
+                        "being saved WITHOUT it", used[i].id, err);
+            backend_log(line);
+            continue;
+        }
+        next = sh_mpkg_embed(cur ? cur : json, cur_len, used[i].id,
+                             payload, payload_len, &next_len, err, sizeof err);
+        HeapFree(GetProcessHeap(), 0, payload);
+        if (!next) {
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                        "MPKG: package '%s' could NOT be embedded in this save (%s); the map is "
+                        "being saved WITHOUT it", used[i].id, err);
+            backend_log(line);
+            continue;
+        }
+        if (cur) HeapFree(GetProcessHeap(), 0, cur);
+        cur = next;
+        cur_len = next_len;
+    }
+
+    if (!cur) return NULL;
+    *out_len = cur_len;
+    return cur;
+}
+
+/* Replace the engine's out-idStr with `body`, through the engine's own assignment.
+ *
+ * The source idStr is built on the stack with a zeroed flags word, which declines the assign's
+ * steal/swap fast path -- so the engine COPIES our bytes and nothing of ours is aliased or
+ * freed by it, and nothing of the engine's is aliased by us. */
+static int replace_out_idstr(void *out_idstr, const char *body, size_t body_len)
+{
+    uint8_t src[IDSTR_SIZE];
+    if (!g_idstr_assign || !out_idstr || !body) return 0;
+    if (body_len > (size_t)INT_MAX) return 0;
+    memset(src, 0, sizeof src);
+    *(int *)(src + IDSTR_LEN_OFF) = (int)body_len;
+    *(const char **)(src + IDSTR_DATA_OFF) = body;
+    *(uint32_t *)(src + IDSTR_FLAGS_OFF) = 0;
+    __try {
+        g_idstr_assign(out_idstr, src);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return 1;
+}
+
+/* The save-path entry point. Everything is best-effort: the engine's save has already completed
+ * correctly by the time this runs, and any failure here simply leaves it as it was. */
+static void mpkg_embed_on_save(void *out_idstr)
+{
+    const char *data = NULL;
+    int len = 0;
+    char *body = NULL;
+    size_t body_len = 0;
+
+    if (!g_idstr_assign || out_idstr == NULL) return;
+
+    __try {
+        len = *(int *)((unsigned char *)out_idstr + IDSTR_LEN_OFF);
+        data = *(const char **)((unsigned char *)out_idstr + IDSTR_DATA_OFF);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    if (data == NULL || len <= 0) return;
+
+    __try {
+        body = embed_used_packages(data, (size_t)len, &body_len);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        body = NULL;
+    }
+    if (body == NULL) return;
+
+    if (replace_out_idstr(out_idstr, body, body_len)) {
+        char line[192];
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "MPKG: saved map now CARRIES its packages -- %d -> %zu bytes; a player "
+                    "without them can install them from the map itself", len, body_len);
+        backend_log(line);
+    } else {
+        backend_log("MPKG: embed-on-save could not write the map back; the save is unchanged");
+    }
+    HeapFree(GetProcessHeap(), 0, body);
+}
+
 /* The detour. Same prototype as the engine target. Call the engine ORIGINAL first (the real save fills
  * `out`), then read `out` and mirror it to rawmap.json. The shadow write is best-effort + fully guarded:
  * the real save has already happened by the time we touch disk. */
@@ -495,6 +650,12 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
      *    caller reads AL the instant we return, so every exit below returns `rc` and nothing else. The
      *    shadow is a bystander to the save -- it may never decide whether the save succeeded. */
     const unsigned char rc = g_ser_orig(map, out_idstr, compact);
+
+    /* 1b) embed the packages this map uses, so a player who does not have them can install them
+     *     from the map itself. This runs BEFORE the shadow so the mirrored copy matches what was
+     *     actually saved, and it is independent of the rawmaps switch: it is a product feature,
+     *     not a debugging aid. A map that uses no packages is untouched. */
+    mpkg_embed_on_save(out_idstr);
 
     /* 2) the shadow is the SAVE half of the rawmaps switch, so it obeys the same arm the LOAD swap does.
      *    Ungated, this overwrote rawmap.json on every map save even with rawmaps off -- silently discarding

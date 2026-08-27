@@ -12,6 +12,7 @@
 #include <windows.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "map_package.h"
@@ -176,6 +177,88 @@ static void check_strip(const char *json, size_t len, int expect_stripped)
     CHECK(strlen(out) == out_len);             /* NUL-terminated at the reported length */
     CHECK(json_well_formed(out, out_len));
     CHECK(sh_mpkg_scan(out, out_len, after, SH_MPKG_MAX_PACKAGES) == 0);   /* no shards left */
+    HeapFree(GetProcessHeap(), 0, out);
+}
+
+/* A minimal but structurally real map: the two members embed has to find, in the order and
+ * shape the engine writes them. `extra` lets a test start from a map that already has string
+ * variables, which is where an allocCount off-by-one would hide. */
+#define EMPTY_MAP \
+    "{\"variables\":{\"allocCount\":[0,0,0,0,0,0,0,0,0,0],\"string\":[]},\"name\":\"m\"}"
+#define ONE_VAR_MAP \
+    "{\"variables\":{\"allocCount\":[0,0,0,0,1,0,0,0,0,0],\"string\":[" \
+    "{\"info\":{\"name\":\"score\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"\"," \
+    "\"~type\":\"snapVarString_t\"}]},\"name\":\"m\"}"
+
+/* Read `variables.allocCount[4]` back out of a map, or -1 if it cannot be read. Deliberately a
+ * separate, dumber parser than the one under test: a shared bug would pass both. */
+static int alloc_count_string(const char *json)
+{
+    const char *a = strstr(json, "\"allocCount\"");
+    int i;
+    if (!a) return -1;
+    a = strchr(a, '[');
+    if (!a) return -1;
+    a++;
+    for (i = 0; i < 4; i++) {
+        a = strchr(a, ',');
+        if (!a) return -1;
+        a++;
+    }
+    return atoi(a);
+}
+
+/* Embed `payload` into `json`, then read it back the way a delivered map is read. */
+static void check_round_trip(const char *json, const unsigned char *payload, size_t payload_len,
+                             int expect_total_vars)
+{
+    char err[SH_MPKG_ERR_CAP];
+    size_t out_len = 0, back_len = 0;
+    char *out = sh_mpkg_embed(json, strlen(json), "demons-testpkg",
+                              payload, payload_len, &out_len, err, sizeof err);
+    sh_mpkg_decl decls[SH_MPKG_MAX_PACKAGES];
+    unsigned char *back;
+    char digest[SH_MPKG_DIGEST_CHARS + 1];
+
+    CHECK(out != NULL);
+    if (!out) { fprintf(stderr, "  embed said: %s\n", err); return; }
+    CHECK(strlen(out) == out_len);
+    CHECK(json_well_formed(out, out_len));
+
+    /* the consumer's own view of what we just wrote */
+    CHECK(sh_mpkg_scan(out, out_len, decls, SH_MPKG_MAX_PACKAGES) == 1);
+    CHECK(strcmp(decls[0].id, "demons-testpkg") == 0);
+    CHECK(decls[0].consistent == 1 && decls[0].complete == 1);
+    CHECK(decls[0].present == decls[0].total);
+
+    sh_mpkg_digest16(payload, payload_len, digest);
+    CHECK(strcmp(decls[0].digest, digest) == 0);
+
+    back = sh_mpkg_extract(out, out_len, "demons-testpkg", &back_len, err, sizeof err);
+    CHECK(back != NULL);
+    if (back) {
+        CHECK(back_len == payload_len);
+        if (back_len == payload_len) CHECK(memcmp(back, payload, payload_len) == 0);
+        HeapFree(GetProcessHeap(), 0, back);
+    } else {
+        fprintf(stderr, "  extract said: %s\n", err);
+    }
+
+    /* the engine reads this slot, not the list length */
+    CHECK(alloc_count_string(out) == expect_total_vars);
+
+    /* embed and strip are inverses */
+    {
+        size_t stripped_len = 0;
+        char *stripped = sh_mpkg_strip(out, out_len, &stripped_len);
+        sh_mpkg_decl none[SH_MPKG_MAX_PACKAGES];
+        CHECK(stripped != NULL);
+        if (stripped) {
+            CHECK(sh_mpkg_scan(stripped, stripped_len, none, SH_MPKG_MAX_PACKAGES) == 0);
+            CHECK(json_well_formed(stripped, stripped_len));
+            HeapFree(GetProcessHeap(), 0, stripped);
+        }
+    }
     HeapFree(GetProcessHeap(), 0, out);
 }
 
@@ -406,6 +489,119 @@ int main(void)
      * never be copied, let alone edited, by this feature. */
     check_strip("{\"variables\":{\"string\":[]}}", 27, 0);
     check_strip(fix_map_prose, fix_map_prose_len, 0);   /* prose is an author's words, not ours */
+
+    /* ---- embed: the author side, read back by the consumer side ----------
+     * These two halves have to agree exactly. A map the game writes and cannot read is worse
+     * than no feature at all, so the read-back here goes through the same scan and extract a
+     * delivered map does. */
+    {
+        unsigned char small[777], big[SH_MPKG_SHARD_CHARS * 2];   /* one shard, then several */
+        size_t i;
+        for (i = 0; i < sizeof small; i++) small[i] = (unsigned char)(i * 7 + 3);
+        for (i = 0; i < sizeof big; i++) big[i] = (unsigned char)((i * 31) ^ (i >> 5));
+
+        check_round_trip(EMPTY_MAP, small, sizeof small, 1);
+        check_round_trip(ONE_VAR_MAP, small, sizeof small, 2);   /* the map's own var is kept */
+
+        /* A multi-shard payload: every shard must carry the same total and digest, or the
+         * consumer refuses the set as inconsistent. */
+        {
+            char err[SH_MPKG_ERR_CAP];
+            size_t out_len = 0;
+            char *out = sh_mpkg_embed(EMPTY_MAP, strlen(EMPTY_MAP), "demons-testpkg",
+                                      big, sizeof big, &out_len, err, sizeof err);
+            sh_mpkg_decl decls[SH_MPKG_MAX_PACKAGES];
+            CHECK(out != NULL);
+            if (out) {
+                CHECK(sh_mpkg_scan(out, out_len, decls, SH_MPKG_MAX_PACKAGES) == 1);
+                CHECK(decls[0].total > 1);              /* it really did split */
+                CHECK(decls[0].complete == 1 && decls[0].consistent == 1);
+                CHECK(alloc_count_string(out) == (int)decls[0].total);
+                HeapFree(GetProcessHeap(), 0, out);
+            }
+        }
+
+        /* Re-embedding REPLACES. A map saved ten times must not carry ten packages. */
+        {
+            char err[SH_MPKG_ERR_CAP];
+            size_t once_len = 0, twice_len = 0;
+            char *once = sh_mpkg_embed(EMPTY_MAP, strlen(EMPTY_MAP), "demons-testpkg",
+                                       small, sizeof small, &once_len, err, sizeof err);
+            CHECK(once != NULL);
+            if (once) {
+                char *twice = sh_mpkg_embed(once, once_len, "demons-testpkg",
+                                            small, sizeof small, &twice_len, err, sizeof err);
+                CHECK(twice != NULL);
+                if (twice) {
+                    CHECK(twice_len == once_len);       /* byte-for-byte the same map */
+                    CHECK(memcmp(twice, once, once_len) == 0);
+                    HeapFree(GetProcessHeap(), 0, twice);
+                }
+                HeapFree(GetProcessHeap(), 0, once);
+            }
+        }
+
+        /* TWO packages must BOTH survive. Embedding is idempotent by stripping first, and the
+         * strip has to be scoped to the package being rewritten -- an unscoped one silently
+         * deleted the first package when the second was embedded, which is exactly the
+         * broken-map case the load gate exists to prevent, wearing the gate's face. */
+        {
+            char err[SH_MPKG_ERR_CAP];
+            size_t one_len = 0, two_len = 0;
+            char *one = sh_mpkg_embed(EMPTY_MAP, strlen(EMPTY_MAP), "pkg-alpha",
+                                      small, sizeof small, &one_len, err, sizeof err);
+            CHECK(one != NULL);
+            if (one) {
+                char *two = sh_mpkg_embed(one, one_len, "pkg-beta",
+                                          big, sizeof big, &two_len, err, sizeof err);
+                CHECK(two != NULL);
+                if (two) {
+                    sh_mpkg_decl d[SH_MPKG_MAX_PACKAGES];
+                    size_t n = sh_mpkg_scan(two, two_len, d, SH_MPKG_MAX_PACKAGES);
+                    size_t k, seen_alpha = 0, seen_beta = 0, total_shards = 0;
+                    CHECK(n == 2);
+                    for (k = 0; k < n; k++) {
+                        CHECK(d[k].complete == 1 && d[k].consistent == 1);
+                        total_shards += d[k].total;
+                        if (strcmp(d[k].id, "pkg-alpha") == 0) seen_alpha = 1;
+                        if (strcmp(d[k].id, "pkg-beta") == 0) seen_beta = 1;
+                    }
+                    CHECK(seen_alpha == 1);
+                    CHECK(seen_beta == 1);
+                    CHECK(alloc_count_string(two) == (int)total_shards);
+
+                    /* and each extracts back to its OWN payload */
+                    {
+                        size_t ra = 0, rb = 0;
+                        unsigned char *a = sh_mpkg_extract(two, two_len, "pkg-alpha", &ra,
+                                                           err, sizeof err);
+                        unsigned char *b = sh_mpkg_extract(two, two_len, "pkg-beta", &rb,
+                                                           err, sizeof err);
+                        CHECK(a != NULL && ra == sizeof small);
+                        if (a && ra == sizeof small) CHECK(memcmp(a, small, ra) == 0);
+                        CHECK(b != NULL && rb == sizeof big);
+                        if (b && rb == sizeof big) CHECK(memcmp(b, big, rb) == 0);
+                        if (a) HeapFree(GetProcessHeap(), 0, a);
+                        if (b) HeapFree(GetProcessHeap(), 0, b);
+                    }
+                    HeapFree(GetProcessHeap(), 0, two);
+                }
+                HeapFree(GetProcessHeap(), 0, one);
+            }
+        }
+
+        /* A map with no variables block cannot carry a payload, and must say so rather than
+         * produce something the consumer will choke on. */
+        {
+            char err[SH_MPKG_ERR_CAP];
+            size_t n = 0;
+            char *bad = sh_mpkg_embed("{\"name\":\"m\"}", 12, "demons-testpkg",
+                                      small, sizeof small, &n, err, sizeof err);
+            CHECK(bad == NULL);
+            CHECK(err[0] != '\0');
+            if (bad) HeapFree(GetProcessHeap(), 0, bad);
+        }
+    }
 
     remove_tree(root);
 

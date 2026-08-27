@@ -559,6 +559,14 @@ static ov_stream *open_internal_decl(const char *name, int *matched)
     return NULL;
 }
 
+size_t sh_overrides_internal_decl_published_count(void)
+{
+    if (InterlockedCompareExchange(&g_internal_decl_table_state, 0, 0) !=
+        OV_INTERNAL_DECL_TABLE_READY)
+        return 0;
+    return g_internal_decl_count;
+}
+
 int sh_overrides_internal_decl_published(const char *name)
 {
     size_t i;

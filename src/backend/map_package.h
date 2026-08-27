@@ -76,6 +76,9 @@
 #define SH_MPKG_MAX_SHARDS     2048        /* shards per package */
 #define SH_MPKG_MAX_CHUNK      65536       /* b64 chars per shard (py emits 8192) */
 #define SH_MPKG_MAX_PAYLOAD    (8u * 1024u * 1024u)   /* packed zip bytes */
+#define SH_MPKG_SHARD_CHARS    8192        /* b64 chars WRITTEN per shard; 16384 failed
+                                              * to deserialize, so this is a measured cap */
+#define SH_MPKG_HEADER_CAP     160         /* "smpkg." + id + two indices + digest + NUL */
 #define SH_MPKG_ERR_CAP        256
 
 /* One declared package, summarised from the shard headers (the cheap
@@ -142,6 +145,25 @@ int sh_mpkg_gate(const char *json, size_t len);
  * overflow, numBits=65544). The payload is an envelope; the engine's map
  * object must never contain it. */
 char *sh_mpkg_strip(const char *json, size_t len, size_t *out_len);
+
+/* THE AUTHOR SIDE. Embed `payload` into `json` as shard string
+ * variables, replacing any copy of the same package already there.
+ * Returns a new NUL-terminated HeapAlloc'd buffer (caller HeapFrees)
+ * with *out_len set, or NULL with the reason in `err`.
+ *
+ * Wire format is the reference implementation's, byte for byte: one
+ * snapVarString_t per shard, the header as its name, 8192 base64
+ * characters as its initialValue, and variables.allocCount[4] kept
+ * equal to the string-variable count -- the engine reads that slot,
+ * not the list length. */
+char *sh_mpkg_embed(const char *json, size_t len, const char *pkg_id,
+                    const unsigned char *payload, size_t payload_len,
+                    size_t *out_len, char *err, size_t err_cap);
+
+/* The first 16 hex characters of the payload's sha256 -- the digest
+ * that goes in a shard header and in the installed package's sidecar. */
+void sh_mpkg_digest16(const unsigned char *payload, size_t len,
+                      char out[SH_MPKG_DIGEST_CHARS + 1]);
 
 #ifdef SH_MAP_PACKAGE_TESTING
 /* Consent modes for tests: production raises an async prompt; tests run

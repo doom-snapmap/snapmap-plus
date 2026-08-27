@@ -426,7 +426,11 @@ static int mpkg_cut_cmp(const void *a, const void *b)
  *
  * Refusing rather than half-stripping is deliberate. A map with a mangled payload still has to
  * load; a map with mangled JSON does not load at all. */
-char *sh_mpkg_strip(const char *json, size_t len, size_t *out_len)
+/* Strip shard variables, optionally only those belonging to `pkg_id`.
+ *
+ * The filter is what makes embedding idempotent WITHOUT being destructive: re-embedding a
+ * package must replace its own shards and leave every other package's alone. */
+static char *mpkg_strip_scoped(const char *json, size_t len, const char *pkg_id, size_t *out_len)
 {
     mpkg_structure st;
     mpkg_cut *cuts = NULL;
@@ -454,7 +458,9 @@ char *sh_mpkg_strip(const char *json, size_t len, size_t *out_len)
 
     while (cut_count < SH_MPKG_MAX_SHARDS &&
            mpkg_next_shard(json, len, &pos, &hdr, &chunk, &chunk_len)) {
-        int el = mpkg_array_element(&st, mpkg_innermost(&st, pos));
+        int el;
+        if (pkg_id && strcmp(hdr.id, pkg_id) != 0) continue;   /* another package's payload */
+        el = mpkg_array_element(&st, mpkg_innermost(&st, pos));
         size_t from, to;
         int dup = 0;
         if (el < 0) continue;
@@ -538,15 +544,327 @@ char *sh_mpkg_strip(const char *json, size_t len, size_t *out_len)
     out[w] = '\0';
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
-                "MPKG: payload STRIPPED before the engine parse -- %u shard variable(s) removed "
-                "in %u contiguous run(s), %zu -> %zu bytes; the delivery envelope never becomes "
-                "map state", (unsigned)elements, (unsigned)cut_count, len, w);
+                "MPKG: payload STRIPPED (%s) -- %u shard variable(s) removed in %u contiguous "
+                "run(s), %zu -> %zu bytes; the delivery envelope never becomes map state",
+                pkg_id ? pkg_id : "every package", (unsigned)elements, (unsigned)cut_count,
+                len, w);
     backend_log(line);
 
     HeapFree(GetProcessHeap(), 0, cuts);
     HeapFree(GetProcessHeap(), 0, st.c);
     if (out_len) *out_len = w;
     return out;
+}
+
+char *sh_mpkg_strip(const char *json, size_t len, size_t *out_len)
+{
+    return mpkg_strip_scoped(json, len, NULL, out_len);
+}
+
+/* ==================================================================== */
+/* embed                                                                 */
+/* ==================================================================== */
+
+static const char MPKG_B64[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/* Standard base64 with padding, into a caller-supplied buffer of at least
+ * ((len + 2) / 3) * 4 + 1 bytes. */
+static size_t mpkg_b64_encode(const unsigned char *p, size_t len, char *out)
+{
+    size_t i = 0, w = 0;
+    while (i + 3 <= len) {
+        unsigned v = ((unsigned)p[i] << 16) | ((unsigned)p[i + 1] << 8) | p[i + 2];
+        out[w++] = MPKG_B64[(v >> 18) & 63];
+        out[w++] = MPKG_B64[(v >> 12) & 63];
+        out[w++] = MPKG_B64[(v >> 6) & 63];
+        out[w++] = MPKG_B64[v & 63];
+        i += 3;
+    }
+    if (len - i == 1) {
+        unsigned v = (unsigned)p[i] << 16;
+        out[w++] = MPKG_B64[(v >> 18) & 63];
+        out[w++] = MPKG_B64[(v >> 12) & 63];
+        out[w++] = '=';
+        out[w++] = '=';
+    } else if (len - i == 2) {
+        unsigned v = ((unsigned)p[i] << 16) | ((unsigned)p[i + 1] << 8);
+        out[w++] = MPKG_B64[(v >> 18) & 63];
+        out[w++] = MPKG_B64[(v >> 12) & 63];
+        out[w++] = MPKG_B64[(v >> 6) & 63];
+        out[w++] = '=';
+    }
+    out[w] = '\0';
+    return w;
+}
+
+void sh_mpkg_digest16(const unsigned char *payload, size_t len,
+                      char out[SH_MPKG_DIGEST_CHARS + 1])
+{
+    mpkg_sha256 h;
+    sha256_init(&h);
+    sha256_update(&h, payload, len);
+    sha256_hex16(&h, out);
+}
+
+/* Locate the container that is the value of member `key` directly inside container `parent`.
+ * Returns its index, or -1. "Directly inside" matters: a map has more than one member called
+ * "string", and only the one whose parent is the variables object is the bucket we mean. */
+static int mpkg_member_container(const char *json, size_t len, const mpkg_structure *st,
+                                 int parent, const char *key)
+{
+    size_t klen = strlen(key);
+    size_t at = st->c[parent].open;
+    size_t stop = st->c[parent].close;
+
+    while (at < stop) {
+        const char *q = mpkg_find(json + at, stop - at, key, klen);
+        size_t koff, v;
+        size_t i;
+        int found = -1;
+        if (!q) return -1;
+        koff = (size_t)(q - json);
+        at = koff + 1;
+        if (koff == 0 || json[koff - 1] != '"') continue;
+        if (koff + klen >= len || json[koff + klen] != '"') continue;
+        v = koff + klen + 1;
+        while (v < stop && mpkg_is_ws(json[v])) v++;
+        if (v >= stop || json[v] != ':') continue;
+        v++;
+        while (v < stop && mpkg_is_ws(json[v])) v++;
+        if (v >= stop || (json[v] != '{' && json[v] != '[')) continue;
+        for (i = 0; i < st->count; i++) {
+            if (st->c[i].open == v) { found = (int)i; break; }
+        }
+        if (found < 0) continue;
+        /* the key itself must be a DIRECT child of `parent`, not of something nested in it */
+        if (mpkg_innermost(st, koff) != parent) continue;
+        return found;
+    }
+    return -1;
+}
+
+/* Byte span of the `index`-th element of a flat array container (numbers only -- allocCount).
+ * Returns 1 with *from/*to, 0 if the array is shorter than that or holds anything nested. */
+static int mpkg_flat_element(const char *json, const mpkg_structure *st, int arr,
+                             unsigned index, size_t *from, size_t *to)
+{
+    size_t p = st->c[arr].open + 1;
+    size_t stop = st->c[arr].close;
+    unsigned n = 0;
+    while (p < stop) {
+        size_t start;
+        while (p < stop && mpkg_is_ws(json[p])) p++;
+        start = p;
+        while (p < stop && json[p] != ',') {
+            if (json[p] == '{' || json[p] == '[' || json[p] == '"') return 0;
+            p++;
+        }
+        if (n == index) {
+            size_t e = p;
+            while (e > start && mpkg_is_ws(json[e - 1])) e--;
+            *from = start;
+            *to = e;
+            return 1;
+        }
+        n++;
+        p++;   /* past the comma */
+    }
+    return 0;
+}
+
+/* Count the direct elements of an array container. */
+static unsigned mpkg_array_count(const char *json, const mpkg_structure *st, int arr)
+{
+    size_t p = st->c[arr].open + 1, stop = st->c[arr].close;
+    unsigned n = 0;
+    int depth = 0, in_string = 0, any = 0;
+    for (; p < stop; p++) {
+        char ch = json[p];
+        if (in_string) {
+            if (ch == '\\') p++;
+            else if (ch == '"') in_string = 0;
+            continue;
+        }
+        if (ch == '"') { in_string = 1; any = 1; continue; }
+        if (ch == '{' || ch == '[') { depth++; any = 1; continue; }
+        if (ch == '}' || ch == ']') { depth--; continue; }
+        if (ch == ',' && depth == 0) { n++; continue; }
+        if (!mpkg_is_ws(ch)) any = 1;
+    }
+    return any ? n + 1 : 0;
+}
+
+/* One shard variable, exactly the engine-emitted snapVarString_t the reference implementation
+ * copies from a corpus map. Written compact; the engine's own writer is compact too. */
+static size_t mpkg_write_shard(char *out, const char *header, const char *chunk, size_t chunk_len)
+{
+    static const char PRE[] =
+        "{\"info\":{\"customIcon\":{\"targetType\":\"idDeclSnapCustomIcon\",\"value\":null,"
+        "\"~type\":\"|pointer\"},\"name\":\"";
+    static const char MID[] = "\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"";
+    static const char POST[] = "\",\"~type\":\"snapVarString_t\"}";
+    size_t w = 0, n;
+    n = sizeof PRE - 1;      memcpy(out + w, PRE, n);      w += n;
+    n = strlen(header);      memcpy(out + w, header, n);   w += n;
+    n = sizeof MID - 1;      memcpy(out + w, MID, n);      w += n;
+    memcpy(out + w, chunk, chunk_len);                     w += chunk_len;
+    n = sizeof POST - 1;     memcpy(out + w, POST, n);     w += n;
+    return w;
+}
+
+char *sh_mpkg_embed(const char *json, size_t len, const char *pkg_id,
+                    const unsigned char *payload, size_t payload_len,
+                    size_t *out_len, char *err, size_t err_cap)
+{
+    mpkg_structure st;
+    char *base = NULL;          /* the payload-free buffer we build on top of */
+    const char *src;
+    size_t src_len;
+    char *b64 = NULL, *out = NULL;
+    size_t b64_len, shards, i, insert, w = 0, need;
+    int vars, bucket, alloc;
+    unsigned existing;
+    char digest[SH_MPKG_DIGEST_CHARS + 1];
+    char line[224];
+
+    if (out_len) *out_len = 0;
+    if (err && err_cap) err[0] = '\0';
+    if (!json || len == 0 || !pkg_id || !payload) {
+        mpkg_err(err, err_cap, "embed called with nothing to embed");
+        return NULL;
+    }
+    if (payload_len == 0 || payload_len > SH_MPKG_MAX_PAYLOAD) {
+        mpkg_err(err, err_cap, "payload is %zu bytes, over the %u-byte embed budget",
+                 payload_len, (unsigned)SH_MPKG_MAX_PAYLOAD);
+        return NULL;
+    }
+
+    /* Re-embedding replaces rather than accumulates: strip whatever is already there first. A
+     * map saved ten times must not carry ten copies of its package. */
+    base = mpkg_strip_scoped(json, len, pkg_id, &src_len);
+    src = base ? base : json;
+    if (!base) src_len = len;
+
+    if (!mpkg_structure_build(src, src_len, &st)) {
+        mpkg_err(err, err_cap, "map JSON did not read cleanly; nothing embedded");
+        goto fail;
+    }
+    vars = mpkg_member_container(src, src_len, &st, 0, "variables");
+    if (vars < 0 || st.c[vars].kind != '{') {
+        mpkg_err(err, err_cap, "map has no variables block");
+        goto fail_struct;
+    }
+    bucket = mpkg_member_container(src, src_len, &st, vars, "string");
+    if (bucket < 0 || st.c[bucket].kind != '[') {
+        mpkg_err(err, err_cap, "map has no variables.string list");
+        goto fail_struct;
+    }
+    alloc = mpkg_member_container(src, src_len, &st, vars, "allocCount");
+    if (alloc < 0 || st.c[alloc].kind != '[') {
+        mpkg_err(err, err_cap, "map has no variables.allocCount list");
+        goto fail_struct;
+    }
+
+    b64_len = ((payload_len + 2) / 3) * 4;
+    b64 = (char *)HeapAlloc(GetProcessHeap(), 0, b64_len + 1);
+    if (!b64) { mpkg_err(err, err_cap, "out of memory encoding the payload"); goto fail_struct; }
+    b64_len = mpkg_b64_encode(payload, payload_len, b64);
+
+    shards = (b64_len + SH_MPKG_SHARD_CHARS - 1) / SH_MPKG_SHARD_CHARS;
+    if (shards == 0) shards = 1;
+    if (shards > SH_MPKG_MAX_SHARDS) {
+        mpkg_err(err, err_cap, "payload needs %zu shards, over the %u cap",
+                 shards, (unsigned)SH_MPKG_MAX_SHARDS);
+        goto fail_b64;
+    }
+    sh_mpkg_digest16(payload, payload_len, digest);
+
+    existing = mpkg_array_count(src, &st, bucket);
+
+    /* Worst case: everything before the insert point, every shard with its wrapper and comma,
+     * everything after, and room for allocCount growing by a few digits. */
+    need = src_len + b64_len + shards * 256 + 64;
+    out = (char *)HeapAlloc(GetProcessHeap(), 0, need + 1);
+    if (!out) { mpkg_err(err, err_cap, "out of memory building the map"); goto fail_b64; }
+
+    insert = st.c[bucket].close;       /* just before the ']' */
+    memcpy(out, src, insert);
+    w = insert;
+    for (i = 0; i < shards; i++) {
+        char header[SH_MPKG_HEADER_CAP];
+        const char *chunk = b64 + i * SH_MPKG_SHARD_CHARS;
+        size_t chunk_len = b64_len - i * SH_MPKG_SHARD_CHARS;
+        if (chunk_len > SH_MPKG_SHARD_CHARS) chunk_len = SH_MPKG_SHARD_CHARS;
+        _snprintf_s(header, sizeof header, _TRUNCATE, "%s%s.%u.%u.%s",
+                    MPKG_HEADER_MAGIC, pkg_id, (unsigned)i, (unsigned)shards, digest);
+        if (existing || i) out[w++] = ',';
+        w += mpkg_write_shard(out + w, header, chunk, chunk_len);
+    }
+    memcpy(out + w, src + insert, src_len - insert);
+    w += src_len - insert;
+    out[w] = '\0';
+
+    /* allocCount[STRING] must equal the list length, and the list just grew. The slot is edited
+     * on the FINISHED buffer, because its offset moved with the insert. */
+    {
+        mpkg_structure st2;
+        int vars2, alloc2;
+        size_t from, to;
+        if (!mpkg_structure_build(out, w, &st2)) {
+            mpkg_err(err, err_cap, "the embedded map did not read back cleanly");
+            goto fail_out;
+        }
+        vars2 = mpkg_member_container(out, w, &st2, 0, "variables");
+        alloc2 = vars2 >= 0 ? mpkg_member_container(out, w, &st2, vars2, "allocCount") : -1;
+        if (alloc2 < 0 || !mpkg_flat_element(out, &st2, alloc2, 4, &from, &to)) {
+            HeapFree(GetProcessHeap(), 0, st2.c);
+            mpkg_err(err, err_cap, "map has no variables.allocCount[4] slot to update");
+            goto fail_out;
+        }
+        {
+            char count[16];
+            int n = _snprintf_s(count, sizeof count, _TRUNCATE, "%u",
+                                (unsigned)(existing + shards));
+            size_t tail = w - to;
+            char *fin = (char *)HeapAlloc(GetProcessHeap(), 0, from + (size_t)n + tail + 1);
+            if (!fin) {
+                HeapFree(GetProcessHeap(), 0, st2.c);
+                mpkg_err(err, err_cap, "out of memory writing the variable count");
+                goto fail_out;
+            }
+            memcpy(fin, out, from);
+            memcpy(fin + from, count, (size_t)n);
+            memcpy(fin + from + n, out + to, tail);
+            w = from + (size_t)n + tail;
+            fin[w] = '\0';
+            HeapFree(GetProcessHeap(), 0, out);
+            out = fin;
+        }
+        HeapFree(GetProcessHeap(), 0, st2.c);
+    }
+
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "MPKG: package '%s' EMBEDDED into the map -- %zu payload bytes as %zu shard(s), "
+                "digest %s; map %zu -> %zu bytes",
+                pkg_id, payload_len, shards, digest, len, w);
+    backend_log(line);
+
+    HeapFree(GetProcessHeap(), 0, b64);
+    HeapFree(GetProcessHeap(), 0, st.c);
+    if (base) HeapFree(GetProcessHeap(), 0, base);
+    if (out_len) *out_len = w;
+    return out;
+
+fail_out:
+    HeapFree(GetProcessHeap(), 0, out);
+fail_b64:
+    HeapFree(GetProcessHeap(), 0, b64);
+fail_struct:
+    HeapFree(GetProcessHeap(), 0, st.c);
+fail:
+    if (base) HeapFree(GetProcessHeap(), 0, base);
+    return NULL;
 }
 
 /* ==================================================================== */
