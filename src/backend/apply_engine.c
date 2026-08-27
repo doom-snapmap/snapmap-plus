@@ -2388,6 +2388,10 @@ void sh_apply_prefab_poll_play(void)
      * so whichever runs first wins. This one still matters on a build where the decl server
      * refused, and on a launch with no packages at all. */
     sh_package_requirements_poll();
+    /* And advance a runtime re-arm if a package was installed mid-session. Must be on the tick:
+     * its two phases have to land on different frames so the engine can drain the cut-content
+     * cvars between them. */
+    sh_decl_server_rearm_poll();
     if (!g_doom_base) return;
 
 #if AE_PASTE_DIAG_ON

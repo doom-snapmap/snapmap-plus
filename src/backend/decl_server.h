@@ -39,6 +39,23 @@ int sh_decl_server_install(const sig_result *results, size_t count,
  * represents disabled, empty, or all-shadowed snapshots. */
 int sh_decl_server_registration_succeeded(void);
 
+/* Re-scan the overrides packages and register any NEW decl identities at runtime, after the
+ * engine's boot promotion. Must run on the engine main thread; the console command
+ * `snapmap_plus_decl_server_rearm` is the normal trigger.
+ *
+ * Content registered this way is born map-scoped (idResource level 1 or 2), NOT permanent --
+ * registration and promotion are deliberately separate here. Give it a lifetime explicitly
+ * against a registry watermark/delta; do not couple the two. Returns 1 when a pass ran. */
+int sh_decl_server_rearm(void);
+
+/* Request a runtime re-arm after a mid-session package install. Safe from any thread; the work
+ * is performed on the engine tick, in two phases separated by real frames because the
+ * cut-content cvars the packages need are QUEUED, not applied immediately. */
+void sh_decl_server_request_rearm(void);
+
+/* Advance a requested re-arm. Call from the engine tick (main thread). No-op when idle. */
+void sh_decl_server_rearm_poll(void);
+
 #ifdef SH_DECL_SERVER_TESTING
 #include <windows.h>
 

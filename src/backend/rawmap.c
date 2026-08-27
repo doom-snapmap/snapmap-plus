@@ -21,6 +21,7 @@
 #include "rawmap.h"
 #include "hook.h"
 #include "backend_log.h"
+#include "map_package.h"
 
 /* DeserializeFromJson prologue steal window. Decoded from the signature DB pattern
  *   40 55            push rbp                      (2)
@@ -155,8 +156,31 @@ static char *read_source_file(size_t *out_len)
     return buf;
 }
 
+/* The MAP-PACKAGE LOAD GATE (map_package.c), wrapped in the same SEH
+ * discipline the save shadow uses on engine memory. This runs on EVERY buffer
+ * the engine is about to parse -- the engine's own json (local, published, and
+ * network-downloaded maps all funnel through this one function) and our
+ * swapped rawmap alike -- BEFORE the parse. A map that declares an override
+ * package the running process does not have must NOT reach the engine: the
+ * missing content is fatal at spawn/render (AddRenderModel throws on the NULL
+ * model), not degraded. Returns 1 = pass to the engine, 0 = refuse the load.
+ * A fault inside the gate passes the buffer through untouched -- vanilla
+ * behavior, never a new crash. */
+static int mpkg_gate_guarded(const char *json)
+{
+    __try {
+        size_t len = json ? strlen(json) : 0;
+        if (len == 0) return 1;
+        return sh_mpkg_gate(json, len);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 1;   /* gate fault -> vanilla load */
+    }
+}
+
 /* The detour. Same prototype as the engine target. When armed + a source reads, call the engine
- * original through the trampoline with OUR buffer as arg0; else pass the engine's json through. */
+ * original through the trampoline with OUR buffer as arg0; else pass the engine's json through.
+ * Either way the chosen buffer passes the map-package gate first; a refused load returns 0 (the
+ * same "failed parse" contract the engine's callers already handle as a clean bounce). */
 static int sh_deser_detour(const char *json, void *out_map)
 {
     if (g_deser_orig == NULL) return 0;   /* defensive: should never happen once installed */
@@ -175,6 +199,11 @@ static int sh_deser_detour(const char *json, void *out_map)
                 json ? "<engine-json>" : "<null>", len, n,
                 flag_armed ? " [flag-armed]" : "");
             backend_log(line);
+            if (!mpkg_gate_guarded(ours)) {
+                backend_log("B1: rawmap swap load REFUSED by the map-package gate");
+                HeapFree(GetProcessHeap(), 0, ours);
+                return 0;   /* refused: the engine never sees the bytes */
+            }
             int rc = g_deser_orig(ours, out_map);   /* engine parses OUR bytes (overwrite of param_1) */
             InterlockedIncrement(&g_swap_complete_count); /* only after the substituted parse returns */
             HeapFree(GetProcessHeap(), 0, ours);     /* OG frees its substitute buffer too */
@@ -182,6 +211,7 @@ static int sh_deser_detour(const char *json, void *out_map)
         }
         /* armed but no readable source -> fall through to a vanilla load (OG bVar2==false). */
     }
+    if (!mpkg_gate_guarded(json)) return 0;   /* refused: engine json never parsed */
     return g_deser_orig(json, out_map);
 }
 

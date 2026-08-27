@@ -45,6 +45,7 @@
 #include "user_overrides.h"
 
 #define DS_INTERNAL_COMMAND     "snapmap_plus_decl_server_apply"
+#define DS_REARM_COMMAND        "snapmap_plus_decl_server_rearm"
 #define DS_MAX_CANDIDATES       512
 #define DS_MAX_DISCOVERED       (DS_MAX_CANDIDATES * 8)
 #define DS_MAX_DEPTH            16
@@ -2164,6 +2165,175 @@ static void __cdecl ds_apply_command(void)
  * called unconditionally on the way out, and a failure stays terminal exactly as it would at
  * RUNNING. The worst outcome is a launch with no published content -- never a launch that does not
  * happen. */
+/* RUNTIME RE-ARM -- the after-boot counterpart of ds_publish_before_boot_promotion.
+ *
+ * Everything registration does is a call on the engine main thread; none of it is
+ * intrinsically boot-only. The reason the service runs at boot is the PROMOTION -- content
+ * alive when the engine's whole-registry pass (0x1801830) runs becomes level 4 and can never
+ * be purged. After boot, newly registered content is born at whatever level the idResource
+ * constructor picks (1 or 2), and the map-transition purge frees it by level alone.
+ *
+ * So this function registers and stops there. It does NOT promote. Promotion is a separate,
+ * measurable step performed against a registry watermark/delta, because the six failed
+ * attempts recorded above all died by coupling the two and guessing at a closure the engine
+ * does not record.
+ *
+ * Runs on the engine main thread (it is an engine command). Every step is SEH-guarded by the
+ * callee; a failure leaves the service FAILED and the launch otherwise untouched. */
+/* Phase latch for the two-phase re-arm. See ds_rearm_command. */
+static volatile LONG g_rearm_phase;   /* 0 = prepare next, 1 = register next */
+
+static void __cdecl ds_rearm_command(void)
+{
+    char line[192];
+    unsigned long packages;
+
+    /* TWO PHASES, because the cut-content gates are cvars and a cvar set is QUEUED, not
+     * immediate. The boot path gets away with one pass because it drains the command buffer
+     * itself at a point where nothing else will; at runtime the drain lands on a frame
+     * boundary, so a single-pass re-arm registered ~50ms before the gates went live and
+     * every candidate died on the blacklist (measured: 297 REFUSED, materialization
+     * terminal). So phase 1 prepares and returns, letting the engine drain; phase 2 does the
+     * registration with the gates already up. Re-issue the command to advance. */
+    if (InterlockedCompareExchange(&g_rearm_phase, 0, 0) == 0) {
+        LONG st = InterlockedCompareExchange(&g_state, 0, 0);
+        if (st != DS_STATE_DONE && st != DS_STATE_FAILED) {
+            backend_log("decl-server RE-ARM refused: a pass is in flight");
+            return;
+        }
+        packages = sh_overrides_rescan_packages();
+        {
+            char rr[MAX_PATH];
+            if (sh_overrides_get_root(rr, sizeof rr)) {
+                (void)sh_resource_bridge_recapture(rr);
+                if (!sh_package_requirements_rearm(rr, (void *)g_execute_commands,
+                                                   sh_user_overrides_enabled_for_launch()))
+                    backend_log("decl-server RE-ARM: package requirements were not applied; "
+                                "cut-content packages will fail to materialize");
+            }
+        }
+        sh_overrides_internal_decl_table_retire();
+        InterlockedExchange(&g_rearm_phase, 1);
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "decl-server RE-ARM phase 1/2 complete: %u package(s) visible, gates queued. "
+                    "Re-issue " DS_REARM_COMMAND " to register once the engine has drained them.",
+                    (unsigned)packages);
+        backend_log(line);
+        return;
+    }
+    InterlockedExchange(&g_rearm_phase, 0);
+
+    packages = 0;
+
+    {
+        /* A previous pass that ended FAILED must not block the service forever -- the usual
+         * cause is a transient gate, not a broken install. */
+        LONG st = InterlockedCompareExchange(&g_state, DS_STATE_INSTALLING, DS_STATE_DONE);
+        if (st != DS_STATE_DONE)
+            st = InterlockedCompareExchange(&g_state, DS_STATE_INSTALLING, DS_STATE_FAILED);
+        if (st != DS_STATE_DONE && st != DS_STATE_FAILED) {
+            backend_log("decl-server RE-ARM refused: a pass is in flight");
+            return;
+        }
+    }
+    InterlockedExchange(&g_registration_succeeded, 0);
+    ds_free_candidates();
+
+    if (!ds_capture_snapshot()) {
+        backend_log("decl-server RE-ARM refused: fresh snapshot capture failed");
+        InterlockedExchange(&g_state, DS_STATE_FAILED);
+        ds_free_candidates();
+        return;
+    }
+    if (g_candidate_count == 0) {
+        backend_log("decl-server RE-ARM: nothing to do (no candidates in the fresh snapshot)");
+        InterlockedExchange(&g_state, DS_STATE_DONE);
+        ds_free_candidates();
+        return;
+    }
+
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "decl-server RE-ARM: %u package(s) visible, fresh snapshot has %u candidate(s) "
+                "-- registering at RUNTIME, after the boot promotion, so new content is born "
+                "map-scoped and needs an explicit lifetime",
+                (unsigned)packages, (unsigned)g_candidate_count);
+    backend_log(line);
+
+    InterlockedExchange(&g_state, DS_STATE_ARMED);
+    if (InterlockedCompareExchange(&g_state, DS_STATE_QUEUED, DS_STATE_ARMED) != DS_STATE_ARMED) {
+        backend_log("decl-server RE-ARM: lost the ARMED -> QUEUED claim; aborting this pass");
+        return;
+    }
+    ds_apply_command();
+}
+
+/* ---- automatic re-arm, driven from the engine tick ------------------------------------
+ *
+ * The console command is the manual trigger. This is the one the product uses: after a package
+ * is installed mid-session, request a re-arm and let the tick advance it. The two phases MUST
+ * land on different frames -- phase 1 queues the cut-content cvars and a cvar set is queued,
+ * not immediate, so registering in the same pass parses new decls while the blacklist is still
+ * up and every candidate dies (measured: 297 REFUSED, materialization terminal).
+ *
+ * DS_REARM_SETTLE_TICKS is deliberately generous. The cost of waiting a few extra frames is
+ * imperceptible; the cost of registering one frame early is a wholesale failure that also
+ * leaves the service in FAILED. */
+#define DS_REARM_SETTLE_TICKS 8
+
+enum {
+    DS_AUTO_IDLE = 0,
+    DS_AUTO_PREPARE,     /* run phase 1 on the next tick */
+    DS_AUTO_SETTLING,    /* let the engine drain the queued cvars */
+    DS_AUTO_REGISTER     /* run phase 2 */
+};
+static volatile LONG g_auto_state;
+static volatile LONG g_auto_ticks;
+
+/* Ask for a runtime re-arm. Safe from any thread; the work happens on the engine tick. */
+void sh_decl_server_request_rearm(void)
+{
+    if (InterlockedCompareExchange(&g_auto_state, DS_AUTO_PREPARE, DS_AUTO_IDLE) == DS_AUTO_IDLE) {
+        InterlockedExchange(&g_auto_ticks, 0);
+        backend_log("decl-server: runtime re-arm REQUESTED (a package was installed mid-session); "
+                    "the engine tick will prepare, settle, then register");
+    }
+}
+
+/* Drive the requested re-arm. Called from the engine tick, which is the main thread. */
+void sh_decl_server_rearm_poll(void)
+{
+    LONG state = InterlockedCompareExchange(&g_auto_state, 0, 0);
+    if (state == DS_AUTO_IDLE) return;
+
+    if (state == DS_AUTO_PREPARE) {
+        ds_rearm_command();                       /* phase 1: rescan/recapture/retire/gates */
+        InterlockedExchange(&g_auto_ticks, 0);
+        InterlockedExchange(&g_auto_state, DS_AUTO_SETTLING);
+        return;
+    }
+    if (state == DS_AUTO_SETTLING) {
+        if (InterlockedIncrement(&g_auto_ticks) < DS_REARM_SETTLE_TICKS) return;
+        InterlockedExchange(&g_auto_state, DS_AUTO_REGISTER);
+        return;
+    }
+    /* DS_AUTO_REGISTER */
+    InterlockedExchange(&g_auto_state, DS_AUTO_IDLE);
+    ds_rearm_command();                           /* phase 2: register */
+    if (sh_decl_server_registration_succeeded())
+        backend_log("decl-server: runtime re-arm COMPLETE -- new identities are registered; "
+                    "give them a lifetime before the next map transition");
+}
+
+/* Programmatic entry point for the same pass. Returns 1 when the pass was driven.
+ * Must be called on the engine main thread. */
+int sh_decl_server_rearm(void)
+{
+    LONG before = InterlockedCompareExchange(&g_state, 0, 0);
+    if (before != DS_STATE_DONE) return 0;
+    ds_rearm_command();
+    return InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE;
+}
+
 static void ds_publish_before_boot_promotion(void)
 {
     /* The cut-content gates first, and synchronously. The blacklist matcher (0x31D0B0) is consulted
@@ -2361,6 +2531,11 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     __try {
         g_add_command(g_cmdsys, DS_INTERNAL_COMMAND, (void *)ds_apply_command,
                       "Snapmap+ internal one-shot decltree registration", NULL, 2u);
+        /* The runtime counterpart: re-scan, re-snapshot and register AFTER boot, so a package
+         * installed mid-session can publish its identities without a relaunch. Registered here
+         * because AddCommand is only reachable with the cmd system resolved at install. */
+        g_add_command(g_cmdsys, DS_REARM_COMMAND, (void *)ds_rearm_command,
+                      "Snapmap+ re-scan packages and register new decls at runtime", NULL, 2u);
         command_registered = 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         command_registered = 0;

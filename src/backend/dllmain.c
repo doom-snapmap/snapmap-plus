@@ -23,6 +23,7 @@
 #include "hook.h"
 #include "smoke.h"
 #include "rawmap.h"
+#include "map_package.h" /* map-embedded override packages: boot snapshot + load gate */
 #include "palette_guard.h"
 #include "palette_refresh.h"
 #include "../fault_shield/mapload_guards.h"   /* the two map-load / spawn game-defect guards */
@@ -194,6 +195,20 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                 deser_clean = (results[i].status == SIG_OK);   /* clean scan, not the hook-tolerant fallback */
                 break;
             }
+        }
+        /* The MAP-PACKAGE gate rides inside the DeserializeFromJson detour, so its
+         * immutable boot package snapshot must exist BEFORE that detour can fire.
+         * The snapshot is what "installed" means to the gate: a package copied to
+         * disk after this instant is NOT live in this process (the decl server's
+         * launch snapshot is equally immutable), and letting its map through
+         * would crash exactly as if it were absent. */
+        {
+            char mpkg_root[MAX_PATH];
+            if (sh_overrides_get_root(mpkg_root, sizeof mpkg_root))
+                sh_mpkg_boot_capture(mpkg_root);
+            else
+                backend_log("MPKG: boot capture SKIPPED -- no effective override root "
+                            "(maps declaring packages will be refused, never crashed)");
         }
         sh_rawmap_swap_install(deser, deser_clean);
 

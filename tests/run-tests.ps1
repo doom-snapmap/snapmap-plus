@@ -25,6 +25,7 @@
 #   decl_server_contract_test -- startup ordering, signature pins, one-shot per-decl source wiring
 #   resource_bridge_test -- exact manifest resolution, sparse decode, provider gate + collisions
 #   packages_test -- per-package override discovery: markers, legacy tree, order, bounds
+#   map_package_test -- map-embedded package shards: scan/extract vs the reference impl, unsafe-zip refusal, load gate
 #   override_packages_test -- the file shadow resolves a decl out of any installed package
 #   package_requirements_test -- allowlisted package cvars, strict parsing, RUNNING gate + one-shot apply
 #   strids_packages_test -- a package ships its own #str_ strings; user > packages > baked
@@ -89,6 +90,7 @@ $tests = @(
     @{ name = "palette_refresh_contract_test"; src = 'palette_refresh_contract_test.c'; arg = (Join-Path $here '..') }
     @{ name = "resource_bridge_test"; src = 'resource_bridge_test.c ..\src\backend\resource_bridge.c ..\src\backend\packages.c ..\src\backend\raw_deflate.c ..\src\backend\decl_text.c'; defs = '/DSH_RESOURCE_BRIDGE_TESTING /DSH_RAW_DEFLATE_TESTING'; arg = "" }
     @{ name = "packages_test"; src = 'packages_test.c ..\src\backend\packages.c'; arg = "" }
+    @{ name = "map_package_test"; src = 'map_package_test.c ..\src\backend\map_package.c ..\src\backend\packages.c ..\src\backend\raw_deflate.c'; defs = '/DSH_MAP_PACKAGE_TESTING'; arg = "" }
     @{ name = "override_packages_test"; src = 'override_packages_test.c ..\src\backend\overrides.c ..\src\backend\packages.c ..\src\backend\decl_text.c'; defs = '/DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
     @{ name = "package_requirements_test"; src = 'package_requirements_test.c ..\src\backend\package_requirements.c ..\src\backend\packages.c'; defs = '/DSH_PACKAGE_REQUIREMENTS_TESTING'; arg = "" }
     @{ name = "strids_packages_test"; src = 'strids_packages_test.c ..\src\backend\strids.c ..\src\backend\packages.c ..\src\backend\overrides.c ..\src\backend\decl_text.c'; defs = '/DSH_STRIDS_TESTING /DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }

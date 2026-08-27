@@ -717,6 +717,50 @@ static int rb_validate_slices_and_open(const char *doom_base)
  * guarded one-shot on a single thread, so a shared buffer is safe here. */
 static sh_package g_packages[SH_PACKAGES_MAX];
 
+/* Re-run the manifest capture so a package installed mid-session becomes resolvable without a
+ * relaunch. Returns what the fresh capture returned.
+ *
+ * SAFETY. sh_resource_bridge_open refuses unless the state is READY, so moving the state off
+ * READY fences off every reader that has not already entered the lookup. A reader ALREADY
+ * inside it cannot be evicted, so the previous entry table is deliberately NOT freed -- it is
+ * retired and leaked. That costs a bounded ~26 KB per package install and removes the
+ * use-after-free entirely; freeing it would trade a real crash for a small saving.
+ *
+ * Call at a quiescent moment (the browser, no map loading). A MISS during the rebuild window
+ * degrades to the packaged resource, which is the same failure this module already tolerates. */
+int sh_resource_bridge_recapture(const char *data_root)
+{
+    char line[192];
+    int ok;
+    LONG previous = InterlockedExchange(&g_state, RB_STATE_INSTALLING);
+
+    if (previous == RB_STATE_INSTALLING) {
+        /* Another capture is in flight; do not race it. Restore and refuse. */
+        InterlockedExchange(&g_state, previous);
+        backend_log("resource-bridge RECAPTURE refused: a capture is already in flight");
+        return 0;
+    }
+
+    /* Retire, do not free. See SAFETY above. */
+    g_entries = NULL;
+    g_entry_count = 0;
+    g_entry_capacity = 0;
+    g_decl_count = 0;
+    g_equivalent_row_count = 0;
+    g_has_manifests = 0;
+    rb_close_archives();
+
+    InterlockedExchange(&g_state, RB_STATE_NEW);
+    ok = sh_resource_bridge_capture(data_root);
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "resource-bridge RECAPTURE %s -- %u entr(ies), %u linked decl(s) now resolvable "
+                "(previous table retired, not freed)",
+                ok ? "complete" : "FAILED",
+                (unsigned)g_entry_count, (unsigned)g_decl_count);
+    backend_log(line);
+    return ok;
+}
+
 int sh_resource_bridge_capture(const char *data_root)
 {
     char directory[MAX_PATH], doom_base[MAX_PATH], pindex_path[MAX_PATH];

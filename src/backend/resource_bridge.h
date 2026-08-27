@@ -23,6 +23,12 @@ enum {
  * decoded bytes are refused. */
 int sh_resource_bridge_capture(const char *data_root);
 
+/* Re-run the capture after a package is installed mid-session, so its manifests become
+ * resolvable without a relaunch. The previous entry table is retired rather than freed (a
+ * reader already inside the lookup cannot be evicted); recapture is rare, so that is a bounded
+ * one-time cost instead of a use-after-free. Call at a quiescent moment. */
+int sh_resource_bridge_recapture(const char *data_root);
+
 /* Mark whether the provider hook that can serve captured entries is live. A
  * non-empty bridge snapshot gates dynamic decl registration until this is 1. */
 void sh_resource_bridge_set_provider_ready(int ready);

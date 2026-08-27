@@ -112,6 +112,17 @@ int sh_overrides_internal_decl_table_install(
  * Observability for the test harness. */
 unsigned long sh_overrides_shadow_count(void);
 
+/* Re-scan %LOCALAPPDATA%\\snapmap-plus\\overrides for packages and publish the new list to
+ * the file-shadow open path, so a package installed mid-session becomes servable without a
+ * restart. Lock-free for readers. Returns the package count now visible.
+ * This makes the package's BYTES reachable; publishing new DECL IDENTITIES is decl_server's
+ * job (sh_decl_server_rearm). */
+unsigned long sh_overrides_rescan_packages(void);
+
+/* Retire the published internal decl table so a runtime re-arm can publish a new one. The old
+ * table is leaked on purpose: an engine thread may still be reading a body out of it. */
+void sh_overrides_internal_decl_table_retire(void);
+
 /* Restore the engine open vtable slot to the saved original (LIFO-safe; idempotent). Returns 1 if a
  * slot was restored, 0 if none was installed. Call on unload to leave the engine vtable clean. */
 int sh_overrides_uninstall(void);

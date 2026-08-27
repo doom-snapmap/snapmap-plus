@@ -577,6 +577,33 @@ int sh_overrides_internal_decl_table_can_install(void)
                OV_INTERNAL_DECL_TABLE_NEW;
 }
 
+/* Retire the published internal decl table so a NEW one can be published mid-session.
+ *
+ * The table is a boot one-shot: can_install() demands state == NEW, so after the boot
+ * publication every later attempt is refused and a runtime re-arm classifies its candidates
+ * and then has nowhere to put them. This is the fourth and last boot-bound surface in the
+ * runtime-registration chain (package list, resource-bridge manifests, decl-server snapshot,
+ * this table).
+ *
+ * DOES NOT FREE. The test-only reset beneath this one is safe precisely because it "occurs
+ * before any engine thread can retain a stream" -- at runtime that guarantee is gone: an
+ * engine thread may hold an ov_stream reading straight out of a table body, and freeing under
+ * it is a use-after-free. So the old table is retired and leaked, bounded by the 512-entry cap
+ * and by how rarely a package is installed. Correctness over a few hundred KB. */
+void sh_overrides_internal_decl_table_retire(void)
+{
+    char line[160];
+    size_t retired = g_internal_decl_count;
+    g_internal_decls = NULL;          /* retire, do NOT free -- see above */
+    g_internal_decl_count = 0;
+    InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_NEW);
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "B1: overrides internal decl table RETIRED (%u entr(ies) leaked by design, "
+                "engine threads may still be reading them); ready to re-publish",
+                (unsigned)retired);
+    backend_log(line);
+}
+
 int sh_overrides_internal_decl_table_install(
     const sh_overrides_internal_decl_entry *entries, size_t count)
 {
@@ -810,21 +837,55 @@ static const ov_namespace g_ov_namespaces[] = {
  * already an immutable launch snapshot -- the audit, the reclaim pass and the
  * user-layer gate all read the tree exactly once -- and this is on the engine's
  * file-open path, so re-enumerating the tree per open is not an option. */
-static sh_package g_ov_packages[SH_PACKAGES_MAX];
-static size_t g_ov_package_count;
+/* DOUBLE-BUFFERED so the package list can be re-scanned mid-session without a lock on the
+ * open path, which is hot (every engine resource open walks it). Writers fill the inactive
+ * buffer and then publish it with one InterlockedExchange; readers take the index ONCE and
+ * use that buffer for the whole resolve. A reader that raced a publish sees either the old
+ * complete list or the new complete list -- never a torn one. */
+static sh_package g_ov_packages_buf[2][SH_PACKAGES_MAX];
+static size_t g_ov_package_counts[2];
+static volatile LONG g_ov_pkg_active;   /* 0 or 1 */
+static volatile LONG g_ov_pkg_generation;
 
 static void ov_capture_packages(void)
 {
     char root[MAX_PATH];
     size_t count = 0;
-    g_ov_package_count = 0;
+    LONG active = InterlockedCompareExchange(&g_ov_pkg_active, 0, 0);
+    LONG target = active ^ 1;              /* fill the buffer nobody is reading */
+
     resolve_root(root, sizeof root);
     if (!root[0]) return;
     /* A partial enumeration still resolves whatever it did find: unlike the decl
      * server, a miss here degrades to the packaged resource rather than
      * publishing a wrong identity, so serving fewer packages is safe. */
-    (void)sh_packages_enumerate(root, g_ov_packages, SH_PACKAGES_MAX, &count);
-    g_ov_package_count = count;
+    (void)sh_packages_enumerate(root, g_ov_packages_buf[target], SH_PACKAGES_MAX, &count);
+    g_ov_package_counts[target] = count;
+    InterlockedExchange(&g_ov_pkg_active, target);   /* publish: one atomic store */
+    InterlockedIncrement(&g_ov_pkg_generation);
+}
+
+/* Re-scan the packages folder and publish the new list to the open path.
+ *
+ * WHY THIS EXISTS. The open hook already stats the disk on EVERY open, so a package's bytes
+ * are servable the moment they land -- but only if the package is in this list, and the list
+ * used to be captured exactly once at install. That made a mid-session install invisible for
+ * a reason that had nothing to do with the engine. Registration of new DECL IDENTITIES is a
+ * separate, harder problem (see decl_server.c); this only makes the BYTES reachable.
+ *
+ * Returns the number of packages now visible. */
+unsigned long sh_overrides_rescan_packages(void)
+{
+    char line[160];
+    LONG active;
+    ov_capture_packages();
+    active = InterlockedCompareExchange(&g_ov_pkg_active, 0, 0);
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "B1: overrides package list RE-SCANNED -- %u package(s) now visible (generation %ld)",
+                (unsigned)g_ov_package_counts[active],
+                (long)InterlockedCompareExchange(&g_ov_pkg_generation, 0, 0));
+    backend_log(line);
+    return (unsigned long)g_ov_package_counts[active];
 }
 
 static int ov_is_regular_file(const char *path)
@@ -855,10 +916,14 @@ static int ov_resolve_existing(const char *name, char *out, size_t cap)
         relative = ns->strip_prefix ? name + prefix_length : name;
         if (!relative[0]) break;
 
-        for (i = 0; i < g_ov_package_count; i++) {
+        /* Take the active buffer index ONCE for this whole resolve, so a concurrent
+         * re-scan cannot move the list out from under the loop. */
+        LONG act = InterlockedCompareExchange(&g_ov_pkg_active, 0, 0);
+        size_t pkg_count = g_ov_package_counts[act];
+        for (i = 0; i < pkg_count; i++) {
             char *p;
             if (_snprintf_s(out, cap, _TRUNCATE, "%s\\%s\\%s",
-                            g_ov_packages[i].root, ns->package_subdir, relative) < 0)
+                            g_ov_packages_buf[act][i].root, ns->package_subdir, relative) < 0)
                 continue;
             for (p = out; *p; ++p)
                 if (*p == '/') *p = '\\';

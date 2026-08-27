@@ -91,6 +91,35 @@ int sh_user_overrides_enabled_for_launch(void)
     return 0;
 }
 
+/* The runtime re-arm re-scans the override package list before publishing identities, so the
+ * file shadow can serve the new package's bytes. This test links decl_server WITHOUT
+ * overrides.c, matching the stubs above; the re-arm path is exercised live, not here. */
+unsigned long sh_overrides_rescan_packages(void)
+{
+    return 0;
+}
+
+/* Same reason: the re-arm recaptures the resource-bridge manifests so a mid-session package's
+ * linked game-owned entries resolve. Not linked here. */
+int sh_resource_bridge_recapture(const char *data_root)
+{
+    (void)data_root;
+    return 0;
+}
+
+/* The re-arm retires the internal decl table so it can be re-published. Not linked here. */
+void sh_overrides_internal_decl_table_retire(void)
+{
+}
+
+/* The re-arm applies the package's cut-content gates before registering. Not linked here. */
+int sh_package_requirements_rearm(const char *data_root, void *execute_command_buffer,
+                                  int user_layer_enabled)
+{
+    (void)data_root; (void)execute_command_buffer; (void)user_layer_enabled;
+    return 0;
+}
+
 int sh_resource_bridge_gate_ok(void)
 {
     return 1;
