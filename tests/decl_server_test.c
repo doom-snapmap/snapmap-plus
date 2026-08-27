@@ -108,8 +108,16 @@ int sh_resource_bridge_recapture(const char *data_root)
 }
 
 /* The re-arm retires the internal decl table so it can be re-published. Not linked here. */
-void sh_overrides_internal_decl_table_retire(void)
+void sh_overrides_internal_decl_table_reopen(void)
 {
+}
+
+int sh_overrides_internal_decl_table_merge(
+    const sh_overrides_internal_decl_entry *entries, size_t count)
+{
+    (void)entries;
+    (void)count;
+    return 0;
 }
 
 /* The re-arm applies the package's cut-content gates before registering. Not linked here. */

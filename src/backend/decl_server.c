@@ -237,6 +237,15 @@ enum {
 };
 
 static volatile LONG g_state = DS_STATE_NEW;
+
+/* idResource level, the field the map-transition purge tests. Declared here because the
+ * materializer (far above the re-arm driver) also writes it -- see the REUSED-decl note. */
+#define DS_RES_LEVEL_OFF 0x28
+
+/* Set for the duration of a RUNTIME registration pass. Boot passes leave it clear: at boot
+ * every identity is created fresh and the engine's own promotion covers them all. */
+static volatile LONG g_rearm_is_runtime;
+static volatile LONG g_rearm_touched_promoted;
 static volatile LONG g_registration_succeeded = 0;
 static ds_candidate *g_candidates;
 static int g_candidate_count;
@@ -1177,9 +1186,14 @@ static int ds_publish_missing_table(int missing_count)
         entries[at].body_length = candidate->body_length;
         at++;
     }
+    /* A runtime pass MERGES over the published table; only a boot pass replaces it. Replacing
+     * on a re-arm drops identities an earlier pass published -- including packages this pass
+     * never looked at -- and their decltree source stops resolving. */
     published = at == missing_count &&
-                sh_overrides_internal_decl_table_install(entries,
-                                                         (size_t)missing_count);
+                (InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)
+                     ? sh_overrides_internal_decl_table_merge(entries, (size_t)missing_count)
+                     : sh_overrides_internal_decl_table_install(entries,
+                                                                (size_t)missing_count));
     HeapFree(GetProcessHeap(), 0, entries);
     return published;
 }
@@ -1552,6 +1566,29 @@ static int ds_materialize_identity(ds_materialize_context *context, int index)
                                       reason);
     }
     if (made_default && context->materialized) (*context->materialized)++;
+
+    /* LIFETIME OF A REUSED DECL. A registry watermark/delta captures what this pass CREATED,
+     * which is exact -- but a runtime pass also REUSES decls that already existed, typically
+     * makeDefault placeholders the engine minted when something asked for the name before the
+     * package was installed. Those predate the watermark, so the delta misses them, and they
+     * stay map-scoped while the content we just promoted points straight at them. The next
+     * map transition frees them and the teardown dereferences a dangling decl:
+     *
+     *     AV read, RIP rva 0x17B42C4 (decl manager), caller rva 0x17C7BCD -- inside UnloadMap
+     *
+     * which is the sixth failure recorded above ("a survivor enumerated by teardown after its
+     * peers were freed"), reached from the other side. So raise every decl this pass touched,
+     * not just the ones it created. Boot never needs this because no placeholder exists yet.
+     *
+     * Read-only if the level is already permanent; SEH-guarded because a torn decl must not
+     * take the pass down. */
+    if (InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)) {
+        __try {
+            unsigned int *lvl = (unsigned int *)((unsigned char *)decl + DS_RES_LEVEL_OFF);
+            if (*lvl != 4u) { *lvl = 4u; InterlockedIncrement(&g_rearm_touched_promoted); }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { /* skip a torn decl */ }
+    }
+
     ds_log(made_default ? "MATERIALIZED" : "REUSED", candidate->source,
            made_default
                ? "native make-default DeclFind produced a live decl for the registered identity"
@@ -2180,6 +2217,8 @@ static void __cdecl ds_apply_command(void)
  *
  * Runs on the engine main thread (it is an engine command). Every step is SEH-guarded by the
  * callee; a failure leaves the service FAILED and the launch otherwise untouched. */
+/* Set for the duration of a RUNTIME registration pass. Boot passes leave it clear: at boot
+ * every identity is created fresh and the engine's own promotion covers them all. */
 /* Registry watermark/delta promotion, defined below next to the re-arm driver. */
 static int  ds_res_watermark(void);
 static void ds_res_promote_delta(unsigned char level);
@@ -2216,7 +2255,10 @@ static void __cdecl ds_rearm_command(void)
                                 "cut-content packages will fail to materialize");
             }
         }
-        sh_overrides_internal_decl_table_retire();
+        /* Reopen the table's STATE so a second publication is allowed, but keep its CONTENTS:
+         * the runtime publish merges over them, which is what stops a re-arm from dropping
+         * identities an earlier pass published. Retiring the contents would defeat that. */
+        sh_overrides_internal_decl_table_reopen();
         InterlockedExchange(&g_rearm_phase, 1);
         _snprintf_s(line, sizeof line, _TRUNCATE,
                     "decl-server RE-ARM phase 1/2 complete: %u package(s) visible, gates queued. "
@@ -2274,8 +2316,17 @@ static void __cdecl ds_rearm_command(void)
      * that is the closure six prior promotion attempts had to guess at. */
     {
         int marked = ds_res_watermark();
+        char tline[160];
+        InterlockedExchange(&g_rearm_touched_promoted, 0);
+        InterlockedExchange(&g_rearm_is_runtime, 1);
         ds_apply_command();
+        InterlockedExchange(&g_rearm_is_runtime, 0);
         if (marked) ds_res_promote_delta(4);
+        _snprintf_s(tline, sizeof tline, _TRUNCATE,
+                    "decl-server: %ld pre-existing decl(s) the pass REUSED were also raised to "
+                    "level 4 -- they predate the watermark and the teardown would free them",
+                    (long)InterlockedCompareExchange(&g_rearm_touched_promoted, 0, 0));
+        backend_log(tline);
     }
 }
 
@@ -2296,7 +2347,6 @@ static void __cdecl ds_rearm_command(void)
 #define DS_RES_NEXT_OFF     0x18
 #define DS_RES_ARR_OFF      0x20
 #define DS_RES_CNT_OFF      0x28
-#define DS_RES_LEVEL_OFF    0x28
 #define DS_RES_MAX_LISTS    4096u
 #define DS_RES_MAX_ENTRIES  262144u
 

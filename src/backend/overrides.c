@@ -590,18 +590,108 @@ int sh_overrides_internal_decl_table_can_install(void)
  * engine thread may hold an ov_stream reading straight out of a table body, and freeing under
  * it is a use-after-free. So the old table is retired and leaked, bounded by the 512-entry cap
  * and by how rarely a package is installed. Correctness over a few hundred KB. */
-void sh_overrides_internal_decl_table_retire(void)
+void sh_overrides_internal_decl_table_reopen(void)
 {
     char line[160];
-    size_t retired = g_internal_decl_count;
-    g_internal_decls = NULL;          /* retire, do NOT free -- see above */
-    g_internal_decl_count = 0;
+    size_t held = g_internal_decl_count;
+    /* Reopen the STATE only. The entries stay published and stay readable, because the runtime
+     * publish MERGES over them -- dropping them here is exactly the bug that made a Cyberdemon
+     * re-arm break the unrelated transformations package. */
     InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_NEW);
     _snprintf_s(line, sizeof line, _TRUNCATE,
-                "B1: overrides internal decl table RETIRED (%u entr(ies) leaked by design, "
-                "engine threads may still be reading them); ready to re-publish",
-                (unsigned)retired);
+                "B1: overrides internal decl table REOPENED for re-publication (%u entr(ies) "
+                "retained and still served; a merge will carry them forward)",
+                (unsigned)held);
     backend_log(line);
+}
+
+/* Publish `entries` MERGED over whatever the table already holds.
+ *
+ * Carrying the old entries forward is the whole point: a re-arm publishes only the identities
+ * the CURRENT pass classified as missing, and anything the previous pass had published would
+ * otherwise silently lose its decltree source -- including entries belonging to packages this
+ * pass never looked at.
+ *
+ * Old entries are carried by POINTER. The old array is retired and leaked (a reader may be
+ * inside it), but its name/body allocations remain reachable from the merged array, so they
+ * stay valid and are never double-freed. A new entry whose key matches an old one wins.
+ *
+ * Returns 1 on success. On any failure the previously published table is left exactly as it
+ * was, because the state is only moved to READY once the merged array is complete. */
+int sh_overrides_internal_decl_table_merge(
+    const sh_overrides_internal_decl_entry *entries, size_t count)
+{
+    ov_internal_decl *merged;
+    ov_internal_decl *old = g_internal_decls;
+    size_t old_count = g_internal_decl_count;
+    size_t total, i, j, at = 0;
+    char line[192];
+
+    if (!g_orig_open || !sh_user_overrides_enabled_for_launch()) return 0;
+    if (!entries || count == 0) return 0;
+    if (count > SIZE_MAX - old_count) return 0;
+    total = old_count + count;
+    if (total > OV_INTERNAL_DECL_MAX_ENTRIES) {
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "B1: overrides internal decl table MERGE refused -- %u old + %u new exceeds "
+                    "the %u-entry cap", (unsigned)old_count, (unsigned)count,
+                    (unsigned)OV_INTERNAL_DECL_MAX_ENTRIES);
+        backend_log(line);
+        return 0;
+    }
+
+    merged = (ov_internal_decl *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                           total * sizeof(merged[0]));
+    if (!merged) return 0;
+
+    /* The new entries first, so a key collision resolves in their favour below. */
+    for (i = 0; i < count; i++) {
+        if (!entries[i].body || entries[i].body_length == 0 ||
+            entries[i].body_length > (size_t)INT64_MAX ||
+            !ov_internal_decl_key(entries[i].type, entries[i].name, &merged[at].name)) {
+            ov_internal_decl_table_free(merged, total);
+            return 0;
+        }
+        for (j = 0; j < at; j++) {
+            if (strcmp(merged[at].name, merged[j].name) == 0) {
+                ov_internal_decl_table_free(merged, total);
+                return 0;                      /* duplicate within the new set */
+            }
+        }
+        merged[at].body = (unsigned char *)HeapAlloc(GetProcessHeap(), 0,
+                                                     entries[i].body_length);
+        if (!merged[at].body) {
+            ov_internal_decl_table_free(merged, total);
+            return 0;
+        }
+        memcpy(merged[at].body, entries[i].body, entries[i].body_length);
+        merged[at].body_length = entries[i].body_length;
+        at++;
+    }
+
+    /* Then the old ones the new set did not supersede, carried by pointer. */
+    for (i = 0; i < old_count; i++) {
+        int superseded = 0;
+        if (!old[i].name || !old[i].body) continue;
+        for (j = 0; j < count; j++) {
+            if (strcmp(old[i].name, merged[j].name) == 0) { superseded = 1; break; }
+        }
+        if (superseded) continue;
+        merged[at].name = old[i].name;         /* borrowed, not copied: the old array leaks */
+        merged[at].body = old[i].body;
+        merged[at].body_length = old[i].body_length;
+        at++;
+    }
+
+    g_internal_decls = merged;
+    g_internal_decl_count = at;
+    InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_READY);
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "B1: overrides internal decl table MERGED -- %u new + %u carried forward = %u "
+                "published (previous array retired, entries reused by pointer)",
+                (unsigned)count, (unsigned)(at - count), (unsigned)at);
+    backend_log(line);
+    return 1;
 }
 
 int sh_overrides_internal_decl_table_install(

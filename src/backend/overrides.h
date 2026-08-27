@@ -121,7 +121,13 @@ unsigned long sh_overrides_rescan_packages(void);
 
 /* Retire the published internal decl table so a runtime re-arm can publish a new one. The old
  * table is leaked on purpose: an engine thread may still be reading a body out of it. */
-void sh_overrides_internal_decl_table_retire(void);
+void sh_overrides_internal_decl_table_reopen(void);
+
+/* Publish `entries` merged OVER the currently published table, so a runtime re-arm cannot drop
+ * identities an earlier pass published -- including ones belonging to packages it never
+ * touched. A new entry with the same key wins. */
+int sh_overrides_internal_decl_table_merge(
+    const sh_overrides_internal_decl_entry *entries, size_t count);
 
 /* Restore the engine open vtable slot to the saved original (LIFO-safe; idempotent). Returns 1 if a
  * slot was restored, 0 if none was installed. Call on unload to leave the engine vtable clean. */
