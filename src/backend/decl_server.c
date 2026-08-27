@@ -2180,6 +2180,10 @@ static void __cdecl ds_apply_command(void)
  *
  * Runs on the engine main thread (it is an engine command). Every step is SEH-guarded by the
  * callee; a failure leaves the service FAILED and the launch otherwise untouched. */
+/* Registry watermark/delta promotion, defined below next to the re-arm driver. */
+static int  ds_res_watermark(void);
+static void ds_res_promote_delta(unsigned char level);
+
 /* Phase latch for the two-phase re-arm. See ds_rearm_command. */
 static volatile LONG g_rearm_phase;   /* 0 = prepare next, 1 = register next */
 
@@ -2264,7 +2268,143 @@ static void __cdecl ds_rearm_command(void)
         backend_log("decl-server RE-ARM: lost the ARMED -> QUEUED claim; aborting this pass");
         return;
     }
-    ds_apply_command();
+
+    /* Wrap the pass in a registry watermark. The two walks sit as tightly around
+     * ds_apply_command as they can, so the delta is what THIS pass created and nothing else --
+     * that is the closure six prior promotion attempts had to guess at. */
+    {
+        int marked = ds_res_watermark();
+        ds_apply_command();
+        if (marked) ds_res_promote_delta(4);
+    }
+}
+
+/* ---- registry watermark / delta promotion --------------------------------------------
+ *
+ * The engine's own promotion (0x1801830) walks a global list-of-lists and writes level 4 into
+ * every entry. These helpers walk the SAME structure, but only to record which entries existed
+ * before a registration pass and to raise the ones that appeared during it.
+ *
+ * Structure, read straight off that promotion loop:
+ *     head  = *(module_base + DS_RES_HEAD_RVA)
+ *     node  = { next: +0x18, array: +0x20, count: +0x28 }
+ *     entry = array[i];   level at entry + 0x28
+ *
+ * The purge (0x1800E80) tests `level & mask` and NOTHING else -- no refcount, no child list --
+ * so a single 4-byte write per entry is the whole of "give this a lifetime". */
+#define DS_RES_HEAD_RVA     0x6217F90u
+#define DS_RES_NEXT_OFF     0x18
+#define DS_RES_ARR_OFF      0x20
+#define DS_RES_CNT_OFF      0x28
+#define DS_RES_LEVEL_OFF    0x28
+#define DS_RES_MAX_LISTS    4096u
+#define DS_RES_MAX_ENTRIES  262144u
+
+static void **g_res_mark;          /* sorted snapshot of entry pointers */
+static size_t g_res_mark_count;
+
+static int ds_res_ptr_cmp(const void *a, const void *b)
+{
+    void *const *x = (void *const *)a, *const *y = (void *const *)b;
+    if ((uintptr_t)*x < (uintptr_t)*y) return -1;
+    if ((uintptr_t)*x > (uintptr_t)*y) return 1;
+    return 0;
+}
+
+/* Walk every registry entry, calling `visit` on each. Returns the number visited, or 0 on a
+ * torn/unreadable structure -- a short walk must degrade, never fault the engine. */
+static size_t ds_res_walk(void (*visit)(void *entry, void *ctx), void *ctx)
+{
+    size_t seen = 0;
+    if (!g_module_base) return 0;
+    __try {
+        void *node = *(void **)(g_module_base + DS_RES_HEAD_RVA);
+        unsigned guard = 0;
+        while (node && guard++ < DS_RES_MAX_LISTS) {
+            void **arr = *(void ***)((unsigned char *)node + DS_RES_ARR_OFF);
+            int cnt = *(int *)((unsigned char *)node + DS_RES_CNT_OFF);
+            int i;
+            if (arr && cnt > 0 && (unsigned)cnt < DS_RES_MAX_ENTRIES) {
+                for (i = 0; i < cnt; i++) {
+                    void *e = arr[i];
+                    if (e) { if (visit) visit(e, ctx); seen++; }
+                }
+            }
+            node = *(void **)((unsigned char *)node + DS_RES_NEXT_OFF);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return seen;
+    }
+    return seen;
+}
+
+static void ds_res_count_visit(void *entry, void *ctx) { (void)entry; (*(size_t *)ctx)++; }
+
+static void ds_res_collect_visit(void *entry, void *ctx)
+{
+    size_t *n = (size_t *)ctx;
+    if (*n < g_res_mark_count) g_res_mark[(*n)++] = entry;
+}
+
+/* Record which resources exist right now. Call immediately before the registration pass. */
+static int ds_res_watermark(void)
+{
+    size_t total = 0, filled = 0;
+    char line[160];
+
+    if (g_res_mark) { HeapFree(GetProcessHeap(), 0, g_res_mark); g_res_mark = NULL; }
+    g_res_mark_count = 0;
+
+    ds_res_walk(ds_res_count_visit, &total);
+    if (total == 0 || total >= DS_RES_MAX_ENTRIES) {
+        backend_log("decl-server: registry watermark unavailable; runtime content will be "
+                    "left map-scoped and the next map transition will free it");
+        return 0;
+    }
+    g_res_mark = (void **)HeapAlloc(GetProcessHeap(), 0, total * sizeof(void *));
+    if (!g_res_mark) return 0;
+    g_res_mark_count = total;
+    ds_res_walk(ds_res_collect_visit, &filled);
+    g_res_mark_count = filled;
+    qsort(g_res_mark, g_res_mark_count, sizeof(void *), ds_res_ptr_cmp);
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "decl-server: registry watermark taken -- %u resource(s)", (unsigned)filled);
+    backend_log(line);
+    return filled > 0;
+}
+
+typedef struct ds_res_promote_ctx { unsigned fresh, poked; unsigned char level; } ds_res_promote_ctx;
+
+static void ds_res_promote_visit(void *entry, void *ctx)
+{
+    ds_res_promote_ctx *c = (ds_res_promote_ctx *)ctx;
+    if (g_res_mark &&
+        bsearch(&entry, g_res_mark, g_res_mark_count, sizeof(void *), ds_res_ptr_cmp))
+        return;                                   /* existed before the pass: not ours */
+    c->fresh++;
+    __try {
+        *(unsigned int *)((unsigned char *)entry + DS_RES_LEVEL_OFF) = c->level;
+        c->poked++;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { /* skip a torn entry, keep going */ }
+}
+
+/* Raise everything that appeared since the watermark to `level`. 4 = permanent, which is the
+ * parity boot-registered content already has. */
+static void ds_res_promote_delta(unsigned char level)
+{
+    ds_res_promote_ctx c;
+    char line[192];
+    if (!g_res_mark || g_res_mark_count == 0) return;
+    c.fresh = 0; c.poked = 0; c.level = level;
+    ds_res_walk(ds_res_promote_visit, &c);
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "decl-server: %u resource(s) appeared during registration, %u promoted to "
+                "level %u -- they now survive the map-transition purge",
+                c.fresh, c.poked, (unsigned)level);
+    backend_log(line);
+    HeapFree(GetProcessHeap(), 0, g_res_mark);
+    g_res_mark = NULL;
+    g_res_mark_count = 0;
 }
 
 /* ---- automatic re-arm, driven from the engine tick ------------------------------------
