@@ -154,6 +154,18 @@ int sh_decl_server_test_register_candidate(
     sh_decl_server_test_idstr_dtor_fn dtor,
     sh_decl_server_test_register_file_fn register_file);
 
+/* Runtime-pass refresh seams. The runtime flag switches the production materialization
+ * into its premark/drain protocol; the previous-identity list feeds the newly-served
+ * test; the counters and the stray sweep make the protocol's outcome assertable. */
+typedef void (*sh_decl_server_test_generic_load_fn)(void *decl);
+void sh_decl_server_test_set_runtime(int active);
+void sh_decl_server_test_set_generic_load(sh_decl_server_test_generic_load_fn fn);
+void sh_decl_server_test_reset_runtime_state(void);
+int sh_decl_server_test_add_prev_identity(const char *type, const char *name);
+void sh_decl_server_test_runtime_counters(long *marked_pending, long *left_loaded,
+                                          long *shadow_reparsed, long *drain_faults);
+int sh_decl_server_test_clear_stray_pending(void);
+
 /* Run the production two-phase materialization pass against a test candidate
  * table. This keeps the native make-default=1, state-byte, and terminal-fault
  * contract executable without requiring a live engine. */

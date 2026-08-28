@@ -1628,11 +1628,385 @@ static void test_walk_error_propagation(void)
     sh_decl_server_test_reset_find_api();
 }
 
+
+/* ---- runtime refresh protocol -------------------------------------------------------------
+ *
+ * A runtime pass must (1) mark every empty reused placeholder pending-load BEFORE the first
+ * drain, so a draining decl's parse-time references reload their targets on demand instead of
+ * consuming empty objects, and (2) re-parse newly served SHADOWED-live identities -- live
+ * objects that predate their package's install -- IN PLACE, immediately, regardless of type
+ * and regardless of whether they already hold loaded data, while leaving already-served ones
+ * alone. The forced drain runs at the browser with no map loaded, so no mark may survive the
+ * pass. The fake find_decl below emulates the engine manager lookup helper (RVA 0x1800A40):
+ * an existing object is returned as-is unless its pending bit (0x02) is set, in which case
+ * the helper clears the bit and runs the generic load (which sets the has-source bit 0x04)
+ * before returning. */
+
+#define RT_DECLS 4
+static unsigned char *g_rt_objects[RT_DECLS];
+static const char *g_rt_names[RT_DECLS];
+static int g_rt_loads[RT_DECLS];
+static int g_rt_first_load_saw_partner_marked = -1;
+static int g_rt_load_total;
+static int g_rt_null_on_load;
+static int g_rt_no_drain;          /* lookup returns the object without draining the mark */
+static int g_rt_direct_loads;      /* fake generic-load fallback invocations */
+
+static void rt_reset(void)
+{
+    int i;
+    for (i = 0; i < RT_DECLS; i++) {
+        g_rt_objects[i] = NULL;
+        g_rt_names[i] = NULL;
+        g_rt_loads[i] = 0;
+    }
+    g_rt_first_load_saw_partner_marked = -1;
+    g_rt_load_total = 0;
+    g_rt_null_on_load = 0;
+    g_rt_no_drain = 0;
+    g_rt_direct_loads = 0;
+}
+
+/* The engine generic load (RVA 0x17FF5F0) as the fallback sees it: tears down and re-parses
+ * in place, leaving the has-source bit set. The production code clears the pending bit
+ * itself before calling, exactly as idResourceList::Load does. */
+static void rt_generic_load(void *decl)
+{
+    ((unsigned char *)decl)[0x2c] |= 0x04;
+    g_rt_direct_loads++;
+}
+
+static int rt_index_of(const char *name)
+{
+    int i;
+    for (i = 0; i < RT_DECLS; i++)
+        if (g_rt_names[i] && name && strcmp(g_rt_names[i], name) == 0) return i;
+    return -1;
+}
+
+static void *rt_find_decl(void *type_manager, const char *logical_name,
+                          unsigned char make_default)
+{
+    int index = rt_index_of(logical_name);
+    unsigned char *decl;
+    (void)type_manager;
+    (void)make_default;
+    if (index < 0) return NULL;
+    decl = g_rt_objects[index];
+    if (!decl) return NULL;
+    if (decl[0x2c] & 0x02) {
+        if (g_rt_null_on_load) return NULL;
+        if (g_rt_no_drain) return decl;
+        if (g_rt_load_total == 0) {
+            /* At the first drain, was the OTHER placeholder already marked? That is the
+             * boot-parity property: a parse-time reference to it would reload it on demand. */
+            int partner = (index == 0) ? 1 : 0;
+            g_rt_first_load_saw_partner_marked =
+                (g_rt_objects[partner] && (g_rt_objects[partner][0x2c] & 0x02)) ? 1 : 0;
+        }
+        decl[0x2c] = (unsigned char)((decl[0x2c] & (unsigned char)~0x02) | 0x04);
+        g_rt_loads[index]++;
+        g_rt_load_total++;
+    }
+    return decl;
+}
+
+static void *rt_type_by_name(void *registry, const char *short_name)
+{
+    (void)registry;
+    (void)short_name;
+    return (void *)(uintptr_t)0x52540000u;
+}
+
+static void *rt_source_find(void *type_manager, const char *logical_name)
+{
+    (void)type_manager;
+    (void)logical_name;
+    return NULL;
+}
+
+static void test_runtime_premark_reused_empties(void)
+{
+    static const unsigned char body[] = "{ }";
+    sh_decl_server_test_materialize_item items[] = {
+        { "material", "rt/alpha", "generated/decls/material/rt/alpha.decl",
+          SH_DECL_SERVER_TEST_MISSING, body, sizeof(body) - 1, 0 },
+        { "material", "rt/beta", "generated/decls/material/rt/beta.decl",
+          SH_DECL_SERVER_TEST_MISSING, body, sizeof(body) - 1, 0 }
+    };
+    unsigned char *a;
+    unsigned char *b;
+    int materialized = -1;
+    long marked = -1, left = -1, shadow = -1, faults = -1;
+
+    a = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x300);
+    b = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x300);
+    CHECK(a != NULL && b != NULL);
+    if (!a || !b) return;
+
+    rt_reset();
+    g_rt_names[0] = "rt/alpha";
+    g_rt_objects[0] = a;
+    g_rt_names[1] = "rt/beta";
+    g_rt_objects[1] = b;
+    sh_decl_server_test_reset_runtime_state();
+    sh_decl_server_test_set_runtime(1);
+    CHECK(sh_decl_server_test_materialize_missing_sedefs(
+              items, 2, (void *)(uintptr_t)0x98760000u, rt_type_by_name,
+              rt_source_find, rt_find_decl, &materialized) == 1);
+    sh_decl_server_test_set_runtime(0);
+
+    /* Both empties re-parsed exactly once, and when the FIRST drain ran the other
+     * placeholder was already marked. */
+    CHECK(g_rt_loads[0] == 1);
+    CHECK(g_rt_loads[1] == 1);
+    CHECK(g_rt_first_load_saw_partner_marked == 1);
+    CHECK((a[0x2c] & 0x02) == 0);
+    CHECK((b[0x2c] & 0x02) == 0);
+    CHECK(materialized == 0);
+    sh_decl_server_test_runtime_counters(&marked, &left, &shadow, &faults);
+    CHECK(marked == 2);
+    CHECK(left == 0);
+    CHECK(shadow == 0);
+    CHECK(faults == 0);
+    CHECK(sh_decl_server_test_clear_stray_pending() == 0);
+    HeapFree(GetProcessHeap(), 0, a);
+    HeapFree(GetProcessHeap(), 0, b);
+}
+
+static void test_runtime_shadowed_refresh(void)
+{
+    sh_decl_server_test_materialize_item items[] = {
+        { "entityDef", "rt/newly", "generated/decls/entitydef/rt/newly.decl",
+          SH_DECL_SERVER_TEST_SHADOWED, NULL, 0, SH_DECL_SERVER_TEST_SHADOW_LIVE },
+        { "entityDef", "rt/served", "generated/decls/entitydef/rt/served.decl",
+          SH_DECL_SERVER_TEST_SHADOWED, NULL, 0, SH_DECL_SERVER_TEST_SHADOW_LIVE },
+        { "entityDef", "rt/sourcekind", "generated/decls/entitydef/rt/sourcekind.decl",
+          SH_DECL_SERVER_TEST_SHADOWED, NULL, 0, SH_DECL_SERVER_TEST_SHADOW_SOURCE },
+        { "sound", "rt/midgame", "generated/decls/sound/rt/midgame.decl",
+          SH_DECL_SERVER_TEST_SHADOWED, NULL, 0, SH_DECL_SERVER_TEST_SHADOW_LIVE }
+    };
+    unsigned char *newly;
+    unsigned char *served;
+    unsigned char *sourcekind;
+    unsigned char *midgame;
+    int materialized = -1;
+    long marked = -1, left = -1, shadow = -1, faults = -1;
+
+    newly = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x300);
+    served = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x300);
+    sourcekind = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x300);
+    CHECK(newly != NULL && served != NULL && sourcekind != NULL);
+    if (!newly || !served || !sourcekind) return;
+
+    /* All three already hold loaded data -- the stale-content case. */
+    newly[0x2c] = 0x04;
+    served[0x2c] = 0x04;
+    sourcekind[0x2c] = 0x04;
+
+    rt_reset();
+    g_rt_names[0] = "rt/newly";
+    g_rt_objects[0] = newly;
+    g_rt_names[1] = "rt/served";
+    g_rt_objects[1] = served;
+    g_rt_names[2] = "rt/sourcekind";
+    g_rt_objects[2] = sourcekind;
+    midgame = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x300);
+    CHECK(midgame != NULL);
+    if (!midgame) return;
+    midgame[0x2c] = 0x04;
+    g_rt_names[3] = "rt/midgame";
+    g_rt_objects[3] = midgame;
+    sh_decl_server_test_reset_runtime_state();
+    CHECK(sh_decl_server_test_add_prev_identity("entityDef", "rt/served") == 1);
+    sh_decl_server_test_set_runtime(1);
+    CHECK(sh_decl_server_test_materialize_missing_sedefs(
+              items, 4, (void *)(uintptr_t)0x98760000u, rt_type_by_name,
+              rt_source_find, rt_find_decl, &materialized) == 1);
+    sh_decl_server_test_set_runtime(0);
+
+    /* Both newly served LIVE shadows -- the map-load-read entityDef AND the sound, whose
+     * natural read instant is mid-gameplay -- were re-parsed IN PLACE through the lookup
+     * drain, at the pass's own safe instant, and no mark survives. The already-served one
+     * and the SOURCE-kind one were left alone. */
+    CHECK(g_rt_loads[0] == 1);
+    CHECK(g_rt_loads[1] == 0);
+    CHECK(g_rt_loads[2] == 0);
+    CHECK(g_rt_loads[3] == 1);
+    CHECK((newly[0x2c] & 0x02) == 0);
+    CHECK((newly[0x2c] & 0x04) != 0);
+    CHECK((served[0x2c] & 0x02) == 0);
+    CHECK((sourcekind[0x2c] & 0x02) == 0);
+    CHECK((midgame[0x2c] & 0x02) == 0);
+    CHECK((midgame[0x2c] & 0x04) != 0);
+    sh_decl_server_test_runtime_counters(&marked, &left, &shadow, &faults);
+    CHECK(marked == 0);
+    CHECK(shadow == 2);
+    CHECK(faults == 0);
+    CHECK(g_rt_direct_loads == 0);
+    CHECK(sh_decl_server_test_clear_stray_pending() == 0);
+    HeapFree(GetProcessHeap(), 0, newly);
+    HeapFree(GetProcessHeap(), 0, served);
+    HeapFree(GetProcessHeap(), 0, sourcekind);
+    HeapFree(GetProcessHeap(), 0, midgame);
+}
+
+static void test_runtime_shadowed_drain_fallback(void)
+{
+    sh_decl_server_test_materialize_item items[] = {
+        { "aiFSMManager", "rt/fsm", "generated/decls/aifsmmanager/rt/fsm.decl",
+          SH_DECL_SERVER_TEST_SHADOWED, NULL, 0, SH_DECL_SERVER_TEST_SHADOW_LIVE }
+    };
+    unsigned char *fsm;
+    int materialized = -1;
+    long marked = -1, left = -1, shadow = -1, faults = -1;
+
+    fsm = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x300);
+    CHECK(fsm != NULL);
+    if (!fsm) return;
+    fsm[0x2c] = 0x04;
+
+    rt_reset();
+    g_rt_names[0] = "rt/fsm";
+    g_rt_objects[0] = fsm;
+    /* The lookup returns the object but never drains the mark -- the failure mode the
+     * fallback exists for. The pinned generic load must then run directly, with the
+     * production code clearing the pending bit first. */
+    g_rt_no_drain = 1;
+    sh_decl_server_test_reset_runtime_state();
+    sh_decl_server_test_set_generic_load(rt_generic_load);
+    sh_decl_server_test_set_runtime(1);
+    CHECK(sh_decl_server_test_materialize_missing_sedefs(
+              items, 1, (void *)(uintptr_t)0x98760000u, rt_type_by_name,
+              rt_source_find, rt_find_decl, &materialized) == 1);
+    sh_decl_server_test_set_runtime(0);
+
+    CHECK(g_rt_direct_loads == 1);
+    CHECK((fsm[0x2c] & 0x02) == 0);
+    CHECK((fsm[0x2c] & 0x04) != 0);
+    sh_decl_server_test_runtime_counters(&marked, &left, &shadow, &faults);
+    CHECK(shadow == 1);
+    CHECK(faults == 0);
+    CHECK(sh_decl_server_test_clear_stray_pending() == 0);
+    sh_decl_server_test_set_generic_load(NULL);
+    HeapFree(GetProcessHeap(), 0, fsm);
+}
+
+static void test_runtime_shadowed_drain_failed_is_swept(void)
+{
+    sh_decl_server_test_materialize_item items[] = {
+        { "aiFSMManager", "rt/fsm2", "generated/decls/aifsmmanager/rt/fsm2.decl",
+          SH_DECL_SERVER_TEST_SHADOWED, NULL, 0, SH_DECL_SERVER_TEST_SHADOW_LIVE }
+    };
+    unsigned char *fsm;
+    int materialized = -1;
+    long marked = -1, left = -1, shadow = -1, faults = -1;
+
+    fsm = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x300);
+    CHECK(fsm != NULL);
+    if (!fsm) return;
+    fsm[0x2c] = 0x04;
+
+    rt_reset();
+    g_rt_names[0] = "rt/fsm2";
+    g_rt_objects[0] = fsm;
+    /* No drain from the lookup AND no generic load resolved: the mark must survive the
+     * reload loop, be counted as nothing, and be disarmed by the sweep -- a shadowed mark
+     * must never stay armed into a map load either. */
+    g_rt_no_drain = 1;
+    sh_decl_server_test_reset_runtime_state();
+    sh_decl_server_test_set_runtime(1);
+    CHECK(sh_decl_server_test_materialize_missing_sedefs(
+              items, 1, (void *)(uintptr_t)0x98760000u, rt_type_by_name,
+              rt_source_find, rt_find_decl, &materialized) == 1);
+    sh_decl_server_test_set_runtime(0);
+
+    CHECK(g_rt_direct_loads == 0);
+    CHECK((fsm[0x2c] & 0x02) != 0);
+    sh_decl_server_test_runtime_counters(&marked, &left, &shadow, &faults);
+    CHECK(shadow == 0);
+    CHECK(sh_decl_server_test_clear_stray_pending() == 1);
+    CHECK((fsm[0x2c] & 0x02) == 0);
+    HeapFree(GetProcessHeap(), 0, fsm);
+}
+
+static void test_runtime_stray_pending_cleared(void)
+{
+    static const unsigned char body[] = "{ }";
+    sh_decl_server_test_materialize_item items[] = {
+        { "material", "rt/stray", "generated/decls/material/rt/stray.decl",
+          SH_DECL_SERVER_TEST_MISSING, body, sizeof(body) - 1, 0 }
+    };
+    unsigned char *stray;
+    int materialized = -1;
+
+    stray = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x300);
+    CHECK(stray != NULL);
+    if (!stray) return;
+
+    rt_reset();
+    g_rt_names[0] = "rt/stray";
+    g_rt_objects[0] = stray;
+    /* The reload path fails (the fake returns NULL once the pending bit is up), so the
+     * materialization fails, the mark survives, and the sweep must disarm it -- a
+     * non-shadowed mark must never stay armed into a map load. */
+    g_rt_null_on_load = 1;
+    sh_decl_server_test_reset_runtime_state();
+    sh_decl_server_test_set_runtime(1);
+    CHECK(sh_decl_server_test_materialize_missing_sedefs(
+              items, 1, (void *)(uintptr_t)0x98760000u, rt_type_by_name,
+              rt_source_find, rt_find_decl, &materialized) == 0);
+    sh_decl_server_test_set_runtime(0);
+
+    CHECK((stray[0x2c] & 0x02) != 0);
+    CHECK(sh_decl_server_test_clear_stray_pending() == 1);
+    CHECK((stray[0x2c] & 0x02) == 0);
+    HeapFree(GetProcessHeap(), 0, stray);
+}
+
+static void test_runtime_off_leaves_placeholders_alone(void)
+{
+    static const unsigned char body[] = "{ }";
+    sh_decl_server_test_materialize_item items[] = {
+        { "material", "rt/alpha", "generated/decls/material/rt/alpha.decl",
+          SH_DECL_SERVER_TEST_MISSING, body, sizeof(body) - 1, 0 }
+    };
+    unsigned char *a;
+    int materialized = -1;
+    long marked = -1, left = -1, shadow = -1, faults = -1;
+
+    a = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x300);
+    CHECK(a != NULL);
+    if (!a) return;
+
+    rt_reset();
+    g_rt_names[0] = "rt/alpha";
+    g_rt_objects[0] = a;
+    sh_decl_server_test_reset_runtime_state();
+    CHECK(sh_decl_server_test_materialize_missing_sedefs(
+              items, 1, (void *)(uintptr_t)0x98760000u, rt_type_by_name,
+              rt_source_find, rt_find_decl, &materialized) == 1);
+
+    /* A boot pass neither marks nor re-parses: the placeholder is reused as-is. */
+    CHECK(g_rt_loads[0] == 0);
+    CHECK((a[0x2c] & 0x02) == 0);
+    sh_decl_server_test_runtime_counters(&marked, &left, &shadow, &faults);
+    CHECK(marked == 0);
+    CHECK(shadow == 0);
+    HeapFree(GetProcessHeap(), 0, a);
+}
+
 int main(void)
 {
     test_native_idstr_boundary();
     test_source_first_classification();
     test_sedef_materialization();
+    test_runtime_premark_reused_empties();
+    test_runtime_shadowed_refresh();
+    test_runtime_shadowed_drain_fallback();
+    test_runtime_shadowed_drain_failed_is_swept();
+    test_runtime_stray_pending_cleared();
+    test_runtime_off_leaves_placeholders_alone();
     test_integrated_scan_materialize_pipeline();
     test_source_only_pipeline_gate();
     test_cyber_shaped_registration_order();

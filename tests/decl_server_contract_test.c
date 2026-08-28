@@ -151,7 +151,13 @@ int main(int argc, char **argv)
      * hand-authored edge walk would only move the failure to the next edge nobody special-cased --
      * which is exactly how the md6Def-only build died. */
     CHECK(strstr(server, "DS_MD6DEF_MODEL_OFFSET") == NULL);
+    /* The runtime refresh is type-blind too. An interim revision deferred stale-shadowed
+     * re-parses to each type's next natural lookup and therefore had to whitelist map-load-read
+     * types (a per-type table of WHEN the engine reads things). The forced browser-instant
+     * drain removed the whitelist: the refresh now runs at the pass's own safe instant for
+     * every type, so no type literal may appear in the refresh path either. */
     CHECK(strstr(server, "\"md6Def\"") == NULL);
+    CHECK(strstr(server, "ds_type_defers_safely") == NULL);
     CHECK(strstr(server, "\"animWeb\"") == NULL);
     /* And it must NEVER re-parse: FreeData 0xFF-fills joint buffers the render thread reads. */
     CHECK(strstr(server, "TouchDecl") == NULL);

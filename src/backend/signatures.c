@@ -441,6 +441,31 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "41 8B 48 28 83 E9 01 48 63 C9 78 ?? 0F 1F 40 00 49 8B 40 20 48 8B 14 C8 "
       "C7 42 28 04 00 00 00",
       0x1801830u },
+    { "ResourceGenericLoad", /* void(idResource *decl [rcx]) -- the engine's generic decl (re)load
+                            * (0x17FF5F0). This is the function the manager lookup helper
+                            * (idResourceList::Load, 0x1800A40) runs after it clears the pending-load
+                            * bit (+0x2c & 0x02), and it performs the engine's OWN teardown before it
+                            * parses: 0x17FFDB0 destructs the decl in place (vtable slot 0 with the
+                            * no-free flag), has the owning resource list reconstruct it (owner vtable
+                            * +0x28) preserving id, name and flags, re-reads the source text (which
+                            * lands in the snapmap-plus file shadow), parses it with the type parser,
+                            * sets the has-source bit (+0x2c |= 0x04) and runs the post-parse virtual
+                            * (+0x50). So a re-parse through THIS function is never "over live
+                            * allocations" -- the old data is freed by the same code path every boot
+                            * parse uses.
+                            *
+                            * The decl server drives re-parses through DeclFind, which reaches this
+                            * function via idResourceList::Load; this direct pin exists as the
+                            * instrumented fallback for a decl whose pending bit survives that lookup.
+                            * Wildcards are the rip-relative cookie read and three rel32 calls; the
+                            * anchor is the 0x900-byte frame with the -2 EH sentinel at [rsp+0x40] plus
+                            * the vtable +0x10 owner fetch, which resolves UNIQUE.
+                            * DIRECT (our own reverse-engineering, 2026-08-27). */
+      "48 8B C4 57 48 81 EC 00 09 00 00 48 C7 44 24 40 FE FF FF FF 48 89 58 10 "
+      "48 89 70 18 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 F0 08 00 00 48 8B F9 "
+      "48 89 4C 24 38 48 8B 01 FF 50 10 48 8B C8 E8 ?? ?? ?? ?? 4C 8B C0 48 8B 57 08 "
+      "48 8B CF E8 ?? ?? ?? ?? 48 8B CF E8 ?? ?? ?? ??",
+      0x17FF5F0u },
     { "CmdExecuteBuffer",  /* idCmdSystemLocal::ExecuteCommandBuffer -- void(cmdSystem [rcx]). The
                             * public no-argument drain: it calls the worker (0x1AA46E0) twice, once with
                             * exec context 0 and once with 1, so both command text buffers
