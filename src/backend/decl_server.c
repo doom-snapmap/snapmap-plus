@@ -2180,6 +2180,35 @@ static int ds_scan_and_materialize_missing(
         return 0;
     }
     {
+        /* Registration only reaches the source catalog, which the engine stops
+         * consulting once a map starts loading. Keep the published identities
+         * answerable across that boundary. This is not allowed to fail the
+         * registration that already succeeded.
+         *
+         * THIS MUST RUN BEFORE THE PALETTE REFRESH, and the ordering is the whole point.
+         *
+         * The palette rebuild DECLINES on every runtime re-arm -- the editor has not built a
+         * roster yet, so there is nothing to rebuild -- and declining is reported by returning 0
+         * with failure_phase PALETTE. The caller correctly treats that as non-terminal and logs
+         * "the palette rebuild was not needed". But while this install sat AFTER the palette
+         * block, that early return skipped it, silently, on exactly the pass that needs it:
+         * boot installs the hook and works, every mid-session install does not.
+         *
+         * Measured 2026-08-29. A map that NAMES an identity the package supplies -- placing a
+         * demon from the toybox names `snapmaps/placeablesnapaiencounter/<demon>` -- then fails
+         * to load after a mid-session install, bouncing off a corrupt-save dialog before the map
+         * JSON is ever parsed, because the existence probe has nobody answering for it. A map
+         * that inlines its content instead names nothing and loads fine, which is why the
+         * campaign's anchor map hid this for so long. */
+        char owned[SH_DECL_SERVER_TYPE_CAP + SH_DECL_SERVER_NAME_CAP + 32];
+        char published[SH_DECL_SERVER_TYPE_CAP + SH_DECL_SERVER_NAME_CAP + 32];
+        if (ds_probe_path(DS_CANDIDATE_SHADOWED, owned, sizeof(owned)) &&
+            ds_probe_path(DS_CANDIDATE_MISSING, published, sizeof(published)))
+            (void)sh_decl_visibility_install(g_module_base, owned, published);
+        else
+            backend_log("decl-visibility REFUSED: no owned/published candidate pair was available to validate the probe");
+    }
+    {
         int palette_ok = 0;
         int palette_fault = 0;
         __try {
@@ -2191,19 +2220,6 @@ static int ds_scan_and_materialize_missing(
             if (failure_phase) *failure_phase = DS_PHASE_FAILURE_PALETTE;
             return 0;
         }
-    }
-    {
-        /* Registration only reaches the source catalog, which the engine stops
-         * consulting once a map starts loading. Keep the published identities
-         * answerable across that boundary. This is not allowed to fail the
-         * registration that already succeeded. */
-        char owned[SH_DECL_SERVER_TYPE_CAP + SH_DECL_SERVER_NAME_CAP + 32];
-        char published[SH_DECL_SERVER_TYPE_CAP + SH_DECL_SERVER_NAME_CAP + 32];
-        if (ds_probe_path(DS_CANDIDATE_SHADOWED, owned, sizeof(owned)) &&
-            ds_probe_path(DS_CANDIDATE_MISSING, published, sizeof(published)))
-            (void)sh_decl_visibility_install(g_module_base, owned, published);
-        else
-            backend_log("decl-visibility REFUSED: no owned/published candidate pair was available to validate the probe");
     }
     return 1;
 }
