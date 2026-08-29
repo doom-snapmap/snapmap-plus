@@ -27,7 +27,6 @@
 #include <string.h>
 #include <shellapi.h>
 #pragma comment(lib, "user32.lib")
-#pragma comment(lib, "shell32.lib")   /* ShellExecuteA -- the relaunch */   /* MessageBoxA (the consent prompt) */
 
 #include <stdlib.h>
 #include "map_package.h"
@@ -1401,7 +1400,7 @@ typedef struct mpkg_boot_pkg {
 typedef struct mpkg_session_entry {
     char id[SH_MPKG_ID_CAP];
     char digest[SH_MPKG_DIGEST_CHARS + 1];
-    int  outcome;   /* 1 installed (restart pending), 0 declined, 2 prompt in flight */
+    int  outcome;   /* 1 installed, 0 declined, 2 prompt in flight */
 } mpkg_session_entry;
 
 static CRITICAL_SECTION g_mpkg_lock;
@@ -1635,103 +1634,6 @@ static void mpkg_record_decline(const char *id, const char *digest)
     backend_log(line);
 }
 
-/* Relaunch DOOM through Steam and close this instance.
- *
- * WHY. A package installed mid-session registers its decls and the map opens in the editor,
- * but the demon's render model is never built and PLAYING it faults. With the package present
- * at BOOT the same map plays correctly, so the shortest honest route to a playable map is a
- * relaunch -- performed for the player rather than asked of them.
- *
- * Steam's rungameid URL rather than exec'ing the exe: DOOM expects to be started by Steam, and
- * the launch options the player already has are applied by Steam, not by us. If the shell
- * refuses, say so and leave this process alone -- a failed relaunch must not also close the
- * game the player is still using. */
-static void mpkg_relaunch_doom(void)
-{
-    /* Two things have to be true at once, and they fight each other.
-     *
-     * (1) Steam refuses to launch a game it still believes is running, so the URL must not be
-     *     fired until after this process is gone -- measured: firing it from here and then
-     *     exiting does nothing at all.
-     * (2) Anything we spawn to fire it later is inside Steam's job object and is killed when we
-     *     exit -- measured three times, with `start`, with a detached cmd, and with explorer;
-     *     the helper always spawned, we always exited, and the game never came back.
-     *     CREATE_BREAKAWAY_FROM_JOB is refused outright, so the job does not permit escape.
-     *
-     * WMI resolves the contradiction. Win32_Process::Create runs the helper under WmiPrvSE
-     * rather than under us, so it is in none of our jobs and our exit cannot reach it. The
-     * powershell that carries the request is still our child and still in the job -- which is
-     * fine, because we WAIT for it before exiting, and the helper it created already exists by
-     * then.
-     *
-     * The helper itself waits out our exit with `ping` (`timeout` needs a console it has not
-     * got) and then hands the protocol URL to explorer, which is what actually resolves
-     * steam:// in the logged-in session. The Steam URL rather than the exe because DOOM expects
-     * to be started by Steam, and the player's launch options are applied by Steam, not by us.
-     *
-     * If any of it fails, say so and leave this process alone: a failed relaunch must never
-     * also close the game the player is still using. */
-    static const char *HELPER =
-        "cmd.exe /c ping -n 8 127.0.0.1 >nul & explorer.exe \"steam://rungameid/379720\"";
-    char cmd[768];
-    STARTUPINFOA si;
-    PROCESS_INFORMATION pi;
-    DWORD code = 1;
-
-    ZeroMemory(&si, sizeof si);
-    si.cb = sizeof si;
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    ZeroMemory(&pi, sizeof pi);
-
-    _snprintf_s(cmd, sizeof cmd, _TRUNCATE,
-                "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command "
-                "\"$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create "
-                "-Arguments @{CommandLine='%s'}; exit [int]$r.ReturnValue\"",
-                HELPER);
-
-    if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW,
-                       NULL, NULL, &si, &pi)) {
-        /* 30s is generous for a CIM call; if it hangs we fall through to the direct spawn
-         * rather than leaving the player staring at a game that will not close. */
-        if (WaitForSingleObject(pi.hProcess, 30000) != WAIT_OBJECT_0 ||
-            !GetExitCodeProcess(pi.hProcess, &code))
-            code = 1;
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-    }
-
-    if (code != 0) {
-        /* WMI unavailable or refused. Try the plain in-job spawn anyway: it is what failed
-         * before, but it costs nothing here and a machine without the job restriction will be
-         * served by it. */
-        char line[192];
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "MPKG: WMI relaunch helper unavailable (result %lu); falling back to a "
-                    "detached spawn, which Steam's job may kill", (unsigned long)code);
-        backend_log(line);
-        ZeroMemory(&pi, sizeof pi);
-        _snprintf_s(cmd, sizeof cmd, _TRUNCATE, "%s", HELPER);
-        if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE,
-                            CREATE_NO_WINDOW | DETACHED_PROCESS, NULL, NULL, &si, &pi)) {
-            backend_log("MPKG: could not spawn the relaunch helper; leaving this instance up");
-            MessageBoxA(NULL,
-                        "Could not restart DOOM automatically.\r\n\r\n"
-                        "Close and reopen the game yourself, then load the map again.",
-                        "Snapmap+ -- restart failed",
-                        MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
-            return;
-        }
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-    } else {
-        backend_log("MPKG: relaunch helper created outside this process's job via WMI");
-    }
-
-    backend_log("MPKG: exiting so Steam can start a fresh instance");
-    ExitProcess(0);
-}
-
 /* The production consent prompt, on its OWN thread so the engine's main
  * thread (which is inside the refused DeserializeFromJson) is never
  * blocked. The load this rode in on is already refused; whatever the user
@@ -1756,8 +1658,7 @@ static DWORD WINAPI mpkg_consent_thread(LPVOID param)
         "    payload:  %u bytes, %u file(s)\r\n\r\n"
         "The load was cancelled: loading this map without its package would crash DOOM.\r\n\r\n"
         "Install the package into the snapmap-plus overrides folder now?\r\n"
-        "The map opens for editing straight away; playing it needs one restart,\r\n"
-        "which Snapmap+ will offer to do for you.",
+        "The map opens for editing and plays straight away -- no restart.",
         s->id, s->digest, (unsigned)s->payload_len, s->files);
 
     answer = MessageBoxA(NULL, text, "Snapmap+ -- map requires a mod package",
@@ -1767,22 +1668,29 @@ static DWORD WINAPI mpkg_consent_thread(LPVOID param)
         char err[SH_MPKG_ERR_CAP];
         if (mpkg_install_staged(s, err, sizeof err)) {
             char done[640];
-            int relaunch;
             _snprintf_s(done, sizeof done, _TRUNCATE,
                 "Package '%s' installed (%u files).\r\n\r\n"
-                "You can open and edit the map now.\r\n"
-                "PLAYING it needs DOOM restarted so the pack loads with the game.\r\n\r\n"
-                "Restart DOOM now?", s->id, s->files);
-            /* EDITING works in this session -- the decl server re-arms on the tick and the
-             * map opens with no restart. PLAYING does not: a mid-session install leaves the
-             * demon's RENDER MODEL unbuilt and the spawn faults, while the same map plays
-             * correctly when the pack is present at boot. So offer the relaunch rather than
-             * pretend, and perform it rather than leave it to the player. */
-            relaunch = MessageBoxA(NULL, done, "Snapmap+ -- package installed",
-                                   MB_YESNO | MB_ICONINFORMATION | MB_TOPMOST |
-                                   MB_SETFOREGROUND | MB_DEFBUTTON1) == IDYES;
-            if (relaunch)
-                mpkg_relaunch_doom();
+                "Load the map again -- it will open and play in this session.",
+                s->id, s->files);
+            /* NO RESTART, AND NO OFFER OF ONE.
+             *
+             * This used to offer a relaunch, on the reading that a mid-session install left the
+             * demon's render model unbuilt, so the map could be EDITED but not PLAYED. That
+             * reading was wrong twice over. The runtime model IS built, with named joints. And
+             * the "playing is broken" evidence came from measurements that return exactly the
+             * same values on a build that works: in the test map the player spawns facing a wall
+             * and never engages the demon, so a hands-off health reading and a console event
+             * count are identical whether the package came from boot or from the map.
+             *
+             * Measured 2026-08-29, twice, with the package absent at boot and delivered by the
+             * map, consent accepted and the restart DECLINED: select the demon, teleport it to
+             * the player, and it hunts, takes the player from 100 health to 27 and to 40 in
+             * thirty seconds, and kills -- the engine's own killfeed reads "[ Cyberdemon ]".
+             *
+             * So the restart is not needed. Offering one anyway would teach a player to reach
+             * for a workaround that costs them their session and buys nothing. */
+            MessageBoxA(NULL, done, "Snapmap+ -- package installed",
+                        MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
         } else {
             char fail[512], line[512];
             _snprintf_s(line, sizeof line, _TRUNCATE,
