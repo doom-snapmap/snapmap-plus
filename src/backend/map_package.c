@@ -1917,8 +1917,7 @@ int sh_mpkg_gate(const char *json, size_t len)
          * on the engine tick, so the honest question is whether that pass has COMPLETED yet --
          * not whether the process has been restarted. Once it has, the identities are live and
          * this map is loadable in this process. */
-        if (sh_decl_server_registration_succeeded() ||
-            sh_decl_server_pass_had_nothing_missing()) {
+        if (sh_decl_server_registration_succeeded()) {
             backend_log("MPKG: package installed and registered at runtime this session; "
                         "allowing the load without a restart");
             return 1;

@@ -1819,8 +1819,6 @@ static void test_runtime_shadowed_refresh(void)
     g_rt_objects[3] = midgame;
     sh_decl_server_test_reset_runtime_state();
     CHECK(sh_decl_server_test_add_prev_identity("entityDef", "rt/served") == 1);
-    { void *wm = (void *)&materialized;   /* a real watermark containing none of the objects */
-      sh_decl_server_test_set_watermark(&wm, 1); }
     sh_decl_server_test_set_runtime(1);
     CHECK(sh_decl_server_test_materialize_missing_sedefs(
               items, 4, (void *)(uintptr_t)0x98760000u, rt_type_by_name,
@@ -1877,8 +1875,6 @@ static void test_runtime_shadowed_drain_fallback(void)
     g_rt_no_drain = 1;
     sh_decl_server_test_reset_runtime_state();
     sh_decl_server_test_set_generic_load(rt_generic_load);
-    { void *wm = (void *)&materialized;   /* a real watermark containing none of the objects */
-      sh_decl_server_test_set_watermark(&wm, 1); }
     sh_decl_server_test_set_runtime(1);
     CHECK(sh_decl_server_test_materialize_missing_sedefs(
               items, 1, (void *)(uintptr_t)0x98760000u, rt_type_by_name,
@@ -1919,8 +1915,6 @@ static void test_runtime_shadowed_drain_failed_is_swept(void)
      * must never stay armed into a map load either. */
     g_rt_no_drain = 1;
     sh_decl_server_test_reset_runtime_state();
-    { void *wm = (void *)&materialized;   /* a real watermark containing none of the objects */
-      sh_decl_server_test_set_watermark(&wm, 1); }
     sh_decl_server_test_set_runtime(1);
     CHECK(sh_decl_server_test_materialize_missing_sedefs(
               items, 1, (void *)(uintptr_t)0x98760000u, rt_type_by_name,
@@ -2002,65 +1996,6 @@ static void test_runtime_off_leaves_placeholders_alone(void)
     HeapFree(GetProcessHeap(), 0, a);
 }
 
-/* A SHADOWED-live decl whose object PREDATES the pass watermark may be held by a live
- * consumer -- re-parsing it in place is the measured second-playtest hang (execution
- * through a pointer into freed decl data, one map transition later). The premark must
- * leave it stale, count it, and never arm its pending bit. An object the pass itself
- * created (absent from the watermark) is milliseconds old and consumerless: it still
- * re-parses. No watermark at all means provenance is unknown, which fails safe.
- *
- * The entityDef exception was TRIED and reverted: reloading the pre-existing coop
- * conductor changed no entity in the census and killed the second playtest outright
- * (0xc0000005 at rva 0x289acc). Consumption time is not a safe substitute for
- * provenance. */
-static void test_runtime_pre_existing_shadowed_left_alone(void)
-{
-    sh_decl_server_test_materialize_item items[] = {
-        { "entityDef", "rt/old", "generated/decls/entitydef/rt/old.decl",
-          SH_DECL_SERVER_TEST_SHADOWED, NULL, 0, SH_DECL_SERVER_TEST_SHADOW_LIVE },
-        { "entityDef", "rt/fresh", "generated/decls/entitydef/rt/fresh.decl",
-          SH_DECL_SERVER_TEST_SHADOWED, NULL, 0, SH_DECL_SERVER_TEST_SHADOW_LIVE }
-    };
-    unsigned char *held;
-    unsigned char *fresh;
-    int materialized = -1;
-    long marked = -1, left = -1, shadow = -1, faults = -1;
-
-    held = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x300);
-    fresh = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x300);
-    CHECK(held != NULL && fresh != NULL);
-    if (!held || !fresh) return;
-    held[0x2c] = 0x04;
-    fresh[0x2c] = 0x04;
-
-    rt_reset();
-    g_rt_names[0] = "rt/old";
-    g_rt_objects[0] = held;
-    g_rt_names[1] = "rt/fresh";
-    g_rt_objects[1] = fresh;
-    sh_decl_server_test_reset_runtime_state();
-    { void *wm = (void *)held;                     /* the pre-existing one IS in the watermark */
-      sh_decl_server_test_set_watermark(&wm, 1); }
-    sh_decl_server_test_set_runtime(1);
-    CHECK(sh_decl_server_test_materialize_missing_sedefs(
-              items, 2, (void *)(uintptr_t)0x98760000u, rt_type_by_name,
-              rt_source_find, rt_find_decl, &materialized) == 1);
-    sh_decl_server_test_set_runtime(0);
-
-    CHECK(g_rt_loads[0] == 0);                     /* never torn down */
-    CHECK((held[0x2c] & 0x02) == 0);               /* never armed */
-    CHECK(*(unsigned int *)(held + 0x28) == 4u);   /* but kept ALIVE: the promoted content
-                                                    * points at it, and a map-scoped level
-                                                    * would let the next purge free it */
-    CHECK(g_rt_loads[1] == 1);                     /* the pass's own object still refreshes */
-    sh_decl_server_test_runtime_counters(&marked, &left, &shadow, &faults);
-    CHECK(shadow == 1);
-    CHECK(faults == 0);
-    CHECK(sh_decl_server_test_runtime_left_stale() == 1);
-    CHECK(sh_decl_server_test_clear_stray_pending() == 0);
-
-}
-
 int main(void)
 {
     test_native_idstr_boundary();
@@ -2072,7 +2007,6 @@ int main(void)
     test_runtime_shadowed_drain_failed_is_swept();
     test_runtime_stray_pending_cleared();
     test_runtime_off_leaves_placeholders_alone();
-    test_runtime_pre_existing_shadowed_left_alone();
     test_integrated_scan_materialize_pipeline();
     test_source_only_pipeline_gate();
     test_cyber_shaped_registration_order();

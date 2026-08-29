@@ -38,9 +38,6 @@ int sh_decl_server_install(const sig_result *results, size_t count,
  * rebuild successfully. DS_STATE_DONE alone is not sufficient: it also
  * represents disabled, empty, or all-shadowed snapshots. */
 int sh_decl_server_registration_succeeded(void);
-/* The most recent completed pass had nothing left to register: every published identity
- * was already served. The install gate accepts this OR registration_succeeded. */
-int sh_decl_server_pass_had_nothing_missing(void);
 
 /* Re-scan the overrides packages and register any NEW decl identities at runtime, after the
  * engine's boot promotion. Must run on the engine main thread; the console command
@@ -168,8 +165,6 @@ int sh_decl_server_test_add_prev_identity(const char *type, const char *name);
 void sh_decl_server_test_runtime_counters(long *marked_pending, long *left_loaded,
                                           long *shadow_reparsed, long *drain_faults);
 int sh_decl_server_test_clear_stray_pending(void);
-void sh_decl_server_test_set_watermark(void **entries, size_t count);
-long sh_decl_server_test_runtime_left_stale(void);
 
 /* Run the production two-phase materialization pass against a test candidate
  * table. This keeps the native make-default=1, state-byte, and terminal-fault

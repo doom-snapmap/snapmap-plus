@@ -127,9 +127,6 @@ int main(int argc, char **argv)
     CHECK(missing_zero && missing_end);
     CHECK(!contains_between(missing_zero, missing_end, "g_registration_succeeded"));
     CHECK(!contains_between(missing_zero, missing_end, "sh_palette_refresh_after_decl_registration"));
-    /* The 0-MISSING return still answers the install gate, through its own flag -- NOT the
-     * success flag, which would also re-arm the probe republish and palette machinery. */
-    CHECK(contains_between(missing_zero, missing_end, "g_pass_nothing_missing"));
 
 done:
     free(refresh); free(signatures); free(build); free(dllmain); free(apply); free(server);
