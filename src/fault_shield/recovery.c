@@ -259,6 +259,12 @@ static void keep_throw_gate_open(void)
  * cnt=*(int*)(dlg+0x908); desc[i]=arr+i*0x1b0; desc+0x00=GDM id, desc+0x08=clear-flag (0=pending). */
 static int is_corrupt_save_gdm(int gdm)
 {
+    /* All four are dismissed. GDM_CORRUPT_CONTINUE was briefly excluded on 2026-08-29, on the
+     * reading that "CONTINUE" meant "continue the load" and that dismissing it was cancelling
+     * work the user asked for. A screenshot of the live dialog settled it: the text is "The save
+     * file appears to be damaged and cannot be loaded" over a single CONTINUE button, so CONTINUE
+     * is the acknowledgement, not a choice. Leaving it up only strands a modal the guard used to
+     * clear. */
     return gdm == GDM_LOAD_DAMAGED_FILE || gdm == GDM_CORRUPT_CONTINUE
         || gdm == GDM_SNAPMAP_DETECTED_CORRUPT || gdm == GDM_SNAPMAP_REMOVED_CORRUPT;
 }
@@ -276,13 +282,17 @@ static void save_guard_tick(void)
         {
             int cnt = *(volatile int *)(dlg + DLGQ_COUNT_OFF);
             int i, dismissed = 0, pending_left = 0;
+            int first_gdm = 0;
             if (cnt < 0) cnt = 0;
             if (cnt > 4) cnt = 4;                /* the dialog queue capacity is 4 */
             for (i = 0; i < cnt; i++) {
                 uint8_t *d = arr + (size_t)i * DLG_DESC_STRIDE;
+                int gdm;
                 if (*(volatile uint8_t *)(d + DESC_CLEARFLAG_OFF) != 0) continue;   /* already cleared */
-                if (is_corrupt_save_gdm(*(volatile int *)(d + DESC_GDMID_OFF))) {
+                gdm = *(volatile int *)(d + DESC_GDMID_OFF);
+                if (is_corrupt_save_gdm(gdm)) {
                     *(volatile uint8_t *)(d + DESC_CLEARFLAG_OFF) = 1;   /* DISMISS-A -- runs NO button action */
+                    if (!dismissed) first_gdm = gdm;
                     dismissed++;
                 } else {
                     pending_left++;
@@ -294,8 +304,26 @@ static void save_guard_tick(void)
                     if (shellMgr) *(volatile uint8_t *)(shellMgr + SHELLMGR_VISIBLE_OFF) = 0;
                 }
                 {
-                    shield_fault f = { "save", -1, "save-guard: dismissed a corrupt-save dialog (save protected)", 0, 0 };
-                    shield_emit(&f);
+                    /* Report WHICH dialog was dismissed. All four ids read as "a corrupt-save
+                     * dialog" in the log, but they mean very different things: a damaged save
+                     * FILE is an environment problem, while the engine deciding a SNAPMAP is
+                     * corrupt points at the map or at content it could not resolve. Chasing the
+                     * mid-session-install failure on 2026-08-29 cost several wrong turns for want
+                     * of this one number. */
+                    char msg[128];
+                    const char *which =
+                        first_gdm == GDM_LOAD_DAMAGED_FILE        ? "LOAD_DAMAGED_FILE" :
+                        first_gdm == GDM_CORRUPT_CONTINUE         ? "CORRUPT_CONTINUE" :
+                        first_gdm == GDM_SNAPMAP_DETECTED_CORRUPT ? "SNAPMAP_DETECTED_CORRUPT" :
+                        first_gdm == GDM_SNAPMAP_REMOVED_CORRUPT  ? "SNAPMAP_REMOVED_CORRUPT" :
+                                                                    "UNKNOWN";
+                    _snprintf_s(msg, sizeof msg, _TRUNCATE,
+                                "save-guard: dismissed %s (gdm=%d) (save protected)",
+                                which, first_gdm);
+                    {
+                        shield_fault f = { "save", -1, msg, 0, 0 };
+                        shield_emit(&f);
+                    }
                 }
             }
         }
