@@ -270,7 +270,17 @@ static volatile LONG g_rearm_marked_pending;
 static volatile LONG g_rearm_left_loaded;
 static volatile LONG g_rearm_drain_faults;
 static volatile LONG g_rearm_shadow_reparsed;
+/* SHADOWED-live decls whose objects PREDATE the pass watermark: left stale on purpose,
+ * because a teardown-reload under a live consumer is the measured second-playtest hang. */
+static volatile LONG g_rearm_left_stale;
+/* Watermark membership, defined with the registry-walk helpers near the re-arm driver. */
+static int ds_res_created_this_pass(void *decl);
 static volatile LONG g_registration_succeeded = 0;
+/* The most recent COMPLETED pass found nothing to register: every published identity was
+ * already served. Distinct from g_registration_succeeded, which additionally promises a
+ * fresh publication and re-arms the probe republish -- a pass that published nothing must
+ * not do that (the palette contract pins it). The install gate accepts either answer. */
+static volatile LONG g_pass_nothing_missing = 0;
 
 /* Identities admitted by the most recent COMPLETED pass (boot or runtime). A runtime pass
  * compares its fresh snapshot against this to find identities that are NEWLY SERVED -- names
@@ -1763,6 +1773,39 @@ static void ds_runtime_premark(ds_materialize_context *context)
             decl = NULL;
         }
         if (!decl) continue;
+        /* THE CONSUMER-LIFETIME GATE. Only population 2 can reach a decl that predates
+         * this pass: a population-1 candidate classified MISSING moments ago, so any
+         * object this probe finds was created inside the pass -- usually by this very
+         * lookup, because the engine's FindByName lazily creates an EMPTY object the
+         * instant the recaptured resource bridge can resolve the name (measured live
+         * 2026-08-28: 599 of 606 creations carried this pass's own frames, ctor
+         * backtraces). An object born inside the pass has no consumers, so its
+         * teardown-reload is safe. An object that PREDATES the watermark may be held by
+         * a long-lived subsystem -- the measured population was five base-game sounds
+         * and the coop conductor -- and re-parsing it frees data that consumer still
+         * points into. That is the reproducible second-playtest hang: rip equal to the
+         * fault address on a PAGE_READONLY page, control flow through a pointer into
+         * freed decl data, one map transition later. Those decls keep their old content;
+         * re-parsing them never closed the behaviour gap anyway (measured twice), so
+         * this trades nothing measured for the hang. No watermark means provenance is
+         * UNKNOWN, which fails safe to pre-existing. */
+        if (shadowed_refresh && !ds_res_created_this_pass(decl)) {
+            /* Never torn down -- but it still needs a LIFETIME. The freshly promoted
+             * content points at this object, and pre-existing objects born after the
+             * boot promotion are map-scoped (level 1): the next transition's purge
+             * would free them under that content, which is the measured cause-1 crash
+             * class (a -1 index read in the resource lists on the second SaveAndPlay,
+             * 2026-08-28). The reload path used to supply this promotion as a side
+             * effect; skipping the reload must not skip the lifetime. */
+            __try {
+                unsigned int *lvl = (unsigned int *)((unsigned char *)decl + DS_RES_LEVEL_OFF);
+                if (*lvl != 4u) { *lvl = 4u; InterlockedIncrement(&g_rearm_touched_promoted); }
+            } __except (EXCEPTION_EXECUTE_HANDLER) { /* skip a torn decl */ }
+            InterlockedIncrement(&g_rearm_left_stale);
+            ds_log("LEFT-STALE", candidate->source,
+                   "live decl predates this runtime pass; a consumer may hold pointers into its data; kept alive at level 4, content left untouched");
+            continue;
+        }
         __try {
             unsigned char *st = (unsigned char *)decl + DS_DECL_STATE_OFFSET;
             if ((*st & DS_DECL_IN_PROGRESS) != 0) {
@@ -2233,6 +2276,8 @@ void sh_decl_server_test_reset_runtime_state(void)
     InterlockedExchange(&g_rearm_left_loaded, 0);
     InterlockedExchange(&g_rearm_drain_faults, 0);
     InterlockedExchange(&g_rearm_shadow_reparsed, 0);
+    InterlockedExchange(&g_rearm_left_stale, 0);
+    sh_decl_server_test_set_watermark(NULL, 0);
 }
 
 int sh_decl_server_test_add_prev_identity(const char *type, const char *name)
@@ -2453,6 +2498,13 @@ static void __cdecl ds_apply_command(void)
                     shadowed, refused);
         backend_log(line);
         ds_record_pass_identities();
+        /* Nothing to register means every identity is already served, and the install
+         * gate needs that answer -- without it, a re-issued re-arm (or a reinstall of an
+         * already-registered package) left both flags clear and map_package refused every
+         * subsequent load with "still registering" forever (measured 2026-08-28). The
+         * SUCCESS flag stays untouched here on purpose: it additionally re-arms the probe
+         * republish, which a pass that published nothing must not do. */
+        InterlockedExchange(&g_pass_nothing_missing, 1);
         InterlockedExchange(&g_state, DS_STATE_DONE);
         ds_free_candidates();
         return;
@@ -2681,6 +2733,7 @@ static void __cdecl ds_rearm_command(void)
         }
     }
     InterlockedExchange(&g_registration_succeeded, 0);
+    InterlockedExchange(&g_pass_nothing_missing, 0);
     ds_free_candidates();
 
     if (!ds_capture_snapshot()) {
@@ -2691,6 +2744,7 @@ static void __cdecl ds_rearm_command(void)
     }
     if (g_candidate_count == 0) {
         backend_log("decl-server RE-ARM: nothing to do (no candidates in the fresh snapshot)");
+        InterlockedExchange(&g_pass_nothing_missing, 1);
         InterlockedExchange(&g_state, DS_STATE_DONE);
         ds_free_candidates();
         return;
@@ -2714,12 +2768,13 @@ static void __cdecl ds_rearm_command(void)
      * that is the closure six prior promotion attempts had to guess at. */
     {
         int marked = ds_res_watermark();
-        char tline[288];
+        char tline[384];
         InterlockedExchange(&g_rearm_touched_promoted, 0);
         InterlockedExchange(&g_rearm_marked_pending, 0);
         InterlockedExchange(&g_rearm_left_loaded, 0);
         InterlockedExchange(&g_rearm_drain_faults, 0);
         InterlockedExchange(&g_rearm_shadow_reparsed, 0);
+        InterlockedExchange(&g_rearm_left_stale, 0);
         InterlockedExchange(&g_rearm_is_runtime, 1);
         ds_apply_command();
         InterlockedExchange(&g_rearm_is_runtime, 0);
@@ -2739,12 +2794,14 @@ static void __cdecl ds_rearm_command(void)
                     "level 4; %ld empty one(s) re-parsed here at the browser, %ld left alone "
                     "(already loaded), %ld drain fault(s), %ld stale shadowed decl(s) "
                     "re-parsed in place here at the browser through the engine's own "
-                    "teardown-then-reload",
+                    "teardown-then-reload, %ld pre-existing live decl(s) left stale "
+                    "(never torn down under a possible consumer)",
                     (long)InterlockedCompareExchange(&g_rearm_touched_promoted, 0, 0),
                     (long)InterlockedCompareExchange(&g_rearm_marked_pending, 0, 0),
                     (long)InterlockedCompareExchange(&g_rearm_left_loaded, 0, 0),
                     (long)InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0),
-                    (long)InterlockedCompareExchange(&g_rearm_shadow_reparsed, 0, 0));
+                    (long)InterlockedCompareExchange(&g_rearm_shadow_reparsed, 0, 0),
+                    (long)InterlockedCompareExchange(&g_rearm_left_stale, 0, 0));
         backend_log(tline);
     }
 }
@@ -2876,6 +2933,37 @@ static void ds_res_promote_delta(unsigned char level)
     g_res_mark_count = 0;
 }
 
+/* True when `decl` appeared AFTER this pass's registry watermark -- i.e. the pass itself
+ * (its classification probe, the premark probe, or a mid-parse reference) created it, so
+ * no consumer outside the pass can hold pointers into it. With no watermark the answer is
+ * UNKNOWN and the caller must treat the decl as pre-existing (fail safe). */
+static int ds_res_created_this_pass(void *decl)
+{
+    if (!g_res_mark || g_res_mark_count == 0) return 0;
+    return bsearch(&decl, g_res_mark, g_res_mark_count, sizeof(void *),
+                   ds_res_ptr_cmp) == NULL;
+}
+
+/* Test seam: install (count > 0) or clear (count == 0) a synthetic watermark so the
+ * consumer-lifetime gate is assertable offline. Production watermarks come only from
+ * ds_res_watermark. */
+void sh_decl_server_test_set_watermark(void **entries, size_t count)
+{
+    if (g_res_mark) { HeapFree(GetProcessHeap(), 0, g_res_mark); g_res_mark = NULL; }
+    g_res_mark_count = 0;
+    if (!entries || count == 0) return;
+    g_res_mark = (void **)HeapAlloc(GetProcessHeap(), 0, count * sizeof(void *));
+    if (!g_res_mark) return;
+    memcpy(g_res_mark, entries, count * sizeof(void *));
+    g_res_mark_count = count;
+    qsort(g_res_mark, g_res_mark_count, sizeof(void *), ds_res_ptr_cmp);
+}
+
+long sh_decl_server_test_runtime_left_stale(void)
+{
+    return (long)InterlockedCompareExchange(&g_rearm_left_stale, 0, 0);
+}
+
 /* ---- automatic re-arm, driven from the engine tick ------------------------------------
  *
  * The console command is the manual trigger. This is the one the product uses: after a package
@@ -2903,6 +2991,12 @@ void sh_decl_server_request_rearm(void)
 {
     if (InterlockedCompareExchange(&g_auto_state, DS_AUTO_PREPARE, DS_AUTO_IDLE) == DS_AUTO_IDLE) {
         InterlockedExchange(&g_auto_ticks, 0);
+        /* The install gate polls these. A stale answer from the boot pass would let a map
+         * load BEFORE this pass registers the just-installed package's identities, which
+         * is the exact crash runtime registration exists to prevent. Clear both now; the
+         * pass this request drives will set the honest one when it completes. */
+        InterlockedExchange(&g_registration_succeeded, 0);
+        InterlockedExchange(&g_pass_nothing_missing, 0);
         backend_log("decl-server: runtime re-arm REQUESTED (a package was installed mid-session); "
                     "the engine tick will prepare, settle, then register");
     }
@@ -3043,6 +3137,11 @@ static void ds_boot_promotion_detour(void)
 int sh_decl_server_registration_succeeded(void)
 {
     return InterlockedCompareExchange(&g_registration_succeeded, 0, 0) != 0;
+}
+
+int sh_decl_server_pass_had_nothing_missing(void)
+{
+    return InterlockedCompareExchange(&g_pass_nothing_missing, 0, 0) != 0;
 }
 
 int sh_decl_server_install(const sig_result *results, size_t count,

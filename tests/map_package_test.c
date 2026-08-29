@@ -26,6 +26,14 @@ int sh_decl_server_registration_succeeded(void)
     return 0;
 }
 
+/* Toggleable: the gate must also accept a completed pass that had nothing to register
+ * (the reinstall-of-an-already-registered-package case that wedged the gate). */
+static int g_stub_nothing_missing;
+int sh_decl_server_pass_had_nothing_missing(void)
+{
+    return g_stub_nothing_missing;
+}
+
 void sh_decl_server_request_rearm(void)
 {
 }
@@ -425,6 +433,13 @@ int main(void)
     CHECK(sh_mpkg_gate(fix_map_happy, fix_map_happy_len) == 0);
     CHECK(strstr(sh_mpkg_test_last_refusal(), "still registering") != NULL);
     CHECK(strstr(sh_mpkg_test_last_refusal(), "restart") == NULL);
+
+    /* A completed pass that found nothing to register is just as final as a successful
+     * one: the identities are already live. The gate must open, or a reinstall of an
+     * already-registered package refuses forever. */
+    g_stub_nothing_missing = 1;
+    CHECK(sh_mpkg_gate(fix_map_happy, fix_map_happy_len) == 1);
+    g_stub_nothing_missing = 0;
 
     /* ---- gate: once the package is in the captured set, the map passes ---- */
     sh_mpkg_test_reset();

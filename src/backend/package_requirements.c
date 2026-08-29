@@ -222,6 +222,39 @@ static int pr_parse_file(unsigned char *body, size_t length)
  * guarded one-shot on a single thread, so a shared buffer is safe here. */
 static sh_package g_packages[SH_PACKAGES_MAX];
 
+/* THE BASELINE. Request the cut-content gates whether or not any installed pack asked, because
+ * the pack that needs them may not be installed YET.
+ *
+ * These gates are read by the blacklist matcher on every load-by-name, so whatever resolves
+ * while they are up is parsed EMPTY and stays that way -- the engine does not re-open a decl it
+ * has already parsed. That is the whole no-restart problem: a pack installed mid-session finds
+ * its content already present and already wrong, and repairing it means tearing down data a live
+ * consumer may hold, which is the measured second-playtest crash. Lowering the gates from the
+ * start means there is nothing to repair.
+ *
+ * This costs a user nothing they were not already getting: any installed cut-content pack turns
+ * these same two cvars off for the whole session today. Making it the baseline only removes the
+ * dependency on WHICH packs happen to be installed and WHEN -- including the case that matters
+ * most here, no packs at all at boot. */
+static void pr_request_baseline_gates(void)
+{
+    size_t k;
+    int added = 0;
+    for (k = 0; k < sizeof(g_allowed) / sizeof(g_allowed[0]); k++) {
+        if (g_allowed[k].requested) continue;
+        g_allowed[k].requested = 1;
+        g_requirement_count++;
+        added++;
+    }
+    if (added) {
+        char line[200];
+        _snprintf_s(line, sizeof(line), _TRUNCATE,
+                    "package-requirements baseline: %d cut-content gate(s) requested at boot so "
+                    "content stays parseable for a pack installed later", added);
+        backend_log(line);
+    }
+}
+
 static int pr_capture(const char *data_root)
 {
     char directory[MAX_PATH], pattern[MAX_PATH];
@@ -289,8 +322,12 @@ static int pr_capture(const char *data_root)
     }
 
     if (!count) {
-        backend_log("package-requirements idle: no *.requirements files");
-        InterlockedExchange(&g_state, PR_STATE_DONE);
+        /* No pack asked -- but the gates still have to come down, because the pack that needs
+         * them may arrive mid-session and by then its content is already parsed empty. This is
+         * exactly the boot-with-no-packs case the no-restart path depends on. */
+        backend_log("package-requirements: no *.requirements files; applying the baseline gates");
+        pr_request_baseline_gates();
+        g_manifest_count = 0;
         return 1;
     }
     qsort(files, count, sizeof(files[0]), pr_file_qsort);
@@ -315,6 +352,9 @@ static int pr_capture(const char *data_root)
         HeapFree(GetProcessHeap(), 0, body);
     }
     g_manifest_count = count;
+
+    pr_request_baseline_gates();
+
     if (!g_requirement_count) {
         backend_log("package-requirements idle: manifests contain no settings");
         InterlockedExchange(&g_state, PR_STATE_DONE);
