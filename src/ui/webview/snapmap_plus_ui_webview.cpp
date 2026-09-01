@@ -96,9 +96,8 @@ static volatile bool g_pending_deselect = false;  /* UI blank-space deselect -- 
 static volatile bool g_select_refused   = false;  /* last selection push was refused (editor mid-grab/hold) */
 static char g_enumbuf[262144];                   /* packed-string scratch for enum_inherits / enum_valid_classes */
 
-/* Intentionally retained camera-manipulation backend. The current page exposes only a read-only footer
- * readout, but camSet/camLock, the cached target, one-shot writes, and per-frame locking stay wired so a
- * future control can return without re-deriving the engine interface. Keep this dormant path intact. */
+/* Camera-manipulation state for the editable footer controls. camSet queues a one-shot write; camLock
+ * holds the supplied target through the per-frame writer until the page releases it. */
 static volatile bool g_cam_lock = false;
 static float         g_cam_xyz[3] = {0.0f, 0.0f, 0.0f};
 static volatile bool g_cam_write_once = false;
@@ -653,8 +652,8 @@ static bool poc_collect_state_growing(int id, char *cls, int ccap, char *inh, in
 }
 static void poc_post_json(const wchar_t *json);   /* fwd */
 
-/* Camera Origin: retained write path (+0x00). Used every frame while a future client enables Lock, and
- * once per camSet message. The current read-only footer does neither. SEH-guarded. */
+/* Camera Origin: write path (+0x00). Used every frame while Lock position is enabled and once per
+ * committed camSet edit. SEH-guarded. */
 static void poc_cam_write()
 {
     __try {
@@ -2538,8 +2537,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 poc_request_preview(n8.c_str(), asset_kind);
             } else if (cmd == L"cancelPreview") {
                 poc_cancel_preview();
-            /* These camera write commands are deliberately dormant, not removed: the current page is
-             * read-only, while future UI or another trusted WebView client can reuse the backend. */
+            /* Camera footer controls: a lock captures its supplied target; an edit queues one write. */
             } else if (cmd == L"camLock") {
                 int on = 0; json_get_int(json, L"on", &on);
                 g_cam_lock = (on != 0);
@@ -2681,7 +2679,11 @@ static HRESULT on_nav_completed(ICoreWebView2 *,
     }
     /* The hidden native host may be shown only after the fully parsed, pre-themed page can receive
      * messages. This keeps a blank/light controller from becoming the first visible frame. */
-    g_cam_read_published = false;  /* the new page needs an initial footer value even if the camera is unchanged */
+    /* A newly navigated page starts with an unchecked lock control. Release any old page's lock and
+     * force an initial coordinate publication so native state and the fresh controls cannot diverge. */
+    g_cam_lock = false;
+    g_cam_write_once = false;
+    g_cam_read_published = false;
     g_page_loaded = true;
     g_webview_ready = true;
     poc_post_config_status();
@@ -2785,7 +2787,7 @@ static void poc_think_loop()
         if (g_pending_open_timeline) { g_tl_json_len = poc_serialize_entity_raw(g_open_timeline_eid); g_pending_open_timeline = false; did_open_timeline = true; }
         if (g_pending_resolve_entity) { g_resolve_json_len = poc_serialize_entity_resolve(g_resolve_entity_eid); g_pending_resolve_entity = false; did_resolve_entity = true; }
         if (g_pending_save_timeline) { poc_apply_save_timeline(); g_pending_save_timeline = false; did_save_timeline = true; }
-        /* Retained camera writer: hold a future-requested lock, or flush one camSet edit. */
+        /* Hold the requested camera lock, or flush one committed coordinate edit. */
         if (g_cam_lock || g_cam_write_once) { poc_cam_write(); g_cam_write_once = false; }
         LeaveCriticalSection(&g_loop->mtx);
 
@@ -2964,6 +2966,11 @@ static void poc_think_loop()
                 ShowWindow(g_hwnd, SW_HIDE); was_visible = false;
             }
 
+            /* Camera feedback is latency-sensitive and the vec3 read is cheap. Sample it at the
+             * frontend's native ~30 Hz cadence while visible, not inside the 10-frame entity poll.
+             * poc_cam_read_send change-gates WebView messages, so a stationary camera emits nothing. */
+            if (was_visible && !g_cam_lock) poc_cam_read_send();
+
             /* periodic auto tasks (~ every 10 frames = ~330 ms): list change poll, editor-selection sync,
              * displayed-state change poll. All emit only on an actual change. */
             if (was_visible && (frame % 10 == 0)) {
@@ -3007,7 +3014,6 @@ static void poc_think_loop()
                 unsigned long long state_started = selection_finished;
                 if (state_called) poc_send_state(g_displayed_eid, true);
                 unsigned long long state_finished = poc_perf_now_us();
-                if (!g_cam_lock) poc_cam_read_send();   /* live camera readout (unless locked) */
                 unsigned long long poll_finished = poc_perf_now_us();
                 poc_perf_note_poll(poll_finished >= poll_started ? poll_finished - poll_started : 0,
                                    collect_us,

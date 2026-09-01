@@ -60,7 +60,7 @@ The frontend holds no engine addresses; it calls the backend only through the vt
 | Synchronize with editor (editor -> list) | `get_selection` +0x150 |
 | Select in editor (list -> editor) | `clear_selection` +0x148, `add_to_selection` +0x138 |
 | Class / Inherit autocomplete | `enum_valid_classes` +0x270, `enum_inherits` +0x278 |
-| Camera origin footer (read-only X/Y/Z) | `get_editor_vec3` +0x08; the dormant `camSet` / `camLock` bridge and `set_editor_vec3` +0x00 path remain implemented for a future control |
+| Camera origin footer (editable X/Y/Z and Lock position) | `get_editor_vec3` +0x08 publishes live coordinates; `camSet` / `camLock` write through `set_editor_vec3` +0x00 once or on every locked frame |
 | Installed version readout | reads `%LOCALAPPDATA%\snapmap-plus\install.json` (written by the installer) |
 | Persistent settings (Light / Dark and Entities controls) | `config_get_json` +0x2B0, `config_set_json` +0x2B8 — registered UTF-8 JSON fragments owned by the backend |
 | Deselect (click a blank structural surface) | One page-level router calls `clear_selection` +0x148 for the app-wide entity selection and also tears down the active Prefab/Timeline selection; every right-hand inspection/editor pane, including expanded Decl Text, is protected workspace |
@@ -115,6 +115,19 @@ through it).
 
 Newest first. Each dated entry covers one working session's worth of change; the undated **Baseline**
 entry at the bottom is the original POC buildout, before this doc tracked dates per entry.
+
+### 2026-08-24 -- Editable camera origin and position lock restored
+
+- **The footer camera coordinates are editable again.** X, Y, and Z continue to follow the live editor
+  camera while their fields are unfocused. Committing any field posts all three coordinates through
+  `camSet`, moving the camera through the existing `set_editor_vec3` interface slot.
+- **Live coordinates update at the frontend's full cadence.** The host samples the camera on every
+  visible 33 ms think-loop frame instead of nesting the read in the 10-frame entity/state poll. The
+  existing coordinate comparison still suppresses WebView messages while the camera is stationary.
+- **Lock position is restored beside the coordinates.** Enabling it captures the displayed X/Y/Z target
+  through `camLock` and reapplies that target on every frontend think-loop frame until the checkbox is
+  cleared. The controls remain in the responsive footer introduced on 2026-08-17 rather than returning
+  to the tab strip.
 
 ### 2026-08-17 -- Prefab transform and dimension parity
 
@@ -234,6 +247,9 @@ entry at the bottom is the original POC buildout, before this doc tracked dates 
   while Plus deliberately supports smaller windows and therefore needs the responsive rules above.
 
 ### 2026-08-17 -- Camera readout moved into grouped footer
+
+> **Superseded 2026-08-24:** the footer layout remains, but its X/Y/Z values are editable again and the
+> Lock position checkbox has been restored. See the entry above.
 
 - **The Camera Lock checkbox and editable X/Y/Z fields are removed from the tab strip.** The live camera
   origin is now a compact read-only footer group labelled `X:`, `Y:`, and `Z:`, with tabular monospace
@@ -1027,9 +1043,9 @@ that doc for the write-up.
 - Sliding toasts for Copy / Save / Delete / Push, color-coded (success / warning / error).
 - "Follow editor selection" (editor selection -> list, any N) and "Select in 3D editor" (list selection ->
   editor, hidden entities skipped). The two are mutually exclusive to avoid a selection feedback loop.
-- Camera Origin initially shipped as editable X/Y/Z fields plus "Lock Position" in the tab strip. On
-  2026-08-17 those controls were replaced by a read-only X/Y/Z footer group; the original write and lock
-  backend remains available as a dormant future extension point.
+- Camera Origin uses editable X/Y/Z fields plus "Lock position" in the responsive footer. Live camera
+  updates do not overwrite a field while it has focus; committing a field moves the camera, and the
+  checkbox pins the displayed position until released.
 - Modern light/dark theme selected from the left-aligned View menu (persisted by the backend-owned
   `config.json` service in DOOM; `localStorage` is standalone-PREVIEW-only). Native controls (scrollbars,
   checkboxes) follow the theme.
