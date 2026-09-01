@@ -54,7 +54,9 @@ auto under `--yes`). This never blocks the mod install — the DLLs deploy regar
 
 The bundle ships **no player override files**. At runtime the tool reads your own from
 `%LOCALAPPDATA%\snapmap-plus\overrides\`. Existing identities use the file-shadow; genuinely new text decl
-identities under `overrides\generated\decls\<type>\` are registered once at cold start by the decl server.
+identities under `overrides\generated\decls\<type>\` are registered once at cold start from one immutable
+in-memory per-decl table by the decl server. Each published entry is keyed by
+`decltree/<type>/<logical-name>.decl`; no aggregate source file is created or served.
 Snapmap+'s small built-in defaults are instead served from memory by the backend DLL. Neither user mechanism
 packages or distributes referenced binary assets.
 

@@ -68,4 +68,11 @@ int sh_strids_set_source(const char *path);
 /* How many #str_ rows the injector has appended (observability for the test harness). */
 unsigned long sh_strids_injected_count(void);
 
+#ifdef SH_STRIDS_TESTING
+/* Bind test doubles for the four engine entry points and run one inject pass; returns rows appended. */
+int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idstr_ctor);
+/* Read back how row `index` was attributed: its id and its owning package ("<user>" if not a package). */
+int sh_strids_test_row(int index, const char **id_out, const char **owner_out);
+#endif
+
 #endif /* BACKEND_B1_STRIDS_H */

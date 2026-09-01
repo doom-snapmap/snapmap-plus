@@ -6,6 +6,346 @@ where our own reimplementation was wrong, not the original SnapHak's behavior; a
 (or faithful reproduction of) the *original's* behavior belongs in [`fidelity.md`](fidelity.md)
 instead. Entries are chronological, newest first.
 
+## 2026-08-23 — Let a package own its shaders, not just its decls
+
+**What changed.** The cross-package resolver is now a namespace table rather than
+one hardcoded prefix. `generated/decls/` still maps to a package's `decls`
+subdirectory as before; `generated/spirv/` and `generated/renderprogs/` now map
+into a new `shaders` subdirectory, where the package path mirrors the engine
+resource name verbatim. Only the enumerated namespaces are package-resolved and
+each only out of its named subdirectory, so nothing else a package contains
+becomes reachable.
+
+**Why.** A render program is an ordinary decl type, so its
+`decls/renderprog/<name>.decl` already rode the existing path -- but the compiled
+module is opened separately, by the engine name
+`generated/spirv/<name>.{vspv,fspv,cspv}`, through the same provider vtable slot
+this layer hooks (the call site at RVA 0xD923A3 passes mode 0, which the open
+hook admits). Without a package-scoped route those files would have to sit in the
+shared tree, where two packages could overwrite each other's shaders on disk --
+the exact failure packages exist to prevent -- and deleting a package folder would
+no longer fully uninstall it.
+
+**Status.** The resolution path is covered by `override_packages_test`. Nothing
+has yet bound a custom shader in a running game; the remaining unknown is whether
+a renderprog decl registered at load-state RUNNING reaches the bind cleanly.
+
+## 2026-08-23 — Resolve a shadowed decl out of any installed package, not just the shared tree
+
+**What changed.** `overrides.c` now resolves an engine resource name across every
+installed override package instead of joining it straight onto the overrides
+root. A `generated/decls/<rest>` request is tried against the legacy shared tree
+first, then against each package as `<package root>\decls\<rest>` in
+`sh_packages_enumerate` order; the first existing file serves it. Only that one
+namespace is package-resolved, and only a package's own `decls` subdirectory, so
+a package cannot expose its `package.json` or anything else as an engine
+resource. The package set is captured once at install, alongside the existing
+audit and reclaim passes, because this sits on the engine's file-open path.
+
+**Why.** The per-package migration taught the decl server, the resource bridge
+and the package requirements reader to read N roots, but not the file shadow --
+and the file shadow is what actually hands decl bytes to the parser. The engine
+only ever asks for a decl by its canonical virtual name,
+`generated/decls/<type>/<name>.decl`, which reached `overrides\generated\decls\...`
+and therefore only ever matched a package literally named `generated`. Every
+other package's decls were unreachable. The failure was silent: the identity
+registered, the engine opened nothing, and the parse produced an empty default.
+For `snapeditorentitydef/demons/cyberdemon_enc` that meant no resolved
+`entityDef`, rejection by the native palette validator, and a terminal
+materialization failure that refused the 292 decls queued behind it -- so the
+Cyberdemon never appeared in the Toybox. A package's own patched copy of an
+identity DOOM also ships was likewise ignored in favour of the archive original.
+
+**Proof.** Live, on the pinned build: `file-shadow FIRED [user]` went from 50
+fires (all under `generated/`) to 66 including 11 from the `cyberdemon` package;
+`entitydef/ai/demon/cyberdemon_hell` now serves the package's 3023-byte patched
+copy instead of the archive's 2869-byte original; and the decl server went from
+`293 REFUSED; materialization was terminal` to `289 live objects materialized,
+0 REFUSED` with `palette-refresh FIRED`. Covered by `override_packages_test`,
+which fails on the package cases when the cross-package search is disabled while
+the legacy-tree case still passes.
+
+## 2026-08-21 — Keep published decl identities resolvable across a gameplay map load
+
+**What changed.** A new service, `decl_visibility`, answers DOOM's decl-resource
+existence probe for exactly the identities the dynamic decl server published,
+and only after the engine's own answer was "does not exist". It resolves the
+decl-resource manager through the pinned global at RVA `0x5557090`, requires the
+vtable `+0x78` slot to already hold the pinned method at RVA `0x1806100`, and
+refuses otherwise. The hook forwards all **seven** arguments of that method,
+including the trailing quiet flag. It claims a path only when the path sits
+under `generated/decls/` and names an entry in the immutable published table,
+and it corrects the boolean result alone, leaving every output argument exactly
+as the engine wrote it. `decl_visibility` is armed once, on the same main-thread
+command, after the palette rebuild succeeds; a refusal is never fatal to
+registration and only means new identities stay editor-only.
+
+**Why.** `DeclFind` decides existence for an identity with no live object by
+branching on the map-load lifecycle state at RVA `0x6DDE198`. Below state 2 it
+consults the source catalog that `DeclRegisterFile` populates; at state 2 and
+above -- which covers every gameplay map load -- it asks the decl-resource
+manager instead, and nothing this product wrote reached that manager. So a
+gameplay load logged `Unknown entityDef` for identities that had registered and
+materialized cleanly minutes earlier, and no actor ever spawned. With the hook
+installed, a cold run registered 232 identities with zero refusals, the engine
+resolved the whole actor dependency tree during the Play load, and the demon
+spawned, animated, engaged and killed the player.
+
+The seven-argument detail is load-bearing and was learned the hard way. Argument
+7 is a quiet flag: a cache miss returns false silently when it is non-zero and
+raises a fatal engine error naming the path when it is zero. An earlier
+six-argument forward left that slot as stack garbage, which turned ordinary
+silent misses into fatal errors and aborted a fully loaded map back to the
+SnapMap browser.
+
+**Also.** A placed editor entity from an override package rendered with a zero
+scale, so its model matrix was singular: the engine logged `modelMatrix invert
+failed` every frame, forced the axis back to identity, and the entity could not
+be transformed. The scale a Snap editor entity uses comes from its entityDef's
+`renderModelInfo.scale`, which a shipped entityDef inherits as a unit vector and
+a package-published one did not. Declaring it explicitly in the package's
+entityDef fixes the preview; no product code was involved.
+
+## 2026-08-20 — Use DOOM's own palette contract to admit new editor entities
+
+**What changed.** The dynamic decl server no longer walks a typed dependency
+closure and no longer requires the generic decl valid bit. Materialization is
+now per identity: every `MISSING` non-editor identity is given a live object in
+its own manager first, in the dependency order the source scans used, and the
+eligible new `snapEditorEntityDef` roots follow. Each identity is looked up with
+`DeclFind(..., makeDefault=0)` and only takes `makeDefault=1` when no object
+exists at all. A null manager, null object, unreadable `+0x2c`, in-progress
+object, or native exception remains terminal. An editor entity is additionally
+held to the same contract DOOM's palette validator applies: a non-null resolved
+entityDef at `+0x1c8`, every output target flagged `0x20`, and every input
+target flagged `0x10` at `+0x3cd`, with the target-array counts bounded. Shadowed
+identities are still never synthesized, source-only abstract bodies are still
+`NON-PALETTE`, and the palette builder is still called exactly once. New
+`DECLSTATE` diagnostics record each observed object's pointer, state byte,
+resolved entityDef, and target counts, and a refused root additionally probes
+its typed edges.
+
+**Why.** Static reverse engineering of the pinned build showed three things.
+The palette builder enumerates every live editor entity and admits exactly what
+its validator accepts; that validator never reads `+0x2c`, so requiring the
+valid bit was stricter than the engine itself and made an ordinary installed
+parent terminal. A manager lookup already lazily loads a pending object, so the
+valid bit records only that a load acquired a source. And the decl parsers
+resolve their own inherit and entityDef edges with `makeDefault=0`, which
+succeeds whenever the target has an object — so the generic requirement is that
+every registered identity has an object, not that the loader pre-resolves a
+typed graph. Dropping the closure also removes the per-decl-type edge schema a
+broader package format would otherwise have needed. Tests cover the palette
+contract directly, including in-progress objects, unresolved entityDefs,
+mis-flagged input and output targets, materialization order, and the rule that a
+shadowed identity is never synthesized.
+
+## 2026-08-20 — Classify declaration sources before live objects
+
+**What changed.** The dynamic decl server now resolves the native
+`DeclSourceFind(typeManager, logicalName)` routine before using
+`DeclFind(..., makeDefault=0)`. An existing source record is classified as
+`SHADOWED` and never enters the missing table, scanner, materialization pass, or
+palette refresh. Only a null source record falls back to the live-object lookup;
+both-null identities remain `MISSING`, and a null type manager is `REFUSED`.
+Source and live lookup exceptions are terminal and prevent table publication.
+The new direct signature is pinned to RVA `0x17B34B0` and the install gate
+requires a clean resolve at that exact address.
+
+**Why.** Native source registration can leave an existing source record
+unmaterialized, so object-only classification incorrectly treated it as absent
+and attempted to register it again. Source-first classification matches the
+engine's scanner semantics while retaining the live-object fallback for records
+that were created independently. Focused tests cover source-first call order,
+all classification outcomes, terminal lookup faults, and the clean pinned
+install gate.
+
+## 2026-08-20 — Materialize new editor-entity decls before palette rebuild
+
+**What changed.** The dynamic decl server now has an explicit second phase
+after every missing source scan succeeds. Before any native make-default call,
+it lexically checks each captured `snapEditorEntityDef` body for a real
+top-level `inherit = ...` or direct `edit.entityDef = ...` assignment. Comments,
+quoted decoys, and nested fields do not satisfy this gate; a source-only
+abstract body is classified `NON-PALETTE` and never calls `DeclFind(...,
+makeDefault=1)`. Eligible identities then take the pinned native
+`DeclFind(typeManager, name, makeDefault=1)` path and require a readable decl
+state byte at `+0x2c` with the in-progress bit clear and the valid bit set plus
+a non-null resolved entityDef pointer at `+0x1c8`. A null manager, null object,
+fault, unreadable state, in-progress object, or invalid object is terminal and
+prevents both registration success and palette refresh. A valid abstract/mispath
+object with a null entityDef is logged as `NON-PALETTE`, excluded from palette
+admission, and does not abort unrelated valid sedefs. The
+palette service now returns success/failure, no longer treats editor `+0x08 ==
+0` as a satisfied branch, validates the palette object, and calls
+`SnapPaletteBuild(editor+0x20660, NULL)` exactly once for either initialization
+state. The registration-success bit is published only after that return is
+successful; a false result is terminal.
+
+**Why.** Native source registration creates the source record but does not
+guarantee a live decl object for a new identity. The editor palette builder
+enumerates live `snapEditorEntityDef` objects, so it cannot discover a new
+entity until the native make-default lookup materializes it. Source-only
+abstract records are valid catalog entries but have no direct entityDef or
+inherit assignment and must not enter that native lookup. Abstract records that
+do materialize are still valid catalog entries but have no resolved entityDef
+and cannot be palette entries; the non-palette classifications keep them from
+aborting valid neighbors. The two-phase
+sequence keeps all source scans ahead of materialization, remains generic to
+the decl table, and changes no rawmap, archive, or `common.mapResources`
+state. Focused tests cover the comment/string-safe lexical gate, zero native
+calls for source-only bodies, scan-before-materialization wiring, the
+make-default argument, type filtering, state validation, terminal faults, and
+exactly-once palette calls for both initialization states.
+
+## 2026-08-20 — Rebuild the editor palette after new decl registration
+
+**What changed.** The dynamic decl server now exposes a success result only
+after every missing identity has completed the native source scan and the
+one-shot `SnapPaletteBuild` call has returned successfully. The ordinary
+engine tick does not poll or retry it. The backend validates the editor
+singleton against the pinned module base and the palette object's vtable
+(`module_base+0x20499A0`) before invoking the clean-signature routine with
+`editor+0x20660` and a NULL progress argument. Unsupported signatures, invalid
+objects/vtables, false results, or exceptions are terminal and cannot retry or
+call twice.
+
+**Why.** A decl can be fully present in the native catalog while the already
+built SnapMap editor palette still lacks its entity entry. Rebuilding the
+engine-owned derived list closes that gap without a rawmap hook, a literal
+`common.mapResources` edit, or a persistent game-file change. Focused tests
+cover the refused/applied states and exactly-once consumption; the real image
+signature test pins `SnapPaletteBuild` at RVA `0x54AEE0`.
+
+## 2026-08-20 — Require complete bounded DEFLATE slices
+
+**What changed.** The raw-DEFLATE reader now fails closed on every malformed, truncated, reserved-block,
+non-final, or output-overflow condition instead of returning partial bytes. It no longer treats reaching the
+requested output size as success: a complete BFINAL block and its EOB are required, including when an empty
+final block follows a full non-final block. Dynamic literal/length trees must explicitly contain symbol 256
+(EOB).
+
+The pindex `zsize` is treated as an exact compressed slice. After BFINAL only zero alignment bits in the last
+byte are accepted; concatenated streams and trailing bytes are refused. The one narrow non-final exception matches
+Doom's archive compressor: a slice may end immediately after a non-final empty stored block with `LEN=0` and
+`NLEN=0xffff`, the raw-DEFLATE representation emitted by `Z_SYNC_FLUSH`; its alignment padding must also be zero.
+Focused tests cover fixed and dynamic known-good streams, missing EOB, exact-size output followed by truncation,
+non-final EOF, valid/invalid sync-flush termination, reserved blocks, oversize output, legal empty-final-block
+termination, and trailing-byte refusal.
+
+## 2026-08-20 — Complete the pinned 31-slot idFile provider table
+
+**What changed.** The file-shadow stream now exposes the exact 31-entry idFile vtable used by the
+supported Steam build, including the verified storage slots at `+0xc0..+0xd8` and a read-only
+`SetLength` refusal at `+0x60`. Read/write byte counts use the native 64-bit contract. The three
+build-specific idStr helpers at `+0xe0/+0xe8/+0xf0` are installed as native engine addresses only when
+all three signatures resolve cleanly; helper publication completes before the provider open-slot swap,
+and a dirty or missing helper fails closed without exposing a partial table. The product remains pinned
+to the original `DOOMx64vk.exe` Steam image and does not claim support for `DOOMx64vk_newbuild.exe`.
+The install now enforces that boundary: the provider ctor, all three native helper addresses, and the
+decoded provider vtable must occupy the audited RVAs before the hook is published. Signed cursor additions
+are overflow-checked, negative file lengths are refused, and an explicit installed-package probe fails when
+it finds no manifest-backed entries instead of reporting a vacuous pass.
+
+Focused contract tests cover the 31-slot shape, helper all-or-nothing publication, terminal refusal,
+native helper RVAs, SetLength behavior for both memory and file-backed streams, supported-build admission,
+and overflowing-seek cursor preservation. The real-image signature test resolves all three helpers uniquely
+at `0x267390`, `0x267290`, and `0x268470`.
+
+## 2026-08-20 — Reject malformed resource streams before publication
+
+**What changed.** The bounded raw-DEFLATE decoder now validates each canonical Huffman code space while
+building code-length, literal/length, and distance trees. Oversubscribed trees and incomplete trees outside
+the DEFLATE/zlib exceptions are rejected; the one-symbol one-bit EOB-only literal tree, all-literal
+zero-distance tree, one-bit single-distance tree, and predefined fixed-distance tree retain their defined
+behavior. The resource bridge also refuses a
+selected slice that declares compressed bytes but zero decoded bytes, rather than treating a zero-byte decoder
+result as a successful payload.
+
+The bridge now claims its one-shot capture with a single `NEW -> INSTALLING` compare-and-swap, publishes
+`READY` only after the complete manifest/pindex/archive snapshot is validated, and enters terminal `FAILED`
+on any refusal. Reader APIs return no snapshot data while capture is installing, so no caller can observe
+partially built globals. Focused tests cover oversubscribed/incomplete trees, every legal exceptional tree,
+the zero-decoded compressed slice, and the read-only stream's native true/no-op slots.
+
+## 2026-08-20 — Match the native idFile seek/read/write helpers
+
+**What changed.** The override provider now uses the engine's idFile seek-origin contract: `0` is
+relative-to-current, `1` is relative-to-end, and `2` is absolute; any other origin refuses without
+moving the cursor. The `+0x38` helper performs an absolute seek followed by read, and the `+0x40`
+helper performs the independently verified absolute seek followed by write. Memory-backed provider
+streams remain read-only, including the write-at path. Focused native tests cover all three origins,
+invalid-origin preservation, absolute read-at, and read-only write-at behavior.
+
+## 2026-08-20 — New decls enter the native source catalog
+
+**What changed.** The dynamic decl server no longer exposes raw `AddFromText` objects through a DeclFind
+detour, and it no longer frames multiple identities into an aggregate source. Those objects can be registered
+yet lack the canonical parsed state consumed by inheritance, which made a nested parent lookup return an object
+that immediately faulted during entityDef field copying. The server now classifies all existing identities with
+lookup-only `DeclFind(..., makeDefault=0)`, excludes them as ordinary `SHADOWED` file overrides, and copies only
+the absent set into an immutable exact table of `decltree/<type>/<logical-name>.decl` entries. Each table body is
+one validated brace block; the main-thread command invokes the registry's native `+0x38` source scanner once
+per identity in dependency order, letting DOOM create its own catalog records through the source-file
+architecture it expects.
+
+The path is fail-closed: registry `+0x38` and `+0x58` must match clean pinned signatures, each identity and
+body is bounded and structurally validated, and publication happens only after complete classification.
+The source-register method takes a native 48-byte `idStr` by pointer and returns a boolean-like result. The
+server constructs a temporary containing `<type>/<logical-name>.decl` with the resolved `IdStrCtor`, calls the
+scanner exactly once for that candidate, and always destroys it with `IdStrDtor`; a constructor/scanner/
+destructor exception or false scanner result terminates the ordered sequence at that candidate with no alternate
+C-string call, fallback, or retry. The provider serves only published exact table keys before ordinary layers;
+it never exposes an aggregate alias. There is no raw object cache, post-scan lookup, default synthesis, hot
+reload, or DeclFind code patch. Native tests cover single-body validation, immutable exact-key publication,
+case-sensitive provider matching, deterministic dependency ordering, and the constructor -> scan -> destructor
+boundary including terminal failures.
+
+## 2026-08-17 — Cut-content packages no longer need rebuilt game archives
+
+**What changed.** The override provider now accepts bounded metadata-only manifests under
+`overrides/<package>/resources`. At launch it resolves every exact manifest triple against the user's installed
+base-game pindex, validates the complete sparse set and archive bounds, and keeps the source archives read-only.
+When the engine asks for an admitted virtual path, Snapmap+ reads and raw-DEFLATE-decodes just that slice into its
+existing in-memory `idFile` stream. The dynamic decl server consumes linked game-owned `.decl` rows from the same
+snapshot; a local generated decl of the same identity wins so packages can carry only their authored patches.
+One logical resource may enumerate multiple unique virtual files, as render-program and other compiled bundles
+do. Exact pindex duplicates collapse only after byte-for-byte stored-payload equivalence; divergent repeats fail
+the complete launch snapshot.
+
+**The prior limitation.** Loose file shadows could replace a path only after the SnapMap resource set already knew
+about it, while native decl registration could add text identities but not their referenced models, animations,
+images, collision, behaviors, and other campaign-only dependencies. The historical Cyberdemon proof rebuilt a
+large SnapMap patch/pindex and regenerated sidecars. The sparse bridge supplies the same installed bytes on demand
+without copying or changing a game archive, pindex, sidecar, executable, or mapResources ID table. Admitted new
+decls are then ordered by unambiguous quoted logical-name references, which lets foundational particles, sounds,
+and other supplied decls register before the higher-level decls that consume them without package-specific names
+or encounter rules. Removing the
+Snapmap+ DLL therefore restores the untouched engine resource path.
+
+The native test uses a synthetic pindex/archive to prove exact resolution, compressed decode, provider gating,
+path-tolerant lookup, multi-file identities, equivalent-repeat collapse, divergent-repeat refusal, provider-path
+collision refusal, and truncated-stream rejection. A separate installed-data probe decodes the Cyberdemon
+dependencies from the user's own archives without emitting a resource payload.
+
+## 2026-08-17 — Decl discovery could split collisions at its capacity boundary
+
+**What changed.** The dynamic decl server now enumerates a bounded metadata snapshot before admitting any file.
+It sorts that complete set deterministically, refuses every member of each case-insensitive type/name collision,
+then admits the first 512 non-colliding entries. Unexpected root, first-entry, or next-entry filesystem errors
+abort and discard the whole snapshot before a main-thread command can be queued.
+
+**The bugs.** The 512-entry cap previously ran while the operating system was still enumerating directories.
+If two case variants of one logical identity straddled that boundary, the retained member appeared unique and
+could be registered while its twin was merely over-cap. `FindFirstFileA` and `FindNextFileA` failures were also
+treated as an empty directory or normal end, so a partial traversal could be applied as though it were complete.
+
+The native regression test places a collision on opposite sides of a 515-entry input, proves that both members
+are excluded before the 512-entry admission boundary, and checks the deterministic last admitted identity. A
+scripted Win32 enumeration seam proves normal empty/end behavior, root and mid-stream access failures, recursive
+failure propagation, whole-discovery discard, and exactly-once handle closure. The source-wiring contract also
+pins metadata walk, collision analysis, and capacity admission in that order.
+
 ## 2026-08-15 — Asset catalogs retained complete source tables after parsing
 
 **What changed.** The installed resource indexes are now reduced to interned recognized-name and

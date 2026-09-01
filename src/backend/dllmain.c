@@ -24,9 +24,11 @@
 #include "smoke.h"
 #include "rawmap.h"
 #include "palette_guard.h"
+#include "palette_refresh.h"
 #include "../fault_shield/mapload_guards.h"   /* the two map-load / spawn game-defect guards */
 #include "strids.h"
 #include "overrides.h"
+#include "package_requirements.h"
 #include "decl_server.h"
 #include "commands.h"
 #include "cvars.h"
@@ -90,9 +92,7 @@ static void resolve_doom(void)
  * mirror every <data-root>\<sub> path the backend builds. */
 static void ensure_user_dirs(void)
 {
-    static const char *subs[] = { "", "\\strings", "\\overrides",
-                                  "\\overrides\\generated", "\\overrides\\generated\\decls",
-                                  "\\prefabs" };
+    static const char *subs[] = { "", "\\strings", "\\overrides", "\\prefabs" };
     char base[MAX_PATH], path[MAX_PATH];
     int i;
     if (FAILED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base))) {
@@ -108,7 +108,7 @@ static void ensure_user_dirs(void)
             backend_log(line);
         }
     }
-    backend_log("snapmap-plus user-data dirs ensured (root + strings/overrides/generated/decls + prefabs)");
+    backend_log("snapmap-plus user-data dirs ensured (root + strings/overrides/prefabs)");
 }
 
 static DWORD WINAPI bootstrap_thread(LPVOID p)
@@ -298,25 +298,53 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * code detour -- it swaps the engine resource-provider's open-by-name VTABLE SLOT (+0xf8) with
          * our override-open. The vtable is .data (not sig-scannable), so we resolve the provider CTOR
          * (ResProviderCtor) by signature and the install decodes its `LEA RAX,[rip+vtable]` to recover
-         * the vtable build-portably, then saves the slot's original + writes our hook into the slot.
+         * the vtable, then requires the ctor, native-helper, and vtable RVAs to match the audited
+         * 31-slot Steam build before saving the slot's original + writing our hook into the slot.
          * Pass the resolve STATUS: the ctor is only used to DECODE the vtable LEA, so a hooked prologue
          * (SIG_OK_HOOKED) would corrupt the decode -- refuse on the hook-tolerant fallback. The shadow
-         * is always-live once installed (no arm gate) and resolves THREE-LAYER: a user's
-         * overrides/<name> file under %LOCALAPPDATA%\snapmap-plus\ -> our built-in default decls from memory
-         * (the "*Custom" tab set; never written to disk) -> the engine's packaged resource. The user-file
-         * layer is gated by the restart-only config snapshot captured above; built-in defaults and engine
-         * resources remain active regardless. See overrides.c. */
+         * is always-live once installed (no arm gate) and resolves FOUR-LAYER: a user's loose
+         * overrides/<name> file -> a manifest-linked installed resource -> our built-in default decls from
+         * memory (the "*Custom" tab set; never written to disk) -> the engine's packaged resource. Both
+         * user-owned layers are gated by the restart-only config snapshot captured above; built-in defaults
+         * and engine resources remain active regardless. See overrides.c and resource_bridge.c. */
+        /* The returned idFile is the pinned build's full 31-slot table. Its native idStr helpers
+         * (+0xe0/+0xe8/+0xf0) are passed only from clean SIG_OK results; overrides.c publishes all
+         * three before this provider slot is changed and refuses the install on any dirty/missing one. */
         void *res_ctor = NULL;
         int   ctor_clean = 0;
+        void *read_string = NULL;
+        void *compare = NULL;
+        void *write_string = NULL;
+        int   read_string_clean = 0;
+        int   compare_clean = 0;
+        int   write_string_clean = 0;
         for (size_t i = 0; i < db; i++) {
             if (results[i].name && strcmp(results[i].name, "ResProviderCtor") == 0) {
                 if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
                     res_ctor = (void *)results[i].addr;
                 ctor_clean = (results[i].status == SIG_OK);
-                break;
+            }
+            if (results[i].name && strcmp(results[i].name, "IdFileReadString") == 0) {
+                if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
+                    read_string = (void *)results[i].addr;
+                read_string_clean = (results[i].status == SIG_OK);
+            }
+            if (results[i].name && strcmp(results[i].name, "IdFileCompare") == 0) {
+                if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
+                    compare = (void *)results[i].addr;
+                compare_clean = (results[i].status == SIG_OK);
+            }
+            if (results[i].name && strcmp(results[i].name, "IdFileWriteString") == 0) {
+                if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
+                    write_string = (void *)results[i].addr;
+                write_string_clean = (results[i].status == SIG_OK);
             }
         }
-        sh_overrides_install(res_ctor, ctor_clean);
+        int overrides_installed = sh_overrides_install(g_doom_base,
+                                                       res_ctor, ctor_clean,
+                                                       read_string, read_string_clean,
+                                                       compare, compare_clean,
+                                                       write_string, write_string_clean);
 
         /* cvar + console-command registration (clone of OG XINPUT1_3 FUN_1800229b1). Both ride the
          * signature-resolved engine fns; neither installs an inline detour. CVARS FIRST -- they have NO
@@ -333,14 +361,19 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         void *cmdsys   = sh_resolve_cmdsys(results, db, g_doom_base);
         sh_commands_install(add_cmd, cmdsys, printf_d, get_decls, g_doom_base);
 
-        /* The DYNAMIC DECL SERVER complements the file-shadow installed above. It snapshots only
-         * overrides/generated/decls, then registers a private command and BufferCommandTexts it so the
-         * engine's native type lookup + AddDeclFromText calls run at the command-exec point on DOOM's
-         * main thread. Existing identities remain ordinary SHADOWED overrides; absent identities become
-         * genuine REGISTERED decls. One immutable launch snapshot, no watcher/retry/hot reload. AFTER
-         * sh_commands_install so AddCommand/cmdSystem are proven live and the command-unlock detour has
-         * already established the normal registration ABI. See decl_server.c. */
-        sh_decl_server_install(results, db, g_doom_base, cmdsys);
+        /* Declarative package runtime requirements are not arbitrary startup scripts. The capture
+         * accepts only product-audited idempotent cvar/value pairs, then the existing backend tick queues
+         * them once after engine load_state reaches RUNNING. In particular, cut-content blacklist gates
+         * are never changed during the fragile startup decl-parse phase. */
+        {
+            char override_root[MAX_PATH];
+            void *buffer_cmd = (void *)sig_addr_by_name(results, db, "BufferCommandText");
+            if (sh_overrides_get_root(override_root, sizeof(override_root)))
+                sh_package_requirements_install(override_root, g_doom_base, cmdsys, buffer_cmd,
+                                                sh_user_overrides_enabled_for_launch());
+            else
+                backend_log("package-requirements REFUSED: effective override root unavailable");
+        }
 
         /* backend touch: AFTER `sh` is registered (sh_commands above registers the "sh" command),
          * create the shared UI-interface object + LoadLibraryA(".\\snapmap-plus\\snapmap-plus-ui.dll") +
@@ -369,6 +402,27 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * sh_ui_bridge_install (the interface + its shared vtable must exist) + sh_apply_engine_install (its
          * slot bodies must be ready). See iface_engine.c. */
         sh_iface_engine_install(results, db, g_doom_base);
+
+        /* New decl identities are catalogued by the engine's native source
+         * scanner, but the editor palette is a separate derived list. Resolve
+         * and arm the clean-signature native rebuild now; the one-shot call is
+         * made synchronously by the successful registration command on the
+         * engine main thread. Unsupported builds refuse before any engine call. */
+        sh_palette_refresh_install(results, db, g_doom_base);
+
+        /* The DYNAMIC DECL SERVER complements the file-shadow installed above. It snapshots local and
+         * linked generated decls, then registers a private command and BufferCommandTexts it so DOOM's
+         * main thread can classify existing identities with lookup-only DeclFind. Existing identities
+         * remain ordinary SHADOWED overrides; absent identities are copied into an immutable exact
+         * decltree table and submitted once each, in dependency order, through the registry's native
+         * +0x38 source scanner. Install this only after the UI/editor bridge and palette one-shot are
+         * armed, so a queued command can never race their initialization. There is no aggregate alias,
+         * per-identity AddFromText call, raw object cache, lookup detour, watcher, retry, or hot reload.
+         * See decl_server.c. */
+        if (overrides_installed)
+            sh_decl_server_install(results, db, g_doom_base, cmdsys);
+        else
+            backend_log("decl-server REFUSED: pinned resource-provider ABI was not installed");
 
         /* wire the entity/spawn handler deps (gameMgr global decoded via GameMgrLea,
          * cmdSystem reused from the sh_resolve_cmdsys decode above, SpawnByEntityDef from the sig DB).

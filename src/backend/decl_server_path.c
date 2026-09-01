@@ -1,6 +1,7 @@
 /* decl_server_path.c -- see decl_server_path.h. Pure C; no Windows APIs. */
 #include "decl_server_path.h"
 
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -9,6 +10,64 @@
 static int ascii_lower(int c)
 {
     return c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c;
+}
+
+static int ascii_case_compare(const char *left, const char *right)
+{
+    const unsigned char *a = (const unsigned char *)(left ? left : "");
+    const unsigned char *b = (const unsigned char *)(right ? right : "");
+    while (*a && *b) {
+        int lower_a = ascii_lower(*a);
+        int lower_b = ascii_lower(*b);
+        if (lower_a != lower_b) return lower_a < lower_b ? -1 : 1;
+        a++;
+        b++;
+    }
+    if (*a == *b) return 0;
+    return *a ? 1 : -1;
+}
+
+static int order_item_compare(const void *left, const void *right)
+{
+    const sh_decl_server_order_item *a = (const sh_decl_server_order_item *)left;
+    const sh_decl_server_order_item *b = (const sh_decl_server_order_item *)right;
+    int result = ascii_case_compare(a->type, b->type);
+    if (!result) result = ascii_case_compare(a->name, b->name);
+    if (!result) result = ascii_case_compare(a->source, b->source);
+    if (!result) result = strcmp(a->source ? a->source : "", b->source ? b->source : "");
+    return result;
+}
+
+size_t sh_decl_server_order_and_admit(sh_decl_server_order_item *items,
+                                      size_t count, size_t limit)
+{
+    size_t i;
+    size_t admitted = 0;
+    if (!items || count == 0) return 0;
+    for (i = 0; i < count; i++) {
+        items[i].duplicate = 0;
+        items[i].admitted = 0;
+    }
+    qsort(items, count, sizeof(items[0]), order_item_compare);
+    for (i = 0; i < count;) {
+        size_t end = i + 1;
+        while (end < count &&
+               ascii_case_compare(items[i].type, items[end].type) == 0 &&
+               ascii_case_compare(items[i].name, items[end].name) == 0) {
+            end++;
+        }
+        if (end - i > 1) {
+            size_t j;
+            for (j = i; j < end; j++) items[j].duplicate = 1;
+        }
+        i = end;
+    }
+    for (i = 0; i < count && admitted < limit; i++) {
+        if (items[i].duplicate) continue;
+        items[i].admitted = 1;
+        admitted++;
+    }
+    return admitted;
 }
 
 static int suffix_decl(const char *s, size_t n)
@@ -29,9 +88,12 @@ static int type_char(unsigned char c)
 
 static int name_char(unsigned char c)
 {
-    if (c <= 0x20 || c >= 0x7f) return 0;
-    return c != '<' && c != '>' && c != ':' && c != '"' &&
-           c != '|' && c != '?' && c != '*';
+    /* The native scanner derives one logical name from the source path. Keep
+     * the portable path-token alphabet; punctuation such as braces,
+     * semicolons, equals, and parentheses is not a safe identity character
+     * even though Windows permits it in a filename. */
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
 }
 
 static int dot_segment(const char *s, size_t n)

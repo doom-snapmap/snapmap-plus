@@ -79,13 +79,13 @@ int main(int argc, char **argv)
                results[i].status == SIG_OK ? "" : st);
     }
 
-    /* The dynamic decl server does more than call the four resolved functions: it decodes the registry
-     * object from DeclRegistryAnchor+0x10 and requires live vtable slots +0x58/+0x70 to equal the
-     * independently resolved DeclTypeByName/DeclAddFromText entries. Prove that exact data-boundary ABI
-     * against the pinned image too, not only the four text signatures. Static pointers in the PE contain
+    /* The dynamic decl server decodes the registry object from DeclRegistryAnchor+0x10 and requires
+     * live vtable slots +0x38/+0x58 to equal the independently resolved DeclRegisterFile/DeclTypeByName
+     * entries. Prove that exact data-boundary ABI against the pinned image too, not only the text signatures.
+     * Static pointers in the PE contain
      * preferred-base VAs, so translate them back into this test's heap-mapped image before dereferencing. */
     {
-        const sig_result *anchor = NULL, *type_method = NULL, *add_method = NULL;
+        const sig_result *anchor = NULL, *type_method = NULL, *register_method = NULL;
         IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
         IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
         uint64_t preferred = nt->OptionalHeader.ImageBase;
@@ -93,17 +93,17 @@ int main(int argc, char **argv)
         for (i = 0; i < total; i++) {
             if (strcmp(results[i].name, "DeclRegistryAnchor") == 0) anchor = &results[i];
             else if (strcmp(results[i].name, "DeclTypeByName") == 0) type_method = &results[i];
-            else if (strcmp(results[i].name, "DeclAddFromText") == 0) add_method = &results[i];
+            else if (strcmp(results[i].name, "DeclRegisterFile") == 0) register_method = &results[i];
         }
-        if (!anchor || !type_method || !add_method || anchor->status != SIG_OK ||
-            type_method->status != SIG_OK || add_method->status != SIG_OK) {
+        if (!anchor || !type_method || !register_method || anchor->status != SIG_OK ||
+            type_method->status != SIG_OK || register_method->status != SIG_OK) {
             printf("BAD decl-registry ABI: prerequisite signature missing\n");
             bad++;
         } else {
             const uint8_t *mov = base + anchor->rva + 0x10;
             int32_t disp = 0;
             const uint8_t *slot;
-            uint64_t registry_va = 0, vtable_va = 0, type_va = 0, add_va = 0;
+            uint64_t registry_va = 0, vtable_va = 0, type_va = 0, register_va = 0;
             int abi_ok = mov[0] == 0x48 && mov[1] == 0x8B && mov[2] == 0x0D;
             memcpy(&disp, mov + 3, sizeof(disp));
             slot = mov + 7 + disp;
@@ -113,19 +113,19 @@ int main(int argc, char **argv)
             if (abi_ok && registry_va >= preferred && registry_va - preferred + 8 <= image_sz)
                 memcpy(&vtable_va, base + (size_t)(registry_va - preferred), sizeof(vtable_va));
             else abi_ok = 0;
-            if (abi_ok && vtable_va >= preferred && vtable_va - preferred + 0x78 <= image_sz) {
+            if (abi_ok && vtable_va >= preferred && vtable_va - preferred + 0x60 <= image_sz) {
                 const uint8_t *vtable = base + (size_t)(vtable_va - preferred);
+                memcpy(&register_va, vtable + 0x38, sizeof(register_va));
                 memcpy(&type_va, vtable + 0x58, sizeof(type_va));
-                memcpy(&add_va, vtable + 0x70, sizeof(add_va));
             } else abi_ok = 0;
             if (!abi_ok || type_va != preferred + type_method->rva ||
-                add_va != preferred + add_method->rva) {
-                printf("BAD decl-registry ABI: registry=0x%llx vtable=0x%llx type=0x%llx add=0x%llx\n",
+                register_va != preferred + register_method->rva) {
+                printf("BAD decl-registry ABI: registry=0x%llx vtable=0x%llx register=0x%llx type=0x%llx\n",
                        (unsigned long long)registry_va, (unsigned long long)vtable_va,
-                       (unsigned long long)type_va, (unsigned long long)add_va);
+                       (unsigned long long)register_va, (unsigned long long)type_va);
                 bad++;
             } else {
-                printf("OK  decl-registry ABI  anchor->registry; vtable +0x58/+0x70 match resolved methods\n");
+                printf("OK  decl-registry ABI  anchor->registry; vtable +0x38/+0x58 match resolved methods\n");
             }
         }
     }

@@ -32,6 +32,8 @@
 #include <string.h>
 #include "snapmap_plus_iface.h"
 #include "apply_engine.h"
+#include "decl_server.h"
+#include "package_requirements.h"
 #include "typeinfo.h"     /* sh_typeinfo_get_declmgr -- the one shared declMgr accessor */
 #include "ui_bridge.h"    /* sh_ui_get_iface -- reach the toast slot for the apply-result toast */
 #include "iface_engine.h" /* sh_iface_class_inherit_ok -- the LAYER-C class/inherit prevention guard */
@@ -2376,6 +2378,16 @@ static void ae_play_log_diff(const ae_play_snap *before, const ae_play_snap *aft
  * reads while building its per-frame capability flags). */
 void sh_apply_prefab_poll_play(void)
 {
+    /* This tick already has the engine's true load-state word. Give declarative package requirements
+     * their one safe post-startup opportunity before doing editor-specific work.
+     *
+     * This is now the FALLBACK path. The decl server applies the same requirements itself, and
+     * synchronously, just before it publishes inside idCommonLocal::Init -- the cut-content gates
+     * have to be live before a new FX or model-backed decl is parsed, and that parse now happens
+     * during boot, so waiting for RUNNING would be far too late. Both entry points share one CAS,
+     * so whichever runs first wins. This one still matters on a build where the decl server
+     * refused, and on a launch with no packages at all. */
+    sh_package_requirements_poll();
     if (!g_doom_base) return;
 
 #if AE_PASTE_DIAG_ON

@@ -26,125 +26,9 @@
 #include "bcn.h"
 #include "megapreview.h"   /* the .vmtr atlas: the other half of the material catalog */
 #include "backend_log.h"
+#include "raw_deflate.h"
 
 #define MAX_PREVIEW 240u        /* matches megapreview's 2x2-page budget, so both routes agree */
-
-/* ------------------------------------------------------------------ raw DEFLATE ---------------
- * The backend links no zlib, and the payloads are raw DEFLATE terminated by a Z_SYNC_FLUSH
- * marker rather than a BFINAL block. We always know the uncompressed size from
- * the index record, so this stops on output-full and never needs to see the terminator. */
-
-typedef struct { const unsigned char *src; size_t len, pos; unsigned bitbuf, bitcnt; } inf_t;
-
-static unsigned inf_bits(inf_t *s, unsigned n)
-{
-    while (s->bitcnt < n) {
-        unsigned b = (s->pos < s->len) ? s->src[s->pos++] : 0u;
-        s->bitbuf |= b << s->bitcnt;
-        s->bitcnt += 8;
-    }
-    unsigned v = s->bitbuf & ((1u << n) - 1u);
-    s->bitbuf >>= n; s->bitcnt -= n;
-    return v;
-}
-
-typedef struct { unsigned short count[16], symbol[288]; } huff_t;
-
-static void huff_build(huff_t *h, const unsigned char *lens, unsigned n)
-{
-    unsigned offs[16], i;
-    for (i = 0; i < 16; ++i) h->count[i] = 0;
-    for (i = 0; i < n; ++i) h->count[lens[i]]++;
-    h->count[0] = 0;
-    offs[0] = 0;
-    for (i = 1; i < 16; ++i) offs[i] = offs[i-1] + h->count[i-1];
-    for (i = 0; i < n; ++i) if (lens[i]) h->symbol[offs[lens[i]]++] = (unsigned short)i;
-}
-
-static int huff_decode(inf_t *s, const huff_t *h)
-{
-    int code = 0, first = 0, index = 0;
-    for (int len = 1; len < 16; ++len) {
-        code |= (int)inf_bits(s, 1);
-        int count = h->count[len];
-        if (code - count < first) return h->symbol[index + (code - first)];
-        index += count; first += count; first <<= 1; code <<= 1;
-    }
-    return -1;
-}
-
-static const unsigned short LBASE[29] = {3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258};
-static const unsigned short LEXT [29] = {0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0};
-static const unsigned short DBASE[30] = {1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577};
-static const unsigned short DEXT [30] = {0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13};
-
-/* Returns bytes produced (== dst_len on success). */
-static size_t inflate_raw(const unsigned char *src, size_t src_len, unsigned char *dst, size_t dst_len)
-{
-    inf_t s = { src, src_len, 0, 0, 0 };
-    size_t out = 0;
-    huff_t lit, dist;
-    for (;;) {
-        if (out >= dst_len) break;
-        unsigned final = inf_bits(&s, 1), type = inf_bits(&s, 2);
-        if (type == 0) {                                  /* stored */
-            s.bitbuf = 0; s.bitcnt = 0;
-            if (s.pos + 4 > s.len) break;
-            unsigned len = s.src[s.pos] | (s.src[s.pos+1] << 8);
-            s.pos += 4;
-            if (s.pos + len > s.len) len = (unsigned)(s.len - s.pos);
-            if (out + len > dst_len) len = (unsigned)(dst_len - out);
-            memcpy(dst + out, s.src + s.pos, len);
-            s.pos += len; out += len;
-        } else if (type == 1 || type == 2) {
-            if (type == 1) {                              /* fixed tables */
-                unsigned char l[288], d[30];
-                int i = 0;
-                for (; i < 144; ++i) l[i] = 8;
-                for (; i < 256; ++i) l[i] = 9;
-                for (; i < 280; ++i) l[i] = 7;
-                for (; i < 288; ++i) l[i] = 8;
-                for (i = 0; i < 30; ++i) d[i] = 5;
-                huff_build(&lit, l, 288); huff_build(&dist, d, 30);
-            } else {                                      /* dynamic tables */
-                static const unsigned char ord[19] = {16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15};
-                unsigned nlen = inf_bits(&s,5)+257, ndist = inf_bits(&s,5)+1, ncode = inf_bits(&s,4)+4;
-                unsigned char cl[19]; memset(cl, 0, sizeof cl);
-                for (unsigned i = 0; i < ncode; ++i) cl[ord[i]] = (unsigned char)inf_bits(&s,3);
-                huff_t clh; huff_build(&clh, cl, 19);
-                unsigned char lens[320]; memset(lens, 0, sizeof lens);
-                unsigned i = 0;
-                while (i < nlen + ndist) {
-                    int sym = huff_decode(&s, &clh);
-                    if (sym < 0) return out;
-                    if (sym < 16) lens[i++] = (unsigned char)sym;
-                    else if (sym == 16) { unsigned char prev = i ? lens[i-1] : 0; unsigned r = 3 + inf_bits(&s,2); while (r-- && i < 320) lens[i++] = prev; }
-                    else if (sym == 17) { unsigned r = 3 + inf_bits(&s,3); while (r-- && i < 320) lens[i++] = 0; }
-                    else                { unsigned r = 11 + inf_bits(&s,7); while (r-- && i < 320) lens[i++] = 0; }
-                }
-                huff_build(&lit, lens, nlen); huff_build(&dist, lens + nlen, ndist);
-            }
-            for (;;) {
-                int sym = huff_decode(&s, &lit);
-                if (sym < 0) return out;
-                if (sym < 256) { if (out < dst_len) dst[out++] = (unsigned char)sym; else return out; }
-                else if (sym == 256) break;
-                else {
-                    sym -= 257; if (sym >= 29) return out;
-                    unsigned len = LBASE[sym] + inf_bits(&s, LEXT[sym]);
-                    int ds = huff_decode(&s, &dist);
-                    if (ds < 0 || ds >= 30) return out;
-                    unsigned d = DBASE[ds] + inf_bits(&s, DEXT[ds]);
-                    if (d > out) return out;
-                    while (len-- && out < dst_len) { dst[out] = dst[out - d]; out++; }
-                }
-            }
-        } else return out;
-        if (final) break;
-        if (s.pos >= s.len && s.bitcnt == 0) break;
-    }
-    return out;
-}
 
 /* ------------------------------------------------------------------- containers ---------------*/
 
@@ -1252,7 +1136,7 @@ static unsigned char *read_payload(const rec_t *r, size_t *out_len)
     if (r->csz == r->usz) { *out_len = r->usz; return raw; }
     unsigned char *out = (unsigned char *)malloc(r->usz);
     if (!out) { free(raw); return NULL; }
-    size_t n = inflate_raw(raw, r->csz, out, r->usz);
+    size_t n = sh_inflate_raw(raw, r->csz, out, r->usz);
     free(raw);
     *out_len = n;
     return out;

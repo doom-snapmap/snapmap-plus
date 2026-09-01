@@ -117,7 +117,7 @@ code — is in **[`docs/contributing.md`](docs/contributing.md)**. The short ver
 2. Make your change under `src/`. Build (`build.ps1`), package (`package.ps1`), and test it in your own DOOM
    via `installer\snapmap-plus.exe install --local dist`.
 3. Open a **pull request** against `main`. The CI gate runs a security scan (no new binaries · capability-surface
-   scan · gitleaks), the Windows build + package, the XInput ordinal-parity check, the 11-test native suite
+   scan · gitleaks), the Windows build + package, the XInput ordinal-parity check, the 31-test native suite
    (`tests\run-tests.ps1`), and the installer's `gofmt`/`vet`/`test`; a maintainer reviews and merges. Tagged,
    reviewed commits are what produce releases.
 
@@ -181,14 +181,16 @@ See [`docs/architecture.md`](docs/architecture.md) for validation, recovery, and
 
 ## Overrides and new decls (runtime)
 
-Snapmap+ has two complementary user-decl paths under `%LOCALAPPDATA%\snapmap-plus\overrides\`:
+Snapmap+ has three complementary runtime paths under `%LOCALAPPDATA%\snapmap-plus\overrides\`:
 
 - **Existing decl identity:** the ordinary resource-loader file shadow remains unchanged. Your file wins
   while the user layer is enabled, then Snapmap+'s few built-in defaults (the "*Custom" palette tab, served
   from memory), then DOOM's packaged resource.
 - **Genuinely new decl identity:** put a `.decl` below `generated\decls\<type>\`. At cold start the decl server
-  derives the engine type from the first directory and the logical name from the remaining path, then uses
-  DOOM's native dynamic-decl API to register an identity that did not exist in the packaged indexes. For
+  derives the engine type from the first directory and the logical name from the remaining path. On DOOM's
+  main thread it excludes identities already in the registry, copies the absent set into one immutable
+  per-decl table keyed by `decltree\<type>\<logical-name>.decl`, and submits each source once through DOOM's
+  native catalog scanner in dependency order. For
   example, this file:
 
   ```text
@@ -197,11 +199,23 @@ Snapmap+ has two complementary user-decl paths under `%LOCALAPPDATA%\snapmap-plu
 
   registers type `actormodifier` with logical name `actormodifier/demon/cacodemon`. If that identity already
   exists, the decl server does not replace it; the file stays on the ordinary shadow path instead.
+- **Game-owned resource dependency:** put a metadata manifest below `generated\resources\`. Each row names an
+  exact resource already present in the player's installed `gameresources.pindex`. Snapmap+ validates the
+  complete manifest at cold start, then reads and decodes only the selected archive slice when DOOM requests
+  it. The archives, indexes, verification sidecars, executable, and `common.mapResources` remain untouched.
+  This can make campaign assets already shipped with DOOM available to a SnapMap override package; it cannot
+  supply assets that are absent from the local installation or distribute them inside a published map.
 
 Discovery is one immutable snapshot per DOOM process. There is no refresh, watcher, hot reload, or unload;
-restart DOOM after adding or changing files. The backend log records every candidate as `REGISTERED`,
-`SHADOWED`, or `REFUSED`. This creates text decl identities only: referenced models, sounds, images, and other
-binary resources must already be available through a separate resource mechanism.
+restart DOOM after adding or changing files. The backend log records existing or rejected candidates as
+`SHADOWED` or `REFUSED`, then records each `MISSING` identity's native registration path and one terminal
+result for the ordered sequence. A published table entry is served before ordinary layers, so a loose physical
+file cannot shadow that exact new identity. DOOM's scanner remains the semantic authority for parse/materialization
+errors; the log does not claim that an individual object materialized solely because its source scan returned true.
+  The catalog creates text decl identities; referenced models, sounds, images, and other binary dependencies
+  must be supplied by the installed-resource manifest path or already be available to the base game.
+  The resource-stream ABI is currently pinned to the audited Steam build; an incompatible DOOM build is
+  refused before the provider hook or dynamic decl server is published.
 
 A broken user set can be bisected with `sh_user_overrides 0` (restore with `sh_user_overrides 1`). The command
 saves `overrides.user_enabled` only when persistence succeeds and requires a DOOM restart; it disables both

@@ -66,7 +66,8 @@ func ensureUserDataTree() {
 // the old folder once every one of its files is confirmed present at the new location. That's a VERIFIED move --
 // the delete only happens after the content is safely mirrored, so nothing is ever lost, but no stale "backup"
 // is left behind either. It also clears the pre-rename %LOCALAPPDATA%\open-snaphak\ app-data folder once its
-// record/token have migrated forward. Best-effort; never fails the install; never deletes an unmirrored folder.
+// record/token have migrated forward. Finally it retires the pre-package overrides\generated tree into a
+// real override package. Best-effort; never fails the install; never deletes an unmirrored folder.
 func migrateUserData() {
 	dir := appDataDir()
 	if dir == "" {
@@ -104,6 +105,10 @@ func migrateUserData() {
 			os.RemoveAll(oldAD)
 		}
 	}
+
+	// 3) Overrides: retire the pre-package overrides\generated tree into a real package. Runs last so
+	//    anything folded forward in step 1 is migrated too, not left behind in the old layout.
+	migrateLegacyOverrides()
 }
 
 // fullyMirrored reports whether every file under src also exists under dst -- the safety check that lets a

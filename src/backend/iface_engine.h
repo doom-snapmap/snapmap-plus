@@ -28,6 +28,11 @@
  * gap, never crashes). Idempotent (one-shot latch). Returns the number of slots bound. */
 int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *module_base);
 
+/* Internal backend consumers may inspect the already-resolved inline editor
+ * singleton from the main-thread tick. NULL means the engine bridge has not
+ * been installed yet. The returned pointer is borrowed for the process life. */
+const uint8_t *sh_iface_engine_editor_base(void);
+
 /* LAYER C (crash prevention): would entity `id`'s class+inherit be ACCEPTED by the engine decl validator
  * after this change? `newClass`/`newInherit` = the values being set (NULL = that field unchanged; the live
  * defsub value is read). The validator's rule: the className must derive from the inherit decl's base type.

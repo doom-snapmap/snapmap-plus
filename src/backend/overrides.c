@@ -1,12 +1,17 @@
 /* overrides.c -- see overrides.h. The OVERRIDES FILE-SHADOW resource loader.
  *
  * Swaps the engine resource-provider's open-by-name vtable slot (+0xf8) with our override-open hook.
- * On each engine open the resolution is THREE-LAYER:
- *   1. USER    -- overrides/<name> under %LOCALAPPDATA%\snapmap-plus\ on disk (an explicit user act; wins).
- *   2. BUILT-IN -- our baked default decls (overrides_baked.h), served FROM MEMORY. Nothing is ever
+ * On each ordinary engine open the resolution is FOUR-LAYER:
+ *   1. USER     -- overrides/<name> under %LOCALAPPDATA%\snapmap-plus\ on disk (an explicit user act; wins).
+ *   2. LINKED   -- exact manifest-selected bytes read on demand from the user's installed, read-only
+ *                 base-game archives by resource_bridge.c. No archive is copied or changed.
+ *   3. BUILT-IN -- our baked default decls (overrides_baked.h), served FROM MEMORY. Nothing is ever
  *                  written to the user's folder, so defaults update with every release and "reset to
  *                  default" is simply deleting the user's file.
- *   3. ENGINE  -- chain to the saved original engine open (the packaged resource).
+ *   4. ENGINE   -- chain to the saved original engine open (the packaged resource).
+ * The dynamic decl server may publish an immutable per-decl table from memory.
+ * Those exact canonical decltree entries are gated with the user layer but
+ * cannot be replaced by a disk or linked resource.
  * A mode>=2 recursion guard goes straight to the original (OG's `param_5 >= 2` branch). For a BUILT-IN
  * name only, a user file that fails a minimal well-formedness check (brace/quote balance) is refused and
  * the built-in default serves instead (logged) -- a garbled file there would take out the "*Custom" tab.
@@ -26,6 +31,7 @@
  */
 #include <windows.h>
 #include <stdint.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
@@ -34,12 +40,25 @@
 #include "overrides.h"
 #include "backend_log.h"
 #include "decl_text.h"
+#include "packages.h"
+#include "resource_bridge.h"
 #include "user_overrides.h"
 #include "overrides_baked.h"        /* the built-in "*Custom"-tab default decls (Timeline + Unknown) */
 
 /* The engine open-by-name vtable method offset within the resource-provider vtable.
  * DIRECT: OG patches engineBase+0x2798598; the vtable is engineBase+0x27984a0 -> slot offset = 0xf8. */
 #define OPEN_SLOT_OFFSET 0xf8
+
+/* The provider stream ABI is not signature-portable. These five independently
+ * resolved locations pin the one Steam build whose resource-provider vtable is
+ * 31 idFile slots and whose provider open method is at +0xf8. A newer DOOM
+ * build has 34 slots with shifted meanings, so matching function signatures
+ * alone is insufficient and must never publish this table there. */
+#define OV_PINNED_RES_PROVIDER_CTOR_RVA 0x1A51070u
+#define OV_PINNED_IDFILE_READSTR_RVA    0x0267390u
+#define OV_PINNED_IDFILE_COMPARE_RVA    0x0267290u
+#define OV_PINNED_IDFILE_WRITESTR_RVA   0x0268470u
+#define OV_PINNED_PROVIDER_VTABLE_RVA   0x27984A0u
 
 /* The engine open method ABI (DIRECT, from OG FUN_18000b370's own call shape):
  *   void* open(void* this, const char* name, uint8 b1, uint8 b2, uint mode)   // __fastcall, returns idFile*
@@ -49,14 +68,32 @@ typedef void *(*open_fn_t)(void *self, const char *name, unsigned char b1, unsig
 static open_fn_t  g_orig_open  = NULL;   /* the saved engine resource-open (the slot's original value) */
 static void     **g_slot       = NULL;   /* the live vtable slot we patched (for uninstall) */
 static volatile LONG g_shadow_count = 0;
+typedef struct ov_internal_decl {
+    char *name;                   /* exact lower-case decltree/<type>/<name>.decl */
+    unsigned char *body;          /* process-lifetime copy */
+    size_t body_length;
+} ov_internal_decl;
+
+static ov_internal_decl *g_internal_decls;
+static size_t g_internal_decl_count;
+static volatile LONG g_internal_decl_table_state;
+
+enum {
+    OV_INTERNAL_DECL_TABLE_NEW = 0,
+    OV_INTERNAL_DECL_TABLE_INSTALLING = 1,
+    OV_INTERNAL_DECL_TABLE_READY = 2,
+    OV_INTERNAL_DECL_TABLE_FAILED = 3
+};
+
+#define OV_INTERNAL_DECL_MAX_ENTRIES 512u
 
 /* The overrides ROOT (holds overrides\ + overrides\shader_includes\). Default %LOCALAPPDATA%\snapmap-plus. */
 static char g_root[MAX_PATH] = {0};
 
 /* ============================================================ our idFile-subclass stream ===========
- * A reimplementation of OG's PTR_FUN_18003d050 stream (the engine idFile interface, 24 virtual
- * methods -- every slot decompiled in pb1-overrides). The object layout keeps OG's public head:
- *   +0x00 vtable   +0x08 FILE*   +0x10 name   +0x18 length   +0x20 short flag   +0x21 byte flag
+ * A reimplementation of the pinned build's PTR_FUN_18003d050 stream (the engine idFile interface,
+ * 31 virtual methods -- every slot decompiled in pb1-overrides). The object layout keeps OG's public head:
+ *   +0x00 vtable   +0x08 FILE*   +0x10 name   +0x18 length   +0x20 short flag
  * The engine reads the resource through this vtable; the dtor (slot 0) frees the object with OUR
  * allocator (HeapFree) -- so we need no engine allocator/free (OG used the engine's only so the engine
  * could free it; here every method incl. the dtor is ours).
@@ -71,13 +108,12 @@ typedef struct ov_stream {
     const char  *name;       /* +0x10 (points at the heap-dup'd name appended after the struct) */
     long long    length;     /* +0x18 */
     short        flag16;     /* +0x20 (OG sets 1) */
-    char         flag8;      /* +0x22-ish via +0x21 read in slot 20; OG returns *(this+0x21) */
     const unsigned char *buf;/* memory backing (baked static text, or an owned heap copy) */
     long long    pos;        /* memory-backing read cursor */
     int          owns_buf;   /* 1 -> dtor HeapFrees buf */
 } ov_stream;
 
-/* --- the 24 vtable methods, faithful to the OG slot semantics (every slot decompiled) --------------
+/* --- the 31 vtable methods, faithful to the pinned build's slot semantics ---------------------------
  * All __fastcall(this in RCX). Behaviour matches OG FUN_18000ae00..b070 exactly, expressed in stdio. */
 
 static void  ov_dtor(ov_stream *s)                                   /* [0] close + free(this) */
@@ -90,14 +126,15 @@ static void  ov_dtor(ov_stream *s)                                   /* [0] clos
     }
 }
 static long long ov_ret0_a(ov_stream *s)        { (void)s; return 0; }   /* [1] return 0 */
-static long long ov_ret0_b(ov_stream *s)        { (void)s; return 0; }   /* [2] return 0 */
 static long long ov_length(ov_stream *s)        { return s ? s->length : 0; }            /* [3] *(this+0x18) */
 static const char *ov_name(ov_stream *s)        { return s ? s->name : NULL; }           /* [4] *(this+0x10) */
-static long long ov_read(ov_stream *s, void *buf, unsigned int n)    /* [5] fread(buf,1,n,fp) */
+static long long ov_read(ov_stream *s, void *buf, uint64_t n)          /* [5] fread(buf,1,n,fp) */
 {
     if (!s || !buf) return 0;
-    if (s->fp) return (long long)fread(buf, 1, n, s->fp);
+    if (n > (uint64_t)SIZE_MAX || n > (uint64_t)INT64_MAX) return 0;
+    if (s->fp) return (long long)fread(buf, 1, (size_t)n, s->fp);
     if (s->buf) {                                        /* memory backing: bounded copy + cursor */
+        if (s->length < 0 || s->pos < 0 || s->pos > s->length) return 0;
         long long avail = s->length - s->pos;
         long long take  = (avail < (long long)n) ? avail : (long long)n;
         if (take <= 0) return 0;
@@ -107,64 +144,81 @@ static long long ov_read(ov_stream *s, void *buf, unsigned int n)    /* [5] frea
     }
     return 0;
 }
-static long long ov_write(ov_stream *s, const void *buf, unsigned int n)  /* [6] fwrite(buf,1,n,fp); memory form is read-only */
+static long long ov_write(ov_stream *s, const void *buf, uint64_t n)       /* [6] fwrite(buf,1,n,fp); memory form is read-only */
 {
     if (!s || !s->fp || !buf) return 0;
-    return (long long)fwrite(buf, 1, n, s->fp);
+    if (n > (uint64_t)SIZE_MAX || n > (uint64_t)INT64_MAX) return 0;
+    return (long long)fwrite(buf, 1, (size_t)n, s->fp);
 }
 static int       ov_seek(ov_stream *s, long long off, int origin);       /* fwd-decl ([14]) */
-/* [7] OG FUN_18000aeb0 -> engine 0x1a1b520 = (Seek(this,off,SEEK_END-ish=2)); (Read(this,buf,len)).
+/* [7] The native helper at RVA 0x1a1b520 calls Seek(this,off,ABS=2), then Read(this,buf,len).
  *     We reproduce the same combo through our own methods (the engine fn only dispatched via the vtable). */
-static long long ov_seekread(ov_stream *s, long long off, void *buf, unsigned int n)
+static long long ov_seekread(ov_stream *s, long long off, void *buf, uint64_t n)
 {
-    if (!s) return 0;
-    ov_seek(s, off, 2);
+    if (!s || ov_seek(s, off, 2) != 0) return 0;
     return ov_read(s, buf, n);
 }
-/* [8] OG FUN_18000aec0 -> engine 0x1a1c220 (an analogous base helper). Same conservative seek+read
- *     reproduction; the slot is only exercised by engine paths that pre-position then read. */
-static long long ov_seekread2(ov_stream *s, long long off, void *buf, unsigned int n)
+/* [8] The native helper at RVA 0x1a1c220 calls Seek(this,off,ABS=2), then Write(this,buf,len). */
+static long long ov_seekwrite(ov_stream *s, long long off, const void *buf, uint64_t n)
 {
-    if (!s) return 0;
-    ov_seek(s, off, 0);
-    return ov_read(s, buf, n);
+    if (!s || ov_seek(s, off, 2) != 0) return 0;
+    return ov_write(s, buf, n);
 }
 static int       ov_lock(ov_stream *s)          { if (s && s->fp) _lock_file(s->fp);   return 1; }   /* [9] */
 static int       ov_unlock(ov_stream *s)        { if (s && s->fp) _unlock_file(s->fp); return 1; }   /* [10] */
-static long long ov_length_byseek(ov_stream *s)                      /* [11] tell/seek-end/tell/restore */
+static long long ov_length_byseek(ov_stream *s)                      /* [11] stored length */
 {
-    if (!s) return 0;
-    if (!s->fp) return s->buf ? s->length : 0;           /* memory backing: length is already known */
-    long long pos = _ftelli64(s->fp);
-    _fseeki64(s->fp, 0, SEEK_END);
-    long long len = _ftelli64(s->fp);
-    _fseeki64(s->fp, pos, SEEK_SET);
-    return len;
+    return s && s->length >= 0 ? s->length : 0;
 }
-static void      ov_noop(ov_stream *s)          { (void)s; }                                          /* [12] RET 0 */
+/* +0x60 is SetLength. Provider streams are deliberately read-only, including file-backed streams:
+ * no caller can turn a resource shadow into a writable archive surrogate. Return zero (failure) and
+ * leave both backings untouched for every request. */
+static int       ov_set_length(ov_stream *s, long long requested)
+{
+    (void)s;
+    (void)requested;
+    return 0;
+}
 static long long ov_tell(ov_stream *s)                                                                /* [13] ftell */
 {
     if (!s) return 0;
     if (s->fp) return _ftelli64(s->fp);
     return s->buf ? s->pos : 0;
 }
-static int       ov_seek(ov_stream *s, long long off, int origin)    /* [14] fseek; OG maps 0->SET,1->END(2),else CUR */
+
+static int ov_checked_add_i64(long long base, long long offset, long long *out)
+{
+    if (!out || (offset > 0 && base > LLONG_MAX - offset) ||
+        (offset < 0 && base < LLONG_MIN - offset)) return 0;
+    *out = base + offset;
+    return 1;
+}
+
+static int       ov_seek(ov_stream *s, long long off, int origin)    /* [14] idFile: 0=CUR, 1=END, 2=ABS */
 {
     if (!s) return -1;
     if (!s->fp) {                                        /* memory backing: move the cursor, clamped */
         if (!s->buf) return -1;
         long long p;
-        if (origin == 0)      p = off;                   /* SET */
-        else if (origin == 1) p = s->length + off;       /* END */
-        else                  p = s->pos + off;          /* CUR */
+        if (s->length < 0 || s->pos < 0 || s->pos > s->length) return -1;
+        if (origin == 0) {                                /* CUR */
+            if (!ov_checked_add_i64(s->pos, off, &p)) return -1;
+        }
+        else if (origin == 1) {                           /* END */
+            if (!ov_checked_add_i64(s->length, off, &p)) return -1;
+        }
+        else if (origin == 2) p = off;                   /* ABS */
+        else return -1;                                  /* invalid origin: refuse, preserve cursor */
         if (p < 0) p = 0;
         if (p > s->length) p = s->length;
         s->pos = p;
         return 0;
     }
-    int o = SEEK_CUR;
-    if (origin == 0) o = SEEK_SET;
+    int o;
+    if (origin == 0) o = SEEK_CUR;
     else if (origin == 1) o = SEEK_END;
+    else if (origin == 2) o = SEEK_SET;
+    else return -1;
     return _fseeki64(s->fp, off, o);
 }
 static long long ov_vprintf(ov_stream *s, const char *fmt, va_list ap)   /* [15] vfprintf */
@@ -186,19 +240,37 @@ static long long ov_printf_thunk(ov_stream *s, const char *fmt, ...)     /* [15]
 static long long ov_ret0_c(ov_stream *s)        { (void)s; return 0; }   /* [17] return 0 */
 static long long ov_ret0_d(ov_stream *s)        { (void)s; return 0; }   /* [18] return 0 */
 static long long ov_ret0_e(ov_stream *s)        { (void)s; return 0; }   /* [19] return 0 */
-static char      ov_flag8(ov_stream *s)         { return s ? s->flag8 : 0; }              /* [20] *(this+0x21) */
-static void      ov_flush_a(ov_stream *s)       { if (s && s->fp) fflush(s->fp); }        /* [21] fflush */
+/* Memory and read-only override streams have no writable/physical provider
+ * flag. Returning zero is the proven metadata value used by the eager reader. */
+static char      ov_provider_flag(ov_stream *s) { (void)s; return 0; }                    /* [20] */
+static void      ov_flush_a(ov_stream *s)                                                /* [21] flush + refresh size */
+{
+    if (s && s->fp) {
+        long long pos, length;
+        fflush(s->fp);
+        pos = _ftelli64(s->fp);
+        if (pos >= 0 && _fseeki64(s->fp, 0, SEEK_END) == 0 &&
+            (length = _ftelli64(s->fp)) >= 0) s->length = length;
+        if (pos >= 0) _fseeki64(s->fp, pos, SEEK_SET);
+    }
+}
 static void      ov_flush_b(ov_stream *s)       { if (s && s->fp) fflush(s->fp); }        /* [22] fflush */
 static long long ov_ret1(ov_stream *s)          { (void)s; return 1; }   /* [23] return 1 */
+static long long ov_drive_type(ov_stream *s)   { (void)s; return 0; }   /* [24] drive/storage type */
+static long long ov_storage_true(ov_stream *s) { (void)s; return 1; }   /* [25] native bool true */
+static long long ov_storage_zero_a(ov_stream *s) { (void)s; return 0; } /* [26] reserved zero */
+static long long ov_storage_zero_b(ov_stream *s) { (void)s; return 0; } /* [27] reserved zero */
 
-/* The stream vtable -- one 24-entry table shared by every stream we hand back (the methods are
+/* The stream vtable -- one exact 31-entry table shared by every stream we hand back (the methods are
  * stateless w.r.t. the object beyond `this`). Slot order follows the engine idFile vtable:
  * GetName @+0x18, GetFullPath @+0x20, Read @+0x28, GetLength @+0x58, GetTimestamp @+0x98 --
- * so the engine calls the right method per slot. */
-static void *g_stream_vtable[24] = {
+ * so the engine calls the right method per slot. The final three entries are the native idStr helpers
+ * for this exact Steam build; they are populated as one publication after all three clean signatures
+ * resolve. Until then they remain NULL and no provider hook is published. */
+static void *g_stream_vtable[31] = {
     (void *)ov_dtor,          /* 0  +0x00 close/dtor */
     (void *)ov_ret0_a,        /* 1  +0x08 */
-    (void *)ov_ret0_b,        /* 2  +0x10 */
+    (void *)ov_ret1,          /* 2  +0x10 native constant true */
     /* +0x18 = the engine idFile GetName slot: idLexer::LoadFile reads it and copies the result
      * into an idStr, so it must be a valid name pointer -- NOT a length. Renderprog decls (and
      * their #include files) load through this slot; entity decls use the +0x20 path below.
@@ -209,11 +281,11 @@ static void *g_stream_vtable[24] = {
     (void *)ov_read,          /* 5  +0x28 Read */
     (void *)ov_write,         /* 6  +0x30 Write */
     (void *)ov_seekread,      /* 7  +0x38 */
-    (void *)ov_seekread2,     /* 8  +0x40 */
+    (void *)ov_seekwrite,      /* 8  +0x40 Seek(ABS) + Write */
     (void *)ov_lock,          /* 9  +0x48 Lock */
     (void *)ov_unlock,        /* 10 +0x50 Unlock */
     (void *)ov_length_byseek, /* 11 +0x58 */
-    (void *)ov_noop,          /* 12 +0x60 (OG RET 0) */
+    (void *)ov_set_length,    /* 12 +0x60 SetLength -> read-only failure */
     (void *)ov_tell,          /* 13 +0x68 Tell */
     (void *)ov_seek,          /* 14 +0x70 Seek */
     (void *)ov_printf_thunk,  /* 15 +0x78 vfprintf */
@@ -221,17 +293,75 @@ static void *g_stream_vtable[24] = {
     (void *)ov_ret0_c,        /* 17 +0x88 */
     (void *)ov_ret0_d,        /* 18 +0x90 */
     (void *)ov_ret0_e,        /* 19 +0x98 */
-    (void *)ov_flag8,         /* 20 +0xa0 */
+    (void *)ov_provider_flag, /* 20 +0xa0 */
     (void *)ov_flush_a,       /* 21 +0xa8 Flush */
     (void *)ov_flush_b,       /* 22 +0xb0 Flush */
     (void *)ov_ret1,          /* 23 +0xb8 */
+    (void *)ov_drive_type,    /* 24 +0xc0 drive/storage type = 0 */
+    (void *)ov_storage_true,  /* 25 +0xc8 native bool true */
+    (void *)ov_storage_zero_a,/* 26 +0xd0 = 0 */
+    (void *)ov_storage_zero_b,/* 27 +0xd8 = 0 */
+    NULL,                      /* 28 +0xe0 native ReadString helper, published after clean SIG_OK */
+    NULL,                      /* 29 +0xe8 native Compare helper, published after clean SIG_OK */
+    NULL,                      /* 30 +0xf0 native WriteString helper, published after clean SIG_OK */
 };
+
+enum {
+    OV_STREAM_HELPERS_NEW = 0,
+    OV_STREAM_HELPERS_INSTALLING = 1,
+    OV_STREAM_HELPERS_READY = 2,
+    OV_STREAM_HELPERS_FAILED = 3
+};
+static volatile LONG g_stream_helpers_state = OV_STREAM_HELPERS_NEW;
+
+/* Configure the three native idStr slots before any provider object can expose this table. The
+ * signatures are deliberately all-or-nothing: a missing or hook-tolerant helper leaves a terminal
+ * refusal state, so we never publish a mixed native/NULL tail. */
+static int ov_stream_helpers_install(void *read_string, int read_clean,
+                                     void *compare, int compare_clean,
+                                     void *write_string, int write_clean)
+{
+    LONG state;
+    if (!read_string || !compare || !write_string || read_clean != 1 ||
+        compare_clean != 1 || write_clean != 1) {
+        if (InterlockedCompareExchange(&g_stream_helpers_state,
+                                       OV_STREAM_HELPERS_FAILED,
+                                       OV_STREAM_HELPERS_NEW) == OV_STREAM_HELPERS_NEW)
+            return 0;
+        state = InterlockedCompareExchange(&g_stream_helpers_state,
+                                           OV_STREAM_HELPERS_NEW,
+                                           OV_STREAM_HELPERS_NEW);
+        return state == OV_STREAM_HELPERS_READY &&
+               g_stream_vtable[28] == read_string &&
+               g_stream_vtable[29] == compare &&
+               g_stream_vtable[30] == write_string;
+    }
+    state = InterlockedCompareExchange(&g_stream_helpers_state,
+                                       OV_STREAM_HELPERS_INSTALLING,
+                                       OV_STREAM_HELPERS_NEW);
+    if (state != OV_STREAM_HELPERS_NEW) {
+        return state == OV_STREAM_HELPERS_READY &&
+               g_stream_vtable[28] == read_string &&
+               g_stream_vtable[29] == compare &&
+               g_stream_vtable[30] == write_string;
+    }
+
+    /* The table is private until the slot publication below. InterlockedExchange is a full
+     * release barrier on Windows, so an engine thread cannot observe a READY state with partial
+     * helper pointers. */
+    g_stream_vtable[28] = read_string;
+    g_stream_vtable[29] = compare;
+    g_stream_vtable[30] = write_string;
+    InterlockedExchange(&g_stream_helpers_state, OV_STREAM_HELPERS_READY);
+    return 1;
+}
 
 /* Construct a stream over an already-open FILE* + its known length. Allocates the object + a copy of
  * `name` after it (so the Name slot returns a stable pointer). NULL on alloc failure (caller fcloses). */
 static ov_stream *make_stream(FILE *fp, long long length, const char *name)
 {
     size_t namelen = name ? strlen(name) : 0;
+    if (length < 0 || namelen > SIZE_MAX - sizeof(ov_stream) - 1) return NULL;
     ov_stream *s = (ov_stream *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
                                           sizeof(ov_stream) + namelen + 1);
     if (!s) return NULL;
@@ -243,7 +373,6 @@ static ov_stream *make_stream(FILE *fp, long long length, const char *name)
     s->name   = namecopy;
     s->length = length;
     s->flag16 = 1;   /* OG sets the +0x20 short to 1 */
-    s->flag8  = 0;
     return s;
 }
 
@@ -251,6 +380,7 @@ static ov_stream *make_stream(FILE *fp, long long length, const char *name)
  * stream's dtor; owns_buf=0 leaves it (the static baked text). NULL on alloc failure. */
 static ov_stream *make_mem_stream(const unsigned char *buf, long long length, const char *name, int owns_buf)
 {
+    if (length < 0 || (!buf && length != 0)) return NULL;
     ov_stream *s = make_stream(NULL, length, name);
     if (!s) return NULL;
     s->buf      = buf;
@@ -293,6 +423,293 @@ static void resolve_root(char *out, size_t cap)
     if (g_root[0]) strncpy_s(out, cap, g_root, _TRUNCATE);
     else default_root(out, cap);
 }
+
+static int ov_internal_decl_char(unsigned char c, int allow_slash)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') ||
+           c == '_' || c == '-' || (allow_slash && c == '.');
+}
+
+static int ov_internal_decl_key(const char *type, const char *name,
+                                char **out_key)
+{
+    size_t type_len, name_len, total, i, segment_start;
+    char *key;
+    if (!type || !name || !type[0] || !name[0] || !out_key) return 0;
+    type_len = strlen(type);
+    name_len = strlen(name);
+    if (type_len > 64 || name_len > 512 ||
+        type_len > SIZE_MAX - name_len - sizeof(SH_OVERRIDES_INTERNAL_DECL_PREFIX) - 6)
+        return 0;
+    for (i = 0; i < type_len; i++)
+        if (!ov_internal_decl_char((unsigned char)type[i], 0)) return 0;
+    segment_start = 0;
+    for (i = 0; i <= name_len; i++) {
+        int at_end = i == name_len;
+        if (!at_end && name[i] != '/') {
+            if (!ov_internal_decl_char((unsigned char)name[i], 1)) return 0;
+            continue;
+        }
+        if (i == segment_start ||
+            (i - segment_start == 1 && name[segment_start] == '.') ||
+            (i - segment_start == 2 && name[segment_start] == '.' &&
+             name[segment_start + 1] == '.')) return 0;
+        segment_start = i + 1;
+    }
+    total = sizeof(SH_OVERRIDES_INTERNAL_DECL_PREFIX) - 1 + type_len + 1 +
+            name_len + 5 + 1;
+    key = (char *)HeapAlloc(GetProcessHeap(), 0, total);
+    if (!key) return 0;
+    memcpy(key, SH_OVERRIDES_INTERNAL_DECL_PREFIX,
+           sizeof(SH_OVERRIDES_INTERNAL_DECL_PREFIX) - 1);
+    memcpy(key + sizeof(SH_OVERRIDES_INTERNAL_DECL_PREFIX) - 1, type, type_len);
+    key[sizeof(SH_OVERRIDES_INTERNAL_DECL_PREFIX) - 1 + type_len] = '/';
+    memcpy(key + sizeof(SH_OVERRIDES_INTERNAL_DECL_PREFIX) - 1 + type_len + 1,
+           name, name_len);
+    memcpy(key + sizeof(SH_OVERRIDES_INTERNAL_DECL_PREFIX) - 1 + type_len + 1 + name_len,
+           ".decl", 5);
+    key[total - 1] = '\0';
+    for (i = 0; i + 1 < total; i++) {
+        if (key[i] >= 'A' && key[i] <= 'Z')
+            key[i] = (char)(key[i] - 'A' + 'a');
+    }
+    *out_key = key;
+    return 1;
+}
+
+static void ov_internal_decl_table_free(ov_internal_decl *entries, size_t count)
+{
+    size_t i;
+    if (!entries) return;
+    for (i = 0; i < count; i++) {
+        if (entries[i].name) HeapFree(GetProcessHeap(), 0, entries[i].name);
+        if (entries[i].body) HeapFree(GetProcessHeap(), 0, entries[i].body);
+    }
+    HeapFree(GetProcessHeap(), 0, entries);
+}
+
+static int ov_internal_decl_table_publish(
+    const sh_overrides_internal_decl_entry *entries, size_t count,
+    int provider_ready, int user_enabled)
+{
+    ov_internal_decl *copy;
+    size_t i, j;
+    LONG expected;
+    if (!provider_ready || !user_enabled || !entries || count == 0 ||
+        count > OV_INTERNAL_DECL_MAX_ENTRIES ||
+        count > SIZE_MAX / sizeof(copy[0])) return 0;
+    expected = InterlockedCompareExchange(&g_internal_decl_table_state,
+                                          OV_INTERNAL_DECL_TABLE_INSTALLING,
+                                          OV_INTERNAL_DECL_TABLE_NEW);
+    if (expected != OV_INTERNAL_DECL_TABLE_NEW) return 0;
+    copy = (ov_internal_decl *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                         count * sizeof(copy[0]));
+    if (!copy) {
+        InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_FAILED);
+        return 0;
+    }
+    for (i = 0; i < count; i++) {
+        if (!entries[i].body || entries[i].body_length == 0 ||
+            entries[i].body_length > (size_t)INT64_MAX ||
+            !ov_internal_decl_key(entries[i].type, entries[i].name, &copy[i].name)) {
+            ov_internal_decl_table_free(copy, count);
+            InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_FAILED);
+            return 0;
+        }
+        for (j = 0; j < i; j++) {
+            if (strcmp(copy[i].name, copy[j].name) == 0) {
+                ov_internal_decl_table_free(copy, count);
+                InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_FAILED);
+                return 0;
+            }
+        }
+        copy[i].body = (unsigned char *)HeapAlloc(GetProcessHeap(), 0,
+                                                  entries[i].body_length);
+        if (!copy[i].body) {
+            ov_internal_decl_table_free(copy, count);
+            InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_FAILED);
+            return 0;
+        }
+        memcpy(copy[i].body, entries[i].body, entries[i].body_length);
+        copy[i].body_length = entries[i].body_length;
+    }
+    g_internal_decls = copy;
+    g_internal_decl_count = count;
+    /* Publish the table only after all keys and bodies are complete. The
+     * process-lifetime table is never freed or republished after READY. */
+    InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_READY);
+    return 1;
+}
+
+static ov_stream *open_internal_decl(const char *name, int *matched)
+{
+    size_t i;
+    if (matched) *matched = 0;
+    if (!name || !sh_user_overrides_enabled_for_launch() ||
+        InterlockedCompareExchange(&g_internal_decl_table_state, 0, 0) !=
+            OV_INTERNAL_DECL_TABLE_READY) return NULL;
+    for (i = 0; i < g_internal_decl_count; i++) {
+        if (strcmp(name, g_internal_decls[i].name) != 0) continue;
+        if (matched) *matched = 1;
+        return make_mem_stream(g_internal_decls[i].body,
+                               (long long)g_internal_decls[i].body_length,
+                               g_internal_decls[i].name, 0);
+    }
+    return NULL;
+}
+
+int sh_overrides_internal_decl_published(const char *name)
+{
+    size_t i;
+    if (!name || !sh_user_overrides_enabled_for_launch() ||
+        InterlockedCompareExchange(&g_internal_decl_table_state, 0, 0) !=
+            OV_INTERNAL_DECL_TABLE_READY) return 0;
+    for (i = 0; i < g_internal_decl_count; i++)
+        if (_stricmp(name, g_internal_decls[i].name) == 0) return 1;
+    return 0;
+}
+
+int sh_overrides_internal_decl_table_can_install(void)
+{
+    return g_orig_open != NULL && sh_user_overrides_enabled_for_launch() &&
+           InterlockedCompareExchange(&g_internal_decl_table_state, 0, 0) ==
+               OV_INTERNAL_DECL_TABLE_NEW;
+}
+
+int sh_overrides_internal_decl_table_install(
+    const sh_overrides_internal_decl_entry *entries, size_t count)
+{
+    return ov_internal_decl_table_publish(entries, count, g_orig_open != NULL,
+                                          sh_user_overrides_enabled_for_launch());
+}
+
+#ifdef SH_OVERRIDES_TESTING
+void sh_overrides_test_internal_decl_table_reset(void)
+{
+    /* Test-only reset occurs before any engine thread can retain a stream. */
+    ov_internal_decl_table_free(g_internal_decls, g_internal_decl_count);
+    g_internal_decls = NULL;
+    g_internal_decl_count = 0;
+    InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_NEW);
+}
+
+int sh_overrides_test_internal_decl_table_install(
+    const sh_overrides_internal_decl_entry *entries, size_t count)
+{
+    return ov_internal_decl_table_publish(entries, count, 1,
+                                          sh_user_overrides_enabled_for_launch());
+}
+
+void *sh_overrides_test_internal_decl_open(const char *name)
+{
+    int matched = 0;
+    return open_internal_decl(name, &matched);
+}
+
+long long sh_overrides_test_stream_read(void *stream, void *buffer, uint64_t length)
+{
+    return ov_read((ov_stream *)stream, buffer, length);
+}
+
+long long sh_overrides_test_stream_read_at(void *stream, long long offset,
+                                            void *buffer, uint64_t length)
+{
+    return ov_seekread((ov_stream *)stream, offset, buffer, length);
+}
+
+long long sh_overrides_test_stream_write(void *stream, const void *buffer, uint64_t length)
+{
+    return ov_write((ov_stream *)stream, buffer, length);
+}
+
+long long sh_overrides_test_stream_write_at(void *stream, long long offset,
+                                             const void *buffer, uint64_t length)
+{
+    return ov_seekwrite((ov_stream *)stream, offset, buffer, length);
+}
+
+int sh_overrides_test_stream_seek(void *stream, long long offset, int origin)
+{
+    return ov_seek((ov_stream *)stream, offset, origin);
+}
+
+long long sh_overrides_test_stream_length(void *stream)
+{
+    return ov_length_byseek((ov_stream *)stream);
+}
+
+int sh_overrides_test_stream_true_flag(void *stream)
+{
+    return (int)((long long(*)(ov_stream *))g_stream_vtable[2])((ov_stream *)stream);
+}
+
+int sh_overrides_test_stream_set_length(void *stream, long long length)
+{
+    return ((int(*)(ov_stream *, long long))g_stream_vtable[12])((ov_stream *)stream, length);
+}
+
+size_t sh_overrides_test_stream_vtable_slots(void)
+{
+    return sizeof g_stream_vtable / sizeof g_stream_vtable[0];
+}
+
+void *sh_overrides_test_stream_vtable_slot(size_t index)
+{
+    return index < sizeof g_stream_vtable / sizeof g_stream_vtable[0] ?
+           g_stream_vtable[index] : NULL;
+}
+
+int sh_overrides_test_stream_helpers_configure(void *read_string, int read_clean,
+                                                void *compare, int compare_clean,
+                                                void *write_string, int write_clean)
+{
+    return ov_stream_helpers_install(read_string, read_clean, compare, compare_clean,
+                                     write_string, write_clean);
+}
+
+int sh_overrides_test_stream_helpers_ready(void)
+{
+    return InterlockedCompareExchange(&g_stream_helpers_state,
+                                      OV_STREAM_HELPERS_NEW,
+                                      OV_STREAM_HELPERS_NEW) == OV_STREAM_HELPERS_READY;
+}
+
+void sh_overrides_test_stream_helpers_reset(void)
+{
+    g_stream_vtable[28] = NULL;
+    g_stream_vtable[29] = NULL;
+    g_stream_vtable[30] = NULL;
+    InterlockedExchange(&g_stream_helpers_state, OV_STREAM_HELPERS_NEW);
+}
+
+void *sh_overrides_test_stream_open_file(const char *path)
+{
+    FILE *fp;
+    long long length;
+    ov_stream *stream;
+    if (!path) return NULL;
+    fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    if (_fseeki64(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+    length = _ftelli64(fp);
+    if (length < 0 || _fseeki64(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+    stream = make_stream(fp, length, path);
+    if (!stream) fclose(fp);
+    return stream;
+}
+
+void sh_overrides_test_stream_close(void *stream)
+{
+    ov_dtor((ov_stream *)stream);
+}
+#endif
 
 int sh_overrides_get_root(char *out, size_t cap)
 {
@@ -337,12 +754,136 @@ static int build_override_path(const char *name, char *out, size_t cap)
     return 1;
 }
 
+/* ============================================================ package resolution ==================*/
+
+/* The engine names every decl `generated/decls/<type>/<name>.decl` -- one flat
+ * virtual namespace, regardless of who published the decl. Before packages that
+ * mapped one-to-one onto `overrides\generated\decls\...`, so joining the name
+ * onto the overrides root WAS the resolver.
+ *
+ * A package owns its own root (`overrides\cyberdemon\decls\...`), so that join
+ * can never reach it: the engine has no idea the folder exists and will never
+ * ask for `cyberdemon/decls/...`. Left unhandled the package's decl bodies are
+ * silently never served -- the decl server registers the identity, the engine
+ * opens nothing, and the parse yields an empty default with no resolved
+ * entityDef. That is what kept the Cyberdemon out of the Toybox.
+ *
+ * So `generated/decls/<rest>` is resolved against every installed package in
+ * turn as `<package root>\decls\<rest>`.
+ *
+ * The same problem applies to every OTHER engine namespace a package may own.
+ * A custom render program is the case that forced this to be a table: the module
+ * loader at RVA 0xD922D0 builds `generated/spirv/<name>.{vspv|fspv|cspv}` and
+ * opens it through this very vtable slot, and its call site passes mode 0, so the
+ * open hook admits it. Its pre-translated source blob arrives the same way as
+ * `generated/renderprogs/<name>_pc_vulkan.bin`. Both must be package-scoped, or a
+ * shader would have to live in the shared tree and two packages could clobber
+ * each other's shaders on disk -- exactly what packages exist to prevent.
+ *
+ * Images are the fourth, and the SnapMap Toybox is what forced them. A tile draws a
+ * material, that material names a .tga, and the engine resolves the pair to an image
+ * resource `generated/image/<path>.bimage`. A package could already ship the material --
+ * a material is an ordinary decl -- but not the pixels behind it, so a package could
+ * never contribute a tile icon of its own. The prefix is STRIPPED here, unlike `shaders`:
+ * every engine image name begins with that same constant, so repeating it inside each
+ * package would add depth and no information.
+ *
+ * A package therefore serves only these enumerated namespaces, and only out of
+ * the subdirectory named here. Nothing else it contains is reachable: its
+ * package.json can never become an engine resource. Under `shaders` the package
+ * path mirrors the engine name verbatim, which keeps the mapping obvious and
+ * costs nothing to extend. */
+typedef struct ov_namespace {
+    const char *engine_prefix;   /* what the engine asks for */
+    const char *package_subdir;  /* which package subdirectory may answer */
+    int strip_prefix;            /* 1: path is <subdir>\<rest>; 0: <subdir>\<whole name> */
+} ov_namespace;
+
+static const ov_namespace g_ov_namespaces[] = {
+    { "generated/decls/",       "decls",   1 },
+    { "generated/spirv/",       "shaders", 0 },
+    { "generated/renderprogs/", "shaders", 0 },
+    { "generated/image/",       "images",  1 },
+};
+
+/* The installed package set, captured once at install. The overrides layer is
+ * already an immutable launch snapshot -- the audit, the reclaim pass and the
+ * user-layer gate all read the tree exactly once -- and this is on the engine's
+ * file-open path, so re-enumerating the tree per open is not an option. */
+static sh_package g_ov_packages[SH_PACKAGES_MAX];
+static size_t g_ov_package_count;
+
+static void ov_capture_packages(void)
+{
+    char root[MAX_PATH];
+    size_t count = 0;
+    g_ov_package_count = 0;
+    resolve_root(root, sizeof root);
+    if (!root[0]) return;
+    /* A partial enumeration still resolves whatever it did find: unlike the decl
+     * server, a miss here degrades to the packaged resource rather than
+     * publishing a wrong identity, so serving fewer packages is safe. */
+    (void)sh_packages_enumerate(root, g_ov_packages, SH_PACKAGES_MAX, &count);
+    g_ov_package_count = count;
+}
+
+static int ov_is_regular_file(const char *path)
+{
+    DWORD attrs = GetFileAttributesA(path);
+    return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* Resolve engine resource `name` to an existing file under overrides\, or 0 if
+ * no layer provides it. The legacy whole-tree path is tried first so an install
+ * that predates packages resolves byte-for-byte where it always did; installed
+ * packages are then tried in `sh_packages_enumerate`'s deterministic order, so
+ * two machines with the same packages pick the same file. */
+static int ov_resolve_existing(const char *name, char *out, size_t cap)
+{
+    size_t i, n;
+
+    if (!name || !name[0] || !out || cap == 0) return 0;
+    if (!build_override_path(name, out, cap)) return 0;
+    if (ov_is_regular_file(out)) return 1;
+
+    for (n = 0; n < sizeof(g_ov_namespaces) / sizeof(g_ov_namespaces[0]); n++) {
+        const ov_namespace *ns = &g_ov_namespaces[n];
+        size_t prefix_length = strlen(ns->engine_prefix);
+        const char *relative;
+
+        if (_strnicmp(name, ns->engine_prefix, prefix_length) != 0) continue;
+        relative = ns->strip_prefix ? name + prefix_length : name;
+        if (!relative[0]) break;
+
+        for (i = 0; i < g_ov_package_count; i++) {
+            char *p;
+            if (_snprintf_s(out, cap, _TRUNCATE, "%s\\%s\\%s",
+                            g_ov_packages[i].root, ns->package_subdir, relative) < 0)
+                continue;
+            for (p = out; *p; ++p)
+                if (*p == '/') *p = '\\';
+            if (ov_is_regular_file(out)) return 1;
+        }
+        break;                      /* prefixes are disjoint; one match is all */
+    }
+    out[0] = '\0';
+    return 0;
+}
+
+#ifdef SH_OVERRIDES_TESTING
+int sh_overrides_test_resolve_existing(const char *name, char *out, size_t cap)
+{
+    ov_capture_packages();
+    return ov_resolve_existing(name, out, cap);
+}
+#endif
+
 /* SEH-guarded open of the override file; returns an ov_stream* (caller returns it to the engine) or
  * NULL if no file / open failed. On success the FILE* is owned by the stream (its dtor fcloses). */
 static ov_stream *try_open_override(const char *name)
 {
     char path[MAX_PATH];
-    if (!build_override_path(name, path, sizeof path)) return NULL;
+    if (!ov_resolve_existing(name, path, sizeof path)) return NULL;
 
     /* exists? (cheap negative for the common no-override case before fopen) */
     DWORD attrs = GetFileAttributesA(path);
@@ -352,10 +893,11 @@ static ov_stream *try_open_override(const char *name)
     if (fopen_s(&fp, path, "rb") != 0 || fp == NULL) return NULL;
 
     /* size via seek-end/tell/restore (OG reads size with _ftelli64). */
-    long long length = 0;
-    if (_fseeki64(fp, 0, SEEK_END) == 0) {
-        length = _ftelli64(fp);
-        _fseeki64(fp, 0, SEEK_SET);
+    long long length;
+    if (_fseeki64(fp, 0, SEEK_END) != 0 || (length = _ftelli64(fp)) < 0 ||
+        _fseeki64(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return NULL;
     }
 
     ov_stream *s = make_stream(fp, length, name);
@@ -418,7 +960,7 @@ static ov_stream *open_user_for_baked_name(const char *name, int *malformed)
 {
     *malformed = 0;
     char path[MAX_PATH];
-    if (!build_override_path(name, path, sizeof path)) return NULL;
+    if (!ov_resolve_existing(name, path, sizeof path)) return NULL;
     DWORD attrs = GetFileAttributesA(path);
     if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY)) return NULL;
 
@@ -438,16 +980,41 @@ static ov_stream *open_user_for_baked_name(const char *name, int *malformed)
 
 /* The override-open hook -- our value in the engine's open vtable slot. Same ABI as the engine method.
  * mode>=2 (OG param_5>=2) is a recursion/no-shadow guard -> straight to the original. Otherwise resolve
- * three-layer: USER disk file -> BUILT-IN baked default (from memory) -> chain to the engine original.
+ * four-layer: USER disk file -> linked installed resource -> BUILT-IN baked default (from memory) ->
+ * chain to the engine original.
  * The user layer alone is gated by the immutable launch snapshot. SEH-guarded so a shadow path fault
  * degrades to a vanilla open. */
 static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
 {
     if (g_orig_open == NULL) return NULL;   /* defensive: never happens once installed */
 
+    if (mode < 2) {
+        ov_stream *internal = NULL;
+        int internal_match = 0;
+        __try {
+            internal = open_internal_decl(name, &internal_match);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            internal = NULL;
+        }
+        if (internal_match) {
+            /* A published identity is authoritative. Do not let an
+             * allocation/read failure fall through to a physical file or the
+             * packaged resource under the same canonical name. */
+            if (!internal) return NULL;
+            unsigned long n = (unsigned long)InterlockedIncrement(&g_shadow_count);
+            char line[MAX_PATH + 160];
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                        "B1: overrides internal decl FIRED for '%s' (%lld bytes) [#%lu]",
+                        name, internal->length, n);
+            backend_log(line);
+            return internal;
+        }
+    }
+
     if (mode < 2 && name != NULL) {
         ov_stream *s = NULL;
         const char *src = NULL;
+        int bridge_error = 0;
         __try {
             const ov_baked_decl_t *baked = find_baked(name);
             int user_on = sh_user_overrides_enabled_for_launch();
@@ -460,6 +1027,28 @@ static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsign
                 } else {
                     s = try_open_override(name);
                     if (s) src = "user";
+                }
+                if (s == NULL) {
+                    unsigned char *linked = NULL;
+                    size_t linked_length = 0;
+                    const char *linked_source = NULL;
+                    int linked_status = sh_resource_bridge_open(name, &linked, &linked_length,
+                                                                &linked_source);
+                    if (linked_status == SH_RESOURCE_BRIDGE_OPENED &&
+                        linked_length <= (size_t)INT64_MAX) {
+                        s = make_mem_stream(linked, (long long)linked_length, name, 1);
+                        if (s) src = "installed resource bridge";
+                        else {
+                            HeapFree(GetProcessHeap(), 0, linked);
+                            bridge_error = 1;
+                        }
+                    } else if (linked_status == SH_RESOURCE_BRIDGE_OPENED) {
+                        HeapFree(GetProcessHeap(), 0, linked);
+                        bridge_error = 1;
+                    } else if (linked_status == SH_RESOURCE_BRIDGE_ERROR) {
+                        bridge_error = 1;
+                    }
+                    (void)linked_source;
                 }
             }
             if (s == NULL && baked != NULL) {
@@ -479,6 +1068,14 @@ static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsign
             backend_log(line);
             return s;   /* the engine reads the override bytes through our idFile vtable */
         }
+        if (bridge_error) {
+            char line[MAX_PATH + 128];
+            _snprintf_s(line, sizeof(line), _TRUNCATE,
+                        "B1: installed resource bridge REFUSED engine fallback for admitted '%s'",
+                        name);
+            backend_log(line);
+            return NULL;
+        }
     }
     /* no override (or guard) -> the engine's normal open (OG masks the byte args to 0xff). */
     return g_orig_open(self, name, (unsigned char)(b1 & 0xff), (unsigned char)(b2 & 0xff), mode);
@@ -488,8 +1085,8 @@ static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsign
  * The engine resource-provider vtable is a .data global (can't be masked-byte sig-scanned). The ctor
  * ResProviderCtor (resolved by signature) starts with `... 48 8B D9 (MOV RBX,RCX) ; 48 8D 05 <disp32>
  * (LEA RAX,[rip+vtable]) ; 48 89 01 (MOV [RCX],RAX)`. We scan forward from the resolved entry for the
- * FIRST `48 8D 05` and decode its rip-relative disp to recover the vtable VA build-portably. (Same
- * decode the strids op uses for its table global.) */
+ * FIRST `48 8D 05` and decode its rip-relative disp to recover the vtable VA. The install then requires
+ * the decoded address and native helper RVAs to match the audited 31-slot build before publication. */
 #define LEA_SCAN_WINDOW 0x40
 
 static int safe_read_n(const uint8_t *src, uint8_t *dst, size_t n)
@@ -531,6 +1128,47 @@ static int file_equals_baked_ignoring_cr(const unsigned char *fbuf, size_t flen,
         while (fi < flen && (char)fbuf[fi] == '\r') fi++;
     }
     return fi == flen && bi == blen;
+}
+
+static int ov_address_is_pinned(const uint8_t *module_base, const void *address,
+                                uintptr_t expected_rva)
+{
+    uintptr_t base = (uintptr_t)module_base;
+    uintptr_t value = (uintptr_t)address;
+    return module_base && address && value >= base && value - base == expected_rva;
+}
+
+static int ov_supported_build_abi(const uint8_t *module_base,
+                                  const void *ctor_fn,
+                                  const void *read_string_fn,
+                                  const void *compare_fn,
+                                  const void *write_string_fn)
+{
+    return ov_address_is_pinned(module_base, ctor_fn, OV_PINNED_RES_PROVIDER_CTOR_RVA) &&
+           ov_address_is_pinned(module_base, read_string_fn, OV_PINNED_IDFILE_READSTR_RVA) &&
+           ov_address_is_pinned(module_base, compare_fn, OV_PINNED_IDFILE_COMPARE_RVA) &&
+           ov_address_is_pinned(module_base, write_string_fn, OV_PINNED_IDFILE_WRITESTR_RVA);
+}
+
+#ifdef SH_OVERRIDES_TESTING
+int sh_overrides_test_supported_build_abi(const uint8_t *module_base,
+                                          const void *ctor,
+                                          const void *read_string,
+                                          const void *compare,
+                                          const void *write_string)
+{
+    return ov_supported_build_abi(module_base, ctor, read_string, compare, write_string);
+}
+#endif
+
+static int ov_suffix_ci(const char *value, const char *suffix)
+{
+    size_t value_length, suffix_length;
+    if (!value || !suffix) return 0;
+    value_length = strlen(value);
+    suffix_length = strlen(suffix);
+    return value_length >= suffix_length &&
+           _stricmp(value + value_length - suffix_length, suffix) == 0;
 }
 
 static void reclaim_baked_overrides(void)
@@ -585,9 +1223,14 @@ static void audit_walk(const char *dir, const char *rel, int depth, int *count, 
         } else {
             (*count)++;
             int bad = 0;
-            long long len = 0;
-            unsigned char *buf = read_all_file(sub, &len);
-            if (buf) { bad = !sh_decl_text_well_formed(buf, (size_t)len); HeapFree(GetProcessHeap(), 0, buf); }
+            if (ov_suffix_ci(subrel, ".decl")) {
+                long long len = 0;
+                unsigned char *buf = read_all_file(sub, &len);
+                if (buf) {
+                    bad = !sh_decl_text_well_formed(buf, (size_t)len);
+                    HeapFree(GetProcessHeap(), 0, buf);
+                }
+            }
             if (bad) (*warned)++;
             if (*named < OV_AUDIT_MAX_NAMED || bad) {
                 char msg[MAX_PATH + 96];
@@ -631,9 +1274,15 @@ static void audit_user_overrides(void)
 
 /* ============================================================ the install (slot swap) ==============*/
 
-int sh_overrides_install(void *ctor_fn, int ctor_status_ok)
+int sh_overrides_install(const uint8_t *module_base,
+                         void *ctor_fn, int ctor_status_ok,
+                         void *read_string_fn, int read_string_status_ok,
+                         void *compare_fn, int compare_status_ok,
+                         void *write_string_fn, int write_string_status_ok)
 {
     char line[MAX_PATH + 128];
+
+    if (!g_root[0]) default_root(g_root, sizeof g_root);
 
     if (ctor_fn == NULL) {
         backend_log("B1: overrides file-shadow SKIPPED -- ResProviderCtor not resolved");
@@ -646,15 +1295,45 @@ int sh_overrides_install(void *ctor_fn, int ctor_status_ok)
                     "(prologue may be hooked); not decoding the vtable LEA from a detoured prologue");
         return 0;
     }
+    if (!read_string_fn || !compare_fn || !write_string_fn ||
+        read_string_status_ok != 1 || compare_status_ok != 1 ||
+        write_string_status_ok != 1) {
+        ov_stream_helpers_install(read_string_fn, read_string_status_ok,
+                                  compare_fn, compare_status_ok,
+                                  write_string_fn, write_string_status_ok);
+        backend_log("B1: overrides file-shadow SKIPPED -- idFile native idStr helpers did not all resolve cleanly");
+        return 0;
+    }
+    if (!ov_supported_build_abi(module_base, ctor_fn, read_string_fn,
+                                compare_fn, write_string_fn)) {
+        backend_log("B1: overrides file-shadow SKIPPED -- resolved engine locations do not match the pinned 31-slot idFile/provider ABI");
+        return 0;
+    }
     if (g_orig_open != NULL) {
         backend_log("B1: overrides file-shadow already installed");
         return 1;
+    }
+
+    if (sh_user_overrides_enabled_for_launch() && !sh_resource_bridge_capture(g_root)) {
+        backend_log("B1: overrides file-shadow SKIPPED -- installed resource manifest snapshot failed closed");
+        return 0;
+    }
+
+    if (!ov_stream_helpers_install(read_string_fn, read_string_status_ok,
+                                   compare_fn, compare_status_ok,
+                                   write_string_fn, write_string_status_ok)) {
+        backend_log("B1: overrides file-shadow SKIPPED -- idFile helper table publication refused");
+        return 0;
     }
 
     void *vtable = decode_vtable_global((const uint8_t *)ctor_fn);
     if (vtable == NULL) {
         backend_log("B1: overrides file-shadow SKIPPED -- could not decode the vtable LEA "
                     "(ResProviderCtor layout shifted?)");
+        return 0;
+    }
+    if (!ov_address_is_pinned(module_base, vtable, OV_PINNED_PROVIDER_VTABLE_RVA)) {
+        backend_log("B1: overrides file-shadow SKIPPED -- decoded provider vtable does not match the pinned +0xf8 ABI");
         return 0;
     }
 
@@ -679,7 +1358,8 @@ int sh_overrides_install(void *ctor_fn, int ctor_status_ok)
     FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void *));
     g_slot = slot;
 
-    if (!g_root[0]) default_root(g_root, sizeof g_root);
+    sh_resource_bridge_set_provider_ready(1);
+    ov_capture_packages();       /* one enumeration; the open path resolves against this snapshot */
     reclaim_baked_overrides();   /* delete OUR untouched previously-written defaults (memory layer serves now) */
     audit_user_overrides();      /* log what the user's folder actively shadows */
     _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -716,6 +1396,7 @@ int sh_overrides_uninstall(void)
         FlushInstructionCache(GetCurrentProcess(), g_slot, sizeof(void *));
     }
     backend_log("B1: overrides file-shadow uninstalled (vtable slot restored)");
+    sh_resource_bridge_set_provider_ready(0);
     g_slot = NULL;
     g_orig_open = NULL;
     return 1;

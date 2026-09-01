@@ -232,6 +232,11 @@ static const uint8_t     *g_module_base   = NULL;  /* cached for the dev-layer c
 static void              *g_devlayer_cvar = NULL;  /* cached snapEdit_enableDevLayer idCVar* (lazy; dev-layer gate) */
 static volatile LONG  g_installed = 0;
 
+const uint8_t *sh_iface_engine_editor_base(void)
+{
+    return g_editor;
+}
+
 /* ---- SEH-guarded primitive reads (a shifted offset degrades to a clean fail, never a crash) ----- */
 static int ie_read_ptr(const void *src, void **out)
 {

@@ -93,9 +93,13 @@ jobs:
         shell: bash
         run: |
           # The release body uses each user-facing commit's full body as its changelog note. Commit bodies are
-          # written as one to three natural sentences; line wrapping is collapsed so GitHub, the website, and
+          # written as one to three short sentences; line wrapping is collapsed so GitHub, the website, and
           # `snapmap-plus changelog` all receive the same readable bullet. Older commits without a body fall
           # back to their subject.
+          #
+          # Bullets are emitted NEWEST FIRST, matching how releases themselves are listed everywhere the
+          # changelog is read: someone opening it wants the most recent change at the top, not to scroll a
+          # release to find it. `git rev-list` already walks newest-first, so this is simply not reversing it.
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           prev="$(git describe --tags --abbrev=0 --match 'v*' "${tag}^" 2>/dev/null || true)"
@@ -107,7 +111,7 @@ jobs:
             range="${tag}"
           fi
           echo "" >> notes.md
-          git rev-list --reverse --no-merges "$range" | while IFS= read -r commit; do
+          git rev-list --no-merges "$range" | while IFS= read -r commit; do
             subject="$(git show -s --format='%s' "$commit")"
             if printf '%s\n' "$subject" \
               | grep -qiE '^(ci|chore|scrub|docs|tests?|release|refactor|build|style|meta): '; then

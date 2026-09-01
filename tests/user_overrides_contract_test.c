@@ -135,7 +135,7 @@ int main(int argc, char **argv)
 
     config_init = strstr(dllmain, "sh_config_init();");
     capture = strstr(dllmain, "sh_user_overrides_capture_launch_state();");
-    install = strstr(dllmain, "sh_overrides_install(res_ctor");
+    install = strstr(dllmain, "sh_overrides_install(g_doom_base");
     CHECK(config_init != NULL);
     CHECK(capture != NULL);
     CHECK(install != NULL);

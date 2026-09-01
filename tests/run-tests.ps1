@@ -4,6 +4,9 @@
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1 -Doom C:\path\to\unpacked-DOOMx64vk.exe
+# Optional explicit installed-resource probe (not part of the default suite):
+#   tests\obj\resource_bridge_test.exe <data-root> <doom-base>
+# Both paths are required; the probe performs no autodiscovery or environment lookup.
 #
 # Default: the self-contained tests (no game, no built DLL needed):
 #   shield_format_test  -- the fault record string formatter (pure logic)
@@ -18,7 +21,13 @@
 #   user_overrides_test -- immutable launch snapshot, persistence reporting + marker independence
 #   user_overrides_contract_test -- startup, command, cvar + loader source-wiring contract
 #   decl_server_test -- path-derived identities + bounded decl-text structural validation
-#   decl_server_contract_test -- startup ordering, signature pins, one-shot source wiring
+#   overrides_internal_test -- exact per-decl table, 31-slot provider ABI, helper gating, and read-only streams
+#   decl_server_contract_test -- startup ordering, signature pins, one-shot per-decl source wiring
+#   resource_bridge_test -- exact manifest resolution, sparse decode, provider gate + collisions
+#   packages_test -- per-package override discovery: markers, legacy tree, order, bounds
+#   override_packages_test -- the file shadow resolves a decl out of any installed package
+#   package_requirements_test -- allowlisted package cvars, strict parsing, RUNNING gate + one-shot apply
+#   strids_packages_test -- a package ships its own #str_ strings; user > packages > baked
 #   config_message_test -- bounded raw WebView config-message extraction
 #   theme_bootstrap_test -- pre-navigation dark-class injection (pure C++ helper)
 #   theme_contract_test -- native/preview theme bridge contract in the embedded HTML source
@@ -73,8 +82,16 @@ $tests = @(
     @{ name = "config_test";        src = 'config_test.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\common\snapmap_plus_iface.c'; defs = '/DSH_CONFIG_TESTING'; libs = 'shell32.lib ole32.lib'; arg = "" }
     @{ name = "user_overrides_test"; src = 'user_overrides_test.c ..\src\backend\user_overrides.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\common\snapmap_plus_iface.c'; defs = '/DSH_CONFIG_TESTING /DSH_USER_OVERRIDES_TESTING'; libs = 'shell32.lib ole32.lib'; arg = "" }
     @{ name = "user_overrides_contract_test"; src = 'user_overrides_contract_test.c'; arg = (Join-Path $here '..') }
-    @{ name = "decl_server_test"; src = 'decl_server_test.c ..\src\backend\decl_server_path.c ..\src\backend\decl_text.c'; arg = "" }
+    @{ name = "decl_server_test"; src = 'decl_server_test.c ..\src\backend\decl_server.c ..\src\backend\packages.c ..\src\backend\decl_server_path.c ..\src\backend\decl_text.c'; defs = '/DSH_DECL_SERVER_TESTING'; arg = "" }
+    @{ name = "overrides_internal_test"; src = 'overrides_internal_test.c ..\src\backend\overrides.c ..\src\backend\packages.c ..\src\backend\decl_text.c'; defs = '/DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
     @{ name = "decl_server_contract_test"; src = 'decl_server_contract_test.c'; arg = (Join-Path $here '..') }
+    @{ name = "palette_refresh_test"; src = 'palette_refresh_test.c ..\src\backend\palette_refresh.c'; defs = '/DSH_PALETTE_REFRESH_TESTING'; arg = "" }
+    @{ name = "palette_refresh_contract_test"; src = 'palette_refresh_contract_test.c'; arg = (Join-Path $here '..') }
+    @{ name = "resource_bridge_test"; src = 'resource_bridge_test.c ..\src\backend\resource_bridge.c ..\src\backend\packages.c ..\src\backend\raw_deflate.c ..\src\backend\decl_text.c'; defs = '/DSH_RESOURCE_BRIDGE_TESTING /DSH_RAW_DEFLATE_TESTING'; arg = "" }
+    @{ name = "packages_test"; src = 'packages_test.c ..\src\backend\packages.c'; arg = "" }
+    @{ name = "override_packages_test"; src = 'override_packages_test.c ..\src\backend\overrides.c ..\src\backend\packages.c ..\src\backend\decl_text.c'; defs = '/DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
+    @{ name = "package_requirements_test"; src = 'package_requirements_test.c ..\src\backend\package_requirements.c ..\src\backend\packages.c'; defs = '/DSH_PACKAGE_REQUIREMENTS_TESTING'; arg = "" }
+    @{ name = "strids_packages_test"; src = 'strids_packages_test.c ..\src\backend\strids.c ..\src\backend\packages.c ..\src\backend\overrides.c ..\src\backend\decl_text.c'; defs = '/DSH_STRIDS_TESTING /DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
     @{ name = "config_message_test"; src = 'config_message_test.cpp ..\src\ui\webview\config_message.cpp'; cxx = $true; arg = "" }
     @{ name = "theme_bootstrap_test"; src = 'theme_bootstrap_test.cpp ..\src\ui\webview\theme_bootstrap.cpp'; cxx = $true; arg = "" }
     @{ name = "theme_contract_test"; src = 'theme_contract_test.c'; arg = (Join-Path $here '..\src\ui\webview\mockup.html') }
@@ -83,8 +100,8 @@ $tests = @(
     @{ name = "preview_test";     src = 'preview_test.c ..\src\backend\preview.c';              arg = "" }
     @{ name = "bcn_test";         src = 'bcn_test.c ..\src\backend\bcn.c';                      arg = "" }
     @{ name = "soundpreview_queue_test"; src = 'soundpreview_queue_test.c';                       arg = "" }
-    @{ name = "imgpreview_index_test"; src = 'imgpreview_index_test.c ..\src\backend\bcn.c';      arg = "" }
-    @{ name = "imgpreview_catalog_test"; src = 'imgpreview_catalog_test.c ..\src\backend\bcn.c';  arg = "" }
+    @{ name = "imgpreview_index_test"; src = 'imgpreview_index_test.c ..\src\backend\bcn.c ..\src\backend\raw_deflate.c';      arg = "" }
+    @{ name = "imgpreview_catalog_test"; src = 'imgpreview_catalog_test.c ..\src\backend\bcn.c ..\src\backend\raw_deflate.c';  arg = "" }
     @{ name = "prefabpreview_test"; src = 'prefabpreview_test.c';                                  arg = "" }
     @{ name = "megapreview_io_test"; src = 'megapreview_io_test.c';                                 arg = "" }
     @{ name = "serialization_buffer_test"; src = 'serialization_buffer_test.cpp'; cxx = $true;     arg = "" }

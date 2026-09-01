@@ -25,13 +25,15 @@
  *     pointer (vtable+0xf8), so we do NOT use install_inline_hook (which writes a 14-byte code jmp). We
  *     read+save the original slot pointer, then write our open hook's address into the slot (VirtualProtect
  *     RW, store, restore, FlushInstructionCache) and record it so we can restore the slot on unload.
- *   - The vtable is .data (not masked-byte sig-scannable). We locate it BUILD-PORTABLY: sig-resolve the
- *     ctor (DB name "ResProviderCtor"), decode the `LEA RAX,[rip+vtable]` right after its prologue to
- *     recover the vtable VA, then open-slot = vtable + 0xf8 -- the same LEA-decode the strids op uses.
+ *   - The vtable is .data (not masked-byte sig-scannable). We sig-resolve the ctor (DB name
+ *     "ResProviderCtor") and decode its `LEA RAX,[rip+vtable]`, but publish only when the ctor, three
+ *     native idFile helpers, and decoded vtable all occupy the audited Steam-build RVAs. The newer
+ *     build has a different idFile layout; it is refused instead of receiving this 31-slot table.
  *   - Our returned stream is our OWN clean-room idFile subclass (its dtor frees with our allocator, so we
  *     need no engine allocator/free): the engine only ever touches it through the vtable methods (all
  *     ours) + the public Length/Name fields. Semantically equivalent to OG's stream.
- *   - THREE-LAYER resolution (OG has two): user disk file -> our BUILT-IN default decls served FROM
+ *   - FOUR-LAYER resolution (OG has two): user disk file -> a manifest-selected installed resource
+ *     served from the user's read-only base-game archives -> our BUILT-IN default decls served FROM
  *     MEMORY (overrides_baked.h; the "*Custom" tab set) -> the engine's packaged resource. Built-ins
  *     are never written to the user's folder (they update with each release; deleting a user file =
  *     reset to default). Only the user layer is gated by an immutable, restart-only config snapshot;
@@ -46,16 +48,39 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* Native DeclRegisterFile canonicalizes a source argument to decltree/<source>.
+ * The dynamic decl server therefore publishes one exact provider entry per
+ * genuinely new identity. There is intentionally no aggregate source alias. */
+#define SH_OVERRIDES_INTERNAL_DECL_PREFIX "decltree/"
+
+typedef struct sh_overrides_internal_decl_entry {
+    const char *type;
+    const char *name;
+    const unsigned char *body;
+    size_t body_length;
+} sh_overrides_internal_decl_entry;
+
 /* Install the overrides file-shadow by swapping the engine resource-provider's open vtable slot.
+ *   module_base    = live DOOM image base. The provider is deliberately enabled only when the
+ *                    resolved functions and decoded provider vtable occupy the pinned Steam-build
+ *                    RVAs for the audited 31-slot idFile ABI; incompatible builds refuse cleanly.
  *   ctor_fn        = resolved engine ResProviderCtor address (from the signature resolver, DB name
  *                    "ResProviderCtor"). 0 => not resolved; logs SKIPPED and returns 0.
  *   ctor_status_ok = 1 iff a CLEAN scan hit (SIG_OK), not the hook-tolerant known_rva fallback
  *                    (SIG_OK_HOOKED). The ctor is only used to DECODE the vtable LEA (we don't patch the
  *                    ctor's code), so a hooked prologue would corrupt the LEA decode -- refuse on a
  *                    hook-tolerant resolve, same conservative policy as the other installs.
+ *   read_string_fn/compare_fn/write_string_fn = the pinned-build native idStr helper addresses for
+ *   idFile slots +0xe0/+0xe8/+0xf0. Each corresponding *_status_ok must be exactly 1 (SIG_OK); a
+ *   missing or hook-tolerant helper refuses the provider install. The three pointers are published
+ *   atomically as one fully configured 31-slot table before the engine vtable slot is changed.
  * Returns 1 if the slot was swapped, 0 otherwise (logs the reason). Emits a "B1: overrides file-shadow
  * installed ..." marker on success. */
-int sh_overrides_install(void *ctor_fn, int ctor_status_ok);
+int sh_overrides_install(const uint8_t *module_base,
+                         void *ctor_fn, int ctor_status_ok,
+                         void *read_string_fn, int read_string_status_ok,
+                         void *compare_fn, int compare_status_ok,
+                         void *write_string_fn, int write_string_status_ok);
 
 /* Set the overrides ROOT directory (the dir that holds overrides\ and overrides\shader_includes\). The
  * effective lookup is <root>\overrides\<name>. Default = %LOCALAPPDATA%\snapmap-plus (the OG used
@@ -67,6 +92,22 @@ int sh_overrides_set_root(const char *path);
  * override mechanisms always inspect the same tree. */
 int sh_overrides_get_root(char *out, size_t cap);
 
+/* One-shot publication of an immutable per-decl table for the dynamic decl
+ * catalog. The function copies every canonical key and body before publishing;
+ * callers may release their snapshot after success. Publication is accepted
+ * only while the launch-captured user layer is enabled and the +0xf8 provider
+ * hook is installed. Exact table entries cannot be shadowed by loose files,
+ * linked resources, built-ins, or a second publication. */
+/* Return 1 when this exact decltree/<type>/<name>.decl key names a published
+ * new identity. Case-insensitive, because the engine spells a decl type with
+ * its registered casing while the table is keyed from the override path.
+ * Read-only: it never opens or copies a body. */
+int sh_overrides_internal_decl_published(const char *name);
+
+int sh_overrides_internal_decl_table_can_install(void);
+int sh_overrides_internal_decl_table_install(
+    const sh_overrides_internal_decl_entry *entries, size_t count);
+
 /* How many times the shadow has FIRED (served an override file instead of the packaged resource).
  * Observability for the test harness. */
 unsigned long sh_overrides_shadow_count(void);
@@ -74,5 +115,40 @@ unsigned long sh_overrides_shadow_count(void);
 /* Restore the engine open vtable slot to the saved original (LIFO-safe; idempotent). Returns 1 if a
  * slot was restored, 0 if none was installed. Call on unload to leave the engine vtable clean. */
 int sh_overrides_uninstall(void);
+
+#ifdef SH_OVERRIDES_TESTING
+void sh_overrides_test_internal_decl_table_reset(void);
+int sh_overrides_test_internal_decl_table_install(
+    const sh_overrides_internal_decl_entry *entries, size_t count);
+void *sh_overrides_test_internal_decl_open(const char *name);
+long long sh_overrides_test_stream_read(void *stream, void *buffer, uint64_t length);
+long long sh_overrides_test_stream_read_at(void *stream, long long offset,
+                                           void *buffer, uint64_t length);
+long long sh_overrides_test_stream_write(void *stream, const void *buffer, uint64_t length);
+long long sh_overrides_test_stream_write_at(void *stream, long long offset,
+                                            const void *buffer, uint64_t length);
+int sh_overrides_test_stream_seek(void *stream, long long offset, int origin);
+long long sh_overrides_test_stream_length(void *stream);
+int sh_overrides_test_stream_true_flag(void *stream);
+int sh_overrides_test_stream_set_length(void *stream, long long length);
+size_t sh_overrides_test_stream_vtable_slots(void);
+void *sh_overrides_test_stream_vtable_slot(size_t index);
+int sh_overrides_test_stream_helpers_configure(void *read_string, int read_clean,
+                                                void *compare, int compare_clean,
+                                                void *write_string, int write_clean);
+int sh_overrides_test_stream_helpers_ready(void);
+void sh_overrides_test_stream_helpers_reset(void);
+int sh_overrides_test_supported_build_abi(const uint8_t *module_base,
+                                          const void *ctor,
+                                          const void *read_string,
+                                          const void *compare,
+                                          const void *write_string);
+void *sh_overrides_test_stream_open_file(const char *path);
+void sh_overrides_test_stream_close(void *stream);
+/* Resolve an engine resource name to the existing override file that serves it
+ * -- the legacy shared tree first, then each installed package's decls. Returns
+ * 0 (and empties `out`) when no layer provides the name. */
+int sh_overrides_test_resolve_existing(const char *name, char *out, size_t cap);
+#endif
 
 #endif /* BACKEND_B1_OVERRIDES_H */
