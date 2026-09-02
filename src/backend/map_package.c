@@ -1705,10 +1705,26 @@ static void mpkg_record_decline(const char *id, const char *digest)
  * over whatever the id would have produced. The button set is a free parameter,
  * so a yes/no pair can be attached to any id.
  */
-#define MPKG_CONSENT_GDM_ID      0x60u   /* GDM_SNAPMAP_DELETE_MAP_PROMPT: a SnapMap-shell prompt
-                                          * personality. The id is never read by the player -- its
-                                          * own text is always replaced by ours -- it only selects
-                                          * a dialog shape the shell already knows how to draw. */
+/* WHICH GDM ID TO BORROW, AND WHY IT MATTERS.
+ *
+ * The id is never seen by the player -- ShowDialog takes our text over whatever
+ * the id would have produced -- so it only selects a dialog shape the shell
+ * already knows how to draw. But it is NOT inert: these ids name real prompts,
+ * and the shell may have an action wired to the affirmative answer.
+ *
+ * This was GDM_SNAPMAP_DELETE_MAP_PROMPT (0x60), chosen purely because it drew a
+ * Yes/No pair. That is a prompt whose "yes" means DELETE THE SELECTED MAP. We
+ * raise it from our own code rather than from the delete flow, so the shell has
+ * no map staged for deletion and the answer should go nowhere -- but "should"
+ * is not a basis for a button a player will actually press, and the cost of
+ * being wrong is somebody's map.
+ *
+ * GDM_CONFIRM_VIDEO_CHANGES is the safer borrow: it is a settings confirmation,
+ * its affirmative action applies pending VIDEO settings, and outside the video
+ * menu there are none pending -- so an unintended "yes" applies nothing and can
+ * destroy nothing. It still needs confirming against a real keypress, which is
+ * the same test that settles the answer encoding. */
+#define MPKG_CONSENT_GDM_ID      0x29u   /* GDM_CONFIRM_VIDEO_CHANGES */
 #define MPKG_CONSENT_BUTTON_SET  6u      /* Yes / No -- identified live; sets 0 and 1 draw a
                                           * single acknowledgement, 2 draws REFRESH/CONTINUE and
                                           * 4 draws RETRY/CONTINUE, none of which is a question */
