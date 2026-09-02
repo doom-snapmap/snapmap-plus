@@ -439,6 +439,12 @@ static void sh_sort_detour(void *ctx, void *arr, uint32_t count, uint32_t radix)
     }
 
     g_sort_orig(ctx, arr, count, radix);
+    /* RETURN-VALUE NOTE. This detour does work AFTER the original returns, and InterlockedDecrement
+     * clobbers EAX -- so if the sort body's return value were ever consumed, this would silently hand
+     * the caller our decrement instead. It is safe only because that value is dead: the target's sole
+     * caller continues with `MOV ECX,[RSP+0x20]` [DIRECT, decoded from the pinned build], never reading
+     * EAX/AL. Re-check that if the target or the build changes. See docs/backend-changes.md,
+     * 2026-09-01 -- the same shape, with a live return value, silently broke every map save. */
     InterlockedDecrement(&g_in_sort);
 }
 

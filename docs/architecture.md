@@ -126,6 +126,7 @@ lock(loop_mutex)
     (*(interface + 0x1a0))()      // drain the backend work-queue: run queued {handler, args}
     apply deferred UI-driven writes (snapshotted in the JS message callback)
 unlock
+sample the live camera origin when the editor is visible and not position-locked
 pump the window's messages
 Sleep(33ms)                       // ~30 Hz
 ```
@@ -135,6 +136,10 @@ Save-to-Decl, timeline commits) is snapshotted off the re-entrant JS message cal
 on the think-loop thread; the manual pump plus the `+0x1a0` work-queue drain *are* the frontend's
 main-thread execution point (a UI-thread or RPC-thread engine call deadlocks the engine's command-system
 lock). Replicate the pump.
+
+The live camera-origin read intentionally runs at this full cadence rather than inside the separate
+10-frame (~330 ms) entity-list/selection/state poll. It posts to WebView2 only when a coordinate changes,
+so stationary-camera frames pay for one guarded vec3 read but enqueue no page message.
 
 ## Engine allocations inherit a heap scope — mind the lifetime
 

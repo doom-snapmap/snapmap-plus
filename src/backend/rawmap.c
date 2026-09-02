@@ -326,9 +326,28 @@ unsigned long sh_rawmap_swap_complete_count(void)
 #define IDSTR_LEN_OFF   0x08   /* int  len  (character count, excl NUL) */
 #define IDSTR_DATA_OFF  0x10   /* char* data (inline baseBuffer for short strings, else heap) */
 
-/* The engine target's prototype: void SerializeToJson(idSnapMap* map, idStr* out, uint8 compact). The
- * out-idStr is arg1 (RDX); the JSON lands there after the call (serialize-to-json-rva.md). */
-typedef void (*serialize_fn_t)(void *map, void *out_idstr, unsigned char compact);
+/* The engine target's prototype: bool SerializeToJson(idSnapMap* map, idStr* out, uint8 compact). The
+ * out-idStr is arg1 (RDX); the JSON lands there after the call (serialize-to-json-rva.md).
+ *
+ * IT RETURNS A BOOL IN AL, AND THE ONLY CALLER CONSUMES IT [DIRECT, decoded from the pinned build].
+ * At the sole call site (the save-snapshot function 0x59D2F0, +0x54) the bytes immediately after the
+ * `call` are:
+ *     0F B6 D8            MOVZX EBX,AL        ; latch the return value
+ *     48 8D 4C 24 30      LEA   RCX,[RSP+0x30]
+ *     E8 DA 08 F8 FF      CALL  <idStr dtor>
+ *     0F B6 C3            MOVZX EAX,BL        ; and return it as the snapshot's own result
+ * so AL IS the save's success flag: a zero there aborts the save with no error, no log and no file.
+ *
+ * This was typed `void` until 2026-09-01, which made the detour's own last-executed call decide the
+ * save's fate. With the shadow DISARMED (the default) the final call before returning was
+ * GetFileAttributesA inside rawmap_armed() -> flag_file_present(), whose miss returns 0 -- so every
+ * save reported FAILURE, the editor kept the map dirty, re-prompted for a name on exit, and the map
+ * never appeared in My Maps. With the shadow ARMED the trailing shadow work happened to leave AL
+ * non-zero, which is why `sh_rawmaps_on` "fixed" saving -- by luck, not by design.
+ *
+ * The detour must therefore latch the engine's verdict and return THAT on every exit path. Nothing
+ * this file does after the original returns may be allowed to speak for the engine. */
+typedef unsigned char (*serialize_fn_t)(void *map, void *out_idstr, unsigned char compact);
 
 static serialize_fn_t g_ser_orig = NULL;   /* the trampoline -> the real engine SerializeToJson */
 
@@ -407,21 +426,25 @@ static char *pretty_copy(const char *data, size_t len, size_t *out_len)
 /* The detour. Same prototype as the engine target. Call the engine ORIGINAL first (the real save fills
  * `out`), then read `out` and mirror it to rawmap.json. The shadow write is best-effort + fully guarded:
  * the real save has already happened by the time we touch disk. */
-static void sh_ser_detour(void *map, void *out_idstr, unsigned char compact)
+static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char compact)
 {
-    if (g_ser_orig == NULL) return;   /* defensive: should never happen once installed */
+    if (g_ser_orig == NULL) return 0;   /* defensive: should never happen once installed */
 
     /* 1) the engine's own serialize -- the real save, untouched. This runs UNCONDITIONALLY and BEFORE the
-     *    gate check below: the player's save must complete identically whether the shadow is on or off. */
-    g_ser_orig(map, out_idstr, compact);
+     *    gate check below: the player's save must complete identically whether the shadow is on or off.
+     *
+     *    LATCH THE VERDICT IMMEDIATELY. `rc` is the save's success flag (see the typedef comment): the
+     *    caller reads AL the instant we return, so every exit below returns `rc` and nothing else. The
+     *    shadow is a bystander to the save -- it may never decide whether the save succeeded. */
+    const unsigned char rc = g_ser_orig(map, out_idstr, compact);
 
     /* 2) the shadow is the SAVE half of the rawmaps switch, so it obeys the same arm the LOAD swap does.
      *    Ungated, this overwrote rawmap.json on every map save even with rawmaps off -- silently discarding
      *    a rawmap the user had put there deliberately. Checked AFTER the real save so the gate can never
      *    affect what the engine writes. */
-    if (!rawmap_armed(NULL)) return;
+    if (!rawmap_armed(NULL)) return rc;
 
-    if (out_idstr == NULL) return;
+    if (out_idstr == NULL) return rc;
 
     /* 2) read the engine's output idStr (len@+0x8, data@+0x10) under SEH (the engine fills these; a layout
      *    surprise must not fault the save path) and mirror it to disk. */
@@ -431,9 +454,9 @@ static void sh_ser_detour(void *map, void *out_idstr, unsigned char compact)
         len  = *(int *)((unsigned char *)out_idstr + IDSTR_LEN_OFF);
         data = *(const char **)((unsigned char *)out_idstr + IDSTR_DATA_OFF);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return;   /* unreadable out-idStr -> skip the shadow (the real save already completed) */
+        return rc;   /* unreadable out-idStr -> skip the shadow (the real save already completed) */
     }
-    if (data == NULL || len <= 0) return;
+    if (data == NULL || len <= 0) return rc;
 
     /* 3) sh_pretty_on chooses the LAYOUT of the copy. Read live per save (it is a cvar a user flips
      *    mid-session, not a startup choice) and default OFF, which is also what a failed cvar register
@@ -474,6 +497,9 @@ static void sh_ser_detour(void *map, void *out_idstr, unsigned char compact)
                    : "");
         backend_log(line);
     }
+
+    /* The engine's verdict, never the shadow's. A failed mirror is not a failed save. */
+    return rc;
 }
 
 int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok)

@@ -2252,6 +2252,11 @@ static void ds_boot_promotion_detour(void)
      * install_inline_hook returned a trampoline -- but skipping it would leave the ENTIRE engine's
      * content map-scoped, which is far worse than anything publication can get wrong. */
     if (g_boot_promotion_original) g_boot_promotion_original();
+    /* RETURN-VALUE NOTE. This runs AFTER the original returns and clobbers EAX, so it would overwrite
+     * the promotion's return value if anything read it. Safe only because that value is dead: the sole
+     * caller at 0x17C6479 continues with `MOV RCX,[rip+...]` [DIRECT, decoded from the pinned build].
+     * Re-check on a build change. See docs/backend-changes.md, 2026-09-01 -- the same shape, over a
+     * function whose return WAS consumed, silently broke every map save. */
     ds_report_promotion_outcome();
 }
 

@@ -6,6 +6,49 @@ where our own reimplementation was wrong, not the original SnapHak's behavior; a
 (or faithful reproduction of) the *original's* behavior belongs in [`fidelity.md`](fidelity.md)
 instead. Entries are chronological, newest first.
 
+## 2026-09-01 — Stop the rawmap save shadow from reporting the player's save as failed
+
+**What changed.** `sh_ser_detour` in `rawmap.c` is typed `unsigned char` instead of
+`void`. It latches the engine's return value the instant `SerializeToJson` returns
+and gives that same value back on all seven of its exit paths. Nothing the shadow
+does afterwards — the arm check, the idStr read, the pretty pass, the disk write —
+can speak for the engine any more.
+
+**Why.** `idSnapMap::SerializeToJson` returns a bool in `AL`, and that bool is the
+save's success flag. Its sole caller, the save-snapshot function at RVA `0x59D2F0`,
+does `MOVZX EBX,AL` on the instruction after the `call` and later returns it as its
+own result (`MOVZX EAX,BL`) — read directly out of the pinned build at `0x59D2F0+0x54`.
+
+The detour was typed `void`, so whatever it happened to call last decided the save's
+fate. With the shadow disarmed — the default — the last call before returning was
+`GetFileAttributesA`, probing for the `arm.flag` file inside `rawmap_armed()` ->
+`flag_file_present()`. That file is normally absent, so the predicate returned 0, and
+the engine read `AL` as a serialize failure. The save was abandoned with no error, no
+log line and no file written: the editor kept the map dirty, re-prompted for a map
+name on exit, and the map never appeared in My Maps. With the shadow armed the
+trailing shadow work left `AL` non-zero, which is why `sh_rawmaps_on` appeared to fix
+saving — luck, not design.
+
+The regression arrived with the arm gate (the `if (!rawmap_armed(NULL)) return;`
+added when the SAVE shadow was put behind the same switch as the LOAD swap). Before
+that gate there was no early return, so the ungated path always left `AL` non-zero by
+the same accident. The load-side detour never had the defect: it is typed `int`,
+latches `rc`, and runs its arm check *before* calling the engine rather than after.
+
+**The invariant this exposed.** A detour that does any work *after* calling the
+original must declare the original's real return type, latch the value, and return
+it. A detour that calls the original last is safe for free, because the original's
+return passes straight through. Two detours still have the risky shape and are safe
+only because their targets' returns are unused — `sh_sort_detour` in `strids.c`
+(target `0x1A2B490`; its caller's next instruction is `MOV ECX,[RSP+0x20]`) and
+`ds_boot_promotion_detour` in `decl_server.c` (target `0x1801830`; its sole caller at
+`0x17C6479` continues with `MOV RCX,[rip+...]`). Both now carry a comment recording
+that dependency, so the next person does not have to rediscover it the hard way.
+
+**Status.** Confirmed in the live editor on the pinned build: with `sh_rawmaps_off`
+a map saves, exits without re-prompting, and appears in My Maps. Saving with
+`sh_rawmaps_on` still mirrors `rawmap.json` exactly as before.
+
 ## 2026-08-23 — Let a package own its shaders, not just its decls
 
 **What changed.** The cross-package resolver is now a namespace table rather than
