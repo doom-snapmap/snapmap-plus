@@ -197,7 +197,13 @@ int sh_pkg_conflicts_report(const char *data_root)
     if (!sh_packages_enumerate(data_root, packages, SH_PACKAGES_MAX, &package_count))
         backend_log("package-conflicts: the package tree could not be read in full; "
                     "the overlap report below may be incomplete");
-    if (package_count < 2) return 0;      /* one package cannot collide with itself */
+    if (package_count < 2) {
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "package-conflicts: %u package(s) installed; nothing can overlap",
+                    (unsigned)package_count);
+        backend_log(line);
+        return 0;
+    }
 
     conflicts = (sh_pkg_conflict *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
                                              SH_PKG_CONFLICT_MAX * sizeof(sh_pkg_conflict));
@@ -215,14 +221,20 @@ int sh_pkg_conflicts_report(const char *data_root)
                     conflicts[i].winner);
         backend_log(line);
     }
-    if (differing || identical || truncated) {
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "package-conflicts: %u package(s) installed, %d differing overlap(s), "
-                    "%d identical overlap(s)%s",
-                    (unsigned)package_count, differing, identical,
-                    truncated ? " -- LIST TRUNCATED, there may be more" : "");
-        backend_log(line);
-    }
+    /* ALWAYS log the summary, including "no overlaps".
+     *
+     * Reporting only when something is wrong makes silence mean two different
+     * things -- a clean install set, or a scan that never ran -- and there is no
+     * way to tell them apart from the outside. That ambiguity cost a live test:
+     * three packages were deliberately made to claim one decl and the run printed
+     * nothing, which proved neither that the overlap was missed nor that the
+     * check had happened at all. */
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "package-conflicts: %u package(s) installed, %d differing overlap(s), "
+                "%d identical overlap(s)%s",
+                (unsigned)package_count, differing, identical,
+                truncated ? " -- LIST TRUNCATED, there may be more" : "");
+    backend_log(line);
     HeapFree(GetProcessHeap(), 0, conflicts);
     return differing;
 }

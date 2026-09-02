@@ -1574,19 +1574,50 @@ static mpkg_session_entry *mpkg_session_add(const char *id, const char *digest, 
 /* install + consent                                                     */
 /* ==================================================================== */
 
+/* A CHAIN, not one package. A map may carry several -- a demon and the two
+ * transformations that dress it, say -- and the gate used to offer only the
+ * first missing one. The player then answered a prompt, watched the map refuse
+ * a second time, answered another prompt, and so on: N+1 loads for N packages,
+ * each refusal looking like a failure. They are staged and consented together. */
 typedef struct mpkg_staged {
     char id[SH_MPKG_ID_CAP];
     char digest[SH_MPKG_DIGEST_CHARS + 1];
     unsigned char *payload;
     size_t payload_len;
     unsigned files;
+    struct mpkg_staged *next;
 } mpkg_staged;
 
+/* Frees the whole chain from `s` onward. */
 static void mpkg_staged_free(mpkg_staged *s)
 {
-    if (!s) return;
-    if (s->payload) HeapFree(GetProcessHeap(), 0, s->payload);
-    HeapFree(GetProcessHeap(), 0, s);
+    while (s) {
+        mpkg_staged *next = s->next;
+        if (s->payload) HeapFree(GetProcessHeap(), 0, s->payload);
+        HeapFree(GetProcessHeap(), 0, s);
+        s = next;
+    }
+}
+
+static unsigned mpkg_staged_count(const mpkg_staged *s)
+{
+    unsigned n = 0;
+    for (; s; s = s->next) n++;
+    return n;
+}
+
+static size_t mpkg_staged_bytes(const mpkg_staged *s)
+{
+    size_t n = 0;
+    for (; s; s = s->next) n += s->payload_len;
+    return n;
+}
+
+static unsigned mpkg_staged_files(const mpkg_staged *s)
+{
+    unsigned n = 0;
+    for (; s; s = s->next) n += s->files;
+    return n;
 }
 
 /* Perform the consented install. Returns 1 on success (and records it as
@@ -1757,21 +1788,30 @@ static void mpkg_consent_finish(int accepted)
     if (!s) return;
 
     if (accepted) {
-        char err[SH_MPKG_ERR_CAP];
-        if (!mpkg_install_staged(s, err, sizeof err)) {
-            char line[512];
-            _snprintf_s(line, sizeof line, _TRUNCATE,
-                        "MPKG: install of package '%s' FAILED: %s", s->id, err);
-            backend_log(line);
+        /* Install every package the map needs, and keep going after a failure:
+         * one bad payload must not silently strand the others, and each records
+         * its own outcome so the ones that worked are not re-offered. */
+        mpkg_staged *item;
+        for (item = s; item; item = item->next) {
+            char err[SH_MPKG_ERR_CAP];
+            if (mpkg_install_staged(item, err, sizeof err)) continue;
+            {
+                char line[512];
+                _snprintf_s(line, sizeof line, _TRUNCATE,
+                            "MPKG: install of package '%s' FAILED: %s", item->id, err);
+                backend_log(line);
+            }
             mpkg_lock();
             {
-                mpkg_session_entry *e = mpkg_session_find(s->id, s->digest);
+                mpkg_session_entry *e = mpkg_session_find(item->id, item->digest);
                 if (e && e->outcome == 2) e->outcome = 0;   /* failed = do not re-prompt */
             }
             mpkg_unlock();
         }
     } else {
-        mpkg_record_decline(s->id, s->digest);
+        mpkg_staged *item;
+        for (item = s; item; item = item->next)
+            mpkg_record_decline(item->id, item->digest);
     }
     mpkg_staged_free(s);
 }
@@ -1798,10 +1838,42 @@ void sh_mpkg_consent_poll(void)
         /* The engine's dialog body is one 256-byte string, so this is written to
          * be read at a glance rather than to carry every field the OS box did.
          * The digest and byte count are in the log for anyone who wants them. */
-        _snprintf_s(text, sizeof text, _TRUNCATE,
-                    "This map brings its own mod package:  %s  (%u files, %u KB).  "
-                    "It has to be installed before the map can load.  Install it now?",
-                    s->id, s->files, (unsigned)((s->payload_len + 1023) / 1024));
+        {
+            unsigned count = mpkg_staged_count(s);
+            unsigned kb = (unsigned)((mpkg_staged_bytes(s) + 1023) / 1024);
+            unsigned files = mpkg_staged_files(s);
+            if (count == 1) {
+                _snprintf_s(text, sizeof text, _TRUNCATE,
+                            "This map brings its own mod package:  %s  (%u files, %u KB).  "
+                            "It has to be installed before the map can load.  Install it now?",
+                            s->id, files, kb);
+            } else {
+                /* Name as many as fit rather than only counting them: "3 mod
+                 * packages" tells a player nothing about what they are agreeing
+                 * to install. The descriptor's string is 256 bytes, so the list
+                 * is truncated with a remainder rather than silently cut. */
+                char names[168];
+                unsigned listed = 0;
+                mpkg_staged *item;
+                names[0] = '\0';
+                for (item = s; item; item = item->next) {
+                    size_t used = strlen(names);
+                    if (used + strlen(item->id) + 4 >= sizeof names) break;
+                    if (used) strncat_s(names, sizeof names, ", ", _TRUNCATE);
+                    strncat_s(names, sizeof names, item->id, _TRUNCATE);
+                    listed++;
+                }
+                if (listed < count) {
+                    char more[32];
+                    _snprintf_s(more, sizeof more, _TRUNCATE, " and %u more", count - listed);
+                    strncat_s(names, sizeof names, more, _TRUNCATE);
+                }
+                _snprintf_s(text, sizeof text, _TRUNCATE,
+                            "This map brings %u mod packages:  %s  (%u files, %u KB).  "
+                            "They have to be installed before the map can load.  Install them now?",
+                            count, names, files, kb);
+            }
+        }
         g_consent_ticket = sh_engine_dialog_ask(MPKG_CONSENT_GDM_ID,
                                                 MPKG_CONSENT_BUTTON_SET, text);
         if (!g_consent_ticket) {
@@ -1959,54 +2031,72 @@ int sh_mpkg_gate(const char *json, size_t len)
         first_missing->present, first_missing->total);
     mpkg_set_refusal(reason);
 
-    /* Offer the install for the first missing package -- unless the user has
-     * already answered (or is being asked) for this exact (id, digest). */
+    /* Stage EVERY missing package, not just the first.
+     *
+     * The gate used to offer only `first_missing`, so a map carrying several --
+     * a demon plus the transformations that dress it -- cost the player one load
+     * and one prompt PER package, with every intermediate load looking like a
+     * plain refusal. They are collected here and consented to together.
+     *
+     * A package already answered for (or already being asked about) is skipped
+     * rather than re-offered, and one that cannot be extracted is skipped with a
+     * reason rather than sinking the whole set. */
     {
-        mpkg_session_entry *e;
-        int should_offer = 0;
-        mpkg_lock();
-        e = mpkg_session_find(first_missing->id, first_missing->digest);
-        if (!e) {
-            if (mpkg_session_add(first_missing->id, first_missing->digest, 2))
-                should_offer = 1;   /* marked in-flight */
-        }
-        mpkg_unlock();
-        if (should_offer) {
+        mpkg_staged *head = NULL, *tail = NULL;
+        size_t i;
+
+        for (i = 0; i < count; i++) {
+            const sh_mpkg_decl *d = &decls[i];
+            mpkg_session_entry *e;
+            int should_offer = 0;
             char err[SH_MPKG_ERR_CAP];
             size_t payload_len = 0;
-            unsigned char *payload =
-                sh_mpkg_extract(json, len, first_missing->id, &payload_len, err, sizeof err);
+            unsigned char *payload;
             unsigned files = 0;
-            if (payload &&
-                !mpkg_zip_survey(payload, payload_len, &files, err, sizeof err)) {
+
+            if (mpkg_boot_satisfies(d)) continue;
+
+            mpkg_lock();
+            e = mpkg_session_find(d->id, d->digest);
+            if (!e && mpkg_session_add(d->id, d->digest, 2))
+                should_offer = 1;              /* marked in-flight */
+            mpkg_unlock();
+            if (!should_offer) continue;
+
+            payload = sh_mpkg_extract(json, len, d->id, &payload_len, err, sizeof err);
+            if (payload && !mpkg_zip_survey(payload, payload_len, &files, err, sizeof err)) {
                 HeapFree(GetProcessHeap(), 0, payload);
                 payload = NULL;
             }
             if (!payload) {
                 char line[SH_MPKG_ERR_CAP + 96];
                 _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "MPKG: package '%s' cannot be offered for install -- %s",
-                    first_missing->id, err);
+                    "MPKG: package '%s' cannot be offered for install -- %s", d->id, err);
                 backend_log(line);
                 mpkg_lock();
-                e = mpkg_session_find(first_missing->id, first_missing->digest);
+                e = mpkg_session_find(d->id, d->digest);
                 if (e && e->outcome == 2) e->outcome = 0;   /* nothing installable: don't re-ask */
                 mpkg_unlock();
-            } else {
+                continue;
+            }
+            {
                 mpkg_staged *s = (mpkg_staged *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
                                                           sizeof *s);
                 if (!s) {
                     HeapFree(GetProcessHeap(), 0, payload);
-                } else {
-                    strcpy_s(s->id, sizeof s->id, first_missing->id);
-                    strcpy_s(s->digest, sizeof s->digest, first_missing->digest);
-                    s->payload = payload;
-                    s->payload_len = payload_len;
-                    s->files = files;
-                    mpkg_request_consent(s);   /* takes ownership */
+                    continue;
                 }
+                strcpy_s(s->id, sizeof s->id, d->id);
+                strcpy_s(s->digest, sizeof s->digest, d->digest);
+                s->payload = payload;
+                s->payload_len = payload_len;
+                s->files = files;
+                s->next = NULL;
+                if (tail) tail->next = s; else head = s;
+                tail = s;
             }
         }
+        if (head) mpkg_request_consent(head);   /* takes ownership of the chain */
     }
     return 0;
 }

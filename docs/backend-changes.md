@@ -49,6 +49,39 @@ that dependency, so the next person does not have to rediscover it the hard way.
 a map saves, exits without re-prompting, and appears in My Maps. Saving with
 `sh_rawmaps_on` still mirrors `rawmap.json` exactly as before.
 
+## 2026-09-02 — Install every package a map needs, from one prompt
+
+**What changed.** The install gate stages EVERY missing package a map carries instead of only the
+first, as a chain consented to together. The prompt names them rather than counting them, truncating
+the list with a remainder because the engine dialog's string is 256 bytes. Installs continue past a
+failure so one bad payload cannot strand the rest, and each package records its own outcome so the
+ones that worked are not re-offered. The overlap reporter also always logs its summary now,
+including "no overlaps".
+
+**Why.** `sh_mpkg_gate` offered `first_missing` alone. A map carrying three packages — a demon plus
+the transformations that dress it — therefore cost the player three prompts and four map loads, and
+every intermediate load looked like a plain refusal rather than progress. Nothing was wrong with the
+install itself; it just only ever ran once per load.
+
+The reporter's summary was previously conditional on having found something, which made silence mean
+two different things: a clean install set, or a scan that never ran. There is no way to tell those
+apart from the outside, and that ambiguity cost a live test.
+
+**Status.** Verified live on a map carrying three packages, all missing at boot: one prompt naming
+all three, three installs, `296 MISSING registered … 0 REFUSED`, then editor and playtest. Testing
+this needed a multi-package map, which previously needed the editor to author — the embedded form is
+plain `snapVarString_t` variables named `smpkg.<id>.<index>.<total>.<digest16>` carrying base64
+chunks of a zip, so they can be written directly. Overlap detection was exercised against real
+colliding packages for the first time: a pack shipping a differing copy of another pack's decl is
+reported against both claimants with winner and loser, while byte-identical copies count as one
+benign overlap.
+
+**Known and not fixed.** A delivered package installs to `overrides\<id>` with a bare leaf name, so
+it can never land inside a grouping folder. Map delivery and manual install of identical content
+therefore produce two packages nothing recognises as the same, because `mpkg_boot_satisfies` matches
+on id and digest. Nothing collects them: a delivered package is permanent and has no uninstall path.
+The reporter makes the duplication visible; it does not prevent it.
+
 ## 2026-09-02 — Install a mid-session package in one pass: the gates were queued, never drained
 
 **What changed.** The runtime decl-server re-arm is a single synchronous pass again. It used to be
