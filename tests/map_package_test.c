@@ -262,6 +262,20 @@ static void check_round_trip(const char *json, const unsigned char *payload, siz
     HeapFree(GetProcessHeap(), 0, out);
 }
 
+
+/* The engine dialog surface, stubbed. This suite is about shard scanning,
+ * extraction and the install gate; consent ROUTING is engine_dialog_test's
+ * subject. Reporting "not ready" keeps every case on the fallback path these
+ * tests already drive through g_consent_mode. */
+int sh_engine_dialog_ready(void) { return 0; }
+int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
+{
+    (void)gdm_id; (void)button_set; (void)text;
+    return 0;
+}
+int sh_engine_dialog_poll(int ticket) { (void)ticket; return 3; }
+void sh_engine_dialog_release(int ticket) { (void)ticket; }
+
 int main(void)
 {
     char temp[MAX_PATH], root[MAX_PATH], overrides[MAX_PATH], sub[MAX_PATH];

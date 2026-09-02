@@ -26,6 +26,7 @@
 #include "map_package.h" /* map-embedded override packages: boot snapshot + load gate */
 #include "palette_guard.h"
 #include "palette_refresh.h"
+#include "engine_dialog.h"
 #include "../fault_shield/mapload_guards.h"   /* the two map-load / spawn game-defect guards */
 #include "strids.h"
 #include "overrides.h"
@@ -426,6 +427,12 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * made synchronously by the successful registration command on the
          * engine main thread. Unsupported builds refuse before any engine call. */
         sh_palette_refresh_install(results, db, g_doom_base);
+
+        /* The engine's own modal surface. Installed before the decl server so a
+         * package prompt raised by the very first map load already has it, and
+         * kept non-fatal: a refusal here only means the install flow falls back
+         * to the OS message box it used before. */
+        sh_engine_dialog_install(results, db, g_doom_base);
 
         /* The DYNAMIC DECL SERVER complements the file-shadow installed above. It snapshots local and
          * linked generated decls, then registers a private command and BufferCommandTexts it so DOOM's

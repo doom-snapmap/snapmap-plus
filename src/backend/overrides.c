@@ -41,6 +41,7 @@
 #include "backend_log.h"
 #include "decl_text.h"
 #include "packages.h"
+#include "package_conflicts.h"
 #include "resource_bridge.h"
 #include "user_overrides.h"
 #include "overrides_baked.h"        /* the built-in "*Custom"-tab default decls (Timeline + Unknown) */
@@ -943,6 +944,9 @@ static const ov_namespace g_ov_namespaces[] = {
 static sh_package g_ov_packages_buf[2][SH_PACKAGES_MAX];
 static size_t g_ov_package_counts[2];
 static volatile LONG g_ov_pkg_active;   /* 0 or 1 */
+/* The overlap report is per-process, not per-capture: capture runs on the engine
+ * file-open path and the installed set does not change under it. */
+static volatile LONG g_ov_conflicts_reported;
 static volatile LONG g_ov_pkg_generation;
 
 static void ov_capture_packages(void)
@@ -960,6 +964,13 @@ static void ov_capture_packages(void)
     (void)sh_packages_enumerate(root, g_ov_packages_buf[target], SH_PACKAGES_MAX, &count);
     g_ov_package_counts[target] = count;
     InterlockedExchange(&g_ov_pkg_active, target);   /* publish: one atomic store */
+
+    /* Say which packages overlap, once per capture. Resolution takes the first
+     * package that carries a file, so an overlap is a precedence decision being
+     * made on the player's behalf; making it in silence is how someone ends up
+     * running one package's content while believing they have another's. */
+    if (count > 1 && !InterlockedCompareExchange(&g_ov_conflicts_reported, 1, 0))
+        (void)sh_pkg_conflicts_report(root);
     InterlockedIncrement(&g_ov_pkg_generation);
 }
 

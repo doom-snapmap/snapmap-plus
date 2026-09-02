@@ -49,6 +49,70 @@ that dependency, so the next person does not have to rediscover it the hard way.
 a map saves, exits without re-prompting, and appears in My Maps. Saving with
 `sh_rawmaps_on` still mirrors `rawmap.json` exactly as before.
 
+## 2026-09-02 — Install a mid-session package in one pass: the gates were queued, never drained
+
+**What changed.** The runtime decl-server re-arm is a single synchronous pass again. It used to be
+split in two, separated by eight engine ticks, and `sh_decl_server_rearm_poll`'s settle state
+machine went with it. `sh_package_requirements_rearm` now drains the engine command buffer itself,
+unconditionally, instead of inferring that whoever applied the cut-content cvars also drained them.
+
+**Why.** The split was attributed to "the cut-content gates are cvars and a cvar set is QUEUED, not
+immediate" -- a timing problem, solved by waiting for a frame boundary. The measured failure behind
+it was real (297 candidates REFUSED, materialization terminal) but the cause was not timing. It was
+a missing drain.
+
+`sh_package_requirements_poll` applies the gates with a NULL executor as soon as load-state reaches
+RUNNING; that QUEUES the commands without draining them, which is harmless at boot because
+something else drains shortly after. On a runtime re-arm nothing does. The re-arm's own
+`apply_now` then saw the state already `DONE`, returned SUCCESS, and reported the gates live while
+the commands sat unread in the buffer -- so the decl pass parsed every candidate against a
+blacklist that was still up. Waiting eight ticks only ever worked because some later tick happened
+to drain it.
+
+Draining an already-empty buffer is harmless, so the drain is unconditional rather than conditional
+on having won that race.
+
+**What it buys.** The wait was not free: the install could not complete inside the flow that
+triggered it, which is why a map carrying a package had to be opened twice -- once to be refused
+and trigger the install, once to actually load. One pass is what makes one action one action.
+
+**Status.** Measured live, same test both ways: two-phase-removed-without-the-drain reproduced the
+original failure exactly (297 REFUSED, materialization terminal), and with the drain the same run
+reports `command buffer drained; the gates are live` followed by `294 MISSING registered ... 75
+SHADOWED, 0 REFUSED; the entity-palette rebuild ... was completed`. Full suite green.
+
+## 2026-09-02 — Decide package overlaps by declared priority, and say when one happens
+
+**What changed.** `sh_package` carries a `priority` read from the package's own package.json
+(default 0), and packages enumerate in descending priority then name -- so the file shadow resolves
+overlaps in a declared order rather than an alphabetical accident. `package_conflicts.c` scans the
+installed set for files more than one package claims and reports them: byte-identical overlaps are
+benign and counted, differing ones are named with their winner and loser. A map-carried package
+whose id is already installed with a DIFFERENT digest now says exactly that instead of
+"already exists on disk".
+
+**Why.** Two mechanisms can serve a decl and only one of them was safe. An identity a package
+PUBLISHES goes through the decl server, which already composes byte-identical copies away and
+refuses a differing duplicate on both sides. An identity a package SHADOWS goes through the file
+shadow, which took the first package in directory order -- so a pack named `boss-demons` beat one
+named `cyberdemon` for any file they both carried, purely because b sorts before c, and nothing
+said so. A player could be running one package's content while believing they had the other's.
+
+Packages are NOT rewritten to remove duplicates, and that is deliberate: a package's digest is its
+identity, it is what a map matches against to know whether the recipient has what the author built
+against, and rewriting on disk would break that and make the package non-portable. Deduplication is
+a resolution-time decision, never an on-disk one.
+
+The version-clash case was a dead end rather than a message: the gate correctly reported the map's
+package as missing (a same-named package with different content does not satisfy it), then the
+install refused because the folder was occupied, and nothing explained why. It still will not
+overwrite -- that could destroy content another map depends on -- but it now names both digests.
+
+**Status.** Covered by `package_conflicts_test`, which builds real package trees: no-overlap,
+identical overlap, differing overlap, priority beating the alphabet, negative priority, a malformed
+package.json falling back to 0 rather than dropping the package, non-servable files not counting as
+conflicts, and a package not conflicting with itself. Full suite green.
+
 ## 2026-09-01 — Rebuild the editor palette on every registration pass, not once per process
 
 **What changed.** `sh_palette_refresh_after_decl_registration` now claims its work

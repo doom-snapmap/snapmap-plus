@@ -88,7 +88,30 @@ int sh_package_requirements_rearm(const char *data_root, void *execute_command_b
     if (!sh_package_requirements_install(data_root, g_module_base, g_cmdsys,
                                          (void *)g_buffer_command, user_layer_enabled))
         return 0;
-    return sh_package_requirements_apply_now(execute_command_buffer);
+    if (!sh_package_requirements_apply_now(execute_command_buffer)) return 0;
+
+    /* DRAIN, ALWAYS, and do not infer that someone else did.
+     *
+     * `apply_now` reports success when the settings are already applied -- including when the
+     * load-state RUNNING poll got there first, which QUEUES the cvars without draining them
+     * because at boot something else drains shortly after. On a runtime re-arm nothing does,
+     * so the caller was told the gates were live while they sat in the command buffer, and
+     * the decl pass then parsed every candidate against a blacklist that was still up. That
+     * is the 297-REFUSED failure: not a missing wait, a missing drain.
+     *
+     * Draining an already-empty buffer is harmless, so this is unconditional rather than
+     * conditional on having won that race. */
+    if (execute_command_buffer) {
+        __try {
+            ((pr_execute_buffer_fn)execute_command_buffer)(g_cmdsys);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            backend_log("package-requirements RE-ARM: the command drain raised an exception; "
+                        "the cut-content gates may not be live");
+            return 0;
+        }
+        backend_log("package-requirements RE-ARM: command buffer drained; the gates are live");
+    }
+    return 1;
 }
 
 #ifdef SH_PACKAGE_REQUIREMENTS_TESTING

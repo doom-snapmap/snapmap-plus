@@ -133,6 +133,13 @@ static int ends_with_ci(const char *value, const char *suffix)
     return value && suffix && v >= s && _stricmp(value + v - s, suffix) == 0;
 }
 
+
+/* The overlap reporter, stubbed. This suite is about resolution and the provider
+ * table; WHICH packages overlap is package_conflicts_test's subject, and pulling
+ * its filesystem walk in here would make these cases depend on a tree they do
+ * not build. */
+int sh_pkg_conflicts_report(const char *data_root) { (void)data_root; return 0; }
+
 int main(void)
 {
     char temp[MAX_PATH], root[MAX_PATH], path[MAX_PATH], resolved[MAX_PATH];

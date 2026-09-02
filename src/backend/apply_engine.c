@@ -33,6 +33,7 @@
 #include "snapmap_plus_iface.h"
 #include "apply_engine.h"
 #include "decl_server.h"
+#include "map_package.h"
 #include "package_requirements.h"
 #include "typeinfo.h"     /* sh_typeinfo_get_declmgr -- the one shared declMgr accessor */
 #include "ui_bridge.h"    /* sh_ui_get_iface -- reach the toast slot for the apply-result toast */
@@ -2392,6 +2393,7 @@ void sh_apply_prefab_poll_play(void)
      * its two phases have to land on different frames so the engine can drain the cut-content
      * cvars between them. */
     sh_decl_server_rearm_poll();
+    sh_mpkg_consent_poll();
     if (!g_doom_base) return;
 
 #if AE_PASTE_DIAG_ON

@@ -17,6 +17,8 @@ Registered with the engine command system; run from the DOOM console.
 | `sh_dumpdef` | Print (and copy to clipboard) an existing entity's resolved entity definition. |
 | `sh_spawninfo` | Generate `spawnOrientation` / `spawnPosition` from the current map position. |
 | `sh_entlist` | List the editor entities. |
+| `sh_dialogtest` | Raise DOOM's own modal carrying the given text (diagnostic for the engine dialog surface). |
+| `sh_dialogpoll` | Read the answer to the dialog `sh_dialogtest` raised. |
 | `sh_listres` | List all resources of a given class (optionally copy to clipboard). |
 | `sh_type` | Print the members of an idTech class or the values of an enum (runtime introspection). Add `-v` to also show each field's byte offset and size. |
 | `sh_validclasses` | List the engine-valid classnames for a given inherit (the same enumerator that feeds the Classname dropdown). |

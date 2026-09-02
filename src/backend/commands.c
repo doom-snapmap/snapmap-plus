@@ -29,6 +29,7 @@
 #include "ui_bridge.h"   /* sh_ui_get_iface() -- the `sh` dispatcher gates on the interface */
 #include "hook.h"        /* install_inline_hook -- the AddCommand detour for the command unlock */
 #include "backend_log.h"
+#include "engine_dialog.h"
 
 /* ------------------------------------------------------------------------ engine fn typedefs ------ */
 
@@ -64,6 +65,7 @@ typedef void *(*get_decls_fn)(const char *type_name);
 /* ------------------------------------------------------------------------- module state ----------- */
 
 static add_command_fn     g_add_command = NULL;
+static int                g_dialogtest_ticket = 0;
 static void              *g_cmdsys      = NULL;
 static printf_dispatch_fn g_printf      = NULL;
 static void              *g_get_decls   = NULL;   /* cached for sh_listres + the material lookups */
@@ -1285,6 +1287,96 @@ typedef struct cmd_entry {
 
 static void h_sh_help(idCmdArgs *a);   /* defined after CMD_TABLE (it walks the table) */
 
+/* sh_dialogtest [buttonset] [text...] -- raise the engine's own modal with our text.
+ *
+ * A diagnostic, because the parts of that surface that live in the Flash layer
+ * cannot be read out of native code: which button LAYOUT a given button-set
+ * value draws, and what the descriptor's result byte reads once a button is
+ * pressed. The button set is a free parameter of the raise, not a property of
+ * the GDM id, so sweeping it here is how the yes/no value gets identified.
+ *
+ * Every argument after the button set is joined back into one string, because a
+ * real message has spaces in it and the command tokeniser would otherwise show
+ * only the first word. */
+static void h_sh_dialogtest(idCmdArgs *a)
+{
+    char text[256];
+    int argc = cmd_argc(a);
+    unsigned gdm_id = 0x6Du;
+    unsigned button_set = 1u;
+    int first = 1, i;
+    const char *lead = cmd_argv(a, 1);
+
+    if (!sh_engine_dialog_ready()) {
+        sh_printf("sh_dialogtest: the engine dialog surface is not ready.\n");
+        return;
+    }
+    /* <gdmid> <buttonset> <text...>, both numeric and both optional-from-the-left.
+     * The GDM id matters as much as the button set: the shell picks a dialog's
+     * personality from the id, so a notice-shaped id draws one button no matter
+     * what button set it is handed. Sweeping both is the only way to find the
+     * pair that asks a real question. */
+    if (lead && lead[0] >= '0' && lead[0] <= '9') {
+        gdm_id = (unsigned)strtoul(lead, NULL, 0);
+        first = 2;
+        {
+            const char *second = cmd_argv(a, 2);
+            if (second && second[0] >= '0' && second[0] <= '9') {
+                button_set = (unsigned)strtoul(second, NULL, 0);
+                first = 3;
+            }
+        }
+    }
+    text[0] = '\0';
+    for (i = first; i < argc; i++) {
+        const char *w = cmd_argv(a, i);
+        if (!w) continue;
+        if (text[0]) strncat_s(text, sizeof text, " ", _TRUNCATE);
+        strncat_s(text, sizeof text, w, _TRUNCATE);
+    }
+    if (!text[0])
+        strncpy_s(text, sizeof text,
+                  "Snapmap+ dialog probe: which buttons are these, and which one did you press?",
+                  _TRUNCATE);
+
+    g_dialogtest_ticket = sh_engine_dialog_ask(gdm_id, button_set, text);
+    if (!g_dialogtest_ticket) {
+        sh_printf("sh_dialogtest: the dialog would not raise (one may already be up).\n");
+        return;
+    }
+    sh_printf("sh_dialogtest: raised ticket %d, gdm %u, button set %u.\n",
+              g_dialogtest_ticket, gdm_id, button_set);
+}
+
+/* sh_dialogpoll -- read the answer to the dialog sh_dialogtest raised. */
+static void h_sh_dialogpoll(idCmdArgs *a)
+{
+    int r;
+    (void)a;
+    if (!g_dialogtest_ticket) {
+        sh_printf("sh_dialogpoll: nothing raised by sh_dialogtest.\n");
+        return;
+    }
+    r = sh_engine_dialog_poll(g_dialogtest_ticket);
+    sh_printf("sh_dialogpoll: ticket %d -> %s\n", g_dialogtest_ticket,
+              r == SH_ENGINE_DIALOG_PENDING  ? "PENDING"  :
+              r == SH_ENGINE_DIALOG_ACCEPTED ? "ACCEPTED" :
+              r == SH_ENGINE_DIALOG_DECLINED ? "DECLINED" : "LOST");
+    if (r != SH_ENGINE_DIALOG_PENDING) g_dialogtest_ticket = 0;
+}
+
+/* sh_dialogdump -- print every descriptor currently in the engine's dialog queue.
+ *
+ * This is what makes the surface legible: the engine's OWN dialogs pass through
+ * the same queue, so a known yes/no prompt raised by the game shows which button
+ * set draws that layout, and watching the flag bytes across an answer shows
+ * which one carries the result. Both are otherwise invisible. */
+static void h_sh_dialogdump(idCmdArgs *a)
+{
+    (void)a;
+    sh_engine_dialog_dump(sh_printf);
+}
+
 static const cmd_entry CMD_TABLE[] = {
     { "sh_rawmaps_on",       (void *)h_rawmaps_on,  "Switches from the normal doom snapmap format to raw JSON maps for saving and loading." },
     { "sh_rawmaps_off",      (void *)h_rawmaps_off, "Switches from the raw JSON map format to the normal doom format for snapmaps." },
@@ -1300,6 +1392,9 @@ static const cmd_entry CMD_TABLE[] = {
     { "sh_genbmodel",        (void *)h_sh_genbmodel,"sh_genbmodel <input file> <output file> Generate a bmodel from a .obj/.ase/.lwo file. " },
     { "sh_genmd6model",      (void *)h_sh_genmd6model,"sh_genmd6model <input file> <output file> Compiles a .md6model into a bmd6model" },
     { "sh_target_any",       (void *)h_target_any,  "Toggles targetting for entities. Reveals / re-hides the campaign-only and normally-hidden placeable entity decls in the SnapMap editor palette." },
+    { "sh_dialogtest",       (void *)h_sh_dialogtest, "[gdmid] [buttonset] [text...] raise the engine's own dialog carrying this text (diagnostic)" },
+    { "sh_dialogpoll",       (void *)h_sh_dialogpoll, "read the answer to the dialog sh_dialogtest raised (diagnostic)" },
+    { "sh_dialogdump",       (void *)h_sh_dialogdump, "print the engine dialog queue: id, button set and flag bytes (diagnostic)" },
     { "sh_listres",          (void *)h_sh_listres,  "<resource classname (ex:idMaterial)> <optional: filter> list all resources of a given type" },
     { "sh_alginfo",          (void *)h_alginfo,     "Prints CPU dispatcher info for the engine-math (algo) override layer." },
     { "sh_debugrender",      (void *)h_sh_debugrender,"Internal renderer-test mutators -- not for normal use" },

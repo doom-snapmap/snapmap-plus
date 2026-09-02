@@ -177,6 +177,10 @@ static void run_inject(void)
     sh_strids_test_inject((void *)0x1, (void *)fake_insert, (void *)fake_hash, (void *)fake_idstr_ctor);
 }
 
+
+/* The overlap reporter, stubbed -- see the note in overrides_internal_test.c. */
+int sh_pkg_conflicts_report(const char *data_root) { (void)data_root; return 0; }
+
 int main(void)
 {
     char temp[MAX_PATH], root[MAX_PATH], overrides[MAX_PATH], path[MAX_PATH];

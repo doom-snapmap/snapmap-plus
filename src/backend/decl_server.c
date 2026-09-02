@@ -2620,22 +2620,25 @@ static void __cdecl ds_apply_command(void)
 static int  ds_res_watermark(void);
 static void ds_res_promote_delta(unsigned char level);
 
-/* Phase latch for the two-phase re-arm. See ds_rearm_command. */
-static volatile LONG g_rearm_phase;   /* 0 = prepare next, 1 = register next */
-
 static void __cdecl ds_rearm_command(void)
 {
     char line[192];
     unsigned long packages;
 
-    /* TWO PHASES, because the cut-content gates are cvars and a cvar set is QUEUED, not
-     * immediate. The boot path gets away with one pass because it drains the command buffer
-     * itself at a point where nothing else will; at runtime the drain lands on a frame
-     * boundary, so a single-pass re-arm registered ~50ms before the gates went live and
-     * every candidate died on the blacklist (measured: 297 REFUSED, materialization
-     * terminal). So phase 1 prepares and returns, letting the engine drain; phase 2 does the
-     * registration with the gates already up. Re-issue the command to advance. */
-    if (InterlockedCompareExchange(&g_rearm_phase, 0, 0) == 0) {
+    /* ONE PASS, synchronously.
+     *
+     * This used to be split in two, on the reading that the cut-content gates are cvars and
+     * "a cvar set is QUEUED, not immediate" -- so phase 1 prepared and returned to let the
+     * engine drain on a frame boundary, and phase 2 registered afterwards. The measured
+     * failure behind that split was real (297 REFUSED, materialization terminal), but the
+     * reason recorded for it was not: `sh_package_requirements_rearm` is handed
+     * `g_execute_commands` and runs the engine's OWN command-buffer drain itself, exactly as
+     * the boot path does. The gates are live when it returns. Nothing has to wait for a frame.
+     *
+     * Splitting it cost the player an entire extra map load: the install could not finish
+     * inside the flow that triggered it, so the map had to be opened a second time. Merging it
+     * is what lets one action be one action. */
+    {
         LONG st = InterlockedCompareExchange(&g_state, 0, 0);
         if (st != DS_STATE_DONE && st != DS_STATE_FAILED) {
             backend_log("decl-server RE-ARM refused: a pass is in flight");
@@ -2646,6 +2649,7 @@ static void __cdecl ds_rearm_command(void)
             char rr[MAX_PATH];
             if (sh_overrides_get_root(rr, sizeof rr)) {
                 (void)sh_resource_bridge_recapture(rr);
+                /* Synchronous: this applies the gates AND drains them before returning. */
                 if (!sh_package_requirements_rearm(rr, (void *)g_execute_commands,
                                                    sh_user_overrides_enabled_for_launch()))
                     backend_log("decl-server RE-ARM: package requirements were not applied; "
@@ -2656,17 +2660,11 @@ static void __cdecl ds_rearm_command(void)
          * the runtime publish merges over them, which is what stops a re-arm from dropping
          * identities an earlier pass published. Retiring the contents would defeat that. */
         sh_overrides_internal_decl_table_reopen();
-        InterlockedExchange(&g_rearm_phase, 1);
         _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "decl-server RE-ARM phase 1/2 complete: %u package(s) visible, gates queued. "
-                    "Re-issue " DS_REARM_COMMAND " to register once the engine has drained them.",
-                    (unsigned)packages);
+                    "decl-server RE-ARM: %u package(s) visible, gates applied and drained; "
+                    "registering in the same pass", (unsigned)packages);
         backend_log(line);
-        return;
     }
-    InterlockedExchange(&g_rearm_phase, 0);
-
-    packages = 0;
 
     {
         /* A previous pass that ended FAILED must not block the service forever -- the usual
@@ -2878,55 +2876,37 @@ static void ds_res_promote_delta(unsigned char level)
 /* ---- automatic re-arm, driven from the engine tick ------------------------------------
  *
  * The console command is the manual trigger. This is the one the product uses: after a package
- * is installed mid-session, request a re-arm and let the tick advance it. The two phases MUST
- * land on different frames -- phase 1 queues the cut-content cvars and a cvar set is queued,
- * not immediate, so registering in the same pass parses new decls while the blacklist is still
- * up and every candidate dies (measured: 297 REFUSED, materialization terminal).
+ * is installed mid-session, request a re-arm and let the tick run it.
  *
- * DS_REARM_SETTLE_TICKS is deliberately generous. The cost of waiting a few extra frames is
- * imperceptible; the cost of registering one frame early is a wholesale failure that also
- * leaves the service in FAILED. */
-#define DS_REARM_SETTLE_TICKS 8
-
+ * It runs as ONE pass. The old split waited several frames between preparing and registering,
+ * on the reading that the cut-content cvars would not be live until the engine drained them on
+ * a frame boundary. They are drained in the pass itself, by the engine's own drain, so there
+ * was never anything to wait for -- and the wait was not free: the install could not complete
+ * inside the flow that asked for it, which is what forced the player to open the map twice. */
 enum {
     DS_AUTO_IDLE = 0,
-    DS_AUTO_PREPARE,     /* run phase 1 on the next tick */
-    DS_AUTO_SETTLING,    /* let the engine drain the queued cvars */
-    DS_AUTO_REGISTER     /* run phase 2 */
+    DS_AUTO_RUN          /* run the whole pass on the next tick */
 };
 static volatile LONG g_auto_state;
-static volatile LONG g_auto_ticks;
 
 /* Ask for a runtime re-arm. Safe from any thread; the work happens on the engine tick. */
 void sh_decl_server_request_rearm(void)
 {
-    if (InterlockedCompareExchange(&g_auto_state, DS_AUTO_PREPARE, DS_AUTO_IDLE) == DS_AUTO_IDLE) {
-        InterlockedExchange(&g_auto_ticks, 0);
+    if (InterlockedCompareExchange(&g_auto_state, DS_AUTO_RUN, DS_AUTO_IDLE) == DS_AUTO_IDLE)
         backend_log("decl-server: runtime re-arm REQUESTED (a package was installed mid-session); "
-                    "the engine tick will prepare, settle, then register");
-    }
+                    "the engine tick will register it");
 }
 
-/* Drive the requested re-arm. Called from the engine tick, which is the main thread. */
+/* Drive the requested re-arm. Called from the engine tick, which is the main thread.
+ *
+ * There is no settle delay any more: the pass applies the cut-content gates through the
+ * engine's own synchronous drain, so there is nothing to wait for between preparing and
+ * registering. The delay used to cost a whole extra map load. */
 void sh_decl_server_rearm_poll(void)
 {
-    LONG state = InterlockedCompareExchange(&g_auto_state, 0, 0);
-    if (state == DS_AUTO_IDLE) return;
-
-    if (state == DS_AUTO_PREPARE) {
-        ds_rearm_command();                       /* phase 1: rescan/recapture/retire/gates */
-        InterlockedExchange(&g_auto_ticks, 0);
-        InterlockedExchange(&g_auto_state, DS_AUTO_SETTLING);
+    if (InterlockedCompareExchange(&g_auto_state, DS_AUTO_IDLE, DS_AUTO_RUN) != DS_AUTO_RUN)
         return;
-    }
-    if (state == DS_AUTO_SETTLING) {
-        if (InterlockedIncrement(&g_auto_ticks) < DS_REARM_SETTLE_TICKS) return;
-        InterlockedExchange(&g_auto_state, DS_AUTO_REGISTER);
-        return;
-    }
-    /* DS_AUTO_REGISTER */
-    InterlockedExchange(&g_auto_state, DS_AUTO_IDLE);
-    ds_rearm_command();                           /* phase 2: register */
+    ds_rearm_command();
     if (sh_decl_server_registration_succeeded())
         backend_log("decl-server: runtime re-arm COMPLETE -- new identities are registered; "
                     "give them a lifetime before the next map transition");

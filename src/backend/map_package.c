@@ -30,6 +30,7 @@
 
 #include <stdlib.h>
 #include "map_package.h"
+#include "engine_dialog.h"
 #include "packages.h"
 #include "decl_server.h"
 #include "raw_deflate.h"
@@ -1507,6 +1508,31 @@ static int mpkg_names_match(const char *declared, const char *folded)
 }
 
 /* Is this declared package satisfied by the BOOT snapshot? (lock held) */
+/* Read the digest sidecar an install leaves beside a package. Returns 0 when the
+ * package predates the sidecar or it cannot be read -- in which case its content
+ * identity is simply unknown, which is different from known-and-different. */
+static int mpkg_read_sidecar_digest(const char *package_root, char *out, size_t out_cap)
+{
+    char path[MAX_PATH];
+    HANDLE handle;
+    DWORD got = 0;
+
+    if (!package_root || !out || out_cap <= SH_MPKG_DIGEST_CHARS) return 0;
+    if (_snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", package_root,
+                    MPKG_SIDECAR_NAME) < 0) return 0;
+    handle = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                         FILE_ATTRIBUTE_NORMAL, NULL);
+    if (handle == INVALID_HANDLE_VALUE) return 0;
+    if (!ReadFile(handle, out, SH_MPKG_DIGEST_CHARS, &got, NULL) ||
+        got != SH_MPKG_DIGEST_CHARS) {
+        CloseHandle(handle);
+        return 0;
+    }
+    CloseHandle(handle);
+    out[SH_MPKG_DIGEST_CHARS] = '\0';
+    return 1;
+}
+
 static int mpkg_boot_satisfies(const sh_mpkg_decl *d)
 {
     size_t i;
@@ -1583,7 +1609,28 @@ static int mpkg_install_staged(const mpkg_staged *s, char *err, size_t err_cap)
     }
     attrs = GetFileAttributesA(dest);
     if (attrs != INVALID_FILE_ATTRIBUTES) {
-        mpkg_err(err, err_cap, "'%s' already exists on disk; not overwriting it", dest);
+        /* The folder is taken. Say WHICH case this is, because the two are not
+         * the same problem and the old wording ("already exists") described the
+         * benign one while silently producing a dead end in the other.
+         *
+         * Same id, DIFFERENT digest is the real trap: the gate correctly reports
+         * the map's package as missing (a same-named package with different
+         * content does not satisfy it), and then the install cannot proceed
+         * because the name is occupied. The map could never load and nothing
+         * explained why. Installing over the top is not the answer either -- that
+         * would silently replace content another map may depend on. So this is
+         * reported as the version clash it is, and resolving it stays the
+         * player's decision. */
+        char installed[SH_MPKG_DIGEST_CHARS + 1];
+        if (mpkg_read_sidecar_digest(dest, installed, sizeof installed) &&
+            strcmp(installed, s->digest) != 0) {
+            mpkg_err(err, err_cap,
+                     "a DIFFERENT version of '%s' is already installed (has %s, this map needs "
+                     "%s). Remove or rename the installed one to use this map's version",
+                     s->id, installed, s->digest);
+        } else {
+            mpkg_err(err, err_cap, "'%s' already exists on disk; not overwriting it", dest);
+        }
         return 0;
     }
     if (!sh_mpkg_unpack(s->payload, s->payload_len, dest, &files, err, err_cap))
@@ -1645,62 +1692,61 @@ static void mpkg_record_decline(const char *id, const char *digest)
  * which is unsolved (campaign W-1/W-7), so an engine dialog today would
  * show a stock message that misleads the user about what they are
  * consenting to. An accurate ugly prompt beats a native-looking wrong one. */
-static DWORD WINAPI mpkg_consent_thread(LPVOID param)
+/* ---- consent on the engine tick ---------------------------------------------
+ *
+ * The engine's own modal is raised and answered on the main thread: AddDialog
+ * writes the dialog queue and the answer is read back out of it. A worker thread
+ * cannot touch either. So consent runs as a small state machine driven from the
+ * engine tick, and the OS message box stays as the fallback for when the engine
+ * surface is unavailable -- an older build, a refused signature, or a prompt
+ * needed before the engine has raised any dialog of its own.
+ *
+ * The GDM id is a personality, not a text source: ShowDialog takes our string
+ * over whatever the id would have produced. The button set is a free parameter,
+ * so a yes/no pair can be attached to any id.
+ */
+#define MPKG_CONSENT_GDM_ID      0x60u   /* GDM_SNAPMAP_DELETE_MAP_PROMPT: a SnapMap-shell prompt
+                                          * personality. The id is never read by the player -- its
+                                          * own text is always replaced by ours -- it only selects
+                                          * a dialog shape the shell already knows how to draw. */
+#define MPKG_CONSENT_BUTTON_SET  6u      /* Yes / No -- identified live; sets 0 and 1 draw a
+                                          * single acknowledgement, 2 draws REFRESH/CONTINUE and
+                                          * 4 draws RETRY/CONTINUE, none of which is a question */
+
+enum {
+    MPKG_CONSENT_IDLE = 0,
+    MPKG_CONSENT_RAISE,      /* staged; raise on the next tick */
+    MPKG_CONSENT_WAITING     /* on screen; poll for the answer */
+};
+
+static volatile LONG  g_consent_state;
+static mpkg_staged   *g_consent_staged;      /* owned while not IDLE */
+static int            g_consent_ticket;
+static volatile LONG  g_consent_waited;      /* ticks spent waiting for the surface */
+
+/* How long to wait for the engine dialog surface before giving up. The menu
+ * manager is captured from the first dialog the game raises on its own, which
+ * on this build is the stay-offline notice during boot -- long before any map
+ * can be loaded. So this bound is only reached if that never happened, and the
+ * honest response then is to install nothing and say why. */
+#define MPKG_CONSENT_WAIT_TICKS 600
+
+static void mpkg_consent_finish(int accepted)
 {
-    mpkg_staged *s = (mpkg_staged *)param;
-    char text[1024];
-    int answer;
+    mpkg_staged *s = g_consent_staged;
 
-    _snprintf_s(text, sizeof text, _TRUNCATE,
-        "The map you tried to load carries a mod package that is not installed:\r\n\r\n"
-        "    package:  %s\r\n"
-        "    digest:   %s\r\n"
-        "    payload:  %u bytes, %u file(s)\r\n\r\n"
-        "The load was cancelled: loading this map without its package would crash DOOM.\r\n\r\n"
-        "Install the package into the snapmap-plus overrides folder now?\r\n"
-        "The map opens for editing and plays straight away -- no restart.",
-        s->id, s->digest, (unsigned)s->payload_len, s->files);
+    g_consent_staged = NULL;
+    g_consent_ticket = 0;
+    InterlockedExchange(&g_consent_state, MPKG_CONSENT_IDLE);
+    if (!s) return;
 
-    answer = MessageBoxA(NULL, text, "Snapmap+ -- map requires a mod package",
-                         MB_YESNO | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND |
-                         MB_DEFBUTTON2);
-    if (answer == IDYES) {
+    if (accepted) {
         char err[SH_MPKG_ERR_CAP];
-        if (mpkg_install_staged(s, err, sizeof err)) {
-            char done[640];
-            _snprintf_s(done, sizeof done, _TRUNCATE,
-                "Package '%s' installed (%u files).\r\n\r\n"
-                "Load the map again -- it will open and play in this session.",
-                s->id, s->files);
-            /* NO RESTART, AND NO OFFER OF ONE.
-             *
-             * This used to offer a relaunch, on the reading that a mid-session install left the
-             * demon's render model unbuilt, so the map could be EDITED but not PLAYED. That
-             * reading was wrong twice over. The runtime model IS built, with named joints. And
-             * the "playing is broken" evidence came from measurements that return exactly the
-             * same values on a build that works: in the test map the player spawns facing a wall
-             * and never engages the demon, so a hands-off health reading and a console event
-             * count are identical whether the package came from boot or from the map.
-             *
-             * Measured 2026-08-29, twice, with the package absent at boot and delivered by the
-             * map, consent accepted and the restart DECLINED: select the demon, teleport it to
-             * the player, and it hunts, takes the player from 100 health to 27 and to 40 in
-             * thirty seconds, and kills -- the engine's own killfeed reads "[ Cyberdemon ]".
-             *
-             * So the restart is not needed. Offering one anyway would teach a player to reach
-             * for a workaround that costs them their session and buys nothing. */
-            MessageBoxA(NULL, done, "Snapmap+ -- package installed",
-                        MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
-        } else {
-            char fail[512], line[512];
+        if (!mpkg_install_staged(s, err, sizeof err)) {
+            char line[512];
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                "MPKG: install of package '%s' FAILED: %s", s->id, err);
+                        "MPKG: install of package '%s' FAILED: %s", s->id, err);
             backend_log(line);
-            _snprintf_s(fail, sizeof fail, _TRUNCATE,
-                "Package '%s' could NOT be installed:\r\n\r\n%s\r\n\r\n"
-                "Nothing was recorded as installed.", s->id, err);
-            MessageBoxA(NULL, fail, "Snapmap+ -- package install failed",
-                        MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);
             mpkg_lock();
             {
                 mpkg_session_entry *e = mpkg_session_find(s->id, s->digest);
@@ -1712,23 +1758,81 @@ static DWORD WINAPI mpkg_consent_thread(LPVOID param)
         mpkg_record_decline(s->id, s->digest);
     }
     mpkg_staged_free(s);
-    return 0;
 }
 
-/* Raise consent for one staged package (takes ownership of `s`). */
+void sh_mpkg_consent_poll(void)
+{
+    LONG state = InterlockedCompareExchange(&g_consent_state, 0, 0);
+    char text[256];
+    mpkg_staged *s;
+
+    if (state == MPKG_CONSENT_IDLE) return;
+    s = g_consent_staged;
+    if (!s) { InterlockedExchange(&g_consent_state, MPKG_CONSENT_IDLE); return; }
+
+    if (state == MPKG_CONSENT_RAISE) {
+        if (!sh_engine_dialog_ready()) {
+            if (InterlockedIncrement(&g_consent_waited) > MPKG_CONSENT_WAIT_TICKS) {
+                backend_log("MPKG: the engine dialog surface never became available; "
+                            "nothing was installed and consent was never asked");
+                mpkg_consent_finish(0);
+            }
+            return;
+        }
+        /* The engine's dialog body is one 256-byte string, so this is written to
+         * be read at a glance rather than to carry every field the OS box did.
+         * The digest and byte count are in the log for anyone who wants them. */
+        _snprintf_s(text, sizeof text, _TRUNCATE,
+                    "This map brings its own mod package:  %s  (%u files, %u KB).  "
+                    "It has to be installed before the map can load.  Install it now?",
+                    s->id, s->files, (unsigned)((s->payload_len + 1023) / 1024));
+        g_consent_ticket = sh_engine_dialog_ask(MPKG_CONSENT_GDM_ID,
+                                                MPKG_CONSENT_BUTTON_SET, text);
+        if (!g_consent_ticket) {
+            backend_log("MPKG: the engine dialog would not raise; installing nothing, because "
+                        "third-party content is never installed without an answer");
+            mpkg_consent_finish(0);
+            return;
+        }
+        InterlockedExchange(&g_consent_state, MPKG_CONSENT_WAITING);
+        return;
+    }
+
+    switch (sh_engine_dialog_poll(g_consent_ticket)) {
+    case SH_ENGINE_DIALOG_PENDING:
+        return;
+    case SH_ENGINE_DIALOG_ACCEPTED:
+        mpkg_consent_finish(1);
+        return;
+    default:
+        mpkg_consent_finish(0);
+        return;
+    }
+}
+
+/* Raise consent for one staged package (takes ownership of `s`).
+ *
+ * ONE PATH. Consent is asked through the engine's own modal and nowhere else.
+ * There is deliberately no OS-message-box fallback: two ways to ask the same
+ * question means two behaviours to keep correct, two things for a player to see
+ * depending on state they cannot observe, and a silent downgrade whenever the
+ * engine path breaks -- which is exactly how a broken engine path would go
+ * unnoticed. If the engine surface cannot ask, nothing is installed and the
+ * refusal says so. */
 static void mpkg_request_consent(mpkg_staged *s)
 {
     int mode;
+
     mpkg_lock();
     mode = g_consent_mode;
     mpkg_unlock();
 
-    if (mode == 1) {          /* test: synchronous accept */
+    if (mode == 1) {          /* test seam: synchronous accept */
         char err[SH_MPKG_ERR_CAP];
         if (!mpkg_install_staged(s, err, sizeof err)) {
             char line[512];
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                "MPKG: install of package '%s' FAILED: %s", s->id, err);
+                        "MPKG: install of package '%s' FAILED: %s", s->id, err);
             backend_log(line);
             mpkg_lock();
             {
@@ -1738,28 +1842,24 @@ static void mpkg_request_consent(mpkg_staged *s)
             mpkg_unlock();
         }
         mpkg_staged_free(s);
-    } else if (mode == 0) {   /* test: synchronous decline */
+        return;
+    }
+    if (mode == 0) {          /* test seam: synchronous decline */
         mpkg_record_decline(s->id, s->digest);
         mpkg_staged_free(s);
-    } else {                  /* production: async prompt */
-        HANDLE h = CreateThread(NULL, 0, mpkg_consent_thread, s, 0, NULL);
-        if (!h) {
-            backend_log("MPKG: consent thread creation FAILED; load stays refused");
-            mpkg_lock();
-            {
-                /* Drop the just-added in-flight entry so the NEXT load can
-                 * re-offer. The gate added it moments ago under this lock, so
-                 * it is the last entry when still in-flight. */
-                mpkg_session_entry *e = mpkg_session_find(s->id, s->digest);
-                if (e && e->outcome == 2 && e == &g_session[g_session_count - 1])
-                    g_session_count--;
-            }
-            mpkg_unlock();
-            mpkg_staged_free(s);
-            return;
-        }
-        CloseHandle(h);
+        return;
     }
+
+    if (InterlockedCompareExchange(&g_consent_state, MPKG_CONSENT_RAISE,
+                                   MPKG_CONSENT_IDLE) != MPKG_CONSENT_IDLE) {
+        backend_log("MPKG: a consent dialog is already up; this one is declined rather than queued");
+        mpkg_record_decline(s->id, s->digest);
+        mpkg_staged_free(s);
+        return;
+    }
+    g_consent_staged = s;
+    InterlockedExchange(&g_consent_waited, 0);
+    backend_log("MPKG: consent will be asked through the engine's own dialog on the next tick");
 }
 
 /* ==================================================================== */

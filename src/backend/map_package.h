@@ -179,4 +179,10 @@ const char *sh_mpkg_test_last_refusal(void);      /* last gate refusal reason, "
 int sh_mpkg_test_session_installed_count(void);
 #endif
 
+
+/* Drive the consent dialog. Call from the engine tick (main thread): the engine
+ * modal is raised into, and answered out of, the live dialog queue, neither of
+ * which a worker thread may touch. No-op when no package is awaiting consent. */
+void sh_mpkg_consent_poll(void);
+
 #endif /* BACKEND_MAP_PACKAGE_H */

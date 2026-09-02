@@ -532,6 +532,39 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "Toast",
       "40 57 48 83 EC 20 48 8B F9 48 8B 89 F0 08 00 00",
       0xCFA0B0u },
+    /* --- the engine's own dialog surface (engine_dialog.c) ------------------
+     * ShowDialog builds default body text from the GDM id as a `#str_` key,
+     * then OVERWRITES it with the descriptor's own embedded idStr when that
+     * string is non-empty, and hands the result to the SWF menu object. That
+     * override is how a dialog carries our text through the engine's own
+     * layout and buttons instead of a Win32 message box. */
+    { "AddDialog",
+      "40 55 57 41 54 41 56 41 57 48 8D AC 24 F0 BC FF FF",
+      0xE643C0u },
+    /* The shell-level raise. The engine NEVER calls AddDialog directly: it goes
+     * through this, which additionally sets a flag on the shell's screen object
+     * (shell+0x18 -> +0xA8 = 1). Raising without that produces a dialog that
+     * draws correctly and ignores every keypress -- measured. */
+    { "AddDialogWrapper",
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B DA 48 8B F9 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 48 90 48 8B D3 48 8B 4F 08 E8 ?? ?? ?? ?? 48 8B 47 18",
+      0x17363A0u },
+    { "ShowDialog",
+      "48 8B C4 57 48 81 EC 80 00 00 00 48 C7 40 B8 FE FF FF FF 48 89 58 18 48 89 70 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 78 48 8B F2",
+      0xE6A260u },
+    /* idStr::operator=(const char *) on an ALREADY-CONSTRUCTED idStr. Distinct
+     * from IdStrCtor, which constructs into raw memory: the descriptor's string
+     * is already live, so assigning is the only correct operation on it. */
+    { "IdStrAssignCStr",
+      "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 40 48 8B FA",
+      0x19FD5F0u },
+    /* idMenuManager_Dialog::RemoveDialog(mgr, index). The engine sets a
+     * descriptor's cleared flag and removes it from the queue in the SAME frame
+     * the player answers, so a poll can never see the answer -- by the next tick
+     * the descriptor is gone and yes is indistinguishable from no. This is the
+     * last instant the answered descriptor still exists. */
+    { "RemoveDialog",
+      "40 56 48 83 EC 20 48 8B F1 3B 91 08 09 00 00",
+      0xE678F0u },
     { "IdStrCtor",
       "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8D 05 ?? ?? ?? ?? 48 8B DA 48 89 01 48 8B F9",
       0x19FCEF0u },
