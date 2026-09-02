@@ -1,4 +1,4 @@
-/* palette_refresh_test.c -- native one-shot palette service and exact gating. */
+/* palette_refresh_test.c -- per-registration palette rebuild service and exact gating. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -125,9 +125,16 @@ int main(void)
     CHECK(sh_palette_refresh_test_call_count() == 1);
     CHECK(g_last_palette == (void *)(module + TEST_EDITOR_SINGLETON_RVA + TEST_EDITOR_PALETTE_OFF));
     CHECK(g_last_progress == NULL);
-    CHECK(sh_palette_refresh_after_decl_registration() == 0);
-    CHECK(g_builder_calls == 1);
-    CHECK(sh_palette_refresh_test_call_count() == 1);
+    /* A later registration pass rebuilds again. The palette is a catalog DERIVED
+     * from the decl list, so a package installed mid-session extends that list
+     * and the catalog has to be rebuilt from it or the new types stay invisible
+     * to every consumer that searches the catalog by name. */
+    CHECK(sh_palette_refresh_after_decl_registration() == 1);
+    CHECK(sh_palette_refresh_test_state() == SH_PALETTE_REFRESH_TEST_APPLIED);
+    CHECK(g_builder_calls == 2);
+    CHECK(sh_palette_refresh_test_call_count() == 2);
+    CHECK(sh_palette_refresh_after_decl_registration() == 1);
+    CHECK(g_builder_calls == 3);
 
     bind_fake(module);
     setup_editor(module, 0, 1);
@@ -137,12 +144,19 @@ int main(void)
     CHECK(sh_palette_refresh_test_call_count() == 1);
     CHECK(g_last_palette == (void *)(module + TEST_EDITOR_SINGLETON_RVA + TEST_EDITOR_PALETTE_OFF));
     CHECK(g_last_progress == NULL);
-    CHECK(sh_palette_refresh_after_decl_registration() == 0);
-    CHECK(g_builder_calls == 1);
-    CHECK(sh_palette_refresh_test_call_count() == 1);
+    CHECK(sh_palette_refresh_after_decl_registration() == 1);
+    CHECK(g_builder_calls == 2);
+    CHECK(sh_palette_refresh_test_call_count() == 2);
 
+    /* A refusal is an integrity verdict on the engine objects this service calls
+     * into, so it stays terminal: re-arming must not give a refused process a
+     * second chance to call the native builder. */
     bind_fake(module);
     setup_editor(module, 0, 0);
+    CHECK(sh_palette_refresh_after_decl_registration() == 0);
+    CHECK(sh_palette_refresh_test_state() == SH_PALETTE_REFRESH_TEST_REFUSED);
+    CHECK(g_builder_calls == 0);
+    setup_editor(module, 0, 1);
     CHECK(sh_palette_refresh_after_decl_registration() == 0);
     CHECK(sh_palette_refresh_test_state() == SH_PALETTE_REFRESH_TEST_REFUSED);
     CHECK(g_builder_calls == 0);

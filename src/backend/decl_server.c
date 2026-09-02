@@ -2185,21 +2185,9 @@ static int ds_scan_and_materialize_missing(
          * answerable across that boundary. This is not allowed to fail the
          * registration that already succeeded.
          *
-         * THIS MUST RUN BEFORE THE PALETTE REFRESH, and the ordering is the whole point.
-         *
-         * The palette rebuild DECLINES on every runtime re-arm -- the editor has not built a
-         * roster yet, so there is nothing to rebuild -- and declining is reported by returning 0
-         * with failure_phase PALETTE. The caller correctly treats that as non-terminal and logs
-         * "the palette rebuild was not needed". But while this install sat AFTER the palette
-         * block, that early return skipped it, silently, on exactly the pass that needs it:
-         * boot installs the hook and works, every mid-session install does not.
-         *
-         * Measured 2026-08-29. A map that NAMES an identity the package supplies -- placing a
-         * demon from the toybox names `snapmaps/placeablesnapaiencounter/<demon>` -- then fails
-         * to load after a mid-session install, bouncing off a corrupt-save dialog before the map
-         * JSON is ever parsed, because the existence probe has nobody answering for it. A map
-         * that inlines its content instead names nothing and loads fine, which is why the
-         * campaign's anchor map hid this for so long. */
+         * THIS MUST RUN BEFORE THE PALETTE REFRESH, and the ordering is the whole point: while
+         * this install sat AFTER the palette block, a `return 0` from that block skipped it
+         * silently on exactly the passes that need it. */
         char owned[SH_DECL_SERVER_TYPE_CAP + SH_DECL_SERVER_NAME_CAP + 32];
         char published[SH_DECL_SERVER_TYPE_CAP + SH_DECL_SERVER_NAME_CAP + 32];
         if (ds_probe_path(DS_CANDIDATE_SHADOWED, owned, sizeof(owned)) &&
@@ -2486,7 +2474,7 @@ static void __cdecl ds_apply_command(void)
         int registered = 0;
         int failed = 0;
         int materialization_failed = 0;
-        int palette_skipped = 0;
+        int palette_declined = 0;
         int materialized = 0;
         int failure_phase = DS_PHASE_FAILURE_NONE;
         const char *failed_source = NULL;
@@ -2501,22 +2489,17 @@ static void __cdecl ds_apply_command(void)
                 materialization_failed = 1;
                 backend_log("decl-server FAILED: native source scans completed but a new snapEditorEntityDef could not be materialized; no palette refresh; no retry");
             } else {
-                /* NOT TERMINAL ANY MORE.
+                /* NOT TERMINAL.
                  *
-                 * A first draft of this predicted the rebuild would REFUSE during Init because the
-                 * editor did not exist yet. That prediction was wrong, and the live log says so:
-                 * "the palette rebuild was completed". The editor singleton is a STATIC object at a
-                 * fixed data RVA (0x3056748) with the palette embedded at +0x20660, so its vtable
-                 * (0x20499A0) is written by CRT static initialization, long before Init -- and that
-                 * vtable identity is exactly what palette_refresh validates. The object is
-                 * constructed from the start; what does not exist yet is a POPULATED roster.
+                 * The rebuild does run at boot: the editor singleton is a STATIC object at a fixed
+                 * data RVA (0x3056748) with the palette embedded at +0x20660, so its vtable
+                 * (0x20499A0) is written by CRT static initialization long before Init, and that
+                 * vtable identity is exactly what palette_refresh validates.
                  *
-                 * So the rebuild does run, against a registry publication has just extended, and it
-                 * is simply no longer load-bearing: publication now precedes any roster the editor
-                 * builds for real. That is why a refusal must not be terminal -- on another build or
-                 * another timing it would discard a registration that completely succeeded, in
-                 * order to report the absence of something nothing depends on. */
-                palette_skipped = 1;
+                 * A decline here therefore means the service REFUSED -- an integrity verdict on the
+                 * engine objects it calls into, named in its own log line -- and it must not
+                 * discard a registration that otherwise completely succeeded. */
+                palette_declined = 1;
             }
         }
         if (failed) {
@@ -2537,11 +2520,11 @@ static void __cdecl ds_apply_command(void)
         } else {
             char line[448];
             _snprintf_s(line, sizeof(line), _TRUNCATE,
-                        "decl-server registration succeeded: %d MISSING registered in dependency order, %d live objects materialized, %d of them new editor entities held to the native palette contract, %d SHADOWED, %d REFUSED; published before the engine boot promotion, so the palette rebuild was %s",
+                        "decl-server registration succeeded: %d MISSING registered in dependency order, %d live objects materialized, %d of them new editor entities held to the native palette contract, %d SHADOWED, %d REFUSED; the entity-palette rebuild that makes these types nameable by a loading map was %s",
                         registered, materialized, ds_admitted_root_count(),
                         shadowed, refused,
-                        palette_skipped ? "not needed (the editor had not built one yet)"
-                                        : "completed");
+                        palette_declined ? "DECLINED (see the palette-refresh line above)"
+                                         : "completed");
             backend_log(line);
             /* Keep one published identity addressable past ds_free_candidates so the caller can
              * read its resource level back after the engine's promotion returns. Identity only --

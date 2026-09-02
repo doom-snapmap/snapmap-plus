@@ -49,6 +49,49 @@ that dependency, so the next person does not have to rediscover it the hard way.
 a map saves, exits without re-prompting, and appears in My Maps. Saving with
 `sh_rawmaps_on` still mirrors `rawmap.json` exactly as before.
 
+## 2026-09-01 — Rebuild the editor palette on every registration pass, not once per process
+
+**What changed.** `sh_palette_refresh_after_decl_registration` now claims its work
+from the APPLIED state as well as IDLE, so the native `SnapPaletteBuild` call runs
+once per successful decl-registration pass instead of once per process. REFUSED
+stays terminal and is never re-claimable: a refusal is an integrity verdict on the
+engine objects the service calls into, so re-arming must not hand a refused process
+another attempt. Every validation the one-shot version performed -- module base,
+pinned builder address, editor-singleton identity, palette vtable -- still runs
+before each call. The decl server's outcome line no longer explains a decline away
+as "the palette rebuild was not needed"; it reports DECLINED and points at the
+palette-refresh line, because a decline can now only mean a refusal.
+
+**Why.** The placeable palette is a catalog DERIVED from the live decl list, and it
+is the same object a loading map is validated against, not just the toybox's source
+of entries: `idSnapMap::RepairAndMigrate` ends in an entity validator that binary
+searches `editor+0x20660` by type name and, on a miss, logs
+`Invalid Entity %d:%s not found in palette` and fails the whole map. The shell then
+shows the player "The save file appears to be damaged". So while the rebuild was
+latched to fire exactly once -- always at boot -- a package installed mid-session
+registered its decls correctly, entered the decl list, resolved by name, and was
+still unusable: any map that NAMED one of its types was refused until DOOM
+restarted, because the catalog searched at load time predated the package. A map
+that inlined its content instead named no palette type and loaded fine, which is
+why this stayed hidden for so long.
+
+Re-running the builder is safe by construction. It clears the count, frees the
+previous array when the allocation-kind byte permits, repopulates from the decl
+list, then re-sorts and runs the engine's own duplicate check -- a teardown that is
+dead code on a first call, which is what shows the routine was written to be called
+more than once. The runtime pre-mark only ever marks the pass's own candidates
+pending-load, so a rebuild cannot silently drop vanilla types. The separate
+structure at `editor+0x206C0` is the snappalette-group module tree rather than an
+index into the placeable array, so it is not invalidated by the rebuild.
+
+**Status.** Covered by `palette_refresh_test` (re-claim from APPLIED, refusal stays
+terminal across later passes) and `palette_refresh_contract_test`; the full native
+and JS suites pass. Verified live on both arms with the same map: a package
+delivered inside a map and installed mid-session now loads, validates and playtests
+without a restart, and a package present at boot still does. Across those runs the
+engine logged the palette rebuild on every registration pass, with no occurrence of
+`not found in palette` or `Unable to validate local saved map`.
+
 ## 2026-08-23 — Let a package own its shaders, not just its decls
 
 **What changed.** The cross-package resolver is now a namespace table rather than

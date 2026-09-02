@@ -1,16 +1,34 @@
-/* palette_refresh.c -- one-shot native rebuild after new decl registration.
+/* palette_refresh.c -- native palette rebuild after each new decl registration.
  *
- * The engine's entity palette is a derived editor catalog. Registering a new
- * decl after the initial palette build does not make it appear in that catalog
- * by itself. The native SnapPaletteBuild routine rebuilds the existing palette
- * in place; this service calls that routine once, synchronously from the
- * dynamic decl server's main-thread command after registration succeeds.
+ * The engine's entity palette is a catalog DERIVED from the live decl list.
+ * Registering a new decl after the catalog has been built does not put it in
+ * the catalog by itself. The native SnapPaletteBuild routine (RVA 0x54AEE0)
+ * rebuilds the catalog in place from the decl list; this service calls that
+ * routine synchronously from the dynamic decl server's main-thread command
+ * after a registration pass succeeds.
+ *
+ * ONCE PER REGISTRATION PASS, NOT ONCE PER PROCESS, and that distinction is
+ * the whole point of this file. The catalog is what every by-name consumer
+ * searches, including idSnapMap::RepairAndMigrate's entity validator
+ * (RVA 0x5F27C0), which binary-searches it and reports
+ *
+ *     Invalid Entity %d:%s not found in palette
+ *
+ * then fails the whole map, which the shell reports to the player as a damaged
+ * save. So while this call was latched to fire exactly once, a package
+ * installed mid-session registered its decls correctly and still could not be
+ * used: any map NAMING one of its types was refused until DOOM was restarted,
+ * because the catalog searched at load time was the one built before the
+ * package existed. Rebuilding per pass is what removes the restart.
+ *
+ * The native builder is written to be re-run: it tears down and frees the
+ * previous array before repopulating it, which is dead code on a first call.
  *
  * This is deliberately not a rawmap hook, an editor injection, or a refresh
  * retry loop. A missing/unsupported build, invalid editor object, vtable
- * mismatch, or native exception is terminal for this process. The decl server
- * materializes new editor-entity decls before this call, so the builder is
- * needed for either editor initialization state and is invoked exactly once.
+ * mismatch, or native exception is terminal for this process -- a refusal is
+ * an integrity verdict on the engine objects being called into, so re-arming
+ * never gives a refused process another attempt.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -103,13 +121,25 @@ int sh_palette_refresh_install(const sig_result *results, size_t count,
     return 1;
 }
 
+/* Claim the service for one rebuild. A pass may start from IDLE (the first
+ * registration of the process) or from APPLIED (every later one). REFUSED and
+ * PENDING are not claimable: the first is terminal, the second means a rebuild
+ * is already in flight. */
+static int pr_claim(void)
+{
+    if (InterlockedCompareExchange(&g_state, PR_STATE_PENDING, PR_STATE_IDLE) == PR_STATE_IDLE)
+        return 1;
+    return InterlockedCompareExchange(&g_state, PR_STATE_PENDING, PR_STATE_APPLIED) ==
+           PR_STATE_APPLIED;
+}
+
 int sh_palette_refresh_after_decl_registration(void)
 {
     const uint8_t *editor;
     void *palette_vtable = NULL;
     int vtable_status;
 
-    if (InterlockedCompareExchange(&g_state, PR_STATE_PENDING, PR_STATE_IDLE) != PR_STATE_IDLE)
+    if (!pr_claim())
         return 0;
     backend_log("palette-refresh ARMED: complete native decl registration succeeded");
 
@@ -143,7 +173,7 @@ int sh_palette_refresh_after_decl_registration(void)
         pr_refuse("palette-refresh REFUSED: SnapPaletteBuild raised an exception");
         return 0;
     }
-    backend_log("palette-refresh FIRED: native SnapPaletteBuild completed once");
+    backend_log("palette-refresh FIRED: native SnapPaletteBuild rebuilt the entity palette");
     return 1;
 }
 

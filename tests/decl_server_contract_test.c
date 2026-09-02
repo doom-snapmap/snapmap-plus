@@ -162,13 +162,13 @@ int main(int argc, char **argv)
     /* And it must NEVER re-parse: FreeData 0xFF-fills joint buffers the render thread reads. */
     CHECK(strstr(server, "TouchDecl") == NULL);
     CHECK(strstr(server, "g_decl_touch") == NULL);
-    /* The palette one-shot is no longer load-bearing, so its refusal must not be terminal: a
-     * registration that fully succeeded may not be discarded to report the absence of a roster
-     * nothing has consulted yet. (Measured live: it does NOT refuse -- the editor singleton and its
-     * embedded palette are statically constructed, so the vtable identity it validates holds from
-     * CRT init onward. The rebuild runs; it is simply redundant now.) */
+    /* The palette rebuild IS load-bearing -- it is what makes a mid-session package's types
+     * nameable by a loading map -- but a decline still must not discard a registration that
+     * otherwise fully succeeded, because a decline is a refusal by the rebuild service alone.
+     * (Measured live: it does not refuse at boot -- the editor singleton and its embedded palette
+     * are statically constructed, so the vtable identity it validates holds from CRT init on.) */
     CHECK(strstr(server, "palette_failed") == NULL);
-    CHECK(strstr(server, "palette_skipped") != NULL);
+    CHECK(strstr(server, "palette_declined") != NULL);
 
     /* THE ORDERING MUST BE PROVED, NOT ASSERTED. Every "before the engine boot promotion" string in
      * this service is its own prose and would read identically if the hook were on the wrong
@@ -245,12 +245,10 @@ int main(int argc, char **argv)
     CHECK(strstr(server, "DS_PHASE_FAILURE_SCAN") != NULL);
     CHECK(strstr(server, "DS_PHASE_FAILURE_MATERIALIZATION") != NULL);
     CHECK(strstr(server, "DS_PHASE_FAILURE_PALETTE") != NULL);
-    /* The palette phase is still DETECTED and still ordered last -- only its consequence changed.
-     * Publication now runs inside idCommonLocal::Init, before the editor object exists, so the
-     * one-shot rebuild necessarily refuses; that is the expected outcome, not a failure, and it may
-     * not discard a registration that succeeded. The two genuinely terminal phases keep their
-     * terminal handling. */
-    CHECK(strstr(server, "palette_skipped = 1;") != NULL);
+    /* The palette phase is DETECTED and ordered last, and its consequence is non-terminal: a
+     * decline is the rebuild service's own refusal and may not discard a registration that
+     * succeeded. The two genuinely terminal phases keep their terminal handling. */
+    CHECK(strstr(server, "palette_declined = 1;") != NULL);
     CHECK(strstr(server, "native registration success was not published") == NULL);
     CHECK(strstr(server, "materialization was terminal; exact decltree table retained; no retry") != NULL);
     CHECK(strstr(server, "DS_DECL_IN_PROGRESS") != NULL);

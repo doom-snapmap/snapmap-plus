@@ -19,6 +19,9 @@
  * palette validator contract -- a resolved entityDef plus correctly flagged
  * input and output targets -- before the palette rebuild is called;
  * source-only abstract bodies are retained as NON-PALETTE without that call.
+ * The palette rebuild runs on EVERY pass, boot or runtime, because the palette
+ * is a catalog derived from the decl list and a map that names a type absent
+ * from that catalog is refused wholesale as a damaged save.
  * Each source-path argument is a native 48-byte idStr temporary, constructed
  * and destroyed around its one call.
  *
@@ -33,10 +36,10 @@
 int sh_decl_server_install(const sig_result *results, size_t count,
                            const uint8_t *module_base, void *cmdsys);
 
-/* Returns 1 only after the one-shot command has registered every missing
- * candidate, materialized required editor decls, and completed the palette
- * rebuild successfully. DS_STATE_DONE alone is not sufficient: it also
- * represents disabled, empty, or all-shadowed snapshots. */
+/* Returns 1 only after the command has registered every missing candidate,
+ * materialized required editor decls, and completed the palette rebuild
+ * successfully. DS_STATE_DONE alone is not sufficient: it also represents
+ * disabled, empty, or all-shadowed snapshots. */
 int sh_decl_server_registration_succeeded(void);
 
 /* Re-scan the overrides packages and register any NEW decl identities at runtime, after the
