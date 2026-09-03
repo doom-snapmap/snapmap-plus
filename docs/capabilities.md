@@ -26,7 +26,7 @@ Registered with the engine command system; run from the DOOM console.
 | `sh_dumpmap` | Dump the current generated `.map` from memory to `<game dir>\base\mapdumps\<name>.map` (debugging). Never overwrites an earlier dump. |
 | `sh_genbmodel` | Generate a bmodel from a `.obj` / `.ase` / `.lwo`. |
 | `sh_genmd6model` | Compile a `.md6model` into a `bmd6model`. |
-| `sh_debugrender` | Renderer debug toggle (developer tool). |
+| `sh_debugrender` | Renderer debug toggle (developer tool); `dumprenderinfo` prints the active rendermodel count and every model's name. |
 | `sh_alginfo` | Report the math-acceleration status. |
 | `sh_help` | List every Snapmap+ console command and cvar with its description in one place. |
 | `sh_superscriptop` | Dump SuperScript / eventDef data (e.g. emit the eventDef table as a header). |
@@ -47,7 +47,6 @@ Console variables; defaults shown in parentheses.
 |---|---|
 | `sh_copy_reslist_to_clipboard` (0) | Copy `sh_listres` output to the clipboard. |
 | `sh_pretty_on` (0) | Pretty-print saved rawmap JSON. |
-| `sh_show_rmcount` (0) | Draw the current number of active rendermodels. |
 | `cs_dash_direction_multiplier` (1.0) | Scale dash direction. |
 | `cs_dash_ground_velocity_multiplier` (2.0) | Scale dash direction when on the ground. |
 | `cs_dash_time_seconds` (0.5) | Time period over which the dash is applied. |

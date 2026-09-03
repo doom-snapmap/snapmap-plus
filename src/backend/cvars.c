@@ -1,12 +1,13 @@
-/* cvars.c -- see cvars.h. The cvar registrar: the 9 OG cvars (clone of OG XINPUT1_3's static-init
- * cvar table + spine flush FUN_1800229b1 / FUN_180022610).
+/* cvars.c -- see cvars.h. The cvar registrar: 8 of the 9 OG cvars (clone of OG XINPUT1_3's static-init
+ * cvar table + spine flush FUN_1800229b1 / FUN_180022610). snaphak_show_rmcount is left out on purpose
+ * -- see the table comment below and docs/fidelity.md.
  *
  * CVAR REGISTER ABI (DIRECT, from the cvar-register flush disasm @0x22610):
  *   ( CvarRegister )( self [embedded idCVar], name, default, typecode, desc, argComp )
  * We call the OUTER engine fn 0x1A04F00 (resolved as "CvarRegister"), NOT the inner idCVarSystem::
  * Register 0x1A05E70 -- the outer self-defaults the two engine .data globals, so we never touch them.
  * typecode (1=BOOL 2=INT 4=FLOAT) is passed VERBATIM as the engine `flags` arg (the engine massages the
- * bits internally). None of the 9 carry EXPOSE/NOCHEAT -> non-EXPOSE / gate-1-invisible (faithful OG).
+ * bits internally). None of OG's 9 carry EXPOSE/NOCHEAT -> non-EXPOSE / gate-1-invisible (faithful OG).
  *
  * Clean-room: ported from our own RE. Zero OG SnapHak bytes.
  */
@@ -71,9 +72,15 @@ typedef int (*name_hash_fn)(const char *name);
  * our own rows register, so our cvars would miss it -- register with the flag up front instead. */
 #define CVAR_FLAG_NOCHEAT         0x10u
 
-/* The cvar table: rows 0..8 are the 9 OG cvars from our cvar-descriptor RE (default / typecode 1=BOOL
+/* The cvar table: rows 0..7 are the OG cvars from our cvar-descriptor RE (default / typecode 1=BOOL
  * 2=INT 4=FLOAT / description verbatim; the OG's snaphak_* name prefix is renamed to our sh_* -- a
- * deliberate post-rebrand divergence); order matches the descriptor dump. */
+ * deliberate post-rebrand divergence); order matches the descriptor dump.
+ *
+ * The dump's 8th row, snaphak_show_rmcount ("draws the current number of rendermodels active"), is NOT
+ * here. Its switch had somewhere to go in the OG -- a spliced SuperScript override fn that drew the count
+ * over the game each frame -- and the clone reimplements no such overlay, so the row would register a name
+ * that nothing can act on. Do not restore it from the descriptor dump without the overlay; the reasoning
+ * is recorded under "Not carried over" in docs/fidelity.md. */
 typedef struct cvar_row {
     const char *name;
     const char *def;
@@ -89,7 +96,6 @@ static const cvar_row CVARS[] = {
     { "cs_mh_direction_multiplier",          "1.0",  4, "scale meathook direction by this" },
     { "cs_mh_movement_multiplier",           "10.0", 4, "scale meathook velocity by this much" },
     { "sh_pretty_on",                        "0",    1, "enables pretty printing of saved rawmap json" },
-    { "sh_show_rmcount",                     "0",    1, "draws the current number of rendermodels active" },
     { "sh_copy_reslist_to_clipboard",        "0",    1, "when sh_listres is used the contents will be copied to the clipboard" },
 };
 #define CVAR_COUNT ((int)(sizeof(CVARS) / sizeof(CVARS[0])))
@@ -165,10 +171,10 @@ int sh_cvar_table_row(int index, const char **name, const char **def, const char
 }
 
 /* ----------------------------------------------------------------- FULL findable-table insert -----
- * THE FIX (root cause: our 9 cvars register into the pending list ONLY; the SOLE hasher
+ * THE FIX (root cause: our cvars register into the pending list ONLY; the SOLE hasher
  * RegisterStaticVars (0x1a06a00) already ran at static init, so our LATE cvars are in NEITHER findable
  * table -> FindCvar misses -> "Unknown command"). After CvarRegister has built each embedded idCVar
- * object, we replay RegisterStaticVars' FULL-table insert for our 9 cvars: append the object pointer
+ * object, we replay RegisterStaticVars' FULL-table insert for each of our cvars: append the object pointer
  * into the FULL idList (cvarSys+0x08) and link it into the FULL idHashIndex (cvarSys+0x38) at the same
  * bucket the engine's hash yields. The S0 cvar-unlock alias then makes the gate-1 (~ console) table BE
  * this FULL table, so the cvars become recognized at both gates.
@@ -180,7 +186,7 @@ int sh_cvar_table_row(int index, const char **name, const char **def, const char
  * guarded so a wrong offset degrades to a logged skip, never a crash/corruption. The one-shot install
  * latch guarantees this pass runs exactly once, so no cvar is double-linked.
  *
- * Returns the number of cvars inserted into the FULL table (0..9). cvarSys / hashfn NULL => 0 (logged). */
+ * Returns the number of cvars inserted into the FULL table (0..8). cvarSys / hashfn NULL => 0 (logged). */
 static int cvar_findable_insert_one(uint8_t *cvarSys, name_hash_fn hashfn, int i)
 {
     __try {
@@ -293,7 +299,7 @@ int sh_cvars_install(void *cvar_register, const void *module_base)
         ok += register_one(reg, i);
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B2: cvars registered %d/%d (register=%p, non-EXPOSE / gate-1-invisible, NOCHEAT so console sets work without dev mode; 9 OG rows)",
+        "B2: cvars registered %d/%d (register=%p, non-EXPOSE / gate-1-invisible, NOCHEAT so console sets work without dev mode; 8 of OG's 9 rows)",
         ok, CVAR_COUNT, cvar_register);
     backend_log(line);
 
@@ -310,7 +316,7 @@ int sh_cvars_install(void *cvar_register, const void *module_base)
         matched, CVAR_COUNT, mutated, CVAR_COUNT);
     backend_log(line);
 
-    /* THE FIX: link our 9 cvars into the FULL findable table so FindCvar (and the S0-aliased gate-1 ~
+    /* THE FIX: link our cvars into the FULL findable table so FindCvar (and the S0-aliased gate-1 ~
      * console) recognizes them. Resolve cvarSys build-portably (CmdSystemLea decode +0x10, base+RVA
      * fallback -- sh_resolve_cvarsys), resolve the engine name-hash, then insert each. */
     uint8_t *cvarSys = (uint8_t *)sh_resolve_cvarsys((const uint8_t *)module_base);

@@ -1,4 +1,4 @@
-/* cvars.h -- register the cvar table with the engine cvar system: the 9 OG cvars (clean-room
+/* cvars.h -- register the cvar table with the engine cvar system: 8 of the 9 OG cvars (clean-room
  * reimplementation of OG XINPUT1_3's static-init cvar push_back + spine flush; the OG's snaphak_*
  * name prefix renamed to our sh_*).
  *
@@ -9,8 +9,13 @@
  * massages the bits internally). None of the 9 carry EXPOSE/NOCHEAT -> they register non-EXPOSE
  * (gate-1-invisible), which is the faithful OG behavior.
  *
- * Our reimpl carries the 9 rows as a static table and calls the engine register fn (resolved by the
- * signature scanner as "CvarRegister", NO hardcoded RVA). The embedded idCVar object the engine writes
+ * The 8th, snaphak_show_rmcount, is deliberately NOT registered: the OG read it from its spliced
+ * SuperScript override fns and drew the count over the game, and the clone has no such overlay to
+ * switch on -- registering the name would advertise a setting that cannot do anything. See the
+ * "Not carried over" entry in docs/fidelity.md before re-adding it from the descriptor dump.
+ *
+ * Our reimpl carries the remaining 8 rows as a static table and calls the engine register fn (resolved by
+ * the signature scanner as "CvarRegister", NO hardcoded RVA). The embedded idCVar object the engine writes
  * through lives in persistent, never-freed, 16-byte-aligned backing storage -- the engine links each
  * cvar into its process-lifetime cvar list, exactly as OG's static descriptors persist for the process.
  *
@@ -25,10 +30,10 @@
  * unconditionally links into the pending list), and the findable-insert must run exactly once, so the
  * latch prevents OUR double-register AND any double-link.
  *
- * THE FINDABLE-INSERT (the fix): our 9 cvars register into the pending list only; the SOLE table-hasher
+ * THE FINDABLE-INSERT (the fix): our cvars register into the pending list only; the SOLE table-hasher
  * RegisterStaticVars (0x1a06a00) already ran at static init, so our LATE cvars are in NEITHER findable
  * table -> FindCvar misses -> "Unknown command". After the CvarRegister loop we replay that fn's FULL-
- * table insert for our 9: append each embedded idCVar object into the FULL idList (cvarSys+0x08) and link
+ * table insert for each row: append each embedded idCVar object into the FULL idList (cvarSys+0x08) and link
  * it into the FULL idHashIndex (cvarSys+0x38) via the engine's own name-hash (sig "NameHash"). We do NOT
  * set CVAR_EXPOSE and do NOT re-call RegisterStaticVars (its static-dup guard ExitProcess(2)es). If the
  * FULL table has no spare room we BAIL per-cvar (logged skip, no realloc). Every engine call + every
@@ -39,15 +44,14 @@
  *                   sig decode +0x10, with *(module_base+0x55b7290) as the logged fallback -- see
  *                   sh_resolve_cvarsys), and it anchors the NameHash sig resolve too.
  *                   NULL => the register loop still runs but the findable-insert is SKIPPED (logged).
- * Does NOT depend on the cmdSystem global. Emits "B2: cvars registered N/9 ..." +
- * "B2: cvar findable-insert N/9 (cvarSys=%p count=%d cap=%d ...)". Returns the count registered (0..9). */
+ * Does NOT depend on the cmdSystem global. Emits "B2: cvars registered N/8 ..." +
+ * "B2: cvar findable-insert N/8 (cvarSys=%p count=%d cap=%d ...)". Returns the count registered (0..8). */
 int sh_cvars_install(void *cvar_register, const void *module_base);
 
 /* CVARS index constants (mirror the cvars.c CVARS[] table order) -- for consumers that read a
- * cvar's live value via sh_cvar_value_int. Rows 0..8 are the 9 OG cvars. */
+ * cvar's live value via sh_cvar_value_int. Rows 0..7 are the OG cvars the clone registers. */
 #define B2_CVAR_SH_PRETTY_ON                 6
-#define B2_CVAR_SH_SHOW_RMCOUNT              7
-#define B2_CVAR_SH_COPY_RESLIST_TO_CLIPBOARD 8
+#define B2_CVAR_SH_COPY_RESLIST_TO_CLIPBOARD 7
 
 /* Read the live INT/BOOL value of cvar `index` (one of the B2_CVAR_* constants) from OUR engine-
  * populated backing object. The engine stores valueInteger at idCVar+0x30 (DIRECT from the source-of-

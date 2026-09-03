@@ -58,6 +58,19 @@ mislabeled its output `"… had inherit %s"`. The clone **corrects the label** �
 `"had class %s"` and `filtinh` reports `"had inherit %s"` — so the toast names the field actually
 filtered (`src/backend/snapstack.c`).
 
+## Not carried over (the original had it; the clone does not)
+
+### `snaphak_show_rmcount` — the on-screen rendermodel count
+The original registered nine cvars, and the eighth, `snaphak_show_rmcount`, drew the live count of
+active rendermodels over the game. It could do that because the original splices the engine's
+SuperScript (eventDef) API table and reads the switch from one of its own override functions each
+frame; the clone reimplements no part of that splice and has no text-overlay surface of its own, so
+there is nothing for the switch to turn on. Rather than register a name that cannot do anything, the
+clone leaves the row out (`src/backend/cvars.c`) — `sh_show_rmcount` is not a Snapmap+ cvar. The count
+itself is not lost: `sh_debugrender dumprenderinfo` prints it, followed by every model's name. Drawing
+it continuously needs a renderer hook that does not exist yet; re-add the cvar in the same change that
+adds one, not before.
+
 ## The one sanctioned divergence — the fault-shield
 
 The original installs two fault detours (on the engine's `Error` and `FatalError`) that each format a
