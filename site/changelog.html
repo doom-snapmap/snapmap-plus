@@ -33,11 +33,44 @@
       <strong>Latest</strong> stable version is what <code>snapmap-plus update</code> installs.
     </p>
 
-    <div id="changelog" aria-live="polite">
+    {% assign latest_stable = site.data.changelog | where: "channel", "stable" | first %}
+    {% assign groups = "added,improved,fixed" | split: "," %}
+    <div id="changelog">
+      {% for rel in site.data.changelog %}
+      <article class="release">
+        <div class="release-head">
+          <h2>{{ rel.tag | escape }}</h2>
+          <time datetime="{{ rel.date | escape }}">{{ rel.date | date: "%B" }} {{ rel.date | date: "%d" | plus: 0 }}, {{ rel.date | date: "%Y" }}</time>
+          {% if rel.channel == "beta" %}<span class="tag-pill tag-beta">Beta</span>{% endif %}
+          {% if latest_stable and rel.tag == latest_stable.tag %}<span class="tag-pill tag-latest">Latest</span>{% endif %}
+        </div>
+        <div class="release-notes">
+          {% if rel.headline %}<p><strong>{{ rel.headline | escape }}</strong></p>{% endif %}
+          {% if rel.summary %}<p>{{ rel.summary | escape }}</p>{% endif %}
+          {% for group in groups %}
+            {% assign items = rel[group] %}
+            {% if items and items.size > 0 %}
+              {% case group %}
+                {% when "added" %}<p><strong>New</strong></p>
+                {% when "improved" %}<p><strong>Improved</strong></p>
+                {% when "fixed" %}<p><strong>Fixed</strong></p>
+              {% endcase %}
+              <ul>{% for item in items %}<li>{{ item | escape }}</li>{% endfor %}</ul>
+            {% endif %}
+          {% endfor %}
+          {% if rel.collapsed %}<p><em>{{ rel.collapsed | escape }}</em></p>{% endif %}
+        </div>
+        <div class="release-links">
+          <a href="https://github.com/doom-snapmap/snapmap-plus/releases/tag/{{ rel.tag | escape }}">View on GitHub</a>
+        </div>
+      </article>
+      {% else %}
       <div class="changelog-fallback">
-        Loading releases&hellip; If nothing appears, the full history lives on
-        <a href="https://github.com/doom-snapmap/snapmap-plus/releases">GitHub releases</a>.
+        No releases yet. Watch
+        <a href="https://github.com/doom-snapmap/snapmap-plus/releases">GitHub releases</a>
+        for the first one.
       </div>
+      {% endfor %}
     </div>
   </div>
 </main>
