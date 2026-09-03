@@ -6,6 +6,38 @@ at the bottom is the original POC buildout, before this doc tracked dates per en
 This is an engineering log for maintainers, not the product changelog. The release notes users read are in
 [`CHANGELOG.md`](../CHANGELOG.md).
 
+### 2026-09-03 -- The schema's enum value sets, corrected against the engine constants
+
+- **Sixteen enums in `schema_slice.js` listed the wrong values**, which is what issue #76 reported: the
+  Entity State tab warned that `SNAP_POI_2` "is not among the known snapPoiElement_t values" on a map
+  that was perfectly valid. It listed `TYPE_ONE`, `TYPE_ONE_`, `TYPE_TWO`, `TYPE_TWO_` and so on.
+- **Where those names came from.** The generator scraped DOOM's localized inspector strings, whose ids
+  read `#str_snapmaps_enum_<enumType>_<LABEL>` and `#str_snapmaps_enum_<enumType>_<LABEL>_desc`. That
+  gives the label an editor widget *displays*, not the constant a declaration *serializes*, and it gives
+  each label twice -- once bare, once with the trailing underscore left behind by `_desc`. Both halves of
+  the corruption pattern noted on 2026-07-15 (`doorState_t`, `walkState_t`, `snapAmmoFilter_t`,
+  `snapDropStyle_t`) fall out of that one mistake, and the file's own header described the sets as
+  "observed in DOOM's own shipped declaration data", which is how it survived review.
+- **Corrected against the reflection constants**, not guessed. Each type's members were read out of the
+  engine's constant table as a contiguous declaration-order block, then cross-checked against that type's
+  `snappropertyinspector_enum` decl: every one matches its inspector's label order and count once
+  `startValue` is applied, which is independent corroboration that the right block was picked. Sentinels
+  (`_MAX`, `_INVALID`, `WALKSTATE_NOCLIP`) are included -- they are real members, and omitting one would
+  just recreate a false warning on a declaration that carries it.
+- **The full set:** `snapPoiElement_t`, `walkState_t`, `coopHazardDamage_t`, `snapDropStyle_t`,
+  `snapAmmoFilter_t`, `snapUniversalAmmo_t`, `snapAISpawnBehavior_t`, `playerLoadoutAbility_t`,
+  `snapSpawnEncounterTarget_t`, `snapSpawnEncounterLocation_t`, `snapSpawnItemLocation_t`,
+  `snapWinCondition_t`, `snapWinDataSource_t`, `snapEndGameState_t`, `snapVisibilityFilter_t`,
+  `snapCauseOfDeath_t`. Three of them (`snapEndGameState_t`, `snapVisibilityFilter_t`,
+  `snapCauseOfDeath_t`) had no trailing-underscore twin and would have been missed by looking for the
+  duplicate pattern alone; they were caught by checking every member in the file against the constant
+  table instead.
+- **This also fixed the value autocomplete**, which shares `SCHEMA.enums`. Typing a value for one of
+  these fields used to suggest `"TYPE_ONE"` -- a token the engine rejects.
+- **`tests/decl_enum_values_test.js` guards both halves**: the sixteen corrected sets must match exactly,
+  and no enum anywhere in the file may carry a member alongside its trailing-underscore twin, so a
+  regeneration through the old path fails the suite instead of shipping.
+
 ### 2026-08-24 -- Editable camera origin and position lock restored
 
 - **The footer camera coordinates are editable again.** X, Y, and Z continue to follow the live editor

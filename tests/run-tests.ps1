@@ -45,6 +45,7 @@
 # The JS checks run after the native suite:
 #   decl_overlay_test -- syntax-paint/text alignment for the Entity State editor
 #   decl_index_order_test -- numeric item[n] presentation, nesting, and 1000-boundary regression
+#   decl_enum_values_test -- schema enum sets match the engine constants, not the localized inspector labels
 #   entity_list_test -- bounded DOM window, full logical filtering, selection, and event delegation
 #   prefab_transform_test -- sparse idMat3 defaults, column-major axes, scale, and block anchoring
 #   prefab_viewport_contract_test -- Prefab Details layout, resize, budgets, and shared-buffer transport
@@ -140,7 +141,7 @@ Write-Host ""; Write-Host "all native tests passed ($($tests.Count))"
 
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) { Write-Host "[FAIL] node not found (required for decl editor tests)"; exit 1 }
-$jsTests = @("decl_overlay_test.js", "decl_index_order_test.js", "asset_browser_test.js", "entity_list_test.js", "prefab_transform_test.js", "prefab_viewport_contract_test.js", "window_chrome_contract_test.js")
+$jsTests = @("decl_overlay_test.js", "decl_index_order_test.js", "decl_enum_values_test.js", "asset_browser_test.js", "entity_list_test.js", "prefab_transform_test.js", "prefab_viewport_contract_test.js", "window_chrome_contract_test.js")
 foreach ($jsTest in $jsTests) {
     & $node.Source (Join-Path $here $jsTest)
     if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] $jsTest (exit $LASTEXITCODE)"; exit 1 }
