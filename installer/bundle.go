@@ -355,8 +355,8 @@ func cmdSetToken(args []string) error {
 
 // cmdChangelog prints the release history. The NEWEST release's notes are printed IN FULL to the console --
 // so you can read exactly what changed without leaving the terminal -- while OLDER releases are listed
-// compactly with a link to their GitHub page. The notes are the commit log CI bakes into each release's body
-// (see release.yml); that keeps the newest changelog self-contained (no link needed to read it).
+// compactly with a link to their GitHub page. The notes are the reviewed CHANGELOG.md entry release.yml
+// publishes as the release body; that keeps the newest changelog self-contained (no link needed to read it).
 func cmdChangelog(f flags) error {
 	token := resolveToken(f)
 	var list []ghRelease
@@ -376,7 +376,8 @@ func cmdChangelog(f flags) error {
 }
 
 // changelogPreviewLines caps how many notes lines an OLDER release shows before it defers to its GitHub link.
-const changelogPreviewLines = 12
+// An entry is a headline, a summary, up to three group headings, up to six bullets and the collapsed line.
+const changelogPreviewLines = 24
 
 // formatChangelog renders the release history. The NEWEST release shows ALL of its notes (no truncation) plus
 // a link to the full GitHub notes; each OLDER release shows a preview (up to changelogPreviewLines lines) then
@@ -402,6 +403,23 @@ func formatChangelog(list []ghRelease, installed string) string {
 	return b.String()
 }
 
+// plainNotesLine reduces the changelog's markdown to plain text for a terminal. Release bodies come from
+// CHANGELOG.md (see release.yml), which is markdown because the website and GitHub render it; the console
+// does not, so a heading, a bold headline and the italic collapsed line would otherwise print their markup.
+func plainNotesLine(line string) string {
+	s := strings.TrimRight(line, "\r")
+	t := strings.TrimSpace(s)
+	switch {
+	case strings.HasPrefix(t, "### "):
+		return strings.TrimSpace(strings.TrimPrefix(t, "###")) + ":"
+	case strings.HasPrefix(t, "**") && strings.HasSuffix(t, "**") && len(t) > 4:
+		return strings.TrimSpace(t[2 : len(t)-2])
+	case strings.HasPrefix(t, "_") && strings.HasSuffix(t, "_") && len(t) > 2:
+		return strings.TrimSpace(t[1 : len(t)-1])
+	}
+	return s
+}
+
 // writeNotes writes a release's notes, indented. limit < 0 prints every line verbatim (blank lines kept). With
 // limit >= 0 it prints at most `limit` non-blank lines and, if the notes are longer, appends a
 // "... full notes: <link>" line instead of the remainder.
@@ -422,7 +440,7 @@ func writeNotes(b *strings.Builder, r ghRelease, limit int) {
 				return
 			}
 		}
-		fmt.Fprintf(b, "    %s\n", strings.TrimRight(line, "\r"))
+		fmt.Fprintf(b, "    %s\n", plainNotesLine(line))
 		shown++
 	}
 }

@@ -43,7 +43,7 @@ func TestFormatChangelogNewestFullPlusLink(t *testing.T) {
 // "... full notes" link for the remainder.
 func TestFormatChangelogOlderPreviewAndTruncationLink(t *testing.T) {
 	var many []string
-	for i := 1; i <= 20; i++ {
+	for i := 1; i <= changelogPreviewLines+8; i++ { // must exceed the cap, whatever it is
 		many = append(many, "- old change "+itoa(i))
 	}
 	list := []ghRelease{
@@ -138,4 +138,32 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(d)
+}
+
+// TestWriteNotesRendersChangelogMarkdown: release bodies now come from CHANGELOG.md (see release.yml), which
+// is markdown because the website and GitHub render it. The console does not, so the markup is reduced to
+// plain text rather than printed literally.
+func TestWriteNotesRendersChangelogMarkdown(t *testing.T) {
+	body := "**One-prompt map installs**\n\nInstalling a map pulls everything it needs.\n\n" +
+		"### New\n- Install everything a map needs from one prompt.\n\n" +
+		"_Plus 14 smaller fixes and internal changes._"
+	var b strings.Builder
+	writeNotes(&b, ghRelease{Body: body, HTMLURL: "https://example.invalid/r"}, -1)
+	out := b.String()
+
+	for _, marker := range []string{"**", "###", "_Plus"} {
+		if strings.Contains(out, marker) {
+			t.Errorf("raw markdown %q survived into terminal output:\n%s", marker, out)
+		}
+	}
+	for _, want := range []string{
+		"One-prompt map installs",
+		"New:",
+		"- Install everything a map needs from one prompt.",
+		"Plus 14 smaller fixes and internal changes.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
 }
