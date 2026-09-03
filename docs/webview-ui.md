@@ -69,8 +69,8 @@ The frontend holds no engine addresses; it calls the backend only through the vt
 | Live Create-from-Selection icon state/count tooltip | `get_selection` +0x150, polled every ~330 ms independent of the sync checkboxes |
 | Prefabs list, detail pane, delete/rename, folders (create/rename/delete/move) | `resolve_prefab_path` +0xc0 only -- pure Win32 file/directory ops (`FindFirstFileA`, `DeleteFileA`, `MoveFileA`, `CreateDirectoryA`, `RemoveDirectoryA`) on the resolved path. No other engine slot involved, unaffected by the +0xb0 issues below. |
 | Create from selection | `serialize_selection` +0xb0 |
-| Load / Place | `apply_edit` kind=1 (the same staging path `sh mkcmd` uses) -- stages into the paste slot only; the user presses Ctrl+V themselves. See the Changelog for why this is stage-only rather than fully automated. |
-| Timelines list (dual-add `idTarget_Timeline` / `idEncounterManager`) | `get_classname_copy` +0x48 -- change-gated (see Changelog), not a fixed timer |
+| Load / Place | `apply_edit` kind=1 (the same staging path `sh mkcmd` uses) -- stages into the paste slot only; the user presses Ctrl+V themselves. See [`webview-ui-history.md`](webview-ui-history.md) for why this is stage-only rather than fully automated. |
+| Timelines list (dual-add `idTarget_Timeline` / `idEncounterManager`) | `get_classname_copy` +0x48 -- change-gated (see [`webview-ui-history.md`](webview-ui-history.md)), not a fixed timer |
 | Open a timeline (tabs + events) | `serialize_entity` +0xc8 -- the same slot Save-to-Decl and Push-to-stack already use, JSON-parsed client-side |
 | Timeline event-arg dropdowns (decl / enum / per-entity asset lists) | `enum_decls_of_resclass` +0x110 -- the same shared slot for both decl-name and enum-member enumeration |
 | Save Timeline (commit `componentTimeLine` / `encounterComponent`) | `apply_edit` kind=0 -- the same path Save-to-Decl already uses, id-targeted instead of paste-targeted |

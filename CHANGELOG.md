@@ -3,7 +3,7 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
-## v0.2.1-beta.6 -- 2026-09-02 (beta)
+## v0.2.1-beta.6 -- 2026-09-03 (beta)
 
 **Mod packs install and play in one step**
 
@@ -86,9 +86,41 @@ copy and paste.
 
 _Plus 7 smaller fixes and internal changes._
 
-## v0.1.0-beta.3 -- 2026-06-29 (beta)
+## v0.2.1-beta.2 -- 2026-07-21 (beta)
 
-**The first public betas**
+**A community section on the site**
 
-Releases before v0.2.1-beta.3 predate this changelog. Their notes are on the
-[GitHub releases page](https://github.com/doom-snapmap/snapmap-plus/releases).
+The website gains a Community section backed by GitHub Discussions: sign in with
+GitHub to post, comment, reply and react, with search, sorting and tags.
+
+### New
+- Post, comment, reply and react in a new Community section, using your GitHub
+  sign-in.
+- Browse the community with search, sorting, tags and a rich-text composer.
+
+### Improved
+- The site is redesigned, with a mobile menu and a Discord link in the nav.
+
+### Fixed
+- Console commands for Snapmap+ settings work without turning on developer mode.
+- Turning the user override layer off now sticks across restarts.
+
+_Plus 18 smaller fixes and internal changes._
+
+## v0.2.1-beta.1 -- 2026-07-19 (beta)
+
+**SnapHak becomes Snapmap+**
+
+The project is renamed Snapmap+, and your saved content moves into a folder of
+its own under your local app data.
+
+### New
+- Snapmap+ keeps your maps, prefabs and overrides in their own folder.
+
+### Improved
+- Existing content is migrated once, and the move is verified before the old
+  copy is removed.
+- The installer carries a version resource and manifest, so fewer antivirus
+  tools flag the download.
+
+_Plus 1 smaller fix and internal change._

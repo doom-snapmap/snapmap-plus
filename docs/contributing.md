@@ -295,6 +295,11 @@ If drafting fails -- an outage, a rate limit, a declined request -- the pull req
 raw commit list marked `NEEDS WRITING`. Rewrite it by hand and merge as usual. A drafting failure never blocks
 a release.
 
+Correcting a past entry: edit it in `CHANGELOG.md`, then run
+`python3 tools/sync_release_notes.py --apply` to push the corrected text onto the already-published GitHub
+Release. Without that, `CHANGELOG.md` is the source of truth only for releases cut after it existed. The tool
+is a dry run by default and saves the current bodies before changing anything.
+
 The first stable release is a special case: there is no earlier stable tag to compare against, so the drafter
 would receive the entire history. Write that entry by hand.
 
@@ -349,7 +354,7 @@ release. **Do not open a public issue for a security problem.** Use GitHub's **p
 | `src/common/` | the shared backend↔frontend interface ABI (`snapmap_plus_iface.h`) |
 | `installer/` | `snapmap-plus.exe` — the Go install / update / uninstall CLI |
 | `tests/` | the native unit tests + `run-tests.ps1` |
-| `tools/` | the changelog parser (`changelog.py`) + the release-notes drafter (`draft_changelog.py`) and their tests |
+| `tools/` | the changelog parser (`changelog.py`), the release-notes drafter (`draft_changelog.py`), the published-release sync (`sync_release_notes.py`) and their tests |
 | `CHANGELOG.md` | the user-facing release notes -- the single source every consumer reads |
 | `docs/` | architecture · capabilities · fidelity · packaging · webview-ui · webview-ui-history · backend-changes · services · this guide |
 | `build.ps1` | compile the DLLs → `build/` (backend + frontend; `-BackendOnly` for backend alone) |
