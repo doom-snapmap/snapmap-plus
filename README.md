@@ -80,12 +80,17 @@ Versions follow **semantic versioning** — `vMAJOR.MINOR.PATCH` (e.g. `v0.1.0`)
 there is no `VERSION` file to maintain. One tag = one release containing **both** the mod bundle and
 `snapmap-plus.exe`, both stamped with that tag.
 
-Cut a release (maintainer):
+Cut a release (maintainer) -- notes first, then the tag:
 
 ```
+gh workflow run prepare-release.yml -f version=v0.1.0   # drafts the notes as a PR; review and merge it
 git tag v0.1.0
 git push origin v0.1.0      # fires .github/workflows/release.yml
 ```
+
+The full sequence, and what happens when drafting fails, is in
+[`docs/contributing.md`](docs/contributing.md#cutting-a-release-maintainer). `release.yml` refuses to build a
+tag that has no entry in [`CHANGELOG.md`](CHANGELOG.md).
 
 CI builds the DLLs + the installer (stamping `snapmap-plus.exe` via `-ldflags -X main.version=v0.1.0`), packages the
 overlay, and publishes a GitHub Release with `snapmap-plus-bundle.zip` + `snapmap-plus.exe` + `install.ps1`.

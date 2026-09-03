@@ -27,3 +27,13 @@ community/.wrangler/
 
 # wrangler local-dev secrets (per-machine; never commit)
 .dev.vars
+
+# Generated from CHANGELOG.md by pages.yml at build time (tools/changelog.py --json)
+site/_data/changelog.json
+
+# Python bytecode cache (tools/)
+__pycache__/
+*.pyc
+
+# Written by tools/sync_release_notes.py before it rewrites a published release body
+release-bodies-backup.json

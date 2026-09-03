@@ -2,15 +2,17 @@
    Each feature activates only when its markup is present:
    1. Download resolver — points [data-dl] links at the newest release's snapmap-plus.exe.
    2. Lightbox — click any framed screenshot to focus it full-screen.
-   3. Changelog — renders GitHub releases into #changelog (auto-generated release notes).
-   4. Guide TOC — builds the sticky sidebar from the rendered guide's headings. */
+   3. Guide TOC — builds the sticky sidebar from the rendered guide's headings.
+   4. Mobile nav — the hamburger menu in the sticky header.
+
+   The changelog page is rendered statically by Jekyll from CHANGELOG.md
+   (see .github/workflows/pages.yml); it needs no script. */
 
 (function () {
   "use strict";
 
   var REPO = "doom-snapmap/snapmap-plus";
   var API = "https://api.github.com/repos/" + REPO + "/releases";
-  var RELEASES_URL = "https://github.com/" + REPO + "/releases";
 
   /* ---------- 1. download resolver ---------- */
 
@@ -110,77 +112,7 @@
     });
   }
 
-  /* ---------- 3. changelog ---------- */
-
-  function esc(s) {
-    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  }
-
-  /* Release bodies are plain text: an intro line, then "- " bullet lines. */
-  function renderNotes(body) {
-    var html = "";
-    var listOpen = false;
-    (body || "").split(/\r?\n/).forEach(function (line) {
-      var t = line.trim();
-      if (!t) return;
-      if (t.indexOf("- ") === 0) {
-        if (!listOpen) { html += "<ul>"; listOpen = true; }
-        html += "<li>" + esc(t.slice(2)) + "</li>";
-      } else {
-        if (listOpen) { html += "</ul>"; listOpen = false; }
-        html += "<p>" + esc(t) + "</p>";
-      }
-    });
-    if (listOpen) html += "</ul>";
-    return html || "<p>No notes for this release.</p>";
-  }
-
-  function initChangelog() {
-    var host = document.getElementById("changelog");
-    if (!host) return;
-    fetchReleases().then(function (rels) {
-      if (!rels || !rels.length) {
-        host.innerHTML =
-          '<div class="changelog-fallback">Could not load the release feed right now. ' +
-          'The full history lives on <a href="' + RELEASES_URL + '">GitHub releases</a>.</div>';
-        return;
-      }
-      var latestStableSeen = false;
-      var html = "";
-      rels.forEach(function (rel) {
-        if (rel.draft) return;
-        var isLatest = !rel.prerelease && !latestStableSeen;
-        if (isLatest) latestStableSeen = true;
-        var date = new Date(rel.published_at);
-        var dateText = date.toLocaleDateString(undefined, {
-          year: "numeric", month: "long", day: "numeric"
-        });
-        var exe = null;
-        for (var i = 0; i < rel.assets.length; i++) {
-          if (rel.assets[i].name === "snapmap-plus.exe") { exe = rel.assets[i]; break; }
-        }
-        html +=
-          '<article class="release">' +
-            '<div class="release-head">' +
-              "<h2>" + esc(rel.tag_name) + "</h2>" +
-              '<time datetime="' + esc(rel.published_at) + '">' + dateText + "</time>" +
-              (rel.prerelease ? '<span class="tag-pill tag-beta">Beta</span>' : "") +
-              (isLatest ? '<span class="tag-pill tag-latest">Latest</span>' : "") +
-            "</div>" +
-            '<div class="release-notes">' + renderNotes(rel.body) + "</div>" +
-            '<div class="release-links">' +
-              (exe ? '<a href="' + esc(exe.browser_download_url) + '">Download snapmap-plus.exe</a><span class="sep">&middot;</span>' : "") +
-              '<a href="' + esc(rel.html_url) + '">View on GitHub</a>' +
-            "</div>" +
-          "</article>";
-      });
-      host.innerHTML = html ||
-        '<div class="changelog-fallback">No releases yet. Watch ' +
-        '<a href="' + RELEASES_URL + '">GitHub releases</a> for the first one.</div>';
-    });
-  }
-
-  /* ---------- 4. guide TOC ---------- */
+  /* ---------- 3. guide TOC ---------- */
 
   function initToc() {
     var toc = document.getElementById("guide-toc-list");
@@ -225,7 +157,7 @@
     }
   }
 
-  /* ---------- 5. mobile nav ---------- */
+  /* ---------- 4. mobile nav ---------- */
 
   function initNav() {
     var header = document.querySelector(".site-header");
@@ -275,7 +207,6 @@
   function boot() {
     resolveDownload();
     initLightbox();
-    initChangelog();
     initToc();
     initNav();
   }
