@@ -41,6 +41,7 @@
 #include "serialization_buffer.h"
 #include "theme_bootstrap.h"
 #include "report_scrub.h"   /* pure anonymization scrub + tail for the crash-report log attachment */
+#include "log_rotate.h"     /* the UI log is append-only too; bound it like the backend's */
 #include "../sh_entity_desc.h" /* GENERATED: OUR RE-extracted Inherit/Classname descriptions (same table sh_tabs.cpp uses) */
 #include "../sh_event_catalog.h" /* GENERATED: OUR event-def catalog, 1611 events (same table sh_timeline.cpp uses) */
 #include "../sh_entity_asset_lists.h" /* GENERATED: OUR per-entity-class model/anim asset lists (same table sh_timeline.cpp uses) */
@@ -208,12 +209,19 @@ struct PocCollectPerf {
 static PocCollectPerf g_collect_perf = {};
 
 /* ------------------------------------------------------------------ tiny file log ------------------ */
+/* The name is the UI's, not the module's internal one: this file sits in a folder
+ * the player can open, next to the backend's log, and "webview_poc" told them
+ * nothing except that someone's proof of concept was still running. */
+static const char *kUiLogPath = "snapmap-plus\\logs\\snapmap-plus-ui.log";
+
 static void poc_log(const char *msg)
 {
+    static bool rolled = false;
     CreateDirectoryA("snapmap-plus", nullptr);   /* one level at a time; both idempotent */
     CreateDirectoryA("snapmap-plus\\logs", nullptr);
     FILE *f = nullptr;
-    if (fopen_s(&f, "snapmap-plus\\logs\\webview_poc.log", "a") == 0 && f) {
+    if (!rolled) { rolled = true; log_rotate_if_large(kUiLogPath, LOG_ROTATE_CAP_BYTES); }
+    if (fopen_s(&f, kUiLogPath, "a") == 0 && f) {
         SYSTEMTIME t; GetLocalTime(&t);
         fprintf(f, "[%02d:%02d:%02d.%03d] %s\n",
                 t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, msg);
@@ -2100,6 +2108,7 @@ static const char *kCrashDir  = "snapmap-plus\\crash";   /* CWD = the game dir (
 static const char *kCrashGlob = "snapmap-plus\\crash\\pending-*.json";
 #define CRASH_RECORD_READ_CAP  16384                      /* a record is ~2 KB; cap the read anyway */
 #define CRASH_LOG_TAIL_KEEP    (15 * 1024)                /* per-log tail budget (3 logs ~= 45 KB) */
+#define CRASH_RECORDS_KEEP     8                          /* newest records kept; older ones are pruned */
 
 static bool        g_report_is_crash = false;   /* the in-flight relay POST came from the crash dialog */
 static bool        g_page_loaded     = false;   /* NavigationCompleted fired -- the page can receive */
@@ -2122,6 +2131,20 @@ static int crash_scan(std::vector<std::string> &names)
     FindClose(h);
     std::sort(names.begin(), names.end(),
               [](const std::string &a, const std::string &b) { return a > b; });
+
+    /* Records are cleared when the crash dialog is answered or a report is sent,
+     * and a SURVIVED fault raises neither -- it gets a quiet toast. So those
+     * records were never cleared by anything, and a machine that hits a
+     * recoverable fault regularly accumulates them without limit. They are worth
+     * keeping (they are real diagnostic signal, and the next report attaches
+     * them), but only the recent ones are: an eight-week-old recovered fault
+     * tells nobody anything. Trim the tail here, where the directory is already
+     * listed and sorted newest-first, so it costs nothing extra. */
+    if ((int)names.size() > CRASH_RECORDS_KEEP) {
+        for (size_t i = CRASH_RECORDS_KEEP; i < names.size(); i++)
+            DeleteFileA((std::string(kCrashDir) + "\\" + names[i]).c_str());
+        names.resize(CRASH_RECORDS_KEEP);
+    }
     return (int)names.size();
 }
 
@@ -2190,7 +2213,7 @@ static void crash_clear_pending()
  * Anonymous-by-design is the feature's contract; the dialog says so next to the checkbox. */
 static std::string crash_collect_logs()
 {
-    static const char *files[] = { "shield_faults.log", "sh_backend.log", "webview_poc.log" };
+    static const char *files[] = { "shield_faults.log", "sh_backend.log", "snapmap-plus-ui.log" };
     char user[64] = "", comp[64] = "", prof[MAX_PATH] = "";
     const char *profleaf = "";
     DWORD un = sizeof user, cn = sizeof comp;

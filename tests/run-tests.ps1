@@ -72,7 +72,7 @@ if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
 
 # name | sources (relative to tests\) | runtime arg
 $tests = @(
-    @{ name = "shield_format_test"; src = 'shield_format_test.c ..\src\fault_shield\fault_record.c'; arg = "" }
+    @{ name = "shield_format_test"; src = 'shield_format_test.c ..\src\fault_shield\fault_record.c ..\src\common\log_rotate.c'; arg = "" }
     @{ name = "hook_test";          src = 'hook_test.c ..\src\backend\hook.c';                       arg = "" }
     @{ name = "crash_record_test";  src = 'crash_record_test.c ..\src\fault_shield\crash_record_format.c'; arg = "" }
     @{ name = "report_scrub_test";  src = 'report_scrub_test.c';                                     arg = "" }

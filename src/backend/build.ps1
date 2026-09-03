@@ -52,6 +52,7 @@ param(
                            "config.c", "config_json.c",
                            "entity.c", "typeinfo.c", "preview.c", "megapreview.c", "imgpreview.c", "prefabpreview.c", "soundpreview.c", "bcn.c", "patch.c", "algo.c", "target_any.c", "wiring_cleandirect.c", "swf_textedit.c", "ui_bridge.c",
                            "iface_engine.c", "apply_engine.c", "../common/snapmap_plus_iface.c",
+                           "../common/log_rotate.c",
                            # backend-hosted SnapStack (snapstack.c + json_patch.c): the `sh psel`/`sh acctargets`/
                            # etc. console commands + the stores -- the SOLE SnapStack implementation (the frontend
                            # never registers its own copy).

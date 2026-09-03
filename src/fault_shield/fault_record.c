@@ -1,5 +1,6 @@
 /* fault_record.c -- see fault_record.h. */
 #include "fault_record.h"
+#include "../common/log_rotate.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -30,6 +31,7 @@ void shield_set_logpath_from_module(HINSTANCE self)
     _snprintf_s(dir, MAX_PATH, _TRUNCATE, "%ssnapmap-plus\\logs", path);
     CreateDirectoryA(dir, NULL);   /* idempotent */
     _snprintf_s(g_logpath, MAX_PATH, _TRUNCATE, "%s\\shield_faults.log", dir);
+    log_rotate_if_large(g_logpath, LOG_ROTATE_CAP_BYTES);
 }
 
 void shield_emit(const shield_fault *f)
