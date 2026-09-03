@@ -40,8 +40,8 @@ extern "C" {
 
 /* ------------------------------------------------------------------ command handler signature -------
  * A registered SnapStack subcommand handler. OG enqueues {handler, parsed-argv-vector} onto the work
- * queue (XINPUT 0x7620 -> obj+0x58 sub-object), and the think-loop's +0x1a0 DRAIN runs them on the UI
- * (main) thread. The args are an argv-style string vector; argc/argv are passed through verbatim.
+ * queue (XINPUT 0x7620 -> obj+0x58 sub-object), and the think-loop's +0x1a0 DRAIN runs them on whichever
+ * thread pumps that think-loop -- the frontend's UI worker, not DOOM's main thread (see issue #61). The args are an argv-style string vector; argc/argv are passed through verbatim.
  * `ctx` is the user pointer registered alongside the handler (later routed to the SnapStack op
  * dispatch table). */
 typedef void (*sh_cmd_handler)(void *ctx, int argc, const char **argv);
