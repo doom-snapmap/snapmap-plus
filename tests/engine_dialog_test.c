@@ -1,11 +1,12 @@
 /* engine_dialog_test.c -- the text-injection gate and the one-at-a-time claim.
  *
  * What is testable offline is exactly the part that does not need DOOM: which
- * descriptors get our text and which are left alone, and that a second question
- * cannot displace one already on screen. The engine-side unknowns -- whether the
- * Flash layer renders a literal string, and what the result byte reads per
- * button -- are settled by `sh_dialogtest` against a running game, because no
- * amount of mocking can answer them.
+ * descriptors get our text and which are left alone, that both buttons are
+ * named with the action ids the answer is later read from, and that a second
+ * question cannot displace one already on screen. The one engine-side unknown
+ * left -- whether the Flash layer renders a literal string -- is settled by
+ * `sh_dialogtest` against a running game, because no amount of mocking can
+ * answer it.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -19,6 +20,14 @@
 #define ED_DESC_TEXT        0x18u
 #define ED_MGR_QUEUE_PTR    0x900u
 #define ED_MGR_QUEUE_COUNT  0x908u
+
+/* The params block indices the two button action ids are written to, and the
+ * ids themselves. Duplicated from engine_dialog.c on purpose: a test that
+ * imported the constants could not catch them being changed. */
+#define ED_PARAM_ACTION_0   3
+#define ED_PARAM_ACTION_1   4
+#define ED_ACTION_ACCEPT    0x4A
+#define ED_ACTION_DECLINE   0x4B
 
 /* A stand-in shell and dialog manager. The shell holds the manager at +0x08 and
  * the manager holds the queue at +0x900 with its count at +0x908, exactly as the
@@ -118,6 +127,14 @@ int main(void)
     CHECK(ticket > 0);
     CHECK(g_add_calls == 1);
     CHECK(sh_engine_dialog_test_pending_id() == 0x6D);
+
+    /* Both buttons are named on the way in. Without these two ids AddDialog
+     * builds both buttons with action 0, the dialog answers correctly on screen
+     * and reports nothing at all -- so this is the whole answer path, asserted
+     * at the only point it is visible offline. */
+    CHECK(((const int *)g_last_params)[ED_PARAM_ACTION_0] == ED_ACTION_ACCEPT);
+    CHECK(((const int *)g_last_params)[ED_PARAM_ACTION_1] == ED_ACTION_DECLINE);
+    CHECK(ED_ACTION_ACCEPT != ED_ACTION_DECLINE);
 
     /* The raise itself writes the text into the queued descriptor. There is no
      * detour on the engine render path any more, so if it does not happen during

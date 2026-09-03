@@ -1289,11 +1289,13 @@ static void h_sh_help(idCmdArgs *a);   /* defined after CMD_TABLE (it walks the 
 
 /* sh_dialogtest [buttonset] [text...] -- raise the engine's own modal with our text.
  *
- * A diagnostic, because the parts of that surface that live in the Flash layer
- * cannot be read out of native code: which button LAYOUT a given button-set
- * value draws, and what the descriptor's result byte reads once a button is
- * pressed. The button set is a free parameter of the raise, not a property of
- * the GDM id, so sweeping it here is how the yes/no value gets identified.
+ * A diagnostic, because the one part of that surface that lives in the Flash
+ * layer cannot be read out of native code: which button LAYOUT a given
+ * button-set value draws. The button set is a free parameter of the raise, not
+ * a property of the GDM id, so sweeping it here is how the yes/no value gets
+ * identified. Which button was PRESSED needs no sweeping -- the engine reports
+ * it through the button's action id -- so `sh_dialogpoll` reads an answer
+ * rather than guessing one.
  *
  * Every argument after the button set is joined back into one string, because a
  * real message has spaces in it and the command tokeniser would otherwise show
@@ -1369,8 +1371,9 @@ static void h_sh_dialogpoll(idCmdArgs *a)
  *
  * This is what makes the surface legible: the engine's OWN dialogs pass through
  * the same queue, so a known yes/no prompt raised by the game shows which button
- * set draws that layout, and watching the flag bytes across an answer shows
- * which one carries the result. Both are otherwise invisible. */
+ * set draws that layout, which is otherwise invisible. No byte in a descriptor
+ * carries the answer -- that arrives through the button's action id -- so this
+ * is a queue inspector and nothing more. */
 static void h_sh_dialogdump(idCmdArgs *a)
 {
     (void)a;

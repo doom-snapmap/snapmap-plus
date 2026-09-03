@@ -14,7 +14,18 @@
  *      captured by watching the engine raise one of its own.
  *   3. The dialog queue is an inline array of 0x1B0-byte descriptors at
  *      mgr+0x900 with its count at mgr+0x908, which is how a raised dialog is
- *      found again to read its answer.
+ *      found again while it is on screen.
+ *   4. A DESCRIPTOR CARRIES NO ANSWER. There is no byte anywhere in it that
+ *      records which button was pressed -- an earlier reading of desc+0x09 as a
+ *      result was wrong; the engine's own ClearDialog log line names that byte
+ *      `m.waitClear`. What a press actually does is invoke the pressed button's
+ *      callback object, whose Call (vtable +0x50) hands the button's ACTION ID
+ *      to the dispatcher at 0xE67BF0. For a gdm id with no case of its own --
+ *      which is every id this product raises -- AddDialog's default path builds
+ *      one button per label from the button set and takes each button's action
+ *      id straight out of OUR params block: button 0 from params[3], button 1
+ *      from params[4]. So we name the two actions, and the engine tells us
+ *      which one the player chose.
  *
  * The descriptor's string is ALREADY CONSTRUCTED when the detour sees it, so it
  * is assigned (idStr::operator=) and never constructed over: constructing into a
@@ -37,17 +48,13 @@
 #define ED_DESC_GDM_ID        0x00u   /* int   */
 #define ED_DESC_BUTTON_SET    0x04u   /* int   */
 #define ED_DESC_CLEARED       0x08u   /* byte: set once the dialog is answered/dismissed */
-#define ED_DESC_RESULT        0x09u   /* byte: the answer. Dismiss-all writes 0 here.     */
+#define ED_DESC_WAIT_CLEAR    0x09u   /* byte: `m.waitClear` -- NOT an answer (see above)  */
 #define ED_DESC_TEXT          0x18u   /* idStr, by value                                  */
 #define ED_DESC_TEXT_LENGTH   0x20u   /* int, the field ShowDialog tests                  */
 
 /* Menu-manager layout (RE: AddDialogInternal 0xE65C20, ClearDialog 0xE663C0). */
 #define ED_MGR_QUEUE_PTR      0x900u
 #define ED_MGR_QUEUE_COUNT    0x908u
-
-/* How much of a descriptor to dump when it is removed. Covers the id, the button
- * set, both flag bytes and the three flags AddDialog writes from its params. */
-#define ED_DESC_HEAD_BYTES    0x20
 
 /* `AddDialog`'s parameter block. Only these fields are read for an id with no
  * switch case, which is every id this product raises. The block is zeroed and
@@ -56,8 +63,24 @@
 #define ED_PARAMS_BYTES       0x100u
 #define ED_PARAM_GDM_ID       0u      /* int index */
 #define ED_PARAM_BUTTON_SET   1u      /* int index */
+#define ED_PARAM_ACTION_0     3u      /* int index; the FIRST button's action id  */
+#define ED_PARAM_ACTION_1     4u      /* int index; the SECOND button's action id */
 #define ED_PARAM_SOURCE_FILE  0x26u   /* int index; a const char * spans 0x26..0x27 */
 #define ED_PARAM_SOURCE_LINE  0x28u   /* int index; log formatting only */
+
+/* The two action ids we name our buttons with.
+ *
+ * Both are chosen off the dispatcher's own jump table (RVA 0xE69F7C, 0x72
+ * entries): actions 0x00, 0x01, 0x1F, 0x26, 0x2D, 0x44, 0x4A, 0x4B, 0x4C, 0x51,
+ * 0x5F and 0x60 all land on the same block at 0xE67C55, which does exactly one
+ * thing -- close the dialog. So an affirmative answer and a negative one behave
+ * identically to the engine and differ only in the id it reports to us.
+ *
+ * 0x4A and 0x4B are used by no case in AddDialog, and AddDialog is the only
+ * thing that ever builds a callback. Seeing either id therefore means OUR
+ * dialog and nothing else: it cannot be produced by a prompt the game raised. */
+#define ED_ACTION_ACCEPT      0x4Au
+#define ED_ACTION_DECLINE     0x4Bu
 
 /* ShowDialog prologue steal window (disasm of 0xE6A260):
  *     48 8B C4              mov  rax, rsp          (3)
@@ -68,13 +91,16 @@
  * operand and no relative branch, so the bytes relocate unchanged. */
 #define ED_SHOWDIALOG_STOLEN  19
 
-/* RemoveDialog prologue steal window (disasm of 0xE678F0):
- *     40 56                 push rsi                        (2)
- *     48 83 EC 20           sub  rsp, 0x20                  (4)
- *     48 8B F1              mov  rsi, rcx                   (3)
- *     3B 91 08 09 00 00     cmp  edx, [rcx+0x908]           (6)
- * = 15 bytes, all register/immediate, no RIP-relative operand. */
-#define ED_REMOVEDIALOG_STOLEN 15
+/* DialogAction prologue steal window (disasm of 0xE67BF0):
+ *     40 55                 push rbp                        (2)
+ *     56                    push rsi                        (1)
+ *     57                    push rdi                        (1)
+ *     41 56                 push r14                        (2)
+ *     41 57                 push r15                        (2)
+ *     48 8D AC 24 50 79 FF FF  lea rbp, [rsp-0x86B0]        (8)
+ * = 16 bytes. All register/rsp-relative; the next instruction pair is a stack
+ * probe whose `call` is rel32, so the window stops exactly before it. */
+#define ED_DIALOGACTION_STOLEN 16
 
 /* AddDialogWrapper prologue steal window (disasm of 0x17363A0):
  *     40 57                       push rdi                 (2)
@@ -85,16 +111,20 @@
 
 typedef void (*ed_add_wrapper_fn)(void *shell, void *params);
 typedef void (*ed_assign_cstr_fn)(void *idstr, const char *text);
-typedef void (*ed_remove_dialog_fn)(void *mgr, int index);
+/* The dispatcher takes two further arguments the engine never reads for any
+ * action id; they are declared and forwarded so the detour is call-compatible
+ * with the site that invokes it rather than with a shortened reading of it. */
+typedef void (*ed_action_fn)(void *mgr, void *params, int action, void *parms,
+                             int flag);
 
 static ed_add_wrapper_fn  g_add_wrapper;      /* the real shell-level raise */
 static ed_add_wrapper_fn  g_wrapper_original;  /* trampoline for the capture hook */
 static ed_assign_cstr_fn  g_assign_cstr;
-static ed_remove_dialog_fn g_remove_original;
+static ed_action_fn       g_action_original;
 static void * volatile    g_shell;
 static int                g_installed;
 
-/* The answer, captured at removal. -1 = nothing captured yet. */
+/* The answer, as the engine reported it. -1 = no button dispatched yet. */
 static volatile LONG g_answer = -1;
 
 /* One tracked dialog at a time. The install flow asks one question and waits for
@@ -176,46 +206,34 @@ static int ed_inject(void *descriptor)
     return 1;
 }
 
-/* The engine removes an answered dialog in the same frame it is answered, so
- * this is the only place the answer and the descriptor coexist. Read it here,
- * before the entry is shifted out of the queue, and let the poll report what was
- * captured rather than racing the engine for it. */
-static void ed_remove_detour(void *mgr, int index)
+/* Every button press on every engine dialog reaches the dispatcher, carrying the
+ * action id its button was built with and a copy of the params block the dialog
+ * was raised from. Both of our ids close the dialog and nothing else, so the
+ * engine's behaviour is untouched: this detour reads the id and gets out of the
+ * way.
+ *
+ * `params` is the callback's own copy, so params[0] is still the gdm id the
+ * dialog was raised with -- checked here so a stray dialog can never answer
+ * ours, even though no engine dialog can produce these ids in the first place. */
+static void ed_action_detour(void *mgr, void *params, int action, void *parms,
+                             int flag)
 {
-    LONG want = InterlockedCompareExchange(&g_pending_id, 0, 0);
-
-    if (want >= 0 && mgr && index >= 0) {
-        __try {
-            void *queue = *(void **)((uint8_t *)mgr + ED_MGR_QUEUE_PTR);
-            int count = *(const int *)((const uint8_t *)mgr + ED_MGR_QUEUE_COUNT);
-            if (queue && index < count) {
-                const uint8_t *desc = (const uint8_t *)queue + (size_t)index * ED_DESC_STRIDE;
-                if (*(const int *)(desc + ED_DESC_GDM_ID) == (int)want) {
-                    char line[320];
-                    char hex[3 * ED_DESC_HEAD_BYTES + 1];
-                    unsigned char cleared = desc[ED_DESC_CLEARED];
-                    unsigned char result  = desc[ED_DESC_RESULT];
-                    int k;
-                    InterlockedExchange(&g_answer, (LONG)result);
-                    /* Dump the descriptor head as well as the two named bytes.
-                     * The byte that records WHICH button was pressed is not
-                     * identified yet -- the obvious candidate reads 0 both for a
-                     * real answer and for an external dismiss -- so log the whole
-                     * head and let a yes-versus-no comparison show which byte
-                     * actually moves, instead of guessing another offset. */
-                    for (k = 0; k < ED_DESC_HEAD_BYTES; k++)
-                        _snprintf_s(hex + k * 3, 4, _TRUNCATE, "%02X ", desc[k]);
-                    _snprintf_s(line, sizeof line, _TRUNCATE,
-                                "engine-dialog: gdm %d removed -- cleared=%u resultByte=%u head=%s\n",
-                                (int)want, (unsigned)cleared, (unsigned)result, hex);
-                    backend_log(line);
-                }
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            /* nothing readable; the poll falls back to "gone means declined" */
+    if (action == (int)ED_ACTION_ACCEPT || action == (int)ED_ACTION_DECLINE) {
+        LONG want = InterlockedCompareExchange(&g_pending_id, 0, 0);
+        int id = -1;
+        if (want >= 0 && params && ed_read_int(params, ED_PARAM_GDM_ID * 4u, &id) &&
+            id == (int)want) {
+            char line[192];
+            InterlockedExchange(&g_answer, action == (int)ED_ACTION_ACCEPT ? 1 : 0);
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                        "engine-dialog: gdm %d -- the player pressed the %s button "
+                        "(engine action 0x%02X)", id,
+                        action == (int)ED_ACTION_ACCEPT ? "affirmative" : "negative",
+                        (unsigned)action);
+            backend_log(line);
         }
     }
-    if (g_remove_original) g_remove_original(mgr, index);
+    if (g_action_original) g_action_original(mgr, params, action, parms, flag);
 }
 
 /* The dialog manager lives at shell+8; the wrapper reads it there to call
@@ -247,16 +265,16 @@ static void ed_wrapper_detour(void *shell, void *params)
 int sh_engine_dialog_install(const sig_result *results, size_t count,
                              const uint8_t *module_base)
 {
-    void *wrapper, *assign, *remove, *tramp;
+    void *wrapper, *assign, *action, *tramp;
 
     if (g_installed) return 1;
     if (!module_base) return 0;
 
     wrapper = ed_clean(results, count, "AddDialogWrapper", module_base, 0x17363A0u);
     assign  = ed_clean(results, count, "IdStrAssignCStr",  module_base, 0x19FD5F0u);
-    remove  = ed_clean(results, count, "RemoveDialog",     module_base, 0xE678F0u);
-    if (!wrapper || !assign || !remove) {
-        backend_log("engine-dialog REFUSED: AddDialogWrapper/RemoveDialog/IdStrAssignCStr all "
+    action  = ed_clean(results, count, "DialogAction",     module_base, 0xE67BF0u);
+    if (!wrapper || !assign || !action) {
+        backend_log("engine-dialog REFUSED: AddDialogWrapper/DialogAction/IdStrAssignCStr all "
                     "require a clean exact-address resolve");
         return 0;
     }
@@ -276,16 +294,16 @@ int sh_engine_dialog_install(const sig_result *results, size_t count,
     }
     g_wrapper_original = (ed_add_wrapper_fn)tramp;
 
-    tramp = install_inline_hook(remove, (void *)ed_remove_detour, ED_REMOVEDIALOG_STOLEN);
+    tramp = install_inline_hook(action, (void *)ed_action_detour, ED_DIALOGACTION_STOLEN);
     if (!tramp) {
-        backend_log("engine-dialog REFUSED: the RemoveDialog detour could not be installed, so a "
+        backend_log("engine-dialog REFUSED: the DialogAction detour could not be installed, so a "
                     "dialog's answer could never be read");
         g_add_wrapper = NULL;
         g_assign_cstr = NULL;
         g_wrapper_original = NULL;
         return 0;
     }
-    g_remove_original = (ed_remove_dialog_fn)tramp;
+    g_action_original = (ed_action_fn)tramp;
     g_installed = 1;
     backend_log("engine-dialog installed: dialogs can now carry our own text");
     return 1;
@@ -333,6 +351,11 @@ int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
     memset(params, 0, sizeof(params));
     params[ED_PARAM_GDM_ID]     = gdm_id;
     params[ED_PARAM_BUTTON_SET] = button_set;
+    /* Name the buttons. Without this both would be built with action 0, which is
+     * also a pure close -- the dialog would answer correctly on screen and report
+     * nothing, which is exactly the hole this pair of ids closes. */
+    params[ED_PARAM_ACTION_0]   = ED_ACTION_ACCEPT;
+    params[ED_PARAM_ACTION_1]   = ED_ACTION_DECLINE;
     memcpy(&params[ED_PARAM_SOURCE_FILE], &source, sizeof(source));
     params[ED_PARAM_SOURCE_LINE] = __LINE__;
 
@@ -397,49 +420,46 @@ static void *ed_find_descriptor(int gdm_id)
 int sh_engine_dialog_poll(int ticket)
 {
     int id = (int)InterlockedCompareExchange(&g_pending_id, 0, 0);
+    LONG answer;
+    unsigned char cleared = 0;
     void *desc;
-    unsigned char cleared = 0, result = 0;
-    char line[192];
 
     if (ticket <= 0 || ticket != (int)InterlockedCompareExchange(&g_ticket, 0, 0))
         return SH_ENGINE_DIALOG_LOST;
     if (id < 0) return SH_ENGINE_DIALOG_LOST;
 
+    /* The dispatched action IS the answer, and it is the only thing that is. It
+     * is read first because the engine closes the dialog in the same frame it
+     * dispatches, so by the time the queue is looked at the descriptor may
+     * already be gone. */
+    answer = InterlockedCompareExchange(&g_answer, 0, 0);
+    if (answer >= 0) {
+        InterlockedExchange(&g_pending_id, -1);
+        return answer ? SH_ENGINE_DIALOG_ACCEPTED : SH_ENGINE_DIALOG_DECLINED;
+    }
+
+    /* No action dispatched. Either the dialog is still up, or it left by a path
+     * that presses no button -- the menu being torn down, another tool dismissing
+     * it, the shutdown sweep. None of those is consent, so all of them decline:
+     * installing third-party content on an answer nobody gave is the one outcome
+     * worth being wrong in the safe direction about. */
     desc = ed_find_descriptor(id);
     if (!desc) {
-        /* Gone from the queue. The removal detour reads the answer out of the
-         * descriptor at the last instant it exists, so prefer what it captured.
-         * With nothing captured, the dialog left by some path we did not see and
-         * the answer is unknown -- which is a decline, because consenting to
-         * install third-party content on an answer nobody observed is the one
-         * outcome worth being wrong in the safe direction about. */
-        LONG answer = InterlockedCompareExchange(&g_answer, 0, 0);
         InterlockedExchange(&g_pending_id, -1);
-        if (answer < 0) {
-            backend_log("engine-dialog: the dialog left the queue with no answer captured; "
-                        "treating that as declined");
-            return SH_ENGINE_DIALOG_DECLINED;
-        }
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "engine-dialog: gdm %d answered with result byte %ld", id, (long)answer);
-        backend_log(line);
-        return answer ? SH_ENGINE_DIALOG_ACCEPTED : SH_ENGINE_DIALOG_DECLINED;
+        backend_log("engine-dialog: the dialog left the queue with no button dispatched; "
+                    "treating that as declined");
+        return SH_ENGINE_DIALOG_DECLINED;
     }
     if (!ed_read_byte(desc, ED_DESC_CLEARED, &cleared)) return SH_ENGINE_DIALOG_PENDING;
     if (!cleared) return SH_ENGINE_DIALOG_PENDING;
-    if (!ed_read_byte(desc, ED_DESC_RESULT, &result)) result = 0;
 
     InterlockedExchange(&g_pending_id, -1);
-    _snprintf_s(line, sizeof line, _TRUNCATE,
-                "engine-dialog: gdm %d answered, result byte %u (0 = declined/dismissed)",
-                id, (unsigned)result);
-    backend_log(line);
-    /* The dismiss-all primitive writes result 0, so 0 is the negative answer and
-     * anything else is affirmative. */
-    return result ? SH_ENGINE_DIALOG_ACCEPTED : SH_ENGINE_DIALOG_DECLINED;
+    backend_log("engine-dialog: the dialog was cleared with no button dispatched; "
+                "treating that as declined");
+    return SH_ENGINE_DIALOG_DECLINED;
 }
 
-void sh_engine_dialog_dump(int (*printf_fn)(const char *fmt, ...))
+void sh_engine_dialog_dump(void (*printf_fn)(const char *fmt, ...))
 {
     void *mgr = ed_manager();
     void *queue = NULL;
@@ -461,14 +481,14 @@ void sh_engine_dialog_dump(int (*printf_fn)(const char *fmt, ...))
     for (i = 0; i < queue_count; i++) {
         void *desc = (uint8_t *)queue + (size_t)i * ED_DESC_STRIDE;
         int id = 0, buttons = 0, text_len = 0;
-        unsigned char cleared = 0, result = 0;
+        unsigned char cleared = 0, wait_clear = 0;
         if (!ed_read_int(desc, ED_DESC_GDM_ID, &id)) break;
         (void)ed_read_int(desc, ED_DESC_BUTTON_SET, &buttons);
         (void)ed_read_int(desc, ED_DESC_TEXT_LENGTH, &text_len);
         (void)ed_read_byte(desc, ED_DESC_CLEARED, &cleared);
-        (void)ed_read_byte(desc, ED_DESC_RESULT, &result);
-        printf_fn("  [%d] gdm=%d buttons=%d textLen=%d cleared=%u resultByte=%u\n",
-                  i, id, buttons, text_len, (unsigned)cleared, (unsigned)result);
+        (void)ed_read_byte(desc, ED_DESC_WAIT_CLEAR, &wait_clear);
+        printf_fn("  [%d] gdm=%d buttons=%d textLen=%d cleared=%u waitClear=%u\n",
+                  i, id, buttons, text_len, (unsigned)cleared, (unsigned)wait_clear);
     }
 }
 
@@ -484,9 +504,11 @@ void sh_engine_dialog_test_reset(void)
     g_wrapper_original = NULL;
     g_add_wrapper = NULL;
     g_assign_cstr = NULL;
+    g_action_original = NULL;
     g_shell = NULL;
     g_installed = 0;
     g_pending_key[0] = '\0';
+    InterlockedExchange(&g_answer, -1);
     InterlockedExchange(&g_ticket, 0);
     InterlockedExchange(&g_pending_id, -1);
     InterlockedExchange(&g_injected, 0);

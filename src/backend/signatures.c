@@ -557,14 +557,15 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "IdStrAssignCStr",
       "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 40 48 8B FA",
       0x19FD5F0u },
-    /* idMenuManager_Dialog::RemoveDialog(mgr, index). The engine sets a
-     * descriptor's cleared flag and removes it from the queue in the SAME frame
-     * the player answers, so a poll can never see the answer -- by the next tick
-     * the descriptor is gone and yes is indistinguishable from no. This is the
-     * last instant the answered descriptor still exists. */
-    { "RemoveDialog",
-      "40 56 48 83 EC 20 48 8B F1 3B 91 08 09 00 00",
-      0xE678F0u },
+    /* idMenuManager_Dialog::HandleDialogAction(mgr, params, action). Every
+     * button on every engine dialog arrives here and NOWHERE else: the button's
+     * callback object is the dispatcher's only caller, and it passes the action
+     * id the dialog was built with. Reading `action` here is how the engine
+     * itself reports which button the player pressed -- there is no answer byte
+     * anywhere in the descriptor to read instead. */
+    { "DialogAction",
+      "40 55 56 57 41 56 41 57 48 8D AC 24 50 79 FF FF B8 B0 87 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 38 FE FF FF FF",
+      0xE67BF0u },
     { "IdStrCtor",
       "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8D 05 ?? ?? ?? ?? 48 8B DA 48 89 01 48 8B F9",
       0x19FCEF0u },
