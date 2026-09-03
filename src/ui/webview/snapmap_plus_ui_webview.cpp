@@ -220,7 +220,14 @@ static void poc_log(const char *msg)
     CreateDirectoryA("snapmap-plus", nullptr);   /* one level at a time; both idempotent */
     CreateDirectoryA("snapmap-plus\\logs", nullptr);
     FILE *f = nullptr;
-    if (!rolled) { rolled = true; log_rotate_if_large(kUiLogPath, LOG_ROTATE_CAP_BYTES); }
+    if (!rolled) {
+        rolled = true;
+        log_rotate_if_large(kUiLogPath, LOG_ROTATE_CAP_BYTES);
+        /* Sweep up the file this log used to be called. Without this the rename
+         * leaves the old one sitting next to the new one forever -- same folder,
+         * two names, and the dead one is the confusing one. */
+        DeleteFileA("snapmap-plus\\logs\\webview_poc.log");
+    }
     if (fopen_s(&f, kUiLogPath, "a") == 0 && f) {
         SYSTEMTIME t; GetLocalTime(&t);
         fprintf(f, "[%02d:%02d:%02d.%03d] %s\n",
