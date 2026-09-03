@@ -233,10 +233,11 @@ static void notice_tick(void)
 /* ---- LAYER 2: keep the dispatcher's throw-gate OPEN ---------------------------------------------------
  * The level>=6 dispatcher 0x1A08E80 throws the RECOVERABLE idException only `if (DAT_146faf820==0 &&
  * DAT_146faf8b0==0)`, else it ExitProcess(1)'s (error-dispatcher-and-recovery.md, the terminal-gate
- * footgun). 0x6faf820 doubles as the render-cap suppressor. The CLONE never arms either (only an
- * external render-cap instrumentation harness does, and it self-resets), so clearing them each frame is a no-op for
- * the end user AND supersedes that harness -- a render-pool overflow now RECOVERS (drop-to-menu) instead
- * of truncating. SEH-guarded: a shifted suppressor RVA must never fault inside the frame hook. */
+ * footgun). Nothing in the image writes either global and both read 0 on the pinned build (see
+ * engine_layout.h), so clearing them each frame is a no-op there; it is kept because the gate is the one
+ * thing standing between a recoverable Error(6) and an ExitProcess(1), and a build that did arm one
+ * would take the process down silently. The read-then-write shape keeps the common case a plain compare.
+ * SEH-guarded: a shifted suppressor RVA must never fault inside the frame hook. */
 static void keep_throw_gate_open(void)
 {
     if (g_doom_base == NULL) return;

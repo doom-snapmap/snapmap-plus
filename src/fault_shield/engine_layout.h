@@ -21,8 +21,15 @@
 #define RVA_ERROR6         0x1a089a0u   /* idCommon::Error      (level 6) -> idException (RECOVERABLE) */
 #define RVA_FATALERROR7    0x1a089e0u   /* idCommon::FatalError (level 7) -> idFatalException (terminal) */
 
-/* Throw-gate suppressors -- BOTH must be 0 for Error(6) to throw (else ExitProcess(1)). DAT_146faf820 is
- * also the render-cap suppressor (mutual exclusion: clear both before every redirect/downgrade).
+/* Throw-gate suppressors -- BOTH must be 0 for Error(6) to throw (else ExitProcess(1)).
+ * ON THE PINNED BUILD BOTH ARE READ-ONLY AND ALREADY 0, so the shield's clearing writes are no-ops that
+ * cost a guarded store and buy insurance against a build where they are not. A Ghidra sweep of the image
+ * (logs/_ob_suppressor.log, 2026-09-03) finds 110 references to 0x146faf820 across 60 functions and one
+ * to 0x146faf8b0, every one of them a CMP -- there is no writer anywhere in the executable. An earlier
+ * note here called 0x146faf820 "also the render-cap suppressor" and warned of mutual exclusion with the
+ * render-model cap; that does not hold. It is one input to the cap's own test, nothing writes it, and
+ * clearing it disables no escape hatch because there is none to disable. It is a broad mode gate read by
+ * AI limits, GUI queries, virtual-texture, pathfinding and resource hashing among others.
  * NON-SIG-ABLE DATA GLOBALS (.data ints, no unique code fingerprint) -> recipe-tagged base+RVA literals.
  * RE-DERIVE per build: these are the two `int` globals the level-6 dispatcher 0x1A08E80 tests before it
  * throws (decompile the dispatcher: the `if (DAT_x == 0 && DAT_y == 0) throw; else ExitProcess(1)` gate);

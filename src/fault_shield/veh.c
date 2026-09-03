@@ -752,8 +752,9 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
      * (no engine-native surface there), which is the correct bad-LOAD behavior. */
     notice_request_msg();
 
-    /* Open Error(6)'s throw gate: BOTH suppressors clear, or the throw becomes ExitProcess(1)
-     * (DAT_146faf820 is also the render-cap suppressor -- see engine_layout.h / the truth). The
+    /* Open Error(6)'s throw gate: BOTH suppressors clear, or the throw becomes ExitProcess(1). Both read 0
+     * and have no writer on the pinned build, so this is insurance rather than a live fix -- see
+     * engine_layout.h for the sweep that established that. The
      * suppressors are recipe-tagged DATA-global RVAs; a shifted build could land the literal on an
      * unmapped/RO page, so SEH-guard the writes (P6) -- a fault here would otherwise crash INSIDE the VEH.
      * If the write faults we still resume into Error(6) (the gate may already be open / re-armed). */
