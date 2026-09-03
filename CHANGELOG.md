@@ -3,6 +3,21 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.7 -- 2026-09-03 (beta)
+
+**Release notes you can actually read**
+
+Each release now ships one short, hand-written entry instead of a wall of commit messages, shown the same way on the website, the releases page and in the mod's own history command. Snapmap+ also tidies away a stale log file left behind by an earlier rename.
+
+### New
+- The history command lays its notes out for a terminal and can show any version you name.
+
+### Improved
+- Every release now comes with one short, reviewed summary shared by the website, the releases page and the mod itself.
+
+### Fixed
+- The leftover log file from the old naming no longer sits alongside the current one.
+
 ## v0.2.1-beta.6 -- 2026-09-03 (beta)
 
 **Mod packs install and play in one step**
