@@ -215,3 +215,53 @@ class TestScrub(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGoldenFixtureSharedWithTheCli(unittest.TestCase):
+    """installer/testdata/entry.md is parsed by the Go renderer in
+    installer/changelog_render.go. Two hand-written parsers of one grammar is
+    how a format silently drifts, so both sides read the SAME fixture: change
+    the rendered shape and this test and the Go test fail together.
+
+    To regenerate after an intended format change:
+        python3 tools/tests/test_draft_changelog.py --regenerate-fixture
+    """
+
+    FIXTURE = (pathlib.Path(__file__).resolve().parents[2]
+               / "installer" / "testdata" / "entry.md")
+
+    @staticmethod
+    def _build():
+        draft = dc.ChangelogDraft(
+            headline="Mod packs install and play in one step",
+            summary=("A map that needs mod packs now installs all of them from a single "
+                     "prompt and plays straight away, instead of asking once per pack "
+                     "and sending you back to restart DOOM."),
+            added=["Install every mod pack a map needs from a single prompt.",
+                   "Play a map's mod pack straight after installing it, with no restart."],
+            improved=["The mod-pack consent prompt uses a dialog that cannot delete anything.",
+                      "Logs and crash records are rolled aside instead of growing without limit."],
+            fixed=["Choosing Yes on the mod-pack prompt now actually installs the pack."],
+            collapsed_count=15,
+            sources=["abc1234"],
+        )
+        dc.validate(draft)
+        section = dc.render("v0.2.1-beta.6", "2026-09-03", draft)
+        # Exactly what release.yml publishes as the release body, which is what
+        # the CLI fetches and the Go renderer parses.
+        return changelog.parse(section)[0]["body"] + "\n"
+
+    def test_renderer_still_produces_the_shared_fixture(self):
+        self.assertEqual(
+            self._build(), self.FIXTURE.read_text(encoding="utf-8"),
+            "the rendered entry no longer matches installer/testdata/entry.md -- "
+            "regenerate it and update installer/changelog_render.go to match",
+        )
+
+
+if __name__ == "__main__" and "--regenerate-fixture" in sys.argv:
+    path = TestGoldenFixtureSharedWithTheCli.FIXTURE
+    path.write_text(TestGoldenFixtureSharedWithTheCli._build(),
+                    encoding="utf-8", newline="\n")
+    print("regenerated " + str(path))
+    raise SystemExit(0)

@@ -30,3 +30,7 @@ community/.wrangler/
 
 # Generated from CHANGELOG.md by pages.yml at build time (tools/changelog.py --json)
 site/_data/changelog.json
+
+# Python bytecode cache (tools/)
+__pycache__/
+*.pyc

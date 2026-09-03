@@ -22,7 +22,7 @@ Usage:
   snapmap-plus install   [--doom <path>] [--local <dist-dir>] [--release <tag>] [--beta] [--yes]
   snapmap-plus update    [--doom <path>] [--release <tag>] [--beta] [--no-self] [--yes]
   snapmap-plus uninstall [--doom <path>] [--yes]
-  snapmap-plus changelog
+  snapmap-plus changelog [<version>|latest|all]
   snapmap-plus status
   snapmap-plus version
   snapmap-plus help
@@ -36,6 +36,12 @@ Options:
   --beta              Install the latest beta (pre-release) instead of the latest stable.
   --no-self           With "update": don't also update snapmap-plus.exe itself (overlay only).
   --yes, -y           Skip the "are you sure?" confirmation (for scripts / automation).
+
+With "changelog", a bare version shows just that release (the leading v is optional):
+  snapmap-plus changelog v0.2.1-beta.4    that release's notes
+  snapmap-plus changelog latest           the newest stable release
+  snapmap-plus changelog all              every release in full
+With no argument it shows the newest release and lists the earlier ones.
 
 With no --local, install/update download from GitHub. Uninstall restores any files it
 replaced and leaves your Snapmap+ modding data untouched.
@@ -83,7 +89,7 @@ func runCommand(cmd string, args []string) error {
 	case "status":
 		return cmdStatus(f)
 	case "changelog", "info", "--info":
-		return cmdChangelog(f)
+		return cmdChangelog(f, args)
 	case "set-token":
 		return cmdSetToken(args)
 	case "version", "--version", "-v":
