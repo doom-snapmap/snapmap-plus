@@ -45,7 +45,7 @@ snapmap-plus help
 
 `install` / `update` / `uninstall` ask for a final **"are you sure?"** confirmation (after all checks pass);
 `--yes` / `-y` skips it for scripts. **`snapmap-plus changelog`** prints the published version history + notes
-(it lives in the GitHub Releases — CI auto-generates each release's notes from the commits since the last tag).
+(it lives in the GitHub Releases — each release's notes are its reviewed `CHANGELOG.md` entry).
 
 - **`--doom <path>`** — the DOOM install dir (the folder with `DOOMx64vk.exe`). If omitted, the installer
   auto-detects it from your Steam libraries (reads `SteamPath` from the registry, scans

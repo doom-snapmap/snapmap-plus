@@ -1,7 +1,8 @@
 # release.yml -- the maintainer-only release pipeline.
 #
 # Runs ONLY on a pushed tag v* -> it builds only reviewed code, and it is the sole place the publish token
-# lives (unreachable from a PR). Cut a release: `git tag v1.2.3 && git push origin v1.2.3`.
+# lives (unreachable from a PR). Cut a release: prepare its notes with prepare-release.yml, merge that pull
+# request, then `git tag v1.2.3 && git push origin v1.2.3` -- see docs/contributing.md, "Cutting a release".
 # It builds the DLLs + the installer, assembles the overlay, and publishes a GitHub Release with the bundle
 # zip + snapmap-plus.exe + install.ps1. (The release publishes to THIS repo via the github context -- no slug.)
 #
