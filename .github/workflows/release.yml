@@ -37,8 +37,17 @@ jobs:
       SNAPMAPPLUS_VCVARS_VER: '14.44.35207'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0   # full history + tags -- the changelog step diffs this tag against the previous one
+      - name: Read this release's notes
+        shell: bash
+        run: |
+          # CHANGELOG.md is the source of truth: prepare-release.yml drafted this entry and
+          # a maintainer reviewed and merged it. This runs FIRST, so a tag with no entry
+          # costs seconds instead of a full Windows build. `python` (not python3) is the
+          # reliable name on the windows-2022 image, and the parser writes the file itself
+          # rather than using a shell redirect, whose encoding differs between runner OSes.
+          set -euo pipefail
+          python tools/changelog.py --section "$GITHUB_REF_NAME" --out notes.md
+          cat notes.md
       - name: Install Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -89,48 +98,6 @@ jobs:
                     "build\webview\snapmap-plus-ui.pdb", "build\webview\snapmap-plus-ui.map")
           foreach ($s in $syms) { if (-not (Test-Path $s)) { throw "missing symbol artifact: $s" } }
           Compress-Archive -Force -DestinationPath snapmap-plus-symbols.zip -Path $syms
-      - name: Build the changelog from the commit log
-        shell: bash
-        run: |
-          # The release body uses each user-facing commit's full body as its changelog note. Commit bodies are
-          # written as one to three short sentences; line wrapping is collapsed so GitHub, the website, and
-          # `snapmap-plus changelog` all receive the same readable bullet. Older commits without a body fall
-          # back to their subject.
-          #
-          # Bullets are emitted NEWEST FIRST, matching how releases themselves are listed everywhere the
-          # changelog is read: someone opening it wants the most recent change at the top, not to scroll a
-          # release to find it. `git rev-list` already walks newest-first, so this is simply not reversing it.
-          set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
-          prev="$(git describe --tags --abbrev=0 --match 'v*' "${tag}^" 2>/dev/null || true)"
-          if [ -n "$prev" ]; then
-            echo "Changes since ${prev}:" > notes.md
-            range="${prev}..${tag}"
-          else
-            echo "Initial release." > notes.md
-            range="${tag}"
-          fi
-          echo "" >> notes.md
-          git rev-list --no-merges "$range" | while IFS= read -r commit; do
-            subject="$(git show -s --format='%s' "$commit")"
-            if printf '%s\n' "$subject" \
-              | grep -qiE '^(ci|chore|scrub|docs|tests?|release|refactor|build|style|meta): '; then
-              continue
-            fi
-
-            body="$(git show -s --format='%b' "$commit" \
-              | grep -viE '^co-authored-by:|^signed-off-by:|generated with claude|claude\.com/claude-code|noreply@anthropic' \
-              || true)"
-            note="$(printf '%s\n' "$body" | awk '
-              NF { if (text != "") text = text " "; text = text $0 }
-              END { gsub(/[[:space:]]+/, " ", text); print text }
-            ')"
-            if [ -z "$note" ]; then
-              note="$subject"
-            fi
-            printf -- '- %s\n' "$note" >> notes.md
-          done
-          echo "" >> notes.md
       - name: Attest build provenance (the published artifacts)
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
