@@ -24,7 +24,8 @@ Installing a community map now pulls down everything it needs in a single prompt
 
 ### New
 - Install everything a map needs from one prompt.
-- Use a map's mod pack straight after installing it.
+- Use a map's mod pack straight after installing it, even when the pack
+  arrived halfway through the session.
 
 ### Improved
 - The mod-pack consent dialog no longer offers to delete files it cannot delete.

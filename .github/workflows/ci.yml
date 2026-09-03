@@ -57,7 +57,7 @@ jobs:
       - name: Capability-surface scan
         run: |
           BASE='${{ steps.base.outputs.sha }}'
-          ADDED=$(git diff "$BASE...HEAD" -- 'src/**' 'installer/**' | grep -E '^\+' | grep -v '^\+\+\+' || true)
+          ADDED=$(git diff "$BASE...HEAD" -- 'src/**' 'installer/**' 'tools/**' | grep -E '^\+' | grep -v '^\+\+\+' || true)
           # BLOCK (hard-fail): code-injection + boot-persistence APIs an in-process game mod + its installer have
           # NO legitimate reason to call. The tool hooks its OWN process (VirtualProtect + memcpy) -- it never
           # writes another process's memory, spawns a remote thread, or installs a Run-key / scheduled task.
@@ -80,6 +80,16 @@ jobs:
           else
             echo "OK: no blocked APIs, and no flagged capability-surface APIs introduced."
           fi
+      - name: Changelog grammar + parser tests
+        run: |
+          # CHANGELOG.md is what release.yml turns into a release body and what
+          # pages.yml turns into the website. A hand-edit that breaks the grammar
+          # must fail HERE, at PR time -- not at release time, after a tag exists.
+          # No dependency install: changelog.py is stdlib-only, and draft_changelog.py
+          # imports pydantic inside the function that calls the API, never at module
+          # scope, so its renderer tests run in this secretless job too.
+          python3 tools/changelog.py --lint
+          python3 -m unittest discover -s tools/tests -t tools -v
       - name: Secret scan (gitleaks)
         # The gitleaks-action@v2 requires a PAID license for organizations; the gitleaks BINARY is free.
         # Pinned version (reproducible + supply-chain friendly). --exit-code 1 fails the job on any leak.

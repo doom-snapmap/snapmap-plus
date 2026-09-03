@@ -66,6 +66,12 @@ def _parse_body(body_lines):
         if m and group:
             out[group].append(m.group("text"))
             continue
+        # A hand-wrapped bullet continues on an indented line. The renderer never
+        # wraps, but CHANGELOG.md is edited by hand, and dropping the tail of a
+        # sentence is worse than any formatting rule.
+        if group and out[group] and (raw[:1] in (" ", "\t")):
+            out[group][-1] += " " + line.strip()
+            continue
         m = HEADLINE_RE.match(line)
         if m and not out["headline"]:
             out["headline"] = m.group("text")

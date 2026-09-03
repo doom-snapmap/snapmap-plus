@@ -59,6 +59,15 @@ class TestStructuredFields(unittest.TestCase):
         self.assertEqual(len(s["improved"]), 1)
         self.assertEqual(s["fixed"], [])
 
+    def test_hand_wrapped_bullet_keeps_its_continuation(self):
+        """CHANGELOG.md is edited by hand; a wrapped bullet must not lose its tail."""
+        s = changelog.parse(VALID)[1]
+        self.assertEqual(
+            s["added"][1],
+            "Use a map's mod pack straight after installing it, even when the "
+            "pack arrived halfway through the session.",
+        )
+
     def test_collapsed_line(self):
         s = changelog.parse(VALID)[1]
         self.assertEqual(s["collapsed"], "Plus 14 smaller fixes and internal changes.")
