@@ -122,10 +122,14 @@ async function sigHash(category, title) {
   return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
 }
 
-/* release channel from the reported version: a "-" (e.g. 0.2.0-beta.1) means a pre-release build;
- * a plain x.y.z means stable; anything non-semver (a dev build) gets no channel label. */
+/* release channel from the reported version: a "-" (e.g. v0.2.0-beta.1) means a pre-release build;
+ * a plain x.y.z means stable; anything non-semver (a dev build) gets no channel label. The leading
+ * "v" is optional because the app reports the release TAG, which carries one -- requiring a bare
+ * x.y.z here silently returned null for every real report, so no report was ever channel-labelled
+ * and issues-retest.yml, which only prompts beta-labelled reports on a pre-release, never prompted
+ * anything. */
 function channelOf(version) {
-  if (!/^\d+\.\d+\.\d+/.test(version)) return null;
+  if (!/^v?\d+\.\d+\.\d+/.test(version)) return null;
   return version.includes('-') ? 'beta' : 'stable';
 }
 

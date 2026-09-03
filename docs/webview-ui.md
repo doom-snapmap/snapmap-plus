@@ -42,7 +42,8 @@ installer\snapmap-plus.exe install --local dist --yes                     # depl
 ```
 
 `package.ps1` assembles a lean overlay that ships **only** the two clone DLLs (the WebView2 runtime is
-system-installed). Runtime log: `<DOOM>\snapmap-plus\logs\webview_poc.log`.
+system-installed). Runtime log: `<DOOM>\snapmap-plus\logs\snapmap-plus-ui.log` (called
+`webview_poc.log` in v0.2.1-beta.5 and earlier).
 
 ## How it maps to the backend interface
 
