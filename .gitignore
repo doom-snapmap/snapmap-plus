@@ -34,3 +34,6 @@ site/_data/changelog.json
 # Python bytecode cache (tools/)
 __pycache__/
 *.pyc
+
+# Written by tools/sync_release_notes.py before it rewrites a published release body
+release-bodies-backup.json

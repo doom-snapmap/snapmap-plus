@@ -145,7 +145,14 @@ jobs:
           # that reads it fails after the tag has already been pushed.
           python3 tools/changelog.py --lint
 
+      # continue-on-error, because opening the pull request is gated by an ORGANISATION policy this
+      # workflow cannot see: Settings -> Actions -> General -> "Allow GitHub Actions to create and
+      # approve pull requests". When that is off the action fails, but it has ALREADY pushed the
+      # branch, so the draft is safe and the next step just tells the maintainer where it is.
+      # The draft cost an API call; losing it to a settings checkbox would be the worst outcome.
       - name: Open the pull request
+        id: pr
+        continue-on-error: true
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           branch: changelog/${{ inputs.version }}
@@ -159,3 +166,26 @@ jobs:
           body-path: sources.md
           delete-branch: true
           add-paths: CHANGELOG.md
+
+      - name: Report where the draft ended up
+        env:
+          VERSION: ${{ inputs.version }}
+          OUTCOME: ${{ steps.pr.outcome }}
+          PR_URL: ${{ steps.pr.outputs.pull-request-url }}
+        run: |
+          set -euo pipefail
+          if [ "$OUTCOME" = "success" ] && [ -n "${PR_URL:-}" ]; then
+            echo "::notice::Release notes ready for review: $PR_URL"
+            exit 0
+          fi
+          BRANCH="changelog/$VERSION"
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "::warning::The draft is pushed to $BRANCH but no pull request was opened."
+            echo "::warning::Enable Settings -> Actions -> General -> 'Allow GitHub Actions to"
+            echo "::warning::create and approve pull requests' (it may be locked at the org level),"
+            echo "::warning::or open it by hand:"
+            echo "::warning::  ${{ github.server_url }}/${{ github.repository }}/compare/main...$BRANCH?expand=1"
+            exit 0
+          fi
+          echo "::error::Neither a pull request nor the branch $BRANCH exists -- the draft was lost."
+          exit 1

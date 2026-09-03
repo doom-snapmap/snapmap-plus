@@ -295,6 +295,10 @@ If drafting fails -- an outage, a rate limit, a declined request -- the pull req
 raw commit list marked `NEEDS WRITING`. Rewrite it by hand and merge as usual. A drafting failure never blocks
 a release.
 
+If the pull request itself cannot be opened -- "Allow GitHub Actions to create and approve pull requests" is
+off, possibly locked by an organisation policy -- the draft is still pushed to `changelog/<version>` and the
+job log prints a compare link. Open it by hand; nothing is lost.
+
 Correcting a past entry: edit it in `CHANGELOG.md`, then run
 `python3 tools/sync_release_notes.py --apply` to push the corrected text onto the already-published GitHub
 Release. Without that, `CHANGELOG.md` is the source of truth only for releases cut after it existed. The tool
