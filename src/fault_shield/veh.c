@@ -29,7 +29,8 @@
 #include <stdio.h>
 #include <string.h>
 #include "engine_layout.h"
-#include "../backend/host_image.h"  /* report the build a crash actually came from */
+#include "../backend/host_image.h"     /* report the build a crash came from + gate every pinned RVA */
+#include "../backend/engine_globals.h" /* locate DOOM's data globals by signing the code that computes them */
 #include "fault_record.h"
 #include "crash_report.h"
 #include "recovery.h"
@@ -40,13 +41,119 @@
 extern uint8_t *g_doom_base;
 extern size_t   g_doom_size;
 
-/* The classifier RVA ranges ride the SIG-RESOLVED entry (g_eng.*_rva) when present, else the recipe-
- * tagged pinned RVA. HI is derived as LO + the recipe-tagged span (engine_layout.h) so it tracks a
- * shifted build off the sig. */
-static uintptr_t editor_lo_rva(void) { return g_eng.editor_pump_rva ? g_eng.editor_pump_rva : RVA_EDITOR_FRAME_LO; }
-static uintptr_t editor_hi_rva(void) { return editor_lo_rva() + EDITOR_FRAME_SPAN; }
-static uintptr_t resolver_lo_rva(void) { return g_eng.resolver_rva ? g_eng.resolver_rva : RVA_RESOLVER_LO; }
-static uintptr_t resolver_hi_rva(void) { return resolver_lo_rva() + RESOLVER_SPAN; }
+/* Is the host the exact build every pinned RVA in this file was extracted from? Answered once at
+ * install, so neither the classifier nor the fault path does string work. */
+static int g_pinned_build = 0;
+
+/* The classifier RVA ranges ride the SIG-RESOLVED entry (g_eng.*_rva); HI is derived as LO + the
+ * recipe-tagged span (engine_layout.h) so it tracks a shifted build off the sig. The pinned RVA is only
+ * a legitimate answer on the build it was extracted from, so it is consulted only there; anywhere else
+ * an unresolved entry yields NO RANGE, and a classifier with no range simply does not claim the fault.
+ * Each returns 1 and fills [lo,hi) when the range is known, 0 when it is not. */
+static int editor_frame_range(uintptr_t *lo, uintptr_t *hi)
+{
+    uintptr_t l = g_eng.editor_pump_rva;
+    if (!l && g_pinned_build) l = RVA_EDITOR_FRAME_LO;
+    if (!l) return 0;
+    *lo = l; *hi = l + EDITOR_FRAME_SPAN;
+    return 1;
+}
+static int resolver_range(uintptr_t *lo, uintptr_t *hi)
+{
+    uintptr_t l = g_eng.resolver_rva;
+    if (!l && g_pinned_build) l = RVA_RESOLVER_LO;
+    if (!l) return 0;
+    *lo = l; *hi = l + RESOLVER_SPAN;
+    return 1;
+}
+
+/* ---- The DATA globals the handler reads, located ONCE at install ------------------------------------
+ * Every one of these used to be a `g_doom_base + <pinned RVA>` literal. DOOM ships two executables built
+ * from one source tree, and between them the data globals move by nearly 0x1000000 -- so those literals
+ * describe exactly one link output and address unrelated memory on the other. They are now located by
+ * glb_resolve, which signs the CODE SITE that computes each address and decodes the displacement out of
+ * it; 0 means "not located on this build" and every use below declines rather than guessing.
+ *
+ * Resolved in veh_install, NOT in the handler: glb_resolve scans the image on a cache miss, which is not
+ * something to do inside an exception handler. The backend resolves the whole table at bootstrap, so by
+ * the time the shield installs these are cache reads. Nothing here allocates. */
+static uintptr_t g_errstate_at   = 0;   /* errState        -- Frame's catch requires its low byte == 0 */
+static uintptr_t g_load_state_at = 0;   /* load_state      -- only the LOADING value 1 blocks recovery */
+static uintptr_t g_suppr_a_at    = 0;   /* throw-gate suppressor A */
+static uintptr_t g_main_tid_at   = 0;   /* the engine's own main-thread id */
+static uintptr_t g_editor_at     = 0;   /* the inline idSnapEditorLocal object (RN-FAULT diagnostic only) */
+static uintptr_t g_ti_fatal_rva  = 0;   /* idFatalException ThrowInfo, as an RVA */
+static int       g_ti_fatal_ok   = 0;   /* ...and whether it resolved (0 is a legal RVA, so flag it) */
+
+/* The visibility leaf. This one is load-bearing in a way none of the others are: the Class-B micro-
+ * recovery SETS RIP from it. A wrong address here would redirect the faulting thread into arbitrary
+ * code, so the leaf is either located on this build or the whole vis-leaf path is switched off. */
+static uintptr_t g_visleaf_lo_rva    = 0;
+static uintptr_t g_visleaf_hi_rva    = 0;
+static uintptr_t g_visleaf_false_rva = 0;
+static int       g_visleaf_ok        = 0;
+/* The two spans INSIDE the leaf, taken from the pinned pair in engine_layout.h so the geometry the
+ * shield has always used is preserved exactly; only the leaf's base address is now resolved. */
+#define VIS_LEAF_FALSE_OFF  (RVA_VIS_LEAF_FALSE - RVA_VIS_LEAF_LO)   /* == 0x24, the XOR AL,AL; RET tail */
+
+/* Is `rva` inside the visibility leaf? UNRESOLVED LEAF => EMPTY RANGE: every caller of this is a
+ * recovery that only makes sense at that exact function, so "we do not know where it is" has to read
+ * as "we are not there", never as an open range. */
+static int in_vis_leaf(uintptr_t rva)
+{
+    return g_visleaf_ok && rva >= g_visleaf_lo_rva && rva < g_visleaf_hi_rva;
+}
+
+/* Locate everything the handler reads. Called from veh_install, before the handler can run. */
+static void veh_resolve_globals(void)
+{
+    const uint8_t *base = g_doom_base;
+    uintptr_t v;
+
+    g_pinned_build = sh_host_is_pinned_rva_build();
+    if (base == NULL) return;
+
+    g_errstate_at   = glb_resolve(base, "error_state", NULL);
+    g_load_state_at = glb_resolve(base, "load_state", NULL);
+    g_suppr_a_at    = glb_resolve(base, "throw_suppressor_a", NULL);
+    g_main_tid_at   = glb_resolve(base, "main_thread_id", NULL);
+    g_editor_at     = glb_resolve(base, "editor_singleton", NULL);
+
+    v = glb_resolve(base, "throwinfo_fatal", NULL);
+    if (v) { g_ti_fatal_rva = v - (uintptr_t)base; g_ti_fatal_ok = 1; }
+
+    v = glb_resolve(base, "vis_leaf_lo", NULL);
+    if (v) {
+        g_visleaf_lo_rva    = v - (uintptr_t)base;
+        g_visleaf_hi_rva    = g_visleaf_lo_rva + VIS_LEAF_SPAN;   /* body end, same span as before */
+        g_visleaf_false_rva = g_visleaf_lo_rva + VIS_LEAF_FALSE_OFF;  /* its own XOR AL,AL; RET tail */
+        g_visleaf_ok        = 1;
+    } else {
+        shield_fault f = { "sig", -1,
+            "visibility leaf UNRESOLVED -- the vis-leaf micro-recovery is disabled on this build "
+            "(the shield will not set RIP from an address it cannot locate)", 0, 0 };
+        shield_emit(&f);
+    }
+}
+
+/* ---- Throw-gate suppressor B (RVA_SUPPRESSOR_B, pinned 0x6faf8b0) -----------------------------------
+ * Suppressor A has a runtime derivation: a RIP-relative reference sweep of the pinned Vulkan image
+ * decodes 32 code sites that compute its address, which is what let it be signed into the globals table.
+ * The same sweep decodes ZERO sites computing suppressor B's address -- a result that sits oddly beside
+ * the Ghidra reference count recorded in engine_layout.h, and the disagreement is itself unresolved.
+ * Either way there is no code site to sign, so there is no portable way to locate this global, and with
+ * the standing finding that both suppressors read 0 and nothing writes either, the constant looks stale
+ * or mis-derived. It is UNVERIFIED, and inventing a derivation would be worse than leaving it out.
+ *
+ * So the write is kept, and performed only on the build the constant came from -- where it is provably a
+ * no-op, so nothing is lost -- and skipped silently everywhere else. The caller SEH-guards; this never
+ * decides anything, it only writes a zero over a zero. If the constant is ever re-derived (or shown to be
+ * a phantom), this function is the single place to change. */
+static void write_suppressor_b_if_pinned(void)
+{
+    if (!g_pinned_build || g_doom_base == NULL) return;
+    *(volatile int32_t *)(g_doom_base + RVA_SUPPRESSOR_B) = 0;
+}
 
 #define SHIELD_MAX_REDIRECTS 8
 static volatile LONG g_redirects = 0;    /* Class-B/fallback Error(6) redirects (runaway-guarded) */
@@ -270,10 +377,13 @@ static int try_revert_csr_entry(const CONTEXT *ctx)
 
     if (!rip_in_doom((void *)ctx->Rip)) return 0;
     rva = (uintptr_t)ctx->Rip - (uintptr_t)g_doom_base;
-    /* resolver range rides the sig-resolved entry; the frameless vis-leaf stays on its recipe-tagged RVA. */
-    if (!((rva >= resolver_lo_rva() && rva < resolver_hi_rva()) ||
-          (rva >= RVA_VIS_LEAF_LO && rva < RVA_VIS_LEAF_HI)))
-        return 0;
+    /* resolver range rides the sig-resolved entry; the frameless vis-leaf rides glb_resolve. Either one
+     * being unlocatable contributes an empty range rather than a guessed one. */
+    {
+        uintptr_t rlo = 0, rhi = 0;
+        int in_resolver = resolver_range(&rlo, &rhi) && rva >= rlo && rva < rhi;
+        if (!(in_resolver || in_vis_leaf(rva))) return 0;
+    }
 
     rbp = (uintptr_t)ctx->Rbp;
     if (rbp == 0) return 0;
@@ -316,7 +426,7 @@ static int try_neutralize_rendernode(const CONTEXT *ctx)
     uintptr_t rva, node, rax;
     if (!rip_in_doom((void *)ctx->Rip)) return 0;
     rva = (uintptr_t)ctx->Rip - (uintptr_t)g_doom_base;
-    if (!(rva >= RVA_VIS_LEAF_LO && rva < RVA_VIS_LEAF_HI)) return 0;
+    if (!in_vis_leaf(rva)) return 0;
     node = (uintptr_t)ctx->Rcx;                       /* the render-node (RCX, preserved across the leaf) */
     rax  = (uintptr_t)ctx->Rax;                        /* the faulting connection-node ref value */
     if (node == 0 || is_wild((void *)node) || rax == 0) return 0;
@@ -375,36 +485,40 @@ static volatile LONG g_cxx_seen = 0;
  * load_state(0x6dde198)!=1`. The errState getter returns only the LOW BYTE, so errState=0x100 already
  * passes. We open the gate for errors that REACH the Frame catch: clear errState's low byte, neutralize
  * load_state ONLY when it is the blocking value 1 (LOADING) -- leave 0/2/3 alone (they already pass != 1
- * and the engine relies on them), and clear both throw-gate suppressors. NOTE: this cannot help an error
+ * and the engine relies on them), and clear the throw-gate suppressors. NOTE: this cannot help an error
  * an INNER engine handler catches before idCommonLocal::Frame (e.g. the incompatible-class decl error,
- * which is a prevent-not-recover case). SEH-guarded vs a shifted RVA. */
+ * which is a prevent-not-recover case). Each write is skipped when its global did not resolve, and the
+ * whole block stays SEH-guarded. */
 static void force_recovery_gate(void)
 {
     if (g_doom_base == NULL) return;
     __try {
-        *(volatile int32_t *)(g_doom_base + RVA_ERRSTATE) = 0;               /* the (char) low-byte getter -> 0 */
-        if (*(volatile int32_t *)(g_doom_base + RVA_LOAD_STATE) == 1)        /* only neutralize LOADING (the blocker) */
-            *(volatile int32_t *)(g_doom_base + RVA_LOAD_STATE) = 0;
-        *(volatile int32_t *)(g_doom_base + RVA_SUPPRESSOR_A) = 0;
-        *(volatile int32_t *)(g_doom_base + RVA_SUPPRESSOR_B) = 0;
+        if (g_errstate_at)
+            *(volatile int32_t *)g_errstate_at = 0;                  /* the (char) low-byte getter -> 0 */
+        if (g_load_state_at && *(volatile int32_t *)g_load_state_at == 1)  /* only neutralize LOADING */
+            *(volatile int32_t *)g_load_state_at = 0;
+        if (g_suppr_a_at)
+            *(volatile int32_t *)g_suppr_a_at = 0;
+        write_suppressor_b_if_pinned();
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
 }
 
 /* ---- Is the faulting thread DOOM's MAIN thread? -----------------------------------------------------
- * Reads the engine's OWN main-thread id (RVA_MAIN_THREAD_ID) -- see engine_layout.h for why the shield
- * must not sample a thread of its own instead (shield_install runs on the backend bootstrap thread).
+ * Reads the engine's OWN main-thread id -- see engine_layout.h for why the shield must not sample a
+ * thread of its own instead (shield_install runs on the backend bootstrap thread).
  *   1  = the main thread
  *   0  = NOT the main thread (the frontend UI thread, a worker, ...)
- *  -1  = UNKNOWN (unreadable, or the engine has not recorded it yet -- the word is 0 until engine init).
- * SEH-guarded: a shifted/unmapped RVA on some other build must degrade to UNKNOWN, never fault inside the
- * VEH. UNKNOWN is deliberately NOT treated as off-main by the caller: an unproven answer must leave the
- * existing behaviour exactly as it was. */
+ *  -1  = UNKNOWN (unresolved, unreadable, or the engine has not recorded it yet -- the word is 0 until
+ *        engine init).
+ * A build where the word does not resolve lands on UNKNOWN, which is the answer that changes nothing:
+ * the caller only acts on a POSITIVE "not the main thread". Still SEH-guarded so a torn read can never
+ * fault inside the VEH. */
 static int shield_on_main_thread(void)
 {
     uint32_t mt = 0;
-    if (g_doom_base == NULL) return -1;
+    if (g_main_tid_at == 0) return -1;
     __try {
-        mt = *(volatile uint32_t *)(g_doom_base + RVA_MAIN_THREAD_ID);
+        mt = *(volatile uint32_t *)g_main_tid_at;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
     if (mt == 0) return -1;
     return (mt == GetCurrentThreadId()) ? 1 : 0;
@@ -451,10 +565,10 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
     if (code == 0xE06D7363 && g_doom_base != NULL &&
         er->NumberParameters >= 4 && er->ExceptionInformation[3] == (ULONG_PTR)g_doom_base) {
         int es = -1, ls = -1;
-        uintptr_t ti = 0;   /* ThrowInfo RVA: idException=0x2ded690 (recoverable) vs idFatalException=0x2ded990 */
+        uintptr_t ti = 0;   /* ThrowInfo RVA: idException (recoverable) vs idFatalException (terminal) */
         __try {
-            es = *(volatile int32_t *)(g_doom_base + RVA_ERRSTATE);
-            ls = *(volatile int32_t *)(g_doom_base + RVA_LOAD_STATE);
+            if (g_errstate_at)   es = *(volatile int32_t *)g_errstate_at;
+            if (g_load_state_at) ls = *(volatile int32_t *)g_load_state_at;
             if (er->NumberParameters >= 3)
                 ti = (uintptr_t)er->ExceptionInformation[2] - (uintptr_t)g_doom_base;
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -467,7 +581,10 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
          * the ONLY capture point. One-shot; carries the engine's verbatim text + the throwing stack. The
          * original SnapHak proved this text is capturable at the sink -- it detoured the sink into a
          * message box + TerminateProcess; we write the record and change NOTHING about the throw. */
-        if (ti == RVA_THROWINFO_FATAL) {
+        /* Only claim a throw is the TERMINAL class when we actually located that ThrowInfo on this
+         * build. 0 is a legal RVA, so an unresolved global must not be allowed to compare equal to a
+         * throw whose descriptor happens to sit at the image base. */
+        if (g_ti_fatal_ok && ti == g_ti_fatal_rva) {
             static volatile LONG s_fatal_throw_recorded = 0;
             if (InterlockedExchange(&s_fatal_throw_recorded, 1) == 0) {
                 __try {
@@ -538,13 +655,13 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
      * +0x70/+0x80 values. SEH-guarded (a wild read while formatting must never re-fault the VEH). */
     {
         uintptr_t rrva = (uintptr_t)rip - (uintptr_t)g_doom_base;
-        if (is_av && rrva >= RVA_VIS_LEAF_LO && rrva < RVA_VIS_LEAF_HI &&
-            InterlockedIncrement(&g_rn_seen) <= 12) {
+        if (is_av && in_vis_leaf(rrva) && InterlockedIncrement(&g_rn_seen) <= 12) {
             __try {
                 uintptr_t node = (uintptr_t)ep->ContextRecord->Rcx;
                 uintptr_t rax  = (uintptr_t)ep->ContextRecord->Rax;
-                uintptr_t ed   = (uintptr_t)g_doom_base + RVA_EDITOR_SINGLETON;
-                uintptr_t base = *(uintptr_t *)(ed + 0x1d0);
+                /* The entity index is a nicety in a log line; without the editor object we simply do
+                 * not report one rather than dereferencing an address we could not locate. */
+                uintptr_t base = g_editor_at ? *(uintptr_t *)(g_editor_at + 0x1d0) : 0;
                 long idx = (base && !is_wild((void *)base)) ? (long)(((intptr_t)node - (intptr_t)base) / 0x180) : -1;
                 uintptr_t p70 = 0, p80 = 0;
                 if (!is_wild((void *)node)) { p70 = *(uintptr_t *)(node + 0x70); p80 = *(uintptr_t *)(node + 0x80); }
@@ -576,8 +693,17 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
          * still fired on tab-out). SILENT + light (one RIP write; no notice/dialog/navigate). The leaf is
          * frameless so RSP still points at the return address -> the injected RET returns cleanly to the
          * resolver. Transient-frame skip: once the rebuild settles the predicate runs normally, so a real
-         * connection loses at most one frame of overlay. RE-DERIVE: RVA_VIS_LEAF_* in engine_layout.h. */
-        if (g_doom_base && rva >= RVA_VIS_LEAF_LO && rva < RVA_VIS_LEAF_FALSE) {
+         * connection loses at most one frame of overlay.
+         *
+         * THE ADDRESS IS RESOLVED, NEVER ASSUMED. This is the one place in the product that SETS the
+         * instruction pointer, so a wrong address here does not degrade a feature -- it sends the
+         * faulting thread into whatever code happens to live at that offset. The leaf comes from
+         * glb_resolve at install; if it did not resolve, g_visleaf_ok is 0, this whole branch is dead,
+         * and the fault falls through to the ordinary wild-pointer gate and the Class-A/Class-B paths
+         * below, exactly as it would for any other fault site. Declining a redirect costs one frame of
+         * overlay; performing an unverified one costs the process. */
+        if (g_visleaf_ok && g_doom_base &&
+            rva >= g_visleaf_lo_rva && rva < g_visleaf_false_rva) {
             /* Per-node skip: redirect to the predicate's own XOR AL,AL;RET tail (return FALSE = no valid
              * connection, what a clean node-less slot returns). A CLEAN RETURN from the frameless leaf -- it
              * does NOT unwind past the resolver/build frames. (A tried unwind-to-editor-Think "abort the whole
@@ -591,7 +717,7 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
                 shield_fault vf = { "visleaf", -1, g_why, rva, (uintptr_t)fault_addr };
                 shield_emit(&vf);
             }
-            ep->ContextRecord->Rip = (DWORD64)((uintptr_t)g_doom_base + RVA_VIS_LEAF_FALSE);
+            ep->ContextRecord->Rip = (DWORD64)((uintptr_t)g_doom_base + g_visleaf_false_rva);
             return EXCEPTION_CONTINUE_EXECUTION;
         }
         if (!(data && is_wild(fault_addr)))
@@ -607,7 +733,8 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
      * context untouched for the fallback. */
     {
         CONTEXT unwound = *ep->ContextRecord;
-        if (unwind_to_rva_range(&unwound, editor_lo_rva(), editor_hi_rva(), 32)) {
+        uintptr_t elo = 0, ehi = 0;
+        if (editor_frame_range(&elo, &ehi) && unwind_to_rva_range(&unwound, elo, ehi, 32)) {
             /* Neutralize the corrupt connection (BLIND -- the shield doesn't know the original value) so
              * the resolver stops re-faulting + the editor regains full per-frame function. Uses the
              * ORIGINAL fault context (RBP still = the resolver frame; the leaf is frameless). */
@@ -753,35 +880,51 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
      * (no engine-native surface there), which is the correct bad-LOAD behavior. */
     notice_request_msg();
 
-    /* Open Error(6)'s throw gate: BOTH suppressors clear, or the throw becomes ExitProcess(1). Both read 0
+    /* Open Error(6)'s throw gate: both suppressors clear, or the throw becomes ExitProcess(1). Both read 0
      * and have no writer on the pinned build, so this is insurance rather than a live fix -- see
-     * engine_layout.h for the sweep that established that. The
-     * suppressors are recipe-tagged DATA-global RVAs; a shifted build could land the literal on an
-     * unmapped/RO page, so SEH-guard the writes (P6) -- a fault here would otherwise crash INSIDE the VEH.
+     * engine_layout.h for the sweep that established that. Suppressor A is located by glb_resolve;
+     * suppressor B is written only on the build its unverified constant came from (see
+     * write_suppressor_b_if_pinned). SEH-guarded (P6): a fault here would otherwise crash INSIDE the VEH.
      * If the write faults we still resume into Error(6) (the gate may already be open / re-armed). */
     __try {
-        *(volatile int32_t *)(g_doom_base + RVA_SUPPRESSOR_A) = 0;
-        *(volatile int32_t *)(g_doom_base + RVA_SUPPRESSOR_B) = 0;
+        if (g_suppr_a_at) *(volatile int32_t *)g_suppr_a_at = 0;
+        write_suppressor_b_if_pinned();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        /* recipe-tagged suppressor RVA shifted on this build -> log + continue (Error6 may still recover) */
-        shield_fault sf = { "sig", -1, "suppressor RVA write faulted (re-derive 0x6faf820/0x6faf8b0)", 0, 0 };
+        shield_fault sf = { "sig", -1, "throw-gate suppressor write faulted", 0, 0 };
         shield_emit(&sf);
     }
 
     /* Simulate `call Error(g_why)` from the faulting site: 16-align rsp, push the faulting rip as a real
      * (unwindable) return address so idException unwinds up to idCommonLocal::Frame's catch. Error(6) is
-     * SIG-RESOLVED (g_eng.error6, RVA fallback). */
-    uintptr_t sp = (ep->ContextRecord->Rsp & ~(uintptr_t)0xF) - 8;
-    *(uintptr_t *)sp = (uintptr_t)rip;
-    ep->ContextRecord->Rsp = sp;
-    ep->ContextRecord->Rcx = (uintptr_t)g_why;                       /* Error(fmt) in rcx */
-    ep->ContextRecord->Rip = g_eng.error6                            /* resume INTO Error(6) (sig-resolved) */
-                           ? (uintptr_t)g_eng.error6
-                           : (uintptr_t)(g_doom_base + RVA_ERROR6);
+     * SIG-RESOLVED (g_eng.error6); the pinned RVA is only a legitimate backstop on the build it was
+     * extracted from, so off that build an unresolved Error(6) means we DECLINE the redirect and let
+     * normal Windows handling take the fault rather than resuming into an unrelated function. */
+    {
+        uintptr_t error6 = g_eng.error6;
+        if (!error6 && g_pinned_build)
+            error6 = (uintptr_t)(g_doom_base + RVA_ERROR6);
+        if (!error6) {
+            shield_fault nf = { "sig", (int)code,
+                "Class-B declined: idCommon::Error(6) is unresolved and this is not the pinned "
+                "extraction build -- resuming into a pinned address would be a wild call", rva,
+                (uintptr_t)fault_addr };
+            shield_emit(&nf);
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        uintptr_t sp = (ep->ContextRecord->Rsp & ~(uintptr_t)0xF) - 8;
+        *(uintptr_t *)sp = (uintptr_t)rip;
+        ep->ContextRecord->Rsp = sp;
+        ep->ContextRecord->Rcx = (uintptr_t)g_why;                   /* Error(fmt) in rcx */
+        ep->ContextRecord->Rip = error6;                             /* resume INTO Error(6) */
+    }
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
 int veh_install(void)
 {
+    /* Locate the data globals BEFORE the handler can run. glb_resolve scans on a cache miss, which is
+     * not work to do inside an exception handler; doing it here means every read in shield_veh is a
+     * plain load of an address already proven to belong to this image. */
+    veh_resolve_globals();
     return AddVectoredExceptionHandler(1 /* first-in-chain */, shield_veh) != NULL;
 }

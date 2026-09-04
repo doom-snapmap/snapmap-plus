@@ -1,8 +1,17 @@
 /* engine_layout.h -- DOOM 2016 fault-machinery contract for the fault-shield.
  *
+ * Every RVA in this file is a PINNED-VULKAN-BUILD value, kept for audit and re-derivation. None of them
+ * locates anything any more: engine FUNCTIONS are resolved by signature (shield_sigs.c) and DATA globals
+ * by signing the code site that computes them (backend/engine_globals.h). DOOM ships two executables from
+ * one source tree, and between them the data globals move by nearly 0x1000000, so these literals describe
+ * exactly one link output. Where one is still read as a backstop it is gated on
+ * sh_host_is_pinned_rva_build() -- see host_image.h for why that gate is not optional.
+ *
+ * The STRUCT FIELD OFFSETS below are a different kind of fact: they are identical on both shipped
+ * executables (directly evidenced), so they need no resolution and must not be touched.
+ *
  * All RVAs are image-base-relative (DOOMx64vk.exe ImageBase 0x140000000); the loader adds the runtime
- * base from GetModuleHandle. BUILD-LOCKED to the pinned demoted depot;
- * re-derive on any DOOM patch. A portable build resolves by signature later (out of scope for now).
+ * base from GetModuleHandle.
  *
  * PROVENANCE (all DIRECT decompiles):
  *   the single error funnel + recovery,
@@ -29,29 +38,41 @@
  * render-model cap; that does not hold. It is one input to the cap's own test, nothing writes it, and
  * clearing it disables no escape hatch because there is none to disable. It is a broad mode gate read by
  * AI limits, GUI queries, virtual-texture, pathfinding and resource hashing among others.
- * NON-SIG-ABLE DATA GLOBALS (.data ints, no unique code fingerprint) -> recipe-tagged base+RVA literals.
+ * Pinned-Vulkan-build RVAs, audit and re-derivation only. Suppressor A is located at runtime by
+ * glb_resolve("throw_suppressor_a"): a RIP-relative reference sweep of the pinned image decodes 32 code
+ * sites that compute its address, any of which can anchor a signature.
+ *
+ * Suppressor B HAS NO SUCH DERIVATION and is UNVERIFIED. The same RIP-relative sweep decodes ZERO sites
+ * computing 0x6faf8b0 -- which sits oddly beside the Ghidra count recorded above (110 references to
+ * 0x146faf820, one to 0x146faf8b0); the two sweeps disagree, and neither yields an anchor to sign.
+ * Together with "nothing in the image writes either global and both read 0", the likeliest reading is
+ * that this constant is stale or was mis-derived. No portable derivation is invented for it: the shield
+ * writes B only on the pinned build, where it is provably a no-op, and skips it silently everywhere else.
+ * Anyone re-deriving it should settle the reference-count disagreement first.
  * RE-DERIVE per build: these are the two `int` globals the level-6 dispatcher 0x1A08E80 tests before it
  * throws (decompile the dispatcher: the `if (DAT_x == 0 && DAT_y == 0) throw; else ExitProcess(1)` gate);
  * find them as the two .data slots that gate read. The shield's writes to them are SEH-guarded (veh.c). */
 #define RVA_SUPPRESSOR_A   0x6faf820u   /* DAT_146faf820 (re-derive: dispatcher 0x1A08E80 throw-gate input A) */
-#define RVA_SUPPRESSOR_B   0x6faf8b0u   /* DAT_146faf8b0 (re-derive: dispatcher 0x1A08E80 throw-gate input B) */
+#define RVA_SUPPRESSOR_B   0x6faf8b0u   /* DAT_146faf8b0 -- UNVERIFIED, zero references in the pinned image */
 
 /* Recovery-gate inputs (read-only; informational for classification). Frame recovers iff
- * errState==0 && load_state!=1 (load_state==1 is unreachable). */
+ * errState==0 && load_state!=1 (load_state==1 is unreachable). Pinned-build RVAs, audit only; located at
+ * runtime by glb_resolve("error_state") / glb_resolve("load_state"). */
 #define RVA_ERRSTATE       0x6dde19cu   /* errState  -- recovery needs ==0 */
 #define RVA_LOAD_STATE     0x6dde198u   /* load_state -- 0 boot / 2 LOADING / 3 RUNNING; !=1 always true */
 
 /* The engine's own record of its MAIN thread id, 8 bytes below the load-state word in the same cluster.
  * This is the DWORD the allocator's scope gate at 0x19FC900 compares GetCurrentThreadId() against, so it is
  * the engine's authoritative answer to "is this the main thread" -- DIRECT, and independently recorded on
- * the backend side (backend/apply_engine.c MAIN_THREAD_ID_RVA, backend/signatures.c MemLocalPushHeap).
+ * the backend side (backend/apply_engine.c, backend/signatures.c MemLocalPushHeap).
  *
  * The shield MUST read the engine's value rather than sampling a thread of its own: shield_install runs on
  * the BACKEND BOOTSTRAP thread (backend/dllmain.c bootstrap_thread), not on DOOM's main thread, so a
  * GetCurrentThreadId() taken at install time would record the wrong thread and mislabel every subsequent
  * fault. It reads 0 until the engine records it, which callers must treat as "unknown", not as "off-main".
- * NON-SIG-ABLE DATA GLOBAL -> recipe-tagged base+RVA literal. RE-DERIVE per build: it is the DWORD the
- * thread-gate predicate 0x19FC900 compares against GetCurrentThreadId(). */
+ * Pinned-build RVA, audit and re-derivation only; located at runtime by glb_resolve("main_thread_id").
+ * RE-DERIVE per build: it is the DWORD the thread-gate predicate 0x19FC900 compares against
+ * GetCurrentThreadId(). */
 #define RVA_MAIN_THREAD_ID 0x6dde190u   /* engine main-thread id (0 until engine init records it) */
 
 /* Recovery teardown / nav levers (used in Tasks 5/8; confirm live before relying). */
@@ -63,9 +84,10 @@
  * ExitEditor 0x522680 in-frame -> EDITOR->BROWSER. (NOTE: the editor-recovery RE report's +0x2366C/
  * +0x2120D "exit trigger" offsets were Wall-corrected against this proven mechanism -- +0x2366C is
  * deactivateReason, +0x2120D is the read-only "exiting" status flag.) */
-/* RVA_EDITOR_SINGLETON: the INLINE idSnapEditorLocal OBJECT (NOT a pointer) at module_base + this.
- * NON-SIG-ABLE DATA GLOBAL (a .data object, no unique code fingerprint) -> recipe-tagged base+RVA literal.
- * SAME re-derive recipe lives on the backend's copy (backend/iface_engine.c EDITOR_SINGLETON_RVA).
+/* RVA_EDITOR_SINGLETON: where the INLINE idSnapEditorLocal OBJECT (NOT a pointer) sits on the pinned
+ * Vulkan build -- audit and re-derivation only. The address the shield uses comes from
+ * glb_resolve("editor_singleton"), which signs the code site that computes it.
+ * SAME re-derive recipe lives on the backend's copy (backend/iface_engine.c).
  * RE-DERIVE per build: it is the inline idSnapEditorLocal singleton, IN-PLACE-CONSTRUCTED by its ctor at
  * 0x51A8E0 -- decompile that ctor at 0x51A8E0; its `this` (the rcx the ctor writes its
  * vtable + fields through) IS this object's address; RVA = that - module_base. (RVA derived from the live
@@ -73,7 +95,7 @@
 #define RVA_EDITOR_SINGLETON  0x3056748u  /* idSnapEditorLocal object = doomBase + this (NOT a pointer; in-place ctor 0x51A8E0) */
 /* RVA_SETSTATE / RVA_FRAME / RVA_EDITOR_PUMP are FUNCTION entries -- sig-resolved at install (shield_sigs.c
  * -> g_eng.setstate / g_eng.frame / g_eng.editor_pump). The RVAs here are the pinned-build values: the sig
- * documentation + the recipe-tagged fallback if a sig misses. */
+ * documentation, and a backstop that is only consulted when the host IS that build. */
 #define RVA_SETSTATE          0x5298A0u   /* idSnapEditorLocal::SetState(editor*, int state) (== SetState sig) */
 #define RVA_EDITOR_PUMP       0x523140u   /* the per-frame editor Think (== EditorPump sig; also EDITOR_FRAME_LO) */
 #define RVA_MENU_PUMP         0x1702BA0u  /* the per-frame menu pump (alt frame context; DOC-only, unused) */
@@ -120,10 +142,15 @@
 #define RVA_RESOLVER_LO       0x5E0AD0u   /* connection resolver FUN_1405e0ad0 entry (== Resolver sig) */
 #define RESOLVER_SPAN         0x396u      /* RE-DERIVE: 0x5E0E66 - 0x5E0AD0 (the resolver body length) */
 #define RVA_RESOLVER_HI       (RVA_RESOLVER_LO + RESOLVER_SPAN)          /* ...body end */
-/* The visibility-predicate leaf 0xD32A30: a tiny FRAMELESS leaf (~0x27 bytes, the live AV site). NOT
- * sig-resolved -- too short to anchor uniquely (the log shows rips at the entry AND mid-fn). Kept as a
- * recipe-tagged build-specific RANGE. RE-DERIVE per build: the leaf reached at the tail of the resolver
- * (Resolver -> ... -> this); find it as the call target from the resolver disasm, span = body length. */
+/* The visibility-predicate leaf 0xD32A30: a tiny FRAMELESS leaf (~0x27 bytes, the live AV site). Too short
+ * to anchor with a byte signature of its own (the log shows rips at the entry AND mid-fn), so it is
+ * located by glb_resolve("vis_leaf_lo") -- signing a CALL SITE that computes its address instead of the
+ * leaf itself. The RVAs below are the pinned build's, audit only; veh.c derives the body end and the
+ * FALSE tail as offsets from the resolved entry, preserving exactly these spans. This is the one address
+ * in the product that RIP is set from, so if it does not resolve the shield disables that recovery
+ * outright rather than redirecting execution to a guess.
+ * RE-DERIVE per build: the leaf reached at the tail of the resolver (Resolver -> ... -> this); find it as
+ * the call target from the resolver disasm, span = body length. */
 #define RVA_VIS_LEAF_LO       0xD32A30u   /* visibility-predicate leaf FUN_140d32a30 (the live AV site; recipe-tagged) */
 #define VIS_LEAF_SPAN         0x27u       /* RE-DERIVE: 0xD32A57 - 0xD32A30 (the frameless-leaf body length) */
 #define RVA_VIS_LEAF_HI       (RVA_VIS_LEAF_LO + VIS_LEAF_SPAN)          /* ...body end (frameless leaf) */
@@ -156,6 +183,7 @@
  *     name table). buttonSet 0x10 builds exactly one "#STR_SWF_OK" button.
  *   - DEDUP: AddDialog->enqueue 0xE65C20 no-adds a matching-gdmId pending entry, so re-raising is safe.
  * S (idMenuShellLocal) = *(base + RVA_SHELL_PTR_SLOT). */
+/* Pinned-build RVA, audit only; located at runtime by glb_resolve("shell_ptr_slot"). */
 #define RVA_SHELL_PTR_SLOT   0x4DF7FC8u  /* .data slot: S = *(uint64*)(base + this) */
 #define RVA_ADDDIALOG        0xE643C0u   /* FUN_140e643c0(dlgMgr, req): build + enqueue the dialog */
 #define RVA_DIALOG_DESC_INIT 0xE63930u   /* FUN_140e63930(req): zero-init the request descriptor, returns req */
@@ -213,7 +241,8 @@
  * survivable. For the Class-A wild-AV path a raw AV has NO error string, so the buffer is only read on the
  * Class-B (Error(6)) recovery; Class-A keeps the generic NOTICE_TEXT_STR.
  *
- * NON-SIG-ABLE DATA GLOBAL (a .data byte buffer, no code fingerprint) -> recipe-tagged base+RVA literal.
+ * A .data byte buffer with no signature of its own, located at runtime by
+ * glb_resolve("last_error_msg"); the RVA below is the pinned build's, audit and re-derivation only.
  * DIRECT (Ghidra, DOOMx64vk.exe base 0x140000000):
  *   WRITTEN only by the dispatcher 0x1A08E80: strncpy(&DAT_146ddd990, fmtbuf, 0x800) at 0x1A098DB (level-7)
  *     and 0x1A09906 (level-6), each immediately before the no-return _CxxThrowException.
