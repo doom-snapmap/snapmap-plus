@@ -18,6 +18,8 @@
 #include "cvars.h"
 #include "commands.h"   /* sh_decode_rip_slot / sh_safe_read -- the shared build-portable slot decoder */
 #include "signatures.h"
+#include "engine_globals.h"   /* glb_resolve -- the portable data-global resolver */
+#include "host_image.h"       /* sh_host_is_pinned_rva_build -- gates the last-resort RVA */
 #include "backend_log.h"
 
 /* The engine cvar register fn: void register(void* self, const char* name, const char* def,
@@ -40,18 +42,24 @@ typedef int (*name_hash_fn)(const char *name);
  * gate-1 (DEV) table at it, so a findable-insert here surfaces at BOTH gates.
  *
  * cvarSys SINGLETON POINTER (the idCVarSystemLocal* .data global). Resolved build-portably like its three
- * backend siblings (cmdSystem / gameMgr / renderWorld) -- DECODE the slot from a sig'd accessor, keep the
- * base+RVA only as a logged fallback. See sh_resolve_cvarsys() below.
+ * backend siblings (cmdSystem / gameMgr / renderWorld) -- DECODE the slot from a sig'd accessor rather than
+ * naming an address. See sh_resolve_cvarsys() below.
  *   - PRIMARY (portable): the cvarSys global sits at cmdSystem_slot + 0x10 (the two .data slots are
  *     adjacent: cmdSystem RVA 0x55b7280, cvarSys RVA 0x55b7290 == +0x10). We decode the cmdSystem slot
  *     from the CmdSystemLea sig (already in BACKEND_ENGINE_SIGNATURES -- the bot_add/bot_remove registrar
  *     whose prologue does `MOV RCX,[rip+cmdSystem]`) via the shared sh_decode_rip_slot, add 0x10, deref
  *     once. NO hardcoded RVA on this path; survives an RVA shift.
- *   - FALLBACK / RE-DERIVE recipe (auto-patcher / DOOM version bump): cvarSys = *(module_base + 0x55b7290).
- *     To re-find on a shifted build: decode the CmdSystemLea accessor's first RIP-relative load to the
- *     cmdSystem .data slot RVA, then cvarSys_RVA = that + 0x10 (== this literal on the pinned build).
- *     Mirror: cvar_unlock/engine_layout.h RVA_CVAR_SYSTEM_PTR carries the identical recipe. */
-#define CVARSYS_SLOT_RVA          0x55b7290u   /* fallback only -- primary is the CmdSystemLea decode +0x10 */
+ *   - SECONDARY (also portable): glb_resolve("cvar_system_slot"), which signs a different code site
+ *     entirely and decodes its RIP displacement. It agrees with the primary on both shipped images
+ *     (as does glb_resolve("cmd_system_slot") + 0x10), so it is an independent second opinion rather
+ *     than a restatement -- and it survives an inline hook on the CmdSystemLea prologue, which the
+ *     primary does not.
+ *   - LAST RESORT: *(module_base + CVARSYS_SLOT_RVA), taken ONLY when the host is the pinned Vulkan
+ *     build that literal was extracted from. On the OpenGL image the same RVA lands in unrelated data,
+ *     so off that build we decline instead and the findable-insert is skipped. */
+#define CVARSYS_SLOT_RVA          0x55b7290u   /* the cvarSys slot's RVA on the pinned Vulkan build -- kept for
+                                                * audit and per-build re-derivation. Only ever dereferenced
+                                                * when sh_host_is_pinned_rva_build() says we ARE that build. */
 #define CVARSYS_OFF_FROM_CMDSYS   0x10         /* cvarSys .data slot == cmdSystem .data slot + 0x10 (adjacent) */
 #define CVARSYS_LIST_PTR_OFF      0x08    /* idList<idCVar*> base: list-ptr */
 #define CVARSYS_LIST_COUNT_OFF    0x10    /* idList count (int) */
@@ -258,11 +266,32 @@ static uint8_t *sh_resolve_cvarsys(const uint8_t *module_base)
             }
             break;
         }
-        backend_log("B2: cvarSys portable decode failed -- trying known-offset fallback");
+        backend_log("B2: cvarSys portable decode failed -- trying the signed data-global anchor");
     }
 
-    /* FALLBACK (hook-tolerance philosophy: portable primary + known_rva fallback / re-derive recipe). */
+    /* SECONDARY (still portable): a different signed code site whose RIP displacement names the same
+     * slot. Independent of the CmdSystemLea prologue, so an inline hook there does not take this down. */
     if (module_base) {
+        glb_status gst = GLB_UNKNOWN_NAME;
+        uintptr_t slot = glb_resolve(module_base, "cvar_system_slot", &gst);
+        if (slot) {
+            uint8_t *obj = NULL;
+            if (sh_safe_read((const uint8_t *)slot, (uint8_t *)&obj, sizeof obj) && obj) {
+                _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "B2: cvarSys glb slot=%p -> obj=%p (portable)", (void *)slot, (void *)obj);
+                backend_log(line);
+                return obj;
+            }
+        } else {
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                "B2: cvarSys glb anchor unresolved (status=%d)", (int)gst);
+            backend_log(line);
+        }
+    }
+
+    /* LAST RESORT: the pinned literal, and only on the build it was extracted from. Anywhere else it
+     * addresses unrelated data, and a wrong idCVarSystemLocal* would be written through. */
+    if (module_base && sh_host_is_pinned_rva_build()) {
         uint8_t *obj = NULL;
         __try {
             obj = *(uint8_t * volatile *)(module_base + CVARSYS_SLOT_RVA);
@@ -271,7 +300,7 @@ static uint8_t *sh_resolve_cvarsys(const uint8_t *module_base)
         }
         if (obj) {
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                "B2: cvarSys fallback *(base+0x55b7290)=%p", (void *)obj);
+                "B2: cvarSys pinned-build fallback *(base+0x55b7290)=%p", (void *)obj);
             backend_log(line);
             return obj;
         }
