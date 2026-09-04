@@ -19,6 +19,9 @@
  * palette validator contract -- a resolved entityDef plus correctly flagged
  * input and output targets -- before the palette rebuild is called;
  * source-only abstract bodies are retained as NON-PALETTE without that call.
+ * The palette rebuild runs on EVERY pass, boot or runtime, because the palette
+ * is a catalog derived from the decl list and a map that names a type absent
+ * from that catalog is refused wholesale as a damaged save.
  * Each source-path argument is a native 48-byte idStr temporary, constructed
  * and destroyed around its one call.
  *
@@ -33,11 +36,28 @@
 int sh_decl_server_install(const sig_result *results, size_t count,
                            const uint8_t *module_base, void *cmdsys);
 
-/* Returns 1 only after the one-shot command has registered every missing
- * candidate, materialized required editor decls, and completed the palette
- * rebuild successfully. DS_STATE_DONE alone is not sufficient: it also
- * represents disabled, empty, or all-shadowed snapshots. */
+/* Returns 1 only after the command has registered every missing candidate,
+ * materialized required editor decls, and completed the palette rebuild
+ * successfully. DS_STATE_DONE alone is not sufficient: it also represents
+ * disabled, empty, or all-shadowed snapshots. */
 int sh_decl_server_registration_succeeded(void);
+
+/* Re-scan the overrides packages and register any NEW decl identities at runtime, after the
+ * engine's boot promotion. Must run on the engine main thread; the console command
+ * `snapmap_plus_decl_server_rearm` is the normal trigger.
+ *
+ * Content registered this way is born map-scoped (idResource level 1 or 2), NOT permanent --
+ * registration and promotion are deliberately separate here. Give it a lifetime explicitly
+ * against a registry watermark/delta; do not couple the two. Returns 1 when a pass ran. */
+int sh_decl_server_rearm(void);
+
+/* Request a runtime re-arm after a mid-session package install. Safe from any thread; the work
+ * is performed on the engine tick, in two phases separated by real frames because the
+ * cut-content cvars the packages need are QUEUED, not applied immediately. */
+void sh_decl_server_request_rearm(void);
+
+/* Advance a requested re-arm. Call from the engine tick (main thread). No-op when idle. */
+void sh_decl_server_rearm_poll(void);
 
 #ifdef SH_DECL_SERVER_TESTING
 #include <windows.h>
@@ -136,6 +156,18 @@ int sh_decl_server_test_register_candidate(
     sh_decl_server_test_idstr_ctor_fn ctor,
     sh_decl_server_test_idstr_dtor_fn dtor,
     sh_decl_server_test_register_file_fn register_file);
+
+/* Runtime-pass refresh seams. The runtime flag switches the production materialization
+ * into its premark/drain protocol; the previous-identity list feeds the newly-served
+ * test; the counters and the stray sweep make the protocol's outcome assertable. */
+typedef void (*sh_decl_server_test_generic_load_fn)(void *decl);
+void sh_decl_server_test_set_runtime(int active);
+void sh_decl_server_test_set_generic_load(sh_decl_server_test_generic_load_fn fn);
+void sh_decl_server_test_reset_runtime_state(void);
+int sh_decl_server_test_add_prev_identity(const char *type, const char *name);
+void sh_decl_server_test_runtime_counters(long *marked_pending, long *left_loaded,
+                                          long *shadow_reparsed, long *drain_faults);
+int sh_decl_server_test_clear_stray_pending(void);
 
 /* Run the production two-phase materialization pass against a test candidate
  * table. This keeps the native make-default=1, state-byte, and terminal-fault

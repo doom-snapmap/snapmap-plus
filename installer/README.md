@@ -44,8 +44,12 @@ snapmap-plus help
 ```
 
 `install` / `update` / `uninstall` ask for a final **"are you sure?"** confirmation (after all checks pass);
-`--yes` / `-y` skips it for scripts. **`snapmap-plus changelog`** prints the published version history + notes
-(it lives in the GitHub Releases — CI auto-generates each release's notes from the commits since the last tag).
+`--yes` / `-y` skips it for scripts. **`snapmap-plus changelog`** prints the published version history,
+laid out for a terminal: the newest release in full, then a one-line index of the earlier ones. Pass a
+version to read just that one — `snapmap-plus changelog v0.2.1-beta.4` (the leading `v` is optional),
+`latest` for the newest stable, or `all` for every release in full. The notes come from the GitHub
+Releases, where each release's body is its reviewed [`CHANGELOG.md`](../CHANGELOG.md) entry, so the
+terminal, the website and the releases page always agree.
 
 - **`--doom <path>`** — the DOOM install dir (the folder with `DOOMx64vk.exe`). If omitted, the installer
   auto-detects it from your Steam libraries (reads `SteamPath` from the registry, scans

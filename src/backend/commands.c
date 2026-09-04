@@ -29,6 +29,7 @@
 #include "ui_bridge.h"   /* sh_ui_get_iface() -- the `sh` dispatcher gates on the interface */
 #include "hook.h"        /* install_inline_hook -- the AddCommand detour for the command unlock */
 #include "backend_log.h"
+#include "engine_dialog.h"
 
 /* ------------------------------------------------------------------------ engine fn typedefs ------ */
 
@@ -64,6 +65,7 @@ typedef void *(*get_decls_fn)(const char *type_name);
 /* ------------------------------------------------------------------------- module state ----------- */
 
 static add_command_fn     g_add_command = NULL;
+static int                g_dialogtest_ticket = 0;
 static void              *g_cmdsys      = NULL;
 static printf_dispatch_fn g_printf      = NULL;
 static void              *g_get_decls   = NULL;   /* cached for sh_listres + the material lookups */
@@ -891,15 +893,19 @@ static void h_sh_debugrender(idCmdArgs *a)
  * (sh_ui_get_iface): if it doesn't exist yet, report "Ui interface doesnt exist yet!" (the OG exact no-UI
  * behavior -- when the frontend hasn't loaded, `sh` faithfully says this). Otherwise look the subcommand
  * up in the interface's runtime cmd-map (interface+0x58) and, on a hit, ENQUEUE {handler,args} onto the
- * work-queue for main-thread execution (the think-loop's +0x1a0 drain runs it).
+ * work-queue, which the frontend's think-loop drains (+0x1a0) on its own thread.
  *
  * The GATE + the real map-lookup + the work-queue enqueue (faithful to the OG 0x7620 dispatch).
  * The 20 SnapStack subcommands are registered by the snaphakui registrar (FUN_180003c80 port) via the
  * interface's REGISTER slot once the UI thread inits. On a HIT we parse argv into a string vector (argv[1]
  * = the subcommand, argv[2..] = its args -- the OG passes the SUBCOMMAND's args, i.e. the tail starting at
  * the subcommand name, faithful to the OG cmdArgs forwarding) and enqueue {handler,args} onto the work-
- * queue; the think-loop's +0x1a0 drain runs it on the MAIN (UI) thread (the DRIVE CONVENTION -- the heavy
- * editor/engine work must run on the main thread, never the console thread). A MISS reports the OG message
+ * queue; the think-loop's +0x1a0 drain runs it OFF the console thread (the DRIVE CONVENTION -- heavy
+ * editor/engine work must not run on the console thread, which the engine does not expect to block).
+ * That drain thread is the FRONTEND's UI worker (CreateThread in ui_bridge.c), NOT DOOM's main thread --
+ * the two are easy to conflate and this comment used to. Issue #61 tracks the consequence: the decl-edit
+ * commits these ops reach call into engine code from a thread the engine treats as foreign.
+ * A MISS reports the OG message
  * "Command %s has not been registered yet". With no subcommand, mirror the OG usage hint. */
 static void h_sh_dispatch(idCmdArgs *a)
 {
@@ -936,7 +942,7 @@ static void h_sh_dispatch(idCmdArgs *a)
         sub_argv[i] = v ? v : "";
     }
 
-    /* ENQUEUE {handler, ctx, sub_argv} onto the work-queue for MAIN-THREAD exec (the +0x1a0 drain runs it).
+    /* ENQUEUE {handler, ctx, sub_argv} onto the work-queue for the drain thread (the +0x1a0 drain runs it).
      * Faithful to OG 0x7620: the dispatch does NOT run the handler inline on the console thread. */
     if (!sh_iface_enqueue_work(iface, handler, ctx, sub_argc, sub_argv))
         sh_printf("sh %s: could not enqueue (out of memory)\n", sub);
@@ -1285,6 +1291,99 @@ typedef struct cmd_entry {
 
 static void h_sh_help(idCmdArgs *a);   /* defined after CMD_TABLE (it walks the table) */
 
+/* sh_dialogtest [buttonset] [text...] -- raise the engine's own modal with our text.
+ *
+ * A diagnostic, because the one part of that surface that lives in the Flash
+ * layer cannot be read out of native code: which button LAYOUT a given
+ * button-set value draws. The button set is a free parameter of the raise, not
+ * a property of the GDM id, so sweeping it here is how the yes/no value gets
+ * identified. Which button was PRESSED needs no sweeping -- the engine reports
+ * it through the button's action id -- so `sh_dialogpoll` reads an answer
+ * rather than guessing one.
+ *
+ * Every argument after the button set is joined back into one string, because a
+ * real message has spaces in it and the command tokeniser would otherwise show
+ * only the first word. */
+static void h_sh_dialogtest(idCmdArgs *a)
+{
+    char text[256];
+    int argc = cmd_argc(a);
+    unsigned gdm_id = 0x6Du;
+    unsigned button_set = 1u;
+    int first = 1, i;
+    const char *lead = cmd_argv(a, 1);
+
+    if (!sh_engine_dialog_ready()) {
+        sh_printf("sh_dialogtest: the engine dialog surface is not ready.\n");
+        return;
+    }
+    /* <gdmid> <buttonset> <text...>, both numeric and both optional-from-the-left.
+     * The GDM id matters as much as the button set: the shell picks a dialog's
+     * personality from the id, so a notice-shaped id draws one button no matter
+     * what button set it is handed. Sweeping both is the only way to find the
+     * pair that asks a real question. */
+    if (lead && lead[0] >= '0' && lead[0] <= '9') {
+        gdm_id = (unsigned)strtoul(lead, NULL, 0);
+        first = 2;
+        {
+            const char *second = cmd_argv(a, 2);
+            if (second && second[0] >= '0' && second[0] <= '9') {
+                button_set = (unsigned)strtoul(second, NULL, 0);
+                first = 3;
+            }
+        }
+    }
+    text[0] = '\0';
+    for (i = first; i < argc; i++) {
+        const char *w = cmd_argv(a, i);
+        if (!w) continue;
+        if (text[0]) strncat_s(text, sizeof text, " ", _TRUNCATE);
+        strncat_s(text, sizeof text, w, _TRUNCATE);
+    }
+    if (!text[0])
+        strncpy_s(text, sizeof text,
+                  "Snapmap+ dialog probe: which buttons are these, and which one did you press?",
+                  _TRUNCATE);
+
+    g_dialogtest_ticket = sh_engine_dialog_ask(gdm_id, button_set, text);
+    if (!g_dialogtest_ticket) {
+        sh_printf("sh_dialogtest: the dialog would not raise (one may already be up).\n");
+        return;
+    }
+    sh_printf("sh_dialogtest: raised ticket %d, gdm %u, button set %u.\n",
+              g_dialogtest_ticket, gdm_id, button_set);
+}
+
+/* sh_dialogpoll -- read the answer to the dialog sh_dialogtest raised. */
+static void h_sh_dialogpoll(idCmdArgs *a)
+{
+    int r;
+    (void)a;
+    if (!g_dialogtest_ticket) {
+        sh_printf("sh_dialogpoll: nothing raised by sh_dialogtest.\n");
+        return;
+    }
+    r = sh_engine_dialog_poll(g_dialogtest_ticket);
+    sh_printf("sh_dialogpoll: ticket %d -> %s\n", g_dialogtest_ticket,
+              r == SH_ENGINE_DIALOG_PENDING  ? "PENDING"  :
+              r == SH_ENGINE_DIALOG_ACCEPTED ? "ACCEPTED" :
+              r == SH_ENGINE_DIALOG_DECLINED ? "DECLINED" : "LOST");
+    if (r != SH_ENGINE_DIALOG_PENDING) g_dialogtest_ticket = 0;
+}
+
+/* sh_dialogdump -- print every descriptor currently in the engine's dialog queue.
+ *
+ * This is what makes the surface legible: the engine's OWN dialogs pass through
+ * the same queue, so a known yes/no prompt raised by the game shows which button
+ * set draws that layout, which is otherwise invisible. No byte in a descriptor
+ * carries the answer -- that arrives through the button's action id -- so this
+ * is a queue inspector and nothing more. */
+static void h_sh_dialogdump(idCmdArgs *a)
+{
+    (void)a;
+    sh_engine_dialog_dump(sh_printf);
+}
+
 static const cmd_entry CMD_TABLE[] = {
     { "sh_rawmaps_on",       (void *)h_rawmaps_on,  "Switches from the normal doom snapmap format to raw JSON maps for saving and loading." },
     { "sh_rawmaps_off",      (void *)h_rawmaps_off, "Switches from the raw JSON map format to the normal doom format for snapmaps." },
@@ -1300,6 +1399,9 @@ static const cmd_entry CMD_TABLE[] = {
     { "sh_genbmodel",        (void *)h_sh_genbmodel,"sh_genbmodel <input file> <output file> Generate a bmodel from a .obj/.ase/.lwo file. " },
     { "sh_genmd6model",      (void *)h_sh_genmd6model,"sh_genmd6model <input file> <output file> Compiles a .md6model into a bmd6model" },
     { "sh_target_any",       (void *)h_target_any,  "Toggles targetting for entities. Reveals / re-hides the campaign-only and normally-hidden placeable entity decls in the SnapMap editor palette." },
+    { "sh_dialogtest",       (void *)h_sh_dialogtest, "[gdmid] [buttonset] [text...] raise the engine's own dialog carrying this text (diagnostic)" },
+    { "sh_dialogpoll",       (void *)h_sh_dialogpoll, "read the answer to the dialog sh_dialogtest raised (diagnostic)" },
+    { "sh_dialogdump",       (void *)h_sh_dialogdump, "print the engine dialog queue: id, button set and flag bytes (diagnostic)" },
     { "sh_listres",          (void *)h_sh_listres,  "<resource classname (ex:idMaterial)> <optional: filter> list all resources of a given type" },
     { "sh_alginfo",          (void *)h_alginfo,     "Prints CPU dispatcher info for the engine-math (algo) override layer." },
     { "sh_debugrender",      (void *)h_sh_debugrender,"Internal renderer-test mutators -- not for normal use" },

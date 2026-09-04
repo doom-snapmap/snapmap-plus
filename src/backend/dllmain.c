@@ -23,8 +23,10 @@
 #include "hook.h"
 #include "smoke.h"
 #include "rawmap.h"
+#include "map_package.h" /* map-embedded override packages: boot snapshot + load gate */
 #include "palette_guard.h"
 #include "palette_refresh.h"
+#include "engine_dialog.h"
 #include "../fault_shield/mapload_guards.h"   /* the two map-load / spawn game-defect guards */
 #include "strids.h"
 #include "overrides.h"
@@ -195,6 +197,20 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                 break;
             }
         }
+        /* The MAP-PACKAGE gate rides inside the DeserializeFromJson detour, so its
+         * immutable boot package snapshot must exist BEFORE that detour can fire.
+         * The snapshot is what "installed" means to the gate: a package copied to
+         * disk after this instant is NOT live in this process (the decl server's
+         * launch snapshot is equally immutable), and letting its map through
+         * would crash exactly as if it were absent. */
+        {
+            char mpkg_root[MAX_PATH];
+            if (sh_overrides_get_root(mpkg_root, sizeof mpkg_root))
+                sh_mpkg_boot_capture(mpkg_root);
+            else
+                backend_log("MPKG: boot capture SKIPPED -- no effective override root "
+                            "(maps declaring packages will be refused, never crashed)");
+        }
         sh_rawmap_swap_install(deser, deser_clean);
 
         /* the rawmap SAVE shadow (the INVERSE of the LOAD swap). Install the SerializeToJson
@@ -215,6 +231,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
             }
         }
         sh_rawmap_save_install(serialize, serialize_clean);
+        /* and the AUTHOR side of map packages: a saved map carries the packages it uses. */
+        sh_rawmap_embed_install(g_doom_base);
 
         /* the RELOAD-crash GUARD (palette_guard.c). After a heavy edit session (repeated create/delete of logic
          * entities), one entry in the editor's entity palette is left with a freed name string. On the next full
@@ -409,6 +427,12 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * made synchronously by the successful registration command on the
          * engine main thread. Unsupported builds refuse before any engine call. */
         sh_palette_refresh_install(results, db, g_doom_base);
+
+        /* The engine's own modal surface. Installed before the decl server so a
+         * package prompt raised by the very first map load already has it, and
+         * kept non-fatal: a refusal here only means the install flow falls back
+         * to the OS message box it used before. */
+        sh_engine_dialog_install(results, db, g_doom_base);
 
         /* The DYNAMIC DECL SERVER complements the file-shadow installed above. It snapshots local and
          * linked generated decls, then registers a private command and BufferCommandTexts it so DOOM's

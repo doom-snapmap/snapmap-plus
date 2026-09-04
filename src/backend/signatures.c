@@ -441,6 +441,31 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "41 8B 48 28 83 E9 01 48 63 C9 78 ?? 0F 1F 40 00 49 8B 40 20 48 8B 14 C8 "
       "C7 42 28 04 00 00 00",
       0x1801830u },
+    { "ResourceGenericLoad", /* void(idResource *decl [rcx]) -- the engine's generic decl (re)load
+                            * (0x17FF5F0). This is the function the manager lookup helper
+                            * (idResourceList::Load, 0x1800A40) runs after it clears the pending-load
+                            * bit (+0x2c & 0x02), and it performs the engine's OWN teardown before it
+                            * parses: 0x17FFDB0 destructs the decl in place (vtable slot 0 with the
+                            * no-free flag), has the owning resource list reconstruct it (owner vtable
+                            * +0x28) preserving id, name and flags, re-reads the source text (which
+                            * lands in the snapmap-plus file shadow), parses it with the type parser,
+                            * sets the has-source bit (+0x2c |= 0x04) and runs the post-parse virtual
+                            * (+0x50). So a re-parse through THIS function is never "over live
+                            * allocations" -- the old data is freed by the same code path every boot
+                            * parse uses.
+                            *
+                            * The decl server drives re-parses through DeclFind, which reaches this
+                            * function via idResourceList::Load; this direct pin exists as the
+                            * instrumented fallback for a decl whose pending bit survives that lookup.
+                            * Wildcards are the rip-relative cookie read and three rel32 calls; the
+                            * anchor is the 0x900-byte frame with the -2 EH sentinel at [rsp+0x40] plus
+                            * the vtable +0x10 owner fetch, which resolves UNIQUE.
+                            * DIRECT (our own reverse-engineering, 2026-08-27). */
+      "48 8B C4 57 48 81 EC 00 09 00 00 48 C7 44 24 40 FE FF FF FF 48 89 58 10 "
+      "48 89 70 18 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 F0 08 00 00 48 8B F9 "
+      "48 89 4C 24 38 48 8B 01 FF 50 10 48 8B C8 E8 ?? ?? ?? ?? 4C 8B C0 48 8B 57 08 "
+      "48 8B CF E8 ?? ?? ?? ?? 48 8B CF E8 ?? ?? ?? ??",
+      0x17FF5F0u },
     { "CmdExecuteBuffer",  /* idCmdSystemLocal::ExecuteCommandBuffer -- void(cmdSystem [rcx]). The
                             * public no-argument drain: it calls the worker (0x1AA46E0) twice, once with
                             * exec context 0 and once with 1, so both command text buffers
@@ -507,6 +532,40 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "Toast",
       "40 57 48 83 EC 20 48 8B F9 48 8B 89 F0 08 00 00",
       0xCFA0B0u },
+    /* --- the engine's own dialog surface (engine_dialog.c) ------------------
+     * ShowDialog builds default body text from the GDM id as a `#str_` key,
+     * then OVERWRITES it with the descriptor's own embedded idStr when that
+     * string is non-empty, and hands the result to the SWF menu object. That
+     * override is how a dialog carries our text through the engine's own
+     * layout and buttons instead of a Win32 message box. */
+    { "AddDialog",
+      "40 55 57 41 54 41 56 41 57 48 8D AC 24 F0 BC FF FF",
+      0xE643C0u },
+    /* The shell-level raise. The engine NEVER calls AddDialog directly: it goes
+     * through this, which additionally sets a flag on the shell's screen object
+     * (shell+0x18 -> +0xA8 = 1). Raising without that produces a dialog that
+     * draws correctly and ignores every keypress -- measured. */
+    { "AddDialogWrapper",
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B DA 48 8B F9 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 48 90 48 8B D3 48 8B 4F 08 E8 ?? ?? ?? ?? 48 8B 47 18",
+      0x17363A0u },
+    { "ShowDialog",
+      "48 8B C4 57 48 81 EC 80 00 00 00 48 C7 40 B8 FE FF FF FF 48 89 58 18 48 89 70 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 78 48 8B F2",
+      0xE6A260u },
+    /* idStr::operator=(const char *) on an ALREADY-CONSTRUCTED idStr. Distinct
+     * from IdStrCtor, which constructs into raw memory: the descriptor's string
+     * is already live, so assigning is the only correct operation on it. */
+    { "IdStrAssignCStr",
+      "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 40 48 8B FA",
+      0x19FD5F0u },
+    /* idMenuManager_Dialog::HandleDialogAction(mgr, params, action). Every
+     * button on every engine dialog arrives here and NOWHERE else: the button's
+     * callback object is the dispatcher's only caller, and it passes the action
+     * id the dialog was built with. Reading `action` here is how the engine
+     * itself reports which button the player pressed -- there is no answer byte
+     * anywhere in the descriptor to read instead. */
+    { "DialogAction",
+      "40 55 56 57 41 56 41 57 48 8D AC 24 50 79 FF FF B8 B0 87 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 38 FE FF FF FF",
+      0xE67BF0u },
     { "IdStrCtor",
       "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8D 05 ?? ?? ?? ?? 48 8B DA 48 89 01 48 8B F9",
       0x19FCEF0u },

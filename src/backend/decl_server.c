@@ -45,6 +45,7 @@
 #include "user_overrides.h"
 
 #define DS_INTERNAL_COMMAND     "snapmap_plus_decl_server_apply"
+#define DS_REARM_COMMAND        "snapmap_plus_decl_server_rearm"
 #define DS_MAX_CANDIDATES       512
 #define DS_MAX_DISCOVERED       (DS_MAX_CANDIDATES * 8)
 #define DS_MAX_DEPTH            16
@@ -67,6 +68,12 @@
  * calls the second. */
 #define DS_PINNED_BOOT_PROMOTE_RVA 0x1801830u
 #define DS_PINNED_CMD_EXECUTE_RVA  0x1AA46B0u
+/* The engine's generic decl (re)load, the function idResourceList::Load (0x1800A40) runs after
+ * clearing a pending-load bit. It performs the engine's own teardown-then-reload: 0x17FFDB0
+ * destructs the decl in place and the owning list reconstructs it (id/name/flags preserved)
+ * before the source is re-read and re-parsed. Pinned as the instrumented fallback for the
+ * runtime refresh; the primary route is the ordinary DeclFind lookup. */
+#define DS_PINNED_GENERIC_LOAD_RVA 0x17FF5F0u
 /* The resource level the map-transition purge tests, and the value that escapes it. This service
  * READS these and never writes them: the whole point of publishing before the engine's promotion is
  * that the engine does the writing. The read exists so a live run can PROVE the ordering worked
@@ -80,6 +87,19 @@
 #define DS_BOOT_PROMOTE_STOLEN_BYTES 15u
 #define DS_DECL_STATE_OFFSET    0x2cu
 #define DS_DECL_IN_PROGRESS    0x01u
+/* "pending load": the manager lookup helper (0x1800A40) clears this and runs the
+ * generic load (0x17FF5F0), so setting it makes the next ordinary lookup re-read the
+ * decl through the file shadow and re-parse it with its own type parser. */
+#define DS_DECL_PENDING_LOAD   0x02u
+/* "generic load acquired a source": the decl already holds real parsed data. A re-load is
+ * still safe THROUGH THE ENGINE'S OWN PATH, because the generic load (0x17FF5F0) tears the
+ * old data down first -- 0x17FFDB0 destructs the decl in place and the owning resource list
+ * reconstructs it, preserving id, name and flags -- so the parser never runs over live
+ * allocations. What a re-load cannot repair is CONSUMERS holding pointers into the old data,
+ * which is why the runtime refresh only re-parses at the browser with no map loaded: the
+ * measured wild jumps (armed sounds draining mid-gameplay; reloadDecls under a live map)
+ * were both dangling-consumer failures, not parser re-entry. */
+#define DS_DECL_HAS_SOURCE     0x04u
 #define DS_DECL_ENTITYDEF_OFFSET 0x1c8u
 
 enum {
@@ -105,6 +125,7 @@ typedef void *(*decl_find_fn)(void *type_manager, const char *logical_name,
                               unsigned char make_default);
 typedef int (*decl_palette_refresh_fn)(void);
 typedef void (*resource_promote_static_fn)(void);
+typedef void (*resource_generic_load_fn)(void *decl);
 typedef void (*cmd_execute_buffer_fn)(void *cmdsys);
 typedef HANDLE (WINAPI *ds_find_first_fn)(LPCSTR pattern, LPWIN32_FIND_DATAA found);
 typedef BOOL (WINAPI *ds_find_next_fn)(HANDLE search, LPWIN32_FIND_DATAA found);
@@ -236,7 +257,48 @@ enum {
 };
 
 static volatile LONG g_state = DS_STATE_NEW;
+
+/* idResource level, the field the map-transition purge tests. Declared here because the
+ * materializer (far above the re-arm driver) also writes it -- see the REUSED-decl note. */
+#define DS_RES_LEVEL_OFF 0x28
+
+/* Set for the duration of a RUNTIME registration pass. Boot passes leave it clear: at boot
+ * every identity is created fresh and the engine's own promotion covers them all. */
+static volatile LONG g_rearm_is_runtime;
+static volatile LONG g_rearm_touched_promoted;
+static volatile LONG g_rearm_marked_pending;
+static volatile LONG g_rearm_left_loaded;
+static volatile LONG g_rearm_drain_faults;
+static volatile LONG g_rearm_shadow_reparsed;
 static volatile LONG g_registration_succeeded = 0;
+
+/* Identities admitted by the most recent COMPLETED pass (boot or runtime). A runtime pass
+ * compares its fresh snapshot against this to find identities that are NEWLY SERVED -- names
+ * no package was publishing when the engine could first have parsed them. Those are the stale
+ * ones: the engine parses a decl once and never re-opens it, so a live object that predates
+ * its package's install keeps pre-install content (blacklist-emptied or base-game bytes) for
+ * the whole process. Measured casualty: the mid-session cyberdemon's FSM states, conductor
+ * and gameplay md6Defs all classified SHADOWED-live on the runtime pass and kept parked-boot
+ * content, so the demon spawned but never engaged. */
+typedef struct ds_pass_identity {
+    char type[SH_DECL_SERVER_TYPE_CAP];
+    char name[SH_DECL_SERVER_NAME_CAP];
+} ds_pass_identity;
+static ds_pass_identity *g_prev_identities;
+static size_t g_prev_identity_count;
+
+/* Every decl THIS runtime pass marked pending-load (bit 0x02), so a cleanup sweep after the
+ * pass can prove none stayed armed: a decl left pending re-parses during the next MAP LOAD,
+ * under a live render thread, which is the measured failure the browser-instant drain
+ * exists to avoid. */
+typedef struct ds_runtime_mark {
+    void *decl;
+    int candidate;
+    int shadowed;  /* 1 = newly served SHADOWED-live refresh, 0 = empty reused placeholder */
+} ds_runtime_mark;
+static ds_runtime_mark g_rt_marks[DS_MAX_CANDIDATES];
+static int g_rt_mark_count;
+
 static ds_candidate *g_candidates;
 static int g_candidate_count;
 static int g_capture_refused;
@@ -252,6 +314,7 @@ static idstr_dtor_fn g_idstr_dtor;
 static decl_source_find_fn g_find_source;
 static decl_find_fn g_find_decl;
 static cmd_execute_buffer_fn g_execute_commands;
+static resource_generic_load_fn g_generic_load;
 static resource_promote_static_fn g_boot_promotion_original;
 static volatile LONG g_boot_promotion_entered;
 static char g_probe_type[SH_DECL_SERVER_TYPE_CAP];
@@ -1176,9 +1239,14 @@ static int ds_publish_missing_table(int missing_count)
         entries[at].body_length = candidate->body_length;
         at++;
     }
+    /* A runtime pass MERGES over the published table; only a boot pass replaces it. Replacing
+     * on a re-arm drops identities an earlier pass published -- including packages this pass
+     * never looked at -- and their decltree source stops resolving. */
     published = at == missing_count &&
-                sh_overrides_internal_decl_table_install(entries,
-                                                         (size_t)missing_count);
+                (InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)
+                     ? sh_overrides_internal_decl_table_merge(entries, (size_t)missing_count)
+                     : sh_overrides_internal_decl_table_install(entries,
+                                                                (size_t)missing_count));
     HeapFree(GetProcessHeap(), 0, entries);
     return published;
 }
@@ -1551,11 +1619,307 @@ static int ds_materialize_identity(ds_materialize_context *context, int index)
                                       reason);
     }
     if (made_default && context->materialized) (*context->materialized)++;
+
+    /* LIFETIME OF A REUSED DECL. A registry watermark/delta captures what this pass CREATED,
+     * which is exact -- but a runtime pass also REUSES decls that already existed, typically
+     * makeDefault placeholders the engine minted when something asked for the name before the
+     * package was installed. Those predate the watermark, so the delta misses them, and they
+     * stay map-scoped while the content we just promoted points straight at them. The next
+     * map transition frees them and the teardown dereferences a dangling decl:
+     *
+     *     AV read, RIP rva 0x17B42C4 (decl manager), caller rva 0x17C7BCD -- inside UnloadMap
+     *
+     * which is the sixth failure recorded above ("a survivor enumerated by teardown after its
+     * peers were freed"), reached from the other side. So raise every decl this pass touched,
+     * not just the ones it created. Boot never needs this because no placeholder exists yet.
+     *
+     * Read-only if the level is already permanent; SEH-guarded because a torn decl must not
+     * take the pass down. */
+    if (InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)) {
+        __try {
+            unsigned int *lvl = (unsigned int *)((unsigned char *)decl + DS_RES_LEVEL_OFF);
+            if (*lvl != 4u) { *lvl = 4u; InterlockedIncrement(&g_rearm_touched_promoted); }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { /* skip a torn decl */ }
+
+        /* The re-parse of an empty reused placeholder is no longer requested here. It is a
+         * whole-pass protocol now: ds_runtime_premark marks EVERY refresh target pending-load
+         * before the first drain, so the find_decl above has already reloaded this decl --
+         * and any decl its parse referenced -- through the manager helper (0x1800A40). See
+         * the premark comment for why the per-decl mark+drain it replaces could bake empty
+         * state into cross-references. */
+    }
+
     ds_log(made_default ? "MATERIALIZED" : "REUSED", candidate->source,
            made_default
                ? "native make-default DeclFind produced a live decl for the registered identity"
                : "registered identity already had a live decl");
     return 1;
+}
+
+/* True when the previous completed pass already admitted this identity -- i.e. its bytes were
+ * already being served when the engine could first have parsed it, so its live object holds
+ * correct content and may have live consumers (a built editor palette, the menu shell). */
+static int ds_prev_identities_contain(const char *type, const char *name)
+{
+    size_t i;
+    for (i = 0; i < g_prev_identity_count; i++)
+        if (_stricmp(g_prev_identities[i].type, type) == 0 &&
+            _stricmp(g_prev_identities[i].name, name) == 0)
+            return 1;
+    return 0;
+}
+
+/* Replace the retained identity set with this pass's snapshot. Runs only when a pass
+ * completes; a FAILED pass keeps the older set so a retry still treats the failed package's
+ * identities as newly served. */
+static void ds_record_pass_identities(void)
+{
+    ds_pass_identity *fresh = NULL;
+    size_t recorded = 0;
+    int i;
+
+    if (g_candidate_count > 0)
+        fresh = (ds_pass_identity *)HeapAlloc(
+            GetProcessHeap(), HEAP_ZERO_MEMORY,
+            (size_t)g_candidate_count * sizeof(fresh[0]));
+    if (g_candidate_count > 0 && !fresh)
+        backend_log("decl-server: pass identity set allocation failed; the next runtime "
+                    "pass will treat every shadowed identity as newly served");
+    if (fresh) {
+        for (i = 0; i < g_candidate_count; i++) {
+            strcpy_s(fresh[recorded].type, sizeof(fresh[recorded].type), g_candidates[i].type);
+            strcpy_s(fresh[recorded].name, sizeof(fresh[recorded].name), g_candidates[i].name);
+            recorded++;
+        }
+    }
+    if (g_prev_identities) HeapFree(GetProcessHeap(), 0, g_prev_identities);
+    g_prev_identities = fresh;
+    g_prev_identity_count = fresh ? recorded : 0;
+}
+
+/* PRE-MARK, ALL AT ONCE, BEFORE ANY DRAIN. Two populations need a re-parse on a runtime
+ * pass:
+ *
+ *   1. Empty reused placeholders: objects the registration scan minted for MISSING
+ *      identities before their bytes were readable. The one-at-a-time mark+drain this
+ *      replaces handled these but left a hole: while decl X drained, X's parse-time
+ *      references resolved against decls later in the order that were still unmarked and
+ *      empty, so X could bake empty inherited state. At boot the same lookup finds NO
+ *      object and the engine lazily creates-and-parses from the source record, which is
+ *      why boot never had the problem. With every decl marked before the first drain, the
+ *      manager helper (0x1800A40) reloads any referenced decl on demand, mid-parse,
+ *      exactly like the boot lazy path.
+ *
+ *   2. Newly served SHADOWED-live identities: live objects that predate the package
+ *      install. The engine parsed them from whatever was reachable at boot -- the
+ *      cut-content blacklist emptied the cyberdemon FSM states and gameplay md6Defs, and
+ *      the conductor kept stale base-game bytes -- and it never re-opens a parsed decl on
+ *      its own. Only identities absent from the previous pass's snapshot qualify, so a
+ *      package already being served (correct bytes, possibly live consumers) is never
+ *      re-parsed. Bit 0x04 is deliberately ignored for this population: holding loaded
+ *      data is exactly the symptom being repaired. SHADOWED-source candidates are left
+ *      alone: classification proved no live object existed without a source record, so
+ *      the first consumer lookup parses fresh through the shadow anyway.
+ *
+ * Bit 0x01 (parse in progress) disqualifies either way.
+ *
+ * NO TYPE GATE. An earlier revision deferred the stale-shadowed re-parse to the engine's next
+ * natural lookup and therefore had to whitelist types whose natural lookup happens at
+ * map-load time (entityDef, md6Def) -- an armed sound drained mid-gameplay and died at
+ * rip=0, and aiFSMManager was excluded because a mark that never drains is dead weight. That
+ * made the refresh type-specific and left every already-looked-up decl stale forever. The
+ * protocol now FORCES the drain itself, immediately, at the browser with no map loaded --
+ * the same instant where the wholesale empty re-parse is measured safe -- through the
+ * engine's own lookup path (DeclFind -> idResourceList::Load 0x1800A40 -> generic load
+ * 0x17FF5F0), which tears the old data down with the engine's own destruct-in-place
+ * (0x17FFDB0) before parsing. WHEN the engine would next read a type no longer matters, so
+ * no type is special. */
+static void ds_runtime_premark(ds_materialize_context *context)
+{
+    int i;
+
+    g_rt_mark_count = 0;
+    for (i = 0; i < g_candidate_count; i++) {
+        ds_candidate *candidate = &g_candidates[i];
+        void *type_manager = NULL;
+        void *decl = NULL;
+        int shadowed_refresh = 0;
+        int marked = 0;
+
+        if (candidate->outcome == DS_CANDIDATE_MISSING) {
+            shadowed_refresh = 0;
+        } else if (candidate->outcome == DS_CANDIDATE_SHADOWED &&
+                   candidate->shadow_kind == DS_SHADOW_LIVE &&
+                   !ds_prev_identities_contain(candidate->type, candidate->name)) {
+            shadowed_refresh = 1;
+        } else {
+            continue;
+        }
+        __try {
+            type_manager = context->type_by_name(context->registry, candidate->type);
+            if (type_manager)
+                decl = context->find_decl(type_manager, candidate->name, 0);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            decl = NULL;
+        }
+        if (!decl) continue;
+        __try {
+            unsigned char *st = (unsigned char *)decl + DS_DECL_STATE_OFFSET;
+            if ((*st & DS_DECL_IN_PROGRESS) != 0) {
+                marked = 0;
+            } else if (!shadowed_refresh && (*st & DS_DECL_HAS_SOURCE) != 0) {
+                InterlockedIncrement(&g_rearm_left_loaded);
+            } else {
+                *st = (unsigned char)(*st | DS_DECL_PENDING_LOAD);
+                marked = 1;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            marked = 0;
+        }
+        if (marked && g_rt_mark_count < DS_MAX_CANDIDATES) {
+            g_rt_marks[g_rt_mark_count].decl = decl;
+            g_rt_marks[g_rt_mark_count].candidate = i;
+            g_rt_marks[g_rt_mark_count].shadowed = shadowed_refresh;
+            g_rt_mark_count++;
+            if (!shadowed_refresh)
+                InterlockedIncrement(&g_rearm_marked_pending);
+        }
+    }
+}
+
+/* DRAIN NOW, AT THE BROWSER, THROUGH THE ENGINE'S OWN PATH. An earlier revision left the
+ * stale-shadowed marks ARMED for the engine's next natural lookup, on the reading of a first
+ * live run that a synthetic drain skips a decl that already holds loaded data. Direct
+ * decompilation of the drain path refutes that reading: idResourceList::Load (0x1800A40)
+ * gates the drain on the pending bit, the decl thread, and a depth-or-level-4 guard -- it
+ * never tests the has-source bit -- and the generic load it runs (0x17FF5F0) begins by
+ * tearing the old data down with the engine's own destruct-in-place (0x17FFDB0: vtable slot
+ * 0 with the no-free flag, then the owning list reconstructs the object preserving id, name
+ * and flags). So a forced drain IS the engine's teardown-then-reload, and running it here --
+ * browser, no map loaded, the instant where the wholesale empty re-parse is measured safe --
+ * removes the dependence on each type's natural read instant that made lazy arming
+ * type-specific and left init-read types (aiFSMManager) unreachable.
+ *
+ * Order matters twice. Every mark is promoted to level 4 BEFORE the first drain, because
+ * Load's depth guard (depth == 0 || level == 4) is what lets a draining decl's parse-time
+ * references drain their own pending targets mid-parse, exactly like the boot lazy path.
+ * And the drain is attempted through find_decl first -- the ordinary lookup -- so name
+ * normalization, redirect handling and the post-lookup virtual all run as the engine runs
+ * them. Measured live (2026-08-27): the lookup returns the object but leaves the mark
+ * armed, because the drain inside Load is additionally gated on a stored decl-thread id
+ * (0x146dde190) that this pass's thread does not match -- so the pinned generic load,
+ * driven directly after clearing the bit exactly as Load would, is the route that actually
+ * re-parses. All 22 stale decls of the first full run (sounds, aiFSMManager, md6Defs, the
+ * conductor entityDef, snapPropertyInspector types) re-opened their sources through the
+ * file shadow and re-parsed with zero faults. */
+static void ds_runtime_reload_shadowed(ds_materialize_context *context)
+{
+    int i;
+
+    for (i = 0; i < g_rt_mark_count; i++) {
+        void *decl;
+
+        if (!g_rt_marks[i].shadowed) continue;
+        decl = g_rt_marks[i].decl;
+        /* Same lifetime insurance the reused path gets: a refreshed decl must not be freed
+         * by the next map transition while promoted content points at it. Doing this for
+         * every mark before the first drain also satisfies Load's nested-drain guard. */
+        __try {
+            unsigned int *lvl = (unsigned int *)((unsigned char *)decl + DS_RES_LEVEL_OFF);
+            if (*lvl != 4u) { *lvl = 4u; InterlockedIncrement(&g_rearm_touched_promoted); }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { }
+    }
+
+    for (i = 0; i < g_rt_mark_count; i++) {
+        ds_candidate *candidate;
+        void *decl;
+        unsigned char state = 0;
+        int fault = 0;
+
+        if (!g_rt_marks[i].shadowed) continue;
+        candidate = &g_candidates[g_rt_marks[i].candidate];
+        decl = g_rt_marks[i].decl;
+        __try {
+            void *type_manager =
+                context->type_by_name(context->registry, candidate->type);
+            if (type_manager)
+                (void)context->find_decl(type_manager, candidate->name, 0);
+            state = *((unsigned char *)decl + DS_DECL_STATE_OFFSET);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            fault = 1;
+        }
+        if (fault) {
+            InterlockedIncrement(&g_rearm_drain_faults);
+            ds_log("DRAIN-FAULT", candidate->source,
+                   "forced re-parse raised an engine exception; pending mark will be swept");
+            continue;
+        }
+        if ((state & DS_DECL_PENDING_LOAD) != 0 && g_generic_load) {
+            /* The lookup did not drain the mark. Run the engine's generic load directly,
+             * clearing the bit first, exactly as idResourceList::Load does. Measured live
+             * 2026-08-27: this is the COMMON route, not an exception -- all 22 stale decls
+             * of the first full run kept their mark through the ordinary lookup (the drain
+             * inside Load is gated on a stored decl-thread id at 0x146dde190, and the pass
+             * evidently does not run on that thread) and every one re-opened its source
+             * through the file shadow and re-parsed when driven through this call, with
+             * zero faults. */
+            ds_log("DRAIN-DIRECT", candidate->source,
+                   "the ordinary lookup left the mark armed (decl-thread gate); running the engine generic load directly");
+            __try {
+                unsigned char *st = (unsigned char *)decl + DS_DECL_STATE_OFFSET;
+                *st = (unsigned char)(*st & ~DS_DECL_PENDING_LOAD);
+                g_generic_load(decl);
+                state = *st;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                fault = 1;
+            }
+            if (fault) {
+                InterlockedIncrement(&g_rearm_drain_faults);
+                ds_log("DRAIN-FAULT", candidate->source,
+                       "direct generic load raised an engine exception");
+                continue;
+            }
+        }
+        if ((state & DS_DECL_PENDING_LOAD) == 0) {
+            char detail[160];
+            InterlockedIncrement(&g_rearm_shadow_reparsed);
+            /* The state byte is reported, not interpreted: a healthy decl freshly parsed
+             * through make-default also reads 0x00 here, so the absence of the has-source
+             * bit says nothing about whether the parse consumed the package's bytes. The
+             * adjacent file-shadow FIRED line is the byte evidence. */
+            _snprintf_s(detail, sizeof detail, _TRUNCATE,
+                        "stale shadowed identity re-parsed in place at the browser (post-drain state=0x%02x)",
+                        (unsigned)state);
+            ds_log("RELOADED", candidate->source, detail);
+        } else {
+            ds_log("DRAIN-FAILED", candidate->source,
+                   "pending mark survived both the lookup and the direct generic load; it will be swept, and this identity stays stale");
+        }
+    }
+}
+
+/* Disarm every stray. A mark that survives to here -- reused-empty or shadowed -- means its
+ * planned browser-instant drain never consumed it, and a decl left pending re-parses at the
+ * engine's next lookup, which for an arbitrary type can be mid-gameplay under a live map:
+ * the measured wild-jump hazard. Clear it so nothing unplanned re-parses later; the identity
+ * stays stale and the count says so. Returns how many were cleared -- zero on every healthy
+ * pass. */
+static int ds_runtime_clear_stray_pending(void)
+{
+    int i, cleared = 0;
+
+    for (i = 0; i < g_rt_mark_count; i++) {
+        void *decl = g_rt_marks[i].decl;
+        __try {
+            unsigned char *st = (unsigned char *)decl + DS_DECL_STATE_OFFSET;
+            if ((*st & DS_DECL_PENDING_LOAD) != 0) {
+                *st = (unsigned char)(*st & ~DS_DECL_PENDING_LOAD);
+                cleared++;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { }
+    }
+    g_rt_mark_count = 0;
+    return cleared;
 }
 
 typedef struct ds_edge_report {
@@ -1688,6 +2052,11 @@ static int ds_materialize_missing_sedefs(void *registry,
     context.find_decl = find_decl;
     context.materialized = materialized;
 
+    /* A runtime pass refreshes stale pre-existing decls with the engine's own pending-load
+     * mechanism; every mark must exist before the first drain (see ds_runtime_premark). */
+    if (InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0))
+        ds_runtime_premark(&context);
+
     for (i = 0; i < g_candidate_count; i++) {
         ds_candidate *candidate = &g_candidates[i];
         if (candidate->outcome != DS_CANDIDATE_MISSING ||
@@ -1714,6 +2083,8 @@ static int ds_materialize_missing_sedefs(void *registry,
             continue;
         if (!ds_materialize_root(&context, i)) return 0;
     }
+    if (InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0))
+        ds_runtime_reload_shadowed(&context);
     return 1;
 }
 
@@ -1809,6 +2180,23 @@ static int ds_scan_and_materialize_missing(
         return 0;
     }
     {
+        /* Registration only reaches the source catalog, which the engine stops
+         * consulting once a map starts loading. Keep the published identities
+         * answerable across that boundary. This is not allowed to fail the
+         * registration that already succeeded.
+         *
+         * THIS MUST RUN BEFORE THE PALETTE REFRESH, and the ordering is the whole point: while
+         * this install sat AFTER the palette block, a `return 0` from that block skipped it
+         * silently on exactly the passes that need it. */
+        char owned[SH_DECL_SERVER_TYPE_CAP + SH_DECL_SERVER_NAME_CAP + 32];
+        char published[SH_DECL_SERVER_TYPE_CAP + SH_DECL_SERVER_NAME_CAP + 32];
+        if (ds_probe_path(DS_CANDIDATE_SHADOWED, owned, sizeof(owned)) &&
+            ds_probe_path(DS_CANDIDATE_MISSING, published, sizeof(published)))
+            (void)sh_decl_visibility_install(g_module_base, owned, published);
+        else
+            backend_log("decl-visibility REFUSED: no owned/published candidate pair was available to validate the probe");
+    }
+    {
         int palette_ok = 0;
         int palette_fault = 0;
         __try {
@@ -1821,23 +2209,73 @@ static int ds_scan_and_materialize_missing(
             return 0;
         }
     }
-    {
-        /* Registration only reaches the source catalog, which the engine stops
-         * consulting once a map starts loading. Keep the published identities
-         * answerable across that boundary. This is not allowed to fail the
-         * registration that already succeeded. */
-        char owned[SH_DECL_SERVER_TYPE_CAP + SH_DECL_SERVER_NAME_CAP + 32];
-        char published[SH_DECL_SERVER_TYPE_CAP + SH_DECL_SERVER_NAME_CAP + 32];
-        if (ds_probe_path(DS_CANDIDATE_SHADOWED, owned, sizeof(owned)) &&
-            ds_probe_path(DS_CANDIDATE_MISSING, published, sizeof(published)))
-            (void)sh_decl_visibility_install(g_module_base, owned, published);
-        else
-            backend_log("decl-visibility REFUSED: no owned/published candidate pair was available to validate the probe");
-    }
     return 1;
 }
 
 #ifdef SH_DECL_SERVER_TESTING
+void sh_decl_server_test_set_runtime(int active)
+{
+    InterlockedExchange(&g_rearm_is_runtime, active ? 1 : 0);
+}
+
+void sh_decl_server_test_set_generic_load(sh_decl_server_test_generic_load_fn fn)
+{
+    g_generic_load = (resource_generic_load_fn)fn;
+}
+
+void sh_decl_server_test_reset_runtime_state(void)
+{
+    if (g_prev_identities) {
+        HeapFree(GetProcessHeap(), 0, g_prev_identities);
+        g_prev_identities = NULL;
+    }
+    g_prev_identity_count = 0;
+    g_rt_mark_count = 0;
+    g_generic_load = NULL;
+    InterlockedExchange(&g_rearm_touched_promoted, 0);
+    InterlockedExchange(&g_rearm_marked_pending, 0);
+    InterlockedExchange(&g_rearm_left_loaded, 0);
+    InterlockedExchange(&g_rearm_drain_faults, 0);
+    InterlockedExchange(&g_rearm_shadow_reparsed, 0);
+}
+
+int sh_decl_server_test_add_prev_identity(const char *type, const char *name)
+{
+    ds_pass_identity *grown;
+    if (!type || !name) return 0;
+    grown = (ds_pass_identity *)HeapAlloc(
+        GetProcessHeap(), HEAP_ZERO_MEMORY,
+        (g_prev_identity_count + 1) * sizeof(grown[0]));
+    if (!grown) return 0;
+    if (g_prev_identities) {
+        memcpy(grown, g_prev_identities, g_prev_identity_count * sizeof(grown[0]));
+        HeapFree(GetProcessHeap(), 0, g_prev_identities);
+    }
+    strcpy_s(grown[g_prev_identity_count].type, sizeof(grown[0].type), type);
+    strcpy_s(grown[g_prev_identity_count].name, sizeof(grown[0].name), name);
+    g_prev_identities = grown;
+    g_prev_identity_count++;
+    return 1;
+}
+
+void sh_decl_server_test_runtime_counters(long *marked_pending, long *left_loaded,
+                                          long *shadow_reparsed, long *drain_faults)
+{
+    if (marked_pending)
+        *marked_pending = (long)InterlockedCompareExchange(&g_rearm_marked_pending, 0, 0);
+    if (left_loaded)
+        *left_loaded = (long)InterlockedCompareExchange(&g_rearm_left_loaded, 0, 0);
+    if (shadow_reparsed)
+        *shadow_reparsed = (long)InterlockedCompareExchange(&g_rearm_shadow_reparsed, 0, 0);
+    if (drain_faults)
+        *drain_faults = (long)InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0);
+}
+
+int sh_decl_server_test_clear_stray_pending(void)
+{
+    return ds_runtime_clear_stray_pending();
+}
+
 int sh_decl_server_test_materialize_missing_sedefs(
     const sh_decl_server_test_materialize_item *items, size_t count,
     void *registry, sh_decl_server_test_type_by_name_fn type_by_name,
@@ -2018,6 +2456,7 @@ static void __cdecl ds_apply_command(void)
                     "decl-server table not required: 0 MISSING, %d SHADOWED, %d REFUSED; no decltree entries published",
                     shadowed, refused);
         backend_log(line);
+        ds_record_pass_identities();
         InterlockedExchange(&g_state, DS_STATE_DONE);
         ds_free_candidates();
         return;
@@ -2035,7 +2474,7 @@ static void __cdecl ds_apply_command(void)
         int registered = 0;
         int failed = 0;
         int materialization_failed = 0;
-        int palette_skipped = 0;
+        int palette_declined = 0;
         int materialized = 0;
         int failure_phase = DS_PHASE_FAILURE_NONE;
         const char *failed_source = NULL;
@@ -2050,22 +2489,17 @@ static void __cdecl ds_apply_command(void)
                 materialization_failed = 1;
                 backend_log("decl-server FAILED: native source scans completed but a new snapEditorEntityDef could not be materialized; no palette refresh; no retry");
             } else {
-                /* NOT TERMINAL ANY MORE.
+                /* NOT TERMINAL.
                  *
-                 * A first draft of this predicted the rebuild would REFUSE during Init because the
-                 * editor did not exist yet. That prediction was wrong, and the live log says so:
-                 * "the palette rebuild was completed". The editor singleton is a STATIC object at a
-                 * fixed data RVA (0x3056748) with the palette embedded at +0x20660, so its vtable
-                 * (0x20499A0) is written by CRT static initialization, long before Init -- and that
-                 * vtable identity is exactly what palette_refresh validates. The object is
-                 * constructed from the start; what does not exist yet is a POPULATED roster.
+                 * The rebuild does run at boot: the editor singleton is a STATIC object at a fixed
+                 * data RVA (0x3056748) with the palette embedded at +0x20660, so its vtable
+                 * (0x20499A0) is written by CRT static initialization long before Init, and that
+                 * vtable identity is exactly what palette_refresh validates.
                  *
-                 * So the rebuild does run, against a registry publication has just extended, and it
-                 * is simply no longer load-bearing: publication now precedes any roster the editor
-                 * builds for real. That is why a refusal must not be terminal -- on another build or
-                 * another timing it would discard a registration that completely succeeded, in
-                 * order to report the absence of something nothing depends on. */
-                palette_skipped = 1;
+                 * A decline here therefore means the service REFUSED -- an integrity verdict on the
+                 * engine objects it calls into, named in its own log line -- and it must not
+                 * discard a registration that otherwise completely succeeded. */
+                palette_declined = 1;
             }
         }
         if (failed) {
@@ -2086,11 +2520,11 @@ static void __cdecl ds_apply_command(void)
         } else {
             char line[448];
             _snprintf_s(line, sizeof(line), _TRUNCATE,
-                        "decl-server registration succeeded: %d MISSING registered in dependency order, %d live objects materialized, %d of them new editor entities held to the native palette contract, %d SHADOWED, %d REFUSED; published before the engine boot promotion, so the palette rebuild was %s",
+                        "decl-server registration succeeded: %d MISSING registered in dependency order, %d live objects materialized, %d of them new editor entities held to the native palette contract, %d SHADOWED, %d REFUSED; the entity-palette rebuild that makes these types nameable by a loading map was %s",
                         registered, materialized, ds_admitted_root_count(),
                         shadowed, refused,
-                        palette_skipped ? "not needed (the editor had not built one yet)"
-                                        : "completed");
+                        palette_declined ? "DECLINED (see the palette-refresh line above)"
+                                         : "completed");
             backend_log(line);
             /* Keep one published identity addressable past ds_free_candidates so the caller can
              * read its resource level back after the engine's promotion returns. Identity only --
@@ -2101,6 +2535,7 @@ static void __cdecl ds_apply_command(void)
                 strcpy_s(g_probe_name, sizeof(g_probe_name), g_candidates[i].name);
                 break;
             }
+            ds_record_pass_identities();
             InterlockedExchange(&g_registration_succeeded, 1);
             InterlockedExchange(&g_state, DS_STATE_DONE);
         }
@@ -2164,6 +2599,329 @@ static void __cdecl ds_apply_command(void)
  * called unconditionally on the way out, and a failure stays terminal exactly as it would at
  * RUNNING. The worst outcome is a launch with no published content -- never a launch that does not
  * happen. */
+/* RUNTIME RE-ARM -- the after-boot counterpart of ds_publish_before_boot_promotion.
+ *
+ * Everything registration does is a call on the engine main thread; none of it is
+ * intrinsically boot-only. The reason the service runs at boot is the PROMOTION -- content
+ * alive when the engine's whole-registry pass (0x1801830) runs becomes level 4 and can never
+ * be purged. After boot, newly registered content is born at whatever level the idResource
+ * constructor picks (1 or 2), and the map-transition purge frees it by level alone.
+ *
+ * So this function registers and stops there. It does NOT promote. Promotion is a separate,
+ * measurable step performed against a registry watermark/delta, because the six failed
+ * attempts recorded above all died by coupling the two and guessing at a closure the engine
+ * does not record.
+ *
+ * Runs on the engine main thread (it is an engine command). Every step is SEH-guarded by the
+ * callee; a failure leaves the service FAILED and the launch otherwise untouched. */
+/* Set for the duration of a RUNTIME registration pass. Boot passes leave it clear: at boot
+ * every identity is created fresh and the engine's own promotion covers them all. */
+/* Registry watermark/delta promotion, defined below next to the re-arm driver. */
+static int  ds_res_watermark(void);
+static void ds_res_promote_delta(unsigned char level);
+
+static void __cdecl ds_rearm_command(void)
+{
+    char line[192];
+    unsigned long packages;
+
+    /* ONE PASS, synchronously.
+     *
+     * This used to be split in two, on the reading that the cut-content gates are cvars and
+     * "a cvar set is QUEUED, not immediate" -- so phase 1 prepared and returned to let the
+     * engine drain on a frame boundary, and phase 2 registered afterwards. The measured
+     * failure behind that split was real (297 REFUSED, materialization terminal), but the
+     * reason recorded for it was not: `sh_package_requirements_rearm` is handed
+     * `g_execute_commands` and runs the engine's OWN command-buffer drain itself, exactly as
+     * the boot path does. The gates are live when it returns. Nothing has to wait for a frame.
+     *
+     * Splitting it cost the player an entire extra map load: the install could not finish
+     * inside the flow that triggered it, so the map had to be opened a second time. Merging it
+     * is what lets one action be one action. */
+    {
+        LONG st = InterlockedCompareExchange(&g_state, 0, 0);
+        if (st != DS_STATE_DONE && st != DS_STATE_FAILED) {
+            backend_log("decl-server RE-ARM refused: a pass is in flight");
+            return;
+        }
+        packages = sh_overrides_rescan_packages();
+        {
+            char rr[MAX_PATH];
+            if (sh_overrides_get_root(rr, sizeof rr)) {
+                (void)sh_resource_bridge_recapture(rr);
+                /* Synchronous: this applies the gates AND drains them before returning. */
+                if (!sh_package_requirements_rearm(rr, (void *)g_execute_commands,
+                                                   sh_user_overrides_enabled_for_launch()))
+                    backend_log("decl-server RE-ARM: package requirements were not applied; "
+                                "cut-content packages will fail to materialize");
+            }
+        }
+        /* Reopen the table's STATE so a second publication is allowed, but keep its CONTENTS:
+         * the runtime publish merges over them, which is what stops a re-arm from dropping
+         * identities an earlier pass published. Retiring the contents would defeat that. */
+        sh_overrides_internal_decl_table_reopen();
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "decl-server RE-ARM: %u package(s) visible, gates applied and drained; "
+                    "registering in the same pass", (unsigned)packages);
+        backend_log(line);
+    }
+
+    {
+        /* A previous pass that ended FAILED must not block the service forever -- the usual
+         * cause is a transient gate, not a broken install. */
+        LONG st = InterlockedCompareExchange(&g_state, DS_STATE_INSTALLING, DS_STATE_DONE);
+        if (st != DS_STATE_DONE)
+            st = InterlockedCompareExchange(&g_state, DS_STATE_INSTALLING, DS_STATE_FAILED);
+        if (st != DS_STATE_DONE && st != DS_STATE_FAILED) {
+            backend_log("decl-server RE-ARM refused: a pass is in flight");
+            return;
+        }
+    }
+    InterlockedExchange(&g_registration_succeeded, 0);
+    ds_free_candidates();
+
+    if (!ds_capture_snapshot()) {
+        backend_log("decl-server RE-ARM refused: fresh snapshot capture failed");
+        InterlockedExchange(&g_state, DS_STATE_FAILED);
+        ds_free_candidates();
+        return;
+    }
+    if (g_candidate_count == 0) {
+        backend_log("decl-server RE-ARM: nothing to do (no candidates in the fresh snapshot)");
+        InterlockedExchange(&g_state, DS_STATE_DONE);
+        ds_free_candidates();
+        return;
+    }
+
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "decl-server RE-ARM: %u package(s) visible, fresh snapshot has %u candidate(s) "
+                "-- registering at RUNTIME, after the boot promotion, so new content is born "
+                "map-scoped and needs an explicit lifetime",
+                (unsigned)packages, (unsigned)g_candidate_count);
+    backend_log(line);
+
+    InterlockedExchange(&g_state, DS_STATE_ARMED);
+    if (InterlockedCompareExchange(&g_state, DS_STATE_QUEUED, DS_STATE_ARMED) != DS_STATE_ARMED) {
+        backend_log("decl-server RE-ARM: lost the ARMED -> QUEUED claim; aborting this pass");
+        return;
+    }
+
+    /* Wrap the pass in a registry watermark. The two walks sit as tightly around
+     * ds_apply_command as they can, so the delta is what THIS pass created and nothing else --
+     * that is the closure six prior promotion attempts had to guess at. */
+    {
+        int marked = ds_res_watermark();
+        char tline[288];
+        InterlockedExchange(&g_rearm_touched_promoted, 0);
+        InterlockedExchange(&g_rearm_marked_pending, 0);
+        InterlockedExchange(&g_rearm_left_loaded, 0);
+        InterlockedExchange(&g_rearm_drain_faults, 0);
+        InterlockedExchange(&g_rearm_shadow_reparsed, 0);
+        InterlockedExchange(&g_rearm_is_runtime, 1);
+        ds_apply_command();
+        InterlockedExchange(&g_rearm_is_runtime, 0);
+        {
+            int stray = ds_runtime_clear_stray_pending();
+            if (stray) {
+                char sline[192];
+                _snprintf_s(sline, sizeof sline, _TRUNCATE,
+                            "decl-server: %d marked decl(s) were never drained; pending-load "
+                            "cleared so nothing re-parses during the next map load", stray);
+                backend_log(sline);
+            }
+        }
+        if (marked) ds_res_promote_delta(4);
+        _snprintf_s(tline, sizeof tline, _TRUNCATE,
+                    "decl-server: %ld pre-existing decl(s) the pass REUSED were also raised to "
+                    "level 4; %ld empty one(s) re-parsed here at the browser, %ld left alone "
+                    "(already loaded), %ld drain fault(s), %ld stale shadowed decl(s) "
+                    "re-parsed in place here at the browser through the engine's own "
+                    "teardown-then-reload",
+                    (long)InterlockedCompareExchange(&g_rearm_touched_promoted, 0, 0),
+                    (long)InterlockedCompareExchange(&g_rearm_marked_pending, 0, 0),
+                    (long)InterlockedCompareExchange(&g_rearm_left_loaded, 0, 0),
+                    (long)InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0),
+                    (long)InterlockedCompareExchange(&g_rearm_shadow_reparsed, 0, 0));
+        backend_log(tline);
+    }
+}
+
+/* ---- registry watermark / delta promotion --------------------------------------------
+ *
+ * The engine's own promotion (0x1801830) walks a global list-of-lists and writes level 4 into
+ * every entry. These helpers walk the SAME structure, but only to record which entries existed
+ * before a registration pass and to raise the ones that appeared during it.
+ *
+ * Structure, read straight off that promotion loop:
+ *     head  = *(module_base + DS_RES_HEAD_RVA)
+ *     node  = { next: +0x18, array: +0x20, count: +0x28 }
+ *     entry = array[i];   level at entry + 0x28
+ *
+ * The purge (0x1800E80) tests `level & mask` and NOTHING else -- no refcount, no child list --
+ * so a single 4-byte write per entry is the whole of "give this a lifetime". */
+#define DS_RES_HEAD_RVA     0x6217F90u
+#define DS_RES_NEXT_OFF     0x18
+#define DS_RES_ARR_OFF      0x20
+#define DS_RES_CNT_OFF      0x28
+#define DS_RES_MAX_LISTS    4096u
+#define DS_RES_MAX_ENTRIES  262144u
+
+static void **g_res_mark;          /* sorted snapshot of entry pointers */
+static size_t g_res_mark_count;
+
+static int ds_res_ptr_cmp(const void *a, const void *b)
+{
+    void *const *x = (void *const *)a, *const *y = (void *const *)b;
+    if ((uintptr_t)*x < (uintptr_t)*y) return -1;
+    if ((uintptr_t)*x > (uintptr_t)*y) return 1;
+    return 0;
+}
+
+/* Walk every registry entry, calling `visit` on each. Returns the number visited, or 0 on a
+ * torn/unreadable structure -- a short walk must degrade, never fault the engine. */
+static size_t ds_res_walk(void (*visit)(void *entry, void *ctx), void *ctx)
+{
+    size_t seen = 0;
+    if (!g_module_base) return 0;
+    __try {
+        void *node = *(void **)(g_module_base + DS_RES_HEAD_RVA);
+        unsigned guard = 0;
+        while (node && guard++ < DS_RES_MAX_LISTS) {
+            void **arr = *(void ***)((unsigned char *)node + DS_RES_ARR_OFF);
+            int cnt = *(int *)((unsigned char *)node + DS_RES_CNT_OFF);
+            int i;
+            if (arr && cnt > 0 && (unsigned)cnt < DS_RES_MAX_ENTRIES) {
+                for (i = 0; i < cnt; i++) {
+                    void *e = arr[i];
+                    if (e) { if (visit) visit(e, ctx); seen++; }
+                }
+            }
+            node = *(void **)((unsigned char *)node + DS_RES_NEXT_OFF);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return seen;
+    }
+    return seen;
+}
+
+static void ds_res_count_visit(void *entry, void *ctx) { (void)entry; (*(size_t *)ctx)++; }
+
+static void ds_res_collect_visit(void *entry, void *ctx)
+{
+    size_t *n = (size_t *)ctx;
+    if (*n < g_res_mark_count) g_res_mark[(*n)++] = entry;
+}
+
+/* Record which resources exist right now. Call immediately before the registration pass. */
+static int ds_res_watermark(void)
+{
+    size_t total = 0, filled = 0;
+    char line[160];
+
+    if (g_res_mark) { HeapFree(GetProcessHeap(), 0, g_res_mark); g_res_mark = NULL; }
+    g_res_mark_count = 0;
+
+    ds_res_walk(ds_res_count_visit, &total);
+    if (total == 0 || total >= DS_RES_MAX_ENTRIES) {
+        backend_log("decl-server: registry watermark unavailable; runtime content will be "
+                    "left map-scoped and the next map transition will free it");
+        return 0;
+    }
+    g_res_mark = (void **)HeapAlloc(GetProcessHeap(), 0, total * sizeof(void *));
+    if (!g_res_mark) return 0;
+    g_res_mark_count = total;
+    ds_res_walk(ds_res_collect_visit, &filled);
+    g_res_mark_count = filled;
+    qsort(g_res_mark, g_res_mark_count, sizeof(void *), ds_res_ptr_cmp);
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "decl-server: registry watermark taken -- %u resource(s)", (unsigned)filled);
+    backend_log(line);
+    return filled > 0;
+}
+
+typedef struct ds_res_promote_ctx { unsigned fresh, poked; unsigned char level; } ds_res_promote_ctx;
+
+static void ds_res_promote_visit(void *entry, void *ctx)
+{
+    ds_res_promote_ctx *c = (ds_res_promote_ctx *)ctx;
+    if (g_res_mark &&
+        bsearch(&entry, g_res_mark, g_res_mark_count, sizeof(void *), ds_res_ptr_cmp))
+        return;                                   /* existed before the pass: not ours */
+    c->fresh++;
+    __try {
+        *(unsigned int *)((unsigned char *)entry + DS_RES_LEVEL_OFF) = c->level;
+        c->poked++;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { /* skip a torn entry, keep going */ }
+}
+
+/* Raise everything that appeared since the watermark to `level`. 4 = permanent, which is the
+ * parity boot-registered content already has. */
+static void ds_res_promote_delta(unsigned char level)
+{
+    ds_res_promote_ctx c;
+    char line[192];
+    if (!g_res_mark || g_res_mark_count == 0) return;
+    c.fresh = 0; c.poked = 0; c.level = level;
+    ds_res_walk(ds_res_promote_visit, &c);
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "decl-server: %u resource(s) appeared during registration, %u promoted to "
+                "level %u -- they now survive the map-transition purge",
+                c.fresh, c.poked, (unsigned)level);
+    backend_log(line);
+    HeapFree(GetProcessHeap(), 0, g_res_mark);
+    g_res_mark = NULL;
+    g_res_mark_count = 0;
+}
+
+/* ---- automatic re-arm, driven from the engine tick ------------------------------------
+ *
+ * The console command is the manual trigger. This is the one the product uses: after a package
+ * is installed mid-session, request a re-arm and let the tick run it.
+ *
+ * It runs as ONE pass. The old split waited several frames between preparing and registering,
+ * on the reading that the cut-content cvars would not be live until the engine drained them on
+ * a frame boundary. They are drained in the pass itself, by the engine's own drain, so there
+ * was never anything to wait for -- and the wait was not free: the install could not complete
+ * inside the flow that asked for it, which is what forced the player to open the map twice. */
+enum {
+    DS_AUTO_IDLE = 0,
+    DS_AUTO_RUN          /* run the whole pass on the next tick */
+};
+static volatile LONG g_auto_state;
+
+/* Ask for a runtime re-arm. Safe from any thread; the work happens on the engine tick. */
+void sh_decl_server_request_rearm(void)
+{
+    if (InterlockedCompareExchange(&g_auto_state, DS_AUTO_RUN, DS_AUTO_IDLE) == DS_AUTO_IDLE)
+        backend_log("decl-server: runtime re-arm REQUESTED (a package was installed mid-session); "
+                    "the engine tick will register it");
+}
+
+/* Drive the requested re-arm. Called from the engine tick, which is the main thread.
+ *
+ * There is no settle delay any more: the pass applies the cut-content gates through the
+ * engine's own synchronous drain, so there is nothing to wait for between preparing and
+ * registering. The delay used to cost a whole extra map load. */
+void sh_decl_server_rearm_poll(void)
+{
+    if (InterlockedCompareExchange(&g_auto_state, DS_AUTO_IDLE, DS_AUTO_RUN) != DS_AUTO_RUN)
+        return;
+    ds_rearm_command();
+    if (sh_decl_server_registration_succeeded())
+        backend_log("decl-server: runtime re-arm COMPLETE -- new identities are registered; "
+                    "give them a lifetime before the next map transition");
+}
+
+/* Programmatic entry point for the same pass. Returns 1 when the pass was driven.
+ * Must be called on the engine main thread. */
+int sh_decl_server_rearm(void)
+{
+    LONG before = InterlockedCompareExchange(&g_state, 0, 0);
+    if (before != DS_STATE_DONE) return 0;
+    ds_rearm_command();
+    return InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE;
+}
+
 static void ds_publish_before_boot_promotion(void)
 {
     /* The cut-content gates first, and synchronously. The blacklist matcher (0x31D0B0) is consulted
@@ -2252,6 +3010,11 @@ static void ds_boot_promotion_detour(void)
      * install_inline_hook returned a trampoline -- but skipping it would leave the ENTIRE engine's
      * content map-scoped, which is far worse than anything publication can get wrong. */
     if (g_boot_promotion_original) g_boot_promotion_original();
+    /* RETURN-VALUE NOTE. This runs AFTER the original returns and clobbers EAX, so it would overwrite
+     * the promotion's return value if anything read it. Safe only because that value is dead: the sole
+     * caller at 0x17C6479 continues with `MOV RCX,[rip+...]` [DIRECT, decoded from the pinned build].
+     * Re-check on a build change. See docs/backend-changes.md, 2026-09-01 -- the same shape, over a
+     * function whose return WAS consumed, silently broke every map save. */
     ds_report_promotion_outcome();
 }
 
@@ -2274,6 +3037,7 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     uintptr_t idstr_dtor;
     uintptr_t boot_promote;
     uintptr_t execute_commands;
+    uintptr_t generic_load;
     int command_registered = 0;
     if (InterlockedCompareExchange(&g_state, DS_STATE_INSTALLING, DS_STATE_NEW) != DS_STATE_NEW)
         return 0;
@@ -2313,13 +3077,17 @@ int sh_decl_server_install(const sig_result *results, size_t count,
      * publishes. Refusing is the correct outcome on a build we cannot serve correctly. */
     boot_promote = ds_clean_addr(results, count, "ResourceStaticPromote");
     execute_commands = ds_clean_addr(results, count, "CmdExecuteBuffer");
+    /* The runtime refresh's instrumented fallback (see ds_runtime_reload_shadowed). Required
+     * like the rest: a build where this does not pin cleanly is a build whose drain path we
+     * have not audited, and the refresh must not run half-proven there. */
+    generic_load = ds_clean_addr(results, count, "ResourceGenericLoad");
     if (!anchor || anchor->status != SIG_OK || !type_method || !register_file || !find_decl ||
         !source_find || source_find->status != SIG_OK || !source_find->addr ||
         type_method->status != SIG_OK || register_file->status != SIG_OK ||
         find_decl->status != SIG_OK || !type_method->addr ||
         !register_file->addr || !find_decl->addr ||
         !idstr_ctor || !idstr_dtor || !boot_promote || !execute_commands ||
-        !add_command || !cmdsys || !module_base ||
+        !generic_load || !add_command || !cmdsys || !module_base ||
         !ds_clean_at_pinned_rva(results, count, "DeclRegistryAnchor", module_base, DS_PINNED_ANCHOR_RVA) ||
         !ds_clean_at_pinned_rva(results, count, "DeclTypeByName", module_base, DS_PINNED_TYPE_RVA) ||
         !ds_clean_at_pinned_rva(results, count, "DeclRegisterFile", module_base, DS_PINNED_REGISTER_RVA) ||
@@ -2330,7 +3098,9 @@ int sh_decl_server_install(const sig_result *results, size_t count,
         !ds_clean_at_pinned_rva(results, count, "ResourceStaticPromote", module_base,
                                 DS_PINNED_BOOT_PROMOTE_RVA) ||
         !ds_clean_at_pinned_rva(results, count, "CmdExecuteBuffer", module_base,
-                                DS_PINNED_CMD_EXECUTE_RVA)) {
+                                DS_PINNED_CMD_EXECUTE_RVA) ||
+        !ds_clean_at_pinned_rva(results, count, "ResourceGenericLoad", module_base,
+                                DS_PINNED_GENERIC_LOAD_RVA)) {
         backend_log("decl-server REFUSED: clean pinned-build registry/idStr/boot-promotion ABI, command-system, or module-base dependency missing");
         InterlockedExchange(&g_state, DS_STATE_FAILED);
         ds_free_candidates();
@@ -2348,6 +3118,7 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     g_find_source = (decl_source_find_fn)source_find->addr;
     g_find_decl = (decl_find_fn)find_decl->addr;
     g_execute_commands = (cmd_execute_buffer_fn)execute_commands;
+    g_generic_load = (resource_generic_load_fn)generic_load;
 
     /* Register the one-shot apply command. It is no longer the delivery vehicle -- the boot
      * promotion detour below calls ds_apply_command directly, already on the engine main
@@ -2356,6 +3127,11 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     __try {
         g_add_command(g_cmdsys, DS_INTERNAL_COMMAND, (void *)ds_apply_command,
                       "Snapmap+ internal one-shot decltree registration", NULL, 2u);
+        /* The runtime counterpart: re-scan, re-snapshot and register AFTER boot, so a package
+         * installed mid-session can publish its identities without a relaunch. Registered here
+         * because AddCommand is only reachable with the cmd system resolved at install. */
+        g_add_command(g_cmdsys, DS_REARM_COMMAND, (void *)ds_rearm_command,
+                      "Snapmap+ re-scan packages and register new decls at runtime", NULL, 2u);
         command_registered = 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         command_registered = 0;

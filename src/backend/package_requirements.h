@@ -27,6 +27,12 @@ int sh_package_requirements_install(const char *data_root,
  */
 int sh_package_requirements_apply_now(void *execute_command_buffer);
 
+/* Re-capture and re-apply requirements after a mid-session package install. REQUIRED before a
+ * runtime decl registration pass: the cut-content blacklist refuses a name before the parser
+ * sees it, so a cut-content package cannot materialize while the gates are up. */
+int sh_package_requirements_rearm(const char *data_root, void *execute_command_buffer,
+                                  int user_layer_enabled);
+
 /* Called from the existing backend/UI tick. It is a no-op until an admitted
  * requirement snapshot exists and the engine has reached RUNNING. */
 void sh_package_requirements_poll(void);

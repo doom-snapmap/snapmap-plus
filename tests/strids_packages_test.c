@@ -120,6 +120,30 @@ static int count_key(const char *id)
 
 /* ------------------------------------------------------------------ fixture helpers */
 
+/* Delete a fixture tree, files first. The test names its tree after the process id, and pids are
+ * recycled -- without this, a later run inherits an earlier run's packages and the injector sees
+ * a conflict the test never set up. */
+static void remove_tree(const char *path)
+{
+    char pattern[MAX_PATH], child[MAX_PATH];
+    WIN32_FIND_DATAA found;
+    HANDLE search;
+    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", path);
+    search = FindFirstFileA(pattern, &found);
+    if (search != INVALID_HANDLE_VALUE) {
+        do {
+            if (strcmp(found.cFileName, ".") == 0 ||
+                strcmp(found.cFileName, "..") == 0) continue;
+            _snprintf_s(child, sizeof child, _TRUNCATE, "%s\\%s", path, found.cFileName);
+            if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) remove_tree(child);
+            else DeleteFileA(child);
+        } while (FindNextFileA(search, &found));
+        FindClose(search);
+    }
+    RemoveDirectoryA(path);
+}
+
+
 static int make_dir(const char *p) { return CreateDirectoryA(p, NULL) || GetLastError() == ERROR_ALREADY_EXISTS; }
 
 static int write_text(const char *path, const char *body)
@@ -153,6 +177,10 @@ static void run_inject(void)
     sh_strids_test_inject((void *)0x1, (void *)fake_insert, (void *)fake_hash, (void *)fake_idstr_ctor);
 }
 
+
+/* The overlap reporter, stubbed -- see the note in overrides_internal_test.c. */
+int sh_pkg_conflicts_report(const char *data_root) { (void)data_root; return 0; }
+
 int main(void)
 {
     char temp[MAX_PATH], root[MAX_PATH], overrides[MAX_PATH], path[MAX_PATH];
@@ -160,6 +188,7 @@ int main(void)
 
     GetTempPathA(sizeof temp, temp);
     _snprintf_s(root, sizeof root, _TRUNCATE, "%ssnapmap-plus-strids-pkg-%lu", temp, (unsigned long)pid);
+    remove_tree(root);                 /* a recycled pid must not inherit an earlier run's packages */
     CHECK(make_dir(root));
     _snprintf_s(overrides, sizeof overrides, _TRUNCATE, "%s\\overrides", root);
     CHECK(make_dir(overrides));
@@ -227,6 +256,8 @@ int main(void)
     /* No packages installed at all is not an error: the injector still runs and the baked defaults
      * still cover the shipped pack. */
     sh_overrides_set_root(NULL);
+
+    remove_tree(root);                 /* and do not leave one behind for the next run either */
 
     if (g_failed) {
         fprintf(stderr, "strids_packages_test: %d check(s) failed\n", g_failed);

@@ -12,7 +12,7 @@ name: Deploy site
 on:
   push:
     branches: [main]
-    paths: ['site/**', '.github/workflows/pages.yml']
+    paths: ['site/**', 'CHANGELOG.md', 'tools/changelog.py', '.github/workflows/pages.yml']
   workflow_dispatch:
 
 permissions:
@@ -30,6 +30,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - name: Render CHANGELOG.md into the site's data
+        run: |
+          # Jekyll builds with `source: ./site` and cannot read ../CHANGELOG.md, so the root
+          # file has to be brought into the Jekyll source tree. site/_data is not in the
+          # repository -- a redirect into a missing directory just fails. The page is then
+          # rendered statically, with no runtime call to the GitHub API.
+          set -euo pipefail
+          mkdir -p site/_data
+          python3 tools/changelog.py --json --out site/_data/changelog.json
+          python3 -c "import json;print(len(json.load(open('site/_data/changelog.json'))),'releases')"
       - name: Build with Jekyll
         uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697 # v1.0.13
         with:

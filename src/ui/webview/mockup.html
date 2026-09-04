@@ -540,10 +540,13 @@
   .status-main > span:first-child { display: flex; align-items: center; min-width: 0; }
   .status-main > span:last-child { flex: none; }
   .status-main #verText { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  /* Camera is a read-only footer group now. The divider + two-sided spacing keep its rapidly changing
-     numbers from visually running into the connection/selection group on the left. */
-  .status-camera { gap: 12px; margin-left: 22px; padding-left: 22px; border-left: 1px solid var(--border); }
-  .status-camera b { display: inline-block; min-width: 72px; font-family: Consolas, "Courier New", monospace; font-variant-numeric: tabular-nums; }
+  /* Camera editing stays in the footer so it remains available on every Studio tab. The divider and
+     two-sided spacing keep the live fields separate from connection/selection state. */
+  .status-camera { gap: 8px; margin-left: 22px; padding-left: 22px; border-left: 1px solid var(--border); }
+  .status-camera label { display: flex; align-items: center; min-width: 0; gap: 4px; color: var(--muted); }
+  .status-camera input[type=text] { width: 76px; min-width: 0; font-family: Consolas, "Courier New", monospace; font-variant-numeric: tabular-nums; }
+  .status-camera .cam-lock { gap: 5px; color: var(--text); }
+  .status-camera .cam-lock input { flex: none; margin: 0; }
   .status-right { margin-left: auto; gap: 10px; padding-left: 22px; }
   .statusbar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; margin-right: 5px; }
   .statusbar .dot.ok { background: #2e9e5b; }
@@ -561,9 +564,8 @@
 
     .statusbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 5px 10px; padding: 5px 8px; }
     .status-main { grid-column: 1; grid-row: 1; gap: 10px; overflow: hidden; }
-    .status-camera { grid-column: 1 / -1; grid-row: 2; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; gap: 8px; margin-left: 0; padding: 5px 0 0; border-top: 1px solid var(--border); border-left: 0; }
-    .status-camera > span { display: flex; min-width: 0; gap: 3px; }
-    .status-camera b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status-camera { grid-column: 1 / -1; grid-row: 2; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; width: 100%; gap: 8px; margin-left: 0; padding: 5px 0 0; border-top: 1px solid var(--border); border-left: 0; }
+    .status-camera input[type=text] { flex: 1 1 0; width: auto; }
     .status-right { grid-column: 2; grid-row: 1; min-width: 0; margin-left: 0; padding-left: 0; }
     #stamp { display: block; max-width: 112px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   }
@@ -863,10 +865,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       <span><span class="dot" id="bridgeDot" role="status" aria-label="Connecting" title="Connecting"></span><b id="verText">Snapmap+</b></span>
       <span>Selected: <b id="selCount">0</b></span>
     </div>
-    <div class="status-group status-camera" title="Live camera origin (read-only)" aria-label="Live camera origin">
-      <span>X: <b id="camX">--</b></span>
-      <span>Y: <b id="camY">--</b></span>
-      <span>Z: <b id="camZ">--</b></span>
+    <div class="status-group status-camera" aria-label="Camera origin controls">
+      <label>X <input type="text" id="camX" value="797.638489" inputmode="decimal" aria-label="Camera X coordinate"></label>
+      <label>Y <input type="text" id="camY" value="183.456985" inputmode="decimal" aria-label="Camera Y coordinate"></label>
+      <label>Z <input type="text" id="camZ" value="-950.475159" inputmode="decimal" aria-label="Camera Z coordinate"></label>
+      <label class="cam-lock"><input type="checkbox" id="camLockChk"> Lock position</label>
     </div>
     <div class="status-group status-right">
       <span id="stamp">Updated: --</span>
@@ -1866,7 +1869,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       ]});
     }
     else if (o.cmd === 'selectInEditor') { /* no 3D editor in browser preview */ }
-    else if (o.cmd === 'camLock' || o.cmd === 'camSet') { /* retained future editing bridge; no editor in browser preview */ }
+    else if (o.cmd === 'camLock' || o.cmd === 'camSet') { /* no 3D editor in browser preview */ }
     else if (o.cmd === 'winState') { onMessage({kind:'windowState', maximized:windowMaximized}); }
     else if (o.cmd === 'winMax') { onMessage({kind:'windowState', maximized:!windowMaximized}); }
     else if (o.cmd === 'winMin' || o.cmd === 'winDrag' || o.cmd === 'winResize') { /* no native window in preview */ }
@@ -3901,7 +3904,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     } else if (d.kind === 'info') {
       toast(d.text || '', 'warn');
     } else if (d.kind === 'camera') {
-      setCamReadout('camX', d.x); setCamReadout('camY', d.y); setCamReadout('camZ', d.z);
+      setCamField('camX', d.x); setCamField('camY', d.y); setCamField('camZ', d.z);
     } else if (d.kind === 'prefabs') {
       prefabTags = d.meta || {};
       renderPrefabList(d.root || [], d.folders || []);
@@ -4323,11 +4326,20 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     else if (e.target.closest('#descToggle')) this.classList.add('open');
   });
 
-  // Camera Origin is display-only in the current UI. The native host deliberately retains its camSet
-  // and camLock message handlers, write-once path, and per-frame lock path as dormant extension points;
-  // restoring editable controls later will not require reverse-engineering or rebuilding that backend.
-  function fmtNum(v) { var n = Number(v); return isFinite(n) ? String(parseFloat(n.toFixed(6))) : '--'; }
-  function setCamReadout(id, v) { document.getElementById(id).textContent = fmtNum(v); }
+  // Camera Origin: fields track the live camera while unfocused; Lock pins the displayed coordinates;
+  // committing an edit writes all three coordinates back through the retained native bridge.
+  function fmtNum(v) { var n = Number(v); return isFinite(n) ? String(parseFloat(n.toFixed(6))) : '0'; }
+  function camVal(id) { var n = parseFloat(document.getElementById(id).value); return isFinite(n) ? n : 0; }
+  function setCamField(id, v) { var el = document.getElementById(id); if (document.activeElement !== el) el.value = fmtNum(v); }
+  document.getElementById('camLockChk').addEventListener('change', function(){
+    if (this.checked) post({cmd:'camLock', on:1, x:camVal('camX'), y:camVal('camY'), z:camVal('camZ')});
+    else post({cmd:'camLock', on:0});
+  });
+  ['camX','camY','camZ'].forEach(function(id){
+    document.getElementById(id).addEventListener('change', function(){
+      post({cmd:'camSet', x:camVal('camX'), y:camVal('camY'), z:camVal('camZ')});
+    });
+  });
 
   // Desktop menu behavior mirrors snapmap-midi: click or keyboard-open, outside-click close.
   var OPEN_MENU = null;

@@ -6,6 +6,189 @@ where our own reimplementation was wrong, not the original SnapHak's behavior; a
 (or faithful reproduction of) the *original's* behavior belongs in [`fidelity.md`](fidelity.md)
 instead. Entries are chronological, newest first.
 
+## 2026-09-01 — Stop the rawmap save shadow from reporting the player's save as failed
+
+**What changed.** `sh_ser_detour` in `rawmap.c` is typed `unsigned char` instead of
+`void`. It latches the engine's return value the instant `SerializeToJson` returns
+and gives that same value back on all seven of its exit paths. Nothing the shadow
+does afterwards — the arm check, the idStr read, the pretty pass, the disk write —
+can speak for the engine any more.
+
+**Why.** `idSnapMap::SerializeToJson` returns a bool in `AL`, and that bool is the
+save's success flag. Its sole caller, the save-snapshot function at RVA `0x59D2F0`,
+does `MOVZX EBX,AL` on the instruction after the `call` and later returns it as its
+own result (`MOVZX EAX,BL`) — read directly out of the pinned build at `0x59D2F0+0x54`.
+
+The detour was typed `void`, so whatever it happened to call last decided the save's
+fate. With the shadow disarmed — the default — the last call before returning was
+`GetFileAttributesA`, probing for the `arm.flag` file inside `rawmap_armed()` ->
+`flag_file_present()`. That file is normally absent, so the predicate returned 0, and
+the engine read `AL` as a serialize failure. The save was abandoned with no error, no
+log line and no file written: the editor kept the map dirty, re-prompted for a map
+name on exit, and the map never appeared in My Maps. With the shadow armed the
+trailing shadow work left `AL` non-zero, which is why `sh_rawmaps_on` appeared to fix
+saving — luck, not design.
+
+The regression arrived with the arm gate (the `if (!rawmap_armed(NULL)) return;`
+added when the SAVE shadow was put behind the same switch as the LOAD swap). Before
+that gate there was no early return, so the ungated path always left `AL` non-zero by
+the same accident. The load-side detour never had the defect: it is typed `int`,
+latches `rc`, and runs its arm check *before* calling the engine rather than after.
+
+**The invariant this exposed.** A detour that does any work *after* calling the
+original must declare the original's real return type, latch the value, and return
+it. A detour that calls the original last is safe for free, because the original's
+return passes straight through. Two detours still have the risky shape and are safe
+only because their targets' returns are unused — `sh_sort_detour` in `strids.c`
+(target `0x1A2B490`; its caller's next instruction is `MOV ECX,[RSP+0x20]`) and
+`ds_boot_promotion_detour` in `decl_server.c` (target `0x1801830`; its sole caller at
+`0x17C6479` continues with `MOV RCX,[rip+...]`). Both now carry a comment recording
+that dependency, so the next person does not have to rediscover it the hard way.
+
+**Status.** Confirmed in the live editor on the pinned build: with `sh_rawmaps_off`
+a map saves, exits without re-prompting, and appears in My Maps. Saving with
+`sh_rawmaps_on` still mirrors `rawmap.json` exactly as before.
+
+## 2026-09-02 — Install every package a map needs, from one prompt
+
+**What changed.** The install gate stages EVERY missing package a map carries instead of only the
+first, as a chain consented to together. The prompt names them rather than counting them, truncating
+the list with a remainder because the engine dialog's string is 256 bytes. Installs continue past a
+failure so one bad payload cannot strand the rest, and each package records its own outcome so the
+ones that worked are not re-offered. The overlap reporter also always logs its summary now,
+including "no overlaps".
+
+**Why.** `sh_mpkg_gate` offered `first_missing` alone. A map carrying three packages — a demon plus
+the transformations that dress it — therefore cost the player three prompts and four map loads, and
+every intermediate load looked like a plain refusal rather than progress. Nothing was wrong with the
+install itself; it just only ever ran once per load.
+
+The reporter's summary was previously conditional on having found something, which made silence mean
+two different things: a clean install set, or a scan that never ran. There is no way to tell those
+apart from the outside, and that ambiguity cost a live test.
+
+**Status.** Verified live on a map carrying three packages, all missing at boot: one prompt naming
+all three, three installs, `296 MISSING registered … 0 REFUSED`, then editor and playtest. Testing
+this needed a multi-package map, which previously needed the editor to author — the embedded form is
+plain `snapVarString_t` variables named `smpkg.<id>.<index>.<total>.<digest16>` carrying base64
+chunks of a zip, so they can be written directly. Overlap detection was exercised against real
+colliding packages for the first time: a pack shipping a differing copy of another pack's decl is
+reported against both claimants with winner and loser, while byte-identical copies count as one
+benign overlap.
+
+**Known and not fixed.** A delivered package installs to `overrides\<id>` with a bare leaf name, so
+it can never land inside a grouping folder. Map delivery and manual install of identical content
+therefore produce two packages nothing recognises as the same, because `mpkg_boot_satisfies` matches
+on id and digest. Nothing collects them: a delivered package is permanent and has no uninstall path.
+The reporter makes the duplication visible; it does not prevent it.
+
+## 2026-09-02 — Install a mid-session package in one pass: the gates were queued, never drained
+
+**What changed.** The runtime decl-server re-arm is a single synchronous pass again. It used to be
+split in two, separated by eight engine ticks, and `sh_decl_server_rearm_poll`'s settle state
+machine went with it. `sh_package_requirements_rearm` now drains the engine command buffer itself,
+unconditionally, instead of inferring that whoever applied the cut-content cvars also drained them.
+
+**Why.** The split was attributed to "the cut-content gates are cvars and a cvar set is QUEUED, not
+immediate" -- a timing problem, solved by waiting for a frame boundary. The measured failure behind
+it was real (297 candidates REFUSED, materialization terminal) but the cause was not timing. It was
+a missing drain.
+
+`sh_package_requirements_poll` applies the gates with a NULL executor as soon as load-state reaches
+RUNNING; that QUEUES the commands without draining them, which is harmless at boot because
+something else drains shortly after. On a runtime re-arm nothing does. The re-arm's own
+`apply_now` then saw the state already `DONE`, returned SUCCESS, and reported the gates live while
+the commands sat unread in the buffer -- so the decl pass parsed every candidate against a
+blacklist that was still up. Waiting eight ticks only ever worked because some later tick happened
+to drain it.
+
+Draining an already-empty buffer is harmless, so the drain is unconditional rather than conditional
+on having won that race.
+
+**What it buys.** The wait was not free: the install could not complete inside the flow that
+triggered it, which is why a map carrying a package had to be opened twice -- once to be refused
+and trigger the install, once to actually load. One pass is what makes one action one action.
+
+**Status.** Measured live, same test both ways: two-phase-removed-without-the-drain reproduced the
+original failure exactly (297 REFUSED, materialization terminal), and with the drain the same run
+reports `command buffer drained; the gates are live` followed by `294 MISSING registered ... 75
+SHADOWED, 0 REFUSED; the entity-palette rebuild ... was completed`. Full suite green.
+
+## 2026-09-02 — Decide package overlaps by declared priority, and say when one happens
+
+**What changed.** `sh_package` carries a `priority` read from the package's own package.json
+(default 0), and packages enumerate in descending priority then name -- so the file shadow resolves
+overlaps in a declared order rather than an alphabetical accident. `package_conflicts.c` scans the
+installed set for files more than one package claims and reports them: byte-identical overlaps are
+benign and counted, differing ones are named with their winner and loser. A map-carried package
+whose id is already installed with a DIFFERENT digest now says exactly that instead of
+"already exists on disk".
+
+**Why.** Two mechanisms can serve a decl and only one of them was safe. An identity a package
+PUBLISHES goes through the decl server, which already composes byte-identical copies away and
+refuses a differing duplicate on both sides. An identity a package SHADOWS goes through the file
+shadow, which took the first package in directory order -- so a pack named `boss-demons` beat one
+named `cyberdemon` for any file they both carried, purely because b sorts before c, and nothing
+said so. A player could be running one package's content while believing they had the other's.
+
+Packages are NOT rewritten to remove duplicates, and that is deliberate: a package's digest is its
+identity, it is what a map matches against to know whether the recipient has what the author built
+against, and rewriting on disk would break that and make the package non-portable. Deduplication is
+a resolution-time decision, never an on-disk one.
+
+The version-clash case was a dead end rather than a message: the gate correctly reported the map's
+package as missing (a same-named package with different content does not satisfy it), then the
+install refused because the folder was occupied, and nothing explained why. It still will not
+overwrite -- that could destroy content another map depends on -- but it now names both digests.
+
+**Status.** Covered by `package_conflicts_test`, which builds real package trees: no-overlap,
+identical overlap, differing overlap, priority beating the alphabet, negative priority, a malformed
+package.json falling back to 0 rather than dropping the package, non-servable files not counting as
+conflicts, and a package not conflicting with itself. Full suite green.
+
+## 2026-09-01 — Rebuild the editor palette on every registration pass, not once per process
+
+**What changed.** `sh_palette_refresh_after_decl_registration` now claims its work
+from the APPLIED state as well as IDLE, so the native `SnapPaletteBuild` call runs
+once per successful decl-registration pass instead of once per process. REFUSED
+stays terminal and is never re-claimable: a refusal is an integrity verdict on the
+engine objects the service calls into, so re-arming must not hand a refused process
+another attempt. Every validation the one-shot version performed -- module base,
+pinned builder address, editor-singleton identity, palette vtable -- still runs
+before each call. The decl server's outcome line no longer explains a decline away
+as "the palette rebuild was not needed"; it reports DECLINED and points at the
+palette-refresh line, because a decline can now only mean a refusal.
+
+**Why.** The placeable palette is a catalog DERIVED from the live decl list, and it
+is the same object a loading map is validated against, not just the toybox's source
+of entries: `idSnapMap::RepairAndMigrate` ends in an entity validator that binary
+searches `editor+0x20660` by type name and, on a miss, logs
+`Invalid Entity %d:%s not found in palette` and fails the whole map. The shell then
+shows the player "The save file appears to be damaged". So while the rebuild was
+latched to fire exactly once -- always at boot -- a package installed mid-session
+registered its decls correctly, entered the decl list, resolved by name, and was
+still unusable: any map that NAMED one of its types was refused until DOOM
+restarted, because the catalog searched at load time predated the package. A map
+that inlined its content instead named no palette type and loaded fine, which is
+why this stayed hidden for so long.
+
+Re-running the builder is safe by construction. It clears the count, frees the
+previous array when the allocation-kind byte permits, repopulates from the decl
+list, then re-sorts and runs the engine's own duplicate check -- a teardown that is
+dead code on a first call, which is what shows the routine was written to be called
+more than once. The runtime pre-mark only ever marks the pass's own candidates
+pending-load, so a rebuild cannot silently drop vanilla types. The separate
+structure at `editor+0x206C0` is the snappalette-group module tree rather than an
+index into the placeable array, so it is not invalidated by the rebuild.
+
+**Status.** Covered by `palette_refresh_test` (re-claim from APPLIED, refusal stays
+terminal across later passes) and `palette_refresh_contract_test`; the full native
+and JS suites pass. Verified live on both arms with the same map: a package
+delivered inside a map and installed mid-session now loads, validates and playtests
+without a restart, and a package present at boot still does. Across those runs the
+engine logged the palette rebuild on every registration pass, with no occurrence of
+`not found in palette` or `Unable to validate local saved map`.
+
 ## 2026-08-23 — Let a package own its shaders, not just its decls
 
 **What changed.** The cross-package resolver is now a namespace table rather than

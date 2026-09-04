@@ -17,5 +17,12 @@ check(/MARGINS\s+shadow\s*=\s*\{\s*1,\s*1,\s*1,\s*1\s*\}/.test(host),'one pixel 
 check(createAt >= 0 && extendAt > createAt && refreshAt > extendAt,'DWM extension happens after create and before frame refresh');
 check(build.includes('"dwmapi.lib"'),'frontend links the DWM import library');
 
+const cameraFrameAt=host.indexOf('if (was_visible && !g_cam_lock) poc_cam_read_send();');
+const slowPollAt=host.indexOf('if (was_visible && (frame % 10 == 0)) {');
+check(cameraFrameAt >= 0 && slowPollAt > cameraFrameAt,
+      'live camera coordinates are sampled per frame before the ten-frame entity poll');
+check(!host.includes('if (!g_cam_lock) poc_cam_read_send();'),
+      'camera feedback is not nested in the slow entity poll');
+
 if(failures){console.error('window_chrome_contract_test: '+failures+' failure(s)');process.exit(1);}
 console.log('window_chrome_contract_test: OK');

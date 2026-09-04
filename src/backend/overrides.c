@@ -41,6 +41,7 @@
 #include "backend_log.h"
 #include "decl_text.h"
 #include "packages.h"
+#include "package_conflicts.h"
 #include "resource_bridge.h"
 #include "user_overrides.h"
 #include "overrides_baked.h"        /* the built-in "*Custom"-tab default decls (Timeline + Unknown) */
@@ -559,6 +560,14 @@ static ov_stream *open_internal_decl(const char *name, int *matched)
     return NULL;
 }
 
+size_t sh_overrides_internal_decl_published_count(void)
+{
+    if (InterlockedCompareExchange(&g_internal_decl_table_state, 0, 0) !=
+        OV_INTERNAL_DECL_TABLE_READY)
+        return 0;
+    return g_internal_decl_count;
+}
+
 int sh_overrides_internal_decl_published(const char *name)
 {
     size_t i;
@@ -575,6 +584,123 @@ int sh_overrides_internal_decl_table_can_install(void)
     return g_orig_open != NULL && sh_user_overrides_enabled_for_launch() &&
            InterlockedCompareExchange(&g_internal_decl_table_state, 0, 0) ==
                OV_INTERNAL_DECL_TABLE_NEW;
+}
+
+/* Retire the published internal decl table so a NEW one can be published mid-session.
+ *
+ * The table is a boot one-shot: can_install() demands state == NEW, so after the boot
+ * publication every later attempt is refused and a runtime re-arm classifies its candidates
+ * and then has nowhere to put them. This is the fourth and last boot-bound surface in the
+ * runtime-registration chain (package list, resource-bridge manifests, decl-server snapshot,
+ * this table).
+ *
+ * DOES NOT FREE. The test-only reset beneath this one is safe precisely because it "occurs
+ * before any engine thread can retain a stream" -- at runtime that guarantee is gone: an
+ * engine thread may hold an ov_stream reading straight out of a table body, and freeing under
+ * it is a use-after-free. So the old table is retired and leaked, bounded by the 512-entry cap
+ * and by how rarely a package is installed. Correctness over a few hundred KB. */
+void sh_overrides_internal_decl_table_reopen(void)
+{
+    char line[160];
+    size_t held = g_internal_decl_count;
+    /* Reopen the STATE only. The entries stay published and stay readable, because the runtime
+     * publish MERGES over them -- dropping them here is exactly the bug that made a Cyberdemon
+     * re-arm break the unrelated transformations package. */
+    InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_NEW);
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "B1: overrides internal decl table REOPENED for re-publication (%u entr(ies) "
+                "retained and still served; a merge will carry them forward)",
+                (unsigned)held);
+    backend_log(line);
+}
+
+/* Publish `entries` MERGED over whatever the table already holds.
+ *
+ * Carrying the old entries forward is the whole point: a re-arm publishes only the identities
+ * the CURRENT pass classified as missing, and anything the previous pass had published would
+ * otherwise silently lose its decltree source -- including entries belonging to packages this
+ * pass never looked at.
+ *
+ * Old entries are carried by POINTER. The old array is retired and leaked (a reader may be
+ * inside it), but its name/body allocations remain reachable from the merged array, so they
+ * stay valid and are never double-freed. A new entry whose key matches an old one wins.
+ *
+ * Returns 1 on success. On any failure the previously published table is left exactly as it
+ * was, because the state is only moved to READY once the merged array is complete. */
+int sh_overrides_internal_decl_table_merge(
+    const sh_overrides_internal_decl_entry *entries, size_t count)
+{
+    ov_internal_decl *merged;
+    ov_internal_decl *old = g_internal_decls;
+    size_t old_count = g_internal_decl_count;
+    size_t total, i, j, at = 0;
+    char line[192];
+
+    if (!g_orig_open || !sh_user_overrides_enabled_for_launch()) return 0;
+    if (!entries || count == 0) return 0;
+    if (count > SIZE_MAX - old_count) return 0;
+    total = old_count + count;
+    if (total > OV_INTERNAL_DECL_MAX_ENTRIES) {
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "B1: overrides internal decl table MERGE refused -- %u old + %u new exceeds "
+                    "the %u-entry cap", (unsigned)old_count, (unsigned)count,
+                    (unsigned)OV_INTERNAL_DECL_MAX_ENTRIES);
+        backend_log(line);
+        return 0;
+    }
+
+    merged = (ov_internal_decl *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                           total * sizeof(merged[0]));
+    if (!merged) return 0;
+
+    /* The new entries first, so a key collision resolves in their favour below. */
+    for (i = 0; i < count; i++) {
+        if (!entries[i].body || entries[i].body_length == 0 ||
+            entries[i].body_length > (size_t)INT64_MAX ||
+            !ov_internal_decl_key(entries[i].type, entries[i].name, &merged[at].name)) {
+            ov_internal_decl_table_free(merged, total);
+            return 0;
+        }
+        for (j = 0; j < at; j++) {
+            if (strcmp(merged[at].name, merged[j].name) == 0) {
+                ov_internal_decl_table_free(merged, total);
+                return 0;                      /* duplicate within the new set */
+            }
+        }
+        merged[at].body = (unsigned char *)HeapAlloc(GetProcessHeap(), 0,
+                                                     entries[i].body_length);
+        if (!merged[at].body) {
+            ov_internal_decl_table_free(merged, total);
+            return 0;
+        }
+        memcpy(merged[at].body, entries[i].body, entries[i].body_length);
+        merged[at].body_length = entries[i].body_length;
+        at++;
+    }
+
+    /* Then the old ones the new set did not supersede, carried by pointer. */
+    for (i = 0; i < old_count; i++) {
+        int superseded = 0;
+        if (!old[i].name || !old[i].body) continue;
+        for (j = 0; j < count; j++) {
+            if (strcmp(old[i].name, merged[j].name) == 0) { superseded = 1; break; }
+        }
+        if (superseded) continue;
+        merged[at].name = old[i].name;         /* borrowed, not copied: the old array leaks */
+        merged[at].body = old[i].body;
+        merged[at].body_length = old[i].body_length;
+        at++;
+    }
+
+    g_internal_decls = merged;
+    g_internal_decl_count = at;
+    InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_READY);
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "B1: overrides internal decl table MERGED -- %u new + %u carried forward = %u "
+                "published (previous array retired, entries reused by pointer)",
+                (unsigned)count, (unsigned)(at - count), (unsigned)at);
+    backend_log(line);
+    return 1;
 }
 
 int sh_overrides_internal_decl_table_install(
@@ -810,21 +936,65 @@ static const ov_namespace g_ov_namespaces[] = {
  * already an immutable launch snapshot -- the audit, the reclaim pass and the
  * user-layer gate all read the tree exactly once -- and this is on the engine's
  * file-open path, so re-enumerating the tree per open is not an option. */
-static sh_package g_ov_packages[SH_PACKAGES_MAX];
-static size_t g_ov_package_count;
+/* DOUBLE-BUFFERED so the package list can be re-scanned mid-session without a lock on the
+ * open path, which is hot (every engine resource open walks it). Writers fill the inactive
+ * buffer and then publish it with one InterlockedExchange; readers take the index ONCE and
+ * use that buffer for the whole resolve. A reader that raced a publish sees either the old
+ * complete list or the new complete list -- never a torn one. */
+static sh_package g_ov_packages_buf[2][SH_PACKAGES_MAX];
+static size_t g_ov_package_counts[2];
+static volatile LONG g_ov_pkg_active;   /* 0 or 1 */
+/* The overlap report is per-process, not per-capture: capture runs on the engine
+ * file-open path and the installed set does not change under it. */
+static volatile LONG g_ov_conflicts_reported;
+static volatile LONG g_ov_pkg_generation;
 
 static void ov_capture_packages(void)
 {
     char root[MAX_PATH];
     size_t count = 0;
-    g_ov_package_count = 0;
+    LONG active = InterlockedCompareExchange(&g_ov_pkg_active, 0, 0);
+    LONG target = active ^ 1;              /* fill the buffer nobody is reading */
+
     resolve_root(root, sizeof root);
     if (!root[0]) return;
     /* A partial enumeration still resolves whatever it did find: unlike the decl
      * server, a miss here degrades to the packaged resource rather than
      * publishing a wrong identity, so serving fewer packages is safe. */
-    (void)sh_packages_enumerate(root, g_ov_packages, SH_PACKAGES_MAX, &count);
-    g_ov_package_count = count;
+    (void)sh_packages_enumerate(root, g_ov_packages_buf[target], SH_PACKAGES_MAX, &count);
+    g_ov_package_counts[target] = count;
+    InterlockedExchange(&g_ov_pkg_active, target);   /* publish: one atomic store */
+
+    /* Say which packages overlap, once per capture. Resolution takes the first
+     * package that carries a file, so an overlap is a precedence decision being
+     * made on the player's behalf; making it in silence is how someone ends up
+     * running one package's content while believing they have another's. */
+    if (count > 1 && !InterlockedCompareExchange(&g_ov_conflicts_reported, 1, 0))
+        (void)sh_pkg_conflicts_report(root);
+    InterlockedIncrement(&g_ov_pkg_generation);
+}
+
+/* Re-scan the packages folder and publish the new list to the open path.
+ *
+ * WHY THIS EXISTS. The open hook already stats the disk on EVERY open, so a package's bytes
+ * are servable the moment they land -- but only if the package is in this list, and the list
+ * used to be captured exactly once at install. That made a mid-session install invisible for
+ * a reason that had nothing to do with the engine. Registration of new DECL IDENTITIES is a
+ * separate, harder problem (see decl_server.c); this only makes the BYTES reachable.
+ *
+ * Returns the number of packages now visible. */
+unsigned long sh_overrides_rescan_packages(void)
+{
+    char line[160];
+    LONG active;
+    ov_capture_packages();
+    active = InterlockedCompareExchange(&g_ov_pkg_active, 0, 0);
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "B1: overrides package list RE-SCANNED -- %u package(s) now visible (generation %ld)",
+                (unsigned)g_ov_package_counts[active],
+                (long)InterlockedCompareExchange(&g_ov_pkg_generation, 0, 0));
+    backend_log(line);
+    return (unsigned long)g_ov_package_counts[active];
 }
 
 static int ov_is_regular_file(const char *path)
@@ -855,10 +1025,14 @@ static int ov_resolve_existing(const char *name, char *out, size_t cap)
         relative = ns->strip_prefix ? name + prefix_length : name;
         if (!relative[0]) break;
 
-        for (i = 0; i < g_ov_package_count; i++) {
+        /* Take the active buffer index ONCE for this whole resolve, so a concurrent
+         * re-scan cannot move the list out from under the loop. */
+        LONG act = InterlockedCompareExchange(&g_ov_pkg_active, 0, 0);
+        size_t pkg_count = g_ov_package_counts[act];
+        for (i = 0; i < pkg_count; i++) {
             char *p;
             if (_snprintf_s(out, cap, _TRUNCATE, "%s\\%s\\%s",
-                            g_ov_packages[i].root, ns->package_subdir, relative) < 0)
+                            g_ov_packages_buf[act][i].root, ns->package_subdir, relative) < 0)
                 continue;
             for (p = out; *p; ++p)
                 if (*p == '/') *p = '\\';

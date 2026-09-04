@@ -49,13 +49,29 @@
  * shadows that resource. What a package adds on top is publishing identities
  * DOOM never shipped, and being uninstallable by deleting one folder.
  *
- * Identity collisions BETWEEN packages are not resolved here. They are left to
- * the decl server's existing case-insensitive collision rule, which already
- * refuses every member of an ambiguous identity group; carrying the owning
- * package name is what lets it say which packages collided. */
+ * Identity collisions BETWEEN packages are handled in two different places,
+ * because two different mechanisms can serve a decl.
+ *
+ * A decl a package PUBLISHES (an identity DOOM never shipped) goes through the
+ * decl server, which already composes byte-identical copies away at discovery
+ * and REFUSES an identity two packages claim with differing bytes -- loudly, and
+ * on both sides, so neither silently wins.
+ *
+ * A decl a package SHADOWS (an identity DOOM did ship, overridden on the way to
+ * the parser) goes through the file shadow, which resolves by trying each
+ * package in turn and taking the first file that exists. That is a real
+ * precedence decision, so it is made explicitly here rather than falling out of
+ * directory order: packages are ordered by descending `priority` and then by
+ * name, and `package_conflicts.c` reports every identity more than one package
+ * claims so the outcome is visible instead of silent.
+ *
+ * Priority comes from the package's own package.json ("priority": N, default 0),
+ * so the person who installs two overlapping packages can settle which one wins
+ * without renaming folders to game the sort. */
 typedef struct sh_package {
     char name[SH_PACKAGE_NAME_CAP];  /* path below overrides\, '/'-separated */
     char root[MAX_PATH];             /* absolute path to the package folder */
+    int  priority;                   /* package.json "priority", default 0 */
 } sh_package;
 
 /* Enumerate packages below `<data_root>\overrides` at any depth, in

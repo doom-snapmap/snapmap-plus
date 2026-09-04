@@ -256,36 +256,56 @@ in place; they do not write to the game directory.
 
 ### Writing the commit body
 
-**Your commit body is the changelog.** The release workflow copies each user-facing commit's body verbatim
-into the GitHub release notes, and from there it is what people read on the website and in
-`snapmap-plus changelog`. Nobody edits it afterwards. A body written as an engineering write-up becomes a wall
-of text in a player's release notes.
+**Your commit body is read by the next maintainer, and by the tool that drafts the changelog.** It is no
+longer published verbatim: the release notes users read live in [`CHANGELOG.md`](../CHANGELOG.md), written
+once per release and reviewed before it ships. That frees a commit body to explain a change properly.
 
-So the body is **one to three short sentences -- about 60 words, never more than 80.** Write the change and
-what it means for someone using Snapmap+, in plain language:
+Still keep it short -- **one to three sentences, about 60 words, never more than 80.** A body that says what
+changed and why is what makes a good changelog entry possible; an engineering write-up buries it.
 
 > Prefab previews now keep a prop's saved rotation and a block's real dimensions instead of resetting them.
 > Logic hexagons stay full size while I/O circles and filter diamonds render smaller, so a graph is easier to
 > read at a glance.
 
-Keep out of it: internal symbol names, RVAs, file paths, test counts, "what changed / why / status" headings,
-bullet lists, checklists, and any restatement of the subject line. If the change genuinely needs a longer
-explanation, that belongs in the PR description or in `docs/` -- the PR body is not published, so it can be as
-long as it needs to be.
+Keep out of it: "what changed / why / status" headings, checklists, and any restatement of the subject line.
+Symbol names and file paths are fine when they are what the sentence is actually about -- the body is not
+published, so write it for a reader who has the diff open. Longer rationale, evidence and alternatives belong
+in the pull-request description or in `docs/`, neither of which is published.
 
-Rationale that matters to reviewers rather than to players -- proof, evidence, alternatives considered -- goes
-in the PR description too, or in the matching `docs/` file from the table in section 9.
+Commits whose subject starts with an internal prefix (`ci:`, `chore:`, `scrub:`, `docs:`, `test:`/`tests:`,
+`release:`, `refactor:`, `build:`, `style:`, `meta:`) are filtered out of the changelog entirely and are free
+to say whatever is useful. The canonical list is `INTERNAL_PREFIX_RE` in
+[`tools/draft_changelog.py`](../tools/draft_changelog.py); if you change one, change both.
 
-Two things that are **not** exceptions:
+### Cutting a release (maintainer)
 
-- **A big change is not a long body.** Summarize the outcome in a sentence and let the diff and the docs carry
-  the detail.
-- **A squashed PR is not a concatenation.** Write one fresh body for the whole PR; never paste the individual
-  commit bodies together. That is what produced release notes tens of kilobytes long, and it is the failure
-  this rule exists to prevent.
+1. `gh workflow run prepare-release.yml -f version=v0.2.2-beta.1` -- drafts that release's `CHANGELOG.md`
+   entry and opens a pull request. It refuses a version that is already tagged, already has an entry, or
+   already has an open branch, and it refuses a malformed version string before spending anything.
+2. Review the pull request. Its description lists which commit backs each bullet, so a claim can be
+   spot-checked without reading the whole range. Edit the entry directly on the branch if a sentence is
+   wrong -- the pull-request gate re-checks the grammar.
+3. Merge it.
+4. `git tag v0.2.2-beta.1 && git push origin v0.2.2-beta.1` -- **do this immediately after merging.** Merging
+   redeploys the site, so between the merge and the tag the changelog page lists a release that cannot yet be
+   downloaded.
+5. `release.yml` refuses to build a tag with no entry, so step 4 cannot silently ship notes-free.
 
-Purely internal commits (`ci:`, `chore:`, `docs:`, `test:`, `refactor:`, `build:`, `style:`, `meta:`) are
-filtered out of the changelog entirely, so they are free to say whatever is useful to the next maintainer.
+If drafting fails -- an outage, a rate limit, a declined request -- the pull request still opens, carrying the
+raw commit list marked `NEEDS WRITING`. Rewrite it by hand and merge as usual. A drafting failure never blocks
+a release.
+
+If the pull request itself cannot be opened -- "Allow GitHub Actions to create and approve pull requests" is
+off, possibly locked by an organisation policy -- the draft is still pushed to `changelog/<version>` and the
+job log prints a compare link. Open it by hand; nothing is lost.
+
+Correcting a past entry: edit it in `CHANGELOG.md`, then run
+`python3 tools/sync_release_notes.py --apply` to push the corrected text onto the already-published GitHub
+Release. Without that, `CHANGELOG.md` is the source of truth only for releases cut after it existed. The tool
+is a dry run by default and saves the current bodies before changing anything.
+
+The first stable release is a special case: there is no earlier stable tag to compare against, so the drafter
+would receive the entire history. Write that entry by hand.
 
 Before merging, the maintainer reads the complete pull request: its description, every commit message, the
 full diff, review discussion, linked issues, and reported validation. Coherent commits are rebased and
@@ -303,7 +323,8 @@ behavior change with stale docs will be sent back. Use this map:
 | If you change… | Update… |
 |---|---|
 | a console command, cvar, SnapStack op, or a Studio-window feature (`src/backend/`, `src/ui/`) | [`docs/capabilities.md`](capabilities.md) — the feature inventory |
-| the frontend UI itself (`src/ui/webview/` — the host or `mockup.html`) | [`docs/webview-ui.md`](webview-ui.md) — its reference sections + a dated Changelog entry |
+| the frontend UI itself (`src/ui/webview/` — the host or `mockup.html`) | [`docs/webview-ui.md`](webview-ui.md) — its reference sections + a dated entry in [`webview-ui-history.md`](webview-ui-history.md) |
+| a release process, an external service, or a credential | [`docs/services.md`](services.md) — the service inventory |
 | the object model, the think-loop, the interface vtable, the persistent-settings registry, or the backend↔frontend boundary | [`docs/architecture.md`](architecture.md) |
 | a deliberately-reproduced original quirk, or a sanctioned divergence | [`docs/fidelity.md`](fidelity.md) |
 | a correctness bugfix in the shared `src/backend/` engine-call layer (not a fidelity divergence -- our own code was wrong) | [`docs/backend-changes.md`](backend-changes.md) |
@@ -337,10 +358,12 @@ release. **Do not open a public issue for a security problem.** Use GitHub's **p
 | `src/common/` | the shared backend↔frontend interface ABI (`snapmap_plus_iface.h`) |
 | `installer/` | `snapmap-plus.exe` — the Go install / update / uninstall CLI |
 | `tests/` | the native unit tests + `run-tests.ps1` |
-| `docs/` | architecture · capabilities · fidelity · packaging · webview-ui · backend-changes · this guide |
+| `tools/` | the changelog parser (`changelog.py`), the release-notes drafter (`draft_changelog.py`), the published-release sync (`sync_release_notes.py`) and their tests |
+| `CHANGELOG.md` | the user-facing release notes -- the single source every consumer reads |
+| `docs/` | architecture · capabilities · fidelity · packaging · webview-ui · webview-ui-history · backend-changes · services · this guide |
 | `build.ps1` | compile the DLLs → `build/` (backend + frontend; `-BackendOnly` for backend alone) |
 | `package.ps1` | assemble the deployable overlay → `dist/` (the two clone DLLs) |
-| `.github/workflows/` | `ci.yml` (the PR gate) · `release.yml` (tag-triggered release) |
+| `.github/workflows/` | `ci.yml` (the PR gate) · `prepare-release.yml` (drafts a release's notes) · `release.yml` (tag-triggered release) · `pages.yml` (the website) |
 | `LICENSE` | MIT |
 
 ## 13. Glossary

@@ -61,6 +61,59 @@ static pr_buffer_command_fn g_buffer_command;
 static size_t g_requirement_count;
 static size_t g_manifest_count;
 
+/* Re-capture and re-apply the package requirements after a mid-session install.
+ *
+ * WHY THIS IS REQUIRED, NOT OPTIONAL. The cut-content blacklist matcher refuses a name BEFORE
+ * the type parser ever sees it, so a package made of cut content (the Cyberdemon is listed in
+ * both blacklists) simply does not load while the gates are up. Measured 2026-08-27: with the
+ * gates still up, a runtime registration pass refused 296 of 296 candidates -- one md6Def's
+ * native DeclFind returned null and the service treats that as terminal. Applying the two
+ * cvars first took REFUSED to 0. Registering identities whose bytes the blacklist will refuse
+ * is worse than not registering them at all.
+ *
+ * Unlike the override/decl tables, nothing here is memory the engine retains -- these are
+ * queued cvar commands -- so the state can simply be reset rather than retired.
+ *
+ * Reuses the cmd-system pointers captured at install. Returns 1 when the settings are live. */
+int sh_package_requirements_rearm(const char *data_root, void *execute_command_buffer,
+                                  int user_layer_enabled)
+{
+    if (!g_cmdsys || !g_buffer_command) {
+        backend_log("package-requirements RE-ARM refused: the command system was never captured");
+        return 0;
+    }
+    g_requirement_count = 0;
+    g_manifest_count = 0;
+    InterlockedExchange(&g_state, PR_STATE_NEW);
+    if (!sh_package_requirements_install(data_root, g_module_base, g_cmdsys,
+                                         (void *)g_buffer_command, user_layer_enabled))
+        return 0;
+    if (!sh_package_requirements_apply_now(execute_command_buffer)) return 0;
+
+    /* DRAIN, ALWAYS, and do not infer that someone else did.
+     *
+     * `apply_now` reports success when the settings are already applied -- including when the
+     * load-state RUNNING poll got there first, which QUEUES the cvars without draining them
+     * because at boot something else drains shortly after. On a runtime re-arm nothing does,
+     * so the caller was told the gates were live while they sat in the command buffer, and
+     * the decl pass then parsed every candidate against a blacklist that was still up. That
+     * is the 297-REFUSED failure: not a missing wait, a missing drain.
+     *
+     * Draining an already-empty buffer is harmless, so this is unconditional rather than
+     * conditional on having won that race. */
+    if (execute_command_buffer) {
+        __try {
+            ((pr_execute_buffer_fn)execute_command_buffer)(g_cmdsys);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            backend_log("package-requirements RE-ARM: the command drain raised an exception; "
+                        "the cut-content gates may not be live");
+            return 0;
+        }
+        backend_log("package-requirements RE-ARM: command buffer drained; the gates are live");
+    }
+    return 1;
+}
+
 #ifdef SH_PACKAGE_REQUIREMENTS_TESTING
 static volatile int *g_test_load_state;
 #endif
@@ -317,6 +370,14 @@ int sh_package_requirements_install(const char *data_root,
                                     int user_layer_enabled)
 {
     char line[256];
+    /* Stash the engine pointers FIRST, before any early return can skip them. A launch whose
+     * packages carry no requirements still needs them retained, because a package installed
+     * LATER will -- and sh_package_requirements_rearm has no other way to reach the command
+     * system. Assigning these only on the success path made the runtime re-arm refuse with
+     * "the command system was never captured". */
+    if (module_base) g_module_base = module_base;
+    if (cmdsys) g_cmdsys = cmdsys;
+    if (buffer_command) g_buffer_command = (pr_buffer_command_fn)buffer_command;
     if (InterlockedCompareExchange(&g_state, PR_STATE_INSTALLING, PR_STATE_NEW) != PR_STATE_NEW)
         return 0;
     if (!user_layer_enabled) {

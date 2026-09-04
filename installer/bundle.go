@@ -116,6 +116,7 @@ func fileSHA256(path string) (string, error) {
 type ghRelease struct {
 	TagName     string    `json:"tag_name"`
 	Name        string    `json:"name"`
+	Draft       bool      `json:"draft"`
 	Prerelease  bool      `json:"prerelease"`
 	PublishedAt string    `json:"published_at"`
 	Body        string    `json:"body"`
@@ -353,77 +354,104 @@ func cmdSetToken(args []string) error {
 	return nil
 }
 
-// cmdChangelog prints the release history. The NEWEST release's notes are printed IN FULL to the console --
-// so you can read exactly what changed without leaving the terminal -- while OLDER releases are listed
-// compactly with a link to their GitHub page. The notes are the commit log CI bakes into each release's body
-// (see release.yml); that keeps the newest changelog self-contained (no link needed to read it).
-func cmdChangelog(f flags) error {
+// cmdChangelog prints the release history for a terminal. With no argument it shows the newest
+// release in full and then a one-line index of the earlier ones; with a version it shows just that
+// release. Notes come from each release's body, which is its reviewed CHANGELOG.md entry (see
+// release.yml), so the CLI, the website and the GitHub releases page all say the same thing.
+//
+// It reads them from the API rather than from a shipped file so it can show a release NEWER than
+// the installed one -- which is most of the reason to run the command.
+func cmdChangelog(f flags, args []string) error {
 	token := resolveToken(f)
 	var list []ghRelease
-	if err := apiGet("https://api.github.com/repos/"+repoSlug+"/releases?per_page=20", token, &list); err != nil {
+	if err := apiGet("https://api.github.com/repos/"+repoSlug+"/releases?per_page=30", token, &list); err != nil {
 		return err
 	}
+	// Drafts are not published releases; nobody can install one.
+	published := list[:0]
+	for _, r := range list {
+		if !r.Draft {
+			published = append(published, r)
+		}
+	}
+	list = published
 	if len(list) == 0 {
 		fmt.Println("No releases have been published yet.")
 		return nil
 	}
+
 	installed := ""
 	if rec, err := loadRecord(); err == nil {
 		installed = rec.Version
 	}
-	fmt.Print(formatChangelog(list, installed))
+	fmt.Print(formatChangelog(list, installed, changelogArg(f, args), terminalWidth()))
 	return nil
 }
 
-// changelogPreviewLines caps how many notes lines an OLDER release shows before it defers to its GitHub link.
-const changelogPreviewLines = 12
+// changelogArg picks the version the user asked for: a bare positional ("changelog v0.2.1-beta.4"),
+// or --release, which already means "this specific version" on install.
+func changelogArg(f flags, args []string) string {
+	if f.release != "" {
+		return f.release
+	}
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			return a
+		}
+	}
+	return ""
+}
 
-// formatChangelog renders the release history. The NEWEST release shows ALL of its notes (no truncation) plus
-// a link to the full GitHub notes; each OLDER release shows a preview (up to changelogPreviewLines lines) then
-// a "full notes" link when there is more. Pure (no I/O) so it is unit-testable. `list` is newest-first (the
-// GitHub API order); `installed` is the currently-installed tag (marked with "<- you have this").
-func formatChangelog(list []ghRelease, installed string) string {
+// formatChangelog renders the history. Pure (no I/O) so it is unit-testable. `list` is newest-first
+// (the GitHub API order), `installed` is the currently-installed tag, `want` is the requested
+// version ("" for the default view, "all" for every entry in full).
+func formatChangelog(list []ghRelease, installed, want string, width int) string {
 	var b strings.Builder
 
-	// The newest release: every line, no cap, then the link (in case a user wants the full per-commit notes).
-	newest := list[0]
-	fmt.Fprintf(&b, "Latest release: %s\n\n", releaseHeadline(newest, installed))
-	writeNotes(&b, newest, -1)
-	fmt.Fprintf(&b, "    Full notes: %s\n", newest.HTMLURL)
-
-	// Older releases: a headline + a capped preview, deferring to the link when truncated.
-	if len(list) > 1 {
-		b.WriteString("\nEarlier releases:\n")
-		for _, r := range list[1:] {
-			fmt.Fprintf(&b, "\n  %s\n", releaseHeadline(r, installed))
-			writeNotes(&b, r, changelogPreviewLines)
+	if strings.EqualFold(strings.TrimSpace(want), "all") {
+		for i, r := range list {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			renderEntry(&b, headerFor(r, installed), parseEntry(r.Body), width)
 		}
+		return b.String()
+	}
+
+	chosen, err := selectRelease(list, want)
+	if err != nil {
+		return wrap(err.Error(), width, margin, margin) + "\n"
+	}
+	renderEntry(&b, headerFor(chosen, installed), parseEntry(chosen.Body), width)
+	fmt.Fprintf(&b, "  %s\n", chosen.HTMLURL)
+
+	// A specific version was asked for: show that one and stop.
+	if strings.TrimSpace(want) != "" {
+		return b.String()
+	}
+
+	var rows []indexRow
+	for _, r := range list {
+		if r.TagName == chosen.TagName {
+			continue
+		}
+		rows = append(rows, indexRow{Tag: r.TagName, Date: r.PublishedAt,
+			Headline: parseEntry(r.Body).Headline, Installed: r.TagName == installed})
+	}
+	if len(rows) > 0 {
+		b.WriteString("\n")
+		renderIndex(&b, rows, width)
 	}
 	return b.String()
 }
 
-// writeNotes writes a release's notes, indented. limit < 0 prints every line verbatim (blank lines kept). With
-// limit >= 0 it prints at most `limit` non-blank lines and, if the notes are longer, appends a
-// "... full notes: <link>" line instead of the remainder.
-func writeNotes(b *strings.Builder, r ghRelease, limit int) {
-	body := strings.TrimRight(r.Body, " \t\r\n")
-	if body == "" {
-		b.WriteString("    (no notes were published for this release)\n")
-		return
-	}
-	shown := 0
-	for _, line := range strings.Split(body, "\n") {
-		if limit >= 0 {
-			if strings.TrimSpace(line) == "" {
-				continue // skip blank lines in the capped preview
-			}
-			if shown >= limit {
-				fmt.Fprintf(b, "    ... full notes: %s\n", r.HTMLURL)
-				return
-			}
-		}
-		fmt.Fprintf(b, "    %s\n", strings.TrimRight(line, "\r"))
-		shown++
+func headerFor(r ghRelease, installed string) releaseHeader {
+	return releaseHeader{
+		Tag:       r.TagName,
+		Beta:      r.Prerelease,
+		Date:      r.PublishedAt,
+		Installed: r.TagName == installed,
+		URL:       r.HTMLURL,
 	}
 }
 

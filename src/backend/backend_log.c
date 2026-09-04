@@ -1,5 +1,6 @@
 /* backend_log.c -- see backend_log.h. */
 #include "backend_log.h"
+#include "../common/log_rotate.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -20,6 +21,8 @@ void backend_set_logpath_from_module(HINSTANCE self)
     _snprintf_s(dir, MAX_PATH, _TRUNCATE, "%ssnapmap-plus\\logs", path);
     CreateDirectoryA(dir, NULL);
     _snprintf_s(g_logpath, MAX_PATH, _TRUNCATE, "%s\\sh_backend.log", dir);
+    /* Roll the accumulated log aside before this session appends to it. */
+    log_rotate_if_large(g_logpath, LOG_ROTATE_CAP_BYTES);
 }
 
 void backend_log(const char *msg)

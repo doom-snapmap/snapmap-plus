@@ -85,10 +85,19 @@ int main(int argc, char **argv)
     CHECK(strstr(refresh, "21088") == NULL);
     CHECK(strstr(refresh, "InterlockedCompareExchange(&g_state, PR_STATE_APPLIED, PR_STATE_PENDING)") != NULL);
     CHECK(strstr(refresh, "Sleep(") == NULL);
+    /* The rebuild is claimable from APPLIED as well as IDLE -- once per registration
+     * pass, not once per process -- and never from REFUSED. A package installed
+     * mid-session extends the decl list the palette is derived from, and a map that
+     * names a type missing from that palette is refused whole as a damaged save. */
+    CHECK(strstr(refresh, "static int pr_claim(void)") != NULL);
+    CHECK(strstr(refresh, "PR_STATE_PENDING, PR_STATE_IDLE") != NULL);
+    CHECK(strstr(refresh, "PR_STATE_PENDING, PR_STATE_APPLIED") != NULL);
+    CHECK(strstr(refresh, "PR_STATE_PENDING, PR_STATE_REFUSED") == NULL);
+    CHECK(strstr(refresh, "not found in palette") != NULL);
     CHECK(strstr(build, "\"palette_refresh.c\"") != NULL);
 
-    /* The editor identity and palette vtable are checked before the one-shot
-     * native builder call for either editor initialization state. */
+    /* The editor identity and palette vtable are checked before every native
+     * builder call, for either editor initialization state. */
     vtable_check = strstr(refresh, "vtable_status = pr_read_ptr");
     builder_call = strstr(refresh, "g_builder((void *)(editor + PR_EDITOR_PALETTE_OFF), NULL);");
     CHECK(vtable_check && builder_call && vtable_check < builder_call);
@@ -113,13 +122,14 @@ int main(int argc, char **argv)
     CHECK(refresh_call && success_set && refresh_call < success_set);
     CHECK(success_set && done_after_call && success_set < done_after_call);
     CHECK(strstr(server, "sh_palette_refresh_after_decl_registration,") != NULL);
-    /* The decl server still calls this one-shot, in the same place, ordered before it publishes
-     * success -- but a refusal is no longer terminal for the registration. Publication moved into
-     * idCommonLocal::Init (ahead of the engine's whole-registry resource promotion, which is what
-     * makes published content survive a playtest), and at that point the editor has not built a
-     * placeable roster yet, so this service correctly refuses on its editor-singleton/palette-vtable
-     * validation. When the editor does build the roster, our identities are already registered. */
-    CHECK(strstr(server, "the editor had not built one yet") != NULL);
+    /* The decl server calls the rebuild in the same place, ordered before it publishes success,
+     * on every pass -- and a decline is reported honestly rather than explained away, because it
+     * can now only mean the service REFUSED. It still must not fail a registration that otherwise
+     * completely succeeded. */
+    CHECK(strstr(server, "palette_declined = 1;") != NULL);
+    CHECK(strstr(server, "DECLINED (see the palette-refresh line above)") != NULL);
+    CHECK(strstr(server, "the editor had not built one yet") == NULL);
+    CHECK(strstr(server, "palette_skipped") == NULL);
     CHECK(strstr(server, "palette refresh failed after native registration; no retry") == NULL);
     CHECK(strstr(dllmain, "21088") == NULL);
     CHECK(strstr(server, "21088") == NULL);

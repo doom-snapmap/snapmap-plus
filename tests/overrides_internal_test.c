@@ -221,6 +221,13 @@ static void test_file_stream_is_read_only(void)
     DeleteFileA(path);
 }
 
+
+/* The overlap reporter, stubbed. This suite is about resolution and the provider
+ * table; WHICH packages overlap is package_conflicts_test's subject, and pulling
+ * its filesystem walk in here would make these cases depend on a tree they do
+ * not build. */
+int sh_pkg_conflicts_report(const char *data_root) { (void)data_root; return 0; }
+
 int main(void)
 {
     test_internal_decl_table();

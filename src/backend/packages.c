@@ -61,6 +61,42 @@ static int pk_is_file(const char *path)
            !(attributes & FILE_ATTRIBUTE_REPARSE_POINT);
 }
 
+/* Read `"priority": N` out of a package.json, defaulting to 0.
+ *
+ * Deliberately a narrow scan rather than a JSON parse: this runs on the engine
+ * file-open path during capture, the only field needed is one integer, and a
+ * malformed or absent marker must yield the default rather than fail a package.
+ * Anything unparseable is simply priority 0, which is where an unmarked package
+ * would have sorted anyway. */
+static int pk_read_priority(const char *directory)
+{
+    char marker[MAX_PATH];
+    char body[1024];
+    FILE *file = NULL;
+    size_t read_bytes;
+    const char *key;
+    int sign = 1, value = 0, digits = 0;
+
+    if (_snprintf_s(marker, sizeof(marker), _TRUNCATE, "%s\\%s",
+                    directory, PK_MARKER) < 0) return 0;
+    if (fopen_s(&file, marker, "rb") != 0 || !file) return 0;
+    read_bytes = fread(body, 1, sizeof(body) - 1, file);
+    fclose(file);
+    body[read_bytes] = '\0';
+
+    key = strstr(body, "\"priority\"");
+    if (!key) return 0;
+    key += 10;                                     /* past the quoted key */
+    while (*key == ' ' || *key == '	' || *key == ':') key++;
+    if (*key == '-') { sign = -1; key++; }
+    while (*key >= '0' && *key <= '9' && digits < 9) {
+        value = value * 10 + (*key - '0');
+        key++;
+        digits++;
+    }
+    return digits ? sign * value : 0;
+}
+
 static int pk_has_marker(const char *directory)
 {
     char marker[MAX_PATH];
@@ -70,7 +106,7 @@ static int pk_has_marker(const char *directory)
 }
 
 static int pk_append(sh_package *out, size_t capacity, size_t *count,
-                     const char *name, const char *root)
+                     const char *name, const char *root, int priority)
 {
     size_t i;
     if (*count >= capacity) return 0;
@@ -79,8 +115,20 @@ static int pk_append(sh_package *out, size_t capacity, size_t *count,
     if (strcpy_s(out[*count].name, sizeof(out[*count].name), name) != 0 ||
         strcpy_s(out[*count].root, sizeof(out[*count].root), root) != 0)
         return 0;
+    out[*count].priority = priority;
     (*count)++;
     return 1;
+}
+
+/* Resolution precedence: higher priority first, then name. The name is only a
+ * tie-break -- it used to be the WHOLE rule, which meant a package called
+ * `boss-demons` silently beat one called `cyberdemon` for any file they both
+ * carried, purely because b sorts before c. Insertion sort is stable, and the
+ * comparison is total, so the order is identical on every machine. */
+static int pk_before(const sh_package *a, const sh_package *b)
+{
+    if (a->priority != b->priority) return a->priority > b->priority;
+    return _stricmp(a->name, b->name) < 0;
 }
 
 static void pk_sort(sh_package *out, size_t count)
@@ -89,7 +137,7 @@ static void pk_sort(sh_package *out, size_t count)
     for (i = 1; i < count; i++) {
         sh_package key = out[i];
         j = i;
-        while (j > 0 && _stricmp(out[j - 1].name, key.name) > 0) {
+        while (j > 0 && pk_before(&key, &out[j - 1])) {
             out[j] = out[j - 1];
             j--;
         }
@@ -139,7 +187,8 @@ static int pk_scan(const char *directory, const char *prefix, unsigned depth,
          * rule instead of a rule plus an exception. A directory without a marker
          * is a grouping folder and is searched, exactly like any other. */
         if (pk_has_marker(child)) {
-            if (!pk_append(out, capacity, count, name, child)) complete = 0;
+            if (!pk_append(out, capacity, count, name, child,
+                           pk_read_priority(child))) complete = 0;
             continue;                       /* a package is a leaf */
         }
         if (!pk_scan(child, name, depth + 1, out, capacity, count)) complete = 0;

@@ -142,12 +142,12 @@ int main(int argc, char **argv)
           "revertBtn.classList.toggle('icon-button', on);") != NULL);
     CHECK(strstr(html,
           "saveBtn.classList.toggle('icon-button', on);") != NULL);
-    CHECK(strstr(html, "id=\"camLockChk\"") == NULL);
+    CHECK(strstr(html, "id=\"camLockChk\"") != NULL);
     CHECK(strstr(html, "class=\"camera\"") == NULL);
     CHECK(strstr(html, ".camera {") == NULL);
-    CHECK(strstr(html, "<input type=\"text\" id=\"camX\"") == NULL);
-    CHECK(strstr(html, "<input type=\"text\" id=\"camY\"") == NULL);
-    CHECK(strstr(html, "<input type=\"text\" id=\"camZ\"") == NULL);
+    CHECK(strstr(html, "<input type=\"text\" id=\"camX\"") != NULL);
+    CHECK(strstr(html, "<input type=\"text\" id=\"camY\"") != NULL);
+    CHECK(strstr(html, "<input type=\"text\" id=\"camZ\"") != NULL);
     CHECK(strstr(html,
           "<div class=\"status-group status-main\">") != NULL);
     CHECK(strstr(html, "id=\"connText\"") == NULL);
@@ -159,15 +159,17 @@ int main(int argc, char **argv)
           "<div class=\"status-group status-camera\"") != NULL);
     CHECK(strstr(html,
           "<div class=\"status-group status-right\">") != NULL);
-    CHECK(strstr(html, "<span>X: <b id=\"camX\">--</b></span>") != NULL);
-    CHECK(strstr(html, "<span>Y: <b id=\"camY\">--</b></span>") != NULL);
-    CHECK(strstr(html, "<span>Z: <b id=\"camZ\">--</b></span>") != NULL);
+    CHECK(strstr(html, "aria-label=\"Camera origin controls\"") != NULL);
+    CHECK(strstr(html, "aria-label=\"Camera X coordinate\"") != NULL);
+    CHECK(strstr(html, "aria-label=\"Camera Y coordinate\"") != NULL);
+    CHECK(strstr(html, "aria-label=\"Camera Z coordinate\"") != NULL);
+    CHECK(strstr(html, "> Lock position</label>") != NULL);
     CHECK(count_text(html, "id=\"camX\"") == 1);
     CHECK(count_text(html, "id=\"camY\"") == 1);
     CHECK(count_text(html, "id=\"camZ\"") == 1);
     CHECK(strstr(html, "<span id=\"stamp\">Updated: --</span>") != NULL);
     CHECK(strstr(html,
-          ".status-camera { gap: 12px; margin-left: 22px; padding-left: 22px; border-left: 1px solid var(--border); }") != NULL);
+          ".status-camera { gap: 8px; margin-left: 22px; padding-left: 22px; border-left: 1px solid var(--border); }") != NULL);
     CHECK(strstr(html,
           "width: 100%; height: 100%; overflow: hidden;") != NULL);
     CHECK(strstr(html,
@@ -192,7 +194,7 @@ int main(int argc, char **argv)
     CHECK(strstr(html,
           ".statusbar { display: grid; grid-template-columns: minmax(0, 1fr) auto;") != NULL);
     CHECK(strstr(html,
-          "grid-template-columns: repeat(3, minmax(0, 1fr));") != NULL);
+          "grid-template-columns: repeat(3, minmax(0, 1fr)) auto;") != NULL);
     CHECK(strstr(html,
           ".panel-head { display: flex; align-items: center; gap: 8px; height: 40px; min-height: 40px;") != NULL);
     CHECK(strstr(html,
@@ -240,12 +242,12 @@ int main(int argc, char **argv)
     CHECK(strstr(html, "id=\"prefabCreateBtn\" title=\"Create from Selection\"") != NULL);
     CHECK(strstr(html,
           "class=\"btn primary icon icon-button\" id=\"createTimelineBtn\" disabled title=\"Create New Timeline") != NULL);
-    CHECK(strstr(html, "function setCamReadout(id, v)") != NULL);
+    CHECK(strstr(html, "function setCamField(id, v)") != NULL);
     CHECK(strstr(html,
-          "setCamReadout('camX', d.x); setCamReadout('camY', d.y); setCamReadout('camZ', d.z);") != NULL);
-    CHECK(strstr(html, "function camVal(") == NULL);
-    CHECK(strstr(html, "post({cmd:'camLock'") == NULL);
-    CHECK(strstr(html, "post({cmd:'camSet'") == NULL);
+          "setCamField('camX', d.x); setCamField('camY', d.y); setCamField('camZ', d.z);") != NULL);
+    CHECK(strstr(html, "function camVal(") != NULL);
+    CHECK(strstr(html, "post({cmd:'camLock'") != NULL);
+    CHECK(strstr(html, "post({cmd:'camSet'") != NULL);
     CHECK(strstr(html,
           "o.cmd === 'camLock' || o.cmd === 'camSet'") != NULL);
 

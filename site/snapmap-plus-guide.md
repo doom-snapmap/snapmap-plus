@@ -706,7 +706,6 @@ Settings you read or change with `<name>` or `<name> <value>` in the console:
 | Cvar | Default | What it does |
 |---|---|---|
 | `sh_pretty_on` | `0` | Pretty-print the JSON Snapmap+ writes for [rawmaps](#rawmaps). |
-| `sh_show_rmcount` | `0` | Draw the current number of active rendermodels on-screen. |
 | `sh_copy_reslist_to_clipboard` | `0` | Copy `sh_listres` output to the clipboard automatically. |
 
 ### Developer and diagnostic tools
@@ -717,7 +716,7 @@ them, but they're listed here for completeness since `sh_help` shows them too:
 | Command | What it does |
 |---|---|
 | `sh_alginfo` | Report the status of Snapmap+'s optional math-acceleration layer. |
-| `sh_debugrender` | Renderer debug toggle. |
+| `sh_debugrender` | Renderer debug toggle; `sh_debugrender dumprenderinfo` prints how many rendermodels are active, then names them. |
 | `cs_dontuse` | Toggle higher-precision engine-math overrides — a performance tradeoff, off by default; the name is the warning. |
 | `sh_superscriptop` | Dump SuperScript / eventDef data. |
 | `cs_dumpeventdefs` | Dump every eventDef to a file. |

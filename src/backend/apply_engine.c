@@ -33,6 +33,7 @@
 #include "snapmap_plus_iface.h"
 #include "apply_engine.h"
 #include "decl_server.h"
+#include "map_package.h"
 #include "package_requirements.h"
 #include "typeinfo.h"     /* sh_typeinfo_get_declmgr -- the one shared declMgr accessor */
 #include "ui_bridge.h"    /* sh_ui_get_iface -- reach the toast slot for the apply-result toast */
@@ -1230,6 +1231,29 @@ static int ae_apply_one(int id, const char *patched_text)
                 if (slen >= 0 && slen > 200) AE_APPLY_DIAG("apply id=%d: src tail='%.120s'", id, (const char *)srcPtr + slen - 120);
             }
 #endif
+            /* PIN THE COMMIT'S ALLOCATIONS TO A HEAP THAT SURVIVES A MAP TEARDOWN.
+             * g_decl_rebuild allocates the decl-source block through Mem_Alloc, whose ambient-scope lookup
+             * only resolves on DOOM's main thread. Off-main the lookup no-ops and the block falls through to
+             * the process heap; ON the main thread with the editor up, the ambient scope is the MAP heap,
+             * which is destroyed wholesale at the next map load -- leaving the live defsub pointing at
+             * unmapped pages and a later free reading a destroyed or recycled header. Confirmed live
+             * 2026-09-03 by the one-shot probe below: a UI-thread commit reports heap=PROCESS.
+             *
+             * So the UI-thread commit survives by accident, and every MAIN-thread caller of ae_apply_one is
+             * exposed. ae_apply_target_write is one today (the sh_target_any wire hook runs on the main
+             * thread and commits inline); it is dormant, which is the only reason this has not been seen.
+             * PushHeap(MEMLOCAL_HEAP_GLOBAL) buys the surviving heap deliberately instead, so the outcome no
+             * longer depends on which thread got here. Off-main this is a no-op -- ae_memlocal() returns NULL
+             * and the push declines -- so the shipped UI-thread path is byte-for-byte unchanged.
+             *
+             * The bracket must span the idStr assigns as well, not just the rebuild: class and inherit
+             * allocate through the same allocator, and ending it early would leave those two in the map heap
+             * while the source text is safe -- which looks fixed right up until the next map change.
+             * __finally, not __except: a fault here must still pop, and swallowing it would skew the scope
+             * depth for the rest of the process. Pop only if the push took (PopHeap fatals on underflow) --
+             * the same shape ae_mkcmd_one already uses for the staging deserialize. */
+            int commit_pushed = ae_push_heap_global();
+            __try {
             /* the source rebuild carries the EDIT (the temp's canonical source includes the leaf) -- always. */
             g_decl_rebuild(defsub, (const char *)srcPtr, 1);             /* 0x17ae560 */
             AE_APPLY_DIAG("apply id=%d: decl_rebuild returned", id);
@@ -1247,6 +1271,9 @@ static int ae_apply_one(int id, const char *patched_text)
             AE_APPLY_DIAG("apply id=%d: class assign done", id);
             if (inhPtr && *(const char *)inhPtr) g_idstr_assign((uint8_t *)defsub + DEFSUB_INHERIT_OFF, (const char *)inhPtr);
             AE_APPLY_DIAG("apply id=%d: inherit assign done -- commit complete", id);
+            } __finally {
+                if (commit_pushed) ae_pop_heap();
+            }
 
             /* (SETTLE re-serialize REMOVED 2026-07-10: the "unsettled decl" theory was disproven -- OG's entity is
              * +0x48=0x10400 too. It didn't fix the crash and its extra EntityClone may compound the COW share
@@ -1295,7 +1322,18 @@ static int ae_apply_one(int id, const char *patched_text)
      *     "C2 commit: thread=UI(off-main) decl-source blob heap=PROCESS (survives)"
      * Anything reporting MAP from the UI thread, or PROCESS from the main thread, REFUTES it -- and in that
      * case the heap is not what distinguishes the two designs and the deferral must not be revisited on
-     * this argument. One-shot (an InterlockedExchange latch), so it cannot spam a per-tick caller. */
+     * this argument. One-shot (an InterlockedExchange latch), so it cannot spam a per-tick caller.
+     *
+     * ANSWERED 2026-09-03, live, on a normal editor session (`sh pr` + `sh bss` on the clean anchor):
+     *     C2 commit: thread=UI(off-main) (tid=31984) decl-source blob=... heap=PROCESS (survives)
+     * exactly the predicted line, so the reading holds: the heap IS what differs between the two designs,
+     * and the surviving heap is a side effect of being on the wrong thread. The commit above is now
+     * bracketed in PushHeap(MEMLOCAL_HEAP_GLOBAL)/PopHeap so it no longer depends on that accident. The
+     * thread move itself is still open -- it is not a heap question any more but a call-shape one (kind=0
+     * would go from a synchronous applied-count to an asynchronous one at five call sites, and toast
+     * ownership moves with it), and it needs its own change with a play -> teardown validation pass.
+     * The probe is kept: it costs one line per process and it re-answers the question on any other machine
+     * or build without a rebuild. */
     if (applied) {
         static volatile LONG s_commit_probe_done = 0;
         if (InterlockedExchange(&s_commit_probe_done, 1) == 0) {
@@ -2388,6 +2426,11 @@ void sh_apply_prefab_poll_play(void)
      * so whichever runs first wins. This one still matters on a build where the decl server
      * refused, and on a launch with no packages at all. */
     sh_package_requirements_poll();
+    /* And advance a runtime re-arm if a package was installed mid-session. Must be on the tick:
+     * its two phases have to land on different frames so the engine can drain the cut-content
+     * cvars between them. */
+    sh_decl_server_rearm_poll();
+    sh_mpkg_consent_poll();
     if (!g_doom_base) return;
 
 #if AE_PASTE_DIAG_ON
