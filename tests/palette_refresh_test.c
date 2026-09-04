@@ -4,13 +4,19 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "host_image.h"
 #include "palette_refresh.h"
 
 #define TEST_EDITOR_SINGLETON_RVA 0x3056748u
 #define TEST_EDITOR_PALETTE_OFF   0x20660u
 #define TEST_EDITOR_INIT_OFF      0x08u
+/* Just "an address in a read-only section" and "an address in an executable section" now -- the
+ * service no longer compares either against a recorded RVA, only against the section it lands in.
+ * They keep the pinned build's real values so the test image resembles the thing it stands in for. */
 #define TEST_PALETTE_VTABLE_RVA   0x20499A0u
 #define TEST_BUILDER_RVA          0x54AEE0u
+#define TEST_TEXT_RVA             0x0001000u
+#define TEST_RDATA_RVA            0x1001000u
 #define TEST_MODULE_BYTES         (TEST_EDITOR_SINGLETON_RVA + TEST_EDITOR_PALETTE_OFF + 0x2000u)
 
 static const uint8_t *g_test_editor;
@@ -18,6 +24,7 @@ static int g_builder_calls;
 static void *g_last_palette;
 static void *g_last_progress;
 static int g_builder_raises;
+static int g_pinned_build = 1;
 
 void backend_log(const char *message)
 {
@@ -27,6 +34,41 @@ void backend_log(const char *message)
 const uint8_t *sh_iface_engine_editor_base(void)
 {
     return g_test_editor;
+}
+
+int sh_host_is_pinned_rva_build(void)
+{
+    return g_pinned_build;
+}
+
+/* Give the fake module enough of a PE image for the section walk that validates the palette vtable:
+ * an executable .text covering the builder and a read-only .rdata covering the palette vtable and
+ * the editor singleton. Both shipped DOOM builds have exactly this shape. */
+static void write_pe_headers(uint8_t *module)
+{
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)module;
+    IMAGE_NT_HEADERS64 *nt;
+    IMAGE_SECTION_HEADER *sec;
+
+    dos->e_magic = IMAGE_DOS_SIGNATURE;
+    dos->e_lfanew = 0x80;
+    nt = (IMAGE_NT_HEADERS64 *)(module + dos->e_lfanew);
+    nt->Signature = IMAGE_NT_SIGNATURE;
+    nt->FileHeader.Machine = IMAGE_FILE_MACHINE_AMD64;
+    nt->FileHeader.NumberOfSections = 2;
+    nt->FileHeader.SizeOfOptionalHeader = (WORD)sizeof(IMAGE_OPTIONAL_HEADER64);
+    nt->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+    nt->OptionalHeader.SizeOfImage = TEST_MODULE_BYTES;
+
+    sec = IMAGE_FIRST_SECTION(nt);
+    memcpy(sec[0].Name, ".text", 6);
+    sec[0].VirtualAddress   = TEST_TEXT_RVA;
+    sec[0].Misc.VirtualSize = TEST_RDATA_RVA - TEST_TEXT_RVA;
+    sec[0].Characteristics  = IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ;
+    memcpy(sec[1].Name, ".rdata", 7);
+    sec[1].VirtualAddress   = TEST_RDATA_RVA;
+    sec[1].Misc.VirtualSize = TEST_MODULE_BYTES - TEST_RDATA_RVA;
+    sec[1].Characteristics  = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ;
 }
 
 static void fake_palette_builder(void *palette, void *progress)
@@ -69,6 +111,10 @@ static void bind_fake(uint8_t *module)
     g_builder_raises = 0;
 }
 
+/* The builder is admitted on the strength of a CLEAN UNIQUE masked-signature match, which is
+ * stronger evidence than RVA equality -- two builds can share an RVA by coincidence, a signature
+ * cannot match the wrong function -- and, unlike RVA equality, it survives the second shipped DOOM
+ * executable, where every function sits at a different address. */
 static void test_install_exact_gate(uint8_t *module, int *failed_out)
 {
     int failed = *failed_out;
@@ -82,12 +128,24 @@ static void test_install_exact_gate(uint8_t *module, int *failed_out)
     sh_palette_refresh_test_reset();
     CHECK(sh_palette_refresh_install(&result, 1, module) == 1);
 
+    /* Still SIG_OK only: this call has a vtable/data-layout contract, so the hook-tolerant
+     * known_rva fallback is not good enough even though it is callable. */
     sh_palette_refresh_test_reset();
     result.status = SIG_OK_HOOKED;
     CHECK(sh_palette_refresh_install(&result, 1, module) == 0);
     CHECK(sh_palette_refresh_test_state() == SH_PALETTE_REFRESH_TEST_REFUSED);
 
+    /* The same clean match at a shifted address -- what the other shipped build looks like -- is
+     * accepted, where the old pinned-RVA gate refused it and silently disabled the service. */
     result.status = SIG_OK;
+    result.rva = TEST_BUILDER_RVA - 0xE460u;
+    result.addr = (uintptr_t)module + result.rva;
+    sh_palette_refresh_test_reset();
+    CHECK(sh_palette_refresh_install(&result, 1, module) == 1);
+
+    /* What is still refused is a resolve whose address and RVA disagree about the image base: the
+     * cached builder pointer and the base the editor is derived from must describe one module. */
+    result.addr = (uintptr_t)module + TEST_BUILDER_RVA;
     result.rva = TEST_BUILDER_RVA + 1;
     sh_palette_refresh_test_reset();
     CHECK(sh_palette_refresh_install(&result, 1, module) == 0);
@@ -114,6 +172,7 @@ int main(void)
         fprintf(stderr, "module allocation failed\n");
         return 2;
     }
+    write_pe_headers(module);
 
     test_install_exact_gate(module, &failed);
 
@@ -160,6 +219,28 @@ int main(void)
     CHECK(sh_palette_refresh_after_decl_registration() == 0);
     CHECK(sh_palette_refresh_test_state() == SH_PALETTE_REFRESH_TEST_REFUSED);
     CHECK(g_builder_calls == 0);
+
+    /* A palette pointer inside the image but in an EXECUTABLE section is not a vtable. The check
+     * is what the pointer plausibly IS, not which build's address it equals -- the pointer is read
+     * out of the live editor object, so it is already correct for whichever build we are in. */
+    bind_fake(module);
+    setup_editor(module, 1, 1);
+    *(void **)(module + TEST_EDITOR_SINGLETON_RVA + TEST_EDITOR_PALETTE_OFF) =
+        (void *)(module + TEST_BUILDER_RVA);
+    CHECK(sh_palette_refresh_after_decl_registration() == 0);
+    CHECK(sh_palette_refresh_test_state() == SH_PALETTE_REFRESH_TEST_REFUSED);
+    CHECK(g_builder_calls == 0);
+
+    /* The editor singleton is still located by a raw pinned-build DATA RVA with no signature behind
+     * it, so off that build the service FAILS CLOSED rather than dereference unrelated memory.
+     * Publishing a wrong pointer would be worse than publishing none: the caller cannot tell. */
+    bind_fake(module);
+    setup_editor(module, 1, 1);
+    g_pinned_build = 0;
+    CHECK(sh_palette_refresh_after_decl_registration() == 0);
+    CHECK(sh_palette_refresh_test_state() == SH_PALETTE_REFRESH_TEST_REFUSED);
+    CHECK(g_builder_calls == 0);
+    g_pinned_build = 1;
 
     bind_fake(module);
     setup_editor(module, 1, 1);

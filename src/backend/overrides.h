@@ -61,9 +61,11 @@ typedef struct sh_overrides_internal_decl_entry {
 } sh_overrides_internal_decl_entry;
 
 /* Install the overrides file-shadow by swapping the engine resource-provider's open vtable slot.
- *   module_base    = live DOOM image base. The provider is deliberately enabled only when the
- *                    resolved functions and decoded provider vtable occupy the pinned Steam-build
- *                    RVAs for the audited 31-slot idFile ABI; incompatible builds refuse cleanly.
+ *   module_base    = live DOOM image base (either shipped executable). The provider is enabled only
+ *                    when every resolved function is a clean unique signature match inside that
+ *                    image and the decoded provider vtable is a read-only location inside it; the
+ *                    audited 31-slot idFile ABI is enforced by the table's shape, not by address.
+ *                    An engine revision that fails either check refuses cleanly.
  *   ctor_fn        = resolved engine ResProviderCtor address (from the signature resolver, DB name
  *                    "ResProviderCtor"). 0 => not resolved; logs SKIPPED and returns 0.
  *   ctor_status_ok = 1 iff a CLEAN scan hit (SIG_OK), not the hook-tolerant known_rva fallback
@@ -161,10 +163,11 @@ int sh_overrides_test_stream_helpers_configure(void *read_string, int read_clean
 int sh_overrides_test_stream_helpers_ready(void);
 void sh_overrides_test_stream_helpers_reset(void);
 int sh_overrides_test_supported_build_abi(const uint8_t *module_base,
-                                          const void *ctor,
-                                          const void *read_string,
-                                          const void *compare,
-                                          const void *write_string);
+                                          const void *ctor, int ctor_status_ok,
+                                          const void *read_string, int read_string_status_ok,
+                                          const void *compare, int compare_status_ok,
+                                          const void *write_string, int write_string_status_ok);
+int sh_overrides_test_address_in_readonly_section(const uint8_t *module_base, const void *address);
 void *sh_overrides_test_stream_open_file(const char *path);
 void sh_overrides_test_stream_close(void *stream);
 /* Resolve an engine resource name to the existing override file that serves it

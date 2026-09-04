@@ -65,13 +65,24 @@ int main(int argc, char **argv)
     CHECK(strstr(signatures, "\"SnapPaletteBuild\"") != NULL);
     CHECK(strstr(signatures, "48 8B C4 56 57 41 54 41 56 41 57 48 81 EC 70 07 00 00") != NULL);
     CHECK(strstr(signatures, "0x54AEE0u") != NULL);
+    /* The builder's identity is proven by a clean unique masked-signature match, which is stronger
+     * than RVA equality and, unlike it, survives the second shipped DOOM executable -- where every
+     * function sits at a different RVA. What is left is a self-consistency check between the
+     * resolver's address and RVA. The pinned RVAs stay as documentation and must not gate. */
     CHECK(strstr(refresh, "builder->status != SIG_OK") != NULL);
-    CHECK(strstr(refresh, "builder->rva != PR_BUILDER_RVA") != NULL);
-    CHECK(strstr(refresh, "builder->addr != (uintptr_t)module_base + PR_BUILDER_RVA") != NULL);
+    CHECK(strstr(refresh, "builder->addr != (uintptr_t)module_base + builder->rva") != NULL);
+    CHECK(strstr(refresh, "builder->rva != PR_BUILDER_RVA") == NULL);
     CHECK(strstr(refresh, "PR_BUILDER_RVA          0x54AEE0u") != NULL);
+    /* The editor singleton is a raw DATA RVA with no signature behind it, so it stays load-bearing
+     * and FAILS CLOSED anywhere but the build it was extracted from. */
     CHECK(strstr(refresh, "PR_EDITOR_SINGLETON_RVA") != NULL);
+    CHECK(strstr(refresh, "sh_host_is_pinned_rva_build()") != NULL);
     CHECK(strstr(refresh, "editor != g_module_base + PR_EDITOR_SINGLETON_RVA") != NULL);
+    /* The palette vtable is read out of the live editor object, so it is checked for plausibility
+     * -- present, and a read-only location in the host image -- not against one build's address. */
     CHECK(strstr(refresh, "PR_PALETTE_VTABLE_RVA   0x20499A0u") != NULL);
+    CHECK(strstr(refresh, "pr_address_in_readonly_section(g_module_base, palette_vtable)") != NULL);
+    CHECK(strstr(refresh, "palette_vtable != (void *)(g_module_base + PR_PALETTE_VTABLE_RVA)") == NULL);
     CHECK(strstr(refresh, "PR_STATE_PENDING") != NULL);
     CHECK(strstr(refresh, "PR_STATE_APPLIED") != NULL);
     CHECK(strstr(refresh, "PR_STATE_REFUSED") != NULL);
