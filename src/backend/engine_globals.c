@@ -9,13 +9,21 @@
 #include "backend_log.h"
 #include "engine_globals_table.gen.h"   /* defines BACKEND_ENGINE_GLOBALS; generated, never hand-edited */
 
+/* The cache is written from whichever thread resolves a name first and read from all of them --
+ * the backend bootstrap, the UI thread, the engine main thread, and the fault shield's handler.
+ * Resolution is deterministic, so a race can only duplicate work; what it must not do is let a
+ * reader see a slot's name published before its address. So a slot is reserved with an interlocked
+ * increment, the name is written, and the ADDRESS IS PUBLISHED LAST behind a barrier. Readers test
+ * the address first and treat zero as "not ready", which costs a re-resolve and never a bad
+ * pointer. No lock: the shield reads this from inside an exception handler, where taking one is
+ * not safe. */
 #define GLB_CACHE_MAX 64
 
 static struct {
-    const char *name;
-    uintptr_t   addr;
+    const char *volatile name;
+    volatile uintptr_t   addr;
 } g_cache[GLB_CACHE_MAX];
-static size_t g_cached = 0;
+static volatile LONG g_reserved = 0;
 
 size_t glb_db_count(void)
 {
@@ -26,18 +34,26 @@ size_t glb_db_count(void)
 
 static uintptr_t cache_get(const char *name)
 {
-    size_t i;
-    for (i = 0; i < g_cached; i++)
-        if (strcmp(g_cache[i].name, name) == 0) return g_cache[i].addr;
+    LONG n = g_reserved;
+    LONG i;
+    if (n > GLB_CACHE_MAX) n = GLB_CACHE_MAX;
+    for (i = 0; i < n; i++) {
+        uintptr_t   a = g_cache[i].addr;   /* address first: zero means not published yet */
+        const char *nm;
+        if (!a) continue;
+        nm = g_cache[i].name;
+        if (nm && strcmp(nm, name) == 0) return a;
+    }
     return 0;
 }
 
 static void cache_put(const char *name, uintptr_t addr)
 {
-    if (g_cached >= GLB_CACHE_MAX) return;
-    g_cache[g_cached].name = name;
-    g_cache[g_cached].addr = addr;
-    g_cached++;
+    LONG i = InterlockedIncrement(&g_reserved) - 1;
+    if (i < 0 || i >= GLB_CACHE_MAX) return;   /* table outgrew the cache: resolve every time */
+    g_cache[i].name = name;
+    MemoryBarrier();
+    g_cache[i].addr = addr;                    /* publish last */
 }
 
 /* SEH-guarded 4-byte read: the anchor may sit in an uncommitted section tail. */
@@ -106,8 +122,9 @@ uintptr_t glb_resolve(const uint8_t *module_base, const char *name, glb_status *
         return 0;
     }
 
-    /* RIP-relative: the displacement is measured from the END of the disp32 field. */
-    decoded = r.addr + e->disp_slot + 4 + (intptr_t)disp + (intptr_t)e->delta;
+    /* RIP-relative: measured from the end of the whole INSTRUCTION, which is the end of the
+     * disp32 plus whatever immediate follows it. See the note in engine_globals.h. */
+    decoded = r.addr + e->disp_slot + 4 + e->disp_tail + (intptr_t)disp + (intptr_t)e->delta;
 
     img_sz = image_size_of(module_base);
     if (img_sz == 0 || decoded < (uintptr_t)module_base ||

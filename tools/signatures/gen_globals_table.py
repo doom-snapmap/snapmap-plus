@@ -35,6 +35,7 @@ NAMES = {
     0x27984a0: ('provider_vtable',        0, 'resource provider vtable, 31 slots (.rdata)'),
     0x2ded690: ('throwinfo_recoverable',  0, 'ThrowInfo for the recoverable level-6 throw (.rdata)'),
     0x2ded990: ('throwinfo_fatal',        0, 'ThrowInfo for the fatal level-7 throw (.rdata)'),
+    0x6faf8b0: ('throw_suppressor_b',    0, 'level-6 dispatcher throw gate B'),
 
     # CODE addresses that cannot be found by their own bytes, anchored on a call site instead.
     # The arithmetic is identical -- a `call rel32` displacement is decoded exactly like a
@@ -81,9 +82,19 @@ def main(json_path, out_path):
         if best is None:
             skipped.append((vk, 'no portable derivation'))
             continue
+        # Every surviving derivation has already been proved to decode back to this exact target on
+        # the reference image, so if they now disagree about the target image, one of them is wrong
+        # and we cannot tell which. Refuse rather than ship a majority vote: adjacent engine globals
+        # are one byte apart, so the wrong answer here looks entirely plausible.
+        if agree != len(rec['derivations']):
+            others = sorted({d['gl_target_rva'] for d in rec['derivations']})
+            skipped.append((vk, 'sites disagree on the target image (%s) -- re-derive by hand'
+                            % ', '.join(others)))
+            continue
         rows.append(dict(name=name, note=note, delta=delta, vk=vk, gl=gl,
                          agree=agree, total=len(rec['derivations']),
                          pattern=best['pattern'], slot=best['disp_slot'],
+                         tail=best.get('disp_tail', 0),
                          site=best['vk_site'], mnemonic=best['mnemonic']))
 
     rows.sort(key=lambda r: r['name'])
@@ -104,16 +115,21 @@ def main(json_path, out_path):
                 '#define BACKEND_ENGINE_GLOBALS_TABLE_GEN_H\n\n'
                 '#include "engine_globals.h"\n\n'
                 'const global_entry BACKEND_ENGINE_GLOBALS[] = {\n')
+        # Designated initializers, deliberately. A positional list silently reassigns every field
+        # after the insertion point if global_entry ever gains one, and the symptom would be a
+        # plausible wrong address rather than a compile error. Naming the fields makes the order
+        # irrelevant and a future field harmless.
         for r in rows:
-            f.write('    { "%s",\n' % r['name'])
+            f.write('    { .name = "%s",\n' % r['name'])
             f.write('      /* %s.\n' % r['note'])
-            f.write('       * Anchor: %s at Vulkan 0x%s (%s).\n'
-                    % (r['mnemonic'], r['site'].replace('0x', ''), 'unique on both images'))
+            f.write('       * Anchor: %s at Vulkan 0x%s (unique on both images).\n'
+                    % (r['mnemonic'], r['site'].replace('0x', '')))
             f.write('       * Resolves to Vulkan 0x%X / OpenGL %s; %d of %d reference sites agreed. */\n'
                     % (r['vk'], r['gl'], r['agree'], r['total']))
-            f.write('      "%s",\n' % r['pattern'])
-            f.write('      %d, %d, 0x%Xu },\n\n' % (r['slot'], r['delta'], r['vk']))
-        f.write('    { NULL, NULL, 0, 0, 0 }\n};\n\n'
+            f.write('      .anchor = "%s",\n' % r['pattern'])
+            f.write('      .disp_slot = %d, .disp_tail = %d, .delta = %d, .pinned_rva = 0x%Xu },\n\n'
+                    % (r['slot'], r['tail'], r['delta'], r['vk']))
+        f.write('    { .name = NULL }\n};\n\n'
                 '#endif /* BACKEND_ENGINE_GLOBALS_TABLE_GEN_H */\n')
 
     print('wrote %s: %d entries' % (out_path, len(rows)))

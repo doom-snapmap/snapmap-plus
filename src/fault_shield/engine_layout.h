@@ -53,7 +53,7 @@
  * throws (decompile the dispatcher: the `if (DAT_x == 0 && DAT_y == 0) throw; else ExitProcess(1)` gate);
  * find them as the two .data slots that gate read. The shield's writes to them are SEH-guarded (veh.c). */
 #define RVA_SUPPRESSOR_A   0x6faf820u   /* DAT_146faf820 (re-derive: dispatcher 0x1A08E80 throw-gate input A) */
-#define RVA_SUPPRESSOR_B   0x6faf8b0u   /* DAT_146faf8b0 -- UNVERIFIED, zero references in the pinned image */
+#define RVA_SUPPRESSOR_B   0x6faf8b0u   /* pinned-build RVA, audit only; located at runtime as "throw_suppressor_b" */
 
 /* Recovery-gate inputs (read-only; informational for classification). Frame recovers iff
  * errState==0 && load_state!=1 (load_state==1 is unreachable). Pinned-build RVAs, audit only; located at

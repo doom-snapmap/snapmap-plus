@@ -51,15 +51,15 @@
 #   prefab_transform_test -- sparse idMat3 defaults, column-major axes, scale, and block anchoring
 #   prefab_viewport_contract_test -- Prefab Details layout, resize, budgets, and shared-buffer transport
 #   window_chrome_contract_test -- captionless DWM shadow/rounded-corner contract
-# -Doom <unpacked DOOM exe>: ALSO the resolver tests, which scan a real
-#   (Steamless-unpacked) DOOM image. globals_test additionally proves the engine data
-#   globals resolve and that their layout invariants hold.
-# -DoomAlt <the other unpacked DOOM exe>: the PORTABILITY gate -- see below. Run both:
-#     tests\run-tests.ps1 -Doom ...\DOOMx64vk.exe.unpacked.exe -DoomAlt ...\DOOMx64.exe.unpacked.exe
-# -Doom <unpacked DOOMx64vk.exe>: ALSO the signature-resolver tests, which scan a real
-#   (Steamless-unpacked) DOOM image:
+# -Doom <unpacked DOOM exe>: ALSO the resolver tests, which scan a real (Steamless-unpacked)
+#   DOOM image. Either shipped executable works:
 #   sig_test            -- every engine signature resolves to its known RVA
-#   hooktol_test        -- the resolver's hook-tolerant fallback (prologue-clobbered fns)
+#   hooktol_test        -- the resolver hook-tolerant fallback (prologue-clobbered fns)
+#   globals_test        -- every engine data global resolves, and the layout invariants hold
+# -DoomAlt <the other unpacked DOOM exe>: the PORTABILITY gate. Re-runs sig_test and
+#   globals_test in portable mode against the second executable, where everything must still
+#   resolve uniquely at its own (different) addresses. Run both together:
+#     tests\run-tests.ps1 -Doom <vk unpacked> -DoomAlt <gl unpacked>
 #
 # Exit 0 iff every selected test passes; non-zero (with the build log) on any failure.
 # Objects + test exes land in tests\obj\ (gitignored). The runtime XInput-ordinal test

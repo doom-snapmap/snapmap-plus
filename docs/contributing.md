@@ -221,7 +221,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1 `
   -Doom C:\path\to\unpacked-DOOMx64vk.exe -DoomAlt C:\path\to\unpacked-DOOMx64.exe
 ```
 
-All 91 signatures and all 24 engine-globals anchors currently resolve uniquely on both images under this
+All 91 signatures and all 25 engine-globals anchors currently resolve uniquely on both images under this
 command.
 
 **Why uniqueness on both images is the actual bar.** A pattern that matches exactly once on one image tells

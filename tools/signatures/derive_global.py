@@ -56,8 +56,15 @@ def riprefs(sec, target_rva):
     d32 = (b[0:n] | (b[1:n + 1] << 8) | (b[2:n + 2] << 16) | (b[3:n + 3] << 24))
     d32 = np.where(d32 >= 0x80000000, d32 - 0x100000000, d32)
     # target == base + off + 4 + d32  =>  d32 + off == target - base - 4
-    want = target_rva - base - 4
-    return np.nonzero(d32 + np.arange(n, dtype=np.int64) == want)[0].tolist()
+    # A reference whose disp32 is followed by an immediate encodes a correspondingly
+    # smaller displacement, so sweep the plausible tail widths too. Missing these is how
+    # a global with exactly one `cmp [rip+disp], imm8` reference looks unreferenced.
+    idx = np.arange(n, dtype=np.int64)
+    hits = []
+    for tail in (0, 1, 2, 4):
+        want = target_rva - base - 4 - tail
+        hits.extend(np.nonzero(d32 + idx == want)[0].tolist())
+    return sorted(set(hits))
 
 
 def decode_site(sec, disp_off, back=24):
@@ -115,6 +122,7 @@ def build_sig(sec, anchor_ins, n_after=6):
     off = start_rva - base
     toks = []
     target_slot = None
+    target_tail = 0
     cur = 0
     for ins in md.disasm(bytes(data[off:off + 16 * (n_after + 1)]), start_rva, count=n_after + 1):
         b = bytes(ins.bytes)
@@ -128,16 +136,18 @@ def build_sig(sec, anchor_ins, n_after=6):
             for op in ins.operands:
                 if op.type == CS_OP_MEM and op.mem.base == X86_REG_RIP:
                     idx = b.rfind(struct.pack('<i', op.mem.disp))
-                    # The displacement must be the LAST field of the instruction. x86-64
-                    # measures it from the end of the whole instruction, so an anchor with a
-                    # trailing immediate (`mov dword ptr [rip+disp], imm32`) would decode 4
-                    # bytes short -- silently, onto a plausible address. Refuse such a site.
-                    if idx >= 0 and idx + 4 == len(b):
+                    # x86-64 measures the displacement from the end of the whole instruction,
+                    # so anything following the disp32 (an immediate, as in
+                    # `cmp dword ptr [rip+disp], 0`) has to be added back when decoding.
+                    # Record how many such bytes there are rather than assuming none --
+                    # assuming none decodes short, silently, onto a plausible address.
+                    if idx >= 0:
                         target_slot = cur + idx
+                        target_tail = len(b) - (idx + 4)
                         break
         toks.extend(masked)
         cur += len(b)
-    return toks, start_rva, target_slot
+    return toks, start_rva, target_slot, target_tail
 
 
 def compile_pat(toks):
@@ -194,22 +204,31 @@ def derive(vk_secs, gl_secs, target_rva, max_sites=6):
         if ins is None:
             continue
         for n_after in (5, 7, 9, 12, 16):
-            toks, srva, tslot = build_sig(vt, ins, n_after=n_after)
+            toks, srva, tslot, ttail = build_sig(vt, ins, n_after=n_after)
             if tslot is None:
                 break
             pb, pm = compile_pat(toks)
             vh = scan(vk_secs, pb, pm)
             if len(vh) != 1:
                 continue
+            # Prove the site decodes back to the target we asked for. The tail sweep in riprefs
+            # can surface a site whose real instruction length differs from the one assumed, and
+            # such a site names a NEIGHBOURING global -- which for adjacent engine globals is a
+            # plausible, wrong answer rather than an obvious failure.
+            vaddr, vsec, vp = vh[0]
+            d32v = struct.unpack_from('<i', vsec['data'], vp + tslot)[0]
+            if vaddr + tslot + 4 + ttail + d32v != target_rva:
+                continue
             gh = scan(gl_secs, pb, pm)
             if len(gh) != 1:
                 continue
             gaddr, gsec, gp = gh[0]
             d32 = struct.unpack_from('<i', gsec['data'], gp + tslot)[0]
-            gl_target = gaddr + tslot + 4 + d32
+            gl_target = gaddr + tslot + 4 + ttail + d32
             report['derivations'].append({
                 'vk_site': hex(srva),
                 'disp_slot': tslot,
+                'disp_tail': ttail,
                 'mnemonic': '%s %s' % (ins.mnemonic, ins.op_str),
                 'insns': n_after + 1,
                 'bytes': len(toks),

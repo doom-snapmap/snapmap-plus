@@ -136,23 +136,24 @@ static void veh_resolve_globals(void)
     }
 }
 
-/* ---- Throw-gate suppressor B (RVA_SUPPRESSOR_B, pinned 0x6faf8b0) -----------------------------------
- * Suppressor A has a runtime derivation: a RIP-relative reference sweep of the pinned Vulkan image
- * decodes 32 code sites that compute its address, which is what let it be signed into the globals table.
- * The same sweep decodes ZERO sites computing suppressor B's address -- a result that sits oddly beside
- * the Ghidra reference count recorded in engine_layout.h, and the disagreement is itself unresolved.
- * Either way there is no code site to sign, so there is no portable way to locate this global, and with
- * the standing finding that both suppressors read 0 and nothing writes either, the constant looks stale
- * or mis-derived. It is UNVERIFIED, and inventing a derivation would be worse than leaving it out.
+/* ---- Throw-gate suppressor B -----------------------------------------------------------------------
+ * This global briefly looked unreferenced. A RIP-relative sweep of the pinned image decoded 32 sites for
+ * suppressor A and none for B, which contradicted the Ghidra reference count recorded in
+ * engine_layout.h. The Ghidra count was right: the sweep only recognised displacements that END an
+ * instruction, and B's single reference is `cmp dword ptr [rip+disp], 0`, whose displacement is followed
+ * by a one-byte immediate. Widening the sweep finds it at 0x1a09857, inside the level-6 dispatcher
+ * exactly where engine_layout.h said it was.
  *
- * So the write is kept, and performed only on the build the constant came from -- where it is provably a
- * no-op, so nothing is lost -- and skipped silently everywhere else. The caller SEH-guards; this never
- * decides anything, it only writes a zero over a zero. If the constant is ever re-derived (or shown to be
- * a phantom), this function is the single place to change. */
-static void write_suppressor_b_if_pinned(void)
+ * So B is signed into the globals table like everything else, and located here at runtime rather than
+ * from a pinned address. Cross-check: B - A is 0x90 on both shipped executables. The caller SEH-guards;
+ * this never decides anything, it only writes a zero over a zero. */
+static void write_suppressor_b(void)
 {
-    if (!g_pinned_build || g_doom_base == NULL) return;
-    *(volatile int32_t *)(g_doom_base + RVA_SUPPRESSOR_B) = 0;
+    uintptr_t b;
+    if (g_doom_base == NULL) return;
+    b = glb_resolve(g_doom_base, "throw_suppressor_b", NULL);
+    if (!b) return;                     /* unlocatable on this build -- skip, never guess */
+    *(volatile int32_t *)b = 0;
 }
 
 #define SHIELD_MAX_REDIRECTS 8
@@ -499,7 +500,7 @@ static void force_recovery_gate(void)
             *(volatile int32_t *)g_load_state_at = 0;
         if (g_suppr_a_at)
             *(volatile int32_t *)g_suppr_a_at = 0;
-        write_suppressor_b_if_pinned();
+        write_suppressor_b();
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
 }
 
@@ -884,11 +885,11 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
      * and have no writer on the pinned build, so this is insurance rather than a live fix -- see
      * engine_layout.h for the sweep that established that. Suppressor A is located by glb_resolve;
      * suppressor B is written only on the build its unverified constant came from (see
-     * write_suppressor_b_if_pinned). SEH-guarded (P6): a fault here would otherwise crash INSIDE the VEH.
+     * write_suppressor_b). SEH-guarded (P6): a fault here would otherwise crash INSIDE the VEH.
      * If the write faults we still resume into Error(6) (the gate may already be open / re-armed). */
     __try {
         if (g_suppr_a_at) *(volatile int32_t *)g_suppr_a_at = 0;
-        write_suppressor_b_if_pinned();
+        write_suppressor_b();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         shield_fault sf = { "sig", -1, "throw-gate suppressor write faulted", 0, 0 };
         shield_emit(&sf);

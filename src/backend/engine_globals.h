@@ -23,21 +23,23 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* CONSTRAINT on `disp_slot`, enforced by the generator, relied on by glb_resolve:
+/* HOW `disp_slot` AND `disp_tail` ARE USED, and why both are needed:
  *
  * x86-64 measures a RIP-relative displacement from the end of the WHOLE INSTRUCTION, not from the
- * end of the displacement field. Those are the same address only when the displacement is the last
- * thing in the instruction. `mov dword ptr [rip+disp], imm32` carries a 4-byte immediate AFTER the
- * displacement, so decoding it as `slot + 4 + disp` lands 4 bytes short -- silently, on a plausible
- * address, with no symptom until something writes through it.
+ * end of the displacement field. Those coincide only when nothing follows the displacement. An
+ * instruction like `cmp dword ptr [rip+disp], 0` carries a 1-byte immediate AFTER the displacement,
+ * so decoding it as `slot + 4 + disp` lands one byte short -- silently, on a plausible address, with
+ * no symptom until something reads or writes through it.
  *
- * So an anchor instruction must end with its disp32. The derivation tooling refuses any candidate
- * site that does not, which is why no entry here needs an instruction-length field. Do not
- * hand-write an entry; regenerate. */
+ * `disp_tail` is the number of immediate bytes that follow the displacement in the anchor
+ * instruction (0 for the common `lea`/`mov` forms). The generator measures it; it is never guessed.
+ * Getting this wrong is not a crash, it is a wrong answer, which is why it is a field rather than an
+ * assumption. Do not hand-write an entry; regenerate. */
 typedef struct global_entry {
     const char *name;        /* stable key, e.g. "editor_singleton" */
     const char *anchor;      /* masked byte pattern of the code site that computes the address */
     uint16_t    disp_slot;   /* byte offset of the RIP-relative disp32 within `anchor`; see above */
+    uint8_t     disp_tail;   /* immediate bytes following that disp32 in the anchor instruction */
     int32_t     delta;       /* added to the decoded address; for adjacent-slot globals */
     uint32_t    pinned_rva;  /* the global's RVA on the pinned Vulkan build -- audit only, never used */
 } global_entry;

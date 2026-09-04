@@ -127,6 +127,30 @@ int main(int argc, char **argv)
         }
     }
 
+    /* The visibility leaf is the one place in the product that SETS the instruction pointer: on a
+     * Class-B render-node fault the shield resumes at leaf+0x24, the predicate's own
+     * `xor al,al; ret` tail. A wrong address there does not degrade a feature, it sends the
+     * faulting thread into whatever happens to live at that offset. So assert the tail really is
+     * that instruction pair on whatever image we were handed, rather than trusting that the leaf's
+     * internal layout carried across the build. */
+    {
+        glb_status st = GLB_UNKNOWN_NAME;
+        uintptr_t lo = glb_resolve(base, "vis_leaf_lo", &st);
+        if (!lo) {
+            printf("BAD vis_leaf_lo UNRESOLVED status=%d\n", (int)st);
+            bad++;
+        } else {
+            const uint8_t *tail = (const uint8_t *)(lo + 0x24);
+            if (tail[0] == 0x32 && tail[1] == 0xC0 && tail[2] == 0xC3) {
+                printf("OK  invariant vis_leaf_lo + 0x24 == xor al,al; ret\n");
+            } else {
+                printf("BAD vis_leaf_lo + 0x24 is %02x %02x %02x, not xor al,al; ret -- "
+                       "the shield must not redirect here\n", tail[0], tail[1], tail[2]);
+                bad++;
+            }
+        }
+    }
+
     /* Layout invariants -- true on any build, so they run in both modes. */
     check_adjacent(base, "cmd_system_slot",      "cvar_system_slot",     0x10, &bad);
     check_adjacent(base, "main_thread_id",       "load_state",           0x08, &bad);

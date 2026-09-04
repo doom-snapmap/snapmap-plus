@@ -59,11 +59,14 @@ static int      g_pinned_build   = 0;
  * instruction writes either, the constant looks stale or mis-derived -- it is UNVERIFIED. Rather than
  * invent a derivation, the write is kept and performed only on the build the constant came from, where it
  * is provably a no-op; everywhere else it is skipped silently. Caller SEH-guards. */
-static void write_suppressor_b_if_pinned(void)
+static void write_suppressor_b(void)
 {
-    if (!g_pinned_build || g_doom_base == NULL) return;
-    if (*(volatile int32_t *)(g_doom_base + RVA_SUPPRESSOR_B) != 0)
-        *(volatile int32_t *)(g_doom_base + RVA_SUPPRESSOR_B) = 0;
+    uintptr_t b;
+    if (g_doom_base == NULL) return;
+    b = glb_resolve(g_doom_base, "throw_suppressor_b", NULL);
+    if (!b) return;                     /* unlocatable on this build -- skip, never guess */
+    if (*(volatile int32_t *)b != 0)
+        *(volatile int32_t *)b = 0;
 }
 
 /* 5 pushes + `mov eax,0x119c0` => boundary 0x17ce36f, all position-independent (disassembly-verified). */
@@ -308,7 +311,7 @@ static void keep_throw_gate_open(void)
     __try {
         if (g_suppr_a_at && *(volatile int32_t *)g_suppr_a_at != 0)
             *(volatile int32_t *)g_suppr_a_at = 0;
-        write_suppressor_b_if_pinned();
+        write_suppressor_b();
     } __except (EXCEPTION_EXECUTE_HANDLER) { /* unreadable page -> skip */ }
 }
 
