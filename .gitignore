@@ -27,9 +27,14 @@ community/.wrangler/
 
 # wrangler local-dev secrets (per-machine; never commit)
 .dev.vars
+deploy.ps1
+docs/rawmap-save-load-system.md
 
 # Generated from CHANGELOG.md by pages.yml at build time (tools/changelog.py --json)
 site/_data/changelog.json
+
+# Jekyll's local build output (jekyll serve)
+site/_site/
 
 # Python bytecode cache (tools/)
 __pycache__/
