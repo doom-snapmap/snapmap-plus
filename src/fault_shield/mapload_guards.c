@@ -24,6 +24,8 @@
 #include <stdio.h>
 #include "mapload_guards.h"
 #include "engine_layout.h"   /* RVA_EVLINK / RVA_INTERACTABLE_SPAWN + the offsets, with their recipes */
+#include "../backend/host_image.h"
+#include "../backend/signatures.h" /* EventLink / InteractableSpawn are signature-resolved */
 #include "fault_record.h"    /* shield_emit -> shield_faults.log */
 #include "hook.h"            /* install_inline_hook */
 
@@ -249,6 +251,27 @@ static void sh_evlink_detour(void *a, void *b)
     g_orig_evlink(a, b);        /* OUTSIDE every __try -- must not swallow the engine's C++ throws */
 }
 
+/* Locate a guard target. Both functions are in the shipped signature database, so they are found by
+ * their BYTES on whichever DOOM executable is running -- the pinned RVAs below are only true of the
+ * Vulkan image, and using one on the OpenGL build made these guards refuse to install at all. The
+ * prologue comparison at each call site stays: the signature says which function this is, the
+ * prologue says the stolen-byte window is still the one we measured. */
+static void *guard_target(const uint8_t *module_base, const char *sig_name, uint32_t pinned_rva)
+{
+    sig_result results[SIG_RESULTS_MAX];
+    size_t db = sig_db_count();
+    uintptr_t a;
+    if (db > SIG_RESULTS_MAX) db = SIG_RESULTS_MAX;
+    /* sig_resolve_all fills results BY DATABASE INDEX and returns how many RESOLVED. Searching only
+     * the returned count truncates the tail of the array, so a single earlier signature failing (our
+     * own detours are already installed by the time the guards arm) silently hides the last entries --
+     * which is exactly how InteractableSpawn went missing while its neighbour EventLink resolved. */
+    (void)sig_resolve_all(module_base, results, SIG_RESULTS_MAX);
+    a = sig_addr_by_name(results, db, sig_name);
+    if (a) return (void *)a;
+    if (sh_host_is_pinned_rva_build()) return (void *)(module_base + pinned_rva);
+    return NULL;   /* unknown build: refuse rather than detour a guessed address */
+}
 int sh_evwire_guard_install(const uint8_t *module_base)
 {
     void *target, *tramp;
@@ -256,11 +279,17 @@ int sh_evwire_guard_install(const uint8_t *module_base)
     if (module_base == NULL) return 0;
     if (g_orig_evlink != NULL) return 1;                     /* one-shot */
 
-    target = (void *)(module_base + RVA_EVLINK);
+    target = guard_target(module_base, "EventLink", RVA_EVLINK);
+    if (target == NULL) {
+        shield_fault f = { "load", -1,
+            "evwire-guard: EventLink is unresolved on this build -- NOT installed", RVA_EVLINK, 0 };
+        shield_emit(&f);
+        return 0;
+    }
     if (!prologue_matches((const uint8_t *)target, k_evlink_prologue, EVLINK_STOLEN)) {
         shield_fault f = { "load", -1,
-            "evwire-guard: prologue MISMATCH at 0x9C2370 -- NOT installed (different DOOM build, or the "
-            "function is already hooked). Re-derive the RVA + STOLEN count for this build.",
+            "evwire-guard: prologue MISMATCH at the resolved EventLink -- NOT installed (the function is "
+            "already hooked, or its stolen-byte window changed). Re-derive the STOLEN count.",
             RVA_EVLINK, 0 };
         shield_emit(&f);
         return 0;
@@ -388,7 +417,14 @@ int sh_interactable_guard_install(const uint8_t *module_base)
     if (module_base == NULL) return 0;
     if (g_orig_ia_spawn != NULL) return 1;                   /* one-shot */
 
-    target = (void *)(module_base + RVA_INTERACTABLE_SPAWN);
+    target = guard_target(module_base, "InteractableSpawn", RVA_INTERACTABLE_SPAWN);
+    if (target == NULL) {
+        shield_fault f = { "load", -1,
+            "interactable-guard: InteractableSpawn is unresolved on this build -- NOT installed",
+            RVA_INTERACTABLE_SPAWN, 0 };
+        shield_emit(&f);
+        return 0;
+    }
     if (!prologue_matches((const uint8_t *)target, k_ia_spawn_prologue, INTERACTABLE_STOLEN)) {
         shield_fault f = { "load", -1,
             "interactable-guard: prologue MISMATCH at 0x1232830 -- NOT installed (different DOOM build, or "
