@@ -56,6 +56,16 @@
 #define DS_IDSTR_SIZE          0x30u
 #define DS_ANCHOR_MOV_OFFSET    0x10u
 #define DS_ANCHOR_MOV_LENGTH    7u
+/* THE RVA EACH OF THESE FUNCTIONS OCCUPIES ON THE PINNED VULKAN BUILD, recorded for audit and
+ * re-derivation. NOT a gate. DOOM 2016 ships two executables built from one source tree and linked
+ * one second apart -- DOOMx64vk.exe and DOOMx64.exe -- and the game relaunches itself between them
+ * when r_renderAPI changes, so we get loaded into whichever one the user is running. Every function
+ * sits at a different RVA on the OpenGL link (measured shifts of -0x400 to -0xE460, with no uniform
+ * delta), while the masked signatures still resolve every one of them uniquely on both images.
+ * Requiring RVA equality therefore proved nothing except which link output we were in, and it
+ * disabled this whole service on half the shipped game. Identity is proved by the signature; see
+ * ds_clean_identity. Keep these current when the signature table is regenerated -- they are the
+ * paper trail back to the extraction build. */
 #define DS_PINNED_ANCHOR_RVA    0x184E1D0u
 #define DS_PINNED_TYPE_RVA      0x17B43B0u
 #define DS_PINNED_REGISTER_RVA  0x17B7330u
@@ -547,18 +557,28 @@ static uintptr_t ds_clean_addr(const sig_result *results, size_t count,
     return result && result->status == SIG_OK ? result->addr : 0;
 }
 
-/* This service also reads a pinned load-state data RVA and decodes a pinned
- * registry layout. Clean signatures prove call targets, but not that those
- * build-specific data/layout assumptions match. Require every independent
- * anchor to occupy the audited Steam-build RVA before arming. */
-static int ds_clean_at_pinned_rva(const sig_result *results, size_t count,
-                                  const char *name, const uint8_t *module_base,
-                                  uintptr_t expected_rva)
+/* Every independent anchor this service decodes a layout through must be the engine function we
+ * think it is, and must not already be detoured by someone else. A UNIQUE masked-signature match
+ * is what proves that, and it proves it better than the RVA equality this gate used to demand: two
+ * different link outputs can share an RVA by coincidence, whereas a signature that matches exactly
+ * once in the executable sections cannot have matched the wrong function. So the test is
+ * SIG_OK -- and SIG_OK specifically, never SIG_OK_HOOKED, because "clean" here means the prologue
+ * was found intact by the scan rather than recovered past someone else's inline hook.
+ *
+ * `documented_rva` is the address on the pinned Vulkan build (see the DS_PINNED_* block above). It
+ * is passed so the audit trail stays attached to the name it belongs to and is deliberately not
+ * compared against anything; the struct field layouts these RVAs were derived alongside are
+ * identical across both shipped builds, which is why the layout decoding below carries over
+ * unchanged. What is still checked is internal consistency: the resolver's address and its
+ * recovered RVA must agree about the module they came from. */
+static int ds_clean_identity(const sig_result *results, size_t count,
+                             const char *name, const uint8_t *module_base,
+                             uintptr_t documented_rva)
 {
     const sig_result *result = ds_result(results, count, name);
+    (void)documented_rva;
     return result && result->status == SIG_OK && result->addr && module_base &&
-           result->rva == expected_rva &&
-           result->addr == (uintptr_t)module_base + expected_rva;
+           result->addr == (uintptr_t)module_base + result->rva;
 }
 
 static void ds_free_candidates(void)
@@ -3088,20 +3108,20 @@ int sh_decl_server_install(const sig_result *results, size_t count,
         !register_file->addr || !find_decl->addr ||
         !idstr_ctor || !idstr_dtor || !boot_promote || !execute_commands ||
         !generic_load || !add_command || !cmdsys || !module_base ||
-        !ds_clean_at_pinned_rva(results, count, "DeclRegistryAnchor", module_base, DS_PINNED_ANCHOR_RVA) ||
-        !ds_clean_at_pinned_rva(results, count, "DeclTypeByName", module_base, DS_PINNED_TYPE_RVA) ||
-        !ds_clean_at_pinned_rva(results, count, "DeclRegisterFile", module_base, DS_PINNED_REGISTER_RVA) ||
-        !ds_clean_at_pinned_rva(results, count, "DeclFind", module_base, DS_PINNED_FIND_RVA) ||
-        !ds_clean_at_pinned_rva(results, count, "DeclSourceFind", module_base, DS_PINNED_SOURCE_FIND_RVA) ||
-        !ds_clean_at_pinned_rva(results, count, "IdStrCtor", module_base, DS_PINNED_IDSTR_CTOR_RVA) ||
-        !ds_clean_at_pinned_rva(results, count, "IdStrDtor", module_base, DS_PINNED_IDSTR_DTOR_RVA) ||
-        !ds_clean_at_pinned_rva(results, count, "ResourceStaticPromote", module_base,
-                                DS_PINNED_BOOT_PROMOTE_RVA) ||
-        !ds_clean_at_pinned_rva(results, count, "CmdExecuteBuffer", module_base,
-                                DS_PINNED_CMD_EXECUTE_RVA) ||
-        !ds_clean_at_pinned_rva(results, count, "ResourceGenericLoad", module_base,
-                                DS_PINNED_GENERIC_LOAD_RVA)) {
-        backend_log("decl-server REFUSED: clean pinned-build registry/idStr/boot-promotion ABI, command-system, or module-base dependency missing");
+        !ds_clean_identity(results, count, "DeclRegistryAnchor", module_base, DS_PINNED_ANCHOR_RVA) ||
+        !ds_clean_identity(results, count, "DeclTypeByName", module_base, DS_PINNED_TYPE_RVA) ||
+        !ds_clean_identity(results, count, "DeclRegisterFile", module_base, DS_PINNED_REGISTER_RVA) ||
+        !ds_clean_identity(results, count, "DeclFind", module_base, DS_PINNED_FIND_RVA) ||
+        !ds_clean_identity(results, count, "DeclSourceFind", module_base, DS_PINNED_SOURCE_FIND_RVA) ||
+        !ds_clean_identity(results, count, "IdStrCtor", module_base, DS_PINNED_IDSTR_CTOR_RVA) ||
+        !ds_clean_identity(results, count, "IdStrDtor", module_base, DS_PINNED_IDSTR_DTOR_RVA) ||
+        !ds_clean_identity(results, count, "ResourceStaticPromote", module_base,
+                           DS_PINNED_BOOT_PROMOTE_RVA) ||
+        !ds_clean_identity(results, count, "CmdExecuteBuffer", module_base,
+                           DS_PINNED_CMD_EXECUTE_RVA) ||
+        !ds_clean_identity(results, count, "ResourceGenericLoad", module_base,
+                           DS_PINNED_GENERIC_LOAD_RVA)) {
+        backend_log("decl-server REFUSED: a registry/idStr/boot-promotion ABI, command-system, or module-base dependency did not resolve to a clean, uniquely identified engine function");
         InterlockedExchange(&g_state, DS_STATE_FAILED);
         ds_free_candidates();
         return 0;
@@ -3165,7 +3185,8 @@ int sh_decl_server_install(const sig_result *results, size_t count,
         char line[320];
         _snprintf_s(line, sizeof(line), _TRUNCATE,
                     "decl-server armed: immutable launch snapshot has %d candidate(s), %zu body bytes; publishes inside idCommonLocal::Init immediately before the engine whole-registry resource promotion (0x%X); no hot reload",
-                    g_candidate_count, g_total_bytes, DS_PINNED_BOOT_PROMOTE_RVA);
+                    g_candidate_count, g_total_bytes,
+                    (unsigned)(boot_promote - (uintptr_t)module_base));
         backend_log(line);
     }
     return 1;

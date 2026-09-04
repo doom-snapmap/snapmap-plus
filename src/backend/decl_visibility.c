@@ -23,12 +23,15 @@
  * and loads it through the file-system open-by-name slot the overrides layer
  * hooks, which serves the published bytes.
  *
- * The method is reached through a runtime-resolved vtable, so there is no byte
- * signature to scan for. The service instead requires the slot to already hold
- * the pinned method for the supported build before it touches anything: a
- * different method would have a different argument shape, and forwarding the
- * wrong one would corrupt the engine's stack. An unrecognised slot is left
- * alone and only logged.
+ * The method is reached through a runtime-resolved vtable, so its address comes
+ * from the live object rather than from a scan. The service still refuses to
+ * touch a slot it cannot identify -- a different method would have a different
+ * argument shape, and forwarding the wrong one would corrupt the engine's stack
+ * -- but it identifies the method by scanning for ITS OWN PROLOGUE and
+ * requiring that unique match to be the address the slot holds. That is a
+ * stronger proof than the RVA equality this used to demand, and unlike an RVA
+ * it survives the OpenGL executable, which is the same source tree re-linked
+ * with every function moved. An unrecognised slot is left alone and only logged.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -40,15 +43,27 @@
 
 #include "backend_log.h"
 #include "decl_visibility.h"
+#include "host_image.h"
 #include "overrides.h"
+#include "signatures.h"
 
-/* Pointer-to-manager global; the manager's own vtable is read from it. */
+/* Pointer-to-manager global; the manager's own vtable is read from it. This is a raw DATA rva, not
+ * a function, so no signature covers it and it is only correct on the build it was read from. It is
+ * gated on sh_host_is_pinned_rva_build() below and fails closed everywhere else, pending the
+ * runtime resolver for that global. Never guess a replacement address for it. */
 #define DV_MANAGER_PTR_RVA 0x5557090u
 #define DV_PROBE_SLOT      0x78u
-/* The method the slot must already hold on the supported build. The
- * vtable is built at runtime, so there is no signature to scan for; this
- * pin is what proves the slot is the method this code models. */
+/* The RVA of the probe on the pinned Vulkan build (0x17F8A40 on the OpenGL build), recorded for
+ * audit and re-derivation. NOT used to gate; the prologue signature below is what identifies the
+ * method, and it matches exactly once on both shipped images. */
 #define DV_PINNED_PROBE_RVA 0x1806100u
+/* The probe's own prologue. The vtable is built at runtime, so the slot's contents cannot be found
+ * by scanning -- but once read, they can be CHECKED by scanning: this pattern resolves uniquely on
+ * both shipped builds, so requiring the unique match to equal the slot's method proves the slot
+ * holds the method this code models, on any link of this source tree. */
+#define DV_PROBE_SIGNATURE \
+    "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 78 FF FF FF " \
+    "48 81 EC 88 01 00 00 48 C7 44 24 30 FE FF FF FF"
 #define DV_PATH_PREFIX     "generated/decls/"
 #define DV_KEY_CAP         512
 
@@ -132,6 +147,25 @@ static unsigned char dv_probe_hook(void *self, const char *path, void *out1,
     return dv_path_is_published(path) ? (unsigned char)1 : (unsigned char)0;
 }
 
+/* Is `probe` the decl-resource existence probe? Answered by scanning the host image for the
+ * probe's own prologue and requiring the unique match to be exactly this address. A signature
+ * that matches once cannot have matched a different function, so this is a stronger identity
+ * proof than the address comparison it replaces -- and it is portable, which the address is not.
+ * SIG_OK only: SIG_OK_HOOKED would mean the scan missed and the known-RVA fallback stepped over
+ * somebody else's detour, which tells us nothing about what this slot holds. */
+static int dv_method_is_probe(const uint8_t *module_base, const void *probe)
+{
+    sig_entry entry;
+    sig_result found;
+
+    entry.name = "DeclResourceExistenceProbe";
+    entry.pattern = DV_PROBE_SIGNATURE;
+    entry.known_rva = DV_PINNED_PROBE_RVA;
+    memset(&found, 0, sizeof(found));
+    if (sig_resolve_one(module_base, &entry, &found) != SIG_OK) return 0;
+    return found.addr != 0 && found.addr == (uintptr_t)probe;
+}
+
 static int dv_resolve(const uint8_t *module_base, void **out_manager,
                       void ***out_slot, dv_probe_fn *out_probe)
 {
@@ -170,6 +204,14 @@ int sh_decl_visibility_install(const uint8_t *module_base,
         backend_log("decl-visibility already installed");
         return 1;
     }
+    /* The manager is still reached through a raw data RVA, which is a fact about one link output
+     * and nothing else. Reading it on any other build would hand us an unrelated pointer that
+     * looks exactly as valid, so this fails closed until that global has a runtime resolver. */
+    if (!sh_host_is_pinned_rva_build()) {
+        backend_log("decl-visibility REFUSED: the decl-resource manager is still located by a "
+                    "pinned data RVA, which is only valid on the extraction build");
+        return 0;
+    }
     if (!dv_resolve(module_base, &manager, &slot, &probe)) {
         backend_log("decl-visibility REFUSED: decl-resource manager, its vtable, or its +0x78 method was unreadable");
         return 0;
@@ -182,10 +224,10 @@ int sh_decl_visibility_install(const uint8_t *module_base,
                 (unsigned)DV_PROBE_SLOT, method_rva);
     backend_log(line);
 
-    /* An unpinned method has an unknown argument shape, and forwarding the
+    /* An unidentified method has an unknown argument shape, and forwarding the
      * wrong one would corrupt the engine's stack. Refuse instead. */
-    if (method_rva != (unsigned long long)DV_PINNED_PROBE_RVA) {
-        backend_log("decl-visibility REFUSED: the +0x78 method is not the pinned decl-resource existence probe for this build");
+    if (!dv_method_is_probe(module_base, probe)) {
+        backend_log("decl-visibility REFUSED: the +0x78 method's prologue is not the decl-resource existence probe's");
         return 0;
     }
 
