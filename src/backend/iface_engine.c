@@ -2,9 +2,10 @@
  * the LIGHT engine touches the SnapStack STORE-ops need.
  *
  * Faithful port of the reference implementation's editor bridge (the live-proven mechanism):
- *   - editor singleton  = *module_base + 0x3056748* is the INLINE idSnapEditorLocal object (NOT a ptr;
- *     the editor-singleton RVA (see the re-derive recipe) -- the OBJECT, in-place ctor 0x51A8E0). A hardcoded
- *     DATA RVA, exactly like cmdSystem/cvarSystem (non-unique data global, not sig-able).
+ *   - editor singleton  = the INLINE idSnapEditorLocal object (NOT a ptr; the OBJECT, in-place ctor
+ *     0x51A8E0). A DATA global, exactly like cmdSystem/cvarSystem, so it carries no byte signature of
+ *     its own; it is located by glb_resolve("editor_singleton"), which signs the code that computes the
+ *     address and reads the displacement out of it. Unresolved means every editor touch below declines.
  *   - selection object  = editor+0x204d0 (ptr); ids @ sel+0x80, count @ sel+0x88; hovered @ sel+0x2c.
  *   - screen (toast)    = editor+0x21088 (ptr; Toast arg0).
  *   - loaded-map / entity array = *(editor+0x204c8); entity-ptr array @ arrObj+0x6a0, count @ arrObj+0x6a8.
@@ -29,6 +30,7 @@
 #include "iface_engine.h"
 #include "apply_engine.h"   /* the heavy slots (serialize/schedule-apply/read-prefab) */
 #include "signatures.h"
+#include "engine_globals.h"  /* glb_resolve -- the editor singleton + the cvar-system slot */
 #include "backend_log.h"
 #include "typeinfo.h"        /* sh_typeinfo_class_derives + the LIVE registry walks (collect_records/inherits) */
 #include "preview.h"         /* sh_preview_get / sh_preview_request -- the asset-preview transport */
@@ -41,15 +43,15 @@
 #include "snapstack.h"          /* sh_snapstack_push_ids_backend -- the SnapStack stack push (+0x2A0) */
 
 /* ---- editor-struct field offsets (this-live-build; ported from the reference implementation, SEH-guarded) ------------ */
-/* EDITOR_SINGLETON_RVA: the INLINE idSnapEditorLocal OBJECT (NOT a pointer) at module_base + this. A
- * NON-SIG-ABLE DATA GLOBAL (a .data object, no unique code fingerprint), like cmdSystem/cvarSystem ->
- * recipe-tagged base+RVA literal. The fault-shield carries the SAME object + the SAME recipe
- * (fault_shield/engine_layout.h RVA_EDITOR_SINGLETON). RE-DERIVE per build: it is the inline
- * idSnapEditorLocal singleton, IN-PLACE-CONSTRUCTED by its ctor at 0x51A8E0 -- decompile that ctor
- * (decompile RVA 0x51A8E0 on the new build); its `this` (the rcx it writes the vtable +
- * fields through) IS this object's address; RVA = that - module_base. (RVA derived from the live
- * editor singleton; see the re-derive recipe above.) */
-#define EDITOR_SINGLETON_RVA   0x3056748u   /* inline idSnapEditorLocal object = module_base + this (in-place ctor 0x51A8E0; re-derive per-build) */
+/* EDITOR_SINGLETON_PINNED_RVA: where the INLINE idSnapEditorLocal OBJECT (NOT a pointer) sits on the
+ * pinned Vulkan build. AUDIT AND RE-DERIVATION ONLY -- the address actually used comes from
+ * glb_resolve("editor_singleton"). A data RVA describes one link output; DOOM's OpenGL executable moves
+ * its data globals by nearly 0x1000000, so this literal names nothing there.
+ * The fault-shield carries the SAME object (fault_shield/engine_layout.h RVA_EDITOR_SINGLETON) and now
+ * resolves it the same way. RE-DERIVE per build: it is the inline idSnapEditorLocal singleton,
+ * IN-PLACE-CONSTRUCTED by its ctor at 0x51A8E0 -- decompile that ctor; its `this` (the rcx it writes the
+ * vtable + fields through) IS this object's address; RVA = that - module_base. */
+#define EDITOR_SINGLETON_PINNED_RVA   0x3056748u
 #define ED_SEL_OBJ_OFF         0x204d0      /* editor+0x204d0 -> selection object ptr */
 #define ED_CAMERA_ORIGIN_OFF   0x170        /* editor+0x170 -> camera-origin vec3 {x,y,z} (3 floats). DIRECT: the OG
                                              * obtains it via editor_vtable[+0xd8](editor) where the engine method
@@ -151,8 +153,9 @@
 #define ENT_LAYER_BITS_OFF     0x160        /* entity[id]+0x160 -> layer bitmask (uint) */
 #define DEVL_CVAR_VALUE_OFF    0x30         /* idCVar+0x30 -> current integer value (== cvars.c value note) */
 #define DEVL_CVAR_NAME_OFF     0x40         /* idCVar+0x40 -> registered name char* (== cvars.c IDCVAR_NAME_OFF) */
-#define DEVL_CVARSYS_SLOT_RVA  0x55b7290u   /* *(module_base+RVA) -> idCVarSystemLocal* (documented fallback; the
-                                             * portable CmdSystemLea decode lives in cvars.c sh_resolve_cvarsys) */
+/* The idCVarSystemLocal* slot's RVA on the pinned Vulkan build -- audit and re-derivation only. The slot
+ * is located by glb_resolve("cvar_system_slot"), the same decode cvars.c sh_resolve_cvarsys performs. */
+#define DEVL_CVARSYS_SLOT_PINNED_RVA  0x55b7290u
 #define DEVL_CVARSYS_ARR_OFF   0x08         /* cvarSys+0x08 -> FULL idCVar** array */
 #define DEVL_CVARSYS_CNT_OFF   0x10         /* cvarSys+0x10 -> FULL count (u32) */
 #define DEVL_CVAR_LIST_CAP     100000u      /* stale-cvarSys guard */
@@ -172,11 +175,13 @@
 #define DEFSUB_INHERIT_OFF      0x58       /* defsub+0x58 -> inherit idStr (SET target) */
 #define ED_SEL_OBJ_OFF_C3       0x204d0    /* editor+0x204d0 -> selection object (Delete guard) */
 
-/* RemoveFromSelection (Delete, +0x130) -- engine 0x59fda0. Resolved by FALLBACK RVA off g_doom_base (a
- * jumptable-dispatch leaf the byte-sig scanner cannot reliably anchor); tagged for per-build re-derive
- * exactly like the editor singleton. RE-DERIVE: the engine call inside OG XINPUT1_3 FUN_1800073c0
- * (decompile RVA 0x73c0 on the new build) -> `(DAT_18003e120 + 0x59fda0)`. */
-#define REMOVE_FROM_SEL_RVA     0x59fda0u
+/* RemoveFromSelection (Delete, +0x130). It was believed to be a jumptable-dispatch leaf the byte-sig
+ * scanner could not anchor, and so was reached by a raw base+RVA; it is in fact signable -- the
+ * `add rcx,0x5e0` that walks to the selection sub-object sits in its fixed bytes, and the pattern matches
+ * exactly once on BOTH shipped executables ("RemoveFromSelection" in signatures.c). The RVA below is the
+ * pinned Vulkan build's, kept for audit and re-derivation only; on the OpenGL image the function is at
+ * 0x59F510. RE-DERIVE: the engine call inside OG XINPUT1_3 FUN_1800073c0 -> `(DAT_18003e120 + 0x59fda0)`. */
+#define REMOVE_FROM_SEL_PINNED_RVA     0x59fda0u
 
 /* idStr::operator=(const char*) -- engine 0x19fd5f0. The displayName field (entity+0x170) is a FULL idStr
  * (len@+0x178 / data@+0x180 / allocFlags@+0x188), so it MUST be assigned with operator= (which manages the
@@ -185,10 +190,12 @@
  * Using 0x1a03e10 on the displayName wrote a pool ptr over the idStr's first qword and never set len/data, so
  * the read (len@+0x178 / data@+0x180) kept seeing the old empty string -> the box never updated (the
  * 2026-06-27 "displayname doesn't save" bug). className/inherit (defsub+0x60/+0x58) ARE idPoolStr, so they
- * correctly stay on 0x1a03e10. Fallback RVA off module_base (re-derive: OG XINPUT1_3 FUN_1800072a0 [the +0x128
- * slot] -> `(DAT_18003e120 + 0x19fd5f0)(entity+0x170, data)`; decompiling 0x19fd5f0 shows the
+ * correctly stay on 0x1a03e10. It is resolved from the shared signature DB as "IdStrAssignCStr", which has
+ * carried this exact function all along -- the raw RVA here was redundant, not a gap. The literal below is
+ * the pinned Vulkan build's, kept for audit and re-derivation only (re-derive: OG XINPUT1_3 FUN_1800072a0
+ * [the +0x128 slot] -> `(DAT_18003e120 + 0x19fd5f0)(entity+0x170, data)`; decompiling 0x19fd5f0 shows the
  * len/data/realloc idStr::operator= body, distinct from 0x1a03e10's pool-ptr write). */
-#define IDSTR_OPASSIGN_RVA      0x19fd5f0u
+#define IDSTR_OPASSIGN_PINNED_RVA      0x19fd5f0u
 
 /* (+0x110 enum-decls-of-resclass): the typed decl-manager node walk -- SAME shape sh_listres
  * uses (GetDeclsOfType(typeName) -> node; array @ node+0x20, count @ node+0x28; each decl's name
@@ -207,8 +214,7 @@ typedef void  (*clear_sel_fn)(void *selObj);                   /* ClearSelection
 typedef void  (*toast_fn)(void *screen, void *titleIdStr, void *textIdStr); /* Toast 0xcfa0b0 */
 typedef void *(*idstr_ctor_fn)(void *self, const char *cstr);  /* IdStrCtor 0x19fcef0 */
 typedef void  (*idstr_dtor_fn)(void *self);                    /* IdStrDtor 0x19fd120 */
-/* the engine setters the Entity-State Save + the Delete need (all sig-resolved off the shared
- * sig DB, except RemoveFromSelection which is a fallback-RVA re-derive leaf). */
+/* the engine setters the Entity-State Save + the Delete need -- all sig-resolved off the shared sig DB. */
 typedef void  (*idstr_assign_fn)(void *dstField, const char *cstr);          /* IdStrAssign 0x1a03e10 (idPoolStr ptr-write: className/inherit) */
 typedef void  (*idstr_opassign_fn)(void *idStrField, const char *cstr);      /* idStr::operator= 0x19fd5f0 (FULL idStr: displayName) */
 typedef void  (*decl_src_rebuild_fn)(void *defsub, const char *src, int one);/* DeclSourceRebuild 0x17ae560 */
@@ -216,7 +222,7 @@ typedef void  (*remove_from_sel_fn)(void *selObj, int id);                    /*
 typedef void *(*get_decls_fn)(const char *type_name);                         /* GetDeclsOfType (sig DB) */
 
 /* ---- module state (resolved once at install) ---------------------------------------------------- */
-static const uint8_t *g_editor   = NULL;   /* module_base + 0x3056748 (the inline editor object) */
+static const uint8_t *g_editor   = NULL;   /* glb_resolve("editor_singleton"); NULL = unresolved */
 static add_to_sel_fn  g_add_sel  = NULL;
 static clear_sel_fn   g_clear_sel= NULL;
 static toast_fn       g_toast    = NULL;
@@ -228,7 +234,7 @@ static idstr_opassign_fn  g_idstr_opassign = NULL; /* +0x128 set displayName (FU
 static decl_src_rebuild_fn g_decl_rebuild = NULL;  /* +0x40 Save-to-Decl rebuild */
 static remove_from_sel_fn g_remove_sel    = NULL;  /* +0x130 Delete */
 static get_decls_fn       g_get_decls     = NULL;  /* +0x110 enum-decls-of-resclass (GetDeclsOfType) */
-static const uint8_t     *g_module_base   = NULL;  /* cached for the dev-layer cvar read (cvarSys RVA fallback) */
+static const uint8_t     *g_cvarsys_slot  = NULL;  /* glb_resolve("cvar_system_slot"); NULL = unresolved */
 static void              *g_devlayer_cvar = NULL;  /* cached snapEdit_enableDevLayer idCVar* (lazy; dev-layer gate) */
 static volatile LONG  g_installed = 0;
 
@@ -1248,13 +1254,14 @@ static int slot_resolve_prefab_path(sh_iface *self, const char *prefix, const ch
 
 /* Lazily resolve + cache the snapEdit_enableDevLayer idCVar* by walking the cvarSys FULL list by name. Pure
  * memory reads + strcmp -> thread-safe on the UI thread. Returns NULL if unreachable (caller fail-safes to
- * "not hidden"). cvarSys via the documented RVA fallback off the cached module base. */
+ * "not hidden"). The cvarSys slot comes from glb_resolve; unresolved means we cannot reach the cvar and
+ * the gate fails safe to "show everything" rather than reading a pinned address. */
 static void *resolve_devlayer_cvar(void)
 {
     if (g_devlayer_cvar) return g_devlayer_cvar;
-    if (!g_module_base) return NULL;
+    if (!g_cvarsys_slot) return NULL;
     void *cvarSys = NULL;
-    if (!ie_read_ptr(g_module_base + DEVL_CVARSYS_SLOT_RVA, &cvarSys) || cvarSys == NULL) return NULL;
+    if (!ie_read_ptr(g_cvarsys_slot, &cvarSys) || cvarSys == NULL) return NULL;
     void    *arr = NULL;
     uint32_t cnt = 0;
     if (!ie_read_ptr((const uint8_t *)cvarSys + DEVL_CVARSYS_ARR_OFF, &arr) || arr == NULL) return NULL;
@@ -1327,8 +1334,19 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;   /* one-shot */
 
     if (module_base) {
-        g_editor = module_base + EDITOR_SINGLETON_RVA;   /* recipe-tagged data RVA (inline ctor 0x51A8E0; see the #define) */
-        g_module_base = module_base;                     /* for the dev-layer cvar read (cvarSys RVA fallback) */
+        glb_status est = GLB_OK;
+        /* Both data globals come from the code that computes them, never from a baked address. A miss
+         * leaves the pointer NULL and every dependent body below already returns its empty answer. */
+        g_editor        = (const uint8_t *)glb_resolve(module_base, "editor_singleton", &est);
+        g_cvarsys_slot  = (const uint8_t *)glb_resolve(module_base, "cvar_system_slot", NULL);
+        if (!g_editor) {
+            char el[192];
+            _snprintf_s(el, sizeof el, _TRUNCATE,
+                "C2: the editor singleton did not resolve (status=%d, pinned 0x%x) -- every editor slot "
+                "will return its empty answer rather than read a pinned address",
+                (int)est, (unsigned)EDITOR_SINGLETON_PINNED_RVA);
+            backend_log(el);
+        }
     }
 
     g_add_sel    = (add_to_sel_fn)sig_addr_by_name(results, n, "AddToSelection");
@@ -1336,14 +1354,14 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     g_toast      = (toast_fn)sig_addr_by_name(results, n, "Toast");
     g_idstr_ctor = (idstr_ctor_fn)sig_addr_by_name(results, n, "IdStrCtor");
     g_idstr_dtor = (idstr_dtor_fn)sig_addr_by_name(results, n, "IdStrDtor");
-    /* the Entity-State setters (sig-resolved) + the Delete remover (fallback RVA). */
+    /* the Entity-State setters + the Delete remover. All sig-resolved: a signature that matches exactly
+     * once identifies a function by its bytes, wherever the link put it, and an unresolved one leaves the
+     * pointer NULL so the slot body refuses instead of calling an address it cannot vouch for. */
     g_idstr_assign = (idstr_assign_fn)    sig_addr_by_name(results, n, "IdStrAssign");
     g_decl_rebuild = (decl_src_rebuild_fn)sig_addr_by_name(results, n, "DeclSourceRebuild");
     g_get_decls    = (get_decls_fn)       sig_addr_by_name(results, n, "GetDeclsOfType"); /* +0x110 */
-    if (module_base) {
-        g_remove_sel = (remove_from_sel_fn)(module_base + REMOVE_FROM_SEL_RVA); /* re-derive-tagged fallback */
-        g_idstr_opassign = (idstr_opassign_fn)(module_base + IDSTR_OPASSIGN_RVA); /* re-derive-tagged fallback (displayName) */
-    }
+    g_remove_sel     = (remove_from_sel_fn)sig_addr_by_name(results, n, "RemoveFromSelection"); /* +0x130 */
+    g_idstr_opassign = (idstr_opassign_fn) sig_addr_by_name(results, n, "IdStrAssignCStr");     /* +0x128 */
 
     /* Bind the vtable slots. We bind a body even when its engine fn is unresolved -- the body null-checks
      * the fn (toast/clear/add no-op cleanly; the pure-read slots don't need an engine fn at all). */

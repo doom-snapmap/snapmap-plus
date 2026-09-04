@@ -101,7 +101,11 @@ $tests = @(
     @{ name = "packages_test"; src = 'packages_test.c ..\src\backend\packages.c'; arg = "" }
     @{ name = "map_package_test"; src = 'map_package_test.c ..\src\backend\map_package.c ..\src\backend\packages.c ..\src\backend\raw_deflate.c'; defs = '/DSH_MAP_PACKAGE_TESTING'; arg = "" }
     @{ name = "override_packages_test"; src = 'override_packages_test.c ..\src\backend\overrides.c ..\src\backend\packages.c ..\src\backend\decl_text.c'; defs = '/DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
-    @{ name = "package_requirements_test"; src = 'package_requirements_test.c ..\src\backend\package_requirements.c ..\src\backend\packages.c'; defs = '/DSH_PACKAGE_REQUIREMENTS_TESTING'; arg = "" }
+    # engine_globals.c + signatures.c come in because the service now LOCATES DOOM's load-state word
+    # instead of baking its address. Linking the real resolver (rather than a stub) means the test also
+    # exercises what happens when it cannot resolve: the host process is not DOOM, so nothing resolves,
+    # and the service must refuse to read anything rather than fall back to a pinned RVA.
+    @{ name = "package_requirements_test"; src = 'package_requirements_test.c ..\src\backend\package_requirements.c ..\src\backend\packages.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c'; defs = '/DSH_PACKAGE_REQUIREMENTS_TESTING'; arg = "" }
     @{ name = "strids_packages_test"; src = 'strids_packages_test.c ..\src\backend\strids.c ..\src\backend\packages.c ..\src\backend\overrides.c ..\src\backend\decl_text.c'; defs = '/DSH_STRIDS_TESTING /DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
     @{ name = "config_message_test"; src = 'config_message_test.cpp ..\src\ui\webview\config_message.cpp'; cxx = $true; arg = "" }
     @{ name = "theme_bootstrap_test"; src = 'theme_bootstrap_test.cpp ..\src\ui\webview\theme_bootstrap.cpp'; cxx = $true; arg = "" }

@@ -39,13 +39,19 @@
 #include "ui_bridge.h"    /* sh_ui_get_iface -- reach the toast slot for the apply-result toast */
 #include "iface_engine.h" /* sh_iface_class_inherit_ok -- the LAYER-C class/inherit prevention guard */
 #include "signatures.h"
+#include "engine_globals.h" /* glb_resolve -- the editor singleton, load_state and main_thread_id */
+#include "host_image.h"     /* sh_host_is_pinned_rva_build -- gates every pinned-RVA backstop */
 #include "backend_log.h"
 
 /* ============================================================ editor-struct field offsets ========== */
 /* SAME this-live-build offsets iface_engine.c uses (ported from the reference implementation, SEH-guarded). The editor
- * singleton is a hardcoded data RVA (like cmdSystem/cvarSystem). The entity ARRAY + defsub reach is the
- * SAME the apply (FUN_180004b80) + serialize (FUN_1800044a0) resolve. */
-#define EDITOR_SINGLETON_RVA   0x3056748u   /* module_base + this = the inline idSnapEditorLocal object */
+ * singleton is now located by glb_resolve("editor_singleton"), which signs the code site that computes
+ * its address; the entity ARRAY + defsub reach is the SAME the apply (FUN_180004b80) + serialize
+ * (FUN_1800044a0) resolve. The struct offsets below are identical on both shipped executables. */
+/* The editor singleton's RVA on the pinned Vulkan build. AUDIT + RE-DERIVATION ONLY -- never used to
+ * locate anything. A data RVA is a fact about one link output, and DOOM's two executables move their
+ * data globals by nearly 0x1000000, so this number is meaningless on the OpenGL image. */
+#define EDITOR_SINGLETON_PINNED_RVA   0x3056748u
 #define ED_MAP_OBJ_OFF         0x204c8      /* editor+0x204c8 -> loaded-map object ptr (null off-editor) */
 #define ARR_ENT_ARRAY_OFF      0x6a0        /* arrObj+0x6a0 -> entity-ptr array (8-byte entries) */
 #define ARR_ENT_COUNT_OFF      0x6a8        /* arrObj+0x6a8 -> entity count (u32) */
@@ -241,8 +247,9 @@ typedef void (*memlocal_popheap_fn)(void *self);
  * FUN_180004210 (the serialize-SELECTION body): a temp prefab is ctor'd via `(DAT_18003e120 + 0x54d0a0)`
  * then populated from the editor via `(DAT_18003e120 + 0x54e410)(temp, editor)`; on success it is reflection-
  * serialized as "idSnapEntityPrefab" + tree-rendered to JSON. The two prefab fns are jumptable/inline-prone
- * leaves the byte-sig scanner cannot reliably anchor, so they resolve by FALLBACK RVA off g_doom_base
- * (tagged for per-build re-derive, exactly like the editor singleton).
+ * leaves the byte-sig scanner was once thought unable to anchor; both now carry signatures, and the RVAs
+ * below are the pinned Vulkan build's, kept for audit and re-derivation. ae_pick_engine_fn only falls back
+ * to one when the host IS that build.
  *
  * PREFAB_TEMP_SIZE was previously 0x220, based on the OG local_6d8 frame slot (0x210 bytes) -- CONFIRMED
  * (2026-07-06) far too small: the ctor at +0x54d0a0 writes its own fields up to ~+0x118 then makes a
@@ -416,7 +423,7 @@ typedef void  (*enter_prefab_grab_fn)(void *mode);                              
 
 /* ============================================================ module state (resolved once) ========== */
 static const uint8_t      *g_doom_base   = NULL;
-static const uint8_t      *g_editor      = NULL;   /* module_base + 0x3056748 (inline editor object) */
+static const uint8_t      *g_editor      = NULL;   /* glb_resolve("editor_singleton"); NULL = unresolved */
 static void               *g_cmdsys      = NULL;   /* idCmdSystemLocal* (for BufferCommandText/AddCommand) */
 static entity_clone_fn     g_entity_clone = NULL;
 static entity_def_ctor_fn  g_def_ctor    = NULL;
@@ -443,21 +450,28 @@ static prefab_dtor_fn      g_prefab_dtor     = NULL;
  * kind=2 degrades to kind=1 (stage-only) and tells the user to press Ctrl+V -- never a partial place. */
 static paste_instantiate_fn g_paste_instantiate = NULL;
 static enter_prefab_grab_fn g_enter_prefab_grab = NULL;
-/* Engine load_state (module_base + LOAD_STATE_RVA): 0 boot / 2 LOADING / 3 RUNNING. THE Play detector.
+/* Engine load_state (glb_resolve("load_state")): 0 boot / 2 LOADING / 3 RUNNING. THE Play detector.
  * Two earlier attempts failed and are recorded so they are not retried:
  *   - "editor session went null and came back" -- the session stays live across a Play round-trip;
  *   - "the loaded-map object pointer changed" -- the map object survives the round-trip too.
  * Neither ever fired (proven live 2026-07-27/28: no C2 stage line on any Play return), which is why the
  * slot cleanup never ran. load_state DOES move for a play/boot load, and per the fault-shield's own note
  * an in-editor in-place load never writes it -- so leaving 3 is specifically "we are going to Play". */
-#define LOAD_STATE_RVA        0x6dde198u
+/* Pinned-Vulkan-build RVA, kept for audit and re-derivation only -- never used to locate the word. */
+#define LOAD_STATE_PINNED_RVA 0x6dde198u
 #define LOAD_STATE_RUNNING    3
 /* The engine's own record of WHICH THREAD is its main thread, 8 bytes below the load-state word. This is
  * the same DWORD the allocator's scope gate at 0x19FC900 compares GetCurrentThreadId() against -- see the
  * MEMLOCAL_* block above and the MemLocalPushHeap entry in signatures.c, both DIRECT. It is the only
  * correct source for "am I on the DOOM main thread": every thread THIS DLL could sample for itself is one
- * of ours (the backend bootstrap thread, the frontend's UI thread), never DOOM's. */
-#define MAIN_THREAD_ID_RVA    0x6dde190u
+ * of ours (the backend bootstrap thread, the frontend's UI thread), never DOOM's.
+ * Pinned-Vulkan-build RVA, audit + re-derivation only. */
+#define MAIN_THREAD_ID_PINNED_RVA 0x6dde190u
+/* Both words are located at install by glb_resolve, which decodes the displacement out of the code that
+ * reads them; 0 means "this build did not resolve" and every consumer below declines rather than reading
+ * a pinned address that would land somewhere unrelated on the OpenGL image. */
+static const uint8_t       *g_load_state_at = NULL;
+static const uint8_t       *g_main_thread_at = NULL;
 static volatile LONG        g_last_load_state = -1;
 /* "WE were the last thing to stage the prefab slot, and this is the entity count we left in it."
  * Set by ae_mkcmd_one. Used to tell OUR staged prefab apart from an engine-made Ctrl+C clipboard, which
@@ -515,17 +529,19 @@ static int ae_read_u32_safe(const void *src, int *out)
 }
 
 /* ---- "are we on the DOOM main thread?" -------------------------------------------------------------
- * Reads the engine's OWN main-thread id (MAIN_THREAD_ID_RVA) rather than sampling a thread of ours.
+ * Reads the engine's OWN main-thread id rather than sampling a thread of ours.
  *   1  = we are the engine main thread
  *   0  = we are NOT (the frontend UI thread, the backend bootstrap thread, ...)
- *  -1  = UNKNOWN: unreadable, or the engine has not recorded it yet (the word is 0 before engine init).
+ *  -1  = UNKNOWN: unresolved, unreadable, or the engine has not recorded it yet (the word is 0 before
+ *        engine init).
  * Callers must treat -1 as "cannot prove", never as "off-main" -- an unknown answer must not silently
- * re-route work. */
+ * re-route work. An unresolved global lands on that same UNKNOWN, which is exactly right: we would
+ * rather admit we cannot tell than answer from an address that means nothing on this build. */
 static int ae_on_main_thread(void)
 {
     uint32_t mt = 0;
-    if (!g_doom_base) return -1;
-    if (!ae_read_u32(g_doom_base + MAIN_THREAD_ID_RVA, &mt)) return -1;
+    if (!g_main_thread_at) return -1;
+    if (!ae_read_u32(g_main_thread_at, &mt)) return -1;
     if (mt == 0) return -1;
     return (mt == GetCurrentThreadId()) ? 1 : 0;
 }
@@ -2465,7 +2481,10 @@ void sh_apply_prefab_poll_play(void)
 #endif
 
     int cur = 0;
-    if (!ae_read_u32_safe(g_doom_base + LOAD_STATE_RVA, &cur)) return;
+    /* No load-state word on this build -> no Play detector. The watchdog only ever CLEANS our own
+     * staging slot, so declining leaves the pre-watchdog behaviour rather than acting on a guess. */
+    if (!g_load_state_at) return;
+    if (!ae_read_u32_safe(g_load_state_at, &cur)) return;
     LONG prev = InterlockedExchange(&g_last_load_state, (LONG)cur);
 
 #if AE_PLAY_DIAG_ON
@@ -2608,12 +2627,18 @@ void sh_apply_prefab_poll_play(void)
  *
  * The RVA still earns its place two ways: it makes drift VISIBLE (the MISMATCH line names the leaf), and
  * it is still used when the scan misses ENTIRELY -- the one case where there is nothing better, and where
- * the caller's own guards have to carry the risk. */
+ * the caller's own guards have to carry the risk.
+ *
+ * PORTABILITY (2026-09-04): that last use is now restricted to the build the RVA was extracted from.
+ * DOOM ships two executables from one source tree, and a pinned RVA on the other one names an unrelated
+ * function -- which is worse than resolving nothing, because the caller cannot tell the difference and
+ * these pointers get CALLED. Off the pinned build the fallback is withheld and this returns NULL; every
+ * caller already null-checks its leaf and degrades to a clean refusal. */
 static void *ae_pick_engine_fn(const sig_result *results, size_t n, const char *sig_name,
                                const uint8_t *base, uint32_t fallback_rva, const char *label)
 {
     uintptr_t s = sig_addr_by_name(results, n, sig_name);
-    uintptr_t r = base ? (uintptr_t)(base + fallback_rva) : 0;
+    uintptr_t r = (base && sh_host_is_pinned_rva_build()) ? (uintptr_t)(base + fallback_rva) : 0;
     char l[192];
 
     if (s && r && s == r) {
@@ -2633,9 +2658,16 @@ static void *ae_pick_engine_fn(const sig_result *results, size_t n, const char *
         backend_log(l);
         return (void *)s;
     }
-    _snprintf_s(l, sizeof l, _TRUNCATE, "C2 sig: %s sig=MISS -> using rva=%p (build-locked)", label, (void *)r);
+    if (r) {
+        _snprintf_s(l, sizeof l, _TRUNCATE, "C2 sig: %s sig=MISS -> using rva=%p (build-locked)", label, (void *)r);
+        backend_log(l);
+        return (void *)r;
+    }
+    _snprintf_s(l, sizeof l, _TRUNCATE,
+                "C2 sig: %s sig=MISS and this is not the pinned extraction build -> DECLINED "
+                "(pinned rva 0x%x names a different function here)", label, (unsigned)fallback_rva);
     backend_log(l);
-    return (void *)r;
+    return NULL;
 }
 
 int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *module_base, void *cmdsys)
@@ -2643,7 +2675,25 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
     if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;   /* one-shot */
 
     g_doom_base = module_base;
-    if (module_base) g_editor = module_base + EDITOR_SINGLETON_RVA;
+    /* The three data globals this file reads. Each is located by signing the CODE that computes its
+     * address, so the same build serves either shipped executable; a miss leaves the pointer NULL and
+     * the dependent path declines. glb_resolve caches, and dllmain resolved the whole table already,
+     * so these are cache hits. */
+    if (module_base) {
+        glb_status gst = GLB_OK;
+        char gl[192];
+        g_editor         = (const uint8_t *)glb_resolve(module_base, "editor_singleton", &gst);
+        g_load_state_at  = (const uint8_t *)glb_resolve(module_base, "load_state", NULL);
+        g_main_thread_at = (const uint8_t *)glb_resolve(module_base, "main_thread_id", NULL);
+        _snprintf_s(gl, sizeof gl, _TRUNCATE,
+            "C2 globals: editor=%p (status=%d, pinned 0x%x) load_state=%p main_thread=%p",
+            (const void *)g_editor, (int)gst, (unsigned)EDITOR_SINGLETON_PINNED_RVA,
+            (const void *)g_load_state_at, (const void *)g_main_thread_at);
+        backend_log(gl);
+        if (!g_editor)
+            backend_log("C2 globals: the editor singleton did not resolve -- the apply chain will "
+                        "refuse every edit rather than write through a pinned address");
+    }
     g_cmdsys = cmdsys;
 
     if (!g_pending_lock_init) { InitializeCriticalSection(&g_pending_lock); g_pending_lock_init = 1; }
@@ -2676,9 +2726,9 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
      * tests and must not reference the engine layer. */
     sh_iface_set_tick_hook(sh_apply_prefab_poll_play);
 
-    /* the prefab-from-selection serialize engine fns (+0xb0). These jumptable/inline-prone leaves
-     * resolve by FALLBACK RVA off module_base (re-derive-tagged like the editor singleton); a wrong/shifted
-     * offset just makes the serialize SEH-fail -> a clean 0-length result, never a crash. */
+    /* the prefab-from-selection serialize engine fns (+0xb0). Signature-first; the pinned RVA is only
+     * consulted on the pinned build (ae_pick_engine_fn), so off it a sig miss leaves the leaf NULL and
+     * the serialize returns a clean 0-length result rather than calling an unrelated function. */
     if (module_base) {
         /* All four are SIGNATURE-first with the old RVA as a cross-checked fallback (see
          * ae_pick_engine_fn). dtor + deshare were raw RVAs until 2026-08-05, when both turned out to

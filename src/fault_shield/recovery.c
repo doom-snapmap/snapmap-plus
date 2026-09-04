@@ -20,6 +20,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "engine_layout.h"
+#include "../backend/host_image.h"     /* sh_host_is_pinned_rva_build -- gates every pinned-RVA backstop */
+#include "../backend/engine_globals.h" /* locate DOOM's data globals by signing the code that computes them */
 #include "fault_record.h"
 #include "hook.h"
 #include "recovery.h"
@@ -31,6 +33,39 @@ typedef void    (*setstate_t)(void *editor, int state);   /* SetState 0x5298A0 (
 typedef int64_t (*frame_t)(void *self);                   /* idCommonLocal::Frame 0x17ce360 */
 static frame_t orig_frame = NULL;
 
+/* ---- The DATA globals this file reads, located ONCE at install --------------------------------------
+ * These were `g_doom_base + <pinned RVA>` literals. Those literals describe one link output; DOOM's two
+ * executables move their data globals by nearly 0x1000000, so on the other one they address unrelated
+ * memory. glb_resolve signs the CODE SITE that computes each address and decodes the displacement, which
+ * works on either build. 0 means "not located here" and every consumer below declines.
+ *
+ * Resolved in recovery_install, not in the per-frame hook: glb_resolve scans on a cache miss, and the
+ * frame hook must stay allocation-free and cheap. The backend resolves the whole table at bootstrap, so
+ * these are cache reads. */
+static uint8_t *g_editor_at      = NULL;   /* the inline idSnapEditorLocal object */
+static uint8_t *g_load_state_at  = NULL;   /* load_state -- 3 == RUNNING */
+static uint8_t *g_last_err_at    = NULL;   /* the engine's last formatted Error/FatalError text */
+static uint8_t *g_shell_slot_at  = NULL;   /* .data slot holding idMenuShellLocal* */
+static uint8_t *g_suppr_a_at     = NULL;   /* throw-gate suppressor A */
+/* Answered once at install. The frame hook runs every frame, and sh_host_is_pinned_rva_build() does a
+ * string compare -- cheap, but not something to repeat 60 times a second for an answer that cannot
+ * change while the process lives. */
+static int      g_pinned_build   = 0;
+
+/* Throw-gate suppressor B has NO portable derivation: a RIP-relative reference sweep of the pinned Vulkan
+ * image decodes ZERO code sites computing 0x6faf8b0 (suppressor A has 32), so there is nothing to sign.
+ * See veh.c and engine_layout.h for the sweep, and for the unresolved disagreement with the Ghidra
+ * reference count recorded there. With the standing finding that both suppressors read 0 and that no
+ * instruction writes either, the constant looks stale or mis-derived -- it is UNVERIFIED. Rather than
+ * invent a derivation, the write is kept and performed only on the build the constant came from, where it
+ * is provably a no-op; everywhere else it is skipped silently. Caller SEH-guards. */
+static void write_suppressor_b_if_pinned(void)
+{
+    if (!g_pinned_build || g_doom_base == NULL) return;
+    if (*(volatile int32_t *)(g_doom_base + RVA_SUPPRESSOR_B) != 0)
+        *(volatile int32_t *)(g_doom_base + RVA_SUPPRESSOR_B) = 0;
+}
+
 /* 5 pushes + `mov eax,0x119c0` => boundary 0x17ce36f, all position-independent (disassembly-verified). */
 #define FRAME_STOLEN 15
 #define RECOVER_BUDGET_FRAMES 600   /* ~10s @ 60fps backstop */
@@ -39,12 +74,19 @@ static volatile LONG g_armed = 0;
 static int g_state  = 0;            /* 1 = recover, 2 = wait-exit */
 static int g_frames = 0;
 
-static uint8_t *editor(void) { return g_doom_base + RVA_EDITOR_SINGLETON; }
-static int ed_state(void)    { return *(volatile int32_t *)(editor() + ED_STATE); }
+/* NULL when the editor singleton did not resolve on this build. Every caller checks: reading through a
+ * pinned data address on the wrong executable is a wild read, not a degraded feature. */
+static uint8_t *editor(void) { return g_editor_at; }
+static int ed_state(void)
+{
+    uint8_t *ed = editor();
+    return ed ? *(volatile int32_t *)(ed + ED_STATE) : 0;
+}
 
 static int in_editor(void)
 {
     uint8_t *ed = editor();
+    if (!ed) return 0;
     return *(void **)(ed + ED_MAP_PTR) != NULL
         && *(volatile int32_t *)(ed + ED_DEACT_REASON) == 0
         && *(volatile int32_t *)(ed + ED_STATE) != 0;
@@ -76,9 +118,19 @@ static void recovery_tick(void)
         return;
     }
     uint8_t *ed = editor();
-    /* SetState sig-resolved (g_eng.setstate); recipe-tagged RVA fallback if the sig missed. */
-    setstate_t SetState = (setstate_t)(g_eng.setstate ? g_eng.setstate
-                                                      : (uintptr_t)(g_doom_base + RVA_SETSTATE));
+    /* SetState is sig-resolved (g_eng.setstate); its pinned RVA is only a valid backstop on the build it
+     * was extracted from. Without the editor object or without SetState there is no drive to run, so
+     * disarm and say so -- the engine's own Error(6) recovery still keeps the process alive. */
+    setstate_t SetState = (setstate_t)(uintptr_t)(g_eng.setstate ? g_eng.setstate
+                            : (g_pinned_build ? (uintptr_t)(g_doom_base + RVA_SETSTATE) : (uintptr_t)0));
+    if (!ed || !SetState) {
+        shield_fault f = { "load", -1,
+            "recovery: the editor singleton or SetState is unresolved on this build -- editor-exit "
+            "drive declined (no address is guessed)", 0, 0 };
+        shield_emit(&f);
+        InterlockedExchange(&g_armed, 0);
+        return;
+    }
 
     switch (g_state) {
     case 1: /* open StartMenu (synchronous), then arm the EXIT (pending + GDM result = Yes) */
@@ -91,8 +143,10 @@ static void recovery_tick(void)
             InterlockedExchange(&g_armed, 0);
             break;
         }
-        if (*(volatile int32_t *)(g_doom_base + RVA_LOAD_STATE) != 3)
-            break;   /* a play/boot load is in flight -- wait (budget-bounded) */
+        /* Without the load-state word we cannot tell whether a play/boot load is in flight, and driving
+         * SetState during one is the crash this gate exists to prevent -- so wait, budget-bounded. */
+        if (!g_load_state_at || *(volatile int32_t *)g_load_state_at != 3)
+            break;   /* a play/boot load is in flight (or unknowable) -- wait (budget-bounded) */
         {
             void *ms = *(void **)(ed + ED_MENU_SCREEN);
             if (ms == NULL)
@@ -140,21 +194,21 @@ void notice_request_msg(void) { InterlockedExchange(&g_notice_armed, 2); }
 /* ---- MESSAGE HARVEST: read the engine's own last-formatted-error text (Class-B / Error(6)/FatalError) ---
  * A plain SEH-guarded READ of the engine global the dispatcher 0x1A08E80 strncpy's the formatted message
  * into right before it throws -- the same buffer the Frame catch funclet 0x1F5B937 prints as the error.
- * NO new hook (zero added instrumentation-conflict surface). A shifted build could land the recipe-tagged RVA on an
- * unmapped page, so SEH-guard the read (mirrors the suppressor-write guard in veh.c). Returns the captured
- * C-string in `out` (NUL-terminated) and 1 if a non-empty message was harvested, else 0 (caller falls back
- * to the generic NOTICE_TEXT_STR). */
+ * NO new hook (zero added instrumentation-conflict surface). The buffer is located by glb_resolve; a build
+ * where it does not resolve simply has no message to harvest and the caller uses the generic notice. The
+ * read stays SEH-guarded on top of that. Returns the captured C-string in `out` (NUL-terminated) and 1 if
+ * a non-empty message was harvested, else 0 (caller falls back to the generic NOTICE_TEXT_STR). */
 static int harvest_engine_msg(char *out, size_t n)
 {
-    if (!out || n == 0 || g_doom_base == NULL) return 0;
+    if (!out || n == 0 || g_last_err_at == NULL) return 0;
     out[0] = '\0';
     __try {
-        const char *p = (const char *)(g_doom_base + RVA_LAST_ERROR_MSG);
+        const char *p = (const char *)g_last_err_at;
         if (p[0] == '\0') return 0;                 /* engine never stashed a message -> generic */
         lstrcpynA(out, p, (int)n);                  /* bounded copy; always NUL-terminates */
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         out[0] = '\0';
-        return 0;                                   /* RVA shifted onto an unmapped page -> generic */
+        return 0;                                   /* unreadable page -> generic */
     }
     return out[0] != '\0';
 }
@@ -199,15 +253,24 @@ static void notice_tick(void)
 
     mode = g_notice_armed;
     if (!mode) return;
+    if (!ed) return;   /* no editor object located on this build -> no editor-native surface to draw on */
     /* The editor screen object exists only in-editor (null elsewhere); also require an in-editor state. */
     if (ed_state() == 0) return;
     screen = *(uint8_t **)(ed + ED_MENU_SCREEN);
     if (!screen) return;
 
-    /* All three sig-resolved (g_eng.*); recipe-tagged RVA fallback per fn if a sig missed. */
-    mk    = (idstr_ctor_t)(g_eng.idstr_ctor ? g_eng.idstr_ctor : (uintptr_t)(g_doom_base + RVA_IDSTR_CTOR));
-    rm    = (idstr_dtor_t)(g_eng.idstr_dtor ? g_eng.idstr_dtor : (uintptr_t)(g_doom_base + RVA_IDSTR_DTOR));
-    toast = (toast_show_t)(g_eng.toast_show ? g_eng.toast_show : (uintptr_t)(g_doom_base + RVA_TOAST_SHOW));
+    /* All three sig-resolved (g_eng.*). The pinned RVAs are only valid on the build they were extracted
+     * from, so off it an unresolved fn means no toast rather than three calls into unrelated code. */
+    mk    = (idstr_ctor_t)(uintptr_t)(g_eng.idstr_ctor ? g_eng.idstr_ctor
+              : (g_pinned_build ? (uintptr_t)(g_doom_base + RVA_IDSTR_CTOR) : (uintptr_t)0));
+    rm    = (idstr_dtor_t)(uintptr_t)(g_eng.idstr_dtor ? g_eng.idstr_dtor
+              : (g_pinned_build ? (uintptr_t)(g_doom_base + RVA_IDSTR_DTOR) : (uintptr_t)0));
+    toast = (toast_show_t)(uintptr_t)(g_eng.toast_show ? g_eng.toast_show
+              : (g_pinned_build ? (uintptr_t)(g_doom_base + RVA_TOAST_SHOW) : (uintptr_t)0));
+    if (!mk || !rm || !toast) {
+        InterlockedExchange(&g_notice_armed, 0);   /* nothing to show; do not re-check every frame */
+        return;
+    }
 
     /* MESSAGE HARVEST (Class-B/Error(6) only -- mode 2): carry the engine's verbatim last-error text if it
      * is present, else the generic notice. Class-A (mode 1) keeps the generic string -- a raw AV has no
@@ -237,16 +300,16 @@ static void notice_tick(void)
  * engine_layout.h), so clearing them each frame is a no-op there; it is kept because the gate is the one
  * thing standing between a recoverable Error(6) and an ExitProcess(1), and a build that did arm one
  * would take the process down silently. The read-then-write shape keeps the common case a plain compare.
- * SEH-guarded: a shifted suppressor RVA must never fault inside the frame hook. */
+ * Suppressor A is located by glb_resolve; suppressor B has no derivation and is only written on the build
+ * its unverified constant came from. SEH-guarded: neither may fault inside the frame hook. */
 static void keep_throw_gate_open(void)
 {
     if (g_doom_base == NULL) return;
     __try {
-        if (*(volatile int32_t *)(g_doom_base + RVA_SUPPRESSOR_A) != 0)
-            *(volatile int32_t *)(g_doom_base + RVA_SUPPRESSOR_A) = 0;
-        if (*(volatile int32_t *)(g_doom_base + RVA_SUPPRESSOR_B) != 0)
-            *(volatile int32_t *)(g_doom_base + RVA_SUPPRESSOR_B) = 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { /* shifted suppressor RVA -> skip */ }
+        if (g_suppr_a_at && *(volatile int32_t *)g_suppr_a_at != 0)
+            *(volatile int32_t *)g_suppr_a_at = 0;
+        write_suppressor_b_if_pinned();
+    } __except (EXCEPTION_EXECUTE_HANDLER) { /* unreadable page -> skip */ }
 }
 
 /* ---- RESIDENT SAVE-DELETION GUARD (B): protect the user's saves from the corrupt-verdict delete --------
@@ -272,9 +335,11 @@ static int is_corrupt_save_gdm(int gdm)
 
 static void save_guard_tick(void)
 {
-    if (g_doom_base == NULL) return;
+    /* Unresolved shell slot -> no guard. Reading a pinned data address on a build it does not describe
+     * would hand this walk an arbitrary pointer and it would then WRITE through it. */
+    if (g_doom_base == NULL || g_shell_slot_at == NULL) return;
     __try {
-        uint8_t *S = *(uint8_t **)(g_doom_base + RVA_SHELL_PTR_SLOT);
+        uint8_t *S = *(uint8_t **)g_shell_slot_at;
         if (S == NULL) return;
         uint8_t *dlg = *(uint8_t **)(S + SHELL_DLGMGR_OFF);
         if (dlg == NULL) return;
@@ -350,8 +415,18 @@ static int64_t frame_detour(void *self)
  * build (sig fell back to a stale RVA) refuses the patch rather than corrupting a wrong byte. */
 static void patch_fatalerror_downgrade(void)
 {
-    uint8_t *fe = (uint8_t *)(g_eng.fatalerror7 ? g_eng.fatalerror7
-                                                : (uintptr_t)(g_doom_base + RVA_FATALERROR7));
+    /* Sig-resolved; the pinned RVA only means anything on the build it came from. Off it, an unresolved
+     * wrapper means we do not patch -- writing a byte into a function we cannot identify is the exact
+     * corruption the scan-and-verify below exists to prevent. */
+    uint8_t *fe = (uint8_t *)(uintptr_t)(g_eng.fatalerror7 ? g_eng.fatalerror7
+                    : (g_pinned_build ? (uintptr_t)(g_doom_base + RVA_FATALERROR7) : (uintptr_t)0));
+    if (fe == NULL) {
+        shield_fault f = { "sig", -1,
+            "FatalError downgrade declined: the wrapper is unresolved and this is not the pinned "
+            "extraction build", 0, 0 };
+        shield_emit(&f);
+        return;
+    }
     __try {
         int i, at = -1;
         for (i = 0; i < 0x40; i++) {
@@ -387,10 +462,32 @@ static void patch_fatalerror_downgrade(void)
 
 int recovery_install(void)
 {
-    /* Hook the SIG-RESOLVED Frame entry (g_eng.frame); recipe-tagged RVA fallback if the sig missed. The
-     * 15-byte FRAME_STOLEN prologue (5 pushes + mov eax,0x119c0) IS the Frame sig's fixed bytes, so a sig
-     * hit lands the hook on exactly the stolen-byte boundary the disasm verified. */
-    void *target = (void *)(g_eng.frame ? g_eng.frame : (uintptr_t)(g_doom_base + RVA_FRAME));
+    /* Locate the data globals first, so the per-frame hook never has to resolve anything: glb_resolve
+     * scans on a cache miss, and the frame detour must stay cheap and allocation-free. */
+    g_pinned_build = sh_host_is_pinned_rva_build();
+    if (g_doom_base) {
+        g_editor_at     = (uint8_t *)glb_resolve(g_doom_base, "editor_singleton", NULL);
+        g_load_state_at = (uint8_t *)glb_resolve(g_doom_base, "load_state", NULL);
+        g_last_err_at   = (uint8_t *)glb_resolve(g_doom_base, "last_error_msg", NULL);
+        g_shell_slot_at = (uint8_t *)glb_resolve(g_doom_base, "shell_ptr_slot", NULL);
+        g_suppr_a_at    = (uint8_t *)glb_resolve(g_doom_base, "throw_suppressor_a", NULL);
+    }
+
+    /* Hook the SIG-RESOLVED Frame entry (g_eng.frame). The 15-byte FRAME_STOLEN prologue (5 pushes +
+     * mov eax,0x119c0) IS the Frame sig's fixed bytes, so a sig hit lands the hook on exactly the
+     * stolen-byte boundary the disasm verified -- which is precisely why the pinned RVA is not an
+     * acceptable substitute anywhere else: those 15 bytes are only Frame's on the build it was extracted
+     * from. Unresolved and not the pinned build -> refuse to install rather than detour an unknown
+     * function. */
+    void *target = (void *)(uintptr_t)(g_eng.frame ? g_eng.frame
+                     : (g_pinned_build ? (uintptr_t)(g_doom_base + RVA_FRAME) : (uintptr_t)0));
+    if (target == NULL) {
+        shield_fault f = { "sig", -1,
+            "recovery REFUSED: idCommonLocal::Frame is unresolved and this is not the pinned extraction "
+            "build -- the frame hook is not installed rather than detouring a guessed address", 0, 0 };
+        shield_emit(&f);
+        return 0;
+    }
     orig_frame = (frame_t)install_inline_hook(target, (void *)frame_detour, FRAME_STOLEN);
     if (orig_frame == NULL) return 0;
     patch_fatalerror_downgrade();   /* LAYER 2: FatalError(7) -> recoverable Error(6) (one-byte level patch) */
