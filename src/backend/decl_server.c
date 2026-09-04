@@ -32,6 +32,7 @@
 #include <string.h>
 
 #include "backend_log.h"
+#include "engine_globals.h"  /* engine data globals, resolved not hardcoded */
 #include "decl_server.h"
 #include "hook.h"
 #include "package_requirements.h"
@@ -2804,7 +2805,10 @@ static size_t ds_res_walk(void (*visit)(void *entry, void *ctx), void *ctx)
     size_t seen = 0;
     if (!g_module_base) return 0;
     __try {
-        void *node = *(void **)(g_module_base + DS_RES_HEAD_RVA);
+        uintptr_t head = glb_resolve(g_module_base, "decl_resource_head", NULL);
+        void *node;
+        if (!head) return 0;   /* unknown build: walk nothing rather than walk garbage */
+        node = *(void **)head;
         unsigned guard = 0;
         while (node && guard++ < DS_RES_MAX_LISTS) {
             void **arr = *(void ***)((unsigned char *)node + DS_RES_ARR_OFF);

@@ -308,9 +308,10 @@ int main(int argc, char **argv)
             CHECK(strstr(visibility, "found.addr == (uintptr_t)probe") != NULL);
             CHECK(strstr(visibility, "if (!dv_method_is_probe(module_base, probe))") != NULL);
             CHECK(strstr(visibility, "method_rva != (unsigned long long)DV_PINNED_PROBE_RVA") == NULL);
-            /* The manager global is a raw data RVA with no signature behind it, so it must fail
-             * closed off the extraction build rather than dereference a guessed address. */
-            CHECK(strstr(visibility, "if (!sh_host_is_pinned_rva_build()) {") != NULL);
+            /* The manager global is located at runtime from the code site that computes it, so
+             * it resolves on either shipped executable; the pinned RVA must not be dereferenced. */
+            CHECK(strstr(visibility, "glb_resolve(module_base, \"decl_visibility_manager\"") != NULL);
+            CHECK(strstr(visibility, "module_base + DV_MANAGER_PTR_RVA") == NULL);
             CHECK(strstr(visibility, "decl_find_fn") == NULL);
             CHECK(strstr(visibility, "make_default") == NULL);
             CHECK(strstr(visibility, "AddFromText") == NULL);

@@ -44,13 +44,16 @@
 #include "backend_log.h"
 #include "decl_visibility.h"
 #include "host_image.h"
+#include "engine_globals.h"  /* the manager slot, resolved from the code site that computes it */
 #include "overrides.h"
 #include "signatures.h"
 
 /* Pointer-to-manager global; the manager's own vtable is read from it. This is a raw DATA rva, not
- * a function, so no signature covers it and it is only correct on the build it was read from. It is
- * gated on sh_host_is_pinned_rva_build() below and fails closed everywhere else, pending the
- * runtime resolver for that global. Never guess a replacement address for it. */
+ * a function, so no signature covers it directly. It is located at runtime as
+ * "decl_visibility_manager" (engine_globals.h) by signing the code site that computes the address
+ * and decoding its displacement, so it resolves on either shipped executable. The value below is
+ * the RVA on the pinned Vulkan build (0x3E59350 on the OpenGL build), kept for audit and
+ * re-derivation only -- it must never be used to locate anything. */
 #define DV_MANAGER_PTR_RVA 0x5557090u
 #define DV_PROBE_SLOT      0x78u
 /* The RVA of the probe on the pinned Vulkan build (0x17F8A40 on the OpenGL build), recorded for
@@ -175,8 +178,14 @@ static int dv_resolve(const uint8_t *module_base, void **out_manager,
     void **slot;
 
     if (!module_base) return 0;
-    if (!dv_safe_read(module_base + DV_MANAGER_PTR_RVA, &manager,
-                      sizeof(manager)) || !manager) return 0;
+    /* Resolve the manager slot from the code site that computes it, so this works on either
+     * shipped executable. DV_MANAGER_PTR_RVA below is the pinned Vulkan value, kept for audit. */
+    {
+        uintptr_t slot_addr = glb_resolve(module_base, "decl_visibility_manager", NULL);
+        if (!slot_addr) return 0;
+        if (!dv_safe_read((const uint8_t *)slot_addr, &manager, sizeof(manager)) || !manager)
+            return 0;
+    }
     if (!dv_safe_read(manager, &vtable, sizeof(vtable)) || !vtable) return 0;
     slot = (void **)((uint8_t *)vtable + DV_PROBE_SLOT);
     if (!dv_safe_read(slot, &probe, sizeof(probe)) || !probe) return 0;
@@ -203,14 +212,6 @@ int sh_decl_visibility_install(const uint8_t *module_base,
     if (g_orig_probe) {
         backend_log("decl-visibility already installed");
         return 1;
-    }
-    /* The manager is still reached through a raw data RVA, which is a fact about one link output
-     * and nothing else. Reading it on any other build would hand us an unrelated pointer that
-     * looks exactly as valid, so this fails closed until that global has a runtime resolver. */
-    if (!sh_host_is_pinned_rva_build()) {
-        backend_log("decl-visibility REFUSED: the decl-resource manager is still located by a "
-                    "pinned data RVA, which is only valid on the extraction build");
-        return 0;
     }
     if (!dv_resolve(module_base, &manager, &slot, &probe)) {
         backend_log("decl-visibility REFUSED: decl-resource manager, its vtable, or its +0x78 method was unreadable");

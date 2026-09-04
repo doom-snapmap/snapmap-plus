@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "engine_globals.h"
 #include "decl_server.h"
 #include "decl_server_path.h"
 #include "decl_text.h"
@@ -157,6 +158,17 @@ uintptr_t sig_addr_by_name(const sig_result *results, size_t count, const char *
     (void)results;
     (void)count;
     (void)name;
+    return 0;
+}
+/* ds_res_walk resolves the engine's decl-resource list head through the globals resolver rather
+ * than a hardcoded RVA. There is no engine image here, so the resolve fails and the walk visits
+ * nothing -- which is what this suite wants, and the same thing that happens on a DOOM build we
+ * cannot serve. */
+uintptr_t glb_resolve(const uint8_t *module_base, const char *name, glb_status *out_status)
+{
+    (void)module_base;
+    (void)name;
+    if (out_status) *out_status = GLB_ANCHOR_NOT_FOUND;
     return 0;
 }
 
