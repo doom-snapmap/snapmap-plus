@@ -149,14 +149,26 @@ static const sig_result *ed_result(const sig_result *results, size_t count,
 
 /* A clean SIG_OK resolve only. These calls have a data-layout contract -- the
  * descriptor offsets and the queue shape -- so a hook-tolerant resolve is not
- * good enough even though it would be callable. */
+ * good enough even though it would be callable: SIG_OK_HOOKED means the scan
+ * missed the prologue and the known-RVA fallback recovered the function past
+ * somebody else's detour, which proves presence, not a clean surface.
+ *
+ * A unique masked-signature match is the identity proof, and it is a stronger
+ * one than address equality: two builds can put unrelated functions at the same
+ * RVA, but a signature that matches exactly once cannot match the wrong
+ * function. `documented_rva` is where this function sits on the pinned Vulkan
+ * image, kept for audit and re-derivation only -- DOOM's OpenGL executable is
+ * the same source tree re-linked, so every one of these is at a shifted RVA
+ * there and comparing against it only refused to arm on half the shipped game.
+ * The internal-consistency check stays: the resolver's address and recovered
+ * RVA must agree about the module they came from. */
 static void *ed_clean(const sig_result *results, size_t count, const char *name,
-                      const uint8_t *module_base, uint32_t expect_rva)
+                      const uint8_t *module_base, uint32_t documented_rva)
 {
     const sig_result *r = ed_result(results, count, name);
+    (void)documented_rva;
     if (!r || r->status != SIG_OK || !r->addr) return NULL;
-    if (r->rva != expect_rva) return NULL;
-    if (r->addr != (uintptr_t)module_base + expect_rva) return NULL;
+    if (r->addr != (uintptr_t)module_base + r->rva) return NULL;
     return (void *)r->addr;
 }
 
@@ -270,12 +282,14 @@ int sh_engine_dialog_install(const sig_result *results, size_t count,
     if (g_installed) return 1;
     if (!module_base) return 0;
 
+    /* The trailing literal on each line is that function's RVA on the pinned Vulkan build,
+     * recorded for audit and re-derivation. It does not gate anything -- see ed_clean. */
     wrapper = ed_clean(results, count, "AddDialogWrapper", module_base, 0x17363A0u);
     assign  = ed_clean(results, count, "IdStrAssignCStr",  module_base, 0x19FD5F0u);
     action  = ed_clean(results, count, "DialogAction",     module_base, 0xE67BF0u);
     if (!wrapper || !assign || !action) {
         backend_log("engine-dialog REFUSED: AddDialogWrapper/DialogAction/IdStrAssignCStr all "
-                    "require a clean exact-address resolve");
+                    "require a clean unique signature resolve");
         return 0;
     }
 
