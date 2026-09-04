@@ -14,7 +14,6 @@
 
 #include <stdint.h>
 
-#define DOOM_MODULE_NAME   "DOOMx64vk.exe"
 
 /* The single error funnel + the recoverable/terminal wrappers. */
 #define RVA_DISPATCHER     0x1a08e80u   /* FUN_141a08e80(int level, const char* fmt, va_list) */

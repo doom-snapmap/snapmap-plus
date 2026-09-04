@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "engine_layout.h"
+#include "../backend/host_image.h"  /* report the build a crash actually came from */
 #include "fault_record.h"
 #include "crash_report.h"
 #include "recovery.h"
@@ -474,7 +475,7 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
                     capture_fault_stack(ep->ContextRecord, stk, sizeof stk, 20);
                     msg[0] = '\0';
                     shield_last_engine_msg(msg, sizeof msg);
-                    crash_report_file("engine_fatalerror", code, 0, 0, DOOM_MODULE_NAME, stk, msg, "");
+                    crash_report_file("engine_fatalerror", code, 0, 0, sh_host_image_name(), stk, msg, "");
                 } __except (EXCEPTION_EXECUTE_HANDLER) {}
             }
         }
@@ -683,7 +684,7 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
                     shield_fault sk = { "stack", (int)code, g_crashstk, rva, (uintptr_t)fault_addr };
                     shield_emit(&sk);
                 }
-                crash_report_file("offthread", code, rva, (uintptr_t)fault_addr, DOOM_MODULE_NAME,
+                crash_report_file("offthread", code, rva, (uintptr_t)fault_addr, sh_host_image_name(),
                                   g_crashstk, "", "");
             } __except (EXCEPTION_EXECUTE_HANDLER) {}
         }
@@ -702,7 +703,7 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
         if (InterlockedExchange(&s_runaway_recorded, 1) == 0) {
             __try {
                 capture_fault_stack(ep->ContextRecord, g_crashstk, sizeof g_crashstk, 14);
-                crash_report_file("fatal", code, rva, (uintptr_t)fault_addr, DOOM_MODULE_NAME,
+                crash_report_file("fatal", code, rva, (uintptr_t)fault_addr, sh_host_image_name(),
                                   g_crashstk, "", "");
             } __except (EXCEPTION_EXECUTE_HANDLER) {}
         }
@@ -728,7 +729,7 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
             capture_fault_stack(ep->ContextRecord, g_crashstk, sizeof g_crashstk, 14);
             shield_fault sk = { "stack", (int)code, g_crashstk, rva, (uintptr_t)fault_addr };
             shield_emit(&sk);   /* the full call stack -> shield_faults.log */
-            crash_report_file("classB", code, rva, (uintptr_t)fault_addr, DOOM_MODULE_NAME,
+            crash_report_file("classB", code, rva, (uintptr_t)fault_addr, sh_host_image_name(),
                               g_crashstk, "", "");
             /* FREE THE MOUSE: DOOM clips the cursor to its window + hides it (captured input); un-clip +
              * force it visible (ShowCursor is a refcount -- bounded loop) so the user can actually reach

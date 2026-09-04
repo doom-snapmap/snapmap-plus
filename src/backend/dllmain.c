@@ -52,25 +52,23 @@
 #include "apply_engine.h"
 #include "cvar_unlock.h"   /* merged-in cvar-unlock (former standalone dinput8) */
 #include "backend_log.h"
+#include "host_image.h"    /* resolve the host DOOM image on either shipped build (Vulkan / OpenGL) */
 #include "../fault_shield/fault_shield.h"   /* the merged fault-shield (recover-in-place vs OG's terminate) */
 #include "../fault_shield/fault_record.h"   /* shield_set_logpath_from_module -> shield_faults.log */
 #ifdef SH_DIAG
 #include "../fault_shield/shield_diag.h"    /* DIAGNOSTIC build (build.ps1 -Diag): catch-all crash + env logger */
 #endif
 
-#define DOOM_MODULE_NAME "DOOMx64vk.exe"
-
 static uint8_t *g_doom_base = NULL;
 static size_t   g_doom_size = 0;
 
 static void resolve_doom(void)
 {
-    g_doom_base = (uint8_t *)GetModuleHandleA(DOOM_MODULE_NAME);
-    if (g_doom_base) {
-        IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)g_doom_base;
-        IMAGE_NT_HEADERS *nt  = (IMAGE_NT_HEADERS *)(g_doom_base + dos->e_lfanew);
-        g_doom_size = nt->OptionalHeader.SizeOfImage;
-    }
+    /* The host process image IS DOOM -- this DLL is loaded by it. Looking the module up by the
+     * name "DOOMx64vk.exe" pinned the backend to the Vulkan build and returned NULL under the
+     * OpenGL build, leaving everything downstream unarmed. See host_image.h. */
+    g_doom_base = (uint8_t *)sh_host_image_base();
+    g_doom_size = sh_host_image_size();
 }
 
 /* Deferred-resolution poll knobs. DOOMx64vk.exe is SteamStub-wrapped: the module is MAPPED early (so
@@ -122,13 +120,17 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         if (!g_doom_base) Sleep(10);
     }
     if (g_doom_base == NULL) {
-        backend_log("FATAL: DOOMx64vk.exe not found");
+        backend_log("FATAL: host process is not a supported DOOM 2016 build "
+                    "(expected DOOMx64vk.exe or DOOMx64.exe)");
         return 0;
     }
 
-    char line[128];
+    char line[160];
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "backend attached base=%p size=%zx", (void *)g_doom_base, g_doom_size);
+        "backend attached host=%s renderer=%s base=%p size=%zx",
+        sh_host_image_name(),
+        sh_host_is_vulkan() == 1 ? "vulkan" : (sh_host_is_vulkan() == 0 ? "opengl" : "unknown"),
+        (void *)g_doom_base, g_doom_size);
     backend_log(line);
 
     /* Create %LOCALAPPDATA%\snapmap-plus\{,strings,overrides,prefabs} if a fresh profile lacks it, so

@@ -48,6 +48,7 @@
 #include <string.h>
 #include "cvar_unlock.h"
 #include "backend_log.h"   /* now in the backend: log the resolution path to sh_backend.log */
+#include "host_image.h"    /* host DOOM image on either shipped build (Vulkan / OpenGL) */
 
 /* ---- the unlock (applied to ALL cvars) ------------------------------------------------------- */
 
@@ -270,13 +271,13 @@ static int apply_unlock(uint8_t *base)
 static DWORD WINAPI unlock_thread(LPVOID param)
 {
     (void)param;
-    uint8_t *base = (uint8_t *)GetModuleHandleA(DOOM_MODULE_NAME);
+    uint8_t *base = (uint8_t *)sh_host_image_base();
 
     /* Phase 1: wait for the cvar system to come up (up to ~60s @ 10ms). */
     int applied = 0;
     for (int i = 0; i < 6000 && !applied; i++) {
         if (base == NULL)
-            base = (uint8_t *)GetModuleHandleA(DOOM_MODULE_NAME);
+            base = (uint8_t *)sh_host_image_base();
         if (base != NULL)
             applied = apply_unlock(base);
         if (!applied)

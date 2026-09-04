@@ -1,4 +1,4 @@
-# build.ps1 -- compile the Snapmap+ BACKEND DLL (our clean-room XINPUT1_3.dll) with MSVC (x64).
+﻿# build.ps1 -- compile the Snapmap+ BACKEND DLL (our clean-room XINPUT1_3.dll) with MSVC (x64).
 # Pure ASCII (PS 5.1 reads BOM-less UTF-8 as 1252). Reuses the fault-shield build TEMPLATE; the backend
 # is a DISTINCT DLL (separate dir, own DllMain) -- this is only the shared MSVC/proxy build approach.
 #
@@ -45,7 +45,7 @@
 #
 # Needs Build Tools for Visual Studio 2022 (C++ workload).
 param(
-    [string[]]$Sources = @("dllmain.c", "signatures.c", "hook.c", "smoke.c",
+    [string[]]$Sources = @("dllmain.c", "host_image.c", "signatures.c", "hook.c", "smoke.c",
                            "rawmap.c", "map_package.c", "map_embed.c", "palette_guard.c", "palette_refresh.c", "engine_dialog.c", "package_conflicts.c", "strids.c",
                            "overrides.c", "resource_bridge.c", "package_requirements.c", "raw_deflate.c", "decl_text.c", "decl_server_path.c", "packages.c", "decl_server.c", "decl_visibility.c",
                            "user_overrides.c", "cvars.c", "commands.c", "clipboard.c",
@@ -200,3 +200,4 @@ if ($Diag) {
     # a -Diag build emits shield_diag.obj into build\obj\backend; keep the release obj dir diag-free.
     Remove-Item (Join-Path $outDir "obj\backend\shield_diag.obj") -ErrorAction SilentlyContinue
 }
+
