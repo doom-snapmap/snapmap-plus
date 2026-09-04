@@ -39,6 +39,7 @@
 #include <string.h>
 
 #include "backend_log.h"
+#include "engine_globals.h"   /* the editor singleton, located from the code site that computes it */
 #include "host_image.h"
 #include "iface_engine.h"
 #include "palette_refresh.h"
@@ -54,8 +55,10 @@
  * but a signature cannot match the wrong function -- and the palette vtable is read out of the
  * live editor object, so it needs no pinned address at all, only a plausibility check.
  *
- * PR_EDITOR_SINGLETON_RVA is different: it is a raw DATA RVA with no signature behind it, so it
- * remains load-bearing and its use is gated on actually being the build it was extracted from. */
+ * PR_EDITOR_SINGLETON_RVA is a raw DATA RVA. It is no longer used to locate anything: the
+ * singleton is resolved as "editor_singleton" through engine_globals.h, which signs the code site
+ * that computes the address. The constant is the pinned Vulkan value (0x309B588 on the OpenGL
+ * build), kept for audit and re-derivation. */
 #define PR_EDITOR_SINGLETON_RVA 0x3056748u
 #define PR_EDITOR_PALETTE_OFF   0x20660u
 #define PR_PALETTE_VTABLE_RVA   0x20499A0u
@@ -193,19 +196,21 @@ int sh_palette_refresh_after_decl_registration(void)
         pr_refuse("palette-refresh REFUSED: clean builder/module dependency unavailable");
         return 0;
     }
-    /* FAIL CLOSED off the pinned build. PR_EDITOR_SINGLETON_RVA is a raw data RVA with no signature
-     * behind it, so on the other shipped executable it names unrelated memory -- publishing a wrong
-     * pointer is worse than publishing none, because the caller cannot tell. A runtime resolver for
-     * this singleton is separate work; until it lands, refuse rather than guess. */
-    if (!sh_host_is_pinned_rva_build()) {
-        pr_refuse("palette-refresh REFUSED: the editor singleton is still located by a pinned-build data RVA, "
-                  "which is only valid on DOOMx64vk.exe");
-        return 0;
-    }
-    editor = sh_iface_engine_editor_base();
-    if (!editor || editor != g_module_base + PR_EDITOR_SINGLETON_RVA) {
-        pr_refuse("palette-refresh REFUSED: editor singleton identity validation failed");
-        return 0;
+    /* The editor singleton is located at runtime from the code site that computes its address, so
+     * this validates against a value derived on THIS build rather than one baked for another. If
+     * the resolver cannot place it, refuse -- a wrong pointer is worse than none, because the
+     * caller cannot tell the difference. */
+    {
+        uintptr_t expect = glb_resolve(g_module_base, "editor_singleton", NULL);
+        if (!expect) {
+            pr_refuse("palette-refresh REFUSED: the editor singleton could not be located on this build");
+            return 0;
+        }
+        editor = sh_iface_engine_editor_base();
+        if (!editor || (uintptr_t)editor != expect) {
+            pr_refuse("palette-refresh REFUSED: editor singleton identity validation failed");
+            return 0;
+        }
     }
 
     /* Validate the palette object before invoking the engine-owned rebuild. The vtable pointer is

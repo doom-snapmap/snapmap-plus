@@ -73,11 +73,12 @@ int main(int argc, char **argv)
     CHECK(strstr(refresh, "builder->addr != (uintptr_t)module_base + builder->rva") != NULL);
     CHECK(strstr(refresh, "builder->rva != PR_BUILDER_RVA") == NULL);
     CHECK(strstr(refresh, "PR_BUILDER_RVA          0x54AEE0u") != NULL);
-    /* The editor singleton is a raw DATA RVA with no signature behind it, so it stays load-bearing
-     * and FAILS CLOSED anywhere but the build it was extracted from. */
+    /* The editor singleton is located at runtime from the code site that computes its address, so
+     * the identity check compares against a value derived on THIS build. The pinned constant is
+     * kept for audit but must not be used to locate anything. */
     CHECK(strstr(refresh, "PR_EDITOR_SINGLETON_RVA") != NULL);
-    CHECK(strstr(refresh, "sh_host_is_pinned_rva_build()") != NULL);
-    CHECK(strstr(refresh, "editor != g_module_base + PR_EDITOR_SINGLETON_RVA") != NULL);
+    CHECK(strstr(refresh, "glb_resolve(g_module_base, \"editor_singleton\"") != NULL);
+    CHECK(strstr(refresh, "editor != g_module_base + PR_EDITOR_SINGLETON_RVA") == NULL);
     /* The palette vtable is read out of the live editor object, so it is checked for plausibility
      * -- present, and a read-only location in the host image -- not against one build's address. */
     CHECK(strstr(refresh, "PR_PALETTE_VTABLE_RVA   0x20499A0u") != NULL);

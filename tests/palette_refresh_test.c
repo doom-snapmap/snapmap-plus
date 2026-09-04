@@ -1,10 +1,11 @@
-/* palette_refresh_test.c -- per-registration palette rebuild service and exact gating. */
+﻿/* palette_refresh_test.c -- per-registration palette rebuild service and exact gating. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "host_image.h"
+#include "engine_globals.h"
 #include "palette_refresh.h"
 
 #define TEST_EDITOR_SINGLETON_RVA 0x3056748u
@@ -25,6 +26,7 @@ static void *g_last_palette;
 static void *g_last_progress;
 static int g_builder_raises;
 static int g_pinned_build = 1;
+static int g_globals_resolvable = 1;
 
 void backend_log(const char *message)
 {
@@ -39,6 +41,19 @@ const uint8_t *sh_iface_engine_editor_base(void)
 int sh_host_is_pinned_rva_build(void)
 {
     return g_pinned_build;
+}
+
+/* palette-refresh locates the editor singleton through the globals resolver. Here it returns the
+ * fake module's singleton, or nothing when g_globals_resolvable is cleared -- which is how the
+ * "build we cannot place the singleton on" case is exercised. */
+uintptr_t glb_resolve(const uint8_t *module_base, const char *name, glb_status *out_status)
+{
+    if (!g_globals_resolvable || strcmp(name, "editor_singleton") != 0) {
+        if (out_status) *out_status = GLB_ANCHOR_NOT_FOUND;
+        return 0;
+    }
+    if (out_status) *out_status = GLB_OK;
+    return (uintptr_t)(module_base + TEST_EDITOR_SINGLETON_RVA);
 }
 
 /* Give the fake module enough of a PE image for the section walk that validates the palette vtable:
@@ -232,15 +247,15 @@ int main(void)
     CHECK(g_builder_calls == 0);
 
     /* The editor singleton is still located by a raw pinned-build DATA RVA with no signature behind
-     * it, so off that build the service FAILS CLOSED rather than dereference unrelated memory.
-     * Publishing a wrong pointer would be worse than publishing none: the caller cannot tell. */
+     * it, so when the resolver cannot place the singleton the service FAILS CLOSED rather than
+     * dereference unrelated memory. A wrong pointer is worse than none: the caller cannot tell. */
     bind_fake(module);
     setup_editor(module, 1, 1);
-    g_pinned_build = 0;
+    g_globals_resolvable = 0;
     CHECK(sh_palette_refresh_after_decl_registration() == 0);
     CHECK(sh_palette_refresh_test_state() == SH_PALETTE_REFRESH_TEST_REFUSED);
     CHECK(g_builder_calls == 0);
-    g_pinned_build = 1;
+    g_globals_resolvable = 1;
 
     bind_fake(module);
     setup_editor(module, 1, 1);
