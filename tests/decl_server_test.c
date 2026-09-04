@@ -159,7 +159,7 @@ uintptr_t sig_addr_by_name(const sig_result *results, size_t count, const char *
     (void)count;
     (void)name;
     return 0;
-}
+}
 /* ds_res_walk resolves the engine's decl-resource list head through the globals resolver rather
  * than a hardcoded RVA. There is no engine image here, so the resolve fails and the walk visits
  * nothing -- which is what this suite wants, and the same thing that happens on a DOOM build we
