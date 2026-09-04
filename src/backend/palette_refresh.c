@@ -39,9 +39,23 @@
 #include <string.h>
 
 #include "backend_log.h"
+#include "host_image.h"
 #include "iface_engine.h"
 #include "palette_refresh.h"
 
+/* PR_EDITOR_PALETTE_OFF is a STRUCT OFFSET and carries across both shipped DOOM builds unchanged.
+ *
+ * The three RVAs are what these locations occupy on the PINNED VULKAN BUILD (DOOMx64vk.exe),
+ * recorded for audit and for re-deriving a signature that stops matching. The two code/vtable ones
+ * NO LONGER GATE: DOOM 2016 ships two executables built from one source tree, the game relaunches
+ * itself into the other when r_renderAPI changes, and every function RVA shifts between them with
+ * no uniform delta. The builder's identity is proven by a clean unique masked-signature match --
+ * which is stronger evidence than RVA equality, since two builds can share an RVA by coincidence
+ * but a signature cannot match the wrong function -- and the palette vtable is read out of the
+ * live editor object, so it needs no pinned address at all, only a plausibility check.
+ *
+ * PR_EDITOR_SINGLETON_RVA is different: it is a raw DATA RVA with no signature behind it, so it
+ * remains load-bearing and its use is gated on actually being the build it was extracted from. */
 #define PR_EDITOR_SINGLETON_RVA 0x3056748u
 #define PR_EDITOR_PALETTE_OFF   0x20660u
 #define PR_PALETTE_VTABLE_RVA   0x20499A0u
@@ -87,6 +101,36 @@ static int pr_read_ptr(const void *address, void **out)
     }
 }
 
+/* Non-zero when `address` lies in a section of the host image the loader mapped READ-ONLY (READ
+ * set, WRITE and EXECUTE clear) -- .rdata on both shipped builds, where the engine's vtables live.
+ * This is the plausibility test for the palette vtable pointer read out of the live editor object:
+ * that pointer is already correct for whichever build we are in, so there is nothing to compare it
+ * against, only somewhere it has to land. SEH-guarded; a malformed or unreadable image refuses. */
+static int pr_address_in_readonly_section(const uint8_t *module_base, const void *address)
+{
+    __try {
+        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)module_base;
+        const IMAGE_NT_HEADERS64 *nt;
+        const IMAGE_SECTION_HEADER *sec;
+        uintptr_t rva;
+        unsigned int i;
+        if (!module_base || !address || (uintptr_t)address < (uintptr_t)module_base) return 0;
+        rva = (uintptr_t)address - (uintptr_t)module_base;
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+        nt = (const IMAGE_NT_HEADERS64 *)(module_base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+        sec = (const IMAGE_SECTION_HEADER *)IMAGE_FIRST_SECTION(nt);
+        for (i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
+            uintptr_t start = (uintptr_t)sec->VirtualAddress;
+            uintptr_t span  = sec->Misc.VirtualSize ? sec->Misc.VirtualSize : sec->SizeOfRawData;
+            if (rva < start || rva >= start + span) continue;
+            return (sec->Characteristics & IMAGE_SCN_MEM_READ) != 0 &&
+                   (sec->Characteristics & (IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE)) == 0;
+        }
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
 static void pr_refuse(const char *reason)
 {
     InterlockedExchange(&g_state, PR_STATE_REFUSED);
@@ -109,9 +153,11 @@ int sh_palette_refresh_install(const sig_result *results, size_t count,
         return 0;
     }
 
-    if (builder->rva != PR_BUILDER_RVA ||
-        builder->addr != (uintptr_t)module_base + PR_BUILDER_RVA) {
-        pr_refuse("palette-refresh REFUSED: SnapPaletteBuild clean resolve is not the pinned exact address");
+    /* The clean SIG_OK resolve above IS the identity proof; all that is left to confirm is that the
+     * resolver's own address and RVA agree about this image base, so the pointer we cache and the
+     * base we later derive the editor from cannot be describing two different modules. */
+    if (builder->addr != (uintptr_t)module_base + builder->rva) {
+        pr_refuse("palette-refresh REFUSED: SnapPaletteBuild resolve is not self-consistent with the host image base");
         return 0;
     }
 
@@ -147,16 +193,28 @@ int sh_palette_refresh_after_decl_registration(void)
         pr_refuse("palette-refresh REFUSED: clean builder/module dependency unavailable");
         return 0;
     }
+    /* FAIL CLOSED off the pinned build. PR_EDITOR_SINGLETON_RVA is a raw data RVA with no signature
+     * behind it, so on the other shipped executable it names unrelated memory -- publishing a wrong
+     * pointer is worse than publishing none, because the caller cannot tell. A runtime resolver for
+     * this singleton is separate work; until it lands, refuse rather than guess. */
+    if (!sh_host_is_pinned_rva_build()) {
+        pr_refuse("palette-refresh REFUSED: the editor singleton is still located by a pinned-build data RVA, "
+                  "which is only valid on DOOMx64vk.exe");
+        return 0;
+    }
     editor = sh_iface_engine_editor_base();
     if (!editor || editor != g_module_base + PR_EDITOR_SINGLETON_RVA) {
         pr_refuse("palette-refresh REFUSED: editor singleton identity validation failed");
         return 0;
     }
 
-    /* Validate the palette object before invoking the engine-owned rebuild. */
+    /* Validate the palette object before invoking the engine-owned rebuild. The vtable pointer is
+     * read out of the live editor object, so it is already right for this build; what is checked is
+     * that it is present and plausibly a vtable -- a non-null read landing in a read-only section of
+     * the host image -- rather than that it equals one build's recorded address. */
     vtable_status = pr_read_ptr(editor + PR_EDITOR_PALETTE_OFF, &palette_vtable);
     if (vtable_status < 0 || vtable_status == 0 ||
-        palette_vtable != (void *)(g_module_base + PR_PALETTE_VTABLE_RVA)) {
+        !pr_address_in_readonly_section(g_module_base, palette_vtable)) {
         pr_refuse("palette-refresh REFUSED: editor palette object/vtable validation failed");
         return 0;
     }
