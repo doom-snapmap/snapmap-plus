@@ -25,7 +25,7 @@ publish. That means maps built with Snapmap+ work for everyone who plays them, c
 nothing needs to be installed on the player's end, and every asset referenced already ships with the base
 game.
 
-![Snapmap+ full window: Entities tab open, DOOM editor visible behind it](images/snapmap-window-and-doom.jpg)
+![Snapmap+ full window: Entities tab open, DOOM editor visible behind it](images/snapmap-window-and-doom.png)
 
 ---
 
@@ -111,14 +111,15 @@ window to look at it can crash the game. Borderless and Windowed don't have that
 
 ### The window
 
-Snapmap+'s panel has three tabs — **Entities**, **Prefabs**, and **Timelines** — and a couple of controls
-that stay visible no matter which tab you're on:
+Snapmap+'s panel has four tabs — **Assets**, **Entities**, **Prefabs**, and **Timelines** — and a couple
+of controls that stay visible no matter which tab you're on:
 
-![Snapmap+ full window: title bar, tabs, Camera Origin, Light/Dark toggle](images/window-tour.png)
+![Snapmap+ full window: title bar, tabs, Camera Origin, View menu](images/window-tour-dark.png)
 
-**Light / Dark** (top menu bar) switches the panel's whole color scheme. It doesn't follow your system
-theme automatically — pick whichever you prefer. Snapmap+ remembers the choice and applies it before the
-window first appears on later launches, so a saved dark theme does not flash light while loading.
+**View → Light Theme / Dark Theme** switches the panel's whole color scheme. It doesn't follow your
+system theme automatically — pick whichever you prefer. Snapmap+ remembers the choice and applies it
+before the window first appears on later launches, so a saved dark theme does not flash light while
+loading.
 
 `config.json` is safe to leave alone. If you deliberately delete it, Snapmap+ treats that as **Reset
 preferences** and recreates the default light setting, Show Hidden off, Entity selection mode off, and user
@@ -128,16 +129,26 @@ for the current session and the window explains that it was not remembered. `sh_
 a failed console write reports the failure, leaves this launch unchanged, and does not establish a change for
 the next launch. Updates, uninstall, and reinstall preserve the file.
 
-**Camera Origin** (top-right) shows your editor camera's live X/Y/Z position, and updates continuously
-while you move around — handy for finding coordinates to paste into a property. Check **Lock** to pin the
-fields (and the camera) in place instead of tracking your movement live; editing a locked field's value
-moves the camera there.
+The **status bar** along the bottom stays visible on every tab too:
+
+![Status bar: connection dot and version, Selected count, X/Y/Z camera fields, Lock position, Updated stamp, help icon](images/status-bar-dark.png)
+
+- The green dot plus version string on the left confirms Snapmap+ is connected and tells you which
+  build you're running.
+- **Selected** shows how many entities are currently selected.
+- **X / Y / Z** is your editor camera's live position, and updates continuously while you move around —
+  handy for finding coordinates to paste into a property. Check **Lock position** to pin the fields (and
+  the camera) in place instead of tracking your movement live; editing a locked field's value moves the
+  camera there.
+- **Updated** (far right) is a live timestamp of the last change Snapmap+ picked up from the map.
+- The **?** icon next to it opens the feedback dialog — see [Reporting Bugs and Requesting
+  Features](#reporting-bugs-and-requesting-features).
 
 ---
 
 ## The Entities Tab
 
-![Entities tab: list populated, one row selected](images/entities-tab.png)
+![Entities tab: list populated, one row selected](images/entites-tab-dark.png)
 
 The Entities tab lists every entity placed in your map, by its **reference ID** and, if you've given it
 one, its display name. The list keeps itself up to date automatically as you edit — **Refresh** is there
@@ -152,6 +163,8 @@ if you ever want to force an immediate re-sync yourself.
   rather browse the list independently of what's selected in-game.
 - **Select in 3D** — the reverse direction: selecting a row (or rows) here also selects the matching
   entity in the SnapMap 3D editor.
+- **Browse assets...** opens the [Assets tab](#the-assets-tab) as a modal, scoped to whichever entity is
+  currently selected — a shortcut for retexturing or reassigning a model/sound without switching tabs.
 
 Follow Selection and Select in 3D are opposite directions of one mode, so they cannot be enabled together.
 Snapmap+ remembers the direction you choose (or that both are off) for the next launch.
@@ -180,7 +193,7 @@ Timeline) to a Remove node/command.
 Selecting an entity (in the list, or in-game with Follow Selection on) opens its **Entity State** panel
 on the right.
 
-![Entity State panel with an entity loaded](images/entity-state-panel.png)
+![Entity State panel with an entity loaded](images/entity-state-panel-dark.png)
 
 - **ID** — the entity's reference ID, read-only, with a **Copy** button.
 - **Inherit** and **Classname** — together, these determine what *kind* of entity this is (see
@@ -209,7 +222,7 @@ on the right.
 - **Inherit / Class Descriptions** (collapsible, below the editor) — a short description of what the
   current inherit and classname actually are, when Snapmap+ has one on file.
 
-![Focus mode active: decl editor filling the window](images/focus-mode.png)
+![Focus mode active: decl editor filling the window](images/focus-mode-dark.png)
 
 ---
 
@@ -298,6 +311,69 @@ references and experimentation, since there isn't a single authoritative list.
 
 ---
 
+## The Assets Tab
+
+The Assets tab is a searchable browser over **everything DOOM's own shipped files contain** — every
+material, model, sound, light, particle and more — with a live preview and one click to put what you
+found onto your map. Nothing here is a bundled list Snapmap+ ships: the catalog is built by reading your
+own installed game files the first time you open each category, so it's always exactly what your copy of
+DOOM has.
+
+![Assets tab: type rail on the left, catalog in the middle, preview and apply panel on the right](images/assets-browser-overview-dark.png)
+
+The tab is three columns:
+
+![Asset Type rail: Pinned, then Placeable and Reference categories with counts](images/asset-browser-types-dark.png)
+
+**Asset Type** (left) — pick a category. **Placeable** categories are things you can actually put on the
+map:
+
+| Category | What it holds |
+|---|---|
+| **Pinned** | Your own shortlist — star any asset from its row to add it here, regardless of type. Handy for the handful of things you're using right now. |
+| Materials | Surfaces/textures. A **Cross Platform Textures Only** filter narrows this down to the ones confirmed to look the same on PC, Xbox, and PlayStation. |
+| Models | Props. |
+| Modules | Whole pre-built SnapMap rooms — placing one drops a single entity that's both visible and solid. |
+| Brush models | The individual wall/floor/detail pieces those rooms are built from. |
+| Clip models | Collision shapes, placeable on their own. |
+| Sounds | Filed by soundbank rather than by name — most raw sound names are near-identical, so the bank is the only grouping that actually helps. |
+| Lights | The light material — the pattern a light shines through. Point vs. spot is chosen separately, from **Create as** (see below). |
+| FX, Particles | The remaining placeable effect types. |
+
+**Reference** categories (Editor defs, Entity defs, Images, Decal atlases, Perks, SWF/Flash) are look-up
+only — useful for finding a name to type in by hand, but nothing to click-apply, since there's no single
+right way to wire something like a Perk or a `.swf` screen into an entity.
+
+![Catalog pane: a folder tree of everything under a category, with per-folder counts](images/assets-browser-catalog-dark.png)
+
+**Catalog** (middle) — browse a category's folder tree, or type into **Filter every folder...** to search
+across all of it at once. Folders show how many assets are inside; click through, or search, until you
+land on the thing you want.
+
+![Asset panel: preview image, name, path, and Apply to selection controls](images/asset-properties-preview-dark.png)
+
+**Asset** (right) — once you pick something, its actual preview shows here: materials and images render
+as real pixels (decoded straight from the game's own texture data, not a stand-in icon), and sounds get a
+play/stop button so you can listen before committing. Below the preview:
+
+- **Copy** — copies the asset's path, for pasting into a decl by hand.
+- **Apply to selection** — writes the asset onto whichever entity you currently have selected, immediately.
+  What it writes (and which entities will accept it) depends on the asset type: a material sets
+  `customMaterial`, a model sets `renderModelInfo.model`, a sound sets `sound` on a speaker, and so on. If
+  the selected entity's class can't use that kind of asset, Snapmap+ tells you why instead of quietly
+  doing nothing.
+- **New entity** — instead of applying to a selection, stages a fresh one-entity prefab holding the asset,
+  picked up and ready to place exactly like Ctrl+V.
+- A material specifically offers **Custom Material** (applies it by name) or **Virtual Mapping** (applies
+  it as a rectangle of the shared megatexture instead of by name — the way to reach materials that have no
+  name of their own) — plus a **Tile every** size and a **Bloom mask** strength.
+
+**Reaching it from an entity you already have selected:** click **Browse assets...** on the [Entities
+tab](#the-entities-tab) to open the same browser shown above as a modal, scoped to that entity — apply an
+asset straight to it without leaving the Entity State panel.
+
+---
+
 ## Reclassing an Entity
 
 Every entity has an **inherit** and a **classname**. Changing either — or both — turns one type of
@@ -336,8 +412,10 @@ Some entities exist in the DOOM engine but have no resource file made for SnapMa
 put in **inherit** for them. Snapmap+ handles this with a generic `snapmaps/unknown` inherit that's
 compatible with any classname — no mismatch risk, regardless of what type you're setting up.
 
-Rather than making you build one of these by hand every time, Snapmap+ seeds two ready-to-place starting
-points — **Unknown** and **Timeline** — directly into DOOM's own Create menu, under a **"*Custom"** tab.
+Rather than making you build one of these by hand every time, Snapmap+ seeds ready-to-place starting
+points — **Unknown**, **Timeline**, and **Lift** — directly into DOOM's own Create menu, under a
+**"*Custom"** tab. These ship as a built-in [override package](#overrides) — the same mechanism you can
+use yourself to add your own declarations.
 
 ![DOOM's Create menu with the *Custom tab open, placing a Timeline entity](images/custom-palette-tab.jpg)
 
@@ -400,7 +478,7 @@ feature as such, so it's covered separately rather than here.
 
 ## The Prefabs Tab
 
-![Prefabs tab: folder tree on the left, a selected prefab's details on the right](images/prefabs-tab.png)
+![Prefabs tab: folder tree on the left, a selected prefab's interactive 3D preview and details on the right](images/prefabs-tab-dark.png)
 
 The Prefabs tab saves a group of entities so you can reuse it later, or share it with someone else
 running Snapmap+.
@@ -410,10 +488,12 @@ it a name, and it's added to the list. **Your cursor must be hovering one of the
 you do this** — whichever object that is becomes the one centered on your cursor when you later paste
 the prefab back in.
 
-**Using one:** select a prefab in the list to see its details on the right — its name, and (once those
-fields are wired up) a description and tags. Click **Load / Place** to stage the prefab for placement
-with SnapMap's built-in paste function, then switch to the editor and press **Ctrl+V** to actually drop
-it into the map.
+**Using one:** select a prefab in the list to see its details on the right — its name, description, and
+tags, plus an **interactive 3D preview** of what you're about to place: drag to orbit, scroll to zoom,
+double-click to frame it. The preview colors entities by what they do — solid, blocking, interactable,
+logic/I/O, triggers — so you can tell what a prefab actually contains before you drop it in. Click
+**Load / Place** to stage the prefab for placement with SnapMap's built-in paste function, then switch to
+the editor and press **Ctrl+V** to actually drop it into the map.
 
 **Organizing:** **New Folder** creates a folder you can drag prefabs into; **Filter prefabs...** narrows
 the list by name. Selecting a prefab and clicking **Delete** removes it permanently.
@@ -432,7 +512,7 @@ A **Timeline** is a single entity that can run multiple scripted actions, on mul
 the same or staggered times. Timelines are painful to set up by hand in the raw decl text, so Snapmap+
 gives them a dedicated editor.
 
-![Timelines tab: list on the left, an open Timeline with eventcalls on the right](images/timelines-tab.png)
+![Timelines tab: list on the left, an open Timeline with eventcalls on the right](images/timelines-tab-dark.png)
 
 **Getting a Timeline into your map:** place one from the **\*Custom** palette tab (see
 [The Custom Palette Tab](#the-custom-palette-tab)) — this is the reliable way to do it, since it comes
@@ -471,9 +551,8 @@ directly, or by turning on `sh_target_any` and wiring it up with the native wire
 
 ## Rawmaps
 
-With Snapmap+ running, saving a map also writes a **rawmap** — a full, human-readable copy of the map's
-contents — to `%LOCALAPPDATA%\snapmap-plus\rawmap.json`. It's saved automatically on every save; no
-separate step needed. A few things it's useful for:
+A **rawmap** is a full, human-readable copy of a map's contents, stored at
+`%LOCALAPPDATA%\snapmap-plus\rawmap.json`. A few things it's useful for:
 
 - Sharing a map with another Snapmap+ user without publishing it, or without either of you needing to be
   connected to the game's servers.
@@ -482,9 +561,20 @@ separate step needed. A few things it's useful for:
   you originally published from.
 - Editing the map file directly in a text editor.
 
-**To load a rawmap into the editor:** open the console (**~**) and run `sh_rawmaps_on`. Whatever
-map you open next (an existing save, to overwrite it, or a blank template) loads from `rawmap.json`
-instead of its own saved data. Once it's loaded, open the console again and run `sh_rawmaps_off`.
+Both saving and loading a rawmap go through the same switch: open the console (**~**) and run
+`sh_rawmaps_on` to turn it on, `sh_rawmaps_off` to turn it off.
+
+**To write a rawmap:** turn on `sh_rawmaps_on` *before* you save. While it's on, saving the map also
+mirrors that save to `rawmap.json`. **It is not automatic** — with `sh_rawmaps_on` off, saving the map
+only writes the normal save, and `rawmap.json` is left untouched.
+
+**To load a rawmap into the editor:** run `sh_rawmaps_on`. Whatever map you open next (an existing save,
+to overwrite it, or a blank template) loads from `rawmap.json` instead of its own saved data. Once it's
+loaded, run `sh_rawmaps_off` again.
+
+Since one switch governs both directions, be deliberate about *why* it's on: turn it on to load a rawmap,
+turn it back off before you keep working normally, then turn it on again only when you actually want a
+save to also write to `rawmap.json`.
 
 A `rawmap.json` from someone else works the same way — drop it into your own `snapmap-plus` folder
 (replacing your own `rawmap.json`) and load it in with `sh_rawmaps_on` as above.
@@ -609,29 +699,60 @@ map (a gameplay-affecting override wouldn't travel with the map anyway, so there
 that). For Snapmap+ itself, overrides remove editor-side restrictions and save you from typing out edits
 by hand that would otherwise be tedious.
 
-The [Custom palette tab](#the-custom-palette-tab) — the Unknown and Timeline entities available straight
-from DOOM's own Create menu — is itself built on this system: it's an override that ships with Snapmap+
-by default.
+The [Custom palette tab](#the-custom-palette-tab) — the Unknown, Timeline, and Lift entities available
+straight from DOOM's own Create menu — is itself built on this system: it's an override that ships with
+Snapmap+ by default.
 
-To add your own, place files under `%LOCALAPPDATA%\snapmap-plus\overrides\`, matching the path/filename of
-the resource you want to replace.
+### Overrides are packages
 
-Actually authoring an override's *contents* is a separate skill from placing the file — the format
+An override is organized as a **package**: a folder under `%LOCALAPPDATA%\snapmap-plus\overrides\`
+containing whatever it adds (decls, resources, strings...) plus a `package.json` marking it as one. The
+package folder *is* the whole thing:
+
+- **Installing** one is copying its folder in.
+- **Uninstalling** one is deleting its folder.
+- **Sharing** one is sending someone that folder — they drop it into their own `overrides\` and it's
+  installed.
+
+Nothing needs compiling or merging, and nothing a package adds can be left behind once its folder is gone.
+A package can sit directly under `overrides\` — a shared mod you were handed, say
+`overrides\cyberdemon\`, installs exactly like that, as its own top-level package — or you can organize
+packages into subfolders as deep as you like; a subfolder without its own `package.json` is just an
+organizing folder, not a package itself.
+
+**`overrides\my-overrides\`** is one specific package: the one Snapmap+ creates for you, empty, on a
+fresh install, as an obvious place to drop anything you make yourself rather than having to invent a
+package folder and `package.json` for it. It isn't special beyond that, and it isn't required — your own
+content is just as free to live in a package folder of its own as anyone else's is.
+
+**This replaces the old method.** Earlier versions of Snapmap+ let you drop a loose file anywhere under
+`overrides\`, matching the path/filename of the resource you wanted to replace, with no package folder
+involved at all. That no longer works — every override now has to live inside *some* package folder (one
+with its own `package.json`). **If you're updating from an older version**, this happens for you
+automatically: your existing loose files are moved into `my-overrides` the first time you update, with
+nothing lost.
+
+**Packages overlap safely.** Two packages both shipping the same shared asset is normal and composes
+without complaint. Only a genuine disagreement — two packages naming the same thing differently — is
+refused, and Snapmap+ names both packages in the error so you know exactly what to fix. Nothing is ever
+silently overwritten by install order.
+
+Actually authoring a package's *contents* is a separate skill from placing the folder — the format
 depends entirely on which resource you're replacing, and isn't covered in this guide.
 
 ### How a file gets picked
 
-Every time the game asks to open a resource, Snapmap+ resolves it in three steps, in order:
+Every time the game asks to open a resource, Snapmap+ resolves it in order:
 
-1. **Your file**, if you've placed one at that path under `overrides\` — wins while the player-file layer is enabled.
+1. **Your installed packages**, if one of them supplies that path — wins while the player-file layer is enabled.
 2. **Snapmap+'s own built-in default** for that same path (this is how the Custom palette tab ships) —
    served from memory, never written into your `overrides\` folder. Because it's never written to disk,
    the built-in updates automatically with every new release, and you can always get back to the default
-   by simply deleting your file at that name.
+   by simply removing your package.
 3. **The game's own packaged resource** — used when neither of the above applies.
 
-If your `overrides` folder ever ends up with something broken in it and you want to rule out your files while
-you track it down, enter:
+If your `overrides` folder ever ends up with something broken in it and you want to rule out your packages
+while you track it down, enter:
 
 ```
 sh_user_overrides 0
@@ -639,7 +760,7 @@ sh_user_overrides 0
 
 If Snapmap+ confirms the save, this skips only step 1 after you restart DOOM. The built-in defaults and
 DOOM's packaged resources (steps 2 and 3) remain available. If the save fails, the console says so, this
-launch stays unchanged, and no next-launch change is guaranteed. Restore your files for the next launch with:
+launch stays unchanged, and no next-launch change is guaranteed. Restore your packages for the next launch with:
 
 ```
 sh_user_overrides 1
@@ -648,6 +769,26 @@ sh_user_overrides 1
 Run `sh_user_overrides` with no argument to see this launch's state and either the saved next-launch state or
 a volatile value that is not confirmed saved. Snapmap+ also writes a list of every active override it found to
 the log each time it starts, so you can always check what's currently shadowing what.
+
+### Maps can carry their own mod packages
+
+Saving a map automatically checks which of your installed packages it actually uses, and embeds those
+packages **inside the map file itself** — no extra step, nothing to remember to attach.
+
+When someone opens a map that needs a package they don't have installed, Snapmap+ asks once:
+
+> This map brings its own mod package: **cyberdemon** (12 files, 340 KB). It has to be installed before
+> the map can load. Install it now?
+
+Click **Yes**, and Snapmap+ installs everything the map brought and the map plays right away — no DOOM
+restart needed. A map that needs several packages lists them all in one prompt instead of asking once per
+package. Click **No**, and nothing is installed; Snapmap+ won't ask again for that exact package unless
+you ask it to load the map again.
+
+**Only players who also have Snapmap+ installed can play a map's mods.** Unlike the entity edits covered
+elsewhere in this guide, a mod package is content Snapmap+ itself resolves — there's no install prompt and
+no way to fetch or apply the package without it. A vanilla player, including anyone on console, cannot
+play a map's mods at all.
 
 ---
 
@@ -723,6 +864,9 @@ them, but they're listed here for completeness since `sh_help` shows them too:
 | `cs_fieldinfo` | Print field info for a type. |
 | `cs_start_render_logging` | Set up the render-logging hook. |
 | `sh_disable_devmode` / `sh_reenable_devmode` | Turn DOOM's developer features off, or back on, without losing your Bethesda.net connection. |
+| `sh_dialogtest [id] [buttons] [text]` | Raise DOOM's own modal dialog carrying the given text — the same surface behind the [mod-package install prompt](#maps-can-carry-their-own-mod-packages). |
+| `sh_dialogpoll` | Read the answer to the dialog `sh_dialogtest` raised. |
+| `sh_dialogdump` | Print the engine's dialog queue: id, button set, and flag bytes. |
 
 ---
 
@@ -731,6 +875,8 @@ them, but they're listed here for completeness since `sh_help` shows them too:
 Snapmap+ has a built-in way to send feedback straight to the developers — no GitHub account, no email,
 no leaving the game. Click the small **?** button in the bottom-right corner of the status bar to open
 the **Send feedback** dialog.
+
+![The Send Feedback dialog: category, title, details, and an optional contact field](images/feedback-dark.png)
 
 Fill in:
 
