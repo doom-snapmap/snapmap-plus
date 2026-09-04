@@ -25,6 +25,8 @@
 #include "entlist_classes.h"
 #include "patch.h"
 #include "signatures.h"
+#include "engine_globals.h"   /* glb_resolve -- the portable data-global resolver */
+#include "host_image.h"       /* sh_host_is_pinned_rva_build -- gates the last-resort RVAs */
 #include "rawmap.h"
 #include "ui_bridge.h"   /* sh_ui_get_iface() -- the `sh` dispatcher gates on the interface */
 #include "hook.h"        /* install_inline_hook -- the AddCommand detour for the command unlock */
@@ -116,8 +118,12 @@ const char *cmd_argv(idCmdArgs *a, int n)
  * RIP-relative load opcode (the four forms 48 8D 0D / 48 8B 0D / 48 8D 05 / 48 8B 05 -- the cmdSystem
  * one is the MOV form, NOT the LEA sh_strids decodes) to the global SLOT, then DEREFERENCE ONCE to get
  * the live object (the MOV form loads *(slot); OG's *(engineBase+0x55b7280) does the same single deref).
- * Build-portable: no hardcoded RVA. Fallback: *(module_base + 0x55b7280) (the known offset). */
-#define CMDSYS_KNOWN_RVA   0x55b7280u
+ * Build-portable: no hardcoded RVA. If that decode fails, glb_resolve("cmd_system_slot") signs a second,
+ * independent code site and decodes its displacement -- also portable. Only if BOTH miss do we consider
+ * the pinned literal, and only on the build it came from. */
+#define CMDSYS_KNOWN_RVA   0x55b7280u   /* the cmdSystem slot's RVA on the pinned Vulkan build -- kept for
+                                         * audit and per-build re-derivation. Dereferenced only when
+                                         * sh_host_is_pinned_rva_build() says we ARE that build. */
 
 /* SHARED with entity.c (declared in commands.h). The gameMgr-global decode reuses the EXACT same
  * 4-opcode RIP-relative scanner so the two globals decode through ONE code path (no duplicate-and-drift). */
@@ -165,16 +171,38 @@ void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *modu
                 return obj;
             }
         }
-        backend_log("B2: cmdSystem portable decode failed -- trying known-offset fallback");
+        backend_log("B2: cmdSystem portable decode failed -- trying the signed data-global anchor");
     }
-    /* Fallback (hook-tolerance philosophy: portable primary + known_rva fallback). */
+    /* Second portable path: a signed code site whose RIP displacement names the same slot. Survives an
+     * inline hook on the CmdSystemLea prologue, which the decode above does not. */
     if (module_base) {
+        glb_status gst = GLB_UNKNOWN_NAME;
+        uintptr_t decoded = glb_resolve(module_base, "cmd_system_slot", &gst);
+        if (decoded) {
+            void *obj = NULL;
+            if (sh_safe_read((const uint8_t *)decoded, (uint8_t *)&obj, sizeof obj) && obj) {
+                char line[128];
+                _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "B2: cmdSystem glb slot=%p -> obj=%p (portable)", (void *)decoded, obj);
+                backend_log(line);
+                return obj;
+            }
+        } else {
+            char line[128];
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                "B2: cmdSystem glb anchor unresolved (status=%d)", (int)gst);
+            backend_log(line);
+        }
+    }
+    /* Last resort: the pinned literal, and only on the build it was extracted from. On the other shipped
+     * image that RVA is unrelated memory whose contents we would publish as idCmdSystemLocal*. */
+    if (module_base && sh_host_is_pinned_rva_build()) {
         const uint8_t *slot = module_base + CMDSYS_KNOWN_RVA;
         void *obj = NULL;
         if (sh_safe_read(slot, (uint8_t *)&obj, sizeof obj) && obj) {
             char line[128];
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                "B2: cmdSystem fallback *(base+0x55b7280)=%p", obj);
+                "B2: cmdSystem pinned-build fallback *(base+0x55b7280)=%p", obj);
             backend_log(line);
             return obj;
         }
@@ -725,8 +753,9 @@ static void h_sh_genbmodel(idCmdArgs *a)
  * Real port of OG FUN_18001ffe0 (dispatches argv[1] across 9 sub-ops). The OG reads renderWorld =
  * *(engineBase+0x57216f0) -- a .data SLOT. We resolve it BUILD-PORTABLY: the RenderWorldGetter sig anchors a
  * unique engine window carrying `LEA RCX,[rip+slot]`; sh_decode_rip_slot decodes it to the slot RVA, then we
- * deref once for the live idRenderWorld*. Fallback: *(g_module_base + 0x57216f0). The editor singleton (for
- * showcursor) is the SAME recipe-tagged data RVA sh_iface_engine uses (module_base + 0x3056748).
+ * deref once for the live idRenderWorld*. If that misses, glb_resolve("render_world_slot") signs a second,
+ * independent code site for the same slot. The editor singleton (for showcursor) comes from
+ * glb_resolve("editor_singleton"), the same portable resolution sh_iface_engine uses.
  *
  * PORTED (safe, read-only): dumprenderinfo (=OG dumpmodelinfo: walk the rendermodel list, Printf each name),
  * showcursor (write byte[editor+0x23624]=0), togglefpsupdate (cosmetic flag toggle -- clone-local state),
@@ -735,7 +764,9 @@ static void h_sh_genbmodel(idCmdArgs *a)
  * trap that halts the game), dump_megatex (hardcoded fwrite to C:\Users\Chris\megatex.raw, chrispy's box).
  * NOT-AVAILABLE (heavy dev-only mutators, faithfully surfaced but not ported): test_rm_commit, test_sum_shit,
  * testnewgui (render-commit / geoworld-build / GUI-alloc -- out of the safe read-only scope). */
-#define RW_SLOT_KNOWN_RVA         0x57216f0u  /* renderWorld .data slot (OG *(engineBase+RVA)); fallback only */
+#define RW_SLOT_KNOWN_RVA         0x57216f0u  /* the renderWorld .data slot's RVA on the pinned Vulkan build
+                                               * (OG *(engineBase+RVA)) -- kept for audit and per-build
+                                               * re-derivation. Dereferenced only when the host IS that build. */
 /* RE-DERIVE RECIPE for the 4 BUILD-SPECIFIC offsets below (do per DOOM build -- portability discipline; these
  * are vtable-slot/struct-field offsets, NOT sig-resolvable). All four come from TWO command-handler decompiles:
  *   - The renderWorld vtbl slots + the model-name offset: decompile the OG `dumpmodelinfo` handler (find via the
@@ -751,14 +782,17 @@ static void h_sh_genbmodel(idCmdArgs *a)
 #define RW_MODEL_NAME_OFF         0x10        /* render model -> name char* (model+0x10) (BUILD-SPECIFIC) */
 #define ED_SHOWCURSOR_OFF         0x23624u    /* editor -> showcursor byte (OG writes 0) (BUILD-SPECIFIC) */
 #define RW_MODEL_COUNT_CAP        1000000u    /* stale-renderWorld guard on the model count */
-#define EDITOR_SINGLETON_RVA      0x3056748u  /* inline idSnapEditorLocal object = module_base + this (SAME recipe
-                                               * as iface_engine.c EDITOR_SINGLETON_RVA; in-place ctor 0x51A8E0;
-                                               * re-derive per build). showcursor writes byte[editor+0x23624]=0. */
+#define EDITOR_SINGLETON_RVA      0x3056748u  /* the inline idSnapEditorLocal object's RVA on the pinned Vulkan
+                                               * build (in-place ctor 0x51A8E0) -- kept for audit and per-build
+                                               * re-derivation, no longer used to locate anything. showcursor
+                                               * finds the object via glb_resolve("editor_singleton") and writes
+                                               * byte[editor+0x23624]=0 through that. */
 
 /* GetDeclsOfType typedef already declared above (get_decls_fn); reuse it for the material lookups. */
 
 /* Resolve the live idRenderWorld* build-portably: decode the RenderWorldGetter sig's RIP slot, deref once;
- * fallback to *(module_base + 0x57216f0). Returns NULL if neither yields a readable non-NULL pointer. */
+ * failing that, the signed "render_world_slot" anchor. The pinned RVA is consulted only on the pinned build.
+ * Returns NULL if none yields a readable non-NULL pointer -- the caller prints "renderWorld not available". */
 static void *dr_resolve_renderworld(void)
 {
     sig_result r;
@@ -770,7 +804,16 @@ static void *dr_resolve_renderworld(void)
             if (sh_safe_read(slot, (uint8_t *)&rw, sizeof rw) && rw) return rw;
         }
     }
-    if (g_module_base) {                     /* fallback: the known data RVA (OG *(base+0x57216f0)) */
+    if (g_module_base) {                     /* second portable path: the signed data-global anchor */
+        uintptr_t slot = glb_resolve(g_module_base, "render_world_slot", NULL);
+        if (slot) {
+            void *rw = NULL;
+            if (sh_safe_read((const uint8_t *)slot, (uint8_t *)&rw, sizeof rw) && rw) return rw;
+        }
+    }
+    /* Last resort, and only on the build the literal was extracted from: elsewhere it reads unrelated
+     * memory and we would hand back a bogus idRenderWorld* the caller cannot distinguish from a real one. */
+    if (g_module_base && sh_host_is_pinned_rva_build()) {
         void *rw = NULL;
         if (sh_safe_read(g_module_base + RW_SLOT_KNOWN_RVA, (uint8_t *)&rw, sizeof rw) && rw) return rw;
     }
@@ -801,12 +844,20 @@ static const char *dr_model_name(void *model)
     __try { return *(const char * const *)((const uint8_t *)model + RW_MODEL_NAME_OFF); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
-/* SEH-guarded write of byte[editor+0x23624]=0 (showcursor). Returns 1 if the write ran. */
+/* SEH-guarded write of byte[editor+0x23624]=0 (showcursor). The editor object is located by the signed
+ * "editor_singleton" anchor; if that does not resolve we DECLINE rather than write through a pinned RVA,
+ * because on any other build that address is unrelated engine state and this is a WRITE. Returns 1 if the
+ * write ran, 0 if we could not locate the editor (the caller then prints "showcursor unavailable"). */
 static int dr_showcursor(void)
 {
     if (!g_module_base) return 0;
+    uintptr_t editor = glb_resolve(g_module_base, "editor_singleton", NULL);
+    if (!editor) {
+        backend_log("B2: sh_debugrender showcursor declined -- editor_singleton unresolved on this build");
+        return 0;
+    }
     __try {
-        *(volatile unsigned char *)(g_module_base + EDITOR_SINGLETON_RVA + ED_SHOWCURSOR_OFF) = 0;
+        *(volatile unsigned char *)(editor + ED_SHOWCURSOR_OFF) = 0;
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
