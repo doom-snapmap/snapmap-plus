@@ -53,6 +53,7 @@
 #include "cvar_unlock.h"   /* merged-in cvar-unlock (former standalone dinput8) */
 #include "backend_log.h"
 #include "host_image.h"    /* resolve the host DOOM image on either shipped build (Vulkan / OpenGL) */
+#include "engine_globals.h" /* DOOM data globals, resolved from the code sites that compute them */
 #include "../fault_shield/fault_shield.h"   /* the merged fault-shield (recover-in-place vs OG's terminate) */
 #include "../fault_shield/fault_record.h"   /* shield_set_logpath_from_module -> shield_faults.log */
 #ifdef SH_DIAG
@@ -158,6 +159,19 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
      * resolve is re-run inside (it's cheap) so the emitted counts/RVAs come from the same final scan;
      * `elapsed` annotates how long past load the decrypt took. */
     sh_smoke_run(g_doom_base, elapsed);
+
+    /* Resolve DOOM's data globals from the code sites that compute them, and log the lot in one
+     * place. Doing it here rather than lazily means a build we cannot fully serve shows up as a
+     * block of UNRESOLVED lines at install, instead of being discovered one broken feature at a
+     * time by whoever files the bug. */
+    {
+        size_t gtotal = glb_db_count();
+        size_t gok    = glb_resolve_all(g_doom_base);
+        char gline[128];
+        _snprintf_s(gline, sizeof gline, _TRUNCATE,
+            "engine globals: %zu/%zu resolved", gok, gtotal);
+        backend_log(gline);
+    }
 
     /* the reusable PATCH/DETOUR layer self-test. Runs at install like the smoke proof, in-DLL, with
      * NO engine side effects -- it patches a SCRATCH RX stub only (apply / call-through / restore + the
