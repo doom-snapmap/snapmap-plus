@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -113,7 +114,9 @@ func TestUpdateDoesNotBackUpOwnDLL(t *testing.T) {
 	doom := filepath.Join(tmp, "DOOM")
 	mkdirAll(t, doom)
 	t.Setenv("LOCALAPPDATA", filepath.Join(tmp, "appdata"))
-	writeF(t, filepath.Join(doom, "DOOMx64vk.exe"), "exe") // a clean DOOM dir -- NO pre-existing XINPUT1_3.dll
+	// A clean DOOM dir -- NO pre-existing XINPUT1_3.dll. Named for the OpenGL executable so the
+	// install/update/uninstall lifecycle is exercised against that name too.
+	writeF(t, filepath.Join(doom, "DOOMx64.exe"), "exe")
 
 	if err := cmdInstall(flags{doom: doom, local: synthDist(t, tmp, "v1")}); err != nil {
 		t.Fatalf("install v1: %v", err)
@@ -176,6 +179,35 @@ func TestRuntimeConfigSurvivesInstallerLifecycle(t *testing.T) {
 		t.Fatalf("reinstall: %v", err)
 	}
 	assertConfig("reinstall")
+}
+
+// TestResolveDoomAcceptsEitherExecutable: DOOM 2016 ships DOOMx64vk.exe and DOOMx64.exe, Snapmap+
+// supports both, and --doom must therefore accept a folder holding either one. A folder holding
+// neither is still refused, and the refusal names both executables so the player knows what to look for.
+func TestResolveDoomAcceptsEitherExecutable(t *testing.T) {
+	for _, exe := range []string{"DOOMx64vk.exe", "DOOMx64.exe"} {
+		dir := filepath.Join(t.TempDir(), "DOOM")
+		mkdirAll(t, dir)
+		writeF(t, filepath.Join(dir, exe), "exe")
+		got, err := resolveDoom(dir)
+		if err != nil {
+			t.Errorf("resolveDoom with only %s: %v", exe, err)
+		} else if got != dir {
+			t.Errorf("resolveDoom with only %s = %q, want %q", exe, got, dir)
+		}
+	}
+
+	empty := filepath.Join(t.TempDir(), "NotDOOM")
+	mkdirAll(t, empty)
+	_, err := resolveDoom(empty)
+	if err == nil {
+		t.Fatal("resolveDoom accepted a folder with no DOOM executable")
+	}
+	for _, exe := range []string{"DOOMx64vk.exe", "DOOMx64.exe"} {
+		if !strings.Contains(err.Error(), exe) {
+			t.Errorf("refusal %q does not mention %s", err, exe)
+		}
+	}
 }
 
 // synthDist writes a synthetic dist/ (the 3 overlay files + a matching MANIFEST.sha256) whose content varies by

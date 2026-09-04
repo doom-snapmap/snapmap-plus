@@ -109,13 +109,16 @@ cd installer ; go build -o snapmap-plus.exe . ; cd ..
 installer\snapmap-plus.exe install --local dist
 ```
 
-It auto-detects your DOOM via Steam (or pass `--doom <path>` to the folder with `DOOMx64vk.exe`), backs up
+It auto-detects your DOOM via Steam (or pass `--doom <path>` to your DOOM 2016 folder, the one holding
+`DOOMx64vk.exe` and `DOOMx64.exe`), backs up
 anything it replaces, and records the install so **`installer\snapmap-plus.exe uninstall`** restores vanilla
 exactly. (You can also drop `dist\*` into the DOOM root by hand — `dist/` mirrors the overlay tree.)
 
 Launch DOOM and enter the SnapMap editor; the **Snapmap+** window opens (run `sh` in the in-game
-console if it doesn't). When you're done, `snapmap-plus.exe uninstall` returns DOOM to vanilla and leaves your
-modding data (`%LOCALAPPDATA%\snapmap-plus`) untouched.
+console if it doesn't). Either renderer will do — the backend attaches to whichever process image it was
+loaded into, so `DOOMx64vk.exe` and `DOOMx64.exe` are both fine (see `-DoomAlt` below). When you're done,
+`snapmap-plus.exe uninstall` returns DOOM to vanilla and leaves your modding data
+(`%LOCALAPPDATA%\snapmap-plus`) untouched.
 
 ## 7. Run the tests
 
@@ -135,7 +138,7 @@ cd ..
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 ```
 
-By default this compiles and runs 33 **self-contained native tests** (no game needed):
+By default this compiles and runs 37 **self-contained native tests** (no game needed):
 
 - **`shield_format_test`** — the fault-record string formatter (pure logic).
 - **`hook_test`** — the inline-detour installer, exercised on a hand-laid scratch stub.
@@ -153,11 +156,16 @@ By default this compiles and runs 33 **self-contained native tests** (no game ne
   ABI, all-or-nothing native-helper publication, and read-only memory/file-stream behavior.
 - **`decl_server_test`** — path-derived decl identities and shared bounded text validation.
 - **`packages_test`** — per-package override discovery: markers, grouping folders, order, and bounds.
+- **`package_conflicts_test`** — cross-package identity collisions and how they are reported.
+- **`map_package_test`** — map-embedded package shards: scan/extract against the reference implementation,
+  unsafe-zip refusal, and the load gate.
 - **`override_packages_test`** — the file shadow resolving a decl or shader out of any installed package.
+- **`strids_packages_test`** — a package shipping its own `#str_` strings: user beats packages beats baked.
 - **`resource_bridge_test`** — manifest resolution, sparse archive decode, the provider gate, and collisions.
 - **`package_requirements_test`** — allowlisted package cvars, strict parsing, and the one-shot apply.
 - **`decl_server_contract_test`** — startup ordering, signature pins, one-shot main-thread wiring, and fail-closed guards.
 - **`palette_refresh_test`** / **`palette_refresh_contract_test`** — new-decl success gating, exactly-once palette rebuild state, and clean signature/editor wiring.
+- **`engine_dialog_test`** — the native engine-dialog helper.
 - **`config_message_test`** — bounded raw WebView config-message extraction before UTF-8 conversion.
 - **`theme_bootstrap_test`** — pre-navigation root-class seeding for a saved dark theme.
 - **`theme_contract_test`** — the HTML config-message contract and PREVIEW-only browser storage.
@@ -177,45 +185,89 @@ By default this compiles and runs 33 **self-contained native tests** (no game ne
   page lookup without retained shard tables.
 - **`serialization_buffer_test`** — timeline growth, terminal failures, retained capacity, and the 32 MB cap.
 
-The same command then runs seven JavaScript tests for the declaration editor, asset browser, bounded
+The same command then runs nine JavaScript tests for the declaration editor, asset browser, bounded
 Entities-list rendering, sparse prefab matrix/scale transforms, the Prefab Details
 viewport/resize/shared-buffer contract, and native window chrome source wiring.
 
-Two more tests scan a **real DOOM image** — a `DOOMx64vk.exe` that's been unpacked from its Steam DRM wrapper
+Three more tests scan a **real DOOM image** — an executable that's been unpacked from its Steam DRM wrapper
 (e.g. with Steamless). **Running these is REQUIRED if you add or change any entry in the engine signature
-table** in `src/backend/signatures.c` — they are the only thing that checks a `known_rva`, and CI cannot run
-them (it has no game image), so a green CI does not cover you:
+table** in `src/backend/signatures.c` **or in the engine-globals table** — they are the only thing that
+checks a `known_rva`, and CI cannot run them (it has no game image), so a green CI does not cover you:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1 -Doom C:\path\to\unpacked-DOOMx64vk.exe
 #   sig_test     -- every engine signature resolves to its known RVA
 #   hooktol_test -- the resolver's hook-tolerant fallback (prologue-clobbered functions)
+#   globals_test -- every engine data global resolves, and its layout invariants hold
 ```
+
+### `-DoomAlt`: the two-executable portability gate
+
+**DOOM 2016 ships two executables, and Snapmap+ has to work in both.** `DOOMx64vk.exe` (Vulkan) and
+`DOOMx64.exe` (OpenGL) are built from one source tree and linked one second apart; their import tables are
+identical except for `vulkan-1.dll` vs `OPENGL32.dll`, both import `XINPUT1_3.dll`, and the game
+*relaunches itself into the other one* when the `r_renderAPI` cvar changes (`0` = OpenGL, `1` = Vulkan).
+There is no separate launcher binary and no Steam launch option that picks a renderer, so a player can land
+in either from a single launch and we get loaded into whichever it is. Struct field layouts are identical
+between the two; only addresses move — and they move by different amounts for code (roughly `-0x400` to
+`-0xE460`) and for data (roughly `+0xE00000` to `+0x1000000`), with no uniform delta anywhere.
+
+So: **a resolver that works on one image is not finished until it works on the other.** Point `-DoomAlt` at
+the second unpacked executable and the suite re-runs `sig_test` and `globals_test` against it in portable
+mode, where the expected RVA is not checked but *uniqueness* is:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1 `
+  -Doom C:\path\to\unpacked-DOOMx64vk.exe -DoomAlt C:\path\to\unpacked-DOOMx64.exe
+```
+
+All 91 signatures and all 24 engine-globals anchors currently resolve uniquely on both images under this
+command.
+
+**Why uniqueness on both images is the actual bar.** A pattern that matches exactly once on one image tells
+you almost nothing: with a few thousand functions to miss, plenty of byte strings are unique by accident.
+A pattern that matches exactly once on *two independently linked images of the same code* is far more
+likely to be describing the function itself rather than an accident of one link. A signature unique on only
+one image is a coincidence, not an identity, and `-DoomAlt` is the only thing in the tree that can tell the
+difference.
+
+The real example is already in the source. `RenderLogStub`'s pattern is `mov [rsp+0x20],r9; ret` plus
+padding — that is a *shape*, not an identity, and any number of tiny stub functions could have it. It
+happens to resolve uniquely on both images, so it passes, but it passes by luck. If you find yourself
+writing a pattern that short, get more bytes or anchor on something the function actually does.
 
 ### Which DOOM build addresses must come from
 
 This matters more than it looks, and it is easy to get wrong without noticing.
 
-The signature table is pinned to **one** DOOM build — the SteamStub-wrapped `DOOMx64vk.exe` with SHA256
+Every `known_rva` in the signature table and every `pinned_rva` in the engine-globals table comes from
+**one** image — the SteamStub-wrapped `DOOMx64vk.exe` with SHA256
 `139763E94F1A75B5310179F9EEEB8A949A1F53C49ACBC722FCFC5DFE7BB6D323`. That is **not** the build Steam
-currently ships. If your Ghidra project, your debugger, or your unpacked image is anything else, every raw
-address you read is for a different build and must be translated before it goes into `known_rva` or a call
-site. There is no single offset that converts between them: the newer build is a cluster-wise re-link, so
-different functions move by different — and sometimes opposite-signed — amounts.
+currently ships, and it is not the OpenGL executable either. If your Ghidra project, your debugger, or your
+unpacked image is anything else, every raw address you read is for a different image and must be translated
+before it goes into `known_rva` or a call site. There is no single offset that converts between them: a
+different build is a cluster-wise re-link, so different functions move by different — and sometimes
+opposite-signed — amounts.
+
+Those recorded RVAs do not locate anything. Functions are found by scanning for their bytes and data globals
+by decoding the RIP-relative displacement out of the signed code site that computes the address, so a
+resolver never needs to know where anything lives. The one runtime consumer of a `known_rva` is the
+hook-tolerant fallback, which probes `module_base + known_rva` only when the scan found nothing *and* the
+host is the pinned image — everywhere else a `known_rva` is validation and documentation.
 
 The trap is that a wrong address is **invisible in normal use**. Byte signatures are build-portable, so the
 scanner still finds the function and your feature works exactly as intended on either build. The only thing
 that breaks is the hook-tolerant fallback, which just quietly stops covering that function. `sig_test` is
 what catches it — hence "required" above.
 
-If you deliberately want to record an address from another build (useful — we do it), label it as such in
-the comment rather than putting it in a field that means "this build".
+If you deliberately want to record an address from another build or the other executable (useful — we do
+it), label it as such in the comment rather than putting it in a field that means "the pinned image".
 
 A third test, `xinput_ordinal_test.c`, is a **runtime** cross-check of the XInput ordinal invariant — it loads
 a built DLL and calls its exports by ordinal. CI verifies that same invariant *statically* with `dumpbin` (the
 "XInput ordinal parity" step), so you normally don't need to run it by hand.
 
-CI runs the 33 self-contained native tests, seven JavaScript tests, and the installer tests on every PR; the DOOM-image tests are local-only
+CI runs the 37 self-contained native tests, nine JavaScript tests, and the installer tests on every PR; the DOOM-image tests are local-only
 (CI has no game image).
 
 After the normal test run has built its executables, contributors with DOOM installed can also
@@ -331,6 +383,7 @@ behavior change with stale docs will be sent back. Use this map:
 | the shipped file set / what's deliberately dropped (`package.ps1`) | [`docs/packaging.md`](packaging.md) |
 | the install / update / uninstall flow, its flags, or release channels (`installer/`) | [`installer/README.md`](../installer/README.md) and, if user-facing, the top-level [`README.md`](../README.md) |
 | the build, test, or contribution process | this file (`docs/contributing.md`) |
+| an engine signature or an engine-globals anchor (`src/backend/signatures.c`, the generated globals table) | nothing to write, but you must run the `-DoomAlt` portability gate above and say so in the PR — CI cannot |
 
 If a change is purely internal and user-invisible, note that in the PR description so the reviewer knows the
 docs were considered.
@@ -338,8 +391,9 @@ docs were considered.
 ## 10. Generated headers — don't hand-edit
 
 A few committed headers are **generated data tables**, not hand-authored source: `src/ui/sh_*.h` (entity
-descriptions, the event catalog/docs, asset lists) and `src/backend/class_universe.h`. They're checked in so
-the repo builds standalone — treat them as **vendored**.
+descriptions, the event catalog/docs, asset lists), `src/backend/class_universe.h`, and
+`src/backend/engine_globals_table.gen.h` (the engine data-global anchors, each verified to match exactly once
+on both shipped executables). They're checked in so the repo builds standalone — treat them as **vendored**.
 Don't hand-edit them in a PR; open an issue describing the change you need instead.
 
 ## 11. Reporting security issues
