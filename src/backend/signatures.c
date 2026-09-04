@@ -1148,5 +1148,56 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 8B F9 "
       "48 8B 01 83 38 01 74 3C B9 F8 06 00 00 E8 ?? ?? ?? ?? 48 8B D8",
       0x52C920u },
+    /* --- functions the backend previously reached through a raw `module_base + RVA` constant.
+     * Each pattern below was extracted from the pinned Vulkan image and then required to match
+     * EXACTLY ONCE on DOOM's OpenGL executable too, so these are portable identities rather than
+     * build-locked addresses. Three of their neighbours could NOT be signed this way -- the
+     * idDeclManager accessor shares its prologue with ~47 functions, the idList growth helper is
+     * too generic, and the visibility leaf is too short to anchor -- and those are resolved from a
+     * call site in engine_globals_table.gen.h instead. */
+    { "RemoveFromSelection", /* void(editor [rcx], entity handle [edx]) -- drops one entity from the
+                              * editor selection. The `add rcx,0x5e0` that walks to the selection
+                              * sub-object sits in the fixed bytes, which is what makes it unique.
+                              * Vulkan 0x59FDA0, OpenGL 0x59F510. */
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B F9 8B DA 48 8B 09 48 81 C1 E0 05 00 00",
+      0x59FDA0u },
+    { "MaterialHeight",     /* uint(material [rcx]) -- the declared image height. Byte-identical to
+                             * MaterialWidth except the final stack slot (0x60 vs 0x68), which is
+                             * exactly what separates them; both are file-wide unique.
+                             * Vulkan 0xD75B40, OpenGL 0xD75DB0. */
+      "40 53 48 83 EC 50 F6 41 68 20 BB 01 00 00 00 89 5C 24 60 74 24 4C 8D 44 24 60",
+      0xD75B40u },
+    { "MaterialWidth",      /* uint(material [rcx]) -- see MaterialHeight.
+                             * Vulkan 0xD75D40, OpenGL 0xD75FB0. */
+      "40 53 48 83 EC 50 F6 41 68 20 BB 01 00 00 00 89 5C 24 60 74 24 4C 8D 44 24 68",
+      0xD75D40u },
+    { "DeclPureFind",       /* the pure decl lookup the typeinfo probes call -- decl *(ctx [rcx],
+                             * name [rdx]). Distinct from DeclFind (0x17B36F0), which is the registry
+                             * form. Vulkan 0x18017A0, OpenGL 0x17F40E0. */
+      "40 57 48 83 EC 40 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 50 48 89 74 24 58 "
+      "48 8B DA 48 8B F1",
+      0x18017A0u },
+    { "EventLink",          /* the map-load event-link routine the fault shield guards. Previously
+                             * reached via RVA_EVLINK with a prologue byte-compare; the signature turns
+                             * that compare into a confirmation rather than the only identity check.
+                             * Vulkan 0x9C2370, OpenGL 0x9C1B70. */
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 89 6C 24 50 "
+      "48 89 74 24 58 48 8B F2 48 8B E9",
+      0x9C2370u },
+    { "InteractableSpawn",  /* the interactable spawn path the fault shield guards. Reached only
+                             * through a vtable, so there is no call site to anchor on; its own bytes
+                             * are unique once the 0x168 frame set-up is included.
+                             * Vulkan 0x1232830, OpenGL 0x12247F0. */
+      "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 98 FE FF FF 48 81 EC 40 02 00 00 "
+      "48 C7 45 80 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 0F 29 70 C8 "
+      "0F 29 78 B8 44 0F 29 40 A8 48 8B 05 ?? ?? ?? ??",
+      0x1232830u },
+    { "DeclResourceProbe",  /* the decl-resource existence probe reached at vtable +0x78. Signing it
+                             * lets decl-visibility confirm the method by its BYTES instead of by an
+                             * RVA that is only true on one build.
+                             * Vulkan 0x1806100, OpenGL 0x17F8A40. */
+      "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 78 FF FF FF "
+      "48 81 EC 88 01 00 00 48 C7 44 24 30 FE FF FF FF",
+      0x1806100u },
     { NULL, NULL, 0 }   /* terminator */
 };

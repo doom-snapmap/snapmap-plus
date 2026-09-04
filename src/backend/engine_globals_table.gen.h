@@ -44,6 +44,13 @@ const global_entry BACKEND_ENGINE_GLOBALS[] = {
       "48 8B 0D ?? ?? ?? ?? 48 8B 01 BA 0F 00 00 00 FF 90 B0 00 00 00 44 89 6C 24 30 48 8B 96 90 01 00 00",
       3, 0, 0x5557090u },
 
+    { "declmgr_accessor",
+      /* idDeclManager accessor; its prologue is shared by ~47 functions.
+       * Anchor: call rel32 at Vulkan 0x2e88b2 (unique on both images).
+       * Resolves to Vulkan 0x17F7030 / OpenGL 0x17e9970; 6 of 6 reference sites agreed. */
+      "E8 ?? ?? ?? ?? 48 8B 10 48 8B C8 FF 52 20 48 8B 10 48 8B C8 FF 52 20 48 8B D8",
+      1, 0, 0x17F7030u },
+
     { "editor_singleton",
       /* idSnapEditorLocal, constructed in place.
        * Anchor: lea rcx, [rip + 0x10cf6f6] at Vulkan 0x1f8704b (unique on both images).
@@ -64,6 +71,13 @@ const global_entry BACKEND_ENGINE_GLOBALS[] = {
        * Resolves to Vulkan 0x56FFB90 / OpenGL 0x4002188; 6 of 6 reference sites agreed. */
       "48 8B 05 ?? ?? ?? ?? 48 63 CB 48 8D 14 49 48 8B CE 48 C1 E2 04 48 03 90 E0 53 04 00",
       3, 0, 0x56FFB90u },
+
+    { "idlist_grow",
+      /* idList growth helper; too generic to sign by its own bytes.
+       * Anchor: call rel32 at Vulkan 0x25bb14 (unique on both images).
+       * Resolves to Vulkan 0x699A60 / OpenGL 0x1acbae0; 6 of 6 reference sites agreed. */
+      "E8 ?? ?? ?? ?? 84 C0 74 17 48 63 46 10 3B 46 14 7D 0E 48 8B C8 48 8B 46 08 48 89 3C C8 FF 46 10 48 8B 5C 24 50",
+      1, 0, 0x699A60u },
 
     { "last_error_msg",
       /* last error message buffer (0x800 bytes).
@@ -162,6 +176,13 @@ const global_entry BACKEND_ENGINE_GLOBALS[] = {
        * Resolves to Vulkan 0x4DF9648 / OpenGL 0x36fb9d0; 6 of 6 reference sites agreed. */
       "48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 90 40 02 00 00 48 8B C8 48 89 5C 24 28 48 8D 1D ?? ?? ?? ??",
       3, 0, 0x4DF9648u },
+
+    { "vis_leaf_lo",
+      /* visibility leaf, entry; too short to anchor uniquely.
+       * Anchor: call rel32 at Vulkan 0x5a5f98 (unique on both images).
+       * Resolves to Vulkan 0xD32A30 / OpenGL 0xd320f0; 3 of 3 reference sites agreed. */
+      "E8 ?? ?? ?? ?? 84 C0 0F 84 ?? ?? ?? ?? 45 33 FF 44 38 BF E4 02 00 00 41 0F 95 C7",
+      1, 0, 0xD32A30u },
 
     { NULL, NULL, 0, 0, 0 }
 };
