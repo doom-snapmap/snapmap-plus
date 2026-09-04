@@ -51,6 +51,11 @@
 #   prefab_transform_test -- sparse idMat3 defaults, column-major axes, scale, and block anchoring
 #   prefab_viewport_contract_test -- Prefab Details layout, resize, budgets, and shared-buffer transport
 #   window_chrome_contract_test -- captionless DWM shadow/rounded-corner contract
+# -Doom <unpacked DOOM exe>: ALSO the resolver tests, which scan a real
+#   (Steamless-unpacked) DOOM image. globals_test additionally proves the engine data
+#   globals resolve and that their layout invariants hold.
+# -DoomAlt <the other unpacked DOOM exe>: the PORTABILITY gate -- see below. Run both:
+#     tests\run-tests.ps1 -Doom ...\DOOMx64vk.exe.unpacked.exe -DoomAlt ...\DOOMx64.exe.unpacked.exe
 # -Doom <unpacked DOOMx64vk.exe>: ALSO the signature-resolver tests, which scan a real
 #   (Steamless-unpacked) DOOM image:
 #   sig_test            -- every engine signature resolves to its known RVA
@@ -59,7 +64,7 @@
 # Exit 0 iff every selected test passes; non-zero (with the build log) on any failure.
 # Objects + test exes land in tests\obj\ (gitignored). The runtime XInput-ordinal test
 # (xinput_ordinal_test) is run by hand against a built build\XINPUT1_3.dll -- see docs\contributing.md.
-param([string]$Doom = "")
+param([string]$Doom = "", [string]$DoomAlt = "")
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $obj  = Join-Path $here "obj"
@@ -117,6 +122,19 @@ if ($Doom) {
     $da = (Resolve-Path $Doom).Path
     $tests += @{ name = "sig_test";     src = 'sig_test.c ..\src\backend\signatures.c';     arg = $da }
     $tests += @{ name = "hooktol_test"; src = 'hooktol_test.c ..\src\backend\signatures.c'; arg = $da }
+    $tests += @{ name = "globals_test"; src = 'globals_test.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\backend_log.c ..\src\common\log_rotate.c'; arg = $da }
+}
+# -DoomAlt is the PORTABILITY gate, and it is what keeps one build of this product serving
+# both of DOOM 2016's executables. Point it at the OTHER unpacked image (if -Doom was the
+# Vulkan one, this is DOOMx64.exe, and vice versa). Every signature and every data global
+# must resolve UNIQUELY there too. They land on different RVAs, which is expected and is why
+# these run in portable mode. A signature unique on only one image is not an identity, it is
+# a coincidence -- and without this pass nothing would catch it.
+if ($DoomAlt) {
+    if (-not (Test-Path $DoomAlt)) { throw "-DoomAlt path not found: $DoomAlt" }
+    $alt = (Resolve-Path $DoomAlt).Path
+    $tests += @{ name = "sig_test_alt"; src = 'sig_test.c ..\src\backend\signatures.c'; arg = @($alt, "portable") }
+    $tests += @{ name = "globals_test_alt"; src = 'globals_test.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\backend_log.c ..\src\common\log_rotate.c'; arg = @($alt, "portable") }
 }
 
 $fail = 0
@@ -133,7 +151,7 @@ foreach ($t in $tests) {
     # (the same cmd /c pattern the build scripts use) instead of letting that stderr trip $ErrorActionPreference.
     cmd /c "cd /d `"$here`" && `"$vcvars`" && $cl > `"$log`" 2>&1"
     if ($LASTEXITCODE -ne 0) { Get-Content $log | Write-Host; Write-Host "[FAIL] compile $($t.name)"; $fail++; continue }
-    if ($t.arg) { & $exe $t.arg } else { & $exe }
+    if ($t.arg) { & $exe @($t.arg) } else { & $exe }
     if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] $($t.name) (exit $LASTEXITCODE)"; $fail++ }
     else { Write-Host "[ok]   $($t.name)" }
 }

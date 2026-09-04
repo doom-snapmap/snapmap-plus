@@ -222,7 +222,10 @@ static int apply_unlock(uint8_t *base)
      * VALIDATION below (a wrong RVA on an RVA-shifted build, before the sig resolves, gives an implausible
      * count -> we bail WITHOUT writing). Once .text decrypts the sig resolves and is preferred (and logs). */
     uint8_t *cvarSys = cvu_resolve_cvarsys_portable(base);
-    if (cvarSys == NULL && g_cvu_cmdsys_slot == NULL) {
+    if (cvarSys == NULL && g_cvu_cmdsys_slot == NULL && sh_host_is_pinned_rva_build()) {
+        /* Only on the build this RVA was extracted from. Elsewhere it names unrelated memory, and
+         * although the count validation below would refuse to write, there is nothing to gain from
+         * reading a wild address once per poll -- we simply wait for the signature instead. */
         __try {
             cvarSys = *(uint8_t **)(base + RVA_CVAR_SYSTEM_PTR);   /* sig not resolved yet -> build-locked RVA */
         } __except (EXCEPTION_EXECUTE_HANDLER) {
