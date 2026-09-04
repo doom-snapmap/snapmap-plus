@@ -128,7 +128,11 @@ def build_sig(sec, anchor_ins, n_after=6):
             for op in ins.operands:
                 if op.type == CS_OP_MEM and op.mem.base == X86_REG_RIP:
                     idx = b.rfind(struct.pack('<i', op.mem.disp))
-                    if idx >= 0:
+                    # The displacement must be the LAST field of the instruction. x86-64
+                    # measures it from the end of the whole instruction, so an anchor with a
+                    # trailing immediate (`mov dword ptr [rip+disp], imm32`) would decode 4
+                    # bytes short -- silently, onto a plausible address. Refuse such a site.
+                    if idx >= 0 and idx + 4 == len(b):
                         target_slot = cur + idx
                         break
         toks.extend(masked)
