@@ -23,7 +23,7 @@ overlay remains the same two DLLs. Configuration is runtime-owned and installer-
 ## Layout
 
 ```
-<DOOM install root>/            # the folder with DOOMx64vk.exe
+<DOOM install root>/            # the folder with DOOMx64vk.exe and DOOMx64.exe
 ├── XINPUT1_3.dll
 └── snapmap-plus/
     └── snapmap-plus-ui.dll
@@ -67,13 +67,27 @@ defaults on the next startup.
 
 ## Build-target anchor (portability)
 
-The clone is built against a specific DOOM build:
+The clone is built against a specific DOOM release, and that release ships **two** executables built from
+one source tree and linked one second apart: `DOOMx64vk.exe` (Vulkan) and `DOOMx64.exe` (OpenGL). The game
+relaunches itself into the other one when the `r_renderAPI` cvar changes, so a player can be in either from
+one launch. Both are supported by the same Snapmap+ build; the backend resolves the host process image
+rather than looking for a name.
+
+The hash below identifies the Vulkan executable, which is the image every `known_rva` in
+`src/backend/signatures.c` and every `pinned_rva` in the engine-globals table was extracted from:
 
 ```
 DOOMx64vk.exe  SHA256  139763E94F1A75B5310179F9EEEB8A949A1F53C49ACBC722FCFC5DFE7BB6D323
 ```
 
-A DOOM update changes this hash, which means a re-port (signature re-resolve + build-specific offset re-derive).
-The clone is built to survive that: engine functions are signature-resolved (fail-loud), data globals are
-RIP-decoded, and build-specific offsets carry re-derive recipes. The auto-re-patcher that automates this on each
+Those recorded RVAs are audit and re-derivation material, not a locator: nothing is found with them. The
+OpenGL executable from the same release carries a different hash and different addresses throughout, and is
+supported on exactly the same terms. What proves the port is that all 91 engine signatures and all 24
+engine-globals anchors resolve **uniquely on both images** — the `-DoomAlt` portability gate in
+`tests\run-tests.ps1`, described in [`contributing.md`](contributing.md).
+
+A DOOM update changes these hashes, which means a re-port (signature re-resolve + build-specific offset
+re-derive). The clone is built to survive that: engine functions are signature-resolved (fail-loud), data
+globals are resolved by decoding the RIP-relative displacement out of the signed code site that computes
+them, and build-specific offsets carry re-derive recipes. The auto-re-patcher that automates this on each
 DOOM update is future work.

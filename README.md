@@ -45,6 +45,11 @@ straight over. See [`installer/README.md`](installer/README.md).
 **Requirements** (exact download links + setup are in [`docs/contributing.md`](docs/contributing.md))
 - **MSVC 2022 Build Tools** (the "Desktop development with C++" workload)
 - **Go 1.21+** (only to build the installer)
+- **DOOM 2016** — either of its two executables. The game ships `DOOMx64vk.exe` (Vulkan) and
+  `DOOMx64.exe` (OpenGL) built from one source tree, and relaunches itself into the other when the
+  `r_renderAPI` cvar changes. One build of Snapmap+ serves both: every engine signature and data global
+  resolves uniquely on each image, and `tests\run-tests.ps1 -Doom <one> -DoomAlt <the other>` is the
+  gate that keeps it that way.
 
 The frontend renders in the Microsoft Edge **WebView2 runtime** (preinstalled on Windows 11 / most Windows 10);
 its SDK is auto-fetched from NuGet at build time. Nothing else to install.
@@ -219,8 +224,9 @@ file cannot shadow that exact new identity. DOOM's scanner remains the semantic 
 errors; the log does not claim that an individual object materialized solely because its source scan returned true.
   The catalog creates text decl identities; referenced models, sounds, images, and other binary dependencies
   must be supplied by the installed-resource manifest path or already be available to the base game.
-  The resource-stream ABI is currently pinned to the audited Steam build; an incompatible DOOM build is
-  refused before the provider hook or dynamic decl server is published.
+  The resource-stream ABI is the audited DOOM 2016 one, which both of the game's executables share; a
+  DOOM build whose provider or `idFile` shape differs is refused before the provider hook or dynamic decl
+  server is published.
 
 A broken user set can be bisected with `sh_user_overrides 0` (restore with `sh_user_overrides 1`). The command
 saves `overrides.user_enabled` only when persistence succeeds and requires a DOOM restart; it disables both

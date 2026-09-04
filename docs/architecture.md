@@ -435,17 +435,21 @@ above. Every gameplay map load is therefore blind to a freshly registered identi
 entity used to report `Unknown entityDef` and never spawn. After the palette rebuild succeeds, the same
 main-thread command arms `decl-visibility`, which answers that one existence probe for exactly the identities
 in the published table and only after the engine's own answer was "no". It requires the manager's method slot
-to already hold the pinned method for the supported build, forwards every argument of that method including
-its trailing quiet flag, and corrects the boolean result alone -- the engine's output arguments are never
-touched. The decl bytes are then read back through the file-system open slot the overrides layer already
-serves. A refusal here is not fatal: registration still succeeds and new identities simply stay editor-only.
+to already hold the engine's own existence probe -- proven by scanning the host image for that probe's
+prologue and requiring the unique match to be exactly the address in the slot, not by comparing the slot
+against a recorded RVA -- forwards every argument of that method including its trailing quiet flag, and
+corrects the boolean result alone; the engine's output arguments are never touched. The decl bytes are then
+read back through the file-system open slot the overrides layer already serves. A refusal here is not fatal: registration still succeeds and new identities simply stay editor-only.
 
 When both native phases succeed, the same main-thread registration command
-invokes the one-shot `palette-refresh` operation synchronously. It validates
-the editor singleton against the pinned module base and the palette object's
-vtable against the pinned `module_base+0x20499A0`, then calls the clean
-signature-resolved `SnapPaletteBuild(editor+0x20660, NULL)` exactly once for
-either editor initialization state. Only a successful return publishes the
+invokes the one-shot `palette-refresh` operation synchronously. It resolves the
+editor singleton through `engine_globals`, which signs the code site that
+computes the singleton's address and reads the address out of that site, checks
+the palette object's vtable for plausibility as read from the live editor object
+rather than against a recorded address, then calls the clean signature-resolved
+`SnapPaletteBuild(editor+0x20660, NULL)` exactly once for either editor
+initialization state. `+0x20660` is a struct offset and is identical on both
+shipped executables. Only a successful return publishes the
 explicit registration-success bit; the backend never infers success from its
 generic `DONE` state because that state also covers disabled, empty, and
 all-shadowed snapshots. An unsupported signature, invalid object or vtable,
@@ -454,8 +458,10 @@ tick poll or retry, rawmap hook, or literal `common.mapResources` injection.
 
 ## The override provider's pinned idFile ABI
 
-The file-shadow returns a clean-room `idFile` stream with the exact 31 pointer slots used by the one
-supported Steam build (`+0x00` through `+0xf0`). The table preserves the verified read/write/seek
+The file-shadow returns a clean-room `idFile` stream with the exact 31 pointer slots used by the
+supported DOOM 2016 build (`+0x00` through `+0xf0`). Both of that build's executables, `DOOMx64vk.exe`
+and `DOOMx64.exe`, come from one source tree and share this layout; only addresses differ between them.
+The table preserves the verified read/write/seek
 methods, reports drive/storage slots `+0xc0=0`, `+0xc8=true`, `+0xd0=0`, and `+0xd8=0`, and refuses
 `SetLength` at `+0x60` for both disk-backed and memory-backed streams. Read, write, read-at, and write-at
 take the native 64-bit byte-count contract; memory streams remain bounded and read-only.
@@ -465,11 +471,21 @@ WriteString helpers directly. Snapmap+ does not reproduce their build-specific `
 addresses are signature-resolved and all must be clean `SIG_OK` results before the stream table is
 published; the table is fully configured before the resource-provider open slot is swapped, so an engine
 thread cannot observe a partially populated tail. A missing, ambiguous, or hook-tolerant helper refuses
-the provider for that process. At runtime Snapmap+ also requires the resolved ctor and three helper RVAs,
-plus the decoded provider-vtable RVA, to equal the audited `DOOMx64vk.exe` Steam image. Signature matches on
-an ABI-incompatible image therefore refuse before the hook is published. `DOOMx64vk_newbuild.exe` is not
-supported until a new ABI/signature pass proves every slot. Memory cursor additions are overflow-checked;
-an invalid or overflowing seek leaves the cursor unchanged.
+the provider for that process.
+
+Identity is proved by the resolution itself, not by an address table. The ctor and the three helpers each
+have to produce a clean unique masked-signature match -- `SIG_OK`, never the hook-tolerant `SIG_OK_HOOKED`
+fallback -- and the decoded provider vtable is resolved through `engine_globals`, out of the code site that
+computes its address. Whatever those steps yield must land inside the host image. A unique signature match
+is stronger evidence than address equality, because two builds can share an RVA by coincidence but a
+pattern that matches once cannot have matched a different function. The RVAs each of these occupies on the
+Vulkan image are still recorded in the source, but only for audit and for re-deriving a signature that
+stops matching; nothing is located with them. The gates that decide compatibility are the ABI *shape*
+checks: 31 `idFile` slots with the provider open method at `+0xf8`. A newer DOOM build has 34 slots with
+shifted meanings, and shape is what actually differs between engine revisions, so it is what is tested.
+Anything that cannot resolve, resolves ambiguously, or resolves to the wrong shape declines the provider
+for that process rather than guessing. Memory cursor additions are overflow-checked; an invalid or
+overflowing seek leaves the cursor unchanged.
 
 Package requirements are deliberately narrower than console startup scripts. Each non-comment row is
 `cvar<TAB>name<TAB>value`, and the pair must match a product-maintained allowlist. Identical requirements
