@@ -108,7 +108,7 @@ jobs:
             snapmap-plus-bundle.zip
             dist/snapmap-plus.exe
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           # A tag with a '-' (e.g. v0.3.0-beta.1) is a BETA pre-release: GitHub excludes it from "latest", so
           # `snapmap-plus update` (end users) never gets it; beta testers opt in via `snapmap-plus install --release <tag>`.
