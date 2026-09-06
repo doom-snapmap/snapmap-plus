@@ -32,6 +32,7 @@
 #include "hook.h"        /* install_inline_hook -- the AddCommand detour for the command unlock */
 #include "backend_log.h"
 #include "engine_dialog.h"
+#include "navmesh.h"      /* sh_navmesh -- what the current map's bake is serving */
 
 /* ------------------------------------------------------------------------ engine fn typedefs ------ */
 
@@ -1435,6 +1436,19 @@ static void h_sh_dialogdump(idCmdArgs *a)
     sh_engine_dialog_dump(sh_printf);
 }
 
+/* sh_navmesh -- what the current map's baked navigation is serving, and for the
+ * modules it is not serving, why.
+ *
+ * Without this the feature is invisible: a refusal is a line in the backend log
+ * that nobody reads until after they have chased a phantom AI bug, and a map
+ * that is working looks exactly like a map that is silently falling back to its
+ * shipped navmesh. */
+static void h_sh_navmesh(idCmdArgs *a)
+{
+    (void)a;
+    sh_navmesh_report(sh_printf);
+}
+
 static const cmd_entry CMD_TABLE[] = {
     { "sh_rawmaps_on",       (void *)h_rawmaps_on,  "Switches from the normal doom snapmap format to raw JSON maps for saving and loading." },
     { "sh_rawmaps_off",      (void *)h_rawmaps_off, "Switches from the raw JSON map format to the normal doom format for snapmaps." },
@@ -1471,6 +1485,8 @@ static const cmd_entry CMD_TABLE[] = {
     { "noTarget",            (void *)h_notarget,       "Toggle notarget (enemies ignore the local player)." },
     { "sh_user_overrides", (void *)h_sh_user_overrides,
       "sh_user_overrides [0|1] -- persist whether player override files load on the next DOOM launch; restart required; built-in defaults stay enabled." },
+    { "sh_navmesh",          (void *)h_sh_navmesh,
+      "Reports the baked AI navigation the current map is serving -- which modules and nav classes, or why a bake was refused." },
     /* OUR OWN addition (no OG counterpart): one place that lists the whole Snapmap+ console surface. */
     { "sh_help",             (void *)h_sh_help,        "Lists every Snapmap+ console command and cvar with its description." },
 };

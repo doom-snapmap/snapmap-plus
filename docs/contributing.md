@@ -138,7 +138,7 @@ cd ..
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 ```
 
-By default this compiles and runs 37 **self-contained native tests** (no game needed):
+By default this compiles and runs 38 **self-contained native tests** (no game needed):
 
 - **`shield_format_test`** — the fault-record string formatter (pure logic).
 - **`hook_test`** — the inline-detour installer, exercised on a hand-laid scratch stub.
@@ -159,6 +159,9 @@ By default this compiles and runs 37 **self-contained native tests** (no game ne
 - **`package_conflicts_test`** — cross-package identity collisions and how they are reported.
 - **`map_package_test`** — map-embedded package shards: scan/extract against the reference implementation,
   unsafe-zip refusal, and the load gate.
+- **`navmesh_test`** — baked navigation: the `smnav1` header grammar, shard reassembly and its delivery
+  failures, the structural AAS gate against synthetic payloads and their mutations, and the map-scoped
+  serving table's lifecycle.
 - **`override_packages_test`** — the file shadow resolving a decl or shader out of any installed package.
 - **`strids_packages_test`** — a package shipping its own `#str_` strings: user beats packages beats baked.
 - **`resource_bridge_test`** — manifest resolution, sparse archive decode, the provider gate, and collisions.
@@ -267,7 +270,7 @@ A third test, `xinput_ordinal_test.c`, is a **runtime** cross-check of the XInpu
 a built DLL and calls its exports by ordinal. CI verifies that same invariant *statically* with `dumpbin` (the
 "XInput ordinal parity" step), so you normally don't need to run it by hand.
 
-CI runs the 37 self-contained native tests, nine JavaScript tests, and the installer tests on every PR; the DOOM-image tests are local-only
+CI runs the 38 self-contained native tests, nine JavaScript tests, and the installer tests on every PR; the DOOM-image tests are local-only
 (CI has no game image).
 
 After the normal test run has built its executables, contributors with DOOM installed can also

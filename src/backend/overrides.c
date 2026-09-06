@@ -44,6 +44,7 @@
 #include "package_conflicts.h"
 #include "resource_bridge.h"
 #include "user_overrides.h"
+#include "navmesh.h"                /* baked AI navigation, served under the module's own names */
 #include "overrides_baked.h"        /* the built-in "*Custom"-tab default decls (Timeline + Unknown) */
 
 /* The engine open-by-name vtable method offset within the resource-provider vtable. A slot index,
@@ -1171,13 +1172,30 @@ static ov_stream *open_user_for_baked_name(const char *name, int *malformed)
 
 /* The override-open hook -- our value in the engine's open vtable slot. Same ABI as the engine method.
  * mode>=2 (OG param_5>=2) is a recursion/no-shadow guard -> straight to the original. Otherwise resolve
- * four-layer: USER disk file -> linked installed resource -> BUILT-IN baked default (from memory) ->
- * chain to the engine original.
+ * BAKED NAVIGATION first, then four-layer: USER disk file -> linked installed resource ->
+ * BUILT-IN baked default (from memory) -> chain to the engine original.
  * The user layer alone is gated by the immutable launch snapshot. SEH-guarded so a shadow path fault
  * degrades to a vanilla open. */
 static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
 {
     if (g_orig_open == NULL) return NULL;   /* defensive: never happens once installed */
+
+    /* The current map's baked navigation, if this is one of the two names it
+     * replaces. It goes FIRST and is not gated by the user-override snapshot:
+     * this is a property of the map being loaded, not of the player's own
+     * override folder, and a stale cooked artefact on disk must never win over
+     * the navigation the map itself carries. navmesh.c owns its own SEH and
+     * disables itself for the session on a fault, so a miss here costs one
+     * bounded compare per served entry and nothing else. */
+    if (mode < 2 && name != NULL) {
+        unsigned char *nav = NULL;
+        size_t nav_len = 0;
+        if (sh_navmesh_open(name, &nav, &nav_len)) {
+            ov_stream *s = make_mem_stream(nav, (long long)nav_len, name, 1);
+            if (s) return s;
+            HeapFree(GetProcessHeap(), 0, nav);
+        }
+    }
 
     if (mode < 2) {
         ov_stream *internal = NULL;

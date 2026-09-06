@@ -523,7 +523,10 @@ removing the Snapmap+ DLL leaves the engine on its untouched packaged-resource p
     "theme": "light",
     "entities.show_hidden": false,
     "entities.selection_mode": "off",
-    "overrides.user_enabled": true
+    "overrides.user_enabled": true,
+    "packages.embed_in_saved_maps": true,
+    "navmesh.enabled": true,
+    "navmesh.embed_in_saved_maps": true
   }
 }
 ```
@@ -534,9 +537,13 @@ enabled. Manual config edits are consumed at the next startup; a successful `sh_
 `sh_user_overrides 1` write goes through the existing setter and so recreates a deleted file. The one descriptor
 table in `src/backend/config.c` declares each setting's key, JSON type, default, validator/normalizer, and
 backend/frontend read/write permissions. In addition to `theme`, the registry has the
-`entities.show_hidden` boolean, `entities.selection_mode` enum (`off`, `follow`, or `select_in_3d`), and
-`overrides.user_enabled` boolean (true by default); the schema version and generic backend↔frontend ABI
-are unchanged. Adding a setting means adding a descriptor and its behavior/tests; the wire contract remains
+`entities.show_hidden` boolean, `entities.selection_mode` enum (`off`, `follow`, or `select_in_3d`),
+`overrides.user_enabled` boolean (true by default), and the three map-payload booleans
+`packages.embed_in_saved_maps`, `navmesh.enabled` and `navmesh.embed_in_saved_maps` (all true by
+default); the schema version and generic backend↔frontend ABI
+are unchanged. `packages.embed_in_saved_maps` was read for a release without being in this table, so it
+always answered "not set" and could not be turned off -- a key the backend reads and the registry does not
+declare is a key that does not exist. Adding a setting means adding a descriptor and its behavior/tests; the wire contract remains
 generic.
 
 Values cross the matched-pair ABI as complete UTF-8 JSON fragments. `config_get_json` at `+0x2B0`

@@ -26,6 +26,7 @@
 #   resource_bridge_test -- exact manifest resolution, sparse decode, provider gate + collisions
 #   packages_test -- per-package override discovery: markers, legacy tree, order, bounds
 #   map_package_test -- map-embedded package shards: scan/extract vs the reference impl, unsafe-zip refusal, load gate
+#   navmesh_test -- smnav1 navigation shards: header grammar, reassembly, the structural AAS gate, and the serving table
 #   override_packages_test -- the file shadow resolves a decl out of any installed package
 #   package_requirements_test -- allowlisted package cvars, strict parsing, RUNNING gate + one-shot apply
 #   strids_packages_test -- a package ships its own #str_ strings; user > packages > baked
@@ -100,6 +101,7 @@ $tests = @(
     @{ name = "resource_bridge_test"; src = 'resource_bridge_test.c ..\src\backend\resource_bridge.c ..\src\backend\packages.c ..\src\backend\raw_deflate.c ..\src\backend\decl_text.c'; defs = '/DSH_RESOURCE_BRIDGE_TESTING /DSH_RAW_DEFLATE_TESTING'; arg = "" }
     @{ name = "packages_test"; src = 'packages_test.c ..\src\backend\packages.c'; arg = "" }
     @{ name = "map_package_test"; src = 'map_package_test.c ..\src\backend\map_package.c ..\src\backend\map_shards.c ..\src\backend\packages.c ..\src\backend\raw_deflate.c'; defs = '/DSH_MAP_PACKAGE_TESTING'; arg = "" }
+    @{ name = "navmesh_test"; src = 'navmesh_test.c ..\src\backend\navmesh.c ..\src\backend\map_shards.c'; defs = '/DSH_NAVMESH_TESTING'; arg = "" }
     @{ name = "override_packages_test"; src = 'override_packages_test.c ..\src\backend\overrides.c ..\src\backend\packages.c ..\src\backend\decl_text.c'; defs = '/DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
     # engine_globals.c + signatures.c come in because the service now LOCATES DOOM's load-state word
     # instead of baking its address. Linking the real resolver (rather than a stub) means the test also

@@ -55,6 +55,16 @@ int sh_resource_bridge_open(const char *name, unsigned char **out,
     return SH_RESOURCE_BRIDGE_MISS;
 }
 
+/* Baked navigation is a different subsystem with its own tests; the file shadow
+ * only has to ask it first. */
+int sh_navmesh_open(const char *name, unsigned char **out_bytes, size_t *out_len)
+{
+    (void)name;
+    if (out_bytes) *out_bytes = NULL;
+    if (out_len) *out_len = 0;
+    return 0;
+}
+
 /* ------------------------------------------------------------------ engine doubles */
 
 #define CAP 1024

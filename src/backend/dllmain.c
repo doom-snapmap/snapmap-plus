@@ -31,6 +31,7 @@
 #include "strids.h"
 #include "overrides.h"
 #include "package_requirements.h"
+#include "navmesh.h"   /* baked AI navigation served through the overrides shadow */
 #include "decl_server.h"
 #include "commands.h"
 #include "cvars.h"
@@ -379,6 +380,13 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                                                        read_string, read_string_clean,
                                                        compare, compare_clean,
                                                        write_string, write_string_clean);
+
+        /* BAKED NAVIGATION. Nothing to resolve and nothing to hook: the serve
+         * path is the overrides open slot just installed, and the load/save path
+         * is the rawmap funnel. This only reports the configured state, so the
+         * log says which way the switch was set before the first map load. The
+         * table itself is built per map, from the map. See navmesh.c. */
+        sh_navmesh_install();
 
         /* cvar + console-command registration (clone of OG XINPUT1_3 FUN_1800229b1). Both ride the
          * signature-resolved engine fns; neither installs an inline detour. CVARS FIRST -- they have NO
