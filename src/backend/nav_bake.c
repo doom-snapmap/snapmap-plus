@@ -40,6 +40,44 @@ static int          g_have_map;
 static volatile LONG g_bakes;
 static volatile LONG g_faulted;
 
+static void bake_plan_locked(void);
+
+/* The live-editor surface, registered once at startup. */
+static sh_nav_bake_entity_count g_live_count;
+static sh_navr_entity_valid     g_live_valid;
+static sh_navr_entity_json      g_live_json;
+static void                    *g_live_ctx;
+static int                      g_live_refreshed;   /* once per map load */
+
+void sh_nav_bake_set_live_editor(sh_nav_bake_entity_count count,
+                                 sh_navr_entity_valid valid,
+                                 sh_navr_entity_json get_json,
+                                 void *ctx)
+{
+    AcquireSRWLockExclusive(&g_bake_lock);
+    g_live_count = count;
+    g_live_valid = valid;
+    g_live_json = get_json;
+    g_live_ctx = ctx;
+    ReleaseSRWLockExclusive(&g_bake_lock);
+}
+
+/* Re-read the markers from the live entities, then re-plan. Called with the
+ * lock held, immediately before a bake.
+ *
+ * Failure is not an error: -1 leaves the map exactly as loaded, which is what a
+ * downloaded map wants anyway. The only thing lost is a mark made this session. */
+static void bake_refresh_live_locked(void)
+{
+    int n, marked;
+    if (!g_live_count || !g_live_json || !g_have_map) return;
+    n = g_live_count(g_live_ctx);
+    if (n <= 0) return;
+    marked = sh_nav_regions_refresh_live(&g_map, n, g_live_valid, g_live_json, g_live_ctx);
+    if (marked < 0) return;             /* map untouched; keep what the load gave us */
+    bake_plan_locked();
+}
+
 static void bake_reason(bake_module *m, const char *fmt, ...)
 {
     va_list ap;
@@ -188,6 +226,7 @@ void sh_nav_bake_set_map(const char *json, size_t len)
     memset(g_modules, 0, sizeof g_modules);
     g_module_count = 0;
     g_have_map = 0;
+    g_live_refreshed = 0;
 
     if (bake_enabled() && json && len) {
         __try {
@@ -362,6 +401,13 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
 
     AcquireSRWLockExclusive(&g_bake_lock);
     if (!g_have_map) { ReleaseSRWLockExclusive(&g_bake_lock); return 0; }
+    /* Once per map load. The three nav classes are built back to back from one
+     * editor state, so re-scanning every entity for each would cost three full
+     * passes for identical answers. */
+    if (!g_live_refreshed) {
+        g_live_refreshed = 1;
+        bake_refresh_live_locked();
+    }
     m = bake_find(module);
     if (m && m->ok) {
         why[0] = 0;

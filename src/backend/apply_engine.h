@@ -71,4 +71,11 @@ void sh_apply_engine_get_slots(sh_serialize_entity_fn *serialize_entity,
  * so sh_iface_engine folds it into the single sh_iface_bind_engine_slots call. */
 void sh_apply_engine_get_serialize_selection(sh_serialize_selection_fn *serialize_selection);
 
+/* The live-entity surface the navigation baker reads: entity count, existence,
+ * and one entity's state as JSON. Shaped to nav_regions.h's callbacks so the
+ * baker keeps no link dependency on this module. */
+int sh_apply_engine_entity_count(void *ctx);
+int sh_apply_engine_entity_valid(int id, void *ctx);
+int sh_apply_engine_entity_json(int id, char *out, int cap, void *ctx);
+
 #endif /* B2_APPLY_ENGINE_H */

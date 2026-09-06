@@ -83,6 +83,40 @@ typedef struct sh_nav_map {
  * map. `out` is fully overwritten, including on failure. */
 int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out);
 
+/* ---- refreshing from the LIVE editor -----------------------------------
+ *
+ * Reading the map JSON is right for a map that arrives from disk or the publish
+ * service, and wrong for the one the author is editing. Pressing Play does not
+ * serialize the map -- verified live -- so a volume ticked this session is
+ * invisible to anything that only ever parsed the loaded bytes: the author ticks
+ * "AI Navigation", presses Play, and is told nothing is marked.
+ *
+ * So at bake time the flags are re-read from the entities themselves. The map's
+ * own `instanceEntities` still supplies attribution, because an entity carries
+ * no instance of its own -- which means a volume CREATED since the load has no
+ * attribution and is skipped. That is the honest limit: ticking an existing box
+ * takes effect immediately, placing a brand new one still needs a save and
+ * reload. */
+
+/* Serialize live entity `id` to JSON. Returns the length written, or <= 0.
+ * The engine's own reflection does this; see apply_engine.c's serialize_entity
+ * slot, which is what the entity-state editor already uses in production. */
+typedef int (*sh_navr_entity_json)(int id, char *out, int cap, void *ctx);
+
+/* Is `id` a live entity? */
+typedef int (*sh_navr_entity_valid)(int id, void *ctx);
+
+/* Re-read every Blocking Box's marker from the live entities, replacing `m`'s
+ * region set while keeping its instance table and attribution. Returns the
+ * number of marked volumes found, or -1 if the live surface could not be read
+ * (in which case `m` is left exactly as it was, so a failure falls back to what
+ * the map was loaded with rather than to nothing).
+ *
+ * `highest_id` bounds the scan; ids are probed through `valid`. */
+int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
+                                sh_navr_entity_valid valid,
+                                sh_navr_entity_json get_json, void *ctx);
+
 /* The Nth instance OF A GIVEN MODULE, in map order -- the mapping BuildAAS
  * itself uses. It opens each instance's navigation resource inside its
  * per-instance loop (RVA 0x4EBFB0), in instance-array order, so the Nth open of

@@ -31,7 +31,8 @@
 #include "strids.h"
 #include "overrides.h"
 #include "package_requirements.h"
-#include "navmesh.h"   /* baked AI navigation served through the overrides shadow */
+#include "navmesh.h"
+#include "nav_bake.h"   /* baked AI navigation served through the overrides shadow */
 #include "decl_server.h"
 #include "commands.h"
 #include "cvars.h"
@@ -435,6 +436,15 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * sh_iface_bind_engine_slots call). The declMgr accessor is reused from sh_typeinfo, so this also
          * relies on g_doom_base being set (it is). See apply_engine.c. */
         sh_apply_engine_install(results, db, g_doom_base, cmdsys);
+
+        /* Hand the navigation baker the live-entity surface, now that the
+         * reflection serialize behind it is ready. Without this the baker reads
+         * only the map as loaded, and a volume the author ticks during a session
+         * does not take effect until the map is loaded again -- pressing Play
+         * does not serialize the map, so nothing else would notice the edit. */
+        sh_nav_bake_set_live_editor(sh_apply_engine_entity_count,
+                                    sh_apply_engine_entity_valid,
+                                    sh_apply_engine_entity_json, NULL);
 
         /* backend touch: bind the UI-interface's engine-touch vtable slots -- the LIGHT touches
          * the SnapStack STORE-ops need (selection read/write, hovered id, toast, class/inherit read, id

@@ -1808,6 +1808,35 @@ static int slot_serialize_entity(sh_iface *self, int id, char *out_json, int cap
     return ae_serialize_to_json("idSnapEntity", cloneBase, out_json, cap);
 }
 
+/* ---- the live-entity surface the navigation baker reads -----------------
+ *
+ * The baker needs the markers as they are NOW, not as the map was loaded,
+ * because pressing Play does not serialize the map and a box ticked this
+ * session would otherwise be invisible to it. These three are the whole
+ * surface: how many entities there are, whether one exists, and its state as
+ * JSON -- the same reflection serialize the entity tools already use. */
+int sh_apply_engine_entity_count(void *ctx)
+{
+    void *array = NULL; uint32_t count = 0;
+    (void)ctx;
+    if (!ae_entity_array(&array, &count)) return 0;
+    return (int)count;
+}
+
+int sh_apply_engine_entity_valid(int id, void *ctx)
+{
+    void *array = NULL; uint32_t count = 0;
+    (void)ctx;
+    if (!ae_entity_array(&array, &count)) return 0;
+    return ae_entity_ptr(array, count, id) != NULL;
+}
+
+int sh_apply_engine_entity_json(int id, char *out, int cap, void *ctx)
+{
+    (void)ctx;
+    return slot_serialize_entity(NULL, id, out, cap);
+}
+
 /* PLACEHOLDER inherit a palette-placed Timeline is spawned with (see the +0x298 slot doc in
  * snapmap_plus_iface.h for the why) -- and the portable value it gets normalized to. */
 #define TL_PLACEHOLDER_INHERIT "snapmaps/editor_only/placeholder_target"

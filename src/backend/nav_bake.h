@@ -51,6 +51,9 @@
 
 #include <stddef.h>
 
+/* for the entity callback types the live-editor seam below is shaped to */
+#include "nav_regions.h"
+
 /* Read this map's regions. Called from the deserialize funnel on EVERY map, so
  * the previous map's regions can never survive into the next one -- the same
  * clear-from-empty rule navmesh.c's serving table follows, and for the same
@@ -75,6 +78,24 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
 
 /* Console report: what this map asked for and what it got. */
 void sh_nav_bake_report(void (*out)(const char *fmt, ...));
+
+/* ---- the live editor ---------------------------------------------------
+ *
+ * Reading the map as loaded is not enough for the author's actual flow: they
+ * tick a box and press Play, and Play does not serialize the map, so the marker
+ * never reaches the table. Given a way to read the LIVE entities, the bake
+ * re-reads the markers from them first.
+ *
+ * Registered rather than called directly so this module keeps no link
+ * dependency on the engine surface -- which is also what lets its tests run
+ * without one. Unregistered, the bake simply uses the map as loaded, which is
+ * correct for a downloaded map and was the whole behaviour before. */
+typedef int (*sh_nav_bake_entity_count)(void *ctx);
+
+void sh_nav_bake_set_live_editor(sh_nav_bake_entity_count count,
+                                 sh_navr_entity_valid valid,
+                                 sh_navr_entity_json get_json,
+                                 void *ctx);
 
 #ifdef SH_NAV_BAKE_TESTING
 /* The name grammar, exposed so a test can prove it matches what the engine

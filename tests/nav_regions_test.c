@@ -564,6 +564,412 @@ static void test_malformed(void)
     bclose(&ents);
 }
 
+/* ==================================================================== */
+/* the live editor                                                       */
+/* ==================================================================== */
+
+/* Pressing Play does not serialize the map, so the bytes above are what the
+ * author saved and NOT what they are looking at. These tests stand in for the
+ * editor: a table of entities the engine would serialize on request, driven
+ * through the same two callbacks the backend passes down. No game is involved
+ * and no game bytes are here -- each document is written member by member to
+ * the shape the engine's reflection emits for one idSnapEntity.
+ *
+ * The live document is deliberately not obliged to carry `uniqueId`: the id the
+ * refresh is asked about IS the entity's index, so an entity is matched by
+ * index and by nothing else. Several documents below leave `uniqueId` out
+ * entirely to keep that honest. */
+
+#define LIVE_MAX 640
+
+typedef struct live_editor {
+    const char *json[LIVE_MAX];     /* what the engine would hand back; NULL: no such entity */
+    int         refuse[LIVE_MAX];   /* live, but serializing it fails */
+    int         overrun[LIVE_MAX];  /* ...and one that reports more than it wrote */
+    int         queried[LIVE_MAX];  /* how many times get_json was asked for this id */
+    int         valid_calls;
+} live_editor;
+
+static int live_valid(int id, void *ctx)
+{
+    live_editor *e = (live_editor *)ctx;
+    e->valid_calls++;
+    if (id < 0 || id >= LIVE_MAX) return 0;
+    return e->json[id] != NULL;
+}
+
+static int live_json(int id, char *out, int cap, void *ctx)
+{
+    live_editor *e = (live_editor *)ctx;
+    size_t n;
+
+    if (id < 0 || id >= LIVE_MAX || cap <= 0) return 0;
+    e->queried[id]++;
+    if (!e->json[id] || e->refuse[id]) return 0;
+    n = strlen(e->json[id]);
+    if ((int)n >= cap) return 0;
+    /* The contract is a LENGTH, not a string: fill the rest with an unbalanced
+     * brace so anything read past the reported length fails loudly instead of
+     * happening to work. */
+    memset(out, '{', (size_t)cap);
+    memcpy(out, e->json[id], n);
+    if (e->overrun[id]) return cap + 64;
+    return (int)n;
+}
+
+/* An editor that is there but can serialize nothing -- the shape of a live
+ * surface that is not actually readable. */
+static int live_all_valid(int id, void *ctx) { (void)id; (void)ctx; return 1; }
+static int live_all_fail(int id, char *out, int cap, void *ctx)
+{
+    (void)id; (void)ctx;
+    if (cap > 0) out[0] = '\0';
+    return 0;
+}
+
+/* One entity as the engine serializes it. `uid` < 0 leaves `uniqueId` out. */
+static char *live_entity(const char *inherit, const char *edit, int uid)
+{
+    blob b;
+    bopen(&b);
+    bput(&b, "{\"displayName\":\"\",\"entityDef\":{\"className\":\"idVolume_Blocking\","
+             "\"inherit\":\"%s\",\"name\":\"\",\"state\":{\"edit\":{%s}},"
+             "\"targetType\":\"idDeclEntityDef\",\"~type\":\"idDeclEntityDef\"},"
+             "\"layerMask\":1,\"pinned\":true", inherit, edit);
+    if (uid >= 0) bput(&b, ",\"uniqueId\":%d", uid);
+    bput(&b, ",\"~type\":\"idSnapEntity\"}");
+    return b.p;
+}
+
+static char *live_box(const char *flags, double cx, double cy, double cz,
+                      double sx, double sy, double sz)
+{
+    char edit[1024];
+    edit_box(edit, sizeof edit, flags, "", cx, cy, cz, sx, sy, sz);
+    return live_entity(INHERIT, edit, -1);
+}
+
+static const char *TICKED  = "\"affectsNavmesh\":true,\"blockDemons\":true,";
+static const char *UNTICKED = "\"blockDemons\":true,";
+
+/* The map every test below starts from: one instance, two blocking boxes, and
+ * only the first of them ticked when it was read. */
+static char *two_box_map(sh_nav_map *m)
+{
+    blob inst, ents;
+    char edit[1024];
+    char *json;
+    size_t n;
+
+    bopen(&inst);
+    bopen(&ents);
+    put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
+    edit_box(edit, sizeof edit, TICKED, "", 0, 0, 0, 128, 128, 64);
+    put_entity(&ents, 1, 11, INHERIT, edit);
+    edit_box(edit, sizeof edit, UNTICKED, "", 100, 200, 64, 200, 400, 128);
+    put_entity(&ents, 0, 22, INHERIT, edit);
+    json = map_of(inst.p, ents.p, "0,2,2", "11,22", &n);
+    CHECK(sh_nav_regions_read(json, n, m) == 1);
+    CHECK(m->region_count == 1);
+    bclose(&inst);
+    bclose(&ents);
+    return json;
+}
+
+/* The bug this exists for: the author ticks "AI Navigation" on a box that was
+ * already in the map and presses Play. Nothing is saved, so the map bytes still
+ * say the box is ordinary -- and the volume has to be picked up anyway, at its
+ * top face, attributed to the instance the map said owns it. */
+static void test_live_tick_this_session(void)
+{
+    sh_nav_map m;
+    live_editor e;
+    char *json = two_box_map(&m);
+    char *live0 = live_box(TICKED, 0, 0, 0, 128, 128, 64);
+    char *live1 = live_box(TICKED, 100, 200, 64, 200, 400, 128);
+
+    memset(&e, 0, sizeof e);
+    e.json[0] = live0;
+    e.json[1] = live1;
+
+    CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == 2);
+    CHECK(m.region_count == 2);
+    CHECK(m.instances[0].region_count == 2);
+    CHECK(m.truncated == 0);
+    CHECK(strcmp(m.instances[0].module, MODULE) == 0);   /* the instance is untouched */
+    if (m.region_count == 2) {
+        CHECK(m.regions[1].entity == 1);
+        CHECK(m.regions[1].instance == 0);
+        CHECK(near_f(m.regions[1].x0, 0.0f));
+        CHECK(near_f(m.regions[1].x1, 200.0f));
+        CHECK(near_f(m.regions[1].y0, 0.0f));
+        CHECK(near_f(m.regions[1].y1, 400.0f));
+        CHECK(near_f(m.regions[1].top_z, 192.0f));       /* bottom 64 + height 128 */
+        CHECK(m.regions[1].block_demons == 1);
+    }
+
+    free(json); free(live0); free(live1);
+}
+
+/* ...and the other direction. A volume the map says is marked, unticked since,
+ * is not navigation any more -- whichever way the tick is spelled live. */
+static void test_live_untick_this_session(void)
+{
+    sh_nav_map m;
+    live_editor e;
+    char *json = two_box_map(&m);
+    char *live0 = live_box("\"affectsNavmesh\":false,\"blockDemons\":true,", 0, 0, 0, 128, 128, 64);
+    char *live1 = live_box(UNTICKED, 100, 200, 64, 200, 400, 128);
+
+    memset(&e, 0, sizeof e);
+    e.json[0] = live0;
+    e.json[1] = live1;
+
+    CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == 0);
+    CHECK(m.region_count == 0);
+    CHECK(m.instances[0].region_count == 0);
+    CHECK(m.instance_count == 1);
+    /* the dropped region is gone, not merely uncounted */
+    CHECK(m.regions[0].entity == 0 && m.regions[0].instance == 0 &&
+          near_f(m.regions[0].top_z, 0.0f));
+
+    free(json); free(live0); free(live1);
+}
+
+/* ABSENT IS FALSE, live exactly as in the map: an untouched volume carries no
+ * `affectsNavmesh` member at all, and reading that as "ticked" would turn every
+ * blocking box in the map into navigation. */
+static void test_live_absent_marker_is_false(void)
+{
+    sh_nav_map m;
+    live_editor e;
+    char *json = two_box_map(&m);
+    char *live0 = live_box("\"blockDemons\":true,", 0, 0, 0, 128, 128, 64);
+    char *live1 = live_box("", 100, 200, 64, 200, 400, 128);
+
+    memset(&e, 0, sizeof e);
+    e.json[0] = live0;
+    e.json[1] = live1;
+
+    CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == 0);
+    CHECK(m.region_count == 0);
+
+    free(json); free(live0); free(live1);
+}
+
+/* `blockDemons` rides along, and absent is false there too. A volume demons
+ * fall through is not a floor, and the caller is the one that decides what to
+ * do about it -- so the flag has to arrive as the author left it. */
+static void test_live_block_demons(void)
+{
+    sh_nav_map m;
+    live_editor e;
+    char *json = two_box_map(&m);
+    char *live0 = live_box("\"affectsNavmesh\":true,", 0, 0, 0, 128, 128, 64);
+    char *live1 = live_box("\"affectsNavmesh\":true,\"blockDemons\":true,",
+                           100, 200, 64, 200, 400, 128);
+
+    memset(&e, 0, sizeof e);
+    e.json[0] = live0;
+    e.json[1] = live1;
+
+    CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == 2);
+    CHECK(m.region_count == 2);
+    if (m.region_count == 2) {
+        CHECK(m.regions[0].entity == 0 && m.regions[0].block_demons == 0);
+        CHECK(m.regions[1].entity == 1 && m.regions[1].block_demons == 1);
+    }
+
+    free(json); free(live0); free(live1);
+}
+
+/* A volume the load pass never saw has no owner anywhere. Coordinates cannot
+ * rescue it -- they are module-local -- so it is skipped, and the skip is
+ * visible as the gap between what was found and what was kept. */
+static void test_live_volume_without_attribution(void)
+{
+    sh_nav_map m;
+    live_editor e;
+    char *json = two_box_map(&m);
+    char *live0 = live_box(TICKED, 0, 0, 0, 128, 128, 64);
+    char *live1 = live_box(TICKED, 100, 200, 64, 200, 400, 128);
+    /* placed this session: the map that was read has no entity 2 at all */
+    char *live2 = live_box(TICKED, 0, 0, 0, 64, 64, 8);
+
+    memset(&e, 0, sizeof e);
+    e.json[0] = live0;
+    e.json[1] = live1;
+    e.json[2] = live2;
+
+    CHECK(sh_nav_regions_refresh_live(&m, 2, live_valid, live_json, &e) == 3);
+    CHECK(m.region_count == 2);              /* found three, kept the two it can place */
+    CHECK(m.instances[0].region_count == 2);
+    CHECK(m.truncated == 0);                 /* a skip is not a cap */
+    if (m.region_count == 2) {
+        CHECK(m.regions[0].entity == 0);
+        CHECK(m.regions[1].entity == 1);
+    }
+    free(json); free(live0); free(live1); free(live2);
+
+    /* the same refusal for an id the map did have, holding something that was
+     * not a blocking volume when it was read: the multimap said nothing about
+     * a volume there, so neither does this */
+    {
+        blob inst, ents;
+        char edit[1024];
+        size_t n;
+
+        bopen(&inst);
+        bopen(&ents);
+        put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
+        edit_box(edit, sizeof edit, TICKED, "", 0, 0, 0, 128, 128, 64);
+        put_entity(&ents, 1, 11, INHERIT, edit);
+        put_entity(&ents, 0, 22, "snapmaps/prop/static", edit);
+        json = map_of(inst.p, ents.p, "0,2,2", "11,22", &n);
+        CHECK(sh_nav_regions_read(json, n, &m) == 1);
+        CHECK(m.region_count == 1);
+
+        memset(&e, 0, sizeof e);
+        e.json[0] = live0 = live_box(TICKED, 0, 0, 0, 128, 128, 64);
+        e.json[1] = live1 = live_box(TICKED, 100, 200, 64, 200, 400, 128);
+        CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == 2);
+        CHECK(m.region_count == 1);
+        if (m.region_count == 1) CHECK(m.regions[0].entity == 0);
+
+        free(json); free(live0); free(live1);
+        bclose(&inst);
+        bclose(&ents);
+    }
+}
+
+/* An id the editor rejects is not an entity, and asking it to serialize one is
+ * how a scan over a stale id range faults. It is not asked. */
+static void test_live_valid_gates_the_scan(void)
+{
+    sh_nav_map m;
+    live_editor e;
+    char *json = two_box_map(&m);
+    char *live1 = live_box(TICKED, 100, 200, 64, 200, 400, 128);
+
+    memset(&e, 0, sizeof e);
+    e.json[1] = live1;      /* id 0 and everything past 1 is not live */
+
+    CHECK(sh_nav_regions_refresh_live(&m, 8, live_valid, live_json, &e) == 1);
+    CHECK(e.queried[0] == 0);
+    CHECK(e.queried[1] == 1);
+    CHECK(e.queried[2] == 0 && e.queried[7] == 0);
+    CHECK(m.region_count == 1);
+    if (m.region_count == 1) CHECK(m.regions[0].entity == 1);
+    free(json);
+
+    /* and an entity whose serializer reports more than it wrote is refused
+     * rather than read past the end of what it handed over */
+    json = two_box_map(&m);
+    memset(&e, 0, sizeof e);
+    e.json[1] = live1;
+    e.overrun[1] = 1;
+    CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == 0);
+    CHECK(m.region_count == 0);
+
+    free(json); free(live1);
+}
+
+/* No live surface at all. Both spellings of that leave the map EXACTLY as it
+ * was loaded -- a failed refresh falls back to the marks the map arrived with,
+ * never to none. */
+static void test_live_unreadable(void)
+{
+    sh_nav_map m, before;
+    live_editor e;
+    char *json = two_box_map(&m);
+
+    memset(&e, 0, sizeof e);
+    e.json[0] = "{}";
+    memcpy(&before, &m, sizeof m);
+
+    CHECK(sh_nav_regions_refresh_live(&m, 4, NULL, live_json, &e) == -1);
+    CHECK(memcmp(&before, &m, sizeof m) == 0);
+    CHECK(sh_nav_regions_refresh_live(&m, 4, live_valid, NULL, &e) == -1);
+    CHECK(memcmp(&before, &m, sizeof m) == 0);
+    CHECK(sh_nav_regions_refresh_live(&m, 4, live_all_valid, live_all_fail, &e) == -1);
+    CHECK(memcmp(&before, &m, sizeof m) == 0);
+    CHECK(sh_nav_regions_refresh_live(NULL, 4, live_valid, live_json, &e) == -1);
+
+    /* an editor that answers nothing is the same answer: an empty id range, and
+     * a range of ids that are all rejected, are both unread rather than a map
+     * whose volumes have all gone */
+    CHECK(sh_nav_regions_refresh_live(&m, -1, live_valid, live_json, &e) == -1);
+    CHECK(memcmp(&before, &m, sizeof m) == 0);
+    memset(&e, 0, sizeof e);
+    CHECK(sh_nav_regions_refresh_live(&m, 4, live_valid, live_json, &e) == -1);
+    CHECK(memcmp(&before, &m, sizeof m) == 0);
+
+    /* a map this reader did not read has no attribution to offer, so it is
+     * refused too rather than attributed from some other map's ownership */
+    {
+        sh_nav_map other;
+        memcpy(&other, &m, sizeof other);
+        memset(&e, 0, sizeof e);
+        e.json[0] = live_box(TICKED, 0, 0, 0, 128, 128, 64);
+        CHECK(sh_nav_regions_refresh_live(&other, 1, live_valid, live_json, &e) == -1);
+        CHECK(memcmp(&before, &other, sizeof other) == 0);
+        free((void *)e.json[0]);
+    }
+
+    free(json);
+}
+
+/* More ticked volumes than the region table holds. The cap is reported the same
+ * way the load path reports it, and nothing is written past the table. */
+static void test_live_region_cap(void)
+{
+    const int volumes = SH_NAVR_MAX_REGIONS + 8;
+    blob inst, ents, kv, vals;
+    char edit[1024];
+    char *json, *live;
+    size_t n;
+    sh_nav_map m;
+    live_editor e;
+    int i;
+
+    bopen(&inst);
+    bopen(&ents);
+    bopen(&vals);
+    bopen(&kv);
+    put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
+    /* none of them ticked when the map was read: the whole table comes from the
+     * live pass */
+    edit_box(edit, sizeof edit, UNTICKED, "", 0, 0, 0, 64, 64, 8);
+    for (i = 0; i < volumes; i++) {
+        put_entity(&ents, i == 0, i + 1, INHERIT, edit);
+        bput(&vals, "%s%d", i ? "," : "", i + 1);
+    }
+    bput(&kv, "0,%d,%d", volumes, volumes);
+    json = map_of(inst.p, ents.p, kv.p, vals.p, &n);
+
+    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(m.region_count == 0);
+    CHECK(m.truncated == 0);
+
+    live = live_box(TICKED, 0, 0, 0, 64, 64, 8);
+    memset(&e, 0, sizeof e);
+    for (i = 0; i < volumes && i < LIVE_MAX; i++) e.json[i] = live;
+
+    CHECK(sh_nav_regions_refresh_live(&m, volumes - 1, live_valid, live_json, &e) ==
+          SH_NAVR_MAX_REGIONS);
+    CHECK(m.region_count == SH_NAVR_MAX_REGIONS);
+    CHECK(m.instances[0].region_count == SH_NAVR_MAX_REGIONS);
+    CHECK(m.truncated == 1);
+    CHECK(m.regions[SH_NAVR_MAX_REGIONS - 1].entity == SH_NAVR_MAX_REGIONS - 1);
+
+    free(json);
+    free(live);
+    bclose(&inst);
+    bclose(&ents);
+    bclose(&kv);
+    bclose(&vals);
+}
+
 int main(void)
 {
     test_one_volume();
@@ -574,6 +980,14 @@ int main(void)
     test_unnameable_instance();
     test_truncation();
     test_malformed();
+    test_live_tick_this_session();
+    test_live_untick_this_session();
+    test_live_absent_marker_is_false();
+    test_live_block_demons();
+    test_live_volume_without_attribution();
+    test_live_valid_gates_the_scan();
+    test_live_unreadable();
+    test_live_region_cap();
 
     if (g_failed) {
         fprintf(stderr, "%d check(s) FAILED\n", g_failed);
