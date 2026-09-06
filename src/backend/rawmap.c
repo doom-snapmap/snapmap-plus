@@ -28,6 +28,7 @@
 #include "map_embed.h"
 #include "navmesh.h"
 #include "nav_bake.h"
+#include "map_shards.h"
 
 /* DeserializeFromJson prologue steal window. Decoded from the signature DB pattern
  *   40 55            push rbp                      (2)
@@ -682,6 +683,35 @@ static void mpkg_embed_on_save(void *out_idstr)
  * fresh bake would silently discard the author's navigation. navmesh.c holds
  * every payload that survived delivery -- including ones this client refused to
  * SERVE -- precisely so a save cannot destroy work a different client can use. */
+/* Re-read the author's marked volumes from the map being SAVED.
+ *
+ * Regions were originally captured only on the deserialize funnel, which is
+ * wrong for the way authoring actually happens: mark some volumes in the editor,
+ * press Play, and no map load occurs in between -- the engine serializes the
+ * live map and builds from that. The region table would still hold whatever the
+ * map carried when it was last LOADED, so a volume marked this session simply
+ * did not exist as far as navigation was concerned, and the author would be told
+ * "no volume in this map is marked" moments after ticking one.
+ *
+ * This covers SAVE. It does NOT cover Play-from-the-editor: pressing Play does
+ * not serialize the map at all -- verified live, this hook never runs on that
+ * transition -- so the editor builds the play session straight from its live map
+ * object. A volume marked and then played in the same session therefore still
+ * gets nothing until the map is saved and reloaded. Closing that needs the marks
+ * read from the live editor entities rather than from map JSON, which is a
+ * different mechanism than anything here. */
+static void nav_regions_on_save(void *out_idstr)
+{
+    const char *data = NULL;
+    int len = 0;
+
+    if (!g_idstr_assign || out_idstr == NULL) return;
+    if (!read_out_idstr(out_idstr, &data, &len)) return;
+    if (data == NULL || len <= 0) return;
+
+    sh_nav_bake_set_map(data, (size_t)len);
+}
+
 static void nav_embed_on_save(void *out_idstr)
 {
     const char *data = NULL;
@@ -728,6 +758,11 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
      *     switch: losing an author's bake on an ordinary save is not a debugging
      *     aid, it is data loss. */
     nav_embed_on_save(out_idstr);
+
+    /* 1d) refresh the marked-volume table from what is being saved, so a volume
+     *     ticked in this session takes effect on the very next Play instead of
+     *     waiting for a map reload. */
+    nav_regions_on_save(out_idstr);
 
     /* 2) the shadow is the SAVE half of the rawmaps switch, so it obeys the same arm the LOAD swap does.
      *    Ungated, this overwrote rawmap.json on every map save even with rawmaps off -- silently discarding
