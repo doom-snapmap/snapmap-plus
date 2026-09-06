@@ -26,12 +26,14 @@
  *   drop downward           a walk-off-ledge link, gated on maxFallHeight
  *                           (0 in every monster-class module, so `fall=auto`
  *                           emits none -- see sh_aas_aug_opts).
- *   drop upward, > 18       a baked traversal: the animated climb. NOT EMITTED
- *                           BY THIS VERSION. The encoding is understood and the
- *                           seam is `traversal` below, but it needs the game's
- *                           universal traversal table read at runtime and live
- *                           verification per demon; until then a platform out of
- *                           step range is an ISLAND.
+ *   drop over maxStepHeight a baked TRAVERSAL: the animated climb, emitted once
+ *                           per demon per usable edge, in both directions. The
+ *                           demon is named arithmetically in the reachability's
+ *                           travel_flags, and the animation is looked up in the
+ *                           player's own universal traversal table -- see
+ *                           nav_traversal.h. With no table loaded, or for a demon
+ *                           with no animation reaching that height, the platform
+ *                           is simply an ISLAND for that demon.
  *
  * An island is not an error. An area with no reachability is legal -- the Grid
  * Room's own ceiling is one in the shipped file -- and demons on it hunt and
@@ -71,10 +73,15 @@ typedef struct sh_aug_platform {
  * off-precedent deviation offered for testing, not for authors. */
 enum { SH_AUG_FALL_AUTO = 0, SH_AUG_FALL_NEVER, SH_AUG_FALL_ALWAYS };
 
+/* `traversal`: emit baked climbs. AUTO offers every demon the table says can
+ * reach that height; NEVER makes every out-of-step-range platform an island,
+ * which is what the earlier build did unconditionally. */
+enum { SH_AUG_TRAVERSAL_AUTO = 0, SH_AUG_TRAVERSAL_NEVER = 1 };
+
 typedef struct sh_aug_opts {
     int   fall;             /* SH_AUG_FALL_* */
     int   inset;            /* inset by the agent radius; 1 unless testing */
-    int   traversal;        /* reserved: baked climbs. Must be 0 in this build. */
+    int   traversal;        /* SH_AUG_TRAVERSAL_* */
 } sh_aug_opts;
 
 /* What one platform became, per class, so the author can be told the truth. */
@@ -85,6 +92,8 @@ typedef struct sh_aug_platform_result {
     int      carrier;                   /* the area the platform sits over */
     int      leaf_slots_carved;
     int      links;                     /* reachabilities touching this area */
+    int      climbs;                    /* baked traversals touching it */
+    int      demons;                    /* distinct demons offered a climb */
     int      island;                    /* 1 if nothing links it */
     char     reason[SH_AUG_REASON_CAP]; /* why it was not emitted */
 } sh_aug_platform_result;

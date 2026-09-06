@@ -8,6 +8,7 @@
 #include "nav_regions.h"
 #include "aas_edit.h"
 #include "aas_augment.h"
+#include "nav_traversal.h"
 #include "navmesh.h"
 #include "config.h"
 
@@ -259,6 +260,14 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
         return 0;
     }
 
+    /* The animation table, from the player's own install. Loaded lazily on the
+     * first bake rather than at startup: it is only needed once a map actually
+     * marks something, and by then the resource provider is certainly up. It
+     * caches itself, so this is one open per session. Failure is not fatal --
+     * without a table nothing can climb and every platform out of step range is
+     * an island, which is exactly the previous build's behaviour. */
+    sh_trav_load(read_shipped);
+
     /* The bytes the engine was about to load. Without these there is nothing to
      * add to: we do not author a navmesh, we extend the shipped one. */
     shipped = read_shipped ? read_shipped(name, &shipped_len) : NULL;
@@ -309,10 +318,29 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
     *out_bytes = baked;
     *out_len = baked_len;
     rc = 1;
-    _snprintf_s(why, why_cap, _TRUNCATE,
-                "%d platform(s), areas %u->%u, links %u->%u, tree depth %u->%u",
-                n, rep.areas_before, rep.areas_after,
-                rep.reach_before, rep.reach_after, rep.depth_before, rep.depth_after);
+    {
+        /* Say what each platform actually got. "Islands" is the number an author
+         * most wants to see: a platform nothing can climb onto is legal and
+         * sometimes wanted, but it is a different thing from one they expected
+         * demons to reach, and only this line distinguishes them. */
+        int islands = 0, climbs = 0, i;
+        for (i = 0; i < rep.platform_count; i++) {
+            if (!rep.platforms[i].emitted) continue;
+            if (rep.platforms[i].island) islands++;
+            climbs += rep.platforms[i].climbs;
+        }
+        _snprintf_s(why, why_cap, _TRUNCATE,
+                    "%d platform(s), areas %u->%u, links %u->%u (%d climb%s), "
+                    "tree depth %u->%u%s%s",
+                    n, rep.areas_before, rep.areas_after,
+                    rep.reach_before, rep.reach_after,
+                    climbs, climbs == 1 ? "" : "s",
+                    rep.depth_before, rep.depth_after,
+                    islands ? "; islands: " : "",
+                    islands ? (sh_trav_ready()
+                               ? "nothing can climb that high"
+                               : "no traversal table, so nothing climbs") : "");
+    }
     return rc;
 }
 

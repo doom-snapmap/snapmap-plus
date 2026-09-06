@@ -63,8 +63,7 @@ The frontend holds no engine addresses; it calls the backend only through the vt
 | Class / Inherit autocomplete | `enum_valid_classes` +0x270, `enum_inherits` +0x278 |
 | Camera origin footer (editable X/Y/Z and Lock position) | `get_editor_vec3` +0x08 publishes live coordinates; `camSet` / `camLock` write through `set_editor_vec3` +0x00 once or on every locked frame |
 | Installed version readout | reads `%LOCALAPPDATA%\snapmap-plus\install.json` (written by the installer) |
-| Navigation section (mark a Blocking Box for AI navigation) | no slot of its own. A row is read with the state editor's own `select` round-trip (`get_declsource_copy` +0x30, `get_inherit_copy` +0x50, `get_displayname` +0x58) and committed with Save to Decl's (`rebuild_set_declsource` +0x40) |
-| Persistent settings (Light / Dark, Entities controls, and the Navigation master switch) | `config_get_json` +0x2B0, `config_set_json` +0x2B8 — registered UTF-8 JSON fragments owned by the backend |
+| Persistent settings (Light / Dark and Entities controls) | `config_get_json` +0x2B0, `config_set_json` +0x2B8 — registered UTF-8 JSON fragments owned by the backend |
 | Deselect (click a blank structural surface) | One page-level router calls `clear_selection` +0x148 for the app-wide entity selection and also tears down the active Prefab/Timeline selection; every right-hand inspection/editor pane, including expanded Decl Text, is protected workspace |
 | List-driven selections behave natively (empty-space click deselects; Delete / Move / bottom-bar controls all apply) | `add_to_selection` +0x138, `clear_selection` +0x148 and `remove_from_selection` +0x130 additionally sync the editor's EntityMode selection-state field (`editor+0x22330`, state `+0x1ac`, dirty `+0xBB8`) -- the field the engine's own empty-space-click handler consults. Direct SEH-guarded field writes, gated on the editor already being in EntityMode. Re-derive recipe at the constant block in `src/backend/iface_engine.c`. |
 | Entities list clears its highlight on a native deselect ("Select in 3D" mode) | the existing `selCount` broadcast (`get_selection` +0x150, ~330 ms poll); the UI now acts on its >0 -> 0 transition |
@@ -92,8 +91,8 @@ embedded `<html lang="en">` marker; light and invalid/unavailable values retain 
 native host starts hidden and can be shown only after a successful `NavigationCompleted`, so the first
 visible frame already has the saved colors and a failed navigation never exposes a blank controller.
 
-The page also sends one startup `configGet` each for `entities.show_hidden`,
-`entities.selection_mode` and `navmesh.enabled`. It aggregates both responses before changing either Entity control, so startup
+The page also sends one startup `configGet` each for `entities.show_hidden` and
+`entities.selection_mode`. It aggregates both responses before changing either Entity control, so startup
 side effects run only after the pair is known. The single selection-mode value makes Follow Selection and
 Select in 3D mutually exclusive; restoring `select_in_3d` updates the control without pushing an empty
 list selection into the editor. Choosing Light Theme or Dark Theme from View, clicking Show Hidden, or
@@ -112,25 +111,6 @@ that actually runs on DOOM's main thread, guarded by `ExecuteCommandBuffer`, is 
 apply (`clone_bss_apply`) -- a different, deferred path, kept only as an old-backend fallback and for
 prefab/mkcmd staging (see [`backend-changes.md`](backend-changes.md) for why decl-edits must NOT go
 through it).
-
-### The Navigation section
-
-The Navigation tab is the authoring surface for custom AI navigation: it lists the map's Blocking
-Boxes with their display name and their `clipModelInfo.size`, and a checkbox marks each one as a
-surface demons may walk on. Marking writes `affectsNavmesh` into that volume's own edit block —
-a bool `snapmaps/volume/blocking` has carried since release, for which no property-sheet row was
-ever exposed and which nothing in the shipped binary reads back, so a map full of marked volumes
-still loads and plays on a stock client with its own navigation.
-
-It adds no bridge surface. Opening the tab (or pressing Refresh) scans the entity list with the
-state editor's own `select` round-trip, batched, and keeps the entities whose inherit is exactly
-`snapmaps/volume/blocking`; an absent `affectsNavmesh` means unmarked. A toggle patches the decl
-source the read returned through the shared `dpEditBlock` / `dpSetScalar` helpers and commits it with
-the same `save` round-trip Save to Decl uses, so both surfaces share one `saveResult`. Because the
-scan drives `select`, it hands the state panel's entity back afterwards, and a scan reply is never
-allowed to overwrite an edit in progress there. The master switch is the backend-owned
-`navmesh.enabled` config key, read and written over the same `configGet` / `configSet` bridge as the
-theme and the Entities controls.
 
 ## Change history
 

@@ -11,6 +11,7 @@
 
 #include "aas_augment.h"
 #include "navmesh.h"
+#include "nav_traversal.h"
 
 /* ---- measured constants ------------------------------------------------ */
 
@@ -81,6 +82,8 @@
 #define AR_FIRST_REACH_FROM     20
 #define AR_FIRST_REACH_TO       24
 #define AR_FIRST_AREA_COVER     32
+#define AR_FIRST_TRAV_POINT     36      /* -> traversalPoints, partitioned per area */
+#define AR_NUM_TRAV_POINT       38
 #define ND_PLANE                0       /* node: 4 ints */
 #define ND_FIELD4               4
 #define ND_CHILD0               8
@@ -870,6 +873,265 @@ static int aug_fall_links(aug_ctx *c, int ai, const aug_rect *eff,
     return added;
 }
 
+/* ---- baked traversals: the animated climb ------------------------------ */
+
+/* traversalPoint is 60 bytes: six floats, eight u16, a u32, two u16, a u32,
+ * then four u16 -- so the field names below ARE their offsets. */
+#define TP_F0    0      /* start x/y/z */
+#define TP_FC    12     /* end x/y/z */
+#define TP_W18   24     /* facing, int16 fixed point */
+#define TP_W1A   26
+#define TP_W24   36     /* -> traversalAnimNames */
+#define TP_D28   40     /* -> the paired reachability */
+#define TP_W2C   44
+#define TP_W2E   46
+#define TP_D30   48     /* the demon, arithmetically */
+#define TP_W34   52     /* from area */
+#define TP_W36   54     /* to area */
+#define TP_W38   56
+#define TP_W3A   58
+
+/* Copied from classic_90_climb.aas_monster48 and not understood; the comments
+ * in the reference implementation say so too rather than inventing a meaning. */
+#define TP_W2C_VALUE  0xFFFF
+#define TP_W2E_VALUE  0xFFFF
+#define TP_W38_VALUE  128
+
+/* The int16 fixed-point unit of the facing vector. 0x7FFE on every record of
+ * our donor and on 214 of 258 in the larger sample. */
+#define TP_DIR_UNIT   32766
+
+/* How far inside the platform area the platform-side endpoint sits. OUR
+ * convention, not a donor value: the animation's root-motion distance is
+ * carried by neither the AAS nor the traversal table, so nothing fixes it. One
+ * unit in is what the module's own walk reachabilities use, and it is what
+ * guarantees the point resolves to the platform area. */
+#define TRAVERSAL_INNER_INSET  REACH_SIDE_OFFSET
+
+typedef struct aug_trav_spec {
+    unsigned travel_flags;
+    unsigned d30;
+    int      travel_time;
+    int      from_area, to_area;
+    double   start[3], end[3];
+    double   dir[2];
+    char     anim[SH_TRAV_PATH_CAP];
+    int      anim_index;    /* resolved into traversalAnimNames before writing */
+} aug_trav_spec;
+
+#define AUG_MAX_TRAVERSALS 2048
+
+/* Collect up- and down-climb specs for one platform: one per demon per usable
+ * edge, in both directions.
+ *
+ * The ledge lip is the REQUESTED rectangle, not the inset one -- the wall face
+ * is where the geometry actually is, and the area is inset by the agent radius
+ * exactly as the module's own floor areas are. The floor-side endpoint then sits
+ * the animation's own offset.x outside that lip, which is what reproduces the
+ * start positions of all fourteen traversals in our donor module.
+ *
+ * Every endpoint is checked with the BSP. A point that does not land in the area
+ * it claims is dropped rather than written: the router would act on the lie. */
+static int aug_traversal_specs(aug_ctx *c, int ai, const aug_rect *eff,
+                               const aug_rect *req, aug_trav_spec *out, int cap)
+{
+    aug_side sides[4];
+    int n, i, k, d, count = 0;
+    double mx = ((double)eff->x0 + eff->x1) / 2.0;
+    double my = ((double)eff->y0 + eff->y1) / 2.0;
+
+    if (c->o->traversal == SH_AUG_TRAVERSAL_NEVER) return 0;
+    if (!sh_trav_ready()) return 0;
+
+    n = aug_platform_edges(c, ai, eff, req, sides);
+    for (i = 0; i < n; i++) {
+        double inner, inner_pt[3];
+        if (sides[i].drop <= (double)c->step) continue;   /* the step regime walks it */
+
+        inner = sides[i].area_edge - sides[i].sgn * TRAVERSAL_INNER_INSET;
+        if (sides[i].axis == 0) { inner_pt[0] = inner; inner_pt[1] = my; }
+        else                    { inner_pt[0] = mx;    inner_pt[1] = inner; }
+        inner_pt[2] = eff->z;
+        if (sh_aas_point_area(c->a, (float)inner_pt[0], (float)inner_pt[1],
+                              (float)(eff->z + 2.0)) != ai) continue;
+
+        for (d = 0; d < 2; d++) {                          /* UP then DOWN */
+            int up = (d == SH_TRAV_UP);
+            for (k = 0; k < sh_trav_monster_count() && count < cap; k++) {
+                const sh_trav_monster *m = sh_trav_monster_at(k);
+                char path[SH_TRAV_PATH_CAP];
+                float off = 0.0f;
+                int dist = 0, time = 0;
+                double outer, outer_pt[3], dir;
+                aug_trav_spec *s;
+
+                if (!m) continue;
+                if (!sh_trav_select(m, d, (float)sides[i].drop, path, sizeof path,
+                                    &off, &dist, &time))
+                    continue;                               /* this demon cannot */
+
+                if (off < 0.0f) off = -off;
+                outer = sides[i].wall + sides[i].sgn * (double)off;
+                if (sides[i].axis == 0) { outer_pt[0] = outer; outer_pt[1] = my; }
+                else                    { outer_pt[0] = mx;    outer_pt[1] = outer; }
+                outer_pt[2] = sides[i].floor_z;
+                if (sh_aas_point_area(c->a, (float)outer_pt[0], (float)outer_pt[1],
+                                      (float)(sides[i].floor_z + 2.0)) != sides[i].floor_area)
+                    continue;
+
+                s = &out[count++];
+                memset(s, 0, sizeof *s);
+                s->travel_flags = m->travel_flags;
+                s->d30 = m->d30;
+                s->travel_time = time;
+                s->from_area = up ? sides[i].floor_area : ai;
+                s->to_area   = up ? ai : sides[i].floor_area;
+                memcpy(s->start, up ? outer_pt : inner_pt, sizeof s->start);
+                memcpy(s->end,   up ? inner_pt : outer_pt, sizeof s->end);
+                /* Facing is the XY travel direction: inward climbing up, outward
+                 * dropping back down. */
+                dir = up ? -sides[i].sgn : sides[i].sgn;
+                s->dir[0] = sides[i].axis == 0 ? dir : 0.0;
+                s->dir[1] = sides[i].axis == 0 ? 0.0 : dir;
+                _snprintf_s(s->anim, sizeof s->anim, _TRUNCATE, "%s", path);
+            }
+        }
+    }
+    return count;
+}
+
+/* Write the specs as reachabilities, traversalPoints and animation names.
+ *
+ * The layout is copied from a shipped donor: the traversal reachabilities are a
+ * contiguous TAIL of the reachability array, traversalPoints[0] is a dummy the
+ * engine's own validation deliberately skips ("traversal point %d has an invalid
+ * start area" only fires for index > 0), and the real points are grouped by
+ * from_area so that each area's first_trav_point / num_trav_point partition
+ * them.
+ *
+ * Returns the number written. */
+static int aug_emit_traversals(aug_ctx *c, aug_trav_spec *specs, int n)
+{
+    unsigned base, first, i;
+    int k, j, written = 0;
+    unsigned na;
+
+    if (n <= 0) return 0;
+    /* Regrouping an existing traversal set would move indices other records
+     * already point at. No SnapMap module ships one, so refuse rather than
+     * guess. */
+    if (sh_aas_count(c->a, SH_AAS_L_TRAVERSALPOINTS) > 1) return 0;
+
+    /* Animation names, deduplicated by path. */
+    for (k = 0; k < n; k++) {
+        unsigned cnt = sh_aas_count(c->a, SH_AAS_L_TRAVERSALANIMNAMES);
+        int found = -1;
+        for (i = 0; i < cnt; i++) {
+            const unsigned char *r = sh_aas_rec_const(c->a, SH_AAS_L_TRAVERSALANIMNAMES, i);
+            if (r && strncmp((const char *)r, specs[k].anim, SH_TRAV_PATH_CAP) == 0) {
+                found = (int)i;
+                break;
+            }
+        }
+        if (found < 0) {
+            unsigned char *r;
+            if (!sh_aas_append(c->a, SH_AAS_L_TRAVERSALANIMNAMES, 1, &first)) return written;
+            r = sh_aas_rec(c->a, SH_AAS_L_TRAVERSALANIMNAMES, first);
+            if (!r) return written;
+            memset(r, 0, SH_TRAV_PATH_CAP);
+            _snprintf_s((char *)r, SH_TRAV_PATH_CAP, _TRUNCATE, "%s", specs[k].anim);
+            found = (int)first;
+        }
+        specs[k].anim_index = found;
+    }
+
+    /* The dummy record every shipped file starts with. */
+    if (sh_aas_count(c->a, SH_AAS_L_TRAVERSALPOINTS) == 0) {
+        unsigned char *tp;
+        if (!sh_aas_append(c->a, SH_AAS_L_TRAVERSALPOINTS, 1, &first)) return written;
+        tp = sh_aas_rec(c->a, SH_AAS_L_TRAVERSALPOINTS, first);
+        if (!tp) return written;
+        memset(tp, 0, sh_aas_record_size(SH_AAS_L_TRAVERSALPOINTS));
+        sh_aas_put_u16(tp, TP_W24, 0xFFFF);
+        sh_aas_put_u16(tp, TP_W2C, TP_W2C_VALUE);
+        sh_aas_put_u16(tp, TP_W2E, TP_W2E_VALUE);
+        sh_aas_put_u16(tp, TP_W38, TP_W38_VALUE);
+    }
+
+    /* Group by from_area, then to_area, so the per-area partition below is a
+     * contiguous run for each area. Insertion sort: n is small and stability
+     * keeps the per-demon order deterministic. */
+    for (k = 1; k < n; k++) {
+        aug_trav_spec key = specs[k];
+        j = k - 1;
+        while (j >= 0 && (specs[j].from_area > key.from_area ||
+                          (specs[j].from_area == key.from_area &&
+                           specs[j].to_area > key.to_area))) {
+            specs[j + 1] = specs[j];
+            j--;
+        }
+        specs[j + 1] = key;
+    }
+
+    base = sh_aas_count(c->a, SH_AAS_L_REACHABILITIES);
+    for (k = 0; k < n; k++) {
+        unsigned char *tp;
+        if (!aug_reach(c, specs[k].travel_flags, specs[k].travel_time,
+                       specs[k].from_area, specs[k].to_area,
+                       specs[k].start, specs[k].end)) break;
+        if (!sh_aas_append(c->a, SH_AAS_L_TRAVERSALPOINTS, 1, &first)) break;
+        tp = sh_aas_rec(c->a, SH_AAS_L_TRAVERSALPOINTS, first);
+        if (!tp) break;
+        memset(tp, 0, sh_aas_record_size(SH_AAS_L_TRAVERSALPOINTS));
+        sh_aas_put_f32(tp, TP_F0 + 0, (float)specs[k].start[0]);
+        sh_aas_put_f32(tp, TP_F0 + 4, (float)specs[k].start[1]);
+        sh_aas_put_f32(tp, TP_F0 + 8, (float)specs[k].start[2]);
+        sh_aas_put_f32(tp, TP_FC + 0, (float)specs[k].end[0]);
+        sh_aas_put_f32(tp, TP_FC + 4, (float)specs[k].end[1]);
+        sh_aas_put_f32(tp, TP_FC + 8, (float)specs[k].end[2]);
+        sh_aas_put_u16(tp, TP_W18, (uint16_t)(int16_t)aug_round(specs[k].dir[0] * TP_DIR_UNIT));
+        sh_aas_put_u16(tp, TP_W1A, (uint16_t)(int16_t)aug_round(specs[k].dir[1] * TP_DIR_UNIT));
+        sh_aas_put_u16(tp, TP_W24, (uint16_t)specs[k].anim_index);
+        sh_aas_put_u32(tp, TP_D28, base + (unsigned)k);
+        sh_aas_put_u16(tp, TP_W2C, TP_W2C_VALUE);
+        sh_aas_put_u16(tp, TP_W2E, TP_W2E_VALUE);
+        sh_aas_put_u32(tp, TP_D30, specs[k].d30);
+        sh_aas_put_u16(tp, TP_W34, (uint16_t)specs[k].from_area);
+        sh_aas_put_u16(tp, TP_W36, (uint16_t)specs[k].to_area);
+        sh_aas_put_u16(tp, TP_W38, TP_W38_VALUE);
+        sh_aas_put_u16(tp, TP_W3A, 0);
+        written++;
+    }
+
+    /* Per-area ownership of the point range. Record 0 is the dummy and belongs
+     * to nobody. */
+    na = sh_aas_count(c->a, SH_AAS_L_AREAS);
+    for (i = 0; i < na; i++) {
+        unsigned char *ar = sh_aas_rec(c->a, SH_AAS_L_AREAS, i);
+        if (!ar) continue;
+        sh_aas_put_u16(ar, AR_FIRST_TRAV_POINT, 0);
+        sh_aas_put_u16(ar, AR_NUM_TRAV_POINT, 0);
+    }
+    {
+        unsigned np = sh_aas_count(c->a, SH_AAS_L_TRAVERSALPOINTS);
+        for (i = 1; i < np; i++) {
+            const unsigned char *tp = sh_aas_rec_const(c->a, SH_AAS_L_TRAVERSALPOINTS, i);
+            unsigned char *ar;
+            unsigned owner;
+            if (!tp) continue;
+            owner = sh_aas_get_u16(tp, TP_W34);
+            if (owner >= na) continue;
+            ar = sh_aas_rec(c->a, SH_AAS_L_AREAS, owner);
+            if (!ar) continue;
+            if (sh_aas_get_u16(ar, AR_NUM_TRAV_POINT) == 0)
+                sh_aas_put_u16(ar, AR_FIRST_TRAV_POINT, (uint16_t)i);
+            sh_aas_put_u16(ar, AR_NUM_TRAV_POINT,
+                           (uint16_t)(sh_aas_get_u16(ar, AR_NUM_TRAV_POINT) + 1));
+        }
+    }
+    return written;
+}
+
 /* Reproduce the fix-up idAAS2File::Load runs after parsing: for each
  * reachability in order, push it onto the front of its from-area's and
  * to-area's chains. Without this the engine's own per-area lists are empty and
@@ -1064,6 +1326,25 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         }
         for (i = 0; i < nmade; i++) aug_step_links(&c, made[i], &effs[i], &reqs[i]);
         for (i = 0; i < nmade; i++) aug_fall_links(&c, made[i], &effs[i], &reqs[i]);
+
+        /* Climbs LAST. The traversal reachabilities must be a contiguous tail of
+         * the reachability array -- that is how every shipped donor lays them
+         * out, and traversalPoint.d28 indexes into it. */
+        {
+            aug_trav_spec *specs = (aug_trav_spec *)HeapAlloc(
+                GetProcessHeap(), 0, AUG_MAX_TRAVERSALS * sizeof(aug_trav_spec));
+            if (specs) {
+                int total = 0;
+                for (i = 0; i < nmade; i++) {
+                    int got = aug_traversal_specs(&c, made[i], &effs[i], &reqs[i],
+                                                  specs + total,
+                                                  AUG_MAX_TRAVERSALS - total);
+                    total += got;
+                }
+                if (total > 0) aug_emit_traversals(&c, specs, total);
+                HeapFree(GetProcessHeap(), 0, specs);
+            }
+        }
         aug_relink(&c);
     }
 
@@ -1080,23 +1361,36 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
      * expected demons to climb onto is a different thing from one they meant to
      * spawn demons on. */
     for (i = 0; i < nmade; i++) {
-        const unsigned char *ar = sh_aas_rec_const(a, SH_AAS_L_AREAS, (unsigned)made[i]);
-        int links = 0;
+        int links = 0, climbs = 0;
+        unsigned seen[SH_TRAV_MAX_MONSTERS];
+        int nseen = 0;
         unsigned r, nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
         for (r = 0; r < nr; r++) {
             const unsigned char *rr = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, r);
+            unsigned flags;
             if (!rr) continue;
-            if ((int)sh_aas_get_u16(rr, RE_FROM_AREA) == made[i] ||
-                (int)sh_aas_get_u16(rr, RE_TO_AREA) == made[i]) links++;
+            if ((int)sh_aas_get_u16(rr, RE_FROM_AREA) != made[i] &&
+                (int)sh_aas_get_u16(rr, RE_TO_AREA) != made[i]) continue;
+            links++;
+            /* A traversal names its demon in the high half of travel_flags; a
+             * walk or fall link is 0x20 / 0x40 and names nobody. */
+            flags = sh_aas_get_u32(rr, RE_TRAVEL_FLAGS);
+            if ((flags >> 16) != 0) {
+                int k, dup = 0;
+                climbs++;
+                for (k = 0; k < nseen; k++) if (seen[k] == flags) { dup = 1; break; }
+                if (!dup && nseen < SH_TRAV_MAX_MONSTERS) seen[nseen++] = flags;
+            }
         }
         for (j = 0; j < n; j++) {
             if (out->platforms[j].area == made[i]) {
                 out->platforms[j].links = links;
+                out->platforms[j].climbs = climbs;
+                out->platforms[j].demons = nseen;
                 out->platforms[j].island = (links == 0);
                 break;
             }
         }
-        (void)ar;
     }
 
     out->areas_after = sh_aas_count(a, SH_AAS_L_AREAS);

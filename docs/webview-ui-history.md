@@ -6,29 +6,17 @@ at the bottom is the original POC buildout, before this doc tracked dates per en
 This is an engineering log for maintainers, not the product changelog. The release notes users read are in
 [`CHANGELOG.md`](../CHANGELOG.md).
 
-### 2026-09-06 -- A Navigation tab: marking which surfaces demons can walk on
+### 2026-09-06 -- The Navigation tab, added and then removed
 
-- **The problem it exists for.** SnapMap's AI routes on a navmesh baked into each shipped module, so
-  anything an author builds out of Blocking Boxes is invisible to demons -- they walk the floor and
-  nothing else. Snapmap+ can hand the engine extended navigation at map load, but only the author can say
-  *which* surfaces should be walkable, and until now there was no way to say it.
-- **The marker is vanilla, not ours.** `snapmaps/volume/blocking` has carried a bool `affectsNavmesh`
-  since release, and the shipped editor tile already declares `affectsNavmeshPath` beside
-  `showOnSpawnPath` and `networkStaticPath`. id wired the whole path and never exposed the property-sheet
-  row; nothing in the shipped binary consumes the value. So a map full of marked volumes loads and plays
-  on a stock client exactly as it does today. The tab is the missing row.
-- **A full-width panel, not a split workspace.** A volume row has nothing to inspect on the right;
-  `#panel-assets` is the existing precedent. Rows are labels wrapping a checkbox so Tab and Space work
-  without any custom key handling.
-- **No new bridge command and no new interface slot.** Reading a volume's flag uses the same
-  `select` -> `state` route the Entity State editor uses (`get_declsource_copy` +0x30); writing it uses
-  the same decl-text patch and `save` -> `rebuild_set_declsource` +0x40 commit. The scan is batched and
-  runs on demand rather than eagerly, because per-entity `select` is the only read the existing surface
-  offers.
-- **Three interaction guards worth remembering.** A scan reply never overwrites an edit in progress in
-  Entity State; toggling a volume that is open and dirty there is refused with a toast rather than
-  committing a stale decl; and the scan only re-runs when the entity set actually changes, so a commit's
-  list republication cannot trigger a full rescan.
+- **Removed the same day it landed.** A Navigation tab briefly listed the map's Blocking Boxes and
+  let an author tick which ones demons may walk on. It is gone: the flag is exposed in DOOM's own
+  entity object-settings panel instead, as an `affectsNavmesh` property row on
+  `snapeditorentitydef/volume/blocking.decl`. Ticking it where every other volume property already
+  lives is a better place for it than a tab of our own, and the frontend needs no navigation code
+  at all.
+- **The frontend is back to what it was.** The tab, its panel, its CSS, its scan-and-commit module
+  and its browser-preview sample volumes were all reverted, along with the page's read and write of
+  the `navmesh.enabled` config key -- that key is the backend's own and is still read there.
 
 ### 2026-09-03 -- The schema's enum value sets, corrected against the engine constants
 
