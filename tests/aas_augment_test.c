@@ -257,6 +257,28 @@ static void test_island_at_128(void)
     /* The whole point of the splice: the engine can now find the area. */
     CHECK_MSG(sh_aas_point_area(a, 0.0f, 0.0f, 130.0f) == rep.platforms[0].area,
               "a point standing on the platform resolves to the new area");
+
+    /* The generated area must LOOK like a shipped floor area. These three
+     * constants were transcribed wrongly once (flags 0x1, travel 0x20, edge
+     * flags 0) and the result was a payload that validated, served and played
+     * while the AI quietly refused to route over it -- a failure no structural
+     * check can catch, so it is pinned here as literals. */
+    {
+        const unsigned char *ar = sh_aas_rec_const(a, SH_AAS_L_AREAS,
+                                                   (unsigned)rep.platforms[0].area);
+        unsigned i, n = sh_aas_count(a, SH_AAS_L_EDGES);
+        int boundary = 0;
+        CHECK(ar != NULL);
+        if (ar) {
+            CHECK_MSG(sh_aas_get_u32(ar, 0) == 0x8u, "area.flags must be 0x8");
+            CHECK_MSG(sh_aas_get_u16(ar, 4) == 0x000Au, "area.travel_flags must be 0x000A");
+        }
+        for (i = 0; i < n; i++) {
+            const unsigned char *e = sh_aas_rec_const(a, SH_AAS_L_EDGES, i);
+            if (e && sh_aas_get_i32(e, 8) == 0x0C01) boundary++;
+        }
+        CHECK_MSG(boundary >= 4, "the platform's own edges carry the 0x0C01 boundary flag");
+    }
     sh_aas_free(a);
 }
 

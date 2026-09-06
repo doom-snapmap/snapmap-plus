@@ -53,9 +53,23 @@
 /* Each endpoint is displaced one unit perpendicular, into its own area. */
 #define REACH_SIDE_OFFSET       1.0f
 
-/* Area flags for a floor area, copied from the Grid Room's own floor slabs. */
-#define AREA_FLAGS_FLOOR        0x00000001u
-#define AREA_TRAVEL_FLAGS_FLOOR 0x0020u
+/* Area flags for a floor area, copied from shipped data. 0x8 is what EVERY real
+ * area carries -- 883 of the 947 in the largest sampled module, and all of them
+ * in four others. */
+#define AREA_FLAGS_FLOOR        0x00000008u
+
+/* area.travel_flags for a floor area. 0x000A on the seven floor slabs of the
+ * Grid Room and the dominant value everywhere (710 of 947). NOT 0x0002, which
+ * marks a module-seam connector, and not 0x0020 -- that is a REACHABILITY travel
+ * flag and means nothing in the area's own flag space. */
+#define AREA_TRAVEL_FLAGS_FLOOR 0x000Au
+
+/* edge.flags. An edge used by exactly one area is a ledge/outer boundary and
+ * carries 0x0C01 (17421 of 17442 shipped instances); one shared by two areas
+ * carries 0x0C00. Writing 0 leaves an edge that belongs to nothing shipped data
+ * recognises. */
+#define EDGE_FLAGS_BOUNDARY     0x00000C01
+#define EDGE_FLAGS_SHARED       0x00000C00
 
 #define AUG_INT16_LO            (-32768)
 #define AUG_INT16_HI            (32767)
@@ -276,19 +290,34 @@ static int aug_vertex(aug_ctx *c, float x, float y, float z)
     return (int)first;
 }
 
+/* Return a SIGNED edge index: +i when the edge runs v0->v1, -i when it already
+ * exists as v1->v0. A negative edgeIndex entry is the shipped convention for
+ * "this edge is traversed reversed", and an edge that turns out to be shared by
+ * two areas is demoted from boundary to shared. */
 static int aug_edge(aug_ctx *c, int v0, int v1)
 {
     unsigned i, n = sh_aas_count(c->a, SH_AAS_L_EDGES), first;
     unsigned char *r;
     for (i = 0; i < n; i++) {
-        const unsigned char *e = sh_aas_rec_const(c->a, SH_AAS_L_EDGES, i);
-        if (e && sh_aas_get_i32(e, 0) == v0 && sh_aas_get_i32(e, 4) == v1)
+        unsigned char *e = sh_aas_rec(c->a, SH_AAS_L_EDGES, i);
+        if (!e) continue;
+        if (sh_aas_get_i32(e, 0) == v0 && sh_aas_get_i32(e, 4) == v1) {
+            if (sh_aas_get_i32(e, 8) == EDGE_FLAGS_BOUNDARY)
+                sh_aas_put_i32(e, 8, EDGE_FLAGS_SHARED);
             return (int)i;
+        }
+        if (sh_aas_get_i32(e, 0) == v1 && sh_aas_get_i32(e, 4) == v0) {
+            if (sh_aas_get_i32(e, 8) == EDGE_FLAGS_BOUNDARY)
+                sh_aas_put_i32(e, 8, EDGE_FLAGS_SHARED);
+            return -(int)i;
+        }
     }
-    if (!sh_aas_append(c->a, SH_AAS_L_EDGES, 1, &first)) return -1;
+    if (!sh_aas_append(c->a, SH_AAS_L_EDGES, 1, &first)) return 0;
     r = sh_aas_rec(c->a, SH_AAS_L_EDGES, first);
-    if (!r) return -1;
-    sh_aas_put_i32(r, 0, v0); sh_aas_put_i32(r, 4, v1); sh_aas_put_i32(r, 8, 0);
+    if (!r) return 0;
+    sh_aas_put_i32(r, 0, v0);
+    sh_aas_put_i32(r, 4, v1);
+    sh_aas_put_i32(r, 8, EDGE_FLAGS_BOUNDARY);
     return (int)first;
 }
 
@@ -421,9 +450,11 @@ static int aug_add_area(aug_ctx *c, const aug_rect *eff, int carrier)
         if (vs[k] < 0) return -1;
     }
     for (k = 0; k < 4; k++) {
+        /* Signed: a negative entry means the edge is traversed reversed, so 0 is
+         * the failure value here rather than a negative one. */
         int e = aug_edge(c, vs[k], vs[(k + 1) & 3]);
         unsigned char *ie;
-        if (e < 0) return -1;
+        if (e == 0) return -1;
         if (!sh_aas_append(c->a, SH_AAS_L_EDGEINDEX, 1, &slot)) return -1;
         ie = sh_aas_rec(c->a, SH_AAS_L_EDGEINDEX, slot);
         if (!ie) return -1;
