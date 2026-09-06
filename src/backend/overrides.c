@@ -45,6 +45,7 @@
 #include "resource_bridge.h"
 #include "user_overrides.h"
 #include "navmesh.h"                /* baked AI navigation, served under the module's own names */
+#include "nav_bake.h"           /* navigation baked from the map's own marked volumes */
 #include "overrides_baked.h"        /* the built-in "*Custom"-tab default decls (Timeline + Unknown) */
 
 /* The engine open-by-name vtable method offset within the resource-provider vtable. A slot index,
@@ -1176,9 +1177,67 @@ static ov_stream *open_user_for_baked_name(const char *name, int *malformed)
  * BUILT-IN baked default (from memory) -> chain to the engine original.
  * The user layer alone is gated by the immutable launch snapshot. SEH-guarded so a shadow path fault
  * degrades to a vanilla open. */
+/* The provider object, latched from the first hook entry.
+ *
+ * The engine never publishes this pointer -- it arrives as the hook's `self` and
+ * nowhere else -- but reading a resource the way the engine would requires it.
+ * The provider is a singleton created by the ctor this file already resolves by
+ * signature, so latching the first one we see is latching the only one. */
+static void *volatile g_provider_self = NULL;
+
+unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_len)
+{
+    typedef long long (*ov_len_fn)(void *self);
+    typedef long long (*ov_read_fn)(void *self, void *buf, uint64_t n);
+    typedef void      (*ov_close_fn)(void *self);
+    void *f = NULL;
+    void **vt;
+    unsigned char *buf = NULL;
+    long long len;
+
+    if (out_len) *out_len = 0;
+    if (!name || !g_orig_open || !g_provider_self) return NULL;
+
+    __try {
+        /* mode 2 is the hook's own no-shadow guard, so this cannot re-enter us
+         * even though the slot still points at ov_open_hook. */
+        f = g_orig_open(g_provider_self, name, 0xff, 0xff, 2);
+        if (!f) return NULL;
+        vt = *(void ***)f;
+        if (!vt) return NULL;
+
+        len = ((ov_len_fn)vt[11])(f);                    /* +0x58 GetLength */
+        if (len <= 0 || (unsigned long long)len > SH_SMNAV_MAX_PAYLOAD) {
+            ((ov_close_fn)vt[0])(f);
+            return NULL;
+        }
+        buf = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (size_t)len);
+        if (!buf) {
+            ((ov_close_fn)vt[0])(f);
+            return NULL;
+        }
+        if (((ov_read_fn)vt[5])(f, buf, (uint64_t)len) != len) {   /* +0x28 Read */
+            HeapFree(GetProcessHeap(), 0, buf);
+            ((ov_close_fn)vt[0])(f);
+            return NULL;
+        }
+        ((ov_close_fn)vt[0])(f);                         /* +0x00 close + free */
+        if (out_len) *out_len = (size_t)len;
+        return buf;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        /* A fault here means the engine's own file object did not behave the way
+         * every other path in this file assumes. Leak nothing we allocated and
+         * let the caller serve the shipped bytes. */
+        if (buf) HeapFree(GetProcessHeap(), 0, buf);
+        if (out_len) *out_len = 0;
+        return NULL;
+    }
+}
+
 static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
 {
     if (g_orig_open == NULL) return NULL;   /* defensive: never happens once installed */
+    if (g_provider_self == NULL) g_provider_self = self;
 
     /* The current map's baked navigation, if this is one of the two names it
      * replaces. It goes FIRST and is not gated by the user-override snapshot:
@@ -1190,7 +1249,11 @@ static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsign
     if (mode < 2 && name != NULL) {
         unsigned char *nav = NULL;
         size_t nav_len = 0;
-        if (sh_navmesh_open(name, &nav, &nav_len)) {
+        /* A bake the map CARRIES wins over one we would generate: the author's
+         * tool already decided, and re-deriving it here could differ. */
+        if (!sh_navmesh_open(name, &nav, &nav_len))
+            sh_nav_bake_open(name, sh_overrides_read_engine_resource, &nav, &nav_len);
+        if (nav) {
             ov_stream *s = make_mem_stream(nav, (long long)nav_len, name, 1);
             if (s) return s;
             HeapFree(GetProcessHeap(), 0, nav);

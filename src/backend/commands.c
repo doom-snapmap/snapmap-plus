@@ -33,6 +33,7 @@
 #include "backend_log.h"
 #include "engine_dialog.h"
 #include "navmesh.h"      /* sh_navmesh -- what the current map's bake is serving */
+#include "nav_bake.h"
 
 /* ------------------------------------------------------------------------ engine fn typedefs ------ */
 
@@ -1447,6 +1448,10 @@ static void h_sh_navmesh(idCmdArgs *a)
 {
     (void)a;
     sh_navmesh_report(sh_printf);
+    /* The two halves of the feature reported together: navigation a map CARRIES
+     * as shards, then navigation it DESCRIBES through marked volumes. Composed
+     * here rather than by either module, so neither has to know about the other. */
+    sh_nav_bake_report(sh_printf);
 }
 
 static const cmd_entry CMD_TABLE[] = {

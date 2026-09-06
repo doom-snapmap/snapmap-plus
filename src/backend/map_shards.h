@@ -39,8 +39,18 @@
  * shorter; a "name" longer than this is not a shard header. */
 #define SH_SHARD_HEADER_MAX   256
 
-/* Structural caps for the document walker. */
-#define SH_SHARD_MAX_CONTAINERS 8192u
+/* Structural caps for the document walker.
+ *
+ * SH_SHARD_MAX_CONTAINERS is the CEILING, not the allocation: the array starts
+ * small and doubles, because a real map is nowhere near the ceiling but is far
+ * past any fixed guess. A 5 MB reference map holds 91,496 containers at depth
+ * 9, so the old fixed 8,192 refused every genuine map -- and refusing to build
+ * the document means nav_regions reads no regions and map_package strips no
+ * packages. A container costs at least one byte of input, so the count is
+ * bounded by the map size regardless; the ceiling only stops an absurd
+ * allocation on a hostile document. */
+#define SH_SHARD_MAX_CONTAINERS (1u << 21)
+#define SH_SHARD_CONTAINERS_MIN 8192u
 #define SH_SHARD_MAX_DEPTH      256u
 
 /* ---------------------------------------------------------------- text ---- */

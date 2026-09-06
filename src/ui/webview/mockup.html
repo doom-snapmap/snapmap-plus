@@ -269,6 +269,25 @@
   .entity-item.selected .name { color: var(--selText); }
   .list-empty { padding: 10px; color: var(--muted); font-style: italic; }
 
+  /* Navigation: one full-width panel rather than a split workspace -- a volume row has nothing to
+     inspect on the right. Everything below is the shared .panel / .entity-item skeleton plus a note
+     band and a summary band, so it reads as the same product as the other tabs. */
+  #panel-navigation > .panel { flex: 1 1 0; }
+  .nav-note { display: flex; gap: 7px; padding: 9px 10px; border-bottom: 1px solid var(--border);
+              color: var(--muted); line-height: 1.5; flex-shrink: 0; }
+  .nav-note .ui-icon { width: 14px; height: 14px; flex-shrink: 0; margin-top: 2px; }
+  .nav-note b { color: var(--text); font-weight: 600; }
+  .nav-summary { padding: 6px 10px; border-bottom: 1px solid var(--border); color: var(--muted);
+                 flex-shrink: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .nav-item { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+  .nav-item input[type=checkbox] { flex-shrink: 0; margin: 0; }
+  .nav-item .name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .nav-item .nav-size { flex-shrink: 0; color: var(--muted); font-family: Consolas, "Courier New", monospace; }
+  .nav-item.selected .nav-size { color: var(--selText); }
+  /* A row whose write is still in flight: visibly inert, and its checkbox is disabled so a second
+     click cannot queue a contradictory commit behind the first. */
+  .nav-item.busy { opacity: 0.55; cursor: default; }
+
   input[type=text], input[type=number], textarea, select { background: var(--field); color: var(--text); border: 1px solid var(--border2); border-radius: 5px; padding: 4px 7px; font-size: 11px; font-family: inherit; user-select: text; -webkit-user-select: text; }
   input[type=text]:focus, input[type=number]:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
   input[type=checkbox] { accent-color: var(--accent); }
@@ -685,6 +704,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     <div class="tab active" data-tab="entities">Entities</div>
     <div class="tab" data-tab="prefabs">Prefabs</div>
     <div class="tab" data-tab="timelines">Timelines</div>
+    <div class="tab" data-tab="navigation">Navigation</div>
   </div>
 
   <div class="content" id="panel-entities">
@@ -857,6 +877,35 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         <div class="tl-inner-body" id="tlBody"></div>
       </div>
     </div>
+    </div>
+  </div>
+
+  <!-- Navigation: the authoring surface for custom AI navigation. Marking a Blocking Box writes
+       `affectsNavmesh` into that volume's own edit block -- a field snapmaps/volume/blocking has
+       carried since release and that the shipped game never reads back, which is why this row is the
+       only way an author can set it and why a marked map is still a normal map to everyone else. -->
+  <div class="content" id="panel-navigation" style="display:none;">
+    <div class="panel">
+      <div class="panel-head">
+        <span class="panel-title">Navigation</span><span class="badge" id="navBadge">0</span>
+        <div class="panel-actions">
+          <button type="button" class="btn icon icon-button" id="navRefreshBtn" title="Re-read this map's volumes" aria-label="Re-read this map's volumes"><svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-refresh-cw"></use></svg></button>
+        </div>
+      </div>
+      <div class="panel-toolbar">
+        <input type="text" id="navFilter" placeholder="Filter blocking boxes...">
+        <div class="opts-row">
+          <label title="Turn custom AI navigation on or off. Saved with your other Snapmap+ settings."><input type="checkbox" id="navEnabled" checked> Custom AI navigation</label>
+        </div>
+      </div>
+      <div class="nav-note">
+        <svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-circle-info"></use></svg>
+        <span>Mark a Blocking Box and demons can walk on its <b>top surface</b>. Snapmap+ hands the game
+          the navigation while the map loads. A map with marked boxes still loads and plays for people who
+          do not have Snapmap+ -- they get this map's stock navigation instead.</span>
+      </div>
+      <div class="nav-summary" id="navSummary" role="status"></div>
+      <div class="panel-body list" id="navList"><div class="list-empty">Waiting for the map...</div></div>
     </div>
   </div>
 
@@ -1173,6 +1222,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var previewReportSigs = {};   // fake dedup memory for the feedback dialog demo (category|title -> seen)
   var previewEnts = [
     {eid:65, id:'0_ind_totally_blank_room_4x/snapmaps/volume/blocking', name:'Block Box', hidden:false},
+    /* Four blocking volumes so the Navigation list has something honest to show: two already marked
+       for AI navigation, one unmarked, and one carrying no clipModelInfo.size of its own. */
+    {eid:66, id:'0_ind_totally_blank_room_4x/snapmaps/volume/blocking_66', name:'Arena Floor', hidden:false},
+    {eid:67, id:'0_ind_totally_blank_room_4x/snapmaps/volume/blocking_67', name:'Catwalk East', hidden:false},
+    {eid:68, id:'0_ind_totally_blank_room_4x/snapmaps/volume/blocking_68', name:'Cover Crate', hidden:false},
     {eid:61, id:'0_ind_totally_blank_room_4x/player/coop/player_start', name:'My Player Start', hidden:false},
     {eid:62, id:'0_ind_totally_blank_room_4x/snapmaps/variable/string', name:'', hidden:false},
     {eid:63, id:'0_ind_totally_blank_room_4x/snapmaps/variable/integer', name:'', hidden:false},
@@ -1247,7 +1301,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     'idPlayerStart_Coop': {summary:"Runtime class for a co-op player spawn point.", confidence:'low', source:'decl'}
   };
   var previewStates = {
-    65: {decl:'edit = {\n\trenderModelInfo = {\n\t\tmodel = "models/mapobjects/snapmaps/box_trigger.lwo";\n\t\tscale = { x = 16; y = 128; z = 64; }\n\t}\n\tblockDemons = false;\n\tisVisible = true;\n\tisNetworkStatic = true;\n}', classname:'idVolume_Blocking', inherit:'snapmaps/volume/blocking', displayname:'Block Box'},
+    65: {decl:'edit = {\n\trenderModelInfo = {\n\t\tmodel = "models/mapobjects/snapmaps/box_trigger.lwo";\n\t\tscale = { x = 16; y = 128; z = 64; }\n\t}\n\tclipModelInfo = {\n\t\tsize = { x = 16; y = 128; z = 64; }\n\t}\n\tblockDemons = false;\n\tisVisible = true;\n\tisNetworkStatic = true;\n}', classname:'idVolume_Blocking', inherit:'snapmaps/volume/blocking', displayname:'Block Box'},
+    66: {decl:'edit = {\n\tclipModelInfo = {\n\t\tsize = { x = 512; y = 512; z = 16; }\n\t}\n\taffectsNavmesh = true;\n\tblockDemons = false;\n\tisVisible = true;\n}', classname:'idVolume_Blocking', inherit:'snapmaps/volume/blocking', displayname:'Arena Floor'},
+    67: {decl:'edit = {\n\tclipModelInfo = {\n\t\tsize = { x = 256; y = 64; z = 8; }\n\t}\n\taffectsNavmesh = true;\n\tblockDemons = false;\n\tisVisible = true;\n}', classname:'idVolume_Blocking', inherit:'snapmaps/volume/blocking', displayname:'Catwalk East'},
+    68: {decl:'edit = {\n\tblockDemons = true;\n\tisVisible = true;\n}', classname:'idVolume_Blocking', inherit:'snapmaps/volume/blocking', displayname:'Cover Crate'},
     61: {decl:'edit = {\n\tteam = "coop";\n\tisVisible = true;\n}', classname:'idPlayerStart_Coop', inherit:'player/coop', displayname:'My Player Start'},
     74: {decl:'edit = {\n\taiType = "heavy";\n\thealth = 300;\n}', classname:'idAI_Snapmap', inherit:'snapmaps/ai', displayname:'Heavy Gunner'}
   };
@@ -3722,6 +3779,346 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     setTimeout(function(){ el.classList.remove('show'); setTimeout(function(){ if (el.parentNode) el.parentNode.removeChild(el); }, 320); }, 2800);
   }
 
+  /* ==== Navigation: marking the surfaces demons may walk on =====================================
+   * SnapMap demons only walk the navmesh baked into each shipped module, so an arena built out of
+   * Blocking Boxes is invisible to them. Snapmap+ hands the engine substitute navigation at map load;
+   * this section is where the author says WHICH surfaces that navigation should cover.
+   *
+   * The marker is `affectsNavmesh` on the volume itself. That field is vanilla --
+   * snapmaps/volume/blocking has carried the bool since release and the shipped editor tile already
+   * declares its path -- but no property-sheet row was ever exposed for it and nothing in the shipped
+   * binary reads the value back. So this list is the only way to set it, and setting it is safe: a
+   * player without Snapmap+ loads the same map and simply gets the module's stock navigation.
+   *
+   * NO NEW BRIDGE SURFACE. A row is READ with the same select -> 'state' round-trip the Entity State
+   * panel uses (get_declsource_copy +0x30 / get_inherit_copy +0x50 / get_displayname +0x58), PATCHED
+   * with the shared decl-text helpers (dpEditBlock + dpSetScalar), and COMMITTED with the same 'save'
+   * round-trip Save to Decl uses (rebuild_set_declsource +0x40). No interface slot is added, and the
+   * master switch rides the existing configGet/configSet bridge. */
+  var NAV_ENABLED_KEY = 'navmesh.enabled';                 // backend-owned config key (src/backend/config.c, default true)
+  var NAV_BLOCKING_INHERIT = 'snapmaps/volume/blocking';   // an entity is a Blocking Box iff its inherit is exactly this
+  var NAV_FLAG_KEY = 'affectsNavmesh';                     // the edit-state leaf, written as bare true/false
+  var NAV_SIZE_BLOCK = 'clipModelInfo';                    // clipModelInfo.size is the box's extent
+  var NAV_SIZE_KEY = 'size';
+  var NAV_SCAN_BATCH = 24;      // select round-trips in flight at once; the host answers each synchronously
+  var NAV_SCAN_TIMEOUT_MS = 6000;
+  var navEnabled = true;        // master on/off, hydrated from NAV_ENABLED_KEY (true until it answers)
+  var navRows = {};             // eid -> {eid, name, marked, size, decl, classname, inherit, displayname, busy}
+  var navOrder = [];            // eids of the Blocking Boxes found, in entity-list order
+  var navScanQueue = [];        // eids still to read in the running scan
+  var navScanPending = {};      // eid -> true while ITS reply is outstanding (an unrelated state push must not count)
+  var navScanOutstanding = 0;
+  var navScanning = false;
+  var navScanned = false;       // a scan has completed for the current entity set
+  var navScanSeen = 0;          // replies since the last progress repaint
+  var navPumping = false;       // re-entrancy guard: in PREVIEW, post() answers synchronously
+  var navScanTimer = 0;
+  var navListSig = '';          // eid-set signature the current cache was built from
+  var navEditorReady = true;    // last editorReady flag off the list message
+  var navSawList = false;       // false until the first list of any kind arrives
+  var navSaveEid = -1;          // eid whose 'save' round-trip is in flight, -1 = none
+  var navSaveQueue = [];
+  var navRestoreEid = -1;       // the Entity State panel's eid, handed back after a scan (see navScanFinish)
+
+  function navPanelVisible() {
+    var el = document.getElementById('panel-navigation');
+    return !!el && el.style.display !== 'none';
+  }
+  function navEntitySig() {
+    var ids = [];
+    for (var i = 0; i < allEntities.length; i++) ids.push(allEntities[i].eid);
+    return ids.join(',');
+  }
+  /* ABSENT MEANS FALSE. An unmarked volume carries no affectsNavmesh line at all, which is exactly why
+   * no existing map needs migrating and why a stock client sees nothing it does not already understand. */
+  function navReadFlag(decl) {
+    var e = dpEditBlock(decl || '');
+    var h = dpFindChild(e.text, e.open, e.close, NAV_FLAG_KEY);
+    if (!h) return false;
+    return /^\s*true\b/.test(e.text.slice(h.after, h.after + 16));
+  }
+  function navReadNumber(s, open, close, key) {
+    var h = dpFindChild(s, open, close, key);
+    if (!h) return null;
+    var m = /^\s*(-?\d+(?:\.\d+)?)/.exec(s.slice(h.after, h.after + 32));
+    return m ? Number(m[1]) : null;
+  }
+  /* clipModelInfo.size, the box's extent. Absent is legitimate (the volume is still carrying the
+   * definition's own size), so it reports null rather than guessing a number. */
+  function navReadSize(decl) {
+    var e = dpEditBlock(decl || '');
+    var clip = dpFindBlock(e.text, e.open, e.close, NAV_SIZE_BLOCK);
+    if (!clip) return null;
+    var size = dpFindBlock(e.text, clip.open, clip.close, NAV_SIZE_KEY);
+    if (!size) return null;
+    var x = navReadNumber(e.text, size.open, size.close, 'x');
+    var y = navReadNumber(e.text, size.open, size.close, 'y');
+    var z = navReadNumber(e.text, size.open, size.close, 'z');
+    if (x === null || y === null || z === null) return null;
+    return {x: x, y: y, z: z};
+  }
+  function navSizeText(size) {
+    if (!size) return 'default size';
+    return size.x + ' x ' + size.y + ' x ' + size.z;
+  }
+  function navEntityById(eid) {
+    for (var i = 0; i < allEntities.length; i++) if (allEntities[i].eid === eid) return allEntities[i];
+    return null;
+  }
+  function navRowName(eid, displayname) {
+    if (displayname) return displayname;
+    var e = navEntityById(eid);
+    if (e && e.name) return e.name;
+    if (e && e.id) return e.id;
+    return 'Blocking Box ' + eid;
+  }
+  function navForget(eid) {
+    if (!navRows[eid]) return;
+    delete navRows[eid];
+    for (var i = 0; i < navOrder.length; i++) if (navOrder[i] === eid) { navOrder.splice(i, 1); break; }
+  }
+  function navStoreRow(d) {
+    var row = navRows[d.eid];
+    if (!row) { row = navRows[d.eid] = {eid: d.eid, busy: false}; navOrder.push(d.eid); }
+    row.decl = d.decl || '';
+    row.classname = d.classname || '';
+    row.inherit = d.inherit || '';
+    row.displayname = d.displayname || '';
+    row.name = navRowName(d.eid, row.displayname);
+    row.marked = navReadFlag(row.decl);
+    row.size = navReadSize(row.decl);
+    return row;
+  }
+
+  function navClearCache() {
+    navRows = {}; navOrder = [];
+    navScanQueue = []; navScanPending = {}; navScanOutstanding = 0;
+    navScanning = false; navScanned = false; navScanSeen = 0;
+    navListSig = '';
+    if (navScanTimer) { clearTimeout(navScanTimer); navScanTimer = 0; }
+  }
+  function navStartScan() {
+    navClearCache();
+    navListSig = navEntitySig();
+    if (!allEntities.length) { navScanned = true; navRender(); return; }
+    navRestoreEid = primaryEid;
+    navScanning = true;
+    for (var i = 0; i < allEntities.length; i++) navScanQueue.push(allEntities[i].eid);
+    navRender();
+    navScanPump();
+  }
+  function navArmScanWatchdog() {
+    if (navScanTimer) clearTimeout(navScanTimer);
+    navScanTimer = setTimeout(function () {
+      navScanTimer = 0;
+      // A reply never came back. Stop claiming to be busy and show whatever was read, rather than
+      // sitting on the progress line forever with no way out but a tab switch.
+      if (navScanning) { navScanQueue = []; navScanPending = {}; navScanOutstanding = 0; navScanFinish(); }
+    }, NAV_SCAN_TIMEOUT_MS);
+  }
+  function navScanPump() {
+    if (navPumping || !navScanning) return;
+    navPumping = true;
+    while (navScanOutstanding < NAV_SCAN_BATCH && navScanQueue.length) {
+      var eid = navScanQueue.shift();
+      navScanPending[eid] = true;
+      navScanOutstanding++;
+      post({cmd: 'select', eid: eid});   // PREVIEW answers this synchronously -- hence the guard above
+    }
+    navPumping = false;
+    if (!navScanQueue.length && navScanOutstanding === 0) navScanFinish();
+    else navArmScanWatchdog();
+  }
+  function navScanFinish() {
+    if (navScanTimer) { clearTimeout(navScanTimer); navScanTimer = 0; }
+    navScanning = false;
+    navScanned = true;
+    navScanSeen = 0;
+    /* The scan drove 'select', which is also what tells the host which entity the state panel is
+     * showing. Hand that back so Entity State keeps getting its periodic refresh. Skipped while that
+     * panel is dirty, because an explicit select applies its whole snapshot and would discard the
+     * edit in progress. */
+    if (navRestoreEid >= 0 && navRestoreEid === primaryEid && !isDirty())
+      post({cmd: 'select', eid: navRestoreEid});
+    navRestoreEid = -1;
+    // The map changed under the scan (a list publication during a scan is deliberately ignored), so
+    // what was just read describes entities that no longer make up the map. Read it again.
+    if (navListSig !== navEntitySig() && navPanelVisible()) { navStartScan(); return; }
+    navRender();
+  }
+  /* One state reply. Returns true when it answered a scan request, so the Entity State panel can tell
+   * our read apart from a refresh the user asked for. */
+  function navReceiveState(d) {
+    var eid = d.eid;
+    var mine = !!navScanPending[eid];
+    if (mine) { delete navScanPending[eid]; navScanOutstanding--; }
+    if (d.ok && !d.truncated) {
+      // Only a read that actually succeeded can decide anything. A failed or over-long read leaves
+      // whatever the list already knows alone rather than silently dropping a volume from it.
+      if (d.inherit === NAV_BLOCKING_INHERIT) navStoreRow(d); else navForget(eid);
+    }
+    if (mine) {
+      // Repaint on a cadence while a big map streams in, then once more when the scan settles.
+      if ((++navScanSeen % 64) === 0 && navPanelVisible()) navRender();
+      navScanPump();
+    } else if (navScanned && navPanelVisible()) {
+      navRender();
+    }
+    return mine;
+  }
+
+  function navPumpSave() {
+    if (navSaveEid !== -1) return;
+    while (navSaveQueue.length) {
+      var eid = navSaveQueue.shift();
+      var row = navRows[eid];
+      if (!row) continue;
+      var e = dpEditBlock(row.decl || '');
+      // Exactly the leaf the backend's own patcher writes: entityDef.state.edit.affectsNavmesh, a
+      // bare true/false token, committed through the Save-to-Decl route.
+      var patched = dpSetScalar(e.text, e.open, e.close, NAV_FLAG_KEY, row.marked ? 'true' : 'false');
+      navSaveEid = eid;
+      post({cmd: 'save', eid: eid, decl: patched, classname: row.classname,
+            inherit: row.inherit, displayname: row.displayname});
+      return;
+    }
+  }
+  /* Claim the shared saveResult when the commit in flight is ours. The host answers saveResult, then a
+   * fresh list, then a fresh state for the saved entity -- that last one re-reads the decl we just
+   * wrote, so the row ends up showing what the map actually holds rather than what we hoped. */
+  function navConsumeSaveResult(d) {
+    if (navSaveEid === -1) return false;
+    var row = navRows[navSaveEid];
+    navSaveEid = -1;
+    if (row) {
+      row.busy = false;
+      if (d.result === 1) {
+        toast(row.marked ? 'Marked for AI navigation' : 'No longer marked for AI navigation', 'ok');
+      } else {
+        row.marked = !row.marked;   // the map never changed; put the row back
+        toast(d.result === 0 ? 'The editor refused that change' : 'Could not save this volume (see log)', 'err');
+      }
+    }
+    navRender();
+    navPumpSave();
+    return true;
+  }
+  function navToggle(eid, on) {
+    var row = navRows[eid];
+    if (!row || row.busy) { navRender(); return; }
+    if (eid === primaryEid && isDirty()) {
+      // Committing here would write our cached decl over the edit the user is part-way through.
+      toast('Save or revert your Entity State edits for this entity first.', 'warn');
+      navRender();
+      return;
+    }
+    row.marked = !!on;
+    row.busy = true;
+    navSaveQueue.push(eid);
+    navRender();
+    navPumpSave();
+  }
+
+  function navSummaryText(total, marked) {
+    if (!navEnabled) return 'Custom AI navigation is off. Turn it on to mark surfaces demons can walk on.';
+    if (navScanning) return "Reading this map's volumes...";
+    if (!total) return 'Nothing to mark yet.';
+    if (!marked) return "No boxes marked, so demons use this map's stock navigation.";
+    return marked + ' of ' + total + (total === 1 ? ' Blocking Box' : ' Blocking Boxes') + ' marked for AI navigation.';
+  }
+  function navEmptyText(total, shown, filtering) {
+    if (!navSawList) return 'Waiting for the map...';
+    if (!navEditorReady) return 'Open the SnapMap editor to mark surfaces for AI navigation.';
+    if (!allEntities.length) return 'No map loaded. Open or create a map in the SnapMap editor.';
+    if (navScanning) return "Reading this map's volumes...";
+    if (!total) return 'This map has no Blocking Boxes. Place one in the SnapMap editor, then mark it here.';
+    if (!shown && filtering) return 'No matches.';
+    return '';
+  }
+  function navRender() {
+    var listEl = document.getElementById('navList');
+    if (!listEl) return;
+    var filterEl = document.getElementById('navFilter');
+    var filter = filterEl ? filterEl.value.toLowerCase() : '';
+    var scroll = listEl.scrollTop;
+    var rows = [], marked = 0;
+    for (var i = 0; i < navOrder.length; i++) {
+      var r = navRows[navOrder[i]];
+      if (!r) continue;
+      rows.push(r);
+      if (r.marked) marked++;
+    }
+    var shown = rows.filter(function (row) {
+      return !filter || row.name.toLowerCase().indexOf(filter) !== -1;
+    });
+    document.getElementById('navBadge').textContent = shown.length;
+    document.getElementById('navSummary').textContent = navSummaryText(rows.length, marked);
+    var empty = navEmptyText(rows.length, shown.length, !!filter);
+    if (empty) {
+      listEl.innerHTML = '<div class="list-empty">' + esc(empty) + '</div>';
+      listEl.scrollTop = scroll;
+      return;
+    }
+    var html = '';
+    for (var j = 0; j < shown.length; j++) {
+      var row = shown[j];
+      var locked = !navEnabled || row.busy;
+      html += '<label class="entity-item nav-item' + (row.busy ? ' busy' : '') + '" data-eid="' + row.eid + '"'
+            + ' title="' + esc(row.name + ' -- ' + navSizeText(row.size)) + '">'
+            + '<input type="checkbox"' + (row.marked ? ' checked' : '') + (locked ? ' disabled' : '') + '>'
+            + '<span class="name">' + esc(row.name) + '</span>'
+            + '<span class="nav-size">' + esc(navSizeText(row.size)) + '</span>'
+            + '</label>';
+    }
+    listEl.innerHTML = html;
+    listEl.scrollTop = scroll;
+  }
+  function navOnShow() {
+    if (navScanning) return;
+    if (!navScanned || navListSig !== navEntitySig()) navStartScan();
+    else navRender();
+  }
+  /* Every list publication. A save re-publishes the list with the same entity set, so the cache
+   * survives a toggle; a genuine entity-set change retires it. */
+  function navOnList(d) {
+    navSawList = true;
+    navEditorReady = d.editorReady !== false;
+    if (navScanning) return;
+    if (navListSig !== navEntitySig()) {
+      navClearCache();
+      if (navPanelVisible()) { navStartScan(); return; }
+    }
+    navRender();
+  }
+  function navReceiveSetting(d) {
+    if (d.key !== NAV_ENABLED_KEY) return false;
+    var on = true;   // the backend ships this key defaulting to true; an unreadable value keeps that
+    if (d.result === 1) {
+      try { var parsed = JSON.parse(d.valueJson); if (typeof parsed === 'boolean') on = parsed; } catch (e) {}
+    }
+    navEnabled = on;
+    document.getElementById('navEnabled').checked = on;
+    navRender();
+    return true;
+  }
+  document.getElementById('navEnabled').addEventListener('change', function () {
+    navEnabled = this.checked;
+    navRender();
+    if (!PREVIEW) configSet(NAV_ENABLED_KEY, navEnabled);
+  });
+  document.getElementById('navFilter').addEventListener('input', navRender);
+  document.getElementById('navRefreshBtn').addEventListener('click', function () { navStartScan(); });
+  // One delegated listener, like the Entities list -- rows are replaced wholesale on every repaint.
+  document.getElementById('navList').addEventListener('change', function (e) {
+    var box = e.target;
+    if (!box || box.type !== 'checkbox') return;
+    var rowEl = box.parentNode;
+    while (rowEl && (!rowEl.classList || !rowEl.classList.contains('nav-item'))) rowEl = rowEl.parentNode;
+    if (!rowEl) return;
+    navToggle(parseInt(rowEl.getAttribute('data-eid'), 10), box.checked);
+  });
+  navRender();
+
   // ---- messages from native ----
   function onMessage(d) {
     if (d.kind === 'windowState') {
@@ -3733,13 +4130,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           if (savedTheme === 'light' || savedTheme === 'dark')
             applyTheme(savedTheme === 'dark', false);
         } catch (e) {}
-      } else {
+      } else if (!navReceiveSetting(d)) {
         receiveEntitySetting(d);
       }
     } else if (d.kind === 'configSetResult') {
       var knownSetting = d.key === 'theme' ||
         d.key === ENTITY_SHOW_HIDDEN_KEY ||
-        d.key === ENTITY_SELECTION_MODE_KEY;
+        d.key === ENTITY_SELECTION_MODE_KEY ||
+        d.key === NAV_ENABLED_KEY;
       if (knownSetting && d.result !== 1)
         toast("Setting changed for this session, but couldn't be saved.", 'warn');
     } else if (d.kind === 'configStatus') {
@@ -3763,6 +4161,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       var exist = {}; for (var i=0;i<allEntities.length;i++) exist[allEntities[i].eid]=true;
       for (var k in selectedEids) if (selectedEids[k] && !exist[k]) delete selectedEids[k];
       var entityPerf = renderList();
+      navOnList(d);
       allTimelines = d.timelines || [];
       var tlExist = {}; for (var ti=0; ti<allTimelines.length; ti++) tlExist[allTimelines[ti].eid] = true;
       if (selectedTlEid !== -1 && !tlExist[selectedTlEid]) selectedTlEid = -1;
@@ -3782,8 +4181,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       // load-then-save-later state, so neither needs this treatment.
       tlCloseEditor();
       closeEntityEditor();
+      // Everything Navigation read belongs to the map that just went away.
+      navClearCache();
+      if (navPanelVisible()) navStartScan(); else navRender();
     } else if (d.kind === 'state') {
+      var navScanReply = navReceiveState(d);
       if (d.eid !== primaryEid) return;
+      // A Navigation scan asked for this entity for its own list. That is not a refresh the user
+      // requested, so it must not apply its snapshot over an edit in progress.
+      if (navScanReply && isDirty()) return;
       // A failed/over-limit refresh cannot safely coexist with an editable stale snapshot. Close the
       // editor even when it is dirty so Save cannot overwrite an authoritative declaration we could
       // not read in full.
@@ -3802,6 +4208,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         inhBox.value = d.inherit; loaded.inherit = d.inherit; updateDirty();
       }
     } else if (d.kind === 'saveResult') {
+      if (navConsumeSaveResult(d)) return;   // the Navigation list and Save to Decl share one commit path
       if (d.result === 1) toast('Saved to decl', 'ok');
       else if (d.result === 0) toast('Save refused: incompatible class + inherit', 'warn');
       else toast('Save failed (see log)', 'err');
@@ -4425,6 +4832,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       configGet('theme');
       configGet(ENTITY_SHOW_HIDDEN_KEY);
       configGet(ENTITY_SELECTION_MODE_KEY);
+      configGet(NAV_ENABLED_KEY);
     }
   })();
 
@@ -4611,11 +5019,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       document.querySelectorAll('.tabstrip .tab').forEach(function(t){ t.classList.remove('active'); });
       this.classList.add('active');
       var which = this.getAttribute('data-tab');
-      ['entities','prefabs','timelines','assets'].forEach(function(name){
+      ['entities','prefabs','timelines','assets','navigation'].forEach(function(name){
         document.getElementById('panel-' + name).style.display = (name === which) ? 'flex' : 'none';
       });
       queueSplitConstrain();
       if (which === 'prefabs') post({cmd:'listPrefabs'});
+      if (which === 'navigation') navOnShow();   // reading every volume is a scan, so it happens on demand
       if (which === 'timelines') tlMaybeAutoRefresh();   // catch stale content from a play-mode round-trip that happened while this tab wasn't visible
       // The selected catalog is cached after its first fetch, so later visits do not cross the bridge.
       if (which === 'assets') { abActive = abTabMount; abOpenCatalog(abTabMount); }

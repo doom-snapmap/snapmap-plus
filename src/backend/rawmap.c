@@ -27,6 +27,7 @@
 #include "overrides.h"
 #include "map_embed.h"
 #include "navmesh.h"
+#include "nav_bake.h"
 
 /* DeserializeFromJson prologue steal window. Decoded from the signature DB pattern
  *   40 55            push rbp                      (2)
@@ -220,6 +221,9 @@ static char *prepare_map_buffer(const char *json)
     if (len == 0) return NULL;
 
     sh_navmesh_build_from_map(json, len);
+    /* The regions the author marked, read from the same bytes and cleared the
+     * same way. A map with no marked volume must not inherit the last map's. */
+    sh_nav_bake_set_map(json, len);
 
     pkg = mpkg_strip_guarded(json);
     nav = sh_navmesh_strip(pkg ? pkg : json, pkg ? strlen(pkg) : len, &nav_len);

@@ -367,7 +367,7 @@ int sh_shard_doc_build(const char *json, size_t len, sh_shard_doc *doc)
 {
     sh_shard_container *c;
     unsigned stack[SH_SHARD_MAX_DEPTH];
-    size_t count = 0, i;
+    size_t count = 0, i, cap;
     unsigned depth = 0;
     int in_string = 0;
 
@@ -375,8 +375,9 @@ int sh_shard_doc_build(const char *json, size_t len, sh_shard_doc *doc)
     doc->c = NULL;
     doc->count = 0;
     if (!json) return 0;
+    cap = SH_SHARD_CONTAINERS_MIN;
     c = (sh_shard_container *)HeapAlloc(GetProcessHeap(), 0,
-                                        SH_SHARD_MAX_CONTAINERS * sizeof(sh_shard_container));
+                                        cap * sizeof(sh_shard_container));
     if (!c) return 0;
 
     for (i = 0; i < len; i++) {
@@ -389,6 +390,16 @@ int sh_shard_doc_build(const char *json, size_t len, sh_shard_doc *doc)
         if (ch == '"') { in_string = 1; continue; }
         if (ch == '{' || ch == '[') {
             if (count >= SH_SHARD_MAX_CONTAINERS || depth >= SH_SHARD_MAX_DEPTH) goto fail;
+            if (count == cap) {
+                sh_shard_container *bigger;
+                size_t ncap = cap * 2;
+                if (ncap > SH_SHARD_MAX_CONTAINERS) ncap = SH_SHARD_MAX_CONTAINERS;
+                bigger = (sh_shard_container *)HeapReAlloc(
+                    GetProcessHeap(), 0, c, ncap * sizeof(sh_shard_container));
+                if (!bigger) goto fail;
+                c = bigger;
+                cap = ncap;
+            }
             c[count].open = i;
             c[count].close = 0;
             c[count].kind = ch;

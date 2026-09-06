@@ -119,6 +119,21 @@ int sh_overrides_internal_decl_table_install(
  * Observability for the test harness. */
 unsigned long sh_overrides_shadow_count(void);
 
+/* Read a resource THE ENGINE WOULD HAVE SERVED, by name, into a fresh buffer
+ * (HeapAlloc(GetProcessHeap()); the caller frees). Returns NULL if the engine
+ * has no such resource, if the shadow is not installed, or on any fault.
+ *
+ * This exists for baked navigation. To give an author's geometry a navmesh we
+ * do not replace a module's navigation wholesale -- we ADD to it, which means
+ * first reading the bytes the engine was about to load. The reopen uses the
+ * hook's own mode >= 2 no-shadow guard, so it goes straight to the engine
+ * original and cannot recurse back into us.
+ *
+ * Only callable once the provider has opened something at least once, because
+ * the provider object is the hook's `self` and there is no other way to name
+ * it -- the engine hands it to us rather than exposing it. */
+unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_len);
+
 /* Re-scan %LOCALAPPDATA%\\snapmap-plus\\overrides for packages and publish the new list to
  * the file-shadow open path, so a package installed mid-session becomes servable without a
  * restart. Lock-free for readers. Returns the package count now visible.
