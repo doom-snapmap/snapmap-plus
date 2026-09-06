@@ -12,6 +12,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,6 +41,25 @@ void backend_log(const char *message)
 }
 
 static void log_reset(void) { g_log_count = 0; }
+
+/* sh_navmesh's console sink, captured. */
+static char g_report[8192];
+
+static void report_sink(const char *fmt, ...)
+{
+    char line[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnprintf_s(line, sizeof line, _TRUNCATE, fmt, ap);
+    va_end(ap);
+    strncat_s(g_report, sizeof g_report, line, _TRUNCATE);
+}
+
+static void report_capture(void)
+{
+    g_report[0] = '\0';
+    sh_navmesh_report(report_sink);
+}
 
 static int log_contains(const char *needle)
 {
@@ -458,6 +478,102 @@ static void test_validator(void)
 /* the header grammar and the serving table                              */
 /* ==================================================================== */
 
+/* THE TWO NAMES, spelled out.
+ *
+ * These literals are what the game's own archive index carries for the
+ * gridroom, and they are asserted as literals rather than composed here:
+ * composing them the way the code composes them would pin nothing. The cooked
+ * name prefixes 'b' to the WHOLE extension -- `.b` + `aas_monster48` --
+ * and getting that wrong is silent, not loud. The engine asks for the cooked
+ * name FIRST, so a wrong spelling misses, the shipped payload answers, the
+ * source name is never requested at all, and the table cheerfully reports
+ * everything served while nothing has been. It cost one live run to find. */
+/* WHAT THE CONSOLE SAYS, and why the map-load counter is in it.
+ *
+ * The clear-on-every-load rule is the one that stops an unbaked map inheriting
+ * the previous map's platforms, and proving it in game wants two map loads in
+ * one session -- which the test rig could not drive. So the report leads with
+ * how many loads reached this code and what the last one found: a count that
+ * advances while the set count falls to zero is the rule working, visible from a
+ * session that only ever loaded one map. */
+static void test_report(void)
+{
+    aas_build b;
+    char *map;
+    size_t map_len = 0;
+
+    CHECK(build_aas(&b, 0, NODES_TREE, 0));
+    sh_navmesh_test_reset();
+    report_capture();
+    CHECK(strstr(g_report, "0 map load(s) seen") != NULL);
+    CHECK(strstr(g_report, "carries no bake") != NULL);
+
+    map = make_map(base_map(BASE_MODULE), BASE_MODULE, "monster48",
+                   b.p, b.len, MAP_GOOD, &map_len);
+    CHECK(map != NULL);
+    if (map) {
+        sh_navmesh_build_from_map(map, map_len);
+        report_capture();
+        CHECK(strstr(g_report, "1 map load(s) seen") != NULL);
+        CHECK(strstr(g_report, "the last found 1 baked set(s)") != NULL);
+        CHECK(strstr(g_report, "ind_totally_blank_room_4x.baas_monster48") != NULL);
+
+        /* the same session, one more load, nothing baked: the counter advances
+         * and the table is empty -- the stale-clear rule, said out loud */
+        sh_navmesh_build_from_map(base_map(BASE_MODULE), strlen(base_map(BASE_MODULE)));
+        report_capture();
+        CHECK(strstr(g_report, "2 map load(s) seen") != NULL);
+        CHECK(strstr(g_report, "the last found 0 baked set(s)") != NULL);
+        CHECK(strstr(g_report, "carries no bake") != NULL);
+        free(map);
+    }
+    free_aas(&b);
+}
+
+static void test_resource_names(void)
+{
+    aas_build b;
+    char *map;
+    size_t map_len = 0;
+
+    CHECK(build_aas(&b, 0, NODES_TREE, 0));
+    sh_navmesh_test_reset();
+    map = make_map(base_map(BASE_MODULE), BASE_MODULE, "monster48",
+                   b.p, b.len, MAP_GOOD, &map_len);
+    CHECK(map != NULL);
+    if (map) {
+        unsigned char *bytes = NULL;
+        size_t len = 0;
+        sh_navmesh_build_from_map(map, map_len);
+        CHECK(sh_navmesh_test_served_count() == 1);
+        CHECK(strcmp(sh_navmesh_test_served_name(0),
+                     "maps/modules/ind_dlc/ind_totally_blank_room_4x/"
+                     "ind_totally_blank_room_4x.aas_monster48") == 0);
+        CHECK(strcmp(sh_navmesh_test_served_name(1),
+                     "generated/maps/modules/ind_dlc/ind_totally_blank_room_4x/"
+                     "ind_totally_blank_room_4x.baas_monster48") == 0);
+
+        /* ...and both of them answer */
+        CHECK(sh_navmesh_open("maps/modules/ind_dlc/ind_totally_blank_room_4x/"
+                              "ind_totally_blank_room_4x.aas_monster48",
+                              &bytes, &len) == 1);
+        if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
+        bytes = NULL; len = 0;
+        CHECK(sh_navmesh_open("generated/maps/modules/ind_dlc/ind_totally_blank_room_4x/"
+                              "ind_totally_blank_room_4x.baas_monster48",
+                              &bytes, &len) == 1);
+        if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
+
+        /* the spelling this shipped with, which the engine never asks for */
+        bytes = NULL; len = 0;
+        CHECK(sh_navmesh_open("generated/maps/modules/ind_dlc/ind_totally_blank_room_4x/"
+                              "ind_totally_blank_room_4x.bmonster48",
+                              &bytes, &len) == 0);
+        free(map);
+    }
+    free_aas(&b);
+}
+
 static void test_reader(void)
 {
     aas_build b;
@@ -480,7 +596,7 @@ static void test_reader(void)
         CHECK(strcmp(sh_navmesh_test_served_name(0),
                      "maps/modules/ind_dlc/deep/room_4x/room_4x.aas_monster48") == 0);
         CHECK(strcmp(sh_navmesh_test_served_name(1),
-                     "generated/maps/modules/ind_dlc/deep/room_4x/room_4x.bmonster48") == 0);
+                     "generated/maps/modules/ind_dlc/deep/room_4x/room_4x.baas_monster48") == 0);
         free(map);
     }
 
@@ -505,7 +621,7 @@ static void test_reader(void)
         bytes = NULL; len = 0;
         CHECK(sh_navmesh_open(
                   "GENERATED\\maps\\modules\\" BASE_MODULE
-                  "\\ind_totally_blank_room_4x.bmonster128", &bytes, &len) == 1);
+                  "\\ind_totally_blank_room_4x.baas_monster128", &bytes, &len) == 1);
         CHECK(len == b.len);
         if (bytes) HeapFree(GetProcessHeap(), 0, bytes);
 
@@ -720,6 +836,8 @@ static void test_prose(void)
 int main(void)
 {
     test_validator();
+    test_resource_names();
+    test_report();
     test_reader();
     test_prose();
 

@@ -15,7 +15,7 @@
  *
  * and its cooked sibling
  *
- *     generated/maps/modules/<category>/<module>/<module>.b<class>
+ *     generated/maps/modules/<category>/<module>/<module>.baas_<class>
  *
  * therefore changes the navigation, with no new engine hook and no new
  * signature. Both names are served whenever either is, so a stale cooked

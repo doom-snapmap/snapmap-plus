@@ -66,7 +66,7 @@ typedef struct nav_set {
     int      valid;              /* passed the structural gate */
     int      served;             /* ...and its module was accepted */
     char     res_name[SH_SMNAV_RESNAME_CAP];    /* maps/modules/.../<m>.aas_<class> */
-    char     cook_name[SH_SMNAV_RESNAME_CAP];   /* generated/maps/.../<m>.b<class> */
+    char     cook_name[SH_SMNAV_RESNAME_CAP];   /* generated/maps/.../<m>.baas_<class> */
     char     reason[SH_SMNAV_REASON_CAP];       /* why it is not served */
 } nav_set;
 
@@ -86,6 +86,13 @@ static nav_module g_modules[SH_SMNAV_MAX_MODULES];
 static size_t     g_module_count;
 static size_t     g_held_bytes;
 static volatile LONG g_serve_count;
+/* Every pass through the deserialize funnel bumps this, whatever it finds --
+ * including when the feature is off. It is reported by `sh_navmesh` because it
+ * is the only thing that makes the clear-on-every-load rule OBSERVABLE from
+ * inside one session: a count that advances while the set count drops to zero
+ * IS the rule working, and saying so does not cost a second map load. */
+static volatile LONG g_build_count;
+static size_t     g_last_build_sets;
 static char       g_last_refusal[SH_SMNAV_REASON_CAP];
 
 /* First fault disables the feature for the whole session.
@@ -753,15 +760,26 @@ static const char *nav_leaf(const char *module)
     return slash ? slash + 1 : module;
 }
 
-/* A truncated name would never match what the engine asks for, so the set would
- * look served and quietly do nothing. Refuse instead. */
+/* The two names one baked class answers to.
+ *
+ * The cooked name prefixes 'b' to the WHOLE extension -- `.b` + `aas_monster48`
+ * = `.baas_monster48` -- not to the class. That is what the game's own archive
+ * index spells, and getting it wrong is invisible rather than loud: the engine
+ * asks for the COOKED name first, so a wrong cooked name simply misses, the
+ * shipped payload answers, and the source name is never requested at all. The
+ * table then reports six names happily served while nothing has been served,
+ * and the map plays on its shipped navigation. Both spellings are pinned by
+ * literal-string assertions in navmesh_test.c for exactly that reason.
+ *
+ * A truncated name would fail the same silent way, so a truncation refuses the
+ * set rather than leaving it looking served. */
 static int nav_build_names(nav_set *s)
 {
     const char *leaf = nav_leaf(s->module);
     if (_snprintf_s(s->res_name, sizeof s->res_name, _TRUNCATE,
                     "maps/modules/%s/%s.aas_%s", s->module, leaf, s->cls) < 0) return 0;
     if (_snprintf_s(s->cook_name, sizeof s->cook_name, _TRUNCATE,
-                    "generated/maps/modules/%s/%s.b%s", s->module, leaf, s->cls) < 0) return 0;
+                    "generated/maps/modules/%s/%s.baas_%s", s->module, leaf, s->cls) < 0) return 0;
     return 1;
 }
 
@@ -975,6 +993,8 @@ void sh_navmesh_build_from_map(const char *json, size_t len)
     char line[256];
     int on = sh_navmesh_enabled();
 
+    InterlockedIncrement(&g_build_count);
+
     AcquireSRWLockExclusive(&g_nav_lock);
     nav_clear_locked();
     g_last_refusal[0] = '\0';
@@ -991,6 +1011,7 @@ void sh_navmesh_build_from_map(const char *json, size_t len)
     for (i = 0; i < g_module_count; i++) if (g_modules[i].ok) modules++;
     sets = g_set_count;
     held = g_held_bytes;
+    g_last_build_sets = sets;
     ReleaseSRWLockExclusive(&g_nav_lock);
 
     if (sets == 0) return;   /* silence is correct for the common map */
@@ -1275,6 +1296,13 @@ void sh_navmesh_report(void (*out)(const char *fmt, ...))
     size_t i;
     if (!out) return;
 
+    /* The map-load line goes first and is printed unconditionally: "did the
+     * map load actually reach this code, and what did it find" is a different
+     * question from "what is in the table now", and it is the one a session
+     * that can only load a single map is still able to answer. */
+    out("navigation: %lu map load(s) seen this session; the last found %zu baked set(s).\n",
+        (unsigned long)InterlockedCompareExchange(&g_build_count, 0, 0), g_last_build_sets);
+
     if (InterlockedCompareExchange(&g_faulted, 0, 0) != 0) {
         out("navigation: DISABLED for this session after a fault; the engine serves its own.\n");
         return;
@@ -1344,6 +1372,8 @@ void sh_navmesh_test_reset(void)
     ReleaseSRWLockExclusive(&g_nav_lock);
     InterlockedExchange(&g_faulted, 0);
     InterlockedExchange(&g_serve_count, 0);
+    InterlockedExchange(&g_build_count, 0);
+    g_last_build_sets = 0;
 }
 
 int sh_navmesh_test_served_count(void)
