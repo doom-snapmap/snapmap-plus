@@ -50,6 +50,16 @@
   .menu-popup button:hover, .menu-popup button:focus-visible { background: var(--sel); color: var(--selText); outline: 0; }
   .menu-popup button[role="menuitemradio"]::before { content: ""; width: 12px; flex: 0 0 12px; text-align: center; }
   .menu-popup button[role="menuitemradio"][aria-checked="true"]::before { content: "\2713"; }
+  /* the arm toggle uses the same tick gutter as the theme radios so both menus align */
+  .menu-popup button[role="menuitemcheckbox"]::before { content: ""; width: 12px; flex: 0 0 12px; text-align: center; }
+  .menu-popup button[role="menuitemcheckbox"][aria-checked="true"]::before { content: "\2713"; }
+  .menu-sep { height: 1px; margin: 3px 4px; background: var(--border2); }
+  /* the staged-path readout. A fixed width, not max-width: the popup sizes to its content, and a
+     max-width alone let it stay narrow and wrap every path over three lines. This sets the popup's
+     width for the whole File menu. overflow-wrap still catches a pathological filename. */
+  .menu-note { width: 296px; padding: 3px 8px 2px; color: var(--textDim, var(--text)); font-size: 11px; line-height: 1.5; opacity: .85; overflow-wrap: anywhere; }
+  .menu-note > div + div { margin-top: 1px; }
+  .menu-note b { font-weight: 600; opacity: .8; }
   .win-controls { display: flex; align-items: stretch; align-self: stretch; gap: 0; margin-left: 8px; margin-right: -6px; padding: 0; }
   .win-btn { width: 38px; height: 30px; display: inline-grid; place-items: center; padding: 0 12px; border-radius: 0; color: var(--muted); cursor: default; }
   .win-btn .ui-icon { width: 14px; height: 14px; stroke-width: 1.8; }
@@ -662,6 +672,22 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     <img class="icon" alt="" src="data:image/jpeg;base64,/9j/2wCEAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDIBCQkJDAsMGA0NGDIhHCEyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMv/AABEIAEAAQAMBIgACEQEDEQH/xAGiAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgsQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+gEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoLEQACAQIEBAMEBwUEBAABAncAAQIDEQQFITEGEkFRB2FxEyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZGiYnKCkqNTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2dri4+Tl5ufo6ery8/T19vf4+fr/2gAMAwEAAhEDEQA/APCwKdilAqaCEzShAcZ6k9h3NaGYkdpcSpujgldT3VCRT/sF3/z6T/8Afs1Zms5rhldECxBcRhnAO3t19etRHS5/7qf9/F/xquWXYj2kO5Wlt5YSBLE8ZPTepGaZivRvA+gaRqvh/WdM1K4sLW9meL7PPL5bSJg5O3JB5xg4I61p+JvhUbPQtOXQ7aW9vw+25lEgAcH+LaTgDOBx26+tRezsy1qro8lIpMVr69oN54d1V9OvhH5yKGzG+4EHof8A9dZZFMBR1q2P3EAX/lpKMn2T/wCv/SoYEVnLP/q0G5v8PxoMjSytI3VjmmtxPY7Cz0zTtbhntBdLbanFdMIww4lQ4VV/Aj8M12K/DDRhZhHubpp8cyhgBn/dx0/zmvMUuls/EYuXDFIbvewU4JAbJAr0ePULaXQGkS9vRYSRPOSbofaFcH/VqcY24HT/AGhXo0XCSd1qj53HLEU3H2c2kzltV8KwaVol4wMl7eCUIWiiO23UEkljzjIHfHFbXw1l1nTYJtWvNRa18N26nzFnyyyHphB257jqeOe13wbq0J8WahBNcahp91dTiWKCQDEigE7HDA846dDjoah+Jkeo6nZaa1hBcixV5I2s0ixskViNxC9iM47enWuCvJOfKlZHt4SM40lKcrt6mh4s0/wrq3hi/wDGMcNxPLcwqEZHI2SZCgkdBg4BzxxxzXjJr1v4VS6haW+padd2kyRfLNEJoyqlujDkd8LXnnieS/n8Q3VxqVj9iuZmDmEIVAGMAjPXp19c1kux0vuZcTAEo/3H4Pt6GrNlp9zdzyRQwvK0S73RPvbQQCR69apirtrd3FrIl1bTPFcQ8b0ODjoD/SrjZPUzqczi+Xc0/E2jSaRqEZZnK3UQuFDrtZd2cqw7EGuj8IWdvbeGr7VLmC1vWBUxxEb3jIJ6jtnsO9Ja61a68JdD19vmEh+yXp+8hJ4yfQ8c9/1qKO31zwNBdO9jbT2kzqryNhgQCccA5AOe4r0IQjGXOtvyPCq1alSl7Cek7ry5lfozodI1SHxBBLqktjbQXdu6Mtw/ynCsDjfjv06eoqh4q8ZazpNtYW9vdCK+lVric+WpCKxOxBkdhxn296wtc8a/bLe5sbCzjhs5gvzOv7zIIOc59RxV/RLhPHGlvo+po5vrZN1vfBN2B6Of8ev1Fc2KlGTTWtt2d2W0qlOMuZcqb0W9tDe+H2v65rjX02pXXnQxBVjHlqvzHJPKgdgPzrznxRNqkuvzprE6TXcOIyyY246gDAHHP1rvNSfRvD3hS60CHVTBfJGJGMYId5Dg9umcAYzkDFeWO7yOXdmdyclmOSa5Vvc9NjRUkb+W4bGR0I9R3FRA07NUI0PMu9oWOIyx4wr+QGJHbnGav6pq+papc/aHtZo5GiWOYKjFZNuCMqR7A46ZFc/06Gl59TVqpJK1zJ0KbkpNao7Pw5HpSaTqWpa7p4l+zNGFUJsPORgLwDz61r6l41s7DQ7NvDq2sLyPmS3MeCg75A4zkV5nj3pRWbV3dmq0VkaWt6vLrmqSX00ccbuANqDjAGB9TWcaC1MLZpgf/9k=">
     <div class="brand">Snapmap+</div>
     <div class="app-menus" id="appMenus">
+      <!-- File sits before View. Its two file actions reach the backend's rawmap load source and save
+           destination (+0x328/+0x330); before this menu those paths were settable only from the test
+           harness, so every rawmap lived at one fixed %LOCALAPPDATA% filename. -->
+      <div class="menu">
+        <button type="button" class="menu-label" data-menu="file" aria-haspopup="menu" aria-expanded="false">File</button>
+        <div class="menu-popup" id="menu-file" role="menu" hidden>
+          <button type="button" id="menuRawmapLoad" role="menuitem"><span>Load Rawmap...</span></button>
+          <button type="button" id="menuRawmapSaveAs" role="menuitem"><span>Save Rawmap As...</span></button>
+          <div class="menu-sep" role="separator"></div>
+          <button type="button" id="menuRawmapArm" role="menuitemcheckbox" aria-checked="false"><span>Rawmap Swap Armed</span></button>
+          <button type="button" id="menuRawmapReset" role="menuitem"><span>Use Default Location</span></button>
+          <div class="menu-sep" role="separator"></div>
+          <!-- Not a menu item: the staged paths, so "which file am I actually on" needs no dialog. -->
+          <div class="menu-note" id="menuRawmapPaths">Loading...</div>
+        </div>
+      </div>
       <div class="menu">
         <button type="button" class="menu-label" data-menu="view" aria-haspopup="menu" aria-expanded="false">View</button>
         <div class="menu-popup" id="menu-view" role="menu" hidden>
@@ -1089,6 +1115,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   }
 
   var PREVIEW = !(window.chrome && window.chrome.webview);
+  /* browser-preview stand-in for the backend's rawmap path pair (see previewHandle) */
+  var PREVIEW_RAWMAP_DEFAULT = 'C:\\Users\\you\\AppData\\Local\\snapmap-plus\\rawmap.json';
+  var previewRawmap = {load: PREVIEW_RAWMAP_DEFAULT, save: PREVIEW_RAWMAP_DEFAULT, armed: 0};
   function post(o) { if (!PREVIEW) { window.chrome.webview.postMessage(o); return; } previewHandle(o); }
   function iconSvg(name) {
     return '<svg class="ui-icon" aria-hidden="true" focusable="false"><use href="#icon-' + name + '"></use></svg>';
@@ -1633,6 +1662,19 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     'textures/whitecollar/wc_panel_maint_1e\ntextures/whitecollar/wc_panel_maint_tall_1a\n' +
     'textures/whitecollar/wc_panel_tall_1d\nweapons/har/harbase\nweapons/har/harbase_bloody\n';
   function previewHandle(o) {
+    // The File menu in browser preview: no native picker and no backend, so answer with the default
+    // pair the backend would report. Without this the menu's readout would sit on "Loading..." and
+    // the layout could never be checked outside the game.
+    if (o.cmd === 'rawmapStatus' || o.cmd === 'rawmapLoadPick' ||
+        o.cmd === 'rawmapSavePick' || o.cmd === 'rawmapArm' || o.cmd === 'rawmapResetPaths') {
+      if (o.cmd === 'rawmapArm') previewRawmap.armed = o.on ? 1 : 0;
+      if (o.cmd === 'rawmapResetPaths') previewRawmap.load = previewRawmap.save = PREVIEW_RAWMAP_DEFAULT;
+      onMessage({kind:'rawmapStatus', ok:true, status:{
+        load: previewRawmap.load, save: previewRawmap.save,
+        armed: previewRawmap.armed, saves: 0, lastBytes: 0
+      }, note: o.cmd === 'rawmapStatus' ? '' : 'Preview only — no backend attached.'});
+      return;
+    }
     if (o.cmd === 'refresh') {
       onMessage(previewList());
       onMessage({kind:'camera', x:797.638489, y:183.456985, z:-950.475159});
@@ -3724,7 +3766,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
   // ---- messages from native ----
   function onMessage(d) {
-    if (d.kind === 'windowState') {
+    if (d.kind === 'rawmapStatus') {
+      renderRawmapStatus(d.ok ? d.status : null);
+      // The note is only present when something actually changed, so a plain refresh stays silent.
+      if (d.note) toast(d.note, d.note.indexOf('Refused') === 0 ? 'err' : '');
+    } else if (d.kind === 'windowState') {
       renderWindowState(d.maximized);
     } else if (d.kind === 'configValue') {
       if (d.key === 'theme' && d.result === 1) {
@@ -4417,6 +4463,73 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   }
   document.getElementById('menuLight').addEventListener('click', function(){ applyTheme(false, true); closeMenus(); });
   document.getElementById('menuDark').addEventListener('click', function(){ applyTheme(true, true); closeMenus(); });
+
+  // ---- File menu: rawmap load / save ----
+  // The load half STAGES a file; it does not open a map. Nothing in the frontend can make the engine
+  // load one, so the wording here always says what the person still has to do. See the +0x328/+0x330
+  // slot comments in snapmap_plus_iface.h for why.
+  var RAWMAP_ARMED = false;
+
+  // Show the tail of a path. Full paths are far too long for a menu, and the filename plus its parent
+  // folder is what actually distinguishes two rawmaps from each other.
+  function rawmapShortPath(p) {
+    if (!p) return '(default)';
+    var parts = p.split('\\');
+    if (parts.length <= 2) return p;
+    return '...\\' + parts.slice(-2).join('\\');
+  }
+
+  function renderRawmapStatus(st) {
+    var note = document.getElementById('menuRawmapPaths');
+    var armBtn = document.getElementById('menuRawmapArm');
+    if (!st) {
+      if (note) note.textContent = 'Rawmap paths unavailable in this build.';
+      return;
+    }
+    RAWMAP_ARMED = !!st.armed;
+    if (armBtn) armBtn.setAttribute('aria-checked', RAWMAP_ARMED ? 'true' : 'false');
+    if (note) {
+      note.innerHTML = '';
+      var mk = function(label, value, title) {
+        var row = document.createElement('div');
+        var b = document.createElement('b');
+        b.textContent = label + ' ';
+        row.appendChild(b);
+        row.appendChild(document.createTextNode(rawmapShortPath(value)));
+        if (title) row.title = title;   // the full path on hover
+        return row;
+      };
+      note.appendChild(mk('Load:', st.load, st.load));
+      note.appendChild(mk('Save:', st.save, st.save));
+      if (!RAWMAP_ARMED) {
+        var warn = document.createElement('div');
+        warn.textContent = 'Not armed — nothing is substituted yet.';
+        note.appendChild(warn);
+      }
+    }
+  }
+
+  document.getElementById('menuRawmapLoad').addEventListener('click', function(){
+    post({cmd: 'rawmapLoadPick'});
+    closeMenus();
+  });
+  document.getElementById('menuRawmapSaveAs').addEventListener('click', function(){
+    post({cmd: 'rawmapSavePick'});
+    closeMenus();
+  });
+  document.getElementById('menuRawmapArm').addEventListener('click', function(){
+    post({cmd: 'rawmapArm', on: RAWMAP_ARMED ? 0 : 1});
+    closeMenus();
+  });
+  document.getElementById('menuRawmapReset').addEventListener('click', function(){
+    post({cmd: 'rawmapResetPaths'});
+    closeMenus();
+  });
+  // Refresh the readout when the menu opens, so it is never showing a stale path.
+  (function(){
+    var lbl = document.querySelector('.menu-label[data-menu="file"]');
+    if (lbl) lbl.addEventListener('click', function(){ post({cmd: 'rawmapStatus'}); });
+  })();
   (function(){
     var dark = document.documentElement.classList.contains('dark');
     if (PREVIEW) dark = previewThemeRead() === 'dark';
@@ -4957,7 +5070,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     {id:'decal',     kind:6, label:'Decal atlases', ref:true},
     {id:'light',     kind:16, label:'Lights'},
     {id:'perk',      kind:14, label:'Perks',      ref:true},
-    {id:'swf',       kind:15, label:'SWF / Flash', ref:true}
+    {id:'swf',       kind:15, label:'SWF / Flash', ref:true},
+    {id:'projectile',kind:17, label:'Projectiles', ref:true},
+    {id:'weapon',    kind:18, label:'Weapons',     ref:true}
   ];
 
 
@@ -7719,6 +7834,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
   measureFont();   // once at boot -- the completion popup positions itself off the editor's char/line metrics
   post({cmd:'refresh'});
+  post({cmd:'rawmapStatus'});   // so the File menu never opens showing "Loading..."
 </script>
 </body>
 </html>

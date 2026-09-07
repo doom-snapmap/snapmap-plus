@@ -777,3 +777,168 @@ unsigned long long sh_rawmap_save_last_bytes(void)
 {
     return (unsigned long long)InterlockedCompareExchange64(&g_last_bytes, 0, 0);
 }
+
+/* ==== the File-menu file surface (+0x328 status / +0x330 configure) ==== */
+
+/* Copy `src` into a JSON string body, escaping what a Windows path can actually contain. Backslash is
+ * the whole reason this exists -- an unescaped "C:\maps\x.json" makes the frontend's JSON.parse throw,
+ * so the paths this file reports would break the very menu that shows them. Quote and the C0 range are
+ * escaped for completeness. Returns 0 if the result would not fit (caller writes no field). */
+static int json_escape_into(char *out, size_t cap, const char *src)
+{
+    size_t w = 0;
+    if (!out || cap == 0) return 0;
+    for (; src && *src; ++src) {
+        unsigned char c = (unsigned char)*src;
+        const char *esc = NULL;
+        char ubuf[7];
+        if      (c == '\\') esc = "\\\\";
+        else if (c == '"')  esc = "\\\"";
+        else if (c == '\n') esc = "\\n";
+        else if (c == '\r') esc = "\\r";
+        else if (c == '\t') esc = "\\t";
+        else if (c < 0x20) { _snprintf_s(ubuf, sizeof ubuf, _TRUNCATE, "\\u%04x", c); esc = ubuf; }
+        if (esc) {
+            size_t n = strlen(esc);
+            if (w + n >= cap) return 0;
+            memcpy(out + w, esc, n);
+            w += n;
+        } else {
+            if (w + 1 >= cap) return 0;
+            out[w++] = (char)c;
+        }
+    }
+    out[w] = '\0';
+    return 1;
+}
+
+int sh_rawmap_validate_source(const char *path, char *out_msg, int msg_capacity)
+{
+    HANDLE h;
+    LARGE_INTEGER sz;
+    char probe[64];
+    DWORD rd = 0;
+    int i;
+
+    if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
+    if (path == NULL || path[0] == '\0') {
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, "no path given", _TRUNCATE);
+        return 0;
+    }
+
+    h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, "cannot open that file", _TRUNCATE);
+        return 0;
+    }
+
+    /* The ceiling matches read_source_file's own 64 MB refusal exactly. Rejecting here rather than
+     * there is the whole point of this check: the swap's refusal is silent and lands minutes later
+     * at a map load, this one lands on the click with a reason attached. */
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 0) {
+        CloseHandle(h);
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, "that file is empty", _TRUNCATE);
+        return 0;
+    }
+    if (sz.QuadPart > (LONGLONG)(64 * 1024 * 1024)) {
+        CloseHandle(h);
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
+                               "that file is over the 64 MB limit", _TRUNCATE);
+        return 0;
+    }
+
+    if (!ReadFile(h, probe, (DWORD)sizeof probe, &rd, NULL)) rd = 0;
+    CloseHandle(h);
+
+    /* A rawmap is a JSON object. Skip a UTF-8 BOM and leading whitespace, then require '{'. This
+     * catches the realistic mistake -- picking a map.decl (zlib bytes) or some unrelated file -- and
+     * says so now instead of substituting unparseable bytes into a real map load. */
+    i = 0;
+    if (rd >= 3 && (unsigned char)probe[0] == 0xEF
+                && (unsigned char)probe[1] == 0xBB
+                && (unsigned char)probe[2] == 0xBF) i = 3;
+    while (i < (int)rd && (probe[i] == ' ' || probe[i] == '\t' ||
+                           probe[i] == '\r' || probe[i] == '\n')) ++i;
+    if (i >= (int)rd || probe[i] != '{') {
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
+                               "that is not rawmap JSON (a compressed map.decl?)", _TRUNCATE);
+        return 0;
+    }
+
+    if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, "ok", _TRUNCATE);
+    return 1;
+}
+
+static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
+{
+    char load_path[MAX_PATH], save_path[MAX_PATH];
+    char load_esc[MAX_PATH * 2], save_esc[MAX_PATH * 2];
+    int written;
+
+    (void)self;
+    if (out_json == NULL || out_capacity <= 0) return 0;
+
+    resolve_source_path(load_path, sizeof load_path);
+    resolve_dest_path(save_path, sizeof save_path);
+
+    if (!json_escape_into(load_esc, sizeof load_esc, load_path)) load_esc[0] = '\0';
+    if (!json_escape_into(save_esc, sizeof save_esc, save_path)) save_esc[0] = '\0';
+
+    /* `armed` reports the EXPLICIT gate only, matching sh_rawmap_swap_is_armed's reasoning: a menu
+     * checkbox must not show ON for a flag-file arm that unticking it cannot clear. */
+    written = _snprintf_s(out_json, (size_t)out_capacity, _TRUNCATE,
+        "{\"load\":\"%s\",\"save\":\"%s\",\"armed\":%d,\"saves\":%lu,\"lastBytes\":%llu}",
+        load_esc, save_esc, sh_rawmap_swap_is_armed(),
+        sh_rawmap_save_count(), sh_rawmap_save_last_bytes());
+
+    return (written > 0) ? written : 0;
+}
+
+static int slot_rawmap_configure(sh_iface *self, const char *load_path, const char *save_path,
+                                 int arm, char *out_msg, int msg_capacity)
+{
+    char reason[128];
+    int ok = 1;
+
+    (void)self;
+    if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
+
+    /* Order matters: validate and set the load source BEFORE arming. Arming first would leave a
+     * window where the swap is live against whatever the previous source was -- which for someone
+     * clicking "Load Rawmap" is the one outcome they did not ask for. */
+    if (load_path != NULL) {
+        if (load_path[0] == '\0') {
+            sh_rawmap_swap_set_source(NULL);          /* empty = restore the default */
+        } else if (sh_rawmap_validate_source(load_path, reason, (int)sizeof reason)) {
+            if (!sh_rawmap_swap_set_source(load_path)) {
+                if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
+                                       "could not set the load path", _TRUNCATE);
+                return 0;
+            }
+        } else {
+            if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, reason, _TRUNCATE);
+            return 0;
+        }
+    }
+
+    /* The save destination is NOT validated as a readable file -- it does not exist yet, and the
+     * shadow itself creates it with CREATE_ALWAYS. A bad directory surfaces as a failed shadow
+     * write, which the existing log line already reports. */
+    if (save_path != NULL) {
+        if (!sh_rawmap_save_set_dest(save_path[0] == '\0' ? NULL : save_path)) ok = 0;
+    }
+
+    if (arm == 0 || arm == 1) sh_rawmap_swap_arm(arm);
+
+    if (out_msg && out_msg[0] == '\0') {
+        strncpy_s(out_msg, (size_t)msg_capacity, ok ? "ok" : "the save path was refused", _TRUNCATE);
+    }
+    return ok;
+}
+
+void sh_rawmap_get_slots(sh_rawmap_status_fn *status, sh_rawmap_configure_fn *configure)
+{
+    if (status)    *status    = slot_rawmap_status;
+    if (configure) *configure = slot_rawmap_configure;
+}

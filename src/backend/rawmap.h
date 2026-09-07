@@ -31,6 +31,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "snapmap_plus_iface.h"   /* the +0x328/+0x330 slot signatures sh_rawmap_get_slots hands back */
+
 /* Install the LOAD-swap detour on the engine's DeserializeFromJson.
  *   `deser_fn`        = the resolved engine fn address (from the signature resolver, name
  *                       "DeserializeFromJson"). 0 => not resolved; logs SKIPPED and returns 0.
@@ -155,5 +157,21 @@ unsigned long sh_rawmap_save_count(void);
 
 /* Bytes written by the most recent shadow (0 if none yet) -- mirrors the reference impl's _lastSaveBytes. */
 unsigned long long sh_rawmap_save_last_bytes(void);
+
+/* ---------------------------------------------------------------- the File-menu file surface -------
+ * The two setters above (set_source / set_dest) were written for the test harness and, until these
+ * slot bodies, had no caller a PERSON could reach. These expose them to the frontend's File menu.
+ *
+ * Expose the +0x328/+0x330 vtable-slot bodies, the way apply_engine hands its slots to iface_engine
+ * so every engine-touch slot binds in one call. Neither body touches the engine -- they are file and
+ * gate state only -- so they are safe from any thread and need no signature resolution. */
+void sh_rawmap_get_slots(sh_rawmap_status_fn *status, sh_rawmap_configure_fn *configure);
+
+/* Would this file be accepted as a load source? Checks readable / non-empty / within the swap's own
+ * 64 MB ceiling / starts like JSON after whitespace. `out_msg` gets a short human-readable reason.
+ * Split out of the configure body so the same verdict can be unit-tested without a live interface.
+ * Returns 1 = acceptable. A pass here is NOT a promise the map is valid -- see rawmap_check() in
+ * doom-re's save-load campaign for why full structural validation needs its own pure-C checks. */
+int sh_rawmap_validate_source(const char *path, char *out_msg, int msg_capacity);
 
 #endif /* BACKEND_RAWMAP_H */

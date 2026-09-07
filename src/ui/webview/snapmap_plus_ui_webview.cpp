@@ -326,6 +326,16 @@ static uint64_t hstr(uint64_t h, const char *s) { while (*s) { h = (h ^ (unsigne
 static uint64_t hint(uint64_t h, int v) { for (int i = 0; i < 4; i++) { h = (h ^ (unsigned char)(v & 0xff)) * 1099511628211ull; v >>= 8; } return h; }
 
 /* ------------------------------------------------------------------ string / JSON helpers ---------- */
+/* Plain UTF-8 -> wide, NO escaping. For text that is ALREADY JSON and must be forwarded verbatim --
+ * poc_json_w below would escape its quotes and braces into a useless string literal. */
+static std::wstring poc_widen(const char *utf8)
+{
+    std::wstring w;
+    if (!utf8) return w;
+    int wl = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
+    if (wl > 0) { w.resize(wl - 1); if (wl > 1) MultiByteToWideChar(CP_UTF8, 0, utf8, -1, &w[0], wl); }
+    return w;
+}
 static std::wstring poc_json_w(const char *utf8)
 {
     int wl = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
@@ -1503,6 +1513,123 @@ static void poc_send_material_result(const char *name)
     json += L",\"info\":\""; json += poc_json_w(info); json += L"\"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
+/* ------------------------------------------------------------------- the File menu's rawmap I/O ----
+ * "Load Rawmap" / "Save Rawmap As", the first surface that lets someone choose a rawmap file by hand
+ * instead of using the one fixed %LOCALAPPDATA% path. The backend already accepted an arbitrary path
+ * on both sides; these are the +0x328/+0x330 slots' only caller.
+ *
+ * WHAT LOAD DOES, EXACTLY. It STAGES a file: the swap substitutes those bytes into the engine's next
+ * map-load parse. It does not open the map, because nothing here can make the engine load one -- that
+ * needs an engine call from a main-thread frame hook this build has no execution point for. Every
+ * string below says "staged" and names what the person still has to do. Do not soften that into
+ * "loaded": someone who reads "loaded" and sees their old map on screen will think we lost their file.
+ *
+ * The picker is modal on the UI thread, which owns the window, so it blocks this thread only -- the
+ * backend and DOOM are untouched while it is open. */
+
+/* Run the common item dialog. `save` picks the Save-As variant. Returns false when the person
+ * cancelled (the overwhelmingly common non-success case, and not an error worth reporting). */
+static bool poc_pick_rawmap_file(bool save, const wchar_t *title, std::wstring &out_path)
+{
+    out_path.clear();
+
+    /* The UI thread's apartment is already initialized by the WebView host, so this is a nesting
+     * no-op that we must still balance -- and RPC_E_CHANGED_MODE means someone else set a different
+     * apartment, which is fine for a modal dialog and must NOT be treated as failure. */
+    HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    bool need_uninit = SUCCEEDED(init);
+
+    IFileDialog *dlg = nullptr;
+    HRESULT hr = CoCreateInstance(save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog, nullptr,
+                                  CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg));
+    if (SUCCEEDED(hr) && dlg) {
+        COMDLG_FILTERSPEC filters[] = {
+            { L"Rawmap JSON (*.json)", L"*.json" },
+            { L"All files (*.*)",      L"*.*"    },
+        };
+        dlg->SetFileTypes(ARRAYSIZE(filters), filters);
+        dlg->SetFileTypeIndex(1);
+        dlg->SetDefaultExtension(L"json");
+        if (title) dlg->SetTitle(title);
+        if (save) dlg->SetFileName(L"rawmap.json");
+
+        hr = dlg->Show(g_hwnd);
+        if (SUCCEEDED(hr)) {
+            IShellItem *item = nullptr;
+            if (SUCCEEDED(dlg->GetResult(&item)) && item) {
+                PWSTR wide = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &wide)) && wide) {
+                    out_path = wide;
+                    CoTaskMemFree(wide);
+                }
+                item->Release();
+            }
+        }
+        dlg->Release();
+    }
+
+    if (need_uninit) CoUninitialize();
+    return !out_path.empty();
+}
+
+/* Report the staged paths + arm state. The backend hands back a JSON fragment (paths are escaped
+ * there -- a Windows path is full of backslashes), so this forwards it whole rather than re-encoding
+ * field by field. An absent slot means an older backend: report it instead of guessing. */
+static void poc_send_rawmap_status(const wchar_t *note)
+{
+    if (!g_webview) return;
+
+    char status[1024] = "";
+    bool have = false;
+    if (g_iface && g_iface->vtbl && g_iface->vtbl->rawmap_status) {
+        have = g_iface->vtbl->rawmap_status(g_iface, status, (int)sizeof status) > 0;
+    }
+
+    std::wstring json = L"{\"kind\":\"rawmapStatus\",\"ok\":";
+    json += have ? L"true" : L"false";
+    if (have) {
+        json += L",\"status\":";
+        json += poc_widen(status);   /* already a JSON object -- forward it, do not escape it */
+    }
+    json += L",\"note\":\"";
+    json += note ? note : L"";
+    json += L"\"}";
+    g_webview->PostWebMessageAsJson(json.c_str());
+}
+
+/* Ask the backend to point a side at a chosen file. `load_path`/`save_path` NULL = leave alone,
+ * "" = restore that side's default. `arm` is 1/0/-1 as the slot documents. */
+static void poc_rawmap_configure(const char *load_path, const char *save_path, int arm,
+                                 const wchar_t *ok_note)
+{
+    if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->rawmap_configure) {
+        poc_send_rawmap_status(L"This build's backend has no rawmap file surface.");
+        return;
+    }
+
+    char msg[192] = "";
+    int ok = g_iface->vtbl->rawmap_configure(g_iface, load_path, save_path, arm,
+                                             msg, (int)sizeof msg);
+    /* The backend's message is the useful one on refusal -- it names WHY the file was rejected
+     * (wrong type, too big, unreadable). On success its "ok" is not worth showing, so the caller's
+     * own sentence wins. */
+    std::wstring note = ok ? std::wstring(ok_note ? ok_note : L"")
+                           : (L"Refused: " + poc_json_w(msg));
+
+    /* poc_logf carries exactly one unsigned long, so compose the detail line first. The paths are
+     * what makes this log worth having when someone reports "it did not load my file". */
+    {
+        char line[640];
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "rawmap configure: ok=%d arm=%d load=%s save=%s msg=%s",
+                    ok, arm,
+                    load_path ? load_path : "(unchanged)",
+                    save_path ? save_path : "(unchanged)", msg);
+        poc_log(line);
+    }
+    poc_send_rawmap_status(note.c_str());
+}
+
 /* Asset browser: consume the latest published preview (+0x2D0 get_preview -- see preview.c). The
  * backend encodes pixels as a PNG data URI, so this is a pure fetch: no rendering or engine touch.
  * Two-step size probe because the image can be a few hundred KB and the required size is only known
@@ -2521,6 +2648,37 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 std::wstring nm; json_get_wstr(json, L"name", nm);
                 std::string n8 = w_to_utf8(nm);
                 poc_send_material_result(n8.c_str());
+            } else if (cmd == L"rawmapStatus") {
+                poc_send_rawmap_status(L"");
+            } else if (cmd == L"rawmapLoadPick") {
+                /* Staging a load ARMS the swap -- picking a file is an unambiguous "use this one".
+                 * Note what arming also does: the save shadow shares this one gate, so the next
+                 * in-game save mirrors over the CURRENT save destination. That is why the reply
+                 * names the file rather than just saying "done". */
+                std::wstring picked;
+                if (poc_pick_rawmap_file(false, L"Load Rawmap", picked)) {
+                    std::string p8 = w_to_utf8(picked);
+                    poc_rawmap_configure(p8.c_str(), nullptr, 1,
+                                         L"Staged. It opens with the next map load.");
+                } else {
+                    poc_send_rawmap_status(L"");   /* cancelled -- refresh, say nothing */
+                }
+            } else if (cmd == L"rawmapSavePick") {
+                std::wstring picked;
+                if (poc_pick_rawmap_file(true, L"Save Rawmap As", picked)) {
+                    std::string p8 = w_to_utf8(picked);
+                    poc_rawmap_configure(nullptr, p8.c_str(), -1,
+                                         L"Saves now mirror to that file.");
+                } else {
+                    poc_send_rawmap_status(L"");
+                }
+            } else if (cmd == L"rawmapArm") {
+                int on = 0; json_get_int(json, L"on", &on);
+                poc_rawmap_configure(nullptr, nullptr, on ? 1 : 0,
+                                     on ? L"Rawmap swap armed." : L"Rawmap swap disarmed.");
+            } else if (cmd == L"rawmapResetPaths") {
+                /* Empty (not NULL) on both sides = restore the built-in %LOCALAPPDATA% pair. */
+                poc_rawmap_configure("", "", -1, L"Back to the default rawmap.json.");
             } else if (cmd == L"newEntity") {
                 std::wstring js, lab;
                 json_get_wstr(json, L"json", js); json_get_wstr(json, L"label", lab);

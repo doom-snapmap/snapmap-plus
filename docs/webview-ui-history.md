@@ -6,6 +6,34 @@ at the bottom is the original POC buildout, before this doc tracked dates per en
 This is an engineering log for maintainers, not the product changelog. The release notes users read are in
 [`CHANGELOG.md`](../CHANGELOG.md).
 
+### 2026-09-07 -- A File menu, and rawmaps that can live anywhere under any name
+
+- **New `File` menu, before `View`**: Load Rawmap..., Save Rawmap As..., a `Rawmap Swap Armed` tick, Use
+  Default Location, and a readout of both staged paths (shortened to the last two path components, full
+  path on hover). Until now every rawmap had to be the single file
+  `%LOCALAPPDATA%\snapmap-plus\rawmap.json`, so keeping two of them meant renaming files by hand between
+  sessions, with nothing to stop an armed save overwriting one you had staged deliberately.
+- **The backend already supported this.** `sh_rawmap_swap_set_source` and `sh_rawmap_save_set_dest` have
+  existed since the swap and shadow were written, for the test harness -- neither had a caller a person
+  could reach. Two new append-only slots, `rawmap_status` +0x328 and `rawmap_configure` +0x330, are their
+  first one; the vtable grows to `0x338`.
+- **Load STAGES a file; it does not open a map.** The swap is passive: it substitutes the staged bytes into
+  the engine's next map-load parse. Nothing in the frontend can drive an editor load on demand -- that
+  needs an engine call from a main-thread frame hook, and this build has no execution point for one (the
+  only route to the main thread today is the console command buffer, which is freeze-prone for heavy
+  lifecycle calls). So the menu says "Staged. It opens with the next map load." and names what is left to
+  do. Deliberately *not* worded as "loaded": someone who reads that, then sees their old map still on
+  screen, reasonably concludes we lost their file.
+- **A picked load file is checked before it is accepted** -- readable, non-empty, at most 64 MB (the same
+  ceiling `read_source_file` already enforced silently), and starting with `{` after a BOM and whitespace.
+  The realistic mistake is picking a compressed `map.decl`, which is now refused at the click with a
+  reason instead of feeding unparseable bytes into a map load minutes later. This is a file-shape check,
+  not structural validation -- a malformed-but-JSON rawmap still reaches the engine.
+- **Paths are JSON-escaped in the backend**, where they are read. A Windows path is mostly backslashes, so
+  reporting one unescaped would break `JSON.parse` on the very menu meant to display it.
+- Verified by build, the native + JavaScript suites, and browser preview (menu order, the arm tick round
+  trip, no console errors). **Not tested in-game.**
+
 ### 2026-09-03 -- The schema's enum value sets, corrected against the engine constants
 
 - **Sixteen enums in `schema_slice.js` listed the wrong values**, which is what issue #76 reported: the
