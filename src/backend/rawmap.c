@@ -350,6 +350,21 @@ int sh_rawmap_swap_is_armed(void)
     return (InterlockedCompareExchange(&g_gate, 0, 0) != 0) ? 1 : 0;
 }
 
+/* Whether the swap WILL fire -- the explicit gate OR the test flag-file, which
+ * is what the detour itself decides on.
+ *
+ * Separate from sh_rawmap_swap_is_armed on purpose. That one answers "is the
+ * control a person set turned on", and deliberately hides the flag-file so it
+ * cannot report ON for something turning the control off would not clear. This
+ * one answers "will the detour substitute a buffer", which is the question a
+ * tool has to ask before it calls the function we detour: the daemon's
+ * engine-direct codec oracle calls idSnapMap::DeserializeFromJson directly, and
+ * doing that while the swap will fire faults inside the engine. */
+int sh_rawmap_swap_will_fire(void)
+{
+    return rawmap_armed(NULL) ? 1 : 0;
+}
+
 int sh_rawmap_swap_set_source(const char *path)
 {
     if (path == NULL || path[0] == '\0') {
