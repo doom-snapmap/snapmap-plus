@@ -3,6 +3,26 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.8 -- 2026-09-07 (beta)
+
+**Demons walk and climb your own geometry**
+
+Mark the Blocking Boxes you build in DOOM's own object settings and Snapmap+ bakes navigation onto them at map load, so demons walk and even climb onto your platforms. Snapmap+ also now runs on both the Vulkan and OpenGL versions of the game.
+
+### New
+- A Navigation tab lets you mark which Blocking Box surfaces demons are allowed to walk on, baked into the map when it loads.
+- Demons now climb onto marked surfaces well above step height, using the animation that suits each one.
+
+### Improved
+- Snapmap+ attaches to whichever DOOM executable is running, so everything keeps working after you switch between Vulkan and OpenGL.
+- The installer now spots the game running under either renderer and asks you to close it instead of failing on a locked file.
+
+### Fixed
+- Marks made during a session survive pressing Play instead of being quietly discarded for the rest of the session.
+- The Entity State tab accepts valid values again instead of rejecting them as unknown and suggesting ones the game refuses.
+
+_Plus 23 smaller fixes and internal changes._
+
 ## v0.2.1-beta.7 -- 2026-09-03 (beta)
 
 **Release notes you can actually read**
