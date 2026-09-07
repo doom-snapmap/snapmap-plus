@@ -87,6 +87,18 @@ itself is not lost: `sh_debugrender dumprenderinfo` prints it, followed by every
 it continuously needs a renderer hook that does not exist yet; re-add the cvar in the same change that
 adds one, not before.
 
+### The six `cs_*` movement cvars — dash and meathook tuning
+The original's other six cvars — `cs_dash_direction_multiplier`, `cs_dash_ground_velocity_multiplier`,
+`cs_dash_time_seconds`, `cs_num_dash_slices`, `cs_mh_direction_multiplier`,
+`cs_mh_movement_multiplier` — tuned the dash and meathook cheat movement it implements in its spliced
+SuperScript override functions, the same `cs_*` cluster (`cs_dash` and friends) the clone carries only
+as parked, disabled objects. The clone reimplements none of that movement code, and the names appear
+nowhere in DOOM's own binary, so there is no engine-side reader either: registering the six would
+advertise settings with nothing to multiply. As with `snaphak_show_rmcount`, the clone leaves the rows
+out (`src/backend/cvars.c`), so of the original's nine cvars it registers two: `sh_pretty_on` and
+`sh_copy_reslist_to_clipboard`. Re-add the six in the same change that ports the dash/meathook
+SuperScript cluster they tune, not before.
+
 ## The original sanctioned divergence — the fault-shield
 
 The original installs two fault detours (on the engine's `Error` and `FatalError`) that each format a

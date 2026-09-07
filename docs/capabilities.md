@@ -48,12 +48,6 @@ Console variables; defaults shown in parentheses.
 |---|---|
 | `sh_copy_reslist_to_clipboard` (0) | Copy `sh_listres` output to the clipboard. |
 | `sh_pretty_on` (0) | Pretty-print saved rawmap JSON. |
-| `cs_dash_direction_multiplier` (1.0) | Scale dash direction. |
-| `cs_dash_ground_velocity_multiplier` (2.0) | Scale dash direction when on the ground. |
-| `cs_dash_time_seconds` (0.5) | Time period over which the dash is applied. |
-| `cs_num_dash_slices` (120) | Number of slices used to apply dash velocity. |
-| `cs_mh_direction_multiplier` (1.0) | Scale meathook direction. |
-| `cs_mh_movement_multiplier` (10.0) | Scale meathook velocity. |
 
 ## SnapStack ops
 
@@ -309,6 +303,7 @@ A few internals are present for parity but are not features you drive directly:
 
 - The 5 parked `cs_*` SuperScript objects (`cs_invert_activator`, `cs_flyto_target`,
   `cs_test_equipped_weapon`, `cs_clone_activator`, `cs_dash`) are disabled gameplay-cheat objects
-  in this build; their only live surface is the `cs_*` cvars above.
+  in this build; they have no live surface. (The original's six `cs_*` tuning cvars for this
+  cluster are not registered either — see "Not carried over" in [`fidelity.md`](fidelity.md).)
 - `snaphak_ext` (a VFS / shader-compile library) is dormant, and `snaphak_algo` (SIMD + threading)
   is an optional performance accelerator — neither is required to match the original's behavior.

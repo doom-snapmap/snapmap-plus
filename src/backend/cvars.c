@@ -1,6 +1,6 @@
-/* cvars.c -- see cvars.h. The cvar registrar: 8 of the 9 OG cvars (clone of OG XINPUT1_3's static-init
- * cvar table + spine flush FUN_1800229b1 / FUN_180022610). snaphak_show_rmcount is left out on purpose
- * -- see the table comment below and docs/fidelity.md.
+/* cvars.c -- see cvars.h. The cvar registrar: 2 of the 9 OG cvars (clone of OG XINPUT1_3's static-init
+ * cvar table + spine flush FUN_1800229b1 / FUN_180022610). snaphak_show_rmcount and the six cs_dash_* /
+ * cs_mh_* movement cvars are left out on purpose -- see the table comment below and docs/fidelity.md.
  *
  * CVAR REGISTER ABI (DIRECT, from the cvar-register flush disasm @0x22610):
  *   ( CvarRegister )( self [embedded idCVar], name, default, typecode, desc, argComp )
@@ -80,15 +80,25 @@ typedef int (*name_hash_fn)(const char *name);
  * our own rows register, so our cvars would miss it -- register with the flag up front instead. */
 #define CVAR_FLAG_NOCHEAT         0x10u
 
-/* The cvar table: rows 0..7 are the OG cvars from our cvar-descriptor RE (default / typecode 1=BOOL
+/* The cvar table: rows 0..1 are the OG cvars from our cvar-descriptor RE (default / typecode 1=BOOL
  * 2=INT 4=FLOAT / description verbatim; the OG's snaphak_* name prefix is renamed to our sh_* -- a
- * deliberate post-rebrand divergence); order matches the descriptor dump.
+ * deliberate post-rebrand divergence); relative order matches the descriptor dump.
  *
- * The dump's 8th row, snaphak_show_rmcount ("draws the current number of rendermodels active"), is NOT
- * here. Its switch had somewhere to go in the OG -- a spliced SuperScript override fn that drew the count
- * over the game each frame -- and the clone reimplements no such overlay, so the row would register a name
- * that nothing can act on. Do not restore it from the descriptor dump without the overlay; the reasoning
- * is recorded under "Not carried over" in docs/fidelity.md. */
+ * The OG registers NINE cvars; the clone registers these TWO. The other seven descriptor-dump rows are
+ * NOT here, all for the same reason: nothing in the clone (or in DOOM itself) could act on them.
+ *   - snaphak_show_rmcount ("draws the current number of rendermodels active"): its switch had somewhere
+ *     to go in the OG -- a spliced SuperScript override fn that drew the count over the game each frame --
+ *     and the clone reimplements no such overlay.
+ *   - The six cs_dash_* / cs_mh_* movement cvars (cs_dash_direction_multiplier,
+ *     cs_dash_ground_velocity_multiplier, cs_dash_time_seconds, cs_num_dash_slices,
+ *     cs_mh_direction_multiplier, cs_mh_movement_multiplier): they tune the dash / meathook cheat
+ *     movement the OG implements in its spliced cs_* SuperScript override cluster (cs_dash and friends),
+ *     which the clone carries only as parked, disabled objects and reimplements no part of. None of the
+ *     six names appears anywhere in DOOM's own binary either, so there is no engine-side reader -- the
+ *     rows would register six settings that nothing can multiply.
+ * Do not restore any of the seven from the descriptor dump without first building its consumer (the
+ * overlay for show_rmcount; the ported dash/meathook SuperScript cluster for the cs_* six); the
+ * reasoning is recorded under "Not carried over" in docs/fidelity.md. */
 typedef struct cvar_row {
     const char *name;
     const char *def;
@@ -97,12 +107,6 @@ typedef struct cvar_row {
 } cvar_row;
 
 static const cvar_row CVARS[] = {
-    { "cs_dash_direction_multiplier",        "1.0",  4, "scale dash direction by this" },
-    { "cs_dash_ground_velocity_multiplier",  "2.0",  4, "scale dash direction by this if on ground" },
-    { "cs_dash_time_seconds",                "0.5",  4, "time period over which to apply the dash slices" },
-    { "cs_num_dash_slices",                  "120",  2, "Num slices for applying dash velocity" },
-    { "cs_mh_direction_multiplier",          "1.0",  4, "scale meathook direction by this" },
-    { "cs_mh_movement_multiplier",           "10.0", 4, "scale meathook velocity by this much" },
     { "sh_pretty_on",                        "0",    1, "enables pretty printing of saved rawmap json" },
     { "sh_copy_reslist_to_clipboard",        "0",    1, "when sh_listres is used the contents will be copied to the clipboard" },
 };
@@ -194,7 +198,7 @@ int sh_cvar_table_row(int index, const char **name, const char **def, const char
  * guarded so a wrong offset degrades to a logged skip, never a crash/corruption. The one-shot install
  * latch guarantees this pass runs exactly once, so no cvar is double-linked.
  *
- * Returns the number of cvars inserted into the FULL table (0..8). cvarSys / hashfn NULL => 0 (logged). */
+ * Returns the number of cvars inserted into the FULL table (0..2). cvarSys / hashfn NULL => 0 (logged). */
 static int cvar_findable_insert_one(uint8_t *cvarSys, name_hash_fn hashfn, int i)
 {
     __try {
@@ -328,7 +332,7 @@ int sh_cvars_install(void *cvar_register, const void *module_base)
         ok += register_one(reg, i);
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B2: cvars registered %d/%d (register=%p, non-EXPOSE / gate-1-invisible, NOCHEAT so console sets work without dev mode; 8 of OG's 9 rows)",
+        "B2: cvars registered %d/%d (register=%p, non-EXPOSE / gate-1-invisible, NOCHEAT so console sets work without dev mode; 2 of OG's 9 rows)",
         ok, CVAR_COUNT, cvar_register);
     backend_log(line);
 

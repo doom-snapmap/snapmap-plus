@@ -17,7 +17,7 @@
 # -- a detour on the engine idLangDict sort that appends strings/strids.json rows to the live string table);
 # overrides (the OVERRIDES FILE-SHADOW, port of OG FUN_18000b370 -- a VTABLE-SLOT swap of the engine
 # resource-provider's open-by-name method, serving %LOCALAPPDATA%\snapmap-plus\overrides\<name> from disk).
-# cvars (register the 9 cvars via the engine OUTER cvar register 0x1A04F00); commands (register the 30
+# cvars (register the 2 cvars via the engine OUTER cvar register 0x1A04F00); commands (register the 30
 # console commands via the engine AddCommand 0x1AA3630, cmdSystem global decoded from the CmdSystemLea
 # accessor; the trivial handlers wire sh_rawmaps_on/off to the shipped ops -- ports of
 # OG FUN_1800229b1's install spine). clipboard (CF_TEXT clipboard-set/get, port of OG FUN_1800053f0) feeds

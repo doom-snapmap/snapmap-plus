@@ -1,4 +1,4 @@
-/* cvars.h -- register the cvar table with the engine cvar system: 8 of the 9 OG cvars (clean-room
+/* cvars.h -- register the cvar table with the engine cvar system: 2 of the 9 OG cvars (clean-room
  * reimplementation of OG XINPUT1_3's static-init cvar push_back + spine flush; the OG's snaphak_*
  * name prefix renamed to our sh_*).
  *
@@ -9,12 +9,15 @@
  * massages the bits internally). None of the 9 carry EXPOSE/NOCHEAT -> they register non-EXPOSE
  * (gate-1-invisible), which is the faithful OG behavior.
  *
- * The 8th, snaphak_show_rmcount, is deliberately NOT registered: the OG read it from its spliced
- * SuperScript override fns and drew the count over the game, and the clone has no such overlay to
- * switch on -- registering the name would advertise a setting that cannot do anything. See the
- * "Not carried over" entry in docs/fidelity.md before re-adding it from the descriptor dump.
+ * Seven of the 9 are deliberately NOT registered, because registering a name nothing can act on would
+ * advertise a setting that cannot do anything: snaphak_show_rmcount (the OG read it from its spliced
+ * SuperScript override fns and drew the rendermodel count over the game; the clone has no such overlay
+ * to switch on) and the six cs_dash_* / cs_mh_* movement cvars (they tune the OG's spliced dash /
+ * meathook SuperScript cheat cluster, which the clone does not port -- and the names appear nowhere in
+ * DOOM's own binary, so there is no engine-side reader either). See the "Not carried over" entries in
+ * docs/fidelity.md before re-adding any of them from the descriptor dump.
  *
- * Our reimpl carries the remaining 8 rows as a static table and calls the engine register fn (resolved by
+ * Our reimpl carries the remaining 2 rows as a static table and calls the engine register fn (resolved by
  * the signature scanner as "CvarRegister", NO hardcoded RVA). The embedded idCVar object the engine writes
  * through lives in persistent, never-freed, 16-byte-aligned backing storage -- the engine links each
  * cvar into its process-lifetime cvar list, exactly as OG's static descriptors persist for the process.
@@ -44,14 +47,14 @@
  *                   sig decode +0x10, with *(module_base+0x55b7290) as the logged fallback -- see
  *                   sh_resolve_cvarsys), and it anchors the NameHash sig resolve too.
  *                   NULL => the register loop still runs but the findable-insert is SKIPPED (logged).
- * Does NOT depend on the cmdSystem global. Emits "B2: cvars registered N/8 ..." +
- * "B2: cvar findable-insert N/8 (cvarSys=%p count=%d cap=%d ...)". Returns the count registered (0..8). */
+ * Does NOT depend on the cmdSystem global. Emits "B2: cvars registered N/2 ..." +
+ * "B2: cvar findable-insert N/2 (cvarSys=%p count=%d cap=%d ...)". Returns the count registered (0..2). */
 int sh_cvars_install(void *cvar_register, const void *module_base);
 
 /* CVARS index constants (mirror the cvars.c CVARS[] table order) -- for consumers that read a
- * cvar's live value via sh_cvar_value_int. Rows 0..7 are the OG cvars the clone registers. */
-#define B2_CVAR_SH_PRETTY_ON                 6
-#define B2_CVAR_SH_COPY_RESLIST_TO_CLIPBOARD 7
+ * cvar's live value via sh_cvar_value_int. Rows 0..1 are the OG cvars the clone registers. */
+#define B2_CVAR_SH_PRETTY_ON                 0
+#define B2_CVAR_SH_COPY_RESLIST_TO_CLIPBOARD 1
 
 /* Read the live INT/BOOL value of cvar `index` (one of the B2_CVAR_* constants) from OUR engine-
  * populated backing object. The engine stores valueInteger at idCVar+0x30 (DIRECT from the source-of-
