@@ -148,7 +148,7 @@ The **status bar** along the bottom stays visible on every tab too:
 
 ## The Entities Tab
 
-![Entities tab: list populated, one row selected](images/entites-tab-dark.png)
+![Entities tab: list populated, one row selected](images/entities-tab-dark.png)
 
 The Entities tab lists every entity placed in your map, by its **reference ID** and, if you've given it
 one, its display name. The list keeps itself up to date automatically as you edit — **Refresh** is there
@@ -372,6 +372,8 @@ play/stop button so you can listen before committing. Below the preview:
 tab](#the-entities-tab) to open the same browser shown above as a modal, scoped to that entity — apply an
 asset straight to it without leaving the Entity State panel.
 
+![The Browse assets modal opened from the Entities tab, scoped to the selected entity](images/assets-modal-dark.png)
+
 ---
 
 ## Reclassing an Entity
@@ -414,8 +416,9 @@ compatible with any classname — no mismatch risk, regardless of what type you'
 
 Rather than making you build one of these by hand every time, Snapmap+ seeds ready-to-place starting
 points — **Unknown**, **Timeline**, and **Lift** — directly into DOOM's own Create menu, under a
-**"*Custom"** tab. These ship as a built-in [override package](#overrides) — the same mechanism you can
-use yourself to add your own declarations.
+**"*Custom"** tab. These ship as Snapmap+'s own built-in [overrides](#overrides) — the same mechanism you
+can use yourself to add your own declarations, served from memory rather than written into your
+`overrides\` folder.
 
 ![DOOM's Create menu with the *Custom tab open, placing a Timeline entity](images/custom-palette-tab.jpg)
 
@@ -725,17 +728,25 @@ fresh install, as an obvious place to drop anything you make yourself rather tha
 package folder and `package.json` for it. It isn't special beyond that, and it isn't required — your own
 content is just as free to live in a package folder of its own as anyone else's is.
 
-**This replaces the old method.** Earlier versions of Snapmap+ let you drop a loose file anywhere under
-`overrides\`, matching the path/filename of the resource you wanted to replace, with no package folder
-involved at all. That no longer works — every override now has to live inside *some* package folder (one
-with its own `package.json`). **If you're updating from an older version**, this happens for you
-automatically: your existing loose files are moved into `my-overrides` the first time you update, with
-nothing lost.
+**Dropping a loose file still works.** Placing a file at `overrides\<resource path>`, matching the
+path/filename of the thing you want to replace, shadows that resource exactly as it always did — it is
+checked before any package, so it wins. What a package adds on top is *publishing* identities DOOM never
+shipped (the thing a loose file cannot do), and uninstalling by deleting one folder.
+
+**If you're updating from an older version**, the one shared `overrides\generated\` tree that older
+releases put everything in is moved into a real `my-overrides` package the first time you update. Files
+are copied before the old folder is removed and nothing is ever overwritten, so a `my-overrides` you
+already had keeps its own copy of anything that collides.
 
 **Packages overlap safely.** Two packages both shipping the same shared asset is normal and composes
-without complaint. Only a genuine disagreement — two packages naming the same thing differently — is
-refused, and Snapmap+ names both packages in the error so you know exactly what to fix. Nothing is ever
-silently overwritten by install order.
+without complaint. Where they genuinely disagree, what happens depends on which kind of thing they
+disagree about:
+
+- A **new identity DOOM never shipped**, claimed by two packages with differing contents, is **refused** —
+  loudly, and naming both packages, so neither silently wins and you know exactly what to fix.
+- An **existing DOOM resource** both packages shadow is a precedence question, so it is settled by the
+  `"priority"` in each `package.json` (higher wins; ties break by name) and every contested resource is
+  reported. Install order never decides it, and nothing is silently overwritten.
 
 Actually authoring a package's *contents* is a separate skill from placing the folder — the format
 depends entirely on which resource you're replacing, and isn't covered in this guide.
@@ -773,17 +784,28 @@ the log each time it starts, so you can always check what's currently shadowing 
 ### Maps can carry their own mod packages
 
 Saving a map automatically checks which of your installed packages it actually uses, and embeds those
-packages **inside the map file itself** — no extra step, nothing to remember to attach.
+packages **inside the map file itself** — no extra step, nothing to remember to attach. A map can carry up
+to 16 packages this way.
+
+**A package you want to travel with a map has to sit directly under `overrides\`**, with a folder name
+made of lowercase letters, digits, `-` or `_`. The grouping subfolders described above are fine for
+organising your own installs, but a package nested inside one (`overrides\demons\cyberdemon\`) cannot be
+named in a map file, so it is skipped when the map is saved — the map then arrives at another player
+missing the package it needed. Keep anything you intend to share one level deep.
 
 When someone opens a map that needs a package they don't have installed, Snapmap+ asks once:
 
 > This map brings its own mod package: **cyberdemon** (12 files, 340 KB). It has to be installed before
 > the map can load. Install it now?
 
-Click **Yes**, and Snapmap+ installs everything the map brought and the map plays right away — no DOOM
-restart needed. A map that needs several packages lists them all in one prompt instead of asking once per
-package. Click **No**, and nothing is installed; Snapmap+ won't ask again for that exact package unless
-you ask it to load the map again.
+Click **Yes** and Snapmap+ installs everything the map brought. **No DOOM restart is needed**, but the
+load that raised the prompt is always refused — open the map again and it plays. If you are quick enough
+that the newly installed content is still registering, that retry is refused too, with a message saying
+so; wait a moment and open it once more. A map that needs several packages lists them all in one prompt
+instead of asking once per package.
+
+Click **No** and nothing is installed. Snapmap+ won't ask about that package again for the rest of the
+session, however many times you reopen the map — restart DOOM if you want to be asked again.
 
 **Only players who also have Snapmap+ installed can play a map's mods.** Unlike the entity edits covered
 elsewhere in this guide, a mod package is content Snapmap+ itself resolves — there's no install prompt and
