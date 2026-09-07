@@ -62,6 +62,8 @@ int crash_record_json(char *buf, size_t cap, const crash_record *r)
     CR_APPENDF("\"dump\":\"%s\",", e_small);
     crash_json_escape(e_small, sizeof e_small, r->version ? r->version : "");
     CR_APPENDF("\"version\":\"%s\",", e_small);
+    crash_json_escape(e_small, sizeof e_small, r->renderer ? r->renderer : "");
+    CR_APPENDF("\"renderer\":\"%s\",", e_small);
     crash_json_escape(e_small, sizeof e_small, r->time ? r->time : "");
     CR_APPENDF("\"time\":\"%s\"}", e_small);
 

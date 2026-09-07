@@ -1557,7 +1557,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     'Play_vo_snapmaps_genericfemale1_areaisoverrun_01|doom_dlc3_vo\n' +
     'Play_vo_snapmaps_genericfemale1_argh1_01|doom_dlc3_vo\n';
 
-  function previewList() { return {kind:'list', version:'local (preview)', editorReady:true, count:0, entities:previewEnts, timelines:previewTimelines}; }
+  function previewList() { return {kind:'list', version:'local (preview)', renderer:'', editorReady:true, count:0, entities:previewEnts, timelines:previewTimelines}; }
   var PREVIEW_MATERIALS =
     'default\nmaterial/snapmap/dynamic_block_textured_gore_floor\n' +
     'models/characters/doommarine/doommarine_eye\n' +
@@ -3756,6 +3756,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       bridgeDot.setAttribute('aria-label', 'Connected');
       bridgeDot.title = 'Connected';
       appVersion = d.version || '';   // rides along in feedback reports
+      appRenderer = d.renderer || '';  // 'vulkan' | 'opengl' | '' -- rides along too
       document.getElementById('verText').textContent = 'Snapmap+ ' + (d.version || '');
       flash('Updated: ' + new Date().toLocaleTimeString());
       allEntities = d.entities || [];
@@ -7588,6 +7589,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
   // ---- feedback report dialog (the bottom-right "?") ----
   var appVersion = '';          // from the list message; "" until the first list arrives
+  var appRenderer = '';         // which renderer the game is running, from the same message
   var reportInFlight = false;   // one submit at a time (the host guards too)
   var rpModal = document.getElementById('reportModal');
   function showReportModal(s){ if (rpModal) rpModal.style.display = s ? 'flex' : 'none'; }
@@ -7616,12 +7618,16 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       body: body,
       contact: (document.getElementById('rpContact').value || '').trim(),
       version: appVersion,
+      renderer: appRenderer,
       website: document.getElementById('rpWebsite').value || ''   // honeypot -- must stay empty
     })});
   });
   // ---- crash-report dialog (auto-opens when the backend leaves a crash record) ----
   var crModal = document.getElementById('crashModal');
   var crashRecord = null, crashInFlight = false;
+  // 'vulkan'/'opengl' -> the name people actually write; anything else (including a record written
+  // before the field existed) -> '' so the caller simply omits the line.
+  function rendererLabel(r){ return r === 'vulkan' ? 'Vulkan' : (r === 'opengl' ? 'OpenGL' : ''); }
   // branded header: reuse the menubar's own inline logo (copy the src -- never duplicate the data URI)
   (function(){
     var mb = document.querySelector('.menubar .icon'), cl = document.getElementById('crashLogo');
@@ -7656,6 +7662,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var line = 'Fault ' + (rec.code || '?') + ' at ' + (rec.module || '?') + '+' + (rec.rip_rva || '0x0');
     if (rec.time) line += '  --  ' + rec.time;
     if (rec.version) line += '  --  version ' + rec.version;
+    if (rendererLabel(rec.renderer)) line += '  --  ' + rendererLabel(rec.renderer);
     document.getElementById('crashSummary').textContent = engineText ? engineText + '\n' + line : line;
     document.getElementById('crashStack').textContent = rec.stack ? rec.stack : '(no call stack captured)';
   }
@@ -7683,6 +7690,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                (rec.fault_addr && rec.fault_addr !== '0x0' ? ' (data address ' + rec.fault_addr + ')' : ''));
     if (rec.time) lines.push('When: ' + rec.time);
     if (rec.version) lines.push('Version at crash: ' + rec.version);
+    // the crash record's own renderer, not the live one: the game relaunches into the other
+    // executable when r_renderAPI changes, so this session may not be the one that died
+    if (rendererLabel(rec.renderer)) lines.push('Renderer at crash: ' + rendererLabel(rec.renderer));
     if (engineText) lines.push('Engine message: ' + engineText);
     lines.push('Call stack:', rec.stack ? rec.stack : '(none captured)');
     if (rec.dump)
@@ -7693,6 +7703,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var b = document.getElementById('crSend');
     b.disabled = true; b.textContent = 'Sending...';
     post({cmd:'crashSubmit', title: title, body: body,
+          renderer: rec.renderer || '',   // '' -> the host falls back to the live renderer
           contact: (document.getElementById('crContact').value || '').trim(),
           attachLogs: document.getElementById('crAttach').checked ? 1 : 0,
           website: document.getElementById('crWebsite').value || ''});   // honeypot -- must stay empty

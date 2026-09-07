@@ -42,6 +42,7 @@
 #include "theme_bootstrap.h"
 #include "report_scrub.h"   /* pure anonymization scrub + tail for the crash-report log attachment */
 #include "log_rotate.h"     /* the UI log is append-only too; bound it like the backend's */
+#include "host_image.h"     /* sh_host_renderer_name -- which renderer the player is actually running */
 #include "../sh_entity_desc.h" /* GENERATED: OUR RE-extracted Inherit/Classname descriptions (same table sh_tabs.cpp uses) */
 #include "../sh_event_catalog.h" /* GENERATED: OUR event-def catalog, 1611 events (same table sh_timeline.cpp uses) */
 #include "../sh_entity_asset_lists.h" /* GENERATED: OUR per-entity-class model/anim asset lists (same table sh_timeline.cpp uses) */
@@ -1330,6 +1331,9 @@ static void poc_emit_list(int n, int ready, const char *reason)
     std::wstring json; json.reserve((size_t)(n + g_tl_count) * 96 + 96);
     json += L"{\"kind\":\"list\",\"seq\":"; json += std::to_wstring(seq);
     json += L",\"version\":\""; json += poc_json_w(g_version.c_str());
+    /* the renderer rides the list message alongside the version, for the same reason: the feedback
+     * dialog composes its own payload in the page and needs both there. */
+    json += L"\",\"renderer\":\""; json += poc_json_w(sh_host_renderer_name());
     json += L"\",\"editorReady\":"; json += ready ? L"true" : L"false";
     json += L",\"count\":"; json += std::to_wstring(n);
     json += L",\"entities\":[";
@@ -2021,10 +2025,12 @@ static void poc_apply_save_prefab_meta(const std::string &name, const std::strin
 /* CAPABILITY NOTE (this is the frontend's ONLY network touch, and why winhttp appears in the import
  * table): one user-initiated HTTPS POST per click on a Send button -- the feedback dialog's, or the
  * crash-report dialog's -- carrying exactly what the user typed (category/title/details/optional
- * contact) plus the installed version string, and, for a crash report the user chose to attach logs
- * to, the ANONYMIZED tails of the local logs (account/machine names scrubbed first; see
- * report_scrub.h), to the project's feedback relay -- which files it as a public issue on the
- * project's GitHub tracker. Nothing is downloaded or executed, nothing runs periodically, nothing is
+ * contact), the installed version string, the renderer the game is running ("vulkan"/"opengl" -- one
+ * token, read from which renderer library the host process loaded; no other system or hardware
+ * information is gathered), and, for a crash report the user chose to attach logs to, the ANONYMIZED
+ * tails of the local logs (account/machine names scrubbed first; see report_scrub.h), to the
+ * project's feedback relay -- which files it as a public issue on the project's GitHub tracker.
+ * Nothing is downloaded or executed, nothing runs periodically, nothing is
  * sent without that explicit click. Full pipeline + the relay's own source: docs/feedback.md +
  * feedback/.
  *
@@ -2608,21 +2614,29 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 /* the crash dialog's Send: unlike reportSubmit (opaque pipe), the payload is composed
                  * HERE -- the one enrichment only this side can do is the anonymized log attachment.
                  * Rides the same worker thread + reportResult plumbing as the feedback dialog. */
-                std::wstring title, bodyw, contact, hp;
+                std::wstring title, bodyw, contact, hp, renderer;
                 int attach = 0;
                 json_get_wstr(json, L"title", title);
                 json_get_wstr(json, L"body", bodyw);
                 json_get_wstr(json, L"contact", contact);
                 json_get_wstr(json, L"website", hp);
+                /* The renderer the CRASHING session ran, forwarded from the crash record. DOOM ships
+                 * one executable per renderer and relaunches itself when r_renderAPI changes, so the
+                 * live process reporting the crash is not necessarily the one that died -- the live
+                 * answer is only the fallback for a record written before the field existed. */
+                json_get_wstr(json, L"renderer", renderer);
                 json_get_int(json, L"attachLogs", &attach);
                 if (!title.empty() && !bodyw.empty() && !g_report_inflight) {
                     std::string logs = attach ? crash_collect_logs() : std::string();
+                    std::string rend = renderer.empty() ? std::string(sh_host_renderer_name())
+                                                        : w_to_utf8(renderer);
                     std::string p;
                     p.reserve(logs.size() + 12288);
                     p += "{\"category\":\"crash\",\"title\":\"";  p += poc_json_n(w_to_utf8(title));
                     p += "\",\"body\":\"";                         p += poc_json_n(w_to_utf8(bodyw));
                     p += "\",\"contact\":\"";                      p += poc_json_n(w_to_utf8(contact));
                     p += "\",\"version\":\"";                      p += poc_json_n(g_version);
+                    p += "\",\"renderer\":\"";                     p += poc_json_n(rend);
                     p += "\",\"website\":\"";                      p += poc_json_n(w_to_utf8(hp));
                     p += "\",\"logs\":\"";                         p += poc_json_n(logs);
                     p += "\"}";

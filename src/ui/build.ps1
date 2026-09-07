@@ -28,6 +28,7 @@ $ErrorActionPreference = "Stop"
 $here   = Split-Path -Parent $MyInvocation.MyCommand.Path            # src\ui
 $repo   = Split-Path -Parent (Split-Path -Parent $here)             # repo root
 $common = Join-Path (Split-Path -Parent $here) "common"            # src\common
+$backend = Join-Path (Split-Path -Parent $here) "backend"          # src\backend (host_image only)
 $build  = Join-Path $repo "build"
 $objDir = Join-Path $build "obj\uiwv"
 $sdkDir = Join-Path $build "webview2sdk"
@@ -175,9 +176,14 @@ Write-Host "generated $hdrPath ($([Math]::Round(($html.Length/1KB),1)) KB of HTM
 $incArgs = @(
     "/I`"$wvInclude`"",
     "/I`"$objDir`"",
-    "/I`"$common`""
+    "/I`"$common`"",
+    # src\backend, for host_image.h. The frontend compiles exactly ONE backend file, host_image.c, so a
+    # report can name the renderer the player is actually running. It is self-contained (windows.h + the
+    # CRT) and answers about the HOST PROCESS -- the same DOOM process both halves live in -- so this is
+    # reuse of the backend's answer, not a second implementation that could drift from it.
+    "/I`"$backend`""
 ) -join " "
-$srcArgs = "webview\snapmap_plus_ui_webview.cpp webview\config_message.cpp webview\theme_bootstrap.cpp sl_exports.cpp ..\common\log_rotate.c"
+$srcArgs = "webview\snapmap_plus_ui_webview.cpp webview\config_message.cpp webview\theme_bootstrap.cpp sl_exports.cpp ..\common\log_rotate.c ..\backend\host_image.c"
 $libArgs = @(
     "`"$wvLib`"",
     "ole32.lib", "oleaut32.lib", "shell32.lib", "shlwapi.lib",

@@ -11,10 +11,10 @@
  * fine-grained PAT (secret GITHUB_TOKEN) when the app secrets are absent.
  *
  * Flow per report:
- *   validate (category / lengths / size) -> honeypot check -> compute a dedup signature ->
+ *   validate (category / lengths / size / renderer) -> honeypot check -> compute a dedup signature ->
  *   search open issues for that signature:
  *     hit  -> append a comment to the existing issue (one issue with N confirmations, not N issues)
- *     miss -> create a new issue, labeled: category label + release channel + user-report
+ *     miss -> create a new issue, labeled: category label + release channel + renderer + user-report
  *
  * Ops notes (see also feedback/README.md):
  *   - secrets: `wrangler secret put APP_ID` + `APP_PRIVATE_KEY` (PKCS#8 PEM) -- or GITHUB_TOKEN as
@@ -133,20 +133,33 @@ function channelOf(version) {
   return version.includes('-') ? 'beta' : 'stable';
 }
 
-function issueBody(details, version, channel, contact, sig) {
+/* Which renderer the reporting session was running. DOOM 2016 ships one executable per renderer
+ * (DOOMx64vk.exe / DOOMx64.exe) and relaunches itself when r_renderAPI changes, so a player can be in
+ * either from the same Steam launch -- and a fault that only reproduces under one of them is otherwise
+ * indistinguishable on the tracker from one that happens under both. The client sends a bare token;
+ * anything else (an old client that sends nothing, a hand-made POST) is treated as unknown rather than
+ * echoed into the issue. */
+const RENDERERS = { vulkan: 'Vulkan', opengl: 'OpenGL' };
+function rendererOf(renderer) {
+  return Object.prototype.hasOwnProperty.call(RENDERERS, renderer) ? renderer : null;
+}
+
+function issueBody(details, version, channel, contact, renderer, sig) {
   const meta = [
     '',
     '---',
     '- Version: ' + version + (channel ? ' (' + channel + ')' : ''),
   ];
+  if (renderer) meta.push('- Renderer: ' + RENDERERS[renderer]);
   if (contact) meta.push('- Contact: ' + contact);
   meta.push('', '<!-- report-sig:' + sig + ' -->');
   meta.push('<sub>Filed automatically from the in-app feedback dialog.</sub>');
   return details + '\n' + meta.join('\n');
 }
 
-function commentBody(details, version, channel, contact, logs) {
-  const lines = ['Another report of this, on version ' + version + (channel ? ' (' + channel + ')' : '') + ':', '', details];
+function commentBody(details, version, channel, contact, renderer, logs) {
+  const lines = ['Another report of this, on version ' + version + (channel ? ' (' + channel + ')' : '') +
+                 (renderer ? ', ' + RENDERERS[renderer] : '') + ':', '', details];
   if (contact) lines.push('', '- Contact: ' + contact);
   if (logs) lines.push('', logsBlock(logs));
   lines.push('', '<sub>Added automatically from the in-app feedback dialog (matching report signature).</sub>');
@@ -175,6 +188,7 @@ export default {
     const details = String(body.body || '').trim();
     const contact = String(body.contact || '').trim().slice(0, 200);
     const version = String(body.version || 'unknown').trim().slice(0, 40) || 'unknown';
+    const renderer = rendererOf(String(body.renderer || '').trim().toLowerCase());
     /* optional log attachment (crash reports only -- ignored for the other categories). */
     const logs = body.category === 'crash' ? String(body.logs || '').slice(0, LOGS_CAP).trim() : '';
     if (!cat) return json({ ok: false, error: 'bad category' }, 400);
@@ -207,7 +221,7 @@ export default {
       const n = match.number;
       const c = await gh(token, '/repos/' + REPO + '/issues/' + n + '/comments', {
         method: 'POST',
-        body: { body: commentBody(details, version, channel, contact, logs) },
+        body: { body: commentBody(details, version, channel, contact, renderer, logs) },
       });
       if (c) return json({ ok: true, mode: 'appended', number: n });
       /* comment failed -> fall through and file a fresh issue rather than dropping the report */
@@ -215,11 +229,12 @@ export default {
 
     const labels = [cat.label, 'user-report'];
     if (channel) labels.push(channel);
+    if (renderer) labels.push(renderer);
     const issue = await gh(token, '/repos/' + REPO + '/issues', {
       method: 'POST',
       body: {
         title: '[' + cat.tag + '] ' + title,
-        body: issueBody(details, version, channel, contact, sig),
+        body: issueBody(details, version, channel, contact, renderer, sig),
         labels,
       },
     });

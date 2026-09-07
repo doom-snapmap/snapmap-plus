@@ -26,6 +26,11 @@ typedef struct crash_record {
     const char *engine_text;  /* the engine's own formatted error text, or "" */
     const char *dump;         /* crash-dump path if one was written, or "" */
     const char *version;      /* installed version string AT FAULT TIME (read at arm), or "" */
+    /* Renderer the crashing session was running: "vulkan" | "opengl" | "" when unresolved. DOOM
+     * ships one executable per renderer and relaunches itself when r_renderAPI changes, so this is
+     * the crashing SESSION's answer -- the reporting UI, which may run in the other one on the next
+     * launch, must carry this rather than re-asking the live process. */
+    const char *renderer;
     const char *time;         /* preformatted local "YYYY-MM-DD HH:MM:SS" */
 } crash_record;
 

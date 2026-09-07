@@ -249,9 +249,11 @@ player data and preserves it across update, uninstall, and reinstall.
 
 The clone makes exactly **one** kind of network request, and only on an explicit user action: clicking
 **Send** in the feedback dialog — or in the crash-report dialog — POSTs the typed report (category /
-title / details / optional contact) plus the installed version string over HTTPS to the project's
-feedback relay ([`feedback/`](../feedback/README.md)), which files it as a public issue on this repo's
-tracker. A crash report can additionally attach the tails of the local log files, but only when its
+title / details / optional contact), the installed version string, and one token naming the renderer the
+game is running (`vulkan` / `opengl`, read from which renderer library the process loaded — nothing
+else about the machine is gathered) over HTTPS to the project's feedback relay
+([`feedback/`](../feedback/README.md)), which files it as a public issue on this repo's tracker. A
+crash report can additionally attach the tails of the local log files, but only when its
 "Attach recent logs" box is checked, and the text is anonymized first (account / profile / machine
 names scrubbed — see [`feedback.md`](feedback.md)); the local crash dump is never uploaded. Nothing is
 downloaded, nothing runs in the background, and nothing else is ever sent. (The installer

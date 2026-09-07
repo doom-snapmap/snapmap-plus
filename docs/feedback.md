@@ -27,24 +27,36 @@ credential to rotate). Users need no account of any kind. Deploy + credential ru
 ## What a filed issue looks like
 
 - **Title:** `[Bug] <the user's title>` (or `[Feature]` / `[Docs]` / `[Other]`).
-- **Body:** the user's details, then a metadata block: `- Version: 0.2.0-beta.3 (beta)`, an optional
-  `- Contact:` line, and an invisible `<!-- report-sig:… -->` marker (the dedup signature: a hash of
-  category + normalized title). Nothing else is collected — no system info, no telemetry.
+- **Body:** the user's details, then a metadata block: `- Version: 0.2.0-beta.3 (beta)`, a
+  `- Renderer: Vulkan` (or `OpenGL`) line, an optional `- Contact:` line, and an invisible
+  `<!-- report-sig:… -->` marker (the dedup signature: a hash of category + normalized title).
+  Nothing else is collected — no telemetry, and no system or hardware information beyond that one
+  renderer token.
 - **Labels:** the category (`bug` / `enhancement` / `documentation` / `question`), the release channel
-  (`beta` / `stable`, from the version string; dev builds get neither), and `user-report` (marks
-  relay-filed issues so the hygiene workflows only ever touch those).
+  (`beta` / `stable`, from the version string; dev builds get neither), the renderer (`vulkan` /
+  `opengl`), and `user-report` (marks relay-filed issues so the hygiene workflows only ever touch
+  those).
+
+**Why the renderer:** DOOM 2016 ships one executable per renderer (`DOOMx64vk.exe` / `DOOMx64.exe`)
+and relaunches itself when `r_renderAPI` changes, so a player can be in either one from the same Steam
+launch. A bug that only reproduces under OpenGL is otherwise indistinguishable on the tracker from one
+that happens under both. The app reports which renderer library the game process actually loaded —
+not the executable name, and nothing else about the machine. The relay accepts only the two known
+tokens; an unrecognized one is dropped rather than echoed into a public issue.
 
 **Dedup:** a report whose signature matches an *open* issue becomes a comment on it ("Another report of
-this, on version …") instead of a duplicate — one issue with N confirmations. Closed issues are never
-resurrected (closed means resolved or rejected; a fresh report opens a fresh issue). Matching is exact
-by design; judging that two differently-worded reports are the same bug stays a maintainer call.
+this, on version …, OpenGL") instead of a duplicate — one issue with N confirmations. Closed issues
+are never resurrected (closed means resolved or rejected; a fresh report opens a fresh issue). Matching
+is exact by design; judging that two differently-worded reports are the same bug stays a maintainer
+call. The signature covers category + title only, so the same bug reported from both renderers stays
+*one* issue whose confirmations show that it hits both.
 
 ## Crash reports
 
 The same pipeline's second producer. When the game hits a serious fault, the fault machinery writes a
 small **crash record** (JSON — fault class, exception code, `module+0xRVA`, call stack, the engine's own
-error message when there is one, timestamp, installed version) to `<game>\snapmap-plus\crash\`, using
-crash-safe file writes only. The Studio UI polls that folder and auto-opens the **crash-report dialog**
+error message when there is one, timestamp, installed version, renderer) to `<game>\snapmap-plus\crash\`,
+using crash-safe file writes only. The Studio UI polls that folder and auto-opens the **crash-report dialog**
 (branded header, same style as the main window): for a fault the editor *survived*, seconds after it
 happens; for a fault that killed the game, on the next launch ("Snapmap+ crashed last session"). Truly
 fatal classes also save a local crash dump (`snapmap-plus\logs\sh_crash.dmp`) — it is never uploaded;
@@ -59,8 +71,8 @@ record so the dialog never nags twice — the full logs and any dump stay on dis
 
 What lands on the tracker: title `Crash: <module>+0x<rva> (0x<code>)` — the crash *location*, so the
 signature dedup groups every occurrence of the same crash onto one issue — labels `crash` +
-`user-report` + channel, a readable crash-summary body, and the attached logs as a **collapsed
-follow-up comment** (one per occurrence, each with its own logs). Repeat crashes therefore read as one
+`user-report` + channel + renderer, a readable crash-summary body, and the attached logs as a
+**collapsed follow-up comment** (one per occurrence, each with its own logs). Repeat crashes therefore read as one
 issue with N dated confirmations, each carrying its own evidence.
 
 ## Tracker hygiene (the two workflows)
@@ -78,7 +90,8 @@ workflow here, and scoped to `user-report` issues — they never touch maintaine
   14 days later. Confirmed bugs and feature requests never auto-close.
 
 Label glossary: `user-report` (relay-filed), `crash` (filed by the crash-report dialog),
-`beta`/`stable` (reported channel), `needs-retest` (superseded by a release, awaiting confirmation),
+`beta`/`stable` (reported channel), `vulkan`/`opengl` (reported renderer), `needs-retest` (superseded
+by a release, awaiting confirmation),
 `awaiting-response` (maintainer asked the reporter a question — apply by hand to arm the stale sweep),
 `stale` (the sweep's warning marker).
 

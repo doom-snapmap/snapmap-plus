@@ -22,6 +22,12 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* The frontend is a separate C++ DLL that compiles host_image.c too (it reports the renderer in a
+ * feedback report), so this needs C linkage from that side -- same arrangement as log_rotate.h. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Base of the host DOOM image, or NULL if the host is not a DOOM 2016 executable we ship for.
  * Idempotent and cheap after the first call; safe to call from any thread. */
 const uint8_t *sh_host_image_base(void);
@@ -39,6 +45,17 @@ const char *sh_host_image_name(void);
  * backend is renderer-blind and must stay that way. */
 int sh_host_is_vulkan(void);
 
+/* The same fact as sh_host_is_vulkan, as the short token the reporting pipeline carries:
+ * "vulkan", "opengl", or "" when the renderer could not be determined.
+ *
+ * Memoized once the answer is DEFINITE, and deliberately not before: a call made before the
+ * renderer library is mapped must not freeze an empty answer in for the rest of the session.
+ * Once cached, a later call is a plain pointer read that touches no loader state -- which is
+ * what lets the crash path snapshot it at arm time and never ask again while the process is
+ * dying (see crash_report.c's safety model).
+ */
+const char *sh_host_renderer_name(void);
+
 /* Non-zero only when the host is the exact build every pinned `known_rva` in this product was
  * extracted from (the Vulkan image documented in signatures.c).
  *
@@ -47,5 +64,9 @@ int sh_host_is_vulkan(void);
  * because the caller cannot tell the difference. Every RVA backstop must be gated on this, so a
  * signature miss degrades to a clean refusal instead of a wild call. */
 int sh_host_is_pinned_rva_build(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* BACKEND_HOST_IMAGE_H */

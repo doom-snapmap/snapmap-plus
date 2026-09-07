@@ -15,6 +15,7 @@ static const uint8_t *g_base = NULL;
 static size_t         g_size = 0;
 static char           g_name[64] = { 0 };
 static LONG           g_resolved = 0;   /* 0 = not tried, 1 = tried (success or failure) */
+static const char * volatile g_renderer = NULL;   /* "vulkan"/"opengl" once definite; NULL until then */
 
 static const char *basename_of(const char *path)
 {
@@ -100,4 +101,19 @@ int sh_host_is_vulkan(void)
     if (GetModuleHandleW(L"OPENGL32.dll") != NULL)
         return 0;
     return -1;
+}
+
+const char *sh_host_renderer_name(void)
+{
+    const char *cached = (const char *)g_renderer;
+    int vk;
+    if (cached != NULL)
+        return cached;
+    vk = sh_host_is_vulkan();
+    if (vk < 0)
+        return "";          /* unresolved -- ask again later; do not cache the ignorance */
+    cached = vk ? "vulkan" : "opengl";
+    /* Racing callers store the same string literal, so a plain store is enough. */
+    g_renderer = cached;
+    return cached;
 }

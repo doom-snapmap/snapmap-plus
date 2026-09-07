@@ -31,6 +31,7 @@ int main(void)
         r.stack = "DOOM+0x5e0b12\n    DOOM+0x5e6410";
         r.engine_text = "^1ERROR: \"quoted\" thing";
         r.dump = ""; r.version = "0.2.0-beta.3"; r.time = "2026-07-18 12:00:00";
+        r.renderer = "opengl";
         n = crash_record_json(buf, sizeof buf, &r);
         assert(n > 0 && (int)strlen(buf) == n);
         assert(buf[0] == '{' && buf[n - 1] == '}');
@@ -42,6 +43,9 @@ int main(void)
         assert(strstr(buf, "DOOM+0x5e0b12\\n"));                     /* newline escaped inside stack */
         assert(strstr(buf, "\\\"quoted\\\""));                       /* quotes escaped inside text */
         assert(strstr(buf, "\"version\":\"0.2.0-beta.3\""));
+        /* the renderer the CRASHING session ran -- the report reads it back rather than asking the
+         * live process, which may have relaunched into the other executable since */
+        assert(strstr(buf, "\"renderer\":\"opengl\""));
         assert(strstr(buf, "\"time\":\"2026-07-18 12:00:00\""));
     }
     /* NULL fields degrade to empty strings, not crashes */
@@ -52,6 +56,7 @@ int main(void)
         assert(crash_record_json(buf, sizeof buf, &r) > 0);
         assert(strstr(buf, "\"kind\":\"fatal\""));
         assert(strstr(buf, "\"stack\":\"\""));
+        assert(strstr(buf, "\"renderer\":\"\""));
     }
     printf("crash_record_test OK\n");
     return 0;

@@ -24,6 +24,7 @@
 #include "recovery.h"    /* shield_last_engine_msg */
 #include "veh.h"         /* shield_capture_stack */
 #include "engine_layout.h"
+#include "../backend/host_image.h"   /* sh_host_renderer_name -- snapshotted at init, never at fault time */
 
 extern uint8_t *g_doom_base;
 
@@ -35,6 +36,7 @@ typedef BOOL (WINAPI *minidump_write_t)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE,
 static char g_crash_dir[MAX_PATH] = {0};   /* <game>\snapmap-plus\crash */
 static char g_dump_path[MAX_PATH] = {0};   /* <game>\snapmap-plus\logs\sh_crash.dmp */
 static char g_inst_version[48]    = {0};   /* installed version at arm time */
+static const char *g_renderer     = "";    /* "vulkan"/"opengl" at arm time (see crash_report_init) */
 static minidump_write_t g_minidump_write = NULL;
 static volatile LONG g_records_written = 0;
 static volatile LONG g_fatal_oneshot   = 0;   /* first-chance 0xC0000374/0xC0000409 full capture, once */
@@ -115,6 +117,7 @@ void crash_report_file(const char *kind, unsigned long code, uintptr_t rip_rva,
     r.rip_rva = (unsigned long long)rip_rva; r.fault_addr = (unsigned long long)fault_addr;
     r.module = module_name; r.stack = stack; r.engine_text = engine_text;
     r.dump = dump_path; r.version = g_inst_version; r.time = tbuf;
+    r.renderer = g_renderer;
     len = crash_record_json(g_rec_buf, sizeof g_rec_buf, &r);
     if (len <= 0) return;
 
@@ -241,6 +244,12 @@ void crash_report_init(void)
     HMODULE dh;
     crash_dirs_from_module();
     crash_read_version();
+    /* Snapshot the renderer HERE, in a safe context, so the fault path only reads a pointer.
+     * sh_host_renderer_name asks the loader (GetModuleHandleW) on its first definite answer, and
+     * a dying process is the wrong place to take the loader lock. Both renderer libraries are
+     * static imports of the DOOM executable, so they are already mapped by the time any of our
+     * code runs -- resolving this early is reliable, and an unresolved "" just omits the field. */
+    g_renderer = sh_host_renderer_name();
     dh = LoadLibraryA("dbghelp.dll");
     if (dh) g_minidump_write = (minidump_write_t)GetProcAddress(dh, "MiniDumpWriteDump");
 }
