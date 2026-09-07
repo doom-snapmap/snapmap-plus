@@ -29,6 +29,8 @@
 #include "navmesh.h"
 #include "nav_bake.h"
 #include "map_shards.h"
+#include "editor_frame.h"   /* sh_editor_frame_request_reload -- the +0x338 load-now slot */
+#include "raw_deflate.h"    /* sh_inflate_raw_upto -- map.decl holds zlib(rawmap JSON) */
 
 /* DeserializeFromJson prologue steal window. Decoded from the signature DB pattern
  *   40 55            push rbp                      (2)
@@ -126,6 +128,30 @@ static int rawmap_armed(int *flag_armed_out)
     int flag_armed     = flag_file_present();
     if (flag_armed_out) *flag_armed_out = flag_armed;
     return explicit_armed || flag_armed;
+}
+
+/* ONE-SHOT SAVE ARM.
+ *
+ * The shadow used to need the shared gate left switched on to catch a save, which is what made the
+ * gate feel like a mode: arm it and every map you open is substituted and every save overwrites
+ * your staged file. Scoping each operation to itself removes that -- the File menu's "Save Rawmap
+ * As" arms the shadow for exactly ONE save and it disarms itself again afterwards.
+ *
+ * Deliberately NOT a second gate. An earlier plan here was to split the shared switch in two, which
+ * is a real change in what `sh_rawmaps_on` means; a one-shot is additive, leaves the console
+ * commands behaving exactly as they always have, and is enough because both halves of the feature
+ * are now driven from a click rather than waiting around for the user to do something. */
+static volatile LONG g_shadow_oneshot = 0;
+
+int sh_rawmap_save_arm_once(void)
+{
+    InterlockedExchange(&g_shadow_oneshot, 1);
+    return 1;
+}
+
+int sh_rawmap_save_oneshot_pending(void)
+{
+    return (InterlockedCompareExchange(&g_shadow_oneshot, 0, 0) != 0) ? 1 : 0;
 }
 
 /* Read the whole source file into a fresh, NUL-terminated heap buffer (OG: malloc(size+1) + fread).
@@ -751,6 +777,8 @@ static void nav_embed_on_save(void *out_idstr)
  * the real save has already happened by the time we touch disk. */
 static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char compact)
 {
+    int used_oneshot = 0;   /* did a "Save Rawmap As" one-shot authorize this write? */
+
     if (g_ser_orig == NULL) return 0;   /* defensive: should never happen once installed */
 
     /* 1) the engine's own serialize -- the real save, untouched. This runs UNCONDITIONALLY and BEFORE the
@@ -783,7 +811,14 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
      *    Ungated, this overwrote rawmap.json on every map save even with rawmaps off -- silently discarding
      *    a rawmap the user had put there deliberately. Checked AFTER the real save so the gate can never
      *    affect what the engine writes. */
-    if (!rawmap_armed(NULL)) return rc;
+    /* ...or a one-shot arm from "Save Rawmap As", which authorizes exactly this save and is cleared
+     * once the bytes are on disk (below). CONSUMED here, not after the write: two saves racing in
+     * must not both pass on the same one-shot, and InterlockedExchange makes exactly one of them
+     * the winner. A failed write therefore spends the one-shot -- the alternative is a one-shot
+     * that can fire on some later save the person did not connect to their click, which is worse
+     * than making them click again. */
+    used_oneshot = (InterlockedExchange(&g_shadow_oneshot, 0) != 0);
+    if (!rawmap_armed(NULL) && !used_oneshot) return rc;
 
     if (out_idstr == NULL) return rc;
 
@@ -830,9 +865,10 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
     if (wrote > 0) {
         InterlockedExchange64(&g_last_bytes, (LONGLONG)wrote);
         unsigned long n = (unsigned long)InterlockedIncrement(&g_shadow_count);
-        char line[160];
+        char line[200];
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "B1: rawmap SAVE shadow wrote %llu bytes -> rawmap.json [#%lu]%s", wrote, n,
+            "B1: rawmap SAVE shadow wrote %llu bytes -> rawmap.json [#%lu]%s%s", wrote, n,
+            used_oneshot ? " [one-shot]" : "",
             pretty ? (laid_out ? " [pretty]"
                                : " [pretty requested; JSON did not re-lay-out -- wrote it unchanged]")
                    : "");
@@ -992,6 +1028,143 @@ int sh_rawmap_validate_source(const char *path, char *out_msg, int msg_capacity)
     return 1;
 }
 
+/* ------------------------------------------------------- save it NOW, from the map already on disk --
+ * "Save Rawmap As" used to only name a destination and then wait for the person to save their map in
+ * the editor. For a map that was ALREADY saved that is a pointless errand: the bytes exist, complete,
+ * on disk. A locally saved SnapMap keeps them at
+ *
+ *     <the save folder>\map.decl   =   [4-byte checksum][zlib(rawmap JSON)]
+ *
+ * and `rawmap.json` is exactly that JSON. Both halves of that are established: the engine's map.decl
+ * fetch hands the record payload straight to zlib inflate, and the layout has been decoded end-to-end
+ * against real saves on disk. So this path reads, inflates and writes -- no engine call, no thread
+ * discipline, no waiting.
+ *
+ * The 4-byte header is a CHECKSUM, not a length (verified: 0x9D4CF0F1 on a 2,638-byte file that
+ * inflates to 23,638), so nothing in the file says how big the JSON is. Hence sh_inflate_raw_upto and
+ * a capacity ladder rather than one sized allocation.
+ *
+ * Only the shadow's one-shot remains for the case this genuinely cannot serve: a map that has never
+ * been saved has no map.decl to read, and only the editor can produce its bytes. */
+static int save_from_local_map(char *out_msg, int msg_capacity, unsigned long long *out_bytes)
+{
+    /* 256 KB covers every real map by a wide margin (the ones measured are 20-24 KB); the rungs above
+     * exist so an unusually large map still works rather than reporting a false "malformed". Capped at
+     * the same 64 MB the load side refuses past. */
+    static const size_t ladder[] = { 256u * 1024u, 1024u * 1024u, 4u * 1024u * 1024u,
+                                     16u * 1024u * 1024u, 64u * 1024u * 1024u };
+
+    char dir[MAX_PATH], id[64], decl[MAX_PATH];
+    HANDLE h;
+    LARGE_INTEGER sz;
+    unsigned char *raw = NULL;
+    char *json = NULL;
+    DWORD rd = 0;
+    size_t got = 0, i;
+    int ok = 0;
+
+    if (out_bytes) *out_bytes = 0;
+    if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
+
+    if (!sh_editor_frame_saved_map_dir(dir, sizeof dir, id, sizeof id)) {
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
+                               "no saved map found -- save your map in the editor first", _TRUNCATE);
+        return 0;
+    }
+    _snprintf_s(decl, sizeof decl, _TRUNCATE, "%s\\map.decl", dir);
+
+    h = CreateFileA(decl, GENERIC_READ, FILE_SHARE_READ, NULL,
+                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
+                               "the saved map's map.decl could not be opened", _TRUNCATE);
+        return 0;
+    }
+    /* 6 = the 4-byte checksum plus zlib's own 2-byte header; 4 more for the trailing Adler-32. A file
+     * that cannot hold all of that plus a byte of deflate is not a map.decl. */
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 11 || sz.QuadPart > (LONGLONG)(64 * 1024 * 1024)) {
+        CloseHandle(h);
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
+                               "the saved map's map.decl is not a size we can read", _TRUNCATE);
+        return 0;
+    }
+    raw = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)sz.QuadPart);
+    if (raw == NULL) { CloseHandle(h); return 0; }
+    if (!ReadFile(h, raw, (DWORD)sz.QuadPart, &rd, NULL) || rd != (DWORD)sz.QuadPart) {
+        CloseHandle(h);
+        HeapFree(GetProcessHeap(), 0, raw);
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
+                               "the saved map's map.decl could not be read", _TRUNCATE);
+        return 0;
+    }
+    CloseHandle(h);
+
+    for (i = 0; i < sizeof ladder / sizeof ladder[0] && !got; i++) {
+        json = (char *)HeapAlloc(GetProcessHeap(), 0, ladder[i]);
+        if (json == NULL) break;
+        /* Two slices, because the decoder refuses trailing bytes: the deflate data proper (dropping
+         * zlib's 4-byte Adler-32 trailer), and failing that the whole tail -- so a variant that does
+         * not carry the trailer still decodes instead of being reported malformed. */
+        got = sh_inflate_raw_upto(raw + 6, (size_t)rd - 6 - 4, (unsigned char *)json, ladder[i]);
+        if (!got) got = sh_inflate_raw_upto(raw + 6, (size_t)rd - 6, (unsigned char *)json, ladder[i]);
+        if (!got) { HeapFree(GetProcessHeap(), 0, json); json = NULL; }
+    }
+    HeapFree(GetProcessHeap(), 0, raw);
+
+    if (!got || json == NULL) {
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
+                               "the saved map's map.decl did not decompress", _TRUNCATE);
+        return 0;
+    }
+
+    /* Sanity: it must look like the rawmap JSON we claim it is, not merely decompress. A silent write
+     * of the wrong bytes is worse than a refusal, because it looks like it worked. */
+    if (json[0] != '{') {
+        HeapFree(GetProcessHeap(), 0, json);
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
+                               "the saved map decompressed to something that is not rawmap JSON",
+                               _TRUNCATE);
+        return 0;
+    }
+
+    {
+        unsigned long long wrote = write_shadow(json, got);
+        HeapFree(GetProcessHeap(), 0, json);
+        if (wrote > 0) {
+            char line[MAX_PATH + 128];
+            if (out_bytes) *out_bytes = wrote;
+            InterlockedExchange64(&g_last_bytes, (LONGLONG)wrote);
+            InterlockedIncrement(&g_shadow_count);
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                        "B1: rawmap SAVE wrote %llu bytes from saved map %s [from-disk]", wrote, id);
+            backend_log(line);
+            if (out_msg) {
+                _snprintf_s(out_msg, (size_t)msg_capacity, _TRUNCATE,
+                            "Wrote %llu bytes from saved map %s.", wrote, id);
+            }
+            ok = 1;
+        } else if (out_msg) {
+            strncpy_s(out_msg, (size_t)msg_capacity,
+                      "could not write to that location", _TRUNCATE);
+        }
+    }
+    return ok;
+}
+
+/* The same verdict, asked about the file the swap would ACTUALLY read.
+ *
+ * The reload used to refuse unless the shared gate was armed, which is why the File menu needed an
+ * "Armed" tick at all: without it the reload declined, and with it every unrelated map load was
+ * substituted too. The gate was never the property worth checking. What matters is whether the
+ * staged bytes will be accepted, and this asks exactly that -- so the reload can arm the swap around
+ * its own call and put the gate back the way the person left it. */
+int sh_rawmap_source_ok(char *out_msg, int msg_capacity)
+{
+    char path[MAX_PATH];
+    resolve_source_path(path, sizeof path);
+    return sh_rawmap_validate_source(path, out_msg, msg_capacity);
+}
+
 static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
 {
     char load_path[MAX_PATH], save_path[MAX_PATH];
@@ -1009,10 +1182,21 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
 
     /* `armed` reports the EXPLICIT gate only, matching sh_rawmap_swap_is_armed's reasoning: a menu
      * checkbox must not show ON for a flag-file arm that unticking it cannot clear. */
+    /* `loads` is the question the File menu actually has to answer: the staged file is substituted
+     * into the NEXT map load, so "did it work" is unanswerable from the paths alone -- the person
+     * needs to see the swap fire. Reporting both counters distinguishes the three outcomes that look
+     * identical on screen: never fired (0), fired but the parse did not return (loads > loadsDone),
+     * and a completed substituted load. Without this the only way to tell was reading
+     * sh_backend.log for "B1: rawmap swap FIRED". */
+    /* `savePending` is the same question for the save half: "Save Rawmap As" arms one save and then
+     * waits for the person to save their map, and a waiting arm is invisible otherwise. */
     written = _snprintf_s(out_json, (size_t)out_capacity, _TRUNCATE,
-        "{\"load\":\"%s\",\"save\":\"%s\",\"armed\":%d,\"saves\":%lu,\"lastBytes\":%llu}",
+        "{\"load\":\"%s\",\"save\":\"%s\",\"armed\":%d,\"saves\":%lu,\"lastBytes\":%llu,"
+        "\"loads\":%lu,\"loadsDone\":%lu,\"savePending\":%d}",
         load_esc, save_esc, sh_rawmap_swap_is_armed(),
-        sh_rawmap_save_count(), sh_rawmap_save_last_bytes());
+        sh_rawmap_save_count(), sh_rawmap_save_last_bytes(),
+        sh_rawmap_swap_count(), sh_rawmap_swap_complete_count(),
+        sh_rawmap_save_oneshot_pending());
 
     return (written > 0) ? written : 0;
 }
@@ -1049,6 +1233,28 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
      * write, which the existing log line already reports. */
     if (save_path != NULL) {
         if (!sh_rawmap_save_set_dest(save_path[0] == '\0' ? NULL : save_path)) ok = 0;
+
+        /* NAMING A DESTINATION IS A REQUEST TO WRITE IT, not to set a preference. "Save Rawmap As"
+         * is the only caller that passes one, and a destination that then does nothing is why the
+         * save half looked broken. Restoring the default ("") asks for no write, so it is skipped.
+         *
+         * WRITE IT NOW if the map is already saved -- the bytes are complete in that save's map.decl
+         * and need nothing from the engine. Only fall back to arming one editor save when there is no
+         * saved map to read, which is the one case where only the editor can produce the bytes.
+         * Sending someone off to save a map they have already saved was the wrong half of this. */
+        if (save_path[0] != '\0') {
+            char why[192];
+            unsigned long long wrote = 0;
+            if (save_from_local_map(why, (int)sizeof why, &wrote)) {
+                if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, why, _TRUNCATE);
+            } else {
+                sh_rawmap_save_arm_once();
+                if (out_msg) {
+                    _snprintf_s(out_msg, (size_t)msg_capacity, _TRUNCATE,
+                                "%s -- it will be written on your next save.", why);
+                }
+            }
+        }
     }
 
     if (arm == 0 || arm == 1) sh_rawmap_swap_arm(arm);
@@ -1059,8 +1265,18 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
     return ok;
 }
 
-void sh_rawmap_get_slots(sh_rawmap_status_fn *status, sh_rawmap_configure_fn *configure)
+/* The half staging cannot do: make a map load HAPPEN, so the staged file actually opens. The engine
+ * call and its frame-boundary discipline live in editor_frame.c; this is only the slot. */
+static int slot_rawmap_load_now(sh_iface *self, char *out_msg, int msg_capacity)
+{
+    (void)self;
+    return sh_editor_frame_request_reload(out_msg, msg_capacity);
+}
+
+void sh_rawmap_get_slots(sh_rawmap_status_fn *status, sh_rawmap_configure_fn *configure,
+                         sh_rawmap_load_now_fn *load_now)
 {
     if (status)    *status    = slot_rawmap_status;
     if (configure) *configure = slot_rawmap_configure;
+    if (load_now)  *load_now  = slot_rawmap_load_now;
 }

@@ -432,6 +432,24 @@ typedef int (*sh_rawmap_configure_fn)(struct sh_iface *self,
                                       const char *load_path, const char *save_path, int arm,
                                       char *out_msg, int msg_capacity);       /* +0x330 (ext 25) */
 
+/* +0x338 (ext 26) Reload the editor's map NOW, so the staged rawmap actually opens.
+ *
+ * This is the half the two slots above cannot do. The load swap is passive -- it substitutes bytes
+ * into a map load -- so until something makes a load happen, a staged file only opens when the
+ * person goes to the menu and opens a map by hand. This asks the backend's editor-frame hook to
+ * call the engine's own in-place LoadMap on the next frame.
+ *
+ * Returns 1 when the request was accepted for the next frame, 0 when refused; `out_msg` carries the
+ * reason either way and is written for a person to read. Accepting is NOT a completion: the frame
+ * hook re-checks the editor's state and may still decline, so poll this slot's status through
+ * rawmap_status rather than treating a 1 as "the map is open".
+ *
+ * It refuses while the swap is disarmed, on purpose. LoadMap names a map by id, and with the swap
+ * off that call would genuinely open a different map and discard unsaved work -- never what someone
+ * clicking "Load Rawmap" meant. */
+typedef int (*sh_rawmap_load_now_fn)(struct sh_iface *self,
+                                     char *out_msg, int msg_capacity);        /* +0x338 (ext 26) */
+
 /* ------------------------------------------------------------------ heavy apply slots --------
  * The heavy serialize/deserialize/apply slots the SnapStack APPLY-ops (bss/bsi/bsf/bsb/bse/accl/
  * acctargets/mkcmd) need. These are the native port of the reference implementation's +0xc8 serialize / +0xd0 deserialize-
@@ -637,6 +655,7 @@ typedef struct sh_iface_vtbl {
     sh_resolve_prefab_defaults_fn resolve_prefab_defaults; /* +0x320 (ext 23) model + scale defaults */
     sh_rawmap_status_fn        rawmap_status;        /* +0x328 (ext 24) staged paths + arm state */
     sh_rawmap_configure_fn     rawmap_configure;     /* +0x330 (ext 25) choose those paths / arm */
+    sh_rawmap_load_now_fn      rawmap_load_now;      /* +0x338 (ext 26) reload the map now */
 } sh_iface_vtbl;
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
@@ -656,7 +675,8 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, get_prefab_mesh) == 0x318);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, resolve_prefab_defaults) == 0x320);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_status) == 0x328);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_configure) == 0x330);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x338);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_load_now) == 0x338);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x340);
 
 /* ------------------------------------------------------------------ the interface object -----------
  * Object layout PINNED to FUN_1800229b1: +0x00 vtable, +0x08 mutex, +0x58 sub-object. The mutex is an
@@ -825,6 +845,7 @@ typedef struct sh_iface_engine_slots {
     /* clone-extension: the File menu's rawmap load/save file surface. */
     sh_rawmap_status_fn        rawmap_status;               /* +0x328 (ext 24) */
     sh_rawmap_configure_fn     rawmap_configure;            /* +0x330 (ext 25) */
+    sh_rawmap_load_now_fn      rawmap_load_now;             /* +0x338 (ext 26) */
 } sh_iface_engine_slots;
 
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *slots);

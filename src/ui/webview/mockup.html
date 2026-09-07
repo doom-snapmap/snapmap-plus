@@ -681,7 +681,20 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
           <button type="button" id="menuRawmapLoad" role="menuitem"><span>Load Rawmap...</span></button>
           <button type="button" id="menuRawmapSaveAs" role="menuitem"><span>Save Rawmap As...</span></button>
           <div class="menu-sep" role="separator"></div>
-          <button type="button" id="menuRawmapArm" role="menuitemcheckbox" aria-checked="false"><span>Rawmap Swap Armed</span></button>
+          <button type="button" id="menuRawmapReload" role="menuitem"><span>Reload Map Now</span></button>
+          <div class="menu-sep" role="separator"></div>
+          <!-- Not needed for either menu action any more: Load Rawmap arms the swap around its own
+               reload and Save Rawmap As arms one save. Kept because it is the manual override that
+               matches the sh_rawmaps_on / sh_rawmaps_off console commands, for anyone who wants it
+               held on across a whole session.
+
+               "Always" is the load-bearing word and two earlier labels got it wrong. "Rawmap Swap
+               Armed" was engine jargon. "Keep Rawmap Save/Load On" read as the master switch for
+               the whole feature -- as if Load Rawmap and Save Rawmap As did nothing without it,
+               which is backwards: they turn it on and off around themselves. What this tick adds is
+               SCOPE, not permission -- it extends rawmap save/load to every map load and save,
+               including ones this menu had no part in. -->
+          <button type="button" id="menuRawmapArm" role="menuitemcheckbox" aria-checked="false"><span>Always Use Rawmap Save/Load</span></button>
           <button type="button" id="menuRawmapReset" role="menuitem"><span>Use Default Location</span></button>
           <div class="menu-sep" role="separator"></div>
           <!-- Not a menu item: the staged paths, so "which file am I actually on" needs no dialog. -->
@@ -1666,13 +1679,23 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     // pair the backend would report. Without this the menu's readout would sit on "Loading..." and
     // the layout could never be checked outside the game.
     if (o.cmd === 'rawmapStatus' || o.cmd === 'rawmapLoadPick' ||
-        o.cmd === 'rawmapSavePick' || o.cmd === 'rawmapArm' || o.cmd === 'rawmapResetPaths') {
+        o.cmd === 'rawmapSavePick' || o.cmd === 'rawmapArm' ||
+        o.cmd === 'rawmapResetPaths' || o.cmd === 'rawmapLoadNow') {
       if (o.cmd === 'rawmapArm') previewRawmap.armed = o.on ? 1 : 0;
-      if (o.cmd === 'rawmapResetPaths') previewRawmap.load = previewRawmap.save = PREVIEW_RAWMAP_DEFAULT;
-      onMessage({kind:'rawmapStatus', ok:true, status:{
+      if (o.cmd === 'rawmapResetPaths') {
+        previewRawmap.load = previewRawmap.save = PREVIEW_RAWMAP_DEFAULT;
+        previewRawmap.savePending = 0;
+      }
+      // Save Rawmap As arms one save; Load Rawmap raises the confirm prompt. Both are modelled here
+      // so the two states the readout can show are reachable without the game.
+      if (o.cmd === 'rawmapSavePick') previewRawmap.savePending = 1;
+      var msg = {kind:'rawmapStatus', ok:true, status:{
         load: previewRawmap.load, save: previewRawmap.save,
-        armed: previewRawmap.armed, saves: 0, lastBytes: 0
-      }, note: o.cmd === 'rawmapStatus' ? '' : 'Preview only — no backend attached.'});
+        armed: previewRawmap.armed, saves: 0, lastBytes: 0, loads: 0, loadsDone: 0,
+        savePending: previewRawmap.savePending || 0
+      }, note: o.cmd === 'rawmapStatus' ? '' : 'Preview only — no backend attached.'};
+      if (o.cmd === 'rawmapLoadPick') msg.confirmLoad = previewRawmap.load;
+      onMessage(msg);
       return;
     }
     if (o.cmd === 'refresh') {
@@ -3770,6 +3793,17 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       renderRawmapStatus(d.ok ? d.status : null);
       // The note is only present when something actually changed, so a plain refresh stays silent.
       if (d.note) toast(d.note, d.note.indexOf('Refused') === 0 ? 'err' : '');
+      // The file is already staged; this only decides WHEN it opens. Asking is the whole safety
+      // story for the load: reloading throws away whatever is in the editor, and the engine gives
+      // us no way to ask whether that is unsaved work. Saying no costs nothing -- the file stays
+      // staged, so they save their map and then use File > Reload Map Now.
+      if (d.confirmLoad) {
+        // One line: #confirmMsg is a div set through textContent, so newlines would not show.
+        showConfirm('Load ' + rawmapShortPath(d.confirmLoad) + ' now? This replaces the map in the ' +
+                    'editor and anything you have not saved is lost. Cancel to save your work ' +
+                    'first, then use File > Reload Map Now.',
+                    function(){ post({cmd: 'rawmapLoadNow'}); });
+      }
     } else if (d.kind === 'windowState') {
       renderWindowState(d.maximized);
     } else if (d.kind === 'configValue') {
@@ -4501,10 +4535,29 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       };
       note.appendChild(mk('Load:', st.load, st.load));
       note.appendChild(mk('Save:', st.save, st.save));
-      if (!RAWMAP_ARMED) {
-        var warn = document.createElement('div');
-        warn.textContent = 'Not armed — nothing is substituted yet.';
-        note.appendChild(warn);
+      // Whether either half has actually fired. This is the only place the answer shows up in the
+      // UI, and it is the question staging leaves open: neither side does anything on the click --
+      // the load waits for a map load, the save waits for the person to save their map.
+      //
+      // The arm no longer gates the load (Load Rawmap arms the swap around its own reload and puts
+      // it back), so "not armed" is no longer worth saying. A waiting Save Rawmap As is, because
+      // nothing else on screen shows that a save is expected.
+      var line = document.createElement('div');
+      if (st.savePending) {
+        line.textContent = 'Save Rawmap As is waiting — save your map in the editor to write it.';
+      } else if (st.loads) {
+        line.textContent = 'Substituted into ' + st.loads +
+                           (st.loads === 1 ? ' map load.' : ' map loads.');
+      } else {
+        line.textContent = 'Ready. Load Rawmap opens a file straight away.';
+      }
+      note.appendChild(line);
+      // Leaving it on is not scoped to this menu, and that is the part worth saying out loud: it is
+      // easy to tick, forget, and then wonder why an ordinary map opened as someone else's rawmap.
+      if (RAWMAP_ARMED) {
+        var on = document.createElement('div');
+        on.textContent = 'Always on: every map load and save uses these files.';
+        note.appendChild(on);
       }
     }
   }
@@ -4515,6 +4568,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   });
   document.getElementById('menuRawmapSaveAs').addEventListener('click', function(){
     post({cmd: 'rawmapSavePick'});
+    closeMenus();
+  });
+  // Reload without re-picking a file -- for iterating on the same rawmap after editing it on disk.
+  document.getElementById('menuRawmapReload').addEventListener('click', function(){
+    post({cmd: 'rawmapLoadNow'});
     closeMenus();
   });
   document.getElementById('menuRawmapArm').addEventListener('click', function(){

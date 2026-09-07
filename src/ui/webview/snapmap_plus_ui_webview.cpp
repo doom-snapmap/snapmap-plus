@@ -124,6 +124,16 @@ static std::string   g_load_prefab_name, g_load_prefab_folder;
  * Load/Place case is only where that text happens to come from. */
 static volatile bool g_pending_new_entity = false;
 static std::string   g_new_entity_json, g_new_entity_label;
+/* The rawmap file picker, run off the UI thread (see the block above poc_pick_rawmap_file for why).
+ * `busy` keeps a second dialog from opening behind the first; `done` is the handoff -- the worker
+ * fills `path`/`kind` and then sets `done` last, and the think loop reads them only after seeing it,
+ * so the interlocked write is the barrier and no lock is needed. The worker never touches them
+ * again afterwards. */
+static volatile LONG g_pick_busy = 0;
+static volatile LONG g_pick_done = 0;
+static int           g_pick_kind = 0;        /* 0 = Load Rawmap, 1 = Save Rawmap As */
+static bool          g_pick_ok   = false;    /* false = cancelled */
+static std::wstring  g_pick_path;
 /* Sound auditioning. Empty name = stop. Deferred like every other engine-touching command: the
  * backend drives live audio state and must be entered from the DOOM main thread, not the WebView
  * one. Only the LATEST request survives to the drain -- clicking down a list faster than frames go
@@ -1524,11 +1534,23 @@ static void poc_send_material_result(const char *name)
  * string below says "staged" and names what the person still has to do. Do not soften that into
  * "loaded": someone who reads "loaded" and sees their old map on screen will think we lost their file.
  *
- * The picker is modal on the UI thread, which owns the window, so it blocks this thread only -- the
- * backend and DOOM are untouched while it is open. */
+ * WHY THE PICKER RUNS ON ITS OWN THREAD
+ * -------------------------------------
+ * It used to run straight out of the web-message handler, on the note (wrong, and reported as lag) that
+ * a modal dialog "blocks this thread only -- the backend and DOOM are untouched". The handler is
+ * dispatched from `DispatchMessageW` INSIDE poc_think_loop, so a modal Show() there stops the loop
+ * itself for as long as the dialog is open: no editor polling, no selection sync, no queued-work drain,
+ * no mesh completions -- and the loop is what keeps the frontend in step with the editor. A shell
+ * dialog is not quick, either: it enumerates cloud providers, network places and thumbnails on open.
+ *
+ * So the dialog gets a dedicated thread with its own apartment, and the result comes back through the
+ * same pending-flag handoff every other deferred action here uses. The think loop keeps turning while
+ * the dialog is up, and every call that touches the backend still happens on the UI thread, where the
+ * rest of this file already requires them to be. */
 
 /* Run the common item dialog. `save` picks the Save-As variant. Returns false when the person
- * cancelled (the overwhelmingly common non-success case, and not an error worth reporting). */
+ * cancelled (the overwhelmingly common non-success case, and not an error worth reporting).
+ * Call from the picker thread, never from the message handler. */
 static bool poc_pick_rawmap_file(bool save, const wchar_t *title, std::wstring &out_path)
 {
     out_path.clear();
@@ -1553,6 +1575,31 @@ static bool poc_pick_rawmap_file(bool save, const wchar_t *title, std::wstring &
         if (title) dlg->SetTitle(title);
         if (save) dlg->SetFileName(L"rawmap.json");
 
+        /* Keep the dialog's own work down. FORCEFILESYSTEM refuses items with no path (nothing we
+         * could open anyway); NOCHANGEDIR keeps it from moving the process's working directory out
+         * from under DOOM; DONTADDTORECENT skips a write to the shell's recent-items store. */
+        {
+            FILEOPENDIALOGOPTIONS opt = 0;
+            if (SUCCEEDED(dlg->GetOptions(&opt)))
+                dlg->SetOptions(opt | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_DONTADDTORECENT);
+        }
+
+        /* Open on the rawmap folder rather than wherever the shell last was. Quick Access is the
+         * slowest possible starting point -- it enumerates cloud providers and network places -- and
+         * this is also simply where a person's rawmaps are. SetDefaultFolder, not SetFolder, so a
+         * remembered location for this dialog still wins. */
+        {
+            wchar_t dir[MAX_PATH];
+            if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, dir))) {
+                wcsncat_s(dir, L"\\snapmap-plus", _TRUNCATE);
+                IShellItem *folder = nullptr;
+                if (SUCCEEDED(SHCreateItemFromParsingName(dir, nullptr, IID_PPV_ARGS(&folder))) && folder) {
+                    dlg->SetDefaultFolder(folder);
+                    folder->Release();
+                }
+            }
+        }
+
         hr = dlg->Show(g_hwnd);
         if (SUCCEEDED(hr)) {
             IShellItem *item = nullptr;
@@ -1574,8 +1621,14 @@ static bool poc_pick_rawmap_file(bool save, const wchar_t *title, std::wstring &
 
 /* Report the staged paths + arm state. The backend hands back a JSON fragment (paths are escaped
  * there -- a Windows path is full of backslashes), so this forwards it whole rather than re-encoding
- * field by field. An absent slot means an older backend: report it instead of guessing. */
-static void poc_send_rawmap_status(const wchar_t *note)
+ * field by field. An absent slot means an older backend: report it instead of guessing.
+ *
+ * `confirm_file`, when set, asks the page to put the "load it now, or save your work first?" question
+ * up before anything opens. It rides on the status message because the file has ALREADY been staged
+ * by the time we ask -- the answer only decides whether the reload runs now or waits for File >
+ * Reload Map Now, so there is nothing to hold on to native-side while the person decides. It must
+ * arrive already JSON-escaped (poc_json_w), like every other path that crosses this boundary. */
+static void poc_send_rawmap_status(const wchar_t *note, const wchar_t *confirm_file = nullptr)
 {
     if (!g_webview) return;
 
@@ -1593,7 +1646,13 @@ static void poc_send_rawmap_status(const wchar_t *note)
     }
     json += L",\"note\":\"";
     json += note ? note : L"";
-    json += L"\"}";
+    json += L"\"";
+    if (confirm_file && *confirm_file) {
+        json += L",\"confirmLoad\":\"";
+        json += confirm_file;
+        json += L"\"";
+    }
+    json += L"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
@@ -1612,8 +1671,10 @@ static void poc_rawmap_configure(const char *load_path, const char *save_path, i
                                              msg, (int)sizeof msg);
     /* The backend's message is the useful one on refusal -- it names WHY the file was rejected
      * (wrong type, too big, unreadable). On success its "ok" is not worth showing, so the caller's
-     * own sentence wins. */
-    std::wstring note = ok ? std::wstring(ok_note ? ok_note : L"")
+     * own sentence wins -- unless the caller passes no sentence, which is how Save Rawmap As asks for
+     * the backend's own: only the backend knows whether it wrote the file there and then or is
+     * waiting for an editor save, and how many bytes went out. */
+    std::wstring note = ok ? (ok_note ? std::wstring(ok_note) : poc_json_w(msg))
                            : (L"Refused: " + poc_json_w(msg));
 
     /* poc_logf carries exactly one unsigned long, so compose the detail line first. The paths are
@@ -1628,6 +1689,94 @@ static void poc_rawmap_configure(const char *load_path, const char *save_path, i
         poc_log(line);
     }
     poc_send_rawmap_status(note.c_str());
+}
+
+/* The picker thread. Its ONLY job is the modal dialog: it touches no backend slot and posts nothing
+ * to the page, because both of those belong on the UI thread. It hands back a path and lets the think
+ * loop do the rest. Its own apartment, since a fresh thread has none. */
+static DWORD WINAPI poc_pick_thread(LPVOID param)
+{
+    const int kind = (int)(intptr_t)param;
+    std::wstring picked;
+    bool ok;
+
+    HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    ok = poc_pick_rawmap_file(kind == 1, kind == 1 ? L"Save Rawmap As" : L"Load Rawmap", picked);
+    if (SUCCEEDED(init)) CoUninitialize();
+
+    g_pick_kind = kind;
+    g_pick_ok   = ok;
+    g_pick_path = picked;
+    InterlockedExchange(&g_pick_done, 1);   /* last: publishes everything written above */
+    return 0;
+}
+
+/* Open a picker, unless one is already open. Returns with the dialog still to come -- the caller has
+ * nothing to report yet, which is the point: the message handler returns immediately and the think
+ * loop keeps turning. */
+static void poc_begin_pick(int kind)
+{
+    HANDLE h;
+
+    if (InterlockedExchange(&g_pick_busy, 1) != 0) {
+        poc_send_rawmap_status(L"A file dialog is already open.");
+        return;
+    }
+    h = CreateThread(nullptr, 0, poc_pick_thread, (LPVOID)(intptr_t)kind, 0, nullptr);
+    if (h == nullptr) {
+        InterlockedExchange(&g_pick_busy, 0);
+        poc_send_rawmap_status(L"Could not open the file dialog.");
+        return;
+    }
+    CloseHandle(h);
+}
+
+/* Act on a finished picker. Runs on the UI thread from the think loop, so every backend call below
+ * is where it has always been. */
+static void poc_finish_pick()
+{
+    const int  kind   = g_pick_kind;
+    const bool picked = g_pick_ok;
+    std::string p8    = picked ? w_to_utf8(g_pick_path) : std::string();
+
+    g_pick_path.clear();
+    InterlockedExchange(&g_pick_done, 0);
+    InterlockedExchange(&g_pick_busy, 0);
+
+    if (!picked) {
+        poc_send_rawmap_status(L"");   /* cancelled -- refresh the readout, say nothing */
+        return;
+    }
+
+    if (kind == 1) {
+        /* Naming a destination IS the request to write it -- the configure slot writes the file there
+         * and then from the map's own save on disk, and only falls back to arming one editor save when
+         * the map has never been saved. No note of our own: only the backend knows which happened. */
+        poc_rawmap_configure(nullptr, p8.c_str(), -1, nullptr);
+        return;
+    }
+
+    /* STAGE ONLY -- arm = -1, deliberately. This used to arm the shared gate and leave it on, which
+     * had two costs nobody asked for: every later map load was substituted too, and the save shadow
+     * rides the same gate, so picking a file to LOAD also redirected the next save. The reload arms
+     * the swap around its own call now (editor_frame.c), so there is nothing left to arm here. */
+    {
+        char msg[192] = "";
+        int staged = 0;
+        if (g_iface && g_iface->vtbl && g_iface->vtbl->rawmap_configure) {
+            staged = g_iface->vtbl->rawmap_configure(g_iface, p8.c_str(), nullptr, -1,
+                                                     msg, (int)sizeof msg);
+        }
+        if (!staged) {
+            poc_send_rawmap_status((L"Refused: " + poc_json_w(msg)).c_str());
+        } else {
+            /* ASK BEFORE OPENING. A reload discards whatever is in the editor, and the engine gives
+             * us no "has unsaved changes" query to consult -- so instead of guessing, the person is
+             * asked, with the file named. Answering no leaves it staged: they save their map, then
+             * File > Reload Map Now. */
+            poc_send_rawmap_status(L"", poc_json_w(p8.c_str()).c_str());
+        }
+    }
 }
 
 /* Asset browser: consume the latest published preview (+0x2D0 get_preview -- see preview.c). The
@@ -2651,31 +2800,34 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
             } else if (cmd == L"rawmapStatus") {
                 poc_send_rawmap_status(L"");
             } else if (cmd == L"rawmapLoadPick") {
-                /* Staging a load ARMS the swap -- picking a file is an unambiguous "use this one".
-                 * Note what arming also does: the save shadow shares this one gate, so the next
-                 * in-game save mirrors over the CURRENT save destination. That is why the reply
-                 * names the file rather than just saying "done". */
-                std::wstring picked;
-                if (poc_pick_rawmap_file(false, L"Load Rawmap", picked)) {
-                    std::string p8 = w_to_utf8(picked);
-                    poc_rawmap_configure(p8.c_str(), nullptr, 1,
-                                         L"Staged. It opens with the next map load.");
-                } else {
-                    poc_send_rawmap_status(L"");   /* cancelled -- refresh, say nothing */
-                }
+                /* Both pickers return immediately -- the dialog runs on its own thread and the think
+                 * loop acts on the result (poc_finish_pick). Running Show() here stalled that loop for
+                 * as long as the dialog was open, which is the lag this fixed. */
+                poc_begin_pick(0);
             } else if (cmd == L"rawmapSavePick") {
-                std::wstring picked;
-                if (poc_pick_rawmap_file(true, L"Save Rawmap As", picked)) {
-                    std::string p8 = w_to_utf8(picked);
-                    poc_rawmap_configure(nullptr, p8.c_str(), -1,
-                                         L"Saves now mirror to that file.");
+                poc_begin_pick(1);
+            } else if (cmd == L"rawmapLoadNow") {
+                /* Ask the backend's editor-frame hook to reload the map, so the staged file opens
+                 * without a trip to the SnapMap menu. The reply is a REQUEST result, not a
+                 * completion -- the reload lands a frame later, and the status refresh that follows
+                 * is what shows whether the swap actually fired. */
+                if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->rawmap_load_now) {
+                    poc_send_rawmap_status(L"This build's backend cannot reload the map.");
                 } else {
-                    poc_send_rawmap_status(L"");
+                    char msg[192] = "";
+                    int ok = g_iface->vtbl->rawmap_load_now(g_iface, msg, (int)sizeof msg);
+                    poc_log(ok ? "rawmap load-now: accepted" : "rawmap load-now: refused");
+                    poc_send_rawmap_status(ok ? L"Reloading the map..."
+                                              : (L"Cannot reload: " + poc_json_w(msg)).c_str());
                 }
             } else if (cmd == L"rawmapArm") {
                 int on = 0; json_get_int(json, L"on", &on);
+                /* Say what it does to the person's maps, not what it does to the detour -- and make
+                 * the OFF message say the menu still works, because the tick's whole hazard is
+                 * reading as the feature's master switch when it is only its scope. */
                 poc_rawmap_configure(nullptr, nullptr, on ? 1 : 0,
-                                     on ? L"Rawmap swap armed." : L"Rawmap swap disarmed.");
+                                     on ? L"Rawmaps now apply to every map load and save."
+                                        : L"Rawmaps apply to the File menu's own actions only.");
             } else if (cmd == L"rawmapResetPaths") {
                 /* Empty (not NULL) on both sides = restore the built-in %LOCALAPPDATA% pair. */
                 poc_rawmap_configure("", "", -1, L"Back to the default rawmap.json.");
@@ -2966,6 +3118,9 @@ static void poc_think_loop()
         if (g_pending_rename_prefab) { poc_apply_rename_prefab(); g_pending_rename_prefab = false; did_rename_prefab = true; }
         if (g_pending_load_prefab)   { poc_apply_load_prefab();   g_pending_load_prefab = false;   did_load_prefab = true; }
         if (g_pending_new_entity)    { poc_apply_new_entity();    g_pending_new_entity = false;    did_new_entity = true; }
+        /* A finished file picker. Its thread only carried the dialog; everything that touches the
+         * backend happens here, on the UI thread, like every other deferred action above. */
+        if (InterlockedCompareExchange(&g_pick_done, 0, 0) != 0) poc_finish_pick();
         if (g_pending_sound_session) { poc_apply_sound_session(); g_pending_sound_session = false; }
         if (g_pending_sound_preview) { poc_apply_sound_preview(); g_pending_sound_preview = false; did_sound_preview = true; }
         if (g_pending_create_folder) { poc_apply_create_folder(); g_pending_create_folder = false; did_create_folder = true; }

@@ -329,6 +329,7 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     /* clone-extension (the File menu's rawmap load/save file surface). */
     g_iface_vtbl_live.rawmap_status           = s->rawmap_status;           /* +0x328 */
     g_iface_vtbl_live.rawmap_configure        = s->rawmap_configure;        /* +0x330 */
+    g_iface_vtbl_live.rawmap_load_now         = s->rawmap_load_now;         /* +0x338 */
 }
 
 /* --------------------------------------------------------------------- the factory -----------------

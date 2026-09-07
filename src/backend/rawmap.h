@@ -149,6 +149,22 @@ int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok);
  * signature rather than accepting an address. */
 void sh_rawmap_embed_install(const void *module_base);
 
+/* Arm the shadow for exactly ONE save, then let it disarm itself.
+ *
+ * "Save Rawmap As" picks a destination and then has to wait for the person to save their map in the
+ * editor. Before this, that wait needed the shared rawmaps gate left switched on, which also armed the
+ * LOAD swap -- so choosing where to write a rawmap silently changed what the next map load would open.
+ * A one-shot is OR'd with the shared gate rather than replacing it, so `sh_rawmaps_on` / `sh_rawmaps_off`
+ * still mean exactly what they always meant.
+ *
+ * The one-shot is consumed by the FIRST save that reaches the shadow, whether or not the write then
+ * succeeds. Always returns 1. */
+int sh_rawmap_save_arm_once(void);
+
+/* Is a one-shot still waiting to be spent? Read-only -- it does not consume. For the status readout,
+ * so the File menu can show that a save is expected. */
+int sh_rawmap_save_oneshot_pending(void);
+
 /* Set the on-disk SHADOW destination path (the file each save is mirrored to). Pass NULL to reset to the
  * default %LOCALAPPDATA%\snapmap-plus\rawmap.json (the OG used %USERPROFILE%\snaphak; the same file the
  * LOAD swap reads). The default deliberately matches the LOAD source so a save-then-load round-trips.
@@ -169,7 +185,8 @@ unsigned long long sh_rawmap_save_last_bytes(void);
  * Expose the +0x328/+0x330 vtable-slot bodies, the way apply_engine hands its slots to iface_engine
  * so every engine-touch slot binds in one call. Neither body touches the engine -- they are file and
  * gate state only -- so they are safe from any thread and need no signature resolution. */
-void sh_rawmap_get_slots(sh_rawmap_status_fn *status, sh_rawmap_configure_fn *configure);
+void sh_rawmap_get_slots(sh_rawmap_status_fn *status, sh_rawmap_configure_fn *configure,
+                         sh_rawmap_load_now_fn *load_now);
 
 /* Would this file be accepted as a load source? Checks readable / non-empty / within the swap's own
  * 64 MB ceiling / starts like JSON after whitespace. `out_msg` gets a short human-readable reason.
@@ -177,5 +194,10 @@ void sh_rawmap_get_slots(sh_rawmap_status_fn *status, sh_rawmap_configure_fn *co
  * Returns 1 = acceptable. A pass here is NOT a promise the map is valid -- see rawmap_check() in
  * doom-re's save-load campaign for why full structural validation needs its own pure-C checks. */
 int sh_rawmap_validate_source(const char *path, char *out_msg, int msg_capacity);
+
+/* The same verdict about the file the swap would actually read (the staged source, or the default).
+ * Ask this instead of sh_rawmap_swap_will_fire before driving a reload: "the staged bytes will be
+ * accepted" is the property that makes a reload safe, and the arm is not. Returns 1 = acceptable. */
+int sh_rawmap_source_ok(char *out_msg, int msg_capacity);
 
 #endif /* BACKEND_RAWMAP_H */

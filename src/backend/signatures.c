@@ -495,6 +495,32 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "MenuThink",
       "48 8B C4 55 57 41 54 41 56 41 57 48 8D 68 98 48 81 EC 40 01 00 00 48 C7 44 24 38 FE FF FF FF",
       0x1718600u },
+    { "EditorFrame",       /* idSnapEditorLocal's per-frame Think (0x523140). The FIRST execution point
+                            * this product has on DOOM's own main thread at a frame boundary -- every
+                            * other main-thread route it has is the console command buffer's drain
+                            * callback, which is documented freeze-prone for heavy lifecycle calls (see
+                            * editor_frame.c). Identified by its own state machine: the body reads the
+                            * editor state id at +0x23618 (`param_1[0x46c3]`), gates on the
+                            * mid-transition field +0x224dc, dispatches through the state resolver and
+                            * calls ExitEditor 0x522680 on the confirm path. 11 insns / 33 bytes with
+                            * NO wildcards, PORTABLE (derived 2026-09-07 by tools/signatures/
+                            * extract_sig.py: unique once on Vulkan 0x523140 and once on OpenGL
+                            * 0x522a80). Every byte is register/rsp/rbp-relative -- no RIP-relative and
+                            * no relative branch -- so the whole 33-byte window is a legal steal. */
+      "48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D 68 A1 48 81 EC 90 00 00 00 48 C7 45 C7 FE FF FF FF",
+      0x523140u },
+    { "EditorLoadMap",     /* idSnapEditorLocal::LoadMap (0x525250) -- reloads/swaps the editor's map IN
+                            * PLACE, without leaving the editor. The stock SnapMap UI exposes no such
+                            * control. Its second argument is an idStr of which LoadMap reads ONLY the
+                            * data pointer at +0x10 (a 20-hex uppercase save-directory id); confirmed by
+                            * decompile, the body's single use is
+                            * `FUN_1405253e0(this, *(void**)(arg+0x10))`. 8 insns / 36 bytes, PORTABLE
+                            * (Vulkan 0x525250, OpenGL 0x524b80). MUST be called from a frame boundary:
+                            * called cold from the menu it is a harmless no-op (the editor subsystem is
+                            * uninitialised), and called from the command-buffer drain it deadlocks the
+                            * main thread. */
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 89 6C 24 48 48 89 74 24 50 48 8B F2 48 8B D9",
+      0x525250u },
     { "MenuPump",
       "40 56 41 57 48 81 EC 18 01 00 00",
       0x1702BA0u },
