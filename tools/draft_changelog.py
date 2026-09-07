@@ -30,6 +30,24 @@ MAX_BODY_CHARS = 800      # one commit body; git permits megabyte messages
 MAX_PROMPT_CHARS = 60000  # the assembled prompt
 MAX_INPUT_TOKENS = 40000  # counted before spending
 
+# The user-facing docs. contributing.md section 9 REQUIRES a behaviour change to
+# update these in the same pull request, so their diff is a human-written account
+# of what changed for a user -- the one input that says HOW a feature is reached,
+# which a commit subject never does.
+DOC_PATHS = ["docs/capabilities.md", "docs/fidelity.md", "docs/webview-ui.md",
+             "README.md"]
+MAX_DOC_CHARS = 24000
+
+# Words that name a place in the interface. A draft may use one only if the
+# sources actually contain it. Inventing the SHAPE of a feature is the failure
+# this guards and it is not hypothetical: for v0.2.1-beta.8 the drafter wrote
+# "A Navigation tab lets you mark which Blocking Box surfaces..." when no
+# Navigation tab exists, was never built, and appears in no commit -- it had only
+# "let authors mark which surfaces demons can walk on" to go on, and invented the
+# rest. The maintainer caught it in review; nothing in the pipeline would have.
+UI_NOUNS = ("tab", "panel", "button", "menu", "dialog", "checkbox", "slider",
+            "toolbar", "sidebar", "window", "dropdown", "wizard", "toggle")
+
 MAX_HEADLINE = 60
 MAX_SUMMARY = 320
 MAX_ITEMS = 6
@@ -70,6 +88,12 @@ it means for someone using Snapmap+.
 for maintainer review.
 - Never use newlines, square brackets, angle brackets, or backticks inside any \
 string. Text containing them is rejected and your draft is discarded.
+
+Grounding -- this is what makes the entry TRUE rather than merely plausible:
+- You are given the commits AND the diff of the user-facing documentation. A behaviour change is required to update those docs in the same pull request, so the docs diff is the account of what a user actually sees.
+- Say only what those sources support. If they tell you a capability changed but not how it is reached, describe the capability and stop.
+- NEVER invent where something lives. Do not name a tab, panel, button, menu, dialog, checkbox, window or any other place in the interface unless that exact word appears in the sources. A draft naming a UI surface the sources never mention is rejected and discarded.
+- Prefer the docs diff's own wording for what a feature is and where it lives.
 """
 
 
@@ -122,7 +146,7 @@ def _reject_forbidden(where, value):
             )
 
 
-def validate(draft):
+def validate(draft, min_collapsed=0):
     """Raise DraftRejected unless every field is safe and short enough."""
     groups = {"added": draft.added, "improved": draft.improved, "fixed": draft.fixed}
 
@@ -142,15 +166,29 @@ def validate(draft):
     if len(draft.summary) > MAX_SUMMARY:
         raise DraftRejected("summary is %d characters (max %d)"
                             % (len(draft.summary), MAX_SUMMARY))
+    # MAX_ITEMS is a TOTAL, matching what the system prompt asks for. It used to
+    # be enforced per group, so a draft could carry 6 New + 6 Improved + 6 Fixed
+    # -- eighteen bullets -- and pass a rule whose stated meaning is six.
+    total = sum(len(items) for items in groups.values())
+    if total > MAX_ITEMS:
+        raise DraftRejected("%d named bullets across New, Improved and Fixed "
+                            "(max %d in total)" % (total, MAX_ITEMS))
     for name, items in groups.items():
-        if len(items) > MAX_ITEMS:
-            raise DraftRejected("%s has %d items (max %d)"
-                                % (name, len(items), MAX_ITEMS))
         for item in items:
             if not item.strip():
                 raise DraftRejected(name + " contains an empty item")
     if draft.collapsed_count < 0:
         raise DraftRejected("collapsed_count is negative")
+    # The rendered line reads "Plus N smaller fixes and internal changes", so N
+    # must be everything in the release that this entry does NOT name -- shown
+    # commits the draft skipped, plus the ones never shown. The prompt used to
+    # pass only the not-shown count, and for v0.2.1-beta.8 that was 1 while the
+    # model rendered 23; the model's reading was the useful one, so the prompt
+    # now asks for it explicitly and this is the floor it may not go under.
+    if draft.collapsed_count < min_collapsed:
+        raise DraftRejected(
+            "collapsed_count is %d but at least %d commits are not described"
+            % (draft.collapsed_count, min_collapsed))
 
     # sources reaches the pull-request description, and reaches git as argv.
     for sha in draft.sources:
@@ -246,6 +284,54 @@ def collect(base):
     return "\n\n".join(blocks), subjects, omitted
 
 
+def collect_docs(base):
+    """The diff of the user-facing docs over the same range, or "".
+
+    This is the drafter's grounding. `docs/contributing.md` section 9 requires a
+    behaviour change to update these files in the SAME pull request, so their
+    diff is a maintainer-written statement of what a user can now do and where --
+    the thing commit subjects systematically leave out, and the gap the model
+    fills by inventing when it is not given it.
+
+    Diff only, not the whole file: the range's changes are the release, and the
+    files themselves are far too large for the prompt budget.
+    """
+    if not base:
+        return ""
+    try:
+        out = _git("diff", "--unified=1", base + "..HEAD", "--", *DOC_PATHS)
+    except subprocess.CalledProcessError:
+        return ""
+    keep = [ln for ln in out.splitlines()
+            if ln.startswith(("diff --git", "+", "-"))]
+    return "\n".join(keep)[:MAX_DOC_CHARS]
+
+
+def _corpus(commits, docs):
+    """Everything the model was actually shown, lowercased, for grounding."""
+    return (commits + "\n" + docs).lower()
+
+
+def check_grounded(draft, corpus):
+    """Reject a draft that names a place in the interface the sources never do.
+
+    Deliberately narrow: it cannot judge whether a sentence is true, and does not
+    try. It catches the one failure that actually happened -- a confident,
+    specific, INVENTED UI surface. A word is allowed the moment the sources
+    mention it once, so a real feature described in the docs diff passes freely.
+    """
+    for name, items in (("added", draft.added), ("improved", draft.improved),
+                        ("fixed", draft.fixed)):
+        for item in items:
+            low = item.lower()
+            for noun in UI_NOUNS:
+                if re.search(r"\b%s\b" % noun, low) and noun not in corpus:
+                    raise DraftRejected(
+                        "%s item names a %r that appears nowhere in the commits or "
+                        "the docs diff -- the drafter invented where the feature "
+                        "lives: %s" % (name, noun, _one_line(item, 120)))
+
+
 def previous_section(path):
     """The most recent entry, as a style anchor."""
     try:
@@ -259,7 +345,7 @@ def previous_section(path):
     return sections[0]["body"] if sections else ""
 
 
-def draft(commits, style, omitted_count):
+def draft(commits, style, omitted_count, docs=""):
     """The one API call. pydantic and anthropic are imported here, not above."""
     import anthropic
     from pydantic import BaseModel
@@ -280,6 +366,12 @@ def draft(commits, style, omitted_count):
         "Count these in collapsed_count and do not describe them: %d\n"
         % omitted_count
     )
+    if docs:
+        prompt += (
+            "\nThe diff of the user-facing documentation over the same range. "
+            "This is what a user can now do and where; prefer its wording, and do "
+            "not name any part of the interface it does not name:\n\n"
+            + docs + "\n")
     if style:
         prompt += ("\nThe previous release's entry, for voice and length only "
                    "-- do not repeat its content:\n\n" + style + "\n")
@@ -324,8 +416,10 @@ def main(argv=None):
         # collect() is inside the try on purpose: a git failure must degrade to
         # a skeleton like every other failure, not kill the workflow.
         commits, subjects, omitted = collect(args.base)
-        parsed = draft(commits, previous_section(args.changelog), omitted)
-        validate(parsed)
+        docs = collect_docs(args.base)
+        parsed = draft(commits, previous_section(args.changelog), omitted, docs)
+        validate(parsed, omitted)
+        check_grounded(parsed, _corpus(commits, docs))
         section, sources = render(args.tag, date, parsed), render_sources(parsed)
     except Exception as exc:            # noqa: BLE001 -- every failure degrades
         reason = _one_line("%s: %s" % (type(exc).__name__, exc))

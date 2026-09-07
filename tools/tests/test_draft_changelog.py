@@ -265,3 +265,77 @@ if __name__ == "__main__" and "--regenerate-fixture" in sys.argv:
                     encoding="utf-8", newline="\n")
     print("regenerated " + str(path))
     raise SystemExit(0)
+
+
+class TestGrounding(unittest.TestCase):
+    """The v0.2.1-beta.8 failure, and the guard that would have caught it."""
+
+    def test_the_navigation_tab_that_never_existed_is_rejected(self):
+        """The real draft. No Navigation tab was ever built, you reach the
+        feature through a property in DOOM's own object settings, and the word
+        "tab" appears in no commit and no doc -- the model invented the shape."""
+        draft = make(added=["A Navigation tab lets you mark which Blocking Box "
+                            "surfaces demons are allowed to walk on."])
+        corpus = dc._corpus(
+            "commit 177d450\nLet authors mark which surfaces demons can walk on\n",
+            "+| AI Navigation on a volume | Tick AI Navigation on a Blocking Box |")
+        with self.assertRaises(dc.DraftRejected) as cm:
+            dc.check_grounded(draft, corpus)
+        self.assertIn("tab", str(cm.exception))
+
+    def test_a_ui_word_the_sources_do_use_is_allowed(self):
+        """The guard must not block a real feature. The Entity State tab is
+        named in the docs, so a bullet may name it."""
+        draft = make(added=[], improved=[],
+                     fixed=["The Entity State tab accepts valid values again."])
+        corpus = dc._corpus("commit 4e61f23\nStop the Entity State tab rejecting "
+                            "valid enum values\n", "")
+        dc.check_grounded(draft, corpus)      # must not raise
+
+    def test_grounding_checks_every_group(self):
+        for group in ("added", "improved", "fixed"):
+            with self.subTest(group=group):
+                groups = {"added": [], "improved": [], "fixed": []}
+                groups[group] = ["Open the new settings panel."]
+                draft = make(**groups)
+                with self.assertRaises(dc.DraftRejected):
+                    dc.check_grounded(draft, dc._corpus("nothing relevant", ""))
+
+    def test_plain_prose_without_ui_nouns_passes(self):
+        draft = make(added=["Demons now climb onto marked surfaces."],
+                     improved=[], fixed=[])
+        dc.check_grounded(draft, dc._corpus("", ""))
+
+
+class TestTotalBulletCap(unittest.TestCase):
+    def test_six_per_group_is_no_longer_eighteen_bullets(self):
+        """The prompt says six in TOTAL; the check used to allow six EACH."""
+        six = ["a", "b", "c", "d", "e", "f"]
+        draft = make(added=list(six), improved=list(six), fixed=list(six))
+        with self.assertRaises(dc.DraftRejected) as cm:
+            dc.validate(draft)
+        self.assertIn("in total", str(cm.exception))
+
+    def test_six_in_total_is_accepted(self):
+        draft = make(added=["a", "b"], improved=["c", "d"], fixed=["e", "f"])
+        dc.validate(draft)                    # must not raise
+
+
+class TestCollapsedFloor(unittest.TestCase):
+    def test_collapsed_count_may_not_undercount_the_release(self):
+        draft = make(collapsed_count=1)
+        with self.assertRaises(dc.DraftRejected) as cm:
+            dc.validate(draft, min_collapsed=23)
+        self.assertIn("not described", str(cm.exception))
+
+    def test_collapsed_count_at_or_above_the_floor_is_fine(self):
+        dc.validate(make(collapsed_count=23), min_collapsed=23)
+        dc.validate(make(collapsed_count=30), min_collapsed=23)
+
+
+class TestDocsAreCollected(unittest.TestCase):
+    def test_no_base_means_no_docs_diff(self):
+        self.assertEqual(dc.collect_docs(""), "")
+
+    def test_doc_paths_cover_the_user_facing_inventory(self):
+        self.assertIn("docs/capabilities.md", dc.DOC_PATHS)

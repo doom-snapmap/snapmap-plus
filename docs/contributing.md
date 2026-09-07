@@ -348,6 +348,16 @@ to say whatever is useful. The canonical list is `INTERNAL_PREFIX_RE` in
 2. Review the pull request. Its description lists which commit backs each bullet, so a claim can be
    spot-checked without reading the whole range. Edit the entry directly on the branch if a sentence is
    wrong -- the pull-request gate re-checks the grammar.
+
+   **Read every bullet as a claim about the product, not as prose.** The drafter is given the commits and
+   the diff of the user-facing docs, and it is told never to name a part of the interface those sources do
+   not name; a draft that does is rejected outright. That guard exists because it happened: the first
+   v0.2.1-beta.8 draft opened with "A Navigation tab lets you mark which Blocking Box surfaces demons are
+   allowed to walk on" when no Navigation tab was ever built -- the feature is a property in DOOM's own
+   object settings, and the word appeared in no commit. Nothing downstream can tell a plausible sentence
+   from a true one. This review is the only place that happens, which is also why section 9's rule that a
+   behaviour change updates the docs in the SAME pull request matters here: those docs are what the drafter
+   is grounded on, and a release whose docs were not updated gives it nothing to be right from.
 3. Merge it.
 4. `git tag v0.2.2-beta.1 && git push origin v0.2.2-beta.1` -- **do this immediately after merging.** Merging
    redeploys the site, so between the merge and the tag the changelog page lists a release that cannot yet be
