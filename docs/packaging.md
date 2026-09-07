@@ -82,7 +82,7 @@ DOOMx64vk.exe  SHA256  139763E94F1A75B5310179F9EEEB8A949A1F53C49ACBC722FCFC5DFE7
 
 Those recorded RVAs are audit and re-derivation material, not a locator: nothing is found with them. The
 OpenGL executable from the same release carries a different hash and different addresses throughout, and is
-supported on exactly the same terms. What proves the port is that all 91 engine signatures and all 24
+supported on exactly the same terms. What proves the port is that all 91 engine signatures and all 25
 engine-globals anchors resolve **uniquely on both images** — the `-DoomAlt` portability gate in
 `tests\run-tests.ps1`, described in [`contributing.md`](contributing.md).
 

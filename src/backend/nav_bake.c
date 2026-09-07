@@ -93,6 +93,37 @@ static void bake_refresh_live_locked(void)
     }
 }
 
+/* How many times the engine has asked for each module's navigation this map.
+ * Its own table, not g_modules: it must count modules nobody marked, which is
+ * what makes an unmarked map a usable probe. */
+typedef struct bake_open_census {
+    char module[SH_NAVR_MODULE_CAP];
+    unsigned opens;
+} bake_open_census;
+
+static bake_open_census g_census[BAKE_MAX_MODULES];
+static int              g_census_count;
+
+static void bake_census(const char *module)
+{
+    int i;
+    AcquireSRWLockExclusive(&g_bake_lock);
+    for (i = 0; i < g_census_count; i++) {
+        if (strcmp(g_census[i].module, module) == 0) {
+            g_census[i].opens++;
+            ReleaseSRWLockExclusive(&g_bake_lock);
+            return;
+        }
+    }
+    if (g_census_count < BAKE_MAX_MODULES) {
+        strncpy_s(g_census[g_census_count].module,
+                  sizeof g_census[g_census_count].module, module, _TRUNCATE);
+        g_census[g_census_count].opens = 1;
+        g_census_count++;
+    }
+    ReleaseSRWLockExclusive(&g_bake_lock);
+}
+
 static void bake_reason(bake_module *m, const char *fmt, ...)
 {
     va_list ap;
@@ -242,6 +273,8 @@ void sh_nav_bake_set_map(const char *json, size_t len)
     g_module_count = 0;
     g_have_map = 0;
     g_live_refreshed = 0;
+    memset(g_census, 0, sizeof g_census);
+    g_census_count = 0;
 
     if (bake_enabled() && json && len) {
         __try {
@@ -414,6 +447,15 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
     for (i = 0; i < NAV_CLASS_COUNT; i++) if (strcmp(cls, NAV_CLASSES[i]) == 0) known = 1;
     if (!known) return 0;
 
+    /* Census FIRST, for every module the engine asks navigation for -- marked or
+     * not. How many times one module's navigation is opened is the measurement
+     * the one-copy rule turns on: BuildAAS builds the name inside its
+     * per-instance loop, so N opens of one name across a map that places that
+     * module N times means each instance can be served its own navigation, and
+     * three opens for twelve instances means it cannot. Counted here rather than
+     * at the bake because an unmarked module is the cheapest way to ask. */
+    bake_census(module);
+
     AcquireSRWLockExclusive(&g_bake_lock);
     if (!g_have_map) { ReleaseSRWLockExclusive(&g_bake_lock); return 0; }
     /* Once per map load. The three nav classes are built back to back from one
@@ -470,6 +512,9 @@ void sh_nav_bake_report(void (*out)(const char *fmt, ...))
                 m->ok ? (m->reason[0] ? m->reason : "ready") : m->reason);
         }
     }
+    for (i = 0; i < g_census_count; i++)
+        out("  the engine opened %s navigation %u time(s)\n",
+            g_census[i].module, g_census[i].opens);
     ReleaseSRWLockShared(&g_bake_lock);
     out("  baked %lu payload(s) this session.\n",
         (unsigned long)InterlockedCompareExchange(&g_bakes, 0, 0));
