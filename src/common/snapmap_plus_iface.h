@@ -338,7 +338,18 @@ typedef int           (*sh_list_materials_fn)(struct sh_iface *self, int start, 
  * than copied -- a light projection is not a surface anyone would put on a wall, so listing it in
  * both places would only ever be the wrong answer in one of them. */
 #define SH_ASSET_LIGHT       16
-#define SH_ASSET_COUNT       17
+/* PROJECTILE: the `projectile` decl type. Reference-only for the same reason PERK is -- a
+ * projectile is named by a weapon/ammo decl's `projectileDecl` (and siblings: `subProjectile`,
+ * `meleeProjectile`, `detonateProjectile`, `fullyChargedProjectileDecl`, ...), never placed or
+ * applied directly, so this is a name you copy and wire by hand. */
+#define SH_ASSET_PROJECTILE  17
+/* WEAPON: the `weapon` decl type, 204 of them. Reference-only, same shape as PROJECTILE -- named
+ * by a `weaponDecl`/`declWeapon` field, not placed or applied. This is the id idTarget_FireWeapon
+ * and idTarget_DummyFire actually take: those SnapMap actions fire a WEAPON decl (which in turn
+ * names the projectile/ammo it launches), there is no logic-side way to fire a projectile decl
+ * directly. */
+#define SH_ASSET_WEAPON       18
+#define SH_ASSET_COUNT       19
 
 /* Page ONE asset type's catalog. `kind` is an SH_ASSET_* value (backend/imgpreview.h); `start` is
  * how many names of that type to skip. Supersedes list_materials, which is kind 0 and stays put

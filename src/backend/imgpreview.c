@@ -77,6 +77,8 @@ static const struct { const char *type; unsigned len; unsigned char kind; const 
      * other model, so they belong in the same category rather than a separate one. */
     { "discreteAnimation",  17, SH_ASSET_MODEL,      NULL,   0 },
     { "perks",               5, SH_ASSET_PERK,       NULL,   0 },
+    { "projectile",         10, SH_ASSET_PROJECTILE, NULL,   0 },
+    { "weapon",              6, SH_ASSET_WEAPON,     NULL,   0 },
     /* `file` is a mixed bag -- .bimage, .tome, .sbsp, .ambientsh -- and only the .bswf half is worth
      * offering, so the suffix does the filtering the type cannot. See imgpreview_swf_name for why
      * the listed name is not the name stored here. */
