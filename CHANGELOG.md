@@ -10,7 +10,7 @@ latest stable version is what `snapmap-plus update` installs.
 Mark the Blocking Boxes you build in DOOM's own object settings and Snapmap+ bakes navigation onto them at map load, so demons walk and even climb onto your platforms. Snapmap+ also now runs on both the Vulkan and OpenGL versions of the game.
 
 ### New
-- A Navigation tab lets you mark which Blocking Box surfaces demons are allowed to walk on, baked into the map when it loads.
+- An AI Navigation switch on any Blocking Box, in DOOM's own object settings, marks its top surface as ground demons may walk on.
 - Demons now climb onto marked surfaces well above step height, using the animation that suits each one.
 
 ### Improved
