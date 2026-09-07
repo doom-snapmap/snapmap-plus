@@ -36,9 +36,18 @@
  *
  * So the arm is not optional, and it was a mistake to make the person supply it. The reload arms the
  * swap immediately before its own LoadMap call and restores the previous state on every path out,
- * fault included. That is a WINDOW, not a one-shot count, because one LoadMap makes the engine parse
- * more than once -- the live log shows the swap firing twice per reload -- and it means the arm can
- * no longer be left switched on across a session, silently substituting ordinary map loads.
+ * fault included. It means the arm can no longer be left switched on across a session, silently
+ * substituting ordinary map loads.
+ *
+ * A WINDOW, not a one-shot count -- and the reason is that a window assumes nothing about how many
+ * times the engine parses. Measured, it parses exactly ONCE per reload (six reloads across two
+ * sessions, each a clean arm -> one fire -> disarm), so a one-shot would work today; it would stop
+ * working the day that count changed, and would silently leave the rest of a multi-parse load
+ * vanilla. Restoring state we saved cannot be wrong by a count.
+ *
+ * An earlier version of this comment claimed the engine parses twice per reload. It does not. That
+ * came from a build whose arm stayed switched on, where hand-driven map loads fired the swap too and
+ * were miscounted as part of the reload -- which is exactly the collateral this window removed.
  *
  * What the request checks instead is the staged file: sh_rawmap_source_ok, on the click and again on
  * the frame. "The bytes will be accepted" is the property that makes the reload safe. The arm never

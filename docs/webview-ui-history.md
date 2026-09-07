@@ -26,7 +26,8 @@ This is an engineering log for maintainers, not the product changelog. The relea
   swap fires, *which* id hardly matters, because our bytes replace the parse either way.
 - **Neither menu action needs the arm tick.** Load Rawmap turns the swap on immediately before its own
   `LoadMap` call and restores the previous state on every path out, faults included -- a window, not a
-  one-shot count, because one reload makes the engine parse twice. Save Rawmap As arms the shadow for
+  one-shot count, because restoring saved state assumes nothing about how many times the engine parses
+  (measured: exactly once per reload, six reloads over two sessions). Save Rawmap As arms the shadow for
   exactly one save. Before this, picking a file to load also left the gate on, so every later map load was
   substituted and -- the shadow sharing that gate -- the next save was redirected too. What the request
   checks instead is the staged file (`sh_rawmap_source_ok`), on the click and again on the frame: "these
@@ -74,8 +75,11 @@ This is an engineering log for maintainers, not the product changelog. The relea
   places, and it is not where anyone's rawmaps are.
 - Verified by build, the native + JavaScript suites (both dual-build portability gates included), and
   browser preview (menu order, the confirm prompt, the waiting-save readout, no console errors).
-  **The reload is proven in-game**: `EF: editor-frame hook installed`, three `EF: reload returned 0`, and
-  six `B1: rawmap swap FIRED` in one session -- two parses per reload, which is why the arm is a window.
+  **Both halves are proven in-game.** Six reloads across two sessions each logged a clean
+  `LOAD-swap ARMED` -> one `rawmap swap FIRED` -> `LOAD-swap DISARMED` -> `EF: reload returned 0`, with
+  the substituted byte count matching the picked file. Three `Save Rawmap As` clicks each logged
+  `rawmap SAVE wrote <n> bytes from saved map <id> [from-disk]` with no editor save and no fallback to
+  the one-shot arm.
 
 ### 2026-09-06 -- The Navigation tab, added and then removed
 

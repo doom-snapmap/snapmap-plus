@@ -84,11 +84,11 @@ static void ef_set_msg(const char *s)
  *     it as the parent of Documents is wrong the moment Documents is redirected -- which OneDrive
  *     does by default. Ask for the folder itself, and only fall back to the profile root.
  *
- * WHICH map we pick barely matters: the reload is refused unless the rawmap swap will fire, and
- * while it fires the engine's bytes are replaced no matter which map it went to fetch. We take the
- * most recently written folder anyway, because that is overwhelmingly the map the person is working
- * on -- so if the swap is somehow disarmed between the request and the frame, the worst case is
- * reloading the map they already had open rather than an unrelated one. */
+ * WHICH map we pick barely matters, because the reload arms the swap around its own LoadMap call:
+ * while it fires the engine's bytes are replaced no matter which map it went to fetch, so the id only
+ * has to name something loadable. We take the most recently written folder anyway, because that is
+ * overwhelmingly the map the person is working on -- so in the worst case the id names the map they
+ * already had open rather than an unrelated one. */
 
 /* The id must be exactly 20 hex digits. Checked because it is about to be handed to an engine
  * function as a name: anything else means we misread the directory layout, and finding that out
@@ -297,9 +297,10 @@ static void ef_service_reload(void *editor)
     /* THE ARM WINDOW. The swap is armed for the duration of this one LoadMap call and put back
      * exactly as we found it, so nobody has to tick a checkbox and no unrelated map load is caught.
      *
-     * A window, not a one-shot count: one LoadMap makes the engine parse more than once (the live
-     * log shows the swap firing twice per reload), so a one-shot would cover the first parse and
-     * leave the rest vanilla. Bracketing the call covers however many parses it makes and no more.
+     * A window, not a one-shot count, because it assumes nothing about how many parses LoadMap
+     * makes. Measured it makes exactly one (six reloads, two sessions, each a clean arm -> one fire
+     * -> disarm), so a one-shot would work today and would break silently the day that changed.
+     * Bracketing the call covers however many parses it makes and no more.
      *
      * Restored on EVERY path out, the fault path included. Leaving the gate on after a fault would
      * silently substitute the person's next ordinary map load, which is the mode this removes. */
