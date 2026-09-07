@@ -101,11 +101,13 @@ static void iface_unregister_cmd(sh_iface *self, const char *name)
 /* --------------------------------------------------------------------- DRAIN (+0x1a0) ---------------
  * Run every queued {handler, args} on the CURRENT thread -- whichever one calls this, which in the shipped
  * build is the frontend's UI worker thread, since its think-loop calls this per-frame. That is NOT DOOM's
- * main thread (see issue #61). Then reset the queue. OG: takes the mutex, runs [wq_begin,wq_end), clears the vector.
+ * main thread. Then reset the queue. OG: takes the mutex, runs [wq_begin,wq_end), clears the vector.
  * Each item owns its argv copy -- freed after the handler runs. SEH would be ideal but this file is plain
  * C without the engine's fault surface; a handler fault here would already be the SnapStack op's concern
- * (op execution wraps it). There are no producers yet, so the queue is always empty -- this just
- * proves the drain is wired + callable from the frontend's think-loop. */
+ * (op execution wraps it). The queue is PRODUCER-LESS in the shipped build: the `sh` dispatch stopped
+ * enqueuing when it moved to inline main-thread execution (issue #61) -- precisely because this drain
+ * runs on the worker thread, the wrong place for engine-touching SnapStack work. The machinery stays
+ * (pinned ABI; and the per-tick hook below rides this call). */
 /* Optional backend-side per-tick housekeeping, registered at install time. A REGISTERED HOOK, not an
  * extern call: this file is shared ABI and is also compiled standalone into the C unit tests, which link
  * none of the backend's engine layer -- an `extern void sh_apply_prefab_poll_play(void)` here builds fine

@@ -1072,11 +1072,15 @@ static int poc_apply_edit_seh(const sh_apply_item *it, int count, const char *op
     __try { return g_iface->vtbl->apply_edit(g_iface, it, count, op) ? 1 : 0; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
-/* Decl-edit (kind=0) commits MUST go inline via +0x290, never the deferred +0xd0 schedule -- that's the
- * deferred-apply double-free (docs/backend-changes.md, 2026-07-12): splitting the commit across two
- * threads/frames double-owns the decl-source block. Try apply_sync first, fall back to the deferred
- * apply_edit only on an old backend that lacks +0x290. kind=1 (mkcmd staging, e.g. Load/Place) is
- * unaffected by this bug and stays on poc_apply_edit_seh/apply_edit. */
+/* Decl-edit (kind=0) commits go through +0x290 apply_sync for the SYNCHRONOUS applied count. Since the
+ * issue #61 thread move the slot executes the batch on DOOM's MAIN thread: called from this UI worker it
+ * marshals through the clone_bss_apply drain and blocks (normally one frame; a few seconds worst-case if
+ * the engine is parked, after which it reports failure) -- so this call may briefly stall the think
+ * loop, by design. (The old comment's "deferred +0xd0 double-owns the decl-source block" reasoning was
+ * OVERTURNED -- the real hazard was the allocation heap, now pinned backend-side; see
+ * docs/backend-changes.md.) Fall back to the deferred apply_edit only on an old backend that lacks
+ * +0x290 -- also main-thread and heap-pinned, just without the synchronous count. kind=1/2 (mkcmd
+ * staging, e.g. Load/Place) stays on poc_apply_edit_seh/apply_edit. */
 static int poc_apply_sync_seh(const sh_apply_item *it, int count, const char *op)
 {
     __try {
@@ -1223,9 +1227,9 @@ static void poc_apply_load_prefab()
  * class/inherit/source on `id`) -- id-targeted instead of paste-targeted. The page already did the hard
  * part (fresh-reserialize + JSON-patch the componentTimeLine/encounterComponent field); this is purely
  * "hand the opaque blob to the engine and report whether it took."
- * COMMITS VIA +0x290 SYNC (OG-faithful): this is a decl-edit commit, same class of op as SnapStack's
- * acctargets/bss/bse -- the deferred +0xd0 schedule double-frees the committed decl-source block on the
- * next Play->teardown. See poc_apply_sync_seh and docs/backend-changes.md. */
+ * COMMITS VIA +0x290 SYNC: a decl-edit commit, same class of op as SnapStack's acctargets/bss/bse. The
+ * slot runs it on DOOM's main thread (blocking marshal from this worker thread -- issue #61) and returns
+ * the real applied count. See poc_apply_sync_seh and docs/backend-changes.md. */
 static void poc_apply_save_timeline()
 {
     g_save_timeline_result = 0;

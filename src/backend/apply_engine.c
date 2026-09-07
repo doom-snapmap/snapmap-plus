@@ -11,9 +11,13 @@
  *                             normalized source/class/inherit onto the live defsub -> dtor temp).
  *   doMkcmdApplyNow         -> ae_mkcmd_one           (deserialize prefab text -> editor+0x209a8).
  *   ensureBssCommand + doBssApplyNow -> the clone_bss_apply engine command + its drain handler (FIX B):
- *                             the heavy structured-deserialize AVs mid-frame (a stale reflection-handler),
- *                             so the frontend SCHEDULEs a batch (slot_schedule_apply -> BufferCommandText)
+ *                             the frontend SCHEDULEs a batch (slot_schedule_apply -> BufferCommandText)
  *                             and the engine drains clone_bss_apply on the DOOM main thread (decl-safe).
+ *                             The same drain also executes the BLOCKING cross-thread requests behind
+ *                             slot_apply_sync and the timeline-inherit normalize (issue #61): an off-main
+ *                             caller publishes the work, enqueues the command, and waits for the drain's
+ *                             result, so every engine-touching serialize/commit runs on the main thread
+ *                             while the caller keeps a synchronous applied-count.
  *   readPrefabStagingJson   -> slot_read_prefab       (+0xb8): the INVERSE +0xb0 serialize of editor+0x209a8.
  *
  * Every engine fn is signature-resolved (version-portable); the declMgr accessor is the ONE hardcoded RVA,
@@ -503,6 +507,41 @@ static int               g_pending_lock_init = 0;
 static apply_item_copy  *g_pending_items = NULL;
 static int               g_pending_count = 0;
 static char              g_pending_op[32] = {0};
+
+/* ---- the BLOCKING cross-thread request (issue #61) -------------------------------------------------
+ * One off-main caller at a time (in practice only the frontend's UI worker thread) publishes a decl-edit
+ * batch (or a normalize-timeline id), enqueues clone_bss_apply, and BLOCKS until the drain has executed
+ * it on DOOM's main thread. This is how a kind=0 commit reaches the main thread WITHOUT turning the
+ * caller's synchronous applied-count into an asynchronous one: the count crosses back through this
+ * request and the caller returns it as before. Guarded by g_pending_lock; the items are a DEEP COPY
+ * (same as the +0xd0 schedule), so a waiter that gives up can walk away without leaving the drain
+ * reading freed caller memory. */
+#define AE_SYNC_EMPTY       0   /* no request */
+#define AE_SYNC_PUBLISHED   1   /* posted, not yet picked up by the drain */
+#define AE_SYNC_RUNNING     2   /* the drain is executing it on the main thread right now */
+#define AE_SYNC_DONE        3   /* finished; `applied` is valid until the waiter collects it */
+#define AE_SYNC_ABANDONED   4   /* the waiter gave up mid-run; the drain resets to EMPTY when done */
+typedef struct ae_sync_request {
+    int              state;     /* AE_SYNC_* */
+    apply_item_copy *items;     /* batch form (fn_kind 0); drain-owned once RUNNING */
+    int              count;
+    char             op[32];
+    int              fn_kind;   /* 0 = item batch; 1 = normalize-timeline-inherit on norm_id */
+    int              norm_id;
+    int              applied;
+} ae_sync_request;
+static ae_sync_request g_sync_req;              /* guarded by g_pending_lock */
+static HANDLE          g_sync_ev = NULL;        /* manual-reset; created once at install */
+/* First wait: the drain normally comes on the very next frame, so this only expires when the main
+ * thread is parked (load screen, modal error) -- in which case the request is withdrawn un-run.
+ * Grace wait: the request was picked up and is executing; give a slow batch time to finish. */
+#define AE_MARSHAL_WAIT_MS   3000
+#define AE_MARSHAL_GRACE_MS 10000
+/* ae_marshal_publish_and_wait outcomes. */
+#define AE_MARSHAL_UNAVAILABLE (-1)  /* no transport (cmd buffer/event/lock missing) -- caller runs inline */
+#define AE_MARSHAL_DONE          0   /* executed on the main thread; *out_applied is the real count */
+#define AE_MARSHAL_NOT_RUN       1   /* never drained; withdrawn -- the batch DEFINITELY did not run */
+#define AE_MARSHAL_LOST          2   /* picked up but no completion in time -- outcome unknown */
 
 /* ============================================================ SEH-guarded primitive reads =========== */
 static int ae_read_ptr(const void *src, void **out)
@@ -1084,9 +1123,11 @@ static int ae_deserialize_to_obj(const char *text, void *dstObj, const char *typ
          * lexer ctor so the embedded idStrs aren't constructed). This was once mis-documented as THE fix for the
          * save->reload "Memory corruption before block" crash, on a theory that g_lex_ctor left these idStrs
          * holding stack garbage that got freed at teardown -- that theory does not hold, since g_lex_ctor
-         * constructs them regardless of prior buffer contents. The actual fix for that crash was committing the
-         * decl-edit INLINE/synchronously (see the +0x290 apply_sync path) instead of deferring it off-thread,
-         * which had left the freshly-committed decl-source block double-owned. */
+         * constructs them regardless of prior buffer contents. (A second recorded explanation for that crash
+         * -- that the deferred commit left the decl-source block "double-owned" -- was also overturned: the
+         * block has exactly one owner in either design. The real mechanism was the ALLOCATION HEAP: a
+         * main-thread commit landed the block in the map heap, destroyed at the next map load. Fixed by the
+         * PushHeap(MEMLOCAL_HEAP_GLOBAL) bracket around the commit in ae_apply_one; see the C2 probe note.) */
         g_idstr_ctor(lexer + LEXER_IDSTR0_OFF, "");
         g_idstr_ctor(lexer + LEXER_IDSTR1_OFF, "");
         g_lex_ctor(lexer);              lex_ctored = 1;    /* LexCtxCtor -- also constructs the +0x30/+0x88 idStrs itself (the two ctors above are redundant/defensive) */
@@ -1223,8 +1264,8 @@ static int ae_apply_one(int id, const char *patched_text)
                                          * members itself (class/inherit at +0x58/+0x60 default to the sentinel;
                                          * the +0x130/+0x168 idStrs are ctor-initialized), so this is a guard, not
                                          * the fix for the save->reload "Memory corruption before block" crash --
-                                         * that fix was the inline/synchronous commit (the +0x290 apply_sync
-                                         * path), not buffer zeroing. */
+                                         * that fix is the heap pin below (the commit's allocations must land in
+                                         * a heap that survives a map teardown), not buffer zeroing. */
     int def_ctored = 0, applied = 0;
     __try {
         g_def_ctor(tmpDef); def_ctored = 1;                /* 0x5e9400 */
@@ -1255,12 +1296,13 @@ static int ae_apply_one(int id, const char *patched_text)
              * unmapped pages and a later free reading a destroyed or recycled header. Confirmed live
              * 2026-09-03 by the one-shot probe below: a UI-thread commit reports heap=PROCESS.
              *
-             * So the UI-thread commit survives by accident, and every MAIN-thread caller of ae_apply_one is
-             * exposed. ae_apply_target_write is one today (the sh_target_any wire hook runs on the main
-             * thread and commits inline); it is dormant, which is the only reason this has not been seen.
-             * PushHeap(MEMLOCAL_HEAP_GLOBAL) buys the surviving heap deliberately instead, so the outcome no
-             * longer depends on which thread got here. Off-main this is a no-op -- ae_memlocal() returns NULL
-             * and the push declines -- so the shipped UI-thread path is byte-for-byte unchanged.
+             * Since the issue #61 thread move, this function runs on the MAIN thread in normal use (the
+             * `sh` dispatch executes at the engine's command-exec point; off-main callers marshal through
+             * the clone_bss_apply drain), so the push is no longer a no-op -- it is the load-bearing half
+             * of the move. Without it, every main-thread commit would land the block in the map heap and
+             * reproduce the 2026-07-12 "Memory corruption before block!" teardown crash. On the residual
+             * off-main paths (thread-unknown or transport-unavailable fallback) the push declines and the
+             * allocation falls through to the process heap anyway, which is equally surviving.
              *
              * The bracket must span the idStr assigns as well, not just the rebuild: class and inherit
              * allocate through the same allocator, and ending it early would leave those two in the map heap
@@ -1333,23 +1375,32 @@ static int ae_apply_one(int id, const char *patched_text)
      * PushHeap(MEMLOCAL_HEAP_GLOBAL)/PopHeap, which buys the same heap deliberately. That is the open
      * question this probe settles, and it is settled by ONE line in sh_backend.log from a normal build.
      *
-     * WHAT TO LOOK FOR. On the first successful decl commit this logs the committing thread class and the
-     * owning heap of the resulting decl-source blob. Expected if the reading above is correct:
-     *     "C2 commit: thread=UI(off-main) decl-source blob heap=PROCESS (survives)"
-     * Anything reporting MAP from the UI thread, or PROCESS from the main thread, REFUTES it -- and in that
-     * case the heap is not what distinguishes the two designs and the deferral must not be revisited on
-     * this argument. One-shot (an InterlockedExchange latch), so it cannot spam a per-tick caller.
-     *
      * ANSWERED 2026-09-03, live, on a normal editor session (`sh pr` + `sh bss` on the clean anchor):
      *     C2 commit: thread=UI(off-main) (tid=31984) decl-source blob=... heap=PROCESS (survives)
-     * exactly the predicted line, so the reading holds: the heap IS what differs between the two designs,
-     * and the surviving heap is a side effect of being on the wrong thread. The commit above is now
-     * bracketed in PushHeap(MEMLOCAL_HEAP_GLOBAL)/PopHeap so it no longer depends on that accident. The
-     * thread move itself is still open -- it is not a heap question any more but a call-shape one (kind=0
-     * would go from a synchronous applied-count to an asynchronous one at five call sites, and toast
-     * ownership moves with it), and it needs its own change with a play -> teardown validation pass.
-     * The probe is kept: it costs one line per process and it re-answers the question on any other machine
-     * or build without a rebuild. */
+     * exactly the predicted line, so the reading held: the heap IS what differed between the two designs,
+     * and the surviving heap was a side effect of being on the wrong thread.
+     *
+     * BOTH HALVES HAVE SINCE LANDED. The commit is bracketed in PushHeap(MEMLOCAL_HEAP_GLOBAL)/PopHeap
+     * (the heap half), and the thread move (issue #61) routes every decl-edit onto the main thread: the
+     * `sh` dispatch now executes SnapStack ops inline at the engine's command-exec point, and off-main
+     * callers (the frontend's Save Timeline, the timeline-inherit normalize) marshal through the
+     * clone_bss_apply drain and block for the result.
+     *
+     * WHAT TO LOOK FOR NOW. On the first successful decl commit of a session the expected line is:
+     *     "C2 commit: thread=DOOM-main (tid=...) decl-source blob=... heap=PROCESS (survives)"
+     * That one line verifies both halves at once: DOOM-main says the thread move routed the commit
+     * correctly, and heap=PROCESS says the pin actually took where it matters (on the main thread the
+     * ambient scope IS the map heap, so PROCESS can only mean our push was in effect).
+     *     thread=DOOM-main heap=MAP        => the PIN REGRESSED (memlocal sig unresolved, bracket lost,
+     *                                         or the scope machinery changed) -- the 2026-07-12 teardown
+     *                                         crash is re-armed; treat as a release blocker.
+     *     thread=UI(off-main)              => the THREAD MOVE regressed (a kind=0 caller bypassed the
+     *                                         dispatch/marshal), though the block still survives off-main.
+     * Caveat (curated finding): a heap=MAP reading is ambiguous IF DeclSourceRebuild reused the engine's
+     * pre-existing buffer instead of reallocating -- the header read then describes the engine's original
+     * allocation. Treat heap=MAP as "investigate", not as instant proof, but never as benign.
+     * One-shot (an InterlockedExchange latch), so it cannot spam a per-tick caller. The probe is kept:
+     * it costs one line per process and re-answers the question on any machine or build without a rebuild. */
     if (applied) {
         static volatile LONG s_commit_probe_done = 0;
         if (InterlockedExchange(&s_commit_probe_done, 1) == 0) {
@@ -1731,6 +1782,72 @@ static void ae_toast_result(const char *op, int applied, int total)
     backend_log(line);
 }
 
+/* Run ONE apply item. The single dispatch shared by every batch executor (the drain, the inline
+ * apply_sync fast path) so no caller can drift onto a variant shape. kind=2 is stage-then-place; its
+ * tri-state collapses to "the item succeeded" for the batch count (both STAGED and PLACED leave a usable
+ * prefab), while g_last_place_result carries the distinction the Load/Place toast needs. */
+static int ae_run_item(int kind, int id, const char *text)
+{
+    if (!text) return 0;
+    if (kind == 2) {
+        int pr = ae_mkcmd_instantiate(text);
+        g_last_place_result = pr;
+        return (pr != AE_PASTE_FAILED);
+    }
+    return (kind == 1) ? ae_mkcmd_one(text)
+         : (kind == 3) ? ae_apply_target_write(id, atoi(text))
+                       : ae_apply_one(id, text);
+}
+
+/* the normalize-timeline body (serialize -> splice -> commit), defined with the other slot bodies below;
+ * the drain needs it for the marshaled fn_kind=1 request. */
+static int ae_normalize_timeline_inherit_body(int id);
+
+/* Consume + execute the one blocking cross-thread request, if any. Runs on the DOOM main thread inside
+ * the clone_bss_apply drain. Toast ownership: a BATCH toasts here (exactly once, with the real
+ * applied/total), because this is where it executes; the waiter only relays the count. The normalize
+ * form (fn_kind=1) never toasts, matching its direct-call behaviour. */
+static void ae_sync_consume_and_run(void)
+{
+    apply_item_copy *items = NULL;
+    int count = 0, fn_kind = 0, norm_id = -1, take = 0;
+    char op[32]; op[0] = '\0';
+
+    if (!g_pending_lock_init) return;
+    EnterCriticalSection(&g_pending_lock);
+    if (g_sync_req.state == AE_SYNC_PUBLISHED) {
+        items   = g_sync_req.items;  count   = g_sync_req.count;
+        fn_kind = g_sync_req.fn_kind; norm_id = g_sync_req.norm_id;
+        memcpy(op, g_sync_req.op, sizeof op); op[sizeof op - 1] = '\0';
+        g_sync_req.items = NULL; g_sync_req.count = 0;
+        g_sync_req.state = AE_SYNC_RUNNING;
+        take = 1;
+    }
+    LeaveCriticalSection(&g_pending_lock);
+    if (!take) return;
+
+    int applied = 0;
+    if (fn_kind == 1) {
+        applied = ae_normalize_timeline_inherit_body(norm_id);
+    } else {
+        for (int i = 0; i < count; i++)
+            if (items && ae_run_item(items[i].kind, items[i].id, items[i].text)) applied++;
+        ae_toast_result(op, applied, count);
+    }
+    if (items) { for (int i = 0; i < count; i++) free(items[i].text); free(items); }
+
+    EnterCriticalSection(&g_pending_lock);
+    g_sync_req.applied = applied;
+    if (g_sync_req.state == AE_SYNC_RUNNING) {
+        g_sync_req.state = AE_SYNC_DONE;
+        if (g_sync_ev) SetEvent(g_sync_ev);
+    } else {
+        /* the waiter abandoned mid-run (its grace wait expired); nobody will collect, so reset. */
+        g_sync_req.state = AE_SYNC_EMPTY;
+    }
+    LeaveCriticalSection(&g_pending_lock);
+}
+
 static void __cdecl ae_clone_bss_apply_cmd(void)
 {
     apply_item_copy *items = NULL;
@@ -1743,31 +1860,21 @@ static void __cdecl ae_clone_bss_apply_cmd(void)
     g_pending_items = NULL; g_pending_count = 0; g_pending_op[0] = '\0';   /* consume */
     if (g_pending_lock_init) LeaveCriticalSection(&g_pending_lock);
 
-    if (!items || count <= 0) { ae_toast_result(op, 0, 0); return; }
+    if (items && count > 0) {
+        int applied = 0;
+        for (int i = 0; i < count; i++)
+            if (ae_run_item(items[i].kind, items[i].id, items[i].text)) applied++;
+        ae_toast_result(op, applied, count);
 
-    int applied = 0;
-    for (int i = 0; i < count; i++) {
-        if (!items[i].text) continue;
-        /* kind=2 is stage-then-place; its tri-state collapses to "the item succeeded" for the batch count
-         * (both STAGED and PLACED leave a usable prefab), while g_last_place_result carries the
-         * distinction the Load/Place toast needs. */
-        int ok;
-        if (items[i].kind == 2) {
-            int pr = ae_mkcmd_instantiate(items[i].text);
-            g_last_place_result = pr;
-            ok = (pr != AE_PASTE_FAILED);
-        } else {
-            ok = (items[i].kind == 1) ? ae_mkcmd_one(items[i].text)
-               : (items[i].kind == 3) ? ae_apply_target_write(items[i].id, atoi(items[i].text))
-                                      : ae_apply_one(items[i].id, items[i].text);
-        }
-        if (ok) applied++;
+        /* free the consumed batch (allocated in slot_schedule_apply). */
+        for (int i = 0; i < count; i++) free(items[i].text);
+        free(items);
     }
-    ae_toast_result(op, applied, count);
+    /* (an empty store is no longer toasted "applied 0/0": it just means a schedule and a marshal shared
+     * one frame, so the command text ran twice and the first pass consumed everything.) */
 
-    /* free the consumed batch (allocated in slot_schedule_apply). */
-    for (int i = 0; i < count; i++) free(items[i].text);
-    free(items);
+    /* the blocking cross-thread request, if one is waiting (issue #61 -- see ae_sync_consume_and_run). */
+    ae_sync_consume_and_run();
 }
 
 /* register clone_bss_apply ONCE (lazy, on the first schedule). AddCommand takes the cmd-system lock; the
@@ -1789,6 +1896,114 @@ static int ae_ensure_command(void)
     }
     backend_log("C2: clone_bss_apply engine command registered (command-buffer apply routing live)");
     return 1;
+}
+
+/* ---- publish the blocking request and wait for the drain (issue #61) -------------------------------
+ * Takes OWNERSHIP of `copy` (a deep-copied batch, or NULL for the fn_kind=1 normalize form) in every
+ * outcome: it is either handed to the drain (which frees it), withdrawn and freed here, or freed on the
+ * unavailable path. Returns an AE_MARSHAL_* outcome; *out_applied is only meaningful on DONE.
+ *
+ * The BufferCommandText append from this (off-main) thread races the main-thread drain's own append in
+ * principle -- the engine's command buffer takes no lock. This is the SAME transport slot_schedule_apply
+ * has always used for Load/Place and mkcmd (and the OG frontend used before that), so the move adds no
+ * new mechanism; it is noted here so nobody mistakes it for a synchronized queue. */
+static int ae_marshal_publish_and_wait(apply_item_copy *copy, int built, const char *op,
+                                       int fn_kind, int norm_id, int *out_applied)
+{
+    *out_applied = 0;
+    if (!g_pending_lock_init || !g_sync_ev || !g_buffer_cmd || !g_cmdsys || !ae_ensure_command()) {
+        if (copy) { for (int i = 0; i < built; i++) free(copy[i].text); free(copy); }
+        return AE_MARSHAL_UNAVAILABLE;
+    }
+
+    EnterCriticalSection(&g_pending_lock);
+    if (g_sync_req.state != AE_SYNC_EMPTY) {
+        /* another off-main request is in flight (should not happen -- one requester thread exists).
+         * Refuse rather than queue; the caller falls back to its pre-move behaviour. */
+        LeaveCriticalSection(&g_pending_lock);
+        if (copy) { for (int i = 0; i < built; i++) free(copy[i].text); free(copy); }
+        backend_log("C2 sync-marshal: request slot busy -> declined (caller falls back)");
+        return AE_MARSHAL_UNAVAILABLE;
+    }
+    ResetEvent(g_sync_ev);
+    g_sync_req.items   = copy;  g_sync_req.count  = built;
+    g_sync_req.fn_kind = fn_kind; g_sync_req.norm_id = norm_id;
+    if (op) strncpy_s(g_sync_req.op, sizeof g_sync_req.op, op, _TRUNCATE);
+    else    g_sync_req.op[0] = '\0';
+    g_sync_req.applied = 0;
+    g_sync_req.state   = AE_SYNC_PUBLISHED;
+    LeaveCriticalSection(&g_pending_lock);
+
+    int enq = 0;
+    __try { g_buffer_cmd(g_cmdsys, CLONE_BSS_CMD "\n"); enq = 1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { enq = 0; }
+    /* On an enqueue fault, fall through to the wait anyway IF the request is already gone (a racing
+     * drain may still pick up a partially-appended command); the withdraw below sorts out the rest. */
+
+    DWORD wr = WaitForSingleObject(g_sync_ev, enq ? AE_MARSHAL_WAIT_MS : 50);
+    (void)wr;
+    EnterCriticalSection(&g_pending_lock);
+    if (g_sync_req.state == AE_SYNC_DONE) {
+        *out_applied = g_sync_req.applied;
+        g_sync_req.state = AE_SYNC_EMPTY;
+        LeaveCriticalSection(&g_pending_lock);
+        return AE_MARSHAL_DONE;
+    }
+    if (g_sync_req.state == AE_SYNC_PUBLISHED) {
+        /* never drained (parked main thread / load screen / the enqueue faulted). Withdraw: the batch
+         * DEFINITELY did not run, so the caller can report an honest failure. */
+        apply_item_copy *mine = g_sync_req.items; int n = g_sync_req.count;
+        g_sync_req.items = NULL; g_sync_req.count = 0;
+        g_sync_req.state = AE_SYNC_EMPTY;
+        LeaveCriticalSection(&g_pending_lock);
+        if (mine) { for (int i = 0; i < n; i++) free(mine[i].text); free(mine); }
+        backend_log("C2 sync-marshal: engine never drained the request -> withdrawn, 0 applied");
+        return AE_MARSHAL_NOT_RUN;
+    }
+    /* RUNNING: the main thread is executing it right now. Wait it out; a batch is bounded
+     * (APPLY_MAX_ITEMS) so this only expires if the main thread parked MID-batch (fatal modal). */
+    LeaveCriticalSection(&g_pending_lock);
+    wr = WaitForSingleObject(g_sync_ev, AE_MARSHAL_GRACE_MS);
+    (void)wr;
+    EnterCriticalSection(&g_pending_lock);
+    if (g_sync_req.state == AE_SYNC_DONE) {
+        *out_applied = g_sync_req.applied;
+        g_sync_req.state = AE_SYNC_EMPTY;
+        LeaveCriticalSection(&g_pending_lock);
+        return AE_MARSHAL_DONE;
+    }
+    g_sync_req.state = AE_SYNC_ABANDONED;   /* the drain resets to EMPTY when (if) it finishes */
+    LeaveCriticalSection(&g_pending_lock);
+    backend_log("C2 sync-marshal: request picked up but not completed in time -- outcome unknown "
+                "(the drain's own toast/log has the truth if it lands)");
+    return AE_MARSHAL_LOST;
+}
+
+/* Deep-copy an sh_apply_item batch and marshal it (batch form). Returns AE_MARSHAL_*. */
+static int ae_apply_marshal(const sh_apply_item *items, int count, const char *op, int *out_applied)
+{
+    *out_applied = 0;
+    apply_item_copy *copy = (apply_item_copy *)calloc((size_t)count, sizeof(apply_item_copy));
+    if (!copy) return AE_MARSHAL_UNAVAILABLE;
+    int built = 0;
+    for (int i = 0; i < count; i++) {
+        const char *t = items[i].text ? items[i].text : "";
+        size_t len = strlen(t);
+        if (len + 1 > APPLY_TEXT_CAP) len = APPLY_TEXT_CAP - 1;
+        char *tc = (char *)malloc(len + 1);
+        if (!tc) break;
+        memcpy(tc, t, len); tc[len] = '\0';
+        copy[built].kind = items[i].kind;
+        copy[built].id   = items[i].id;
+        copy[built].text = tc;
+        built++;
+    }
+    if (built != count) {   /* OOM mid-copy: a PARTIAL batch must not run (silent under-apply) */
+        for (int i = 0; i < built; i++) free(copy[i].text);
+        free(copy);
+        return AE_MARSHAL_UNAVAILABLE;
+    }
+    return ae_marshal_publish_and_wait(copy, built, op, 0, -1, out_applied);
 }
 
 /* ============================================================ the vtable slot bodies =============== */
@@ -1871,44 +2086,19 @@ static int tl_splice_portable_inherit(const char *src, char *out, int cap)
     return replaced;
 }
 
-/* +0x298 (ext 6) TIMELINE PORTABLE-INHERIT NORMALIZE -- see the full doc comment on
- * sh_normalize_timeline_inherit_fn in snapmap_plus_iface.h. Cheap defsub-inherit read first (no serialize/no
- * alloc) so this is safe to call every tick on every Timeline-classed id; only a placeholder match pays
- * for the malloc+serialize+splice+commit+free. Commits via ae_apply_one directly (the SAME body +0x290
- * apply_sync calls for kind=0) INLINE on the calling thread -- whichever thread that is is, by
- * construction, the caller's own safe commit point (matching the +0x290 guarantee). Both scratch buffers
- * are heap-allocated per call and freed before returning -- no persistent static/BSS footprint (see the
- * TL_NORMALIZE_BUF_CAP comment above for the regression that shape avoids). */
-static int slot_normalize_timeline_inherit(sh_iface *self, int id)
+/* The normalize WORK: serialize -> splice the placeholder inherit portable -> commit. MUST run on DOOM's
+ * main thread (it is a serialize + kind=0 decl commit, the issue #61 pair); reached either directly when
+ * the caller is already there, or through the clone_bss_apply drain's fn_kind=1 request. Both scratch
+ * buffers are heap-allocated per call and freed before returning -- no persistent static/BSS footprint
+ * (see the TL_NORMALIZE_BUF_CAP comment above for the regression that shape avoids). */
+static int ae_normalize_timeline_inherit_body(int id)
 {
-    (void)self;
     int result = 0;
     char *json = NULL, *patched = NULL;
     __try {
-        void *array = NULL; uint32_t count = 0;
-        if (!ae_entity_array(&array, &count)) { result = 0; goto done; }
-        void *ent = ae_entity_ptr(array, count, id);
-        if (!ent) { result = 0; goto done; }
-        void *defsub = NULL;
-        if (!ae_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) || defsub == NULL) { result = 0; goto done; }
-        /* RE-FIRE GATE -- check the decl-source BLOB (defsub+0x38), NOT the raw inherit idStr (defsub+0x58).
-         * ae_apply_one rebuilds the blob from the CURRENT defsub+0x58 (DeclSourceRebuild) BEFORE it assigns
-         * the new inherit, so the blob lags one commit behind the raw field: after the first commit the raw
-         * field reads 'snapmaps/unknown' but the blob still reads the placeholder. get_inherit reads this
-         * blob AND the map save serializes it, so if we gated on the raw field we'd commit exactly ONCE and
-         * leave the blob (hence the Inherit box + the saved map) stuck on the placeholder forever. Gating on
-         * the blob instead keeps this firing across successive rescans (each triggered by the raw field's
-         * id-string change) until a commit's DeclSourceRebuild finally bakes 'unknown' into the blob -- this
-         * self-correcting repeated-commit behavior is what the get_inherit gate has relied on all along (the
-         * "repeated commits" seen in the log are load-bearing, not waste). A raw-field gate here was tried
-         * 2026-07-12 and confirmed to leave the Inherit box + the saved map stuck on the placeholder. */
-        void *blob = NULL;
-        if (!ae_read_ptr((const uint8_t *)defsub + DECL_BLOB_OFF, &blob) || !blob) { result = 0; goto done; }
-        if (!strstr((const char *)blob, TL_PLACEHOLDER_INHERIT)) { result = 0; goto done; }   /* blob already portable */
-
         json = (char *)malloc(TL_NORMALIZE_BUF_CAP);
         if (!json) { result = 0; goto done; }
-        int n = slot_serialize_entity(self, id, json, TL_NORMALIZE_BUF_CAP);
+        int n = slot_serialize_entity(NULL, id, json, TL_NORMALIZE_BUF_CAP);
         if (n <= 0) { result = 0; goto done; }
 
         patched = (char *)malloc(TL_NORMALIZE_BUF_CAP);
@@ -1921,6 +2111,50 @@ done:
     if (json) free(json);
     if (patched) free(patched);
     return result;
+}
+
+/* +0x298 (ext 6) TIMELINE PORTABLE-INHERIT NORMALIZE -- see the full doc comment on
+ * sh_normalize_timeline_inherit_fn in snapmap_plus_iface.h. Cheap defsub-blob read first (no serialize/no
+ * alloc, SEH-guarded) so this is safe to call every tick on every Timeline-classed id; only a placeholder
+ * match pays for the real work -- and, when the caller is off-main (the frontend's rescan poll), for the
+ * blocking main-thread marshal that work now rides (issue #61: the serialize + commit are engine calls
+ * that belong on DOOM's main thread; the gate is a guarded read and may stay cheap and local). */
+static int slot_normalize_timeline_inherit(sh_iface *self, int id)
+{
+    (void)self;
+    int gate = 0;
+    __try {
+        void *array = NULL; uint32_t count = 0;
+        void *ent = NULL, *defsub = NULL, *blob = NULL;
+        if (ae_entity_array(&array, &count) &&
+            (ent = ae_entity_ptr(array, count, id)) != NULL &&
+            ae_read_ptr((const uint8_t *)ent + ENT_DEFSUB_OFF, &defsub) && defsub &&
+            /* RE-FIRE GATE -- check the decl-source BLOB (defsub+0x38), NOT the raw inherit idStr (+0x58).
+             * ae_apply_one rebuilds the blob from the CURRENT defsub+0x58 (DeclSourceRebuild) BEFORE it
+             * assigns the new inherit, so the blob lags one commit behind the raw field: after the first
+             * commit the raw field reads 'snapmaps/unknown' but the blob still reads the placeholder.
+             * get_inherit reads this blob AND the map save serializes it, so a raw-field gate would commit
+             * exactly ONCE and leave the blob (hence the Inherit box + the saved map) stuck on the
+             * placeholder forever. Gating on the blob keeps this firing across successive rescans until a
+             * commit's DeclSourceRebuild finally bakes 'unknown' into the blob -- the repeated commits in
+             * the log are load-bearing, not waste. A raw-field gate was tried 2026-07-12 and confirmed to
+             * leave the Inherit box + the saved map stuck on the placeholder. */
+            ae_read_ptr((const uint8_t *)defsub + DECL_BLOB_OFF, &blob) && blob &&
+            strstr((const char *)blob, TL_PLACEHOLDER_INHERIT) != NULL)
+            gate = 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { gate = 0; }
+    if (!gate) return 0;
+
+    if (ae_on_main_thread() == 0) {
+        int applied = 0;
+        int mr = ae_marshal_publish_and_wait(NULL, 0, "tl-inherit-portable", 1, id, &applied);
+        if (mr == AE_MARSHAL_DONE) return applied;
+        if (mr != AE_MARSHAL_UNAVAILABLE) return 0;   /* not run / lost -- the next rescan re-fires */
+        /* transport unavailable on this build -> the pre-move local commit below (off-main the heap
+         * pin declines and the block lands in the process heap, which survives -- the beta.4 shape). */
+    }
+    /* on the main thread already (1), thread unknown (-1), or no transport: run right here. */
+    return ae_normalize_timeline_inherit_body(id);
 }
 
 /* +0xd0 SCHEDULE a batch of apply-items at the engine command-exec point (FIX B). Deep-copies the items
@@ -1971,13 +2205,12 @@ static int slot_schedule_apply(sh_iface *self, const sh_apply_item *items, int c
  * ae_apply_one). Called by the sh_target_any confirm hook (wiring_cleandirect) INSTEAD of laying an (invalid,
  * dangling) CSR edge to a bare timeline target.
  *
- * COMMITS INLINE (OG-faithful, 2026-07-12): runs NOW on the calling thread, NOT deferred to clone_bss_apply.
- * The wire hook already runs on the DOOM main thread (a decl-safe point where reflect resolves), so an inline
- * commit is correct and avoids the deferred double-free the SnapStack decl-edits hit (the +0x290 sync-apply
- * fix -- see docs/backend-changes.md). This path is DORMANT today (sh_target_any targets via SnapMap's native
- * input/output nodes and writes NO decl; only `acctargets` writes a targets list), but it is the natural
- * primitive for a future UI-driven "add target" feature -- keeping it on the inline path means that feature is
- * crash-correct by default. SEH-guarded inside ae_apply_target_write; a bad state degrades to a no-op. */
+ * COMMITS INLINE: runs NOW on the calling thread. The wire hook runs on the DOOM main thread (a decl-safe
+ * point where reflect resolves), which is exactly where a serialize + decl commit belongs (issue #61), and
+ * ae_apply_one's heap pin keeps the committed block out of the map heap there. NOT dormant: wcd_run reaches
+ * this whenever `sh_target_any` is revealed and the connect tool picks a BARE (timeline) target -- for
+ * output/input-node targets the stock creator runs instead and no decl is written. SEH-guarded inside
+ * ae_apply_target_write; a bad state degrades to a no-op. */
 void ae_schedule_target_write(int source_id, int target_id)
 {
     __try { ae_apply_target_write(source_id, target_id); }
@@ -2086,41 +2319,57 @@ static int slot_serialize_selection(sh_iface *self, char *out_json, int cap)
     return written;
 }
 
-/* +0x290 (ext 5) SYNCHRONOUS inline apply -- the OG-faithful commit path. Runs the apply batch RIGHT NOW on
- * the CALLING (UI/think-loop) thread, exactly like OG's acctargets handler (FUN_18000228c) which calls its
- * +0xd0 commit (FUN_180004b80) INLINE. This REPLACES the deferred clone_bss_apply route for the SnapStack
- * decl-edit ops: the deferral (FIX B) split serialize (UI thread) from commit (DOOM main thread, a later
- * frame), which left the committed decl-source block DOUBLE-OWNED -> the play->teardown double-free
- * (acctargets/bss "Memory corruption before block"). OG never defers -- it commits inline on the SAME
- * UI/think-loop thread where the serialize already runs successfully (so reflect IS resolvable there;
- * slot_serialize_entity proves it), giving the block a single clean owner. Each ae_apply_one is SEH-guarded,
- * so if the deserialize ever DID fault off-main it degrades to 0-applied, never a crash. Returns applied
- * count. Same batch semantics as slot_schedule_apply (kind 0=decl edit / 1=mkcmd / 3=target-write) but
- * inline -- text is caller-owned + valid for the call, so NO deep copy / pending store is needed. */
+/* +0x290 (ext 5) SYNCHRONOUS apply -- the decl-edit commit path. Returns the applied count, computed
+ * before this call returns, and produces exactly ONE result toast per batch.
+ *
+ * THREADING (issue #61, the thread move). Serialize and commit are engine calls and belong on DOOM's
+ * main thread; the engine's allocator, decl machinery, and entity structures are only coherent there.
+ *   - Called ON the main thread (the `sh` console dispatch at the engine's command-exec point, the
+ *     clone_bss_apply drain, the sh_target_any wire hook): runs the batch inline, right here. This is
+ *     the normal shipped path for every SnapStack op since the dispatch stopped bouncing handlers to
+ *     the frontend's worker thread.
+ *   - Called OFF the main thread (the frontend's Save Timeline on the UI worker): the batch is
+ *     deep-copied, handed to the clone_bss_apply drain, and this call BLOCKS (normally one frame) for
+ *     the drain's applied count -- so the caller keeps a synchronous result and the engine work still
+ *     happens on its own thread. The drain toasts (that is where the batch ran); a withdrawn request
+ *     toasts 0/N here so the exactly-one-toast contract holds either way.
+ *   - Thread UNKNOWN (main-thread id unresolved on this build) or no marshal transport: fall back to
+ *     the pre-move inline commit on the calling thread. That is exactly the shipped beta.4 behaviour --
+ *     contained by the per-item SEH guards, and heap-safe off-main because the scope lookup no-ops and
+ *     the block lands in the process heap.
+ *
+ * HISTORY. This slot originally ran the batch inline on the UI worker thread on the theory that the
+ * 2026-07-12 deferred-apply crash was a cross-thread double-free. That explanation was overturned (the
+ * block has one owner in either design); the real mechanism was the ALLOCATION HEAP -- a main-thread
+ * commit landed the decl-source block in the map heap, which dies at map teardown. ae_apply_one now pins
+ * the commit to the process heap, which is what makes the main-thread route correct.
+ *
+ * Each item is SEH-guarded (a fault degrades to 0-applied, never a crash). Same batch semantics as
+ * slot_schedule_apply (kind 0=decl edit / 1=mkcmd / 2=stage+place / 3=target-write); text is
+ * caller-owned and only needs to outlive the call (the marshal deep-copies). */
 static int slot_apply_sync(sh_iface *self, const sh_apply_item *items, int count, const char *op_label)
 {
     (void)self;
     if (!items || count <= 0 || count > APPLY_MAX_ITEMS) return 0;
     if (!ae_editor_session()) return 0;
-    int applied = 0;
-    for (int i = 0; i < count; i++) {
-        if (!items[i].text) continue;
-        /* kind=2 is stage-then-place; its tri-state collapses to "the item succeeded" for the batch count
-         * (both STAGED and PLACED leave a usable prefab), while g_last_place_result carries the
-         * distinction the Load/Place toast needs. */
-        int ok;
-        if (items[i].kind == 2) {
-            int pr = ae_mkcmd_instantiate(items[i].text);
-            g_last_place_result = pr;
-            ok = (pr != AE_PASTE_FAILED);
-        } else {
-            ok = (items[i].kind == 1) ? ae_mkcmd_one(items[i].text)
-               : (items[i].kind == 3) ? ae_apply_target_write(items[i].id, atoi(items[i].text))
-                                      : ae_apply_one(items[i].id, items[i].text);
+    const char *op = op_label ? op_label : "apply";
+
+    if (ae_on_main_thread() == 0) {
+        int applied = 0;
+        int mr = ae_apply_marshal(items, count, op, &applied);
+        if (mr == AE_MARSHAL_DONE)    return applied;    /* ran on the main thread; drain toasted */
+        if (mr == AE_MARSHAL_NOT_RUN) {                  /* withdrawn un-run: honest 0/N, our toast */
+            ae_toast_result(op, 0, count);
+            return 0;
         }
-        if (ok) applied++;
+        if (mr == AE_MARSHAL_LOST)    return 0;          /* drain owns it; its toast/log tell the truth */
+        /* AE_MARSHAL_UNAVAILABLE -> pre-move inline fallback below. */
     }
-    ae_toast_result(op_label ? op_label : "apply", applied, count);
+
+    int applied = 0;
+    for (int i = 0; i < count; i++)
+        if (ae_run_item(items[i].kind, items[i].id, items[i].text)) applied++;
+    ae_toast_result(op, applied, count);
     return applied;
 }
 
@@ -2726,6 +2975,9 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
     g_cmdsys = cmdsys;
 
     if (!g_pending_lock_init) { InitializeCriticalSection(&g_pending_lock); g_pending_lock_init = 1; }
+    /* the blocking-marshal completion event (manual-reset; reset per request under the lock). If this
+     * fails the marshal reports UNAVAILABLE and off-main callers keep the pre-move inline behaviour. */
+    if (!g_sync_ev) g_sync_ev = CreateEventW(NULL, TRUE, FALSE, NULL);
 
     g_entity_clone = (entity_clone_fn)    sig_addr_by_name(results, n, "EntityClone");
     g_def_ctor     = (entity_def_ctor_fn) sig_addr_by_name(results, n, "EntityDefCtor");

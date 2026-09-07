@@ -11,10 +11,21 @@
  * teardown; (2) several persistent `static` scratch buffers (two 256KB JSON buffers x3 call sites, a 1MB
  * idstr_bufs[4096][256] table) -- the same BSS-footprint pattern that caused a controller-freelook
  * regression when tried on the timeline-inherit slot. This rewrite fixes both: every kind=0 apply-op now
- * tries the SYNCHRONOUS +0x290 apply_sync first (OG-faithful inline commit; see ic_apply below), falling
+ * tries the SYNCHRONOUS +0x290 apply_sync first (see ic_apply below), falling
  * back to the deferred schedule only for an old backend without the slot; mkcmd (kind=1, a different
  * operation that never exhibited the crash) stays on the deferred path, matching the original's
  * convention. All scratch buffers are heap-allocated transiently per call (malloc/free), never static/BSS.
+ *
+ * THREADING (issue #61, 2026-09-07). These handlers now execute on DOOM's MAIN thread: the `sh` console
+ * dispatch (commands.c h_sh_dispatch) runs them inline at the engine's command-exec point instead of
+ * bouncing them to the frontend's UI worker via the work-queue. That puts every engine touch an op makes
+ * -- serialize, decl commit, selection writes, toast -- on the thread the engine expects, as one unit,
+ * and keeps every applied-count synchronous. (The 2026-07-12 "deferred +0xd0 double-frees the block"
+ * explanation referenced above was later OVERTURNED: the block has one owner in either design; the real
+ * hazard was the allocation heap, now pinned in ae_apply_one. See docs/backend-changes.md.) The numbered
+ * STACKS are still also reachable from the frontend's worker thread through the +0x2A0 push / +0x2A8
+ * clear slots, so the stack stores are guarded by g_ss_lock below; the GROUPS are touched only by these
+ * handlers (one thread) and stay lock-free.
  *
  * Clean-room: ported from our own RE. Zero OG SnapHak bytes.
  */
@@ -102,6 +113,30 @@ static void ss_ids_free(ss_ids *v) { free(v->items); v->items = NULL; v->count =
 #define SS_MAX_STACKS 256   /* generous vs. any real console usage; an absurd index arg clamps in, no grow needed */
 static ss_ids g_stacks[SS_MAX_STACKS];
 
+/* The numbered stacks are touched from TWO threads since the issue #61 dispatch move: the `sh` handlers
+ * on DOOM's main thread, and the frontend's +0x2A0 push_to_stack / +0x2A8 clear_stack slots on its UI
+ * worker (the Entities-tab context menu). A concurrent realloc/memcpy would corrupt our own CRT heap, so
+ * every stack MUTATION takes this lock. Plain count READS (toast lines, the >=2 precondition checks) stay
+ * lock-free -- an aligned int read cannot tear, and a stale count only wobbles a toast number or lets a
+ * bse/acc fall through to an empty move_out, which already degrades cleanly. Initialized once in
+ * sh_register_snapstack_commands_backend, which runs on the backend bootstrap thread before the frontend
+ * thread exists and before any command can execute; the lazy CAS guard is belt-and-suspenders for any
+ * exotic call order. GROUPS need none of this: only the handlers (one thread) reach them. */
+static CRITICAL_SECTION g_ss_lock;
+static volatile LONG    g_ss_lock_state = 0;   /* 0 uninit, 1 initializing, 2 ready */
+static void ss_lock_init(void)
+{
+    LONG prev = InterlockedCompareExchange(&g_ss_lock_state, 1, 0);
+    if (prev == 0) {
+        InitializeCriticalSection(&g_ss_lock);
+        InterlockedExchange(&g_ss_lock_state, 2);
+    } else if (prev == 1) {
+        while (InterlockedCompareExchange(&g_ss_lock_state, 2, 2) != 2) Sleep(0);
+    }
+}
+static void ss_lock(void)   { ss_lock_init(); EnterCriticalSection(&g_ss_lock); }
+static void ss_unlock(void) { LeaveCriticalSection(&g_ss_lock); }
+
 static int ss_clamp_index(int index)
 {
     if (index < 0) return 0;
@@ -109,9 +144,27 @@ static int ss_clamp_index(int index)
     return index;
 }
 static ss_ids *stack_get(int index) { return &g_stacks[ss_clamp_index(index)]; }
-static int stack_push(int index, const int *ids, int n) { return ss_ids_push_dedup(stack_get(index), ids, n); }
-static void stack_clear(int index) { ss_ids_clear(stack_get(index)); }
-static int stack_move_out(int index, int **out) { return ss_ids_move_out(stack_get(index), out); }
+/* every stack MUTATION goes through these three, under g_ss_lock (see its comment). */
+static int stack_push(int index, const int *ids, int n)
+{
+    ss_lock();
+    int pushed = ss_ids_push_dedup(stack_get(index), ids, n);
+    ss_unlock();
+    return pushed;
+}
+static void stack_clear(int index)
+{
+    ss_lock();
+    ss_ids_clear(stack_get(index));
+    ss_unlock();
+}
+static int stack_move_out(int index, int **out)
+{
+    ss_lock();
+    int n = ss_ids_move_out(stack_get(index), out);
+    ss_unlock();
+    return n;
+}
 
 /* ============================================================ the named GROUPS ======================= */
 #define SS_GROUP_NAME_CAP 64
@@ -284,21 +337,25 @@ static int ic_schedule_apply(sh_iface *iface, const sh_apply_item *items, int n,
     if (!iface || !iface->vtbl || !iface->vtbl->apply_edit || n <= 0) return 0;
     return iface->vtbl->apply_edit(iface, items, n, op) != 0;
 }
-/* +0x290 SYNCHRONOUS inline apply (OG-faithful): commit NOW on this (console-drain / UI) thread. Returns
- * the applied count (>=0), or -1 if the slot is absent (an older backend -> the caller falls back to the
- * deferred schedule). */
+/* +0x290 SYNCHRONOUS apply: commit as one unit with a synchronous applied count. These handlers run on
+ * DOOM's main thread (the `sh` dispatch executes them at the engine's command-exec point -- issue #61),
+ * so the slot takes its inline fast path right here; were this ever called off-main, the slot itself
+ * marshals to the main thread and blocks, so the count stays real either way. Returns the applied count
+ * (>=0), or -1 if the slot is absent (an older backend -> the caller falls back to the deferred
+ * schedule). */
 static int ic_apply_sync(sh_iface *iface, const sh_apply_item *items, int n, const char *op)
 {
     if (!iface || !iface->vtbl || !iface->vtbl->apply_sync) return -1;
     if (n <= 0) return 0;
     return iface->vtbl->apply_sync(iface, items, n, op);
 }
-/* Apply a batch the OG-faithful way: SYNCHRONOUS inline (+0x290) when the backend has it, else the
- * deferred +0xd0 schedule (older backend only). ALL kind=0 decl-edit ops (bss/bsi/bsf/bsb/bse/accl/
- * acctargets) go through this -- see the module doc comment for why (the deferred path double-frees the
- * decl-source block on the next map teardown; this is the exact bug the first port attempt carried).
- * mkcmd (kind=1, prefab paste) intentionally stays on ic_schedule_apply -- a different operation that
- * targets the editor paste slot, matching the original's convention. */
+/* Apply a batch: SYNCHRONOUS (+0x290) when the backend has it, else the deferred +0xd0 schedule (older
+ * backend only -- and in this build unreachable, since snapstack.c ships inside the backend that owns
+ * the slot; kept as the documented degradation shape). ALL kind=0 decl-edit ops (bss/bsi/bsf/bsb/bse/
+ * accl/acctargets) go through this. Both routes now execute the batch on DOOM's main thread with the
+ * commit's allocations pinned to a surviving heap; the difference is only that the deferred route loses
+ * the synchronous applied count. mkcmd (kind=1, prefab paste) intentionally stays on ic_schedule_apply
+ * -- a different operation that targets the editor paste slot, matching the original's convention. */
 static int ic_apply(sh_iface *iface, const sh_apply_item *items, int n, const char *op)
 {
     if (n <= 0) return 0;
@@ -658,7 +715,7 @@ static void do_bulkset(sh_iface *iface, const char *op, int argc, const char **a
     free(scratch);
     free(ids);
     if (m == 0) { ic_toast(iface, "SnapStack", "serialize/patch produced no apply"); return; }
-    int ok = ic_apply(iface, items, m, op);   /* +0x290 SYNCHRONOUS inline (OG-faithful); deferred fallback */
+    int ok = ic_apply(iface, items, m, op);   /* +0x290 SYNCHRONOUS on the main thread; deferred fallback */
     for (int i = 0; i < m; i++) free(owned[i]);
     if (!ok) {
         char t[96]; _snprintf_s(t, sizeof t, _TRUNCATE, "%s: apply failed (editor down?)", op);
@@ -710,7 +767,7 @@ static void h_bsb(void *ctx, int argc, const char **argv)
     free(ids);
     if (mismatch) ic_toast(iface, "SnapStack", "bsb: some entities skipped (property/value re-resolve mismatch)");
     if (m > 0) {
-        int ok = ic_apply(iface, items, m, "bsb");   /* +0x290 SYNCHRONOUS inline; deferred fallback */
+        int ok = ic_apply(iface, items, m, "bsb");   /* +0x290 SYNCHRONOUS on the main thread; deferred fallback */
         for (int i = 0; i < m; i++) free(owned[i]);
         if (!ok) ic_toast(iface, "SnapStack", "bsb: apply failed (editor down?)");
     } else if (!mismatch) {
@@ -759,7 +816,7 @@ static void h_bse(void *ctx, int argc, const char **argv)
     free(scratch);
     free(ids);
     if (m == 0) { ic_toast(iface, "SnapStack", "bse: produced no apply"); return; }
-    int ok = ic_apply(iface, items, m, "bse");   /* +0x290 SYNCHRONOUS inline (OG-faithful); deferred fallback */
+    int ok = ic_apply(iface, items, m, "bse");   /* +0x290 SYNCHRONOUS on the main thread; deferred fallback */
     for (int i = 0; i < m; i++) free(owned[i]);
     if (!ok) ic_toast(iface, "SnapStack", "bse: apply failed (editor down?)");
 }
@@ -833,7 +890,7 @@ static void do_acc(sh_iface *iface, const char *op, int argc, const char **argv,
     free(idstr_bufs);
     free(full);
     sh_apply_item it; it.kind = 0; it.id = popped; it.text = patched;
-    int ok = ic_apply(iface, &it, 1, op);   /* +0x290 SYNCHRONOUS inline (OG-faithful); deferred fallback */
+    int ok = ic_apply(iface, &it, 1, op);   /* +0x290 SYNCHRONOUS on the main thread; deferred fallback */
     free(patched);
     if (!ok) { ic_toast(iface, "SnapStack", "accl: apply failed (editor down?)"); return; }
 
@@ -903,8 +960,9 @@ static void h_mkcmd(void *ctx, int argc, const char **argv)
     free(commandText);
 
     /* mkcmd (kind=1, prefab paste) intentionally stays on the DEFERRED path -- it targets the editor paste
-     * slot, a different operation from the kind=0 decl-edits, and never exhibited the double-free crash
-     * (matches the original's convention; see the module doc comment for the kind=0 rationale). */
+     * slot, a different operation from the kind=0 decl-edits (matches the original's convention). With the
+     * handler now running at the command-exec point, the BufferCommandText enqueue happens ON the main
+     * thread (the engine's re-entrant second buffer) and the stage runs one frame later, still main-thread. */
     sh_apply_item it; it.kind = 1; it.id = 0; it.text = prefab;
     int ok = ic_schedule_apply(iface, &it, 1, "mkcmd");
     free(prefab);
@@ -1016,13 +1074,19 @@ static void h_chkstk(void *ctx, int argc, const char **argv)
     const char *arg = arg_at(argc, argv, 1);
     if (arg && arg[0]) {
         int index = ss_clamp_index(parse_stack_index(arg));
-        ss_ids *s = stack_get(index);
-        sh_printf("chkstk: stack %d holds %d id(s):\n", index, s->count);
-        for (int i = 0; i < s->count; i++) {
-            char idstr[256]; ic_id_string(iface, s->items[i], idstr, (int)sizeof idstr);
-            sh_printf("  [%d] id=%d  \"%s\"\n", i, s->items[i], idstr);
+        /* SNAPSHOT the stack under the lock, then release it before the per-id engine reads -- the
+         * listing walks items[], which a concurrent +0x2A0 push could realloc out from under us. */
+        int *ids = NULL;
+        ss_lock();
+        int n = ss_ids_copy_out(stack_get(index), &ids);
+        ss_unlock();
+        sh_printf("chkstk: stack %d holds %d id(s):\n", index, n);
+        for (int i = 0; i < n; i++) {
+            char idstr[256]; ic_id_string(iface, ids[i], idstr, (int)sizeof idstr);
+            sh_printf("  [%d] id=%d  \"%s\"\n", i, ids[i], idstr);
         }
-        char t[96]; _snprintf_s(t, sizeof t, _TRUNCATE, "stack %d: %d id(s)", index, s->count);
+        free(ids);
+        char t[96]; _snprintf_s(t, sizeof t, _TRUNCATE, "stack %d: %d id(s)", index, n);
         ic_toast(iface, "SnapStack", t);
     } else {
         int nonempty = 0, total = 0;
@@ -1186,19 +1250,25 @@ static void h_snapstack_diag(void *ctx, int argc, const char **argv)
 
 void sh_register_snapstack_commands_backend(sh_iface *iface)
 {
+    ss_lock_init();   /* single-threaded here (backend bootstrap, before the frontend thread spins) */
     if (!iface || !iface->vtbl || !iface->vtbl->register_cmd) return;
     for (int i = 0; i < SNAPSTACK_COMMAND_COUNT; i++)
         iface->vtbl->register_cmd(iface, SNAPSTACK_COMMANDS[i].name, SNAPSTACK_COMMANDS[i].handler, iface);
 }
 
+/* The two FRONTEND-thread entry points into the stack store (the +0x2A0/+0x2A8 slots). These are why
+ * g_ss_lock exists -- see its comment. */
 void sh_snapstack_push_ids_backend(int index, const int *ids, int count)
 {
-    if (count > 0) stack_push(index, ids, count);
+    if (count > 0) stack_push(index, ids, count);   /* stack_push locks */
 }
 
 int sh_snapstack_clear_stack_backend(int index)
 {
-    int had = stack_get(index)->count;
-    stack_clear(index);
+    ss_lock();
+    ss_ids *s = stack_get(index);
+    int had = s->count;
+    ss_ids_clear(s);
+    ss_unlock();
     return had;
 }

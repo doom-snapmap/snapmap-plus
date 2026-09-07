@@ -945,21 +945,25 @@ static void h_sh_debugrender(idCmdArgs *a)
  * Port of OG XINPUT1_3 FUN_180007620 (the `sh` console command). GATES on the shared UI-interface object
  * (sh_ui_get_iface): if it doesn't exist yet, report "Ui interface doesnt exist yet!" (the OG exact no-UI
  * behavior -- when the frontend hasn't loaded, `sh` faithfully says this). Otherwise look the subcommand
- * up in the interface's runtime cmd-map (interface+0x58) and, on a hit, ENQUEUE {handler,args} onto the
- * work-queue, which the frontend's think-loop drains (+0x1a0) on its own thread.
+ * up in the interface's runtime cmd-map (interface+0x58) and, on a hit, run the handler RIGHT HERE.
  *
- * The GATE + the real map-lookup + the work-queue enqueue (faithful to the OG 0x7620 dispatch).
- * The 20 SnapStack subcommands are registered by the snaphakui registrar (FUN_180003c80 port) via the
- * interface's REGISTER slot once the UI thread inits. On a HIT we parse argv into a string vector (argv[1]
- * = the subcommand, argv[2..] = its args -- the OG passes the SUBCOMMAND's args, i.e. the tail starting at
- * the subcommand name, faithful to the OG cmdArgs forwarding) and enqueue {handler,args} onto the work-
- * queue; the think-loop's +0x1a0 drain runs it OFF the console thread (the DRIVE CONVENTION -- heavy
- * editor/engine work must not run on the console thread, which the engine does not expect to block).
- * That drain thread is the FRONTEND's UI worker (CreateThread in ui_bridge.c), NOT DOOM's main thread --
- * the two are easy to conflate and this comment used to. Issue #61 tracks the consequence: the decl-edit
- * commits these ops reach call into engine code from a thread the engine treats as foreign.
- * A MISS reports the OG message
- * "Command %s has not been registered yet". With no subcommand, mirror the OG usage hint. */
+ * INLINE EXECUTION IS THE POINT (issue #61, a deliberate divergence from the OG dispatch -- see
+ * docs/fidelity.md). This callback is an engine Cbuf command: the engine invokes it on DOOM's MAIN
+ * thread at ExecuteCommandBuffer, the same decl-safe exec point the clone_bss_apply drain and the decl
+ * server use. That is exactly where a SnapStack op belongs -- its serialize, JSON patch, decl commit,
+ * selection writes, and toast all land on the engine's own thread as one unit, and the applied count
+ * stays synchronous. The OG instead ENQUEUED {handler,args} onto the interface work-queue, drained by
+ * its frontend's worker thread (+0x1a0); it had to (its handlers touched Qt objects owned by that
+ * thread), and calling engine decl code from that foreign thread is the defect behind the #56/#59
+ * faults. Our handlers touch no UI-thread-affine state (backend stores + vtable slots only), so nothing
+ * needs the bounce. The old comment here called the worker "the MAIN (UI) thread" -- that conflation is
+ * how the wrong-thread commit survived review, and it is exactly wrong: the worker is a plain
+ * CreateThread in ui_bridge.c and the engine treats it as foreign.
+ *
+ * argv shape is unchanged: the OG passes the SUBCOMMAND's args (the tail starting at the subcommand
+ * name), so argv[0] = the subcommand, argv[1..] = its args. The handler call is SEH-guarded so a
+ * handler fault degrades to a console line instead of taking the frame down. A MISS reports the OG
+ * message "Command %s has not been registered yet". With no subcommand, mirror the OG usage hint. */
 static void h_sh_dispatch(idCmdArgs *a)
 {
     sh_iface *iface = sh_ui_get_iface();
@@ -982,10 +986,9 @@ static void h_sh_dispatch(idCmdArgs *a)
         return;
     }
 
-    /* Parse argv into a string vector for the queued handler. The OG forwards the SUBCOMMAND's argv (the
-     * tail from the subcommand name onward), so argv[0] = the subcommand, argv[1..] = its args. Build that
-     * vector from the console idCmdArgs (skip argv[0]="sh"). The enqueue DEEP-COPIES these strings, so the
-     * transient engine-owned argv need not outlive this call. */
+    /* Build the SUBCOMMAND's argv from the console idCmdArgs (skip argv[0]="sh"). The engine-owned
+     * strings are valid for the duration of this callback, and the handler runs inside it, so no copy
+     * is needed. */
     int total = cmd_argc(a);
     int sub_argc = total > 1 ? total - 1 : 0;          /* drop the leading "sh" */
     const char *sub_argv[64];
@@ -995,10 +998,13 @@ static void h_sh_dispatch(idCmdArgs *a)
         sub_argv[i] = v ? v : "";
     }
 
-    /* ENQUEUE {handler, ctx, sub_argv} onto the work-queue for the drain thread (the +0x1a0 drain runs it).
-     * Faithful to OG 0x7620: the dispatch does NOT run the handler inline on the console thread. */
-    if (!sh_iface_enqueue_work(iface, handler, ctx, sub_argc, sub_argv))
-        sh_printf("sh %s: could not enqueue (out of memory)\n", sub);
+    /* RUN INLINE on this thread -- DOOM's main thread at the command-exec point (see the doc comment
+     * above for why this replaced the OG's enqueue-to-worker dispatch). */
+    __try {
+        handler(ctx, sub_argc, sub_argv);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        sh_printf("sh %s: handler faulted (recovered; the op did not complete)\n", sub);
+    }
 }
 
 /* ----------------------------------------------------------------- [12] sh_superscriptop ----------

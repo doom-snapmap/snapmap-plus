@@ -6,6 +6,59 @@ where our own reimplementation was wrong, not the original SnapHak's behavior; a
 (or faithful reproduction of) the *original's* behavior belongs in [`fidelity.md`](fidelity.md)
 instead. Entries are chronological, newest first.
 
+## 2026-09-07 — Decl-edit commits moved onto DOOM's main thread (issue #61, step 2)
+
+**What changed.** Every kind=0 decl-edit — the SnapStack apply ops (`bss`/`bsi`/`bsf`/`bsb`/`bse`/
+`accl`/`acctargets`), the WebView Save Timeline, and the palette-timeline inherit-normalize — now
+executes its engine-touching serialize *and* commit on **DOOM's main thread**, with the commit's
+allocations pinned to a surviving heap (the `PushHeap(0)`/`PopHeap` bracket that landed with #81). Two
+mechanisms, chosen so no caller loses its synchronous applied count:
+
+1. **The `sh` console dispatch runs SnapStack handlers inline** (`commands.c` `h_sh_dispatch`). The
+   engine invokes that callback on its main thread at `ExecuteCommandBuffer` — the same decl-safe exec
+   point the `clone_bss_apply` drain and the decl server already use — so the whole op (serialize →
+   JSON patch → commit → toast) lands there as one unit, synchronously. The old dispatch enqueued the
+   handler onto the interface work-queue, drained by the *frontend's UI worker thread* — a plain
+   `CreateThread` in `ui_bridge.c` that the engine treats as foreign. (The OG had to bounce: its
+   handlers touched Qt objects owned by that thread. Ours touch none, so the bounce only bought the
+   wrong thread. See `fidelity.md` for the sanctioned divergence.)
+2. **`apply_sync` (+0x290) marshals when called off-main.** The frontend's Save Timeline still calls it
+   from the UI worker; the slot now deep-copies the batch, hands it to the `clone_bss_apply` drain, and
+   blocks — normally one frame — for the drain's applied count. The drain toasts (that is where the
+   batch ran); a request the engine never drains is withdrawn after a timeout and reported as an honest
+   0-applied. The inherit-normalize (+0x298) keeps its cheap SEH-guarded gate on the calling thread and
+   marshals only an actual commit. If the marshal transport is unavailable (unresolved command system)
+   or the main-thread id cannot be proven, both fall back to the pre-move inline commit — exactly the
+   shipped beta.4 behaviour, which is contained but wrong-threaded.
+
+Because the numbered SnapStack stacks are now mutated from the main thread while the Entities-tab
+context menu still pushes/clears them from the UI worker (`+0x2A0`/`+0x2A8`), the stack store gained a
+critical section (`g_ss_lock` in `snapstack.c`). Groups stay single-threaded and lock-free.
+
+**Why.** The commits ran on the UI worker thread and called straight into engine decl code — the shape
+behind the #56 (`DeclSourceRebuild` area) and #59 (`EntityClone`) crash reports; beta.4 contains those
+faults but they still occurred. The commit could not simply be deferred back to the main thread because
+of the 2026-07-12 `"Memory corruption before block!"` crash — whose recorded cause ("the deferred
+commit left the decl-source block double-owned across two threads") was **overturned on re-reading**:
+`ae_apply_one` allocates the block and hands it to exactly one owner on whichever single thread runs
+it. What actually differed is the **allocation heap**: `Mem_Alloc`'s ambient-scope lookup is
+main-thread-gated, so a main-thread commit landed the block in the *map heap* (destroyed wholesale at
+the next map load) while the off-main commit fell through to the surviving process heap — confirmed
+live 2026-09-03 by the one-shot `C2 commit:` probe (`thread=UI(off-main) … heap=PROCESS`). The
+inline-on-UI-thread design worked *by accident*. #81 fixed the heap axis (the pin); this entry is the
+thread axis. The probe now verifies both at once: the expected line is
+`C2 commit: thread=DOOM-main … heap=PROCESS (survives)`; `thread=DOOM-main … heap=MAP` means the pin
+regressed and the teardown crash is re-armed.
+
+**Corrections to earlier entries this supersedes.** The 2026-07-12 entry's "double-owned →
+double-free" mechanism and its "commit decl edits SYNCHRONOUSLY [on the UI thread]" convention are
+retired: the rule is now *commit decl edits on DOOM's main thread under the heap pin*, and `+0x290` is
+still the one slot to call — it enforces the thread itself. That entry's claim that
+`ae_schedule_target_write` (kind=3) "never fires in normal use" is also too strong: `wcd_run`
+(`wiring_cleandirect.c`) reaches it whenever `sh_target_any` is revealed and the connect tool picks a
+bare (timeline) target — output/input-node picks take the stock creator instead. It was already
+main-thread and is heap-safe since the pin.
+
 ## 2026-09-01 — Stop the rawmap save shadow from reporting the player's save as failed
 
 **What changed.** `sh_ser_detour` in `rawmap.c` is typed `unsigned char` instead of
@@ -1029,6 +1082,11 @@ before a timeline save).
 > `+0xd0` path is retained only as an old-backend fallback and for prefab/mkcmd staging (`kind=1`), which
 > stages into the paste slot rather than rewriting a decl.
 
+*(Update 2026-09-07: the mechanism above is superseded. The "double-owned" explanation was overturned —
+the block has one owner in either design; the real hazard was the allocation heap, and the commit now
+runs on DOOM's main thread under a heap pin. `+0x290` is still the one slot to call for a decl edit; it
+now enforces the correct thread itself. See the 2026-09-07 entry.)*
+
 **`ae_schedule_target_write` (`kind=3`) migrated to inline too, though it's DORMANT.** It writes
 `state.edit.targets` onto the source entity's decl — but it **never fires in normal use**: `sh_target_any`
 targets via SnapMap's native input/output-node logic and writes nothing to the decl (only `acctargets` ever
@@ -1038,7 +1096,10 @@ UI-driven "add target" feature, so it was migrated the same day (`ae_schedule_ta
 is crash-correct by default. Prefab Load/Place + `mkcmd` (`kind=1`) stage into the paste slot (different
 mechanism, never crashed, intentionally left on the deferred path). *(Update 2026-07-13: WebView's Save
 Timeline was migrated onto `+0x290` too — see the 2026-07-13 entry above; it was on the deferred `+0xd0`
-path when this entry was written.)*
+path when this entry was written.)* *(Update 2026-09-07: "never fires in normal use" is too strong —
+`wcd_run` reaches the kind=3 write whenever `sh_target_any` is revealed and the connect tool picks a
+bare timeline target. It was main-thread all along, and its map-heap exposure was closed by the #81
+heap pin. See the 2026-09-07 entry.)*
 
 **DONE (2026-07-13):** the `AE_APPLY_DIAG` / `AE_DESER_DIAG` flags are now `0`, and the `+0x40 rebuild` and
 `C2 SYNC apply` markers plus the `normalize-timeline-inherit … committed` log were removed — the backend no

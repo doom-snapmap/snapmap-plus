@@ -1,4 +1,4 @@
-# Fidelity — the original's quirks, what the clone reproduces, and the one divergence
+# Fidelity — the original's quirks, what the clone reproduces, and the sanctioned divergences
 
 The clone was built to a **faithful-reproduction** bar: match the original SnapHak's observable
 behavior first — including the ugly, mislabeled, and unfinished bits — and leave *fixing* what was
@@ -7,7 +7,8 @@ the original's quirks are now **fixed** in the shipped clone rather than reprodu
 records, per quirk, what the original did and what the **current** clone source actually does, so
 the two never drift apart in a contributor's mind.
 
-One behavior is a deliberate divergence from the start: the fault-shield (last section).
+Two behaviors are deliberate divergences: the fault-shield (from the start; last section), and the
+`sh` dispatch thread (since 2026-09-07; below).
 
 ## Still faithful (reproduced on purpose)
 
@@ -19,10 +20,25 @@ isn't worth carrying); a real Lua editor is still future work.
 
 ### The manual 30 Hz think-loop
 The frontend runs its own pump — drain the work-queue, apply deferred writes, pump the window's
-messages, `Sleep(33 ms)` — rather than a framework event loop. This is faithful to the original *and*
-load-bearing — heavy engine work is applied on this pump, and the pump plus the work-queue drain *are*
-the frontend's main-thread execution point (see [`architecture.md`](architecture.md)). Reproduced
-exactly, not modernized.
+messages, `Sleep(33 ms)` — rather than a framework event loop. This is faithful to the original and
+still load-bearing: the frontend's own engine-touching requests (entity reads, prefab staging, Save
+Timeline) are snapshotted off the re-entrant JS callback and issued from this one worker thread (see
+[`architecture.md`](architecture.md)). Reproduced, not modernized. Note the pump's thread is the
+frontend's **own worker**, not DOOM's main thread — since the dispatch divergence below, the SnapStack
+subcommands no longer run on it at all, and a decl-edit issued from it is marshaled onto the engine's
+thread by the `+0x290` apply slot.
+
+### The `sh` dispatch runs SnapStack ops on the engine's thread — a sanctioned divergence
+The original's `sh` console command looks the subcommand up and **enqueues** `{handler, args}` onto
+the interface work-queue, which its frontend's UI worker thread drains — it had to, because its
+handlers touched Qt objects owned by that thread. The clone's handlers touch no thread-affine UI
+state, and calling engine decl code from that foreign worker thread is the defect behind issue #61
+(the #56/#59 crash reports), so since 2026-09-07 the clone's `sh` dispatch **executes the handler
+inline** in the engine's own command callback — on DOOM's main thread at `ExecuteCommandBuffer`, the
+decl-safe exec point. Observable behavior (arguments, toasts, counts, messages) is unchanged; only
+the executing thread differs. The work-queue and its `+0x1a0` drain remain in the ABI (the drain also
+carries the backend's per-tick hook) but ship producer-less. See
+[`backend-changes.md`](backend-changes.md) (2026-09-07) for the mechanism and history.
 
 ### Save-to-Decl does no *full* class/inherit compatibility check
 The Entity-State "Save to Decl" commits the edited classname/inherit/displayname into the entity in
@@ -71,7 +87,7 @@ itself is not lost: `sh_debugrender dumprenderinfo` prints it, followed by every
 it continuously needs a renderer hook that does not exist yet; re-add the cvar in the same change that
 adds one, not before.
 
-## The one sanctioned divergence — the fault-shield
+## The original sanctioned divergence — the fault-shield
 
 The original installs two fault detours (on the engine's `Error` and `FatalError`) that each format a
 message, pop a `MessageBoxA`, and call `TerminateProcess` — destroying the engine's own recoverable
@@ -80,6 +96,6 @@ error path and killing DOOM.
 The clone replaces those two kill-detours with a resident **fault-shield**: a vectored exception
 handler (`src/fault_shield/`, **compiled into the backend `XINPUT1_3.dll`**) that catches the access
 violation in DOOM's frame code, **reverts the bad edit, and shows a toast** instead of terminating the
-process. This is the single deliberate behavioral departure from the original — it makes a class of
-in-editor crashes recoverable rather than fatal — and it is what makes the "no full compat check"
+process. This deliberate behavioral departure from the original makes a class of
+in-editor crashes recoverable rather than fatal, and it is what makes the "no full compat check"
 stance above safe.

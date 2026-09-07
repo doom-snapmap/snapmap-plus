@@ -39,9 +39,11 @@ extern "C" {
 #endif
 
 /* ------------------------------------------------------------------ command handler signature -------
- * A registered SnapStack subcommand handler. OG enqueues {handler, parsed-argv-vector} onto the work
- * queue (XINPUT 0x7620 -> obj+0x58 sub-object), and the think-loop's +0x1a0 DRAIN runs them on whichever
- * thread pumps that think-loop -- the frontend's UI worker, not DOOM's main thread (see issue #61). The args are an argv-style string vector; argc/argv are passed through verbatim.
+ * A registered SnapStack subcommand handler. The OG enqueued {handler, parsed-argv-vector} onto the work
+ * queue (XINPUT 0x7620 -> obj+0x58 sub-object) for its frontend's UI worker to drain (+0x1a0); the
+ * clone's `sh` dispatch runs the handler INLINE on DOOM's main thread at the engine command-exec point
+ * instead (issue #61 -- engine-touching work belongs there, and the OG's Qt thread-affinity reason does
+ * not apply). The args are an argv-style string vector; argc/argv are passed through verbatim.
  * `ctx` is the user pointer registered alongside the handler (later routed to the SnapStack op
  * dispatch table). */
 typedef void (*sh_cmd_handler)(void *ctx, int argc, const char **argv);
@@ -179,14 +181,16 @@ typedef int          (*sh_enum_inherits_fn)(struct sh_iface *self,
 typedef int          (*sh_id_dev_layer_hidden_fn)(struct sh_iface *self, int id);                /* +0x280 (ext 3) */
 typedef int          (*sh_wire_edit_generation_fn)(struct sh_iface *self);                       /* +0x288 (ext 4) */
 
-/* +0x290 (ext 5) SYNCHRONOUS inline apply -- the OG-faithful commit path. Same signature as the +0xd0
- * schedule, but it does NOT defer: it runs the apply batch RIGHT NOW on the CALLING (UI/think-loop) thread,
- * exactly like OG's acctargets handler (FUN_18000228c), which calls its +0xd0 commit (FUN_180004b80)
- * INLINE. The SnapStack decl-edit ops (acctargets/accl/bss/bse) use THIS instead of the deferred +0xd0 so
- * serialize + commit happen atomically on one thread -> the committed decl-source block has a SINGLE clean
- * owner (OG's behavior). The deferred +0xd0 split them across threads/frames and double-owned the block ->
- * the play->teardown double-free. Returns the applied count (SEH-guarded per item; an off-main reflect gap
- * degrades to 0, never a crash). */
+/* +0x290 (ext 5) SYNCHRONOUS apply -- the decl-edit commit path. Same signature as the +0xd0 schedule,
+ * but the applied count is computed before the call returns. The batch EXECUTES on DOOM's main thread
+ * (issue #61): a caller already on it (the `sh` console dispatch, the clone_bss_apply drain) runs it
+ * inline; an off-main caller (the frontend's UI worker) is transparently marshaled through the
+ * clone_bss_apply drain and blocks -- normally one frame -- for the result. Exactly one result toast is
+ * produced per batch, by whichever side ran it. Returns the applied count (SEH-guarded per item; a fault
+ * degrades to 0-applied, never a crash). HISTORY: this slot once ran the batch inline on the calling
+ * UI-worker thread, justified by a "deferred commit double-owns the decl-source block" theory that was
+ * later overturned -- the real hazard was the allocation HEAP (a main-thread commit landed the block in
+ * the map heap, destroyed at map teardown), now closed by the PushHeap bracket in ae_apply_one. */
 typedef int          (*sh_apply_sync_fn)(struct sh_iface *self, const struct sh_apply_item *items,
                                          int count, const char *op_label);                        /* +0x290 (ext 5) */
 
@@ -195,10 +199,11 @@ typedef int          (*sh_apply_sync_fn)(struct sh_iface *self, const struct sh_
  * Timeline is selectable in the palette at all -- the clone cannot fabricate a Timeline entity directly;
  * see docs/backend-changes.md for the create-path history), so the fresh entity records THAT as
  * its `inherit` -- a saved map would then only reload where our override is installed. This slot: given a
- * live entity id, cheaply checks (a raw defsub-inherit read, no serialize) whether it is still that
+ * live entity id, cheaply checks (a raw defsub-blob read, no serialize) whether it is still that
  * placeholder; if so, serializes the entity (+0xc8-equivalent), raw-splices the inherit to the portable
  * `snapmaps/unknown` (NOT a JSON re-parse, which would drop the engine-required float ".0"), and commits
- * INLINE on the CALLING thread (same guarantee as +0x290 apply_sync -- no deferred double-free risk).
+ * ON DOOM'S MAIN THREAD (same discipline as +0x290 apply_sync: run inline when already there, else a
+ * blocking marshal through the clone_bss_apply drain -- issue #61).
  * `className` is left untouched (idTarget_Timeline stays -- no reclass, no render-node/crash surface).
  * NOTE (2026-07-12): live-testing showed this can commit multiple times in quick succession for the same
  * entity before the placeholder stops re-matching -- confirmed to be a PRE-EXISTING characteristic of the
@@ -686,15 +691,19 @@ void sh_iface_set_tick_hook(void (*fn)(void));
  * Look the subcommand `name` up in the interface's runtime cmd-map (the obj+0x58 RB-tree the OG's
  * register path populates; our backing store is the sub_impl's linear map). On a hit, fills *handler +
  * *ctx with the registered pair and returns 1; on a miss returns 0. Taken under the cmd-map's lock.
- * The `sh` dispatcher (XINPUT 0x7620 port) calls this to decide enqueue-or-"not registered". */
+ * The `sh` dispatcher (XINPUT 0x7620 port) calls this to decide run-inline-or-"not registered". */
 int sh_iface_lookup_cmd(sh_iface *self, const char *name, sh_cmd_handler *handler, void **ctx);
 
 /* ------------------------------------------------------------------ work-queue enqueue ---------
  * Append a {handler, ctx, argc, argv-copy} record onto the interface's work-queue (the sub+0x60/+0x68/
- * +0x70 vector) under the mutex, for MAIN-THREAD execution by the think-loop's +0x1a0 drain. The argv
- * strings are DEEP-COPIED here (heap-owned by the record), so the caller's argv may be freed/reused
- * after the call -- the drain frees the copy once the handler has run. Returns 1 on success, 0 on OOM /
- * a null interface. This is the producer the OG `sh` dispatcher (0x7620) is. */
+ * +0x70 vector) under the mutex, for later execution by whichever thread pumps the +0x1a0 drain -- in
+ * the shipped build the FRONTEND's UI worker thread, NOT DOOM's main thread. The argv strings are
+ * DEEP-COPIED here (heap-owned by the record), so the caller's argv may be freed/reused after the call
+ * -- the drain frees the copy once the handler has run. Returns 1 on success, 0 on OOM / a null
+ * interface. This was the producer the OG `sh` dispatcher (0x7620) is; the clone's `sh` dispatch now
+ * runs handlers inline on the engine's command-exec thread instead (issue #61), so the shipped queue is
+ * producer-less -- the machinery stays because the slot offsets are pinned ABI and the drain also
+ * carries the per-tick hook. */
 int sh_iface_enqueue_work(sh_iface *self, sh_cmd_handler handler, void *ctx,
                           int argc, const char **argv);
 

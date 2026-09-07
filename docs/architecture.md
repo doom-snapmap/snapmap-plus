@@ -131,11 +131,20 @@ pump the window's messages
 Sleep(33ms)                       // ~30 Hz
 ```
 
-This is **load-bearing**, not a stylistic choice. Heavy engine work (the SnapStack apply chain,
-Save-to-Decl, timeline commits) is snapshotted off the re-entrant JS message callback and applied here,
-on the think-loop thread; the manual pump plus the `+0x1a0` work-queue drain *are* the frontend's
-main-thread execution point (a UI-thread or RPC-thread engine call deadlocks the engine's command-system
-lock). Replicate the pump.
+This is **load-bearing**, not a stylistic choice. The frontend's engine-touching requests
+(Save-to-Decl, timeline commits, prefab staging) are snapshotted off the re-entrant JS message
+callback and issued here, from this one worker thread (a WebView2-callback or RPC-thread engine call
+deadlocks the engine's command-system lock). Replicate the pump. Two thread facts to keep straight:
+
+- The think-loop thread is the **frontend's own worker** (`CreateThread` in `ui_bridge.c`), **not
+  DOOM's main thread** — the engine treats it as foreign (issue #61). Decl-edit commits issued from
+  it (`apply_sync` `+0x290`) are marshaled by the backend onto the engine's thread through the
+  `clone_bss_apply` command-buffer drain, with the caller blocking (normally one frame) for the
+  synchronous applied count.
+- The SnapStack subcommands no longer run on this drain at all: the `sh` console dispatch executes
+  them inline on DOOM's main thread at the engine's command-exec point (see
+  [`fidelity.md`](fidelity.md)'s sanctioned divergence). The `+0x1a0` drain still runs every tick —
+  it carries the backend's per-tick hook — but its queue ships producer-less.
 
 The live camera-origin read intentionally runs at this full cadence rather than inside the separate
 10-frame (~330 ms) entity-list/selection/state poll. It posts to WebView2 only when a coordinate changes,
@@ -182,7 +191,9 @@ frontend reads them at the same offsets.
   the timeline inherit-normalize, push/clear-stack, the generic configuration getter/setter, and the
   asset-browser group — preview request/publish, request-by-name, the material atlas rect, the
   catalog pager, sound preview/session, and prefab model resolution/mesh transport) — initializes the mutex at `+0x08`, and hangs a
-  sub-object off `+0x58` that holds the SnapStack subcommand map and the main-thread work-queue.
+  sub-object off `+0x58` that holds the SnapStack subcommand map and the work-queue (drained by the
+  frontend's worker thread; producer-less since the `sh` dispatch moved inline onto the engine's
+  thread — see "The 30 Hz manual think-loop").
 - **Extension slots are append-only**: a new capability gets the next slot after the current end;
   original-block offsets never move. This is also a real failure mode, not a formality — a frontend
   calling an extension slot that an older backend never installed would call through garbage. That is
