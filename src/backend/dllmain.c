@@ -31,6 +31,8 @@
 #include "strids.h"
 #include "overrides.h"
 #include "package_requirements.h"
+#include "navmesh.h"
+#include "nav_bake.h"   /* baked AI navigation served through the overrides shadow */
 #include "decl_server.h"
 #include "commands.h"
 #include "cvars.h"
@@ -52,25 +54,24 @@
 #include "apply_engine.h"
 #include "cvar_unlock.h"   /* merged-in cvar-unlock (former standalone dinput8) */
 #include "backend_log.h"
+#include "host_image.h"    /* resolve the host DOOM image on either shipped build (Vulkan / OpenGL) */
+#include "engine_globals.h" /* DOOM data globals, resolved from the code sites that compute them */
 #include "../fault_shield/fault_shield.h"   /* the merged fault-shield (recover-in-place vs OG's terminate) */
 #include "../fault_shield/fault_record.h"   /* shield_set_logpath_from_module -> shield_faults.log */
 #ifdef SH_DIAG
 #include "../fault_shield/shield_diag.h"    /* DIAGNOSTIC build (build.ps1 -Diag): catch-all crash + env logger */
 #endif
 
-#define DOOM_MODULE_NAME "DOOMx64vk.exe"
-
 static uint8_t *g_doom_base = NULL;
 static size_t   g_doom_size = 0;
 
 static void resolve_doom(void)
 {
-    g_doom_base = (uint8_t *)GetModuleHandleA(DOOM_MODULE_NAME);
-    if (g_doom_base) {
-        IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)g_doom_base;
-        IMAGE_NT_HEADERS *nt  = (IMAGE_NT_HEADERS *)(g_doom_base + dos->e_lfanew);
-        g_doom_size = nt->OptionalHeader.SizeOfImage;
-    }
+    /* The host process image IS DOOM -- this DLL is loaded by it. Looking the module up by the
+     * name "DOOMx64vk.exe" pinned the backend to the Vulkan build and returned NULL under the
+     * OpenGL build, leaving everything downstream unarmed. See host_image.h. */
+    g_doom_base = (uint8_t *)sh_host_image_base();
+    g_doom_size = sh_host_image_size();
 }
 
 /* Deferred-resolution poll knobs. DOOMx64vk.exe is SteamStub-wrapped: the module is MAPPED early (so
@@ -122,13 +123,17 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         if (!g_doom_base) Sleep(10);
     }
     if (g_doom_base == NULL) {
-        backend_log("FATAL: DOOMx64vk.exe not found");
+        backend_log("FATAL: host process is not a supported DOOM 2016 build "
+                    "(expected DOOMx64vk.exe or DOOMx64.exe)");
         return 0;
     }
 
-    char line[128];
+    char line[160];
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "backend attached base=%p size=%zx", (void *)g_doom_base, g_doom_size);
+        "backend attached host=%s renderer=%s base=%p size=%zx",
+        sh_host_image_name(),
+        sh_host_is_vulkan() == 1 ? "vulkan" : (sh_host_is_vulkan() == 0 ? "opengl" : "unknown"),
+        (void *)g_doom_base, g_doom_size);
     backend_log(line);
 
     /* Create %LOCALAPPDATA%\snapmap-plus\{,strings,overrides,prefabs} if a fresh profile lacks it, so
@@ -156,6 +161,19 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
      * resolve is re-run inside (it's cheap) so the emitted counts/RVAs come from the same final scan;
      * `elapsed` annotates how long past load the decrypt took. */
     sh_smoke_run(g_doom_base, elapsed);
+
+    /* Resolve DOOM's data globals from the code sites that compute them, and log the lot in one
+     * place. Doing it here rather than lazily means a build we cannot fully serve shows up as a
+     * block of UNRESOLVED lines at install, instead of being discovered one broken feature at a
+     * time by whoever files the bug. */
+    {
+        size_t gtotal = glb_db_count();
+        size_t gok    = glb_resolve_all(g_doom_base);
+        char gline[128];
+        _snprintf_s(gline, sizeof gline, _TRUNCATE,
+            "engine globals: %zu/%zu resolved", gok, gtotal);
+        backend_log(gline);
+    }
 
     /* the reusable PATCH/DETOUR layer self-test. Runs at install like the smoke proof, in-DLL, with
      * NO engine side effects -- it patches a SCRATCH RX stub only (apply / call-through / restore + the
@@ -364,6 +382,13 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                                                        compare, compare_clean,
                                                        write_string, write_string_clean);
 
+        /* BAKED NAVIGATION. Nothing to resolve and nothing to hook: the serve
+         * path is the overrides open slot just installed, and the load/save path
+         * is the rawmap funnel. This only reports the configured state, so the
+         * log says which way the switch was set before the first map load. The
+         * table itself is built per map, from the map. See navmesh.c. */
+        sh_navmesh_install();
+
         /* cvar + console-command registration (clone of OG XINPUT1_3 FUN_1800229b1). Both ride the
          * signature-resolved engine fns; neither installs an inline detour. CVARS FIRST -- they have NO
          * cmdSystem dependency and FIRE as soon as CvarRegister resolves (we only CALL the engine fn, so
@@ -411,6 +436,15 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * sh_iface_bind_engine_slots call). The declMgr accessor is reused from sh_typeinfo, so this also
          * relies on g_doom_base being set (it is). See apply_engine.c. */
         sh_apply_engine_install(results, db, g_doom_base, cmdsys);
+
+        /* Hand the navigation baker the live-entity surface, now that the
+         * reflection serialize behind it is ready. Without this the baker reads
+         * only the map as loaded, and a volume the author ticks during a session
+         * does not take effect until the map is loaded again -- pressing Play
+         * does not serialize the map, so nothing else would notice the edit. */
+        sh_nav_bake_set_live_editor(sh_apply_engine_entity_count,
+                                    sh_apply_engine_entity_valid,
+                                    sh_apply_engine_entity_json, NULL);
 
         /* backend touch: bind the UI-interface's engine-touch vtable slots -- the LIGHT touches
          * the SnapStack STORE-ops need (selection read/write, hovered id, toast, class/inherit read, id

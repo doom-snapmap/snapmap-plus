@@ -4,8 +4,8 @@
  * Both handlers share sh_commands' console ABI (idCmdArgs / cmd_argv / sh_printf) + the SEH byte-copy
  * (sh_safe_read) via commands.h, so there is ONE Printf wrapper + ONE safe-read across the whole command
  * surface. sh_type's clipboard copy reuses sh_clipboard_set (cs_fieldinfo does NOT copy). The reflection
- * deps (the declMgr accessor at the hardcoded RVA 0x17F7030 + vtable+0x80, FindTypeInfoByName,
- * FindEnumByName) are resolved/cached by sh_typeinfo_install.
+ * deps (the declMgr accessor, reached through the signed "declmgr_accessor" anchor, + vtable+0x80,
+ * FindTypeInfoByName, FindEnumByName) are resolved/cached by sh_typeinfo_install.
  *
  * Every engine deref is SEH-guarded and non-null gated -- a wrong/shifted build offset degrades to a clean
  * printed error, never a crash. Both field/enum walks carry an iteration CAP so a non-terminating (never-
@@ -21,19 +21,24 @@
 #include "commands.h"
 #include "clipboard.h"
 #include "backend_log.h"
+#include "engine_globals.h"  /* glb_resolve -- signs the code site that computes a data global's address */
 #include "class_universe.h"  /* SH_CLASS_UNIVERSE[] -- the dropdown candidate list for sh_validclasses */
 
 /* ------------------------------------------------------------------------ engine fn typedefs ------ */
 
-/* The declMgr accessor at the HARDCODED RVA 0x17F7030. NOT a trivial `mov rax,[rip+x]; ret` -- the engine
- * bytes there are a real lazy-init singleton accessor (`53 48 83 EC 30 48 C7 44 24 20 FE FF FF FF ...`:
- * push rbx; sub rsp,0x30; SEH cookie slot; lazy-init the declMgr singleton; return its ptr in RAX). Its
- * fixed prologue is shared by ~47 .text functions and only becomes unique via the build-volatile RIP
- * displacement -- which is WHY it is not signature-able (a stable sig can't pin the volatile disp).
- * Resolved off g_doom_base, the established precedent (the DECL_MGR_ACCESSOR_RVA / the reference
- * implementation _declMgrAccessor -- both hardcoded data RVAs, no sig). 0-arg, returns the declMgr object in RAX. */
+/* The declMgr accessor. NOT a trivial `mov rax,[rip+x]; ret` -- the engine bytes there are a real lazy-init
+ * singleton accessor (`53 48 83 EC 30 48 C7 44 24 20 FE FF FF FF ...`: push rbx; sub rsp,0x30; SEH cookie
+ * slot; lazy-init the declMgr singleton; return its ptr in RAX). Its fixed prologue is shared by ~47 .text
+ * functions and only becomes unique via the build-volatile RIP displacement -- which is WHY its own bytes
+ * are not signature-able (a stable sig can't pin the volatile disp).
+ *
+ * So we sign a CALL SITE instead and decode the rel32: engine_globals' "declmgr_accessor" entry. That is
+ * portable in exactly the way the raw RVA was not -- the caller's bytes are stable across both shipped
+ * builds, and the displacement tells us where the callee sits on THIS one. 0-arg, returns declMgr in RAX. */
 typedef void *(*declmgr_getter_fn)(void);
-#define DECLMGR_ACCESSOR_KNOWN_RVA  0x17F7030u
+#define DECLMGR_ACCESSOR_KNOWN_RVA  0x17F7030u   /* the accessor's RVA on the pinned Vulkan build -- kept for
+                                                  * audit and per-build re-derivation, no longer used to
+                                                  * locate anything (glb_resolve does that now). */
 
 /* declMgr -> reflection/type-info manager: vtable slot +0x80 (the reflection accessor; matches
  * the reference implementation declMgr.readPointer().add(0x80).readPointer()). __fastcall(self) -> reflect. */
@@ -88,22 +93,40 @@ typedef void *(*find_enum_fn)(void *reflect, const char *name);
 
 /* ------------------------------------------------------------------------- module state ----------- */
 
-static const uint8_t   *g_doom_base    = NULL;   /* for the declMgr accessor at base + 0x17F7030 */
+/* The engine primitives the two decl-find call sites share. Hoisted to file scope so the resolved
+ * addresses can be cached once at install instead of being rebuilt from an RVA at every call. */
+typedef void *(*decl_find_fn)(void *ctx, const char *name);   /* FUN_141800a40 calls it with 2 args */
+typedef int   (*dim_fn)(void *material);                      /* idMaterial width/height getters */
+
+static const uint8_t   *g_doom_base    = NULL;   /* host DOOM image base */
 static find_typeinfo_fn g_find_type    = NULL;   /* FindTypeInfoByName (sig 0x1A1D590) */
 static find_enum_fn     g_find_enum    = NULL;   /* FindEnumByName     (sig 0x1A1DA20) */
 static volatile LONG    g_installed    = 0;      /* one-shot install latch */
 
+/* Everything below is resolved ONCE by sh_typeinfo_install and is NULL when this build could not be
+ * served. Each user checks its own dependency and declines; none of them falls back to a pinned RVA,
+ * because on the other shipped executable these globals sit ~0xE00000-0x1000000 away and the literal
+ * would name unrelated memory that no caller could tell apart from the real thing. */
+static declmgr_getter_fn g_declmgr_getter   = NULL;   /* glb "declmgr_accessor" (a CODE address) */
+static const uint8_t    *g_validator_mgr    = NULL;   /* glb "validator_manager" (slot; deref lazily) */
+static void             *g_resource_mgr_ctx = NULL;   /* glb "resource_manager_ctx" (the object itself) */
+static void             *g_material_mgr_ctx = NULL;   /* glb "material_manager_ctx" (the object itself) */
+static const uint8_t    *g_type_container   = NULL;   /* glb "type_container" (the reflection container P) */
+static decl_find_fn      g_decl_find        = NULL;   /* sig "DeclPureFind" */
+static dim_fn            g_material_width   = NULL;   /* sig "MaterialWidth" */
+static dim_fn            g_material_height  = NULL;   /* sig "MaterialHeight" */
+
 /* ----------------------------------------------------------- SHARED declMgr-object accessor -------
- * Returns the raw declMgr singleton object (the accessor at base + 0x17F7030, SEH-guarded). NON-static:
- * sh_superscriptop [12] in commands.c REUSES this to reach the engine event-manager (declMgr vtable
- * slot +0x90 -> evMgr) -- it shares sh_typeinfo's ONE declMgr accessor rather than re-resolving the RVA.
- * NULL on a NULL base or any fault. */
+ * Returns the raw declMgr singleton object (SEH-guarded). NON-static: sh_superscriptop [12] in commands.c
+ * REUSES this to reach the engine event-manager (declMgr vtable slot +0x90 -> evMgr) -- it shares
+ * sh_typeinfo's ONE declMgr accessor rather than resolving it again. NULL if the accessor did not resolve
+ * on this build (we do NOT call a pinned address speculatively -- that is a CALL, not a read) or on any
+ * fault; every caller degrades to "type manager unavailable". */
 void *sh_typeinfo_get_declmgr(void)
 {
-    if (!g_doom_base) return NULL;
+    if (!g_declmgr_getter) return NULL;
     __try {
-        declmgr_getter_fn getter = (declmgr_getter_fn)(g_doom_base + DECLMGR_ACCESSOR_KNOWN_RVA);
-        return getter();
+        return g_declmgr_getter();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return NULL;
     }
@@ -222,22 +245,26 @@ static int ti_read_u32(const void *base, size_t off, uint32_t *out)
  * Returns: 1 = derives, 0 = does NOT derive (incl. an UNRESOLVABLE className -- the engine validator treats
  * an unknown class as "does not derive" too), -1 = type system UNAVAILABLE (reflect NULL; the caller must
  * NOT reject on -1, only on a definite 0). Bounded (64 levels) + SEH-guarded (via the ti_* helpers). */
-/* The decl-VALIDATOR's reflection context: manager = *(base + 0x4DF9648); reflect = manager->vtable[+0x240]
- * (manager). The validator (FUN_141a201d0 -> FUN_141a1d590 = FindTypeInfoByName) walks types via THIS
+/* The decl-VALIDATOR's reflection context: manager = *(the "validator_manager" slot, 0x4DF9648 on the
+ * pinned build); reflect = manager->vtable[+0x240](manager).
+ * The validator (FUN_141a201d0 -> FUN_141a1d590 = FindTypeInfoByName) walks types via THIS
  * reflect -- which resolves the SnapMap entity classes (logic_base / idSnapMapUserFilter) that the
  * declMgr->[+0x80] reflect sh_typeinfo's sh_type uses MISSES. RE'd from the validator disasm: the
  * `mov rcx,[rip+0x364bf48]` @ 0x17ad6f9 resolves to 0x17ad700 + 0x364bf48 = 0x4DF9648 (the live decl/
  * resource manager -- ~100 code xrefs). NOTE: the earlier 0x3BF8648 here was an arithmetic error (ZERO
  * xrefs -> NULL at runtime -> this getter returned NULL and the guard silently used the ti_get_reflect
- * fallback). Build-specific (global RVA + vtable slot) -> SEH-guarded; NULL on any fault (caller falls back
- * to ti_get_reflect). */
-#define VALIDATOR_MGR_RVA         0x4DF9648u
+ * fallback). The manager slot is located by the signed "validator_manager" anchor rather than the literal;
+ * the vtable slot is still build-specific -> SEH-guarded; NULL on an unresolved anchor or any fault (caller
+ * falls back to ti_get_reflect). */
+#define VALIDATOR_MGR_RVA         0x4DF9648u   /* the manager slot's RVA on the pinned Vulkan build -- kept for
+                                                * audit and per-build re-derivation, no longer used to locate
+                                                * anything (glb_resolve("validator_manager") does that). */
 #define VSLOT_VALIDATOR_REFLECT   0x240
 static void *ti_get_validator_reflect(void)
 {
-    if (!g_doom_base) return NULL;
+    if (!g_validator_mgr) return NULL;
     __try {
-        void *mgr = *(void * const *)(g_doom_base + VALIDATOR_MGR_RVA);
+        void *mgr = *(void * const *)g_validator_mgr;
         if (!mgr) return NULL;
         const uint8_t *vtbl = *(const uint8_t * const *)mgr;
         if (!vtbl) return NULL;
@@ -272,23 +299,23 @@ int sh_typeinfo_class_derives(const char *className, const char *baseName)
  * engine decl validator to accept it. Via the engine's PURE decl find (FUN_1418017a0: read-lock -> hash ->
  * probe -> cached-decl-or-NULL -> unlock; NO load/parse/global-mutation/INT3 -- verified DIRECT, vs the
  * load-or-create FUN_1417b36f0 the validator uses, which has FatalError+INT3 traps and is NOT safe to call)
- * over the resource-mgr ctx at base+0x59BD8F0, then idDeclEntityDef.className @ +0x60 (the validator's
+ * over the resource-mgr ctx, then idDeclEntityDef.className @ +0x60 (the validator's
  * vtbl+0xb0 = `return *(this+0x60)`). The inherit decl is already loaded (the entity exists), so the pure
- * find returns it. RVA-tagged (the find + ctx are non-sig-able resource-mgr internals -- re-derive per build
- * via the validator @ 0x17ad682/0x17ad689). SEH-guarded: any fault / not-found inherit -> NULL (caller
- * fail-opens). Copies Y into buf; returns buf or NULL. */
-#define RESOURCE_MGR_CTX_RVA   0x59BD8F0u   /* resource-mgr ctx object (validator lea @ 0x17ad682) */
-#define DECL_PURE_FIND_RVA     0x18017A0u   /* FUN_1418017a0(ctx,name) -> cached decl-or-NULL (pure hash find) */
+ * find returns it. The ctx now comes from the signed "resource_manager_ctx" anchor and the find from the
+ * "DeclPureFind" signature, so neither is an address we wrote down. SEH-guarded: an unresolved dependency,
+ * any fault, or a not-found inherit -> NULL (caller fail-opens). Copies Y into buf; returns buf or NULL. */
+#define RESOURCE_MGR_CTX_RVA   0x59BD8F0u   /* the resource-mgr ctx object's RVA on the pinned Vulkan build
+                                             * (validator lea @ 0x17ad682) -- audit / re-derivation only. */
+#define DECL_PURE_FIND_RVA     0x18017A0u   /* FUN_1418017a0(ctx,name) -> cached decl-or-NULL (pure hash find);
+                                             * its RVA on the pinned Vulkan build -- audit only, it is signed. */
 #define DECL_CLASSNAME_OFF     0x60u        /* idDeclEntityDef.className char* (vtbl+0xb0 = return *(this+0x60)) */
 const char *sh_typeinfo_inherit_base(const char *inheritName, char *buf, size_t cap)
 {
     if (buf && cap) buf[0] = '\0';
-    if (!g_doom_base || !inheritName || !inheritName[0] || !buf || cap < 2) return NULL;
+    if (!inheritName || !inheritName[0] || !buf || cap < 2) return NULL;
+    if (!g_resource_mgr_ctx || !g_decl_find) return NULL;   /* unserved build -- decline, never guess */
     __try {
-        typedef void *(*decl_find_fn)(void *ctx, const char *name);   /* FUN_141800a40 calls it with 2 args */
-        void *ctx = (void *)(g_doom_base + RESOURCE_MGR_CTX_RVA);
-        decl_find_fn find = (decl_find_fn)(g_doom_base + DECL_PURE_FIND_RVA);
-        void *decl = find(ctx, inheritName);
+        void *decl = g_decl_find(g_resource_mgr_ctx, inheritName);
         if (!decl) return NULL;
         const char *cn = *(const char * const *)((const uint8_t *)decl + DECL_CLASSNAME_OFF);
         if (!cn || !cn[0]) return NULL;
@@ -367,12 +394,10 @@ static int ti_model_from_resolved_text(const char *text, size_t len, char *out, 
 int sh_typeinfo_inherit_model(const char *inheritName, char *buf, size_t cap)
 {
     if (buf && cap) buf[0] = '\0';
-    if (!g_doom_base || !inheritName || !inheritName[0] || !buf || cap < 2) return 0;
+    if (!inheritName || !inheritName[0] || !buf || cap < 2) return 0;
+    if (!g_resource_mgr_ctx || !g_decl_find) return 0;      /* unserved build -- decline, never guess */
     __try {
-        typedef void *(*decl_find_fn)(void *ctx, const char *name);
-        void *ctx = (void *)(g_doom_base + RESOURCE_MGR_CTX_RVA);
-        decl_find_fn find = (decl_find_fn)(g_doom_base + DECL_PURE_FIND_RVA);
-        const uint8_t *decl = (const uint8_t *)find(ctx, inheritName);
+        const uint8_t *decl = (const uint8_t *)g_decl_find(g_resource_mgr_ctx, inheritName);
         if (!decl) return 0;
         const char *text = *(const char * const *)(decl + DECL_RESOLVED_TEXT_OFF);
         if (!text) return 0;
@@ -415,9 +440,12 @@ int sh_typeinfo_inherit_model(const char *inheritName, char *buf, size_t cap)
  * reported dimensions vary sensibly across materials (4096x4096 down to very small) -- real per-material
  * image metadata, not a fixed fallback value, even for materials never placed/rendered this session. Safe
  * to use for real dimension data, not just as a found/not-found signal. */
-#define MATERIAL_MGR_CTX_RVA    0x59BD9D0u  /* material type-manager context from material setter */
-#define MATERIAL_WIDTH_FN_RVA   0xD75D40u   /* verified idMaterial width getter                 */
-#define MATERIAL_HEIGHT_FN_RVA  0xD75B40u   /* verified idMaterial height getter                */
+/* All three are the pinned Vulkan build's RVAs, kept for audit and per-build re-derivation and no longer
+ * used to locate anything: the ctx comes from the signed "material_manager_ctx" anchor, and the two getters
+ * from the "MaterialWidth" / "MaterialHeight" signatures. */
+#define MATERIAL_MGR_CTX_RVA    0x59BD9D0u  /* material type-manager context from the material setter */
+#define MATERIAL_WIDTH_FN_RVA   0xD75D40u   /* verified idMaterial width getter                       */
+#define MATERIAL_HEIGHT_FN_RVA  0xD75B40u   /* verified idMaterial height getter                      */
 
 /* Structural probe only (2026-07-30) -- reads two more pointer hops WITHOUT touching Vulkan/GPU state, to
  * confirm the offsets before any capture code is written. Traced from `idVirtualTexture::SetSource`
@@ -499,22 +527,21 @@ int sh_typeinfo_inherit_model(const char *inheritName, char *buf, size_t cap)
 int sh_typeinfo_find_material(const char *name, char *buf, size_t cap)
 {
     if (buf && cap) buf[0] = '\0';
-    if (!g_doom_base || !name || !name[0] || !buf || cap < 2) return 0;
+    if (!name || !name[0] || !buf || cap < 2) return 0;
+    if (!g_material_mgr_ctx || !g_decl_find) return 0;      /* unserved build -- decline, never guess */
     __try {
-        typedef void *(*decl_find_fn)(void *ctx, const char *name);
-        void *ctx = (void *)(g_doom_base + MATERIAL_MGR_CTX_RVA);
-        decl_find_fn find = (decl_find_fn)(g_doom_base + DECL_PURE_FIND_RVA);
-        void *material = find(ctx, name);
+        void *material = g_decl_find(g_material_mgr_ctx, name);
         if (!material) return 0;
 
+        /* Dimensions are best-effort and always were: an unresolved getter reports the same "found with no
+         * dimensions" the SEH path already produced, so a signature miss costs the size, not the answer. */
         int w = -1, h = -1;
-        __try {
-            typedef int (*dim_fn)(void *material);
-            dim_fn get_w = (dim_fn)(g_doom_base + MATERIAL_WIDTH_FN_RVA);
-            dim_fn get_h = (dim_fn)(g_doom_base + MATERIAL_HEIGHT_FN_RVA);
-            w = get_w(material);
-            h = get_h(material);
-        } __except (EXCEPTION_EXECUTE_HANDLER) { w = -1; h = -1; }
+        if (g_material_width && g_material_height) {
+            __try {
+                w = g_material_width(material);
+                h = g_material_height(material);
+            } __except (EXCEPTION_EXECUTE_HANDLER) { w = -1; h = -1; }
+        }
 
         /* structural probe -- see the comment above; never affects found/dims, best-effort only */
         int has_vtex = 0, has_minlod = 0;
@@ -584,15 +611,16 @@ int sh_typeinfo_find_material(const char *name, char *buf, size_t cap)
 #define REGISTRY_NAME_OFF       0x00      /* record -> className char* (NULL name terminates the array) */
 #define REGISTRY_SUPER_OFF      0x08      /* record -> superclass name char* ("" for a root) */
 #define REGISTRY_WALK_CAP       65536u    /* stale/garbage-array guard (this build has ~10,190 records) */
-#define TYPE_CONTAINER_RVA      0x3082b10u /* the reflection container object P (reflect+0 holds &this). Used as
-                                           * the thread-safe fallback when reflect is null (the UI thread):
-                                           * P is a fixed static global, so B=*(P+0x20) is a pure raw read.
-                                           * BUILD-SPECIFIC -- re-derive per build: it's *(reflect+0) on the
-                                           * game thread, per our RE of the reflection registry). */
+#define TYPE_CONTAINER_RVA      0x3082b10u /* the reflection container object P (reflect+0 holds &this), as an
+                                           * RVA on the pinned Vulkan build -- kept for audit and per-build
+                                           * re-derivation, no longer used to locate anything. P is located
+                                           * by the signed "type_container" anchor; on the game thread it is
+                                           * also just *(reflect+0), which is the primary path below. */
 
-/* Root B = the type-record array base, THREAD-SAFELY. Primary (portable): reflect (game thread) -> P=*(reflect).
- * Fallback (the UI thread, where the reflect vtable accessor returns null): the container global P=base+0x3082b10
- * (a fixed static object -- raw read, no vtable call). Either way B=*(P+0x20). NULL only if neither roots. */
+/* Root B = the type-record array base, THREAD-SAFELY. Primary: reflect (game thread) -> P=*(reflect).
+ * Fallback (the UI thread, where the reflect vtable accessor returns null): the container global P, located
+ * by the signed "type_container" anchor (a fixed static object -- raw read, no vtable call). Either way
+ * B=*(P+0x20). NULL if neither roots, which the callers already treat as "registry unavailable". */
 static const uint8_t *ti_type_array_base(void)
 {
     const uint8_t *P = NULL;
@@ -601,7 +629,7 @@ static const uint8_t *ti_type_array_base(void)
         __try { P = *(const uint8_t * const *)reflect; }
         __except (EXCEPTION_EXECUTE_HANDLER) { P = NULL; }
     }
-    if (P == NULL && g_doom_base) P = g_doom_base + TYPE_CONTAINER_RVA;   /* UI-thread fallback (fixed global) */
+    if (P == NULL) P = g_type_container;              /* UI-thread fallback (the signed fixed global) */
     if (P == NULL) return NULL;
     const uint8_t *B = NULL;
     __try { B = *(const uint8_t * const *)(P + REGISTRY_TYPEBASE_OFF); }
@@ -647,19 +675,19 @@ int sh_typeinfo_collect_records(sh_ti_record *out, int cap)
     return n;
 }
 
-/* Enumerate the LIVE entityDef decl manager (the valid-INHERIT set). The mgr @ RESOURCE_MGR_CTX_RVA (0x59BD8F0
- * -- the SAME ctx sh_typeinfo_inherit_base uses) is a flat array: count @ mgr+0x28, array @ mgr+0x20, each
- * element an idDeclEntityDef* whose name (the decl PATH) is the generic idDecl name slot @ decl+0x08. Pure raw
- * reads -> thread-safe on the UI thread. */
+/* Enumerate the LIVE entityDef decl manager (the valid-INHERIT set). The mgr -- the SAME signed
+ * "resource_manager_ctx" object sh_typeinfo_inherit_base uses -- is a flat array: count @ mgr+0x28,
+ * array @ mgr+0x20, each element an idDeclEntityDef* whose name (the decl PATH) is the generic idDecl
+ * name slot @ decl+0x08. Pure raw reads -> thread-safe on the UI thread. */
 #define ENTITYDEF_MGR_ARRAY_OFF  0x20
 #define ENTITYDEF_MGR_COUNT_OFF  0x28
 #define DECL_NAME_OFF            0x08
 int sh_typeinfo_collect_inherits(const char **out_names, int cap)
 {
-    if (!out_names || cap <= 0 || !g_doom_base) return -1;
+    if (!out_names || cap <= 0 || !g_resource_mgr_ctx) return -1;
     int n = 0;
     __try {
-        const uint8_t *mgr = g_doom_base + RESOURCE_MGR_CTX_RVA;
+        const uint8_t *mgr = (const uint8_t *)g_resource_mgr_ctx;
         int count = *(const int *)(mgr + ENTITYDEF_MGR_COUNT_OFF);
         const uint8_t * const *arr = *(const uint8_t * const * const *)(mgr + ENTITYDEF_MGR_ARRAY_OFF);
         if (arr == NULL || count <= 0 || (uint32_t)count > REGISTRY_WALK_CAP) return -1;  /* stale-mgr guard */
@@ -942,6 +970,13 @@ void h_sh_validclasses(idCmdArgs *a)
 
 /* ------------------------------------------------------------------------------- install ---------- */
 
+/* An installed address as an RVA off the host image, or 0 if it did not resolve. Log-only. */
+static unsigned ti_rva(uintptr_t addr)
+{
+    if (!addr || !g_doom_base) return 0u;
+    return (unsigned)(addr - (uintptr_t)g_doom_base);
+}
+
 int sh_typeinfo_install(const sig_result *results, size_t n, const uint8_t *module_base)
 {
     if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;   /* one-shot */
@@ -954,11 +989,31 @@ int sh_typeinfo_install(const sig_result *results, size_t n, const uint8_t *modu
     g_find_type = (find_typeinfo_fn)sig_addr_by_name(results, n, "FindTypeInfoByName");
     g_find_enum = (find_enum_fn)sig_addr_by_name(results, n, "FindEnumByName");
 
-    char line[200];
+    /* The three engine functions we used to reach by raw address are signed like every other one. */
+    g_decl_find       = (decl_find_fn)sig_addr_by_name(results, n, "DeclPureFind");
+    g_material_width  = (dim_fn)sig_addr_by_name(results, n, "MaterialWidth");
+    g_material_height = (dim_fn)sig_addr_by_name(results, n, "MaterialHeight");
+
+    /* The data globals (and the one accessor whose own bytes cannot be signed) come from the code sites
+     * that compute them. A zero here means this build is not served for that feature -- the dependent
+     * handler prints its own unavailable message rather than reading a pinned address. */
+    g_declmgr_getter   = (declmgr_getter_fn)glb_resolve(module_base, "declmgr_accessor", NULL);
+    g_validator_mgr    = (const uint8_t *)glb_resolve(module_base, "validator_manager", NULL);
+    g_resource_mgr_ctx = (void *)glb_resolve(module_base, "resource_manager_ctx", NULL);
+    g_material_mgr_ctx = (void *)glb_resolve(module_base, "material_manager_ctx", NULL);
+    g_type_container   = (const uint8_t *)glb_resolve(module_base, "type_container", NULL);
+
+    /* Log RVAs, not pointers: they are what a bug report can be compared against across builds, and 0
+     * reads unambiguously as "did not resolve here". */
+    char line[240];
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "B2: typeinfo install -- find_type=%p find_enum=%p declmgr_acc=base+0x17f7030 "
-        "(cs_fieldinfo/sh_type wired)",
-        (void *)g_find_type, (void *)g_find_enum);
+        "B2: typeinfo install -- find_type=0x%x find_enum=0x%x declmgr_acc=0x%x decl_find=0x%x "
+        "res_ctx=0x%x mat_ctx=0x%x validator=0x%x type_container=0x%x mat_dims=%s",
+        ti_rva((uintptr_t)g_find_type), ti_rva((uintptr_t)g_find_enum),
+        ti_rva((uintptr_t)g_declmgr_getter), ti_rva((uintptr_t)g_decl_find),
+        ti_rva((uintptr_t)g_resource_mgr_ctx), ti_rva((uintptr_t)g_material_mgr_ctx),
+        ti_rva((uintptr_t)g_validator_mgr), ti_rva((uintptr_t)g_type_container),
+        (g_material_width && g_material_height) ? "yes" : "no");
     backend_log(line);
     return 1;
 }

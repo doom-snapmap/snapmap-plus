@@ -48,7 +48,28 @@ static uint8_t *map_pe_by_rva(const char *path, size_t *image_sz)
 
 int main(int argc, char **argv)
 {
-    if (argc < 2) { fprintf(stderr, "usage: sig_test <DOOM_unpacked.exe>\n"); return 2; }
+    /* Two DIFFERENT properties are checked here, and conflating them is what made this test
+     * unable to see a second DOOM build.
+     *
+     *   uniqueness -- every signature matches exactly once. This must hold on EVERY build we
+     *                 support, and it is the property that actually makes the resolver safe.
+     *   known_rva  -- the match lands on the RVA the signature was extracted at. That is a fact
+     *                 about ONE link output, and is false (harmlessly) on any other build.
+     *
+     * DOOM 2016 ships a Vulkan and an OpenGL executable built from one source tree; function RVAs
+     * differ between them by -0x400 to -0xE460 with no uniform offset. Demanding known_rva
+     * equality on the OpenGL image reports 84 failures for a DB that is in fact healthy there.
+     *
+     *   sig_test <image>            # pinned mode: uniqueness AND known_rva (the Vulkan image)
+     *   sig_test <image> portable   # portable mode: uniqueness only, and report the shift
+     */
+    int pinned = 1;
+    if (argc < 2) {
+        fprintf(stderr, "usage: sig_test <DOOM_unpacked.exe> [portable]\n");
+        return 2;
+    }
+    if (argc >= 3 && strcmp(argv[2], "portable") == 0) pinned = 0;
+
     size_t image_sz = 0;
     uint8_t *base = map_pe_by_rva(argv[1], &image_sz);
     if (!base) return 2;
@@ -72,11 +93,19 @@ int main(int argc, char **argv)
                          results[i].status == SIG_NOT_FOUND ? "NOTFOUND" :
                          results[i].status == SIG_AMBIGUOUS ? "AMBIG" : "BAD";
         uint32_t known = BACKEND_ENGINE_SIGNATURES[i].known_rva;
-        int rva_ok = (results[i].status == SIG_OK && results[i].rva == known);
+        int unique = (results[i].status == SIG_OK);
+        int rva_ok = pinned ? (unique && results[i].rva == known) : unique;
         if (!rva_ok) bad++;
-        printf("%s %-20s resolved=0x%-9x known=0x%-9x %s\n",
-               rva_ok ? "OK " : "BAD", results[i].name, results[i].rva, known,
-               results[i].status == SIG_OK ? "" : st);
+        if (pinned) {
+            printf("%s %-20s resolved=0x%-9x known=0x%-9x %s\n",
+                   rva_ok ? "OK " : "BAD", results[i].name, results[i].rva, known,
+                   unique ? "" : st);
+        } else {
+            printf("%s %-20s resolved=0x%-9x shift=%+d %s\n",
+                   rva_ok ? "OK " : "BAD", results[i].name, results[i].rva,
+                   unique ? (int)((long)results[i].rva - (long)known) : 0,
+                   unique ? "" : st);
+        }
     }
 
     /* The dynamic decl server decodes the registry object from DeclRegistryAnchor+0x10 and requires
@@ -130,7 +159,9 @@ int main(int argc, char **argv)
         }
     }
     printf("======================================================================\n");
-    printf("C resolver: %zu/%zu unique; %d RVA-mismatches\n", ok, total, bad);
+    printf("C resolver [%s]: %zu/%zu unique; %d %s\n",
+           pinned ? "pinned" : "portable", ok, total, bad,
+           pinned ? "RVA-mismatches" : "non-unique");
     free(base);
     return (ok == total && bad == 0) ? 0 : 1;
 }

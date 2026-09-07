@@ -17,6 +17,7 @@
 EXPORTS
     sh_rawmap_swap_is_armed         @100
     sh_rawmap_swap_complete_count   @101
+    sh_rawmap_swap_will_fire        @102
     XInputGetState                  @2
     XInputSetState                  @3
     XInputGetCapabilities           @4

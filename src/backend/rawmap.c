@@ -26,6 +26,9 @@
 #include "config.h"
 #include "overrides.h"
 #include "map_embed.h"
+#include "navmesh.h"
+#include "nav_bake.h"
+#include "map_shards.h"
 
 /* DeserializeFromJson prologue steal window. Decoded from the signature DB pattern
  *   40 55            push rbp                      (2)
@@ -198,6 +201,38 @@ static char *mpkg_strip_guarded(const char *json)
     }
 }
 
+/* Everything that has to happen to a map buffer between the gate and the parse.
+ *
+ * The navigation table is rebuilt FROM EMPTY here, on every buffer the engine is
+ * about to parse, because that is what stops a map with no bake from inheriting
+ * the previous map's platforms -- the worst silent failure this feature permits.
+ * It is built BEFORE either strip, from the bytes the map arrived in.
+ *
+ * Then both delivery envelopes come out: packages first, navigation second. A
+ * strip that declines returns NULL and the previous buffer is used, so the two
+ * chain without either one being able to lose the other's work.
+ *
+ * Returns a HeapAlloc'd buffer (caller frees) or NULL meaning "use the original". */
+static char *prepare_map_buffer(const char *json)
+{
+    char *pkg, *nav;
+    size_t len = json ? strlen(json) : 0;
+    size_t nav_len = 0;
+
+    if (len == 0) return NULL;
+
+    sh_navmesh_build_from_map(json, len);
+    /* The regions the author marked, read from the same bytes and cleared the
+     * same way. A map with no marked volume must not inherit the last map's. */
+    sh_nav_bake_set_map(json, len);
+
+    pkg = mpkg_strip_guarded(json);
+    nav = sh_navmesh_strip(pkg ? pkg : json, pkg ? strlen(pkg) : len, &nav_len);
+    if (!nav) return pkg;
+    if (pkg) HeapFree(GetProcessHeap(), 0, pkg);
+    return nav;
+}
+
 /* The detour. Same prototype as the engine target. When armed + a source reads, call the engine
  * original through the trampoline with OUR buffer as arg0; else pass the engine's json through.
  * Either way the chosen buffer passes the map-package gate first; a refused load returns 0 (the
@@ -226,10 +261,10 @@ static int sh_deser_detour(const char *json, void *out_map)
                 return 0;   /* refused: the engine never sees the bytes */
             }
             {
-                char *stripped = mpkg_strip_guarded(ours);
-                int rc = g_deser_orig(stripped ? stripped : ours, out_map);
+                char *prepared = prepare_map_buffer(ours);
+                int rc = g_deser_orig(prepared ? prepared : ours, out_map);
                 InterlockedIncrement(&g_swap_complete_count); /* only after the substituted parse returns */
-                if (stripped) HeapFree(GetProcessHeap(), 0, stripped);
+                if (prepared) HeapFree(GetProcessHeap(), 0, prepared);
                 HeapFree(GetProcessHeap(), 0, ours);     /* OG frees its substitute buffer too */
                 return rc;
             }
@@ -238,11 +273,11 @@ static int sh_deser_detour(const char *json, void *out_map)
     }
     if (!mpkg_gate_guarded(json)) return 0;   /* refused: engine json never parsed */
     {
-        char *stripped = mpkg_strip_guarded(json);
+        char *prepared = prepare_map_buffer(json);
         int rc;
-        if (!stripped) return g_deser_orig(json, out_map);
-        rc = g_deser_orig(stripped, out_map);
-        HeapFree(GetProcessHeap(), 0, stripped);
+        if (!prepared) return g_deser_orig(json, out_map);
+        rc = g_deser_orig(prepared, out_map);
+        HeapFree(GetProcessHeap(), 0, prepared);
         return rc;
     }
 }
@@ -313,6 +348,21 @@ int sh_rawmap_swap_arm(int on)
 int sh_rawmap_swap_is_armed(void)
 {
     return (InterlockedCompareExchange(&g_gate, 0, 0) != 0) ? 1 : 0;
+}
+
+/* Whether the swap WILL fire -- the explicit gate OR the test flag-file, which
+ * is what the detour itself decides on.
+ *
+ * Separate from sh_rawmap_swap_is_armed on purpose. That one answers "is the
+ * control a person set turned on", and deliberately hides the flag-file so it
+ * cannot report ON for something turning the control off would not clear. This
+ * one answers "will the detour substitute a buffer", which is the question a
+ * tool has to ask before it calls the function we detour: the daemon's
+ * engine-direct codec oracle calls idSnapMap::DeserializeFromJson directly, and
+ * doing that while the swap will fire faults inside the engine. */
+int sh_rawmap_swap_will_fire(void)
+{
+    return rawmap_armed(NULL) ? 1 : 0;
 }
 
 int sh_rawmap_swap_set_source(const char *path)
@@ -598,6 +648,19 @@ static int replace_out_idstr(void *out_idstr, const char *body, size_t body_len)
     return 1;
 }
 
+/* Read the engine's out-idStr under SEH (the engine fills it; a layout surprise must not fault
+ * the save path). Returns 1 with the bytes and length the engine just wrote. */
+static int read_out_idstr(void *out_idstr, const char **data, int *len)
+{
+    __try {
+        *len  = *(int *)((unsigned char *)out_idstr + IDSTR_LEN_OFF);
+        *data = *(const char **)((unsigned char *)out_idstr + IDSTR_DATA_OFF);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return *data != NULL && *len > 0;
+}
+
 /* The save-path entry point. Everything is best-effort: the engine's save has already completed
  * correctly by the time this runs, and any failure here simply leaves it as it was. */
 static void mpkg_embed_on_save(void *out_idstr)
@@ -608,14 +671,7 @@ static void mpkg_embed_on_save(void *out_idstr)
     size_t body_len = 0;
 
     if (!g_idstr_assign || out_idstr == NULL) return;
-
-    __try {
-        len = *(int *)((unsigned char *)out_idstr + IDSTR_LEN_OFF);
-        data = *(const char **)((unsigned char *)out_idstr + IDSTR_DATA_OFF);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return;
-    }
-    if (data == NULL || len <= 0) return;
+    if (!read_out_idstr(out_idstr, &data, &len)) return;
 
     __try {
         body = embed_used_packages(data, (size_t)len, &body_len);
@@ -633,6 +689,60 @@ static void mpkg_embed_on_save(void *out_idstr)
     } else {
         backend_log("MPKG: embed-on-save could not write the map back; the save is unchanged");
     }
+    HeapFree(GetProcessHeap(), 0, body);
+}
+
+/* Put the current map's baked navigation back into the bytes being saved.
+ *
+ * The shards were stripped on load, so without this a load-then-save with no
+ * fresh bake would silently discard the author's navigation. navmesh.c holds
+ * every payload that survived delivery -- including ones this client refused to
+ * SERVE -- precisely so a save cannot destroy work a different client can use. */
+/* Re-read the author's marked volumes from the map being SAVED.
+ *
+ * Regions were originally captured only on the deserialize funnel, which is
+ * wrong for the way authoring actually happens: mark some volumes in the editor,
+ * press Play, and no map load occurs in between -- the engine serializes the
+ * live map and builds from that. The region table would still hold whatever the
+ * map carried when it was last LOADED, so a volume marked this session simply
+ * did not exist as far as navigation was concerned, and the author would be told
+ * "no volume in this map is marked" moments after ticking one.
+ *
+ * This covers SAVE. It does NOT cover Play-from-the-editor: pressing Play does
+ * not serialize the map at all -- verified live, this hook never runs on that
+ * transition -- so the editor builds the play session straight from its live map
+ * object. A volume marked and then played in the same session therefore still
+ * gets nothing until the map is saved and reloaded. Closing that needs the marks
+ * read from the live editor entities rather than from map JSON, which is a
+ * different mechanism than anything here. */
+static void nav_regions_on_save(void *out_idstr)
+{
+    const char *data = NULL;
+    int len = 0;
+
+    if (!g_idstr_assign || out_idstr == NULL) return;
+    if (!read_out_idstr(out_idstr, &data, &len)) return;
+    if (data == NULL || len <= 0) return;
+
+    sh_nav_bake_set_map(data, (size_t)len);
+}
+
+static void nav_embed_on_save(void *out_idstr)
+{
+    const char *data = NULL;
+    int len = 0;
+    char *body = NULL;
+    size_t body_len = 0;
+
+    if (!g_idstr_assign || out_idstr == NULL) return;
+    if (!read_out_idstr(out_idstr, &data, &len)) return;
+
+    body = sh_navmesh_embed_all(data, (size_t)len, &body_len);
+    if (body == NULL) return;
+
+    if (!replace_out_idstr(out_idstr, body, body_len))
+        backend_log("NAV: the saved map could not be written back; its navigation shards are "
+                    "not in this save");
     HeapFree(GetProcessHeap(), 0, body);
 }
 
@@ -656,6 +766,18 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
      *     actually saved, and it is independent of the rawmaps switch: it is a product feature,
      *     not a debugging aid. A map that uses no packages is untouched. */
     mpkg_embed_on_save(out_idstr);
+
+    /* 1c) ...and the navigation this map arrived with, or was baked with this
+     *     session. Runs AFTER the package embed so it operates on the bytes that
+     *     are actually being saved, and like it, is independent of the rawmaps
+     *     switch: losing an author's bake on an ordinary save is not a debugging
+     *     aid, it is data loss. */
+    nav_embed_on_save(out_idstr);
+
+    /* 1d) refresh the marked-volume table from what is being saved, so a volume
+     *     ticked in this session takes effect on the very next Play instead of
+     *     waiting for a map reload. */
+    nav_regions_on_save(out_idstr);
 
     /* 2) the shadow is the SAVE half of the rawmaps switch, so it obeys the same arm the LOAD swap does.
      *    Ungated, this overwrote rawmap.json on every map save even with rawmaps off -- silently discarding

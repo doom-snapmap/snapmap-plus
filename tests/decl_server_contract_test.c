@@ -111,7 +111,16 @@ int main(int argc, char **argv)
     CHECK(strstr(server, "DS_IDSTR_SIZE          0x30u") != NULL);
     CHECK(strstr(server, "DS_DECL_ENTITYDEF_OFFSET 0x1c8u") != NULL);
     CHECK(strstr(server, "DS_PINNED_REGISTER_RVA") != NULL);
-    CHECK(strstr(server, "ds_clean_at_pinned_rva") != NULL);
+    /* IDENTITY, NOT ADDRESS. Every anchor must resolve to a unique masked-signature match with a
+     * clean prologue (SIG_OK, never SIG_OK_HOOKED). The pinned RVAs stay as the audit trail back
+     * to the extraction build, but they may not gate: DOOM ships a second executable built from
+     * the same source tree, where every one of these functions is at a shifted RVA and every
+     * signature still matches uniquely. Comparing RVAs there refused to arm the whole service. */
+    CHECK(strstr(server, "ds_clean_identity") != NULL);
+    CHECK(strstr(server, "result->status == SIG_OK") != NULL);
+    CHECK(strstr(server, "result->rva == expected_rva") == NULL);
+    /* Internal consistency between the resolver's two outputs is still required. */
+    CHECK(strstr(server, "result->addr == (uintptr_t)module_base + result->rva") != NULL);
     CHECK(strstr(server, "anchor->status != SIG_OK") != NULL);
     CHECK(strstr(server, "AddFromText") == NULL);
     /* The banned dead-end was a raw DeclFind detour plus a process-wide object cache. That ban
@@ -288,10 +297,21 @@ int main(int argc, char **argv)
             CHECK(strstr(visibility, "if (original) return original;") != NULL);
             /* Only identities this process published are ever corrected. */
             CHECK(strstr(visibility, "sh_overrides_internal_decl_published") != NULL);
-            /* The slot is proven to hold the pinned method before it is patched,
-             * and this is not a decl lookup detour or an object cache. */
+            /* The slot is proven to hold the probe before it is patched, and this is not a decl
+             * lookup detour or an object cache. The proof is the method's own PROLOGUE, matched
+             * uniquely in the host image -- the slot's address cannot be scanned for, but once
+             * read it can be checked, and a signature identifies the function on any link of this
+             * source tree where an RVA identifies only one of them. */
             CHECK(strstr(visibility, "DV_PINNED_PROBE_RVA 0x1806100u") != NULL);
-            CHECK(strstr(visibility, "method_rva != (unsigned long long)DV_PINNED_PROBE_RVA") != NULL);
+            CHECK(strstr(visibility, "DV_PROBE_SIGNATURE") != NULL);
+            CHECK(strstr(visibility, "sig_resolve_one(module_base, &entry, &found) != SIG_OK") != NULL);
+            CHECK(strstr(visibility, "found.addr == (uintptr_t)probe") != NULL);
+            CHECK(strstr(visibility, "if (!dv_method_is_probe(module_base, probe))") != NULL);
+            CHECK(strstr(visibility, "method_rva != (unsigned long long)DV_PINNED_PROBE_RVA") == NULL);
+            /* The manager global is located at runtime from the code site that computes it, so
+             * it resolves on either shipped executable; the pinned RVA must not be dereferenced. */
+            CHECK(strstr(visibility, "glb_resolve(module_base, \"decl_visibility_manager\"") != NULL);
+            CHECK(strstr(visibility, "module_base + DV_MANAGER_PTR_RVA") == NULL);
             CHECK(strstr(visibility, "decl_find_fn") == NULL);
             CHECK(strstr(visibility, "make_default") == NULL);
             CHECK(strstr(visibility, "AddFromText") == NULL);

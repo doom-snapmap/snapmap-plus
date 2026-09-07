@@ -25,8 +25,6 @@
 
 #include <stdint.h>
 
-#define DOOM_MODULE_NAME "DOOMx64vk.exe"
-
 /* idCvarSystem singleton POINTER: a DATA global holding the cvarSys object's address.
  * cvarSys = *(imageBase + RVA_CVAR_SYSTEM_PTR).
  * BUILD-SPECIFIC literal. RE-DERIVE on a new DOOM build (auto-patcher / version bump): the two .data slots

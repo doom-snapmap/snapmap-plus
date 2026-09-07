@@ -44,17 +44,36 @@
 #include "package_conflicts.h"
 #include "resource_bridge.h"
 #include "user_overrides.h"
+#include "navmesh.h"                /* baked AI navigation, served under the module's own names */
+#include "nav_bake.h"           /* navigation baked from the map's own marked volumes */
 #include "overrides_baked.h"        /* the built-in "*Custom"-tab default decls (Timeline + Unknown) */
 
-/* The engine open-by-name vtable method offset within the resource-provider vtable.
- * DIRECT: OG patches engineBase+0x2798598; the vtable is engineBase+0x27984a0 -> slot offset = 0xf8. */
+/* The engine open-by-name vtable method offset within the resource-provider vtable. A slot index,
+ * not an address, so it carries across both shipped builds unchanged.
+ * DIRECT: OG patches engineBase+0x2798598; the vtable is engineBase+0x27984a0 -> slot offset = 0xf8
+ * (both RVAs read off the pinned Vulkan build). */
 #define OPEN_SLOT_OFFSET 0xf8
 
-/* The provider stream ABI is not signature-portable. These five independently
- * resolved locations pin the one Steam build whose resource-provider vtable is
- * 31 idFile slots and whose provider open method is at +0xf8. A newer DOOM
- * build has 34 slots with shifted meanings, so matching function signatures
- * alone is insufficient and must never publish this table there. */
+/* The RVAs these five locations occupy on the PINNED VULKAN BUILD (DOOMx64vk.exe), recorded for
+ * audit and for re-deriving a signature that stops matching. THEY NO LONGER GATE THE INSTALL.
+ *
+ * DOOM 2016 ships two executables built from one source tree, DOOMx64vk.exe and DOOMx64.exe, and
+ * the game relaunches itself into the other one when r_renderAPI changes -- so we are loaded into
+ * either. Every function RVA shifts between the two images (by -0x400 to -0xE460, with no uniform
+ * delta) while the struct layouts and the provider/idFile ABI are identical. Demanding RVA
+ * equality here therefore refused the entire file shadow on the OpenGL build even though every
+ * signature resolved, uniquely, at its shifted address.
+ *
+ * What these gates are FOR is proving the resolved address really is the engine function we think
+ * it is. A unique masked-signature match proves that, and proves it better than RVA equality: two
+ * builds can share an RVA by coincidence, but a signature cannot match the wrong function. So the
+ * identity test is now the resolve status -- SIG_OK, never the hook-tolerant SIG_OK_HOOKED
+ * known_rva fallback -- plus containment in the host image. See ov_supported_build_abi.
+ *
+ * The ABI SHAPE checks are untouched and still do the real work: the provider vtable is 31 idFile
+ * slots with the provider open method at OPEN_SLOT_OFFSET (+0xf8), and a newer DOOM build has 34
+ * slots with shifted meanings. Shape is what differs between engine revisions; no address test
+ * substitutes for it. */
 #define OV_PINNED_RES_PROVIDER_CTOR_RVA 0x1A51070u
 #define OV_PINNED_IDFILE_READSTR_RVA    0x0267390u
 #define OV_PINNED_IDFILE_COMPARE_RVA    0x0267290u
@@ -1154,13 +1173,92 @@ static ov_stream *open_user_for_baked_name(const char *name, int *malformed)
 
 /* The override-open hook -- our value in the engine's open vtable slot. Same ABI as the engine method.
  * mode>=2 (OG param_5>=2) is a recursion/no-shadow guard -> straight to the original. Otherwise resolve
- * four-layer: USER disk file -> linked installed resource -> BUILT-IN baked default (from memory) ->
- * chain to the engine original.
+ * BAKED NAVIGATION first, then four-layer: USER disk file -> linked installed resource ->
+ * BUILT-IN baked default (from memory) -> chain to the engine original.
  * The user layer alone is gated by the immutable launch snapshot. SEH-guarded so a shadow path fault
  * degrades to a vanilla open. */
+/* The provider object, latched from the first hook entry.
+ *
+ * The engine never publishes this pointer -- it arrives as the hook's `self` and
+ * nowhere else -- but reading a resource the way the engine would requires it.
+ * The provider is a singleton created by the ctor this file already resolves by
+ * signature, so latching the first one we see is latching the only one. */
+static void *volatile g_provider_self = NULL;
+
+unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_len)
+{
+    typedef long long (*ov_len_fn)(void *self);
+    typedef long long (*ov_read_fn)(void *self, void *buf, uint64_t n);
+    typedef void      (*ov_close_fn)(void *self);
+    void *f = NULL;
+    void **vt;
+    unsigned char *buf = NULL;
+    long long len;
+
+    if (out_len) *out_len = 0;
+    if (!name || !g_orig_open || !g_provider_self) return NULL;
+
+    __try {
+        /* mode 2 is the hook's own no-shadow guard, so this cannot re-enter us
+         * even though the slot still points at ov_open_hook. */
+        f = g_orig_open(g_provider_self, name, 0xff, 0xff, 2);
+        if (!f) return NULL;
+        vt = *(void ***)f;
+        if (!vt) return NULL;
+
+        len = ((ov_len_fn)vt[11])(f);                    /* +0x58 GetLength */
+        if (len <= 0 || (unsigned long long)len > SH_SMNAV_MAX_PAYLOAD) {
+            ((ov_close_fn)vt[0])(f);
+            return NULL;
+        }
+        buf = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (size_t)len);
+        if (!buf) {
+            ((ov_close_fn)vt[0])(f);
+            return NULL;
+        }
+        if (((ov_read_fn)vt[5])(f, buf, (uint64_t)len) != len) {   /* +0x28 Read */
+            HeapFree(GetProcessHeap(), 0, buf);
+            ((ov_close_fn)vt[0])(f);
+            return NULL;
+        }
+        ((ov_close_fn)vt[0])(f);                         /* +0x00 close + free */
+        if (out_len) *out_len = (size_t)len;
+        return buf;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        /* A fault here means the engine's own file object did not behave the way
+         * every other path in this file assumes. Leak nothing we allocated and
+         * let the caller serve the shipped bytes. */
+        if (buf) HeapFree(GetProcessHeap(), 0, buf);
+        if (out_len) *out_len = 0;
+        return NULL;
+    }
+}
+
 static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
 {
     if (g_orig_open == NULL) return NULL;   /* defensive: never happens once installed */
+    if (g_provider_self == NULL) g_provider_self = self;
+
+    /* The current map's baked navigation, if this is one of the two names it
+     * replaces. It goes FIRST and is not gated by the user-override snapshot:
+     * this is a property of the map being loaded, not of the player's own
+     * override folder, and a stale cooked artefact on disk must never win over
+     * the navigation the map itself carries. navmesh.c owns its own SEH and
+     * disables itself for the session on a fault, so a miss here costs one
+     * bounded compare per served entry and nothing else. */
+    if (mode < 2 && name != NULL) {
+        unsigned char *nav = NULL;
+        size_t nav_len = 0;
+        /* A bake the map CARRIES wins over one we would generate: the author's
+         * tool already decided, and re-deriving it here could differ. */
+        if (!sh_navmesh_open(name, &nav, &nav_len))
+            sh_nav_bake_open(name, sh_overrides_read_engine_resource, &nav, &nav_len);
+        if (nav) {
+            ov_stream *s = make_mem_stream(nav, (long long)nav_len, name, 1);
+            if (s) return s;
+            HeapFree(GetProcessHeap(), 0, nav);
+        }
+    }
 
     if (mode < 2) {
         ov_stream *internal = NULL;
@@ -1256,11 +1354,15 @@ static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsign
 }
 
 /* ============================================================ vtable-global LEA decode ==============
- * The engine resource-provider vtable is a .data global (can't be masked-byte sig-scanned). The ctor
- * ResProviderCtor (resolved by signature) starts with `... 48 8B D9 (MOV RBX,RCX) ; 48 8D 05 <disp32>
- * (LEA RAX,[rip+vtable]) ; 48 89 01 (MOV [RCX],RAX)`. We scan forward from the resolved entry for the
- * FIRST `48 8D 05` and decode its rip-relative disp to recover the vtable VA. The install then requires
- * the decoded address and native helper RVAs to match the audited 31-slot build before publication. */
+ * The engine resource-provider vtable is a read-only .rdata global (can't be masked-byte sig-scanned).
+ * The ctor ResProviderCtor (resolved by signature) starts with `... 48 8B D9 (MOV RBX,RCX) ; 48 8D 05
+ * <disp32> (LEA RAX,[rip+vtable]) ; 48 89 01 (MOV [RCX],RAX)`. We scan forward from the resolved entry
+ * for the FIRST `48 8D 05` and decode its rip-relative disp to recover the vtable VA.
+ *
+ * Because the address is DECODED FROM THE LIVE IMAGE it is already correct on whichever build we are
+ * in; there is nothing to compare it to on a second build, and it must not be compared to one build's
+ * RVA. The install instead sanity-checks that the decode landed somewhere a vtable can live -- inside
+ * the host image, in a section mapped read-only -- and then relies on the ABI shape checks. */
 #define LEA_SCAN_WINDOW 0x40
 
 static int safe_read_n(const uint8_t *src, uint8_t *dst, size_t n)
@@ -1304,34 +1406,108 @@ static int file_equals_baked_ignoring_cr(const unsigned char *fbuf, size_t flen,
     return fi == flen && bi == blen;
 }
 
-static int ov_address_is_pinned(const uint8_t *module_base, const void *address,
-                                uintptr_t expected_rva)
+/* ---- host-image containment tests (what an ADDRESS alone can honestly prove) ------------------
+ * Both walk the host PE headers under SEH: module_base is engine-supplied and a malformed or
+ * unreadable image must degrade to a clean refusal, never a fault. */
+
+/* SizeOfImage from the host's optional header. 0/failure => 0. */
+static int ov_image_size(const uint8_t *module_base, uint32_t *out_size)
+{
+    __try {
+        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)module_base;
+        const IMAGE_NT_HEADERS64 *nt;
+        if (!module_base || !out_size) return 0;
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+        nt = (const IMAGE_NT_HEADERS64 *)(module_base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+        if (nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return 0;
+        *out_size = nt->OptionalHeader.SizeOfImage;
+        return *out_size != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+/* Non-zero when `address` lies inside the host image's mapped range. CONTAINMENT, NOT IDENTITY:
+ * it says only that the pointer is a location in DOOM, which is the most any address test can
+ * honestly say. Identity comes from the unique signature match that produced the address. */
+static int ov_address_in_image(const uint8_t *module_base, const void *address)
 {
     uintptr_t base = (uintptr_t)module_base;
     uintptr_t value = (uintptr_t)address;
-    return module_base && address && value >= base && value - base == expected_rva;
+    uint32_t size = 0;
+    if (!module_base || !address || value < base) return 0;
+    if (!ov_image_size(module_base, &size)) return 0;
+    return value - base < (uintptr_t)size;
 }
 
-static int ov_supported_build_abi(const uint8_t *module_base,
-                                  const void *ctor_fn,
-                                  const void *read_string_fn,
-                                  const void *compare_fn,
-                                  const void *write_string_fn)
+/* Non-zero when `address` lies in a section the loader mapped READ-ONLY (READ set, WRITE and
+ * EXECUTE clear) -- .rdata on both shipped builds, which is where the engine's vtables live. This
+ * is the plausibility test for a runtime-decoded vtable pointer: a decode that lands in .text, in
+ * writable .data, or outside the image did not decode a vtable. It is deliberately not an identity
+ * test, because a decoded address needs none -- it came from the live image. */
+static int ov_address_in_readonly_section(const uint8_t *module_base, const void *address)
 {
-    return ov_address_is_pinned(module_base, ctor_fn, OV_PINNED_RES_PROVIDER_CTOR_RVA) &&
-           ov_address_is_pinned(module_base, read_string_fn, OV_PINNED_IDFILE_READSTR_RVA) &&
-           ov_address_is_pinned(module_base, compare_fn, OV_PINNED_IDFILE_COMPARE_RVA) &&
-           ov_address_is_pinned(module_base, write_string_fn, OV_PINNED_IDFILE_WRITESTR_RVA);
+    __try {
+        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)module_base;
+        const IMAGE_NT_HEADERS64 *nt;
+        const IMAGE_SECTION_HEADER *sec;
+        uintptr_t rva;
+        unsigned int i;
+        if (!module_base || !address || (uintptr_t)address < (uintptr_t)module_base) return 0;
+        rva = (uintptr_t)address - (uintptr_t)module_base;
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+        nt = (const IMAGE_NT_HEADERS64 *)(module_base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+        sec = (const IMAGE_SECTION_HEADER *)IMAGE_FIRST_SECTION(nt);
+        for (i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
+            uintptr_t start = (uintptr_t)sec->VirtualAddress;
+            uintptr_t span  = sec->Misc.VirtualSize ? sec->Misc.VirtualSize : sec->SizeOfRawData;
+            if (rva < start || rva >= start + span) continue;
+            return (sec->Characteristics & IMAGE_SCN_MEM_READ) != 0 &&
+                   (sec->Characteristics & (IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE)) == 0;
+        }
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+/* The four native locations published into our idFile table must each be a CLEAN UNIQUE
+ * masked-signature match -- SIG_OK, never the hook-tolerant SIG_OK_HOOKED known_rva fallback,
+ * because the ctor's prologue is decoded and the helpers are called through an engine-owned table
+ * -- and each must be an address inside the host image.
+ *
+ * That is the entire identity argument, and it is stronger than the RVA equality this used to
+ * demand: a unique signature cannot match the wrong function, whereas two builds can share an RVA
+ * by accident. It is also the only form of the argument that survives the second shipped build,
+ * where every one of these functions sits at a different RVA. */
+static int ov_supported_build_abi(const uint8_t *module_base,
+                                  const void *ctor_fn, int ctor_status_ok,
+                                  const void *read_string_fn, int read_string_status_ok,
+                                  const void *compare_fn, int compare_status_ok,
+                                  const void *write_string_fn, int write_string_status_ok)
+{
+    return ctor_status_ok == 1 && read_string_status_ok == 1 &&
+           compare_status_ok == 1 && write_string_status_ok == 1 &&
+           ov_address_in_image(module_base, ctor_fn) &&
+           ov_address_in_image(module_base, read_string_fn) &&
+           ov_address_in_image(module_base, compare_fn) &&
+           ov_address_in_image(module_base, write_string_fn);
 }
 
 #ifdef SH_OVERRIDES_TESTING
 int sh_overrides_test_supported_build_abi(const uint8_t *module_base,
-                                          const void *ctor,
-                                          const void *read_string,
-                                          const void *compare,
-                                          const void *write_string)
+                                          const void *ctor, int ctor_status_ok,
+                                          const void *read_string, int read_string_status_ok,
+                                          const void *compare, int compare_status_ok,
+                                          const void *write_string, int write_string_status_ok)
 {
-    return ov_supported_build_abi(module_base, ctor, read_string, compare, write_string);
+    return ov_supported_build_abi(module_base, ctor, ctor_status_ok,
+                                  read_string, read_string_status_ok,
+                                  compare, compare_status_ok,
+                                  write_string, write_string_status_ok);
+}
+
+int sh_overrides_test_address_in_readonly_section(const uint8_t *module_base, const void *address)
+{
+    return ov_address_in_readonly_section(module_base, address);
 }
 #endif
 
@@ -1478,9 +1654,12 @@ int sh_overrides_install(const uint8_t *module_base,
         backend_log("B1: overrides file-shadow SKIPPED -- idFile native idStr helpers did not all resolve cleanly");
         return 0;
     }
-    if (!ov_supported_build_abi(module_base, ctor_fn, read_string_fn,
-                                compare_fn, write_string_fn)) {
-        backend_log("B1: overrides file-shadow SKIPPED -- resolved engine locations do not match the pinned 31-slot idFile/provider ABI");
+    if (!ov_supported_build_abi(module_base, ctor_fn, ctor_status_ok,
+                                read_string_fn, read_string_status_ok,
+                                compare_fn, compare_status_ok,
+                                write_string_fn, write_string_status_ok)) {
+        backend_log("B1: overrides file-shadow SKIPPED -- resolved engine locations are not clean unique "
+                    "signature matches inside the host image");
         return 0;
     }
     if (g_orig_open != NULL) {
@@ -1506,8 +1685,14 @@ int sh_overrides_install(const uint8_t *module_base,
                     "(ResProviderCtor layout shifted?)");
         return 0;
     }
-    if (!ov_address_is_pinned(module_base, vtable, OV_PINNED_PROVIDER_VTABLE_RVA)) {
-        backend_log("B1: overrides file-shadow SKIPPED -- decoded provider vtable does not match the pinned +0xf8 ABI");
+    /* Plausibility, not identity: the address was decoded out of the live image, so it is already
+     * the right one for whichever build we are in, and OV_PINNED_PROVIDER_VTABLE_RVA is only what
+     * it happens to be on the Vulkan image. All we can usefully ask is that the decode landed
+     * where a vtable can live -- inside DOOM, in a read-only section. */
+    if (!ov_address_in_image(module_base, vtable) ||
+        !ov_address_in_readonly_section(module_base, vtable)) {
+        backend_log("B1: overrides file-shadow SKIPPED -- decoded provider vtable is not a read-only "
+                    "location inside the host image (the LEA decode did not land on a vtable)");
         return 0;
     }
 

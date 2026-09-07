@@ -26,6 +26,13 @@
 #   resource_bridge_test -- exact manifest resolution, sparse decode, provider gate + collisions
 #   packages_test -- per-package override discovery: markers, legacy tree, order, bounds
 #   map_package_test -- map-embedded package shards: scan/extract vs the reference impl, unsafe-zip refusal, load gate
+#   navmesh_test -- smnav1 navigation shards: header grammar, reassembly, the structural AAS gate, and the serving table
+#   nav_regions_test -- the author's ticked blocking volumes: the top-face rect, instanceEntities attribution, caps + malformed maps
+#   aas_edit_test -- the mutable AAS model: byte-identical round trip, structural parse refusals, lump append + caps, settings block
+#   aas_augment_test -- adding walkable areas: admission, the BSP splice, the step/island link regimes, refusals
+#   nav_bake_test -- baking marked regions at load: the resource-name grammar, planning, clear-on-load, the one-marked-copy rule
+#   nav_traversal_test -- the universal traversal table: the decl grammar, dropped `_` placeholders, nearest-nominal
+#                         selection and its refusals, the nine shipped travel-flag values, and failing closed
 #   override_packages_test -- the file shadow resolves a decl out of any installed package
 #   package_requirements_test -- allowlisted package cvars, strict parsing, RUNNING gate + one-shot apply
 #   strids_packages_test -- a package ships its own #str_ strings; user > packages > baked
@@ -51,15 +58,20 @@
 #   prefab_transform_test -- sparse idMat3 defaults, column-major axes, scale, and block anchoring
 #   prefab_viewport_contract_test -- Prefab Details layout, resize, budgets, and shared-buffer transport
 #   window_chrome_contract_test -- captionless DWM shadow/rounded-corner contract
-# -Doom <unpacked DOOMx64vk.exe>: ALSO the signature-resolver tests, which scan a real
-#   (Steamless-unpacked) DOOM image:
+# -Doom <unpacked DOOM exe>: ALSO the resolver tests, which scan a real (Steamless-unpacked)
+#   DOOM image. Either shipped executable works:
 #   sig_test            -- every engine signature resolves to its known RVA
-#   hooktol_test        -- the resolver's hook-tolerant fallback (prologue-clobbered fns)
+#   hooktol_test        -- the resolver hook-tolerant fallback (prologue-clobbered fns)
+#   globals_test        -- every engine data global resolves, and the layout invariants hold
+# -DoomAlt <the other unpacked DOOM exe>: the PORTABILITY gate. Re-runs sig_test and
+#   globals_test in portable mode against the second executable, where everything must still
+#   resolve uniquely at its own (different) addresses. Run both together:
+#     tests\run-tests.ps1 -Doom <vk unpacked> -DoomAlt <gl unpacked>
 #
 # Exit 0 iff every selected test passes; non-zero (with the build log) on any failure.
 # Objects + test exes land in tests\obj\ (gitignored). The runtime XInput-ordinal test
 # (xinput_ordinal_test) is run by hand against a built build\XINPUT1_3.dll -- see docs\contributing.md.
-param([string]$Doom = "")
+param([string]$Doom = "", [string]$DoomAlt = "")
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $obj  = Join-Path $here "obj"
@@ -94,9 +106,19 @@ $tests = @(
     @{ name = "palette_refresh_contract_test"; src = 'palette_refresh_contract_test.c'; arg = (Join-Path $here '..') }
     @{ name = "resource_bridge_test"; src = 'resource_bridge_test.c ..\src\backend\resource_bridge.c ..\src\backend\packages.c ..\src\backend\raw_deflate.c ..\src\backend\decl_text.c'; defs = '/DSH_RESOURCE_BRIDGE_TESTING /DSH_RAW_DEFLATE_TESTING'; arg = "" }
     @{ name = "packages_test"; src = 'packages_test.c ..\src\backend\packages.c'; arg = "" }
-    @{ name = "map_package_test"; src = 'map_package_test.c ..\src\backend\map_package.c ..\src\backend\packages.c ..\src\backend\raw_deflate.c'; defs = '/DSH_MAP_PACKAGE_TESTING'; arg = "" }
+    @{ name = "map_package_test"; src = 'map_package_test.c ..\src\backend\map_package.c ..\src\backend\map_shards.c ..\src\backend\packages.c ..\src\backend\raw_deflate.c'; defs = '/DSH_MAP_PACKAGE_TESTING'; arg = "" }
+    @{ name = "navmesh_test"; src = 'navmesh_test.c ..\src\backend\navmesh.c ..\src\backend\map_shards.c'; defs = '/DSH_NAVMESH_TESTING'; arg = "" }
+    @{ name = "nav_regions_test"; src = 'nav_regions_test.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c'; arg = "" }
+    @{ name = "aas_edit_test"; src = 'aas_edit_test.c ..\src\backend\aas_edit.c'; arg = "" }
+    @{ name = "aas_augment_test"; src = 'aas_augment_test.c ..\src\backend\aas_augment.c ..\src\backend\aas_edit.c ..\src\backend\nav_traversal.c ..\src\backend\navmesh.c ..\src\backend\map_shards.c'; defs = '/DSH_NAVMESH_TESTING'; arg = "" }
+    @{ name = "nav_bake_test"; src = 'nav_bake_test.c ..\src\backend\nav_bake.c ..\src\backend\nav_regions.c ..\src\backend\aas_edit.c ..\src\backend\aas_augment.c ..\src\backend\nav_traversal.c ..\src\backend\map_shards.c'; defs = '/DSH_NAV_BAKE_TESTING'; arg = "" }
+    @{ name = "nav_traversal_test"; src = 'nav_traversal_test.c ..\src\backend\nav_traversal.c'; defs = '/DSH_TRAV_TESTING'; arg = "" }
     @{ name = "override_packages_test"; src = 'override_packages_test.c ..\src\backend\overrides.c ..\src\backend\packages.c ..\src\backend\decl_text.c'; defs = '/DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
-    @{ name = "package_requirements_test"; src = 'package_requirements_test.c ..\src\backend\package_requirements.c ..\src\backend\packages.c'; defs = '/DSH_PACKAGE_REQUIREMENTS_TESTING'; arg = "" }
+    # engine_globals.c + signatures.c come in because the service now LOCATES DOOM's load-state word
+    # instead of baking its address. Linking the real resolver (rather than a stub) means the test also
+    # exercises what happens when it cannot resolve: the host process is not DOOM, so nothing resolves,
+    # and the service must refuse to read anything rather than fall back to a pinned RVA.
+    @{ name = "package_requirements_test"; src = 'package_requirements_test.c ..\src\backend\package_requirements.c ..\src\backend\packages.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c'; defs = '/DSH_PACKAGE_REQUIREMENTS_TESTING'; arg = "" }
     @{ name = "strids_packages_test"; src = 'strids_packages_test.c ..\src\backend\strids.c ..\src\backend\packages.c ..\src\backend\overrides.c ..\src\backend\decl_text.c'; defs = '/DSH_STRIDS_TESTING /DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
     @{ name = "config_message_test"; src = 'config_message_test.cpp ..\src\ui\webview\config_message.cpp'; cxx = $true; arg = "" }
     @{ name = "theme_bootstrap_test"; src = 'theme_bootstrap_test.cpp ..\src\ui\webview\theme_bootstrap.cpp'; cxx = $true; arg = "" }
@@ -117,6 +139,19 @@ if ($Doom) {
     $da = (Resolve-Path $Doom).Path
     $tests += @{ name = "sig_test";     src = 'sig_test.c ..\src\backend\signatures.c';     arg = $da }
     $tests += @{ name = "hooktol_test"; src = 'hooktol_test.c ..\src\backend\signatures.c'; arg = $da }
+    $tests += @{ name = "globals_test"; src = 'globals_test.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\backend_log.c ..\src\common\log_rotate.c'; arg = $da }
+}
+# -DoomAlt is the PORTABILITY gate, and it is what keeps one build of this product serving
+# both of DOOM 2016's executables. Point it at the OTHER unpacked image (if -Doom was the
+# Vulkan one, this is DOOMx64.exe, and vice versa). Every signature and every data global
+# must resolve UNIQUELY there too. They land on different RVAs, which is expected and is why
+# these run in portable mode. A signature unique on only one image is not an identity, it is
+# a coincidence -- and without this pass nothing would catch it.
+if ($DoomAlt) {
+    if (-not (Test-Path $DoomAlt)) { throw "-DoomAlt path not found: $DoomAlt" }
+    $alt = (Resolve-Path $DoomAlt).Path
+    $tests += @{ name = "sig_test_alt"; src = 'sig_test.c ..\src\backend\signatures.c'; arg = @($alt, "portable") }
+    $tests += @{ name = "globals_test_alt"; src = 'globals_test.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\backend_log.c ..\src\common\log_rotate.c'; arg = @($alt, "portable") }
 }
 
 $fail = 0
@@ -133,7 +168,7 @@ foreach ($t in $tests) {
     # (the same cmd /c pattern the build scripts use) instead of letting that stderr trip $ErrorActionPreference.
     cmd /c "cd /d `"$here`" && `"$vcvars`" && $cl > `"$log`" 2>&1"
     if ($LASTEXITCODE -ne 0) { Get-Content $log | Write-Host; Write-Host "[FAIL] compile $($t.name)"; $fail++; continue }
-    if ($t.arg) { & $exe $t.arg } else { & $exe }
+    if ($t.arg) { & $exe @($t.arg) } else { & $exe }
     if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] $($t.name) (exit $LASTEXITCODE)"; $fail++ }
     else { Write-Host "[ok]   $($t.name)" }
 }

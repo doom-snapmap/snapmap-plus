@@ -16,13 +16,18 @@
 #include <string.h>
 
 #include "backend_log.h"
+#include "engine_globals.h"   /* glb_resolve -- the engine load-state word */
 #include "packages.h"
 #include "package_requirements.h"
 
 #define PR_MAX_FILES            64u
 #define PR_MAX_FILE_BYTES       (64u * 1024u)
 #define PR_MAX_TOTAL_BYTES      (256u * 1024u)
-#define PR_LOAD_STATE_RVA       0x6dde198u
+/* The load-state word's RVA on the pinned Vulkan build. AUDIT AND RE-DERIVATION ONLY: the address this
+ * service reads comes from glb_resolve("load_state"), which signs the code that computes it. DOOM's two
+ * executables place their data globals nearly 0x1000000 apart, so this literal is meaningless on the
+ * OpenGL image and must never be read there. */
+#define PR_LOAD_STATE_PINNED_RVA 0x6dde198u
 #define PR_LOAD_STATE_RUNNING   3
 
 enum {
@@ -56,6 +61,10 @@ static pr_allowed g_allowed[] = {
 
 static volatile LONG g_state = PR_STATE_NEW;
 static const uint8_t *g_module_base;
+/* The resolved load-state word, or NULL until it resolves (or never, on a build we cannot locate it on).
+ * `g_load_state_reported` keeps the refusal to one log line instead of one per poll. */
+static const uint8_t *g_load_state_at;
+static int g_load_state_reported;
 static void *g_cmdsys;
 static pr_buffer_command_fn g_buffer_command;
 static size_t g_requirement_count;
@@ -355,8 +364,24 @@ static int pr_read_load_state(int *value)
     }
 #endif
     if (!g_module_base) return 0;
+    /* Locate the word by signing the code that reads it. Cached after the first success, and dllmain
+     * resolves the whole table at install, so this is a lookup rather than a scan. A build where it does
+     * not resolve reports "cannot read the load state", which holds the RUNNING gate shut: the audited
+     * cvars are restart-only conveniences, and not applying them is a delay, whereas reading a pinned
+     * address on the wrong executable is a wild read of whatever happens to live there. */
+    if (!g_load_state_at) {
+        g_load_state_at = (const uint8_t *)glb_resolve(g_module_base, "load_state", NULL);
+        if (!g_load_state_at) {
+            if (!g_load_state_reported) {
+                g_load_state_reported = 1;
+                backend_log("package-requirements: the engine load-state word did not resolve on this "
+                            "build -- the RUNNING gate stays shut and no requirement is applied");
+            }
+            return 0;
+        }
+    }
     __try {
-        *value = *(const volatile int *)(g_module_base + PR_LOAD_STATE_RVA);
+        *value = *(const volatile int *)g_load_state_at;
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
@@ -496,6 +521,8 @@ void sh_package_requirements_test_reset(void)
     for (i = 0; i < sizeof(g_allowed) / sizeof(g_allowed[0]); i++)
         g_allowed[i].requested = 0;
     g_module_base = NULL;
+    g_load_state_at = NULL;
+    g_load_state_reported = 0;
     g_cmdsys = NULL;
     g_buffer_command = NULL;
     g_test_load_state = NULL;

@@ -65,6 +65,10 @@ int sh_rawmap_swap_arm(int on);
  * definition for why. */
 int sh_rawmap_swap_is_armed(void);
 
+/* Whether the swap WILL fire: the explicit gate OR the test flag-file. Ask this,
+ * not sh_rawmap_swap_is_armed, before calling a function the swap detours. */
+int sh_rawmap_swap_will_fire(void);
+
 /* Set the file-backed rawmap source path (the bytes the swap delivers). For this slice a simple
  * file-backed source matches how OG sources its rawmap (%USERPROFILE%\snaphak\rawmap.json). Pass NULL
  * to reset to the default path. The real source is wired later. Returns 1 if a path is set. */

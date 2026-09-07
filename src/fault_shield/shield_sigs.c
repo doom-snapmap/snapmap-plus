@@ -24,7 +24,8 @@
 #include "engine_layout.h"
 #include "fault_record.h"
 #include "shield_sigs.h"
-#include "../backend/signatures.h"   /* the shared, self-contained resolver (no backend-DLL dep) */
+#include "../backend/signatures.h"   /* sh_host_is_pinned_rva_build: a known_rva describes one build only */
+#include "../backend/host_image.h"   /* the shared, self-contained resolver (no backend-DLL dep) */
 
 shield_engine g_eng = { 0 };
 
@@ -103,16 +104,33 @@ static int resolve_fn(const uint8_t *module_base, const char *name,
             if (out_rva)  *out_rva  = r.rva;
             return 1;   /* portable scan hit */
         }
-        /* Scan missed (or only a hooked-known_rva hit): use the recipe-tagged RVA backstop + log it. */
-        if (out_addr) *out_addr = (uintptr_t)(module_base + e->known_rva);
-        if (out_rva)  *out_rva  = e->known_rva;
+        /* Scan missed. The known_rva backstop is a fact about ONE link output, so it may only be
+         * used on that build. DOOM 2016 ships two executables and the engine relaunches itself
+         * between them, so publishing base+known_rva unconditionally hands the shield a pointer
+         * into unrelated code on the other one -- and the shield SETS RIP from these. Worse, it
+         * made every caller's "did this resolve?" check dead, because the field was never zero.
+         * Off the pinned build we publish nothing and let the caller decline. */
         {
-            char msg[160];
-            _snprintf_s(msg, sizeof msg, _TRUNCATE,
-                "sig miss for %s (status=%d) -> fell back to known_rva 0x%x (re-derive on patch)",
-                name, (int)st, (unsigned)e->known_rva);
-            shield_fault f = { "sig", (int)st, msg, e->known_rva, 0 };
-            shield_emit(&f);
+            int pinned = sh_host_is_pinned_rva_build();
+            char msg[200];
+            if (pinned) {
+                if (out_addr) *out_addr = (uintptr_t)(module_base + e->known_rva);
+                if (out_rva)  *out_rva  = e->known_rva;
+                _snprintf_s(msg, sizeof msg, _TRUNCATE,
+                    "sig miss for %s (status=%d) -> fell back to known_rva 0x%x (re-derive on patch)",
+                    name, (int)st, (unsigned)e->known_rva);
+            } else {
+                if (out_addr) *out_addr = 0;
+                if (out_rva)  *out_rva  = 0;
+                _snprintf_s(msg, sizeof msg, _TRUNCATE,
+                    "sig miss for %s (status=%d) on a build the known_rva does not describe -> "
+                    "unresolved; dependent shield features will decline",
+                    name, (int)st);
+            }
+            {
+                shield_fault f = { "sig", (int)st, msg, pinned ? e->known_rva : 0u, 0 };
+                shield_emit(&f);
+            }
         }
         return 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {

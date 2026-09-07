@@ -94,12 +94,16 @@ starts, rather than shipping one in the installer.
 
 ## Opening Snapmap+
 
-**DOOM must be running its Vulkan renderer — Snapmap+ won't load under OpenGL.** This is a launch-time
-setting, so set it *before* starting DOOM (or restart DOOM after changing it, if it's already running):
+**Either renderer works — you don't have to pick one.** DOOM 2016 ships two executables built from the
+same source, `DOOMx64vk.exe` (Vulkan) and `DOOMx64.exe` (OpenGL), and switches between them by relaunching
+itself, so one Steam launch can land you in either. Snapmap+ installs once and loads into whichever
+executable is actually running. Nothing to configure.
 
-- **In-game:** Options → Advanced, set **Renderer** to **Vulkan**, then restart DOOM for it to take effect.
-- **Without launching DOOM:** open `%USERPROFILE%\Saved Games\id Software\DOOM\base\DOOMConfig.local` in
-  a text editor, find `r_renderAPI`, and set it to `1` (Vulkan is `1`, OpenGL is `0`). Save, then launch DOOM.
+The renderer lives in the `r_renderAPI` cvar (`0` is OpenGL, `1` is Vulkan), stored in
+`%USERPROFILE%\Saved Games\id Software\DOOM\base\DOOMConfig.local`. Changing it is what makes DOOM restart
+into the other executable — useful to know if you're chasing a graphics problem, but not something Snapmap+
+asks you to touch. OpenGL support is new: it is proven against the shipped OpenGL executable in our tests,
+so if you see Snapmap+ behave differently there than under Vulkan, that's worth reporting.
 
 Once installed, open a SnapMap in editor mode. A second window — the Snapmap+ panel — will appear
 alongside the DOOM window; you'll need to switch windows (Alt+Tab) to see it, since it doesn't overlay

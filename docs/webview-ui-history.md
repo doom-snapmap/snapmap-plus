@@ -34,6 +34,18 @@ This is an engineering log for maintainers, not the product changelog. The relea
 - Verified by build, the native + JavaScript suites, and browser preview (menu order, the arm tick round
   trip, no console errors). **Not tested in-game.**
 
+### 2026-09-06 -- The Navigation tab, added and then removed
+
+- **Removed the same day it landed.** A Navigation tab briefly listed the map's Blocking Boxes and
+  let an author tick which ones demons may walk on. It is gone: the flag is exposed in DOOM's own
+  entity object-settings panel instead, as an `affectsNavmesh` property row on
+  `snapeditorentitydef/volume/blocking.decl`. Ticking it where every other volume property already
+  lives is a better place for it than a tab of our own, and the frontend needs no navigation code
+  at all.
+- **The frontend is back to what it was.** The tab, its panel, its CSS, its scan-and-commit module
+  and its browser-preview sample volumes were all reverted, along with the page's read and write of
+  the `navmesh.enabled` config key -- that key is the backend's own and is still read there.
+
 ### 2026-09-03 -- The schema's enum value sets, corrected against the engine constants
 
 - **Sixteen enums in `schema_slice.js` listed the wrong values**, which is what issue #76 reported: the

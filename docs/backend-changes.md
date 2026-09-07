@@ -423,10 +423,20 @@ supported Steam build, including the verified storage slots at `+0xc0..+0xd8` an
 `SetLength` refusal at `+0x60`. Read/write byte counts use the native 64-bit contract. The three
 build-specific idStr helpers at `+0xe0/+0xe8/+0xf0` are installed as native engine addresses only when
 all three signatures resolve cleanly; helper publication completes before the provider open-slot swap,
-and a dirty or missing helper fails closed without exposing a partial table. The product remains pinned
-to the original `DOOMx64vk.exe` Steam image and does not claim support for `DOOMx64vk_newbuild.exe`.
-The install now enforces that boundary: the provider ctor, all three native helper addresses, and the
-decoded provider vtable must occupy the audited RVAs before the hook is published. Signed cursor additions
+and a dirty or missing helper fails closed without exposing a partial table. This change drew the
+supported-build boundary with addresses: the provider ctor, all three native helper addresses, and the
+decoded provider vtable had to occupy the audited `DOOMx64vk.exe` RVAs before the hook was published.
+
+That address gate has since been withdrawn, because it was wrong about what it was testing. DOOM 2016
+ships two executables built from one source tree, `DOOMx64vk.exe` and `DOOMx64.exe`, with identical
+struct layouts and an identical provider/`idFile` ABI but every function at a different RVA, so demanding
+address equality refused the whole file shadow on the OpenGL image even though every signature resolved
+uniquely there. Identity now comes from the resolution itself -- a clean unique masked-signature match for
+the ctor and helpers, the provider vtable resolved out of the code site that computes its address -- plus
+containment in the host image, which is stronger evidence than an RVA comparison. The recorded RVAs remain
+in the source for audit and re-derivation only. The ABI *shape* checks that do the real compatibility work
+are unchanged: 31 `idFile` slots with the provider open method at `+0xf8`, which a newer DOOM build (34
+slots, shifted meanings) fails. Signed cursor additions
 are overflow-checked, negative file lengths are refused, and an explicit installed-package probe fails when
 it finds no manifest-backed entries instead of reporting a vacuous pass.
 

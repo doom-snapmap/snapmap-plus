@@ -48,6 +48,7 @@
 #include <string.h>
 #include "cvar_unlock.h"
 #include "backend_log.h"   /* now in the backend: log the resolution path to sh_backend.log */
+#include "host_image.h"    /* host DOOM image on either shipped build (Vulkan / OpenGL) */
 
 /* ---- the unlock (applied to ALL cvars) ------------------------------------------------------- */
 
@@ -221,7 +222,10 @@ static int apply_unlock(uint8_t *base)
      * VALIDATION below (a wrong RVA on an RVA-shifted build, before the sig resolves, gives an implausible
      * count -> we bail WITHOUT writing). Once .text decrypts the sig resolves and is preferred (and logs). */
     uint8_t *cvarSys = cvu_resolve_cvarsys_portable(base);
-    if (cvarSys == NULL && g_cvu_cmdsys_slot == NULL) {
+    if (cvarSys == NULL && g_cvu_cmdsys_slot == NULL && sh_host_is_pinned_rva_build()) {
+        /* Only on the build this RVA was extracted from. Elsewhere it names unrelated memory, and
+         * although the count validation below would refuse to write, there is nothing to gain from
+         * reading a wild address once per poll -- we simply wait for the signature instead. */
         __try {
             cvarSys = *(uint8_t **)(base + RVA_CVAR_SYSTEM_PTR);   /* sig not resolved yet -> build-locked RVA */
         } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -270,13 +274,13 @@ static int apply_unlock(uint8_t *base)
 static DWORD WINAPI unlock_thread(LPVOID param)
 {
     (void)param;
-    uint8_t *base = (uint8_t *)GetModuleHandleA(DOOM_MODULE_NAME);
+    uint8_t *base = (uint8_t *)sh_host_image_base();
 
     /* Phase 1: wait for the cvar system to come up (up to ~60s @ 10ms). */
     int applied = 0;
     for (int i = 0; i < 6000 && !applied; i++) {
         if (base == NULL)
-            base = (uint8_t *)GetModuleHandleA(DOOM_MODULE_NAME);
+            base = (uint8_t *)sh_host_image_base();
         if (base != NULL)
             applied = apply_unlock(base);
         if (!applied)

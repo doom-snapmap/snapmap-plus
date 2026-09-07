@@ -10,10 +10,13 @@ import (
 	"strings"
 )
 
-const (
-	doomAppID = "379720"
-	doomExe   = "DOOMx64vk.exe"
-)
+const doomAppID = "379720"
+
+// DOOM 2016 ships two executables built from one source tree: DOOMx64vk.exe (Vulkan) and
+// DOOMx64.exe (OpenGL). Steam installs both side by side, and the game relaunches itself into the
+// other one when the r_renderAPI cvar changes -- so a player can be in either from one launch.
+// Snapmap+ supports both, so every check here has to consider both names.
+var doomExes = []string{"DOOMx64vk.exe", "DOOMx64.exe"}
 
 // resolveDoom returns the DOOM install dir: an explicit --doom (verified), else Steam auto-detect.
 func resolveDoom(explicit string) (string, error) {
@@ -21,29 +24,40 @@ func resolveDoom(explicit string) (string, error) {
 		if hasDoomExe(explicit) {
 			return explicit, nil
 		}
-		return "", fmt.Errorf("no %s in %q -- point --doom at your DOOM 2016 folder (the one containing %s)", doomExe, explicit, doomExe)
+		return "", fmt.Errorf("no DOOM 2016 executable in %q -- point --doom at your DOOM 2016 folder (the one containing %s)", explicit, strings.Join(doomExes, " and "))
 	}
 	dir, err := detectDoomViaSteam()
 	if err != nil {
-		return "", fmt.Errorf("couldn't find your DOOM 2016 install automatically -- pass --doom <the folder containing %s> (usually ...\\steamapps\\common\\DOOM)", doomExe)
+		return "", fmt.Errorf("couldn't find your DOOM 2016 install automatically -- pass --doom <your DOOM 2016 folder, the one containing %s> (usually ...\\steamapps\\common\\DOOM)", strings.Join(doomExes, " and "))
 	}
 	return dir, nil
 }
 
+// hasDoomExe: either shipped executable is enough to call this a DOOM 2016 folder.
 func hasDoomExe(dir string) bool {
-	st, err := os.Stat(filepath.Join(dir, doomExe))
-	return err == nil && !st.IsDir()
+	for _, exe := range doomExes {
+		if st, err := os.Stat(filepath.Join(dir, exe)); err == nil && !st.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
-// doomIsRunning reports whether DOOM 2016 (DOOMx64vk.exe) is currently running, so we can say "close DOOM
-// first" instead of surfacing a raw file-lock error -- Windows won't let us replace a DLL the running game
-// has loaded. Best-effort: if we can't tell (e.g. tasklist unavailable), we don't block.
+// doomIsRunning reports whether DOOM 2016 is currently running under either of its executables, so we
+// can say "close DOOM first" instead of surfacing a raw file-lock error -- Windows won't let us replace
+// a DLL the running game has loaded. Best-effort: if we can't tell (e.g. tasklist unavailable), we
+// don't block. `IMAGENAME eq` is an exact match, so the two names never answer for each other.
 func doomIsRunning() bool {
-	out, err := exec.Command("tasklist", "/FI", "IMAGENAME eq "+doomExe, "/NH").Output()
-	if err != nil {
-		return false
+	for _, exe := range doomExes {
+		out, err := exec.Command("tasklist", "/FI", "IMAGENAME eq "+exe, "/NH").Output()
+		if err != nil {
+			continue
+		}
+		if strings.Contains(string(out), exe) {
+			return true
+		}
 	}
-	return strings.Contains(string(out), doomExe)
+	return false
 }
 
 // detectDoomViaSteam: SteamPath (registry) -> every library in libraryfolders.vdf -> the one holding appid 379720.

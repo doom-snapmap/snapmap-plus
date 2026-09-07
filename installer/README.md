@@ -51,9 +51,12 @@ version to read just that one — `snapmap-plus changelog v0.2.1-beta.4` (the le
 Releases, where each release's body is its reviewed [`CHANGELOG.md`](../CHANGELOG.md) entry, so the
 terminal, the website and the releases page always agree.
 
-- **`--doom <path>`** — the DOOM install dir (the folder with `DOOMx64vk.exe`). If omitted, the installer
-  auto-detects it from your Steam libraries (reads `SteamPath` from the registry, scans
-  `libraryfolders.vdf` for the library holding appid `379720`, and verifies `DOOMx64vk.exe` is there).
+- **`--doom <path>`** — your DOOM 2016 install dir. Steam puts both of the game's executables there,
+  `DOOMx64vk.exe` (Vulkan) and `DOOMx64.exe` (OpenGL); Snapmap+ works under either. If omitted, the
+  installer auto-detects the folder from your Steam libraries (reads `SteamPath` from the registry, scans
+  `libraryfolders.vdf` for the library holding appid `379720`, and verifies a DOOM executable is there).
+  `install`, `update` and `uninstall` refuse to run while DOOM is open under either executable, since
+  Windows won't let them replace a DLL the running game has loaded.
 - **`--local <dist-dir>`** — install from a local `dist/` tree (built by the repo's `package.ps1`) instead of
   downloading. This is the contributor / local-test
   path. The installer reads whatever files `MANIFEST.sha256` lists and installs exactly those -- it has no

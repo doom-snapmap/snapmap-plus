@@ -61,9 +61,11 @@ typedef struct sh_overrides_internal_decl_entry {
 } sh_overrides_internal_decl_entry;
 
 /* Install the overrides file-shadow by swapping the engine resource-provider's open vtable slot.
- *   module_base    = live DOOM image base. The provider is deliberately enabled only when the
- *                    resolved functions and decoded provider vtable occupy the pinned Steam-build
- *                    RVAs for the audited 31-slot idFile ABI; incompatible builds refuse cleanly.
+ *   module_base    = live DOOM image base (either shipped executable). The provider is enabled only
+ *                    when every resolved function is a clean unique signature match inside that
+ *                    image and the decoded provider vtable is a read-only location inside it; the
+ *                    audited 31-slot idFile ABI is enforced by the table's shape, not by address.
+ *                    An engine revision that fails either check refuses cleanly.
  *   ctor_fn        = resolved engine ResProviderCtor address (from the signature resolver, DB name
  *                    "ResProviderCtor"). 0 => not resolved; logs SKIPPED and returns 0.
  *   ctor_status_ok = 1 iff a CLEAN scan hit (SIG_OK), not the hook-tolerant known_rva fallback
@@ -117,6 +119,21 @@ int sh_overrides_internal_decl_table_install(
  * Observability for the test harness. */
 unsigned long sh_overrides_shadow_count(void);
 
+/* Read a resource THE ENGINE WOULD HAVE SERVED, by name, into a fresh buffer
+ * (HeapAlloc(GetProcessHeap()); the caller frees). Returns NULL if the engine
+ * has no such resource, if the shadow is not installed, or on any fault.
+ *
+ * This exists for baked navigation. To give an author's geometry a navmesh we
+ * do not replace a module's navigation wholesale -- we ADD to it, which means
+ * first reading the bytes the engine was about to load. The reopen uses the
+ * hook's own mode >= 2 no-shadow guard, so it goes straight to the engine
+ * original and cannot recurse back into us.
+ *
+ * Only callable once the provider has opened something at least once, because
+ * the provider object is the hook's `self` and there is no other way to name
+ * it -- the engine hands it to us rather than exposing it. */
+unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_len);
+
 /* Re-scan %LOCALAPPDATA%\\snapmap-plus\\overrides for packages and publish the new list to
  * the file-shadow open path, so a package installed mid-session becomes servable without a
  * restart. Lock-free for readers. Returns the package count now visible.
@@ -161,10 +178,11 @@ int sh_overrides_test_stream_helpers_configure(void *read_string, int read_clean
 int sh_overrides_test_stream_helpers_ready(void);
 void sh_overrides_test_stream_helpers_reset(void);
 int sh_overrides_test_supported_build_abi(const uint8_t *module_base,
-                                          const void *ctor,
-                                          const void *read_string,
-                                          const void *compare,
-                                          const void *write_string);
+                                          const void *ctor, int ctor_status_ok,
+                                          const void *read_string, int read_string_status_ok,
+                                          const void *compare, int compare_status_ok,
+                                          const void *write_string, int write_string_status_ok);
+int sh_overrides_test_address_in_readonly_section(const uint8_t *module_base, const void *address);
 void *sh_overrides_test_stream_open_file(const char *path);
 void sh_overrides_test_stream_close(void *stream);
 /* Resolve an engine resource name to the existing override file that serves it

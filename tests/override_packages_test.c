@@ -64,6 +64,29 @@ int sh_resource_bridge_open(const char *name, unsigned char **out,
     return SH_RESOURCE_BRIDGE_MISS;
 }
 
+/* Baked navigation is a different subsystem with its own tests; the file shadow
+ * only has to ask it first. */
+#include "../src/backend/nav_bake.h"
+
+/* Navigation baked from a map's marked volumes. No map is loaded in this test,
+ * so the hook must fall through to the shadow exactly as it does in game. */
+int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
+                     unsigned char **out_bytes, size_t *out_len)
+{
+    (void)name; (void)read_shipped;
+    if (out_bytes) *out_bytes = NULL;
+    if (out_len) *out_len = 0;
+    return 0;
+}
+
+int sh_navmesh_open(const char *name, unsigned char **out_bytes, size_t *out_len)
+{
+    (void)name;
+    if (out_bytes) *out_bytes = NULL;
+    if (out_len) *out_len = 0;
+    return 0;
+}
+
 static void join(char *out, size_t size, const char *a, const char *b)
 {
     _snprintf_s(out, size, _TRUNCATE, "%s\\%s", a, b);

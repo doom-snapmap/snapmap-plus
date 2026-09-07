@@ -28,7 +28,7 @@ Usage:
   snapmap-plus help
 
 Options:
-  --doom <path>       The DOOM install dir (the folder with DOOMx64vk.exe).
+  --doom <path>       Your DOOM 2016 install dir (the folder with DOOMx64vk.exe and DOOMx64.exe).
                       Auto-detected from your Steam libraries if omitted.
   --local <dist-dir>  Install from a local dist/ tree (built by package.ps1) instead of
                       downloading a release.

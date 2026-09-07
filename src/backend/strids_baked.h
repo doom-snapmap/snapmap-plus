@@ -37,6 +37,17 @@ static const strid_baked_t g_strids_baked[] = {
     { "sh_unknown",       "Unknown" },
     { "sh_unknown_desc",  "An unknown entity not normally available in the palette." },
 
+    /* The Blocking Box's added "AI Navigation" property row. The label and its
+     * help text are the only place an author is told what marking a box does, so
+     * the description says what it affects (the TOP surface), and that a marked
+     * map is still playable by people without Snapmap+ -- which is the question
+     * anyone sharing a map asks first. */
+    { "sh_affects_navmesh",      "AI Navigation" },
+    { "sh_affects_navmesh_desc", "If true, demons can walk on this volume's top surface. "
+                                 "Snapmap+ builds the navigation while the map loads. Players "
+                                 "without Snapmap+ can still load and play the map; their demons "
+                                 "just use the module's normal navigation." },
+
     /* (extend here as the shipped pack / UI grows -- one row per custom #str_ id.) */
 };
 

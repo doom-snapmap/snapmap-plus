@@ -21,6 +21,8 @@
 #include "entity.h"
 #include "commands.h"
 #include "clipboard.h"
+#include "engine_globals.h"   /* glb_resolve -- the portable data-global resolver */
+#include "host_image.h"       /* sh_host_is_pinned_rva_build -- gates the last-resort RVA */
 #include "backend_log.h"
 #include "dumpmap_path.h"
 
@@ -54,7 +56,10 @@ typedef int   (*map_writer_fn)(void *map, const char *path);
 #define ENT_ENTITYDEF_OFF    0x6d0
 #define ENTITYDEF_TEXT_OFF   0x140
 
-/* gameMgr known-offset FALLBACK (OG *(engineBase+0x56ffb90)); used only if the GameMgrLea decode fails. */
+/* The gameMgr slot's RVA on the pinned Vulkan build (OG *(engineBase+0x56ffb90)) -- kept for audit and
+ * per-build re-derivation. It is only ever dereferenced when sh_host_is_pinned_rva_build() says the host
+ * IS that build; the portable paths (the GameMgrLea decode, then the signed "game_manager_slot" anchor)
+ * are what actually locate the slot. */
 #define GAMEMGR_KNOWN_RVA    0x56ffb90u
 
 /* ------------------------------------------------------------------------- module state ----------- */
@@ -74,7 +79,8 @@ static volatile LONG    g_installed    = 0;      /* one-shot install latch */
  * REUSE the shared sh_decode_rip_slot (commands.c) -- the GameMgrLea accessor's prologue is
  * `MOV RAX,[rip+gameMgr]` (48 8B 05 at byte offset 0), which the 4-opcode scanner catches. Return the
  * SLOT (the global's address); we do NOT deref-and-cache here because the manager is NULL this early.
- * Fallback: module_base + 0x56ffb90. Accept any READABLE slot (the value may legitimately be NULL now). */
+ * If that decode misses, the signed "game_manager_slot" anchor names the same slot on any build. Accept
+ * any READABLE slot (the value may legitimately be NULL now). */
 const uint8_t *sh_resolve_gamemgr_slot(const sig_result *results, size_t n, const uint8_t *module_base)
 {
     void *accessor = (void *)sig_addr_by_name(results, n, "GameMgrLea");
@@ -90,15 +96,41 @@ const uint8_t *sh_resolve_gamemgr_slot(const sig_result *results, size_t n, cons
                 return slot;
             }
         }
-        backend_log("B2: gameMgr portable decode failed -- trying known-offset fallback");
+        backend_log("B2: gameMgr portable decode failed -- trying the signed data-global anchor");
     }
+    /* Second portable path: a signed code site whose RIP displacement names the same slot. Independent
+     * of the GameMgrLea prologue, so an inline hook there does not take this down. */
     if (module_base) {
+        glb_status gst = GLB_UNKNOWN_NAME;
+        uintptr_t decoded = glb_resolve(module_base, "game_manager_slot", &gst);
+        if (decoded) {
+            const uint8_t *slot = (const uint8_t *)decoded;
+            void *probe = NULL;
+            if (sh_safe_read(slot, (uint8_t *)&probe, sizeof probe)) {
+                char line[128];
+                _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "B2: gameMgr slot glb=%p (current=%p, lazy-deref) (portable)", (void *)slot, probe);
+                backend_log(line);
+                return slot;
+            }
+        } else {
+            char line[128];
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                "B2: gameMgr glb anchor unresolved (status=%d)", (int)gst);
+            backend_log(line);
+        }
+    }
+    /* Last resort: the pinned literal, and only on the build it was extracted from. On the other shipped
+     * image the data globals sit ~0x1000000 away, so this RVA would hand back unrelated memory that the
+     * caller could not tell from a real slot. Off the pinned build we decline instead. */
+    if (module_base && sh_host_is_pinned_rva_build()) {
         const uint8_t *slot = module_base + GAMEMGR_KNOWN_RVA;
         void *probe = NULL;
         if (sh_safe_read(slot, (uint8_t *)&probe, sizeof probe)) {
             char line[128];
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                "B2: gameMgr slot fallback=base+0x56ffb90=%p (current=%p, lazy-deref)", (void *)slot, probe);
+                "B2: gameMgr slot pinned-build fallback=base+0x56ffb90=%p (current=%p, lazy-deref)",
+                (void *)slot, probe);
             backend_log(line);
             return slot;
         }

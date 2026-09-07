@@ -50,6 +50,29 @@ int sh_resource_bridge_open(const char *name, unsigned char **out,
     return SH_RESOURCE_BRIDGE_MISS;
 }
 
+/* Baked navigation is a different subsystem with its own tests; the file shadow
+ * only has to ask it first. */
+#include "../src/backend/nav_bake.h"
+
+/* Navigation baked from a map's marked volumes. No map is loaded in this test,
+ * so the hook must fall through to the shadow exactly as it does in game. */
+int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
+                     unsigned char **out_bytes, size_t *out_len)
+{
+    (void)name; (void)read_shipped;
+    if (out_bytes) *out_bytes = NULL;
+    if (out_len) *out_len = 0;
+    return 0;
+}
+
+int sh_navmesh_open(const char *name, unsigned char **out_bytes, size_t *out_len)
+{
+    (void)name;
+    if (out_bytes) *out_bytes = NULL;
+    if (out_len) *out_len = 0;
+    return 0;
+}
+
 static void test_internal_decl_table(void)
 {
     static unsigned char source[] = "0123456789abcdef";
@@ -66,20 +89,76 @@ static void test_internal_decl_table(void)
     void *stream;
 
     sh_overrides_test_stream_helpers_reset();
+    /* The provider gate proves IDENTITY BY SIGNATURE, not by address. DOOM 2016 ships two
+     * executables built from one source tree and relaunches itself between them, and every engine
+     * function sits at a different RVA in each -- so a gate that demanded one build's RVA refused
+     * the whole file shadow on the other even though every signature resolved uniquely there.
+     * What the gate requires now is a clean unique match (status 1 = SIG_OK, never the
+     * hook-tolerant SIG_OK_HOOKED fallback) at an address inside the host image. This test image
+     * stands in for the host: any offset within it is accepted regardless of its value, and only a
+     * dirty status or an address outside the image is refused. */
     {
-        const uint8_t *base = (const uint8_t *)(uintptr_t)0x10000000u;
+        const uint8_t *base = (const uint8_t *)GetModuleHandleA(NULL);
+        CHECK(base != NULL);
+        /* Four arbitrary, mutually different in-image offsets: no RVA is privileged any more. */
         CHECK(sh_overrides_test_supported_build_abi(
                   base,
-                  base + 0x1A51070u,
-                  base + 0x0267390u,
-                  base + 0x0267290u,
-                  base + 0x0268470u) == 1);
+                  base + 0x1000u, 1,
+                  base + 0x1100u, 1,
+                  base + 0x1200u, 1,
+                  base + 0x1300u, 1) == 1);
+        /* The same four shifted by an arbitrary amount -- exactly what the second shipped build
+         * looks like -- are just as acceptable. */
         CHECK(sh_overrides_test_supported_build_abi(
                   base,
-                  base + 0x1A51070u,
-                  base + 0x0267391u,
-                  base + 0x0267290u,
-                  base + 0x0268470u) == 0);
+                  base + 0x1001u, 1,
+                  base + 0x1101u, 1,
+                  base + 0x1201u, 1,
+                  base + 0x1301u, 1) == 1);
+        /* A hook-tolerant known_rva resolve of any one of them still refuses: the ctor prologue is
+         * decoded and the helpers are called through an engine-owned table. */
+        CHECK(sh_overrides_test_supported_build_abi(
+                  base,
+                  base + 0x1000u, 1,
+                  base + 0x1100u, 0,
+                  base + 0x1200u, 1,
+                  base + 0x1300u, 1) == 0);
+        CHECK(sh_overrides_test_supported_build_abi(
+                  base,
+                  base + 0x1000u, 0,
+                  base + 0x1100u, 1,
+                  base + 0x1200u, 1,
+                  base + 0x1300u, 1) == 0);
+        /* An unresolved location, or one that is not in the host image at all, refuses. */
+        CHECK(sh_overrides_test_supported_build_abi(
+                  base,
+                  base + 0x1000u, 1,
+                  NULL, 1,
+                  base + 0x1200u, 1,
+                  base + 0x1300u, 1) == 0);
+        CHECK(sh_overrides_test_supported_build_abi(
+                  base,
+                  base + 0x1000u, 1,
+                  base + 0x1100u, 1,
+                  base + 0x1200u, 1,
+                  base - 0x1000u, 1) == 0);
+        CHECK(sh_overrides_test_supported_build_abi(
+                  NULL,
+                  base + 0x1000u, 1,
+                  base + 0x1100u, 1,
+                  base + 0x1200u, 1,
+                  base + 0x1300u, 1) == 0);
+
+        /* The decoded provider vtable is checked for plausibility, not for one build's address:
+         * .rdata (read-only) yes, .text and outside the image no. The PE headers at the image base
+         * are readable and read-only-by-characteristics only inside a section, so probe real ones:
+         * this function's own address is executable, and a stack address is outside the image. */
+        CHECK(sh_overrides_test_address_in_readonly_section(base, "rdata-probe") == 1);
+        CHECK(sh_overrides_test_address_in_readonly_section(
+                  base, (const void *)(uintptr_t)&test_internal_decl_table) == 0);
+        CHECK(sh_overrides_test_address_in_readonly_section(base, &readback) == 0);
+        CHECK(sh_overrides_test_address_in_readonly_section(base, NULL) == 0);
+        CHECK(sh_overrides_test_address_in_readonly_section(NULL, base) == 0);
     }
     CHECK(sh_overrides_test_stream_vtable_slots() == 31);
     CHECK(sh_overrides_test_stream_vtable_slot(0) != NULL);
