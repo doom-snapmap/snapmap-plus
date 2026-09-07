@@ -69,13 +69,28 @@ void sh_nav_bake_set_live_editor(sh_nav_bake_entity_count count,
  * downloaded map wants anyway. The only thing lost is a mark made this session. */
 static void bake_refresh_live_locked(void)
 {
-    int n, marked;
+    int n, marked, before, after;
+    char line[192];
+
     if (!g_live_count || !g_live_json || !g_have_map) return;
     n = g_live_count(g_live_ctx);
     if (n <= 0) return;
+    before = g_module_count;
     marked = sh_nav_regions_refresh_live(&g_map, n, g_live_valid, g_live_json, g_live_ctx);
     if (marked < 0) return;             /* map untouched; keep what the load gave us */
     bake_plan_locked();
+    after = g_module_count;
+
+    /* A live read that TAKES AWAY what the map load supplied is the one outcome
+     * of this function that can silently turn the whole feature off, so it says
+     * so. Reading the live surface at the wrong moment did exactly that on every
+     * Play until 2026-09-06, and it was invisible: the bake simply never ran. */
+    if (after < before) {
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "NAV: the live editor read dropped %d module(s) -- scanned %d entity id(s), "
+                    "found %d marked volume(s)", before - after, n, marked);
+        backend_log(line);
+    }
 }
 
 static void bake_reason(bake_module *m, const char *fmt, ...)

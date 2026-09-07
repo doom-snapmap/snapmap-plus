@@ -736,6 +736,88 @@ static void test_live_untick_this_session(void)
     free(json); free(live0); free(live1);
 }
 
+/* PRESSING PLAY MUST NOT UNMARK THE MAP.
+ *
+ * The live entity array becomes the play session's the moment a playtest starts,
+ * so entities keep answering and not one of them is a Blocking Box. That is a
+ * surface that has stopped showing us this map's volumes -- NOT an author who
+ * unticked them, because unticking leaves the box there without the marker.
+ *
+ * Reading it as the latter deleted every mark on every Play, and since the
+ * commit also collapses the bake plan the feature stayed off for the rest of the
+ * session: measured live 2026-09-06, editor "1 volume(s) ... ready" -> Play "no
+ * volume in this map is marked for AI navigation". */
+static void test_live_no_volumes_keeps_map_marks(void)
+{
+    sh_nav_map m, before;
+    live_editor e;
+    char *json = two_box_map(&m);
+    /* entities that answer, none of them a Blocking Box */
+    char *live0 = live_entity("snapmaps/logic/counter", "{}", -1);
+    char *live1 = live_entity("snapmaps/spawners/encounter", "{}", -1);
+
+    before = m;
+    memset(&e, 0, sizeof e);
+    e.json[0] = live0;
+    e.json[1] = live1;
+
+    CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == -1);
+    CHECK(memcmp(&before, &m, sizeof m) == 0);
+    CHECK(m.region_count == 1);
+
+    free(json); free(live0); free(live1);
+}
+
+/* MARKS WE CANNOT PLACE ARE NOT EVIDENCE THE MAP HAS NONE.
+ *
+ * Attribution is by the id the map load recorded. When the live surface answers
+ * about a different id space -- which is what a playtest does -- the marked
+ * volumes are found and then every one of them falls out at the owner lookup.
+ * Committing that leaves an empty table, collapses the bake plan, and the
+ * feature is off for the session. The load already placed these correctly.
+ *
+ * Live: "the live editor read dropped 1 module(s) -- scanned 70 entity id(s),
+ * found 1 marked volume(s)". */
+static void test_live_marked_but_unattributable_keeps_map_marks(void)
+{
+    sh_nav_map m, before;
+    live_editor e;
+    char *json = two_box_map(&m);
+    /* a marked Blocking Box at an id the load never saw -> no owner */
+    char *live9 = live_box(TICKED, 0, 0, 0, 128, 128, 64);
+
+    before = m;
+    memset(&e, 0, sizeof e);
+    e.json[9] = live9;
+
+    CHECK(sh_nav_regions_refresh_live(&m, 9, live_valid, live_json, &e) == -1);
+    CHECK(memcmp(&before, &m, sizeof m) == 0);
+    CHECK(m.region_count == 1);
+
+    free(json); free(live9);
+}
+
+/* The other side of that rule, so the guard above cannot be widened into "never
+ * unmark anything": a surface that DOES show us the Blocking Boxes is entitled
+ * to say none of them is marked any more. */
+static void test_live_unmarked_volumes_still_clear(void)
+{
+    sh_nav_map m;
+    live_editor e;
+    char *json = two_box_map(&m);
+    char *live0 = live_box(UNTICKED, 0, 0, 0, 128, 128, 64);
+    char *live1 = live_box(UNTICKED, 100, 200, 64, 200, 400, 128);
+
+    memset(&e, 0, sizeof e);
+    e.json[0] = live0;
+    e.json[1] = live1;
+
+    CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == 0);
+    CHECK(m.region_count == 0);
+
+    free(json); free(live0); free(live1);
+}
+
 /* ABSENT IS FALSE, live exactly as in the map: an untouched volume carries no
  * `affectsNavmesh` member at all, and reading that as "ticked" would turn every
  * blocking box in the map into navigation. */
@@ -863,13 +945,18 @@ static void test_live_valid_gates_the_scan(void)
     free(json);
 
     /* and an entity whose serializer reports more than it wrote is refused
-     * rather than read past the end of what it handed over */
+     * rather than read past the end of what it handed over.
+     *
+     * Refusing it leaves NO legible Blocking Box on the surface, so the map
+     * keeps the marks it loaded with: an entity we could not read is not an
+     * entity that told us it is unmarked. Same reasoning as the no-surface case
+     * below, and the reason a Play cannot unmark a map. */
     json = two_box_map(&m);
     memset(&e, 0, sizeof e);
     e.json[1] = live1;
     e.overrun[1] = 1;
-    CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == 0);
-    CHECK(m.region_count == 0);
+    CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == -1);
+    CHECK(m.region_count == 1);
 
     free(json); free(live1);
 }
@@ -982,6 +1069,9 @@ int main(void)
     test_malformed();
     test_live_tick_this_session();
     test_live_untick_this_session();
+    test_live_no_volumes_keeps_map_marks();
+    test_live_marked_but_unattributable_keeps_map_marks();
+    test_live_unmarked_volumes_still_clear();
     test_live_absent_marker_is_false();
     test_live_block_demons();
     test_live_volume_without_attribution();

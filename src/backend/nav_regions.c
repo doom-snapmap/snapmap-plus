@@ -610,7 +610,7 @@ int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
                                 sh_navr_entity_json get_json, void *ctx)
 {
     navr_live *w;
-    int id, top, answered = 0, marked = 0, i;
+    int id, top, answered = 0, volumes = 0, marked = 0, i;
 
     /* Without both callbacks there is no live surface to read, and without the
      * map this reader last read there is no attribution for what it would say.
@@ -644,6 +644,10 @@ int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
          * not one, and the walk is the expensive part of this loop. */
         if (!sh_shard_find(w->json, (size_t)n, NAVR_VOLUME_INHERIT,
                            sizeof NAVR_VOLUME_INHERIT - 1)) continue;
+        /* Counted BEFORE the marker test, because "this surface is showing us
+         * the map's Blocking Boxes" is what makes an absent marker mean the
+         * author unticked it. See the commit rule below. */
+        volumes++;
         if (!sh_shard_find(w->json, (size_t)n, NAVR_MARKER,
                            sizeof NAVR_MARKER - 1)) continue;
 
@@ -678,6 +682,45 @@ int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
      * an editor holding nothing, and the two want the same treatment anyway:
      * leave the map exactly as it was loaded. */
     if (answered == 0) {
+        free(w);
+        return -1;
+    }
+
+    /* Entities answered, but not one of them is a Blocking Box. That is NOT an
+     * author who unticked every volume -- unticking leaves the box there, just
+     * without the marker -- it is a surface that is no longer showing us this
+     * map's volumes at all.
+     *
+     * Pressing Play is exactly that surface: the live entity array becomes the
+     * play session's, so plenty of entities answer and none of them is the
+     * editor's Blocking Box. Committing that answer deleted every mark the map
+     * load supplied, on every Play, and because the commit also collapses the
+     * bake plan the feature then stayed off for the rest of the session --
+     * measured live 2026-09-06, where the editor reported "1 volume(s) ...
+     * ready" and the very next Play reported "no volume in this map is marked".
+     *
+     * Only a surface that shows us Blocking Boxes may speak about their markers.
+     * -1 leaves the map with the flags it loaded with. */
+    if (volumes == 0) {
+        free(w);
+        return -1;
+    }
+
+    /* Marked volumes were found and NOT ONE of them could be attributed to an
+     * instance. Attribution is by the id the map load recorded, so this is the
+     * live surface answering about a different id space -- at Play the array is
+     * indexed differently from the uniqueIds the load indexed by, and every
+     * marked volume falls out at the owner lookup above.
+     *
+     * `marked` counts them before that lookup, so the caller would be told "1
+     * marked volume" while the committed table held none: the bake plan then
+     * collapsed to nothing and the feature stayed off for the session. Measured
+     * live 2026-09-06 -- "the live editor read dropped 1 module(s) -- scanned 70
+     * entity id(s), found 1 marked volume(s)".
+     *
+     * Finding marks we cannot place is not evidence that the map has none. The
+     * load already placed these correctly; keep its answer. */
+    if (marked > 0 && w->count == 0) {
         free(w);
         return -1;
     }
