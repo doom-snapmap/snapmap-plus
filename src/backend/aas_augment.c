@@ -968,6 +968,18 @@ typedef struct aug_trav_spec {
  * Trying the midpoint first keeps every link the single-anchor build already
  * produced exactly where it was; the rest are only reached by a demon the
  * midpoint would have lost entirely. */
+#ifdef SH_AUG_TESTING
+/* Emulate the single-anchor build, so an A/B over real module bytes can show
+ * what per-demon anchor placement actually recovers. 0 = no cap. */
+static int g_test_anchor_cap;
+int sh_aug_test_set_anchor_cap(int n)
+{
+    int was = g_test_anchor_cap;
+    g_test_anchor_cap = n;
+    return was;
+}
+#endif
+
 static int aug_trav_anchors(double lo, double hi, double *out, int cap)
 {
     double mid;
@@ -1020,6 +1032,9 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_rect *eff,
         na = aug_trav_anchors(sides[i].axis == 0 ? (double)eff->y0 : (double)eff->x0,
                               sides[i].axis == 0 ? (double)eff->y1 : (double)eff->x1,
                               anchors, (int)(sizeof anchors / sizeof anchors[0]));
+#ifdef SH_AUG_TESTING
+        if (g_test_anchor_cap > 0 && na > g_test_anchor_cap) na = g_test_anchor_cap;
+#endif
 
         for (d = 0; d < 2; d++) {                          /* UP then DOWN */
             int up = (d == SH_TRAV_UP);

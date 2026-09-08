@@ -135,6 +135,9 @@ unsigned sh_aas_tree_depth(const sh_aas *a);
  * matters -- midpoint first, then distinct positions spanning the edge -- is
  * pinned rather than assumed. */
 int sh_aug_test_trav_anchors(double lo, double hi, double *out, int cap);
+/* Cap the anchors tried per demon (1 = the old single-midpoint behaviour).
+ * Returns the previous cap. 0 = uncapped. */
+int sh_aug_test_set_anchor_cap(int n);
 #endif
 
 #endif /* SNAPMAP_PLUS_AAS_AUGMENT_H */
