@@ -40,9 +40,11 @@
 
 typedef void (*editor_frame_fn)(void *editor, void *arg);
 typedef int  (*ef_load_map_fn)(void *editor, void *id_str);
+typedef void (*ef_add_branch_tag_fn)(void *map);
 
 static editor_frame_fn g_frame_orig  = NULL;
 static ef_load_map_fn  g_load_map    = NULL;
+static ef_add_branch_tag_fn g_add_branch_tag = NULL;
 /* The INLINE idSnapEditorLocal OBJECT, not a pointer to one -- it is in-place constructed at a data
  * global, exactly as iface_engine.c documents. So this address IS the `this` LoadMap wants; there is
  * no dereference step, and adding one would read the object's first field as a pointer. */
@@ -84,11 +86,9 @@ static void ef_set_msg(const char *s)
  *     it as the parent of Documents is wrong the moment Documents is redirected -- which OneDrive
  *     does by default. Ask for the folder itself, and only fall back to the profile root.
  *
- * WHICH map we pick barely matters, because the reload arms the swap around its own LoadMap call:
- * while it fires the engine's bytes are replaced no matter which map it went to fetch, so the id only
- * has to name something loadable. We take the most recently written folder anyway, because that is
- * overwhelmingly the map the person is working on -- so in the worst case the id names the map they
- * already had open rather than an unrelated one. */
+ * The reload does NOT name one of these. It names a scratch map we mint ourselves -- see the
+ * scratch-map note below for why, and for the reasoning this file used to carry here and had wrong.
+ * The walk stays because minting copies an existing save, and because Save Rawmap reads one. */
 
 /* The id must be exactly 20 hex digits. Checked because it is about to be handed to an engine
  * function as a name: anything else means we misread the directory layout, and finding that out
@@ -155,8 +155,23 @@ static int newest_saved_map_id(char *out, size_t cap)
         hm = FindFirstFileA(glob, &fd);
         if (hm == INVALID_HANDLE_VALUE) continue;
         do {
+            char probe[MAX_PATH];
             if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
             if (!valid_map_id(fd.cFileName + 8)) continue;   /* skip "SNAPMAPS" */
+
+            /* A correctly-named folder is NOT a saved map. Deleting a map in DOOM removes
+             * game.details and map.decl but LEAVES both .verify sidecars, so the tree fills with
+             * folders that pass every name check and hold no data -- 194 of them out of 249 on the
+             * machine this was found on. Picking one of those as "the newest saved map" made Save
+             * Rawmap fail with a nonsense reason and would have made a mint copy an empty folder.
+             * Require the two files that actually constitute a save. */
+            _snprintf_s(probe, sizeof probe, _TRUNCATE, "%s\\%s\\%s\\map.decl",
+                        base, acct.cFileName, fd.cFileName);
+            if (GetFileAttributesA(probe) == INVALID_FILE_ATTRIBUTES) continue;
+            _snprintf_s(probe, sizeof probe, _TRUNCATE, "%s\\%s\\%s\\game.details",
+                        base, acct.cFileName, fd.cFileName);
+            if (GetFileAttributesA(probe) == INVALID_FILE_ATTRIBUTES) continue;
+
             if (found && CompareFileTime(&fd.ftLastWriteTime, &best) <= 0) continue;
             best = fd.ftLastWriteTime;
             strncpy_s(out, cap, fd.cFileName + 8, _TRUNCATE);
@@ -213,6 +228,92 @@ int sh_editor_frame_saved_map_dir(char *out, size_t cap, char *out_id, size_t id
 
     if (out_id && id_cap) strncpy_s(out_id, id_cap, id, _TRUNCATE);
     return 1;
+}
+
+/* The scratch-map machinery that used to sit here is GONE, and deliberately not kept behind an
+ * #if 0. It minted a map id and copied a save folder so a reload could target a slot that was ours
+ * rather than one of the person's. The premise was wrong: DISCONFIRMED 2026-09-07, a copied folder
+ * is not a second map, because the engine keys a save by the `localId` INSIDE its game.details and
+ * a copy still names its source. Both list entries opened the same map.
+ *
+ * It is deleted rather than parked because it was ~200 lines encoding a false belief, and the thing
+ * worth keeping from it is the disconfirmation, which lives in campaign rawmap-io-contract T2. The
+ * engine mints its own slot now -- see the tag note below -- so nothing here needs to.
+ *
+ * `map_dir_by_id`, `mint_map_id`, `copy_save_folder` and the scratch-id file went with it. */
+
+/* ------------------------------------------------- mark a substituted map as new ----------------
+ * THE POINT OF THIS WHOLE FILE, in one call.
+ *
+ * A rawmap parsed into an open map inherits that map's IDENTITY -- LoadMap named an existing save, so
+ * the editor holds a real map and the next Save writes over it with no prompt. Two earlier attempts
+ * to fix that failed on the same wrong assumption: that identity is something we can supply. It is
+ * not. Minting a save needs a game.details `checksum=` and a 40-byte .verify sidecar, and this
+ * project can generate neither (13 hash algorithms x 6 byte ranges against 54 real saves: no match;
+ * the community .verify KDF did not reproduce over 864 combinations).
+ *
+ * The engine already has the behaviour we want and gates it on ONE BIT OF MAP STATE. The Save
+ * command asks the open map for the tag "map:new" or "map:branch"; if either is present, Save routes
+ * into SAVE AS -- prompt for a name, then CreateLocalSavedMapInternal mints a fresh slot and the
+ * ENGINE writes the checksum and the sidecars. That is the path Branch and New-from-Template take.
+ *
+ * So we stop trying to forge identity and just tell the truth: this map is derived from another one.
+ * Set the tag, and the person is asked to name it, and their original is never written.
+ *
+ * WHY ON A FRAME, not in the swap detour: the detour runs inside DeserializeFromJson, which is only
+ * part of the load. Whether the record's tags are applied to the map before or after that parse is
+ * not established, and a tag set mid-load could be overwritten by the rest of it. A frame after the
+ * load has finished has no such ordering question -- and the frame hook is already this project's
+ * one sanctioned main-thread execution point.
+ *
+ * WHY map:branch rather than map:new: both gate the same prompt, and only map:branch has a
+ * ready-made single-argument add-if-absent function in the engine. Reaching for map:new would mean
+ * hand-building an idStr into an idStrList, i.e. this project's own allocator handling on an engine
+ * object, for no behavioural difference. */
+static unsigned long g_seen_swaps  = 0;   /* substituted parses already accounted for */
+static volatile LONG g_tag_faulted = 0;
+
+/* Called from the frame hook, after the engine's own Think returned. Cheap on every frame: one
+ * counter compare, and nothing else unless a substituted load actually landed. */
+static void ef_mark_substituted_map(void *editor)
+{
+    unsigned long now;
+    void *map = NULL;
+
+    if (g_add_branch_tag == NULL) return;
+    if (InterlockedCompareExchange(&g_tag_faulted, 0, 0) != 0) return;
+
+    now = sh_rawmap_swap_complete_count();
+    if (now == g_seen_swaps) return;          /* the common case: nothing new */
+
+    __try {
+        map = *(void *const *)((const unsigned char *)editor + ED_MAP_PTR_OFF);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedExchange(&g_tag_faulted, 1);
+        backend_log("EF: tag-as-new ABANDONED -- could not read the editor map pointer");
+        return;
+    }
+
+    /* No map yet means the load has not finished installing it. Leave the counter alone and try
+     * again next frame rather than consuming the event against a map that is not there. */
+    if (map == NULL) return;
+
+    __try {
+        g_add_branch_tag(map);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedExchange(&g_tag_faulted, 1);
+        backend_log("EF: tag-as-new FAULTED inside the engine tag add; disabled for this session");
+        return;
+    }
+
+    g_seen_swaps = now;
+    {
+        char line[160];
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "EF: substituted map tagged map:branch -- Save will ask for a new name [swap #%lu]",
+                    now);
+        backend_log(line);
+    }
 }
 
 /* ------------------------------------------------------------------ the reload ------------------ */
@@ -343,8 +444,15 @@ static void sh_editor_frame_detour(void *editor, void *arg)
     InterlockedIncrement(&g_ticks);
 
     if (InterlockedCompareExchange(&g_faulted, 0, 0) != 0) return;
+    if (editor == NULL) return;
+
+    /* Runs on EVERY frame, unlike the reload below, because the map it has to mark arrives from a
+     * load the PERSON started -- there is no request to wait for. It is a counter compare on the
+     * frames where nothing happened. */
+    ef_mark_substituted_map(editor);
+
     if (InterlockedCompareExchange(&g_pending, 0, 0) == 0) return;   /* the common frame: one read */
-    if (g_load_map == NULL || editor == NULL) return;
+    if (g_load_map == NULL) return;
 
     ef_service_reload(editor);
 }
@@ -352,13 +460,21 @@ static void sh_editor_frame_detour(void *editor, void *arg)
 /* ------------------------------------------------------------------ install + API --------------- */
 
 int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
-                            const uint8_t *module_base)
+                            void *add_branch_tag_fn, const uint8_t *module_base)
 {
     glb_status st = GLB_OK;
     char line[256];
     void *tramp;
 
     if (!g_msg_ready) { InitializeCriticalSection(&g_msg_lock); g_msg_ready = 1; }
+
+    /* Independent of the frame hook succeeding: it is only read from inside the hook, so a null
+     * here costs the tag and nothing else. Logged either way -- a silently missing tag would look
+     * exactly like the engine ignoring it, which is the wrong thing to go debugging. */
+    g_add_branch_tag = (ef_add_branch_tag_fn)add_branch_tag_fn;
+    backend_log(add_branch_tag_fn != NULL
+                ? "EF: map:branch tagger resolved -- substituted maps will save as new maps"
+                : "EF: map:branch tagger NOT resolved -- a substituted map would overwrite its slot");
 
     if (frame_fn == NULL) {
         backend_log("EF: editor-frame hook SKIPPED -- EditorFrame not resolved");
@@ -400,13 +516,17 @@ int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
         "EF: editor-frame hook installed at %p (trampoline %p, stolen %d); loadmap=%p; editor=%p",
         frame_fn, tramp, EDITOR_FRAME_STOLEN, load_map_fn, (void *)g_editor_obj);
     backend_log(line);
+
+    /* Baseline the swap counter at install. Without this, a swap that fired before the editor came
+     * up would read as "new" on the first frame and tag whatever map happened to be open. */
+    g_seen_swaps = sh_rawmap_swap_complete_count();
     return 1;
 }
 
 int sh_editor_frame_request_reload(char *out_msg, int msg_capacity)
 {
     const char *why = NULL;
-    char msg[128];
+    char msg[192] = "";
     void *ed;
 
     if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
@@ -414,33 +534,61 @@ int sh_editor_frame_request_reload(char *out_msg, int msg_capacity)
     if (g_frame_orig == NULL)                                    why = "this build has no editor-frame hook";
     else if (InterlockedCompareExchange(&g_faulted, 0, 0) != 0)  why = "the frame hook faulted earlier this session";
     else if (g_load_map == NULL)                                 why = "the engine's map loader was not found";
-    else if (g_editor_obj == 0)                                 why = "the editor could not be located";
+    else if (g_editor_obj == 0)                                  why = "the editor could not be located";
     else if (InterlockedCompareExchange(&g_pending, 0, 0) != 0)  why = "a reload is already waiting for the next frame";
+    /* THE SAFETY INTERLOCK, and the only reason this is allowed to borrow a slot at all.
+     *
+     * The reload hands LoadMap an EXISTING saved map, so the editor adopts that map's identity --
+     * that is what made it destructive twice. What makes it safe is the map:branch tag: with it set,
+     * the editor's Save cannot write the borrowed slot, because Save routes into Save As, prompts for
+     * a name, and mints a new slot through the engine's own CreateLocalSavedMapInternal. The borrowed
+     * map is READ and never written.
+     *
+     * So the tag is not a nicety here, it is the whole safety property. No tagger, no reload -- and
+     * refusing is not a hardship, because staging still works and substitutes into a map the person
+     * opened themselves. */
+    else if (g_add_branch_tag == NULL)                           why = "this build cannot mark a loaded rawmap as a new map, "
+                                                                       "so loading one in place could overwrite a saved map";
+    else if (InterlockedCompareExchange(&g_tag_faulted, 0, 0) != 0) why = "marking a rawmap as a new map faulted earlier this "
+                                                                          "session, so loading one in place is no longer safe";
     if (why) {
+        /* LOG EVERY REFUSAL. These used to return the reason to the UI and write nothing, so a
+         * person reporting "it did not load" left no trace to read afterwards -- which cost a
+         * round trip to find out it was simply "no map is open". */
+        char rl[256];
+        _snprintf_s(rl, sizeof rl, _TRUNCATE, "EF: open-as-new REFUSED -- %s", why);
+        backend_log(rl);
         if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, why, _TRUNCATE);
         return 0;
     }
 
-    /* No arm check. The reload arms the swap around its own LoadMap call (see ef_service_reload), so
-     * requiring the person to arm it first only ever meant "tick this, and also catch every other map
-     * load you do today". What has to be true is that the staged bytes are usable -- checked here so
-     * the reason lands on the click, and again on the frame. */
     if (!sh_rawmap_source_ok(msg, (int)sizeof msg)) {
+        char rl[256];
+        _snprintf_s(rl, sizeof rl, _TRUNCATE, "EF: open-as-new REFUSED -- staged source: %s", msg);
+        backend_log(rl);
         if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, msg, _TRUNCATE);
         return 0;
     }
 
     ed = ef_editor();
     if (ed == NULL || !ef_can_reload(ed, &why)) {
+        {
+            char rl[256];
+            _snprintf_s(rl, sizeof rl, _TRUNCATE, "EF: open-as-new REFUSED -- editor: %s",
+                        why ? why : "not ready");
+            backend_log(rl);
+        }
         /* Refuse now rather than queue a request that can only be declined: "open a map first" is
          * a useful answer, and a request that sits pending forever is not. */
         if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, why ? why : "the editor is not ready", _TRUNCATE);
         return 0;
     }
 
+    /* WHICH map is borrowed genuinely does not matter now -- and note that this file once said those
+     * words for the wrong reason, so they are worth being exact about. It does not matter because the
+     * tag stops the slot being WRITTEN, not because the swap replaces its content. Content was never
+     * the damage; identity was. The newest save is used only because it is certain to be loadable. */
     if (!newest_saved_map_id(g_reload_id, sizeof g_reload_id)) {
-        /* Log WHERE we looked. The first version of this failed on every machine because the layout
-         * has an account folder in it, and the message alone gave no way to see that. */
         char root[MAX_PATH] = "", line[MAX_PATH + 128];
         saved_games_root(root, sizeof root);
         _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -448,14 +596,21 @@ int sh_editor_frame_request_reload(char *out_msg, int msg_capacity)
                     "\\<account>\\SNAPMAPS*", root);
         backend_log(line);
         if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
-                               "no local saved map was found to reload through", _TRUNCATE);
+                               "no local saved map was found to load through -- save any map in DOOM once",
+                               _TRUNCATE);
         return 0;
     }
 
     InterlockedExchange(&g_state, SH_RELOAD_PENDING);
     ef_set_msg("waiting for the next editor frame");
     InterlockedExchange(&g_pending, 1);
-    if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, "reloading", _TRUNCATE);
+    {
+        char rl[256];
+        _snprintf_s(rl, sizeof rl, _TRUNCATE,
+                    "EF: open-as-new ACCEPTED -- queued through saved map %s", g_reload_id);
+        backend_log(rl);
+    }
+    if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, "opening as a new map", _TRUNCATE);
     return 1;
 }
 

@@ -495,6 +495,68 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "MenuThink",
       "48 8B C4 55 57 41 54 41 56 41 57 48 8D 68 98 48 81 EC 40 01 00 00 48 C7 44 24 38 FE FF FF FF",
       0x1718600u },
+    /* ---- the mint-a-new-save chain (campaign rawmap-io-contract T2) ----------------------------
+     * Resolved but NOT YET CALLED. They are here so load-time resolution reports whether they scan
+     * clean on the installed build -- the OpenGL image has never been cross-checked against a live
+     * GL process, and a signature that resolves in a file but not in memory is exactly the failure
+     * this table exists to surface early.
+     *
+     * WHY THIS CHAIN. Opening a rawmap through LoadMap borrows an EXISTING save slot, so the editor
+     * takes that map's identity while the rawmap supplies only content -- and the next save writes
+     * the rawmap over that map. Minting a save first and loading THAT makes the rawmap a genuinely
+     * new map. CreateLocalSavedMapInternal mints a fresh id when its id argument is NULL.
+     *
+     * The chain's third function, idStr::operator=(const char *), is ALREADY in this table as
+     * "IdStrAssignCStr" (0x19FD5F0) -- adding it again under a second name only produced two entries
+     * resolving to one address. Two findings about it that belong with this chain:
+     *
+     *   - Its purpose is DIRECT, not inferred from a name. The body carries its own source paths
+     *     ("...idlib\text\Str.cpp(88) : TAG_STRING", "...idlib\text/Str.h" with the assert
+     *     "a <= ALLOCED_MASK") and works len@+0x08 / data@+0x10 / alloced|flags@+0x18 -- the layout
+     *     this backend already reads. So it is NOT the intern-and-store-pointer function that the
+     *     resolve-address discipline warns about mistaking for an idStr assign.
+     *   - CAUTION for the eventual caller: on a ZEROED idStr it silently does NOTHING. With
+     *     alloced==0 and the heap bit clear it takes the "static buffer too small -> return" path.
+     *     So the record handed to CreateLocalSavedMapInternal cannot be a zeroed buffer; its idStr
+     *     fields have to be engine-constructed first. */
+    { "CreateLocalSavedMapInternal",
+      /* Full prologue, zero wildcards -- no RIP-relative operand and no relative branch in the
+       * window. Unique at 23 bytes: confirmed independently by extract_sig.py (PORTABLE, target
+       * 0x561d70) and by a Ghidra whole-image byte search returning exactly one hit. */
+      "40 55 53 56 57 41 54 41 56 41 57 48 8D 6C 24 E1 48 81 EC B0 00 00 00",
+      0x562780u },
+    /* idSnapMap::AddTag("map:branch") -- add-if-absent on the map's tag list.
+     *
+     * WHY THIS FUNCTION MATTERS: the editor's Save command asks the open map whether it carries
+     * "map:new" or "map:branch" and, if it does, routes Save into SAVE AS -- which prompts for a
+     * name and mints a fresh save slot through CreateLocalSavedMapInternal. That is the engine's own
+     * "this is a new map, name it" path, the one Branch and New-from-Template use. Setting the tag on
+     * a map we substituted is therefore the whole of "open a rawmap as a new map": the engine does
+     * the minting, writes its own game.details checksum, and writes its own .verify sidecars, none of
+     * which this project can currently generate.
+     *
+     * The tag is transient state, not published metadata: idSnapMap save-as REMOVES it before
+     * writing and restores it only if the write failed, and the skip-rename branch removes it
+     * outright. It shares the list with publish tags but under the reserved "map:" prefix -- cf. the
+     * cvar snapEdit_allowReservedTags, "Can put reserved tags in publish flow."
+     *
+     * WILDCARDS: two RIP-relative displacements (the stack-cookie load and the lea of the "map:branch"
+     * literal) and one call rel32. NOT unique at 45 bytes -- the prologue through the first lea has a
+     * byte-identical twin at 0x1180590 on the pinned build, which is the kind of near-miss this
+     * project has shipped before. Extended through `add rdi,0x998` -- the tag-list field offset
+     * itself -- which is both the shortest distinguishing run and the most meaningful one.
+     * Verified ONE hit on BOTH shipped builds; the embedded 0x998 matching in both also confirms the
+     * field offset does not move between them. */
+    { "SnapMapAddBranchTag",
+      "4C 8B DC 57 48 83 EC 60 49 C7 43 B8 FE FF FF FF 49 89 5B 10 49 89 73 18 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 58 48 8B F9 48 8D 15 ?? ?? ?? ?? "
+      "49 8D 4B C0 E8 ?? ?? ?? ?? 90 48 81 C7 98 09 00 00 8B 77 08 83 EE 01",
+      0x5992C0u },
+
+    { "WriteLocalSavedMapText",
+      /* Same: no wildcards, unique at 20 bytes by both tools (target 0x576530). */
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 20 BE FF FF",
+      0x576EA0u },
     { "EditorFrame",       /* idSnapEditorLocal's per-frame Think (0x523140). The FIRST execution point
                             * this product has on DOOM's own main thread at a frame boundary -- every
                             * other main-thread route it has is the console command buffer's drain

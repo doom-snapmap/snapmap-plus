@@ -1584,17 +1584,36 @@ static bool poc_pick_rawmap_file(bool save, const wchar_t *title, std::wstring &
                 dlg->SetOptions(opt | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_DONTADDTORECENT);
         }
 
-        /* Open on the rawmap folder rather than wherever the shell last was. Quick Access is the
-         * slowest possible starting point -- it enumerates cloud providers and network places -- and
-         * this is also simply where a person's rawmaps are. SetDefaultFolder, not SetFolder, so a
-         * remembered location for this dialog still wins. */
+        /* Our own slot for the dialog's persisted state, so what it remembers is OURS and cannot be
+         * inherited from whatever other dialog in this process was shown last. */
+        {
+            static const GUID kRawmapPickerGuid =
+                { 0x7b3a9c41, 0x5e28, 0x4d6b, { 0x9f, 0x14, 0x2c, 0x8a, 0xde, 0x61, 0x3f, 0x70 } };
+            dlg->SetClientGuid(kRawmapPickerGuid);
+        }
+
+        /* Open on the rawmap folder rather than wherever the shell last was.
+         *
+         * SetFolder, NOT SetDefaultFolder -- and this is a correction of the line that used to be
+         * here. SetDefaultFolder applies only when the dialog has NO remembered location, and it had
+         * one, so the dialog kept opening in Quick Access instead. That was two reported problems
+         * with one cause: the folder we set looked ignored, and the dialog was slow to appear,
+         * because Quick Access is the slowest possible starting point -- it enumerates cloud
+         * providers and network places, and on a machine whose Documents is OneDrive-redirected that
+         * is a network round trip before anything gets drawn.
+         *
+         * SetDefaultFolder is kept too, for the first-ever open and for a path that does not exist
+         * yet; SetFolder wins when both are set. Overriding a remembered location is the intent:
+         * this is the app's own data folder and it is where rawmaps live. */
         {
             wchar_t dir[MAX_PATH];
             if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, dir))) {
                 wcsncat_s(dir, L"\\snapmap-plus", _TRUNCATE);
+                CreateDirectoryW(dir, nullptr);        /* harmless if it already exists */
                 IShellItem *folder = nullptr;
                 if (SUCCEEDED(SHCreateItemFromParsingName(dir, nullptr, IID_PPV_ARGS(&folder))) && folder) {
                     dlg->SetDefaultFolder(folder);
+                    dlg->SetFolder(folder);
                     folder->Release();
                 }
             }
@@ -1626,7 +1645,7 @@ static bool poc_pick_rawmap_file(bool save, const wchar_t *title, std::wstring &
  * `confirm_file`, when set, asks the page to put the "load it now, or save your work first?" question
  * up before anything opens. It rides on the status message because the file has ALREADY been staged
  * by the time we ask -- the answer only decides whether the reload runs now or waits for File >
- * Reload Map Now, so there is nothing to hold on to native-side while the person decides. It must
+ * Open Rawmap as New Map, so there is nothing to hold on to native-side while the person decides. It must
  * arrive already JSON-escaped (poc_json_w), like every other path that crosses this boundary. */
 static void poc_send_rawmap_status(const wchar_t *note, const wchar_t *confirm_file = nullptr)
 {
@@ -1739,6 +1758,14 @@ static void poc_finish_pick()
     const bool picked = g_pick_ok;
     std::string p8    = picked ? w_to_utf8(g_pick_path) : std::string();
 
+    /* Kept before the clear below, for the confirm prompt: the person should see WHICH file they are
+     * about to open, and the full path is too long for a dialog line. */
+    std::wstring base;
+    if (picked) {
+        size_t cut = g_pick_path.find_last_of(L"\\/");
+        base = (cut == std::wstring::npos) ? g_pick_path : g_pick_path.substr(cut + 1);
+    }
+
     g_pick_path.clear();
     InterlockedExchange(&g_pick_done, 0);
     InterlockedExchange(&g_pick_busy, 0);
@@ -1756,15 +1783,16 @@ static void poc_finish_pick()
         return;
     }
 
-    /* STAGE ONLY -- arm = -1, deliberately. This used to arm the shared gate and leave it on, which
-     * had two costs nobody asked for: every later map load was substituted too, and the save shadow
-     * rides the same gate, so picking a file to LOAD also redirected the next save. The reload arms
-     * the swap around its own call now (editor_frame.c), so there is nothing left to arm here. */
+    /* STAGE + ARM ONE LOAD (arm = 2). Not the shared gate: setting that left every later map load
+     * substituted as well, and the save shadow rides the same gate, so picking a file to LOAD also
+     * redirected the next save. A one-shot is what the click actually means -- apply this file to
+     * the map I am about to open, and then stop. It spends itself on the substitution, so a load
+     * that cannot read the staged file leaves the arm intact rather than silently eating it. */
     {
         char msg[192] = "";
         int staged = 0;
         if (g_iface && g_iface->vtbl && g_iface->vtbl->rawmap_configure) {
-            staged = g_iface->vtbl->rawmap_configure(g_iface, p8.c_str(), nullptr, -1,
+            staged = g_iface->vtbl->rawmap_configure(g_iface, p8.c_str(), nullptr, 2,
                                                      msg, (int)sizeof msg);
         }
         if (!staged) {
@@ -1773,8 +1801,14 @@ static void poc_finish_pick()
             /* ASK BEFORE OPENING. A reload discards whatever is in the editor, and the engine gives
              * us no "has unsaved changes" query to consult -- so instead of guessing, the person is
              * asked, with the file named. Answering no leaves it staged: they save their map, then
-             * File > Reload Map Now. */
-            poc_send_rawmap_status(L"", poc_json_w(p8.c_str()).c_str());
+             * File > Open Rawmap as New Map. */
+            /* ASK, AND OFFER TO OPEN IT NOW. This prompt used to exist, was retired while an
+             * in-place load was refused (its only honest answer had become no), and is restored now
+             * that a load opens as a genuinely new map. Passing the file name is what raises it --
+             * the page owns the dialog, deliberately: a NATIVE modal here runs inside the UI think
+             * loop and stalls editor polling, which is the same freeze that made the file picker
+             * lag before it was moved off-thread. */
+            poc_send_rawmap_status(L"", base.c_str());
         }
     }
 }
@@ -2804,6 +2838,21 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                  * loop acts on the result (poc_finish_pick). Running Show() here stalled that loop for
                  * as long as the dialog was open, which is the lag this fixed. */
                 poc_begin_pick(0);
+            } else if (cmd == L"rawmapSaveNow") {
+                /* Save Rawmap: write again to the destination already in use, no dialog.
+                 *
+                 * No new slot and no magic value -- the page hands back the very path the status
+                 * readout is already showing it, and naming a destination IS the request to write
+                 * it (see slot_rawmap_configure). So "save again here" and "save somewhere new" are
+                 * one backend call that differs only in where the path came from: the picker, or
+                 * the status the page already holds. */
+                std::wstring dest; json_get_wstr(json, L"path", dest);
+                if (dest.empty()) {
+                    poc_send_rawmap_status(L"No rawmap location yet -- use Save Rawmap As... first.");
+                } else {
+                    std::string d8 = w_to_utf8(dest);
+                    poc_rawmap_configure(nullptr, d8.c_str(), -1, nullptr);
+                }
             } else if (cmd == L"rawmapSavePick") {
                 poc_begin_pick(1);
             } else if (cmd == L"rawmapLoadNow") {
@@ -2817,8 +2866,8 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     char msg[192] = "";
                     int ok = g_iface->vtbl->rawmap_load_now(g_iface, msg, (int)sizeof msg);
                     poc_log(ok ? "rawmap load-now: accepted" : "rawmap load-now: refused");
-                    poc_send_rawmap_status(ok ? L"Reloading the map..."
-                                              : (L"Cannot reload: " + poc_json_w(msg)).c_str());
+                    poc_send_rawmap_status(ok ? L"Opening as a new map -- Save will ask you to name it."
+                                              : (L"Cannot open: " + poc_json_w(msg)).c_str());
                 }
             } else if (cmd == L"rawmapArm") {
                 int on = 0; json_get_int(json, L"on", &on);

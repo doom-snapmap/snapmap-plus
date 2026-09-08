@@ -154,6 +154,32 @@ int sh_rawmap_save_oneshot_pending(void)
     return (InterlockedCompareExchange(&g_shadow_oneshot, 0, 0) != 0) ? 1 : 0;
 }
 
+/* ONE-SHOT LOAD ARM -- the missing half of the pair above.
+ *
+ * The save side got a one-shot and the load side did not, so "open a rawmap" still had to leave the
+ * shared gate switched ON, and the gate is not scoped to one operation: with it on, EVERY map the
+ * person opens afterwards is substituted, not just the one they asked for. That is a mode, and it is
+ * the kind of mode that quietly replaces a map you only meant to look at.
+ *
+ * Same shape as the shadow one-shot: additive, so `sh_rawmaps_on` keeps meaning exactly what it
+ * always meant, and a click can scope itself to a single load without touching the switch.
+ *
+ * CONSUMED ONLY ON A REAL SUBSTITUTION. An arm burned by a load that could not read the staged file
+ * would leave the person with the next map silently un-substituted and no way to see why, so the
+ * detour clears it after the source reads, not when it decides to look. */
+static volatile LONG g_swap_oneshot = 0;
+
+int sh_rawmap_load_arm_once(void)
+{
+    InterlockedExchange(&g_swap_oneshot, 1);
+    return 1;
+}
+
+int sh_rawmap_load_oneshot_pending(void)
+{
+    return (InterlockedCompareExchange(&g_swap_oneshot, 0, 0) != 0) ? 1 : 0;
+}
+
 /* Read the whole source file into a fresh, NUL-terminated heap buffer (OG: malloc(size+1) + fread).
  * Returns the buffer (caller frees with HeapFree) + sets *out_len, or NULL on any failure. */
 static char *read_source_file(size_t *out_len)
@@ -270,16 +296,21 @@ static int sh_deser_detour(const char *json, void *out_map)
     /* armed = explicit-arm (sh_rawmap_swap_arm) OR the TEST flag-file is present. The flag-file is the
      * test harness's no-console arm trigger; the explicit gate is the production-style arm. Either arms. */
     int flag_armed = 0;
-    if (rawmap_armed(&flag_armed)) {
+    int oneshot    = sh_rawmap_load_oneshot_pending();
+    if (rawmap_armed(&flag_armed) || oneshot) {
         size_t len = 0;
         char *ours = read_source_file(&len);
         if (ours != NULL) {
             char line[160];
-            unsigned long n = (unsigned long)InterlockedIncrement(&g_swap_count);
+            unsigned long n;
+            /* Spend the arm here, where a substitution is certain -- see the note on the one-shot. */
+            if (oneshot) InterlockedExchange(&g_swap_oneshot, 0);
+            n = (unsigned long)InterlockedIncrement(&g_swap_count);
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                "B1: rawmap swap FIRED (orig %s bytes -> ours %zu bytes) [#%lu]%s",
+                "B1: rawmap swap FIRED (orig %s bytes -> ours %zu bytes) [#%lu]%s%s",
                 json ? "<engine-json>" : "<null>", len, n,
-                flag_armed ? " [flag-armed]" : "");
+                flag_armed ? " [flag-armed]" : "",
+                oneshot ? " [one-shot]" : "");
             backend_log(line);
             if (!mpkg_gate_guarded(ours)) {
                 backend_log("B1: rawmap swap load REFUSED by the map-package gate");
@@ -1131,12 +1162,18 @@ static int save_from_local_map(char *out_msg, int msg_capacity, unsigned long lo
         unsigned long long wrote = write_shadow(json, got);
         HeapFree(GetProcessHeap(), 0, json);
         if (wrote > 0) {
-            char line[MAX_PATH + 128];
+            char line[MAX_PATH * 2 + 128];
+            char dest_now[MAX_PATH] = "";
             if (out_bytes) *out_bytes = wrote;
             InterlockedExchange64(&g_last_bytes, (LONGLONG)wrote);
             InterlockedIncrement(&g_shadow_count);
+            /* NAME THE DESTINATION. Without it this line said a write succeeded and left the one
+             * question that matters -- into WHICH file -- unanswerable, which is exactly the shape
+             * a save that "did not stick" takes: it stuck somewhere else. */
+            resolve_dest_path(dest_now, sizeof dest_now);
             _snprintf_s(line, sizeof line, _TRUNCATE,
-                        "B1: rawmap SAVE wrote %llu bytes from saved map %s [from-disk]", wrote, id);
+                        "B1: rawmap SAVE wrote %llu bytes from saved map %s -> %s [from-disk]",
+                        wrote, id, dest_now[0] ? dest_now : "<unresolved>");
             backend_log(line);
             if (out_msg) {
                 _snprintf_s(out_msg, (size_t)msg_capacity, _TRUNCATE,
@@ -1232,6 +1269,29 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
      * shadow itself creates it with CREATE_ALWAYS. A bad directory surfaces as a failed shadow
      * write, which the existing log line already reports. */
     if (save_path != NULL) {
+        /* REFUSE to aim the save output at the file currently staged for LOAD.
+         *
+         * Observed 2026-09-07: a Save Rawmap wrote a saved map over a 214,490-byte staged rawmap and
+         * left the file the person was actually watching untouched -- so it read as "the save did not
+         * stick" when in truth it had landed somewhere destructive. How the destination got there
+         * does not matter: the save output and the load source being ONE file is never wanted.
+         * Writing it destroys the input, and the next map load then substitutes the saved map back
+         * into itself.
+         *
+         * Refused, not warned. A warning here is a message about a file that is already gone. */
+        if (save_path[0] != '\0') {
+            char src_now[MAX_PATH] = "";
+            resolve_source_path(src_now, sizeof src_now);
+            if (src_now[0] != '\0' && _stricmp(src_now, save_path) == 0) {
+                if (out_msg && msg_capacity > 0) {
+                    strncpy_s(out_msg, (size_t)msg_capacity,
+                              "that file is the rawmap staged for loading -- saving onto it would "
+                              "destroy it. Pick a different name.", _TRUNCATE);
+                }
+                backend_log("B1: rawmap SAVE dest REFUSED -- same file as the staged load source");
+                return 0;
+            }
+        }
         if (!sh_rawmap_save_set_dest(save_path[0] == '\0' ? NULL : save_path)) ok = 0;
 
         /* NAMING A DESTINATION IS A REQUEST TO WRITE IT, not to set a preference. "Save Rawmap As"
@@ -1257,7 +1317,12 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
         }
     }
 
-    if (arm == 0 || arm == 1) sh_rawmap_swap_arm(arm);
+    /* 0/1 set the shared gate, -1 leaves it alone, and 2 arms ONE load and no more. The last is
+     * what "Load Rawmap" wants: it scopes the substitution to the map the person is about to open,
+     * where setting the gate would also substitute every map they opened afterwards -- and, because
+     * the save shadow rides the same gate, redirect their next save too. */
+    if (arm == 0 || arm == 1)  sh_rawmap_swap_arm(arm);
+    else if (arm == 2)         sh_rawmap_load_arm_once();
 
     if (out_msg && out_msg[0] == '\0') {
         strncpy_s(out_msg, (size_t)msg_capacity, ok ? "ok" : "the save path was refused", _TRUNCATE);

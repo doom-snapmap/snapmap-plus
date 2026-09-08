@@ -165,6 +165,15 @@ int sh_rawmap_save_arm_once(void);
  * so the File menu can show that a save is expected. */
 int sh_rawmap_save_oneshot_pending(void);
 
+/* Arm the LOAD swap for exactly ONE map parse, then let it disarm itself. The counterpart of
+ * sh_rawmap_save_arm_once: it lets "Load Rawmap" scope itself to the map the person is about to
+ * open, instead of leaving the shared gate on and substituting every map opened afterwards.
+ * Additive to the gate -- either arms the swap. */
+int sh_rawmap_load_arm_once(void);
+
+/* 1 = a one-shot load arm is waiting to be spent. Does not consume it. */
+int sh_rawmap_load_oneshot_pending(void);
+
 /* Set the on-disk SHADOW destination path (the file each save is mirrored to). Pass NULL to reset to the
  * default %LOCALAPPDATA%\snapmap-plus\rawmap.json (the OG used %USERPROFILE%\snaphak; the same file the
  * LOAD swap reads). The default deliberately matches the LOAD source so a save-then-load round-trips.

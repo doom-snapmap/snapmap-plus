@@ -242,7 +242,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * the editor being up. The hook only fires while the editor's own Think runs, and it services
          * nothing until something requests a reload. */
         {
-            void *ed_frame = NULL, *ed_loadmap = NULL;
+            void *ed_frame = NULL, *ed_loadmap = NULL, *ed_addtag = NULL;
             int   ed_frame_clean = 0;
             for (size_t i = 0; i < db; i++) {
                 if (results[i].name == NULL) continue;
@@ -253,9 +253,12 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                 } else if (strcmp(results[i].name, "EditorLoadMap") == 0) {
                     if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
                         ed_loadmap = (void *)results[i].addr;
+                } else if (strcmp(results[i].name, "SnapMapAddBranchTag") == 0) {
+                    if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
+                        ed_addtag = (void *)results[i].addr;
                 }
             }
-            sh_editor_frame_install(ed_frame, ed_frame_clean, ed_loadmap, g_doom_base);
+            sh_editor_frame_install(ed_frame, ed_frame_clean, ed_loadmap, ed_addtag, g_doom_base);
         }
 
         /* the rawmap SAVE shadow (the INVERSE of the LOAD swap). Install the SerializeToJson

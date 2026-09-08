@@ -74,7 +74,10 @@
  *                  reload capability (the hook is still useful as an execution point).
  *   `module_base`= host image base, for resolving the editor singleton through engine_globals.
  * Returns 1 if the detour was installed. Idempotent. */
+/* `add_branch_tag_fn` is idSnapMap::AddTag("map:branch") (signature SnapMapAddBranchTag). Optional:
+ * null only costs the tag that makes a substituted map save as a NEW map. */
 int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
+                            void *add_branch_tag_fn,
                             const uint8_t *module_base);
 
 /* Request an in-place map reload on the next editor frame.
