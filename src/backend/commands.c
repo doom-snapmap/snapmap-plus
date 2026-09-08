@@ -458,20 +458,6 @@ static void rawmap_print_state(void)
      * everything a person does next without being asked for it again, so it gets one. */
     if (sh_rawmap_swap_is_armed())
         sh_printf("  GATE ON - every map you open and save goes through a rawmap.\n");
-    else if (sh_rawmap_swap_will_fire()) {
-        /* THE ONE CASE WHERE THE GATE IS OFF AND THE SWAP STILL FIRES.
-         *
-         * arm.flag is a test hook: the detour arms on the gate OR that file, so with the file
-         * present every map opened is substituted. Reading the gate alone made this readout state
-         * the opposite of what was about to happen, and 'sh_rawmaps off' cannot clear it -- there
-         * is nothing to turn off. So name the file, and say plainly that the off switch will not
-         * help, because that is the first thing anyone would reach for. */
-        char flag[MAX_PATH] = "";
-        sh_rawmap_flag_file_path(flag, (int)sizeof flag);
-        sh_printf("  GATE OFF, BUT EVERY MAP YOU OPEN IS STILL BEING REPLACED.\n");
-        sh_printf("  This file is doing it. Delete it to stop ('sh_rawmaps off' will not):\n");
-        sh_printf("    %s\n", flag[0] ? flag : "arm.flag, beside your load path");
-    }
     sh_printf("  load from: %s%s\n", load_path[0] ? load_path : "(none)",
               readable ? "" : "   <-- cannot be read right now");
     if (!readable && why[0]) sh_printf("             %s\n", why);

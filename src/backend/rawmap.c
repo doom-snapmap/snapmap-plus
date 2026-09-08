@@ -384,19 +384,6 @@ int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok)
     return 1;
 }
 
-/* Where the TEST arm flag-file would be, for a caller that has to NAME it.
- *
- * `sh_rawmaps off` cannot clear a flag-file arm, and neither can unticking anything, so a surface
- * that reports the swap is off while the flag is present has to be able to say which file to delete.
- * Telling someone "something else is arming this" without saying what is barely better than not
- * telling them. Tracks the load path, because the flag is that file's sibling. */
-void sh_rawmap_flag_file_path(char *out, int cap)
-{
-    if (!out || cap <= 0) return;
-    out[0] = '\0';
-    flag_file_path(out, (size_t)cap);
-}
-
 int sh_rawmap_swap_arm(int on)
 {
     InterlockedExchange(&g_gate, on ? 1 : 0);
@@ -1929,13 +1916,9 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
     if (!json_escape_into(save_esc, sizeof save_esc, save_path)) save_esc[0] = '\0';
 
     /* `armed` reports the EXPLICIT gate only, matching sh_rawmap_swap_is_armed's reasoning: a menu
-     * checkbox must not show ON for a flag-file arm that unticking it cannot clear.
-     *
-     * `willFire` is the honest answer to what actually happens, gate OR flag-file, and it exists
-     * because `armed` alone let the menu tell a lie: with arm.flag present, every map opened is
-     * substituted while the checkbox sits unticked and nothing on screen says why. The checkbox
-     * still reads `armed` -- a control shows its own state -- and the two together let the page warn
-     * instead of misreport. */
+     * checkbox must not show ON for a flag-file arm that unticking it cannot clear. `willFire` is
+     * the gate OR that flag-file -- what actually happens -- so the menu can enable an item on
+     * whether it would work rather than on whether the tick is set. */
     /* `loads` is the question the File menu actually has to answer: the staged file is substituted
      * into the NEXT map load, so "did it work" is unanswerable from the paths alone -- the person
      * needs to see the swap fire. Reporting both counters distinguishes the three outcomes that look
