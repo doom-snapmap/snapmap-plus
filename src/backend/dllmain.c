@@ -142,6 +142,10 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
      * (the reason an end-user couldn't see the "unknown entity" override served from overrides\). */
     ensure_user_dirs();
     sh_config_init(); /* nonfatal: the service retains defaults and status flags on failure */
+    /* Straight after config init and before any map can load: the rawmap save destination has a
+     * persisted setting, and it has to be in force the first time someone hits Save, not from the
+     * second one onwards. */
+    sh_rawmap_config_load();
     sh_user_overrides_capture_launch_state();
 
     /* Poll the resolver until the SteamStub has decrypted .text (full DB resolves uniquely) or we time

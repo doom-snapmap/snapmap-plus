@@ -222,9 +222,79 @@ void sh_rawmap_get_slots(sh_rawmap_status_fn *status, sh_rawmap_configure_fn *co
  * doom-re's save-load campaign for why full structural validation needs its own pure-C checks. */
 int sh_rawmap_validate_source(const char *path, char *out_msg, int msg_capacity);
 
+/* 1 = this file is a rawmap, by the top-level "~type":"idSnapMap" the engine's serializer writes.
+ * Stricter than sh_rawmap_validate_source on purpose: that guards an explicit load of a named file,
+ * this decides whether to OFFER a file in a listing -- and the folders involved also hold
+ * config.json, install.json, pinned.json and prefabs, which are all valid JSON and none of them
+ * maps. Reads the last 8 KB. */
+int sh_rawmap_looks_like_rawmap(const char *path);
+
 /* The same verdict about the file the swap would actually read (the staged source, or the default).
  * Ask this instead of sh_rawmap_swap_will_fire before driving a reload: "the staged bytes will be
  * accepted" is the property that makes a reload safe, and the arm is not. Returns 1 = acceptable. */
+/* Both EFFECTIVE paths: what the load swap would read, and where a save gets mirrored. Either
+ * pointer may be NULL. These are the paths actually in force, defaults included -- not only what was
+ * explicitly set -- so a caller can state them without knowing whether anything overrode them. */
+void sh_rawmap_get_paths(char *load_out, int load_cap, char *save_out, int save_cap);
+
+/* The DEFAULT paths, regardless of what is set. Pair with sh_rawmap_get_paths to tell "the usual
+ * file" from "the file currently in force". */
+void sh_rawmap_get_default_paths(char *load_out, int load_cap, char *save_out, int save_cap);
+
+/* 1 = both effective paths are the built-in defaults. Compared by VALUE: the installers
+ * materialize the defaults into their own variables, so "nothing was set" is not testable. */
+int sh_rawmap_paths_are_default(void);
+
+/* THE SAVE PATH SETTING -- `sh_rawmaps savepath <rawmap|default|path>` and the File menu's
+ * "Use Rawmap as Save Path" tick. Three values, and the only DURABLE way the destination moves:
+ * the default rawmap.json (0), the loaded rawmap (1), or one pinned file (2). Exporting with
+ * "Save Rawmap As" or `sh_rawmaps save <path>` does NOT change it -- that is one write.
+ *
+ * DEFAULT is the default on purpose: a loaded rawmap is an archive entry, so nothing about importing
+ * one can end up writing over it. */
+#define SH_RAWMAP_DEST_DEFAULT 0
+#define SH_RAWMAP_DEST_RAWMAP  1
+#define SH_RAWMAP_DEST_FIXED   2
+
+/* 1 = mode RAWMAP (saves follow the loaded rawmap). The File menu's tick. */
+int sh_rawmap_dest_follows_source(void);
+
+/* The mode, and the pinned file when the mode is FIXED (out_fixed is emptied otherwise). */
+int sh_rawmap_dest_mode(char *out_fixed, int fixed_cap);
+
+/* Set mode RAWMAP (on) or DEFAULT (off). Returns the resulting sh_rawmap_dest_follows_source(). */
+int sh_rawmap_set_dest_follows_source(int on);
+
+/* Pin the save destination to one file, durably (mode FIXED). "" or NULL means DEFAULT.
+ * Refuses anything sh_rawmap_dest_path_is_usable refuses. */
+int sh_rawmap_set_dest_fixed(const char *path);
+
+/* Could we write a rawmap at `path`? The file need not exist -- a save creates it -- but the path
+ * must name a folder and that folder must exist. This is what stops a bare word like "banana" from
+ * becoming a file in DOOM's own install folder. Writes the reason into out_msg on failure. */
+int sh_rawmap_dest_path_is_usable(const char *path, char *out_msg, int msg_capacity);
+
+/* Load the persisted "Use Rawmap as Save Path" setting into the live flag. Call once at startup,
+ * after sh_config_init and before the first map load. */
+void sh_rawmap_config_load(void);
+
+/* Name a destination for ONE write ("Save Rawmap As", `sh_rawmaps save <path>`). It overrides both
+ * the follow toggle and the default for that write only, and is spent once the bytes are on disk --
+ * so an export cannot outlive itself and become the place every later save goes. Leaves the toggle
+ * alone. "" or NULL cancels a pending one-off AND clears the toggle ("back to the default"). */
+int sh_rawmap_choose_dest(const char *path);
+
+/* Call when a NEW rawmap is staged for loading: cancels a one-off destination that was named but
+ * never written, so an abandoned export does not attach itself to the next import. Leaves the
+ * toggle alone -- surviving a load is what the toggle is for. */
+void sh_rawmap_reset_dest_for_new_load(void);
+
 int sh_rawmap_source_ok(char *out_msg, int msg_capacity);
 
 #endif /* BACKEND_RAWMAP_H */
+
+#ifdef SH_RAWMAP_TESTING
+/* Test-only: write bytes through the real destination resolver, so a test can check WHERE a save
+ * lands and that a one-off destination is spent by it. Not present in shipping builds. */
+unsigned long long sh_rawmap_test_write(const char *data, size_t len);
+#endif
