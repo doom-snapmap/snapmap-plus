@@ -21,6 +21,7 @@
 
 #include "../src/backend/aas_edit.h"
 #include "../src/backend/aas_augment.h"
+#include "../src/backend/nav_traversal.h"
 #include "../src/backend/navmesh.h"
 
 static int g_checks = 0, g_fail = 0;
@@ -253,6 +254,11 @@ static void test_island_at_128(void)
     memset(&o, 0, sizeof o);
     o.fall = SH_AUG_FALL_AUTO;
     o.inset = 1;
+    /* Say NEVER rather than relying on no traversal table having been loaded.
+     * sh_trav_load caches for the process, so once any test in this binary
+     * loads one the AUTO default stops meaning "no climbs available" -- an
+     * order dependency, not a property of the code under test. */
+    o.traversal = SH_AUG_TRAVERSAL_NEVER;
     mkplat(&p, -500.0f, -500.0f, 500.0f, 500.0f, 128.0f, "roof");
 
     CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
@@ -262,7 +268,7 @@ static void test_island_at_128(void)
     CHECK_MSG(rep.platforms[0].leaf_slots_carved > 0,
               "the area must be spliced into the BSP or it is unfindable");
     CHECK_MSG(rep.platforms[0].island == 1,
-              "128 is past maxStepHeight and no traversal is emitted in this build");
+              "128 is past maxStepHeight and no climb was offered");
     CHECK_MSG(rep.depth_exceeded == 0, "the tree must stay inside the loader limit");
 
     /* The whole point of the splice: the engine can now find the area. */
@@ -785,6 +791,141 @@ static void test_a_pair_is_not_emitted_twice(void)
     sh_aas_free(a);
 }
 
+/* ==================================================================== */
+/* leaps: crossing a gap                                                 */
+/* ==================================================================== */
+
+/* A synthetic table with LEDGE and LEAP rows for two demons, served through the
+ * public loader -- aas_augment_test builds without SH_TRAV_TESTING, so
+ * sh_trav_test_parse is not available here. NO GAME BYTES: this is written by
+ * the test. */
+static const char *TRAV_TABLE_TEXT =
+"{\n"
+"\tedit = {\n"
+"\t\ttable = {\n"
+"\t\t\ttable[0] = {\n"
+"\t\t\t\tmonster = \"Imp\";\n"
+"\t\t\t\ttraversal = {\n"
+"\t\t\t\t\ttraversal[0] = {\n"
+"\t\t\t\t\t\ttype = \"LEDGE_UP_64\";\n"
+"\t\t\t\t\t\tpath = \"m/imp/traversal/jump_ledge_up_64\";\n"
+"\t\t\t\t\t\toffset = {\n\t\t\t\t\t\t\tx = -32;\n\t\t\t\t\t\t}\n"
+"\t\t\t\t\t}\n"
+"\t\t\t\t\ttraversal[1] = {\n"
+"\t\t\t\t\t\ttype = \"LEDGE_UP_128\";\n"
+"\t\t\t\t\t\tpath = \"m/imp/traversal/jump_ledge_up_128\";\n"
+"\t\t\t\t\t\toffset = {\n\t\t\t\t\t\t\tx = -32;\n\t\t\t\t\t\t}\n"
+"\t\t\t\t\t}\n"
+"\t\t\t\t\ttraversal[2] = {\n"
+"\t\t\t\t\t\ttype = \"LEDGE_UP_512\";\n"
+"\t\t\t\t\t\tpath = \"m/imp/traversal/jump_ledge_up_512\";\n"
+"\t\t\t\t\t\toffset = {\n\t\t\t\t\t\t\tx = -32;\n\t\t\t\t\t\t}\n"
+"\t\t\t\t\t}\n"
+"\t\t\t\t\ttraversal[3] = {\n"
+"\t\t\t\t\t\ttype = \"LEDGE_DOWN_64\";\n"
+"\t\t\t\t\t\tpath = \"m/imp/traversal/jump_ledge_down_64\";\n"
+"\t\t\t\t\t\toffset = {\n\t\t\t\t\t\t\tx = -20;\n\t\t\t\t\t\t}\n"
+"\t\t\t\t\t}\n"
+"\t\t\t\t\ttraversal[4] = {\n"
+"\t\t\t\t\t\ttype = \"LEDGE_DOWN_128\";\n"
+"\t\t\t\t\t\tpath = \"m/imp/traversal/jump_ledge_down_128\";\n"
+"\t\t\t\t\t\toffset = {\n\t\t\t\t\t\t\tx = -20;\n\t\t\t\t\t\t}\n"
+"\t\t\t\t\t}\n"
+"\t\t\t\t\ttraversal[5] = {\n"
+"\t\t\t\t\t\ttype = \"LEDGE_DOWN_512\";\n"
+"\t\t\t\t\t\tpath = \"m/imp/traversal/jump_ledge_down_512\";\n"
+"\t\t\t\t\t\toffset = {\n\t\t\t\t\t\t\tx = -20;\n\t\t\t\t\t\t}\n"
+"\t\t\t\t\t}\n"
+"\t\t\t\t\ttraversal[6] = {\n"
+"\t\t\t\t\t\ttype = \"LEAP_ACROSS_256\";\n"
+"\t\t\t\t\t\tpath = \"m/imp/traversal/jump_forward_256\";\n"
+"\t\t\t\t\t\toffset = {\n\t\t\t\t\t\t\tx = -60;\n\t\t\t\t\t\t}\n"
+"\t\t\t\t\t}\n"
+"\t\t\t\t\ttraversal[7] = {\n"
+"\t\t\t\t\t\ttype = \"LEAP_ACROSS_512\";\n"
+"\t\t\t\t\t\tpath = \"m/imp/traversal/jump_forward_512\";\n"
+"\t\t\t\t\t\toffset = {\n\t\t\t\t\t\t\tx = -60;\n\t\t\t\t\t\t}\n"
+"\t\t\t\t\t}\n"
+"\t\t\t\t}\n"
+"\t\t\t}\n"
+"\t\t}\n"
+"\t}\n"
+"}\n";
+
+static unsigned char *trav_table_reader(const char *name, size_t *out_len)
+{
+    size_t n = strlen(TRAV_TABLE_TEXT);
+    unsigned char *buf;
+    (void)name;
+    buf = (unsigned char *)malloc(n);
+    if (!buf) return NULL;
+    memcpy(buf, TRAV_TABLE_TEXT, n);
+    if (out_len) *out_len = n;
+    return buf;
+}
+
+static void load_synthetic_traversal_table(void)
+{
+    CHECK_MSG(sh_trav_load(trav_table_reader) == 1, "the synthetic table parses");
+    CHECK_MSG(sh_trav_ready() == 1, "and leaves the module ready");
+}
+
+/* Two platforms with a 600-unit gap: inside the range shipped leaps cover, and
+ * level, so a demon with a LEAP_ACROSS row can cross it. */
+static void test_a_gap_within_range_becomes_a_leap(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a gap the shipped animations cover becomes a leap\n");
+    load_synthetic_traversal_table();
+    mkplat(&p[0], -1200.0f, -400.0f, -600.0f, 400.0f, 16.0f, "near");
+    mkplat(&p[1],     0.0f, -400.0f,  600.0f, 400.0f, 16.0f, "far");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    if (rep.platforms[0].emitted && rep.platforms[1].emitted)
+        CHECK_MSG(rep.platforms[0].leaps > 0, "the 600-unit gap is crossed");
+    sh_aas_free(a);
+}
+
+/* Beyond the range shipped leaps cover: not crossed. An uncrossed gap is a
+ * reported island edge, never an error. */
+static void test_a_gap_beyond_range_is_not_crossed(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a gap wider than any shipped leap is left uncrossed\n");
+    load_synthetic_traversal_table();
+    mkplat(&p[0], -2000.0f, -400.0f, -1500.0f, 400.0f, 16.0f, "near");
+    mkplat(&p[1],  1500.0f, -400.0f,  2000.0f, 400.0f, 16.0f, "far");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK_MSG(rep.platforms[0].leaps == 0, "3000 units is past every animation");
+    sh_aas_free(a);
+}
+
+/* A table-nominal leap is LEVEL -- the median vertical change across 1,754
+ * shipped records is one unit, and |dz|/span p90 is 0.29. A steeply graded gap
+ * is not what these animations do. */
+static void test_a_steep_gap_is_refused(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a gap between surfaces at very different heights is refused\n");
+    load_synthetic_traversal_table();
+    mkplat(&p[0], -1200.0f, -400.0f, -600.0f, 400.0f,  16.0f, "near");
+    mkplat(&p[1],     0.0f, -400.0f,  600.0f, 400.0f, 400.0f, "far");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK_MSG(rep.platforms[0].leaps == 0, "a 0.64 grade is past the envelope");
+    sh_aas_free(a);
+}
+
 int main(void)
 {
     printf("aas_augment_test\n");
@@ -801,6 +942,9 @@ int main(void)
     test_two_abutting_platforms_link_to_each_other();
     test_a_partially_abutting_neighbour_is_found();
     test_a_pair_is_not_emitted_twice();
+    test_a_gap_within_range_becomes_a_leap();
+    test_a_gap_beyond_range_is_not_crossed();
+    test_a_steep_gap_is_refused();
     test_island_at_128();
     test_step_regime_at_16();
     test_refusals();

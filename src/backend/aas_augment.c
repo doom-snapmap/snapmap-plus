@@ -1188,6 +1188,64 @@ static int aug_edge_segments(aug_ctx *c, int ai, const aug_quad *eff,
     return n;
 }
 
+/* Segments of an edge that face another generated quad ACROSS OPEN SPACE.
+ *
+ * This has to be its own query. aug_edge_segments asks whether a point a few
+ * units outside the edge lies inside a peer, and a quad across a 600-unit gap
+ * never does -- so leaps found by the touching probe would be exactly none, and
+ * a REGIME_LEAP segment could never occur.
+ *
+ * So this casts outward from the edge, as far as the longest leap shipped data
+ * shows (982 units), and records the first peer it meets with the clearance to
+ * it. Runs of samples facing the same peer at a similar distance become one
+ * segment. Anything already touching is left to aug_edge_segments. */
+static int aug_edge_gap_segments(aug_ctx *c, int ai, const aug_quad *eff,
+                                 const aug_quad *req, const aug_peer *peers,
+                                 int npeers, aug_side *out, int cap)
+{
+    int e, n = 0;
+
+    for (e = 0; e < 4 && n < cap; e++) {
+        double in2[2], out2[2], ts[32];
+        int cnt, k, run_start = 0, run_peer = -2, j = (e + 1) & 3;
+
+        aug_edge_normal_in(eff, e, in2);
+        out2[0] = -in2[0];
+        out2[1] = -in2[1];
+        cnt = aug_samples_unit(ts, 32);
+
+        for (k = 0; k <= cnt; k++) {
+            int who = -1, q;
+            if (k < cnt) {
+                double t = ts[k];
+                double ex = req->c[e][0] + t * (req->c[j][0] - req->c[e][0]);
+                double ey = req->c[e][1] + t * (req->c[j][1] - req->c[e][1]);
+                double d;
+                for (d = AUG_TOUCH_EPS; d <= SH_TRAV_LEAP_MAX_SPAN && who < 0; d += 16.0) {
+                    double px = ex + out2[0] * d, py = ey + out2[1] * d;
+                    for (q = 0; q < npeers; q++) {
+                        if (peers[q].area == ai) continue;
+                        if (aug_quad_contains_xy(peers[q].req, px, py)) { who = peers[q].area; break; }
+                    }
+                }
+            }
+            if (who != run_peer) {
+                if (run_peer >= 0 && n < cap) {
+                    aug_close_segment(c, &out[n], eff, e, out2,
+                                      ts[run_start], ts[k - 1], run_peer,
+                                      peers, npeers, req);
+                    /* Only a genuine gap belongs here; anything the touching
+                     * probe already owns is not a leap. */
+                    if (out[n].gap > AUG_TOUCH_EPS) n++;
+                }
+                run_peer = who;
+                run_start = k;
+            }
+        }
+    }
+    return n;
+}
+
 /* Which regime carries a segment.
  *
  * On the MAGNITUDE of the height change plus an explicit direction. The
@@ -1481,6 +1539,11 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
 
     n = aug_edge_segments(c, ai, eff, req, peers, npeers, sides,
                           (int)(sizeof sides / sizeof sides[0]));
+    /* Climbs come from the touching segments; leaps need their own long-range
+     * cast, because a quad across a real gap is invisible to the touching
+     * probe. */
+    n += aug_edge_gap_segments(c, ai, eff, req, peers, npeers, sides + n,
+                               (int)(sizeof sides / sizeof sides[0]) - n);
     for (i = 0; i < n; i++) {
         double anchors[24];
         double seglen, span;
@@ -2001,6 +2064,16 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                                                   peers, nmade, specs + total,
                                                   AUG_MAX_TRAVERSALS - total);
                     total += got;
+                }
+                /* Leaps are counted here rather than off the reachability
+                 * records, because a leap and a climb write the same five
+                 * records and are indistinguishable afterwards. */
+                for (i = 0; i < total; i++) {
+                    if (!specs[i].is_leap) continue;
+                    for (j = 0; j < n; j++)
+                        if (out->platforms[j].area == specs[i].from_area ||
+                            out->platforms[j].area == specs[i].to_area)
+                            out->platforms[j].leaps++;
                 }
                 if (total > 0) aug_emit_traversals(&c, specs, total);
                 HeapFree(GetProcessHeap(), 0, specs);
