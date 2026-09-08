@@ -575,10 +575,18 @@ static void test_malformed(void)
  * and no game bytes are here -- each document is written member by member to
  * the shape the engine's reflection emits for one idSnapEntity.
  *
- * The live document is deliberately not obliged to carry `uniqueId`: the id the
- * refresh is asked about IS the entity's index, so an entity is matched by
- * index and by nothing else. Several documents below leave `uniqueId` out
- * entirely to keep that honest. */
+ * THE ID IS THE uniqueId, NOT the position in the map JSON's entities array.
+ * The editor's entity table is sparse and indexed by uniqueId: measured live
+ * 2026-09-08, an 11-entity map whose uniqueIds ran 56..69 produced an editor
+ * table of highWater 70, and the marked Blocking Box -- entities[3], uniqueId
+ * 62 -- answered at live id 62. These tests therefore place each document at its
+ * uniqueId, which for the shared two-box map below is 11 and 22. An earlier
+ * revision of both this file and nav_regions.c assumed the array index, which is
+ * why a volume ticked in the editor never survived to the bake.
+ *
+ * The live document is still not obliged to CARRY `uniqueId` as a member: it is
+ * addressed by the id it answers to, not by what it says about itself, and
+ * several documents below leave the member out entirely to keep that honest. */
 
 #define LIVE_MAX 640
 
@@ -689,16 +697,16 @@ static void test_live_tick_this_session(void)
     char *live1 = live_box(TICKED, 100, 200, 64, 200, 400, 128);
 
     memset(&e, 0, sizeof e);
-    e.json[0] = live0;
-    e.json[1] = live1;
+    e.json[11] = live0;
+    e.json[22] = live1;
 
-    CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == 2);
+    CHECK(sh_nav_regions_refresh_live(&m, 22, live_valid, live_json, &e) == 2);
     CHECK(m.region_count == 2);
     CHECK(m.instances[0].region_count == 2);
     CHECK(m.truncated == 0);
     CHECK(strcmp(m.instances[0].module, MODULE) == 0);   /* the instance is untouched */
     if (m.region_count == 2) {
-        CHECK(m.regions[1].entity == 1);
+        CHECK(m.regions[1].entity == 22);
         CHECK(m.regions[1].instance == 0);
         CHECK(near_f(m.regions[1].x0, 0.0f));
         CHECK(near_f(m.regions[1].x1, 200.0f));
@@ -722,10 +730,10 @@ static void test_live_untick_this_session(void)
     char *live1 = live_box(UNTICKED, 100, 200, 64, 200, 400, 128);
 
     memset(&e, 0, sizeof e);
-    e.json[0] = live0;
-    e.json[1] = live1;
+    e.json[11] = live0;
+    e.json[22] = live1;
 
-    CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == 0);
+    CHECK(sh_nav_regions_refresh_live(&m, 22, live_valid, live_json, &e) == 0);
     CHECK(m.region_count == 0);
     CHECK(m.instances[0].region_count == 0);
     CHECK(m.instance_count == 1);
@@ -758,10 +766,10 @@ static void test_live_no_volumes_keeps_map_marks(void)
 
     before = m;
     memset(&e, 0, sizeof e);
-    e.json[0] = live0;
-    e.json[1] = live1;
+    e.json[11] = live0;
+    e.json[22] = live1;
 
-    CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == -1);
+    CHECK(sh_nav_regions_refresh_live(&m, 22, live_valid, live_json, &e) == -1);
     CHECK(memcmp(&before, &m, sizeof m) == 0);
     CHECK(m.region_count == 1);
 
@@ -809,10 +817,10 @@ static void test_live_unmarked_volumes_still_clear(void)
     char *live1 = live_box(UNTICKED, 100, 200, 64, 200, 400, 128);
 
     memset(&e, 0, sizeof e);
-    e.json[0] = live0;
-    e.json[1] = live1;
+    e.json[11] = live0;
+    e.json[22] = live1;
 
-    CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == 0);
+    CHECK(sh_nav_regions_refresh_live(&m, 22, live_valid, live_json, &e) == 0);
     CHECK(m.region_count == 0);
 
     free(json); free(live0); free(live1);
@@ -830,10 +838,10 @@ static void test_live_absent_marker_is_false(void)
     char *live1 = live_box("", 100, 200, 64, 200, 400, 128);
 
     memset(&e, 0, sizeof e);
-    e.json[0] = live0;
-    e.json[1] = live1;
+    e.json[11] = live0;
+    e.json[22] = live1;
 
-    CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == 0);
+    CHECK(sh_nav_regions_refresh_live(&m, 22, live_valid, live_json, &e) == 0);
     CHECK(m.region_count == 0);
 
     free(json); free(live0); free(live1);
@@ -852,14 +860,14 @@ static void test_live_block_demons(void)
                            100, 200, 64, 200, 400, 128);
 
     memset(&e, 0, sizeof e);
-    e.json[0] = live0;
-    e.json[1] = live1;
+    e.json[11] = live0;
+    e.json[22] = live1;
 
-    CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == 2);
+    CHECK(sh_nav_regions_refresh_live(&m, 22, live_valid, live_json, &e) == 2);
     CHECK(m.region_count == 2);
     if (m.region_count == 2) {
-        CHECK(m.regions[0].entity == 0 && m.regions[0].block_demons == 0);
-        CHECK(m.regions[1].entity == 1 && m.regions[1].block_demons == 1);
+        CHECK(m.regions[0].entity == 11 && m.regions[0].block_demons == 0);
+        CHECK(m.regions[1].entity == 22 && m.regions[1].block_demons == 1);
     }
 
     free(json); free(live0); free(live1);
@@ -875,21 +883,21 @@ static void test_live_volume_without_attribution(void)
     char *json = two_box_map(&m);
     char *live0 = live_box(TICKED, 0, 0, 0, 128, 128, 64);
     char *live1 = live_box(TICKED, 100, 200, 64, 200, 400, 128);
-    /* placed this session: the map that was read has no entity 2 at all */
+    /* placed this session: the map that was read has no uniqueId 33 at all */
     char *live2 = live_box(TICKED, 0, 0, 0, 64, 64, 8);
 
     memset(&e, 0, sizeof e);
-    e.json[0] = live0;
-    e.json[1] = live1;
-    e.json[2] = live2;
+    e.json[11] = live0;
+    e.json[22] = live1;
+    e.json[33] = live2;
 
-    CHECK(sh_nav_regions_refresh_live(&m, 2, live_valid, live_json, &e) == 3);
+    CHECK(sh_nav_regions_refresh_live(&m, 33, live_valid, live_json, &e) == 3);
     CHECK(m.region_count == 2);              /* found three, kept the two it can place */
     CHECK(m.instances[0].region_count == 2);
     CHECK(m.truncated == 0);                 /* a skip is not a cap */
     if (m.region_count == 2) {
-        CHECK(m.regions[0].entity == 0);
-        CHECK(m.regions[1].entity == 1);
+        CHECK(m.regions[0].entity == 11);
+        CHECK(m.regions[1].entity == 22);
     }
     free(json); free(live0); free(live1); free(live2);
 
@@ -912,11 +920,11 @@ static void test_live_volume_without_attribution(void)
         CHECK(m.region_count == 1);
 
         memset(&e, 0, sizeof e);
-        e.json[0] = live0 = live_box(TICKED, 0, 0, 0, 128, 128, 64);
-        e.json[1] = live1 = live_box(TICKED, 100, 200, 64, 200, 400, 128);
-        CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == 2);
+        e.json[11] = live0 = live_box(TICKED, 0, 0, 0, 128, 128, 64);
+        e.json[22] = live1 = live_box(TICKED, 100, 200, 64, 200, 400, 128);
+        CHECK(sh_nav_regions_refresh_live(&m, 22, live_valid, live_json, &e) == 2);
         CHECK(m.region_count == 1);
-        if (m.region_count == 1) CHECK(m.regions[0].entity == 0);
+        if (m.region_count == 1) CHECK(m.regions[0].entity == 11);
 
         free(json); free(live0); free(live1);
         bclose(&inst);
@@ -934,14 +942,15 @@ static void test_live_valid_gates_the_scan(void)
     char *live1 = live_box(TICKED, 100, 200, 64, 200, 400, 128);
 
     memset(&e, 0, sizeof e);
-    e.json[1] = live1;      /* id 0 and everything past 1 is not live */
+    e.json[22] = live1;     /* every id but 22 is not live */
 
-    CHECK(sh_nav_regions_refresh_live(&m, 8, live_valid, live_json, &e) == 1);
+    CHECK(sh_nav_regions_refresh_live(&m, 30, live_valid, live_json, &e) == 1);
     CHECK(e.queried[0] == 0);
-    CHECK(e.queried[1] == 1);
-    CHECK(e.queried[2] == 0 && e.queried[7] == 0);
+    CHECK(e.queried[11] == 0);
+    CHECK(e.queried[22] == 1);
+    CHECK(e.queried[2] == 0 && e.queried[29] == 0);
     CHECK(m.region_count == 1);
-    if (m.region_count == 1) CHECK(m.regions[0].entity == 1);
+    if (m.region_count == 1) CHECK(m.regions[0].entity == 22);
     free(json);
 
     /* and an entity whose serializer reports more than it wrote is refused
@@ -953,9 +962,9 @@ static void test_live_valid_gates_the_scan(void)
      * below, and the reason a Play cannot unmark a map. */
     json = two_box_map(&m);
     memset(&e, 0, sizeof e);
-    e.json[1] = live1;
-    e.overrun[1] = 1;
-    CHECK(sh_nav_regions_refresh_live(&m, 1, live_valid, live_json, &e) == -1);
+    e.json[22] = live1;
+    e.overrun[22] = 1;
+    CHECK(sh_nav_regions_refresh_live(&m, 22, live_valid, live_json, &e) == -1);
     CHECK(m.region_count == 1);
 
     free(json); free(live1);
@@ -1040,14 +1049,15 @@ static void test_live_region_cap(void)
 
     live = live_box(TICKED, 0, 0, 0, 64, 64, 8);
     memset(&e, 0, sizeof e);
-    for (i = 0; i < volumes && i < LIVE_MAX; i++) e.json[i] = live;
+    /* uniqueId i+1, so the live table is addressed one slot up. */
+    for (i = 0; i < volumes && i + 1 < LIVE_MAX; i++) e.json[i + 1] = live;
 
-    CHECK(sh_nav_regions_refresh_live(&m, volumes - 1, live_valid, live_json, &e) ==
+    CHECK(sh_nav_regions_refresh_live(&m, volumes, live_valid, live_json, &e) ==
           SH_NAVR_MAX_REGIONS);
     CHECK(m.region_count == SH_NAVR_MAX_REGIONS);
     CHECK(m.instances[0].region_count == SH_NAVR_MAX_REGIONS);
     CHECK(m.truncated == 1);
-    CHECK(m.regions[SH_NAVR_MAX_REGIONS - 1].entity == SH_NAVR_MAX_REGIONS - 1);
+    CHECK(m.regions[SH_NAVR_MAX_REGIONS - 1].entity == SH_NAVR_MAX_REGIONS);
 
     free(json);
     free(live);

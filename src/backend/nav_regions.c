@@ -324,7 +324,7 @@ static int navr_volume_rect(const char *json, size_t len, const sh_shard_doc *do
 #define NAVR_MAX_VOLUMES    4096
 
 typedef struct navr_volume {
-    unsigned entity;    /* index in the map's entities array == the live id */
+    unsigned entity;    /* index in the map's entities array (NOT the live id) */
     int      uid;       /* uniqueId, which is what instanceEntities addresses */
     int      instance;  /* -1 until the multimap says otherwise */
 } navr_volume;
@@ -335,13 +335,23 @@ static struct {
     int               count;
 } g_loaded;
 
-/* The instance the load pass attributed the volume at entity index `entity` to,
- * or -1 for a volume it never saw. */
-static int navr_loaded_owner(unsigned entity)
+/* The instance the load pass attributed the volume with `uniqueId` to, or -1 for
+ * a volume it never saw.
+ *
+ * BY uniqueId, NOT by position in the map JSON's entities array. Those are two
+ * different id spaces and conflating them is why a mark made this session never
+ * reached the bake. The live editor answers about its own entity table, which is
+ * indexed by uniqueId and is sparse: measured live 2026-09-08 on an 11-entity map
+ * whose uniqueIds ran 56..69, the editor table reported highWater 70, and the
+ * marked Blocking Box -- entities[3], uniqueId 62 -- answered at live id 62.
+ * Matching on the array index looked up id 62 against index 3, missed, and every
+ * live mark fell out at this lookup. `instanceEntities` addresses uniqueIds too,
+ * so this is also the id the attribution pass already agrees with. */
+static int navr_loaded_owner(int uid)
 {
     int i;
     for (i = 0; i < g_loaded.count; i++)
-        if (g_loaded.v[i].entity == entity) return g_loaded.v[i].instance;
+        if (g_loaded.v[i].uid == uid) return g_loaded.v[i].instance;
     return -1;
 }
 
@@ -618,6 +628,12 @@ int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
      * caller with the flags the map was loaded with instead of with none. */
     if (!m || !valid || !get_json) return -1;
     if (m != g_loaded.owner) return -1;
+    /* Nothing the load pass saw means nothing a live mark could belong to: every id
+     * would fail navr_loaded_owner below and be skipped, so the scan is guaranteed
+     * to return an empty answer at the cost of one engine serialize per entity.
+     * This runs on Play, in front of the map build, so that cost is on the
+     * author's clock -- take the early exit instead. */
+    if (g_loaded.count == 0) return -1;
 
     top = highest_id;
     if (top > NAVR_LIVE_SCAN_MAX) top = NAVR_LIVE_SCAN_MAX;
@@ -669,7 +685,7 @@ int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
          * skipped ones are the difference between this function's return value
          * and `m->region_count`; they are not a cap, so `truncated` says
          * nothing about them. */
-        owner = navr_loaded_owner((unsigned)id);
+        owner = navr_loaded_owner(id);
         if (owner < 0 || owner >= m->instance_count) continue;
         if (m->instances[owner].module[0] == '\0') continue;
 
