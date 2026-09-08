@@ -3,6 +3,35 @@
  * Every constant below was measured against shipped data. Where a value is
  * copied without being understood, the comment says so rather than inventing a
  * justification for it.
+ *
+ * THE SHAPE OF THIS FILE
+ * ----------------------
+ * It is long, and deliberately one file. The obvious split -- lifting the edge
+ * and link machinery out -- was measured and declined: it moves 891 lines but
+ * has to export `aug_ctx` and `aug_quad`, the whole data model, so the two
+ * halves would still change together. That is a header to maintain, not a
+ * seam. This map is the answer to the real cost instead.
+ *
+ *   measured constants        the numbers, each with the corpus behind it
+ *   small helpers             rounding, clamping, the agent's box
+ *   BSP queries               tree root, depth, and the point-to-area walk
+ *   the quad                  a walkable surface: four corners and a plane.
+ *                             aug_z_at, the inward edge normal, the inset.
+ *                             THE EDGE NORMAL'S SIGN IS LOAD-BEARING -- read
+ *                             the comment on aug_edge_normal_in before touching
+ *                             anything geometric.
+ *   interning                 vertices, edges, planes, nodes, deduplicated
+ *   area geometry             bounds, clusters, obstaclePVS, aug_add_area
+ *   the BSP splice            aug_carve: five planes per platform
+ *   reachabilities            aug_reach, and walk links between flat boxes
+ *   edges and neighbours      the segment model: who is across each part of
+ *                             each edge, how far, and how much higher. Two
+ *                             neighbour sources, and they are not symmetric.
+ *   link regimes              step, fall, climb and leap, chosen by magnitude
+ *                             and direction rather than by a signed drop
+ *   baked traversals          the five records a climb or a leap writes
+ *   admission                 headroom and the platform bounds
+ *   the driver                sh_aas_augment: two passes, areas then links
  */
 #include <windows.h>
 #include <math.h>
