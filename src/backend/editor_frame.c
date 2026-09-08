@@ -77,19 +77,18 @@ static void ef_set_msg(const char *s)
  *
  *     <Saved Games>\id Software\DOOM\base\savegame.user\<steam id>\SNAPMAPS<20 hex>
  *
- * and that 20-hex suffix IS the id. Two things here were wrong on the first attempt and both
- * produced the same unhelpful "no local saved map was found":
+ * and that 20-hex suffix IS the id. Two levels of that path are easy to get wrong, and both fail as
+ * "no local saved map was found":
  *
- *   - THE STEAM-ID LEVEL. The maps are not directly under savegame.user; each account gets its own
- *     numeric folder in between, alongside PROFILE and the GAME-AUTOSAVE slots. Missing that level
- *     means the glob matches nothing on every machine, not just an unusual one.
- *   - THE ROOT. "Saved Games" is a known folder in its own right and can be relocated, and deriving
- *     it as the parent of Documents is wrong the moment Documents is redirected -- which OneDrive
- *     does by default. Ask for the folder itself, and only fall back to the profile root.
+ *   - THE STEAM-ID LEVEL. Each account has its own numeric folder under savegame.user, alongside
+ *     PROFILE and the GAME-AUTOSAVE slots. Without it the glob matches nothing on any machine.
+ *   - THE ROOT. "Saved Games" is a known folder in its own right and can be relocated; deriving it
+ *     as the parent of Documents breaks under OneDrive redirection. Ask for it, then fall back to
+ *     the profile root.
  *
- * The reload does NOT name one of these. It names a scratch map we mint ourselves -- see the
- * scratch-map note below for why, and for the reasoning this file used to carry here and had wrong.
- * The walk stays because minting copies an existing save, and because Save Rawmap reads one. */
+ * A copied save folder is NOT a second map [DISCONFIRMED 2026-09-07: the engine keys a save by the
+ * `localId` inside its game.details, so both list entries opened the same map]. The reload borrows
+ * an existing slot and relies on the map:branch tag instead. */
 
 /* The id must be exactly 20 hex digits. Checked because it is about to be handed to an engine
  * function as a name: anything else means we misread the directory layout, and finding that out
@@ -231,46 +230,24 @@ int sh_editor_frame_saved_map_dir(char *out, size_t cap, char *out_id, size_t id
     return 1;
 }
 
-/* The scratch-map machinery that used to sit here is GONE, and deliberately not kept behind an
- * #if 0. It minted a map id and copied a save folder so a reload could target a slot that was ours
- * rather than one of the person's. The premise was wrong: DISCONFIRMED 2026-09-07, a copied folder
- * is not a second map, because the engine keys a save by the `localId` INSIDE its game.details and
- * a copy still names its source. Both list entries opened the same map.
- *
- * It is deleted rather than parked because it was ~200 lines encoding a false belief, and the thing
- * worth keeping from it is the disconfirmation, which lives in campaign rawmap-io-contract T2. The
- * engine mints its own slot now -- see the tag note below -- so nothing here needs to.
- *
- * `map_dir_by_id`, `mint_map_id`, `copy_save_folder` and the scratch-id file went with it. */
 
 /* ------------------------------------------------- mark a substituted map as new ----------------
- * THE POINT OF THIS WHOLE FILE, in one call.
+ * A rawmap parsed into an open map inherits that map's IDENTITY, so the next Save overwrites the
+ * borrowed slot with no prompt. Identity cannot be forged here: minting a save needs a game.details
+ * `checksum=` and a 40-byte .verify sidecar, and neither reproduces [13 hash algorithms x 6 byte
+ * ranges against 54 real saves: no match; the community .verify KDF failed over 864 combinations].
  *
- * A rawmap parsed into an open map inherits that map's IDENTITY -- LoadMap named an existing save, so
- * the editor holds a real map and the next Save writes over it with no prompt. Two earlier attempts
- * to fix that failed on the same wrong assumption: that identity is something we can supply. It is
- * not. Minting a save needs a game.details `checksum=` and a 40-byte .verify sidecar, and this
- * project can generate neither (13 hash algorithms x 6 byte ranges against 54 real saves: no match;
- * the community .verify KDF did not reproduce over 864 combinations).
+ * The engine gates the behaviour we want on ONE BIT OF MAP STATE: Save asks the open map for the tag
+ * "map:new" or "map:branch", and either routes it into SAVE AS -- prompt for a name, then
+ * CreateLocalSavedMapInternal mints a fresh slot and the ENGINE writes the checksum and sidecars.
  *
- * The engine already has the behaviour we want and gates it on ONE BIT OF MAP STATE. The Save
- * command asks the open map for the tag "map:new" or "map:branch"; if either is present, Save routes
- * into SAVE AS -- prompt for a name, then CreateLocalSavedMapInternal mints a fresh slot and the
- * ENGINE writes the checksum and the sidecars. That is the path Branch and New-from-Template take.
+ * ON A FRAME, not in the swap detour: the detour runs inside DeserializeFromJson, which is only part
+ * of the load, and whether the record's tags are applied before or after that parse is unestablished
+ * -- a tag set mid-load could be overwritten by the rest of it.
  *
- * So we stop trying to forge identity and just tell the truth: this map is derived from another one.
- * Set the tag, and the person is asked to name it, and their original is never written.
- *
- * WHY ON A FRAME, not in the swap detour: the detour runs inside DeserializeFromJson, which is only
- * part of the load. Whether the record's tags are applied to the map before or after that parse is
- * not established, and a tag set mid-load could be overwritten by the rest of it. A frame after the
- * load has finished has no such ordering question -- and the frame hook is already this project's
- * one sanctioned main-thread execution point.
- *
- * WHY map:branch rather than map:new: both gate the same prompt, and only map:branch has a
- * ready-made single-argument add-if-absent function in the engine. Reaching for map:new would mean
- * hand-building an idStr into an idStrList, i.e. this project's own allocator handling on an engine
- * object, for no behavioural difference. */
+ * map:branch rather than map:new because both gate the same prompt and only map:branch has a
+ * single-argument add-if-absent function in the engine; map:new would mean hand-building an idStr
+ * into an idStrList. */
 static unsigned long g_seen_swaps  = 0;   /* substituted parses already accounted for */
 static volatile LONG g_tag_faulted = 0;
 
@@ -361,15 +338,10 @@ static void *ef_editor(void)
 
 /* Is this frame a safe one to reload on? Checked on the frame itself, never at request time: the
  * editor can leave a usable state between the click and the frame that services it. */
-/* Is the editor LIVE and holding a map -- the question both the reload and the rawmap save have to
- * ask before touching anything.
- *
- * Named ef_can_reload while only the reload asked it, and the save asked a weaker version of its own
- * that tested the map pointer alone. That pointer SURVIVES leaving the editor: at the SnapMap main
- * menu it still holds the last map, so a console `sh_rawmaps save` there was accepted and went on to
- * serialize a map the person was no longer editing, reporting success. The state check is what
- * separates "a map is open" from "a map was open" -- ED_STATE_OFF is 0 with no editor state
- * running -- so both callers now ask the same, stronger question. */
+/* Is the editor LIVE and holding a map? Both the reload and the rawmap save ask this before touching
+ * anything, and it must be the FULL check: the map pointer alone SURVIVES leaving the editor, still
+ * holding the last map at the main menu. ED_STATE_OFF == 0 is what separates "a map is open" from
+ * "a map was open". */
 static int ef_editor_live_with_map(void *editor, const char **why)
 {
     __try {
@@ -636,17 +608,9 @@ int sh_editor_frame_request_reload(char *out_msg, int msg_capacity)
     else if (g_load_map == NULL)                                 why = "the engine's map loader was not found";
     else if (g_editor_obj == 0)                                  why = "the editor could not be located";
     else if (InterlockedCompareExchange(&g_pending, 0, 0) != 0)  why = "a reload is already waiting for the next frame";
-    /* THE SAFETY INTERLOCK, and the only reason this is allowed to borrow a slot at all.
-     *
-     * The reload hands LoadMap an EXISTING saved map, so the editor adopts that map's identity --
-     * that is what made it destructive twice. What makes it safe is the map:branch tag: with it set,
-     * the editor's Save cannot write the borrowed slot, because Save routes into Save As, prompts for
-     * a name, and mints a new slot through the engine's own CreateLocalSavedMapInternal. The borrowed
-     * map is READ and never written.
-     *
-     * So the tag is not a nicety here, it is the whole safety property. No tagger, no reload -- and
-     * refusing is not a hardship, because staging still works and substitutes into a map the person
-     * opened themselves. */
+    /* THE SAFETY INTERLOCK. The reload hands LoadMap an EXISTING saved map, so the editor adopts
+     * that map's identity; the map:branch tag is what stops Save from writing the borrowed slot,
+     * routing it into Save As instead. No tagger, no reload -- staging still works. */
     else if (g_add_branch_tag == NULL)                           why = "this build cannot mark a loaded rawmap as a new map, "
                                                                        "so loading one in place could overwrite a saved map";
     else if (InterlockedCompareExchange(&g_tag_faulted, 0, 0) != 0) why = "marking a rawmap as a new map faulted earlier this "
