@@ -112,11 +112,15 @@ static unsigned char *build_module(size_t *out_len)
     p[5] = 29;
 
     /* settings: agent box 48x48x80 (radius 24), maxStepHeight 18,
-     * maxFallHeight 0 -- the monster-class shape. */
+     * maxFallHeight 0, minFloorCos 0.7 -- the monster-class shape. */
     putf(p + SETW(0), -24.0f); putf(p + SETW(1), -24.0f); putf(p + SETW(2), 0.0f);
     putf(p + SETW(3),  24.0f); putf(p + SETW(4),  24.0f); putf(p + SETW(5), 80.0f);
     putf(p + SETW(12), 18.0f);          /* maxStepHeight */
     putf(p + SETW(15), 0.0f);           /* maxFallHeight */
+    /* minFloorCos -- 0.7 in every shipped payload, so a floor up to 45.57
+     * degrees from horizontal is walkable. The augmenter fails closed without
+     * it, exactly as it would on a payload it could not read. */
+    putf(p + SETW(16), 0.7f);
     put32(p + SETW(36), 100);           /* tt_startWalkOffLedge */
 
     off = 394;
@@ -469,11 +473,223 @@ static void test_traversal_anchor_pattern(void)
     CHECK(n >= 1);
 }
 
+/* ==================================================================== */
+/* oriented geometry                                                     */
+/* ==================================================================== */
+
+static int near_d(double a, double b) { double v = a - b; return v < 0.001 && v > -0.001; }
+static int near_f(float a, float b) { float v = a - b; return v < 0.001f && v > -0.001f; }
+
+/* A yawed rect: a w-by-h rectangle rotated `deg` about its own centre, level at
+ * `z`, wound clockwise seen from +Z. */
+static void mkplat_yawed(sh_aug_platform *p, double deg, double w, double h,
+                         double z, const char *name)
+{
+    double r = deg * 3.14159265358979323846 / 180.0;
+    double cs = cos(r), sn = sin(r), hw = w / 2.0, hh = h / 2.0;
+    double lx[4], ly[4];
+    int i;
+    lx[0] = -hw; lx[1] = +hw; lx[2] = +hw; lx[3] = -hw;
+    ly[0] = +hh; ly[1] = +hh; ly[2] = -hh; ly[3] = -hh;
+    memset(p, 0, sizeof *p);
+    for (i = 0; i < 4; i++) {
+        p->c[i][0] = (float)(lx[i] * cs - ly[i] * sn);
+        p->c[i][1] = (float)(lx[i] * sn + ly[i] * cs);
+        p->c[i][2] = (float)z;
+    }
+    p->n[2] = 1.0f;
+    p->face = 4;
+    _snprintf_s(p->name, sizeof p->name, _TRUNCATE, "%s", name);
+}
+
+/* A rect tilted `deg` about the y axis: the surface rises across x, so its
+ * normal leans by exactly `deg` and n[2] is cos(deg). */
+static void mkplat_tilted(sh_aug_platform *p, double deg, double w, double h,
+                          double z, const char *name)
+{
+    double r = deg * 3.14159265358979323846 / 180.0;
+    double cs = cos(r), sn = sin(r), hw = w / 2.0, hh = h / 2.0;
+    double lx[4], ly[4];
+    int i;
+    lx[0] = -hw; lx[1] = +hw; lx[2] = +hw; lx[3] = -hw;
+    ly[0] = +hh; ly[1] = +hh; ly[2] = -hh; ly[3] = -hh;
+    memset(p, 0, sizeof *p);
+    for (i = 0; i < 4; i++) {
+        p->c[i][0] = (float)(lx[i] * cs);
+        p->c[i][1] = (float)ly[i];
+        p->c[i][2] = (float)(z + lx[i] * sn);
+    }
+    p->n[0] = (float)(-sn); p->n[1] = 0.0f; p->n[2] = (float)cs;
+    p->face = 4;
+    _snprintf_s(p->name, sizeof p->name, _TRUNCATE, "%s", name);
+}
+
+/* On a sloped quad the surface height is a FUNCTION of position. Every link
+ * endpoint depends on getting this right. */
+static void test_z_at_interpolates_across_a_slope(void)
+{
+    unsigned char q[512];
+    double corners[4][3];
+    printf("the surface height varies across a sloped quad\n");
+    corners[0][0] = 0;   corners[0][1] = 100; corners[0][2] = 0;
+    corners[1][0] = 100; corners[1][1] = 100; corners[1][2] = 50;
+    corners[2][0] = 100; corners[2][1] = 0;   corners[2][2] = 50;
+    corners[3][0] = 0;   corners[3][1] = 0;   corners[3][2] = 0;
+    CHECK(sh_aug_test_quad_size() <= sizeof q);
+    CHECK(sh_aug_test_quad_init(q, corners) == 1);
+    CHECK(near_d(sh_aug_test_z_at(q,   0.0, 50.0),  0.0));
+    CHECK(near_d(sh_aug_test_z_at(q,  50.0, 50.0), 25.0));
+    CHECK(near_d(sh_aug_test_z_at(q, 100.0, 50.0), 50.0));
+    /* A 50-in-100 rise is 26.57 degrees, cos 0.894427 -- and that number is
+     * exactly what the minFloorCos gate reads. */
+    CHECK(near_d(sh_aug_test_quad_normal_z(q), 0.894427));
+}
+
+/* Containment must be TRUE inside. If the edge normal's sign were inverted this
+ * would answer exactly the opposite, and the inset, the carve and neighbour
+ * discovery would all invert with it. */
+static void test_contains_is_true_inside(void)
+{
+    unsigned char q[512];
+    double corners[4][3];
+    printf("a point inside the quad is inside it\n");
+    corners[0][0] = 0;   corners[0][1] = 100; corners[0][2] = 0;
+    corners[1][0] = 100; corners[1][1] = 100; corners[1][2] = 0;
+    corners[2][0] = 100; corners[2][1] = 0;   corners[2][2] = 0;
+    corners[3][0] = 0;   corners[3][1] = 0;   corners[3][2] = 0;
+    CHECK(sh_aug_test_quad_init(q, corners) == 1);
+    CHECK(sh_aug_test_quad_contains(q, 50.0, 50.0) == 1);
+    CHECK(sh_aug_test_quad_contains(q, 150.0, 50.0) == 0);
+    CHECK(sh_aug_test_quad_contains(q, 50.0, -50.0) == 0);
+}
+
+/* The inset of a ROTATED quad is the rotated inset. The axis-wise inset this
+ * replaced would eat the corners and refuse platforms that are large enough. */
+static void test_inset_of_a_rotated_quad_stays_rotated(void)
+{
+    unsigned char q[512], in[512];
+    double corners[4][3], c0[3];
+    printf("the inset of a rotated quad is rotated too\n");
+    /* A 200x200 square yawed 45 degrees: corners on the axes at r = 141.421,
+     * wound clockwise seen from +Z. */
+    corners[0][0] = 0;        corners[0][1] = 141.421;  corners[0][2] = 0;
+    corners[1][0] = 141.421;  corners[1][1] = 0;        corners[1][2] = 0;
+    corners[2][0] = 0;        corners[2][1] = -141.421; corners[2][2] = 0;
+    corners[3][0] = -141.421; corners[3][1] = 0;        corners[3][2] = 0;
+    CHECK(sh_aug_test_quad_init(q, corners) == 1);
+    CHECK(sh_aug_test_quad_inset(q, 24.0, in) == 1);
+    sh_aug_test_quad_corner(in, 0, c0);
+    /* Each edge moves in by 24 along its own normal, so a corner sitting on an
+     * axis moves in by 24*sqrt(2) = 33.941. */
+    CHECK(near_d(c0[0], 0.0));
+    CHECK(near_d(c0[1], 141.421 - 33.9411));
+}
+
+/* Smaller than twice the inset: refused, never inverted. If the edge normal
+ * pointed outward this quad would GROW and this check would pass a lie. */
+static void test_inset_refuses_a_collapsing_quad(void)
+{
+    unsigned char q[512], in[512];
+    double corners[4][3];
+    printf("a quad too small to inset is refused\n");
+    corners[0][0] = 0;  corners[0][1] = 30; corners[0][2] = 0;
+    corners[1][0] = 30; corners[1][1] = 30; corners[1][2] = 0;
+    corners[2][0] = 30; corners[2][1] = 0;  corners[2][2] = 0;
+    corners[3][0] = 0;  corners[3][1] = 0;  corners[3][2] = 0;
+    CHECK(sh_aug_test_quad_init(q, corners) == 1);
+    CHECK(sh_aug_test_quad_inset(q, 24.0, in) == 0);
+}
+
+/* node.field4 is "has a z component", not "is a Z plane". The yawed-vertical
+ * case is the one a Z-versus-XY rule gets wrong, and this build writes a yawed
+ * vertical plane on every edge of every rotated platform. */
+static void test_field4_follows_the_plane_z_component(void)
+{
+    printf("node.field4 follows the plane's z component\n");
+    CHECK(sh_aug_test_node_field4(0.0)   == 0);   /* vertical, any yaw */
+    CHECK(sh_aug_test_node_field4(1.0)   == 1);   /* axis-aligned Z */
+    CHECK(sh_aug_test_node_field4(0.894) == 1);   /* oblique */
+    CHECK(sh_aug_test_node_field4(-0.5)  == 1);   /* oblique, leaning down */
+}
+
+/* The engine's own bake walks floors up to minFloorCos -- 0.7, 45.57 degrees.
+ * Steeper is refused WITH the angle, not silently dropped. */
+static void test_minfloorcos_gate_at_the_boundary(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+    printf("a face steeper than minFloorCos is refused with its angle\n");
+    mkplat_tilted(&p[0], 45.0, 512.0, 512.0, 16.0, "shallow");   /* cos 0.7071 */
+    mkplat_tilted(&p[1], 46.0, 512.0, 512.0, 400.0, "steep");    /* cos 0.6947 */
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK_MSG(rep.platforms[0].emitted == 1, "45 degrees is inside the limit");
+    CHECK_MSG(rep.platforms[1].emitted == 0, "46 degrees is past it");
+    CHECK(near_f(rep.platforms[1].tilt_degrees, 46.0f));
+    CHECK_MSG(strstr(rep.platforms[1].reason, "46") != NULL,
+              "the refusal names the measured angle");
+    sh_aas_free(a);
+}
+
+/* A payload whose minFloorCos does not read as a cosine is rejected outright.
+ * sh_aas_setting_f32 answers 0.0f for a model it cannot read, and a gate of
+ * "normal.z < 0" would accept a vertical wall as floor. The setter takes a BYTE
+ * offset, and word 16 is 208 + 16*4 = 272. */
+static void test_unreadable_minfloorcos_rejects_the_payload(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p;
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+    printf("a payload with no readable slope limit is refused\n");
+    sh_aas_set_setting_f32(a, 272u, 0.0f);
+    mkplat(&p, -256.0f, -256.0f, 256.0f, 256.0f, 16.0f, "shelf");
+    CHECK_MSG(sh_aas_augment(a, &p, 1, &o, &rep) == 0,
+              "fail closed rather than treat a wall as floor");
+    sh_aas_free(a);
+}
+
+/* A rotated area must be findable through the BSP -- the property the serving
+ * path checks before trusting a payload -- and must NOT swallow its own
+ * bounding box, which is what an axis-aligned carve would do. */
+static void test_a_yawed_area_resolves_through_the_bsp(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p;
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+    printf("a yawed area is findable, and only where it actually is\n");
+    mkplat_yawed(&p, 45.0, 400.0, 400.0, 16.0, "diamond");
+    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK(rep.platforms[0].emitted == 1);
+    if (rep.platforms[0].emitted) {
+        CHECK_MSG(sh_aas_point_area(a, 0.0f, 0.0f, 18.0f) == rep.platforms[0].area,
+                  "the centre of the diamond is on it");
+        /* Inside the bounding box, outside the rotated quad. An axis-aligned
+         * carve would claim this point; an oriented one must not. */
+        CHECK_MSG(sh_aas_point_area(a, 270.0f, 270.0f, 18.0f) != rep.platforms[0].area,
+                  "a corner of the bounding square is NOT on the diamond");
+    }
+    sh_aas_free(a);
+}
+
 int main(void)
 {
     printf("aas_augment_test\n");
     test_fixture_resolves();
     test_traversal_anchor_pattern();
+    test_z_at_interpolates_across_a_slope();
+    test_contains_is_true_inside();
+    test_inset_of_a_rotated_quad_stays_rotated();
+    test_inset_refuses_a_collapsing_quad();
+    test_field4_follows_the_plane_z_component();
+    test_minfloorcos_gate_at_the_boundary();
+    test_unreadable_minfloorcos_rejects_the_payload();
+    test_a_yawed_area_resolves_through_the_bsp();
     test_island_at_128();
     test_step_regime_at_16();
     test_refusals();

@@ -42,6 +42,11 @@
  * 150254/150292 (XY, area, area). Its MEANING is unknown -- copied, not
  * understood. */
 #define NODE_F4_Z               1
+/* node.field4 is 1 exactly when the split plane HAS a z component, and 0
+ * otherwise -- including for a YAWED VERTICAL plane, which is still 0. Measured
+ * over 12,450 classified nodes in ten shipped payloads: axis-aligned XY 5,623 at
+ * 0, yawed vertical 5,120 at 0, axis-aligned Z 1,579 at 1, oblique 128 at 1.
+ * 100% consistent. A "Z versus XY" rule gets the yawed-vertical case wrong. */
 #define NODE_F4_XY              0
 
 /* Spacing between successive walk reachabilities along a shared edge, and the
@@ -80,6 +85,15 @@
 #define SET_WORDS               208
 #define SET_W(n)                (SET_WORDS + (n) * 4)
 #define SET_MAX_STEP_HEIGHT     SET_W(12)
+/* minFloorCos -- the walkable-slope threshold, 0.7 (45.57 degrees) in every
+ * shipped payload and identical across all three monster classes.
+ *
+ * Word 16, NOT 17. The disk settings record is not a packed image of
+ * idAAS2Settings: it drops maxLedgeGrabHeight among others and reorders after
+ * word 23, so extrapolating the struct layout lands one word late on a value
+ * (minHighCeiling, 80) that is not a cosine at all. The offset comes from the
+ * decoded corpus. */
+#define SET_MIN_FLOOR_COS       SET_W(16)
 #define SET_MAX_FALL_HEIGHT     SET_W(15)
 #define SET_TT_WALK_OFF_LEDGE   SET_W(36)
 
@@ -249,13 +263,207 @@ unsigned sh_aas_tree_depth(const sh_aas *a)
 
 /* ---- the augmenter state ----------------------------------------------- */
 
-typedef struct aug_rect {
-    float x0, y0, x1, y1, z;
-} aug_rect;
+/* A walkable surface: a planar convex quad wound CLOCKWISE seen from +Z.
+ *
+ * Not a rect. A Blocking Box can be yawed, tilted, or lying on its side, so the
+ * surface has four corners each with their own z and there is no single `z` any
+ * more -- `n`,`d` are its supporting plane (n.p + d = 0, n[2] > 0) and the
+ * height at a point is aug_z_at.
+ *
+ * `x0..y1` is the XY BOUNDING BOX, kept for cheap rejection and for the record
+ * fields that genuinely want an AABB. It is NOT the footprint: for a yawed quad
+ * it is strictly larger, and testing containment against it is the bug that
+ * makes a rotated platform swallow its own bounding square. */
+typedef struct aug_quad {
+    double c[4][3];
+    double n[3];
+    double d;
+    double x0, y0, x1, y1;
+} aug_quad;
+
+static int aug_quad_init(aug_quad *q, const double c[4][3])
+{
+    double u[3], v[3], len;
+    int i, k;
+
+    for (i = 0; i < 4; i++)
+        for (k = 0; k < 3; k++) q->c[i][k] = c[i][k];
+    for (k = 0; k < 3; k++) { u[k] = c[1][k] - c[0][k]; v[k] = c[3][k] - c[0][k]; }
+    q->n[0] = u[1]*v[2] - u[2]*v[1];
+    q->n[1] = u[2]*v[0] - u[0]*v[2];
+    q->n[2] = u[0]*v[1] - u[1]*v[0];
+    len = sqrt(q->n[0]*q->n[0] + q->n[1]*q->n[1] + q->n[2]*q->n[2]);
+    if (len < 1e-6) return 0;
+    for (k = 0; k < 3; k++) q->n[k] /= len;
+    if (q->n[2] < 0.0) for (k = 0; k < 3; k++) q->n[k] = -q->n[k];
+    if (q->n[2] < 1e-6) return 0;            /* vertical: nothing to stand on */
+    q->d = -(q->n[0]*c[0][0] + q->n[1]*c[0][1] + q->n[2]*c[0][2]);
+    q->x0 = q->x1 = c[0][0];
+    q->y0 = q->y1 = c[0][1];
+    for (i = 1; i < 4; i++) {
+        if (c[i][0] < q->x0) q->x0 = c[i][0];
+        if (c[i][0] > q->x1) q->x1 = c[i][0];
+        if (c[i][1] < q->y0) q->y0 = c[i][1];
+        if (c[i][1] > q->y1) q->y1 = c[i][1];
+    }
+    return 1;
+}
+
+static int aug_quad_from_platform(aug_quad *q, const sh_aug_platform *p)
+{
+    double c[4][3];
+    int i, k;
+    for (i = 0; i < 4; i++)
+        for (k = 0; k < 3; k++) c[i][k] = p->c[i][k];
+    return aug_quad_init(q, c);
+}
+
+/* The surface height at (x,y). Defined across the WHOLE plane, not only inside
+ * the quad, because probes and link endpoints sit just outside an edge. */
+static double aug_z_at(const aug_quad *q, double x, double y)
+{
+    return -(q->n[0]*x + q->n[1]*y + q->d) / q->n[2];
+}
+
+static double aug_quad_min_z(const aug_quad *q)
+{
+    double v = q->c[0][2];
+    int i;
+    for (i = 1; i < 4; i++) if (q->c[i][2] < v) v = q->c[i][2];
+    return v;
+}
+
+static double aug_quad_max_z(const aug_quad *q)
+{
+    double v = q->c[0][2];
+    int i;
+    for (i = 1; i < 4; i++) if (q->c[i][2] > v) v = q->c[i][2];
+    return v;
+}
+
+/* The INWARD XY normal of edge i, which runs c[i] -> c[i+1].
+ *
+ * The winding is CLOCKWISE seen from +Z, so inward is the edge direction rotated
+ * MINUS 90 degrees: (ey, -ex). Check it on the edge (x0,y1) -> (x1,y1):
+ * e = (+1,0), inward = (0,-1), and the interior is indeed at y < y1.
+ *
+ * The +90 rotation (-ey, ex) points OUTWARD, and using it here would invert the
+ * inset, containment, the carve's lateral planes and every neighbour probe at
+ * once -- one sign, four silent failures. */
+static void aug_edge_normal_in(const aug_quad *q, int i, double out[2])
+{
+    int j = (i + 1) & 3;
+    double ex = q->c[j][0] - q->c[i][0];
+    double ey = q->c[j][1] - q->c[i][1];
+    double len = sqrt(ex*ex + ey*ey);
+    if (len < 1e-9) { out[0] = out[1] = 0.0; return; }
+    out[0] =  ey / len;
+    out[1] = -ex / len;
+}
+
+/* Offset every edge inward by r and re-intersect.
+ *
+ * Exact for a convex quad, where the axis-wise +/- radius inset this replaces is
+ * correct only for an axis-aligned rectangle -- inset a 45-degree quad by its
+ * AABB and the corners are eaten, refusing platforms that are actually large
+ * enough for the agent.
+ *
+ * Corner i of the result is the intersection of edges i-1 and i, because edge
+ * i-1 ends at c[i] and edge i starts there. Returns 0 if the quad collapses or
+ * turns itself inside out. */
+static int aug_quad_inset(const aug_quad *in, double r, aug_quad *out)
+{
+    double nx[4], ny[4], off[4], c[4][3], sh = 0.0;
+    int i;
+
+    if (r <= 0.0) { *out = *in; return 1; }
+    for (i = 0; i < 4; i++) {
+        double n2[2];
+        aug_edge_normal_in(in, i, n2);
+        if (n2[0] == 0.0 && n2[1] == 0.0) return 0;
+        nx[i] = n2[0]; ny[i] = n2[1];
+        off[i] = nx[i]*in->c[i][0] + ny[i]*in->c[i][1] + r;
+    }
+    for (i = 0; i < 4; i++) {
+        int pv = (i + 3) & 3;
+        double det = nx[pv]*ny[i] - nx[i]*ny[pv];
+        if (det > -1e-9 && det < 1e-9) return 0;
+        c[i][0] = (off[pv]*ny[i] - off[i]*ny[pv]) / det;
+        c[i][1] = (nx[pv]*off[i] - nx[i]*off[pv]) / det;
+        c[i][2] = aug_z_at(in, c[i][0], c[i][1]);
+    }
+    for (i = 0; i < 4; i++) {
+        int j = (i + 1) & 3;
+        sh += c[i][0]*c[j][1] - c[j][0]*c[i][1];
+    }
+    if (sh > -1.0) return 0;             /* collapsed, or wound the other way */
+    /* Winding is NOT enough. Over-inset a small quad and it turns inside out
+     * through itself while STAYING clockwise: a 30x30 square inset by 24 lands
+     * on (24,6),(6,6),(6,24),(24,24), whose shoelace is -648 -- still negative,
+     * still "valid", and completely wrong.
+     *
+     * The test that does hold is convexity against the inset half-planes: for a
+     * genuine inset every corner sits on the inward side of every edge. In the
+     * flipped case corner 0 is 18 units on the WRONG side of edge 1. */
+    for (i = 0; i < 4; i++) {
+        int j;
+        for (j = 0; j < 4; j++)
+            if (nx[j]*c[i][0] + ny[j]*c[i][1] < off[j] - 1e-6) return 0;
+    }
+    return aug_quad_init(out, c);
+}
+
+/* Inside the quad in XY. The AABB is only the cheap reject; the real test is the
+ * sign of every edge's inward normal. */
+static int aug_quad_contains_xy(const aug_quad *q, double x, double y)
+{
+    int i;
+    if (x < q->x0 - 1e-6 || x > q->x1 + 1e-6 ||
+        y < q->y0 - 1e-6 || y > q->y1 + 1e-6) return 0;
+    for (i = 0; i < 4; i++) {
+        double n2[2];
+        aug_edge_normal_in(q, i, n2);
+        if (n2[0]*(x - q->c[i][0]) + n2[1]*(y - q->c[i][1]) < -1e-6) return 0;
+    }
+    return 1;
+}
+
+/* The narrowest the quad gets, edge to opposite corners. For a rotated quad the
+ * AABB overstates usable size, so this is what the agent footprint is compared
+ * against. */
+static double aug_quad_min_width(const aug_quad *q)
+{
+    double best = 1e30;
+    int i, k;
+    for (i = 0; i < 4; i++) {
+        double n2[2];
+        aug_edge_normal_in(q, i, n2);
+        for (k = 0; k < 4; k++) {
+            double dist = n2[0]*(q->c[k][0] - q->c[i][0]) + n2[1]*(q->c[k][1] - q->c[i][1]);
+            if (dist > 1e-6 && dist < best) best = dist;
+        }
+    }
+    return best;
+}
+
+/* node.field4 from a split plane's z component. See the NODE_F4_* comment: the
+ * rule is "has a z component", not "is a Z plane". */
+static int aug_node_field4(double pc)
+{
+    return pc != 0.0 ? 1 : 0;
+}
+
+static double aug_degrees_from_horizontal(double nz)
+{
+    if (nz >  1.0) nz =  1.0;
+    if (nz < -1.0) nz = -1.0;
+    return acos(nz) * 180.0 / 3.14159265358979323846;
+}
 
 typedef struct aug_ctx {
     sh_aas         *a;
     const sh_aug_opts *o;
+    double          min_floor_cos;  /* the payload's own walkable-slope gate */
     sh_aug_report  *rep;
     float           radius;
     float           height;
@@ -432,12 +640,10 @@ static void aug_copy_pvs(aug_ctx *c, int carrier, unsigned *out_first)
 }
 
 /* Append one walkable area for `eff` and return its index, or -1. */
-static int aug_add_area(aug_ctx *c, const aug_rect *eff, int carrier)
+static int aug_add_area(aug_ctx *c, const aug_quad *eff, int carrier)
 {
     /* A closed edge loop wound clockwise seen from +Z -- the winding of every
      * floor area of the Grid Room, verified by shoelace on areas 2, 5 and 8. */
-    const float cx[4] = { eff->x0, eff->x1, eff->x1, eff->x0 };
-    const float cy[4] = { eff->y1, eff->y1, eff->y0, eff->y0 };
     int vs[4];
     unsigned first_ei = sh_aas_count(c->a, SH_AAS_L_EDGEINDEX);
     unsigned first_pvs = 0, first_area, first_bounds, slot;
@@ -446,7 +652,8 @@ static int aug_add_area(aug_ctx *c, const aug_rect *eff, int carrier)
     unsigned i, n;
 
     for (k = 0; k < 4; k++) {
-        vs[k] = aug_vertex(c, cx[k], cy[k], eff->z);
+        vs[k] = aug_vertex(c, (float)eff->c[k][0], (float)eff->c[k][1],
+                              (float)eff->c[k][2]);
         if (vs[k] < 0) return -1;
     }
     for (k = 0; k < 4; k++) {
@@ -488,12 +695,12 @@ static int aug_add_area(aug_ctx *c, const aug_rect *eff, int carrier)
     sh_aas_put_u16(ar, AR_FIRST_AREA_COVER,
                    (uint16_t)sh_aas_count(c->a, SH_AAS_L_AREACOVERINDEX));
 
-    sh_aas_put_i16(ab, AB_MINX, (int16_t)aug_clamp16(aug_round(eff->x0)));
-    sh_aas_put_i16(ab, AB_MINY, (int16_t)aug_clamp16(aug_round(eff->y0)));
-    sh_aas_put_i16(ab, AB_MINZ, (int16_t)aug_clamp16(aug_round(eff->z)));
-    sh_aas_put_i16(ab, AB_MAXX, (int16_t)aug_clamp16(aug_round(eff->x1)));
-    sh_aas_put_i16(ab, AB_MAXY, (int16_t)aug_clamp16(aug_round(eff->y1)));
-    sh_aas_put_i16(ab, AB_MAXZ, (int16_t)aug_clamp16(aug_round(eff->z)));
+    sh_aas_put_i16(ab, AB_MINX, (int16_t)aug_clamp16(aug_round((float)eff->x0)));
+    sh_aas_put_i16(ab, AB_MINY, (int16_t)aug_clamp16(aug_round((float)eff->y0)));
+    sh_aas_put_i16(ab, AB_MINZ, (int16_t)aug_clamp16(aug_round((float)aug_quad_min_z(eff))));
+    sh_aas_put_i16(ab, AB_MAXX, (int16_t)aug_clamp16(aug_round((float)eff->x1)));
+    sh_aas_put_i16(ab, AB_MAXY, (int16_t)aug_clamp16(aug_round((float)eff->y1)));
+    sh_aas_put_i16(ab, AB_MAXZ, (int16_t)aug_clamp16(aug_round((float)aug_quad_max_z(eff))));
 
     /* Cluster bookkeeping: w0 == w1 == the number of areas in the cluster, true
      * in 20/20 shipped payloads. */
@@ -568,7 +775,7 @@ static void aug_clip_cell(aug_box *cell, const unsigned char *p, int front)
  * navigable over the overhang -- which is reported, not hidden.
  *
  * Returns the number of leaf slots carved. */
-static int aug_carve(aug_ctx *c, int area, const aug_rect *eff)
+static int aug_carve(aug_ctx *c, int area, const aug_quad *eff)
 {
     typedef struct { int node; aug_box cell; } aug_frame;
     struct { int plane; int f4; } split[5];
@@ -579,20 +786,32 @@ static int aug_carve(aug_ctx *c, int area, const aug_rect *eff)
     const double BIG = 1e9;
     const double eps = 1e-3;
 
-    split[0].plane = aug_plane(c, 0.0f, 0.0f, 1.0f, -(eff->z - BSP_FLOOR_EPS));
+    /* The face plane, offset VERTICALLY. BSP_FLOOR_EPS was measured as
+     * areaBounds[leaf].minz - planeZ, a vertical quantity, so displacing the
+     * plane 9.6 along an oblique normal would make the vertical drop 9.6/n.z --
+     * 13.7 at the 0.7 slope gate, outside anything the corpus shows. Shifting
+     * `dist` by eps*n.z keeps the vertical drop at exactly eps for any tilt. */
+    split[0].plane = aug_plane(c, (float)eff->n[0], (float)eff->n[1], (float)eff->n[2],
+                                  (float)(eff->d + BSP_FLOOR_EPS * eff->n[2]));
     split[0].f4 = NODE_F4_Z;
-    split[1].plane = aug_plane(c, 1.0f, 0.0f, 0.0f, -eff->x0);
-    split[1].f4 = NODE_F4_XY;
-    split[2].plane = aug_plane(c, -1.0f, 0.0f, 0.0f, eff->x1);
-    split[2].f4 = NODE_F4_XY;
-    split[3].plane = aug_plane(c, 0.0f, 1.0f, 0.0f, -eff->y0);
-    split[3].f4 = NODE_F4_XY;
-    split[4].plane = aug_plane(c, 0.0f, -1.0f, 0.0f, eff->y1);
-    split[4].f4 = NODE_F4_XY;
+    /* One vertical plane per quad edge, on the INWARD normal: the engine takes
+     * child0 when n.p + dist > 0, so the area child must be on the interior
+     * side. For an axis-aligned quad these are exactly the four planes this
+     * replaced; for a yawed one they are the yawed edges, which is what stops a
+     * rotated platform swallowing its own bounding square. */
+    for (i = 0; i < 4; i++) {
+        double n2[2];
+        aug_edge_normal_in(eff, i, n2);
+        split[1 + i].plane = aug_plane(c, (float)n2[0], (float)n2[1], 0.0f,
+            (float)(-(n2[0]*eff->c[i][0] + n2[1]*eff->c[i][1])));
+        split[1 + i].f4 = aug_node_field4(0.0);
+    }
     for (i = 0; i < 5; i++) if (split[i].plane < 0) return 0;
 
-    box.v[0] = eff->x0; box.v[1] = eff->y0; box.v[2] = eff->z - BSP_FLOOR_EPS;
-    box.v[3] = eff->x1; box.v[4] = eff->y1; box.v[5] = eff->z + c->height;
+    box.v[0] = eff->x0; box.v[1] = eff->y0;
+    box.v[2] = aug_quad_min_z(eff) - BSP_FLOOR_EPS;
+    box.v[3] = eff->x1; box.v[4] = eff->y1;
+    box.v[5] = aug_quad_max_z(eff) + c->height;
 
     root = aug_tree_root(c->a);
     if (root <= 0) return 0;
@@ -781,8 +1000,8 @@ typedef struct aug_side {
     double drop;
 } aug_side;
 
-static int aug_platform_edges(aug_ctx *c, int ai, const aug_rect *eff,
-                              const aug_rect *req, aug_side *out)
+static int aug_platform_edges(aug_ctx *c, int ai, const aug_quad *eff,
+                              const aug_quad *req, aug_side *out)
 {
     double mx = ((double)eff->x0 + eff->x1) / 2.0;
     double my = ((double)eff->y0 + eff->y1) / 2.0;
@@ -800,12 +1019,13 @@ static int aug_platform_edges(aug_ctx *c, int ai, const aug_rect *eff,
         double along = edges[i] + sgns[i] * REACH_SIDE_OFFSET;
         double px = axes[i] == 0 ? along : mx;
         double py = axes[i] == 0 ? my : along;
-        int bi = sh_aas_point_area(c->a, (float)px, (float)py, eff->z);
+        int bi = sh_aas_point_area(c->a, (float)px, (float)py,
+                                   (float)aug_z_at(eff, px, py));
         float tb[5];
         double drop;
         if (bi <= 0 || bi == ai) continue;
         if (!aug_flat_box(c->a, (unsigned)bi, tb)) continue;
-        drop = (double)eff->z - (double)tb[4];
+        drop = aug_z_at(eff, px, py) - (double)tb[4];
         if (drop <= 0.0) continue;
         out[n].axis = axes[i];
         out[n].sgn = sgns[i];
@@ -831,8 +1051,8 @@ static int aug_platform_edges(aug_ctx *c, int ai, const aug_rect *eff,
  * aug_walk_links cannot do this job: it fires only when two flat boxes share a
  * degenerate edge segment, and a generated platform is carved INSIDE a floor
  * slab, so their footprints overlap in 2D instead. */
-static int aug_step_links(aug_ctx *c, int ai, const aug_rect *eff,
-                          const aug_rect *req)
+static int aug_step_links(aug_ctx *c, int ai, const aug_quad *eff,
+                          const aug_quad *req)
 {
     aug_side sides[4];
     int n = aug_platform_edges(c, ai, eff, req, sides);
@@ -850,15 +1070,15 @@ static int aug_step_links(aug_ctx *c, int ai, const aug_rect *eff,
             double up[3], dn[3];
             if (sides[i].axis == 0) {
                 up[0] = outer; up[1] = ts[k]; up[2] = sides[i].floor_z;
-                dn[0] = inner; dn[1] = ts[k]; dn[2] = eff->z;
+                dn[0] = inner; dn[1] = ts[k]; dn[2] = aug_z_at(eff, inner, ts[k]);
             } else {
                 up[0] = ts[k]; up[1] = outer; up[2] = sides[i].floor_z;
-                dn[0] = ts[k]; dn[1] = inner; dn[2] = eff->z;
+                dn[0] = ts[k]; dn[1] = inner; dn[2] = aug_z_at(eff, ts[k], inner);
             }
             /* Both endpoints must resolve to the area they claim, or the link is
              * a lie the router will act on. */
             if (sh_aas_point_area(c->a, (float)dn[0], (float)dn[1],
-                                  (float)(eff->z + 2.0)) != ai) continue;
+                                  (float)(dn[2] + 2.0)) != ai) continue;
             if (sh_aas_point_area(c->a, (float)up[0], (float)up[1],
                                   (float)(sides[i].floor_z + 2.0)) != sides[i].floor_area)
                 continue;
@@ -873,8 +1093,8 @@ static int aug_step_links(aug_ctx *c, int ai, const aug_rect *eff,
  * maxFallHeight, which is 0 in every monster-class module, so AUTO emits none.
  * That is deliberate -- no shipped monster-class payload contains a 0x40
  * record, and inventing one is off-precedent. */
-static int aug_fall_links(aug_ctx *c, int ai, const aug_rect *eff,
-                          const aug_rect *req)
+static int aug_fall_links(aug_ctx *c, int ai, const aug_quad *eff,
+                          const aug_quad *req)
 {
     aug_side sides[4];
     int n, i, added = 0;
@@ -896,7 +1116,7 @@ static int aug_fall_links(aug_ctx *c, int ai, const aug_rect *eff,
             s[0] = mx; s[1] = sides[i].area_edge - sides[i].sgn * REACH_SIDE_OFFSET;
             e[0] = mx; e[1] = sides[i].area_edge + sides[i].sgn * REACH_SIDE_OFFSET;
         }
-        s[2] = eff->z;
+        s[2] = aug_z_at(eff, s[0], s[1]);
         e[2] = sides[i].floor_z;
         time = (int)tt + aug_round(sides[i].drop * REACH_FALL_PER_UNIT);
         if (aug_reach(c, REACH_FALL, time, ai, sides[i].floor_area, s, e)) added++;
@@ -1012,8 +1232,8 @@ static int aug_trav_anchors(double lo, double hi, double *out, int cap)
  *
  * Every endpoint is checked with the BSP. A point that does not land in the area
  * it claims is dropped rather than written: the router would act on the lie. */
-static int aug_traversal_specs(aug_ctx *c, int ai, const aug_rect *eff,
-                               const aug_rect *req, aug_trav_spec *out, int cap)
+static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
+                               const aug_quad *req, aug_trav_spec *out, int cap)
 {
     aug_side sides[4];
     int n, i, k, d, count = 0;
@@ -1065,10 +1285,10 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_rect *eff,
                         inner_pt[0] = anchors[a]; inner_pt[1] = inner;
                         outer_pt[0] = anchors[a]; outer_pt[1] = outer;
                     }
-                    inner_pt[2] = eff->z;
+                    inner_pt[2] = aug_z_at(eff, inner_pt[0], inner_pt[1]);
                     outer_pt[2] = sides[i].floor_z;
                     if (sh_aas_point_area(c->a, (float)inner_pt[0], (float)inner_pt[1],
-                                          (float)(eff->z + 2.0)) != ai) continue;
+                                          (float)(inner_pt[2] + 2.0)) != ai) continue;
                     if (sh_aas_point_area(c->a, (float)outer_pt[0], (float)outer_pt[1],
                                           (float)(sides[i].floor_z + 2.0)) != sides[i].floor_area)
                         continue;
@@ -1298,10 +1518,13 @@ static double aug_plat_centroid_z(const sh_aug_platform *p)
 /* Clearance above a platform: the distance to the lowest thing that overlaps it
  * in XY and sits above it, counting both the module's own areas and the other
  * platforms in this bake. */
-static double aug_headroom(aug_ctx *c, const aug_rect *p,
+static double aug_headroom(aug_ctx *c, const aug_quad *p,
                            const sh_aug_platform *all, int n, int self)
 {
     double best = 1e30;
+    /* A tilted face has no single height; its centroid is the honest summary of
+     * where it sits for a clearance comparison. */
+    double pz = (p->c[0][2] + p->c[1][2] + p->c[2][2] + p->c[3][2]) / 4.0;
     unsigned i, na = sh_aas_count(c->a, SH_AAS_L_AREAS);
     int k;
     for (i = 1; i < na; i++) {
@@ -1309,20 +1532,20 @@ static double aug_headroom(aug_ctx *c, const aug_rect *p,
         double minz;
         if (!b) continue;
         minz = sh_aas_get_i16(b, AB_MINZ);
-        if (minz <= p->z) continue;
+        if (minz <= pz) continue;
         if (sh_aas_get_i16(b, AB_MAXX) <= p->x0 || sh_aas_get_i16(b, AB_MINX) >= p->x1) continue;
         if (sh_aas_get_i16(b, AB_MAXY) <= p->y0 || sh_aas_get_i16(b, AB_MINY) >= p->y1) continue;
-        if (minz - p->z < best) best = minz - p->z;
+        if (minz - pz < best) best = minz - pz;
     }
     for (k = 0; k < n; k++) {
         double b[4], z;
         if (k == self) continue;
         z = aug_plat_centroid_z(&all[k]);
-        if (z <= p->z) continue;
+        if (z <= pz) continue;
         aug_plat_bounds(&all[k], b);
         if (b[2] <= p->x0 || b[0] >= p->x1) continue;
         if (b[3] <= p->y0 || b[1] >= p->y1) continue;
-        if (z - p->z < best) best = z - p->z;
+        if (z - pz < best) best = z - pz;
     }
     return best;
 }
@@ -1336,8 +1559,8 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     aug_ctx c;
     int order[SH_AUG_MAX_PLATFORMS];
     int made[SH_AUG_MAX_PLATFORMS];
-    aug_rect effs[SH_AUG_MAX_PLATFORMS];
-    aug_rect reqs[SH_AUG_MAX_PLATFORMS];
+    aug_quad effs[SH_AUG_MAX_PLATFORMS];
+    aug_quad reqs[SH_AUG_MAX_PLATFORMS];
     float mins[3], maxs[3], fw, fd;
     int i, j, k, nmade = 0;
 
@@ -1351,6 +1574,12 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     c.radius = opts->inset ? aug_agent_radius(a) : 0.0f;
     c.height = aug_agent_height(a);
     c.step = sh_aas_setting_f32(a, SET_MAX_STEP_HEIGHT);
+    c.min_floor_cos = sh_aas_setting_f32(a, SET_MIN_FLOOR_COS);
+    /* Fail CLOSED. sh_aas_setting_f32 answers 0.0f for a model it cannot read,
+     * and a gate of "normal.z < 0" would cheerfully accept a vertical wall as
+     * floor. A payload we cannot read the slope limit out of is one we decline
+     * to augment. */
+    if (c.min_floor_cos <= 0.0 || c.min_floor_cos > 1.0) return 0;
     sh_aas_agent_bounds(a, mins, maxs);
     fw = maxs[0] - mins[0];
     fd = maxs[1] - mins[1];
@@ -1376,7 +1605,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         int idx = order[k];
         sh_aug_platform_result *pr = &out->platforms[idx];
         const sh_aug_platform *p = &plats[idx];
-        aug_rect req, eff;
+        aug_quad req, eff;
         int carrier, area;
         double head;
 
@@ -1385,25 +1614,33 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         pr->area = -1;
         pr->carrier = -1;
 
-        {
-            /* TEMPORARY BRIDGE: the AABB of the quad, which IS the quad for an
-             * upright volume. The next change replaces this with aug_quad, so
-             * behaviour here is deliberately identical to what shipped. */
-            double b[4];
-            aug_plat_bounds(p, b);
-            req.x0 = (float)b[0]; req.y0 = (float)b[1];
-            req.x1 = (float)b[2]; req.y1 = (float)b[3];
-            req.z = (float)aug_plat_centroid_z(p);
-        }
-        eff.x0 = req.x0 + c.radius; eff.x1 = req.x1 - c.radius;
-        eff.y0 = req.y0 + c.radius; eff.y1 = req.y1 - c.radius;
-        eff.z = req.z;
+        pr->tilt_degrees = (float)aug_degrees_from_horizontal(p->n[2]);
+        /* face 4 is an UPRIGHT box's top. Anything else means the author is
+         * standing on what they think of as a side, which is correct for a
+         * tipped box and worth telling them. */
+        pr->side_face = (p->face != 4);
 
-        if (eff.x1 - eff.x0 < fw || eff.y1 - eff.y0 < fd) {
+        if (!aug_quad_from_platform(&req, p)) {
             _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
-                        "too small: %.0fx%.0f after the %.0f-unit agent-radius inset, "
-                        "this demon size needs %.0fx%.0f",
-                        eff.x1 - eff.x0, eff.y1 - eff.y0, c.radius, fw, fd);
+                        "this face has no footprint to walk on");
+            continue;
+        }
+        if ((double)p->n[2] < c.min_floor_cos) {
+            _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
+                        "too steep: this face is %.0f degrees from horizontal, "
+                        "this nav class walks up to %.1f",
+                        pr->tilt_degrees,
+                        aug_degrees_from_horizontal(c.min_floor_cos));
+            continue;
+        }
+        if (!aug_quad_inset(&req, c.radius, &eff) ||
+            aug_quad_min_width(&eff) < (fw < fd ? fw : fd)) {
+            /* The AABB would overstate a rotated quad's usable size, so the
+             * comparison is against its narrowest edge-to-corner width. */
+            _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
+                        "too small: %.0f units across after the %.0f-unit "
+                        "agent-radius inset, this demon size needs %.0fx%.0f",
+                        aug_quad_min_width(&req) - 2.0 * c.radius, c.radius, fw, fd);
             continue;
         }
         head = aug_headroom(&c, &req, plats, n, idx);
@@ -1415,15 +1652,19 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         }
         if (eff.x0 <= AUG_INT16_LO || eff.x1 >= AUG_INT16_HI ||
             eff.y0 <= AUG_INT16_LO || eff.y1 >= AUG_INT16_HI ||
-            eff.z  <= AUG_INT16_LO || eff.z  >= AUG_INT16_HI) {
+            aug_quad_min_z(&eff) <= AUG_INT16_LO ||
+            aug_quad_max_z(&eff) >= AUG_INT16_HI) {
             _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
                         "outside the coordinate range navigation bounds can hold "
                         "(+/-32767)");
             continue;
         }
 
-        carrier = sh_aas_point_area(a, (eff.x0 + eff.x1) / 2.0f,
-                                    (eff.y0 + eff.y1) / 2.0f, eff.z);
+        {
+            double mx = (eff.x0 + eff.x1) / 2.0, my = (eff.y0 + eff.y1) / 2.0;
+            carrier = sh_aas_point_area(a, (float)mx, (float)my,
+                                        (float)aug_z_at(&eff, mx, my));
+        }
         area = aug_add_area(&c, &eff, carrier);
         if (area < 0) {
             _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
@@ -1538,4 +1779,41 @@ int sh_aug_test_trav_anchors(double lo, double hi, double *out, int cap)
 {
     return aug_trav_anchors(lo, hi, out, cap);
 }
+
+/* The quad geometry, reached through an opaque buffer because aug_quad is
+ * internal and the tests are a separate translation unit. */
+size_t sh_aug_test_quad_size(void) { return sizeof(aug_quad); }
+
+int sh_aug_test_quad_init(void *quad, const double corners[4][3])
+{
+    return aug_quad_init((aug_quad *)quad, corners);
+}
+
+double sh_aug_test_z_at(const void *quad, double x, double y)
+{
+    return aug_z_at((const aug_quad *)quad, x, y);
+}
+
+int sh_aug_test_quad_inset(const void *quad, double r, void *out)
+{
+    return aug_quad_inset((const aug_quad *)quad, r, (aug_quad *)out);
+}
+
+int sh_aug_test_quad_contains(const void *quad, double x, double y)
+{
+    return aug_quad_contains_xy((const aug_quad *)quad, x, y);
+}
+
+void sh_aug_test_quad_corner(const void *quad, int i, double out[3])
+{
+    const aug_quad *q = (const aug_quad *)quad;
+    out[0] = q->c[i & 3][0]; out[1] = q->c[i & 3][1]; out[2] = q->c[i & 3][2];
+}
+
+double sh_aug_test_quad_normal_z(const void *quad)
+{
+    return ((const aug_quad *)quad)->n[2];
+}
+
+int sh_aug_test_node_field4(double plane_c) { return aug_node_field4(plane_c); }
 #endif

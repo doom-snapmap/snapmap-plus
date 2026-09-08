@@ -151,6 +151,18 @@ int sh_aug_test_trav_anchors(double lo, double hi, double *out, int cap);
 /* Cap the anchors tried per demon (1 = the old single-midpoint behaviour).
  * Returns the previous cap. 0 = uncapped. */
 int sh_aug_test_set_anchor_cap(int n);
+
+/* The quad geometry, through an opaque buffer: `aug_quad` is internal to the
+ * .c and the tests are a separate translation unit. Size a local array with
+ * sh_aug_test_quad_size() and pass it as `quad`. */
+size_t sh_aug_test_quad_size(void);
+int    sh_aug_test_quad_init(void *quad, const double corners[4][3]);
+double sh_aug_test_z_at(const void *quad, double x, double y);
+int    sh_aug_test_quad_inset(const void *quad, double r, void *out);
+int    sh_aug_test_quad_contains(const void *quad, double x, double y);
+void   sh_aug_test_quad_corner(const void *quad, int i, double out[3]);
+double sh_aug_test_quad_normal_z(const void *quad);
+int    sh_aug_test_node_field4(double plane_c);
 #endif
 
 #endif /* SNAPMAP_PLUS_AAS_AUGMENT_H */
