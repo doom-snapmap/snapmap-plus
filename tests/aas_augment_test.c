@@ -677,6 +677,114 @@ static void test_a_yawed_area_resolves_through_the_bsp(void)
     sh_aas_free(a);
 }
 
+/* ==================================================================== */
+/* chaining: volumes standing together link to EACH OTHER                */
+/* ==================================================================== */
+
+/* Does any reachability join these two areas, and how many? */
+static int reach_count(sh_aas *a, int from, int to)
+{
+    unsigned i, n = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+    int found = 0;
+    for (i = 0; i < n; i++) {
+        const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
+        if (!r) continue;
+        /* reachability: travel_flags u32 at 0, from u16 at 6, to u16 at 8. */
+        if ((int)sh_aas_get_u16(r, 6) == from && (int)sh_aas_get_u16(r, 8) == to) found++;
+    }
+    return found;
+}
+
+static int reach_exists(sh_aas *a, int from, int to) { return reach_count(a, from, to) > 0; }
+
+/* How many of them are of one travel type -- 0x20 is a plain walk. */
+static int reach_count_of_type(sh_aas *a, int from, int to, unsigned type)
+{
+    unsigned i, n = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+    int found = 0;
+    for (i = 0; i < n; i++) {
+        const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
+        if (!r) continue;
+        if ((int)sh_aas_get_u16(r, 6) == from && (int)sh_aas_get_u16(r, 8) == to &&
+            sh_aas_get_u32(r, 0) == type) found++;
+    }
+    return found;
+}
+
+/* THE REPORTED BUG. Two volumes standing side by side, 12 apart in z so the step
+ * regime carries it and no traversal table is needed. Before this change each
+ * one linked only to the module floor, so a demon walked DOWN off one, across
+ * the floor, and back UP the other -- "they climb down first then climb the
+ * other bv". */
+static void test_two_abutting_platforms_link_to_each_other(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+    printf("two volumes standing together link to each other\n");
+    mkplat(&p[0], -512.0f, -512.0f,    0.0f, 512.0f, 16.0f, "lower");
+    mkplat(&p[1],    0.0f, -512.0f,  512.0f, 512.0f, 28.0f, "upper");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK(rep.platforms[0].emitted == 1);
+    CHECK(rep.platforms[1].emitted == 1);
+    if (rep.platforms[0].emitted && rep.platforms[1].emitted) {
+        CHECK_MSG(reach_exists(a, rep.platforms[0].area, rep.platforms[1].area),
+                  "the lower one reaches the upper one directly");
+        CHECK_MSG(reach_exists(a, rep.platforms[1].area, rep.platforms[0].area),
+                  "and back again");
+        CHECK_MSG(rep.platforms[0].neighbours >= 1, "the report says so");
+    }
+    sh_aas_free(a);
+}
+
+/* A neighbour abutting only PART of an edge. The single midpoint probe this
+ * replaced landed past it and answered with the floor. */
+static void test_a_partially_abutting_neighbour_is_found(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+    printf("a neighbour touching only part of an edge is still found\n");
+    mkplat(&p[0], -512.0f, -512.0f,   0.0f, 512.0f, 16.0f, "wide");
+    /* Covers only the top third of the shared edge. */
+    mkplat(&p[1],    0.0f,  200.0f, 512.0f, 512.0f, 28.0f, "corner");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    if (rep.platforms[0].emitted && rep.platforms[1].emitted)
+        CHECK_MSG(reach_exists(a, rep.platforms[0].area, rep.platforms[1].area),
+                  "the partial overlap is enough to link them");
+    sh_aas_free(a);
+}
+
+/* Symmetric discovery means A sees B and B sees A, and the regimes already write
+ * both directions per segment. Without the ownership rule every record would be
+ * written twice and AUG_MAX_TRAVERSALS would fill with duplicates. Step links
+ * are emitted per SAMPLE, so the count is not one -- what must hold is that the
+ * two directions agree. */
+static void test_a_pair_is_not_emitted_twice(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    int fwd, back;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+    printf("each pair of volumes is linked once, not twice\n");
+    mkplat(&p[0], -512.0f, -512.0f,    0.0f, 512.0f, 16.0f, "a");
+    mkplat(&p[1],    0.0f, -512.0f,  512.0f, 512.0f, 28.0f, "b");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    if (rep.platforms[0].emitted && rep.platforms[1].emitted) {
+        fwd  = reach_count(a, rep.platforms[0].area, rep.platforms[1].area);
+        back = reach_count(a, rep.platforms[1].area, rep.platforms[0].area);
+        CHECK(fwd > 0);
+        CHECK_MSG(fwd == back, "the two directions must agree");
+    }
+    sh_aas_free(a);
+}
+
 int main(void)
 {
     printf("aas_augment_test\n");
@@ -690,6 +798,9 @@ int main(void)
     test_minfloorcos_gate_at_the_boundary();
     test_unreadable_minfloorcos_rejects_the_payload();
     test_a_yawed_area_resolves_through_the_bsp();
+    test_two_abutting_platforms_link_to_each_other();
+    test_a_partially_abutting_neighbour_is_found();
+    test_a_pair_is_not_emitted_twice();
     test_island_at_128();
     test_step_regime_at_16();
     test_refusals();

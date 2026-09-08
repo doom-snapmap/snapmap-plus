@@ -563,19 +563,26 @@ static int aug_node(aug_ctx *c, int plane_num, int field4, int child0, int child
 
 /* ---- area geometry ----------------------------------------------------- */
 
-/* An area whose bounds are flat in z, as (minx, miny, maxx, maxy, z). A
- * generated platform and every Grid Room floor slab are flat; anything else is
- * not something these linkers know how to join. */
-static int aug_flat_box(const sh_aas *a, unsigned area, float out[5])
+/* An area's bounds, as (minx, miny, maxx, maxy, minz, maxz).
+ *
+ * There is deliberately NO flatness gate. Its predecessor refused any area whose
+ * minz != maxz, which did two kinds of harm: it would make every tilted
+ * generated area an unlinkable island, and it ALREADY made the linkers blind to
+ * the majority of shipped module areas -- 144 of 159 in d2_map_01.aas_monster48
+ * have spanning bounds, 57 of 102 in hell_big_blank_room.
+ *
+ * Callers take maxz as the surface a demon stands on: exact for a flat area, and
+ * the conservative choice for a sloped one. */
+static int aug_area_box(const sh_aas *a, unsigned area, float out[6])
 {
     const unsigned char *b = sh_aas_rec_const(a, SH_AAS_L_AREABOUNDS, area);
     if (!b) return 0;
-    if (sh_aas_get_i16(b, AB_MINZ) != sh_aas_get_i16(b, AB_MAXZ)) return 0;
     out[0] = (float)sh_aas_get_i16(b, AB_MINX);
     out[1] = (float)sh_aas_get_i16(b, AB_MINY);
     out[2] = (float)sh_aas_get_i16(b, AB_MAXX);
     out[3] = (float)sh_aas_get_i16(b, AB_MAXY);
     out[4] = (float)sh_aas_get_i16(b, AB_MINZ);
+    out[5] = (float)sh_aas_get_i16(b, AB_MAXZ);
     return 1;
 }
 
@@ -954,12 +961,12 @@ static int aug_samples(float lo, float hi, double *out, int cap)
  * own area's z, sampled along the edge. */
 static int aug_walk_links(aug_ctx *c, int ai, int bi)
 {
-    float A[5], B[5];
+    float A[6], B[6];
     double ox0, ox1, oy0, oy1, ts[64];
     int added = 0, n, k;
-    if (!aug_flat_box(c->a, (unsigned)ai, A)) return 0;
-    if (!aug_flat_box(c->a, (unsigned)bi, B)) return 0;
-    if (fabs((double)A[4] - (double)B[4]) > (double)c->step) return 0;
+    if (!aug_area_box(c->a, (unsigned)ai, A)) return 0;
+    if (!aug_area_box(c->a, (unsigned)bi, B)) return 0;
+    if (fabs((double)A[5] - (double)B[5]) > (double)c->step) return 0;
     ox0 = A[0] > B[0] ? A[0] : B[0];
     ox1 = A[2] < B[2] ? A[2] : B[2];
     oy0 = A[1] > B[1] ? A[1] : B[1];
@@ -970,8 +977,8 @@ static int aug_walk_links(aug_ctx *c, int ai, int bi)
         n = aug_samples((float)oy0, (float)oy1, ts, 64);
         for (k = 0; k < n; k++) {
             double s[3], e[3];
-            s[0] = ox0 - sgn * REACH_SIDE_OFFSET; s[1] = ts[k]; s[2] = A[4];
-            e[0] = ox0 + sgn * REACH_SIDE_OFFSET; e[1] = ts[k]; e[2] = B[4];
+            s[0] = ox0 - sgn * REACH_SIDE_OFFSET; s[1] = ts[k]; s[2] = A[5];
+            e[0] = ox0 + sgn * REACH_SIDE_OFFSET; e[1] = ts[k]; e[2] = B[5];
             if (aug_reach(c, REACH_WALK, REACH_WALK_TIME, ai, bi, s, e)) added++;
         }
     } else if (oy1 == oy0 && ox1 > ox0) {
@@ -979,64 +986,232 @@ static int aug_walk_links(aug_ctx *c, int ai, int bi)
         n = aug_samples((float)ox0, (float)ox1, ts, 64);
         for (k = 0; k < n; k++) {
             double s[3], e[3];
-            s[0] = ts[k]; s[1] = oy0 - sgn * REACH_SIDE_OFFSET; s[2] = A[4];
-            e[0] = ts[k]; e[1] = oy0 + sgn * REACH_SIDE_OFFSET; e[2] = B[4];
+            s[0] = ts[k]; s[1] = oy0 - sgn * REACH_SIDE_OFFSET; s[2] = A[5];
+            e[0] = ts[k]; e[1] = oy0 + sgn * REACH_SIDE_OFFSET; e[2] = B[5];
             if (aug_reach(c, REACH_WALK, REACH_WALK_TIME, ai, bi, s, e)) added++;
         }
     }
     return added;
 }
 
-/* (axis, outward sign, area edge, wall, floor area, floor z, drop) for each
- * platform edge that has a flat floor area outside it and below it. Shared by
- * the step and fall linkers so both see exactly the same geometry. */
+/* One SEGMENT of one platform edge, and what lies across it. Shared by every
+ * link regime so they all see exactly the same geometry.
+ *
+ * DIRECTIONAL, not axis-aligned: a rotated platform's edge has no axis. `out` is
+ * the outward unit XY normal, which for an axis-aligned quad is exactly the
+ * (axis, sgn) pair this replaced.
+ *
+ * A SEGMENT, not the whole edge: its predecessor probed one point per side, at
+ * the side's midpoint, so a neighbour abutting only part of an edge was invisible
+ * and the probe answered with the module floor far below. That is what made
+ * demons climb down and back up between two volumes standing together.
+ *
+ * `drop` is SIGNED -- near_z minus far_z -- because discovery can now see a
+ * neighbour ABOVE. Every regime gates on its MAGNITUDE plus a direction; see
+ * aug_regime. Gating on the signed value was safe only while a neighbour above
+ * could not occur, and would now classify a 500-unit rise as a step. */
 typedef struct aug_side {
-    int   axis;         /* 0 = x, 1 = y */
-    double sgn;         /* outward */
-    double area_edge;
-    double wall;
-    int   floor_area;
-    double floor_z;
-    double drop;
+    double p0[2], p1[2];    /* the segment on the INSET quad, in edge order */
+    double out[2];          /* outward unit normal in XY */
+    int    floor_area;      /* the area across it */
+    double near_z, far_z;   /* surface height each side, at the segment midpoint */
+    double drop;            /* near_z - far_z */
+    double gap;             /* XY clearance; 0 when touching */
+    int    generated;       /* 1 if the neighbour is another generated quad */
+    int    peer;            /* index into the peer table, or -1 */
 } aug_side;
 
-static int aug_platform_edges(aug_ctx *c, int ai, const aug_quad *eff,
-                              const aug_quad *req, aug_side *out)
+/* A quad this bake already created: its uninset footprint, its inset footprint
+ * and the area it became. Adjacency is decided on `req` and endpoints are placed
+ * inside `eff`; see aug_edge_segments. */
+typedef struct aug_peer {
+    const aug_quad *req;
+    const aug_quad *eff;
+    int             area;
+} aug_peer;
+
+/* How close two UNINSET footprints must be to count as touching. Volumes an
+ * author snapped together are flush, but exact zero is the wrong test against
+ * float noise, and a gap below the shortest shipped leap cannot be crossed by
+ * anything -- so anything within this is dispatched to the step or climb
+ * regime rather than falling into a hole between the two. */
+#define AUG_TOUCH_EPS   4.0
+
+/* The XY clearance between two convex quads: 0 if they touch or overlap.
+ * Measured on the UNINSET footprints, because that is where the walls actually
+ * are. */
+static double aug_quad_gap(const aug_quad *a, const aug_quad *b)
 {
-    double mx = ((double)eff->x0 + eff->x1) / 2.0;
-    double my = ((double)eff->y0 + eff->y1) / 2.0;
-    const int    axes[4] = { 1, 1, 0, 0 };
-    const double sgns[4] = { +1.0, -1.0, -1.0, +1.0 };
-    double edges[4], walls[4];
-    int i, n = 0;
-
-    edges[0] = eff->y1; walls[0] = req->y1;
-    edges[1] = eff->y0; walls[1] = req->y0;
-    edges[2] = eff->x0; walls[2] = req->x0;
-    edges[3] = eff->x1; walls[3] = req->x1;
-
+    double best = 1e30;
+    int i, k;
+    /* Cheap separating-box reject first. */
+    if (a->x1 < b->x0 - 4096.0 || b->x1 < a->x0 - 4096.0 ||
+        a->y1 < b->y0 - 4096.0 || b->y1 < a->y0 - 4096.0) return 1e30;
+    /* Point-to-edge over both directions is enough for two convex quads at the
+     * distances that matter here. */
     for (i = 0; i < 4; i++) {
-        double along = edges[i] + sgns[i] * REACH_SIDE_OFFSET;
-        double px = axes[i] == 0 ? along : mx;
-        double py = axes[i] == 0 ? my : along;
-        int bi = sh_aas_point_area(c->a, (float)px, (float)py,
-                                   (float)aug_z_at(eff, px, py));
-        float tb[5];
-        double drop;
-        if (bi <= 0 || bi == ai) continue;
-        if (!aug_flat_box(c->a, (unsigned)bi, tb)) continue;
-        drop = aug_z_at(eff, px, py) - (double)tb[4];
-        if (drop <= 0.0) continue;
-        out[n].axis = axes[i];
-        out[n].sgn = sgns[i];
-        out[n].area_edge = edges[i];
-        out[n].wall = walls[i];
-        out[n].floor_area = bi;
-        out[n].floor_z = tb[4];
-        out[n].drop = drop;
-        n++;
+        for (k = 0; k < 4; k++) {
+            double ex = b->c[(k + 1) & 3][0] - b->c[k][0];
+            double ey = b->c[(k + 1) & 3][1] - b->c[k][1];
+            double len2 = ex * ex + ey * ey, t, dx, dy, d;
+            if (len2 < 1e-9) continue;
+            t = ((a->c[i][0] - b->c[k][0]) * ex + (a->c[i][1] - b->c[k][1]) * ey) / len2;
+            if (t < 0.0) t = 0.0;
+            if (t > 1.0) t = 1.0;
+            dx = a->c[i][0] - (b->c[k][0] + t * ex);
+            dy = a->c[i][1] - (b->c[k][1] + t * ey);
+            d = sqrt(dx * dx + dy * dy);
+            if (d < best) best = d;
+        }
+        if (aug_quad_contains_xy(b, a->c[i][0], a->c[i][1])) return 0.0;
+        if (aug_quad_contains_xy(a, b->c[i][0], b->c[i][1])) return 0.0;
+    }
+    return best;
+}
+
+/* Parameters along an edge, in 0..1, for segmenting it. Denser than the single
+ * midpoint the predecessor used, which is the whole point. */
+static int aug_samples_unit(double *out, int cap)
+{
+    int i, n = cap < 17 ? cap : 17;
+    if (n < 2) { if (cap > 0) out[0] = 0.5; return cap > 0 ? 1 : 0; }
+    for (i = 0; i < n; i++) out[i] = (double)i / (double)(n - 1);
+    return n;
+}
+
+/* Fill one segment record from a run of samples facing one neighbour. */
+static void aug_close_segment(aug_ctx *c, aug_side *sd, const aug_quad *eff,
+                              int e, const double out2[2], double t0, double t1,
+                              int who, const aug_peer *peers, int npeers,
+                              const aug_quad *req)
+{
+    int j = (e + 1) & 3, q;
+    double mt = (t0 + t1) / 2.0, mx, my;
+
+    sd->p0[0] = eff->c[e][0] + t0 * (eff->c[j][0] - eff->c[e][0]);
+    sd->p0[1] = eff->c[e][1] + t0 * (eff->c[j][1] - eff->c[e][1]);
+    sd->p1[0] = eff->c[e][0] + t1 * (eff->c[j][0] - eff->c[e][0]);
+    sd->p1[1] = eff->c[e][1] + t1 * (eff->c[j][1] - eff->c[e][1]);
+    sd->out[0] = out2[0];
+    sd->out[1] = out2[1];
+    mx = eff->c[e][0] + mt * (eff->c[j][0] - eff->c[e][0]);
+    my = eff->c[e][1] + mt * (eff->c[j][1] - eff->c[e][1]);
+    sd->near_z = aug_z_at(eff, mx, my);
+    sd->floor_area = who;
+    sd->generated = 0;
+    sd->peer = -1;
+    sd->gap = 0.0;
+
+    for (q = 0; q < npeers; q++) {
+        if (peers[q].area != who) continue;
+        sd->generated = 1;
+        sd->peer = q;
+        sd->far_z = aug_z_at(peers[q].eff, mx + out2[0] * 8.0, my + out2[1] * 8.0);
+        sd->gap = aug_quad_gap(req, peers[q].req);
+        if (sd->gap < AUG_TOUCH_EPS) sd->gap = 0.0;
+        break;
+    }
+    if (!sd->generated) {
+        float tb[6];
+        sd->far_z = aug_area_box(c->a, (unsigned)who, tb) ? (double)tb[5] : sd->near_z;
+    }
+    sd->drop = sd->near_z - sd->far_z;
+}
+
+/* Per edge of the quad, the SEGMENTS of that edge and the neighbour each faces.
+ *
+ * Two neighbour sources, and they are deliberately not symmetric:
+ *
+ * 1. OTHER GENERATED QUADS, compared directly in XY against their UNINSET
+ *    footprints. Exact and symmetric, so partial abutment, neighbours ABOVE and
+ *    the lowest-first creation order all stop mattering -- the augmenter already
+ *    holds every quad it made and does not have to rediscover them through the
+ *    BSP.
+ *
+ *    On `req`, NOT `eff`. `eff` is inset by the agent radius -- 24, 48 or 64 by
+ *    nav class -- so two FLUSH volumes are up to 128 units apart in `eff`, and a
+ *    proximity test there finds nothing at all for exactly the case this exists
+ *    to fix.
+ *
+ * 2. THE MODULE'S OWN SHIPPED AREAS, sampled and BSP-probed. Downward only: an
+ *    author cannot place a shipped module area above their own platform, so the
+ *    restriction is right for this source and wrong for the other.
+ *
+ * A contiguous run of samples facing one neighbour becomes one segment. */
+static int aug_edge_segments(aug_ctx *c, int ai, const aug_quad *eff,
+                             const aug_quad *req, const aug_peer *peers,
+                             int npeers, aug_side *out, int cap)
+{
+    int e, n = 0;
+
+    for (e = 0; e < 4 && n < cap; e++) {
+        double in2[2], out2[2], ts[32];
+        int cnt, k, run_start = 0, run_peer = -2, j = (e + 1) & 3;
+
+        aug_edge_normal_in(eff, e, in2);
+        out2[0] = -in2[0];
+        out2[1] = -in2[1];
+        cnt = aug_samples_unit(ts, 32);
+
+        for (k = 0; k <= cnt; k++) {
+            int who = -1, q;
+            if (k < cnt) {
+                double t = ts[k];
+                double ex = req->c[e][0] + t * (req->c[j][0] - req->c[e][0]);
+                double ey = req->c[e][1] + t * (req->c[j][1] - req->c[e][1]);
+                double px = ex + out2[0] * AUG_TOUCH_EPS;
+                double py = ey + out2[1] * AUG_TOUCH_EPS;
+                for (q = 0; q < npeers; q++) {
+                    if (peers[q].area == ai) continue;
+                    if (aug_quad_contains_xy(peers[q].req, px, py)) { who = peers[q].area; break; }
+                }
+                if (who < 0) {
+                    float tb[6];
+                    double nz = aug_z_at(eff, ex, ey);
+                    double bx = ex + out2[0] * REACH_SIDE_OFFSET;
+                    double by = ey + out2[1] * REACH_SIDE_OFFSET;
+                    int bi = sh_aas_point_area(c->a, (float)bx, (float)by, (float)nz);
+                    if (bi > 0 && bi != ai && aug_area_box(c->a, (unsigned)bi, tb) &&
+                        (double)tb[5] < nz) who = bi;
+                }
+            }
+            if (who != run_peer) {
+                if (run_peer >= 0 && n < cap)
+                    aug_close_segment(c, &out[n++], eff, e, out2,
+                                      ts[run_start], ts[k - 1], run_peer,
+                                      peers, npeers, req);
+                run_peer = who;
+                run_start = k;
+            }
+        }
     }
     return n;
+}
+
+/* Which regime carries a segment.
+ *
+ * On the MAGNITUDE of the height change plus an explicit direction. The
+ * predecessors gated on the signed drop, which was safe only because discovery
+ * refused neighbours above; with that gone, `drop > step` would call a 500-unit
+ * RISE a step and emit a plain 0x20 walk link for it -- and across 94,327
+ * shipped walk records joining two flat areas, not one spans more than
+ * maxStepHeight. */
+enum { REGIME_NONE = 0, REGIME_STEP, REGIME_UP, REGIME_DOWN, REGIME_LEAP };
+
+static int aug_regime(const aug_side *s, double step)
+{
+    if (s->gap > AUG_TOUCH_EPS) return REGIME_LEAP;
+    if (fabs(s->drop) <= step)  return REGIME_STEP;
+    return s->drop > 0.0 ? REGIME_DOWN : REGIME_UP;
+}
+
+/* Emit for this segment at all? With symmetric quad-to-quad discovery A sees B
+ * and B sees A, and the regimes already write both directions per segment, so
+ * without this every record between two generated quads is written twice. The
+ * lower area index owns the pair. */
+static int aug_side_owns(const aug_side *s, int ai)
+{
+    return !(s->generated && s->floor_area < ai);
 }
 
 /* Plain walk links for a platform inside the STEP regime.
@@ -1052,35 +1227,57 @@ static int aug_platform_edges(aug_ctx *c, int ai, const aug_quad *eff,
  * degenerate edge segment, and a generated platform is carved INSIDE a floor
  * slab, so their footprints overlap in 2D instead. */
 static int aug_step_links(aug_ctx *c, int ai, const aug_quad *eff,
-                          const aug_quad *req)
+                          const aug_quad *req, const aug_peer *peers, int npeers)
 {
-    aug_side sides[4];
-    int n = aug_platform_edges(c, ai, eff, req, sides);
+    aug_side sides[64];
+    int n = aug_edge_segments(c, ai, eff, req, peers, npeers, sides,
+                              (int)(sizeof sides / sizeof sides[0]));
     int added = 0, i, k;
+
     for (i = 0; i < n; i++) {
-        double lo, hi, inner, outer, ts[64];
+        double ts[64];
         int cnt;
-        if (sides[i].drop > (double)c->step) continue;
-        lo = sides[i].axis == 0 ? eff->y0 : eff->x0;
-        hi = sides[i].axis == 0 ? eff->y1 : eff->x1;
-        inner = sides[i].area_edge - sides[i].sgn * REACH_SIDE_OFFSET;
-        outer = sides[i].area_edge + sides[i].sgn * REACH_SIDE_OFFSET;
-        cnt = aug_samples((float)lo, (float)hi, ts, 64);
+        if (aug_regime(&sides[i], (double)c->step) != REGIME_STEP) continue;
+        if (!aug_side_owns(&sides[i], ai)) continue;
+        cnt = aug_samples_unit(ts, 64);
         for (k = 0; k < cnt; k++) {
-            double up[3], dn[3];
-            if (sides[i].axis == 0) {
-                up[0] = outer; up[1] = ts[k]; up[2] = sides[i].floor_z;
-                dn[0] = inner; dn[1] = ts[k]; dn[2] = aug_z_at(eff, inner, ts[k]);
+            double t = ts[k], up[3], dn[3];
+            /* The near endpoint sits inside THIS quad; the far one inside the
+             * neighbour's own inset footprint, not one unit past a shared wall.
+             * Generated areas are carved at the INSET quad, so two flush volumes
+             * have areas 2*radius apart -- 48 to 128 units -- with the floor slab
+             * between them. Probing just outside the wall lands in that dead
+             * strip, the BSP answers with the floor, and the link is refused:
+             * every step link between two chained volumes, gone. */
+            dn[0] = sides[i].p0[0] + t * (sides[i].p1[0] - sides[i].p0[0])
+                  - sides[i].out[0] * REACH_SIDE_OFFSET;
+            dn[1] = sides[i].p0[1] + t * (sides[i].p1[1] - sides[i].p0[1])
+                  - sides[i].out[1] * REACH_SIDE_OFFSET;
+            dn[2] = aug_z_at(eff, dn[0], dn[1]);
+            if (sides[i].generated && sides[i].peer >= 0) {
+                const aug_quad *pe = peers[sides[i].peer].eff;
+                double cx = (pe->x0 + pe->x1) / 2.0, cy = (pe->y0 + pe->y1) / 2.0;
+                double bx = sides[i].p0[0] + t * (sides[i].p1[0] - sides[i].p0[0]);
+                double by = sides[i].p0[1] + t * (sides[i].p1[1] - sides[i].p0[1]);
+                double gx = bx + sides[i].out[0] * 8.0, gy = by + sides[i].out[1] * 8.0;
+                /* Walk in from the shared edge until the point is genuinely on
+                 * the neighbour's area, then fall back to its centre. */
+                if (!aug_quad_contains_xy(pe, gx, gy)) { gx = cx; gy = cy; }
+                up[0] = gx; up[1] = gy;
+                up[2] = aug_z_at(pe, gx, gy);
             } else {
-                up[0] = ts[k]; up[1] = outer; up[2] = sides[i].floor_z;
-                dn[0] = ts[k]; dn[1] = inner; dn[2] = aug_z_at(eff, ts[k], inner);
+                up[0] = sides[i].p0[0] + t * (sides[i].p1[0] - sides[i].p0[0])
+                      + sides[i].out[0] * REACH_SIDE_OFFSET;
+                up[1] = sides[i].p0[1] + t * (sides[i].p1[1] - sides[i].p0[1])
+                      + sides[i].out[1] * REACH_SIDE_OFFSET;
+                up[2] = sides[i].far_z;
             }
             /* Both endpoints must resolve to the area they claim, or the link is
              * a lie the router will act on. */
             if (sh_aas_point_area(c->a, (float)dn[0], (float)dn[1],
                                   (float)(dn[2] + 2.0)) != ai) continue;
             if (sh_aas_point_area(c->a, (float)up[0], (float)up[1],
-                                  (float)(sides[i].floor_z + 2.0)) != sides[i].floor_area)
+                                  (float)(up[2] + 2.0)) != sides[i].floor_area)
                 continue;
             if (aug_reach(c, REACH_WALK, REACH_WALK_TIME, sides[i].floor_area, ai, up, dn)) added++;
             if (aug_reach(c, REACH_WALK, REACH_WALK_TIME, ai, sides[i].floor_area, dn, up)) added++;
@@ -1094,32 +1291,33 @@ static int aug_step_links(aug_ctx *c, int ai, const aug_quad *eff,
  * That is deliberate -- no shipped monster-class payload contains a 0x40
  * record, and inventing one is off-precedent. */
 static int aug_fall_links(aug_ctx *c, int ai, const aug_quad *eff,
-                          const aug_quad *req)
+                          const aug_quad *req, const aug_peer *peers, int npeers)
 {
-    aug_side sides[4];
+    aug_side sides[64];
     int n, i, added = 0;
     double max_fall = sh_aas_setting_f32(c->a, SET_MAX_FALL_HEIGHT);
     double tt = sh_aas_setting_f32(c->a, SET_TT_WALK_OFF_LEDGE);
+
     if (c->o->fall == SH_AUG_FALL_NEVER) return 0;
-    n = aug_platform_edges(c, ai, eff, req, sides);
+    n = aug_edge_segments(c, ai, eff, req, peers, npeers, sides,
+                          (int)(sizeof sides / sizeof sides[0]));
     for (i = 0; i < n; i++) {
-        double s[3], e[3], mx, my;
+        double s3[3], e3[3], bx, by;
         int time;
-        if (sides[i].drop <= (double)c->step) continue;    /* the step regime walks it */
+        /* Falling is DOWNWARD only, by definition -- a rise is a climb. */
+        if (aug_regime(&sides[i], (double)c->step) != REGIME_DOWN) continue;
+        if (!aug_side_owns(&sides[i], ai)) continue;
         if (c->o->fall == SH_AUG_FALL_AUTO && sides[i].drop > max_fall) continue;
-        mx = ((double)eff->x0 + eff->x1) / 2.0;
-        my = ((double)eff->y0 + eff->y1) / 2.0;
-        if (sides[i].axis == 0) {
-            s[0] = sides[i].area_edge - sides[i].sgn * REACH_SIDE_OFFSET; s[1] = my;
-            e[0] = sides[i].area_edge + sides[i].sgn * REACH_SIDE_OFFSET; e[1] = my;
-        } else {
-            s[0] = mx; s[1] = sides[i].area_edge - sides[i].sgn * REACH_SIDE_OFFSET;
-            e[0] = mx; e[1] = sides[i].area_edge + sides[i].sgn * REACH_SIDE_OFFSET;
-        }
-        s[2] = aug_z_at(eff, s[0], s[1]);
-        e[2] = sides[i].floor_z;
-        time = (int)tt + aug_round(sides[i].drop * REACH_FALL_PER_UNIT);
-        if (aug_reach(c, REACH_FALL, time, ai, sides[i].floor_area, s, e)) added++;
+        bx = (sides[i].p0[0] + sides[i].p1[0]) / 2.0;
+        by = (sides[i].p0[1] + sides[i].p1[1]) / 2.0;
+        s3[0] = bx - sides[i].out[0] * REACH_SIDE_OFFSET;
+        s3[1] = by - sides[i].out[1] * REACH_SIDE_OFFSET;
+        s3[2] = aug_z_at(eff, s3[0], s3[1]);
+        e3[0] = bx + sides[i].out[0] * REACH_SIDE_OFFSET;
+        e3[1] = by + sides[i].out[1] * REACH_SIDE_OFFSET;
+        e3[2] = sides[i].far_z;
+        time = (int)tt + aug_round((float)(sides[i].drop * REACH_FALL_PER_UNIT));
+        if (aug_reach(c, REACH_FALL, time, ai, sides[i].floor_area, s3, e3)) added++;
     }
     return added;
 }
@@ -1168,6 +1366,7 @@ typedef struct aug_trav_spec {
     double   dir[2];
     char     anim[SH_TRAV_PATH_CAP];
     int      anim_index;    /* resolved into traversalAnimNames before writing */
+    int      is_leap;       /* a gap crossing rather than a climb, for the report */
 } aug_trav_spec;
 
 #define AUG_MAX_TRAVERSALS 2048
@@ -1232,26 +1431,81 @@ static int aug_trav_anchors(double lo, double hi, double *out, int cap)
  *
  * Every endpoint is checked with the BSP. A point that does not land in the area
  * it claims is dropped rather than written: the router would act on the lie. */
-static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
-                               const aug_quad *req, aug_trav_spec *out, int cap)
+/* A link whose path crosses another generated quad's solid column is dropped.
+ *
+ * Both endpoints of a traversal were already checked, but the path BETWEEN them
+ * never was, so a climb or a leap could send a demon straight through a volume
+ * standing in the way -- "they can glitch through the bv during the traversal
+ * and get lost".
+ *
+ * ASSUMPTION, stated because nothing pins it: a generated quad's solid column is
+ * that quad extruded downward. nav_regions reports only the walkable face and
+ * discards the volume's lower faces, so the true solid is not available at this
+ * layer. This errs toward refusing a link that would in fact have been clear,
+ * and a refused link is a reported island edge, never a corrupt payload. A quad
+ * whose surface is BELOW the sampled path does not block, which is what we
+ * want. */
+static int aug_path_is_clear(const aug_peer *peers, int npeers,
+                             int from_area, int to_area,
+                             const double s3[3], const double e3[3])
 {
-    aug_side sides[4];
+    int q, k;
+    for (q = 0; q < npeers; q++) {
+        if (peers[q].area == from_area || peers[q].area == to_area) continue;
+        for (k = 1; k < 16; k++) {
+            double t = (double)k / 16.0;
+            double x = s3[0] + t * (e3[0] - s3[0]);
+            double y = s3[1] + t * (e3[1] - s3[1]);
+            double z = s3[2] + t * (e3[2] - s3[2]);
+            if (aug_quad_contains_xy(peers[q].req, x, y) &&
+                z < aug_z_at(peers[q].req, x, y)) return 0;
+        }
+    }
+    return 1;
+}
+
+/* Collect climb and leap specs for one platform: one per demon per usable
+ * segment, in both directions.
+ *
+ * Every endpoint is checked with the BSP. A point that does not land in the area
+ * it claims is dropped rather than written: the router would act on the lie. */
+static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
+                               const aug_quad *req, const aug_peer *peers,
+                               int npeers, aug_trav_spec *out, int cap)
+{
+    aug_side sides[64];
     int n, i, k, d, count = 0;
 
     if (c->o->traversal == SH_AUG_TRAVERSAL_NEVER) return 0;
     if (!sh_trav_ready()) return 0;
 
-    n = aug_platform_edges(c, ai, eff, req, sides);
+    n = aug_edge_segments(c, ai, eff, req, peers, npeers, sides,
+                          (int)(sizeof sides / sizeof sides[0]));
     for (i = 0; i < n; i++) {
         double anchors[24];
-        double inner = sides[i].area_edge - sides[i].sgn * TRAVERSAL_INNER_INSET;
-        int na;
-        if (sides[i].drop <= (double)c->step) continue;   /* the step regime walks it */
+        double seglen, span;
+        int na, regime, leap;
 
-        /* The edge runs along the axis the side does NOT face. */
-        na = aug_trav_anchors(sides[i].axis == 0 ? (double)eff->y0 : (double)eff->x0,
-                              sides[i].axis == 0 ? (double)eff->y1 : (double)eff->x1,
-                              anchors, (int)(sizeof anchors / sizeof anchors[0]));
+        regime = aug_regime(&sides[i], (double)c->step);
+        if (regime == REGIME_STEP || regime == REGIME_NONE) continue;
+        if (!aug_side_owns(&sides[i], ai)) continue;
+        leap = (regime == REGIME_LEAP);
+        /* A climb is measured vertically, a leap horizontally. */
+        span = leap ? sides[i].gap : fabs(sides[i].drop);
+        /* A leap is nearly LEVEL: over 1,754 shipped records on the six table
+         * nominals the median vertical change is one unit and |dz|/span p90 is
+         * 0.29. Anything steeper is not what these animations do. */
+        if (leap && span > 0.0 &&
+            fabs(sides[i].drop) / span > SH_TRAV_LEAP_MAX_GRADE) continue;
+
+        seglen = sqrt((sides[i].p1[0] - sides[i].p0[0]) * (sides[i].p1[0] - sides[i].p0[0]) +
+                      (sides[i].p1[1] - sides[i].p0[1]) * (sides[i].p1[1] - sides[i].p0[1]));
+        (void)seglen;
+        /* Anchors run along THIS SEGMENT, not the whole edge, which is what
+         * makes a partially-abutting neighbour reachable by a demon whose
+         * animation offset is large. */
+        na = aug_trav_anchors(0.0, 1.0, anchors,
+                              (int)(sizeof anchors / sizeof anchors[0]));
 #ifdef SH_AUG_TESTING
         if (g_test_anchor_cap > 0 && na > g_test_anchor_cap) na = g_test_anchor_cap;
 #endif
@@ -1262,56 +1516,74 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                 const sh_trav_monster *m = sh_trav_monster_at(k);
                 char path[SH_TRAV_PATH_CAP];
                 float off = 0.0f;
-                int dist = 0, time = 0, a, placed = 0;
-                double outer, inner_pt[3], outer_pt[3], dir;
-                aug_trav_spec *s;
+                int dist = 0, time = 0, aidx, placed = 0, dirn;
+                double inner_pt[3], outer_pt[3], dirs;
+                aug_trav_spec *sp;
 
                 if (!m) continue;
-                if (!sh_trav_select(m, d, (float)sides[i].drop, path, sizeof path,
+                dirn = leap ? SH_TRAV_ACROSS : d;
+                if (!sh_trav_select(m, dirn, (float)span, path, sizeof path,
                                     &off, &dist, &time))
                     continue;                               /* this demon cannot */
-
                 if (off < 0.0f) off = -off;
-                outer = sides[i].wall + sides[i].sgn * (double)off;
 
-                /* This demon's own pair of endpoints, tried along the edge until
-                 * both land where they claim. The offset is the demon's, so the
-                 * answer is too: an anchor that fails for one can serve another. */
-                for (a = 0; a < na; a++) {
-                    if (sides[i].axis == 0) {
-                        inner_pt[0] = inner; inner_pt[1] = anchors[a];
-                        outer_pt[0] = outer; outer_pt[1] = anchors[a];
-                    } else {
-                        inner_pt[0] = anchors[a]; inner_pt[1] = inner;
-                        outer_pt[0] = anchors[a]; outer_pt[1] = outer;
-                    }
+                for (aidx = 0; aidx < na; aidx++) {
+                    double t = anchors[aidx];
+                    double bx = sides[i].p0[0] + t * (sides[i].p1[0] - sides[i].p0[0]);
+                    double by = sides[i].p0[1] + t * (sides[i].p1[1] - sides[i].p0[1]);
+                    inner_pt[0] = bx - sides[i].out[0] * TRAVERSAL_INNER_INSET;
+                    inner_pt[1] = by - sides[i].out[1] * TRAVERSAL_INNER_INSET;
                     inner_pt[2] = aug_z_at(eff, inner_pt[0], inner_pt[1]);
-                    outer_pt[2] = sides[i].floor_z;
+                    if (sides[i].generated && sides[i].peer >= 0) {
+                        /* Land INSIDE the neighbour's own inset footprint. The
+                         * areas are 2*radius apart even when the walls are
+                         * flush, so an endpoint measured from the wall lands in
+                         * the dead strip between them. */
+                        const aug_quad *pe = peers[sides[i].peer].eff;
+                        double gx = bx + sides[i].out[0] * (sides[i].gap + (double)off);
+                        double gy = by + sides[i].out[1] * (sides[i].gap + (double)off);
+                        if (!aug_quad_contains_xy(pe, gx, gy)) {
+                            gx = (pe->x0 + pe->x1) / 2.0;
+                            gy = (pe->y0 + pe->y1) / 2.0;
+                        }
+                        outer_pt[0] = gx; outer_pt[1] = gy;
+                        outer_pt[2] = aug_z_at(pe, gx, gy);
+                    } else {
+                        outer_pt[0] = bx + sides[i].out[0] * (double)off;
+                        outer_pt[1] = by + sides[i].out[1] * (double)off;
+                        outer_pt[2] = sides[i].far_z;
+                    }
                     if (sh_aas_point_area(c->a, (float)inner_pt[0], (float)inner_pt[1],
                                           (float)(inner_pt[2] + 2.0)) != ai) continue;
                     if (sh_aas_point_area(c->a, (float)outer_pt[0], (float)outer_pt[1],
-                                          (float)(sides[i].floor_z + 2.0)) != sides[i].floor_area)
+                                          (float)(outer_pt[2] + 2.0)) != sides[i].floor_area)
                         continue;
+                    if (!aug_path_is_clear(peers, npeers, ai, sides[i].floor_area,
+                                           inner_pt, outer_pt)) continue;
                     placed = 1;
                     break;
                 }
-                if (!placed) continue;      /* nowhere on this edge works for it */
+                if (!placed) continue;      /* nowhere on this segment works for it */
 
-                s = &out[count++];
-                memset(s, 0, sizeof *s);
-                s->travel_flags = m->travel_flags;
-                s->d30 = m->d30;
-                s->travel_time = time;
-                s->from_area = up ? sides[i].floor_area : ai;
-                s->to_area   = up ? ai : sides[i].floor_area;
-                memcpy(s->start, up ? outer_pt : inner_pt, sizeof s->start);
-                memcpy(s->end,   up ? inner_pt : outer_pt, sizeof s->end);
-                /* Facing is the XY travel direction: inward climbing up, outward
-                 * dropping back down. */
-                dir = up ? -sides[i].sgn : sides[i].sgn;
-                s->dir[0] = sides[i].axis == 0 ? dir : 0.0;
-                s->dir[1] = sides[i].axis == 0 ? 0.0 : dir;
-                _snprintf_s(s->anim, sizeof s->anim, _TRUNCATE, "%s", path);
+                sp = &out[count++];
+                memset(sp, 0, sizeof *sp);
+                sp->travel_flags = m->travel_flags;
+                sp->d30 = m->d30;
+                sp->travel_time = time;
+                sp->from_area = up ? sides[i].floor_area : ai;
+                sp->to_area   = up ? ai : sides[i].floor_area;
+                memcpy(sp->start, up ? outer_pt : inner_pt, sizeof sp->start);
+                memcpy(sp->end,   up ? inner_pt : outer_pt, sizeof sp->end);
+                /* Facing is the XY travel direction: inward coming onto this
+                 * platform, outward leaving it. A non-axis facing is on
+                 * precedent -- wc_office_arena.aas_monster48 carries (w18,w1a)
+                 * pairs of (23169,23169) and (57468,33778), and 23169 is
+                 * 0.707 * TP_DIR_UNIT. */
+                dirs = up ? -1.0 : 1.0;
+                sp->dir[0] = sides[i].out[0] * dirs;
+                sp->dir[1] = sides[i].out[1] * dirs;
+                sp->is_leap = leap;
+                _snprintf_s(sp->anim, sizeof sp->anim, _TRUNCATE, "%s", path);
             }
         }
     }
@@ -1561,6 +1833,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     int made[SH_AUG_MAX_PLATFORMS];
     aug_quad effs[SH_AUG_MAX_PLATFORMS];
     aug_quad reqs[SH_AUG_MAX_PLATFORMS];
+    aug_peer peers[SH_AUG_MAX_PLATFORMS];
     float mins[3], maxs[3], fw, fd;
     int i, j, k, nmade = 0;
 
@@ -1697,8 +1970,23 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                 aug_walk_links(&c, (int)b, made[i]);
             }
         }
-        for (i = 0; i < nmade; i++) aug_step_links(&c, made[i], &effs[i], &reqs[i]);
-        for (i = 0; i < nmade; i++) aug_fall_links(&c, made[i], &effs[i], &reqs[i]);
+        /* The peer table: every quad this bake actually created. Refused
+         * platforms are absent -- `nmade` only advances on success -- so the
+         * effs[i] <-> plats[i] identity is broken and nothing may rely on it.
+         *
+         * This is the second neighbour source, and it is what fixes chaining:
+         * the augmenter already holds every quad it made, so it does not have to
+         * rediscover them through the BSP, where the agent-radius inset hides
+         * them behind 48 to 128 units of floor. */
+        for (i = 0; i < nmade; i++) {
+            peers[i].req = &reqs[i];
+            peers[i].eff = &effs[i];
+            peers[i].area = made[i];
+        }
+        for (i = 0; i < nmade; i++)
+            aug_step_links(&c, made[i], &effs[i], &reqs[i], peers, nmade);
+        for (i = 0; i < nmade; i++)
+            aug_fall_links(&c, made[i], &effs[i], &reqs[i], peers, nmade);
 
         /* Climbs LAST. The traversal reachabilities must be a contiguous tail of
          * the reachability array -- that is how every shipped donor lays them
@@ -1710,7 +1998,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                 int total = 0;
                 for (i = 0; i < nmade; i++) {
                     int got = aug_traversal_specs(&c, made[i], &effs[i], &reqs[i],
-                                                  specs + total,
+                                                  peers, nmade, specs + total,
                                                   AUG_MAX_TRAVERSALS - total);
                     total += got;
                 }
@@ -1734,17 +2022,29 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
      * expected demons to climb onto is a different thing from one they meant to
      * spawn demons on. */
     for (i = 0; i < nmade; i++) {
-        int links = 0, climbs = 0;
+        int links = 0, climbs = 0, neighbours = 0;
         unsigned seen[SH_TRAV_MAX_MONSTERS];
+        int nbr[SH_AUG_MAX_PLATFORMS];
         int nseen = 0;
         unsigned r, nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
         for (r = 0; r < nr; r++) {
             const unsigned char *rr = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, r);
             unsigned flags;
+            int other, q, dupn = 0;
             if (!rr) continue;
             if ((int)sh_aas_get_u16(rr, RE_FROM_AREA) != made[i] &&
                 (int)sh_aas_get_u16(rr, RE_TO_AREA) != made[i]) continue;
             links++;
+            /* How many DISTINCT areas this platform reaches. The author's real
+             * question after placing two volumes together is whether they are
+             * joined to each other, and "links" alone cannot answer it -- a
+             * platform with forty links to the floor looks identical to one
+             * chained to its neighbour. */
+            other = (int)sh_aas_get_u16(rr, RE_FROM_AREA) == made[i]
+                  ? (int)sh_aas_get_u16(rr, RE_TO_AREA)
+                  : (int)sh_aas_get_u16(rr, RE_FROM_AREA);
+            for (q = 0; q < neighbours; q++) if (nbr[q] == other) { dupn = 1; break; }
+            if (!dupn && neighbours < SH_AUG_MAX_PLATFORMS) nbr[neighbours++] = other;
             /* A traversal names its demon in the high half of travel_flags; a
              * walk or fall link is 0x20 / 0x40 and names nobody. */
             flags = sh_aas_get_u32(rr, RE_TRAVEL_FLAGS);
@@ -1760,6 +2060,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                 out->platforms[j].links = links;
                 out->platforms[j].climbs = climbs;
                 out->platforms[j].demons = nseen;
+                out->platforms[j].neighbours = neighbours;
                 out->platforms[j].island = (links == 0);
                 break;
             }
