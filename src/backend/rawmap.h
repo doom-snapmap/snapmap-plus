@@ -174,6 +174,24 @@ int sh_rawmap_load_arm_once(void);
 /* 1 = a one-shot load arm is waiting to be spent. Does not consume it. */
 int sh_rawmap_load_oneshot_pending(void);
 
+/* ---------------------------------------------------- serialize the LIVE map -------------------
+ * Save Rawmap reading the newest save off disk cannot see unsaved edits, and on a never-saved map it
+ * exports a DIFFERENT map. These ask the engine for the map that is actually open instead.
+ *
+ * `map_to_json` is the resolved SnapMapToJson (signature "SnapMapToJson"), NOT SerializeToJson --
+ * see the signature note for why those are not interchangeable. `add_branch_tag_fn` is the resolved
+ * SnapMapAddBranchTag, used only as the derivation site for the engine's idStr constructor and
+ * destructor, which have too many identical twins to signature directly. */
+int sh_rawmap_set_live_serialize(void *map_to_json, void *add_branch_tag_fn);
+
+/* 1 = the live path is usable: both functions resolved and it has not faulted this session. */
+int sh_rawmap_live_serialize_ready(void);
+
+/* Serialize `map` and write it to the rawmap destination. MAIN THREAD ONLY: it reads engine state and
+ * allocates through the engine's allocator, so it must be entered from the editor-frame hook. */
+int sh_rawmap_write_from_live(void *map, char *out_msg, int msg_capacity,
+                              unsigned long long *out_bytes);
+
 /* Set the on-disk SHADOW destination path (the file each save is mirrored to). Pass NULL to reset to the
  * default %LOCALAPPDATA%\snapmap-plus\rawmap.json (the OG used %USERPROFILE%\snaphak; the same file the
  * LOAD swap reads). The default deliberately matches the LOAD source so a save-then-load round-trips.

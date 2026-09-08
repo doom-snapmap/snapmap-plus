@@ -74,6 +74,14 @@
  *                  reload capability (the hook is still useful as an execution point).
  *   `module_base`= host image base, for resolving the editor singleton through engine_globals.
  * Returns 1 if the detour was installed. Idempotent. */
+/* Queue "write the OPEN map to the rawmap file" for the next editor frame.
+ *
+ * The serialize is an engine touch and must happen on a frame, so this only QUEUES it: 1 means
+ * accepted, and the outcome shows up in the log and in the next status refresh. 0 means refused,
+ * with the reason in out_msg -- the useful ones being "no map is open" and a build that could not
+ * resolve the serializer. */
+int sh_editor_frame_request_rawmap_save(char *out_msg, int msg_capacity);
+
 /* `add_branch_tag_fn` is idSnapMap::AddTag("map:branch") (signature SnapMapAddBranchTag). Optional:
  * null only costs the tag that makes a substituted map save as a NEW map. */
 int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,

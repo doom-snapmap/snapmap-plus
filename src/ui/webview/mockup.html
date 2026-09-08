@@ -4543,28 +4543,17 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       };
       note.appendChild(mk('Load:', st.load, st.load));
       note.appendChild(mk('Save:', st.save, st.save));
-      // Whether either half has actually fired. This is the only place the answer shows up in the
-      // UI, and it is the question staging leaves open: neither side does anything on the click --
-      // the load waits for a map load, the save waits for the person to save their map.
-      //
-      // The arm no longer gates the load (Load Rawmap arms the swap around its own reload and puts
-      // it back), so "not armed" is no longer worth saying. A waiting Save Rawmap As is, because
-      // nothing else on screen shows that a save is expected.
-      var line = document.createElement('div');
-      if (st.savePending) {
-        line.textContent = 'Save Rawmap As is waiting — save your map in the editor to write it.';
-      } else if (st.loads) {
-        line.textContent = 'Substituted into ' + st.loads +
-                           (st.loads === 1 ? ' map load.' : ' map loads.');
-      } else {
-        line.textContent = 'Ready. Load Rawmap opens a file straight away.';
-      }
-      note.appendChild(line);
+      // No status line here on purpose. It used to report a running count of rawmap substitutions,
+      // which was engine vocabulary describing something already finished -- it never answered the
+      // only question the menu is asked, which is what happens when you click. The paths above say
+      // what is set; the log says what happened, with timestamps and full destinations, and that is
+      // where diagnosis actually happens. A line nobody reads is a line that makes the two that
+      // matter harder to see.
       // Leaving it on is not scoped to this menu, and that is the part worth saying out loud: it is
       // easy to tick, forget, and then wonder why an ordinary map opened as someone else's rawmap.
       if (RAWMAP_ARMED) {
         var on = document.createElement('div');
-        on.textContent = 'Always on: every map load and save uses these files.';
+        on.textContent = 'Always on: every map you open and every save uses these files.';
         note.appendChild(on);
       }
     }
@@ -4577,8 +4566,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // Save again to wherever the last one went. The page already knows that path -- the readout shows
   // it -- so it hands it straight back rather than making the person re-pick it every export.
   document.getElementById('menuRawmapSave').addEventListener('click', function(){
-    if (!RAWMAP_SAVE_PATH) { toast('No rawmap location yet -- use Save Rawmap As... first.', 'warn'); }
-    else { post({cmd: 'rawmapSaveNow', path: RAWMAP_SAVE_PATH}); }
+    // No "pick a location first" branch: the backend always resolves a destination, defaulting to
+    // %LOCALAPPDATA%\snapmap-plus\rawmap.json, so RAWMAP_SAVE_PATH is never empty and the guard
+    // that used to be here could not fire. Save Rawmap therefore always has somewhere to write.
+    post({cmd: 'rawmapSaveNow', path: RAWMAP_SAVE_PATH});
     closeMenus();
   });
   document.getElementById('menuRawmapSaveAs').addEventListener('click', function(){

@@ -52,6 +52,7 @@ static uintptr_t       g_editor_obj  = 0;
 
 static volatile LONG  g_faulted   = 0;
 static volatile LONG  g_pending   = 0;      /* 1 = a reload is queued for the next good frame */
+static volatile LONG  g_save_pending = 0;   /* 1 = a live rawmap save is queued for the next frame */
 static volatile LONG  g_state     = SH_RELOAD_IDLE;
 static volatile LONG  g_ticks     = 0;
 
@@ -316,6 +317,32 @@ static void ef_mark_substituted_map(void *editor)
     }
 }
 
+/* ------------------------------------------------- save the OPEN map as a rawmap ----------------
+ * Serialising the live map is an engine touch: it reads editor state and allocates through the
+ * engine's allocator, so it belongs on a frame, not on the UI thread that the click arrives on.
+ * Same discipline as the reload -- the click queues, the frame does it. */
+static void ef_service_rawmap_save(void *editor)
+{
+    void *map = NULL;
+    char msg[192] = "";
+
+    __try {
+        map = *(void *const *)((const unsigned char *)editor + ED_MAP_PTR_OFF);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("EF: rawmap save ABANDONED -- could not read the editor map pointer");
+        return;
+    }
+
+    if (map == NULL) {
+        backend_log("EF: rawmap save ABANDONED -- no map is open");
+        return;
+    }
+
+    /* The result is reported through the log and the status readout the page refreshes afterwards.
+     * There is no way to hand it back to the click: that returned a frame ago. */
+    (void)sh_rawmap_write_from_live(map, msg, (int)sizeof msg, NULL);
+}
+
 /* ------------------------------------------------------------------ the reload ------------------ */
 
 /* Read the live editor pointer. The slot holds the object; the object is null before the editor
@@ -451,6 +478,8 @@ static void sh_editor_frame_detour(void *editor, void *arg)
      * frames where nothing happened. */
     ef_mark_substituted_map(editor);
 
+    if (InterlockedExchange(&g_save_pending, 0) != 0) ef_service_rawmap_save(editor);
+
     if (InterlockedCompareExchange(&g_pending, 0, 0) == 0) return;   /* the common frame: one read */
     if (g_load_map == NULL) return;
 
@@ -520,6 +549,45 @@ int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
     /* Baseline the swap counter at install. Without this, a swap that fired before the editor came
      * up would read as "new" on the first frame and tag whatever map happened to be open. */
     g_seen_swaps = sh_rawmap_swap_complete_count();
+    return 1;
+}
+
+int sh_editor_frame_request_rawmap_save(char *out_msg, int msg_capacity)
+{
+    const char *why = NULL;
+    void *ed;
+
+    if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
+
+    if (g_frame_orig == NULL)                                    why = "this build has no editor-frame hook";
+    else if (InterlockedCompareExchange(&g_faulted, 0, 0) != 0)  why = "the frame hook faulted earlier this session";
+    else if (g_editor_obj == 0)                                  why = "the editor could not be located";
+    else if (!sh_rawmap_live_serialize_ready())                   why = "this build cannot serialize the open map";
+    else if (InterlockedCompareExchange(&g_save_pending, 0, 0) != 0) why = "a rawmap save is already waiting for the next frame";
+    if (why == NULL) {
+        ed = ef_editor();
+        if (ed == NULL) why = "the editor is not ready";
+        else {
+            void *map = NULL;
+            __try {
+                map = *(void *const *)((const unsigned char *)ed + ED_MAP_PTR_OFF);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                map = NULL;
+            }
+            if (map == NULL) why = "no map is open";
+        }
+    }
+    if (why) {
+        char rl[256];
+        _snprintf_s(rl, sizeof rl, _TRUNCATE, "EF: rawmap save REFUSED -- %s", why);
+        backend_log(rl);
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, why, _TRUNCATE);
+        return 0;
+    }
+
+    InterlockedExchange(&g_save_pending, 1);
+    if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
+                           "saving the open map as a rawmap", _TRUNCATE);
     return 1;
 }
 

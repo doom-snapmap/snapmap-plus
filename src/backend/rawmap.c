@@ -548,6 +548,191 @@ static void resolve_dest_path(char *out, size_t cap)
 /* Write `len` bytes from `data` to the shadow destination ("wb", truncate). Returns the byte count
  * written, or 0 on any failure. SEH-free here (pure Win32 file ops on a validated buffer); the engine
  * out-idStr read in the detour is SEH-guarded by the caller. */
+/* Defined below, next to the shadow that shares it: one writer for both the shadow and the
+ * live path, so the destination is resolved in exactly one place. */
+static unsigned long long write_shadow(const char *data, size_t len);
+
+/* Is `path` the very file currently staged for LOADING? Used by the save ladder's disk fallback,
+ * which is the only rung whose bytes might not be the open map's. */
+static int dest_is_the_staged_source(const char *path)
+{
+    char src_now[MAX_PATH] = "";
+    if (path == NULL || path[0] == '\0') return 0;
+    resolve_source_path(src_now, sizeof src_now);
+    return (src_now[0] != '\0' && _stricmp(src_now, path) == 0) ? 1 : 0;
+}
+
+/* ------------------------------------------------------- serialize the LIVE map ----------------
+ * Save Rawmap used to read the newest saved map's map.decl off DISK. That is wrong in two ways the
+ * person can hit without doing anything unusual:
+ *
+ *   - unsaved edits are not in it. It exports the last SAVED state and reports success.
+ *   - on a map that has never been saved there is no folder for it, so it exports whichever OTHER
+ *     map was saved most recently. Silently. Same class of "borrowed the wrong slot" mistake as the
+ *     load bug.
+ *
+ * Asking the engine to serialize the map that is actually open removes both, and removes the disk
+ * entirely from the save path: no newest-folder scan, no dirty flag to consult, nothing to grey out.
+ *
+ * WHAT TO CALL. SnapMapToJson (0x59D2F0), NOT SerializeToJson (0x5F2390). SerializeToJson's first
+ * argument is a temporary snapshot object that SnapMapToJson builds and destroys around it -- see
+ * the signature note. The save shadow never had to know that, because it only ever inspects the
+ * argument the engine already prepared for it.
+ *
+ * THE idStr. The engine writes its output into an idStr we supply, so it must be a real one: its
+ * own constructor and destructor, taken from the engine, never a zeroed block. A zeroed idStr has a
+ * null data pointer and a zero alloced count, and whether the engine's assignment path tolerates
+ * that is an assumption this project does not need to make. Both come from decoding the two CALLs
+ * inside SnapMapAddBranchTag, which is uniquely signable -- the technique the resolve-address
+ * discipline prescribes for functions with identical twins, and which this codebase already uses to
+ * reach idList-grow. sizeof(idStr) is 0x30, DIRECT from that same function's tag-list stride
+ * (LEA RCX,[RAX+RAX*2]; SHL RCX,4). */
+
+typedef unsigned char (*map_to_json_fn)(void *map, void *out_idstr, unsigned char compact);
+typedef void *(*idstr_ctor_fn)(void *self, const char *init);
+typedef void  (*idstr_dtor_fn)(void *self);
+
+#define IDSTR_SIZE 0x30
+
+static map_to_json_fn g_map_to_json = NULL;
+static idstr_ctor_fn  g_idstr_ctor  = NULL;
+static idstr_dtor_fn  g_idstr_dtor  = NULL;
+static volatile LONG  g_live_faulted = 0;
+
+/* Offsets of the two CALL instructions inside SnapMapAddBranchTag, from its own base. Checked for an
+ * E8 opcode before the displacement is believed: a constant offset into another function is a guess
+ * until the byte there agrees, and this project's rule is that addresses come from derivation. */
+#define ADDTAG_CALL_IDSTR_CTOR 0x35
+#define ADDTAG_CALL_IDSTR_DTOR 0xB2
+
+static void *decode_rel32_call(const unsigned char *at)
+{
+    int rel = 0;
+    if (at == NULL || *at != 0xE8) return NULL;
+    memcpy(&rel, at + 1, sizeof rel);
+    return (void *)(at + 5 + rel);
+}
+
+int sh_rawmap_set_live_serialize(void *map_to_json, void *add_branch_tag_fn)
+{
+    const unsigned char *tag = (const unsigned char *)add_branch_tag_fn;
+
+    g_map_to_json = (map_to_json_fn)map_to_json;
+    g_idstr_ctor  = NULL;
+    g_idstr_dtor  = NULL;
+
+    if (tag != NULL) {
+        __try {
+            g_idstr_ctor = (idstr_ctor_fn)decode_rel32_call(tag + ADDTAG_CALL_IDSTR_CTOR);
+            g_idstr_dtor = (idstr_dtor_fn)decode_rel32_call(tag + ADDTAG_CALL_IDSTR_DTOR);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            g_idstr_ctor = NULL;
+            g_idstr_dtor = NULL;
+        }
+    }
+
+    {
+        char line[256];
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "B1: rawmap live-serialize %s (map->json=%p, idStr ctor=%p, dtor=%p)",
+                    sh_rawmap_live_serialize_ready() ? "READY" : "UNAVAILABLE",
+                    (void *)g_map_to_json, (void *)g_idstr_ctor, (void *)g_idstr_dtor);
+        backend_log(line);
+    }
+    return sh_rawmap_live_serialize_ready();
+}
+
+int sh_rawmap_live_serialize_ready(void)
+{
+    if (InterlockedCompareExchange(&g_live_faulted, 0, 0) != 0) return 0;
+    return (g_map_to_json != NULL && g_idstr_ctor != NULL && g_idstr_dtor != NULL) ? 1 : 0;
+}
+
+/* Serialize `map` and write it to the rawmap destination. MAIN THREAD ONLY -- it reads engine state
+ * and allocates through the engine's allocator, so it is called from the editor-frame hook, never
+ * from the UI thread. */
+int sh_rawmap_write_from_live(void *map, char *out_msg, int msg_capacity,
+                              unsigned long long *out_bytes)
+{
+    unsigned char blk[IDSTR_SIZE];
+    unsigned long long wrote = 0;
+    int len = 0;
+    const char *data = NULL;
+    unsigned char rc = 0;
+
+    if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
+    if (out_bytes) *out_bytes = 0;
+
+    if (!sh_rawmap_live_serialize_ready()) {
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
+                               "this build cannot serialize the open map", _TRUNCATE);
+        return 0;
+    }
+    if (map == NULL) {
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, "no map is open", _TRUNCATE);
+        return 0;
+    }
+
+    memset(blk, 0, sizeof blk);
+
+    /* One guard around the whole engine sequence. A fault after the constructor leaks that one
+     * idStr, which is accepted deliberately: the alternative is unwinding engine state we do not
+     * own, and the fault also disables this path for the session, so it can happen once. */
+    __try {
+        g_idstr_ctor(blk, "");
+        rc = g_map_to_json(map, blk, 1);
+        if (rc) {
+            len  = *(const int *)(blk + IDSTR_LEN_OFF);
+            data = *(const char *const *)(blk + IDSTR_DATA_OFF);
+            if (data != NULL && len > 0) wrote = write_shadow(data, (size_t)len);
+        }
+        g_idstr_dtor(blk);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedExchange(&g_live_faulted, 1);
+        backend_log("B1: rawmap live-serialize FAULTED; disabled for this session");
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
+                               "serializing the open map faulted", _TRUNCATE);
+        return 0;
+    }
+
+    if (!rc) {
+        backend_log("B1: rawmap live-serialize -- the engine declined to serialize the map");
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
+                               "the engine would not serialize this map", _TRUNCATE);
+        return 0;
+    }
+    if (wrote == 0) {
+        char path[MAX_PATH] = "";
+        resolve_dest_path(path, sizeof path);
+        {
+            char line[MAX_PATH + 128];
+            _snprintf_s(line, sizeof line, _TRUNCATE,
+                        "B1: rawmap live-serialize produced %d bytes but the write to %s failed",
+                        len, path);
+            backend_log(line);
+        }
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
+                               "the rawmap file could not be written", _TRUNCATE);
+        return 0;
+    }
+
+    InterlockedExchange64(&g_last_bytes, (LONGLONG)wrote);
+    InterlockedIncrement(&g_shadow_count);
+    {
+        char path[MAX_PATH] = "", line[MAX_PATH + 128];
+        resolve_dest_path(path, sizeof path);
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "B1: rawmap SAVE wrote %llu bytes from the OPEN map -> %s [live]", wrote, path);
+        backend_log(line);
+        if (out_msg) {
+            _snprintf_s(out_msg, (size_t)msg_capacity, _TRUNCATE,
+                        "Wrote %llu bytes from the open map.", wrote);
+        }
+    }
+    if (out_bytes) *out_bytes = wrote;
+    return 1;
+}
+
 static unsigned long long write_shadow(const char *data, size_t len)
 {
     char path[MAX_PATH];
@@ -1229,11 +1414,15 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
      * waits for the person to save their map, and a waiting arm is invisible otherwise. */
     written = _snprintf_s(out_json, (size_t)out_capacity, _TRUNCATE,
         "{\"load\":\"%s\",\"save\":\"%s\",\"armed\":%d,\"saves\":%lu,\"lastBytes\":%llu,"
-        "\"loads\":%lu,\"loadsDone\":%lu,\"savePending\":%d}",
+        "\"loads\":%lu,\"loadsDone\":%lu,\"savePending\":%d,\"loadPending\":%d}",
         load_esc, save_esc, sh_rawmap_swap_is_armed(),
         sh_rawmap_save_count(), sh_rawmap_save_last_bytes(),
         sh_rawmap_swap_count(), sh_rawmap_swap_complete_count(),
-        sh_rawmap_save_oneshot_pending());
+        sh_rawmap_save_oneshot_pending(),
+        /* `loadPending` is the load half of the same question savePending answers: a staged rawmap
+         * is waiting for the next map to open. Without it the menu could only report a COUNT of past
+         * substitutions, which told the person nothing about what happens next. */
+        sh_rawmap_load_oneshot_pending());
 
     return (written > 0) ? written : 0;
 }
@@ -1269,29 +1458,13 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
      * shadow itself creates it with CREATE_ALWAYS. A bad directory surfaces as a failed shadow
      * write, which the existing log line already reports. */
     if (save_path != NULL) {
-        /* REFUSE to aim the save output at the file currently staged for LOAD.
-         *
-         * Observed 2026-09-07: a Save Rawmap wrote a saved map over a 214,490-byte staged rawmap and
-         * left the file the person was actually watching untouched -- so it read as "the save did not
-         * stick" when in truth it had landed somewhere destructive. How the destination got there
-         * does not matter: the save output and the load source being ONE file is never wanted.
-         * Writing it destroys the input, and the next map load then substitutes the saved map back
-         * into itself.
-         *
-         * Refused, not warned. A warning here is a message about a file that is already gone. */
-        if (save_path[0] != '\0') {
-            char src_now[MAX_PATH] = "";
-            resolve_source_path(src_now, sizeof src_now);
-            if (src_now[0] != '\0' && _stricmp(src_now, save_path) == 0) {
-                if (out_msg && msg_capacity > 0) {
-                    strncpy_s(out_msg, (size_t)msg_capacity,
-                              "that file is the rawmap staged for loading -- saving onto it would "
-                              "destroy it. Pick a different name.", _TRUNCATE);
-                }
-                backend_log("B1: rawmap SAVE dest REFUSED -- same file as the staged load source");
-                return 0;
-            }
-        }
+        /* Saving BACK to the file you loaded from is allowed, and is the normal way to work: load a
+         * rawmap, edit it, write it out again. An earlier version of this refused that outright.
+         * The refusal was aimed at the right accident and the wrong cause -- what destroyed a staged
+         * rawmap was Save Rawmap writing the WRONG MAP'S bytes onto it (it read the newest save off
+         * disk), not the filenames matching. Serializing the open map fixed the cause, so the
+         * round trip is safe and the blanket refusal only got in the way. The one rung that can
+         * still write the wrong map guards itself -- see the ladder below. */
         if (!sh_rawmap_save_set_dest(save_path[0] == '\0' ? NULL : save_path)) ok = 0;
 
         /* NAMING A DESTINATION IS A REQUEST TO WRITE IT, not to set a preference. "Save Rawmap As"
@@ -1305,7 +1478,41 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
         if (save_path[0] != '\0') {
             char why[192];
             unsigned long long wrote = 0;
-            if (save_from_local_map(why, (int)sizeof why, &wrote)) {
+
+            /* THE LADDER, best first.
+             *
+             * 1. THE OPEN MAP. Ask the engine to serialize what is actually in the editor. This is
+             *    the only rung that captures UNSAVED edits, and the only one that cannot export the
+             *    wrong map. It queues onto the next editor frame, because serializing touches engine
+             *    state -- so "accepted" here means it is about to happen, not that it has.
+             *
+             * 2. THE NEWEST SAVE ON DISK. What this used to do unconditionally. Correct only when
+             *    the open map is saved and unmodified, and on a never-saved map it silently exports
+             *    a DIFFERENT map -- so it is a fallback now, for when there is no editor to ask
+             *    (no map open, or a build that could not resolve the serializer).
+             *
+             * 3. ARM THE NEXT SAVE. When neither can produce bytes, mirror the person's next
+             *    editor save. Costs them one Save and is always the right map. */
+            if (sh_editor_frame_request_rawmap_save(why, (int)sizeof why)) {
+                if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
+                                       "Writing the open map to the rawmap file.", _TRUNCATE);
+            } else if (dest_is_the_staged_source(save_path)) {
+                /* Rung 2 reads the newest save off DISK, which is not necessarily the map the person
+                 * has open -- and here the destination is the rawmap they staged for loading. Those
+                 * two together are what destroyed a 214KB staged file once already: the wrong map's
+                 * bytes written over the input. Rung 1 may do this freely (those are the open map's
+                 * own bytes); rung 2 may not, so it drops through to arming the next real save. */
+                backend_log("B1: rawmap SAVE skipped the disk fallback -- it would write the wrong "
+                            "map over the staged load source");
+                strncpy_s(why, sizeof why,
+                          "that file is the rawmap you staged for loading, and no map is open to "
+                          "save from", _TRUNCATE);
+                sh_rawmap_save_arm_once();
+                if (out_msg) {
+                    _snprintf_s(out_msg, (size_t)msg_capacity, _TRUNCATE,
+                                "%s -- it will be written on your next save.", why);
+                }
+            } else if (save_from_local_map(why, (int)sizeof why, &wrote)) {
                 if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, why, _TRUNCATE);
             } else {
                 sh_rawmap_save_arm_once();

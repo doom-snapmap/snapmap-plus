@@ -547,6 +547,32 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
      * itself -- which is both the shortest distinguishing run and the most meaningful one.
      * Verified ONE hit on BOTH shipped builds; the embedded 0x998 matching in both also confirms the
      * field offset does not move between them. */
+    /* idSnapMap -> JSON, the engine's own "serialize this map for saving" entry point.
+     *
+     * bool SnapMapToJson(void *map, idStr *out, unsigned char compact)
+     *
+     * THIS, not SerializeToJson (0x5F2390), is what to call to get a live map's JSON.
+     * SerializeToJson's first argument is NOT the map: this function builds a ~0x770 temporary
+     * snapshot object on its own stack, populates it from the map, serializes THAT, and destroys it.
+     * Calling SerializeToJson with an idSnapMap* would hand it the wrong object -- which is exactly
+     * the mistake the save shadow's own typedef comment invites, because the shadow only ever sees
+     * the argument the engine already prepared.
+     *
+     * Established from the sole caller (0x568B90), which also settles two long-open questions:
+     *   *param_3 = 0x6f            -> game.details "declVersion": 111
+     *   FUN_141A4A480(json, len)   -> game.details "declChecksum"
+     * so the decl checksum is id's own hash over the serialized JSON. That is why a sweep of 13
+     * stock algorithms over 6 byte ranges against 54 real saves matched nothing.
+     *
+     * WILDCARDS: one RIP-relative displacement (the stack-cookie load). Unique on BOTH shipped
+     * builds at this length; the trailing `E8` anchors the temp-object construction that makes this
+     * function what it is. */
+    { "SnapMapToJson",
+      "40 53 56 57 48 81 EC B0 07 00 00 48 C7 44 24 20 FE FF FF FF "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 A0 07 00 00 "
+      "41 0F B6 F0 48 8B FA 48 8B D9 48 8D 4C 24 30 E8",
+      0x59D2F0u },
+
     { "SnapMapAddBranchTag",
       "4C 8B DC 57 48 83 EC 60 49 C7 43 B8 FE FF FF FF 49 89 5B 10 49 89 73 18 "
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 58 48 8B F9 48 8D 15 ?? ?? ?? ?? "
