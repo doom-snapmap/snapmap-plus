@@ -460,9 +460,12 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
                     chained,
                     rep.depth_before, rep.depth_after,
                     islands ? "; islands: " : "",
-                    islands ? (sh_trav_ready()
-                               ? "nothing can climb that high"
-                               : "no traversal table, so nothing climbs") : "",
+                    islands ? (rep.climbs_declined
+                               ? "this module already carries its own climbs, so "
+                                 "none were added"
+                               : (sh_trav_ready()
+                                  ? "nothing can climb that high"
+                                  : "no traversal table, so nothing climbs")) : "",
                     rep.links_truncated
                         ? "; the link budget ran out, so some volumes have fewer "
                           "climbs and leaps than their shape allows"

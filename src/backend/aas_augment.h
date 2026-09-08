@@ -121,6 +121,11 @@ typedef struct sh_aug_report {
     int      links_truncated;           /* the traversal budget ran out; some
                                          * platforms have fewer climbs and leaps
                                          * than the geometry allows */
+    int      climbs_declined;           /* this module already owns traversal
+                                         * points on an area we would have
+                                         * climbed from, so no climb or leap was
+                                         * written at all -- the islands are ours,
+                                         * not the geometry's */
 } sh_aug_report;
 
 /* Augment `a` in place. Returns 1 if the model is still coherent (even if every

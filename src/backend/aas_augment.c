@@ -1815,10 +1815,44 @@ static int aug_emit_traversals(aug_ctx *c, aug_trav_spec *specs, int n)
     unsigned na;
 
     if (n <= 0) return 0;
-    /* Regrouping an existing traversal set would move indices other records
-     * already point at. No SnapMap module ships one, so refuse rather than
-     * guess. */
-    if (sh_aas_count(c->a, SH_AAS_L_TRAVERSALPOINTS) > 1) return 0;
+
+    /* MODULES THAT ALREADY SHIP TRAVERSALS.
+     *
+     * The predecessor of this block refused outright whenever the payload had
+     * any traversal points, on the stated grounds that no SnapMap module ships
+     * one. That is simply false: classic_90_climb -- this project's own donor --
+     * ships seven, wc_office_arena ships twenty-seven, and 312 of 696 extracted
+     * payloads carry traversal animation names. The blanket refusal therefore
+     * silently produced ZERO climbs and ZERO leaps on roughly half of all
+     * modules, and the author was told "nothing can climb that high", which was
+     * not the reason.
+     *
+     * What actually has to hold is narrower. The per-area ownership pass at the
+     * bottom rebuilds first/num for every area by scanning the whole array, so
+     * pre-existing points are fine in themselves -- but each area's points must
+     * stay CONTIGUOUS, and we append ours at the end. That is sound exactly when
+     * no area we write a point for already owns points somewhere earlier.
+     *
+     * Our platform areas are brand new and own nothing. The only real hazard is
+     * an existing area we climb FROM -- typically the module floor. So test that
+     * one condition instead of refusing everything. */
+    {
+        unsigned na0 = sh_aas_count(c->a, SH_AAS_L_AREAS);
+        for (k = 0; k < n; k++) {
+            const unsigned char *ar;
+            if (specs[k].from_area < 0 || (unsigned)specs[k].from_area >= na0) continue;
+            ar = sh_aas_rec_const(c->a, SH_AAS_L_AREAS, (unsigned)specs[k].from_area);
+            if (ar && sh_aas_get_u16(ar, AR_NUM_TRAV_POINT) > 0) {
+                /* Interleaving with an existing run would need the whole array
+                 * regrouped and every index that points into it rewritten. That
+                 * is a real change to records whose ordering semantics are not
+                 * fully recovered, so it is refused -- but REPORTED, so the
+                 * islands are not blamed on the geometry. */
+                c->rep->climbs_declined = 1;
+                return 0;
+            }
+        }
+    }
 
     /* Animation names, deduplicated by path. */
     for (k = 0; k < n; k++) {

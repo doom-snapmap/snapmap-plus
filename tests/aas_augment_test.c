@@ -1140,6 +1140,60 @@ static void test_a_bake_at_the_platform_cap_completes(void)
     sh_aas_free(a);
 }
 
+/* A module that already owns traversal points on the area we would climb FROM.
+ *
+ * The predecessor refused whenever a payload had ANY traversal points, on the
+ * stated grounds that no SnapMap module ships one. classic_90_climb -- this
+ * project's own donor -- ships seven, and 312 of 696 extracted payloads carry
+ * traversal animation names, so that refusal silently produced zero climbs on
+ * about half of all modules while blaming the geometry.
+ *
+ * The condition that actually matters is narrower: each area's points must stay
+ * contiguous, and ours are appended at the end. This pokes the floor area's
+ * ownership count to make the unsafe case, and checks it is refused AND said
+ * out loud. */
+static void test_existing_traversals_on_our_floor_are_declined_out_loud(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p;
+    sh_aug_report rep;
+    sh_aug_opts o;
+    unsigned char *floor_area;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a module that already owns climbs on our floor says so\n");
+    load_synthetic_traversal_table();
+
+    /* Area 1 is the floor slab; claim it already owns a traversal point. */
+    floor_area = sh_aas_rec(a, SH_AAS_L_AREAS, 1);
+    CHECK(floor_area != NULL);
+    if (floor_area) sh_aas_put_u16(floor_area, 38u, 1u);   /* AR_NUM_TRAV_POINT */
+
+    mkplat(&p, -500.0f, -500.0f, 500.0f, 500.0f, 128.0f, "roof");
+    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK_MSG(rep.climbs_declined == 1,
+              "the refusal is reported, not blamed on the geometry");
+    CHECK_MSG(rep.platforms[0].climbs == 0, "and no climb was written");
+    sh_aas_free(a);
+}
+
+/* The ordinary case must not regress: a module with no traversal points of its
+ * own still gets its climbs. */
+static void test_a_module_without_traversals_still_gets_climbs(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p;
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a module with no climbs of its own still gets ours\n");
+    load_synthetic_traversal_table();
+    mkplat(&p, -500.0f, -500.0f, 500.0f, 500.0f, 128.0f, "roof");
+    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK_MSG(rep.climbs_declined == 0, "nothing to decline");
+    CHECK_MSG(rep.platforms[0].climbs > 0, "and the climbs are there");
+    sh_aas_free(a);
+}
+
 int main(void)
 {
     printf("aas_augment_test\n");
@@ -1167,6 +1221,8 @@ int main(void)
     test_an_upright_platform_is_not_a_side_face();
     test_a_dense_yawed_chain_stays_within_the_depth_limit();
     test_a_bake_at_the_platform_cap_completes();
+    test_existing_traversals_on_our_floor_are_declined_out_loud();
+    test_a_module_without_traversals_still_gets_climbs();
     test_island_at_128();
     test_step_regime_at_16();
     test_refusals();
