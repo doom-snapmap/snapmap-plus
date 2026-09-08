@@ -80,6 +80,10 @@
  * accepted, and the outcome shows up in the log and in the next status refresh. 0 means refused,
  * with the reason in out_msg -- the useful ones being "no map is open" and a build that could not
  * resolve the serializer. */
+/* Could a rawmap save happen right now? 1 = yes. Changes NOTHING either way -- ask this before
+ * applying a destination of your own, so a refusal does not leave the save path moved. */
+int sh_editor_frame_can_rawmap_save(char *out_msg, int msg_capacity);
+
 int sh_editor_frame_request_rawmap_save(char *out_msg, int msg_capacity);
 
 /* `add_branch_tag_fn` is idSnapMap::AddTag("map:branch") (signature SnapMapAddBranchTag). Optional:

@@ -361,7 +361,16 @@ static void *ef_editor(void)
 
 /* Is this frame a safe one to reload on? Checked on the frame itself, never at request time: the
  * editor can leave a usable state between the click and the frame that services it. */
-static int ef_can_reload(void *editor, const char **why)
+/* Is the editor LIVE and holding a map -- the question both the reload and the rawmap save have to
+ * ask before touching anything.
+ *
+ * Named ef_can_reload while only the reload asked it, and the save asked a weaker version of its own
+ * that tested the map pointer alone. That pointer SURVIVES leaving the editor: at the SnapMap main
+ * menu it still holds the last map, so a console `sh_rawmaps save` there was accepted and went on to
+ * serialize a map the person was no longer editing, reporting success. The state check is what
+ * separates "a map is open" from "a map was open" -- ED_STATE_OFF is 0 with no editor state
+ * running -- so both callers now ask the same, stronger question. */
+static int ef_editor_live_with_map(void *editor, const char **why)
 {
     __try {
         const unsigned char *e = (const unsigned char *)editor;
@@ -401,7 +410,7 @@ static void ef_service_reload(void *editor)
     int prev_armed;
     char line[256];
 
-    if (!ef_can_reload(editor, &why)) return;   /* stay pending; try again next frame */
+    if (!ef_editor_live_with_map(editor, &why)) return;   /* stay pending; try again next frame */
 
     /* Re-check the SOURCE on the frame, not the arm. The request may have sat in the queue while the
      * staged file was moved or replaced, and substituting bytes we have not just seen accepted is
@@ -552,31 +561,54 @@ int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
     return 1;
 }
 
+/* Why a rawmap save cannot happen right now, or NULL if it can. NO SIDE EFFECTS and no logging --
+ * it exists so a caller can ASK before it changes anything of its own.
+ *
+ * `sh_rawmaps save <path>` is why. It set the destination first and asked afterwards, so a save
+ * refused at the main menu still moved the person's save path, and the only way to find out was to
+ * read the state back. A question that changes state is not a question. */
+static const char *ef_rawmap_save_blocker(void)
+{
+    void *ed;
+
+    if (g_frame_orig == NULL)                        return "this build has no editor-frame hook";
+    if (InterlockedCompareExchange(&g_faulted, 0, 0) != 0)
+                                                     return "the frame hook faulted earlier this session";
+    if (g_editor_obj == 0)                           return "the editor could not be located";
+    if (!sh_rawmap_live_serialize_ready())           return "this build cannot serialize the open map";
+    if (InterlockedCompareExchange(&g_save_pending, 0, 0) != 0)
+                                                     return "a rawmap save is already waiting for the next frame";
+
+    ed = ef_editor();
+    if (ed == NULL) return "the editor is not ready";
+
+    /* The SAME liveness question the reload asks. The weaker map-pointer-only version this replaced
+     * accepted a save at the SnapMap main menu, because that pointer still held the last map -- and
+     * then wrote it out and called it a success. */
+    {
+        const char *why = NULL;
+        if (!ef_editor_live_with_map(ed, &why)) return why ? why : "the editor is not ready";
+    }
+    return NULL;
+}
+
+int sh_editor_frame_can_rawmap_save(char *out_msg, int msg_capacity)
+{
+    const char *why = ef_rawmap_save_blocker();
+    if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
+    if (why) {
+        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, why, _TRUNCATE);
+        return 0;
+    }
+    return 1;
+}
+
 int sh_editor_frame_request_rawmap_save(char *out_msg, int msg_capacity)
 {
-    const char *why = NULL;
-    void *ed;
+    const char *why = ef_rawmap_save_blocker();
 
     if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
 
-    if (g_frame_orig == NULL)                                    why = "this build has no editor-frame hook";
-    else if (InterlockedCompareExchange(&g_faulted, 0, 0) != 0)  why = "the frame hook faulted earlier this session";
-    else if (g_editor_obj == 0)                                  why = "the editor could not be located";
-    else if (!sh_rawmap_live_serialize_ready())                   why = "this build cannot serialize the open map";
-    else if (InterlockedCompareExchange(&g_save_pending, 0, 0) != 0) why = "a rawmap save is already waiting for the next frame";
-    if (why == NULL) {
-        ed = ef_editor();
-        if (ed == NULL) why = "the editor is not ready";
-        else {
-            void *map = NULL;
-            __try {
-                map = *(void *const *)((const unsigned char *)ed + ED_MAP_PTR_OFF);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                map = NULL;
-            }
-            if (map == NULL) why = "no map is open";
-        }
-    }
     if (why) {
         char rl[256];
         _snprintf_s(rl, sizeof rl, _TRUNCATE, "EF: rawmap save REFUSED -- %s", why);
@@ -639,7 +671,7 @@ int sh_editor_frame_request_reload(char *out_msg, int msg_capacity)
     }
 
     ed = ef_editor();
-    if (ed == NULL || !ef_can_reload(ed, &why)) {
+    if (ed == NULL || !ef_editor_live_with_map(ed, &why)) {
         {
             char rl[256];
             _snprintf_s(rl, sizeof rl, _TRUNCATE, "EF: open-as-new REFUSED -- editor: %s",
