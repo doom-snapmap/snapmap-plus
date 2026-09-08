@@ -645,14 +645,27 @@ static void h_sh_rawmaps(idCmdArgs *a)
             return;
         }
 
-        /* The same gate `savepath` uses. A one-off export to a bare word lands in DOOM's install
-         * folder exactly as a pinned one did -- the only difference is that it happens once, which
-         * makes it harder to notice, not better. */
-        if (arg != NULL && arg[0] != '\0' &&
-            !sh_rawmap_dest_path_is_usable(arg, why, (int)sizeof why)) {
-            sh_printf("Cannot save to %s\n", arg);
-            sh_printf("  %s\n", why[0] ? why : "that is not a usable save path");
-            sh_printf("Nothing was changed.\n");
+        /* WORK OUT THE DESTINATION WITHOUT AIMING AT IT YET.
+         *
+         * The order here is the whole point. An earlier version aimed first and vetted afterwards,
+         * which meant a REFUSED path still became the destination: `sh_rawmaps save <read-only file>`
+         * printed its refusal and left the save pointed at a file that cannot be written, so the
+         * next plain `sh_rawmaps save` failed too, at a path the person never chose for keeping.
+         *
+         * With an argument the destination is that argument; without one it is whatever the setting
+         * resolves to. Either way it is only a candidate until every check has passed. */
+        if (arg != NULL && arg[0] != '\0')
+            strncpy_s(save_path, sizeof save_path, arg, _TRUNCATE);
+        else
+            sh_rawmap_get_paths(NULL, 0, save_path, (int)sizeof save_path);
+
+        /* Covers both the bare-word case (a name is not a path, and would land in DOOM's install
+         * folder) and a target that exists but cannot be written. Nothing has been aimed anywhere
+         * yet, so a refusal here changes nothing at all. */
+        if (!sh_rawmap_dest_writable_now(save_path, why, (int)sizeof why)) {
+            sh_printf("Cannot save to %s\n", save_path);
+            sh_printf("  %s\n", why[0] ? why : "that file cannot be written");
+            sh_printf("Nothing was changed. The save path is untouched.\n");
             return;
         }
 
@@ -672,8 +685,12 @@ static void h_sh_rawmaps(idCmdArgs *a)
          * reads the newest save off disk is how a never-saved map silently exports a DIFFERENT map,
          * and a console command that writes the wrong map is worse than one that says no. */
         if (sh_editor_frame_request_rawmap_save(why, (int)sizeof why)) {
-            sh_rawmap_get_paths(NULL, 0, save_path, (int)sizeof save_path);
-            sh_printf("Writing the open map to %s\n", save_path);
+            /* "Queued", not "Writing". The save runs on a later editor frame, so this line cannot
+             * know the outcome -- it used to say "Writing the open map to <path>" and say it just as
+             * confidently for a read-only file that the write then failed on. It reports what it
+             * actually did, and says where the answer is. */
+            sh_printf("Queued: the open map will be written to\n  %s\n", save_path);
+            sh_printf("If it does not appear, sh_backend.log says why.\n");
         } else {
             /* Reachable despite the probe: the editor can leave a live state between the two calls,
              * and the queue slot can be taken. Reported, not asserted. */

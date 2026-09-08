@@ -275,6 +275,12 @@ int sh_rawmap_set_dest_fixed(const char *path);
  * becoming a file in DOOM's own install folder. Writes the reason into out_msg on failure. */
 int sh_rawmap_dest_path_is_usable(const char *path, char *out_msg, int msg_capacity);
 
+/* Can we write there RIGHT NOW? As above, plus: the file must not already exist as a folder or as a
+ * read-only file. Ask this at a save, not when vetting a save-path setting -- the write is queued
+ * onto a later frame, so a refusal has to happen before the command reports anything. Attribute-only,
+ * so a full disk or a lock still fails later; it never opens the target. */
+int sh_rawmap_dest_writable_now(const char *path, char *out_msg, int msg_capacity);
+
 /* Load the persisted "Use Rawmap as Save Path" setting into the live flag. Call once at startup,
  * after sh_config_init and before the first map load. */
 void sh_rawmap_config_load(void);

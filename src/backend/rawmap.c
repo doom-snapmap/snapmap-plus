@@ -766,6 +766,43 @@ int sh_rawmap_dest_path_is_usable(const char *path, char *out_msg, int msg_capac
     return dest_folder_is_usable(path, out_msg, msg_capacity);
 }
 
+/* CAN WE WRITE THERE RIGHT NOW? Stricter than dest_folder_is_usable, and asked at a different
+ * moment: that one vets a SETTING, where the file is not expected to exist and its permissions may
+ * change before the next save. This one is asked at the save itself.
+ *
+ * The gap it closes: a read-only destination was accepted and the console said "Writing the open map
+ * to <path>". The write is queued onto a later editor frame, so by the time it failed the command had
+ * already reported success and only the log disagreed. Since the writer renames a temp file over the
+ * target, a read-only target fails at the rename -- late, silently, and after the console had spoken.
+ *
+ * Only the attribute is checked, so this is not a guarantee: a full disk, a revoked share or a lock
+ * held by another program still fail at the write. It catches the case someone can actually cause by
+ * hand, and it never opens the target -- opening it to test would truncate the file it is protecting. */
+int sh_rawmap_dest_writable_now(const char *path, char *out_msg, int msg_capacity)
+{
+    DWORD attr;
+
+    if (!dest_folder_is_usable(path, out_msg, msg_capacity)) return 0;
+
+    attr = GetFileAttributesA(path);
+    if (attr == INVALID_FILE_ATTRIBUTES) return 1;      /* not there yet: the save creates it */
+
+    if (attr & FILE_ATTRIBUTE_DIRECTORY) {
+        if (out_msg && msg_capacity > 0)
+            strncpy_s(out_msg, (size_t)msg_capacity,
+                      "a folder already has that name", _TRUNCATE);
+        return 0;
+    }
+    if (attr & FILE_ATTRIBUTE_READONLY) {
+        if (out_msg && msg_capacity > 0)
+            strncpy_s(out_msg, (size_t)msg_capacity,
+                      "that file is read-only. Untick Read-only in its Properties, "
+                      "or save somewhere else", _TRUNCATE);
+        return 0;
+    }
+    return 1;
+}
+
 int sh_rawmap_set_dest_fixed(const char *path)
 {
     char line[MAX_PATH + 64];
@@ -1988,6 +2025,22 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
          * disk), not the filenames matching. Serializing the open map fixed the cause, so the
          * round trip is safe and the blanket refusal only got in the way. The one rung that can
          * still write the wrong map guards itself -- see the ladder below. */
+        /* REFUSE AN UNWRITABLE DESTINATION BEFORE AIMING ANYTHING AT IT. The ladder's best rung
+         * queues onto the next editor frame, so "accepted" here means the write is about to happen,
+         * not that it did -- exactly as the console's own save reported success for a read-only file
+         * and only the log disagreed. Checked ahead of choose_dest so a refusal leaves the
+         * destination untouched. */
+        if (save_path[0] != '\0') {
+            char wmsg[192] = "";
+            if (!sh_rawmap_dest_writable_now(save_path, wmsg, (int)sizeof wmsg)) {
+                if (out_msg && msg_capacity > 0)
+                    _snprintf_s(out_msg, (size_t)msg_capacity, _TRUNCATE,
+                                "Cannot save to %s -- %s", save_path,
+                                wmsg[0] ? wmsg : "it cannot be written");
+                return 0;
+            }
+        }
+
         if (!sh_rawmap_choose_dest(save_path)) ok = 0;
 
         /* NAMING A DESTINATION IS A REQUEST TO WRITE IT, not to set a preference. "Save Rawmap As"
