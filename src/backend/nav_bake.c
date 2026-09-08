@@ -39,6 +39,12 @@ static int          g_module_count;
 static int          g_have_map;
 static volatile LONG g_bakes;
 static volatile LONG g_faulted;
+/* What the last pre-build live read actually saw. This is the one thing an author
+ * cannot otherwise tell apart: "I ticked a box and nothing happened" has a very
+ * different cause when the read never ran than when it ran and found nothing. */
+static int g_live_scanned = -1;   /* entity ids offered, -1 = never ran */
+static int g_live_marked;         /* marked volumes it attributed */
+static int g_live_refused;        /* the read declined to commit */
 
 static void bake_plan_locked(void);
 
@@ -47,7 +53,6 @@ static sh_nav_bake_entity_count g_live_count;
 static sh_navr_entity_valid     g_live_valid;
 static sh_navr_entity_json      g_live_json;
 static void                    *g_live_ctx;
-static int                      g_live_refreshed;   /* once per map load */
 
 void sh_nav_bake_set_live_editor(sh_nav_bake_entity_count count,
                                  sh_navr_entity_valid valid,
@@ -74,10 +79,14 @@ static void bake_refresh_live_locked(void)
 
     if (!g_live_count || !g_live_json || !g_have_map) return;
     n = g_live_count(g_live_ctx);
+    g_live_scanned = n;
+    g_live_marked = 0;
+    g_live_refused = 0;
     if (n <= 0) return;
     before = g_module_count;
     marked = sh_nav_regions_refresh_live(&g_map, n, g_live_valid, g_live_json, g_live_ctx);
-    if (marked < 0) return;             /* map untouched; keep what the load gave us */
+    if (marked < 0) { g_live_refused = 1; return; }   /* map untouched; keep what the load gave us */
+    g_live_marked = marked;
     bake_plan_locked();
     after = g_module_count;
 
@@ -261,6 +270,23 @@ static void bake_plan_locked(void)
     }
 }
 
+/* Re-read the markers from the live editor and re-plan.
+ *
+ * MUST be called on DOOM's main thread while the EDITOR is live and quiescent --
+ * that is the whole point of it being a separate entry point rather than
+ * something the bake does for itself. It reads live entities through the engine's
+ * own reflection serialize, which is only meaningful while the editor still owns
+ * its map; the frontend's UI worker thread is explicitly the wrong place (issue
+ * #61), and so is the middle of BuildAAS (issues #87 and #89).
+ *
+ * Cheap to call again: it is a scan, not a mutation, and it is idempotent. */
+void sh_nav_bake_refresh_live(void)
+{
+    AcquireSRWLockExclusive(&g_bake_lock);
+    if (g_have_map) bake_refresh_live_locked();
+    ReleaseSRWLockExclusive(&g_bake_lock);
+}
+
 void sh_nav_bake_set_map(const char *json, size_t len)
 {
     int ok;
@@ -272,9 +298,11 @@ void sh_nav_bake_set_map(const char *json, size_t len)
     memset(g_modules, 0, sizeof g_modules);
     g_module_count = 0;
     g_have_map = 0;
-    g_live_refreshed = 0;
     memset(g_census, 0, sizeof g_census);
     g_census_count = 0;
+    g_live_scanned = -1;
+    g_live_marked = 0;
+    g_live_refused = 0;
 
     if (bake_enabled() && json && len) {
         __try {
@@ -458,13 +486,17 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
 
     AcquireSRWLockExclusive(&g_bake_lock);
     if (!g_have_map) { ReleaseSRWLockExclusive(&g_bake_lock); return 0; }
-    /* Once per map load. The three nav classes are built back to back from one
-     * editor state, so re-scanning every entity for each would cost three full
-     * passes for identical answers. */
-    if (!g_live_refreshed) {
-        g_live_refreshed = 1;
-        bake_refresh_live_locked();
-    }
+    /* NOTHING HERE MAY TOUCH THE ENGINE. This runs inside the engine's own AAS
+     * loader -- idDeclSnapMap::BuildAAS (0x4EBFB0) -> idAAS2File::Load ->
+     * idAAS2File::LoadBinary -> the resource-provider hook -> here -- and by then
+     * SnapMapEditToSnapBuild has already begun turning the edit map into the build
+     * map. Reading the live entities from this point called EntityClone on entities
+     * whose defsub was still NULL and raised thousands of access violations inside
+     * the loader, which the fault shield escalated to idCommon::Error(6) and which
+     * killed the process (issues #87 and #89).
+     *
+     * The refresh now happens on the editor side, before the build starts, through
+     * sh_nav_bake_refresh_live(). An open consumes the plan and nothing else. */
     m = bake_find(module);
     if (m && m->ok) {
         why[0] = 0;
@@ -511,6 +543,17 @@ void sh_nav_bake_report(void (*out)(const char *fmt, ...))
                 m->module, m->regions, m->instance,
                 m->ok ? (m->reason[0] ? m->reason : "ready") : m->reason);
         }
+    }
+    if (g_live_scanned < 0) {
+        out("  the live editor was never read for this map -- a volume ticked this "
+            "session will not take effect until the map is loaded again.\n");
+    } else if (g_live_refused) {
+        out("  the live editor read was declined (scanned %d entity id(s)); this map "
+            "is baked exactly as it was loaded.\n", g_live_scanned);
+    } else {
+        out("  the live editor read scanned %d entity id(s) and found %d marked "
+            "volume(s), so a volume ticked this session is included.\n",
+            g_live_scanned, g_live_marked);
     }
     for (i = 0; i < g_census_count; i++)
         out("  the engine opened %s navigation %u time(s)\n",

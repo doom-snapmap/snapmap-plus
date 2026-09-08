@@ -33,6 +33,7 @@
 #include "package_requirements.h"
 #include "navmesh.h"
 #include "nav_bake.h"   /* baked AI navigation served through the overrides shadow */
+#include "nav_play.h"   /* re-read the author's live marks before the Play build */
 #include "decl_server.h"
 #include "commands.h"
 #include "cvars.h"
@@ -445,6 +446,29 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_nav_bake_set_live_editor(sh_apply_engine_entity_count,
                                     sh_apply_engine_entity_valid,
                                     sh_apply_engine_entity_json, NULL);
+
+        /* And the one point that read surface may be used from. Pressing Play does not
+         * serialize the map, so a volume ticked this session reaches the baker only if
+         * something reads the live editor -- but the bake itself is far too late to do
+         * it (issues #87 and #89: by then SnapMapEditToSnapBuild has begun turning the
+         * edit map into the build map, and cloning an entity with no defsub yet is an
+         * unconditional NULL dereference inside the engine). The detour goes on the
+         * ENTRY of that conversion instead: still DOOM's main thread, still the editor's
+         * own map, and strictly before all three BuildAAS calls. Registered above first
+         * so the refresh has a surface to read the moment the hook can fire. */
+        {
+            void *snapbuild = NULL;
+            int   snapbuild_clean = 0;
+            for (size_t i = 0; i < db; i++) {
+                if (results[i].name && strcmp(results[i].name, "SnapMapEditToSnapBuild") == 0) {
+                    if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
+                        snapbuild = (void *)results[i].addr;
+                    snapbuild_clean = (results[i].status == SIG_OK);
+                    break;
+                }
+            }
+            sh_nav_play_install(snapbuild, snapbuild_clean);
+        }
 
         /* backend touch: bind the UI-interface's engine-touch vtable slots -- the LIGHT touches
          * the SnapStack STORE-ops need (selection read/write, hovered id, toast, class/inherit read, id

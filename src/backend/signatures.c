@@ -340,6 +340,18 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "SerializeToJson",
       "40 53 56 57 48 81 EC E0 00 00 00 48 C7 44 24 70 FE FF FF FF",
       0x5F2390u },
+    { "SnapMapEditToSnapBuild", /* int(edit map [rcx], build map [rdx], ctx [r8]) -- the edit-to-build
+                                 * conversion the editor runs when Play is pressed. It calls
+                                 * idDeclSnapMap::BuildAAS three times (once per demon size class) at
+                                 * +0x35C/+0x373/+0x38A, so its ENTRY is the last point at which the
+                                 * editor still owns its map and the first that precedes every bake.
+                                 * Snapmap+ detours it to re-read the author's live navigation marks;
+                                 * see nav_play.h. */
+      "48 8B C4 55 41 54 41 55 41 56 41 57 48 8B EC 48 83 EC 60 48 C7 45 C0 FE FF FF FF "
+      "48 89 58 08 48 89 70 18 48 89 78 20 4D 8B E0 48 8B F2 4C 8B E9 "
+      "4C 8D 05 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 48 8D 4D E0 E8 ?? ?? ?? ?? 90 "
+      "4C 8D 05 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 48 8D 4D C8",
+      0x4F27B0u },
     { "AddCommand",
       "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 "
       "41 54 41 56 41 57 48 83 EC 20 48 63 69 10",

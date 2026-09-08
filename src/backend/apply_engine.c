@@ -60,6 +60,7 @@
 #define ARR_ENT_ARRAY_OFF      0x6a0        /* arrObj+0x6a0 -> entity-ptr array (8-byte entries) */
 #define ARR_ENT_COUNT_OFF      0x6a8        /* arrObj+0x6a8 -> entity count (u32) */
 #define ENT_VALID_OFF          0x8          /* entity[id]+8 != 0 => valid; ALSO the clone base (ent+8) */
+#define ENT_CLONE_DEFSUB_OFF   0x150        /* cloneBase+0x150 = ent+0x158 = the defsub EntityClone derefs */
 #define ENT_DEFSUB_OFF         0x158        /* entity[id]+0x158 -> def sub-object (commit target) */
 /* (render-node bucket re-sync defines removed with the create-timeline path -- the clone no longer edits the
  * editor's wire-overlay render buckets; a timeline is placed by the engine via the in-game palette.) */
@@ -2020,6 +2021,29 @@ static int slot_serialize_entity(sh_iface *self, int id, char *out_json, int cap
     if (!ent) return 0;
     /* cloneBase = ent+8 (the ADDRESS, not a deref) -- the reference implementation ent.add(ENT_VALID_OFF). */
     void *cloneBase = (void *)((uint8_t *)ent + ENT_VALID_OFF);
+    /* THE DEFSUB MUST EXIST BEFORE THE CLONE RUNS. EntityClone (0x5A6460) reads
+     * cloneBase+0x150 twice and treats the two reads differently: at 0x5A6474 it
+     * null-checks the pointer and substitutes a default, but at 0x5A649F it passes the
+     * field's ADDRESS to 0x53C250, which does `MOV RCX,[RCX]` and tail-jumps into
+     * 0x17AAAB0 -- whose first instruction is `CMP dword ptr [RCX+0x40],0`. With a NULL
+     * defsub that is an unconditional read of [0x40], i.e. 0xC0000005.
+     *
+     * An entity with a NULL defsub is reachable: during the Play build transition the
+     * editor's map object holds entities that are allocated but not yet populated. The
+     * __except inside ae_serialize_to_json contains each individual fault, but a scan
+     * over every id then raises thousands of them inside whatever the caller is doing,
+     * and the fault shield escalates one of those to idCommon::Error(6), which kills the
+     * process. That is issues #87 and #89.
+     *
+     * So the contract is checked here rather than survived downstream: no defsub, no
+     * clone. ae_read_ptr is the fault-safe read, so a half-built entity answers 0 the
+     * same way an out-of-range id does. */
+    {
+        void *defsub = NULL;
+        if (!ae_read_ptr((const uint8_t *)cloneBase + ENT_CLONE_DEFSUB_OFF, &defsub) ||
+            defsub == NULL)
+            return 0;
+    }
     return ae_serialize_to_json("idSnapEntity", cloneBase, out_json, cap);
 }
 

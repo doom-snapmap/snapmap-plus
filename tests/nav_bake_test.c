@@ -286,6 +286,109 @@ static void test_malformed_map_does_not_take_the_load_down(void)
     CHECK(1);   /* reaching here without faulting is the assertion */
 }
 
+
+/* ---- the live-editor surface must never be read from inside a bake -------
+ *
+ * The crash reported as issues #87 and #89. sh_nav_bake_open runs INSIDE the
+ * engine's AAS loader -- idDeclSnapMap::BuildAAS (0x4EBFB0) -> idAAS2File::Load
+ * -> idAAS2File::LoadBinary -> the resource-provider hook -> here. Reading the
+ * live entities from there means calling the engine's EntityClone (0x5A6460) on
+ * whatever the editor's map object holds at that instant, and during the Play
+ * build transition that is entities whose defsub (cloneBase+0x150) is still
+ * NULL. EntityClone null-checks that field at 0x5A6474 and then dereferences it
+ * unconditionally at 0x5A649F, so every such entity raises 0xC0000005 reading
+ * [NULL+0x40] -- thousands of first-chance faults inside the loader, escalated
+ * by the shield to idCommon::Error(6), which is what killed the process.
+ *
+ * The live read has to happen while the EDITOR is intact, not while the engine
+ * is mid-build. So the invariant is structural and is pinned here: an open
+ * touches nothing but the plan it was already given. */
+static int g_live_count_calls, g_live_valid_calls, g_live_json_calls;
+
+static int live_count(void *ctx) { (void)ctx; g_live_count_calls++; return 64; }
+static int live_valid(int id, void *ctx) { (void)id; (void)ctx; g_live_valid_calls++; return 1; }
+static int live_json(int id, char *out, int cap, void *ctx)
+{
+    (void)id; (void)ctx;
+    g_live_json_calls++;
+    if (cap > 0 && out) out[0] = 0;
+    return 0;
+}
+
+static void live_reset(void)
+{
+    g_live_count_calls = g_live_valid_calls = g_live_json_calls = 0;
+}
+
+static void test_open_never_reads_the_live_editor(void)
+{
+    const int owner[1] = { 0 };
+    char *json;
+    unsigned char *bytes = NULL;
+    size_t len = 0;
+
+    printf("a bake never reads the live editor (issues #87/#89)\n");
+    sh_nav_bake_test_reset();
+    sh_nav_bake_set_live_editor(live_count, live_valid, live_json, NULL);
+    live_reset();
+
+    json = make_map("ind_dlc/room", 1, 1, 0x1u, 0x1u, owner);
+    sh_nav_bake_set_map(json, strlen(json));
+
+    /* The engine asking for all three classes, the way BuildAAS does. */
+    (void)sh_nav_bake_open("maps/modules/ind_dlc/room/room.aas_monster48",
+                           no_shipped_bytes, &bytes, &len);
+    (void)sh_nav_bake_open("maps/modules/ind_dlc/room/room.aas_monster96",
+                           no_shipped_bytes, &bytes, &len);
+    (void)sh_nav_bake_open("maps/modules/ind_dlc/room/room.aas_monster128",
+                           no_shipped_bytes, &bytes, &len);
+
+    CHECK_MSG(g_live_count_calls == 0,
+              "an open must not ask the editor how many entities it has");
+    CHECK_MSG(g_live_valid_calls == 0,
+              "an open must not probe live entity ids");
+    CHECK_MSG(g_live_json_calls == 0,
+              "an open must not serialize a live entity -- that is the EntityClone fault");
+
+    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL);
+}
+
+/* The other half of the same change: the refresh still has to HAPPEN, just from
+ * the editor side. A volume ticked this session must reach the plan without the
+ * author saving and reloading the map, which is the reported bad UX. */
+static void test_refresh_live_is_callable_from_the_editor(void)
+{
+    const int owner[1] = { 0 };
+    char *json;
+
+    printf("the editor-side refresh reads the live editor\n");
+    sh_nav_bake_test_reset();
+    sh_nav_bake_set_live_editor(live_count, live_valid, live_json, NULL);
+    live_reset();
+
+    json = make_map("ind_dlc/room", 1, 1, 0x1u, 0x1u, owner);
+    sh_nav_bake_set_map(json, strlen(json));
+
+    sh_nav_bake_refresh_live();
+    CHECK_MSG(g_live_count_calls > 0,
+              "the editor-side refresh is what reads the live surface now");
+
+    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL);
+}
+
+/* Without a map there is nothing to attribute a live mark to, and the refresh
+ * must be a no-op rather than a scan -- it is called from the editor tick. */
+static void test_refresh_live_without_a_map_is_a_no_op(void)
+{
+    printf("the editor-side refresh does nothing without a map\n");
+    sh_nav_bake_test_reset();
+    sh_nav_bake_set_live_editor(live_count, live_valid, live_json, NULL);
+    live_reset();
+    sh_nav_bake_refresh_live();
+    CHECK_MSG(g_live_count_calls == 0, "no map means nothing to refresh");
+    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL);
+}
+
 int main(void)
 {
     printf("nav_bake_test\n");
@@ -298,6 +401,9 @@ int main(void)
     test_unblocking_volume_is_not_a_floor();
     test_open_is_total();
     test_malformed_map_does_not_take_the_load_down();
+    test_open_never_reads_the_live_editor();
+    test_refresh_live_is_callable_from_the_editor();
+    test_refresh_live_without_a_map_is_a_no_op();
     printf("%s -- %d checks, %d failed\n", g_fail ? "FAILED" : "ok", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

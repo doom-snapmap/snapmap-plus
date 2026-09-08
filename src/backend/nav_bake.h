@@ -92,6 +92,22 @@ void sh_nav_bake_report(void (*out)(const char *fmt, ...));
  * correct for a downloaded map and was the whole behaviour before. */
 typedef int (*sh_nav_bake_entity_count)(void *ctx);
 
+/* Re-read the markers from the live editor and re-plan, so a volume ticked THIS
+ * SESSION is baked without the author saving and reloading the map.
+ *
+ * This is a separate entry point on purpose. Pressing Play does not serialize the
+ * map -- SnapMapEditToSnapBuild (0x4F27B0) reaches neither DeserializeFromJson nor
+ * SerializeToJson, verified against the binary -- so the map JSON the deserialize
+ * funnel handed sh_nav_bake_set_map is the map as it was LOADED, and the only place
+ * a session's tick exists is the live editor.
+ *
+ * It must run on DOOM's main thread while the editor still owns its map. The two
+ * places it must NOT run are the frontend's UI worker thread (issue #61) and inside
+ * the engine's AAS load (issues #87 and #89) -- by the latter the edit map is
+ * already being turned into the build map and its entities have no defsub yet.
+ */
+void sh_nav_bake_refresh_live(void);
+
 void sh_nav_bake_set_live_editor(sh_nav_bake_entity_count count,
                                  sh_navr_entity_valid valid,
                                  sh_navr_entity_json get_json,
