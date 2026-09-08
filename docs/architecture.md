@@ -185,12 +185,14 @@ include that header** — it is a matched pair. The backend writes the vtable an
 frontend reads them at the same offsets.
 
 - The backend builds it (`operator_new(0x60)`), installs the vtable — the **77 original-faithful
-  slots** (`+0x00..+0x260`) plus the **clone-extension slots** appended after them (`+0x268..+0x318`
-  today, `sizeof(sh_iface_vtbl) == 0x320`: the atomic class+inherit apply, the class/inherit
+  slots** (`+0x00..+0x260`) plus the **clone-extension slots** appended after them (`+0x268..+0x330`
+  today, `sizeof(sh_iface_vtbl) == 0x338`: the atomic class+inherit apply, the class/inherit
   enumerators, the dev-layer query, the wire-edit generation counter, the synchronous `apply_sync`,
-  the timeline inherit-normalize, push/clear-stack, the generic configuration getter/setter, and the
+  the timeline inherit-normalize, push/clear-stack, the generic configuration getter/setter, the
   asset-browser group — preview request/publish, request-by-name, the material atlas rect, the
-  catalog pager, sound preview/session, and prefab model resolution/mesh transport) — initializes the mutex at `+0x08`, and hangs a
+  catalog pager, sound preview/session, and prefab model resolution/mesh transport — and the rawmap
+  file pair, `rawmap_status` (`+0x328`) and `rawmap_configure` (`+0x330`), which back the File menu's
+  Load Rawmap / Save Rawmap As) — initializes the mutex at `+0x08`, and hangs a
   sub-object off `+0x58` that holds the SnapStack subcommand map and the work-queue (drained by the
   frontend's worker thread; producer-less since the `sh` dispatch moved inline onto the engine's
   thread — see "The 30 Hz manual think-loop").

@@ -41,6 +41,7 @@
 #include "valid_class_map.h" /* SH_VCM_* -- the class-dropdown static snapshot (used only if the live walk fails) */
 #include "wiring_cleandirect.h" /* sh_wiring_cleandirect_generation -- the wire-any connect-edit counter (+0x288) */
 #include "snapstack.h"          /* sh_snapstack_push_ids_backend -- the SnapStack stack push (+0x2A0) */
+#include "rawmap.h"             /* sh_rawmap_get_slots -- the File menu's rawmap file surface (+0x328/+0x330) */
 
 /* ---- editor-struct field offsets (this-live-build; ported from the reference implementation, SEH-guarded) ------------ */
 /* EDITOR_SINGLETON_PINNED_RVA: where the INLINE idSnapEditorLocal OBJECT (NOT a pointer) sits on the
@@ -1432,6 +1433,12 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     slots.request_prefab_mesh     = slot_request_prefab_mesh;        /* +0x310 ext 21 */
     slots.get_prefab_mesh         = slot_get_prefab_mesh;            /* +0x318 ext 22 */
     slots.resolve_prefab_defaults = slot_resolve_prefab_defaults;    /* +0x320 ext 23 */
+    /* the File menu's rawmap load/save file surface. These bodies live in rawmap.c beside the gate and
+     * path state they act on, and touch no engine memory, so they bind unconditionally -- there is no
+     * signature for them to depend on and nothing for a shifted build to break. */
+    sh_rawmap_get_slots(&slots.rawmap_status,        /* +0x328 ext 24 */
+                        &slots.rawmap_configure,     /* +0x330 ext 25 */
+                        &slots.rawmap_load_now);     /* +0x338 ext 26 */
     sh_iface_bind_engine_slots(&slots);
 
     char line[200];

@@ -6,6 +6,81 @@ at the bottom is the original POC buildout, before this doc tracked dates per en
 This is an engineering log for maintainers, not the product changelog. The release notes users read are in
 [`CHANGELOG.md`](../CHANGELOG.md).
 
+### 2026-09-07 -- A File menu, and rawmaps that can live anywhere under any name
+
+- **New `File` menu, before `View`**: Load Rawmap..., Save Rawmap As..., Reload Map Now, a
+  `Always Use Rawmap Save/Load` tick, Use Default Location, and a readout of both staged paths (shortened
+  to the last two path components, full path on hover). Until now every rawmap had to be the single file
+  `%LOCALAPPDATA%\snapmap-plus\rawmap.json`, so keeping two of them meant renaming files by hand between
+  sessions, with nothing to stop an armed save overwriting one you had staged deliberately.
+- **The backend already supported the file half.** `sh_rawmap_swap_set_source` and `sh_rawmap_save_set_dest`
+  have existed since the swap and shadow were written, for the test harness -- neither had a caller a
+  person could reach. Three new append-only slots are their first one: `rawmap_status` +0x328,
+  `rawmap_configure` +0x330 and `rawmap_load_now` +0x338; the vtable grows to `0x340`.
+- **Load actually OPENS the map.** The swap on its own is passive -- it substitutes the staged bytes into
+  the engine's *next* map-load parse -- so the first cut of this menu could only stage a file and then ask
+  the person to go and open a map by hand. `editor_frame.c` supplies the missing execution point: a hook on
+  `idSnapEditorLocal`'s frame function, which is DOOM's main thread at a boundary safe for a lifecycle
+  call, unlike the console command buffer (freeze-prone) or the frontend think-loop (the UI thread). The
+  reload it drives is `idSnapEditorLocal::LoadMap` against a local saved-map id read off disk; while the
+  swap fires, *which* id hardly matters, because our bytes replace the parse either way.
+- **Neither menu action needs the arm tick.** Load Rawmap turns the swap on immediately before its own
+  `LoadMap` call and restores the previous state on every path out, faults included -- a window, not a
+  one-shot count, because restoring saved state assumes nothing about how many times the engine parses
+  (measured: exactly once per reload, six reloads over two sessions). Save Rawmap As arms the shadow for
+  exactly one save. Before this, picking a file to load also left the gate on, so every later map load was
+  substituted and -- the shadow sharing that gate -- the next save was redirected too. What the request
+  checks instead is the staged file (`sh_rawmap_source_ok`), on the click and again on the frame: "these
+  bytes will be accepted" is the property that makes a reload safe, and the arm never was.
+- **The tick survives as the manual override**, and took two goes to name. `Rawmap Swap Armed` was engine
+  jargon. `Keep Rawmap Save/Load On` was worse in a way that matters: it read as the feature's master
+  switch, implying Load Rawmap and Save Rawmap As do nothing while it is off -- exactly backwards, since
+  those two turn it on and off around themselves. It is `Always Use Rawmap Save/Load`. The tick grants
+  SCOPE, not permission: it extends rawmaps to every map load and save, including ones the menu had no
+  part in. The readout says so while it is on, and unticking it now reports that the menu still works.
+- **Save Rawmap As writes the file immediately, with no engine involvement.** Sending someone off to
+  save a map they had already saved was the wrong half of this. A locally saved SnapMap keeps its bytes
+  complete on disk at `<save folder>\map.decl` = `[4-byte checksum][zlib(rawmap JSON)]`, so the write is
+  read, inflate, write -- no engine call, no thread discipline, no waiting. The one-shot editor-save arm
+  survives only for the case this cannot serve: a map that has never been saved has no `map.decl`, and
+  only the editor can produce its bytes.
+- **`sh_inflate_raw_upto`**, a capacity-bounded companion to `sh_inflate_raw`. The existing decoder
+  requires the finished output length up front, and `map.decl` records it nowhere -- its 4-byte header is
+  a checksum, not a size (`0x9D4CF0F1` on a 2,638-byte file that inflates to 23,638), so guessing by
+  doubling can never land on it. Both entry points share one body; `exact` changes exactly the two lines
+  where `dst_len` was a required length rather than a bound, and stream validation is untouched.
+  Verified against three real saves: 23,638 / 20,575 / 21,280 bytes, matching an independent
+  `DeflateStream` decode byte for byte, first ladder rung, complete JSON.
+- **A confirmation before anything opens.** A reload discards whatever is in the editor, and the engine
+  offers no "does this map have unsaved changes" query to consult, so the person is asked instead, with the
+  file named. Answering no costs nothing: the file is already staged, so they save their map and then use
+  Reload Map Now. An in-engine dirty check would let this prompt appear only when there is something to
+  lose; that is the follow-up, not a blocker.
+- **A picked load file is checked before it is accepted** -- readable, non-empty, at most 64 MB (the same
+  ceiling `read_source_file` already enforced silently), and starting with `{` after a BOM and whitespace.
+  The realistic mistake is picking a compressed `map.decl`, which is now refused at the click with a
+  reason instead of feeding unparseable bytes into a map load minutes later. This is a file-shape check,
+  not structural validation -- a malformed-but-JSON rawmap still reaches the engine.
+- **Paths are JSON-escaped in the backend**, where they are read. A Windows path is mostly backslashes, so
+  reporting one unescaped would break `JSON.parse` on the very menu meant to display it.
+- **The file picker runs on its own thread.** It was called straight out of the web-message handler, on
+  a note -- wrong, and reported as severe lag with a busy cursor -- that a modal dialog "blocks this
+  thread only". The handler is dispatched from `DispatchMessageW` *inside* `poc_think_loop`, so a modal
+  `Show()` there stops the loop for as long as the dialog is open: no editor polling, no selection sync,
+  no queued-work drain, no mesh completions. Now the dialog gets a dedicated thread with its own
+  apartment and hands its result back through the same pending-flag handoff every other deferred action
+  uses, so every backend call still happens on the UI thread. The dialog also opens on
+  `%LOCALAPPDATA%\snapmap-plus` with `FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_DONTADDTORECENT` --
+  Quick Access is the slowest possible starting point, since it enumerates cloud providers and network
+  places, and it is not where anyone's rawmaps are.
+- Verified by build, the native + JavaScript suites (both dual-build portability gates included), and
+  browser preview (menu order, the confirm prompt, the waiting-save readout, no console errors).
+  **Both halves are proven in-game.** Six reloads across two sessions each logged a clean
+  `LOAD-swap ARMED` -> one `rawmap swap FIRED` -> `LOAD-swap DISARMED` -> `EF: reload returned 0`, with
+  the substituted byte count matching the picked file. Three `Save Rawmap As` clicks each logged
+  `rawmap SAVE wrote <n> bytes from saved map <id> [from-disk]` with no editor save and no fallback to
+  the one-shot arm.
+
 ### 2026-09-06 -- The Navigation tab, added and then removed
 
 - **Removed the same day it landed.** A Navigation tab briefly listed the map's Blocking Boxes and

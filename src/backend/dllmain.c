@@ -23,6 +23,7 @@
 #include "hook.h"
 #include "smoke.h"
 #include "rawmap.h"
+#include "editor_frame.h"   /* the main-thread frame hook + the in-place map reload it drives */
 #include "map_package.h" /* map-embedded override packages: boot snapshot + load gate */
 #include "palette_guard.h"
 #include "palette_refresh.h"
@@ -142,6 +143,10 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
      * (the reason an end-user couldn't see the "unknown entity" override served from overrides\). */
     ensure_user_dirs();
     sh_config_init(); /* nonfatal: the service retains defaults and status flags on failure */
+    /* Straight after config init and before any map can load: the rawmap save destination has a
+     * persisted setting, and it has to be in force the first time someone hits Save, not from the
+     * second one onwards. */
+    sh_rawmap_config_load();
     sh_user_overrides_capture_launch_state();
 
     /* Poll the resolver until the SteamStub has decrypted .text (full DB resolves uniquely) or we time
@@ -231,6 +236,42 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                             "(maps declaring packages will be refused, never crashed)");
         }
         sh_rawmap_swap_install(deser, deser_clean);
+
+        /* The editor-frame hook: a main-thread execution point at a frame boundary, and the in-place
+         * map reload it drives. This is what turns the File menu's "Load Rawmap" from staging a file
+         * into actually opening it -- the load swap substitutes bytes into a map load, but nothing in
+         * the product could make a map load HAPPEN. See editor_frame.h for why neither the command
+         * buffer's drain nor the frontend think-loop could be that execution point.
+         *
+         * Installed here, beside the swap it serves, and for the same reason: it does not depend on
+         * the editor being up. The hook only fires while the editor's own Think runs, and it services
+         * nothing until something requests a reload. */
+        {
+            void *ed_frame = NULL, *ed_loadmap = NULL, *ed_addtag = NULL, *ed_tojson = NULL;
+            int   ed_frame_clean = 0;
+            for (size_t i = 0; i < db; i++) {
+                if (results[i].name == NULL) continue;
+                if (strcmp(results[i].name, "EditorFrame") == 0) {
+                    if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
+                        ed_frame = (void *)results[i].addr;
+                    ed_frame_clean = (results[i].status == SIG_OK);
+                } else if (strcmp(results[i].name, "EditorLoadMap") == 0) {
+                    if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
+                        ed_loadmap = (void *)results[i].addr;
+                } else if (strcmp(results[i].name, "SnapMapAddBranchTag") == 0) {
+                    if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
+                        ed_addtag = (void *)results[i].addr;
+                } else if (strcmp(results[i].name, "SnapMapToJson") == 0) {
+                    if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
+                        ed_tojson = (void *)results[i].addr;
+                }
+            }
+            sh_editor_frame_install(ed_frame, ed_frame_clean, ed_loadmap, ed_addtag, g_doom_base);
+            /* Save Rawmap serialises the OPEN map rather than reading the newest save off disk.
+             * The tag function doubles as the derivation site for the engine's idStr ctor/dtor --
+             * see sh_rawmap_set_live_serialize. */
+            sh_rawmap_set_live_serialize(ed_tojson, ed_addtag);
+        }
 
         /* the rawmap SAVE shadow (the INVERSE of the LOAD swap). Install the SerializeToJson
          * detour as soon as the engine fn is resolved -- like the LOAD swap it does NOT depend on the

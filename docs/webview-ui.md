@@ -64,6 +64,7 @@ The frontend holds no engine addresses; it calls the backend only through the vt
 | Camera origin footer (editable X/Y/Z and Lock position) | `get_editor_vec3` +0x08 publishes live coordinates; `camSet` / `camLock` write through `set_editor_vec3` +0x00 once or on every locked frame |
 | Installed version readout | reads `%LOCALAPPDATA%\snapmap-plus\install.json` (written by the installer) |
 | Persistent settings (Light / Dark and Entities controls) | `config_get_json` +0x2B0, `config_set_json` +0x2B8 — registered UTF-8 JSON fragments owned by the backend |
+| File menu: Load Rawmap / Save Rawmap As, the arm toggle, the staged-path readout | `rawmap_status` +0x328 reports both staged paths, the arm state and the save counter as one JSON fragment (the backend escapes the paths — a Windows path is mostly backslashes); `rawmap_configure` +0x330 points either side at a chosen file, restores a default on an empty string, and arms or disarms. The picker itself is host-side (`IFileOpenDialog` / `IFileSaveDialog`, modal on the UI thread, no engine touch). **Load stages a file, it does not open a map** — the swap is passive, so the staged bytes are substituted into the *next* map the engine parses; every string in the menu says so, because a person who reads "loaded" and still sees the old map concludes their file was lost. |
 | Deselect (click a blank structural surface) | One page-level router calls `clear_selection` +0x148 for the app-wide entity selection and also tears down the active Prefab/Timeline selection; every right-hand inspection/editor pane, including expanded Decl Text, is protected workspace |
 | List-driven selections behave natively (empty-space click deselects; Delete / Move / bottom-bar controls all apply) | `add_to_selection` +0x138, `clear_selection` +0x148 and `remove_from_selection` +0x130 additionally sync the editor's EntityMode selection-state field (`editor+0x22330`, state `+0x1ac`, dirty `+0xBB8`) -- the field the engine's own empty-space-click handler consults. Direct SEH-guarded field writes, gated on the editor already being in EntityMode. Re-derive recipe at the constant block in `src/backend/iface_engine.c`. |
 | Entities list clears its highlight on a native deselect ("Select in 3D" mode) | the existing `selCount` broadcast (`get_selection` +0x150, ~330 ms poll); the UI now acts on its >0 -> 0 transition |
@@ -157,3 +158,8 @@ Open `src/ui/webview/mockup.html` directly in a browser to see and click through
 useful for iterating on layout/behavior without building or deploying. This preview branch only runs when
 there is no WebView2 host, so it has no effect inside DOOM. The preview remembers its theme in browser
 `localStorage`; production uses the backend-owned `config.json` service instead.
+
+The File menu answers in preview too: there is no native picker and no backend, so `previewHandle` reports
+the default `%LOCALAPPDATA%` path pair and lets the arm toggle flip an in-page variable. Without that stub
+the menu's path readout would sit on "Loading..." forever, and its layout could not be checked outside the
+game. Load/Save As are inert there — they report "Preview only" rather than opening a dialog.

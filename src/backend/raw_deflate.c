@@ -148,8 +148,21 @@ static const unsigned short DEXT[30] = {
     0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13
 };
 
-size_t sh_inflate_raw(const unsigned char *src, size_t src_len,
-                      unsigned char *dst, size_t dst_len)
+/* The decoder body, shared by both entry points.
+ *
+ * `exact` is the ONLY difference between them, and it touches exactly two lines below -- the two
+ * places `dst_len` is asked to be the finished output length rather than a capacity. Everywhere else
+ * it was already a bound (`out >= dst_len`, `len > dst_len - out`), so the capacity form removes a
+ * requirement and adds no new arithmetic. Stream validation is identical in both: complete BFINAL or
+ * the Z_SYNC_FLUSH form, zero alignment padding, no trailing or concatenated bytes.
+ *
+ * Why the capacity form is needed at all: a saved map's `map.decl` is zlib(rawmap JSON) with no
+ * uncompressed length recorded anywhere in the file (its 4-byte header is a checksum -- verified
+ * against real saves: 0x9D4CF0F1 for a 2,638-byte file that inflates to 23,638). The exact form
+ * cannot decode a stream whose output length you do not already know, and guessing by doubling can
+ * never land on it. */
+static size_t inflate_body(const unsigned char *src, size_t src_len,
+                           unsigned char *dst, size_t dst_len, int exact)
 {
     inf_t s;
     size_t out = 0;
@@ -181,7 +194,7 @@ size_t sh_inflate_raw(const unsigned char *src, size_t src_len,
                  * the selected pindex boundary is immediately after this
                  * non-final empty stored block. Do not continue into a second
                  * stream or tolerate trailing bytes. */
-                if (out != dst_len || s.pos != s.len) return 0;
+                if ((exact && out != dst_len) || s.pos != s.len) return 0;
                 return out;
             }
         } else if (type == 1 || type == 2) {
@@ -269,10 +282,22 @@ size_t sh_inflate_raw(const unsigned char *src, size_t src_len,
             }
         } else return 0;
         if (final) {
-            if (out != dst_len || !inf_at_exact_end(&s)) return 0;
+            if ((exact && out != dst_len) || !inf_at_exact_end(&s)) return 0;
             return out;
         }
     }
+}
+
+size_t sh_inflate_raw(const unsigned char *src, size_t src_len,
+                      unsigned char *dst, size_t dst_len)
+{
+    return inflate_body(src, src_len, dst, dst_len, 1);
+}
+
+size_t sh_inflate_raw_upto(const unsigned char *src, size_t src_len,
+                           unsigned char *dst, size_t dst_cap)
+{
+    return inflate_body(src, src_len, dst, dst_cap, 0);
 }
 
 #ifdef SH_RAW_DEFLATE_TESTING

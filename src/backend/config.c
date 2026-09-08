@@ -127,6 +127,25 @@ static const config_descriptor g_registry[] = {
         SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,
         NULL,
         normalize_bool
+    },
+    {
+        /* Where rawmap saves go -- `sh_rawmaps savepath <rawmap|default|path>`
+         * and the File menu's "Use Rawmap as Save Path" tick. Three values in
+         * ONE key: "" is the default rawmap.json, "rawmap" follows whichever
+         * rawmap is loaded, and anything else is a pinned path.
+         *
+         * One key rather than a bool plus a path, because two keys can
+         * contradict each other and a setting that can contradict itself will.
+         *
+         * "" by default, and that default is the point: a rawmap you load is a
+         * library entry, so nothing about importing one can end up writing over
+         * it. Exporting with "Save Rawmap As" does not change this -- that is a
+         * single write, and it is spent as soon as the bytes land. */
+        "rawmap.save_path", SH_JSON_STRING, "\"\"",
+        SH_CONFIG_BACKEND_READ | SH_CONFIG_BACKEND_WRITE |
+        SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,
+        NULL,
+        NULL
     }
 };
 

@@ -31,6 +31,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "snapmap_plus_iface.h"   /* the +0x328/+0x330 slot signatures sh_rawmap_get_slots hands back */
+
 /* Install the LOAD-swap detour on the engine's DeserializeFromJson.
  *   `deser_fn`        = the resolved engine fn address (from the signature resolver, name
  *                       "DeserializeFromJson"). 0 => not resolved; logs SKIPPED and returns 0.
@@ -147,6 +149,49 @@ int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok);
  * signature rather than accepting an address. */
 void sh_rawmap_embed_install(const void *module_base);
 
+/* Arm the shadow for exactly ONE save, then let it disarm itself.
+ *
+ * "Save Rawmap As" picks a destination and then has to wait for the person to save their map in the
+ * editor. Before this, that wait needed the shared rawmaps gate left switched on, which also armed the
+ * LOAD swap -- so choosing where to write a rawmap silently changed what the next map load would open.
+ * A one-shot is OR'd with the shared gate rather than replacing it, so `sh_rawmaps_on` / `sh_rawmaps_off`
+ * still mean exactly what they always meant.
+ *
+ * The one-shot is consumed by the FIRST save that reaches the shadow, whether or not the write then
+ * succeeds. Always returns 1. */
+int sh_rawmap_save_arm_once(void);
+
+/* Is a one-shot still waiting to be spent? Read-only -- it does not consume. For the status readout,
+ * so the File menu can show that a save is expected. */
+int sh_rawmap_save_oneshot_pending(void);
+
+/* Arm the LOAD swap for exactly ONE map parse, then let it disarm itself. The counterpart of
+ * sh_rawmap_save_arm_once: it lets "Load Rawmap" scope itself to the map the person is about to
+ * open, instead of leaving the shared gate on and substituting every map opened afterwards.
+ * Additive to the gate -- either arms the swap. */
+int sh_rawmap_load_arm_once(void);
+
+/* 1 = a one-shot load arm is waiting to be spent. Does not consume it. */
+int sh_rawmap_load_oneshot_pending(void);
+
+/* ---------------------------------------------------- serialize the LIVE map -------------------
+ * Save Rawmap reading the newest save off disk cannot see unsaved edits, and on a never-saved map it
+ * exports a DIFFERENT map. These ask the engine for the map that is actually open instead.
+ *
+ * `map_to_json` is the resolved SnapMapToJson (signature "SnapMapToJson"), NOT SerializeToJson --
+ * see the signature note for why those are not interchangeable. `add_branch_tag_fn` is the resolved
+ * SnapMapAddBranchTag, used only as the derivation site for the engine's idStr constructor and
+ * destructor, which have too many identical twins to signature directly. */
+int sh_rawmap_set_live_serialize(void *map_to_json, void *add_branch_tag_fn);
+
+/* 1 = the live path is usable: both functions resolved and it has not faulted this session. */
+int sh_rawmap_live_serialize_ready(void);
+
+/* Serialize `map` and write it to the rawmap destination. MAIN THREAD ONLY: it reads engine state and
+ * allocates through the engine's allocator, so it must be entered from the editor-frame hook. */
+int sh_rawmap_write_from_live(void *map, char *out_msg, int msg_capacity,
+                              unsigned long long *out_bytes);
+
 /* Set the on-disk SHADOW destination path (the file each save is mirrored to). Pass NULL to reset to the
  * default %LOCALAPPDATA%\snapmap-plus\rawmap.json (the OG used %USERPROFILE%\snaphak; the same file the
  * LOAD swap reads). The default deliberately matches the LOAD source so a save-then-load round-trips.
@@ -160,4 +205,96 @@ unsigned long sh_rawmap_save_count(void);
 /* Bytes written by the most recent shadow (0 if none yet) -- mirrors the reference impl's _lastSaveBytes. */
 unsigned long long sh_rawmap_save_last_bytes(void);
 
+/* ---------------------------------------------------------------- the File-menu file surface -------
+ * The two setters above (set_source / set_dest) were written for the test harness and, until these
+ * slot bodies, had no caller a PERSON could reach. These expose them to the frontend's File menu.
+ *
+ * Expose the +0x328/+0x330 vtable-slot bodies, the way apply_engine hands its slots to iface_engine
+ * so every engine-touch slot binds in one call. Neither body touches the engine -- they are file and
+ * gate state only -- so they are safe from any thread and need no signature resolution. */
+void sh_rawmap_get_slots(sh_rawmap_status_fn *status, sh_rawmap_configure_fn *configure,
+                         sh_rawmap_load_now_fn *load_now);
+
+/* Would this file be accepted as a load source? Checks readable / non-empty / within the swap's own
+ * 64 MB ceiling / starts like JSON after whitespace. `out_msg` gets a short human-readable reason.
+ * Split out of the configure body so the same verdict can be unit-tested without a live interface.
+ * Returns 1 = acceptable. A pass here is NOT a promise the map is valid -- see rawmap_check() in
+ * doom-re's save-load campaign for why full structural validation needs its own pure-C checks. */
+int sh_rawmap_validate_source(const char *path, char *out_msg, int msg_capacity);
+
+/* 1 = this file is a rawmap, by the top-level "~type":"idSnapMap" the engine's serializer writes.
+ * Stricter than sh_rawmap_validate_source on purpose: that guards an explicit load of a named file,
+ * this decides whether to OFFER a file in a listing -- and the folders involved also hold
+ * config.json, install.json, pinned.json and prefabs, which are all valid JSON and none of them
+ * maps. Reads the last 8 KB. */
+int sh_rawmap_looks_like_rawmap(const char *path);
+
+/* The same verdict about the file the swap would actually read (the staged source, or the default).
+ * Ask this instead of sh_rawmap_swap_will_fire before driving a reload: "the staged bytes will be
+ * accepted" is the property that makes a reload safe, and the arm is not. Returns 1 = acceptable. */
+/* Both EFFECTIVE paths: what the load swap would read, and where a save gets mirrored. Either
+ * pointer may be NULL. These are the paths actually in force, defaults included -- not only what was
+ * explicitly set -- so a caller can state them without knowing whether anything overrode them. */
+void sh_rawmap_get_paths(char *load_out, int load_cap, char *save_out, int save_cap);
+
+/* The DEFAULT paths, regardless of what is set. Pair with sh_rawmap_get_paths to tell "the usual
+ * file" from "the file currently in force". */
+void sh_rawmap_get_default_paths(char *load_out, int load_cap, char *save_out, int save_cap);
+
+/* 1 = both effective paths are the built-in defaults. Compared by VALUE: the installers
+ * materialize the defaults into their own variables, so "nothing was set" is not testable. */
+int sh_rawmap_paths_are_default(void);
+
+/* THE SAVE PATH SETTING -- `sh_rawmaps savepath <rawmap|default|path>` and the File menu's
+ * "Use Rawmap as Save Path" tick. Three values, and the only DURABLE way the destination moves:
+ * the default rawmap.json (0), the loaded rawmap (1), or one pinned file (2). Exporting with
+ * "Save Rawmap As" or `sh_rawmaps save <path>` does NOT change it -- that is one write.
+ *
+ * DEFAULT is the default on purpose: a loaded rawmap is an archive entry, so nothing about importing
+ * one can end up writing over it. */
+#define SH_RAWMAP_DEST_DEFAULT 0
+#define SH_RAWMAP_DEST_RAWMAP  1
+#define SH_RAWMAP_DEST_FIXED   2
+
+/* 1 = mode RAWMAP (saves follow the loaded rawmap). The File menu's tick. */
+int sh_rawmap_dest_follows_source(void);
+
+/* The mode, and the pinned file when the mode is FIXED (out_fixed is emptied otherwise). */
+int sh_rawmap_dest_mode(char *out_fixed, int fixed_cap);
+
+/* Set mode RAWMAP (on) or DEFAULT (off). Returns the resulting sh_rawmap_dest_follows_source(). */
+int sh_rawmap_set_dest_follows_source(int on);
+
+/* Pin the save destination to one file, durably (mode FIXED). "" or NULL means DEFAULT.
+ * Refuses anything sh_rawmap_dest_path_is_usable refuses. */
+int sh_rawmap_set_dest_fixed(const char *path);
+
+/* Could we write a rawmap at `path`? The file need not exist -- a save creates it -- but the path
+ * must name a folder and that folder must exist. This is what stops a bare word like "banana" from
+ * becoming a file in DOOM's own install folder. Writes the reason into out_msg on failure. */
+int sh_rawmap_dest_path_is_usable(const char *path, char *out_msg, int msg_capacity);
+
+/* Load the persisted "Use Rawmap as Save Path" setting into the live flag. Call once at startup,
+ * after sh_config_init and before the first map load. */
+void sh_rawmap_config_load(void);
+
+/* Name a destination for ONE write ("Save Rawmap As", `sh_rawmaps save <path>`). It overrides both
+ * the follow toggle and the default for that write only, and is spent once the bytes are on disk --
+ * so an export cannot outlive itself and become the place every later save goes. Leaves the toggle
+ * alone. "" or NULL cancels a pending one-off AND clears the toggle ("back to the default"). */
+int sh_rawmap_choose_dest(const char *path);
+
+/* Call when a NEW rawmap is staged for loading: cancels a one-off destination that was named but
+ * never written, so an abandoned export does not attach itself to the next import. Leaves the
+ * toggle alone -- surviving a load is what the toggle is for. */
+void sh_rawmap_reset_dest_for_new_load(void);
+
+int sh_rawmap_source_ok(char *out_msg, int msg_capacity);
+
 #endif /* BACKEND_RAWMAP_H */
+
+#ifdef SH_RAWMAP_TESTING
+/* Test-only: write bytes through the real destination resolver, so a test can check WHERE a save
+ * lands and that a one-off destination is spent by it. Not present in shipping builds. */
+unsigned long long sh_rawmap_test_write(const char *data, size_t len);
+#endif

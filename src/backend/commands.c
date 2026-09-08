@@ -28,6 +28,7 @@
 #include "engine_globals.h"   /* glb_resolve -- the portable data-global resolver */
 #include "host_image.h"       /* sh_host_is_pinned_rva_build -- gates the last-resort RVAs */
 #include "rawmap.h"
+#include "editor_frame.h"   /* sh_editor_frame_request_rawmap_save -- sh_rawmaps save */
 #include "ui_bridge.h"   /* sh_ui_get_iface() -- the `sh` dispatcher gates on the interface */
 #include "hook.h"        /* install_inline_hook -- the AddCommand detour for the command unlock */
 #include "backend_log.h"
@@ -222,9 +223,48 @@ void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *modu
  *     NOT the AddCommand help. */
 static void h_rawmaps_on(idCmdArgs *a)
 {
+    char load_path[MAX_PATH] = "", save_path[MAX_PATH] = "", why[192] = "";
+    int  readable;
+
     (void)a;
     sh_rawmap_swap_arm(1);
     sh_printf("Enabling raw snapmap save/load.\n");
+
+    /* SAY WHAT WAS JUST ARMED. This switch makes EVERY subsequent map load use the staged file and
+     * every save mirror to the destination, and both were set by earlier clicks the person may not
+     * remember -- the File menu prints them, the console did not. Arming without naming the files is
+     * asking someone to accept a consequence they cannot see. */
+    sh_rawmap_get_paths(load_path, (int)sizeof load_path, save_path, (int)sizeof save_path);
+
+    /* LEGACY NAME. Kept because it is what the published guide teaches -- removing it would break
+     * written instructions people have already followed. Labelled rather than quietly maintained,
+     * and deliberately NOT given behaviour of its own: making it force the default paths was
+     * considered and rejected, because two near-identical command names differing invisibly is a
+     * worse trap than not knowing what is armed -- and the latter is fixed by printing the paths. */
+    if (!sh_rawmap_paths_are_default()) {
+        char dflt[MAX_PATH] = "";
+        sh_rawmap_get_default_paths(dflt, (int)sizeof dflt, NULL, 0);
+        sh_printf("Note: these are not the default files. Older guides describe %s\n", dflt);
+        sh_printf("      'sh_rawmaps default' puts both paths back.\n");
+    }
+    readable = sh_rawmap_source_ok(why, (int)sizeof why);
+
+    sh_printf("  load from: %s%s\n", load_path[0] ? load_path : "(none)",
+              readable ? "" : "   <-- cannot be read right now");
+    if (!readable && why[0]) sh_printf("             %s\n", why);
+    {
+        /* Say WHY the destination is what it is. The path alone cannot distinguish "this is the
+         * default", "this follows the loaded rawmap" and "this is pinned here", and those three
+         * answer very different questions about what the next save will do. */
+        char fixed[MAX_PATH] = "";
+        int  mode = sh_rawmap_dest_mode(fixed, (int)sizeof fixed);
+        const char *tag = (mode == SH_RAWMAP_DEST_RAWMAP) ? "   (following the loaded rawmap)"
+                        : (mode == SH_RAWMAP_DEST_FIXED)  ? "   (pinned by 'sh_rawmaps savepath')"
+                        : "   (the default)";
+        sh_printf("  save to:   %s%s\n", save_path[0] ? save_path : "(none)", tag);
+    }
+    sh_printf("Every map you open now loads that file, and every save is mirrored to that one.\n");
+    sh_printf("(legacy name -- 'sh_rawmaps' shows and changes everything, including both paths.)\n");
 }
 /* [2] sh_rawmaps_off (OG snapHak_rawmaps_off) -> sh_rawmap_swap_arm(0). Prints OG RUNTIME "Disabling raw
  *     snapmap save/load." (the OG handler @0x21070), NOT the AddCommand help. */
@@ -233,7 +273,432 @@ static void h_rawmaps_off(idCmdArgs *a)
     (void)a;
     sh_rawmap_swap_arm(0);
     sh_printf("Disabling raw snapmap save/load.\n");
+    /* Worth saying, because "off" reads like the feature is gone: the File menu's own actions scope
+     * themselves to one operation and keep working with the gate down. Off means "stop applying to
+     * everything", not "stop working". */
+    sh_printf("The File menu, 'sh_rawmaps save' and 'sh_rawmaps load' still work.\n");
 }
+/* [2b] sh_rawmaps -- one command that can SAY what it is about to do.
+ *
+ * sh_rawmaps_on/off arm a switch whose effect depends on state the person cannot see: once on, every
+ * map they open is substituted from a file some earlier click staged, and every save is mirrored to
+ * a destination set the same way. The File menu prints both paths; the console did not, so arming
+ * there meant accepting a consequence you could not read first.
+ *
+ * The fix is not only to print on arming (that is done too) but to make the console able to ANSWER
+ * THE QUESTION FIRST -- bare `sh_rawmaps` shows the state and both paths and changes nothing -- and
+ * to make choosing and arming one action, so there is no remembered state to be surprised by.
+ *
+ *   sh_rawmaps                  state + both paths (changes nothing)
+ *   sh_rawmaps list             the rawmap files sitting in the default folder
+ *   sh_rawmaps on | off         the shared gate, exactly as sh_rawmaps_on/off
+ *   sh_rawmaps load <path>      stage a file for the next map load
+ *   sh_rawmaps save [path]      write the OPEN map, optionally to a new destination
+ *   sh_rawmaps default          put both paths back to the default location
+ *
+ * sh_rawmaps_on / sh_rawmaps_off stay as they are. They are the original SnapHak names, they are in
+ * circulation, and retiring them buys nothing -- the same reasoning that made the one-shot arms
+ * additive rather than a redefinition of the gate. */
+
+/* The folder the default paths live in, derived from the default itself rather than rebuilt, so it
+ * cannot drift away from where the files actually are. */
+/* Split a FILE path into the folder that holds it. 0 when there is no separator to split on,
+ * which is the default resolver's relative fallback and has no folder to speak of. */
+static int rawmap_dir_of(const char *path, char *out, size_t cap)
+{
+    char *slash;
+    if (path == NULL || path[0] == '\0') return 0;
+    strncpy_s(out, cap, path, _TRUNCATE);
+    slash = strrchr(out, '\\');
+    if (slash == NULL) return 0;
+    *slash = '\0';
+    return (out[0] != '\0') ? 1 : 0;
+}
+
+static int rawmap_default_dir(char *out, size_t cap)
+{
+    char probe[MAX_PATH] = "";
+    /* The DEFAULT path deliberately, not the effective one: this is "the folder rawmaps ship in",
+     * which must not move when someone points the load path at a file somewhere else. Where they
+     * ACTUALLY keep them is a separate question, and rawmap_print_list answers both. */
+    sh_rawmap_get_default_paths(probe, (int)sizeof probe, NULL, 0);
+    return rawmap_dir_of(probe, out, cap);
+}
+
+/* The folder the CURRENT load path lives in. This is the one that matters in practice: a listing
+ * whose only job is "what could I load" is useless if it cannot see where the person keeps their
+ * files, and loading one rawmap is all it takes to teach it. */
+static int rawmap_current_load_dir(char *out, size_t cap)
+{
+    char probe[MAX_PATH] = "";
+    sh_rawmap_get_paths(probe, (int)sizeof probe, NULL, 0);
+    return rawmap_dir_of(probe, out, cap);
+}
+
+/* One folder's *.json files. `prefix` is printed before each name, so a subfolder pass can show
+ * "doom\mymap.json" without a second column. Returns how many it printed. */
+static int rawmap_list_one_dir(const char *dir, const char *prefix)
+{
+    char glob[MAX_PATH];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    int n = 0;
+
+    _snprintf_s(glob, sizeof glob, _TRUNCATE, "%s\\*.json", dir);
+    h = FindFirstFileA(glob, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        char full[MAX_PATH];
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        /* A .json NAME proves nothing. This folder also holds config.json, install.json and
+         * pinned.json, and prefabs\ is full of *.snapmap.json files that are prefabs, not maps.
+         * Only the file's own "~type" settles it -- see sh_rawmap_looks_like_rawmap. */
+        _snprintf_s(full, sizeof full, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
+        if (!sh_rawmap_looks_like_rawmap(full)) continue;
+        sh_printf("  %s%-38s %llu bytes\n", prefix ? prefix : "", fd.cFileName,
+                  ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow);
+        n++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return n;
+}
+
+/* A folder and ONE level of subfolders under it. One level, not a walk: a rawmap library is
+ * organised a folder deep ("rawmaps\doom\"), and an unbounded recursion pointed at C:\ by a typo
+ * would sit there enumerating the disk while the game waits on the console callback. */
+static int rawmap_list_dir_tree(const char *dir)
+{
+    char glob[MAX_PATH], sub[MAX_PATH], prefix[MAX_PATH];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    int n;
+
+    n = rawmap_list_one_dir(dir, NULL);
+
+    _snprintf_s(glob, sizeof glob, _TRUNCATE, "%s\\*", dir);
+    h = FindFirstFileA(glob, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+            _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\%s", dir, fd.cFileName);
+            _snprintf_s(prefix, sizeof prefix, _TRUNCATE, "%s\\", fd.cFileName);
+            n += rawmap_list_one_dir(sub, prefix);
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    return n;
+}
+
+static void rawmap_list_section(const char *dir, const char *what)
+{
+    int n;
+    sh_printf("rawmap files in %s%s:\n", dir, what ? what : "");
+    n = rawmap_list_dir_tree(dir);
+    if (n == 0) sh_printf("  (none)\n");
+}
+
+/* `arg` = a folder to list, or NULL for the two folders that matter: where rawmaps default to, and
+ * where the current load path points. Listing only the default was the first version, and it showed
+ * an empty folder to anyone who keeps their rawmaps somewhere of their own -- which reads as a
+ * broken command rather than as a question about the folder. */
+static void rawmap_print_list(const char *arg)
+{
+    char def_dir[MAX_PATH] = "", cur_dir[MAX_PATH] = "";
+    int have_def, have_cur;
+    DWORD attrs;
+
+    if (arg != NULL && arg[0] != '\0') {
+        attrs = GetFileAttributesA(arg);
+        if (attrs == INVALID_FILE_ATTRIBUTES) { sh_printf("No such folder: %s\n", arg); return; }
+        /* Checked as a DIRECTORY, not merely as existing. A file path here would glob
+         * "mymap.json\\*.json", match nothing, and report an empty folder -- which tells someone
+         * who mistyped a folder for a file that their rawmaps are missing. */
+        if (!(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            sh_printf("That is a file, not a folder: %s\n", arg);
+            return;
+        }
+        rawmap_list_section(arg, NULL);
+        return;
+    }
+
+    have_def = rawmap_default_dir(def_dir, sizeof def_dir);
+    have_cur = rawmap_current_load_dir(cur_dir, sizeof cur_dir);
+
+    if (!have_def && !have_cur) { sh_printf("Could not work out the rawmap folder.\n"); return; }
+
+    if (have_def) rawmap_list_section(def_dir, "   (the default folder)");
+
+    /* Only when it is somewhere else -- the common case is that both are the default, and printing
+     * one folder twice would read as two folders with the same contents. */
+    if (have_cur && (!have_def || _stricmp(def_dir, cur_dir) != 0)) {
+        sh_printf("\n");
+        rawmap_list_section(cur_dir, "   (where your load path points)");
+    }
+
+    sh_printf("\n'sh_rawmaps list <folder>' lists any other folder.\n");
+}
+
+static void rawmap_print_state(void)
+{
+    char load_path[MAX_PATH] = "", save_path[MAX_PATH] = "", why[192] = "";
+    int readable;
+
+    sh_rawmap_get_paths(load_path, (int)sizeof load_path, save_path, (int)sizeof save_path);
+    readable = sh_rawmap_source_ok(why, (int)sizeof why);
+
+    /* THE GATE IS ONLY WORTH A LINE WHEN IT IS ON.
+     *
+     * This started as "raw snapmap save/load is OFF (File menu actions still work)", which reads as
+     * "the feature is off" -- false, since nothing here needs the gate. The fix for that was two
+     * lines explaining the off state, which was worse: four lines of state where two were wanted,
+     * with the explanation on top of the paths a person ran the command to see.
+     *
+     * Off is the normal setting and changes nothing, so it gets no line at all. On DOES change
+     * everything a person does next without being asked for it again, so it gets one. */
+    if (sh_rawmap_swap_is_armed())
+        sh_printf("  GATE ON - every map you open and save goes through a rawmap.\n");
+    sh_printf("  load from: %s%s\n", load_path[0] ? load_path : "(none)",
+              readable ? "" : "   <-- cannot be read right now");
+    if (!readable && why[0]) sh_printf("             %s\n", why);
+    {
+        /* Say WHY the destination is what it is. The path alone cannot distinguish "this is the
+         * default", "this follows the loaded rawmap" and "this is pinned here", and those three
+         * answer very different questions about what the next save will do. */
+        char fixed[MAX_PATH] = "";
+        int  mode = sh_rawmap_dest_mode(fixed, (int)sizeof fixed);
+        const char *tag = (mode == SH_RAWMAP_DEST_RAWMAP) ? "   (following the loaded rawmap)"
+                        : (mode == SH_RAWMAP_DEST_FIXED)  ? "   (pinned by 'sh_rawmaps savepath')"
+                        : "   (the default)";
+        sh_printf("  save to:   %s%s\n", save_path[0] ? save_path : "(none)", tag);
+    }
+    if (sh_rawmap_load_oneshot_pending())
+        sh_printf("  a rawmap is staged for the NEXT map you open.\n");
+    if (sh_rawmap_save_oneshot_pending())
+        sh_printf("  waiting for your next save in DOOM to write the rawmap.\n");
+}
+
+static void h_sh_rawmaps(idCmdArgs *a)
+{
+    const char *verb = cmd_argv(a, 1);
+    const char *arg  = cmd_argv(a, 2);
+
+    if (verb == NULL || verb[0] == '\0') { rawmap_print_state(); return; }
+
+    if (_stricmp(verb, "list") == 0)    { rawmap_print_list(arg); return; }
+
+    if (_stricmp(verb, "on") == 0)      { sh_rawmap_swap_arm(1); rawmap_print_state(); return; }
+    if (_stricmp(verb, "off") == 0)     { sh_rawmap_swap_arm(0); rawmap_print_state(); return; }
+
+    if (_stricmp(verb, "default") == 0) {
+        sh_rawmap_swap_set_source(NULL);
+        sh_rawmap_save_set_dest(NULL);
+        /* sh_rawmap_save_set_dest(NULL) clears the follow toggle as part of restoring the default,
+         * so there is nothing extra to do here -- said out loud because "reset both paths" silently
+         * turning a toggle off is the sort of thing a reader should not have to go and check. */
+        sh_printf("Both paths reset to the default location.\n");
+        rawmap_print_state();
+        return;
+    }
+
+    /* `load <path>` SETS the load path and stages it. `load` with no path OPENS whatever the load
+     * path is set to, right now.
+     *
+     * The split is deliberate, and it fixes a gap rather than inventing one. Naming a file and
+     * opening it are different intents -- "point at this from now on" versus "put it in front of me"
+     * -- and the console could only express the first. Someone who wanted the second had to set the
+     * path and then go and open a map from the map list to trigger it, which is a strange way to ask
+     * a console for something. The File menu already had both (the picker stages, the confirm opens);
+     * this is the console catching up.
+     *
+     * A bare `load` DISCARDS unsaved editor edits, the same as answering yes to the menu's confirm.
+     * There is no prompt to raise from a console callback, so it says so and does it: the command
+     * was typed on purpose, and it cannot damage a SAVED map -- the rawmap opens as a new map that
+     * has to be named, which is the interlock sh_editor_frame_request_reload enforces. */
+    if (_stricmp(verb, "load") == 0) {
+        char why[192] = "";
+
+        if (arg == NULL || arg[0] == '\0') {
+            char load_path[MAX_PATH] = "";
+
+            sh_rawmap_get_paths(load_path, (int)sizeof load_path, NULL, 0);
+
+            /* Say no for the ONE reason worth saying no for: there is nothing readable to load.
+             * Everything else below is a route, not a refusal. */
+            if (!sh_rawmap_source_ok(why, (int)sizeof why)) {
+                sh_printf("Cannot open %s\n", load_path[0] ? load_path : "(no load path)");
+                sh_printf("  %s\n", why[0] ? why : "it cannot be read");
+                return;
+            }
+
+            /* ARM FIRST, THEN TRY TO OPEN IT NOW.
+             *
+             * The order is the fix. This used to call the reload and, when the reload said no,
+             * print "Cannot open it" and stop -- which is a dead end for the commonest case there
+             * is: standing at the SnapMap main menu, where there is no live editor for the reload to
+             * drive. Staging works perfectly well from there. Opening any map from the list applies
+             * the staged rawmap, so staging is not a consolation prize, it is the same outcome one
+             * click later. A command that could have done the job and reported failure instead is
+             * worse than one that does the job the long way and says so.
+             *
+             * Arming before the attempt also costs nothing when the attempt succeeds: the swap
+             * spends the one-shot on the substitution either way. */
+            sh_rawmap_load_arm_once();
+
+            if (sh_editor_frame_request_reload(why, (int)sizeof why)) {
+                sh_printf("Opening %s as a new map.\n", load_path);
+                sh_printf("Unsaved edits in the editor are discarded. Save will ask you to name it.\n");
+            } else {
+                sh_printf("Staged %s\n", load_path);
+                sh_printf("  Open any map and it opens as this rawmap, and Save will ask you to\n");
+                sh_printf("  name it. (Not opened right away because %s.)\n",
+                          why[0] ? why : "the editor is not ready");
+            }
+            return;
+        }
+
+        /* VALIDATE BEFORE STAGING, exactly as the File menu does -- same function, same reasons.
+         *
+         * This used to stage the path whatever it was and merely MENTION that the file could not be
+         * read, on the theory that refusing to remember a merely-absent file would be its own
+         * surprise. That was wrong twice over. The File menu refuses the same file outright, so one
+         * surface accepted what the other rejected. And a load path aimed at a file that is not
+         * there is good for nothing: there is no later step that creates it (that is the SAVE side),
+         * so all it can do is sit there looking armed and then substitute nothing. A typo
+         * remembered is worse than a typo refused. */
+        if (!sh_rawmap_validate_source(arg, why, (int)sizeof why)) {
+            sh_printf("Cannot use %s\n", arg);
+            sh_printf("  %s\n", why[0] ? why : "that file cannot be read");
+            sh_printf("Nothing was staged. The load path is unchanged.\n");
+            return;
+        }
+        if (!sh_rawmap_swap_set_source(arg)) { sh_printf("That path could not be used.\n"); return; }
+        /* The same rule the File menu follows, and the same function it calls -- staging a rawmap
+         * to LOAD is a read, and a read does not inherit the destination an earlier export chose. */
+        sh_rawmap_reset_dest_for_new_load();
+        sh_printf("Staged. Open any map -- or run 'sh_rawmaps load' with no path -- and it\n"
+                  "becomes a new map you name.\n");
+        sh_rawmap_load_arm_once();
+        rawmap_print_state();
+        return;
+    }
+
+    /* The console half of the File menu's "Use Rawmap as Save Path" tick. Bare form reports, so the
+     * question can be asked without changing anything -- the same reason bare `sh_rawmaps` exists.
+     *
+     * THREE VALUES, AND ONLY THREE. `on` / `off` used to be accepted as aliases for `rawmap` /
+     * `default`, on the theory that it is what a person types at a thing the File menu draws as a
+     * checkbox. They were removed: four words for three settings is not kindness, it is two more
+     * things to read in the help and two more rows to test, and "savepath on" cannot say ON WHAT --
+     * this setting names a destination, it does not have an enabled state. */
+    if (_stricmp(verb, "savepath") == 0) {
+        char fixed[MAX_PATH] = "";
+        char why[192] = "";
+        int  mode;
+
+        if (arg != NULL && arg[0] != '\0') {
+            /* Anything that is not one of the two words is taken as a PATH: this is the durable
+             * "always save here" setting, and it is a different verb from `save <path>` precisely so
+             * a one-off export cannot quietly become one.
+             *
+             * The fall-through is CHECKED now. It used to pin whatever was typed, so `savepath
+             * banana` aimed every later save at a file called "banana" in DOOM's own install folder
+             * and said nothing about it. A word is not a destination. */
+            if (_stricmp(arg, "rawmap") == 0)
+                sh_rawmap_set_dest_follows_source(1);
+            else if (_stricmp(arg, "default") == 0)
+                sh_rawmap_set_dest_follows_source(0);
+            else if (!sh_rawmap_dest_path_is_usable(arg, why, (int)sizeof why)) {
+                sh_printf("Cannot save to %s\n", arg);
+                sh_printf("  %s\n", why[0] ? why : "that is not a usable save path");
+                sh_printf("Use 'rawmap', 'default', or a full path. Nothing was changed.\n");
+                return;
+            }
+            else if (!sh_rawmap_set_dest_fixed(arg)) {
+                sh_printf("That path could not be used as a save path.\n");
+                return;
+            }
+        }
+
+        mode = sh_rawmap_dest_mode(fixed, (int)sizeof fixed);
+        if (mode == SH_RAWMAP_DEST_RAWMAP)
+            sh_printf("Saves go back over the rawmap you loaded.\n");
+        else if (mode == SH_RAWMAP_DEST_FIXED)
+            sh_printf("Saves always go to %s\n", fixed);
+        else
+            sh_printf("Saves go to the default rawmap.json, so a loaded rawmap is left alone.\n");
+        rawmap_print_state();
+        return;
+    }
+
+    if (_stricmp(verb, "save") == 0) {
+        char why[192] = "";
+        char save_path[MAX_PATH] = "";
+
+        /* ASK BEFORE CHANGING ANYTHING. This used to set the destination first and find out
+         * afterwards whether a save was even possible, so `sh_rawmaps save <path>` at the main menu
+         * moved the person's save path and then refused -- a failed command with a side effect, and
+         * nothing on screen said the path had moved. The probe has no side effects. */
+        if (!sh_editor_frame_can_rawmap_save(why, (int)sizeof why)) {
+            sh_printf("Cannot save: %s\n", why[0] ? why : "the editor is not ready");
+            sh_printf("Nothing was changed. Open a map in the editor first.\n");
+            return;
+        }
+
+        /* The same gate `savepath` uses. A one-off export to a bare word lands in DOOM's install
+         * folder exactly as a pinned one did -- the only difference is that it happens once, which
+         * makes it harder to notice, not better. */
+        if (arg != NULL && arg[0] != '\0' &&
+            !sh_rawmap_dest_path_is_usable(arg, why, (int)sizeof why)) {
+            sh_printf("Cannot save to %s\n", arg);
+            sh_printf("  %s\n", why[0] ? why : "that is not a usable save path");
+            sh_printf("Nothing was changed.\n");
+            return;
+        }
+
+        /* sh_rawmap_choose_dest, NOT sh_rawmap_save_set_dest. The setter alone left the follow
+         * toggle on, and resolve_dest_path consults that first -- so the write went to the loaded
+         * rawmap instead of the file named right here. */
+        if (arg != NULL && arg[0] != '\0' && !sh_rawmap_choose_dest(arg)) {
+            sh_printf("That path could not be used as a destination.\n");
+            return;
+        }
+
+        /* Queued onto the editor frame -- serializing the open map touches engine state. A console
+         * handler runs as a Cbuf callback on the main thread, but not inside the editor's frame, so
+         * it queues like every other engine touch this project makes.
+         *
+         * Only ever the OPEN map: no disk fallback, unlike the File menu's ladder. A fallback that
+         * reads the newest save off disk is how a never-saved map silently exports a DIFFERENT map,
+         * and a console command that writes the wrong map is worse than one that says no. */
+        if (sh_editor_frame_request_rawmap_save(why, (int)sizeof why)) {
+            sh_rawmap_get_paths(NULL, 0, save_path, (int)sizeof save_path);
+            sh_printf("Writing the open map to %s\n", save_path);
+        } else {
+            /* Reachable despite the probe: the editor can leave a live state between the two calls,
+             * and the queue slot can be taken. Reported, not asserted. */
+            sh_printf("Cannot save: %s\n", why[0] ? why : "the editor is not ready");
+        }
+        return;
+    }
+
+    sh_printf("sh_rawmaps -- raw JSON map files.\n");
+    sh_printf("  sh_rawmaps                 show the state and both paths\n");
+    sh_printf("  sh_rawmaps list [folder]   rawmap files: the default folder, the folder your\n");
+    sh_printf("                             load path points at, or one you name\n");
+    sh_printf("  sh_rawmaps on | off        optional: apply rawmaps to EVERY map load and save\n");
+    sh_printf("  sh_rawmaps load <path>     point the load path at a file and stage it\n");
+    sh_printf("  sh_rawmaps load            open the load path as a new map -- or stage it,\n");
+    sh_printf("                             if the editor is not up yet, so the next map\n");
+    sh_printf("                             you open becomes it\n");
+    sh_printf("  sh_rawmaps save            write the open map to the save path\n");
+    sh_printf("  sh_rawmaps save <path>     export it THERE once, then back to the save path\n");
+    sh_printf("  sh_rawmaps savepath [rawmap|default|<path>]\n");
+    sh_printf("                             where saves ALWAYS go: over the loaded rawmap,\n");
+    sh_printf("                             the default rawmap.json, or one file you name\n");
+    sh_printf("  sh_rawmaps default         put both paths back to the default\n");
+}
+
 /* [3] sh_alginfo -> algo.c (h_alginfo: reports our snaphak_algo reimpl PRESENT). [18] cs_dontuse ->
  * algo.c (h_cs_dontuse: the toggle that installs/uninstalls the 4 f64 math overrides). Both are
  * extern-declared near the CMD_TABLE (like the sh_entity / sh_typeinfo handlers). */
@@ -1461,8 +1926,9 @@ static void h_sh_navmesh(idCmdArgs *a)
 }
 
 static const cmd_entry CMD_TABLE[] = {
-    { "sh_rawmaps_on",       (void *)h_rawmaps_on,  "Switches from the normal doom snapmap format to raw JSON maps for saving and loading." },
-    { "sh_rawmaps_off",      (void *)h_rawmaps_off, "Switches from the raw JSON map format to the normal doom format for snapmaps." },
+    { "sh_rawmaps",           (void *)h_sh_rawmaps,   "Raw JSON map files: state, paths, load, save. Run with no arguments to see what is set." },
+    { "sh_rawmaps_on",       (void *)h_rawmaps_on,  "(legacy) Same as 'sh_rawmaps on'. Kept because older guides use it." },
+    { "sh_rawmaps_off",      (void *)h_rawmaps_off, "(legacy) Same as 'sh_rawmaps off'. Kept because older guides use it." },
     { "sh_type",             (void *)h_sh_type,     "Dumps a types (enum/class) fields to the console and copies the text to your clipboard." },
     { "sh_validclasses",     (void *)h_sh_validclasses,"sh_validclasses <inherit> -- lists the engine-valid classNames for an inherit (the classes deriving from its base type Y; the class-dropdown enumerator)." },
     { "sh_entlist",          (void *)h_sh_entlist,  "Dumps the list of idEntity types in the engine" },
