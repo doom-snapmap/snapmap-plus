@@ -130,17 +130,9 @@ static int rawmap_armed(int *flag_armed_out)
     return explicit_armed || flag_armed;
 }
 
-/* ONE-SHOT SAVE ARM.
- *
- * The shadow used to need the shared gate left switched on to catch a save, which is what made the
- * gate feel like a mode: arm it and every map you open is substituted and every save overwrites
- * your staged file. Scoping each operation to itself removes that -- the File menu's "Save Rawmap
- * As" arms the shadow for exactly ONE save and it disarms itself again afterwards.
- *
- * Deliberately NOT a second gate. An earlier plan here was to split the shared switch in two, which
- * is a real change in what `sh_rawmaps_on` means; a one-shot is additive, leaves the console
- * commands behaving exactly as they always have, and is enough because both halves of the feature
- * are now driven from a click rather than waiting around for the user to do something. */
+/* ONE-SHOT SAVE ARM. Arms the shadow for exactly one save, then disarms itself, so a single export
+ * does not need the shared gate left on -- which would substitute every later map too. Additive to
+ * the gate, never a second one, so `sh_rawmaps_on` keeps its meaning. */
 static volatile LONG g_shadow_oneshot = 0;
 
 int sh_rawmap_save_arm_once(void)
@@ -154,19 +146,10 @@ int sh_rawmap_save_oneshot_pending(void)
     return (InterlockedCompareExchange(&g_shadow_oneshot, 0, 0) != 0) ? 1 : 0;
 }
 
-/* ONE-SHOT LOAD ARM -- the missing half of the pair above.
+/* ONE-SHOT LOAD ARM -- the load half of the pair above, same shape and same reasoning.
  *
- * The save side got a one-shot and the load side did not, so "open a rawmap" still had to leave the
- * shared gate switched ON, and the gate is not scoped to one operation: with it on, EVERY map the
- * person opens afterwards is substituted, not just the one they asked for. That is a mode, and it is
- * the kind of mode that quietly replaces a map you only meant to look at.
- *
- * Same shape as the shadow one-shot: additive, so `sh_rawmaps_on` keeps meaning exactly what it
- * always meant, and a click can scope itself to a single load without touching the switch.
- *
- * CONSUMED ONLY ON A REAL SUBSTITUTION. An arm burned by a load that could not read the staged file
- * would leave the person with the next map silently un-substituted and no way to see why, so the
- * detour clears it after the source reads, not when it decides to look. */
+ * CONSUMED ONLY ON A REAL SUBSTITUTION: the detour clears it after the source reads, not when it
+ * decides to look, so a load that could not read the staged file does not silently spend the arm. */
 static volatile LONG g_swap_oneshot = 0;
 
 int sh_rawmap_load_arm_once(void)
@@ -215,16 +198,11 @@ static char *read_source_file(size_t *out_len)
     return buf;
 }
 
-/* The MAP-PACKAGE LOAD GATE (map_package.c), wrapped in the same SEH
- * discipline the save shadow uses on engine memory. This runs on EVERY buffer
- * the engine is about to parse -- the engine's own json (local, published, and
- * network-downloaded maps all funnel through this one function) and our
- * swapped rawmap alike -- BEFORE the parse. A map that declares an override
- * package the running process does not have must NOT reach the engine: the
- * missing content is fatal at spawn/render (AddRenderModel throws on the NULL
- * model), not degraded. Returns 1 = pass to the engine, 0 = refuse the load.
- * A fault inside the gate passes the buffer through untouched -- vanilla
- * behavior, never a new crash. */
+/* The MAP-PACKAGE LOAD GATE (map_package.c), under the same SEH discipline the shadow uses on engine
+ * memory. Runs before the parse on EVERY buffer -- local, published, downloaded and swapped alike.
+ * A map declaring an override package this process lacks must not reach the engine: the missing
+ * content is fatal at spawn/render (AddRenderModel throws on the NULL model), not degraded.
+ * 1 = pass to the engine, 0 = refuse. A fault inside passes the buffer through untouched. */
 static int mpkg_gate_guarded(const char *json)
 {
     __try {
@@ -253,18 +231,14 @@ static char *mpkg_strip_guarded(const char *json)
     }
 }
 
-/* Everything that has to happen to a map buffer between the gate and the parse.
+/* Everything that happens to a map buffer between the gate and the parse.
  *
- * The navigation table is rebuilt FROM EMPTY here, on every buffer the engine is
- * about to parse, because that is what stops a map with no bake from inheriting
- * the previous map's platforms -- the worst silent failure this feature permits.
- * It is built BEFORE either strip, from the bytes the map arrived in.
+ * The navigation table is rebuilt FROM EMPTY on every buffer, before either strip and from the bytes
+ * the map arrived in, or a map with no bake inherits the previous map's platforms. Then the delivery
+ * envelopes come out, packages first. A strip that declines returns NULL and the previous buffer is
+ * used, so neither can lose the other's work.
  *
- * Then both delivery envelopes come out: packages first, navigation second. A
- * strip that declines returns NULL and the previous buffer is used, so the two
- * chain without either one being able to lose the other's work.
- *
- * Returns a HeapAlloc'd buffer (caller frees) or NULL meaning "use the original". */
+ * Returns a HeapAlloc'd buffer (caller frees), or NULL meaning "use the original". */
 static char *prepare_map_buffer(const char *json)
 {
     char *pkg, *nav;
@@ -394,14 +368,9 @@ int sh_rawmap_swap_arm(int on)
 /* Is the LOAD-swap currently armed? Reports the EXPLICIT arm only.
  *
  * Deliberately NOT the same predicate the swap itself uses: that one is
- * `explicit_armed || flag_file_present()`, because the flag-file is a test
- * stand-in that can arm the swap without anyone having said so. A caller
- * asking "is it on" wants the state a person set and can unset -- reporting
- * the file-backed arm here would show ON for a control that turning off does
- * not clear.
- *
- * Exported so a caller can read it BY NAME. `g_gate` is file-static, so the
- * alternative is an address that moves on every rebuild. */
+ * `explicit_armed || flag_file_present()`. A caller asking "is it on" wants
+ * the state a person set and can unset; reporting the file-backed arm here
+ * would show ON for a control that turning off cannot clear. */
 int sh_rawmap_swap_is_armed(void)
 {
     return (InterlockedCompareExchange(&g_gate, 0, 0) != 0) ? 1 : 0;
@@ -444,28 +413,13 @@ unsigned long sh_rawmap_swap_complete_count(void)
 
 /* ==== merged: SAVE shadow (was rawmap.c) ==== */
 
-/* rawmap.c -- see rawmap.h. The rawmap SAVE shadow (port of OG FUN_180023e60, the
- * INVERSE of the LOAD swap rawmap.c).
+/* rawmap.c -- see rawmap.h. The rawmap LOAD swap and SAVE shadow.
  *
- * Detours idSnapMap::SerializeToJson(idSnapMap* map, idStr* out, uint8 compact). On an ARMED save our
- * detour FIRST calls the engine ORIGINAL (via the trampoline) so the engine's own serializer fills the
- * out-idStr `out` -- the real save proceeds untouched -- and THEN reads out.len/out.data and mirrors those
- * bytes to %LOCALAPPDATA%\snapmap-plus\rawmap.json. The just-saved map thus becomes a reusable rawmap (the
- * inverse of the LOAD swap, which substitutes rawmap.json INTO a load). See the header for the full RE.
- *
- * ARMED means the same `rawmap_armed()` the LOAD swap uses -- the shadow is the save half of one switch,
- * not an always-on mirror. The engine's own serialize is never gated; only the copy to disk is.
- *
- * `sh_pretty_on` re-lays-out the bytes on their way to disk (json_pretty.h). Same reasoning as the arm:
- * the cvar governs the rawmap this project writes, so it applies where those bytes are chosen -- HERE --
- * and not to the engine's out-idStr, which is what the player's own save is written from.
- *
- * Why this is safe to slot in front of the engine fn: the detour has the EXACT prototype of the target
- * (void(idSnapMap*, idStr*, uint8)), so the stolen-prologue trampoline preserves the engine's calling
- * convention; we change nothing about the serialize itself -- we only READ the engine's output idStr and
- * write a copy to disk. Every file op is failure-tolerant and the WRITE happens AFTER the real save has
- * completed, so a shadow failure degrades to a vanilla save, never a crash and never a corrupted save.
- */
+ * The shadow detours idSnapMap::SerializeToJson. It calls the engine original through the trampoline
+ * first, then reads the filled out-idStr and copies those bytes to the resolved destination, so the
+ * player's own save is never altered and a shadow failure degrades to a vanilla save. The detour has
+ * the target's exact prototype, which is what lets the stolen-prologue trampoline keep the calling
+ * convention. sh_pretty_on re-lays out the copy only, never the engine's own output. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -498,24 +452,10 @@ unsigned long sh_rawmap_swap_complete_count(void)
 /* The engine target's prototype: bool SerializeToJson(idSnapMap* map, idStr* out, uint8 compact). The
  * out-idStr is arg1 (RDX); the JSON lands there after the call (serialize-to-json-rva.md).
  *
- * IT RETURNS A BOOL IN AL, AND THE ONLY CALLER CONSUMES IT [DIRECT, decoded from the pinned build].
- * At the sole call site (the save-snapshot function 0x59D2F0, +0x54) the bytes immediately after the
- * `call` are:
- *     0F B6 D8            MOVZX EBX,AL        ; latch the return value
- *     48 8D 4C 24 30      LEA   RCX,[RSP+0x30]
- *     E8 DA 08 F8 FF      CALL  <idStr dtor>
- *     0F B6 C3            MOVZX EAX,BL        ; and return it as the snapshot's own result
- * so AL IS the save's success flag: a zero there aborts the save with no error, no log and no file.
- *
- * This was typed `void` until 2026-09-01, which made the detour's own last-executed call decide the
- * save's fate. With the shadow DISARMED (the default) the final call before returning was
- * GetFileAttributesA inside rawmap_armed() -> flag_file_present(), whose miss returns 0 -- so every
- * save reported FAILURE, the editor kept the map dirty, re-prompted for a name on exit, and the map
- * never appeared in My Maps. With the shadow ARMED the trailing shadow work happened to leave AL
- * non-zero, which is why `sh_rawmaps_on` "fixed" saving -- by luck, not by design.
- *
- * The detour must therefore latch the engine's verdict and return THAT on every exit path. Nothing
- * this file does after the original returns may be allowed to speak for the engine. */
+ * AL IS THE SAVE'S SUCCESS FLAG, and the only caller consumes it [DIRECT, decoded at the sole call
+ * site 0x59D2F0+0x54: MOVZX EBX,AL / <idStr dtor> / MOVZX EAX,BL]. Zero there aborts the save with
+ * no error, no log and no file. The detour must latch the engine's verdict and return THAT on every
+ * exit path -- nothing this file does afterwards may speak for the engine. */
 typedef unsigned char (*serialize_fn_t)(void *map, void *out_idstr, unsigned char compact);
 
 static serialize_fn_t g_ser_orig = NULL;   /* the trampoline -> the real engine SerializeToJson */
@@ -549,23 +489,15 @@ static void default_dest_path(char *out, size_t cap)
 }
 
 /* THE SAVE PATH SETTING -- `sh_rawmaps savepath <rawmap|default|path>`, and the File menu's
- * "Use Rawmap as Save Path" tick.
+ * "Use Rawmap as Save Path" tick. One durable setting, three values, and the only durable way the
+ * destination moves:
  *
- * One durable setting with three values, and it is the ONLY durable way the save destination moves:
+ *   DEFAULT  %LOCALAPPDATA%\snapmap-plus\rawmap.json
+ *   RAWMAP   back over whichever rawmap is loaded
+ *   FIXED    one named file, always
  *
- *   DEFAULT  saves go to %LOCALAPPDATA%\snapmap-plus\rawmap.json
- *   RAWMAP   saves go back over whichever rawmap is currently loaded
- *   FIXED    saves go to one named file, always
- *
- * DEFAULT is the default, and that is the whole design: a rawmap you LOAD is an archive entry, not a
- * scratch file, so nothing you do to import one can end up writing over it. Exporting somewhere with
- * "Save Rawmap As" or `sh_rawmaps save <path>` does NOT change this setting -- that is a one-off
- * write (g_dest_once) which is spent as soon as the bytes land. An export that silently became the
- * new home for every later save is the bug this shape exists to make impossible.
- *
- * RAWMAP is held as a MODE consulted at resolve time, never as a path copied in when a rawmap is
- * loaded. A copy would go stale the moment a different rawmap was staged, and switching back to
- * DEFAULT would leave the archive file still wired in -- an opt-out that does not opt out. */
+ * A one-off export (g_dest_once) never touches it. RAWMAP is a mode consulted at resolve time, not a
+ * path copied in at load: a copy would go stale as soon as a different rawmap was staged. */
 /* Defined further down, next to the status JSON that is its other caller. Needed here to
  * write the save-path setting out as a JSON string. */
 static int json_escape_into(char *out, size_t cap, const char *src);
@@ -711,21 +643,11 @@ static int ensure_dir(const char *dir)
     return (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY));
 }
 
-/* IS THIS A PLACE WE COULD WRITE A FILE?
+/* Is `path` shaped like somewhere we could write?
  *
- * A save destination cannot be checked the way a load source is: neither the file NOR its folder is
- * supposed to exist yet. A missing folder is fine -- the save creates it, so `savepath
- * D:\archive\2026\mine.json` works on a machine that has never had that folder. What is checked is
- * that the thing is a PATH at all.
- *
- * That is the mistake worth catching. `savepath banana` used to be accepted and pinned, because
- * anything that was not one of the two keywords was taken as a path: every save after it went to a
- * file called "banana" in whatever directory DOOM was started from, and nothing said so. Someone
- * typing a bare word is naming a setting they misremembered, not a file.
- *
- * So: it must have a folder part and a file part. The drive, if one is named, must exist -- a save
- * cannot conjure a Z: drive, and finding that out at save time is finding out too late.
- * Deliberately unchecked: the extension. Where someone keeps their own maps is theirs to decide. */
+ * Neither the file nor its folder need exist -- the save creates both. What must hold: a folder part
+ * AND a file part, so a bare word cannot become a file in DOOM's own directory; and a named drive
+ * must exist, since a save cannot conjure one. The extension is deliberately unchecked. */
 static int dest_folder_is_usable(const char *path, char *out_msg, int msg_capacity)
 {
     char dir[MAX_PATH];
@@ -909,30 +831,16 @@ static int dest_is_the_staged_source(const char *path)
 }
 
 /* ------------------------------------------------------- serialize the LIVE map ----------------
- * Save Rawmap used to read the newest saved map's map.decl off DISK. That is wrong in two ways the
- * person can hit without doing anything unusual:
+ * Ask the engine for the map that is actually open, so unsaved edits are included and the disk is
+ * out of the save path entirely.
  *
- *   - unsaved edits are not in it. It exports the last SAVED state and reports success.
- *   - on a map that has never been saved there is no folder for it, so it exports whichever OTHER
- *     map was saved most recently. Silently. Same class of "borrowed the wrong slot" mistake as the
- *     load bug.
+ * CALL SnapMapToJson (0x59D2F0), NOT SerializeToJson (0x5F2390): SerializeToJson's first argument is
+ * a temporary snapshot that SnapMapToJson builds and destroys around it.
  *
- * Asking the engine to serialize the map that is actually open removes both, and removes the disk
- * entirely from the save path: no newest-folder scan, no dirty flag to consult, nothing to grey out.
- *
- * WHAT TO CALL. SnapMapToJson (0x59D2F0), NOT SerializeToJson (0x5F2390). SerializeToJson's first
- * argument is a temporary snapshot object that SnapMapToJson builds and destroys around it -- see
- * the signature note. The save shadow never had to know that, because it only ever inspects the
- * argument the engine already prepared for it.
- *
- * THE idStr. The engine writes its output into an idStr we supply, so it must be a real one: its
- * own constructor and destructor, taken from the engine, never a zeroed block. A zeroed idStr has a
- * null data pointer and a zero alloced count, and whether the engine's assignment path tolerates
- * that is an assumption this project does not need to make. Both come from decoding the two CALLs
- * inside SnapMapAddBranchTag, which is uniquely signable -- the technique the resolve-address
- * discipline prescribes for functions with identical twins, and which this codebase already uses to
- * reach idList-grow. sizeof(idStr) is 0x30, DIRECT from that same function's tag-list stride
- * (LEA RCX,[RAX+RAX*2]; SHL RCX,4). */
+ * The out-idStr must be a REAL idStr -- engine constructor and destructor, never a zeroed block,
+ * whose null data pointer the engine's assignment path may not tolerate. Both are decoded from the
+ * two CALLs inside SnapMapAddBranchTag, which is uniquely signable. sizeof(idStr) is 0x30, DIRECT
+ * from that function's tag-list stride (LEA RCX,[RAX+RAX*2]; SHL RCX,4). */
 
 typedef unsigned char (*map_to_json_fn)(void *map, void *out_idstr, unsigned char compact);
 typedef void *(*idstr_ctor_fn)(void *self, const char *init);
@@ -1099,23 +1007,12 @@ static unsigned long long write_shadow(const char *data, size_t len)
      * reports it the same way any other unwritable destination does. */
     if (dest_dir_part(path, dir, sizeof dir)) ensure_dir(dir);
 
-    /* WRITE BESIDE THE TARGET, THEN RENAME OVER IT. The destination file is never opened for
-     * writing, so a save that dies partway cannot destroy the rawmap already there.
+    /* WRITE BESIDE THE TARGET, THEN RENAME OVER IT. The destination is never opened for writing, so
+     * a save that dies partway cannot destroy the rawmap already there -- CREATE_ALWAYS on the target
+     * would empty it before the first new byte lands.
      *
-     * The version before this opened the destination with CREATE_ALWAYS, which EMPTIES the file
-     * before the first byte of the new one is written. Three megabytes then went in over perhaps a
-     * few hundred milliseconds, and anything that interrupted that window -- a full disk, an
-     * unplugged drive, the game going down -- left a fragment where an archive used to be. Deleting
-     * the fragment afterwards was honest but no help: the old map was already gone. An archival tool
-     * that can eat the thing it is archiving is not one.
-     *
-     * MoveFileEx with REPLACE_EXISTING is the swap, and on the same volume it is a rename: it either
-     * happened or it did not, and no reader ever sees a half-written file under the real name. The
-     * temp file sits next to the target rather than in %TEMP% on purpose -- a rename ACROSS volumes
-     * degrades to a copy, which would reintroduce the very window this removes.
-     *
-     * If we cannot write the temp file at all, nothing has been touched yet, so the old file
-     * survives even the total failure. */
+     * The temp file sits next to the target, not in %TEMP%: a rename across volumes degrades to a
+     * copy, which reintroduces the window this removes. */
     if (_snprintf_s(temp, sizeof temp, _TRUNCATE, "%s.tmp", path) < 0) return 0;
 
     h = CreateFileA(temp, GENERIC_WRITE, FILE_SHARE_READ, NULL,
@@ -1368,23 +1265,13 @@ static void mpkg_embed_on_save(void *out_idstr)
  * fresh bake would silently discard the author's navigation. navmesh.c holds
  * every payload that survived delivery -- including ones this client refused to
  * SERVE -- precisely so a save cannot destroy work a different client can use. */
-/* Re-read the author's marked volumes from the map being SAVED.
+/* Re-read the author's marked volumes from the map being SAVED, so a volume marked this session is
+ * not missed by a region table that only ever refreshed on load.
  *
- * Regions were originally captured only on the deserialize funnel, which is
- * wrong for the way authoring actually happens: mark some volumes in the editor,
- * press Play, and no map load occurs in between -- the engine serializes the
- * live map and builds from that. The region table would still hold whatever the
- * map carried when it was last LOADED, so a volume marked this session simply
- * did not exist as far as navigation was concerned, and the author would be told
- * "no volume in this map is marked" moments after ticking one.
- *
- * This covers SAVE. It does NOT cover Play-from-the-editor: pressing Play does
- * not serialize the map at all -- verified live, this hook never runs on that
- * transition -- so the editor builds the play session straight from its live map
- * object. A volume marked and then played in the same session therefore still
- * gets nothing until the map is saved and reloaded. Closing that needs the marks
- * read from the live editor entities rather than from map JSON, which is a
- * different mechanism than anything here. */
+ * Covers save only. Pressing Play does NOT serialize the map [DIRECT, verified live: this hook never
+ * runs on that transition], so a volume marked and played in the same session still gets nothing
+ * until the map is saved and reloaded. Closing that needs the marks read from the live editor
+ * entities instead of from map JSON. */
 static void nav_regions_on_save(void *out_idstr)
 {
     const char *data = NULL;
@@ -1624,30 +1511,16 @@ static int json_escape_into(char *out, size_t cap, const char *src)
     return 1;
 }
 
-/* Is this file a SnapMap RAWMAP, as opposed to some other JSON the tool wrote?
+/* Is this file a rawmap, rather than some other JSON in the same folder (config.json, a prefab)?
  *
- * `sh_rawmaps list` showed every *.json it found, and that is wrong in two directions at once. The
- * default folder is %LOCALAPPDATA%\snapmap-plus\, which also holds config.json, install.json and
- * pinned.json; and prefabs\ is full of *.snapmap.json files that are NOT maps. Offering any of
- * those as something to load is worse than useless -- it invites loading one.
+ * The marker is the top-level "~type" the engine's serializer writes: a rawmap ends
+ * ..."~type":"idSnapMap","~version":111}, a prefab says "idSnapEntityPrefab". Keys come out sorted,
+ * so "~type" is second-to-last -- 36 bytes from the end of a 3 MB file, hence the TAIL read. 8 KB
+ * covers a pretty-printed one. The quotes in the needle are required: idSnapMapCapEntity starts with
+ * idSnapMap, and a prefab of map geometry can contain those.
  *
- * sh_rawmap_validate_source cannot answer this: it requires a JSON OBJECT, which all of the above
- * are. It is deliberately left that lenient -- it guards an explicit load of a file someone named,
- * where the honest failure is a parse error rather than a refusal based on a guess. A listing can be
- * pickier than a loader, because guessing wrong here only hides a row.
- *
- * WHAT ACTUALLY DISTINGUISHES THEM is the top-level "~type" the engine's own serializer writes:
- *
- *     a rawmap  ends  ..."version":111,"~type":"idSnapMap","~version":111}
- *     a prefab  says  "~type":"idSnapEntityPrefab"
- *
- * Checked in the TAIL, not the head. Keys come out in sorted order, so "~type" is the second to last
- * of them -- 36 bytes from the end of a 3 MB rawmap on this machine. A tail read costs exactly what
- * a head read costs, and 8 KB of it is a wide margin for a pretty-printed file (sh_pretty_on
- * re-lays these out, which is also why the search cannot assume there is no space after the colon).
- *
- * The quotes in the needle matter: idSnapMapCapEntity begins with idSnapMap, and a PREFAB of map
- * geometry can contain those entities. Searching for the quoted value cannot confuse the two. */
+ * Stricter than sh_rawmap_validate_source on purpose -- that guards a load of a named file, where a
+ * parse error is the honest failure; guessing wrong here only hides a row. */
 int sh_rawmap_looks_like_rawmap(const char *path)
 {
     HANDLE h;
@@ -1742,23 +1615,17 @@ int sh_rawmap_validate_source(const char *path, char *out_msg, int msg_capacity)
 }
 
 /* ------------------------------------------------------- save it NOW, from the map already on disk --
- * "Save Rawmap As" used to only name a destination and then wait for the person to save their map in
- * the editor. For a map that was ALREADY saved that is a pointless errand: the bytes exist, complete,
- * on disk. A locally saved SnapMap keeps them at
+ * A locally saved SnapMap holds its bytes at
  *
  *     <the save folder>\map.decl   =   [4-byte checksum][zlib(rawmap JSON)]
  *
- * and `rawmap.json` is exactly that JSON. Both halves of that are established: the engine's map.decl
- * fetch hands the record payload straight to zlib inflate, and the layout has been decoded end-to-end
- * against real saves on disk. So this path reads, inflates and writes -- no engine call, no thread
- * discipline, no waiting.
+ * and rawmap.json is exactly that JSON, so this reads, inflates and writes with no engine call.
  *
- * The 4-byte header is a CHECKSUM, not a length (verified: 0x9D4CF0F1 on a 2,638-byte file that
- * inflates to 23,638), so nothing in the file says how big the JSON is. Hence sh_inflate_raw_upto and
- * a capacity ladder rather than one sized allocation.
+ * The 4-byte header is a CHECKSUM, not a length [DIRECT: 0x9D4CF0F1 on a 2,638-byte file inflating
+ * to 23,638], so nothing states the JSON's size -- hence sh_inflate_raw_upto and a capacity ladder.
  *
- * Only the shadow's one-shot remains for the case this genuinely cannot serve: a map that has never
- * been saved has no map.decl to read, and only the editor can produce its bytes. */
+ * A map that has never been saved has no map.decl, and only the editor can produce its bytes; that
+ * case falls back to the shadow's one-shot. */
 static int save_from_local_map(char *out_msg, int msg_capacity, unsigned long long *out_bytes)
 {
     /* 256 KB covers every real map by a wide margin (the ones measured are 20-24 KB); the rungs above
@@ -1870,19 +1737,10 @@ static int save_from_local_map(char *out_msg, int msg_capacity, unsigned long lo
     return ok;
 }
 
-/* The same verdict, asked about the file the swap would ACTUALLY read.
- *
- * The reload used to refuse unless the shared gate was armed, which is why the File menu needed an
- * "Armed" tick at all: without it the reload declined, and with it every unrelated map load was
- * substituted too. The gate was never the property worth checking. What matters is whether the
- * staged bytes will be accepted, and this asks exactly that -- so the reload can arm the swap around
- * its own call and put the gate back the way the person left it. */
-/* Report BOTH effective paths -- what the swap would read and what a save would be mirrored to.
- *
- * Exposed because `sh_rawmaps_on` was a switch whose effect depended on state the person could not
- * see: it arms substitution for every subsequent map load, using whichever file some earlier click
- * staged. The File menu at least prints the two paths; a console user was arming blind. A switch
- * that cannot say what it is about to do is the problem, and this is what fixes it. */
+/* The same verdict, asked about the file the swap would ACTUALLY read. Not the gate: what matters is
+ * whether the staged bytes will be accepted, so a reload can arm the swap around its own call and
+ * leave the gate as the person set it. */
+/* Both EFFECTIVE paths -- what the swap would read, and where a save would be mirrored. */
 /* The DEFAULT paths, whatever is currently set. Distinct from sh_rawmap_get_paths, which reports the
  * EFFECTIVE ones -- a caller that wants to say "this is not the usual file" needs both. */
 void sh_rawmap_get_default_paths(char *load_out, int load_cap, char *save_out, int save_cap)
@@ -1952,18 +1810,13 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
     if (!json_escape_into(load_esc, sizeof load_esc, load_path)) load_esc[0] = '\0';
     if (!json_escape_into(save_esc, sizeof save_esc, save_path)) save_esc[0] = '\0';
 
-    /* `armed` reports the EXPLICIT gate only, matching sh_rawmap_swap_is_armed's reasoning: a menu
-     * checkbox must not show ON for a flag-file arm that unticking it cannot clear. `willFire` is
-     * the gate OR that flag-file -- what actually happens -- so the menu can enable an item on
-     * whether it would work rather than on whether the tick is set. */
-    /* `loads` is the question the File menu actually has to answer: the staged file is substituted
-     * into the NEXT map load, so "did it work" is unanswerable from the paths alone -- the person
-     * needs to see the swap fire. Reporting both counters distinguishes the three outcomes that look
-     * identical on screen: never fired (0), fired but the parse did not return (loads > loadsDone),
-     * and a completed substituted load. Without this the only way to tell was reading
-     * sh_backend.log for "B1: rawmap swap FIRED". */
-    /* `savePending` is the same question for the save half: "Save Rawmap As" arms one save and then
-     * waits for the person to save their map, and a waiting arm is invisible otherwise. */
+    /* `armed` is the explicit gate only, so a checkbox never shows ON for a flag-file arm that
+     * unticking cannot clear. `willFire` is gate OR flag-file -- what actually happens -- for
+     * enabling items rather than drawing the tick.
+     *
+     * `loads` / `loadsDone` separate three outcomes that look identical on screen: never fired (0),
+     * fired but the parse did not return (loads > loadsDone), and a completed substituted load.
+     * `savePending` / `loadPending` show a one-shot still waiting, which is otherwise invisible. */
     written = _snprintf_s(out_json, (size_t)out_capacity, _TRUNCATE,
         "{\"load\":\"%s\",\"save\":\"%s\",\"armed\":%d,\"saves\":%lu,\"lastBytes\":%llu,"
         "\"loads\":%lu,\"loadsDone\":%lu,\"savePending\":%d,\"loadPending\":%d,"
@@ -2072,18 +1925,15 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
             if (sh_editor_frame_request_rawmap_save(why, (int)sizeof why)) {
                 if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
                                        "Writing the open map to the rawmap file.", _TRUNCATE);
-            /* NO "the editor is up but has no map" rung here, and that is a decision, not an
-             * omission. It was written and removed: the Snapmap+ window only exists once you are IN
-             * the editor, and a map is always live there, so the branch could not be reached from
-             * this menu. The residual window it would have covered is a save landing exactly during
-             * an editor transition (ED_SUBSTATE_OFF == 5) or shutdown, where rung 1 refuses and rung
-             * 2 would read a different map off disk. If that is ever seen, this is the place. */
+            /* No "editor up but no map" rung: this window only exists inside the editor, where a map
+             * is always live. The one residual case is a save landing during an editor transition
+             * (ED_SUBSTATE_OFF == 5) or shutdown, where rung 1 refuses and rung 2 would read a
+             * different map off disk. If that is ever seen, this is the place. */
             } else if (dest_is_the_staged_source(save_path)) {
-                /* Rung 2 reads the newest save off DISK, which is not necessarily the map the person
-                 * has open -- and here the destination is the rawmap they staged for loading. Those
-                 * two together are what destroyed a 214KB staged file once already: the wrong map's
-                 * bytes written over the input. Rung 1 may do this freely (those are the open map's
-                 * own bytes); rung 2 may not, so it drops through to arming the next real save. */
+                /* Rung 2 reads the newest save off DISK, which need not be the open map -- and here
+                 * the destination is the rawmap staged for loading. Writing one over the other is
+                 * the wrong map's bytes over the input. Rung 1 is free to (they are the open map's
+                 * own bytes); rung 2 drops through to arming the next real save. */
                 backend_log("B1: rawmap SAVE skipped the disk fallback -- it would write the wrong "
                             "map over the staged load source");
                 strncpy_s(why, sizeof why,
