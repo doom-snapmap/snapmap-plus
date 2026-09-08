@@ -685,12 +685,15 @@ static void h_sh_rawmaps(idCmdArgs *a)
          * reads the newest save off disk is how a never-saved map silently exports a DIFFERENT map,
          * and a console command that writes the wrong map is worse than one that says no. */
         if (sh_editor_frame_request_rawmap_save(why, (int)sizeof why)) {
-            /* "Queued", not "Writing". The save runs on a later editor frame, so this line cannot
-             * know the outcome -- it used to say "Writing the open map to <path>" and say it just as
-             * confidently for a read-only file that the write then failed on. It reports what it
-             * actually did, and says where the answer is. */
-            sh_printf("Queued: the open map will be written to\n  %s\n", save_path);
-            sh_printf("If it does not appear, sh_backend.log says why.\n");
+            /* Present tense, one line. This briefly said "Queued: the open map will be written to",
+             * on the reasoning that the write lands on a later editor frame and so cannot be
+             * reported as done -- true, and useless: that frame is one of about thirty a second, and
+             * "queued" reads as something that might sit there indefinitely.
+             *
+             * The problem was never this wording. It was that an unwritable destination got this far
+             * at all; the check above refuses that now, so by the time this prints the write is
+             * genuinely about to happen. */
+            sh_printf("Writing the open map to %s\n", save_path);
         } else {
             /* Reachable despite the probe: the editor can leave a live state between the two calls,
              * and the queue slot can be taken. Reported, not asserted. */
