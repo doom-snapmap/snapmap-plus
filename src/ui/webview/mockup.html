@@ -4657,16 +4657,18 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         var on = document.createElement('div');
         on.textContent = 'Always on: every map you open and every save uses these files.';
         note.appendChild(on);
-      } else if (RAWMAP_WILL_FIRE) {
-        // The tick is off and the swap fires anyway, because an arm.flag file is arming it. Saying
-        // nothing here is the worst option: the menu would show an unticked box above a Load Path
-        // that is silently replacing every map opened, and unticking the box again cannot help.
-        var flag = document.createElement('div');
-        flag.textContent = 'Every map you open is being replaced by the Load Path file. '
-                         + 'A file named arm.flag is doing that. Delete it to stop — '
-                         + 'the switch above will not.';
-        note.appendChild(flag);
       }
+      // NO arm.flag WARNING HERE, deliberately. The swap also arms on a sibling arm.flag file, and
+      // this menu can therefore show the tick off while every map opened is replaced. That is a real
+      // inconsistency and it IS reported -- by `sh_rawmaps`, which names the file to delete.
+      //
+      // It does not belong in this menu. arm.flag is a test hook that a harness creates; nobody
+      // using Snapmap+ normally has one, so the line would be three sentences of alarming text
+      // about an unfamiliar file, permanently present in the code and visible to a developer only.
+      // The console is where "why is this happening" gets asked, and it answers there.
+      //
+      // What the menu DOES honour is the behaviour: "Open Rawmap as New Map" stays live whenever the
+      // swap will fire, whatever armed it, because greying out a working item is wrong either way.
     }
   }
 
