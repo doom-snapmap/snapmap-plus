@@ -45,16 +45,32 @@
 #define SH_NAVR_MAX_REGIONS     512
 #define SH_NAVR_MODULE_CAP      128     /* "category/module" + NUL */
 
-/* One walkable surface an author asked for: the TOP FACE of a ticked Blocking
- * Box, in module-local coordinates.
+/* One walkable surface an author asked for, in module-local coordinates.
+ *
+ * NOT A RECTANGLE. A Blocking Box carries a full `idMat3 spawnOrientation`, and
+ * 12.4% of the volumes in a real map are not upright, so the walkable surface is
+ * an ORIENTED QUAD -- four corners each with their own z. Which face of the box
+ * that is depends on the rotation: the top for an upright box, a SIDE face for a
+ * box on its side (58 of the 82 non-upright volumes in one real map), the
+ * underside for one rotated past vertical.
  *
  * A blocking volume's `spawnPosition` is the box's BOTTOM in z and its CENTRE in
- * x and y, so the walkable surface is the rectangle at spawnPosition.z + size.z.
- * That asymmetry is the engine's, not ours; getting it wrong puts the navigation
- * at the floor of the box instead of its roof. */
+ * x and y. That asymmetry is the engine's, not ours, and it is why a rotated box
+ * hangs somewhere other than where an upright one would.
+ *
+ * `c` is wound CLOCKWISE seen from +Z, the winding every Grid Room floor area
+ * uses. `n` is that face's unit outward normal. `face` is the OBB face index:
+ * `face >> 1` is the axis and `face & 1` the negative side, so an UPRIGHT box's
+ * top face is 4, not 0.
+ *
+ * Whether the face is WALKABLE is not decided here. The threshold is
+ * `minFloorCos`, a per-nav-class AAS setting, and one region feeds all three
+ * monster classes -- so this module reports the geometry and the augmenter
+ * judges it. */
 typedef struct sh_nav_region {
-    float x0, y0, x1, y1;   /* module-local rect, normalised so x0<x1, y0<y1 */
-    float top_z;            /* module-local z of the walkable surface */
+    float c[4][3];          /* the face, module-local, CW seen from +Z */
+    float n[3];             /* unit outward normal of that face */
+    int   face;             /* OBB face index 0..5; 4 is an upright box's top */
     int   instance;         /* index into the instance table below */
     int   block_demons;     /* the volume's blockDemons; 0 means a demon falls through it */
     unsigned entity;        /* index in the map's entities array, for diagnostics */

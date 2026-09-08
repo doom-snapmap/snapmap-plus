@@ -347,9 +347,9 @@ static int bake_collect_platforms(const bake_module *m, sh_aug_platform *out, in
          * author ticked -- navigating onto it would be a lie the router acts on. */
         if (!r->block_demons) continue;
         memset(&out[n], 0, sizeof out[n]);
-        out[n].x0 = r->x0; out[n].y0 = r->y0;
-        out[n].x1 = r->x1; out[n].y1 = r->y1;
-        out[n].z = r->top_z;
+        memcpy(out[n].c, r->c, sizeof out[n].c);
+        memcpy(out[n].n, r->n, sizeof out[n].n);
+        out[n].face = r->face;
         _snprintf_s(out[n].name, sizeof out[n].name, _TRUNCATE, "volume %u", r->entity);
         n++;
     }

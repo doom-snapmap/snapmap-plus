@@ -252,27 +252,109 @@ static int navr_module_name(const char *decl, char *out, size_t cap)
     return 1;
 }
 
-/* The walkable rectangle of one Blocking Box, read out of its `edit` object
- * into `r` -- everything about a region except whose it is. Returns 0 for a
- * volume with no top face to derive: a shape that is not a box, or a box with
- * no area.
+/* `spawnOrientation` into `m`, as a rotation matrix.
+ *
+ * It is an `idMat3` that serializes with DEFAULT ELISION: only members that
+ * differ from the default are written, and THE DEFAULT IS THE IDENTITY, not
+ * zero. So this seeds the identity and overlays what is there.
+ *
+ * That is not a stylistic choice. Over the 6,932 entities carrying a `mat` in a
+ * real map, an identity-seeded read yields 6,932 matrices that are orthonormal
+ * with determinant +1; a zero-seeded read yields 1,604, and the rest are
+ * degenerate. A near-zero yaw serializes as
+ *
+ *     {"mat[0]":{"y":8.74e-08}, "mat[1]":{"x":-8.74e-08}}
+ *
+ * which is a rotation of about 5e-6 degrees under the identity and a collapsed
+ * matrix under zeros.
+ *
+ * Returns 0 for a matrix that is not a rotation. Both checks matter: a sheared
+ * matrix would give a non-rectangular face, and a REFLECTION is orthonormal but
+ * has determinant -1 and would give a mirrored footprint that the caller's
+ * shoelace rewind would then quietly make legal. */
+static int navr_mat3(const char *json, size_t len, const sh_shard_doc *doc,
+                     int edit, float m[3][3])
+{
+    static const char *ROW[3] = { "mat[0]", "mat[1]", "mat[2]" };
+    static const char *COMP[3] = { "x", "y", "z" };
+    int so, mat, r, c;
+    double det;
+
+    for (r = 0; r < 3; r++)
+        for (c = 0; c < 3; c++) m[r][c] = (r == c) ? 1.0f : 0.0f;
+
+    so = navr_member(json, len, doc, edit, "spawnOrientation", '{');
+    if (so < 0) return 1;                      /* absent: identity, upright */
+    mat = navr_member(json, len, doc, so, "mat", '{');
+    if (mat < 0) return 1;
+
+    for (r = 0; r < 3; r++) {
+        int row = navr_member(json, len, doc, mat, ROW[r], '{');
+        if (row < 0) continue;                 /* elided row: identity */
+        for (c = 0; c < 3; c++) {
+            size_t v;
+            double d;
+            if (navr_value(json, len, doc, row, COMP[c], &v) &&
+                navr_num_at(json, len, v, &d))
+                m[r][c] = (float)d;            /* elided member: identity */
+        }
+    }
+
+    for (r = 0; r < 3; r++) {
+        double n2 = (double)m[r][0] * m[r][0] + (double)m[r][1] * m[r][1]
+                  + (double)m[r][2] * m[r][2];
+        if (n2 < 0.99 || n2 > 1.01) return 0;
+    }
+    for (r = 0; r < 3; r++) {
+        int s = (r + 1) % 3;
+        double dp = (double)m[r][0] * m[s][0] + (double)m[r][1] * m[s][1]
+                  + (double)m[r][2] * m[s][2];
+        if (dp < -0.01 || dp > 0.01) return 0;
+    }
+    det = (double)m[0][0] * ((double)m[1][1] * m[2][2] - (double)m[1][2] * m[2][1])
+        - (double)m[0][1] * ((double)m[1][0] * m[2][2] - (double)m[1][2] * m[2][0])
+        + (double)m[0][2] * ((double)m[1][0] * m[2][1] - (double)m[1][1] * m[2][0]);
+    if (det < 0.99 || det > 1.01) return 0;
+    return 1;
+}
+
+/* The walkable face of one Blocking Box, read out of its `edit` object into `r`
+ * -- everything about a region except whose it is. Returns 0 for a volume with
+ * no face to derive: a shape that is not a box, a box with no area, or an
+ * orientation that is not a rotation.
+ *
+ * The local box runs `x,y` in +/- size/2 and `z` in [0, size.z], because
+ * `spawnPosition` is the box's CENTRE in x and y and its BOTTOM in z. World is
+ * `Rt * local`: the ROWS of the stored matrix are the local basis expressed in
+ * world, so world axis i IS row i. That convention is not guessed -- it is what
+ * the OG decompile builds in entity.c's angles-to-mat3, where
+ * `mat[1] = {-sinYaw, cosYaw, 0}` is unmistakably a row.
+ *
+ * The walkable face is whichever of the six has the greatest +z normal. For an
+ * upright box that is the top, and this reduces exactly to the old
+ * `spawnPosition.z + size.z`. Because the three axis z-components satisfy
+ * az^2 + bz^2 + cz^2 = 1, the best face's normal.z is always at least
+ * 1/sqrt(3) -- so a face ALWAYS exists, and a box tipped past about 55 degrees
+ * gets its area on what the author sees as a side. That is geometrically right
+ * and is what makes a box lying on its side work at all; the report says so.
  *
  * Both the load pass and the live refresh come through here, so the map on disk
  * and the map in the editor can never disagree about where a volume's walkable
- * surface is. They read the same two members for the same reason:
- * `spawnPosition` is the box's CENTRE in x and y and its BOTTOM in z, so the
- * surface is the top face, and a positive size leaves the rectangle already
- * normalised. */
-static int navr_volume_rect(const char *json, size_t len, const sh_shard_doc *doc,
+ * surface is. */
+static int navr_volume_face(const char *json, size_t len, const sh_shard_doc *doc,
                             int edit, sh_nav_region *r)
 {
+    static const float SU[4] = { -1.0f, +1.0f, +1.0f, -1.0f };
+    static const float SV[4] = { -1.0f, -1.0f, +1.0f, +1.0f };
     char text[64];
-    int clip, box, at;
-    float sx, sy, sz, cx, cy, cz;
+    int clip, box, at, i, k, best, a, u, v;
+    float sx, sy, sz, cx, cy, cz, m[3][3], half[3], centre[3], s;
+    float bestz, bestarea;
+    double sh;
 
     clip = navr_member(json, len, doc, edit, "clipModelInfo", '{');
     if (clip >= 0 && navr_str(json, len, doc, clip, "type", text, sizeof text) &&
-        strcmp(text, NAVR_CLIPMODEL_BOX) != 0) return 0;    /* no top face to derive */
+        strcmp(text, NAVR_CLIPMODEL_BOX) != 0) return 0;    /* no face to derive */
 
     box = navr_member(json, len, doc, clip, "size", '{');
     sx = navr_num(json, len, doc, box, "x", 0.0f);
@@ -285,11 +367,58 @@ static int navr_volume_rect(const char *json, size_t len, const sh_shard_doc *do
     cy = navr_num(json, len, doc, at, "y", 0.0f);
     cz = navr_num(json, len, doc, at, "z", 0.0f);
 
-    r->x0 = cx - sx / 2.0f;
-    r->y0 = cy - sy / 2.0f;
-    r->x1 = cx + sx / 2.0f;
-    r->y1 = cy + sy / 2.0f;
-    r->top_z = cz + sz;
+    if (!navr_mat3(json, len, doc, edit, m)) return 0;
+
+    half[0] = sx / 2.0f;
+    half[1] = sy / 2.0f;
+    half[2] = sz / 2.0f;
+    /* spawnPosition is the box BOTTOM in LOCAL z, so the centre sits half a
+     * height along the local z axis -- which in world is row 2. */
+    centre[0] = cx + m[2][0] * half[2];
+    centre[1] = cy + m[2][1] * half[2];
+    centre[2] = cz + m[2][2] * half[2];
+
+    best = -1; bestz = -2.0f; bestarea = -1.0f;
+    for (i = 0; i < 6; i++) {
+        int ax = i >> 1;
+        float sg = (i & 1) ? -1.0f : 1.0f;
+        float nz = m[ax][2] * sg;
+        float ar = half[(ax + 1) % 3] * half[(ax + 2) % 3];
+        /* Ties -- a box at exactly 45 degrees about one axis has two faces at
+         * 0.707 -- break toward the larger face, then the lower index, so the
+         * choice is deterministic rather than dependent on float noise. */
+        if (nz > bestz + 1e-4f || (nz > bestz - 1e-4f && ar > bestarea)) {
+            best = i; bestz = nz; bestarea = ar;
+        }
+    }
+
+    a = best >> 1;
+    s = (best & 1) ? -1.0f : 1.0f;
+    u = (a + 1) % 3;
+    v = (a + 2) % 3;
+    for (i = 0; i < 4; i++)
+        for (k = 0; k < 3; k++)
+            r->c[i][k] = centre[k] + s * half[a] * m[a][k]
+                       + SU[i] * half[u] * m[u][k]
+                       + SV[i] * half[v] * m[v][k];
+    for (k = 0; k < 3; k++) r->n[k] = m[a][k] * s;
+    r->face = best;
+
+    /* Wind CLOCKWISE seen from +Z: the XY shoelace must come out negative. A
+     * face whose XY projection is degenerate has no footprint at all -- that is
+     * a box standing exactly on edge, and there is nothing to walk on. */
+    sh = 0.0;
+    for (i = 0; i < 4; i++) {
+        int j = (i + 1) & 3;
+        sh += (double)r->c[i][0] * r->c[j][1] - (double)r->c[j][0] * r->c[i][1];
+    }
+    if (sh > -1e-3 && sh < 1e-3) return 0;
+    if (sh > 0.0) {
+        float t[3];
+        memcpy(t, r->c[1], sizeof t);
+        memcpy(r->c[1], r->c[3], sizeof t);
+        memcpy(r->c[3], t, sizeof t);
+    }
     return 1;
 }
 
@@ -517,7 +646,7 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
          * region; every other blocking volume in the map is left alone. */
         if (!navr_bool(json, len, &doc, edit, NAVR_MARKER)) continue;
 
-        if (!navr_volume_rect(json, len, &doc, edit, &region)) continue;
+        if (!navr_volume_face(json, len, &doc, edit, &region)) continue;
 
         if (out->region_count >= SH_NAVR_MAX_REGIONS) {
             out->truncated = 1;
@@ -605,7 +734,7 @@ static int navr_live_region(const char *json, size_t len, sh_nav_region *r)
             /* ABSENT IS FALSE here exactly as it is in the map: an untouched
              * volume simply has no `affectsNavmesh` member to read. */
             if (edit >= 0 && navr_bool(json, len, &doc, edit, NAVR_MARKER) &&
-                navr_volume_rect(json, len, &doc, edit, r)) {
+                navr_volume_face(json, len, &doc, edit, r)) {
                 r->block_demons = navr_bool(json, len, &doc, edit, "blockDemons");
                 ok = 1;
             }

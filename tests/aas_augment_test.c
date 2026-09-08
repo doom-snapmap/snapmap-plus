@@ -207,7 +207,14 @@ static void mkplat(sh_aug_platform *p, float x0, float y0, float x1, float y1,
                    float z, const char *name)
 {
     memset(p, 0, sizeof *p);
-    p->x0 = x0; p->y0 = y0; p->x1 = x1; p->y1 = y1; p->z = z;
+    /* Clockwise seen from +Z, the winding every Grid Room floor area uses. */
+    p->c[0][0] = x0; p->c[0][1] = y1;
+    p->c[1][0] = x1; p->c[1][1] = y1;
+    p->c[2][0] = x1; p->c[2][1] = y0;
+    p->c[3][0] = x0; p->c[3][1] = y0;
+    p->c[0][2] = p->c[1][2] = p->c[2][2] = p->c[3][2] = z;
+    p->n[2] = 1.0f;
+    p->face = 4;                    /* an upright box's top */
     _snprintf_s(p->name, sizeof p->name, _TRUNCATE, "%s", name);
 }
 

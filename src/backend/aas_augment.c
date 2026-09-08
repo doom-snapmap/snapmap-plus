@@ -1271,6 +1271,30 @@ static void aug_relink(aug_ctx *c)
 
 /* ---- admission --------------------------------------------------------- */
 
+/* A platform's XY bounds and its centroid height, from its four corners.
+ *
+ * The corners replaced the old x0/y1/z members, so what used to be a field read
+ * is a fold. The centroid is the right single height for ordering and for the
+ * headroom comparison: a tilted face has no one z, and its middle is the honest
+ * summary of where it sits. */
+static void aug_plat_bounds(const sh_aug_platform *p, double b[4])
+{
+    int i;
+    b[0] = b[2] = p->c[0][0];
+    b[1] = b[3] = p->c[0][1];
+    for (i = 1; i < 4; i++) {
+        if (p->c[i][0] < b[0]) b[0] = p->c[i][0];
+        if (p->c[i][1] < b[1]) b[1] = p->c[i][1];
+        if (p->c[i][0] > b[2]) b[2] = p->c[i][0];
+        if (p->c[i][1] > b[3]) b[3] = p->c[i][1];
+    }
+}
+
+static double aug_plat_centroid_z(const sh_aug_platform *p)
+{
+    return ((double)p->c[0][2] + p->c[1][2] + p->c[2][2] + p->c[3][2]) / 4.0;
+}
+
 /* Clearance above a platform: the distance to the lowest thing that overlaps it
  * in XY and sits above it, counting both the module's own areas and the other
  * platforms in this bake. */
@@ -1291,11 +1315,14 @@ static double aug_headroom(aug_ctx *c, const aug_rect *p,
         if (minz - p->z < best) best = minz - p->z;
     }
     for (k = 0; k < n; k++) {
+        double b[4], z;
         if (k == self) continue;
-        if (all[k].z <= p->z) continue;
-        if (all[k].x1 <= p->x0 || all[k].x0 >= p->x1) continue;
-        if (all[k].y1 <= p->y0 || all[k].y0 >= p->y1) continue;
-        if (all[k].z - p->z < best) best = all[k].z - p->z;
+        z = aug_plat_centroid_z(&all[k]);
+        if (z <= p->z) continue;
+        aug_plat_bounds(&all[k], b);
+        if (b[2] <= p->x0 || b[0] >= p->x1) continue;
+        if (b[3] <= p->y0 || b[1] >= p->y1) continue;
+        if (z - p->z < best) best = z - p->z;
     }
     return best;
 }
@@ -1338,7 +1365,9 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     for (i = 0; i < n; i++) order[i] = i;
     for (i = 1; i < n; i++) {
         int key = order[i];
-        for (j = i - 1; j >= 0 && plats[order[j]].z > plats[key].z; j--)
+        for (j = i - 1; j >= 0 &&
+             aug_plat_centroid_z(&plats[order[j]]) > aug_plat_centroid_z(&plats[key]);
+             j--)
             order[j + 1] = order[j];
         order[j + 1] = key;
     }
@@ -1356,11 +1385,16 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         pr->area = -1;
         pr->carrier = -1;
 
-        req.x0 = p->x0 < p->x1 ? p->x0 : p->x1;
-        req.x1 = p->x0 < p->x1 ? p->x1 : p->x0;
-        req.y0 = p->y0 < p->y1 ? p->y0 : p->y1;
-        req.y1 = p->y0 < p->y1 ? p->y1 : p->y0;
-        req.z = p->z;
+        {
+            /* TEMPORARY BRIDGE: the AABB of the quad, which IS the quad for an
+             * upright volume. The next change replaces this with aug_quad, so
+             * behaviour here is deliberately identical to what shipped. */
+            double b[4];
+            aug_plat_bounds(p, b);
+            req.x0 = (float)b[0]; req.y0 = (float)b[1];
+            req.x1 = (float)b[2]; req.y1 = (float)b[3];
+            req.z = (float)aug_plat_centroid_z(p);
+        }
         eff.x0 = req.x0 + c.radius; eff.x1 = req.x1 - c.radius;
         eff.y0 = req.y0 + c.radius; eff.y1 = req.y1 - c.radius;
         eff.z = req.z;
