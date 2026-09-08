@@ -2877,9 +2877,25 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 poc_rawmap_configure(nullptr, nullptr, on ? 1 : 0,
                                      on ? L"Rawmaps now apply to every map load and save."
                                         : L"Rawmaps apply to the File menu's own actions only.");
-            } else if (cmd == L"rawmapResetPaths") {
-                /* Empty (not NULL) on both sides = restore the built-in %LOCALAPPDATA% pair. */
-                poc_rawmap_configure("", "", -1, L"Back to the default rawmap.json.");
+            } else if (cmd == L"rawmapSaveBack") {
+                /* "Use Rawmap as Save Path" -- replaced "Use Default Location" in the File menu.
+                 *
+                 * OFF is the archival default: a rawmap you LOAD is a library entry, and saves go to
+                 * the default rawmap.json so importing one can never be what overwrites it. ON is
+                 * the deliberate round trip -- load, edit, save straight back over the same file.
+                 *
+                 * arm codes 3/4 rather than a new vtable slot: the backend and frontend must match
+                 * slot for slot, and `arm` was already a verb code once value 2 (arm ONE load)
+                 * existed. Resetting both paths lives on in the console as `sh_rawmaps default`;
+                 * with saves defaulting to rawmap.json on every load, the menu button for it was
+                 * answering a question that no longer comes up.
+                 *
+                 * Both paths ride the status back to the page, so the tick renders from the backend
+                 * rather than from anything the page remembers -- the console can change it too. */
+                int on = 0; json_get_int(json, L"on", &on);
+                poc_rawmap_configure(nullptr, nullptr, on ? 3 : 4,
+                                     on ? L"Saves now write back over the rawmap you loaded."
+                                        : L"Saves go to the default rawmap.json; loaded rawmaps are left alone.");
             } else if (cmd == L"newEntity") {
                 std::wstring js, lab;
                 json_get_wstr(json, L"json", js); json_get_wstr(json, L"label", lab);
