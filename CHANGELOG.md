@@ -5,7 +5,7 @@ latest stable version is what `snapmap-plus update` installs.
 
 ## v0.2.1-beta.9 -- 2026-09-08 (beta)
 
-**Steadier navigation bakes, and no more command crashes**
+**Marks take effect on Play, and the bake no longer crashes**
 
 Climb links are now placed to suit each demon, so more of your platforms are reachable, and marks ticked during a session reach the bake without a save-and-reload. Several crashes around map building and console commands are gone, and reports now say which renderer you were running.
 
@@ -13,7 +13,7 @@ Climb links are now placed to suit each demon, so more of your platforms are rea
 - Feedback and crash reports now carry which renderer version of the game you are running, shown as a Renderer line, so renderer-specific bugs can be told apart.
 
 ### Improved
-- Climb links are placed along a ledge where each demon can actually stand, so demons that start their climb further out no longer lose the edge and thousands more platforms gain links.
+- Climb links are placed along a ledge where each demon can actually stand, so a demon whose climb starts further out no longer loses the edge, and platforms that no demon could reach become reachable.
 - Six dash and meathook tuning settings that nothing could ever read are no longer offered, and the documentation no longer lists them.
 
 ### Fixed
