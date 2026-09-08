@@ -73,6 +73,14 @@
  * carries 0x0C01 (17421 of 17442 shipped instances); one shared by two areas
  * carries 0x0C00. Writing 0 leaves an edge that belongs to nothing shipped data
  * recognises. */
+/* An edge only one area uses, and one two areas share. The demotion below fires
+ * when a second area asks for an edge that already exists.
+ *
+ * For GENERATED geometry it now essentially never fires: aug_vertex interns by
+ * exact float equality, and two abutting ORIENTED quads -- inset by the agent
+ * radius, each on its own plane -- will not produce bit-identical corners. That
+ * costs nothing here, because nothing in the augmenter routes on shared edges;
+ * chained platforms are joined by reachabilities, not by shared geometry. */
 #define EDGE_FLAGS_BOUNDARY     0x00000C01
 #define EDGE_FLAGS_SHARED       0x00000C00
 
