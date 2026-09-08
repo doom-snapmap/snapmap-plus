@@ -3,6 +3,26 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.9 -- 2026-09-08 (beta)
+
+**Marks take effect on Play, and the bake no longer crashes**
+
+Climb links are now placed to suit each demon, so more of your platforms are reachable, and marks ticked during a session reach the bake without a save-and-reload. Several crashes around map building and console commands are gone, and reports now say which renderer you were running.
+
+### New
+- Feedback and crash reports now carry which renderer version of the game you are running, shown as a Renderer line, so renderer-specific bugs can be told apart.
+
+### Improved
+- Climb links are placed along a ledge where each demon can actually stand, so a demon whose climb starts further out no longer loses the edge, and platforms that no demon could reach become reachable.
+- Six dash and meathook tuning settings that nothing could ever read are no longer offered, and the documentation no longer lists them.
+
+### Fixed
+- Surfaces you mark during a session now reach the navigation bake without saving and reloading the map.
+- The game no longer dies with a fatal error while building a map that has live navigation marks.
+- Console commands that edit game data now run on the game's own thread, ending the crashes some players hit when using them.
+
+_Plus 6 smaller fixes and internal changes._
+
 ## v0.2.1-beta.8 -- 2026-09-07 (beta)
 
 **Demons walk and climb your own geometry**
