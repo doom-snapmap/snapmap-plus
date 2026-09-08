@@ -1024,7 +1024,8 @@ typedef struct aug_side {
     int    floor_area;      /* the area across it */
     double near_z, far_z;   /* surface height each side, at the segment midpoint */
     double drop;            /* near_z - far_z */
-    double gap;             /* XY clearance; 0 when touching */
+    double gap;             /* XY clearance ALONG THIS SEGMENT'S ray; 0 when touching */
+    double land[2];         /* where a link actually arrives on the far side */
     int    generated;       /* 1 if the neighbour is another generated quad */
     int    peer;            /* index into the peer table, or -1 */
 } aug_side;
@@ -1087,6 +1088,47 @@ static int aug_samples_unit(double *out, int cap)
     return n;
 }
 
+/* How far along a ray the quad is first entered, and where to stand once inside.
+ *
+ * Measured ALONG THE RAY, not as the minimum clearance between two whole quads.
+ * Those differ whenever the neighbour is off to one side, and using the whole-
+ * quad minimum picks an animation for one distance and then writes the link at
+ * another -- outside the stretch envelope the animation was chosen for.
+ *
+ * Returns 0 if the ray never reaches it inside `maxd`. */
+static int aug_ray_entry(const aug_quad *target, double ox, double oy,
+                         double dx, double dy, double maxd,
+                         double *out_dist, double out_land[2])
+{
+    double lo = -1.0, hi = -1.0, d;
+    int i;
+
+    for (d = 0.0; d <= maxd; d += 16.0) {
+        if (aug_quad_contains_xy(target, ox + dx * d, oy + dy * d)) { hi = d; break; }
+        lo = d;
+    }
+    if (hi < 0.0) return 0;
+    /* Bisect down to a unit, so the reported distance is the wall and not the
+     * step size that found it. */
+    if (lo >= 0.0) {
+        for (i = 0; i < 8; i++) {
+            double mid = (lo + hi) / 2.0;
+            if (aug_quad_contains_xy(target, ox + dx * mid, oy + dy * mid)) hi = mid;
+            else lo = mid;
+        }
+    }
+    *out_dist = hi;
+    /* Stand a little way past the lip rather than exactly on it, and fall back
+     * to the quad's centre if that overshoots a narrow target. */
+    out_land[0] = ox + dx * (hi + REACH_SIDE_OFFSET * 2.0);
+    out_land[1] = oy + dy * (hi + REACH_SIDE_OFFSET * 2.0);
+    if (!aug_quad_contains_xy(target, out_land[0], out_land[1])) {
+        out_land[0] = (target->x0 + target->x1) / 2.0;
+        out_land[1] = (target->y0 + target->y1) / 2.0;
+    }
+    return 1;
+}
+
 /* Fill one segment record from a run of samples facing one neighbour. */
 static void aug_close_segment(aug_ctx *c, aug_side *sd, const aug_quad *eff,
                               int e, const double out2[2], double t0, double t1,
@@ -1110,13 +1152,46 @@ static void aug_close_segment(aug_ctx *c, aug_side *sd, const aug_quad *eff,
     sd->peer = -1;
     sd->gap = 0.0;
 
+    sd->land[0] = mx + out2[0] * REACH_SIDE_OFFSET;
+    sd->land[1] = my + out2[1] * REACH_SIDE_OFFSET;
+
     for (q = 0; q < npeers; q++) {
+        double dist, wx, wy, junk[2];
         if (peers[q].area != who) continue;
         sd->generated = 1;
         sd->peer = q;
-        sd->far_z = aug_z_at(peers[q].eff, mx + out2[0] * 8.0, my + out2[1] * 8.0);
-        sd->gap = aug_quad_gap(req, peers[q].req);
-        if (sd->gap < AUG_TOUCH_EPS) sd->gap = 0.0;
+
+        /* TWO casts along the same ray, because the two questions differ.
+         *
+         * The GAP is wall to wall, so it is cast from OUR uninset edge against
+         * the peer's uninset footprint. Casting from the inset edge instead
+         * would report the agent radius -- 24 to 64 units -- as a gap between
+         * two volumes an author placed flush, and the segment would be
+         * classified as a leap across a gap that does not exist.
+         *
+         * The LANDING point has to be inside the peer's AREA, which is carved at
+         * its inset quad, so that one is cast against `eff`. */
+        wx = req->c[e][0] + mt * (req->c[j][0] - req->c[e][0]);
+        wy = req->c[e][1] + mt * (req->c[j][1] - req->c[e][1]);
+        if (aug_ray_entry(peers[q].req, wx, wy, out2[0], out2[1],
+                          SH_TRAV_LEAP_MAX_SPAN, &dist, junk))
+            sd->gap = dist < AUG_TOUCH_EPS ? 0.0 : dist;
+        else {
+            /* The ray misses it even though a sample found it, which happens at
+             * a corner. The whole-quad clearance is right, just less precise. */
+            sd->gap = aug_quad_gap(req, peers[q].req);
+            if (sd->gap < AUG_TOUCH_EPS) sd->gap = 0.0;
+        }
+        if (!aug_ray_entry(peers[q].eff, wx, wy, out2[0], out2[1],
+                           SH_TRAV_LEAP_MAX_SPAN + 256.0, &dist, sd->land)) {
+            sd->land[0] = (peers[q].eff->x0 + peers[q].eff->x1) / 2.0;
+            sd->land[1] = (peers[q].eff->y0 + peers[q].eff->y1) / 2.0;
+        }
+        /* The height is read where the link ACTUALLY arrives. Reading it a few
+         * units outside our own edge is mid-air once there is a gap, and on a
+         * tilted neighbour it extrapolates the plane to a height no surface
+         * has. */
+        sd->far_z = aug_z_at(peers[q].eff, sd->land[0], sd->land[1]);
         break;
     }
     if (!sd->generated) {
@@ -1124,6 +1199,30 @@ static void aug_close_segment(aug_ctx *c, aug_side *sd, const aug_quad *eff,
         sd->far_z = aug_area_box(c->a, (unsigned)who, tb) ? (double)tb[5] : sd->near_z;
     }
     sd->drop = sd->near_z - sd->far_z;
+}
+
+/* The peers close enough to this quad to be worth testing, by bounding box.
+ *
+ * Without this, gap discovery is four edges by thirty-two samples by sixty
+ * ray steps by EVERY peer, and the platform cap is 512 -- billions of
+ * containment tests for one bake. The AABB overlap test is exact enough as a
+ * filter because it can only ever admit too many, never too few.
+ *
+ * `reach` is how far out the caller intends to look: the touching epsilon for
+ * adjacency, the longest shipped leap for gaps. */
+static int aug_candidates(const aug_quad *req, const aug_peer *peers, int npeers,
+                          int ai, double reach, const aug_peer **out, int cap)
+{
+    int q, n = 0;
+    for (q = 0; q < npeers && n < cap; q++) {
+        if (peers[q].area == ai) continue;
+        if (peers[q].req->x0 > req->x1 + reach) continue;
+        if (peers[q].req->x1 < req->x0 - reach) continue;
+        if (peers[q].req->y0 > req->y1 + reach) continue;
+        if (peers[q].req->y1 < req->y0 - reach) continue;
+        out[n++] = &peers[q];
+    }
+    return n;
 }
 
 /* Per edge of the quad, the SEGMENTS of that edge and the neighbour each faces.
@@ -1150,7 +1249,11 @@ static int aug_edge_segments(aug_ctx *c, int ai, const aug_quad *eff,
                              const aug_quad *req, const aug_peer *peers,
                              int npeers, aug_side *out, int cap)
 {
-    int e, n = 0;
+    const aug_peer *cand[SH_AUG_MAX_PLATFORMS];
+    int e, n = 0, ncand;
+
+    ncand = aug_candidates(req, peers, npeers, ai, AUG_TOUCH_EPS * 2.0,
+                           cand, SH_AUG_MAX_PLATFORMS);
 
     for (e = 0; e < 4 && n < cap; e++) {
         double in2[2], out2[2], ts[32];
@@ -1169,9 +1272,8 @@ static int aug_edge_segments(aug_ctx *c, int ai, const aug_quad *eff,
                 double ey = req->c[e][1] + t * (req->c[j][1] - req->c[e][1]);
                 double px = ex + out2[0] * AUG_TOUCH_EPS;
                 double py = ey + out2[1] * AUG_TOUCH_EPS;
-                for (q = 0; q < npeers; q++) {
-                    if (peers[q].area == ai) continue;
-                    if (aug_quad_contains_xy(peers[q].req, px, py)) { who = peers[q].area; break; }
+                for (q = 0; q < ncand; q++) {
+                    if (aug_quad_contains_xy(cand[q]->req, px, py)) { who = cand[q]->area; break; }
                 }
                 if (who < 0) {
                     float tb[6];
@@ -1211,7 +1313,12 @@ static int aug_edge_gap_segments(aug_ctx *c, int ai, const aug_quad *eff,
                                  const aug_quad *req, const aug_peer *peers,
                                  int npeers, aug_side *out, int cap)
 {
-    int e, n = 0;
+    const aug_peer *cand[SH_AUG_MAX_PLATFORMS];
+    int e, n = 0, ncand;
+
+    ncand = aug_candidates(req, peers, npeers, ai, SH_TRAV_LEAP_MAX_SPAN,
+                           cand, SH_AUG_MAX_PLATFORMS);
+    if (ncand == 0) return 0;
 
     for (e = 0; e < 4 && n < cap; e++) {
         double in2[2], out2[2], ts[32];
@@ -1231,9 +1338,8 @@ static int aug_edge_gap_segments(aug_ctx *c, int ai, const aug_quad *eff,
                 double d;
                 for (d = AUG_TOUCH_EPS; d <= SH_TRAV_LEAP_MAX_SPAN && who < 0; d += 16.0) {
                     double px = ex + out2[0] * d, py = ey + out2[1] * d;
-                    for (q = 0; q < npeers; q++) {
-                        if (peers[q].area == ai) continue;
-                        if (aug_quad_contains_xy(peers[q].req, px, py)) { who = peers[q].area; break; }
+                    for (q = 0; q < ncand; q++) {
+                        if (aug_quad_contains_xy(cand[q]->req, px, py)) { who = cand[q]->area; break; }
                     }
                 }
             }
@@ -1321,16 +1427,15 @@ static int aug_step_links(aug_ctx *c, int ai, const aug_quad *eff,
                   - sides[i].out[1] * REACH_SIDE_OFFSET;
             dn[2] = aug_z_at(eff, dn[0], dn[1]);
             if (sides[i].generated && sides[i].peer >= 0) {
+                /* The landing point the segment already measured along its own
+                 * outward ray. Generated areas are carved at the INSET quad, so
+                 * two flush volumes have areas 2*radius apart with floor between
+                 * them: a point one unit past the shared wall is in that dead
+                 * strip and the BSP answers with the floor, refusing the link. */
                 const aug_quad *pe = peers[sides[i].peer].eff;
-                double cx = (pe->x0 + pe->x1) / 2.0, cy = (pe->y0 + pe->y1) / 2.0;
-                double bx = sides[i].p0[0] + t * (sides[i].p1[0] - sides[i].p0[0]);
-                double by = sides[i].p0[1] + t * (sides[i].p1[1] - sides[i].p0[1]);
-                double gx = bx + sides[i].out[0] * 8.0, gy = by + sides[i].out[1] * 8.0;
-                /* Walk in from the shared edge until the point is genuinely on
-                 * the neighbour's area, then fall back to its centre. */
-                if (!aug_quad_contains_xy(pe, gx, gy)) { gx = cx; gy = cy; }
-                up[0] = gx; up[1] = gy;
-                up[2] = aug_z_at(pe, gx, gy);
+                up[0] = sides[i].land[0];
+                up[1] = sides[i].land[1];
+                up[2] = aug_z_at(pe, up[0], up[1]);
             } else {
                 up[0] = sides[i].p0[0] + t * (sides[i].p1[0] - sides[i].p0[0])
                       + sides[i].out[0] * REACH_SIDE_OFFSET;
@@ -1606,19 +1711,22 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                     inner_pt[1] = by - sides[i].out[1] * TRAVERSAL_INNER_INSET;
                     inner_pt[2] = aug_z_at(eff, inner_pt[0], inner_pt[1]);
                     if (sides[i].generated && sides[i].peer >= 0) {
-                        /* Land INSIDE the neighbour's own inset footprint. The
-                         * areas are 2*radius apart even when the walls are
-                         * flush, so an endpoint measured from the wall lands in
-                         * the dead strip between them. */
+                        /* Land INSIDE the neighbour's own inset footprint, at the
+                         * point the segment measured along its outward ray. The
+                         * areas are 2*radius apart even when the walls are flush,
+                         * so an endpoint measured from the wall lands in the dead
+                         * strip between them.
+                         *
+                         * The animation's own offset is NOT added here. For a
+                         * touching neighbour the two areas already stand that far
+                         * apart, and for a leap the span was selected from this
+                         * same measured distance -- adding the offset on top
+                         * would write the link at a distance the chosen clip was
+                         * never checked against. */
                         const aug_quad *pe = peers[sides[i].peer].eff;
-                        double gx = bx + sides[i].out[0] * (sides[i].gap + (double)off);
-                        double gy = by + sides[i].out[1] * (sides[i].gap + (double)off);
-                        if (!aug_quad_contains_xy(pe, gx, gy)) {
-                            gx = (pe->x0 + pe->x1) / 2.0;
-                            gy = (pe->y0 + pe->y1) / 2.0;
-                        }
-                        outer_pt[0] = gx; outer_pt[1] = gy;
-                        outer_pt[2] = aug_z_at(pe, gx, gy);
+                        outer_pt[0] = sides[i].land[0];
+                        outer_pt[1] = sides[i].land[1];
+                        outer_pt[2] = aug_z_at(pe, outer_pt[0], outer_pt[1]);
                     } else {
                         outer_pt[0] = bx + sides[i].out[0] * (double)off;
                         outer_pt[1] = by + sides[i].out[1] * (double)off;
@@ -1860,7 +1968,19 @@ static double aug_plat_centroid_z(const sh_aug_platform *p)
 
 /* Clearance above a platform: the distance to the lowest thing that overlaps it
  * in XY and sits above it, counting both the module's own areas and the other
- * platforms in this bake. */
+ * platforms in this bake.
+ *
+ * REFUSED platforms are counted too, and that is deliberate. A volume this bake
+ * declined to make walkable -- too small, too steep, out of range -- is still a
+ * solid box standing in the world. Skipping it here would let us emit a walkable
+ * area in the space underneath one, and demons would spawn into a ceiling. The
+ * question this asks is "what is physically above me", not "what did we
+ * navigate".
+ *
+ * The platform overlap test is exact rather than an AABB comparison: for a yawed
+ * quad the bounding box is strictly larger, so an AABB test reports overlap
+ * between two rotated platforms that do not actually meet and refuses one of
+ * them for headroom it really has. */
 static double aug_headroom(aug_ctx *c, const aug_quad *p,
                            const sh_aug_platform *all, int n, int self)
 {
@@ -1882,12 +2002,18 @@ static double aug_headroom(aug_ctx *c, const aug_quad *p,
     }
     for (k = 0; k < n; k++) {
         double b[4], z;
+        aug_quad other;
         if (k == self) continue;
         z = aug_plat_centroid_z(&all[k]);
         if (z <= pz) continue;
         aug_plat_bounds(&all[k], b);
+        /* Cheap AABB reject first; it can only ever admit too many. */
         if (b[2] <= p->x0 || b[0] >= p->x1) continue;
         if (b[3] <= p->y0 || b[1] >= p->y1) continue;
+        /* Then the exact test, so a rotated neighbour whose bounding box
+         * overlaps but whose footprint does not is not counted. */
+        if (aug_quad_from_platform(&other, &all[k]) &&
+            aug_quad_gap(p, &other) > 0.0) continue;
         if (z - pz < best) best = z - pz;
     }
     return best;
@@ -2068,10 +2194,15 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
             if (specs) {
                 int total = 0;
                 for (i = 0; i < nmade; i++) {
+                    int room = AUG_MAX_TRAVERSALS - total;
                     int got = aug_traversal_specs(&c, made[i], &effs[i], &reqs[i],
-                                                  peers, nmade, specs + total,
-                                                  AUG_MAX_TRAVERSALS - total);
+                                                  peers, nmade, specs + total, room);
                     total += got;
+                    /* Filling the budget exactly means the collector stopped
+                     * because it ran out of room, not because it ran out of
+                     * geometry. Say so: a silently truncated bake reads to an
+                     * author exactly like a complete one. */
+                    if (got == room) out->links_truncated = 1;
                 }
                 /* Leaps are counted here rather than off the reachability
                  * records, because a leap and a climb write the same five

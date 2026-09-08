@@ -118,6 +118,9 @@ typedef struct sh_aug_report {
     unsigned reach_before, reach_after;
     unsigned depth_before, depth_after;
     int      depth_exceeded;            /* past the loader's 0x80 limit */
+    int      links_truncated;           /* the traversal budget ran out; some
+                                         * platforms have fewer climbs and leaps
+                                         * than the geometry allows */
 } sh_aug_report;
 
 /* Augment `a` in place. Returns 1 if the model is still coherent (even if every

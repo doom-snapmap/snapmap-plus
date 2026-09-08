@@ -463,7 +463,10 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
                     islands ? (sh_trav_ready()
                                ? "nothing can climb that high"
                                : "no traversal table, so nothing climbs") : "",
-                    tipped ? "; some volumes are walkable on a side face" : "");
+                    rep.links_truncated
+                        ? "; the link budget ran out, so some volumes have fewer "
+                          "climbs and leaps than their shape allows"
+                        : (tipped ? "; some volumes are walkable on a side face" : ""));
     }
     return rc;
 }

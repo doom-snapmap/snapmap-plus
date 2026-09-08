@@ -926,6 +926,220 @@ static void test_a_steep_gap_is_refused(void)
     sh_aas_free(a);
 }
 
+/* ==================================================================== */
+/* direction: a neighbour ABOVE is a climb, never a step                 */
+/* ==================================================================== */
+
+/* THE regression guard on the most dangerous edge of this change.
+ *
+ * Edge discovery used to refuse a neighbour above, and the regimes gated on the
+ * SIGNED height change. Removing the refusal without restating the gates would
+ * make aug_step_links' `drop > step` test true for every rise -- a negative drop
+ * is always inside any positive step -- and a 112-unit RISE would be written as
+ * a plain 0x20 walk link. Across 94,327 shipped walk records joining two flat
+ * areas, not one spans more than maxStepHeight. */
+static void test_a_tall_neighbour_gets_a_climb_not_a_walk(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a neighbour standing above is climbed, not stepped onto\n");
+    load_synthetic_traversal_table();
+    mkplat(&p[0], -512.0f, -512.0f,   0.0f, 512.0f,  16.0f, "low");
+    mkplat(&p[1],    0.0f, -512.0f, 512.0f, 512.0f, 128.0f, "high");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    if (rep.platforms[0].emitted && rep.platforms[1].emitted) {
+        CHECK_MSG(reach_count_of_type(a, rep.platforms[0].area,
+                                      rep.platforms[1].area, 0x20u) == 0,
+                  "a 112-unit rise must NEVER be a plain walk link");
+        CHECK_MSG(reach_count_of_type(a, rep.platforms[1].area,
+                                      rep.platforms[0].area, 0x20u) == 0,
+                  "nor the reverse");
+        CHECK_MSG(rep.platforms[0].climbs > 0 || rep.platforms[1].climbs > 0,
+                  "it is carried by a traversal instead");
+    }
+    sh_aas_free(a);
+}
+
+/* With the ownership rule only the lower area index emits for a pair, so it has
+ * to write BOTH directions or the taller platform is a roach motel: demons climb
+ * up and can never come down. */
+static void test_the_climb_is_reciprocated(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a climb between two volumes goes both ways\n");
+    load_synthetic_traversal_table();
+    mkplat(&p[0], -512.0f, -512.0f,   0.0f, 512.0f,  16.0f, "low");
+    mkplat(&p[1],    0.0f, -512.0f, 512.0f, 512.0f, 128.0f, "high");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    if (rep.platforms[0].emitted && rep.platforms[1].emitted) {
+        CHECK_MSG(reach_exists(a, rep.platforms[0].area, rep.platforms[1].area),
+                  "up");
+        CHECK_MSG(reach_exists(a, rep.platforms[1].area, rep.platforms[0].area),
+                  "and back down");
+    }
+    sh_aas_free(a);
+}
+
+/* Three volumes in a row, each a climb above the last. A-B and B-C must both
+ * link without either routing through the module floor -- which is the whole
+ * shape of the reported bug at one more step. */
+static void test_a_three_tower_chain_links_end_to_end(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[3];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a three-volume chain links end to end\n");
+    load_synthetic_traversal_table();
+    mkplat(&p[0], -900.0f, -512.0f, -300.0f, 512.0f,  16.0f, "a");
+    mkplat(&p[1], -300.0f, -512.0f,  300.0f, 512.0f,  80.0f, "b");
+    mkplat(&p[2],  300.0f, -512.0f,  900.0f, 512.0f, 144.0f, "c");
+    CHECK(sh_aas_augment(a, p, 3, &o, &rep) == 1);
+    if (rep.platforms[0].emitted && rep.platforms[1].emitted && rep.platforms[2].emitted) {
+        CHECK_MSG(reach_exists(a, rep.platforms[0].area, rep.platforms[1].area), "a to b");
+        CHECK_MSG(reach_exists(a, rep.platforms[1].area, rep.platforms[2].area), "b to c");
+        CHECK_MSG(reach_exists(a, rep.platforms[2].area, rep.platforms[1].area), "c back to b");
+        CHECK_MSG(rep.platforms[1].neighbours >= 2,
+                  "the middle one reaches both of its neighbours");
+    }
+    sh_aas_free(a);
+}
+
+/* A gap too wide to step and too narrow for the shortest shipped leap gets no
+ * link at all. That is honest -- there is no animation for it -- but it must not
+ * be mistaken for a leap and written with one that does not fit. */
+static void test_a_gap_below_the_leap_minimum_is_not_crossed(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a gap shorter than any shipped leap is not crossed\n");
+    load_synthetic_traversal_table();
+    mkplat(&p[0], -600.0f, -400.0f, -100.0f, 400.0f, 16.0f, "near");
+    /* 80 units apart: past the touching epsilon, under SH_TRAV_LEAP_MIN_SPAN. */
+    mkplat(&p[1],  -20.0f, -400.0f,  480.0f, 400.0f, 16.0f, "far");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    if (rep.platforms[0].emitted && rep.platforms[1].emitted)
+        CHECK_MSG(rep.platforms[0].leaps == 0, "80 units is below every nominal");
+    sh_aas_free(a);
+}
+
+/* The swept-path check. Without it a leap is written straight through whatever
+ * stands between the two platforms -- "they can glitch through the bv during the
+ * traversal and get lost". This is only meaningful now that leaps exist; before
+ * them no link across this gap was attempted and the test would have passed
+ * without testing anything. */
+static void test_a_leap_through_a_third_volume_is_dropped(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[3];
+    sh_aug_report rep;
+    sh_aug_report bare;
+    sh_aug_platform two[2];
+    sh_aas *b = load_module();
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a leap whose path runs through another volume is dropped\n");
+    load_synthetic_traversal_table();
+
+    /* Control: the same two platforms with nothing between them DO get a leap,
+     * so the refusal below is the wall and not the geometry. */
+    mkplat(&two[0], -1200.0f, -400.0f, -600.0f, 400.0f, 16.0f, "near");
+    mkplat(&two[1],     0.0f, -400.0f,  600.0f, 400.0f, 16.0f, "far");
+    CHECK(sh_aas_augment(b, two, 2, &o, &bare) == 1);
+    CHECK_MSG(bare.platforms[0].leaps > 0, "the control leap is emitted");
+    sh_aas_free(b);
+
+    mkplat(&p[0], -1200.0f, -400.0f, -600.0f, 400.0f,  16.0f, "near");
+    mkplat(&p[1],     0.0f, -400.0f,  600.0f, 400.0f,  16.0f, "far");
+    mkplat(&p[2],  -400.0f, -400.0f, -200.0f, 400.0f, 190.0f, "wall");
+    CHECK(sh_aas_augment(a, p, 3, &o, &rep) == 1);
+    CHECK_MSG(!reach_exists(a, rep.platforms[0].area, rep.platforms[1].area),
+              "the wall between them refuses the leap");
+    sh_aas_free(a);
+}
+
+/* An ordinary upright platform is NOT a side face. face 4 is an upright box's
+ * top, so a `face != 0` test would flag every platform in every map. */
+static void test_an_upright_platform_is_not_a_side_face(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p;
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+    printf("an ordinary upright platform is not reported as a side face\n");
+    mkplat(&p, -500.0f, -500.0f, 500.0f, 500.0f, 16.0f, "flat");
+    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    CHECK(rep.platforms[0].side_face == 0);
+    CHECK(near_f(rep.platforms[0].tilt_degrees, 0.0f));
+    sh_aas_free(a);
+}
+
+/* Oblique and yawed split planes are not clipped by aug_clip_cell, so the
+ * running cell stays a superset, aug_box_side straddles more often, and more
+ * leaves keep all five split tests. nav_bake discards the WHOLE module's bake on
+ * depth_exceeded, so that cost has to be measured rather than assumed. */
+static void test_a_dense_yawed_chain_stays_within_the_depth_limit(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[16];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    int i;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+    printf("a dense chain of yawed platforms stays inside the loader depth limit\n");
+    for (i = 0; i < 16; i++) {
+        mkplat_yawed(&p[i], 30.0, 220.0, 220.0, 16.0 + i * 8.0, "chain");
+        /* Spread them along x so they are a chain, not a stack. */
+        p[i].c[0][0] += (float)(i * 240 - 1800); p[i].c[1][0] += (float)(i * 240 - 1800);
+        p[i].c[2][0] += (float)(i * 240 - 1800); p[i].c[3][0] += (float)(i * 240 - 1800);
+    }
+    CHECK(sh_aas_augment(a, p, 16, &o, &rep) == 1);
+    CHECK_MSG(rep.depth_exceeded == 0,
+              "16 yawed platforms must not blow the 0x80 tree-depth limit");
+    sh_aas_free(a);
+}
+
+/* A bake at the platform cap has to finish, and finish coherently. Gap discovery
+ * casts outward as far as the longest shipped leap from every sample on every
+ * edge, so without a bounding-box prefilter over the peer set this is four edges
+ * by thirty-two samples by sixty ray steps by five hundred peers, per platform,
+ * for five hundred platforms. That is not slow, it is never. */
+static void test_a_bake_at_the_platform_cap_completes(void)
+{
+    sh_aas *a = load_module();
+    static sh_aug_platform p[200];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    int i, emitted = 0;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a bake with two hundred platforms completes and stays coherent\n");
+    load_synthetic_traversal_table();
+    /* A 20x10 grid of small platforms inside the fixture's +/-2000 floor. */
+    for (i = 0; i < 200; i++) {
+        float x = -1900.0f + (float)(i % 20) * 190.0f;
+        float y = -950.0f  + (float)(i / 20) * 190.0f;
+        mkplat(&p[i], x, y, x + 150.0f, y + 150.0f, 16.0f + (float)(i % 3) * 6.0f, "cell");
+    }
+    CHECK_MSG(sh_aas_augment(a, p, 200, &o, &rep) == 1,
+              "the model must still be coherent");
+    for (i = 0; i < rep.platform_count; i++) if (rep.platforms[i].emitted) emitted++;
+    CHECK_MSG(emitted > 100, "most of them should land");
+    CHECK_MSG(rep.depth_exceeded == 0, "and the tree stays inside the loader limit");
+    sh_aas_free(a);
+}
+
 int main(void)
 {
     printf("aas_augment_test\n");
@@ -945,6 +1159,14 @@ int main(void)
     test_a_gap_within_range_becomes_a_leap();
     test_a_gap_beyond_range_is_not_crossed();
     test_a_steep_gap_is_refused();
+    test_a_tall_neighbour_gets_a_climb_not_a_walk();
+    test_the_climb_is_reciprocated();
+    test_a_three_tower_chain_links_end_to_end();
+    test_a_gap_below_the_leap_minimum_is_not_crossed();
+    test_a_leap_through_a_third_volume_is_dropped();
+    test_an_upright_platform_is_not_a_side_face();
+    test_a_dense_yawed_chain_stays_within_the_depth_limit();
+    test_a_bake_at_the_platform_cap_completes();
     test_island_at_128();
     test_step_regime_at_16();
     test_refusals();
