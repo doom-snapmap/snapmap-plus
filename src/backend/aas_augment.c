@@ -952,6 +952,43 @@ typedef struct aug_trav_spec {
 
 #define AUG_MAX_TRAVERSALS 2048
 
+/* Candidate anchor positions along one platform edge, MIDPOINT FIRST.
+ *
+ * A climb link needs two points to land where they claim: an inner point on the
+ * platform and an outer point on the floor below, the latter sitting the chosen
+ * animation's own offset.x out from the wall. That offset is PER DEMON -- a demon
+ * whose clip starts further out needs more clear floor than one whose clip starts
+ * close in -- so a single anchor makes the two demons' endpoints land in different
+ * places, and one of them can miss the floor area (past its far edge, inside a
+ * wall, or on top of a neighbouring platform) while the other is fine.
+ *
+ * Sampling only the midpoint therefore dropped whole demons from an edge for a
+ * reason that had nothing to do with whether they can make the climb, which is
+ * what "the big demons cannot use my platform" looks like from the outside.
+ * Trying the midpoint first keeps every link the single-anchor build already
+ * produced exactly where it was; the rest are only reached by a demon the
+ * midpoint would have lost entirely. */
+static int aug_trav_anchors(double lo, double hi, double *out, int cap)
+{
+    double mid;
+    double ts[24];
+    int n, i, count = 0;
+
+    if (cap <= 0) return 0;
+    if (hi < lo) { double t = lo; lo = hi; hi = t; }
+
+    mid = (lo + hi) / 2.0;
+    out[count++] = mid;
+
+    n = aug_samples((float)lo, (float)hi, ts, (int)(sizeof ts / sizeof ts[0]));
+    for (i = 0; i < n && count < cap; i++) {
+        int dup = 0, k;
+        for (k = 0; k < count; k++) if (out[k] == ts[i]) { dup = 1; break; }
+        if (!dup) out[count++] = ts[i];
+    }
+    return count;
+}
+
 /* Collect up- and down-climb specs for one platform: one per demon per usable
  * edge, in both directions.
  *
@@ -968,23 +1005,21 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_rect *eff,
 {
     aug_side sides[4];
     int n, i, k, d, count = 0;
-    double mx = ((double)eff->x0 + eff->x1) / 2.0;
-    double my = ((double)eff->y0 + eff->y1) / 2.0;
 
     if (c->o->traversal == SH_AUG_TRAVERSAL_NEVER) return 0;
     if (!sh_trav_ready()) return 0;
 
     n = aug_platform_edges(c, ai, eff, req, sides);
     for (i = 0; i < n; i++) {
-        double inner, inner_pt[3];
+        double anchors[24];
+        double inner = sides[i].area_edge - sides[i].sgn * TRAVERSAL_INNER_INSET;
+        int na;
         if (sides[i].drop <= (double)c->step) continue;   /* the step regime walks it */
 
-        inner = sides[i].area_edge - sides[i].sgn * TRAVERSAL_INNER_INSET;
-        if (sides[i].axis == 0) { inner_pt[0] = inner; inner_pt[1] = my; }
-        else                    { inner_pt[0] = mx;    inner_pt[1] = inner; }
-        inner_pt[2] = eff->z;
-        if (sh_aas_point_area(c->a, (float)inner_pt[0], (float)inner_pt[1],
-                              (float)(eff->z + 2.0)) != ai) continue;
+        /* The edge runs along the axis the side does NOT face. */
+        na = aug_trav_anchors(sides[i].axis == 0 ? (double)eff->y0 : (double)eff->x0,
+                              sides[i].axis == 0 ? (double)eff->y1 : (double)eff->x1,
+                              anchors, (int)(sizeof anchors / sizeof anchors[0]));
 
         for (d = 0; d < 2; d++) {                          /* UP then DOWN */
             int up = (d == SH_TRAV_UP);
@@ -992,8 +1027,8 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_rect *eff,
                 const sh_trav_monster *m = sh_trav_monster_at(k);
                 char path[SH_TRAV_PATH_CAP];
                 float off = 0.0f;
-                int dist = 0, time = 0;
-                double outer, outer_pt[3], dir;
+                int dist = 0, time = 0, a, placed = 0;
+                double outer, inner_pt[3], outer_pt[3], dir;
                 aug_trav_spec *s;
 
                 if (!m) continue;
@@ -1003,12 +1038,29 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_rect *eff,
 
                 if (off < 0.0f) off = -off;
                 outer = sides[i].wall + sides[i].sgn * (double)off;
-                if (sides[i].axis == 0) { outer_pt[0] = outer; outer_pt[1] = my; }
-                else                    { outer_pt[0] = mx;    outer_pt[1] = outer; }
-                outer_pt[2] = sides[i].floor_z;
-                if (sh_aas_point_area(c->a, (float)outer_pt[0], (float)outer_pt[1],
-                                      (float)(sides[i].floor_z + 2.0)) != sides[i].floor_area)
-                    continue;
+
+                /* This demon's own pair of endpoints, tried along the edge until
+                 * both land where they claim. The offset is the demon's, so the
+                 * answer is too: an anchor that fails for one can serve another. */
+                for (a = 0; a < na; a++) {
+                    if (sides[i].axis == 0) {
+                        inner_pt[0] = inner; inner_pt[1] = anchors[a];
+                        outer_pt[0] = outer; outer_pt[1] = anchors[a];
+                    } else {
+                        inner_pt[0] = anchors[a]; inner_pt[1] = inner;
+                        outer_pt[0] = anchors[a]; outer_pt[1] = outer;
+                    }
+                    inner_pt[2] = eff->z;
+                    outer_pt[2] = sides[i].floor_z;
+                    if (sh_aas_point_area(c->a, (float)inner_pt[0], (float)inner_pt[1],
+                                          (float)(eff->z + 2.0)) != ai) continue;
+                    if (sh_aas_point_area(c->a, (float)outer_pt[0], (float)outer_pt[1],
+                                          (float)(sides[i].floor_z + 2.0)) != sides[i].floor_area)
+                        continue;
+                    placed = 1;
+                    break;
+                }
+                if (!placed) continue;      /* nowhere on this edge works for it */
 
                 s = &out[count++];
                 memset(s, 0, sizeof *s);
@@ -1431,3 +1483,10 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
 
     return c.failed ? 0 : 1;
 }
+
+#ifdef SH_AUG_TESTING
+int sh_aug_test_trav_anchors(double lo, double hi, double *out, int cap)
+{
+    return aug_trav_anchors(lo, hi, out, cap);
+}
+#endif

@@ -415,10 +415,58 @@ static void test_many_platforms_stay_within_depth(void)
     sh_aas_free(a);
 }
 
+/* THE ANCHOR PATTERN A CLIMB LINK IS PLACED ON.
+ *
+ * The outer endpoint of a climb sits the animation's own offset.x out from the
+ * ledge, and that offset is PER DEMON -- a clip that starts further out needs
+ * more clear floor than one that starts close in. Sampling a single position on
+ * the edge therefore decides for every demon at once: if that one spot does not
+ * work for a demon with a long start offset, it loses the edge entirely even
+ * though it can make the climb, which is what "the big demons ignore my
+ * platform" looks like from the outside.
+ *
+ * The midpoint stays FIRST so every link the single-anchor build produced is
+ * still produced in the same place; the rest are only reached by a demon that
+ * would otherwise have been dropped. */
+static void test_traversal_anchor_pattern(void)
+{
+    double a[24];
+    int n, i, j;
+    printf("climb anchors are sampled along the edge, midpoint first\n");
+
+    n = sh_aug_test_trav_anchors(-1000.0, 1000.0, a, 24);
+    CHECK_MSG(n >= 2, "a wide edge must offer an alternative to the midpoint");
+    CHECK_MSG(a[0] == 0.0, "the midpoint is tried first, so existing links do not move");
+    for (i = 0; i < n; i++)
+        CHECK_MSG(a[i] >= -1000.0 && a[i] <= 1000.0, "an anchor must stay on the edge");
+    for (i = 0; i < n; i++)
+        for (j = i + 1; j < n; j++)
+            CHECK_MSG(a[i] != a[j], "a repeated anchor is a wasted BSP query");
+
+    /* Reversed spans are the same edge. */
+    {
+        double b[24];
+        int m = sh_aug_test_trav_anchors(1000.0, -1000.0, b, 24);
+        CHECK(m == n);
+        if (m == n) for (i = 0; i < n; i++) CHECK(a[i] == b[i]);
+    }
+
+    /* A degenerate edge still offers the midpoint rather than nothing. */
+    n = sh_aug_test_trav_anchors(50.0, 50.0, a, 24);
+    CHECK_MSG(n >= 1, "even a zero-length span offers its midpoint");
+    CHECK(a[0] == 50.0);
+
+    /* The cap is honoured: this runs per demon per direction per edge. */
+    n = sh_aug_test_trav_anchors(-100000.0, 100000.0, a, 4);
+    CHECK_MSG(n <= 4, "the anchor list must never overrun the caller buffer");
+    CHECK(n >= 1);
+}
+
 int main(void)
 {
     printf("aas_augment_test\n");
     test_fixture_resolves();
+    test_traversal_anchor_pattern();
     test_island_at_128();
     test_step_regime_at_16();
     test_refusals();

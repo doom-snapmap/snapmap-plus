@@ -127,4 +127,14 @@ int sh_aas_point_area(const sh_aas *a, float x, float y, float z);
 /* The BSP tree's depth, and the loader's hard limit on it. */
 unsigned sh_aas_tree_depth(const sh_aas *a);
 
+#ifdef SH_AUG_TESTING
+/* The candidate anchor positions along one platform edge, midpoint first. A
+ * climb link's outer endpoint sits the chosen animation's own offset out from
+ * the wall, and that offset differs per demon, so one sampled position is not
+ * enough: it decides for every demon at once. Exposed so the contract that
+ * matters -- midpoint first, then distinct positions spanning the edge -- is
+ * pinned rather than assumed. */
+int sh_aug_test_trav_anchors(double lo, double hi, double *out, int cap);
+#endif
+
 #endif /* SNAPMAP_PLUS_AAS_AUGMENT_H */
