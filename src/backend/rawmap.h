@@ -66,8 +66,18 @@ int sh_rawmap_swap_arm(int on);
 int sh_rawmap_swap_is_armed(void);
 
 /* Whether the swap WILL fire: the explicit gate OR the test flag-file. Ask this,
- * not sh_rawmap_swap_is_armed, before calling a function the swap detours. */
+ * not sh_rawmap_swap_is_armed, before calling a function the swap detours.
+ *
+ * Also the right question for any surface that REPORTS what happens next, as
+ * opposed to drawing a control's own state. A readout built on
+ * sh_rawmap_swap_is_armed says the swap is off while a flag-file arm quietly
+ * substitutes every map that gets opened. */
 int sh_rawmap_swap_will_fire(void);
+
+/* Where the test arm flag-file would be: the load path's sibling "arm.flag".
+ * For a surface that has to tell someone which file to delete -- neither
+ * 'sh_rawmaps off' nor unticking anything can clear a flag-file arm. */
+void sh_rawmap_flag_file_path(char *out, int cap);
 
 /* Set the file-backed rawmap source path (the bytes the swap delivers). For this slice a simple
  * file-backed source matches how OG sources its rawmap (%USERPROFILE%\snaphak\rawmap.json). Pass NULL

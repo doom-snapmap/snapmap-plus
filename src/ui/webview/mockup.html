@@ -1722,7 +1722,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         armed: previewRawmap.armed, saves: 0, lastBytes: 0, loads: 0, loadsDone: 0,
         savePending: previewRawmap.savePending || 0,
         loadPending: previewRawmap.loadPending || 0,
-        saveBack: previewRawmap.saveBack || 0
+        saveBack: previewRawmap.saveBack || 0,
+        // No arm.flag exists in browser preview, so willFire can only be the gate here. Sent
+        // explicitly rather than omitted, so the preview exercises the same field the game sends
+        // and a missing-field fallback never becomes the only tested path.
+        willFire: previewRawmap.armed
       }, note: o.cmd === 'rawmapStatus' ? '' : 'Preview only — no backend attached.'};
       // Raise the confirm on a pick, exactly as the backend does now that a load opens as a
       // genuinely new map. Answering Cancel leaves loadPending set, which is the state the
@@ -4541,6 +4545,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // load one, so the wording here always says what the person still has to do. See the +0x328/+0x330
   // slot comments in snapmap_plus_iface.h for why.
   var RAWMAP_ARMED = false;
+  // Mirrors st.willFire: the gate OR a sibling arm.flag file. See renderRawmapStatus.
+  var RAWMAP_WILL_FIRE = false;
   // Mirrors st.saveBack so the click handler can send the OPPOSITE of what is currently set.
   var RAWMAP_SAVEBACK = false;
   var RAWMAP_SAVE_PATH = '';   // the destination Save Rawmap reuses
@@ -4570,6 +4576,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       return;
     }
     RAWMAP_ARMED = !!st.armed;
+    // Whether the swap ACTUALLY fires, which is not the same question as whether the tick is on:
+    // the backend arms on the gate OR a sibling arm.flag test file. The checkbox below still shows
+    // `armed`, because a control shows its own state and unticking it cannot delete a file -- but
+    // anything that REPORTS what happens next has to read this instead, or the menu says the swap
+    // is off while every map opened is being substituted.
+    RAWMAP_WILL_FIRE = (st.willFire === undefined) ? RAWMAP_ARMED : !!st.willFire;
     RAWMAP_SAVE_PATH = st.save || '';
     if (armBtn) armBtn.setAttribute('aria-checked', RAWMAP_ARMED ? 'true' : 'false');
 
@@ -4588,13 +4600,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     // "Open Rawmap as New Map": live only when it would actually do something, and named after
     // the file it would open, so the item doubles as the staged-rawmap indicator.
     //
-    // Live on EITHER a staged one-shot or the always-on gate. With the gate up there is no
-    // one-shot to consume -- every load substitutes -- and the item is still the shortcut past
+    // Live on EITHER a staged one-shot or a swap that will actually fire. With the swap live there
+    // is no one-shot to consume -- every load substitutes -- and the item is still the shortcut past
     // the map list, so keying only off loadPending would grey out the case where it works best.
+    // RAWMAP_WILL_FIRE, not RAWMAP_ARMED: an arm.flag arm substitutes every load too, and greying
+    // the item out while that is true tells the person it would do nothing when it would.
     var reloadBtn = document.getElementById('menuRawmapReload');
     if (reloadBtn) {
       var staged = !!st.loadPending;
-      var reloadLive = staged || RAWMAP_ARMED;
+      var reloadLive = staged || RAWMAP_WILL_FIRE;
       var rawPath = st.load || '';
       var rawName = rawmapBaseName(rawPath);
       reloadBtn.disabled = !reloadLive;
@@ -4608,7 +4622,11 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       reloadBtn.title = staged
         ? (rawPath + '\nWaiting: this file opens as a new map you name.')
         : (reloadLive
-            ? (rawPath + '\nAlways Use Rawmap Save/Load is on, so this opens the Load Path file.')
+            ? (rawPath + (RAWMAP_ARMED
+                ? '\nAlways Use Rawmap Save/Load is on, so this opens the Load Path file.'
+                // Reachable with the switch OFF, when an arm.flag file is doing the replacing.
+                // The armed wording would name a switch the person can see is off.
+                : '\nEvery map you open is being replaced, so this opens the Load Path file.'))
             : 'Nothing is waiting. Use Load Rawmap... to pick a file first.');
     }
     if (note) {
@@ -4639,6 +4657,15 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         var on = document.createElement('div');
         on.textContent = 'Always on: every map you open and every save uses these files.';
         note.appendChild(on);
+      } else if (RAWMAP_WILL_FIRE) {
+        // The tick is off and the swap fires anyway, because an arm.flag file is arming it. Saying
+        // nothing here is the worst option: the menu would show an unticked box above a Load Path
+        // that is silently replacing every map opened, and unticking the box again cannot help.
+        var flag = document.createElement('div');
+        flag.textContent = 'Every map you open is being replaced by the Load Path file. '
+                         + 'A file named arm.flag is doing that. Delete it to stop — '
+                         + 'the switch above will not.';
+        note.appendChild(flag);
       }
     }
   }

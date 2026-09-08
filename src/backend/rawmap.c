@@ -384,6 +384,19 @@ int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok)
     return 1;
 }
 
+/* Where the TEST arm flag-file would be, for a caller that has to NAME it.
+ *
+ * `sh_rawmaps off` cannot clear a flag-file arm, and neither can unticking anything, so a surface
+ * that reports the swap is off while the flag is present has to be able to say which file to delete.
+ * Telling someone "something else is arming this" without saying what is barely better than not
+ * telling them. Tracks the load path, because the flag is that file's sibling. */
+void sh_rawmap_flag_file_path(char *out, int cap)
+{
+    if (!out || cap <= 0) return;
+    out[0] = '\0';
+    flag_file_path(out, (size_t)cap);
+}
+
 int sh_rawmap_swap_arm(int on)
 {
     InterlockedExchange(&g_gate, on ? 1 : 0);
@@ -1916,7 +1929,13 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
     if (!json_escape_into(save_esc, sizeof save_esc, save_path)) save_esc[0] = '\0';
 
     /* `armed` reports the EXPLICIT gate only, matching sh_rawmap_swap_is_armed's reasoning: a menu
-     * checkbox must not show ON for a flag-file arm that unticking it cannot clear. */
+     * checkbox must not show ON for a flag-file arm that unticking it cannot clear.
+     *
+     * `willFire` is the honest answer to what actually happens, gate OR flag-file, and it exists
+     * because `armed` alone let the menu tell a lie: with arm.flag present, every map opened is
+     * substituted while the checkbox sits unticked and nothing on screen says why. The checkbox
+     * still reads `armed` -- a control shows its own state -- and the two together let the page warn
+     * instead of misreport. */
     /* `loads` is the question the File menu actually has to answer: the staged file is substituted
      * into the NEXT map load, so "did it work" is unanswerable from the paths alone -- the person
      * needs to see the swap fire. Reporting both counters distinguishes the three outcomes that look
@@ -1930,7 +1949,7 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
         "\"loads\":%lu,\"loadsDone\":%lu,\"savePending\":%d,\"loadPending\":%d,"
         /* `saveBack` is the File menu's "Use Rawmap as Save Path" tick. It has to ride the status
          * rather than be remembered by the page, because the console can change it too. */
-        "\"saveBack\":%d}",
+        "\"saveBack\":%d,\"willFire\":%d}",
         load_esc, save_esc, sh_rawmap_swap_is_armed(),
         sh_rawmap_save_count(), sh_rawmap_save_last_bytes(),
         sh_rawmap_swap_count(), sh_rawmap_swap_complete_count(),
@@ -1939,7 +1958,8 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
          * is waiting for the next map to open. Without it the menu could only report a COUNT of past
          * substitutions, which told the person nothing about what happens next. */
         sh_rawmap_load_oneshot_pending(),
-        sh_rawmap_dest_follows_source());
+        sh_rawmap_dest_follows_source(),
+        sh_rawmap_swap_will_fire());
 
     return (written > 0) ? written : 0;
 }
