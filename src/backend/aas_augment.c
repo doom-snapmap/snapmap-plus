@@ -1406,13 +1406,46 @@ static int aug_regime(const aug_side *s, double step)
     return s->drop > 0.0 ? REGIME_DOWN : REGIME_UP;
 }
 
-/* Emit for this segment at all? With symmetric quad-to-quad discovery A sees B
- * and B sees A, and the regimes already write both directions per segment, so
- * without this every record between two generated quads is written twice. The
- * lower area index owns the pair. */
-static int aug_side_owns(const aug_side *s, int ai)
+/* Is every corner of `inner` inside `outer`, in XY? */
+static int aug_quad_contains_quad(const aug_quad *outer, const aug_quad *inner)
 {
-    return !(s->generated && s->floor_area < ai);
+    int i;
+    for (i = 0; i < 4; i++)
+        if (!aug_quad_contains_xy(outer, inner->c[i][0], inner->c[i][1])) return 0;
+    return 1;
+}
+
+/* Emit for this segment at all?
+ *
+ * Two generated quads that face each other are discovered from BOTH sides, and
+ * each regime writes both directions per segment, so without a rule every record
+ * between them is written twice. "The lower area index owns the pair" settles
+ * that -- but only while discovery really is symmetric, and it is not.
+ *
+ * A quad is discovered by sampling points just outside the INSPECTING quad's own
+ * edges. So when one footprint sits wholly INSIDE another -- a tall pillar
+ * standing through a wide slab -- every pillar edge faces the slab, and no slab
+ * edge ever faces the pillar. Platforms are created lowest-first, so the slab
+ * takes the lower index and would own a pair it can never see: the pillar found
+ * the segments, declined to emit, and the slab never looked. The pillar came out
+ * emitted, carved, passing the serving gate, and with ZERO reachabilities -- and
+ * a demon that cannot be routed anywhere just stands still and shoots.
+ *
+ * So containment decides first, and only then the index. Mutual containment
+ * (identical footprints) means both sides do discover it, and falls through to
+ * the index rule rather than being emitted twice. */
+static int aug_side_owns(const aug_side *s, int ai, const aug_quad *req,
+                         const aug_peer *peers, int npeers)
+{
+    if (!s->generated) return 1;
+    if (s->peer >= 0 && s->peer < npeers && peers[s->peer].req && req) {
+        const aug_quad *theirs = peers[s->peer].req;
+        int we_inside_them = aug_quad_contains_quad(theirs, req);
+        int they_inside_us = aug_quad_contains_quad(req, theirs);
+        if (we_inside_them && !they_inside_us) return 1;   /* only we can see it */
+        if (they_inside_us && !we_inside_them) return 0;   /* only they can */
+    }
+    return !(s->floor_area < ai);
 }
 
 /* Plain walk links for a platform inside the STEP regime.
@@ -1439,7 +1472,7 @@ static int aug_step_links(aug_ctx *c, int ai, const aug_quad *eff,
         double ts[64];
         int cnt;
         if (aug_regime(&sides[i], (double)c->step) != REGIME_STEP) continue;
-        if (!aug_side_owns(&sides[i], ai)) continue;
+        if (!aug_side_owns(&sides[i], ai, req, peers, npeers)) continue;
         cnt = aug_samples_unit(ts, 64);
         for (k = 0; k < cnt; k++) {
             double t = ts[k], up[3], dn[3];
@@ -1506,7 +1539,7 @@ static int aug_fall_links(aug_ctx *c, int ai, const aug_quad *eff,
         int time;
         /* Falling is DOWNWARD only, by definition -- a rise is a climb. */
         if (aug_regime(&sides[i], (double)c->step) != REGIME_DOWN) continue;
-        if (!aug_side_owns(&sides[i], ai)) continue;
+        if (!aug_side_owns(&sides[i], ai, req, peers, npeers)) continue;
         if (c->o->fall == SH_AUG_FALL_AUTO && sides[i].drop > max_fall) continue;
         bx = (sides[i].p0[0] + sides[i].p1[0]) / 2.0;
         by = (sides[i].p0[1] + sides[i].p1[1]) / 2.0;
@@ -1693,7 +1726,7 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
 
         regime = aug_regime(&sides[i], (double)c->step);
         if (regime == REGIME_STEP || regime == REGIME_NONE) continue;
-        if (!aug_side_owns(&sides[i], ai)) continue;
+        if (!aug_side_owns(&sides[i], ai, req, peers, npeers)) continue;
         leap = (regime == REGIME_LEAP);
         /* A climb is measured vertically, a leap horizontally. */
         span = leap ? sides[i].gap : fabs(sides[i].drop);
@@ -1818,41 +1851,18 @@ static int aug_emit_traversals(aug_ctx *c, aug_trav_spec *specs, int n)
 
     /* MODULES THAT ALREADY SHIP TRAVERSALS.
      *
-     * The predecessor of this block refused outright whenever the payload had
-     * any traversal points, on the stated grounds that no SnapMap module ships
-     * one. That is simply false: classic_90_climb -- this project's own donor --
-     * ships seven, wc_office_arena ships twenty-seven, and 312 of 696 extracted
-     * payloads carry traversal animation names. The blanket refusal therefore
-     * silently produced ZERO climbs and ZERO leaps on roughly half of all
-     * modules, and the author was told "nothing can climb that high", which was
-     * not the reason.
-     *
-     * What actually has to hold is narrower. The per-area ownership pass at the
-     * bottom rebuilds first/num for every area by scanning the whole array, so
-     * pre-existing points are fine in themselves -- but each area's points must
-     * stay CONTIGUOUS, and we append ours at the end. That is sound exactly when
-     * no area we write a point for already owns points somewhere earlier.
-     *
-     * Our platform areas are brand new and own nothing. The only real hazard is
-     * an existing area we climb FROM -- typically the module floor. So test that
-     * one condition instead of refusing everything. */
-    {
-        unsigned na0 = sh_aas_count(c->a, SH_AAS_L_AREAS);
-        for (k = 0; k < n; k++) {
-            const unsigned char *ar;
-            if (specs[k].from_area < 0 || (unsigned)specs[k].from_area >= na0) continue;
-            ar = sh_aas_rec_const(c->a, SH_AAS_L_AREAS, (unsigned)specs[k].from_area);
-            if (ar && sh_aas_get_u16(ar, AR_NUM_TRAV_POINT) > 0) {
-                /* Interleaving with an existing run would need the whole array
-                 * regrouped and every index that points into it rewritten. That
-                 * is a real change to records whose ordering semantics are not
-                 * fully recovered, so it is refused -- but REPORTED, so the
-                 * islands are not blamed on the geometry. */
-                c->rep->climbs_declined = 1;
-                return 0;
-            }
-        }
-    }
+     * The predecessor of this block declined the whole set whenever a spec's
+     * from_area already owned traversal points, so an intersecting platform on
+     * any of the 312 of 696 extracted payloads that ship traversals came out an
+     * island. The constraint it protected -- each area's points contiguous,
+     * because first_trav_point/num_trav_point partition the array -- is real,
+     * but it is restored by REGROUPING: after appending, the whole array is
+     * stably reordered by from-area and the partition rebuilt. That is safe
+     * because exactly two things index traversalPoints, and both survive a
+     * reorder: the per-area partition (rebuilt below from w34) and each point's
+     * own d28, which points OUT of the array at a reachability that does not
+     * move. Shipped payloads are already grouped by ascending from-area, so the
+     * regrouped layout is the shipped layout. */
 
     /* Animation names, deduplicated by path. */
     for (k = 0; k < n; k++) {
@@ -1933,6 +1943,37 @@ static int aug_emit_traversals(aug_ctx *c, aug_trav_spec *specs, int n)
         sh_aas_put_u16(tp, TP_W38, TP_W38_VALUE);
         sh_aas_put_u16(tp, TP_W3A, 0);
         written++;
+    }
+
+    /* REGROUP: stable insertion sort of records 1..np-1 by from-area, so each
+     * area's points are one contiguous run whatever the payload already owned.
+     * Record 0 is the engine-mandated dummy and stays put. Stability keeps the
+     * shipped points' relative order and our own per-demon order. Shipped
+     * arrays are already grouped ascending, so this is near-linear in
+     * practice. */
+    {
+        unsigned np = sh_aas_count(c->a, SH_AAS_L_TRAVERSALPOINTS);
+        size_t rs = sh_aas_record_size(SH_AAS_L_TRAVERSALPOINTS);
+        unsigned char hold[64];
+        unsigned m, q;
+        if (rs <= sizeof hold) {
+            for (m = 2; m < np; m++) {
+                unsigned char *cur = sh_aas_rec(c->a, SH_AAS_L_TRAVERSALPOINTS, m);
+                unsigned owner;
+                if (!cur) continue;
+                owner = sh_aas_get_u16(cur, TP_W34);
+                memcpy(hold, cur, rs);
+                q = m;
+                while (q > 1) {
+                    unsigned char *prev = sh_aas_rec(c->a, SH_AAS_L_TRAVERSALPOINTS, q - 1);
+                    if (!prev || sh_aas_get_u16(prev, TP_W34) <= owner) break;
+                    memcpy(sh_aas_rec(c->a, SH_AAS_L_TRAVERSALPOINTS, q), prev, rs);
+                    q--;
+                }
+                if (q != m)
+                    memcpy(sh_aas_rec(c->a, SH_AAS_L_TRAVERSALPOINTS, q), hold, rs);
+            }
+        }
     }
 
     /* Per-area ownership of the point range. Record 0 is the dummy and belongs
@@ -2082,6 +2123,346 @@ static double aug_headroom(aug_ctx *c, const aug_quad *p,
     return best;
 }
 
+/* Can anything ever get ONTO each requested platform?
+ *
+ * A platform is entered only across its edges -- step, climb and leap links all
+ * hang off edge segments -- so a platform whose every lip either hangs past the
+ * module's walkable floor or is buried behind the volumes it stands among can
+ * never be reached, no matter what the linkers do. Emitting it anyway is the
+ * emitted-but-unroutable failure that leaves demons standing still, and worse,
+ * TWO such platforms that touch each other link to each other and stop even
+ * reading as islands -- which is exactly the wc_coupler_256 overlap case, two
+ * 400-wide slabs on a 336-wide floor, each reaching only the other. So entry is
+ * decided over the whole REQUEST up front, before anything is carved.
+ *
+ * A platform has FLOOR ENTRY when some edge sample faces walkable module floor
+ * at or below its lip -- discovered with aug_edge_segments' own probe, at the
+ * same offset and lip height, so a shape the linkers can enter is never refused
+ * here. An edge sample that instead faces ANOTHER volume this bake will emit is
+ * not floor entry: that is peer adjacency, and it is settled by the spread pass,
+ * which joins any two would-be areas within the longest shipped leap. Entry then
+ * propagates along those pairs. Only a volume that will actually be emitted can
+ * shadow a floor probe -- a request refused for its shape (no footprint, too
+ * steep, too small, too little headroom, out of range) is not built and is not
+ * an obstacle, which is why a floor-standing solid refused for headroom does not
+ * strand the floating slab that overlaps it.
+ *
+ * The prediction errs toward admitting: it uses only the carve-independent shape
+ * gates, not the carrier or splice checks, so an admitted platform the linkers
+ * still cannot join comes out a reported island exactly as before -- never a
+ * silent one. On allocation failure every platform is admitted, the behaviour
+ * this replaces. */
+static void aug_entry_flood(aug_ctx *c, const sh_aug_platform *plats, int n,
+                            unsigned char *reachable)
+{
+    aug_quad *q;
+    unsigned char *emit;        /* will this request clear the shape gates? */
+    float mins[3], maxs[3], fw, fd, minw;
+    int i, j, changed;
+
+    for (i = 0; i < n; i++) reachable[i] = 1;               /* fail open */
+    if (n <= 0) return;
+    q = (aug_quad *)HeapAlloc(GetProcessHeap(), 0,
+                              (size_t)n * sizeof *q + (size_t)n);
+    if (!q) return;
+    emit = (unsigned char *)(q + n);
+    sh_aas_agent_bounds(c->a, mins, maxs);
+    fw = maxs[0] - mins[0];
+    fd = maxs[1] - mins[1];
+    minw = fw < fd ? fw : fd;
+
+    /* The peer set: the request gates that DECIDE emission and do not need the
+     * tree mutated -- the driver's shape checks plus its carrier probe, in the
+     * same order. A request that fails any of them is not built and cannot
+     * shadow another platform's floor. The one thing left out is a splice that
+     * fails after the carve, which the carrier probe already guarantees will
+     * not happen. The carrier probe is read against the ORIGINAL tree, so a
+     * platform stacked on ANOTHER generated one reads carrier-less here and is
+     * left fail-open (emit stays 0, reachable stays 1); the driver's own carrier
+     * check builds it. That is only ever a missed shadow, never a false refusal,
+     * because such a platform is carried and therefore reachable regardless. */
+    for (i = 0; i < n; i++) {
+        aug_quad eff;
+        double mx, my;
+        emit[i] = 0;
+        if (!aug_quad_from_platform(&q[i], &plats[i])) continue;
+        if ((double)plats[i].n[2] < c->min_floor_cos) continue;
+        if (!aug_quad_inset(&q[i], c->radius, &eff) ||
+            aug_quad_min_width(&eff) < (double)minw) continue;
+        if (aug_headroom(c, &q[i], plats, n, i) < (double)c->height) continue;
+        if (eff.x0 <= AUG_INT16_LO || eff.x1 >= AUG_INT16_HI ||
+            eff.y0 <= AUG_INT16_LO || eff.y1 >= AUG_INT16_HI ||
+            aug_quad_min_z(&eff) <= AUG_INT16_LO ||
+            aug_quad_max_z(&eff) >= AUG_INT16_HI) continue;
+        mx = (eff.x0 + eff.x1) / 2.0;
+        my = (eff.y0 + eff.y1) / 2.0;
+        if (sh_aas_point_area(c->a, (float)mx, (float)my,
+                              (float)aug_z_at(&eff, mx, my)) <= 0) continue;
+        emit[i] = 1;
+    }
+
+    for (i = 0; i < n; i++) {
+        int e, entry = 0;
+        if (!emit[i]) continue;         /* its own shape refusal speaks for it */
+        for (e = 0; e < 4 && !entry; e++) {
+            double in2[2], out2[2], ts[32];
+            int cnt, k, e1 = (e + 1) & 3;
+            aug_edge_normal_in(&q[i], e, in2);
+            out2[0] = -in2[0];
+            out2[1] = -in2[1];
+            cnt = aug_samples_unit(ts, 32);
+            for (k = 0; k < cnt && !entry; k++) {
+                double t = ts[k];
+                double ex = q[i].c[e][0] + t * (q[i].c[e1][0] - q[i].c[e][0]);
+                double ey = q[i].c[e][1] + t * (q[i].c[e1][1] - q[i].c[e][1]);
+                double nz = aug_z_at(&q[i], ex, ey);
+                double px = ex + out2[0] * AUG_TOUCH_EPS;
+                double py = ey + out2[1] * AUG_TOUCH_EPS;
+                int jj, bi, shadowed = 0;
+                float tb[6];
+                /* Facing another volume this bake will build is peer adjacency,
+                 * not floor entry: aug_edge_segments takes the peer over the
+                 * module floor in exactly this test, and the spread pass carries
+                 * entry across the pair. A refused request is not built and does
+                 * not shadow. */
+                for (jj = 0; jj < n; jj++) {
+                    if (jj == i || !emit[jj]) continue;
+                    if (aug_quad_contains_xy(&q[jj], px, py)) { shadowed = 1; break; }
+                }
+                if (shadowed) continue;
+                bi = sh_aas_point_area(c->a,
+                                       (float)(ex + out2[0] * REACH_SIDE_OFFSET),
+                                       (float)(ey + out2[1] * REACH_SIDE_OFFSET),
+                                       (float)nz);
+                if (bi > 0 && aug_area_box(c->a, (unsigned)bi, tb) &&
+                    (double)tb[5] <= nz + (double)c->step) entry = 1;
+            }
+        }
+        reachable[i] = (unsigned char)entry;
+    }
+
+    do {
+        changed = 0;
+        for (i = 0; i < n; i++) {
+            if (reachable[i] || !emit[i]) continue;
+            for (j = 0; j < n; j++) {
+                if (j == i || !reachable[j] || !emit[j]) continue;
+                if (aug_quad_gap(&q[i], &q[j]) <= (double)SH_TRAV_LEAP_MAX_SPAN) {
+                    reachable[i] = 1;
+                    changed = 1;
+                    break;
+                }
+            }
+        }
+    } while (changed);
+
+    HeapFree(GetProcessHeap(), 0, q);
+}
+
+/* ---- volumes standing in each other's way -------------------------------
+ *
+ * A marked volume is a SOLID, not the face on top of it, and authors intersect
+ * them constantly: a pillar rising through a slab, a floating block clipping
+ * into the platform below, a small box parked on a big one. Emitting the slab's
+ * whole top then claims ground the pillar is standing in. A demon routed across
+ * it walks into the pillar and stops -- which is the arrangement testers
+ * reported as "breaks all AI", and it is also why a partly-blocked platform
+ * used to be refused whole for headroom: one intruding corner spoke for the
+ * entire face.
+ *
+ * Both are the same operation. Subtract from a face every other marked volume
+ * that occupies the space a demon would have to stand in to be there. What is
+ * left is up to four rectangles in the face's OWN basis, each still a planar
+ * convex quad on the same supporting plane, so nothing downstream changes: the
+ * pieces are adjacent, and the spread pass links them to each other exactly as
+ * it links any two touching platforms.
+ *
+ * The subtraction is by the intruder's bounding box IN THAT BASIS, so a volume
+ * rotated relative to the face it pierces loses a little more than it truly
+ * occupies. That is the safe direction -- navigation never claims ground it has
+ * not proven -- and the alternative, exact convex subtraction, yields pentagons
+ * an area record has no way to store.
+ *
+ * Only volumes THIS BAKE was asked about are subtracted. The module's own baked
+ * geometry overhead is still judged by aug_headroom, which refuses the whole
+ * face; that is a coarser answer, but it is the module's shipped navigation and
+ * not something an author placed. */
+
+#define AUG_MAX_PIECES 8
+
+typedef struct aug_rect2 { double u0, v0, u1, v1; } aug_rect2;
+
+static double aug_rect2_area(const aug_rect2 *r)
+{
+    double du = r->u1 - r->u0, dv = r->v1 - r->v0;
+    return (du > 0.0 && dv > 0.0) ? du * dv : 0.0;
+}
+
+/* The parts of `r` outside `b`, as up to four rectangles. Returns 0 when `b`
+ * swallows `r` whole, which is the buried case; returns 1 with out[0] == *r
+ * when they do not overlap at all. */
+static int aug_rect2_subtract(const aug_rect2 *r, const aug_rect2 *b, aug_rect2 *out)
+{
+    double u0 = b->u0 > r->u0 ? b->u0 : r->u0;
+    double u1 = b->u1 < r->u1 ? b->u1 : r->u1;
+    double v0 = b->v0 > r->v0 ? b->v0 : r->v0;
+    double v1 = b->v1 < r->v1 ? b->v1 : r->v1;
+    int n = 0;
+    if (u0 >= u1 || v0 >= v1) { out[0] = *r; return 1; }
+    if (u0 > r->u0) { out[n].u0 = r->u0; out[n].u1 = u0;    out[n].v0 = r->v0; out[n].v1 = r->v1; n++; }
+    if (u1 < r->u1) { out[n].u0 = u1;    out[n].u1 = r->u1; out[n].v0 = r->v0; out[n].v1 = r->v1; n++; }
+    if (v0 > r->v0) { out[n].u0 = u0;    out[n].u1 = u1;    out[n].v0 = r->v0; out[n].v1 = v0;    n++; }
+    if (v1 < r->v1) { out[n].u0 = u0;    out[n].u1 = u1;    out[n].v0 = v1;    out[n].v1 = r->v1; n++; }
+    return n;
+}
+
+/* The face's own orthonormal basis: origin at corner 0, U along the first edge,
+ * V along the last, W the face normal. Returns 0 for a face whose edges are not
+ * perpendicular or have collapsed, in which case the caller leaves it alone --
+ * refusing to split is always safe, trusting a bad basis is not. */
+static int aug_face_basis(const sh_aug_platform *p, double o[3], double U[3],
+                          double V[3], double W[3], double *lu, double *lv)
+{
+    double du, dv;
+    int k;
+    for (k = 0; k < 3; k++) {
+        o[k] = p->c[0][k];
+        U[k] = (double)p->c[1][k] - p->c[0][k];
+        V[k] = (double)p->c[3][k] - p->c[0][k];
+        W[k] = p->n[k];
+    }
+    du = sqrt(U[0]*U[0] + U[1]*U[1] + U[2]*U[2]);
+    dv = sqrt(V[0]*V[0] + V[1]*V[1] + V[2]*V[2]);
+    if (du < 1e-6 || dv < 1e-6) return 0;
+    for (k = 0; k < 3; k++) { U[k] /= du; V[k] /= dv; }
+    if (fabs(U[0]*V[0] + U[1]*V[1] + U[2]*V[2]) > 1e-3) return 0;
+    if (fabs(W[0]*W[0] + W[1]*W[1] + W[2]*W[2] - 1.0) > 1e-3) return 0;
+    *lu = du; *lv = dv;
+    return 1;
+}
+
+/* Where volume `s` sits in that basis: its bounding box in u and v, and how far
+ * it reaches along the face normal. The solid is the face swept back along -n
+ * by `depth`, so eight corners describe it exactly. */
+static void aug_solid_extent(const sh_aug_platform *s, const double o[3],
+                             const double U[3], const double V[3], const double W[3],
+                             aug_rect2 *uv, double *w0, double *w1)
+{
+    int i, k;
+    for (i = 0; i < 8; i++) {
+        double p[3], du, dv, dw;
+        for (k = 0; k < 3; k++)
+            p[k] = (double)s->c[i & 3][k]
+                 - (i < 4 ? 0.0 : (double)s->depth * s->n[k]) - o[k];
+        du = p[0]*U[0] + p[1]*U[1] + p[2]*U[2];
+        dv = p[0]*V[0] + p[1]*V[1] + p[2]*V[2];
+        dw = p[0]*W[0] + p[1]*W[1] + p[2]*W[2];
+        if (i == 0) {
+            uv->u0 = uv->u1 = du; uv->v0 = uv->v1 = dv; *w0 = *w1 = dw;
+        } else {
+            if (du < uv->u0) uv->u0 = du;
+            if (du > uv->u1) uv->u1 = du;
+            if (dv < uv->v0) uv->v0 = dv;
+            if (dv > uv->v1) uv->v1 = dv;
+            if (dw < *w0) *w0 = dw;
+            if (dw > *w1) *w1 = dw;
+        }
+    }
+}
+
+/* Turn every requested face into the pieces of it a demon can actually stand
+ * on. Returns how many entries were written to `work`; each one records which
+ * request it came from, and a request every other volume buries is written back
+ * once with `buried` set so the author still gets told why. */
+static int aug_expand_solids(const aug_ctx *c, const sh_aug_platform *src, int n,
+                             sh_aug_platform *work, int *wsrc, unsigned char *wburied,
+                             int *wpieces, int cap, int *truncated)
+{
+    double keep = c->radius > 0.0 ? 2.0 * (double)c->radius : 1.0;
+    int i, nw = 0;
+
+    for (i = 0; i < n && nw < cap; i++) {
+        aug_rect2 pieces[AUG_MAX_PIECES], next[AUG_MAX_PIECES * 4];
+        double o[3], U[3], V[3], W[3], lu, lv;
+        int np = 1, j, k = 0, whole;
+
+        if (!aug_face_basis(&src[i], o, U, V, W, &lu, &lv)) {
+            work[nw] = src[i]; wsrc[nw] = i; wburied[nw] = 0; wpieces[nw] = 1; nw++;
+            continue;
+        }
+        pieces[0].u0 = 0.0; pieces[0].v0 = 0.0; pieces[0].u1 = lu; pieces[0].v1 = lv;
+
+        for (j = 0; j < n && np > 0; j++) {
+            aug_rect2 b;
+            double w0, w1;
+            int nn = 0;
+            if (j == i || src[j].depth <= 0.0f) continue;
+            aug_solid_extent(&src[j], o, U, V, W, &b, &w0, &w1);
+            /* Entirely at or below the surface: it is what we are standing on,
+             * or it is under us. Entirely above a demon's head: it is a ceiling,
+             * and aug_headroom has already measured it. */
+            if (w1 <= AUG_TOUCH_EPS) continue;
+            if (w0 >= (double)c->height) continue;
+            for (k = 0; k < np; k++) {
+                aug_rect2 got[4];
+                int g = aug_rect2_subtract(&pieces[k], &b, got), t;
+                for (t = 0; t < g; t++) {
+                    if (got[t].u1 - got[t].u0 < keep) continue;
+                    if (got[t].v1 - got[t].v0 < keep) continue;
+                    if (nn < AUG_MAX_PIECES * 4) next[nn++] = got[t];
+                }
+            }
+            /* Too many slivers to carry. Keep the biggest, and say so rather
+             * than let a silently shortened list read as a complete bake. */
+            if (nn > AUG_MAX_PIECES) {
+                int x, y;
+                for (x = 1; x < nn; x++) {
+                    aug_rect2 key = next[x];
+                    double ka = aug_rect2_area(&key);
+                    for (y = x - 1; y >= 0 && aug_rect2_area(&next[y]) < ka; y--)
+                        next[y + 1] = next[y];
+                    next[y + 1] = key;
+                }
+                nn = AUG_MAX_PIECES;
+                *truncated = 1;
+            }
+            for (k = 0; k < nn; k++) pieces[k] = next[k];
+            np = nn;
+        }
+
+        if (np <= 0) {
+            work[nw] = src[i]; wsrc[nw] = i; wburied[nw] = 1; wpieces[nw] = 0; nw++;
+            continue;
+        }
+        /* Untouched: hand back the ORIGINAL corners, not a rebuild of them, so
+         * a face nothing intersects is bit-for-bit what the author placed. */
+        whole = (np == 1 && pieces[0].u0 <= 1e-6 && pieces[0].v0 <= 1e-6 &&
+                 pieces[0].u1 >= lu - 1e-6 && pieces[0].v1 >= lv - 1e-6);
+        if (whole) {
+            work[nw] = src[i]; wsrc[nw] = i; wburied[nw] = 0; wpieces[nw] = 1; nw++;
+            continue;
+        }
+        for (k = 0; k < np && nw < cap; k++) {
+            static const int SU[4] = { 0, 1, 1, 0 };
+            static const int SV[4] = { 0, 0, 1, 1 };
+            int q, ax;
+            work[nw] = src[i];
+            for (q = 0; q < 4; q++) {
+                double u = SU[q] ? pieces[k].u1 : pieces[k].u0;
+                double v = SV[q] ? pieces[k].v1 : pieces[k].v0;
+                for (ax = 0; ax < 3; ax++)
+                    work[nw].c[q][ax] = (float)(o[ax] + u * U[ax] + v * V[ax]);
+            }
+            _snprintf_s(work[nw].name, sizeof work[nw].name, _TRUNCATE,
+                        "%.40s [%d/%d]", src[i].name, k + 1, np);
+            wsrc[nw] = i; wburied[nw] = 0; wpieces[nw] = np; nw++;
+        }
+        if (k < np) *truncated = 1;
+    }
+    if (i < n) *truncated = 1;
+    return nw;
+}
+
 /* ---- the driver -------------------------------------------------------- */
 
 int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
@@ -2089,13 +2470,18 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
 {
     static const sh_aug_opts defaults = { SH_AUG_FALL_AUTO, 1, 0 };
     aug_ctx c;
-    int order[SH_AUG_MAX_PLATFORMS];
-    int made[SH_AUG_MAX_PLATFORMS];
-    aug_quad effs[SH_AUG_MAX_PLATFORMS];
-    aug_quad reqs[SH_AUG_MAX_PLATFORMS];
-    aug_peer peers[SH_AUG_MAX_PLATFORMS];
+    /* HEAP, not stack. Two aug_quad arrays alone are 160 KB at the platform
+     * cap, and this runs on the map loader's thread beside everything else the
+     * bake needs -- a stack that only just fits is one platform away from not
+     * fitting. One block, one free, so the single exit stays single. */
+    int *order = NULL, *made = NULL, *wsrc = NULL, *wpieces = NULL;
+    aug_quad *effs = NULL, *reqs = NULL;
+    aug_peer *peers = NULL;
+    unsigned char *entry_ok = NULL, *wburied = NULL;
+    sh_aug_platform *work = NULL;
+    unsigned char *block = NULL;
     float mins[3], maxs[3], fw, fd;
-    int i, j, k, nmade = 0;
+    int i, j, k, nmade = 0, rc;
 
     if (!a || !out) return 0;
     memset(out, 0, sizeof *out);
@@ -2117,10 +2503,43 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     fw = maxs[0] - mins[0];
     fd = maxs[1] - mins[1];
 
+    /* Marked volumes intersect each other, so what an author asked for and what
+     * a demon can stand on are not the same set of shapes. Everything below runs
+     * on the PIECES, not on the requests -- see aug_expand_solids. Heap, not
+     * stack: this loads on the same thread the rest of the bake does. */
+    {
+        size_t nmax = SH_AUG_MAX_PLATFORMS;
+        size_t need = nmax * (sizeof *work + sizeof *effs + sizeof *reqs +
+                              sizeof *peers + 4 * sizeof(int) + 2);
+        unsigned char *at;
+        block = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, need);
+        if (!block) return 0;           /* nothing has been written yet */
+        at = block;
+        work     = (sh_aug_platform *)at; at += nmax * sizeof *work;
+        effs     = (aug_quad *)at;        at += nmax * sizeof *effs;
+        reqs     = (aug_quad *)at;        at += nmax * sizeof *reqs;
+        peers    = (aug_peer *)at;        at += nmax * sizeof *peers;
+        order    = (int *)at;             at += nmax * sizeof(int);
+        made     = (int *)at;             at += nmax * sizeof(int);
+        wsrc     = (int *)at;             at += nmax * sizeof(int);
+        wpieces  = (int *)at;             at += nmax * sizeof(int);
+        entry_ok = at;                    at += nmax;
+        wburied  = at;
+    }
+    out->source_count = n;
+    n = aug_expand_solids(&c, plats, n, work, wsrc, wburied, wpieces,
+                          SH_AUG_MAX_PLATFORMS, &out->pieces_truncated);
+    plats = work;
+
     out->areas_before = sh_aas_count(a, SH_AAS_L_AREAS);
     out->reach_before = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
     out->depth_before = sh_aas_tree_depth(a);
     out->platform_count = n;
+
+    /* Entry is decided over the whole request before anything is carved: the
+     * lumps are append-only, so a platform found unreachable after its splice
+     * could no longer be taken back. */
+    aug_entry_flood(&c, plats, n, entry_ok);
 
     /* Lowest first, so a platform that carries another is already in the tree
      * when the one above it looks for its carrier. */
@@ -2145,6 +2564,19 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         memcpy(pr->name, p->name, sizeof pr->name);
         pr->name[sizeof pr->name - 1] = 0;
         pr->area = -1;
+        pr->source = wsrc[idx];
+        pr->pieces = wpieces[idx];
+        if (wburied[idx]) {
+            /* Every part of this face is inside another marked volume, so there
+             * is nowhere on it a demon could be standing. Refused with its own
+             * reason rather than left to fail some later gate for the wrong
+             * cause -- an author who stacked two boxes flush needs to be told
+             * that, not told their box is "too small". */
+            _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
+                        "completely inside the other volumes around it -- no "
+                        "part of this face is standing room");
+            continue;
+        }
         pr->carrier = -1;
 
         pr->tilt_degrees = (float)aug_degrees_from_horizontal(p->n[2]);
@@ -2198,6 +2630,44 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
             carrier = sh_aas_point_area(a, (float)mx, (float)my,
                                         (float)aug_z_at(&eff, mx, my));
         }
+        /* NOTHING UNDER THE MIDDLE OF IT.
+         *
+         * aug_carve only splices where the tree already holds a real area --
+         * `if (child == 0) continue` -- so a box that overhangs the edge of the
+         * module gets a PARTIAL splice: some leaf near an edge is replaced, the
+         * carve reports success, and the middle of the platform still resolves
+         * to void. The area record then claims ground the tree cannot find, and
+         * a demon standing there cannot be routed anywhere, which is the same
+         * "emitted but unroutable" failure that makes them stand still and
+         * shoot.
+         *
+         * This has to be caught HERE, before aug_add_area, and not after the
+         * carve: the lumps are append-only, so refusing later leaves the area
+         * stranded in the array -- counted into a cluster and included in
+         * trees[0].c -- which is precisely the phantom being avoided. */
+        if (carrier <= 0) {
+            _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
+                        "nothing walkable under the middle of it -- this box "
+                        "hangs over space the module has no floor in");
+            continue;
+        }
+        /* NOTHING CAN EVER GET ONTO IT.
+         *
+         * Every edge either hangs past the module's walkable floor or is
+         * covered by another volume, and no volume it touches reaches the
+         * floor either -- so whatever the linkers try, the result is an area
+         * demons can be told to reach and never arrive at. That is the
+         * stand-still-and-shoot failure, and unlike a mere island it can hide:
+         * two such volumes link to EACH OTHER and stop reading as islands at
+         * all. Refused here, before the carve, because the carve cannot be
+         * taken back. */
+        if (!entry_ok[idx]) {
+            _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
+                        "nothing can get onto it: every edge hangs past the "
+                        "module's walkable floor or into another volume, and "
+                        "no touching volume reaches the floor either");
+            continue;
+        }
         area = aug_add_area(&c, &eff, carrier);
         if (area < 0) {
             _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
@@ -2205,10 +2675,26 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
             c.failed = 1;
             break;
         }
+        pr->leaf_slots_carved = aug_carve(&c, area, &eff);
+        if (pr->leaf_slots_carved <= 0) {
+            /* Belt and braces. The carrier check above already refuses the case
+             * that produces this -- a carrier area under the middle guarantees at
+             * least that leaf is replaceable -- so reaching here means something
+             * unmodelled. We cannot un-append the area, so the least bad outcome
+             * is to refuse to CLAIM it and to leave the reason visible. */
+            _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
+                        "nowhere to splice this into the navigation tree");
+            continue;
+        }
         pr->emitted = 1;
         pr->area = area;
         pr->carrier = carrier;
-        pr->leaf_slots_carved = aug_carve(&c, area, &eff);
+        {
+            double mx = (eff.x0 + eff.x1) / 2.0, my = (eff.y0 + eff.y1) / 2.0;
+            pr->centre[0] = (float)mx;
+            pr->centre[1] = (float)my;
+            pr->centre[2] = (float)aug_z_at(&eff, mx, my);
+        }
         effs[nmade] = eff;
         reqs[nmade] = req;
         made[nmade] = area;
@@ -2267,18 +2753,58 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                      * author exactly like a complete one. */
                     if (got == room) out->links_truncated = 1;
                 }
-                /* Leaps are counted here rather than off the reachability
-                 * records, because a leap and a climb write the same five
-                 * records and are indistinguishable afterwards. */
-                for (i = 0; i < total; i++) {
-                    if (!specs[i].is_leap) continue;
-                    for (j = 0; j < n; j++)
-                        if (out->platforms[j].area == specs[i].from_area ||
-                            out->platforms[j].area == specs[i].to_area)
-                            out->platforms[j].leaps++;
+                /* Count leaps only for specs that were actually WRITTEN.
+                 * aug_emit_traversals can decline the whole set -- a module that
+                 * already owns traversal points on an area we climb from -- and
+                 * counting the collected specs beforehand reported leaps the
+                 * payload does not contain, which is a report that lies to the
+                 * author about what their map got.
+                 *
+                 * A leap and a climb write the same five records and are
+                 * indistinguishable in the payload afterwards, so the count has
+                 * to come from the specs; it just has to come from the ones that
+                 * survived. */
+                if (total > 0 && aug_emit_traversals(&c, specs, total) > 0) {
+                    for (i = 0; i < total; i++) {
+                        if (!specs[i].is_leap) continue;
+                        for (j = 0; j < n; j++)
+                            if (out->platforms[j].area == specs[i].from_area ||
+                                out->platforms[j].area == specs[i].to_area)
+                                out->platforms[j].leaps++;
+                    }
                 }
-                if (total > 0) aug_emit_traversals(&c, specs, total);
                 HeapFree(GetProcessHeap(), 0, specs);
+            }
+        }
+        /* THE DEAD ZONE.
+         *
+         * A demon steps up to maxStepHeight and jumps no shorter than the
+         * shortest jump_forward animation the game ships -- 149 units. A gap
+         * between those two is crossable by neither, so the two platforms stay
+         * unlinked no matter what the linkers try. That is geometry, not a bug,
+         * but it is invisible: both platforms are emitted, both reach the floor,
+         * neither reads as an island, and the author is left wondering why
+         * demons will not walk from one to the other. Counted here so the bake
+         * line can say it. */
+        for (i = 0; i < nmade; i++) {
+            for (j = i + 1; j < nmade; j++) {
+                double gap = aug_quad_gap(&reqs[i], &reqs[j]);
+                unsigned r, nr;
+                int linked = 0;
+                if (gap <= AUG_TOUCH_EPS || gap >= (double)SH_TRAV_LEAP_MIN_SPAN)
+                    continue;
+                nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+                for (r = 0; r < nr && !linked; r++) {
+                    const unsigned char *rr =
+                        sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, r);
+                    int f, t;
+                    if (!rr) continue;
+                    f = (int)sh_aas_get_u16(rr, RE_FROM_AREA);
+                    t = (int)sh_aas_get_u16(rr, RE_TO_AREA);
+                    if ((f == made[i] && t == made[j]) ||
+                        (f == made[j] && t == made[i])) linked = 1;
+                }
+                if (!linked) out->dead_gaps++;
             }
         }
         aug_relink(&c);
@@ -2347,7 +2873,9 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     out->depth_after = sh_aas_tree_depth(a);
     out->depth_exceeded = out->depth_after > (unsigned)SH_AAS_MAX_DEPTH;
 
-    return c.failed ? 0 : 1;
+    rc = c.failed ? 0 : 1;
+    HeapFree(GetProcessHeap(), 0, block);
+    return rc;
 }
 
 #ifdef SH_AUG_TESTING

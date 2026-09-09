@@ -71,6 +71,7 @@ typedef struct sh_nav_region {
     float c[4][3];          /* the face, module-local, CW seen from +Z */
     float n[3];             /* unit outward normal of that face */
     int   face;             /* OBB face index 0..5; 4 is an upright box's top */
+    float depth;            /* the box's extent along -n; the face plus this is the whole solid */
     int   instance;         /* index into the instance table below */
     int   block_demons;     /* the volume's blockDemons; 0 means a demon falls through it */
     unsigned entity;        /* index in the map's entities array, for diagnostics */

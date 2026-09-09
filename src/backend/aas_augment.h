@@ -74,6 +74,7 @@ typedef struct sh_aug_platform {
     float c[4][3];                      /* the face, CW seen from +Z */
     float n[3];                         /* unit outward normal */
     int   face;                         /* OBB face index; 4 == upright top */
+    float depth;                        /* the solid's extent along -n behind the face */
     char  name[SH_AUG_NAME_CAP];        /* for the report only */
 } sh_aug_platform;
 
@@ -108,12 +109,36 @@ typedef struct sh_aug_platform_result {
     int      side_face;                 /* 1 if that face is not the box's top */
     int      neighbours;                /* distinct areas this platform links to */
     int      leaps;                     /* gap links touching it */
+    float    centre[3];                 /* where the emitted surface's middle
+                                         * ended up -- the same point the carve
+                                         * was proved against, and the only way
+                                         * a caller can probe a PIECE, whose
+                                         * corners are not the request's */
+    int      source;                    /* which requested volume this came from */
+    int      pieces;                    /* how many walkable pieces that volume
+                                         * became once the volumes intersecting
+                                         * it were subtracted; 1 is untouched */
     char     reason[SH_AUG_REASON_CAP]; /* why it was not emitted */
 } sh_aug_platform_result;
 
 typedef struct sh_aug_report {
+    /* One entry per walkable PIECE, which is not one per requested volume: a
+     * volume another one intersects is split into the parts of it a demon can
+     * actually stand on. `source` on each entry names the volume it came from,
+     * and `source_count` is how many volumes were asked about. */
     sh_aug_platform_result platforms[SH_AUG_MAX_PLATFORMS];
     int      platform_count;
+    int      source_count;
+    int      pieces_truncated;          /* a face broke into more pieces than
+                                         * could be carried; the smallest were
+                                         * dropped, so some walkable ground is
+                                         * missing from the payload */
+    int      dead_gaps;                 /* pairs of emitted platforms too far
+                                         * apart to step between and too close
+                                         * for the shortest jump the game ships,
+                                         * left unlinked. Nothing can fix this
+                                         * from here; the author has to move a
+                                         * volume, so they have to be told. */
     unsigned areas_before, areas_after;
     unsigned reach_before, reach_after;
     unsigned depth_before, depth_after;
