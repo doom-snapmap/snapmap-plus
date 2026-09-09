@@ -1413,6 +1413,85 @@ static void test_no_arrangement_emits_a_stranded_area(void)
     sh_aas_free(a);
 }
 
+/* THE PHANTOM INVARIANT: every area added must belong to a platform we claim.
+ *
+ * The lumps are append-only, so a platform refused AFTER aug_add_area leaves its
+ * area stranded in the array -- counted into a cluster and into trees[0].c, with
+ * no reachabilities and no owner. That is the same "present but unroutable"
+ * shape that freezes demons, except nothing in the report mentions it.
+ *
+ * Counting is the whole test: areas_after - areas_before must equal the number
+ * of platforms reported emitted, for every arrangement, including the ones that
+ * refuse. */
+static void test_areas_added_equals_platforms_emitted(void)
+{
+    static const struct { float x0, y0, x1, y1, z; const char *name; } CASE[] = {
+        { -400.0f, -400.0f,  400.0f,  400.0f,   16.0f, "ordinary" },
+        { 6000.0f, 6000.0f, 6600.0f, 6600.0f,  900.0f, "over nothing" },
+        { 1900.0f, -400.0f, 2600.0f,  400.0f,   16.0f, "overhanging the edge" },
+        {  -60.0f,  -60.0f,   60.0f,   60.0f,   16.0f, "small" },
+    };
+    int ci;
+    printf("every area added belongs to a platform the report claims\n");
+    for (ci = 0; ci < (int)(sizeof CASE / sizeof CASE[0]); ci++) {
+        sh_aas *a = load_module();
+        sh_aug_platform p;
+        sh_aug_report rep;
+        sh_aug_opts o;
+        int i, emitted = 0, added;
+        o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+        mkplat(&p, CASE[ci].x0, CASE[ci].y0, CASE[ci].x1, CASE[ci].y1,
+               CASE[ci].z, CASE[ci].name);
+        CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+        for (i = 0; i < rep.platform_count; i++)
+            if (rep.platforms[i].emitted) emitted++;
+        added = (int)rep.areas_after - (int)rep.areas_before;
+        CHECK_MSG(added == emitted, CASE[ci].name);
+        /* And a refusal always explains itself. */
+        for (i = 0; i < rep.platform_count; i++)
+            if (!rep.platforms[i].emitted)
+                CHECK_MSG(rep.platforms[i].reason[0] != 0, CASE[ci].name);
+        sh_aas_free(a);
+    }
+}
+
+/* An emitted platform's own centre must resolve to its own area.
+ *
+ * aug_carve only replaces leaf slots that already hold a real area, so a box
+ * overhanging the module floor used to get a partial splice: carved > 0, hence
+ * reported emitted, while the middle of it still resolved to void. */
+static void test_an_emitted_platform_resolves_at_its_own_centre(void)
+{
+    static const struct { float x0, y0, x1, y1, z; const char *name; } CASE[] = {
+        { -400.0f, -400.0f,  400.0f,  400.0f,  16.0f, "ordinary" },
+        { 1900.0f, -400.0f, 2600.0f,  400.0f,  16.0f, "overhanging the edge" },
+        { 1990.0f, -400.0f, 2800.0f,  400.0f,  16.0f, "mostly off the edge" },
+    };
+    int ci;
+    printf("an emitted platform resolves to its own area at its centre\n");
+    for (ci = 0; ci < (int)(sizeof CASE / sizeof CASE[0]); ci++) {
+        sh_aas *a = load_module();
+        sh_aug_platform p;
+        sh_aug_report rep;
+        sh_aug_opts o;
+        float cx, cy, cz;
+        o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+        mkplat(&p, CASE[ci].x0, CASE[ci].y0, CASE[ci].x1, CASE[ci].y1,
+               CASE[ci].z, CASE[ci].name);
+        CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+        if (rep.platforms[0].emitted) {
+            cx = (CASE[ci].x0 + CASE[ci].x1) / 2.0f;
+            cy = (CASE[ci].y0 + CASE[ci].y1) / 2.0f;
+            cz = CASE[ci].z + 2.0f;
+            CHECK_MSG(sh_aas_point_area(a, cx, cy, cz) == rep.platforms[0].area,
+                      CASE[ci].name);
+        } else {
+            CHECK_MSG(rep.platforms[0].reason[0] != 0, CASE[ci].name);
+        }
+        sh_aas_free(a);
+    }
+}
+
 int main(void)
 {
     printf("aas_augment_test\n");
@@ -1447,6 +1526,8 @@ int main(void)
     test_a_floating_intersecting_volume_is_never_a_stranded_area();
     test_a_platform_with_no_carrier_is_refused_not_phantom();
     test_no_arrangement_emits_a_stranded_area();
+    test_areas_added_equals_platforms_emitted();
+    test_an_emitted_platform_resolves_at_its_own_centre();
     test_existing_traversals_on_our_floor_are_declined_out_loud();
     test_a_module_without_traversals_still_gets_climbs();
     test_island_at_128();

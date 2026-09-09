@@ -2231,6 +2231,27 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
             carrier = sh_aas_point_area(a, (float)mx, (float)my,
                                         (float)aug_z_at(&eff, mx, my));
         }
+        /* NOTHING UNDER THE MIDDLE OF IT.
+         *
+         * aug_carve only splices where the tree already holds a real area --
+         * `if (child == 0) continue` -- so a box that overhangs the edge of the
+         * module gets a PARTIAL splice: some leaf near an edge is replaced, the
+         * carve reports success, and the middle of the platform still resolves
+         * to void. The area record then claims ground the tree cannot find, and
+         * a demon standing there cannot be routed anywhere, which is the same
+         * "emitted but unroutable" failure that makes them stand still and
+         * shoot.
+         *
+         * This has to be caught HERE, before aug_add_area, and not after the
+         * carve: the lumps are append-only, so refusing later leaves the area
+         * stranded in the array -- counted into a cluster and included in
+         * trees[0].c -- which is precisely the phantom being avoided. */
+        if (carrier <= 0) {
+            _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
+                        "nothing walkable under the middle of it -- this box "
+                        "hangs over space the module has no floor in");
+            continue;
+        }
         area = aug_add_area(&c, &eff, carrier);
         if (area < 0) {
             _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
@@ -2240,13 +2261,13 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         }
         pr->leaf_slots_carved = aug_carve(&c, area, &eff);
         if (pr->leaf_slots_carved <= 0) {
-            /* The area exists in the array but the tree cannot reach it. Leaving
-             * it would put a phantom in the cluster bookkeeping -- counted, linked
-             * and included in trees[0].c, yet unreachable by the BSP walk the
-             * router uses. Say so and do not claim it was emitted. */
+            /* Belt and braces. The carrier check above already refuses the case
+             * that produces this -- a carrier area under the middle guarantees at
+             * least that leaf is replaceable -- so reaching here means something
+             * unmodelled. We cannot un-append the area, so the least bad outcome
+             * is to refuse to CLAIM it and to leave the reason visible. */
             _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
-                        "nowhere to splice this into the navigation tree; nothing "
-                        "walkable sits under it");
+                        "nowhere to splice this into the navigation tree");
             continue;
         }
         pr->emitted = 1;
