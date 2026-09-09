@@ -20,7 +20,11 @@ void backend_log(const char *message);
 static const char *const NAV_CLASSES[] = { "monster48", "monster96", "monster128" };
 #define NAV_CLASS_COUNT ((int)(sizeof NAV_CLASSES / sizeof NAV_CLASSES[0]))
 
-#define BAKE_REASON_CAP 192
+/* The bake line carries the counts plus every note that applies -- islands,
+ * side faces, cut volumes, dead-zone pairs -- and at 192 the notes were being
+ * silently cut off mid-sentence, which reads to an author exactly like the bake
+ * had nothing more to say. 64 modules at this size is 24 KB of statics. */
+#define BAKE_REASON_CAP 384
 
 typedef struct bake_module {
     char module[SH_NAVR_MODULE_CAP];    /* "category/module" */
@@ -350,6 +354,7 @@ static int bake_collect_platforms(const bake_module *m, sh_aug_platform *out, in
         memcpy(out[n].c, r->c, sizeof out[n].c);
         memcpy(out[n].n, r->n, sizeof out[n].n);
         out[n].face = r->face;
+        out[n].depth = r->depth;
         _snprintf_s(out[n].name, sizeof out[n].name, _TRUNCATE, "volume %u", r->entity);
         n++;
     }
@@ -439,7 +444,16 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
          * sometimes wanted, but it is a different thing from one they expected
          * demons to reach, and only this line distinguishes them. */
         int islands = 0, climbs = 0, leaps = 0, chained = 0, tipped = 0, i;
+        int cut = 0, lastcut = -1;
         for (i = 0; i < rep.platform_count; i++) {
+            /* Counted over every entry, emitted or not: a volume cut into
+             * pieces that were then all refused is exactly the case an author
+             * needs told about. Entries from one volume are contiguous, so the
+             * last-source check is enough to count volumes rather than pieces. */
+            if (rep.platforms[i].pieces != 1 && rep.platforms[i].source != lastcut) {
+                lastcut = rep.platforms[i].source;
+                cut++;
+            }
             if (!rep.platforms[i].emitted) continue;
             if (rep.platforms[i].island) islands++;
             climbs += rep.platforms[i].climbs;
@@ -470,6 +484,25 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
                         ? "; the link budget ran out, so some volumes have fewer "
                           "climbs and leaps than their shape allows"
                         : (tipped ? "; some volumes are walkable on a side face" : ""));
+        if (cut) {
+            size_t at = strlen(why);
+            _snprintf_s(why + at, why_cap - at, _TRUNCATE,
+                        "; %d volume(s) cut around the solids standing in them%s",
+                        cut,
+                        rep.pieces_truncated
+                            ? ", and one broke into more pieces than fit, so some "
+                              "walkable ground was dropped"
+                            : "");
+        }
+        /* Kept SHORT and last: the line has a fixed budget, and a note that
+         * pushes the cut count off the end costs the author the more important
+         * fact. */
+        if (rep.dead_gaps) {
+            size_t at = strlen(why);
+            _snprintf_s(why + at, why_cap - at, _TRUNCATE,
+                        "; %d pair(s) too far to step and too close to jump",
+                        rep.dead_gaps);
+        }
     }
     return rc;
 }

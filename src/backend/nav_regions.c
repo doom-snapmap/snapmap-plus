@@ -403,6 +403,10 @@ static int navr_volume_face(const char *json, size_t len, const sh_shard_doc *do
                        + SV[i] * half[v] * m[v][k];
     for (k = 0; k < 3; k++) r->n[k] = m[a][k] * s;
     r->face = best;
+    /* The solid is this face swept back along -n by the box's extent on that
+     * axis. Carrying it means the augmenter can ask "is this volume standing in
+     * the way of that one", which a face alone can never answer. */
+    r->depth = 2.0f * half[a];
 
     /* Wind CLOCKWISE seen from +Z: the XY shoelace must come out negative. A
      * face whose XY projection is degenerate has no footprint at all -- that is

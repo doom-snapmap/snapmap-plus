@@ -1531,6 +1531,303 @@ static void test_an_emitted_platform_resolves_at_its_own_centre(void)
     }
 }
 
+/* ---- volumes standing in each other's way ------------------------------
+ *
+ * These are the arrangements testers reported and the earlier fixtures never
+ * covered: they all built volumes that touch but never INTERSECT, so a face
+ * that claimed ground another solid was standing in always looked correct.
+ *
+ * `depth` is what makes a platform a solid rather than a face. A fixture that
+ * leaves it zero gets the old behaviour exactly, which is why every test above
+ * still passes unchanged -- so these set it deliberately. */
+
+static void mkbox(sh_aug_platform *p, float x0, float y0, float x1, float y1,
+                  float top, float bottom, const char *name)
+{
+    mkplat(p, x0, y0, x1, y1, top, name);
+    p->depth = top - bottom;            /* swept back along -n, which is -z here */
+}
+
+/* The pieces of `rep` that came from requested volume `src`. */
+static int pieces_of(const sh_aug_report *rep, int src, int *out, int cap)
+{
+    int i, n = 0;
+    for (i = 0; i < rep->platform_count && n < cap; i++)
+        if (rep->platforms[i].source == src) out[n++] = i;
+    return n;
+}
+
+static void test_a_pillar_through_a_slab_is_cut_out_of_it(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    int idx[8], n, i, at_centre, claimed = 0;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a pillar standing through a slab is cut out of the slab's top\n");
+    load_synthetic_traversal_table();
+    /* Caliban's LEFT case: both boxes stand on the module floor, and the pillar
+     * rises through the slab. The slab's top used to be emitted whole, which
+     * claimed the 192x192 the pillar is standing in -- a demon routed across it
+     * walks into the pillar and stops, which is "breaks all AI". */
+    mkbox(&p[0], -384.0f, -384.0f, 384.0f, 384.0f,  16.0f, 0.0f, "slab");
+    mkbox(&p[1],  -96.0f,  -96.0f,  96.0f,  96.0f, 128.0f, 0.0f, "pillar");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK_MSG(rep.source_count == 2, "two volumes were asked about");
+
+    n = pieces_of(&rep, 0, idx, 8);
+    CHECK_MSG(n == 4, "the slab becomes the four strips around the pillar");
+    for (i = 0; i < n; i++) {
+        CHECK_MSG(rep.platforms[idx[i]].pieces == 4,
+                  "and every strip says so, so the author is told");
+        /* Not vacuous: a cut that emitted nothing would satisfy every
+         * "no strip claims that ground" check below for the wrong reason. */
+        CHECK_MSG(rep.platforms[idx[i]].emitted,
+                  "and every strip is actually emitted -- reason: %s");
+    }
+
+    /* THE POINT OF THE WHOLE CHANGE. Standing room just above the slab, in the
+     * middle of the pillar's footprint, must not resolve to any area the slab
+     * produced. */
+    at_centre = sh_aas_point_area(a, 0.0f, 0.0f, 17.0f);
+    CHECK_MSG(at_centre > 0, "that point still resolves to the module's own floor");
+    for (i = 0; i < n; i++)
+        if (rep.platforms[idx[i]].emitted && rep.platforms[idx[i]].area == at_centre)
+            claimed = 1;
+    CHECK_MSG(!claimed, "no strip of the slab claims the ground inside the pillar");
+    /* The other half of the same claim: a point on a strip DOES resolve to that
+     * strip, so the subtraction removed the pillar and nothing else. */
+    CHECK_MSG(sh_aas_point_area(a, -300.0f, 0.0f, 17.0f) != at_centre,
+              "and ground on a strip resolves to the strip, not to the floor");
+
+    /* And the strips are still one surface: they touch, so they link. */
+    for (i = 0; i < n; i++)
+        if (rep.platforms[idx[i]].emitted)
+            CHECK_MSG(rep.platforms[idx[i]].links > 0,
+                      "each strip is still reachable, not cut into islands");
+    sh_aas_free(a);
+}
+
+static void test_a_face_buried_in_another_volume_is_refused_by_name(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    int idx[8], n;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a face entirely inside another volume is refused for that reason\n");
+    load_synthetic_traversal_table();
+    /* A small box swallowed by a big one. Its top is not a surface at all: it is
+     * a plane in the middle of somebody else's solid. */
+    mkbox(&p[0], -384.0f, -384.0f, 384.0f, 384.0f, 128.0f, 0.0f, "block");
+    mkbox(&p[1],  -96.0f,  -96.0f,  96.0f,  96.0f,  64.0f, 0.0f, "swallowed");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+
+    n = pieces_of(&rep, 1, idx, 8);
+    CHECK_MSG(n == 1, "a buried face is still reported once");
+    if (n == 1) {
+        CHECK_MSG(rep.platforms[idx[0]].emitted == 0, "and it is not emitted");
+        CHECK_MSG(rep.platforms[idx[0]].pieces == 0, "with no pieces left of it");
+        CHECK_MSG(strstr(rep.platforms[idx[0]].reason, "standing room") != NULL,
+                  "and the reason names the burial, not some later gate");
+    }
+    /* The big box is UNDER the small one's face, never over it, so it keeps its
+     * whole top. Subtraction must not run backwards. */
+    n = pieces_of(&rep, 0, idx, 8);
+    CHECK_MSG(n == 1 && rep.platforms[idx[0]].pieces == 1,
+              "the containing box's own top is untouched");
+    sh_aas_free(a);
+}
+
+static void test_a_floating_volume_clipping_into_a_platform_is_cut_out(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    int idx[8], n, i, at_centre, claimed = 0;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a floating volume clipping into a platform is cut out of it\n");
+    load_synthetic_traversal_table();
+    /* Caliban's MIDDLE case: the floater never reaches the module floor, it just
+     * hangs into the slab. Reported as breaking SOME demons and not others,
+     * which is exactly what a per-class agent height does to a whole-platform
+     * headroom refusal. */
+    mkbox(&p[0], -384.0f, -384.0f, 384.0f, 384.0f, 16.0f,  0.0f, "slab");
+    mkbox(&p[1],  -96.0f,  -96.0f,  96.0f,  96.0f, 72.0f,  8.0f, "floater");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+
+    n = pieces_of(&rep, 0, idx, 8);
+    CHECK_MSG(n == 4, "the slab is cut around the floater's footprint");
+    for (i = 0; i < n; i++)
+        CHECK_MSG(rep.platforms[idx[i]].emitted, "and every strip is emitted");
+    at_centre = sh_aas_point_area(a, 0.0f, 0.0f, 17.0f);
+    for (i = 0; i < n; i++)
+        if (rep.platforms[idx[i]].emitted && rep.platforms[idx[i]].area == at_centre)
+            claimed = 1;
+    CHECK_MSG(!claimed, "no strip claims the ground the floater hangs in");
+    sh_aas_free(a);
+}
+
+static void test_the_separated_control_arrangement_is_left_alone(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("two volumes that share nothing are not cut at all\n");
+    load_synthetic_traversal_table();
+    /* Caliban's RIGHT case, the control -- and the arrangement every earlier
+     * fixture used, which is why none of them caught any of this. */
+    mkbox(&p[0], -384.0f, -384.0f, -128.0f, 384.0f, 16.0f, 0.0f, "left");
+    mkbox(&p[1],  128.0f, -384.0f,  384.0f, 384.0f, 16.0f, 0.0f, "right");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK_MSG(rep.platform_count == 2, "two volumes stay two platforms");
+    CHECK_MSG(rep.platforms[0].pieces == 1 && rep.platforms[1].pieces == 1,
+              "and neither is split");
+    CHECK_MSG(rep.platforms[0].source == 0 && rep.platforms[1].source == 1,
+              "each still names the volume it came from");
+    sh_aas_free(a);
+}
+
+static void test_a_box_parked_on_a_platform_is_cut_out_of_it(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    int idx[8], n;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a box standing on a platform is cut out of the platform's top\n");
+    load_synthetic_traversal_table();
+    /* Not an intersection at all -- it is the ordinary case of stacking one
+     * marked volume on another, and the lower top has never been walkable where
+     * the upper box sits. The same subtraction answers it. */
+    mkbox(&p[0], -384.0f, -384.0f, 384.0f, 384.0f,  16.0f,  0.0f, "floor slab");
+    mkbox(&p[1],  -96.0f,  -96.0f,  96.0f,  96.0f, 112.0f, 16.0f, "crate");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    n = pieces_of(&rep, 0, idx, 8);
+    CHECK_MSG(n == 4, "the slab is cut around the crate standing on it");
+    n = pieces_of(&rep, 1, idx, 8);
+    CHECK_MSG(n == 1 && rep.platforms[idx[0]].pieces == 1,
+              "and the crate's own top is whole");
+    sh_aas_free(a);
+}
+
+static void test_a_low_ceiling_over_part_of_a_platform_keeps_the_rest(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    int idx[8], n, i, any = 0;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a low ceiling over half a platform costs it that half, not all of it\n");
+    load_synthetic_traversal_table();
+    /* The agent is 80 tall. A solid 44 units above the slab used to refuse the
+     * WHOLE slab for headroom, because aug_headroom answers one number for the
+     * entire face -- so one intruding corner spoke for the rest of it. */
+    mkbox(&p[0], -384.0f, -384.0f, 384.0f, 384.0f, 16.0f,  0.0f, "slab");
+    mkbox(&p[1],    0.0f, -384.0f, 384.0f, 384.0f, 60.0f, 16.0f, "overhang");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    n = pieces_of(&rep, 0, idx, 8);
+    CHECK_MSG(n == 1, "the covered half is subtracted, leaving one piece");
+    for (i = 0; i < n; i++) if (rep.platforms[idx[i]].emitted) any = 1;
+    CHECK_MSG(any, "and the uncovered half is emitted rather than refused whole");
+    sh_aas_free(a);
+}
+
+static void test_a_cut_platform_never_strands_an_area(void)
+{
+    static const struct { float px0, py0, px1, py1, ptop, pbot; } CASES[] = {
+        {  -96.0f,  -96.0f,   96.0f,   96.0f, 128.0f,   0.0f },  /* centred pillar */
+        { -384.0f, -384.0f,  -96.0f,   96.0f, 128.0f,   0.0f },  /* against one edge */
+        { -384.0f, -384.0f,   96.0f,   96.0f, 128.0f,   0.0f },  /* into one corner */
+        { -500.0f, -500.0f,  500.0f,  500.0f, 128.0f,   0.0f },  /* swallows it */
+        {  -96.0f,  -96.0f,   96.0f,   96.0f,  72.0f,   8.0f },  /* floating */
+        {  -96.0f,  -96.0f,   96.0f,   96.0f, 112.0f,  16.0f },  /* parked on top */
+        { -384.0f,  -20.0f,  384.0f,   20.0f, 128.0f,   0.0f },  /* a thin wall across */
+    };
+    int ci;
+    printf("no cut arrangement leaves an area nothing can reach\n");
+    load_synthetic_traversal_table();
+    for (ci = 0; ci < (int)(sizeof CASES / sizeof CASES[0]); ci++) {
+        sh_aas *a = load_module();
+        sh_aug_platform p[2];
+        sh_aug_report rep;
+        sh_aug_opts o;
+        int i;
+        o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+        mkbox(&p[0], -384.0f, -384.0f, 384.0f, 384.0f, 16.0f, 0.0f, "slab");
+        mkbox(&p[1], CASES[ci].px0, CASES[ci].py0, CASES[ci].px1, CASES[ci].py1,
+              CASES[ci].ptop, CASES[ci].pbot, "intruder");
+        CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+        /* The swallowing case legitimately emits nothing from the slab; every
+         * other arrangement must leave the author some walkable ground, or the
+         * subtraction is eating more than the intruder occupies. */
+        if (ci != 3) {
+            int emitted = 0;
+            for (i = 0; i < rep.platform_count; i++)
+                if (rep.platforms[i].emitted) emitted++;
+            CHECK_MSG(emitted > 0, "the cut left something to walk on");
+        }
+        for (i = 0; i < rep.platform_count; i++) {
+            if (!rep.platforms[i].emitted) continue;
+            CHECK_MSG(rep.platforms[i].island == 0,
+                      "an emitted piece nothing links is the stand-still failure");
+            /* And every emitted piece must be findable at its own centre --
+             * a piece the tree cannot resolve is ground demons are told about
+             * and can never occupy. */
+            CHECK_MSG(rep.platforms[i].area > 0, "with a real area index");
+        }
+        sh_aas_free(a);
+    }
+}
+
+
+static void test_a_gap_in_the_dead_zone_is_counted_and_named(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a gap nothing can step or jump across is counted, not passed over\n");
+    load_synthetic_traversal_table();
+    /* 80 units apart: past AUG_TOUCH_EPS, so no step link, and well under the
+     * 149-unit shortest jump_forward the game ships, so no leap either. Both
+     * platforms are emitted and neither is an island -- they each reach the
+     * floor -- so nothing else in the report would ever mention this. */
+    mkbox(&p[0], -400.0f, -200.0f,  -40.0f, 200.0f, 16.0f, 0.0f, "west");
+    mkbox(&p[1],   40.0f, -200.0f,  400.0f, 200.0f, 16.0f, 0.0f, "east");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK_MSG(rep.platforms[0].emitted && rep.platforms[1].emitted,
+              "both volumes are emitted -- the count below means nothing if not");
+    CHECK_MSG(rep.dead_gaps == 1, "the unlinkable pair is counted exactly once");
+    CHECK_MSG(rep.platforms[0].island == 0 && rep.platforms[1].island == 0,
+              "and neither reads as an island, which is why it needs saying");
+    sh_aas_free(a);
+}
+
+static void test_a_flush_pair_is_not_a_dead_gap(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("two volumes standing flush are not reported as a dead gap\n");
+    load_synthetic_traversal_table();
+    mkbox(&p[0], -400.0f, -200.0f,    0.0f, 200.0f, 16.0f, 0.0f, "west");
+    mkbox(&p[1],    0.0f, -200.0f,  400.0f, 200.0f, 16.0f, 0.0f, "east");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    CHECK_MSG(rep.dead_gaps == 0, "touching volumes step between each other");
+    sh_aas_free(a);
+}
+
 int main(void)
 {
     printf("aas_augment_test\n");
@@ -1567,6 +1864,15 @@ int main(void)
     test_no_arrangement_emits_a_stranded_area();
     test_areas_added_equals_platforms_emitted();
     test_an_emitted_platform_resolves_at_its_own_centre();
+    test_a_pillar_through_a_slab_is_cut_out_of_it();
+    test_a_face_buried_in_another_volume_is_refused_by_name();
+    test_a_floating_volume_clipping_into_a_platform_is_cut_out();
+    test_the_separated_control_arrangement_is_left_alone();
+    test_a_box_parked_on_a_platform_is_cut_out_of_it();
+    test_a_low_ceiling_over_part_of_a_platform_keeps_the_rest();
+    test_a_cut_platform_never_strands_an_area();
+    test_a_gap_in_the_dead_zone_is_counted_and_named();
+    test_a_flush_pair_is_not_a_dead_gap();
     test_existing_traversals_on_our_floor_are_regrouped_not_declined();
     test_a_module_without_traversals_still_gets_climbs();
     test_island_at_128();

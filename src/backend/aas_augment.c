@@ -2259,6 +2259,210 @@ static void aug_entry_flood(aug_ctx *c, const sh_aug_platform *plats, int n,
     HeapFree(GetProcessHeap(), 0, q);
 }
 
+/* ---- volumes standing in each other's way -------------------------------
+ *
+ * A marked volume is a SOLID, not the face on top of it, and authors intersect
+ * them constantly: a pillar rising through a slab, a floating block clipping
+ * into the platform below, a small box parked on a big one. Emitting the slab's
+ * whole top then claims ground the pillar is standing in. A demon routed across
+ * it walks into the pillar and stops -- which is the arrangement testers
+ * reported as "breaks all AI", and it is also why a partly-blocked platform
+ * used to be refused whole for headroom: one intruding corner spoke for the
+ * entire face.
+ *
+ * Both are the same operation. Subtract from a face every other marked volume
+ * that occupies the space a demon would have to stand in to be there. What is
+ * left is up to four rectangles in the face's OWN basis, each still a planar
+ * convex quad on the same supporting plane, so nothing downstream changes: the
+ * pieces are adjacent, and the spread pass links them to each other exactly as
+ * it links any two touching platforms.
+ *
+ * The subtraction is by the intruder's bounding box IN THAT BASIS, so a volume
+ * rotated relative to the face it pierces loses a little more than it truly
+ * occupies. That is the safe direction -- navigation never claims ground it has
+ * not proven -- and the alternative, exact convex subtraction, yields pentagons
+ * an area record has no way to store.
+ *
+ * Only volumes THIS BAKE was asked about are subtracted. The module's own baked
+ * geometry overhead is still judged by aug_headroom, which refuses the whole
+ * face; that is a coarser answer, but it is the module's shipped navigation and
+ * not something an author placed. */
+
+#define AUG_MAX_PIECES 8
+
+typedef struct aug_rect2 { double u0, v0, u1, v1; } aug_rect2;
+
+static double aug_rect2_area(const aug_rect2 *r)
+{
+    double du = r->u1 - r->u0, dv = r->v1 - r->v0;
+    return (du > 0.0 && dv > 0.0) ? du * dv : 0.0;
+}
+
+/* The parts of `r` outside `b`, as up to four rectangles. Returns 0 when `b`
+ * swallows `r` whole, which is the buried case; returns 1 with out[0] == *r
+ * when they do not overlap at all. */
+static int aug_rect2_subtract(const aug_rect2 *r, const aug_rect2 *b, aug_rect2 *out)
+{
+    double u0 = b->u0 > r->u0 ? b->u0 : r->u0;
+    double u1 = b->u1 < r->u1 ? b->u1 : r->u1;
+    double v0 = b->v0 > r->v0 ? b->v0 : r->v0;
+    double v1 = b->v1 < r->v1 ? b->v1 : r->v1;
+    int n = 0;
+    if (u0 >= u1 || v0 >= v1) { out[0] = *r; return 1; }
+    if (u0 > r->u0) { out[n].u0 = r->u0; out[n].u1 = u0;    out[n].v0 = r->v0; out[n].v1 = r->v1; n++; }
+    if (u1 < r->u1) { out[n].u0 = u1;    out[n].u1 = r->u1; out[n].v0 = r->v0; out[n].v1 = r->v1; n++; }
+    if (v0 > r->v0) { out[n].u0 = u0;    out[n].u1 = u1;    out[n].v0 = r->v0; out[n].v1 = v0;    n++; }
+    if (v1 < r->v1) { out[n].u0 = u0;    out[n].u1 = u1;    out[n].v0 = v1;    out[n].v1 = r->v1; n++; }
+    return n;
+}
+
+/* The face's own orthonormal basis: origin at corner 0, U along the first edge,
+ * V along the last, W the face normal. Returns 0 for a face whose edges are not
+ * perpendicular or have collapsed, in which case the caller leaves it alone --
+ * refusing to split is always safe, trusting a bad basis is not. */
+static int aug_face_basis(const sh_aug_platform *p, double o[3], double U[3],
+                          double V[3], double W[3], double *lu, double *lv)
+{
+    double du, dv;
+    int k;
+    for (k = 0; k < 3; k++) {
+        o[k] = p->c[0][k];
+        U[k] = (double)p->c[1][k] - p->c[0][k];
+        V[k] = (double)p->c[3][k] - p->c[0][k];
+        W[k] = p->n[k];
+    }
+    du = sqrt(U[0]*U[0] + U[1]*U[1] + U[2]*U[2]);
+    dv = sqrt(V[0]*V[0] + V[1]*V[1] + V[2]*V[2]);
+    if (du < 1e-6 || dv < 1e-6) return 0;
+    for (k = 0; k < 3; k++) { U[k] /= du; V[k] /= dv; }
+    if (fabs(U[0]*V[0] + U[1]*V[1] + U[2]*V[2]) > 1e-3) return 0;
+    if (fabs(W[0]*W[0] + W[1]*W[1] + W[2]*W[2] - 1.0) > 1e-3) return 0;
+    *lu = du; *lv = dv;
+    return 1;
+}
+
+/* Where volume `s` sits in that basis: its bounding box in u and v, and how far
+ * it reaches along the face normal. The solid is the face swept back along -n
+ * by `depth`, so eight corners describe it exactly. */
+static void aug_solid_extent(const sh_aug_platform *s, const double o[3],
+                             const double U[3], const double V[3], const double W[3],
+                             aug_rect2 *uv, double *w0, double *w1)
+{
+    int i, k;
+    for (i = 0; i < 8; i++) {
+        double p[3], du, dv, dw;
+        for (k = 0; k < 3; k++)
+            p[k] = (double)s->c[i & 3][k]
+                 - (i < 4 ? 0.0 : (double)s->depth * s->n[k]) - o[k];
+        du = p[0]*U[0] + p[1]*U[1] + p[2]*U[2];
+        dv = p[0]*V[0] + p[1]*V[1] + p[2]*V[2];
+        dw = p[0]*W[0] + p[1]*W[1] + p[2]*W[2];
+        if (i == 0) {
+            uv->u0 = uv->u1 = du; uv->v0 = uv->v1 = dv; *w0 = *w1 = dw;
+        } else {
+            if (du < uv->u0) uv->u0 = du;
+            if (du > uv->u1) uv->u1 = du;
+            if (dv < uv->v0) uv->v0 = dv;
+            if (dv > uv->v1) uv->v1 = dv;
+            if (dw < *w0) *w0 = dw;
+            if (dw > *w1) *w1 = dw;
+        }
+    }
+}
+
+/* Turn every requested face into the pieces of it a demon can actually stand
+ * on. Returns how many entries were written to `work`; each one records which
+ * request it came from, and a request every other volume buries is written back
+ * once with `buried` set so the author still gets told why. */
+static int aug_expand_solids(const aug_ctx *c, const sh_aug_platform *src, int n,
+                             sh_aug_platform *work, int *wsrc, unsigned char *wburied,
+                             int *wpieces, int cap, int *truncated)
+{
+    double keep = c->radius > 0.0 ? 2.0 * (double)c->radius : 1.0;
+    int i, nw = 0;
+
+    for (i = 0; i < n && nw < cap; i++) {
+        aug_rect2 pieces[AUG_MAX_PIECES], next[AUG_MAX_PIECES * 4];
+        double o[3], U[3], V[3], W[3], lu, lv;
+        int np = 1, j, k = 0, whole;
+
+        if (!aug_face_basis(&src[i], o, U, V, W, &lu, &lv)) {
+            work[nw] = src[i]; wsrc[nw] = i; wburied[nw] = 0; wpieces[nw] = 1; nw++;
+            continue;
+        }
+        pieces[0].u0 = 0.0; pieces[0].v0 = 0.0; pieces[0].u1 = lu; pieces[0].v1 = lv;
+
+        for (j = 0; j < n && np > 0; j++) {
+            aug_rect2 b;
+            double w0, w1;
+            int nn = 0;
+            if (j == i || src[j].depth <= 0.0f) continue;
+            aug_solid_extent(&src[j], o, U, V, W, &b, &w0, &w1);
+            /* Entirely at or below the surface: it is what we are standing on,
+             * or it is under us. Entirely above a demon's head: it is a ceiling,
+             * and aug_headroom has already measured it. */
+            if (w1 <= AUG_TOUCH_EPS) continue;
+            if (w0 >= (double)c->height) continue;
+            for (k = 0; k < np; k++) {
+                aug_rect2 got[4];
+                int g = aug_rect2_subtract(&pieces[k], &b, got), t;
+                for (t = 0; t < g; t++) {
+                    if (got[t].u1 - got[t].u0 < keep) continue;
+                    if (got[t].v1 - got[t].v0 < keep) continue;
+                    if (nn < AUG_MAX_PIECES * 4) next[nn++] = got[t];
+                }
+            }
+            /* Too many slivers to carry. Keep the biggest, and say so rather
+             * than let a silently shortened list read as a complete bake. */
+            if (nn > AUG_MAX_PIECES) {
+                int x, y;
+                for (x = 1; x < nn; x++) {
+                    aug_rect2 key = next[x];
+                    double ka = aug_rect2_area(&key);
+                    for (y = x - 1; y >= 0 && aug_rect2_area(&next[y]) < ka; y--)
+                        next[y + 1] = next[y];
+                    next[y + 1] = key;
+                }
+                nn = AUG_MAX_PIECES;
+                *truncated = 1;
+            }
+            for (k = 0; k < nn; k++) pieces[k] = next[k];
+            np = nn;
+        }
+
+        if (np <= 0) {
+            work[nw] = src[i]; wsrc[nw] = i; wburied[nw] = 1; wpieces[nw] = 0; nw++;
+            continue;
+        }
+        /* Untouched: hand back the ORIGINAL corners, not a rebuild of them, so
+         * a face nothing intersects is bit-for-bit what the author placed. */
+        whole = (np == 1 && pieces[0].u0 <= 1e-6 && pieces[0].v0 <= 1e-6 &&
+                 pieces[0].u1 >= lu - 1e-6 && pieces[0].v1 >= lv - 1e-6);
+        if (whole) {
+            work[nw] = src[i]; wsrc[nw] = i; wburied[nw] = 0; wpieces[nw] = 1; nw++;
+            continue;
+        }
+        for (k = 0; k < np && nw < cap; k++) {
+            static const int SU[4] = { 0, 1, 1, 0 };
+            static const int SV[4] = { 0, 0, 1, 1 };
+            int q, ax;
+            work[nw] = src[i];
+            for (q = 0; q < 4; q++) {
+                double u = SU[q] ? pieces[k].u1 : pieces[k].u0;
+                double v = SV[q] ? pieces[k].v1 : pieces[k].v0;
+                for (ax = 0; ax < 3; ax++)
+                    work[nw].c[q][ax] = (float)(o[ax] + u * U[ax] + v * V[ax]);
+            }
+            _snprintf_s(work[nw].name, sizeof work[nw].name, _TRUNCATE,
+                        "%.40s [%d/%d]", src[i].name, k + 1, np);
+            wsrc[nw] = i; wburied[nw] = 0; wpieces[nw] = np; nw++;
+        }
+        if (k < np) *truncated = 1;
+    }
+    if (i < n) *truncated = 1;
+    return nw;
+}
+
 /* ---- the driver -------------------------------------------------------- */
 
 int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
@@ -2273,7 +2477,10 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     aug_peer peers[SH_AUG_MAX_PLATFORMS];
     unsigned char entry_ok[SH_AUG_MAX_PLATFORMS];
     float mins[3], maxs[3], fw, fd;
-    int i, j, k, nmade = 0;
+    int i, j, k, nmade = 0, rc;
+    sh_aug_platform *work = NULL;
+    int *wsrc = NULL, *wpieces = NULL;
+    unsigned char *wburied = NULL;
 
     if (!a || !out) return 0;
     memset(out, 0, sizeof *out);
@@ -2294,6 +2501,27 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     sh_aas_agent_bounds(a, mins, maxs);
     fw = maxs[0] - mins[0];
     fd = maxs[1] - mins[1];
+
+    /* Marked volumes intersect each other, so what an author asked for and what
+     * a demon can stand on are not the same set of shapes. Everything below runs
+     * on the PIECES, not on the requests -- see aug_expand_solids. Heap, not
+     * stack: this loads on the same thread the rest of the bake does. */
+    work    = (sh_aug_platform *)HeapAlloc(GetProcessHeap(), 0,
+                                           SH_AUG_MAX_PLATFORMS * sizeof *work);
+    wsrc    = (int *)HeapAlloc(GetProcessHeap(), 0, SH_AUG_MAX_PLATFORMS * sizeof *wsrc);
+    wpieces = (int *)HeapAlloc(GetProcessHeap(), 0, SH_AUG_MAX_PLATFORMS * sizeof *wpieces);
+    wburied = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, SH_AUG_MAX_PLATFORMS);
+    if (!work || !wsrc || !wpieces || !wburied) {
+        if (work) HeapFree(GetProcessHeap(), 0, work);
+        if (wsrc) HeapFree(GetProcessHeap(), 0, wsrc);
+        if (wpieces) HeapFree(GetProcessHeap(), 0, wpieces);
+        if (wburied) HeapFree(GetProcessHeap(), 0, wburied);
+        return 0;                       /* nothing has been written yet */
+    }
+    out->source_count = n;
+    n = aug_expand_solids(&c, plats, n, work, wsrc, wburied, wpieces,
+                          SH_AUG_MAX_PLATFORMS, &out->pieces_truncated);
+    plats = work;
 
     out->areas_before = sh_aas_count(a, SH_AAS_L_AREAS);
     out->reach_before = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
@@ -2328,6 +2556,19 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         memcpy(pr->name, p->name, sizeof pr->name);
         pr->name[sizeof pr->name - 1] = 0;
         pr->area = -1;
+        pr->source = wsrc[idx];
+        pr->pieces = wpieces[idx];
+        if (wburied[idx]) {
+            /* Every part of this face is inside another marked volume, so there
+             * is nowhere on it a demon could be standing. Refused with its own
+             * reason rather than left to fail some later gate for the wrong
+             * cause -- an author who stacked two boxes flush needs to be told
+             * that, not told their box is "too small". */
+            _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
+                        "completely inside the other volumes around it -- no "
+                        "part of this face is standing room");
+            continue;
+        }
         pr->carrier = -1;
 
         pr->tilt_degrees = (float)aug_degrees_from_horizontal(p->n[2]);
@@ -2440,6 +2681,12 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         pr->emitted = 1;
         pr->area = area;
         pr->carrier = carrier;
+        {
+            double mx = (eff.x0 + eff.x1) / 2.0, my = (eff.y0 + eff.y1) / 2.0;
+            pr->centre[0] = (float)mx;
+            pr->centre[1] = (float)my;
+            pr->centre[2] = (float)aug_z_at(&eff, mx, my);
+        }
         effs[nmade] = eff;
         reqs[nmade] = req;
         made[nmade] = area;
@@ -2521,6 +2768,37 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                 HeapFree(GetProcessHeap(), 0, specs);
             }
         }
+        /* THE DEAD ZONE.
+         *
+         * A demon steps up to maxStepHeight and jumps no shorter than the
+         * shortest jump_forward animation the game ships -- 149 units. A gap
+         * between those two is crossable by neither, so the two platforms stay
+         * unlinked no matter what the linkers try. That is geometry, not a bug,
+         * but it is invisible: both platforms are emitted, both reach the floor,
+         * neither reads as an island, and the author is left wondering why
+         * demons will not walk from one to the other. Counted here so the bake
+         * line can say it. */
+        for (i = 0; i < nmade; i++) {
+            for (j = i + 1; j < nmade; j++) {
+                double gap = aug_quad_gap(&reqs[i], &reqs[j]);
+                unsigned r, nr;
+                int linked = 0;
+                if (gap <= AUG_TOUCH_EPS || gap >= (double)SH_TRAV_LEAP_MIN_SPAN)
+                    continue;
+                nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+                for (r = 0; r < nr && !linked; r++) {
+                    const unsigned char *rr =
+                        sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, r);
+                    int f, t;
+                    if (!rr) continue;
+                    f = (int)sh_aas_get_u16(rr, RE_FROM_AREA);
+                    t = (int)sh_aas_get_u16(rr, RE_TO_AREA);
+                    if ((f == made[i] && t == made[j]) ||
+                        (f == made[j] && t == made[i])) linked = 1;
+                }
+                if (!linked) out->dead_gaps++;
+            }
+        }
         aug_relink(&c);
     }
 
@@ -2587,7 +2865,12 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     out->depth_after = sh_aas_tree_depth(a);
     out->depth_exceeded = out->depth_after > (unsigned)SH_AAS_MAX_DEPTH;
 
-    return c.failed ? 0 : 1;
+    rc = c.failed ? 0 : 1;
+    HeapFree(GetProcessHeap(), 0, work);
+    HeapFree(GetProcessHeap(), 0, wsrc);
+    HeapFree(GetProcessHeap(), 0, wpieces);
+    HeapFree(GetProcessHeap(), 0, wburied);
+    return rc;
 }
 
 #ifdef SH_AUG_TESTING
