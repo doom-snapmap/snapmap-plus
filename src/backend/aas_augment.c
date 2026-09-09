@@ -2470,17 +2470,18 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
 {
     static const sh_aug_opts defaults = { SH_AUG_FALL_AUTO, 1, 0 };
     aug_ctx c;
-    int order[SH_AUG_MAX_PLATFORMS];
-    int made[SH_AUG_MAX_PLATFORMS];
-    aug_quad effs[SH_AUG_MAX_PLATFORMS];
-    aug_quad reqs[SH_AUG_MAX_PLATFORMS];
-    aug_peer peers[SH_AUG_MAX_PLATFORMS];
-    unsigned char entry_ok[SH_AUG_MAX_PLATFORMS];
+    /* HEAP, not stack. Two aug_quad arrays alone are 160 KB at the platform
+     * cap, and this runs on the map loader's thread beside everything else the
+     * bake needs -- a stack that only just fits is one platform away from not
+     * fitting. One block, one free, so the single exit stays single. */
+    int *order = NULL, *made = NULL, *wsrc = NULL, *wpieces = NULL;
+    aug_quad *effs = NULL, *reqs = NULL;
+    aug_peer *peers = NULL;
+    unsigned char *entry_ok = NULL, *wburied = NULL;
+    sh_aug_platform *work = NULL;
+    unsigned char *block = NULL;
     float mins[3], maxs[3], fw, fd;
     int i, j, k, nmade = 0, rc;
-    sh_aug_platform *work = NULL;
-    int *wsrc = NULL, *wpieces = NULL;
-    unsigned char *wburied = NULL;
 
     if (!a || !out) return 0;
     memset(out, 0, sizeof *out);
@@ -2506,17 +2507,24 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
      * a demon can stand on are not the same set of shapes. Everything below runs
      * on the PIECES, not on the requests -- see aug_expand_solids. Heap, not
      * stack: this loads on the same thread the rest of the bake does. */
-    work    = (sh_aug_platform *)HeapAlloc(GetProcessHeap(), 0,
-                                           SH_AUG_MAX_PLATFORMS * sizeof *work);
-    wsrc    = (int *)HeapAlloc(GetProcessHeap(), 0, SH_AUG_MAX_PLATFORMS * sizeof *wsrc);
-    wpieces = (int *)HeapAlloc(GetProcessHeap(), 0, SH_AUG_MAX_PLATFORMS * sizeof *wpieces);
-    wburied = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, SH_AUG_MAX_PLATFORMS);
-    if (!work || !wsrc || !wpieces || !wburied) {
-        if (work) HeapFree(GetProcessHeap(), 0, work);
-        if (wsrc) HeapFree(GetProcessHeap(), 0, wsrc);
-        if (wpieces) HeapFree(GetProcessHeap(), 0, wpieces);
-        if (wburied) HeapFree(GetProcessHeap(), 0, wburied);
-        return 0;                       /* nothing has been written yet */
+    {
+        size_t nmax = SH_AUG_MAX_PLATFORMS;
+        size_t need = nmax * (sizeof *work + sizeof *effs + sizeof *reqs +
+                              sizeof *peers + 4 * sizeof(int) + 2);
+        unsigned char *at;
+        block = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, need);
+        if (!block) return 0;           /* nothing has been written yet */
+        at = block;
+        work     = (sh_aug_platform *)at; at += nmax * sizeof *work;
+        effs     = (aug_quad *)at;        at += nmax * sizeof *effs;
+        reqs     = (aug_quad *)at;        at += nmax * sizeof *reqs;
+        peers    = (aug_peer *)at;        at += nmax * sizeof *peers;
+        order    = (int *)at;             at += nmax * sizeof(int);
+        made     = (int *)at;             at += nmax * sizeof(int);
+        wsrc     = (int *)at;             at += nmax * sizeof(int);
+        wpieces  = (int *)at;             at += nmax * sizeof(int);
+        entry_ok = at;                    at += nmax;
+        wburied  = at;
     }
     out->source_count = n;
     n = aug_expand_solids(&c, plats, n, work, wsrc, wburied, wpieces,
@@ -2866,10 +2874,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     out->depth_exceeded = out->depth_after > (unsigned)SH_AAS_MAX_DEPTH;
 
     rc = c.failed ? 0 : 1;
-    HeapFree(GetProcessHeap(), 0, work);
-    HeapFree(GetProcessHeap(), 0, wsrc);
-    HeapFree(GetProcessHeap(), 0, wpieces);
-    HeapFree(GetProcessHeap(), 0, wburied);
+    HeapFree(GetProcessHeap(), 0, block);
     return rc;
 }
 
