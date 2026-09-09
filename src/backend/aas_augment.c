@@ -1851,41 +1851,18 @@ static int aug_emit_traversals(aug_ctx *c, aug_trav_spec *specs, int n)
 
     /* MODULES THAT ALREADY SHIP TRAVERSALS.
      *
-     * The predecessor of this block refused outright whenever the payload had
-     * any traversal points, on the stated grounds that no SnapMap module ships
-     * one. That is simply false: classic_90_climb -- this project's own donor --
-     * ships seven, wc_office_arena ships twenty-seven, and 312 of 696 extracted
-     * payloads carry traversal animation names. The blanket refusal therefore
-     * silently produced ZERO climbs and ZERO leaps on roughly half of all
-     * modules, and the author was told "nothing can climb that high", which was
-     * not the reason.
-     *
-     * What actually has to hold is narrower. The per-area ownership pass at the
-     * bottom rebuilds first/num for every area by scanning the whole array, so
-     * pre-existing points are fine in themselves -- but each area's points must
-     * stay CONTIGUOUS, and we append ours at the end. That is sound exactly when
-     * no area we write a point for already owns points somewhere earlier.
-     *
-     * Our platform areas are brand new and own nothing. The only real hazard is
-     * an existing area we climb FROM -- typically the module floor. So test that
-     * one condition instead of refusing everything. */
-    {
-        unsigned na0 = sh_aas_count(c->a, SH_AAS_L_AREAS);
-        for (k = 0; k < n; k++) {
-            const unsigned char *ar;
-            if (specs[k].from_area < 0 || (unsigned)specs[k].from_area >= na0) continue;
-            ar = sh_aas_rec_const(c->a, SH_AAS_L_AREAS, (unsigned)specs[k].from_area);
-            if (ar && sh_aas_get_u16(ar, AR_NUM_TRAV_POINT) > 0) {
-                /* Interleaving with an existing run would need the whole array
-                 * regrouped and every index that points into it rewritten. That
-                 * is a real change to records whose ordering semantics are not
-                 * fully recovered, so it is refused -- but REPORTED, so the
-                 * islands are not blamed on the geometry. */
-                c->rep->climbs_declined = 1;
-                return 0;
-            }
-        }
-    }
+     * The predecessor of this block declined the whole set whenever a spec's
+     * from_area already owned traversal points, so an intersecting platform on
+     * any of the 312 of 696 extracted payloads that ship traversals came out an
+     * island. The constraint it protected -- each area's points contiguous,
+     * because first_trav_point/num_trav_point partition the array -- is real,
+     * but it is restored by REGROUPING: after appending, the whole array is
+     * stably reordered by from-area and the partition rebuilt. That is safe
+     * because exactly two things index traversalPoints, and both survive a
+     * reorder: the per-area partition (rebuilt below from w34) and each point's
+     * own d28, which points OUT of the array at a reachability that does not
+     * move. Shipped payloads are already grouped by ascending from-area, so the
+     * regrouped layout is the shipped layout. */
 
     /* Animation names, deduplicated by path. */
     for (k = 0; k < n; k++) {
@@ -1966,6 +1943,37 @@ static int aug_emit_traversals(aug_ctx *c, aug_trav_spec *specs, int n)
         sh_aas_put_u16(tp, TP_W38, TP_W38_VALUE);
         sh_aas_put_u16(tp, TP_W3A, 0);
         written++;
+    }
+
+    /* REGROUP: stable insertion sort of records 1..np-1 by from-area, so each
+     * area's points are one contiguous run whatever the payload already owned.
+     * Record 0 is the engine-mandated dummy and stays put. Stability keeps the
+     * shipped points' relative order and our own per-demon order. Shipped
+     * arrays are already grouped ascending, so this is near-linear in
+     * practice. */
+    {
+        unsigned np = sh_aas_count(c->a, SH_AAS_L_TRAVERSALPOINTS);
+        size_t rs = sh_aas_record_size(SH_AAS_L_TRAVERSALPOINTS);
+        unsigned char hold[64];
+        unsigned m, q;
+        if (rs <= sizeof hold) {
+            for (m = 2; m < np; m++) {
+                unsigned char *cur = sh_aas_rec(c->a, SH_AAS_L_TRAVERSALPOINTS, m);
+                unsigned owner;
+                if (!cur) continue;
+                owner = sh_aas_get_u16(cur, TP_W34);
+                memcpy(hold, cur, rs);
+                q = m;
+                while (q > 1) {
+                    unsigned char *prev = sh_aas_rec(c->a, SH_AAS_L_TRAVERSALPOINTS, q - 1);
+                    if (!prev || sh_aas_get_u16(prev, TP_W34) <= owner) break;
+                    memcpy(sh_aas_rec(c->a, SH_AAS_L_TRAVERSALPOINTS, q), prev, rs);
+                    q--;
+                }
+                if (q != m)
+                    memcpy(sh_aas_rec(c->a, SH_AAS_L_TRAVERSALPOINTS, q), hold, rs);
+            }
+        }
     }
 
     /* Per-area ownership of the point range. Record 0 is the dummy and belongs
@@ -2115,6 +2123,142 @@ static double aug_headroom(aug_ctx *c, const aug_quad *p,
     return best;
 }
 
+/* Can anything ever get ONTO each requested platform?
+ *
+ * A platform is entered only across its edges -- step, climb and leap links all
+ * hang off edge segments -- so a platform whose every lip either hangs past the
+ * module's walkable floor or is buried behind the volumes it stands among can
+ * never be reached, no matter what the linkers do. Emitting it anyway is the
+ * emitted-but-unroutable failure that leaves demons standing still, and worse,
+ * TWO such platforms that touch each other link to each other and stop even
+ * reading as islands -- which is exactly the wc_coupler_256 overlap case, two
+ * 400-wide slabs on a 336-wide floor, each reaching only the other. So entry is
+ * decided over the whole REQUEST up front, before anything is carved.
+ *
+ * A platform has FLOOR ENTRY when some edge sample faces walkable module floor
+ * at or below its lip -- discovered with aug_edge_segments' own probe, at the
+ * same offset and lip height, so a shape the linkers can enter is never refused
+ * here. An edge sample that instead faces ANOTHER volume this bake will emit is
+ * not floor entry: that is peer adjacency, and it is settled by the spread pass,
+ * which joins any two would-be areas within the longest shipped leap. Entry then
+ * propagates along those pairs. Only a volume that will actually be emitted can
+ * shadow a floor probe -- a request refused for its shape (no footprint, too
+ * steep, too small, too little headroom, out of range) is not built and is not
+ * an obstacle, which is why a floor-standing solid refused for headroom does not
+ * strand the floating slab that overlaps it.
+ *
+ * The prediction errs toward admitting: it uses only the carve-independent shape
+ * gates, not the carrier or splice checks, so an admitted platform the linkers
+ * still cannot join comes out a reported island exactly as before -- never a
+ * silent one. On allocation failure every platform is admitted, the behaviour
+ * this replaces. */
+static void aug_entry_flood(aug_ctx *c, const sh_aug_platform *plats, int n,
+                            unsigned char *reachable)
+{
+    aug_quad *q;
+    unsigned char *emit;        /* will this request clear the shape gates? */
+    float mins[3], maxs[3], fw, fd, minw;
+    int i, j, changed;
+
+    for (i = 0; i < n; i++) reachable[i] = 1;               /* fail open */
+    if (n <= 0) return;
+    q = (aug_quad *)HeapAlloc(GetProcessHeap(), 0,
+                              (size_t)n * sizeof *q + (size_t)n);
+    if (!q) return;
+    emit = (unsigned char *)(q + n);
+    sh_aas_agent_bounds(c->a, mins, maxs);
+    fw = maxs[0] - mins[0];
+    fd = maxs[1] - mins[1];
+    minw = fw < fd ? fw : fd;
+
+    /* The peer set: the request gates that DECIDE emission and do not need the
+     * tree mutated -- the driver's shape checks plus its carrier probe, in the
+     * same order. A request that fails any of them is not built and cannot
+     * shadow another platform's floor. The one thing left out is a splice that
+     * fails after the carve, which the carrier probe already guarantees will
+     * not happen. The carrier probe is read against the ORIGINAL tree, so a
+     * platform stacked on ANOTHER generated one reads carrier-less here and is
+     * left fail-open (emit stays 0, reachable stays 1); the driver's own carrier
+     * check builds it. That is only ever a missed shadow, never a false refusal,
+     * because such a platform is carried and therefore reachable regardless. */
+    for (i = 0; i < n; i++) {
+        aug_quad eff;
+        double mx, my;
+        emit[i] = 0;
+        if (!aug_quad_from_platform(&q[i], &plats[i])) continue;
+        if ((double)plats[i].n[2] < c->min_floor_cos) continue;
+        if (!aug_quad_inset(&q[i], c->radius, &eff) ||
+            aug_quad_min_width(&eff) < (double)minw) continue;
+        if (aug_headroom(c, &q[i], plats, n, i) < (double)c->height) continue;
+        if (eff.x0 <= AUG_INT16_LO || eff.x1 >= AUG_INT16_HI ||
+            eff.y0 <= AUG_INT16_LO || eff.y1 >= AUG_INT16_HI ||
+            aug_quad_min_z(&eff) <= AUG_INT16_LO ||
+            aug_quad_max_z(&eff) >= AUG_INT16_HI) continue;
+        mx = (eff.x0 + eff.x1) / 2.0;
+        my = (eff.y0 + eff.y1) / 2.0;
+        if (sh_aas_point_area(c->a, (float)mx, (float)my,
+                              (float)aug_z_at(&eff, mx, my)) <= 0) continue;
+        emit[i] = 1;
+    }
+
+    for (i = 0; i < n; i++) {
+        int e, entry = 0;
+        if (!emit[i]) continue;         /* its own shape refusal speaks for it */
+        for (e = 0; e < 4 && !entry; e++) {
+            double in2[2], out2[2], ts[32];
+            int cnt, k, e1 = (e + 1) & 3;
+            aug_edge_normal_in(&q[i], e, in2);
+            out2[0] = -in2[0];
+            out2[1] = -in2[1];
+            cnt = aug_samples_unit(ts, 32);
+            for (k = 0; k < cnt && !entry; k++) {
+                double t = ts[k];
+                double ex = q[i].c[e][0] + t * (q[i].c[e1][0] - q[i].c[e][0]);
+                double ey = q[i].c[e][1] + t * (q[i].c[e1][1] - q[i].c[e][1]);
+                double nz = aug_z_at(&q[i], ex, ey);
+                double px = ex + out2[0] * AUG_TOUCH_EPS;
+                double py = ey + out2[1] * AUG_TOUCH_EPS;
+                int jj, bi, shadowed = 0;
+                float tb[6];
+                /* Facing another volume this bake will build is peer adjacency,
+                 * not floor entry: aug_edge_segments takes the peer over the
+                 * module floor in exactly this test, and the spread pass carries
+                 * entry across the pair. A refused request is not built and does
+                 * not shadow. */
+                for (jj = 0; jj < n; jj++) {
+                    if (jj == i || !emit[jj]) continue;
+                    if (aug_quad_contains_xy(&q[jj], px, py)) { shadowed = 1; break; }
+                }
+                if (shadowed) continue;
+                bi = sh_aas_point_area(c->a,
+                                       (float)(ex + out2[0] * REACH_SIDE_OFFSET),
+                                       (float)(ey + out2[1] * REACH_SIDE_OFFSET),
+                                       (float)nz);
+                if (bi > 0 && aug_area_box(c->a, (unsigned)bi, tb) &&
+                    (double)tb[5] <= nz + (double)c->step) entry = 1;
+            }
+        }
+        reachable[i] = (unsigned char)entry;
+    }
+
+    do {
+        changed = 0;
+        for (i = 0; i < n; i++) {
+            if (reachable[i] || !emit[i]) continue;
+            for (j = 0; j < n; j++) {
+                if (j == i || !reachable[j] || !emit[j]) continue;
+                if (aug_quad_gap(&q[i], &q[j]) <= (double)SH_TRAV_LEAP_MAX_SPAN) {
+                    reachable[i] = 1;
+                    changed = 1;
+                    break;
+                }
+            }
+        }
+    } while (changed);
+
+    HeapFree(GetProcessHeap(), 0, q);
+}
+
 /* ---- the driver -------------------------------------------------------- */
 
 int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
@@ -2127,6 +2271,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     aug_quad effs[SH_AUG_MAX_PLATFORMS];
     aug_quad reqs[SH_AUG_MAX_PLATFORMS];
     aug_peer peers[SH_AUG_MAX_PLATFORMS];
+    unsigned char entry_ok[SH_AUG_MAX_PLATFORMS];
     float mins[3], maxs[3], fw, fd;
     int i, j, k, nmade = 0;
 
@@ -2154,6 +2299,11 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     out->reach_before = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
     out->depth_before = sh_aas_tree_depth(a);
     out->platform_count = n;
+
+    /* Entry is decided over the whole request before anything is carved: the
+     * lumps are append-only, so a platform found unreachable after its splice
+     * could no longer be taken back. */
+    aug_entry_flood(&c, plats, n, entry_ok);
 
     /* Lowest first, so a platform that carries another is already in the tree
      * when the one above it looks for its carrier. */
@@ -2250,6 +2400,23 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
             _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
                         "nothing walkable under the middle of it -- this box "
                         "hangs over space the module has no floor in");
+            continue;
+        }
+        /* NOTHING CAN EVER GET ONTO IT.
+         *
+         * Every edge either hangs past the module's walkable floor or is
+         * covered by another volume, and no volume it touches reaches the
+         * floor either -- so whatever the linkers try, the result is an area
+         * demons can be told to reach and never arrive at. That is the
+         * stand-still-and-shoot failure, and unlike a mere island it can hide:
+         * two such volumes link to EACH OTHER and stop reading as islands at
+         * all. Refused here, before the carve, because the carve cannot be
+         * taken back. */
+        if (!entry_ok[idx]) {
+            _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
+                        "nothing can get onto it: every edge hangs past the "
+                        "module's walkable floor or into another volume, and "
+                        "no touching volume reaches the floor either");
             continue;
         }
         area = aug_add_area(&c, &eff, carrier);
