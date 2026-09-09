@@ -1211,5 +1211,12 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 78 FF FF FF "
       "48 81 EC 88 01 00 00 48 C7 44 24 30 FE FF FF FF",
       0x1806100u },
+    { "WeaponHudModeCall", /* The ammo widget's mode call and declaration guard.
+                             * Verified independently on Vulkan and OpenGL. No
+                             * pinned-build fallback: resolve uniquely by content. */
+      "E8 ?? ?? ?? ?? 84 C0 74 45 48 8B 83 F8 01 00 00 48 85 C0 74 09 "
+      "80 B8 41 06 00 00 00 75 30", 0 },
+    { "WeaponHudGameMode", /* bool(game*); separately verifies the decoded call target. */
+      "48 8B 81 38 53 04 00 83 78 18 01 0F 94 C0 C3", 0 },
     { NULL, NULL, 0 }   /* terminator */
 };

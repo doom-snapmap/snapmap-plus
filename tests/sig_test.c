@@ -94,7 +94,7 @@ int main(int argc, char **argv)
                          results[i].status == SIG_AMBIGUOUS ? "AMBIG" : "BAD";
         uint32_t known = BACKEND_ENGINE_SIGNATURES[i].known_rva;
         int unique = (results[i].status == SIG_OK);
-        int rva_ok = pinned ? (unique && results[i].rva == known) : unique;
+        int rva_ok = pinned && known ? (unique && results[i].rva == known) : unique;
         if (!rva_ok) bad++;
         if (pinned) {
             printf("%s %-20s resolved=0x%-9x known=0x%-9x %s\n",

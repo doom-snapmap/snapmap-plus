@@ -41,6 +41,7 @@ typedef struct sh_patch_handle {
     size_t    len;                       /* how many bytes were saved/overwritten */
     uint32_t  old_protect;               /* the page protection before we touched it */
     int       live;                      /* 1 = patched (restorable), 0 = not / already reverted */
+    int       atomic_rel32;              /* E8 operand changed with one aligned interlocked store */
 } sh_patch_handle;
 
 /* Status codes for the patch ops. */
@@ -87,6 +88,14 @@ sh_patch_status code_unpatch(sh_patch_handle *handle);
  * On a clean hit it patches at r->addr (+ optional `expect` byte-recheck, may be NULL). */
 sh_patch_status code_patch_sig(const sig_result *r, const uint8_t *expect, const uint8_t *new_bytes,
                                size_t len, sh_patch_handle *out_handle);
+
+/* Redirect an existing E8 call without changing its opcode. The four-byte
+ * displacement MUST be aligned. Validate the complete call and publish its
+ * operand with a compare-exchange, so concurrent execution cannot see a torn
+ * displacement. The destination must be fully initialized before this call.
+ * The caller owns destination lifetime until all users have finished. */
+sh_patch_status code_patch_call_sig(const sig_result *r, const uint8_t expect[5],
+                                    const uint8_t replacement[5], sh_patch_handle *handle);
 
 /* ---- detour family: REUSE hook.c's inline-detour installer (NOT reimplemented) ---------------------
  *

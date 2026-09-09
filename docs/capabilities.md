@@ -4,6 +4,14 @@ What the clone does, grouped by kind. This is the user-facing feature inventory;
 fit together see [`architecture.md`](architecture.md), and for the intentionally-faithful quirks
 see [`fidelity.md`](fidelity.md).
 
+## Package weapon HUD settings
+
+Override packages can supply `hud/weapons.json` to select engine-default or
+weapon-capacity ammo presentation for exact weapon declarations. Unlimited
+capacity can use the existing infinity symbol and full ammo bar in SnapMap;
+finite capacity remains numeric. This changes presentation only and requires
+Snapmap+ on the displaying client. See [the schema and installation rules](weapon-hud.md).
+
 ## Console commands
 
 Registered with the engine command system; run from the DOOM console.

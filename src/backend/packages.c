@@ -45,14 +45,6 @@ int sh_package_subdir(const sh_package *package, const char *subdirectory,
                        package->root, subdirectory) >= 0;
 }
 
-static int pk_is_directory(const char *path)
-{
-    DWORD attributes = g_get_attributes(path);
-    return attributes != INVALID_FILE_ATTRIBUTES &&
-           (attributes & FILE_ATTRIBUTE_DIRECTORY) &&
-           !(attributes & FILE_ATTRIBUTE_REPARSE_POINT);
-}
-
 static int pk_is_file(const char *path)
 {
     DWORD attributes = g_get_attributes(path);
@@ -193,6 +185,10 @@ static int pk_scan(const char *directory, const char *prefix, unsigned depth,
         }
         if (!pk_scan(child, name, depth + 1, out, capacity, count)) complete = 0;
     } while (g_find_next(search, &found));
+    /* FindNextFile also returns FALSE when enumeration was interrupted. Read
+     * its error before FindClose can overwrite it: a partial package set is
+     * not a complete snapshot, even if earlier entries were admitted. */
+    if (GetLastError() != ERROR_NO_MORE_FILES) complete = 0;
     g_find_close(search);
     return complete;
 }
@@ -201,13 +197,20 @@ int sh_packages_enumerate(const char *data_root, sh_package *out, size_t capacit
                           size_t *count)
 {
     char overrides[MAX_PATH];
+    DWORD attributes;
     int complete;
 
     if (count) *count = 0;
     if (!data_root || !data_root[0] || !out || capacity == 0 || !count) return 0;
     if (_snprintf_s(overrides, sizeof(overrides), _TRUNCATE, "%s%s",
                     data_root, PK_OVERRIDES_SUFFIX) < 0) return 0;
-    if (!pk_is_directory(overrides)) return 1;   /* nothing installed yet */
+    attributes = g_get_attributes(overrides);
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        DWORD error = GetLastError();
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    }
+    if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return 0;
 
     complete = pk_scan(overrides, "", 0, out, capacity, count);
     pk_sort(out, *count);

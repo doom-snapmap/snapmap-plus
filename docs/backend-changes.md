@@ -6,6 +6,21 @@ where our own reimplementation was wrong, not the original SnapHak's behavior; a
 (or faithful reproduction of) the *original's* behavior belongs in [`fidelity.md`](fidelity.md)
 instead. Entries are chronological, newest first.
 
+## 2026-09-09 — Incomplete package discovery is refused
+
+Package enumeration now distinguishes end-of-directory from a failed next-entry
+read and distinguishes an absent overrides directory from inaccessible or
+malformed roots. Previously, a partial scan could report success and omit a
+conflicting package. Consumers requiring a complete snapshot, including weapon
+HUD policies, now receive a failure and retain their documented fallback.
+Injected enumeration tests cover failures after already discovering packages.
+
+The patch layer also supports redirecting an existing aligned E8 call by
+atomically replacing only its rel32 operand, with verified original bytes and
+atomic restoration. The weapon HUD uses this path rather than a multi-byte
+copy while native callers can be running. Its synthetic executable test keeps
+an unrelated caller active through installation and restoration.
+
 ## 2026-09-07 — Decl-edit commits moved onto DOOM's main thread (issue #61, step 2)
 
 **What changed.** Every kind=0 decl-edit — the SnapStack apply ops (`bss`/`bsi`/`bsf`/`bsb`/`bse`/

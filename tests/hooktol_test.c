@@ -110,7 +110,8 @@ int main(int argc, char **argv)
                    good ? "OK " : "BAD", name, (int)results[i].status, results[i].rva);
         } else {
             int good = (results[i].status == SIG_OK &&
-                        results[i].rva == BACKEND_ENGINE_SIGNATURES[i].known_rva);
+                        (!BACKEND_ENGINE_SIGNATURES[i].known_rva ||
+                         results[i].rva == BACKEND_ENGINE_SIGNATURES[i].known_rva));
             if (!good) {
                 fail++;
                 printf("BAD %-20s status=%d rva=0x%-9x (expected clean SIG_OK@known)\n",

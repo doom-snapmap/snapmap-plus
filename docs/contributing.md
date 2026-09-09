@@ -174,6 +174,8 @@ By default this compiles and runs 42 **self-contained native tests** (no game ne
 - **`strids_packages_test`** — a package shipping its own `#str_` strings: user beats packages beats baked.
 - **`resource_bridge_test`** — manifest resolution, sparse archive decode, the provider gate, and collisions.
 - **`package_requirements_test`** — allowlisted package cvars, strict parsing, and the one-shot apply.
+- **`weapon_hud_test`** — weapon display policy parsing, duplicate/conflict refusal,
+  bounded admission, package removal, and an executable synthetic call-site relay.
 - **`decl_server_contract_test`** — startup ordering, signature pins, one-shot main-thread wiring, and fail-closed guards.
 - **`palette_refresh_test`** / **`palette_refresh_contract_test`** — new-decl success gating, exactly-once palette rebuild state, and clean signature/editor wiring.
 - **`engine_dialog_test`** — the native engine-dialog helper.
@@ -232,7 +234,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1 `
   -Doom C:\path\to\unpacked-DOOMx64vk.exe -DoomAlt C:\path\to\unpacked-DOOMx64.exe
 ```
 
-All 91 signatures and all 25 engine-globals anchors currently resolve uniquely on both images under this
+All 94 signatures and all 25 engine-globals anchors currently resolve uniquely on both images under this
 command.
 
 **Why uniqueness on both images is the actual bar.** A pattern that matches exactly once on one image tells
@@ -273,6 +275,11 @@ what catches it — hence "required" above.
 
 If you deliberately want to record an address from another build or the other executable (useful — we do
 it), label it as such in the comment rather than putting it in a field that means "the pinned image".
+
+An entry with `known_rva=0` explicitly has no pinned-build fallback. It must
+still resolve uniquely in both images; the tests skip only its nonexistent
+pinned-address comparison, not signature resolution. The weapon HUD entries
+use this form.
 
 A third test, `xinput_ordinal_test.c`, is a **runtime** cross-check of the XInput ordinal invariant — it loads
 a built DLL and calls its exports by ordinal. CI verifies that same invariant *statically* with `dumpbin` (the

@@ -31,6 +31,7 @@
 #include "strids.h"
 #include "overrides.h"
 #include "package_requirements.h"
+#include "weapon_hud.h"
 #include "navmesh.h"
 #include "nav_bake.h"   /* baked AI navigation served through the overrides shadow */
 #include "nav_play.h"   /* re-read the author's live marks before the Play build */
@@ -412,10 +413,12 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         {
             char override_root[MAX_PATH];
             void *buffer_cmd = (void *)sig_addr_by_name(results, db, "BufferCommandText");
-            if (sh_overrides_get_root(override_root, sizeof(override_root)))
+            if (sh_overrides_get_root(override_root, sizeof(override_root))) {
                 sh_package_requirements_install(override_root, g_doom_base, cmdsys, buffer_cmd,
                                                 sh_user_overrides_enabled_for_launch());
-            else
+                sh_weapon_hud_install(override_root, g_doom_base, results, db,
+                                      sh_user_overrides_enabled_for_launch());
+            } else
                 backend_log("package-requirements REFUSED: effective override root unavailable");
         }
 

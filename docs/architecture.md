@@ -248,6 +248,7 @@ overrides/cyberdemon/decls/<type>/<logical-name>.decl
 overrides/cyberdemon/resources/<name>.manifest
 overrides/cyberdemon/requirements/<name>.requirements
 overrides/cyberdemon/strings/<name>.json
+overrides/cyberdemon/hud/weapons.json
 overrides/cyberdemon/shaders/generated/spirv/<name>.{vspv,fspv,cspv}
 overrides/cyberdemon/shaders/generated/renderprogs/<name>_pc_vulkan.bin
 ```
@@ -304,6 +305,16 @@ removes the old tree only once every file is verified present at the new locatio
 
 That migration does not change which bytes the engine can be served, because the root file shadow below is a
 separate path from package resolution.
+
+### Weapon HUD policy
+
+Packages may declare exact weapon-to-ammo-display mappings in `hud/weapons.json`.
+The bounded, strictly parsed table is captured at startup and during package
+re-arm; identical requests compose and disagreements refuse the HUD table.
+One portable, verified ammo-widget call uses the table without modifying game
+mode, ammunition or declarations. It preserves engine behavior for unlisted
+weapons and when overrides are disabled or validation fails.
+See [weapon-hud.md](weapon-hud.md) for the schema, lifecycle and client limits.
 
 ### The file shadow resolves across packages too
 
