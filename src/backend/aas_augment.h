@@ -61,10 +61,19 @@
 #define SH_AUG_NAME_CAP        64
 #define SH_AUG_REASON_CAP      160
 
-/* One surface to make walkable, in the payload's own module-local space. */
+/* One surface to make walkable, in the payload's own module-local space: an
+ * ORIENTED CONVEX QUAD, four corners each with their own z, wound CLOCKWISE
+ * seen from +Z.
+ *
+ * Not a rect. A Blocking Box carries a full rotation, and 12.4% of the volumes
+ * in a real map are not upright, so the surface can be yawed, tilted, or a side
+ * face of a box lying down. `n` is the face's unit outward normal and `face` its
+ * OBB index -- 4 is an UPRIGHT box's top, which is what `side_face` compares
+ * against. */
 typedef struct sh_aug_platform {
-    float x0, y0, x1, y1;               /* rect, normalised */
-    float z;                            /* the walkable surface height */
+    float c[4][3];                      /* the face, CW seen from +Z */
+    float n[3];                         /* unit outward normal */
+    int   face;                         /* OBB face index; 4 == upright top */
     char  name[SH_AUG_NAME_CAP];        /* for the report only */
 } sh_aug_platform;
 
@@ -95,6 +104,10 @@ typedef struct sh_aug_platform_result {
     int      climbs;                    /* baked traversals touching it */
     int      demons;                    /* distinct demons offered a climb */
     int      island;                    /* 1 if nothing links it */
+    float    tilt_degrees;              /* the chosen face's angle from horizontal */
+    int      side_face;                 /* 1 if that face is not the box's top */
+    int      neighbours;                /* distinct areas this platform links to */
+    int      leaps;                     /* gap links touching it */
     char     reason[SH_AUG_REASON_CAP]; /* why it was not emitted */
 } sh_aug_platform_result;
 
@@ -105,6 +118,14 @@ typedef struct sh_aug_report {
     unsigned reach_before, reach_after;
     unsigned depth_before, depth_after;
     int      depth_exceeded;            /* past the loader's 0x80 limit */
+    int      links_truncated;           /* the traversal budget ran out; some
+                                         * platforms have fewer climbs and leaps
+                                         * than the geometry allows */
+    int      climbs_declined;           /* this module already owns traversal
+                                         * points on an area we would have
+                                         * climbed from, so no climb or leap was
+                                         * written at all -- the islands are ours,
+                                         * not the geometry's */
 } sh_aug_report;
 
 /* Augment `a` in place. Returns 1 if the model is still coherent (even if every
@@ -138,6 +159,18 @@ int sh_aug_test_trav_anchors(double lo, double hi, double *out, int cap);
 /* Cap the anchors tried per demon (1 = the old single-midpoint behaviour).
  * Returns the previous cap. 0 = uncapped. */
 int sh_aug_test_set_anchor_cap(int n);
+
+/* The quad geometry, through an opaque buffer: `aug_quad` is internal to the
+ * .c and the tests are a separate translation unit. Size a local array with
+ * sh_aug_test_quad_size() and pass it as `quad`. */
+size_t sh_aug_test_quad_size(void);
+int    sh_aug_test_quad_init(void *quad, const double corners[4][3]);
+double sh_aug_test_z_at(const void *quad, double x, double y);
+int    sh_aug_test_quad_inset(const void *quad, double r, void *out);
+int    sh_aug_test_quad_contains(const void *quad, double x, double y);
+void   sh_aug_test_quad_corner(const void *quad, int i, double out[3]);
+double sh_aug_test_quad_normal_z(const void *quad);
+int    sh_aug_test_node_field4(double plane_c);
 #endif
 
 #endif /* SNAPMAP_PLUS_AAS_AUGMENT_H */

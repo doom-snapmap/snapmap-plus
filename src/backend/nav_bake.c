@@ -347,9 +347,9 @@ static int bake_collect_platforms(const bake_module *m, sh_aug_platform *out, in
          * author ticked -- navigating onto it would be a lie the router acts on. */
         if (!r->block_demons) continue;
         memset(&out[n], 0, sizeof out[n]);
-        out[n].x0 = r->x0; out[n].y0 = r->y0;
-        out[n].x1 = r->x1; out[n].y1 = r->y1;
-        out[n].z = r->top_z;
+        memcpy(out[n].c, r->c, sizeof out[n].c);
+        memcpy(out[n].n, r->n, sizeof out[n].n);
+        out[n].face = r->face;
         _snprintf_s(out[n].name, sizeof out[n].name, _TRUNCATE, "volume %u", r->entity);
         n++;
     }
@@ -438,23 +438,38 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
          * most wants to see: a platform nothing can climb onto is legal and
          * sometimes wanted, but it is a different thing from one they expected
          * demons to reach, and only this line distinguishes them. */
-        int islands = 0, climbs = 0, i;
+        int islands = 0, climbs = 0, leaps = 0, chained = 0, tipped = 0, i;
         for (i = 0; i < rep.platform_count; i++) {
             if (!rep.platforms[i].emitted) continue;
             if (rep.platforms[i].island) islands++;
             climbs += rep.platforms[i].climbs;
+            leaps  += rep.platforms[i].leaps;
+            /* More than one neighbour means it reaches something besides the
+             * module floor -- which is the question an author actually has after
+             * standing two volumes next to each other. */
+            if (rep.platforms[i].neighbours > 1) chained++;
+            if (rep.platforms[i].side_face) tipped++;
         }
         _snprintf_s(why, why_cap, _TRUNCATE,
-                    "%d platform(s), areas %u->%u, links %u->%u (%d climb%s), "
-                    "tree depth %u->%u%s%s",
+                    "%d platform(s), areas %u->%u, links %u->%u "
+                    "(%d climb%s, %d leap%s, %d chained), tree depth %u->%u%s%s%s",
                     n, rep.areas_before, rep.areas_after,
                     rep.reach_before, rep.reach_after,
                     climbs, climbs == 1 ? "" : "s",
+                    leaps, leaps == 1 ? "" : "s",
+                    chained,
                     rep.depth_before, rep.depth_after,
                     islands ? "; islands: " : "",
-                    islands ? (sh_trav_ready()
-                               ? "nothing can climb that high"
-                               : "no traversal table, so nothing climbs") : "");
+                    islands ? (rep.climbs_declined
+                               ? "this module already carries its own climbs, so "
+                                 "none were added"
+                               : (sh_trav_ready()
+                                  ? "nothing can climb that high"
+                                  : "no traversal table, so nothing climbs")) : "",
+                    rep.links_truncated
+                        ? "; the link budget ran out, so some volumes have fewer "
+                          "climbs and leaps than their shape allows"
+                        : (tipped ? "; some volumes are walkable on a side face" : ""));
     }
     return rc;
 }

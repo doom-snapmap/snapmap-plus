@@ -35,6 +35,41 @@ static int near_f(float a, float b)
     return d < 0.001f && d > -0.001f;
 }
 
+/* ---- reading a region's quad ------------------------------------------
+ *
+ * A region is four corners now, not a rect, so what used to be a member read is
+ * a min or max over the corners. The values these return for an UPRIGHT volume
+ * are exactly what the old x0/y1/top_z members held, which is what lets the
+ * pre-existing cases below assert the same numbers they always did. */
+static float quad_min_x(const sh_nav_region *r)
+{
+    float v = r->c[0][0]; int i;
+    for (i = 1; i < 4; i++) if (r->c[i][0] < v) v = r->c[i][0];
+    return v;
+}
+static float quad_max_x(const sh_nav_region *r)
+{
+    float v = r->c[0][0]; int i;
+    for (i = 1; i < 4; i++) if (r->c[i][0] > v) v = r->c[i][0];
+    return v;
+}
+static float quad_min_y(const sh_nav_region *r)
+{
+    float v = r->c[0][1]; int i;
+    for (i = 1; i < 4; i++) if (r->c[i][1] < v) v = r->c[i][1];
+    return v;
+}
+static float quad_max_y(const sh_nav_region *r)
+{
+    float v = r->c[0][1]; int i;
+    for (i = 1; i < 4; i++) if (r->c[i][1] > v) v = r->c[i][1];
+    return v;
+}
+static float quad_extent_x(const sh_nav_region *r) { return quad_max_x(r) - quad_min_x(r); }
+static float quad_extent_y(const sh_nav_region *r) { return quad_max_y(r) - quad_min_y(r); }
+/* The face is planar, so any corner's z is the surface height for a level one. */
+static float quad_top_z(const sh_nav_region *r) { return r->c[0][2]; }
+
 /* ==================================================================== */
 /* building a map                                                        */
 /* ==================================================================== */
@@ -111,6 +146,22 @@ static void edit_box(char *out, size_t cap, const char *flags, const char *type,
         flags, type, sx, sy, sz, cx, cy, cz);
 }
 
+/* Like edit_box, plus a raw `spawnOrientation` fragment. NULL means the member
+ * is absent, which the reader must treat as the identity. */
+static void edit_box_or(char *out, size_t cap, const char *flags, const char *type,
+                        double cx, double cy, double cz,
+                        double sx, double sy, double sz, const char *orient)
+{
+    _snprintf_s(out, cap, _TRUNCATE,
+        "%s\"clipModelInfo\":{%s\"size\":{\"x\":%g,\"y\":%g,\"z\":%g}},"
+        "\"isOpaque\":false,"
+        "\"renderModelInfo\":{\"model\":\"industrial/panel.hotspot\","
+        "\"scale\":{\"x\":9999,\"y\":9999,\"z\":9999},"
+        "\"size\":{\"x\":9999,\"y\":9999,\"z\":9999}},"
+        "%s%s\"spawnPosition\":{\"x\":%g,\"y\":%g,\"z\":%g}",
+        flags, type, sx, sy, sz, orient ? orient : "", orient ? "," : "", cx, cy, cz);
+}
+
 static char *map_of(const char *instances, const char *entities,
                     const char *key_values, const char *values, size_t *out_len)
 {
@@ -133,6 +184,32 @@ static char *map_of(const char *instances, const char *entities,
 
 /* One instance, one ticked box. The rectangle is centred on spawnPosition in x
  * and y, and its z is the TOP of the box -- spawnPosition.z is the bottom. */
+/* One instance, one ticked Blocking Box, correctly attributed. Attribution
+ * through `instanceEntities` is not optional: without it the keep filter drops
+ * the region and every assertion reads zero. `orient` is a raw
+ * `spawnOrientation` fragment, or NULL for none.
+ *
+ * The caller frees the returned document; the blobs are closed here. */
+static char *map_with_volume(double sx, double sy, double sz,
+                             double px, double py, double pz,
+                             const char *orient, size_t *out_n)
+{
+    blob inst, ents;
+    char edit[2048];
+    char *json;
+
+    bopen(&inst);
+    bopen(&ents);
+    put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
+    edit_box_or(edit, sizeof edit, "\"affectsNavmesh\":true,\"blockDemons\":true,", "",
+                px, py, pz, sx, sy, sz, orient);
+    put_entity(&ents, 1, 7, INHERIT, edit);
+    json = map_of(inst.p, ents.p, "0,1,1", "7", out_n);
+    bclose(&inst);
+    bclose(&ents);
+    return json;
+}
+
 static void test_one_volume(void)
 {
     blob inst, ents;
@@ -160,11 +237,11 @@ static void test_one_volume(void)
     CHECK(m.region_count == 1);
     CHECK(m.truncated == 0);
     if (m.region_count == 1) {
-        CHECK(near_f(m.regions[0].x0, 0.0f));
-        CHECK(near_f(m.regions[0].x1, 200.0f));
-        CHECK(near_f(m.regions[0].y0, 0.0f));
-        CHECK(near_f(m.regions[0].y1, 400.0f));
-        CHECK(near_f(m.regions[0].top_z, 192.0f));   /* bottom 64 + height 128 */
+        CHECK(near_f(quad_min_x(&m.regions[0]), 0.0f));
+        CHECK(near_f(quad_max_x(&m.regions[0]), 200.0f));
+        CHECK(near_f(quad_min_y(&m.regions[0]), 0.0f));
+        CHECK(near_f(quad_max_y(&m.regions[0]), 400.0f));
+        CHECK(near_f(quad_top_z(&m.regions[0]), 192.0f));   /* bottom 64 + height 128 */
         CHECK(m.regions[0].instance == 0);
         CHECK(m.regions[0].block_demons == 1);
         CHECK(m.regions[0].entity == 0);
@@ -255,11 +332,11 @@ static void test_box_shape(void)
     if (m.region_count == 2) {
         CHECK(m.regions[0].entity == 0);
         CHECK(m.regions[1].entity == 4);
-        CHECK(near_f(m.regions[1].x0, -256.0f));
-        CHECK(near_f(m.regions[1].x1, 256.0f));
-        CHECK(near_f(m.regions[1].y0, -128.0f));
-        CHECK(near_f(m.regions[1].y1, 128.0f));
-        CHECK(near_f(m.regions[1].top_z, 48.0f));
+        CHECK(near_f(quad_min_x(&m.regions[1]), -256.0f));
+        CHECK(near_f(quad_max_x(&m.regions[1]), 256.0f));
+        CHECK(near_f(quad_min_y(&m.regions[1]), -128.0f));
+        CHECK(near_f(quad_max_y(&m.regions[1]), 128.0f));
+        CHECK(near_f(quad_top_z(&m.regions[1]), 48.0f));
     }
 
     free(json);
@@ -309,7 +386,7 @@ static void test_two_instances_of_one_module(void)
         CHECK(m.regions[0].entity == 0 && m.regions[0].instance == 0);
         CHECK(m.regions[1].entity == 1 && m.regions[1].instance == 1);
         /* module-local, so the second instance's origin is NOT applied */
-        CHECK(near_f(m.regions[1].x0, -64.0f) && near_f(m.regions[1].x1, 64.0f));
+        CHECK(near_f(quad_min_x(&m.regions[1]), -64.0f) && near_f(quad_max_x(&m.regions[1]), 64.0f));
     }
     free(json);
 
@@ -708,11 +785,11 @@ static void test_live_tick_this_session(void)
     if (m.region_count == 2) {
         CHECK(m.regions[1].entity == 22);
         CHECK(m.regions[1].instance == 0);
-        CHECK(near_f(m.regions[1].x0, 0.0f));
-        CHECK(near_f(m.regions[1].x1, 200.0f));
-        CHECK(near_f(m.regions[1].y0, 0.0f));
-        CHECK(near_f(m.regions[1].y1, 400.0f));
-        CHECK(near_f(m.regions[1].top_z, 192.0f));       /* bottom 64 + height 128 */
+        CHECK(near_f(quad_min_x(&m.regions[1]), 0.0f));
+        CHECK(near_f(quad_max_x(&m.regions[1]), 200.0f));
+        CHECK(near_f(quad_min_y(&m.regions[1]), 0.0f));
+        CHECK(near_f(quad_max_y(&m.regions[1]), 400.0f));
+        CHECK(near_f(quad_top_z(&m.regions[1]), 192.0f));       /* bottom 64 + height 128 */
         CHECK(m.regions[1].block_demons == 1);
     }
 
@@ -739,7 +816,7 @@ static void test_live_untick_this_session(void)
     CHECK(m.instance_count == 1);
     /* the dropped region is gone, not merely uncounted */
     CHECK(m.regions[0].entity == 0 && m.regions[0].instance == 0 &&
-          near_f(m.regions[0].top_z, 0.0f));
+          near_f(quad_top_z(&m.regions[0]), 0.0f));
 
     free(json); free(live0); free(live1);
 }
@@ -1067,9 +1144,183 @@ static void test_live_region_cap(void)
     bclose(&vals);
 }
 
+/* ==================================================================== */
+/* orientation: the quad is the box's real walkable face                 */
+/* ==================================================================== */
+
+/* A sparse `spawnOrientation` omits `mat[2]` entirely. Seeded with the IDENTITY
+ * that is a rotation; seeded with zeros it is a degenerate matrix and every
+ * corner collapses. Over the 6,932 entities carrying a `mat` in a real map, an
+ * identity-seeded read yields 6,932 orthonormal matrices with determinant +1
+ * and a zero-seeded read yields 1,604 -- so this is the mistake that would
+ * quietly break every rotated volume in the game. */
+static void test_sparse_orientation_seeds_identity(void)
+{
+    sh_nav_map m;
+    size_t n;
+    char *json = map_with_volume(128, 64, 32, 0, 0, 0,
+        "\"spawnOrientation\":{\"mat\":{\"mat[0]\":{\"x\":0,\"y\":1},"
+        "\"mat[1]\":{\"x\":-1,\"y\":0}}}", &n);
+
+    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(m.region_count == 1);
+    if (m.region_count == 1) {
+        CHECK(near_f(m.regions[0].n[2], 1.0f));
+        CHECK(m.regions[0].face == 4);                       /* still the top */
+        CHECK(near_f(quad_extent_x(&m.regions[0]), 64.0f));  /* 90 deg yaw swaps */
+        CHECK(near_f(quad_extent_y(&m.regions[0]), 128.0f));
+        CHECK(near_f(quad_top_z(&m.regions[0]), 32.0f));
+    }
+    free(json);
+}
+
+/* A 90-degree yaw CANNOT pin `R` against `Rt`: for a centred box both give the
+ * same corner SET, and at 45 degrees both give equal x and y extents too. Only
+ * the actual corner POSITIONS distinguish them. Under Rt (correct) a 200x100
+ * box yawed 45 degrees has corners at (+/-35.355, +/-106.066); under R they are
+ * at (+/-106.066, +/-35.355). */
+static void test_45_yaw_on_oblong_pins_the_convention(void)
+{
+    sh_nav_map m;
+    size_t n;
+    char orient[256];
+    char *json;
+    int i;
+
+    _snprintf_s(orient, sizeof orient, _TRUNCATE,
+        "\"spawnOrientation\":{\"mat\":{\"mat[0]\":{\"x\":%.10f,\"y\":%.10f},"
+        "\"mat[1]\":{\"x\":%.10f,\"y\":%.10f}}}",
+        0.70710678118, 0.70710678118, -0.70710678118, 0.70710678118);
+    json = map_with_volume(200, 100, 10, 0, 0, 0, orient, &n);
+
+    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(m.region_count == 1);
+    if (m.region_count == 1) {
+        /* Both conventions give these extents, which is exactly why the extents
+         * are not the test. */
+        CHECK(near_f(quad_extent_x(&m.regions[0]), 212.132f));
+        CHECK(near_f(quad_extent_y(&m.regions[0]), 212.132f));
+        for (i = 0; i < 4; i++) {
+            float cx = m.regions[0].c[i][0], cy = m.regions[0].c[i][1];
+            float ax = cx < 0 ? -cx : cx, ay = cy < 0 ? -cy : cy;
+            /* A 200x100 rect at 45 degrees has corners of BOTH shapes -- two at
+             * (35.355, 106.066) and two at (106.066, 35.355) -- so the magnitudes
+             * alone say nothing. What separates the conventions is the SIGN
+             * PAIRING: a +45 yaw puts the long axis along y = x, so every corner
+             * has sign(x) == sign(y). Under the transposed reading the yaw is -45
+             * and every corner straddles y = -x instead. */
+            CHECK((near_f(ax, 35.3553f) && near_f(ay, 106.0660f)) ||
+                  (near_f(ax, 106.0660f) && near_f(ay, 35.3553f)));
+            CHECK(cx * cy > 0.0f);
+        }
+    }
+    free(json);
+}
+
+/* A box on its side -- 58 of the 82 non-upright volumes in one real map sit at
+ * exactly 90 degrees. Its walkable face is a SIDE face, footprint size.x by
+ * size.z, and the old code put an area a full box-height away from any surface. */
+static void test_box_on_its_side_uses_a_side_face(void)
+{
+    sh_nav_map m;
+    size_t n;
+    /* 90 degrees about x: local +y -> world +z, local +z -> world -y. */
+    char *json = map_with_volume(128, 64, 32, 0, 0, 0,
+        "\"spawnOrientation\":{\"mat\":{\"mat[1]\":{\"y\":0,\"z\":1},"
+        "\"mat[2]\":{\"y\":-1,\"z\":0}}}", &n);
+
+    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(m.region_count == 1);
+    if (m.region_count == 1) {
+        CHECK(near_f(m.regions[0].n[2], 1.0f));
+        CHECK(m.regions[0].face == 2);                       /* +axis1, not the top */
+        CHECK(near_f(quad_extent_x(&m.regions[0]), 128.0f));
+        CHECK(near_f(quad_extent_y(&m.regions[0]), 32.0f));  /* size.z, not size.y */
+    }
+    free(json);
+}
+
+/* Rotated 180 about x: the box hangs BELOW spawnPosition, so its walkable face
+ * is what was the underside, at spawnPosition.z. The old `cz + sz` put the area
+ * a box-height up in open air, where nothing can stand and nothing else can
+ * claim the column. */
+static void test_inverted_box_takes_its_face_from_the_bottom(void)
+{
+    sh_nav_map m;
+    size_t n;
+    char *json = map_with_volume(128, 64, 32, 0, 0, 100,
+        "\"spawnOrientation\":{\"mat\":{\"mat[1]\":{\"y\":-1},"
+        "\"mat[2]\":{\"z\":-1}}}", &n);
+
+    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(m.region_count == 1);
+    if (m.region_count == 1) {
+        CHECK(near_f(quad_top_z(&m.regions[0]), 100.0f));
+        CHECK(near_f(m.regions[0].n[2], 1.0f));
+        CHECK(m.regions[0].face == 5);                       /* -axis2 */
+    }
+    free(json);
+}
+
+/* An upright volume with no `spawnOrientation` must produce exactly what the
+ * rect reader produced -- the regression guard on the 87.6% of volumes in a real
+ * map that are upright. */
+static void test_absent_orientation_matches_the_old_rect(void)
+{
+    sh_nav_map m;
+    size_t n;
+    char *json = map_with_volume(200, 400, 128, 100, 200, 64, NULL, &n);
+
+    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(m.region_count == 1);
+    if (m.region_count == 1) {
+        CHECK(near_f(quad_min_x(&m.regions[0]), 0.0f));
+        CHECK(near_f(quad_max_x(&m.regions[0]), 200.0f));
+        CHECK(near_f(quad_min_y(&m.regions[0]), 0.0f));
+        CHECK(near_f(quad_max_y(&m.regions[0]), 400.0f));
+        CHECK(near_f(quad_top_z(&m.regions[0]), 192.0f));    /* bottom 64 + 128 */
+        CHECK(m.regions[0].face == 4);
+    }
+    free(json);
+}
+
+/* Not a rotation at all: refused rather than emitted sheared. */
+static void test_non_orthonormal_matrix_is_refused(void)
+{
+    sh_nav_map m;
+    size_t n;
+    char *json = map_with_volume(128, 64, 32, 0, 0, 0,
+        "\"spawnOrientation\":{\"mat\":{\"mat[0]\":{\"x\":3,\"y\":0,\"z\":0}}}", &n);
+
+    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(m.region_count == 0);
+    free(json);
+}
+
+/* A REFLECTION is orthonormal but has determinant -1, and the shoelace rewind
+ * would quietly make its mirrored footprint look legal. */
+static void test_reflection_is_refused(void)
+{
+    sh_nav_map m;
+    size_t n;
+    char *json = map_with_volume(128, 64, 32, 0, 0, 0,
+        "\"spawnOrientation\":{\"mat\":{\"mat[0]\":{\"x\":-1}}}", &n);
+
+    CHECK(sh_nav_regions_read(json, n, &m) == 1);
+    CHECK(m.region_count == 0);
+    free(json);
+}
+
 int main(void)
 {
     test_one_volume();
+    test_sparse_orientation_seeds_identity();
+    test_45_yaw_on_oblong_pins_the_convention();
+    test_box_on_its_side_uses_a_side_face();
+    test_inverted_box_takes_its_face_from_the_bottom();
+    test_absent_orientation_matches_the_old_rect();
+    test_non_orthonormal_matrix_is_refused();
+    test_reflection_is_refused();
     test_marker_required();
     test_box_shape();
     test_two_instances_of_one_module();

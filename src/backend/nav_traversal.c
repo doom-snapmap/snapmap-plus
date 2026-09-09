@@ -27,14 +27,22 @@
 const int SH_TRAV_DISTANCE[SH_TRAV_DISTANCES] = { 64, 128, 192, 256, 384, 512 };
 
 /* The five traversal families the shipped table carries, 6 distances each --
- * 30 rows per demon, 300 rows over the file's ten monsters. Only the two LEDGE
- * families are reachable through this module's API; the other three are parsed
- * so that the row count means what it says and so an unrecognised type is a
- * real signal rather than the normal case. */
+ * 30 rows per demon, 300 rows over the file's ten monsters. Three are reachable
+ * through this module's API; the two RAIL families are parsed so that the row
+ * count means what it says and so an unrecognised type is a real signal rather
+ * than the normal case.
+ *
+ * LEAP_ACROSS rows point at `jump_forward_<d>` animations (and
+ * `run_over_railing` for the archvile's three short distances), which is why
+ * searching the shipped payloads for "leap" finds nothing while 1,754 records
+ * use them. Per-demon coverage is at least as good as climbing: seven of the
+ * nine have all six distances, the hellified soldier has four, the zombie two,
+ * and the Cyberdemon has no traversal animation of any kind. */
 static const char *const TRAV_FAMILY[] = {
     "LEAP_ACROSS", "LEDGE_DOWN", "LEDGE_UP", "RAIL_DOWN", "RAIL_UP"
 };
 #define TRAV_FAMILIES        ((int)(sizeof TRAV_FAMILY / sizeof TRAV_FAMILY[0]))
+#define TRAV_FAM_LEAP_ACROSS 0
 #define TRAV_FAM_LEDGE_DOWN  1
 #define TRAV_FAM_LEDGE_UP    2
 
@@ -408,7 +416,10 @@ static int trav_parse_locked(const char *text, size_t len)
         for (f = 0; f < g_decl_monster_count; f++)
             if (strcmp(g_decl_monster[f], TRAV_MONSTER[i].decl_name) == 0) slot = f;
         if (slot < 0) continue;
-        for (f = TRAV_FAM_LEDGE_DOWN; f <= TRAV_FAM_LEDGE_UP; f++)
+        /* LEAP_ACROSS counts toward readiness now, so a table that carried
+         * only leaps would parse as usable. That is a deliberate widening, not a
+         * mechanical one: leaps are emitted from the same records as climbs. */
+        for (f = TRAV_FAM_LEAP_ACROSS; f <= TRAV_FAM_LEDGE_UP; f++)
             for (d = 0; d < SH_TRAV_DISTANCES; d++)
                 if (g_anim[slot][f][d].have) return 1;
     }
@@ -503,7 +514,7 @@ int sh_trav_select(const sh_trav_monster *m, int direction, float drop,
 {
     const trav_anim *chosen = NULL;
     char path[SH_TRAV_PATH_CAP];
-    float offset_x = 0.0f, best_err = 0.0f, ratio;
+    float offset_x = 0.0f, best_err = 0.0f, ratio, max_stretch = SH_TRAV_MAX_STRETCH;
     int fam, slot, i, best = -1;
 
     if (out_path && path_cap) out_path[0] = 0;
@@ -514,6 +525,14 @@ int sh_trav_select(const sh_trav_monster *m, int direction, float drop,
     if (!m) return 0;
     if (direction == SH_TRAV_UP) fam = TRAV_FAM_LEDGE_UP;
     else if (direction == SH_TRAV_DOWN) fam = TRAV_FAM_LEDGE_DOWN;
+    else if (direction == SH_TRAV_ACROSS) {
+        /* `drop` is the HORIZONTAL span of the gap here, not a height. Outside
+         * the range shipped leaps actually cover there is no animation to warp,
+         * so the gap is simply not crossed. */
+        fam = TRAV_FAM_LEAP_ACROSS;
+        if (drop < SH_TRAV_LEAP_MIN_SPAN || drop > SH_TRAV_LEAP_MAX_SPAN) return 0;
+        max_stretch = SH_TRAV_LEAP_MAX_STRETCH;
+    }
     else return 0;
     /* A NaN fails both comparisons, which is the answer we want for it. */
     if (!(drop > 0.0f) || !(drop < 1.0e9f)) return 0;
@@ -541,7 +560,7 @@ int sh_trav_select(const sh_trav_monster *m, int direction, float drop,
     if (best < 0) return 0;
 
     ratio = drop / (float)SH_TRAV_DISTANCE[best];
-    if (ratio > SH_TRAV_MAX_STRETCH) return 0;
+    if (ratio > max_stretch) return 0;
     if (ratio < SH_TRAV_MIN_SQUASH) return 0;
 
     if (out_path) {

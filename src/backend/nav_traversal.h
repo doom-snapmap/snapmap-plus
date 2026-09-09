@@ -82,9 +82,31 @@ extern const int SH_TRAV_DISTANCE[SH_TRAV_DISTANCES];
 #define SH_TRAV_MAX_STRETCH    2.0f
 #define SH_TRAV_MIN_SQUASH     0.18f
 
-/* Which direction the climb goes. The table names rows LEDGE_UP_<d> and
- * LEDGE_DOWN_<d>. */
-enum { SH_TRAV_UP = 0, SH_TRAV_DOWN = 1 };
+/* Which way the traversal goes. The table names rows LEDGE_UP_<d>,
+ * LEDGE_DOWN_<d> and LEAP_ACROSS_<d>. ACROSS selects on the HORIZONTAL span of a
+ * gap where the other two select on a vertical drop. */
+enum { SH_TRAV_UP = 0, SH_TRAV_DOWN = 1, SH_TRAV_ACROSS = 2 };
+
+/* The leap envelope, measured over the 1,754 shipped traversalPoints records
+ * across the extracted corpus whose animation is exactly one of the six table
+ * nominals:
+ *
+ *   horizontal span   149 .. 982 units (p50 612, p99 880)
+ *   span / nominal    p50 1.58, p90 2.09, p99 3.47, max 5.35
+ *   |dz|              p50 ONE unit, p90 192, max 511
+ *   |dz| / span       p50 0.00, p90 0.29, max 0.83
+ *
+ * Two things follow. A leap stretches far harder than a climb -- the climb
+ * corpus tops out at 2.25, which is why SH_TRAV_MAX_STRETCH stays 2.0 for the
+ * LEDGE families and this one gets its own. And a table-nominal leap is
+ * essentially LEVEL, so a steeply-graded gap is not what these animations do.
+ *
+ * `offset.x` on every shipped LEAP_ACROSS row is NEGATIVE (-18 to -132): the
+ * animation starts BEHIND the take-off lip, where a climb's sign varies. */
+#define SH_TRAV_LEAP_MAX_STRETCH   3.5f
+#define SH_TRAV_LEAP_MIN_SPAN      149.0f
+#define SH_TRAV_LEAP_MAX_SPAN      982.0f
+#define SH_TRAV_LEAP_MAX_GRADE     0.3f
 
 /* One demon, as the traversal system sees it. */
 typedef struct sh_trav_monster {
