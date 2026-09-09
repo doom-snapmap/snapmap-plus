@@ -1406,13 +1406,46 @@ static int aug_regime(const aug_side *s, double step)
     return s->drop > 0.0 ? REGIME_DOWN : REGIME_UP;
 }
 
-/* Emit for this segment at all? With symmetric quad-to-quad discovery A sees B
- * and B sees A, and the regimes already write both directions per segment, so
- * without this every record between two generated quads is written twice. The
- * lower area index owns the pair. */
-static int aug_side_owns(const aug_side *s, int ai)
+/* Is every corner of `inner` inside `outer`, in XY? */
+static int aug_quad_contains_quad(const aug_quad *outer, const aug_quad *inner)
 {
-    return !(s->generated && s->floor_area < ai);
+    int i;
+    for (i = 0; i < 4; i++)
+        if (!aug_quad_contains_xy(outer, inner->c[i][0], inner->c[i][1])) return 0;
+    return 1;
+}
+
+/* Emit for this segment at all?
+ *
+ * Two generated quads that face each other are discovered from BOTH sides, and
+ * each regime writes both directions per segment, so without a rule every record
+ * between them is written twice. "The lower area index owns the pair" settles
+ * that -- but only while discovery really is symmetric, and it is not.
+ *
+ * A quad is discovered by sampling points just outside the INSPECTING quad's own
+ * edges. So when one footprint sits wholly INSIDE another -- a tall pillar
+ * standing through a wide slab -- every pillar edge faces the slab, and no slab
+ * edge ever faces the pillar. Platforms are created lowest-first, so the slab
+ * takes the lower index and would own a pair it can never see: the pillar found
+ * the segments, declined to emit, and the slab never looked. The pillar came out
+ * emitted, carved, passing the serving gate, and with ZERO reachabilities -- and
+ * a demon that cannot be routed anywhere just stands still and shoots.
+ *
+ * So containment decides first, and only then the index. Mutual containment
+ * (identical footprints) means both sides do discover it, and falls through to
+ * the index rule rather than being emitted twice. */
+static int aug_side_owns(const aug_side *s, int ai, const aug_quad *req,
+                         const aug_peer *peers, int npeers)
+{
+    if (!s->generated) return 1;
+    if (s->peer >= 0 && s->peer < npeers && peers[s->peer].req && req) {
+        const aug_quad *theirs = peers[s->peer].req;
+        int we_inside_them = aug_quad_contains_quad(theirs, req);
+        int they_inside_us = aug_quad_contains_quad(req, theirs);
+        if (we_inside_them && !they_inside_us) return 1;   /* only we can see it */
+        if (they_inside_us && !we_inside_them) return 0;   /* only they can */
+    }
+    return !(s->floor_area < ai);
 }
 
 /* Plain walk links for a platform inside the STEP regime.
@@ -1439,7 +1472,7 @@ static int aug_step_links(aug_ctx *c, int ai, const aug_quad *eff,
         double ts[64];
         int cnt;
         if (aug_regime(&sides[i], (double)c->step) != REGIME_STEP) continue;
-        if (!aug_side_owns(&sides[i], ai)) continue;
+        if (!aug_side_owns(&sides[i], ai, req, peers, npeers)) continue;
         cnt = aug_samples_unit(ts, 64);
         for (k = 0; k < cnt; k++) {
             double t = ts[k], up[3], dn[3];
@@ -1506,7 +1539,7 @@ static int aug_fall_links(aug_ctx *c, int ai, const aug_quad *eff,
         int time;
         /* Falling is DOWNWARD only, by definition -- a rise is a climb. */
         if (aug_regime(&sides[i], (double)c->step) != REGIME_DOWN) continue;
-        if (!aug_side_owns(&sides[i], ai)) continue;
+        if (!aug_side_owns(&sides[i], ai, req, peers, npeers)) continue;
         if (c->o->fall == SH_AUG_FALL_AUTO && sides[i].drop > max_fall) continue;
         bx = (sides[i].p0[0] + sides[i].p1[0]) / 2.0;
         by = (sides[i].p0[1] + sides[i].p1[1]) / 2.0;
@@ -1693,7 +1726,7 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
 
         regime = aug_regime(&sides[i], (double)c->step);
         if (regime == REGIME_STEP || regime == REGIME_NONE) continue;
-        if (!aug_side_owns(&sides[i], ai)) continue;
+        if (!aug_side_owns(&sides[i], ai, req, peers, npeers)) continue;
         leap = (regime == REGIME_LEAP);
         /* A climb is measured vertically, a leap horizontally. */
         span = leap ? sides[i].gap : fabs(sides[i].drop);
@@ -2205,10 +2238,20 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
             c.failed = 1;
             break;
         }
+        pr->leaf_slots_carved = aug_carve(&c, area, &eff);
+        if (pr->leaf_slots_carved <= 0) {
+            /* The area exists in the array but the tree cannot reach it. Leaving
+             * it would put a phantom in the cluster bookkeeping -- counted, linked
+             * and included in trees[0].c, yet unreachable by the BSP walk the
+             * router uses. Say so and do not claim it was emitted. */
+            _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
+                        "nowhere to splice this into the navigation tree; nothing "
+                        "walkable sits under it");
+            continue;
+        }
         pr->emitted = 1;
         pr->area = area;
         pr->carrier = carrier;
-        pr->leaf_slots_carved = aug_carve(&c, area, &eff);
         effs[nmade] = eff;
         reqs[nmade] = req;
         made[nmade] = area;
@@ -2267,17 +2310,26 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                      * author exactly like a complete one. */
                     if (got == room) out->links_truncated = 1;
                 }
-                /* Leaps are counted here rather than off the reachability
-                 * records, because a leap and a climb write the same five
-                 * records and are indistinguishable afterwards. */
-                for (i = 0; i < total; i++) {
-                    if (!specs[i].is_leap) continue;
-                    for (j = 0; j < n; j++)
-                        if (out->platforms[j].area == specs[i].from_area ||
-                            out->platforms[j].area == specs[i].to_area)
-                            out->platforms[j].leaps++;
+                /* Count leaps only for specs that were actually WRITTEN.
+                 * aug_emit_traversals can decline the whole set -- a module that
+                 * already owns traversal points on an area we climb from -- and
+                 * counting the collected specs beforehand reported leaps the
+                 * payload does not contain, which is a report that lies to the
+                 * author about what their map got.
+                 *
+                 * A leap and a climb write the same five records and are
+                 * indistinguishable in the payload afterwards, so the count has
+                 * to come from the specs; it just has to come from the ones that
+                 * survived. */
+                if (total > 0 && aug_emit_traversals(&c, specs, total) > 0) {
+                    for (i = 0; i < total; i++) {
+                        if (!specs[i].is_leap) continue;
+                        for (j = 0; j < n; j++)
+                            if (out->platforms[j].area == specs[i].from_area ||
+                                out->platforms[j].area == specs[i].to_area)
+                                out->platforms[j].leaps++;
+                    }
                 }
-                if (total > 0) aug_emit_traversals(&c, specs, total);
                 HeapFree(GetProcessHeap(), 0, specs);
             }
         }

@@ -703,6 +703,29 @@ static int reach_count(sh_aas *a, int from, int to)
 
 static int reach_exists(sh_aas *a, int from, int to) { return reach_count(a, from, to) > 0; }
 
+/* No two reachability records share the same areas AND the same endpoints.
+ *
+ * This is the shape a broken dedup rule produces: with symmetric discovery both
+ * quads emit the pair, and the duplicates are identical record-for-record rather
+ * than merely numerous. Counting links alone cannot see it, because a segment
+ * legitimately emits one record per sample along it. */
+static int no_duplicate_reach_endpoints(sh_aas *a)
+{
+    unsigned i, j, n = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+    for (i = 0; i < n; i++) {
+        const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
+        if (!r) continue;
+        for (j = i + 1; j < n; j++) {
+            const unsigned char *q = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, j);
+            if (!q) continue;
+            if (sh_aas_get_u16(r, 6) != sh_aas_get_u16(q, 6)) continue;   /* from */
+            if (sh_aas_get_u16(r, 8) != sh_aas_get_u16(q, 8)) continue;   /* to   */
+            if (memcmp(r + 12, q + 12, 12) == 0) return 0;   /* start[3]+end[3] i16 */
+        }
+    }
+    return 1;
+}
+
 /* How many of them are of one travel type -- 0x20 is a plain walk. */
 static int reach_count_of_type(sh_aas *a, int from, int to, unsigned type)
 {
@@ -1194,6 +1217,202 @@ static void test_a_module_without_traversals_still_gets_climbs(void)
     sh_aas_free(a);
 }
 
+/* ==================================================================== */
+/* the geometry matrix: every way two marked volumes can meet            */
+/* ==================================================================== */
+/*
+ * The reported failure was a tall pillar standing THROUGH a wide slab: all AI
+ * froze, shooting but not moving. Nothing here caught it because every fixture
+ * above uses volumes that are separate or merely abutting -- which is exactly
+ * the arrangement that always worked.
+ *
+ * These pin the rest of the matrix. The property that matters for every one of
+ * them is the same: a platform that is EMITTED must not be an ISLAND, because an
+ * emitted-but-unroutable area is what makes a demon stand still. A platform we
+ * decline to emit is fine; silence is not.
+ */
+
+/* CONTAINMENT -- the reported case. The pillar's footprint is wholly inside the
+ * slab's, so no slab edge can ever face the pillar. Discovery is one-sided, and
+ * an ownership rule based on area index alone hands the pair to the side that
+ * cannot see it. */
+static void test_a_pillar_through_a_slab_is_linked(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    int slab, pil;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a pillar standing through a slab is linked, not stranded\n");
+    load_synthetic_traversal_table();
+    mkplat(&p[0], -384.0f, -384.0f, 384.0f, 384.0f,  16.0f, "slab");
+    mkplat(&p[1],  -96.0f,  -96.0f,  96.0f,  96.0f, 128.0f, "pillar");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    slab = 0; pil = 1;
+    if (rep.platforms[pil].emitted) {
+        CHECK_MSG(rep.platforms[pil].island == 0,
+                  "the contained platform must not be an island -- an emitted "
+                  "area nothing reaches is what freezes every demon on the map");
+        CHECK_MSG(rep.platforms[pil].links > 0, "and it must carry links");
+    }
+    (void)slab;
+    sh_aas_free(a);
+}
+
+/* The mirror: the CONTAINING platform is created second (higher centroid), so
+ * the index order flips. Ownership must still land on the side that can see it. */
+static void test_containment_works_with_the_index_order_reversed(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("containment is linked whichever platform is created first\n");
+    load_synthetic_traversal_table();
+    /* The small one is LOWER here, so it is created first and takes the lower
+     * index -- the opposite of the pillar case. */
+    mkplat(&p[0],  -96.0f,  -96.0f,  96.0f,  96.0f,  16.0f, "inner");
+    mkplat(&p[1], -384.0f, -384.0f, 384.0f, 384.0f, 128.0f, "outer");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    if (rep.platforms[0].emitted && rep.platforms[1].emitted) {
+        CHECK_MSG(!(rep.platforms[0].island && rep.platforms[1].island),
+                  "both cannot be islands");
+    }
+    sh_aas_free(a);
+}
+
+/* IDENTICAL footprints at different heights. Each contains the other, so the
+ * containment rule must NOT fire for both -- that would emit every record twice.
+ * It has to fall through to the index rule. */
+static void test_identical_footprints_are_not_double_linked(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    int fwd, back;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+    printf("two volumes with the same footprint are linked once, not twice\n");
+    mkplat(&p[0], -256.0f, -256.0f, 256.0f, 256.0f, 16.0f, "lower");
+    mkplat(&p[1], -256.0f, -256.0f, 256.0f, 256.0f, 28.0f, "upper");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    if (rep.platforms[0].emitted && rep.platforms[1].emitted) {
+        fwd  = reach_count(a, rep.platforms[0].area, rep.platforms[1].area);
+        back = reach_count(a, rep.platforms[1].area, rep.platforms[0].area);
+        CHECK_MSG(fwd == back, "the two directions must agree");
+        CHECK(no_duplicate_reach_endpoints(a));
+    }
+    sh_aas_free(a);
+}
+
+/* PARTIAL overlap -- corners crossing. Both sides discover it, so this is the
+ * symmetric case the index rule was written for. Guard against the fix breaking
+ * it. */
+static void test_partially_overlapping_volumes_still_link_once(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+    printf("partially overlapping volumes link exactly once\n");
+    mkplat(&p[0], -400.0f, -400.0f,  100.0f, 100.0f, 16.0f, "a");
+    mkplat(&p[1], -100.0f, -100.0f,  400.0f, 400.0f, 28.0f, "b");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    if (rep.platforms[0].emitted && rep.platforms[1].emitted) {
+        CHECK(reach_count(a, rep.platforms[0].area, rep.platforms[1].area) ==
+              reach_count(a, rep.platforms[1].area, rep.platforms[0].area));
+        CHECK(no_duplicate_reach_endpoints(a));
+    }
+    sh_aas_free(a);
+}
+
+/* A FLOATING volume that intersects a floor-standing one without reaching the
+ * floor. Whatever the bake decides, it must not emit an area and then strand
+ * it. */
+static void test_a_floating_intersecting_volume_is_never_a_stranded_area(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[2];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    int i;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("a floating volume intersecting a solid one is linked or refused, "
+           "never stranded\n");
+    load_synthetic_traversal_table();
+    mkplat(&p[0], -384.0f, -384.0f, 384.0f, 384.0f,  16.0f, "solid");
+    mkplat(&p[1],  -96.0f,  -96.0f,  96.0f,  96.0f, 120.0f, "floater");
+    CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
+    for (i = 0; i < rep.platform_count; i++) {
+        if (!rep.platforms[i].emitted) {
+            CHECK_MSG(rep.platforms[i].reason[0] != 0,
+                      "a refusal must say why");
+            continue;
+        }
+        CHECK_MSG(rep.platforms[i].island == 0,
+                  "an emitted platform must be reachable");
+    }
+    sh_aas_free(a);
+}
+
+/* A platform with NOTHING under it to splice into. The carve takes no leaf
+ * slots, and the area must not be reported as emitted -- a phantom counted into
+ * a cluster but absent from the tree is exactly what corrupts routing. */
+static void test_a_platform_with_no_carrier_is_refused_not_phantom(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p;
+    sh_aug_report rep;
+    sh_aug_opts o;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_NEVER;
+    printf("a platform the tree cannot hold is refused, not left a phantom\n");
+    /* Far outside the fixture's +/-2000 floor slab and high above it. */
+    mkplat(&p, 6000.0f, 6000.0f, 6600.0f, 6600.0f, 900.0f, "orphan");
+    CHECK(sh_aas_augment(a, &p, 1, &o, &rep) == 1);
+    if (!rep.platforms[0].emitted)
+        CHECK_MSG(rep.platforms[0].reason[0] != 0, "and it says why");
+    else
+        CHECK_MSG(rep.platforms[0].leaf_slots_carved > 0,
+                  "if it claims to be emitted it must be in the tree");
+    sh_aas_free(a);
+}
+
+/* THE INVARIANT, over the whole matrix at once: nothing the bake emits may be
+ * an island. This is the property that actually maps onto "demons stand still
+ * and shoot", so it is asserted across every arrangement together rather than
+ * only one at a time. */
+static void test_no_arrangement_emits_a_stranded_area(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[8];
+    sh_aug_report rep;
+    sh_aug_opts o;
+    int i, emitted = 0;
+    o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
+    printf("no arrangement in the matrix emits a stranded area\n");
+    load_synthetic_traversal_table();
+    mkplat(&p[0], -1500.0f, -400.0f, -740.0f, 360.0f,  16.0f, "slab");
+    mkplat(&p[1], -1210.0f, -110.0f, -1030.0f, 70.0f, 128.0f, "pillar");   /* contained */
+    mkplat(&p[2],  -600.0f, -400.0f,  160.0f, 360.0f,  16.0f, "solid");
+    mkplat(&p[3],  -310.0f, -110.0f, -130.0f,  70.0f, 120.0f, "floater");  /* contained, floating */
+    mkplat(&p[4],   400.0f, -400.0f,  900.0f, 100.0f,  16.0f, "ov_a");
+    mkplat(&p[5],   700.0f, -100.0f, 1200.0f, 360.0f,  28.0f, "ov_b");     /* partial */
+    mkplat(&p[6],  1400.0f, -400.0f, 1900.0f, 360.0f,  16.0f, "apart_a");
+    mkplat(&p[7],  1400.0f,  500.0f, 1900.0f, 900.0f,  16.0f, "apart_b");  /* separate */
+    CHECK(sh_aas_augment(a, p, 8, &o, &rep) == 1);
+    for (i = 0; i < rep.platform_count; i++) {
+        if (!rep.platforms[i].emitted) continue;
+        emitted++;
+        CHECK_MSG(rep.platforms[i].island == 0, rep.platforms[i].name);
+    }
+    CHECK_MSG(emitted >= 4, "most of the matrix should still be emitted");
+    CHECK(rep.depth_exceeded == 0);
+    sh_aas_free(a);
+}
+
 int main(void)
 {
     printf("aas_augment_test\n");
@@ -1221,6 +1440,13 @@ int main(void)
     test_an_upright_platform_is_not_a_side_face();
     test_a_dense_yawed_chain_stays_within_the_depth_limit();
     test_a_bake_at_the_platform_cap_completes();
+    test_a_pillar_through_a_slab_is_linked();
+    test_containment_works_with_the_index_order_reversed();
+    test_identical_footprints_are_not_double_linked();
+    test_partially_overlapping_volumes_still_link_once();
+    test_a_floating_intersecting_volume_is_never_a_stranded_area();
+    test_a_platform_with_no_carrier_is_refused_not_phantom();
+    test_no_arrangement_emits_a_stranded_area();
     test_existing_traversals_on_our_floor_are_declined_out_loud();
     test_a_module_without_traversals_still_gets_climbs();
     test_island_at_128();
