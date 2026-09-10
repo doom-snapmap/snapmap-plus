@@ -14,6 +14,7 @@
  * the walker proved, every number is copied into a fixed buffer before it is
  * converted, and a malformed map yields an empty answer rather than a fault.
  */
+#include <windows.h>
 #include <stdlib.h>
 #include <string.h>
 #include <float.h>
@@ -36,7 +37,8 @@
 /* THE MARKER itself, spelled once. The live refresh rejects most entities by
  * looking for this text before it parses anything, and a marker the two spell
  * differently would reject every volume in the map. */
-#define NAVR_MARKER         "affectsNavmesh"
+#define NAVR_MARKER         "noFlood"
+#define NAVR_LEGACY_MARKER  "affectsNavmesh"
 
 /* `clipModelInfo.type` for a box. The decl default, which means the field is
  * ABSENT from the map when it holds -- so absent reads as a box, and only a
@@ -159,15 +161,23 @@ static float navr_num(const char *json, size_t len, const sh_shard_doc *doc,
     return (float)d;
 }
 
-/* A bool member. ABSENT IS FALSE -- that is the decl default for both
- * `affectsNavmesh` and `blockDemons`, and it is why a map nobody has ticked
+/* A bool member. ABSENT IS FALSE -- that is the default for both
+ * `flags.noFlood` and `blockDemons`, and it is why a map nobody has ticked
  * anything in yields no regions at all. */
 static int navr_bool(const char *json, size_t len, const sh_shard_doc *doc,
                      int parent, const char *key)
 {
     size_t v;
     if (!navr_value(json, len, doc, parent, key, &v)) return 0;
-    return len - v >= 4 && memcmp(json + v, "true", 4) == 0;
+    if (len - v < 4 || memcmp(json + v, "true", 4) != 0) return 0;
+    v += 4;
+    return v == len || sh_shard_is_ws(json[v]) || json[v] == ',' || json[v] == '}';
+}
+
+static int navr_marked(const char *json, size_t len, const sh_shard_doc *doc, int edit)
+{
+    return navr_bool(json, len, doc,
+                     navr_member(json, len, doc, edit, "flags", '{'), NAVR_MARKER);
 }
 
 /* A string member, into a bounded buffer. A value that does not fit is not one
@@ -579,6 +589,100 @@ static void navr_attribute(const char *json, size_t len, const sh_shard_doc *doc
 /* the map                                                               */
 /* ==================================================================== */
 
+typedef struct navr_patch {
+    size_t at, remove;
+    const char *text;
+} navr_patch;
+
+static int navr_patch_order(const void *a, const void *b)
+{
+    const navr_patch *pa = (const navr_patch *)a, *pb = (const navr_patch *)b;
+    return pa->at < pb->at ? -1 : pa->at > pb->at;
+}
+
+/* Migrate only the known Blocking Box entity state. Preserve unrelated fields
+ * and an explicit new marker (including false). Clear the native legacy flag
+ * even when the new marker is present, so later toggle-off cannot resurrect it.
+ * Collect all splices before writing: a refusal never partially migrates a map. */
+char *sh_nav_regions_migrate(const char *json, size_t len, size_t *out_len)
+{
+    sh_shard_doc doc;
+    navr_patch *patches = NULL;
+    char *out = NULL;
+    size_t count = 0, total = len, used = 0, read_at = 0, p;
+    int arr, i;
+
+    if (out_len) *out_len = len;
+    if (!json || !len || !sh_shard_find(json, len, NAVR_LEGACY_MARKER,
+                                       sizeof NAVR_LEGACY_MARKER - 1)) return NULL;
+    if (!sh_shard_doc_build(json, len, &doc)) return NULL;
+    if (doc.c[0].kind != '{') goto done;
+    arr = navr_member(json, len, &doc, 0, "entities", '[');
+    if (arr < 0 || doc.count > (size_t)-1 / sizeof *patches) goto done;
+    patches = (navr_patch *)malloc(doc.count * sizeof *patches);
+    if (!patches) goto done;
+    for (i = arr + 1; (size_t)i < doc.count && doc.c[i].open < doc.c[arr].close; i++) {
+        int ed, edit, flags;
+        size_t legacy, value, first;
+        char inherit[64];
+        if (doc.c[i].parent != arr || doc.c[i].kind != '{') continue;
+        ed = navr_member(json, len, &doc, i, "entityDef", '{');
+        if (!navr_str(json, len, &doc, ed, "inherit", inherit, sizeof inherit) ||
+            strcmp(inherit, NAVR_VOLUME_INHERIT) != 0) continue;
+        edit = navr_member(json, len, &doc,
+            navr_member(json, len, &doc, ed, "state", '{'), "edit", '{');
+        if (!navr_bool(json, len, &doc, edit, NAVR_LEGACY_MARKER) ||
+            !navr_value(json, len, &doc, edit, NAVR_LEGACY_MARKER, &legacy)) continue;
+        if (count + 2 > doc.count) goto done;
+        flags = navr_member(json, len, &doc, edit, "flags", '{');
+        if (flags < 0) {
+            /* A present non-object flags value cannot be replaced safely. */
+            if (navr_value(json, len, &doc, edit, "flags", &value)) goto done;
+            patches[count++] = (navr_patch){doc.c[edit].open + 1, 0,
+                                            "\"flags\":{\"noFlood\":true},"};
+        } else if (!navr_value(json, len, &doc, flags, NAVR_MARKER, &value)) {
+            first = doc.c[flags].open + 1;
+            while (first < doc.c[flags].close && sh_shard_is_ws(json[first])) first++;
+            patches[count++] = (navr_patch){doc.c[flags].open + 1, 0,
+                first == doc.c[flags].close ? "\"noFlood\":true" : "\"noFlood\":true,"};
+        } else {
+            /* Never make an invalid native bool look valid by dropping it. */
+            size_t n = navr_bool(json, len, &doc, flags, NAVR_MARKER) ? 4 : 5;
+            if (n == 5 && (len - value < 5 || memcmp(json + value, "false", 5))) goto done;
+            value += n;
+            if (value < len && !sh_shard_is_ws(json[value]) && json[value] != ',' &&
+                json[value] != '}') goto done;
+        }
+        patches[count++] = (navr_patch){legacy, 4, "false"};
+    }
+    if (!count) goto done;
+    qsort(patches, count, sizeof *patches, navr_patch_order);
+    for (p = 0; p < count; p++) {
+        size_t n = strlen(patches[p].text);
+        if (patches[p].at < read_at || patches[p].at > len ||
+            patches[p].remove > len - patches[p].at) goto done;
+        read_at = patches[p].at + patches[p].remove;
+        if (total - patches[p].remove > (size_t)-1 - n - 1) goto done;
+        total = total - patches[p].remove + n;
+    }
+    out = (char *)HeapAlloc(GetProcessHeap(), 0, total + 1);
+    if (!out) goto done;
+    read_at = 0;
+    for (p = 0; p < count; p++) {
+        size_t copy = patches[p].at - read_at, n = strlen(patches[p].text);
+        memcpy(out + used, json + read_at, copy); used += copy;
+        memcpy(out + used, patches[p].text, n); used += n;
+        read_at = patches[p].at + patches[p].remove;
+    }
+    memcpy(out + used, json + read_at, len - read_at);
+    out[total] = '\0';
+    if (out_len) *out_len = total;
+done:
+    free(patches);
+    sh_shard_doc_free(&doc);
+    return out;
+}
+
 int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
 {
     /* the volume's uniqueId, parallel to out->regions, until attribution */
@@ -674,7 +778,7 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
 
         /* THE MARKER. Only a volume the author ticked "AI Navigation" on is a
          * region; every other blocking volume in the map is left alone. */
-        if (!navr_bool(json, len, &doc, edit, NAVR_MARKER) &&
+        if (!navr_marked(json, len, &doc, edit) &&
             !navr_bool(json, len, &doc, edit, "blockDemons")) continue;
 
         if (!navr_volume_face(json, len, &doc, edit, &region)) {
@@ -689,7 +793,7 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
         if(vuid<0)out->invalid_geometry=1;
         for(keep=0;keep<out->region_count;keep++)if(uid[keep]==vuid)out->invalid_geometry=1;
         region.instance = -1;
-        region.marked = navr_bool(json,len,&doc,edit,NAVR_MARKER);
+        region.marked = navr_marked(json,len,&doc,edit);
         region.block_demons = navr_bool(json, len, &doc, edit, "blockDemons");
         region.entity = self;
         out->regions[out->region_count] = region;
@@ -775,8 +879,8 @@ static int navr_live_region(const char *json, size_t len, sh_nav_region *r)
             edit = navr_member(json, len, &doc,
                                navr_member(json, len, &doc, ed, "state", '{'), "edit", '{');
             /* ABSENT IS FALSE here exactly as it is in the map: an untouched
-             * volume simply has no `affectsNavmesh` member to read. */
-            if (edit >= 0 && navr_bool(json, len, &doc, edit, NAVR_MARKER) &&
+             * volume simply has no `flags.noFlood` member to read. */
+            if (edit >= 0 && navr_marked(json, len, &doc, edit) &&
                 navr_volume_face(json, len, &doc, edit, r)) {
                 r->block_demons = navr_bool(json, len, &doc, edit, "blockDemons");
                 ok = 1;

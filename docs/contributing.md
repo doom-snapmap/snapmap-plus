@@ -168,7 +168,7 @@ By default this compiles and runs 45 **self-contained native tests** (no game ne
   that makes a new area findable, the step and island link regimes, and the refusals.
 - **`nav_geometry_test`** -- oriented solid clipping, support unions, ramp contacts, clearance,
   overlap ordering, floating undersides and bounded geometry failures.
-- **`nav_regions_test`** — reading an author's marked volumes out of a map: the `affectsNavmesh` marker,
+- **`nav_regions_test`** — reading an author's marked volumes out of a map: the `flags.noFlood` marker and legacy migration,
   the spawnPosition/size asymmetry, and `instanceEntities` attribution.
 - **`nav_bake_test`** — baking those regions at map load: the resource-name grammar, per-map planning,
   complete snapshot invalidation, creation/deletion, and distinct resource names for repeated modules.

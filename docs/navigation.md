@@ -5,6 +5,11 @@ support grounded demons. Snapmap+ builds navigation from their current placement
 rotation and dimensions. An unmarked box that blocks demons still obstructs
 navigation on a marked box.
 
+The property uses the existing `flags.noFlood` boolean. Older maps using
+`affectsNavmesh` are migrated on load, preserving the navigation choice while
+clearing that field's native obstacle-content effect. See
+[navigation markers](navigation-markers.md) for precedence and compatibility.
+
 ## Surfaces and traversal
 
 The bake considers all six faces after rotation, then retains exposed faces that

@@ -6,6 +6,19 @@ where our own reimplementation was wrong, not the original SnapHak's behavior; a
 (or faithful reproduction of) the *original's* behavior belongs in [`fidelity.md`](fidelity.md)
 instead. Entries are chronological, newest first.
 
+## 2026-09-10 — Separate the navigation marker from native obstacle contents
+
+The Blocking Box AI Navigation property now uses `flags.noFlood`, an existing
+serialized boolean with no gameplay consumer found in the supported runtime
+access audit. The former `affectsNavmesh` field clears a native obstacle-content
+bit in both renderers. Map loading transfers legacy marks to the new field and
+clears the old flag before both baking and native parsing; explicit new on/off
+values take precedence. The decoder and editor refresh read only the new field.
+
+See [navigation markers](navigation-markers.md) for migration, compatibility,
+and validation limits. This change was checked offline; it does not establish
+that the reported demon stalling is fixed.
+
 ## 2026-09-09 — Intersecting bridge connections respect clearance and elevation
 
 Touching-area discovery now covers the square agent footprint's diagonal

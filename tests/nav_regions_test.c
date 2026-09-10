@@ -13,12 +13,14 @@
  * truncated, unbalanced or lying document has to come back empty rather than
  * read off the end of the buffer.
  */
+#include <windows.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "nav_regions.h"
+#include "overrides_baked.h"
 
 static int g_failed;
 
@@ -201,7 +203,7 @@ static char *map_with_volume(double sx, double sy, double sz,
     bopen(&inst);
     bopen(&ents);
     put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
-    edit_box_or(edit, sizeof edit, "\"affectsNavmesh\":true,\"blockDemons\":true,", "",
+    edit_box_or(edit, sizeof edit, "\"flags\":{\"noFlood\":true},\"blockDemons\":true,", "",
                 px, py, pz, sx, sy, sz, orient);
     put_entity(&ents, 1, 7, INHERIT, edit);
     json = map_of(inst.p, ents.p, "0,1,1", "7", out_n);
@@ -221,7 +223,7 @@ static void test_one_volume(void)
     bopen(&inst);
     bopen(&ents);
     put_instance(&inst, 1, MODULE_DECL, 1152, -2944, 0, 3);
-    edit_box(edit, sizeof edit, "\"affectsNavmesh\":true,\"blockDemons\":true,", "",
+    edit_box(edit, sizeof edit, "\"flags\":{\"noFlood\":true},\"blockDemons\":true,", "",
              100, 200, 64, 200, 400, 128);
     put_entity(&ents, 1, 7, INHERIT, edit);
     json = map_of(inst.p, ents.p, "0,1,1", "7", &n);
@@ -255,7 +257,7 @@ static void test_one_volume(void)
     bclose(&ents);
 }
 
-/* Only `affectsNavmesh` makes a region. A map full of ordinary blocking
+/* Only `flags.noFlood` makes a region. A map full of ordinary blocking
  * volumes -- which is every map published so far -- has none. */
 static void test_marker_required(void)
 {
@@ -270,13 +272,13 @@ static void test_marker_required(void)
     put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
     edit_box(edit, sizeof edit, "\"blockDemons\":true,", "", 0, 0, 0, 64, 64, 8);
     put_entity(&ents, 1, 1, INHERIT, edit);                 /* absent is false */
-    edit_box(edit, sizeof edit, "\"affectsNavmesh\":false,\"blockDemons\":true,", "",
+    edit_box(edit, sizeof edit, "\"flags\":{\"noFlood\":false},\"blockDemons\":true,", "",
              0, 0, 0, 64, 64, 8);
     put_entity(&ents, 0, 2, INHERIT, edit);
-    edit_box(edit, sizeof edit, "\"affectsNavmesh\":true,", "", 0, 0, 0, 64, 64, 8);
+    edit_box(edit, sizeof edit, "\"flags\":{\"noFlood\":true},", "", 0, 0, 0, 64, 64, 8);
     put_entity(&ents, 0, 3, INHERIT, edit);
     /* and an entity that is not a blocking volume at all, ticked or not */
-    edit_box(edit, sizeof edit, "\"affectsNavmesh\":true,", "", 0, 0, 0, 64, 64, 8);
+    edit_box(edit, sizeof edit, "\"flags\":{\"noFlood\":true},", "", 0, 0, 0, 64, 64, 8);
     put_entity(&ents, 0, 4, "snapmaps/prop/static", edit);
     json = map_of(inst.p, ents.p, "0,4,4", "1,2,3,4", &n);
 
@@ -297,7 +299,7 @@ static void test_marker_required(void)
 /* Only a box has a top face, and only a box with area has one at all. */
 static void test_box_shape(void)
 {
-    static const char *TICKED = "\"affectsNavmesh\":true,\"blockDemons\":true,";
+    static const char *TICKED = "\"flags\":{\"noFlood\":true},\"blockDemons\":true,";
     blob inst, ents;
     char edit[1024];
     char *json;
@@ -322,7 +324,7 @@ static void test_box_shape(void)
     put_entity(&ents, 0, 4, INHERIT, edit);
     /* 4: the editor omits a vector component that is zero */
     put_entity(&ents, 0, 5, INHERIT,
-               "\"affectsNavmesh\":true,\"blockDemons\":true,"
+               "\"flags\":{\"noFlood\":true},\"blockDemons\":true,"
                "\"clipModelInfo\":{\"size\":{\"x\":512,\"y\":256,\"z\":16}},"
                "\"spawnPosition\":{\"z\":32}");
     json = map_of(inst.p, ents.p, "0,5,5", "1,2,3,4,5", &n);
@@ -364,7 +366,7 @@ static void test_two_instances_of_one_module(void)
     bopen(&ents);
     put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
     put_instance(&inst, 0, MODULE_DECL, 2048, 0, 0, 2);
-    edit_box(edit, sizeof edit, "\"affectsNavmesh\":true,\"blockDemons\":true,", "",
+    edit_box(edit, sizeof edit, "\"flags\":{\"noFlood\":true},\"blockDemons\":true,", "",
              0, 0, 0, 128, 128, 64);
     put_entity(&ents, 1, 11, INHERIT, edit);
     put_entity(&ents, 0, 22, INHERIT, edit);
@@ -442,7 +444,7 @@ static void test_orphan_bucket(void)
     bopen(&inst);
     bopen(&ents);
     put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
-    edit_box(edit, sizeof edit, "\"affectsNavmesh\":true,\"blockDemons\":true,", "",
+    edit_box(edit, sizeof edit, "\"flags\":{\"noFlood\":true},\"blockDemons\":true,", "",
              0, 0, 0, 128, 128, 64);
     put_entity(&ents, 1, 5, INHERIT, edit);     /* instance 0's bucket */
     put_entity(&ents, 0, 6, INHERIT, edit);     /* the orphan bucket */
@@ -477,7 +479,7 @@ static void test_unnameable_instance(void)
     put_instance(&inst, 1, "maps/modules/no_category.decl", 0, 0, 0, 0);
     put_instance(&inst, 0, "somewhere/else/entirely", 0, 0, 0, 0);
     put_instance(&inst, 0, MODULE_DECL, 0, 0, 0, 0);
-    edit_box(edit, sizeof edit, "\"affectsNavmesh\":true,\"blockDemons\":true,", "",
+    edit_box(edit, sizeof edit, "\"flags\":{\"noFlood\":true},\"blockDemons\":true,", "",
              0, 0, 0, 128, 128, 64);
     put_entity(&ents, 1, 1, INHERIT, edit);
     put_entity(&ents, 0, 2, INHERIT, edit);
@@ -518,7 +520,7 @@ static void test_truncation(void)
     bopen(&ents);
     bopen(&vals);
     put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
-    edit_box(edit, sizeof edit, "\"affectsNavmesh\":true,\"blockDemons\":true,", "",
+    edit_box(edit, sizeof edit, "\"flags\":{\"noFlood\":true},\"blockDemons\":true,", "",
              0, 0, 0, 64, 64, 8);
     for (i = 0; i < volumes; i++) {
         put_entity(&ents, i == 0, i + 1, INHERIT, edit);
@@ -600,7 +602,7 @@ static void test_malformed(void)
     bopen(&inst);
     bopen(&ents);
     put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
-    edit_box(edit, sizeof edit, "\"affectsNavmesh\":true,\"blockDemons\":true,", "",
+    edit_box(edit, sizeof edit, "\"flags\":{\"noFlood\":true},\"blockDemons\":true,", "",
              0, 0, 0, 128, 128, 64);
     put_entity(&ents, 1, 1, INHERIT, edit);
     json = map_of(inst.p, ents.p, "0,1,1", "1", &n);
@@ -745,7 +747,7 @@ static char *live_box(const char *flags, double cx, double cy, double cz,
     return live_entity(INHERIT, edit, -1);
 }
 
-static const char *TICKED  = "\"affectsNavmesh\":true,\"blockDemons\":true,";
+static const char *TICKED  = "\"flags\":{\"noFlood\":true},\"blockDemons\":true,";
 static const char *UNTICKED = "\"blockDemons\":true,";
 
 /* The map every test below starts from: one instance, two blocking boxes, and
@@ -814,7 +816,7 @@ static void test_live_untick_this_session(void)
     sh_nav_map m;
     live_editor e;
     char *json = two_box_map(&m);
-    char *live0 = live_box("\"affectsNavmesh\":false,\"blockDemons\":true,", 0, 0, 0, 128, 128, 64);
+    char *live0 = live_box("\"flags\":{\"noFlood\":false},\"blockDemons\":true,", 0, 0, 0, 128, 128, 64);
     char *live1 = live_box(UNTICKED, 100, 200, 64, 200, 400, 128);
 
     memset(&e, 0, sizeof e);
@@ -915,7 +917,7 @@ static void test_live_unmarked_volumes_still_clear(void)
 }
 
 /* ABSENT IS FALSE, live exactly as in the map: an untouched volume carries no
- * `affectsNavmesh` member at all, and reading that as "ticked" would turn every
+ * `flags.noFlood` member at all, and reading that as "ticked" would turn every
  * blocking box in the map into navigation. */
 static void test_live_absent_marker_is_false(void)
 {
@@ -943,8 +945,8 @@ static void test_live_block_demons(void)
     sh_nav_map m;
     live_editor e;
     char *json = two_box_map(&m);
-    char *live0 = live_box("\"affectsNavmesh\":true,", 0, 0, 0, 128, 128, 64);
-    char *live1 = live_box("\"affectsNavmesh\":true,\"blockDemons\":true,",
+    char *live0 = live_box("\"flags\":{\"noFlood\":true},", 0, 0, 0, 128, 128, 64);
+    char *live1 = live_box("\"flags\":{\"noFlood\":true},\"blockDemons\":true,",
                            100, 200, 64, 200, 400, 128);
 
     memset(&e, 0, sizeof e);
@@ -1324,8 +1326,82 @@ static void test_reflection_is_refused(void)
     free(json);
 }
 
+static void test_marker_migration(void)
+{
+    static const char *cases[] = {
+        "\"affectsNavmesh\":true,",
+        "\"affectsNavmesh\":true,\"flags\":{},",
+        "\"flags\":{\"hide\":false},\"affectsNavmesh\":true,",
+        "\"flags\":{\"noFlood\":true,\"hide\":false},\"affectsNavmesh\":true,",
+        "\"flags\":{\"noFlood\":false,\"hide\":false},\"affectsNavmesh\":true,"
+    };
+    size_t k;
+    for (k = 0; k < sizeof cases / sizeof cases[0]; k++) {
+        blob inst, ents;
+        char edit[1024], *json, *migrated;
+        size_t len, out_len;
+        sh_nav_map before, after;
+        bopen(&inst); bopen(&ents);
+        put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
+        edit_box(edit, sizeof edit, cases[k], "", 0, 0, 0, 64, 64, 8);
+        put_entity(&ents, 1, 1, INHERIT, edit);
+        json = map_of(inst.p, ents.p, "0,1,1", "1", &len);
+        CHECK(sh_nav_regions_read(json, len, &before));
+        /* Legacy field alone never participates in a bake. */
+        CHECK(before.region_count == (k == 3 ? 1 : 0));
+        migrated = sh_nav_regions_migrate(json, len, &out_len);
+        CHECK(migrated != NULL);
+        if (migrated) {
+            CHECK(out_len == strlen(migrated));
+            CHECK(strstr(migrated, "\"affectsNavmesh\":false") != NULL);
+            CHECK(sh_nav_regions_read(migrated, out_len, &after));
+            CHECK(after.region_count == (k == 4 ? 0 : 1));
+            if (after.region_count) CHECK(after.regions[0].instance == 0);
+            if (k >= 2) CHECK(strstr(migrated, "\"hide\":false") != NULL);
+            CHECK(sh_nav_regions_migrate(migrated, out_len, NULL) == NULL);
+            HeapFree(GetProcessHeap(), 0, migrated);
+        }
+        /* Input ownership and old file bytes remain untouched. */
+        CHECK(strstr(json, "\"affectsNavmesh\":true") != NULL);
+        free(json); bclose(&inst); bclose(&ents);
+    }
+}
+
+static void test_marker_migration_boundaries(void)
+{
+    static const char *unchanged[] = {
+        "{\"entities\":[]}",
+        "{\"entities\":[{\"entityDef\":{\"inherit\":\"other\",\"state\":{\"edit\":{\"affectsNavmesh\":true}}}}]}",
+        "{\"entities\":[{\"entityDef\":{\"inherit\":\"snapmaps/volume/blocking\",\"state\":{\"edit\":{\"affectsNavmesh\":false}}}}]}",
+        "{\"entities\":[{\"entityDef\":{\"inherit\":\"snapmaps/volume/blocking\",\"state\":{\"edit\":{\"nested\":{\"affectsNavmesh\":true}}}}}]}",
+        "{\"entities\":[{\"entityDef\":{\"inherit\":\"snapmaps/volume/blocking\",\"state\":{\"edit\":{\"affectsNavmesh\":true,\"flags\":null}}}}]}",
+        "{\"entities\":[{\"entityDef\":{\"inherit\":\"snapmaps/volume/blocking\",\"state\":{\"edit\":{\"affectsNavmesh\":true,\"flags\":{\"noFlood\":\"false\"}}}}}]}",
+        "{\"entities\":[{\"entityDef\":{\"inherit\":\"snapmaps/volume/blocking\",\"state\":{\"edit\":{\"affectsNavmesh\":trueSuffix}}}}]}",
+        "{\"entities\":["
+    };
+    size_t i;
+    for (i = 0; i < sizeof unchanged / sizeof unchanged[0]; i++) {
+        size_t len = strlen(unchanged[i]), out_len = 0;
+        CHECK(sh_nav_regions_migrate(unchanged[i], len, &out_len) == NULL);
+        CHECK(out_len == len);
+    }
+    /* The actual shipped native property points to the new field. Its native
+     * affectsNavmeshPath stays independent and no new engine field is added. */
+    {
+        char text[sizeof g_ov_baked_d4 + 1];
+        memcpy(text, g_ov_baked_d4, sizeof g_ov_baked_d4);
+        text[sizeof g_ov_baked_d4] = 0;
+        CHECK(strstr(text, "path = \"flags.noFlood\";") != NULL);
+        CHECK(strstr(text, "path = \"affectsNavmesh\";") == NULL);
+        CHECK(strstr(text, "affectsNavmeshPath = \"affectsNavmesh\";") != NULL);
+        CHECK(strstr(text, "#str_sh_bv_navigation") != NULL);
+    }
+}
+
 int main(void)
 {
+    test_marker_migration();
+    test_marker_migration_boundaries();
     test_one_volume();
     test_sparse_orientation_seeds_identity();
     test_45_yaw_on_oblong_pins_the_convention();

@@ -4,23 +4,17 @@
  * ----------------------------
  * They build their arena out of Blocking Boxes, as they always have, and tick
  * "AI Navigation" on the ones demons are meant to walk on. That tick sets
- * `affectsNavmesh` on the volume.
+ * `flags.noFlood` on the volume, an existing reflected idEntity boolean.
+ * The runtime access audit found no gameplay consumer of its bit in either
+ * supported executable. The Blocking Box decl and base constructor default it
+ * to false. This uses vanilla typeinfo and serialization, not a new field.
  *
- * That field is not ours. `snapmaps/volume/blocking` has carried a bool
- * `affectsNavmesh` since release, and the shipped editor tile already declares
- * `affectsNavmeshPath = "affectsNavmesh"` beside `showOnSpawnPath` and
- * `networkStaticPath`. id wired the whole path and then never exposed the
- * property sheet row, and nothing in the shipped binary consumes the value: the
- * one function that references the string (RVA 0x545120) is the editor's
- * property-write dispatcher, which copies it into the entity's spawn args, and
- * no AAS or obstacle code reads it back.
- *
- * That is what makes this marker VANILLA-SAFE BY CONSTRUCTION. Snapmap+ only
- * adds the missing property-sheet row; the field, its typeinfo path and its
- * serialization already exist in every player's game. A vanilla client loads a
- * map full of ticked volumes, plumbs the bool to spawn args exactly as it always
- * did, and nothing reads it. No new entityDef, no palette entry, no unknown
- * inherit -- the three things that could make a stock client refuse a map.
+ * The former marker, `affectsNavmesh`, is NOT inert: the native blocking-volume
+ * setup clears CONTENTS_OBSTACLE when it is true. Old marked boxes migrate at
+ * map load to flags.noFlood, with affectsNavmesh cleared before native parsing.
+ * An explicit new marker wins, including false. The bake reader itself never
+ * falls back to affectsNavmesh. See docs/navigation-markers.md for scope and
+ * compatibility limits.
  *
  * WHAT THIS MODULE DOES
  * ---------------------
@@ -103,6 +97,11 @@ typedef struct sh_nav_map {
  * 0 if it is not a map document at all. Never raises; the input is a stranger's
  * map. `out` is fully overwritten, including on failure. */
 int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out);
+
+/* Convert legacy Blocking Box markers before native map parsing. Returns a
+ * NUL-terminated HeapAlloc buffer (caller HeapFrees), or NULL for no change or
+ * a refusal. Other entities and unrelated bytes are preserved. */
+char *sh_nav_regions_migrate(const char *json, size_t len, size_t *out_len);
 
 /* Legacy per-entity refresh for callers without a complete-map snapshot.
  * Production editor baking uses sh_nav_bake_set_snapshot instead: it refreshes

@@ -8,6 +8,10 @@ This is an engineering log for maintainers, not the product changelog. The relea
 
 ### 2026-09-06 -- The Navigation tab, added and then removed
 
+The property described below originally used `affectsNavmesh`. On September 10
+it moved to `flags.noFlood` to separate the bake marker from native obstacle
+contents; see [navigation markers](navigation-markers.md).
+
 - **Removed the same day it landed.** A Navigation tab briefly listed the map's Blocking Boxes and
   let an author tick which ones demons may walk on. It is gone: the flag is exposed in DOOM's own
   entity object-settings panel instead, as an `affectsNavmesh` property row on

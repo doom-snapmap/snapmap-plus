@@ -102,7 +102,7 @@ static char *make_map(const char *module, int instances, int n,
             "\"state\":{\"edit\":{"
             "\"clipModelInfo\":{\"size\":{\"x\":1024.0,\"y\":1024.0,\"z\":128.0}},"
             "\"spawnPosition\":{\"x\":0.0,\"y\":0.0,\"z\":0.0},"
-            "\"blockDemons\":%s,\"affectsNavmesh\":%s}}}}",
+            "\"blockDemons\":%s,\"flags\":{\"noFlood\":%s}}}}}",
             i ? "," : "", 100 + i,
             (blocks & (1u << i)) ? "true" : "false",
             (marked & (1u << i)) ? "true" : "false");
