@@ -26,6 +26,16 @@ if (-not $vs) { throw "VC Tools (x86/x64) not found in any VS install." }
 $vcvars = "$vs\VC\Auxiliary\Build\vcvars64.bat"
 if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
 
+# Import the MSVC environment ONCE. vcvars64.bat costs seconds, so running it per
+# test spent minutes on setup alone. Names starting with "=" are cmd's per-drive
+# working directories and are skipped by the pattern.
+cmd /c "`"$vcvars`" >nul 2>&1 && set" | ForEach-Object {
+    if ($_ -match '^([^=]+)=(.*)$') {
+        [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
+    }
+}
+if (-not (Get-Command cl -ErrorAction SilentlyContinue)) { throw "cl not on PATH after $vcvars" }
+
 # name | sources (relative to tests\) | runtime arg
 $tests = @(
     @{ name = "nav_play_test"; src = 'nav_play_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; arg = "" }
@@ -103,7 +113,7 @@ foreach ($t in $tests) {
     $cl  = "cl /nologo /O2 /MT /I..\src\backend /I..\src\common /I..\src\fault_shield /I..\src\ui\webview$cxx$defs $($t.src) /Fe:obj\$($t.name).exe /Foobj\$libs"
     $log = Join-Path $obj ($t.name + ".build.log")
     # Judge the compiler exit code; vcvars may emit unrelated stderr diagnostics.
-    cmd /c "cd /d `"$here`" && `"$vcvars`" && $cl > `"$log`" 2>&1"
+    cmd /c "cd /d `"$here`" && $cl > `"$log`" 2>&1"
     if ($LASTEXITCODE -ne 0) { Get-Content $log | Write-Host; Write-Host "[FAIL] compile $($t.name)"; $fail++; continue }
     if ($t.arg) { & $exe @($t.arg) } else { & $exe }
     if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] $($t.name) (exit $LASTEXITCODE)"; $fail++ }
