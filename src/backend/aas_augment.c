@@ -961,11 +961,36 @@ static int aug_carve(aug_ctx *c, int area, const aug_quad *eff)
 
 /* ---- reachabilities ---------------------------------------------------- */
 
+/* Reachabilities store integer coordinates. Validate the stored point, not
+ * just its floating-point precursor: truncation can cross a yawed seam.
+ * Preserve the old truncation when valid, otherwise try the adjacent integer
+ * corners of the same coordinate cell and retain the closest valid one. */
+static int aug_reach_point(const sh_aas *a,int area,const double p[3],double out[3])
+{
+    double best=1e30;int i,k,found=0;
+    for(k=0;k<3;k++) {
+        if(!isfinite(p[k])||p[k]<-32768.0||p[k]>32767.0)return 0;
+        out[k]=(double)aug_trunc(p[k]);
+    }
+    if(sh_aas_point_area(a,(float)out[0],(float)out[1],(float)(out[2]+2))==area)return 1;
+    for(i=0;i<8;i++) {
+        double q[3],d=0;
+        for(k=0;k<3;k++){q[k]=(i&(1<<k))?ceil(p[k]):floor(p[k]);d+=(q[k]-p[k])*(q[k]-p[k]);}
+        if(d>=best||sh_aas_point_area(a,(float)q[0],(float)q[1],(float)(q[2]+2))!=area)continue;
+        memcpy(out,q,sizeof q);best=d;found=1;
+    }
+    return found;
+}
+
 static int aug_reach(aug_ctx *c, unsigned flags, int time, int from, int to,
                      const double s[3], const double e[3])
 {
     unsigned first;
     unsigned char *r;
+    double qs[3],qe[3];
+    if(!aug_reach_point(c->a,from,s,qs)||!aug_reach_point(c->a,to,e,qe))return 0;
+    if(flags==REACH_WALK&&fabs(qs[2]-qe[2])>c->step)return 0;
+    s=qs;e=qe;
     if (!sh_aas_append(c->a, SH_AAS_L_REACHABILITIES, 1, &first)) return 0;
     r = sh_aas_rec(c->a, SH_AAS_L_REACHABILITIES, first);
     if (!r) return 0;
@@ -1341,7 +1366,11 @@ static int aug_generated_segments(aug_ctx *c,int ai,const aug_quad *eff,
                                   int npeers,aug_side *out,int cap,int gaps)
 {
     const aug_peer *cand[SH_AUG_MAX_PLATFORMS];
-    double reach=gaps?SH_TRAV_LEAP_MAX_SPAN:2.0*c->radius+AUG_TOUCH_EPS*2.0;
+    /* Standing clearance uses the native square XY body, not a circle.
+     * Against a yawed edge its support radius is r*(|nx|+|ny|), up to
+     * sqrt(2)*r. Two touching surfaces can therefore have their standing
+     * regions farther apart than 2*r without any physical gap. */
+    double reach=gaps?SH_TRAV_LEAP_MAX_SPAN:2.0*sqrt(2.0)*c->radius+AUG_TOUCH_EPS*2.0;
     int ncand=aug_candidates(req,peers,npeers,ai,reach,cand,SH_AUG_MAX_PLATFORMS);
     int e,q,n=0;
     for(e=0;e<eff->count;e++) {
@@ -1800,7 +1829,7 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                 const sh_trav_monster *m = sh_trav_monster_at(k);
                 char path[SH_TRAV_PATH_CAP];
                 float off = 0.0f;
-                int dist = 0, time = 0, aidx, placed = 0, dirn;
+                int dist = 0, time = 0, aidx, placed = 0, dirn, inward;
                 double inner_pt[3], outer_pt[3], dirs;
                 aug_trav_spec *sp;
 
@@ -1832,9 +1861,21 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                          * would write the link at a distance the chosen clip was
                          * never checked against. */
                         const aug_quad *pe = peers[sides[i].peer].eff;
-                        outer_pt[0] = sides[i].land[0];
-                        outer_pt[1] = sides[i].land[1];
+                        double distance,land[2];
+                        /* A touching contact follows this anchor's ray. Leaps
+                         * keep the landing used to select their span above. */
+                        if(leap)memcpy(land,sides[i].land,sizeof land);
+                        else if(!aug_ray_entry(pe,inner_pt[0],inner_pt[1],
+                                sides[i].out[0],sides[i].out[1],
+                                SH_TRAV_LEAP_MAX_SPAN+256.0,&distance,land))continue;
+                        outer_pt[0] = land[0];
+                        outer_pt[1] = land[1];
                         outer_pt[2] = aug_z_at(pe, outer_pt[0], outer_pt[1]);
+                        if(!leap) {
+                            double actual_span=fabs(inner_pt[2]-outer_pt[2]);
+                            if(actual_span<=c->step||!sh_trav_select(m,dirn,(float)actual_span,
+                                path,sizeof path,&off,&dist,&time))continue;
+                        }
                     } else {
                         outer_pt[0] = bx + sides[i].out[0] * (double)off;
                         outer_pt[1] = by + sides[i].out[1] * (double)off;
@@ -1847,6 +1888,11 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                         continue;
                     if (!aug_path_is_clear(c, peers, npeers, ai, sides[i].floor_area,
                                            inner_pt, outer_pt)) continue;
+                    {
+                        double stored[3];
+                        if(!aug_reach_point(c->a,ai,inner_pt,stored)||
+                           !aug_reach_point(c->a,sides[i].floor_area,outer_pt,stored))continue;
+                    }
                     placed = 1;
                     break;
                 }
@@ -1857,16 +1903,20 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                 sp->travel_flags = m->travel_flags;
                 sp->d30 = m->d30;
                 sp->travel_time = time;
-                sp->from_area = up ? sides[i].floor_area : ai;
-                sp->to_area   = up ? ai : sides[i].floor_area;
-                memcpy(sp->start, up ? outer_pt : inner_pt, sizeof sp->start);
-                memcpy(sp->end,   up ? inner_pt : outer_pt, sizeof sp->end);
+                /* Pair ownership follows geometry/index order, not elevation.
+                 * A lower bridge can own its higher support: select the actual
+                 * uphill/downhill direction independently of which is 'ours'. */
+                inward=leap?up:(up==(inner_pt[2]>outer_pt[2]));
+                sp->from_area = inward ? sides[i].floor_area : ai;
+                sp->to_area   = inward ? ai : sides[i].floor_area;
+                memcpy(sp->start, inward ? outer_pt : inner_pt, sizeof sp->start);
+                memcpy(sp->end,   inward ? inner_pt : outer_pt, sizeof sp->end);
                 /* Facing is the XY travel direction: inward coming onto this
                  * platform, outward leaving it. A non-axis facing is on
                  * precedent -- wc_office_arena.aas_monster48 carries (w18,w1a)
                  * pairs of (23169,23169) and (57468,33778), and 23169 is
                  * 0.707 * TP_DIR_UNIT. */
-                dirs = up ? -1.0 : 1.0;
+                dirs = inward ? -1.0 : 1.0;
                 sp->dir[0] = sides[i].out[0] * dirs;
                 sp->dir[1] = sides[i].out[1] * dirs;
                 sp->is_leap = leap;

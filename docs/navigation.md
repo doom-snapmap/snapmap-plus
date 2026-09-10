@@ -27,6 +27,15 @@ construction does not have to become one area, and a valid isolated platform
 does not automatically have a route up from the module floor. Different monster
 sizes can have different usable space and traversal links.
 
+A bridge slightly below its supports needs explicit connections across each
+ledge. Height changes within the AAS class's `maxStepHeight` (18 units in the
+ground-monster payloads) use reciprocal walk links; higher ledges require a
+supported traversal animation. Neighbor discovery includes the extra clearance
+needed by a square collision footprint at any yaw. Stored integer endpoints
+must still resolve to their intended areas, and uphill/downhill animations
+follow the actual elevations regardless of box creation order. An overlap does
+not make a ledge of arbitrary height walkable.
+
 ## Editing and preview
 
 While the editor is active, Snapmap+ takes a complete geometry snapshot roughly

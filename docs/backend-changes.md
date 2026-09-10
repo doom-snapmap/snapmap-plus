@@ -6,6 +6,21 @@ where our own reimplementation was wrong, not the original SnapHak's behavior; a
 (or faithful reproduction of) the *original's* behavior belongs in [`fidelity.md`](fidelity.md)
 instead. Entries are chronological, newest first.
 
+## 2026-09-09 — Intersecting bridge connections respect clearance and elevation
+
+Touching-area discovery now covers the square agent footprint's diagonal
+clearance. The previous circular bound missed rotated bridge contacts even
+with a one-unit step. Reachability endpoints are checked after integer
+conversion, with adjacent integer candidates tried when truncation crosses a
+seam. Climb and descent direction now follows endpoint elevation instead of
+assuming the area owning a connection is always the higher one.
+
+Host regressions exercise overlapping narrow bridges, skewed intersections,
+five orientations, every input order, three agent widths, and both walkable
+steps and animated ledges. They verify generated-only walk routes, stored
+endpoint membership, reciprocal bridge traversals and animation direction.
+These checks do not replace live demon movement testing.
+
 ## 2026-09-09 — Blocking Box navigation follows solid geometry and editor revisions
 
 The baker now considers every rotated box face, clips exposed standing space
