@@ -88,6 +88,120 @@ static int index_of(const sh_package *packages, size_t count, const char *name)
     return -1;
 }
 
+/* Deterministic enumeration failures, including the error being overwritten
+ * by FindClose. Synthetic directory entries never open a real search handle. */
+static DWORD injected_root_attributes, injected_root_error;
+static DWORD injected_first_error, injected_terminal_error;
+static unsigned injected_entries, injected_cursor, injected_searches, injected_closes;
+
+static DWORD WINAPI injected_attributes(LPCSTR path)
+{
+    size_t length = strlen(path);
+    if (length >= 13 && !strcmp(path + length - 13, "\\package.json"))
+        return FILE_ATTRIBUTE_NORMAL;
+    SetLastError(injected_root_error);
+    return injected_root_attributes;
+}
+
+static void injected_entry(LPWIN32_FIND_DATAA found, unsigned index)
+{
+    memset(found, 0, sizeof *found);
+    found->dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+    _snprintf_s(found->cFileName, sizeof found->cFileName, _TRUNCATE,
+                "injected-%u", index);
+}
+
+static HANDLE WINAPI injected_first(LPCSTR pattern, LPWIN32_FIND_DATAA found)
+{
+    (void)pattern;
+    injected_searches++;
+    injected_cursor = 0;
+    if (!injected_entries) {
+        SetLastError(injected_first_error);
+        return INVALID_HANDLE_VALUE;
+    }
+    injected_entry(found, injected_cursor++);
+    return (HANDLE)(ULONG_PTR)1;
+}
+
+static BOOL WINAPI injected_next(HANDLE search, LPWIN32_FIND_DATAA found)
+{
+    (void)search;
+    if (injected_cursor < injected_entries) {
+        injected_entry(found, injected_cursor++);
+        return TRUE;
+    }
+    SetLastError(injected_terminal_error);
+    return FALSE;
+}
+
+static BOOL WINAPI injected_close(HANDLE search)
+{
+    (void)search;
+    injected_closes++;
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
+}
+
+static void enumeration_failures(const char *root)
+{
+    sh_packages_test_find_api api = {injected_first, injected_next,
+                                    injected_close, injected_attributes};
+    sh_package packages[SH_PACKAGES_MAX];
+    size_t count;
+    injected_root_attributes = FILE_ATTRIBUTE_DIRECTORY;
+    injected_root_error = ERROR_SUCCESS;
+    injected_terminal_error = ERROR_NO_MORE_FILES;
+    injected_first_error = ERROR_FILE_NOT_FOUND;
+    injected_entries = 0;
+    injected_searches = injected_closes = 0;
+    sh_packages_test_set_api(&api);
+
+    CHECK(sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(count == 0);
+    injected_first_error = ERROR_ACCESS_DENIED;
+    CHECK(!sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(count == 0);
+
+    injected_entries = 2;
+    CHECK(sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(count == 2);
+    CHECK(index_of(packages, count, "injected-0") >= 0);
+    CHECK(index_of(packages, count, "injected-1") >= 0);
+    CHECK(injected_closes == 1);
+    injected_terminal_error = ERROR_ACCESS_DENIED;
+    CHECK(!sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(count == 2); /* callers can inspect partial rows, but must refuse */
+    CHECK(injected_closes == 2);
+    injected_terminal_error = ERROR_READ_FAULT;
+    CHECK(!sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(count == 2);
+    CHECK(injected_closes == 3);
+
+    injected_root_attributes = INVALID_FILE_ATTRIBUTES;
+    injected_searches = 0;
+    injected_root_error = ERROR_FILE_NOT_FOUND;
+    CHECK(sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(count == 0);
+    injected_root_error = ERROR_PATH_NOT_FOUND;
+    CHECK(sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(count == 0);
+    injected_root_error = ERROR_ACCESS_DENIED;
+    CHECK(!sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(count == 0);
+    injected_root_error = ERROR_SHARING_VIOLATION;
+    CHECK(!sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(count == 0);
+    injected_root_attributes = FILE_ATTRIBUTE_NORMAL;
+    CHECK(!sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(count == 0);
+    injected_root_attributes = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT;
+    CHECK(!sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(count == 0);
+    CHECK(injected_searches == 0);
+    sh_packages_test_reset_api();
+}
+
 int main(void)
 {
     char temp[MAX_PATH], root[MAX_PATH], overrides[MAX_PATH];
@@ -101,6 +215,7 @@ int main(void)
                 temp, (unsigned long)pid);
     remove_tree(root);
     CHECK(make_dir(root));
+    enumeration_failures(root);
 
     /* A data root with no overrides directory at all is a complete, empty
      * enumeration -- a fresh install must not look like a read failure. */

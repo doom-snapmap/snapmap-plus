@@ -36,6 +36,7 @@
 #include "decl_server.h"
 #include "hook.h"
 #include "package_requirements.h"
+#include "weapon_hud.h"
 #include "decl_server_path.h"
 #include "decl_text.h"
 #include "overrides.h"
@@ -2651,6 +2652,7 @@ static void __cdecl ds_rearm_command(void)
             char rr[MAX_PATH];
             if (sh_overrides_get_root(rr, sizeof rr)) {
                 (void)sh_resource_bridge_recapture(rr);
+                (void)sh_weapon_hud_reload(rr);
                 /* Synchronous: this applies the gates AND drains them before returning. */
                 if (!sh_package_requirements_rearm(rr, (void *)g_execute_commands,
                                                    sh_user_overrides_enabled_for_launch()))

@@ -60,6 +60,7 @@
 #define SH_AUG_MAX_PLATFORMS   512
 #define SH_AUG_NAME_CAP        64
 #define SH_AUG_REASON_CAP      160
+#define SH_AUG_MAX_CORNERS     32
 
 /* One surface to make walkable, in the payload's own module-local space: an
  * ORIENTED CONVEX QUAD, four corners each with their own z, wound CLOCKWISE
@@ -71,11 +72,15 @@
  * OBB index -- 4 is an UPRIGHT box's top, which is what `side_face` compares
  * against. */
 typedef struct sh_aug_platform {
-    float c[4][3];                      /* the face, CW seen from +Z */
+    float c[SH_AUG_MAX_CORNERS][3];      /* convex boundary, CW seen from +Z */
     float n[3];                         /* unit outward normal */
     int   face;                         /* OBB face index; 4 == upright top */
     float depth;                        /* the solid's extent along -n behind the face */
     char  name[SH_AUG_NAME_CAP];        /* for the report only */
+    int   corners;                      /* zero means four input box corners */
+    int   prepared;                     /* clearance already applied to the union */
+    int   obstacle_only;                /* collide, but never create support */
+    float support[4][3];                /* original box face behind a prepared cell */
 } sh_aug_platform;
 
 /* `fall`: emit walk-off-ledge links. AUTO honours settings.maxFallHeight, which
@@ -129,10 +134,8 @@ typedef struct sh_aug_report {
     sh_aug_platform_result platforms[SH_AUG_MAX_PLATFORMS];
     int      platform_count;
     int      source_count;
-    int      pieces_truncated;          /* a face broke into more pieces than
-                                         * could be carried; the smallest were
-                                         * dropped, so some walkable ground is
-                                         * missing from the payload */
+    int      pieces_truncated;          /* geometry capacity exhausted;
+                                         * the whole candidate is refused */
     int      dead_gaps;                 /* pairs of emitted platforms too far
                                          * apart to step between and too close
                                          * for the shortest jump the game ships,
@@ -143,9 +146,8 @@ typedef struct sh_aug_report {
     unsigned reach_before, reach_after;
     unsigned depth_before, depth_after;
     int      depth_exceeded;            /* past the loader's 0x80 limit */
-    int      links_truncated;           /* the traversal budget ran out; some
-                                         * platforms have fewer climbs and leaps
-                                         * than the geometry allows */
+    int      links_truncated;           /* traversal capacity exhausted;
+                                         * the whole candidate is refused */
     int      climbs_declined;           /* this module already owns traversal
                                          * points on an area we would have
                                          * climbed from, so no climb or leap was

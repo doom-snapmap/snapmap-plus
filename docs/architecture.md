@@ -150,6 +150,28 @@ The live camera-origin read intentionally runs at this full cadence rather than 
 10-frame (~330 ms) entity-list/selection/state poll. It posts to WebView2 only when a coordinate changes,
 so stationary-camera frames pay for one guarded vec3 read but enqueue no page message.
 
+## Editor navigation snapshots and rendering
+
+The existing frontend tick schedules at most one navigation refresh per second.
+The engine command drain performs the complete edit-map serialization on the
+game thread. A thread-local snapshot guard suppresses save embedding and shadow
+writes during this read. Geometry, module transforms and `instanceEntities`
+ownership are validated and published together under the bake lock; a changed
+snapshot invalidates cached generated areas. No new interface slots are needed.
+
+The edit-to-build detour takes a final snapshot and freezes its revision while
+the engine composes the three ground-monster AAS classes. Two verified BuildAAS
+call sites select temporary resource names containing the revision and exact
+module-instance index. The ordinary engine transform, merge and temporary
+resource destruction paths then handle each independent payload.
+
+Object Mode renders the validated monster48 preview. The game thread publishes
+a private double-buffered line list; native render-stage and post-process hooks
+match it to the current renderer-side world and view. Renderer consumers hold a
+shared lock and never read mutable editor entities. Blueprint Mode, unavailable
+snapshots and editor teardown clear the display. See [navigation.md](navigation.md)
+for geometry support, refresh timing and limits.
+
 ## Engine allocations inherit a heap scope — mind the lifetime
 
 Any engine object we build through idlib containers is allocated from **whatever heap is currently on top
@@ -250,6 +272,7 @@ overrides/cyberdemon/decls/<type>/<logical-name>.decl
 overrides/cyberdemon/resources/<name>.manifest
 overrides/cyberdemon/requirements/<name>.requirements
 overrides/cyberdemon/strings/<name>.json
+overrides/cyberdemon/hud/weapons.json
 overrides/cyberdemon/shaders/generated/spirv/<name>.{vspv,fspv,cspv}
 overrides/cyberdemon/shaders/generated/renderprogs/<name>_pc_vulkan.bin
 ```
@@ -306,6 +329,16 @@ removes the old tree only once every file is verified present at the new locatio
 
 That migration does not change which bytes the engine can be served, because the root file shadow below is a
 separate path from package resolution.
+
+### Weapon HUD policy
+
+Packages may declare exact weapon-to-ammo-display mappings in `hud/weapons.json`.
+The bounded, strictly parsed table is captured at startup and during package
+re-arm; identical requests compose and disagreements refuse the HUD table.
+One portable, verified ammo-widget call uses the table without modifying game
+mode, ammunition or declarations. It preserves engine behavior for unlisted
+weapons and when overrides are disabled or validation fails.
+See [weapon-hud.md](weapon-hud.md) for the schema, lifecycle and client limits.
 
 ### The file shadow resolves across packages too
 
@@ -539,6 +572,7 @@ removing the Snapmap+ DLL leaves the engine on its untouched packaged-resource p
     "overrides.user_enabled": true,
     "packages.embed_in_saved_maps": true,
     "navmesh.enabled": true,
+    "navmesh.preview": true,
     "navmesh.embed_in_saved_maps": true
   }
 }

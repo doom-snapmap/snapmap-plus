@@ -6,6 +6,55 @@ where our own reimplementation was wrong, not the original SnapHak's behavior; a
 (or faithful reproduction of) the *original's* behavior belongs in [`fidelity.md`](fidelity.md)
 instead. Entries are chronological, newest first.
 
+## 2026-09-09 — Intersecting bridge connections respect clearance and elevation
+
+Touching-area discovery now covers the square agent footprint's diagonal
+clearance. The previous circular bound missed rotated bridge contacts even
+with a one-unit step. Reachability endpoints are checked after integer
+conversion, with adjacent integer candidates tried when truncation crosses a
+seam. Climb and descent direction now follows endpoint elevation instead of
+assuming the area owning a connection is always the higher one.
+
+Host regressions exercise overlapping narrow bridges, skewed intersections,
+five orientations, every input order, three agent widths, and both walkable
+steps and animated ledges. They verify generated-only walk routes, stored
+endpoint membership, reciprocal bridge traversals and animation direction.
+These checks do not replace live demon movement testing.
+
+## 2026-09-09 — Blocking Box navigation follows solid geometry and editor revisions
+
+The baker now considers every rotated box face, clips exposed standing space
+against oriented solids and agent clearance, and preserves shared support edges.
+Floating decks retain their actual undersides. Connection discovery clips whole
+edge intervals so narrow contacts can be found between fixed sample locations.
+
+Complete editor snapshots replace the load-time ID ownership lookup, covering
+creation, deletion, transforms and module reassignment. A final snapshot freezes
+the Play build revision. Temporary AAS resource names include the exact module
+instance so repeated modules cannot reuse another instance's custom geometry.
+Invalid geometry, ambiguous ownership and capacity failures refuse the candidate.
+
+Object Mode displays a green grid from validated generated areas through a
+private native render pass. Renderer hooks resolve on both executable variants;
+their frontend-to-backend render-world member offsets differ and are selected
+from the verified renderer prologue. See [navigation.md](navigation.md) for scope
+and the distinction between baked standing space and demon traversal behavior.
+
+## 2026-09-09 — Incomplete package discovery is refused
+
+Package enumeration now distinguishes end-of-directory from a failed next-entry
+read and distinguishes an absent overrides directory from inaccessible or
+malformed roots. Previously, a partial scan could report success and omit a
+conflicting package. Consumers requiring a complete snapshot, including weapon
+HUD policies, now receive a failure and retain their documented fallback.
+Injected enumeration tests cover failures after already discovering packages.
+
+The patch layer also supports redirecting an existing aligned E8 call by
+atomically replacing only its rel32 operand, with verified original bytes and
+atomic restoration. The weapon HUD uses this path rather than a multi-byte
+copy while native callers can be running. Its synthetic executable test keeps
+an unrelated caller active through installation and restoration.
+
 ## 2026-09-07 — Decl-edit commits moved onto DOOM's main thread (issue #61, step 2)
 
 **What changed.** Every kind=0 decl-edit — the SnapStack apply ops (`bss`/`bsi`/`bsf`/`bsb`/`bse`/

@@ -90,6 +90,7 @@ if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
 
 # name | sources (relative to tests\) | runtime arg
 $tests = @(
+    @{ name = "weapon_hud_test"; src = 'weapon_hud_test.c ..\src\backend\weapon_hud.c ..\src\backend\packages.c ..\src\backend\config_json.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_WEAPON_HUD_TESTING /DSH_PACKAGES_TESTING'; arg = "" }
     @{ name = "shield_format_test"; src = 'shield_format_test.c ..\src\fault_shield\fault_record.c ..\src\common\log_rotate.c'; arg = "" }
     @{ name = "hook_test";          src = 'hook_test.c ..\src\backend\hook.c';                       arg = "" }
     @{ name = "crash_record_test";  src = 'crash_record_test.c ..\src\fault_shield\crash_record_format.c'; arg = "" }
@@ -110,13 +111,14 @@ $tests = @(
     @{ name = "package_conflicts_test"; src = 'package_conflicts_test.c ..\src\backend\package_conflicts.c ..\src\backend\packages.c'; arg = "" }
     @{ name = "palette_refresh_contract_test"; src = 'palette_refresh_contract_test.c'; arg = (Join-Path $here '..') }
     @{ name = "resource_bridge_test"; src = 'resource_bridge_test.c ..\src\backend\resource_bridge.c ..\src\backend\packages.c ..\src\backend\raw_deflate.c ..\src\backend\decl_text.c'; defs = '/DSH_RESOURCE_BRIDGE_TESTING /DSH_RAW_DEFLATE_TESTING'; arg = "" }
-    @{ name = "packages_test"; src = 'packages_test.c ..\src\backend\packages.c'; arg = "" }
+    @{ name = "packages_test"; src = 'packages_test.c ..\src\backend\packages.c'; defs = '/DSH_PACKAGES_TESTING'; arg = "" }
     @{ name = "map_package_test"; src = 'map_package_test.c ..\src\backend\map_package.c ..\src\backend\map_shards.c ..\src\backend\packages.c ..\src\backend\raw_deflate.c'; defs = '/DSH_MAP_PACKAGE_TESTING'; arg = "" }
     @{ name = "navmesh_test"; src = 'navmesh_test.c ..\src\backend\navmesh.c ..\src\backend\map_shards.c'; defs = '/DSH_NAVMESH_TESTING'; arg = "" }
     @{ name = "nav_regions_test"; src = 'nav_regions_test.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c'; arg = "" }
     @{ name = "aas_edit_test"; src = 'aas_edit_test.c ..\src\backend\aas_edit.c'; arg = "" }
-    @{ name = "aas_augment_test"; src = 'aas_augment_test.c ..\src\backend\aas_augment.c ..\src\backend\aas_edit.c ..\src\backend\nav_traversal.c ..\src\backend\navmesh.c ..\src\backend\map_shards.c'; defs = '/DSH_NAVMESH_TESTING /DSH_AUG_TESTING'; arg = "" }
-    @{ name = "nav_bake_test"; src = 'nav_bake_test.c ..\src\backend\nav_bake.c ..\src\backend\nav_regions.c ..\src\backend\aas_edit.c ..\src\backend\aas_augment.c ..\src\backend\nav_traversal.c ..\src\backend\map_shards.c'; defs = '/DSH_NAV_BAKE_TESTING'; arg = "" }
+    @{ name = "nav_geometry_test"; src = 'nav_geometry_test.c ..\src\backend\nav_geometry.c'; arg = "" }
+    @{ name = "aas_augment_test"; src = 'aas_augment_test.c ..\src\backend\aas_augment.c ..\src\backend\nav_geometry.c ..\src\backend\aas_edit.c ..\src\backend\nav_traversal.c ..\src\backend\navmesh.c ..\src\backend\map_shards.c'; defs = '/DSH_NAVMESH_TESTING /DSH_AUG_TESTING'; arg = "" }
+    @{ name = "nav_bake_test"; src = 'nav_bake_test.c ..\src\backend\nav_bake.c ..\src\backend\nav_regions.c ..\src\backend\aas_edit.c ..\src\backend\aas_augment.c ..\src\backend\nav_geometry.c ..\src\backend\nav_traversal.c ..\src\backend\map_shards.c'; defs = '/DSH_NAV_BAKE_TESTING'; arg = "" }
     @{ name = "nav_traversal_test"; src = 'nav_traversal_test.c ..\src\backend\nav_traversal.c'; defs = '/DSH_TRAV_TESTING'; arg = "" }
     @{ name = "override_packages_test"; src = 'override_packages_test.c ..\src\backend\overrides.c ..\src\backend\packages.c ..\src\backend\decl_text.c'; defs = '/DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
     # engine_globals.c + signatures.c come in because the service now LOCATES DOOM's load-state word

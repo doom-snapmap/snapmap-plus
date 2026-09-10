@@ -45,7 +45,12 @@
 #include "signatures.h"
 #include "engine_globals.h" /* glb_resolve -- the editor singleton, load_state and main_thread_id */
 #include "host_image.h"     /* sh_host_is_pinned_rva_build -- gates every pinned-RVA backstop */
+#include "overrides.h"
+#include "config.h"
 #include "backend_log.h"
+#include "rawmap.h"
+#include "nav_bake.h"
+#include "nav_preview.h"
 
 /* ============================================================ editor-struct field offsets ========== */
 /* SAME this-live-build offsets iface_engine.c uses (ported from the reference implementation, SEH-guarded). The editor
@@ -412,6 +417,7 @@ typedef void  (*enter_prefab_grab_fn)(void *mode);                              
 /* ============================================================ module state (resolved once) ========== */
 static const uint8_t      *g_doom_base   = NULL;
 static const uint8_t      *g_editor      = NULL;   /* glb_resolve("editor_singleton"); NULL = unresolved */
+static void *g_editor_map_to_json;
 static void               *g_cmdsys      = NULL;   /* idCmdSystemLocal* (for BufferCommandText/AddCommand) */
 static entity_clone_fn     g_entity_clone = NULL;
 static entity_def_ctor_fn  g_def_ctor    = NULL;
@@ -1995,6 +2001,96 @@ int sh_apply_engine_entity_json(int id, char *out, int cap, void *ctx)
     return slot_serialize_entity(NULL, id, out, cap);
 }
 
+int sh_apply_engine_nav_snapshot(char **out, size_t *len, void *ctx)
+{
+    uint8_t str[IDSTR_SIZE] = {0};
+    void *map = NULL; char *copy = NULL;
+    const uint8_t *ed;
+    int initialized = 0, ok = 0, length = 0;
+    DWORD main_id = 0;
+    (void)ctx;
+    *out = NULL; *len = 0;
+    if (!g_idstr_ctor || !g_idstr_dtor || !g_editor_map_to_json || !g_main_thread_at ||
+        !ae_read_u32((const uint8_t *)g_main_thread_at, &main_id) ||
+        main_id != GetCurrentThreadId()) return 0;
+    ed = ae_editor_session();
+    if (!ed || !ae_read_ptr(ed + ED_MAP_OBJ_OFF, &map)) return 0;
+    __try {
+        g_idstr_ctor(str, ""); initialized = 1;
+        if (sh_rawmap_snapshot(g_editor_map_to_json, map, str) &&
+            ae_read_u32_safe(str + IDSTR_LEN_OFF, &length) &&
+            length > 0 && length < 32 * 1024 * 1024) {
+            copy = (char *)malloc((size_t)length + 1);
+            if (copy && ae_read_idstr(str, copy, length + 1) == length) ok = 1;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    if (initialized) {
+        __try { g_idstr_dtor(str); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    }
+    if (!ok) { free(copy); return 0; }
+    *out = copy; *len = (size_t)length; return 1;
+}
+
+static volatile LONG g_nav_refresh_queued;
+static int g_nav_refresh_registered;
+static ULONGLONG g_nav_refresh_next;
+
+static void ae_nav_preview(const uint8_t *ed)
+{
+    typedef void *(*get_object_fn)(const void *);
+    void *world; void **vt; int enabled=0;
+    if (!sh_config_get_bool("navmesh.preview",&enabled,NULL) || !enabled) {
+        sh_nav_preview_clear(); return;
+    }
+    vt=*(void ***)ed;
+    world=((get_object_fn)vt[0x128/8])(ed);
+    if (!world) { sh_nav_preview_clear(); return; }
+    sh_nav_preview_begin(world);
+    sh_nav_bake_preview(sh_overrides_read_engine_resource,sh_nav_preview_add_line,NULL);
+    sh_nav_preview_publish();
+}
+
+static void ae_nav_refresh_cmd(void)
+{
+    int state = -1, mode = -1;
+    const uint8_t *ed = ae_editor_session();
+    __try {
+        if (ed && ae_read_u32_safe(g_load_state_at, &state) && state == LOAD_STATE_RUNNING &&
+            ae_read_u32_safe(ed + ED_ENTITY_MODE_OFF, &mode) && mode >= 0 && mode <= 2) {
+            sh_nav_bake_refresh_live();
+            if (mode == 2) ae_nav_preview(ed);
+            else sh_nav_preview_clear();
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        sh_nav_preview_clear();
+        backend_log("NAV: editor snapshot refresh faulted");
+    }
+    InterlockedExchange(&g_nav_refresh_queued, 0);
+}
+
+/* The frontend only schedules. Reflection and publication always run in the
+ * engine command drain, and at most one refresh may be outstanding. */
+static void ae_nav_refresh_poll(void)
+{
+    ULONGLONG now = GetTickCount64();
+    int state = -1;
+    if (!ae_editor_session() || !ae_read_u32_safe(g_load_state_at, &state) ||
+        state != LOAD_STATE_RUNNING) { sh_nav_preview_clear(); return; }
+    if (now < g_nav_refresh_next || !g_cmdsys || !g_add_command || !g_buffer_cmd) return;
+    g_nav_refresh_next = now + 1000;
+    if (!ae_editor_session() || !ae_read_u32_safe(g_load_state_at, &state) ||
+        state != LOAD_STATE_RUNNING) return;
+    __try {
+        if (!g_nav_refresh_registered) {
+            g_add_command(g_cmdsys, "sh_nav_refresh_internal", (void *)ae_nav_refresh_cmd,
+                          NULL, "refresh current editor navigation geometry", 0);
+            g_nav_refresh_registered = 1;
+        }
+        if (InterlockedCompareExchange(&g_nav_refresh_queued, 1, 0) == 0)
+            g_buffer_cmd(g_cmdsys, "sh_nav_refresh_internal\n");
+    } __except (EXCEPTION_EXECUTE_HANDLER) { InterlockedExchange(&g_nav_refresh_queued, 0); }
+}
+
 /* PLACEHOLDER inherit a palette-placed Timeline is spawned with (see the +0x298 slot doc in
  * snapmap_plus_iface.h for the why) -- and the portable value it gets normalized to. */
 #define TL_PLACEHOLDER_INHERIT "snapmaps/editor_only/placeholder_target"
@@ -2651,6 +2747,7 @@ void sh_apply_prefab_poll_play(void)
      * cvars between them. */
     sh_decl_server_rearm_poll();
     sh_mpkg_consent_poll();
+    ae_nav_refresh_poll();
     if (!g_doom_base) return;
 
 #if AE_PASTE_DIAG_ON
@@ -2907,6 +3004,8 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
     g_node_ctor    = (parse_node_ctor_fn) sig_addr_by_name(results, n, "ParseNodeCtor");
     g_node_dtor    = (parse_node_dtor_fn) sig_addr_by_name(results, n, "ParseNodeDtor");
     g_idstr_ctor   = (idstr_ctor_fn)      sig_addr_by_name(results, n, "IdStrCtor");
+    g_editor_map_to_json = (void *)sig_addr_by_name(results, n, "EditorMapToJson");
+    sh_nav_preview_install(results,n);
     g_idstr_dtor   = (idstr_dtor_fn)      sig_addr_by_name(results, n, "IdStrDtor");
     g_idstr_assign = (idstr_assign_fn)    sig_addr_by_name(results, n, "IdStrAssign");
     g_decl_rebuild = (decl_src_rebuild_fn)sig_addr_by_name(results, n, "DeclSourceRebuild");

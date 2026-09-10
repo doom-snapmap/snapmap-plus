@@ -1,50 +1,15 @@
-/* nav_bake.h -- bake the author's marked regions into navigation, at map load.
+/* nav_bake.h -- current editor geometry, preview and per-instance AAS baking.
  *
- * WHERE THIS SITS
- * ---------------
- * navmesh.c serves navigation a map CARRIES, as smnav1 shards baked by an
- * offline tool. This module serves navigation a map DESCRIBES: the author ticks
- * "AI Navigation" on their Blocking Boxes (nav_regions.c reads that), and the
- * bytes are produced here, on the spot, when the engine asks for the module's
- * navmesh.
+ * Complete game-thread snapshots capture boxes, transforms and ownership.
+ * Geometry changes invalidate the cached preview. Before the engine converts
+ * the editor map for Play, a final snapshot freezes the build revision.
  *
- * WHY BAKE AT LOAD RATHER THAN AT SAVE
- * ------------------------------------
- * Baking at save would mean the finished payload rides in the map, which sounds
- * tidier but is worse in every direction that matters:
+ * Each marked module instance receives a private temporary resource name.
+ * BuildAAS loads, transforms and merges that instance's payload, then frees
+ * the temporary resource. Stock name-based cached resources stay shared.
  *
- *   - the map would carry ~10 KB per platform per demon size against an 8 MiB
- *     budget; describing the regions instead costs a boolean per volume;
- *   - a saved bake goes stale the moment the author moves a box, so it needs a
- *     geometry digest and a staleness rule, and an author who ignores the
- *     warning ships navigation for geometry that is not there;
- *   - the shipped payload we must add to is right here at open time -- the
- *     engine is literally asking for it -- whereas at save time we would have to
- *     go find it;
- *   - and the same client that can USE custom navigation is the one baking it,
- *     because no vanilla client can use it at all. There is no audience that
- *     benefits from the bytes being pre-made.
- *
- * The cost is a bake per module per demon class per map load. That is three
- * augment passes over a payload of a few tens of KB for the usual one-module
- * custom map, which is nothing against a map load that already takes seconds.
- *
- * ONE INSTANCE PER MODULE MAY CARRY REGIONS
- * -----------------------------------------
- * A module's navigation is keyed by RESOURCE NAME, and every instance of that
- * module is built from the same resource. idDeclSnapMap::BuildAAS (RVA
- * 0x4EBFB0) opens it inside its per-instance loop and frees what it loaded on
- * every iteration, which says each instance loads afresh and could therefore be
- * served its own bytes -- but that is read from the disassembly, not measured,
- * and being wrong about it means serving one grid room's platforms to another,
- * where demons would walk on thin air.
- *
- * So until it is measured: regions may live in at most one instance of a given
- * module. A map may place a module twelve times; only one of those may carry
- * marked volumes. That covers the way custom maps are actually built -- the
- * author builds their arena in one room -- and it is correct whichever way
- * BuildAAS turns out to behave. A map that breaks the rule is refused for that
- * module, loudly, and plays on its shipped navigation.
+ * navmesh.c separately serves the older smnav1 embedded-payload format.
+ * See docs/navigation.md for the author-facing contract and limits.
  */
 #ifndef SNAPMAP_PLUS_NAV_BAKE_H
 #define SNAPMAP_PLUS_NAV_BAKE_H
@@ -108,6 +73,18 @@ typedef int (*sh_nav_bake_entity_count)(void *ctx);
  */
 void sh_nav_bake_refresh_live(void);
 
+typedef int (*sh_nav_bake_snapshot)(char **json, size_t *len, void *ctx);
+void sh_nav_bake_set_snapshot(sh_nav_bake_snapshot snapshot, void *ctx);
+void sh_nav_bake_build_begin(void);
+void sh_nav_bake_build_end(void);
+
+/* Refresh the editor preview from a validated bake for monster48. Lines are
+ * world-space; the caller draws them only while the editor is active. */
+typedef void (*sh_nav_preview_line)(const float start[3], const float end[3], void *ctx);
+void sh_nav_bake_preview(sh_nav_bake_reader read_shipped, sh_nav_preview_line line, void *ctx);
+void sh_nav_bake_enable_instances(int enabled);
+int sh_nav_bake_instance_name(int instance, const char *name, char *out, size_t capacity);
+
 void sh_nav_bake_set_live_editor(sh_nav_bake_entity_count count,
                                  sh_navr_entity_valid valid,
                                  sh_navr_entity_json get_json,
@@ -121,6 +98,7 @@ int sh_nav_bake_test_parse_name(const char *name, char *module, size_t module_ca
                                 char *cls, size_t cls_cap);
 void sh_nav_bake_test_reset(void);
 int  sh_nav_bake_test_bake_count(void);
+void sh_nav_bake_test_copy_map(sh_nav_map *out);
 #endif
 
 #endif /* SNAPMAP_PLUS_NAV_BAKE_H */

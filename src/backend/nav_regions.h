@@ -75,6 +75,7 @@ typedef struct sh_nav_region {
     int   instance;         /* index into the instance table below */
     int   block_demons;     /* the volume's blockDemons; 0 means a demon falls through it */
     unsigned entity;        /* index in the map's entities array, for diagnostics */
+    int marked;            /* distinguishes support from an unmarked obstacle */
 } sh_nav_region;
 
 /* A placed module. `origin`/`orientation` are what BuildAAS applies to that
@@ -93,6 +94,9 @@ typedef struct sh_nav_map {
     sh_nav_region   regions[SH_NAVR_MAX_REGIONS];
     int             region_count;
     int             truncated;          /* a cap was hit; the caller should say so */
+    int             invalid_geometry;   /* invalid solid, transform or ownership */
+    sh_nav_region   obstacles[SH_NAVR_MAX_REGIONS];
+    int             obstacle_count;
 } sh_nav_map;
 
 /* Read `json` into `out`. Returns 1 if the map parsed (even with zero regions),
@@ -100,20 +104,10 @@ typedef struct sh_nav_map {
  * map. `out` is fully overwritten, including on failure. */
 int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out);
 
-/* ---- refreshing from the LIVE editor -----------------------------------
- *
- * Reading the map JSON is right for a map that arrives from disk or the publish
- * service, and wrong for the one the author is editing. Pressing Play does not
- * serialize the map -- verified live -- so a volume ticked this session is
- * invisible to anything that only ever parsed the loaded bytes: the author ticks
- * "AI Navigation", presses Play, and is told nothing is marked.
- *
- * So at bake time the flags are re-read from the entities themselves. The map's
- * own `instanceEntities` still supplies attribution, because an entity carries
- * no instance of its own -- which means a volume CREATED since the load has no
- * attribution and is skipped. That is the honest limit: ticking an existing box
- * takes effect immediately, placing a brand new one still needs a save and
- * reload. */
+/* Legacy per-entity refresh for callers without a complete-map snapshot.
+ * Production editor baking uses sh_nav_bake_set_snapshot instead: it refreshes
+ * ownership and the instance table together with geometry, including new IDs.
+ */
 
 /* Serialize live entity `id` to JSON. Returns the length written, or <= 0.
  * The engine's own reflection does this; see apply_engine.c's serialize_entity
@@ -134,11 +128,8 @@ int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
                                 sh_navr_entity_valid valid,
                                 sh_navr_entity_json get_json, void *ctx);
 
-/* The Nth instance OF A GIVEN MODULE, in map order -- the mapping BuildAAS
- * itself uses. It opens each instance's navigation resource inside its
- * per-instance loop (RVA 0x4EBFB0), in instance-array order, so the Nth open of
- * one resource name is the Nth instance of that module. Returns the index into
- * `m->instances`, or -1. */
+/* Return the Nth occurrence of a module in the map's instance array, or -1.
+ * This is a table lookup, not an inference from resource-open order. */
 int sh_nav_regions_nth_instance(const sh_nav_map *m, const char *module, int n);
 
 #endif /* SNAPMAP_PLUS_NAV_REGIONS_H */

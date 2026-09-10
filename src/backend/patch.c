@@ -81,7 +81,7 @@ static void hexdump(const uint8_t *buf, size_t n, char *out, size_t outcap)
 sh_patch_status code_patch(void *target, const uint8_t *expect, const uint8_t *new_bytes,
                            size_t len, sh_patch_handle *out_handle)
 {
-    if (out_handle) out_handle->live = 0;
+    if (out_handle) { out_handle->live = 0; out_handle->atomic_rel32 = 0; }
     if (!target || !new_bytes || !out_handle || len == 0 || len > B2_PATCH_MAX_BYTES)
         return B2_PATCH_REFUSED_BADARG;
 
@@ -158,6 +158,8 @@ sh_patch_status code_unpatch(sh_patch_handle *handle)
     if (!handle || !handle->live) return B2_PATCH_FAIL_NOTLIVE;
     if (!handle->target || handle->len == 0 || handle->len > B2_PATCH_MAX_BYTES)
         return B2_PATCH_REFUSED_BADARG;
+    if (handle->atomic_rel32 && (handle->len != 5 ||
+        (((uintptr_t)handle->target + 1) & 3u))) return B2_PATCH_REFUSED_BADARG;
 
     uint8_t *t = (uint8_t *)handle->target;
 
@@ -167,7 +169,15 @@ sh_patch_status code_unpatch(sh_patch_handle *handle)
         return B2_PATCH_FAIL_PROTECT;
     }
 
-    int restored = safe_memcpy(t, handle->orig, handle->len);
+    int restored;
+    if (handle->atomic_rel32) {
+        __try {
+            LONG original;
+            memcpy(&original, handle->orig + 1, sizeof original);
+            InterlockedExchange((volatile LONG *)(t + 1), original);
+            restored = 1;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { restored = 0; }
+    } else restored = safe_memcpy(t, handle->orig, handle->len);
     FlushInstructionCache(GetCurrentProcess(), t, handle->len);
 
     /* restore the saved page protection (the one in force before the patch). */
@@ -185,6 +195,37 @@ sh_patch_status code_unpatch(sh_patch_handle *handle)
 }
 
 /* ---- sig-anchored code_patch (the verify-before-write entry point) ------------------------------ */
+
+sh_patch_status code_patch_call_sig(const sig_result *r, const uint8_t expect[5],
+                                    const uint8_t replacement[5], sh_patch_handle *handle)
+{
+    DWORD old, ignored;
+    LONG before, after;
+    sh_patch_status status = B2_PATCH_REFUSED_VERIFY;
+    if (!handle) return B2_PATCH_REFUSED_BADARG;
+    memset(handle, 0, sizeof *handle);
+    if (!r || r->status != SIG_OK || !r->addr) return B2_PATCH_REFUSED_SIG;
+    if (!expect || !replacement || expect[0] != 0xe8 || replacement[0] != 0xe8 ||
+        ((r->addr + 1) & 3u)) return B2_PATCH_REFUSED_BADARG;
+    uint8_t *target = (uint8_t *)r->addr;
+    int match = 0;
+    if (!safe_memcmp(target, expect, 5, &match) || !match) return B2_PATCH_REFUSED_VERIFY;
+    memcpy(&before, expect + 1, sizeof before);
+    memcpy(&after, replacement + 1, sizeof after);
+    if (!VirtualProtect(target, 5, PAGE_EXECUTE_READWRITE, &old)) return B2_PATCH_FAIL_PROTECT;
+    __try {
+        if (target[0] == 0xe8 &&
+            InterlockedCompareExchange((volatile LONG *)(target + 1), after, before) == before) {
+            memcpy(handle->orig, expect, 5);
+            handle->target = target; handle->len = 5; handle->old_protect = old;
+            handle->live = 1; handle->atomic_rel32 = 1;
+            status = B2_PATCH_OK;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { status = B2_PATCH_FAIL_SEH; }
+    FlushInstructionCache(GetCurrentProcess(), target, 5);
+    VirtualProtect(target, 5, old, &ignored);
+    return status;
+}
 
 sh_patch_status code_patch_sig(const sig_result *r, const uint8_t *expect, const uint8_t *new_bytes,
                                size_t len, sh_patch_handle *out_handle)

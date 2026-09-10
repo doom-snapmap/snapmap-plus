@@ -120,6 +120,12 @@ static const config_descriptor g_registry[] = {
         normalize_bool
     },
     {
+        "navmesh.preview", SH_JSON_BOOL, "true",
+        SH_CONFIG_BACKEND_READ | SH_CONFIG_BACKEND_WRITE |
+        SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,
+        NULL, normalize_bool
+    },
+    {
         /* Write the navigation a map arrived with back into it when it is
          * saved. Off means a load-then-save drops the author's bake. */
         "navmesh.embed_in_saved_maps", SH_JSON_BOOL, "true",

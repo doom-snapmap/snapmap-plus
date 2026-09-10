@@ -148,6 +148,7 @@ static void test_first_run_creates_defaults_and_getter_contract(void)
         "    \"overrides.user_enabled\": true,\n"
         "    \"packages.embed_in_saved_maps\": true,\n"
         "    \"navmesh.enabled\": true,\n"
+        "    \"navmesh.preview\": true,\n"
         "    \"navmesh.embed_in_saved_maps\": true,\n"
         "    \"rawmap.save_path\": \"\"\n"
         "  }\n"
@@ -203,7 +204,7 @@ static void test_loads_existing_theme_without_rewriting(void)
         "\"settings\":{\"future_array\":[1,null],\"theme\":\"dark\","
         "\"entities.show_hidden\":false,"
         "\"entities.selection_mode\":\"off\","
-        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"}}";
+        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.preview\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"}}";
 
     CHECK(make_temp_root(root, MAX_PATH));
     CHECK(make_config_dir(root, dir, path));
@@ -242,7 +243,7 @@ static void test_sets_valid_theme_and_preserves_unknown_values(void)
         "\"theme\":\"light\","
         "\"entities.show_hidden\":false,"
         "\"entities.selection_mode\":\"off\","
-        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.embed_in_saved_maps\":true"
+        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.preview\":true,\"navmesh.embed_in_saved_maps\":true"
         "}"
         "}";
 
@@ -307,18 +308,18 @@ static void test_repairs_missing_and_invalid_registered_values(void)
         "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
         "\"entities.show_hidden\":\"yes\","
         "\"entities.selection_mode\":\"off\","
-        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\",\"future\":42}}",
+        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.preview\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\",\"future\":42}}",
         "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
         "\"entities.show_hidden\":false,"
         "\"entities.selection_mode\":\"both\","
-        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\",\"future\":42}}",
+        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.preview\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\",\"future\":42}}",
         "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
         "\"entities.show_hidden\":false,"
         "\"entities.selection_mode\":\"off\",\"future\":42}}",
         "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
         "\"entities.show_hidden\":false,"
         "\"entities.selection_mode\":\"off\","
-        "\"overrides.user_enabled\":\"yes\",\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\",\"future\":42}}"
+        "\"overrides.user_enabled\":\"yes\",\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.preview\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\",\"future\":42}}"
     };
     size_t i;
     int enabled = -1;
@@ -376,7 +377,7 @@ static void test_entity_settings_validation_and_persistence(void)
         "\"theme\":\"light\","
         "\"entities.show_hidden\":false,"
         "\"entities.selection_mode\":\"off\","
-        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.embed_in_saved_maps\":true,"
+        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.preview\":true,\"navmesh.embed_in_saved_maps\":true,"
         "\"future\":42}}";
 
     CHECK(make_temp_root(root, MAX_PATH));
@@ -444,7 +445,7 @@ static void test_user_overrides_setting_validation_and_persistence(void)
         "\"theme\":\"light\","
         "\"entities.show_hidden\":false,"
         "\"entities.selection_mode\":\"off\","
-        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.embed_in_saved_maps\":true,"
+        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.preview\":true,\"navmesh.embed_in_saved_maps\":true,"
         "\"future\":42}}";
 
     CHECK(make_temp_root(root, MAX_PATH));
@@ -490,12 +491,12 @@ static void test_setter_rereads_external_edits_and_recreates_deleted_file(void)
         "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
         "\"entities.show_hidden\":false,"
         "\"entities.selection_mode\":\"off\","
-        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"},\"sentinel\":1}";
+        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.preview\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"},\"sentinel\":1}";
     const char external[] =
         "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
         "\"entities.show_hidden\":false,"
         "\"entities.selection_mode\":\"off\","
-        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.embed_in_saved_maps\":true,\"external\":true},"
+        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.preview\":true,\"navmesh.embed_in_saved_maps\":true,\"external\":true},"
         "\"sentinel\":2}";
     const char *defaults =
         "{\n"
@@ -507,6 +508,7 @@ static void test_setter_rereads_external_edits_and_recreates_deleted_file(void)
         "    \"overrides.user_enabled\": true,\n"
         "    \"packages.embed_in_saved_maps\": true,\n"
         "    \"navmesh.enabled\": true,\n"
+        "    \"navmesh.preview\": true,\n"
         "    \"navmesh.embed_in_saved_maps\": true,\n"
         "    \"rawmap.save_path\": \"\"\n"
         "  }\n"
@@ -562,12 +564,12 @@ static void test_accepts_bom_and_canonicalizes_registered_strings(void)
         "\xEF\xBB\xBF{\"schema_version\":1,\"settings\":{\"theme\":\"dark\","
         "\"entities.show_hidden\":false,"
         "\"entities.selection_mode\":\"off\","
-        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"}}";
+        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.preview\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"}}";
     const char escaped_document[] =
         "{\"schema_version\":1,\"settings\":{\"theme\":\"d\\u0061rk\","
         "\"entities.show_hidden\":false,"
         "\"entities.selection_mode\":\"off\","
-        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"}}";
+        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.preview\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"}}";
 
     CHECK(make_temp_root(root, MAX_PATH));
     CHECK(make_config_dir(root, dir, path));
@@ -730,7 +732,7 @@ static void test_mutation_failures_keep_old_file_and_session_value(void)
         "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
         "\"entities.show_hidden\":false,"
         "\"entities.selection_mode\":\"off\","
-        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"},\"keep\":true}";
+        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.preview\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"},\"keep\":true}";
     size_t i;
 
     for (i = 0; i < sizeof(faults) / sizeof(faults[0]); i++) {
@@ -769,7 +771,7 @@ static void test_partial_existing_replace_keeps_old_file(void)
         "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
         "\"entities.show_hidden\":false,"
         "\"entities.selection_mode\":\"off\","
-        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"},\"keep\":true}";
+        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.preview\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"},\"keep\":true}";
     wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH];
     char value[16];
     char *disk = NULL;
@@ -805,7 +807,7 @@ static void test_partial_existing_replace_restores_moved_old_file(void)
         "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
         "\"entities.show_hidden\":false,"
         "\"entities.selection_mode\":\"off\","
-        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"},\"keep\":true}";
+        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.preview\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"},\"keep\":true}";
     wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH];
     char value[16];
     char *disk = NULL;
@@ -873,12 +875,12 @@ static void test_startup_restores_interrupted_existing_replace(void)
         "{\"schema_version\":1,\"settings\":{\"theme\":\"dark\","
         "\"entities.show_hidden\":false,"
         "\"entities.selection_mode\":\"off\","
-        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"},\"keep\":true}";
+        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.preview\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"},\"keep\":true}";
     const char replacement[] =
         "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
         "\"entities.show_hidden\":false,"
         "\"entities.selection_mode\":\"off\","
-        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"},\"keep\":true}";
+        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.preview\":true,\"navmesh.embed_in_saved_maps\":true,\"rawmap.save_path\":\"\"},\"keep\":true}";
     wchar_t root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH];
     wchar_t rollback[MAX_PATH], temp[MAX_PATH];
     char value[16];
@@ -1181,7 +1183,7 @@ static void test_process_writers_are_serialized(void)
         "{\"schema_version\":1,\"settings\":{\"theme\":\"light\","
         "\"entities.show_hidden\":false,"
         "\"entities.selection_mode\":\"off\","
-        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.embed_in_saved_maps\":true,"
+        "\"overrides.user_enabled\":true,\"packages.embed_in_saved_maps\":true,\"navmesh.enabled\":true,\"navmesh.preview\":true,\"navmesh.embed_in_saved_maps\":true,"
         "\"future\":{\"keep\":true}},\"sentinel\":\"preserve\"}";
 
     CHECK(make_temp_root(root, MAX_PATH));

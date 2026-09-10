@@ -32,6 +32,7 @@
 #include "strids.h"
 #include "overrides.h"
 #include "package_requirements.h"
+#include "weapon_hud.h"
 #include "navmesh.h"
 #include "nav_bake.h"   /* baked AI navigation served through the overrides shadow */
 #include "nav_play.h"   /* re-read the author's live marks before the Play build */
@@ -453,10 +454,12 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         {
             char override_root[MAX_PATH];
             void *buffer_cmd = (void *)sig_addr_by_name(results, db, "BufferCommandText");
-            if (sh_overrides_get_root(override_root, sizeof(override_root)))
+            if (sh_overrides_get_root(override_root, sizeof(override_root))) {
                 sh_package_requirements_install(override_root, g_doom_base, cmdsys, buffer_cmd,
                                                 sh_user_overrides_enabled_for_launch());
-            else
+                sh_weapon_hud_install(override_root, g_doom_base, results, db,
+                                      sh_user_overrides_enabled_for_launch());
+            } else
                 backend_log("package-requirements REFUSED: effective override root unavailable");
         }
 
@@ -487,6 +490,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_nav_bake_set_live_editor(sh_apply_engine_entity_count,
                                     sh_apply_engine_entity_valid,
                                     sh_apply_engine_entity_json, NULL);
+        sh_nav_bake_set_snapshot(sh_apply_engine_nav_snapshot, NULL);
 
         /* And the one point that read surface may be used from. Pressing Play does not
          * serialize the map, so a volume ticked this session reaches the baker only if
@@ -509,6 +513,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                 }
             }
             sh_nav_play_install(snapbuild, snapbuild_clean);
+            sh_nav_play_install_instances(results, db);
         }
 
         /* backend touch: bind the UI-interface's engine-touch vtable slots -- the LIGHT touches

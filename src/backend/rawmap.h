@@ -298,6 +298,10 @@ void sh_rawmap_reset_dest_for_new_load(void);
 
 int sh_rawmap_source_ok(char *out_msg, int msg_capacity);
 
+/* Main-thread read-only serialization, bypassing save side effects. The caller
+ * constructs and destroys the output idStr with the engine's own helpers. */
+int sh_rawmap_snapshot(void *editor_serializer, void *map, void *out_idstr);
+
 #endif /* BACKEND_RAWMAP_H */
 
 #ifdef SH_RAWMAP_TESTING

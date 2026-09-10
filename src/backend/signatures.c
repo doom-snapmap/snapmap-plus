@@ -340,6 +340,39 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "SerializeToJson",
       "40 53 56 57 48 81 EC E0 00 00 00 48 C7 44 24 70 FE FF FF FF",
       0x5F2390u },
+    { "EditorMapToJson", /* Constructs an idSnapMap from idSnapMapEdit, serializes,
+                          * and destroys the temporary. No save-slot writes. */
+      "40 53 56 57 48 81 EC B0 07 00 00 48 C7 44 24 20 FE FF FF FF "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 A0 07 00 00 "
+      "41 0F B6 F0 48 8B FA 48 8B D9 48 8D 4C 24 30 E8 ?? ?? ?? ?? "
+      "90 48 8D 54 24 30 48 8B CB E8 ?? ?? ?? ?? 44 0F B6 C6 48 8B D7",
+      0x59D2F0u },
+    { "NavRenderBegin",
+      "40 56 57 41 56 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 58 48 89 6C 24 60 48 8B EA 48 8B D9 80 B9 EC 00 00 00 00",
+      0xd72a20u },
+    { "NavRenderEnd",
+      "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B D9 C6 81 EC 00 00 00 00",
+      0xd72c40u },
+    { "NavRenderMatrix",
+      "48 89 5C 24 18 55 56 57 48 8D 6C 24 B9 48 81 EC 90 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 37 48 63 81 AC FB 00 00 48 8B F2 48 63 91 B4 FB 00 00 48 8B D9 44 8B 84 91 70 94 00 00 44 0B 84 81 70 94 00 00 48 63 81 B8 FB 00 00 44 0B 84 81 70 94 00 00 48 63 81 B0 FB 00 00 44 0B 84 81 70 94 00 00 44 85 81 7C B9 00 00 74 ?? B2 01 E8 ?? ?? ?? ?? 48 8D 45 27 48 8B CE 48 8D 7B 60 48 89 7C 24 28 4C 8D 4D 17 4C 8D 45 07 48 89 44 24 20 48 8D 55 F7 E8 ?? ?? ?? ?? 0F 28 45 F7",
+      0xd737a0u },
+    { "NavRenderLines",
+      "40 55 48 83 EC 30 48 8B 69 18",
+      0xdec860u },
+    { "NavRenderStage",
+      "48 89 5C 24 18 55 56 57 41 54 41 55 41 56 41 57 48 81 EC A0 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 90 00 00 00",
+      0xdb9870u },
+    { "NavPostProcessSlot", /* Registered renderer job, not a renderer-specific function RVA. */
+      "48 8B 15 ?? ?? ?? ?? 41 B1 01 48 8B CE E8 ?? ?? ?? ??",
+      0xDBA0DCu },
+    { "BuildAASFindCall", /* R14 is the exact compiled module-instance record. */
+      "E8 ?? ?? ?? ?? 48 8B F8 48 85 C0 75 44 45 33 C9 45 33 C0 48 8B 55 A8 "
+      "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B F8 41 B4 01",
+      0x4EC1E9u },
+    { "BuildAASLoadCall", /* Temporary-resource branch, released after merge. */
+      "E8 ?? ?? ?? ?? 48 8B F8 41 B4 01 48 85 C0 75 23 48 8D 4D 98 E8 ?? ?? ?? ?? "
+      "90 48 8D 4D C8 E8 ?? ?? ?? ?? 44 0F B6 64 24 40 48 8B 7C 24 48",
+      0x4EC207u },
     { "SnapMapEditToSnapBuild", /* int(edit map [rcx], build map [rdx], ctx [r8]) -- the edit-to-build
                                  * conversion the editor runs when Play is pressed. It calls
                                  * idDeclSnapMap::BuildAAS three times (once per demon size class) at
@@ -1325,5 +1358,12 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 78 FF FF FF "
       "48 81 EC 88 01 00 00 48 C7 44 24 30 FE FF FF FF",
       0x1806100u },
+    { "WeaponHudModeCall", /* The ammo widget's mode call and declaration guard.
+                             * Verified independently on Vulkan and OpenGL. No
+                             * pinned-build fallback: resolve uniquely by content. */
+      "E8 ?? ?? ?? ?? 84 C0 74 45 48 8B 83 F8 01 00 00 48 85 C0 74 09 "
+      "80 B8 41 06 00 00 00 75 30", 0 },
+    { "WeaponHudGameMode", /* bool(game*); separately verifies the decoded call target. */
+      "48 8B 81 38 53 04 00 83 78 18 01 0F 94 C0 C3", 0 },
     { NULL, NULL, 0 }   /* terminator */
 };

@@ -534,7 +534,7 @@ static void mkplat_tilted(sh_aug_platform *p, double deg, double w, double h,
  * endpoint depends on getting this right. */
 static void test_z_at_interpolates_across_a_slope(void)
 {
-    unsigned char q[512];
+    unsigned char q[2048];
     double corners[4][3];
     printf("the surface height varies across a sloped quad\n");
     corners[0][0] = 0;   corners[0][1] = 100; corners[0][2] = 0;
@@ -556,7 +556,7 @@ static void test_z_at_interpolates_across_a_slope(void)
  * discovery would all invert with it. */
 static void test_contains_is_true_inside(void)
 {
-    unsigned char q[512];
+    unsigned char q[2048];
     double corners[4][3];
     printf("a point inside the quad is inside it\n");
     corners[0][0] = 0;   corners[0][1] = 100; corners[0][2] = 0;
@@ -573,7 +573,7 @@ static void test_contains_is_true_inside(void)
  * replaced would eat the corners and refuse platforms that are large enough. */
 static void test_inset_of_a_rotated_quad_stays_rotated(void)
 {
-    unsigned char q[512], in[512];
+    unsigned char q[2048], in[2048];
     double corners[4][3], c0[3];
     printf("the inset of a rotated quad is rotated too\n");
     /* A 200x200 square yawed 45 degrees: corners on the axes at r = 141.421,
@@ -595,7 +595,7 @@ static void test_inset_of_a_rotated_quad_stays_rotated(void)
  * pointed outward this quad would GROW and this check would pass a lie. */
 static void test_inset_refuses_a_collapsing_quad(void)
 {
-    unsigned char q[512], in[512];
+    unsigned char q[2048], in[2048];
     double corners[4][3];
     printf("a quad too small to inset is refused\n");
     corners[0][0] = 0;  corners[0][1] = 30; corners[0][2] = 0;
@@ -1155,8 +1155,9 @@ static void test_a_bake_at_the_platform_cap_completes(void)
         float y = -950.0f  + (float)(i / 20) * 190.0f;
         mkplat(&p[i], x, y, x + 150.0f, y + 150.0f, 16.0f + (float)(i % 3) * 6.0f, "cell");
     }
-    CHECK_MSG(sh_aas_augment(a, p, 200, &o, &rep) == 1,
-              "the model must still be coherent");
+    CHECK_MSG(sh_aas_augment(a, p, 200, &o, &rep) == 0,
+              "a traversal budget overflow must reject the whole candidate");
+    CHECK(rep.links_truncated);
     for (i = 0; i < rep.platform_count; i++) if (rep.platforms[i].emitted) emitted++;
     CHECK_MSG(emitted > 100, "most of them should land");
     CHECK_MSG(rep.depth_exceeded == 0, "and the tree stays inside the loader limit");
@@ -1828,10 +1829,190 @@ static void test_a_flush_pair_is_not_a_dead_gap(void)
     sh_aas_free(a);
 }
 
+static void test_suspended_bridge_is_continuous(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[3];
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_NEVER, 1, SH_AUG_TRAVERSAL_NEVER };
+    int left, deck, right, x;
+    printf("a suspended bridge has continuous standing space and walk links\n");
+    mkbox(&p[0], 0, 0, 128, 256, 128, 0, "west support");
+    mkbox(&p[1], 128, 0, 384, 256, 128, 96, "floating deck");
+    mkbox(&p[2], 384, 0, 512, 256, 128, 0, "east support");
+    CHECK(sh_aas_augment(a, p, 3, &o, &rep));
+    left = sh_aas_point_area(a, 64, 128, 130);
+    deck = sh_aas_point_area(a, 256, 128, 130);
+    right = sh_aas_point_area(a, 448, 128, 130);
+    CHECK(left > 1 && deck > 1 && right > 1);
+    for (x = 25; x < 487; x += 7) CHECK(sh_aas_point_area(a, (float)x, 128, 130) > 1);
+    CHECK(reach_exists(a, left, deck)); CHECK(reach_exists(a, deck, left));
+    CHECK(reach_exists(a, deck, right)); CHECK(reach_exists(a, right, deck));
+    CHECK(rep.areas_after == rep.areas_before + 3);
+    sh_aas_free(a);
+}
+
+static void test_rotated_ridge_has_reciprocal_walk_links(void)
+{
+    sh_aas *a=load_module();sh_aug_platform p;sh_aug_report rep;
+    sh_aug_opts o={SH_AUG_FALL_NEVER,1,SH_AUG_TRAVERSAL_NEVER};
+    int i,left,right;double s=sqrt(0.5);
+    mkbox(&p,-128,-256,128,256,128,-128,"rotated ridge");
+    for(i=0;i<4;i++) {double x=p.c[i][0],z=p.c[i][2];
+        p.c[i][0]=(float)((x+z)*s);p.c[i][2]=(float)((z-x)*s);}
+    p.n[0]=p.n[2]=(float)s;
+    CHECK(sh_aas_augment(a,&p,1,&o,&rep));
+    left=sh_aas_point_area(a,-32,0,(float)(256*s-32+2));
+    right=sh_aas_point_area(a,32,0,(float)(256*s-32+2));
+    CHECK(left>1&&right>1&&left!=right);
+    CHECK(reach_exists(a,left,right));CHECK(reach_exists(a,right,left));
+    sh_aas_free(a);
+}
+
+static void test_level_floor_joins_ramp(void)
+{
+    sh_aas *a=load_module();sh_aug_platform p[2];sh_aug_report rep;
+    sh_aug_opts o={SH_AUG_FALL_NEVER,1,SH_AUG_TRAVERSAL_NEVER};int flat,ramp;
+    mkbox(&p[0],-256,-128,0,128,64,0,"level support");
+    mkbox(&p[1],0,-128,256,128,64,32,"ramp");
+    p[1].c[1][2]=p[1].c[2][2]=192;
+    p[1].n[0]=(float)(-1/sqrt(5.0));p[1].n[2]=(float)(2/sqrt(5.0));
+    CHECK(sh_aas_augment(a,p,2,&o,&rep));
+    flat=sh_aas_point_area(a,-32,0,66);ramp=sh_aas_point_area(a,32,0,82);
+    CHECK(flat>1&&ramp>1&&flat!=ramp);
+    CHECK(reach_exists(a,flat,ramp));CHECK(reach_exists(a,ramp,flat));
+    sh_aas_free(a);
+}
+
+static int generated_walk_route(const sh_aas *a,int start,int goal)
+{
+    unsigned char seen[SH_AUG_MAX_PLATFORMS+2]={0};
+    unsigned pass,r,na=sh_aas_count(a,SH_AAS_L_AREAS),nr=sh_aas_count(a,SH_AAS_L_REACHABILITIES);
+    if(start<2||goal<2||na>sizeof seen)return 0;
+    seen[start]=1;
+    for(pass=0;pass<na;pass++)for(r=0;r<nr;r++) {
+        const unsigned char *p=sh_aas_rec_const(a,SH_AAS_L_REACHABILITIES,r);
+        unsigned from=sh_aas_get_u16(p,6),to=sh_aas_get_u16(p,8);
+        if(from>=2&&to>=2&&from<na&&to<na&&seen[from]&&sh_aas_get_u32(p,0)==0x20)seen[to]=1;
+    }
+    return seen[goal];
+}
+
+static int bridge_links_valid(const sh_aas *a)
+{
+    unsigned i;
+    for(i=0;i<sh_aas_count(a,SH_AAS_L_REACHABILITIES);i++) {
+        const unsigned char *p=sh_aas_rec_const(a,SH_AAS_L_REACHABILITIES,i);
+        unsigned from=sh_aas_get_u16(p,6),to=sh_aas_get_u16(p,8);
+        if(from<2||to<2)continue;
+        if(sh_aas_point_area(a,(float)sh_aas_get_i16(p,12),(float)sh_aas_get_i16(p,14),
+            (float)sh_aas_get_i16(p,16)+2)!=from ||
+           sh_aas_point_area(a,(float)sh_aas_get_i16(p,18),(float)sh_aas_get_i16(p,20),
+            (float)sh_aas_get_i16(p,22)+2)!=to) {
+            printf("stored reach %u misses its areas %u -> %u\n",i,from,to);return 0;
+        }
+    }
+    for(i=1;i<sh_aas_count(a,SH_AAS_L_TRAVERSALPOINTS);i++) {
+        const unsigned char *p=sh_aas_rec_const(a,SH_AAS_L_TRAVERSALPOINTS,i);
+        const char *anim=(const char*)sh_aas_rec_const(a,SH_AAS_L_TRAVERSALANIMNAMES,sh_aas_get_u16(p,0x24));
+        float dz=sh_aas_get_f32(p,20)-sh_aas_get_f32(p,8);
+        if((strstr(anim,"ledge_up")&&dz<=0)||(strstr(anim,"ledge_down")&&dz>=0)) {
+            printf("traversal %u uses %s for dz %g\n",i,anim,dz);return 0;
+        }
+    }
+    return 1;
+}
+
+static void test_intersecting_bridge_routes(void)
+{
+    static const int permutations[6][3]={{0,1,2},{0,2,1},{1,0,2},{1,2,0},{2,0,1},{2,1,0}};
+    static const float radii[3]={24,48,64},drops[8]={0,1,8,16,18,24,64,96};
+    static const double angles[5]={0,0.317,0.7853981633974483,1.917,3.941};
+    int r,d,rotation,order,skew,i,k,left,deck,right;
+    printf("intersecting bridge walk routes across sizes, rotations, order and step heights\n");
+    load_synthetic_traversal_table();
+    for(r=0;r<3;r++)for(d=0;d<8;d++)for(rotation=0;rotation<5;rotation++)
+    for(order=0;order<6;order++)for(skew=0;skew<2;skew++) {
+        sh_aas *a=load_module();sh_aug_platform original[3],p[3];sh_aug_report rep;
+        sh_aug_opts o={SH_AUG_FALL_NEVER,1,SH_AUG_TRAVERSAL_NEVER};
+        double angle=angles[rotation],c=cos(angle),s=sin(angle);
+        if(drops[d]>=64)o.traversal=SH_AUG_TRAVERSAL_AUTO;
+        sh_aas_set_setting_f32(a,208,-radii[r]);sh_aas_set_setting_f32(a,212,-radii[r]);
+        sh_aas_set_setting_f32(a,220,radii[r]);sh_aas_set_setting_f32(a,224,radii[r]);
+        mkbox(&original[0],-768,-384,-256,384,128,0,"west support");
+        mkbox(&original[1],-384,-96,384,96,128-drops[d],16,"overlapping deck");
+        mkbox(&original[2],256,-384,768,384,128,0,"east support");
+        for(i=0;i<3;i++) {
+            double box_angle=angle+(permutations[order][i]==1?skew*0.173:0);
+            double bc=cos(box_angle),bs=sin(box_angle);
+            p[i]=original[permutations[order][i]];
+            for(k=0;k<4;k++) {
+                double x=p[i].c[k][0],y=p[i].c[k][1];
+                p[i].c[k][0]=(float)(x*bc-y*bs+0.375);p[i].c[k][1]=(float)(x*bs+y*bc-0.625);
+            }
+        }
+        CHECK(sh_aas_augment(a,p,3,&o,&rep));
+        left=sh_aas_point_area(a,(float)(-512*c+0.375),(float)(-512*s-0.625),130);
+        deck=sh_aas_point_area(a,0.375f,-0.625f,130-drops[d]);
+        right=sh_aas_point_area(a,(float)(512*c+0.375),(float)(512*s-0.625),130);
+        if(!bridge_links_valid(a)) {
+            printf("bridge links failed: radius %.0f drop %.0f rotation %d order %d skew %d\n",radii[r],drops[d],rotation,order,skew);
+            CHECK(0);sh_aas_free(a);return;
+        }
+        if(drops[d]<=18) {
+            if(!generated_walk_route(a,left,deck)||!generated_walk_route(a,deck,right)||
+               !generated_walk_route(a,right,deck)||!generated_walk_route(a,deck,left)) {
+                printf("bridge route failed: radius %.0f drop %.0f rotation %d order %d skew %d areas %d %d %d\n",
+                    radii[r],drops[d],rotation,order,skew,left,deck,right);CHECK(0);sh_aas_free(a);return;
+            }
+        } else {
+            CHECK(!generated_walk_route(a,left,deck));
+            if(drops[d]>=64) {
+                CHECK(reach_exists(a,left,deck));CHECK(reach_exists(a,deck,left));
+                CHECK(reach_exists(a,deck,right));CHECK(reach_exists(a,right,deck));
+            }
+        }
+        sh_aas_free(a);
+    }
+}
+
+static void test_narrow_partial_contacts(void)
+{
+    sh_aas *a=load_module();sh_aug_platform p[9];sh_aug_report rep;
+    sh_aug_opts o={SH_AUG_FALL_NEVER,1,SH_AUG_TRAVERSAL_NEVER};int i,main_area;
+    mkbox(&p[0],-400,-1900,0,1900,128,0,"long support");
+    for(i=0;i<8;i++) {
+        float y=-1733.0f+443.0f*i;
+        mkbox(&p[i+1],0,y,400,y+64,128,96,"narrow abutment");
+    }
+    CHECK(sh_aas_augment(a,p,9,&o,&rep));
+    main_area=sh_aas_point_area(a,-200,0,130);CHECK(main_area>1);
+    for(i=0;i<8;i++) {
+        int peer=sh_aas_point_area(a,200,-1701.0f+443.0f*i,130);
+        CHECK(peer>1&&peer!=main_area);
+        unsigned r,pass,nr=sh_aas_count(a,SH_AAS_L_REACHABILITIES);
+        unsigned char seen[SH_AUG_MAX_PLATFORMS+2]={0};
+        CHECK(sh_aas_count(a,SH_AAS_L_AREAS)<=sizeof seen);
+        seen[main_area]=1;
+        for(pass=0;pass<sh_aas_count(a,SH_AAS_L_AREAS);pass++)for(r=0;r<nr;r++) {
+            const unsigned char *rr=sh_aas_rec_const(a,SH_AAS_L_REACHABILITIES,r);
+            unsigned from=sh_aas_get_u16(rr,6),to=sh_aas_get_u16(rr,8);
+            if(from<sizeof seen&&to<sizeof seen&&seen[from]&&sh_aas_get_u32(rr,0)==0x20)seen[to]=1;
+        }
+        CHECK(seen[peer]);
+    }
+    sh_aas_free(a);
+}
+
 int main(void)
 {
     printf("aas_augment_test\n");
     test_fixture_resolves();
+    test_intersecting_bridge_routes();
+    test_narrow_partial_contacts();
+    test_suspended_bridge_is_continuous();
+    test_rotated_ridge_has_reciprocal_walk_links();
+    test_level_floor_joins_ramp();
     test_traversal_anchor_pattern();
     test_z_at_interpolates_across_a_slope();
     test_contains_is_true_inside();

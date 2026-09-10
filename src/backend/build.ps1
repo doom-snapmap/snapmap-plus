@@ -46,8 +46,8 @@
 # Needs Build Tools for Visual Studio 2022 (C++ workload).
 param(
     [string[]]$Sources = @("dllmain.c", "host_image.c", "signatures.c", "engine_globals.c", "hook.c", "smoke.c",
-                           "rawmap.c", "editor_frame.c", "map_shards.c", "map_package.c", "map_embed.c", "navmesh.c", "nav_regions.c", "nav_bake.c", "nav_play.c", "nav_traversal.c", "aas_edit.c", "aas_augment.c", "palette_guard.c", "palette_refresh.c", "engine_dialog.c", "package_conflicts.c", "strids.c",
-                           "overrides.c", "resource_bridge.c", "package_requirements.c", "raw_deflate.c", "decl_text.c", "decl_server_path.c", "packages.c", "decl_server.c", "decl_visibility.c",
+                           "rawmap.c", "editor_frame.c", "map_shards.c", "map_package.c", "map_embed.c", "navmesh.c", "nav_regions.c", "nav_bake.c", "nav_play.c", "nav_traversal.c", "aas_edit.c", "aas_augment.c", "nav_geometry.c", "nav_preview.c", "palette_guard.c", "palette_refresh.c", "engine_dialog.c", "package_conflicts.c", "strids.c",
+                           "overrides.c", "resource_bridge.c", "package_requirements.c", "weapon_hud.c", "raw_deflate.c", "decl_text.c", "decl_server_path.c", "packages.c", "decl_server.c", "decl_visibility.c",
                            "user_overrides.c", "cvars.c", "commands.c", "clipboard.c",
                            "config.c", "config_json.c",
                            "entity.c", "typeinfo.c", "preview.c", "megapreview.c", "imgpreview.c", "prefabpreview.c", "soundpreview.c", "bcn.c", "patch.c", "algo.c", "target_any.c", "wiring_cleandirect.c", "swf_textedit.c", "ui_bridge.c",
