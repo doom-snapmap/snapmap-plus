@@ -629,6 +629,7 @@ int sh_rawmap_dest_writable_now(const char *path, char *out_msg, int msg_capacit
 int sh_rawmap_set_save_target(const char *path)
 {
     char line[MAX_PATH + 64];
+    char dflt[MAX_PATH];
 
     if (path == NULL || path[0] == '\0') {
         if (g_save_target[0]) {
@@ -638,6 +639,18 @@ int sh_rawmap_set_save_target(const char *path)
         return 1;
     }
     if (!dest_folder_is_usable(path, NULL, 0)) return 0;
+
+    /* Picking the usual file is not a choice to keep saves off it. Holding it as a
+     * target would behave identically and still tick the File menu's box, so the
+     * menu would claim something is in force that changes nothing. */
+    default_dest_path(dflt, sizeof dflt);
+    if (_stricmp(path, dflt) == 0) {
+        if (g_save_target[0]) {
+            g_save_target[0] = '\0';
+            backend_log("B1: rawmap saves go to the default rawmap.json");
+        }
+        return 1;
+    }
 
     strncpy_s(g_save_target, sizeof g_save_target, path, _TRUNCATE);
     if (g_save_target[0] == '\0') return 0;
@@ -1628,8 +1641,6 @@ int sh_rawmap_paths_are_default(void)
 {
     char src_now[MAX_PATH] = "", dst_now[MAX_PATH] = "";
     char src_def[MAX_PATH] = "", dst_def[MAX_PATH] = "";
-
-    if (g_save_target[0]) return 0;
 
     resolve_source_path(src_now, sizeof src_now);
     resolve_dest_path(dst_now, sizeof dst_now);

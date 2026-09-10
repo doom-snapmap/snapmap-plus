@@ -304,6 +304,48 @@ static void are_default_answers_both_ways(const char *archive)
     clean_state();
 }
 
+/* Picking the usual file is not a choice to keep saves off it, so nothing is held. */
+static void picking_the_usual_file_holds_nothing(void)
+{
+    char dflt[MAX_PATH] = "", target[MAX_PATH] = "x";
+
+    printf("\n-- picking the usual file leaves nothing in force\n");
+
+    clean_state();
+    sh_rawmap_get_default_paths(NULL, 0, dflt, (int)sizeof dflt);
+    CHECK(dflt[0] != '\0');
+
+    CHECK(sh_rawmap_set_save_target(dflt) == 1);
+    sh_rawmap_get_save_target(target, (int)sizeof target);
+    printf("   after picking it: target is %s\n", target[0] ? target : "(nothing)");
+    CHECK(target[0] == '\0');            /* the tick stays clear */
+    CHECK(save_is_default());
+    CHECK(sh_rawmap_paths_are_default() == 1);
+
+    clean_state();
+}
+
+/* A file chosen earlier is released when the usual file is picked. */
+static void picking_the_usual_file_releases_a_chosen_one(void)
+{
+    char dflt[MAX_PATH] = "", picked[MAX_PATH], target[MAX_PATH] = "x";
+
+    printf("\n-- picking the usual file releases a file chosen before it\n");
+
+    clean_state();
+    sh_rawmap_get_default_paths(NULL, 0, dflt, (int)sizeof dflt);
+    CHECK(temp_path("rawmap_test_export5.json", picked, sizeof picked));
+    CHECK(sh_rawmap_set_save_target(picked) == 1);
+    CHECK(!save_is_default());
+
+    CHECK(sh_rawmap_set_save_target(dflt) == 1);
+    sh_rawmap_get_save_target(target, (int)sizeof target);
+    CHECK(target[0] == '\0');
+    CHECK(save_is_default());
+
+    clean_state();
+}
+
 /* Write a file with exact bytes -- these tests are about what the LAST bytes say. */
 static int write_file(const char *name, const char *bytes, char *out, size_t cap)
 {
@@ -411,6 +453,8 @@ int main(void)
     choosing_the_opened_rawmap_works(archive);
     a_different_map_drops_the_target();
     a_bare_word_is_refused();
+    picking_the_usual_file_holds_nothing();
+    picking_the_usual_file_releases_a_chosen_one();
     are_default_answers_both_ways(archive);
     looks_like_rawmap_tells_them_apart();
 
