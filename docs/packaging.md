@@ -53,9 +53,13 @@ auto under `--yes`). This never blocks the mod install — the DLLs deploy regar
 ## Per-user data is NOT shipped
 
 The bundle ships **no player override files**. At runtime the tool reads your own from
-`%LOCALAPPDATA%\snapmap-plus\overrides\`. Existing identities use the file-shadow; genuinely new text decl
-identities under `overrides\<package>\decls\<type>\` are registered once at cold start from one immutable
-in-memory per-decl table by the decl server. Each published entry is keyed by
+`%LOCALAPPDATA%\snapmap-plus\overrides\`. Each package has a `package.json` marker.
+Existing identities use the file shadow; new text decl identities under
+`overrides\<package>\decls\<type>\` are registered by the decl server at boot.
+The map-package installation flow also requests a guarded runtime refresh of
+declarations, strings and installed-resource references; manual file changes
+require a restart. Published declaration snapshots remain valid for active
+readers. Each published entry is keyed by
 `decltree/<type>/<logical-name>.decl`; no aggregate source file is created or served.
 Snapmap+'s small built-in defaults are instead served from memory by the backend DLL. Neither user mechanism
 packages or distributes referenced binary assets.
@@ -80,11 +84,10 @@ The hash below identifies the Vulkan executable, which is the image every `known
 DOOMx64vk.exe  SHA256  139763E94F1A75B5310179F9EEEB8A949A1F53C49ACBC722FCFC5DFE7BB6D323
 ```
 
-Recorded RVAs support validation and re-derivation. The signature resolver can
-also probe a known RVA when it finds a recognized hook and enough matching tail
-bytes; this fallback does not check the image hash. Other explicit RVA fallbacks
-use `sh_host_is_pinned_rva_build`, which currently checks the Vulkan executable's
-basename, not its fingerprint. Neither check establishes an exact build match.
+Recorded RVAs support validation and re-derivation. Raw-RVA fallbacks require a
+matching backing-file SHA-256 in `host_image.c`. The hook-tolerant fallback also
+requires a recognized detour and matching signature tail. Other images use the
+portable scan paths; their filenames do not authorize reference addresses.
 The OpenGL executable from the same release has different addresses. The engine
 signatures and engine-globals anchors must resolve **uniquely on both images** — the `-DoomAlt` portability gate in
 `tests\run-tests.ps1`, described in [`contributing.md`](contributing.md).

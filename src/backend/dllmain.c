@@ -13,7 +13,6 @@
 #include "smoke.h"
 #include "rawmap.h"
 #include "map_package.h"
-#include "palette_guard.h"
 #include "palette_refresh.h"
 #include "engine_dialog.h"
 #include "../fault_shield/mapload_guards.h"

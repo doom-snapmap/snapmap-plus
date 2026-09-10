@@ -3,6 +3,9 @@
  * The browser receives only an opaque session ID. MEDIA R2 stores uploaded images.
  * See README.md for setup, routes and operational limits. */
 
+import { RequestError, readBody, readJsonObject } from '../src/workers/request_body.js';
+export { CommunityQuota } from './quota.js';
+
 const REPO_OWNER = 'doom-snapmap';
 const REPO_NAME = 'snapmap-plus';
 const API = 'https://api.github.com';
@@ -35,8 +38,7 @@ const SESSION_TTL = 30 * 86400;      // 30 days
 const STATE_TTL = 600;               // 10 minutes to complete the GitHub round-trip
 
 const MAX_UPLOAD = 8 * 1024 * 1024;  // 8 MB per image
-/* Per-session write thresholds; KV counters do not enforce atomic global limits. */
-const LIMITS = { post: 10, comment: 60, reaction: 120, upload: 30, preview: 120, edit: 60 };
+const MAX_JSON = 384 * 1024;         // Allows a 60,000-character body even when JSON-escaped.
 
 /* ---------------- small helpers ---------------- */
 
@@ -370,15 +372,29 @@ async function getSession(env, req) {
   try { return { sid: m[1], user: JSON.parse(raw) }; } catch { return null; }
 }
 
-/* Approximate session throttling: KV get/put is not atomic, so concurrent requests
- * can lose increments. Each write renews the one-hour expiry. */
-async function rateOk(env, sid, kind) {
-  const limit = LIMITS[kind];
-  const key = 'rate:' + kind + ':' + sid;
-  const n = parseInt((await env.SESSIONS.get(key)) || '0', 10);
-  if (n >= limit) return false;
-  await env.SESSIONS.put(key, String(n + 1), { expirationTtl: 3600 });
-  return true;
+async function rateOk(env, session, kind) {
+  try {
+    let id = session.user.id;
+    if (!/^[1-9]\d{0,19}$/.test(String(id || ''))) {
+      // Upgrade older sessions once so signing in again cannot reset a quota.
+      const response = await fetch(API + '/user', {
+        headers: { 'Authorization': 'Bearer ' + session.user.token, 'Accept': 'application/vnd.github+json',
+                   'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'snapmap-plus-community' },
+      });
+      if (!response.ok) throw new Error('account lookup failed');
+      const user = await readJsonObject(response, 16384);
+      id = String(user.id || '');
+      if (!/^[1-9]\d{0,19}$/.test(id)) throw new Error('account id missing');
+      session.user.id = id;
+      await env.SESSIONS.put('session:' + session.sid, JSON.stringify(session.user), { expirationTtl: SESSION_TTL });
+    }
+    const objectId = env.WRITE_QUOTAS.idFromName('github:' + id);
+    const result = await env.WRITE_QUOTAS.get(objectId).consume(kind);
+    if (typeof result?.allowed !== 'boolean') throw new Error('invalid quota result');
+    return result.allowed;
+  } catch {
+    throw new RequestError('write quota unavailable; try again later', 503);
+  }
 }
 
 /* optional Turnstile check -- active only when the secret is configured */
@@ -446,6 +462,7 @@ async function authCallback(env, req, url) {
   const sid = randomHex(32);
   await env.SESSIONS.put('session:' + sid, JSON.stringify({
     token: tok.access_token,
+    id: String(user.id),
     login: user.login,
     name: user.name || user.login,
     avatar: user.avatar_url,
@@ -582,7 +599,7 @@ async function getDiscussion(env, number) {
 
 async function createPost(env, req, session, body) {
   if (!(await turnstileOk(env, req, body.turnstile))) return { error: 'verification failed', status: 403 };
-  if (!(await rateOk(env, session.sid, 'post'))) return { error: 'rate limited', status: 429 };
+  if (!(await rateOk(env, session, 'post'))) return { error: 'rate limited', status: 429 };
   const title = String(body.title || '').trim();
   const text = String(body.body || '').trim();
   const categoryId = String(body.categoryId || '');
@@ -601,7 +618,7 @@ async function createPost(env, req, session, body) {
 
 async function createComment(env, req, session, number, body) {
   if (!(await turnstileOk(env, req, body.turnstile))) return { error: 'verification failed', status: 403 };
-  if (!(await rateOk(env, session.sid, 'comment'))) return { error: 'rate limited', status: 429 };
+  if (!(await rateOk(env, session, 'comment'))) return { error: 'rate limited', status: 429 };
   const text = String(body.body || '').trim();
   if (text.length < 1 || text.length > 60000) return { error: 'bad body', status: 400 };
   const post = await getDiscussion(env, number);
@@ -615,7 +632,7 @@ async function createComment(env, req, session, number, body) {
 }
 
 async function addReaction(env, req, session, body) {
-  if (!(await rateOk(env, session.sid, 'reaction'))) return { error: 'rate limited', status: 429 };
+  if (!(await rateOk(env, session, 'reaction'))) return { error: 'rate limited', status: 429 };
   const subjectId = String(body.subjectId || '');
   const content = String(body.content || '');
   if (!subjectId || !REACTION_CONTENTS.includes(content)) return { error: 'bad reaction', status: 400 };
@@ -626,7 +643,7 @@ async function addReaction(env, req, session, body) {
 }
 
 async function editPost(env, req, session, number, body) {
-  if (!(await rateOk(env, session.sid, 'edit'))) return { error: 'rate limited', status: 429 };
+  if (!(await rateOk(env, session, 'edit'))) return { error: 'rate limited', status: 429 };
   const title = String(body.title || '').trim();
   const text = String(body.body || '').trim();
   if (title.length < 3 || title.length > 200) return { error: 'bad title', status: 400 };
@@ -649,7 +666,7 @@ async function editPost(env, req, session, number, body) {
 }
 
 async function deletePost(env, req, session, number) {
-  if (!(await rateOk(env, session.sid, 'edit'))) return { error: 'rate limited', status: 429 };
+  if (!(await rateOk(env, session, 'edit'))) return { error: 'rate limited', status: 429 };
   const post = await getDiscussion(env, number);
   if (post.error) return post;
   const data = await gql(session.user.token, M_DELETE_DISCUSSION, { id: post.id });
@@ -661,7 +678,7 @@ async function deletePost(env, req, session, number) {
 }
 
 async function editComment(env, req, session, id, body) {
-  if (!(await rateOk(env, session.sid, 'edit'))) return { error: 'rate limited', status: 429 };
+  if (!(await rateOk(env, session, 'edit'))) return { error: 'rate limited', status: 429 };
   const text = String(body.body || '').trim();
   if (text.length < 1 || text.length > 60000) return { error: 'bad body', status: 400 };
   const data = await gql(session.user.token, M_UPDATE_COMMENT, { commentId: id, body: text });
@@ -673,7 +690,7 @@ async function editComment(env, req, session, id, body) {
 }
 
 async function deleteComment(env, req, session, id) {
-  if (!(await rateOk(env, session.sid, 'edit'))) return { error: 'rate limited', status: 429 };
+  if (!(await rateOk(env, session, 'edit'))) return { error: 'rate limited', status: 429 };
   const data = await gql(session.user.token, M_DELETE_COMMENT, { id });
   if (!(data && data.deleteDiscussionComment)) {
     return { error: 'GitHub rejected the delete (only the author can delete)', status: 403 };
@@ -685,7 +702,7 @@ async function deleteComment(env, req, session, id) {
 /* markdown -> HTML through GitHub's own renderer+sanitizer, so the composer preview matches the
  * published rendering exactly */
 async function previewMarkdown(env, session, body) {
-  if (!(await rateOk(env, session.sid, 'preview'))) return { error: 'rate limited', status: 429 };
+  if (!(await rateOk(env, session, 'preview'))) return { error: 'rate limited', status: 429 };
   const text = String(body.text || '');
   if (text.length > 60000) return { error: 'too long', status: 413 };
   const token = await authToken(env);
@@ -714,12 +731,9 @@ const IMAGE_TYPES = {
 };
 
 async function uploadMedia(env, req, session) {
-  if (!(await rateOk(env, session.sid, 'upload'))) return { error: 'rate limited', status: 429 };
-  const len = parseInt(req.headers.get('Content-Length') || '0', 10);
-  if (len > MAX_UPLOAD) return { error: 'too large (8 MB max)', status: 413 };
-  const buf = new Uint8Array(await req.arrayBuffer());
+  if (!(await rateOk(env, session, 'upload'))) return { error: 'rate limited', status: 429 };
+  const buf = await readBody(req, MAX_UPLOAD);
   if (buf.length === 0) return { error: 'empty upload', status: 400 };
-  if (buf.length > MAX_UPLOAD) return { error: 'too large (8 MB max)', status: 413 };
 
   /* identify by magic bytes -- the client-sent name/type is advisory only */
   let ext = null, mime = null;
@@ -751,8 +765,7 @@ async function serveMedia(env, key) {
 
 /* ---------------- entry ---------------- */
 
-export default {
-  async fetch(req, env) {
+async function handleRequest(req, env) {
     if (req.method === 'OPTIONS') return preflight(req);
 
     const url = new URL(req.url);
@@ -790,6 +803,7 @@ export default {
     } else if (req.method === 'POST') {
       const session = await getSession(env, req);
       if (path === '/auth/logout') {
+        await readBody(req, MAX_JSON);
         if (session) await env.SESSIONS.delete('session:' + session.sid);
         result = { ok: true };
       } else if (!session) {
@@ -797,11 +811,8 @@ export default {
       } else if (path === '/media/upload') {
         result = await uploadMedia(env, req, session);
       } else {
-        let body;
-        try { body = await req.json(); } catch { body = null; }
-        if (!body) {
-          result = { error: 'bad json', status: 400 };
-        } else if (path === '/community/discussions') {
+        const body = await readJsonObject(req, MAX_JSON);
+        if (path === '/community/discussions') {
           result = await createPost(env, req, session, body);
         } else if (path === '/community/reactions') {
           result = await addReaction(env, req, session, body);
@@ -820,13 +831,12 @@ export default {
         const mp = path.match(/^\/community\/discussions\/(\d+)$/);
         const mc = path.match(/^\/community\/comments\/([A-Za-z0-9_=-]+)$/);
         if (req.method === 'DELETE') {
+          await readBody(req, MAX_JSON);
           if (mp) result = await deletePost(env, req, session, parseInt(mp[1], 10));
           else if (mc) result = await deleteComment(env, req, session, mc[1]);
         } else {
-          let body;
-          try { body = await req.json(); } catch { body = null; }
-          if (!body) result = { error: 'bad json', status: 400 };
-          else if (mp) result = await editPost(env, req, session, parseInt(mp[1], 10), body);
+          const body = await readJsonObject(req, MAX_JSON);
+          if (mp) result = await editPost(env, req, session, parseInt(mp[1], 10), body);
           else if (mc) result = await editComment(env, req, session, mc[1], body);
         }
       }
@@ -835,5 +845,14 @@ export default {
     if (!result) return withCors(req, json({ error: 'not found' }, 404));
     if (result.error) return withCors(req, json({ error: result.error }, result.status || 500));
     return withCors(req, json(result));
+}
+
+export default {
+  async fetch(req, env) {
+    try { return await handleRequest(req, env); }
+    catch (error) {
+      return withCors(req, json({ error: error instanceof RequestError ? error.message : 'service unavailable' },
+                               error instanceof RequestError ? error.status : 503));
+    }
   },
 };

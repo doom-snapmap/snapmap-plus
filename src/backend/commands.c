@@ -53,6 +53,7 @@ static volatile LONG      g_installed   = 0;
 
 /* Keep the original getter bytes while devmode is forced off. */
 static sh_patch_handle    g_devmode_handle;
+static int               g_devmode_patch_complete;
 
 /* Pass the address of one preformatted string pointer as the engine varargs. */
 void sh_printf(const char *fmt, ...)
@@ -353,7 +354,8 @@ static void h_disable_devmode(idCmdArgs *a)
 {
     (void)a;
     if (g_devmode_handle.live) {
-        sh_printf("devmode already disabled\n");
+        sh_printf(g_devmode_patch_complete ? "devmode already disabled\n" :
+                  "devmode restoration incomplete; run sh_reenable_devmode to retry\n");
         return;
     }
     sig_result r;
@@ -366,8 +368,12 @@ static void h_disable_devmode(idCmdArgs *a)
     const uint8_t expect[3]    = { 0x0F, 0xB6, 0x81 };
     const uint8_t new_bytes[3] = { 0x31, 0xC0, 0xC3 };
     sh_patch_status st = code_patch_sig(&r, expect, new_bytes, 3, &g_devmode_handle);
+    g_devmode_patch_complete = st == B2_PATCH_OK;
     if (st == B2_PATCH_OK)
         sh_printf("sh_disable_devmode: %s -- devmode disabled (session getter -> 0)\n",
+                  sh_patch_status_str(st));
+    else if (g_devmode_handle.live)
+        sh_printf("sh_disable_devmode: %s -- restoration incomplete; run sh_reenable_devmode to retry\n",
                   sh_patch_status_str(st));
     else
         sh_printf("sh_disable_devmode: %s -- patch refused, devmode unchanged\n",
@@ -383,6 +389,7 @@ static void h_reenable_devmode(idCmdArgs *a)
         return;
     }
     sh_patch_status st = code_unpatch(&g_devmode_handle);
+    g_devmode_patch_complete = 0;
     if (st == B2_PATCH_OK)
         sh_printf("sh_reenable_devmode: %s -- devmode re-enabled (getter restored)\n",
                   sh_patch_status_str(st));
@@ -426,9 +433,20 @@ static void our_renderlog_hook(void *ctx, void *channel, const char *fmt, ...)
 static void h_cs_start_render_logging(idCmdArgs *a)
 {
     (void)a;
+    if (g_renderlog_tramp) {
+        if (sh_detour_is_installed(g_renderlog_tramp)) {
+            sh_printf("render logging already started\n");
+            return;
+        }
+        if (!sh_uninstall_detour(g_renderlog_tramp)) {
+            sh_printf("render logging restoration pending; retry this command.\n");
+            return;
+        }
+        g_renderlog_tramp = NULL;
+    }
     if (g_renderlog_fp) {
-        sh_printf("render logging already started\n");
-        return;
+        fclose(g_renderlog_fp);
+        g_renderlog_fp = NULL;
     }
     if (fopen_s(&g_renderlog_fp, "renderlog.txt", "w") != 0 || g_renderlog_fp == NULL) {
         g_renderlog_fp = NULL;
@@ -445,12 +463,21 @@ static void h_cs_start_render_logging(idCmdArgs *a)
         return;
     }
 
-    g_renderlog_tramp = sh_install_detour_sig(&r, (void *)our_renderlog_hook, RENDERLOG_STOLEN);
+    g_renderlog_tramp = sh_prepare_detour_sig(&r, (void *)our_renderlog_hook, RENDERLOG_STOLEN);
     if (g_renderlog_tramp == NULL) {
         sh_printf("cs_start_render_logging: detour install refused/failed (%s status=%d) -- logging off.\n",
                   RENDERLOG_SIG_NAME, (int)r.status);
         fclose(g_renderlog_fp);
         g_renderlog_fp = NULL;
+        return;
+    }
+    if (sh_commit_detour(g_renderlog_tramp) != B2_PATCH_OK) {
+        if (sh_uninstall_detour(g_renderlog_tramp)) {
+            g_renderlog_tramp = NULL;
+            fclose(g_renderlog_fp);
+            g_renderlog_fp = NULL;
+        }
+        sh_printf("cs_start_render_logging: commit failed; retained callbacks require restoration.\n");
         return;
     }
     sh_printf("cs_start_render_logging: render-log hook installed.\n");
@@ -1368,9 +1395,14 @@ static void sh_command_unlock_install(void *cmdsys, void *add_command, const uin
     idlist_grow_fn grow = sh_decode_idlist_grow(add_command, module_base);
 
     /* Future registrations inherit exposure flags. */
-    void *tramp = install_inline_hook(add_command, (void *)hook_add_command, ADDCMD_STOLEN);
-    if (tramp != NULL) {
-        g_addcmd_tramp = (add_command6_fn)tramp;
+    if (g_addcmd_tramp && !hook_is_installed((void *)g_addcmd_tramp) &&
+        hook_unpatch((void *)g_addcmd_tramp)) g_addcmd_tramp = NULL;
+    if (!g_addcmd_tramp) {
+        g_addcmd_tramp = (add_command6_fn)hook_prepare(add_command, (void *)hook_add_command, ADDCMD_STOLEN);
+        if (g_addcmd_tramp && hook_commit((void *)g_addcmd_tramp) != B2_PATCH_OK &&
+            hook_unpatch((void *)g_addcmd_tramp)) g_addcmd_tramp = NULL;
+    }
+    if (hook_is_installed((void *)g_addcmd_tramp)) {
         backend_log("B2: command-unlock -- AddCommand detour installed (flags|6 on every registration)");
     } else {
         backend_log("B2: command-unlock -- AddCommand detour FAILED (one-time pass still runs)");

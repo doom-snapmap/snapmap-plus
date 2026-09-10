@@ -53,10 +53,11 @@ static void     **g_slot       = NULL;   /* the live vtable slot we patched (for
 static volatile LONG g_shadow_count = 0;
 typedef struct ov_internal_decl {
     char *name;                   /* exact lower-case decltree/<type>/<name>.decl */
-    unsigned char *body;          /* process-lifetime copy */
+    unsigned char *body;          /* owned by the published snapshot */
     size_t body_length;
 } ov_internal_decl;
 
+static SRWLOCK g_internal_lock = SRWLOCK_INIT;
 static ov_internal_decl *g_internal_decls;
 static size_t g_internal_decl_count;
 static volatile LONG g_internal_decl_table_state;
@@ -449,7 +450,14 @@ static void ov_internal_decl_table_free(ov_internal_decl *entries, size_t count)
     HeapFree(GetProcessHeap(), 0, entries);
 }
 
-static int ov_internal_decl_table_publish(
+static int ov_internal_decl_table_publish(const sh_overrides_internal_decl_entry *entries, size_t count, int provider_ready, int user_enabled);
+static ov_stream * open_internal_decl(const char *name, int *matched);
+size_t sh_overrides_internal_decl_published_count(void);
+int sh_overrides_internal_decl_published(const char *name);
+int sh_overrides_internal_decl_table_can_install(void);
+static int ov_internal_decl_table_merge(const sh_overrides_internal_decl_entry *entries, size_t count, int provider_ready);
+
+static int ov_internal_decl_table_publish_locked(
     const sh_overrides_internal_decl_entry *entries, size_t count,
     int provider_ready, int user_enabled)
 {
@@ -496,14 +504,12 @@ static int ov_internal_decl_table_publish(
     }
     g_internal_decls = copy;
     g_internal_decl_count = count;
-    /* Publish only complete keys and bodies. Retain allocations across
-     * runtime replacements for existing streams.
-     */
+    /* Publish only complete keys and bodies; open streams own separate copies. */
     InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_READY);
     return 1;
 }
 
-static ov_stream *open_internal_decl(const char *name, int *matched)
+static ov_stream *open_internal_decl_locked(const char *name, int *matched)
 {
     size_t i;
     if (matched) *matched = 0;
@@ -513,14 +519,21 @@ static ov_stream *open_internal_decl(const char *name, int *matched)
     for (i = 0; i < g_internal_decl_count; i++) {
         if (strcmp(name, g_internal_decls[i].name) != 0) continue;
         if (matched) *matched = 1;
-        return make_mem_stream(g_internal_decls[i].body,
-                               (long long)g_internal_decls[i].body_length,
-                               g_internal_decls[i].name, 0);
+        {
+            ov_stream *stream;
+            size_t length = g_internal_decls[i].body_length;
+            unsigned char *body = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, length);
+            if (!body) return NULL;
+            memcpy(body, g_internal_decls[i].body, length);
+            stream = make_mem_stream(body, (long long)length, g_internal_decls[i].name, 1);
+            if (!stream) HeapFree(GetProcessHeap(), 0, body);
+            return stream;
+        }
     }
     return NULL;
 }
 
-size_t sh_overrides_internal_decl_published_count(void)
+size_t sh_overrides_internal_decl_published_count_locked(void)
 {
     if (InterlockedCompareExchange(&g_internal_decl_table_state, 0, 0) !=
         OV_INTERNAL_DECL_TABLE_READY)
@@ -528,7 +541,7 @@ size_t sh_overrides_internal_decl_published_count(void)
     return g_internal_decl_count;
 }
 
-int sh_overrides_internal_decl_published(const char *name)
+int sh_overrides_internal_decl_published_locked(const char *name)
 {
     size_t i;
     if (!name || !sh_user_overrides_enabled_for_launch() ||
@@ -539,39 +552,22 @@ int sh_overrides_internal_decl_published(const char *name)
     return 0;
 }
 
-int sh_overrides_internal_decl_table_can_install(void)
+int sh_overrides_internal_decl_table_can_install_locked(void)
 {
     return g_orig_open != NULL && sh_user_overrides_enabled_for_launch() &&
            InterlockedCompareExchange(&g_internal_decl_table_state, 0, 0) ==
                OV_INTERNAL_DECL_TABLE_NEW;
 }
 
-/* Reopen publication state without freeing or hiding existing entries.
- * Runtime rearm must merge new identities over them; streams may still
- * reference their bodies.
- */
+/* A runtime merge replaces an immutable table. Existing opens own their
+ * bytes, so publication never hides the old table or invalidates a stream. */
 void sh_overrides_internal_decl_table_reopen(void)
 {
-    char line[160];
-    size_t held = g_internal_decl_count;
-    /* Only the state reopens; existing entries remain available to lookup and
-     * merge.
-     */
-    InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_NEW);
-    _snprintf_s(line, sizeof line, _TRUNCATE,
-                "B1: overrides internal decl table REOPENED for re-publication (%u entr(ies) "
-                "retained and still served; a merge will carry them forward)",
-                (unsigned)held);
-    backend_log(line);
+    backend_log("B1: overrides internal decl table remains available during refresh");
 }
 
-/* Merge new entries over the current table. New keys win; unchanged entries
- * borrow their existing key/body allocations. Retain prior arrays for
- * concurrent readers. Allocation failure leaves the previous table intact;
- * READY is published after construction completes.
- */
-int sh_overrides_internal_decl_table_merge(
-    const sh_overrides_internal_decl_entry *entries, size_t count)
+static int ov_internal_decl_table_merge_locked(
+    const sh_overrides_internal_decl_entry *entries, size_t count, int provider_ready)
 {
     ov_internal_decl *merged;
     ov_internal_decl *old = g_internal_decls;
@@ -579,19 +575,10 @@ int sh_overrides_internal_decl_table_merge(
     size_t total, i, j, at = 0;
     char line[192];
 
-    if (!g_orig_open || !sh_user_overrides_enabled_for_launch()) return 0;
-    if (!entries || count == 0) return 0;
+    if (!provider_ready || !sh_user_overrides_enabled_for_launch()) return 0;
+    if (!entries || count == 0 || count > OV_INTERNAL_DECL_MAX_ENTRIES) return 0;
     if (count > SIZE_MAX - old_count) return 0;
     total = old_count + count;
-    if (total > OV_INTERNAL_DECL_MAX_ENTRIES) {
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "B1: overrides internal decl table MERGE refused -- %u old + %u new exceeds "
-                    "the %u-entry cap", (unsigned)old_count, (unsigned)count,
-                    (unsigned)OV_INTERNAL_DECL_MAX_ENTRIES);
-        backend_log(line);
-        return 0;
-    }
-
     merged = (ov_internal_decl *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
                                            total * sizeof(merged[0]));
     if (!merged) return 0;
@@ -621,7 +608,7 @@ int sh_overrides_internal_decl_table_merge(
         at++;
     }
 
-    /* Then the old ones the new set did not supersede, carried by pointer. */
+    /* Copy unchanged identities into the replacement snapshot. */
     for (i = 0; i < old_count; i++) {
         int superseded = 0;
         if (!old[i].name || !old[i].body) continue;
@@ -629,18 +616,29 @@ int sh_overrides_internal_decl_table_merge(
             if (strcmp(old[i].name, merged[j].name) == 0) { superseded = 1; break; }
         }
         if (superseded) continue;
-        merged[at].name = old[i].name;         /* Borrowed from the retained previous table. */
-        merged[at].body = old[i].body;
+        if (at >= OV_INTERNAL_DECL_MAX_ENTRIES) {
+            ov_internal_decl_table_free(merged, total);
+            return 0;
+        }
+        merged[at].name = (char *)HeapAlloc(GetProcessHeap(), 0, strlen(old[i].name) + 1);
+        merged[at].body = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, old[i].body_length);
+        if (!merged[at].name || !merged[at].body) {
+            ov_internal_decl_table_free(merged, total);
+            return 0;
+        }
+        strcpy_s(merged[at].name, strlen(old[i].name) + 1, old[i].name);
+        memcpy(merged[at].body, old[i].body, old[i].body_length);
         merged[at].body_length = old[i].body_length;
         at++;
     }
 
     g_internal_decls = merged;
     g_internal_decl_count = at;
+    ov_internal_decl_table_free(old, old_count);
     InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_READY);
     _snprintf_s(line, sizeof line, _TRUNCATE,
                 "B1: overrides internal decl table MERGED -- %u new + %u carried forward = %u "
-                "published (previous array retired, entries reused by pointer)",
+                "published (previous snapshot released)",
                 (unsigned)count, (unsigned)(at - count), (unsigned)at);
     backend_log(line);
     return 1;
@@ -842,10 +840,9 @@ static const ov_namespace g_ov_namespaces[] = {
 /* Cache package enumeration outside the resource-open path. Capture at
  * installation and refresh during runtime rearm.
  */
-/* Rescans fill the inactive buffer, then atomically publish its index. Each
- * lookup reads the index once. Two buffers do not track reader lifetime;
- * rescans must be serialized at a quiescent boundary.
- */
+/* Readers hold the shared lock through path selection. A rescan exclusively
+ * owns both buffers until it publishes a complete inventory. */
+static SRWLOCK g_ov_packages_lock = SRWLOCK_INIT;
 static sh_package g_ov_packages_buf[2][SH_PACKAGES_MAX];
 static size_t g_ov_package_counts[2];
 static volatile LONG g_ov_pkg_active;   /* 0 or 1 */
@@ -853,27 +850,30 @@ static volatile LONG g_ov_pkg_active;   /* 0 or 1 */
 static volatile LONG g_ov_conflicts_reported;
 static volatile LONG g_ov_pkg_generation;
 
-static void ov_capture_packages(void)
+static int ov_capture_packages(void)
 {
     char root[MAX_PATH];
     size_t count = 0;
-    LONG active = InterlockedCompareExchange(&g_ov_pkg_active, 0, 0);
-    LONG target = active ^ 1;              /* Fill the inactive buffer. */
+    LONG active, target;
+    int complete;
 
     resolve_root(root, sizeof root);
-    if (!root[0]) return;
-    /* Keep the enumerated subset on failure; omitted packages fall through to
-     * later resource layers. Decl registration separately rejects a partial
-     * snapshot.
-     */
-    (void)sh_packages_enumerate(root, g_ov_packages_buf[target], SH_PACKAGES_MAX, &count);
+    AcquireSRWLockExclusive(&g_ov_packages_lock);
+    active = g_ov_pkg_active;
+    target = active ^ 1;
+    complete = root[0] && sh_packages_enumerate(root, g_ov_packages_buf[target],
+                                               SH_PACKAGES_MAX, &count);
+    if (!complete) count = 0;
     g_ov_package_counts[target] = count;
     InterlockedExchange(&g_ov_pkg_active, target);   /* publish: one atomic store */
+    InterlockedIncrement(&g_ov_pkg_generation);
+    ReleaseSRWLockExclusive(&g_ov_packages_lock);
 
     /* Log overlapping package files so the selected precedence is visible. */
     if (count > 1 && !InterlockedCompareExchange(&g_ov_conflicts_reported, 1, 0))
         (void)sh_pkg_conflicts_report(root);
-    InterlockedIncrement(&g_ov_pkg_generation);
+    if (!complete) backend_log("B1: overrides package inventory REFUSED -- enumeration incomplete");
+    return complete;
 }
 
 /* Refresh package paths used by opens. New decl identities still require
@@ -883,14 +883,19 @@ unsigned long sh_overrides_rescan_packages(void)
 {
     char line[160];
     LONG active;
-    ov_capture_packages();
+    if (!ov_capture_packages()) return SH_OVERRIDES_RESCAN_FAILED;
+    AcquireSRWLockShared(&g_ov_packages_lock);
     active = InterlockedCompareExchange(&g_ov_pkg_active, 0, 0);
     _snprintf_s(line, sizeof line, _TRUNCATE,
                 "B1: overrides package list RE-SCANNED -- %u package(s) now visible (generation %ld)",
                 (unsigned)g_ov_package_counts[active],
                 (long)InterlockedCompareExchange(&g_ov_pkg_generation, 0, 0));
-    backend_log(line);
-    return (unsigned long)g_ov_package_counts[active];
+    {
+        unsigned long count = (unsigned long)g_ov_package_counts[active];
+        ReleaseSRWLockShared(&g_ov_packages_lock);
+        backend_log(line);
+        return count;
+    }
 }
 
 static int ov_is_regular_file(const char *path)
@@ -920,7 +925,7 @@ static int ov_resolve_existing(const char *name, char *out, size_t cap)
         relative = ns->strip_prefix ? name + prefix_length : name;
         if (!relative[0]) break;
 
-        /* Use one buffer index for the entire lookup. */
+        AcquireSRWLockShared(&g_ov_packages_lock);
         LONG act = InterlockedCompareExchange(&g_ov_pkg_active, 0, 0);
         size_t pkg_count = g_ov_package_counts[act];
         for (i = 0; i < pkg_count; i++) {
@@ -930,8 +935,12 @@ static int ov_resolve_existing(const char *name, char *out, size_t cap)
                 continue;
             for (p = out; *p; ++p)
                 if (*p == '/') *p = '\\';
-            if (ov_is_regular_file(out)) return 1;
+            if (ov_is_regular_file(out)) {
+                ReleaseSRWLockShared(&g_ov_packages_lock);
+                return 1;
+            }
         }
+        ReleaseSRWLockShared(&g_ov_packages_lock);
         break;                      /* prefixes are disjoint; one match is all */
     }
     out[0] = '\0';
@@ -942,6 +951,11 @@ static int ov_resolve_existing(const char *name, char *out, size_t cap)
 int sh_overrides_test_resolve_existing(const char *name, char *out, size_t cap)
 {
     ov_capture_packages();
+    return ov_resolve_existing(name, out, cap);
+}
+
+int sh_overrides_test_resolve_cached(const char *name, char *out, size_t cap)
+{
     return ov_resolve_existing(name, out, cap);
 }
 #endif
@@ -1605,3 +1619,69 @@ int sh_overrides_uninstall(void)
     g_orig_open = NULL;
     return 1;
 }
+
+static int ov_internal_decl_table_publish(const sh_overrides_internal_decl_entry *entries, size_t count, int provider_ready, int user_enabled)
+{
+    int result;
+    AcquireSRWLockExclusive(&g_internal_lock);
+    __try { result = ov_internal_decl_table_publish_locked(entries, count, provider_ready, user_enabled); }
+    __finally { ReleaseSRWLockExclusive(&g_internal_lock); }
+    return result;
+}
+
+static ov_stream * open_internal_decl(const char *name, int *matched)
+{
+    ov_stream * result;
+    AcquireSRWLockShared(&g_internal_lock);
+    __try { result = open_internal_decl_locked(name, matched); }
+    __finally { ReleaseSRWLockShared(&g_internal_lock); }
+    return result;
+}
+
+size_t sh_overrides_internal_decl_published_count(void)
+{
+    size_t result;
+    AcquireSRWLockShared(&g_internal_lock);
+    __try { result = sh_overrides_internal_decl_published_count_locked(); }
+    __finally { ReleaseSRWLockShared(&g_internal_lock); }
+    return result;
+}
+
+int sh_overrides_internal_decl_published(const char *name)
+{
+    int result;
+    AcquireSRWLockShared(&g_internal_lock);
+    __try { result = sh_overrides_internal_decl_published_locked(name); }
+    __finally { ReleaseSRWLockShared(&g_internal_lock); }
+    return result;
+}
+
+int sh_overrides_internal_decl_table_can_install(void)
+{
+    int result;
+    AcquireSRWLockShared(&g_internal_lock);
+    __try { result = sh_overrides_internal_decl_table_can_install_locked(); }
+    __finally { ReleaseSRWLockShared(&g_internal_lock); }
+    return result;
+}
+
+static int ov_internal_decl_table_merge(const sh_overrides_internal_decl_entry *entries, size_t count, int provider_ready)
+{
+    int result;
+    AcquireSRWLockExclusive(&g_internal_lock);
+    __try { result = ov_internal_decl_table_merge_locked(entries, count, provider_ready); }
+    __finally { ReleaseSRWLockExclusive(&g_internal_lock); }
+    return result;
+}
+
+int sh_overrides_internal_decl_table_merge(const sh_overrides_internal_decl_entry *entries, size_t count)
+{
+    return ov_internal_decl_table_merge(entries, count, g_orig_open != NULL);
+}
+
+#ifdef SH_OVERRIDES_TESTING
+int sh_overrides_test_internal_decl_table_merge(const sh_overrides_internal_decl_entry *entries, size_t count)
+{
+    return ov_internal_decl_table_merge(entries, count, 1);
+}
+#endif

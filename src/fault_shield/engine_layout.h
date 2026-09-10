@@ -99,6 +99,7 @@
 #define SHELLMGR_VISIBLE_OFF 0xA8u       /* (shellMgr)+0xa8 = the dialog-visible byte; write 1 on raise */
 #define DLGQ_ARR_OFF         0x900u      /* *(dlgMgr+0x900) = the descriptor array ptr (dedup scan) */
 #define DLGQ_COUNT_OFF       0x908u      /* *(int*)(dlgMgr+0x908) = queued count (<=4) */
+#define DLGMGR_ACTIVE_OFF    0x8F0u      /* active widget; native ClearDialog hides it before retirement */
 #define DLG_DESC_STRIDE      0x1B0u      /* per-descriptor stride (also the request-struct size) */
 #define DESC_GDMID_OFF       0x00u       /* descriptor/request: GDM id (int) */
 #define DESC_BUTTONSET_OFF   0x04u       /* descriptor/request: button-set (int) */
@@ -108,8 +109,9 @@
 #define NOTICE_BUTTONSET     0x10        /* single OK button (#STR_SWF_OK) */
 #define NOTICE_OK_ACTION     0           /* action 0 = pure close (RemoveDialog only -- dispatcher 0xE67BF0) */
 
-/* Dismiss these save-rejection dialogs by setting their clear flag. The actual
- * save deletion is a button action, so dismissal must not invoke that action. */
+/* Dismiss these save-rejection dialogs through ClearDialogWrapper. A direct
+ * clear-flag write can release callbacks while their widget remains visible.
+ * The wrapper performs native teardown without invoking a deletion action. */
 #define GDM_LOAD_DAMAGED_FILE          0x1d   /* single-map LOAD reject (Delete/Cancel prompt) */
 #define GDM_CORRUPT_CONTINUE           0x34   /* corrupt-continue */
 #define GDM_SNAPMAP_DETECTED_CORRUPT   0x83   /* browser bad-slot scan: detected-corrupt */

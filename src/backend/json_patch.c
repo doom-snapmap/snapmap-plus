@@ -1,6 +1,5 @@
 /* Locate JSON value spans and splice compact engine entity JSON in place.
- * Property-path descent is limited by JSON_MAX_SEGS; nested-value scanning has
- * no separate depth limit. This scanner is not a general JSON validator. */
+ * Property paths and JSON nesting are bounded before any edit is constructed. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -20,26 +19,39 @@ static const char *json_skip_ws(const char *p)
     return p;
 }
 
-/* Skip a quoted string, honoring escaped bytes; return NULL if unterminated. */
+/* Reject unterminated strings, control bytes, and malformed escape sequences. */
 static const char *json_skip_string(const char *p)
 {
     if (!p || *p != '"') return NULL;
     p++;
     while (*p != '\0') {
-        if (*p == '\\') { p++; if (*p == '\0') return NULL; p++; continue; }
+        if ((unsigned char)*p < 0x20) return NULL;
+        if (*p == '\\') {
+            p++;
+            if (*p == 'u') {
+                for (int i = 0; i < 4; i++) {
+                    char c = *++p;
+                    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                          (c >= 'A' && c <= 'F'))) return NULL;
+                }
+            } else if (!*p || !strchr("\"\\/bfnrt", *p)) return NULL;
+            p++;
+            continue;
+        }
         if (*p == '"') return p + 1;
         p++;
     }
     return NULL;
 }
 
-/* Skip a value, recursively scanning objects and arrays. No depth cap is imposed. */
-static const char *json_skip_value(const char *p)
+/* depth counts open containers, independently of the property-path limit. */
+static const char *json_skip_value_depth(const char *p, unsigned depth)
 {
     p = json_skip_ws(p);
     if (!p || *p == '\0') return NULL;
 
     if (*p == '"') return json_skip_string(p);
+    if ((*p == '{' || *p == '[') && depth >= SH_JSON_PATCH_MAX_DEPTH) return NULL;
 
     if (*p == '{') {
         const char *q = json_skip_ws(p + 1);
@@ -52,7 +64,7 @@ static const char *json_skip_value(const char *p)
             q = json_skip_ws(q);
             if (!q || *q != ':') return NULL;
             q = json_skip_ws(q + 1);
-            q = json_skip_value(q);
+            q = json_skip_value_depth(q, depth + 1);
             if (!q) return NULL;
             q = json_skip_ws(q);
             if (!q) return NULL;
@@ -67,7 +79,7 @@ static const char *json_skip_value(const char *p)
         if (!q) return NULL;
         if (*q == ']') return q + 1;
         for (;;) {
-            q = json_skip_value(q);
+            q = json_skip_value_depth(q, depth + 1);
             if (!q) return NULL;
             q = json_skip_ws(q);
             if (!q) return NULL;
@@ -84,16 +96,36 @@ static const char *json_skip_value(const char *p)
     if (*p == '-' || (*p >= '0' && *p <= '9')) {
         const char *q = p;
         if (*q == '-') q++;
-        while (*q >= '0' && *q <= '9') q++;
-        if (*q == '.') { q++; while (*q >= '0' && *q <= '9') q++; }
+        if (*q == '0') q++;
+        else {
+            if (*q < '1' || *q > '9') return NULL;
+            while (*q >= '0' && *q <= '9') q++;
+        }
+        if (*q == '.') {
+            q++;
+            if (*q < '0' || *q > '9') return NULL;
+            while (*q >= '0' && *q <= '9') q++;
+        }
         if (*q == 'e' || *q == 'E') {
             q++;
             if (*q == '+' || *q == '-') q++;
+            if (*q < '0' || *q > '9') return NULL;
             while (*q >= '0' && *q <= '9') q++;
         }
         return (q > p) ? q : NULL;
     }
     return NULL;
+}
+
+static const char *json_skip_value(const char *p)
+{
+    return json_skip_value_depth(p, 0);
+}
+
+static int json_complete(const char *p)
+{
+    const char *end = json_skip_value(p);
+    return end && !*json_skip_ws(end);
 }
 
 /* Find a direct member of [obj_open,obj_close), where obj_close follows the }.
@@ -198,7 +230,7 @@ static int json_build_scalar_chain(const char * const *segs, int nseg, int from_
 /* JSON-escape `raw` into a quoted string literal token (surrounding quotes included). */
 int sh_json_quote_string(const char *raw, char *out, int cap)
 {
-    if (cap < 3 || !raw) return 0;
+    if (cap < 3 || !raw || !out) return 0;
     int o = 0;
     out[o++] = '"';
     for (const unsigned char *p = (const unsigned char *)raw; *p; p++) {
@@ -262,13 +294,16 @@ static int json_string_span_equals(const char *span_start, const char *span_end,
     return *t == '\0';
 }
 
-static int json_atoi_span(const char *start, const char *end)
+static int json_list_count(const char *start, const char *end)
 {
-    int v = 0, neg = 0;
+    int v = 0;
     const char *p = start;
-    if (p < end && *p == '-') { neg = 1; p++; }
-    for (; p < end && *p >= '0' && *p <= '9'; p++) v = v * 10 + (*p - '0');
-    return neg ? -v : v;
+    if (p == end) return -1;
+    for (; p < end; p++) {
+        if (*p < '0' || *p > '9' || v > (JSON_CHAIN_CAP - (*p - '0')) / 10) return -1;
+        v = v * 10 + (*p - '0');
+    }
+    return v;
 }
 
 /* Build `"item[N]":"<escaped ids[i]>",` for one entry. */
@@ -372,8 +407,8 @@ static int json_walk_upsert_reflist(const char *doc, size_t doclen, const char *
     if (found && ve > vs && *vs == '{') {
         const char *num_key = NULL, *num_vs = NULL, *num_ve = NULL;
         if (json_find_top_level_key(vs, ve, "num", &num_key, &num_vs, &num_ve)) {
-            int base = json_atoi_span(num_vs, num_ve);
-            if (base < 0) base = 0;
+            int base = json_list_count(num_vs, num_ve);
+            if (base < 0) return 0;
             char newitems[JSON_CHAIN_CAP];
             size_t nlen = 0;
             int next = base;
@@ -441,6 +476,10 @@ static int build_segs(char *pathbuf, size_t pathbuf_cap, const char *prop_path,
                        const char *segs[JSON_MAX_SEGS])
 {
     int nseg = 0;
+    if (!*prop_path || prop_path[0] == '.' || prop_path[strlen(prop_path) - 1] == '.' ||
+        strstr(prop_path, "..")) return 0;
+    for (const unsigned char *p = (const unsigned char *)prop_path; *p; p++)
+        if (*p < 0x20 || *p == '"' || *p == '\\') return 0;
     segs[nseg++] = "entityDef";
     segs[nseg++] = "state";
     segs[nseg++] = "edit";
@@ -457,23 +496,25 @@ int sh_json_patch_set_leaf(const char *full_json, const char *prop_path, const c
                             char *out, int outcap)
 {
     if (!full_json || !prop_path || !raw_leaf_token || !out || outcap <= 0) return 0;
-    if (full_json[0] != '{') return 0;
+    if (full_json[0] != '{' || !json_complete(full_json) || !json_complete(raw_leaf_token)) return 0;
     const char *segs[JSON_MAX_SEGS];
     char pathbuf[512];
     int nseg = build_segs(pathbuf, sizeof pathbuf, prop_path, segs);
     if (nseg == 0) return 0;
-    return json_walk_set(full_json, strlen(full_json), full_json, segs, nseg, 0, raw_leaf_token, out, outcap);
+    return json_walk_set(full_json, strlen(full_json), full_json, segs, nseg, 0, raw_leaf_token, out, outcap)
+        && json_complete(out);
 }
 
 int sh_json_patch_upsert_reflist(const char *full_json, const char *prop_path,
                                   const char * const *id_strings, int n_ids, char *out, int outcap)
 {
-    if (!full_json || !prop_path || !id_strings || n_ids <= 0 || !out || outcap <= 0) return 0;
-    if (full_json[0] != '{') return 0;
+    if (!full_json || !prop_path || !id_strings || n_ids <= 0 || n_ids > JSON_CHAIN_CAP || !out || outcap <= 0) return 0;
+    if (full_json[0] != '{' || !json_complete(full_json)) return 0;
+    for (int i = 0; i < n_ids; i++) if (!id_strings[i]) return 0;
     const char *segs[JSON_MAX_SEGS];
     char pathbuf[512];
     int nseg = build_segs(pathbuf, sizeof pathbuf, prop_path, segs);
     if (nseg == 0) return 0;
     return json_walk_upsert_reflist(full_json, strlen(full_json), full_json, segs, nseg, 0,
-                                     id_strings, n_ids, out, outcap);
+                                     id_strings, n_ids, out, outcap) && json_complete(out);
 }

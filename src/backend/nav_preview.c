@@ -198,7 +198,16 @@ int sh_nav_preview_install(const sig_result *r, size_t n)
     unsigned char *post, *draw;
     int32_t rel;
     size_t stolen = 0, i;
-    if (g_ready) return 1;
+    if (g_ready && hook_is_installed((void *)g_stage) && hook_is_installed((void *)g_post)) return 1;
+    InterlockedExchange(&g_ready,0);
+    if (g_post) {
+        if (!hook_unpatch((void *)g_post)) return 0;
+        g_post = NULL;
+    }
+    if (g_stage) {
+        if (!hook_unpatch((void *)g_stage)) return 0;
+        g_stage = NULL;
+    }
     g_begin = (draw_begin_fn)preview_address(r,n,"NavRenderBegin");
     g_end = (draw_end_fn)preview_address(r,n,"NavRenderEnd");
     g_matrix = (draw_matrix_fn)preview_address(r,n,"NavRenderMatrix");
@@ -226,22 +235,25 @@ int sh_nav_preview_install(const sig_result *r, size_t n)
             memcpy(&rel,draw+i+3,4); g_immediate = draw+i+7+rel; break;
         }
         if (!g_immediate) __leave;
-        g_draw_world = (unsigned char *)calloc(1,WORLD_DEBUG_OFFSET+sizeof(void *));
-        g_lines.data = (preview_line *)calloc(PREVIEW_LINES,sizeof(preview_line));
-        g_pending_lines = (preview_line *)calloc(PREVIEW_LINES,sizeof(preview_line));
+        if (!g_draw_world) g_draw_world = (unsigned char *)calloc(1,WORLD_DEBUG_OFFSET+sizeof(void *));
+        if (!g_lines.data) g_lines.data = (preview_line *)calloc(PREVIEW_LINES,sizeof(preview_line));
+        if (!g_pending_lines) g_pending_lines = (preview_line *)calloc(PREVIEW_LINES,sizeof(preview_line));
         if (!g_draw_world || !g_lines.data || !g_pending_lines) __leave;
         *(preview_list **)(g_draw_world+WORLD_DEBUG_OFFSET) = &g_lines;
         g_lines.capacity = PREVIEW_LINES;
-        g_stage = (render_stage_fn)install_inline_hook((void *)stage,preview_stage,16);
+        g_stage = (render_stage_fn)hook_prepare((void *)stage,preview_stage,16);
         if (!g_stage) __leave;
-        g_post = (render_post_fn)install_inline_hook(post,preview_post,stolen);
-        if (!g_post) { hook_unpatch((void *)g_stage); g_stage = NULL; __leave; }
+        g_post = (render_post_fn)hook_prepare(post,preview_post,stolen);
+        if (!g_post || hook_commit((void *)g_stage) != B2_PATCH_OK ||
+            hook_commit((void *)g_post) != B2_PATCH_OK) __leave;
         InterlockedExchange(&g_ready,1);
     } __except (EXCEPTION_EXECUTE_HANDLER) { InterlockedExchange(&g_faulted,1); }
     if (g_ready) {
         backend_log("NAV: native editor navigation overlay installed"); return 1;
     }
 failed:
+    if (g_post && hook_unpatch((void *)g_post)) g_post = NULL;
+    if (g_stage && hook_unpatch((void *)g_stage)) g_stage = NULL;
     backend_log("NAV: native editor navigation overlay unavailable");
     return 0;
 }

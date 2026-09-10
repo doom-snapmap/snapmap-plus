@@ -787,10 +787,15 @@ void sh_mpkg_boot_capture(const char *data_root)
     mpkg_lock();
     if (g_boot_captured) { mpkg_unlock(); return; }   /* first capture wins: it is the BOOT state */
     strncpy_s(g_data_root, sizeof g_data_root, data_root, _TRUNCATE);
-    /* Retain the enumerated subset if discovery was incomplete. The caller
-     * does not check enumeration status here.
-     */
-    sh_packages_enumerate(data_root, pkgs, SH_PACKAGES_MAX, &count);
+    if (!sh_packages_enumerate(data_root, pkgs, SH_PACKAGES_MAX, &count)) {
+        g_boot_count = 0;
+        /* Keep the failed launch snapshot terminal; a later disk scan must
+         * never become an implicit consent decision. */
+        g_boot_captured = -1;
+        mpkg_unlock();
+        backend_log("MPKG: boot inventory refused -- package enumeration was incomplete");
+        return;
+    }
     g_boot_count = 0;
     for (i = 0; i < count && g_boot_count < SH_PACKAGES_MAX; i++) {
         mpkg_boot_pkg *b = &g_boot[g_boot_count++];
@@ -1083,9 +1088,9 @@ void sh_mpkg_consent_poll(void)
     if (!s) { InterlockedExchange(&g_consent_state, MPKG_CONSENT_IDLE); return; }
 
     if (state == MPKG_CONSENT_RAISE) {
-        if (!sh_engine_dialog_ready()) {
+        if (!sh_engine_dialog_can_ask()) {
             if (InterlockedIncrement(&g_consent_waited) > MPKG_CONSENT_WAIT_TICKS) {
-                backend_log("MPKG: the engine dialog surface never became available; "
+                backend_log("MPKG: the engine dialog surface did not become ready and idle; "
                             "nothing was installed and consent was never asked");
                 mpkg_consent_finish(0);
             }
@@ -1218,7 +1223,7 @@ int sh_mpkg_gate(const char *json, size_t len)
     int overflow = 0;
     size_t missing_count = 0;
     const sh_mpkg_decl *first_missing = NULL;
-    int first_missing_pending_restart = 0;
+    size_t session_installed_count = 0;
     char reason[SH_MPKG_ERR_CAP];
 
     if (!json || len == 0) return 1;
@@ -1232,7 +1237,7 @@ int sh_mpkg_gate(const char *json, size_t len)
         mpkg_set_refusal("map declares more packages than the gate can vet");
         return 0;
     }
-    if (!g_boot_captured) {
+    if (g_boot_captured != 1) {
         /* A declared package requires a captured boot state; refuse otherwise. */
         mpkg_set_refusal("map declares packages but the boot package snapshot is missing");
         return 0;
@@ -1245,16 +1250,16 @@ int sh_mpkg_gate(const char *json, size_t len)
         if (mpkg_boot_satisfies(d)) continue;
         e = mpkg_session_find(d->id, d->digest);
         missing_count++;
+        if (e && e->outcome == 1) session_installed_count++;
         if (!first_missing) {
             first_missing = d;
-            first_missing_pending_restart = (e && e->outcome == 1);
         }
     }
     mpkg_unlock();
 
     if (missing_count == 0) return 1;   /* everything already installed: silent pass */
 
-    if (first_missing_pending_restart) {
+    if (session_installed_count == missing_count) {
         /* Session installs pass only after declaration registration reports success. */
         if (sh_decl_server_registration_succeeded()) {
             backend_log("MPKG: package installed and registered at runtime this session; "
@@ -1262,8 +1267,8 @@ int sh_mpkg_gate(const char *json, size_t len)
             return 1;
         }
         _snprintf_s(reason, sizeof reason, _TRUNCATE,
-            "package '%s' was installed this session and is still registering; "
-            "try again in a moment", first_missing->id);
+            "package '%s' was installed this session but its registration is incomplete or failed; "
+            "check the package registration log before retrying", first_missing->id);
         mpkg_set_refusal(reason);
         return 0;
     }

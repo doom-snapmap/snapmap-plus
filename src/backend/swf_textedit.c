@@ -247,7 +247,11 @@ static void *swf_onkey_detour(void *self, void *retbuf, void *thisObject, void *
 
 void sh_swf_textedit_install(const uint8_t *module_base)
 {
-    if (g_orig_onkey != NULL) return;
+    if (g_orig_onkey) {
+        if (sh_detour_is_installed((void *)g_orig_onkey)) return;
+        if (!sh_uninstall_detour((void *)g_orig_onkey)) return;
+        g_orig_onkey = NULL;
+    }
     if (module_base == NULL) { backend_log("swf-textedit: NOT armed (no module base)"); return; }
 
     const sig_entry *sig = NULL;
@@ -279,7 +283,7 @@ void sh_swf_textedit_install(const uint8_t *module_base)
         return;
     }
 
-    void *tramp = sh_install_detour_sig(&r, (void *)swf_onkey_detour, SWF_ONKEY_STOLEN);
+    void *tramp = sh_prepare_detour_sig(&r, (void *)swf_onkey_detour, SWF_ONKEY_STOLEN);
     if (tramp == NULL) {
         backend_log("swf-textedit: NOT armed (onKey detour install refused/failed)");
         return;
@@ -295,6 +299,11 @@ void sh_swf_textedit_install(const uint8_t *module_base)
         break;
     }
 
+    if (sh_commit_detour(tramp) != B2_PATCH_OK) {
+        if (sh_uninstall_detour(tramp)) g_orig_onkey = NULL;
+        backend_log("swf-textedit: commit failed; retained callbacks require restoration");
+        return;
+    }
     backend_log(g_idstr_assign != NULL
                 ? "swf-textedit: ready (Ctrl+C copies / Ctrl+V pastes the focused SWF text field)"
                 : "swf-textedit: ready, COPY ONLY (idStr assign unresolved -- Ctrl+V disabled)");
@@ -303,6 +312,6 @@ void sh_swf_textedit_install(const uint8_t *module_base)
 void sh_swf_textedit_uninstall(void)
 {
     if (g_orig_onkey == NULL) return;
-    sh_uninstall_detour((void *)g_orig_onkey);
-    g_orig_onkey = NULL;
+    if (sh_uninstall_detour((void *)g_orig_onkey)) g_orig_onkey = NULL;
+    else backend_log("swf-textedit: restore failed; original callback retained");
 }

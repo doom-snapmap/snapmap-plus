@@ -33,7 +33,7 @@ If anything here is wrong, missing, or unclear, fixing it is itself a welcome PR
 - **Pure ASCII source.** The PowerShell build reads BOM-less UTF-8 as Windows-1252, so keep `.c` / `.h` /
   `.cpp` / `.ps1` files ASCII-only (no smart quotes, em dashes, or accented characters in source).
 - **Match the surrounding code.** The backend is plain C; the frontend is C++ (the WebView2 host) + HTML/CSS/JS
-  in `mockup.html`; the installer is Go (run `gofmt`).
+  in the WebView page and its local modules; the installer is Go (run `gofmt`).
 - **Supply-chain awareness.** Because the tool loads into DOOM, releases are a supply-chain target. PR CI runs
   in a secretless sandbox (it can't publish or touch signing keys), a maintainer reviews every diff, and a scan
   flags any new network / process-spawn / persistence code — the tool has no legitimate reason for any of that.
@@ -83,11 +83,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1
 This compiles both DLLs into **`build/`**: the backend `XINPUT1_3.dll` and the frontend
 `build/webview/snapmap-plus-ui.dll` (the WebView2 SDK is auto-fetched from NuGet on the first build). `build/`
 is gitignored. (`build.ps1` first builds the backend, then the frontend, so the two never drift out of ABI
-sync -- see [`architecture.md`](architecture.md).)
+sync; their shared ABI is declared in `src/common/snapmap_plus_iface.h`.)
 
 `build.ps1` is the one top-level build script (used above and by CI). Pass `-BackendOnly` to skip the
 frontend when iterating on backend code alone; any extra args (e.g. `-Diag`) forward through to
-`src\backend\build.ps1`. The frontend itself is described in [`webview-ui.md`](webview-ui.md).
+`src\backend\build.ps1`. Frontend sources are in `src/ui/webview/`.
 
 ## 5. Package the overlay
 
@@ -97,8 +97,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File package.ps1
 
 This assembles the deployable **2-file overlay** into **`dist/`**: the two clone DLLs (the frontend
 renders in the system-installed WebView2 runtime), laid out exactly as they drop into a DOOM install,
-alongside a `MANIFEST.sha256`. `dist/` is gitignored. See [`docs/packaging.md`](packaging.md) for the full
-file list.
+alongside a `MANIFEST.sha256`. `dist/` is gitignored. The manifest records both DLLs;
+no game assets or per-user data are bundled.
 
 ## 6. Deploy and test in DOOM
 
@@ -138,71 +138,16 @@ cd ..
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 ```
 
-By default this compiles and runs 45 **self-contained native tests** (no game needed):
+The runner builds and executes the self-contained native suites, then runs the
+JavaScript suites with Node 22.13 or newer. No game is needed for these checks.
+They cover patch ownership and rollback, edit dispatch, package and resource
+lifetimes, navigation, crash records, previews, frontend contracts and Worker
+request handling. The current test manifest is `tests/run-tests.ps1`.
 
-- **`shield_format_test`** — the fault-record string formatter (pure logic).
-- **`hook_test`** — the inline-detour installer, exercised on a hand-laid scratch stub.
-- **`crash_record_test`** — crash-record JSON formatting and escaping.
-- **`report_scrub_test`** — report-log anonymization and bounded tail selection.
-- **`dumpmap_path_test`** — `sh_dumpmap` path validation and output-name construction.
-- **`json_pretty_test`** — rawmap JSON re-layout, byte preservation, and refusal cases.
-- **`config_json_test`** — bounded UTF-8 JSON parsing, duplicate-key rejection, mutation, and serialization.
-- **`iface_config_test`** — the pinned `+0x2B0` / `+0x2B8` config ABI and callback binding.
-- **`config_test`** — config creation, validation/repair/recovery, preservation, atomic-failure behavior,
-  deletion reset, external/process writers, and the registered service.
-- **`user_overrides_test`** — immutable launch snapshots, persistence reporting, and marker independence.
-- **`user_overrides_contract_test`** — startup, command, cvar, and loader source-wiring contracts.
-- **`overrides_internal_test`** — exact reserved-source matching, user gating, the pinned 31-slot provider
-  ABI, all-or-nothing native-helper publication, and read-only memory/file-stream behavior.
-- **`decl_server_test`** — path-derived decl identities and shared bounded text validation.
-- **`packages_test`** — per-package override discovery: markers, grouping folders, order, and bounds.
-- **`package_conflicts_test`** — cross-package identity collisions and how they are reported.
-- **`map_package_test`** — map-embedded package shards: scan/extract against the reference implementation,
-  unsafe-zip refusal, and the load gate.
-- **`navmesh_test`** — baked navigation: the `smnav1` header grammar, shard reassembly and its delivery
-  failures, the structural AAS gate against synthetic payloads and their mutations, and the map-scoped
-  serving table's lifecycle.
-- **`aas_edit_test`** — the mutable AAS model: the byte-identical round trip, the structural parse
-  refusals, lump appends and their caps, and the settings block.
-- **`aas_augment_test`** — adding walkable areas to a module's navigation: admission, the BSP splice
-  that makes a new area findable, the step and island link regimes, and the refusals.
-- **`nav_geometry_test`** -- oriented solid clipping, support unions, ramp contacts, clearance,
-  overlap ordering, floating undersides and bounded geometry failures.
-- **`nav_regions_test`** — reading an author's marked volumes out of a map: the `flags.noFlood` marker and legacy migration,
-  the spawnPosition/size asymmetry, and `instanceEntities` attribution.
-- **`nav_bake_test`** — baking those regions at map load: the resource-name grammar, per-map planning,
-  complete snapshot invalidation, creation/deletion, and distinct resource names for repeated modules.
-- **`override_packages_test`** — the file shadow resolving a decl or shader out of any installed package.
-- **`strids_packages_test`** — a package shipping its own `#str_` strings: user beats packages beats baked.
-- **`resource_bridge_test`** — manifest resolution, sparse archive decode, the provider gate, and collisions.
-- **`package_requirements_test`** — allowlisted package cvars, strict parsing, and the one-shot apply.
-- **`weapon_hud_test`** — weapon display policy parsing, duplicate/conflict refusal,
-  bounded admission, package removal, and an executable synthetic call-site relay.
-- **`decl_server_contract_test`** — startup ordering, signature pins, one-shot main-thread wiring, and fail-closed guards.
-- **`palette_refresh_test`** / **`palette_refresh_contract_test`** — new-decl success gating, exactly-once palette rebuild state, and clean signature/editor wiring.
-- **`engine_dialog_test`** — the native engine-dialog helper.
-- **`config_message_test`** — bounded raw WebView config-message extraction before UTF-8 conversion.
-- **`theme_bootstrap_test`** — pre-navigation root-class seeding for a saved dark theme.
-- **`theme_contract_test`** — the HTML config-message contract and PREVIEW-only browser storage.
-- **`entity_settings_contract_test`** — persisted Entities controls, startup hydration, and the exclusive selection-direction contract.
-- **`growing_text_buffer_test`** — large declaration reads, exact-boundary growth, and the safety-cap signal.
-- **`preview_test`** — generation-safe request/publish handoff and RGBA-to-PNG payloads.
-- **`bcn_test`** — BC1/BC3/BC7 vectors, padded dimensions, truncation, and overflow guards.
-- **`soundpreview_queue_test`** — failed-kick rollback, FIFO preservation, overflow, and name bounds.
-- **`imgpreview_index_test`** — bounded index parsing, compact-name ownership, catalog routing,
-  SWF rewriting, and rollback.
-- **`imgpreview_catalog_test`** — lazy optional unions, compact Wwise strings, direct-image
-  previews, bank preference, wrapper collapse, and VMTR paging.
-- **`prefabpreview_test`** — bounded single/multi-surface BMODEL and MD6 geometry decoding,
-  spawner-to-pickup model inheritance, sparse inherited render-scale composition, and the Prefab Details
-  binary transport-blob contract.
-- **`megapreview_io_test`** — compact VMTR strings, on-demand scratch, and selected-entry Mega2
-  page lookup without retained shard tables.
-- **`serialization_buffer_test`** — timeline growth, terminal failures, retained capacity, and the 32 MB cap.
-
-The same command then runs ten JavaScript tests for the declaration editor, asset browser, bounded
-Entities-list rendering, sparse prefab matrix/scale transforms, the Prefab Details
-viewport/resize/shared-buffer contract, and native window chrome source wiring.
+Run the Worker runtime suite as well when changing either service. It verifies
+concurrent quotas, persistence and uploads against local storage and a GitHub
+mock. See [tests/README.md](../tests/README.md) for its pinned dependency and
+command. CI runs both the normal suite and the Worker runtime suite.
 
 Three more tests scan a **real DOOM image** — an executable that's been unpacked from its Steam DRM wrapper
 (e.g. with Steamless). **Running these is REQUIRED if you add or change any entry in the engine signature
@@ -236,8 +181,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1 `
   -Doom C:\path\to\unpacked-DOOMx64vk.exe -DoomAlt C:\path\to\unpacked-DOOMx64.exe
 ```
 
-All 94 signatures and all 25 engine-globals anchors currently resolve uniquely on both images under this
-command.
+The runner reports the current signature and engine-global counts and requires
+each entry to resolve uniquely on both images.
 
 **Why uniqueness on both images is the actual bar.** A pattern that matches exactly once on one image tells
 you almost nothing: with a few thousand functions to miss, plenty of byte strings are unique by accident.
@@ -265,12 +210,13 @@ different build is a cluster-wise re-link, so different functions move by differ
 opposite-signed — amounts.
 
 Normal resolution scans function bytes or decodes a global's RIP-relative code
-anchor. The hook-tolerant fallback can probe `module_base + known_rva` after a
-failed scan, requiring a recognized detour and at least six matching fixed tail
-bytes. It does not verify an image fingerprint. Separately, explicit RVA fallback
-consumers use `sh_host_is_pinned_rva_build`; that helper checks the Vulkan
-executable basename, not the recorded hash. Treat these as compatibility limits,
-not proof that the running image matches the reference build.
+anchor. Raw-RVA fallbacks require an exact SHA-256 match of the process's backing
+executable against the reference hashes in `host_image.c`. This recognizes the
+wrapped reference and its verified unpacked copy without depending on code bytes
+that installed hooks have changed. The hook-tolerant fallback also requires a
+recognized detour and at least six matching fixed tail bytes. Portable scans
+remain available on other supported images; an unverified file cannot authorize
+a raw-RVA fallback.
 
 The trap is that a wrong address is **invisible in normal use**. Byte signatures are build-portable, so the
 scanner still finds the function and your feature works exactly as intended on either build. The only thing
@@ -321,8 +267,8 @@ states, keyboard access, and narrow layouts in a browser.
 2. **Change** code under `src/` (or `installer/`). Keep each PR focused on one thing.
 3. **Build + package + test in DOOM:** `build.ps1` → `package.ps1` → `snapmap-plus.exe install --local dist`.
    A local round-trip is much faster than waiting on CI, and lets you actually see it working in DOOM rather
-   than just "the build didn't fail." See [`architecture.md`](architecture.md)'s note on the vtable's
-   extension slots for why a backend/frontend version mismatch is a real failure mode, not a theoretical one.
+   than just "the build didn't fail." Always deploy both DLLs from the same build because their
+   interface layouts must match.
 4. **Run the tests** (section 7) — both the Go and C suites.
 5. **Update the docs** your change affects (section 9).
 6. **Commit** with a clear, imperative subject; a simple area prefix such as `installer:` or `backend:` is
@@ -412,33 +358,32 @@ contributor's authorship and credit.
 
 ## 9. Keep the docs in sync (required)
 
-**A change that alters behavior must update the matching docs in the *same* PR.** Reviewers check for this — a
-behavior change with stale docs will be sent back. Use this map:
+Update the instructions affected by a behavior change in the same contribution.
+Player workflows belong in the website guide; installation belongs in the root
+and installer READMEs; build, test and release procedures belong here; service
+or credential changes belong in [services.md](services.md).
 
-| If you change… | Update… |
-|---|---|
-| a console command, cvar, SnapStack op, or a Studio-window feature (`src/backend/`, `src/ui/`) | [`docs/capabilities.md`](capabilities.md) — the feature inventory |
-| the frontend UI itself (`src/ui/webview/` — the host or `mockup.html`) | [`docs/webview-ui.md`](webview-ui.md) and the affected feature reference |
-| a release process, an external service, or a credential | [`docs/services.md`](services.md) — the service inventory |
-| the object model, the think-loop, the interface vtable, the persistent-settings registry, or the backend↔frontend boundary | [`docs/architecture.md`](architecture.md) |
-| a deliberately-reproduced original quirk, or a sanctioned divergence | [`docs/fidelity.md`](fidelity.md) |
-| a correctness bugfix in the shared `src/backend/` engine-call layer (not a fidelity divergence -- our own code was wrong) | the affected feature reference or [`docs/architecture.md`](architecture.md); explain the fix in the pull request |
-| the shipped file set / what's deliberately dropped (`package.ps1`) | [`docs/packaging.md`](packaging.md) |
-| the install / update / uninstall flow, its flags, or release channels (`installer/`) | [`installer/README.md`](../installer/README.md) and, if user-facing, the top-level [`README.md`](../README.md) |
-| the build, test, or contribution process | this file (`docs/contributing.md`) |
-| an engine signature or an engine-globals anchor (`src/backend/signatures.c`, the generated globals table) | nothing to write, but you must run the `-DoomAlt` portability gate above and say so in the PR — CI cannot |
+Retain contributor guides and cross-component contracts in `docs/`. Update
+[architecture](architecture.md) when boundaries, ownership or threading change;
+[WebView UI](webview-ui.md) when frontend development changes; and
+[packaging](packaging.md) when the shipped layout changes. The
+[capabilities inventory](capabilities.md), [compatibility guide](fidelity.md) and
+[feedback pipeline](feedback.md) explain supported workflows and shared behavior.
 
-If a change is purely internal and user-invisible, note that in the PR description so the reviewer knows the
-docs were considered.
+Explain narrow backend algorithms in source and concise comments. Their detailed
+investigations and historical evidence belong in snaphak-re's findings system.
+External contributors can include evidence and rationale in their pull request;
+the product must build and remain understandable without a research checkout.
+
+Signature and engine-global changes still require the two-image portability
+gate above. Report its result because CI cannot access those game images.
 
 ### Documentation and comment style
 
-Keep `docs/` focused on current product behavior, supported formats, architecture,
-and contributor operations. Put user-facing release history in `CHANGELOG.md`.
-Investigation transcripts, abandoned designs and dated engineering journals
-belong in snaphak-re's findings system, not in product reference pages. External
-contributors can provide evidence in their pull request; maintaining this
-repository must not require a private research checkout.
+Keep `docs/` focused on contribution, operation and larger component boundaries.
+Do not duplicate a backend implementation in its own feature document. Put
+release history in `CHANGELOG.md`. Use focused directory READMEs and comments
+for responsibilities, limits and non-obvious decisions.
 
 Main directories such as `src/`, `tests/` and `tools/` have a `README.md` using
 this opening structure. Keep nested guides only where they explain a separate
@@ -492,14 +437,14 @@ release. **Do not open a public issue for a security problem.** Use GitHub's **p
 | Path | What |
 |---|---|
 | `src/backend/` | the backend DLL (`XINPUT1_3.dll`): the hook layer, console commands, cvars, persistent configuration, cvar-unlock, the resident fault-shield |
-| `src/ui/` | the frontend DLL (`snapmap-plus-ui.dll`): the WebView2 Snapmap+ window -- `webview/` holds the host (`snapmap_plus_ui_webview.cpp`) + the UI (`mockup.html`) |
+| `src/ui/` | the frontend DLL (`snapmap-plus-ui.dll`): the WebView2 host, HTML page, styles, declaration module and native message codecs |
 | `src/fault_shield/` | the recover-in-place vectored-exception fault shield (compiled into the backend) |
 | `src/common/` | the shared backend↔frontend interface ABI (`snapmap_plus_iface.h`) |
 | `installer/` | `snapmap-plus.exe` — the Go install / update / uninstall CLI |
 | `tests/` | the native unit tests + `run-tests.ps1` |
 | `tools/` | the changelog parser (`changelog.py`), the release-notes drafter (`draft_changelog.py`), the published-release sync (`sync_release_notes.py`) and their tests |
 | `CHANGELOG.md` | the user-facing release notes -- the single source every consumer reads |
-| `docs/` | current product and contributor references, indexed in [README.md](README.md) |
+| `docs/` | contributor guides and cross-component contracts, indexed in [README.md](README.md) |
 | `build.ps1` | compile the DLLs → `build/` (backend + frontend; `-BackendOnly` for backend alone) |
 | `package.ps1` | assemble the deployable overlay → `dist/` (the two clone DLLs) |
 | `.github/workflows/` | `ci.yml` (the PR gate) · `prepare-release.yml` (drafts a release's notes) · `release.yml` (tag-triggered release) · `pages.yml` (the website) |
@@ -522,5 +467,4 @@ release. **Do not open a public issue for a security problem.** Use GitHub's **p
 - **decl** — a DOOM engine declaration (an entity or resource definition). **cvar** — an engine console
   variable. **cvar-unlock** — re-enabling editor cvars the engine hides by default.
 - **The fault-shield** — a vectored-exception handler that recovers in place from certain faults instead of
-  letting the process die; the one sanctioned behavioral divergence from the original (see
-  [`docs/fidelity.md`](fidelity.md)).
+  letting the process die. Recovery is limited to the cases implemented in `src/fault_shield/`.

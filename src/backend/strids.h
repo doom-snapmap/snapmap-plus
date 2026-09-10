@@ -3,9 +3,9 @@
  * defaults. Keys are case-insensitive and first-writer-wins. Use the native
  * hash, string pool and list append functions, then re-sort the table.
  *
- * Injection runs once during installation because the normal startup sort has
- * already passed. A sort-body detour provides a one-shot fallback without
- * duplicating rows on recursive or later sorts.
+ * Installation injects immediately. Runtime rearm updates keys owned by this
+ * injector and appends new keys before sorting; it never appends a duplicate
+ * owned key. Removed keys remain available to already loaded content.
  */
 #ifndef BACKEND_B1_STRIDS_H
 #define BACKEND_B1_STRIDS_H
@@ -23,6 +23,10 @@
 int sh_strids_install(void *sort_body_fn, int sort_status_ok,
                       void *table_lea_fn, void *insert_fn, void *hash_fn, void *idstr_ctor_fn);
 
+/* Refresh on the engine main thread at the package-registration boundary.
+ * Returns 0 if discovery, native mutation, or sorting failed. */
+int sh_strids_rearm(void);
+
 /* Set the user document path; NULL restores %LOCALAPPDATA%\snapmap-
  * plus\strings\strids.json. Returns 1 when set.
  */
@@ -34,6 +38,7 @@ unsigned long sh_strids_injected_count(void);
 #ifdef SH_STRIDS_TESTING
 /* Bind test doubles for the four engine entry points and run one inject pass; returns rows appended. */
 int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idstr_ctor);
+void sh_strids_test_set_sort(void *sort);
 /* Read back how row `index` was attributed: its id and its owning package ("<user>" if not a package). */
 int sh_strids_test_row(int index, const char **id_out, const char **owner_out);
 #endif

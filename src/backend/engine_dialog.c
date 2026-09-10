@@ -32,6 +32,7 @@
 /* Menu-manager layout (RE: AddDialogInternal 0xE65C20, ClearDialog 0xE663C0). */
 #define ED_MGR_QUEUE_PTR      0x900u
 #define ED_MGR_QUEUE_COUNT    0x908u
+#define ED_MGR_ACTIVE         0x8F0u
 
 /* Zeroed AddDialog parameter block. Reserve enough space for all fields read
  * by the supported default GDM path; the native call does not write to it.
@@ -88,6 +89,7 @@ typedef void (*ed_action_fn)(void *mgr, void *params, int action, void *parms,
                              int flag);
 
 static ed_add_wrapper_fn  g_add_wrapper;      /* the real shell-level raise */
+static ed_add_wrapper_fn  g_clear_wrapper;
 static ed_add_wrapper_fn  g_wrapper_original;  /* trampoline for the capture hook */
 static ed_assign_cstr_fn  g_assign_cstr;
 static ed_action_fn       g_action_original;
@@ -169,8 +171,7 @@ static int ed_inject(void *descriptor)
     __try {
         g_assign_cstr((uint8_t *)descriptor + ED_DESC_TEXT, g_pending_key);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        backend_log("engine-dialog: assigning our text into the descriptor raised "
-                    "an exception; the engine's own text stands");
+        backend_log("engine-dialog: assigning custom descriptor text raised an exception");
         return 0;
     }
     InterlockedExchange(&g_injected, 1);
@@ -225,50 +226,58 @@ static void ed_wrapper_detour(void *shell, void *params)
     if (g_wrapper_original) g_wrapper_original(shell, params);
 }
 
+static int ed_remove_hooks(void)
+{
+    g_installed = 0;
+    if (g_action_original && hook_unpatch((void *)g_action_original)) g_action_original = NULL;
+    if (g_wrapper_original && hook_unpatch((void *)g_wrapper_original)) g_wrapper_original = NULL;
+    if (g_action_original || g_wrapper_original) return 0;
+    g_add_wrapper = NULL;
+    g_clear_wrapper = NULL;
+    g_assign_cstr = NULL;
+    return 1;
+}
+
 int sh_engine_dialog_install(const sig_result *results, size_t count,
                              const uint8_t *module_base)
 {
-    void *wrapper, *assign, *action, *tramp;
+    void *wrapper, *clear, *assign, *action;
 
-    if (g_installed) return 1;
+    if (g_installed && hook_is_installed((void *)g_wrapper_original) &&
+        hook_is_installed((void *)g_action_original)) return 1;
+    if (!ed_remove_hooks()) return 0;
     if (!module_base) return 0;
 
     /* The trailing literal on each line is that function's RVA on the pinned Vulkan build,
      * recorded for audit and re-derivation. It does not gate anything -- see ed_clean. */
     wrapper = ed_clean(results, count, "AddDialogWrapper", module_base, 0x17363A0u);
+    clear   = ed_clean(results, count, "ClearDialogWrapper", module_base, 0x1736450u);
     assign  = ed_clean(results, count, "IdStrAssignCStr",  module_base, 0x19FD5F0u);
     action  = ed_clean(results, count, "DialogAction",     module_base, 0xE67BF0u);
-    if (!wrapper || !assign || !action) {
-        backend_log("engine-dialog REFUSED: AddDialogWrapper/DialogAction/IdStrAssignCStr all "
+    if (!wrapper || !clear || !assign || !action) {
+        backend_log("engine-dialog REFUSED: AddDialogWrapper/ClearDialogWrapper/DialogAction/IdStrAssignCStr all "
                     "require a clean unique signature resolve");
         return 0;
     }
 
     g_add_wrapper = (ed_add_wrapper_fn)wrapper;
+    g_clear_wrapper = (ed_add_wrapper_fn)clear;
     g_assign_cstr = (ed_assign_cstr_fn)assign;
 
     /* Watch the wrapper to learn the shell. ShowDialog is deliberately NOT
      * hooked: the text goes into the queued descriptor right after the raise,
      * which needs no detour on the engine's own render path. */
-    tramp = install_inline_hook(wrapper, (void *)ed_wrapper_detour, ED_WRAPPER_STOLEN);
-    if (!tramp) {
-        g_add_wrapper = NULL;
-        g_assign_cstr = NULL;
-        backend_log("engine-dialog REFUSED: the AddDialogWrapper detour could not be installed");
+    g_wrapper_original = (ed_add_wrapper_fn)hook_prepare(wrapper, (void *)ed_wrapper_detour,
+                                                       ED_WRAPPER_STOLEN);
+    g_action_original = (ed_action_fn)hook_prepare(action, (void *)ed_action_detour,
+                                                  ED_DIALOGACTION_STOLEN);
+    if (!g_wrapper_original || !g_action_original ||
+        hook_commit((void *)g_wrapper_original) != B2_PATCH_OK ||
+        hook_commit((void *)g_action_original) != B2_PATCH_OK) {
+        backend_log(ed_remove_hooks() ? "engine-dialog REFUSED: detour preparation or commit failed"
+                                     : "engine-dialog rollback incomplete; callbacks retained for retry");
         return 0;
     }
-    g_wrapper_original = (ed_add_wrapper_fn)tramp;
-
-    tramp = install_inline_hook(action, (void *)ed_action_detour, ED_DIALOGACTION_STOLEN);
-    if (!tramp) {
-        backend_log("engine-dialog REFUSED: the DialogAction detour could not be installed, so a "
-                    "dialog's answer could never be read");
-        g_add_wrapper = NULL;
-        g_assign_cstr = NULL;
-        g_wrapper_original = NULL;
-        return 0;
-    }
-    g_action_original = (ed_action_fn)tramp;
     g_installed = 1;
     backend_log("engine-dialog installed: dialogs can now carry our own text");
     return 1;
@@ -279,6 +288,47 @@ int sh_engine_dialog_ready(void)
     return g_installed && g_shell != NULL;
 }
 
+int sh_engine_dialog_queue_idle(const void *shell)
+{
+    const unsigned char *manager, *queue;
+    int count, i;
+    size_t last;
+    if (!shell) return 0;
+    __try {
+        manager = *(const unsigned char *const *)((const unsigned char *)shell + 8);
+        if (!manager) return 0;
+        queue = *(const unsigned char *const *)(manager + ED_MGR_QUEUE_PTR);
+        count = *(const int *)(manager + ED_MGR_QUEUE_COUNT);
+        if (!queue || count < 0 || count > 64) return 0;
+        last = count ? (size_t)(count - 1) * ED_DESC_STRIDE + ED_DESC_CLEARED : 0;
+        if ((uintptr_t)queue > UINTPTR_MAX - last) return 0;
+        /* Even an empty queue must name readable, initialized storage. */
+        (void)*(const volatile unsigned char *)queue;
+        for (i = 0; i < count; i++)
+            if (queue[(size_t)i * ED_DESC_STRIDE + ED_DESC_CLEARED] != 1) return 0;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+int sh_engine_dialog_can_ask(void)
+{
+    const unsigned char *manager;
+    void *shell = g_shell;
+    if (!g_installed || !g_add_wrapper || !g_clear_wrapper || !g_assign_cstr ||
+        !sh_engine_dialog_queue_idle(shell)) return 0;
+    __try {
+        manager = *(const unsigned char *const *)((const unsigned char *)shell + 8);
+        /* Cleared descriptors still own callbacks until native Think removes them.
+         * The active widget must also be hidden before a new modal can use it. */
+        return *(const int *)(manager + ED_MGR_QUEUE_COUNT) == 0 &&
+               manager[ED_MGR_ACTIVE] == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
 int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
 {
     void *shell = g_shell;
@@ -287,7 +337,7 @@ int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
     char line[256];
     void *desc;
 
-    if (!g_installed || !shell || !g_add_wrapper || !text || !text[0]) return 0;
+    if (!sh_engine_dialog_can_ask() || !text || !text[0]) return 0;
 
     /* Reclaim a tracked slot when its descriptor has left the queue,
      * including after menu teardown or external dismissal.
@@ -340,8 +390,18 @@ int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
         return 0;
     }
     if (!ed_inject(desc)) {
-        backend_log("engine-dialog: the queued descriptor would not take our text; the engine's "
-                    "own wording stands");
+        /* Default GDM wording cannot authorize the requested operation. Forget
+         * the claim before cancellation so reentrant actions cannot accept it. */
+        InterlockedExchange(&g_pending_id, -1);
+        __try {
+            g_clear_wrapper(shell, params);
+            backend_log("engine-dialog: custom text failed; the native dialog was cancelled");
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            /* Physical queue/widget admission remains busy until native teardown,
+             * even though no consent ticket owns this failed question. */
+            backend_log("engine-dialog: custom text and cancellation failed; no consent ticket issued");
+        }
+        return 0;
     }
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -459,6 +519,7 @@ void sh_engine_dialog_test_reset(void)
 {
     g_wrapper_original = NULL;
     g_add_wrapper = NULL;
+    g_clear_wrapper = NULL;
     g_assign_cstr = NULL;
     g_action_original = NULL;
     g_shell = NULL;
@@ -470,9 +531,11 @@ void sh_engine_dialog_test_reset(void)
     InterlockedExchange(&g_injected, 0);
 }
 
-void sh_engine_dialog_test_bind(void *shell, void *add_wrapper, void *assign_cstr)
+void sh_engine_dialog_test_bind(void *shell, void *add_wrapper, void *clear_wrapper,
+                                void *assign_cstr)
 {
     g_add_wrapper = (ed_add_wrapper_fn)add_wrapper;
+    g_clear_wrapper = (ed_add_wrapper_fn)clear_wrapper;
     g_assign_cstr = (ed_assign_cstr_fn)assign_cstr;
     g_installed = 1;
     g_shell = shell;
@@ -486,5 +549,10 @@ int sh_engine_dialog_test_inject(void *descriptor)
 int sh_engine_dialog_test_pending_id(void)
 {
     return (int)InterlockedCompareExchange(&g_pending_id, 0, 0);
+}
+
+void sh_engine_dialog_test_action(int gdm_id, int action)
+{
+    ed_action_detour(NULL, &gdm_id, action, NULL, 0);
 }
 #endif

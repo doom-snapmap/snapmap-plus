@@ -24,6 +24,8 @@ static int g_builder_calls;
 static void *g_last_palette;
 static void *g_last_progress;
 static int g_builder_raises;
+static int g_builder_reenter;
+static int g_nested_result, g_nested_before, g_nested_after;
 static int g_pinned_build = 1;
 static int g_globals_resolvable = 1;
 
@@ -86,6 +88,12 @@ static void fake_palette_builder(void *palette, void *progress)
     g_builder_calls++;
     g_last_palette = palette;
     g_last_progress = progress;
+    if (g_builder_reenter) {
+        g_builder_reenter = 0;
+        g_nested_before = sh_palette_refresh_test_state();
+        g_nested_result = sh_palette_refresh_after_decl_registration();
+        g_nested_after = sh_palette_refresh_test_state();
+    }
     if (g_builder_raises)
         RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, NULL);
 }
@@ -119,6 +127,8 @@ static void bind_fake(uint8_t *module)
     g_last_palette = NULL;
     g_last_progress = (void *)(uintptr_t)1;
     g_builder_raises = 0;
+    g_builder_reenter = 0;
+    g_nested_result = g_nested_before = g_nested_after = -1;
 }
 
 /* Accept a clean unique signature result at either supported image's
@@ -199,6 +209,21 @@ int main(void)
     CHECK(sh_palette_refresh_test_call_count() == 2);
     CHECK(sh_palette_refresh_after_decl_registration() == 1);
     CHECK(g_builder_calls == 3);
+
+    /* A nested attempt cannot replace the live palette during its outer build.
+     * Refusing that attempt must not poison the completed outer pass. */
+    bind_fake(module);
+    setup_editor(module, 1, 1);
+    g_builder_reenter = 1;
+    CHECK(sh_palette_refresh_after_decl_registration() == 1);
+    CHECK(g_nested_before == SH_PALETTE_REFRESH_TEST_PENDING);
+    CHECK(g_nested_result == 0);
+    CHECK(g_nested_after == SH_PALETTE_REFRESH_TEST_PENDING);
+    CHECK(g_builder_calls == 1);
+    CHECK(sh_palette_refresh_test_call_count() == 1);
+    CHECK(sh_palette_refresh_test_state() == SH_PALETTE_REFRESH_TEST_APPLIED);
+    CHECK(sh_palette_refresh_after_decl_registration() == 1);
+    CHECK(g_builder_calls == 2);
 
     bind_fake(module);
     setup_editor(module, 0, 1);

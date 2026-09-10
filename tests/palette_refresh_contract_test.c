@@ -48,6 +48,7 @@ int main(int argc, char **argv)
     char *refresh, *signatures, *build, *dllmain, *apply, *server;
     const char *install, *iface_install, *decl_install;
     const char *success_set, *refresh_call, *done_after_call, *missing_zero, *missing_end;
+    const char *command, *palette_refusal, *palette_end, *usability_failure, *usability_end;
     const char *vtable_check, *builder_call;
     if (argc != 2) {
         fprintf(stderr, "usage: palette_refresh_contract_test <repo-root>\n");
@@ -119,19 +120,29 @@ int main(int argc, char **argv)
      * the ordinary engine tick must never poll or retry it. */
     CHECK(strstr(apply, "sh_palette_refresh_poll") == NULL);
     CHECK(strstr(apply, "palette_refresh") == NULL);
-    CHECK(strstr(server, "static void __cdecl ds_apply_command(void)") != NULL);
-    missing_zero = strstr(server, "if (missing == 0)");
-    success_set = strstr(server, "InterlockedExchange(&g_registration_succeeded, 1);");
+    command = strstr(server, "static void __cdecl ds_apply_command(void)");
+    CHECK(command != NULL);
+    missing_zero = command ? strstr(command, "if (missing == 0 && shadowed == 0)") : NULL;
+    success_set = command ? strstr(command, "InterlockedExchange(&g_registration_succeeded, 1);") : NULL;
     refresh_call = strstr(server, "palette_ok = palette_refresh() ? 1 : 0;");
     done_after_call = success_set ? strstr(success_set, "InterlockedExchange(&g_state, DS_STATE_DONE);") : NULL;
     CHECK(missing_zero && success_set && missing_zero < success_set);
     CHECK(refresh_call && success_set && refresh_call < success_set);
     CHECK(success_set && done_after_call && success_set < done_after_call);
     CHECK(strstr(server, "sh_palette_refresh_after_decl_registration,") != NULL);
-    /* Rebuild before publishing registration success on every pass. Report a
-     * declined refresh without failing otherwise successful registration. */
-    CHECK(strstr(server, "palette_declined = 1;") != NULL);
-    CHECK(strstr(server, "DECLINED (see the palette-refresh line above)") != NULL);
+    /* A declined or faulting rebuild fails the usable pass. The command must
+     * propagate that failure before it can publish registration success. */
+    palette_refusal = refresh_call ? strstr(refresh_call, "if (palette_fault || !palette_ok)") : NULL;
+    palette_end = palette_refusal ? strstr(palette_refusal, "return 1;") : NULL;
+    CHECK(contains_between(palette_refusal, palette_end, "DS_PHASE_FAILURE_PALETTE"));
+    CHECK(contains_between(palette_refusal, palette_end, "return 0;"));
+    usability_failure = command ? strstr(command, "else if (usability_failed || refused ||") : NULL;
+    usability_end = usability_failure ? strstr(usability_failure, "} else {") : NULL;
+    CHECK(contains_between(command, usability_failure, "usability_failed = 1;"));
+    CHECK(contains_between(usability_failure, usability_end,
+                           "InterlockedExchange(&g_state, DS_STATE_FAILED);"));
+    CHECK(!contains_between(usability_failure, usability_end, "g_registration_succeeded"));
+    CHECK(usability_end && success_set && usability_end < success_set);
     CHECK(strstr(server, "the editor had not built one yet") == NULL);
     CHECK(strstr(server, "palette_skipped") == NULL);
     CHECK(strstr(server, "palette refresh failed after native registration; no retry") == NULL);
@@ -139,7 +150,12 @@ int main(int argc, char **argv)
     CHECK(strstr(server, "21088") == NULL);
     missing_end = missing_zero ? strstr(missing_zero, "ds_free_candidates();") : NULL;
     CHECK(missing_zero && missing_end);
-    CHECK(!contains_between(missing_zero, missing_end, "g_registration_succeeded"));
+    /* A truly empty pass needs no palette; shadow-only edits still reach it.
+     * Refused candidates must not turn that empty path into success. */
+    CHECK(contains_between(missing_zero, missing_end,
+                           "InterlockedExchange(&g_registration_succeeded, refused == 0);"));
+    CHECK(contains_between(missing_zero, missing_end,
+                           "refused ? DS_STATE_FAILED : DS_STATE_DONE"));
     CHECK(!contains_between(missing_zero, missing_end, "sh_palette_refresh_after_decl_registration"));
 
 done:

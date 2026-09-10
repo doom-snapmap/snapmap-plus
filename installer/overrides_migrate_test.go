@@ -69,8 +69,7 @@ func TestMigrateLegacyOverrides_removesEmptyLegacyTree(t *testing.T) {
 	}
 }
 
-// The destination wins a name collision; the old source is removed without comparing
-// bytes.
+// A name collision preserves both versions for the user to reconcile.
 func TestMigrateLegacyOverrides_neverClobbersExisting(t *testing.T) {
 	la, _ := newDataDirs(t)
 	rel := filepath.Join("decls", "snapeditorentitydef", "func", "lift.decl")
@@ -81,6 +80,9 @@ func TestMigrateLegacyOverrides_neverClobbersExisting(t *testing.T) {
 
 	if got, err := os.ReadFile(overridesPath(la, starterPackageName, rel)); err != nil || string(got) != "MINE" {
 		t.Fatalf("the user's own file must survive the migration: %q, %v", got, err)
+	}
+	if got := readF(t, overridesPath(la, "generated", rel)); got != "OLD" {
+		t.Fatalf("conflicting source was discarded: %q", got)
 	}
 }
 
@@ -94,6 +96,17 @@ func TestMigrateLegacyOverrides_keepsExistingMarker(t *testing.T) {
 
 	if got, err := os.ReadFile(marker); err != nil || string(got) != `{"name":"renamed by me"}` {
 		t.Fatalf("an existing package.json must not be rewritten: %q, %v", got, err)
+	}
+}
+
+func TestMigrateLegacyOverridesKeepsSourceWhenMarkerFails(t *testing.T) {
+	la, _ := newDataDirs(t)
+	legacy := overridesPath(la, "generated", "decls", "file.decl")
+	writeF(t, legacy, "decl")
+	mkdirAll(t, overridesPath(la, starterPackageName, "package.json"))
+	migrateUserData()
+	if got := readF(t, legacy); got != "decl" {
+		t.Fatal("unusable package marker allowed legacy retirement")
 	}
 }
 

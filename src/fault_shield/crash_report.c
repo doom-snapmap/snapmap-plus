@@ -34,6 +34,7 @@ static LPTOP_LEVEL_EXCEPTION_FILTER g_prev_filter = NULL;
 static char g_rec_buf[8192];
 static char g_rec_stack[2048];
 static char g_rec_text[HARVEST_MSG_MAX];
+static volatile LONG g_record_busy, g_capture_busy, g_dump_busy;
 
 static void crash_dirs_from_module(void)
 {
@@ -84,13 +85,13 @@ static void crash_read_version(void)
     g_inst_version[q - p] = '\0';
 }
 
-void crash_report_file(const char *kind, unsigned long code, uintptr_t rip_rva,
+static void crash_report_file_locked(const char *kind, unsigned long code, uintptr_t rip_rva,
                        uintptr_t fault_addr, const char *module_name,
                        const char *stack, const char *engine_text, const char *dump_path)
 {
     crash_record r;
     SYSTEMTIME st;
-    char tbuf[32], fpath[MAX_PATH];
+    char tbuf[32], fpath[MAX_PATH], temporary[MAX_PATH];
     int len, tryn;
     HANDLE h = INVALID_HANDLE_VALUE;
     if (g_crash_dir[0] == '\0') return;
@@ -107,26 +108,31 @@ void crash_report_file(const char *kind, unsigned long code, uintptr_t rip_rva,
     len = crash_record_json(g_rec_buf, sizeof g_rec_buf, &r);
     if (len <= 0) return;
 
-    /* CREATE_NEW avoids overwriting a same-second record; suffixes break collisions.
-     * The UI selects the latest record by lexicographic filename order. */
-    for (tryn = 0; tryn < 4; tryn++) {
+    /* CREATE_NEW preserves same-second records; the UI orders collision suffixes numerically. */
+    for (tryn = 0; tryn < CRASH_MAX_RECORDS; tryn++) {
         if (tryn == 0)
             _snprintf_s(fpath, MAX_PATH, _TRUNCATE, "%s\\pending-%04d%02d%02d-%02d%02d%02d.json",
                         g_crash_dir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
         else
             _snprintf_s(fpath, MAX_PATH, _TRUNCATE, "%s\\pending-%04d%02d%02d-%02d%02d%02d-%d.json",
                         g_crash_dir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, tryn);
-        h = CreateFileA(fpath, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW,
+        if (_snprintf_s(temporary, sizeof temporary, _TRUNCATE, "%s.tmp", fpath) < 0) return;
+        if (GetFileAttributesA(fpath) != INVALID_FILE_ATTRIBUTES) continue;
+        h = CreateFileA(temporary, GENERIC_WRITE, 0, NULL, CREATE_NEW,
                         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
         if (h != INVALID_HANDLE_VALUE) break;
         if (GetLastError() != ERROR_FILE_EXISTS) return;
     }
     if (h == INVALID_HANDLE_VALUE) return;
     {
-        DWORD wrote;
-        WriteFile(h, g_rec_buf, (DWORD)len, &wrote, NULL);
+        DWORD wrote = 0;
+        BOOL ok = WriteFile(h, g_rec_buf, (DWORD)len, &wrote, NULL) && wrote == (DWORD)len;
+        CloseHandle(h);
+        if (!ok || !MoveFileExA(temporary, fpath, MOVEFILE_WRITE_THROUGH)) {
+            DeleteFileA(temporary);
+            return;
+        }
     }
-    CloseHandle(h);
     {
         shield_fault f = { "crash-record", (int)code, "crash record written for the report dialog",
                            rip_rva, fault_addr };
@@ -134,7 +140,19 @@ void crash_report_file(const char *kind, unsigned long code, uintptr_t rip_rva,
     }
 }
 
-const char *crash_report_write_dump(EXCEPTION_POINTERS *ep)
+void crash_report_file(const char *kind, unsigned long code, uintptr_t rip_rva,
+                       uintptr_t fault_addr, const char *module_name,
+                       const char *stack, const char *engine_text, const char *dump_path)
+{
+    /* A fault handler must never wait on a thread that may itself have faulted. */
+    if (InterlockedCompareExchange(&g_record_busy, 1, 0) != 0) return;
+    __try {
+        crash_report_file_locked(kind, code, rip_rva, fault_addr, module_name,
+                                 stack, engine_text, dump_path);
+    } __finally { InterlockedExchange(&g_record_busy, 0); }
+}
+
+static const char *crash_report_write_dump_locked(EXCEPTION_POINTERS *ep)
 {
     HANDLE h;
     MINIDUMP_EXCEPTION_INFORMATION mei;
@@ -155,8 +173,17 @@ const char *crash_report_write_dump(EXCEPTION_POINTERS *ep)
     return ok ? g_dump_path : "";
 }
 
+const char *crash_report_write_dump(EXCEPTION_POINTERS *ep)
+{
+    const char *path = "";
+    if (InterlockedCompareExchange(&g_dump_busy, 1, 0) != 0) return path;
+    __try { path = crash_report_write_dump_locked(ep); }
+    __finally { InterlockedExchange(&g_dump_busy, 0); }
+    return path;
+}
+
 /* Capture fatal details; callers guard this attempt with SEH. */
-static void crash_capture_fatal(EXCEPTION_POINTERS *ep)
+static void crash_capture_fatal_locked(EXCEPTION_POINTERS *ep)
 {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
     void *rip  = ep->ExceptionRecord->ExceptionAddress;
@@ -188,6 +215,13 @@ static void crash_capture_fatal(EXCEPTION_POINTERS *ep)
     shield_last_engine_msg(g_rec_text, sizeof g_rec_text);
     dump = crash_report_write_dump(ep);
     crash_report_file("fatal", code, rva, fa, mod, g_rec_stack, g_rec_text, dump);
+}
+
+static void crash_capture_fatal(EXCEPTION_POINTERS *ep)
+{
+    if (InterlockedCompareExchange(&g_capture_busy, 1, 0) != 0) return;
+    __try { crash_capture_fatal_locked(ep); }
+    __finally { InterlockedExchange(&g_capture_busy, 0); }
 }
 
 /* Best-effort first-chance capture when a fatal status reaches the VEH. */

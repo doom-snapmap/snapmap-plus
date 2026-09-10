@@ -10,6 +10,8 @@
 #include <string.h>
 #include "snapmap_plus_iface.h"
 #include "iface_engine.h"
+#include "edit_pair.h"
+#include "engine_cvar_read.h"
 #include "apply_engine.h"
 #include "signatures.h"
 #include "engine_globals.h"
@@ -328,20 +330,20 @@ static int slot_get_selection(sh_iface *self, int *out_ids, int max)
 
 
 /* Detect a positional manipulation snapshot through selected scratch-layer
- * entities. Selection mutation would corrupt Escape restoration. Most read
- * errors refuse mutation; an absent or unreadable selection pointer returns
- * no active snapshot. */
+ * entities. Selection mutation would corrupt Escape restoration. Unknown
+ * selection state refuses mutation. */
 static int manipulation_in_progress(void)
 {
     const uint8_t *ed = editor_session();
     if (!ed) return 1;                       /* Unknown editor: refuse mutation. */
     void *mapObj = NULL, *sel = NULL;
     if (!ie_read_ptr(ed + ED_MAP_OBJ_OFF, &mapObj) || !mapObj) return 1;
-    if (!ie_read_ptr(ed + ED_SEL_OBJ_OFF, &sel) || !sel) return 0;   /* Absent or unreadable selection: no snapshot reported. */
+    if (!ie_read_ptr(ed + ED_SEL_OBJ_OFF, &sel) || !sel) return 1;
 
     int count = 0;
     if (!ie_read_s32((const uint8_t *)sel + SEL_COUNT_OFF, &count)) return 1;
-    if (count <= 0) return 0;
+    if (count < 0) return 1;
+    if (count == 0) return 0;
     if (count > SEL_MAX_IDS) return 1;
 
     void *ids = NULL, *layers = NULL;
@@ -812,8 +814,8 @@ static void slot_set_inherit(sh_iface *self, int id, const char *cstr)
 
 /* Validate the final class/inherit pair once, avoiding invalid intermediate
  * checks during cross-family morphs. Null/empty leaves a field unchanged.
- * Writes have separate fault guards: 1 means at least one write succeeded,
- * not an atomic transaction. The caller rebuilds once after success. */
+ * Preserve both originals before writing and restore them if either write
+ * faults. The caller rebuilds only after a complete success. */
 static int slot_apply_class_inherit(sh_iface *self, int id, const char *cls, const char *inh)
 {
     (void)self;
@@ -824,13 +826,12 @@ static int slot_apply_class_inherit(sh_iface *self, int id, const char *cls, con
     const char *h = (inh && inh[0]) ? inh : NULL;
     if (!c && !h) return 0;
     if (!sh_iface_class_inherit_ok(id, c, h)) return 0;
-    int wrote = 0;
-    /* Write inherit before class, then let the caller rebuild the source header. */
-    if (h) { __try { g_idstr_assign((uint8_t *)defsub + DEFSUB_INHERIT_OFF, h); wrote = 1; }
-             __except (EXCEPTION_EXECUTE_HANDLER) {} }
-    if (c) { __try { g_idstr_assign((uint8_t *)defsub + DEFSUB_CLASS_OFF,   c); wrote = 1; }
-             __except (EXCEPTION_EXECUTE_HANDLER) {} }
-    return wrote;
+    int result = sh_edit_pair_apply((uint8_t *)defsub + DEFSUB_CLASS_OFF,
+                                    (uint8_t *)defsub + DEFSUB_INHERIT_OFF,
+                                    c, h, g_idstr_assign);
+    if (result == SH_EDIT_PAIR_PARTIAL)
+        backend_log("Class/inherit update faulted and rollback failed; inspect the entity before editing again");
+    return result;
 }
 
 /* Assign the full display-name idStr through IdStrAssignCStr; empty names are allowed. */
@@ -1014,43 +1015,29 @@ static int slot_resolve_prefab_path(sh_iface *self, const char *prefix, const ch
     return out_path[0] != '\0';
 }
 
-/* Lazily find the dev-layer cvar in the full registry. A miss leaves it
- * unresolved; the visibility caller then behaves as though it were disabled. */
+/* Cache registry objects, whose lifetimes match the engine process. */
 static void *resolve_devlayer_cvar(void)
 {
-    if (g_devlayer_cvar) return g_devlayer_cvar;
-    if (!g_cvarsys_slot) return NULL;
-    void *cvarSys = NULL;
-    if (!ie_read_ptr(g_cvarsys_slot, &cvarSys) || cvarSys == NULL) return NULL;
-    void    *arr = NULL;
-    uint32_t cnt = 0;
-    if (!ie_read_ptr((const uint8_t *)cvarSys + DEVL_CVARSYS_ARR_OFF, &arr) || arr == NULL) return NULL;
-    if (!ie_read_u32((const uint8_t *)cvarSys + DEVL_CVARSYS_CNT_OFF, &cnt) || cnt == 0 ||
-        cnt > DEVL_CVAR_LIST_CAP) return NULL;
-    for (uint32_t i = 0; i < cnt; i++) {
-        void *cv = NULL;
-        if (!ie_read_ptr((const uint8_t *)arr + (size_t)i * 8, &cv) || cv == NULL) continue;
-        void *namep = NULL;
-        if (!ie_read_ptr((const uint8_t *)cv + DEVL_CVAR_NAME_OFF, &namep) || namep == NULL) continue;
-        __try {
-            if (strcmp((const char *)namep, DEVL_CVAR_NAME) == 0) { g_devlayer_cvar = cv; return cv; }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {   }
-    }
-    return NULL;
+    if (!g_devlayer_cvar) g_devlayer_cvar = sh_engine_cvar_find(g_cvarsys_slot, DEVL_CVAR_NAME);
+    return g_devlayer_cvar;
 }
 
-/* Return 1 for a non-base-layer entity unless the cvar is confirmed enabled.
- * Missing/unreadable cvar values act as disabled; entity read failures show it. */
+int sh_iface_engine_copy_paste_enabled(void)
+{
+    static void *copy_paste;
+    int enabled = 0;
+    if (!copy_paste) copy_paste = sh_engine_cvar_find(g_cvarsys_slot, "snapEdit_enableCopyPaste");
+    return sh_engine_cvar_read_int(copy_paste, &enabled) && enabled != 0;
+}
+
+/* Hide a non-base-layer entity only when the cvar is confirmed disabled. */
 static int slot_id_dev_layer_hidden(sh_iface *self, int id)
 {
     (void)self;
     if (id < 0) return 0;
-    /* Only a readable, enabled cvar bypasses the base-layer test. */
     void *cv = resolve_devlayer_cvar();
-    if (cv != NULL) {
-        int enabled = 0;
-        if (ie_read_s32((const uint8_t *)cv + DEVL_CVAR_VALUE_OFF, &enabled) && enabled != 0) return 0;
-    }
+    int enabled = 0;
+    if (!cv || !ie_read_s32((const uint8_t *)cv + DEVL_CVAR_VALUE_OFF, &enabled) || enabled != 0) return 0;
     void    *array = NULL;
     uint32_t count = 0;
     if (!entity_array(&array, &count)) return 0;

@@ -2,7 +2,22 @@
 #include <assert.h>
 #include <string.h>
 #include <stdio.h>
+#include <windows.h>
 #include "../src/fault_shield/crash_record_format.h"
+
+static DWORD WINAPI format_thread(LPVOID arg)
+{
+    const char *tag = (const char *)arg;
+    crash_record r = {0};
+    char actual[8192], expected[8192];
+    r.kind = tag; r.stack = tag; r.engine_text = tag; r.module = tag;
+    assert(crash_record_json(expected, sizeof expected, &r) > 0);
+    for (int i = 0; i < 20000; i++) {
+        assert(crash_record_json(actual, sizeof actual, &r) > 0);
+        assert(strcmp(actual, expected) == 0);
+    }
+    return 0;
+}
 
 int main(void)
 {
@@ -56,6 +71,32 @@ int main(void)
         assert(strstr(buf, "\"kind\":\"fatal\""));
         assert(strstr(buf, "\"stack\":\"\""));
         assert(strstr(buf, "\"renderer\":\"\""));
+    }
+    /* Every insufficient capacity fails empty, including an exact byte fit
+     * without room for NUL. Guard bytes detect writes outside the capacity. */
+    {
+        crash_record r = {0};
+        char bounded[8192];
+        r.engine_text = "quote\" control\x01 UTF-8 \xc3\xa9";
+        int full = crash_record_json(buf, sizeof buf, &r);
+        for (int cap = 1; cap <= full; cap++) {
+            memset(bounded, '#', sizeof bounded);
+            assert(crash_record_json(bounded, (size_t)cap, &r) == 0);
+            assert(bounded[0] == '\0' && bounded[cap] == '#');
+        }
+        assert(crash_record_json(bounded, (size_t)full + 1, &r) == full);
+        assert(strcmp(bounded, buf) == 0);
+        r.engine_text = "\xf0\x80\x80\x80\xc3";
+        assert(crash_record_json(buf, sizeof buf, &r) > 0);
+        assert(strstr(buf, "\\ufffd\\ufffd\\ufffd\\ufffd\\ufffd"));
+    }
+    {
+        HANDLE a = CreateThread(NULL, 0, format_thread, "alpha\\\"\n", 0, NULL);
+        HANDLE b = CreateThread(NULL, 0, format_thread, "beta\t\x01", 0, NULL);
+        assert(a && b);
+        assert(WaitForSingleObject(a, 30000) == WAIT_OBJECT_0);
+        assert(WaitForSingleObject(b, 30000) == WAIT_OBJECT_0);
+        CloseHandle(a); CloseHandle(b);
     }
     printf("crash_record_test OK\n");
     return 0;

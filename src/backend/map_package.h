@@ -70,7 +70,7 @@ int sh_mpkg_unpack(const unsigned char *payload, size_t len, const char *dest_di
 /* Capture the immutable boot-time package list from
  * `<data_root>\overrides` (names via packages.c + any smpkg.digest
  * sidecars). Call once at bootstrap, before the deserialize detour can
- * fire. First capture wins; later calls are ignored. Also records
+ * fire. First capture, including a failed inventory, wins; later calls are ignored. Also records
  * data_root as the install destination root. */
 void sh_mpkg_boot_capture(const char *data_root);
 

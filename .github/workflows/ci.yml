@@ -92,6 +92,10 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.21'
+      - name: Install Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
       - name: Build backend + frontend
         shell: pwsh
         run: |
@@ -133,11 +137,18 @@ jobs:
             throw "XInput ordinals must be 2=GetState, 3=SetState"
           }
           Write-Host "ordinals OK (2=GetState, 3=SetState)"
-      - name: C unit tests (self-contained)
+      - name: Native and JavaScript tests
         shell: pwsh
         run: |
           .\tests\run-tests.ps1
           if ($LASTEXITCODE -ne 0) { throw "C unit tests failed" }
+      - name: Worker runtime tests
+        shell: pwsh
+        run: |
+          npm install --prefix build/worker-tests --no-audit --no-fund --no-package-lock miniflare@4.20260730.0
+          if ($LASTEXITCODE -ne 0) { throw "Worker test dependency installation failed" }
+          node tests/worker_runtime_test.js build/worker-tests/node_modules/miniflare
+          if ($LASTEXITCODE -ne 0) { throw "Worker runtime tests failed" }
       - name: Installer -- gofmt + vet + test + build
         shell: pwsh
         working-directory: installer

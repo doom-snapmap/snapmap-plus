@@ -38,13 +38,14 @@ func selfInstall() {
 	// Preserve the running executable's name.
 	target := filepath.Join(dir, filepath.Base(exe))
 	if sameFile(exe, target) {
+		_ = installSelfCopy(exe, target)
 		return // already running from the installed location
 	}
 	_, existed := os.Stat(target)
 	if os.MkdirAll(dir, 0o755) != nil {
 		return
 	}
-	if copyFile(exe, target) != nil {
+	if installSelfCopy(exe, target) != nil {
 		return
 	}
 	if existed != nil { // first time -> let the user know where it went
@@ -52,8 +53,8 @@ func selfInstall() {
 	}
 }
 
-// cleanupAppData removes installer metadata and executable copies other than
-// the running file. It preserves config.json and nonempty content folders.
+// cleanupAppData removes metadata and unchanged, recorded executable copies.
+// Unrecorded files, the running image and player content remain untouched.
 func cleanupAppData() {
 	dir := appDataDir()
 	if dir == "" {
@@ -61,16 +62,8 @@ func cleanupAppData() {
 	}
 	os.Remove(filepath.Join(dir, "install.json"))
 	os.Remove(filepath.Join(dir, "token"))
-	// This cleanup treats every top-level .exe as an installer copy.
-	// It does not consult an ownership record for these files.
 	exe, _ := os.Executable()
-	if matches, err := filepath.Glob(filepath.Join(dir, "*.exe")); err == nil {
-		for _, m := range matches {
-			if exe == "" || !sameFile(exe, m) {
-				os.Remove(m)
-			}
-		}
-	}
+	cleanupOwnedExecutables(dir, exe)
 	// Remove only empty content folders, then the parent if empty.
 	for _, sub := range userContentSubdirs {
 		removeIfEmpty(filepath.Join(dir, sub))

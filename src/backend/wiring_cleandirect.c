@@ -128,7 +128,17 @@ static int wcd_resolve_sig(const char *name, sig_result *out)
 
 void sh_wiring_cleandirect_install(const uint8_t *module_base)
 {
-    if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return;
+    if (g_installed && sh_detour_is_installed((void *)g_orig_base) &&
+        sh_detour_is_installed((void *)g_orig_outnode)) return;
+    InterlockedExchange(&g_installed, 0);
+    if (g_orig_outnode) {
+        if (!sh_uninstall_detour((void *)g_orig_outnode)) return;
+        g_orig_outnode = NULL;
+    }
+    if (g_orig_base) {
+        if (!sh_uninstall_detour((void *)g_orig_base)) return;
+        g_orig_base = NULL;
+    }
     g_module_base = module_base;
 
     sig_result rb, ro;
@@ -141,18 +151,20 @@ void sh_wiring_cleandirect_install(const uint8_t *module_base)
         return;
     }
 
-    void *tb = sh_install_detour_sig(&rb, (void *)connect_creator_base_detour, WIRING_STOLEN);
+    void *tb = sh_prepare_detour_sig(&rb, (void *)connect_creator_base_detour, WIRING_STOLEN);
     if (tb == NULL) {
         backend_log("B2: sh_target_any clean-direct NOT armed (base creator detour install failed)");
         return;
     }
-    void *to = sh_install_detour_sig(&ro, (void *)connect_creator_outnode_detour, WIRING_STOLEN);
-    if (to == NULL) {
-        sh_uninstall_detour(tb);   /* Roll back the first detour if the second fails. */
-        backend_log("B2: sh_target_any clean-direct NOT armed (output-node creator detour install failed)");
+    g_orig_base = (creator_fn)tb;
+    void *to = sh_prepare_detour_sig(&ro, (void *)connect_creator_outnode_detour, WIRING_STOLEN);
+    g_orig_outnode = (creator_fn)to;
+    if (!to || sh_commit_detour(tb) != B2_PATCH_OK || sh_commit_detour(to) != B2_PATCH_OK) {
+        if (to && sh_uninstall_detour(to)) g_orig_outnode = NULL;
+        if (sh_uninstall_detour(tb)) g_orig_base = NULL;
+        backend_log("B2: sh_target_any clean-direct commit failed; retained callbacks require restoration");
         return;
     }
-    g_orig_base    = (creator_fn)tb;
-    g_orig_outnode = (creator_fn)to;
+    InterlockedExchange(&g_installed, 1);
     backend_log("B2: sh_target_any clean-direct ready (off until reveal; cdbb40 + cdb990 detoured)");
 }

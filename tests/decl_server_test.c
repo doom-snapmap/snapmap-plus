@@ -11,11 +11,34 @@
 #include "decl_server_path.h"
 #include "decl_text.h"
 #include "overrides.h"
+#include "hook.h"
 
+static int g_apply_palette_result = 1;
+static int g_apply_palette_calls;
+static int g_user_enabled;
+static int g_runtime_dependencies_ok = 1;
+static int g_string_refreshes;
+static int g_table_published;
+static int g_table_merges;
+static char g_fixture_root[MAX_PATH];
+static unsigned char g_boundary_editor[16];
+static unsigned char g_boundary_shell[0x20];
+static unsigned char g_boundary_manager[0x918];
+static unsigned char g_boundary_dialog_manager[0x910];
+static unsigned char g_boundary_dialog_queue[2 * 0x1b0];
+static unsigned char g_boundary_common[0xf577];
+static void *g_boundary_shell_slot = g_boundary_shell;
+static void *g_boundary_common_slot = g_boundary_common;
+static DWORD g_boundary_thread;
+static int g_boundary_unknown;
+static void *g_boundary_resource_head;
+static void heap_observe_native(int palette);
 /* Stub palette notification while testing decl-server helpers. */
 int sh_palette_refresh_after_decl_registration(void)
 {
-    return 1;
+    heap_observe_native(1);
+    g_apply_palette_calls++;
+    return g_apply_palette_result;
 }
 
 static int g_failed;
@@ -26,6 +49,48 @@ static int g_failed;
         g_failed++;                                                             \
     }                                                                           \
 } while (0)
+
+/* Model the allocator scope stack independently of resource-level promotion. */
+static struct {
+    unsigned char prefix[0x44];
+    int heaps[32];
+    int depth;
+} g_heap_local;
+static int g_heap_push_noop, g_heap_pushes, g_heap_pops;
+static int g_heap_check_native, g_heap_decl_calls, g_heap_palette_calls;
+
+static void heap_fixture_reset(void)
+{
+    memset(&g_heap_local, 0, sizeof(g_heap_local));
+    g_heap_local.depth = 1;
+    g_heap_local.heaps[0] = 2;
+    g_heap_push_noop = g_heap_pushes = g_heap_pops = 0;
+    g_heap_check_native = g_heap_decl_calls = g_heap_palette_calls = 0;
+}
+
+static void *heap_get(void) { return &g_heap_local; }
+static void heap_push(void *self, int heap)
+{
+    CHECK(self == &g_heap_local && heap == 0);
+    g_heap_pushes++;
+    if (g_heap_push_noop) return;
+    CHECK(g_heap_local.depth >= 0 && g_heap_local.depth < 32);
+    g_heap_local.heaps[g_heap_local.depth++] = heap;
+}
+static void heap_pop(void *self)
+{
+    CHECK(self == &g_heap_local && g_heap_local.depth > 0);
+    g_heap_pops++;
+    g_heap_local.depth--;
+}
+
+static void heap_observe_native(int palette)
+{
+    if (!g_heap_check_native) return;
+    CHECK(g_heap_local.depth == 2 && g_heap_local.heaps[1] == 0);
+    if (palette) g_heap_palette_calls++;
+    else g_heap_decl_calls++;
+}
 
 static char g_last_log[512];
 static int g_log_count;
@@ -38,6 +103,7 @@ void backend_log(const char *message)
 
 /* Record optional post-palette operations without letting them fail registration. */
 static int g_visibility_installs;
+static int g_visibility_result = 1;
 
 int sh_decl_visibility_install(const unsigned char *module_base,
                                const char *existing_probe_path,
@@ -45,32 +111,83 @@ int sh_decl_visibility_install(const unsigned char *module_base,
 {
     (void)module_base; (void)existing_probe_path; (void)absent_probe_path;
     g_visibility_installs++;
-    return 1;
+    return g_visibility_result;
 }
 
-/* Stub boot promotion and synchronous package cvars so installation refuses
- * without calling an engine. */
-void *install_inline_hook(void *target, void *detour, size_t stolen)
+/* Exercise hook ownership without modifying executable memory. */
+static void *g_hook_owned;
+static void (*g_hook_detour)(void);
+static int g_hook_prepare_fail = 1;
+static int g_hook_unpatch_fail;
+static int g_hook_installed;
+static int g_hook_invoke_on_commit;
+static sh_patch_status g_hook_commit_result = B2_PATCH_FAIL_SEH;
+static int g_hook_prepares, g_hook_commits, g_hook_unpatches;
+static int g_hook_original_calls, g_requirements_calls;
+static int g_linked_fixture;
+
+void *hook_prepare(void *target, void *detour, size_t stolen)
 {
-    (void)target; (void)detour; (void)stolen;
-    return NULL;
+    CHECK(target != NULL && detour != NULL && stolen >= 14);
+    CHECK(g_hook_owned == NULL);
+    g_hook_prepares++;
+    if (g_hook_prepare_fail) return NULL;
+    g_hook_owned = target;
+    g_hook_detour = (void (*)(void))detour;
+    return target;
+}
+sh_patch_status hook_commit(void *tramp)
+{
+    CHECK(tramp == g_hook_owned && tramp != NULL);
+    g_hook_commits++;
+    if (g_hook_invoke_on_commit) {
+        int before = g_hook_original_calls;
+        int refreshes = g_string_refreshes;
+        g_hook_detour();
+        CHECK(g_hook_original_calls == before + 1);
+        CHECK(sh_decl_server_registration_succeeded() == 0);
+        CHECK(sh_decl_server_rearm() == 0 && g_string_refreshes == refreshes);
+    }
+    g_hook_installed = g_hook_commit_result == B2_PATCH_OK;
+    return g_hook_commit_result;
+}
+int hook_is_installed(void *tramp)
+{
+    return tramp != NULL && tramp == g_hook_owned && g_hook_installed;
+}
+int hook_unpatch(void *tramp)
+{
+    CHECK(tramp == g_hook_owned && tramp != NULL);
+    g_hook_unpatches++;
+    g_hook_installed = 0;
+    if (g_hook_unpatch_fail) return 0;
+    g_hook_owned = NULL;
+    g_hook_detour = NULL;
+    return 1;
 }
 
 int sh_package_requirements_apply_now(void *execute_command_buffer)
 {
     (void)execute_command_buffer;
+    g_requirements_calls++;
     return 1;
 }
 
 int sh_overrides_get_root(char *out, size_t cap)
 {
-    if (out && cap) out[0] = '\0';
-    return 0;
+    if (out && cap) strcpy_s(out, cap, g_fixture_root);
+    return g_fixture_root[0] != '\0';
 }
 
 int sh_overrides_internal_decl_table_can_install(void)
 {
-    return 0;
+    return g_user_enabled;
+}
+
+int sh_overrides_internal_decl_published(const char *name)
+{
+    (void)name;
+    return g_table_published;
 }
 
 int sh_overrides_internal_decl_table_install(
@@ -83,7 +200,7 @@ int sh_overrides_internal_decl_table_install(
 
 int sh_user_overrides_enabled_for_launch(void)
 {
-    return 0;
+    return g_user_enabled;
 }
 
 /* Stub override recapture needed by runtime re-arm; overrides.c is not linked. */
@@ -92,11 +209,15 @@ unsigned long sh_overrides_rescan_packages(void)
     return 0;
 }
 
+int sh_strids_rearm(void) { g_string_refreshes++; return g_runtime_dependencies_ok; }
+void sh_resource_bridge_snapshot_begin(void) {}
+void sh_resource_bridge_snapshot_end(void) {}
+
 /* Stub resource-bridge recapture for runtime package registration. */
 int sh_resource_bridge_recapture(const char *data_root)
 {
     (void)data_root;
-    return 0;
+    return g_runtime_dependencies_ok;
 }
 
 int sh_weapon_hud_reload(const char *data_root)
@@ -115,7 +236,8 @@ int sh_overrides_internal_decl_table_merge(
 {
     (void)entries;
     (void)count;
-    return 0;
+    g_table_merges++;
+    return 1;
 }
 
 /* The re-arm applies the package's cut-content gates before registering. Not linked here. */
@@ -123,7 +245,7 @@ int sh_package_requirements_rearm(const char *data_root, void *execute_command_b
                                   int user_layer_enabled)
 {
     (void)data_root; (void)execute_command_buffer; (void)user_layer_enabled;
-    return 0;
+    return g_runtime_dependencies_ok;
 }
 
 int sh_resource_bridge_gate_ok(void)
@@ -133,21 +255,29 @@ int sh_resource_bridge_gate_ok(void)
 
 size_t sh_resource_bridge_decl_count(void)
 {
-    return 0;
+    return g_linked_fixture ? 1 : 0;
 }
 
 int sh_resource_bridge_decl_metadata(size_t index, const char **type,
                                      const char **name, const char **source)
 {
-    (void)index; (void)type; (void)name; (void)source;
-    return 0;
+    if (!g_linked_fixture || index) return 0;
+    *type = "material";
+    *name = "rt/alpha";
+    *source = "linked/decls/material/rt/alpha.decl";
+    return 1;
 }
 
 int sh_resource_bridge_read_decl(size_t index, char **body, size_t *length,
                                  const char **reason)
 {
-    (void)index; (void)body; (void)length; (void)reason;
-    return 0;
+    (void)reason;
+    if (!g_linked_fixture || index) return 0;
+    *body = (char *)HeapAlloc(GetProcessHeap(), 0, 3);
+    if (!*body) return 0;
+    memcpy(*body, "{}", 3);
+    *length = 2;
+    return 1;
 }
 
 uintptr_t sig_addr_by_name(const sig_result *results, size_t count, const char *name)
@@ -164,6 +294,12 @@ uintptr_t glb_resolve(const uint8_t *module_base, const char *name, glb_status *
     (void)module_base;
     (void)name;
     if (out_status) *out_status = GLB_ANCHOR_NOT_FOUND;
+    if (g_boundary_unknown) return 0;
+    if (!strcmp(name, "editor_singleton")) return (uintptr_t)g_boundary_editor;
+    if (!strcmp(name, "shell_ptr_slot")) return (uintptr_t)&g_boundary_shell_slot;
+    if (!strcmp(name, "validator_manager")) return (uintptr_t)&g_boundary_common_slot;
+    if (!strcmp(name, "main_thread_id")) return (uintptr_t)&g_boundary_thread;
+    if (!strcmp(name, "decl_resource_head")) return (uintptr_t)&g_boundary_resource_head;
     return 0;
 }
 
@@ -932,6 +1068,17 @@ static void test_integrated_scan_materialize_pipeline(void)
     CHECK(memcmp(g_pipeline_events, "CSDCSDTFFTFFP", 13) == 0);
     CHECK(sh_decl_server_registration_succeeded() == 0);
 
+    pipeline_reset();
+    g_pipeline_decl = decl_memory;
+    g_visibility_result = 0;
+    ok = sh_decl_server_test_scan_and_materialize_missing(
+        items, sizeof(items) / sizeof(items[0]),
+        (void *)(uintptr_t)0x98760000u, pipeline_type_by_name, pipeline_source_find,
+        pipeline_find_decl, pipeline_palette_refresh, pipeline_ctor,
+        pipeline_dtor, pipeline_register_file, &registered, &materialized, &failure_phase);
+    CHECK(ok == 0 && failure_phase == SH_DECL_SERVER_TEST_PHASE_VISIBILITY);
+    CHECK(g_pipeline_palette_calls == 0);
+    g_visibility_result = 1;
     HeapFree(GetProcessHeap(), 0, decl_memory);
 }
 
@@ -1634,8 +1781,8 @@ static void test_walk_error_propagation(void)
 
 
 /* Mark all empty reused placeholders before the first drain so parse-time
- * references can reload their targets. Re-parse newly served live shadows in
- * place regardless of type, leaving already-served objects alone.
+ * references can reload their targets. Re-parse changed live shadows in
+ * place regardless of type or a prior pass.
  * The browser-safe pass must clear every pending mark. The lookup double
  * clears pending bit 0x02, then loads source and sets bit 0x04. */
 
@@ -1668,6 +1815,7 @@ static void rt_reset(void)
  * The caller must clear pending before invoking it. */
 static void rt_generic_load(void *decl)
 {
+    heap_observe_native(0);
     ((unsigned char *)decl)[0x2c] |= 0x04;
     g_rt_direct_loads++;
 }
@@ -1683,6 +1831,7 @@ static int rt_index_of(const char *name)
 static void *rt_find_decl(void *type_manager, const char *logical_name,
                           unsigned char make_default)
 {
+    heap_observe_native(0);
     int index = rt_index_of(logical_name);
     unsigned char *decl;
     (void)type_manager;
@@ -1812,18 +1961,17 @@ static void test_runtime_shadowed_refresh(void)
     g_rt_names[3] = "rt/midgame";
     g_rt_objects[3] = midgame;
     sh_decl_server_test_reset_runtime_state();
-    CHECK(sh_decl_server_test_add_prev_identity("entityDef", "rt/served") == 1);
     sh_decl_server_test_set_runtime(1);
     CHECK(sh_decl_server_test_materialize_missing_sedefs(
               items, 4, (void *)(uintptr_t)0x98760000u, rt_type_by_name,
               rt_source_find, rt_find_decl, &materialized) == 1);
     sh_decl_server_test_set_runtime(0);
 
-    /* Refresh both newly served live shadows in place and clear their marks;
-     * preserve the already-served object and source-only entry. */
+    /* Refresh every live shadow, including prior-pass and source-classified
+     * entries. All pending marks must drain in this pass. */
     CHECK(g_rt_loads[0] == 1);
-    CHECK(g_rt_loads[1] == 0);
-    CHECK(g_rt_loads[2] == 0);
+    CHECK(g_rt_loads[1] == 1);
+    CHECK(g_rt_loads[2] == 1);
     CHECK(g_rt_loads[3] == 1);
     CHECK((newly[0x2c] & 0x02) == 0);
     CHECK((newly[0x2c] & 0x04) != 0);
@@ -1833,7 +1981,7 @@ static void test_runtime_shadowed_refresh(void)
     CHECK((midgame[0x2c] & 0x04) != 0);
     sh_decl_server_test_runtime_counters(&marked, &left, &shadow, &faults);
     CHECK(marked == 0);
-    CHECK(shadow == 2);
+    CHECK(shadow == 4);
     CHECK(faults == 0);
     CHECK(g_rt_direct_loads == 0);
     CHECK(sh_decl_server_test_clear_stray_pending() == 0);
@@ -1984,6 +2132,328 @@ static void test_runtime_off_leaves_placeholders_alone(void)
     HeapFree(GetProcessHeap(), 0, a);
 }
 
+static int g_registered_commands;
+static void lifecycle_add_command(void *cmdsys, const char *name, void *callback,
+                                  const char *help, void *completion, unsigned int flags)
+{
+    (void)cmdsys; (void)name; (void)callback; (void)help; (void)completion; (void)flags;
+    g_registered_commands++;
+}
+
+static void lifecycle_noop(void) {}
+static void lifecycle_promote(void) { g_hook_original_calls++; }
+
+static void test_boot_hook_recovery(const sig_result *results, size_t count,
+                                    const unsigned char *base, void *cmdsys)
+{
+    int before, requirements, prepares;
+    unsigned char resource_node[0x30] = {0}, resource[0x30] = {0};
+    void *resources[] = {resource};
+    sh_decl_server_test_reset_install();
+    *(void **)(resource_node + 0x20) = resources;
+    *(int *)(resource_node + 0x28) = 1;
+    g_boundary_resource_head = resource_node;
+    g_linked_fixture = 1;
+    g_hook_prepares = g_hook_commits = g_hook_unpatches = 0;
+    g_hook_original_calls = g_requirements_calls = 0;
+
+    /* No prepared callback is owned, so a later install can start afresh. */
+    g_hook_prepare_fail = 1;
+    CHECK(sh_decl_server_install(results, count, base, cmdsys) == 0);
+    CHECK(g_hook_prepares == 1 && g_hook_commits == 0 && g_hook_owned == NULL);
+    CHECK(sh_decl_server_registration_succeeded() == 0);
+    CHECK(sh_decl_server_rearm() == 0);
+
+    /* Completed rollback also permits retry, without a test-state reset. */
+    g_hook_prepare_fail = 0;
+    g_hook_commit_result = B2_PATCH_FAIL_SEH;
+    g_hook_unpatch_fail = 0;
+    g_hook_invoke_on_commit = 1;
+    CHECK(sh_decl_server_install(results, count, base, cmdsys) == 0);
+    CHECK(g_hook_prepares == 2 && g_hook_commits == 1 && g_hook_unpatches == 1);
+    CHECK(g_hook_owned == NULL && sh_decl_server_registration_succeeded() == 0);
+
+    g_hook_commit_result = B2_PATCH_FAIL_ROLLBACK;
+    g_hook_unpatch_fail = 1;
+    g_hook_invoke_on_commit = 0;
+    CHECK(sh_decl_server_install(results, count, base, cmdsys) == 0);
+    CHECK(g_hook_prepares == 3 && g_hook_commits == 2 && g_hook_unpatches == 2);
+    CHECK(g_hook_owned != NULL && !hook_is_installed(g_hook_owned));
+    CHECK(sh_decl_server_registration_succeeded() == 0);
+    before = g_hook_original_calls;
+    requirements = g_requirements_calls;
+    g_hook_detour();
+    CHECK(g_hook_original_calls == before + 1);
+    CHECK(g_requirements_calls == requirements);
+    before = g_string_refreshes;
+    CHECK(sh_decl_server_rearm() == 0);
+    sh_decl_server_request_rearm();
+    sh_decl_server_rearm_poll();
+    CHECK(g_string_refreshes == before && sh_decl_server_registration_succeeded() == 0);
+    prepares = g_hook_prepares;
+    CHECK(sh_decl_server_install(results, count, base, cmdsys) == 0);
+    CHECK(g_hook_prepares == prepares && g_hook_owned != NULL);
+
+    /* Recovery releases the old record before preparing another. Commit calls
+     * the detour immediately, proving its original callback is already visible. */
+    g_hook_unpatch_fail = 0;
+    g_hook_commit_result = B2_PATCH_OK;
+    g_hook_invoke_on_commit = 1;
+    before = g_hook_original_calls;
+    CHECK(sh_decl_server_install(results, count, base, cmdsys) == 1);
+    CHECK(g_hook_prepares == prepares + 1 && hook_is_installed(g_hook_owned));
+    CHECK(g_hook_original_calls == before + 1);
+    CHECK(g_requirements_calls == requirements + 1);
+    before = g_string_refreshes;
+    sh_decl_server_rearm_poll();
+    CHECK(g_string_refreshes == before + 1);
+    if (!sh_decl_server_registration_succeeded())
+        fprintf(stderr, "hook recovery refresh: %s\n", g_last_log);
+    CHECK(sh_decl_server_registration_succeeded() == 1);
+    prepares = g_hook_prepares;
+    CHECK(sh_decl_server_install(results, count, base, cmdsys) == 1);
+    CHECK(g_hook_prepares == prepares);
+    /* An attempted removal also invalidates readiness while restoration waits. */
+    g_hook_installed = 0;
+    g_hook_unpatch_fail = 1;
+    CHECK(sh_decl_server_install(results, count, base, cmdsys) == 0);
+    CHECK(sh_decl_server_registration_succeeded() == 0 && sh_decl_server_rearm() == 0);
+    CHECK(g_hook_prepares == prepares && g_hook_owned != NULL);
+    g_hook_unpatch_fail = 0;
+    CHECK(sh_decl_server_install(results, count, base, cmdsys) == 1);
+    CHECK(g_hook_prepares == prepares + 1 && hook_is_installed(g_hook_owned));
+    CHECK(sh_decl_server_registration_succeeded() == 1);
+    sh_decl_server_test_reset_install();
+    CHECK(g_hook_owned == NULL);
+    g_boundary_resource_head = NULL;
+    g_linked_fixture = 0;
+    g_hook_prepare_fail = 1;
+    g_hook_invoke_on_commit = 0;
+}
+
+static void test_empty_launch_and_runtime_results(void)
+{
+    static struct { unsigned char anchor[32]; void *registry; } image_anchor;
+    static void *vtable[12];
+    static void *registry;
+    const unsigned char *base = (const unsigned char *)GetModuleHandleA(NULL);
+    struct { const char *name; void *address; } bindings[] = {
+        {"DeclRegistryAnchor", image_anchor.anchor},
+        {"DeclTypeByName", rt_type_by_name}, {"DeclRegisterFile", pipeline_register_file},
+        {"DeclFind", rt_find_decl}, {"DeclSourceFind", rt_source_find},
+        {"IdStrCtor", pipeline_ctor}, {"IdStrDtor", pipeline_dtor},
+        {"ResourceStaticPromote", lifecycle_promote}, {"CmdExecuteBuffer", lifecycle_noop},
+        {"ResourceGenericLoad", rt_generic_load}, {"AddCommand", lifecycle_add_command},
+        {"MemLocalGet", heap_get}, {"MemLocalPushHeap", heap_push},
+        {"MemLocalPopHeap", heap_pop}
+    };
+    sig_result results[sizeof(bindings)/sizeof(bindings[0])];
+    char temp[MAX_PATH];
+    int displacement = (int)((unsigned char *)&image_anchor.registry -
+                              (image_anchor.anchor + 0x17));
+    static const unsigned char body[] = "{}";
+    sh_decl_server_test_materialize_item item = {
+        "material", "rt/alpha", "generated/decls/material/rt/alpha.decl",
+        SH_DECL_SERVER_TEST_SHADOWED, body, 2, SH_DECL_SERVER_TEST_SHADOW_LIVE
+    };
+    unsigned char *decl = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x300);
+    CHECK(decl != NULL);
+    if (!decl) return;
+    GetTempPathA(sizeof(temp), temp);
+    _snprintf_s(g_fixture_root, sizeof(g_fixture_root), _TRUNCATE,
+                "%ssnapmap-plus-empty-launch-%lu", temp, GetCurrentProcessId());
+    CHECK(CreateDirectoryA(g_fixture_root, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
+    vtable[7] = pipeline_register_file;
+    vtable[11] = rt_type_by_name;
+    registry = vtable;
+    image_anchor.registry = &registry;
+    memcpy(image_anchor.anchor + 0x10, "\x48\x8b\x0d", 3);
+    memcpy(image_anchor.anchor + 0x13, &displacement, 4);
+    for (size_t i = 0; i < sizeof(bindings)/sizeof(bindings[0]); i++) {
+        results[i].name = bindings[i].name;
+        results[i].status = SIG_OK;
+        results[i].addr = (uintptr_t)bindings[i].address;
+        results[i].rva = (uint32_t)(results[i].addr - (uintptr_t)base);
+    }
+    sh_decl_server_test_reset_install();
+    heap_fixture_reset();
+    g_user_enabled = 1;
+    g_registered_commands = 0;
+    CHECK(sh_decl_server_install(results, sizeof(results)/sizeof(results[0]), base, &registry) == 1);
+    CHECK(g_registered_commands == 2);
+    CHECK(sh_decl_server_registration_succeeded() == 1);
+    {
+        unsigned char node[0x30] = {0}, original[0x30] = {0}, fresh[0x30] = {0};
+        void *entries[2] = {original, fresh};
+        *(unsigned int *)(original + 0x28) = 2;
+        *(unsigned int *)(fresh + 0x28) = 2;
+        *(void **)(node + 0x20) = entries;
+        *(int *)(node + 0x28) = 1;
+        g_boundary_resource_head = node;
+        CHECK(sh_decl_server_test_lifetime_watermark() == 1);
+        *(int *)(node + 0x28) = 2;
+        CHECK(sh_decl_server_test_promote_delta() == 1);
+        CHECK(*(unsigned int *)(original + 0x28) == 2);
+        CHECK(*(unsigned int *)(fresh + 0x28) == 4);
+        *(void **)(node + 0x18) = (void *)1;
+        CHECK(sh_decl_server_test_lifetime_watermark() == 0);
+        *(void **)(node + 0x18) = node;
+        CHECK(sh_decl_server_test_lifetime_watermark() == 0);
+        *(void **)(node + 0x18) = NULL;
+        *(int *)(node + 0x28) = 1;
+        CHECK(sh_decl_server_test_lifetime_watermark() == 1);
+        entries[1] = (void *)1;
+        *(int *)(node + 0x28) = 2;
+        CHECK(sh_decl_server_test_promote_delta() == 0);
+        g_boundary_resource_head = NULL;
+    }
+    *(void **)(g_boundary_shell + 8) = g_boundary_dialog_manager;
+    *(void **)(g_boundary_dialog_manager + 0x900) = g_boundary_dialog_queue;
+    *(int *)(g_boundary_dialog_manager + 0x908) = 0;
+    *(void **)(g_boundary_shell + 0x18) = g_boundary_manager;
+    *(int *)(g_boundary_manager + 8) = 0x3f;
+    *(int *)(g_boundary_manager + 12) = 0x3f;
+    *(int *)(g_boundary_manager + 0x910) = 1;
+    *(int *)(g_boundary_manager + 0x914) = 1;
+    /* DISMISS-A can leave the visible byte set after every descriptor is gone. */
+    g_boundary_manager[0xa8] = 1;
+    g_boundary_thread = GetCurrentThreadId();
+    g_string_refreshes = 0;
+    CHECK(sh_decl_server_rearm() == 1);
+    CHECK(g_string_refreshes == 1);
+    CHECK(g_boundary_manager[0xa8] == 1);
+    sh_decl_server_request_rearm();
+    CHECK(sh_decl_server_registration_succeeded() == 0);
+    /* Every unsafe state preserves the pending request without touching packages. */
+    g_boundary_editor[9] = 1;
+    sh_decl_server_rearm_poll();
+    CHECK(g_string_refreshes == 1 && sh_decl_server_registration_succeeded() == 0);
+    g_boundary_editor[9] = 0;
+    g_boundary_common[0xf576] = 1;
+    sh_decl_server_rearm_poll();
+    CHECK(g_string_refreshes == 1);
+    g_boundary_common[0xf576] = 2;
+    sh_decl_server_rearm_poll();
+    CHECK(g_string_refreshes == 1);
+    g_boundary_common[0xf576] = 0;
+    *(int *)(g_boundary_manager + 0x910) = 10;
+    sh_decl_server_rearm_poll();
+    CHECK(g_string_refreshes == 1);
+    *(int *)(g_boundary_manager + 0x910) = 1;
+    *(int *)(g_boundary_manager + 12) = 0x2e;
+    sh_decl_server_rearm_poll();
+    CHECK(g_string_refreshes == 1);
+    *(int *)(g_boundary_manager + 12) = 0x3f;
+    /* Queue state must block even when the visible byte says no dialog. */
+    g_boundary_manager[0xa8] = 0;
+    *(int *)(g_boundary_dialog_manager + 0x908) = 2;
+    g_boundary_dialog_queue[8] = 1;
+    g_boundary_dialog_queue[0x1b0 + 8] = 0;
+    sh_decl_server_rearm_poll();
+    CHECK(g_string_refreshes == 1);
+    g_boundary_dialog_queue[0x1b0 + 8] = 2;
+    sh_decl_server_rearm_poll();
+    CHECK(g_string_refreshes == 1);
+    *(int *)(g_boundary_dialog_manager + 0x908) = -1;
+    sh_decl_server_rearm_poll();
+    CHECK(g_string_refreshes == 1);
+    *(int *)(g_boundary_dialog_manager + 0x908) = 65;
+    sh_decl_server_rearm_poll();
+    CHECK(g_string_refreshes == 1);
+    *(int *)(g_boundary_dialog_manager + 0x908) = 0;
+    *(void **)(g_boundary_dialog_manager + 0x900) = NULL;
+    sh_decl_server_rearm_poll();
+    CHECK(g_string_refreshes == 1);
+    *(void **)(g_boundary_dialog_manager + 0x900) = (void *)1;
+    sh_decl_server_rearm_poll();
+    CHECK(g_string_refreshes == 1);
+    *(void **)(g_boundary_dialog_manager + 0x900) = g_boundary_dialog_queue;
+    *(void **)(g_boundary_shell + 8) = NULL;
+    sh_decl_server_rearm_poll();
+    CHECK(g_string_refreshes == 1);
+    *(void **)(g_boundary_shell + 8) = (void *)1;
+    sh_decl_server_rearm_poll();
+    CHECK(g_string_refreshes == 1);
+    *(void **)(g_boundary_shell + 8) = g_boundary_dialog_manager;
+    g_boundary_dialog_queue[0x1b0 + 8] = 1;
+    *(int *)(g_boundary_dialog_manager + 0x908) = 2;
+    g_boundary_manager[0xa8] = 1;
+    g_boundary_thread = 0;
+    sh_decl_server_rearm_poll();
+    CHECK(g_string_refreshes == 1);
+    g_boundary_thread = GetCurrentThreadId();
+    g_boundary_common_slot = NULL;
+    sh_decl_server_rearm_poll();
+    CHECK(g_string_refreshes == 1 && sh_decl_server_rearm() == 0);
+    g_boundary_common_slot = g_boundary_common;
+    sh_decl_server_rearm_poll();
+    CHECK(sh_decl_server_registration_succeeded() == 1 && g_string_refreshes == 2);
+    g_runtime_dependencies_ok = 0;
+    CHECK(sh_decl_server_rearm() == 0);
+    CHECK(sh_decl_server_registration_succeeded() == 0);
+    g_runtime_dependencies_ok = 1;
+    CHECK(sh_decl_server_rearm() == 1);
+
+    rt_reset();
+    g_rt_names[0] = "rt/alpha";
+    g_rt_objects[0] = decl;
+    decl[0x2c] = 0x04;
+    g_table_published = 1;
+    g_table_merges = 0;
+    g_apply_palette_calls = 0;
+    CHECK(sh_decl_server_test_apply(&item, 1, 1) == 1);
+    CHECK(g_apply_palette_calls == 1 && g_rt_loads[0] == 1 && g_table_merges == 1);
+    /* Repeated same-identity edits must refresh again, including decltree bytes. */
+    CHECK(sh_decl_server_test_apply(&item, 1, 1) == 1);
+    CHECK(g_apply_palette_calls == 2 && g_rt_loads[0] == 2 && g_table_merges == 2);
+    g_apply_palette_result = 0;
+    CHECK(sh_decl_server_test_apply(&item, 1, 1) == 0);
+    CHECK(sh_decl_server_registration_succeeded() == 0);
+    g_apply_palette_result = 1;
+    CHECK(sh_decl_server_test_apply(&item, 1, 1) == 1);
+    {
+        unsigned char resource_node[0x30] = {0};
+        void *resources[] = {decl};
+        int loads, palettes;
+        *(void **)(resource_node + 0x20) = resources;
+        *(int *)(resource_node + 0x28) = 1;
+        g_boundary_resource_head = resource_node;
+        g_linked_fixture = 1;
+        heap_fixture_reset();
+        g_heap_check_native = 1;
+        CHECK(sh_decl_server_rearm() == 1);
+        CHECK(g_heap_decl_calls > 0 && g_heap_palette_calls == 1);
+        CHECK(g_heap_pushes == 1 && g_heap_pops == 1);
+        CHECK(g_heap_local.depth == 1 && g_heap_local.heaps[0] == 2);
+
+        /* An unconfirmed push must refuse before any native parse or palette
+         * allocation; a later confirmed scope can retry the same pass. */
+        loads = g_heap_decl_calls;
+        palettes = g_heap_palette_calls;
+        g_heap_push_noop = 1;
+        CHECK(sh_decl_server_rearm() == 0);
+        CHECK(sh_decl_server_registration_succeeded() == 0);
+        CHECK(g_heap_decl_calls == loads && g_heap_palette_calls == palettes);
+        CHECK(g_heap_local.depth == 1 && g_heap_local.heaps[0] == 2);
+        CHECK(g_heap_pushes == 2 && g_heap_pops == 1);
+        g_heap_push_noop = 0;
+        CHECK(sh_decl_server_rearm() == 1);
+        CHECK(g_heap_decl_calls > loads && g_heap_palette_calls == palettes + 1);
+        CHECK(g_heap_pushes == 3 && g_heap_pops == 2);
+        CHECK(g_heap_local.depth == 1 && g_heap_local.heaps[0] == 2);
+        g_heap_check_native = 0;
+        g_boundary_resource_head = NULL;
+        g_linked_fixture = 0;
+    }
+    test_boot_hook_recovery(results, sizeof(results)/sizeof(results[0]), base, &registry);
+    sh_decl_server_test_reset_install();
+    g_user_enabled = 0;
+    g_table_published = 0;
+    RemoveDirectoryA(g_fixture_root);
+    g_fixture_root[0] = '\0';
+    HeapFree(GetProcessHeap(), 0, decl);
+}
+
 int main(void)
 {
     test_native_idstr_boundary();
@@ -2009,6 +2479,7 @@ int main(void)
     test_inheritance_cycle_refusal();
     test_complete_set_collision_ordering();
     test_walk_error_propagation();
+    test_empty_launch_and_runtime_results();
     if (g_failed) {
         fprintf(stderr, "%d decl-server test(s) failed\n", g_failed);
         return 1;

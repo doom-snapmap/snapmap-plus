@@ -9,7 +9,6 @@
  * the temporary resource. Stock name-based cached resources stay shared.
  *
  * navmesh.c separately serves the older smnav1 embedded-payload format.
- * See docs/navigation.md for the author-facing contract and limits.
  */
 #ifndef SNAPMAP_PLUS_NAV_BAKE_H
 #define SNAPMAP_PLUS_NAV_BAKE_H

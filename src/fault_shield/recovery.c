@@ -5,9 +5,12 @@
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include "engine_layout.h"
 #include "../backend/host_image.h"     /* sh_host_is_pinned_rva_build -- gates every pinned-RVA backstop */
 #include "../backend/engine_globals.h" /* locate DOOM's data globals by signing the code that computes them */
+#include "../backend/apply_engine.h"
+#include "../backend/signatures.h"
 #include "fault_record.h"
 #include "hook.h"
 #include "recovery.h"
@@ -18,6 +21,8 @@ extern uint8_t *g_doom_base;
 typedef void    (*setstate_t)(void *editor, int state);   /* SetState 0x5298A0 (synchronous) */
 typedef int64_t (*frame_t)(void *self);                   /* idCommonLocal::Frame 0x17ce360 */
 static frame_t orig_frame = NULL;
+typedef void (*clear_dialog_t)(void *shell, void *params);
+static clear_dialog_t g_clear_dialog;
 
 /* Cache resolved global addresses before the frame hook runs. Unresolved
  * globals disable their dependent operations; avoid scanning in the frame path. */
@@ -251,9 +256,8 @@ static void keep_throw_gate_open(void)
     } __except (EXCEPTION_EXECUTE_HANDLER) { /* unreadable page -> skip */ }
 }
 
-/* Dismiss save-rejection dialogs by setting their clear flag, without running
- * any button action that could delete a save. The shell may be absent; all
- * queue access is guarded. */
+/* Native dismissal hides the widget before Think releases its callbacks.
+ * It holds the shell lock and invokes no button action that could delete a save. */
 static int is_corrupt_save_gdm(int gdm)
 {
     /* CORRUPT_CONTINUE acknowledges a failed load; it does not resume loading. */
@@ -264,38 +268,41 @@ static int is_corrupt_save_gdm(int gdm)
 static void save_guard_tick(void)
 {
     /* An unresolved shell slot disables the guard. */
-    if (g_doom_base == NULL || g_shell_slot_at == NULL) return;
+    if (g_doom_base == NULL || g_shell_slot_at == NULL || !g_clear_dialog) return;
     __try {
         uint8_t *S = *(uint8_t **)g_shell_slot_at;
         if (S == NULL) return;
+        if (*(void **)(S + SHELL_SHELLMGR_OFF) == NULL) return;
         uint8_t *dlg = *(uint8_t **)(S + SHELL_DLGMGR_OFF);
         if (dlg == NULL) return;
         uint8_t *arr = *(uint8_t **)(dlg + DLGQ_ARR_OFF);
         if (arr == NULL) return;
         {
             int cnt = *(volatile int *)(dlg + DLGQ_COUNT_OFF);
-            int i, dismissed = 0, pending_left = 0;
+            int i, dismissed = 0;
             int first_gdm = 0;
-            if (cnt < 0) cnt = 0;
-            if (cnt > 4) cnt = 4;                /* the dialog queue capacity is 4 */
+            int pending_ids[4], pending_count = 0;
+            if (cnt < 0 || cnt > 4) return;
             for (i = 0; i < cnt; i++) {
                 uint8_t *d = arr + (size_t)i * DLG_DESC_STRIDE;
                 int gdm;
                 if (*(volatile uint8_t *)(d + DESC_CLEARFLAG_OFF) != 0) continue;   /* already cleared */
                 gdm = *(volatile int *)(d + DESC_GDMID_OFF);
-                if (is_corrupt_save_gdm(gdm)) {
-                    *(volatile uint8_t *)(d + DESC_CLEARFLAG_OFF) = 1;   /* DISMISS-A -- runs NO button action */
-                    if (!dismissed) first_gdm = gdm;
-                    dismissed++;
-                } else {
-                    pending_left++;
-                }
+                if (is_corrupt_save_gdm(gdm)) pending_ids[pending_count++] = gdm;
+            }
+            /* Snapshot IDs before calling the engine; no descriptor pointer is
+             * retained across native teardown or possible menu reentry. */
+            for (i = 0; i < pending_count; i++) {
+                uint32_t params[0x100 / sizeof(uint32_t)] = {0};
+                const char *source = "snapmap-plus save guard";
+                params[0] = (uint32_t)pending_ids[i];
+                memcpy(&params[0x26], &source, sizeof source);
+                params[0x28] = __LINE__;
+                g_clear_dialog(S, params);
+                if (!dismissed) first_gdm = pending_ids[i];
+                dismissed++;
             }
             if (dismissed) {
-                if (pending_left == 0) {         /* sync the visible byte once the queue drained */
-                    uint8_t *shellMgr = *(uint8_t **)(S + SHELL_SHELLMGR_OFF);
-                    if (shellMgr) *(volatile uint8_t *)(shellMgr + SHELLMGR_VISIBLE_OFF) = 0;
-                }
                 {
                     /* Preserve the dialog ID: damaged files and rejected map content need
                      * different diagnosis even though both are save errors. */
@@ -321,11 +328,14 @@ static void save_guard_tick(void)
 
 static int64_t frame_detour(void *self)
 {
+    int64_t result;
     keep_throw_gate_open();      /* LAYER 2: gate clear so engine Error(6)/downgraded-FatalError recovers */
     save_guard_tick();           /* B: resident save-deletion guard (dismiss the corrupt-save dialogs) */
     recovery_tick();             /* advance a pending editor-exit recovery */
     notice_tick();               /* show a pending editor-native notice */
-    return orig_frame(self);
+    result = orig_frame(self);
+    if (!InterlockedCompareExchange(&g_armed, 0, 0)) sh_apply_prefab_poll_play();
+    return result;
 }
 
 /* Change FatalError's level immediate from 7 to 6, allowing its throw to use
@@ -378,14 +388,33 @@ static void patch_fatalerror_downgrade(void)
 
 int recovery_install(void)
 {
+    if (orig_frame) {
+        if (hook_is_installed((void *)orig_frame)) return 1;
+        if (!hook_unpatch((void *)orig_frame)) return 0;
+        orig_frame = NULL;
+    }
     /* Cache globals before installing the frame hook. */
     g_pinned_build = sh_host_is_pinned_rva_build();
+    g_clear_dialog = NULL;
     if (g_doom_base) {
+        const sig_entry *entry;
+        for (entry = BACKEND_ENGINE_SIGNATURES; entry->name; entry++) {
+            sig_result result;
+            if (strcmp(entry->name, "ClearDialogWrapper") != 0) continue;
+            if (sig_resolve_one(g_doom_base, entry, &result) == SIG_OK)
+                g_clear_dialog = (clear_dialog_t)result.addr;
+            break;
+        }
         g_editor_at     = (uint8_t *)glb_resolve(g_doom_base, "editor_singleton", NULL);
         g_load_state_at = (uint8_t *)glb_resolve(g_doom_base, "load_state", NULL);
         g_last_err_at   = (uint8_t *)glb_resolve(g_doom_base, "last_error_msg", NULL);
         g_shell_slot_at = (uint8_t *)glb_resolve(g_doom_base, "shell_ptr_slot", NULL);
         g_suppr_a_at    = (uint8_t *)glb_resolve(g_doom_base, "throw_suppressor_a", NULL);
+    }
+    if (!g_clear_dialog) {
+        shield_fault f = { "sig", -1,
+            "save guard unavailable: ClearDialogWrapper requires a clean unique signature", 0, 0 };
+        shield_emit(&f);
     }
 
     /* The Frame signature covers the 15 position-independent bytes stolen here.
@@ -399,8 +428,12 @@ int recovery_install(void)
         shield_emit(&f);
         return 0;
     }
-    orig_frame = (frame_t)install_inline_hook(target, (void *)frame_detour, FRAME_STOLEN);
+    orig_frame = (frame_t)hook_prepare(target, (void *)frame_detour, FRAME_STOLEN);
     if (orig_frame == NULL) return 0;
+    if (hook_commit((void *)orig_frame) != B2_PATCH_OK) {
+        if (hook_unpatch((void *)orig_frame)) orig_frame = NULL;
+        return 0;
+    }
     patch_fatalerror_downgrade();   /* LAYER 2: FatalError(7) -> recoverable Error(6) (one-byte level patch) */
     return 1;
 }

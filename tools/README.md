@@ -2,13 +2,14 @@
 
 ## Purpose
 
-Contains maintainer tools for release notes and portable engine signatures.
+Contains maintainer tools for release notes, frontend assets and portable engine signatures.
 
 ## Contents
 
 - `changelog.py` parses and validates `CHANGELOG.md` and emits website data.
 - `draft_changelog.py` prepares release-note drafts for review.
 - `sync_release_notes.py` synchronizes reviewed notes to GitHub releases.
+- `update-avatar.ps1` deliberately refreshes the embedded organization avatar; normal builds use committed assets.
 - [signatures/](signatures/README.md) derives and checks engine patterns.
 - [tests/](tests/) tests changelog parsing and drafting.
 - `requirements.in` and `requirements.txt` declare and pin release-drafter dependencies.

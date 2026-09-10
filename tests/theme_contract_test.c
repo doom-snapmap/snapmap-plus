@@ -96,6 +96,23 @@ int main(int argc, char **argv)
     html = read_all(argv[1]);
     CHECK(html != NULL);
     if (!html) return 1;
+    CHECK(count_text(html, "<link rel=\"stylesheet\" href=\"studio.css\">") == 1);
+    {
+        char path[4096];
+        char *last, *slash, *css, *combined;
+        if (strcpy_s(path, sizeof path, argv[1])) { free(html); return 1; }
+        last = strrchr(path, '\\'); slash = strrchr(path, '/');
+        if (slash && (!last || slash > last)) last = slash;
+        if (last) last[1] = 0; else path[0] = 0;
+        if (strcat_s(path, sizeof path, "studio.css")) { free(html); return 1; }
+        css = read_all(path);
+        CHECK(css != NULL);
+        if (!css) { free(html); return 1; }
+        combined = (char *)malloc(strlen(html) + strlen(css) + 2);
+        if (!combined) { free(css); free(html); return 1; }
+        sprintf(combined, "%s\n%s", html, css);
+        free(css); free(html); html = combined;
+    }
     check_eol_matcher();
 
     CHECK(strstr(html, "<html lang=\"en\">") != NULL);

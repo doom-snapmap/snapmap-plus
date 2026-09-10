@@ -7,11 +7,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include "signatures.h"
+#include "host_image.h"
 
-static uint8_t *map_pe_by_rva(const char *path, size_t *image_sz)
+static uint8_t *map_pe_by_rva(const wchar_t *path, size_t *image_sz)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "open %s failed\n", path); return NULL; }
+    FILE *f = _wfopen(path, L"rb");
+    if (!f) { fprintf(stderr, "open %ls failed\n", path); return NULL; }
     fseek(f, 0, SEEK_END); long fsz = ftell(f); fseek(f, 0, SEEK_SET);
     uint8_t *file = (uint8_t *)malloc(fsz);
     if (!file || fread(file, 1, fsz, f) != (size_t)fsz) { fclose(f); free(file); return NULL; }
@@ -50,7 +51,30 @@ static const sig_entry *find_sig(const char *name)
     return NULL;
 }
 
-int main(int argc, char **argv)
+static int rejects_changed_file(const uint8_t *base, const wchar_t *source)
+{
+    wchar_t root[MAX_PATH], temporary[MAX_PATH];
+    HANDLE file = INVALID_HANDLE_VALUE;
+    unsigned char byte;
+    DWORD count;
+    int refused = 0;
+    if (!GetTempPathW(MAX_PATH, root) || !GetTempFileNameW(root, L"smp", 0, temporary)) return 0;
+    if (!CopyFileW(source, temporary, FALSE)) goto done;
+    file = CreateFileW(temporary, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (file == INVALID_HANDLE_VALUE) goto done;
+    if (!ReadFile(file, &byte, 1, &count, NULL) || count != 1) goto done;
+    byte ^= 1;
+    SetFilePointer(file, 0, NULL, FILE_BEGIN);
+    if (!WriteFile(file, &byte, 1, &count, NULL) || count != 1) goto done;
+    CloseHandle(file); file = INVALID_HANDLE_VALUE;
+    refused = !sh_host_test_bind_pinned_image(base, temporary);
+done:
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    DeleteFileW(temporary);
+    return refused;
+}
+
+int wmain(int argc, wchar_t **argv)
 {
     if (argc < 2) { fprintf(stderr, "usage: hooktol_test <DOOM_unpacked.exe>\n"); return 2; }
     size_t image_sz = 0;
@@ -70,6 +94,19 @@ int main(int argc, char **argv)
         const sig_entry *s = find_sig(hooks[i].name);
         if (!s) { printf("BAD: sig %s not in DB\n", hooks[i].name); free(base); return 1; }
         hook_prologue(base, s->known_rva, hooks[i].stolen);
+    }
+
+    /* Matching detour/tail bytes alone must never authorize an RVA. */
+    for (int i = 0; i < NH; i++) {
+        sig_result result;
+        if (sig_resolve_one(base, find_sig(hooks[i].name), &result) != SIG_NOT_FOUND) {
+            printf("BAD: unverified image accepted a hooked RVA\n"); free(base); return 1;
+        }
+    }
+    if (!rejects_changed_file(base, argv[1]) ||
+        !sh_host_test_bind_pinned_image(base, argv[1]) ||
+        sh_host_is_pinned_rva_image(base + 1)) {
+        printf("BAD: exact image fingerprint/binding failed\n"); free(base); return 1;
     }
 
     /* SIG_RESULTS_MAX, never a bare literal -- see the note in sig_test.c. */
@@ -108,6 +145,7 @@ int main(int argc, char **argv)
     }
     printf("======================================================================\n");
     printf("resolved=%zu/%zu  hook-tolerant=%d/%d  failures=%d\n", ok, total, hooked, NH, fail);
+    sh_host_test_bind_pinned_image(NULL, NULL);
     free(base);
     /* Pass iff all sigs resolved, all 3 hooked ones came back SIG_OK_HOOKED, and nothing else broke. */
     return (ok == total && hooked == NH && fail == 0) ? 0 : 1;

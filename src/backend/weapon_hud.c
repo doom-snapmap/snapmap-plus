@@ -27,6 +27,7 @@ static SRWLOCK g_lock = SRWLOCK_INIT;
 static int g_enabled;
 static void *g_relay;
 static sh_patch_handle g_patch;
+static int g_hook_ready;
 typedef unsigned char (*hud_mode_fn)(void *game);
 static hud_mode_fn g_original;
 static volatile LONG g_reported;
@@ -261,7 +262,12 @@ int sh_weapon_hud_install(const char *root, const uint8_t *module,
     int32_t displacement;
     intptr_t distance;
     (void)module;
-    if (g_patch.live) return 1;
+    if (g_patch.live) {
+        if (g_hook_ready) return 1;
+        if (code_unpatch(&g_patch) != B2_PATCH_OK) return 0;
+        VirtualFree(g_relay, 0, MEM_RELEASE); g_relay = NULL; g_original = NULL;
+    }
+    g_hook_ready = 0;
     g_enabled = enabled;
     if (!enabled) { backend_log("weapon-hud disabled with user overrides"); return 1; }
     sh_weapon_hud_reload(root);
@@ -281,9 +287,14 @@ int sh_weapon_hud_install(const char *root, const uint8_t *module,
     memcpy(replacement + 1, &displacement, sizeof displacement);
     g_original = (hud_mode_fn)predicate->addr;
     if (code_patch_call_sig(site, expected, replacement, &g_patch) != B2_PATCH_OK) goto free_relay;
+    g_hook_ready = 1;
     backend_log("weapon-hud installed: scoped ammo-display call, engine fallback for unlisted weapons");
     return 1;
 free_relay:
+    if (g_patch.live) {
+        backend_log("weapon-hud rollback incomplete; relay retained for the outstanding patch");
+        return 0;
+    }
     VirtualFree(g_relay, 0, MEM_RELEASE); g_relay = NULL; g_original = NULL;
 refused:
     backend_log("weapon-hud REFUSED: verified HUD call/predicate or relay unavailable; no hook installed");
@@ -368,6 +379,12 @@ int sh_weapon_hud_test_relay(const char *root)
     if (sh_weapon_hud_install(root, code, results, 2, 1) ||
         memcmp(code, caller, sizeof caller)) goto done;
     results[1].addr--;
+#ifdef SH_PATCH_TESTING
+    sh_patch_test_faults(2 | 8, 0, 0);
+    if (sh_weapon_hud_install(root, code, results, 2, 1) ||
+        !g_patch.live || !g_relay || !g_original || g_hook_ready) goto done;
+    sh_patch_test_faults(0, 0, 0);
+#endif
     if (!sh_weapon_hud_install(root, code, results, 2, 1)) goto done;
     {
         LONG initial = InterlockedCompareExchange(&run.iterations, 0, 0);
@@ -384,6 +401,9 @@ int sh_weapon_hud_test_relay(const char *root)
     if (call(&game, NULL) != 0) goto done;
     ok = 1;
 done:
+#ifdef SH_PATCH_TESTING
+    sh_patch_test_faults(0, 0, 0);
+#endif
     if (g_patch.live && code_unpatch(&g_patch) != B2_PATCH_OK) ok = 0;
     InterlockedExchange(&run.stop, 1);
     if (thread) {
@@ -392,8 +412,10 @@ done:
         if (run.failed || !run.iterations) ok = 0;
     }
     if (run.ready) CloseHandle(run.ready);
-    if (g_relay) VirtualFree(g_relay, 0, MEM_RELEASE);
-    g_relay = NULL; g_original = NULL;
+    if (!g_patch.live) {
+        if (g_relay) VirtualFree(g_relay, 0, MEM_RELEASE);
+        g_relay = NULL; g_original = NULL; g_hook_ready = 0;
+    }
     if (memcmp(code, caller, sizeof caller)) ok = 0;
     VirtualFree(code, 0, MEM_RELEASE);
     return ok;

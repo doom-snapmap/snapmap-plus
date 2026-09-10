@@ -84,9 +84,9 @@ typedef int          (*sh_enum_decls_of_resclass_fn)(struct sh_iface *self, cons
                                                     char *out_buf, int cap, int *out_count);       /* +0x110 */
 
 /* Validate the final class/inherit pair once, then assign supplied fields.
- * Null/empty retains a field. Return 1 if at least one write succeeded, zero
- * on rejection/unavailable dependencies. Separate fault guards mean this
- * is not transactional. Rebuild decl source once after success. */
+ * Null/empty retains a field. Return 1 only when all requested writes succeed,
+ * zero on refusal or successful rollback, and -2 when rollback also faults.
+ * Rebuild decl source only after result 1. */
 typedef int          (*sh_apply_class_inherit_fn)(struct sh_iface *self, int id,
                                                   const char *cls, const char *inh);              /* +0x268 (ext 0) */
 
@@ -103,25 +103,26 @@ typedef int          (*sh_enum_valid_classes_fn)(struct sh_iface *self, const ch
 typedef int          (*sh_enum_inherits_fn)(struct sh_iface *self,
                                             char *out_buf, int cap, int *out_count);               /* +0x278 (ext 2) */
 
-/* Return 1 for a non-base-layer entity unless the dev-layer cvar is confirmed
- * enabled. Missing/unreadable cvar values act as disabled; unavailable entity
- * state returns zero. This list filter omits the native picker's extra mask. */
+/* Hide non-base-layer entities only when the dev-layer cvar is confirmed
+ * disabled. Unknown cvar or entity state leaves them visible. This list
+ * filter omits the native picker's extra mask. */
 typedef int          (*sh_id_dev_layer_hidden_fn)(struct sh_iface *self, int id);                /* +0x280 (ext 3) */
 typedef int          (*sh_wire_edit_generation_fn)(struct sh_iface *self);                       /* +0x288 (ext 4) */
 
-/* Apply and return the completed item count. Main-thread calls run inline;
- * known off-main callers marshal and wait when transport is available.
- * Unknown thread identity or unavailable transport retains inline execution.
- * Zero may also mean a running request exceeded the wait: it can complete
- * later. Caller-owned text is deep-copied for marshaling. */
+#define SH_APPLY_IN_PROGRESS (-2)
+struct sh_apply_item;
+/* Return the completed item count, or SH_APPLY_IN_PROGRESS when the engine
+ * started but has not finished by the wait deadline. That result must not be
+ * retried or reported as failure. Unknown thread identity, missing transport,
+ * and busy slots refuse execution. Marshaling owns a complete text copy. */
 typedef int          (*sh_apply_sync_fn)(struct sh_iface *self, const struct sh_apply_item *items,
                                          int count, const char *op_label);                        /* +0x290 (ext 5) */
 
 /* Normalize palette timelines from snapmaps/editor_only/placeholder_target
  * to portable snapmaps/unknown without changing class or numeric formatting.
  * Gate on the source blob, which can lag a raw inherit assignment by one
- * commit, so rescans may retry. Uses the same main-thread preference and
- * inline fallback as apply_sync. See docs/architecture.md. */
+ * commit, so rescans may retry. Execution requires a verified main thread or
+ * successful marshaling, as for apply_sync. */
 typedef int          (*sh_normalize_timeline_inherit_fn)(struct sh_iface *self, int id);          /* +0x298 (ext 6) */
 
 /* Push IDs with deduplication onto the backend stack shared with console commands. */
@@ -253,7 +254,7 @@ typedef struct sh_apply_item {
 
 /* Deep-copy into the pending batch and enqueue the main-thread drain.
  * Return 1 when command text was submitted; execution completes later.
- * op_label identifies result reporting. A newer pending batch replaces it. */
+ * op_label identifies result reporting. An occupied queue refuses new work. */
 typedef int          (*sh_schedule_apply_fn)(struct sh_iface *self, const sh_apply_item *items, int count,
                                              const char *op_label);                              /* +0xd0 */
 

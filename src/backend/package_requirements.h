@@ -29,7 +29,7 @@ int sh_package_requirements_apply_now(void *execute_command_buffer);
 int sh_package_requirements_rearm(const char *data_root, void *execute_command_buffer,
                                   int user_layer_enabled);
 
-/* Called from the existing backend/UI tick. It is a no-op until an admitted
+/* Called from the engine frame's maintenance pass. It is a no-op until an admitted
  * requirement snapshot exists and the engine has reached RUNNING. */
 void sh_package_requirements_poll(void);
 

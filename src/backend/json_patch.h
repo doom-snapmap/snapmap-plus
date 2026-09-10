@@ -1,8 +1,10 @@
 /* Patch entityDef.state.edit paths in compact engine JSON without building a tree.
- * On failure, discard out and do not schedule an apply. These helpers recognize
- * the engine format; they do not fully validate arbitrary JSON. */
+ * On failure, discard out and do not schedule an apply. These helpers validate
+ * JSON token grammar and nesting, without interpreting Unicode or duplicate keys. */
 #ifndef JSON_PATCH_H
 #define JSON_PATCH_H
+
+#define SH_JSON_PATCH_MAX_DEPTH 64
 
 /* Set a scalar using an already encoded JSON token; no escaping is applied.
  * Create missing intermediate objects. Return 1 with a full patched document,

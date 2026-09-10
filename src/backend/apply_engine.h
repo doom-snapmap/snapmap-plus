@@ -17,8 +17,9 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
  * engine runs the action on a later frame and the user positions the result. */
 int sh_apply_last_place_result(void);
 
-/* Per-tick maintenance and staged-prefab lifetime checks. On leaving RUNNING,
- * preserve verified persistent storage or reset our matching unsafe slot. */
+/* Maintenance after a successful native Frame, outside recovery. Unknown or
+ * off-main callers do nothing. On leaving RUNNING, preserve verified persistent
+ * storage or reset our matching unsafe staged-prefab slot. */
 void sh_apply_prefab_poll_play(void);
 
 /* Commit a module-qualified target reference to the source inline, despite

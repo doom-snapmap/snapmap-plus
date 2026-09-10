@@ -260,6 +260,11 @@ int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok)
 {
     char line[200];
 
+    if (g_deser_orig) {
+        if (hook_is_installed((void *)g_deser_orig)) return 1;
+        if (!hook_unpatch((void *)g_deser_orig)) return 0;
+        g_deser_orig = NULL;
+    }
     if (deser_fn == NULL) {
         backend_log("B1: rawmap LOAD-swap SKIPPED -- DeserializeFromJson not resolved");
         return 0;
@@ -272,19 +277,19 @@ int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok)
                     "fallback (prologue already hooked); not installing over an existing detour");
         return 0;
     }
-    if (g_deser_orig != NULL) {
-        backend_log("B1: rawmap LOAD-swap already installed");
-        return 1;
-    }
-
-    void *tramp = install_inline_hook(deser_fn, (void *)sh_deser_detour, DESER_STOLEN);
+    void *tramp = hook_prepare(deser_fn, (void *)sh_deser_detour, DESER_STOLEN);
     if (tramp == NULL) {
-        backend_log("B1: rawmap LOAD-swap FAIL -- install_inline_hook returned NULL");
+        backend_log("B1: rawmap LOAD-swap FAIL -- trampoline preparation failed");
         return 0;
     }
     g_deser_orig = (deser_fn_t)tramp;
 
     if (!g_src_path[0]) default_source_path(g_src_path, sizeof g_src_path);
+    if (hook_commit(tramp) != B2_PATCH_OK) {
+        if (hook_unpatch(tramp)) g_deser_orig = NULL;
+        backend_log("B1: rawmap LOAD-swap commit failed; retained callbacks require restoration");
+        return 0;
+    }
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "B1: rawmap LOAD-swap installed at %p (trampoline %p, stolen %d); source=%s; gate=DISARMED",
         deser_fn, tramp, DESER_STOLEN, g_src_path);
@@ -739,6 +744,11 @@ int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok)
 {
     char line[200];
 
+    if (g_ser_orig) {
+        if (hook_is_installed((void *)g_ser_orig)) return 1;
+        if (!hook_unpatch((void *)g_ser_orig)) return 0;
+        g_ser_orig = NULL;
+    }
     if (serialize_fn == NULL) {
         backend_log("B1: rawmap SAVE shadow SKIPPED -- SerializeToJson not resolved");
         return 0;
@@ -749,19 +759,19 @@ int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok)
                     "fallback (prologue already hooked); not installing over an existing detour");
         return 0;
     }
-    if (g_ser_orig != NULL) {
-        backend_log("B1: rawmap SAVE shadow already installed");
-        return 1;
-    }
-
-    void *tramp = install_inline_hook(serialize_fn, (void *)sh_ser_detour, SAVE_STOLEN);
+    void *tramp = hook_prepare(serialize_fn, (void *)sh_ser_detour, SAVE_STOLEN);
     if (tramp == NULL) {
-        backend_log("B1: rawmap SAVE shadow FAIL -- install_inline_hook returned NULL");
+        backend_log("B1: rawmap SAVE shadow FAIL -- trampoline preparation failed");
         return 0;
     }
     g_ser_orig = (serialize_fn_t)tramp;
 
     if (!g_dest_path[0]) default_dest_path(g_dest_path, sizeof g_dest_path);
+    if (hook_commit(tramp) != B2_PATCH_OK) {
+        if (hook_unpatch(tramp)) g_ser_orig = NULL;
+        backend_log("B1: rawmap SAVE shadow commit failed; retained callbacks require restoration");
+        return 0;
+    }
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "B1: rawmap SAVE shadow installed at %p (trampoline %p, stolen %d); dest=%s",
         serialize_fn, tramp, SAVE_STOLEN, g_dest_path);

@@ -64,62 +64,8 @@ if (-not (Test-Path (Join-Path $wvInclude "WebView2.h"))) { throw "WebView2.h mi
 if (-not (Test-Path $wvLib)) { throw "WebView2LoaderStatic.lib missing after SDK fetch ($wvLib)" }
 Write-Host "WebView2 SDK ready at $sdkDir"
 
-# Refresh the embedded organization avatar when a valid download differs.
-# This can modify tracked mockup.html. Download failures keep the committed image.
-$htmlPath = Join-Path $here "webview\mockup.html"
-if (-not (Test-Path $htmlPath)) { throw "mockup.html not found at $htmlPath" }
-$logoTmp = Join-Path $objDir "org_avatar.tmp"
-try {
-    & curl.exe -sL --max-time 8 -o $logoTmp "https://github.com/doom-snapmap.png?size=64" 2>$null
-    $ok = (Test-Path $logoTmp) -and ((Get-Item $logoTmp).Length -gt 0) -and ((Get-Item $logoTmp).Length -lt 65536)
-    if ($ok) {
-        $logoBytes = [IO.File]::ReadAllBytes($logoTmp)
-        $mime = $null
-        if ($logoBytes.Length -gt 3 -and $logoBytes[0] -eq 0xFF -and $logoBytes[1] -eq 0xD8) { $mime = "image/jpeg" }
-        elseif ($logoBytes.Length -gt 7 -and $logoBytes[0] -eq 0x89 -and $logoBytes[1] -eq 0x50) { $mime = "image/png" }
-        if ($mime) {
-            $logoUri = "data:$mime;base64," + [Convert]::ToBase64String($logoBytes)
-            $htmlRaw = Get-Content -Raw -Path $htmlPath
-            $m = [regex]::Matches($htmlRaw, 'data:image/(?:jpeg|png);base64,[A-Za-z0-9+/=]+')
-            if ($m.Count -eq 1) {
-                if ($m[0].Value -ne $logoUri) {
-                    $htmlRaw = $htmlRaw.Substring(0, $m[0].Index) + $logoUri + $htmlRaw.Substring($m[0].Index + $m[0].Length)
-                    [IO.File]::WriteAllText($htmlPath, $htmlRaw, (New-Object System.Text.UTF8Encoding $false))
-                    Write-Host "logo: refreshed from the org avatar ($($logoBytes.Length) bytes, $mime) -- mockup.html updated, commit it"
-                } else { Write-Host "logo: embedded copy is up to date with the org avatar" }
-            } else { Write-Host "logo: skipped -- expected exactly 1 base64 data URI in mockup.html, found $($m.Count)" }
-        } else { Write-Host "logo: skipped -- fetched data is not a JPEG/PNG" }
-    } else { Write-Host "logo: skipped -- avatar fetch failed, empty, or implausibly large (offline?)" }
-} catch { Write-Host "logo: skipped -- $($_.Exception.Message)" }
-if (Test-Path $logoTmp) { Remove-Item $logoTmp -Force }
-
-# Embed the page in the DLL.
-$html = Get-Content -Raw -Path $htmlPath
-
-# NavigateToString cannot resolve relative scripts. Require and inline the schema
-# table so a missing file or tag cannot silently disable declaration completion.
-$slicePath = Join-Path $here "webview\schema_slice.js"
-$sliceTag  = '<script src="schema_slice.js"></script>'
-if (-not (Test-Path $slicePath)) { throw "schema_slice.js not found at $slicePath -- required (the decl editor would ship schema-less)" }
-if ($html.IndexOf($sliceTag) -lt 0) { throw "mockup.html does not contain the literal tag $sliceTag -- cannot inline the schema table" }
-$slice = Get-Content -Raw -Path $slicePath
-if ($slice.IndexOf(')SNAPMAPPLUS') -ge 0) { throw "schema_slice.js contains the raw-literal delimiter )SNAPMAPPLUS -- cannot embed" }
-if ($slice.IndexOf('</script') -ge 0) { throw "schema_slice.js contains '</script' -- would terminate the inline script tag early" }
-$html = $html.Replace($sliceTag, "<script>`n$slice</script>")
-if ($html.IndexOf($sliceTag) -ge 0) { throw "schema_slice.js inlining left a residual src tag -- duplicate tag in mockup.html?" }
-
-# Inline the separately testable prefab transform and viewport scripts too.
-foreach ($prefabScriptName in @("prefab_transform.js", "prefab_viewport.js")) {
-    $prefabScriptPath = Join-Path $here ("webview\" + $prefabScriptName)
-    $prefabScriptTag = '<script src="' + $prefabScriptName + '"></script>'
-    if (-not (Test-Path $prefabScriptPath)) { throw "$prefabScriptName not found at $prefabScriptPath -- required" }
-    if ($html.IndexOf($prefabScriptTag) -lt 0) { throw "mockup.html does not contain $prefabScriptTag -- cannot inline it" }
-    $prefabScript = Get-Content -Raw -Path $prefabScriptPath
-    if ($prefabScript.IndexOf(')SNAPMAPPLUS') -ge 0) { throw "$prefabScriptName contains the raw-literal delimiter )SNAPMAPPLUS -- cannot embed" }
-    if ($prefabScript.IndexOf('</script') -ge 0) { throw "$prefabScriptName contains '</script' -- would terminate the inline script tag early" }
-    $html = $html.Replace($prefabScriptTag, "<script>`n$prefabScript</script>")
-    if ($html.IndexOf($prefabScriptTag) -ge 0) { throw "$prefabScriptName inlining left a residual src tag" }
-}
+# Bundle committed assets without changing source files.
+$html = & (Join-Path $here "embed-page.ps1")
 
 # Split adjacent raw literals below MSVC's size limit. Reject the raw delimiter
 # in embedded content so it cannot terminate a literal early.
@@ -146,7 +92,7 @@ $incArgs = @(
     # Share host_image.c so both DLLs identify the renderer consistently.
     "/I`"$backend`""
 ) -join " "
-$srcArgs = "webview\snapmap_plus_ui_webview.cpp webview\config_message.cpp webview\theme_bootstrap.cpp sl_exports.cpp ..\common\log_rotate.c ..\backend\host_image.c"
+$srcArgs = "webview\snapmap_plus_ui_webview.cpp webview\config_message.cpp webview\webview_json.cpp webview\theme_bootstrap.cpp sl_exports.cpp ..\common\log_rotate.c ..\backend\host_image.c"
 $libArgs = @(
     "`"$wvLib`"",
     "ole32.lib", "oleaut32.lib", "shell32.lib", "shlwapi.lib",

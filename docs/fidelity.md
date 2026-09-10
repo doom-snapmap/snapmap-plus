@@ -24,7 +24,7 @@ The `sh` console dispatcher executes SnapStack handlers on DOOM's main thread,
 inside the engine's command callback. SnapHak queued these handlers onto its
 UI thread because they touched Qt objects. Snapmap+'s handlers do not require
 that thread. The interface queue remains in the ABI, and its drain still runs
-the backend tick. See [threading](architecture.md#the-30-hz-manual-think-loop).
+the backend tick. See [threading](architecture.md#threads-and-edit-results).
 
 `bsb` reports failed property round trips with a non-modal toast. `filtcls`
 reports the class field it filtered, rather than reusing the inherit label.

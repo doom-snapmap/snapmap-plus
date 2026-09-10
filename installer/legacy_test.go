@@ -29,6 +29,7 @@ func ogFootprint(t *testing.T, doom string) {
 // Legacy migration removes the recognized runtime, deploys the bundle and
 // leaves vanilla files intact without backing up legacy DLLs.
 func TestLegacyMigrationOnInstall(t *testing.T) {
+	syntheticProcessGuard(t, false)
 	tmp := t.TempDir()
 	doom := filepath.Join(tmp, "DOOM")
 	ogFootprint(t, doom)
@@ -94,6 +95,7 @@ func TestLegacyMigrationOnInstall(t *testing.T) {
 // TestLoneDinput8IsNotLegacy: a dinput8.dll with no original-SnapHak marker could be an unrelated
 // mod -- detection must not fire and the file must survive an install.
 func TestLoneDinput8IsNotLegacy(t *testing.T) {
+	syntheticProcessGuard(t, false)
 	tmp := t.TempDir()
 	doom := filepath.Join(tmp, "DOOM")
 	writeF(t, filepath.Join(doom, "DOOMx64vk.exe"), "exe")
@@ -135,6 +137,7 @@ func TestDetectLegacySingleMarker(t *testing.T) {
 
 // An update must discard a legacy-runtime backup created before migration existed.
 func TestLegacyBackupDropped(t *testing.T) {
+	syntheticProcessGuard(t, false)
 	tmp := t.TempDir()
 	doom := filepath.Join(tmp, "DOOM")
 	ogFootprint(t, doom)

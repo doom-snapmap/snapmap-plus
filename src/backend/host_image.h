@@ -30,10 +30,17 @@ int sh_host_is_vulkan(void);
  * calls can retry; later reporting calls use the cached string without loader access. */
 const char *sh_host_renderer_name(void);
 
-/* Permit pinned-RVA fallbacks for a host named DOOMx64vk.exe.
- * This checks the basename only, not the extraction-build hash or version.
- * Every raw-RVA fallback must use this gate to exclude the OpenGL image. */
+/* Permit raw RVAs only when the backing executable has a known extraction-build
+ * SHA-256. Both its original Steam wrapper and verified unpacked copy are known. */
 int sh_host_is_pinned_rva_build(void);
+
+/* The signature resolver must also bind that identity to the image it scans. */
+int sh_host_is_pinned_rva_image(const uint8_t *base);
+
+#ifdef SH_HOST_IMAGE_TESTING
+/* Bind an offline mapped image only after checking its source file's SHA-256. */
+int sh_host_test_bind_pinned_image(const uint8_t *base, const wchar_t *path);
+#endif
 
 #ifdef __cplusplus
 }

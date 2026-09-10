@@ -84,8 +84,7 @@ static void iface_unregister_cmd(sh_iface *self, const char *name)
  * command dispatch now runs inline on the engine main thread instead of
  * enqueueing here. Retain this ABI slot for queue consumers and the tick hook.
  * Detached work owns argv until its handler returns. */
-/* Register engine maintenance indirectly so standalone common-module tests
- * do not acquire an engine-layer link dependency. */
+/* Optional drain callback; it runs on the drain caller's thread. */
 static void (*g_tick_hook)(void) = NULL;
 
 void sh_iface_set_tick_hook(void (*fn)(void))

@@ -6,26 +6,7 @@
  * changing any bytes outside the reordered entry bodies.
  */
 'use strict';
-const fs = require('fs');
-const path = require('path');
-
-const HTML = path.join(__dirname, '..', 'src', 'ui', 'webview', 'mockup.html');
-const src = fs.readFileSync(HTML, 'utf8').replace(/\r\n/g, '\n');
-
-function grab(startRe, endMarker) {
-  const i = src.search(startRe);
-  if (i < 0) throw new Error('could not find ' + startRe + ' in mockup.html');
-  const j = src.indexOf(endMarker, i);
-  if (j < 0) throw new Error('could not find end marker after ' + startRe);
-  return src.slice(i, j + endMarker.length);
-}
-
-const tokSrc = grab(/function tokenizeDecl\(text\)/, '\n    return toks;\n  }');
-const orderSrc = grab(/function naturalizeIndexedDecl\(text\)/, '\n    return normalized;\n  }');
-const sandbox = {};
-new Function('exports', tokSrc + '\n' + orderSrc +
-  '\nexports.naturalizeIndexedDecl = naturalizeIndexedDecl;')(sandbox);
-const naturalize = sandbox.naturalizeIndexedDecl;
+const naturalize = require('../src/ui/webview/decl_language.js').create(null).naturalize;
 
 let failures = 0;
 function check(condition, message) {

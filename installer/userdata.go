@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -55,10 +57,8 @@ func ensureUserDataTree() {
 	}
 }
 
-// migrateUserData copies missing legacy files, then removes the source when
-// fullyMirrored finds every destination path. Existing destination files win;
-// contents are not compared. It also retires old metadata and the shared override
-// layout. Migration is best-effort and does not fail installation.
+// Migration preserves conflicting or unreadable sources for manual recovery.
+// Failures are reported without failing installation.
 func migrateUserData() {
 	dir := appDataDir()
 	if dir == "" {
@@ -69,9 +69,9 @@ func migrateUserData() {
 	// 1) User content: %USERPROFILE%\snaphak -> the app-data dir, then remove the old folder if fully mirrored.
 	if old := oldUserContentDir(); old != "" && !sameFile(old, dir) {
 		if _, err := os.Stat(old); err == nil {
-			copyTreeMissing(old, dir)
-			if fullyMirrored(old, dir) {
-				if os.RemoveAll(old) == nil {
+			_, copyErr := copyTreeMissing(old, dir)
+			if copyErr == nil && fullyMirrored(old, dir) {
+				if removeMirroredTree(old, dir) == nil {
 					fmt.Printf("  ~ moved your saved content (overrides / prefabs / rawmaps) to %s\n", dir)
 				}
 			} else {
@@ -80,19 +80,21 @@ func migrateUserData() {
 		}
 	}
 
-	// Copy missing old metadata, then remove its directory. Copy errors are ignored
-	// here; unlike content migration, this path has no post-copy verification.
+	// Retire only verified metadata; unknown files keep the old directory alive.
 	if oldAD := oldAppDataDir(); oldAD != "" && !sameFile(oldAD, dir) {
 		if _, err := os.Stat(oldAD); err == nil {
 			for _, name := range []string{"install.json", "token"} {
 				s, t := filepath.Join(oldAD, name), filepath.Join(dir, name)
-				if _, e := os.Stat(t); e != nil {
-					if _, e := os.Stat(s); e == nil {
-						copyFile(s, t)
-					}
+				if _, err := os.Lstat(s); os.IsNotExist(err) {
+					continue
+				}
+				if err := copyMissingFile(s, t); err == nil && identicalFiles(s, t) {
+					os.Remove(s)
+				} else {
+					fmt.Printf("  ! kept legacy metadata %s -- the destination could not be verified\n", s)
 				}
 			}
-			os.RemoveAll(oldAD)
+			os.Remove(oldAD) // Only an empty directory can be retired.
 		}
 	}
 
@@ -100,34 +102,34 @@ func migrateUserData() {
 	migrateLegacyOverrides()
 }
 
-// fullyMirrored checks destination path presence for enumerated files.
-// It does not compare bytes or treat source enumeration errors as failure.
+// fullyMirrored rejects missing entries, byte differences, links and read errors.
 func fullyMirrored(src, dst string) bool {
-	ok := true
-	filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+	err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
 			return nil
 		}
 		rel, rerr := filepath.Rel(src, path)
 		if rerr != nil {
-			ok = false
-			return nil
+			return rerr
 		}
-		if _, e := os.Stat(filepath.Join(dst, rel)); e != nil {
-			ok = false
+		if !identicalFiles(path, filepath.Join(dst, rel)) {
+			return fmt.Errorf("unverified migration: %s", path)
 		}
 		return nil
 	})
-	return ok
+	return err == nil
 }
 
-// copyTreeMissing recursively copies every file under src into dst, preserving the relative layout, but only
-// when the destination file does NOT already exist (it never overwrites). Returns the number of files copied.
-// Best-effort: an unreadable/unwritable file (or a missing src) is skipped, not fatal.
-func copyTreeMissing(src, dst string) int {
+// copyTreeMissing never overwrites a destination and reports incomplete copies.
+func copyTreeMissing(src, dst string) (int, error) {
 	copied := 0
-	filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
-		if err != nil { // unreadable entry, or src doesn't exist -> nothing to migrate
+	var failures error
+	walkErr := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			failures = errors.Join(failures, err)
 			return nil
 		}
 		if d.IsDir() {
@@ -135,19 +137,114 @@ func copyTreeMissing(src, dst string) int {
 		}
 		rel, rerr := filepath.Rel(src, path)
 		if rerr != nil {
+			failures = errors.Join(failures, rerr)
 			return nil
 		}
 		target := filepath.Join(dst, rel)
-		if _, err := os.Stat(target); err == nil {
-			return nil // already present -> never overwrite
-		}
-		if os.MkdirAll(filepath.Dir(target), 0o755) != nil {
+		if _, err := os.Lstat(target); err == nil {
 			return nil
 		}
-		if copyFile(path, target) == nil {
+		if err := copyMissingFile(path, target); err == nil {
 			copied++
+		} else {
+			failures = errors.Join(failures, err)
 		}
 		return nil
 	})
-	return copied
+	return copied, errors.Join(failures, walkErr)
+}
+
+// plainPath refuses links in any existing component before copying or deleting.
+func plainPath(path string) bool {
+	for path = filepath.Clean(path); ; path = filepath.Dir(path) {
+		info, err := os.Lstat(path)
+		if err != nil && !os.IsNotExist(err) {
+			return false
+		}
+		if err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			return false
+		}
+		if filepath.Dir(path) == path {
+			return true
+		}
+	}
+}
+
+func identicalFiles(src, dst string) bool {
+	if !plainPath(src) || !plainPath(dst) {
+		return false
+	}
+	a, ea := os.Lstat(src)
+	b, eb := os.Lstat(dst)
+	if ea != nil || eb != nil || !a.Mode().IsRegular() || !b.Mode().IsRegular() || a.Size() != b.Size() {
+		return false
+	}
+	x, ea := fileSHA256(src)
+	y, eb := fileSHA256(dst)
+	return ea == nil && eb == nil && x == y
+}
+
+func copyMissingFile(src, dst string) error {
+	if !plainPath(src) || !plainPath(dst) {
+		return fmt.Errorf("migration refuses linked paths: %s", src)
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("migration requires a regular file: %s", src)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+	if os.IsExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	err = errors.Join(copyErr, out.Sync(), out.Close())
+	if err != nil {
+		os.Remove(dst)
+	}
+	return err
+}
+
+// Recheck each source and remove empty directories only. Late additions survive.
+func removeMirroredTree(src, dst string) error {
+	var dirs []string
+	err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			dirs = append(dirs, path)
+			return nil
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if !identicalFiles(path, filepath.Join(dst, rel)) {
+			return fmt.Errorf("migration changed before removal: %s", path)
+		}
+		return os.Remove(path)
+	})
+	if err != nil {
+		return err
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := os.Remove(dirs[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }

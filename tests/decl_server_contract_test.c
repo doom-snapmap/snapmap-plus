@@ -118,17 +118,18 @@ int main(int argc, char **argv)
     /* Restrict engine code patching to boot promotion; do not detour DeclFind
      * or retain a process-wide decl-object cache. */
     CHECK(strstr(server, "sh_install_detour") == NULL);
-    CHECK(strstr(server, "install_inline_hook((void *)boot_promote,") != NULL);
+    CHECK(strstr(server, "hook_prepare((void *)boot_promote,") != NULL);
 
     /* Publish before the engine's boot promotion so it assigns static level 4
      * to the new resources and their dependencies. Publishing afterward leaves
      * them map-scoped and vulnerable to transition purges. */
-    CHECK(strstr(server, "install_inline_hook") != NULL);
+    CHECK(strstr(server, "hook_commit((void *)g_boot_promotion_original)") != NULL);
     CHECK(strstr(server, "ds_boot_promotion_detour") != NULL);
     CHECK(strstr(server, "DS_PINNED_BOOT_PROMOTE_RVA 0x1801830u") != NULL);
     CHECK(strstr(server, "g_boot_promotion_original();") != NULL);
     /* Exactly one engine code patch, and it is that one. */
-    CHECK(count_occurrences(server, "install_inline_hook(") == 1);
+    CHECK(count_occurrences(server, "hook_prepare(") == 1);
+    CHECK(count_occurrences(server, "hook_commit(") == 1);
     /* Publication must not depend on load-state polling or queued commands. */
     CHECK(strstr(server, "sh_decl_server_poll") == NULL);
     CHECK(strstr(server, "DS_LOAD_STATE_RUNNING") == NULL);
@@ -148,9 +149,9 @@ int main(int argc, char **argv)
     /* Avoid TouchDecl: its FreeData path can invalidate buffers still read by rendering. */
     CHECK(strstr(server, "TouchDecl") == NULL);
     CHECK(strstr(server, "g_decl_touch") == NULL);
-    /* Report palette refusal separately from otherwise successful registration. */
+    /* A palette or visibility failure must keep the map-load gate closed. */
     CHECK(strstr(server, "palette_failed") == NULL);
-    CHECK(strstr(server, "palette_declined") != NULL);
+    CHECK(strstr(server, "usability_failed") != NULL);
 
     /* Read a published resource's level after promotion to verify that the
      * engine assigned static lifetime; hook placement alone is not sufficient evidence. */
@@ -223,9 +224,8 @@ int main(int argc, char **argv)
     CHECK(strstr(server, "DS_PHASE_FAILURE_SCAN") != NULL);
     CHECK(strstr(server, "DS_PHASE_FAILURE_MATERIALIZATION") != NULL);
     CHECK(strstr(server, "DS_PHASE_FAILURE_PALETTE") != NULL);
-    /* Run palette refresh last and keep its refusal non-terminal. Preserve
-     * terminal handling for discovery and registration failures. */
-    CHECK(strstr(server, "palette_declined = 1;") != NULL);
+    /* Registration can remain installed after failure without being usable. */
+    CHECK(strstr(server, "usability_failed = 1;") != NULL);
     CHECK(strstr(server, "native registration success was not published") == NULL);
     CHECK(strstr(server, "materialization was terminal; exact decltree table retained; no retry") != NULL);
     CHECK(strstr(server, "DS_DECL_IN_PROGRESS") != NULL);
