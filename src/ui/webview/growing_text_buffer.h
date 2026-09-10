@@ -4,17 +4,9 @@
 #include <cstddef>
 #include <vector>
 
-/* Read a NUL-terminated engine string without assuming a fixed declaration size.
- *
- * The engine's copy slots clamp to cap-1 and do not report the source length. A
- * full final byte is therefore the only truncation signal available: retry with
- * a doubled reusable buffer until the copied string ends before that byte. An
- * exact cap-1-byte source causes one harmless extra read and then resolves.
- *
- * max_cap is an honest safety boundary for the editor/WebView transport. When
- * it is reached, truncated is set so the caller can refuse to expose a partial
- * declaration as editable text instead of presenting invalid syntax silently.
- */
+/* Grow and reuse storage until a NUL-terminated engine string fits below cap-1.
+ * The copy API does not report source length, so an exact fit needs an extra read.
+ * At max_cap, set truncated and refuse partial editable text. */
 template <typename CopyFn>
 static bool sh_read_growing_text(std::vector<char> &buffer,
                                  std::size_t initial_cap,

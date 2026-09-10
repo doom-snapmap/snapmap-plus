@@ -5,6 +5,12 @@ support grounded demons. Snapmap+ builds navigation from their current placement
 rotation and dimensions. An unmarked box that blocks demons still obstructs
 navigation on a marked box.
 
+The property uses the existing `flags.noFlood` boolean. Older maps using
+`affectsNavmesh` are migrated on load, preserving the navigation choice in the
+new marker. At runtime, marked boxes keep physical collision while Snapmap+
+excludes them from the native avoidance obstacle list when navigation is enabled. See
+[navigation markers](navigation-markers.md) for precedence and compatibility.
+
 ## Surfaces and traversal
 
 The bake considers all six faces after rotation, then retains exposed faces that
@@ -56,6 +62,8 @@ Green lines show the generated walk areas from the validated **monster48** bake.
 The native renderer draws them on the construction in the module's Object Mode;
 Blueprint Mode does not display them. This overlay is separate from a module's
 own grid material and does not require enabling the engine's debug render modes.
+Both OpenGL and Vulkan use their native rendering paths; OpenGL explicitly
+selects the editor's presentation image after post-processing.
 They include area outlines and a grid, with the monster's clearance already
 removed. They do not indicate reachability from the player or suitability for
 larger demons. `navmesh.preview` controls this display and defaults to true.
@@ -96,7 +104,12 @@ The implementation uses bounded convex clipping and floating-point tolerances.
 Invalid input or exhausted geometry capacity refuses the candidate rather than
 publishing a truncated surface set. Limits include 512 relevant boxes per map,
 512 generated convex pieces per module bake, 32 corners per piece, the native
-AAS coordinate range, and the traversal-record capacity. Refusal retains the
+AAS coordinate range, and the traversal-record capacity. The native router also
+allows at most 256 outgoing links per area. Dense bakes reserve each distinct
+destination and traversal capability before retaining additional edge samples;
+shipped links stay intact. If the required connections alone exceed the limit,
+the complete candidate is refused. Validation checks this limit on generated and
+imported payloads before the engine can load them. Refusal retains the
 module's shipped navigation; it does not retain a stale custom bake.
 Complex layouts still need Play testing,
 especially narrow transitions, ceilings and animated traversals. A green surface

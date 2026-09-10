@@ -1,23 +1,6 @@
-/* map_package.c -- see map_package.h. Map-embedded override packages: the C
- * consumer of the smpkg wire format (reference: dev repo src/map_package.py),
- * the pre-parse load gate, and the consent-gated installer.
- *
- * Everything here operates on a raw JSON text buffer -- no JSON DOM is ever
- * built (the buffer can be megabytes and the no-shard fast path must stay
- * one substring sweep). A shard is only recognised when the full header
- * grammar matches AND the header is the string value of a "name" key, so a
- * map whose prose merely contains "smpkg." is not perturbed.
- *
- * Divergences from the python reference, all crafted-map corners whose
- * outcome class (refusal) is unchanged:
- *   - base64 is decoded strictly (python's b64decode quietly discards
- *     non-alphabet bytes); a shard with junk in it fails here rather than
- *     being repaired -- the sha256 digest would refuse it either way.
- *   - a header with total==0 or an out-of-range index is rejected as
- *     malformed here; python surfaces the same maps as "incomplete".
- *   - zip member paths additionally refuse '\', ':', control chars and
- *     '.' segments (python refuses only absolute and '..'); stricter is
- *     correct for an installer fed a stranger's map.
+/* smpkg shard parsing, payload extraction and consent-gated installation. Use
+ * bounded JSON spans without a DOM. Strict base64, header counts and Windows
+ * path checks reject malformed delivery data.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -36,7 +19,6 @@
 #include "decl_server.h"
 #include "raw_deflate.h"
 #include "backend_log.h"
-
 
 /* ==================================================================== */
 /* small text helpers                                                    */
@@ -135,10 +117,9 @@ static int mpkg_next_shard(const char *json, size_t len, size_t *pos,
 /* strip                                                                 */
 /* ==================================================================== */
 
-/* Strip shard variables, optionally only those belonging to `pkg_id`.
- *
- * The filter is what makes embedding idempotent WITHOUT being destructive: re-embedding a
- * package must replace its own shards and leave every other package's alone. */
+/* Strip matching package variables; a package filter preserves other payloads
+ * during re-embedding.
+ */
 static int mpkg_strip_filter(const char *hdr, size_t hdr_len, void *ctx)
 {
     const char *pkg_id = (const char *)ctx;
@@ -216,8 +197,7 @@ char *sh_mpkg_embed(const char *json, size_t len, const char *pkg_id,
         return NULL;
     }
 
-    /* Re-embedding replaces rather than accumulates: strip whatever is already there first. A
-     * map saved ten times must not carry ten copies of its package. */
+    /* Replace this package's old shards before adding new ones. */
     base = mpkg_strip_scoped(json, len, pkg_id, &src_len);
     src = base ? base : json;
     if (!base) src_len = len;
@@ -451,7 +431,9 @@ typedef struct mpkg_zentry {
     int         is_dir;
 } mpkg_zentry;
 
-/* Locate the central directory. Returns 1 + *cd/*count, 0 on a malformed zip. */
+/* Locate the central directory. Return 1 with cd and count, or 0 if
+ * malformed.
+ */
 static int mpkg_zip_open(const unsigned char *payload, size_t len,
                          const unsigned char **cd, unsigned *count,
                          char *err, size_t err_cap)
@@ -525,8 +507,9 @@ static int mpkg_zip_entry(const unsigned char *payload, size_t len,
     return 1;
 }
 
-/* The untrusted-input rule: relative, forward-slashed, no '.'/'..'
- * segments, no drive letters, no control chars. A map is a stranger's file. */
+/* Require relative forward-slash paths without dot segments, drive letters or
+ * control characters.
+ */
 static int mpkg_member_path_safe(const char *name, unsigned n)
 {
     unsigned i, seg_start = 0;
@@ -804,8 +787,9 @@ void sh_mpkg_boot_capture(const char *data_root)
     mpkg_lock();
     if (g_boot_captured) { mpkg_unlock(); return; }   /* first capture wins: it is the BOOT state */
     strncpy_s(g_data_root, sizeof g_data_root, data_root, _TRUNCATE);
-    /* An unreadable tree yields a partial list; missing packages then refuse
-     * loads (never crash them), so a partial capture is safe to keep. */
+    /* Retain the enumerated subset if discovery was incomplete. The caller
+     * does not check enumeration status here.
+     */
     sh_packages_enumerate(data_root, pkgs, SH_PACKAGES_MAX, &count);
     g_boot_count = 0;
     for (i = 0; i < count && g_boot_count < SH_PACKAGES_MAX; i++) {
@@ -837,7 +821,6 @@ static int mpkg_names_match(const char *declared, const char *folded)
     return 0;
 }
 
-/* Is this declared package satisfied by the BOOT snapshot? (lock held) */
 /* Read the digest sidecar an install leaves beside a package. Returns 0 when the
  * package predates the sidecar or it cannot be read -- in which case its content
  * identity is simply unknown, which is different from known-and-different. */
@@ -904,11 +887,7 @@ static mpkg_session_entry *mpkg_session_add(const char *id, const char *digest, 
 /* install + consent                                                     */
 /* ==================================================================== */
 
-/* A CHAIN, not one package. A map may carry several -- a demon and the two
- * transformations that dress it, say -- and the gate used to offer only the
- * first missing one. The player then answered a prompt, watched the map refuse
- * a second time, answered another prompt, and so on: N+1 loads for N packages,
- * each refusal looking like a failure. They are staged and consented together. */
+/* Stage every missing package in a chain for one consent decision. */
 typedef struct mpkg_staged {
     char id[SH_MPKG_ID_CAP];
     char digest[SH_MPKG_DIGEST_CHARS + 1];
@@ -970,18 +949,9 @@ static int mpkg_install_staged(const mpkg_staged *s, char *err, size_t err_cap)
     }
     attrs = GetFileAttributesA(dest);
     if (attrs != INVALID_FILE_ATTRIBUTES) {
-        /* The folder is taken. Say WHICH case this is, because the two are not
-         * the same problem and the old wording ("already exists") described the
-         * benign one while silently producing a dead end in the other.
-         *
-         * Same id, DIFFERENT digest is the real trap: the gate correctly reports
-         * the map's package as missing (a same-named package with different
-         * content does not satisfy it), and then the install cannot proceed
-         * because the name is occupied. The map could never load and nothing
-         * explained why. Installing over the top is not the answer either -- that
-         * would silently replace content another map may depend on. So this is
-         * reported as the version clash it is, and resolving it stays the
-         * player's decision. */
+        /* Report a differing installed digest as a version clash. Never
+         * overwrite an occupied folder, which another map may depend on.
+         */
         char installed[SH_MPKG_DIGEST_CHARS + 1];
         if (mpkg_read_sidecar_digest(dest, installed, sizeof installed) &&
             strcmp(installed, s->digest) != 0) {
@@ -1019,9 +989,7 @@ static int mpkg_install_staged(const mpkg_staged *s, char *err, size_t err_cap)
         "requesting a runtime re-arm, no restart needed", s->id, s->digest, dest, files);
     backend_log(line);
 
-    /* Registration no longer needs a relaunch: ask the decl server to re-arm. It runs on the
-     * engine tick in two phases (the cut-content cvars a package needs are queued, not
-     * immediate), so the identities become live a few frames from now rather than next launch. */
+    /* Request a synchronous registration pass on the next engine tick. */
     sh_decl_server_request_rearm();
     return 1;
 }
@@ -1042,53 +1010,15 @@ static void mpkg_record_decline(const char *id, const char *digest)
     backend_log(line);
 }
 
-/* The production consent prompt, on its OWN thread so the engine's main
- * thread (which is inside the refused DeserializeFromJson) is never
- * blocked. The load this rode in on is already refused; whatever the user
- * answers only affects FUTURE loads -- but 'future' now means the next load
- * in THIS session, because installing re-arms the decl server on the tick.
- *
- * This is deliberately a native Win32 prompt rather than the engine's
- * idMenuManager_Dialog: AddDialog's body text resolves in the SWF layer,
- * which is unsolved (campaign W-1/W-7), so an engine dialog today would
- * show a stock message that misleads the user about what they are
- * consenting to. An accurate ugly prompt beats a native-looking wrong one. */
-/* ---- consent on the engine tick ---------------------------------------------
- *
- * The engine's own modal is raised and answered on the main thread: AddDialog
- * writes the dialog queue and the answer is read back out of it. A worker thread
- * cannot touch either. So consent runs as a small state machine driven from the
- * engine tick, and the OS message box stays as the fallback for when the engine
- * surface is unavailable -- an older build, a refused signature, or a prompt
- * needed before the engine has raised any dialog of its own.
- *
- * The GDM id is a personality, not a text source: ShowDialog takes our string
- * over whatever the id would have produced. The button set is a free parameter,
- * so a yes/no pair can be attached to any id.
+/* Consent runs as a state machine on the engine main-thread tick, which owns
+ * dialog queue writes and answer reads. The modal uses our text and button
+ * set; no OS fallback is used.
  */
-/* WHICH GDM ID TO BORROW, AND WHY IT MATTERS.
- *
- * The id is never seen by the player -- ShowDialog takes our text over whatever
- * the id would have produced -- so it only selects a dialog shape the shell
- * already knows how to draw. But it is NOT inert: these ids name real prompts,
- * and the shell may have an action wired to the affirmative answer.
- *
- * This was GDM_SNAPMAP_DELETE_MAP_PROMPT (0x60), chosen purely because it drew a
- * Yes/No pair. That is a prompt whose "yes" means DELETE THE SELECTED MAP. We
- * raise it from our own code rather than from the delete flow, so the shell has
- * no map staged for deletion and the answer should go nowhere -- but "should"
- * is not a basis for a button a player will actually press, and the cost of
- * being wrong is somebody's map.
- *
- * GDM_CONFIRM_VIDEO_CHANGES is the safer borrow: it is a settings confirmation,
- * its affirmative action applies pending VIDEO settings, and outside the video
- * menu there are none pending -- so an unintended "yes" applies nothing and can
- * destroy nothing. It still needs confirming against a real keypress, which is
- * the same test that settles the answer encoding. */
+/* Use GDM_CONFIRM_VIDEO_CHANGES as the dialog shape. GDM ids can have native
+ * affirmative actions; do not borrow a destructive prompt such as delete-map.
+ */
 #define MPKG_CONSENT_GDM_ID      0x29u   /* GDM_CONFIRM_VIDEO_CHANGES */
-#define MPKG_CONSENT_BUTTON_SET  6u      /* Yes / No -- identified live; sets 0 and 1 draw a
-                                          * single acknowledgement, 2 draws REFRESH/CONTINUE and
-                                          * 4 draws RETRY/CONTINUE, none of which is a question */
+#define MPKG_CONSENT_BUTTON_SET  6u      /* native Yes/No button set */
 
 enum {
     MPKG_CONSENT_IDLE = 0,
@@ -1101,11 +1031,9 @@ static mpkg_staged   *g_consent_staged;      /* owned while not IDLE */
 static int            g_consent_ticket;
 static volatile LONG  g_consent_waited;      /* ticks spent waiting for the surface */
 
-/* How long to wait for the engine dialog surface before giving up. The menu
- * manager is captured from the first dialog the game raises on its own, which
- * on this build is the stay-offline notice during boot -- long before any map
- * can be loaded. So this bound is only reached if that never happened, and the
- * honest response then is to install nothing and say why. */
+/* Bound the wait for a captured engine dialog manager; on timeout install
+ * nothing.
+ */
 #define MPKG_CONSENT_WAIT_TICKS 600
 
 static void mpkg_consent_finish(int accepted)
@@ -1118,9 +1046,7 @@ static void mpkg_consent_finish(int accepted)
     if (!s) return;
 
     if (accepted) {
-        /* Install every package the map needs, and keep going after a failure:
-         * one bad payload must not silently strand the others, and each records
-         * its own outcome so the ones that worked are not re-offered. */
+        /* Attempt each consented package and record failures independently. */
         mpkg_staged *item;
         for (item = s; item; item = item->next) {
             char err[SH_MPKG_ERR_CAP];
@@ -1165,9 +1091,9 @@ void sh_mpkg_consent_poll(void)
             }
             return;
         }
-        /* The engine's dialog body is one 256-byte string, so this is written to
-         * be read at a glance rather than to carry every field the OS box did.
-         * The digest and byte count are in the log for anyone who wants them. */
+        /* Keep the modal body within its 256-byte native string; details stay
+         * in the log.
+         */
         {
             unsigned count = mpkg_staged_count(s);
             unsigned kb = (unsigned)((mpkg_staged_bytes(s) + 1023) / 1024);
@@ -1178,10 +1104,7 @@ void sh_mpkg_consent_poll(void)
                             "It has to be installed before the map can load.  Install it now?",
                             s->id, files, kb);
             } else {
-                /* Name as many as fit rather than only counting them: "3 mod
-                 * packages" tells a player nothing about what they are agreeing
-                 * to install. The descriptor's string is 256 bytes, so the list
-                 * is truncated with a remainder rather than silently cut. */
+                /* List names that fit and report the remainder count. */
                 char names[168];
                 unsigned listed = 0;
                 mpkg_staged *item;
@@ -1228,15 +1151,9 @@ void sh_mpkg_consent_poll(void)
     }
 }
 
-/* Raise consent for one staged package (takes ownership of `s`).
- *
- * ONE PATH. Consent is asked through the engine's own modal and nowhere else.
- * There is deliberately no OS-message-box fallback: two ways to ask the same
- * question means two behaviours to keep correct, two things for a player to see
- * depending on state they cannot observe, and a silent downgrade whenever the
- * engine path breaks -- which is exactly how a broken engine path would go
- * unnoticed. If the engine surface cannot ask, nothing is installed and the
- * refusal says so. */
+/* Take ownership of the staged chain and request engine-modal consent. If the
+ * engine cannot ask, decline without installing.
+ */
 static void mpkg_request_consent(mpkg_staged *s)
 {
     int mode;
@@ -1316,8 +1233,7 @@ int sh_mpkg_gate(const char *json, size_t len)
         return 0;
     }
     if (!g_boot_captured) {
-        /* Defensive: without the boot snapshot "installed" is unknowable, and
-         * guessing wrong is a process death. Refuse; a vanilla map is untouched. */
+        /* A declared package requires a captured boot state; refuse otherwise. */
         mpkg_set_refusal("map declares packages but the boot package snapshot is missing");
         return 0;
     }
@@ -1339,10 +1255,7 @@ int sh_mpkg_gate(const char *json, size_t len)
     if (missing_count == 0) return 1;   /* everything already installed: silent pass */
 
     if (first_missing_pending_restart) {
-        /* Installed this session. Registration is no longer a relaunch: the decl server re-arms
-         * on the engine tick, so the honest question is whether that pass has COMPLETED yet --
-         * not whether the process has been restarted. Once it has, the identities are live and
-         * this map is loadable in this process. */
+        /* Session installs pass only after declaration registration reports success. */
         if (sh_decl_server_registration_succeeded()) {
             backend_log("MPKG: package installed and registered at runtime this session; "
                         "allowing the load without a restart");
@@ -1361,16 +1274,9 @@ int sh_mpkg_gate(const char *json, size_t len)
         first_missing->present, first_missing->total);
     mpkg_set_refusal(reason);
 
-    /* Stage EVERY missing package, not just the first.
-     *
-     * The gate used to offer only `first_missing`, so a map carrying several --
-     * a demon plus the transformations that dress it -- cost the player one load
-     * and one prompt PER package, with every intermediate load looking like a
-     * plain refusal. They are collected here and consented to together.
-     *
-     * A package already answered for (or already being asked about) is skipped
-     * rather than re-offered, and one that cannot be extracted is skipped with a
-     * reason rather than sinking the whole set. */
+    /* Stage all extractable missing packages together. Skip prior decisions,
+     * in-flight prompts and failed extractions, recording each outcome.
+     */
     {
         mpkg_staged *head = NULL, *tail = NULL;
         size_t i;

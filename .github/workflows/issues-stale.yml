@@ -1,10 +1,5 @@
-# Feedback hygiene 2/2 -- the stale sweep.
-#
-# Nightly garbage collector for user-filed reports that are waiting on their reporter: anything labeled
-# needs-retest (a release superseded it -- see issues-retest.yml) or awaiting-response (a maintainer
-# asked a question) gets a warning after 21 quiet days and closes 14 days later. Scoped by
-# any-of-issue-labels, so ordinary confirmed bugs/features NEVER auto-close; PRs are exempt entirely.
-# Secretless: built-in GITHUB_TOKEN, least-privilege permissions -- same posture as ci.yml.
+# Warn waiting user reports after 21 quiet days and close them 14 days later.
+# Only needs-retest or awaiting-response issues qualify; PRs are exempt.
 name: Issues -- stale sweep
 
 on:

@@ -6,30 +6,21 @@
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_set_json) == 0x2B8);
-/* ext 11, appended 2026-07-27: the "editor is mid-manipulation" query that gates every selection
- * mutation (see the typedef in snapmap_plus_iface.h). Appended at the tail, so every pre-existing
- * offset above is unchanged -- only the total size grows. */
+/* Pin append-only interface offsets so adding slots cannot move existing callbacks. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, manipulation_in_progress) == 0x2C0);
-/* ext 12, appended 2026-07-30: FIND MATERIAL by name (cached-only lookup; the Revenant asset-viewport
- * tab's first probe). Same append-only convention -- offsets above unchanged. */
+/* Cached material lookup. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, find_material) == 0x2C8);
-/* ext 13, appended 2026-07-30: GET PREVIEW -- consume the decoded asset thumbnail as a
- * data:image/png;base64 URI (preview.c owns the encode and the cross-thread handoff). Append-only again:
- * every offset above is unchanged and only the total size grows. */
+/* Consume the decoded preview as a PNG data URI. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, get_preview) == 0x2D0);
-/* ext 14, appended 2026-08-02: REQUEST PREVIEW -- render a NAMED material into the preview target, so
- * the tab can preview any material instead of a hardcoded one. Append-only again. */
+/* Queue preview decoding for a named material. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, request_preview) == 0x2D8);
-/* ext 15, appended 2026-08-03: LIST MATERIALS -- pages the ~9,805-name catalog so the Assets tab
- * can show a clickable list instead of requiring a pasted name. Append-only again. */
+/* Page the material catalog. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, list_materials) == 0x2E0);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, list_assets) == 0x2E8);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, material_rect) == 0x2F0);
-/* ext 18, appended 2026-08-04: SOUND PREVIEW -- audition a soundshader through the editor's own
- * preview path, NULL name to stop. Append-only again. */
+/* Audition a soundshader; NULL stops playback. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, sound_preview) == 0x2F8);
-/* ext 19, appended 2026-08-04: SOUND SESSION -- hold preview mode open while the browser is up, so
- * the audition cvars are not churned per click. Append-only again. */
+/* Hold audition mode for the browser session. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, sound_session) == 0x300);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, resolve_prefab_model) == 0x308);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, request_prefab_mesh) == 0x310);

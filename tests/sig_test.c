@@ -1,14 +1,6 @@
-/* sig_test.c -- offline equivalence test for the backend signature resolver (signatures.c).
- *
- * Builds an in-memory IMAGE laid out by RVA from a PE file on disk (each section's raw bytes copied to
- * image[VirtualAddress], exactly how the Windows loader maps it), then runs sig_resolve_all over it --
- * so this exercises the SAME code path the live DLL takes (mapped-image section walk), against the real
- * unpacked DOOM, with no game running. Confirms the C port matches the reference resolver's verdict
- * (25/25 unique, RVAs == known_rva). NOT shipped in the DLL -- a build-time check.
- *
- *   cl /nologo /O2 /MT sig_test.c signatures.c /Fe:sig_test.exe
- *   sig_test.exe <DOOM_unpacked.exe>          # exit 0 iff all sigs resolve uniquely to known RVA
- */
+/* Offline signature-resolution checks against an unpacked PE mapped by RVA.
+ * Pinned mode checks unique matches and expected Vulkan RVAs; portable mode
+ * checks unique matches without requiring those addresses. Run via run-tests.ps1. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -48,21 +40,8 @@ static uint8_t *map_pe_by_rva(const char *path, size_t *image_sz)
 
 int main(int argc, char **argv)
 {
-    /* Two DIFFERENT properties are checked here, and conflating them is what made this test
-     * unable to see a second DOOM build.
-     *
-     *   uniqueness -- every signature matches exactly once. This must hold on EVERY build we
-     *                 support, and it is the property that actually makes the resolver safe.
-     *   known_rva  -- the match lands on the RVA the signature was extracted at. That is a fact
-     *                 about ONE link output, and is false (harmlessly) on any other build.
-     *
-     * DOOM 2016 ships a Vulkan and an OpenGL executable built from one source tree; function RVAs
-     * differ between them by -0x400 to -0xE460 with no uniform offset. Demanding known_rva
-     * equality on the OpenGL image reports 84 failures for a DB that is in fact healthy there.
-     *
-     *   sig_test <image>            # pinned mode: uniqueness AND known_rva (the Vulkan image)
-     *   sig_test <image> portable   # portable mode: uniqueness only, and report the shift
-     */
+    /* Uniqueness is required on each supported image. known_rva equality is
+     * specific to the pinned Vulkan image; portable mode accepts address shifts. */
     int pinned = 1;
     if (argc < 2) {
         fprintf(stderr, "usage: sig_test <DOOM_unpacked.exe> [portable]\n");
@@ -74,10 +53,7 @@ int main(int argc, char **argv)
     uint8_t *base = map_pe_by_rva(argv[1], &image_sz);
     if (!base) return 2;
 
-    /* SIG_RESULTS_MAX, never a bare literal: the loop below indexes `results` by sig_db_count(), so a
-     * short array reads (and sig_resolve_all writes) past the end the moment the DB outgrows it. That
-     * is exactly what happened at entry 67 -- garbage statuses and an access violation in the test
-     * itself, which is a far worse failure than the silent truncation the constant was added to fix. */
+    /* Size results for the whole signature database to prevent out-of-bounds access. */
     size_t total = sig_db_count();
     sig_result results[SIG_RESULTS_MAX];
     size_t ok = sig_resolve_all(base, results, SIG_RESULTS_MAX);
@@ -108,11 +84,8 @@ int main(int argc, char **argv)
         }
     }
 
-    /* The dynamic decl server decodes the registry object from DeclRegistryAnchor+0x10 and requires
-     * live vtable slots +0x38/+0x58 to equal the independently resolved DeclRegisterFile/DeclTypeByName
-     * entries. Prove that exact data-boundary ABI against the pinned image too, not only the text signatures.
-     * Static pointers in the PE contain
-     * preferred-base VAs, so translate them back into this test's heap-mapped image before dereferencing. */
+    /* Check the registry anchor and +0x38/+0x58 vtable entries against independently
+     * resolved functions. Translate preferred-base PE pointers into the mapped image. */
     {
         const sig_result *anchor = NULL, *type_method = NULL, *register_method = NULL;
         IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
@@ -157,6 +130,16 @@ int main(int argc, char **argv)
                 printf("OK  decl-registry ABI  anchor->registry; vtable +0x38/+0x58 match resolved methods\n");
             }
         }
+    }
+    {
+        sig_result target;
+        sig_status status = sig_resolve_one(base, &NAV_RENDER_TARGET_GL_SIGNATURE, &target);
+        int is_gl = strstr(argv[1], "DOOMx64.exe") != NULL;
+        if ((is_gl && (status != SIG_OK || target.rva != 0x19231e0u)) ||
+            (!is_gl && status != SIG_NOT_FOUND)) {
+            printf("BAD OpenGL navigation render-target helper: status=%d RVA=0x%x\n", status, target.rva);
+            bad++;
+        } else printf("OK  renderer-specific navigation target helper\n");
     }
     printf("======================================================================\n");
     printf("C resolver [%s]: %zu/%zu unique; %d %s\n",

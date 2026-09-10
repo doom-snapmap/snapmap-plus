@@ -55,8 +55,7 @@ func acquireBundle(f flags) (*bundle, func(), error) {
 	return b, cleanup, nil
 }
 
-// loadBundle reads dist/MANIFEST.sha256 and verifies every listed file is present and hash-correct,
-// so we never start writing into a DOOM install from a partial or tampered bundle.
+// loadBundle validates every manifest-listed file before installation starts.
 func loadBundle(root string) (*bundle, error) {
 	f, err := os.Open(filepath.Join(root, "MANIFEST.sha256"))
 	if err != nil {
@@ -108,10 +107,7 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// --- GitHub release resolution ------------------------------------------------------------------------
-// install/update download the release bundle from GitHub via the API. A PRIVATE repo (closed beta) needs a
-// token -- set once with `snapmap-plus set-token <tok>`, or via SNAPMAP_PLUS_TOKEN / --token; it also enables --beta.
-// When the repo is public, no token is needed.
+// GitHub releases. Private repositories require a token; public beta releases do not.
 
 type ghRelease struct {
 	TagName     string    `json:"tag_name"`
@@ -194,10 +190,8 @@ func fetchRelease(f flags, token string) (*ghRelease, error) {
 		if err == nil {
 			return &r, nil
 		}
-		// GitHub's "latest" endpoint excludes pre-releases, so before the first stable release it
-		// 404s even though betas exist. Fall back to the release list: prefer a stable if one shows
-		// up after all (a transient /latest failure), else take the newest beta and say so. Once a
-		// stable release exists this fallback never picks a beta again.
+		// The latest-release endpoint excludes prereleases. On failure, inspect the list
+		// and prefer a stable release; report the beta fallback when none exists.
 		var list []ghRelease
 		if lerr := apiGet(base+"?per_page=30", token, &list); lerr == nil {
 			if pick, isBeta := pickDefaultRelease(list); pick != nil {
@@ -211,10 +205,9 @@ func fetchRelease(f flags, token string) (*ghRelease, error) {
 	}
 }
 
-// pickDefaultRelease picks what a no-flags install/update should get from the release list
-// (newest-first, the GitHub API order): the newest stable release, or -- while no stable has been
-// published yet -- the newest pre-release. The bool reports that beta fallback so the caller can tell
-// the user. Returns nil when the list is empty. Pure (no I/O) so it is unit-testable.
+// pickDefaultRelease expects newest-first input. It returns the newest stable
+// release, or the newest prerelease and a true fallback flag. An empty list returns
+// nil.
 func pickDefaultRelease(list []ghRelease) (*ghRelease, bool) {
 	for i := range list {
 		if !list[i].Prerelease {
@@ -302,7 +295,7 @@ func downloadAsset(a *ghAsset, token, dest string) error {
 	return err
 }
 
-// --- token storage ------------------------------------------------------------------------------------
+// Token storage.
 
 func tokenPath() (string, error) {
 	dir := appDataDir()
@@ -354,13 +347,9 @@ func cmdSetToken(args []string) error {
 	return nil
 }
 
-// cmdChangelog prints the release history for a terminal. With no argument it shows the newest
-// release in full and then a one-line index of the earlier ones; with a version it shows just that
-// release. Notes come from each release's body, which is its reviewed CHANGELOG.md entry (see
-// release.yml), so the CLI, the website and the GitHub releases page all say the same thing.
-//
-// It reads them from the API rather than from a shipped file so it can show a release NEWER than
-// the installed one -- which is most of the reason to run the command.
+// cmdChangelog shows the newest release in full and indexes older releases,
+// or selects a requested version. Fetching current release bodies also exposes
+// notes newer than the installed version.
 func cmdChangelog(f flags, args []string) error {
 	token := resolveToken(f)
 	var list []ghRelease

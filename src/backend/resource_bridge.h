@@ -10,23 +10,21 @@ enum {
     SH_RESOURCE_BRIDGE_OPENED = 1
 };
 
-/* Capture one immutable launch snapshot from
- * overrides/generated/resources/*.manifest. The call is one-shot: it claims
- * NEW with a single INSTALLING CAS, publishes READY only after complete
- * validation, and enters terminal FAILED on refusal. Each non-comment row is an exact
- * tab-separated (decl type, logical name, installed virtual path) triple. The
- * triples are resolved against the user's own gameresources.pindex. Multiple
- * virtual paths may share one logical identity (compiled resource bundles),
- * while provider paths remain unique. Repeated exact pindex rows are accepted
- * only when their stored payload bytes are identical. Archives are opened
- * read-only and are never copied or changed. Compressed slices with zero
- * decoded bytes are refused. */
+/* Capture and validate resources/*.manifest from installed packages. Each
+ * tab-separated row names a decl type, logical name and installed virtual
+ * path resolved through gameresources.pindex. Multiple resource paths may
+ * belong to one identity; each provider path must be unambiguous. Duplicate
+ * pindex rows require identical stored payloads. Archives stay read-only;
+ * compressed slices with zero decoded bytes are refused. Capture publishes
+ * READY only after validation; recapture explicitly reopens the state.
+ */
 int sh_resource_bridge_capture(const char *data_root);
 
-/* Re-run the capture after a package is installed mid-session, so its manifests become
- * resolvable without a relaunch. The previous entry table is retired rather than freed (a
- * reader already inside the lookup cannot be evicted); recapture is rare, so that is a bounded
- * one-time cost instead of a use-after-free. Call at a quiescent moment. */
+/* Refresh manifests after package changes. Retain the previous entry
+ * allocations for existing readers; each recapture adds retained memory. Call
+ * at a serialized, quiescent boundary with no map loading. Returns the new
+ * capture result.
+ */
 int sh_resource_bridge_recapture(const char *data_root);
 
 /* Mark whether the provider hook that can serve captured entries is live. A

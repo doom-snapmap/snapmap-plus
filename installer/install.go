@@ -90,10 +90,8 @@ func cmdInstall(f flags) error {
 	}
 	defer cleanup()
 
-	// Files a PREVIOUS install placed are OUR own DLLs, not vanilla -- never "back them up" on an update, or
-	// uninstall would later restore our DLL as if it were the genuine file and leave DOOM non-vanilla. Carry
-	// the earlier install's genuine backups forward so uninstall still restores them. Best-effort: no prior
-	// record (a first install) just yields empty sets.
+	// Keep the original backups across updates. Backing up an earlier Snapmap+ DLL
+	// would make uninstall restore the mod instead of the pre-install file.
 	ours := map[string]bool{}
 	var priorBackups []backup
 	var priorLegacy []string
@@ -112,8 +110,7 @@ func cmdInstall(f flags) error {
 		Backups:       priorBackups,
 		LegacyRemoved: priorLegacy,
 	}
-	// The original SnapHak in this DOOM folder? Snapmap+ replaces it -- migrate (remove its files)
-	// as part of the install, after the confirmation below.
+	// Detect legacy files now; remove them only after confirmation.
 	legacy := detectLegacy(doom)
 	confirmMsg := fmt.Sprintf("About to install Snapmap+ %s into\n  %s\nContinue?", rec.Version, doom)
 	if len(legacy) > 0 {
@@ -141,9 +138,8 @@ func cmdInstall(f flags) error {
 	fmt.Printf("Installing Snapmap+ into %s\n", doom)
 	for _, e := range b.files {
 		target := filepath.Join(doom, e.rel)
-		// Back up only a GENUINE pre-existing file we'd overwrite (e.g. a real XINPUT1_3.dll). Skip if a
-		// previous install already attributed this path to us, or the on-disk file is byte-identical to the
-		// DLL we're about to write (also ours) -- backing either up would corrupt the vanilla-restore.
+		// Back up pre-existing files unless the prior record owns them or their bytes
+		// already match this bundle. Preserve earlier backups for uninstall.
 		if st, err := os.Stat(target); err == nil && !st.IsDir() {
 			ourFile := ours[e.rel]
 			if !ourFile {
@@ -174,9 +170,7 @@ func cmdInstall(f flags) error {
 	if err := saveRecord(rec); err != nil {
 		return fmt.Errorf("installed the files, but couldn't write the install record (%v) -- uninstall may not fully clean up", err)
 	}
-	// Remove what a PRIOR install of OURS placed that this one no longer does -- notably a renamed overlay
-	// (the old snaphak\snaphakui.dll, superseded by snapmap-plus\snapmap-plus-ui.dll). These paths come from
-	// our OWN prior install record, so they are always ours to remove (never the original SnapHak's files).
+	// Remove obsolete paths recorded by our previous installation.
 	for rel := range ours {
 		placed := false
 		for _, r := range rec.Files {
@@ -200,10 +194,8 @@ func cmdInstall(f flags) error {
 	return nil
 }
 
-// migrateLegacyLogs folds runtime logs from older locations -- the oldest releases' root-level snaphak_logs\,
-// and the previous-name overlay's snaphak\logs\ -- into the current snapmap-plus\logs\, so an update doesn't
-// strand old logs in a dir nothing writes to anymore, then drops the emptied old overlay dir. Best-effort: a
-// file that won't move (locked, name collision) stays behind and its dir is left in place; never fails install.
+// migrateLegacyLogs moves old runtime logs into snapmap-plus/logs. Locked files
+// and name collisions stay at the old location; migration failure is nonfatal.
 func migrateLegacyLogs(doom string) {
 	newDir := filepath.Join(doom, "snapmap-plus", "logs")
 	foldLogsForward(filepath.Join(doom, "snaphak_logs"), newDir)
@@ -300,19 +292,15 @@ func cmdUninstall(f flags) error {
 		}
 		fmt.Printf("  ~ restored %s\n", bk.Rel)
 	}
-	// 3) clean up the dirs we created. The runtime-logs dir (snapmap-plus\logs\; releases before the
-	//    rename used snaphak\logs\, the oldest a root-level snaphak_logs\) is unambiguously ours ->
-	//    remove it whole; snapmap-plus/ + snaphak/ + platforms/ only if now empty (a pre-existing
-	//    tree is left intact).
+	// Remove runtime log trees. Remove overlay and plugin directories only if empty.
 	os.RemoveAll(filepath.Join(doom, "snapmap-plus", "logs"))
 	os.RemoveAll(filepath.Join(doom, "snaphak", "logs"))
 	os.RemoveAll(filepath.Join(doom, "snaphak_logs"))
 	removeIfEmpty(filepath.Join(doom, "snapmap-plus"))
 	removeIfEmpty(filepath.Join(doom, "snaphak"))
 	removeIfEmpty(filepath.Join(doom, "platforms"))
-	// 4) auto-cleanup our app-data folder: the record, the saved token, and the stable snapmap-plus.exe copy.
-	//    Runtime-owned config.json preferences and the user's modding data (the
-	//    %LOCALAPPDATA%\snapmap-plus content folders and any old %USERPROFILE%\snaphak) are NEVER touched.
+	// Remove installer metadata and unused executable copies; preserve runtime
+	// configuration and nonempty player-content directories.
 	cleanupAppData()
 	fmt.Println("Done. DOOM restored to vanilla. (Your Snapmap+ modding data was left untouched.)")
 	return nil

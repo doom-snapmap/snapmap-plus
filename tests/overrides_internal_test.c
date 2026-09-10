@@ -89,14 +89,8 @@ static void test_internal_decl_table(void)
     void *stream;
 
     sh_overrides_test_stream_helpers_reset();
-    /* The provider gate proves IDENTITY BY SIGNATURE, not by address. DOOM 2016 ships two
-     * executables built from one source tree and relaunches itself between them, and every engine
-     * function sits at a different RVA in each -- so a gate that demanded one build's RVA refused
-     * the whole file shadow on the other even though every signature resolved uniquely there.
-     * What the gate requires now is a clean unique match (status 1 = SIG_OK, never the
-     * hook-tolerant SIG_OK_HOOKED fallback) at an address inside the host image. This test image
-     * stands in for the host: any offset within it is accepted regardless of its value, and only a
-     * dirty status or an address outside the image is refused. */
+    /* Require SIG_OK and an in-image address, accepting shifted RVAs.
+     * SIG_OK_HOOKED and out-of-image pointers must refuse the provider. */
     {
         const uint8_t *base = (const uint8_t *)GetModuleHandleA(NULL);
         CHECK(base != NULL);
@@ -149,10 +143,8 @@ static void test_internal_decl_table(void)
                   base + 0x1200u, 1,
                   base + 0x1300u, 1) == 0);
 
-        /* The decoded provider vtable is checked for plausibility, not for one build's address:
-         * .rdata (read-only) yes, .text and outside the image no. The PE headers at the image base
-         * are readable and read-only-by-characteristics only inside a section, so probe real ones:
-         * this function's own address is executable, and a stack address is outside the image. */
+        /* Accept a provider vtable in a read-only section; reject executable
+         * and out-of-image pointers using real process addresses. */
         CHECK(sh_overrides_test_address_in_readonly_section(base, "rdata-probe") == 1);
         CHECK(sh_overrides_test_address_in_readonly_section(
                   base, (const void *)(uintptr_t)&test_internal_decl_table) == 0);
@@ -301,10 +293,7 @@ static void test_file_stream_is_read_only(void)
 }
 
 
-/* The overlap reporter, stubbed. This suite is about resolution and the provider
- * table; WHICH packages overlap is package_conflicts_test's subject, and pulling
- * its filesystem walk in here would make these cases depend on a tree they do
- * not build. */
+/* Stub overlap reporting; package_conflicts_test covers its filesystem scan. */
 int sh_pkg_conflicts_report(const char *data_root) { (void)data_root; return 0; }
 
 int main(void)

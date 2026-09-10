@@ -1,4 +1,4 @@
-/* nav_play.c -- see nav_play.h for what this is and why it hooks where it does. */
+/* Capture pre-build navigation snapshots and route per-instance AAS loads. */
 #include <windows.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -8,6 +8,7 @@
 #include "nav_bake.h"
 #include "hook.h"
 #include "patch.h"
+#include "config.h"
 
 void backend_log(const char *message);
 
@@ -16,11 +17,10 @@ void backend_log(const char *message);
  * RIP-relative operand, no relative jmp or call). The installer needs >= 14. */
 #define SNAPBUILD_STOLEN 15
 
-/* int(void *, void *, void *) -- three register args and no stack args, read off
- * the call site at 0x4EE428 (RCX=R14, RDX=[RBP+0x900], R8=RDI) and off the
- * prologue, which homes RBX/RSI/RDI into the caller's shadow space rather than
- * reading anything above the frame. The return value IS used: the call site does
- * MOV EBX,EAX immediately after, so the detour must pass it through. */
+/* Three register arguments, no stack arguments; int return must pass through.
+ * The pinned Vulkan call site at 0x4EE428 sets RCX=R14, RDX=[RBP+0x900],
+ * R8=RDI and consumes EAX.
+ */
 typedef int (*snapbuild_fn_t)(void *a, void *b, void *c);
 
 static snapbuild_fn_t g_orig;
@@ -32,6 +32,20 @@ static nav_find_fn g_find;
 static nav_load_fn g_load;
 static sh_patch_handle g_instance_patches[2];
 static void *g_instance_relays[2];
+static sh_patch_handle g_volume_contents_patch;
+static void *g_volume_contents_relay;
+
+/* The marker is stored independently, but walkable solid geometry must not be
+ * registered as an avoidance obstacle. Keep native physical collision and the
+ * native flag's behavior; add the derived policy only to marked Blocking Boxes.
+ * This executes inside their contents update, including spawn and copied boxes. */
+static unsigned char nav_volume_clear_obstacle(const unsigned char *entity)
+{
+    int enabled=0;
+    if(entity[0xc8e])return 1;
+    return entity[0xc89]&&(entity[0x3ea]&0x40)&&
+        sh_config_get_bool("navmesh.enabled",&enabled,NULL)&&enabled;
+}
 
 static void *nav_instance_find(void *self,const char *name,unsigned char flags,
                                const unsigned char *record)
@@ -76,7 +90,8 @@ static void *nav_near_relay(uintptr_t call,void *handler,int instance)
                !VirtualQuery((void*)address,&mbi,sizeof mbi)||mbi.State!=MEM_FREE)continue;
             relay=(unsigned char*)VirtualAlloc((void*)address,4096,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
             if(!relay)continue;
-            if(instance){relay[at++]=0x4d;relay[at++]=0x8b;relay[at++]=0xce;}
+            if(instance==1){relay[at++]=0x4d;relay[at++]=0x8b;relay[at++]=0xce;}
+            if(instance==2){relay[at++]=0x48;relay[at++]=0x8b;relay[at++]=0xcb;}
             relay[at++]=0xff;relay[at++]=0x25;
             memset(relay+at,0,4);at+=4;memcpy(relay+at,&handler,8);at+=8;
             if(!VirtualProtect(relay,4096,PAGE_EXECUTE_READ,&old)){
@@ -85,6 +100,31 @@ static void *nav_near_relay(uintptr_t call,void *handler,int instance)
         }
     }
     return NULL;
+}
+
+int sh_nav_play_install_volume_contents(const sig_result *results,size_t count)
+{
+    const unsigned char expected[9]={0x80,0xbb,0x8e,0x0c,0,0,0,0x74,0x0a};
+    unsigned char patch[9]={0xe8,0,0,0,0,0x84,0xc0,0x74,0x0a};
+    size_t i;intptr_t distance;int32_t relative;
+    if(g_volume_contents_patch.live)return 1;
+    for(i=0;i<count;i++)if(results[i].name&&
+        !strcmp(results[i].name,"BlockingVolumeObstacleGate")&&results[i].status==SIG_OK) {
+        g_volume_contents_relay=nav_near_relay(results[i].addr,
+                                              (void*)nav_volume_clear_obstacle,2);
+        if(!g_volume_contents_relay)break;
+        distance=(intptr_t)g_volume_contents_relay-(intptr_t)(results[i].addr+5);
+        if(distance>=INT32_MIN&&distance<=INT32_MAX) {
+            relative=(int32_t)distance;memcpy(patch+1,&relative,4);
+            if(code_patch_sig(&results[i],expected,patch,sizeof patch,
+                              &g_volume_contents_patch)==B2_PATCH_OK) {
+                backend_log("NAV: marked-volume obstacle policy installed");return 1;
+            }
+        }
+        VirtualFree(g_volume_contents_relay,0,MEM_RELEASE);g_volume_contents_relay=NULL;
+        break;
+    }
+    backend_log("NAV: marked-volume obstacle policy unavailable");return 0;
 }
 
 int sh_nav_play_install_instances(const sig_result *results,size_t count)
@@ -122,11 +162,9 @@ failed:
 
 static int nav_snapbuild_detour(void *a, void *b, void *c)
 {
-    /* The whole reason this hook exists. Guarded and non-fatal: the marks are a
-     * convenience over the map as loaded, and failing to read them must never be
-     * worse than not having read them. A fault here would otherwise land in the
-     * middle of the engine's map build, which is the exact shape of the bug this
-     * replaces. */
+    /* Capture the final snapshot before conversion; contain faults at the
+     * hook boundary.
+     */
     __try {
         sh_nav_bake_build_begin();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -151,9 +189,9 @@ int sh_nav_play_install(void *snapbuild_fn, int status_ok)
         return 0;
     }
     if (!status_ok) {
-        /* Same rule the rawmap swap follows: a prologue that only resolved through
-         * the hook-tolerant fallback is already detoured by somebody else, and
-         * installing over it steals detour bytes rather than the real prologue. */
+        /* Hook-tolerant resolution can point at an existing detour; its bytes
+         * are not a usable prologue.
+         */
         backend_log("NAV: pre-build live read SKIPPED -- SnapMapEditToSnapBuild resolved via "
                     "hook-tolerant fallback (prologue already hooked)");
         return 0;

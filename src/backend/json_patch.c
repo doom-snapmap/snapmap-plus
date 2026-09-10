@@ -1,12 +1,6 @@
-/* json_patch.c -- see json_patch.h. A hand-written recursive-descent SKIP scanner (never a full
- * parse-to-tree) over the engine's compact JSON, used only to locate key/value SPANS so we can splice
- * raw text in place. Every recursive walker strictly increases its segment index each call (bounded by
- * JSON_MAX_SEGS), so there is no unbounded recursion on attacker/malformed input -- worst case is a
- * clean 0 return.
- *
- * Clean-room: our own design; generalizes apply_engine.c's proven ae_splice_targets technique (insert
- * item[N] before "num", bump "num") to an arbitrary dotted path + a real dedup-append. Zero OG bytes.
- */
+/* Locate JSON value spans and splice compact engine entity JSON in place.
+ * Property-path descent is limited by JSON_MAX_SEGS; nested-value scanning has
+ * no separate depth limit. This scanner is not a general JSON validator. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -17,9 +11,7 @@
 #define JSON_MAX_SEGS   16
 #define JSON_CHAIN_CAP  (16 * 1024)
 
-/* ============================================================ the SKIP scanner ===================
- * Every json_skip_* returns a pointer just PAST the scanned token, or NULL on malformed/truncated
- * input. No allocation, no tree -- callers keep only the spans they need. */
+/* Token scanners return the end of a span or NULL, without allocating a tree. */
 
 static const char *json_skip_ws(const char *p)
 {
@@ -28,8 +20,7 @@ static const char *json_skip_ws(const char *p)
     return p;
 }
 
-/* p must point AT the opening '"'. Returns a pointer just past the CLOSING '"' (handles \" and \\
- * escapes so an escaped quote never ends the string early). NULL if unterminated. */
+/* Skip a quoted string, honoring escaped bytes; return NULL if unterminated. */
 static const char *json_skip_string(const char *p)
 {
     if (!p || *p != '"') return NULL;
@@ -42,9 +33,7 @@ static const char *json_skip_string(const char *p)
     return NULL;
 }
 
-/* p must point at the FIRST character of a value (object/array/string/number/true/false/null). Returns
- * a pointer just past the value's last character, or NULL on malformed input. Recurses into nested
- * objects/arrays (depth bounded by the real JSON nesting depth -- entity JSON is not pathological). */
+/* Skip a value, recursively scanning objects and arrays. No depth cap is imposed. */
 static const char *json_skip_value(const char *p)
 {
     p = json_skip_ws(p);
@@ -107,15 +96,9 @@ static const char *json_skip_value(const char *p)
     return NULL;
 }
 
-/* Find `key` as a DIRECT (top-level) member of the object spanning [obj_open, obj_close) (obj_open AT
- * '{', obj_close just past the matching '}'). Only scans this object's own members -- never matches a
- * same-named key nested inside a child object/array, unlike a naive strstr. On a hit, *val_start points
- * at the value's first character and *val_end just past its last; *key_start (if non-NULL) points at the
- * key's OPENING quote, i.e. the true start of the "key":value member -- needed by any caller that must
- * splice/insert relative to the member as a whole, not just its value (get this wrong and a splice meant
- * to land BEFORE the key lands after the colon instead, corrupting the JSON -- see json_patch.c's own
- * postmortem comment on the accl/acctargets merge bug this guarded against). Returns 1 on a hit, 0 on a
- * miss or malformed object (never partial: outputs are untouched on a 0 return). */
+/* Find a direct member of [obj_open,obj_close), where obj_close follows the }.
+ * Return its value span and, optionally, the key opening quote. Outputs remain
+ * untouched on a miss or malformed object. */
 static int json_find_top_level_key(const char *obj_open, const char *obj_close, const char *key,
                                     const char **key_start, const char **val_start, const char **val_end)
 {
@@ -150,10 +133,9 @@ static int json_find_top_level_key(const char *obj_open, const char *obj_close, 
     return 0;
 }
 
-/* ============================================================ splice / insert / build primitives == */
+/* Text construction. */
 
-/* out := doc[0..cut_start) + repl + doc[cut_end..doclen). Bounds-checked; 0 on overflow (out untouched
- * in any meaningful way on failure -- caller must not use it). */
+/* Replace [cut_start,cut_end) in doc. Return 0 on overflow; discard out on failure. */
 static int json_splice(const char *doc, size_t doclen, const char *cut_start, const char *cut_end,
                         const char *repl, char *out, int outcap)
 {
@@ -172,17 +154,13 @@ static int json_splice(const char *doc, size_t doclen, const char *cut_start, co
     return 1;
 }
 
-/* Insert `"key":value_token` as a new member of the object [obj_open, obj_close), right after the
- * opening '{' (before any existing members, with a trailing ',' if the object wasn't empty). */
+/* Insert a member after {, adding a comma only when the object is nonempty. */
 static int json_insert_member(const char *doc, size_t doclen, const char *obj_open, const char *obj_close,
                                const char *key, const char *value_token, char *out, int outcap)
 {
     const char *p = json_skip_ws(obj_open + 1);
     if (!p) return 0;
-    /* empty-object test: the first non-ws char after '{' is the closing '}'. (NOT `p == obj_close` --
-     * obj_close points PAST the '}', so an empty object {} has p AT the '}' but p != obj_close, which
-     * mis-classified {} as non-empty and appended a trailing comma -> `{"k":v,}` -> the engine lexer
-     * rejects it. Live-found on an edit-less entity whose `edit` serialized as `{}`.) */
+    /* obj_close follows }; test the first non-whitespace byte after { instead. */
     (void)obj_close;
     int empty = (*p == '}');
     char member[JSON_CHAIN_CAP + 128];
@@ -252,10 +230,8 @@ int sh_json_quote_string(const char *raw, char *out, int cap)
     return 1;
 }
 
-/* Decode-compare a JSON string SPAN (span_start AT the opening '"', span_end just past the closing '"')
- * against a raw (unescaped) C string, without materializing a decoded copy. A handful of rare escapes
- * (\uXXXX) are not decoded -- on those bytes this degrades to "not equal" (never a false positive
- * match), so the worst case is a harmless duplicate append, never a wrong dedup-skip. */
+/* Compare an escaped JSON string with raw text. Unsupported escapes, including
+ * Unicode escapes, compare unequal and may allow a duplicate append. */
 static int json_string_span_equals(const char *span_start, const char *span_end, const char *target)
 {
     if (!span_start || !span_end || span_end <= span_start || *span_start != '"') return 0;
@@ -337,12 +313,9 @@ static int json_build_list_chain(const char * const *segs, int nseg, int from_id
     return json_build_scalar_chain(segs, nseg, from_idx, freshlist, out, outcap);
 }
 
-/* ============================================================ the two recursive walkers =========== */
+/* Property-path traversal. */
 
-/* set_leaf's walker: descend through EXISTING objects along segs[idx..]; once the chain breaks (a
- * segment is missing, or exists but isn't an object short of the leaf), build the remainder fresh in
- * ONE splice/insert against the ORIGINAL doc -- there is never more than one text mutation per call,
- * because pure descent never touches doc at all. */
+/* Descend existing objects, then create any missing path in one splice. */
 static int json_walk_set(const char *doc, size_t doclen, const char *obj_open,
                           const char * const *segs, int nseg, int idx,
                           const char *leaf_token, char *out, int outcap)
@@ -360,15 +333,8 @@ static int json_walk_set(const char *doc, size_t doclen, const char *obj_open,
         return json_walk_set(doc, doclen, vs, segs, nseg, idx + 1, leaf_token, out, outcap);
 
     {
-        /* segs[idx] is missing, OR it exists but its value is NOT an object (e.g. `"edit":null` /
-         * `"edit":""` on an edit-less entity -- the engine serializes an empty edit that way).
-         * Build the remaining path segs[idx+1..] as a BRACED
-         * OBJECT VALUE `{"segs[idx+1]":{...:leaf}}` -- NOT the bare `"key":value` member json_build_
-         * scalar_chain returns, which when spliced as segs[idx]'s value produced the invalid
-         * `"edit":"renderModelInfo":{...}` the engine lexer rejected (live-found: bss/acctargets
-         * "applied 0/1"). Both paths below use segs[idx]'s VALUE = this braced object:
-         *   found  -> splice [vs,ve) (replace the non-object value with the object),
-         *   !found -> insert `"segs[idx]":<object>`. */
+        /* A missing or non-object intermediate value needs a braced object, not
+         * a bare key:value member. */
         char inner[JSON_CHAIN_CAP];
         char chain[JSON_CHAIN_CAP];
         if (!json_build_scalar_chain(segs, nseg, idx + 1, leaf_token, inner, (int)sizeof inner)) return 0;
@@ -393,9 +359,7 @@ static int json_walk_upsert_reflist(const char *doc, size_t doclen, const char *
     if (idx < nseg - 1) {
         if (found && ve > vs && *vs == '{')
             return json_walk_upsert_reflist(doc, doclen, vs, segs, nseg, idx + 1, ids, n_ids, out, outcap);
-        /* segs[idx] missing OR a non-object value -- build segs[idx+1..] as a BRACED OBJECT VALUE, same
-         * fix + rationale as json_walk_set above (a bare member spliced as edit's value gave the invalid
-         * `"edit":"targets":{...}` the lexer rejected on an edit-less entity). */
+        /* Wrap the missing path in an object, as in json_walk_set. */
         char inner[JSON_CHAIN_CAP];
         char chain[JSON_CHAIN_CAP];
         if (!json_build_list_chain(segs, nseg, idx + 1, ids, n_ids, inner, (int)sizeof inner)) return 0;
@@ -404,8 +368,7 @@ static int json_walk_upsert_reflist(const char *doc, size_t doclen, const char *
         return json_insert_member(doc, doclen, obj_open, obj_close, segs[idx], chain, out, outcap);
     }
 
-    /* idx == nseg-1: the leaf. If it's already a proper num/item[] list, dedup-append (the
-     * ae_splice_targets technique: insert new item[N] members right before "num", bump "num"). */
+    /* Merge an existing num/item[] list by inserting new items before num. */
     if (found && ve > vs && *vs == '{') {
         const char *num_key = NULL, *num_vs = NULL, *num_ve = NULL;
         if (json_find_top_level_key(vs, ve, "num", &num_key, &num_vs, &num_ve)) {
@@ -434,7 +397,7 @@ static int json_walk_upsert_reflist(const char *doc, size_t doclen, const char *
                 next++;
             }
             if (next == base) {
-                /* nothing new (every id already targeted) -- output doc unchanged, verbatim. */
+                /* All IDs are already present; preserve the original document. */
                 if (doclen + 1 > (size_t)outcap) return 0;
                 memcpy(out, doc, doclen);
                 out[doclen] = '\0';
@@ -447,15 +410,8 @@ static int json_walk_upsert_reflist(const char *doc, size_t doclen, const char *
 
             char full_leaf[JSON_CHAIN_CAP * 2 + 128];
             size_t off = 0;
-            /* BUGFIX (found via a live acctargets 0/1-apply repro): this MUST be num_key (the "num" key's
-             * own opening quote), not num_vs (its VALUE's start, i.e. the digit). num_vs..ve is only the
-             * digit + trailing '}' -- using it here silently swallowed the literal "num": text into the
-             * "kept verbatim" prefix, so the re-emitted "\"num\":" below duplicated it and the new items
-             * landed AFTER "num" instead of before -- e.g. {"item[0]":"a","num":"item[1]":"b","num":2} --
-             * a colon directly after a colon, which the engine's deserialize correctly (silently) rejects
-             * (apply_engine.c's "applied 0/1"). Only exercised when a PRE-EXISTING targets list is being
-             * merged into; a fresh/empty list (json_build_fresh_list) never took this path, which is why
-             * it looked flaky rather than consistently broken. */
+            /* Insert before the num key, not its value, to avoid duplicating the key
+             * or placing new members after its colon. */
             size_t seg1 = (size_t)(num_key - vs);     /* [vs .. "num" key start) -- kept verbatim */
             size_t tail = (size_t)(ve - num_ve);      /* [num's value end .. ve) -- kept verbatim */
             if (seg1 + nlen + 6 + strlen(numrepl) + tail + 1 > sizeof full_leaf) return 0;
@@ -467,7 +423,7 @@ static int json_walk_upsert_reflist(const char *doc, size_t doclen, const char *
             full_leaf[off] = '\0';
             return json_splice(doc, doclen, vs, ve, full_leaf, out, outcap);
         }
-        /* an object, but not list-shaped (no "num") -- fall through to wholesale replace. */
+        /* Replace objects that do not have a list count. */
     }
     {
         char freshlist[JSON_CHAIN_CAP];
@@ -477,11 +433,10 @@ static int json_walk_upsert_reflist(const char *doc, size_t doclen, const char *
     }
 }
 
-/* ============================================================ public entry points ================= */
+/* Public operations. */
 
-/* Splits prop_path on '.' into segs[3..], having already seeded segs[0..2] = entityDef/state/edit.
- * Returns the segment count, or 0 on overflow/empty. pathbuf is the caller's scratch (must outlive the
- * walk -- strtok_s writes NULs into it and segs[] points into it). */
+/* Prefix the dotted property path with entityDef.state.edit. Return 0 if invalid
+ * or too long. segs points into pathbuf, which must outlive traversal. */
 static int build_segs(char *pathbuf, size_t pathbuf_cap, const char *prop_path,
                        const char *segs[JSON_MAX_SEGS])
 {

@@ -1,4 +1,4 @@
-/* hook.h -- a minimal hand-rolled inline-detour installer (SnapHak-style, abs-jmp variant). */
+/* Shared inline-detour installer used by the shield. */
 #ifndef SHIELD_HOOK_H
 #define SHIELD_HOOK_H
 

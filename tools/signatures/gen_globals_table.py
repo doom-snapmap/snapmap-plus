@@ -1,18 +1,10 @@
-"""Emit the product's engine_globals table from the derivation results.
-
-Input:  derived_globals.json (produced by derive_global.py)
-Output: engine_globals_table.gen.h -- the BACKEND_ENGINE_GLOBALS array
-
-This file is GENERATED. Nobody hand-maintains a per-build address table; that is the
-whole point. Adding support for another DOOM build means re-running the derivation and
-regenerating, not editing C by hand.
-"""
+"""Generate BACKEND_ENGINE_GLOBALS from derived_globals.json.
+Edit derivation inputs and regenerate engine_globals_table.gen.h; the output
+is generated, while this script is maintained source."""
 import json, os, sys
 
-# Every global the product actually consumes, keyed by its RVA on the pinned Vulkan build.
-# `delta` is for globals that are reached as a fixed offset from a neighbouring slot the
-# engine's own code computes -- the same adjacency the backend already relies on for
-# cvarSys == cmdSystem + 0x10.
+# Map consumed globals by reference-image RVA. delta represents verified
+# adjacency to a referenced slot, such as cvarSys at cmdSystem + 0x10.
 NAMES = {
     0x3056748: ('editor_singleton',       0, 'idSnapEditorLocal, constructed in place'),
     0x55b7280: ('cmd_system_slot',        0, 'idCmdSystem singleton pointer'),
@@ -37,9 +29,7 @@ NAMES = {
     0x2ded990: ('throwinfo_fatal',        0, 'ThrowInfo for the fatal level-7 throw (.rdata)'),
     0x6faf8b0: ('throw_suppressor_b',    0, 'level-6 dispatcher throw gate B'),
 
-    # CODE addresses that cannot be found by their own bytes, anchored on a call site instead.
-    # The arithmetic is identical -- a `call rel32` displacement is decoded exactly like a
-    # RIP-relative data displacement -- so they live in the same table and need no new mechanism.
+    # Caller-anchored functions use the same rel32 decoding as data references.
     0x17F7030: ('declmgr_accessor',       0, 'idDeclManager accessor; its prologue is shared by ~47 functions'),
     0x699A60:  ('idlist_grow',            0, 'idList growth helper; too generic to sign by its own bytes'),
     0xD32A30:  ('vis_leaf_lo',            0, 'visibility leaf, entry; too short to anchor uniquely'),
@@ -82,10 +72,8 @@ def main(json_path, out_path):
         if best is None:
             skipped.append((vk, 'no portable derivation'))
             continue
-        # Every surviving derivation has already been proved to decode back to this exact target on
-        # the reference image, so if they now disagree about the target image, one of them is wrong
-        # and we cannot tell which. Refuse rather than ship a majority vote: adjacent engine globals
-        # are one byte apart, so the wrong answer here looks entirely plausible.
+        # All reference sites must agree on the target. Refuse conflicting derivations
+        # rather than select a majority that could name a neighboring global.
         if agree != len(rec['derivations']):
             others = sorted({d['gl_target_rva'] for d in rec['derivations']})
             skipped.append((vk, 'sites disagree on the target image (%s) -- re-derive by hand'
@@ -115,10 +103,8 @@ def main(json_path, out_path):
                 '#define BACKEND_ENGINE_GLOBALS_TABLE_GEN_H\n\n'
                 '#include "engine_globals.h"\n\n'
                 'const global_entry BACKEND_ENGINE_GLOBALS[] = {\n')
-        # Designated initializers, deliberately. A positional list silently reassigns every field
-        # after the insertion point if global_entry ever gains one, and the symptom would be a
-        # plausible wrong address rather than a compile error. Naming the fields makes the order
-        # irrelevant and a future field harmless.
+        # Name initializer fields so adding or reordering fields cannot silently shift
+        # values.
         for r in rows:
             f.write('    { .name = "%s",\n' % r['name'])
             f.write('      /* %s.\n' % r['note'])

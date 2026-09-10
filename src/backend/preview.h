@@ -1,13 +1,7 @@
-/* preview.h -- the asset-preview transport: RGBA pixels in, `data:image/png;base64,...` out.
- *
- * This module is route-independent. It knows nothing about where the pixels came from: it owns the
- * request/publish handshake, PNG encoding, and cross-thread buffer, and nothing else. Each request
- * receives a generation so a slow producer can never publish an older image for a newer selection.
- *
- *   PRODUCER (whatever can make pixels)          CONSUMER (the WebView UI)
- *   ------------------------------------          -------------------------
- *   sh_preview_take_request(...)         <-----   sh_preview_request[_kind]    iface ext 14 (+0x2D8)
- *   sh_preview_publish(...)              ----->   sh_preview_get(out, cap)     iface ext 13 (+0x2D0)
+/* Thread-safe asset-preview transport: request generations, RGBA-to-PNG
+ * encoding and a consumable base64 data URI. Producers take staged requests
+ * and publish pixels; the UI requests through iface ext 14 (+0x2d8) and
+ * consumes through ext 13 (+0x2d0). Generations reject stale results.
  */
 #ifndef BACKEND_PREVIEW_H
 #define BACKEND_PREVIEW_H
@@ -23,10 +17,10 @@
  * Safe from any thread. Backs iface ext 13 (+0x2D0). */
 int  sh_preview_get(char *out, size_t cap);
 
-/* Stage `name` as the asset the user wants to see, and invalidate whatever is currently published so a
- * poll cannot mistake the previous image for this request's answer. ASYNCHRONOUS by nature: pixels are
- * produced on another thread, so the caller polls sh_preview_get until it returns > 0. Backs iface
- * ext 14 (+0x2D8). */
+/* Stage a name and invalidate the current preview. Production is
+ * asynchronous; poll sh_preview_get for completion. Backs iface ext 14
+ * (+0x2d8).
+ */
 void sh_preview_request(const char *name);
 
 /* Stage a request with its catalog kind when the caller has one. AUTO preserves the original

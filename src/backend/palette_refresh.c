@@ -1,34 +1,11 @@
-/* palette_refresh.c -- native palette rebuild after each new decl registration.
+/* Rebuild the native entity palette after each successful decl registration
+ * pass. Registration alone does not update this catalog, which by-name
+ * lookups and map validation consume. Stale entries can report "not found in palette".
+ * The builder replaces its previous array.
  *
- * The engine's entity palette is a catalog DERIVED from the live decl list.
- * Registering a new decl after the catalog has been built does not put it in
- * the catalog by itself. The native SnapPaletteBuild routine (RVA 0x54AEE0)
- * rebuilds the catalog in place from the decl list; this service calls that
- * routine synchronously from the dynamic decl server's main-thread command
- * after a registration pass succeeds.
- *
- * ONCE PER REGISTRATION PASS, NOT ONCE PER PROCESS, and that distinction is
- * the whole point of this file. The catalog is what every by-name consumer
- * searches, including idSnapMap::RepairAndMigrate's entity validator
- * (RVA 0x5F27C0), which binary-searches it and reports
- *
- *     Invalid Entity %d:%s not found in palette
- *
- * then fails the whole map, which the shell reports to the player as a damaged
- * save. So while this call was latched to fire exactly once, a package
- * installed mid-session registered its decls correctly and still could not be
- * used: any map NAMING one of its types was refused until DOOM was restarted,
- * because the catalog searched at load time was the one built before the
- * package existed. Rebuilding per pass is what removes the restart.
- *
- * The native builder is written to be re-run: it tears down and frees the
- * previous array before repopulating it, which is dead code on a first call.
- *
- * This is deliberately not a rawmap hook, an editor injection, or a refresh
- * retry loop. A missing/unsupported build, invalid editor object, vtable
- * mismatch, or native exception is terminal for this process -- a refusal is
- * an integrity verdict on the engine objects being called into, so re-arming
- * never gives a refused process another attempt.
+ * The decl server calls synchronously on the main thread. Missing signatures,
+ * invalid objects, vtable checks or native exceptions enter terminal REFUSED;
+ * later rearm attempts do not retry this service.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -44,21 +21,11 @@
 #include "iface_engine.h"
 #include "palette_refresh.h"
 
-/* PR_EDITOR_PALETTE_OFF is a STRUCT OFFSET and carries across both shipped DOOM builds unchanged.
- *
- * The three RVAs are what these locations occupy on the PINNED VULKAN BUILD (DOOMx64vk.exe),
- * recorded for audit and for re-deriving a signature that stops matching. The two code/vtable ones
- * NO LONGER GATE: DOOM 2016 ships two executables built from one source tree, the game relaunches
- * itself into the other when r_renderAPI changes, and every function RVA shifts between them with
- * no uniform delta. The builder's identity is proven by a clean unique masked-signature match --
- * which is stronger evidence than RVA equality, since two builds can share an RVA by coincidence
- * but a signature cannot match the wrong function -- and the palette vtable is read out of the
- * live editor object, so it needs no pinned address at all, only a plausibility check.
- *
- * PR_EDITOR_SINGLETON_RVA is a raw DATA RVA. It is no longer used to locate anything: the
- * singleton is resolved as "editor_singleton" through engine_globals.h, which signs the code site
- * that computes the address. The constant is the pinned Vulkan value (0x309B588 on the OpenGL
- * build), kept for audit and re-derivation. */
+/* PR_EDITOR_PALETTE_OFF is the supported structure offset. RVAs below are
+ * pinned Vulkan audit references, not lookup gates. Resolve the builder by
+ * clean signature and editor_singleton through engine_globals. The OpenGL
+ * singleton RVA is 0x309B588.
+ */
 #define PR_EDITOR_SINGLETON_RVA 0x3056748u
 #define PR_EDITOR_PALETTE_OFF   0x20660u
 #define PR_PALETTE_VTABLE_RVA   0x20499A0u
@@ -104,11 +71,10 @@ static int pr_read_ptr(const void *address, void **out)
     }
 }
 
-/* Non-zero when `address` lies in a section of the host image the loader mapped READ-ONLY (READ
- * set, WRITE and EXECUTE clear) -- .rdata on both shipped builds, where the engine's vtables live.
- * This is the plausibility test for the palette vtable pointer read out of the live editor object:
- * that pointer is already correct for whichever build we are in, so there is nothing to compare it
- * against, only somewhere it has to land. SEH-guarded; a malformed or unreadable image refuses. */
+/* Check that the palette vtable lies in a readable, non-writable, non-
+ * executable host section. This is a plausibility check; unreadable PE
+ * headers refuse.
+ */
 static int pr_address_in_readonly_section(const uint8_t *module_base, const void *address)
 {
     __try {
@@ -156,9 +122,7 @@ int sh_palette_refresh_install(const sig_result *results, size_t count,
         return 0;
     }
 
-    /* The clean SIG_OK resolve above IS the identity proof; all that is left to confirm is that the
-     * resolver's own address and RVA agree about this image base, so the pointer we cache and the
-     * base we later derive the editor from cannot be describing two different modules. */
+    /* Require the resolved address and RVA to describe the same host module. */
     if (builder->addr != (uintptr_t)module_base + builder->rva) {
         pr_refuse("palette-refresh REFUSED: SnapPaletteBuild resolve is not self-consistent with the host image base");
         return 0;
@@ -196,10 +160,7 @@ int sh_palette_refresh_after_decl_registration(void)
         pr_refuse("palette-refresh REFUSED: clean builder/module dependency unavailable");
         return 0;
     }
-    /* The editor singleton is located at runtime from the code site that computes its address, so
-     * this validates against a value derived on THIS build rather than one baked for another. If
-     * the resolver cannot place it, refuse -- a wrong pointer is worse than none, because the
-     * caller cannot tell the difference. */
+    /* Use the runtime-resolved editor global; refuse if it is unavailable. */
     {
         uintptr_t expect = glb_resolve(g_module_base, "editor_singleton", NULL);
         if (!expect) {
@@ -213,10 +174,9 @@ int sh_palette_refresh_after_decl_registration(void)
         }
     }
 
-    /* Validate the palette object before invoking the engine-owned rebuild. The vtable pointer is
-     * read out of the live editor object, so it is already right for this build; what is checked is
-     * that it is present and plausibly a vtable -- a non-null read landing in a read-only section of
-     * the host image -- rather than that it equals one build's recorded address. */
+    /* Before calling the builder, require a readable palette object and a
+     * non-null vtable in a read-only host section.
+     */
     vtable_status = pr_read_ptr(editor + PR_EDITOR_PALETTE_OFF, &palette_vtable);
     if (vtable_status < 0 || vtable_status == 0 ||
         !pr_address_in_readonly_section(g_module_base, palette_vtable)) {

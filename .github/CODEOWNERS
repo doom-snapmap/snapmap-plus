@@ -1,18 +1,10 @@
-# Code owners -- a change to any path below REQUIRES the maintainer's review before it can merge.
-# Pair this with a branch ruleset on `main` that has "Require review from Code Owners" enabled.
-# These are the supply-chain-critical surfaces: the CI/release workflows, the build scripts, and the installer.
-#
-# NOTE: @adiazpar is the maintainer's GitHub handle -- verify it matches the account that owns the repo
-# (an invalid handle here is silently ignored by GitHub, i.e. no enforcement).
+# Maintainer ownership for workflows, builds and installation.
+# Enforcement requires a branch ruleset with code-owner review enabled
+# and a valid maintainer handle.
 
 /.github/      @adiazpar
 *.ps1          @adiazpar
 /installer/    @adiazpar
 
-# The release tooling the workflows EXECUTE. prepare-release.yml is owner-guarded
-# by /.github/ above, but it runs `python3 tools/draft_changelog.py` in the one
-# job that holds ANTHROPIC_API_KEY -- so without this line a contributor could
-# change what that job runs, and the prompt it runs with, without an owner ever
-# seeing it. tools/requirements.txt pins the drafter's dependencies by hash and
-# is the same class of surface.
+# Release scripts and dependencies execute in the credential-bearing draft job.
 /tools/        @adiazpar

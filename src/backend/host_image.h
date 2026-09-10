@@ -1,20 +1,6 @@
-/* host_image.h -- resolve the DOOM image this DLL is loaded into, whichever build it is.
- *
- * DOOM 2016 ships two executables built from one source tree, linked one second apart:
- * DOOMx64vk.exe (imports vulkan-1.dll) and DOOMx64.exe (imports OPENGL32.dll). Their import
- * tables are otherwise identical, both import XINPUT1_3.dll, and the game switches between
- * them by relaunching itself when r_renderAPI changes -- so a user can land in either one
- * from the same Steam launch, and we get loaded into whichever it is.
- *
- * The backend used to find DOOM with GetModuleHandleA("DOOMx64vk.exe"), which returns NULL
- * under the OpenGL build and left the whole backend unarmed. It never needed a name: our DLL
- * is loaded BY DOOM, so the host process image IS DOOM. GetModuleHandleA(NULL) is the correct
- * and renderer-agnostic way to ask.
- *
- * The basename is still checked, but only to refuse a host that is not DOOM at all (this DLL
- * is named XINPUT1_3.dll and could be dropped beside any game). Both shipped names are accepted.
- * Real identity comes from the signature layer, which pins each engine function by its bytes.
- */
+/* Resolve the host DOOM image for either supported renderer.
+ * GetModuleHandle(NULL) finds the process image; accepted basenames are
+ * DOOMx64vk.exe and DOOMx64.exe. Engine functions are resolved by signature. */
 #ifndef BACKEND_HOST_IMAGE_H
 #define BACKEND_HOST_IMAGE_H
 
@@ -22,14 +8,12 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* The frontend is a separate C++ DLL that compiles host_image.c too (it reports the renderer in a
- * feedback report), so this needs C linkage from that side -- same arrangement as log_rotate.h. */
+/* Also compiled into the C++ frontend for renderer reporting. */
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Base of the host DOOM image, or NULL if the host is not a DOOM 2016 executable we ship for.
- * Idempotent and cheap after the first call; safe to call from any thread. */
+/* Return the accepted host image base, or NULL. Results are cached after startup. */
 const uint8_t *sh_host_image_base(void);
 
 /* SizeOfImage from the host's PE headers, or 0 if unresolved. */
@@ -39,30 +23,16 @@ size_t sh_host_image_size(void);
  * Use this for log lines and crash records so a report names the build it came from. */
 const char *sh_host_image_name(void);
 
-/* 1 when the host is running the Vulkan renderer, 0 when OpenGL, -1 when unresolved.
- * Decided by which renderer library is loaded, not by the executable name. Only the handful
- * of genuinely renderer-dependent probes should consult this -- everything else in the
- * backend is renderer-blind and must stay that way. */
+/* Infer Vulkan (1), OpenGL (0), or unresolved (-1) from loaded renderer libraries. */
 int sh_host_is_vulkan(void);
 
-/* The same fact as sh_host_is_vulkan, as the short token the reporting pipeline carries:
- * "vulkan", "opengl", or "" when the renderer could not be determined.
- *
- * Memoized once the answer is DEFINITE, and deliberately not before: a call made before the
- * renderer library is mapped must not freeze an empty answer in for the rest of the session.
- * Once cached, a later call is a plain pointer read that touches no loader state -- which is
- * what lets the crash path snapshot it at arm time and never ask again while the process is
- * dying (see crash_report.c's safety model).
- */
+/* Return "vulkan", "opengl", or "". Cache only a definite renderer so startup
+ * calls can retry; later reporting calls use the cached string without loader access. */
 const char *sh_host_renderer_name(void);
 
-/* Non-zero only when the host is the exact build every pinned `known_rva` in this product was
- * extracted from (the Vulkan image documented in signatures.c).
- *
- * A known_rva is a fact about one link output and nothing else. Using it as a fallback on any
- * other build publishes a pointer into unrelated code -- which is worse than publishing nothing,
- * because the caller cannot tell the difference. Every RVA backstop must be gated on this, so a
- * signature miss degrades to a clean refusal instead of a wild call. */
+/* Permit pinned-RVA fallbacks for a host named DOOMx64vk.exe.
+ * This checks the basename only, not the extraction-build hash or version.
+ * Every raw-RVA fallback must use this gate to exclude the OpenGL image. */
 int sh_host_is_pinned_rva_build(void);
 
 #ifdef __cplusplus

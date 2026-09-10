@@ -1,47 +1,7 @@
-/* community/worker.js -- the Community service: a Cloudflare Worker that serves the site's
- * Community section (posts, comments, reactions) from GitHub Discussions, brokers "Sign in with
- * GitHub", and hosts screenshot uploads.
- *
- * Why it exists: repository Discussions are GraphQL-only, and GitHub's GraphQL API requires a
- * token even for public data -- the site cannot fetch discussions anonymously the way the
- * changelog fetches releases. So the site calls this service: reads are proxied with a credential
- * only it holds, and writes are performed with the SIGNED-IN USER's token so authorship is really
- * them. The GitHub client secret and user tokens never touch the browser.
- *
- * Identity model:
- *   - reads: the org-owned GitHub App (secrets APP_ID + APP_PRIVATE_KEY -> installation token),
- *     with a plain PAT fallback (secret GITHUB_TOKEN).
- *   - writes: OAuth authorization-code flow against the same App (secret CLIENT_SECRET). The
- *     browser holds only an opaque session id (localStorage, sent as a Bearer header); the user's
- *     GitHub token lives in Workers KV, server-side.
- *
- * Surface (JSON unless noted; CORS for the site origin; * = requires a Bearer session):
- *   GET  /                                      health check
- *   GET  /auth/login                            302 to GitHub authorize (KV-backed state)
- *   GET  /auth/callback?code&state              exchange code, mint session, 302 back to the site
- *   GET  /auth/me                             * session's { login, name, avatar }
- *   POST /auth/logout                         * delete the session
- *   GET  /community/categories                  discussion categories (the section tabs)
- *   GET  /community/discussions?category&after  paged post list, newest first
- *   GET  /community/discussions/:number         one post: bodyHTML + comments + reactions
- *   POST /community/discussions               * create a post { categoryId, title, body }
- *   POST /community/discussions/:number/comments * add a comment { body, replyToId? }
- *   POST /community/reactions                 * add a reaction { subjectId, content }
- *   POST /community/preview                   * render markdown -> GitHub-sanitized HTML { text }
- *   POST /media/upload?name=<filename>        * store an image in R2 (raw body) -> { url }
- *   GET  /media/<key>                           stream an uploaded image (long-cache)
- *
- * Abuse posture: session-gated writes + per-session KV rate limits + size caps; image uploads are
- * magic-byte sniffed against an allowlist. Optional Turnstile: when secret TURNSTILE_SECRET is
- * set, create endpoints also require a `turnstile` token in the JSON body (site-key pair on the
- * pages). GitHub's own moderation tools are the backstop.
- *
- * Ops notes:
- *   - secrets: APP_ID, APP_PRIVATE_KEY (PKCS#8 PEM), CLIENT_SECRET; optional GITHUB_TOKEN,
- *     TURNSTILE_SECRET. Bindings: KV SESSIONS, R2 MEDIA (wrangler.toml).
- *   - read caching: an in-isolate TTL cache (the edge Cache API is a no-op on workers.dev
- *     domains); a successful write flushes it so the writer sees their post promptly.
- */
+/* Community API for GitHub Discussions, OAuth sessions and screenshot uploads.
+ * Reads use an App token; writes use the signed-in user token held in SESSIONS KV.
+ * The browser receives only an opaque session ID. MEDIA R2 stores uploaded images.
+ * See README.md for setup, routes and operational limits. */
 
 const REPO_OWNER = 'doom-snapmap';
 const REPO_NAME = 'snapmap-plus';
@@ -51,10 +11,8 @@ const SITE_ORIGIN = 'https://doom-snapmap.github.io';
 const SITE_BASE = SITE_ORIGIN + '/snapmap-plus';
 const CLIENT_ID = 'Iv23liFSVvbqF4r8a2uK';   // public identifier of the snapmap-plus-community App
 
-/* Categories reserved for other channels (Discord) never surface on the site -- not in the
- * tabs, not in the composer, and posts filed under them stay off the site's lists. Creating a
- * new category in repo settings needs no code change: anything not on this list appears
- * automatically. */
+/* Hide reserved categories from lists and composition; new unlisted categories
+ * appear automatically. */
 const HIDDEN_CATEGORY_SLUGS = new Set(['polls', 'show-and-tell', 'ideas']);
 
 /* Tab order: content categories first, housekeeping last; anything new lands in between,
@@ -77,7 +35,7 @@ const SESSION_TTL = 30 * 86400;      // 30 days
 const STATE_TTL = 600;               // 10 minutes to complete the GitHub round-trip
 
 const MAX_UPLOAD = 8 * 1024 * 1024;  // 8 MB per image
-/* per-session hourly write budgets -- generous for a human, a wall for a loop */
+/* Per-session write thresholds; KV counters do not enforce atomic global limits. */
 const LIMITS = { post: 10, comment: 60, reaction: 120, upload: 30, preview: 120, edit: 60 };
 
 /* ---------------- small helpers ---------------- */
@@ -187,9 +145,8 @@ async function gql(token, query, variables) {
   });
   if (!res.ok) { console.log('graphql http', res.status, (await res.text()).slice(0, 300)); return null; }
   const out = await res.json();
-  /* a missing node (e.g. discussion number that doesn't exist) arrives as a NOT_FOUND entry in
-   * `errors` ALONGSIDE partial data -- pass the data through so callers can 404 precisely; only a
-   * response with no data at all is an upstream failure */
+  /* Keep partial GraphQL data so callers can distinguish a missing node from an
+   * upstream failure. Fail here only when no data is available. */
   if (out.errors) console.log('graphql errors:', JSON.stringify(out.errors).slice(0, 500));
   return out.data || null;
 }
@@ -295,9 +252,8 @@ mutation($subjectId: ID!, $content: ReactionContent!) {
   }
 }`;
 
-/* author controls -- GitHub enforces authorship server-side (an author can edit/delete their own
- * discussions and comments; repo maintainers can moderate anything), so these carry no
- * authorization logic of their own: a non-author's attempt simply comes back as an error */
+/* These mutations run with the user token; GitHub enforces author and moderator
+ * permissions. Read/write handlers perform their own input checks. */
 const M_UPDATE_DISCUSSION = `
 mutation($discussionId: ID!, $title: String, $body: String, $categoryId: ID) {
   updateDiscussion(input: { discussionId: $discussionId, title: $title, body: $body, categoryId: $categoryId }) {
@@ -414,7 +370,8 @@ async function getSession(env, req) {
   try { return { sid: m[1], user: JSON.parse(raw) }; } catch { return null; }
 }
 
-/* naive per-session counter -- KV is not atomic, but a small overshoot is harmless here */
+/* Approximate session throttling: KV get/put is not atomic, so concurrent requests
+ * can lose increments. Each write renews the one-hour expiry. */
 async function rateOk(env, sid, kind) {
   const limit = LIMITS[kind];
   const key = 'rate:' + kind + ':' + sid;
@@ -493,8 +450,8 @@ async function authCallback(env, req, url) {
     name: user.name || user.login,
     avatar: user.avatar_url,
   }), { expirationTtl: SESSION_TTL });
-  /* the session id rides the URL FRAGMENT (never sent to servers/logs); the page script pockets
-   * it into localStorage and scrubs the URL */
+  /* Return the opaque session in the URL fragment; the page stores it and clears
+   * the fragment. GitHub tokens remain in KV. */
   return Response.redirect(back + '#session=' + sid, 302);
 }
 
@@ -520,8 +477,8 @@ async function getCategories(env) {
 }
 
 async function listDiscussions(env, categorySlug, after, sort) {
-  /* 'top' has no GraphQL orderBy: fetch a wide window newest-first and rank by reactions here.
-   * Correct while the forum holds <100 posts per view; beyond that the tail truncates (logged). */
+  /* Rank a bounded newest-first window by reactions for top sort.
+   * This is not a global ranking when older posts lie outside that window. */
   const top = sort === 'top';
   const orderField = sort === 'active' ? 'UPDATED_AT' : 'CREATED_AT';
   const key = 'list|' + (categorySlug || '') + '|' + (top ? '' : (after || '')) + '|' + (top ? 'TOP' : orderField);

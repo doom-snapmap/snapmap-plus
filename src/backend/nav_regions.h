@@ -1,40 +1,13 @@
-/* nav_regions.h -- the author's navigation regions, read out of the map.
+/* Read Blocking Box navigation geometry and instance ownership from map JSON.
  *
- * WHAT AN AUTHOR ACTUALLY DOES
- * ----------------------------
- * They build their arena out of Blocking Boxes, as they always have, and tick
- * "AI Navigation" on the ones demons are meant to walk on. That tick sets
- * `affectsNavmesh` on the volume.
+ * AI Navigation uses flags.noFlood. Legacy affectsNavmesh markers migrate
+ * before native parsing; an explicit new marker, including false, wins.
+ * Runtime obstacle policy is applied separately. See docs/navigation-
+ * markers.md.
  *
- * That field is not ours. `snapmaps/volume/blocking` has carried a bool
- * `affectsNavmesh` since release, and the shipped editor tile already declares
- * `affectsNavmeshPath = "affectsNavmesh"` beside `showOnSpawnPath` and
- * `networkStaticPath`. id wired the whole path and then never exposed the
- * property sheet row, and nothing in the shipped binary consumes the value: the
- * one function that references the string (RVA 0x545120) is the editor's
- * property-write dispatcher, which copies it into the entity's spawn args, and
- * no AAS or obstacle code reads it back.
- *
- * That is what makes this marker VANILLA-SAFE BY CONSTRUCTION. Snapmap+ only
- * adds the missing property-sheet row; the field, its typeinfo path and its
- * serialization already exist in every player's game. A vanilla client loads a
- * map full of ticked volumes, plumbs the bool to spawn args exactly as it always
- * did, and nothing reads it. No new entityDef, no palette entry, no unknown
- * inherit -- the three things that could make a stock client refuse a map.
- *
- * WHAT THIS MODULE DOES
- * ---------------------
- * Reads the map JSON once and answers: which module instances are placed, and
- * which ticked volumes belong to each. Attribution is by `instanceEntities` --
- * the engine's OWN record of which entities belong to which instance -- and
- * never by containment, because an entity's coordinates are module-local and
- * two instances of one module have identical local coordinates.
- *
- * A region is reported in MODULE-LOCAL space, which is the space the module's
- * AAS is baked in, so the caller can hand it straight to the augmenter without
- * knowing where the instance sits in the world.
- *
- * NO GAME BYTES: tests synthesize map JSON, they do not embed a real map.
+ * Ownership comes from instanceEntities, never spatial containment:
+ * coordinates are module-local and repeated instances can share the same
+ * local geometry.
  */
 #ifndef SNAPMAP_PLUS_NAV_REGIONS_H
 #define SNAPMAP_PLUS_NAV_REGIONS_H
@@ -43,7 +16,18 @@
 
 #define SH_NAVR_MAX_INSTANCES   256
 #define SH_NAVR_MAX_REGIONS     512
-#define SH_NAVR_MODULE_CAP      128     /* "category/module" + NUL */
+#define SH_NAVR_MODULE_CAP      128     /* A box encoded as one oriented face and
+                                         * its depth in module-local space.
+                                         * spawnPosition is centred in x/y and at
+                                         * the bottom in local z. Corners wind
+                                         * clockwise from +Z; face>>1 selects the
+                                         * OBB axis and face&1 its negative side.
+                                         *
+                                         * nav_geometry reconstructs the solid and
+                                         * considers every face. Walkability
+                                         * depends on the nav class's minFloorCos
+                                         * and clearance settings.
+                                         */
 
 /* One walkable surface an author asked for, in module-local coordinates.
  *
@@ -78,9 +62,9 @@ typedef struct sh_nav_region {
     int marked;            /* distinguishes support from an unmarked obstacle */
 } sh_nav_region;
 
-/* A placed module. `origin`/`orientation` are what BuildAAS applies to that
- * instance's navigation, and together with `module` they are the only identity
- * an instance has -- idSnapInstance carries no id field. */
+/* Placed module identity and transform used by BuildAAS. idSnapInstance has
+ * no separate id field.
+ */
 typedef struct sh_nav_instance {
     char  module[SH_NAVR_MODULE_CAP];   /* "category/module", no path, no .decl */
     float origin[3];
@@ -99,31 +83,33 @@ typedef struct sh_nav_map {
     int             obstacle_count;
 } sh_nav_map;
 
-/* Read `json` into `out`. Returns 1 if the map parsed (even with zero regions),
- * 0 if it is not a map document at all. Never raises; the input is a stranger's
- * map. `out` is fully overwritten, including on failure. */
+/* Parse into out, overwriting it even on failure. Returns 1 for a map
+ * document, including one with no regions, or 0 for invalid input.
+ */
 int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out);
+
+/* Convert legacy Blocking Box markers before native map parsing. Returns a
+ * NUL-terminated HeapAlloc buffer (caller HeapFrees), or NULL for no change or
+ * a refusal. Other entities and unrelated bytes are preserved. */
+char *sh_nav_regions_migrate(const char *json, size_t len, size_t *out_len);
 
 /* Legacy per-entity refresh for callers without a complete-map snapshot.
  * Production editor baking uses sh_nav_bake_set_snapshot instead: it refreshes
  * ownership and the instance table together with geometry, including new IDs.
  */
 
-/* Serialize live entity `id` to JSON. Returns the length written, or <= 0.
- * The engine's own reflection does this; see apply_engine.c's serialize_entity
- * slot, which is what the entity-state editor already uses in production. */
+/* Serialize live entity id with engine reflection. Returns bytes written, or
+ * <= 0 on failure.
+ */
 typedef int (*sh_navr_entity_json)(int id, char *out, int cap, void *ctx);
 
 /* Is `id` a live entity? */
 typedef int (*sh_navr_entity_valid)(int id, void *ctx);
 
-/* Re-read every Blocking Box's marker from the live entities, replacing `m`'s
- * region set while keeping its instance table and attribution. Returns the
- * number of marked volumes found, or -1 if the live surface could not be read
- * (in which case `m` is left exactly as it was, so a failure falls back to what
- * the map was loaded with rather than to nothing).
- *
- * `highest_id` bounds the scan; ids are probed through `valid`. */
+/* Legacy refresh of markers and geometry using the existing instance
+ * attribution. Returns the marked-volume count, or -1 without changing m if
+ * the live surface cannot be read. highest_id bounds probes through valid.
+ */
 int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
                                 sh_navr_entity_valid valid,
                                 sh_navr_entity_json get_json, void *ctx);

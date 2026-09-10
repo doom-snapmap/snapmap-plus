@@ -1,9 +1,5 @@
-// snapmap-plus -- the Snapmap+ installer.
-//
-// A single static Windows CLI that installs / updates / removes the Snapmap+ overlay in a DOOM 2016 install,
-// with backup and an uninstall that restores vanilla. It detects DOOM, deploys the overlay (or
-// downloads a release), and keeps a record so uninstall reverses exactly what it placed. Stdlib only, no
-// external dependencies.
+// Snapmap+ installer: discover DOOM, verify and deploy the bundle, and record
+// backups for uninstall. Runtime dependencies are limited to the Go standard library.
 package main
 
 import (
@@ -54,8 +50,7 @@ to install (or to update when a newer version is out), and takes any command abo
 func main() {
 	cleanupSelfUpdateLeftovers() // remove any <exe>.old a prior self-update left behind
 	if len(os.Args) < 2 {
-		// no args = a double-click -> the status-aware interactive prompt (install / update notice /
-		// full command loop), so every command works without a terminal or PATH.
+		// No arguments opens the interactive prompt used when double-clicking the executable.
 		interactiveMain()
 		return
 	}

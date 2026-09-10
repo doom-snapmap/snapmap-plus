@@ -20,8 +20,7 @@ func writeFileAt(t *testing.T, path, body string) {
 	}
 }
 
-// A fresh install with no legacy tree still gets the starter package, so a user has an obvious place to drop
-// their own content instead of a bare overrides root.
+// A fresh install receives an empty starter package.
 func TestMigrateLegacyOverrides_scaffoldsStarterPackage(t *testing.T) {
 	la, _ := newDataDirs(t)
 
@@ -33,8 +32,7 @@ func TestMigrateLegacyOverrides_scaffoldsStarterPackage(t *testing.T) {
 	}
 }
 
-// The pre-package overrides\generated tree becomes a real package: its files move across with their layout
-// intact, the marker is written, and the old tree is removed once everything is verified present.
+// Migration preserves relative paths, creates a marker and removes the old tree.
 func TestMigrateLegacyOverrides_movesLegacyTreeIntoPackage(t *testing.T) {
 	la, _ := newDataDirs(t)
 	writeFileAt(t, overridesPath(la, "generated", "decls", "snapeditorentitydef", "func", "lift.decl"), "LIFT")
@@ -71,8 +69,8 @@ func TestMigrateLegacyOverrides_removesEmptyLegacyTree(t *testing.T) {
 	}
 }
 
-// A file the user already has in the starter package wins over a same-named file in the legacy tree, and the
-// legacy tree is still cleared -- the migration never overwrites, exactly like the app-data migration.
+// The destination wins a name collision; the old source is removed without comparing
+// bytes.
 func TestMigrateLegacyOverrides_neverClobbersExisting(t *testing.T) {
 	la, _ := newDataDirs(t)
 	rel := filepath.Join("decls", "snapeditorentitydef", "func", "lift.decl")
@@ -86,8 +84,7 @@ func TestMigrateLegacyOverrides_neverClobbersExisting(t *testing.T) {
 	}
 }
 
-// An existing marker is never rewritten -- the user may have renamed or re-described their package, and this
-// runs on every update.
+// Repeated installs preserve the user's existing package marker.
 func TestMigrateLegacyOverrides_keepsExistingMarker(t *testing.T) {
 	la, _ := newDataDirs(t)
 	marker := overridesPath(la, starterPackageName, "package.json")

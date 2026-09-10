@@ -1,24 +1,13 @@
-/* snapmap_plus_iface.c -- the BACKEND-hosted interface-object factory + the live REGISTER/UNREGISTER/DRAIN
- * bodies (the generic, engine-free trio). See snapmap_plus_iface.h for the pinned ABI.
- *
- * The OG builds this object in XINPUT1_3 FUN_1800229b1 (operator_new(0x60) + the 0x78 sub-object + the
- * RB-tree map + the work-queue vector). We build the SAME shape with a portable C implementation:
- * the cmd-map is a small open hash/linear list keyed by name (the frontend's 20 subcommands fit easily),
- * the work-queue is a growable sh_work_item vector, and the mutex is a Win32 CRITICAL_SECTION stored in
- * the obj+0x08 blob. The vtable is a single static instance shared by all (only one object is ever made).
- *
- * Clean-room: our own RE; zero OG bytes. Compiled into the backend (XINPUT1_3.dll); the frontend only
- * CALLS through the vtable (it never constructs the object).
- */
+/* Backend-owned shared interface factory, command registry, and work queue.
+ * The frontend calls the vtable; this module has no engine link dependency.
+ * See snapmap_plus_iface.h for the fixed cross-DLL layout. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include "snapmap_plus_iface.h"
 
-/* The cmd-map: a simple name->{handler,ctx} list. OG uses a std::map RB-tree at sub+0x00; for the clone
- * the lookup is by name and the set is small (20), so a linear/grown array is faithful in behavior (same
- * register/lookup/unregister semantics) without re-implementing a std::map ABI across the DLL line. */
+/* Small command registry backed by a growable linear array. */
 typedef struct cmd_entry {
     char           *name;           /* heap-owned */
     sh_cmd_handler  handler;
@@ -31,30 +20,23 @@ typedef struct cmd_map {
     size_t     cap;
 } cmd_map;
 
-/* The sub-object as the backend actually allocates it: the pinned sh_iface_sub header + the live C
- * containers we back the map/work-queue with. The pinned wq_begin/end/cap mirror the vector; the cmd_map
- * lives where the OG RB-tree head would (sub+0x00..) -- we stash a cmd_map* in map_root and keep map_nil
- * as a sentinel so the layout offsets stay put. */
+/* Keep the fixed ABI header first; private storage and locking follow it. */
 typedef struct sub_impl {
-    sh_iface_sub  pinned;           /* the ABI-pinned header (must be first: offsets are load-bearing) */
-    cmd_map       map;              /* the live cmd-map backing store */
+    sh_iface_sub  pinned;           /* Must remain first. */
+    cmd_map       map;
     CRITICAL_SECTION lock;          /* guards both the map and the work-queue */
 } sub_impl;
 
-/* --------------------------------------------------------------------- the mutex in obj+0x08 ---------
- * OG: _Mtx_init_in_situ writes a CRT _Mtx into obj+8. We store a CRITICAL_SECTION in the same blob (the
- * blob is 0x50 bytes; CRITICAL_SECTION is 0x28 on x64 -- fits). The frontend never touches it; only the
- * backend's drain/register lock through it (and through the sub's lock). We use the sub's CRITICAL_SECTION
- * as the single guard (the OG's two mutexes guard the same logical queue); the obj+0x08 blob is reserved
- * for ABI-layout exactness and left zero. */
+/* obj + 0x08 remains reserved for ABI compatibility. The subobject's critical
+ * section is the live guard for both registry and queue. */
 
-/* --------------------------------------------------------------------- REGISTER (+0x188) ------------ */
+
 static void iface_register_cmd(sh_iface *self, const char *name, sh_cmd_handler handler, void *ctx)
 {
     if (!self || !self->sub || !name) return;
     sub_impl *si = (sub_impl *)self->sub;
     EnterCriticalSection(&si->lock);
-    /* replace if the name already exists (OG map insert overwrites the slot) */
+    /* Registration replaces an existing name. */
     for (size_t i = 0; i < si->map.count; i++) {
         if (strcmp(si->map.items[i].name, name) == 0) {
             si->map.items[i].handler = handler;
@@ -81,7 +63,7 @@ static void iface_register_cmd(sh_iface *self, const char *name, sh_cmd_handler 
     LeaveCriticalSection(&si->lock);
 }
 
-/* --------------------------------------------------------------------- UNREGISTER (+0x190) ---------- */
+
 static void iface_unregister_cmd(sh_iface *self, const char *name)
 {
     if (!self || !self->sub || !name) return;
@@ -98,24 +80,12 @@ static void iface_unregister_cmd(sh_iface *self, const char *name)
     LeaveCriticalSection(&si->lock);
 }
 
-/* --------------------------------------------------------------------- DRAIN (+0x1a0) ---------------
- * Run every queued {handler, args} on the CURRENT thread -- whichever one calls this, which in the shipped
- * build is the frontend's UI worker thread, since its think-loop calls this per-frame. That is NOT DOOM's
- * main thread. Then reset the queue. OG: takes the mutex, runs [wq_begin,wq_end), clears the vector.
- * Each item owns its argv copy -- freed after the handler runs. SEH would be ideal but this file is plain
- * C without the engine's fault surface; a handler fault here would already be the SnapStack op's concern
- * (op execution wraps it). The queue is PRODUCER-LESS in the shipped build: the `sh` dispatch stopped
- * enqueuing when it moved to inline main-thread execution (issue #61) -- precisely because this drain
- * runs on the worker thread, the wrong place for engine-touching SnapStack work. The machinery stays
- * (pinned ABI; and the per-tick hook below rides this call). */
-/* Optional backend-side per-tick housekeeping, registered at install time. A REGISTERED HOOK, not an
- * extern call: this file is shared ABI and is also compiled standalone into the C unit tests, which link
- * none of the backend's engine layer -- an `extern void sh_apply_prefab_poll_play(void)` here builds fine
- * in the DLL and fails the test binaries with LNK2019. NULL unless the backend sets it, so the tests link
- * clean and the drain stays a no-op for anyone who does not register one.
- * The backend currently uses it to re-initialise a prefab staging slot that a Play round-trip would leave
- * dangling. The drain is the one thing the frontend calls on every think-loop tick, which is the cadence
- * that needs. */
+/* Drain on the calling thread, normally the frontend UI worker. Engine-touch
+ * command dispatch now runs inline on the engine main thread instead of
+ * enqueueing here. Retain this ABI slot for queue consumers and the tick hook.
+ * Detached work owns argv until its handler returns. */
+/* Register engine maintenance indirectly so standalone common-module tests
+ * do not acquire an engine-layer link dependency. */
 static void (*g_tick_hook)(void) = NULL;
 
 void sh_iface_set_tick_hook(void (*fn)(void))
@@ -133,7 +103,7 @@ static void iface_drain_work_queue(sh_iface *self)
     EnterCriticalSection(&si->lock);
     sh_work_item *begin = sub->wq_begin;
     sh_work_item *end   = sub->wq_end;
-    /* detach the queue so handlers can re-enqueue without reentrancy on our iteration */
+    /* Detach under the lock so handlers can enqueue without changing this iteration. */
     sub->wq_begin = NULL;
     sub->wq_end   = NULL;
     sub->wq_cap   = NULL;
@@ -141,20 +111,16 @@ static void iface_drain_work_queue(sh_iface *self)
 
     for (sh_work_item *it = begin; it != end; it++) {
         if (it->handler) it->handler(it->ctx, it->argc, (const char **)it->argv);
-        /* free the per-item argv copy (each string + the array) */
+
         if (it->argv) {
             for (int i = 0; i < it->argc; i++) free(it->argv[i]);
             free(it->argv);
         }
     }
-    free(begin);   /* the detached vector's storage */
+    free(begin);
 }
 
-/* --------------------------------------------------------------------- cmd-map LOOKUP (C2, +0x58) --
- * The `sh` dispatcher (XINPUT 0x7620) looks the subcommand up in the runtime cmd-map. OG does an RB-tree
- * find on the std::map at obj+0x58; our backing store is the same linear map iface_register_cmd fills.
- * Returns 1 + the {handler,ctx} on a hit; 0 on a miss. Taken under the cmd-map lock for consistency with
- * a concurrent register (the registrar runs on the UI thread, the dispatcher on the console thread). */
+/* Locked registry lookup; copy handler/context on a hit and return 1, else 0. */
 int sh_iface_lookup_cmd(sh_iface *self, const char *name, sh_cmd_handler *handler, void **ctx)
 {
     if (!self || !self->sub || !name) return 0;
@@ -173,11 +139,7 @@ int sh_iface_lookup_cmd(sh_iface *self, const char *name, sh_cmd_handler *handle
     return found;
 }
 
-/* --------------------------------------------------------------------- work-queue ENQUEUE -----
- * The producer the OG `sh` dispatcher is: append {handler,ctx,argc, deep-copied argv} onto the work-queue
- * vector (sub+0x60/+0x68/+0x70) under the mutex. The DRAIN (+0x1a0) runs + frees it on the UI thread. We
- * grow the vector geometrically (the OG std::vector push_back); the argv strings are heap-duplicated so
- * the caller (the engine cmd handler, whose argv is engine-owned + transient) need not keep them alive. */
+/* Enqueue a deep copy of argv for later execution on the drain caller's thread. */
 int sh_iface_enqueue_work(sh_iface *self, sh_cmd_handler handler, void *ctx,
                           int argc, const char **argv)
 {
@@ -185,7 +147,7 @@ int sh_iface_enqueue_work(sh_iface *self, sh_cmd_handler handler, void *ctx,
     sub_impl *si = (sub_impl *)self->sub;
     sh_iface_sub *sub = &si->pinned;
 
-    /* deep-copy argv OUTSIDE the lock (malloc/strdup are the slow part). */
+
     char **argv_copy = NULL;
     if (argc > 0 && argv) {
         argv_copy = (char **)calloc((size_t)argc, sizeof(char *));
@@ -203,7 +165,7 @@ int sh_iface_enqueue_work(sh_iface *self, sh_cmd_handler handler, void *ctx,
     }
 
     EnterCriticalSection(&si->lock);
-    /* grow the vector if full (geometric, like std::vector). begin/end/cap are sh_work_item*. */
+
     size_t cur_len = (size_t)(sub->wq_end - sub->wq_begin);
     size_t cur_cap = (size_t)(sub->wq_cap - sub->wq_begin);
     if (cur_len == cur_cap) {
@@ -227,29 +189,17 @@ int sh_iface_enqueue_work(sh_iface *self, sh_cmd_handler handler, void *ctx,
     return 1;
 }
 
-/* --------------------------------------------------------------------- the shared vtable ------------
- * One static instance. The live trio carry real bodies; every other slot is NULL (a pin-and-stub
- * placeholder). The frontend only invokes +0x1a0 (drain) in the think-loop and +0x88/+0x1c0/+0x1d0/
- * +0x1b0/+0x98 in the EntityMode key-poll branch -- which is GATED behind a debug flag + an editor-ready
- * check, so it does not fire in normal boot. The remaining slots are filled later. A defensive frontend treats a NULL
- * slot as "not yet implemented" (it null-checks before calling the optional ones).
- *
- * A C99 designated initializer binds the live bodies to their named members; ALL other slots start
- * NULL. The engine-touch slots (selection/toast/class-read) are bound at install via
- * sh_iface_bind_engine_slots -- so the vtable is no longer const (the backend patches the engine slots
- * once the editor singleton + the AddToSelection/ClearSelection/Toast engine fns are signature-resolved).
- * The offsets stay pinned by the struct layout regardless. */
+/* One mutable shared vtable. Registry/drain slots bind immediately; config
+ * and engine callbacks bind separately. Optional slots may remain null. */
 static sh_iface_vtbl g_iface_vtbl_live = {
     .register_cmd     = iface_register_cmd,     /* +0x188 */
     .unregister_cmd   = iface_unregister_cmd,   /* +0x190 */
     .drain_work_queue = iface_drain_work_queue, /* +0x1a0 */
-    /* engine-touch + apply/serialize slots NULL until sh_iface_bind_engine_slots / the heavy bind */
+
 };
 
-/* --------------------------------------------------------------------- config-slot binder ------
- * Configuration is engine-independent and must be callable as soon as the frontend starts. Keep this
- * binder separate from the later engine-slot binder so that binding engine callbacks cannot clear or
- * race these two append-only cells. */
+/* Config is available before engine installation. Keep its binding separate
+ * so later engine binding does not overwrite these cells. */
 void sh_iface_bind_config_slots(const sh_iface_config_slots *slots)
 {
     if (!slots) return;
@@ -257,12 +207,8 @@ void sh_iface_bind_config_slots(const sh_iface_config_slots *slots)
     g_iface_vtbl_live.config_set_json = slots->config_set_json; /* +0x2B8 */
 }
 
-/* --------------------------------------------------------------------- engine-slot binder ------
- * The backend resolves the editor singleton + the selection/toast engine fns by SIGNATURE, then hands the
- * bodies here once. We patch the SINGLE shared vtable's engine-touch slots in place (only one interface
- * object is ever made, so all instances see the bind). Idempotent + null-tolerant: a NULL body leaves the
- * slot NULL (the frontend null-checks before calling). Keeps the common factory engine-FREE -- the engine
- * code lives entirely in the backend (iface_engine.c); this just wires the function pointers. */
+/* Copy engine callbacks into the shared vtable without linking this module
+ * to the engine layer. Null callbacks clear their corresponding slots. */
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
 {
     if (!s) return;
@@ -280,11 +226,11 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     g_iface_vtbl_live.hovered_id        = s->hovered_id;         /* +0x198 */
     g_iface_vtbl_live.is_entity_mode    = s->is_entity_mode;     /* +0x1c0 (Create-New-Timeline gate) */
     g_iface_vtbl_live.toast             = s->toast;              /* +0x1b8 */
-    /* heavy slots (NULL until sh_iface_engine binds them with the full apply chain). */
+
     g_iface_vtbl_live.serialize_entity  = s->serialize_entity;   /* +0xc8 */
     g_iface_vtbl_live.apply_edit        = s->apply_edit;         /* +0xd0 */
     g_iface_vtbl_live.read_prefab       = s->read_prefab;        /* +0xb8 */
-    /* DATA-tab slots (Entity-State read/write + Prefabs serialize/path + Delete). */
+
     g_iface_vtbl_live.get_declsource_copy    = s->get_declsource_copy;    /* +0x30  */
     g_iface_vtbl_live.rebuild_set_declsource = s->rebuild_set_declsource; /* +0x40  */
     g_iface_vtbl_live.get_displayname        = s->get_displayname;        /* +0x58  */
@@ -294,28 +240,28 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     g_iface_vtbl_live.serialize_selection    = s->serialize_selection;    /* +0xb0  */
     g_iface_vtbl_live.resolve_prefab_path    = s->resolve_prefab_path;    /* +0xc0  */
     g_iface_vtbl_live.selection_guard        = s->remove_from_selection;  /* +0x130 */
-    /* the Timeline-Editor constrained decl-combobox enumerator (+0x110). */
+
     g_iface_vtbl_live.enum_decls_of_resclass = s->enum_decls_of_resclass; /* +0x110 */
-    /* clone-extension slots (the atomic class+inherit morph). */
+
     g_iface_vtbl_live.apply_class_inherit    = s->apply_class_inherit;    /* +0x268 */
-    /* clone-extension (the class-dropdown enumerator). */
+
     g_iface_vtbl_live.enum_valid_classes     = s->enum_valid_classes;     /* +0x270 */
-    /* clone-extension (the inherit-dropdown enumerator). */
+
     g_iface_vtbl_live.enum_inherits          = s->enum_inherits;          /* +0x278 */
-    /* clone-extension (the dev-layer entity-hidden query). */
+
     g_iface_vtbl_live.id_dev_layer_hidden    = s->id_dev_layer_hidden;    /* +0x280 */
-    /* clone-extension (the wire-any connect-edit generation counter; entity-list re-read signal). */
+
     g_iface_vtbl_live.wire_edit_generation   = s->wire_edit_generation;   /* +0x288 */
-    /* clone-extension (the synchronous inline apply -- OG-faithful commit for the SnapStack decl-edit ops). */
+
     g_iface_vtbl_live.apply_sync             = s->apply_sync;             /* +0x290 */
-    /* clone-extension (the palette-timeline portable-inherit one-shot normalize; shared by both frontends). */
+
     g_iface_vtbl_live.normalize_timeline_inherit = s->normalize_timeline_inherit; /* +0x298 */
-    /* clone-extension (push onto the backend-owned SnapStack stack; out-of-process frontends only). */
+
     g_iface_vtbl_live.push_to_stack          = s->push_to_stack;          /* +0x2A0 */
-    /* clone-extension (empty the backend-owned SnapStack stack; out-of-process frontends only). */
+
     g_iface_vtbl_live.clear_stack            = s->clear_stack;            /* +0x2A8 */
     g_iface_vtbl_live.manipulation_in_progress = s->manipulation_in_progress; /* +0x2C0 */
-    /* clone-extension (FIND a material decl by name; cached-only lookup, asset-viewport tab probe). */
+
     g_iface_vtbl_live.find_material           = s->find_material;           /* +0x2C8 */
     g_iface_vtbl_live.get_preview             = s->get_preview;             /* +0x2D0 */
     g_iface_vtbl_live.request_preview         = s->request_preview;         /* +0x2D8 */
@@ -334,10 +280,7 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     g_iface_vtbl_live.rawmap_load_now         = s->rawmap_load_now;         /* +0x338 */
 }
 
-/* --------------------------------------------------------------------- the factory -----------------
- * operator_new(0x60) shape: zero-init the object, install the vtable, init the obj-mutex blob (left zero
- * for layout; the live guard is the sub's CRITICAL_SECTION), allocate + zero the sub-object, init its
- * map/queue empty. Returns the object the backend stores + hands to the frontend. */
+/* Allocate the fixed object and private subobject with an empty registry/queue. */
 sh_iface *sh_iface_create(void)
 {
     sh_iface *obj = (sh_iface *)calloc(1, sizeof(sh_iface));
@@ -346,22 +289,21 @@ sh_iface *sh_iface_create(void)
     sub_impl *si = (sub_impl *)calloc(1, sizeof(sub_impl));
     if (!si) { free(obj); return NULL; }
     InitializeCriticalSection(&si->lock);
-    /* empty map + empty work-queue (pinned vector NULL/NULL/NULL = empty) */
+
     si->map.items   = NULL;
     si->map.count   = 0;
     si->map.cap     = 0;
     si->pinned.wq_begin = NULL;
     si->pinned.wq_end   = NULL;
     si->pinned.wq_cap   = NULL;
-    /* map_nil/map_root/map_size carry the cmd_map backing pointer + count for ABI-shape parity (OG
-     * stashes the RB-tree head here); the live store is si->map, reached via the sub_impl cast. */
+    /* Preserve the ABI fields while the actual registry resides in si->map. */
     si->pinned.map_nil  = &si->map;
     si->pinned.map_root = NULL;
     si->pinned.map_size = 0;
 
     obj->vtbl = &g_iface_vtbl_live;     /* +0x00 */
-    /* obj->mtx left zero (ABI-layout reserve; the live guard is si->lock at the sub) */
-    obj->sub  = (sh_iface_sub *)si;     /* +0x58 -- the sub_impl's first member IS the pinned header */
+    /* Reserved object mutex bytes stay zero; si->lock guards live state. */
+    obj->sub  = (sh_iface_sub *)si;     /* +0x58: sub_impl starts with the fixed header. */
 
     return obj;
 }

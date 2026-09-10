@@ -6,10 +6,8 @@ import (
 	"testing"
 )
 
-// entryFixture is the SHARED golden fixture: installer/testdata/entry.md is produced by the Python
-// renderer (tools/draft_changelog.py) and asserted byte-for-byte by its test suite. Both sides read
-// this one file, so a format change fails the Go and the Python tests together instead of silently
-// rotting one of two hand-written parsers of the same grammar.
+// entryFixture is shared with the Python release renderer. Both suites check it
+// so the two parsers agree on the release format.
 func entryFixture(t *testing.T) string {
 	t.Helper()
 	b, err := os.ReadFile("testdata/entry.md")

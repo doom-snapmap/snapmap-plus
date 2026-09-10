@@ -6,28 +6,17 @@ import (
 	"path/filepath"
 )
 
-// Before override packages existed, everything a user overrode lived in one shared tree,
-// overrides\generated\{decls,resources,requirements}. The backend used to special-case that folder as a
-// package with no package.json so those installs kept working. That left two rules where one would do, and
-// the shared tree has the problems packages exist to solve: two mods land in the same folders, uninstalling
-// one means knowing which files were its, and nothing carries a name the diagnostics can blame.
-//
-// So the installer migrates it, once, into a real package. What that does NOT change is which bytes the
-// engine can be served: the file shadow resolves every engine resource name against the overrides root
-// directly (overrides\<engine name>), which is a separate path from package resolution and is untouched --
-// dropping a file at overrides\<name> still shadows that resource. What the package adds is publishing
-// identities DOOM never shipped, and uninstalling by deleting one folder.
+// Migrate the old shared overrides/generated layout into a marked package.
+// Loose root-level shadows remain a separate backend lookup path.
 
-// starterPackageName is where a user's own content lives: the destination of the migration above, and the
-// folder a fresh install gets so there is somewhere obvious to drop things.
+// starterPackageName is the migration destination and the fresh-install starter folder.
 const starterPackageName = "my-overrides"
 
 // legacyOverridesName is the pre-package shared tree this migration retires.
 const legacyOverridesName = "generated"
 
-// starterPackageJSON marks the folder as a package. Nothing parses it -- the backend only checks that the
-// file exists -- so this deliberately carries no `contents` hash map: those belong to a package someone
-// distributes, and would be stale the moment the user edited their own files.
+// starterPackageJSON marks editable user content. Omit a contents digest because
+// the user changes these files after installation.
 const starterPackageJSON = `{
   "schema": "snapmap-plus.override-package.v1",
   "name": "my-overrides",
@@ -44,13 +33,9 @@ func overridesDir() string {
 	return filepath.Join(dir, "overrides")
 }
 
-// migrateLegacyOverrides moves overrides\generated into overrides\my-overrides and marks it as a package,
-// then makes sure that starter package exists whether or not there was anything to migrate.
-//
-// The move is VERIFIED, matching migrateUserData: files are copied without ever overwriting, and the source
-// is removed only once every one of its files is confirmed present at the destination. A user who already
-// has a my-overrides package keeps their copy of any colliding file. Best-effort throughout -- this never
-// fails an install.
+// migrateLegacyOverrides copies missing files into my-overrides and creates its
+// marker. Existing destination files win. Source removal uses fullyMirrored
+// path-presence checks, not byte comparison. Failures do not fail installation.
 func migrateLegacyOverrides() {
 	overrides := overridesDir()
 	if overrides == "" {
@@ -59,8 +44,7 @@ func migrateLegacyOverrides() {
 	legacy := filepath.Join(overrides, legacyOverridesName)
 	starter := filepath.Join(overrides, starterPackageName)
 
-	// copyTreeMissing tolerates a missing source (it copies nothing), so this needs no separate existence
-	// check -- and a legacy tree holding only empty directories correctly reports zero files moved.
+	// Missing sources and empty directory trees copy no files.
 	moved := copyTreeMissing(legacy, starter)
 
 	if err := os.MkdirAll(starter, 0o755); err != nil {

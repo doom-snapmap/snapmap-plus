@@ -1,19 +1,9 @@
-/* nav_regions.c -- see nav_regions.h. Read the ticked Blocking Boxes out of a
- * map and say which placed module instance each one belongs to.
- *
- * No JSON DOM is built. map_shards' container walker maps every object and
- * array in the document in one forward pass, and everything here reads members
- * out of those byte spans -- the same machinery the shard strip/insert path
- * drives, for the same reason: a map is megabytes and almost none of it is our
- * business. A document the walker refuses (unbalanced, or past its container
- * cap) is refused here too; a half-understood map must not produce half a
+/* Read Blocking Boxes and their module ownership from bounded map JSON spans.
+ * map_shards supplies the container walk; no DOM is allocated. Reject
+ * malformed or over-capacity documents rather than building partial
  * navigation.
- *
- * The map arrives from the publish service, so nothing here trusts a length, an
- * index or a count it has not checked itself. Every scan is bounded by a span
- * the walker proved, every number is copied into a fixed buffer before it is
- * converted, and a malformed map yields an empty answer rather than a fault.
  */
+#include <windows.h>
 #include <stdlib.h>
 #include <string.h>
 #include <float.h>
@@ -22,44 +12,33 @@
 #include "nav_regions.h"
 #include "map_shards.h"
 
-/* An instance's `moduleName` is a decl path: `maps/modules/<category>/<module>.decl`.
- * Anything else is not a module we can name, and a module we cannot name is a
- * module whose navigation we cannot serve. */
+/* Module decl names follow maps/modules/<category>/<module>.decl. */
 #define NAVR_MODULE_PREFIX  "maps/modules/"
 #define NAVR_MODULE_SUFFIX  ".decl"
 
-/* `snapmaps/volume/blocking` is what a Blocking Box inherits; every one of the
- * 2,411 in the reference map carries it, and carries `className`
- * `idVolume_Blocking` with it, so one of the two is enough. */
+/* Recognize Blocking Boxes by their inherited decl or idVolume_Blocking
+ * class.
+ */
 #define NAVR_VOLUME_INHERIT "snapmaps/volume/blocking"
 
-/* THE MARKER itself, spelled once. The live refresh rejects most entities by
- * looking for this text before it parses anything, and a marker the two spell
- * differently would reject every volume in the map. */
-#define NAVR_MARKER         "affectsNavmesh"
+/* Shared marker spelling for the map reader and live prefilter. */
+#define NAVR_MARKER         "noFlood"
+#define NAVR_LEGACY_MARKER  "affectsNavmesh"
 
-/* `clipModelInfo.type` for a box. The decl default, which means the field is
- * ABSENT from the map when it holds -- so absent reads as a box, and only a
- * type we can see and do not know disqualifies a volume. */
+/* An omitted clipModelInfo.type uses the box default. */
 #define NAVR_CLIPMODEL_BOX  "CLIPMODEL_BOX"
 
-/* The longest number token we will convert. Nothing the editor writes comes
- * close; a longer one is not a coordinate. */
+/* Bound number tokens before conversion. */
 #define NAVR_NUM_MAX        63
 
 /* ==================================================================== */
 /* reading members out of a walked document                              */
 /* ==================================================================== */
 
-/* Is `off` DIRECTLY inside `parent` -- inside it, and inside none of its
- * descendants? An entity carries several members called `size`, and only the
- * one under `clipModelInfo` is the box.
- *
- * The walker records containers in the order they open, so a container's
- * descendants are exactly the run that follows it until one opens past its
- * close. Checking that run is what makes this affordable:
- * sh_shard_doc_innermost sweeps the whole document, and this is called for
- * every member of every entity in the map. */
+/* Test direct membership, excluding descendants. Several entity fields share
+ * names such as size. Containers are in opening order, so only the following
+ * descendant run needs scanning.
+ */
 static int navr_direct(const sh_shard_doc *doc, int parent, size_t off)
 {
     size_t i, stop;
@@ -159,19 +138,24 @@ static float navr_num(const char *json, size_t len, const sh_shard_doc *doc,
     return (float)d;
 }
 
-/* A bool member. ABSENT IS FALSE -- that is the decl default for both
- * `affectsNavmesh` and `blockDemons`, and it is why a map nobody has ticked
- * anything in yields no regions at all. */
+/* Absent flags.noFlood and blockDemons members default to false. */
 static int navr_bool(const char *json, size_t len, const sh_shard_doc *doc,
                      int parent, const char *key)
 {
     size_t v;
     if (!navr_value(json, len, doc, parent, key, &v)) return 0;
-    return len - v >= 4 && memcmp(json + v, "true", 4) == 0;
+    if (len - v < 4 || memcmp(json + v, "true", 4) != 0) return 0;
+    v += 4;
+    return v == len || sh_shard_is_ws(json[v]) || json[v] == ',' || json[v] == '}';
 }
 
-/* A string member, into a bounded buffer. A value that does not fit is not one
- * of ours, so it reads as absent rather than as a prefix of itself. */
+static int navr_marked(const char *json, size_t len, const sh_shard_doc *doc, int edit)
+{
+    return navr_bool(json, len, doc,
+                     navr_member(json, len, doc, edit, "flags", '{'), NAVR_MARKER);
+}
+
+/* Read a bounded string; refuse overflow instead of accepting a prefix. */
 static int navr_str(const char *json, size_t len, const sh_shard_doc *doc,
                     int parent, const char *key, char *out, size_t cap)
 {
@@ -213,9 +197,7 @@ static int navr_index(double v)
     return (int)v;
 }
 
-/* The next element of a FLAT number array, and the position after it. Returns 0
- * at the end of the array and at the first element that is not a number, which
- * is how a mangled multimap stops attribution instead of misdirecting it. */
+/* Read the next flat-array number; stop at the end or an invalid element. */
 static int navr_flat_next(const char *json, size_t *p, size_t stop, double *out)
 {
     size_t at = *p;
@@ -254,26 +236,10 @@ static int navr_module_name(const char *decl, char *out, size_t cap)
     return 1;
 }
 
-/* `spawnOrientation` into `m`, as a rotation matrix.
- *
- * It is an `idMat3` that serializes with DEFAULT ELISION: only members that
- * differ from the default are written, and THE DEFAULT IS THE IDENTITY, not
- * zero. So this seeds the identity and overlays what is there.
- *
- * That is not a stylistic choice. Over the 6,932 entities carrying a `mat` in a
- * real map, an identity-seeded read yields 6,932 matrices that are orthonormal
- * with determinant +1; a zero-seeded read yields 1,604, and the rest are
- * degenerate. A near-zero yaw serializes as
- *
- *     {"mat[0]":{"y":8.74e-08}, "mat[1]":{"x":-8.74e-08}}
- *
- * which is a rotation of about 5e-6 degrees under the identity and a collapsed
- * matrix under zeros.
- *
- * Returns 0 for a matrix that is not a rotation. Both checks matter: a sheared
- * matrix would give a non-rectangular face, and a REFLECTION is orthonormal but
- * has determinant -1 and would give a mirrored footprint that the caller's
- * shoelace rewind would then quietly make legal. */
+/* Read spawnOrientation over an identity matrix: reflection omits default
+ * members, including diagonal ones. Require orthonormality and determinant +1
+ * to reject shear, degenerate transforms and reflections.
+ */
 static int navr_mat3(const char *json, size_t len, const sh_shard_doc *doc,
                      int edit, float m[3][3])
 {
@@ -321,26 +287,13 @@ static int navr_mat3(const char *json, size_t len, const sh_shard_doc *doc,
     return 1;
 }
 
-/* Encode one Blocking Box as a representative face and its depth in `r`
- * -- everything about a region except whose it is. Returns 0 for a volume with
- * no face to derive: a shape that is not a box, a box with no area, or an
- * orientation that is not a rotation.
+/* Encode the box as one representative face and its depth. Local x/y span
+ * +/-size/2; local z spans [0,size.z]. Stored matrix rows are local basis
+ * vectors in module space.
  *
- * The local box runs `x,y` in +/- size/2 and `z` in [0, size.z], because
- * `spawnPosition` is the box's CENTRE in x and y and its BOTTOM in z. World is
- * `Rt * local`: the ROWS of the stored matrix are the local basis expressed in
- * world, so world axis i IS row i. That convention is not guessed -- it is what
- * the OG decompile builds in entity.c's angles-to-mat3, where
- * `mat[1] = {-sinYaw, cosYaw, 0}` is unmistakably a row.
- *
- * Choose the greatest +z normal for a nondegenerate encoding. This is not a
- * final walkability decision: nav_geometry reconstructs the full oriented solid
- * from this face and depth, considers all six faces, and clips the exposed
- * slope-eligible surfaces against the other solids and agent clearance.
- *
- * Both the load pass and the live refresh come through here, so the map on disk
- * and the map in the editor can never disagree about where a volume's walkable
- * surface is. */
+ * Choose the greatest +Z normal; nav_geometry reconstructs the solid and
+ * evaluates all faces. Load and legacy live refresh share this conversion.
+ */
 static int navr_volume_face(const char *json, size_t len, const sh_shard_doc *doc,
                             int edit, sh_nav_region *r)
 {
@@ -405,14 +358,12 @@ static int navr_volume_face(const char *json, size_t len, const sh_shard_doc *do
                        + SV[i] * half[v] * m[v][k];
     for (k = 0; k < 3; k++) r->n[k] = m[a][k] * s;
     r->face = best;
-    /* The solid is this face swept back along -n by the box's extent on that
-     * axis. Carrying it means the augmenter can ask "is this volume standing in
-     * the way of that one", which a face alone can never answer. */
+    /* Depth reconstructs the occupied solid behind the face for collision tests. */
     r->depth = 2.0f * half[a];
 
-    /* Wind CLOCKWISE seen from +Z: the XY shoelace must come out negative. A
-     * face whose XY projection is degenerate has no footprint at all -- that is
-     * a box standing exactly on edge, and there is nothing to walk on. */
+    /* Clockwise from +Z requires negative XY shoelace area. Reject degenerate
+     * projections.
+     */
     sh = 0.0;
     for (i = 0; i < 4; i++) {
         int j = (i + 1) & 3;
@@ -432,30 +383,14 @@ static int navr_volume_face(const char *json, size_t len, const sh_shard_doc *do
 /* the volumes the load pass saw                                         */
 /* ==================================================================== */
 
-/* EVERY Blocking Box in the map that was read, ticked or not, and the instance
- * the map said owns it.
+/* Legacy live-refresh ownership cache for all Blocking Boxes in the last
+ * parsed map, including unmarked boxes. Newly created entities require a
+ * complete-map snapshot to refresh this attribution.
  *
- * The live refresh needs this and cannot get it from the region table. An
- * entity carries no instance of its own -- `instanceEntities` is the map's own
- * record of ownership and it is gone by the time a bake runs -- and the volume
- * an author ticks during a session is, by definition, one nobody had ticked
- * when the map was read, so it is not a region and would have nowhere to
- * belong. Recording every blocking volume here is exactly what makes ticking an
- * EXISTING box take effect immediately, and it is also what makes a box CREATED
- * this session honestly unattributable: it was never in the map that was read,
- * so it is not in here, so it is skipped rather than guessed at.
- *
- * This is the reader's bookkeeping, not part of the map, which is why it is
- * module-local rather than a field on sh_nav_map. It belongs to the map most
- * recently read AND TO NO OTHER: a refresh of a different sh_nav_map is refused
- * rather than attributed from a table that describes something else. Both entry
- * points run under the caller's own lock (nav_bake serializes load against
- * bake), which is what makes one shared table safe.
- *
- * The reference map holds 2,411 blocking volumes among 7,556 entities, so this
- * cap is the largest map anyone has published with room to spare. A volume past
- * it keeps working exactly as it did before -- it just does not get the live
- * refresh. */
+ * The cache belongs only to g_loaded_map. Callers serialize parsing and
+ * refresh under their lock. Volumes beyond the cap are unavailable to the
+ * legacy refresh.
+ */
 #define NAVR_MAX_VOLUMES    4096
 
 typedef struct navr_volume {
@@ -470,18 +405,10 @@ static struct {
     int               count;
 } g_loaded;
 
-/* The instance the load pass attributed the volume with `uniqueId` to, or -1 for
- * a volume it never saw.
- *
- * BY uniqueId, NOT by position in the map JSON's entities array. Those are two
- * different id spaces and conflating them is why a mark made this session never
- * reached the bake. The live editor answers about its own entity table, which is
- * indexed by uniqueId and is sparse: measured live 2026-09-08 on an 11-entity map
- * whose uniqueIds ran 56..69, the editor table reported highWater 70, and the
- * marked Blocking Box -- entities[3], uniqueId 62 -- answered at live id 62.
- * Matching on the array index looked up id 62 against index 3, missed, and every
- * live mark fell out at this lookup. `instanceEntities` addresses uniqueIds too,
- * so this is also the id the attribution pass already agrees with. */
+/* Look up ownership by uniqueId, which indexes both the sparse live entity
+ * table and instanceEntities. The position in the JSON entities array is a
+ * different identifier.
+ */
 static int navr_loaded_owner(int uid)
 {
     int i;
@@ -494,24 +421,14 @@ static int navr_loaded_owner(int uid)
 /* attribution                                                           */
 /* ==================================================================== */
 
-/* Give every region the instance that OWNS its volume, from `instanceEntities`.
+/* instanceEntities is a CSR multimap: bucket b uses
+ * values[keyValues[b]..keyValues[b+1]), containing entity uniqueIds. It has
+ * one bucket per instance plus an orphan bucket, so keyValues has
+ * instance_count+2 entries.
  *
- * That member is an idIndexMultimap in CSR form: bucket b holds
- * `values[keyValues[b] .. keyValues[b + 1])`, and `values` holds entity
- * `uniqueId`s -- NOT positions in the entities array. There is one bucket per
- * instance and then a trailing ORPHAN bucket, so `keyValues` is
- * instance_count + 2 long (13 instances, 15 keyValues, 7,556 entities in the
- * reference map).
- *
- * The orphan bucket is deliberately never attributed. An entity in it belongs
- * to no instance, and the coordinates cannot rescue it: they are module-local,
- * so two instances of one module hold volumes at identical coordinates and
- * containment cannot tell them apart. Such a volume is dropped silently -- it
- * is not a cap, which is the only thing `truncated` reports.
- *
- * One walk answers the same question twice: for the regions this map already
- * has, and for every blocking volume in it, ticked or not, so a volume ticked
- * later in the session can still be given the owner the map recorded for it. */
+ * Do not attribute the orphan bucket by coordinates: repeated modules share
+ * local space. The same walk records ownership for marked and unmarked boxes.
+ */
 static void navr_attribute(const char *json, size_t len, const sh_shard_doc *doc,
                            int mm, sh_nav_map *out, const int *uid)
 {
@@ -579,6 +496,100 @@ static void navr_attribute(const char *json, size_t len, const sh_shard_doc *doc
 /* the map                                                               */
 /* ==================================================================== */
 
+typedef struct navr_patch {
+    size_t at, remove;
+    const char *text;
+} navr_patch;
+
+static int navr_patch_order(const void *a, const void *b)
+{
+    const navr_patch *pa = (const navr_patch *)a, *pb = (const navr_patch *)b;
+    return pa->at < pb->at ? -1 : pa->at > pb->at;
+}
+
+/* Migrate only the known Blocking Box entity state. Preserve unrelated fields
+ * and an explicit new marker (including false). Clear the native legacy flag
+ * even when the new marker is present, so later toggle-off cannot resurrect it.
+ * Collect all splices before writing: a refusal never partially migrates a map. */
+char *sh_nav_regions_migrate(const char *json, size_t len, size_t *out_len)
+{
+    sh_shard_doc doc;
+    navr_patch *patches = NULL;
+    char *out = NULL;
+    size_t count = 0, total = len, used = 0, read_at = 0, p;
+    int arr, i;
+
+    if (out_len) *out_len = len;
+    if (!json || !len || !sh_shard_find(json, len, NAVR_LEGACY_MARKER,
+                                       sizeof NAVR_LEGACY_MARKER - 1)) return NULL;
+    if (!sh_shard_doc_build(json, len, &doc)) return NULL;
+    if (doc.c[0].kind != '{') goto done;
+    arr = navr_member(json, len, &doc, 0, "entities", '[');
+    if (arr < 0 || doc.count > (size_t)-1 / sizeof *patches) goto done;
+    patches = (navr_patch *)malloc(doc.count * sizeof *patches);
+    if (!patches) goto done;
+    for (i = arr + 1; (size_t)i < doc.count && doc.c[i].open < doc.c[arr].close; i++) {
+        int ed, edit, flags;
+        size_t legacy, value, first;
+        char inherit[64];
+        if (doc.c[i].parent != arr || doc.c[i].kind != '{') continue;
+        ed = navr_member(json, len, &doc, i, "entityDef", '{');
+        if (!navr_str(json, len, &doc, ed, "inherit", inherit, sizeof inherit) ||
+            strcmp(inherit, NAVR_VOLUME_INHERIT) != 0) continue;
+        edit = navr_member(json, len, &doc,
+            navr_member(json, len, &doc, ed, "state", '{'), "edit", '{');
+        if (!navr_bool(json, len, &doc, edit, NAVR_LEGACY_MARKER) ||
+            !navr_value(json, len, &doc, edit, NAVR_LEGACY_MARKER, &legacy)) continue;
+        if (count + 2 > doc.count) goto done;
+        flags = navr_member(json, len, &doc, edit, "flags", '{');
+        if (flags < 0) {
+            /* A present non-object flags value cannot be replaced safely. */
+            if (navr_value(json, len, &doc, edit, "flags", &value)) goto done;
+            patches[count++] = (navr_patch){doc.c[edit].open + 1, 0,
+                                            "\"flags\":{\"noFlood\":true},"};
+        } else if (!navr_value(json, len, &doc, flags, NAVR_MARKER, &value)) {
+            first = doc.c[flags].open + 1;
+            while (first < doc.c[flags].close && sh_shard_is_ws(json[first])) first++;
+            patches[count++] = (navr_patch){doc.c[flags].open + 1, 0,
+                first == doc.c[flags].close ? "\"noFlood\":true" : "\"noFlood\":true,"};
+        } else {
+            /* Never make an invalid native bool look valid by dropping it. */
+            size_t n = navr_bool(json, len, &doc, flags, NAVR_MARKER) ? 4 : 5;
+            if (n == 5 && (len - value < 5 || memcmp(json + value, "false", 5))) goto done;
+            value += n;
+            if (value < len && !sh_shard_is_ws(json[value]) && json[value] != ',' &&
+                json[value] != '}') goto done;
+        }
+        patches[count++] = (navr_patch){legacy, 4, "false"};
+    }
+    if (!count) goto done;
+    qsort(patches, count, sizeof *patches, navr_patch_order);
+    for (p = 0; p < count; p++) {
+        size_t n = strlen(patches[p].text);
+        if (patches[p].at < read_at || patches[p].at > len ||
+            patches[p].remove > len - patches[p].at) goto done;
+        read_at = patches[p].at + patches[p].remove;
+        if (total - patches[p].remove > (size_t)-1 - n - 1) goto done;
+        total = total - patches[p].remove + n;
+    }
+    out = (char *)HeapAlloc(GetProcessHeap(), 0, total + 1);
+    if (!out) goto done;
+    read_at = 0;
+    for (p = 0; p < count; p++) {
+        size_t copy = patches[p].at - read_at, n = strlen(patches[p].text);
+        memcpy(out + used, json + read_at, copy); used += copy;
+        memcpy(out + used, patches[p].text, n); used += n;
+        read_at = patches[p].at + patches[p].remove;
+    }
+    memcpy(out + used, json + read_at, len - read_at);
+    out[total] = '\0';
+    if (out_len) *out_len = total;
+done:
+    free(patches);
+    sh_shard_doc_free(&doc);
+    return out;
+}
+
 int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
 {
     /* the volume's uniqueId, parallel to out->regions, until attribution */
@@ -619,10 +630,9 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
             break;
         }
         in = &out->instances[out->instance_count++];
-        /* An instance we cannot name still takes its slot. instanceEntities
-         * addresses instances BY POSITION, so dropping one here would silently
-         * re-attribute every volume in every bucket after it; its regions are
-         * dropped at the end instead. */
+        /* Preserve instance slots even for invalid names: instanceEntities
+         * addresses them by position.
+         */
         if (!navr_str(json, len, &doc, i, "moduleName", decl, sizeof decl) ||
             !navr_module_name(decl, in->module, sizeof in->module))
             in->module[0] = '\0';
@@ -649,8 +659,7 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
         unsigned self;
 
         if (doc.c[i].parent != arr || doc.c[i].kind != '{') continue;
-        /* `entity` is diagnostics only, so counting object elements is close
-         * enough: no shipped map puts anything else in this array. */
+        /* Diagnostic index counts object elements in entities. */
         self = index++;
 
         ed = navr_member(json, len, &doc, i, "entityDef", '{');
@@ -661,9 +670,7 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
                            navr_member(json, len, &doc, ed, "state", '{'), "edit", '{');
         if (edit < 0) continue;
 
-        /* Every blocking volume is remembered, ticked or not, because the
-         * author may tick this one after the map has been read and the only
-         * record of who owns it is the one being walked right now. */
+        /* Cache unmarked boxes too for the legacy live-refresh path. */
         vuid = navr_index(navr_num(json, len, &doc, i, "uniqueId", -1.0f));
         if (g_loaded.count < NAVR_MAX_VOLUMES) {
             navr_volume *v = &g_loaded.v[g_loaded.count++];
@@ -672,9 +679,8 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
             v->instance = -1;
         }
 
-        /* THE MARKER. Only a volume the author ticked "AI Navigation" on is a
-         * region; every other blocking volume in the map is left alone. */
-        if (!navr_bool(json, len, &doc, edit, NAVR_MARKER) &&
+        /* Only marked volumes contribute support; unmarked boxes may be obstacles. */
+        if (!navr_marked(json, len, &doc, edit) &&
             !navr_bool(json, len, &doc, edit, "blockDemons")) continue;
 
         if (!navr_volume_face(json, len, &doc, edit, &region)) {
@@ -689,7 +695,7 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
         if(vuid<0)out->invalid_geometry=1;
         for(keep=0;keep<out->region_count;keep++)if(uid[keep]==vuid)out->invalid_geometry=1;
         region.instance = -1;
-        region.marked = navr_bool(json,len,&doc,edit,NAVR_MARKER);
+        region.marked = navr_marked(json,len,&doc,edit);
         region.block_demons = navr_bool(json, len, &doc, edit, "blockDemons");
         region.entity = self;
         out->regions[out->region_count] = region;
@@ -698,16 +704,12 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
     }
 
     arr = navr_member(json, len, &doc, 0, "instanceEntities", '{');
-    /* The volumes nobody has ticked need attributing too, so the walk is worth
-     * making for a map with no regions at all -- which is every map an author
-     * is about to tick their first volume in. */
+    /* Attribute unmarked boxes for later legacy marker refresh. */
     if (arr >= 0 && (out->region_count > 0 || g_loaded.count > 0))
         navr_attribute(json, len, &doc, arr, out, uid);
     else if(out->region_count>0)out->invalid_geometry=1;
 
-    /* Keep what an instance owns and can be named for. A volume in the orphan
-     * bucket, or one owned by an instance whose moduleName made no sense, has
-     * no module whose AAS it could be merged into. */
+    /* Drop regions without a named owning module, including orphans. */
     for (i = 0, keep = 0; i < out->region_count; i++) {
         int owner = out->regions[i].instance;
         if(owner==-1)out->invalid_geometry=1;
@@ -737,19 +739,13 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
 /* the live editor                                                       */
 /* ==================================================================== */
 
-/* One entity's serialized JSON. A Blocking Box is a few hundred bytes; this is
- * generous headroom for one, and an entity that does not fit in it is a
- * timeline or an encounter rather than a box, so refusing it costs nothing. */
+/* Bound serialized live-entity JSON; oversized entities are skipped. */
 #define NAVR_LIVE_JSON_CAP  (16 * 1024)
 
-/* The scan stops here however high the caller's `highest_id` goes. A map's
- * entity budget is nowhere near it (7,556 in the reference map), and pressing
- * Play is not the moment to walk an unbounded id space. */
+/* Cap the live id scan so refresh cannot block Play indefinitely. */
 #define NAVR_LIVE_SCAN_MAX  65536
 
-/* Scratch for one refresh, heap-held for the call and freed before it returns.
- * The regions are built here rather than in `m` because `m` may not be touched
- * at all unless the whole scan succeeds. */
+/* Build a temporary region set and commit only after the scan succeeds. */
 typedef struct navr_live {
     char          json[NAVR_LIVE_JSON_CAP];
     sh_nav_region regions[SH_NAVR_MAX_REGIONS];
@@ -757,10 +753,9 @@ typedef struct navr_live {
     int           capped;
 } navr_live;
 
-/* Read one live entity's JSON as a marked Blocking Box, filling everything
- * about `r` except whose it is. The document is one entity serialized by the
- * engine's own reflection, so it is the same shape the load pass walks per
- * entity -- with the entity object as the root instead of an array element. */
+/* Read one reflected entity document as a marked box. Its root is the entity
+ * object; geometry parsing is shared with the map reader.
+ */
 static int navr_live_region(const char *json, size_t len, sh_nav_region *r)
 {
     sh_shard_doc doc;
@@ -775,8 +770,8 @@ static int navr_live_region(const char *json, size_t len, sh_nav_region *r)
             edit = navr_member(json, len, &doc,
                                navr_member(json, len, &doc, ed, "state", '{'), "edit", '{');
             /* ABSENT IS FALSE here exactly as it is in the map: an untouched
-             * volume simply has no `affectsNavmesh` member to read. */
-            if (edit >= 0 && navr_bool(json, len, &doc, edit, NAVR_MARKER) &&
+             * volume simply has no `flags.noFlood` member to read. */
+            if (edit >= 0 && navr_marked(json, len, &doc, edit) &&
                 navr_volume_face(json, len, &doc, edit, r)) {
                 r->block_demons = navr_bool(json, len, &doc, edit, "blockDemons");
                 ok = 1;
@@ -794,17 +789,14 @@ int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
     navr_live *w;
     int id, top, answered = 0, volumes = 0, marked = 0, i;
 
-    /* Without both callbacks there is no live surface to read, and without the
-     * map this reader last read there is no attribution for what it would say.
-     * Both are -1 rather than an empty answer, because -1 is what leaves the
-     * caller with the flags the map was loaded with instead of with none. */
+    /* Missing callbacks or mismatched attribution refuse the refresh without
+     * clearing the map.
+     */
     if (!m || !valid || !get_json) return -1;
     if (m != g_loaded.owner) return -1;
-    /* Nothing the load pass saw means nothing a live mark could belong to: every id
-     * would fail navr_loaded_owner below and be skipped, so the scan is guaranteed
-     * to return an empty answer at the cost of one engine serialize per entity.
-     * This runs on Play, in front of the map build, so that cost is on the
-     * author's clock -- take the early exit instead. */
+    /* Without cached volumes, every ownership lookup would fail; skip engine
+     * serialization.
+     */
     if (g_loaded.count == 0) return -1;
 
     top = highest_id;
@@ -823,40 +815,31 @@ int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
         n = get_json(id, w->json, (int)sizeof w->json, ctx);
         if (n <= 0) continue;
         answered++;
-        /* A result that fills the buffer is what a truncating writer looks like
-         * from here, and half a document is not one. */
+        /* A full buffer may be truncated; refuse it before parsing. */
         if (n >= (int)sizeof w->json) continue;
 
-        /* Refuse the overwhelming majority before the container walk. A marked
-         * Blocking Box carries both of these texts; anything missing either is
-         * not one, and the walk is the expensive part of this loop. */
+        /* Cheap text prefilter before the more expensive container walk. */
         if (!sh_shard_find(w->json, (size_t)n, NAVR_VOLUME_INHERIT,
                            sizeof NAVR_VOLUME_INHERIT - 1)) continue;
-        /* Counted BEFORE the marker test, because "this surface is showing us
-         * the map's Blocking Boxes" is what makes an absent marker mean the
-         * author unticked it. See the commit rule below. */
+        /* Count boxes before markers to distinguish unticked boxes from the
+         * wrong live surface.
+         */
         volumes++;
         if (!sh_shard_find(w->json, (size_t)n, NAVR_MARKER,
                            sizeof NAVR_MARKER - 1)) continue;
 
         memset(&r, 0, sizeof r);
         if (!navr_live_region(w->json, (size_t)n, &r)) continue;
-        /* The table is full, so the scan stops rather than counting volumes it
-         * cannot hand over: past here the return value would say more than
-         * `regions` contains, and a cap is what `truncated` is for. */
+        /* Stop at capacity so reported counts match stored regions. */
         if (w->count >= SH_NAVR_MAX_REGIONS) {
             w->capped = 1;
             break;
         }
         marked++;
 
-        /* WHOSE IT IS comes from the map, never from the entity. A volume the
-         * load pass never saw was created this session, has no owner anywhere,
-         * and is SKIPPED rather than guessed at -- coordinates are module-local,
-         * so guessing would silently give one instance another's geometry. The
-         * skipped ones are the difference between this function's return value
-         * and `m->region_count`; they are not a cap, so `truncated` says
-         * nothing about them. */
+        /* Legacy refresh cannot place ids absent from its ownership cache.
+         * Skip them; complete-map snapshots handle newly created boxes.
+         */
         owner = navr_loaded_owner(id);
         if (owner < 0 || owner >= m->instance_count) continue;
         if (m->instances[owner].module[0] == '\0') continue;
@@ -866,58 +849,32 @@ int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
         w->regions[w->count++] = r;
     }
 
-    /* Not one entity answered. That is a surface we could not read rather than
-     * an editor holding nothing, and the two want the same treatment anyway:
-     * leave the map exactly as it was loaded. */
+    /* No readable entities means no trustworthy refresh; retain the prior map. */
     if (answered == 0) {
         free(w);
         return -1;
     }
 
-    /* Entities answered, but not one of them is a Blocking Box. That is NOT an
-     * author who unticked every volume -- unticking leaves the box there, just
-     * without the marker -- it is a surface that is no longer showing us this
-     * map's volumes at all.
-     *
-     * Pressing Play is exactly that surface: the live entity array becomes the
-     * play session's, so plenty of entities answer and none of them is the
-     * editor's Blocking Box. Committing that answer deleted every mark the map
-     * load supplied, on every Play, and because the commit also collapses the
-     * bake plan the feature then stayed off for the rest of the session --
-     * measured live 2026-09-06, where the editor reported "1 volume(s) ...
-     * ready" and the very next Play reported "no volume in this map is marked".
-     *
-     * Only a surface that shows us Blocking Boxes may speak about their markers.
-     * -1 leaves the map with the flags it loaded with. */
+    /* No Blocking Boxes means this may be the Play entity table, not the
+     * editor's. Unticking markers leaves boxes present, so retain the prior
+     * map on refusal.
+     */
     if (volumes == 0) {
         free(w);
         return -1;
     }
 
-    /* Marked volumes were found and NOT ONE of them could be attributed to an
-     * instance. Attribution is by the id the map load recorded, so this is the
-     * live surface answering about a different id space -- at Play the array is
-     * indexed differently from the uniqueIds the load indexed by, and every
-     * marked volume falls out at the owner lookup above.
-     *
-     * `marked` counts them before that lookup, so the caller would be told "1
-     * marked volume" while the committed table held none: the bake plan then
-     * collapsed to nothing and the feature stayed off for the session. Measured
-     * live 2026-09-06 -- "the live editor read dropped 1 module(s) -- scanned 70
-     * entity id(s), found 1 marked volume(s)".
-     *
-     * Finding marks we cannot place is not evidence that the map has none. The
-     * load already placed these correctly; keep its answer. */
+    /* Found markers with no attributable owners indicate a mismatched id set.
+     * Refuse the refresh instead of committing an empty plan.
+     */
     if (marked > 0 && w->count == 0) {
         free(w);
         return -1;
     }
 
-    /* Commit. The instance table keeps its identities AND ITS POSITIONS --
-     * attribution addresses instances by position, so moving one would
-     * re-attribute every volume after it. Only `region_count` is rewritten,
-     * because it counts the region table and would otherwise be counting a
-     * region table that no longer exists. */
+    /* Commit only regions. Preserve instance positions because ownership uses
+     * their array indices.
+     */
     for (i = 0; i < m->instance_count && i < SH_NAVR_MAX_INSTANCES; i++)
         m->instances[i].region_count = 0;
     for (i = 0; i < w->count; i++) {

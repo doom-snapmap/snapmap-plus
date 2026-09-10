@@ -1,10 +1,5 @@
-/* package_conflicts_test.c -- overlap detection and its benign/real split.
- *
- * The question this answers is the one a player would ask: if two packages I
- * installed both carry the same file, which one am I actually running, and does
- * anything tell me? Every case here builds a real directory tree and scans it,
- * because the whole mechanism is filesystem shape.
- */
+/* Tests identical-file and conflicting-file detection using real fixture
+ * directories, including the reported winner under package priority. */
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
@@ -142,9 +137,7 @@ int main(void)
     CHECK(strcmp(conflicts[0].loser, "beta") == 0);
     CHECK(strstr(conflicts[0].resource, "shared.decl") != NULL);
 
-    /* PRIORITY BEATS THE ALPHABET. This is the case the old order got wrong: a
-     * package called `beta` could never outrank `alpha` no matter what the
-     * player wanted, because the sort was the name and nothing else. */
+    /* Explicit priority must outrank alphabetical package order. */
     fresh();
     make_package("alpha", "entitydef\\shared.decl", "ONE", "{}");
     make_package("beta",  "entitydef\\shared.decl", "TWO", "{ \"priority\": 10 }");

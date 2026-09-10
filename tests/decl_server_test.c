@@ -12,9 +12,7 @@
 #include "decl_text.h"
 #include "overrides.h"
 
-/* The production command notifies the palette one-shot after the final
- * native registration pass. This unit test exercises decl-server helpers
- * without linking that engine-facing service. */
+/* Stub palette notification while testing decl-server helpers. */
 int sh_palette_refresh_after_decl_registration(void)
 {
     return 1;
@@ -38,8 +36,7 @@ void backend_log(const char *message)
     strcpy_s(g_last_log, sizeof(g_last_log), message ? message : "");
 }
 
-/* The decl server arms these after a successful palette rebuild. Neither may
- * affect its outcome, so the seam records the calls and always succeeds. */
+/* Record optional post-palette operations without letting them fail registration. */
 static int g_visibility_installs;
 
 int sh_decl_visibility_install(const unsigned char *module_base,
@@ -51,11 +48,8 @@ int sh_decl_visibility_install(const unsigned char *module_base,
     return 1;
 }
 
-/* Publication is triggered by a one-shot detour on the engine's whole-registry
- * resource promotion, and applies the package requirement cvars synchronously
- * just before it. Neither reaches an engine in this unit test, so both seams
- * record nothing and report the outcome that keeps sh_decl_server_install on
- * its refusal path. */
+/* Stub boot promotion and synchronous package cvars so installation refuses
+ * without calling an engine. */
 void *install_inline_hook(void *target, void *detour, size_t stolen)
 {
     (void)target; (void)detour; (void)stolen;
@@ -92,16 +86,13 @@ int sh_user_overrides_enabled_for_launch(void)
     return 0;
 }
 
-/* The runtime re-arm re-scans the override package list before publishing identities, so the
- * file shadow can serve the new package's bytes. This test links decl_server WITHOUT
- * overrides.c, matching the stubs above; the re-arm path is exercised live, not here. */
+/* Stub override recapture needed by runtime re-arm; overrides.c is not linked. */
 unsigned long sh_overrides_rescan_packages(void)
 {
     return 0;
 }
 
-/* Same reason: the re-arm recaptures the resource-bridge manifests so a mid-session package's
- * linked game-owned entries resolve. Not linked here. */
+/* Stub resource-bridge recapture for runtime package registration. */
 int sh_resource_bridge_recapture(const char *data_root)
 {
     (void)data_root;
@@ -166,10 +157,8 @@ uintptr_t sig_addr_by_name(const sig_result *results, size_t count, const char *
     (void)name;
     return 0;
 }
-/* ds_res_walk resolves the engine's decl-resource list head through the globals resolver rather
- * than a hardcoded RVA. There is no engine image here, so the resolve fails and the walk visits
- * nothing -- which is what this suite wants, and the same thing that happens on a DOOM build we
- * cannot serve. */
+/* Without an engine image, the globals resolver returns no list head and
+ * ds_res_walk visits nothing. */
 uintptr_t glb_resolve(const uint8_t *module_base, const char *name, glb_status *out_status)
 {
     (void)module_base;
@@ -1038,11 +1027,8 @@ static void *closure_source_find(void *type_manager, const char *logical_name)
     return (void *)(uintptr_t)0x33300000u;
 }
 
-/* The Cyberdemon-shaped package is the integration fixture for the generic
- * rule: every registered identity gets a live object in its own manager, in
- * registration order, non-editor types first. Identities the installation
- * already owns -- source or live shadows -- are never synthesized, which is the
- * exact regression that made an existing editor parent terminal. */
+/* The synthetic package exercises generic materialization order: non-editor
+ * identities first. Existing source and live shadows must not be synthesized. */
 static void test_cyber_shaped_registration_order(void)
 {
     static const unsigned char root_body[] =
@@ -1647,18 +1633,11 @@ static void test_walk_error_propagation(void)
 }
 
 
-/* ---- runtime refresh protocol -------------------------------------------------------------
- *
- * A runtime pass must (1) mark every empty reused placeholder pending-load BEFORE the first
- * drain, so a draining decl's parse-time references reload their targets on demand instead of
- * consuming empty objects, and (2) re-parse newly served SHADOWED-live identities -- live
- * objects that predate their package's install -- IN PLACE, immediately, regardless of type
- * and regardless of whether they already hold loaded data, while leaving already-served ones
- * alone. The forced drain runs at the browser with no map loaded, so no mark may survive the
- * pass. The fake find_decl below emulates the engine manager lookup helper (RVA 0x1800A40):
- * an existing object is returned as-is unless its pending bit (0x02) is set, in which case
- * the helper clears the bit and runs the generic load (which sets the has-source bit 0x04)
- * before returning. */
+/* Mark all empty reused placeholders before the first drain so parse-time
+ * references can reload their targets. Re-parse newly served live shadows in
+ * place regardless of type, leaving already-served objects alone.
+ * The browser-safe pass must clear every pending mark. The lookup double
+ * clears pending bit 0x02, then loads source and sets bit 0x04. */
 
 #define RT_DECLS 4
 static unsigned char *g_rt_objects[RT_DECLS];
@@ -1685,9 +1664,8 @@ static void rt_reset(void)
     g_rt_direct_loads = 0;
 }
 
-/* The engine generic load (RVA 0x17FF5F0) as the fallback sees it: tears down and re-parses
- * in place, leaving the has-source bit set. The production code clears the pending bit
- * itself before calling, exactly as idResourceList::Load does. */
+/* The generic-load fallback re-parses in place and sets has-source.
+ * The caller must clear pending before invoking it. */
 static void rt_generic_load(void *decl)
 {
     ((unsigned char *)decl)[0x2c] |= 0x04;
@@ -1716,8 +1694,7 @@ static void *rt_find_decl(void *type_manager, const char *logical_name,
         if (g_rt_null_on_load) return NULL;
         if (g_rt_no_drain) return decl;
         if (g_rt_load_total == 0) {
-            /* At the first drain, was the OTHER placeholder already marked? That is the
-             * boot-parity property: a parse-time reference to it would reload it on demand. */
+            /* At the first drain, every other empty placeholder must already be marked. */
             int partner = (index == 0) ? 1 : 0;
             g_rt_first_load_saw_partner_marked =
                 (g_rt_objects[partner] && (g_rt_objects[partner][0x2c] & 0x02)) ? 1 : 0;
@@ -1774,8 +1751,7 @@ static void test_runtime_premark_reused_empties(void)
               rt_source_find, rt_find_decl, &materialized) == 1);
     sh_decl_server_test_set_runtime(0);
 
-    /* Both empties re-parsed exactly once, and when the FIRST drain ran the other
-     * placeholder was already marked. */
+    /* Both placeholders reload once; all marks must precede the first drain. */
     CHECK(g_rt_loads[0] == 1);
     CHECK(g_rt_loads[1] == 1);
     CHECK(g_rt_first_load_saw_partner_marked == 1);
@@ -1843,10 +1819,8 @@ static void test_runtime_shadowed_refresh(void)
               rt_source_find, rt_find_decl, &materialized) == 1);
     sh_decl_server_test_set_runtime(0);
 
-    /* Both newly served LIVE shadows -- the map-load-read entityDef AND the sound, whose
-     * natural read instant is mid-gameplay -- were re-parsed IN PLACE through the lookup
-     * drain, at the pass's own safe instant, and no mark survives. The already-served one
-     * and the SOURCE-kind one were left alone. */
+    /* Refresh both newly served live shadows in place and clear their marks;
+     * preserve the already-served object and source-only entry. */
     CHECK(g_rt_loads[0] == 1);
     CHECK(g_rt_loads[1] == 0);
     CHECK(g_rt_loads[2] == 0);
@@ -1887,9 +1861,8 @@ static void test_runtime_shadowed_drain_fallback(void)
     rt_reset();
     g_rt_names[0] = "rt/fsm";
     g_rt_objects[0] = fsm;
-    /* The lookup returns the object but never drains the mark -- the failure mode the
-     * fallback exists for. The pinned generic load must then run directly, with the
-     * production code clearing the pending bit first. */
+    /* If lookup leaves the mark pending, clear it and invoke the resolved
+     * generic-load fallback directly. */
     g_rt_no_drain = 1;
     sh_decl_server_test_reset_runtime_state();
     sh_decl_server_test_set_generic_load(rt_generic_load);
@@ -1928,9 +1901,8 @@ static void test_runtime_shadowed_drain_failed_is_swept(void)
     rt_reset();
     g_rt_names[0] = "rt/fsm2";
     g_rt_objects[0] = fsm;
-    /* No drain from the lookup AND no generic load resolved: the mark must survive the
-     * reload loop, be counted as nothing, and be disarmed by the sweep -- a shadowed mark
-     * must never stay armed into a map load either. */
+    /* Without a lookup drain or fallback, count no refresh and disarm the
+     * shadowed object's mark before map load. */
     g_rt_no_drain = 1;
     sh_decl_server_test_reset_runtime_state();
     sh_decl_server_test_set_runtime(1);
@@ -1965,9 +1937,7 @@ static void test_runtime_stray_pending_cleared(void)
     rt_reset();
     g_rt_names[0] = "rt/stray";
     g_rt_objects[0] = stray;
-    /* The reload path fails (the fake returns NULL once the pending bit is up), so the
-     * materialization fails, the mark survives, and the sweep must disarm it -- a
-     * non-shadowed mark must never stay armed into a map load. */
+    /* If materialization fails, disarm the unshadowed object's remaining mark. */
     g_rt_null_on_load = 1;
     sh_decl_server_test_reset_runtime_state();
     sh_decl_server_test_set_runtime(1);

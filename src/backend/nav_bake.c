@@ -1,4 +1,4 @@
-/* nav_bake.c -- see nav_bake.h for what this is and why it bakes at load. */
+/* Bake per-instance navigation from map data or a current editor snapshot. */
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
@@ -22,10 +22,9 @@ void backend_log(const char *message);
 static const char *const NAV_CLASSES[] = { "monster48", "monster96", "monster128" };
 #define NAV_CLASS_COUNT ((int)(sizeof NAV_CLASSES / sizeof NAV_CLASSES[0]))
 
-/* The bake line carries the counts plus every note that applies -- islands,
- * side faces, cut volumes, dead-zone pairs -- and at 192 the notes were being
- * silently cut off mid-sentence, which reads to an author exactly like the bake
- * had nothing more to say. 64 modules at this size is 24 KB of statics. */
+/* Room for counts and all diagnostic notes without truncating common reports.
+
+ */
 #define BAKE_REASON_CAP 384
 
 typedef struct bake_module {
@@ -45,9 +44,9 @@ static int          g_module_count;
 static int          g_have_map;
 static volatile LONG g_bakes;
 static volatile LONG g_faulted;
-/* What the last pre-build live read actually saw. This is the one thing an author
- * cannot otherwise tell apart: "I ticked a box and nothing happened" has a very
- * different cause when the read never ran than when it ran and found nothing. */
+/* Last live-read diagnostics distinguish a missing snapshot from an empty
+ * one.
+ */
 static int g_live_scanned = -1;   /* entity ids offered, -1 = never ran */
 static int g_live_marked;         /* marked volumes it attributed */
 static int g_live_refused;        /* the read declined to commit */
@@ -116,11 +115,10 @@ void sh_nav_bake_set_live_editor(sh_nav_bake_entity_count count,
     ReleaseSRWLockExclusive(&g_bake_lock);
 }
 
-/* Re-read the markers from the live entities, then re-plan. Called with the
- * lock held, immediately before a bake.
- *
- * Failure is not an error: -1 leaves the map exactly as loaded, which is what a
- * downloaded map wants anyway. The only thing lost is a mark made this session. */
+/* Legacy per-entity refresh, called with g_bake_lock held. A refusal
+ * preserves the previously attributed map; complete snapshots use a separate
+ * path.
+ */
 static void bake_refresh_live_locked(void)
 {
     int n, marked, before, after;
@@ -139,10 +137,7 @@ static void bake_refresh_live_locked(void)
     bake_plan_locked();
     after = g_module_count;
 
-    /* A live read that TAKES AWAY what the map load supplied is the one outcome
-     * of this function that can silently turn the whole feature off, so it says
-     * so. Reading the live surface at the wrong moment did exactly that on every
-     * Play until 2026-09-06, and it was invisible: the bake simply never ran. */
+    /* Report lost modules so a failed or mistimed live read is visible. */
     if (after < before) {
         _snprintf_s(line, sizeof line, _TRUNCATE,
                     "NAV: the live editor read dropped %d module(s) -- scanned %d entity id(s), "
@@ -151,9 +146,7 @@ static void bake_refresh_live_locked(void)
     }
 }
 
-/* How many times the engine has asked for each module's navigation this map.
- * Its own table, not g_modules: it must count modules nobody marked, which is
- * what makes an unmarked map a usable probe. */
+/* Count resource opens for all modules, including unmarked ones. */
 typedef struct bake_open_census {
     char module[SH_NAVR_MODULE_CAP];
     unsigned opens;
@@ -202,15 +195,11 @@ static int bake_enabled(void)
 /* the resource-name grammar                                             */
 /* ==================================================================== */
 
-/* The two names one module's navigation answers to, mirroring navmesh.c:
- *
- *     maps/modules/<category>/<module>/<module>.aas_<class>
- *     generated/maps/modules/<category>/<module>/<module>.baas_<class>
- *
- * The cooked spelling prefixes 'b' to the WHOLE extension, and the engine asks
- * for it FIRST -- which is why getting it wrong fails silently rather than
- * loudly, and why navmesh_test.c pins both spellings with literal strings. The
- * same trap applies here, so this parser is tested the same way. */
+/* Accepted resource names:
+ *   maps/modules/<category>/<module>/<module>.aas_<class>
+ *   generated/maps/modules/<category>/<module>/<module>.baas_<class>
+ * The engine tries the cooked .baas_ spelling first.
+ */
 static int bake_parse_name(const char *name, char *module, size_t module_cap,
                            char *cls, size_t cls_cap)
 {
@@ -233,9 +222,7 @@ static int bake_parse_name(const char *name, char *module, size_t module_cap,
         return 0;
     }
 
-    /* p is "<category>/<module>/<module><ext><class>". The category may not
-     * contain a dot, and neither may a module, so the FIRST dot from the right
-     * that starts our extension is the split. */
+    /* Split at the extension in <category>/<module>/<module><ext><class>. */
     dot = strstr(p, ext);
     if (!dot) return 0;
     /* the leaf directly before the extension must be preceded by a slash */
@@ -314,16 +301,11 @@ static void bake_plan_locked(void)
     }
 }
 
-/* Re-read the markers from the live editor and re-plan.
- *
- * MUST be called on DOOM's main thread while the EDITOR is live and quiescent --
- * that is the whole point of it being a separate entry point rather than
- * something the bake does for itself. It reads live entities through the engine's
- * own reflection serialize, which is only meaningful while the editor still owns
- * its map; the frontend's UI worker thread is explicitly the wrong place (issue
- * #61), and so is the middle of BuildAAS (issues #87 and #89).
- *
- * Cheap to call again: it is a scan, not a mutation, and it is idempotent. */
+/* Refresh on DOOM's main thread while the editor still owns its map, before
+ * BuildAAS. Engine reflection is unsafe on the frontend worker or during map
+ * conversion. Complete snapshots also refresh ownership and newly created
+ * entities.
+ */
 void sh_nav_bake_refresh_live(void)
 {
     if (InterlockedCompareExchange(&g_building, 0, 0)) return;
@@ -413,7 +395,7 @@ void sh_nav_bake_set_map(const char *json, size_t len)
     }
     ReleaseSRWLockExclusive(&g_bake_lock);
 
-    if (g_module_count == 0) return;    /* silence is right for the common map */
+    if (g_module_count == 0) return;    /* No report for an unmarked map. */
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
                 "NAV: this map marks %d volume(s) for AI navigation across %d module(s)"
@@ -432,8 +414,7 @@ static int bake_collect_platforms(const bake_module *m, sh_aug_platform *out, in
     for (i = 0; i < g_map.region_count && n < cap; i++) {
         const sh_nav_region *r = &g_map.regions[i];
         if (r->instance != m->instance) continue;
-        /* A volume demons fall straight through is not a floor, whatever the
-         * author ticked -- navigating onto it would be a lie the router acts on. */
+        /* Only geometry that blocks demons can support a walkable surface. */
         if (!r->block_demons) continue;
         memset(&out[n], 0, sizeof out[n]);
         memcpy(out[n].c, r->c, sizeof r->c);
@@ -474,16 +455,13 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
         return 0;
     }
 
-    /* The animation table, from the player's own install. Loaded lazily on the
-     * first bake rather than at startup: it is only needed once a map actually
-     * marks something, and by then the resource provider is certainly up. It
-     * caches itself, so this is one open per session. Failure is not fatal --
-     * without a table nothing can climb and every platform out of step range is
-     * an island, which is exactly the previous build's behaviour. */
+    /* Load traversal animations lazily through the active provider;
+     * successful reads are cached for the session. Without a table, no climbs
+     * are emitted.
+     */
     sh_trav_load(read_shipped);
 
-    /* The bytes the engine was about to load. Without these there is nothing to
-     * add to: we do not author a navmesh, we extend the shipped one. */
+    /* Augmentation requires the shipped payload as its base. */
     shipped = read_shipped ? read_shipped(name, &shipped_len) : NULL;
     if (!shipped) {
         _snprintf_s(why, why_cap, _TRUNCATE,
@@ -511,6 +489,7 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
     sh_aas_free(model);
     if (!baked) {
         _snprintf_s(why, why_cap, _TRUNCATE, "%s",
+                    rep.reach_limit_exceeded ? "required routes exceed the native 256 outgoing links per area; the whole bake was refused" :
                     rep.links_truncated ? "the traversal capacity was exceeded; the whole bake was refused" :
                     rep.pieces_truncated ? "the geometry capacity was exceeded; the whole bake was refused" :
                     rep.depth_exceeded ? "the navigation tree depth was exceeded; the whole bake was refused" :
@@ -518,9 +497,7 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
         return 0;
     }
 
-    /* The same gate the shard path applies. A payload we generated is not
-     * automatically safe: the engine's loader is what dies on a malformed one,
-     * and a bug in our own augmenter is exactly as fatal as a hostile map. */
+    /* Generated output must pass the same structural gate as embedded payloads. */
     err[0] = 0;
     if (!sh_navmesh_validate_aas(baked, baked_len, err, sizeof err)) {
         HeapFree(GetProcessHeap(), 0, baked);
@@ -538,17 +515,13 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
     *out_len = baked_len;
     rc = 1;
     {
-        /* Say what each platform actually got. "Islands" is the number an author
-         * most wants to see: a platform nothing can climb onto is legal and
-         * sometimes wanted, but it is a different thing from one they expected
-         * demons to reach, and only this line distinguishes them. */
+        /* Report islands separately from surfaces with incoming routes. */
         int islands = 0, climbs = 0, leaps = 0, chained = 0, tipped = 0, i;
         int cut = 0, lastcut = -1;
         for (i = 0; i < rep.platform_count; i++) {
-            /* Counted over every entry, emitted or not: a volume cut into
-             * pieces that were then all refused is exactly the case an author
-             * needs told about. Entries from one volume are contiguous, so the
-             * last-source check is enough to count volumes rather than pieces. */
+            /* Count source volumes even if all pieces were refused. Pieces
+             * from one source are contiguous.
+             */
             if (rep.platforms[i].pieces != 1 && rep.platforms[i].source != lastcut) {
                 lastcut = rep.platforms[i].source;
                 cut++;
@@ -557,9 +530,7 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
             if (rep.platforms[i].island) islands++;
             climbs += rep.platforms[i].climbs;
             leaps  += rep.platforms[i].leaps;
-            /* More than one neighbour means it reaches something besides the
-             * module floor -- which is the question an author actually has after
-             * standing two volumes next to each other. */
+            /* Multiple neighbours indicate routes beyond the module floor. */
             if (rep.platforms[i].neighbours > 1) chained++;
             if (rep.platforms[i].side_face) tipped++;
         }
@@ -580,14 +551,18 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
                                   ? "nothing can climb that high"
                                   : "no traversal table, so nothing climbs")) : "",
                     tipped ? "; some volumes are walkable on a side face" : "");
+        if (rep.anchors_reduced) {
+            size_t at = strlen(why);
+            _snprintf_s(why + at, why_cap - at, _TRUNCATE,
+                        "; %d alternative link samples removed to fit native routing",
+                        rep.anchors_reduced);
+        }
         if (cut) {
             size_t at = strlen(why);
             _snprintf_s(why + at, why_cap - at, _TRUNCATE,
                         "; %d volume(s) cut around the solids standing in them", cut);
         }
-        /* Kept SHORT and last: the line has a fixed budget, and a note that
-         * pushes the cut count off the end costs the author the more important
-         * fact. */
+        /* Keep optional notes last so truncation preserves the cut-volume count. */
         if (rep.dead_gaps) {
             size_t at = strlen(why);
             _snprintf_s(why + at, why_cap - at, _TRUNCATE,
@@ -732,13 +707,7 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
         return *out_bytes!=NULL;
     }
 
-    /* Census FIRST, for every module the engine asks navigation for -- marked or
-     * not. How many times one module's navigation is opened is the measurement
-     * the one-copy rule turns on: BuildAAS builds the name inside its
-     * per-instance loop, so N opens of one name across a map that places that
-     * module N times means each instance can be served its own navigation, and
-     * three opens for twelve instances means it cannot. Counted here rather than
-     * at the bake because an unmarked module is the cheapest way to ask. */
+    /* Count every module open before filtering, including unmarked modules. */
     bake_census(module);
 
     AcquireSRWLockExclusive(&g_bake_lock);
@@ -747,17 +716,11 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
         if(instance>=0 && read_shipped) *out_bytes=read_shipped(name,out_len);
         return *out_bytes!=NULL;
     }
-    /* NOTHING HERE MAY TOUCH THE ENGINE. This runs inside the engine's own AAS
-     * loader -- idDeclSnapMap::BuildAAS (0x4EBFB0) -> idAAS2File::Load ->
-     * idAAS2File::LoadBinary -> the resource-provider hook -> here -- and by then
-     * SnapMapEditToSnapBuild has already begun turning the edit map into the build
-     * map. Reading the live entities from this point called EntityClone on entities
-     * whose defsub was still NULL and raised thousands of access violations inside
-     * the loader, which the fault shield escalated to idCommon::Error(6) and which
-     * killed the process (issues #87 and #89).
-     *
-     * The refresh now happens on the editor side, before the build starts, through
-     * sh_nav_bake_refresh_live(). An open consumes the plan and nothing else. */
+    /* Do not inspect live entities here. This runs inside BuildAAS after
+     * editor-to-build conversion has started; entities may have null defsub
+     * fields. Consume the plan captured by sh_nav_bake_refresh_live before
+     * conversion.
+     */
     m = NULL;
     if(instance>=0) {
         if(revision==g_geometry_revision)
@@ -779,8 +742,7 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
                 strncpy_s(why,sizeof why,m->reason,_TRUNCATE);
             } else hit = bake_one(name, m, read_shipped, out_bytes, out_len, why, sizeof why,NULL);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            /* One fault disables the feature for the session. A bake that can
-             * fault once can fault again, and the engine is holding the map. */
+            /* Disable baking after a fault to avoid repeating it during map load. */
             InterlockedExchange(&g_faulted, 1);
             hit = 0;
             _snprintf_s(why, sizeof why, _TRUNCATE, "the bake faulted; navigation is off for this session");

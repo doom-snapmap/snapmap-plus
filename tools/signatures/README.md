@@ -1,94 +1,60 @@
-# Signature and global derivation tooling
+# Signature derivation
 
-These scripts produce the two things that let one build of Snapmap+ serve more than one
-DOOM 2016 executable:
+## Purpose
 
-- the masked byte signatures in `src/backend/signatures.c`, and
-- the generated table in `src/backend/engine_globals_table.gen.h`.
+Derives and checks the byte patterns that locate engine functions and data
+globals on DOOM 2016's Vulkan and OpenGL executables. These tools support
+porting and maintenance; they are not included in the DLLs.
 
-Nothing here ships in the DLL. You need it only when adding a new engine function or data
-global, or when DOOM is patched and addresses move.
+## Contents
 
-## Why this exists
+| Script | Responsibility |
+|---|---|
+| `extract_sig.py` | Grow a masked function signature and check uniqueness on two images. |
+| `derive_callee.py` | Identify a function through signed callers and decoded call targets. |
+| `derive_global.py` | Find signed RIP-relative references to a data global. |
+| `gen_globals_table.py` | Emit the generated engine-global table from derivation output. |
+| `sigscan.py` | Check the committed signature database without compiling native tests. |
 
-DOOM 2016 ships two executables built from one source tree and linked one second apart:
-`DOOMx64vk.exe` (Vulkan) and `DOOMx64.exe` (OpenGL). Their import tables are identical apart
-from `vulkan-1.dll` versus `OPENGL32.dll`, and the game relaunches itself into the other one
-when the `r_renderAPI` cvar changes — so a user can end up in either from a single Steam launch.
+## Working here
 
-Between those two images, function addresses shift by −0x400 to −0xE460 with no uniform offset,
-and data globals move by nearly 0x1000000. Struct field layouts, on the other hand, are
-identical. So the rule the product follows is:
+Use Python 3.10 or later with `capstone` and `numpy`. Supply unpacked local
+DOOM executables; [Steamless](https://github.com/atom0s/Steamless) can produce
+`<name>.unpacked.exe` from each SteamStub-wrapped input. Do not commit the images
+or extracted game bytes.
 
-> **Identity comes from a signature. Addresses come from derivation. Never from a constant.**
+The output feeds `src/backend/signatures.c` and
+`src/backend/engine_globals_table.gen.h`. Preserve the distinction between a
+signature, which finds code, and an RVA, which describes one image. Renderer
+addresses cannot be translated with a single offset.
 
-A hardcoded RVA is a fact about one link output. It is not wrong in a way you can detect at
-runtime — it silently names unrelated memory — which is why the product refuses rather than
-falls back to one whenever it is not running the build that RVA came from.
+## Commands
 
-## Getting unpacked images
+```text
+python extract_sig.py <reference.exe> <target.exe> <rva> [...]
+python derive_callee.py <reference.exe> <target.exe> <rva> [...]
+python derive_global.py <reference.exe> <target.exe> <rva> [...]
+python gen_globals_table.py [derived_globals.json] [out.h]
+python sigscan.py <signatures.c> <image> [<image> ...]
+```
 
-Both executables are SteamStub-wrapped, so their `.text` is encrypted on disk. Unpack each with
-[Steamless](https://github.com/atom0s/Steamless) before running anything here:
+Run from this directory or use each script's full path. Function extraction
+masks RIP-relative displacements and relative branches while retaining structure
+displacements. Callee and global derivation use multiple sites to check agreement
+where possible. Read each script's argument handling before selecting output paths.
 
-    Steamless.CLI.exe "…\DOOM\DOOMx64vk.exe"
-    Steamless.CLI.exe "…\DOOM\DOOMx64.exe"
+## Adding or repairing an entry
 
-That writes `<name>.unpacked.exe` alongside each input.
+1. Identify the intended function or global on a known unpacked image.
+2. Derive a signature and require a unique match on both renderer images.
+   A shared prologue or tiny stub may need a caller anchor instead.
+3. Record RVAs only for their labeled source image. Do not treat a unique byte
+   match alone as proof that it names the intended operation.
+4. Update the source entry or generator input. Never hand-edit a generated
+   pattern in `engine_globals_table.gen.h`.
+5. From the repository root, run
+   `tests/run-tests.ps1 -Doom <image> -DoomAlt <other-renderer-image>`.
 
-Requires Python 3.10+ with `capstone` and `numpy`.
-
-## The scripts
-
-`extract_sig.py <ref.exe> <target.exe> <rva> [...]`
-Extract a minimal unique signature for a function, growing the window one instruction at a time
-until it matches exactly once on the reference image, then require it to match exactly once on
-the target image too. Wildcards RIP-relative displacements and branch rel32s; keeps struct
-displacements fixed, because those are identical across builds and raise selectivity for free.
-This is what you use when adding a normal entry to `BACKEND_ENGINE_SIGNATURES`.
-
-`derive_callee.py <ref.exe> <target.exe> <rva> [...]`
-For functions that cannot be identified by their own bytes — a prologue shared with dozens of
-other functions, a stub too short to anchor, a body that is a generic shape. Signs a *call site*
-instead and reads the `call rel32`. Reports multi-site consensus.
-
-`derive_global.py <ref.exe> <target.exe> <rva> [...]`
-For data globals. Finds every RIP-relative code site that computes the address, builds a masked
-signature of that site, requires uniqueness on both images, then reads the displacement at the
-match on the target. Reports multi-site consensus.
-
-`gen_globals_table.py [derived_globals.json] [out.h]`
-Emits `engine_globals_table.gen.h` from the derivation output. **The table is generated. Never
-hand-edit a pattern in it.** Adding a global means adding a name to the `NAMES` map here and
-re-running, not writing C.
-
-`sigscan.py <signatures.c> <image> [<image> ...]`
-A quick host-side check of the whole shipped database against one or more images, without
-compiling anything. `tests/run-tests.ps1 -Doom … -DoomAlt …` is the authoritative gate; this is
-for iterating.
-
-## Adding a signature
-
-1. Find the function's RVA on an unpacked image.
-2. `extract_sig.py <vk> <gl> <rva>`. If it reports `PORTABLE`, take the pattern.
-3. If it reports `FAILED`, the function has no identity of its own — use `derive_callee.py` and
-   add it to the globals table instead.
-4. Add the entry, then prove it:
-
-       tests\run-tests.ps1 -Doom …\DOOMx64vk.exe.unpacked.exe -DoomAlt …\DOOMx64.exe.unpacked.exe
-
-   Both images must resolve it uniquely. A pattern that is unique on only one image is a
-   coincidence, not an identity, and shipping it means the product works on one build and
-   mis-resolves on the other with no symptom you would notice.
-
-`RenderLogStub` in `signatures.c` is the cautionary example already in the tree: its pattern is
-`mov [rsp+0x20],r9; ret` plus padding, which is a *shape*. It happens to land on the right
-function on both images, confirmed separately by five agreeing call sites — but nothing about the
-pattern earns that, and only the two-image gate would have caught it if it had not.
-
-## Supporting another DOOM build
-
-Unpack it, run the derivations against it, and check that every existing signature and global
-still resolves. Nothing about the product needs to know which build it is running. If a pattern
-stops resolving there, fix the pattern — do not add a per-build address table. There isn't one,
-and adding one is how a single product turns into two.
+The native two-image suite is the required gate; `sigscan.py` is an iteration
+aid. Confirm calling conventions and field layouts separately when supporting
+a different engine build. See [contributing](../../docs/contributing.md#7-run-the-tests).

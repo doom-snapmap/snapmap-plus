@@ -1,5 +1,4 @@
-/* crash_record_format.c -- see crash_record_format.h. Pure C, no OS/CRT-heap dependency: safe to call
- * from a crash context (static/stack buffers only; _snprintf_s never allocates). */
+/* Format crash records without I/O or explicit heap allocation. */
 #include "crash_record_format.h"
 #include <stdio.h>
 #include <string.h>
@@ -31,8 +30,7 @@ int crash_json_escape(char *dst, size_t cap, const char *src)
     return (int)o;
 }
 
-/* Per-field escape scratch. The stack walk is the longest field; the engine text is capped upstream
- * (HARVEST_MSG_MAX). Static (not stack): this runs in crash contexts where stack may be precious. */
+/* Static escape buffers preserve stack space on the fault path. */
 static char e_stack[4096], e_text[1536], e_small[512];
 
 int crash_record_json(char *buf, size_t cap, const crash_record *r)

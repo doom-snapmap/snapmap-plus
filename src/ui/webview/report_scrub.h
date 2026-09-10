@@ -1,21 +1,14 @@
-/* report_scrub.h -- pure helpers for the crash-report log attachment: anonymization scrub + tail.
- *
- * Submitting a crash report may attach the tails of the local log files, and log lines carry local
- * filesystem paths -- i.e. the Windows account name (C:\Users\<name>\...) and sometimes the machine
- * name. Reports are anonymous by design, so BOTH are scrubbed out of the attached text before it
- * leaves the machine. Header-only, pure C (no OS calls), so the exact same code is unit-tested
- * off-game (tests/report_scrub_test.c) and compiled into the UI host.
- */
+/* Pure helpers for report attachments: replace account/machine identifiers and
+ * select bounded log tails. These helpers do not remove arbitrary personal data. */
 #ifndef SNAPMAP_PLUS_REPORT_SCRUB_H
 #define SNAPMAP_PLUS_REPORT_SCRUB_H
 
 #include <stddef.h>
 #include <string.h>
 
-/* Case-insensitive scrub: copy `src` into dst, replacing EVERY occurrence of `name` (matched
- * case-insensitively) with `repl`. Names shorter than 2 chars are not scrubbed (degenerate match --
- * would mangle the whole text; no real Windows account is 1 char). Always NUL-terminates; truncates
- * at cap. Returns chars written. */
+/* Copy with case-insensitive name replacement. Names shorter than two bytes are
+ * skipped to avoid pervasive single-character replacements. Return bytes written;
+ * a nonzero destination capacity is NUL-terminated, with truncation at cap. */
 static int rs_scrub(char *dst, size_t cap, const char *src, const char *name, const char *repl)
 {
     size_t o = 0, nlen, rlen, i;
@@ -46,9 +39,8 @@ static int rs_scrub(char *dst, size_t cap, const char *src, const char *name, co
     return (int)o;
 }
 
-/* Tail: return the offset into a `len`-byte buffer such that at most `keep` bytes remain, snapped
- * FORWARD to the next line start when the cut lands mid-line (so the tail never opens with a torn
- * half-line). A buffer shorter than `keep` tails from 0. Pure arithmetic. */
+/* Return a tail offset retaining at most keep bytes. Prefer a whole line; if
+ * no newline remains, use a byte cut. Short buffers start at zero. */
 static size_t rs_tail_offset(const char *buf, size_t len, size_t keep)
 {
     size_t off;

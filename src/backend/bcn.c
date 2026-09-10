@@ -1,10 +1,6 @@
-/* bcn.c -- see bcn.h. BC1 / BC3 / BC7 -> RGBA8.
- *
- * Straight implementations of the public block-compression formats; no engine dependency.
- * Two invariants everything here obeys, because a texture browser must never fault on a
- * malformed or truncated asset:
- *   - reads never go past `src_len` (a short block reads as zero);
- *   - every channel is clamped on the way out. */
+/* CPU decoders for the public BC1, BC3 and BC7 formats. Source fetches beyond
+ * src_len return zero; callers provide a padded RGBA8 output buffer.
+ */
 
 #include <string.h>
 #include "bcn.h"

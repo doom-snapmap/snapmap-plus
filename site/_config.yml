@@ -7,3 +7,7 @@ description: Snapmap+ opens up DOOM (2016) SnapMap — full property editing, no
 markdown: kramdown
 kramdown:
   input: GFM
+
+# The directory guide is repository documentation, not a public page.
+exclude:
+  - README.md

@@ -6,18 +6,13 @@ import (
 	"path/filepath"
 )
 
-// User modding content (overrides, prefabs, custom strings) lives in the app-data folder alongside the install
-// record -- one consolidated place, %LOCALAPPDATA%\snapmap-plus\ (appDataDir). This is the right home for mod
-// data: it is reliably writable (unlike a game folder under Program Files, where non-elevated writes fail or get
-// redirected), it survives a game uninstall / "verify integrity of game files" / reinstall, and it is out of the
-// home directory so its name never collides with a repository clone. The backend reads the same tree; its startup
-// scaffolder (dllmain.c) mirrors userContentSubdirs -- keep the two in sync.
+// Player content lives in writable local app data, outside the game installation.
+// Keep userContentSubdirs aligned with the backend startup folders in dllmain.c.
 
 // userContentSubdirs is the content tree the installer scaffolds and the backend reads. Mirrors dllmain.c's subs[].
 var userContentSubdirs = []string{"strings", "overrides", "prefabs"}
 
-// oldUserContentDir is where content lived before this version: %USERPROFILE%\snaphak\ (a path reused from the
-// original tool, historically in the home root). Empty if USERPROFILE is unset.
+// oldUserContentDir is the legacy home-root data folder; empty if USERPROFILE is unset.
 func oldUserContentDir() string {
 	base := os.Getenv("USERPROFILE")
 	if base == "" {
@@ -49,8 +44,7 @@ func oldTokenPath() string {
 	return ""
 }
 
-// ensureUserDataTree creates the content folders (overrides / prefabs / strings) under the app-data dir if a
-// fresh profile lacks them, so the disk-backed features work on a clean install instead of silently no-opping.
+// ensureUserDataTree creates missing player-content directories.
 func ensureUserDataTree() {
 	dir := appDataDir()
 	if dir == "" {
@@ -61,13 +55,10 @@ func ensureUserDataTree() {
 	}
 }
 
-// migrateUserData scaffolds the content tree and, one time, MOVES a user's existing content forward from the
-// old home-root %USERPROFILE%\snaphak\ folder into the app-data dir: it copies every missing file, then removes
-// the old folder once every one of its files is confirmed present at the new location. That's a VERIFIED move --
-// the delete only happens after the content is safely mirrored, so nothing is ever lost, but no stale "backup"
-// is left behind either. It also clears the pre-rename %LOCALAPPDATA%\open-snaphak\ app-data folder once its
-// record/token have migrated forward. Finally it retires the pre-package overrides\generated tree into a
-// real override package. Best-effort; never fails the install; never deletes an unmirrored folder.
+// migrateUserData copies missing legacy files, then removes the source when
+// fullyMirrored finds every destination path. Existing destination files win;
+// contents are not compared. It also retires old metadata and the shared override
+// layout. Migration is best-effort and does not fail installation.
 func migrateUserData() {
 	dir := appDataDir()
 	if dir == "" {
@@ -89,9 +80,8 @@ func migrateUserData() {
 		}
 	}
 
-	// 2) Old app-data folder (%LOCALAPPDATA%\open-snaphak): the record + token migrate forward lazily via
-	//    loadRecord / resolveToken; make sure both are present at the new location, then delete the old folder
-	//    (its stale exe copy goes with it).
+	// Copy missing old metadata, then remove its directory. Copy errors are ignored
+	// here; unlike content migration, this path has no post-copy verification.
 	if oldAD := oldAppDataDir(); oldAD != "" && !sameFile(oldAD, dir) {
 		if _, err := os.Stat(oldAD); err == nil {
 			for _, name := range []string{"install.json", "token"} {
@@ -106,13 +96,12 @@ func migrateUserData() {
 		}
 	}
 
-	// 3) Overrides: retire the pre-package overrides\generated tree into a real package. Runs last so
-	//    anything folded forward in step 1 is migrated too, not left behind in the old layout.
+	// Migrate overrides last so newly copied legacy content follows the same layout.
 	migrateLegacyOverrides()
 }
 
-// fullyMirrored reports whether every file under src also exists under dst -- the safety check that lets a
-// migration delete src without risking data loss.
+// fullyMirrored checks destination path presence for enumerated files.
+// It does not compare bytes or treat source enumeration errors as failure.
 func fullyMirrored(src, dst string) bool {
 	ok := true
 	filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {

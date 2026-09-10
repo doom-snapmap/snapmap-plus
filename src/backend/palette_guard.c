@@ -1,38 +1,18 @@
-/* palette_guard.c -- the editor WIRE-RENDER render-node guard.
+/* Sanitize editor wire-render node references before the native resolver
+ * walks them. The legacy palette_guard name remains; this is not a palette
+ * name-sort hook.
  *
- * NOTE ON THE NAME. This file (and sh_palette_guard_install) keep their legacy names so the single dllmain
- * call site + the build source list are untouched; the CONTENT is the render-node guard described below. The
- * two earlier guards this file used to host -- the palette-migration name-sort guard (0x5ec6c0) and the
- * entity-collection teardown guard (0x4e9aa0) -- were REMOVED: they targeted the "dangling embedded idStr"
- * theory (crash face 0x1ab32ee), which is NOT the create-timeline reload crash. Evidence: the palette guard
- * logged "reset 0" on every load (it never once fired). The idStr/decl face's actual ROOT fix lives in
- * apply_engine.c (ae_apply_one's timeline decl-unregister) and stays; this file now owns only the render-node
- * face. (Trivial follow-up: rename the file/function to rendernode_guard.)
+ * The pinned Vulkan resolver at RVA 0x5e0ad0 receives a vector handle as
+ * argument 2 (View+0x60, editor+0x1d0). Its records are 0x180 bytes;
+ * output/input references at +0x70/+0x80 lead to the predicate status byte at
+ * node+0x30. Reloads or uninitialized slots can leave unreadable references.
+ * Clear those references without reordering or freeing records. Readable
+ * pointers remain unchanged, including freed storage that is still mapped.
  *
- * ROOT (DIRECT, reverse-engineered + live-measured). The editor's per-frame wire/connection overlay renderer
- * walks a per-entity RENDER-NODE array and, for each entity, reads its output-node (+0x70) and input-node
- * (+0x80) references and dereferences their +0x30 status byte (predicate FUN_140d32a30 `cmp byte [rax+0x30]`).
- * The connection resolver FUN_1405e0ad0(OP, arrHandle, out, i, flag) drives that walk: `arrHandle` (its 2nd
- * arg) is the render-node vector handle {base @+0x00, size @+0x08 (int), cap @+0x10}, a PERSISTENT member of
- * the editor VIEW (editor+0x1d0) that SURVIVES play->exit->re-enter (only the map reloads). A from-scratch
- * timeline is a NODE-LESS is-target: it has no output/input node, but the paste+reclass leaves a render-node
- * whose +0x70 references an output-node object that the reload frees while the persistent slot keeps the now
- * dangling reference (or, after the vector reallocs on reload, fresh heap garbage like 0x1/0x4). Next re-enter,
- * the renderer walks that record and dereferences the stale reference -> access violation (rip 0xd32a39).
- *
- * FIX. Detour the resolver (0x5e0ad0) and, BEFORE calling the original, walk the render-node array and null any
- * record's +0x70/+0x80 that is NOT a readable object reference (a small integer, or an unmapped/freed pointer).
- * The predicate treats a null node reference as "no node" and skips it -- which is the CORRECT result for a
- * node-less timeline (it has no wire to draw), so this repairs the render rather than merely masking a fault. A
- * VALID node reference (a readable heap object) is left untouched. We never reorder the array or free anything.
- * SEH-guarded end to end + game-thread (the resolver runs on the render/game thread), so it cannot fault the
- * guard or race the editor.
- *
- * Clean-room from our own reverse-engineering. BUILD-SPECIFIC RVAs + struct offsets (recipe-tagged) --
- * RE-DERIVE per build: disasm 0x5e0ad0 (prologue = four arg home-stores, 20 bytes, clean boundary before the
- * pushes -> STOLEN=20; its 2nd arg is the render-node vector handle = View+0x60 = editor+0x1d0). Live-measured
- * the vector shape {base, size, cap} + the 0x180 stride + the +0x70/+0x80 node refs + the +0x30 status byte the
- * predicate FUN_140d32a30 reads. */
+ * This installer uses a build-specific RVA and a 20-byte prologue of four
+ * argument home stores before the pushes. Re-derive the entry, instruction
+ * boundary and layout before porting it.
+ */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -41,12 +21,15 @@
 #include "backend_log.h"
 
 #define RVA_WIRE_RESOLVER      0x5e0ad0u   /* FUN_1405e0ad0(OP, arrHandle, out, i, flag): the wire-render walk */
-#define WIRE_RESOLVER_STOLEN   20u         /* clean prologue: 4x arg home-store (mov [rsp+8/+0x10/+0x18/+0x20], rcx/rdx/r8/r9d) = 20 bytes, before the PUSH block */
+#define WIRE_RESOLVER_STOLEN   20u         /* Four argument home stores form the 20-byte stolen prologue, before pushes. */
 
 /* render-node vector handle (the resolver's 2nd arg = View+0x60 = editor+0x1d0). */
 #define RN_BASE_OFF            0x00        /* base ptr (first 0x180 record) */
 #define RN_SIZE_OFF            0x08        /* logical element count (int) */
-#define RN_CAP_OFF             0x0c        /* allocated capacity (int) -- the resolver's entity high-water can exceed SIZE for a freshly-added entity yet stay within CAP; those [size,cap) slots are uninitialized */
+#define RN_CAP_OFF             0x0c        /* Capacity: resolver high-water can exceed
+                                            * size; the remaining slots may be
+                                            * uninitialized.
+                                            */
 #define RN_STRIDE             0x180u       /* one per-entity render-node record */
 #define RN_COUNT_MAX          0x4000       /* editor entity cap ~0x3ffe; a larger size = a bad read -> skip */
 
@@ -60,9 +43,9 @@ typedef void (*wire_resolver_fn)(void *op, void *arr_handle, void *out, int i, c
 static wire_resolver_fn g_orig_resolver = NULL;
 static volatile LONG    g_reset_total   = 0;
 
-/* Is the byte range [addr, addr+nbytes) fully backed by committed, readable memory? VirtualQuery so a freed page
- * reports its true state (a plain 1-byte SEH probe misses a buffer straddling a still-mapped page into an
- * unmapped one). Returns 0 on any un-committed / no-access / guard page in the range. */
+/* Require the full byte range to be committed and readable. VirtualQuery
+ * catches spans crossing inaccessible or guard pages.
+ */
 static int mem_range_readable(const void *addr, size_t nbytes)
 {
     const uint8_t *p   = (const uint8_t *)addr;
@@ -79,10 +62,10 @@ static int mem_range_readable(const void *addr, size_t nbytes)
     return 1;
 }
 
-/* Is `p` an INVALID node reference (would fault the predicate's `[p+0x30]` read)? null is VALID (== no node,
- * the predicate handles it). A small integer or a pointer whose [p, p+0x30] range is not committed is INVALID.
- * A readable heap object is left as-is (a real node, or a freed-but-still-mapped one whose byte read won't
- * fault -- not our crash). */
+/* NULL means no node. Reject small integers and unreadable ranges through
+ * node+0x30. Readability does not prove object lifetime; freed but still
+ * mapped storage passes.
+ */
 static int node_ref_invalid(const void *p)
 {
     if (p == NULL) return 0;                                             /* no node -> fine */
@@ -90,8 +73,7 @@ static int node_ref_invalid(const void *p)
     return mem_range_readable(p, NODE_STATUS_OFF + 1) ? 0 : 1;          /* range not committed -> dangling */
 }
 
-/* Null one node-reference field if it is invalid. SEH-guarded so a torn record cannot fault the guard.
- * Returns 1 if it reset the field, 0 otherwise. */
+/* Clear an invalid reference under SEH. Return 1 if the field changed. */
 static int sanitize_node_ref(uint8_t *field)
 {
     void *p;
@@ -115,11 +97,9 @@ static void sh_rendernode_sanitize(void *arr_handle)
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return;                                                          /* can't read the handle -- defer to the engine */
     }
-    /* Walk the FULL allocation [0, cap), not just [0, size). The wire-render resolver iterates up to the entity
-     * HIGH-WATER, which for a freshly-added entity (a just-created timeline) can exceed `size` (the vector's logical
-     * count -- not grown) while staying within `cap` (the allocation). Those [size, cap) slots are UNINITIALIZED ->
-     * a garbage +0x70/+0x80 the predicate FUN_140d32a30 dereferences = the wire-render AV 0xd32a39. Nulling them
-     * before the resolver reads them averts it. cap >= size always; an absurd/unreadable cap falls back to size. */
+    /* Inspect the full bounded capacity because the resolver high-water can
+     * exceed logical size. Invalid capacity falls back to size.
+     */
     int n = (cap >= size && cap <= RN_COUNT_MAX) ? cap : size;
     if (base == NULL || n <= 0 || n > RN_COUNT_MAX) return;
 
@@ -130,7 +110,7 @@ static void sh_rendernode_sanitize(void *arr_handle)
         reset += sanitize_node_ref(rec + RN_INNODE_OFF);
     }
     if (reset) {
-        /* fires only on a real repair; the first few log (a stale/uninitialized render-node was neutralized). */
+        /* Log only repairs, with a bounded initial sample. */
         if (InterlockedAdd(&g_reset_total, reset) <= 64) {
             char m[128];
             _snprintf_s(m, sizeof m, _TRUNCATE,

@@ -26,9 +26,8 @@ func ogFootprint(t *testing.T, doom string) {
 	}
 }
 
-// TestLegacyMigrationOnInstall: installing into a DOOM folder that has the original SnapHak removes
-// every original file, deploys ours, creates NO backup of the original's DLLs (they are not genuine
-// game files), prunes the emptied Qt plugin dirs, and leaves vanilla files alone.
+// Legacy migration removes the recognized runtime, deploys the bundle and
+// leaves vanilla files intact without backing up legacy DLLs.
 func TestLegacyMigrationOnInstall(t *testing.T) {
 	tmp := t.TempDir()
 	doom := filepath.Join(tmp, "DOOM")
@@ -134,9 +133,7 @@ func TestDetectLegacySingleMarker(t *testing.T) {
 	}
 }
 
-// TestLegacyBackupDropped: an install made BEFORE this migration existed backed up the original's
-// XINPUT1_3.dll as if it were genuine. The next install (an update) with the original still present
-// must delete that stale backup and drop its record entry, so uninstall restores nothing non-vanilla.
+// An update must discard a legacy-runtime backup created before migration existed.
 func TestLegacyBackupDropped(t *testing.T) {
 	tmp := t.TempDir()
 	doom := filepath.Join(tmp, "DOOM")

@@ -1,29 +1,9 @@
-/* veh.c -- catch a raw access-violation in DOOM frame code and recover, by fault class.
- *
- * The OS raises an access-violation the engine's C++ EH never sees; we catch it FIRST in the VEH chain
- * (AddVectoredExceptionHandler first-in-chain) and recover per class:
- *
- *   Class A -- an IN-EDITOR draw fault (a corrupt/OOR connection-CSR column -> wild-pointer deref in the
- *     per-frame module-view draw: editor Think 0x523140 -> 0x521D90 -> 0x5E7380 -> 0x5E6410 -> resolver
- *     0x5E0AD0 -> visibility leaf 0xD32A30). The resolver writes into a CALLER stack idList the consumer
- *     0x5E5CB0 draws only `if (0<count)` (DIRECT) -- so a partial list is safe. We ABORT the faulting
- *     draw by RtlVirtualUnwind'ing the thread back to the editor frame 0x523140 and continuing: the frame
- *     completes, the editor stays LIVE + responsive. NO modal, NO thread-parking. (Detected by whether
- *     the editor frame is an ancestor on the faulting stack -- the unwind IS the classifier.)
- *
- *   Class B / unknown -- a bad-LOAD CSR-builder fault, or an unclassified wild deref (the editor frame is
- *     NOT on the stack). Fall back to the engine's own recoverable idCommon::Error(6) (-> idException ->
- *     idCommonLocal::Frame catch) + drive the proven editor-exit -> My-Maps browser (recovery.c). This
- *     CAN surface DOOM's recoverable-error modal; it is the documented fallback while the clean Class-B
- *     load-abort (return-failure from GetLocalSavedMapEdit 0x566640) is RE-pending.
- *
- * WHY the split: routing the in-editor fault through Error(6) traps the user on a thread-parking modal
- * (LIVE 2026-06-19) -- the level-6 dispatcher 0x1A08E80 ALWAYS raises a surface (overlay listener-walk
- * FUN_141a44420) AND throws/exits (DIRECT, decompile), so it can never be the in-editor recovery.
- *
- * Provenance: our own clean-room RE of the engine fault dispatcher + recovery (nonmodal-recovery,
- * ratified against the primary decompiles, 2026-06-19).
- */
+/* Classify engine faults and attempt bounded recovery. Visibility-leaf faults
+ * return false for the bad node. Other wild draw faults can unwind to editor
+ * Think (Class A); remaining eligible faults redirect to Error(6) and request
+ * editor exit (Class B). Known off-main threads are never given that redirect.
+ * Engine C++ throws continue to their handlers after recovery-gate adjustments.
+ * Fault logging is independent of recovery and may also record non-engine faults. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -45,11 +25,8 @@ extern size_t   g_doom_size;
  * install, so neither the classifier nor the fault path does string work. */
 static int g_pinned_build = 0;
 
-/* The classifier RVA ranges ride the SIG-RESOLVED entry (g_eng.*_rva); HI is derived as LO + the
- * recipe-tagged span (engine_layout.h) so it tracks a shifted build off the sig. The pinned RVA is only
- * a legitimate answer on the build it was extracted from, so it is consulted only there; anywhere else
- * an unresolved entry yields NO RANGE, and a classifier with no range simply does not claim the fault.
- * Each returns 1 and fills [lo,hi) when the range is known, 0 when it is not. */
+/* Derive [lo,hi) from resolved entries and measured spans. Use a literal start
+ * only on the pinned build; an unresolved range cannot classify a fault. */
 static int editor_frame_range(uintptr_t *lo, uintptr_t *hi)
 {
     uintptr_t l = g_eng.editor_pump_rva;
@@ -67,16 +44,8 @@ static int resolver_range(uintptr_t *lo, uintptr_t *hi)
     return 1;
 }
 
-/* ---- The DATA globals the handler reads, located ONCE at install ------------------------------------
- * Every one of these used to be a `g_doom_base + <pinned RVA>` literal. DOOM ships two executables built
- * from one source tree, and between them the data globals move by nearly 0x1000000 -- so those literals
- * describe exactly one link output and address unrelated memory on the other. They are now located by
- * glb_resolve, which signs the CODE SITE that computes each address and decodes the displacement out of
- * it; 0 means "not located on this build" and every use below declines rather than guessing.
- *
- * Resolved in veh_install, NOT in the handler: glb_resolve scans the image on a cache miss, which is not
- * something to do inside an exception handler. The backend resolves the whole table at bootstrap, so by
- * the time the shield installs these are cache reads. Nothing here allocates. */
+/* Resolve handler globals during installation to avoid image scans while
+ * handling faults. Zero means unavailable; callers skip dependent operations. */
 static uintptr_t g_errstate_at   = 0;   /* errState        -- Frame's catch requires its low byte == 0 */
 static uintptr_t g_load_state_at = 0;   /* load_state      -- only the LOADING value 1 blocks recovery */
 static uintptr_t g_suppr_a_at    = 0;   /* throw-gate suppressor A */
@@ -85,20 +54,15 @@ static uintptr_t g_editor_at     = 0;   /* the inline idSnapEditorLocal object (
 static uintptr_t g_ti_fatal_rva  = 0;   /* idFatalException ThrowInfo, as an RVA */
 static int       g_ti_fatal_ok   = 0;   /* ...and whether it resolved (0 is a legal RVA, so flag it) */
 
-/* The visibility leaf. This one is load-bearing in a way none of the others are: the Class-B micro-
- * recovery SETS RIP from it. A wrong address here would redirect the faulting thread into arbitrary
- * code, so the leaf is either located on this build or the whole vis-leaf path is switched off. */
+/* The visibility redirect requires the resolved leaf and its measured false tail. */
 static uintptr_t g_visleaf_lo_rva    = 0;
 static uintptr_t g_visleaf_hi_rva    = 0;
 static uintptr_t g_visleaf_false_rva = 0;
 static int       g_visleaf_ok        = 0;
-/* The two spans INSIDE the leaf, taken from the pinned pair in engine_layout.h so the geometry the
- * shield has always used is preserved exactly; only the leaf's base address is now resolved. */
+/* Offsets within the leaf remain tied to the measured body layout. */
 #define VIS_LEAF_FALSE_OFF  (RVA_VIS_LEAF_FALSE - RVA_VIS_LEAF_LO)   /* == 0x24, the XOR AL,AL; RET tail */
 
-/* Is `rva` inside the visibility leaf? UNRESOLVED LEAF => EMPTY RANGE: every caller of this is a
- * recovery that only makes sense at that exact function, so "we do not know where it is" has to read
- * as "we are not there", never as an open range. */
+/* An unresolved leaf never matches a fault. */
 static int in_vis_leaf(uintptr_t rva)
 {
     return g_visleaf_ok && rva >= g_visleaf_lo_rva && rva < g_visleaf_hi_rva;
@@ -136,17 +100,9 @@ static void veh_resolve_globals(void)
     }
 }
 
-/* ---- Throw-gate suppressor B -----------------------------------------------------------------------
- * This global briefly looked unreferenced. A RIP-relative sweep of the pinned image decoded 32 sites for
- * suppressor A and none for B, which contradicted the Ghidra reference count recorded in
- * engine_layout.h. The Ghidra count was right: the sweep only recognised displacements that END an
- * instruction, and B's single reference is `cmp dword ptr [rip+disp], 0`, whose displacement is followed
- * by a one-byte immediate. Widening the sweep finds it at 0x1a09857, inside the level-6 dispatcher
- * exactly where engine_layout.h said it was.
- *
- * So B is signed into the globals table like everything else, and located here at runtime rather than
- * from a pinned address. Cross-check: B - A is 0x90 on both shipped executables. The caller SEH-guards;
- * this never decides anything, it only writes a zero over a zero. */
+/* Resolve suppressor B through the dispatcher's CMP anchor. Its displacement
+ * is followed by an immediate byte; engine_globals accounts for that tail.
+ * Callers guard the write with SEH. */
 static void write_suppressor_b(void)
 {
     uintptr_t b;
@@ -166,22 +122,14 @@ static char g_why[200];   /* persists: Error(6) reads it as the fmt (rcx) after 
 static char g_diag[260];
 static char g_rndiag[220];
 
-/* ---- CLASS-B CRASH RECORD + STACK: name exactly what faulted (type + site + call stack) to the log
- * AND a crash record, so a serious fault is never silent. The record is what raises the in-app
- * crash-report dialog (the process SURVIVES a Class-B fault, so the dialog appears seconds later --
- * the old blocking native message box this replaced is gone). Rate-limited (a per-frame fault would
- * otherwise spam). ------ */
+/* Cap detailed Class-B stack and crash-record capture independently of recovery.
+ * The UI treats these records as nonterminal notices, not proof of survival. */
 #define SHIELD_MAX_POPUP 3
 static volatile LONG g_popup_seen = 0;
 static char g_crashstk[512];
 
-/* ---- FIRST-CHANCE CRASH LOGGER (crash-forensics: name a death the recovery paths never touch) --------
- * The recovery logic below only ACTS on AVs/HW-faults whose rip is INSIDE DOOM; it CONTINUE_SEARCHes every
- * other first-chance exception -- a crash-class fault in a NON-DOOM module (the Snapmap+ UI DLL, a backend
- * detour, a system/runtime DLL) or a fastfail/heap-stop -- so those deaths left NO shield trace and an attached debugger saw
- * only a bare process-terminated. This LOG-ONLY block records ANY crash-class first-chance exception in ANY
- * module (code + name + rip + module+offset + fault addr), rate-limited + immediate-flush, then falls through
- * so the recovery logic runs UNCHANGED (it never alters the exception disposition). */
+/* Log first-chance crash statuses from any module without changing disposition.
+ * Recovery below only acts on its supported engine fault paths. */
 #define SHIELD_MAX_FIRSTCHANCE 64
 static volatile LONG g_firstchance_seen = 0;
 static char g_fcdiag[320];
@@ -245,35 +193,23 @@ static int rip_in_doom(void *rip)
            (uint8_t *)rip <  g_doom_base + g_doom_size;
 }
 
-/* "wild" = a data address NOT backed by committed memory (the conn_oor out-of-range-index -> garbage-
- * pointer class). Mirrors the reference implementation's findModuleByAddress(fa)==null intent. A committed-but-
- * garbage heap address would slip past this; tighten to a module/heap check if a fixture needs it. */
+/* Uncommitted or inaccessible data is wild. Readable recycled heap storage
+ * cannot be distinguished from live storage by this page-state check. */
 static int is_wild(void *addr)
 {
     MEMORY_BASIC_INFORMATION mbi;
     if (VirtualQuery(addr, &mbi, sizeof mbi) == 0) return 1;   /* unqueryable -> wild */
     if (mbi.State != MEM_COMMIT) return 1;                     /* free / reserved -> a read faults */
-    /* Committed BUT a read still faults: PAGE_NOACCESS. The conn_oor wild index landed on a
-     * committed-but-no-access page (LIVE crash 2026-06-19: CSR-build AV, state=MEM_COMMIT prot=0x1,
-     * slipped the old State-only check -> the shield missed the AV and DOOM died). Mask off the
-     * modifier bits (PAGE_GUARD 0x100, PAGE_NOCACHE 0x200, ...) so stack GUARD pages are NOT treated
-     * as wild (those legitimately drive stack growth and must not be redirected). */
+    /* PAGE_NOACCESS can be committed. Mask modifiers so a stack guard page is
+     * not mistaken for an inaccessible page and redirected during stack growth. */
     if ((mbi.Protect & 0xFF) == PAGE_NOACCESS) return 1;
     return 0;
 }
 
-/* ---- Class-A recovery primitive: unwind the faulting thread to a known-good ancestor frame -----------
- * Walk the call stack from `ctx` (a COPY of the fault context) up to `maxframes` real frames with the OS
- * unwinder (RtlLookupFunctionEntry + RtlVirtualUnwind), which correctly restores callee-saved registers +
- * RSP at each step -- unlike a naive RIP/RSP poke, which would leave the resume frame's nonvolatiles
- * clobbered. Stop when RIP lands in the DOOM RVA range [lo,hi): leave `ctx` at that frame's resume state
- * (i.e. as if the inner call had returned) and return 1. A frameless leaf (no RUNTIME_FUNCTION -- e.g. the
- * visibility predicate 0xD32A30) is unwound by popping its return address off [RSP]. Returns 0 if the
- * range is not reached within the cap (the caller then falls back to Error(6)).
- *
- * Safe to call from the VEH: the fault is a wild DATA read, so the thread stack is intact + walkable, and
- * RtlVirtualUnwind takes no locks the fault could hold. UNW_FLAG_NHANDLER => we do NOT run __finally / EH
- * termination handlers in the skipped frames (at worst a per-frame temp leak; validated live). */
+/* Unwind a context copy to [lo,hi), restoring nonvolatile registers and RSP.
+ * Return 1 at the target frame, or 0 after maxframes without a match. Frameless
+ * leaves pop their return address. UNW_FLAG_NHANDLER skips cleanup handlers, so
+ * this recovery may leak frame temporaries and requires an intact stack. */
 static int unwind_to_rva_range(CONTEXT *ctx, uintptr_t lo_rva, uintptr_t hi_rva, int maxframes)
 {
     int i;
@@ -358,18 +294,10 @@ static int writable_int(uintptr_t addr)
     return 1;
 }
 
-/* ---- In-shield REVERT: neutralize the corrupt connection so the resolver stops re-faulting ----------
- * The Class-A unwind survives the fault, but if the bad CSR value PERSISTS the resolver re-faults every
- * frame -> the module-view draw is aborted each frame -> editor interaction degrades (LIVE 2026-06-19:
- * objects stopped highlighting / grabbing). Unlike an external instrumentation tool (which knew the original value), the shield
- * neutralizes the bad connection BLIND, from the fault context: the visibility leaf 0xD32A30 is frameless,
- * so at the leaf/resolver fault RBP still holds the RESOLVER 0x5E0AD0 frame. The faulting connection entry
- * = *( *(RBP-CSR_FRAME_COL_HOLDER) ) + lVar19*4  (lVar19 = *(RBP-CSR_FRAME_LOOPIDX)); the out-of-range
- * index value is in RSI; a guaranteed-valid index (the source entity, outer loop counter) is in R12. We
- * CLAMP the bad entry to the source index -> next frame reads a valid index -> no fault -> full draw.
- * HEAVILY GUARDED: only fires if RIP is in the resolver/leaf region, every pointer in the chain is
- * committed+readable, the located entry actually holds the faulting value (RSI), and the slot is writable
- * -- otherwise skip (survive-only). Returns 1 if it clamped. (DIRECT: disasm 0x5E0AD0.) */
+/* Repair the bad CSR column using the original resolver frame. RBP locates the
+ * column array and loop index, RSI is the faulty value, and R12 is the source
+ * entity index. Require a matching slot, known fault range, and writable storage.
+ * Return 1 after replacing the column; otherwise leave recovery to the caller. */
 static int try_revert_csr_entry(const CONTEXT *ctx)
 {
     uintptr_t rva, rbp, holder, colArr, entry_addr;
@@ -410,18 +338,9 @@ static int try_revert_csr_entry(const CONTEXT *ctx)
     return 1;
 }
 
-/* ---- In-shield NEUTRALIZE a dangling render-node connection ref (the create-timeline draw-fault class) --
- * A DIFFERENT fault shape from try_revert_csr_entry's corrupt-CSR-index. Here the visibility leaf 0xD32A30
- * faults reading *(node+0x70) / *(node+0x80) -- an OUTPUT / INPUT connection-node ref -- that DANGLES: a
- * node-less entity (a reclassed idTarget_Timeline) inherited a now-freed connection-node ptr from a prior
- * node-having occupant (an idTarget_Command) of its render-node slot. The per-module view build 0x5E6620
- * only clears such a ref LATER (its else-branch never rebuilds a node-less entry), so on the exit-Play view
- * rebuild the resolver reads the dangling ref one frame before the clear -> wild AV, re-firing every frame.
- * At the frameless leaf RCX still = the render-node; RAX = the faulting ref value (*(node+0x70) at 0xD32A39,
- * or *(node+0x80) at 0xD32A4B). We NULL the exact ref that faulted (its value == RAX) so the next frame's
- * predicate reads a null ref -> no wire drawn, no fault -- the correct state for a node-less entity. HEAVILY
- * GUARDED (rip in the vis-leaf, node committed+readable, the ref slot writable). Returns 1 if it nulled a
- * ref. (DIRECT: disasm 0xD32A30 = MOV RAX,[RCX+0x70]; TEST; JZ; CMP byte [RAX+0x30].) */
+/* Clear a dangling render-node reference only at the known frameless leaf.
+ * RCX holds the node, and RAX must match its +0x70 or +0x80 slot before clearing.
+ * A null reference suppresses that wire on the next frame. Return 1 if changed. */
 static int try_neutralize_rendernode(const CONTEXT *ctx)
 {
     uintptr_t rva, node, rax;
@@ -444,12 +363,9 @@ static int try_neutralize_rendernode(const CONTEXT *ctx)
     return 0;
 }
 
-/* LAYER 1 -- the non-AV hardware-fault codes the shield ALSO recovers: any CPU exception that is a crash
- * the engine does not handle (illegal/privileged instruction, int/float divide + the float family, in-page,
- * datatype misalignment, array-bounds). These skip the AV-only wild-pointer gate and route straight to the
- * Class-B Error(6) redirect. DELIBERATELY NOT here: STACK_OVERFLOW (the VEH would run on the exhausted
- * stack -- needs a guard-page handler, deferred); C++ throws (0xE06D7363, engine-caught); breakpoints;
- * DBG_PRINTEXCEPTION_C -- those pass through uncaptured. AV keeps its wild gate + the Class-A unwind. */
+/* Supported non-AV hardware faults route to Class B without the wild-address
+ * test. Stack overflow is excluded because recovery needs a usable stack.
+ * C++ throws and debugger notifications use separate handling or pass through. */
 static int is_other_hw_fault(DWORD code)
 {
     switch (code) {
@@ -475,21 +391,10 @@ static int is_other_hw_fault(DWORD code)
 /* Count of C++ throws the shield has gate-forced (log rate-limit only). */
 static volatile LONG g_cxx_seen = 0;
 
-/* LAYER 2 -- force idCommonLocal::Frame's idException catch to RECOVER (drop-to-menu + resume) instead of
- * rethrowing to the WinMain terminal exit. DIRECT (error-dispatcher-and-recovery.md): that catch recovers
- * iff errState(0x6dde19c)==0 AND both throw-gate suppressors are 0 (load_state!=1 is always true). An
- * Error(6)/downgraded-FatalError SETS errState as it raises, so by the time the throw reaches the catch the
- * gate is shut -> rethrow -> exit. Clearing these on the THROW (first-chance, before the catch reads them)
- * is what flips a fatal rethrow into a live recovery. SEH-guarded vs a shifted RVA.
- *
- * DIRECT (catch funclet 0x1F5B937, decompiled live): recover iff `(char)errState(0x6dde19c)==0 &&
- * load_state(0x6dde198)!=1`. The errState getter returns only the LOW BYTE, so errState=0x100 already
- * passes. We open the gate for errors that REACH the Frame catch: clear errState's low byte, neutralize
- * load_state ONLY when it is the blocking value 1 (LOADING) -- leave 0/2/3 alone (they already pass != 1
- * and the engine relies on them), and clear the throw-gate suppressors. NOTE: this cannot help an error
- * an INNER engine handler catches before idCommonLocal::Frame (e.g. the incompatible-class decl error,
- * which is a prevent-not-recover case). Each write is skipped when its global did not resolve, and the
- * whole block stays SEH-guarded. */
+/* Open Frame's recovery gate before the engine catch reads it: zero errState,
+ * change load_state only when it equals the blocking value 1, and clear resolved
+ * throw suppressors. Frame tests errState's low byte; this code clears the word.
+ * This cannot recover an error caught by an inner engine handler first. */
 static void force_recovery_gate(void)
 {
     if (g_doom_base == NULL) return;
@@ -504,16 +409,9 @@ static void force_recovery_gate(void)
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
 }
 
-/* ---- Is the faulting thread DOOM's MAIN thread? -----------------------------------------------------
- * Reads the engine's OWN main-thread id -- see engine_layout.h for why the shield must not sample a
- * thread of its own instead (shield_install runs on the backend bootstrap thread).
- *   1  = the main thread
- *   0  = NOT the main thread (the frontend UI thread, a worker, ...)
- *  -1  = UNKNOWN (unresolved, unreadable, or the engine has not recorded it yet -- the word is 0 until
- *        engine init).
- * A build where the word does not resolve lands on UNKNOWN, which is the answer that changes nothing:
- * the caller only acts on a POSITIVE "not the main thread". Still SEH-guarded so a torn read can never
- * fault inside the VEH. */
+/* Read the engine's thread ID: 1 = main, 0 = off-main, -1 = unknown/unreadable.
+ * Bootstrap runs on another thread, so its ID cannot identify Frame's thread.
+ * Only a definite off-main result blocks the Class-B redirect. */
 static int shield_on_main_thread(void)
 {
     uint32_t mt = 0;
@@ -536,10 +434,7 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
     DWORD code = er->ExceptionCode;
     void *rip  = (void *)ep->ContextRecord->Rip;
 
-    /* FIRST-CHANCE CRASH LOGGER (LOG-ONLY -- the exception disposition is NOT touched here; the recovery
-     * layers below run exactly as before). Names any crash-class fault the recovery paths ignore (a fault in
-     * a non-DOOM module, a fastfail/heap-stop) so a `crash=None`/no-dump death is no longer anonymous.
-     * SEH-guarded: a fault while formatting the diagnostic must never crash inside the VEH. */
+    /* First-chance logging is independent of recovery and guarded against bad reads. */
     if (is_crash_class(code) && InterlockedIncrement(&g_firstchance_seen) <= SHIELD_MAX_FIRSTCHANCE) {
         __try {
             char mod[80]; uintptr_t moff = 0;
@@ -556,13 +451,9 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
-    /* LAYER 2 -- a DOOM C++ throw (MSVC 0xE06D7363) is the idException an Error(6)/downgraded-FatalError
-     * raises. NOTE: a C++ throw's rip is inside kernel32's RaiseException, NOT DOOM, so identify it by the
-     * THROWING MODULE -- ExceptionInformation[3] is the throw's image base on x64 (the RVA-encoded ThrowInfo
-     * base). Force the engine's recovery gate open on the throw (first-chance, before the idCommonLocal::Frame
-     * catch reads it), then CONTINUE_SEARCH so the engine's OWN catch does the drop-to-menu recovery -- this
-     * is what makes a thrown engine error SURVIVE instead of rethrowing to the WinMain terminal exit. (Engine
-     * throws the engine catches locally are unaffected -- only the Frame catch consults errState.) */
+    /* Identify DOOM C++ throws by ExceptionInformation[3], the x64 throwing image
+     * base; RIP points into RaiseException. Open the recovery gate before Frame
+     * handles the throw, then continue exception search. */
     if (code == 0xE06D7363 && g_doom_base != NULL &&
         er->NumberParameters >= 4 && er->ExceptionInformation[3] == (ULONG_PTR)g_doom_base) {
         int es = -1, ls = -1;
@@ -575,16 +466,9 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
         force_recovery_gate();
         log_engine_error_text();     /* record the engine's verbatim error text -- e.g. a masked load-time FatalError */
-        /* TERMINAL throw -> crash record NOW. An idFatalException ALWAYS rethrows out of the Frame catch
-         * to the terminal exit (the FatalError(7) downgrade patches the common wrapper to level 6, so this
-         * class only appears via a direct level-7 dispatcher path) -- and that exit is a caught-C++ unwind,
-         * so no unhandled-exception filter ever fires for it. This first-chance sight of the ThrowInfo is
-         * the ONLY capture point. One-shot; carries the engine's verbatim text + the throwing stack. The
-         * original SnapHak proved this text is capturable at the sink -- it detoured the sink into a
-         * message box + TerminateProcess; we write the record and change NOTHING about the throw. */
-        /* Only claim a throw is the TERMINAL class when we actually located that ThrowInfo on this
-         * build. 0 is a legal RVA, so an unresolved global must not be allowed to compare equal to a
-         * throw whose descriptor happens to sit at the image base. */
+        /* Record a fatal engine throw before its caught unwind exits the process.
+         * That path does not reach an unhandled-exception filter. */
+        /* Classify only a resolved ThrowInfo; zero must not act as an unknown match. */
         if (g_ti_fatal_ok && ti == g_ti_fatal_rva) {
             static volatile LONG s_fatal_throw_recorded = 0;
             if (InterlockedExchange(&s_fatal_throw_recorded, 1) == 0) {
@@ -603,9 +487,8 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
                 es, ls, (unsigned long long)ti);
             shield_fault df = { "diag", -1, g_diag, 0, 0 };
             shield_emit(&df);
-            /* capture the THROWING call stack -- for a masked heap-corruption FatalError ("Memory corruption
-             * before block!") this names the heap operation (free/alloc/check) that detected it + its caller,
-             * narrowing which structure was overflowed. SEH-guarded per frame inside the walker. */
+            /* The throwing stack identifies the heap operation or caller reporting an
+             * engine error. The walker guards each frame. */
             {
                 char stk[512];
                 capture_fault_stack(ep->ContextRecord, stk, sizeof stk, 20);
@@ -615,10 +498,7 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    /* LAYER 1 -- catch every HARDWARE fault in DOOM, not just AVs. An AV keeps its wild-pointer gate + the
-     * Class-A in-editor unwind below; the other hardware faults (is_other_hw_fault) are crashes the engine
-     * does not handle -> they fall straight through to the Class-B Error(6) redirect. Benign first-chance
-     * exceptions (DBG_PRINTEXCEPTION_C on every console line, breakpoints) continue uncaptured. */
+    /* Keep only supported hardware faults; AVs need further address classification. */
     if (code != EXCEPTION_ACCESS_VIOLATION && !is_other_hw_fault(code))
         return EXCEPTION_CONTINUE_SEARCH;
 
@@ -627,12 +507,8 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
     void *fault_addr = is_av ? (void *)er->ExceptionInformation[1] : NULL;
     int   data       = is_av && (fault_addr != rip);
 
-    /* COEXISTENCE hardening (defense-in-depth beyond the install-time instrumentation gate): do NO work on a
-     * non-DOOM first-chance AV. An external tool's injection (and other non-DOOM modules) raise first-chance AVs the
-     * shield never acts on anyway (the act-gate below already requires rip_in_doom); early-out here so the
-     * shield's handler is a near-instant pass-through for any exception not originating in DOOM -- it never
-     * runs the diagnostic VirtualQuery+emit on an external tool's loader exceptions. Cheap + narrows the conflict
-     * surface even if a race ever left the shield armed during injection. */
+    /* Recovery is limited to DOOM code. First-chance logging above may still
+     * record other modules. */
     if (!rip_in_doom(rip))
         return EXCEPTION_CONTINUE_SEARCH;
 
@@ -650,10 +526,7 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
         shield_emit(&df);
     }
 
-    /* RENDER-NODE fault detail (root-cause data for the create-timeline draw fault): at the vis-leaf
-     * 0xD32A30 RCX = the render-node, RAX = the faulting connection-node ref. Compute the node's array
-     * index (base = *(editor+0x1d0)) so the log names WHICH entity's render-node slot dangled + its
-     * +0x70/+0x80 values. SEH-guarded (a wild read while formatting must never re-fault the VEH). */
+    /* At the visibility leaf, record the node index and reference slots for diagnosis. */
     {
         uintptr_t rrva = (uintptr_t)rip - (uintptr_t)g_doom_base;
         if (is_av && in_vis_leaf(rrva) && InterlockedIncrement(&g_rn_seen) <= 12) {
@@ -681,36 +554,15 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
      * left to the engine's own SEH (redirecting one the engine would have handled is worse than its local
      * handling -- fault-shield-recovery.md scope). Non-AV hardware faults skip this gate -> Class-B. */
     if (is_av) {
-        /* ===== VIS-LEAF MICRO-RECOVERY (BEFORE the wild-gate + Class-A/Class-B) =========================
-         * The render-node visibility predicate FUN_140d32a30 (frameless leaf) derefs node->+0x70 / +0x80
-         * connection refs at 4 sites (0xd32a30/39/3f/4b). During the create-timeline / node-less rebuild
-         * (exit-Play, tab-out to Blueprint, editor re-entry) those slots are transiently bad, so a deref
-         * faults. The SAFE, correct result for a bad/absent connection is FALSE ("no valid connection") --
-         * exactly what a clean node-less slot returns. So redirect RIP to the leaf's own XOR AL,AL;RET tail
-         * (0xd32a54) and resume: the predicate returns FALSE, the resolver skips the node, the frame
-         * completes. STACK-INDEPENDENT (works in EntityMode, Blueprint, AND editor re-entry alike -- unlike
-         * the Class-A editor-Think unwind, which only claims some stacks and lets the rest fall to the heavy
-         * Class-B Error(6)+toast+MessageBox+navigate path -- the cause of the "Error Detected" toast that
-         * still fired on tab-out). SILENT + light (one RIP write; no notice/dialog/navigate). The leaf is
-         * frameless so RSP still points at the return address -> the injected RET returns cleanly to the
-         * resolver. Transient-frame skip: once the rebuild settles the predicate runs normally, so a real
-         * connection loses at most one frame of overlay.
-         *
-         * THE ADDRESS IS RESOLVED, NEVER ASSUMED. This is the one place in the product that SETS the
-         * instruction pointer, so a wrong address here does not degrade a feature -- it sends the
-         * faulting thread into whatever code happens to live at that offset. The leaf comes from
-         * glb_resolve at install; if it did not resolve, g_visleaf_ok is 0, this whole branch is dead,
-         * and the fault falls through to the ordinary wild-pointer gate and the Class-A/Class-B paths
-         * below, exactly as it would for any other fault site. Declining a redirect costs one frame of
-         * overlay; performing an unverified one costs the process. */
+        /* Visibility-leaf faults return false for this node by resuming at the leaf
+         * tail. The leaf is frameless, so RSP still holds the caller return address.
+         * This skips one predicate without unwinding active resolver/build frames.
+         * Use only a resolved leaf with the measured false-return offset; otherwise
+         * fall through to the ordinary recovery classification. */
         if (g_visleaf_ok && g_doom_base &&
             rva >= g_visleaf_lo_rva && rva < g_visleaf_false_rva) {
-            /* Per-node skip: redirect to the predicate's own XOR AL,AL;RET tail (return FALSE = no valid
-             * connection, what a clean node-less slot returns). A CLEAN RETURN from the frameless leaf -- it
-             * does NOT unwind past the resolver/build frames. (A tried unwind-to-editor-Think "abort the whole
-             * draw" fast-path was REVERTED: unwinding the frameless leaf out of deep in-flight resolver/build
-             * frames corrupted the engine heap on exit-Play -- "Memory corruption before block!". The clean
-             * per-node return is safe; it is slower under a storm but never corrupts.) Silent. */
+            /* Return through the leaf itself. Unwinding past active builder frames here
+             * caused heap corruption on exit from Play; preserve those frames. */
             if (InterlockedIncrement(&g_visleaf_seen) <= 3) {
                 _snprintf_s(g_why, sizeof g_why, _TRUNCATE,
                     "vis-leaf render-node fault @ 0x%llx (rip+0x%llx) -> predicate forced FALSE (skip node), resumed",
@@ -724,21 +576,14 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
         if (!(data && is_wild(fault_addr)))
             return EXCEPTION_CONTINUE_SEARCH;
 
-    /* ---- Class A: an IN-EDITOR draw fault. If the per-frame editor Think 0x523140 is an ancestor on the
-     * faulting stack, ABORT the faulting module-view draw by unwinding the thread back to it and resuming
-     * -- the frame completes, the editor stays live (DIRECT: the resolver builds into a caller stack list
-     * the consumer draws only `if (0<count)`; the editor Think runs unconditional work after the 0x521D90
-     * call). NO Error(6), NO thread-parking modal. This recovers in place each frame the corrupt CSR is
-     * drawn (~1 fault/frame, always making forward progress), so it is NOT counted against the runaway
-     * guard; the log is rate-limited to avoid per-frame spam. Unwind a COPY so a miss leaves the real
-     * context untouched for the fallback. */
+    /* Class A: unwind a copy to editor Think and abort the current draw. A miss
+     * leaves the original context for Class B. Repeated recovered draws are not
+     * charged against the redirect budget; only their logging is limited. */
     {
         CONTEXT unwound = *ep->ContextRecord;
         uintptr_t elo = 0, ehi = 0;
         if (editor_frame_range(&elo, &ehi) && unwind_to_rva_range(&unwound, elo, ehi, 32)) {
-            /* Neutralize the corrupt connection (BLIND -- the shield doesn't know the original value) so
-             * the resolver stops re-faulting + the editor regains full per-frame function. Uses the
-             * ORIGINAL fault context (RBP still = the resolver frame; the leaf is frameless). */
+            /* Use the original resolver registers to repair the persistent bad connection. */
             int reverted   = try_revert_csr_entry(ep->ContextRecord);
             int rn_cleared = try_neutralize_rendernode(ep->ContextRecord);
             if (InterlockedIncrement(&g_classa_seen) <= 5) {
@@ -750,48 +595,19 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
                 shield_fault fa = { "action", -1, g_why, rva, (uintptr_t)fault_addr };
                 shield_emit(&fa);
             }
-            /* NO in-game notice for Class-A recoveries. Class-A = a RECOVERED in-editor draw fault -- a
-             * transient render glitch the shield aborts + resumes in place. The create-timeline / node-less
-             * rebuild produces a burst of these across MORE THAN ONE site: the vis-leaf predicate 0xd32a30
-             * (micro-recovered before we ever get here) AND the module-render build ~0x5e68e7 (aborted here).
-             * A per-site notice gate is whack-a-mole; the whole CLASS is spurious -- arming "Error Detected
-             * in map logic" for a fault the shield already recovered in place was the exact repeating-toast
-             * complaint. So Class-A recoveries are SILENT (every one is still logged to shield_faults.log for
-             * diagnostics). SERIOUS faults take the Class-B path below, which keeps its notice + "Fault
-             * Caught" dialog. */
-            /* (intentionally no notice_request() here) */
+            /* Class-A recovery stays silent to avoid repeated error toasts during
+             * transient render rebuilds. Diagnostics above are rate-limited. */
+
             *ep->ContextRecord = unwound;
             return EXCEPTION_CONTINUE_EXECUTION;
         }
     }
     }   /* end if (is_av) -- a wild AV the editor-unwind didn't claim falls through to Class-B */
 
-    /* ==== OFF-MAIN-THREAD GATE (defense in depth; PURE ADDITION -- the main-thread path below is
-     * byte-for-byte unchanged) ==========================================================================
-     * Class B works by RESUMING INTO idCommon::Error(6), which raises a C++ idException and relies on
-     * idCommonLocal::Frame's catch to receive it. That catch only exists on DOOM's MAIN thread -- Frame IS
-     * the main thread's frame body. On any OTHER thread (notably the frontend's UI thread, which the
-     * backend spins in ui_bridge.c and which calls straight into engine code) there is NO idException
-     * handler anywhere on the stack, so the synthesized throw unwinds off the top of the thread UNHANDLED
-     * and the process dies with 0xE06D7363 -- turning a fault the OS would merely have reported into a
-     * guaranteed process kill. That is strictly worse than doing nothing, and it is the reported crash
-     * signature.
-     *
-     * The existing classifier never noticed, because its only reach test is rip_in_doom() -- which is TRUE
-     * for a UI-thread fault inside engine code -- and Class A's unwind_to_rva_range() searches for the
-     * editor Think frame, which is never on the UI thread's stack, so every off-main fault fell straight
-     * through to here.
-     *
-     * So: off the main thread, DECLINE. Record the fault with the same full diagnostics + crash record the
-     * Class-B path would have written (this must not become a silent swallow -- the crash-report dialog and
-     * shield_faults.log are how these get triaged), then EXCEPTION_CONTINUE_SEARCH so normal Windows
-     * handling applies. That leaves the fault contained rather than converted, and deliberately introduces
-     * NO new recovery mechanism -- unwinding or resuming an arbitrary worker thread is not something the
-     * shield has any evidence it can do safely.
-     *
-     * UNKNOWN (-1) falls through to the unchanged behaviour on purpose: before the engine records its main
-     * thread id, and on any build where the RVA does not read, we must not start declining faults we have
-     * always handled. Only a POSITIVE "this is not the main thread" changes anything. */
+    /* Error(6) relies on Frame's catch on the engine main thread. On a known worker
+     * thread, record the fault and continue normal exception search instead. This
+     * does not recover or prove containment; a surrounding handler may catch it.
+     * Unknown thread identity preserves the existing Class-B fallback behavior. */
     if (shield_on_main_thread() == 0) {
         if (InterlockedIncrement(&g_offthread_seen) <= SHIELD_MAX_OFFTHREAD) {
             __try {
@@ -844,14 +660,9 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
     shield_fault f = { "load", -1, g_why, rva, (uintptr_t)fault_addr };
     shield_emit(&f);
 
-    /* CRASH DETAIL + CRASH RECORD: capture the faulting call stack, log it (the citable record), and
-     * write a crash record -- the Snapmap+ UI polls for it and raises the styled crash-report
-     * dialog seconds later (the process survives a Class-B fault, so the dialog can be real UI; the
-     * blocking native message box this replaced parked the faulting thread and could only ever say
-     * "look at the log"). Rate-limited (SHIELD_MAX_POPUP) so a per-frame fault can't spam; SEH-guarded
-     * so building it can never re-fault the VEH. No engine error text here by design: a raw AV never
-     * stashed one, so the last-error buffer would be a STALE previous message (the same staleness rule
-     * notice_tick documents). */
+    /* Capture stack and a nonterminal record, capped separately from redirects.
+     * Raw hardware faults do not populate engine error text; reading that buffer
+     * here would attach an unrelated earlier message. */
     if (InterlockedIncrement(&g_popup_seen) <= SHIELD_MAX_POPUP) {
         __try {
             capture_fault_stack(ep->ContextRecord, g_crashstk, sizeof g_crashstk, 14);
@@ -867,26 +678,15 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
-    /* Arm the recovery router: the engine's own Frame catch keeps us alive but does NOT navigate (it
-     * resumes the editor on the dangling render-world -> re-fault loop). The frame-hook drives the
-     * proven editor-exit -> My-Maps browser so the loop terminates. */
+    /* Request normal editor teardown so an incomplete render world is not reused. */
     recovery_arm();
 
-    /* MESSAGE HARVEST (Class-B): we are about to resume INTO Error(6), which formats g_why and strncpy's it
-     * into the engine's last-error global (DAT_146ddd990) before throwing. Arm the HARVESTING toast so that
-     * if the recovery resumes in-editor (a genuine engine Error/FatalError the Frame catch recovers in
-     * place), the recover-in-place toast carries the engine's VERBATIM error text instead of the generic
-     * notice -- informative like OG's popup, survivable unlike OG's kill. The toast renders only once an
-     * editor screen exists + self-dedups; if the recovery navigates to the browser it simply never shows
-     * (no engine-native surface there), which is the correct bad-LOAD behavior. */
+    /* Error(6) will populate engine error text after this redirect. Request a toast
+     * using that text if recovery later has an editor screen to show it on. */
     notice_request_msg();
 
-    /* Open Error(6)'s throw gate: both suppressors clear, or the throw becomes ExitProcess(1). Both read 0
-     * and have no writer on the pinned build, so this is insurance rather than a live fix -- see
-     * engine_layout.h for the sweep that established that. Suppressor A is located by glb_resolve;
-     * suppressor B is written only on the build its unverified constant came from (see
-     * write_suppressor_b). SEH-guarded (P6): a fault here would otherwise crash INSIDE the VEH.
-     * If the write faults we still resume into Error(6) (the gate may already be open / re-armed). */
+    /* Clear both resolved suppressors before Error(6). A failed write is logged;
+     * the redirect still proceeds because the gate may already be open. */
     __try {
         if (g_suppr_a_at) *(volatile int32_t *)g_suppr_a_at = 0;
         write_suppressor_b();
@@ -895,11 +695,8 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
         shield_emit(&sf);
     }
 
-    /* Simulate `call Error(g_why)` from the faulting site: 16-align rsp, push the faulting rip as a real
-     * (unwindable) return address so idException unwinds up to idCommonLocal::Frame's catch. Error(6) is
-     * SIG-RESOLVED (g_eng.error6); the pinned RVA is only a legitimate backstop on the build it was
-     * extracted from, so off that build an unresolved Error(6) means we DECLINE the redirect and let
-     * normal Windows handling take the fault rather than resuming into an unrelated function. */
+    /* Simulate call Error(g_why): align RSP and push the fault RIP as the unwindable
+     * return address. Require a resolved wrapper or the exact pinned-build fallback. */
     {
         uintptr_t error6 = g_eng.error6;
         if (!error6 && g_pinned_build)
@@ -923,9 +720,7 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
 
 int veh_install(void)
 {
-    /* Locate the data globals BEFORE the handler can run. glb_resolve scans on a cache miss, which is
-     * not work to do inside an exception handler; doing it here means every read in shield_veh is a
-     * plain load of an address already proven to belong to this image. */
+    /* Resolve handler globals before the VEH can run. */
     veh_resolve_globals();
     return AddVectoredExceptionHandler(1 /* first-in-chain */, shield_veh) != NULL;
 }

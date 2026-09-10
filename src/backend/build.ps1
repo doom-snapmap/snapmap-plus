@@ -1,49 +1,6 @@
-﻿# build.ps1 -- compile the Snapmap+ BACKEND DLL (our clean-room XINPUT1_3.dll) with MSVC (x64).
-# Pure ASCII (PS 5.1 reads BOM-less UTF-8 as 1252). Reuses the fault-shield build TEMPLATE; the backend
-# is a DISTINCT DLL (separate dir, own DllMain) -- this is only the shared MSVC/proxy build approach.
-#
-# Usage:
-#   pwsh -File build.ps1                 # -> XINPUT1_3.dll (the resident backend, proxy + foundation)
-#   pwsh -File build.ps1 -Out x.dll      # alternate output name
-#
-# Sources (each is a clone of an OG XINPUT1_3 / engine mechanism):
-# dllmain (bootstrap), signatures (the masked-byte engine resolver), hook (the inline-detour installer),
-# smoke (the resolver + installer self-proof), backend_log, xinput_proxy (the XInput export-forwarding
-# thunks -- DOOM's input keeps working).
-# rawmap (the keystone rawmap LOAD swap, port of OG
-# FUN_180023ad0's DeserializeFromJson detour, plus the SAVE shadow -- the inverse, port of OG
-# FUN_180023e60's SerializeToJson detour: on every editor save, call the engine serialize then mirror the
-# out-idStr JSON to rawmap.json); strids (the #str_ string injector, port of OG FUN_1800102e0/FUN_18000FF10
-# -- a detour on the engine idLangDict sort that appends strings/strids.json rows to the live string table);
-# overrides (the OVERRIDES FILE-SHADOW, port of OG FUN_18000b370 -- a VTABLE-SLOT swap of the engine
-# resource-provider's open-by-name method, serving %LOCALAPPDATA%\snapmap-plus\overrides\<name> from disk).
-# cvars (register the 2 cvars via the engine OUTER cvar register 0x1A04F00); commands (register the 30
-# console commands via the engine AddCommand 0x1AA3630, cmdSystem global decoded from the CmdSystemLea
-# accessor; the trivial handlers wire sh_rawmaps_on/off to the shipped ops -- ports of
-# OG FUN_1800229b1's install spine). clipboard (CF_TEXT clipboard-set/get, port of OG FUN_1800053f0) feeds
-# the sh_listres clipboard copy; sh_listres (port of FUN_180022000, GetDeclsOfType decl walk) + sh_entlist
-# (port of FUN_180021b50, vendored class list in entlist_classes.h) are real handlers in commands. entity
-# (sh_dumpdef / sh_spawninfo / sh_spawn -- ports of OG FUN_180021e60 / FUN_180024d90 / FUN_180021c90;
-# gameMgr global decoded via the GameMgrLea sig reusing commands' sh_decode_rip_slot; FindEntity/GetOrigin/
-# ExecuteCommandText vtable slots SEH-guarded; sh_spawn's teleport guarded against a bogus GetOrigin).
-# typeinfo (cs_fieldinfo / sh_type -- ports of OG FUN_180021db0 / FUN_180021090; the reflection/type-info
-# mgr reached via the hardcoded declMgr accessor RVA 0x17F7030 (NOT sig-able) + vtable+0x80, then
-# FindTypeInfoByName/FindEnumByName sigs; field+enum record walks SEH-guarded + capped).
-# patch (the reusable engine-code PATCH/DETOUR layer -- code_patch/code_unpatch = OG FUN_180001790
-# memcpy-to-RX with a sig-anchored verify-before-write + a restore-record, all SEH-guarded; the detour
-# family is a thin REUSE of hook.c's installer). Runs an in-DLL scratch-site self-test at install (apply/
-# call-through/restore + the negative refuse-on-mismatch); installs NO engine patches itself.
-# algo (cs_dontuse [18] + sh_alginfo -- ports of OG XINPUT1_3 FUN_1800223a0 + the 4 vendored snaphak_algo
-# math overrides). cs_dontuse is a TOGGLE that FULL-replaces 4 engine math fns (matmul 0x1a82f10 / inverse
-# 0x1a828f0 / packRGBA 0x1a19470 / curveEval 0x1a5eb40, sig-resolved AlgoMatMul/AlgoInverse/AlgoPackRGBA/
-# AlgoCurveEval) with clean-room reimpls -- matmul/inverse/curveEval in f64 (more precise than the engine's
-# native f32, satisfying OG's contract), color-pack BIT-EXACT to the OG round-half-up hook. OFF BY DEFAULT
-# (the 2nd sanctioned divergence after the fault-shield).
-# Runs an in-DLL math self-test at install (the 4 ops on known inputs, NO engine state). Replaces the
-# cs_dontuse + sh_alginfo cosmetic stubs in commands.
-# Add new backend sources to the $Sources list below.
-#
-# Needs Build Tools for Visual Studio 2022 (C++ workload).
+﻿# Build the x64 XINPUT1_3.dll backend with Visual Studio 2022 C++ Build Tools.
+# Run: pwsh -File build.ps1 [-Out XINPUT1_3.dll] [-Diag] [-VcVarsVer <version>]
+# Add backend translation units to Sources below. Keep this script ASCII for PS 5.1.
 param(
     [string[]]$Sources = @("dllmain.c", "host_image.c", "signatures.c", "engine_globals.c", "hook.c", "smoke.c",
                            "rawmap.c", "editor_frame.c", "map_shards.c", "map_package.c", "map_embed.c", "navmesh.c", "nav_regions.c", "nav_bake.c", "nav_play.c", "nav_traversal.c", "aas_edit.c", "aas_augment.c", "nav_geometry.c", "nav_preview.c", "palette_guard.c", "palette_refresh.c", "engine_dialog.c", "package_conflicts.c", "strids.c",
@@ -53,37 +10,25 @@ param(
                            "entity.c", "typeinfo.c", "preview.c", "megapreview.c", "imgpreview.c", "prefabpreview.c", "soundpreview.c", "bcn.c", "patch.c", "algo.c", "target_any.c", "wiring_cleandirect.c", "swf_textedit.c", "ui_bridge.c",
                            "iface_engine.c", "apply_engine.c", "../common/snapmap_plus_iface.c",
                            "../common/log_rotate.c",
-                           # backend-hosted SnapStack (snapstack.c + json_patch.c): the `sh psel`/`sh acctargets`/
-                           # etc. console commands + the stores -- the SOLE SnapStack implementation (the frontend
-                           # never registers its own copy).
+                           # The backend owns the SnapStack command handlers and stores.
                            "snapstack.c", "json_patch.c",
-                           # cvar-unlock MERGED in: the former standalone dinput8 cvar-unlock now rides
-                           # the backend (one fewer shipped DLL; no System32 dinput8 shadow). dinput8 forwarder
-                           # dropped -- DOOM loads the real System32 dinput8. Spawned from dllmain (b2_cvar_unlock_start).
+                           # Include the cvar unlocker in the backend; DOOM uses the native dinput8 DLL.
                            "cvar_unlock.c",
                            "backend_log.c", "xinput_proxy.c",
-                           # FAULT-SHIELD (merged 2026-06-22): the recover-in-place shield rides the backend's
-                           # proven XINPUT1_3 load. Reuses THIS dir's hook.c + signatures.c (no double-link --
-                           # the shield's hook.c/signatures.c are NOT added). Installed from dllmain bootstrap.
+                           # The fault shield shares this backend's hook and signature implementations.
+                           # Do not add the shield's duplicate hook.c or signatures.c.
                            "../fault_shield/veh.c", "../fault_shield/recovery.c",
                            "../fault_shield/fault_record.c", "../fault_shield/shield_sigs.c",
-                           # crash-record capture (the crash-report dialog's evidence trail): the pure
-                           # record formatter + the fatal-path handlers/record writer.
+                           # Capture and format evidence for the crash-report dialog.
                            "../fault_shield/crash_record_format.c", "../fault_shield/crash_report.c",
-                           # targeted guards for game-side defects on the map-load / spawn path (the
-                           # event-link list walk + idInteractable::Spawn's subsystem pointer).
+                           # Guards for event-link walks and interactable spawning.
                            "../fault_shield/mapload_guards.c",
                            "../fault_shield/fault_shield.c"),
     [string]$Out = "XINPUT1_3.dll",
-    # -Diag: build the DIAGNOSTIC variant -- adds the catch-all crash + environment logger (shield_diag.c)
-    # under /DSH_DIAG. Same output name (XINPUT1_3.dll) so an end-user just swaps it in, reproduces the
-    # crash, and sends sh_diag.log. A TROUBLESHOOTING build only -- not for distribution.
+    # Diag adds SH_DIAG and the crash/environment logger for troubleshooting.
     [switch]$Diag,
-    # -VcVarsVer: PIN the MSVC toolset (e.g. "14.44.35207") instead of taking whatever the VS install
-    # happens to default to. A shipped DLL can only be rebuilt byte-for-byte with the compiler that made
-    # it, so the release workflow pins this; empty (the local-dev default) means "use the install
-    # default". Defaults from SNAPMAPPLUS_VCVARS_VER so ONE env var pins both halves of the lockstep
-    # build (the repo-root build.ps1 forwards no arguments to the frontend script).
+    # Pin the MSVC toolset for reproducible release builds. An empty value uses
+    # the installed default; SNAPMAPPLUS_VCVARS_VER shares the pin with the UI build.
     [string]$VcVarsVer = $env:SNAPMAPPLUS_VCVARS_VER
 )
 $ErrorActionPreference = "Stop"
@@ -98,10 +43,7 @@ if (-not $vs) { throw "VC Tools (x86/x64) not found in any VS install." }
 $vcvars = "$vs\VC\Auxiliary\Build\vcvars64.bat"
 if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
 
-# --- toolset pin -------------------------------------------------------------------------------------
-# Resolve (and, when pinned, VERIFY) the MSVC toolset before compiling. Checking here turns "the pinned
-# toolset is not on this machine" into a named error listing what IS installed, instead of a bare
-# non-zero exit from vcvars64.bat several layers down.
+# Resolve and verify the requested toolset before invoking vcvars64.bat.
 $vcvarsArgs = ""
 $toolsetDir = Join-Path $vs "VC\Tools\MSVC"
 if ($VcVarsVer) {
@@ -113,9 +55,7 @@ if ($VcVarsVer) {
     $vcvarsArgs = " -vcvars_ver=$VcVarsVer"
     $toolset = $VcVarsVer + " (pinned)"
 } else {
-    # Not pinned: report the newest toolset present, so the log still records what compiled these bytes
-    # (and shows the maintainer the value to pin). Enumerating the toolset dir keeps this independent of
-    # any VS version-marker file.
+    # Without a pin, report the newest installed toolset for build diagnostics.
     $newest = Get-ChildItem $toolsetDir -Directory -ErrorAction SilentlyContinue |
               Sort-Object Name -Descending | Select-Object -First 1
     if ($newest) { $toolset = $newest.Name + " (newest installed, NOT pinned)" }
@@ -123,10 +63,10 @@ if ($VcVarsVer) {
 }
 Write-Host "[build] MSVC toolset $toolset"
 
-# Allow comma-separated -Sources (handy from the shell): "a.c,b.c" -> @("a.c","b.c").
+# Accept comma-separated source names as well as a PowerShell array.
 if ($Sources.Count -eq 1 -and $Sources[0] -match ",") { $Sources = $Sources[0].Split(",") }
 
-# -Diag: pull in the diagnostic crash + environment logger and define SH_DIAG (dllmain arms it).
+# Include the optional logger; DllMain arms it when SH_DIAG is defined.
 $defs = ""
 if ($Diag) {
     $Sources += "../fault_shield/shield_diag.c"
@@ -134,52 +74,28 @@ if ($Diag) {
     Write-Host "[build] DIAGNOSTIC variant: +shield_diag.c /DSH_DIAG"
 }
 
-# Compile with cwd = $here (relative names) so quoted absolute paths with trailing backslashes can't be
-# mis-parsed by cmd. The XInput export NAMES *and ORDINALS* come from xinput1_3.def (/DEF: below); the
-# xinput_proxy.c bodies are plain (no __declspec) so the .def is the SOLE export source. This is load-
-# bearing: DOOM imports XINPUT1_3.dll BY ORDINAL, and __declspec auto-numbers exports ALPHABETICALLY ->
-# the wrong ordinals -> DOOM's controller poll calls the wrong fn -> heap corruption. The .def pins the
-# ordinals to the real System32 XInput1_3.dll. (.def EXPORTS of locally-DEFINED fns are not dotted
-# forwarders, so there is no alias/collision -- the old reason for avoiding a .def no longer applies.)
+# Compile from this directory with relative paths to avoid cmd quoting issues.
+# xinput1_3.def is the sole export source and fixes native XInput ordinals.
+# DOOM imports by ordinal; automatic alphabetical numbering calls wrong functions.
 $srcArgs = ($Sources | ForEach-Object { '"' + $_.Trim() + '"' }) -join " "
-$implib  = $Out -replace '\.dll$', '.lib'   # import lib + .exp -> build\obj\backend (build\ root stays shippable DLLs only)
-# /I..\common : the shared UI-interface ABI header (snapmap_plus_iface.h) the ui-bridge + the common factory
-# (../common/snapmap_plus_iface.c) include. The interface object the backend creates here is the matched pair
-# the frontend snapmap-plus-ui.dll consumes.
-# shell32.lib: known-folder APIs used by runtime data paths. ole32.lib: CoTaskMemFree for
-# SHGetKnownFolderPath's config-service allocation.
-# Output goes to the TOP-LEVEL repo build\ (out of src\), via paths RELATIVE to cwd=$here so the
-# quoted-trailing-backslash cmd footgun (see above) is avoided: ..\..\ from src\backend\ is the repo root.
-# /DEF:xinput1_3.def + /I..\common stay cwd-relative (load-bearing -- the .def pins the XInput ordinals).
-# SYMBOLS (build\XINPUT1_3.pdb + .map). A crash stack is a list of module offsets; without symbols a
-# reported "XINPUT1_3.dll+0x1234" cannot be turned back into a function, which is most of the value of
-# the crash-report dialog. These are MAINTAINER artifacts -- the release workflow publishes them as a
-# separate asset; package.ps1 never copies them into dist\, so the shipped overlay stays two DLLs.
-#
-# The flag set is chosen to be LAYOUT-NEUTRAL -- the shipped code must not change just because we now
-# emit symbols for it:
-#   /Z7        debug info inside each .obj (no separate compiler PDB, so nothing races over one shared
-#              vc*.pdb in the common /Fo dir); the linker collects it into one PDB.
-#   /DEBUG:FULL is what generates that PDB -- but it also flips two linker DEFAULTS that WOULD move code:
-#              it implies /INCREMENTAL (thunks + padding) and turns OFF /OPT:REF and /OPT:ICF. The three
-#              explicit flags below put the release layout back; they are not optional extras.
-#   /Brepro    deterministic output (hash instead of a build timestamp) on BOTH the compile and the link,
-#              so the same source + same toolset gives the same bytes. It requires non-incremental
-#              linking, which /INCREMENTAL:NO already guarantees; nothing else set here reads the PE
-#              timestamp (package.ps1 hashes contents, the installer verifies those hashes).
-#   /PDBALTPATH:%_PDB% records the PDB as a bare filename instead of this machine's absolute build path,
-#              which would otherwise be embedded in every shipped DLL. Symbol lookup is by GUID+age, so
-#              nothing is lost.
+$implib  = $Out -replace '\.dll$', '.lib'   # Put import libraries and .exp files under build/obj/backend.
+# Include the shared interface ABI used by the backend factory and paired UI DLL.
+# shell32 supplies known-folder APIs; ole32 frees their returned allocations.
+# DLL, PDB and map outputs go to the repository build directory.
+# PDB and map files resolve crash offsets and ship as separate maintainer assets.
+# /Z7 keeps compiler debug data in each object, avoiding a shared compiler PDB.
+# /DEBUG:FULL emits linker symbols; /INCREMENTAL:NO and /OPT:REF,ICF explicitly
+# restore release layout defaults that debug linking otherwise changes.
+# /Brepro on compilation and linking removes timestamp-based output variation.
+# /PDBALTPATH:%_PDB% records only the PDB filename, omitting local build paths.
 $cl = "cl /nologo /LD /O2 /W3 /MT /Z7 /Brepro $defs /Fo..\..\build\obj\backend\ /I..\common $srcArgs /Fe:..\..\build\$Out " +
       "/link /DEF:xinput1_3.def /IMPLIB:..\..\build\obj\backend\$implib shell32.lib ole32.lib " +
       "/DEBUG:FULL /INCREMENTAL:NO /OPT:REF /OPT:ICF /Brepro /PDBALTPATH:%_PDB% /MAP"
 
 $cmd = "cd /d `"$here`" && `"$vcvars`"$vcvarsArgs && $cl"
-# vcvars64.bat emits a spurious "'vswhere.exe' is not recognized" line on stderr (it probes a bare-PATH
-# vswhere before falling back); under $ErrorActionPreference='Stop' that native-command stderr line trips
-# PS 5.1 as a terminating error even though cl succeeds. Route the whole cmd's stdout+stderr to a log and
-# gate ONLY on the real signal -- $LASTEXITCODE from `cmd /c` (the same pattern the frontend build.ps1 uses).
-$outDir = Join-Path (Split-Path -Parent (Split-Path -Parent $here)) "build"   # <repo>\build (out of src\)
+# Capture native stderr in the build log: PS 5.1 can otherwise treat harmless
+# vcvars diagnostics as terminating errors. Determine success from LASTEXITCODE.
+$outDir = Join-Path (Split-Path -Parent (Split-Path -Parent $here)) "build"
 New-Item -ItemType Directory -Force (Join-Path $outDir "obj\backend") | Out-Null
 $buildLog = Join-Path $outDir "build.log"
 cmd /c "$cmd > `"$buildLog`" 2>&1"
@@ -187,8 +103,7 @@ $clExit = $LASTEXITCODE
 Get-Content $buildLog | Write-Host
 if ($clExit -ne 0) { throw "cl failed (exit $clExit) -- see $buildLog" }
 Write-Host "built $(Join-Path $outDir $Out)"
-# The symbols are what make a reported crash offset resolvable; a silent miss would only be discovered
-# the next time someone tried to read a stack, so assert they were actually produced.
+# Require both symbol artifacts so reported crash offsets remain resolvable.
 foreach ($sym in @(($Out -replace '\.dll$', '.pdb'), ($Out -replace '\.dll$', '.map'))) {
     $symPath = Join-Path $outDir $sym
     if (-not (Test-Path $symPath)) { throw "expected symbol artifact missing: $symPath" }
@@ -197,8 +112,7 @@ foreach ($sym in @(($Out -replace '\.dll$', '.pdb'), ($Out -replace '\.dll$', '.
 if ($Diag) {
     Write-Host "[build] *** DIAGNOSTIC build -- DO NOT DISTRIBUTE (troubleshooting only; writes sh_diag.log + sh_crash.dmp) ***"
 } else {
-    # a -Diag build emits shield_diag.obj into build\obj\backend; keep the release obj dir diag-free.
+    # Remove an earlier diagnostic object from the release object directory.
     Remove-Item (Join-Path $outDir "obj\backend\shield_diag.obj") -ErrorAction SilentlyContinue
 }
-
 

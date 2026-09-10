@@ -1,4 +1,4 @@
-/* soundpreview.c -- see soundpreview.h for what this is and why testSound is not it. */
+/* Main-thread sound auditioning with one retained, stoppable emitter. */
 
 #include <windows.h>
 #include <stdio.h>
@@ -15,13 +15,9 @@ typedef void  (*snd_stop_fn)(void *world, unsigned long long handle);
 typedef void  (*cmd_exec_fn)(void *cmdSys, const char *text);
 /* The main-thread bridge, same two engine functions apply_engine.c uses for clone_bss_apply. */
 typedef void  (*snd_buffer_cmd_fn)(void *cmdSys, const char *text);
-/* AddCommand's 4th and 5th arguments are help and arg-completion in SOME order, and this repo's two
- * existing declarations of it disagree about which (apply_engine.c says cb,p3,help; commands.c says
- * handler,help,argComp). AddCommand itself (0x1AA3630) only shows that they land in adjacent slots
- * of its 0x28-byte record -- param_5 at +0x10, param_4 at +0x18 -- without naming either. Since one
- * of those slots is a FUNCTION POINTER the engine may later call for tab-completion, passing a help
- * string into the wrong one is a jump into string bytes. This command is internal plumbing whose
- * help text nobody reads, so BOTH are passed NULL and the question does not have to be answered. */
+/* Pass NULL for both optional AddCommand help/completion arguments; this
+ * internal command needs neither.
+ */
 typedef void  (*snd_add_command_fn)(void *cmdSys, const char *name, void *handler, void *arg4,
                                     void *arg5, unsigned int flags);
 
@@ -32,47 +28,23 @@ static void            *g_cmdsys;
 static int              g_installed;
 static int              g_stop_bound;  /* 0 = not tried, 1 = bound, -1 = tried and refused */
 
-/* ================================================== THE MAIN-THREAD RULE =========================
- * NOTHING in this file may touch the sound world from the calling thread. Everything that starts,
- * stops or re-modes a sound is queued and executed on the DOOM MAIN THREAD, through the engine's own
- * command buffer -- the same routing apply_engine.c uses for clone_bss_apply.
+/* All sound-world mutations run on the DOOM main thread through the command
+ * buffer. The native start path publishes an emitter before initializing its
+ * shader at +0x20a0; an audio-worker update can dereference that field during
+ * an off-thread start.
  *
- * This is not defensive style, it is a crash we shipped and hit (2026-08-05). `StartSound_wwise`
- * (RVA 0x1854600) publishes a brand-new emitter into the sound world's LIVE list before it is
- * initialised:
- *
- *     emitter = FUN_1418455e0(operator_new(0x2200));   // allocate + base ctor
- *     world[0x3EE][i] = emitter;                       // PUBLISH  (world+0x1F70)
- *     world[0x3EF]    = i + 1;                         //   and bump the count (world+0x1F78)
- *     ...
- *     FUN_141846900(emitter, world, ...);              // ONLY NOW is emitter+0x20A0 (the shader) set
- *
- * Meanwhile idSoundWorld::Update (RVA 0x1857270, called from the "Sound World Update" job at
- * 0x18520B0) walks that list on an AUDIO WORKER THREAD and does, at the top of idSound::Update
- * (0x1847670):
- *
- *     mov rax,[emitter+0x20A0]      ; the sound shader
- *     mov edi,[rax+0xA4]            ; <-- rax == 0 inside the window above -> AV at address 0xA4
- *
- * So any caller that starts a sound off the main thread races that window on every single call. We
- * were calling from the frontend's 30 Hz think-loop thread, and it faulted exactly there.
- *
- * The engine's own audition, `testSound`, does not hit this because it is a CONSOLE COMMAND: the
- * command buffer is drained on the main thread, which does not overlap the sound job. We take the
- * same route rather than inventing a safety story of our own -- if the engine's worked example is
- * safe, an identical routing is safe for the same reason.
- *
- * (The fault-shield does not save you here either: it downgrades the AV to a recoverable Error(6),
- * which is validated for MAIN-THREAD faults. Unwinding it out of the audio job instead leaves the
- * sound system's state held and the game freezes rather than recovering.) */
+ * Pinned Vulkan audit anchors: StartSound_wwise 0x1854600, emitter
+ * initialization 0x1846900, world update 0x1857270 and emitter update
+ * 0x1847670. Queue through the same main-thread route as native console
+ * auditioning; SEH around the caller cannot repair a fault in the audio job.
+ */
 #define SP_CMD_NAME "sh_sndprev"
 
 typedef enum { SP_OP_PLAY = 0, SP_OP_STOP, SP_OP_SESSION_ON, SP_OP_SESSION_OFF } sp_op;
 
-/* A small ring rather than a single last-wins slot: ordering between ops is meaningful (a
- * session-off that arrives after a play must still stop it), so they cannot be collapsed. 8 is
- * generous -- the UI produces at most one op per click. On overflow the OLDEST is dropped and logged,
- * because the newest op is the one that reflects what the user last did. */
+/* Preserve operation order in an eight-entry ring. On overflow, drop and log
+ * the oldest pending operation to retain the latest user action.
+ */
 #define SP_QUEUE_MAX 8
 #define SP_NAME_CAP 512
 typedef struct { sp_op op; unsigned long sequence; char name[SP_NAME_CAP]; } sp_item;
@@ -92,12 +64,10 @@ static snd_add_command_fn g_add_command;
 #define SP_VSLOT_PREVIEW 0x30
 #define SP_VSLOT_STOP    0x98
 
-/* StopSound's prologue: the frame setup, then the handle decode that is its fingerprint --
- * SHR RAX,0x20 to take the emitter index out of the packed handle, TEST/JS, then CMP against the
- * emitter count at world+0x1F78. Used to VERIFY the vtable slot, never to search for it: the
- * function has a byte-identical twin at +0xA0 (same code, different globals), so a search returns
- * two hits and cannot pick. Verifying a pointer we already took from the right slot has no such
- * problem -- the twin only means "these bytes are a StopSound", which is exactly the claim. */
+/* Verify StopSound at vtable +0x98 with its prologue and packed-handle
+ * decode. Do not scan for it: slot +0xa0 has a byte-identical twin using
+ * different globals.
+ */
 static const uint8_t SP_STOP_PROLOGUE[] = {
     0x48,0x8B,0xC4, 0x48,0x89,0x50,0x10, 0x57, 0x48,0x83,0xEC,0x60,
     0x48,0xC7,0x40,0xC8,0xFE,0xFF,0xFF,0xFF, 0x48,0x89,0x58,0x08, 0x48,0x89,0x70,0x18,
@@ -107,29 +77,18 @@ static const uint8_t SP_STOP_PROLOGUE[] = {
 
 static unsigned long long g_handle;    /* the one live preview, 0 = nothing playing */
 
-/* PREVIEW MODE is the cvar state an audition needs: background audio on (Snapmap+ has focus, DOOM
- * does not) plus the engine's solo/forced-listener pair. It is entered ONCE and held, never toggled
- * per click.
- *
- * The first version toggled it per preview, and that was audibly wrong: each play ran
- * s_playSoundInBackground 0 (tearing down the previous preview) immediately followed by 1, so every
- * click suspended and resumed DOOM's whole audio engine and re-entered solo. Sounds faded in, and
- * short ones could be over before the resume finished -- which is exactly the "sometimes it does
- * not play" this was reported as.
- *
- * g_session is the UI holding the mode open for as long as the asset browser is up; g_mode_on is
- * what we have actually written. A preview can still be started without a session (the mode is
- * entered on demand and dropped on stop) -- the session only means "do not drop it between clicks". */
+/* Preview mode enables background audio plus the native solo/forced-listener
+ * settings. g_session holds the mode while the browser is open; g_mode_on
+ * records whether it is active. Without a session, play enters the mode and
+ * stop leaves it.
+ */
 static int g_session;
 static int g_mode_on;
 
-/* RIP-relative decode, any destination register.
- *
- * The shared sh_decode_rip_slot in commands.c only accepts modrm 0x05 (->RAX) and 0x0D (->RCX)
- * because that is what its two callers' accessors happen to use. Our accessor loads into RBX
- * (modrm 0x1D). Rather than widen a scanner two other subsystems depend on, this takes the general
- * form: for a [rip+disp32] operand the modrm byte is mod=00 rm=101, i.e. (modrm & 0xC7) == 0x05,
- * with the register in bits 3..5. Same arithmetic otherwise. */
+/* Decode RIP-relative loads for any destination register: ModRM must satisfy
+ * (modrm & 0xc7) == 0x05. The shared command helper accepts fewer destination
+ * registers.
+ */
 #define SP_SCAN_WINDOW 64
 static const uint8_t *sp_decode_rip_any(const uint8_t *fn)
 {
@@ -146,9 +105,9 @@ static const uint8_t *sp_decode_rip_any(const uint8_t *fn)
     return NULL;
 }
 
-/* The live sound world, or NULL. Read through the slot EVERY time: the world is torn down and
- * rebuilt across map loads and s_restart, so a cached pointer goes stale and would be a use-after-
- * free the first time someone reloads a map with a preview handle outstanding. */
+/* Read the world slot on each use; map loads and s_restart replace the
+ * object.
+ */
 static void *sp_world(void)
 {
     if (!g_slot) return NULL;
@@ -160,12 +119,10 @@ static void *sp_world(void)
 
 /* cmdSystem vtbl +0x48, the same slot and the same byte offset sh_spawninfo uses for `getviewpos`. */
 #define SP_VSLOT_EXEC_CMD_TEXT 0x48
-/* Bind StopSound from the live sound world's vtable, once, and only if the vtable proves itself
- * first: slot +0x30 must be the very function the SoundPreview signature already found. If that
- * matches, this is the vtable we reverse-engineered and slot +0x98 means what we recorded; if it
- * does not, the layout moved and we refuse rather than call an arbitrary pointer.
- *
- * Deferred to first use because the sound world does not exist at install time. Returns 1 if bound. */
+/* Bind StopSound from the live vtable on first use. Require +0x30 to equal
+ * the resolved SoundPreview entry before validating +0x98. Returns 1 when
+ * bound.
+ */
 static int sp_bind_stop(void *world)
 {
     if (g_stop_bound) return g_stop_bound > 0;
@@ -216,9 +173,9 @@ static void sp_console(const char *text)
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-/* ---- the main-thread queue ---------------------------------------------------------------------
- * Producers (any thread) push an op and kick the command buffer; the consumer is the registered
- * console command, which the engine runs on the main thread. See THE MAIN-THREAD RULE above. */
+/* Any thread may enqueue; the registered native console command drains on the
+ * main thread.
+ */
 
 static void sp_do_play(const char *name);       /* the real bodies, main-thread only */
 static void sp_do_stop(void);
@@ -338,8 +295,7 @@ int sh_soundpreview_install(const sig_result *results, size_t n,
     const uint8_t *acc = (const uint8_t *)sig_addr_by_name(results, n, "SoundWorldLea");
     if (acc) g_slot = sp_decode_rip_any(acc);
     g_preview = (snd_preview_fn)sig_addr_by_name(results, n, "SoundPreview");
-    /* The main-thread bridge. Without BOTH of these there is no safe way to start a sound at all,
-     * so the module refuses to arm rather than falling back to calling from the caller's thread. */
+    /* Require both command-buffer entry points before arming playback. */
     g_buffer_cmd  = (snd_buffer_cmd_fn) sig_addr_by_name(results, n, "BufferCommandText");
     g_add_command = (snd_add_command_fn)sig_addr_by_name(results, n, "AddCommand");
     /* g_stop is NOT resolved here. It comes from the sound world's own vtable at first use --
@@ -390,8 +346,9 @@ static void sp_leave_mode(void)
     }
 }
 
-/* Silence the current emitter and nothing else. This is what runs BETWEEN previews -- the cvars are
- * deliberately untouched, because churning them is what made playback inconsistent. */
+/* Stop only the current emitter between previews; keep the mode cvars
+ * unchanged.
+ */
 static void sp_stop_emitter(void)
 {
     void *w = sp_world();
@@ -417,9 +374,9 @@ static void sp_do_session(int on)
 static void sp_do_stop(void)
 {
     sp_stop_emitter();
-    /* With the browser still open, stay in preview mode: the next Play should be instant, and a
-     * background-audio suspend/resume between clicks is the very thing being avoided. The session
-     * ending is what tears the mode down. */
+    /* Keep preview mode while the session is open; closing the session
+     * restores audio.
+     */
     if (!g_session) sp_leave_mode();
 }
 
@@ -437,11 +394,9 @@ static void sp_do_play(const char *name)
 {
     if (!g_preview || !name || !name[0]) return;
 
-    /* The gate. The engine resolves this name with the find-OR-CREATE decl primitive, which raises
-     * a fatal error on a name that is not a real decl -- so an unvalidated name is not a failed
-     * preview, it is a killed game. Our own container index answers the question with no engine
-     * call at all, and the browser only ever offers names that came from that same index, so this
-     * rejects nothing legitimate. */
+    /* Validate with our catalog before native find-or-create, whose missing-
+     * name behavior can raise an engine error.
+     */
     if (!sh_imgpreview_has(SH_ASSET_SOUND, name)) {
         char l[320];
         _snprintf_s(l, sizeof l, _TRUNCATE,
@@ -453,20 +408,18 @@ static void sp_do_play(const char *name)
     void *w = sp_world();
     if (!w) { backend_log("soundpreview: no sound world (not in a map yet?)"); return; }
 
-    /* A preview we cannot stop is worse than no preview -- it is exactly testSound's failure -- so
-     * the stop has to be in hand BEFORE anything is allowed to start. */
+    /* Bind stopping before starting any emitter. */
     if (!sp_bind_stop(w)) {
         backend_log("soundpreview: REFUSED -- StopSound could not be bound, so nothing is played");
         return;
     }
 
-    /* Mode FIRST, and only if it is not already up. With a session open this is a no-op, so the
-     * audio engine is never suspended mid-click. */
+    /* Enter preview mode if the session has not already enabled it. */
     sp_enter_mode();
 
-    /* One at a time. The engine's preview allocates a fresh emitter per call and does NOT recycle,
-     * so without this the second click is audible on top of the first -- the pile-up testSound
-     * suffers from. Only the emitter is stopped; the mode stays up. */
+    /* Stop the previous emitter before allocating another; keep preview mode
+     * active.
+     */
     sp_stop_emitter();
 
     unsigned long long h = 0;
@@ -485,19 +438,17 @@ static void sp_do_play(const char *name)
     }
 }
 
-/* PUBLIC, any thread. Validates what can be validated WITHOUT touching the sound world -- the name
- * gate and the world's mere existence -- then hands the actual audition to the main thread.
- *
- * The return value therefore means "accepted", not "audible": a name we reject, a missing sound
- * world or a dead command buffer are still reported synchronously (which is every failure the user
- * can act on), while the engine's own "declined to start" outcome is one frame later and lands in
- * the log. That trade is deliberate -- see THE MAIN-THREAD RULE. */
+/* Public, any thread: validate the name and world availability, then queue
+ * playback. A return of 1 means accepted; later native refusal is logged on
+ * the main thread.
+ */
 int sh_soundpreview_play(const char *name)
 {
     if (!g_preview || !name || !name[0]) return 0;
 
-    /* Cheap, engine-free, and the same gate sp_do_play re-applies on the main thread. Doing it here
-     * as well is what keeps a bad name a red toast instead of a silent nothing a frame later. */
+    /* Repeat the catalog check here for synchronous feedback and at execution
+     * time.
+     */
     if (!sh_imgpreview_has(SH_ASSET_SOUND, name)) {
         char l[320];
         _snprintf_s(l, sizeof l, _TRUNCATE,
@@ -505,8 +456,9 @@ int sh_soundpreview_play(const char *name)
         backend_log(l);
         return 0;
     }
-    /* Reading the world POINTER is a plain load of a global; it does not walk the emitter list and
-     * is safe from any thread. Only mutating the world is not. */
+    /* Read only the global world pointer here; emitter access stays on the
+     * main thread.
+     */
     if (!sp_world()) { backend_log("soundpreview: no sound world (not in a map yet?)"); return 0; }
 
     return sp_post(SP_OP_PLAY, name);

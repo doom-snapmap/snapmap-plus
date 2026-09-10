@@ -1,8 +1,4 @@
-/* dumpmap_path_test.c -- pure-logic tests for sh_dumpmap's output-path resolution.
- *
- * The handler hands the resolved path straight to the map writer, so a mistake here writes a file
- * somewhere the user will never find it (or, worse, over something else). None of this needs the game.
- */
+/* Offline output-path resolution tests for sh_dumpmap. */
 #include <assert.h>
 #include <string.h>
 #include <stdio.h>

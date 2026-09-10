@@ -1,17 +1,7 @@
 #!/usr/bin/env python3
-"""Parse CHANGELOG.md -- the single source of truth for user-facing release notes.
-
-Standard library only. This runs in three workflows with no dependency install:
-release.yml (windows-2022, `python`), pages.yml and ci.yml (ubuntu-latest,
-`python3`). Adding a third-party import breaks the release.
-
-The section-header grammar every consumer parses:
-
-    ## <tag> -- <YYYY-MM-DD> (<channel>)
-
-Read liberally, emit strictly: the separator is accepted as `--` or either
-Unicode dash an editor may substitute, and only ever written as ASCII `--`.
-"""
+"""Parse CHANGELOG.md for CI, releases and website data using the standard library.
+Section headers are: ## <tag> -- <YYYY-MM-DD> (<channel>).
+Accept common Unicode dash separators, but emit ASCII --."""
 
 import argparse
 import datetime
@@ -66,9 +56,7 @@ def _parse_body(body_lines):
         if m and group:
             out[group].append(m.group("text"))
             continue
-        # A hand-wrapped bullet continues on an indented line. The renderer never
-        # wraps, but CHANGELOG.md is edited by hand, and dropping the tail of a
-        # sentence is worse than any formatting rule.
+        # Preserve indented continuations of hand-wrapped bullets.
         if group and out[group] and (raw[:1] in (" ", "\t")):
             out[group][-1] += " " + line.strip()
             continue
@@ -105,8 +93,7 @@ def parse(text):
 
 
 def find(sections, tag):
-    """Exact tag match. A substring search would resolve v0.2.1 to
-    v0.2.1-beta.6, which is precisely the first stable release."""
+    """Match the complete tag so a stable version cannot select a beta entry."""
     for section in sections:
         if section["tag"] == tag:
             return section

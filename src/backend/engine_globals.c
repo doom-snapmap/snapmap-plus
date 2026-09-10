@@ -9,14 +9,9 @@
 #include "backend_log.h"
 #include "engine_globals_table.gen.h"   /* defines BACKEND_ENGINE_GLOBALS; generated, never hand-edited */
 
-/* The cache is written from whichever thread resolves a name first and read from all of them --
- * the backend bootstrap, the UI thread, the engine main thread, and the fault shield's handler.
- * Resolution is deterministic, so a race can only duplicate work; what it must not do is let a
- * reader see a slot's name published before its address. So a slot is reserved with an interlocked
- * increment, the name is written, and the ADDRESS IS PUBLISHED LAST behind a barrier. Readers test
- * the address first and treat zero as "not ready", which costs a re-resolve and never a bad
- * pointer. No lock: the shield reads this from inside an exception handler, where taking one is
- * not safe. */
+/* Publish each cache address last; readers skip unpublished slots and may resolve
+ * them again. Avoid locks because the fault shield also reads this cache from
+ * exception handlers. Duplicate resolutions produce the same address. */
 #define GLB_CACHE_MAX 64
 
 static struct {
@@ -102,10 +97,8 @@ uintptr_t glb_resolve(const uint8_t *module_base, const char *name, glb_status *
         if (strcmp(e->name, name) == 0) break;
     if (!e->name) return 0;
 
-    /* known_rva is deliberately 0: the hook-tolerant fallback in sig_resolve_one resolves AT the
-     * pinned RVA when the scan misses, which is exactly wrong here. We are about to read a
-     * displacement out of the matched bytes, and a detour will have overwritten them. Only a clean,
-     * unique scan hit is usable, so give the resolver no fallback to take. */
+    /* Disable RVA fallback: detours overwrite the displacement we need to decode.
+ * Only an intact, unique anchor can locate a data global. */
     anchor_sig.name      = e->name;
     anchor_sig.pattern   = e->anchor;
     anchor_sig.known_rva = 0;
@@ -122,8 +115,7 @@ uintptr_t glb_resolve(const uint8_t *module_base, const char *name, glb_status *
         return 0;
     }
 
-    /* RIP-relative: measured from the end of the whole INSTRUCTION, which is the end of the
-     * disp32 plus whatever immediate follows it. See the note in engine_globals.h. */
+    /* RIP is measured from the instruction end, including any trailing immediate. */
     decoded = r.addr + e->disp_slot + 4 + e->disp_tail + (intptr_t)disp + (intptr_t)e->delta;
 
     img_sz = image_size_of(module_base);

@@ -1,36 +1,9 @@
-/* aas_edit.h -- a MUTABLE AAS2 3.29 file: parse, append, re-serialize.
+/* Mutable AAS2 3.29 payloads: parse, append records, and serialize.
  *
- * WHY THIS EXISTS
- * ---------------
- * navmesh.c can already VALIDATE a payload -- walk the 22 count-prefixed lumps,
- * bounds-check the cross-lump indices, prove the BSP terminates. That is a
- * read-only gate over a const buffer, which is all serving substitute bytes ever
- * needed.
- *
- * Authoring needs the other half. To give an author's own geometry navigation we
- * must ADD to a shipped payload: vertices, edges, planes, one area per platform,
- * the BSP nodes that make that area findable, a cluster and obstaclePVS row, and
- * the reachabilities that link it. This module is the editable model that makes
- * that expressible, and the writer that turns it back into bytes the engine's
- * own loader accepts.
- *
- * THE SHAPE
- * ---------
- * A payload is a 30-byte header, a 364-byte settings block, then 22 lumps, each
- * a u32 count followed by that many FIXED-SIZE records. Everything multi-byte is
- * BIG-ENDIAN on disk. There is no offset table: lump N begins where lump N-1
- * ended, so appending to any lump shifts every later one -- which is exactly why
- * a mutable model has to own the whole file rather than patch it in place.
- *
- * Records stay big-endian in the backing store and are converted at the edge by
- * the typed accessors below. Only the lumps the augmenter actually reads or
- * writes get typed views; the rest are carried through verbatim. That keeps this
- * file small and makes a round-trip byte-identical by construction: an untouched
- * lump is copied, not re-encoded.
- *
- * NO GAME BYTES. Like every other test in this repo, the tests for this module
- * SYNTHESISE payloads (tests/navmesh_test.c `build_aas` is the precedent). Do not
- * add a real .aas_* file as a fixture -- see README.md.
+ * The file has a 30-byte header, 364-byte settings block, and 22 count-
+ * prefixed lumps of fixed-size big-endian records. Each lump owns its bytes
+ * so appends do not move other lumps. Untouched records are copied verbatim
+ * for byte-identical round trips.
  */
 #ifndef SNAPMAP_PLUS_AAS_EDIT_H
 #define SNAPMAP_PLUS_AAS_EDIT_H
@@ -69,9 +42,10 @@ typedef struct sh_aas sh_aas;
 
 /* ---- lifetime ---------------------------------------------------------- */
 
-/* Parse `len` bytes into an editable model. Returns NULL and fills `err` on any
- * structural problem -- this applies the SAME rules as sh_navmesh_validate_aas,
- * because a payload we cannot trust is one we must not edit either. */
+/* Parse the header, lump bounds and count relationships. Returns NULL and
+ * fills err on failure. Cross-lump indices and BSP integrity require
+ * sh_navmesh_validate_aas after editing.
+ */
 sh_aas *sh_aas_parse(const unsigned char *bytes, size_t len, char *err, size_t err_cap);
 
 void sh_aas_free(sh_aas *a);
@@ -95,6 +69,9 @@ const unsigned char *sh_aas_rec_const(const sh_aas *a, int lump, unsigned i);
  * Returns 0 on allocation failure or if the lump would exceed its cap. */
 int sh_aas_append(sh_aas *a, int lump, unsigned n, unsigned *out_first);
 
+/* Remove a tail after compaction. Does not repair cross-lump references. */
+int sh_aas_truncate(sh_aas *a, int lump, unsigned count);
+
 /* ---- big-endian field helpers ------------------------------------------ */
 
 uint32_t sh_aas_get_u32(const unsigned char *rec, unsigned off);
@@ -109,11 +86,10 @@ void sh_aas_put_i32(unsigned char *rec, unsigned off, int32_t v);
 void sh_aas_put_i16(unsigned char *rec, unsigned off, int16_t v);
 void sh_aas_put_f32(unsigned char *rec, unsigned off, float v);
 
-/* ---- the settings block ------------------------------------------------
- * 364 bytes at SH_AAS_HEADER_BYTES. The augmenter needs the agent bounding box
- * (to inset a platform by the agent radius and to reject one with too little
- * headroom) and maxStepHeight (the walk-link ceiling, 18 in every shipped
- * SnapMap module). Offsets are into the settings block, not the file. */
+/* Settings occupy 364 bytes at SH_AAS_HEADER_BYTES. Offsets below are
+ * relative to that block. Agent bounds determine clearance; maxStepHeight
+ * limits walk links.
+ */
 float sh_aas_setting_f32(const sh_aas *a, unsigned off);
 void  sh_aas_set_setting_f32(sh_aas *a, unsigned off, float v);
 

@@ -1,16 +1,5 @@
-"""Derive a data global's RVA on a second DOOM build without hardcoding it.
-
-Given a data RVA on the reference (Vulkan) image, find every RIP-relative code site
-that computes that address, build a masked byte signature of the surrounding code
-with volatile operands wildcarded (the same style as the product's shipped
-signature DB), require the signature to be UNIQUE on both images, then read the
-displacement at the matched site on the target (OpenGL) image to recover the
-global's RVA there.
-
-This is the mechanism that lets one shipped binary serve both builds: the product
-signs a CODE SITE it can find on any build, and reads the data address out of it,
-instead of baking an RVA that is only true for one build.
-"""
+"""Locate a data global on a second image through signed RIP-relative code sites.
+Require unique matches on both images and decode the target displacement."""
 import struct, sys, json, os
 from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_OP_MEM, CS_OP_IMM
 from capstone.x86 import X86_REG_RIP, X86_GRP_JUMP, X86_GRP_CALL
@@ -56,9 +45,7 @@ def riprefs(sec, target_rva):
     d32 = (b[0:n] | (b[1:n + 1] << 8) | (b[2:n + 2] << 16) | (b[3:n + 3] << 24))
     d32 = np.where(d32 >= 0x80000000, d32 - 0x100000000, d32)
     # target == base + off + 4 + d32  =>  d32 + off == target - base - 4
-    # A reference whose disp32 is followed by an immediate encodes a correspondingly
-    # smaller displacement, so sweep the plausible tail widths too. Missing these is how
-    # a global with exactly one `cmp [rip+disp], imm8` reference looks unreferenced.
+    # Include immediate bytes after disp32 when testing candidate instruction ends.
     idx = np.arange(n, dtype=np.int64)
     hits = []
     for tail in (0, 1, 2, 4):
@@ -93,11 +80,8 @@ def decode_site(sec, disp_off, back=24):
 
 
 def wildcard_slots(ins):
-    """Byte ranges to wildcard: RIP-relative displacements and branch rel32s.
-
-    Small struct displacements stay FIXED. Struct layout is identical across the
-    two builds; only addresses move, so keeping them raises selectivity for free.
-    """
+    """Wildcard RIP-relative displacements and branch rel32s. Keep structure offsets
+    fixed for the supported renderer pair; different engine builds need layout review."""
     slots = []
     b = bytes(ins.bytes)
     if (ins.group(X86_GRP_JUMP) or ins.group(X86_GRP_CALL)) and ins.size >= 5:
@@ -136,11 +120,10 @@ def build_sig(sec, anchor_ins, n_after=6):
             for op in ins.operands:
                 if op.type == CS_OP_MEM and op.mem.base == X86_REG_RIP:
                     idx = b.rfind(struct.pack('<i', op.mem.disp))
-                    # x86-64 measures the displacement from the end of the whole instruction,
-                    # so anything following the disp32 (an immediate, as in
-                    # `cmp dword ptr [rip+disp], 0`) has to be added back when decoding.
-                    # Record how many such bytes there are rather than assuming none --
-                    # assuming none decodes short, silently, onto a plausible address.
+                    # RIP-relative addressing uses the end of the whole instruction.
+                    # Record any
+                    # immediate bytes after disp32 so decoding does not select a
+                    # neighboring address.
                     if idx >= 0:
                         target_slot = cur + idx
                         target_tail = len(b) - (idx + 4)
@@ -211,10 +194,8 @@ def derive(vk_secs, gl_secs, target_rva, max_sites=6):
             vh = scan(vk_secs, pb, pm)
             if len(vh) != 1:
                 continue
-            # Prove the site decodes back to the target we asked for. The tail sweep in riprefs
-            # can surface a site whose real instruction length differs from the one assumed, and
-            # such a site names a NEIGHBOURING global -- which for adjacent engine globals is a
-            # plausible, wrong answer rather than an obvious failure.
+            # Confirm the decoded reference equals the requested global; candidate tail
+            # lengths can otherwise select a plausible neighboring address.
             vaddr, vsec, vp = vh[0]
             d32v = struct.unpack_from('<i', vsec['data'], vp + tslot)[0]
             if vaddr + tslot + 4 + ttail + d32v != target_rva:

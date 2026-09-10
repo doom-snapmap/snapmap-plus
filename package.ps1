@@ -1,38 +1,25 @@
-# package.ps1 -- assemble the deployable Snapmap+ overlay into dist\ (the tree you drop into a DOOM
-# install). Pure ASCII (PS 5.1 reads BOM-less UTF-8 as 1252).
-#
-# Ships ONLY the two clone DLLs -- the WebView2 (HTML) frontend has no Qt dependency and uses the
-# system-installed WebView2 runtime (preinstalled on Windows 11; evergreen on most Windows 10) at run
-# time, so there is nothing else to bundle.
-#
-# Consumes the DLLs built by src\backend\build.ps1 (XINPUT1_3.dll) and src\ui\build.ps1
-# (snapmap-plus-ui.dll), both in build\.
-#
-# Usage:
-#   powershell -NoProfile -ExecutionPolicy Bypass -File package.ps1
+# Package the two built DLLs and their hash manifest into dist/.
+# The frontend uses the system WebView2 runtime. Run build.ps1 first.
+# Keep this script ASCII for PowerShell 5.1.
 $ErrorActionPreference = "Stop"
 $here  = Split-Path -Parent $MyInvocation.MyCommand.Path   # the repo root
 $build = Join-Path $here "build"
 $dist  = Join-Path $here "dist"
 
-# --- consume build\ : both clone DLLs must be present. The frontend lands in
-#     build\webview\snapmap-plus-ui.dll, the backend directly in build\XINPUT1_3.dll. ---
+# Require both DLL outputs before changing dist/.
 $backendDll = Join-Path $build "XINPUT1_3.dll"
 $uiDll      = Join-Path $build "webview\snapmap-plus-ui.dll"
 foreach ($d in @($backendDll, $uiDll)) {
     if (-not (Test-Path $d)) { throw "missing $d -- run build.ps1 first (repo root; builds backend + frontend together)." }
 }
 
-# --- refuse a -Diag (troubleshooting) backend: it is self-labelled DO NOT DISTRIBUTE. The diagnostic
-#     logger (shield_diag.c) is the only source of the string "sh_diag.log"; a release build has
-#     none. (An earlier marker, the crash-dump filename, stopped being diag-unique when the release
-#     fatal path gained its own crash-dump write for the crash-report dialog.) ---
+# Reject diagnostic backends: sh_diag.log is present only in diagnostic builds.
 $ascii = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($backendDll))
 if ($ascii.Contains("sh_diag.log")) {
     throw "build\XINPUT1_3.dll is a -Diag build (DO NOT DISTRIBUTE). Rebuild release with src\backend\build.ps1 (no -Diag)."
 }
 
-# --- assemble dist\ fresh ---
+# Recreate the bundle directory.
 if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
 $snapDir = Join-Path $dist "snapmap-plus"
 New-Item -ItemType Directory -Force $snapDir | Out-Null
@@ -40,7 +27,7 @@ New-Item -ItemType Directory -Force $snapDir | Out-Null
 Copy-Item $backendDll (Join-Path $dist "XINPUT1_3.dll")
 Copy-Item $uiDll      (Join-Path $snapDir "snapmap-plus-ui.dll")
 
-# --- MANIFEST.sha256 : the 2 deployable files (the installer's file list + per-file hash verify) ---
+# Record the installed paths and SHA-256 hashes.
 $files = @("XINPUT1_3.dll", "snapmap-plus\snapmap-plus-ui.dll")
 $lines = foreach ($f in $files) {
     $h = (Get-FileHash (Join-Path $dist $f) -Algorithm SHA256).Hash

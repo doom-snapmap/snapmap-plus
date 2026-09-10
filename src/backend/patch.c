@@ -1,19 +1,6 @@
-/* patch.c -- see patch.h. The reusable engine-code PATCH/DETOUR layer.
- *
- * code_patch/code_unpatch = the memcpy-to-RX primitive (port of OG FUN_180001790, from the devmode
- * code-patch decompile): VirtualProtect RWX -> write -> FlushInstructionCache ->
- * restore protection, with a verify-before-write guard and a recorded restore-handle. The detour family
- * (sh_install_detour / sh_uninstall_detour) is a thin REUSE of hook.c's already-cloned inline-detour
- * installer (OG FUN_180001850 / FUN_180001920) -- NOT reimplemented here.
- *
- * SAFETY (the whole point): the target is resolved by SIGNATURE upstream (a unique sig match verifies the
- * expected bytes are present BY CONSTRUCTION); the *_sig entry points REFUSE unless the resolve was a
- * clean unique hit (SIG_OK); code_patch additionally re-checks the caller's `expect` against the live
- * bytes; every memory touch is SEH-guarded so any fault logs + returns a clean error, never a partial
- * write. This layer installs NO engine patches -- it only builds + self-tests itself on a scratch site.
- *
- * Clean-room: ported from our own RE (the evidence + hook.c). Zero OG SnapHak bytes.
- */
+/* Guarded code patches with restore handles, plus wrappers for hook.c detours.
+ * Signature wrappers require a clean match; optional expected bytes are checked
+ * before writing. A fault during memcpy can still leave a partial write. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -36,11 +23,9 @@ const char *sh_patch_status_str(sh_patch_status s)
     }
 }
 
-/* ---- SEH-guarded memory helpers ----------------------------------------------------------------- */
+/* Guarded memory access. */
 
-/* SEH-guarded compare of `n` bytes a[] vs b[]. *match=1 if equal. Returns 1 if both ranges were
- * readable, 0 if an access violation hit during the read (then *match is meaningless). The compare is
- * inside the __try so an unreadable target page is reported as a fault, not a crash. */
+/* Return 1 if both ranges were readable, with their equality in match. */
 static int safe_memcmp(const uint8_t *a, const uint8_t *b, size_t n, int *match)
 {
     __try {
@@ -53,9 +38,7 @@ static int safe_memcmp(const uint8_t *a, const uint8_t *b, size_t n, int *match)
     }
 }
 
-/* SEH-guarded copy of `n` bytes src->dst. Returns 1 on success, 0 if a fault hit (partial copy is
- * possible on a fault, so callers only use this AFTER VirtualProtect succeeded -- a fault there means the
- * page genuinely can't be written and is reported as FAIL_SEH). */
+/* Return 0 on a memory fault; a partial copy may already have occurred. */
 static int safe_memcpy(uint8_t *dst, const uint8_t *src, size_t n)
 {
     __try {
@@ -76,7 +59,7 @@ static void hexdump(const uint8_t *buf, size_t n, char *out, size_t outcap)
     else if (!p && outcap) out[0] = '\0';
 }
 
-/* ---- code_patch / code_unpatch ----------------------------------------------------------------- */
+/* Byte patches and restoration. */
 
 sh_patch_status code_patch(void *target, const uint8_t *expect, const uint8_t *new_bytes,
                            size_t len, sh_patch_handle *out_handle)
@@ -87,9 +70,7 @@ sh_patch_status code_patch(void *target, const uint8_t *expect, const uint8_t *n
 
     uint8_t *t = (uint8_t *)target;
 
-    /* (1) verify-before-write: the caller-asserted `expect` bytes MUST currently be live at target.
-     * A mismatch means the site shifted / is already patched / is the wrong address -> REFUSE, no write.
-     * (A read fault here is also a refuse-class outcome: the page isn't what we expected.) */
+    /* Refuse before writing when expected bytes do not match. */
     if (expect) {
         int match = 0;
         if (!safe_memcmp(t, expect, len, &match)) {
@@ -111,14 +92,13 @@ sh_patch_status code_patch(void *target, const uint8_t *expect, const uint8_t *n
         }
     }
 
-    /* (2) record the originals BEFORE touching protection (so a restore-record exists even if the write
-     * faults). Read under SEH; an unreadable target aborts with no write. */
+    /* Save original bytes before changing protection or writing the patch. */
     if (!safe_memcpy(out_handle->orig, t, len)) {
         backend_log("B2: code_patch FAIL_SEH (target unreadable during orig-record) -- no write");
         return B2_PATCH_FAIL_SEH;
     }
 
-    /* (3) VirtualProtect RWX. */
+
     DWORD old = 0;
     if (!VirtualProtect(t, len, PAGE_EXECUTE_READWRITE, &old)) {
         char line[96];
@@ -128,8 +108,8 @@ sh_patch_status code_patch(void *target, const uint8_t *expect, const uint8_t *n
         return B2_PATCH_FAIL_PROTECT;
     }
 
-    /* (4) write under SEH. On a fault, restore protection and report -- the originals are already
-     * recorded so the caller could code_unpatch a partial write if it wanted, but live stays 0. */
+    /* A fault may leave partial bytes. Protection restoration is attempted, but
+     * live stays 0, so code_unpatch cannot recover this failed write. */
     int wrote = safe_memcpy(t, new_bytes, len);
     if (!wrote) {
         DWORD tmp;
@@ -140,7 +120,7 @@ sh_patch_status code_patch(void *target, const uint8_t *expect, const uint8_t *n
 
     FlushInstructionCache(GetCurrentProcess(), t, len);
 
-    /* (5) restore the original page protection. */
+
     {
         DWORD tmp;
         VirtualProtect(t, len, old, &tmp);
@@ -180,7 +160,7 @@ sh_patch_status code_unpatch(sh_patch_handle *handle)
     } else restored = safe_memcpy(t, handle->orig, handle->len);
     FlushInstructionCache(GetCurrentProcess(), t, handle->len);
 
-    /* restore the saved page protection (the one in force before the patch). */
+
     {
         DWORD tmp;
         VirtualProtect(t, handle->len, handle->old_protect, &tmp);
@@ -194,7 +174,7 @@ sh_patch_status code_unpatch(sh_patch_handle *handle)
     return B2_PATCH_OK;
 }
 
-/* ---- sig-anchored code_patch (the verify-before-write entry point) ------------------------------ */
+/* Signature-gated patch operations. */
 
 sh_patch_status code_patch_call_sig(const sig_result *r, const uint8_t expect[5],
                                     const uint8_t replacement[5], sh_patch_handle *handle)
@@ -235,9 +215,7 @@ sh_patch_status code_patch_sig(const sig_result *r, const uint8_t *expect, const
         backend_log("B2: code_patch_sig REFUSED_SIG (target not resolved) -- no write");
         return B2_PATCH_REFUSED_SIG;
     }
-    /* The verify-before-write gate: ONLY a clean unique scan hit. SIG_OK_HOOKED (the live prologue is
-     * already a detour) / anything else => the expected original bytes are NOT guaranteed present => REFUSE.
-     * A unique SIG_OK match BY CONSTRUCTION proves the fixed signature bytes are at r->addr. */
+    /* Already-hooked results do not establish intact patch bytes. */
     if (r->status != SIG_OK) {
         char line[160];
         _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -249,7 +227,7 @@ sh_patch_status code_patch_sig(const sig_result *r, const uint8_t *expect, const
     return code_patch((void *)r->addr, expect, new_bytes, len, out_handle);
 }
 
-/* ---- detour family: thin REUSE of hook.c (NOT reimplemented) ------------------------------------ */
+/* Inline detour wrappers. */
 
 void *sh_install_detour(void *target, void *detour, size_t stolen)
 {
@@ -285,17 +263,10 @@ void *sh_install_detour_sig(const sig_result *r, void *detour, size_t stolen)
     return tramp;
 }
 
-/* ---- in-DLL self-test (scratch site only; NO engine side effects) ------------------------------- */
+/* Scratch-memory patch checks. */
 
-/* The scratch target is a small RX stub with a KNOWN byte pattern -- a position-independent function we
- * can call through to confirm a patch took effect.
- *
- * int scratch(void): return 0x11;
- *   B8 11 00 00 00   mov eax, 0x11      (5)
- *   C3               ret                (1)
- * We patch the imm32 (offset 1..4) from 0x11 to 0x22 so a call-through returns the NEW value -- proof the
- * patch executes -- then unpatch and confirm it returns 0x11 again. Padding NOPs round the stub out so a
- * patch window never runs past the meaningful bytes. */
+/* This stub returns 0x11. Change its immediate to 0x22 and restore it, checking
+ * calls as well as bytes. Handwritten code keeps the patch window deterministic. */
 static const uint8_t SCRATCH_CODE[] = {
     0xB8, 0x11, 0x00, 0x00, 0x00,   /* mov eax, 0x11 */
     0xC3,                           /* ret */
@@ -307,7 +278,7 @@ int sh_patch_selftest(void)
 {
     typedef int (*scratch_fn)(void);
     char line[224];
-    char whybuf[160];             /* detailed FAIL detail (kept SEPARATE from `line` to avoid aliasing) */
+    char whybuf[160];             /* Keep diagnostic scratch separate from the destination log buffer. */
     const char *why = "not run";
 
     uint8_t *stub = (uint8_t *)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE,
@@ -322,13 +293,13 @@ int sh_patch_selftest(void)
 
     int ok = 0;
 
-    /* baseline: the known pattern returns 0x11. */
+
     if (fn() != 0x11) {
         why = "baseline scratch wrong";
         goto done;
     }
 
-    /* (1) POSITIVE: code_patch the imm32 0x11 -> 0x22 with a MATCHING expect. */
+    /* Matching expected bytes permit the patch. */
     {
         const uint8_t expect[4]   = { 0x11, 0x00, 0x00, 0x00 };
         const uint8_t newbytes[4] = { 0x22, 0x00, 0x00, 0x00 };
@@ -340,12 +311,12 @@ int sh_patch_selftest(void)
             why = whybuf;
             goto done;
         }
-        /* call through -> the patched value must execute. */
+
         if (fn() != 0x22) { why = "patch did not take (call-through != 0x22)"; goto done; }
-        /* read back -> the bytes must be the new pattern. */
+
         if (stub[SCRATCH_PATCH_OFF] != 0x22) { why = "patch readback wrong"; goto done; }
 
-        /* (1b) code_unpatch -> the original must be restored. */
+
         sh_patch_status us = code_unpatch(&h);
         if (us != B2_PATCH_OK || h.live) {
             _snprintf_s(whybuf, sizeof whybuf, _TRUNCATE,
@@ -357,10 +328,9 @@ int sh_patch_selftest(void)
         if (stub[SCRATCH_PATCH_OFF] != 0x11) { why = "restore readback wrong"; goto done; }
     }
 
-    /* (2) NEGATIVE: code_patch with an expect that does NOT match the (now-restored) scratch bytes.
-     * The verify-before-write guard must REFUSE -- no write, status REFUSED_VERIFY, bytes untouched. */
+    /* Mismatched expected bytes must refuse the patch without modifying the stub. */
     {
-        const uint8_t wrong_expect[4] = { 0xAA, 0xBB, 0xCC, 0xDD };   /* not what's live (0x11 00 00 00) */
+        const uint8_t wrong_expect[4] = { 0xAA, 0xBB, 0xCC, 0xDD };
         const uint8_t newbytes[4]     = { 0x33, 0x00, 0x00, 0x00 };
         sh_patch_handle h;
         sh_patch_status st = code_patch(stub + SCRATCH_PATCH_OFF, wrong_expect, newbytes, 4, &h);
@@ -371,7 +341,7 @@ int sh_patch_selftest(void)
             goto done;
         }
         if (h.live) { why = "negative test produced a live handle"; goto done; }
-        /* prove NO write happened: bytes + call-through still the original. */
+
         if (stub[SCRATCH_PATCH_OFF] != 0x11) { why = "negative test wrote bytes (should refuse)"; goto done; }
         if (fn() != 0x11) { why = "negative test altered behavior (should refuse)"; goto done; }
     }

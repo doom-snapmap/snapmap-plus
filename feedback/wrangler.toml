@@ -1,5 +1,4 @@
-# feedback/wrangler.toml -- deploy config for the feedback relay (see worker.js + README.md).
-# Deploy from this directory: npx wrangler deploy
+# Feedback Worker deployment settings. See README.md for setup.
 name = "snapmap-plus-feedback"
 main = "worker.js"
 compatibility_date = "2026-07-01"

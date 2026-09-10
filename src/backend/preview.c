@@ -1,6 +1,6 @@
-/* preview.c -- see preview.h. The asset-preview transport and nothing else: request staging, RGBA ->
- * PNG -> base64 data URI, and the cross-thread handoff to the UI. No engine calls, no detours, no
- * renderer state; this file is pure CPU and links against nothing but the CRT and Win32. */
+/* Asset-preview request staging, PNG/base64 encoding and cross-thread
+ * delivery. This module uses only CPU work, the CRT and Win32.
+ */
 
 #include <windows.h>
 #include <limits.h>
@@ -10,18 +10,15 @@
 #include "preview.h"
 #include "backend_log.h"
 
-/* ---- published image -------------------------------------------------------------------------------
- * The producer publishes one buffer and the UI consumes it through iface ext 13. The same lock
- * serializes publish, probe, consume, and request invalidation, so the backend releases the encoded
- * asset as soon as its one consumer has copied it instead of retaining a duplicate indefinitely. */
+/* One published buffer, consumed through iface ext 13. A shared lock
+ * serializes publication, probing, consumption and invalidation; release the
+ * buffer after its successful copy.
+ */
 static char          *g_preview_b64   = NULL;
 static volatile LONG  g_preview_ready = 0;
 static SRWLOCK        g_preview_lock  = SRWLOCK_INIT;
 
-/* ---- staged request --------------------------------------------------------------------------------
- * Written by the UI thread in sh_preview_request, read by the producer in sh_preview_take_request. Held
- * under the same lock as the image: contention is negligible (one write per user click) and one lock is
- * one fewer ordering rule to get wrong. */
+/* Stage requests under the same lock as published images. */
 static char           g_requested[512] = { 0 };
 static int            g_requested_kind = SH_PREVIEW_KIND_AUTO;
 static volatile LONG  g_request_gen    = 0;
@@ -122,17 +119,10 @@ int sh_preview_publish(unsigned long generation, const unsigned char *rgba, unsi
     if (!generation || !rgba || w == 0 || h == 0) return SH_PREVIEW_FAILED;
 
     __try {
-        /* PNG, not BMP, and the reason is load-bearing: a 24bpp BMP has nowhere to put ALPHA.
-         * Many DOOM assets are a flat white RGB plane with the entire image carried in the alpha
-         * channel -- GUI icons, decals, POI markers. Encoded as BMP those arrive as a solid white
-         * square, which reads as "the decoder failed" when in fact the decode was perfect and the
-         * ENCODER threw the answer away. (Observed live 2026-08-03: snap_talk_poi blank while
-         * snap_poi_dope_fish, which has real colour, was fine.)
-         *
-         * No compressor is needed. PNG's IDAT is a zlib stream, and DEFLATE permits STORED
-         * (uncompressed) blocks, so this emits a valid zlib stream with zero compression: a 2-byte
-         * header, stored blocks of at most 65535 bytes, and an Adler-32. Every chunk gets a CRC-32.
-         * Slightly larger than a BMP; correct, which the BMP was not. */
+        /* Use RGBA PNG so icons and decals retain their alpha channel. Encode
+         * zlib with stored DEFLATE blocks of at most 65535 bytes and an
+         * Adler-32; each PNG chunk also has a CRC-32.
+         */
         if ((size_t)w > ((size_t)-1 - 1u) / 4u) return SH_PREVIEW_FAILED;
         const size_t raw_stride = (size_t)w * 4u + 1u;        /* +1 = per-scanline filter byte */
         if ((size_t)h > (size_t)-1 / raw_stride) return SH_PREVIEW_FAILED;

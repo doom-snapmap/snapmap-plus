@@ -1,18 +1,6 @@
-/* typeinfo.c -- see typeinfo.h. The type-introspection console commands
- * (cs_fieldinfo, sh_type). Ports of OG XINPUT1_3 FUN_180021db0 / FUN_180021090.
- *
- * Both handlers share sh_commands' console ABI (idCmdArgs / cmd_argv / sh_printf) + the SEH byte-copy
- * (sh_safe_read) via commands.h, so there is ONE Printf wrapper + ONE safe-read across the whole command
- * surface. sh_type's clipboard copy reuses sh_clipboard_set (cs_fieldinfo does NOT copy). The reflection
- * deps (the declMgr accessor, reached through the signed "declmgr_accessor" anchor, + vtable+0x80,
- * FindTypeInfoByName, FindEnumByName) are resolved/cached by sh_typeinfo_install.
- *
- * Every engine deref is SEH-guarded and non-null gated -- a wrong/shifted build offset degrades to a clean
- * printed error, never a crash. Both field/enum walks carry an iteration CAP so a non-terminating (never-
- * NULL-name) garbage record cannot spin forever, mirroring sh_commands' LISTRES_COUNT_CAP discipline.
- *
- * Clean-room: ported from our own RE (the foundation report). Zero OG SnapHak bytes.
- */
+/* Reflection queries for console output, class/inherit validation, and asset metadata.
+ * Dependencies resolve at installation. Guarded, bounded record walks return
+ * unavailable or partial results when engine data cannot be read. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -21,92 +9,64 @@
 #include "commands.h"
 #include "clipboard.h"
 #include "backend_log.h"
-#include "engine_globals.h"  /* glb_resolve -- signs the code site that computes a data global's address */
-#include "class_universe.h"  /* SH_CLASS_UNIVERSE[] -- the dropdown candidate list for sh_validclasses */
+#include "engine_globals.h"
+#include "class_universe.h"
 
-/* ------------------------------------------------------------------------ engine fn typedefs ------ */
+/* Engine call contracts. */
 
-/* The declMgr accessor. NOT a trivial `mov rax,[rip+x]; ret` -- the engine bytes there are a real lazy-init
- * singleton accessor (`53 48 83 EC 30 48 C7 44 24 20 FE FF FF FF ...`: push rbx; sub rsp,0x30; SEH cookie
- * slot; lazy-init the declMgr singleton; return its ptr in RAX). Its fixed prologue is shared by ~47 .text
- * functions and only becomes unique via the build-volatile RIP displacement -- which is WHY its own bytes
- * are not signature-able (a stable sig can't pin the volatile disp).
- *
- * So we sign a CALL SITE instead and decode the rel32: engine_globals' "declmgr_accessor" entry. That is
- * portable in exactly the way the raw RVA was not -- the caller's bytes are stable across both shipped
- * builds, and the displacement tells us where the callee sits on THIS one. 0-arg, returns declMgr in RAX. */
+/* Decode the decl-manager accessor from a signed call site. Its own lazy-init
+ * prologue is shared by other functions, so a prologue-only pattern is ambiguous. */
 typedef void *(*declmgr_getter_fn)(void);
-#define DECLMGR_ACCESSOR_KNOWN_RVA  0x17F7030u   /* the accessor's RVA on the pinned Vulkan build -- kept for
-                                                  * audit and per-build re-derivation, no longer used to
-                                                  * locate anything (glb_resolve does that now). */
+#define DECLMGR_ACCESSOR_KNOWN_RVA  0x17F7030u   /* Pinned Vulkan audit reference only; resolved through a signed call site. */
 
-/* declMgr -> reflection/type-info manager: vtable slot +0x80 (the reflection accessor; matches
- * the reference implementation declMgr.readPointer().add(0x80).readPointer()). __fastcall(self) -> reflect. */
+/* Decl-manager vtable +0x80 returns its reflection context. */
 #define VSLOT_REFLECT_ACCESSOR  0x80
 
-/* FindTypeInfoByName(reflect, name, scope=0) -> the type record (sig "FindTypeInfoByName" 0x1A1D590).
- * Ghidra labels it void(longlong*,char*,char*) -- a DECOMPILER MISS (the recursive %s::%s scope lookup
- * defeats return-register recovery); the live caller FUN_1409c79d0 PROVES a non-void record return. We
- * call it 3-arg returning rec*; rec==NULL means "not found" (sh_type then falls through to FindEnumByName). */
+/* Three-argument type lookup returns a record, despite a void decompiler label.
+ * Caller 0x9C79D0 consumes the result; NULL means the type was not found. */
 typedef void *(*find_typeinfo_fn)(void *reflect, const char *name, void *scope);
-/* FindEnumByName(reflect, name) -> the enum record (sig "FindEnumByName" 0x1A1DA20). Cleanly returns the
- * record (return recovered). enumRec==NULL => "Couldn't find type". */
+
 typedef void *(*find_enum_fn)(void *reflect, const char *name);
 
-/* --------------------------------------------------------------- field/enum record sub-offsets ----
- * SHARED record (cs_fieldinfo + sh_type CLASS branch). CONFIRMED LIVE (FUN_1409c79d0): field array @
- * rec+0x20, stride 0x48, name @ field+0x10. OG-handler-only (BUILD-SPECIFIC, live-confirm at FIRE):
- * offset @ +0x18, size @ +0x1c, varType @ +0x00, varOps @ +0x08, comment @ +0x28.
- *
- * The CLASS-branch per-field render reads THREE strings (re-derived against OG FUN_180021090's field
- * loop, its decompile L240-253 + the two fmt literals @0x374e0/0x37518):
- *   field+0x00 = varType (the PRIMARY type string -- OG `pcVar13 = *puVar5`, always the 1st %s)
- *   field+0x08 = varOps  (the pointer/array qualifier -- the strstr("*") target, OG `puVar5[1]`)
- *   field+0x10 = varName (OG `puVar5[2]`, also the loop terminator)
- * matching the engine's idlib schema idTypeInfoTools field-metadata (..,varType,varOps,varName,..).
- * cs_fieldinfo never touches +0x00/+0x08 -- it only needs name/offset/size. */
-#define REC_FIELDS_OFF      0x20    /* type record -> field array base (CONFIRMED LIVE) */
-#define REC_SUPER_OFF       0x08    /* type record -> superclass name char* (sh_type; OG-only) */
-#define FIELD_STRIDE        0x48    /* field-record stride (CONFIRMED LIVE) */
-#define FIELD_NAME_OFF      0x10    /* field -> varName char* (CONFIRMED LIVE; loop terminator on NULL/empty) */
-#define FIELD_OFFSET_OFF    0x18    /* field -> offset (uint) (OG-only, BUILD-SPECIFIC) */
-#define FIELD_SIZE_OFF      0x1c    /* field -> size   (uint) (OG-only, BUILD-SPECIFIC) */
-#define FIELD_VARTYPE_OFF   0x00    /* field -> varType char* (primary type; OG arg1, always printed) */
-#define FIELD_VAROPS_OFF    0x08    /* field -> varOps  char* (qualifier; the strstr("*") target) */
-#define FIELD_COMMENT_OFF   0x28    /* field -> comment char* (OG-only, BUILD-SPECIFIC) */
+/* Reflection field layout. Array@record+0x20, stride 0x48, and name@field+0x10
+ * were checked against engine caller 0x9C79D0. Remaining fields came from the
+ * original command metadata and require rechecking when porting builds. */
+#define REC_FIELDS_OFF      0x20    /* type record -> field array */
+#define REC_SUPER_OFF       0x08    /* superclass name; original-command evidence */
+#define FIELD_STRIDE        0x48    /* field-record stride */
+#define FIELD_NAME_OFF      0x10    /* field name; NULL or empty terminates */
+#define FIELD_OFFSET_OFF    0x18    /* field offset; original-command evidence */
+#define FIELD_SIZE_OFF      0x1c    /* field size; original-command evidence */
+#define FIELD_VARTYPE_OFF   0x00    /* primary type string */
+#define FIELD_VAROPS_OFF    0x08    /* pointer/array qualifier */
+#define FIELD_COMMENT_OFF   0x28    /* field comment; original-command evidence */
 
-/* ENUM-member record (sh_type ENUM branch). CONFIRMED LIVE (FUN_140440230): members array @ enumRec+0x10,
- * stride 0x10, member name @ +0, value(uint) @ +8. OG-handler-only: enum NAME @ enumRec+0x00. */
-#define ENUM_NAME_OFF       0x00    /* enum record -> enum NAME char* (OG-only, BUILD-SPECIFIC) */
-#define ENUM_MEMBERS_OFF    0x10    /* enum record -> members array base (CONFIRMED LIVE) */
-#define ENUM_MEMBER_STRIDE  0x10    /* enum-member stride (CONFIRMED LIVE) */
-#define EMEMBER_NAME_OFF    0x00    /* member -> name char* (CONFIRMED LIVE; loop terminator on NULL) */
-#define EMEMBER_VALUE_OFF   0x08    /* member -> value (uint) (CONFIRMED LIVE) */
+/* Enum array/stride/member fields follow engine caller 0x440230.
+ * The enum record name offset has original-command evidence only. */
+#define ENUM_NAME_OFF       0x00    /* enum name; original-command evidence */
+#define ENUM_MEMBERS_OFF    0x10    /* member array */
+#define ENUM_MEMBER_STRIDE  0x10    /* enum-member stride */
+#define EMEMBER_NAME_OFF    0x00    /* member name; NULL terminates */
+#define EMEMBER_VALUE_OFF   0x08    /* unsigned member value */
 
-/* Iteration CAP -- a never-terminating (garbage / shifted) record must not spin forever. Both the field
- * walk and the enum walk bound their loops by this (same stale-record discipline as LISTRES_COUNT_CAP). */
+/* Bound unterminated field and enum records. */
 #define TI_WALK_CAP   4096u
 
-/* sh_type's accumulation buffer (the OG writes a fixed 0x800 stack buffer per Printf; we accumulate the
- * whole dump into one fixed buffer + copy it to the clipboard, like sh_spawninfo's 0x800 buf). */
+/* Collect one bounded dump for both console output and clipboard copy. */
 #define TI_DUMP_CAP   0x4000
 
-/* ------------------------------------------------------------------------- module state ----------- */
+/* Cached dependencies. */
 
-/* The engine primitives the two decl-find call sites share. Hoisted to file scope so the resolved
- * addresses can be cached once at install instead of being rebuilt from an RVA at every call. */
-typedef void *(*decl_find_fn)(void *ctx, const char *name);   /* FUN_141800a40 calls it with 2 args */
-typedef int   (*dim_fn)(void *material);                      /* idMaterial width/height getters */
 
-static const uint8_t   *g_doom_base    = NULL;   /* host DOOM image base */
-static find_typeinfo_fn g_find_type    = NULL;   /* FindTypeInfoByName (sig 0x1A1D590) */
-static find_enum_fn     g_find_enum    = NULL;   /* FindEnumByName     (sig 0x1A1DA20) */
-static volatile LONG    g_installed    = 0;      /* one-shot install latch */
+typedef void *(*decl_find_fn)(void *ctx, const char *name);
+typedef int   (*dim_fn)(void *material);
 
-/* Everything below is resolved ONCE by sh_typeinfo_install and is NULL when this build could not be
- * served. Each user checks its own dependency and declines; none of them falls back to a pinned RVA,
- * because on the other shipped executable these globals sit ~0xE00000-0x1000000 away and the literal
- * would name unrelated memory that no caller could tell apart from the real thing. */
+static const uint8_t   *g_doom_base    = NULL;
+static find_typeinfo_fn g_find_type    = NULL;
+static find_enum_fn     g_find_enum    = NULL;
+static volatile LONG    g_installed    = 0;
+
+/* Unresolved dependencies stay NULL; consumers decline rather than use raw RVAs. */
 static declmgr_getter_fn g_declmgr_getter   = NULL;   /* glb "declmgr_accessor" (a CODE address) */
 static const uint8_t    *g_validator_mgr    = NULL;   /* glb "validator_manager" (slot; deref lazily) */
 static void             *g_resource_mgr_ctx = NULL;   /* glb "resource_manager_ctx" (the object itself) */
@@ -116,12 +76,7 @@ static decl_find_fn      g_decl_find        = NULL;   /* sig "DeclPureFind" */
 static dim_fn            g_material_width   = NULL;   /* sig "MaterialWidth" */
 static dim_fn            g_material_height  = NULL;   /* sig "MaterialHeight" */
 
-/* ----------------------------------------------------------- SHARED declMgr-object accessor -------
- * Returns the raw declMgr singleton object (SEH-guarded). NON-static: sh_superscriptop [12] in commands.c
- * REUSES this to reach the engine event-manager (declMgr vtable slot +0x90 -> evMgr) -- it shares
- * sh_typeinfo's ONE declMgr accessor rather than resolving it again. NULL if the accessor did not resolve
- * on this build (we do NOT call a pinned address speculatively -- that is a CALL, not a read) or on any
- * fault; every caller degrades to "type manager unavailable". */
+/* Shared guarded accessor for reflection, apply, and event-manager consumers. */
 void *sh_typeinfo_get_declmgr(void)
 {
     if (!g_declmgr_getter) return NULL;
@@ -132,18 +87,16 @@ void *sh_typeinfo_get_declmgr(void)
     }
 }
 
-/* ------------------------------------------------------------- SEH-guarded reflection helpers -----
- * declMgr accessor -> declMgr; reflect = (*(*declMgr + 0x80))(declMgr). A wrong accessor RVA, a NULL
- * declMgr, or a wrong vtable slot degrades to NULL (the handler then prints "type manager unavailable"). */
+/* Reach reflection through declMgr vtable +0x80; return NULL on failure. */
 static void *ti_get_reflect(void)
 {
     void *declmgr = sh_typeinfo_get_declmgr();
     if (!declmgr) return NULL;
     __try {
-        const uint8_t *vtbl = *(const uint8_t * const *)declmgr;      /* *declMgr = the vtable */
+        const uint8_t *vtbl = *(const uint8_t * const *)declmgr;
         if (!vtbl) return NULL;
         typedef void *(*reflect_fn)(void *self);
-        reflect_fn fn = *(reflect_fn const *)(vtbl + VSLOT_REFLECT_ACCESSOR);  /* vtable[+0x80] */
+        reflect_fn fn = *(reflect_fn const *)(vtbl + VSLOT_REFLECT_ACCESSOR);
         if (!fn) return NULL;
         return fn(declmgr);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -151,16 +104,9 @@ static void *ti_get_reflect(void)
     }
 }
 
-/* ----------------------------------------------------- decl-type instance enumerator (Timeline combo) -
- * Pack the decl-instance NAMES of a decl-type into out_buf (consecutive NUL-terminated strings, double-NUL
- * end -- the SAME packed-string ABI the +0x110 slot_enum_decls_of_resclass returns). The Timeline-Editor's
- * decl comboboxes use THIS, not engine GetDeclsOfType: GetDeclsOfType is the engine's ASSET registry
- * (idImage/idMD6Anim/...) and LOGS "Unknown resource class '%s'" on a decl-type miss (the console spam).
- * The non-logging path (OG XINPUT +0x100 FUN_180006eb0): reflect = declMgr->[+0x80]; node = FindByName
- * (g_find_enum = engine 0x1A1DA20, a hash lookup that returns 0 SILENTLY on a miss); the decl instances are
- * at *(node+0x10) -- {name-char-ptr, _} pairs, stride 0x10, terminated by a NULL name. Returns 1 + *out_count
- * on >=1 name, else 0. SEH-guarded + TI_WALK_CAP-bounded: a miss / shifted node degrades to a clean 0 -- no
- * log, no crash (the frontend then leaves the combo editable, faithful to the OG miss branch). */
+/* Enumerate decl-type instance names through reflection's silent enum lookup.
+ * GetDeclsOfType serves asset classes and logs errors for these names. Pack
+ * NUL-separated strings with a double-NUL terminator; preserve partial output. */
 int sh_typeinfo_enum_decls_of_type(const char *declType, char *out_buf, int cap, int *out_count)
 {
     if (out_count) *out_count = 0;
@@ -176,10 +122,10 @@ int sh_typeinfo_enum_decls_of_type(const char *declType, char *out_buf, int cap,
 
     int written = 0, names = 0;
     __try {
-        void **list = *(void ***)((const uint8_t *)node + 0x10);   /* *(node+0x10) = the instance list */
+        void **list = *(void ***)((const uint8_t *)node + 0x10);
         for (uint32_t i = 0; list && i < TI_WALK_CAP; i++) {
-            const char *nm = (const char *)list[(size_t)i * 2];     /* {name,_} pairs -> stride 0x10 (2 qwords) */
-            if (!nm) break;                                          /* NULL name terminates the list */
+            const char *nm = (const char *)list[(size_t)i * 2];
+            if (!nm) break;
             int nlen = (int)strlen(nm);
             if (nlen <= 0 || nlen > 250) continue;
             if (written + nlen + 1 > cap - 1) break;
@@ -234,31 +180,14 @@ static int ti_read_u32(const void *base, size_t off, uint32_t *out)
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-/* ------------------------------------------------------- LAYER C: class-lineage compatibility check ----
- * Does `className` derive from (or equal) `baseName`, walking the engine type hierarchy BY NAME -- the SAME
- * walk the engine's decl validator does (the decompiled FUN_141a201d0: FindTypeInfoByName -> the superclass
- * name @ rec+0x08, up the chain until baseName is found or the chain ends). The bscls/bsin prevention guard
- * (iface_engine.c) calls this to REJECT an incompatible class change UP FRONT -- before the engine's decl
- * reparse raises the fatal "Class X does not derive from Y" Error(6), which an INNER engine handler catches
- * before idCommonLocal::Frame so the fault-shield cannot recover it (prevent-not-recover,
- * error-dispatcher-and-recovery.md).
- * Returns: 1 = derives, 0 = does NOT derive (incl. an UNRESOLVABLE className -- the engine validator treats
- * an unknown class as "does not derive" too), -1 = type system UNAVAILABLE (reflect NULL; the caller must
- * NOT reject on -1, only on a definite 0). Bounded (64 levels) + SEH-guarded (via the ti_* helpers). */
-/* The decl-VALIDATOR's reflection context: manager = *(the "validator_manager" slot, 0x4DF9648 on the
- * pinned build); reflect = manager->vtable[+0x240](manager).
- * The validator (FUN_141a201d0 -> FUN_141a1d590 = FindTypeInfoByName) walks types via THIS
- * reflect -- which resolves the SnapMap entity classes (logic_base / idSnapMapUserFilter) that the
- * declMgr->[+0x80] reflect sh_typeinfo's sh_type uses MISSES. RE'd from the validator disasm: the
- * `mov rcx,[rip+0x364bf48]` @ 0x17ad6f9 resolves to 0x17ad700 + 0x364bf48 = 0x4DF9648 (the live decl/
- * resource manager -- ~100 code xrefs). NOTE: the earlier 0x3BF8648 here was an arithmetic error (ZERO
- * xrefs -> NULL at runtime -> this getter returned NULL and the guard silently used the ti_get_reflect
- * fallback). The manager slot is located by the signed "validator_manager" anchor rather than the literal;
- * the vtable slot is still build-specific -> SEH-guarded; NULL on an unresolved anchor or any fault (caller
- * falls back to ti_get_reflect). */
-#define VALIDATOR_MGR_RVA         0x4DF9648u   /* the manager slot's RVA on the pinned Vulkan build -- kept for
-                                                * audit and per-build re-derivation, no longer used to locate
-                                                * anything (glb_resolve("validator_manager") does that). */
+/* Walk superclass names, matching the decl validator. Reject definite mismatch
+ * before reparse: its Error(6) is caught inside the engine, beyond frame recovery.
+ * Return 1 for a match, 0 for mismatch/unknown type, or -1 when reflection is
+ * unavailable; callers must not reject solely on -1. Walk at most 64 ancestors. */
+/* The validator uses manager vtable +0x240, which includes SnapMap classes
+ * missed by declMgr +0x80. Resolve the manager slot through its global anchor;
+ * fall back to the decl-manager context when unavailable. */
+#define VALIDATOR_MGR_RVA         0x4DF9648u   /* Pinned Vulkan audit reference; the global anchor locates the slot. */
 #define VSLOT_VALIDATOR_REFLECT   0x240
 static void *ti_get_validator_reflect(void)
 {
@@ -283,37 +212,25 @@ int sh_typeinfo_class_derives(const char *className, const char *baseName)
     if (!reflect) return -1;
     const char *cur = className;
     for (int i = 0; i < 64 && cur && cur[0]; i++) {
-        if (strcmp(cur, baseName) == 0) return 1;          /* baseName found in the ancestry chain */
+        if (strcmp(cur, baseName) == 0) return 1;
         void *rec = ti_find_type(reflect, cur);
-        if (!rec) return 0;                                /* `cur` is not a known type -> it cannot derive
-                                                            * from baseName (the engine validator treats an
-                                                            * unresolvable class as "does not derive" too).
-                                                            * reflect==NULL already returned -1 above, so this
-                                                            * NULL means the type genuinely is not found. */
-        cur = ti_read_cstr(rec, REC_SUPER_OFF);            /* rec+0x08 = the superclass name (walk up) */
+        if (!rec) return 0;                                /* An unknown class cannot establish ancestry. */
+        cur = ti_read_cstr(rec, REC_SUPER_OFF);
     }
-    return 0;                                              /* chain exhausted without baseName */
+    return 0;
 }
 
-/* Resolve the inherit decl's base class name Y -- the class an entity's className MUST derive from for the
- * engine decl validator to accept it. Via the engine's PURE decl find (FUN_1418017a0: read-lock -> hash ->
- * probe -> cached-decl-or-NULL -> unlock; NO load/parse/global-mutation/INT3 -- verified DIRECT, vs the
- * load-or-create FUN_1417b36f0 the validator uses, which has FatalError+INT3 traps and is NOT safe to call)
- * over the resource-mgr ctx, then idDeclEntityDef.className @ +0x60 (the validator's
- * vtbl+0xb0 = `return *(this+0x60)`). The inherit decl is already loaded (the entity exists), so the pure
- * find returns it. The ctx now comes from the signed "resource_manager_ctx" anchor and the find from the
- * "DeclPureFind" signature, so neither is an address we wrote down. SEH-guarded: an unresolved dependency,
- * any fault, or a not-found inherit -> NULL (caller fail-opens). Copies Y into buf; returns buf or NULL. */
-#define RESOURCE_MGR_CTX_RVA   0x59BD8F0u   /* the resource-mgr ctx object's RVA on the pinned Vulkan build
-                                             * (validator lea @ 0x17ad682) -- audit / re-derivation only. */
-#define DECL_PURE_FIND_RVA     0x18017A0u   /* FUN_1418017a0(ctx,name) -> cached decl-or-NULL (pure hash find);
-                                             * its RVA on the pinned Vulkan build -- audit only, it is signed. */
+/* Find the inherit declaration through the read-only hash lookup, then copy
+ * className@+0x60. Avoid load-or-create: unresolved names can trigger engine
+ * fatal paths there. Return NULL if unavailable; the compatibility guard then opens. */
+#define RESOURCE_MGR_CTX_RVA   0x59BD8F0u   /* Pinned Vulkan audit reference from the validator call site. */
+#define DECL_PURE_FIND_RVA     0x18017A0u   /* Pinned Vulkan audit reference; DeclPureFind resolves the function. */
 #define DECL_CLASSNAME_OFF     0x60u        /* idDeclEntityDef.className char* (vtbl+0xb0 = return *(this+0x60)) */
 const char *sh_typeinfo_inherit_base(const char *inheritName, char *buf, size_t cap)
 {
     if (buf && cap) buf[0] = '\0';
     if (!inheritName || !inheritName[0] || !buf || cap < 2) return NULL;
-    if (!g_resource_mgr_ctx || !g_decl_find) return NULL;   /* unserved build -- decline, never guess */
+    if (!g_resource_mgr_ctx || !g_decl_find) return NULL;
     __try {
         void *decl = g_decl_find(g_resource_mgr_ctx, inheritName);
         if (!decl) return NULL;
@@ -324,8 +241,7 @@ const char *sh_typeinfo_inherit_base(const char *inheritName, char *buf, size_t 
     } __except (EXCEPTION_EXECUTE_HANDLER) { buf[0] = '\0'; return NULL; }
 }
 
-/* idDeclEntityDef contains its resolved text idStr at +0x130, whose data pointer is +0x10 within
- * that idStr. This is the same +0x140 read used by sh_dumpdef after it reaches an entity's decl. */
+/* Resolved-text idStr@+0x130 has its data pointer at +0x140. */
 #define DECL_RESOLVED_TEXT_OFF 0x140u
 #define DECL_RESOLVED_TEXT_CAP (4u * 1024u * 1024u)
 
@@ -395,7 +311,7 @@ int sh_typeinfo_inherit_model(const char *inheritName, char *buf, size_t cap)
 {
     if (buf && cap) buf[0] = '\0';
     if (!inheritName || !inheritName[0] || !buf || cap < 2) return 0;
-    if (!g_resource_mgr_ctx || !g_decl_find) return 0;      /* unserved build -- decline, never guess */
+    if (!g_resource_mgr_ctx || !g_decl_find) return 0;
     __try {
         const uint8_t *decl = (const uint8_t *)g_decl_find(g_resource_mgr_ctx, inheritName);
         if (!decl) return 0;
@@ -408,112 +324,25 @@ int sh_typeinfo_inherit_model(const char *inheritName, char *buf, size_t cap)
     } __except (EXCEPTION_EXECUTE_HANDLER) { buf[0] = '\0'; return 0; }
 }
 
-/* -------------------------------------------------- MATERIAL decl-find ------------------------------------
- * Resolves a MATERIAL decl by name using the SAME pure decl-find primitive as sh_typeinfo_inherit_base
- * above (DECL_PURE_FIND_RVA -- read-lock -> hash -> probe -> cached-decl-or-NULL -> unlock; no load/parse/
- * FatalError trap), pointed at the MATERIAL type-manager's own ctx instead of the entityDef resource-mgr's.
- *
- * MATERIAL_MGR_CTX_RVA comes from the live `idSWFSpriteInstance::material` setter's own decl-find
- * call (image base 0x140000000, address 0x1459bd9d0 => RVA 0x59BD9D0). Reusing
- * DECL_PURE_FIND_RVA against this different ctx is an ASSUMPTION that the pure-find primitive generalizes
- * across resource-manager instances of the same shape -- corroborated (not proven) by the material ctx
- * sitting only 0xE0 bytes from RESOURCE_MGR_CTX_RVA (0x59BD8F0), suggestive of a common per-decl-type
- * context table. SEH-guarded either way: a wrong assumption degrades to "not found", never a crash.
- *
- * CORRECTED 2026-07-30 by live in-game test (user): this is NOT a "cached-only, session-so-far" lookup as
- * first assumed here -- it resolves ANY of the shipped material decls (the full ~9,805-entry catalog),
- * with no placement/rendering/prior use required, while a genuinely made-up name still correctly reports
- * "not found" (confirmed with a negative-control test). The likely reason: material DECLS (unlike the GPU
- * image data they may reference) are cheap text metadata the engine registers into the type manager's hash
- * table for the whole catalog at boot, independent of whether any given material has actually been drawn
- * yet -- so "pure find" here means "is this decl NAME known to the registry", not "has this material's
- * resource been loaded". This is materially better than first thought: the resolve step already covers the
- * full asset index, not just an in-use subset. Still NOT the load-or-create primitive at FUN_1417b36f0,
- * which has FatalError/INT3 traps on a miss -- no reason to touch that now that the pure find already
- * covers the whole catalog.
- *
- * On a hit, ALSO best-effort calls the engine's own materialWidth/materialHeight getters (the same two
- * functions the SWF native vars `materialWidth`/`materialHeight` call at RVAs 0xD75D40 / 0xD75B40) on
- * the resolved idMaterial*, rather than reimplementing their
- * branchy fallback logic ourselves. A dimension-read fault degrades to "found" with no dimensions, never a
- * crash -- the decl-find result is the useful part either way. CONFIRMED live (2026-07-30, user): the
- * reported dimensions vary sensibly across materials (4096x4096 down to very small) -- real per-material
- * image metadata, not a fixed fallback value, even for materials never placed/rendered this session. Safe
- * to use for real dimension data, not just as a found/not-found signal. */
-/* All three are the pinned Vulkan build's RVAs, kept for audit and per-build re-derivation and no longer
- * used to locate anything: the ctx comes from the signed "material_manager_ctx" anchor, and the two getters
- * from the "MaterialWidth" / "MaterialHeight" signatures. */
+/* Use the read-only declaration lookup with the material-manager context.
+ * Shipped material names are available before rendering; this does not imply
+ * their GPU images are resident. Dimension getters are best effort. */
+/* Pinned Vulkan audit references; all three addresses resolve by signature. */
 #define MATERIAL_MGR_CTX_RVA    0x59BD9D0u  /* material type-manager context from the material setter */
 #define MATERIAL_WIDTH_FN_RVA   0xD75D40u   /* verified idMaterial width getter                       */
 #define MATERIAL_HEIGHT_FN_RVA  0xD75B40u   /* verified idMaterial height getter                      */
 
-/* Structural probe only (2026-07-30) -- reads two more pointer hops WITHOUT touching Vulkan/GPU state, to
- * confirm the offsets before any capture code is written. Traced from `idVirtualTexture::SetSource`
- * (FUN_140E11C50): a VMTR-backed material's `+0x170` field (the SAME
- * one the width/height getters above already read) is an `idVirtualTexture*`, and that object keeps an
- * ALWAYS-RESIDENT low-res fallback texture -- a genuine `idImage` (built through ScratchImage /
- * idImage_Vulkan_PC, name-suffixed "_minlod", with its own
- * FatalError check on allocation failure) -- at a fixed offset on the idVirtualTexture object.
- * MATERIAL_VTEX_OFF is the SAME offset the width/height getters dereference (0x170); VTEX_MINLOD_IMAGE_OFF
- * is DIRECT from SetSource's own `ScratchImage(..., "..._minlod", ...)` call site writing to `this+0x3F0`.
- * This is INFERRED to generalize (SetSource's `this` and the getter's `*(material+0x170)` write/read the
- * SAME header-derived field at the SAME +0x20 offset, which is the corroborating link -- not yet confirmed
- * any further). Purely additive to the existing find/dimension result; never touches the material-find
- * result or return value, so a wrong offset here degrades to blank probe fields, nothing else.
- *
- * THIRD ATTEMPT at the image's real pixel size (2026-07-31), after two live-tested failures. Both earlier
- * guesses read a field that some OTHER code path happened to write; this one reads the field the Vulkan
- * image-creation path ITSELF consumes, so it cannot be path-specific:
- *
- *   idImage_Vulkan_PC::Create (FUN_140DADB70, identified by its own assertion
- *   naming Image_Vulkan_PC.cpp) memsets a 0x58-byte stack struct, fills it, and passes it to vkCreateImage
- *   as pCreateInfo. 0x58 is sizeof(VkImageCreateInfo) exactly, and the fill is a byte-exact match to that
- *   struct's layout, confirmed by FIVE independent constants that could not all line up by chance:
- *     +0x00 sType    = 0xE  == VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
- *     +0x10 flags    = 0x10 == VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT (set only on the cube branch)
- *     +0x14 type     = 1 or 2 == VK_IMAGE_TYPE_2D / _3D (selected by the same cube/3D discriminator)
- *     +0x30 samples  = 1|2|4|8 exactly (VkSampleCountFlagBits' only legal values, from a 4-way switch)
- *     +0x3C/+0x40/+0x48 = sharingMode / queueFamilyIndexCount=2 / pQueueFamilyIndices -- all three set
- *                    together off one global, the textbook CONCURRENT-sharing triple
- *   With the layout pinned, the extent fields are read verbatim from the image object:
- *     extent.width  (+0x1C) <- *(int *)(image + 0x60)
- *     extent.height (+0x20) <- *(int *)(image + 0x64)
- *     mipLevels     (+0x28) <- *(int *)(image + 0x70)
- *   These are populated by the opts->image field copy at the TOP of Create (image field = opts field +
- *   0x54), and idImageManager::ScratchImage (FUN_140DA3600, named by its own "called with empty name"
- *   error) performs the IDENTICAL copy on its deferred branch too -- so the fields are valid whether or not
- *   the VkImage itself exists yet. This is why it beats both dead ends: it is the universal path every
- *   engine image passes through, not one creation variant.
- *
- * The min-LOD call site supplies KNOWN LITERALS for three of these, which this probe reads back as built-in
- * negative controls -- the thing both failed attempts lacked. SetSource's "_minlod" ScratchImage opts have
- * type=0 (2D), engine format=0x13, mipLevels=1, so IMAGE_TYPE_OFF/IMAGE_FMT_OFF/IMAGE_MIPS_OFF must read
- * back exactly 0 / 0x13 / 1. If they do, the offset family is confirmed by three literal matches and the
- * width/height read beside them is trustworthy; if they do not, the mapping is wrong and the dimensions
- * must be discarded regardless of how plausible they look. IMAGE_CREATEFAIL_OFF is the same +0xBD byte
- * SetSource itself tests to decide whether to FatalError on min-LOD allocation failure (expect 0), and
- * IMAGE_VKIMAGE_OFF is the live VkImage handle vkCreateImage writes (expect non-NULL) -- together they say
- * whether the image is really GPU-resident and thus copyable.
- *
- * PRIOR DEAD ENDS, both live-tested wrong, retained so neither gets retried:
- *   0x38/0x3C -- came from a FILE-LOADING creation variant (FUN_140D9D240); those are decoded-source-art
- *     dimensions, a different field family from the created VkImage's extent. Not populated on a
- *     ScratchImage-created image.
- *   VTEX +0x1C -- SetSource really does pass this as both width and height, so the static read was right,
- *     but the value is in PAGES, not pixels (the same function computes it as `1 << (numLodLevels-1)` and
- *     derives the pixel size as `that * 120`, the known page quantum -- 2048 pages * 120 = 245760, the
- *     atlas width from promoted truth). It is also only overwritten on ONE of SetSource's two branches; on
- *     the other it retains raw .vmtr header bytes that happen to sit at that offset, which is exactly the
- *     large non-power-of-two garbage the live test saw. Kept below purely as a cross-check to print
- *     alongside the extent, NOT as a size. */
+/* Probe the virtual texture's resident minimum-LOD image without GPU calls.
+ * Re-derive image extent fields from idImage_Vulkan_PC::Create (0xDADB70 on the
+ * pinned Vulkan build): VkImageCreateInfo width/height/mips read +0x60/+0x64/+0x70.
+ * SetSource (0xE11C50) supplies the _minlod controls type=0, format=0x13, mips=1;
+ * mismatched controls invalidate the probe. Image+0xBD reports creation failure
+ * and +0xE0 stores VkImage. File-loading fields +0x38/+0x3C are source-art
+ * dimensions and must not substitute for the created image extent. */
 #define MATERIAL_VTEX_OFF        0x170u  /* material -> idVirtualTexture* (0 if not virtual-textured) */
 #define VTEX_MINLOD_IMAGE_OFF    0x3F0u  /* idVirtualTexture -> idImage* (always-resident low-res fallback) */
-/* LIVE-CORRECTED 2026-07-31: +0x1C is the material's atlas Y COORDINATE, not a page count. The probe read
- * 149760 for skull_key_gray, exactly that material's atlas y (its .vmtr row is `9600 149760 1920 1920` =
- * x y w h). SetSource's two 8-byte header stores lay the row out as x@+0x18, y@+0x1C, w@+0x20, h@+0x24;
- * the `1 << (numLodLevels-1)` write that suggested "pages" is on a branch these materials do not take.
- * CONFIRMED as a by-product: +0x20 really is the atlas width -- the engine's own material width getter
- * computes `*(vtex+0x20) * 128 / 120`, and 1920*128/120 = 2048 matched the live reported dimensions. */
+/* This material branch stores atlas x/y/w/h at +0x18/+0x1C/+0x20/+0x24.
+ * +0x1C is atlas Y, not a page count; width conversion uses *128/120. */
 #define VTEX_ATLAS_Y_OFF         0x1Cu   /* idVirtualTexture -> atlas Y coordinate (px) -- cross-check only */
 #define VTEX_ATLAS_W_OFF         0x20u   /* idVirtualTexture -> atlas width (px); getter does *128/120 */
 #define IMAGE_TYPE_OFF           0x54u   /* idImage -> image type; min-LOD control value: 0 (2D) */
@@ -528,13 +357,12 @@ int sh_typeinfo_find_material(const char *name, char *buf, size_t cap)
 {
     if (buf && cap) buf[0] = '\0';
     if (!name || !name[0] || !buf || cap < 2) return 0;
-    if (!g_material_mgr_ctx || !g_decl_find) return 0;      /* unserved build -- decline, never guess */
+    if (!g_material_mgr_ctx || !g_decl_find) return 0;
     __try {
         void *material = g_decl_find(g_material_mgr_ctx, name);
         if (!material) return 0;
 
-        /* Dimensions are best-effort and always were: an unresolved getter reports the same "found with no
-         * dimensions" the SEH path already produced, so a signature miss costs the size, not the answer. */
+        /* A missing dimension getter does not invalidate the material lookup. */
         int w = -1, h = -1;
         if (g_material_width && g_material_height) {
             __try {
@@ -543,7 +371,7 @@ int sh_typeinfo_find_material(const char *name, char *buf, size_t cap)
             } __except (EXCEPTION_EXECUTE_HANDLER) { w = -1; h = -1; }
         }
 
-        /* structural probe -- see the comment above; never affects found/dims, best-effort only */
+        /* Optional structural diagnostics do not change the lookup result. */
         int has_vtex = 0, has_minlod = 0;
         int img_w = -1, img_h = -1, img_type = -1, img_fmt = -1, img_mips = -1;
         int pages = -1, fail = -1, resident = 0;
@@ -576,8 +404,7 @@ int sh_typeinfo_find_material(const char *name, char *buf, size_t cap)
             char pagetag[32] = "";
             if (pages > 0) _snprintf_s(pagetag, sizeof pagetag, _TRUNCATE, " atlasY=%d", pages);
             if (has_minlod) {
-                /* the three literals SetSource itself wrote -- if these do not read back exactly, the
-                 * offset mapping is wrong and img_w/img_h must NOT be believed, however plausible */
+                /* Verify SetSource's literal controls before trusting image dimensions. */
                 int ctl = (img_type == 0 && img_fmt == 0x13 && img_mips == 1);
                 _snprintf_s(tag, sizeof tag, _TRUNCATE,
                             " [vt+minlod %dx%d ctl=%s(t%d/f%#x/m%d) fail=%d vk=%s%s]",
@@ -599,28 +426,18 @@ int sh_typeinfo_find_material(const char *name, char *buf, size_t cap)
     }
 }
 
-/* -------------------------------------------------- LIVE reflection type-registry walk (enumerate all) ----
- * The registry is a NULL-name-sentinel flat array reachable from the SAME reflect sh_type uses: P =
- * *(reflect+0) (the container global), type-record array B = *(P+0x20), records stride 0x38, className @
- * rec+0x00 (NULL = end), superclass name @ rec+0x08. RE'd from the engine: FindTypeInfoByName 0x1A1D590
- * returns *(*(reflect+0)+0x20)+idx*0x38; the registry builder 0x1A1EEE0 + registrar 0x1A1CCF0 iterate the
- * same array; the idEntity-derived subset reproduces OG's frozen 892 string-for-string (verified). Reuses
- * ti_get_reflect() -- ZERO new sigs/offsets. */
+/* Reflection types form a NULL-name-terminated array at container+0x20,
+ * stride 0x38, name@+0 and superclass@+8. FindTypeInfoByName and the registry
+ * builders use this same layout. */
 #define REGISTRY_TYPEBASE_OFF   0x20      /* container P -> type-record array base (*(P+0x20)) */
 #define REGISTRY_RECORD_STRIDE  0x38      /* per-record stride */
 #define REGISTRY_NAME_OFF       0x00      /* record -> className char* (NULL name terminates the array) */
 #define REGISTRY_SUPER_OFF      0x08      /* record -> superclass name char* ("" for a root) */
-#define REGISTRY_WALK_CAP       65536u    /* stale/garbage-array guard (this build has ~10,190 records) */
-#define TYPE_CONTAINER_RVA      0x3082b10u /* the reflection container object P (reflect+0 holds &this), as an
-                                           * RVA on the pinned Vulkan build -- kept for audit and per-build
-                                           * re-derivation, no longer used to locate anything. P is located
-                                           * by the signed "type_container" anchor; on the game thread it is
-                                           * also just *(reflect+0), which is the primary path below. */
+#define REGISTRY_WALK_CAP       65536u    /* Bound invalid or unterminated arrays. */
+#define TYPE_CONTAINER_RVA      0x3082b10u /* Pinned Vulkan audit reference; runtime uses the signed type_container anchor. */
 
-/* Root B = the type-record array base, THREAD-SAFELY. Primary: reflect (game thread) -> P=*(reflect).
- * Fallback (the UI thread, where the reflect vtable accessor returns null): the container global P, located
- * by the signed "type_container" anchor (a fixed static object -- raw read, no vtable call). Either way
- * B=*(P+0x20). NULL if neither roots, which the callers already treat as "registry unavailable". */
+/* Prefer the reflection container. When the accessor is unavailable on the UI
+ * thread, read the signed static container directly. Both yield array@P+0x20. */
 static const uint8_t *ti_type_array_base(void)
 {
     const uint8_t *P = NULL;
@@ -641,17 +458,17 @@ int sh_typeinfo_collect_classnames(const char **out_names, int cap)
 {
     if (!out_names || cap <= 0) return -1;
     const uint8_t *B = ti_type_array_base();
-    if (!B) return -1;                                /* pre-boot / unrooted -> caller falls back */
+    if (!B) return -1;
     int n = 0;
     __try {
         for (uint32_t i = 0; i < REGISTRY_WALK_CAP && n < cap; i++) {
             const uint8_t *rec = B + (size_t)i * REGISTRY_RECORD_STRIDE;
             const char *name = *(const char * const *)(rec + REGISTRY_NAME_OFF);
-            if (name == NULL) break;                  /* NULL-name sentinel = end of array */
+            if (name == NULL) break;
             out_names[n++] = name;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        /* a shifted/garbage array degrades to whatever we collected -- never a crash */
+        /* Keep the records collected before a memory fault. */
     }
     return n;
 }
@@ -675,10 +492,8 @@ int sh_typeinfo_collect_records(sh_ti_record *out, int cap)
     return n;
 }
 
-/* Enumerate the LIVE entityDef decl manager (the valid-INHERIT set). The mgr -- the SAME signed
- * "resource_manager_ctx" object sh_typeinfo_inherit_base uses -- is a flat array: count @ mgr+0x28,
- * array @ mgr+0x20, each element an idDeclEntityDef* whose name (the decl PATH) is the generic idDecl
- * name slot @ decl+0x08. Pure raw reads -> thread-safe on the UI thread. */
+/* Read loaded entityDef names from resource_manager_ctx: array@+0x20,
+ * count@+0x28, name@decl+0x08. Returned strings remain engine-owned. */
 #define ENTITYDEF_MGR_ARRAY_OFF  0x20
 #define ENTITYDEF_MGR_COUNT_OFF  0x28
 #define DECL_NAME_OFF            0x08
@@ -702,12 +517,9 @@ int sh_typeinfo_collect_inherits(const char **out_names, int cap)
     return n;
 }
 
-/* ----------------------------------------------------------------------------- handlers ----------
- * Non-static (extern-declared in commands.c) so CMD_TABLE references them directly. */
+/* Console handlers registered in commands.c. */
 
-/* [10] cs_fieldinfo <type> <field> (READ-ONLY) -- find the type record, walk its field array (stride
- * 0x48, name @ +0x10, loop-terminate on NULL/empty), and on the named field print "Size N, offset M".
- * Port of OG FUN_180021db0. No clipboard. */
+/* Print one reflected field's size and offset. */
 void h_cs_fieldinfo(idCmdArgs *a)
 {
     const char *type  = cmd_argv(a, 1);
@@ -738,14 +550,14 @@ void h_cs_fieldinfo(idCmdArgs *a)
     for (uint32_t i = 0; i < TI_WALK_CAP; i++) {
         const uint8_t *f = fields + (size_t)i * FIELD_STRIDE;
         const char *name = ti_read_cstr(f, FIELD_NAME_OFF);
-        if (name == NULL || name[0] == '\0') break;            /* OG loop terminator: NULL/empty name */
+        if (name == NULL || name[0] == '\0') break;
         if (strcmp(name, field) == 0) {
             uint32_t size = 0, off = 0;
             if (!ti_read_u32(f, FIELD_SIZE_OFF, &size) || !ti_read_u32(f, FIELD_OFFSET_OFF, &off)) {
                 sh_printf("cs_fieldinfo: field '%s' size/offset unreadable.\n", field);
                 return;
             }
-            sh_printf("Size %d, offset %d\n", size, off);      /* OG verbatim (the OG handler @0x21db0) */
+            sh_printf("Size %d, offset %d\n", size, off);
             return;
         }
     }
@@ -764,12 +576,8 @@ static void ti_dump_append(char *buf, size_t cap, size_t *len, const char *s)
     buf[*len] = '\0';
 }
 
-/* Emit a possibly-multi-KB string through sh_printf, which truncates EACH call at its 1024-byte stack
- * buffer (commands.c). OG sh_type (FUN_180021090) printed field-by-field -- each line well under the cap --
- * but we accumulate the whole struct into one buffer for the clipboard copy, so a single sh_printf("%s",dump)
- * is silently cut off at ~1KB (idMover stops mid-field at crushDislodgeForceMult). Chunk the on-screen emit
- * under the cap, breaking on newlines so a chunk never splits a field line. The clipboard still gets the full
- * dump. */
+/* Console output truncates each sh_printf call near 1 KB. Emit bounded chunks,
+ * preferring newline boundaries, while keeping the complete dump for the clipboard. */
 static void ti_emit_long(const char *s)
 {
     if (s == NULL) return;
@@ -790,25 +598,16 @@ static void ti_emit_long(const char *s)
     }
 }
 
-/* [3] sh_type <name> [-v] -- dump a CLASS's fields or an ENUM's members as C-struct/enum text, print it,
- * and copy it to the clipboard. Port of OG FUN_180021090.
- *   reflect = declMgr->reflect; rec = FindTypeInfoByName(reflect,name);
- *   if rec  -> CLASS branch (Inherits + per-field "type name;")
- *   else en = FindEnumByName(reflect,name); if en -> ENUM branch ("enum NAME { name = val, ... };")
- *   else "Couldn't find type %s!".
- * OG always prints a trailing "//offset N size M" on each field; here the default is CLEAN and the
- * optional "-v" flag restores that offset/size (build-specific info -- handy for memory work, noise for
- * browsing). The clipboard copy matches the on-screen text (both come from the one `dump` buffer). */
+/* Dump a class or enum and copy the same text to the clipboard. -v adds
+ * per-field offsets and sizes; the default omits that diagnostic detail. */
 void h_sh_type(idCmdArgs *a)
 {
     const char *type = cmd_argv(a, 1);
     if (type == NULL) {
-        sh_printf("No type provided!\n");                      /* OG verbatim (the OG handler @0x21090) */
+        sh_printf("No type provided!\n");
         return;
     }
-    /* clone extension: an optional "-v" (arg 2) restores the per-field reflection offset/size that OG
-     * always prints. Default = clean (no //offset size). Only the CLASS branch has offset/size, so -v is
-     * a no-op for enums. arg 2 never collides with OG (OG sh_type takes only the type name). */
+
     const char *vflag = cmd_argv(a, 2);
     int verbose = (vflag != NULL && _stricmp(vflag, "-v") == 0);
 
@@ -825,11 +624,11 @@ void h_sh_type(idCmdArgs *a)
 
     void *rec = ti_find_type(reflect, type);
     if (rec != NULL) {
-        /* ---- CLASS branch ---- */
+        /* Class fields. */
         const char *super = ti_read_cstr(rec, REC_SUPER_OFF);
         sh_printf("Inherits %s\n", (super && super[0]) ? super : "(none)");
 
-        const char *cname = ti_read_cstr(rec, ENUM_NAME_OFF);  /* class NAME @ rec+0x00 */
+        const char *cname = ti_read_cstr(rec, ENUM_NAME_OFF);
         _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "struct %s {\n", (cname && cname[0]) ? cname : type);
         ti_dump_append(dump, sizeof dump, &dlen, tmp);
         if (super && super[0]) {
@@ -840,30 +639,25 @@ void h_sh_type(idCmdArgs *a)
         const uint8_t *fields = (const uint8_t *)ti_read_ptr(rec, REC_FIELDS_OFF);
         for (uint32_t i = 0; fields != NULL && i < TI_WALK_CAP; i++) {
             const uint8_t *f = fields + (size_t)i * FIELD_STRIDE;
-            const char *fname = ti_read_cstr(f, FIELD_NAME_OFF);      /* +0x10 varName (loop terminator) */
-            if (fname == NULL || fname[0] == '\0') break;             /* OG terminator: cmp [rsi+0x10],0 */
-            const char *vartype = ti_read_cstr(f, FIELD_VARTYPE_OFF); /* +0x00 varType (primary type) */
-            const char *varops  = ti_read_cstr(f, FIELD_VAROPS_OFF);  /* +0x08 varOps  (qualifier) */
-            const char *fcmt    = ti_read_cstr(f, FIELD_COMMENT_OFF); /* +0x28 comment */
+            const char *fname = ti_read_cstr(f, FIELD_NAME_OFF);
+            if (fname == NULL || fname[0] == '\0') break;
+            const char *vartype = ti_read_cstr(f, FIELD_VARTYPE_OFF);
+            const char *varops  = ti_read_cstr(f, FIELD_VAROPS_OFF);
+            const char *fcmt    = ti_read_cstr(f, FIELD_COMMENT_OFF);
             uint32_t foff = 0, fsize = 0;
             ti_read_u32(f, FIELD_OFFSET_OFF, &foff);
             ti_read_u32(f, FIELD_SIZE_OFF, &fsize);
             if (vartype == NULL) vartype = "?";
             if (varops  == NULL) varops  = "";
 
-            /* OG fmt-selects on strstr(varOps,"*") -- the QUALIFIER, not the type. Both forms print
-             * THREE %s; the arg ORDER differs per form (copy OG exactly, @0x21090 L240-253):
-             *   star    (varOps has '*'): "\t%s%s %s" = (varType, varOps, varName)
-             *   no-star                 : "\t%s %s%s" = (varType, varName, varOps)
-             * The trailing ";" + optional "//offset N size M" is appended below so the offset/size can be
-             * gated on -v without duplicating both format arms. */
+            /* Pointer qualifiers precede the name; array qualifiers follow it. */
             int is_ptr = (strstr(varops, "*") != NULL);
             if (is_ptr)
                 _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "\t%s%s %s", vartype, varops, fname);
             else
                 _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "\t%s %s%s", vartype, fname, varops);
             ti_dump_append(dump, sizeof dump, &dlen, tmp);
-            /* default: a clean "type name;"; -v restores OG's build-specific offset/size comment. */
+
             if (verbose)
                 _snprintf_s(tmp, sizeof tmp, _TRUNCATE, ";//offset %d size %d\n", foff, fsize);
             else
@@ -883,10 +677,10 @@ void h_sh_type(idCmdArgs *a)
         return;
     }
 
-    /* ---- ENUM branch (FindTypeInfoByName returned NULL) ---- */
+    /* Fall back to enum lookup when no class record exists. */
     void *en = ti_find_enum(reflect, type);
     if (en == NULL) {
-        sh_printf("Couldn't find type %s!\n", type);           /* OG verbatim */
+        sh_printf("Couldn't find type %s!\n", type);
         return;
     }
 
@@ -898,10 +692,10 @@ void h_sh_type(idCmdArgs *a)
     for (uint32_t i = 0; members != NULL && i < TI_WALK_CAP; i++) {
         const uint8_t *m = members + (size_t)i * ENUM_MEMBER_STRIDE;
         const char *mname = ti_read_cstr(m, EMEMBER_NAME_OFF);
-        if (mname == NULL || mname[0] == '\0') break;           /* loop terminator: NULL/empty name */
+        if (mname == NULL || mname[0] == '\0') break;
         uint32_t mval = 0;
         ti_read_u32(m, EMEMBER_VALUE_OFF, &mval);
-        _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "\t%s = %d,\n", mname, mval);  /* OG verbatim */
+        _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "\t%s = %d,\n", mname, mval);
         ti_dump_append(dump, sizeof dump, &dlen, tmp);
     }
     ti_dump_append(dump, sizeof dump, &dlen, "};\n");
@@ -912,9 +706,7 @@ void h_sh_type(idCmdArgs *a)
         sh_printf("sh_type: copied enum '%s' to the clipboard.\n", type);
 }
 
-/* Filter+print one candidate C for sh_validclasses: emit if C == Y or C derives from Y (the LIVE engine
- * ancestry check, the SAME derive-rule the apply-guard uses -> the list == exactly what a Save accepts).
- * Bumps *count on emit; sets *y_seen when C == Y. */
+/* Emit a candidate satisfying the class/inherit ancestry rule. */
 static void vc_emit(const char *C, const char *Y, int *count, int *y_seen)
 {
     if (!C || !C[0]) return;
@@ -926,15 +718,9 @@ static void vc_emit(const char *C, const char *Y, int *count, int *y_seen)
     }
 }
 
-/* [+] sh_validclasses <inherit> -- the class-dropdown ENUMERATOR. Resolve Y = the inherit's base className
- * (sh_typeinfo_inherit_base), then list every registered className that DERIVES from Y. The candidate set is
- * the LIVE reflection type registry (sh_typeinfo_collect_classnames -- every registered idTypeInfo, not a
- * frozen decl-corpus list), so classes with NO editor decl (idBillboard, idTarget_Command, ...) ARE surfaced;
- * the filter (sh_typeinfo_class_derives) is the engine's own ancestry walk, so the list == exactly what a Save
- * accepts. Portable: auto-tracks DOOM patches, ZERO hardcoded class data. Fallback: if the live registry is
- * unreachable (pre-boot), serve the static class_universe.h candidate set (the degraded, decl-corpus subset).
- * Picking an idEntity-rooted inherit (snapmaps/unknown / target/default) lists ALL entity classes. */
-#define SH_REGISTRY_MAX  16384   /* candidate-buffer cap (this build ~10,190 registered types) */
+/* List live types compatible with an inherit declaration. Fall back to the
+ * static candidate table only when the live registry is unavailable. */
+#define SH_REGISTRY_MAX  16384   /* Candidate buffer cap. */
 void h_sh_validclasses(idCmdArgs *a)
 {
     const char *inherit = cmd_argv(a, 1);
@@ -953,22 +739,22 @@ void h_sh_validclasses(idCmdArgs *a)
     static const char *names[SH_REGISTRY_MAX];       /* main-thread-serial console handler -> static is safe */
     int count = 0, y_seen = 0;
     int k = sh_typeinfo_collect_classnames(names, SH_REGISTRY_MAX);
-    if (k > 0) {                                       /* LIVE registry (complete + portable) */
+    if (k > 0) {
         for (int i = 0; i < k; i++) vc_emit(names[i], Y, &count, &y_seen);
         if (k >= SH_REGISTRY_MAX)
             sh_printf("  (registry list truncated at %d -- raise SH_REGISTRY_MAX)\n", SH_REGISTRY_MAX);
-    } else {                                           /* fallback: static decl-corpus candidate set */
+    } else {
         sh_printf("  (live type registry unavailable -- using the static candidate set)\n");
         for (int i = 0; i < SH_CLASS_UNIVERSE_N; i++) vc_emit(SH_CLASS_UNIVERSE[i], Y, &count, &y_seen);
     }
-    if (!y_seen) {   /* Y itself derives from itself -- emit it if the candidate set didn't contain it */
+    if (!y_seen) {   /* Include the base itself if the candidate list omitted it. */
         sh_printf("  %s\n", Y);
         count++;
     }
     sh_printf("(%d valid classes for inherit '%s')\n", count, inherit);
 }
 
-/* ------------------------------------------------------------------------------- install ---------- */
+/* Dependency installation. */
 
 /* An installed address as an RVA off the host image, or 0 if it did not resolve. Log-only. */
 static unsigned ti_rva(uintptr_t addr)
@@ -979,7 +765,7 @@ static unsigned ti_rva(uintptr_t addr)
 
 int sh_typeinfo_install(const sig_result *results, size_t n, const uint8_t *module_base)
 {
-    if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;   /* one-shot */
+    if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;
     if (module_base == NULL) {
         backend_log("B2: typeinfo install SKIPPED -- module base NULL");
         return 0;
@@ -989,22 +775,19 @@ int sh_typeinfo_install(const sig_result *results, size_t n, const uint8_t *modu
     g_find_type = (find_typeinfo_fn)sig_addr_by_name(results, n, "FindTypeInfoByName");
     g_find_enum = (find_enum_fn)sig_addr_by_name(results, n, "FindEnumByName");
 
-    /* The three engine functions we used to reach by raw address are signed like every other one. */
+
     g_decl_find       = (decl_find_fn)sig_addr_by_name(results, n, "DeclPureFind");
     g_material_width  = (dim_fn)sig_addr_by_name(results, n, "MaterialWidth");
     g_material_height = (dim_fn)sig_addr_by_name(results, n, "MaterialHeight");
 
-    /* The data globals (and the one accessor whose own bytes cannot be signed) come from the code sites
-     * that compute them. A zero here means this build is not served for that feature -- the dependent
-     * handler prints its own unavailable message rather than reading a pinned address. */
+    /* Resolve code/data anchors once; each consumer handles missing dependencies. */
     g_declmgr_getter   = (declmgr_getter_fn)glb_resolve(module_base, "declmgr_accessor", NULL);
     g_validator_mgr    = (const uint8_t *)glb_resolve(module_base, "validator_manager", NULL);
     g_resource_mgr_ctx = (void *)glb_resolve(module_base, "resource_manager_ctx", NULL);
     g_material_mgr_ctx = (void *)glb_resolve(module_base, "material_manager_ctx", NULL);
     g_type_container   = (const uint8_t *)glb_resolve(module_base, "type_container", NULL);
 
-    /* Log RVAs, not pointers: they are what a bug report can be compared against across builds, and 0
-     * reads unambiguously as "did not resolve here". */
+    /* Log relative addresses for comparison across reports; 0 means unresolved. */
     char line[240];
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "B2: typeinfo install -- find_type=0x%x find_enum=0x%x declmgr_acc=0x%x decl_find=0x%x "

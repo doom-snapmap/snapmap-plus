@@ -1,24 +1,10 @@
-/* map_shards.h -- the shard ENVELOPE machinery a map-embedded payload rides in.
+/* Shared envelope for map-level package (smpkg) and navigation (smnav1)
+ * payloads. Each variables.string entry carries a family header in info.name
+ * and base64 in initialValue.
  *
- * A map's `variables.string[]` is the only place a SnapMap map can carry bytes
- * that survive publishing, so every payload this product embeds travels the
- * same way: one string variable per shard, a family header in the variable's
- * `info.name`, base64 in its `initialValue`. Two families exist today --
- * `smpkg.` (override packages, map_package.c) and `smnav1.` (baked navigation,
- * navmesh.c) -- and they differ ONLY in the header grammar and in what the
- * payload means.
- *
- * Everything that is the same for both lives here: the sha256 digest, base64,
- * the bounded in-place scanner that finds shard variables without building a
- * JSON DOM, the document structure walker that makes removing a whole array
- * element safe, and the splice that adds shard variables back.
- *
- * The scanner is deliberately conservative. A header only counts when it is
- * the string value of a "name" key inside a snapVarInfo_t, so a map whose prose
- * merely contains the magic -- an entity name, a Save-to-Decl blob -- is not
- * perturbed. Every scan is bounded: header length, chunk length, value search
- * window, container count and nesting depth all have caps, because the input is
- * a stranger's map.
+ * This module provides digesting, base64, bounded scanning, container walks
+ * and JSON splices. Families supply their header grammar and payload policy.
+ * The scanner uses name and snapVarInfo_t markers to avoid ordinary prose.
  */
 #ifndef SNAPMAP_PLUS_MAP_SHARDS_H
 #define SNAPMAP_PLUS_MAP_SHARDS_H
@@ -28,27 +14,19 @@
 /* sha256 hexdigest prefix carried in a header, shared by every family. */
 #define SH_SHARD_DIGEST_CHARS 16
 
-/* Base64 characters WRITTEN per shard. 16384 failed to deserialize, so this is
- * a measured engine cap, not a taste. */
+/* Written chunk size; 16384-byte chunks failed native deserialization. */
 #define SH_SHARD_CHARS        8192
-/* ...and what we will READ back, which is generous so a shard written by some
- * other tool still reassembles. */
+/* Read cap allows larger chunks from other writers. */
 #define SH_SHARD_MAX_CHUNK    65536
 
 /* The longest header text a scanner will consider. Both families are far
  * shorter; a "name" longer than this is not a shard header. */
 #define SH_SHARD_HEADER_MAX   256
 
-/* Structural caps for the document walker.
- *
- * SH_SHARD_MAX_CONTAINERS is the CEILING, not the allocation: the array starts
- * small and doubles, because a real map is nowhere near the ceiling but is far
- * past any fixed guess. A 5 MB reference map holds 91,496 containers at depth
- * 9, so the old fixed 8,192 refused every genuine map -- and refusing to build
- * the document means nav_regions reads no regions and map_package strips no
- * packages. A container costs at least one byte of input, so the count is
- * bounded by the map size regardless; the ceiling only stops an absurd
- * allocation on a hostile document. */
+/* Container storage grows geometrically up to this ceiling. Large maps exceed
+ * 8192 containers; cap both count and depth without preallocating the
+ * maximum.
+ */
 #define SH_SHARD_MAX_CONTAINERS (1u << 21)
 #define SH_SHARD_CONTAINERS_MIN 8192u
 #define SH_SHARD_MAX_DEPTH      256u
@@ -119,11 +97,9 @@ typedef struct sh_shard_doc {
     size_t              count;
 } sh_shard_doc;
 
-/* Map every container in one forward pass that understands string literals and
- * escapes. Returns 1 and fills `doc` (free with sh_shard_doc_free), or 0
- * meaning "do not touch this buffer" -- not structurally clean, or over the
- * caps. Backwards scanning cannot answer this: going backwards you cannot tell
- * whether a '{' you just passed was structure or text. */
+/* Walk containers forward with string/escape handling. Returns 1 and fills
+ * doc (free with sh_shard_doc_free), or 0 for malformed/over-capacity input.
+ */
 int  sh_shard_doc_build(const char *json, size_t len, sh_shard_doc *doc);
 void sh_shard_doc_free(sh_shard_doc *doc);
 
@@ -148,14 +124,10 @@ unsigned sh_shard_doc_array_count(const char *json, const sh_shard_doc *doc, int
 /* Return non-zero to REMOVE the shard variable carrying this header. */
 typedef int (*sh_shard_filter_fn)(const char *hdr, size_t hdr_len, void *ctx);
 
-/* Remove matching shard variables, returning a new NUL-terminated HeapAlloc'd
- * buffer (caller HeapFrees) with *out_len set, or NULL when there is nothing to
- * remove or the document cannot be stripped safely -- in which case the caller
- * uses the original buffer unchanged. *doc_failed distinguishes the two, so the
- * caller can log a refusal without inventing one for every payload-free map.
- *
- * Refusing rather than half-stripping is deliberate: a map with a mangled
- * payload still has to load; a map with mangled JSON does not load at all. */
+/* Remove matching shard variables into an owned NUL-terminated process-heap
+ * buffer. NULL retains the original; doc_failed distinguishes a structural
+ * refusal from no matches. Never apply a partial splice.
+ */
 char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t magic_len,
                      sh_shard_filter_fn filter, void *ctx, size_t max_cuts,
                      size_t *out_len, unsigned *elements_out, unsigned *runs_out,

@@ -1,20 +1,9 @@
-/* bcn.h -- block-compressed texture decoders (BC1, BC3, BC7) -> RGBA8.
+/* Decode BC1, BC3 and BC7 blocks to RGBA8 without engine calls. Bimage codes
+ * 10, 11 and 23 select those formats; each block covers 4x4 pixels and
+ * occupies 8, 16 or 16 bytes respectively.
  *
- * DOOM's `.bimage` container stores its mips in these formats; the format code in the bimage
- * header maps to them as:
- *
- *     code 10 -> BC1   (8 bytes / 4x4 block, RGB + 1-bit alpha)
- *     code 11 -> BC3   (16 bytes / 4x4, BC4 alpha block + BC1 colour block)
- *     code 23 -> BC7   (16 bytes / 4x4, 8 modes)
- *
- * Unlike the megatexture page codec -- which is id's own and had to be CALLED rather than
- * reimplemented -- BCn is a public, fully specified format, so these are ordinary decoders
- * with no engine dependency at all.
- *
- * All three write RGBA8 into a caller-supplied buffer sized for the PADDED dimensions
- * (width and height each rounded up to a multiple of 4). Cropping to the real size is the
- * caller's job. They never read past `src_len`: short input is treated as zero-filled, which
- * matters because a truncated asset must degrade to a dim thumbnail, not a fault.
+ * The caller allocates output for dimensions rounded up to multiples of four
+ * and crops afterward. Reads beyond src_len supply zero bytes.
  */
 #ifndef BACKEND_BCN_H
 #define BACKEND_BCN_H
@@ -29,8 +18,9 @@
 /* Bytes of RGBA output needed for a w x h image (i.e. padded w * padded h * 4). */
 size_t bcn_rgba_size(unsigned w, unsigned h);
 
-/* Decode into `dst` (must hold bcn_rgba_size(w,h) bytes). Returns 1 on success, 0 if the
- * arguments or dimensions are unusable. Out-of-range input is clamped, never trusted. */
+/* Decode into dst, which must hold bcn_rgba_size(w,h) bytes. Returns 1 on
+ * success, 0 for invalid arguments or dimensions.
+ */
 int bcn_decode_bc1(const unsigned char *src, size_t src_len, unsigned w, unsigned h, unsigned char *dst);
 int bcn_decode_bc3(const unsigned char *src, size_t src_len, unsigned w, unsigned h, unsigned char *dst);
 int bcn_decode_bc7(const unsigned char *src, size_t src_len, unsigned w, unsigned h, unsigned char *dst);

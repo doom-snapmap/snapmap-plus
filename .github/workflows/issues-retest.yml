@@ -1,14 +1,6 @@
-# Feedback hygiene 1/2 -- release retest prompts.
-#
-# When a release is published, open user-filed reports (label: user-report, filed by the in-app feedback
-# dialog via the feedback/ relay) that were reported on an OLDER version get a "still reproducible?"
-# comment + the needs-retest label. The stale sweep (issues-stale.yml) then closes them if nobody
-# responds. Deliberately NOT auto-close-on-release: a bug reported on an old version usually still
-# exists on the new one -- real fixes are closed by a maintainer with "fixed in vX".
-#
-# Channel rule: a pre-release (tag with "-") only prompts beta-channel reports; a stable release
-# prompts everything older. Secretless by design: the built-in GITHUB_TOKEN, least-privilege
-# permissions, no repo secrets -- same posture as ci.yml (which this deliberately does not touch).
+# After a release, ask older user reports to retest and add needs-retest.
+# Prereleases prompt beta reports only; stable releases prompt all older reports.
+# The stale workflow handles unanswered prompts. Use only the scoped GITHUB_TOKEN.
 name: Issues -- release retest
 
 on:

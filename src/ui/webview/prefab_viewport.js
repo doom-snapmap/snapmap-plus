@@ -346,8 +346,7 @@ var prefabViewport = (function () {
     } else if (entity.model) size=[48,48,48];
     else if (/logic|listener|variable|filter/i.test(entity.className)) size=[12,12,12];
     else size=[32,32,32];
-    /* Thin blocking slabs and decals are valid. Only avoid a singular proxy; do not inflate a
-       one-unit authored dimension to the former arbitrary two-unit minimum. */
+    /* Preserve thin slabs and decals; only expand dimensions that make a singular proxy. */
     for (i = 0; i < 3; i++) if (size[i] < .01) size[i] = .01;
     entity.modelMatrix=composeMatrix(entity.position,entity.axes,displayScale);
     entity.proxyMatrix=(entity.role==='blocker'||entity.role==='trigger')

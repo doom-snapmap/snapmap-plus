@@ -1,16 +1,6 @@
-/* commands.c -- see commands.h. The console-command surface (clone of OG FUN_1800229b1's
- * AddCommand spine + handlers).
- *
- * Register the command NAMES; Tier B/C handlers are faithful "not yet implemented in
- * clone" stubs that print the OG help. sh_rawmaps_on/off (OG snapHak_rawmaps_on/off) are wired to the
- * SHIPPED sh_rawmap_swap_arm gate. sh_target_any is the editor-decl visibility toggle (target_any.c ->
- * h_target_any), a pair-for-pair port of OG SnapHak's own sh_target_any (FUN_180021EE0).
- * snaphak_algo (cs_dontuse [18] + sh_alginfo) now lives in algo.c -- cs_dontuse toggles the 4 f64
- * engine-math overrides, sh_alginfo reports the reimpl present; both extern-declared near CMD_TABLE.
- *
- * Clean-room: ported from our own RE (the verbatim command names/help read from the
- * OG XINPUT1_3.dll string table). Zero OG SnapHak bytes.
- */
+/* Register console commands and implement dispatch, resource listings, developer
+ * utilities, and command exposure. Entity, reflection, and math handlers live
+ * in their respective modules; SnapStack dispatch uses the shared command map. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -21,71 +11,51 @@
 #include "cvars.h"
 #include "user_overrides.h"
 #include "clipboard.h"
-#include "typeinfo.h"          /* sh_typeinfo_get_declmgr() -- shared declMgr accessor for [12] */
+#include "typeinfo.h"
 #include "entlist_classes.h"
 #include "patch.h"
 #include "signatures.h"
-#include "engine_globals.h"   /* glb_resolve -- the portable data-global resolver */
-#include "host_image.h"       /* sh_host_is_pinned_rva_build -- gates the last-resort RVAs */
+#include "engine_globals.h"
+#include "host_image.h"
 #include "rawmap.h"
-#include "editor_frame.h"   /* sh_editor_frame_request_rawmap_save -- sh_rawmaps save */
-#include "ui_bridge.h"   /* sh_ui_get_iface() -- the `sh` dispatcher gates on the interface */
-#include "hook.h"        /* install_inline_hook -- the AddCommand detour for the command unlock */
+#include "editor_frame.h"
+#include "ui_bridge.h"
+#include "hook.h"
 #include "backend_log.h"
 #include "engine_dialog.h"
-#include "navmesh.h"      /* sh_navmesh -- what the current map's bake is serving */
+#include "navmesh.h"
 #include "nav_bake.h"
 
-/* ------------------------------------------------------------------------ engine fn typedefs ------ */
+/* Engine call contracts. */
 
-/* idCmdSystemLocal::AddCommand(cmdsys, name, handler, help, argComp, flags). DIRECT shape from
- * the AddCommand decompile @0x1aa3630 + the registrar @0x229b1; we pass argComp=NULL, flags=2 (see register_cmd: 2 -> stored 6
- * -> the command lands in the FULL *and* DEV tables + is dev-cheat-exempt, so the `~` console finds it even
- * in dev mode; the OG left param5/6 as register garbage = effectively 0 = FULL-only = dev-gated).
- *
- * SLOT MAP (engine 0x1aa3630 stores: cmd[0]=name=param_2, cmd[1]=handler=param_3, cmd[2]=param_5,
- * cmd[3]=param_4, cmd[4]=flags). We register help in param_4 (-> cmd[3]) -- this is FAITHFUL to OG SnapHak:
- * its own registrar (@0x229b1) calls AddCommand(cmdsys, name, handler, help) with the help string
- * as param_4 and nothing for param_5/param_6, and chrispy's commands display their help in-game -> cmd[3]
- * (param_4) IS the help-display slot the engine reads. (the reference implementation's clone_bss_apply uses the other order --
- * help in param_5, NULL in param_4 -- but it is an INTERNAL command never shown to users, so its help-slot
- * placement is immaterial; apply_engine.c matches the reference implementation there byte-for-byte and stays as-is.) So this
- * (cmdsys, name, handler, help, argComp=NULL, flags) order is correct for the user-facing OG command set;
- * load-bearing arg = handler=param_3, correctly placed everywhere. */
+/* AddCommand(self,name,handler,help,argComp,flags). Help is argument 4;
+ * argument completion is 5. flags=2 becomes stored flags=6, exposing commands
+ * in full/developer tables and exempting them from the developer cheat guard. */
 typedef void (*add_command_fn)(void *cmdsys, const char *name, void *handler,
                                const char *help, void *argComp, unsigned int flags);
 
-/* idCommon message dispatch (Printf sig 0x1A08E80). OG's wrapper FUN_180006380 calls it as
- * (level=1, fmt, &va) -- a POINTER to the spilled varargs. We pre-format with _vsnprintf then call the
- * safe fixed-arg form dispatch(1, "%s", &bufptr) so we never re-derive the engine va layout. */
+/* Dispatch takes a pointer to varargs. Preformat text, then supply one %s argument. */
 typedef void (*printf_dispatch_fn)(int level, const char *fmt, void *vaptr);
 
-/* GetDeclsOfType(typeName) -> the typed decl-manager node (same engine fn sh_listres uses; sig
- * "GetDeclsOfType" @0x1800D20). Returns NULL for an unknown type. */
+/* Return a typed resource-registry node, or NULL for an unknown class. */
 typedef void *(*get_decls_fn)(const char *type_name);
 
-/* idCmdArgs + the shared SEH accessors + sh_printf + the global-decode scanner are declared in
- * commands.h (entity.c's moved handlers reuse them). */
 
-/* ------------------------------------------------------------------------- module state ----------- */
+
+/* Cached state. */
 
 static add_command_fn     g_add_command = NULL;
 static int                g_dialogtest_ticket = 0;
 static void              *g_cmdsys      = NULL;
 static printf_dispatch_fn g_printf      = NULL;
-static void              *g_get_decls   = NULL;   /* cached for sh_listres + the material lookups */
-static const uint8_t     *g_module_base = NULL;   /* DOOM module base (devmode resolves its sig at FIRE) */
-static volatile LONG      g_installed   = 0;      /* one-shot install latch */
+static void              *g_get_decls   = NULL;
+static const uint8_t     *g_module_base = NULL;
+static volatile LONG      g_installed   = 0;
 
-/* [15][16] devmode: ONE static restore-handle, gated on g_devmode_handle.live (static zero-init => .live==0
- * => "not currently disabled"). disable_devmode code_patch_sig's the SessionDevModeGetter head to
- * `xor eax,eax; ret`; reenable_devmode code_unpatch's it. The patch layer owns all the SEH/verify. */
-static sh_patch_handle    g_devmode_handle;       /* zero-init: .live == 0 (not patched) */
+/* Keep the original getter bytes while devmode is forced off. */
+static sh_patch_handle    g_devmode_handle;
 
-/* ------------------------------------------------------------------------- Printf wrapper ---------
- * sh_printf(fmt, ...) -- format into a stack buffer, then dispatch(1, "%s", &bufptr). The engine's
- * idCommon::dispatch reads a POINTER to the args, so we pass the address of a single (char*) holding
- * our pre-formatted buffer -- exactly one %s consumed, no engine-va guesswork. */
+/* Pass the address of one preformatted string pointer as the engine varargs. */
 void sh_printf(const char *fmt, ...)
 {
     if (!g_printf) return;
@@ -98,12 +68,11 @@ void sh_printf(const char *fmt, ...)
     __try {
         g_printf(1, "%s", &p);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        /* a console dispatch fault must never take down the editor */
+
     }
 }
 
-/* SEH-guarded idCmdArgs accessors (the engine hands us the args object; never trust its shape).
- * Non-static -- declared in commands.h so entity.c's moved handlers share the SAME accessors. */
+/* Shared guarded access to engine-owned command arguments. */
 int cmd_argc(idCmdArgs *a)
 {
     __try { return a ? a->argc : 0; }
@@ -115,32 +84,19 @@ const char *cmd_argv(idCmdArgs *a, int n)
     __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
 
-/* ----------------------------------------------------------------- cmdSystem-global decode --------
- * The CmdSystemLea accessor (sig "CmdSystemLea" = the engine bot_add/bot_remove registrar) loads the
- * idCmdSystemLocal* global in its prologue via `MOV RCX,[rip+cmdSystem]` (48 8B 0D). Decode the FIRST
- * RIP-relative load opcode (the four forms 48 8D 0D / 48 8B 0D / 48 8D 05 / 48 8B 05 -- the cmdSystem
- * one is the MOV form, NOT the LEA sh_strids decodes) to the global SLOT, then DEREFERENCE ONCE to get
- * the live object (the MOV form loads *(slot); OG's *(engineBase+0x55b7280) does the same single deref).
- * Build-portable: no hardcoded RVA. If that decode fails, glb_resolve("cmd_system_slot") signs a second,
- * independent code site and decodes its displacement -- also portable. Only if BOTH miss do we consider
- * the pinned literal, and only on the build it came from. */
-#define CMDSYS_KNOWN_RVA   0x55b7280u   /* the cmdSystem slot's RVA on the pinned Vulkan build -- kept for
-                                         * audit and per-build re-derivation. Dereferenced only when
-                                         * sh_host_is_pinned_rva_build() says we ARE that build. */
+/* Decode cmdSystem from CmdSystemLea, then an independent global anchor.
+ * The last-resort pinned RVA uses the Vulkan filename gate, not a build hash. */
+#define CMDSYS_KNOWN_RVA   0x55b7280u   /* Pinned Vulkan audit/fallback slot, gated by host filename. */
 
-/* SHARED with entity.c (declared in commands.h). The gameMgr-global decode reuses the EXACT same
- * 4-opcode RIP-relative scanner so the two globals decode through ONE code path (no duplicate-and-drift). */
+/* Guarded byte reads shared by global decoders and entity handlers. */
 int sh_safe_read(const uint8_t *src, uint8_t *dst, size_t n)
 {
     __try { for (size_t i = 0; i < n; i++) dst[i] = src[i]; return 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-/* Decode a build-specific .data global SLOT address from a sig'd accessor fn whose prologue carries a
- * RIP-relative MOV/LEA to that global. Scans the first B2_RIP_SCAN_WINDOW bytes for the FIRST of the four
- * decode-target opcodes (48 8B 0D / 48 8B 05 / 48 8D 0D / 48 8D 05) and returns rip_next + disp32. Used by
- * BOTH sh_resolve_cmdsys (CmdSystemLea, the MOV-RCX form 48 8B 0D at offset 6) and sh_resolve_gamemgr
- * (GameMgrLea, the MOV-RAX form 48 8B 05 at offset 0). Returns the SLOT, NOT the dereferenced object. */
+/* Decode the first RIP-relative MOV/LEA to RAX/RCX within the accessor window.
+ * Return the pointer slot, not the object it contains. */
 const uint8_t *sh_decode_rip_slot(const uint8_t *accessor_fn)
 {
     uint8_t b[B2_RIP_SCAN_WINDOW];
@@ -160,7 +116,7 @@ const uint8_t *sh_decode_rip_slot(const uint8_t *accessor_fn)
 
 void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *module_base)
 {
-    /* Primary: decode the slot from the sig'd accessor, then deref once for the live object. */
+
     void *accessor = (void *)sig_addr_by_name(results, n, "CmdSystemLea");
     if (accessor) {
         const uint8_t *slot = sh_decode_rip_slot((const uint8_t *)accessor);
@@ -176,8 +132,7 @@ void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *modu
         }
         backend_log("B2: cmdSystem portable decode failed -- trying the signed data-global anchor");
     }
-    /* Second portable path: a signed code site whose RIP displacement names the same slot. Survives an
-     * inline hook on the CmdSystemLea prologue, which the decode above does not. */
+    /* Independent anchor survives a detour on the CmdSystemLea prologue. */
     if (module_base) {
         glb_status gst = GLB_UNKNOWN_NAME;
         uintptr_t decoded = glb_resolve(module_base, "cmd_system_slot", &gst);
@@ -197,8 +152,7 @@ void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *modu
             backend_log(line);
         }
     }
-    /* Last resort: the pinned literal, and only on the build it was extracted from. On the other shipped
-     * image that RVA is unrelated memory whose contents we would publish as idCmdSystemLocal*. */
+    /* Last resort: pinned Vulkan RVA behind the host filename gate. */
     if (module_base && sh_host_is_pinned_rva_build()) {
         const uint8_t *slot = module_base + CMDSYS_KNOWN_RVA;
         void *obj = NULL;
@@ -214,13 +168,9 @@ void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *modu
     return NULL;
 }
 
-/* ----------------------------------------------------------------------------- handlers ----------
- * The trivial handlers (wired to shipped ops); all others are faithful stubs. Each is __fastcall with
- * a single idCmdArgs* arg. Handlers run as a Cbuf callback on the engine main thread (console exec). */
+/* Console handlers run at the engine main-thread command-execution point. */
 
-/* [1] sh_rawmaps_on (OG snapHak_rawmaps_on) -> the SHIPPED sh_rawmap_swap_arm(1) gate (single source of
- *     truth). Prints the OG RUNTIME message "Enabling raw snapmap save/load." (the OG handler @0x21050),
- *     NOT the AddCommand help. */
+/* Arm rawmap load swapping. */
 static void h_rawmaps_on(idCmdArgs *a)
 {
     char load_path[MAX_PATH] = "", save_path[MAX_PATH] = "", why[192] = "";
@@ -266,8 +216,7 @@ static void h_rawmaps_on(idCmdArgs *a)
     sh_printf("Every map you open now loads that file, and every save is mirrored to that one.\n");
     sh_printf("(legacy name -- 'sh_rawmaps' shows and changes everything, including both paths.)\n");
 }
-/* [2] sh_rawmaps_off (OG snapHak_rawmaps_off) -> sh_rawmap_swap_arm(0). Prints OG RUNTIME "Disabling raw
- *     snapmap save/load." (the OG handler @0x21070), NOT the AddCommand help. */
+/* Disarm rawmap load swapping. */
 static void h_rawmaps_off(idCmdArgs *a)
 {
     (void)a;
@@ -719,16 +668,10 @@ static void h_sh_rawmaps(idCmdArgs *a)
     sh_printf("  sh_rawmaps default         put both paths back to the default\n");
 }
 
-/* [3] sh_alginfo -> algo.c (h_alginfo: reports our snaphak_algo reimpl PRESENT). [18] cs_dontuse ->
- * algo.c (h_cs_dontuse: the toggle that installs/uninstalls the 4 f64 math overrides). Both are
- * extern-declared near the CMD_TABLE (like the sh_entity / sh_typeinfo handlers). */
 
-/* ----------------------------------------------------------------- decl-walk SEH helpers --------
- * sh_listres walks the decl-manager node layout (LIVE-VERIFIED: the decl-ptr array @
- * node+0x20, the count @ node+0x28. Each decl's NAME is a char* @ *decl+8 (the generic idDecl name slot
- * -- DIRECT from OG behavior: sh_listres passes *(*decl+8) as the Printf %s arg; it is an engine RUNTIME
- * offset not in the source-of-record, so LIVE-CONFIRM at FIRE: `sh_listres idMaterial` must print real
- * names). Every read is SEH-guarded; a wrong/garbage node degrades to a clean no-op, never a crash. */
+
+/* Resource registry: array@node+0x20, count@+0x28, name@decl+0x08.
+ * Recheck object layout when porting; reads are guarded and count-bounded. */
 #define LISTRES_ARRAY_OFF   0x20    /* decl-manager node -> decl-pointer array */
 #define LISTRES_COUNT_OFF   0x28    /* decl-manager node -> decl count (uint) */
 #define LISTRES_NAME_OFF    0x08    /* decl object -> name char* (*decl + 8) */
@@ -751,9 +694,8 @@ static const char *lr_decl_name(const void *decl)
     __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
 
-/* A tiny growable byte buffer for the sh_copy_reslist_to_clipboard accumulation (each matched name
- * + '\n'). Heap-backed; freed by the caller. On any OOM the buffer goes "failed" and silently stops
- * accumulating (the console print still happens -- the clipboard copy just won't include the overflow). */
+/* Accumulate newline-separated names for clipboard copy. Allocation failure
+ * stops collection while console output continues. Caller frees the buffer. */
 typedef struct lr_buf {
     char  *data;
     size_t len;
@@ -764,8 +706,8 @@ typedef struct lr_buf {
 static void lr_buf_append(lr_buf *b, const char *s)
 {
     if (b->failed || s == NULL) return;
-    size_t add = strlen(s) + 1;                 /* the name + a '\n' */
-    if (b->len + add + 1 > b->cap) {            /* +1 for the final NUL */
+    size_t add = strlen(s) + 1;
+    if (b->len + add + 1 > b->cap) {
         size_t ncap = b->cap ? b->cap * 2 : 4096;
         while (ncap < b->len + add + 1) ncap *= 2;
         char *nd = (char *)realloc(b->data, ncap);
@@ -779,16 +721,13 @@ static void lr_buf_append(lr_buf *b, const char *s)
     b->data[b->len]   = '\0';
 }
 
-/* [14] sh_listres <type> [filter] -- GetDeclsOfType(type), walk the decl array, print each name; if
- * argv[2] is present, substring-filter; if sh_copy_reslist_to_clipboard is set, accumulate the
- * matched names and copy the list to the clipboard at the end. Clone of OG FUN_180022000
- * (its decompile @0x22000 + our listres-mechanism notes). */
+/* List resource names with optional substring filtering and clipboard copy. */
 static void h_sh_listres(idCmdArgs *a)
 {
     const char *type   = cmd_argv(a, 1);
-    const char *filter = cmd_argv(a, 2);        /* NULL => no filter (OG: argc<3) */
+    const char *filter = cmd_argv(a, 2);
 
-    if (type == NULL) {                          /* OG silently returns; we add a usage line */
+    if (type == NULL) {
         sh_printf("usage: sh_listres <resource classname (ex:idMaterial)> [filter]\n");
         return;
     }
@@ -814,7 +753,7 @@ static void h_sh_listres(idCmdArgs *a)
         sh_printf("sh_listres: 0 decls of type '%s'.\n", type);
         return;
     }
-    if (count > LISTRES_COUNT_CAP) {            /* stale/garbage node guard */
+    if (count > LISTRES_COUNT_CAP) {
         sh_printf("sh_listres: decl count implausible (stale manager node?).\n");
         return;
     }
@@ -825,12 +764,12 @@ static void h_sh_listres(idCmdArgs *a)
     uint32_t printed = 0;
     for (uint32_t i = 0; i < count; i++) {
         void *decl = NULL;
-        if (!lr_read_ptr((const uint8_t *)array + (size_t)i * 8, &decl)) break;  /* array tail AV */
+        if (!lr_read_ptr((const uint8_t *)array + (size_t)i * 8, &decl)) break;
         if (decl == NULL) continue;
 
         const char *name = lr_decl_name(decl);
         if (name == NULL) continue;
-        if (filter != NULL && strstr(name, filter) == NULL) continue;            /* substring filter */
+        if (filter != NULL && strstr(name, filter) == NULL) continue;
 
         sh_printf("%s\n", name);
         printed++;
@@ -844,40 +783,31 @@ static void h_sh_listres(idCmdArgs *a)
     free(buf.data);
 }
 
-/* [5] sh_entlist [filter] -- list every idEntity-derived class NAME; if argv[1] is present, substring-filter.
- * Clone of OG FUN_180021b50. OG walked a STATIC ptr-table (its own hardcoded snapshot of the idEntity subclass
- * set); we RE'd that this snapshot IS the engine's idEntity-derived reflection walk (our idEntity-derived live
- * set reproduces OG's 892 STRING-FOR-STRING). So the
- * clone enumerates the LIVE type registry (sh_typeinfo_collect_classnames) and keeps every class that derives
- * from idEntity -- byte-identical to OG's list on this build BUT portable (auto-tracks DOOM patches) AND it
- * surfaces any decl-less idEntity class OG's frozen snapshot happened to miss. Two deliberate divergences from
- * OG: (1) we do NOT skip idTarget_Command (OG hid it; the user wants it listed -- it is a real, makeable
- * idEntity class); (2) a trailing count line. Fallback: if the live registry is unreachable (pre-boot), walk
- * the static B2_ENTLIST_CLASSES snapshot. The idEntity-derive filter naturally excludes non-entity types
- * (components / managers / structs) the raw registry also holds. */
-#define SH_ENTLIST_MAX  16384   /* candidate-buffer cap (this build ~10,190 registered types) */
+/* List live idEntity subclasses, including decl-less types and idTarget_Command.
+ * Fall back to the static snapshot when reflection is unavailable. */
+#define SH_ENTLIST_MAX  16384   /* Candidate capacity. */
 static void h_sh_entlist(idCmdArgs *a)
 {
-    const char *filter = cmd_argv(a, 1);        /* NULL => no filter (OG: argc<=1) */
+    const char *filter = cmd_argv(a, 1);
 
     static const char *names[SH_ENTLIST_MAX];   /* main-thread-serial console handler -> static is safe */
     int printed = 0;
     int k = sh_typeinfo_collect_classnames(names, SH_ENTLIST_MAX);
-    if (k > 0) {                                 /* LIVE registry: keep idEntity subclasses (excl. idEntity base) */
+    if (k > 0) {
         for (int i = 0; i < k; i++) {
             const char *name = names[i];
-            if (name == NULL || strcmp(name, "idEntity") == 0) continue;          /* list SUBCLASSES (OG-faithful) */
-            if (sh_typeinfo_class_derives(name, "idEntity") != 1) continue;       /* keep only idEntity-derived */
-            if (filter != NULL && strstr(name, filter) == NULL) continue;         /* substring filter */
+            if (name == NULL || strcmp(name, "idEntity") == 0) continue;
+            if (sh_typeinfo_class_derives(name, "idEntity") != 1) continue;
+            if (filter != NULL && strstr(name, filter) == NULL) continue;
             sh_printf("%s\n", name);
             printed++;
         }
         if (k >= SH_ENTLIST_MAX)
             sh_printf("(registry list truncated at %d -- raise SH_ENTLIST_MAX)\n", SH_ENTLIST_MAX);
-    } else {                                     /* fallback: the static idEntity-subclass snapshot */
+    } else {
         for (int i = 0; i < B2_ENTLIST_CLASS_COUNT; i++) {
             const char *name = B2_ENTLIST_CLASSES[i];
-            if (filter != NULL && strstr(name, filter) == NULL) continue;         /* substring filter */
+            if (filter != NULL && strstr(name, filter) == NULL) continue;
             sh_printf("%s\n", name);
             printed++;
         }
@@ -886,23 +816,12 @@ static void h_sh_entlist(idCmdArgs *a)
               filter ? " matching " : "", filter ? filter : "");
 }
 
-/* ----------------------------------------------------------------- [15][16] devmode -------------
- * FIRST live engine-code patch. SnapHak's snaphak_disable_devmode stomps the idSessionLocal devmode bool
- * getter (engine 0x18a31d0: movzx eax,[rcx+0x34c89]; ret) so it always returns 0; reenable restores it.
- * We ride the sh_patch layer EXACTLY (code_patch_sig / code_unpatch + the static restore-handle), and
- * resolve the SessionDevModeGetter site by SIGNATURE at FIRE (not a hardcoded RVA) -- version-portable, and
- * a sig miss/ambiguity makes code_patch_sig REFUSE (no write) on a shifted build rather than mis-patch.
- *
- * code_patch overwrites only the 3-byte HEAD (0F B6 81 -> 31 C0 C3 = `xor eax,eax; ret`); bytes 3-7 of the
- * original getter are never touched, so code_unpatch restores the full original instruction and the sig
- * re-resolves on the restored bytes -> repeatable disable/reenable. */
+/* Force the session devmode getter to return 0, retaining its original bytes
+ * for restoration. Resolve and verify the signature at command invocation. */
 #define DEVMODE_SIG_NAME   "SessionDevModeGetter"
 
-/* Resolve a named engine site from the shipped sig DB (mirrors sh_cvars' NameHash resolve: iterate
- * BACKEND_ENGINE_SIGNATURES, sig_resolve_one over g_module_base). Fills *out; returns 1 if the entry was
- * found in the DB (then *out carries the resolve status, which the code_patch_sig / install_detour_sig
- * gates check), 0 if the name isn't in the DB or no module base is cached. Used by BOTH the [15][16]
- * devmode patch (SessionDevModeGetter) and the [11] render-logging detour (RenderLogStub). */
+/* Find a database entry and resolve it now. Return 0 for no entry/base;
+ * callers separately check out->status before using the result. */
 static int resolve_sig_by_name(const char *name, sig_result *out)
 {
     if (g_module_base == NULL || name == NULL) return 0;
@@ -914,8 +833,7 @@ static int resolve_sig_by_name(const char *name, sig_result *out)
     return 0;
 }
 
-/* [15] sh_disable_devmode (OG snaphak_disable_devmode) -- patch the session devmode getter to return 0
- * (devmode off). */
+
 static void h_disable_devmode(idCmdArgs *a)
 {
     (void)a;
@@ -929,8 +847,7 @@ static void h_disable_devmode(idCmdArgs *a)
         return;
     }
 
-    /* expect = the 3-byte head the sig already verified (0F B6 81); new = `xor eax,eax; ret` (31 C0 C3).
-     * code_patch_sig REFUSES unless the resolve was a clean unique SIG_OK hit. */
+    /* Replace the verified head with xor eax,eax; ret. */
     const uint8_t expect[3]    = { 0x0F, 0xB6, 0x81 };
     const uint8_t new_bytes[3] = { 0x31, 0xC0, 0xC3 };
     sh_patch_status st = code_patch_sig(&r, expect, new_bytes, 3, &g_devmode_handle);
@@ -942,8 +859,7 @@ static void h_disable_devmode(idCmdArgs *a)
                   sh_patch_status_str(st));
 }
 
-/* [16] sh_reenable_devmode (OG snaphak_reenable_devmode) -- restore the session devmode getter (undo the
- * disable patch). */
+
 static void h_reenable_devmode(idCmdArgs *a)
 {
     (void)a;
@@ -959,41 +875,27 @@ static void h_reenable_devmode(idCmdArgs *a)
         sh_printf("sh_reenable_devmode: %s -- restore failed\n", sh_patch_status_str(st));
 }
 
-/* ----------------------------------------------------------------- [11] cs_start_render_logging ---
- * FIRST live engine-code DETOUR (the detour layer's first real consumer). SnapHak's
- * cs_start_render_logging (OG FUN_1800224c0) opens renderlog.txt and detours the engine's render-debug
- * TRACE SINK (RenderLogStub @0xd99dc0 = `mov [rsp+0x20],r9; ret`, a no-op when logging is off) with a hook
- * that writes the engine's printf trace lines to the file. The engine hands the sink a fully-formatted
- * printf fmt + varargs ("Source stages %s -> Dest stages: %s\n", etc.), so the hook reads ZERO renderer
- * internals -- it just vfprintf's fmt+va to the log. The original sink was a no-op, so the hook does NOT
- * trampoline. Start-only, process-lifetime (mirrors OG: no stop command; teardown at DLL detach is
- * optional). We resolve RenderLogStub by SIGNATURE at FIRE (version-portable) and ride the
- * sh_install_detour_sig (SIG_OK-gated, SEH-guarded, reversible). */
+/* Log render trace varargs through a replacement no-op sink. Start-only: the
+ * detour and file remain active for the process lifetime, with no trampoline call. */
 #define RENDERLOG_SIG_NAME   "RenderLogStub"
 #define RENDERLOG_STOLEN     14   /* hook.c writes a 14-byte FF25 abs-jmp + requires stolen>=14; 14<=16 room */
 
 static FILE *g_renderlog_fp    = NULL;
 static void *g_renderlog_tramp = NULL;
 
-/* SEH-guarded vfprintf to the render log -- factored out of our_renderlog_hook because MSVC forbids
- * mixing va_start/va_end with __try/__except in the SAME function (it inserts a frame-unwind filter the
- * varargs prologue conflicts with). This helper takes the already-started va_list; a fault while the
- * engine's varargs/fmt are malformed degrades to a clean no-write, never a crash that takes down the
- * renderer. */
+/* MSVC cannot combine varargs setup and SEH in one function. Pass the prepared
+ * va_list into this guarded writer instead. */
 static void renderlog_write(FILE *fp, const char *fmt, va_list ap)
 {
     __try {
         vfprintf(fp, fmt, ap);
         fflush(fp);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        /* a malformed engine trace line must never fault the render thread */
+
     }
 }
 
-/* The detour hook installed over RenderLogStub. The engine calls the sink as
- * (ctx=RCX, channel=RDX, fmt=R8, ...va); we IGNORE ctx+channel and write fmt + the varargs to
- * renderlog.txt. Reads ZERO renderer internals (the engine supplies a fully-formatted fmt+varargs); does
- * NOT call a trampoline (the original sink was a no-op). */
+/* Engine ABI: (context,channel,format,...). Only format and varargs are consumed. */
 static void our_renderlog_hook(void *ctx, void *channel, const char *fmt, ...)
 {
     (void)ctx;
@@ -1005,8 +907,7 @@ static void our_renderlog_hook(void *ctx, void *channel, const char *fmt, ...)
     va_end(ap);
 }
 
-/* [11] cs_start_render_logging -- open renderlog.txt + detour the engine render-debug trace sink so its
- * printf lines are logged. Start-only (mirrors OG: no stop command). */
+/* Open the render trace log and install its sink once. */
 static void h_cs_start_render_logging(idCmdArgs *a)
 {
     (void)a;
@@ -1040,39 +941,28 @@ static void h_cs_start_render_logging(idCmdArgs *a)
     sh_printf("cs_start_render_logging: render-log hook installed.\n");
 }
 
-/* ---- Tier B/C STUBS: register the NAME, print the OG help + a "not yet implemented" note. ----
- * Each closes over its own help via a small per-command wrapper produced by the X-macro below. The
- * stub is faithful surface (the command STOPS returning "Unknown command") without claiming behavior. */
+/* Shared help/refusal wrapper for unimplemented commands. */
 #define STUB_HANDLER(fn, help_text)                                              \
     static void fn(idCmdArgs *a) {                                              \
         (void)a;                                                                \
         sh_printf("%s\n(not yet implemented in clone)\n", help_text);          \
     }
 
-/* ============================================================ WS-C deferred dev/asset commands ====
- * [20] sh_genmd6model / [19] sh_genbmodel / [17] sh_debugrender -- OG chrispy dev/asset tools. Real ports
- * of OG XINPUT1_3 FUN_18000b560 / FUN_18000b4a0 / FUN_18001ffe0. Every engine fn is resolved by SIGNATURE
- * off the live DOOM module (resolve_sig_by_name over g_module_base, the same path devmode/renderlog use) --
- * NO hardcoded base+RVA. Every engine touch is SEH-guarded (these are heavy/faultable asset compilers + a
- * runtime renderWorld vtable). [17] ports only the SAFE READ-ONLY sub-ops; its 2 genuinely-harmful sub-ops
- * (loadimg_n_break = INT3 debugger trap; dump_megatex = hardcoded fwrite to C:\Users\Chris\megatex.raw) are
- * routed to a clear refusal, NOT reproduced bug-for-bug. */
+/* Model compilation and render-debug commands. Engine calls resolve at use.
+ * Debug traps, machine-specific dumps, and unsupported mutators are refused. */
 
-/* ---- engine fn typedefs for the asset-gen call-targets (resolved by sig at FIRE) ---------------- */
-typedef void *(*default_idstr_ctor_fn)(void *self);                    /* DefaultIdStrCtor 0x19fd040 */
-typedef void *(*md6_ctor_fn)(void *md6);                               /* Md6Ctor 0x149b8d0 */
-typedef void  (*md6_setoutput_fn)(void *md6, void *output_idstr);      /* Md6SetOutput 0x149c450 */
-typedef void  (*md6_build_fn)(void *md6);                              /* Md6Build (final call) 0x149bee0 */
-typedef void  (*idstr_assign2_fn)(void *dstField, const char *cstr);   /* IdStrAssign 0x1a03e10 */
-typedef void *(*idstr_ctor2_fn)(void *self, const char *cstr);         /* IdStrCtor 0x19fcef0 */
-typedef void  (*idstr_dtor2_fn)(void *self);                           /* IdStrDtor 0x19fd120 */
-typedef void  (*bmodel_builder_fn)(void *out208, const char *input,    /* BModelBuilder 0x14cf550 */
+/* Model-builder call contracts. */
+typedef void *(*default_idstr_ctor_fn)(void *self);
+typedef void *(*md6_ctor_fn)(void *md6);
+typedef void  (*md6_setoutput_fn)(void *md6, void *output_idstr);
+typedef void  (*md6_build_fn)(void *md6);
+typedef void  (*idstr_assign2_fn)(void *dstField, const char *cstr);
+typedef void *(*idstr_ctor2_fn)(void *self, const char *cstr);
+typedef void  (*idstr_dtor2_fn)(void *self);
+typedef void  (*bmodel_builder_fn)(void *out208, const char *input,
                                    const char *output, void *opts);
 
-/* ---- SEH-guarded single-call wrappers (the engine fns are heavy/faultable; never let a fault out) --
- * Each resolves the named sig at FIRE (build-portable) and invokes under __try. Returns 1 on a ran call,
- * 0 if the sig is missing/unresolved or the call faulted. MSVC forbids mixing C++ object unwinding with
- * __try in one fn, but these are plain C fn-ptr calls so the guard is clean. */
+/* Resolve each engine helper on invocation; report missing signatures or faults. */
 static void *eng_default_idstr_ctor(void *self)
 {
     sig_result r;
@@ -1103,7 +993,7 @@ static void eng_idstr_dtor(void *self)
     if (!resolve_sig_by_name("IdStrDtor", &r) ||
         (r.status != SIG_OK && r.status != SIG_OK_HOOKED) || r.addr == 0) return;
     __try { ((idstr_dtor2_fn)r.addr)(self); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { /* dtor fault -> leak, never crash */ }
+    __except (EXCEPTION_EXECUTE_HANDLER) { /* Leave failed cleanup to the process lifetime. */ }
 }
 static int eng_md6_ctor(void *md6)
 {
@@ -1138,33 +1028,26 @@ static int eng_bmodel_builder(void *out208, const char *input, const char *outpu
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-/* idStr / md6 / bmodel-result stack-object sizes -- over-allocated vs the OG's exact frame slots so a
- * build-shifted object layout can never overrun. OG frames: [20] opts idStr 288B, input idStr 88B, output
- * idStr 48B, md6 ctx; [19] opts idStr 48B, out208 result 208B. We round each generously. */
-#define GEN_IDSTR_BYTES   128     /* an idStr (inline buf cap 0x14 + header) -- OG slots 48..288B; 128 covers it */
+/* Local engine-object storage. These bounds cover the supported layouts;
+ * a different engine build still requires validation. */
+#define GEN_IDSTR_BYTES   128     /* Scratch storage for an engine idStr. */
 #define GEN_MD6_BYTES     1024    /* the idMd6Builder ctx (ctor inits md6+0x38..+0x110; build writes +0xf8) */
 #define GEN_BMODEL_BYTES  256     /* the BModelBuilder out208 result struct (OG memsets/uses 208 = 0xD0 bytes) */
-#define GEN_BOPTS_BYTES   0xD0    /* the bmodel options struct: OG memset(opts,1,0xD0). RECIPE-TAG (build-
-                                   * specific): re-confirm 0xD0 on a build bump by tracing how 0x14cf600 reads
-                                   * R9 (BModelBuilder sig comment). The clone memsets a 0xD0 buffer to 0x01. */
+#define GEN_BOPTS_BYTES   0xD0    /* BModel result buffer, filled with 0x01. Despite this name, arg4 is an idStr. */
 
-/* [20] sh_genmd6model <input> <output> -- compile a .md6model into a bmd6model. Real port of OG
- * FUN_18000b560. OG ORDER (DIRECT, from its decompile @0xb560): gate argc>2 (>=3); DefaultIdStrCtor(opts);
- * Md6Ctor(&md6); IdStrAssign(input, argv[1]); IdStrCtor(output, argv[2]); Md6SetOutput(&md6, output);
- * IdStrDtor(output); Md6Build(&md6); IdStrDtor(opts). The OG ctor's a default opts idStr it never passes
- * to the call chain (a scratch the md6 ctx already owns at md6+0x60) -- we ctor+dtor it faithfully to
- * mirror the OG frame lifecycle. Md6Build is destructor-shaped (compile-then-release, the bmd6 buffer
- * write folded into the dtor -- see the Md6Build sig comment). Every engine call SEH-guarded. */
+/* Build MD6 output through constructor, input assignment, output setup, and
+ * final compile/release. The final operation owns builder teardown; output
+ * and scratch option strings retain their separate lifetimes. */
 static void h_sh_genmd6model(idCmdArgs *a)
 {
     const char *input  = cmd_argv(a, 1);
     const char *output = cmd_argv(a, 2);
-    if (cmd_argc(a) <= 2 || input == NULL || output == NULL) {     /* OG gate: 2 < argc */
+    if (cmd_argc(a) <= 2 || input == NULL || output == NULL) {
         sh_printf("sh_genmd6model <input file> <output file> Compiles a .md6model into a bmd6model\n");
         return;
     }
 
-    /* Zero-init the stack objects so a sig miss / partial ctor leaves defined (dtor-safe) memory. */
+    /* Initialize scratch before any engine constructor runs. */
     unsigned char opts[GEN_IDSTR_BYTES];   memset(opts,   0, sizeof opts);
     unsigned char md6 [GEN_MD6_BYTES];     memset(md6,    0, sizeof md6);
     unsigned char inS [GEN_IDSTR_BYTES];   memset(inS,    0, sizeof inS);
@@ -1179,7 +1062,7 @@ static void h_sh_genmd6model(idCmdArgs *a)
         eng_idstr_dtor(opts);
         return;
     }
-    /* input/output idStrs. IdStrAssign sets the input field; IdStrCtor copies the output C-string. */
+
     if (!eng_idstr_assign(inS, input) || !eng_idstr_ctor_copy(outS, output)) {
         sh_printf("sh_genmd6model: idStr assign/ctor unresolved -- cannot compile.\n");
         eng_idstr_dtor(opts);
@@ -1191,10 +1074,10 @@ static void h_sh_genmd6model(idCmdArgs *a)
         eng_idstr_dtor(opts);
         return;
     }
-    eng_idstr_dtor(outS);                  /* OG dtors output right after SetOutput */
+    eng_idstr_dtor(outS);
 
-    int built = eng_md6_build(md6);        /* the final md6 call (compile-then-release) */
-    eng_idstr_dtor(opts);                  /* OG dtors opts last */
+    int built = eng_md6_build(md6);
+    eng_idstr_dtor(opts);
 
     if (built)
         sh_printf("sh_genmd6model: compiled '%s' -> '%s'\n", input, output);
@@ -1202,33 +1085,27 @@ static void h_sh_genmd6model(idCmdArgs *a)
         sh_printf("sh_genmd6model: md6 build unresolved/faulted ('%s').\n", input);
 }
 
-/* [19] sh_genbmodel <input> <output> -- generate a bmodel from a .obj/.ase/.lwo. Real port of OG
- * FUN_18000b4a0. OG ORDER (DIRECT, from its decompile @0xb4a0): gate argc>2; memset(opts,1,0xD0); DefaultIdStrCtor(s);
- * BModelBuilder(out208, argv[1]=input, argv[2]=output, &opts); IdStrDtor(s). The default idStr `s` is a
- * scratch the OG ctor's + dtor's around the call (not passed to BModelBuilder) -- mirror its lifecycle.
- * Every engine call SEH-guarded; the out208 result + the 0xD0 opts buffer are stack-local + zero-init. */
+/* Generate a BModel using a 0xD0 result buffer and a constructed options idStr. */
 static void h_sh_genbmodel(idCmdArgs *a)
 {
     const char *input  = cmd_argv(a, 1);
     const char *output = cmd_argv(a, 2);
-    if (cmd_argc(a) <= 2 || input == NULL || output == NULL) {     /* OG gate: 2 < argc */
+    if (cmd_argc(a) <= 2 || input == NULL || output == NULL) {
         sh_printf("sh_genbmodel <input file> <output file> Generate a bmodel from a .obj/.ase/.lwo file.\n");
         return;
     }
 
-    /* OG (cmd_0xb4a0): ONE 0xD0 struct memset to 0x01 is BModelBuilder arg1/RCX (the out/result struct); ONE
-     * default-ctor'd idStr is arg4/R9. There is NO separate options buffer -- the 0x01-memset IS arg1. (The
-     * first port inverted arg1/arg4: it passed a 0-memset buffer as arg1 + the 0x01 buffer as arg4, leaving
-     * the idStr unused. Fixed to match OG byte-for-byte.) */
-    unsigned char out208[GEN_BOPTS_BYTES]; memset(out208, 0x01, sizeof out208);  /* OG: memset(auStack_e8, 1, 0xd0) -> arg1 */
-    unsigned char optsS [GEN_IDSTR_BYTES]; memset(optsS,  0,    sizeof optsS);    /* OG auStack_118: the idStr -> arg4 */
+    /* Engine arg1 is the 0xD0 result initialized to 0x01; arg4 is the idStr.
+     * Swapping them breaks the builder ABI. */
+    unsigned char out208[GEN_BOPTS_BYTES]; memset(out208, 0x01, sizeof out208);
+    unsigned char optsS [GEN_IDSTR_BYTES]; memset(optsS,  0,    sizeof optsS);
 
     if (!eng_default_idstr_ctor(optsS)) {
         sh_printf("sh_genbmodel: idStr ctor unresolved -- cannot generate.\n");
         return;
     }
-    int built = eng_bmodel_builder(out208, input, output, optsS);  /* OG: BModelBuilder(auStack_e8, input, output, auStack_118) */
-    eng_idstr_dtor(optsS);                  /* OG dtors the idStr after the build */
+    int built = eng_bmodel_builder(out208, input, output, optsS);
+    eng_idstr_dtor(optsS);
 
     if (built)
         sh_printf("sh_genbmodel: generated bmodel '%s' -> '%s'\n", input, output);
@@ -1236,50 +1113,23 @@ static void h_sh_genbmodel(idCmdArgs *a)
         sh_printf("sh_genbmodel: bmodel builder unresolved/faulted ('%s').\n", input);
 }
 
-/* ----------------------------------------------------------------- [17] sh_debugrender -------------
- * Real port of OG FUN_18001ffe0 (dispatches argv[1] across 9 sub-ops). The OG reads renderWorld =
- * *(engineBase+0x57216f0) -- a .data SLOT. We resolve it BUILD-PORTABLY: the RenderWorldGetter sig anchors a
- * unique engine window carrying `LEA RCX,[rip+slot]`; sh_decode_rip_slot decodes it to the slot RVA, then we
- * deref once for the live idRenderWorld*. If that misses, glb_resolve("render_world_slot") signs a second,
- * independent code site for the same slot. The editor singleton (for showcursor) comes from
- * glb_resolve("editor_singleton"), the same portable resolution sh_iface_engine uses.
- *
- * PORTED (safe, read-only): dumprenderinfo (=OG dumpmodelinfo: walk the rendermodel list, Printf each name),
- * showcursor (write byte[editor+0x23624]=0), togglefpsupdate (cosmetic flag toggle -- clone-local state),
- * showmaterial / drawmatarg (GetDeclsOfType("idMaterial") lookups -- decl reads, no mutation).
- * REFUSED (clear toast, NOT bug-for-bug -- genuinely harmful): loadimg_n_break (ends in INT3 = a debugger
- * trap that halts the game), dump_megatex (hardcoded fwrite to C:\Users\Chris\megatex.raw, chrispy's box).
- * NOT-AVAILABLE (heavy dev-only mutators, faithfully surfaced but not ported): test_rm_commit, test_sum_shit,
- * testnewgui (render-commit / geoworld-build / GUI-alloc -- out of the safe read-only scope). */
-#define RW_SLOT_KNOWN_RVA         0x57216f0u  /* the renderWorld .data slot's RVA on the pinned Vulkan build
-                                               * (OG *(engineBase+RVA)) -- kept for audit and per-build
-                                               * re-derivation. Dereferenced only when the host IS that build. */
-/* RE-DERIVE RECIPE for the 4 BUILD-SPECIFIC offsets below (do per DOOM build -- portability discipline; these
- * are vtable-slot/struct-field offsets, NOT sig-resolvable). All four come from TWO command-handler decompiles:
- *   - The renderWorld vtbl slots + the model-name offset: decompile the OG `dumpmodelinfo` handler (find via the
- *     AddCommand("dumpmodelinfo") registration xref, or its Printf format string). It does
- *     `n = rw->vtbl[RW_VSLOT_MODEL_COUNT]()` then loops `m = rw->vtbl[RW_VSLOT_GET_MODEL](i);
- *     name = *(char**)(m + RW_MODEL_NAME_OFF)` -> read the two `call qword[rax+0xNN]` vtbl offsets + the
- *     `mov rcx,[model+0xNN]` name offset straight off the decompile.
- *   - ED_SHOWCURSOR_OFF: decompile the OG `showcursor` handler -> `*(uint8*)(editor + 0xNN) = 0`; the editor base
- *     is EDITOR_SINGLETON_RVA below (already recipe-tagged). Re-derive by decompiling the handler (<handlerRVA>) on the new build.
- * A wrong offset here degrades to a bad read on dev-only console cmds (SEH-guarded), never a crash. */
+/* Render inspection uses signed render-world anchors; showcursor writes one
+ * signed editor-object field. Other toggles are local diagnostics. Unsupported
+ * mutators and the original debugger/machine-specific dump paths are refused. */
+#define RW_SLOT_KNOWN_RVA         0x57216f0u  /* Pinned Vulkan fallback slot; the host gate checks filename only. */
+/* Recheck vtable/field offsets when porting. Derive model-count/model/name
+ * accesses from the dumpmodelinfo handler and the cursor byte from showcursor. */
 #define RW_VSLOT_MODEL_COUNT      0x188       /* renderWorld vtbl -> GetActiveRenderModelCount() -> uint (BUILD-SPECIFIC) */
 #define RW_VSLOT_GET_MODEL        0x190       /* renderWorld vtbl -> GetRenderModel(idx) -> model* (=400; BUILD-SPECIFIC) */
 #define RW_MODEL_NAME_OFF         0x10        /* render model -> name char* (model+0x10) (BUILD-SPECIFIC) */
 #define ED_SHOWCURSOR_OFF         0x23624u    /* editor -> showcursor byte (OG writes 0) (BUILD-SPECIFIC) */
 #define RW_MODEL_COUNT_CAP        1000000u    /* stale-renderWorld guard on the model count */
-#define EDITOR_SINGLETON_RVA      0x3056748u  /* the inline idSnapEditorLocal object's RVA on the pinned Vulkan
-                                               * build (in-place ctor 0x51A8E0) -- kept for audit and per-build
-                                               * re-derivation, no longer used to locate anything. showcursor
-                                               * finds the object via glb_resolve("editor_singleton") and writes
-                                               * byte[editor+0x23624]=0 through that. */
+#define EDITOR_SINGLETON_RVA      0x3056748u  /* Pinned Vulkan audit reference; the editor global anchor locates the object. */
 
-/* GetDeclsOfType typedef already declared above (get_decls_fn); reuse it for the material lookups. */
 
-/* Resolve the live idRenderWorld* build-portably: decode the RenderWorldGetter sig's RIP slot, deref once;
- * failing that, the signed "render_world_slot" anchor. The pinned RVA is consulted only on the pinned build.
- * Returns NULL if none yields a readable non-NULL pointer -- the caller prints "renderWorld not available". */
+
+/* Resolve renderWorld by accessor, independent global anchor, then a
+ * Vulkan-name-gated RVA. Return NULL if no readable non-NULL object is found. */
 static void *dr_resolve_renderworld(void)
 {
     sig_result r;
@@ -1298,8 +1148,7 @@ static void *dr_resolve_renderworld(void)
             if (sh_safe_read((const uint8_t *)slot, (uint8_t *)&rw, sizeof rw) && rw) return rw;
         }
     }
-    /* Last resort, and only on the build the literal was extracted from: elsewhere it reads unrelated
-     * memory and we would hand back a bogus idRenderWorld* the caller cannot distinguish from a real one. */
+    /* Last resort: the pinned Vulkan slot behind the host filename gate. */
     if (g_module_base && sh_host_is_pinned_rva_build()) {
         void *rw = NULL;
         if (sh_safe_read(g_module_base + RW_SLOT_KNOWN_RVA, (uint8_t *)&rw, sizeof rw) && rw) return rw;
@@ -1331,10 +1180,7 @@ static const char *dr_model_name(void *model)
     __try { return *(const char * const *)((const uint8_t *)model + RW_MODEL_NAME_OFF); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
-/* SEH-guarded write of byte[editor+0x23624]=0 (showcursor). The editor object is located by the signed
- * "editor_singleton" anchor; if that does not resolve we DECLINE rather than write through a pinned RVA,
- * because on any other build that address is unrelated engine state and this is a WRITE. Returns 1 if the
- * write ran, 0 if we could not locate the editor (the caller then prints "showcursor unavailable"). */
+/* Clear the cursor flag only after the editor singleton anchor resolves. */
 static int dr_showcursor(void)
 {
     if (!g_module_base) return 0;
@@ -1348,8 +1194,7 @@ static int dr_showcursor(void)
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
-/* SEH-guarded GetDeclsOfType("idMaterial") + a no-op presence probe (the OG also did a name lookup we do
- * not need to mutate). Returns the decl-list ptr, or NULL. */
+/* Query material-registry presence without modifying declarations. */
 static void *dr_material_decls(void)
 {
     if (!g_get_decls) return NULL;
@@ -1357,9 +1202,7 @@ static void *dr_material_decls(void)
     __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
 }
 
-/* clone-local cosmetic toggle states (the OG flips engine-side debug flags DAT_18003e789/e78b/e78c; the
- * clone keeps the user-facing toggle behavior without poking undocumented engine globals -- faithful surface,
- * no engine mutation beyond the editor showcursor byte). */
+/* Diagnostic toggles are local state and do not change engine rendering flags. */
 static int g_dr_fps_update = 0;
 
 static void h_sh_debugrender(idCmdArgs *a)
@@ -1370,7 +1213,7 @@ static void h_sh_debugrender(idCmdArgs *a)
         return;
     }
 
-    /* ---- SAFE READ-ONLY sub-ops ---- */
+    /* Supported inspection and cursor controls. */
     if (strcmp(sub, "dumprenderinfo") == 0 || strcmp(sub, "dumpmodelinfo") == 0) {
         void *rw = dr_resolve_renderworld();
         if (rw == NULL) { sh_printf("sh_debugrender: renderWorld not available (no live render).\n"); return; }
@@ -1404,7 +1247,7 @@ static void h_sh_debugrender(idCmdArgs *a)
         return;
     }
 
-    /* ---- REFUSED (genuinely harmful; clear toast, NOT bug-for-bug) ---- */
+    /* Deliberately refused legacy operations. */
     if (strcmp(sub, "loadimg_n_break") == 0) {
         sh_printf("sh_debugrender: '%s' not available -- it ends in a debugger INT3 trap (halts the game). "
                   "Refused by the clone.\n", sub);
@@ -1416,7 +1259,7 @@ static void h_sh_debugrender(idCmdArgs *a)
         return;
     }
 
-    /* ---- NOT-AVAILABLE (heavy dev-only mutators, faithfully surfaced, out of the safe read-only scope) ---- */
+    /* Unsupported engine-mutating debug operations. */
     if (strcmp(sub, "test_rm_commit") == 0 || strcmp(sub, "test_sum_shit") == 0 ||
         strcmp(sub, "testnewgui") == 0) {
         sh_printf("sh_debugrender: '%s' is an internal render mutator of the original tool -- not ported.\n", sub);
@@ -1426,29 +1269,11 @@ static void h_sh_debugrender(idCmdArgs *a)
     sh_printf("sh_debugrender: unknown sub-op '%s'.\n", sub);
 }
 
-/* ----------------------------------------------------------------- [22] sh -- the SnapStack dispatcher
- * Port of OG XINPUT1_3 FUN_180007620 (the `sh` console command). GATES on the shared UI-interface object
- * (sh_ui_get_iface): if it doesn't exist yet, report "Ui interface doesnt exist yet!" (the OG exact no-UI
- * behavior -- when the frontend hasn't loaded, `sh` faithfully says this). Otherwise look the subcommand
- * up in the interface's runtime cmd-map (interface+0x58) and, on a hit, run the handler RIGHT HERE.
- *
- * INLINE EXECUTION IS THE POINT (issue #61, a deliberate divergence from the OG dispatch -- see
- * docs/fidelity.md). This callback is an engine Cbuf command: the engine invokes it on DOOM's MAIN
- * thread at ExecuteCommandBuffer, the same decl-safe exec point the clone_bss_apply drain and the decl
- * server use. That is exactly where a SnapStack op belongs -- its serialize, JSON patch, decl commit,
- * selection writes, and toast all land on the engine's own thread as one unit, and the applied count
- * stays synchronous. The OG instead ENQUEUED {handler,args} onto the interface work-queue, drained by
- * its frontend's worker thread (+0x1a0); it had to (its handlers touched Qt objects owned by that
- * thread), and calling engine decl code from that foreign thread is the defect behind the #56/#59
- * faults. Our handlers touch no UI-thread-affine state (backend stores + vtable slots only), so nothing
- * needs the bounce. The old comment here called the worker "the MAIN (UI) thread" -- that conflation is
- * how the wrong-thread commit survived review, and it is exactly wrong: the worker is a plain
- * CreateThread in ui_bridge.c and the engine treats it as foreign.
- *
- * argv shape is unchanged: the OG passes the SUBCOMMAND's args (the tail starting at the subcommand
- * name), so argv[0] = the subcommand, argv[1..] = its args. The handler call is SEH-guarded so a
- * handler fault degrades to a console line instead of taking the frame down. A MISS reports the OG
- * message "Command %s has not been registered yet". With no subcommand, mirror the OG usage hint. */
+/* Dispatch sh subcommands inline on the engine main thread. Backend handlers
+ * can serialize, edit, commit, select, and toast at this command-execution point;
+ * sending them to the frontend worker would make those engine calls off-thread.
+ * argv begins at the subcommand name. Borrowed argument strings remain valid
+ * for this callback; missing commands and caught handler faults print errors. */
 static void h_sh_dispatch(idCmdArgs *a)
 {
     sh_iface *iface = sh_ui_get_iface();
@@ -1459,32 +1284,29 @@ static void h_sh_dispatch(idCmdArgs *a)
 
     const char *sub = cmd_argv(a, 1);
     if (sub == NULL) {
-        sh_printf("Dispatches a Snapmap+ command\n");   /* the OG's usage line said "snaphak" -- renamed */
+        sh_printf("Dispatches a Snapmap+ command\n");
         return;
     }
 
-    /* Look the subcommand up in the interface's runtime cmd-map (obj+0x58, the registrar-populated map). */
+
     sh_cmd_handler handler = NULL;
     void          *ctx     = NULL;
     if (!sh_iface_lookup_cmd(iface, sub, &handler, &ctx) || handler == NULL) {
-        sh_printf("Command %s has not been registered yet\n", sub);   /* OG miss path */
+        sh_printf("Command %s has not been registered yet\n", sub);
         return;
     }
 
-    /* Build the SUBCOMMAND's argv from the console idCmdArgs (skip argv[0]="sh"). The engine-owned
-     * strings are valid for the duration of this callback, and the handler runs inside it, so no copy
-     * is needed. */
+    /* Borrow the subcommand argument tail for this synchronous callback. */
     int total = cmd_argc(a);
-    int sub_argc = total > 1 ? total - 1 : 0;          /* drop the leading "sh" */
+    int sub_argc = total > 1 ? total - 1 : 0;
     const char *sub_argv[64];
     if (sub_argc > 64) sub_argc = 64;
     for (int i = 0; i < sub_argc; i++) {
-        const char *v = cmd_argv(a, i + 1);            /* a->argv[1..] = the subcommand + its args */
+        const char *v = cmd_argv(a, i + 1);
         sub_argv[i] = v ? v : "";
     }
 
-    /* RUN INLINE on this thread -- DOOM's main thread at the command-exec point (see the doc comment
-     * above for why this replaced the OG's enqueue-to-worker dispatch). */
+
     __try {
         handler(ctx, sub_argc, sub_argv);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1492,37 +1314,13 @@ static void h_sh_dispatch(idCmdArgs *a)
     }
 }
 
-/* ----------------------------------------------------------------- [12] sh_superscriptop ----------
- * Real port of OG XINPUT1_3 FUN_180026450 (cmd_0x26650 gates it on argv[1]=="genevents"). Dumps the
- * engine's event-definition table to the clipboard as a block of C #defines, so a "superscript" author
- * has every EV_<name>/<eventnum> + its arg-spec on the clipboard. DIRECT RE of the engine event-manager
- * vtable (this DOOMx64vk build; base 0x140000000) -- all hops ride sh_typeinfo's ONE declMgr accessor, no
- * new signature:
- *   declMgr = sh_typeinfo_get_declmgr();                  // accessor @ base+0x17F7030 (0x1417f7030: lazy-init singleton)
- *   evMgr   = (*(*declMgr + 0x90))(declMgr);              // declMgr vtbl slot +0x90 (0x17f70d0: lea rax,[rcx+0x1a0]) -> evMgr sub-object @ declMgr+0x1A0
- *   count   = (*(*evMgr  + 0x28))(evMgr);                 // evMgr vtbl slot +0x28 (0x17f75b0: mov eax,[count]) -> event count
- *   for i in 0..count-1:
- *     name  = (*(*evMgr + 0x20))(evMgr, i);               // evMgr vtbl slot +0x20 (0x17f7550) -> *getByIndex(i) == rec+0x00 == the event NAME char*
- *     rec   = (*(*evMgr + 0x10))(evMgr, name);            // evMgr vtbl slot +0x10 (0x17f7320: findByName) -> the eventDef record (OG DISCARDED this -> the bug)
- *     fspec = *(rec + 0x10);                              // eventDef rec+0x10 == the ';'-delimited arg-spec char* (slot 7 / FUN_140748650 splits it on ';')
- *     emit  "#define EV_<name> <i>\n#define FSPEC_<name> \"<fspec>\"\n"
- *
- * eventDef record layout (DIRECT, the registrar @0x17f7140 + slot accessors): +0x00 name char*,
- * +0x10 fspec char*, +0x2c fspec strlen, +0x30 numArgs, +0x34 eventnum (== the array index i, since the
- * registrar stores rec at array[eventnum] and eventnum increments per registration). So the OG's use of
- * the loop index i as the %d number is correct (i == eventnum).
- *
- * THE OG sprintf BUG (in the OG decompile @0x26450, L45): FUN_180025130(buf, "#define EV_%s %d\n#define FSPEC_%s \"%s\"\n",
- * name, i) passes 4 conversions but only 2 varargs -> the 2nd FSPEC_%s and the "%s" read register garbage.
- * THE CLONE EMITS THE INTENDED OUTPUT, not bug-for-bug: all 4 fields resolved (name, i, name, fspec). If a
- * record's fspec is unreadable/empty (a NULL rec+0x10 -- e.g. a no-arg event), we emit the EV_ line +
- * FSPEC_<name> "" faithfully (an empty arg-spec), never register garbage.
- *
- * BUILD-PORTABILITY (the reference-entity-layout trap): the declMgr-accessor RVA + the declMgr-vtbl +0x90
- * and evMgr-vtbl +0x28/+0x20/+0x10 SLOTS + the rec+0x10 fspec offset are this-build event-manager layout
- * -- RE-DERIVE PER BUILD (disassemble the declMgr ctor FUN_1417f6c70's two vtables
- * PTR_FUN_14270b958 / PTR_FUN_14270c2c8). Every hop is SEH-guarded + non-null gated; a wrong slot degrades
- * to "event manager unavailable" / a clean per-event skip, never a crash (same discipline as sh_type). */
+/* Export engine event names, numbers, and argument specs as C defines.
+ * Reach evMgr through declMgr vtable +0x90, then count/name/find through
+ * +0x28/+0x20/+0x10. Event records hold name@+0, fspec@+0x10, eventnum@+0x34.
+ * Dense registry indices equal event numbers. Resolve all format arguments;
+ * missing specs become empty strings.
+ * Recheck slots against the decl-manager constructor vtables when porting;
+ * the singleton accessor itself resolves through typeinfo's signed call site. */
 #define SS_EVMGR_ACCESSOR_VSLOT   0x90    /* declMgr vtbl -> evMgr sub-object accessor (BUILD-SPECIFIC) */
 #define SS_EV_COUNT_VSLOT         0x28    /* evMgr   vtbl -> event count                (BUILD-SPECIFIC) */
 #define SS_EV_GETNAME_VSLOT       0x20    /* evMgr   vtbl -> name-by-index (char*)       (BUILD-SPECIFIC) */
@@ -1531,13 +1329,12 @@ static void h_sh_dispatch(idCmdArgs *a)
 #define SS_EV_COUNT_CAP           65536u  /* stale/garbage-evMgr guard (registrar caps the table at 0x1000) */
 #define SS_DUMP_CAP               0x40000 /* accumulation buffer (~256 KiB; ~1k events * ~200 B each) */
 
-typedef void *(*ss_evmgr_acc_fn)(void *declmgr);            /* (*declMgr+0x90)(declMgr) -> evMgr */
-typedef unsigned (*ss_count_fn)(void *evmgr);              /* (*evMgr+0x28)(evMgr) -> count */
-typedef const char *(*ss_getname_fn)(void *evmgr, unsigned i); /* (*evMgr+0x20)(evMgr,i) -> name char* */
-typedef void *(*ss_findbyname_fn)(void *evmgr, const char *nm);/* (*evMgr+0x10)(evMgr,name) -> record */
+typedef void *(*ss_evmgr_acc_fn)(void *declmgr);
+typedef unsigned (*ss_count_fn)(void *evmgr);
+typedef const char *(*ss_getname_fn)(void *evmgr, unsigned i);
+typedef void *(*ss_findbyname_fn)(void *evmgr, const char *nm);
 
-/* SEH-guarded single vtable-slot call wrappers (the evMgr/declMgr shape is engine-owned; never trust it).
- * Each reads *obj (the vtable), then the fn ptr at vtbl+slot, calls it; NULL/0 on any fault. */
+/* Guarded event-manager vtable calls return NULL/0 on failure. */
 static void *ss_call_evmgr_acc(void *declmgr)
 {
     __try {
@@ -1593,11 +1390,10 @@ static void ss_dump_append(char *buf, size_t cap, size_t *len, const char *s)
     buf[*len] = '\0';
 }
 
-/* [12] sh_superscriptop -- dump the engine's event definitions to the clipboard as C #defines. Real
- * port of OG FUN_180026450 (sprintf bug fixed: all 4 fields resolved -- name, eventnum, name, fspec). */
+/* Copy event definitions as C defines. */
 static void h_sh_superscriptop(idCmdArgs *a)
 {
-    (void)a;   /* OG gates on argv[1]=="genevents"; the clone wires this handler directly to the command */
+    (void)a;
 
     void *declmgr = sh_typeinfo_get_declmgr();
     if (declmgr == NULL) {
@@ -1614,7 +1410,7 @@ static void h_sh_superscriptop(idCmdArgs *a)
         sh_printf("sh_superscriptop: no event definitions.\n");
         return;
     }
-    if (count > SS_EV_COUNT_CAP) {            /* stale/garbage-evMgr guard */
+    if (count > SS_EV_COUNT_CAP) {
         sh_printf("sh_superscriptop: event count implausible (stale event manager?).\n");
         return;
     }
@@ -1624,9 +1420,7 @@ static void h_sh_superscriptop(idCmdArgs *a)
     dump[0] = '\0';
     char line[1024];
 
-    /* The OG opened with an eventdef_ss_t struct-comment header (in the OG decompile @0x26450, L38-40); keep a header
-     * that documents the emitted #define pair (intended output, not the OG's struct decl which the OG
-     * never actually filled in). */
+    /* Describe the emitted name/number/spec pairs. */
     ss_dump_append(dump, sizeof dump, &dlen,
         "// snapmap-plus sh_superscriptop -- engine event definitions\n"
         "// EV_<name> = the event number; FSPEC_<name> = its ';'-delimited arg-spec\n");
@@ -1634,15 +1428,14 @@ static void h_sh_superscriptop(idCmdArgs *a)
     unsigned emitted = 0;
     for (unsigned i = 0; i < count; i++) {
         const char *name = ss_call_getname(evmgr, i);
-        if (name == NULL || name[0] == '\0') continue;   /* a hole in the table -> skip (no garbage) */
+        if (name == NULL || name[0] == '\0') continue;
 
         const char *fspec = NULL;
-        void *rec = ss_call_findbyname(evmgr, name);      /* the record the OG fetched but discarded */
-        if (rec != NULL) fspec = ss_read_fspec(rec);      /* rec+0x10 -> the arg-spec char* */
-        if (fspec == NULL) fspec = "";                    /* no-arg / unreadable -> empty spec (faithful) */
+        void *rec = ss_call_findbyname(evmgr, name);
+        if (rec != NULL) fspec = ss_read_fspec(rec);
+        if (fspec == NULL) fspec = "";
 
-        /* INTENDED output -- all 4 conversions resolved (name, eventnum==i, name, fspec). The OG passed
-         * only (name, i) for 4 specifiers; we pass all four properly. */
+
         _snprintf_s(line, sizeof line, _TRUNCATE,
                     "#define EV_%s %u\n#define FSPEC_%s \"%s\"\n", name, i, name, fspec);
         ss_dump_append(dump, sizeof dump, &dlen, line);
@@ -1655,57 +1448,28 @@ static void h_sh_superscriptop(idCmdArgs *a)
         sh_printf("sh_superscriptop: %u event defs generated (clipboard copy failed).\n", emitted);
 }
 
-/* ----------------------------------------------------------------- [21] cs_dumpeventdefs ----------
- * REAL port of the INTENT of OG XINPUT1_3 FUN_18000a1b0 (cmd thunk FUN_180022460). The OG walked a
- * SnapHak-INTERNAL eventDef std::vector (DAT_18003e4d8..e4e0, stride 0x210) -- a table the clone NEVER
- * builds -- formatting each record (FUN_18000a4e0) into a newline-joined string, then fputs'ing it to a
- * HARDCODED "C:\Users\Chris\eternalevents.txt" (chrispy's machine) via fopen_s(...,"w"). We instead source
- * the SAME eventDef data from the ENGINE (exactly the [12] sh_superscriptop walk: sh_typeinfo_get_declmgr
- * -> evMgr via declMgr vtbl+0x90 -> count/getByIndex/findByName) and write it to a FILE.
- *
- * FILE FORMAT (the OG event-def file format, RE-confirmed from the sibling FUN_180026450 header L38-40 --
- * the OG's own eventdef-table declaration; the [21] internal-cache formatter FUN_18000a4e0 was not
- * decompiled, so we reproduce the OG's documented eventdef_ss_t table, whose 5 members map 1:1 onto the
- * engine record fields we have):
- *   header  "struct eventdef_ss_t {const char* m_evname;int m_rettype;const char* m_fspec;"
- *           "unsigned m_numargs; unsigned m_eventnum;};\n\tstatic const eventdef_ss_t ALLEVENTS[]={\n"
- *   per ev  "\t{\"<name>\", <rettype>, \"<fspec>\", <numargs>, <eventnum>},\n"
- *   footer  "};\n"
- * fopen mode = "w" (faithful to the OG fopen_s mode). The OG joined records with '\n' and fputs'd once;
- * we fputs the whole accumulated buffer once (same single-write shape), SEH-guarded.
- *
- * ENGINE-record field map (DIRECT, the [12] eventDef layout): m_evname  <- rec+0x00 (name, via getByIndex)
- *   m_fspec <- rec+0x10 (';'-delimited arg-spec); m_numargs <- rec+0x30; m_eventnum <- rec+0x34. m_rettype
- *   is NOT sourceable from the four record fields the engine walk exposes -- we emit 0 (the faithful
- *   closest equivalent: a placeholder return-type, exactly as the OG's struct reserved the slot). Note the
- *   record's eventnum (rec+0x34) is the AUTHORITATIVE event number (== the loop index i for a dense table,
- *   but we emit the record's own field so a sparse table stays correct).
- *
- * SANE PATH: "eventdefs.txt" in the DOOM cwd (adapts the hardcoded chrispy path; mirrors how [11]
- * cs_start_render_logging writes "renderlog.txt"). The full walk + the file IO are SEH-guarded: a garbage
- * evMgr/record degrades to a clean per-event skip or an "unavailable" line, never a crash. Reuses the [12]
- * declMgr accessor + vtable-slot wrappers -- NO new signature. */
+/* Write engine event definitions as an eventdef_ss_t table in eventdefs.txt.
+ * Event numbers come from record+0x34, falling back to the dense index.
+ * Derive argument counts from semicolon-delimited fspec; record+0x30 is not
+ * populated on the supported build. Return type is unavailable and emitted as 0. */
 #define CDE_REC_EVENTNUM_OFF  0x34    /* eventDef record -> eventnum (uint)   (BUILD-SPECIFIC, [12] layout) */
-#define CDE_OUT_PATH          "eventdefs.txt"   /* sane path (DOOM cwd); adapts OG's hardcoded chrispy path */
+#define CDE_OUT_PATH          "eventdefs.txt"   /* Relative to the DOOM working directory. */
 
-/* SEH-guarded read of the eventnum record field cs_dumpeventdefs emits (the [12] clipboard path never needed
- * it). NOTE m_numargs is NOT read from the record: rec+0x30 reads 0 on this build (the engine derives the arg
- * count from the fspec at use-time), so cs_dumpeventdefs derives m_numargs from the fspec instead. */
+/* Read the record event number, or use the caller's dense-index fallback. */
 static unsigned cde_read_eventnum(void *rec, unsigned fallback)
 {
     __try { return *(const unsigned *)((const uint8_t *)rec + CDE_REC_EVENTNUM_OFF); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return fallback; }
 }
 
-/* SEH-guarded single fputs of the accumulated buffer (a malformed buffer/fp must never fault the editor). */
+/* Guard file output and report write success. */
 static int cde_write_file(FILE *fp, const char *buf)
 {
     __try { fputs(buf, fp); return 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-/* [21] cs_dumpeventdefs -- dump the engine event definitions to a FILE as the OG eventdef_ss_t table. Real
- * port of the OG INTENT (engine-sourced, sane path), not the OG's SnapHak-internal-cache walk. */
+/* Export the event table to a file. */
 static void h_cs_dumpeventdefs(idCmdArgs *a)
 {
     (void)a;
@@ -1725,17 +1489,17 @@ static void h_cs_dumpeventdefs(idCmdArgs *a)
         sh_printf("cs_dumpeventdefs: no event definitions.\n");
         return;
     }
-    if (count > SS_EV_COUNT_CAP) {            /* stale/garbage-evMgr guard (same cap as [12]) */
+    if (count > SS_EV_COUNT_CAP) {
         sh_printf("cs_dumpeventdefs: event count implausible (stale event manager?).\n");
         return;
     }
 
-    static char dump[SS_DUMP_CAP];            /* ~256 KiB; ~1.6k events * ~100 B/row fits */
+    static char dump[SS_DUMP_CAP];
     size_t dlen = 0;
     dump[0] = '\0';
     char line[1024];
 
-    /* The OG eventdef-table header (verbatim from FUN_180026450 L38-40 -- the OG's own declaration). */
+
     ss_dump_append(dump, sizeof dump, &dlen,
         "struct eventdef_ss_t {const char* m_evname;int m_rettype;const char* m_fspec;"
         "unsigned m_numargs; unsigned m_eventnum;};\n"
@@ -1744,32 +1508,30 @@ static void h_cs_dumpeventdefs(idCmdArgs *a)
     unsigned emitted = 0;
     for (unsigned i = 0; i < count; i++) {
         const char *name = ss_call_getname(evmgr, i);
-        if (name == NULL || name[0] == '\0') continue;    /* a hole in the table -> skip (no garbage) */
+        if (name == NULL || name[0] == '\0') continue;
 
         const char *fspec   = NULL;
         unsigned    numargs = 0;
         unsigned    eventnum = i;                          /* dense-table fallback if rec unreadable */
-        void *rec = ss_call_findbyname(evmgr, name);       /* the record the OG cache walk formatted */
+        void *rec = ss_call_findbyname(evmgr, name);
         if (rec != NULL) {
-            fspec    = ss_read_fspec(rec);                 /* rec+0x10 -> the ';'-delimited arg-spec */
-            eventnum = cde_read_eventnum(rec, i);          /* rec+0x34 (authoritative event number) */
+            fspec    = ss_read_fspec(rec);
+            eventnum = cde_read_eventnum(rec, i);
         }
-        if (fspec == NULL) fspec = "";                     /* no-arg / unreadable -> empty spec (faithful) */
-        /* m_numargs: derive from the fspec (count the ';'-delimited arg tokens) -- rec+0x30 reads 0 on this
-         * build (the engine derives it from the fspec at use-time), and the fspec is authoritative. */
+        if (fspec == NULL) fspec = "";
+        /* Count argument tokens from fspec; the reflected count is not populated. */
         for (const char *cp = fspec; *cp; cp++) if (*cp == ';') numargs++;
 
-        /* m_rettype: not sourceable from the engine record fields the walk exposes -> 0 (faithful
-         * placeholder, as the OG struct reserved the slot). */
+        /* Return type is unavailable; retain the table's 0 placeholder. */
         _snprintf_s(line, sizeof line, _TRUNCATE,
                     "\t{\"%s\", 0, \"%s\", %u, %u},\n", name, fspec, numargs, eventnum);
         ss_dump_append(dump, sizeof dump, &dlen, line);
         emitted++;
     }
-    ss_dump_append(dump, sizeof dump, &dlen, "};\n");      /* footer (close the ALLEVENTS[] table) */
+    ss_dump_append(dump, sizeof dump, &dlen, "};\n");
 
     FILE *fp = NULL;
-    if (fopen_s(&fp, CDE_OUT_PATH, "w") != 0 || fp == NULL) {    /* "w" -- faithful to the OG fopen mode */
+    if (fopen_s(&fp, CDE_OUT_PATH, "w") != 0 || fp == NULL) {
         sh_printf("cs_dumpeventdefs: could not open %s for writing.\n", CDE_OUT_PATH);
         return;
     }
@@ -1782,72 +1544,40 @@ static void h_cs_dumpeventdefs(idCmdArgs *a)
         sh_printf("cs_dumpeventdefs: %u event defs generated (file write failed).\n", emitted);
 }
 
-/* The entity/spawn handlers live in entity.c -- they need the gameMgr global + the
- * FindEntity/GetOrigin/ExecuteCommandText vtable slots + SpawnByEntityDef (all cached by
- * sh_entity_install). Extern-declared here so CMD_TABLE can reference them without drift; they share
- * sh_commands' idCmdArgs/cmd_argv/sh_printf via commands.h. */
+/* Entity handlers share this command ABI. */
 void h_sh_dumpdef(idCmdArgs *a);
 void h_sh_spawninfo(idCmdArgs *a);
 void h_sh_spawn(idCmdArgs *a);
-void h_sh_dumpmap(idCmdArgs *a);   /* T5 -- real port in entity.c (MapGetter+MapWriter, reuses gameMgr) */
-/* The 5 player-cheat commands (OG/DLM parity -- DLM's dinput8 adds them; stock SnapMap lacks them) live in
- * entity.c: each toggles one runtime bit on the local idPlayer (FindEntity("player1")). */
+void h_sh_dumpmap(idCmdArgs *a);
+/* Local-player runtime cheat toggles. */
 void h_noclip(idCmdArgs *a);
 void h_infinitehealth(idCmdArgs *a);
 void h_noplayerdeath(idCmdArgs *a);
 void h_noplayerkill(idCmdArgs *a);
 void h_notarget(idCmdArgs *a);
 
-/* The type-introspection handlers live in typeinfo.c -- they reach the reflection/type-info
- * manager via the hardcoded declMgr accessor RVA 0x17F7030 (+vtable+0x80) + FindTypeInfoByName /
- * FindEnumByName (all cached by sh_typeinfo_install). Extern-declared here so CMD_TABLE can reference them
- * without drift; they share sh_commands' idCmdArgs/cmd_argv/sh_printf via commands.h. */
+/* Reflection handlers bind through typeinfo's signed dependencies. */
 void h_cs_fieldinfo(idCmdArgs *a);
 void h_sh_type(idCmdArgs *a);
 void h_sh_validclasses(idCmdArgs *a);
 
-/* snaphak_algo handlers live in algo.c -- h_cs_dontuse [18] toggles the 4 f64 math overrides on/off;
- * h_alginfo (sh_alginfo) reports the reimpl PRESENT. Their engine deps (the module base for resolving the
- * 4 AlgoMatMul/Inverse/PackRGBA/CurveEval sigs at FIRE) are cached by sh_algo_install (dllmain). Extern-
- * declared here so CMD_TABLE references them without drift; they share sh_commands' idCmdArgs/sh_printf. */
+/* Optional math overrides and status reporting. */
 void h_cs_dontuse(idCmdArgs *a);
 void h_alginfo(idCmdArgs *a);
 
-/* sh_target_any: the editor-decl visibility toggle (target_any.c -> h_target_any), a pair-for-pair port of
- * OG SnapHak's own sh_target_any (FUN_180021EE0) -- it flips the visibility pair (bits 7-6 of decl+0x3CD)
- * over every idDeclSnapEditorEntity decl to reveal / re-hide the normally-hidden placeable entity decls.
- * GetDeclsOfType is handed to it by sh_target_any_install (dllmain). Extern-declared here (matching
- * target_any.h) so CMD_TABLE references it without drift; it shares sh_commands' idCmdArgs/sh_printf. */
+/* Palette visibility toggle. */
 void h_target_any(idCmdArgs *a);
 
-/* ------------------------------------------------------------------------ the command table -------
- * From the OG XINPUT1_3.dll string table (read 2026-06-21), with two deliberate post-rebrand
- * divergences: the OG's snapHak_/snaphak_ command-name prefixes are renamed to sh_*, and the original
- * author's personal name is scrubbed from the live help strings (the dev-only commands say "internal"
- * instead). sh_target_any carries lightly reworded help but the OG behavior (the editor-decl
- * visibility toggle, target_any.c). Order mirrors the [1]-[22] command numbering. sh_help (at the
- * end) is OUR OWN addition. */
+/* Console command names and their displayed help. */
 typedef struct cmd_entry {
     const char *name;
     void       *handler;
     const char *help;
 } cmd_entry;
 
-static void h_sh_help(idCmdArgs *a);   /* defined after CMD_TABLE (it walks the table) */
+static void h_sh_help(idCmdArgs *a);
 
-/* sh_dialogtest [buttonset] [text...] -- raise the engine's own modal with our text.
- *
- * A diagnostic, because the one part of that surface that lives in the Flash
- * layer cannot be read out of native code: which button LAYOUT a given
- * button-set value draws. The button set is a free parameter of the raise, not
- * a property of the GDM id, so sweeping it here is how the yes/no value gets
- * identified. Which button was PRESSED needs no sweeping -- the engine reports
- * it through the button's action id -- so `sh_dialogpoll` reads an answer
- * rather than guessing one.
- *
- * Every argument after the button set is joined back into one string, because a
- * real message has spaces in it and the command tokeniser would otherwise show
- * only the first word. */
+/* Raise a diagnostic dialog. Join remaining arguments to preserve message spaces. */
 static void h_sh_dialogtest(idCmdArgs *a)
 {
     char text[256];
@@ -1861,11 +1591,8 @@ static void h_sh_dialogtest(idCmdArgs *a)
         sh_printf("sh_dialogtest: the engine dialog surface is not ready.\n");
         return;
     }
-    /* <gdmid> <buttonset> <text...>, both numeric and both optional-from-the-left.
-     * The GDM id matters as much as the button set: the shell picks a dialog's
-     * personality from the id, so a notice-shaped id draws one button no matter
-     * what button set it is handed. Sweeping both is the only way to find the
-     * pair that asks a real question. */
+    /* Optional numeric prefix is GDM id then button set. Both affect layout,
+     * so a button-set value alone does not determine which controls appear. */
     if (lead && lead[0] >= '0' && lead[0] <= '9') {
         gdm_id = (unsigned)strtoul(lead, NULL, 0);
         first = 2;
@@ -1915,33 +1642,19 @@ static void h_sh_dialogpoll(idCmdArgs *a)
     if (r != SH_ENGINE_DIALOG_PENDING) g_dialogtest_ticket = 0;
 }
 
-/* sh_dialogdump -- print every descriptor currently in the engine's dialog queue.
- *
- * This is what makes the surface legible: the engine's OWN dialogs pass through
- * the same queue, so a known yes/no prompt raised by the game shows which button
- * set draws that layout, which is otherwise invisible. No byte in a descriptor
- * carries the answer -- that arrives through the button's action id -- so this
- * is a queue inspector and nothing more. */
+/* Inspect queued dialog descriptors; button answers arrive through callbacks. */
 static void h_sh_dialogdump(idCmdArgs *a)
 {
     (void)a;
     sh_engine_dialog_dump(sh_printf);
 }
 
-/* sh_navmesh -- what the current map's baked navigation is serving, and for the
- * modules it is not serving, why.
- *
- * Without this the feature is invisible: a refusal is a line in the backend log
- * that nobody reads until after they have chased a phantom AI bug, and a map
- * that is working looks exactly like a map that is silently falling back to its
- * shipped navmesh. */
+/* Report served baked navigation and reasons for falling back to shipped data. */
 static void h_sh_navmesh(idCmdArgs *a)
 {
     (void)a;
     sh_navmesh_report(sh_printf);
-    /* The two halves of the feature reported together: navigation a map CARRIES
-     * as shards, then navigation it DESCRIBES through marked volumes. Composed
-     * here rather than by either module, so neither has to know about the other. */
+    /* Compose stored-shard and marked-volume reports without coupling the modules. */
     sh_nav_bake_report(sh_printf);
 }
 
@@ -1973,8 +1686,7 @@ static const cmd_entry CMD_TABLE[] = {
     { "cs_start_render_logging", (void *)h_cs_start_render_logging, "Sets up the renderlog hook " },
     { "sh_spawninfo",        (void *)h_sh_spawninfo,"Generate spawnOrientation/spawnPosition from current position in map" },
     { "sh",                  (void *)h_sh_dispatch, "Dispatches a Snapmap+ command" },
-    /* The 5 player-cheat commands (OG/DLM parity): DLM's dinput8 adds these to SnapMap; we reproduce them
-     * clean-room (toggle one runtime bit on the local idPlayer -- entity.c). Match OG's names exactly. */
+
     { "noClip",              (void *)h_noclip,         "Toggle noclip (no-collision flight) for the local player." },
     { "infiniteHealth",      (void *)h_infinitehealth, "Toggle infinite health for the local player." },
     { "noPlayerDeath",       (void *)h_noplayerdeath,  "Toggle no-death (the player cannot die) for the local player." },
@@ -1984,15 +1696,12 @@ static const cmd_entry CMD_TABLE[] = {
       "sh_user_overrides [0|1] -- persist whether player override files load on the next DOOM launch; restart required; built-in defaults stay enabled." },
     { "sh_navmesh",          (void *)h_sh_navmesh,
       "Reports the baked AI navigation the current map is serving -- which modules and nav classes, or why a bake was refused." },
-    /* OUR OWN addition (no OG counterpart): one place that lists the whole Snapmap+ console surface. */
+
     { "sh_help",             (void *)h_sh_help,        "Lists every Snapmap+ console command and cvar with its description." },
 };
 #define CMD_COUNT ((int)(sizeof(CMD_TABLE) / sizeof(CMD_TABLE[0])))
 
-/* sh_help -- print the full Snapmap+ console surface: every CMD_TABLE command (name + help) and every
- * cvar table row (name + default + description). The help strings are the same ones registered with
- * the engine; this just puts them in ONE listing (the engine's own listCmds buries them among
- * thousands of engine commands). */
+/* List registered command help and cvar defaults from their source tables. */
 static void h_sh_help(idCmdArgs *a)
 {
     (void)a;
@@ -2008,29 +1717,11 @@ static void h_sh_help(idCmdArgs *a)
     }
 }
 
-/* ====================================================================== command unlock ===========
- * Make EVERY console command usable once a developer command (e.g. `god`) flips developer mode on.
- *
- * THE PROBLEM. DOOM splits commands across a two-table developer gate exactly like cvars: a fresh
- * console scans the FULL list (cmdSys+0x08), but the instant dev mode turns on the console scans the
- * DEV list (cmdSys+0x20) AND applies a cheat guard (`ExecuteCommandText` 0x1aa4950: throws unless
- * cmd->flags@+0x20 & 2). The engine's native cheats (noclip/give/...) and the clone's own commands are
- * registered without the dev flag, so they read "Unknown command" right after `god` -- the regression
- * vs the original SnapHak (whose bundled mod flagged every command).
- *
- * THE FAITHFUL FIX (what the original mod's dinput8 does). It detours the engine AddCommand
- * (0x1aa3630) and ORs flags|6 (=0x2 cheat-exempt | 0x4 dev-table-membership) into EVERY registration,
- * so the engine's OWN AddCommand inserts each command into BOTH tables, growing each list's own buffer
- * correctly. We mirror that: (1) detour AddCommand the same way for all FUTURE registrations (incl. the
- * gameplay commands that only register on level load); (2) a one-time pass for commands ALREADY
- * registered before our detour installed -- OR flags|6 + insert into the DEV list via the engine's OWN
- * idList grow. NO table aliasing: an earlier attempt pointed the DEV idList at the FULL backing array
- * with a stale DEV.count, so AddCommand's DEV-append wrote into the shared buffer at the wrong index and
- * duplicated/lost commands. The engine never shares those buffers; neither do we.
- *
- * Offsets DIRECT from the AddCommand (0x1aa3630) + ExecuteCommandText (0x1aa4950) decompiles:
- *   cmdSys: FULL idList {array@+0x08, count@+0x10}, DEV idList {array@+0x20, count@+0x28, cap@+0x2c}.
- *   idCommand (operator_new(0x28)): name@0, handler@8, argComp@0x10, help@0x18, flags@+0x20. */
+/* Expose commands to both full/developer lookup tables with flags 0x06.
+ * Hook future registrations and backfill existing commands into the developer
+ * list using the engine allocator. Never alias the full/developer arrays: their
+ * independent counts would make later appends overwrite or duplicate entries.
+ * idCommand layout: name@0, handler@8, completion@0x10, help@0x18, flags@0x20. */
 #define CMD_FULL_ARRAY_OFF  0x08u
 #define CMD_FULL_COUNT_OFF  0x10u
 #define CMD_DEV_ARRAY_OFF   0x20u
@@ -2040,21 +1731,9 @@ static void h_sh_help(idCmdArgs *a)
 #define CMD_DEV_FLAGS       0x6u        /* 0x2 cheat-exempt | 0x4 dev-table membership */
 #define CMD_COUNT_SANITY    100000u
 
-/* idList grow (engine FUN_140699a60): ensures room for one more element on the idList at `list`
- * (granularity-or-double then idList::Resize, the engine allocator).
- *
- * NOT signature-resolvable, and not for want of trying: it is ONE of 1,560 byte-identical
- * instantiations of the same idList template in the image, differing only in rip-relative and rel32
- * displacements. No lengthening of a prologue pattern separates them: a byte signature answers
- * "where is this function", and is the wrong tool when the answer is "in 1,560 places".
- *
- * So it is resolved RELATIONALLY instead, off AddCommand, which IS signature-resolved: AddCommand
- * calls this on cmdSys+0x08 (the FULL list) before appending, and that call site is the instruction
- * pair `LEA RCX,[RSI+8]` / `CALL rel32`. Scanning AddCommand's own body for those five bytes and
- * decoding the displacement yields the callee wherever this build put it. The old build-locked
- * `module_base + 0x699a60` is retained below only as the documented cross-check.
- *
- * A miss degrades to a skipped insert (the caller SEH-guards), never a crash. */
+/* Resolve list growth from AddCommand's LEA RCX,[RSI+8]; CALL rel32.
+ * Generic idList instantiations share their bytes, so use this relationship
+ * rather than a direct signature or raw RVA. */
 #define IDLIST_GROW_RVA     0x699a60u   /* pinned-build value -- cross-check only, never used to locate */
 typedef void (*idlist_grow_fn)(void *idlist);
 
@@ -2064,10 +1743,8 @@ static idlist_grow_fn sh_decode_idlist_grow(void *add_command, const uint8_t *mo
 {
     if (!add_command || !module_base) return NULL;
 
-    /* `LEA RCX,[RSI+8]` = 48 8D 4E 08, then E8 rel32. The first such pair in AddCommand is the FULL
-     * list; the DEV one (LEA RCX,[RSI+0x20]) calls the same function. 256 bytes covers both on the
-     * pinned build, where the first pair starts at +0xBF (its CALL opcode is at +0xC3 -- the logged
-     * offset below is the start of the 9-byte window, not the call). */
+    /* Find LEA RCX,[RSI+8]; E8 rel32 in the first 256 bytes. The developer-list
+     * variant uses +0x20 and calls the same growth helper. */
     const uint8_t *p = (const uint8_t *)add_command;
     for (unsigned i = 0; i + 9 <= 256; ++i) {
         uint8_t win[9];
@@ -2078,7 +1755,7 @@ static idlist_grow_fn sh_decode_idlist_grow(void *add_command, const uint8_t *mo
         memcpy(&rel, win + 5, sizeof rel);
         const uint8_t *tgt = p + i + 9 + rel;
 
-        /* Range-check against the module before handing back something that will be CALLED. */
+        /* Validate callable addresses against the mapped image. */
         uint8_t probe;
         if (tgt < module_base || !sh_safe_read(tgt, &probe, 1)) return NULL;
 
@@ -2095,8 +1772,7 @@ static idlist_grow_fn sh_decode_idlist_grow(void *add_command, const uint8_t *mo
     return NULL;
 }
 
-/* The AddCommand detour: OR flags|6 then call through the trampoline (= the original mod's
- * `or [rsp+0x30],6`). 6-arg passthrough; flags is the 6th (stack) arg. */
+/* Preserve all six AddCommand arguments while adding exposure flags. */
 typedef void (*add_command6_fn)(void *cmdsys, const char *name, void *handler, const char *help,
                                 void *argComp, unsigned int flags);
 static add_command6_fn g_addcmd_tramp = NULL;
@@ -2109,7 +1785,7 @@ static void hook_add_command(void *cmdsys, const char *name, void *handler, cons
         g_addcmd_tramp(cmdsys, name, handler, help, argComp, flags | CMD_DEV_FLAGS);
 }
 
-/* SEH-guarded: is `cmd` already in the DEV idList? (A torn read -> treat as present, i.e. skip.) */
+/* On an unreadable developer list, assume present to avoid a duplicate append. */
 static int cmd_in_dev(uint8_t *cmdSys, void *cmd)
 {
     __try {
@@ -2123,31 +1799,29 @@ static int cmd_in_dev(uint8_t *cmdSys, void *cmd)
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 1; }
 }
 
-/* SEH-guarded: append `cmd` to the DEV idList, growing via the engine's OWN idList grow if full.
- * Mirrors AddCommand's DEV-append exactly (engine-managed buffer; never shares the FULL array). */
+/* Append using the engine's own list allocator; keep the full array separate. */
 static void cmd_dev_append(uint8_t *cmdSys, void *cmd, idlist_grow_fn grow)
 {
     __try {
         uint32_t count = *(uint32_t *)(cmdSys + CMD_DEV_COUNT_OFF);
         uint32_t cap   = *(uint32_t *)(cmdSys + CMD_DEV_CAP_OFF);
         if (count >= cap) {
-            if (!grow) return;                       /* can't grow safely -> skip (never corrupt) */
-            grow(cmdSys + CMD_DEV_ARRAY_OFF);        /* engine realloc; array + cap move */
+            if (!grow) return;
+            grow(cmdSys + CMD_DEV_ARRAY_OFF);        /* Growth can replace the backing array. */
             count = *(uint32_t *)(cmdSys + CMD_DEV_COUNT_OFF);
             cap   = *(uint32_t *)(cmdSys + CMD_DEV_CAP_OFF);
         }
         if (count < cap) {
-            void **dev = *(void ***)(cmdSys + CMD_DEV_ARRAY_OFF);   /* re-read after grow */
+            void **dev = *(void ***)(cmdSys + CMD_DEV_ARRAY_OFF);
             if (dev != NULL) {
                 dev[count] = cmd;
                 *(uint32_t *)(cmdSys + CMD_DEV_COUNT_OFF) = count + 1;
             }
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { /* skip on fault */ }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {   }
 }
 
-/* One-time pass: OR flags|6 on every FULL command + insert any not yet in DEV. Catches every command
- * registered BEFORE our detour installed (the engine's core commands). Returns the count walked. */
+/* Expose preexisting commands and add missing developer-list entries. */
 static uint32_t command_unlock_pass(uint8_t *cmdSys, idlist_grow_fn grow)
 {
     void   **full = NULL;
@@ -2170,9 +1844,7 @@ static uint32_t command_unlock_pass(uint8_t *cmdSys, idlist_grow_fn grow)
     return n;
 }
 
-/* Install the command unlock: detour AddCommand (all FUTURE registrations) + a one-time pass over the
- * commands already registered. Idempotent-latched by the caller (one-shot). cmdsys/add_command already
- * resolved; module_base anchors the engine idList-grow. */
+/* Hook later registrations and backfill existing commands once. */
 static void sh_command_unlock_install(void *cmdsys, void *add_command, const uint8_t *module_base)
 {
     if (cmdsys == NULL || add_command == NULL) {
@@ -2181,8 +1853,7 @@ static void sh_command_unlock_install(void *cmdsys, void *add_command, const uin
     }
     idlist_grow_fn grow = sh_decode_idlist_grow(add_command, module_base);
 
-    /* (1) detour AddCommand: every FUTURE registration (incl. gameplay commands on level load) gets
-     *     flags|6, so the engine's own AddCommand inserts it into BOTH tables, growing properly. */
+    /* Future registrations inherit exposure flags. */
     void *tramp = install_inline_hook(add_command, (void *)hook_add_command, ADDCMD_STOLEN);
     if (tramp != NULL) {
         g_addcmd_tramp = (add_command6_fn)tramp;
@@ -2191,8 +1862,7 @@ static void sh_command_unlock_install(void *cmdsys, void *add_command, const uin
         backend_log("B2: command-unlock -- AddCommand detour FAILED (one-time pass still runs)");
     }
 
-    /* (2) one-time pass over already-registered commands (the engine's core set): OR flags|6 + insert
-     *     into the DEV list via the engine's own idList grow. */
+    /* Backfill existing commands. */
     uint32_t walked = command_unlock_pass((uint8_t *)cmdsys, grow);
     char line[160];
     _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -2201,21 +1871,12 @@ static void sh_command_unlock_install(void *cmdsys, void *add_command, const uin
     backend_log(line);
 }
 
-/* Register one command via the 6-arg engine AddCommand. flags=2 (developer-EXEMPT): AddCommand massages
- * 2 -> stored 6 (bits 0x2|0x4), so the command is appended into BOTH the cmdSystem FULL table (+0x08) AND
- * the DEV table (+0x20), and it passes ExecuteCommandText's "Attempting to call a developer command" cheat
- * guard (which throws iff dev-mode-on AND (flag&2)==0). Result: Snapmap+'s commands are typeable in the `~`
- * console whether or not dev mode is active (a developer tool flips dev-mode on -> the typed console then
- * scans the DEV table; with flags=0 our commands are FULL-only and read "Unknown command" there). The
- * engine's own always-typeable commands (`where`/`getviewpos`) use exactly flags=2.
- *   RE: command-console-exposure -- ExecuteCommandText 0x141aa4950 (gate getter *(cmdSys+0x200a8):
- *   0=>FULL@+0x08, !=0=>DEV@+0x20), AddCommand 0x141aa3630 (`flags|4 if flags&2`; cheat guard 0x1419fcb60).
- *   DELIBERATE divergence from OG-faithful: the OG passes NO flag (~stack garbage, effectively 0), so the
- *   OG's own commands are ALSO dev-gated -- flags=2 EXCEEDS OG (a console-usability fix). */
+/* flags=2 grants cheat exemption; AddCommand adds developer membership (4).
+ * This keeps product commands visible before and after a developer command runs. */
 static int register_cmd(const cmd_entry *e)
 {
     __try {
-        g_add_command(g_cmdsys, e->name, e->handler, e->help, NULL, 2u);   /* flags=2 -> FULL+DEV + cheat-exempt */
+        g_add_command(g_cmdsys, e->name, e->handler, e->help, NULL, 2u);
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
@@ -2225,7 +1886,7 @@ static int register_cmd(const cmd_entry *e)
 int sh_commands_install(void *add_command, void *cmdsys, void *printf_disp, void *get_decls,
                         const uint8_t *module_base)
 {
-    if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;   /* one-shot */
+    if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;
 
     if (!add_command) { backend_log("B2: commands SKIPPED -- AddCommand unresolved"); return 0; }
     if (!printf_disp) { backend_log("B2: commands SKIPPED -- Printf unresolved"); return 0; }
@@ -2235,7 +1896,7 @@ int sh_commands_install(void *add_command, void *cmdsys, void *printf_disp, void
     g_cmdsys      = cmdsys;
     g_printf      = (printf_dispatch_fn)printf_disp;
     g_get_decls   = get_decls;
-    g_module_base = module_base;   /* devmode [15][16] resolve SessionDevModeGetter at FIRE off this base */
+    g_module_base = module_base;
 
     int n = 0;
     for (int i = 0; i < CMD_COUNT; i++)
@@ -2247,9 +1908,7 @@ int sh_commands_install(void *add_command, void *cmdsys, void *printf_disp, void
         n, CMD_COUNT, cmdsys, add_command, printf_disp);
     backend_log(line);
 
-    /* Command unlock: detour AddCommand (flags|6 on every future registration) + a one-time pass over
-     * the already-registered set, so every command stays usable once a dev command flips dev mode.
-     * Runs AFTER our own registrations are in the FULL table (the pass mirrors them into DEV too). */
+    /* Apply exposure to both current commands and future engine registrations. */
     sh_command_unlock_install(g_cmdsys, (void *)g_add_command, g_module_base);
     return n;
 }

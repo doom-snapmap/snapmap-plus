@@ -65,17 +65,13 @@ int main(int argc, char **argv)
     CHECK(strstr(signatures, "\"SnapPaletteBuild\"") != NULL);
     CHECK(strstr(signatures, "48 8B C4 56 57 41 54 41 56 41 57 48 81 EC 70 07 00 00") != NULL);
     CHECK(strstr(signatures, "0x54AEE0u") != NULL);
-    /* The builder's identity is proven by a clean unique masked-signature match, which is stronger
-     * than RVA equality and, unlike it, survives the second shipped DOOM executable -- where every
-     * function sits at a different RVA. What is left is a self-consistency check between the
-     * resolver's address and RVA. The pinned RVAs stay as documentation and must not gate. */
+    /* Require a clean unique signature result and consistent address/RVA pair;
+     * pinned reference addresses must not gate other supported images. */
     CHECK(strstr(refresh, "builder->status != SIG_OK") != NULL);
     CHECK(strstr(refresh, "builder->addr != (uintptr_t)module_base + builder->rva") != NULL);
     CHECK(strstr(refresh, "builder->rva != PR_BUILDER_RVA") == NULL);
     CHECK(strstr(refresh, "PR_BUILDER_RVA          0x54AEE0u") != NULL);
-    /* The editor singleton is located at runtime from the code site that computes its address, so
-     * the identity check compares against a value derived on THIS build. The pinned constant is
-     * kept for audit but must not be used to locate anything. */
+    /* Locate the singleton through its runtime code anchor, not the pinned audit RVA. */
     CHECK(strstr(refresh, "PR_EDITOR_SINGLETON_RVA") != NULL);
     CHECK(strstr(refresh, "glb_resolve(g_module_base, \"editor_singleton\"") != NULL);
     CHECK(strstr(refresh, "editor != g_module_base + PR_EDITOR_SINGLETON_RVA") == NULL);
@@ -97,10 +93,8 @@ int main(int argc, char **argv)
     CHECK(strstr(refresh, "21088") == NULL);
     CHECK(strstr(refresh, "InterlockedCompareExchange(&g_state, PR_STATE_APPLIED, PR_STATE_PENDING)") != NULL);
     CHECK(strstr(refresh, "Sleep(") == NULL);
-    /* The rebuild is claimable from APPLIED as well as IDLE -- once per registration
-     * pass, not once per process -- and never from REFUSED. A package installed
-     * mid-session extends the decl list the palette is derived from, and a map that
-     * names a type missing from that palette is refused whole as a damaged save. */
+    /* Allow rebuilding after each registration pass, including from APPLIED,
+     * while keeping REFUSED terminal. */
     CHECK(strstr(refresh, "static int pr_claim(void)") != NULL);
     CHECK(strstr(refresh, "PR_STATE_PENDING, PR_STATE_IDLE") != NULL);
     CHECK(strstr(refresh, "PR_STATE_PENDING, PR_STATE_APPLIED") != NULL);
@@ -134,10 +128,8 @@ int main(int argc, char **argv)
     CHECK(refresh_call && success_set && refresh_call < success_set);
     CHECK(success_set && done_after_call && success_set < done_after_call);
     CHECK(strstr(server, "sh_palette_refresh_after_decl_registration,") != NULL);
-    /* The decl server calls the rebuild in the same place, ordered before it publishes success,
-     * on every pass -- and a decline is reported honestly rather than explained away, because it
-     * can now only mean the service REFUSED. It still must not fail a registration that otherwise
-     * completely succeeded. */
+    /* Rebuild before publishing registration success on every pass. Report a
+     * declined refresh without failing otherwise successful registration. */
     CHECK(strstr(server, "palette_declined = 1;") != NULL);
     CHECK(strstr(server, "DECLINED (see the palette-refresh line above)") != NULL);
     CHECK(strstr(server, "the editor had not built one yet") == NULL);

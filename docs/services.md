@@ -1,17 +1,35 @@
 # External services
 
-Every service Snapmap+ depends on, what it costs, and what breaks without it. A fork needs this list to stand
-the project up on its own accounts.
+The services used by the repository and website, their credentials, and fork
+setup requirements. Hosting charges depend on the account plan and usage;
+release drafting makes a paid API call when its key is configured.
 
-| Service | What it does | Plan | Credential | Stored in | Without it |
-|---|---|---|---|---|---|
-| GitHub Actions | Builds, tests, publishes releases | Free (public repo) | `GITHUB_TOKEN`, minted per run | GitHub | No CI, no releases |
-| GitHub Pages | Serves the website | Free | none | — | No website |
-| Cloudflare Workers | The feedback relay and the Community service | Free tier | the GitHub App key below | Cloudflare Worker secrets | In-app feedback and community posts fail |
-| GitHub App (feedback) | Files feedback as issues, as a bot identity | Free | App private key | Cloudflare, **not** GitHub | Feedback cannot file issues |
-| **Anthropic API** | **Drafts each release's changelog entry** | **Paid, about $0.05 per release** | **`ANTHROPIC_API_KEY`** | **GitHub Environment `changelog`** | **Entries fall back to a commit-list skeleton; releases still work** |
+| Service | Purpose | Credentials or bindings | Without it |
+|---|---|---|---|
+| GitHub Actions | Builds, checks and releases | Per-run `GITHUB_TOKEN` | Automated checks and publishing stop. |
+| GitHub Pages | Public website | Workflow Pages permissions | The site cannot publish. |
+| Feedback Worker and GitHub App | Files reports as issues | Worker secrets `APP_ID`, `APP_PRIVATE_KEY`; optional `GITHUB_TOKEN` fallback | In-app reports cannot reach GitHub. |
+| Community Worker and GitHub App | Reads Discussions and handles GitHub sign-in | Worker secrets `APP_ID`, `APP_PRIVATE_KEY`, `CLIENT_SECRET`; optional `GITHUB_TOKEN` read fallback | Community reads or sign-in fail. |
+| Workers KV | Community sessions, OAuth state and write counters | `SESSIONS` binding | Sign-in and authenticated routes fail. |
+| R2 | Community screenshots | `MEDIA` binding | Uploads and media retrieval fail. |
+| Turnstile | Optional Community write challenge | Worker secret `TURNSTILE_SECRET` and matching site setup | The Worker skips the challenge when the secret is absent. |
+| Anthropic API | Drafts release notes for review | GitHub Environment `changelog`: `ANTHROPIC_API_KEY` | The workflow proposes a commit-list skeleton. |
 
-## Anthropic API — the only paid service
+## Worker services
+
+[Feedback setup](../feedback/README.md) covers the issue-writing App and its
+private key. [Community setup](../community/README.md) covers the Discussions App,
+OAuth callback, KV and R2. Their App credentials live in Cloudflare, separately
+from GitHub Actions secrets. The Community Worker stores signed-in users' GitHub
+tokens in KV and sends browsers opaque session IDs; writes use the user's token.
+
+A fork must provision its own services and storage, configure the App repository
+permissions, replace account-specific IDs and callback/origin constants, and
+update the endpoint URLs in the frontend and website. Source comments and
+`wrangler.toml` describe the checked-in configuration, not current account billing
+or deployed permissions.
+
+## Release drafting API
 
 Used by [`prepare-release.yml`](../.github/workflows/prepare-release.yml), **once per release**, to draft the
 `CHANGELOG.md` entry a maintainer then reviews and merges. If it is unavailable the workflow still opens its
@@ -20,10 +38,8 @@ blocks a release.
 
 ### Blast radius
 
-The feedback GitHub App — the project's other credential — is scoped to Issues alone, lives in Cloudflare
-rather than GitHub, and mints roughly one-hour installation tokens, so its worst case is deletable spam
-issues. An API key has neither capability scoping nor an intrinsic ceiling. The controls, in the order they
-actually bound the loss:
+The drafting key authorizes billable requests. Keep its spending controls
+separate from the repository's write permissions. The intended deployment uses:
 
 1. **A monthly spend limit on a dedicated Anthropic workspace**, set in the Console. This is the only control
    that bounds the financial exposure, and it is deliberately outside GitHub.

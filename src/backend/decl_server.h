@@ -1,4 +1,4 @@
-/* decl_server.h -- restart-time source-catalog registration for new engine decl identities. */
+/* Register package declaration identities at boot and during runtime rearm. */
 #ifndef BACKEND_DECL_SERVER_H
 #define BACKEND_DECL_SERVER_H
 
@@ -6,54 +6,36 @@
 #include <stdint.h>
 #include "signatures.h"
 
-/* Snapshot overrides/generated/decls plus linked installed .decl resources,
- * register an internal command, and enqueue that command through DOOM's command
- * buffer. The command executes exactly once on the engine main thread. Existing
- * source records and live identities remain file-shadow overrides; only absent
- * identities are copied to an immutable exact decltree table and scanned through
- * the engine's native DeclRegisterFile virtual method in dependency order. After every scan,
- * each registered identity is given a live object in its own decl manager in
- * that same order, because the native decl parsers resolve their own inherit
- * and entityDef edges with makeDefault=0 and only find targets that already
- * exist. Eligible new snapEditorEntityDef roots are then held to the native
- * palette validator contract -- a resolved entityDef plus correctly flagged
- * input and output targets -- before the palette rebuild is called;
- * source-only abstract bodies are retained as NON-PALETTE without that call.
- * The palette rebuild runs on EVERY pass, boot or runtime, because the palette
- * is a catalog derived from the decl list and a map that names a type absent
- * from that catalog is refused wholesale as a damaged save.
- * Each source-path argument is a native 48-byte idStr temporary, constructed
- * and destroyed around its one call.
+/* Snapshot package decl roots and linked installed resources. On the engine
+ * main thread, classify sources before live decls, publish missing identities
+ * through the exact decltree provider, scan them in dependency order, then
+ * materialize and validate eligible palette entries. Source arguments are
+ * native 48-byte idStr temporaries.
  *
- * A non-empty snapshot is armed at install, and published from a one-shot
- * detour on the engine's whole-registry resource promotion -- the single pass
- * in idCommonLocal::Init that makes every resource alive at that instant
- * permanent. Publishing immediately before it is what puts new content in the
- * same static set, by the same engine pass, as the shipped editor content it
- * depends on; publishing after it (the former load-state RUNNING trigger) left
- * new content map-scoped, so the first playtest destroyed it. Returns 1 when
- * work was armed or there was nothing to do, 0 when the service was refused. */
+ * Boot publication runs immediately before whole-registry promotion so new
+ * content receives permanent lifetime with shipped dependencies. Returns 1
+ * for armed or empty work, 0 on refusal.
+ */
 int sh_decl_server_install(const sig_result *results, size_t count,
                            const uint8_t *module_base, void *cmdsys);
 
-/* Returns 1 only after the command has registered every missing candidate,
- * materialized required editor decls, and completed the palette rebuild
- * successfully. DS_STATE_DONE alone is not sufficient: it also represents
- * disabled, empty, or all-shadowed snapshots. */
+/* Return 1 after source registration and required materialization complete.
+ * Palette refusal is logged separately and does not clear this bit. DONE
+ * alone is insufficient: disabled, empty and all-shadowed snapshots also
+ * reach it.
+ */
 int sh_decl_server_registration_succeeded(void);
 
-/* Re-scan the overrides packages and register any NEW decl identities at runtime, after the
- * engine's boot promotion. Must run on the engine main thread; the console command
- * `snapmap_plus_decl_server_rearm` is the normal trigger.
- *
- * Content registered this way is born map-scoped (idResource level 1 or 2), NOT permanent --
- * registration and promotion are deliberately separate here. Give it a lifetime explicitly
- * against a registry watermark/delta; do not couple the two. Returns 1 when a pass ran. */
+/* Run package rescan and registration on the engine main thread from DONE.
+ * Promote newly created resources against a registry watermark and preserve
+ * reused decl lifetimes. Returns 1 if the pass finishes in DONE, otherwise 0.
+ */
 int sh_decl_server_rearm(void);
 
-/* Request a runtime re-arm after a mid-session package install. Safe from any thread; the work
- * is performed on the engine tick, in two phases separated by real frames because the
- * cut-content cvars the packages need are QUEUED, not applied immediately. */
+/* Request runtime rearm from any thread. The next engine tick applies
+ * requirements, drains commands and registers declarations in one synchronous
+ * pass.
+ */
 void sh_decl_server_request_rearm(void);
 
 /* Advance a requested re-arm. Call from the engine tick (main thread). No-op when idle. */
@@ -101,10 +83,9 @@ enum {
     SH_DECL_SERVER_TEST_REFUSED = 3
 };
 
-/* Optional shadow provenance for materialization tests. Zero keeps the
- * historical test seam behavior (a shadowed item is treated as a source
- * shadow unless a valid live object can be reused). Production classification
- * always supplies one of these explicit values. */
+/* Optional test shadow provenance. Zero retains legacy inference; production
+ * supplies an explicit source/live classification.
+ */
 enum {
     SH_DECL_SERVER_TEST_SHADOW_NONE = 0,
     SH_DECL_SERVER_TEST_SHADOW_SOURCE = 1,

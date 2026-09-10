@@ -1,33 +1,11 @@
-/* overrides.c -- see overrides.h. The OVERRIDES FILE-SHADOW resource loader.
+/* Resource-provider open hook and native idFile streams. See overrides.h for
+ * precedence and ownership. Built-in names receive a brace/quote check before
+ * a user file replaces them; other disk resources pass through unchanged.
  *
- * Swaps the engine resource-provider's open-by-name vtable slot (+0xf8) with our override-open hook.
- * On each ordinary engine open the resolution is FOUR-LAYER:
- *   1. USER     -- overrides/<name> under %LOCALAPPDATA%\snapmap-plus\ on disk (an explicit user act; wins).
- *   2. LINKED   -- exact manifest-selected bytes read on demand from the user's installed, read-only
- *                 base-game archives by resource_bridge.c. No archive is copied or changed.
- *   3. BUILT-IN -- our baked default decls (overrides_baked.h), served FROM MEMORY. Nothing is ever
- *                  written to the user's folder, so defaults update with every release and "reset to
- *                  default" is simply deleting the user's file.
- *   4. ENGINE   -- chain to the saved original engine open (the packaged resource).
- * The dynamic decl server may publish an immutable per-decl table from memory.
- * Those exact canonical decltree entries are gated with the user layer but
- * cannot be replaced by a disk or linked resource.
- * A mode>=2 recursion guard goes straight to the original (OG's `param_5 >= 2` branch). For a BUILT-IN
- * name only, a user file that fails a minimal well-formedness check (brace/quote balance) is refused and
- * the built-in default serves instead (logged) -- a garbled file there would take out the "*Custom" tab.
- * The user layer can be disabled for bisecting a broken override set through the restart-only
- * configuration snapshot; the built-in and engine layers remain active regardless.
- *
- * Install-time passes (both logged, both SEH-guarded):
- *   - RECLAIM: earlier releases WROTE the baked defaults to the user's folder if absent. A user file
- *     byte-equal to a baked default (CR bytes ignored) is provably ours-untouched -> deleted, so the
- *     memory layer serves current defaults. A differing file is user-owned -> kept, shadowing.
- *   - AUDIT: enumerate the active user override files into the log, so "what is shadowing what" is
- *     always answerable from the log alone.
- *
- * Clean-room: ported from our own RE (overrides.h header).
- * Zero OG SnapHak bytes. Every disk/engine touch is SEH-guarded -- a shadow failure degrades to a
- * vanilla engine open, never a crash.
+ * Installation reclaims files matching old built-in defaults, ignoring CR
+ * bytes, and logs active user overrides. Each shadow path has an SEH
+ * boundary; faults fall back to the original resource open where that path
+ * permits it.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -48,41 +26,26 @@
 #include "nav_bake.h"           /* navigation baked from the map's own marked volumes */
 #include "overrides_baked.h"        /* the built-in "*Custom"-tab default decls (Timeline + Unknown) */
 
-/* The engine open-by-name vtable method offset within the resource-provider vtable. A slot index,
- * not an address, so it carries across both shipped builds unchanged.
- * DIRECT: OG patches engineBase+0x2798598; the vtable is engineBase+0x27984a0 -> slot offset = 0xf8
- * (both RVAs read off the pinned Vulkan build). */
+/* Provider open slot offset, +0xf8. Pinned Vulkan evidence: vtable RVA
+ * 0x27984a0 and open-slot RVA 0x2798598.
+ */
 #define OPEN_SLOT_OFFSET 0xf8
 
-/* The RVAs these five locations occupy on the PINNED VULKAN BUILD (DOOMx64vk.exe), recorded for
- * audit and for re-deriving a signature that stops matching. THEY NO LONGER GATE THE INSTALL.
- *
- * DOOM 2016 ships two executables built from one source tree, DOOMx64vk.exe and DOOMx64.exe, and
- * the game relaunches itself into the other one when r_renderAPI changes -- so we are loaded into
- * either. Every function RVA shifts between the two images (by -0x400 to -0xE460, with no uniform
- * delta) while the struct layouts and the provider/idFile ABI are identical. Demanding RVA
- * equality here therefore refused the entire file shadow on the OpenGL build even though every
- * signature resolved, uniquely, at its shifted address.
- *
- * What these gates are FOR is proving the resolved address really is the engine function we think
- * it is. A unique masked-signature match proves that, and proves it better than RVA equality: two
- * builds can share an RVA by coincidence, but a signature cannot match the wrong function. So the
- * identity test is now the resolve status -- SIG_OK, never the hook-tolerant SIG_OK_HOOKED
- * known_rva fallback -- plus containment in the host image. See ov_supported_build_abi.
- *
- * The ABI SHAPE checks are untouched and still do the real work: the provider vtable is 31 idFile
- * slots with the provider open method at OPEN_SLOT_OFFSET (+0xf8), and a newer DOOM build has 34
- * slots with shifted meanings. Shape is what differs between engine revisions; no address test
- * substitutes for it. */
+/* Pinned Vulkan RVAs for audit and signature repair; they do not gate
+ * installation. The supported builds share the idFile ABI while function
+ * addresses differ. Installation requires clean SIG_OK matches, host-image
+ * containment and a decoded read-only provider vtable. The stream below
+ * implements the audited 31-slot ABI.
+ */
 #define OV_PINNED_RES_PROVIDER_CTOR_RVA 0x1A51070u
 #define OV_PINNED_IDFILE_READSTR_RVA    0x0267390u
 #define OV_PINNED_IDFILE_COMPARE_RVA    0x0267290u
 #define OV_PINNED_IDFILE_WRITESTR_RVA   0x0268470u
 #define OV_PINNED_PROVIDER_VTABLE_RVA   0x27984A0u
 
-/* The engine open method ABI (DIRECT, from OG FUN_18000b370's own call shape):
- *   void* open(void* this, const char* name, uint8 b1, uint8 b2, uint mode)   // __fastcall, returns idFile*
- * OG masks b1/b2 to 0xff when chaining. mode>=2 -> straight to original (recursion guard). */
+/* Engine ABI: idFile* open(self, name, uint8 b1, uint8 b2, uint mode). Mode
+ * >= 2 bypasses shadowing; preserve both byte arguments when chaining.
+ */
 typedef void *(*open_fn_t)(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode);
 
 static open_fn_t  g_orig_open  = NULL;   /* the saved engine resource-open (the slot's original value) */
@@ -110,18 +73,14 @@ enum {
 /* The overrides ROOT (holds overrides\ + overrides\shader_includes\). Default %LOCALAPPDATA%\snapmap-plus. */
 static char g_root[MAX_PATH] = {0};
 
-/* ============================================================ our idFile-subclass stream ===========
- * A reimplementation of the pinned build's PTR_FUN_18003d050 stream (the engine idFile interface,
- * 31 virtual methods -- every slot decompiled in pb1-overrides). The object layout keeps OG's public head:
- *   +0x00 vtable   +0x08 FILE*   +0x10 name   +0x18 length   +0x20 short flag
- * The engine reads the resource through this vtable; the dtor (slot 0) frees the object with OUR
- * allocator (HeapFree) -- so we need no engine allocator/free (OG used the engine's only so the engine
- * could free it; here every method incl. the dtor is ours).
+/* Native idFile stream head: +0x00 vtable, +0x08 FILE*, +0x10 name, +0x18
+ * length, +0x20 short flag. All 31 slots use our stream object; its
+ * destructor releases it with HeapFree.
  *
- * TWO BACKINGS, one vtable: fp != NULL -> FILE*-backed (a user override file, OG-equivalent);
- * fp == NULL && buf != NULL -> MEMORY-backed (a built-in default, or a validated user file already read
- * whole). The memory form is read-only (Write/printf return 0) and tracks its own cursor in `pos`;
- * owns_buf says the dtor must HeapFree the buffer (a heap copy) vs leave it (the static baked text). */
+ * fp selects disk backing. Otherwise buf is read-only memory, pos is its
+ * cursor, and owns_buf controls whether the destructor frees the payload.
+ * Static baked text is borrowed.
+ */
 typedef struct ov_stream {
     void        *vtable;     /* +0x00 */
     FILE        *fp;         /* +0x08 (NULL for a memory-backed stream) */
@@ -133,8 +92,7 @@ typedef struct ov_stream {
     int          owns_buf;   /* 1 -> dtor HeapFrees buf */
 } ov_stream;
 
-/* --- the 31 vtable methods, faithful to the pinned build's slot semantics ---------------------------
- * All __fastcall(this in RCX). Behaviour matches OG FUN_18000ae00..b070 exactly, expressed in stdio. */
+/* Native virtual-method implementations; self arrives in RCX. */
 
 static void  ov_dtor(ov_stream *s)                                   /* [0] close + free(this) */
 {
@@ -171,8 +129,9 @@ static long long ov_write(ov_stream *s, const void *buf, uint64_t n)       /* [6
     return (long long)fwrite(buf, 1, (size_t)n, s->fp);
 }
 static int       ov_seek(ov_stream *s, long long off, int origin);       /* fwd-decl ([14]) */
-/* [7] The native helper at RVA 0x1a1b520 calls Seek(this,off,ABS=2), then Read(this,buf,len).
- *     We reproduce the same combo through our own methods (the engine fn only dispatched via the vtable). */
+/* [7] Match native read-at (Vulkan RVA 0x1a1b520): Seek with ABS=2, then
+ * Read.
+ */
 static long long ov_seekread(ov_stream *s, long long off, void *buf, uint64_t n)
 {
     if (!s || ov_seek(s, off, 2) != 0) return 0;
@@ -190,9 +149,7 @@ static long long ov_length_byseek(ov_stream *s)                      /* [11] sto
 {
     return s && s->length >= 0 ? s->length : 0;
 }
-/* +0x60 is SetLength. Provider streams are deliberately read-only, including file-backed streams:
- * no caller can turn a resource shadow into a writable archive surrogate. Return zero (failure) and
- * leave both backings untouched for every request. */
+/* +0x60 SetLength always fails: provider streams are read-only. */
 static int       ov_set_length(ov_stream *s, long long requested)
 {
     (void)s;
@@ -246,9 +203,9 @@ static long long ov_vprintf(ov_stream *s, const char *fmt, va_list ap)   /* [15]
     if (!s || !s->fp || !fmt) return 0;
     return (long long)vfprintf(s->fp, fmt, ap);
 }
-/* OG slot [15]/[16] are the C-varargs printf forms (vfprintf into fp). The engine resource-READ path
- * never calls them; we provide a faithful vfprintf so a write path stays correct. The vtable stores a
- * single entry; both OG slots resolve to a vfprintf-to-fp, so we point both at this thunk. */
+/* Slots [15] and [16] share the native C-varargs printf shape. Both use this
+ * FILE-backed thunk; memory streams return zero.
+ */
 static long long ov_printf_thunk(ov_stream *s, const char *fmt, ...)     /* [15]/[16] varargs entry */
 {
     va_list ap; long long r;
@@ -260,8 +217,7 @@ static long long ov_printf_thunk(ov_stream *s, const char *fmt, ...)     /* [15]
 static long long ov_ret0_c(ov_stream *s)        { (void)s; return 0; }   /* [17] return 0 */
 static long long ov_ret0_d(ov_stream *s)        { (void)s; return 0; }   /* [18] return 0 */
 static long long ov_ret0_e(ov_stream *s)        { (void)s; return 0; }   /* [19] return 0 */
-/* Memory and read-only override streams have no writable/physical provider
- * flag. Returning zero is the proven metadata value used by the eager reader. */
+/* Read-only streams report no writable/physical provider flag. */
 static char      ov_provider_flag(ov_stream *s) { (void)s; return 0; }                    /* [20] */
 static void      ov_flush_a(ov_stream *s)                                                /* [21] flush + refresh size */
 {
@@ -281,21 +237,18 @@ static long long ov_storage_true(ov_stream *s) { (void)s; return 1; }   /* [25] 
 static long long ov_storage_zero_a(ov_stream *s) { (void)s; return 0; } /* [26] reserved zero */
 static long long ov_storage_zero_b(ov_stream *s) { (void)s; return 0; } /* [27] reserved zero */
 
-/* The stream vtable -- one exact 31-entry table shared by every stream we hand back (the methods are
- * stateless w.r.t. the object beyond `this`). Slot order follows the engine idFile vtable:
- * GetName @+0x18, GetFullPath @+0x20, Read @+0x28, GetLength @+0x58, GetTimestamp @+0x98 --
- * so the engine calls the right method per slot. The final three entries are the native idStr helpers
- * for this exact Steam build; they are populated as one publication after all three clean signatures
- * resolve. Until then they remain NULL and no provider hook is published. */
+/* Shared idFile vtable is a 31-entry table. Native idStr helpers occupy the final three
+ * slots; all must resolve cleanly before the provider hook is published.
+ * Preserve slot order even where several methods share an implementation.
+ */
 static void *g_stream_vtable[31] = {
     (void *)ov_dtor,          /* 0  +0x00 close/dtor */
     (void *)ov_ret0_a,        /* 1  +0x08 */
     (void *)ov_ret1,          /* 2  +0x10 native constant true */
-    /* +0x18 = the engine idFile GetName slot: idLexer::LoadFile reads it and copies the result
-     * into an idStr, so it must be a valid name pointer -- NOT a length. Renderprog decls (and
-     * their #include files) load through this slot; entity decls use the +0x20 path below.
-     * GetLength is a separate slot (+0x58, ov_length_byseek). Returning ov_length here would
-     * deref the file size as a char* and crash. */
+    /* +0x18 is GetName: idLexer copies this pointer into an idStr when
+     * reading renderprogs and includes. GetLength is +0x58; returning a
+     * length here would treat an integer as a string pointer.
+     */
     (void *)ov_name,          /* 3  +0x18 GetName -> name char* */
     (void *)ov_name,          /* 4  +0x20 GetFullPath -> name char* */
     (void *)ov_read,          /* 5  +0x28 Read */
@@ -334,9 +287,9 @@ enum {
 };
 static volatile LONG g_stream_helpers_state = OV_STREAM_HELPERS_NEW;
 
-/* Configure the three native idStr slots before any provider object can expose this table. The
- * signatures are deliberately all-or-nothing: a missing or hook-tolerant helper leaves a terminal
- * refusal state, so we never publish a mixed native/NULL tail. */
+/* Configure all three native idStr slots before publishing the provider hook.
+ * Missing or hooked helpers leave a terminal refusal state.
+ */
 static int ov_stream_helpers_install(void *read_string, int read_clean,
                                      void *compare, int compare_clean,
                                      void *write_string, int write_clean)
@@ -366,9 +319,9 @@ static int ov_stream_helpers_install(void *read_string, int read_clean,
                g_stream_vtable[30] == write_string;
     }
 
-    /* The table is private until the slot publication below. InterlockedExchange is a full
-     * release barrier on Windows, so an engine thread cannot observe a READY state with partial
-     * helper pointers. */
+    /* Publish READY only after all helper pointers are set.
+     * InterlockedExchange supplies the memory barrier.
+     */
     g_stream_vtable[28] = read_string;
     g_stream_vtable[29] = compare;
     g_stream_vtable[30] = write_string;
@@ -392,7 +345,7 @@ static ov_stream *make_stream(FILE *fp, long long length, const char *name)
     s->fp     = fp;
     s->name   = namecopy;
     s->length = length;
-    s->flag16 = 1;   /* OG sets the +0x20 short to 1 */
+    s->flag16 = 1;   /* Native stream flag at +0x20. */
     return s;
 }
 
@@ -409,25 +362,12 @@ static ov_stream *make_mem_stream(const unsigned char *buf, long long length, co
     return s;
 }
 
-/* ====================================================== override-file path resolution ==============
- * OG FUN_18000b110 (DIRECT, XINPUT1_3.dll decompile + disasm 0xb13b..0xb1c8). The branch selector is a ".inc"-SUFFIX test, NOT a '/' test:
- *
- *   match = strstr(name, ".inc");                       // DAT_18003e2d0 = a strstr-style substring find
- *   if (match == NULL || *(match + 4) != '\0')          // ".inc" absent, or NOT at end of the string
- *       fmt = "overrides/%s";                            //   -> COMMON case (the vast majority)
- *   else {                                               // name's first ".inc" sits at its very end
- *       if (strchr(name,'/') != NULL &&
- *           strstr(name,"includes") != name)             //   "includes" is NOT a prefix of name
- *           rel = strchr(name,'/') + 1;                   //   strip up to & incl the first '/'
- *       fmt = "overrides/shader_includes/%s";            //   -> RARE case (shader-include .inc files)
- *   }
- *   sprintf(buf, fmt, rel);  // then prepend <root>\overrides... ; all '/' -> '\'
- *
- * So shader_includes is the EXCEPTION for ".inc"-suffixed shader-include names; overrides/<name> is the
- * common path for every normal resource (env/..., models/..., fonts/... -- none end in ".inc"). DAT_18003e2d0
- * is a runtime-resolved substring-find fn-ptr (null in the static image; proven strstr-semantics by its other
- * call site FUN_180026680: `find(name,"superscriptx64.dll") != 0 -> LoadLibrary`). The full path =
- * <root>\overrides\... with all '/' -> '\'. */
+/* Resource names normally map to overrides/<name>. The shader-include branch
+ * applies only when the first ".inc" occurrence ends the name; it maps to
+ * overrides/shader_includes/<relative>. In that branch, strip the first path
+ * component unless the name starts with "includes". Normalize separators
+ * after joining the data root.
+ */
 
 static void default_root(char *out, size_t cap)
 {
@@ -556,8 +496,9 @@ static int ov_internal_decl_table_publish(
     }
     g_internal_decls = copy;
     g_internal_decl_count = count;
-    /* Publish the table only after all keys and bodies are complete. The
-     * process-lifetime table is never freed or republished after READY. */
+    /* Publish only complete keys and bodies. Retain allocations across
+     * runtime replacements for existing streams.
+     */
     InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_READY);
     return 1;
 }
@@ -605,26 +546,17 @@ int sh_overrides_internal_decl_table_can_install(void)
                OV_INTERNAL_DECL_TABLE_NEW;
 }
 
-/* Retire the published internal decl table so a NEW one can be published mid-session.
- *
- * The table is a boot one-shot: can_install() demands state == NEW, so after the boot
- * publication every later attempt is refused and a runtime re-arm classifies its candidates
- * and then has nowhere to put them. This is the fourth and last boot-bound surface in the
- * runtime-registration chain (package list, resource-bridge manifests, decl-server snapshot,
- * this table).
- *
- * DOES NOT FREE. The test-only reset beneath this one is safe precisely because it "occurs
- * before any engine thread can retain a stream" -- at runtime that guarantee is gone: an
- * engine thread may hold an ov_stream reading straight out of a table body, and freeing under
- * it is a use-after-free. So the old table is retired and leaked, bounded by the 512-entry cap
- * and by how rarely a package is installed. Correctness over a few hundred KB. */
+/* Reopen publication state without freeing or hiding existing entries.
+ * Runtime rearm must merge new identities over them; streams may still
+ * reference their bodies.
+ */
 void sh_overrides_internal_decl_table_reopen(void)
 {
     char line[160];
     size_t held = g_internal_decl_count;
-    /* Reopen the STATE only. The entries stay published and stay readable, because the runtime
-     * publish MERGES over them -- dropping them here is exactly the bug that made a Cyberdemon
-     * re-arm break the unrelated transformations package. */
+    /* Only the state reopens; existing entries remain available to lookup and
+     * merge.
+     */
     InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_NEW);
     _snprintf_s(line, sizeof line, _TRUNCATE,
                 "B1: overrides internal decl table REOPENED for re-publication (%u entr(ies) "
@@ -633,19 +565,11 @@ void sh_overrides_internal_decl_table_reopen(void)
     backend_log(line);
 }
 
-/* Publish `entries` MERGED over whatever the table already holds.
- *
- * Carrying the old entries forward is the whole point: a re-arm publishes only the identities
- * the CURRENT pass classified as missing, and anything the previous pass had published would
- * otherwise silently lose its decltree source -- including entries belonging to packages this
- * pass never looked at.
- *
- * Old entries are carried by POINTER. The old array is retired and leaked (a reader may be
- * inside it), but its name/body allocations remain reachable from the merged array, so they
- * stay valid and are never double-freed. A new entry whose key matches an old one wins.
- *
- * Returns 1 on success. On any failure the previously published table is left exactly as it
- * was, because the state is only moved to READY once the merged array is complete. */
+/* Merge new entries over the current table. New keys win; unchanged entries
+ * borrow their existing key/body allocations. Retain prior arrays for
+ * concurrent readers. Allocation failure leaves the previous table intact;
+ * READY is published after construction completes.
+ */
 int sh_overrides_internal_decl_table_merge(
     const sh_overrides_internal_decl_entry *entries, size_t count)
 {
@@ -705,7 +629,7 @@ int sh_overrides_internal_decl_table_merge(
             if (strcmp(old[i].name, merged[j].name) == 0) { superseded = 1; break; }
         }
         if (superseded) continue;
-        merged[at].name = old[i].name;         /* borrowed, not copied: the old array leaks */
+        merged[at].name = old[i].name;         /* Borrowed from the retained previous table. */
         merged[at].body = old[i].body;
         merged[at].body_length = old[i].body_length;
         at++;
@@ -863,26 +787,22 @@ int sh_overrides_get_root(char *out, size_t cap)
     return out[0] != '\0';
 }
 
-/* Build the on-disk override path for engine resource `name` into `out`. Returns 1 if a path was built
- * (always, for a non-empty name). The selection mirrors OG FUN_18000b110 EXACTLY (see the block comment
- * above): the shader_includes branch is the RARE exception for ".inc"-suffixed shader-include names; every
- * normal resource (no ".inc" suffix) takes the common overrides/<name> path. */
+/* Build a disk override path. The first terminal ".inc" match selects
+ * shader_includes; other resources use the shared override tree.
+ */
 static int build_override_path(const char *name, char *out, size_t cap)
 {
     if (!name || !name[0]) return 0;
     char root[MAX_PATH];
     resolve_root(root, sizeof root);
 
-    /* OG's ".inc"-suffix test: find the first ".inc"; the shader branch is taken only when that match is
-     * at the very end of the name (the byte after the 4-char ".inc" is the terminator) -- i.e. `match &&
-     * match[4]=='\0'`. (Byte-faithful to OG's `*(strstr(name,".inc")+4) == 0`.) */
+    /* Only the first ".inc" occurrence counts, and it must end the name. */
     const char *match = strstr(name, ".inc");
     int is_shader_include = (match != NULL && match[4] == '\0');
 
     const char *rel = name;
     if (is_shader_include) {
-        /* OG: within the shader branch, strip up to & incl the first '/' UNLESS the name begins with
-         * "includes" (OG: `strchr(name,'/') && strstr(name,"includes") != name -> rel = slash+1`). */
+        /* Strip the first component unless the name starts with "includes". */
         const char *slash = strchr(name, '/');
         if (slash != NULL && strstr(name, "includes") != name)
             rel = slash + 1;
@@ -893,7 +813,7 @@ static int build_override_path(const char *name, char *out, size_t cap)
     else
         _snprintf_s(out, cap, _TRUNCATE, "%s\\overrides\\%s", root, name);
 
-    /* normalize '/' -> '\' (OG does the same on the assembled path). */
+    /* Normalize separators. */
     for (char *p = out; *p; ++p)
         if (*p == '/') *p = '\\';
     return 1;
@@ -901,43 +821,11 @@ static int build_override_path(const char *name, char *out, size_t cap)
 
 /* ============================================================ package resolution ==================*/
 
-/* The engine names every decl `generated/decls/<type>/<name>.decl` -- one flat
- * virtual namespace, regardless of who published the decl. Before packages that
- * mapped one-to-one onto `overrides\generated\decls\...`, so joining the name
- * onto the overrides root WAS the resolver.
- *
- * A package owns its own root (`overrides\cyberdemon\decls\...`), so that join
- * can never reach it: the engine has no idea the folder exists and will never
- * ask for `cyberdemon/decls/...`. Left unhandled the package's decl bodies are
- * silently never served -- the decl server registers the identity, the engine
- * opens nothing, and the parse yields an empty default with no resolved
- * entityDef. That is what kept the Cyberdemon out of the Toybox.
- *
- * So `generated/decls/<rest>` is resolved against every installed package in
- * turn as `<package root>\decls\<rest>`.
- *
- * The same problem applies to every OTHER engine namespace a package may own.
- * A custom render program is the case that forced this to be a table: the module
- * loader at RVA 0xD922D0 builds `generated/spirv/<name>.{vspv|fspv|cspv}` and
- * opens it through this very vtable slot, and its call site passes mode 0, so the
- * open hook admits it. Its pre-translated source blob arrives the same way as
- * `generated/renderprogs/<name>_pc_vulkan.bin`. Both must be package-scoped, or a
- * shader would have to live in the shared tree and two packages could clobber
- * each other's shaders on disk -- exactly what packages exist to prevent.
- *
- * Images are the fourth, and the SnapMap Toybox is what forced them. A tile draws a
- * material, that material names a .tga, and the engine resolves the pair to an image
- * resource `generated/image/<path>.bimage`. A package could already ship the material --
- * a material is an ordinary decl -- but not the pixels behind it, so a package could
- * never contribute a tile icon of its own. The prefix is STRIPPED here, unlike `shaders`:
- * every engine image name begins with that same constant, so repeating it inside each
- * package would add depth and no information.
- *
- * A package therefore serves only these enumerated namespaces, and only out of
- * the subdirectory named here. Nothing else it contains is reachable: its
- * package.json can never become an engine resource. Under `shaders` the package
- * path mirrors the engine name verbatim, which keeps the mapping obvious and
- * costs nothing to extend. */
+/* Map supported engine namespaces to package subdirectories. Decl and image
+ * prefixes are stripped; shader paths retain their full generated namespace.
+ * Restricting this table prevents unrelated package files from becoming
+ * engine resources.
+ */
 typedef struct ov_namespace {
     const char *engine_prefix;   /* what the engine asks for */
     const char *package_subdir;  /* which package subdirectory may answer */
@@ -951,20 +839,17 @@ static const ov_namespace g_ov_namespaces[] = {
     { "generated/image/",       "images",  1 },
 };
 
-/* The installed package set, captured once at install. The overrides layer is
- * already an immutable launch snapshot -- the audit, the reclaim pass and the
- * user-layer gate all read the tree exactly once -- and this is on the engine's
- * file-open path, so re-enumerating the tree per open is not an option. */
-/* DOUBLE-BUFFERED so the package list can be re-scanned mid-session without a lock on the
- * open path, which is hot (every engine resource open walks it). Writers fill the inactive
- * buffer and then publish it with one InterlockedExchange; readers take the index ONCE and
- * use that buffer for the whole resolve. A reader that raced a publish sees either the old
- * complete list or the new complete list -- never a torn one. */
+/* Cache package enumeration outside the resource-open path. Capture at
+ * installation and refresh during runtime rearm.
+ */
+/* Rescans fill the inactive buffer, then atomically publish its index. Each
+ * lookup reads the index once. Two buffers do not track reader lifetime;
+ * rescans must be serialized at a quiescent boundary.
+ */
 static sh_package g_ov_packages_buf[2][SH_PACKAGES_MAX];
 static size_t g_ov_package_counts[2];
 static volatile LONG g_ov_pkg_active;   /* 0 or 1 */
-/* The overlap report is per-process, not per-capture: capture runs on the engine
- * file-open path and the installed set does not change under it. */
+/* Report overlapping files once per process. */
 static volatile LONG g_ov_conflicts_reported;
 static volatile LONG g_ov_pkg_generation;
 
@@ -973,35 +858,27 @@ static void ov_capture_packages(void)
     char root[MAX_PATH];
     size_t count = 0;
     LONG active = InterlockedCompareExchange(&g_ov_pkg_active, 0, 0);
-    LONG target = active ^ 1;              /* fill the buffer nobody is reading */
+    LONG target = active ^ 1;              /* Fill the inactive buffer. */
 
     resolve_root(root, sizeof root);
     if (!root[0]) return;
-    /* A partial enumeration still resolves whatever it did find: unlike the decl
-     * server, a miss here degrades to the packaged resource rather than
-     * publishing a wrong identity, so serving fewer packages is safe. */
+    /* Keep the enumerated subset on failure; omitted packages fall through to
+     * later resource layers. Decl registration separately rejects a partial
+     * snapshot.
+     */
     (void)sh_packages_enumerate(root, g_ov_packages_buf[target], SH_PACKAGES_MAX, &count);
     g_ov_package_counts[target] = count;
     InterlockedExchange(&g_ov_pkg_active, target);   /* publish: one atomic store */
 
-    /* Say which packages overlap, once per capture. Resolution takes the first
-     * package that carries a file, so an overlap is a precedence decision being
-     * made on the player's behalf; making it in silence is how someone ends up
-     * running one package's content while believing they have another's. */
+    /* Log overlapping package files so the selected precedence is visible. */
     if (count > 1 && !InterlockedCompareExchange(&g_ov_conflicts_reported, 1, 0))
         (void)sh_pkg_conflicts_report(root);
     InterlockedIncrement(&g_ov_pkg_generation);
 }
 
-/* Re-scan the packages folder and publish the new list to the open path.
- *
- * WHY THIS EXISTS. The open hook already stats the disk on EVERY open, so a package's bytes
- * are servable the moment they land -- but only if the package is in this list, and the list
- * used to be captured exactly once at install. That made a mid-session install invisible for
- * a reason that had nothing to do with the engine. Registration of new DECL IDENTITIES is a
- * separate, harder problem (see decl_server.c); this only makes the BYTES reachable.
- *
- * Returns the number of packages now visible. */
+/* Refresh package paths used by opens. New decl identities still require
+ * decl_server rearm. Returns the visible package count.
+ */
 unsigned long sh_overrides_rescan_packages(void)
 {
     char line[160];
@@ -1022,11 +899,10 @@ static int ov_is_regular_file(const char *path)
     return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-/* Resolve engine resource `name` to an existing file under overrides\, or 0 if
- * no layer provides it. The legacy whole-tree path is tried first so an install
- * that predates packages resolves byte-for-byte where it always did; installed
- * packages are then tried in `sh_packages_enumerate`'s deterministic order, so
- * two machines with the same packages pick the same file. */
+/* Find a resource in the shared override tree, then installed packages
+ * ordered by descending priority and case-insensitive name. Return 0 if no
+ * file exists.
+ */
 static int ov_resolve_existing(const char *name, char *out, size_t cap)
 {
     size_t i, n;
@@ -1044,8 +920,7 @@ static int ov_resolve_existing(const char *name, char *out, size_t cap)
         relative = ns->strip_prefix ? name + prefix_length : name;
         if (!relative[0]) break;
 
-        /* Take the active buffer index ONCE for this whole resolve, so a concurrent
-         * re-scan cannot move the list out from under the loop. */
+        /* Use one buffer index for the entire lookup. */
         LONG act = InterlockedCompareExchange(&g_ov_pkg_active, 0, 0);
         size_t pkg_count = g_ov_package_counts[act];
         for (i = 0; i < pkg_count; i++) {
@@ -1085,7 +960,7 @@ static ov_stream *try_open_override(const char *name)
     FILE *fp = NULL;
     if (fopen_s(&fp, path, "rb") != 0 || fp == NULL) return NULL;
 
-    /* size via seek-end/tell/restore (OG reads size with _ftelli64). */
+    /* Measure with seek-end/tell, then restore the cursor. */
     long long length;
     if (_fseeki64(fp, 0, SEEK_END) != 0 || (length = _ftelli64(fp)) < 0 ||
         _fseeki64(fp, 0, SEEK_SET) != 0) {
@@ -1145,10 +1020,10 @@ static unsigned char *read_all_file(const char *path, long long *out_len)
     return buf;
 }
 
-/* USER layer open for a BUILT-IN name: slurp + validate the user's file. Well-formed -> a memory
- * stream over the heap copy (stream owns it). Malformed -> refuse (log) and let the caller serve the
- * built-in default -- a garbled file at one of these names would take out the "*Custom" tab. A file
- * the slurp can't handle (oversize/alloc) is served unvalidated as a plain stream (benefit of doubt). */
+/* Validate user replacements for built-in names before returning an owned
+ * memory stream. Invalid text falls back to the built-in. Oversize files or
+ * allocation failures instead try a plain file stream.
+ */
 static ov_stream *open_user_for_baked_name(const char *name, int *malformed)
 {
     *malformed = 0;
@@ -1171,18 +1046,9 @@ static ov_stream *open_user_for_baked_name(const char *name, int *malformed)
     return s;
 }
 
-/* The override-open hook -- our value in the engine's open vtable slot. Same ABI as the engine method.
- * mode>=2 (OG param_5>=2) is a recursion/no-shadow guard -> straight to the original. Otherwise resolve
- * BAKED NAVIGATION first, then four-layer: USER disk file -> linked installed resource ->
- * BUILT-IN baked default (from memory) -> chain to the engine original.
- * The user layer alone is gated by the immutable launch snapshot. SEH-guarded so a shadow path fault
- * degrades to a vanilla open. */
-/* The provider object, latched from the first hook entry.
- *
- * The engine never publishes this pointer -- it arrives as the hook's `self` and
- * nowhere else -- but reading a resource the way the engine would requires it.
- * The provider is a singleton created by the ctor this file already resolves by
- * signature, so latching the first one we see is latching the only one. */
+/* Capture the provider object from the first hook call so original-resource
+ * reads can reuse its native self pointer.
+ */
 static void *volatile g_provider_self = NULL;
 
 unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_len)
@@ -1225,9 +1091,9 @@ unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_l
         if (out_len) *out_len = (size_t)len;
         return buf;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        /* A fault here means the engine's own file object did not behave the way
-         * every other path in this file assumes. Leak nothing we allocated and
-         * let the caller serve the shipped bytes. */
+        /* Release our output buffer and report failure if a native stream
+         * call faults.
+         */
         if (buf) HeapFree(GetProcessHeap(), 0, buf);
         if (out_len) *out_len = 0;
         return NULL;
@@ -1239,18 +1105,13 @@ static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsign
     if (g_orig_open == NULL) return NULL;   /* defensive: never happens once installed */
     if (g_provider_self == NULL) g_provider_self = self;
 
-    /* The current map's baked navigation, if this is one of the two names it
-     * replaces. It goes FIRST and is not gated by the user-override snapshot:
-     * this is a property of the map being loaded, not of the player's own
-     * override folder, and a stale cooked artefact on disk must never win over
-     * the navigation the map itself carries. navmesh.c owns its own SEH and
-     * disables itself for the session on a fault, so a miss here costs one
-     * bounded compare per served entry and nothing else. */
+    /* Map-carried navigation precedes disk overrides and is independent of
+     * the launch user-layer gate.
+     */
     if (mode < 2 && name != NULL) {
         unsigned char *nav = NULL;
         size_t nav_len = 0;
-        /* A bake the map CARRIES wins over one we would generate: the author's
-         * tool already decided, and re-deriving it here could differ. */
+        /* Embedded navigation takes precedence over dynamically generated output. */
         if (!sh_navmesh_open(name, &nav, &nav_len))
             sh_nav_bake_open(name, sh_overrides_read_engine_resource, &nav, &nav_len);
         if (nav) {
@@ -1349,20 +1210,14 @@ static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsign
             return NULL;
         }
     }
-    /* no override (or guard) -> the engine's normal open (OG masks the byte args to 0xff). */
+    /* No shadow, or mode guard: chain with the original byte arguments. */
     return g_orig_open(self, name, (unsigned char)(b1 & 0xff), (unsigned char)(b2 & 0xff), mode);
 }
 
-/* ============================================================ vtable-global LEA decode ==============
- * The engine resource-provider vtable is a read-only .rdata global (can't be masked-byte sig-scanned).
- * The ctor ResProviderCtor (resolved by signature) starts with `... 48 8B D9 (MOV RBX,RCX) ; 48 8D 05
- * <disp32> (LEA RAX,[rip+vtable]) ; 48 89 01 (MOV [RCX],RAX)`. We scan forward from the resolved entry
- * for the FIRST `48 8D 05` and decode its rip-relative disp to recover the vtable VA.
- *
- * Because the address is DECODED FROM THE LIVE IMAGE it is already correct on whichever build we are
- * in; there is nothing to compare it to on a second build, and it must not be compared to one build's
- * RVA. The install instead sanity-checks that the decode landed somewhere a vtable can live -- inside
- * the host image, in a section mapped read-only -- and then relies on the ABI shape checks. */
+/* Decode the first LEA RAX,[rip+disp32] in the resolved provider constructor
+ * to find its vtable. Installation then requires the target to lie in a read-
+ * only host section; pinned RVAs are diagnostic only.
+ */
 #define LEA_SCAN_WINDOW 0x40
 
 static int safe_read_n(const uint8_t *src, uint8_t *dst, size_t n)
@@ -1386,12 +1241,10 @@ static void *decode_vtable_global(const uint8_t *ctor_fn)
     return NULL;
 }
 
-/* ====================================================== install-time reclaim + audit ===============
- * RECLAIM: earlier releases wrote the built-in defaults to <root>\overrides\<name> if absent. Such a
- * file, byte-equal to the baked text with CR bytes ignored (some copies picked up CRLF endings), is
- * provably OURS-untouched -> delete it, so the in-memory built-in layer (which updates with every
- * release) serves instead. ANY difference -> the file is user-owned -> kept, and it keeps winning.
- * SEH-guarded; a reclaim failure just leaves the file shadowing (the old behavior). */
+/* Remove legacy disk copies that match built-in defaults with CR bytes
+ * ignored, allowing current in-memory defaults to serve. Keep every differing
+ * file. Reclaim faults leave the existing disk shadow in place.
+ */
 static int file_equals_baked_ignoring_cr(const unsigned char *fbuf, size_t flen,
                                          const char *baked, size_t blen)
 {
@@ -1406,9 +1259,9 @@ static int file_equals_baked_ignoring_cr(const unsigned char *fbuf, size_t flen,
     return fi == flen && bi == blen;
 }
 
-/* ---- host-image containment tests (what an ADDRESS alone can honestly prove) ------------------
- * Both walk the host PE headers under SEH: module_base is engine-supplied and a malformed or
- * unreadable image must degrade to a clean refusal, never a fault. */
+/* SEH-guarded host-image bounds checks. Invalid or unreadable PE headers
+ * refuse installation.
+ */
 
 /* SizeOfImage from the host's optional header. 0/failure => 0. */
 static int ov_image_size(const uint8_t *module_base, uint32_t *out_size)
@@ -1426,9 +1279,7 @@ static int ov_image_size(const uint8_t *module_base, uint32_t *out_size)
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-/* Non-zero when `address` lies inside the host image's mapped range. CONTAINMENT, NOT IDENTITY:
- * it says only that the pointer is a location in DOOM, which is the most any address test can
- * honestly say. Identity comes from the unique signature match that produced the address. */
+/* Check host-image containment; this does not identify the function. */
 static int ov_address_in_image(const uint8_t *module_base, const void *address)
 {
     uintptr_t base = (uintptr_t)module_base;
@@ -1439,11 +1290,9 @@ static int ov_address_in_image(const uint8_t *module_base, const void *address)
     return value - base < (uintptr_t)size;
 }
 
-/* Non-zero when `address` lies in a section the loader mapped READ-ONLY (READ set, WRITE and
- * EXECUTE clear) -- .rdata on both shipped builds, which is where the engine's vtables live. This
- * is the plausibility test for a runtime-decoded vtable pointer: a decode that lands in .text, in
- * writable .data, or outside the image did not decode a vtable. It is deliberately not an identity
- * test, because a decoded address needs none -- it came from the live image. */
+/* Require READ with neither WRITE nor EXECUTE on the containing section. This
+ * checks whether a decoded vtable address is plausible, not its identity.
+ */
 static int ov_address_in_readonly_section(const uint8_t *module_base, const void *address)
 {
     __try {
@@ -1469,15 +1318,11 @@ static int ov_address_in_readonly_section(const uint8_t *module_base, const void
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-/* The four native locations published into our idFile table must each be a CLEAN UNIQUE
- * masked-signature match -- SIG_OK, never the hook-tolerant SIG_OK_HOOKED known_rva fallback,
- * because the ctor's prologue is decoded and the helpers are called through an engine-owned table
- * -- and each must be an address inside the host image.
- *
- * That is the entire identity argument, and it is stronger than the RVA equality this used to
- * demand: a unique signature cannot match the wrong function, whereas two builds can share an RVA
- * by accident. It is also the only form of the argument that survives the second shipped build,
- * where every one of these functions sits at a different RVA. */
+/* Require clean SIG_OK matches for the constructor and all three native
+ * helpers, plus host-image containment. Hook-tolerant fallbacks are refused
+ * because the constructor is decoded and helpers become callable vtable
+ * entries.
+ */
 static int ov_supported_build_abi(const uint8_t *module_base,
                                   const void *ctor_fn, int ctor_status_ok,
                                   const void *read_string_fn, int read_string_status_ok,
@@ -1550,8 +1395,9 @@ static void reclaim_baked_overrides(void)
     }
 }
 
-/* AUDIT: enumerate the user's active override files into the log (count + names, bounded), flagging any
- * that fail the well-formedness tripwire -- so "what is shadowing what" is answerable from the log. */
+/* Log a bounded list of active user files and flag failed text-balance
+ * checks.
+ */
 #define OV_AUDIT_MAX_FILES 512
 #define OV_AUDIT_MAX_NAMED 24
 #define OV_AUDIT_MAX_DEPTH 8
@@ -1639,8 +1485,7 @@ int sh_overrides_install(const uint8_t *module_base,
         return 0;
     }
     if (!ctor_status_ok) {
-        /* The ctor is only used to DECODE the vtable LEA; a hooked prologue would corrupt the decode.
-         * Refuse on the hook-tolerant known_rva fallback (same conservative policy as the other ops). */
+        /* A hooked constructor may obscure the vtable LEA; refuse fallback matches. */
         backend_log("B1: overrides file-shadow SKIPPED -- ResProviderCtor via hook-tolerant fallback "
                     "(prologue may be hooked); not decoding the vtable LEA from a detoured prologue");
         return 0;
@@ -1685,10 +1530,9 @@ int sh_overrides_install(const uint8_t *module_base,
                     "(ResProviderCtor layout shifted?)");
         return 0;
     }
-    /* Plausibility, not identity: the address was decoded out of the live image, so it is already
-     * the right one for whichever build we are in, and OV_PINNED_PROVIDER_VTABLE_RVA is only what
-     * it happens to be on the Vulkan image. All we can usefully ask is that the decode landed
-     * where a vtable can live -- inside DOOM, in a read-only section. */
+    /* Require the decoded vtable to lie in a read-only host section. The
+     * pinned Vulkan RVA is for audit only.
+     */
     if (!ov_address_in_image(module_base, vtable) ||
         !ov_address_in_readonly_section(module_base, vtable)) {
         backend_log("B1: overrides file-shadow SKIPPED -- decoded provider vtable is not a read-only "
@@ -1698,8 +1542,9 @@ int sh_overrides_install(const uint8_t *module_base,
 
     void **slot = (void **)((uint8_t *)vtable + OPEN_SLOT_OFFSET);
 
-    /* Save the original open + overwrite the slot with our hook. The slot is .data (an 8-byte pointer),
-     * so we VirtualProtect RW, store, restore -- NOT install_inline_hook (that patches code). */
+    /* Temporarily make the read-only vtable page writable, replace the eight-
+     * byte open slot, then restore protection.
+     */
     void *orig = NULL;
     if (!safe_read_n((const uint8_t *)slot, (uint8_t *)&orig, sizeof orig) || orig == NULL) {
         backend_log("B1: overrides file-shadow SKIPPED -- open vtable slot unreadable / null");
@@ -1718,8 +1563,8 @@ int sh_overrides_install(const uint8_t *module_base,
     g_slot = slot;
 
     sh_resource_bridge_set_provider_ready(1);
-    ov_capture_packages();       /* one enumeration; the open path resolves against this snapshot */
-    reclaim_baked_overrides();   /* delete OUR untouched previously-written defaults (memory layer serves now) */
+    ov_capture_packages();       /* Capture the initial package list for resource opens. */
+    reclaim_baked_overrides();   /* Reclaim matching legacy copies so in-memory defaults can serve. */
     audit_user_overrides();      /* log what the user's folder actively shadows */
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "B1: overrides file-shadow installed (vtable=%p slot+0x%x=%p, orig open=%p); root=%s\\overrides; "

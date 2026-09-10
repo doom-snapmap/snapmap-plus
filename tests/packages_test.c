@@ -1,9 +1,4 @@
-/* packages_test.c -- per-package override discovery.
- *
- * The contract these tests pin is what makes "drag the folder in" safe: a
- * directory only counts as a package once it says so with a package.json, the
- * pre-package shared tree keeps working, and the order two machines see is the
- * same order. */
+/* Tests package-marker discovery, legacy overrides and deterministic ordering. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -244,9 +239,7 @@ int main(void)
     CHECK(index_of(packages, count, "four-demon-runes") == 1);
     CHECK(index_of(packages, count, "generated") < 0);
 
-    /* A user may organise installs into grouping folders to any depth. A
-     * grouping folder is searched, never returned, and its name becomes part of
-     * the package's identity so two groups may hold like-named packages. */
+    /* Grouping folders contribute to identity but are not themselves packages. */
     install(overrides, "editor/lifts", 1);
     install(overrides, "editor/toybox", 1);
     install(overrides, "editor/scratch", 0);

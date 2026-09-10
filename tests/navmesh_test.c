@@ -1,14 +1,6 @@
-/* navmesh_test.c -- baked navigation: the smnav1 shard reader, the structural
- * AAS gate, and the map-scoped serving table.
- *
- * The contract these tests pin is the one that keeps a stranger's map from
- * killing the process, and the one that keeps a demon off a platform that is
- * not there. Every AAS payload here is SYNTHETIC -- built by this file, byte by
- * byte, to the published AAS2 3.29 layout -- because the product ships no game
- * bytes and a test may not either. The good payload must be accepted (a
- * validator that refuses correct data is worse than none), and each mutation of
- * it must be refused without a crash.
- */
+/* Tests smnav1 reassembly, structural AAS validation and map-scoped serving.
+ * All AAS2 3.29 fixtures are synthetic; accept the valid payload and refuse
+ * each malformed mutation without a crash. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -117,11 +109,9 @@ static void put16(unsigned char *p, unsigned v)
 
 typedef enum { NODES_TREE, NODES_CYCLE, NODES_CHAIN } node_mode;
 
-/* The canonical good file: two areas (0 is the engine's dummy), four vertices
- * and edges, one reachability wired into both per-area lists, one cluster, one
- * cover record, and a small BSP. `pad` adds dependencyName records, which carry
- * no cross-lump index, so the payload can be grown past a shard boundary
- * without inventing geometry. */
+/* Synthetic file with dummy/floor areas, four vertices and edges, one linked
+ * reachability, cluster and cover record, and a small BSP. Dependency-name
+ * padding crosses shard boundaries without adding geometry. */
 static int build_aas(aas_build *b, unsigned pad, node_mode mode, unsigned chain)
 {
     unsigned counts[22];
@@ -429,9 +419,8 @@ static void test_validator(void)
     CHECK(strstr(err, "area") != NULL);
     put32(b.p + b.off[A_NODES] + 8, 1);
 
-    /* areaBounds must cover every area. It is the last lump, so shortening it
-     * by one record and the payload by one record keeps the walk exact and
-     * leaves only the mismatch to catch. */
+    /* Remove the final areaBounds record while preserving the file end to
+     * isolate its required one-record-per-area count. */
     put32(b.p + b.off[A_AREABOUNDS] - 4, 1);
     CHECK(sh_navmesh_validate_aas(b.p, b.len - 12, err, sizeof err) == 0);
     CHECK(strstr(err, "areaBounds") != NULL);
@@ -478,24 +467,11 @@ static void test_validator(void)
 /* the header grammar and the serving table                              */
 /* ==================================================================== */
 
-/* THE TWO NAMES, spelled out.
- *
- * These literals are what the game's own archive index carries for the
- * gridroom, and they are asserted as literals rather than composed here:
- * composing them the way the code composes them would pin nothing. The cooked
- * name prefixes 'b' to the WHOLE extension -- `.b` + `aas_monster48` --
- * and getting that wrong is silent, not loud. The engine asks for the cooked
- * name FIRST, so a wrong spelling misses, the shipped payload answers, the
- * source name is never requested at all, and the table cheerfully reports
- * everything served while nothing has been. It cost one live run to find. */
-/* WHAT THE CONSOLE SAYS, and why the map-load counter is in it.
- *
- * The clear-on-every-load rule is the one that stops an unbaked map inheriting
- * the previous map's platforms, and proving it in game wants two map loads in
- * one session -- which the test rig could not drive. So the report leads with
- * how many loads reached this code and what the last one found: a count that
- * advances while the set count falls to zero is the rule working, visible from a
- * session that only ever loaded one map. */
+/* Keep source and cooked resource names as independent literals. Cooking
+ * prefixes the whole extension with b (.baas_monster48); a wrong name silently
+ * falls through to shipped navigation. */
+/* The load count and current set count expose whether a new load cleared
+ * the previous map's navigation. */
 static void test_report(void)
 {
     aas_build b;
@@ -833,9 +809,51 @@ static void test_prose(void)
     CHECK(sh_navmesh_strip(map, strlen(map), NULL) == NULL);   /* and nothing is removed */
 }
 
+static void test_native_reachability_limit(void)
+{
+    aas_build b;
+    unsigned i;
+    size_t extra = 256 * 40, old_end;
+    unsigned char *r, *area;
+    char err[256];
+    CHECK(build_aas(&b, 0, NODES_TREE, 0));
+    old_end = b.off[A_REACH] + 40;
+    b.p = (unsigned char *)realloc(b.p, b.len + extra);
+    CHECK(b.p != NULL);
+    if (!b.p) return;
+    memmove(b.p + old_end + extra, b.p + old_end, b.len - old_end);
+    memset(b.p + old_end, 0, extra);
+    b.len += extra;
+    for (i = A_REACH + 1; i < 22; i++) b.off[i] += extra;
+    put32(b.p + b.off[A_REACH] - 4, 257);
+    for (i = 0; i < 257; i++) {
+        r = b.p + b.off[A_REACH] + i * 40;
+        put16(r + 6, 1); put16(r + 8, 1);
+        put32(r + 0x20, i == 256 ? 0xffffffffu : i + 1);
+        put32(r + 0x24, i == 256 ? 0xffffffffu : i + 1);
+    }
+    CHECK(!sh_navmesh_validate_aas(b.p, b.len, err, sizeof err));
+    CHECK(strstr(err, "256 outgoing reachabilities") != NULL);
+    put32(b.p + b.off[A_AREAS] + 44 + 0x14, 0xffffffffu);
+    CHECK(!sh_navmesh_validate_aas(b.p, b.len, err, sizeof err));
+    CHECK(strstr(err, "256 outgoing reachabilities") != NULL);
+    put32(b.p + b.off[A_AREAS] + 44 + 0x14, 0);
+    /* 256 outgoing and 257 incoming is legal: only the outgoing ordinal is
+     * packed into eight bits. The extra route originates in area 0. */
+    r = b.p + b.off[A_REACH] + 255 * 40;
+    put32(r + 0x20, 0xffffffffu);
+    r += 40;
+    put16(r + 6, 0);
+    area = b.p + b.off[A_AREAS];
+    put32(area + 0x14, 256);
+    CHECK(sh_navmesh_validate_aas(b.p, b.len, err, sizeof err));
+    free_aas(&b);
+}
+
 int main(void)
 {
     test_validator();
+    test_native_reachability_limit();
     test_resource_names();
     test_report();
     test_reader();

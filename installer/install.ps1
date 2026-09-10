@@ -1,9 +1,5 @@
-# install.ps1 -- one-liner bootstrap for the Snapmap+ installer.
-#
-# Once the origin repo is set, end users run:
-#   irm https://github.com/doom-snapmap/snapmap-plus/releases/latest/download/install.ps1 | iex
-# It downloads snapmap-plus.exe from the latest release into %LOCALAPPDATA%\snapmap-plus and runs
-# `snapmap-plus install`. After that, run snapmap-plus.exe directly for update / uninstall / status.
+# Download the latest release installer into local app data and run install.
+# Use the downloaded executable for later update, uninstall and status commands.
 $ErrorActionPreference = "Stop"
 
 $repo = "doom-snapmap/snapmap-plus"

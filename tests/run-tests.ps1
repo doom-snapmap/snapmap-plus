@@ -1,80 +1,18 @@
-# run-tests.ps1 -- compile + run Snapmap+'s C unit tests with MSVC (x64). Pure ASCII.
-# Needs Build Tools for Visual Studio 2022 (C++ workload) -- the same toolchain the build scripts use.
+# Compile and run the offline C/C++ and JavaScript tests with MSVC x64 and Node.
+# Requires Visual Studio C++ Build Tools. Outputs go to tests\obj (gitignored).
 #
-# Usage:
-#   powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
-#   powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1 -Doom C:\path\to\unpacked-DOOMx64vk.exe
-# Optional explicit installed-resource probe (not part of the default suite):
+#   tests\run-tests.ps1
+#   tests\run-tests.ps1 -Doom <unpacked Vulkan exe> -DoomAlt <unpacked OpenGL exe>
+#
+# The default suite needs no game or built DLL. -Doom adds pinned signature,
+# hook-fallback and global checks; -DoomAlt checks the second image in portable
+# mode, accepting address shifts while requiring unique matches and layout checks.
+# Exit 0 means every selected test passed; failures include their build log.
+#
+# Optional manual probes:
 #   tests\obj\resource_bridge_test.exe <data-root> <doom-base>
-# Both paths are required; the probe performs no autodiscovery or environment lookup.
-#
-# Default: the self-contained tests (no game, no built DLL needed):
-#   shield_format_test  -- the fault record string formatter (pure logic)
-#   hook_test           -- the inline-detour installer, on a hand-laid scratch stub
-#   crash_record_test   -- the crash-record JSON formatter + escaping (pure logic)
-#   report_scrub_test   -- the crash-report log anonymization scrub + tail (pure logic)
-#   dumpmap_path_test   -- sh_dumpmap's output-path resolution (pure logic)
-#   json_pretty_test    -- sh_pretty_on's rawmap JSON re-layout: document preserved, refusals (pure logic)
-#   rawmap_paths_test   -- where a rawmap save goes: a named destination is ONE write, the
-#                          savepath setting is the durable one, and what counts as a rawmap
-#                          at all (a prefab has the same "entities" array a map does)
-#   config_json_test    -- bounded JSON grammar, duplicate keys, preservation + serialization
-#   iface_config_test   -- append-only config slot layout + dedicated binder isolation
-#   config_test         -- config lifecycle, validation, recovery, atomic faults + concurrency
-#   user_overrides_test -- immutable launch snapshot, persistence reporting + marker independence
-#   user_overrides_contract_test -- startup, command, cvar + loader source-wiring contract
-#   decl_server_test -- path-derived identities + bounded decl-text structural validation
-#   overrides_internal_test -- exact per-decl table, 31-slot provider ABI, helper gating, and read-only streams
-#   decl_server_contract_test -- startup ordering, signature pins, one-shot per-decl source wiring
-#   resource_bridge_test -- exact manifest resolution, sparse decode, provider gate + collisions
-#   packages_test -- per-package override discovery: markers, legacy tree, order, bounds
-#   map_package_test -- map-embedded package shards: scan/extract vs the reference impl, unsafe-zip refusal, load gate
-#   navmesh_test -- smnav1 navigation shards: header grammar, reassembly, the structural AAS gate, and the serving table
-#   nav_regions_test -- the author's ticked blocking volumes: the top-face rect, instanceEntities attribution, caps + malformed maps
-#   aas_edit_test -- the mutable AAS model: byte-identical round trip, structural parse refusals, lump append + caps, settings block
-#   aas_augment_test -- adding walkable areas: admission, the BSP splice, the step/island link regimes, refusals
-#   nav_bake_test -- baking marked regions at load: the resource-name grammar, planning, clear-on-load, the one-marked-copy rule
-#   nav_traversal_test -- the universal traversal table: the decl grammar, dropped `_` placeholders, nearest-nominal
-#                         selection and its refusals, the nine shipped travel-flag values, and failing closed
-#   override_packages_test -- the file shadow resolves a decl out of any installed package
-#   package_requirements_test -- allowlisted package cvars, strict parsing, RUNNING gate + one-shot apply
-#   strids_packages_test -- a package ships its own #str_ strings; user > packages > baked
-#   config_message_test -- bounded raw WebView config-message extraction
-#   theme_bootstrap_test -- pre-navigation dark-class injection (pure C++ helper)
-#   theme_contract_test -- native/preview theme bridge contract in the embedded HTML source
-#   entity_settings_contract_test -- persisted Entities controls + exclusive selection-mode contract
-#   growing_text_buffer_test -- large declaration reads, exact boundary, and explicit safety-cap signal
-#   preview_test       -- generation-safe request/publish handoff and RGBA PNG payload
-#   bcn_test           -- BC1/BC3/BC7 vectors, padded dimensions, and overflow guards
-#   soundpreview_queue_test -- failed-kick rollback, FIFO preservation, overflow, and name bounds
-#   imgpreview_index_test -- bounded parsing, compact-name ownership, catalog routing, and rollback
-#   imgpreview_catalog_test -- lazy optional unions, compact Wwise strings, direct images, and paging
-#   prefabpreview_test -- bounded BMODEL/MD6 geometry decode and binary transport blob
-#   megapreview_io_test -- compact VMTR metadata and selected-entry Mega2 reads
-#   serialization_buffer_test -- timeline growth, terminal failures, retained capacity, and 32 MB cap
-# The JS checks run after the native suite:
-#   decl_overlay_test -- syntax-paint/text alignment for the Entity State editor
-#   decl_index_order_test -- numeric item[n] presentation, nesting, and 1000-boundary regression
-#   decl_enum_values_test -- schema enum sets match the engine constants, not the localized inspector labels
-#   feedback_channel_test -- the relay reads a release channel out of the v-prefixed tag the app reports
-#   feedback_renderer_test -- the relay classifies the reported renderer and names it in the issue body
-#   entity_list_test -- bounded DOM window, full logical filtering, selection, and event delegation
-#   prefab_transform_test -- sparse idMat3 defaults, column-major axes, scale, and block anchoring
-#   prefab_viewport_contract_test -- Prefab Details layout, resize, budgets, and shared-buffer transport
-#   window_chrome_contract_test -- captionless DWM shadow/rounded-corner contract
-# -Doom <unpacked DOOM exe>: ALSO the resolver tests, which scan a real (Steamless-unpacked)
-#   DOOM image. Either shipped executable works:
-#   sig_test            -- every engine signature resolves to its known RVA
-#   hooktol_test        -- the resolver hook-tolerant fallback (prologue-clobbered fns)
-#   globals_test        -- every engine data global resolves, and the layout invariants hold
-# -DoomAlt <the other unpacked DOOM exe>: the PORTABILITY gate. Re-runs sig_test and
-#   globals_test in portable mode against the second executable, where everything must still
-#   resolve uniquely at its own (different) addresses. Run both together:
-#     tests\run-tests.ps1 -Doom <vk unpacked> -DoomAlt <gl unpacked>
-#
-# Exit 0 iff every selected test passes; non-zero (with the build log) on any failure.
-# Objects + test exes land in tests\obj\ (gitignored). The runtime XInput-ordinal test
-# (xinput_ordinal_test) is run by hand against a built build\XINPUT1_3.dll -- see docs\contributing.md.
+# Both resource paths are required; there is no autodiscovery.
+# For xinput_ordinal_test against the built proxy, see docs\contributing.md.
 param([string]$Doom = "", [string]$DoomAlt = "")
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -90,6 +28,7 @@ if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
 
 # name | sources (relative to tests\) | runtime arg
 $tests = @(
+    @{ name = "nav_play_test"; src = 'nav_play_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; arg = "" }
     @{ name = "weapon_hud_test"; src = 'weapon_hud_test.c ..\src\backend\weapon_hud.c ..\src\backend\packages.c ..\src\backend\config_json.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_WEAPON_HUD_TESTING /DSH_PACKAGES_TESTING'; arg = "" }
     @{ name = "shield_format_test"; src = 'shield_format_test.c ..\src\fault_shield\fault_record.c ..\src\common\log_rotate.c'; arg = "" }
     @{ name = "hook_test";          src = 'hook_test.c ..\src\backend\hook.c';                       arg = "" }
@@ -97,7 +36,7 @@ $tests = @(
     @{ name = "report_scrub_test";  src = 'report_scrub_test.c';                                     arg = "" }
     @{ name = "dumpmap_path_test";  src = 'dumpmap_path_test.c';                                     arg = "" }
     @{ name = "json_pretty_test";   src = 'json_pretty_test.c';                                      arg = "" }
-    @{ name = "rawmap_paths_test";  src = 'rawmap_paths_test.c ..\src\backend\rawmap.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\common\snapmap_plus_iface.c'; defs = '/DSH_RAWMAP_TESTING /DSH_CONFIG_TESTING'; libs = 'shell32.lib ole32.lib'; arg = "" }
+    @{ name = "rawmap_paths_test";  src = 'rawmap_paths_test.c ..\src\backend\rawmap.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\common\snapmap_plus_iface.c'; defs = '/DSH_RAWMAP_TESTING /DSH_CONFIG_TESTING'; libs = 'shell32.lib ole32.lib'; arg = "" }
     @{ name = "config_json_test";   src = 'config_json_test.c ..\src\backend\config_json.c';         arg = "" }
     @{ name = "iface_config_test";  src = 'iface_config_test.c ..\src\common\snapmap_plus_iface.c';   arg = "" }
     @{ name = "config_test";        src = 'config_test.c ..\src\backend\config.c ..\src\backend\config_json.c ..\src\common\snapmap_plus_iface.c'; defs = '/DSH_CONFIG_TESTING'; libs = 'shell32.lib ole32.lib'; arg = "" }
@@ -121,10 +60,8 @@ $tests = @(
     @{ name = "nav_bake_test"; src = 'nav_bake_test.c ..\src\backend\nav_bake.c ..\src\backend\nav_regions.c ..\src\backend\aas_edit.c ..\src\backend\aas_augment.c ..\src\backend\nav_geometry.c ..\src\backend\nav_traversal.c ..\src\backend\map_shards.c'; defs = '/DSH_NAV_BAKE_TESTING'; arg = "" }
     @{ name = "nav_traversal_test"; src = 'nav_traversal_test.c ..\src\backend\nav_traversal.c'; defs = '/DSH_TRAV_TESTING'; arg = "" }
     @{ name = "override_packages_test"; src = 'override_packages_test.c ..\src\backend\overrides.c ..\src\backend\packages.c ..\src\backend\decl_text.c'; defs = '/DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
-    # engine_globals.c + signatures.c come in because the service now LOCATES DOOM's load-state word
-    # instead of baking its address. Linking the real resolver (rather than a stub) means the test also
-    # exercises what happens when it cannot resolve: the host process is not DOOM, so nothing resolves,
-    # and the service must refuse to read anything rather than fall back to a pinned RVA.
+    # Link the real globals resolver to verify refusal when this non-game process
+    # cannot provide the load-state address.
     @{ name = "package_requirements_test"; src = 'package_requirements_test.c ..\src\backend\package_requirements.c ..\src\backend\packages.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c'; defs = '/DSH_PACKAGE_REQUIREMENTS_TESTING'; arg = "" }
     @{ name = "strids_packages_test"; src = 'strids_packages_test.c ..\src\backend\strids.c ..\src\backend\packages.c ..\src\backend\overrides.c ..\src\backend\decl_text.c'; defs = '/DSH_STRIDS_TESTING /DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
     @{ name = "config_message_test"; src = 'config_message_test.cpp ..\src\ui\webview\config_message.cpp'; cxx = $true; arg = "" }
@@ -148,12 +85,7 @@ if ($Doom) {
     $tests += @{ name = "hooktol_test"; src = 'hooktol_test.c ..\src\backend\signatures.c'; arg = $da }
     $tests += @{ name = "globals_test"; src = 'globals_test.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\backend_log.c ..\src\common\log_rotate.c'; arg = $da }
 }
-# -DoomAlt is the PORTABILITY gate, and it is what keeps one build of this product serving
-# both of DOOM 2016's executables. Point it at the OTHER unpacked image (if -Doom was the
-# Vulkan one, this is DOOMx64.exe, and vice versa). Every signature and every data global
-# must resolve UNIQUELY there too. They land on different RVAs, which is expected and is why
-# these run in portable mode. A signature unique on only one image is not an identity, it is
-# a coincidence -- and without this pass nothing would catch it.
+# Check the second executable without requiring the pinned image's addresses.
 if ($DoomAlt) {
     if (-not (Test-Path $DoomAlt)) { throw "-DoomAlt path not found: $DoomAlt" }
     $alt = (Resolve-Path $DoomAlt).Path
@@ -167,12 +99,10 @@ foreach ($t in $tests) {
     $defs = if ($t.defs) { " $($t.defs)" } else { "" }
     $cxx  = if ($t.cxx)  { " /EHsc /std:c++17" } else { "" }
     $libs = if ($t.libs) { " /link $($t.libs)" } else { "" }
-    # Output paths are RELATIVE (cwd=tests via cd /d) -- a quoted absolute path with a trailing backslash
-    # is the cmd `\"` footgun the build scripts document (cl D8036). obj\ exists (created above); names have no spaces.
+    # Relative output paths avoid cl's quoted trailing-backslash parsing issue.
     $cl  = "cl /nologo /O2 /MT /I..\src\backend /I..\src\common /I..\src\fault_shield /I..\src\ui\webview$cxx$defs $($t.src) /Fe:obj\$($t.name).exe /Foobj\$libs"
     $log = Join-Path $obj ($t.name + ".build.log")
-    # vcvars64.bat prints a spurious 'vswhere not recognized' line to stderr; gate on cl's real exit only
-    # (the same cmd /c pattern the build scripts use) instead of letting that stderr trip $ErrorActionPreference.
+    # Judge the compiler exit code; vcvars may emit unrelated stderr diagnostics.
     cmd /c "cd /d `"$here`" && `"$vcvars`" && $cl > `"$log`" 2>&1"
     if ($LASTEXITCODE -ne 0) { Get-Content $log | Write-Host; Write-Host "[FAIL] compile $($t.name)"; $fail++; continue }
     if ($t.arg) { & $exe @($t.arg) } else { & $exe }

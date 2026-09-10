@@ -99,10 +99,9 @@ static const config_descriptor g_registry[] = {
         normalize_bool
     },
     {
-        /* Read by rawmap.c's save path since the packages release, but never
-         * registered, so it always answered "not set" and could not be turned
-         * off. Registering it is the whole fix; the default is what the code
-         * already assumed. */
+        /* Enable package embedding by default; rawmap save reads this
+         * registered key.
+         */
         "packages.embed_in_saved_maps", SH_JSON_BOOL, "true",
         SH_CONFIG_BACKEND_READ | SH_CONFIG_BACKEND_WRITE |
         SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,
@@ -110,9 +109,9 @@ static const config_descriptor g_registry[] = {
         normalize_bool
     },
     {
-        /* Serve a map's own baked AI navigation in place of its modules'
-         * shipped navmeshes (navmesh.c). Off leaves the shards in the map as
-         * inert variables, which is what an older release does with them. */
+        /* Control serving map-carried navigation. When disabled, retain its
+         * shards as inert map variables.
+         */
         "navmesh.enabled", SH_JSON_BOOL, "true",
         SH_CONFIG_BACKEND_READ | SH_CONFIG_BACKEND_WRITE |
         SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,
@@ -126,8 +125,9 @@ static const config_descriptor g_registry[] = {
         NULL, normalize_bool
     },
     {
-        /* Write the navigation a map arrived with back into it when it is
-         * saved. Off means a load-then-save drops the author's bake. */
+        /* Preserve map-carried navigation on save. Disabling this drops the
+         * loaded bake.
+         */
         "navmesh.embed_in_saved_maps", SH_JSON_BOOL, "true",
         SH_CONFIG_BACKEND_READ | SH_CONFIG_BACKEND_WRITE |
         SH_CONFIG_UI_READ | SH_CONFIG_UI_WRITE,

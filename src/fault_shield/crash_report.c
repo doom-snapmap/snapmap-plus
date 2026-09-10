@@ -1,19 +1,6 @@
-/* crash_report.c -- see crash_report.h.
- *
- * SAFETY MODEL (this runs while the process may be dying):
- *  - record writes use CreateFileA(CREATE_NEW) + WriteFile with WRITE_THROUGH, static buffers, no
- *    CRT heap; a same-second collision just bumps a suffix; any failure is absorbed silently.
- *  - the first-chance fatal one-shot mirrors the diagnostic build's proven pattern: HEAP_CORRUPTION
- *    (0xC0000374) and __fastfail/STACK_BUFFER_OVERRUN (0xC0000409) trap to the kernel and never
- *    reach an unhandled-exception filter on x64, so the full capture happens right there, once --
- *    the process is dying anyway, so the loader-lock cost is acceptable. The stack walk is heap-free
- *    (RtlVirtualUnwind), so it survives a corrupt heap; the dump is best-effort after it.
- *  - the unhandled-exception filter chains to the REAL previous filter, guarded so it can never
- *    chain to itself, and re-asserts for ~30s after arm (the engine installs its own top-level
- *    filter during bring-up and would displace ours -- same displacement the diagnostic build
- *    documents).
- *  - dbghelp is bound at ARM time (LoadLibrary inside a crash is off-limits).
- */
+/* Capture crash records with bounded static buffers and write-through files.
+ * Pre-bind dbghelp during initialization. Fatal capture is best-effort and does
+ * not change exception handling. Callers guard the fatal capture attempt. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -70,8 +57,7 @@ static void crash_dirs_from_module(void)
     _snprintf_s(g_dump_path, MAX_PATH, _TRUNCATE, "%ssnapmap-plus\\logs\\sh_crash.dmp", path);
 }
 
-/* Read "version" from %LOCALAPPDATA%\snapmap-plus\install.json (the installer's manifest -- the same
- * source the UI reads). Best-effort: absent/malformed -> "" (the record just omits it). */
+/* Read the installer manifest version; leave it empty if unavailable or malformed. */
 static void crash_read_version(void)
 {
     char la[MAX_PATH], path[MAX_PATH], data[4096];
@@ -121,9 +107,8 @@ void crash_report_file(const char *kind, unsigned long code, uintptr_t rip_rva,
     len = crash_record_json(g_rec_buf, sizeof g_rec_buf, &r);
     if (len <= 0) return;
 
-    /* pending-YYYYMMDD-HHMMSS[-n].json: CREATE_NEW so a same-second second fault bumps the suffix
-     * instead of read-modify-writing anything at crash time. Lexicographic name order == time order,
-     * which is what the UI's "show the latest" relies on. */
+    /* CREATE_NEW avoids overwriting a same-second record; suffixes break collisions.
+     * The UI selects the latest record by lexicographic filename order. */
     for (tryn = 0; tryn < 4; tryn++) {
         if (tryn == 0)
             _snprintf_s(fpath, MAX_PATH, _TRUNCATE, "%s\\pending-%04d%02d%02d-%02d%02d%02d.json",
@@ -170,8 +155,7 @@ const char *crash_report_write_dump(EXCEPTION_POINTERS *ep)
     return ok ? g_dump_path : "";
 }
 
-/* One full fatal capture: stack + engine text + dump + record. Shared by the first-chance one-shot
- * and the unhandled filter. SEH-guarded per step: a capture failure degrades, never re-faults. */
+/* Capture fatal details; callers guard this attempt with SEH. */
 static void crash_capture_fatal(EXCEPTION_POINTERS *ep)
 {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
@@ -206,7 +190,7 @@ static void crash_capture_fatal(EXCEPTION_POINTERS *ep)
     crash_report_file("fatal", code, rva, fa, mod, g_rec_stack, g_rec_text, dump);
 }
 
-/* First-chance one-shot for the filter-bypassing fatal codes (see the header comment). LOG-ONLY. */
+/* Best-effort first-chance capture when a fatal status reaches the VEH. */
 static LONG CALLBACK crash_fatal_veh(PEXCEPTION_POINTERS ep)
 {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
@@ -217,8 +201,7 @@ static LONG CALLBACK crash_fatal_veh(PEXCEPTION_POINTERS ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-/* Unhandled-exception filter: the definitive "process dying here" record. Chains to the REAL
- * previous filter -- never to itself. */
+/* Record an unhandled fault, then chain to the previous filter without recursion. */
 static LONG WINAPI crash_uef(EXCEPTION_POINTERS *ep)
 {
     LPTOP_LEVEL_EXCEPTION_FILTER prev = g_prev_filter;
@@ -229,8 +212,8 @@ static LONG WINAPI crash_uef(EXCEPTION_POINTERS *ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-/* Re-assert the filter through engine bring-up (~30s), discarding the return so g_prev_filter is
- * captured exactly once at arm and can never become our own filter. */
+/* Reassert through engine startup for about 30 seconds. Keep the original previous
+ * filter; capturing this call's return could make the chain recurse into itself. */
 static DWORD WINAPI crash_reassert_thread(LPVOID p)
 {
     int i;
@@ -244,11 +227,8 @@ void crash_report_init(void)
     HMODULE dh;
     crash_dirs_from_module();
     crash_read_version();
-    /* Snapshot the renderer HERE, in a safe context, so the fault path only reads a pointer.
-     * sh_host_renderer_name asks the loader (GetModuleHandleW) on its first definite answer, and
-     * a dying process is the wrong place to take the loader lock. Both renderer libraries are
-     * static imports of the DOOM executable, so they are already mapped by the time any of our
-     * code runs -- resolving this early is reliable, and an unresolved "" just omits the field. */
+    /* Snapshot the renderer before faults can occur: its first lookup may take the
+     * loader lock. An unresolved renderer stays empty in the record. */
     g_renderer = sh_host_renderer_name();
     dh = LoadLibraryA("dbghelp.dll");
     if (dh) g_minidump_write = (minidump_write_t)GetProcAddress(dh, "MiniDumpWriteDump");

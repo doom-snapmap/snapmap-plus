@@ -1,4 +1,4 @@
-/* veh.h -- the fault-shield's vectored exception handler (raw AV -> recoverable Error(6)). */
+/* Engine-fault classification, recovery, and stack capture. */
 #ifndef SHIELD_VEH_H
 #define SHIELD_VEH_H
 

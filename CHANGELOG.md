@@ -3,6 +3,25 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.10 -- 2026-09-10 (beta)
+
+**Connected navigation for custom bridges and ramps**
+
+Navigation now follows the exposed surfaces of rotated and intersecting Blocking Boxes, with repairs for demons crossing bridges and returning to module floors. Editing refreshes the bake automatically, and the green preview is visible on both renderers. Existing navigation marks migrate without manual retoggling.
+
+### New
+- Weapon packages can select ammo presentation from the weapon's capacity, including the existing infinity display, without changing ammunition or gameplay.
+
+### Improved
+- Rotated boxes, floating decks and intersecting structures bake from their exposed walkable surfaces. Shared supports retain contact, while buried surfaces are removed.
+- Moving, rotating, copying or deleting boxes refreshes navigation. Each placed module keeps its own bake, including maps with multiple Grid Rooms.
+- Platforms can connect directly, with gap leaps where the demon's native traversal data allows them. Modules that already contain climbs can receive additional custom traversal links.
+
+### Fixed
+- Repaired bridge and ramp-to-floor transitions by preserving floor contact, rebuilding navigation visibility and keeping marked volumes out of the native avoidance obstacle list. This also applies to maps saved with the replacement AI Navigation marker.
+- Dense bakes respect the engine's connection limits. Candidates that cannot fit are refused before loading, preventing the associated Play failure.
+- The green navigation preview now displays correctly in the OpenGL editor as well as Vulkan.
+
 ## v0.2.1-beta.9 -- 2026-09-08 (beta)
 
 **Marks take effect on Play, and the bake no longer crashes**

@@ -3,12 +3,19 @@
 #define SNAPMAP_PLUS_NAV_GEOMETRY_H
 #include "aas_augment.h"
 
-/* Boxes are supplied as one face and its extrusion, not axis-aligned bounds.
- * All upward faces are considered. Output convex cells have agent clearance
- * applied once, across unions and contacts within the native step height.
- * Returns -1 on invalid geometry or a
- * capacity failure; callers must discard the entire candidate bake. */
+/* Boxes are one face plus its extrusion. Consider all upward faces and apply
+ * agent clearance once across support unions and step-height contacts.
+ * Returns -1 for invalid geometry or exhausted capacity; discard the entire
+ * candidate bake.
+ */
 int sh_nav_geometry_build(const sh_aug_platform *boxes, int count,
+    double radius, double height, double floor_cos, double step, sh_aug_platform *out,
+    int *source, int *pieces, unsigned char *buried, int capacity);
+
+/* Existing module floors contribute support at contacts within step height.
+ * These convex polygons are neither emitted again nor treated as solid boxes. */
+int sh_nav_geometry_build_supported(const sh_aug_platform *boxes, int count,
+    const sh_aug_platform *support, int support_count,
     double radius, double height, double floor_cos, double step, sh_aug_platform *out,
     int *source, int *pieces, unsigned char *buried, int capacity);
 

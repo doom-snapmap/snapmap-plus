@@ -300,7 +300,8 @@ static int ng_merge(const ng_poly *a,const ng_poly *b,ng_poly *out)
     return fabs(ng_area(out)-ng_area(a)-ng_area(b))<1e-5;
 }
 
-int sh_nav_geometry_build(const sh_aug_platform *src,int count,double radius,
+int sh_nav_geometry_build_supported(const sh_aug_platform *src,int count,
+    const sh_aug_platform *support,int support_count,double radius,
     double height,double floor_cos,double step,sh_aug_platform *out,int *source,int *pieces,
     unsigned char *buried,int capacity)
 {
@@ -308,17 +309,18 @@ int sh_nav_geometry_build(const sh_aug_platform *src,int count,double radius,
     ng_interval *iv=NULL,*next=NULL;
     typedef struct ng_boundary { ng_poly p; int face; } ng_boundary;
     ng_boundary *boundaries=NULL;
-    int nb=0,nbcap=0,i,j,k,f,nf=0,nout=0,rc=-1;
-    if(count<0||count>SH_AUG_MAX_PLATFORMS||capacity<1||radius<0.0||height<=0.0||
+    int nb=0,nbcap=0,i,j,k,f,nf=0,build_faces,nout=0,rc=-1;
+    if(support_count<0||support_count>65535||(support_count&&!support)||
+       count<0||count>SH_AUG_MAX_PLATFORMS||capacity<1||radius<0.0||height<=0.0||
        floor_cos<=0.0||floor_cos>1.0||step<0.0||step>=height||!isfinite(step)||
        !isfinite(radius)||!isfinite(height)||!isfinite(floor_cos)||
        (count&&!src)||!out||!source||!pieces||!buried)return -1;
     boxes=(ng_box*)calloc(count?count:1,sizeof *boxes);
-    faces=(ng_face*)calloc(count?count*6:1,sizeof *faces);
+    faces=(ng_face*)calloc((size_t)count*6+support_count+1,sizeof *faces);
     mem=(ng_poly*)malloc(2*(size_t)capacity*sizeof *mem);
-    iv=(ng_interval*)malloc(2*(size_t)(count*6+1)*sizeof *iv);
+    iv=(ng_interval*)malloc(2*(size_t)(count*6+support_count+1)*sizeof *iv);
     if(!boxes||!faces||!mem||!iv)goto done;
-    next=iv+count*6+1;
+    next=iv+count*6+support_count+1;
     for(i=0;i<count;i++) {
         if(!ng_box_read(&src[i],&boxes[i]))goto done;
         if(src[i].obstacle_only)continue;
@@ -335,8 +337,17 @@ int sh_nav_geometry_build(const sh_aug_platform *src,int count,double radius,
             faces[nf++]=face;
         }
     }
-        /* Erode exposed boundaries; retain support contacts within a step. */
-    for(i=0;i<nf&&radius>0.0;i++) {
+    build_faces=nf;
+    for(i=0;i<support_count;i++) {
+        ng_face *face=&faces[nf++];
+        if(support[i].corners<3||support[i].corners>NG_MAX)goto done;
+        face->p.n=support[i].corners;face->source=-1;
+        for(k=0;k<3;k++)face->normal[k]=support[i].n[k];
+        for(j=0;j<face->p.n;j++)for(k=0;k<3;k++)face->p.p[j][k]=support[i].c[j][k];
+    }
+    /* Existing module floors participate in support, but are not emitted or
+     * subtracted as occupied solids. This keeps a ramp's exit at the floor. */
+    for(i=0;i<build_faces&&radius>0.0;i++) {
             for(k=0;k<faces[i].p.n;k++) {
                 double *p=faces[i].p.p[k],*q=faces[i].p.p[(k+1)%faces[i].p.n];
                 double dx=q[0]-p[0],dy=q[1]-p[1],len=sqrt(dx*dx+dy*dy);
@@ -368,7 +379,7 @@ int sh_nav_geometry_build(const sh_aug_platform *src,int count,double radius,
                 }
             }
         }
-    for(f=0;f<nf;f++) {
+    for(f=0;f<build_faces;f++) {
         ng_face *face=&faces[f];int np=1,start=nout;
         a=mem;b=mem+capacity;a[0]=face->p;
         /* Partition overlapping support without inset along partition seams. */
@@ -424,4 +435,12 @@ int sh_nav_geometry_build(const sh_aug_platform *src,int count,double radius,
     rc=nout;
 done:
     free(boundaries);free(iv);free(mem);free(faces);free(boxes);return rc;
+}
+
+int sh_nav_geometry_build(const sh_aug_platform *src,int count,double radius,
+    double height,double floor_cos,double step,sh_aug_platform *out,int *source,int *pieces,
+    unsigned char *buried,int capacity)
+{
+    return sh_nav_geometry_build_supported(src,count,NULL,0,radius,height,floor_cos,
+                                           step,out,source,pieces,buried,capacity);
 }

@@ -1,20 +1,7 @@
-# prepare-release.yml -- drafts one CHANGELOG.md entry, as a reviewed pull request.
-#
-# This is the ONLY workflow that holds ANTHROPIC_API_KEY and the only place the project
-# spends money. workflow_dispatch is its only trigger, and dispatch requires repo write,
-# so no fork can reach it (same property ci.yml relies on). Two jobs on purpose: `draft`
-# holds the key and NO write permission; `propose` holds write permission and cannot read
-# the key. The API key and `contents: write` never share a process.
-#
-# The key lives in the `changelog` GitHub Environment, whose deployment branch policy MUST
-# be restricted to `main`. An environment defaults to "All branches", and dispatch lets the
-# caller choose the ref -- the workflow file that RUNS is the one on the chosen ref, so
-# without that policy a tampered workflow on a branch could read the key. The control that
-# actually bounds the financial loss is a monthly spend limit on a dedicated Anthropic
-# workspace, set in the Console. Both are documented in docs/services.md.
-#
-# Every third-party action is pinned to a full commit SHA with a version comment, as in
-# ci.yml, release.yml and pages.yml. Do not replace a SHA with a tag.
+# Draft one changelog entry for review. The draft job has the API key and no
+# write permission; the propose job can write but cannot read that key.
+# Restrict the changelog environment to main and configure a provider spend limit
+# as described in docs/services.md. Keep third-party actions pinned to SHAs.
 name: Prepare release
 
 on:
@@ -27,9 +14,7 @@ on:
 permissions: {}
 
 concurrency:
-  # Deliberately NOT keyed on the version: two maintainers preparing different versions
-  # would both branch from the same base and both prepend to the top of the same file,
-  # and if the later version merged first the changelog would be out of order.
+  # Serialize all versions because each draft prepends to the same changelog.
   group: prepare-release
   cancel-in-progress: false
 
@@ -52,7 +37,7 @@ jobs:
           # input would run as shell, in the job that can read the API key.
           VERSION: ${{ inputs.version }}
         run: |
-          # Everything that could waste an API call happens HERE, before any spend.
+          # Validate inputs before requesting a draft.
           set -euo pipefail
           if ! printf '%s' "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
             echo "::error::'$VERSION' is not a valid tag. Expected v1.2.3 or v1.2.3-beta.4."
@@ -72,9 +57,8 @@ jobs:
           fi
 
           case "$VERSION" in
-            # A stable release rolls up its betas, so it compares against the last STABLE
-            # tag. `git describe` exits non-zero when there is none -- and there is none
-            # today, every tag so far is a beta -- so guard it or `set -e` kills the step.
+            # Stable releases compare against the previous stable tag.
+            # Allow git describe to fail when no matching tag exists yet.
             *-*) BASE=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true) ;;
             *)   BASE=$(git describe --tags --abbrev=0 --match 'v*' --exclude '*-*' 2>/dev/null || true) ;;
           esac
@@ -141,15 +125,11 @@ jobs:
           path.write_text(new, encoding="utf-8", newline="\n")
           PY
           rm section.md
-          # The entry must satisfy the grammar every consumer parses, or the release
-          # that reads it fails after the tag has already been pushed.
+          # Validate the inserted entry before proposing it for review.
           python3 tools/changelog.py --lint
 
-      # continue-on-error, because opening the pull request is gated by an ORGANISATION policy this
-      # workflow cannot see: Settings -> Actions -> General -> "Allow GitHub Actions to create and
-      # approve pull requests". When that is off the action fails, but it has ALREADY pushed the
-      # branch, so the draft is safe and the next step just tells the maintainer where it is.
-      # The draft cost an API call; losing it to a settings checkbox would be the worst outcome.
+      # If organization policy blocks PR creation, retain the pushed draft branch
+      # and report its compare link in the next step.
       - name: Open the pull request
         id: pr
         continue-on-error: true

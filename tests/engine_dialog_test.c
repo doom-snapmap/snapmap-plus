@@ -1,13 +1,5 @@
-/* engine_dialog_test.c -- the text-injection gate and the one-at-a-time claim.
- *
- * What is testable offline is exactly the part that does not need DOOM: which
- * descriptors get our text and which are left alone, that both buttons are
- * named with the action ids the answer is later read from, and that a second
- * question cannot displace one already on screen. The one engine-side unknown
- * left -- whether the Flash layer renders a literal string -- is settled by
- * `sh_dialogtest` against a running game, because no amount of mocking can
- * answer it.
- */
+/* Offline descriptor text, button-action and single-claim checks. These
+ * doubles cannot verify Flash rendering; that requires sh_dialogtest in game. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -21,18 +13,14 @@
 #define ED_MGR_QUEUE_PTR    0x900u
 #define ED_MGR_QUEUE_COUNT  0x908u
 
-/* The params block indices the two button action ids are written to, and the
- * ids themselves. Duplicated from engine_dialog.c on purpose: a test that
- * imported the constants could not catch them being changed. */
+/* Keep button indices and action IDs independent of engine_dialog.c. */
 #define ED_PARAM_ACTION_0   3
 #define ED_PARAM_ACTION_1   4
 #define ED_ACTION_ACCEPT    0x4A
 #define ED_ACTION_DECLINE   0x4B
 
-/* A stand-in shell and dialog manager. The shell holds the manager at +0x08 and
- * the manager holds the queue at +0x900 with its count at +0x908, exactly as the
- * engine lays them out -- because the code under test reads the queue back after
- * a raise, and a fake that skipped it would not exercise that at all. */
+/* Model the shell manager at +0x08 and its queue/count at +0x900/+0x908
+ * because the raise path reads the queued descriptor back. */
 static unsigned char g_mgr[0x1000];
 static void         *g_shell_obj[8];
 static unsigned char g_queue[4 * ED_DESC_STRIDE];
@@ -70,9 +58,7 @@ static int failed;
 
 void backend_log(const char *message) { (void)message; }
 
-/* The detour installer is the one thing here that needs a real engine to mean
- * anything, and no test calls sh_engine_dialog_install, so it is stubbed rather
- * than dragging the inline-hook machinery into a pure-logic test. */
+/* Installation is not exercised; stub the engine detour dependency. */
 void *install_inline_hook(void *target, void *detour, size_t stolen)
 {
     (void)target; (void)detour; (void)stolen;
@@ -128,24 +114,17 @@ int main(void)
     CHECK(g_add_calls == 1);
     CHECK(sh_engine_dialog_test_pending_id() == 0x6D);
 
-    /* Both buttons are named on the way in. Without these two ids AddDialog
-     * builds both buttons with action 0, the dialog answers correctly on screen
-     * and reports nothing at all -- so this is the whole answer path, asserted
-     * at the only point it is visible offline. */
+    /* Both buttons need distinct action IDs so answers can be read back. */
     CHECK(((const int *)g_last_params)[ED_PARAM_ACTION_0] == ED_ACTION_ACCEPT);
     CHECK(((const int *)g_last_params)[ED_PARAM_ACTION_1] == ED_ACTION_DECLINE);
     CHECK(ED_ACTION_ACCEPT != ED_ACTION_DECLINE);
 
-    /* The raise itself writes the text into the queued descriptor. There is no
-     * detour on the engine render path any more, so if it does not happen during
-     * the raise it never happens. */
+    /* Raise must populate the queued descriptor before rendering. */
     CHECK(g_assign_calls == 1);
     CHECK(g_last_target == (void *)((unsigned char *)queue_entry(0) + ED_DESC_TEXT));
     CHECK(strcmp(g_last_text, "install this package?") == 0);
 
-    /* Every OTHER dialog the game raises must pass through untouched. Rewriting
-     * a stranger's text would corrupt unrelated engine UI, and the detour sees
-     * all of them. */
+    /* Only the claimed dialog may receive replacement text. */
     reset();
     CHECK(sh_engine_dialog_ask(0x6Du, 1u, "ours") > 0);
     g_assign_calls = 0;
@@ -173,10 +152,7 @@ int main(void)
     CHECK(sh_engine_dialog_ask(0x6Du, 1u, "second") == 0);
     CHECK(g_add_calls == 1);
 
-    /* A claim whose dialog has left the queue must NOT wedge the surface. The
-     * test binding reports an empty queue, so the second ask reclaims rather
-     * than refusing -- otherwise one externally-dismissed dialog would disable
-     * every prompt for the rest of the session. */
+    /* Reclaim a dismissed dialog so its stale claim cannot block later prompts. */
     reset();
     CHECK(sh_engine_dialog_ask(0x6Du, 1u, "stranded") > 0);
     CHECK(sh_engine_dialog_test_pending_id() == 0x6D);
@@ -201,9 +177,7 @@ int main(void)
         CHECK(g_add_calls == 0);
     }
 
-    /* A raise that queues no descriptor is a FAILED raise: handing back a ticket
-     * for a dialog that does not exist would strand the caller waiting forever
-     * for an answer that can never arrive. */
+    /* A raise that queues no descriptor must fail instead of returning a ticket. */
     reset();
     g_swallow_raise = 1;
     CHECK(sh_engine_dialog_ask(0x6Du, 1u, "swallowed") == 0);

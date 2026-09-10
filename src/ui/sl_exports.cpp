@@ -1,26 +1,9 @@
-/* sl_exports.cpp -- the 9 `sl_*` SuperScript-Lua C exports (thin stubs).
- *
- * FAITHFUL surface: OG snaphakui.dll exports 9 `sl_*` functions (the "SuperScript Lua" bindings) that are
- * plain C helpers over the interface object + the SnapStack store -- they are NOT lua_CFunctions and are
- * NEVER bound to a Lua state in this build (the Lua VM host is DEAD, 0 callers). The spec preserves them
- * as EXPORTS for SuperScript ABI compatibility (so the clone's export surface matches OG's).
- *
- * They ship as thin stubs (return 0 / empty) so the ABI EXPORT SURFACE is complete now; later work fills the
- * bodies (they call interface slots +0x28/+0x38/+0x60/+0x68/+0x1b8 -- the same object + store as `sh` and
- * the tabs). Exported by the OG names (undecorated C) via snapmap-plus-ui.def.
- *
- * OG RVAs (for the C3 port): sl_is_valid_entityid 0x75cc, sl_get_entity_classname_impl 0x7588,
- * sl_get_entity_inherit_impl 0x7544, sl_get_entity_declsource_impl 0x7660, sl_show_toast_impl 0x75f8,
- * sl_push_entityid_sh 0x7700, sl_pop_entityid_sh 0x76a4, sl_get_group_size 0x770c,
- * sl_get_group_ids_array 0x77d0.
- *
- * Clean-room: our own RE of the OG sl_* bindings. Zero OG bytes.
- */
+/* Compatibility exports for the original sl_* surface. These are inert stubs;
+ * this build does not host a Lua VM. Export names are pinned by the .def file. */
 #include <cstdint>
 
-/* All exported undecorated (extern "C") so snapmap-plus-ui.def lists the OG names verbatim. The stub signatures
- * are the conservative widest shape (a pointer/int in, an int/pointer out); later work refines each to its real
- * SuperScript signature when the bodies land. Returning 0 / nullptr is the safe inert stub. */
+/* Keep undecorated C linkage. Signatures are compatibility placeholders and
+ * results remain zero/null until these operations are implemented. */
 extern "C" {
 
 /* entity-id queries -> interface +0x28/+0x48/+0x50/+0x30. Stub: not-valid / empty. */

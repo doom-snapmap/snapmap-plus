@@ -1,15 +1,5 @@
-"""Locate a function on a second build by signing one of its CALL SITES.
-
-Some engine functions are not identifiable by their own bytes -- a tiny stub whose
-body is a generic shape (`mov [rsp+0x20],r9; ret` plus padding) matches by accident,
-not by identity. Scanning for such a body on a different build finds *a* function of
-that shape, which is worse than finding nothing.
-
-The fix is to sign the CALLER instead. A call site sits inside a large, distinctive
-function, so it can be pinned uniquely; the call's rel32 then names the callee on
-whatever build we are running. Same principle as derive_global.py, applied to a
-`call rel32` displacement rather than a RIP-relative data displacement.
-"""
+"""Locate a function on another build through a signed caller and decoded rel32.
+Use this when the callee body is too short or too generic for a useful signature."""
 import struct, sys
 from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_OP_MEM
 from capstone.x86 import X86_REG_RIP, X86_GRP_JUMP, X86_GRP_CALL
@@ -144,10 +134,9 @@ if __name__ == '__main__':
                     continue
                 rec['derivations'].append({
                     'vk_site': hex(vk_call),
-                    # `pattern_start + rel_slot + 4 + rel32` is the callee -- the same
-                    # arithmetic a RIP-relative data reference uses, so one resolver
-                    # serves both. The pattern may begin before the call itself, so the
-                    # slot is measured, not assumed.
+                    # Decode pattern_start + rel_slot + 4 + rel32. The measured slot may
+                    # follow
+                    # other instructions in the pattern.
                     'disp_slot': rel_slot,
                     'mnemonic': 'call rel32',
                     'bytes': nbytes,

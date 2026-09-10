@@ -1,19 +1,13 @@
-/* json_pretty_test.c -- pure-logic tests for the sh_pretty_on JSON re-layout.
- *
- * This pass runs over the bytes of a map the user just saved, so the two things it must never do are
- * change the document and produce something the loader will not take back. The tests below pin both:
- * every token survives in order (strip the layout back out and you have the input again), and anything
- * this cannot lay out safely is REFUSED so the caller writes the original bytes instead.
- */
+/* Tests JSON layout changes preserve token order and refuse unsupported
+ * input so the caller can retain the original map bytes. */
 #include <assert.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "../src/backend/json_pretty.h"
 
-/* Lay `src` out into a fresh buffer the way the shadow does: measure, allocate, fill. Returns NULL if
- * json_pretty refused. The result is NUL-terminated for the string compares below (the shadow writes
- * `len` bytes and needs no terminator). */
+/* Measure, allocate and format; return NULL on refusal. Add a terminator
+ * for assertions, although the production writer uses an explicit length. */
 static char *pretty(const char *src)
 {
     size_t len  = strlen(src);

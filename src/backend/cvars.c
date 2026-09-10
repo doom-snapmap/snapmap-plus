@@ -1,65 +1,29 @@
-/* cvars.c -- see cvars.h. The cvar registrar: 2 of the 9 OG cvars (clone of OG XINPUT1_3's static-init
- * cvar table + spine flush FUN_1800229b1 / FUN_180022610). snaphak_show_rmcount and the six cs_dash_* /
- * cs_mh_* movement cvars are left out on purpose -- see the table comment below and docs/fidelity.md.
- *
- * CVAR REGISTER ABI (DIRECT, from the cvar-register flush disasm @0x22610):
- *   ( CvarRegister )( self [embedded idCVar], name, default, typecode, desc, argComp )
- * We call the OUTER engine fn 0x1A04F00 (resolved as "CvarRegister"), NOT the inner idCVarSystem::
- * Register 0x1A05E70 -- the outer self-defaults the two engine .data globals, so we never touch them.
- * typecode (1=BOOL 2=INT 4=FLOAT) is passed VERBATIM as the engine `flags` arg (the engine massages the
- * bits internally). None of OG's 9 carry EXPOSE/NOCHEAT -> non-EXPOSE / gate-1-invisible (faithful OG).
- *
- * Clean-room: ported from our own RE. Zero OG SnapHak bytes.
- */
+/* Register the supported Snapmap+ cvars and insert them into engine lookup tables.
+ * CvarRegister takes an embedded idCVar, name, default, flags, description, and
+ * completion callback. Call the outer registration function so it initializes
+ * the engine globals. Type bits are combined with NOCHEAT to allow console writes. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include "cvars.h"
-#include "commands.h"   /* sh_decode_rip_slot / sh_safe_read -- the shared build-portable slot decoder */
+#include "commands.h"
 #include "signatures.h"
-#include "engine_globals.h"   /* glb_resolve -- the portable data-global resolver */
-#include "host_image.h"       /* sh_host_is_pinned_rva_build -- gates the last-resort RVA */
+#include "engine_globals.h"
+#include "host_image.h"
 #include "backend_log.h"
 
-/* The engine cvar register fn: void register(void* self, const char* name, const char* def,
- *   uint32_t flags [== typecode], const char* desc, void* argComp). */
+
 typedef void (*cvar_register_fn)(void *self, const char *name, const char *def,
                                  uint32_t flags, const char *desc, void *argComp);
 
-/* The engine cvar NAME hash (sig "NameHash" = 0x1a00480): case-insensitive accumulator
- *   h = h*0x1f + tolower(c), the EXACT hash RegisterStaticVars (0x1a06a00) buckets each cvar with.
- * We call the engine's own hash (not a re-derive) so our findable-insert lands in the same bucket the
- * engine's gate-0 FindCvar reads. Returns the raw (unmasked) hash. */
+/* Use the engine name hash so insertion and FindCvar choose the same bucket. */
 typedef int (*name_hash_fn)(const char *name);
 
-/* The idCVarSystem singleton + its FULL findable-table offsets.
- * ALL offsets DIRECT-confirmed against the RegisterStaticVars (0x1a06a00) disassembly: the FULL idList
- * is { ptr@+0x08, count@+0x10, capacity@+0x14 } (the +0x14 capacity is the count==cap grow gate at
- * 0x1a06af2/0x1a06b0d), the FULL idHashIndex is { hash[]@+0x38, indexChain[]@+0x40, hashSize@+0x48,
- * indexChainSize@+0x4c, hashMask@+0x54, lookupMask@+0x58 } (RegisterStaticVars' own bucket math + grow
- * gate at 0x1a06aa6/0x1a06ad4). This is the gate-0 findable table; the S0 cvar-unlock alias points the
- * gate-1 (DEV) table at it, so a findable-insert here surfaces at BOTH gates.
- *
- * cvarSys SINGLETON POINTER (the idCVarSystemLocal* .data global). Resolved build-portably like its three
- * backend siblings (cmdSystem / gameMgr / renderWorld) -- DECODE the slot from a sig'd accessor rather than
- * naming an address. See sh_resolve_cvarsys() below.
- *   - PRIMARY (portable): the cvarSys global sits at cmdSystem_slot + 0x10 (the two .data slots are
- *     adjacent: cmdSystem RVA 0x55b7280, cvarSys RVA 0x55b7290 == +0x10). We decode the cmdSystem slot
- *     from the CmdSystemLea sig (already in BACKEND_ENGINE_SIGNATURES -- the bot_add/bot_remove registrar
- *     whose prologue does `MOV RCX,[rip+cmdSystem]`) via the shared sh_decode_rip_slot, add 0x10, deref
- *     once. NO hardcoded RVA on this path; survives an RVA shift.
- *   - SECONDARY (also portable): glb_resolve("cvar_system_slot"), which signs a different code site
- *     entirely and decodes its RIP displacement. It agrees with the primary on both shipped images
- *     (as does glb_resolve("cmd_system_slot") + 0x10), so it is an independent second opinion rather
- *     than a restatement -- and it survives an inline hook on the CmdSystemLea prologue, which the
- *     primary does not.
- *   - LAST RESORT: *(module_base + CVARSYS_SLOT_RVA), taken ONLY when the host is the pinned Vulkan
- *     build that literal was extracted from. On the OpenGL image the same RVA lands in unrelated data,
- *     so off that build we decline instead and the findable-insert is skipped. */
-#define CVARSYS_SLOT_RVA          0x55b7290u   /* the cvarSys slot's RVA on the pinned Vulkan build -- kept for
-                                                * audit and per-build re-derivation. Only ever dereferenced
-                                                * when sh_host_is_pinned_rva_build() says we ARE that build. */
+/* Full-table offsets follow RegisterStaticVars. The developer-table alias exposes
+ * this same list to the console. Resolve the singleton from CmdSystemLea +0x10,
+ * then an independent global anchor, then the Vulkan-name-gated pinned RVA. */
+#define CVARSYS_SLOT_RVA          0x55b7290u   /* Pinned Vulkan slot; the fallback gate checks its filename, not its hash. */
 #define CVARSYS_OFF_FROM_CMDSYS   0x10         /* cvarSys .data slot == cmdSystem .data slot + 0x10 (adjacent) */
 #define CVARSYS_LIST_PTR_OFF      0x08    /* idList<idCVar*> base: list-ptr */
 #define CVARSYS_LIST_COUNT_OFF    0x10    /* idList count (int) */
@@ -70,35 +34,15 @@ typedef int (*name_hash_fn)(const char *name);
 #define CVARSYS_HASHMASK_OFF      0x54    /* idHashIndex hashMask (uint) */
 #define CVARSYS_LOOKUPMASK_OFF    0x58    /* idHashIndex lookupMask (uint) */
 
-/* idCVar embedded-object name slot. CvarRegister/idCVarSystem::Register store the cvar NAME at obj+0x40
- * (the same string FindCvar/RegisterStaticVars hash via [cvar+0x40]); our self == &g_cvar_objs[i][0], so
- * the registered name lives at g_cvar_objs[i][0x40]. We hash CVARS[i].name (identical bytes) directly. */
+/* Registered name in the embedded idCVar; it matches the table string we hash. */
 #define IDCVAR_NAME_OFF           0x40
 
-/* CVAR_NOCHEAT (0x10): the set-exemption flag -- without it the engine cheat-gates console writes while
- * dev mode is off. The cvar-unlock pass ORs this onto every cvar it sweeps, but that sweep runs BEFORE
- * our own rows register, so our cvars would miss it -- register with the flag up front instead. */
+/* Our rows can register after the unlock sweep, so include settability up front. */
 #define CVAR_FLAG_NOCHEAT         0x10u
 
-/* The cvar table: rows 0..1 are the OG cvars from our cvar-descriptor RE (default / typecode 1=BOOL
- * 2=INT 4=FLOAT / description verbatim; the OG's snaphak_* name prefix is renamed to our sh_* -- a
- * deliberate post-rebrand divergence); relative order matches the descriptor dump.
- *
- * The OG registers NINE cvars; the clone registers these TWO. The other seven descriptor-dump rows are
- * NOT here, all for the same reason: nothing in the clone (or in DOOM itself) could act on them.
- *   - snaphak_show_rmcount ("draws the current number of rendermodels active"): its switch had somewhere
- *     to go in the OG -- a spliced SuperScript override fn that drew the count over the game each frame --
- *     and the clone reimplements no such overlay.
- *   - The six cs_dash_* / cs_mh_* movement cvars (cs_dash_direction_multiplier,
- *     cs_dash_ground_velocity_multiplier, cs_dash_time_seconds, cs_num_dash_slices,
- *     cs_mh_direction_multiplier, cs_mh_movement_multiplier): they tune the dash / meathook cheat
- *     movement the OG implements in its spliced cs_* SuperScript override cluster (cs_dash and friends),
- *     which the clone carries only as parked, disabled objects and reimplements no part of. None of the
- *     six names appears anywhere in DOOM's own binary either, so there is no engine-side reader -- the
- *     rows would register six settings that nothing can multiply.
- * Do not restore any of the seven from the descriptor dump without first building its consumer (the
- * overlay for show_rmcount; the ported dash/meathook SuperScript cluster for the cs_* six); the
- * reasoning is recorded under "Not carried over" in docs/fidelity.md. */
+/* Register only cvars with implemented consumers. The omitted render-count and
+ * dash/meathook settings require features this product does not carry; see
+ * docs/fidelity.md before restoring them. */
 typedef struct cvar_row {
     const char *name;
     const char *def;
@@ -112,14 +56,11 @@ static const cvar_row CVARS[] = {
 };
 #define CVAR_COUNT ((int)(sizeof(CVARS) / sizeof(CVARS[0])))
 
-/* Persistent, never-freed, 16-byte-aligned backing for the engine's embedded idCVar object. The engine
- * writes through this+0x80 and the descriptor cell spacing (~0xC0) bounds the object well under 0x400;
- * 0x400 is generous and 16-aligned for the engine's SSE init. The engine links each into its cvar list
- * for the process lifetime (OG never frees its static descriptors either), so this storage is static. */
+/* Engine lists retain these objects for the process lifetime. Static backing is
+ * 16-byte aligned for engine initialization and covers writes through +0x80. */
 __declspec(align(16)) static uint8_t g_cvar_objs[CVAR_COUNT][0x400];
 
-/* One-shot latch -- CvarRegister has NO dedup (unconditional link into the list head), so a second
- * install pass would duplicate every row. Latch so OUR install fires exactly once. */
+/* CvarRegister does not deduplicate; register and link each row only once. */
 static volatile LONG g_installed = 0;
 
 /* Register one cvar, SEH-guarded. Returns 1 on success, 0 if the engine call faulted. */
@@ -134,12 +75,8 @@ static int register_one(cvar_register_fn reg, int i)
     }
 }
 
-/* DIRECT self-readback verification (independent of the production console's non-EXPOSE hiding):
- * idCVarSystem::Register (@0x1a05e70) populates the embedded idCVar object -- name@self+0x40,
- * default@+0x48, desc@+0x50, flags@+0x58 -- and links self+0x80 into the engine cvar list. We confirm
- * registration TOOK EFFECT by reading our (zero-initialized) backing block back: bit1 = name@+0x40 strcmp
- * matches our cvar name (a proper cvar entry); bit0 = the block mutated from zero (Register wrote into it).
- * Both together = DIRECT proof the engine registered the cvar, even though it stays gate-1-invisible. */
+/* Read back name@+0x40 and nonzero backing bytes to check registration.
+ * Return bit 1 for a matching name and bit 0 for any mutation. */
 static int verify_one(int i)
 {
     __try {
@@ -153,9 +90,7 @@ static int verify_one(int i)
     }
 }
 
-/* idCVar.valueInteger offset (DIRECT, from the engine's idlib field schema): idCVar puts
- * valueInteger (and BOOL) at +0x30, cross-confirmed by the OG DAT_18003d2b8==(embedded idCVar)+0x30
- * arithmetic. Our self == &g_cvar_objs[i][0] (no descriptor wrapper), so value == *(int*)(block+0x30). */
+/* Engine idCVar stores integer and bool values at +0x30. */
 #define IDCVAR_VALUE_INT_OFF 0x30
 
 int sh_cvar_value_int(int index, int def)
@@ -182,47 +117,29 @@ int sh_cvar_table_row(int index, const char **name, const char **def, const char
     return 1;
 }
 
-/* ----------------------------------------------------------------- FULL findable-table insert -----
- * THE FIX (root cause: our cvars register into the pending list ONLY; the SOLE hasher
- * RegisterStaticVars (0x1a06a00) already ran at static init, so our LATE cvars are in NEITHER findable
- * table -> FindCvar misses -> "Unknown command"). After CvarRegister has built each embedded idCVar
- * object, we replay RegisterStaticVars' FULL-table insert for each of our cvars: append the object pointer
- * into the FULL idList (cvarSys+0x08) and link it into the FULL idHashIndex (cvarSys+0x38) at the same
- * bucket the engine's hash yields. The S0 cvar-unlock alias then makes the gate-1 (~ console) table BE
- * this FULL table, so the cvars become recognized at both gates.
- *
- * We do NOT set CVAR_EXPOSE (OG's 9 are non-EXPOSE; the alias, not EXPOSE, is what gives gate-1 reach)
- * and we do NOT re-call RegisterStaticVars (its static-dup guard ExitProcess(2)es on a re-run). We BAIL
- * (logged skip, no realloc) if the FULL table has no spare room -- a ~6600-cvar table normally has a few
- * slots free; growing it would be out of scope + riskier than skipping. Every memory access is SEH-
- * guarded so a wrong offset degrades to a logged skip, never a crash/corruption. The one-shot install
- * latch guarantees this pass runs exactly once, so no cvar is double-linked.
- *
- * Returns the number of cvars inserted into the FULL table (0..2). cvarSys / hashfn NULL => 0 (logged). */
+/* Late registration misses RegisterStaticVars, so explicitly append to the full
+ * list and hash chain. Do not rerun RegisterStaticVars: its duplicate guard exits
+ * the process. Refuse insertion if there is no spare capacity; do not reallocate
+ * engine-owned tables. Return 1 for this inserted row, otherwise 0. */
 static int cvar_findable_insert_one(uint8_t *cvarSys, name_hash_fn hashfn, int i)
 {
     __try {
-        const char *name = CVARS[i].name;                       /* == the obj+0x40 name CvarRegister stored */
-        void       *obj  = (void *)&g_cvar_objs[i][0];          /* our embedded idCVar object */
+        const char *name = CVARS[i].name;
+        void       *obj  = (void *)&g_cvar_objs[i][0];
 
         int  count = *(volatile int *)(cvarSys + CVARSYS_LIST_COUNT_OFF);
         int  cap   = *(volatile int *)(cvarSys + CVARSYS_LIST_CAP_OFF);
         int  ics   = *(volatile int *)(cvarSys + CVARSYS_INDEXCHAINSZ_OFF);
         if (count >= cap || count >= ics)
-            return -1;                                          /* no spare room -- bail (caller logs) */
+            return -1;
 
-        /* idList append: list[count] = obj; count++  (mirrors 0x1a06b16-0x1a06b1e). The list-ptr SLOT is
-         * read once (we hold the one-shot install latch -> single writer), SEH-guarded by the __try. */
+        /* Append before linking the corresponding hash-chain entry. */
         void **list = *(void ***)(cvarSys + CVARSYS_LIST_PTR_OFF);
         list[count] = obj;
         *(volatile int *)(cvarSys + CVARSYS_LIST_COUNT_OFF) = count + 1;
 
-        /* idHashIndex::Add: hb = (h & hashMask) & lookupMask; chain[count] = bucket[hb]; bucket[hb] = count.
-         * The masked-bucket VALUE equals RegisterStaticVars' own LOOKUP/dup-check math at 0x1a06a5d/0x1a06a76
-         * (`lookupMask & hashMask & (h&hashMask)`). RegisterStaticVars' INSERT site (the chain/bucket writes
-         * at 0x1a06ad4-0x1a06aee) uses h&hashMask WITHOUT lookupMask -- but lookupMask is 0xFFFFFFFF on the
-         * live populated table (the grow fn always sets it all-ones; only an empty/disabled table differs,
-         * impossible for the 6600+-cvar system), so our hb is the SAME bucket the engine writes AND reads. */
+        /* Match FindCvar bucket math. Populated tables use lookupMask=0xFFFFFFFF,
+         * so this also matches RegisterStaticVars insertion. */
         unsigned h    = (unsigned)hashfn(name);
         unsigned mask = *(volatile unsigned *)(cvarSys + CVARSYS_HASHMASK_OFF);
         unsigned look = *(volatile unsigned *)(cvarSys + CVARSYS_LOOKUPMASK_OFF);
@@ -233,33 +150,25 @@ static int cvar_findable_insert_one(uint8_t *cvarSys, name_hash_fn hashfn, int i
         bucket[hb]   = count;
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;                                               /* a bad offset -> logged skip, never crash */
+        return 0;                                               /* A memory fault leaves this insertion reported as skipped. */
     }
 }
 
-/* ------------------------------------------------------------------ cvarSys-global decode ---------
- * Resolve the idCVarSystemLocal* global build-portably -- the SAME pattern as its three siblings
- * (sh_resolve_cmdsys / sh_resolve_gamemgr_slot / dr_resolve_renderworld): decode the slot from a sig'd
- * accessor, deref once, keep the base+RVA only as a logged fallback. cvarSys is NOT directly sig'd, but
- * its .data slot is exactly cmdSystem_slot + 0x10 (adjacent globals), and cmdSystem IS sig-decodable via
- * CmdSystemLea -> so we decode the cmdSystem slot, add 0x10, deref once. Returns the live cvarSys object
- * pointer (the address whose +0x08/+0x38/... findable tables we insert into), or NULL on any failure.
- * Re-resolves CmdSystemLea from BACKEND_ENGINE_SIGNATURES by name (same single-source-of-truth pattern as
- * the NameHash resolve below -- no pattern duplication). Every access is SEH-guarded via sh_safe_read. */
+/* Resolve and read cvarSys, returning NULL if all address paths fail. */
 static uint8_t *sh_resolve_cvarsys(const uint8_t *module_base)
 {
     char line[160];
 
-    /* PRIMARY (portable): decode the cmdSystem slot from the CmdSystemLea sig, +0x10 -> cvarSys slot, deref. */
+    /* Primary: CmdSystemLea decodes the adjacent command-system slot. */
     if (module_base) {
         for (size_t i = 0; BACKEND_ENGINE_SIGNATURES[i].name != NULL; i++) {
             if (strcmp(BACKEND_ENGINE_SIGNATURES[i].name, "CmdSystemLea") != 0) continue;
             sig_result one;
             sig_status st = sig_resolve_one(module_base, &BACKEND_ENGINE_SIGNATURES[i], &one);
-            if (st != SIG_OK && st != SIG_OK_HOOKED) break;   /* sig miss -> fall through to known-RVA */
+            if (st != SIG_OK && st != SIG_OK_HOOKED) break;   /* Try the independent global anchor next. */
             const uint8_t *cmdsys_slot = sh_decode_rip_slot((const uint8_t *)one.addr);
             if (!cmdsys_slot) break;
-            const uint8_t *cvarsys_slot = cmdsys_slot + CVARSYS_OFF_FROM_CMDSYS;   /* adjacent .data global */
+            const uint8_t *cvarsys_slot = cmdsys_slot + CVARSYS_OFF_FROM_CMDSYS;
             uint8_t *obj = NULL;
             if (sh_safe_read(cvarsys_slot, (uint8_t *)&obj, sizeof obj) && obj) {
                 _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -273,8 +182,7 @@ static uint8_t *sh_resolve_cvarsys(const uint8_t *module_base)
         backend_log("B2: cvarSys portable decode failed -- trying the signed data-global anchor");
     }
 
-    /* SECONDARY (still portable): a different signed code site whose RIP displacement names the same
-     * slot. Independent of the CmdSystemLea prologue, so an inline hook there does not take this down. */
+    /* Independent anchor also works when CmdSystemLea has been detoured. */
     if (module_base) {
         glb_status gst = GLB_UNKNOWN_NAME;
         uintptr_t slot = glb_resolve(module_base, "cvar_system_slot", &gst);
@@ -293,8 +201,7 @@ static uint8_t *sh_resolve_cvarsys(const uint8_t *module_base)
         }
     }
 
-    /* LAST RESORT: the pinned literal, and only on the build it was extracted from. Anywhere else it
-     * addresses unrelated data, and a wrong idCVarSystemLocal* would be written through. */
+    /* Last resort: pinned Vulkan RVA, gated by host filename rather than hash. */
     if (module_base && sh_host_is_pinned_rva_build()) {
         uint8_t *obj = NULL;
         __try {
@@ -336,8 +243,7 @@ int sh_cvars_install(void *cvar_register, const void *module_base)
         ok, CVAR_COUNT, cvar_register);
     backend_log(line);
 
-    /* DIRECT engine-populated readback (proves registration despite the production console hiding
-     * non-EXPOSE cvars as "Unknown command"). */
+    /* Inspect the backing objects separately from lookup-table visibility. */
     int matched = 0, mutated = 0;
     for (int i = 0; i < CVAR_COUNT; i++) {
         int r = verify_one(i);
@@ -349,15 +255,11 @@ int sh_cvars_install(void *cvar_register, const void *module_base)
         matched, CVAR_COUNT, mutated, CVAR_COUNT);
     backend_log(line);
 
-    /* THE FIX: link our cvars into the FULL findable table so FindCvar (and the S0-aliased gate-1 ~
-     * console) recognizes them. Resolve cvarSys build-portably (CmdSystemLea decode +0x10, base+RVA
-     * fallback -- sh_resolve_cvarsys), resolve the engine name-hash, then insert each. */
+    /* Make the late-registered rows findable through the full table and its alias. */
     uint8_t *cvarSys = (uint8_t *)sh_resolve_cvarsys((const uint8_t *)module_base);
     name_hash_fn hashfn = NULL;
     if (module_base) {
-        /* Resolve the engine cvar name-hash from the shipped DB by name (no pattern duplication --
-         * single source of truth in BACKEND_ENGINE_SIGNATURES). Both a clean scan and the hook-tolerant
-         * known_rva fallback count (the fn is present + callable either way). */
+        /* Resolve the engine hash from the shared signature database. */
         for (size_t i = 0; BACKEND_ENGINE_SIGNATURES[i].name != NULL; i++) {
             if (strcmp(BACKEND_ENGINE_SIGNATURES[i].name, "NameHash") != 0) continue;
             sig_result one;

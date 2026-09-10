@@ -1,9 +1,8 @@
-/* prefabpreview.h -- asynchronous, read-only cooked-geometry service for the Prefab Details viewport.
- *
- * The service never ships or persists game bytes. It resolves logical model names against the installed
- * resource indexes, decodes only positions/normals/indices on demand, and publishes a bounded neutral
- * mesh blob for WebView2. Textures, materials, skeletons, animations, and renderer hooks are deliberately
- * outside this preview path. */
+/* Asynchronous cooked-geometry previews for the Prefab Details viewport.
+ * Resolve installed resources and decode positions, normals and indices into
+ * a bounded neutral mesh for WebView2. Payloads are read on demand; this path
+ * does not decode textures, skeletons or animation.
+ */
 #ifndef BACKEND_PREFABPREVIEW_H
 #define BACKEND_PREFABPREVIEW_H
 

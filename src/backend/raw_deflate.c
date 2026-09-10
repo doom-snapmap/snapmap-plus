@@ -31,9 +31,9 @@ static unsigned inf_bits(inf_t *s, unsigned n)
     }
 }
 
-/* Stored blocks begin on the next byte boundary. Deflate's alignment bits are
- * padding, not data; accepting nonzero values here would make a bounded slice
- * depend on bytes that the format says are discarded. */
+/* Align stored blocks to the next byte. This decoder additionally requires
+ * zero padding bits as a resource-slice policy.
+ */
 static int inf_align_zero(inf_t *s)
 {
     unsigned mask;
@@ -45,9 +45,9 @@ static int inf_align_zero(inf_t *s)
     return 1;
 }
 
-/* A pindex zsize is an exact compressed slice, not a container for concatenated
- * streams. After the final block, only zero alignment bits in its last byte are
- * permitted; a second byte (even all-zero padding) is refused. */
+/* Treat pindex zsize as an exact slice. Require zero remaining bits after the
+ * final block and reject any extra byte, including zero padding.
+ */
 static int inf_at_exact_end(const inf_t *s)
 {
     unsigned mask;

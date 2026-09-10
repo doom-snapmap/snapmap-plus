@@ -1,10 +1,5 @@
-/* map_shards.c -- see map_shards.h. The shard envelope, shared by every
- * map-embedded payload family.
- *
- * Everything here operates on a raw JSON text buffer -- no JSON DOM is ever
- * built (the buffer can be megabytes and the no-shard fast path must stay one
- * substring sweep). Nothing here knows what a payload means; a family supplies
- * its own magic, header grammar and policy.
+/* Shared bounded JSON shard scanning and splicing; payload families supply
+ * grammar and policy.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -16,8 +11,7 @@
 #include "map_shards.h"
 
 /* ==================================================================== */
-/* sha256 -- standard FIPS 180-4, needed for the shard digest. Self-     */
-/* contained; the backend had no hash primitive before this.             */
+/* SHA-256 (FIPS 180-4) for shard digests. */
 /* ==================================================================== */
 
 typedef struct {
@@ -266,10 +260,9 @@ bad:
 /* the shard scanner                                                     */
 /* ==================================================================== */
 
-/* How far past a header its initialValue may sit. In both the compact and the
- * pretty engine layouts the gap is ~100-350 bytes (name -> info's "~type" ->
- * "initialValue"); 4096 is generous without letting the search wander into the
- * next variable. */
+/* Bound the name-to-initialValue search window; engine layouts usually
+ * separate them by 100-350 bytes.
+ */
 #define SHARD_VALUE_WINDOW 4096
 
 /* Is the string starting at `quote` (the opening '"' of the header) the value
@@ -285,8 +278,9 @@ static int shard_is_name_value(const char *json, const char *quote)
     return memcmp(r - 5, "\"name\"", 6) == 0;
 }
 
-/* Find the shard's base64 chunk after its header. Returns 1 with
- * *chunk/*chunk_len (chunk may legally be empty), 0 = unreadable. */
+/* Find the base64 span after a header. Return 1 with chunk and chunk_len,
+ * including empty chunks; 0 means unreadable.
+ */
 static int shard_find_chunk(const char *hdr_end, const char *end,
                             const char **chunk, size_t *chunk_len)
 {
@@ -336,12 +330,9 @@ int sh_shard_next(const char *json, size_t len, const char *magic, size_t magic_
         if (!q) continue;
         n = (size_t)(q - p);
 
-        /* A shard variable's name lives in a snapVarInfo_t, whose "~type"
-         * follows the name within a few dozen bytes in both the compact and
-         * pretty layouts. An ENTITY merely named like a header (entity names
-         * are author-controlled free text) has no such marker and is not a
-         * shard -- the reference implementations read only variables.string,
-         * and this check is what keeps the C scanner equally scoped. */
+        /* Require the nearby snapVarInfo_t marker to reject ordinary entity
+         * names resembling shard headers.
+         */
         {
             size_t w = (size_t)(end - (q + 1));
             if (w > 256) w = 256;
@@ -578,8 +569,7 @@ char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t mag
     if (doc_failed) *doc_failed = 0;
     if (!json || len == 0 || max_cuts == 0) return NULL;
 
-    /* Cheap reject first: the overwhelming majority of maps carry no payload at
-     * all, and they must not pay for the structural pass. */
+    /* Skip the structural pass for payload-free maps. */
     if (!sh_shard_find(json, len, magic, magic_len)) return NULL;
     if (!sh_shard_doc_build(json, len, &doc)) {
         if (doc_failed) *doc_failed = 1;
@@ -616,9 +606,7 @@ char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t mag
 
     qsort(cuts, cut_count, sizeof(shard_cut), shard_cut_cmp);
 
-    /* Merge runs of ADJACENT elements -- ones separated by nothing but whitespace and a single
-     * comma -- into one cut. Shards are consecutive by construction, and asking each element to
-     * claim a comma for itself makes neighbours fight over the one between them. */
+    /* Merge adjacent removal spans so each run claims one delimiter. */
     {
         size_t w2 = 0;
         for (i = 1; i < cut_count; i++) {
@@ -634,8 +622,7 @@ char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t mag
         cut_count = w2 + 1;
     }
 
-    /* Now take ONE adjacent comma per run so the array stays valid: the one BEFORE the run, or,
-     * when the run starts the array, the one after it. */
+    /* Remove the preceding comma, or the following comma for an initial run. */
     for (i = 0; i < cut_count; i++) {
         size_t b = cuts[i].from;
         while (b > 0 && sh_shard_is_ws(json[b - 1])) b--;
@@ -647,8 +634,7 @@ char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t mag
             if (a < len && json[a] == ',') cuts[i].to = a + 1;
         }
     }
-    /* Overlapping cuts would mean two shards resolved to the same element by different spans;
-     * that should be impossible, but splicing overlapping ranges silently corrupts, so refuse. */
+    /* Reject overlapping cuts rather than corrupting JSON. */
     for (i = 1; i < cut_count; i++) {
         if (cuts[i].from < cuts[i - 1].to) {
             if (doc_failed) *doc_failed = 1;
@@ -687,9 +673,7 @@ char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t mag
 /* insert                                                                */
 /* ==================================================================== */
 
-/* One shard variable, exactly the engine-emitted snapVarString_t the reference
- * implementation copies from a corpus map. Written compact; the engine's own
- * writer is compact too. */
+/* Write the compact snapVarString_t envelope. */
 static size_t shard_write_var(char *out, const char *header, const char *chunk, size_t chunk_len)
 {
     static const char PRE[] =
@@ -779,9 +763,7 @@ char *sh_shard_insert(const char *json, size_t len,
     out[w] = '\0';
     sh_shard_doc_free(&doc);
 
-    /* allocCount[STRING] must equal the list length, and the list just grew. The
-     * slot is edited on the FINISHED buffer, because its offset moved with the
-     * insert. */
+    /* Update allocCount[STRING] after insertion, which moves its byte offset. */
     {
         sh_shard_doc doc2;
         int vars2, alloc2;

@@ -1,13 +1,7 @@
-/* xinput_ordinal_test.c -- prove the XINPUT1_3.dll ordinal fix at runtime.
- *
- * DOOM imports XINPUT1_3.dll BY ORDINAL: ord 2 = XInputGetState, ord 3 = XInputSetState. This harness
- * resolves those exports BY ORDINAL (exactly as DOOM's loader does) and calls them the way DOOM does --
- * GetState(idx, &XINPUT_STATE), SetState(idx, &XINPUT_VIBRATION). On the BROKEN build ordinal 2 was
- * XInputGetBatteryInformation, so this same call wrote a battery struct through an uninitialised 3rd
- * pointer -> wild write. On the FIXED build it must return a clean code (1167 ERROR_DEVICE_NOT_CONNECTED
- * with no pad, or 0) and leave a guard region untouched. SEH-guarded so a regression shows as a caught AV
- * rather than killing the harness.
- */
+/* Runtime check of XINPUT1_3 ordinal 2 (GetState) and 3 (SetState), matching
+ * DOOM's imports. Guard buffers detect writes from an incorrect export; SEH
+ * turns an access violation into a test failure. Accept success or no-controller
+ * status from the real proxy DLL. */
 #include <windows.h>
 #include <stdio.h>
 

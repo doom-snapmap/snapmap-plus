@@ -19,8 +19,7 @@ int log_rotate_if_large(const char *path, unsigned long long cap_bytes)
     if (size < cap_bytes) return 0;
     if (_snprintf_s(previous, sizeof previous, _TRUNCATE, "%s.prev", path) < 0) return 0;
 
-    /* MoveFile will not overwrite, so the older roll goes first. Losing the roll
-     * from two sessions ago is the point -- two files is the whole budget. */
+    /* Remove the older roll because MoveFile does not overwrite it. */
     DeleteFileA(previous);
     return MoveFileA(path, previous) ? 1 : 0;
 }

@@ -1,16 +1,6 @@
-/* Snapmap+ "editor ghost" — a holographic Baron of Hell silhouette, traced from an
-   in-game frame (184-point contour), rendered as a slowly swaying hologram plate:
-   front/back contour shells, an interior point-cloud grain, and a scanline sweep.
-   Vanilla Canvas 2D — no libraries, no WebGL. Decorative only: it mounts on any
-   `canvas[data-ghost]`, respects prefers-reduced-motion (single static frame),
-   skips small screens, and only animates while on-screen.
-
-   Tuning via data attributes:
-     data-ghost-opacity   overall alpha multiplier        (default 1)
-     data-ghost-scale     figure height / canvas height   (default 1.15)
-     data-ghost-below     fraction of figure below bottom (default 0.18)
-     data-ghost-x         horizontal center 0..1          (default 0.5)
-     data-ghost-parallax  scroll-depth factor             (default 0.1) */
+/* Draw the decorative Baron silhouette on canvas[data-ghost] with Canvas 2D.
+ * Animate only while visible; reduced motion uses one frame, and small screens skip it.
+ * Data attributes: opacity (1), scale (1.15), below (0.18), x (0.5), parallax (0.1). */
 (function () {
   "use strict";
 

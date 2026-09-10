@@ -1,28 +1,7 @@
-/* feedback/worker.js -- the feedback relay: a Cloudflare Worker that turns the in-app "Send feedback"
- * dialog's anonymous POST into a labeled issue on this project's GitHub tracker.
- *
- * Why it exists: GitHub has no anonymous write path (every API write needs a credential), and a
- * credential must never ship inside a public binary. So the app POSTs here, and this relay files the
- * issue with a credential only it holds.
- *
- * Identity: preferably a GITHUB APP owned by the org (secrets APP_ID + APP_PRIVATE_KEY) -- issues then
- * arrive from "<app-name>[bot]", not from any personal account, and tokens are minted fresh per
- * request (the app's private key never expires -> no rotation chore). Falls back to a plain
- * fine-grained PAT (secret GITHUB_TOKEN) when the app secrets are absent.
- *
- * Flow per report:
- *   validate (category / lengths / size / renderer) -> honeypot check -> compute a dedup signature ->
- *   search open issues for that signature:
- *     hit  -> append a comment to the existing issue (one issue with N confirmations, not N issues)
- *     miss -> create a new issue, labeled: category label + release channel + renderer + user-report
- *
- * Ops notes (see also feedback/README.md):
- *   - secrets: `wrangler secret put APP_ID` + `APP_PRIVATE_KEY` (PKCS#8 PEM) -- or GITHUB_TOKEN as
- *     the PAT fallback (expires -> annual rotation; the app path has no such chore).
- *   - stateless by design: no KV, no queues; GitHub Issues is the only store.
- *   - abuse posture: honeypot + size caps here; if real spam ever shows up, add a Cloudflare
- *     rate-limiting rule on the dashboard (no code change needed).
- */
+/* Relay in-app reports to GitHub Issues using a server-side App credential,
+ * with a PAT fallback. Validate inputs, match an open report signature, then
+ * append a confirmation or create an issue. GitHub is the only persistent store.
+ * See README.md for setup and docs/feedback.md for the client pipeline. */
 
 const REPO = 'doom-snapmap/snapmap-plus';
 const API = 'https://api.github.com';
@@ -32,10 +11,8 @@ const CATEGORIES = {
   feature: { label: 'enhancement',   tag: 'Feature' },
   docs:    { label: 'documentation', tag: 'Docs' },
   other:   { label: 'question',      tag: 'Other' },
-  /* crash reports (the in-app crash dialog): the client auto-titles them with the crash location
-   * ("Crash: MODULE+0xRVA (0xCODE)"), so the signature dedup groups identical crash sites onto one
-   * issue. They may carry a `logs` field -- anonymized log tails, delivered as a follow-up COMMENT
-   * (collapsed) so the issue body stays readable; each dedup occurrence brings its own logs comment. */
+  /* Crash titles identify the fault location for signature matching. Each report
+   * can attach anonymized log tails in a collapsed follow-up comment. */
   crash:   { label: 'crash',         tag: 'Crash' },
 };
 
@@ -43,8 +20,7 @@ const CATEGORIES = {
  * guard. The client already tails each log before sending. */
 const LOGS_CAP = 50000;
 
-/* Wrap attached logs for a comment: collapsed, fenced with FOUR backticks so log text containing
- * a ``` sequence cannot break out of the fence. */
+/* Use a four-backtick fence so ordinary triple-backtick log text stays inside it. */
 function logsBlock(logs) {
   return '<details><summary>Attached logs (anonymized)</summary>\n\n````text\n' + logs + '\n````\n</details>';
 }
@@ -73,9 +49,8 @@ async function gh(bearer, path, opts) {
   return res.json();
 }
 
-/* ---- GitHub App auth: a short-lived RS256 JWT (signed with the app's private key) is exchanged for
- * a ~1h installation token, cached across requests in this isolate. The app's key is long-lived but
- * never leaves the Worker secret store; the tokens GitHub actually sees expire on their own. ---- */
+/* Exchange an App-signed JWT for a short-lived installation token and cache it
+ * in this isolate. The private key stays in Worker secrets. */
 let tokenCache = { token: null, exp: 0 };
 
 function b64u(bytes) {
@@ -122,23 +97,14 @@ async function sigHash(category, title) {
   return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
 }
 
-/* release channel from the reported version: a "-" (e.g. v0.2.0-beta.1) means a pre-release build;
- * a plain x.y.z means stable; anything non-semver (a dev build) gets no channel label. The leading
- * "v" is optional because the app reports the release TAG, which carries one -- requiring a bare
- * x.y.z here silently returned null for every real report, so no report was ever channel-labelled
- * and issues-retest.yml, which only prompts beta-labelled reports on a pre-release, never prompted
- * anything. */
+/* Accept an optional v prefix on release tags. Hyphenated versions are beta;
+ * plain versions are stable; unrecognized versions receive no channel label. */
 function channelOf(version) {
   if (!/^v?\d+\.\d+\.\d+/.test(version)) return null;
   return version.includes('-') ? 'beta' : 'stable';
 }
 
-/* Which renderer the reporting session was running. DOOM 2016 ships one executable per renderer
- * (DOOMx64vk.exe / DOOMx64.exe) and relaunches itself when r_renderAPI changes, so a player can be in
- * either from the same Steam launch -- and a fault that only reproduces under one of them is otherwise
- * indistinguishable on the tracker from one that happens under both. The client sends a bare token;
- * anything else (an old client that sends nothing, a hand-made POST) is treated as unknown rather than
- * echoed into the issue. */
+/* Accept only known renderer tokens; omit missing or unrecognized values from issues. */
 const RENDERERS = { vulkan: 'Vulkan', opengl: 'OpenGL' };
 function rendererOf(renderer) {
   return Object.prototype.hasOwnProperty.call(RENDERERS, renderer) ? renderer : null;
@@ -179,8 +145,7 @@ export default {
     let body;
     try { body = JSON.parse(raw); } catch { return json({ ok: false, error: 'bad json' }, 400); }
 
-    /* honeypot: a hidden field humans never see. A bot that filled it gets a convincing fake success
-     * (nothing filed) -- a rejection would just teach it which field to skip. */
+    /* A filled honeypot returns success without filing a report. */
     if (body.website) return json({ ok: true, mode: 'created', number: 0 });
 
     const cat = CATEGORIES[body.category];
@@ -200,15 +165,9 @@ export default {
     const token = await authToken(env);
     if (!token) return json({ ok: false, error: 'relay auth' }, 500);
 
-    /* dedup (best-effort: a lookup failure falls through to plain create). Deliberately the LIST
-     * endpoint + a body scan, NOT the search API: search is eventually-consistent (seconds-to-minutes
-     * of index lag), so two reports of the same thing in quick succession -- or one user's double-send
-     * -- would slip past it and double-file (observed live, 2026-07-18). Listing open user-report
-     * issues avoids the index; oldest-first, so a match is always the ORIGINAL report and stopping at
-     * the first hit is correct. Up to 3 pages (300 open reports) is far beyond a realistic tracker.
-     * Still best-effort: a sub-second race (two reports arriving together) can double-file -- the
-     * in-app dialog's one-in-flight guard covers the common double-click case. Closed matches are NOT
-     * resurrected -- closed means resolved or rejected; a fresh report opens a fresh issue. */
+    /* Scan up to 300 open reports oldest-first, avoiding the search index delay.
+     * Lookup failures and concurrent requests can still create duplicates.
+     * Closed reports are never reopened. */
     let match = null;
     const marker = 'report-sig:' + sig;
     for (let page = 1; page <= 3 && !match; page++) {
@@ -239,9 +198,8 @@ export default {
       },
     });
     if (!issue || !issue.number) return json({ ok: false, error: 'upstream' }, 502);
-    /* logs ride a follow-up comment, not the issue body: the body stays a readable crash summary, and
-     * every occurrence (create OR dedup-append) then carries its own logs the same way. Best-effort --
-     * a failed comment never fails the report (the issue exists; the response stays ok). */
+    /* Attach logs separately after issue creation. Failure to add this comment
+     * does not change the successful report response. */
     if (logs) {
       await gh(token, '/repos/' + REPO + '/issues/' + issue.number + '/comments', {
         method: 'POST',

@@ -1,20 +1,8 @@
 package main
 
-// changelog_render.go -- renders a release's notes for a terminal.
-//
-// A release body is the reviewed CHANGELOG.md entry that release.yml publishes (see
-// docs/contributing.md). It is markdown because the website and GitHub render it; a console does
-// not, so this file parses that entry back into its parts and lays them out as plain text: wrapped
-// to the terminal, bullets with a hanging indent, one release per block.
-//
-// DELIBERATELY COLOURLESS. No ANSI escapes: the tool targets Windows, where a plain conhost window
-// without virtual-terminal processing would print raw escape codes instead of colour, and the
-// structure below reads well without it. A test asserts no escape is emitted.
-//
-// THE GRAMMAR LIVES IN TWO PLACES. tools/changelog.py parses the same entry shape in Python. That
-// duplication is guarded by a shared golden fixture, installer/testdata/entry.md, which the Python
-// renderer produces and both test suites read -- change the format and both fail together. Do not
-// "simplify" either side away from the fixture.
+// Render reviewed release Markdown as wrapped terminal text without ANSI escapes.
+// Keep the grammar aligned with tools/changelog.py: both suites use the shared
+// installer/testdata/entry.md fixture.
 
 import (
 	"fmt"
@@ -93,9 +81,7 @@ func parseEntry(body string) changelogEntry {
 		case len(trimmed) > 2 && strings.HasPrefix(trimmed, "_") && strings.HasSuffix(trimmed, "_"):
 			e.Collapsed = strings.TrimSpace(trimmed[1 : len(trimmed)-1])
 
-		// An indented line continues the bullet above it: CHANGELOG.md is hand-editable and a
-		// maintainer may wrap a long one. Dropping the tail of a sentence is worse than any
-		// formatting rule.
+		// Preserve wrapped bullet continuations in hand-edited release notes.
 		case (raw != "" && (raw[0] == ' ' || raw[0] == '\t')) && group >= 0 &&
 			len(e.Groups[group].Items) > 0:
 			last := len(e.Groups[group].Items) - 1
@@ -193,9 +179,7 @@ func writeReleaseHeading(b *strings.Builder, h releaseHeader, width int) {
 	fmt.Fprintf(b, "%s%s\n\n", margin, strings.Repeat("-", width-len(margin)))
 }
 
-// renderIndex writes the compact "earlier releases" list: one line per release, ending with the
-// hint for reading any of them in full. The headline column is what makes a one-line index
-// possible at all -- it only exists because entries carry one.
+// renderIndex writes one headline per older release and a hint for opening it.
 func renderIndex(b *strings.Builder, rows []indexRow, width int) {
 	if len(rows) == 0 {
 		return
@@ -212,9 +196,7 @@ func renderIndex(b *strings.Builder, rows []indexRow, width int) {
 		date := shortDate(r.Date)
 		prefix := fmt.Sprintf("%s%-*s   %-11s   ", bulletPad, tagW, r.Tag, date)
 		headline := r.Headline
-		// The installed release can be an older one -- someone on the stable channel is
-		// behind every beta -- so the marker has to be available here, not only on the
-		// expanded entry above.
+		// The installed version may be in the index rather than the expanded entry.
 		suffix := ""
 		if r.Installed {
 			suffix = "   <- installed"
@@ -299,9 +281,8 @@ func parseReleaseDate(s string) (time.Time, bool) {
 	return t, true
 }
 
-// terminalWidth is the layout width. There is no syscall here on purpose: honouring COLUMNS keeps
-// this portable stdlib Go with no OS-specific files, and 80 is a safe default everywhere. The
-// clamp keeps prose readable -- a 300-column window should not produce 300-column paragraphs.
+// terminalWidth uses COLUMNS or 80, clamped for readable paragraphs.
+// It requires no platform-specific console API.
 func terminalWidth() int {
 	const fallback, min, max = 80, 60, 100
 	w := fallback

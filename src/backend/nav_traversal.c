@@ -1,18 +1,6 @@
-/* nav_traversal.c -- see nav_traversal.h for what a traversal is and why this
- * table is read out of the player's install instead of being baked in here.
- *
- * THE DECL IS UNTRUSTED INPUT
- * ---------------------------
- * It arrives from whatever the player has installed, through the same resource
- * hook a package can shadow, so it is parsed the way every other outside byte
- * in this backend is: bounded copies, no scan that is not bounded by the length
- * we were handed, and NO assumption that the buffer is NUL-terminated -- the
- * shipped file does not even end in a newline, its last byte is '}'.
- *
- * And it FAILS CLOSED. A table that will not parse leaves sh_trav_ready() at 0,
- * which leaves sh_trav_select() refusing every demon, which means no climb is
- * ever emitted and every platform out of step range is simply an island. That
- * is a feature that does nothing, not a map the engine chokes on.
+/* Parse installed traversal declarations with bounded reads; input need not
+ * be NUL-terminated. A rejected table leaves sh_trav_ready false and prevents
+ * traversal emission.
  */
 #include <windows.h>
 #include <stdio.h>
@@ -21,23 +9,12 @@
 
 #include "nav_traversal.h"
 
-/* The six distances the table names its LEDGE rows after, ascending. Ascending
- * matters: the selection below walks this array in order and keeps the first of
- * a tie, which is how "ties to the smaller" is implemented. */
+/* Ascending nominals make equal-distance ties select the smaller clip. */
 const int SH_TRAV_DISTANCE[SH_TRAV_DISTANCES] = { 64, 128, 192, 256, 384, 512 };
 
-/* The five traversal families the shipped table carries, 6 distances each --
- * 30 rows per demon, 300 rows over the file's ten monsters. Three are reachable
- * through this module's API; the two RAIL families are parsed so that the row
- * count means what it says and so an unrecognised type is a real signal rather
- * than the normal case.
- *
- * LEAP_ACROSS rows point at `jump_forward_<d>` animations (and
- * `run_over_railing` for the archvile's three short distances), which is why
- * searching the shipped payloads for "leap" finds nothing while 1,754 records
- * use them. Per-demon coverage is at least as good as climbing: seven of the
- * nine have all six distances, the hellified soldier has four, the zombie two,
- * and the Cyberdemon has no traversal animation of any kind. */
+/* Parse five families of six distances. The API exposes ledge up/down and
+ * leaps; rail families are retained for format validation.
+ */
 static const char *const TRAV_FAMILY[] = {
     "LEAP_ACROSS", "LEDGE_DOWN", "LEDGE_UP", "RAIL_DOWN", "RAIL_UP"
 };
@@ -46,21 +23,10 @@ static const char *const TRAV_FAMILY[] = {
 #define TRAV_FAM_LEDGE_DOWN  1
 #define TRAV_FAM_LEDGE_UP    2
 
-/* TRAVEL TIME IS A DELIBERATE SIMPLIFICATION, AND IT IS A ROUTING COST.
- *
- * The reverse-engineering this module is a port of looks travel_time up per
- * ANIMATION PATH from 207 values measured off shipped reachability records. We
- * do not ship that table, because it is keyed by game asset paths and this repo
- * ships no game content (README.md). Instead every climb takes the MEDIAN
- * observed travel_time for the nominal distance that was selected, below --
- * each of which is inside the observed range for its own distance.
- *
- * That is safe because travel_time is not a correctness constraint. It is the
- * cost the router adds to a path, so a wrong value changes which route the AI
- * PREFERS; it cannot malform the file, fail the engine's load validation, or
- * stop the climb from happening. Shipped data is not consistent about it
- * either: a single nominal spans an enormous range (64 runs from 50 to 416),
- * so there is no one right number to be wrong about. */
+/* travel_time is a routing cost, not an animation-validity check. Use
+ * measured medians by nominal distance instead of shipping a table keyed by
+ * game animation paths.
+ */
 static const int TRAV_MEDIAN_TIME[SH_TRAV_DISTANCES] = {
     136,    /*  64 */
     152,    /* 128 */
@@ -74,19 +40,13 @@ static const int TRAV_MEDIAN_TIME[SH_TRAV_DISTANCES] = {
 /* the demons                                                            */
 /* ==================================================================== */
 
-/* Both words come from the engine's own TraversalMonsterTypeToTraversalFlags,
- * as the header records. They are derived here rather than tabulated so there
- * is exactly one place a mask can be wrong; nav_traversal_test.c then checks
- * the derivation against all nine distinct traversal flag words that occur
- * anywhere in shipped data. */
+/* Derive both flag words from the engine's traversal-monster mask. */
 #define TRAV_FLAGS(M)  ((unsigned)((((0x1000u | (((unsigned)(M)) << 7) | 1u)) << 16) & 0xFFFFFFFFu))
 #define TRAV_D30(M)    ((unsigned)(0x02000000u | (((unsigned)(M)) << 12) | 0x908u))
 
-/* In traversalMonsterType_t order. MARINE is in the enum but is the player, so
- * it is not offered; the Cyberdemon is not in the enum at all and so can never
- * be given a baked traversal, even though the decl carries a row block for it.
- * decl_name is the table's own key and must match it byte for byte -- that is
- * the only thing joining this table to the animation paths. */
+/* Engine enum order, excluding MARINE and Cyberdemon. decl_name must match
+ * the table's monster key exactly.
+ */
 static const sh_trav_monster TRAV_MONSTER[] = {
     { "Imp",               "imp",               3,  TRAV_FLAGS(3),  TRAV_D30(3)  },
     { "Hellified Soldier", "hellified_soldier", 9,  TRAV_FLAGS(9),  TRAV_D30(9)  },
@@ -110,9 +70,9 @@ typedef struct trav_anim {
     int   have;
 } trav_anim;
 
-/* A hard ceiling on the bytes we will walk. The shipped file is about 90 KB;
- * this is room for two orders of magnitude of growth and still bounds the work
- * a hostile package can ask for. */
+/* Bound installed declaration size, allowing headroom over the shipped ~90
+ * KB.
+ */
 #define TRAV_TEXT_MAX  (4u * 1024u * 1024u)
 
 static SRWLOCK  g_trav_lock = SRWLOCK_INIT;
@@ -135,33 +95,11 @@ static void trav_clear_locked(void)
 /* the decl scanner                                                      */
 /* ==================================================================== */
 
-/* The file is machine-generated idDeclFile syntax with ONE ASSIGNMENT PER LINE
- * and every block brace on a line of its own:
- *
- *     {
- *         edit = {
- *             table = {
- *                 table[0] = {
- *                     monster = "Archvile";
- *                     traversal = {
- *                         traversal[6] = {
- *                             type = "LEDGE_DOWN_64";
- *                             path = "zion/characters/monsters/archvile/traversals/jump_ledge_down_128";
- *                             offset = {
- *                                 x = -64;
- *                             }
- *                             xScale = 1.4199999571;
- *                         }
- *
- * so a line scanner is exact. Note what is really there against what one might
- * assume: `offset` carries an `x` and NOTHING ELSE (no y, no z, anywhere in the
- * file), 55 of the 300 rows have no `offset` block at all, `xScale` may follow
- * the offset block rather than precede it, the numbers are written as plain
- * integers as often as decimals, the line endings are CRLF, and the file does
- * not end with a newline.
- *
- * A decl that put two assignments on one line would be refused rather than
- * mis-read. That is the fail-closed direction, and no generator emits one. */
+/* The scanner expects generated idDeclFile syntax: one assignment per line
+ * and braces on separate lines. offset may be absent; when present it
+ * contains x. xScale can follow it. Accept integers, decimals, CRLF and an
+ * unterminated final line.
+ */
 
 static int trav_is_digit(char c) { return c >= '0' && c <= '9'; }
 
@@ -216,9 +154,7 @@ static int trav_assign(const char *p, size_t n, const char *key)
     return -1;
 }
 
-/* A quoted value into a bounded buffer. A value that does not fit, or that is
- * never closed before the end of the line, is not a value we can use: the
- * caller drops the row rather than acting on a truncated path. */
+/* Read a bounded quoted value; refuse unclosed or oversized paths. */
 static int trav_quoted(const char *p, size_t n, size_t at, char *out, size_t cap)
 {
     size_t i, w = 0;
@@ -316,10 +252,9 @@ static int trav_split_type(const char *type, int *fam, int *dist_idx)
     return 0;
 }
 
-/* The decl's own monster key gets a slot. Running out of slots is not something
- * a shipped table does -- there are ten and SH_TRAV_MAX_MONSTERS is 16 -- so it
- * means the file is not the file we think it is, and the whole parse fails
- * rather than quietly serving a demon whose rows were dropped. */
+/* Refuse the whole table if monster slots run out; silently dropped rows
+ * could misrepresent available animations.
+ */
 static int trav_monster_slot(const char *name)
 {
     int i;
@@ -338,11 +273,7 @@ static void trav_commit_row(int monster, const char *type, const char *path, flo
 
     if (monster < 0 || !type[0] || !path[0]) return;
 
-    /* A row whose path BASENAME is exactly "_" is a placeholder meaning this
-     * demon has no animation for this traversal. 58 of the 300 rows are one,
-     * which is why only 242 animations are real -- and why the zombie's
-     * LEDGE_UP stops at 128 and the hellified soldier's at 192. Dropping them
-     * here is what lets sh_trav_select answer "this demon cannot". */
+    /* A path basename of "_" is an unavailable-animation placeholder. */
     base = strrchr(path, '/');
     base = base ? base + 1 : path;
     if (strcmp(base, "_") == 0) return;
@@ -356,9 +287,9 @@ static void trav_commit_row(int monster, const char *type, const char *path, flo
     strncpy_s(slot->path, sizeof slot->path, path, _TRUNCATE);
 }
 
-/* Parse into the (already cleared) table. Returns 1 only for a table that is
- * structurally whole AND that gives at least one demon we offer a LEDGE
- * animation, because anything less is a table that cannot produce a climb. */
+/* Parse a complete table with at least one usable ledge or leap animation for
+ * an offered demon.
+ */
 static int trav_parse_locked(const char *text, size_t len)
 {
     size_t pos = 0, n = 0;
@@ -407,8 +338,7 @@ static int trav_parse_locked(const char *text, size_t len)
         }
     }
 
-    /* Truncated input leaves blocks open, and that is the only thing that
-     * distinguishes half a table from a whole one. */
+    /* Open blocks at EOF indicate truncated input. */
     if (depth != 0 || in_row) return 0;
 
     for (i = 0; i < TRAV_MONSTER_COUNT; i++) {
@@ -416,9 +346,7 @@ static int trav_parse_locked(const char *text, size_t len)
         for (f = 0; f < g_decl_monster_count; f++)
             if (strcmp(g_decl_monster[f], TRAV_MONSTER[i].decl_name) == 0) slot = f;
         if (slot < 0) continue;
-        /* LEAP_ACROSS counts toward readiness now, so a table that carried
-         * only leaps would parse as usable. That is a deliberate widening, not a
-         * mechanical one: leaps are emitted from the same records as climbs. */
+        /* A leap-only table is usable. */
         for (f = TRAV_FAM_LEAP_ACROSS; f <= TRAV_FAM_LEDGE_UP; f++)
             for (d = 0; d < SH_TRAV_DISTANCES; d++)
                 if (g_anim[slot][f][d].have) return 1;
@@ -440,9 +368,9 @@ int sh_trav_load(sh_trav_reader read_decl)
     if (g_ready) { ReleaseSRWLockExclusive(&g_trav_lock); return 1; }
     if (!read_decl) { ReleaseSRWLockExclusive(&g_trav_lock); return 0; }
 
-    /* The reader is the engine's resource hook and the bytes are the player's,
-     * so both sides of this are guarded the way nav_bake guards a bake: one
-     * fault here would otherwise take down a map load. */
+    /* Contain faults from the provider callback or declaration parser during
+     * map load.
+     */
     __try {
         bytes = read_decl(SH_TRAV_DECL_NAME, &len);
         trav_clear_locked();
@@ -489,25 +417,10 @@ static int trav_slot_for(const sh_trav_monster *m)
     return -1;
 }
 
-/* NEAREST AVAILABLE NOMINAL, TIES TO THE SMALLER.
- *
- * The six numbers name the ANIMATION, not the geometry: the engine warps the
- * clip onto the reachability's real endpoints either way, so whatever is left
- * between the animation's nominal distance and the actual drop IS the visual
- * error. Minimising it is therefore the right objective, and plain nearest is
- * what minimises it. Measured over the 2,484 shipped LEDGE records, nearest
- * reproduces the animation the shipped file itself chose 62.6% of the time --
- * against 49.3% for "smallest nominal that covers the drop" and 40.9% for
- * "largest that does not exceed it" -- and leaves a median residual of 8 units
- * and a p90 of 32, against 26.5 and 74 for smallest-covering. (Nearest by log
- * ratio scores marginally better at 64.3% but differs on 3% of records and is
- * much harder to explain, so it is not what we do.)
- *
- * Refusal has exactly three causes, and each is a real thing about the demon:
- * it has no animation in this family at all, the drop needs more stretch than
- * shipped data has ever asked for (SH_TRAV_MAX_STRETCH), or it is so much
- * shorter than the smallest clip the demon owns that the clip would be squashed
- * past SH_TRAV_MIN_SQUASH. */
+/* Select the nearest available nominal, ties to the smaller. The engine warps
+ * the clip to the endpoints, so this minimizes nominal-distance error. Refuse
+ * absent families and distances beyond the stretch/squash bounds.
+ */
 int sh_trav_select(const sh_trav_monster *m, int direction, float drop,
                    char *out_path, size_t path_cap,
                    float *out_offset_x, int *out_distance, int *out_travel_time)
@@ -526,9 +439,7 @@ int sh_trav_select(const sh_trav_monster *m, int direction, float drop,
     if (direction == SH_TRAV_UP) fam = TRAV_FAM_LEDGE_UP;
     else if (direction == SH_TRAV_DOWN) fam = TRAV_FAM_LEDGE_DOWN;
     else if (direction == SH_TRAV_ACROSS) {
-        /* `drop` is the HORIZONTAL span of the gap here, not a height. Outside
-         * the range shipped leaps actually cover there is no animation to warp,
-         * so the gap is simply not crossed. */
+        /* For leaps, drop is horizontal span; enforce the separate leap envelope. */
         fam = TRAV_FAM_LEAP_ACROSS;
         if (drop < SH_TRAV_LEAP_MIN_SPAN || drop > SH_TRAV_LEAP_MAX_SPAN) return 0;
         max_stretch = SH_TRAV_LEAP_MAX_STRETCH;
@@ -565,8 +476,7 @@ int sh_trav_select(const sh_trav_monster *m, int direction, float drop,
 
     if (out_path) {
         size_t need = strlen(path) + 1;
-        /* A truncated animation path is a path to nothing, so a buffer that
-         * cannot hold it is a refusal and not a partial answer. */
+        /* Refuse an animation path that cannot fit the output buffer. */
         if (path_cap < need) return 0;
         memcpy(out_path, path, need);
     }

@@ -1,68 +1,19 @@
-/* map_package.h -- map-embedded override packages: the wire format, the install,
- * and the load gate.
+/* Map-embedded package delivery, extraction, consent and load gating.
  *
- * WHY THIS EXISTS
- * ---------------
- * Overrides never reach players -- publishing uploads only the map file. So a
- * map's mod content travels INSIDE the map, as base64 shards in map-level
- * string variables (`variables.string[]`), each shard's header in the
- * variable's `info.name`:
+ * Each variables.string shard stores base64 in initialValue and a header in
+ * info.name: smpkg.<pkg>.<idx>.<total>.<digest16>. Package ids use lowercase
+ * [a-z0-9_-]; digest16 is a SHA-256 prefix over the ZIP payload. ZIPs may use
+ * stored or deflated entries.
  *
- *     smpkg.<pkg>.<idx>.<total>.<digest16>
+ * Gate maps before native parsing because missing content can fault at
+ * spawn/render. Match the boot package snapshot by digest, or folded name
+ * when no sidecar exists. A differing sidecar rejects a name match. Session
+ * installs become eligible after runtime declaration registration succeeds.
  *
- * where <pkg> is a lowercase [a-z0-9_-]+ package id, <idx>/<total> are the
- * shard index and count, and <digest16> is the first 16 hex chars of the
- * sha256 of the packed payload (a deflate zip of the package folder). The
- * reference implementation of this format is the development repo's
- * `src/map_package.py`; this module is its C consumer. The payload carries
- * only the AUTHORED layer (decls, resource manifests, requirements) -- the
- * heavy game-owned bytes are resolved from the player's own installed
- * archives by the resource bridge, so a whole real package is ~84 KiB.
- *
- * WHY THERE IS A LOAD GATE, AND WHY IT IS MANDATORY
- * -------------------------------------------------
- * A map that references package content WITHOUT the package is FATAL, not
- * degraded: the missing model decl resolves to NULL, the engine hands that
- * NULL to idRenderWorldLocal::AddRenderModel, and the process throws and
- * dies (proven live, twice, campaign dynamic-content-serving W-20). The
- * makeDefault placeholder covers decl resolution, not the render path. So
- * the check CANNOT be an optional prompt shown while the map loads -- the
- * map must be refused BEFORE the engine ever parses it. The single place
- * every map load funnels through -- local save, published offline, and
- * network download alike (W-8) -- is idSnapMap::DeserializeFromJson, which
- * rawmap.c already detours. That detour calls sh_mpkg_gate() on every
- * buffer before handing it to the engine.
- *
- * WHAT "INSTALLED" MEANS: THE BOOT SNAPSHOT, NEVER THE DISK
- * ---------------------------------------------------------
- * The decl server takes an immutable launch snapshot; a package installed
- * on disk AFTER boot is NOT live in the running process, and letting its
- * map through would crash exactly as if it were absent. So the gate
- * compares against a package list captured once at boot
- * (sh_mpkg_boot_capture), plus the set installed by THIS module this
- * session (which are refused with "restart required" rather than passed).
- *
- * A declared package is satisfied when a boot-time package matches it:
- *   - by digest: the package folder carries a `smpkg.digest` sidecar (our
- *     installer writes one) equal to the declared digest; or
- *   - by name, when no sidecar exists (grandfathering hand-installed
- *     packages): the installed name, lowercased and with '/' folded to '-',
- *     equals the declared id, or one ends with "-" + the other (so a map
- *     declaring `demons-cyberdemon` accepts an install at
- *     overrides\cyberdemon or overrides\demons\cyberdemon).
- *   A sidecar that DISAGREES with the declared digest is a version
- *   mismatch and does not satisfy -- the map is refused rather than fed to
- *   an engine holding different content. Generous name matching is safe
- *   because a false "satisfied" merely reproduces today's behavior; the
- *   consent + path checks on INSTALL are the security boundary, not this.
- *
- * FAILURE POLICY: every gate-internal failure degrades to a vanilla load
- * (pass-through) or a clean refusal (DeserializeFromJson returns 0, which
- * the engine's callers already handle as a failed parse -- a browser
- * bounce, proven live in W-18). Never a crash. Installs happen only after
- * explicit user consent, and registration is boot-time only (six failed
- * post-hoc promotion attempts are documented in decl_server.c), so an
- * install always ends in "restart DOOM".
+ * Verified missing payloads are staged for one engine-modal consent prompt.
+ * Installation never overwrites an existing folder. The current load is
+ * refused; subsequent loads can proceed after rearm. The caller guards gate
+ * faults separately.
  */
 #ifndef BACKEND_MAP_PACKAGE_H
 #define BACKEND_MAP_PACKAGE_H
@@ -107,14 +58,12 @@ size_t sh_mpkg_scan(const char *json, size_t len, sh_mpkg_decl *out, size_t cap)
 unsigned char *sh_mpkg_extract(const char *json, size_t len, const char *pkg_id,
                                size_t *out_len, char *err, size_t err_cap);
 
-/* Unpack a packed payload (a deflate zip) under `dest_dir`, creating it.
- * REFUSES unsafe member paths: absolute, drive-qualified, backslashed, or
- * containing '.' / '..' segments -- a map is untrusted input. Bounded
- * against decompression bombs (entry, per-file and total-size caps).
- * Payload integrity is already sha256-verified by extract, so per-member
- * CRCs are not re-checked. Returns 1 and *files_out on success, else 0
- * with the reason in `err` (a partial unpack may remain; the caller
- * treats the install as failed and never records it as installed). */
+/* Unpack stored or deflated ZIP entries under dest_dir. Reject unsafe paths
+ * and enforce entry, per-file and total-byte limits. extract already verifies
+ * payload SHA-256; member CRCs are not rechecked. Returns 1 and files_out, or
+ * 0 with err. A failed write may leave partial files, which are never
+ * recorded as installed.
+ */
 int sh_mpkg_unpack(const unsigned char *payload, size_t len, const char *dest_dir,
                    unsigned *files_out, char *err, size_t err_cap);
 
@@ -125,25 +74,18 @@ int sh_mpkg_unpack(const unsigned char *payload, size_t len, const char *dest_di
  * data_root as the install destination root. */
 void sh_mpkg_boot_capture(const char *data_root);
 
-/* THE LOAD GATE. Returns 1 = hand the buffer to the engine, 0 = refuse
- * the load (the detour returns 0 to the engine without parsing). On a
- * refusal the reason is logged and, when a missing package's payload
- * verifies, a consent prompt is raised on its own thread offering to
- * install it (never blocking the engine thread); either answer still
- * refuses THIS load, because registration is restart-only. */
+/* Return 1 to parse the map, or 0 to refuse it. Verified missing payloads are
+ * staged for consent on the engine tick; this load remains refused. Session
+ * installs require successful runtime registration before a later load can
+ * pass.
+ */
 int sh_mpkg_gate(const char *json, size_t len);
 
-/* Remove the delivery payload from a map buffer, AFTER the gate has read
- * it. Returns a new NUL-terminated HeapAlloc'd buffer (caller HeapFrees)
- * with *out_len set, or NULL when there is nothing to strip or the
- * document cannot be stripped safely -- either way the caller then uses
- * the original buffer.
- *
- * This is not an optimisation. A shard is 8 KiB and the playtest
- * serialises map variables into a 4 KiB message, so a map that still
- * carries its payload cannot be played at all (measured: idBitMsg
- * overflow, numBits=65544). The payload is an envelope; the engine's map
- * object must never contain it. */
+/* Strip package delivery variables after gating. Return an owned NUL-
+ * terminated process-heap buffer and out_len, or NULL to keep the original.
+ * Shards must stay outside engine map state: 8 KiB variables overflow the
+ * playtest's 4 KiB message.
+ */
 char *sh_mpkg_strip(const char *json, size_t len, size_t *out_len);
 
 /* THE AUTHOR SIDE. Embed `payload` into `json` as shard string
@@ -166,10 +108,11 @@ void sh_mpkg_digest16(const unsigned char *payload, size_t len,
                       char out[SH_MPKG_DIGEST_CHARS + 1]);
 
 #ifdef SH_MAP_PACKAGE_TESTING
-/* Consent modes for tests: production raises an async prompt; tests run
- * the decision synchronously. */
+/* Consent modes: production stages an engine modal; tests decide
+ * synchronously.
+ */
 enum {
-    SH_MPKG_CONSENT_PROMPT = -1,   /* production: async MessageBox thread */
+    SH_MPKG_CONSENT_PROMPT = -1,   /* production: engine modal on the main-thread tick */
     SH_MPKG_CONSENT_DECLINE = 0,   /* synchronous: user said no */
     SH_MPKG_CONSENT_ACCEPT  = 1    /* synchronous: user said yes -> install */
 };
@@ -178,7 +121,6 @@ void sh_mpkg_test_reset(void);                    /* clear snapshot + session st
 const char *sh_mpkg_test_last_refusal(void);      /* last gate refusal reason, "" if none */
 int sh_mpkg_test_session_installed_count(void);
 #endif
-
 
 /* Drive the consent dialog. Call from the engine tick (main thread): the engine
  * modal is raised into, and answered out of, the live dialog queue, neither of

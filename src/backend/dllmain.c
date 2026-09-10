@@ -1,68 +1,57 @@
-/* dllmain.c -- the Snapmap+ BACKEND DLL bootstrap (our clean-room XINPUT1_3.dll).
- *
- * This is the backend's OWN DllMain -- the OG SnapHak loader/spine lived in XINPUT1_3.dll, and our
- * clone occupies the same load vector. It is SEPARATE from the fault-shield (a distinct proxy DLL with
- * a different signature). NO fault-shield / VEH / recovery code here.
- *
- * Bootstrap = resolve the DOOM module base -> run the signature resolver -> run the
- * smoke proof (resolver + inline-detour installer self-test) -> emit the "PB0: ..." line. Later stages wire the
- * real ops AFTER this point: the rawmap save/load swap, unhide, overrides shadow, the strids injector,
- * and the sh apply chain -- all riding on the signature-resolved engine fns + this installer.
- *
- * Clean-room: ported from our own RE of the OG hook-install + DLL architecture
- * + the reference implementation's signature table. Zero OG SnapHak bytes.
- */
+/* XInput backend bootstrap. A worker resolves the host image and engine symbols,
+ * checks patch primitives, installs feature hooks, starts the frontend, and arms
+ * the fault shield compiled into this same DLL. */
 #include <windows.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
-#include <shlobj.h>                       /* SHGetFolderPathA + CSIDL_LOCAL_APPDATA (ensure_user_dirs) */
+#include <shlobj.h>
 #pragma comment(lib, "shell32.lib")
 #include "signatures.h"
 #include "hook.h"
 #include "smoke.h"
 #include "rawmap.h"
-#include "editor_frame.h"   /* the main-thread frame hook + the in-place map reload it drives */
-#include "map_package.h" /* map-embedded override packages: boot snapshot + load gate */
+#include "editor_frame.h"
+#include "map_package.h"
 #include "palette_guard.h"
 #include "palette_refresh.h"
 #include "engine_dialog.h"
-#include "../fault_shield/mapload_guards.h"   /* the two map-load / spawn game-defect guards */
+#include "../fault_shield/mapload_guards.h"
 #include "strids.h"
 #include "overrides.h"
 #include "package_requirements.h"
 #include "weapon_hud.h"
 #include "navmesh.h"
-#include "nav_bake.h"   /* baked AI navigation served through the overrides shadow */
-#include "nav_play.h"   /* re-read the author's live marks before the Play build */
+#include "nav_bake.h"
+#include "nav_play.h"
 #include "decl_server.h"
 #include "commands.h"
 #include "cvars.h"
 #include "entity.h"
 #include "typeinfo.h"
-#include "megapreview.h"  /* Assets-tab material preview: megatexture pages -> RGBA, CPU-only */
-#include "imgpreview.h"   /* ...plus plain-material/direct-image previews and asset catalogs */
-#include "prefabpreview.h"/* Prefab Details: async untextured geometry from installed containers */
-#include "soundpreview.h" /* Assets-tab sound auditioning: the editor's own preview path */
+#include "megapreview.h"
+#include "imgpreview.h"
+#include "prefabpreview.h"
+#include "soundpreview.h"
 #include "patch.h"
 #include "algo.h"
-#include "target_any.h"   /* sh_target_any editor-decl visibility toggle (OG FUN_180021EE0 port) */
-#include "wiring_cleandirect.h" /* sh_target_any wire-any: force the stock clean-direct connect branch (bind to any target ENTITY, no input radial) */
-#include "swf_textedit.h"       /* SWF text-field clipboard: Ctrl+C out of the editor's free-text property fields */
+#include "target_any.h"
+#include "wiring_cleandirect.h"
+#include "swf_textedit.h"
 #include "ui_bridge.h"
 #include "config.h"
 #include "user_overrides.h"
 #include "iface_engine.h"
 #include "apply_engine.h"
-#include "cvar_unlock.h"   /* merged-in cvar-unlock (former standalone dinput8) */
+#include "cvar_unlock.h"
 #include "backend_log.h"
-#include "host_image.h"    /* resolve the host DOOM image on either shipped build (Vulkan / OpenGL) */
-#include "engine_globals.h" /* DOOM data globals, resolved from the code sites that compute them */
-#include "../fault_shield/fault_shield.h"   /* the merged fault-shield (recover-in-place vs OG's terminate) */
-#include "../fault_shield/fault_record.h"   /* shield_set_logpath_from_module -> shield_faults.log */
+#include "host_image.h"
+#include "engine_globals.h"
+#include "../fault_shield/fault_shield.h"
+#include "../fault_shield/fault_record.h"
 #ifdef SH_DIAG
-#include "../fault_shield/shield_diag.h"    /* DIAGNOSTIC build (build.ps1 -Diag): catch-all crash + env logger */
+#include "../fault_shield/shield_diag.h"
 #endif
 
 static uint8_t *g_doom_base = NULL;
@@ -70,32 +59,18 @@ static size_t   g_doom_size = 0;
 
 static void resolve_doom(void)
 {
-    /* The host process image IS DOOM -- this DLL is loaded by it. Looking the module up by the
-     * name "DOOMx64vk.exe" pinned the backend to the Vulkan build and returned NULL under the
-     * OpenGL build, leaving everything downstream unarmed. See host_image.h. */
+    /* Resolve the host image for either accepted executable name. */
     g_doom_base = (uint8_t *)sh_host_image_base();
     g_doom_size = sh_host_image_size();
 }
 
-/* Deferred-resolution poll knobs. DOOMx64vk.exe is SteamStub-wrapped: the module is MAPPED early (so
- * GetModuleHandle succeeds + the PE headers/section table are readable from the first DLL-init tick),
- * but its `.text` is ENCRYPTED on disk and only decrypted in-memory when the SteamStub stub runs at the
- * exe entry point -- which is AFTER the loader's DLL-init that runs our DllMain. A resolver pass during
- * (or right after) DLL-init therefore scans STILL-ENCRYPTED bytes and matches 0 signatures. So we don't
- * resolve once at load: we POLL sig_resolve_all until the whole DB resolves uniquely (proof the real
- * decrypted engine code is now mapped) or we give up after a generous budget (the SteamStub-wrapped .text must be decrypted before the DB resolves). */
+/* SteamStub exposes the engine .text after DLL initialization. Poll resolution
+ * until the database is available or the timeout permits a partial installation. */
 #define PB0_POLL_INTERVAL_MS  75
 #define PB0_POLL_TIMEOUT_MS   60000
 
-/* Create the %LOCALAPPDATA%\snapmap-plus\ user-data tree if absent. The disk-backed features (overrides,
- * rawmap swap/save, strids) and the prefab resolver all read/write under this folder but historically
- * ASSUMED it existed. On a fresh profile it is absent, so every one of those features silently no-ops --
- * e.g. the "unknown entity" override served from overrides\ never appears in-game. Create the tree once
- * at startup so a clean install works out of the box. (The installer scaffolds the same tree and folds a
- * pre-rebrand %USERPROFILE%\snaphak\ tree -- the original tool's path, which our pre-rename releases
- * reused -- forward into it; this is the runtime backstop for a hand-deployed overlay.) CreateDirectoryA
- * is idempotent (ERROR_ALREADY_EXISTS is benign); any other failure is logged non-fatally. Subfolders
- * mirror every <data-root>\<sub> path the backend builds. */
+/* Create runtime data directories for hand-deployed overlays and fresh profiles.
+ * Existing directories are harmless; other creation failures are logged. */
 static void ensure_user_dirs(void)
 {
     static const char *subs[] = { "", "\\strings", "\\overrides", "\\prefabs" };
@@ -120,7 +95,7 @@ static void ensure_user_dirs(void)
 static DWORD WINAPI bootstrap_thread(LPVOID p)
 {
     (void)p;
-    /* Wait for the DOOM module to be mapped (present very early, but be defensive ~60s @ 10ms). */
+    /* Wait up to about 60 seconds for the supported host image. */
     for (int i = 0; i < 6000 && g_doom_base == NULL; i++) {
         resolve_doom();
         if (!g_doom_base) Sleep(10);
@@ -139,9 +114,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         (void *)g_doom_base, g_doom_size);
     backend_log(line);
 
-    /* Create %LOCALAPPDATA%\snapmap-plus\{,strings,overrides,prefabs} if a fresh profile lacks it, so
-     * overrides / rawmaps / strids / prefabs work on a clean install instead of silently no-opping
-     * (the reason an end-user couldn't see the "unknown entity" override served from overrides\). */
+
     ensure_user_dirs();
     sh_config_init(); /* nonfatal: the service retains defaults and status flags on failure */
     /* Straight after config init and before any map can load: the rawmap save destination has a
@@ -150,29 +123,23 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
     sh_rawmap_config_load();
     sh_user_overrides_capture_launch_state();
 
-    /* Poll the resolver until the SteamStub has decrypted .text (full DB resolves uniquely) or we time
-     * out. sig_resolve_all returns the count of UNIQUE resolves; the bar is the whole DB. While .text is
-     * still encrypted this is 0 (or a stray partial), so we retry on a short interval. */
+    /* Retry while startup code may still be encrypted; partial binding is allowed
+     * after timeout and each feature must validate its own dependencies. */
     size_t total = sig_db_count();
     DWORD  t0 = GetTickCount();
     size_t last_ok = 0;
     for (;;) {
         last_ok = sh_resolve_count(g_doom_base);
-        if (last_ok == total) break;                       /* decrypted -- the real code is mapped */
+        if (last_ok == total) break;
         if (GetTickCount() - t0 >= PB0_POLL_TIMEOUT_MS) break;
         Sleep(PB0_POLL_INTERVAL_MS);
     }
     DWORD elapsed = GetTickCount() - t0;
 
-    /* prove the foundation (resolver + inline-detour installer) end-to-end. Emits "PB0: ...". The
-     * resolve is re-run inside (it's cheap) so the emitted counts/RVAs come from the same final scan;
-     * `elapsed` annotates how long past load the decrypt took. */
+    /* Record resolution and scratch-detour results from a fresh scan. */
     sh_smoke_run(g_doom_base, elapsed);
 
-    /* Resolve DOOM's data globals from the code sites that compute them, and log the lot in one
-     * place. Doing it here rather than lazily means a build we cannot fully serve shows up as a
-     * block of UNRESOLVED lines at install, instead of being discovered one broken feature at a
-     * time by whoever files the bug. */
+    /* Resolve and log all data anchors here so unsupported dependencies are visible. */
     {
         size_t gtotal = glb_db_count();
         size_t gok    = glb_resolve_all(g_doom_base);
@@ -182,36 +149,21 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         backend_log(gline);
     }
 
-    /* the reusable PATCH/DETOUR layer self-test. Runs at install like the smoke proof, in-DLL, with
-     * NO engine side effects -- it patches a SCRATCH RX stub only (apply / call-through / restore + the
-     * negative refuse-on-mismatch that proves the verify-before-write guard). This ships the LAYER
-     * (code_patch/code_unpatch + the detour reuse from hook.c, all sig-anchored + SEH-guarded); the engine
-     * patch consumers (devmode 0x18a31d0, render-logging, cs_dontuse) come later. Emits
-     * "B2: patch-layer self-test PASS ..." or a specific FAIL. See patch.c. */
+    /* Check guarded patches on scratch memory before installing consumers. */
     sh_patch_selftest();
 
-    /* snaphak_algo: the in-DLL math self-test (like the patch-layer self-test -- in-DLL, NO engine
-     * state). Runs the 4 clean-room ops (matmul/inverse/colorpack/curve) on known inputs + checks the
-     * results (color-pack BIT-EXACT to the OG hook; the others f64-tolerant), proving the math independent
-     * of the live engine BEFORE cs_dontuse ever installs a detour. Emits "B2: snaphak_algo self-test PASS
-     * ..." or a specific FAIL. See algo.c. */
+    /* Check math implementations without touching engine state. */
     sh_algo_selftest();
 
-    /* Resolve the engine fns the feature ops ride on (from a final resolve pass -- the poll above
-     * already proved the whole DB resolves): the rawmap save/load swap, the strids injector, the
-     * OVERRIDES file-shadow, and the cvar + console-command registration. */
+    /* Bind features from the final resolution results, including partial results. */
     {
         sig_result results[SIG_RESULTS_MAX];
-        sig_resolve_all(g_doom_base, results, SIG_RESULTS_MAX);   /* fills results[0..sig_db_count) by DB index */
+        sig_resolve_all(g_doom_base, results, SIG_RESULTS_MAX);
         size_t db = sig_db_count();
-        if (db > SIG_RESULTS_MAX) db = SIG_RESULTS_MAX;   /* smoke.c logs the overflow */
+        if (db > SIG_RESULTS_MAX) db = SIG_RESULTS_MAX;
 
-        /* the rawmap LOAD swap (the keystone feature). Install the DeserializeFromJson detour as
-         * soon as the engine fn is resolved -- it does NOT depend on the editor being up (the detour
-         * just sits in front of the engine deserialize; it only swaps when ARMED + a source reads). We
-         * pass the resolve STATUS so the installer refuses to patch over an already-hooked prologue
-         * (SIG_OK_HOOKED) -- e.g. when an external instrumentation tool has hooked the same fn during testing.
-         * The gate starts DISARMED; the test harness arms it for testing. */
+        /* Install rawmap load interception only on a clean prologue. The swap starts
+         * disarmed; package admission also runs inside this detour. */
         void *deser = NULL;
         int   deser_clean = 0;
         for (size_t i = 0; i < db; i++) {
@@ -222,12 +174,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                 break;
             }
         }
-        /* The MAP-PACKAGE gate rides inside the DeserializeFromJson detour, so its
-         * immutable boot package snapshot must exist BEFORE that detour can fire.
-         * The snapshot is what "installed" means to the gate: a package copied to
-         * disk after this instant is NOT live in this process (the decl server's
-         * launch snapshot is equally immutable), and letting its map through
-         * would crash exactly as if it were absent. */
+        /* Capture the immutable installed-package snapshot before load interception
+         * can run. Packages added later require a restart to become active. */
         {
             char mpkg_root[MAX_PATH];
             if (sh_overrides_get_root(mpkg_root, sizeof mpkg_root))
@@ -238,15 +186,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         }
         sh_rawmap_swap_install(deser, deser_clean);
 
-        /* The editor-frame hook: a main-thread execution point at a frame boundary, and the in-place
-         * map reload it drives. This is what turns the File menu's "Load Rawmap" from staging a file
-         * into actually opening it -- the load swap substitutes bytes into a map load, but nothing in
-         * the product could make a map load HAPPEN. See editor_frame.h for why neither the command
-         * buffer's drain nor the frontend think-loop could be that execution point.
-         *
-         * Installed here, beside the swap it serves, and for the same reason: it does not depend on
-         * the editor being up. The hook only fires while the editor's own Think runs, and it services
-         * nothing until something requests a reload. */
+        /* The editor-frame hook: a main-thread frame boundary, and the in-place map
+         * reload it drives for the File menu's Load Rawmap. Installed beside the swap
+         * it serves, and like it does not depend on the editor being up. */
         {
             void *ed_frame = NULL, *ed_loadmap = NULL, *ed_addtag = NULL, *ed_tojson = NULL;
             int   ed_frame_clean = 0;
@@ -268,19 +210,13 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                 }
             }
             sh_editor_frame_install(ed_frame, ed_frame_clean, ed_loadmap, ed_addtag, g_doom_base);
-            /* Save Rawmap serialises the OPEN map rather than reading the newest save off disk.
-             * The tag function doubles as the derivation site for the engine's idStr ctor/dtor --
-             * see sh_rawmap_set_live_serialize. */
+            /* Save Rawmap serializes the open map, not the newest save on disk. The tag
+             * function also derives the engine's idStr ctor/dtor. */
             sh_rawmap_set_live_serialize(ed_tojson, ed_addtag);
         }
 
-        /* the rawmap SAVE shadow (the INVERSE of the LOAD swap). Install the SerializeToJson
-         * detour as soon as the engine fn is resolved -- like the LOAD swap it does NOT depend on the
-         * editor being up (the detour sits in front of the engine serialize; on every save it calls the
-         * engine original to fill the out-idStr, then mirrors that JSON to rawmap.json). No arm gate: OG
-         * writes the shadow on EVERY save. Same clean-scan-only policy as the LOAD swap -- refuse to patch
-         * over an already-hooked prologue (SIG_OK_HOOKED, e.g. an external instrumentation tool). See
-         * rawmap.c. */
+        /* Mirror saves to rawmap JSON. Require a clean serialization prologue before
+         * installing this always-active shadow hook. */
         void *serialize = NULL;
         int   serialize_clean = 0;
         for (size_t i = 0; i < db; i++) {
@@ -292,71 +228,26 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
             }
         }
         sh_rawmap_save_install(serialize, serialize_clean);
-        /* and the AUTHOR side of map packages: a saved map carries the packages it uses. */
+
         sh_rawmap_embed_install(g_doom_base);
 
-        /* the RELOAD-crash GUARD (palette_guard.c). After a heavy edit session (repeated create/delete of logic
-         * entities), one entry in the editor's entity palette is left with a freed name string. On the next full
-         * map-load the palette is sorted by name at entry, and copying that entry during the sort dereferences the
-         * freed pointer -> access violation (fault region 0x19fca40). The map loads clean first, then the post-load
-         * sort detonates -- a use-after-free, not a bad deserialize. The guard detours the palette-migration entry
-         * (0x5ec6c0) and resets any dangling palette name string to empty BEFORE the sort copies it, so a clean
-         * empty string is copied instead of the freed one. A valid entry is untouched; nothing is freed (the stale
-         * buffer is simply never read). No editor/sig dependency (recipe-tagged RVA off the module base). See
-         * palette_guard.c. */
-        /* DISABLED since 2026-07-05, and deliberately left that way. The render-node guard is one of OUR
-         * injected detours and it WRITES into the render-node array, so it was commented out to prove our
-         * own code was not the corruptor.
-         *
-         * READ THIS BEFORE PANICKING AT THE LOG LINE: the FAULT-SHIELD IS NOT DISABLED. It was turned off
-         * alongside this guard for that same 2026-07-05 diagnostic, was cleared by it, and was RE-ENABLED
-         * the same day -- see shield_install() at the end of this function. This guard is the ONLY thing
-         * still off, and the old log wording ("shield-off diagnostic build") wrongly implied otherwise.
-         *
-         * It stays off because the render-node root cause (a reclassed node-less timeline keeping the
-         * pasted command's stale render-node +0x70) was fixed AT THE SOURCE in ae_apply_one, which makes
-         * this guard a redundant mitigation rather than a load-bearing one. RE-ENABLE by uncommenting if
-         * the 0xd32a39 render face is ever reproduced again. */
-        /* sh_palette_guard_install(g_doom_base); */
+
+        /* The render-node guard remains disabled after the apply-path root fix.
+         * The separate fault shield is installed normally below. */
+
         backend_log("rendernode-guard: DISABLED (redundant since the ae_apply_one root fix; "
                     "fault-shield itself is ACTIVE)");
 
-        /* the MAP-LOAD / SPAWN GAME-DEFECT GUARDS (fault_shield/mapload_guards.c). Two crashes whose root
-         * cause is in the GAME's code, each guarded in front of the engine's own unvalidated deref:
-         *
-         *   evwire-guard (0x9C2370)  -- the event/trigger linker walks a link list's element buffer for
-         *     `num` entries having validated neither the buffer nor num-vs-capacity. A stale list faults
-         *     at 0x9C24B0 during map load (the faulting address IS the element pointer -- a dangling heap
-         *     pointer, so a NULL test would not catch it; the guard probes readability). On a bad list the
-         *     guard resets it to the engine's OWN empty-list state, so the walk is a no-op and the engine's
-         *     next append rebuilds it. Some event wiring is lost on a corrupt load; nothing is freed.
-         *
-         *   interactable-guard (0x1232830) -- idInteractable::Spawn dereferences its subsystem pointer
-         *     *(this+0x3DB0) twice with no null check, faulting at 0x123293F (address 0xE90) when an
-         *     interactable spawns before that subsystem is up. The guard zeroes the tag count so the engine
-         *     takes its own already-exercised "nothing to bind" path; the rest of Spawn still runs. NOTE:
-         *     the result-null-check right after the faulting load is NOT a usable absent-chain path -- it
-         *     leads to a second access violation in the callee. See mapload_guards.c for that disassembly.
-         *
-         * Both are no-ops on a healthy path (one SEH-guarded header read; a readability probe only when
-         * there is something to vet) and neither adds per-frame work. No editor/sig dependency
-         * (recipe-tagged RVAs off the module base, declared in fault_shield/engine_layout.h). To DISABLE
-         * one guard, comment out its line alone -- same convention as the render-node guard above. */
+        /* Guard stale event-wire lists and interactables whose subsystem is absent.
+         * Their implementations define the engine-layout checks and recovery limits. */
         sh_evwire_guard_install(g_doom_base);
         sh_interactable_guard_install(g_doom_base);
 
         void *get_decls = (void *)sig_addr_by_name(results, db, "GetDeclsOfType");
-        /* GetDeclsOfType is resolved here and handed to the command layer below (sh_commands_install),
-         * where sh_listres + the material-lookup handlers walk the typed decl-manager node it returns.
-         * The editor-palette expansion is driven by the OVERRIDES file-shadow (manifest- + port-bit-driven
-         * palette enumeration), not by any decl-visibility bit flip. */
 
-        /* the strids #str_ INJECTOR. Detour the engine idLangDict sort body (StridsSortBody) so
-         * the first top-level sort first appends our #str_<id> rows from strings/strids.json into the
-         * live string table, then runs the real sort. Like the rawmap swap, refuse to install over an
-         * already-hooked prologue (pass the clean-scan STATUS). The other engine fns (the table-global
-         * LEA anchor, the idList Append, the idStr hash, and the idStr pool ctor [DB name IdStrAssign,
-         * the 0x1a03e10 fn]) are resolved by name from the same scan. See strids.c. */
+
+        /* Inject custom #str_ entries before the first top-level language-table sort.
+         * The detour needs a clean prologue; helper functions come from the same scan. */
         void *sort_body = NULL;
         int   sort_clean = 0;
         for (size_t i = 0; i < db; i++) {
@@ -370,25 +261,13 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         void *strids_lea   = (void *)sig_addr_by_name(results, db, "StridsTableLea");
         void *strids_ins   = (void *)sig_addr_by_name(results, db, "StridsInsert");
         void *strids_hash  = (void *)sig_addr_by_name(results, db, "StridsHash");
-        void *idstr_ctor   = (void *)sig_addr_by_name(results, db, "IdStrAssign");  /* 0x1a03e10 ctor */
+        void *idstr_ctor   = (void *)sig_addr_by_name(results, db, "IdStrAssign");
         sh_strids_install(sort_body, sort_clean, strids_lea, strids_ins, strids_hash, idstr_ctor);
 
-        /* the OVERRIDES FILE-SHADOW (port of OG FUN_18000b370 vtable-slot swap). NOT an inline
-         * code detour -- it swaps the engine resource-provider's open-by-name VTABLE SLOT (+0xf8) with
-         * our override-open. The vtable is .data (not sig-scannable), so we resolve the provider CTOR
-         * (ResProviderCtor) by signature and the install decodes its `LEA RAX,[rip+vtable]` to recover
-         * the vtable, then requires the ctor, native-helper, and vtable RVAs to match the audited
-         * 31-slot Steam build before saving the slot's original + writing our hook into the slot.
-         * Pass the resolve STATUS: the ctor is only used to DECODE the vtable LEA, so a hooked prologue
-         * (SIG_OK_HOOKED) would corrupt the decode -- refuse on the hook-tolerant fallback. The shadow
-         * is always-live once installed (no arm gate) and resolves FOUR-LAYER: a user's loose
-         * overrides/<name> file -> a manifest-linked installed resource -> our built-in default decls from
-         * memory (the "*Custom" tab set; never written to disk) -> the engine's packaged resource. Both
-         * user-owned layers are gated by the restart-only config snapshot captured above; built-in defaults
-         * and engine resources remain active regardless. See overrides.c and resource_bridge.c. */
-        /* The returned idFile is the pinned build's full 31-slot table. Its native idStr helpers
-         * (+0xe0/+0xe8/+0xf0) are passed only from clean SIG_OK results; overrides.c publishes all
-         * three before this provider slot is changed and refuses the install on any dirty/missing one. */
+        /* Replace resource-provider open-by-name slot +0xF8 after validating the audited
+         * provider ABI. User override layers use the immutable launch setting;
+         * built-in defaults and engine resources remain available regardless. */
+        /* Publish all three clean native idStr helpers before installing the provider. */
         void *res_ctor = NULL;
         int   ctor_clean = 0;
         void *read_string = NULL;
@@ -425,20 +304,11 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                                                        compare, compare_clean,
                                                        write_string, write_string_clean);
 
-        /* BAKED NAVIGATION. Nothing to resolve and nothing to hook: the serve
-         * path is the overrides open slot just installed, and the load/save path
-         * is the rawmap funnel. This only reports the configured state, so the
-         * log says which way the switch was set before the first map load. The
-         * table itself is built per map, from the map. See navmesh.c. */
+        /* Navigation uses the resource shadow and map funnel; report its startup state. */
         sh_navmesh_install();
 
-        /* cvar + console-command registration (clone of OG XINPUT1_3 FUN_1800229b1). Both ride the
-         * signature-resolved engine fns; neither installs an inline detour. CVARS FIRST -- they have NO
-         * cmdSystem dependency and FIRE as soon as CvarRegister resolves (we only CALL the engine fn, so
-         * SIG_OK and SIG_OK_HOOKED are both fine). COMMANDS need the idCmdSystemLocal* global, decoded
-         * build-portably from the CmdSystemLea accessor's RIP-relative MOV (sh_resolve_cmdsys); they
-         * degrade gracefully (cmdsys==NULL -> log + skip, no crash). get_decls (fetched above) is
-         * passed to the command layer for sh_listres + the material lookups. See cvars.c / commands.c. */
+        /* Register cvars before commands. Commands additionally need cmdSystem;
+         * each registration path handles missing dependencies independently. */
         void *cvar_reg = (void *)sig_addr_by_name(results, db, "CvarRegister");
         sh_cvars_install(cvar_reg, g_doom_base);
 
@@ -447,10 +317,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         void *cmdsys   = sh_resolve_cmdsys(results, db, g_doom_base);
         sh_commands_install(add_cmd, cmdsys, printf_d, get_decls, g_doom_base);
 
-        /* Declarative package runtime requirements are not arbitrary startup scripts. The capture
-         * accepts only product-audited idempotent cvar/value pairs, then the existing backend tick queues
-         * them once after engine load_state reaches RUNNING. In particular, cut-content blacklist gates
-         * are never changed during the fragile startup decl-parse phase. */
+        /* Capture allowlisted package cvars, then queue them once the engine is RUNNING.
+         * Do not alter these gates during startup declaration parsing. */
         {
             char override_root[MAX_PATH];
             void *buffer_cmd = (void *)sig_addr_by_name(results, db, "BufferCommandText");
@@ -463,44 +331,21 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                 backend_log("package-requirements REFUSED: effective override root unavailable");
         }
 
-        /* backend touch: AFTER `sh` is registered (sh_commands above registers the "sh" command),
-         * create the shared UI-interface object + LoadLibraryA(".\\snapmap-plus\\snapmap-plus-ui.dll") +
-         * CreateThread(sh_ui_init, &argblock{argc,argv,out-slot,interface}). This is the OG spine
-         * tail of FUN_1800229b1 (the interface is built + handed to the frontend right after the AddCommand
-         * spine; the OG loaded .\snaphak\snaphakui.dll / snaphak_ui_init -- same mechanism, our names).
-         * Once this runs, `sh` stops reporting "Ui interface doesnt exist yet!" (it gates on the
-         * interface sh_ui_get_iface returns). The interface + its register/unregister/drain bodies are the
-         * generic factory in ../common/snapmap_plus_iface.c. See ui_bridge.c. */
+        /* Create the shared interface and launch the frontend after sh registration. */
         sh_ui_bridge_install();
 
-        /* backend touch: resolve the heavy 8-pass apply-chain engine fns (entity-clone /
-         * struct-serialize / tree-render / struct-deserialize / lexer / parse-node ctor+dtor / entity-def
-         * ctor+dtor / decl-source-rebuild / idstr-assign -- all sig-resolved) + cache cmdSystem +
-         * BufferCommandText/AddCommand for the clone_bss_apply command-buffer routing (FIX B). MUST run
-         * BEFORE sh_iface_engine_install (which folds the apply-engine's three slot bodies into the single
-         * sh_iface_bind_engine_slots call). The declMgr accessor is reused from sh_typeinfo, so this also
-         * relies on g_doom_base being set (it is). See apply_engine.c. */
+        /* Bind apply dependencies before publishing their interface slots. */
         sh_apply_engine_install(results, db, g_doom_base, cmdsys);
 
-        /* Hand the navigation baker the live-entity surface, now that the
-         * reflection serialize behind it is ready. Without this the baker reads
-         * only the map as loaded, and a volume the author ticks during a session
-         * does not take effect until the map is loaded again -- pressing Play
-         * does not serialize the map, so nothing else would notice the edit. */
+        /* Expose live entity reads so navigation sees marks edited since map load. */
         sh_nav_bake_set_live_editor(sh_apply_engine_entity_count,
                                     sh_apply_engine_entity_valid,
                                     sh_apply_engine_entity_json, NULL);
         sh_nav_bake_set_snapshot(sh_apply_engine_nav_snapshot, NULL);
 
-        /* And the one point that read surface may be used from. Pressing Play does not
-         * serialize the map, so a volume ticked this session reaches the baker only if
-         * something reads the live editor -- but the bake itself is far too late to do
-         * it (issues #87 and #89: by then SnapMapEditToSnapBuild has begun turning the
-         * edit map into the build map, and cloning an entity with no defsub yet is an
-         * unconditional NULL dereference inside the engine). The detour goes on the
-         * ENTRY of that conversion instead: still DOOM's main thread, still the editor's
-         * own map, and strictly before all three BuildAAS calls. Registered above first
-         * so the refresh has a surface to read the moment the hook can fire. */
+        /* Read marks at entry to edit-to-build conversion, on the engine main thread.
+         * Later bake callbacks can see entities with incomplete defsub state and
+         * cannot safely clone them. Install only after the live read surface exists. */
         {
             void *snapbuild = NULL;
             int   snapbuild_clean = 0;
@@ -514,121 +359,58 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
             }
             sh_nav_play_install(snapbuild, snapbuild_clean);
             sh_nav_play_install_instances(results, db);
+            sh_nav_play_install_volume_contents(results, db);
         }
 
-        /* backend touch: bind the UI-interface's engine-touch vtable slots -- the LIGHT touches
-         * the SnapStack STORE-ops need (selection read/write, hovered id, toast, class/inherit read, id
-         * validity/count) PLUS the heavy serialize/apply/read-prefab slots (+0xc8/+0xd0/+0xb8, folded
-         * in from sh_apply_engine). The editor singleton is a hardcoded data RVA (0x3056748, like cmdSystem);
-         * the selection/toast/idStr engine FNS are resolved by name from `results` (signature-based). AFTER
-         * sh_ui_bridge_install (the interface + its shared vtable must exist) + sh_apply_engine_install (its
-         * slot bodies must be ready). See iface_engine.c. */
+        /* Bind engine slots after the interface and apply dependencies exist.
+         * The editor singleton resolves through the engine-globals anchor. */
         sh_iface_engine_install(results, db, g_doom_base);
 
-        /* New decl identities are catalogued by the engine's native source
-         * scanner, but the editor palette is a separate derived list. Resolve
-         * and arm the clean-signature native rebuild now; the one-shot call is
-         * made synchronously by the successful registration command on the
-         * engine main thread. Unsupported builds refuse before any engine call. */
+        /* Arm the native palette rebuild before declaration registration can queue it. */
         sh_palette_refresh_install(results, db, g_doom_base);
 
-        /* The engine's own modal surface. Installed before the decl server so a
-         * package prompt raised by the very first map load already has it, and
-         * kept non-fatal: a refusal here only means the install flow falls back
-         * to the OS message box it used before. */
+        /* Install native prompts before the decl server can raise a package dialog.
+         * Failed binding leaves the OS message-box fallback available. */
         sh_engine_dialog_install(results, db, g_doom_base);
 
-        /* The DYNAMIC DECL SERVER complements the file-shadow installed above. It snapshots local and
-         * linked generated decls, then registers a private command and BufferCommandTexts it so DOOM's
-         * main thread can classify existing identities with lookup-only DeclFind. Existing identities
-         * remain ordinary SHADOWED overrides; absent identities are copied into an immutable exact
-         * decltree table and submitted once each, in dependency order, through the registry's native
-         * +0x38 source scanner. Install this only after the UI/editor bridge and palette one-shot are
-         * armed, so a queued command can never race their initialization. There is no aggregate alias,
-         * per-identity AddFromText call, raw object cache, lookup detour, watcher, retry, or hot reload.
-         * See decl_server.c. */
+        /* Queue immutable new-declaration registration on the engine main thread.
+         * The interface and palette callbacks must be ready before its command runs. */
         if (overrides_installed)
             sh_decl_server_install(results, db, g_doom_base, cmdsys);
         else
             backend_log("decl-server REFUSED: pinned resource-provider ABI was not installed");
 
-        /* wire the entity/spawn handler deps (gameMgr global decoded via GameMgrLea,
-         * cmdSystem reused from the sh_resolve_cmdsys decode above, SpawnByEntityDef from the sig DB).
-         * The handlers themselves are already registered by the sh_commands CMD_TABLE; this only caches
-         * their engine deps. AFTER sh_commands_install. See entity.c. */
+        /* Bind dependencies for the already-registered entity commands. */
         sh_entity_install(results, db, g_doom_base, cmdsys);
 
-        /* wire the type-introspection handler deps (FindTypeInfoByName / FindEnumByName from
-         * the sig DB; the declMgr accessor is the hardcoded RVA 0x17F7030 off g_doom_base, NOT sig-able --
-         * resolved internally by sh_typeinfo_install, then vtable+0x80). The cs_fieldinfo/sh_type handlers
-         * are already registered by the sh_commands CMD_TABLE; this only caches their engine deps. AFTER
-         * sh_entity_install. See typeinfo.c. */
+        /* Bind reflection functions and the signed decl-manager accessor call site. */
         sh_typeinfo_install(results, db, g_doom_base);
 
-        /* megapreview: the Assets-tab preview PRODUCER. Reads <game>\virtualtextures off disk and
-         * decodes a named material's megatexture pages by calling DOOM's own page decoder
-         * (FUN_14196E140) in-process -- a pure function, so no renderer, no GPU and no map
-         * residency, which is what lets this cover the whole catalog instead of only what the
-         * loaded map happens to render. The decoder comes from the signature DB (Mega2PageDecode),
-         * so an unrecognised build degrades to "no previews" rather than a call into the wrong
-         * code. Hooks nothing. See megapreview.c for the format and decoder details. */
+        /* Decode virtual-texture previews from installed files through the signed
+         * engine page decoder; no renderer or GPU calls are needed. */
         sh_megapreview_install(results, db, g_doom_base);
-        /* imgpreview: plain materials and direct images decoded from the shipped
-         * .index/.resources containers (BC1/BC3/BC7), plus demand-loaded asset catalogs. Reads
-         * files only; no engine call, no hook. The preview worker calls it when the atlas route
-         * declines. */
+        /* Load installed-resource indexes for file-based image previews and catalogs. */
         sh_imgpreview_install();
-        /* prefabpreview: a bounded worker layered over imgpreview's lazy installed-resource index.
-         * It decodes only positions/normals/indices for the selected prefab and never calls the game
-         * renderer or ships/persists resource bytes. Missing/unsupported models remain UI proxies. */
+        /* Start bounded prefab geometry previews using the installed-resource index. */
         sh_prefabpreview_install();
-        /* soundpreview: the same browser's AUDIO half. Calls the editor's own audition path
-         * (sound-world vtbl +0x30) and keeps the emitter handle it returns, so a preview can be
-         * stopped and a second click replaces the first instead of stacking on it -- the two things
-         * the `testSound` console command cannot do. Needs cmdsys for the s_soloSound /
-         * s_forceListener / s_playSoundInBackground cvars. Refuses to arm unless BOTH the play and
-         * the stop resolve. Hooks nothing. See soundpreview.c. */
+        /* Bind editor audio audition and stop functions together. */
         sh_soundpreview_install(results, db, g_doom_base, cmdsys);
 
-        /* snaphak_algo (cs_dontuse [18] + sh_alginfo): cache the DOOM module base so the cs_dontuse
-         * TOGGLE can resolve the 4 AlgoMatMul/AlgoInverse/AlgoPackRGBA/AlgoCurveEval sigs at FIRE and
-         * FULL-replace the engine math fns with our f64 reimpl (color-pack bit-exact). OFF BY DEFAULT --
-         * installs NOTHING here; the cs_dontuse / sh_alginfo handlers are already registered by the
-         * sh_commands CMD_TABLE. The 2nd sanctioned divergence (after the fault-shield) -- ON-state diverges
-         * from OG's x87-80-bit in the last ULPs by design.
-         * AFTER sh_typeinfo_install. See algo.c. */
+        /* Cache math-override dependencies; cs_dontuse remains off until toggled. */
         sh_algo_install(g_doom_base);
 
-        /* sh_target_any: hand GetDeclsOfType (resolved above) to the editor-decl visibility toggle so its
-         * handler can walk the idDeclSnapEditorEntity registry on demand. The handler is registered by the
-         * sh_commands CMD_TABLE. Pair-for-pair port of OG SnapHak's sh_target_any (FUN_180021EE0). */
+        /* Bind registry enumeration for the visibility-toggle command. */
         sh_target_any_install(get_decls);
 
-        /* sh_target_any wire-any (clone improvement over the original): detour the editor wire tool's two
-         * connect creators (cdbb40/cdb990) so, while sh_target_any is revealed, a target that would raise the
-         * "which input?" radial picker instead takes the tool's own clean-direct branch -- binding the wire to
-         * the target ENTITY, no picker, no node mediation. Transient-flag technique; forces no slots, frees no
-         * node (so none of the placeholder / stray-wire / "(no module)" artifacts). Off until reveal. */
+        /* Bare wire targets receive native references; real nodes retain stock wiring. */
         sh_wiring_cleandirect_install(g_doom_base);
 
-        /* SWF text-field clipboard (clone improvement -- vanilla has NO text copy/paste in the editor at
-         * all, and it is genuinely absent rather than disabled: the stock SWF text-edit key handler has no
-         * Ctrl branch, only a shift flag). Detours that handler so Ctrl+C copies the focused field's
-         * selection (whole field when nothing is selected) and Ctrl+V splices the clipboard in at the
-         * selection. Copy is pure reads; paste is the only write, and it is separately gated on its own
-         * idStr-assignment resolve -- if that misses, copy still works and paste stays dark. */
+        /* Add SWF clipboard shortcuts; paste requires its own assignment signature. */
         sh_swf_textedit_install(g_doom_base);
     }
 
-    /* FAULT-SHIELD (merged 2026-06-22): install the recover-in-place shield -- a first-in-chain VEH +
-     * the idCommonLocal::Frame recovery hook -- AFTER the decrypt-poll above, so the shield's engine
-     * sigs resolve on DECRYPTED .text. Was a separate winmm.dll proxy that DOOM's loader rejected at
-     * load; rides the backend's PROVEN XINPUT1_3 load now. The sanctioned divergence
-     * (recover-in-place vs OG's TerminateProcess). Blocks briefly on the instrumentation-coexistence wait. */
-    /* RE-ENABLED 2026-07-05 after the shield-off diagnostic PROVED the fault-shield innocent (the create-timeline AV
-     * 0xd32a39 fired identically with the shield off -> the engine's own crash dialog = the "freeze"). The real root
-     * (a reclassed node-less timeline keeping the pasted command's stale render-node +0x70) is now fixed at the source
-     * in ae_apply_one. The shield stays as the normal recover-in-place safety net. */
+    /* Arm the resident fault shield after startup resolution. */
+
     shield_install(g_doom_base, g_doom_size);
 
     return 0;
@@ -642,16 +424,13 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
         backend_set_logpath_from_module(hinst);   /* sh_backend.log under <DOOM>\snapmap-plus\logs\ */
         shield_set_logpath_from_module(hinst);     /* shield_faults.log under <DOOM>\snapmap-plus\logs\ (shield's own log) */
 #ifdef SH_DIAG
-        /* DIAGNOSTIC build only: arm the catch-all crash + environment logger FIRST, so it captures a
-         * crash ANYWHERE (incl. outside the recovery shield's DOOM-only VEH, and __fastfail/heap faults).
-         * Log-only -- never alters control flow. Writes sh_diag.log under <DOOM>\snapmap-plus\logs\. */
+        /* Diagnostic builds record faults and environment details without recovering. */
         shield_diag_install(hinst);
 #endif
         /* Don't do engine work in DllMain (loader lock). Spin the bootstrap onto its own thread. */
         HANDLE h = CreateThread(NULL, 0, bootstrap_thread, NULL, 0, NULL);
         if (h) CloseHandle(h);
-        /* Spawn the cvar-unlock on its own thread too (merged from the former standalone dinput8).
-         * It self-resolves cvarSys via its own CmdSystemLea sig scan, independent of the bootstrap. */
+        /* The independent unlock worker can run before backend resolution completes. */
         sh_cvar_unlock_start();
     }
 #ifdef SH_DIAG

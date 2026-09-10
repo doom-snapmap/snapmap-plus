@@ -1,40 +1,10 @@
-/* aas_edit.c -- see aas_edit.h. The mutable half of the AAS2 3.29 format: pull
- * a payload apart into one array per lump, append to those arrays, and put the
- * file back together.
+/* Editable AAS payload storage. Header, settings and lump records remain in
+ * their original big-endian form, preserving every untouched byte. Per-lump
+ * allocations make appends local; serialization concatenates them.
  *
- * THE ONE PROPERTY EVERYTHING ELSE HANGS OFF
- * ------------------------------------------
- * Parse-then-write with no edit in between must reproduce the input BYTE FOR
- * BYTE. The augmenter starts from a shipped payload and adds to it, so every
- * byte this module cannot reproduce is a byte of the module's own navigation
- * silently changed -- a failure that shows up as demons behaving oddly in a
- * level nobody edited, with nothing to point at. The design that buys the
- * property is refusing to decode: the header and the settings block are held as
- * opaque bytes, and each lump is held as its records EXACTLY as they came off
- * disk, big-endian, never re-encoded. An untouched lump is memcpy'd back out,
- * so there is no float that can round differently and no reserved field that
- * can be dropped. The typed accessors convert one field at a time, at the edge,
- * only where a caller actually asks.
- *
- * WHY EACH LUMP OWNS ITS OWN ALLOCATION
- * -------------------------------------
- * There is no offset table in this format: lump N starts where lump N-1 ended.
- * Appending one vertex therefore moves every later lump, so a single flat
- * buffer would have to be rebuilt on every append. Per-lump growable arrays make
- * an append local, and the writer is the only place the concatenation is ever
- * formed.
- *
- * HOW MUCH OF THE VALIDATOR THIS REPEATS
- * --------------------------------------
- * Parsing applies the STRUCTURAL half of sh_navmesh_validate_aas -- magic,
- * version, the per-lump count caps, and the lump walk landing on exactly the
- * last byte -- because those are what make the arrays' extents known, and a
- * payload we cannot walk is one we must not edit either. The cross-lump index
- * checks and the BSP walk are deliberately NOT repeated here: a model in
- * mid-edit cannot satisfy them (an area exists for a beat before the nodes that
- * find it do), and repeating them would fork the rule. The bytes this writer
- * produces go through sh_navmesh_validate_aas before they reach the engine,
- * which is the gate that has always decided what the engine is allowed to see.
+ * Parsing checks the file layout and count relationships. Cross-lump indices
+ * and BSP integrity belong to sh_navmesh_validate_aas, which must validate
+ * serialized output before the engine receives it.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -45,11 +15,9 @@
 #include "aas_edit.h"
 #include "navmesh.h"
 
-/* The 22 lumps in on-disk order, with the record size each one uses. This
- * mirrors NAV_LUMPS in navmesh.c rather than sharing it: that table is private
- * to the validator's translation unit, and this module has to link without it.
- * The two must agree exactly, so both tests pin the same numbers. Order and
- * sizes ARE the file format; nothing here is negotiable. */
+/* Lump order and record sizes mirror NAV_LUMPS in navmesh.c. These tables
+ * must agree; both modules are independently linked by tests.
+ */
 typedef struct aas_lump_def { const char *name; unsigned record; } aas_lump_def;
 
 static const aas_lump_def AAS_LUMPS[SH_AAS_L__COUNT] = {
@@ -77,26 +45,13 @@ static const aas_lump_def AAS_LUMPS[SH_AAS_L__COUNT] = {
     { "areaBounds",              12 }
 };
 
-/* ---- the settings block ------------------------------------------------
+/* Settings: u32 type, three length-prefixed strings, then 39 big-endian
+ * words. Shipped strings each occupy 64 bytes: 4 + 3*(4+64) + 39*4 = 364.
+ * Words 0..5 hold agent mins/maxs; word 12 is maxStepHeight.
  *
- * idAAS2Settings' binary form is, in order: a u32 type, three length-prefixed
- * strings (fileExtensionAAS, groupName, explicitGroupName), then 39 big-endian
- * 32-bit words. The length prefix is 64 in every shipped file, which is exactly
- * what makes the block 4 + 3 * (4 + 64) + 39 * 4 == 364 bytes -- the
- * SH_AAS_SETTINGS_BYTES navmesh.c walks past without looking inside.
- *
- * Words 0..5 are the agent bounding box (mins xyz, then maxs xyz) and word 12
- * is maxStepHeight. Those positions come from this project's own study of the
- * settings block (the reference codec's SETTINGS_WORDS table), where every word
- * up to and including maxStepHeight is confirmed by a shipped TEXT AAS carrying
- * the same value at the same relative position -- the binary and text writers
- * emit the same fields in the same order, so the text form is a readable
- * cross-check on the binary one.
- *
- * The word base is DERIVED from the three length prefixes rather than assumed,
- * so a file that sizes its strings differently still reads correctly; only a
- * block whose prefixes do not leave room for exactly the 39 words falls back to
- * the shipped 208. */
+ * The word base is derived from the string lengths. If they leave an invalid
+ * word span, the reader uses the shipped offset, 208.
+ */
 #define AAS_SET_WORDS_OFF   208u
 #define AAS_SET_WORD_COUNT  39u
 #define AAS_SET_W_BBOX      0u      /* words 0..2 mins, 3..5 maxs */
@@ -125,9 +80,7 @@ static void aas_verr(char *err, size_t cap, const char *fmt, ...)
 
 static int aas_lump_ok(int lump) { return lump >= 0 && lump < SH_AAS_L__COUNT; }
 
-/* Areas are indexed by a u16 in the areaBounds pairing, in every reachability
- * and in every BSP leaf, so their cap is tighter than the belt-and-braces one
- * every other lump gets. */
+/* Area indices are u16 in areaBounds, reachabilities and BSP leaves. */
 static unsigned aas_lump_cap(int lump)
 {
     return (lump == SH_AAS_L_AREAS) ? (unsigned)SH_AAS_MAX_AREAS
@@ -250,9 +203,7 @@ sh_aas *sh_aas_parse(const unsigned char *bytes, size_t len, char *err, size_t e
         return NULL;
     }
 
-    /* The lump walk, and it is the same one the validator does: 22 counts,
-     * fixed record sizes, landing on exactly the last byte. Everything after
-     * this point indexes an array whose extent is now known. */
+    /* Walk all 22 count-prefixed lumps and require an exact end-of-file match. */
     for (i = 0; i < SH_AAS_L__COUNT; i++) {
         uint64_t bytes_needed;
         if (len - off < 4) {
@@ -280,9 +231,7 @@ sh_aas *sh_aas_parse(const unsigned char *bytes, size_t len, char *err, size_t e
         return NULL;
     }
 
-    /* The three count relationships the validator also enforces at file scope.
-     * They cost nothing here and refusing them at the door means the augmenter
-     * never starts from a file it could not have written itself. */
+    /* Enforce the validator's file-level count relationships before allocating. */
     if (counts[SH_AAS_L_AREAS] > SH_AAS_MAX_AREAS) {
         aas_verr(err, err_cap, "%u areas, over the %u a u16 index can reach",
                  counts[SH_AAS_L_AREAS], (unsigned)SH_AAS_MAX_AREAS);
@@ -307,8 +256,7 @@ sh_aas *sh_aas_parse(const unsigned char *bytes, size_t len, char *err, size_t e
     memcpy(a->header, bytes, SH_AAS_HEADER_BYTES);
     memcpy(a->settings, bytes + SH_AAS_HEADER_BYTES, SH_AAS_SETTINGS_BYTES);
 
-    /* Capacity starts AT the parsed count -- an untouched model allocates not
-     * one byte more than the file it came from, and growth doubles from there. */
+    /* Start at the parsed count; later appends grow capacity geometrically. */
     for (i = 0; i < SH_AAS_L__COUNT; i++) {
         size_t n = (size_t)counts[i] * AAS_LUMPS[i].record;
         a->lump[i].count = counts[i];
@@ -337,9 +285,7 @@ unsigned char *sh_aas_write(const sh_aas *a, size_t *out_len)
     for (i = 0; i < SH_AAS_L__COUNT; i++)
         total += 4 + (size_t)a->lump[i].count * AAS_LUMPS[i].record;
 
-    /* The engine reads one payload out of one shard set, and that budget is
-     * what the shard reader will hand it. Refusing here rather than at bake
-     * time would be a nasty surprise, so the augmenter asks before it commits. */
+    /* Keep serialized output within the same payload limit as the shard reader. */
     if (total > SH_SMNAV_MAX_PAYLOAD) return NULL;
 
     out = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, total);
@@ -387,9 +333,7 @@ const unsigned char *sh_aas_rec_const(const sh_aas *a, int lump, unsigned i)
     return sh_aas_rec((sh_aas *)a, lump, i);
 }
 
-/* Double, from whatever the file brought, never below 16 records. A bake adds a
- * handful of records to lumps that already hold thousands, so doubling costs no
- * reallocation at all on the big lumps and a bounded few on the empty ones. */
+/* Grow geometrically, with a minimum allocation of 16 records. */
 static int aas_reserve(aas_lump *L, int lump, unsigned need)
 {
     unsigned limit = aas_lump_cap(lump);
@@ -409,6 +353,13 @@ static int aas_reserve(aas_lump *L, int lump, unsigned need)
     if (!p) return 0;
     L->bytes = p;
     L->cap = cap;
+    return 1;
+}
+
+int sh_aas_truncate(sh_aas *a, int lump, unsigned count)
+{
+    if (!a || !aas_lump_ok(lump) || count > a->lump[lump].count) return 0;
+    a->lump[lump].count = count;
     return 1;
 }
 

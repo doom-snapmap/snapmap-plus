@@ -1,21 +1,8 @@
 #!/usr/bin/env python3
-"""Make an already-published GitHub Release body match its CHANGELOG.md entry.
-
-release.yml sets the body from CHANGELOG.md when a release is cut, so this is
-only needed for releases published before that was true, or when a past entry is
-corrected after the fact. Without it, CHANGELOG.md is the source of truth only
-going forward.
-
-Maintainer tool, run by hand. Standard library plus the `gh` CLI, which a
-maintainer already has authenticated.
-
-    python3 tools/sync_release_notes.py                  # dry run: report differences
-    python3 tools/sync_release_notes.py --apply          # rewrite the bodies
-    python3 tools/sync_release_notes.py --tag v0.2.1-beta.4 --apply
-
-Every run writes the current bodies to a backup file before changing anything,
-so a bad sync can be undone with `gh release edit <tag> --notes-file <saved>`.
-"""
+"""Synchronize published release bodies with reviewed CHANGELOG.md entries.
+Requires an authenticated gh CLI. Default is a dry run; --apply writes changes
+and --tag selects one release. Save current bodies before writing so changes
+can be reversed with gh release edit --notes-file."""
 
 import argparse
 import json
@@ -32,9 +19,7 @@ def gh(*args, check=True):
 
 
 def published_tags():
-    """Tags that have a published GitHub Release. A tag alone is not a release:
-    13 of this repository's tags were never published, and they must not be
-    reported as drifted."""
+    """Return tags with published releases; tags without a release body are not drift."""
     out = gh("release", "list", "--limit", "200", "--json", "tagName").stdout
     return {r["tagName"] for r in json.loads(out)}
 

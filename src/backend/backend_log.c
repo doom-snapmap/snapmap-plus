@@ -1,4 +1,6 @@
-/* backend_log.c -- see backend_log.h. */
+/* Write timestamped backend diagnostics to the debugger sink and session log.
+
+ */
 #include "backend_log.h"
 #include "../common/log_rotate.h"
 #include <stdio.h>
@@ -13,8 +15,7 @@ void backend_set_logpath_from_module(HINSTANCE self)
     if (len == 0 || len >= MAX_PATH) { strcpy_s(g_logpath, MAX_PATH, "sh_backend.log"); return; }
     char *slash = strrchr(path, '\\');
     if (slash) *(slash + 1) = '\0'; else path[0] = '\0';
-    /* keep the DOOM install dir clean: group all logs under <DOOM>\snapmap-plus\logs\ (parent first --
-     * CreateDirectory makes one level at a time; both calls idempotent) */
+    /* Create snapmap-plus/logs beneath the game directory, one level at a time. */
     char dir[MAX_PATH];
     _snprintf_s(dir, MAX_PATH, _TRUNCATE, "%ssnapmap-plus", path);
     CreateDirectoryA(dir, NULL);
@@ -35,7 +36,7 @@ void backend_log(const char *msg)
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
         msg ? msg : "");
 
-    OutputDebugStringA(line);   /* -> in-game console + any attached debugger */
+    OutputDebugStringA(line);   /* Debugger sink; installed output hooks may also forward this text. */
 
     if (g_logpath[0]) {
         HANDLE h = CreateFileA(g_logpath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,

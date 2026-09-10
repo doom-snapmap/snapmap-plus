@@ -1,4 +1,4 @@
-/* package_conflicts.c -- see package_conflicts.h. */
+/* Report overlapping files in installed packages. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -9,11 +9,9 @@
 #include "backend_log.h"
 #include "package_conflicts.h"
 
-/* The namespaces a package can serve. A package's other contents -- its
- * package.json, its readme -- are not reachable as engine resources, so an
- * overlap there means nothing and is not scanned. Keep this in step with the
- * namespace table in overrides.c: a namespace that resolves but is not scanned
- * would collide silently, which is the whole failure this file exists to end. */
+/* Keep scanned namespaces aligned with overrides.c. Package metadata is not
+ * an engine resource and does not participate in collisions.
+ */
 static const char *const g_scanned[] = { "decls", "shaders", "resources", "requirements" };
 
 #define PC_MAX_DEPTH   8
@@ -39,10 +37,9 @@ static int pc_is_directory(const char *path)
            !(a & FILE_ATTRIBUTE_REPARSE_POINT);
 }
 
-/* Compare two files byte for byte. Sizes first, because a difference in size
- * settles it without reading either. An unreadable file is reported as
- * DIFFERING: claiming two files match when one could not be read would turn a
- * real conflict into a silent one, which is the wrong way to be wrong here. */
+/* Compare size then bytes. Treat unreadable files as differing so a failed
+ * read cannot hide a conflict.
+ */
 static int pc_same_bytes(const char *a, const char *b)
 {
     FILE *fa = NULL, *fb = NULL;
@@ -153,11 +150,9 @@ int sh_pkg_conflicts_scan(const sh_package *packages, size_t count,
         }
     }
 
-    /* Packages arrive in precedence order, so for any pair the LOWER index is
-     * the winner -- the same order the file shadow resolves in. Comparing every
-     * later claim against the first one found reports each loser once against
-     * the package that actually shadows it, rather than every pair against each
-     * other. */
+    /* Input is in precedence order. Compare each losing claim with the first
+     * winner, avoiding duplicate pairwise reports.
+     */
     n = 0;
     for (j = 0; j < scan.count && n < capacity; j++) {
         for (k = 0; k < j; k++) {
@@ -221,14 +216,7 @@ int sh_pkg_conflicts_report(const char *data_root)
                     conflicts[i].winner);
         backend_log(line);
     }
-    /* ALWAYS log the summary, including "no overlaps".
-     *
-     * Reporting only when something is wrong makes silence mean two different
-     * things -- a clean install set, or a scan that never ran -- and there is no
-     * way to tell them apart from the outside. That ambiguity cost a live test:
-     * three packages were deliberately made to claim one decl and the run printed
-     * nothing, which proved neither that the overlap was missed nor that the
-     * check had happened at all. */
+    /* Always log a summary, including zero overlaps, to confirm the scan ran. */
     _snprintf_s(line, sizeof line, _TRUNCATE,
                 "package-conflicts: %u package(s) installed, %d differing overlap(s), "
                 "%d identical overlap(s)%s",

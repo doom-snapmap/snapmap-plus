@@ -1,27 +1,6 @@
-/* navmesh.c -- see navmesh.h. The runtime half of baked navigation: read the
- * map's `smnav1.` shards, prove the payloads are walkable, and serve them under
- * the module's own resource names for exactly as long as that map is loaded.
- *
- * Everything here is bounded and defensive by construction. The input is a
- * stranger's map: it arrives over the publish service, it is reassembled from
- * author-controlled base64, and the result is handed to a native binary parser
- * inside the engine. Nothing in this file trusts a length, an index or a count
- * it has not itself checked.
- *
- * The SEH guards sit INSIDE the table lock on purpose. An __except unwind skips
- * whatever follows it, so a guard wrapped around an Acquire/Release pair would
- * leave the table locked for the rest of the session on the one path that most
- * needs the table to keep working.
- *
- * Divergences from the frozen format document, both narrowings whose outcome
- * class (refuse and log) is unchanged:
- *   - the class field is accepted as [a-z0-9_]+ rather than only the three
- *     names the baker emits today, because that character set is what makes the
- *     constructed resource name safe; a class we do not know is simply never
- *     asked for.
- *   - the module field must be lowercase [a-z0-9_/-], carry at least one '/',
- *     and have no empty segment. Every shipped module name satisfies this, and
- *     it is what stops a header from constructing a path.
+/* Read, validate and serve map-scoped smnav1 payloads. Keep SEH inside the
+ * table lock so error handling still releases it. Header paths and payload
+ * sizes are bounded before native parsing.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -36,9 +15,7 @@
 #include "config.h"
 #include "backend_log.h"
 
-/* Both are registered in config.c -- unlike `packages.embed_in_saved_maps`,
- * which shipped being read without ever being in the registry, so it always
- * answered "not set" and could not be turned off. */
+/* Persistent navigation configuration keys registered in config.c. */
 #define NAV_CONFIG_ENABLED  "navmesh.enabled"
 #define NAV_CONFIG_EMBED    "navmesh.embed_in_saved_maps"
 
@@ -61,7 +38,7 @@ typedef struct nav_set {
     unsigned present;
     int      consistent;         /* headers agree, no duplicate or out-of-range index */
     sh_shard_chunk *chunks;      /* [total], pointers INTO the map buffer; scan-time only */
-    unsigned char  *payload;     /* HeapAlloc'd: the backend CRT heap, never the map heap */
+    unsigned char  *payload;     /* process-heap buffer, never engine map-heap storage */
     size_t          payload_len;
     int      valid;              /* passed the structural gate */
     int      served;             /* ...and its module was accepted */
@@ -86,21 +63,14 @@ static nav_module g_modules[SH_SMNAV_MAX_MODULES];
 static size_t     g_module_count;
 static size_t     g_held_bytes;
 static volatile LONG g_serve_count;
-/* Every pass through the deserialize funnel bumps this, whatever it finds --
- * including when the feature is off. It is reported by `sh_navmesh` because it
- * is the only thing that makes the clear-on-every-load rule OBSERVABLE from
- * inside one session: a count that advances while the set count drops to zero
- * IS the rule working, and saying so does not cost a second map load. */
+/* Advance on every deserialize, including disabled and empty maps, to expose
+ * table reset activity in diagnostics.
+ */
 static volatile LONG g_build_count;
 static size_t     g_last_build_sets;
 static char       g_last_refusal[SH_SMNAV_REASON_CAP];
 
-/* First fault disables the feature for the whole session.
- *
- * The product's fault shield recovers in place, which is exactly wrong for a
- * per-open defect: it would turn one bug into an unbounded stream of
- * half-served opens that no forensics could attribute. One fault, one loud log,
- * feature off, engine serves its own navigation for the rest of the run. */
+/* Disable serving after the first fault to avoid repeated partial opens. */
 static volatile LONG g_faulted;
 static volatile LONG g_installed;
 
@@ -287,9 +257,7 @@ static uint16_t nav_be16(const unsigned char *p)
 
 static int32_t nav_be32s(const unsigned char *p) { return (int32_t)nav_be32(p); }
 
-/* The 22 arrays, in the exact order the engine's writer emits them, with the
- * record size each one uses. Order and sizes ARE the file format; nothing here
- * is negotiable or version-tolerant. */
+/* AAS lump order and fixed record sizes. */
 enum {
     L_PLANES = 0, L_VERTICES, L_EDGES, L_EDGEINDEX, L_REACH, L_AREAS, L_NODES,
     L_PORTALS, L_PORTALINDEX, L_CLUSTERS, L_OBSTACLEPVS, L_REACHNAMES,
@@ -342,15 +310,9 @@ static void nav_verr(char *err, size_t cap, const char *fmt, ...)
 
 #define NAV_REC(a, lump, i) ((a)->p + (a)->off[lump] + (size_t)(i) * NAV_LUMPS[lump].record)
 
-/* The BSP walk: every node reachable, no node reachable twice, no path longer
- * than the engine's own limit.
- *
- * A shipped BSP is a tree, so a node is the child of at most one other node and
- * every node hangs off some root. Enforcing both is what turns "walk the tree"
- * into a terminating operation on hostile input: a cyclic node graph is
- * precisely the crafted shape whose engine behaviour nobody has measured, and a
- * depth counter alone would never reach a cycle that sits below a shallow
- * subtree. */
+/* Require every BSP node to be reachable once from a root within the native
+ * depth limit. Reject cycles, multiple parents and unreachable nodes.
+ */
 static int nav_walk_bsp(const nav_aas *a, char *err, size_t err_cap)
 {
     enum { ST_REF = 1, ST_REFMANY = 2, ST_SEEN = 4 };
@@ -461,19 +423,17 @@ done:
     return rc;
 }
 
-/* The two per-area reachability chains the engine walks at runtime.
- *
- * Each reachability is pushed onto exactly one "from" list and one "to" list
- * when the file is built, so seeing one twice means the links were crafted --
- * and an unbounded walk is a hang, which is not a failure the engine would ever
- * report. Reachabilities that are on no list are left alone: nothing walks
- * them, so refusing them would be a rule the data does not owe us. */
+/* Validate per-area from/to chains against repeated reachabilities and
+ * unbounded walks. Unlisted records are checked separately because the engine
+ * rebuilds these lists.
+ */
 static int nav_walk_reach_chains(const nav_aas *a, char *err, size_t err_cap)
 {
     uint32_t num_reach = a->count[L_REACH];
     uint32_t num_areas = a->count[L_AREAS];
     size_t bytes = (size_t)((num_reach + 7u) / 8u);
     unsigned char *seen;
+    unsigned *degrees;
     uint32_t area;
     int list, rc = 0;
 
@@ -484,15 +444,40 @@ static int nav_walk_reach_chains(const nav_aas *a, char *err, size_t err_cap)
         nav_verr(err, err_cap, "out of memory validating the reachability lists");
         return 0;
     }
+    degrees = (unsigned *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                    (size_t)num_areas * sizeof *degrees);
+    if (!degrees) {
+        nav_verr(err, err_cap, "out of memory validating outgoing reachabilities");
+        goto done;
+    }
+    /* Load rebuilds these lists from the records. An omitted list head must
+     * not hide an overflow from this gate. Cross-indices were checked above. */
+    for (area = 0; area < num_reach; area++) {
+        unsigned from = nav_be16(NAV_REC(a, L_REACH, area) + 6);
+        if (++degrees[from] > SH_AAS_MAX_AREA_REACHABILITIES) {
+            nav_verr(err, err_cap, "area %u has more than %u outgoing reachabilities",
+                     from, SH_AAS_MAX_AREA_REACHABILITIES);
+            HeapFree(GetProcessHeap(), 0, degrees);
+            goto done;
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, degrees);
 
     for (list = 0; list < 2; list++) {
         unsigned char *bits = seen + (size_t)list * bytes;
         size_t head_off = (list == 0) ? 0x14 : 0x18;
         size_t link_off = (list == 0) ? 0x20 : 0x24;
         for (area = 0; area < num_areas; area++) {
+            unsigned degree = 0;
             int32_t at = nav_be32s(NAV_REC(a, L_AREAS, area) + head_off);
             while (at != -1) {
                 uint32_t idx;
+                if (list == 0 && ++degree > SH_AAS_MAX_AREA_REACHABILITIES) {
+                    nav_verr(err, err_cap,
+                             "area %u has more than %u outgoing reachabilities",
+                             area, SH_AAS_MAX_AREA_REACHABILITIES);
+                    goto done;
+                }
                 if (at < 0 || (uint32_t)at >= num_reach) {
                     nav_verr(err, err_cap,
                              "area %u reachability list %d leaves the array at %d of %u",
@@ -549,9 +534,7 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_
     a.p = p;
     a.len = len;
 
-    /* The lump walk. This one rule -- 22 counts, fixed record sizes, landing on
-     * exactly the last byte -- kills the whole truncation and overrun class,
-     * because every check after it indexes an array whose extent is now known. */
+    /* Require 22 bounded count-prefixed lumps ending exactly at EOF. */
     for (i = 0; i < SH_AAS_LUMPS; i++) {
         uint64_t bytes;
         if (len - off < 4) {
@@ -679,15 +662,10 @@ int sh_navmesh_validate_aas(const unsigned char *p, size_t len, char *err, size_
 /* the map's own module placements                                       */
 /* ==================================================================== */
 
-/* How many times does this map place `module`?
- *
- * The shadow is keyed by resource name, so two instances of one module cannot
- * be served different navigation. The bake refuses to produce such a payload,
- * and this re-checks it on load rather than trusting the carrier. An instance
- * is a `"moduleName": "maps/modules/<category>/<module>.decl"` member of the
- * map's instance list. A spelling we do not recognise reads as zero, which
- * serves rather than refuses: the engine simply never asks for a module the map
- * does not place, so a string compare is not allowed to reject a map. */
+/* Count module placements for legacy shared-name payloads. Repeated instances
+ * cannot receive distinct bytes through this format. Unknown spellings count
+ * as zero; the engine will not request an unplaced module.
+ */
 static unsigned nav_count_instances(const char *json, size_t len, const char *module)
 {
     char want[SH_SMNAV_RESNAME_CAP];
@@ -760,19 +738,10 @@ static const char *nav_leaf(const char *module)
     return slash ? slash + 1 : module;
 }
 
-/* The two names one baked class answers to.
- *
- * The cooked name prefixes 'b' to the WHOLE extension -- `.b` + `aas_monster48`
- * = `.baas_monster48` -- not to the class. That is what the game's own archive
- * index spells, and getting it wrong is invisible rather than loud: the engine
- * asks for the COOKED name first, so a wrong cooked name simply misses, the
- * shipped payload answers, and the source name is never requested at all. The
- * table then reports six names happily served while nothing has been served,
- * and the map plays on its shipped navigation. Both spellings are pinned by
- * literal-string assertions in navmesh_test.c for exactly that reason.
- *
- * A truncated name would fail the same silent way, so a truncation refuses the
- * set rather than leaving it looking served. */
+/* Serve source .aas_<class> and cooked .baas_<class> aliases. The engine
+ * tries cooked first, so a wrong or truncated alias silently falls back to
+ * stock data; reject truncated names.
+ */
 static int nav_build_names(nav_set *s)
 {
     const char *leaf = nav_leaf(s->module);
@@ -973,9 +942,7 @@ static void nav_accept(const char *json, size_t len)
 static void nav_build_locked(const char *json, size_t len)
 {
     __try {
-        /* The cheap reject. Almost no map carries a bake, and one that does not
-         * pays a single substring sweep -- but it must still get this far,
-         * because clearing the table is the whole reason this runs every load. */
+        /* Reset state even for shard-free maps; scanning then uses a cheap reject. */
         if (json && len && sh_shard_find(json, len, SH_SMNAV_MAGIC, SH_SMNAV_MAGIC_LEN)) {
             nav_collect(json, len);
             nav_reassemble();
@@ -1014,7 +981,7 @@ void sh_navmesh_build_from_map(const char *json, size_t len)
     g_last_build_sets = sets;
     ReleaseSRWLockExclusive(&g_nav_lock);
 
-    if (sets == 0) return;   /* silence is correct for the common map */
+    if (sets == 0) return;   /* No detailed report for a map without navigation shards. */
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
                 "NAV: this map carries %zu baked module/class set(s); serving %zu of them for "
@@ -1061,9 +1028,7 @@ char *sh_navmesh_strip(const char *json, size_t len, size_t *out_len)
 {
     if (out_len) *out_len = 0;
     if (!json || len == 0) return NULL;
-    /* Disabled means the shards stay where an older client leaves them: inert
-     * map variables, which is exactly how a map baked by a newer release
-     * behaves on a client that does not know about it. */
+    /* When disabled, retain shards as map variables instead of stripping them. */
     if (!sh_navmesh_enabled()) return NULL;
     return nav_strip_inner(json, len, out_len);
 }
@@ -1238,10 +1203,9 @@ static int nav_open_locked(const char *name, unsigned char **out_bytes, size_t *
             if (nav_name_eq(name, s->res_name)) *which = "module";
             else if (nav_name_eq(name, s->cook_name)) *which = "cooked";
             else continue;
-            /* A COPY, always. The table is rebuilt on the next map load and
-             * this buffer may still be being read by the engine; aliasing table
-             * memory into a stream is a use-after-free waiting for a fast
-             * loader. */
+            /* Return a copy: a later map load can rebuild the table while the
+             * engine still owns the stream.
+             */
             copy = (unsigned char *)HeapAlloc(GetProcessHeap(), 0,
                                               s->payload_len ? s->payload_len : 1);
             if (!copy) break;
@@ -1296,10 +1260,7 @@ void sh_navmesh_report(void (*out)(const char *fmt, ...))
     size_t i;
     if (!out) return;
 
-    /* The map-load line goes first and is printed unconditionally: "did the
-     * map load actually reach this code, and what did it find" is a different
-     * question from "what is in the table now", and it is the one a session
-     * that can only load a single map is still able to answer. */
+    /* Always report the last map-load scan before current serving state. */
     out("navigation: %lu map load(s) seen this session; the last found %zu baked set(s).\n",
         (unsigned long)InterlockedCompareExchange(&g_build_count, 0, 0), g_last_build_sets);
 

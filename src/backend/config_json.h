@@ -1,9 +1,6 @@
-/* config_json.h -- bounded JSON validation + raw-value object model for config.json.
- *
- * This is intentionally small and purpose-built. It validates complete JSON values, decodes object
- * keys, rejects duplicate keys at every nesting level, and preserves member values as validated raw
- * JSON fragments. The config service can therefore update registered settings without losing unknown
- * future values or normalizing engine-sensitive number spellings.
+/* Validate bounded JSON values and retain object members as raw fragments.
+ * Decode keys and reject duplicates at every nesting level. This lets
+ * settings updates preserve unknown values and original number spellings.
  */
 #ifndef SH_CONFIG_JSON_H
 #define SH_CONFIG_JSON_H

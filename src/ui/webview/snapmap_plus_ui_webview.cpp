@@ -1,22 +1,7 @@
-/* snapmap_plus_ui_webview.cpp -- the frontend: snapmap-plus-ui.dll hosts the "Snapmap+" UI as HTML in a
- * Microsoft Edge WebView2 control.
- *
- * Exports sh_ui_init (ord 10; the OG's counterpart was snaphak_ui_init), writes the loop-state to
- * arg-block[0], caches the backend interface (arg-block[3]) and drains its work-queue (+0x1a0) at
- * ~30 Hz on this thread, keeps the 9 sl_* exports (../sl_exports.cpp). Zero DOOM/OG bytes.
- *
- * ITERATION 4 -- deeper Entities tab.
- *   - multi-select (JS), context menu: Copy ID (clipboard), Delete (+0x130 selection_guard),
- *     Push to stack 0 (+0x2A0 push_to_stack -- pushes onto the backend-owned SnapStack stack; see
- *     src/backend/snapstack.c for the `sh <subcommand>` console ops that then consume it).
- *   - auto-refresh: a cheap content signature over the walk; the list is re-emitted only when it
- *     changes (add/delete/rename/reclass/hide), so no needless re-renders.
- *   - synchronize with editor: when the checkbox is on, poll get_selection (+0x150); a single changed
- *     editor selection re-points the panel.
- *   - state auto-refresh: the displayed entity's state is re-read on a signature and pushed as
- *     {auto:true}; the HTML applies it only when the edit panel is clean (never clobbers unsaved edits).
- *   - save is deferred + applied under the loop mutex; delete likewise.
- */
+/* WebView2 frontend host. sh_ui_init (ordinal 10) receives loop state in arg[0]
+ * and the backend interface in arg[3]. A single STA thread handles the page,
+ * drains UI requests at about 30 Hz, and polls change-gated editor state.
+ * Engine mutations use backend interface slots; see docs/architecture.md. */
 #include <windows.h>
 #include <dwmapi.h>
 #include <shlobj.h>
@@ -43,10 +28,10 @@
 #include "report_scrub.h"   /* pure anonymization scrub + tail for the crash-report log attachment */
 #include "log_rotate.h"     /* the UI log is append-only too; bound it like the backend's */
 #include "host_image.h"     /* sh_host_renderer_name -- which renderer the player is actually running */
-#include "../sh_entity_desc.h" /* GENERATED: OUR RE-extracted Inherit/Classname descriptions (same table sh_tabs.cpp uses) */
-#include "../sh_event_catalog.h" /* GENERATED: OUR event-def catalog, 1611 events (same table sh_timeline.cpp uses) */
-#include "../sh_entity_asset_lists.h" /* GENERATED: OUR per-entity-class model/anim asset lists (same table sh_timeline.cpp uses) */
-#include "../sh_event_docs.h" /* GENERATED: OUR author-facing event/arg descriptions, 1611 events (same table sh_timeline.cpp's EXPLAIN box uses) */
+#include "../sh_entity_desc.h"/* generated entity descriptions */
+#include "../sh_event_catalog.h"/* generated event names and argument types */
+#include "../sh_entity_asset_lists.h"/* generated per-class model and animation choices */
+#include "../sh_event_docs.h"/* generated event and argument descriptions */
 
 using namespace Microsoft::WRL;
 
@@ -76,10 +61,8 @@ static uint64_t      g_last_list_sig  = 0;
 static uint64_t      g_last_state_sig = 0;
 static uint64_t      g_last_sel_sig   = 0;       /* forward-sync: last editor-selection signature */
 
-/* Entity declarations produced by large generated Timelines routinely exceed the old 64 KiB scratch
- * buffer. Keep one reusable buffer and grow it on demand; the periodic state poll then pays no repeated
- * allocation cost. The 32 MiB ceiling is a UI safety boundary, not a silent clipping point -- hitting it
- * is reported to the page and the partial declaration is never made editable. */
+/* Retain a growing read buffer for large declarations. At the 32 MiB cap,
+ * report truncation instead of exposing partial JSON as editable text. */
 #define POC_DECL_INITIAL_CAP (64u * 1024u)
 #define POC_DECL_MAX_CAP     (32u * 1024u * 1024u)
 static std::vector<char> g_state_decl;
@@ -120,25 +103,19 @@ static int           g_rename_result = 0;        /* 1 ok; 0 MoveFile failed (des
 
 static volatile bool g_pending_load_prefab = false;
 static std::string   g_load_prefab_name, g_load_prefab_folder;
-/* Assets browser "New entity": the page authors a one-entity prefab and we stage it through the
- * SAME path Load/Place uses. No temp file -- apply_edit takes the JSON text, and the file in the
- * Load/Place case is only where that text happens to come from. */
+/* New-entity requests supply prefab JSON directly to the Load/Place apply path. */
 static volatile bool g_pending_new_entity = false;
 static std::string   g_new_entity_json, g_new_entity_label;
-/* The rawmap file picker, run off the UI thread (see the block above poc_pick_rawmap_file for why).
- * `busy` keeps a second dialog from opening behind the first; `done` is the handoff -- the worker
- * fills `path`/`kind` and then sets `done` last, and the think loop reads them only after seeing it,
- * so the interlocked write is the barrier and no lock is needed. The worker never touches them
- * again afterwards. */
+/* The rawmap file picker, run off the UI thread. `busy` keeps a second dialog from
+ * opening behind the first; `done` is the handoff, written last, so the interlocked
+ * write is the barrier and no lock is needed. */
 static volatile LONG g_pick_busy = 0;
 static volatile LONG g_pick_done = 0;
 static int           g_pick_kind = 0;        /* 0 = Load Rawmap, 1 = Save Rawmap As */
 static bool          g_pick_ok   = false;    /* false = cancelled */
 static std::wstring  g_pick_path;
-/* Sound auditioning. Empty name = stop. Deferred like every other engine-touching command: the
- * backend drives live audio state and must be entered from the DOOM main thread, not the WebView
- * one. Only the LATEST request survives to the drain -- clicking down a list faster than frames go
- * by should audition what you landed on, not queue up everything you passed over. */
+/* Keep the latest sound request until the drain; an empty name stops playback.
+ * The backend marshals live audio changes to the engine thread. */
 static volatile bool g_pending_sound_preview = false;
 static std::string   g_sound_preview_name;
 static int           g_sound_preview_result = 0;
@@ -147,10 +124,8 @@ static int           g_sound_preview_result = 0;
 static volatile bool g_pending_sound_session = false;
 static volatile int  g_sound_session_on = 0;
 static int           g_new_entity_result = -1;
-static int           g_load_result = 0;          /* 1 staged ok (now press Ctrl+V in the 3D view to place it);
-                                                   * 0/-1 resolve/read/schedule failure (see log). Deliberately
-                                                   * stage-only -- see backend-changes.md for why we don't try to
-                                                   * automate the paste keystroke ourselves. */
+static int           g_load_result = 0;          /* 1 queued for stage/place; 0/-1 = resolve, read, or queue failure.
+                                                   * Queue acceptance does not confirm placement. */
 
 /* Folders: one real level of subdirectories under %LOCALAPPDATA%\snapmap-plus\prefabs\ (no nested-within-nested).
  * folder="" always means the root prefabs\ dir. The folder/file IS the truth -- no separate manifest. */
@@ -171,24 +146,18 @@ static volatile bool g_pending_move_prefab = false;
 static std::string   g_move_prefab_name, g_move_prefab_from, g_move_prefab_to;
 static int           g_move_prefab_result = 0;      /* 1 ok; 0 MoveFile failed (dest name collision); -1 resolve failed */
 
-/* Timelines Stage 2: OPEN a timeline -> serialize the entity (+0xc8) and ship its raw JSON to the page, which
- * JSON.parses it and walks entityDef.state.edit.componentTimeLine/encounterComponent. Serialize is an
- * engine touch -> done in the think-loop drain under the loop
- * mutex, like the prefab ops. */
+/* Defer timeline serialization to the UI drain, then send its JSON to the page. */
 static volatile bool g_pending_open_timeline = false;
 static int           g_open_timeline_eid = -1;
 static int           g_tl_json_len = 0;             /* bytes serialized into g_tl_json this drain (0 = failed) */
 
-/* Timelines Stage 3: resolve one entity's class (for the asset dropdowns) -- same deferred-to-drain shape as
- * opening a timeline, but a separate eid/len pair (see poc_serialize_entity_into's buffer-separation note). */
+/* Resolve event-target inheritance separately so it cannot overwrite an open timeline. */
 static volatile bool g_pending_resolve_entity = false;
 static int           g_resolve_entity_eid = -1;
 static int           g_resolve_json_len = 0;
 
-/* Timelines Stage 5 (Save): the page ships the FULL patched entity JSON (fresh-reserialized by the page
- * itself via a plain openTimeline round-trip, then patched client-side -- see mockup.html's doSaveTimeline)
- * -- committed via apply_edit kind=0 (the SAME "deserialize patched_text -> commit" path the prefab
- * kind=1/mkcmd flow already uses in this file, just id-targeted instead of paste-targeted). */
+/* Save the complete entity JSON after the page refreshes and patches its timeline.
+ * kind=0 targets an entity; kind=1/2 are prefab staging operations. */
 static volatile bool g_pending_save_timeline = false;
 static int           g_save_timeline_eid = -1;
 static std::string   g_save_timeline_json;          /* UTF-8; the page's JSON.stringify output, already fully patched */
@@ -200,9 +169,7 @@ static int           g_save_timeline_result = 0;     /* 1 ok, 0 apply_edit refus
 struct PocEnt { int eid; char id[POC_ID_CAP]; char name[POC_NAME_CAP]; int hidden; };
 static PocEnt *g_ents = nullptr;
 
-/* Timelines list: dual-added from the entity walk (OG quirk, sh_tabs.cpp populate_one_entity). Filled by
- * poc_rescan_timelines, which runs ONLY when the cheap entities signature changed (same cadence as the OG's
- * sh_rebuild_entity_list) -- never a fixed timer, and never touches classname on every poll. */
+/* Rebuild the Timeline and Encounter Manager list when the entity signature changes. */
 #define POC_MAX_TLS 2048
 struct PocTl { int eid; char id[POC_ID_CAP]; char name[POC_NAME_CAP]; };
 static PocTl *g_tls = nullptr;
@@ -219,10 +186,8 @@ struct PocCollectPerf {
 };
 static PocCollectPerf g_collect_perf = {};
 
-/* ------------------------------------------------------------------ tiny file log ------------------ */
-/* The name is the UI's, not the module's internal one: this file sits in a folder
- * the player can open, next to the backend's log, and "webview_poc" told them
- * nothing except that someone's proof of concept was still running. */
+/* File logging. */
+/* Keep the log name recognizable beside the backend log. */
 static const char *kUiLogPath = "snapmap-plus\\logs\\snapmap-plus-ui.log";
 
 static void poc_log(const char *msg)
@@ -234,9 +199,7 @@ static void poc_log(const char *msg)
     if (!rolled) {
         rolled = true;
         log_rotate_if_large(kUiLogPath, LOG_ROTATE_CAP_BYTES);
-        /* Sweep up the file this log used to be called. Without this the rename
-         * leaves the old one sitting next to the new one forever -- same folder,
-         * two names, and the dead one is the confusing one. */
+        /* Remove the obsolete log filename after the rename. */
         DeleteFileA("snapmap-plus\\logs\\webview_poc.log");
     }
     if (fopen_s(&f, kUiLogPath, "a") == 0 && f) {
@@ -332,13 +295,13 @@ static void poc_perf_note_poll(unsigned long long total_us, unsigned long long c
     if (g_collect_perf.calls >= 90) poc_perf_flush_collect("30-second-window");
 }
 
-/* ------------------------------------------------------------------ hashing (change signatures) ---- */
+/* Change signatures. */
 static uint64_t hstr(uint64_t h, const char *s) { while (*s) { h = (h ^ (unsigned char)*s) * 1099511628211ull; s++; } return h; }
 static uint64_t hint(uint64_t h, int v) { for (int i = 0; i < 4; i++) { h = (h ^ (unsigned char)(v & 0xff)) * 1099511628211ull; v >>= 8; } return h; }
 
-/* ------------------------------------------------------------------ string / JSON helpers ---------- */
-/* Plain UTF-8 -> wide, NO escaping. For text that is ALREADY JSON and must be forwarded verbatim --
- * poc_json_w below would escape its quotes and braces into a useless string literal. */
+/* String and JSON helpers. */
+/* Plain UTF-8 -> wide, NO escaping. For text that is already JSON and must be
+ * forwarded verbatim; poc_json_w would escape it into a useless string literal. */
 static std::wstring poc_widen(const char *utf8)
 {
     std::wstring w;
@@ -385,11 +348,8 @@ static std::string w_to_utf8(const std::wstring &w)
     WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], n, nullptr, nullptr);
     return s;
 }
-/* Path-safety gate (contributor-reported): resolve_prefab_path (+0xc0, backend) is a plain string concat
- * with no rejection of its own -- a name containing ".." or a path separator would resolve outside the
- * prefabs\ tree before ever reaching fopen/DeleteFileA/MoveFileA/CreateDirectoryA/RemoveDirectoryA. Only
- * the JS side guarded this before. Applied to every raw prefab/folder name component the UI supplies,
- * BEFORE it is concatenated into a prefix/filename and handed to resolve_prefab_path. */
+/* Validate each name component before resolve_prefab_path concatenates it.
+ * Reject separators and traversal here as well as in the page. */
 static bool poc_valid_name(const std::string &n)
 {
     if (n.empty() || n.size() > 200) return false;
@@ -475,19 +435,9 @@ static bool json_get_double(const std::wstring &j, const wchar_t *key, double *o
     return true;
 }
 
-/* ---- pinned assets ---------------------------------------------------------------------------
- * The mapper's own shortlist, kept in %LOCALAPPDATA%\snapmap-plus\pinned.json -- deliberately its
- * OWN file rather than a key in the settings config.
- *
- * The settings file is all-or-nothing: a parse failure or a schema mismatch sends the whole document
- * to "damaged -> restored defaults". Settings are a handful of validated scalars and can afford that;
- * pins are unbounded data the user grows themselves, and a malformed pin list has no business being
- * able to reset somebody's theme and Show Hidden along with it. Keeping them apart means the worst a
- * broken pins file can do is cost the pins. It also sits next to rawmap.json, which is already that
- * folder's convention for user data, and stays hand-editable and easy to back up or share.
- *
- * The host does no parsing -- it moves the bytes and nothing else. Shape and validation belong to the
- * UI, which is the only side that knows what a pin means. A missing file is simply "no pins yet". */
+/* Keep the user's asset pins in pinned.json, separate from validated settings.
+ * A damaged pin list must not reset unrelated preferences. The host transports
+ * opaque bytes; the page owns parsing, validation, and the empty-list fallback. */
 static std::string poc_pins_path()
 {
     char *la = nullptr; size_t n = 0;
@@ -510,18 +460,14 @@ static void poc_send_pins()
             fclose(f);
         }
     }
-    /* Sent as an escaped STRING, not spliced in as raw JSON: a hand-edited file that is not valid
-     * JSON must not be able to corrupt the message envelope itself. The UI parses it in a try/catch
-     * and falls back to an empty list. */
+    /* Escape file contents as a string so malformed JSON cannot break the envelope. */
     std::wstring m = L"{\"kind\":\"pins\",\"doc\":\"";
     m += poc_json_w(data.c_str());
     m += L"\"}";
     if (g_webview) g_webview->PostWebMessageAsJson(m.c_str());
 }
 
-/* Write-through: the UI owns the list and hands over the whole document each time it changes. Small
- * enough that rewriting it beats maintaining a diff, and it keeps the host free of pin semantics.
- * Written to a temp file and moved into place, so an interrupted write cannot truncate the real one. */
+/* Replace the full pin document via a temporary file and atomic move. */
 static void poc_save_pins(const std::string &doc)
 {
     std::string path = poc_pins_path();
@@ -556,7 +502,7 @@ static void poc_read_version()
     g_version = data.substr(k, e - k);
 }
 
-/* ------------------------------------------------------------------ guarded engine reads/writes ---- */
+/* Guarded engine access. */
 static int poc_editor_ready()
 {
     int r = 0;
@@ -605,15 +551,9 @@ static int poc_collect_timed(int *out_ready, const char *reason,
     poc_perf_note_collect(elapsed, n, reason);
     return n;
 }
-/* Rescan g_ents[0..n) for Timelines and refill g_tls/g_tl_count. Called ONLY when the cheap entities-list
- * signature just changed (mirrors the OG sh_rebuild_entity_list cadence -- NOT a fixed timer). Reads the
- * classname of EVERY entity, exactly like the OG populate_one_entity (sh_tabs.cpp), and dual-adds any
- * idTarget_Timeline / idEncounterManager into the Timelines list (the OG quirk -- both classes, so encounter
- * managers show too). The classname read was live-debug-proven a clean pure-memory pointer walk
- * (ent->+0x158->+0x60), so it's cheap + safe; the per-call SEH guard keeps one bad entity from aborting the
- * rescan. (An earlier version pre-filtered on the id-string containing "unknown"/"placeholder_target" to save
- * calls, but that skipped idEncounterManager -- whose inherit is neither -- so it's dropped in favor of the
- * faithful "read every entity's class" behavior.) */
+/* Rebuild timeline entries only when the entity signature changes. Check every
+ * visible entity's class so Encounter Managers are included alongside Timelines.
+ * Guard each class read so one bad entity cannot abort the rescan. */
 static void poc_rescan_timelines(int n)
 {
     int tn = 0;
@@ -629,15 +569,9 @@ static void poc_rescan_timelines(int n)
             poc_logf("poc_rescan_timelines: get_classname_copy FAULTED for id=%lu (skipped)", (unsigned long)g_ents[i].eid);
         }
         if (c && (strcmp(c, "idTarget_Timeline") == 0 || strcmp(c, "idEncounterManager") == 0)) {
-            /* PORTABLE-INHERIT NORMALIZE (2026-07-13): a Timeline placed from the in-game palette is
-             * spawned from a repurposed placeholder entityDef, so it records that as its `inherit` -- a
-             * saved map would then only reload where our override is installed. The rewrite lives in the
-             * shared backend slot +0x298. Cheap on a non-match (a raw defsub-inherit read,
-             * no serialize/no alloc) and idempotent, so it's safe to call unconditionally on every
-             * Timeline-classed id every rescan -- only idTarget_Timeline can carry the placeholder
-             * (idEncounterManager's inherit is unrelated). The displayed Inherit
-             * box (if this entity is open in the Entity-State panel) self-corrects via the regular auto
-             * state poll -- see the per-field dirty exception in mockup.html's 'state' handler. */
+            /* Replace the palette placeholder inherit with the portable Timeline inherit.
+             * The backend slot is idempotent and cheap on nonmatches; the state poll
+             * refreshes an open panel after this normalization. */
             if (strcmp(c, "idTarget_Timeline") == 0 && g_iface->vtbl->normalize_timeline_inherit) {
                 __try { g_iface->vtbl->normalize_timeline_inherit(g_iface, g_ents[i].eid); }
                 __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -743,10 +677,7 @@ static void poc_apply_save()
             if (g_iface->vtbl->set_classname) g_iface->vtbl->set_classname(g_iface, id, g_save_class.c_str());
             if (g_iface->vtbl->set_inherit)   g_iface->vtbl->set_inherit(g_iface, id, g_save_inherit.c_str());
         }
-        /* BUGFIX (contributor-reported): displayname used to be written HERE, unconditionally -- so a REJECTED
-         * class+inherit pair (r==0) still silently landed the displayname, a partial apply on a "failed" save.
-         * Moved inside the r!=0 branch below so a refusal is fully atomic: nothing lands until the pair is
-         * accepted. */
+        /* Apply the display name only after the class/inherit pair is accepted. */
         if (r != 0) {
             if (g_iface->vtbl->rebuild_set_declsource) g_iface->vtbl->rebuild_set_declsource(g_iface, id, g_save_decl.c_str());
             int r2 = -1;
@@ -770,17 +701,10 @@ static void poc_apply_deletes()
             }
     } __except (EXCEPTION_EXECUTE_HANDLER) { }
 }
-/* Timelines Stage 2: serialize an entity (+0xc8) into a caller-supplied buffer. SEH-guarded, no engine
- * exceptions escape. Returns bytes written (0 = failed / no slot / SEH). Shared by the timeline-open path
- * (g_tl_json below) and the entity-inherit-resolution path (Stage 3 asset dropdowns, g_resolve_json) -- two
- * SEPARATE buffers, not one shared one, so a resolve request mid-timeline-open can't clobber the open's data
- * if both land in the same think-loop drain. */
-/* Three outcomes, not two. `serialize_entity` reports only a byte count, and 0 means both "your
- * buffer was too small" and "this entity could not be written" -- that ambiguity is why the grow
- * loop below exists. But an engine exception is a THIRD thing, and growing the buffer can never
- * fix it. Collapsing it into 0 made a raise indistinguishable from a tight buffer, so a timeline
- * that crashed the engine call reported itself as too large and sent the reader hunting for a
- * bigger buffer that was never the answer. */
+/* Serialize into caller-owned storage under SEH. Timeline-open and target-inherit
+ * requests use separate buffers so requests in one drain cannot overwrite each other. */
+/* A clean zero can mean insufficient capacity. An exception is a terminal
+ * failure, so keep its negative result distinct and do not retry it as a size issue. */
 static int poc_serialize_entity_into(int id, char *buf, int cap)
 {
     int n = 0;
@@ -795,23 +719,10 @@ static int poc_serialize_entity_into(int id, char *buf, int cap)
     buf[n] = 0;
     return n;
 }
-/* Serialize `id` into a buffer that GROWS until the result fits, and report how many bytes it took.
- *
- * A fixed cap was wrong here, not merely tight. `serialize_entity` never reports the length it needed --
- * a buffer that is too small comes back as 0, exactly like a real failure -- so the caller cannot say
- * "your timeline is bigger than the buffer", only "could not open this timeline". Doubling and retrying
- * is the only way to tell the two apart, and it is the same trick sh_read_growing_text uses for engine
- * strings, for the same reason.
- *
- * A serialize that fills the buffer to its cap is treated as too-small as well: that is what a truncating
- * writer looks like from here, and half a JSON document would reach the page as `ok` and fail to parse
- * there instead. An entity whose real size happens to land exactly on the cap costs one extra call and
- * then resolves, which is the same harmless case that header documents.
- *
- * Growth is kept for the session, so the cost is a few extra calls on the ONE open that outgrows the
- * buffer and nothing afterwards. */
-#define POC_SERIALIZE_INITIAL_CAP (1u * 1024 * 1024)    /* every hand-authored timeline fits here */
-#define POC_SERIALIZE_MAX_CAP     (32u * 1024 * 1024)   /* honest boundary, not a guess at the maximum */
+/* Retry zero or cap-filling results with a larger retained buffer. The engine
+ * does not report required size; an exact fit needs one extra read to confirm it. */
+#define POC_SERIALIZE_INITIAL_CAP (1u * 1024 * 1024)    /* initial capacity; grows for larger timelines */
+#define POC_SERIALIZE_MAX_CAP     (32u * 1024 * 1024)   /* transport safety cap */
 
 static int poc_serialize_entity_grow(int id, std::vector<char> &buf, const char *what)
 {
@@ -820,8 +731,7 @@ static int poc_serialize_entity_grow(int id, std::vector<char> &buf, const char 
         buf, POC_SERIALIZE_INITIAL_CAP, POC_SERIALIZE_MAX_CAP,
         [&](char *out, int cap) { return poc_serialize_entity_into(id, out, cap); },
         [&](size_t cap, int result, bool terminal) {
-        /* Neither negative result is a size problem. Stop rather than doubling into the same answer,
-         * and keep the distinction visible in the log. */
+        /* Negative results are terminal failures, not capacity problems. */
         if (result == SH_SERIALIZE_UNAVAILABLE) {
             _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d NOT ATTEMPTED -- interface/vtable missing or bad id",
                         what, id);
@@ -834,10 +744,7 @@ static int poc_serialize_entity_grow(int id, std::vector<char> &buf, const char 
             poc_log(l);
             return;
         }
-        /* A clean 0, or a result that filled the buffer. Only these two can be a tight buffer, so
-         * only these two are worth another rung. Log every rung: a run that never succeeds should
-         * show its whole ladder, because "0 at every size" and "filled at every size" are different
-         * findings and the old log printed only the last one. */
+        /* Log each retry to distinguish persistent zero results from truncating writes. */
         _snprintf_s(l, sizeof l, _TRUNCATE, "%s: entity %d attempt at %lu bytes returned %d",
                     what, id, (unsigned long)cap, result);
         poc_log(l);
@@ -854,10 +761,7 @@ static int poc_serialize_entity_grow(int id, std::vector<char> &buf, const char 
     }
     return n > 0 ? n : 0;
 }
-/* Timelines Stage 2: serialize the timeline entity itself. A hand-authored timeline is small -- this
- * buffer was a fixed 1 MB on that basis -- but a GENERATED one is not: a snapmap-midi song exported to a
- * rawmap serialized to 1.67 MB across 8470 events, 67% past that cap, and every such timeline refused to
- * open with no way to see why. */
+/* Serialize the timeline with reusable storage that can grow for generated content. */
 static std::vector<char> g_tl_json;
 static int poc_serialize_entity_raw(int id) { return poc_serialize_entity_grow(id, g_tl_json, "timeline-open"); }
 /* Post {kind:"timelineData", eid, ok, json:"<the serialized entity JSON, escaped>"}. The page JSON.parses
@@ -872,11 +776,8 @@ static void poc_emit_timeline_data(int eid, int json_len)
     m += L",\"json\":\""; if (ok) m += poc_json_w(g_tl_json.data()); m += L"\"}";
     g_webview->PostWebMessageAsJson(m.c_str());
 }
-/* Timelines Stage 3 (per-entity asset dropdowns): resolve the CLASS (entityDef.inherit) of the "Runs on"
- * entity of an event-tab -- NOT the timeline entity itself. Reuses the same serialize_entity call, into its
- * OWN buffer (see poc_serialize_entity_into's comment). The page JSON.parses the result and reads .entityDef
- * .inherit itself (matches tl_entity_inherit_slug's "serialize + read one field" approach, but ships the
- * whole doc rather than adding a second raw-string field-scanner in C++ -- one parsing path, not two). */
+/* Serialize the event's target entity into its own buffer. The page reads
+ * entityDef.inherit to select the appropriate model/animation choices. */
 static std::vector<char> g_resolve_json;
 static int poc_serialize_entity_resolve(int id) { return poc_serialize_entity_grow(id, g_resolve_json, "entity-resolve"); }
 static void poc_emit_entity_inherit(int eid, int json_len)
@@ -888,17 +789,12 @@ static void poc_emit_entity_inherit(int eid, int json_len)
     m += L",\"json\":\""; if (ok) m += poc_json_w(g_resolve_json.data()); m += L"\"}";
     g_webview->PostWebMessageAsJson(m.c_str());
 }
-/* "Select in editor": drive the 3D editor selection from the list -- clear, then add each. (+0x148/+0x138)
- * BRACKETED LOGGING: a hang (not a crash -- the backend slots are SEH-guarded) leaves the last line on
- * disk (each poc_log flushes), so the log pinpoints exactly which call/ id froze the UI thread. */
+/* Replace editor selection from the list. Log each call to locate a stalled slot. */
 static void poc_apply_select_in_editor()
 {
     poc_logf("select-in-editor: apply start ids=%lu", (unsigned long)g_select_eids.size());
-    /* Refused while the editor is grabbing/holding: the engine's Escape/cancel path restores a snapshot
-     * indexed positionally against the live selection array, so changing that array mid-manipulation
-     * makes Escape swap entity pointers into the wrong slots -- duplicated entities, entities deleted
-     * outright, freezes. Pre-existing engine behaviour (reproduced on v0.2.1-beta.2). The backend
-     * enforces this too; checking here as well lets us tell the user why nothing happened. */
+    /* Manipulation snapshots index the selection positionally. Changing it during
+     * a grab can corrupt Escape restoration; the backend enforces this gate too. */
     if (g_iface && g_iface->vtbl && g_iface->vtbl->manipulation_in_progress
         && g_iface->vtbl->manipulation_in_progress(g_iface)) {
         poc_log("select-in-editor: REFUSED -- editor is mid-manipulation (grab/hold)");
@@ -920,11 +816,7 @@ static void poc_apply_select_in_editor()
     } __except (EXCEPTION_EXECUTE_HANDLER) { poc_log("select-in-editor: SEH in apply"); }
     poc_log("select-in-editor: apply done");
 }
-/* UI blank-space deselect: clear_selection only, no re-add. This keeps the page and 3D-editor selection
- * aligned without a dedicated button. A visible Deselect button used to be the ONLY way to clear a
- * list-driven selection because a native empty-space click did nothing. That root cause was fixed
- * 2026-07-27 (iface_engine.c syncs the EntityMode selection state alongside the selection array; see
- * ED_MODE_OBJ_OFF there), so the native viewport and this page-level gesture now both deselect normally. */
+/* Mirror a page blank-space click by clearing the editor selection. */
 static void poc_apply_deselect()
 {
     __try {
@@ -940,17 +832,9 @@ static int poc_serialize_selection_raw(char *buf, int cap)
     __except (EXCEPTION_EXECUTE_HANDLER) { n = 0; }
     return n;
 }
-/* Create-from-selection: resolve the file path (+0xc0), serialize the CURRENT editor selection (+0xb0),
- * fwrite it. g_create_result: 1 ok, 0 nothing was
- * selected (serialize returned empty), 2 not hovering an entity in the selection, -1 resolve/serialize/
- * write failure. Real prefabs on disk run up to ~370 KB (Sync Entities for Demons.json), so the scratch
- * buffer is generously sized at 4 MB.
- *
- * The hover check (+0x198) is a real, CONFIRMED (2026-07-06) engine requirement, not a UI nicety: the
- * engine's own PrefabPopulate refuses to run without a hovered entity in the selection (it prints
- * "Failed to create prefab: not hovering entity in selection." itself). Checking it here up front, before
- * ever touching serialize_selection, gives an accurate result code instead of the generic "nothing
- * selected" for what is actually a distinct failure. */
+/* Save the current selection as prefab JSON. The engine requires the hovered
+ * entity to be selected; report that refusal separately from an empty selection.
+ * Results: 1 = saved, 0 = empty, 2 = hover refused, -1 = resolve/serialize/write failure. */
 static void poc_apply_create_prefab()
 {
     g_create_result = -1;
@@ -1006,10 +890,8 @@ static bool poc_prefab_file_path(const std::string &folder, const std::string &n
     std::string fname = name + ".json";
     return g_iface->vtbl->resolve_prefab_path(g_iface, prefix.c_str(), fname.c_str(), out, cap) && out[0] != '\0';
 }
-/* The metadata sidecar (description + tags) rides beside its prefab as "<name>.meta.json" -- resolved
- * through the same validated path helper (the ".meta" suffix is part of the stem), so it inherits the
- * path-safety gate. The prefab .json itself stays byte-exact engine JSON (it IS the staged paste
- * payload), which is why metadata lives in a sidecar and not inside the prefab file. */
+/* Keep descriptions and tags in <name>.meta.json beside the prefab. The prefab
+ * stays engine JSON; the validated path helper handles both filenames. */
 static bool poc_prefab_meta_path(const std::string &folder, const std::string &name, char *out, int cap)
 {
     return poc_prefab_file_path(folder, name + ".meta", out, cap);
@@ -1040,8 +922,7 @@ static void poc_list_json_dir(const std::string &dirPath, std::vector<std::strin
     std::sort(names.begin(), names.end());
 }
 
-/* Delete a prefab file: pure Win32 (no engine) -- resolve the path (+0xc0 is SHGetFolderPathA, no engine
- * touch) then DeleteFileA. result: 1 deleted, 0 DeleteFile failed (missing/locked), -1 resolve failed. */
+/* Delete a prefab: 1 = deleted, 0 = file operation failed, -1 = path refused. */
 static void poc_apply_delete_prefab()
 {
     g_delete_result = -1;
@@ -1054,9 +935,8 @@ static void poc_apply_delete_prefab()
         if (poc_prefab_meta_path(g_delete_prefab_folder, g_delete_prefab_name, mp, (int)sizeof mp)) DeleteFileA(mp);
     }
 }
-/* Rename a prefab file WITHIN its current folder: MoveFileA old->new. MoveFileA refuses to overwrite an
- * existing destination (returns 0), so a name collision is a safe no-op the UI reports; the JS also
- * pre-checks. result: 1 ok, 0 MoveFile failed (dest exists / source missing / locked), -1 resolve failed. */
+/* Rename within the folder without overwriting an existing destination.
+ * Results: 1 = moved, 0 = file operation failed, -1 = path refused. */
 static void poc_apply_rename_prefab()
 {
     g_rename_result = -1;
@@ -1072,14 +952,8 @@ static void poc_apply_rename_prefab()
             MoveFileA(oldm, newm);
     }
 }
-/* Load/Place: read the prefab file's raw JSON off disk, clear the current editor selection FIRST (so
- * nothing else is selected once the user pastes it), then schedule a kind=1 (mkcmd) apply item to stage
- * it into editor+0x209a8. Deliberately stage-only -- we tried automating the follow-up paste keystroke
- * (direct PasteInstantiate call, then a synthesized Ctrl+V) and both had real side effects (a crash, then
- * a spurious ESC-menu popup from the OS-level focus switch); see backend-changes.md. The user presses
- * Ctrl+V themselves in the 3D view to actually place it, matching the original SnapHak's own workflow
- * (confirmed via decompiling the original snaphakui.dll/XINPUT1_3.dll -- neither of them automates this
- * step either). result: 1 staged, 0/-1 resolve/read/schedule failure (see backend log). */
+/* Load/Place reads prefab JSON and queues kind=2 for staging and native paste.
+ * Placement depends on backend editor gates; queue acceptance alone is not placement. */
 /* __try can't share a function with a C++ object needing unwinding (/EHsc, C2712) -- these leaves have
  * only PODs in scope, so the SEH guards around the engine calls are safe here. */
 static void poc_clear_selection_seh()
@@ -1093,15 +967,10 @@ static int poc_apply_edit_seh(const sh_apply_item *it, int count, const char *op
     __try { return g_iface->vtbl->apply_edit(g_iface, it, count, op) ? 1 : 0; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
-/* Decl-edit (kind=0) commits go through +0x290 apply_sync for the SYNCHRONOUS applied count. Since the
- * issue #61 thread move the slot executes the batch on DOOM's MAIN thread: called from this UI worker it
- * marshals through the clone_bss_apply drain and blocks (normally one frame; a few seconds worst-case if
- * the engine is parked, after which it reports failure) -- so this call may briefly stall the think
- * loop, by design. (The old comment's "deferred +0xd0 double-owns the decl-source block" reasoning was
- * OVERTURNED -- the real hazard was the allocation heap, now pinned backend-side; see
- * docs/backend-changes.md.) Fall back to the deferred apply_edit only on an old backend that lacks
- * +0x290 -- also main-thread and heap-pinned, just without the synchronous count. kind=1/2 (mkcmd
- * staging, e.g. Load/Place) stays on poc_apply_edit_seh/apply_edit. */
+/* Prefer apply_sync for kind=0 so the result reports an applied count. It
+ * normally marshals off-main calls to the engine thread and waits, but the backend
+ * also has an inline fallback. An older backend uses deferred apply_edit, whose
+ * result only acknowledges scheduling. Prefab kind=1/2 uses apply_edit directly. */
 static int poc_apply_sync_seh(const sh_apply_item *it, int count, const char *op)
 {
     __try {
@@ -1118,14 +987,9 @@ static void poc_apply_new_entity()
         poc_log("new-entity: ABORT (iface/slot missing)");
         return;
     }
-    /* PREFLIGHT -- refuse instead of degrading. Both of these are the engine's own paste gate, and
-     * the place step silently falls back to stage-only when either fails, which reported success
-     * while nothing arrived on the cursor:
-     *   - hovering an entity: the engine's paste branch is gated on hovered id == -1.
-     *   - a live selection: PasteInstantiate uses the selection array as its old->new id map and
-     *     AddToSelection appends, so pasting over one mis-wires every connection.
-     * Auto-clearing the selection was the old behaviour; it hid from the user that the state they
-     * could see on screen was the reason, so say it instead. */
+    /* Native paste requires no hovered entity and an empty selection. Refuse here
+     * so the page can explain the gate instead of reporting a queued but unplaced
+     * entity. Pasting over a selection can miswire the old-to-new ID mapping. */
     if (g_iface->vtbl->hovered_id && g_iface->vtbl->hovered_id(g_iface) >= 0) {
         poc_log("new-entity: REFUSED (hovering an entity -- the engine will not paste there)");
         g_new_entity_result = -2;
@@ -1145,11 +1009,8 @@ static void poc_apply_new_entity()
     poc_log(l);
 }
 
-/* Audition the staged sound name, or stop when it is empty. The backend refuses a name that is not
- * in its own catalog rather than handing it to the engine's find-or-create, so a bad name costs a
- * log line and nothing else. */
-/* Open or close the preview-mode session. Drained BEFORE the play below, so the browser opening and
- * the first Play in the same frame still establish the mode before the sound starts. */
+/* Sound names are validated by the backend catalog before live playback. */
+/* Establish the preview session before draining its first play request. */
 static void poc_apply_sound_session()
 {
     if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->sound_session) return;
@@ -1187,70 +1048,23 @@ static void poc_apply_load_prefab()
     fclose(fp);
     if (body.empty()) { poc_log("load-prefab: ABORT (empty file)"); return; }
 
-    /* Clear first: PasteInstantiate uses the selection array as its old->new id map and AddToSelection
-     * APPENDS, so instantiating with a live selection silently mis-wires every pasted connection. The
-     * backend re-verifies this immediately before placing (the clear can legitimately be refused while a
-     * manipulation snapshot is outstanding) and falls back to stage-only rather than risk it. */
+    /* Paste uses selection as its old-to-new ID map. Clear it first; the backend
+     * rechecks before placement because a pending manipulation may refuse clearing. */
     poc_clear_selection_seh();
 
-    /* kind=2 = stage THEN place -- runs the engine's own paste pair (PasteInstantiate + the Add-Prefab
-     * grab transition), the exact sequence its Ctrl+V branch runs, so the user no longer has to press
-     * Ctrl+V in the 3D view. Deferred (not sync) on purpose: the place MUST happen on the DOOM main
-     * thread, which is where the clone_bss_apply drain runs it. If anything is unavailable -- sig
-     * unresolved, not in EntityMode, selection not empty -- it degrades to the old stage-only behaviour
-     * and the toast says so; there is no half-placed outcome. */
-    /* STILL kind=1 (stage-only), but the RECORDED REASON BELOW IS DISPROVEN -- read this before acting.
-     *
-     * The old note said kind=2 was disabled "because the prefab we stage is not structurally equivalent to
-     * one the engine's own CreatePrefab builds", and to re-enable "once the deserialized prefab matches
-     * CreatePrefab's output". Both are wrong:
-     *   - the object IS member-for-member equivalent; nothing about its layout ever differed;
-     *   - the real cause was that its entity-blob array was allocated in the engine's MAP heap, which
-     *     ResetMapHeap destroys with HeapDestroy at map load. Fixed 2026-07-28 by staging inside an
-     *     idMemLocal::PushHeap(0) scope (see apply_engine.c's MEMLOCAL_* block and docs/backend-changes.md).
-     * The symptoms that note cites -- "Ctrl+V pastes nothing, Ctrl+C faults at 0x1ab32ee, repeated pastes
-     * end in Memory corruption before block!" -- are exactly that bug, and it is fixed and verified: the
-     * staged prefab now survives a Play round-trip and a map change with Ctrl+V working afterwards.
-     *
-     * So the stated precondition for re-enabling is MET. It is still kind=1 only because the separate
-     * auto-grab corruption report has not been re-tested against the fixed build, and every observation
-     * behind it was made while the staged prefab lived in the map heap.
-     *
-     * ALSO NOTE the two records of the manual control CONTRADICT each other: this comment said repeated
-     * manual pastes of OUR prefab ended in "Memory corruption before block!", while the campaign recorded
-     * "the same repeated manual pasting under stage-only is clean". The "auto-grab specifically is at
-     * fault" conclusion rests on that control, so it is weaker than it looks.
-     *
-     * SHIPPED 2026-07-28 as kind=2 after a measured re-test. Evidence: eight auto-grab pastes across two
-     * sessions (one on a fresh map, followed by several minutes of normal editing) produced no corruption,
-     * and the post-paste editor state was IDENTICAL to a manual Ctrl+V --
-     *     mode+0x1ac=4  arm(+0x420)=-1  action=0x0  flags1(+0x41)=0x64 pasteAvail=1  flags2=0x00 dirty=0
-     * -- which eliminates both suspects that had kept this off (that we force the paste-available bit rather
-     * than let the engine recompute it, and that we ClearSelection immediately before arming). The arm word
-     * self-clears, so an injected action cannot re-fire either.
-     *
-     * Also verified while testing: the engine's paste gate contains NO capacity/budget term (it is exactly
-     * the copy/paste cvar AND staged count >= 1, inside the nothing-hovered branch), so forcing that bit
-     * cannot bypass a map-full check. And because this route INJECTS an action rather than calling
-     * PasteInstantiate directly, the engine still runs its own paste branch and every check inside it.
-     *
-     * The one honest residue: we set the bit without reading snapEdit_enableCopyPaste, so we could paste
-     * while the user has copy/paste disabled. Minor, and the engine's next recompute clears it again.
-     *
-     * REVERT: set kind back to 1 and rebuild -- that is the whole switch. */
+    /* kind=2 stages and requests the engine's native paste action on its main thread.
+     * Missing editor prerequisites can leave the prefab staged for manual paste. */
+    /* Staged prefab storage must survive map-heap resets; the backend allocates it
+     * in heap 0. Keep placement on the native action path rather than directly
+     * invoking PasteInstantiate or synthesizing operating-system keystrokes. */
     sh_apply_item it; it.kind = 2; it.id = 0; it.text = body.c_str();
     g_load_result = poc_apply_edit_seh(&it, 1, "load-prefab");
     char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: name='%s' staged=%d (kind=2: stage + auto pick-up)",
                              g_load_prefab_name.c_str(), g_load_result);
     poc_log(l);
 }
-/* Timelines Stage 5 (Save): kind=0 (deserialize the FULL patched entity JSON -> temp def -> commit
- * class/inherit/source on `id`) -- id-targeted instead of paste-targeted. The page already did the hard
- * part (fresh-reserialize + JSON-patch the componentTimeLine/encounterComponent field); this is purely
- * "hand the opaque blob to the engine and report whether it took."
- * COMMITS VIA +0x290 SYNC: a decl-edit commit, same class of op as SnapStack's acctargets/bss/bse. The
- * slot runs it on DOOM's main thread (blocking marshal from this worker thread -- issue #61) and returns
- * the real applied count. See poc_apply_sync_seh and docs/backend-changes.md. */
+/* Commit the page's refreshed, patched entity JSON with kind=0. Prefer the
+ * synchronous applied result; see poc_apply_sync_seh for the older-backend fallback. */
 static void poc_apply_save_timeline()
 {
     g_save_timeline_result = 0;
@@ -1302,9 +1116,8 @@ static void poc_apply_rename_folder()
     poc_strip_trailing_sep(oldd); poc_strip_trailing_sep(newd);
     g_rename_folder_result = MoveFileA(oldd, newd) ? 1 : 0;
 }
-/* Delete a folder: move any remaining prefabs back to root first (a same-named file already at root is
- * left behind rather than silently overwritten -- that leaves the folder non-empty, so RemoveDirectory then
- * fails and reports it honestly instead of losing data), then RemoveDirectoryA. */
+/* Move contents to the prefab root before removing a folder. A name collision
+ * leaves the source file in place and removal fails without overwriting data. */
 static void poc_apply_delete_folder()
 {
     g_delete_folder_result = -1;
@@ -1336,7 +1149,7 @@ static int poc_run_enum(int classes, const char *inherit, char *buf, int cap, in
     return r;
 }
 
-/* ------------------------------------------------------------------ messages to the HTML ----------- */
+/* Messages to the page. */
 static uint64_t poc_list_sig(int n)
 {
     uint64_t h = 1469598103934665603ull;
@@ -1389,8 +1202,7 @@ static void poc_send_list(const char *reason)
 {
     int ready = 0; int n = poc_collect_timed(&ready, reason);
     uint64_t sig = poc_list_sig(n);
-    /* the one get_classname_copy call site (the Timeline rescan) rides the SAME "did the cheap entities
-     * signature change" gate as the OG's sh_rebuild_entity_list -- not a fixed timer. */
+    /* Rebuild Timelines only when the entity signature changes. */
     if (sig != g_last_list_sig) poc_rescan_timelines_timed(n, reason);
     g_last_list_sig = sig;
     poc_emit_list(n, ready, reason);
@@ -1440,10 +1252,8 @@ static void poc_send_enum(int classes, const char *inherit)
     json += L"]}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
-/* Run enum_decls_of_resclass (+0x110) into buf. SEH-guarded, no C++ objects -- split out from
- * poc_send_arg_resclass below because MSVC (C2712) forbids __try in a function that also has a C++ object
- * (std::wstring/std::string) requiring unwind cooperation, same reason poc_run_enum is split from
- * poc_send_enum. */
+/* Keep SEH in a POD-only helper: MSVC forbids __try alongside C++ locals
+ * that require unwinding. */
 static int poc_run_arg_resclass(const char *resClass, char *buf, int cap, int *pcount)
 {
     int r = 0; *pcount = 0; if (cap >= 2) { buf[0] = 0; buf[1] = 0; }
@@ -1453,11 +1263,8 @@ static int poc_run_arg_resclass(const char *resClass, char *buf, int cap, int *p
     } __except (EXCEPTION_EXECUTE_HANDLER) { r = 0; *pcount = 0; }
     return r;
 }
-/* Timelines Stage 3 (DECL + ENUM arg widgets): the valid-values list for ONE decl resource-class or ONE
- * engine enum type, via the same shared +0x110 slot for both --
- * decl args pass the reduced short-name ("sound"), enum args pass the raw catalog type verbatim
- * ("fxCondition_t"). A shifted-build offset or unknown resClass degrades to an empty list (the combo then
- * falls back to a plain editable box, faithful to the original's behavior). */
+/* Query declaration classes by short name and enum types by catalog name.
+ * Empty results leave the page with an editable text field. */
 static void poc_send_arg_resclass(const char *resClass)
 {
     if (!g_webview) return;
@@ -1481,9 +1288,7 @@ static void poc_send_arg_resclass(const char *resClass)
     json += L"]}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
-/* CLONE EXTENSION: the Entities-tab Inherit/Classname description panel -- a name->desc
- * lookup over the canonical
- * generated table (sh_entity_desc.h). */
+/* Look up entity descriptions in the generated table. */
 static const ShEntDesc *poc_lookup_desc(const std::string &name)
 {
     static std::map<std::string, const ShEntDesc *> *idx = nullptr;
@@ -1513,10 +1318,7 @@ static void poc_send_desc(const char *inherit, const char *classname)
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
-/* Resolve a MATERIAL decl by name (+0x2C8 find_material -- see typeinfo.c) and report
- * found/not-found plus the metadata the engine supplied. Live-tested in-game (2026-07-30): this resolves ANY shipped
- * material name (the full catalog), not just ones already placed/rendered this session -- a miss means the
- * name genuinely isn't a real material, not "not loaded yet". */
+/* Resolve a material and return the metadata supplied by the backend. */
 static void poc_send_material_result(const char *name)
 {
     if (!g_webview) return;
@@ -1531,30 +1333,15 @@ static void poc_send_material_result(const char *name)
     json += L",\"info\":\""; json += poc_json_w(info); json += L"\"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
-/* ------------------------------------------------------------------- the File menu's rawmap I/O ----
- * "Load Rawmap" / "Save Rawmap As", the first surface that lets someone choose a rawmap file by hand
- * instead of using the one fixed %LOCALAPPDATA% path. The backend already accepted an arbitrary path
- * on both sides; these are the +0x328/+0x330 slots' only caller.
+/* The File menu's rawmap I/O: "Load Rawmap" / "Save Rawmap As", the only caller of
+ * the +0x328/+0x330 slots. Load STAGES a file -- the swap substitutes it into the
+ * engine's next map-load parse -- so every string below says "staged", not "loaded".
  *
- * WHAT LOAD DOES, EXACTLY. It STAGES a file: the swap substitutes those bytes into the engine's next
- * map-load parse. It does not open the map, because nothing here can make the engine load one -- that
- * needs an engine call from a main-thread frame hook this build has no execution point for. Every
- * string below says "staged" and names what the person still has to do. Do not soften that into
- * "loaded": someone who reads "loaded" and sees their old map on screen will think we lost their file.
- *
- * WHY THE PICKER RUNS ON ITS OWN THREAD
- * -------------------------------------
- * It used to run straight out of the web-message handler, on the note (wrong, and reported as lag) that
- * a modal dialog "blocks this thread only -- the backend and DOOM are untouched". The handler is
- * dispatched from `DispatchMessageW` INSIDE poc_think_loop, so a modal Show() there stops the loop
- * itself for as long as the dialog is open: no editor polling, no selection sync, no queued-work drain,
- * no mesh completions -- and the loop is what keeps the frontend in step with the editor. A shell
- * dialog is not quick, either: it enumerates cloud providers, network places and thumbnails on open.
- *
- * So the dialog gets a dedicated thread with its own apartment, and the result comes back through the
- * same pending-flag handoff every other deferred action here uses. The think loop keeps turning while
- * the dialog is up, and every call that touches the backend still happens on the UI thread, where the
- * rest of this file already requires them to be. */
+ * The picker runs on its own thread. This handler is dispatched from DispatchMessageW
+ * inside poc_think_loop, so a modal Show() here would stop editor polling, selection
+ * sync and the queued-work drain for as long as the dialog is open. The result comes
+ * back through the same pending-flag handoff every other deferred action uses, so
+ * every backend call still happens on the UI thread. */
 
 /* Run the common item dialog. `save` picks the Save-As variant. Returns false when the person
  * cancelled (the overwhelmingly common non-success case, and not an error worth reporting).
@@ -1806,25 +1593,16 @@ static void poc_finish_pick()
         if (!staged) {
             poc_send_rawmap_status((L"Refused: " + poc_json_w(msg)).c_str());
         } else {
-            /* ASK BEFORE OPENING. A reload discards whatever is in the editor, and the engine gives
-             * us no "has unsaved changes" query to consult -- so instead of guessing, the person is
-             * asked, with the file named. Answering no leaves it staged: they save their map, then
-             * File > Open Rawmap as New Map. */
-            /* ASK, AND OFFER TO OPEN IT NOW. This prompt used to exist, was retired while an
-             * in-place load was refused (its only honest answer had become no), and is restored now
-             * that a load opens as a genuinely new map. Passing the file name is what raises it --
-             * the page owns the dialog, deliberately: a NATIVE modal here runs inside the UI think
-             * loop and stalls editor polling, which is the same freeze that made the file picker
-             * lag before it was moved off-thread. */
+            /* Ask before opening: a reload discards whatever is in the editor, and the engine
+             * offers no "has unsaved changes" query. Answering no leaves the file staged. The
+             * page owns this dialog on purpose -- a native modal here stalls the think loop. */
             poc_send_rawmap_status(L"", base.c_str());
         }
     }
 }
 
-/* Asset browser: consume the latest published preview (+0x2D0 get_preview -- see preview.c). The
- * backend encodes pixels as a PNG data URI, so this is a pure fetch: no rendering or engine touch.
- * Two-step size probe because the image can be a few hundred KB and the required size is only known
- * once something has actually been published. */
+/* Fetch the latest worker-published PNG data URI. Probe its size before copying;
+ * no rendering or engine access occurs here. */
 static void poc_send_preview(const char *name)
 {
     if (!g_webview) return;
@@ -1852,9 +1630,7 @@ static void poc_send_preview(const char *name)
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
-/* Asset browser: ask the backend worker to decode a named material or image (+0x2D8
- * request_preview). Staging only -- the CPU worker reads installed data asynchronously, so the page
- * polls getPreview afterwards rather than expecting an image back from this call. */
+/* Queue preview decoding on the backend worker. The page polls for publication. */
 static void poc_request_preview(const char *name, int asset_kind)
 {
     if (!g_webview) return;
@@ -1884,13 +1660,8 @@ static void poc_cancel_preview()
         g_iface->vtbl->request_preview(g_iface, "");
 }
 
-/* Assets browser: one asset type's catalog (+0x2E8 list_assets), sent on demand and held in the
- * page's bounded two-type cache, which then filters client-side. Materials alone are ~9,805 names
- * plus atlas-only rows and a few hundred KB, so each type is paged out of the backend in chunks and
- * concatenated here before one bridge response.
- *
- * Falls back to +0x2E0 list_materials when the backend predates ext 16, so a UI DLL paired with an
- * older backend still lists materials instead of coming up empty. */
+/* Collect catalog pages into one response for the page's bounded cache.
+ * Older backends can still supply materials through list_materials. */
 static void poc_send_asset_list(int kind)
 {
     if (!g_webview) return;
@@ -1919,13 +1690,7 @@ static void poc_send_asset_list(int kind)
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
-/* Timelines Stage 3: the full event-def catalog, sent ONCE per session (like enumInherits' full list) --
- * the page caches it and filters client-side, same "first N shown, type to narrow" Combo() convention as
- * Inherit/Classname. Each event carries its arg SCHEMA (name+type per position)
- * -- not just the bare event name -- so the page can label each argument ("<name> (<type>)",
- * the same convention the original uses) and know how many args a freshly-picked event expects,
- * instead of only being able to describe args that already have a stored value. Static data
- * (sh_event_catalog.h), no engine touch. */
+/* Send the static event catalog and argument schemas for client-side filtering. */
 static void poc_send_events()
 {
     if (!g_webview) return;
@@ -1946,12 +1711,8 @@ static void poc_send_events()
     json += L"]}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
-/* Timelines "EXPLAIN" box (Option B, see docs/webview-ui.md) -- our author-facing summary + per-arg
- * descriptions for each event, backed by the generated sh_event_docs.h table. Same
- * "ship the whole generated table once per session, cache client-side" pattern as poc_send_events -- static
- * data (sh_event_docs.h), no engine touch. Sent lazily (enumEventDocs), not folded into poc_send_events,
- * since it's a materially bigger payload the description panel doesn't need until the user actually opens
- * a timeline and expands one. */
+/* Send generated event and argument descriptions lazily when requested. The
+ * page caches this larger payload separately from the event catalog. */
 static void poc_send_event_docs()
 {
     if (!g_webview) return;
@@ -1986,12 +1747,8 @@ static void poc_json_asset_items(std::wstring &json, const ShAssetItem *items, i
     }
     json += L"]";
 }
-/* Timelines Stage 3 (per-entity asset dropdowns, "exceed-the-OG" -- the original never had this,
- * it just made you type a raw model index or anim path): the full per-entity-class asset table, sent ONCE
- * per session, same "ship the canonical generated table, cache client-side" pattern as poc_send_events.
- * Only 45 entity classes carry asset lists (sh_entity_asset_lists.h), far smaller than the event catalog.
- * Static data, no engine touch -- resolving WHICH class applies to a given "Runs on" entity is the separate
- * poc_emit_entity_inherit round-trip above. */
+/* Send generated per-class asset choices. Resolving an event target's inherit
+ * uses the separate entity-serialization request. */
 static void poc_send_entity_assets()
 {
     if (!g_webview) return;
@@ -2132,9 +1889,7 @@ static void poc_post_config_status()
     g_config_status_posted = true;
 }
 
-/* Cheap targeted scan of a prefab JSON body (no full JSON parser, same "find key" approach as
- * json_get_wstr). The exact `"idSnapEntity"` token appears once per entity; the prefab root uses the
- * distinct `"idSnapEntityPrefab"`, so it cannot be double-counted. */
+/* Count exact idSnapEntity keys without counting the idSnapEntityPrefab root. */
 static int poc_count_prefab_entities(const std::string &body)
 {
     int entityCount = 0;
@@ -2147,8 +1902,7 @@ static int poc_count_prefab_entities(const std::string &body)
 }
 /* Read a single prefab file (resolved via +0xc0) and push its scene plus aggregate entity count.
  * folder="" selects the prefab root. */
-/* read a small sidecar/aux file fully; refuses anything over 64 KB (metadata is tiny -- a huge file
- * here is not ours). Returns false on missing/oversize/unreadable. */
+/* Read a bounded auxiliary file; return false for missing, oversized, or unreadable data. */
 static bool poc_read_small_file(const char *path, std::string &body)
 {
     FILE *fp = nullptr;
@@ -2206,10 +1960,8 @@ static void poc_send_prefab_detail(const std::string &name, const std::string &f
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
-/* extract a sidecar's "tags" array as individual strings (targeted find-key scan, the same approach as
- * poc_count_prefab_entities -- no JSON library). The values are re-escaped fresh on emit; sidecar bytes are NEVER
- * spliced into an outgoing message raw, so a malformed/hand-edited sidecar can only lose its own tags,
- * never invalidate the whole prefabs message. */
+/* Extract flat sidecar tags and re-escape each value. Never splice sidecar
+ * bytes into an outgoing JSON envelope. */
 static bool poc_read_meta_tags(const std::string &folder, const std::string &name, std::vector<std::string> &tags)
 {
     char path[1024];
@@ -2232,12 +1984,8 @@ static bool poc_read_meta_tags(const std::string &folder, const std::string &nam
     return true;
 }
 
-/* enumerate %LOCALAPPDATA%\snapmap-plus\prefabs\ (resolved via the +0xc0 interface slot; the OG's
- * Prefabs tab listed %USERPROFILE%\snaphak\prefabs\): the root *.json files, plus one real level
- * of subdirectories (each a "folder"), each listing its own *.json files. No nested-within-nested. Empty
- * (or missing dir) sends empty arrays so the UI can show its empty state. The trailing "meta" map carries
- * each prefab's sidecar tags ("<folder>/<name>" or "<name>" -> ["tag",...], tagged entries only) so the
- * list filter can match on tags without a per-prefab round trip. */
+/* Enumerate root prefabs and one level of folders. Include sidecar tags in the
+ * list response so filtering needs no per-prefab reads from the page. */
 static void poc_send_prefabs()
 {
     if (!g_webview) return;
@@ -2331,23 +2079,13 @@ static void poc_apply_save_prefab_meta(const std::string &name, const std::strin
     if (result == 1) poc_send_prefabs();
 }
 
-/* ------------------------------------------------------------------ feedback report ("?" dialog) --- */
-/* CAPABILITY NOTE (this is the frontend's ONLY network touch, and why winhttp appears in the import
- * table): one user-initiated HTTPS POST per click on a Send button -- the feedback dialog's, or the
- * crash-report dialog's -- carrying exactly what the user typed (category/title/details/optional
- * contact), the installed version string, the renderer the game is running ("vulkan"/"opengl" -- one
- * token, read from which renderer library the host process loaded; no other system or hardware
- * information is gathered), and, for a crash report the user chose to attach logs to, the ANONYMIZED
- * tails of the local logs (account/machine names scrubbed first; see report_scrub.h), to the
- * project's feedback relay -- which files it as a public issue on the project's GitHub tracker.
- * Nothing is downloaded or executed, nothing runs periodically, nothing is
- * sent without that explicit click. Full pipeline + the relay's own source: docs/feedback.md +
- * feedback/.
- *
- * The POST runs on its own short-lived thread: the think loop and the WebView2 callbacks share ONE STA
- * thread, so a synchronous WinHTTP call there would freeze the whole UI for up to the timeout. The
- * thread only touches the g_report_* cells; the think loop polls g_report_done and posts the result to
- * the page from the correct (loop) thread, like every other *Result message. */
+/* Feedback submission. */
+/* Network boundary: Send starts one HTTPS POST to the feedback relay, which
+ * creates or updates a public GitHub issue. Payloads contain user-entered text,
+ * version, renderer, and optional scrubbed log tails for crash reports.
+ * Run the request on a short-lived worker so WinHTTP cannot block the STA UI.
+ * The worker owns g_report_* while in flight; the loop posts its result to the page.
+ * See docs/feedback.md and feedback/ for the service contract. */
 static const wchar_t *kReportHost = L"snapmap-plus-feedback.doom-snapmap.workers.dev";   /* the deployed relay (feedback/); unreachable -> red toast, nothing else */
 static const wchar_t *kReportPath = L"/report";
 #define REPORT_PAYLOAD_CAP (64 * 1024)
@@ -2412,25 +2150,12 @@ static DWORD WINAPI report_thread(LPVOID)
     return 0;
 }
 
-/* ------------------------------------------------------------------ crash reports ------------------ */
-/* The backend's fault machinery writes one small JSON crash record per serious fault to
- * <game>\snapmap-plus\crash\pending-*.json (crash-safe, at fault time). This side is the REPORTING end:
- * the think loop polls that directory (~2 s, cheap FindFirstFile) and decides what the user sees.
- *
- * NOT EVERY RECORD IS A CRASH. The record's `kind` says which happened:
- *   - "fatal" / "engine_fatalerror" -- TERMINAL: the process died (or is dying). The crash-report
- *     dialog is exactly right, and appears on the next launch.
- *   - "classB" -- SURVIVED: the shield caught the fault and recovered through the engine's own
- *     Error(6) path; the editor kept running. The user experienced a hitch, not a crash.
- * Both used to raise the same dialog, so a recovered fault prompted "the game crashed -- send a
- * report", and the tracker filled up with reports of faults nobody actually lost a session to. A
- * survived fault is still real diagnostic signal, so the record is still WRITTEN and still kept on
- * disk -- it just gets a quiet toast instead of a modal, and only mid-session (see the poll).
- *
- * Submission rides the exact same relay POST as the feedback dialog (category "crash"), with one
- * enrichment done here: optionally attaching the tails of the local logs, ANONYMIZED first (the
- * account/profile/machine names are scrubbed -- see report_scrub.h). Dismiss and a successful send
- * both clear the pending records (never nag twice); the full logs and any crash dump stay untouched. */
+/* Crash-record presentation and reporting. */
+/* Poll backend pending records about every two seconds. Terminal/unknown kinds
+ * prompt for a report; classB/offthread records receive a notice only if newly
+ * observed during this session. These kinds describe handling, not proof of survival.
+ * Reports share the feedback relay and may attach scrubbed log tails. Dismissal
+ * or successful submission clears pending records; full logs and dumps stay local. */
 static const char *kCrashDir  = "snapmap-plus\\crash";   /* CWD = the game dir (poc_log's convention) */
 static const char *kCrashGlob = "snapmap-plus\\crash\\pending-*.json";
 #define CRASH_RECORD_READ_CAP  16384                      /* a record is ~2 KB; cap the read anyway */
@@ -2442,9 +2167,7 @@ static bool        g_page_loaded     = false;   /* NavigationCompleted fired -- 
 static std::string g_crash_last_sent;           /* terminal pending-*.json already raised as the dialog */
 static std::string g_crash_last_seen;           /* newest pending-*.json already classified (ANY kind) */
 
-/* List the pending records NEWEST FIRST (the stamp format makes lexicographic order == time order).
- * Returns the count. Cheap by design -- FindFirstFile only, no file is opened: this runs every poll,
- * while the records themselves are read only when the newest name actually changes. */
+/* Sort pending filenames newest-first without opening records on every poll. */
 static int crash_scan(std::vector<std::string> &names)
 {
     WIN32_FIND_DATAA fd;
@@ -2459,14 +2182,7 @@ static int crash_scan(std::vector<std::string> &names)
     std::sort(names.begin(), names.end(),
               [](const std::string &a, const std::string &b) { return a > b; });
 
-    /* Records are cleared when the crash dialog is answered or a report is sent,
-     * and a SURVIVED fault raises neither -- it gets a quiet toast. So those
-     * records were never cleared by anything, and a machine that hits a
-     * recoverable fault regularly accumulates them without limit. They are worth
-     * keeping (they are real diagnostic signal, and the next report attaches
-     * them), but only the recent ones are: an eight-week-old recovered fault
-     * tells nobody anything. Trim the tail here, where the directory is already
-     * listed and sorted newest-first, so it costs nothing extra. */
+    /* Bound retained diagnostics even when notices need no dismissal or submission. */
     if ((int)names.size() > CRASH_RECORDS_KEEP) {
         for (size_t i = CRASH_RECORDS_KEEP; i < names.size(); i++)
             DeleteFileA((std::string(kCrashDir) + "\\" + names[i]).c_str());
@@ -2475,26 +2191,10 @@ static int crash_scan(std::vector<std::string> &names)
     return (int)names.size();
 }
 
-/* Did the process NOT survive the fault this record describes? Reads the record's own `kind` field
- * (written first by crash_record_json). Two kinds do not by themselves mean the process died:
- *
- *   "classB"    -- the shield's recover-in-place path: it resumed the thread into Error(6) and the
- *                  engine's frame loop caught it.
- *   "offthread" -- the shield DECLINED a fault on a non-main thread (see fault_shield/veh.c) and
- *                  returned EXCEPTION_CONTINUE_SEARCH instead of forcing a throw that thread has no
- *                  handler for. The fault is then whatever the code around it makes of it, and the
- *                  apply path's per-item __except guards routinely absorb one and degrade to
- *                  "0 applied" -- the process keeps running. Crucially, if nothing absorbs it and the
- *                  process DOES die, the unhandled-exception filter writes its own separate "fatal"
- *                  record (with a minidump) for that same fault, and THAT record prompts. So treating
- *                  an offthread record as survivable cannot swallow a real death; it only avoids
- *                  double-reporting one, and avoids crying crash over a fault we contained.
- *
- * ANY OTHER KIND, INCLUDING UNKNOWN OR UNREADABLE, COUNTS AS TERMINAL, deliberately. The two failure
- * directions are not symmetric: mislabelling a survived fault as terminal costs one unwanted dialog,
- * while mislabelling a real crash as survived silently swallows the only prompt the user ever gets. A
- * future kind added on the writing side therefore keeps working (it prompts) until it is explicitly
- * listed here -- and a new kind must only be listed once something else is known to report the death. */
+/* classB/offthread records describe attempted recovery or declined redirection,
+ * so they do not establish process death. Other kinds prompt for a crash report.
+ * Fatal capture is separate and best-effort; a missing fatal record cannot prove
+ * that the process survived. Unknown or unreadable kinds default to prompting. */
 static bool crash_record_is_terminal(const std::string &rec)
 {
     const char *p = strstr(rec.c_str(), "\"kind\"");
@@ -2534,10 +2234,8 @@ static void crash_clear_pending()
     FindClose(h);
 }
 
-/* Tail + ANONYMIZE the local logs for the attachment. Seeks (never reads a whole log -- they are
- * append-only and can be large), snaps the cut to a line start, then scrubs the account name, the
- * profile-folder name, and the machine name out of the text (case-insensitive, -> <user>/<machine>).
- * Anonymous-by-design is the feature's contract; the dialog says so next to the checkbox. */
+/* Read bounded log tails, then scrub account, profile-folder, and machine names
+ * before attachment. This targets those identifiers, not arbitrary personal data. */
 static std::string crash_collect_logs()
 {
     static const char *files[] = { "shield_faults.log", "sh_backend.log", "snapmap-plus-ui.log" };
@@ -2584,7 +2282,7 @@ static std::string crash_collect_logs()
     return out;
 }
 
-/* ------------------------------------------------------------------ window / WebView2 -------------- */
+/* Native window and WebView2 lifecycle. */
 static LRESULT CALLBACK PocWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
@@ -2619,21 +2317,17 @@ static void poc_create_window()
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW); wc.lpszClassName = L"SnapmapPlusStudioWebView";
     wc.style = CS_NOCLOSE;   /* remove the native close (X) button -- can't close the UI from the editor */
     RegisterClassExW(&wc);
-    /* default size big enough to show the Entities list + state editor (or the Prefabs folder tree + card)
-     * side by side with no clipping on a typical 1080p+ display, without needing a manual resize on first
-     * launch. Fits comfortably within 1920x1080 with room for the taskbar. */
+    /* Initial size fits the list and detail panels side by side on a 1080p display. */
     g_hwnd = CreateWindowExW(0, L"SnapmapPlusStudioWebView", L"Snapmap+",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1440, 900, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
-    /* Match snapmap-midi's captionless-window treatment. Extending one pixel of native frame into the
-     * client is what asks DWM to retain its drop shadow and Windows 11 rounded corners even though
-     * WM_NCCALCSIZE removes the visible caption/frame. Zero margins produce the flat square window. */
+    /* A one-pixel DWM frame preserves shadows and rounded corners after
+     * WM_NCCALCSIZE removes the visible caption. */
     if (g_hwnd) {
         MARGINS shadow = {1, 1, 1, 1};
         HRESULT hr = DwmExtendFrameIntoClientArea(g_hwnd, &shadow);
         if (FAILED(hr)) poc_logf("DwmExtendFrameIntoClientArea failed hr=0x%08lx", (unsigned long)hr);
     }
-    /* force a frame recalculation now so WM_NCCALCSIZE strips the title bar BEFORE the window is first
-     * shown -- otherwise the native frame lingers until the first resize/move. */
+    /* Recalculate before showing so the native caption does not linger until resize. */
     if (g_hwnd)
         SetWindowPos(g_hwnd, nullptr, 0, 0, 0, 0,
                      SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -2986,19 +2680,16 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     } else poc_post_json(L"{\"kind\":\"reportResult\",\"ok\":false}");
                 }
             } else if (cmd == L"crashSubmit") {
-                /* the crash dialog's Send: unlike reportSubmit (opaque pipe), the payload is composed
-                 * HERE -- the one enrichment only this side can do is the anonymized log attachment.
-                 * Rides the same worker thread + reportResult plumbing as the feedback dialog. */
+                /* Compose crash reports here to add optional local log tails, then use the
+                 * same worker and result message as ordinary feedback. */
                 std::wstring title, bodyw, contact, hp, renderer;
                 int attach = 0;
                 json_get_wstr(json, L"title", title);
                 json_get_wstr(json, L"body", bodyw);
                 json_get_wstr(json, L"contact", contact);
                 json_get_wstr(json, L"website", hp);
-                /* The renderer the CRASHING session ran, forwarded from the crash record. DOOM ships
-                 * one executable per renderer and relaunches itself when r_renderAPI changes, so the
-                 * live process reporting the crash is not necessarily the one that died -- the live
-                 * answer is only the fallback for a record written before the field existed. */
+                /* Prefer the recorded renderer: this session may differ from the one that
+                 * faulted. Use the live renderer only for older records without the field. */
                 json_get_wstr(json, L"renderer", renderer);
                 json_get_int(json, L"attachLogs", &attach);
                 if (!title.empty() && !bodyw.empty() && !g_report_inflight) {
@@ -3050,10 +2741,8 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 else if (dir == L"bl") ht = HTBOTTOMLEFT;else if (dir == L"br") ht = HTBOTTOMRIGHT;
                 if (ht) { ReleaseCapture(); SendMessageW(g_hwnd, WM_NCLBUTTONDOWN, ht, 0); }
             } else if (cmd == L"tlUseSelection") {
-                /* "Runs on" -> "Use current selection": a fresh on-demand read (not the periodic poll's
-                 * cached count), since the user expects THIS click to reflect whatever's selected right now.
-                 * Full POC_MAX_ENTS buffer (not a small cap) so a >1 selection reports its TRUE count rather
-                 * than being silently truncated to the buffer size. */
+                /* Fetch current selection on demand, using the full entity capacity so the
+                 * reported count is not truncated. */
                 static int uselids[POC_MAX_ENTS];
                 int un = poc_get_selection(uselids, POC_MAX_ENTS);
                 wchar_t m[96];
@@ -3162,7 +2851,7 @@ static void poc_start_webview()
     if (FAILED(hr)) poc_logf("Create env FAILED hr=0x%08lx", (unsigned long)hr);
 }
 
-/* ------------------------------------------------------------------ the 30 Hz think-loop ----------- */
+/* UI request drain and polling loop, about 30 Hz. */
 static void poc_think_loop()
 {
     bool was_visible = false;
@@ -3308,17 +2997,9 @@ static void poc_think_loop()
             g_report_inflight = false;
         }
 
-        /* crash-record poll (~2 s): classify the pending records and announce at most one thing per
-         * new record. TERMINAL records raise the crash dialog exactly as they always have -- a user
-         * whose game actually died is prompted unchanged. A SURVIVED (Class-B) record gets a quiet
-         * toast instead, and only when it lands MID-SESSION: found at startup it describes a hitch in
-         * a session that has already ended, so there is nothing for the user to act on and the record
-         * just stays on disk as diagnostics.
-         *
-         * Walking the whole list newest-first (rather than looking only at the single newest name)
-         * is load-bearing now that the two outcomes are treated differently: a survived fault landing
-         * after a real crash record would otherwise sit in front of it and MASK the one prompt that
-         * mattered. Scanning names is cheap; records are opened only when the newest name changes. */
+        /* On a new pending filename, scan all records for terminal kinds so a later
+         * nonterminal record cannot hide a crash prompt. Nonterminal records show
+         * notices only after startup; retained older records remain diagnostic data. */
         if (g_page_loaded && (frame == 1 || frame % 60 == 0)) {
             std::vector<std::string> names;
             int cnt = crash_scan(names);
@@ -3358,7 +3039,7 @@ static void poc_think_loop()
                         poc_log(l);
                     }
                 } else if (survived > 0 && terminal == 0 && !startup) {
-                    /* recovered fault, this session: a toast, no dialog, nothing to submit. */
+                    /* nonterminal record observed this session: notice only */
                     std::wstring m = L"{\"kind\":\"faultRecovered\",\"count\":";
                     m += std::to_wstring(survived); m += L"}";
                     poc_post_json(m.c_str());
@@ -3377,12 +3058,8 @@ static void poc_think_loop()
                 poc_log(l);
                 ShowWindow(g_hwnd, SW_SHOW); UpdateWindow(g_hwnd);
                 poc_send_list("editor-visible");
-                /* the editor screen just came back (Play just ended, or a map load/reload just completed --
-                 * editor_ready_poll (+0x88) is 1 in either case, 0 in the HUB/menu/Play). The webview host
-                 * window + its DOM/JS state are only HIDDEN across that gap, never destroyed, so any Timeline
-                 * Editor panel left open before Play/reload would otherwise keep showing stale cached data
-                 * with no signal to the user that it's stale. Force it closed here so the user must
-                 * re-select (and re-fetch) before editing. */
+                /* The DOM survives Play and map reloads. Close any open timeline when the
+                 * editor returns so subsequent edits begin with fresh serialized state. */
                 poc_post_json(L"{\"kind\":\"editorReopened\"}");
                 was_visible = true;
             }
@@ -3392,9 +3069,7 @@ static void poc_think_loop()
                 ShowWindow(g_hwnd, SW_HIDE); was_visible = false;
             }
 
-            /* Camera feedback is latency-sensitive and the vec3 read is cheap. Sample it at the
-             * frontend's native ~30 Hz cadence while visible, not inside the 10-frame entity poll.
-             * poc_cam_read_send change-gates WebView messages, so a stationary camera emits nothing. */
+            /* Sample camera coordinates at UI cadence; change gating avoids idle messages. */
             if (was_visible && !g_cam_lock) poc_cam_read_send();
 
             /* periodic auto tasks (~ every 10 frames = ~330 ms): list change poll, editor-selection sync,
@@ -3409,9 +3084,7 @@ static void poc_think_loop()
                     poc_emit_list(n, rdy, "entity-change");
                 }
 
-                /* live editor-selection COUNT, independent of "Follow editor selection" -- the Prefabs tab's
-                 * "Create from selection (N)" button needs this regardless of sync mode. POC_MAX_ENTS (not
-                 * a fresh 64-cap) since a selection can't exceed the total entity list, already capped there. */
+                /* Publish selection count regardless of sync direction for prefab creation. */
                 unsigned long long selection_started = poc_perf_now_us();
                 static int selids[POC_MAX_ENTS];
                 int sn = poc_get_selection(selids, POC_MAX_ENTS);

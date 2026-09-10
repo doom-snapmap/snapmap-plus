@@ -1,57 +1,64 @@
-# feedback/ — the feedback relay
+# Feedback relay
 
-The in-app **Send feedback** dialog (the "?" button in the Snapmap+ window) POSTs the user's report here —
-a tiny Cloudflare Worker — and the relay files it as a labeled issue on this repo's tracker. Users never
-need a GitHub account; the relay holds the only credential, and files issues **as the org's GitHub App
-bot identity** (`<app-name>[bot]`), not as any personal account. See `worker.js` for the full flow
-(validation → honeypot → dedup-by-signature → create or append) and `docs/feedback.md` for the
-end-to-end pipeline including the repo-side hygiene workflows.
+## Purpose
 
-## Deploy (maintainer, one-time + on change)
+Accepts reports from the in-app feedback and crash dialogs and files them as
+GitHub issues. A Cloudflare Worker holds the repository credential so players
+can submit a report without a GitHub account.
 
-Prereqs: a free Cloudflare account, Node.js.
+## Contents
 
+- `worker.js` validates reports, groups matching open reports and creates issues
+  or confirmation comments.
+- `wrangler.toml` defines the Worker name, entry point and compatibility date.
+
+## Working here
+
+Read the [feedback pipeline](../docs/feedback.md) for payloads, crash attachments
+and issue-maintenance behavior. Keep the host endpoint in
+`src/ui/webview/snapmap_plus_ui_webview.cpp` aligned with the deployed Worker.
+Credentials belong in Worker secrets. The [service inventory](../docs/services.md)
+records ownership and the release-related credentials used elsewhere.
+
+## Deployment
+
+Use a Cloudflare account and Node.js. From this directory:
+
+```text
+npx wrangler login
+npx wrangler deploy
 ```
-cd feedback
-npx wrangler login          # opens the browser, authorizes wrangler against your Cloudflare account
-npx wrangler deploy         # prints the deployed URL: https://snapmap-plus-feedback.<your-subdomain>.workers.dev
-```
 
-Sanity check: `curl https://snapmap-plus-feedback.<your-subdomain>.workers.dev/` → `snapmap-plus feedback relay: OK`.
+The health endpoint is `GET /`; a working relay responds with
+`snapmap-plus feedback relay: OK`. Configure credentials before testing report
+submission, since a successful submission creates or comments on an issue.
 
-The deployed hostname must match `kReportHost` in `src/ui/webview/snapmap_plus_ui_webview.cpp` — update it
-there once after the first deploy (the URL is stable across redeploys).
+## GitHub App setup
 
-## The credential — a GitHub App (preferred)
+1. Create an organization-owned GitHub App. Disable webhooks and grant repository
+   Issues read/write access. Install it only on the report repository.
+2. Note its App ID and generate a private key.
+3. Convert the downloaded key to PKCS#8:
 
-Issues should come from a bot identity owned by the org, not a person, so the relay authenticates as a
-**GitHub App**. One-time setup:
+   ```text
+   openssl pkcs8 -topk8 -inform PEM -nocrypt -in downloaded.pem -out app-pkcs8.pem
+   ```
 
-1. github.com → the **doom-snapmap** org → Settings → Developer settings → **GitHub Apps** → New GitHub App.
-   Name it (e.g. `snapmap-plus-feedback`; issues will show as `snapmap-plus-feedback[bot]`), homepage = this
-   repo's URL, **uncheck "Active" under Webhook**, and under Permissions set **Repository permissions →
-   Issues → Read and write** (nothing else). "Where can this app be installed" → **Only on this account**.
-2. On the new app's page: note the **App ID**, then **Generate a private key** (downloads a `.pem`).
-3. **Install App** (left sidebar) → install on the doom-snapmap org → **Only select repositories →
-   snapmap-plus**.
-4. GitHub's key download is PKCS#1; the Worker needs PKCS#8. Convert once:
-   `openssl pkcs8 -topk8 -inform PEM -nocrypt -in <downloaded>.pem -out app-pkcs8.pem`
-   (Windows: `openssl.exe` ships with Git under `C:\Program Files\Git\usr\bin\`.)
-5. Store the secrets:
-   `npx wrangler secret put APP_ID` (the number from step 2), then
-   `npx wrangler secret put APP_PRIVATE_KEY` (paste the whole `app-pkcs8.pem`, BEGIN/END lines included).
+4. Store `APP_ID` and `APP_PRIVATE_KEY` with `npx wrangler secret put`, including
+   the complete PEM header and footer for the key. Remove local key copies when
+   no longer needed.
 
-No expiry, no rotation chore: the relay mints short-lived (~1 h) installation tokens from the key per
-request. If the key is ever compromised, revoke it on the app page, generate a new one, redo steps 4–5.
-Delete the local `.pem` files once the secret is stored.
+The relay mints short-lived installation tokens and files reports as the App's
+bot identity. Revoke and replace the App key if it is compromised. For a fork,
+update the repository constants in `worker.js` as well.
 
-**Fallback:** with no APP_ID/APP_PRIVATE_KEY set, the relay uses a fine-grained PAT from the
-`GITHUB_TOKEN` secret instead (repo: only this one; permissions: Issues read/write; max 1-year expiry —
-issues then come from the PAT owner's account, and the annual rotation chore applies).
+Without the App credentials, the Worker can use a fine-grained PAT from its
+`GITHUB_TOKEN` secret. Scope it to Issues read/write on the report repository;
+reports then use that token owner's identity. Track its expiration and rotation.
 
-## Abuse posture
+## Validation and limits
 
-Stateless and deliberately minimal: honeypot field + size/length caps in the Worker. If real spam ever
-appears, add a Cloudflare **rate-limiting rule** on the dashboard (Security → WAF → Rate limiting rules,
-scope it to `POST /report`) — no code change needed. Worst case is spam *issues*, which are deletable;
-the token can't touch anything but Issues on this one repo.
+The relay applies a honeypot, payload caps and exact report-signature matching.
+A match appends only to an open issue; a closed report is not reopened. These
+checks do not replace edge rate limiting or maintainer moderation. The credential
+should remain scoped to report management.

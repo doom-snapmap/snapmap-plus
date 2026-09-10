@@ -1,17 +1,5 @@
-/* packages.c -- see packages.h.
- *
- * WHY THERE IS NO COMPILE STEP
- *
- * It is tempting to let users author isolated package folders and then "compile"
- * them into the single shared tree the loader used to read. Nothing requires
- * that. DOOM never sees this directory layout: the decl server derives a decl's
- * type and logical name from its path relative to a decls root, and the resource
- * bridge and requirements reader each glob one subdirectory. All three take a
- * root and append a fixed suffix, so supporting many packages -- nested to any
- * depth -- is reading N roots instead of one. No staging, no generated copies to
- * go stale, no bookkeeping about which package wrote which file, and deleting a
- * folder really does uninstall it. A compile step would buy nothing and would
- * add every one of those failure modes back.
+/* Enumerate marked package roots directly; no staged or merged tree is
+ * needed.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -53,13 +41,10 @@ static int pk_is_file(const char *path)
            !(attributes & FILE_ATTRIBUTE_REPARSE_POINT);
 }
 
-/* Read `"priority": N` out of a package.json, defaulting to 0.
- *
- * Deliberately a narrow scan rather than a JSON parse: this runs on the engine
- * file-open path during capture, the only field needed is one integer, and a
- * malformed or absent marker must yield the default rather than fail a package.
- * Anything unparseable is simply priority 0, which is where an unmarked package
- * would have sorted anyway. */
+/* Read priority from a bounded package.json prefix using a narrow integer
+ * scan. Missing keys or unusable values default to 0; this is not full JSON
+ * validation.
+ */
 static int pk_read_priority(const char *directory)
 {
     char marker[MAX_PATH];
@@ -112,11 +97,9 @@ static int pk_append(sh_package *out, size_t capacity, size_t *count,
     return 1;
 }
 
-/* Resolution precedence: higher priority first, then name. The name is only a
- * tie-break -- it used to be the WHOLE rule, which meant a package called
- * `boss-demons` silently beat one called `cyberdemon` for any file they both
- * carried, purely because b sorts before c. Insertion sort is stable, and the
- * comparison is total, so the order is identical on every machine. */
+/* Higher priority first, then case-insensitive name; insertion sort is
+ * stable.
+ */
 static int pk_before(const sh_package *a, const sh_package *b)
 {
     if (a->priority != b->priority) return a->priority > b->priority;
@@ -173,11 +156,9 @@ static int pk_scan(const char *directory, const char *prefix, unsigned depth,
             complete = 0; continue;
         }
 
-        /* The marker is the ONLY thing that makes a package. The pre-package
-         * `generated` tree used to be special-cased here as a nameless package;
-         * the installer now migrates it into a real one, so this stays a single
-         * rule instead of a rule plus an exception. A directory without a marker
-         * is a grouping folder and is searched, exactly like any other. */
+        /* Only package.json marks a package. Unmarked folders remain
+         * searchable groups.
+         */
         if (pk_has_marker(child)) {
             if (!pk_append(out, capacity, count, name, child,
                            pk_read_priority(child))) complete = 0;

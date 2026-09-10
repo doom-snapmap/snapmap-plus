@@ -1,20 +1,7 @@
-/* megapreview.h -- the asset-preview PRODUCER: megatexture pages -> RGBA, on the CPU.
- *
- * This is the replacement for the retired in-engine render-capture route (see preview.h for why
- * that died). Instead of asking the renderer to draw a material -- which only works for materials
- * the loaded map already renders -- this reads the material's megatexture pages straight off disk
- * and decodes them by calling DOOM's OWN page decoder in-process.
- *
- * That decoder is a pure function: bytes in, RGBA out. No renderer, no render thread, no GPU, no
- * virtual-texture state, and critically NO MAP RESIDENCY. So this works for the full ~6,800-material
- * catalog regardless of which map is open, which is exactly what an asset browser needs.
- *
- * The codec is id's own DCT + YCoCg-R rather than libjpeg, so this calls the engine decoder instead
- * of reimplementing it. Page addressing follows `.vmtr` rect -> shard -> mip cell -> page id ->
- * file offset. Controlled runs across 68 pages established the required input slack, output
- * pre-clear, and plane-0 albedo selection.
- *
- * It produces into the transport in preview.h and touches nothing else.
+/* Preview VMTR-backed materials by reading installed atlas shards and calling
+ * the native CPU page decoder. Page lookup follows rectangle, shard, mip
+ * cell, page ID and file offset. It does not depend on the currently loaded
+ * map. Publish decoded RGBA through preview.h.
  */
 #ifndef BACKEND_MEGAPREVIEW_H
 #define BACKEND_MEGAPREVIEW_H
@@ -23,34 +10,26 @@
 
 #include "signatures.h"
 
-/* Start the producer. The decoder is resolved from the shared signature database as
- * `Mega2PageDecode` -- no hardcoded RVA -- so it is found wherever the loader put it, and a build
- * whose bytes do not match simply fails to resolve rather than calling into the wrong code.
- * `module_base` is still needed for the on-disk `virtualtextures` directory next to the exe.
- * Spawns one low-priority worker that sleeps until a preview request wakes it. Decode scratch is
- * allocated only for an atlas-backed request and released after an idle interval.
- *
- * Returns 1 if the worker started, 0 otherwise (NULL base, unresolved decoder, already installed).
- * Failure is non-fatal and only costs previews. */
+/* Resolve Mega2PageDecode and start a low-priority worker. module_base
+ * locates virtualtextures beside the executable. Requests wake the worker;
+ * atlas scratch is allocated on demand and released after an idle interval.
+ * Returns 1 when started, 0 on failure or repeat installation.
+ */
 int sh_megapreview_install(const sig_result *results, size_t n, const uint8_t *module_base);
 
 /* Wake the producer after sh_preview_request stages a name. A no-op when installation failed. */
 void sh_megapreview_wake(void);
 
-/* A material's `.vmtr` atlas rect, written to out_xywh as {x, y, w, h} in atlas pixels. Returns 1
- * if the material is virtual-textured, 0 if it has no rect (which is the answer to "can this take
- * a virtualmapping renderParm?" -- roughly half the catalog cannot). Divide each component by
- * 245760 to get the renderParm's value form. */
+/* Write the VMTR rectangle as {x,y,w,h} in atlas pixels. Returns 1 when
+ * found, otherwise 0. A virtualmapping renderParm uses {w,h,x,y}, with each
+ * component divided by 245760.
+ */
 int sh_megapreview_rect(const char *name, int *out_xywh);
 
-/* Enumerate the `.vmtr` atlas by index: the name of row `i`, or NULL once `i` is past the end.
- * Returns names in file order and does not filter -- the caller decides what to do with them.
- *
- * This exists because a material does NOT need a `material` decl to be usable. The atlas addresses
- * art by RECTANGLE, so a `virtualmapping` renderParm can paint any row here whether or not anyone
- * authored a decl for that name. Enumerating decls alone therefore under-reports the real catalog,
- * and the missing names are unreachable in a browser that only lists decls -- they cannot be
- * searched for, so they cannot be applied. The material catalog folds these rows in on demand. */
+/* Return atlas row i in file order, or NULL past the end. Names may repeat
+ * across shards. Atlas-only materials can be applied by rectangle without a
+ * material decl; the browser merges these names on demand.
+ */
 const char *sh_megapreview_name_at(int i);
 
 #endif /* BACKEND_MEGAPREVIEW_H */

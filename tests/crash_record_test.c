@@ -43,8 +43,7 @@ int main(void)
         assert(strstr(buf, "DOOM+0x5e0b12\\n"));                     /* newline escaped inside stack */
         assert(strstr(buf, "\\\"quoted\\\""));                       /* quotes escaped inside text */
         assert(strstr(buf, "\"version\":\"0.2.0-beta.3\""));
-        /* the renderer the CRASHING session ran -- the report reads it back rather than asking the
-         * live process, which may have relaunched into the other executable since */
+        /* Retain the crashing session's renderer even if the game later relaunches. */
         assert(strstr(buf, "\"renderer\":\"opengl\""));
         assert(strstr(buf, "\"time\":\"2026-07-18 12:00:00\""));
     }

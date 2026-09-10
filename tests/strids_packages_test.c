@@ -1,14 +1,5 @@
-/* strids_packages_test -- a package ships its own #str_ strings.
- *
- * Before this layer existed the injector read exactly one document, the user's global
- * strings\strids.json, so a package that added an entity had no way to name it: the only route was
- * hand-editing a file every other package also had to share. These cases pin the layer that fixed it,
- * and the precedence that keeps the old behaviour intact.
- *
- * The four engine entry points cannot be reimplemented here -- they intern into an engine-private
- * string pool and grow an engine-owned idList -- so the test supplies doubles and inspects what the
- * injector asked them to append.
- */
+/* Tests package #str_ injection and user/package/default precedence. Engine
+ * string-pool and list operations are doubled to inspect appended key/value pairs. */
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -21,9 +12,7 @@ static int g_failed;
 #define CHECK(c) do { if (!(c)) { \
     fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #c); g_failed++; } } while (0)
 
-/* Only the injector is under test, so the rest of its collaborators are stubbed. backend_log is
- * CAPTURED rather than discarded: a cross-package conflict is supposed to name both packages, and a
- * diagnostic nobody can read is not a diagnostic. */
+/* Stub collaborators and capture logs so conflict tests can check both package names. */
 static char g_log[8192];
 
 void backend_log(const char *message)
@@ -55,12 +44,10 @@ int sh_resource_bridge_open(const char *name, unsigned char **out,
     return SH_RESOURCE_BRIDGE_MISS;
 }
 
-/* Baked navigation is a different subsystem with its own tests; the file shadow
- * only has to ask it first. */
+/* Stub baked navigation; only its lookup priority matters here. */
 #include "../src/backend/nav_bake.h"
 
-/* Navigation baked from a map's marked volumes. No map is loaded in this test,
- * so the hook must fall through to the shadow exactly as it does in game. */
+/* With no marked-volume bake, lookup must fall through to the file shadow. */
 int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
                      unsigned char **out_bytes, size_t *out_len)
 {
@@ -86,8 +73,7 @@ static char g_vals[CAP][512];
 static int  g_pairs;
 static int  g_appended;
 
-/* The injector interns the key, then the value, then appends. Recording them in ctor order is what
- * lets the test read back the (key, value) it actually asked the engine for. */
+/* Record constructor order to reconstruct each appended key/value pair. */
 static void fake_idstr_ctor(void *out_handle, const char *s)
 {
     *(void **)out_handle = (void *)s;
@@ -143,9 +129,7 @@ static int count_key(const char *id)
 
 /* ------------------------------------------------------------------ fixture helpers */
 
-/* Delete a fixture tree, files first. The test names its tree after the process id, and pids are
- * recycled -- without this, a later run inherits an earlier run's packages and the injector sees
- * a conflict the test never set up. */
+/* Remove old PID-named fixtures so a reused process ID cannot inherit packages. */
 static void remove_tree(const char *path)
 {
     char pattern[MAX_PATH], child[MAX_PATH];
@@ -216,14 +200,12 @@ int main(void)
     _snprintf_s(overrides, sizeof overrides, _TRUNCATE, "%s\\overrides", root);
     CHECK(make_dir(overrides));
     sh_overrides_set_root(root);
-    /* Own EVERY layer. An unset source path falls back to %LOCALAPPDATA%\snapmap-plus\strings\
-     * strids.json -- the developer's real document -- which would make this test's result depend on
-     * whose machine it runs on. Point it inside the fixture at a file that does not exist yet. */
+    /* Set every source path inside the fixture to avoid reading the user's
+     * real strings document through the default-path fallback. */
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\user_strids.json", root);
     sh_strids_set_source(path);
 
-    /* A package's own strings are injected, so an entity it adds can be named without the user
-     * editing anything. This is the whole point of the layer. */
+    /* A package must supply strings without edits to the global user document. */
     CHECK(install_strings(overrides, "cyberdemon", "cyberdemon.json",
                           "{ \"ai_cyberdemon_name\" : \"Cyberdemon\","
                           "  \"cyber_desc\" : \"A towering cybernetic demon.\" }"));
@@ -232,7 +214,7 @@ int main(void)
     CHECK(value_for("ai_cyberdemon_name") && strcmp(value_for("ai_cyberdemon_name"), "Cyberdemon") == 0);
     CHECK(value_for("cyber_desc") != NULL);
 
-    /* The row is attributed to the package that supplied it, which is what lets a conflict name names. */
+    /* Retain source-package attribution for conflict reports. */
     {
         int i, found = 0;
         const char *id = NULL, *owner = NULL;
@@ -244,8 +226,7 @@ int main(void)
         CHECK(found);
     }
 
-    /* Identical text in two packages COMPOSES: a shared prerequisite vendored into both is being
-     * self-contained, not wrong. One row, no complaint. */
+    /* Identical shared strings compose into one row without a conflict. */
     CHECK(install_strings(overrides, "zz-second", "shared.json",
                           "{ \"shared_key\" : \"Shared Text\" }"));
     CHECK(install_strings(overrides, "cyberdemon", "shared.json",
@@ -253,22 +234,20 @@ int main(void)
     run_inject();
     CHECK(count_key("shared_key") == 1);
 
-    /* A real disagreement keeps the FIRST definition and never appends twice -- a duplicate key would
-     * corrupt the engine's sorted-by-hash dictionary, so "refuse" here means "do not append". */
+    /* On disagreement, retain the first value and never append duplicate keys
+     * to the engine's hash-sorted dictionary. */
     CHECK(install_strings(overrides, "zz-second", "shared.json",
                           "{ \"shared_key\" : \"A DIFFERENT VALUE\" }"));
     run_inject();
     CHECK(count_key("shared_key") == 1);
     CHECK(value_for("shared_key") && strcmp(value_for("shared_key"), "Shared Text") == 0);
-    /* And it says so, naming both sides: silently picking a winner by enumeration order is exactly
-     * what the composition rule exists to prevent. */
+    /* A conflict must identify both packages. */
     CHECK(strstr(g_log, "REFUSED") != NULL);
     CHECK(strstr(g_log, "shared_key") != NULL);
     CHECK(strstr(g_log, "zz-second") != NULL);
     CHECK(strstr(g_log, "cyberdemon") != NULL);
 
-    /* The user's own document still OUTRANKS a package: their explicit override is the top layer, and
-     * that precedence is what the pre-package behaviour depended on. */
+    /* The explicit user document takes precedence over package strings. */
     CHECK(write_text(path, "{ \"ai_cyberdemon_name\" : \"MY OWN NAME\" }"));
     run_inject();
     CHECK(count_key("ai_cyberdemon_name") == 1);
@@ -276,8 +255,7 @@ int main(void)
           strcmp(value_for("ai_cyberdemon_name"), "MY OWN NAME") == 0);
     sh_strids_set_source(NULL);
 
-    /* No packages installed at all is not an error: the injector still runs and the baked defaults
-     * still cover the shipped pack. */
+    /* Without packages, injection must still supply baked defaults. */
     sh_overrides_set_root(NULL);
 
     remove_tree(root);                 /* and do not leave one behind for the next run either */

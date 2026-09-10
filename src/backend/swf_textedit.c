@@ -1,53 +1,33 @@
-/* swf_textedit.c -- see swf_textedit.h. Ctrl+C / Ctrl+V for the editor's SWF text fields.
- *
- * COPY is pure reads: the focused idSWFTextInstance's text + selection range -> the Windows clipboard.
- * Confirmed live across text, int, float, vec3 and size inspectors (they are all SWF-text-backed).
- *
- * PASTE splices the clipboard into the live text idStr, mirroring EXACTLY what the stock
- * BACKSPACE/DELETE case does -- rebuild as left + inserted + right, assign back, collapse the
- * selection -- so it inherits the engine's own semantics rather than inventing new ones. It is the
- * only thing here that WRITES, and it is gated on its own separately-resolved idStr assignment: if
- * that does not resolve, copy still works and paste simply stays dark rather than guessing.
- *
- * We deliberately do NOT filter what may be pasted into numeric fields. The editor already accepts
- * arbitrary typed text there and resolves it at commit (non-numeric input commits as 0, confirmed
- * live), so matching that is more faithful than inventing a restriction the editor does not have.
- *
- * Every engine touch is SEH-guarded and range-checked, and we ALWAYS chain to the stock handler --
- * we never swallow a key.
- */
+/* Ctrl+C/Ctrl+V for focused SWF text fields. Copy reads the selected text; paste
+ * splices through engine idStr assignment and leaves numeric validation to the
+ * editor. Missing assignment support disables paste only. The stock key handler
+ * always runs after our guarded clipboard work. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include "swf_textedit.h"
 #include "signatures.h"
-#include "patch.h"        /* sh_install_detour_sig / sh_uninstall_detour */
-#include "clipboard.h"    /* sh_clipboard_set */
+#include "patch.h"
+#include "clipboard.h"
 #include "backend_log.h"
 
 #define SIG_SWF_ONKEY     "SwfTextOnKeyCall"
 #define SWF_ONKEY_STOLEN  15u   /* push rbp/rsi/rdi/r14/r15 (8) + sub rsp,imm32 (7) = 15 whole, PIC bytes */
 
-/* ---- build-specific offsets (RE-DERIVE per DOOM build: decompile the onKey::Call this detours) ---
- * All recovered DIRECT from that one function: it dereferences exactly these. */
+/* Recheck object offsets against the signed onKey::Call when porting builds. */
 #define TF_TEXTINST_OFF   0xC0    /* "TextField" script object -> its idSWFTextInstance (param_3[0x18]) */
 #define TI_TEXT_OFF       0x38    /* idSWFTextInstance -> the live text idStr */
 #define TI_LEN_OFF        0x40    /* idSWFTextInstance -> character count (caret/END bound) */
 #define TI_SELSTART_OFF   0x124   /* selection anchor (== caret unless shift-selecting) */
 #define TI_SELEND_OFF     0x128   /* caret / selection end */
 
-/* idStr ABI. CONFIRMED DIRECT from the engine's own idStr::Left (FUN_14033e640), which reads
- * `*(char **)(str + 0x10) + offset` with NO short-string branch, and whose freshly-constructed result
- * sets `data = self + 0x1c`. So +0x10 is ALWAYS a real char* -- for a short string it simply points at
- * that same object's inline base buffer at +0x1c, never at the pointer field itself.
- * (Do NOT reintroduce a `len < 0x10 ? inline : heap` branch here: that copies the pointer's own bytes
- * as text for every short string -- observed live as garbled clipboard output.) */
+/* idStr.data@+0x10 is always a pointer, including short strings whose data
+ * points to self+0x1C. Do not substitute a length-based inline-data branch. */
 #define IDSTR_LEN_OFF     0x08    /* int len (chars, excl NUL) */
 #define IDSTR_DATA_OFF    0x10    /* char* data -- always a pointer (inline base buffer @ +0x1c, or heap) */
 
-/* idSWFScriptValue: { int32 type @ +0; value @ +8 }, stride 0x10. Type ids read off the engine's own
- * ToInteger/ToBool converters (FUN_1417438c0 / FUN_1417437e0). */
+/* idSWFScriptValue stores type@+0, payload@+8, with a 0x10-byte stride. */
 #define SWFV_STRIDE       0x10
 #define SWFV_TYPE_OFF     0x00
 #define SWFV_VAL_OFF      0x08
@@ -55,14 +35,12 @@
 #define SWFV_T_INT        5
 #define SWFV_T_BOOL       7
 
-/* DirectInput scancodes -- consistent with every case in the stock handler (0x0e BACKSPACE,
- * 0x2a/0x36 SHIFT, 0xcb LEFT, 0xcd RIGHT, 0xc7 HOME, 0xcf END, 0xd3 DELETE). */
-/* No SC_LCTRL/SC_RCTRL here on purpose: Ctrl is read from the OS at the moment C or V arrives
- * (ctrl_is_held), never tracked from this key stream. See the note above swf_onkey_detour. */
+/* DirectInput scancodes. */
+/* Read Ctrl from the OS when C/V arrives; this stream can miss modifier releases. */
 #define SC_C              0x2e
 #define SC_V              0x2f
 
-/* Extra idSWFTextInstance fields the paste path needs (same provenance as the block above). */
+
 #define TI_MULTILINE_OFF  0x140   /* nonzero = ENTER inserts a newline (gates the stock 0x1c/0x9c case) */
 #define TI_MAXCHARS_OFF   0x280   /* character cap; the stock focus path truncates when text exceeds it */
 
@@ -70,26 +48,14 @@
 #define IDSTR_SIZE        0x30
 #define IDSTR_FLAGS_OFF   0x18
 
-/* Sanity ceiling for a text field's length. A datapad body is far below this; anything above means we
- * are reading garbage (wrong object / stale offset) and must bail rather than trust it. */
+/* Refuse implausibly large text-field reads. */
 #define TEXT_SANE_MAX     (256 * 1024)
 /* Clipboard read cap. Heap-allocated (see paste_at_selection) -- never put this on the hook's stack. */
 #define CLIP_MAX          (64 * 1024)
 
-/* ---- the "is this actually a TextField?" gate -----------------------------------------------------
- * onKey::Call fires for EVERY focused SWF script object, not only text fields, and only reads its
- * +0xC0 after asking the object `vtable[1](obj, "TextField")`. Skipping that check reads +0xC0 off an
- * unrelated object and yields garbage (observed live on non-text inspectors).
- *
- * That check is a POINTER-IDENTITY compare against the engine's own interned type-name string --
- * `return param_2 == PTR_s_Object_...;` -- NOT a strcmp, so passing our own "TextField" literal would
- * always answer false. We must hand it the engine's exact pointer.
- *
- * We recover that pointer from the detoured function's OWN BODY rather than a hardcoded RVA (same
- * LEA/MOV-decode technique the backend already uses for its *Lea signatures): at +0x4B the prologue
- * carries `48 8B 15 <rel32>` = `mov rdx,[rip+rel32]`, whose target holds the interned "TextField"
- * pointer the engine passes. Verified before use; a byte mismatch disarms the feature rather than
- * guessing. BUILD-SPECIFIC -- re-derive this offset if the prologue changes. */
+/* The handler also receives non-text objects. Its type check compares an interned
+ * pointer, so our own "TextField" literal would fail. Decode the engine pointer
+ * from MOV RDX,[RIP+disp32] at onKey::Call+0x4B and validate the opcode first. */
 #define TF_STRPTR_INSN_OFF   0x4Bu                  /* offset of the `mov rdx,[rip+rel32]` in onKey::Call */
 static const uint8_t TF_STRPTR_INSN[3] = { 0x48, 0x8B, 0x15 };
 #define TF_STRPTR_INSN_LEN   7u                     /* 3 opcode + 4 rel32 */
@@ -103,8 +69,7 @@ static onkey_fn        g_orig_onkey   = NULL;
 static const void     *g_textfield_id = NULL;   /* the engine's interned "TextField" string pointer */
 static idstr_assign_fn g_idstr_assign = NULL;   /* idStr::operator=(const idStr&) -- NULL => paste off */
 
-/* Ask the script object whether it is a TextField, exactly the way the stock handler does. Returns 0
- * on anything unexpected -- we only ever proceed on a positive answer. */
+/* Proceed only when the engine confirms the script object is a TextField. */
 static int is_textfield(void *obj)
 {
     if (obj == NULL || g_textfield_id == NULL) return 0;
@@ -115,8 +80,7 @@ static int is_textfield(void *obj)
     return is_type(obj, g_textfield_id) != 0;
 }
 
-/* Read one idSWFScriptValue as an integer, mirroring the engine's own ToInteger for the numeric
- * types. Returns 0 for a type we do not expect here (string/object) rather than guessing. */
+/* Convert expected numeric script types; unsupported types return 0. */
 static int swfv_int(const uint8_t *v, int64_t *out)
 {
     int32_t t = *(const int32_t *)(v + SWFV_TYPE_OFF);
@@ -127,7 +91,7 @@ static int swfv_int(const uint8_t *v, int64_t *out)
     return 0;
 }
 
-/* Resolve an idStr to its bytes (SSO-aware), with a sanity bound. 0 = do not trust it. */
+/* Read bounded idStr data through its pointer, including short strings. */
 static int idstr_view(const uint8_t *s, const char **out_data, int *out_len)
 {
     int len = *(const int *)(s + IDSTR_LEN_OFF);
@@ -137,8 +101,7 @@ static int idstr_view(const uint8_t *s, const char **out_data, int *out_len)
     return (*out_data != NULL);
 }
 
-/* Copy the focused field's selection (or the whole field when nothing is selected) to the clipboard.
- * Pure reads. Returns 1 if something was placed on the clipboard. */
+/* Copy the selection, or the whole field when empty. Return clipboard success. */
 static int copy_selection(const uint8_t *ti)
 {
     const char *data = NULL;
@@ -150,8 +113,7 @@ static int copy_selection(const uint8_t *ti)
     int b = *(const int *)(ti + TI_SELEND_OFF);
     int lo = (a < b) ? a : b;
     int hi = (a < b) ? b : a;
-    /* Clamp against the ACTUAL string length, not the instance's own count field -- if the two ever
-     * disagree the string is the one we are about to read out of. */
+    /* Bound selection indices by the string actually being read. */
     if (lo < 0) lo = 0;
     if (hi > len) hi = len;
     if (lo > len) lo = len;
@@ -176,30 +138,20 @@ static int copy_selection(const uint8_t *ti)
     return ok;
 }
 
-/* Splice the clipboard into the focused field at the selection, mirroring EXACTLY what the stock
- * BACKSPACE/DELETE case does: rebuild the string as left + inserted + right, assign it back into the
- * live idStr, then collapse the selection to the end of what was inserted. The engine never touches
- * the instance's own length field there either -- it does not need to, because that field IS the
- * idStr's length word (text @ +0x38, len @ +0x38+0x08 = +0x40), so the assign updates it for free.
- *
- * We do NOT filter what gets pasted into numeric fields: the engine already accepts arbitrary typed
- * text there and resolves it at commit (a non-numeric value simply commits as 0, confirmed live), so
- * matching that behaviour is strictly more faithful than inventing a restriction the editor lacks. */
+/* Replace the selection and collapse the caret after inserted text. Assignment
+ * also updates TI_LEN_OFF, which is the same word as the idStr length. Numeric
+ * fields retain the editor's normal commit-time validation. */
 static int paste_at_selection(const uint8_t *ti)
 {
     if (g_idstr_assign == NULL) return 0;
 
-    /* Heap, not stack: this runs on the game's main thread inside a detour, where a buffer this size
-     * would be a stack-overflow hazard. */
+    /* Keep the large clipboard buffer off the engine thread's stack. */
     char *clip = (char *)HeapAlloc(GetProcessHeap(), 0, CLIP_MAX);
     if (clip == NULL) return 0;
     if (!sh_clipboard_get(clip, (int)CLIP_MAX)) { HeapFree(GetProcessHeap(), 0, clip); return 0; }
 
-    /* Normalise line endings. CR is never wanted. A multi-line field keeps LF verbatim -- blank lines
-     * are real formatting in a datapad body. A single-line field cannot represent line structure at
-     * all, so any RUN of newlines collapses to ONE space, and a run at the very start or very end is
-     * dropped outright. (Emitting one space per newline instead just leaks the original's blank lines
-     * as runs of spaces -- pasted prose is full of them.) */
+    /* Drop CR. Multiline fields keep LF; single-line fields collapse internal
+     * newline runs to one space and remove leading/trailing runs. */
     int multiline = (*(const int *)(ti + TI_MULTILINE_OFF) != 0);
     int ci = 0, co = 0, pending_break = 0;
     for (; clip[ci] != '\0'; ci++) {
@@ -227,7 +179,7 @@ static int paste_at_selection(const uint8_t *ti)
     if (hi < lo) hi = lo;
     if (hi > len) hi = len;
 
-    /* Honour the field's character cap the way the engine's own focus path does. <= 0 means no cap. */
+    /* Nonpositive maxchars means no cap. */
     int maxchars = *(const int *)(ti + TI_MAXCHARS_OFF);
     int keep = lo + (len - hi);
     int ins  = co;
@@ -242,8 +194,7 @@ static int paste_at_selection(const uint8_t *ti)
     memcpy(buf + lo + ins, data + hi, (size_t)(len - hi));
     buf[total] = '\0';
 
-    /* A stack-built source idStr: the assign only reads its length and data, and a zeroed flags word
-     * declines the steal/swap fast path, so nothing engine-owned is aliased or freed. */
+    /* Zero flags prevent idStr assignment from stealing this borrowed buffer. */
     uint8_t src[IDSTR_SIZE];
     memset(src, 0, sizeof src);
     *(int *)(src + IDSTR_LEN_OFF)   = total;
@@ -266,31 +217,14 @@ static int paste_at_selection(const uint8_t *ti)
     return 1;
 }
 
-/* Is Ctrl PHYSICALLY held, right now?
- *
- * This deliberately does NOT track Ctrl from the onKey stream. The first version did, latching a
- * static flag on the Ctrl key-down and clearing it on the key-up, "the way the stock handler tracks
- * Shift" -- and it shipped a bug that made the editor's text fields unusable: after one Ctrl+C, a
- * bare `c` copied and a bare `v` pasted, forever. Typing the word "variable" pasted the clipboard
- * into the field once per `v`.
- *
- * The cause is that the latch outlives the keystroke. The stock handler reads Shift only while
- * processing the keystroke it was handed, so a Ctrl/Shift release it never sees costs nothing;
- * ours was consulted on LATER keystrokes, so a single missed key-up left it stuck on. Modifier
- * key-ups are not reliably delivered to a focused SWF script object -- the field can lose focus, the
- * window can lose focus, or the engine may simply not dispatch them -- and any one of those arms the
- * bug permanently.
- *
- * So: no state. Ask the OS for the real key state at the instant C or V arrives. There is nothing to
- * go stale, alt-tabbing mid-chord cannot poison it, and it covers both Ctrl keys without caring
- * which scancode the engine reports. GetAsyncKeyState reads physical key state directly rather than
- * this thread's message queue, which matters because the hook runs on the engine's input path. */
+/* Query physical Ctrl state for each chord. SWF focus changes can lose key-up
+ * events, so retaining a modifier latch would turn later bare C/V into shortcuts. */
 static int ctrl_is_held(void)
 {
     return (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
 }
 
-/* The detour. Acts on Ctrl+C / Ctrl+V, and ALWAYS chains -- we never swallow a key. */
+/* Handle clipboard chords, then always chain to the stock handler. */
 static void *swf_onkey_detour(void *self, void *retbuf, void *thisObject, void *parms)
 {
     __try {
@@ -306,14 +240,14 @@ static void *swf_onkey_detour(void *self, void *retbuf, void *thisObject, void *
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        /* A bad offset degrades to "clipboard did nothing" -- never to a broken text field. */
+        /* Continue stock input handling if clipboard access faults. */
     }
     return g_orig_onkey(self, retbuf, thisObject, parms);
 }
 
 void sh_swf_textedit_install(const uint8_t *module_base)
 {
-    if (g_orig_onkey != NULL) return;   /* already armed */
+    if (g_orig_onkey != NULL) return;
     if (module_base == NULL) { backend_log("swf-textedit: NOT armed (no module base)"); return; }
 
     const sig_entry *sig = NULL;
@@ -327,9 +261,8 @@ void sh_swf_textedit_install(const uint8_t *module_base)
     sig_result r;
     sig_resolve_one(module_base, sig, &r);
 
-    /* Recover the interned "TextField" pointer from the resolved function's own body BEFORE detouring
-     * (the detour overwrites only the first 15 bytes, but decode first anyway so a failure costs no
-     * engine write at all). Without it the type gate can never answer true, so refuse to arm. */
+    /* Decode the interned type pointer before any patch. Without it the type
+     * check cannot succeed, so leave the handler untouched. */
     if (r.status == SIG_OK || r.status == SIG_OK_HOOKED) {
         __try {
             const uint8_t *insn = (const uint8_t *)r.addr + TF_STRPTR_INSN_OFF;
@@ -353,8 +286,7 @@ void sh_swf_textedit_install(const uint8_t *module_base)
     }
     g_orig_onkey = (onkey_fn)tramp;
 
-    /* Paste additionally needs a real idStr assignment. Resolve it independently: if it is missing,
-     * copy still works and only paste stays dark -- never fall back to a guess, since this one WRITES. */
+    /* Paste requires a separate assignment signature; copy can work without it. */
     for (size_t i = 0; BACKEND_ENGINE_SIGNATURES[i].name != NULL; i++) {
         if (strcmp(BACKEND_ENGINE_SIGNATURES[i].name, "IdStrAssignFromStr") != 0) continue;
         sig_result ra;

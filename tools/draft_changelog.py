@@ -1,20 +1,8 @@
 #!/usr/bin/env python3
-"""Draft one CHANGELOG.md section from a range of commits, with one API call.
-
-Runs only in .github/workflows/prepare-release.yml, in the job that holds
-ANTHROPIC_API_KEY and no write permission. Its output is an artifact; a
-separate job opens the pull request.
-
-Anthropic's structured-output schema subset does not support maxLength,
-minimum, or array-size constraints -- the SDK strips them and validates
-client-side. The schema therefore guarantees SHAPE only. Length and content
-are enforced by validate() below, which is also the injection boundary: commit
-bodies are contributor-controlled, and one newline in a model-authored string
-would forge a second section header that the parser accepts as real.
-
-pydantic and anthropic are imported INSIDE draft(), never at module scope:
-ci.yml's guard job runs this module's tests with no dependency install.
-"""
+"""Draft one CHANGELOG.md entry in the credential-bearing, read-only workflow job.
+A separate job opens the pull request. validate() enforces content and length
+limits before rendering; contributor-controlled text must not introduce Markdown
+structure. Import optional API dependencies inside draft() so offline tests work."""
 
 import argparse
 import dataclasses
@@ -30,21 +18,14 @@ MAX_BODY_CHARS = 800      # one commit body; git permits megabyte messages
 MAX_PROMPT_CHARS = 60000  # the assembled prompt
 MAX_INPUT_TOKENS = 40000  # counted before spending
 
-# The user-facing docs. contributing.md section 9 REQUIRES a behaviour change to
-# update these in the same pull request, so their diff is a human-written account
-# of what changed for a user -- the one input that says HOW a feature is reached,
-# which a commit subject never does.
+# Include changed feature documentation so drafts can describe how users reach a
+# feature.
 DOC_PATHS = ["docs/capabilities.md", "docs/fidelity.md", "docs/webview-ui.md",
              "README.md"]
 MAX_DOC_CHARS = 24000
 
-# Words that name a place in the interface. A draft may use one only if the
-# sources actually contain it. Inventing the SHAPE of a feature is the failure
-# this guards and it is not hypothetical: for v0.2.1-beta.8 the drafter wrote
-# "A Navigation tab lets you mark which Blocking Box surfaces..." when no
-# Navigation tab exists, was never built, and appears in no commit -- it had only
-# "let authors mark which surfaces demons can walk on" to go on, and invented the
-# rest. The maintainer caught it in review; nothing in the pipeline would have.
+# Require interface-location words to appear in the inputs. This catches invented
+# UI surfaces, but it does not establish that every drafted claim is true.
 UI_NOUNS = ("tab", "panel", "button", "menu", "dialog", "checkbox", "slider",
             "toolbar", "sidebar", "window", "dropdown", "wizard", "toggle")
 
@@ -53,8 +34,7 @@ MAX_SUMMARY = 320
 MAX_ITEMS = 6
 MAX_SKELETON_SUBJECTS = 20
 
-# The only definition of "user-facing commit" in the repository. It moved here
-# from the deleted release.yml step; docs/contributing.md documents it.
+# Canonical user-facing commit filter; keep contributing.md aligned.
 INTERNAL_PREFIX_RE = re.compile(
     r"^(ci|chore|scrub|docs|tests?|release|refactor|build|style|meta): ", re.I
 )
@@ -166,9 +146,7 @@ def validate(draft, min_collapsed=0):
     if len(draft.summary) > MAX_SUMMARY:
         raise DraftRejected("summary is %d characters (max %d)"
                             % (len(draft.summary), MAX_SUMMARY))
-    # MAX_ITEMS is a TOTAL, matching what the system prompt asks for. It used to
-    # be enforced per group, so a draft could carry 6 New + 6 Improved + 6 Fixed
-    # -- eighteen bullets -- and pass a rule whose stated meaning is six.
+    # Enforce the item limit across all groups combined.
     total = sum(len(items) for items in groups.values())
     if total > MAX_ITEMS:
         raise DraftRejected("%d named bullets across New, Improved and Fixed "
@@ -179,12 +157,8 @@ def validate(draft, min_collapsed=0):
                 raise DraftRejected(name + " contains an empty item")
     if draft.collapsed_count < 0:
         raise DraftRejected("collapsed_count is negative")
-    # The rendered line reads "Plus N smaller fixes and internal changes", so N
-    # must be everything in the release that this entry does NOT name -- shown
-    # commits the draft skipped, plus the ones never shown. The prompt used to
-    # pass only the not-shown count, and for v0.2.1-beta.8 that was 1 while the
-    # model rendered 23; the model's reading was the useful one, so the prompt
-    # now asks for it explicitly and this is the floor it may not go under.
+    # The collapsed count includes both omitted inputs and commits the draft leaves
+    # unnamed.
     if draft.collapsed_count < min_collapsed:
         raise DraftRejected(
             "collapsed_count is %d but at least %d commits are not described"
@@ -254,16 +228,9 @@ def render_sources(draft):
 
 
 def collect(base):
-    """Return (prompt_block, user_facing_subjects, omitted_count).
-
-    The range ends at HEAD, never at the tag: prepare-release.yml refuses to run
-    when the tag already exists, so the tag is by definition not yet created and
-    `base..<tag>` would be an unknown revision.
-
-    omitted_count covers BOTH commits filtered as internal and user-facing
-    commits dropped by the prompt cap, so the collapsed line stays honest on a
-    large range.
-    """
+    """Return (prompt_block, user_facing_subjects, omitted_count) for base..HEAD.
+    The release tag does not exist yet. Count internal commits and prompt-cap
+    omissions."""
     rev_range = "HEAD" if not base else base + "..HEAD"
     shas = _git("rev-list", "--no-merges", rev_range).split()
 
@@ -285,17 +252,8 @@ def collect(base):
 
 
 def collect_docs(base):
-    """The diff of the user-facing docs over the same range, or "".
-
-    This is the drafter's grounding. `docs/contributing.md` section 9 requires a
-    behaviour change to update these files in the SAME pull request, so their
-    diff is a maintainer-written statement of what a user can now do and where --
-    the thing commit subjects systematically leave out, and the gap the model
-    fills by inventing when it is not given it.
-
-    Diff only, not the whole file: the range's changes are the release, and the
-    files themselves are far too large for the prompt budget.
-    """
+    """Return the bounded user-facing documentation diff for this release range.
+    Use changes rather than complete files to focus the draft on this release."""
     if not base:
         return ""
     try:
@@ -313,13 +271,8 @@ def _corpus(commits, docs):
 
 
 def check_grounded(draft, corpus):
-    """Reject a draft that names a place in the interface the sources never do.
-
-    Deliberately narrow: it cannot judge whether a sentence is true, and does not
-    try. It catches the one failure that actually happened -- a confident,
-    specific, INVENTED UI surface. A word is allowed the moment the sources
-    mention it once, so a real feature described in the docs diff passes freely.
-    """
+    """Reject interface-location words absent from the supplied sources.
+    This vocabulary check cannot verify the truth of a sentence."""
     for name, items in (("added", draft.added), ("improved", draft.improved),
                         ("fixed", draft.fixed)):
         for item in items:

@@ -1,27 +1,11 @@
-# src/ui/build.ps1 -- build the snapmap-plus-ui.dll that hosts the Snapmap+ UI in a Microsoft Edge
-# WebView2 control (HTML/CSS/JS). Same exports + backend contract as the interface expects. Pure ASCII
-# (PS 5.1 reads BOM-less UTF-8 as 1252). Invoked by the repo-root build.ps1 (backend + frontend, lockstep).
-#
-# What it does:
-#   1. locate MSVC via vswhere -> vcvars64.
-#   2. fetch the Microsoft.Web.WebView2 SDK (headers + static loader lib) from NuGet into
-#      build\webview2sdk (gitignored) if not already there. NO binaries land in the repo.
-#   2b. best-effort refresh of the embedded menubar logo from the GitHub org avatar (offline-safe:
-#      any fetch failure keeps the committed copy; a real change rewrites mockup.html -> commit it).
-#   3. generate build\obj\uiwv\mockup_html.h from webview\mockup.html (the UI, embedded in the DLL).
-#   4. cl-compile webview\snapmap_plus_ui_webview.cpp + sl_exports.cpp -> build\snapmap-plus-ui.dll,
-#      statically linking WebView2LoaderStatic.lib (no WebView2Loader.dll to ship).
-#
-# Usage:  invoked by the repo-root build.ps1; or directly: pwsh -File src\ui\build.ps1 (backend not rebuilt)
-#
-# Needs: Build Tools for Visual Studio 2022 (C++ workload). Uses the system-installed WebView2 runtime
-# at RUN time (preinstalled on Windows 11; evergreen runtime on most Windows 10).
+# Build the WebView2 frontend into build\webview. The root build invokes this
+# alongside the backend; a direct invocation rebuilds only the frontend.
+# Requires MSVC C++ tools. Fetches a pinned WebView2 SDK, embeds the page and
+# scripts, and links the static loader against the system WebView2 runtime.
+# Keep this file ASCII for PowerShell 5.1.
 param(
     [string]$Out = "snapmap-plus-ui.dll",
-    # -VcVarsVer: PIN the MSVC toolset (e.g. "14.44.35207") instead of the VS install default, so a
-    # shipped DLL can be rebuilt byte-for-byte. Defaults from SNAPMAPPLUS_VCVARS_VER -- the repo-root
-    # build.ps1 forwards no arguments here, so the env var is what keeps this half of the lockstep
-    # build on the same compiler as the backend half. See src\backend\build.ps1 for the full note.
+# SNAPMAPPLUS_VCVARS_VER keeps both DLL builds on the same pinned MSVC toolset.
     [string]$VcVarsVer = $env:SNAPMAPPLUS_VCVARS_VER
 )
 $ErrorActionPreference = "Stop"
@@ -34,7 +18,7 @@ $objDir = Join-Path $build "obj\uiwv"
 $sdkDir = Join-Path $build "webview2sdk"
 New-Item -ItemType Directory -Force $objDir | Out-Null
 
-# --- 1. MSVC toolchain --------------------------------------------------------------------------------
+# MSVC toolchain.
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 if (-not (Test-Path $vswhere)) { throw "vswhere not found. Install VS 2022 Build Tools (C++ workload)." }
 $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
@@ -42,8 +26,7 @@ if (-not $vs) { throw "VC Tools (x86/x64) not found in any VS install." }
 $vcvars = "$vs\VC\Auxiliary\Build\vcvars64.bat"
 if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
 
-# Resolve (and, when pinned, VERIFY) the MSVC toolset up front -- same check the backend build does, so
-# a missing pin fails by name here too rather than as a bare non-zero exit out of vcvars64.bat.
+# Report a missing toolset pin before invoking vcvars64.bat.
 $vcvarsArgs = ""
 $toolsetDir = Join-Path $vs "VC\Tools\MSVC"
 if ($VcVarsVer) {
@@ -55,7 +38,7 @@ if ($VcVarsVer) {
     $vcvarsArgs = " -vcvars_ver=$VcVarsVer"
     $toolset = $VcVarsVer + " (pinned)"
 } else {
-    # Not pinned: report the newest toolset present (same rationale as the backend build).
+# Without a pin, report the newest installed toolset.
     $newest = Get-ChildItem $toolsetDir -Directory -ErrorAction SilentlyContinue |
               Sort-Object Name -Descending | Select-Object -First 1
     if ($newest) { $toolset = $newest.Name + " (newest installed, NOT pinned)" }
@@ -63,10 +46,7 @@ if ($VcVarsVer) {
 }
 Write-Host "[build] MSVC toolset $toolset"
 
-# --- 2. WebView2 SDK (NuGet) --------------------------------------------------------------------------
-# Pinned (not "latest") -- api.nuget.org's index.json lists prerelease builds interleaved with stable
-# ones, so $idx.versions[-1] (the literal last entry) can silently land a "-prerelease" SDK. Bump this
-# deliberately when picking up a new stable release.
+# WebView2 SDK. Update the stable version deliberately; NuGet's last entry may be a prerelease.
 $wvPinnedVersion = "1.0.4078.44"
 $wvInclude = Join-Path $sdkDir "build\native\include"
 $wvLib     = Join-Path $sdkDir "build\native\x64\WebView2LoaderStatic.lib"
@@ -84,13 +64,8 @@ if (-not (Test-Path (Join-Path $wvInclude "WebView2.h"))) { throw "WebView2.h mi
 if (-not (Test-Path $wvLib)) { throw "WebView2LoaderStatic.lib missing after SDK fetch ($wvLib)" }
 Write-Host "WebView2 SDK ready at $sdkDir"
 
-# --- 2b. sync the menubar logo from the org avatar (best-effort, offline-safe) ------------------------
-# The menubar logo is the GitHub org avatar (github.com/doom-snapmap), carried inside mockup.html as a base64
-# data URI (the page is loaded from a string in-game, so no file or URL would resolve at runtime). Each
-# build refreshes that copy: fetch the 64px avatar, and if it downloads, is a real JPEG/PNG, and differs
-# from what's embedded, rewrite the data URI in mockup.html -- the change then shows up in git like any
-# source edit. ANY failure (offline, timeout, junk response, unexpected HTML shape) just keeps the
-# committed copy and never fails the build.
+# Refresh the embedded organization avatar when a valid download differs.
+# This can modify tracked mockup.html. Download failures keep the committed image.
 $htmlPath = Join-Path $here "webview\mockup.html"
 if (-not (Test-Path $htmlPath)) { throw "mockup.html not found at $htmlPath" }
 $logoTmp = Join-Path $objDir "org_avatar.tmp"
@@ -118,14 +93,11 @@ try {
 } catch { Write-Host "logo: skipped -- $($_.Exception.Message)" }
 if (Test-Path $logoTmp) { Remove-Item $logoTmp -Force }
 
-# --- 3. embed the HTML --------------------------------------------------------------------------------
-# Wrap mockup.html verbatim in a C++ raw string literal so the DLL carries the UI with no shipped file.
+# Embed the page in the DLL.
 $html = Get-Content -Raw -Path $htmlPath
 
-# Inline the decl editor's generated schema table (webview\schema_slice.js) in place of its <script src>
-# tag: the page is loaded via NavigateToString in-game, so a relative src never resolves there -- the
-# table must ride inside the single embedded HTML string. Both the tag and the file are REQUIRED: a
-# silent miss would ship a schema-less decl editor (structural checks only, no completion).
+# NavigateToString cannot resolve relative scripts. Require and inline the schema
+# table so a missing file or tag cannot silently disable declaration completion.
 $slicePath = Join-Path $here "webview\schema_slice.js"
 $sliceTag  = '<script src="schema_slice.js"></script>'
 if (-not (Test-Path $slicePath)) { throw "schema_slice.js not found at $slicePath -- required (the decl editor would ship schema-less)" }
@@ -136,8 +108,7 @@ if ($slice.IndexOf('</script') -ge 0) { throw "schema_slice.js contains '</scrip
 $html = $html.Replace($sliceTag, "<script>`n$slice</script>")
 if ($html.IndexOf($sliceTag) -ge 0) { throw "schema_slice.js inlining left a residual src tag -- duplicate tag in mockup.html?" }
 
-# Inline the Prefab Details transform + WebGL units for the same NavigateToString reason. Separate source
-# files keep the pure matrix contract directly testable while the shipped page remains one document.
+# Inline the separately testable prefab transform and viewport scripts too.
 foreach ($prefabScriptName in @("prefab_transform.js", "prefab_viewport.js")) {
     $prefabScriptPath = Join-Path $here ("webview\" + $prefabScriptName)
     $prefabScriptTag = '<script src="' + $prefabScriptName + '"></script>'
@@ -150,10 +121,8 @@ foreach ($prefabScriptName in @("prefab_transform.js", "prefab_viewport.js")) {
     if ($html.IndexOf($prefabScriptTag) -ge 0) { throw "$prefabScriptName inlining left a residual src tag" }
 }
 
-# MSVC caps a single string literal at ~16 KB (error C2026). Split into <16 KB chunks emitted as
-# ADJACENT raw string literals -- the compiler concatenates them into one array. Raw literals need no
-# escaping; any byte is safe except the exact ")SNAPMAPPLUS" delimiter, which neither the HTML nor the
-# inlined schema table contains (guarded above for the slice).
+# Split adjacent raw literals below MSVC's size limit. Reject the raw delimiter
+# in embedded content so it cannot terminate a literal early.
 if ($html.IndexOf(')SNAPMAPPLUS') -ge 0) { throw "embedded HTML contains the raw-literal delimiter )SNAPMAPPLUS -- cannot chunk" }
 $chunkSize = 8000
 $sb = New-Object System.Text.StringBuilder
@@ -168,19 +137,13 @@ $hdrPath = Join-Path $objDir "mockup_html.h"
 Set-Content -Path $hdrPath -Value $sb.ToString() -Encoding ascii -NoNewline
 Write-Host "generated $hdrPath ($([Math]::Round(($html.Length/1KB),1)) KB of HTML)"
 
-# --- 4. compile -------------------------------------------------------------------------------------
-# /MD (dynamic CRT: the WebView2 static loader + the process's existing MSVCP140/VCRUNTIME140 expect it),
-# /EHsc /std:c++17. Includes: WebView2 headers, the generated header dir, the shared iface ABI dir.
-# Sources: the WebView2 host + the unchanged sl_* export stubs. Links the static WebView2 loader + the
-# Win32 libs its COM/shell calls need. /DEF pins the export set (sh_ui_init @10 -- the OG's ordinal -- + the OG-named sl_*).
+# Compile with the dynamic CRT required by the WebView2 static loader.
+# The .def file pins sh_ui_init at ordinal 10 and the sl_* compatibility exports.
 $incArgs = @(
     "/I`"$wvInclude`"",
     "/I`"$objDir`"",
     "/I`"$common`"",
-    # src\backend, for host_image.h. The frontend compiles exactly ONE backend file, host_image.c, so a
-    # report can name the renderer the player is actually running. It is self-contained (windows.h + the
-    # CRT) and answers about the HOST PROCESS -- the same DOOM process both halves live in -- so this is
-    # reuse of the backend's answer, not a second implementation that could drift from it.
+    # Share host_image.c so both DLLs identify the renderer consistently.
     "/I`"$backend`""
 ) -join " "
 $srcArgs = "webview\snapmap_plus_ui_webview.cpp webview\config_message.cpp webview\theme_bootstrap.cpp sl_exports.cpp ..\common\log_rotate.c ..\backend\host_image.c"
@@ -193,14 +156,10 @@ $libArgs = @(
 ) -join " "
 $implib = $Out -replace '\.dll$', '.lib'
 
-# Output -> build\webview\ (the frontend's own subfolder; the backend, XINPUT1_3.dll, stays
-# directly in build\.)
+# Frontend output directory.
 New-Item -ItemType Directory -Force (Join-Path $build "webview") | Out-Null
-# SYMBOLS (build\webview\snapmap-plus-ui.pdb + .map) -- same flag set, and the same reasoning, as the
-# backend build (see the long note in src\backend\build.ps1): /Z7 + /DEBUG:FULL emit the symbols a crash
-# offset needs to become a function name, while /INCREMENTAL:NO /OPT:REF /OPT:ICF put back the release
-# layout that /DEBUG:FULL would otherwise change, and /Brepro makes the output deterministic. Maintainer
-# artifacts only: package.ps1 copies just the DLL, so the shipped overlay is unchanged.
+# Emit crash symbols while keeping release optimization and reproducible linking.
+# PDB and map files are maintainer artifacts; packaging copies only the DLL.
 $cl  = "cl /nologo /LD /O2 /W3 /EHsc /std:c++17 /MD /Z7 /Brepro /DWIN32 /D_WINDOWS /Fo..\..\build\obj\uiwv\ " +
        "$incArgs $srcArgs /Fe:..\..\build\webview\$Out " +
        "/link /DEF:snapmap-plus-ui.def /IMPLIB:..\..\build\obj\uiwv\$implib $libArgs " +
@@ -213,7 +172,7 @@ $clExit = $LASTEXITCODE
 Get-Content $buildLog | Write-Host
 if ($clExit -ne 0) { throw "cl failed (exit $clExit) -- see $buildLog" }
 Write-Host "built $(Join-Path $build "webview\$Out") (WebView2)"
-# Assert the symbols landed -- a silent miss would only surface the next time a crash stack needed them.
+# Require both symbol artifacts for later crash diagnosis.
 foreach ($sym in @(($Out -replace '\.dll$', '.pdb'), ($Out -replace '\.dll$', '.map'))) {
     $symPath = Join-Path $build "webview\$sym"
     if (-not (Test-Path $symPath)) { throw "expected symbol artifact missing: $symPath" }

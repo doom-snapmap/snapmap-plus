@@ -1,20 +1,6 @@
-/* aas_edit_test.c -- the mutable AAS2 3.29 model: parse, append, re-serialize.
- *
- * The contract this file pins is byte preservation. An authoring pass starts
- * from a module's shipped navigation and ADDS to it, so anything the model
- * cannot reproduce exactly is a piece of the game's own navmesh quietly
- * rewritten -- a failure that surfaces as demons misbehaving in a room nobody
- * touched. So the central check here is not "does it parse": it is that
- * parse-then-write returns the input byte for byte, for a payload whose header
- * dwords, settings words and record bytes are all deliberately non-zero.
- *
- * Every payload is SYNTHETIC, built by this file to the published layout, in
- * the same shape tests/navmesh_test.c builds one: the product ships no game
- * bytes and a test may not either. The synthetic file is wired so it would also
- * satisfy the full structural gate in navmesh.c (edges index real vertices,
- * areas own real spans, the BSP is a tree), which keeps the two suites talking
- * about the same file.
- */
+/* Tests AAS2 3.29 parsing, appending and byte-preserving serialization.
+ * Synthetic fixtures use nonzero header, settings and record bytes to expose
+ * accidental rewriting. They also satisfy navmesh.c's structural gate. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -38,17 +24,13 @@ static int g_failed;
 /* a synthetic AAS2 3.29 file                                            */
 /* ==================================================================== */
 
-/* Lump order and record sizes are the file format. Spelling them out here (as
- * navmesh_test.c does) means the test would notice if aas_edit.c's table ever
- * drifted from the format, rather than agreeing with it by construction. */
+/* Keep format sizes independent of aas_edit.c so drift cannot make the
+ * implementation and its fixture agree on the same mistake. */
 static const unsigned AAS_REC[SH_AAS_L__COUNT] = {
     16, 12, 12, 4, 40, 44, 16, 12, 4, 16, 1, 132, 128, 128, 128, 56, 4, 4, 60, 24, 24, 12
 };
 
-/* aas_edit.h's lump enum and navmesh.h's lump count describe the same 22
- * arrays, and the preamble is the header plus the settings block. Both are
- * facts about the format, so a build failure is the right way to hear about a
- * drift, not a failing run. */
+/* Assert the shared 22-lump layout and preamble size at compile time. */
 typedef char aas_lumps_agree[(SH_AAS_L__COUNT == SH_AAS_LUMPS) ? 1 : -1];
 typedef char aas_preamble_agrees[
     (SH_AAS_PREAMBLE_BYTES == SH_AAS_HEADER_BYTES + SH_AAS_SETTINGS_BYTES) ? 1 : -1];
@@ -84,13 +66,9 @@ static void putf(unsigned char *p, float f)
     put32(p, bits);
 }
 
-/* The canonical good file, mirroring navmesh_test.c's: two areas (0 is the
- * engine's dummy), four vertices and edges, one reachability on both per-area
- * lists, one cluster, one cover record and a three-node BSP. `pad` adds
- * dependencyName records, which carry no cross-lump index, so the payload can
- * be grown without inventing geometry. Nothing here is left zero by accident --
- * the header dwords and the settings words carry distinctive values precisely
- * so a writer that dropped them would be caught. */
+/* Synthetic valid file: dummy and floor areas, four vertices and edges, one
+ * reachability, cluster and cover record, and a three-node BSP. Dependency-name
+ * padding grows it without new geometry; nonzero metadata tests preservation. */
 static int synth_aas(aas_synth *b, unsigned pad)
 {
     unsigned counts[SH_AAS_L__COUNT];
@@ -341,9 +319,7 @@ static void test_roundtrip_is_byte_identical(void)
     roundtrip_one(17);
 }
 
-/* The records are carried through verbatim, so a field read back out of the
- * model has to be the field the file put there -- including the parts of the
- * header and settings block the model never decodes. */
+/* Preserve record bytes, including header and settings fields the model does not decode. */
 static void test_record_access(void)
 {
     aas_synth b;
@@ -443,9 +419,8 @@ static void test_parse_refusals(void)
     CHECK(sh_aas_parse(b.p, b.len - 1, err, sizeof err) == NULL);
     CHECK(strstr(err, "areaBounds") != NULL && strstr(err, "overrun") != NULL);
 
-    /* areaBounds is one record per area, and a mismatch is not editable.
-     * areaBounds is the last lump, so dropping a record and the 12 bytes it
-     * occupied still lands the walk on exactly the end. */
+    /* Dropping the final areaBounds record preserves the file end but violates
+     * the required one-record-per-area count. */
     put32(b.p + b.off[SH_AAS_L_AREABOUNDS] - 4, 1);
     CHECK(sh_aas_parse(b.p, b.len - 12, err, sizeof err) == NULL);
     CHECK(strstr(err, "areaBounds") != NULL && strstr(err, "2 areas") != NULL);
@@ -586,9 +561,7 @@ static void test_append_survives_a_round_trip(void)
     free_synth(&b);
 }
 
-/* The caps are refused BEFORE anything is allocated: an area index is a u16
- * everywhere in this format, so the 65534th area is not a big file, it is a
- * corrupt one. */
+/* Reject area counts that exceed the format's u16 index limit before allocating. */
 static void test_append_caps(void)
 {
     aas_synth b;
@@ -651,9 +624,7 @@ static void test_write_refuses_over_budget(void)
 /* the settings block                                                    */
 /* ==================================================================== */
 
-/* The augmenter insets a platform by the agent radius and rejects one with too
- * little headroom, so reading the wrong word here is geometry that looks right
- * and navigates wrong. */
+/* Agent radius and height must come from the correct settings words. */
 static void test_settings_accessors(void)
 {
     aas_synth b;
@@ -718,6 +689,34 @@ static void test_settings_accessors(void)
     free_synth(&b);
 }
 
+static void test_truncate_preserves_prefix_and_clears_regrowth(void)
+{
+    aas_synth b;
+    sh_aas *a;
+    unsigned char *out;
+    size_t len;
+    unsigned first;
+    if (!synth_aas(&b, 2)) { CHECK(0); return; }
+    a = sh_aas_parse(b.p, b.len, NULL, 0);
+    CHECK(a != NULL);
+    if (!a) { free_synth(&b); return; }
+    CHECK(sh_aas_append(a, SH_AAS_L_DEPENDENCYNAMES, 3, &first));
+    memset(sh_aas_rec(a, SH_AAS_L_DEPENDENCYNAMES, first), 'x',
+           sh_aas_record_size(SH_AAS_L_DEPENDENCYNAMES));
+    CHECK(!sh_aas_truncate(a, SH_AAS_L_DEPENDENCYNAMES, first + 4));
+    CHECK(sh_aas_truncate(a, SH_AAS_L_DEPENDENCYNAMES, first));
+    CHECK(sh_aas_rec(a, SH_AAS_L_DEPENDENCYNAMES, first) == NULL);
+    out = sh_aas_write(a, &len);
+    CHECK(out && len == b.len && !memcmp(out, b.p, len));
+    if (out) HeapFree(GetProcessHeap(), 0, out);
+    CHECK(sh_aas_append(a, SH_AAS_L_DEPENDENCYNAMES, 1, &first));
+    CHECK(sh_aas_rec(a, SH_AAS_L_DEPENDENCYNAMES, first)[0] == 0);
+    CHECK(!sh_aas_truncate(NULL, SH_AAS_L_DEPENDENCYNAMES, 0));
+    CHECK(!sh_aas_truncate(a, SH_AAS_L__COUNT, 0));
+    sh_aas_free(a);
+    free_synth(&b);
+}
+
 int main(void)
 {
     test_record_sizes();
@@ -730,6 +729,7 @@ int main(void)
     test_append_caps();
     test_write_refuses_over_budget();
     test_settings_accessors();
+    test_truncate_preserves_prefix_and_clears_regrowth();
 
     if (g_failed) {
         fprintf(stderr, "%d check(s) FAILED\n", g_failed);
