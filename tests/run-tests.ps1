@@ -28,6 +28,8 @@ if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
 
 # name | sources (relative to tests\) | runtime arg
 $tests = @(
+    @{ name = "nav_heap_test"; src = 'nav_heap_test.c'; arg = "" }
+    @{ name = "nav_heap_hook_test"; src = 'nav_heap_hook_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "patch_test"; src = 'patch_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "json_patch_test"; src = 'json_patch_test.c ..\src\backend\json_patch.c'; arg = "" }
     @{ name = "edit_pair_test"; src = 'edit_pair_test.c'; arg = "" }

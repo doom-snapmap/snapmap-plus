@@ -9,6 +9,7 @@
 #include "hook.h"
 #include "patch.h"
 #include "config.h"
+#include "nav_heap_queue.h"
 
 void backend_log(const char *message);
 
@@ -35,6 +36,45 @@ static void *g_instance_relays[2];
 static sh_patch_handle g_volume_contents_patch;
 static void *g_volume_contents_relay;
 static int g_volume_contents_ready, g_instances_ready;
+
+typedef void (*nav_heap_push_fn)(void *, const sh_nav_heap_node *, sh_nav_heap_list *);
+static nav_heap_push_fn g_heap_push;
+static LONG g_heap_refused;
+
+static void nav_heap_push(void *self, const sh_nav_heap_node *item, sh_nav_heap_list *list)
+{
+    sh_nav_heap_node pending = *item;
+    int result = sh_nav_heap_admit(list, pending);
+    if (result == SH_NAV_HEAP_NATIVE) g_heap_push(self, &pending, list);
+    else if (result == SH_NAV_HEAP_INVALID && !InterlockedExchange(&g_heap_refused, 1))
+        backend_log("NAV: refused an invalid path-search queue insertion");
+}
+
+static int nav_heap_install(const sig_result *results, size_t count)
+{
+    size_t i;
+    if (g_heap_push) {
+        if (hook_is_installed((void *)g_heap_push)) return 1;
+        if (!hook_unpatch((void *)g_heap_push)) return 0;
+        g_heap_push = NULL;
+    }
+    for (i = 0; i < count; ++i) {
+        if (!results[i].name || strcmp(results[i].name, "NavSearchHeapPush") ||
+            results[i].status != SIG_OK) continue;
+        /* Three register saves: 15 whole bytes without relative operands. */
+        g_heap_push = (nav_heap_push_fn)hook_prepare((void *)results[i].addr,
+                                                     (void *)nav_heap_push, 15);
+        if (!g_heap_push) break;
+        if (hook_commit((void *)g_heap_push) == B2_PATCH_OK) {
+            backend_log("NAV: path-search queue capacity safeguard installed");
+            return 1;
+        }
+        if (hook_unpatch((void *)g_heap_push)) g_heap_push = NULL;
+        break;
+    }
+    backend_log("NAV: path-search queue capacity safeguard unavailable");
+    return 0;
+}
 
 /* The marker is stored independently, but walkable solid geometry must not be
  * registered as an avoidance obstacle. Keep native physical collision and the
@@ -108,6 +148,7 @@ int sh_nav_play_install_volume_contents(const sig_result *results,size_t count)
     const unsigned char expected[9]={0x80,0xbb,0x8e,0x0c,0,0,0,0x74,0x0a};
     unsigned char patch[9]={0xe8,0,0,0,0,0x84,0xc0,0x74,0x0a};
     size_t i;intptr_t distance;int32_t relative;
+    nav_heap_install(results, count);
     if(g_volume_contents_patch.live) {
         if(g_volume_contents_ready)return 1;
         if(code_unpatch(&g_volume_contents_patch)!=B2_PATCH_OK)return 0;

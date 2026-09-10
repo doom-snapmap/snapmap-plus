@@ -340,6 +340,10 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "E8 ?? ?? ?? ?? 48 8B F8 41 B4 01 48 85 C0 75 23 48 8D 4D 98 E8 ?? ?? ?? ?? "
       "90 48 8D 4D C8 E8 ?? ?? ?? ?? 44 0F B6 64 24 40 48 8B 7C 24 48",
       0x4EC207u },
+    { "NavSearchHeapPush", /* Same verified leaf on Vulkan and OpenGL. */
+      "48 89 5C 24 08 48 89 74 24 18 48 89 7C 24 20 4D 8B 08 33 C9 "
+      "44 0F B7 1A 49 8B D8 48 8B FA 66 41 39 49 04",
+      0x6C12D0u },
     { "BlockingVolumeObstacleGate", /* The native affectsNavmesh contents mask gate. */
       "80 BB 8E 0C 00 00 00 74 0A 81 A3 94 0C 00 00 FF FF FD FF "
       "48 8B 8B 08 08 00 00 41 83 C8 FF 8B 93 94 0C 00 00 48 8B 01 FF 50 30",

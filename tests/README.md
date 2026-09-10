@@ -9,6 +9,10 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
 - `run-tests.ps1` builds and runs the native and JavaScript suites.
 - `*_test.c` and `*_test.cpp` exercise runtime helpers and source contracts.
 - `*_test.js` checks page behavior, browser modules and Worker services.
+- `nav_heap_test.c` checks full path-search queues, repeated route improvements,
+  allocation canaries and the subtree metadata consumed by native removal.
+- `nav_heap_hook_test.c` checks queue hook publication, rollback and bounded
+  insertion through the installed detour with an authored native-code fixture.
 - `sig_test.c`, `globals_test.c` and `hooktol_test.c` use optional local game images.
 - `map_package_fixtures.h` contains packaged test vectors.
 - `decl_scroll_probe.html` is a manual declaration-editor probe; `strip_dump.c` is a diagnostic helper.
