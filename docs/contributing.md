@@ -138,7 +138,7 @@ cd ..
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
 ```
 
-By default this compiles and runs 42 **self-contained native tests** (no game needed):
+By default this compiles and runs 45 **self-contained native tests** (no game needed):
 
 - **`shield_format_test`** — the fault-record string formatter (pure logic).
 - **`hook_test`** — the inline-detour installer, exercised on a hand-laid scratch stub.
@@ -166,10 +166,12 @@ By default this compiles and runs 42 **self-contained native tests** (no game ne
   refusals, lump appends and their caps, and the settings block.
 - **`aas_augment_test`** — adding walkable areas to a module's navigation: admission, the BSP splice
   that makes a new area findable, the step and island link regimes, and the refusals.
+- **`nav_geometry_test`** -- oriented solid clipping, support unions, ramp contacts, clearance,
+  overlap ordering, floating undersides and bounded geometry failures.
 - **`nav_regions_test`** — reading an author's marked volumes out of a map: the `affectsNavmesh` marker,
   the spawnPosition/size asymmetry, and `instanceEntities` attribution.
 - **`nav_bake_test`** — baking those regions at map load: the resource-name grammar, per-map planning,
-  the clear-on-every-load rule, and the one-marked-copy rule for a repeated module.
+  complete snapshot invalidation, creation/deletion, and distinct resource names for repeated modules.
 - **`override_packages_test`** — the file shadow resolving a decl or shader out of any installed package.
 - **`strids_packages_test`** — a package shipping its own `#str_` strings: user beats packages beats baked.
 - **`resource_bridge_test`** — manifest resolution, sparse archive decode, the provider gate, and collisions.
@@ -285,7 +287,7 @@ A third test, `xinput_ordinal_test.c`, is a **runtime** cross-check of the XInpu
 a built DLL and calls its exports by ordinal. CI verifies that same invariant *statically* with `dumpbin` (the
 "XInput ordinal parity" step), so you normally don't need to run it by hand.
 
-CI runs the 42 self-contained native tests, ten JavaScript tests, and the installer tests on every PR; the DOOM-image tests are local-only
+CI runs the 45 self-contained native tests, ten JavaScript tests, and the installer tests on every PR; the DOOM-image tests are local-only
 (CI has no game image).
 
 After the normal test run has built its executables, contributors with DOOM installed can also

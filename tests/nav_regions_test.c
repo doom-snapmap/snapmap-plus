@@ -401,17 +401,28 @@ static void test_two_instances_of_one_module(void)
     }
     free(json);
 
-    /* a multimap that stops short: two instances, but keyValues only bounds the
-     * first bucket. The second bucket has no end, so it is not a bucket, and
-     * inventing one out of whatever follows would attribute a volume to an
-     * instance the map never said owned it. */
+    /* Incomplete ownership refuses the snapshot, including an earlier bucket
+     * that happened to be readable. No partial per-module bake is published. */
     json = map_of(inst.p, ents.p, "0,1", "11,22", &n);
     CHECK(sh_nav_regions_read(json, n, &m) == 1);
-    CHECK(m.region_count == 1);
-    CHECK(m.instances[0].region_count == 1);
+    CHECK(m.invalid_geometry == 1);
+    CHECK(m.region_count == 0);
+    CHECK(m.instances[0].region_count == 0);
     CHECK(m.instances[1].region_count == 0);
-    if (m.region_count == 1) CHECK(m.regions[0].instance == 0);
     free(json);
+
+    /* Duplicate ownership, decreasing offsets and truncated value arrays
+     * cannot assign one physical solid to the wrong instance. */
+    json = map_of(inst.p, ents.p, "0,1,2,2", "11,11", &n);
+    CHECK(sh_nav_regions_read(json,n,&m));CHECK(m.invalid_geometry);free(json);
+    json = map_of(inst.p, ents.p, "0,2,1,2", "11,22", &n);
+    CHECK(sh_nav_regions_read(json,n,&m));CHECK(m.invalid_geometry);free(json);
+    json = map_of(inst.p, ents.p, "0,1,2,2", "11", &n);
+    CHECK(sh_nav_regions_read(json,n,&m));CHECK(m.invalid_geometry);free(json);
+    json = map_of(inst.p, ents.p, "0,1,2,2", "11.5,22", &n);
+    CHECK(sh_nav_regions_read(json,n,&m));CHECK(m.invalid_geometry);free(json);
+    json = map_of(inst.p, ents.p, "0,1,2,2", "11,99", &n);
+    CHECK(sh_nav_regions_read(json,n,&m));CHECK(m.invalid_geometry);free(json);
 
     bclose(&inst);
     bclose(&ents);
@@ -1122,7 +1133,7 @@ static void test_live_region_cap(void)
 
     CHECK(sh_nav_regions_read(json, n, &m) == 1);
     CHECK(m.region_count == 0);
-    CHECK(m.truncated == 0);
+    CHECK(m.truncated == 1); /* Unmarked colliding boxes also consume the solid budget. */
 
     live = live_box(TICKED, 0, 0, 0, 64, 64, 8);
     memset(&e, 0, sizeof e);
@@ -1294,6 +1305,7 @@ static void test_non_orthonormal_matrix_is_refused(void)
 
     CHECK(sh_nav_regions_read(json, n, &m) == 1);
     CHECK(m.region_count == 0);
+    CHECK(m.invalid_geometry == 1);
     free(json);
 }
 
@@ -1308,6 +1320,7 @@ static void test_reflection_is_refused(void)
 
     CHECK(sh_nav_regions_read(json, n, &m) == 1);
     CHECK(m.region_count == 0);
+    CHECK(m.invalid_geometry == 1);
     free(json);
 }
 

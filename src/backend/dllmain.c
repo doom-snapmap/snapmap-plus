@@ -449,6 +449,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_nav_bake_set_live_editor(sh_apply_engine_entity_count,
                                     sh_apply_engine_entity_valid,
                                     sh_apply_engine_entity_json, NULL);
+        sh_nav_bake_set_snapshot(sh_apply_engine_nav_snapshot, NULL);
 
         /* And the one point that read surface may be used from. Pressing Play does not
          * serialize the map, so a volume ticked this session reaches the baker only if
@@ -471,6 +472,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                 }
             }
             sh_nav_play_install(snapbuild, snapbuild_clean);
+            sh_nav_play_install_instances(results, db);
         }
 
         /* backend touch: bind the UI-interface's engine-touch vtable slots -- the LIGHT touches

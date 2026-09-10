@@ -219,18 +219,27 @@ static void test_regions_do_not_survive_the_next_map(void)
     CHECK(bytes == NULL);
 }
 
-static void test_two_marked_copies_are_refused(void)
+static void test_two_marked_copies_have_distinct_resources(void)
 {
     const int owner[2] = { 0, 1 };
-    char *json;
-    printf("marking volumes in two copies of one module is refused\n");
+    char *json;char first[384],second[384],stale[384];
+    unsigned char *bytes=NULL;size_t length=0;
+    printf("identical module names and local coordinates retain exact instance ownership\n");
     sh_nav_bake_test_reset();
     g_log_count = 0;
-    /* Both volumes marked, but they belong to different instances of the same
-     * module -- which cannot be served different navigation. */
     json = make_map("ind_dlc/room", 2, 2, 0x3u, 0x3u, owner);
     sh_nav_bake_set_map(json, strlen(json));
-    CHECK_MSG(log_contains("refused"), "the author must be told, not silently ignored");
+    sh_nav_bake_enable_instances(1);
+    CHECK(sh_nav_bake_instance_name(0,"maps/modules/ind_dlc/room/room.aas_monster48",first,sizeof first));
+    CHECK(sh_nav_bake_instance_name(1,"maps/modules/ind_dlc/room/room.aas_monster48",second,sizeof second));
+    CHECK(strcmp(first,second)!=0);
+    CHECK(!sh_nav_bake_instance_name(2,"maps/modules/ind_dlc/room/room.aas_monster48",stale,sizeof stale));
+    CHECK(!sh_nav_bake_instance_name(0,"maps/modules/other/room/room.aas_monster48",stale,sizeof stale));
+    CHECK(!sh_nav_bake_open("maps/modules/ind_dlc/room/room.aas_monster48",no_shipped_bytes,&bytes,&length));
+    strcpy_s(stale,sizeof stale,first);
+    sh_nav_bake_set_map(json,strlen(json));
+    CHECK(sh_nav_bake_instance_name(0,"maps/modules/ind_dlc/room/room.aas_monster48",first,sizeof first));
+    CHECK(strcmp(first,stale)!=0);
 }
 
 static void test_one_marked_copy_of_a_repeated_module_is_fine(void)
@@ -389,6 +398,88 @@ static void test_refresh_live_without_a_map_is_a_no_op(void)
     sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL);
 }
 
+static const char *g_snapshot_json;
+static int snapshot_read(char **out, size_t *len, void *ctx)
+{
+    (void)ctx; *out = NULL; *len = 0;
+    if (!g_snapshot_json) return 0;
+    *len = strlen(g_snapshot_json);
+    *out = (char *)malloc(*len + 1);
+    if (!*out) return 0;
+    memcpy(*out, g_snapshot_json, *len + 1); return 1;
+}
+
+static void test_complete_snapshot_tracks_creation_and_deletion(void)
+{
+    static sh_nav_map map;
+    const int owner[2] = {0, 0};
+    printf("complete snapshots update ownership, creation, deletion and the build barrier\n");
+    sh_nav_bake_test_reset();
+    sh_nav_bake_set_map(make_map("ind_dlc/room", 1, 0, 0, 0, owner),
+                        strlen(make_map("ind_dlc/room", 1, 0, 0, 0, owner)));
+    sh_nav_bake_set_snapshot(snapshot_read, NULL);
+    g_snapshot_json = make_map("ind_dlc/room", 1, 2, 3, 3, owner);
+    sh_nav_bake_refresh_live();
+    sh_nav_bake_test_copy_map(&map); CHECK(map.region_count == 2);
+    CHECK(map.instances[0].region_count == 2);
+    sh_nav_bake_build_begin();
+    g_snapshot_json = make_map("ind_dlc/room", 1, 0, 0, 0, owner);
+    sh_nav_bake_refresh_live();
+    sh_nav_bake_test_copy_map(&map); CHECK(map.region_count == 2);
+    sh_nav_bake_build_end();
+    sh_nav_bake_refresh_live();
+    sh_nav_bake_test_copy_map(&map); CHECK(map.region_count == 0);
+    CHECK(map.instances[0].region_count == 0);
+    sh_nav_bake_set_snapshot(NULL, NULL);
+}
+
+static void test_snapshot_moves_and_changes_ownership(void)
+{
+    static sh_nav_map map;
+    const int owner[2]={0,1};char before[384],after[384],*json,*value;float x;
+    const char *name="maps/modules/ind_dlc/room/room.aas_monster48";
+    sh_nav_bake_test_reset();sh_nav_bake_enable_instances(1);
+    sh_nav_bake_set_snapshot(snapshot_read,NULL);
+    g_snapshot_json=make_map("ind_dlc/room",2,2,3,3,owner);
+    sh_nav_bake_refresh_live();sh_nav_bake_test_copy_map(&map);
+    CHECK(map.instances[0].region_count==1&&map.instances[1].region_count==1);
+    CHECK(map.regions[0].instance==0&&map.regions[1].instance==1);
+    CHECK(sh_nav_bake_instance_name(0,name,before,sizeof before));x=map.regions[0].c[0][0];
+    sh_nav_bake_refresh_live();
+    CHECK(sh_nav_bake_instance_name(0,name,after,sizeof after));CHECK(!strcmp(before,after));
+    json=(char*)g_snapshot_json;
+    value=strstr(json,"\"spawnPosition\":{\"x\":0.0");CHECK(value!=NULL);
+    if(value)value[strlen("\"spawnPosition\":{\"x\":")]='1';
+    sh_nav_bake_refresh_live();sh_nav_bake_test_copy_map(&map);
+    CHECK(map.regions[0].c[0][0]==x+1);
+    CHECK(sh_nav_bake_instance_name(0,name,after,sizeof after));CHECK(strcmp(before,after)!=0);
+    g_snapshot_json=NULL;sh_nav_bake_refresh_live();
+    CHECK(!sh_nav_bake_instance_name(0,name,after,sizeof after));
+    g_snapshot_json=make_map("ind_dlc/room",2,2,3,3,owner);sh_nav_bake_refresh_live();
+    CHECK(sh_nav_bake_instance_name(1,name,after,sizeof after));
+    {
+        const int swapped[3]={1,0,1};
+        g_snapshot_json=make_map("ind_dlc/room",2,2,3,3,swapped);
+        sh_nav_bake_refresh_live();sh_nav_bake_test_copy_map(&map);
+        CHECK(map.regions[0].instance==1&&map.regions[1].instance==0);
+        CHECK(sh_nav_bake_instance_name(1,name,before,sizeof before));CHECK(strcmp(before,after)!=0);
+        /* New copied IDs join the owner's next snapshot; no load-time ID table. */
+        g_snapshot_json=make_map("ind_dlc/room",2,3,7,7,swapped);
+        sh_nav_bake_refresh_live();sh_nav_bake_test_copy_map(&map);
+        CHECK(map.region_count==3&&map.instances[1].region_count==2);
+        CHECK(map.regions[2].instance==1);
+        /* Removing a marker and changing collision each invalidate navigation. */
+        g_snapshot_json=make_map("ind_dlc/room",2,3,3,7,swapped);
+        sh_nav_bake_refresh_live();sh_nav_bake_test_copy_map(&map);
+        CHECK(map.region_count==2&&map.obstacle_count==1);
+        CHECK(map.obstacles[0].instance==1);
+        g_snapshot_json=make_map("ind_dlc/room",2,3,3,3,swapped);
+        sh_nav_bake_refresh_live();sh_nav_bake_test_copy_map(&map);
+        CHECK(map.region_count==2&&map.obstacle_count==0);
+    }
+    sh_nav_bake_set_snapshot(NULL,NULL);
+}
+
 int main(void)
 {
     printf("nav_bake_test\n");
@@ -396,7 +487,7 @@ int main(void)
     test_marked_volume_is_planned();
     test_unmarked_map_is_silent();
     test_regions_do_not_survive_the_next_map();
-    test_two_marked_copies_are_refused();
+    test_two_marked_copies_have_distinct_resources();
     test_one_marked_copy_of_a_repeated_module_is_fine();
     test_unblocking_volume_is_not_a_floor();
     test_open_is_total();
@@ -404,6 +495,8 @@ int main(void)
     test_open_never_reads_the_live_editor();
     test_refresh_live_is_callable_from_the_editor();
     test_refresh_live_without_a_map_is_a_no_op();
+    test_complete_snapshot_tracks_creation_and_deletion();
+    test_snapshot_moves_and_changes_ownership();
     printf("%s -- %d checks, %d failed\n", g_fail ? "FAILED" : "ok", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

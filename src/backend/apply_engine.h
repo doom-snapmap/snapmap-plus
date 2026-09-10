@@ -77,5 +77,8 @@ void sh_apply_engine_get_serialize_selection(sh_serialize_selection_fn *serializ
 int sh_apply_engine_entity_count(void *ctx);
 int sh_apply_engine_entity_valid(int id, void *ctx);
 int sh_apply_engine_entity_json(int id, char *out, int cap, void *ctx);
+/* A complete current edit map, including live instanceEntities ownership.
+ * Main thread only. Successful output is malloc-owned by the caller. */
+int sh_apply_engine_nav_snapshot(char **out, size_t *len, void *ctx);
 
 #endif /* B2_APPLY_ENGINE_H */

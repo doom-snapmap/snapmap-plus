@@ -6,6 +6,25 @@ where our own reimplementation was wrong, not the original SnapHak's behavior; a
 (or faithful reproduction of) the *original's* behavior belongs in [`fidelity.md`](fidelity.md)
 instead. Entries are chronological, newest first.
 
+## 2026-09-09 — Blocking Box navigation follows solid geometry and editor revisions
+
+The baker now considers every rotated box face, clips exposed standing space
+against oriented solids and agent clearance, and preserves shared support edges.
+Floating decks retain their actual undersides. Connection discovery clips whole
+edge intervals so narrow contacts can be found between fixed sample locations.
+
+Complete editor snapshots replace the load-time ID ownership lookup, covering
+creation, deletion, transforms and module reassignment. A final snapshot freezes
+the Play build revision. Temporary AAS resource names include the exact module
+instance so repeated modules cannot reuse another instance's custom geometry.
+Invalid geometry, ambiguous ownership and capacity failures refuse the candidate.
+
+Object Mode displays a green grid from validated generated areas through a
+private native render pass. Renderer hooks resolve on both executable variants;
+their frontend-to-backend render-world member offsets differ and are selected
+from the verified renderer prologue. See [navigation.md](navigation.md) for scope
+and the distinction between baked standing space and demon traversal behavior.
+
 ## 2026-09-09 — Incomplete package discovery is refused
 
 Package enumeration now distinguishes end-of-directory from a failed next-entry

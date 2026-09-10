@@ -29,11 +29,13 @@
  */
 #ifndef SNAPMAP_PLUS_NAV_PLAY_H
 #define SNAPMAP_PLUS_NAV_PLAY_H
+#include "signatures.h"
 
 /* Detour SnapMapEditToSnapBuild so the live marks are re-read before the build.
  * `status_ok` is false when the signature only resolved through the hook-tolerant
  * fallback, in which case the prologue is already somebody else's detour and we
  * refuse rather than stealing detour bytes. Returns 1 when installed. */
 int sh_nav_play_install(void *snapbuild_fn, int status_ok);
+int sh_nav_play_install_instances(const sig_result *results, size_t count);
 
 #endif /* SNAPMAP_PLUS_NAV_PLAY_H */

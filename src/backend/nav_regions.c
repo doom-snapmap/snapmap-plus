@@ -16,6 +16,8 @@
  */
 #include <stdlib.h>
 #include <string.h>
+#include <float.h>
+#include <math.h>
 
 #include "nav_regions.h"
 #include "map_shards.h"
@@ -142,7 +144,7 @@ static int navr_num_at(const char *json, size_t len, size_t off, double *out)
     if (n == 0) return 0;
     text[n] = '\0';
     *out = strtod(text, &end);
-    return end != text;
+    return end != text && *end == '\0' && _finite(*out);
 }
 
 /* A number member, or `dflt`. The editor omits a vector component that is zero,
@@ -153,7 +155,7 @@ static float navr_num(const char *json, size_t len, const sh_shard_doc *doc,
     size_t v;
     double d;
     if (!navr_value(json, len, doc, parent, key, &v)) return dflt;
-    if (!navr_num_at(json, len, v, &d)) return dflt;
+    if (!navr_num_at(json, len, v, &d)) return (float)NAN;
     return (float)d;
 }
 
@@ -207,7 +209,7 @@ static void navr_vec3(const char *json, size_t len, const sh_shard_doc *doc,
  * number small enough to compare against a position without overflowing. */
 static int navr_index(double v)
 {
-    if (!(v >= 0.0) || v > 1073741824.0) return -1;
+    if (!(v >= 0.0) || v > 1073741824.0 || v != floor(v)) return -1;
     return (int)v;
 }
 
@@ -294,9 +296,10 @@ static int navr_mat3(const char *json, size_t len, const sh_shard_doc *doc,
         for (c = 0; c < 3; c++) {
             size_t v;
             double d;
-            if (navr_value(json, len, doc, row, COMP[c], &v) &&
-                navr_num_at(json, len, v, &d))
+            if (navr_value(json, len, doc, row, COMP[c], &v)) {
+                if (!navr_num_at(json, len, v, &d) || !_finite(d)) return 0;
                 m[r][c] = (float)d;            /* elided member: identity */
+            }
         }
     }
 
@@ -318,7 +321,7 @@ static int navr_mat3(const char *json, size_t len, const sh_shard_doc *doc,
     return 1;
 }
 
-/* The walkable face of one Blocking Box, read out of its `edit` object into `r`
+/* Encode one Blocking Box as a representative face and its depth in `r`
  * -- everything about a region except whose it is. Returns 0 for a volume with
  * no face to derive: a shape that is not a box, a box with no area, or an
  * orientation that is not a rotation.
@@ -330,13 +333,10 @@ static int navr_mat3(const char *json, size_t len, const sh_shard_doc *doc,
  * the OG decompile builds in entity.c's angles-to-mat3, where
  * `mat[1] = {-sinYaw, cosYaw, 0}` is unmistakably a row.
  *
- * The walkable face is whichever of the six has the greatest +z normal. For an
- * upright box that is the top, and this reduces exactly to the old
- * `spawnPosition.z + size.z`. Because the three axis z-components satisfy
- * az^2 + bz^2 + cz^2 = 1, the best face's normal.z is always at least
- * 1/sqrt(3) -- so a face ALWAYS exists, and a box tipped past about 55 degrees
- * gets its area on what the author sees as a side. That is geometrically right
- * and is what makes a box lying on its side work at all; the report says so.
+ * Choose the greatest +z normal for a nondegenerate encoding. This is not a
+ * final walkability decision: nav_geometry reconstructs the full oriented solid
+ * from this face and depth, considers all six faces, and clips the exposed
+ * slope-eligible surfaces against the other solids and agent clearance.
  *
  * Both the load pass and the live refresh come through here, so the map on disk
  * and the map in the editor can never disagree about where a volume's walkable
@@ -360,12 +360,14 @@ static int navr_volume_face(const char *json, size_t len, const sh_shard_doc *do
     sx = navr_num(json, len, doc, box, "x", 0.0f);
     sy = navr_num(json, len, doc, box, "y", 0.0f);
     sz = navr_num(json, len, doc, box, "z", 0.0f);
-    if (sx <= 0.0f || sy <= 0.0f) return 0;    /* degenerate: no surface at all */
+    if (!_finite(sx) || !_finite(sy) || !_finite(sz) ||
+        sx <= 0.0f || sy <= 0.0f || sz <= 0.0f) return 0;
 
     at = navr_member(json, len, doc, edit, "spawnPosition", '{');
     cx = navr_num(json, len, doc, at, "x", 0.0f);
     cy = navr_num(json, len, doc, at, "y", 0.0f);
     cz = navr_num(json, len, doc, at, "z", 0.0f);
+    if (!_finite(cx) || !_finite(cy) || !_finite(cz)) return 0;
 
     if (!navr_mat3(json, len, doc, edit, m)) return 0;
 
@@ -519,7 +521,7 @@ static void navr_attribute(const char *json, size_t len, const sh_shard_doc *doc
     double v;
 
     arr = navr_member(json, len, doc, mm, "keyValues", '[');
-    if (arr < 0) return;
+    if (arr < 0) { out->invalid_geometry=1; return; }
     p = doc->c[arr].open + 1;
     stop = doc->c[arr].close;
     while (kv_count < (int)(sizeof kv / sizeof kv[0]) &&
@@ -528,9 +530,15 @@ static void navr_attribute(const char *json, size_t len, const sh_shard_doc *doc
         if (at < 0) break;
         kv[kv_count++] = at;
     }
+    if(kv_count!=out->instance_count+2 || kv[0]!=0) {
+        out->invalid_geometry=1; return;
+    }
+    for(arr=1;arr<kv_count;arr++)if(kv[arr]<kv[arr-1]) {
+        out->invalid_geometry=1; return;
+    }
 
     arr = navr_member(json, len, doc, mm, "values", '[');
-    if (arr < 0) return;
+    if (arr < 0) { out->invalid_geometry=1; return; }
     p = doc->c[arr].open + 1;
     stop = doc->c[arr].close;
     while (navr_flat_next(json, &p, stop, &v)) {
@@ -539,10 +547,18 @@ static void navr_attribute(const char *json, size_t len, const sh_shard_doc *doc
                pos >= kv[bucket + 1]) bucket++;
         /* past the last instance we recorded: the rest of `values` is the
          * orphan bucket, or buckets for instances a cap cut off */
-        if (bucket >= out->instance_count || bucket + 1 >= kv_count) return;
+        if (id < 0) { out->invalid_geometry=1; return; }
+        if (bucket >= out->instance_count || bucket + 1 >= kv_count) {
+            for(r=0;r<out->region_count;r++)if(uid[r]==id) {
+                if(out->regions[r].instance!=-1)out->invalid_geometry=1;
+                out->regions[r].instance=-2; /* explicitly orphaned */
+            }
+            pos++;continue;
+        }
         if (id >= 0 && pos >= kv[bucket]) {
             for (r = 0; r < out->region_count; r++) {
-                if (out->regions[r].instance < 0 && uid[r] == id) {
+                if (uid[r] == id) {
+                    if(out->regions[r].instance!=-1)out->invalid_geometry=1;
                     out->regions[r].instance = bucket;
                     break;
                 }
@@ -556,6 +572,7 @@ static void navr_attribute(const char *json, size_t len, const sh_shard_doc *doc
         }
         pos++;
     }
+    if(pos!=kv[kv_count-1])out->invalid_geometry=1;
 }
 
 /* ==================================================================== */
@@ -611,7 +628,16 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
             in->module[0] = '\0';
         origin = navr_member(json, len, &doc, i, "origin", '{');
         navr_vec3(json, len, &doc, origin, in->origin);
-        in->orientation = (int)navr_num(json, len, &doc, i, "orientation", 0.0f);
+        if(!_finite(in->origin[0])||!_finite(in->origin[1])||!_finite(in->origin[2]))
+            out->invalid_geometry=1;
+        {
+            int orientation=navr_member(json,len,&doc,i,"orientation",'{');
+            float value=(orientation>=0
+                ? navr_num(json,len,&doc,orientation,"value",0.0f)
+                : navr_num(json,len,&doc,i,"orientation",0.0f));
+            if(!_finite(value)||value<0||value>7||value!=floor(value))out->invalid_geometry=1;
+            else in->orientation=(int)value;
+        }
     }
 
     arr = navr_member(json, len, &doc, 0, "entities", '[');
@@ -648,15 +674,22 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
 
         /* THE MARKER. Only a volume the author ticked "AI Navigation" on is a
          * region; every other blocking volume in the map is left alone. */
-        if (!navr_bool(json, len, &doc, edit, NAVR_MARKER)) continue;
+        if (!navr_bool(json, len, &doc, edit, NAVR_MARKER) &&
+            !navr_bool(json, len, &doc, edit, "blockDemons")) continue;
 
-        if (!navr_volume_face(json, len, &doc, edit, &region)) continue;
+        if (!navr_volume_face(json, len, &doc, edit, &region)) {
+            out->invalid_geometry = 1;
+            continue;
+        }
 
         if (out->region_count >= SH_NAVR_MAX_REGIONS) {
             out->truncated = 1;
             break;
         }
+        if(vuid<0)out->invalid_geometry=1;
+        for(keep=0;keep<out->region_count;keep++)if(uid[keep]==vuid)out->invalid_geometry=1;
         region.instance = -1;
+        region.marked = navr_bool(json,len,&doc,edit,NAVR_MARKER);
         region.block_demons = navr_bool(json, len, &doc, edit, "blockDemons");
         region.entity = self;
         out->regions[out->region_count] = region;
@@ -670,14 +703,20 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
      * is about to tick their first volume in. */
     if (arr >= 0 && (out->region_count > 0 || g_loaded.count > 0))
         navr_attribute(json, len, &doc, arr, out, uid);
+    else if(out->region_count>0)out->invalid_geometry=1;
 
     /* Keep what an instance owns and can be named for. A volume in the orphan
      * bucket, or one owned by an instance whose moduleName made no sense, has
      * no module whose AAS it could be merged into. */
     for (i = 0, keep = 0; i < out->region_count; i++) {
         int owner = out->regions[i].instance;
+        if(owner==-1)out->invalid_geometry=1;
         if (owner < 0 || owner >= out->instance_count) continue;
         if (out->instances[owner].module[0] == '\0') continue;
+        if(!out->regions[i].marked) {
+            out->obstacles[out->obstacle_count++]=out->regions[i];
+            continue;
+        }
         if (keep != i) out->regions[keep] = out->regions[i];
         out->instances[owner].region_count++;
         keep++;

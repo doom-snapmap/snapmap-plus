@@ -462,6 +462,17 @@ unsigned long sh_rawmap_swap_complete_count(void)
 typedef unsigned char (*serialize_fn_t)(void *map, void *out_idstr, unsigned char compact);
 
 static serialize_fn_t g_ser_orig = NULL;   /* the trampoline -> the real engine SerializeToJson */
+static __declspec(thread) int g_snapshot_depth;
+
+int sh_rawmap_snapshot(void *editor_serializer, void *map, void *out_idstr)
+{
+    int ok=0;
+    if (!g_ser_orig || !editor_serializer || !map || !out_idstr) return 0;
+    g_snapshot_depth++;
+    __try { ok=((serialize_fn_t)editor_serializer)(map,out_idstr,0)!=0; }
+    __finally { g_snapshot_depth--; }
+    return ok;
+}
 
 static volatile LONG     g_shadow_count = 0;
 static volatile LONGLONG g_last_bytes   = 0;
@@ -760,6 +771,7 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
      *    caller reads AL the instant we return, so every exit below returns `rc` and nothing else. The
      *    shadow is a bystander to the save -- it may never decide whether the save succeeded. */
     const unsigned char rc = g_ser_orig(map, out_idstr, compact);
+    if (g_snapshot_depth) return rc;
 
     /* 1b) embed the packages this map uses, so a player who does not have them can install them
      *     from the map itself. This runs BEFORE the shadow so the mirrored copy matches what was

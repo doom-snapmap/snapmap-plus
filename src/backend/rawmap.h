@@ -160,4 +160,8 @@ unsigned long sh_rawmap_save_count(void);
 /* Bytes written by the most recent shadow (0 if none yet) -- mirrors the reference impl's _lastSaveBytes. */
 unsigned long long sh_rawmap_save_last_bytes(void);
 
+/* Main-thread read-only serialization, bypassing save side effects. The caller
+ * constructs and destroys the output idStr with the engine's own helpers. */
+int sh_rawmap_snapshot(void *editor_serializer, void *map, void *out_idstr);
+
 #endif /* BACKEND_RAWMAP_H */
