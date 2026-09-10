@@ -40,6 +40,11 @@ int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
                             void *add_branch_tag_fn,
                             const uint8_t *module_base);
 
+/* The editor Think entry as resolved, or NULL before install ran or on a build that could not
+ * resolve it. Valid whether or not the hook went in, and it is the PRE-hook entry: the install
+ * overwrites the prologue, so a later signature scan for this function finds nothing. */
+void *sh_editor_frame_target(void);
+
 /* Could a rawmap save happen right now? 1 = yes, and it changes NOTHING either way -- ask before
  * applying a destination of your own, so a refusal cannot leave the save path moved. */
 int sh_editor_frame_can_rawmap_save(char *out_msg, int msg_capacity);

@@ -10,6 +10,7 @@
 #include "shield_sigs.h"
 #include "../backend/signatures.h"/* shared signature resolver */
 #include "../backend/host_image.h"/* exact-build gate for literal RVA fallback */
+#include "../backend/editor_frame.h"/* the backend's pre-hook EditorFrame entry */
 
 shield_engine g_eng = { 0 };
 
@@ -109,6 +110,31 @@ static int resolve_fn(const uint8_t *module_base, const char *name,
     }
 }
 
+/* EditorPump and the backend's EditorFrame are the same function, and the backend hooks it,
+ * which overwrites the prologue this scan matches on. It resolved the entry before patching,
+ * so take that address when the scan comes back empty. Bounded to the host image: a value
+ * outside it would put the Class-A unwind range somewhere that is not engine code. */
+static int adopt_backend_editor_frame(const uint8_t *module_base)
+{
+    const uint8_t *entry = (const uint8_t *)sh_editor_frame_target();
+    char msg[160];
+
+    if (entry == NULL || module_base == NULL) return 0;
+    if (entry < module_base || (size_t)(entry - module_base) > 0xFFFFFFFFu) return 0;
+
+    g_eng.editor_pump     = (uintptr_t)entry;
+    g_eng.editor_pump_rva = (uint32_t)(entry - module_base);
+    _snprintf_s(msg, sizeof msg, _TRUNCATE,
+                "EditorPump adopted from the installed editor-frame hook at 0x%x "
+                "(its prologue is a detour, so the scan cannot see it)",
+                (unsigned)g_eng.editor_pump_rva);
+    {
+        shield_fault f = { "sig", 0, msg, g_eng.editor_pump_rva, 0 };
+        shield_emit(&f);
+    }
+    return 1;
+}
+
 int shield_resolve_engine(const uint8_t *module_base)
 {
     int scanned = 0;
@@ -117,6 +143,7 @@ int shield_resolve_engine(const uint8_t *module_base)
     scanned += resolve_fn(module_base, "SetState",    &g_eng.setstate,     NULL);
     scanned += resolve_fn(module_base, "Frame",      &g_eng.frame,       NULL);
     scanned += resolve_fn(module_base, "EditorPump", &g_eng.editor_pump, &g_eng.editor_pump_rva);
+    if (g_eng.editor_pump == 0) scanned += adopt_backend_editor_frame(module_base);
     scanned += resolve_fn(module_base, "Resolver",   &g_eng.resolver,    &g_eng.resolver_rva);
     scanned += resolve_fn(module_base, "Toast",      &g_eng.toast_show,  NULL);
     scanned += resolve_fn(module_base, "IdStrCtor",  &g_eng.idstr_ctor,  NULL);

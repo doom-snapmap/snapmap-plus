@@ -44,6 +44,9 @@ typedef void (*ef_add_branch_tag_fn)(void *map);
 
 static editor_frame_fn g_frame_orig  = NULL;
 static ef_load_map_fn  g_load_map    = NULL;
+/* The entry as resolved, kept because installing the hook overwrites the prologue that
+ * identifies it. The fault shield needs the same address and scans later. */
+static void           *g_frame_entry = NULL;
 static ef_add_branch_tag_fn g_add_branch_tag = NULL;
 /* The INLINE idSnapEditorLocal OBJECT, not a pointer to one -- it is in-place constructed at a data
  * global, exactly as iface_engine.c documents. So this address IS the `this` LoadMap wants; there is
@@ -251,6 +254,10 @@ int sh_editor_frame_saved_map_dir(char *out, size_t cap, char *out_id, size_t id
 static unsigned long g_seen_swaps  = 0;   /* substituted parses already accounted for */
 static volatile LONG g_tag_faulted = 0;
 
+/* The engine's map load state; 3 is a finished load. */
+#define EF_LOAD_STATE_RUNNING 3
+static const uint8_t *g_load_state_at = NULL;
+
 /* Called from the frame hook, after the engine's own Think returned. Cheap on every frame: one
  * counter compare, and nothing else unless a substituted load actually landed. */
 static void ef_mark_substituted_map(void *editor)
@@ -275,6 +282,22 @@ static void ef_mark_substituted_map(void *editor)
     /* No map yet means the load has not finished installing it. Leave the counter alone and try
      * again next frame rather than consuming the event against a map that is not there. */
     if (map == NULL) return;
+
+    /* A non-null map is not a finished one. The tag add scans the map's tag list for a duplicate
+     * and grows it, so running it while the load is still filling that same list puts two writers
+     * on one array: whichever one grows it frees the other's copy. Wait for the load instead --
+     * the counter is untouched, so the tag lands a few frames later. An unresolved state global
+     * cannot answer this, and tagging a half-built list is the failure being avoided. */
+    {
+        DWORD state = 0;
+        if (g_load_state_at == NULL) return;
+        __try {
+            state = *(volatile const DWORD *)g_load_state_at;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return;
+        }
+        if (state != EF_LOAD_STATE_RUNNING) return;
+    }
 
     __try {
         g_add_branch_tag(map);
@@ -486,6 +509,10 @@ int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
                 ? "EF: map:branch tagger resolved -- substituted maps will save as new maps"
                 : "EF: map:branch tagger NOT resolved -- a substituted map would overwrite its slot");
 
+    /* Published before the patch and regardless of it: a skipped hook still leaves a
+     * usable address for anything that only wants to know where the function is. */
+    g_frame_entry = frame_fn;
+
     if (frame_fn == NULL) {
         backend_log("EF: editor-frame hook SKIPPED -- EditorFrame not resolved");
         return 0;
@@ -506,6 +533,13 @@ int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
      * so it is derived, never baked. A failure here is not fatal to the hook -- the frame hook is a
      * useful execution point on its own -- but it does disable the reload, which needs the object. */
     if (module_base) {
+        /* Gates the branch tag: without it the tag is never added, which costs the tag and
+         * nothing else. Adding one to a list the engine is still building is the worse half. */
+        g_load_state_at = (const uint8_t *)glb_resolve(module_base, "load_state", NULL);
+        backend_log(g_load_state_at != NULL
+                    ? "EF: load state resolved -- the branch tag waits for the load to finish"
+                    : "EF: load state UNRESOLVED -- substituted maps will not be tagged as new");
+
         g_editor_obj = glb_resolve(module_base, "editor_singleton", &st);
         if (!g_editor_obj) {
             _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -569,6 +603,11 @@ static const char *ef_rawmap_save_blocker(void)
         if (!ef_editor_live_with_map(ed, &why)) return why ? why : "the editor is not ready";
     }
     return NULL;
+}
+
+void *sh_editor_frame_target(void)
+{
+    return g_frame_entry;
 }
 
 int sh_editor_frame_can_rawmap_save(char *out_msg, int msg_capacity)
