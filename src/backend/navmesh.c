@@ -474,6 +474,7 @@ static int nav_walk_reach_chains(const nav_aas *a, char *err, size_t err_cap)
     uint32_t num_areas = a->count[L_AREAS];
     size_t bytes = (size_t)((num_reach + 7u) / 8u);
     unsigned char *seen;
+    unsigned *degrees;
     uint32_t area;
     int list, rc = 0;
 
@@ -484,15 +485,40 @@ static int nav_walk_reach_chains(const nav_aas *a, char *err, size_t err_cap)
         nav_verr(err, err_cap, "out of memory validating the reachability lists");
         return 0;
     }
+    degrees = (unsigned *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                    (size_t)num_areas * sizeof *degrees);
+    if (!degrees) {
+        nav_verr(err, err_cap, "out of memory validating outgoing reachabilities");
+        goto done;
+    }
+    /* Load rebuilds these lists from the records. An omitted list head must
+     * not hide an overflow from this gate. Cross-indices were checked above. */
+    for (area = 0; area < num_reach; area++) {
+        unsigned from = nav_be16(NAV_REC(a, L_REACH, area) + 6);
+        if (++degrees[from] > SH_AAS_MAX_AREA_REACHABILITIES) {
+            nav_verr(err, err_cap, "area %u has more than %u outgoing reachabilities",
+                     from, SH_AAS_MAX_AREA_REACHABILITIES);
+            HeapFree(GetProcessHeap(), 0, degrees);
+            goto done;
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, degrees);
 
     for (list = 0; list < 2; list++) {
         unsigned char *bits = seen + (size_t)list * bytes;
         size_t head_off = (list == 0) ? 0x14 : 0x18;
         size_t link_off = (list == 0) ? 0x20 : 0x24;
         for (area = 0; area < num_areas; area++) {
+            unsigned degree = 0;
             int32_t at = nav_be32s(NAV_REC(a, L_AREAS, area) + head_off);
             while (at != -1) {
                 uint32_t idx;
+                if (list == 0 && ++degree > SH_AAS_MAX_AREA_REACHABILITIES) {
+                    nav_verr(err, err_cap,
+                             "area %u has more than %u outgoing reachabilities",
+                             area, SH_AAS_MAX_AREA_REACHABILITIES);
+                    goto done;
+                }
                 if (at < 0 || (uint32_t)at >= num_reach) {
                     nav_verr(err, err_cap,
                              "area %u reachability list %d leaves the array at %d of %u",

@@ -35,6 +35,7 @@ typedef unsigned char (*draw_begin_fn)(void *, void *, void *);
 typedef void (*draw_end_fn)(void *);
 typedef void (*draw_matrix_fn)(void *, const void *);
 typedef void (*draw_lines_fn)(void **);
+typedef void (*draw_target_fn)(void *, void *, int, int);
 
 static SRWLOCK g_preview_lock = SRWLOCK_INIT;
 static preview_list g_lines;
@@ -52,6 +53,7 @@ static draw_begin_fn g_begin;
 static draw_end_fn g_end;
 static draw_matrix_fn g_matrix;
 static draw_lines_fn g_draw;
+static draw_target_fn g_target;
 static volatile LONG g_ready, g_faulted;
 
 void sh_nav_preview_clear(void)
@@ -121,11 +123,11 @@ static void preview_stage(void *self, const unsigned char *frame,
     g_stage(self, frame, a, b, c, d);
 }
 
-static void preview_draw(void **job)
+static void preview_draw(void **job, void *target)
 {
     void *context[5], *command, *view;
     unsigned i;
-    int begun = 0;
+    int begun = 0, rebound = 0;
     if (!g_ready || g_faulted || !TryAcquireSRWLockShared(&g_preview_lock)) return;
     __try {
         if (!g_world || !g_lines.count) __leave;
@@ -133,6 +135,10 @@ static void preview_draw(void **job)
         for (i = 0; i < PREVIEW_VIEWS; i++)
             if (g_views[i].view == view && g_views[i].world == g_world) break;
         if (i == PREVIEW_VIEWS || !view || !command) __leave;
+        if (target) {
+            rebound = 1;
+            g_target(command, target, 0, 0);
+        }
         context[0] = command; context[1] = view; context[2] = job[4];
         context[3] = g_draw_world;
         /* The consumer requests its matrix at +0xc84. Supply the actual
@@ -149,13 +155,25 @@ static void preview_draw(void **job)
     }
     __try { if (begun) g_end(g_immediate); }
     __except (EXCEPTION_EXECUTE_HANDLER) { InterlockedExchange(&g_faulted, 1); }
+    __try { if (rebound) g_target(command, job[13], 0, 0); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { InterlockedExchange(&g_faulted, 1); }
     ReleaseSRWLockShared(&g_preview_lock);
 }
 
 static void preview_post(void **job)
 {
+    void *target = NULL;
     g_post(job);
-    preview_draw(job);
+    /* OpenGL keeps separate post-process and presentation images. In the
+     * editor the final composite can read the image behind job[16], even
+     * though the post job leaves job[13] bound. Draw once into that image and
+     * restore the post target before handing control back to the engine.
+     * Vulkan's render-pass attachments remain owned by its native post job. */
+    if (g_target) __try {
+        target = job[16] ? *(void **)job[16] : NULL;
+        if (target == job[13]) target = NULL;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { InterlockedExchange(&g_faulted, 1); }
+    preview_draw(job, target);
 }
 
 static uintptr_t preview_address(const sig_result *r, size_t n, const char *name)
@@ -194,7 +212,11 @@ int sh_nav_preview_install(const sig_result *r, size_t n)
         if (!memcmp(post,vk_head,sizeof vk_head)) {
             stolen = sizeof vk_head; g_world_backend_offset = 0x852c0;
         } else if (!memcmp(post,gl_head,sizeof gl_head)) {
+            sig_result target;
             stolen = sizeof gl_head; g_world_backend_offset = 0x85280;
+            if (sig_resolve_one((const uint8_t *)GetModuleHandleW(NULL),
+                                &NAV_RENDER_TARGET_GL_SIGNATURE, &target) != SIG_OK) __leave;
+            g_target = (draw_target_fn)target.addr;
         }
         if (!stolen) __leave;
         draw = (unsigned char *)g_draw;

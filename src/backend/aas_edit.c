@@ -412,6 +412,13 @@ static int aas_reserve(aas_lump *L, int lump, unsigned need)
     return 1;
 }
 
+int sh_aas_truncate(sh_aas *a, int lump, unsigned count)
+{
+    if (!a || !aas_lump_ok(lump) || count > a->lump[lump].count) return 0;
+    a->lump[lump].count = count;
+    return 1;
+}
+
 int sh_aas_append(sh_aas *a, int lump, unsigned n, unsigned *out_first)
 {
     aas_lump *L;

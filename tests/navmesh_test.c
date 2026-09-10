@@ -833,9 +833,51 @@ static void test_prose(void)
     CHECK(sh_navmesh_strip(map, strlen(map), NULL) == NULL);   /* and nothing is removed */
 }
 
+static void test_native_reachability_limit(void)
+{
+    aas_build b;
+    unsigned i;
+    size_t extra = 256 * 40, old_end;
+    unsigned char *r, *area;
+    char err[256];
+    CHECK(build_aas(&b, 0, NODES_TREE, 0));
+    old_end = b.off[A_REACH] + 40;
+    b.p = (unsigned char *)realloc(b.p, b.len + extra);
+    CHECK(b.p != NULL);
+    if (!b.p) return;
+    memmove(b.p + old_end + extra, b.p + old_end, b.len - old_end);
+    memset(b.p + old_end, 0, extra);
+    b.len += extra;
+    for (i = A_REACH + 1; i < 22; i++) b.off[i] += extra;
+    put32(b.p + b.off[A_REACH] - 4, 257);
+    for (i = 0; i < 257; i++) {
+        r = b.p + b.off[A_REACH] + i * 40;
+        put16(r + 6, 1); put16(r + 8, 1);
+        put32(r + 0x20, i == 256 ? 0xffffffffu : i + 1);
+        put32(r + 0x24, i == 256 ? 0xffffffffu : i + 1);
+    }
+    CHECK(!sh_navmesh_validate_aas(b.p, b.len, err, sizeof err));
+    CHECK(strstr(err, "256 outgoing reachabilities") != NULL);
+    put32(b.p + b.off[A_AREAS] + 44 + 0x14, 0xffffffffu);
+    CHECK(!sh_navmesh_validate_aas(b.p, b.len, err, sizeof err));
+    CHECK(strstr(err, "256 outgoing reachabilities") != NULL);
+    put32(b.p + b.off[A_AREAS] + 44 + 0x14, 0);
+    /* 256 outgoing and 257 incoming is legal: only the outgoing ordinal is
+     * packed into eight bits. The extra route originates in area 0. */
+    r = b.p + b.off[A_REACH] + 255 * 40;
+    put32(r + 0x20, 0xffffffffu);
+    r += 40;
+    put16(r + 6, 0);
+    area = b.p + b.off[A_AREAS];
+    put32(area + 0x14, 256);
+    CHECK(sh_navmesh_validate_aas(b.p, b.len, err, sizeof err));
+    free_aas(&b);
+}
+
 int main(void)
 {
     test_validator();
+    test_native_reachability_limit();
     test_resource_names();
     test_report();
     test_reader();

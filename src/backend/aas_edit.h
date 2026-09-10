@@ -95,6 +95,9 @@ const unsigned char *sh_aas_rec_const(const sh_aas *a, int lump, unsigned i);
  * Returns 0 on allocation failure or if the lump would exceed its cap. */
 int sh_aas_append(sh_aas *a, int lump, unsigned n, unsigned *out_first);
 
+/* Remove a tail after compaction. Does not repair cross-lump references. */
+int sh_aas_truncate(sh_aas *a, int lump, unsigned count);
+
 /* ---- big-endian field helpers ------------------------------------------ */
 
 uint32_t sh_aas_get_u32(const unsigned char *rec, unsigned off);

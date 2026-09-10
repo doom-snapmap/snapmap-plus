@@ -511,6 +511,7 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
     sh_aas_free(model);
     if (!baked) {
         _snprintf_s(why, why_cap, _TRUNCATE, "%s",
+                    rep.reach_limit_exceeded ? "required routes exceed the native 256 outgoing links per area; the whole bake was refused" :
                     rep.links_truncated ? "the traversal capacity was exceeded; the whole bake was refused" :
                     rep.pieces_truncated ? "the geometry capacity was exceeded; the whole bake was refused" :
                     rep.depth_exceeded ? "the navigation tree depth was exceeded; the whole bake was refused" :
@@ -580,6 +581,12 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
                                   ? "nothing can climb that high"
                                   : "no traversal table, so nothing climbs")) : "",
                     tipped ? "; some volumes are walkable on a side face" : "");
+        if (rep.anchors_reduced) {
+            size_t at = strlen(why);
+            _snprintf_s(why + at, why_cap - at, _TRUNCATE,
+                        "; %d alternative link samples removed to fit native routing",
+                        rep.anchors_reduced);
+        }
         if (cut) {
             size_t at = strlen(why);
             _snprintf_s(why + at, why_cap - at, _TRUNCATE,

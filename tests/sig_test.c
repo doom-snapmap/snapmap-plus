@@ -158,6 +158,16 @@ int main(int argc, char **argv)
             }
         }
     }
+    {
+        sig_result target;
+        sig_status status = sig_resolve_one(base, &NAV_RENDER_TARGET_GL_SIGNATURE, &target);
+        int is_gl = strstr(argv[1], "DOOMx64.exe") != NULL;
+        if ((is_gl && (status != SIG_OK || target.rva != 0x19231e0u)) ||
+            (!is_gl && status != SIG_NOT_FOUND)) {
+            printf("BAD OpenGL navigation render-target helper: status=%d RVA=0x%x\n", status, target.rva);
+            bad++;
+        } else printf("OK  renderer-specific navigation target helper\n");
+    }
     printf("======================================================================\n");
     printf("C resolver [%s]: %zu/%zu unique; %d %s\n",
            pinned ? "pinned" : "portable", ok, total, bad,

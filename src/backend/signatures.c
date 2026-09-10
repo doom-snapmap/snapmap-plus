@@ -15,6 +15,14 @@
 #include "signatures.h"
 #include <string.h>
 
+const sig_entry NAV_RENDER_TARGET_GL_SIGNATURE = {
+    "NavRenderTargetGL",
+    "48 89 4C 24 08 53 55 57 41 55 48 83 EC 38 48 8B D9 B9 40 8D 00 00 "
+    "45 8B E9 41 8B E8 48 8B FA 48 85 D2 75 18 FF 15 ?? ?? ?? ?? "
+    "B9 01 00 00 00 89 4B 28",
+    0x19231e0u
+};
+
 /* ------------------------------------------------------------------ pattern compile + match ------ */
 
 #define SIG_MAX_PATTERN 256   /* longest signature byte length we support (DB max is ~40 bytes) */

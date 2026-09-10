@@ -148,6 +148,8 @@ typedef struct sh_aug_report {
     int      depth_exceeded;            /* past the loader's 0x80 limit */
     int      links_truncated;           /* traversal capacity exhausted;
                                          * the whole candidate is refused */
+    int      reach_limit_exceeded;      /* required routes cannot fit one area */
+    int      anchors_reduced;           /* alternative basic/traversal samples removed */
     int      climbs_declined;           /* this module already owns traversal
                                          * points on an area we would have
                                          * climbed from, so no climb or leap was

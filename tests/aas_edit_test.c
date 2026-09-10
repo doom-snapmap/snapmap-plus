@@ -718,6 +718,34 @@ static void test_settings_accessors(void)
     free_synth(&b);
 }
 
+static void test_truncate_preserves_prefix_and_clears_regrowth(void)
+{
+    aas_synth b;
+    sh_aas *a;
+    unsigned char *out;
+    size_t len;
+    unsigned first;
+    if (!synth_aas(&b, 2)) { CHECK(0); return; }
+    a = sh_aas_parse(b.p, b.len, NULL, 0);
+    CHECK(a != NULL);
+    if (!a) { free_synth(&b); return; }
+    CHECK(sh_aas_append(a, SH_AAS_L_DEPENDENCYNAMES, 3, &first));
+    memset(sh_aas_rec(a, SH_AAS_L_DEPENDENCYNAMES, first), 'x',
+           sh_aas_record_size(SH_AAS_L_DEPENDENCYNAMES));
+    CHECK(!sh_aas_truncate(a, SH_AAS_L_DEPENDENCYNAMES, first + 4));
+    CHECK(sh_aas_truncate(a, SH_AAS_L_DEPENDENCYNAMES, first));
+    CHECK(sh_aas_rec(a, SH_AAS_L_DEPENDENCYNAMES, first) == NULL);
+    out = sh_aas_write(a, &len);
+    CHECK(out && len == b.len && !memcmp(out, b.p, len));
+    if (out) HeapFree(GetProcessHeap(), 0, out);
+    CHECK(sh_aas_append(a, SH_AAS_L_DEPENDENCYNAMES, 1, &first));
+    CHECK(sh_aas_rec(a, SH_AAS_L_DEPENDENCYNAMES, first)[0] == 0);
+    CHECK(!sh_aas_truncate(NULL, SH_AAS_L_DEPENDENCYNAMES, 0));
+    CHECK(!sh_aas_truncate(a, SH_AAS_L__COUNT, 0));
+    sh_aas_free(a);
+    free_synth(&b);
+}
+
 int main(void)
 {
     test_record_sizes();
@@ -730,6 +758,7 @@ int main(void)
     test_append_caps();
     test_write_refuses_over_budget();
     test_settings_accessors();
+    test_truncate_preserves_prefix_and_clears_regrowth();
 
     if (g_failed) {
         fprintf(stderr, "%d check(s) FAILED\n", g_failed);

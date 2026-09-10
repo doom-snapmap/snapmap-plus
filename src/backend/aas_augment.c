@@ -37,6 +37,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "aas_augment.h"
 #include "nav_geometry.h"
@@ -1992,6 +1993,112 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
     return count;
 }
 
+/* Keep every route before spending the remaining native slots on alternative
+ * anchors. A route includes the demon flags, direction, animation and traversal
+ * metadata; dropping a later demon just because earlier ones filled the area
+ * would turn a capacity fix into a class-specific navigation failure.
+ * Shipped links are never removed. Generated walk/fall samples share the same
+ * budget as traversals, so a long floor edge cannot crowd out every climb. */
+static int aug_budget_traversals(aug_ctx *c, aug_trav_spec *specs, int n,
+                                 sh_aug_report *out)
+{
+    unsigned na = sh_aas_count(c->a, SH_AAS_L_AREAS), i;
+    unsigned nr = sh_aas_count(c->a, SH_AAS_L_REACHABILITIES);
+    unsigned original = out->reach_before, nb = nr - original;
+    aug_trav_spec *choices = (aug_trav_spec *)calloc(nb + n + 1, sizeof *choices);
+    unsigned *degree = (unsigned *)calloc(na, sizeof *degree);
+    int *rank = (int *)calloc(nb + n + 1, sizeof *rank);
+    unsigned char *keep = (unsigned char *)calloc(nb + n + 1, 1);
+    unsigned slots = 1, *last = NULL;
+    int k, round, max_rank = 0, written = 0;
+    while (slots < 2 * (nb + (unsigned)n + 1)) slots <<= 1;
+    last = (unsigned *)calloc(slots, sizeof *last);
+    if (!choices || !degree || !rank || !keep || !last) { c->failed = 1; goto done; }
+    for (i = 0; i < nb; i++) {
+        const unsigned char *r = sh_aas_rec_const(c->a, SH_AAS_L_REACHABILITIES, original+i);
+        choices[i].from_area = sh_aas_get_u16(r, RE_FROM_AREA);
+        choices[i].to_area = sh_aas_get_u16(r, RE_TO_AREA);
+        choices[i].travel_flags = sh_aas_get_u32(r, RE_TRAVEL_FLAGS);
+    }
+    /* Reject unusable integer endpoints before choosing route representatives.
+     * Otherwise one invalid anchor stops emission of every later traversal, or
+     * consumes the only slot reserved for another usable anchor of that route. */
+    for (k = 0; k < n; k++) {
+        double start[3], end[3];
+        if (aug_reach_point(c->a, specs[k].from_area, specs[k].start, start) &&
+            aug_reach_point(c->a, specs[k].to_area, specs[k].end, end))
+            choices[nb + written++] = specs[k];
+    }
+    n = (int)nb + written;
+    written = 0;
+    for (i = 0; i < original; i++) {
+        const unsigned char *r = sh_aas_rec_const(c->a, SH_AAS_L_REACHABILITIES, i);
+        unsigned from = sh_aas_get_u16(r, RE_FROM_AREA);
+        if (from >= na || ++degree[from] > SH_AAS_MAX_AREA_REACHABILITIES)
+            goto overflow;
+    }
+    for (k = 0; k < n; k++) {
+        const aug_trav_spec *s = &choices[k];
+        const unsigned char *name = (const unsigned char *)s->anim;
+        unsigned hash = 2166136261u, bucket;
+        if (choices[k].from_area < 0 || (unsigned)choices[k].from_area >= na)
+            goto overflow;
+        hash = (hash ^ (unsigned)s->from_area) * 16777619u;
+        hash = (hash ^ (unsigned)s->to_area) * 16777619u;
+        hash = (hash ^ s->travel_flags) * 16777619u;
+        hash = (hash ^ s->d30) * 16777619u;
+        while (*name) hash = (hash ^ *name++) * 16777619u;
+        bucket = hash & (slots - 1);
+        while (last[bucket]) {
+            unsigned j = last[bucket] - 1;
+            if (choices[j].from_area == s->from_area &&
+                choices[j].to_area == s->to_area &&
+                choices[j].travel_flags == s->travel_flags &&
+                choices[j].d30 == s->d30 && !strcmp(choices[j].anim, s->anim)) {
+                rank[k] = rank[j] + 1;
+                break;
+            }
+            bucket = (bucket + 1) & (slots - 1);
+        }
+        last[bucket] = (unsigned)k + 1;
+        if (rank[k] > max_rank) max_rank = rank[k];
+        if (!rank[k]) {
+            if (++degree[choices[k].from_area] > SH_AAS_MAX_AREA_REACHABILITIES)
+                goto overflow;
+            keep[k] = 1;
+        }
+    }
+    /* Round-robin across routes, retaining input order when no reduction is
+     * needed. The collector tries midpoint anchors first. */
+    for (round = 1; round <= max_rank && round < SH_AAS_MAX_AREA_REACHABILITIES; round++) for (k = 0; k < n; k++) {
+        unsigned from = (unsigned)choices[k].from_area;
+        if (rank[k] == round && degree[from] < SH_AAS_MAX_AREA_REACHABILITIES) {
+            degree[from]++;
+            keep[k] = 1;
+        }
+    }
+    /* Only generated basic links move. Shipped traversalPoint indices still
+     * refer to the unchanged prefix; new traversal points are emitted later.
+     * aug_relink rebuilds every list after this compaction. */
+    nr = original;
+    for (i = 0; i < nb; i++) if (keep[i]) {
+        if (nr != original+i)
+            memcpy(sh_aas_rec(c->a, SH_AAS_L_REACHABILITIES, nr),
+                   sh_aas_rec_const(c->a, SH_AAS_L_REACHABILITIES, original+i), 40);
+        nr++;
+    }
+    if (!sh_aas_truncate(c->a, SH_AAS_L_REACHABILITIES, nr)) { c->failed = 1; goto done; }
+    for (k = (int)nb; k < n; k++) if (keep[k]) specs[written++] = choices[k];
+    out->anchors_reduced = n - written - (int)(nr - original);
+    goto done;
+overflow:
+    out->reach_limit_exceeded = 1;
+    c->failed = 1;
+done:
+    free(choices); free(keep); free(rank); free(degree); free(last);
+    return c->failed ? 0 : written;
+}
+
 /* Write the specs as reachabilities, traversalPoints and animation names.
  *
  * The layout is copied from a shipped donor: the traversal reachabilities are a
@@ -2672,19 +2779,13 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                      * author exactly like a complete one. */
                     if (got == room) { out->links_truncated = 1; c.failed = 1; break; }
                 }
-                /* Count leaps only for specs that were actually WRITTEN.
-                 * aug_emit_traversals can decline the whole set -- a module that
-                 * already owns traversal points on an area we climb from -- and
-                 * counting the collected specs beforehand reported leaps the
-                 * payload does not contain, which is a report that lies to the
-                 * author about what their map got.
-                 *
-                 * A leap and a climb write the same five records and are
-                 * indistinguishable in the payload afterwards, so the count has
-                 * to come from the specs; it just has to come from the ones that
-                 * survived. */
-                if (!c.failed && total > 0 && aug_emit_traversals(&c, specs, total) > 0) {
-                    for (i = 0; i < total; i++) {
+                /* Budget basic links and traversals together before allocating
+                 * traversal-point indices. Report only emitted leap samples. */
+                if (!c.failed) total = aug_budget_traversals(&c, specs, total, out);
+                if (!c.failed && total > 0) {
+                    int written = aug_emit_traversals(&c, specs, total);
+                    if (written != total) c.failed = 1;
+                    for (i = 0; i < written; i++) {
                         if (!specs[i].is_leap) continue;
                         for (j = 0; j < n; j++)
                             if (out->platforms[j].area == specs[i].from_area ||

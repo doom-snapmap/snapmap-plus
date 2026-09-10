@@ -73,6 +73,9 @@
 
 #include <stddef.h>
 
+/* The native router packs an outgoing reachability ordinal into eight bits. */
+#define SH_AAS_MAX_AREA_REACHABILITIES 256u
+
 /* ---- the frozen wire format ------------------------------------------- */
 
 #define SH_SMNAV_MAGIC          "smnav1."

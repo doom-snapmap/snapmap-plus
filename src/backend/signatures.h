@@ -59,6 +59,8 @@ typedef struct sig_result {
 /* The shipped engine signature database. NULL-terminated
  * (the final entry has name==NULL). */
 extern const sig_entry BACKEND_ENGINE_SIGNATURES[];
+/* OpenGL-only helper; resolved only after identifying the OpenGL post job. */
+extern const sig_entry NAV_RENDER_TARGET_GL_SIGNATURE;
 
 /* Count of real entries in BACKEND_ENGINE_SIGNATURES (excluding the NULL terminator). */
 size_t sig_db_count(void);

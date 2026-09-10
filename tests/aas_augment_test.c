@@ -2081,9 +2081,76 @@ static void test_narrow_partial_contacts(void)
     sh_aas_free(a);
 }
 
+static void test_dense_climbs_fit_native_routing(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p[36];
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO };
+    unsigned degree[128] = {0}, i, nr;
+    int j;
+    unsigned char *bytes;
+    size_t len;
+    char err[256];
+    load_synthetic_traversal_table();
+    for (j = 0; j < 36; j++) {
+        float x = -1800.0f + (j % 6) * 600.0f;
+        float y = -1800.0f + (j / 6) * 600.0f;
+        mkplat(&p[j], x, y, x + 300, y + 300, 128, "raised block");
+    }
+    CHECK(sh_aas_augment(a, p, 36, &o, &rep));
+    CHECK(rep.anchors_reduced > 0);
+    nr = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
+    for (i = 0; i < nr; i++) {
+        const unsigned char *r = sh_aas_rec_const(a, SH_AAS_L_REACHABILITIES, i);
+        unsigned from = sh_aas_get_u16(r, 6);
+        CHECK(from < 128);
+        if (from < 128) CHECK(++degree[from] <= 256);
+    }
+    for (j = 0; j < rep.platform_count; j++) {
+        CHECK(rep.platforms[j].emitted);
+        CHECK(rep.platforms[j].demons == 1);
+        CHECK(reach_exists(a, 1, rep.platforms[j].area));
+        CHECK(reach_exists(a, rep.platforms[j].area, 1));
+    }
+    bytes = sh_aas_write(a, &len);
+    CHECK(bytes != NULL);
+    if (bytes) {
+        CHECK(sh_navmesh_validate_aas(bytes, len, err, sizeof err));
+        HeapFree(GetProcessHeap(), 0, bytes);
+    }
+    sh_aas_free(a);
+}
+
+static void test_required_routes_over_native_limit_refuse_bake(void)
+{
+    sh_aas *a = load_module();
+    sh_aug_platform p;
+    sh_aug_report rep;
+    sh_aug_opts o = { SH_AUG_FALL_AUTO, 1, SH_AUG_TRAVERSAL_AUTO };
+    unsigned original = sh_aas_count(a, SH_AAS_L_REACHABILITIES), first, i;
+    CHECK(original <= 256);
+    CHECK(sh_aas_append(a, SH_AAS_L_REACHABILITIES, 256 - original, &first));
+    for (i = 0; i < 256; i++) {
+        unsigned char *r = sh_aas_rec(a, SH_AAS_L_REACHABILITIES, i);
+        sh_aas_put_u16(r, 6, 1); sh_aas_put_u16(r, 8, 1);
+        sh_aas_put_i32(r, 32, i == 255 ? -1 : (int)i + 1);
+        sh_aas_put_i32(r, 36, i == 255 ? -1 : (int)i + 1);
+    }
+    sh_aas_put_i32(sh_aas_rec(a, SH_AAS_L_AREAS, 1), 20, 0);
+    sh_aas_put_i32(sh_aas_rec(a, SH_AAS_L_AREAS, 1), 24, 0);
+    load_synthetic_traversal_table();
+    mkplat(&p, -150, -150, 150, 150, 128, "raised block");
+    CHECK(!sh_aas_augment(a, &p, 1, &o, &rep));
+    CHECK(rep.reach_limit_exceeded);
+    sh_aas_free(a);
+}
+
 int main(void)
 {
     printf("aas_augment_test\n");
+    test_dense_climbs_fit_native_routing();
+    test_required_routes_over_native_limit_refuse_bake();
     test_fixture_resolves();
     test_intersecting_bridge_routes();
     test_exposed_edges_remain_walls();
