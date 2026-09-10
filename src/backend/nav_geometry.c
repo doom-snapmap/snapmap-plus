@@ -135,39 +135,67 @@ static int ng_coplanar(const ng_face *a,const ng_face *b)
     return fabs(ng_dot(a->normal,d))<NG_EPS;
 }
 
+/* Intersect a moving standing body with one OBB using all separating axes.
+ * Parameter bounds select either a finite segment or an outward ray. */
+static int ng_body_interval(const ng_box *b,const double start[3],
+    const double delta[3],double radius,double height,double *lo,double *hi)
+{
+    int a,k,j;
+    double axes[15][3]={{0}},centre[3];
+    for(k=0;k<3;k++){axes[k+3][k]=1.0;centre[k]=b->c[k];}
+    centre[2]-=height*0.5;
+    for(a=0;a<3;a++)for(k=0;k<3;k++)axes[a][k]=b->axis[a][k];
+    for(a=0;a<3;a++)for(k=0;k<3;k++){
+        double *v=axes[6+a*3+k];
+        v[(k+1)%3]=b->axis[a][(k+2)%3];
+        v[(k+2)%3]=-b->axis[a][(k+1)%3];
+    }
+    for(a=0;a<15&&*lo<*hi;a++) {
+        double len=sqrt(ng_dot(axes[a],axes[a])),rad,speed,offset,l,h;
+        if(len<1e-8)continue;
+        for(k=0;k<3;k++)axes[a][k]/=len;
+        rad=radius*(fabs(axes[a][0])+fabs(axes[a][1]))+
+            height*0.5*fabs(axes[a][2]);
+        for(j=0;j<3;j++)rad+=b->half[j]*fabs(ng_dot(axes[a],b->axis[j]));
+        rad-=NG_EPS; /* Mere contact does not intersect the open solid. */
+        offset=ng_dot(axes[a],start)-ng_dot(axes[a],centre);
+        speed=ng_dot(axes[a],delta);
+        if(fabs(speed)<1e-12){if(fabs(offset)>=rad)return 0;continue;}
+        l=(-rad-offset)/speed;h=(rad-offset)/speed;
+        if(l>h){double t=l;l=h;h=t;}
+        if(l>*lo)*lo=l;if(h<*hi)*hi=h;
+    }
+    return *lo<*hi;
+}
+
 int sh_nav_geometry_path_clear(const sh_aug_platform *src,int count,
     int skip_a,int skip_b,const double start[3],const double end[3],
     double radius,double height)
 {
-    int i,a,k,j;
+    int i,k;double delta[3];
+    for(k=0;k<3;k++)delta[k]=end[k]-start[k];
     for(i=0;i<count;i++) {
-        ng_box b; double axes[15][3]={{0}},lo=0.0,hi=1.0,centre[3];
+        ng_box b;double lo=0.0,hi=1.0;
         if(i==skip_a||i==skip_b||src[i].depth==0.0f)continue;
         if(!ng_box_read(&src[i],&b))return 0;
-        for(k=0;k<3;k++){axes[k+3][k]=1.0;centre[k]=b.c[k];}
-        centre[2]-=height*0.5;
-        for(a=0;a<3;a++)for(k=0;k<3;k++)axes[a][k]=b.axis[a][k];
-        for(a=0;a<3;a++)for(k=0;k<3;k++){
-            double *v=axes[6+a*3+k];
-            v[(k+1)%3]=b.axis[a][(k+2)%3];
-            v[(k+2)%3]=-b.axis[a][(k+1)%3];
-        }
-        for(a=0;a<15&&lo<hi;a++) {
-            double len=sqrt(ng_dot(axes[a],axes[a])),rad,speed,offset,l,h;
-            if(len<1e-8)continue;
-            for(k=0;k<3;k++)axes[a][k]/=len;
-            rad=radius*(fabs(axes[a][0])+fabs(axes[a][1]))+
-                height*0.5*fabs(axes[a][2]);
-            for(j=0;j<3;j++)rad+=b.half[j]*fabs(ng_dot(axes[a],b.axis[j]));
-            rad-=NG_EPS; /* Mere contact does not intersect the open solid. */
-            offset=ng_dot(axes[a],start)-ng_dot(axes[a],centre);
-            speed=ng_dot(axes[a],end)-ng_dot(axes[a],start);
-            if(fabs(speed)<1e-12){if(fabs(offset)>=rad){lo=1.0;hi=0.0;}continue;}
-            l=(-rad-offset)/speed;h=(rad-offset)/speed;
-            if(l>h){double t=l;l=h;h=t;}
-            if(l>lo)lo=l;if(h<hi)hi=h;
-        }
-        if(lo<hi)return 0;
+        if(ng_body_interval(&b,start,delta,radius,height,&lo,&hi))return 0;
+    }
+    return 1;
+}
+
+int sh_nav_geometry_ray_exit(const sh_aug_platform *src,const double start[3],
+    const double direction[3],double radius,double height,double *distance)
+{
+    ng_box box;double lo=0.0,hi=1e9;int k;
+    if(!src||!start||!direction||!distance||!ng_box_read(src,&box)||
+       !isfinite(radius)||radius<0||!isfinite(height)||height<=0)return 0;
+    for(k=0;k<3;k++)if(!isfinite(start[k])||!isfinite(direction[k]))return 0;
+    if(ng_dot(direction,direction)<1e-12)return 0;
+    *distance=0.0;
+    if(!box.solid)return 1;
+    if(ng_body_interval(&box,start,direction,radius,height,&lo,&hi)) {
+        if(hi>=1e9)return 0;
+        *distance=hi;
     }
     return 1;
 }

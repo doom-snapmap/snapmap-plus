@@ -81,7 +81,7 @@ typedef struct sh_aug_report {
     unsigned reach_before, reach_after;
     unsigned depth_before, depth_after;
     int      depth_exceeded;            /* past the loader's 0x80 limit */
-    int      links_truncated;           /* traversal capacity exhausted;
+    int      links_truncated;           /* traversal allocation failed;
                                          * the whole candidate is refused */
     int      reach_limit_exceeded;      /* required routes cannot fit one area */
     int      anchors_reduced;           /* alternative basic/traversal samples removed */

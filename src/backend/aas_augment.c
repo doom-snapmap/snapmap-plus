@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 
 #include "aas_augment.h"
 #include "nav_geometry.h"
@@ -1674,7 +1675,33 @@ typedef struct aug_trav_spec {
     int      is_leap;       /* a gap crossing rather than a climb, for the report */
 } aug_trav_spec;
 
-#define AUG_MAX_TRAVERSALS 2048
+typedef struct aug_trav_buffer {
+    aug_trav_spec *data;
+    int count, capacity;
+} aug_trav_buffer;
+
+/* Candidate storage is independent of the native per-area routing budget.
+ * A geometry edit can add many valid contact intervals at once. Grow before
+ * writing rather than rejecting the complete bake at a fixed sample count. */
+static aug_trav_spec *aug_trav_append(aug_ctx *c, aug_trav_buffer *buffer)
+{
+    if (buffer->count == buffer->capacity) {
+        int capacity;
+        aug_trav_spec *data;
+        if (buffer->capacity > INT_MAX / 2) goto failed;
+        capacity = buffer->capacity ? buffer->capacity * 2 : 256;
+        if ((size_t)capacity > (size_t)-1 / sizeof *data) goto failed;
+        data = (aug_trav_spec *)realloc(buffer->data, (size_t)capacity * sizeof *data);
+        if (!data) goto failed;
+        buffer->data = data;
+        buffer->capacity = capacity;
+    }
+    return &buffer->data[buffer->count++];
+failed:
+    c->rep->links_truncated = 1;
+    c->failed = 1;
+    return NULL;
+}
 
 /* Try midpoint anchors first, then spread along the edge. Per-demon animation
  * offsets need different amounts of clear floor, so one anchor can reject an
@@ -1745,18 +1772,55 @@ static int aug_path_is_clear(aug_ctx *c, const aug_peer *peers, int npeers,
     return 1;
 }
 
+/* Prepared edges bound standing space and sit inside the physical ledge.
+ * Animation offsets start at the physical ledge. Floor endpoints must also
+ * clear the complete oriented solid, whose lower face can overhang that edge. */
+static int aug_floor_traversal_point(aug_ctx *c,const aug_peer *owner,
+    const aug_side *side,double x,double y,double offset,double point[3])
+{
+    aug_quad floor;int have_floor=aug_original_floor(c->a,(unsigned)side->floor_area,&floor);
+    double distance=offset;
+    if(owner&&owner->prepared&&owner->source>=0&&owner->source<c->solid_count) {
+        double lip=1e9,body_exit,origin[3],direction[3];int e;
+        for(e=0;e<owner->support.count;e++) {
+            double normal[2],speed,inside;
+            aug_edge_normal_in(&owner->support,e,normal);
+            speed=normal[0]*side->out[0]+normal[1]*side->out[1];
+            inside=normal[0]*(x-owner->support.c[e][0])+normal[1]*(y-owner->support.c[e][1]);
+            if(speed < -1e-9 && -inside/speed<lip)lip=-inside/speed;
+        }
+        if(lip>=1e9)return 0;
+        if(lip>0)distance+=lip;
+        origin[0]=x;origin[1]=y;
+        origin[2]=have_floor?aug_z_at(&floor,x,y):side->far_z;
+        direction[0]=side->out[0];direction[1]=side->out[1];
+        direction[2]=have_floor?aug_z_at(&floor,x+direction[0],y+direction[1])-origin[2]:0;
+        if(!sh_nav_geometry_ray_exit(&c->solids[owner->source],origin,direction,
+                                     c->radius,c->height,&body_exit))return 0;
+        /* Cover the later integer-coordinate rounding without changing the
+         * standing surface or its boundary. */
+        if(body_exit>0&&distance<body_exit+2.0)distance=body_exit+2.0;
+    }
+    point[0]=x+side->out[0]*distance;
+    point[1]=y+side->out[1]*distance;
+    point[2]=have_floor?aug_z_at(&floor,point[0],point[1]):side->far_z;
+    return 1;
+}
+
 /* Collect per-demon climbs and leaps for usable edge segments in both
  * directions. Refuse endpoints that resolve outside their claimed BSP areas.
  */
 static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                                const aug_quad *req, const aug_peer *peers,
-                               int npeers, aug_trav_spec *out, int cap)
+                               int npeers, aug_trav_buffer *buffer)
 {
     aug_side sides[512];
     int n, i, k, d, count = 0;
+    const aug_peer *owner=NULL;
 
     if (c->o->traversal == SH_AUG_TRAVERSAL_NEVER) return 0;
     if (!sh_trav_ready()) return 0;
+    for(i=0;i<npeers;i++)if(peers[i].area==ai){owner=&peers[i];break;}
 
     n = aug_edge_segments(c, ai, eff, req, peers, npeers, sides,
                           (int)(sizeof sides / sizeof sides[0]));
@@ -1792,7 +1856,7 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
 
         for (d = 0; d < 2; d++) {                          /* UP then DOWN */
             int up = (d == SH_TRAV_UP);
-            for (k = 0; k < sh_trav_monster_count() && count < cap; k++) {
+            for (k = 0; k < sh_trav_monster_count(); k++) {
                 const sh_trav_monster *m = sh_trav_monster_at(k);
                 char path[SH_TRAV_PATH_CAP];
                 float off = 0.0f;
@@ -1802,7 +1866,7 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
 
                 if (!m) continue;
                 dirn = leap ? SH_TRAV_ACROSS : d;
-                if (!sh_trav_select(m, dirn, (float)span, path, sizeof path,
+                if (sides[i].generated && !sh_trav_select(m, dirn, (float)span, path, sizeof path,
                                     &off, &dist, &time))
                     continue;                               /* this demon cannot */
                 if (off < 0.0f) off = -off;
@@ -1837,11 +1901,22 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                                 path,sizeof path,&off,&dist,&time))continue;
                         }
                     } else {
-                        outer_pt[0] = bx + sides[i].out[0] * (double)off;
-                        outer_pt[1] = by + sides[i].out[1] * (double)off;
-                        aug_quad floor;
-                        outer_pt[2] = aug_original_floor(c->a,(unsigned)sides[i].floor_area,&floor)?
-                            aug_z_at(&floor,outer_pt[0],outer_pt[1]):sides[i].far_z;
+                        int attempt,selected=0;
+                        /* Select at this anchor's elevation, then recheck if
+                         * moving along a sloped native floor changes the clip.
+                         * A nonconvergent choice is not emitted. */
+                        off=0.0f;
+                        for(attempt=0;attempt<=SH_TRAV_DISTANCES;attempt++) {
+                            float next_offset;double actual_span;
+                            if(!aug_floor_traversal_point(c,owner,&sides[i],bx,by,fabs(off),outer_pt))break;
+                            actual_span=fabs(inner_pt[2]-outer_pt[2]);
+                            if(actual_span<=c->step||!sh_trav_select(m,dirn,(float)actual_span,
+                                path,sizeof path,&next_offset,&dist,&time))break;
+                            next_offset=(float)fabs(next_offset);
+                            if(next_offset==off){selected=1;break;}
+                            off=next_offset;
+                        }
+                        if(!selected)continue;
                     }
                     if (sh_aas_point_area(c->a, (float)inner_pt[0], (float)inner_pt[1],
                                           (float)(inner_pt[2] + 2.0)) != ai) continue;
@@ -1854,13 +1929,18 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                         double stored[3];
                         if(!aug_reach_point(c->a,ai,inner_pt,stored)||
                            !aug_reach_point(c->a,sides[i].floor_area,outer_pt,stored))continue;
+                        if(!sides[i].generated&&
+                           !sh_nav_geometry_path_clear(c->solids,c->solid_count,-1,-1,
+                               stored,stored,c->radius,c->height))continue;
                     }
                     placed = 1;
                     break;
                 }
                 if (!placed) continue;      /* nowhere on this segment works for it */
 
-                sp = &out[count++];
+                sp = aug_trav_append(c, buffer);
+                if (!sp) return count;
+                count++;
                 memset(sp, 0, sizeof *sp);
                 sp->travel_flags = m->travel_flags;
                 sp->d30 = m->d30;
@@ -2642,18 +2722,14 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
 
         /* Append traversals last to keep their reachabilities in one tail. */
         {
-            aug_trav_spec *specs = (aug_trav_spec *)HeapAlloc(
-                GetProcessHeap(), 0, AUG_MAX_TRAVERSALS * sizeof(aug_trav_spec));
-            if (specs) {
+            aug_trav_buffer buffer = {0};
+            {
                 int total = 0;
-                for (i = 0; i < nmade; i++) {
-                    int room = AUG_MAX_TRAVERSALS - total;
-                    int got = aug_traversal_specs(&c, made[i], &effs[i], &reqs[i],
-                                                  peers, nmade, specs + total, room);
-                    total += got;
-                    /* A full collector may have omitted routes; report capacity exhaustion. */
-                    if (got == room) { out->links_truncated = 1; c.failed = 1; break; }
-                }
+                aug_trav_spec *specs;
+                for (i = 0; i < nmade && !c.failed; i++)
+                    aug_traversal_specs(&c, made[i], &effs[i], &reqs[i], peers, nmade, &buffer);
+                specs = buffer.data;
+                total = buffer.count;
                 /* Budget basic links and traversals together before allocating
                  * traversal-point indices. Report only emitted leap samples. */
                 if (!c.failed) total = aug_budget_traversals(&c, specs, total, out);
@@ -2668,8 +2744,8 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                                 out->platforms[j].leaps++;
                     }
                 }
-                HeapFree(GetProcessHeap(), 0, specs);
-            } else { c.failed = 1; }
+                free(specs);
+            }
         }
         /* Report gaps beyond contact/step handling but shorter than available
          * leaps. Both platforms can have floor routes without being linked to

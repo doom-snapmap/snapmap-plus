@@ -315,6 +315,24 @@ references and experimentation, since there isn't a single authoritative list.
 
 ---
 
+## AI navigation on Blocking Boxes
+
+Enable **AI Navigation** and **Block Demons** on a Blocking Box to use its exposed,
+walkable surfaces for demon navigation. Rotating a box can make one of its sides
+the new walking surface. Slopes retain their actual angle, and overlapping boxes
+contribute their exposed surfaces.
+
+The green preview shows the smallest demon navigation size. Larger demons need
+more standing room and clearance, so a narrow green surface may still be too small
+for a hell knight. Climbing also requires an available traversal animation and
+clear approach and landing positions; the floor-side positions account for the
+whole rotated box, including an overhanging slope.
+
+Adding boxes does not impose a fixed 2,048-traversal cutoff. There are still engine
+limits on navigation complexity. If a bake cannot fit safely, Snapmap+ refuses
+that module's custom navigation and records the reason in `sh_backend.log`.
+Use `sh_navmesh` in the game console for the current bake report.
+
 ## The Assets Tab
 
 The Assets tab is a searchable browser over **everything DOOM's own shipped files contain** — every
