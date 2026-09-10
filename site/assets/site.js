@@ -4,9 +4,10 @@
    2. Lightbox — click any framed screenshot to focus it full-screen.
    3. Guide TOC — builds the sticky sidebar from the rendered guide's headings.
    4. Mobile nav — the hamburger menu in the sticky header.
+   5. Changelog copy — formatted release announcements for community posts.
 
    The changelog page is rendered statically by Jekyll from CHANGELOG.md
-   (see .github/workflows/pages.yml); it needs no script. */
+   (see .github/workflows/pages.yml); copying is a progressive enhancement. */
 
 (function () {
   "use strict";
@@ -202,6 +203,71 @@
     else if (mq.addListener) mq.addListener(onChange);
   }
 
+  /* ---------- 5. changelog copy ---------- */
+
+  function releaseAnnouncement(release) {
+    var parts = [
+      "## Snapmap+ " + release.querySelector("h2").textContent.trim(),
+      release.querySelector("time").textContent.trim()
+    ];
+    // Read the rendered notes so every displayed paragraph and bullet is included.
+    release.querySelectorAll(".release-notes > *").forEach(function (block) {
+      var text = block.textContent.trim();
+      if (!text) return;
+      if (block.tagName === "UL") {
+        text = Array.prototype.map.call(block.children, function (item) {
+          return "- " + item.textContent.trim();
+        }).join("\n");
+      } else if (block.querySelector("strong")) {
+        text = "**" + text + "**";
+      } else if (block.querySelector("em")) {
+        text = "_" + text + "_";
+      }
+      if (text) parts.push(text);
+    });
+    parts.push("[View on GitHub](" + release.querySelector(".release-links a").href + ")");
+    return parts.join("\n\n");
+  }
+
+  function initChangelogCopy() {
+    if (!navigator.clipboard || !navigator.clipboard.writeText) return;
+    document.querySelectorAll(".release-copy").forEach(function (button) {
+      var release = button.closest(".release");
+      var status = release.querySelector(".release-copy-status");
+      var label = "Copy changelog for " + release.querySelector("h2").textContent.trim();
+      var resetTimer;
+      var copying = false;
+      button.hidden = false;
+      button.setAttribute("aria-label", label);
+      button.addEventListener("click", async function () {
+        if (copying) return;
+        copying = true;
+        clearTimeout(resetTimer);
+        button.classList.remove("is-copied");
+        button.setAttribute("aria-label", label);
+        button.title = "Copy changelog";
+        status.textContent = "";
+        try {
+          await navigator.clipboard.writeText(releaseAnnouncement(release));
+          button.classList.add("is-copied");
+          button.setAttribute("aria-label", "Changelog copied");
+          button.title = "Copied!";
+          status.textContent = "Copied!";
+        } catch (error) {
+          status.textContent = "Couldn't copy. Try again or select the notes to copy manually.";
+        } finally {
+          copying = false;
+          resetTimer = setTimeout(function () {
+            button.classList.remove("is-copied");
+            button.setAttribute("aria-label", label);
+            button.title = "Copy changelog";
+            status.textContent = "";
+          }, 3000);
+        }
+      });
+    });
+  }
+
   /* ---------- boot ---------- */
 
   function boot() {
@@ -209,6 +275,7 @@
     initLightbox();
     initToc();
     initNav();
+    initChangelogCopy();
   }
 
   if (document.readyState === "loading") {

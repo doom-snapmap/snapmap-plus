@@ -302,6 +302,17 @@ These optional checks print recognized-record counts, streamed and retained meta
 Mega2 table bytes left on disk. They read the indexes, Wwise manifest, VMTR tables, and Mega2 headers
 in place; they do not write to the game directory.
 
+### Website changelog
+
+The website in `site/` renders release notes from `CHANGELOG.md` through
+`tools/changelog.py` and Jekyll. Each release has a Lucide copy button beside
+"View on GitHub" that copies its title, date, complete notes, and release link
+as Markdown for community announcements, including Discord. Successful copies
+show a green check for three seconds; failed copies show an inline message.
+The button is available when JavaScript and the browser Clipboard API are enabled.
+When changing this feature, verify the copied content, success/reset and failure
+states, keyboard access, and narrow layouts in a browser.
+
 ## 8. The pull-request workflow
 
 1. **Branch:** `git switch -c fix/steam-path-detection` (or `feature/<thing>`).
