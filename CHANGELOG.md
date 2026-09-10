@@ -3,6 +3,26 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.10 -- 2026-09-10 (beta)
+
+**Navigation built from a volume's real solid shape**
+
+Marked Blocking Boxes now bake navigation from their actual oriented solid geometry, so tilted boxes, intersecting pillars, floating decks and chained platforms all work, demons leap gaps between platforms, and green outlines show the validated areas. Weapon packages can also choose how ammo is displayed.
+
+### New
+- Override packages can supply their own weapon HUD settings to show either the engine-default or weapon-capacity ammo presentation, changing presentation only and never ammunition or gameplay.
+
+### Improved
+- Navigation is built from each marked volume's real solid geometry, so boxes tipped off upright, intersecting pillars, shared supports and floating decks all become walkable instead of claiming ground a demon then stands stuck in.
+- Platforms standing together now link directly to each other instead of routing demons down to the module floor and back up, and a gap between two near-level platforms becomes a leap when shipped data covers the distance.
+- Climbs are now added to modules that already ship traversals of their own, so roughly half of all modules no longer come out with no way onto your platforms.
+
+### Fixed
+- AI Navigation now uses a different underlying map field, with older marks migrating as the map loads so your existing maps keep working and the game's own obstacle behaviour is left alone.
+- Dense constructions no longer fail when Play loads their navigation, and the green navigation preview now reaches the picture on the OpenGL renderer.
+
+_Plus 12 smaller fixes and internal changes._
+
 ## v0.2.1-beta.9 -- 2026-09-08 (beta)
 
 **Marks take effect on Play, and the bake no longer crashes**
