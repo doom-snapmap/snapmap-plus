@@ -790,6 +790,12 @@ int sh_rawmap_live_serialize_ready(void)
     return (g_map_to_json != NULL && g_idstr_ctor != NULL && g_idstr_dtor != NULL) ? 1 : 0;
 }
 
+/* Defined below, beside the save detour that is their other caller. Both writers put a
+ * map through the same encoders, so a rawmap carries what an engine save carries. */
+static void mpkg_embed_on_save(void *out_idstr);
+static void nav_embed_on_save(void *out_idstr);
+static void nav_regions_on_save(void *out_idstr);
+
 /* Serialize `map` and write it to the rawmap destination. MAIN THREAD ONLY -- it reads engine state
  * and allocates through the engine's allocator, so it is called from the editor-frame hook, never
  * from the UI thread. */
@@ -824,6 +830,14 @@ int sh_rawmap_write_from_live(void *map, char *out_msg, int msg_capacity,
         g_idstr_ctor(blk, "");
         rc = g_map_to_json(map, blk, 1);
         if (rc) {
+            /* The same three encoders the save detour runs, in the same order. The engine
+             * hands back map state with the shards already stripped at load, so writing
+             * this buffer straight out drops the packages the map uses and the navigation
+             * its author baked. Each one no-ops if its own dependencies are unresolved. */
+            mpkg_embed_on_save(blk);
+            nav_embed_on_save(blk);
+            nav_regions_on_save(blk);
+
             len  = *(const int *)(blk + IDSTR_LEN_OFF);
             data = *(const char *const *)(blk + IDSTR_DATA_OFF);
             if (data != NULL && len > 0) wrote = write_shadow(data, (size_t)len);
