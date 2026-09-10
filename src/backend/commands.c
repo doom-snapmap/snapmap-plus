@@ -426,6 +426,27 @@ static void rawmap_print_state(void)
         sh_printf("  a rawmap is staged for the NEXT map you open.\n");
     if (sh_rawmap_save_oneshot_pending())
         sh_printf("  waiting for your next save in DOOM to write the rawmap.\n");
+    sh_printf("  'sh_rawmaps help' lists what else it can do.\n");
+}
+
+static void rawmap_print_usage(void)
+{
+    sh_printf("sh_rawmaps -- raw JSON map files.\n");
+    sh_printf("  sh_rawmaps                 show the state and both paths\n");
+    sh_printf("  sh_rawmaps help | ?        this list\n");
+    sh_printf("  sh_rawmaps list [folder]   rawmap files: the default folder, the folder your\n");
+    sh_printf("                             load path points at, or one you name\n");
+    sh_printf("  sh_rawmaps on | off        optional: apply rawmaps to EVERY map load and save\n");
+    sh_printf("  sh_rawmaps load <path>     point the load path at a file and stage it\n");
+    sh_printf("  sh_rawmaps load            open the load path as a new map -- or stage it,\n");
+    sh_printf("                             if the editor is not up yet, so the next map\n");
+    sh_printf("                             you open becomes it\n");
+    sh_printf("  sh_rawmaps save            write the open map to the save path\n");
+    sh_printf("  sh_rawmaps save <path>     export it THERE once, then back to the save path\n");
+    sh_printf("  sh_rawmaps savepath [rawmap|default|<path>]\n");
+    sh_printf("                             where saves ALWAYS go: over the loaded rawmap,\n");
+    sh_printf("                             the default rawmap.json, or one file you name\n");
+    sh_printf("  sh_rawmaps default         put both paths back to the default\n");
 }
 
 static void h_sh_rawmaps(idCmdArgs *a)
@@ -434,6 +455,10 @@ static void h_sh_rawmaps(idCmdArgs *a)
     const char *arg  = cmd_argv(a, 2);
 
     if (verb == NULL || verb[0] == '\0') { rawmap_print_state(); return; }
+
+    /* An unknown verb already falls through to the usage text at the end. Naming
+     * these two makes it something a person can ask for rather than stumble on. */
+    if (_stricmp(verb, "help") == 0 || strcmp(verb, "?") == 0) { rawmap_print_usage(); return; }
 
     if (_stricmp(verb, "list") == 0)    { rawmap_print_list(arg); return; }
 
@@ -652,21 +677,7 @@ static void h_sh_rawmaps(idCmdArgs *a)
         return;
     }
 
-    sh_printf("sh_rawmaps -- raw JSON map files.\n");
-    sh_printf("  sh_rawmaps                 show the state and both paths\n");
-    sh_printf("  sh_rawmaps list [folder]   rawmap files: the default folder, the folder your\n");
-    sh_printf("                             load path points at, or one you name\n");
-    sh_printf("  sh_rawmaps on | off        optional: apply rawmaps to EVERY map load and save\n");
-    sh_printf("  sh_rawmaps load <path>     point the load path at a file and stage it\n");
-    sh_printf("  sh_rawmaps load            open the load path as a new map -- or stage it,\n");
-    sh_printf("                             if the editor is not up yet, so the next map\n");
-    sh_printf("                             you open becomes it\n");
-    sh_printf("  sh_rawmaps save            write the open map to the save path\n");
-    sh_printf("  sh_rawmaps save <path>     export it THERE once, then back to the save path\n");
-    sh_printf("  sh_rawmaps savepath [rawmap|default|<path>]\n");
-    sh_printf("                             where saves ALWAYS go: over the loaded rawmap,\n");
-    sh_printf("                             the default rawmap.json, or one file you name\n");
-    sh_printf("  sh_rawmaps default         put both paths back to the default\n");
+    rawmap_print_usage();
 }
 
 
@@ -1686,7 +1697,7 @@ static void h_sh_navmesh(idCmdArgs *a)
 }
 
 static const cmd_entry CMD_TABLE[] = {
-    { "sh_rawmaps",           (void *)h_sh_rawmaps,   "Raw JSON map files: state, paths, load, save. Run with no arguments to see what is set." },
+    { "sh_rawmaps",           (void *)h_sh_rawmaps,   "Raw JSON map files: state, paths, load, save. Run with no arguments to see what is set, or 'sh_rawmaps help' (or '?') for every verb." },
     { "sh_rawmaps_on",       (void *)h_rawmaps_on,  "(legacy) Same as 'sh_rawmaps on'. Kept because older guides use it." },
     { "sh_rawmaps_off",      (void *)h_rawmaps_off, "(legacy) Same as 'sh_rawmaps off'. Kept because older guides use it." },
     { "sh_type",             (void *)h_sh_type,     "Dumps a types (enum/class) fields to the console and copies the text to your clipboard." },
