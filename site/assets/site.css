@@ -793,14 +793,13 @@ section.connect { padding: 72px 0 84px; border-bottom: none; }
   width: 36px;
   height: 36px;
   padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--panel);
-  color: var(--muted);
+  border: 0;
+  background: transparent;
+  color: var(--wire);
   cursor: pointer;
 }
-.release-copy:hover { color: var(--argent-hi); border-color: currentColor; }
-.release-copy.is-copied { color: #70df96; border-color: currentColor; }
+.release-copy:hover { color: var(--argent-hi); }
+.release-copy.is-copied { color: #70df96; }
 .release-copy[hidden], .release-copy .check-icon, .release-copy.is-copied .copy-icon { display: none; }
 .release-copy.is-copied .check-icon { display: block; }
 .release-copy-status { color: var(--muted); }
