@@ -5,23 +5,22 @@ latest stable version is what `snapmap-plus update` installs.
 
 ## v0.2.1-beta.10 -- 2026-09-10 (beta)
 
-**Navigation built from a volume's real solid shape**
+**Connected navigation for custom bridges and ramps**
 
-Marked Blocking Boxes now bake navigation from their actual oriented solid geometry, so tilted boxes, intersecting pillars, floating decks and chained platforms all work, demons leap gaps between platforms, and green outlines show the validated areas. Weapon packages can also choose how ammo is displayed.
+Navigation now follows the exposed surfaces of rotated and intersecting Blocking Boxes, with repairs for demons crossing bridges and returning to module floors. Editing refreshes the bake automatically, and the green preview is visible on both renderers. Existing navigation marks migrate without manual retoggling.
 
 ### New
-- Override packages can supply their own weapon HUD settings to show either the engine-default or weapon-capacity ammo presentation, changing presentation only and never ammunition or gameplay.
+- Weapon packages can select ammo presentation from the weapon's capacity, including the existing infinity display, without changing ammunition or gameplay.
 
 ### Improved
-- Navigation is built from each marked volume's real solid geometry, so boxes tipped off upright, intersecting pillars, shared supports and floating decks all become walkable instead of claiming ground a demon then stands stuck in.
-- Platforms standing together now link directly to each other instead of routing demons down to the module floor and back up, and a gap between two near-level platforms becomes a leap when shipped data covers the distance.
-- Climbs are now added to modules that already ship traversals of their own, so roughly half of all modules no longer come out with no way onto your platforms.
+- Rotated boxes, floating decks and intersecting structures bake from their exposed walkable surfaces. Shared supports retain contact, while buried surfaces are removed.
+- Moving, rotating, copying or deleting boxes refreshes navigation. Each placed module keeps its own bake, including maps with multiple Grid Rooms.
+- Platforms can connect directly, with gap leaps where the demon's native traversal data allows them. Modules that already contain climbs can receive additional custom traversal links.
 
 ### Fixed
-- AI Navigation now uses a different underlying map field, with older marks migrating as the map loads so your existing maps keep working and the game's own obstacle behaviour is left alone.
-- Dense constructions no longer fail when Play loads their navigation, and the green navigation preview now reaches the picture on the OpenGL renderer.
-
-_Plus 12 smaller fixes and internal changes._
+- Repaired bridge and ramp-to-floor transitions by preserving floor contact, rebuilding navigation visibility and keeping marked volumes out of the native avoidance obstacle list. This also applies to maps saved with the replacement AI Navigation marker.
+- Dense bakes respect the engine's connection limits. Candidates that cannot fit are refused before loading, preventing the associated Play failure.
+- The green navigation preview now displays correctly in the OpenGL editor as well as Vulkan.
 
 ## v0.2.1-beta.9 -- 2026-09-08 (beta)
 
