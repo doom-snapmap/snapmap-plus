@@ -5,10 +5,11 @@
 
 /* Boxes are supplied as one face and its extrusion, not axis-aligned bounds.
  * All upward faces are considered. Output convex cells have agent clearance
- * applied once, across coplanar unions. Returns -1 on invalid geometry or a
+ * applied once, across unions and contacts within the native step height.
+ * Returns -1 on invalid geometry or a
  * capacity failure; callers must discard the entire candidate bake. */
 int sh_nav_geometry_build(const sh_aug_platform *boxes, int count,
-    double radius, double height, double floor_cos, sh_aug_platform *out,
+    double radius, double height, double floor_cos, double step, sh_aug_platform *out,
     int *source, int *pieces, unsigned char *buried, int capacity);
 
 /* Continuous segment/solid test for a standing agent. Support solids at the

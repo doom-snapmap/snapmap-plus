@@ -27,14 +27,21 @@ construction does not have to become one area, and a valid isolated platform
 does not automatically have a route up from the module floor. Different monster
 sizes can have different usable space and traversal links.
 
-A bridge slightly below its supports needs explicit connections across each
-ledge. Height changes within the AAS class's `maxStepHeight` (18 units in the
-ground-monster payloads) use reciprocal walk links; higher ledges require a
-supported traversal animation. Neighbor discovery includes the extra clearance
-needed by a square collision footprint at any yaw. Stored integer endpoints
-must still resolve to their intended areas, and uphill/downhill animations
-follow the actual elevations regardless of box creation order. An overlap does
-not make a ledge of arbitrary height walkable.
+A bridge slightly below its supports needs floor polygons that meet at each
+ledge as well as reciprocal walk links. Height changes within the AAS class's
+`maxStepHeight` (18 units in the ground-monster payloads) retain that contact
+without an agent-width clearance strip beside the riser. Higher ledges require
+a supported traversal animation. Buried surfaces, unsupported gaps, unmarked
+obstacles and inadequate headroom still remove standing space.
+
+The native walk tracer follows floor polygons and permits only about 0.2 units
+of horizontal separation. A link across a wider clearance strip can exist in
+the routing graph while failing this movement check. The baker checks stored
+integer endpoints against their areas and floor contact, and rejects shortcuts
+through exposed wall edges. Partial contacts and stepped seams split area edges:
+the contact is shared, while exposed portions retain their wall flags. Uphill
+and downhill animations follow the actual elevations regardless of box order.
+An overlap does not make a ledge of arbitrary height walkable.
 
 ## Editing and preview
 

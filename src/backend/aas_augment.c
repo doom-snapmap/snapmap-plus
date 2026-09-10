@@ -523,6 +523,7 @@ typedef struct aug_ctx {
     int             failed;
     const sh_aug_platform *solids;
     int solid_count;
+    int prepared_geometry;
     unsigned original_areas;
 } aug_ctx;
 
@@ -961,6 +962,57 @@ static int aug_carve(aug_ctx *c, int area, const aug_quad *eff)
 
 /* ---- reachabilities ---------------------------------------------------- */
 
+/* Clip a line to the emitted floor loop, independently of its BSP volume.
+ * Walking advances from this loop's exit to a neighboring loop's entry. */
+static int aug_floor_span(const sh_aas *a,int area,const double start[3],
+                          const double end[3],double *lo,double *hi)
+{
+    const unsigned char *ar=sh_aas_rec_const(a,SH_AAS_L_AREAS,(unsigned)area);
+    unsigned first;int i,n;
+    if(!ar)return 0;
+    n=sh_aas_get_u16(ar,AR_NUM_EDGES);first=sh_aas_get_u32(ar,AR_FIRST_EDGE_INDEX);
+    *lo=0;*hi=1;
+    for(i=0;i<n;i++) {
+        const unsigned char *ix=sh_aas_rec_const(a,SH_AAS_L_EDGEINDEX,first+(unsigned)i);
+        const unsigned char *edge,*v,*w;int ei;double nx,ny,d0,d1,t;
+        if(!ix)return 0;ei=sh_aas_get_i32(ix,0);
+        edge=sh_aas_rec_const(a,SH_AAS_L_EDGES,(unsigned)abs(ei));if(!edge)return 0;
+        v=sh_aas_rec_const(a,SH_AAS_L_VERTICES,sh_aas_get_u32(edge,ei<0?4:0));
+        w=sh_aas_rec_const(a,SH_AAS_L_VERTICES,sh_aas_get_u32(edge,ei<0?0:4));
+        if(!v||!w)return 0;
+        nx=sh_aas_get_f32(w,4)-sh_aas_get_f32(v,4);
+        ny=sh_aas_get_f32(v,0)-sh_aas_get_f32(w,0);
+        d0=nx*(start[0]-sh_aas_get_f32(v,0))+ny*(start[1]-sh_aas_get_f32(v,4));
+        d1=nx*(end[0]-sh_aas_get_f32(v,0))+ny*(end[1]-sh_aas_get_f32(v,4));
+        if(d0<0&&d1<0)return 0;
+        if((d0<0)==(d1<0))continue;
+        t=d0/(d0-d1);
+        if(d0<0){if(t>*lo)*lo=t;}else if(t<*hi)*hi=t;
+    }
+    return n>=3&&*lo<=*hi;
+}
+
+/* Reject a near-corner shortcut through an exposed edge even when its small
+ * floor gap falls within the native trace tolerance. */
+static int aug_floor_wall_at(const sh_aas *a,int area,double x,double y)
+{
+    const unsigned char *ar=sh_aas_rec_const(a,SH_AAS_L_AREAS,(unsigned)area);unsigned i;
+    for(i=0;i<sh_aas_get_u16(ar,AR_NUM_EDGES);i++) {
+        const unsigned char *ix=sh_aas_rec_const(a,SH_AAS_L_EDGEINDEX,sh_aas_get_u32(ar,AR_FIRST_EDGE_INDEX)+i);
+        const unsigned char *ed=sh_aas_rec_const(a,SH_AAS_L_EDGES,(unsigned)abs(sh_aas_get_i32(ix,0)));
+        const unsigned char *v,*w;double dx,dy,len,along,vx,vy;
+        if(!(sh_aas_get_u32(ed,8)&1))continue;
+        v=sh_aas_rec_const(a,SH_AAS_L_VERTICES,sh_aas_get_u32(ed,0));
+        w=sh_aas_rec_const(a,SH_AAS_L_VERTICES,sh_aas_get_u32(ed,4));
+        vx=sh_aas_get_f32(v,0);vy=sh_aas_get_f32(v,4);
+        dx=sh_aas_get_f32(w,0)-vx;dy=sh_aas_get_f32(w,4)-vy;len=hypot(dx,dy);
+        if(len<1e-8)continue;
+        along=((x-vx)*dx+(y-vy)*dy)/len;
+        if(along>0.04&&along<len-0.04&&fabs(dx*(y-vy)-dy*(x-vx))<0.02*len)return 1;
+    }
+    return 0;
+}
+
 /* Reachabilities store integer coordinates. Validate the stored point, not
  * just its floating-point precursor: truncation can cross a yawed seam.
  * Preserve the old truncation when valid, otherwise try the adjacent integer
@@ -990,6 +1042,14 @@ static int aug_reach(aug_ctx *c, unsigned flags, int time, int from, int to,
     double qs[3],qe[3];
     if(!aug_reach_point(c->a,from,s,qs)||!aug_reach_point(c->a,to,e,qe))return 0;
     if(flags==REACH_WALK&&fabs(qs[2]-qe[2])>c->step)return 0;
+    if(flags==REACH_WALK&&c->prepared_geometry&&
+       (unsigned)from>=c->original_areas&&(unsigned)to>=c->original_areas) {
+        double a0,a1,b0,b1,dx=qe[0]-qs[0],dy=qe[1]-qs[1];
+        if(!aug_floor_span(c->a,from,qs,qe,&a0,&a1)||!aug_floor_span(c->a,to,qs,qe,&b0,&b1)||
+           (b0-a1)*sqrt(dx*dx+dy*dy)>0.2||
+           aug_floor_wall_at(c->a,from,qs[0]+a1*dx,qs[1]+a1*dy)||
+           aug_floor_wall_at(c->a,to,qs[0]+b0*dx,qs[1]+b0*dy))return 0;
+    }
     s=qs;e=qe;
     if (!sh_aas_append(c->a, SH_AAS_L_REACHABILITIES, 1, &first)) return 0;
     r = sh_aas_rec(c->a, SH_AAS_L_REACHABILITIES, first);
@@ -1115,6 +1175,7 @@ typedef struct aug_peer {
     int             area;
     aug_quad support;
     int source;
+    int prepared;
 } aug_peer;
 
 /* How close two UNINSET footprints must be to count as touching. Volumes an
@@ -1569,6 +1630,10 @@ static int aug_step_links(aug_ctx *c, int ai, const aug_quad *eff,
                 double distance, land[2];
                 if(!aug_ray_entry(pe,dn[0],dn[1],sides[i].out[0],sides[i].out[1],
                     SH_TRAV_LEAP_MAX_SPAN+256.0,&distance,land))continue;
+                /* Native walking clips each floor polygon and accepts only
+                 * 0.2 units of horizontal separation at the transition. A
+                 * reachability cannot jump a clearance gap or skip a cell. */
+                if(peers[sides[i].peer].prepared&&distance-REACH_SIDE_OFFSET>0.2)continue;
                 up[0] = land[0];
                 up[1] = land[1];
                 up[2] = aug_z_at(pe, up[0], up[1]);
@@ -2105,6 +2170,96 @@ static int aug_emit_traversals(aug_ctx *c, aug_trav_spec *specs, int n)
  * reachability in order, push it onto the front of its from-area's and
  * to-area's chains. Without this the engine's own per-area lists are empty and
  * every link we wrote is invisible. */
+typedef struct aug_seam { double lo,hi; } aug_seam;
+
+static int aug_seam_order(const void *a,const void *b)
+{
+    double d=((const aug_seam*)a)->lo-((const aug_seam*)b)->lo;
+    return d<0?-1:d>0?1:0;
+}
+
+/* Floor contact is not necessarily a whole, identical 3D edge: a short deck
+ * can meet the middle of a long edge, and a step has two different elevations.
+ * Split those contacts before classifying walls. Native wall queries inspect
+ * edge flags, independently of the routing graph. Keep exposed remainders. */
+static int aug_stitch_edges(aug_ctx *c,const aug_quad *floors,const int *areas,int n)
+{
+    aug_seam *spans=NULL;
+    int i,j,e,k,ok=0,cap=n*SH_AUG_MAX_CORNERS;
+    if(!n)return 1;
+    spans=(aug_seam*)malloc((size_t)cap*sizeof *spans);
+    if(!spans)goto done;
+    for(i=0;i<n;i++) {
+        unsigned first=sh_aas_count(c->a,SH_AAS_L_EDGEINDEX),count=0;
+        for(e=0;e<floors[i].count;e++) {
+            const double *a=floors[i].c[e],*b=floors[i].c[(e+1)%floors[i].count];
+            double dx=b[0]-a[0],dy=b[1]-a[1],len=hypot(dx,dy),prev=0;
+            int ns=0,t;
+            if(len<1e-8)goto done;
+            for(j=0;j<n;j++)if(j!=i)
+                for(k=0;k<floors[j].count;k++) {
+                    const double *v=floors[j].c[k],*w=floors[j].c[(k+1)%floors[j].count];
+                    double lo,hi,z0,z1,slope;
+                    if(dx*(w[0]-v[0])+dy*(w[1]-v[1])>=0)continue;
+                    if(fabs(dx*(v[1]-a[1])-dy*(v[0]-a[0]))>0.02*len||
+                       fabs(dx*(w[1]-a[1])-dy*(w[0]-a[0]))>0.02*len)continue;
+                    lo=((w[0]-a[0])*dx+(w[1]-a[1])*dy)/(len*len);
+                    hi=((v[0]-a[0])*dx+(v[1]-a[1])*dy)/(len*len);
+                    if(lo<0)lo=0;if(hi>1)hi=1;if(hi<=lo)continue;
+                    z0=a[2]-aug_z_at(&floors[j],a[0],a[1]);
+                    z1=b[2]-aug_z_at(&floors[j],b[0],b[1]);slope=z1-z0;
+                    if(fabs(slope)<1e-9){if(fabs(z0)>c->step+1e-5)continue;}
+                    else {
+                        double l=(-c->step-z0)/slope,h=(c->step-z0)/slope;
+                        if(l>h){double tmp=l;l=h;h=tmp;}
+                        if(l>lo)lo=l;if(h<hi)hi=h;
+                    }
+                    /* A sub-float fragment can tilt its half-plane severely
+                     * after serialization. Snap cuts within the seam tolerance
+                     * to existing endpoints instead of creating tiny edges. */
+                    if(lo*len<0.02)lo=0;if((1-hi)*len<0.02)hi=1;
+                    if((hi-lo)*len<0.02)continue;
+                    if(ns==cap)goto done;
+                    spans[ns].lo=lo;spans[ns++].hi=hi;
+                }
+            qsort(spans,(size_t)ns,sizeof *spans,aug_seam_order);
+            /* Merge intervals, then alternate exposed and shared portions. */
+            for(k=0,t=0;k<ns;k++) {
+                if(t&&(spans[k].lo-spans[t-1].hi)*len<=0.02) {
+                    if(spans[k].hi>spans[t-1].hi)spans[t-1].hi=spans[k].hi;
+                } else spans[t++]=spans[k];
+            }
+            ns=t;
+            for(k=0;k<=2*ns;k++) {
+                double end=k==2*ns?1:(k&1)?spans[k/2].hi:spans[k/2].lo;
+                int shared=k&1,v0,v1;unsigned edge,ix;unsigned char *rec;
+                if((end-prev)*len<0.00001){prev=end;continue;}
+                v0=aug_vertex(c,(float)(a[0]+prev*dx),(float)(a[1]+prev*dy),(float)(a[2]+prev*(b[2]-a[2])));
+                v1=aug_vertex(c,(float)(a[0]+end*dx),(float)(a[1]+end*dy),(float)(a[2]+end*(b[2]-a[2])));
+                if(v0<0||v1<0)goto done;
+                /* Do not pass through aug_edge: reusing this area's old edge
+                 * is not evidence of sharing it with a second area. */
+                if(!sh_aas_append(c->a,SH_AAS_L_EDGES,1,&edge))goto done;
+                rec=sh_aas_rec(c->a,SH_AAS_L_EDGES,edge);
+                sh_aas_put_u32(rec,0,(unsigned)v0);sh_aas_put_u32(rec,4,(unsigned)v1);
+                sh_aas_put_u32(rec,8,shared?EDGE_FLAGS_SHARED:EDGE_FLAGS_BOUNDARY);
+                if(!sh_aas_append(c->a,SH_AAS_L_EDGEINDEX,1,&ix))goto done;
+                sh_aas_put_i32(sh_aas_rec(c->a,SH_AAS_L_EDGEINDEX,ix),0,edge);
+                count++;prev=end;
+            }
+        }
+        if(count>32767)goto done;
+        {
+            unsigned char *ar=sh_aas_rec(c->a,SH_AAS_L_AREAS,(unsigned)areas[i]);
+            sh_aas_put_u16(ar,AR_NUM_EDGES,(uint16_t)count);
+            sh_aas_put_u32(ar,AR_FIRST_EDGE_INDEX,first);
+        }
+    }
+    ok=1;
+done:
+    free(spans);return ok;
+}
+
 static void aug_relink(aug_ctx *c)
 {
     unsigned na = sh_aas_count(c->a, SH_AAS_L_AREAS);
@@ -2254,7 +2409,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     if (n < 0) n = 0;
     if (n > SH_AUG_MAX_PLATFORMS || (n>0&&!plats)) return 0;
 
-    c.a = a; c.o = opts; c.rep = out; c.failed = 0;
+    c.a = a; c.o = opts; c.rep = out; c.failed = 0;c.prepared_geometry=0;
     c.solids=plats;c.solid_count=n;c.original_areas=sh_aas_count(a,SH_AAS_L_AREAS);
     c.radius = opts->inset ? aug_agent_radius(a) : 0.0f;
     c.height = aug_agent_height(a);
@@ -2296,7 +2451,8 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         int solids=0;
         for(i=0;i<n;i++)if(plats[i].depth>0.0f)solids++;
         if(solids) {
-            n=sh_nav_geometry_build(plats,n,c.radius,c.height,c.min_floor_cos,
+            c.prepared_geometry=1;
+            n=sh_nav_geometry_build(plats,n,c.radius,c.height,c.min_floor_cos,c.step,
                 work,wsrc,wpieces,wburied,SH_AUG_MAX_PLATFORMS);
             if(n<0){out->pieces_truncated=1;HeapFree(GetProcessHeap(),0,block);return 0;}
         } else for(i=0;i<n;i++){
@@ -2452,6 +2608,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         nmade++;
     }
 
+    if(c.prepared_geometry&&!c.failed&&!aug_stitch_edges(&c,effs,made,nmade))c.failed=1;
     if (!c.failed) {
         /* Walk links first, so the step linker knows which pairs are covered.
          * A generated area is carved inside a floor slab, so in practice the
@@ -2481,8 +2638,10 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
             peers[i].area = made[i];
             peers[i].support=reqs[i];
             peers[i].source=-1;
+            peers[i].prepared=0;
             for(j=0;j<n;j++)if(out->platforms[j].area==made[i]) {
                 peers[i].source=out->platforms[j].source;
+                peers[i].prepared=plats[j].prepared;
                 if(!plats[j].prepared)break;
                 double corners[4][3];int v,x;
                 for(v=0;v<4;v++)for(x=0;x<3;x++)corners[v][x]=plats[j].support[v][x];
