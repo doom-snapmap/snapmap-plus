@@ -1651,8 +1651,9 @@ static int ds_materialize_identity(ds_materialize_context *context, int index)
      *
      *     AV read, RIP rva 0x17B42C4 (decl manager), caller rva 0x17C7BCD -- inside UnloadMap
      *
-     * So raise every decl this pass TOUCHED, not just the ones it created. Boot never needs this
-     * because no placeholder exists yet.
+     * which is the sixth failure recorded above ("a survivor enumerated by teardown after its
+     * peers were freed"), reached from the other side. So raise every decl this pass touched,
+     * not just the ones it created. Boot never needs this because no placeholder exists yet.
      *
      * Read-only if the level is already permanent; SEH-guarded because a torn decl must not
      * take the pass down. */
@@ -1722,13 +1723,14 @@ static void ds_record_pass_identities(void)
  * pass:
  *
  *   1. Empty reused placeholders: objects the registration scan minted for MISSING
- *      identities before their bytes were readable. Marking all of them before the first
- *      drain is what makes this correct -- one at a time, decl X's parse-time references
- *      resolve against decls later in the order that are still unmarked and empty, and X
- *      bakes empty inherited state. Boot never hits this because the same lookup finds NO
- *      object and the engine lazily creates-and-parses from the source record. Marked up
- *      front, the manager helper (0x1800A40) reloads any referenced decl on demand,
- *      mid-parse, exactly like that boot path.
+ *      identities before their bytes were readable. The one-at-a-time mark+drain this
+ *      replaces handled these but left a hole: while decl X drained, X's parse-time
+ *      references resolved against decls later in the order that were still unmarked and
+ *      empty, so X could bake empty inherited state. At boot the same lookup finds NO
+ *      object and the engine lazily creates-and-parses from the source record, which is
+ *      why boot never had the problem. With every decl marked before the first drain, the
+ *      manager helper (0x1800A40) reloads any referenced decl on demand, mid-parse,
+ *      exactly like the boot lazy path.
  *
  *   2. Newly served SHADOWED-live identities: live objects that predate the package
  *      install. The engine parsed them from whatever was reachable at boot -- the
@@ -1743,14 +1745,17 @@ static void ds_record_pass_identities(void)
  *
  * Bit 0x01 (parse in progress) disqualifies either way.
  *
- * NO TYPE GATE, because the drain is FORCED here rather than deferred to each type's next natural
- * lookup. It runs immediately, at the browser with no map loaded -- the instant where the
- * wholesale empty re-parse is measured safe -- through the engine's own path (DeclFind ->
- * idResourceList::Load 0x1800A40 -> generic load 0x17FF5F0), which tears the old data down with
- * the engine's own destruct-in-place (0x17FFDB0) before parsing. Deferring instead makes the
- * refresh type-specific: a mark left armed on a sound drains mid-gameplay and dies at rip=0, one
- * on an init-read type (aiFSMManager) never drains at all, and every already-looked-up decl stays
- * stale forever. */
+ * NO TYPE GATE. An earlier revision deferred the stale-shadowed re-parse to the engine's next
+ * natural lookup and therefore had to whitelist types whose natural lookup happens at
+ * map-load time (entityDef, md6Def) -- an armed sound drained mid-gameplay and died at
+ * rip=0, and aiFSMManager was excluded because a mark that never drains is dead weight. That
+ * made the refresh type-specific and left every already-looked-up decl stale forever. The
+ * protocol now FORCES the drain itself, immediately, at the browser with no map loaded --
+ * the same instant where the wholesale empty re-parse is measured safe -- through the
+ * engine's own lookup path (DeclFind -> idResourceList::Load 0x1800A40 -> generic load
+ * 0x17FF5F0), which tears the old data down with the engine's own destruct-in-place
+ * (0x17FFDB0) before parsing. WHEN the engine would next read a type no longer matters, so
+ * no type is special. */
 static void ds_runtime_premark(ds_materialize_context *context)
 {
     int i;
@@ -1804,15 +1809,18 @@ static void ds_runtime_premark(ds_materialize_context *context)
     }
 }
 
-/* DRAIN NOW, AT THE BROWSER, THROUGH THE ENGINE'S OWN PATH.
- *
- * A forced drain IS the engine's own teardown-then-reload [DIRECT, decompilation]:
- * idResourceList::Load (0x1800A40) gates on the pending bit, the decl thread and a
- * depth-or-level-4 guard, and never tests the has-source bit; the generic load it runs
- * (0x17FF5F0) begins by tearing the old data down with destruct-in-place (0x17FFDB0: vtable
- * slot 0 with the no-free flag, then the owning list reconstructs the object preserving id,
- * name and flags). Running it here -- browser, no map loaded, where the wholesale empty
- * re-parse is measured safe -- removes any dependence on each type's natural read instant.
+/* DRAIN NOW, AT THE BROWSER, THROUGH THE ENGINE'S OWN PATH. An earlier revision left the
+ * stale-shadowed marks ARMED for the engine's next natural lookup, on the reading of a first
+ * live run that a synthetic drain skips a decl that already holds loaded data. Direct
+ * decompilation of the drain path refutes that reading: idResourceList::Load (0x1800A40)
+ * gates the drain on the pending bit, the decl thread, and a depth-or-level-4 guard -- it
+ * never tests the has-source bit -- and the generic load it runs (0x17FF5F0) begins by
+ * tearing the old data down with the engine's own destruct-in-place (0x17FFDB0: vtable slot
+ * 0 with the no-free flag, then the owning list reconstructs the object preserving id, name
+ * and flags). So a forced drain IS the engine's teardown-then-reload, and running it here --
+ * browser, no map loaded, the instant where the wholesale empty re-parse is measured safe --
+ * removes the dependence on each type's natural read instant that made lazy arming
+ * type-specific and left init-read types (aiFSMManager) unreachable.
  *
  * Order matters twice. Every mark is promoted to level 4 BEFORE the first drain, because
  * Load's depth guard (depth == 0 || level == 4) is what lets a draining decl's parse-time
@@ -2570,38 +2578,49 @@ static void __cdecl ds_apply_command(void)
  * content is not permanent because the engine knows what it is. It is permanent because it happened
  * to be alive when that one snapshot was taken.
  *
- * WHY PUBLISHING HAPPENS HERE AND NOT AT LOAD-STATE RUNNING. Timed against T = the promotion
- * [DIRECT, Frida interceptor on the promotion, 2026-08-26]:
+ * WHY THE SERVICE PUBLISHES HERE AND NOT AT LOAD-STATE RUNNING. It used to publish at RUNNING, and a
+ * live capture (Frida interceptor on the promotion, 2026-08-26) measured exactly how badly that
+ * misses, relative to T = the promotion:
+ *     T-146.9s   this service is armed; the override provider is installed
  *     T-131.6s   the provider begins serving the engine's own decls
  *     T-3.637s   the 64th and last startup decl load (snapEditorSettings/settings.decl, 70 KB)
  *     T          the engine's whole-registry promotion runs
  *     T+0.821s   load-state RUNNING
- *     T+2.267s   publication at RUNNING completes -- 2.3 seconds too late, every launch
- * Content published there is born map-scoped and the first playtest destroys it, while the editor's
- * render entity keeps the raw decl pointer it cached and is never rebuilt on the return leg.
+ *     T+2.267s   publication used to complete -- 2.3 seconds too late, every launch
+ * Our content was therefore born map-scoped and the first playtest destroyed it, while the editor's
+ * render entity kept the raw decl pointer it had cached and is never rebuilt on the return leg.
  *
- * PROMOTING OUR OWN CONTENT AFTERWARDS CANNOT WORK. A subset needs a closure the engine does not
- * record: an idResource carries a name, an id, two flag bytes and this level, and the purge decides
- * by the level ALONE -- no refcount, no child list, no back-reference table. Six attempts each died
- * on an edge nobody had special-cased (a pinned md6Def whose model was not pinned, an animWeb
- * indexing a rebuilt md6Def, a survivor enumerated by teardown after its peers were freed, a
- * re-parse whose FreeData 0xFF-filled buffers the render thread was reading, and
- * entityDef -> edit.renderModelInfo.model). Promoting the WHOLE registry needs no closure but
- * destroys the engine's lifecycle, because level 1 and level 2 are two deliberately different
- * scopes; called at RUNNING it also pins the loaded map's resources permanently.
+ * WHY NOT PROMOTE OUR OWN CONTENT AFTERWARDS. Six attempts did, and every one failed:
+ *   - a pinned md6Def whose model was not pinned -> the animator read a freed model
+ *   - a surviving animWeb indexing an md6Def that had been rebuilt -> cyberdemon model, mancubus anim
+ *   - a survivor enumerated by teardown after its peers were freed -> call through a freed vtable
+ *   - a re-parse whose FreeData 0xFF-filled joint buffers the render thread was reading
+ *   - promotion that followed one edge (md6Def -> the model at +0x60) and died on the first edge
+ *     nobody had special-cased: entityDef -> edit.renderModelInfo.model
+ *   - calling the engine's own promotion at RUNNING, which IS complete, but by then a map is loaded,
+ *     so it also made that map's resources permanent and the engine could never free them again
+ * A subset needs a closure the engine does not record: an idResource carries a name, an id, two flag
+ * bytes and this level, and the purge decides by the level ALONE -- no refcount, no child list, no
+ * back-reference table. The whole registry needs no closure but destroys the engine's own lifecycle,
+ * because level 1 and level 2 are two deliberately different scopes, not one.
  *
- * SO IT PUBLISHES BEFORE THE SNAPSHOT and lets the engine take it. Our content is promoted by the
- * same pass, at the same instant, as the content it depends on. No second promotion, no subset, no
- * per-type knowledge -- and nothing map-scoped becomes permanent, because at 0x17C6479 no map exists
- * yet.
+ * SO WE DO NEITHER. We publish BEFORE the snapshot and let the engine take it. Our content is then
+ * promoted by the same pass, at the same instant, as the content it depends on -- identical
+ * treatment to shipped editor content because it IS the same treatment. No second promotion, no
+ * subset, no edges, no per-type knowledge, and nothing that was map-scoped is made permanent,
+ * because at 0x17C6479 no map exists yet.
  *
- * THE WINDOW IS QUIESCENT BY MEASUREMENT: startup decl parsing finished 3.6s earlier, and the
- * provider had been serving the engine's own decls for over two minutes, so the engine has just
- * finished driving the entire SnapMap decl type set through our file-shadow.
+ * WHY IT IS SAFE TO PUBLISH HERE. The capture again: the engine's startup decl parsing finished 3.6
+ * seconds earlier, and our provider had been serving the engine's own decls for over two minutes.
+ * The decl registry is not merely constructed at this point -- the engine has just finished driving
+ * the entire SnapMap decl type set through our file-shadow. The window is quiescent by measurement,
+ * not by assumption.
  *
- * REFUSE AND CONTINUE IS THE CONTRACT. This runs during boot, so it must never stop one: everything
- * is inside SEH and the engine's promotion is called unconditionally on the way out. The worst
- * outcome is a launch with no published content. */
+ * REFUSE AND CONTINUE IS THE CONTRACT. A publication failure now happens during boot, so it must
+ * never be able to stop one. Everything this detour does is inside SEH, the engine's promotion is
+ * called unconditionally on the way out, and a failure stays terminal exactly as it would at
+ * RUNNING. The worst outcome is a launch with no published content -- never a launch that does not
+ * happen. */
 /* RUNTIME RE-ARM -- the after-boot counterpart of ds_publish_before_boot_promotion.
  *
  * Everything registration does is a call on the engine main thread; none of it is

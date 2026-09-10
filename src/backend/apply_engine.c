@@ -127,30 +127,39 @@
  * the ambient scope, so the blob array is allocated in a heap the engine destroys on the next map load --
  * leaving the prefab's idList header pointing at unmapped pages.
  *
- * The engine's own answer is an explicit scope push/pop through the allocator's vtable (the object is
- * the process-wide idMemLocal at module+0x155b7190):
+ * The engine's own fix for exactly this situation is an explicit scope push/pop, reached through the
+ * allocator object's vtable (the object is the process-wide idMemLocal at module+0x155b7190):
  *
  *   vtable +0x48  idMemLocal::PushHeap(int heapId)   (RVA 0x1AC57A0) -- names itself in its own assert
  *   vtable +0x50  idMemLocal::PopHeap(void)          (RVA 0x1AC5770)
  *
- * Wrapping the stage in PushHeap(0)/PopHeap() puts the blob array in the process heap, where the engine's
- * own clipboard lives, without changing how any member is copied. Mem_Alloc falls through to
- * GetProcessHeap() when the selected handle is NULL, which is why heap id 0 yields the process heap
- * [DIRECT: heap[0]=NULL, heap[1]=persist, heap[2]=map, ambient depth 1 while the editor is up].
+ * Wrapping the stage in PushHeap(0)/PopHeap() puts the blob array in the process heap, exactly where the
+ * engine's own clipboard lives, WITHOUT changing how any member is copied.
  *
- * Two constraints, both read off the engine's code:
+ * Two safety notes, both established from the engine's code rather than assumed:
  *   - The scope stack is GLOBAL, not per-thread (idMemLocal is one process-wide object; its _tls_index
- *     use is only the magic-static init guard), so this briefly moves the ambient heap for every thread.
+ *     use is only the magic-static once-init guard). So this briefly changes the ambient heap for other
+ *     threads too.
  *   - That is a LEAK risk, never a corruption risk: every block records its own heap in its header and
- *     Mem_Free reads it back, so a block is always freed into the heap it came from. The worst case is
- *     an unrelated allocation made inside the window outliving its intended owner.
- * The window is one deserialize, and push/pop are balanced with __try/__finally -- PopHeap fatals on
- * underflow, so balance matters.
+ *     Mem_Free reads it back, so a block is always freed into the heap it came from no matter what the
+ *     scope is at free time. The worst case is an unrelated allocation made inside our window outliving
+ *     its intended owner.
+ * The window is one deserialize, and push/pop are balanced with __try/__finally so an exception cannot
+ * leave the stack unbalanced (PopHeap fatals on underflow, so balance matters).
  *
- * The three functions resolve by SIGNATURE (MemLocalGet / MemLocalPushHeap / MemLocalPopHeap), and every
- * call is range-checked against the DOOM module first, because a wrong pointer here would be CALLED, not
- * merely read. On any failure the push does not happen, the allocation lands in the map heap,
- * ae_block_survives_map returns 0, and the protective re-ctor runs. */
+ * ===== CONFIRMED FIXED 2026-07-28 =====
+ * With the push in place the staged blob array allocates in the process heap, and the prefab survives BOTH
+ * a Play round-trip and a map change with Ctrl+V still working afterwards -- matching the engine's own
+ * clipboard. Live heap table at the time: heap[0]=NULL, heap[1]=persist, heap[2]=map, and the ambient scope
+ * depth was already 1 (the engine keeps the map heap pushed while the editor is up, which is why our
+ * allocations were landing there). Mem_Alloc falls through to GetProcessHeap() when the selected handle is
+ * NULL, so PushHeap(0) is what yields the process heap.
+ *
+ * The three functions are resolved by SIGNATURE (MemLocalGet / MemLocalPushHeap / MemLocalPopHeap in
+ * signatures.c) rather than by raw RVA, and every call is range-checked against the DOOM module first,
+ * because a wrong pointer here would be CALLED, not merely read. If any of that fails the push simply does
+ * not happen, the allocation lands in the map heap, ae_block_survives_map returns 0, and the protective
+ * re-ctor runs -- i.e. the old behaviour, not a crash. */
 /* The scope machinery is MAIN-THREAD-ONLY. idMemLocal::PushHeap/PopHeap and Mem_Alloc's heapId==-1 scope
  * lookup are all gated on the same predicate (RVA 0x19FC900):
  *     if (mainThreadId != 0 && mainThreadId != GetCurrentThreadId()) return 0;
@@ -188,7 +197,7 @@ typedef void (*memlocal_popheap_fn)(void *self);
 /* selObj+0x80 is a POINTER to the selected-entity id array (s32 each), with the count at +0x88 -- i.e. the
  * usual idList ptr/num shape, not an inline array. Established 2026-07-28 by a probe that read it inline and
  * got the pointer's own halves back as "ids": low dword -797462928, high dword 479 (= 0x1DF, matching the
- * 0x000001DF... entity pointers in the same log), then the count itself. An inline array here could only ever
+ * 0x000001DF… entity pointers in the same log), then the count itself. An inline array here could only ever
  * have held two entries before colliding with the count, which was the tell.
  * This is the same array PasteInstantiate uses as its old->new id map, which is why the selection must be
  * empty before calling it. */
@@ -196,15 +205,16 @@ typedef void (*memlocal_popheap_fn)(void *self);
 #define PREFAB_MAX_ENTITIES       100000    /* stale-slot sanity guard on the staged entity count */
 
 /* --- ACTION INJECTION (how we ask the engine to paste, instead of pasting ourselves) ----------------
- * WHY NOT JUST CALL IT: calling PasteInstantiate + the grab setter directly from the command-buffer
- * drain creates the entities, but COMMITTING the placement afterwards damages the heap -- an idStr
- * destructor later frees a block whose header is already bad, an AV plus "Memory corruption before
- * block!" on the next Play [DIRECT, 2026-07-27: same crash with 93 entities and with 1, while the same
- * staged prefab pasted with a real Ctrl+V is clean]. The prefab data and the staging are fine; the CALL
- * SITE is the fault. The engine runs the paste inside the idle sub-state's per-frame handler during the
- * mode Think, and the place-commit depends on per-frame bookkeeping that only holds there.
+ * WHY NOT JUST CALL IT: we did, and it corrupts the map. Calling PasteInstantiate + the grab setter
+ * directly from the command-buffer drain creates the entities fine (cancelling out of it is clean), but
+ * COMMITTING the placement afterwards damages the heap -- an idStr destructor later frees a block whose
+ * header is already bad, surfacing as an AV + "Memory corruption before block!" on the next Play. Proven
+ * live 2026-07-27: same crash with 93 entities and with 1, while the SAME staged prefab pasted with a
+ * real Ctrl+V and placed is completely clean. So the prefab data and our staging are fine; the fault is
+ * the call SITE. The engine runs the paste inside the idle sub-state's per-frame handler during the mode
+ * Think, and the place-commit depends on per-frame bookkeeping that only holds on that path.
  *
- * So ASK instead. The mode's context-menu descriptor doubles as a queued-action slot, and the base
+ * So: don't call it. ASK. The mode's context-menu descriptor doubles as a queued-action slot -- the base
  * dispatcher reads it and handles the result IDENTICALLY to a live key press:
  *     actionId = (*(int *)(mode+0x420) == -1) ? -1 : *(int *)(mode+0x424);
  * and the paste branch matches on `IsActionPressed(0x5C) || actionId == 0x5C`. We write the id, arm the
@@ -251,20 +261,27 @@ typedef void (*memlocal_popheap_fn)(void *self);
  * below are the pinned Vulkan build's, kept for audit and re-derivation. ae_pick_engine_fn only falls back
  * to one when the host IS that build.
  *
- * PREFAB_TEMP_SIZE must clear ~0x590, not the 0x210 the OG frame slot suggests: the ctor at +0x54d0a0
- * writes its own fields to ~+0x118, then forward-calls a SECOND, larger ctor that keeps writing past
- * +0x590 [DIRECT]. Undersized, it overflows onto valid stack memory rather than faulting, so neither the
- * fault-shield VEH nor an SEH guard sees it. 0x2000 leaves headroom.
+ * PREFAB_TEMP_SIZE was previously 0x220, based on the OG local_6d8 frame slot (0x210 bytes) -- CONFIRMED
+ * (2026-07-06) far too small: the ctor at +0x54d0a0 writes its own fields up to ~+0x118 then makes a
+ * small forward call into a SECOND, larger ctor that keeps writing fields past +0x590 -- the real object
+ * needs at least ~0x590+ bytes, ~2.6x the old allocation. The old size was a silent stack-buffer overflow
+ * on every create-from-selection call (writes landing on valid stack memory just past our buffer -- not a
+ * clean AV, so neither the fault-shield VEH nor our own SEH guard ever caught it; this is what crashed
+ * DOOM outright). Bumped to 0x2000 for comfortable headroom over the confirmed-required size.
  *
- * PrefabPopulate takes THREE args, not two [DIRECT]. The 3rd (R8) is an out int* status the engine writes
- * through (1, 2, and a cleared 0 on different validation paths), so a 2-arg call leaves R8 holding
- * whatever the previous call left -- a write through garbage at +0x2D7 and +0xE91 inside PrefabPopulate.
- * Pass a real local's address.
+ * PrefabPopulate is a 3-ARG function, not 2 -- CONFIRMED (2026-07-06). The 3rd (R8) is an out int* status/
+ * reason code the engine writes through (seen storing 1, 2, and a cleared 0 on different validation paths).
+ * Our call only ever passed 2 args, so R8 held whatever was left over from the prior call in the sequence
+ * -- an intermittent crash (write through garbage/unmapped R8, e.g. observed 0x10) at two sites inside
+ * PrefabPopulate: +0x2D7 and +0xE91. Fixed by adding the missing out-param and passing a real local's
+ * address so the write always lands somewhere harmless.
  *
- * Status 2 means "not hovering an entity in the selection", a real engine requirement -- it prints
- * "Failed to create prefab: not hovering entity in selection." itself. The create flow checks the
- * hovered-id slot (+0x198) up front instead (poc_apply_create_prefab), so the UI gets that answer rather
- * than the generic "nothing selected". */
+ * Separately CONFIRMED: not hovering an entity in the selection is a REAL engine requirement, not a red
+ * herring -- with the crash fixed, status code 2 turns out to mean exactly that (the engine prints "Failed
+ * to create prefab: not hovering entity in selection." itself before returning it). So the create flow now
+ * checks the hovered-id slot (+0x198) up front (see poc_apply_create_prefab in snapmap_plus_ui_webview.cpp)
+ * instead of relying on this out-param at all -- simpler, and gives the UI an accurate "not hovering"
+ * result instead of the generic "nothing selected". */
 #define PREFAB_CTOR_RVA        0x54d0a0u   /* idSnapEntityPrefab ctor (OG FUN_180004210 local_6d8 ctor) */
 #define PREFAB_POPULATE_RVA    0x54e410u   /* populate prefab from editor selection (returns char success) */
 #define PREFAB_DTOR_RVA        0x51d870u   /* idSnapEntityPrefab dtor (OG FUN_180004210 cleanup) */
@@ -673,23 +690,44 @@ static void ae_log_memlocal_state(const char *when)
 #endif /* AE_STAGE_DIAG_ON */
 
 /* ============================================================ paste-outcome DIAGNOSTIC ==============
- * Dumps each newly selected entity's allocation header after ANY paste, ours or a real Ctrl+V -- owning
- * heap, tag, size, and whether the guard cookie validates -- so the two can be compared. Driven from the
- * per-tick hook on the hold transition (mode+0x1ac reaching 4), because the paste lands a frame or more
- * after the arm; that also catches a manual Ctrl+V, which supplies the control.
+ * WHY. Auto-grab (kind=2) is implemented but disabled: one "Memory corruption before block!" followed two
+ * auto-grab pastes, while repeated MANUAL pastes of the same prefab are clean. That message is the guarded
+ * Mem_Free's cookie check (doom-re: engine/memory-heaps-and-allocator.md) -- it fires when the allocator is
+ * handed a pointer it never returned. So the question is which pointer, and what our sequence leaves
+ * different from a real Ctrl+V.
  *
- * Off, because it answered its question [DIRECT, 2026-07-28]: eight auto-grab pastes across two sessions
- * left the editor identical to a manual Ctrl+V -- mode+0x1ac=4  arm(+0x420)=-1  action=0x0
- * flags1(+0x41)=0x64 pasteAvail=1  flags2=0x00 dirty=0 -- with no corruption. The corruption that had
- * kept kind=2 disabled was the staged-prefab map-heap bug, fixed by the MEMLOCAL_* push.
+ * WHAT THIS MEASURES. After ANY paste -- ours or a real Ctrl+V -- dump each newly selected entity's own
+ * allocation header: owning heap, tag, size, and whether the guard cookie still validates. Then compare the
+ * two. This is the same engine-vs-us control that cracked the staged-prefab case, applied to the paste's
+ * OUTPUT instead of its input.
  *
- * KNOWN DEFECT if you re-enable it. mode+0x1ac reaching 4 is the MANIPULATION sub-state, entered by a
- * paste-hold AND by an ordinary grab of existing entities, so plain grabs get logged and MISLABELLED
- * "MANUAL (engine Ctrl+V)" -- entries reading flags1=0x0b pasteAvail=0 flags2=0x04 with selection counts
- * around 100 were entities being moved, not pasted. (pasteAvail=0 there is correct: with something
- * selected the gate recompute takes its other branch and never sets bit 0x40.) The fix is to correlate
- * against a paste having happened -- staged entity count equal to the new selection count, or the arm
- * word being consumed -- rather than trusting the sub-state. */
+ * IMPORTANT SCOPE NOTE. kind=2 does not call PasteInstantiate itself -- it arms the action slot and the
+ * ENGINE performs the paste on a later frame, in its own dispatcher. So the entity allocations are made by
+ * engine code at the engine's own point in the frame, and the ambient heap scope should already match a
+ * manual Ctrl+V. That makes a heap-scope difference UNLIKELY for the injection route (it remains a strong
+ * candidate for the abandoned direct-call route, where our drain was the caller). If this probe shows both
+ * paths allocating identically, heap scope is eliminated for injection and the two remaining suspects --
+ * we SET the paste-available bit rather than letting the engine recompute it, and we ClearSelection
+ * immediately before arming -- become the front. Either outcome is progress.
+ *
+ * Because the paste lands a frame or more after we arm, the probe is driven from the per-tick hook on the
+ * hold transition (mode+0x1ac reaching 4), which catches a manual Ctrl+V too and so supplies the control.
+ *
+ * RESULT (2026-07-28) -- flipped OFF, question answered. Eight auto-grab pastes across two sessions, one on
+ * a fresh map, produced NO corruption, and the post-paste editor state was identical to a manual Ctrl+V:
+ *     mode+0x1ac=4  arm(+0x420)=-1  action=0x0  flags1(+0x41)=0x64 pasteAvail=1  flags2=0x00 dirty=0
+ * So both suspects are eliminated (forcing the paste-available bit; ClearSelection before arming), and the
+ * original corruption was the staged-prefab map-heap bug fixed the same day. kind=2 shipped on that basis.
+ *
+ * ⚠ KNOWN DEFECT if you re-enable this. The trigger fires on mode+0x1ac reaching 4, which is the
+ * MANIPULATION sub-state -- entered by a paste-hold AND by an ordinary grab of existing entities. So plain
+ * grabs get logged and MISLABELLED as "MANUAL (engine Ctrl+V)". Live example: entries showing
+ * flags1=0x0b pasteAvail=0 flags2=0x04 with selection counts of 106/90/104 were the maintainer moving
+ * entities pasted two minutes earlier, not pastes at all. (The pasteAvail=0 there is correct engine
+ * behaviour -- with something selected the gate recompute takes its other branch and never sets bit 0x40.)
+ * To fix properly, correlate against a paste actually having happened -- e.g. require the staged entity
+ * count to equal the new selection count, or latch on the arm word being consumed -- rather than trusting
+ * the sub-state alone. */
 #define AE_PASTE_DIAG_ON  0
 #if AE_PASTE_DIAG_ON
 #define AE_PASTE_DIAG(...) do { char _ld[320]; \
@@ -1262,19 +1300,23 @@ static int ae_apply_one(int id, const char *patched_text)
              * only resolves on DOOM's main thread. Off-main the lookup no-ops and the block falls through to
              * the process heap; ON the main thread with the editor up, the ambient scope is the MAP heap,
              * which is destroyed wholesale at the next map load -- leaving the live defsub pointing at
-             * unmapped pages and a later free reading a destroyed or recycled header.
+             * unmapped pages and a later free reading a destroyed or recycled header. Confirmed live
+             * 2026-09-03 by the one-shot probe below: a UI-thread commit reports heap=PROCESS.
              *
-             * This function runs on the MAIN thread in normal use (issue #61), so the push is the
-             * load-bearing half of that move: without it every main-thread commit lands the block in the
-             * map heap and re-arms the teardown crash. On the residual off-main paths the push declines
-             * and the allocation falls through to the process heap, which survives too.
+             * Since the issue #61 thread move, this function runs on the MAIN thread in normal use (the
+             * `sh` dispatch executes at the engine's command-exec point; off-main callers marshal through
+             * the clone_bss_apply drain), so the push is no longer a no-op -- it is the load-bearing half
+             * of the move. Without it, every main-thread commit would land the block in the map heap and
+             * reproduce the 2026-07-12 "Memory corruption before block!" teardown crash. On the residual
+             * off-main paths (thread-unknown or transport-unavailable fallback) the push declines and the
+             * allocation falls through to the process heap anyway, which is equally surviving.
              *
-             * THE BRACKET MUST SPAN THE idStr ASSIGNS, not just the rebuild -- class and inherit allocate
-             * through the same allocator, and ending early leaves those two in the map heap while the
-             * source text is safe, which looks fixed until the next map change.
-             *
-             * __finally, not __except: a fault must still pop, or the scope depth is skewed for the rest
-             * of the process. Pop only if the push took, because PopHeap fatals on underflow. */
+             * The bracket must span the idStr assigns as well, not just the rebuild: class and inherit
+             * allocate through the same allocator, and ending it early would leave those two in the map heap
+             * while the source text is safe -- which looks fixed right up until the next map change.
+             * __finally, not __except: a fault here must still pop, and swallowing it would skew the scope
+             * depth for the rest of the process. Pop only if the push took (PopHeap fatals on underflow) --
+             * the same shape ae_mkcmd_one already uses for the staging deserialize. */
             int commit_pushed = ae_push_heap_global();
             __try {
             /* the source rebuild carries the EDIT (the temp's canonical source includes the leaf) -- always. */
@@ -1309,24 +1351,63 @@ static int ae_apply_one(int id, const char *patched_text)
     }
     if (def_ctored) { __try { g_def_dtor(tmpDef); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 
-    /* ---- ONE-SHOT COMMIT PROVENANCE PROBE ---------------------------------------------------------
-     * Logs one line on the first successful decl commit of a process, naming the thread and the heap the
-     * decl-source block landed in. It verifies the two things that keep this commit safe: the thread move
-     * (issue #61) and the PushHeap(MEMLOCAL_HEAP_GLOBAL) bracket around the commit.
+    /* ---- ONE-SHOT COMMIT PROVENANCE PROBE (crash-triage instrument, 2026-08) ----------------------
+     * WHY THIS EXISTS. The 2026-07-12 writeup (docs/backend-changes.md) attributes the acctargets/bss
+     * "Memory corruption before block!" at map teardown to the deferred commit having left the decl-source
+     * block "double-owned" across two threads, and fixes it by committing INLINE on the UI thread. That
+     * fix WORKS -- it is not in dispute -- but the stated mechanism does not survive reading this file:
      *
-     * The heap is what matters. On the main thread the ambient scope IS the map heap, which HeapDestroy's
-     * wholesale at the next map load, and a defsub left pointing into it faults or trips the guarded
-     * free's cookie check at teardown [DIRECT, the AE_PLAY_DIAG result below, same allocator].
+     *   - ae_apply_one allocates the decl-source block (g_decl_rebuild) and hands it to ONE owner, the live
+     *     defsub, entirely on whichever single thread called it. It is never touched by two threads in
+     *     EITHER design, so there is no second owner to do a second free.
+     *   - The serialize half hands over a plain char* we malloc'd: ae_serialize_to_json destructs every
+     *     engine object it makes (see its teardown) and copies bytes out via ae_read_idstr. No engine-owned
+     *     allocation crosses the thread boundary, so "split across two threads" moves nothing that could be
+     *     double-owned.
      *
-     * Expected:  "C2 commit: thread=DOOM-main (tid=...) decl-source blob=... heap=PROCESS (survives)"
-     *   heap=MAP with thread=DOOM-main  => THE PIN REGRESSED (memlocal sig unresolved, or the bracket
-     *                                      lost). The teardown crash is re-armed: release blocker.
-     *   thread=UI(off-main)             => the THREAD MOVE regressed, a kind=0 caller bypassed the
-     *                                      dispatch/marshal. The block still survives off-main.
-     * heap=MAP is ambiguous if DeclSourceRebuild reused the engine's existing buffer, because the header
-     * then describes the engine's allocation -- so investigate it, never call it benign.
+     * What DID differ between the two designs is the allocating THREAD, and therefore -- via the
+     * main-thread-gated ambient heap scope (see the MEMLOCAL_* block, and MemLocalPushHeap in
+     * signatures.c, both DIRECT) -- the block's OWNING HEAP:
+     *     commit on the UI thread   -> the scope lookup no-ops -> block lands in the PROCESS heap (survives)
+     *     commit on the main thread -> the scope lookup works, and the editor keeps the MAP heap pushed
+     *                                  -> block lands in the MAP heap, which is HeapDestroy'd wholesale at
+     *                                     the next map load, leaving the defsub pointing at unmapped pages.
+     * A later teardown-time free of that block reads a header that is unmapped (AV) or recycled (cookie
+     * mismatch) -- which is EXACTLY the reported pair of symptoms, and exactly what the staged-prefab
+     * investigation already established for the same allocator (see the AE_PLAY_DIAG RESULT note).
      *
-     * One-shot via an InterlockedExchange latch, so a per-tick caller cannot spam it. */
+     * If that reading is right, the inline-on-UI-thread fix has been working by ACCIDENT -- it buys the
+     * surviving heap as a side effect of being on the wrong thread -- and the operation can be moved back
+     * onto the DOOM main thread (where the engine actually supports it) as long as the commit is wrapped in
+     * PushHeap(MEMLOCAL_HEAP_GLOBAL)/PopHeap, which buys the same heap deliberately. That is the open
+     * question this probe settles, and it is settled by ONE line in sh_backend.log from a normal build.
+     *
+     * ANSWERED 2026-09-03, live, on a normal editor session (`sh pr` + `sh bss` on the clean anchor):
+     *     C2 commit: thread=UI(off-main) (tid=31984) decl-source blob=... heap=PROCESS (survives)
+     * exactly the predicted line, so the reading held: the heap IS what differed between the two designs,
+     * and the surviving heap was a side effect of being on the wrong thread.
+     *
+     * BOTH HALVES HAVE SINCE LANDED. The commit is bracketed in PushHeap(MEMLOCAL_HEAP_GLOBAL)/PopHeap
+     * (the heap half), and the thread move (issue #61) routes every decl-edit onto the main thread: the
+     * `sh` dispatch now executes SnapStack ops inline at the engine's command-exec point, and off-main
+     * callers (the frontend's Save Timeline, the timeline-inherit normalize) marshal through the
+     * clone_bss_apply drain and block for the result.
+     *
+     * WHAT TO LOOK FOR NOW. On the first successful decl commit of a session the expected line is:
+     *     "C2 commit: thread=DOOM-main (tid=...) decl-source blob=... heap=PROCESS (survives)"
+     * That one line verifies both halves at once: DOOM-main says the thread move routed the commit
+     * correctly, and heap=PROCESS says the pin actually took where it matters (on the main thread the
+     * ambient scope IS the map heap, so PROCESS can only mean our push was in effect).
+     *     thread=DOOM-main heap=MAP        => the PIN REGRESSED (memlocal sig unresolved, bracket lost,
+     *                                         or the scope machinery changed) -- the 2026-07-12 teardown
+     *                                         crash is re-armed; treat as a release blocker.
+     *     thread=UI(off-main)              => the THREAD MOVE regressed (a kind=0 caller bypassed the
+     *                                         dispatch/marshal), though the block still survives off-main.
+     * Caveat (curated finding): a heap=MAP reading is ambiguous IF DeclSourceRebuild reused the engine's
+     * pre-existing buffer instead of reallocating -- the header read then describes the engine's original
+     * allocation. Treat heap=MAP as "investigate", not as instant proof, but never as benign.
+     * One-shot (an InterlockedExchange latch), so it cannot spam a per-tick caller. The probe is kept:
+     * it costs one line per process and re-answers the question on any machine or build without a rebuild. */
     if (applied) {
         static volatile LONG s_commit_probe_done = 0;
         if (InterlockedExchange(&s_commit_probe_done, 1) == 0) {
@@ -1511,11 +1592,11 @@ static int ae_mkcmd_one(const char *prefab_text)
 }
 
 /* ============================================================ kind=2: stage THEN place ==============
- * Load/Place without the manual Ctrl+V. Runs the engine's OWN paste sequence -- the pair its idle
- * sub-state dispatcher runs on action 0x5C -- rather than synthesizing input: the Snapmap+ window holds
- * focus when the button is clicked and DOOM reads through DirectInput, so a synthetic Ctrl+V reaches the
- * wrong window and the OS focus switch raises a spurious ESC menu. A memory-level call has no such
- * dependency on focus.
+ * Load/Place without the manual Ctrl+V. Runs the engine's OWN paste sequence -- the exact pair its idle
+ * sub-state dispatcher runs on action 0x5C -- rather than synthesizing input (the Snapmap+ window holds
+ * focus when the button is clicked and DOOM reads through DirectInput, so a synthetic Ctrl+V goes to the
+ * wrong window; a previous attempt also produced a spurious ESC-menu popup from the OS focus switch).
+ * A memory-level call bypasses the input stack entirely, so focus is irrelevant.
  *
  * Order is NOT negotiable:
  *   1. stage                     -- deserialize the prefab text into editor+0x209a8 (kind=1)
@@ -1527,9 +1608,9 @@ static int ae_mkcmd_one(const char *prefab_text)
  *   3. VERIFY the clear took     -- the guard can legitimately REFUSE the clear; instantiating anyway is
  *                                   the corrupting case, so a non-empty selection aborts to stage-only.
  *   4. PasteInstantiate          -- build the entities into the live map
- *   5. EnterAddPrefabGrab        -- the tool-state transition the engine always runs next. Skipping it
- *                                   leaves the entities placed-but-undraggable and crashes on the
- *                                   following Play transition.
+ *   5. EnterAddPrefabGrab        -- the tool-state transition the engine always runs next; skipping it is
+ *                                   what left the 2026-07-06 attempt placed-but-undraggable and crashing
+ *                                   on the following Play transition.
  *
  * NOTHING IS PLACED INTO THE MAP HERE. This reproduces Ctrl+V exactly: the prefab's entities are
  * instantiated and handed to the editor HELD (the Add-Prefab grab state), so the user still moves them
@@ -2377,8 +2458,11 @@ static int slot_serialize_selection(sh_iface *self, char *out_json, int cap)
  *     contained by the per-item SEH guards, and heap-safe off-main because the scope lookup no-ops and
  *     the block lands in the process heap.
  *
- * The main-thread route is only correct because ae_apply_one pins the commit's allocations to a heap
- * that outlives a map teardown -- see the MEMLOCAL_* bracket there.
+ * HISTORY. This slot originally ran the batch inline on the UI worker thread on the theory that the
+ * 2026-07-12 deferred-apply crash was a cross-thread double-free. That explanation was overturned (the
+ * block has one owner in either design); the real mechanism was the ALLOCATION HEAP -- a main-thread
+ * commit landed the decl-source block in the map heap, which dies at map teardown. ae_apply_one now pins
+ * the commit to the process heap, which is what makes the main-thread route correct.
  *
  * Each item is SEH-guarded (a fault degrades to 0-applied, never a crash). Same batch semantics as
  * slot_schedule_apply (kind 0=decl edit / 1=mkcmd / 2=stage+place / 3=target-write); text is
@@ -2437,41 +2521,55 @@ int sh_apply_last_place_result(void)
 }
 
 /* ============================================================ Play-round-trip slot DIAGNOSTIC =======
- * Records what Play does to the staging slot. Off by default; the MECHANISM IT FOUND is fixed by the
- * MEMLOCAL_* push above, so this is kept as the instrument that re-checks it, not as an open question.
+ * WHY THIS EXISTS. doom-re campaign staged-prefab-equivalence proved (2026-07-28) that staging leaves the
+ * entities idList well-formed -- a live measurement showed num == capacity after every stage, because the
+ * g_prefab_ctor reset above zeroes capacity so the reflection deserializer always takes its grow path.
+ * So the invalidation is a PLAY-TIME event, and the open question is what exactly Play does to the slot.
  *
- * TWO FLAGS, because the mitigation hides the bug. sh_apply_prefab_poll_play re-ctors the slot on the way
- * OUT of Play, while the memory is still intact, so logging alone measures the mitigation. Observing the
- * real post-Play state needs the re-ctor skipped, which re-arms the crash it prevents: the logging is
- * harmless and the skip is DANGEROUS.
+ * THE MEASUREMENT PROBLEM. sh_apply_prefab_poll_play re-ctors the slot on the way OUT (when Play starts),
+ * deliberately, while the memory is still intact. That means by the time Play ends the slot is already a
+ * clean empty prefab -- so simply logging after Play measures the mitigation, not the bug. To observe the
+ * real post-Play state the protective re-ctor has to be skipped, which re-arms the very crash it prevents.
+ * Hence two flags: the logging is harmless and on; the skip is DANGEROUS and off.
  *
- * WHAT IT RECORDS, on the way out and again on the way back, with a diff: the entities idList header
- * (ptr/num/capacity), plus for the first few blobs the teardown-relevant idStr at blob+0x168 (len, data,
- * flags, and whether data points at that idStr's own SSO buffer). Header unchanged means the damage is
- * inside the blobs; a changed or zeroed ptr means Play released or moved the buffer; a data pointer that
- * was self-owned going in and is not coming back means Play rewrote the string.
+ * WHAT IT RECORDS. On the way out: the entities idList header (ptr/num/capacity) plus, for the first few
+ * blobs, the teardown-relevant idStr at blob+0x168 (len / data / flags, and whether data points at that
+ * idStr's own SSO buffer, i.e. is self-owned). On the way back: the same fields again, with a diff. That
+ * discriminates the three candidate mechanisms directly -- header unchanged means the damage is inside the
+ * blobs; ptr changed or zeroed means Play released or moved the buffer; a data pointer that was self-owned
+ * going in but is not coming back means Play rewrote the string.
  *
- * ===== THE MECHANISM [DIRECT, 2026-07-28 HOLD_SLOT run] =====
- * Before Play the entities idList read ptr=0x1D8F2C106C0, num=5, capacity=5, every blob well-formed.
- * After Play the header was BYTE-IDENTICAL and the memory it pointed at was UNMAPPED -- blob+0x0 faults,
- * not garbage. The engine's own Ctrl+C clipboard survived Play intact, buffer contents included.
+ * ===== RESULT (2026-07-28, HOLD_SLOT run) -- THE MECHANISM =====
+ * Before Play: entities ptr=0x1D8F2C106C0, num=5, capacity=5, all blobs readable and well-formed.
+ * After Play:  the idList header is BYTE-IDENTICAL (same ptr, same num, same capacity) but the memory it
+ *              points at is UNMAPPED -- reading blob+0x0 faults. Not freed-and-reused (that would read as
+ *              garbage); unmapped.
+ * Control:     the engine's own Ctrl+C clipboard is byte-identical across Play INCLUDING its buffer
+ *              contents, so its blob array is NOT released.
  *
- * So Play releases the region holding our blob array while the prefab keeps a live-looking header into
- * it. The next Ctrl+C runs CreatePrefab -> prefab operator= -> idList operator=, sees src->capacity(0) !=
- * dst->capacity(5), and calls the blob teardown with (ptr, capacity=5) -- walking five blobs of
- * unmapped-or-recycled memory into the guarded free. Both reported symptoms follow from that one cause:
- * still unmapped reads as an AV, re-committed reads as plausible garbage with the heap-owned bit set,
- * which trips the cookie check ("Memory corruption before block!").
+ * So Play releases the heap region holding OUR blob array to the OS, while the prefab keeps a live-looking
+ * header pointing into it. The next Ctrl+C then runs CreatePrefab -> prefab operator= -> idList operator=,
+ * which sees src->capacity(0) != dst->capacity(5), and calls the blob teardown with (ptr, capacity=5) --
+ * walking five blobs of unmapped-or-recycled memory and handing whatever it finds to the guarded free.
+ * That accounts for BOTH reported symptoms from one cause: read it while still unmapped and you get an AV;
+ * read it after the region has been re-committed by other allocations and you get plausible garbage with
+ * the heap-owned bit set, which trips the guarded free's cookie check ("Memory corruption before block!").
  *
- * No member's contents diverge from the engine's own prefab. WHICH HEAP the blob array comes from is the
- * whole difference. */
+ * The divergence is therefore NOT the contents of any member -- every member we probed matches the engine's
+ * own prefab exactly. It is WHICH HEAP the blob array is allocated from. Our staging allocates it through
+ * the reflection idList handler's element-supplied resize, the engine's through its own tag-aware resize;
+ * one lands in a map-lifetime heap and the other does not. Note the engine's guarded allocator selects
+ * between GetProcessHeap() and two other heaps on flag bits in each block's header, which is consistent
+ * with a map-scoped heap being torn down wholesale. Fixing this means getting our blob array allocated the
+ * way CreatePrefab's is; that is the open RE question, not a guess to code now. */
 #define AE_PLAY_DIAG_ON  0
 /* DANGER -- flip to 1 only for a deliberate diagnostic run, on a throwaway map, with your work saved.
  * It SKIPS the protective re-ctor so the post-Play slot state is observable, which re-arms the known
  * heap-corruption crash on the next Ctrl+C. "Memory corruption before block!" is a FATAL engine error
  * (non-returning), so this can hard-kill the process, not just trip the fault shield. Leave at 0 for
  * any normal build. */
-/* Turn this on only for a NEW post-Play question that needs the slot held. */
+/* ANSWERED 2026-07-28 by a HOLD_SLOT run -- see the RESULT note below. Back to 0; there is no reason to
+ * turn this on again unless a NEW post-Play question needs the slot held. */
 #define AE_PLAY_DIAG_HOLD_SLOT  0
 
 #if AE_PLAY_DIAG_ON
@@ -2913,19 +3011,28 @@ void sh_apply_prefab_poll_play(void)
 /* Resolve an engine leaf by SIGNATURE, with a historical raw RVA kept only as a fallback and as a
  * drift tripwire.
  *
- * POLICY: on a disagreement the SIGNATURE WINS, never the stale RVA. A mismatch means the recorded RVA
- * no longer describes this build -- the game was patched, or the RVA was wrong when written -- so the RVA
- * points into arbitrary code while the signature is correct. The scan is not a loose match either:
+ * POLICY (revised 2026-07-28): on a disagreement the SIGNATURE WINS. The stale RVA is never preferred
+ * over a live scan hit.
+ *
+ * The earlier policy refused the signature and used the RVA, reasoning that a bad scan hit could corrupt
+ * live editor state silently (these leaves run on every stage and on the Play watchdog's slot re-init).
+ * That trade is backwards on the only case it actually fires in. A mismatch means the recorded RVA no
+ * longer describes this build -- either the game was patched, or the RVA was wrong when it was written
+ * (all four of this DB's contaminated entries were exactly that: derived from a mis-imported binary).
+ * In both cases the RVA points into arbitrary code while the signature is correct, so preferring the RVA
+ * guarantees the very outcome the check was meant to prevent. The scan is also not a loose match:
  * sig_resolve_one enforces UNIQUENESS across the whole executable range and reports AMBIGUOUS rather
  * than guessing, so a lone hit is a strong result.
  *
- * The RVA earns its place two ways: it makes drift VISIBLE (the MISMATCH line names the leaf), and it is
- * used when the scan misses ENTIRELY, where the caller's own guards carry the risk.
+ * The RVA still earns its place two ways: it makes drift VISIBLE (the MISMATCH line names the leaf), and
+ * it is still used when the scan misses ENTIRELY -- the one case where there is nothing better, and where
+ * the caller's own guards have to carry the risk.
  *
- * That fallback is restricted to the build the RVA was extracted from. DOOM ships two executables from
- * one source tree, and a pinned RVA on the other names an unrelated function -- worse than resolving
- * nothing, because the caller cannot tell and these pointers get CALLED. Off the pinned build this
- * returns NULL, and every caller null-checks its leaf and degrades to a clean refusal. */
+ * PORTABILITY (2026-09-04): that last use is now restricted to the build the RVA was extracted from.
+ * DOOM ships two executables from one source tree, and a pinned RVA on the other one names an unrelated
+ * function -- which is worse than resolving nothing, because the caller cannot tell the difference and
+ * these pointers get CALLED. Off the pinned build the fallback is withheld and this returns NULL; every
+ * caller already null-checks its leaf and degrades to a clean refusal. */
 static void *ae_pick_engine_fn(const sig_result *results, size_t n, const char *sig_name,
                                const uint8_t *base, uint32_t fallback_rva, const char *label)
 {

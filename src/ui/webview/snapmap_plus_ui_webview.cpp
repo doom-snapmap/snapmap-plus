@@ -3,14 +3,19 @@
  *
  * Exports sh_ui_init (ord 10; the OG's counterpart was snaphak_ui_init), writes the loop-state to
  * arg-block[0], caches the backend interface (arg-block[3]) and drains its work-queue (+0x1a0) at
- * ~30 Hz on this thread, and keeps the 9 sl_* exports (../sl_exports.cpp). Zero DOOM/OG bytes.
+ * ~30 Hz on this thread, keeps the 9 sl_* exports (../sl_exports.cpp). Zero DOOM/OG bytes.
  *
- * The Entities tab: multi-select in JS, a context menu (Copy ID, Delete via +0x130 selection_guard,
- * Push to stack 0 via +0x2A0 push_to_stack, consumed by the `sh` console ops in
- * src/backend/snapstack.c), and three auto-refreshes driven by cheap content signatures rather than
- * timers -- the entity list, the editor selection (get_selection, +0x150, when the checkbox is on) and
- * the displayed entity's state, which the page applies only while its edit panel is clean. Save and
- * delete are deferred and applied under the loop mutex.
+ * ITERATION 4 -- deeper Entities tab.
+ *   - multi-select (JS), context menu: Copy ID (clipboard), Delete (+0x130 selection_guard),
+ *     Push to stack 0 (+0x2A0 push_to_stack -- pushes onto the backend-owned SnapStack stack; see
+ *     src/backend/snapstack.c for the `sh <subcommand>` console ops that then consume it).
+ *   - auto-refresh: a cheap content signature over the walk; the list is re-emitted only when it
+ *     changes (add/delete/rename/reclass/hide), so no needless re-renders.
+ *   - synchronize with editor: when the checkbox is on, poll get_selection (+0x150); a single changed
+ *     editor selection re-points the panel.
+ *   - state auto-refresh: the displayed entity's state is re-read on a signature and pushed as
+ *     {auto:true}; the HTML applies it only when the edit panel is clean (never clobbers unsaved edits).
+ *   - save is deferred + applied under the loop mutex; delete likewise.
  */
 #include <windows.h>
 #include <dwmapi.h>
@@ -474,14 +479,15 @@ static bool json_get_double(const std::wstring &j, const wchar_t *key, double *o
  * The mapper's own shortlist, kept in %LOCALAPPDATA%\snapmap-plus\pinned.json -- deliberately its
  * OWN file rather than a key in the settings config.
  *
- * The settings file is all-or-nothing: a parse failure or schema mismatch sends the whole document to
- * "damaged -> restored defaults". That is fine for a handful of validated scalars, but pins are
- * unbounded user data, and a malformed pin list must not be able to reset somebody's theme too. Apart,
- * the worst a broken pins file costs is the pins. It also sits next to rawmap.json, that folder's
- * convention for user data.
+ * The settings file is all-or-nothing: a parse failure or a schema mismatch sends the whole document
+ * to "damaged -> restored defaults". Settings are a handful of validated scalars and can afford that;
+ * pins are unbounded data the user grows themselves, and a malformed pin list has no business being
+ * able to reset somebody's theme and Show Hidden along with it. Keeping them apart means the worst a
+ * broken pins file can do is cost the pins. It also sits next to rawmap.json, which is already that
+ * folder's convention for user data, and stays hand-editable and easy to back up or share.
  *
- * The host moves the bytes and does no parsing -- shape and validation belong to the UI, the only side
- * that knows what a pin means. A missing file is "no pins yet". */
+ * The host does no parsing -- it moves the bytes and nothing else. Shape and validation belong to the
+ * UI, which is the only side that knows what a pin means. A missing file is simply "no pins yet". */
 static std::string poc_pins_path()
 {
     char *la = nullptr; size_t n = 0;
@@ -599,13 +605,15 @@ static int poc_collect_timed(int *out_ready, const char *reason,
     poc_perf_note_collect(elapsed, n, reason);
     return n;
 }
-/* Rescan g_ents[0..n) for Timelines and refill g_tls/g_tl_count. Called only when the cheap
- * entities-list signature changed, matching the OG sh_rebuild_entity_list cadence rather than a timer.
- * Reads the classname of EVERY entity, like the OG populate_one_entity, and adds both
- * idTarget_Timeline and idEncounterManager to the Timelines list -- an OG quirk that shows encounter
- * managers there too, and the reason this cannot pre-filter on the id string. The classname read is a
- * pure-memory pointer walk (ent->+0x158->+0x60) [DIRECT, live debug], and the per-call SEH guard keeps
- * one bad entity from aborting the rescan. */
+/* Rescan g_ents[0..n) for Timelines and refill g_tls/g_tl_count. Called ONLY when the cheap entities-list
+ * signature just changed (mirrors the OG sh_rebuild_entity_list cadence -- NOT a fixed timer). Reads the
+ * classname of EVERY entity, exactly like the OG populate_one_entity (sh_tabs.cpp), and dual-adds any
+ * idTarget_Timeline / idEncounterManager into the Timelines list (the OG quirk -- both classes, so encounter
+ * managers show too). The classname read was live-debug-proven a clean pure-memory pointer walk
+ * (ent->+0x158->+0x60), so it's cheap + safe; the per-call SEH guard keeps one bad entity from aborting the
+ * rescan. (An earlier version pre-filtered on the id-string containing "unknown"/"placeholder_target" to save
+ * calls, but that skipped idEncounterManager -- whose inherit is neither -- so it's dropped in favor of the
+ * faithful "read every entity's class" behavior.) */
 static void poc_rescan_timelines(int n)
 {
     int tn = 0;
@@ -621,12 +629,15 @@ static void poc_rescan_timelines(int n)
             poc_logf("poc_rescan_timelines: get_classname_copy FAULTED for id=%lu (skipped)", (unsigned long)g_ents[i].eid);
         }
         if (c && (strcmp(c, "idTarget_Timeline") == 0 || strcmp(c, "idEncounterManager") == 0)) {
-            /* PORTABLE-INHERIT NORMALIZE: a Timeline placed from the in-game palette is spawned from
-             * a repurposed placeholder entityDef and records that as its `inherit`, so the saved map
-             * would only reload where our override is installed. The rewrite lives in backend slot
-             * +0x298. It is idempotent and cheap on a non-match (a raw defsub-inherit read, no
-             * serialize, no alloc), so it runs on every Timeline-classed id every rescan. A displayed
-             * Inherit box self-corrects through the regular auto state poll. */
+            /* PORTABLE-INHERIT NORMALIZE (2026-07-13): a Timeline placed from the in-game palette is
+             * spawned from a repurposed placeholder entityDef, so it records that as its `inherit` -- a
+             * saved map would then only reload where our override is installed. The rewrite lives in the
+             * shared backend slot +0x298. Cheap on a non-match (a raw defsub-inherit read,
+             * no serialize/no alloc) and idempotent, so it's safe to call unconditionally on every
+             * Timeline-classed id every rescan -- only idTarget_Timeline can carry the placeholder
+             * (idEncounterManager's inherit is unrelated). The displayed Inherit
+             * box (if this entity is open in the Entity-State panel) self-corrects via the regular auto
+             * state poll -- see the per-field dirty exception in mockup.html's 'state' handler. */
             if (strcmp(c, "idTarget_Timeline") == 0 && g_iface->vtbl->normalize_timeline_inherit) {
                 __try { g_iface->vtbl->normalize_timeline_inherit(g_iface, g_ents[i].eid); }
                 __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -786,15 +797,19 @@ static int poc_serialize_entity_into(int id, char *buf, int cap)
 }
 /* Serialize `id` into a buffer that GROWS until the result fits, and report how many bytes it took.
  *
- * `serialize_entity` never reports the length it needed -- a too-small buffer comes back as 0, exactly
- * like a real failure -- so doubling and retrying is the only way to tell "bigger than the buffer" from
- * "could not open this timeline". sh_read_growing_text does the same for engine strings.
+ * A fixed cap was wrong here, not merely tight. `serialize_entity` never reports the length it needed --
+ * a buffer that is too small comes back as 0, exactly like a real failure -- so the caller cannot say
+ * "your timeline is bigger than the buffer", only "could not open this timeline". Doubling and retrying
+ * is the only way to tell the two apart, and it is the same trick sh_read_growing_text uses for engine
+ * strings, for the same reason.
  *
- * A serialize that exactly fills the buffer counts as too-small too, since that is what a truncating
- * writer looks like from here and half a JSON document would reach the page as `ok`. An entity whose
- * real size lands on the cap costs one extra call and then resolves.
+ * A serialize that fills the buffer to its cap is treated as too-small as well: that is what a truncating
+ * writer looks like from here, and half a JSON document would reach the page as `ok` and fail to parse
+ * there instead. An entity whose real size happens to land exactly on the cap costs one extra call and
+ * then resolves, which is the same harmless case that header documents.
  *
- * Growth is kept for the session, so only the first open that outgrows the buffer pays. */
+ * Growth is kept for the session, so the cost is a few extra calls on the ONE open that outgrows the
+ * buffer and nothing afterwards. */
 #define POC_SERIALIZE_INITIAL_CAP (1u * 1024 * 1024)    /* every hand-authored timeline fits here */
 #define POC_SERIALIZE_MAX_CAP     (32u * 1024 * 1024)   /* honest boundary, not a guess at the maximum */
 
@@ -926,13 +941,16 @@ static int poc_serialize_selection_raw(char *buf, int cap)
     return n;
 }
 /* Create-from-selection: resolve the file path (+0xc0), serialize the CURRENT editor selection (+0xb0),
- * fwrite it. g_create_result: 1 ok, 0 nothing selected (serialize returned empty), 2 not hovering an
- * entity in the selection, -1 resolve/serialize/write failure. Real prefabs run up to ~370 KB, so the
- * scratch buffer is 4 MB.
+ * fwrite it. g_create_result: 1 ok, 0 nothing was
+ * selected (serialize returned empty), 2 not hovering an entity in the selection, -1 resolve/serialize/
+ * write failure. Real prefabs on disk run up to ~370 KB (Sync Entities for Demons.json), so the scratch
+ * buffer is generously sized at 4 MB.
  *
- * The hover check (+0x198) is an engine requirement [DIRECT]: the engine's own PrefabPopulate refuses
- * to run without a hovered entity in the selection. Checking it before serialize_selection gives that
- * its own result code rather than the generic "nothing selected". */
+ * The hover check (+0x198) is a real, CONFIRMED (2026-07-06) engine requirement, not a UI nicety: the
+ * engine's own PrefabPopulate refuses to run without a hovered entity in the selection (it prints
+ * "Failed to create prefab: not hovering entity in selection." itself). Checking it here up front, before
+ * ever touching serialize_selection, gives an accurate result code instead of the generic "nothing
+ * selected" for what is actually a distinct failure. */
 static void poc_apply_create_prefab()
 {
     g_create_result = -1;
@@ -1054,12 +1072,14 @@ static void poc_apply_rename_prefab()
             MoveFileA(oldm, newm);
     }
 }
-/* Load/Place: read the prefab file's raw JSON off disk, clear the editor selection first so nothing
- * else is selected when the user pastes, then schedule a kind=1 (mkcmd) apply item to stage it into
- * editor+0x209a8. Stage-only: a direct PasteInstantiate call crashed, and a synthesized Ctrl+V raised a
- * spurious ESC menu from the OS-level focus switch (backend-changes.md). The user presses Ctrl+V in the
- * 3D view, which is also the original SnapHak's workflow [DIRECT, its own decompilation automates no
- * paste either]. result: 1 staged, 0/-1 resolve/read/schedule failure. */
+/* Load/Place: read the prefab file's raw JSON off disk, clear the current editor selection FIRST (so
+ * nothing else is selected once the user pastes it), then schedule a kind=1 (mkcmd) apply item to stage
+ * it into editor+0x209a8. Deliberately stage-only -- we tried automating the follow-up paste keystroke
+ * (direct PasteInstantiate call, then a synthesized Ctrl+V) and both had real side effects (a crash, then
+ * a spurious ESC-menu popup from the OS-level focus switch); see backend-changes.md. The user presses
+ * Ctrl+V themselves in the 3D view to actually place it, matching the original SnapHak's own workflow
+ * (confirmed via decompiling the original snaphakui.dll/XINPUT1_3.dll -- neither of them automates this
+ * step either). result: 1 staged, 0/-1 resolve/read/schedule failure (see backend log). */
 /* __try can't share a function with a C++ object needing unwinding (/EHsc, C2712) -- these leaves have
  * only PODs in scope, so the SEH guards around the engine calls are safe here. */
 static void poc_clear_selection_seh()
@@ -1073,12 +1093,15 @@ static int poc_apply_edit_seh(const sh_apply_item *it, int count, const char *op
     __try { return g_iface->vtbl->apply_edit(g_iface, it, count, op) ? 1 : 0; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
-/* Decl-edit (kind=0) commits go through +0x290 apply_sync for the SYNCHRONOUS applied count. The slot
- * executes the batch on DOOM's MAIN thread (issue #61), so from this UI worker it marshals through the
- * clone_bss_apply drain and BLOCKS -- normally one frame, a few seconds at worst with the engine parked,
- * after which it reports failure. Stalling the think loop that long is by design. An old backend without
- * +0x290 falls back to the deferred apply_edit, also main-thread and heap-pinned, just without the
- * count. kind=1/2 (mkcmd staging, e.g. Load/Place) stays on poc_apply_edit_seh/apply_edit. */
+/* Decl-edit (kind=0) commits go through +0x290 apply_sync for the SYNCHRONOUS applied count. Since the
+ * issue #61 thread move the slot executes the batch on DOOM's MAIN thread: called from this UI worker it
+ * marshals through the clone_bss_apply drain and blocks (normally one frame; a few seconds worst-case if
+ * the engine is parked, after which it reports failure) -- so this call may briefly stall the think
+ * loop, by design. (The old comment's "deferred +0xd0 double-owns the decl-source block" reasoning was
+ * OVERTURNED -- the real hazard was the allocation heap, now pinned backend-side; see
+ * docs/backend-changes.md.) Fall back to the deferred apply_edit only on an old backend that lacks
+ * +0x290 -- also main-thread and heap-pinned, just without the synchronous count. kind=1/2 (mkcmd
+ * staging, e.g. Load/Place) stays on poc_apply_edit_seh/apply_edit. */
 static int poc_apply_sync_seh(const sh_apply_item *it, int count, const char *op)
 {
     __try {
@@ -1095,13 +1118,14 @@ static void poc_apply_new_entity()
         poc_log("new-entity: ABORT (iface/slot missing)");
         return;
     }
-    /* PREFLIGHT -- refuse instead of degrading. Both are the engine's own paste gate, and the place
-     * step falls back to stage-only when either fails, which reads as success while nothing arrives on
-     * the cursor:
+    /* PREFLIGHT -- refuse instead of degrading. Both of these are the engine's own paste gate, and
+     * the place step silently falls back to stage-only when either fails, which reported success
+     * while nothing arrived on the cursor:
      *   - hovering an entity: the engine's paste branch is gated on hovered id == -1.
      *   - a live selection: PasteInstantiate uses the selection array as its old->new id map and
      *     AddToSelection appends, so pasting over one mis-wires every connection.
-     * Saying so beats auto-clearing the selection, which hides the on-screen cause. */
+     * Auto-clearing the selection was the old behaviour; it hid from the user that the state they
+     * could see on screen was the reason, so say it instead. */
     if (g_iface->vtbl->hovered_id && g_iface->vtbl->hovered_id(g_iface) >= 0) {
         poc_log("new-entity: REFUSED (hovering an entity -- the engine will not paste there)");
         g_new_entity_result = -2;
@@ -1175,34 +1199,58 @@ static void poc_apply_load_prefab()
      * thread, which is where the clone_bss_apply drain runs it. If anything is unavailable -- sig
      * unresolved, not in EntityMode, selection not empty -- it degrades to the old stage-only behaviour
      * and the toast says so; there is no half-placed outcome. */
-    /* kind=2: stage the prefab AND inject the paste action, so the drop needs no Ctrl+V.
+    /* STILL kind=1 (stage-only), but the RECORDED REASON BELOW IS DISPROVEN -- read this before acting.
      *
-     * The staging happens inside an idMemLocal::PushHeap(0) scope (apply_engine.c's MEMLOCAL_* block),
-     * because the entity-blob array otherwise lands in the engine's MAP heap, which ResetMapHeap
-     * destroys at map load.
+     * The old note said kind=2 was disabled "because the prefab we stage is not structurally equivalent to
+     * one the engine's own CreatePrefab builds", and to re-enable "once the deserialized prefab matches
+     * CreatePrefab's output". Both are wrong:
+     *   - the object IS member-for-member equivalent; nothing about its layout ever differed;
+     *   - the real cause was that its entity-blob array was allocated in the engine's MAP heap, which
+     *     ResetMapHeap destroys with HeapDestroy at map load. Fixed 2026-07-28 by staging inside an
+     *     idMemLocal::PushHeap(0) scope (see apply_engine.c's MEMLOCAL_* block and docs/backend-changes.md).
+     * The symptoms that note cites -- "Ctrl+V pastes nothing, Ctrl+C faults at 0x1ab32ee, repeated pastes
+     * end in Memory corruption before block!" -- are exactly that bug, and it is fixed and verified: the
+     * staged prefab now survives a Play round-trip and a map change with Ctrl+V working afterwards.
      *
-     * [DIRECT] Eight auto-grab pastes across two sessions left the editor in a state identical to a
-     * manual Ctrl+V -- mode+0x1ac=4  arm(+0x420)=-1  action=0x0  flags1(+0x41)=0x64 pasteAvail=1
-     * flags2=0x00 dirty=0 -- with no corruption. The arm word self-clears, so an injected action cannot
-     * re-fire. The engine's paste gate is the copy/paste cvar AND staged count >= 1 inside the
-     * nothing-hovered branch, with no capacity term, and injecting an action rather than calling
-     * PasteInstantiate keeps the engine's own paste branch and its checks in the path.
+     * So the stated precondition for re-enabling is MET. It is still kind=1 only because the separate
+     * auto-grab corruption report has not been re-tested against the fixed build, and every observation
+     * behind it was made while the staged prefab lived in the map heap.
      *
-     * Residue: the paste-available bit is set without reading snapEdit_enableCopyPaste, so a paste is
-     * possible while the user has copy/paste off. The engine's next recompute clears it.
+     * ALSO NOTE the two records of the manual control CONTRADICT each other: this comment said repeated
+     * manual pastes of OUR prefab ended in "Memory corruption before block!", while the campaign recorded
+     * "the same repeated manual pasting under stage-only is clean". The "auto-grab specifically is at
+     * fault" conclusion rests on that control, so it is weaker than it looks.
      *
-     * kind=1 is stage-only, if the injection ever needs backing out. */
+     * SHIPPED 2026-07-28 as kind=2 after a measured re-test. Evidence: eight auto-grab pastes across two
+     * sessions (one on a fresh map, followed by several minutes of normal editing) produced no corruption,
+     * and the post-paste editor state was IDENTICAL to a manual Ctrl+V --
+     *     mode+0x1ac=4  arm(+0x420)=-1  action=0x0  flags1(+0x41)=0x64 pasteAvail=1  flags2=0x00 dirty=0
+     * -- which eliminates both suspects that had kept this off (that we force the paste-available bit rather
+     * than let the engine recompute it, and that we ClearSelection immediately before arming). The arm word
+     * self-clears, so an injected action cannot re-fire either.
+     *
+     * Also verified while testing: the engine's paste gate contains NO capacity/budget term (it is exactly
+     * the copy/paste cvar AND staged count >= 1, inside the nothing-hovered branch), so forcing that bit
+     * cannot bypass a map-full check. And because this route INJECTS an action rather than calling
+     * PasteInstantiate directly, the engine still runs its own paste branch and every check inside it.
+     *
+     * The one honest residue: we set the bit without reading snapEdit_enableCopyPaste, so we could paste
+     * while the user has copy/paste disabled. Minor, and the engine's next recompute clears it again.
+     *
+     * REVERT: set kind back to 1 and rebuild -- that is the whole switch. */
     sh_apply_item it; it.kind = 2; it.id = 0; it.text = body.c_str();
     g_load_result = poc_apply_edit_seh(&it, 1, "load-prefab");
     char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "load-prefab: name='%s' staged=%d (kind=2: stage + auto pick-up)",
                              g_load_prefab_name.c_str(), g_load_result);
     poc_log(l);
 }
-/* Timelines Stage 5 (Save): kind=0, so the full patched entity JSON deserializes to a temp def and
- * commits class/inherit/source on `id` -- id-targeted, not paste-targeted. The page has already
- * reserialized and JSON-patched the componentTimeLine/encounterComponent field, so this hands the
- * opaque blob to the engine and reports whether it took. Commits through +0x290 sync, on DOOM's main
- * thread, for the real applied count. */
+/* Timelines Stage 5 (Save): kind=0 (deserialize the FULL patched entity JSON -> temp def -> commit
+ * class/inherit/source on `id`) -- id-targeted instead of paste-targeted. The page already did the hard
+ * part (fresh-reserialize + JSON-patch the componentTimeLine/encounterComponent field); this is purely
+ * "hand the opaque blob to the engine and report whether it took."
+ * COMMITS VIA +0x290 SYNC: a decl-edit commit, same class of op as SnapStack's acctargets/bss/bse. The
+ * slot runs it on DOOM's main thread (blocking marshal from this worker thread -- issue #61) and returns
+ * the real applied count. See poc_apply_sync_seh and docs/backend-changes.md. */
 static void poc_apply_save_timeline()
 {
     g_save_timeline_result = 0;
@@ -1488,18 +1536,25 @@ static void poc_send_material_result(const char *name)
  * instead of using the one fixed %LOCALAPPDATA% path. The backend already accepted an arbitrary path
  * on both sides; these are the +0x328/+0x330 slots' only caller.
  *
- * WHAT LOAD DOES: it STAGES a file, so the swap substitutes those bytes into the engine's next
- * map-load parse. It does not open the map. Every string below says "staged" and names what the person
- * still has to do -- "loaded" would read as a lost file to anyone who then sees their old map.
+ * WHAT LOAD DOES, EXACTLY. It STAGES a file: the swap substitutes those bytes into the engine's next
+ * map-load parse. It does not open the map, because nothing here can make the engine load one -- that
+ * needs an engine call from a main-thread frame hook this build has no execution point for. Every
+ * string below says "staged" and names what the person still has to do. Do not soften that into
+ * "loaded": someone who reads "loaded" and sees their old map on screen will think we lost their file.
  *
- * THE PICKER RUNS ON ITS OWN THREAD. The web-message handler is dispatched from `DispatchMessageW`
- * inside poc_think_loop, so a modal Show() there stops the loop for as long as the dialog is up: no
- * editor polling, no selection sync, no queued-work drain, no mesh completions. A shell dialog is not
- * quick either -- it enumerates cloud providers, network places and thumbnails on open.
+ * WHY THE PICKER RUNS ON ITS OWN THREAD
+ * -------------------------------------
+ * It used to run straight out of the web-message handler, on the note (wrong, and reported as lag) that
+ * a modal dialog "blocks this thread only -- the backend and DOOM are untouched". The handler is
+ * dispatched from `DispatchMessageW` INSIDE poc_think_loop, so a modal Show() there stops the loop
+ * itself for as long as the dialog is open: no editor polling, no selection sync, no queued-work drain,
+ * no mesh completions -- and the loop is what keeps the frontend in step with the editor. A shell
+ * dialog is not quick, either: it enumerates cloud providers, network places and thumbnails on open.
  *
- * So the dialog gets a dedicated thread with its own apartment and hands its result back through the
- * pending-flag handoff every other deferred action here uses. Every call that touches the backend still
- * happens on the UI thread. */
+ * So the dialog gets a dedicated thread with its own apartment, and the result comes back through the
+ * same pending-flag handoff every other deferred action here uses. The think loop keeps turning while
+ * the dialog is up, and every call that touches the backend still happens on the UI thread, where the
+ * rest of this file already requires them to be. */
 
 /* Run the common item dialog. `save` picks the Save-As variant. Returns false when the person
  * cancelled (the overwhelmingly common non-success case, and not an error worth reporting).
@@ -1547,11 +1602,17 @@ static bool poc_pick_rawmap_file(bool save, const wchar_t *title, std::wstring &
 
         /* Open on the rawmap folder rather than wherever the shell last was.
          *
-         * SetFolder, NOT SetDefaultFolder: SetDefaultFolder applies only when the dialog has no
-         * remembered location, and it has one, so the dialog opens in Quick Access -- which looks
-         * like the folder was ignored and is also the slowest start, enumerating cloud providers and
-         * network places. SetDefaultFolder stays for the first-ever open and for a path that does not
-         * exist yet; SetFolder wins when both are set. */
+         * SetFolder, NOT SetDefaultFolder -- and this is a correction of the line that used to be
+         * here. SetDefaultFolder applies only when the dialog has NO remembered location, and it had
+         * one, so the dialog kept opening in Quick Access instead. That was two reported problems
+         * with one cause: the folder we set looked ignored, and the dialog was slow to appear,
+         * because Quick Access is the slowest possible starting point -- it enumerates cloud
+         * providers and network places, and on a machine whose Documents is OneDrive-redirected that
+         * is a network round trip before anything gets drawn.
+         *
+         * SetDefaultFolder is kept too, for the first-ever open and for a path that does not exist
+         * yet; SetFolder wins when both are set. Overriding a remembered location is the intent:
+         * this is the app's own data folder and it is where rawmaps live. */
         {
             wchar_t dir[MAX_PATH];
             if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, dir))) {
@@ -1823,10 +1884,13 @@ static void poc_cancel_preview()
         g_iface->vtbl->request_preview(g_iface, "");
 }
 
-/* Assets browser: one asset type's catalog (+0x2E8 list_assets), sent on demand into the page's
- * bounded two-type cache, which filters client-side. Materials alone are ~9,805 names and a few hundred
- * KB, so each type is paged out of the backend in chunks and concatenated into one bridge response.
- * Falls back to +0x2E0 list_materials on a backend older than ext 16. */
+/* Assets browser: one asset type's catalog (+0x2E8 list_assets), sent on demand and held in the
+ * page's bounded two-type cache, which then filters client-side. Materials alone are ~9,805 names
+ * plus atlas-only rows and a few hundred KB, so each type is paged out of the backend in chunks and
+ * concatenated here before one bridge response.
+ *
+ * Falls back to +0x2E0 list_materials when the backend predates ext 16, so a UI DLL paired with an
+ * older backend still lists materials instead of coming up empty. */
 static void poc_send_asset_list(int kind)
 {
     if (!g_webview) return;
@@ -1855,11 +1919,13 @@ static void poc_send_asset_list(int kind)
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
-/* Timelines Stage 3: the full event-def catalog, sent ONCE per session like enumInherits. The page
- * caches and filters it client-side, on the same "first N shown, type to narrow" convention as
- * Inherit/Classname. Each event carries its arg SCHEMA -- name and type per position -- so the page can
- * label an argument "<name> (<type>)" and know how many args a freshly-picked event expects, not only
- * the ones that already have a stored value. Static data (sh_event_catalog.h), no engine touch. */
+/* Timelines Stage 3: the full event-def catalog, sent ONCE per session (like enumInherits' full list) --
+ * the page caches it and filters client-side, same "first N shown, type to narrow" Combo() convention as
+ * Inherit/Classname. Each event carries its arg SCHEMA (name+type per position)
+ * -- not just the bare event name -- so the page can label each argument ("<name> (<type>)",
+ * the same convention the original uses) and know how many args a freshly-picked event expects,
+ * instead of only being able to describe args that already have a stored value. Static data
+ * (sh_event_catalog.h), no engine touch. */
 static void poc_send_events()
 {
     if (!g_webview) return;
@@ -2352,16 +2418,19 @@ static DWORD WINAPI report_thread(LPVOID)
  * the think loop polls that directory (~2 s, cheap FindFirstFile) and decides what the user sees.
  *
  * NOT EVERY RECORD IS A CRASH. The record's `kind` says which happened:
- *   - "fatal" / "engine_fatalerror" -- TERMINAL: the process died or is dying, and the crash-report
- *     dialog appears on the next launch.
- *   - "classB" -- SURVIVED: the shield caught the fault and recovered through the engine's Error(6)
- *     path, so the user got a hitch rather than a crash. The record is still written and kept, as
- *     diagnostic signal, but it gets a quiet mid-session toast instead of a modal.
+ *   - "fatal" / "engine_fatalerror" -- TERMINAL: the process died (or is dying). The crash-report
+ *     dialog is exactly right, and appears on the next launch.
+ *   - "classB" -- SURVIVED: the shield caught the fault and recovered through the engine's own
+ *     Error(6) path; the editor kept running. The user experienced a hitch, not a crash.
+ * Both used to raise the same dialog, so a recovered fault prompted "the game crashed -- send a
+ * report", and the tracker filled up with reports of faults nobody actually lost a session to. A
+ * survived fault is still real diagnostic signal, so the record is still WRITTEN and still kept on
+ * disk -- it just gets a quiet toast instead of a modal, and only mid-session (see the poll).
  *
- * Submission rides the same relay POST as the feedback dialog (category "crash"), with one enrichment
- * here: optionally attaching the tails of the local logs, ANONYMIZED first -- account, profile and
- * machine names scrubbed, see report_scrub.h. Dismiss and a successful send both clear the pending
- * records, so nothing nags twice; the full logs and any crash dump stay untouched. */
+ * Submission rides the exact same relay POST as the feedback dialog (category "crash"), with one
+ * enrichment done here: optionally attaching the tails of the local logs, ANONYMIZED first (the
+ * account/profile/machine names are scrubbed -- see report_scrub.h). Dismiss and a successful send
+ * both clear the pending records (never nag twice); the full logs and any crash dump stay untouched. */
 static const char *kCrashDir  = "snapmap-plus\\crash";   /* CWD = the game dir (poc_log's convention) */
 static const char *kCrashGlob = "snapmap-plus\\crash\\pending-*.json";
 #define CRASH_RECORD_READ_CAP  16384                      /* a record is ~2 KB; cap the read anyway */
@@ -2406,22 +2475,26 @@ static int crash_scan(std::vector<std::string> &names)
     return (int)names.size();
 }
 
-/* Did the process NOT survive the fault this record describes? Reads the record's own `kind` field.
- * Two kinds do not by themselves mean the process died:
+/* Did the process NOT survive the fault this record describes? Reads the record's own `kind` field
+ * (written first by crash_record_json). Two kinds do not by themselves mean the process died:
  *
- *   "classB"    -- the shield recovered in place: it resumed the thread into Error(6) and the engine's
- *                  frame loop caught it.
- *   "offthread" -- the shield DECLINED a fault on a non-main thread (fault_shield/veh.c) and returned
- *                  EXCEPTION_CONTINUE_SEARCH rather than forcing a throw that thread has no handler
- *                  for. The apply path's per-item __except guards routinely absorb one and degrade to
- *                  "0 applied". If nothing absorbs it and the process does die, the unhandled-exception
- *                  filter writes its own "fatal" record with a minidump for the same fault, and that
- *                  record prompts -- so treating this kind as survivable cannot swallow a real death.
+ *   "classB"    -- the shield's recover-in-place path: it resumed the thread into Error(6) and the
+ *                  engine's frame loop caught it.
+ *   "offthread" -- the shield DECLINED a fault on a non-main thread (see fault_shield/veh.c) and
+ *                  returned EXCEPTION_CONTINUE_SEARCH instead of forcing a throw that thread has no
+ *                  handler for. The fault is then whatever the code around it makes of it, and the
+ *                  apply path's per-item __except guards routinely absorb one and degrade to
+ *                  "0 applied" -- the process keeps running. Crucially, if nothing absorbs it and the
+ *                  process DOES die, the unhandled-exception filter writes its own separate "fatal"
+ *                  record (with a minidump) for that same fault, and THAT record prompts. So treating
+ *                  an offthread record as survivable cannot swallow a real death; it only avoids
+ *                  double-reporting one, and avoids crying crash over a fault we contained.
  *
- * ANY OTHER KIND, INCLUDING UNKNOWN OR UNREADABLE, COUNTS AS TERMINAL. The two errors are not
- * symmetric: calling a survived fault terminal costs one unwanted dialog, while calling a real crash
- * survived swallows the only prompt the user ever gets. So a kind added on the writing side prompts
- * until it is listed here, and it should only be listed once something else reports the death. */
+ * ANY OTHER KIND, INCLUDING UNKNOWN OR UNREADABLE, COUNTS AS TERMINAL, deliberately. The two failure
+ * directions are not symmetric: mislabelling a survived fault as terminal costs one unwanted dialog,
+ * while mislabelling a real crash as survived silently swallows the only prompt the user ever gets. A
+ * future kind added on the writing side therefore keeps working (it prompts) until it is explicitly
+ * listed here -- and a new kind must only be listed once something else is known to report the death. */
 static bool crash_record_is_terminal(const std::string &rec)
 {
     const char *p = strstr(rec.c_str(), "\"kind\"");
@@ -2776,10 +2849,13 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                  * as long as the dialog was open, which is the lag this fixed. */
                 poc_begin_pick(0);
             } else if (cmd == L"rawmapSaveNow") {
-                /* Save Rawmap: write again to the destination already in use, no dialog. The page
-                 * hands back the path the status readout is showing it, and naming a destination IS
-                 * the request to write it (slot_rawmap_configure) -- so "save again here" and "save
-                 * somewhere new" are one call differing only in where the path came from. */
+                /* Save Rawmap: write again to the destination already in use, no dialog.
+                 *
+                 * No new slot and no magic value -- the page hands back the very path the status
+                 * readout is already showing it, and naming a destination IS the request to write
+                 * it (see slot_rawmap_configure). So "save again here" and "save somewhere new" are
+                 * one backend call that differs only in where the path came from: the picker, or
+                 * the status the page already holds. */
                 std::wstring dest; json_get_wstr(json, L"path", dest);
                 if (dest.empty()) {
                     poc_send_rawmap_status(L"No rawmap location yet -- use Save Rawmap As... first.");
@@ -2812,18 +2888,20 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                                      on ? L"Rawmaps now apply to every map load and save."
                                         : L"Rawmaps apply to the File menu's own actions only.");
             } else if (cmd == L"rawmapSaveBack") {
-                /* "Use Rawmap as Save Path".
+                /* "Use Rawmap as Save Path" -- replaced "Use Default Location" in the File menu.
                  *
                  * OFF is the archival default: a rawmap you LOAD is a library entry, and saves go to
-                 * the default rawmap.json, so importing one can never overwrite it. ON is the
-                 * deliberate round trip -- load, edit, save back over the same file.
+                 * the default rawmap.json so importing one can never be what overwrites it. ON is
+                 * the deliberate round trip -- load, edit, save straight back over the same file.
                  *
-                 * arm codes 3/4 rather than a new vtable slot, since the backend and frontend must
-                 * match slot for slot and `arm` is already a verb code. Resetting both paths is the
-                 * console's `sh_rawmaps default`.
+                 * arm codes 3/4 rather than a new vtable slot: the backend and frontend must match
+                 * slot for slot, and `arm` was already a verb code once value 2 (arm ONE load)
+                 * existed. Resetting both paths lives on in the console as `sh_rawmaps default`;
+                 * with saves defaulting to rawmap.json on every load, the menu button for it was
+                 * answering a question that no longer comes up.
                  *
-                 * Both paths ride the status back to the page, so the tick renders from the backend --
-                 * the console can change it too. */
+                 * Both paths ride the status back to the page, so the tick renders from the backend
+                 * rather than from anything the page remembers -- the console can change it too. */
                 int on = 0; json_get_int(json, L"on", &on);
                 poc_rawmap_configure(nullptr, nullptr, on ? 3 : 4,
                                      on ? L"Saves now write back over the rawmap you loaded."
@@ -3231,13 +3309,16 @@ static void poc_think_loop()
         }
 
         /* crash-record poll (~2 s): classify the pending records and announce at most one thing per
-         * new record. A TERMINAL record raises the crash dialog. A SURVIVED (Class-B) record gets a
-         * quiet toast, and only mid-session -- found at startup it describes a hitch in a session that
-         * has already ended, so it just stays on disk as diagnostics.
+         * new record. TERMINAL records raise the crash dialog exactly as they always have -- a user
+         * whose game actually died is prompted unchanged. A SURVIVED (Class-B) record gets a quiet
+         * toast instead, and only when it lands MID-SESSION: found at startup it describes a hitch in
+         * a session that has already ended, so there is nothing for the user to act on and the record
+         * just stays on disk as diagnostics.
          *
-         * The walk goes through the whole list newest-first, not just the newest name: a survived fault
-         * landing after a real crash record would otherwise sit in front of it and mask the prompt that
-         * mattered. Scanning names is cheap; records open only when the newest name changes. */
+         * Walking the whole list newest-first (rather than looking only at the single newest name)
+         * is load-bearing now that the two outcomes are treated differently: a survived fault landing
+         * after a real crash record would otherwise sit in front of it and MASK the one prompt that
+         * mattered. Scanning names is cheap; records are opened only when the newest name changes. */
         if (g_page_loaded && (frame == 1 || frame % 60 == 0)) {
             std::vector<std::string> names;
             int cnt = crash_scan(names);

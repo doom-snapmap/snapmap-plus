@@ -1,12 +1,15 @@
-/* commands.c -- see commands.h. The console-command surface: the AddCommand spine cloned from OG
- * FUN_1800229b1, plus the handlers. Tier B/C handlers are stubs that print the OG help.
+/* commands.c -- see commands.h. The console-command surface (clone of OG FUN_1800229b1's
+ * AddCommand spine + handlers).
  *
- * sh_rawmaps_on/off (OG snapHak_rawmaps_on/off) drive the shipped sh_rawmap_swap_arm gate.
- * sh_target_any is the editor-decl visibility toggle in target_any.c, ported from OG FUN_180021EE0.
- * snaphak_algo (cs_dontuse [18] + sh_alginfo) lives in algo.c, extern-declared near CMD_TABLE.
+ * Register the command NAMES; Tier B/C handlers are faithful "not yet implemented in
+ * clone" stubs that print the OG help. sh_rawmaps_on/off (OG snapHak_rawmaps_on/off) are wired to the
+ * SHIPPED sh_rawmap_swap_arm gate. sh_target_any is the editor-decl visibility toggle (target_any.c ->
+ * h_target_any), a pair-for-pair port of OG SnapHak's own sh_target_any (FUN_180021EE0).
+ * snaphak_algo (cs_dontuse [18] + sh_alginfo) now lives in algo.c -- cs_dontuse toggles the 4 f64
+ * engine-math overrides, sh_alginfo reports the reimpl present; both extern-declared near CMD_TABLE.
  *
- * Clean-room: ported from our own RE, with the command names and help read from the OG XINPUT1_3.dll
- * string table. Zero OG SnapHak bytes.
+ * Clean-room: ported from our own RE (the verbatim command names/help read from the
+ * OG XINPUT1_3.dll string table). Zero OG SnapHak bytes.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -35,14 +38,20 @@
 
 /* ------------------------------------------------------------------------ engine fn typedefs ------ */
 
-/* idCmdSystemLocal::AddCommand(cmdsys, name, handler, help, argComp, flags) [DIRECT, the AddCommand
- * decompile @0x1aa3630 + the OG registrar @0x229b1]. We pass argComp=NULL and flags=2; see register_cmd
- * for what the engine does with the 2.
+/* idCmdSystemLocal::AddCommand(cmdsys, name, handler, help, argComp, flags). DIRECT shape from
+ * the AddCommand decompile @0x1aa3630 + the registrar @0x229b1; we pass argComp=NULL, flags=2 (see register_cmd: 2 -> stored 6
+ * -> the command lands in the FULL *and* DEV tables + is dev-cheat-exempt, so the `~` console finds it even
+ * in dev mode; the OG left param5/6 as register garbage = effectively 0 = FULL-only = dev-gated).
  *
- * SLOT MAP: the engine stores cmd[0]=name=param_2, cmd[1]=handler=param_3, cmd[2]=param_5,
- * cmd[3]=param_4, cmd[4]=flags. Help goes in param_4, matching the OG registrar, whose commands display
- * their help in-game -- so cmd[3] is the slot the engine reads for help. (apply_engine.c's
- * clone_bss_apply uses the other order for an internal command never shown to users, and stays as-is.) */
+ * SLOT MAP (engine 0x1aa3630 stores: cmd[0]=name=param_2, cmd[1]=handler=param_3, cmd[2]=param_5,
+ * cmd[3]=param_4, cmd[4]=flags). We register help in param_4 (-> cmd[3]) -- this is FAITHFUL to OG SnapHak:
+ * its own registrar (@0x229b1) calls AddCommand(cmdsys, name, handler, help) with the help string
+ * as param_4 and nothing for param_5/param_6, and chrispy's commands display their help in-game -> cmd[3]
+ * (param_4) IS the help-display slot the engine reads. (the reference implementation's clone_bss_apply uses the other order --
+ * help in param_5, NULL in param_4 -- but it is an INTERNAL command never shown to users, so its help-slot
+ * placement is immaterial; apply_engine.c matches the reference implementation there byte-for-byte and stays as-is.) So this
+ * (cmdsys, name, handler, help, argComp=NULL, flags) order is correct for the user-facing OG command set;
+ * load-bearing arg = handler=param_3, correctly placed everywhere. */
 typedef void (*add_command_fn)(void *cmdsys, const char *name, void *handler,
                                const char *help, void *argComp, unsigned int flags);
 
@@ -107,12 +116,14 @@ const char *cmd_argv(idCmdArgs *a, int n)
 }
 
 /* ----------------------------------------------------------------- cmdSystem-global decode --------
- * The CmdSystemLea accessor (the engine bot_add/bot_remove registrar) loads the idCmdSystemLocal*
- * global in its prologue via `MOV RCX,[rip+cmdSystem]` (48 8B 0D). Decode the first RIP-relative load
- * -- four forms, 48 8D 0D / 48 8B 0D / 48 8D 05 / 48 8B 05, this one the MOV rather than the LEA
- * sh_strids decodes -- to the global slot, then deref once for the live object. On a failed decode,
- * glb_resolve("cmd_system_slot") signs a second, independent site and decodes its displacement. The
- * pinned literal below is only considered if both miss, and only on the build it came from. */
+ * The CmdSystemLea accessor (sig "CmdSystemLea" = the engine bot_add/bot_remove registrar) loads the
+ * idCmdSystemLocal* global in its prologue via `MOV RCX,[rip+cmdSystem]` (48 8B 0D). Decode the FIRST
+ * RIP-relative load opcode (the four forms 48 8D 0D / 48 8B 0D / 48 8D 05 / 48 8B 05 -- the cmdSystem
+ * one is the MOV form, NOT the LEA sh_strids decodes) to the global SLOT, then DEREFERENCE ONCE to get
+ * the live object (the MOV form loads *(slot); OG's *(engineBase+0x55b7280) does the same single deref).
+ * Build-portable: no hardcoded RVA. If that decode fails, glb_resolve("cmd_system_slot") signs a second,
+ * independent code site and decodes its displacement -- also portable. Only if BOTH miss do we consider
+ * the pinned literal, and only on the build it came from. */
 #define CMDSYS_KNOWN_RVA   0x55b7280u   /* the cmdSystem slot's RVA on the pinned Vulkan build -- kept for
                                          * audit and per-build re-derivation. Dereferenced only when
                                          * sh_host_is_pinned_rva_build() says we ARE that build. */
@@ -219,12 +230,17 @@ static void h_rawmaps_on(idCmdArgs *a)
     sh_rawmap_swap_arm(1);
     sh_printf("Enabling raw snapmap save/load.\n");
 
-    /* Name the files being armed: this switch applies them to every later map load and save, and
-     * both may have been set by earlier clicks. */
+    /* SAY WHAT WAS JUST ARMED. This switch makes EVERY subsequent map load use the staged file and
+     * every save mirror to the destination, and both were set by earlier clicks the person may not
+     * remember -- the File menu prints them, the console did not. Arming without naming the files is
+     * asking someone to accept a consequence they cannot see. */
     sh_rawmap_get_paths(load_path, (int)sizeof load_path, save_path, (int)sizeof save_path);
 
-    /* Legacy name, kept because the published guide teaches it. Deliberately no behaviour of its
-     * own: two near-identical command names differing invisibly is a worse trap. */
+    /* LEGACY NAME. Kept because it is what the published guide teaches -- removing it would break
+     * written instructions people have already followed. Labelled rather than quietly maintained,
+     * and deliberately NOT given behaviour of its own: making it force the default paths was
+     * considered and rejected, because two near-identical command names differing invisibly is a
+     * worse trap than not knowing what is armed -- and the latter is fixed by printing the paths. */
     if (!sh_rawmap_paths_are_default()) {
         char dflt[MAX_PATH] = "";
         sh_rawmap_get_default_paths(dflt, (int)sizeof dflt, NULL, 0);
@@ -262,17 +278,27 @@ static void h_rawmaps_off(idCmdArgs *a)
      * everything", not "stop working". */
     sh_printf("The File menu, 'sh_rawmaps save' and 'sh_rawmaps load' still work.\n");
 }
-/* [2b] sh_rawmaps -- the whole rawmap surface, and the bare form answers without changing anything.
+/* [2b] sh_rawmaps -- one command that can SAY what it is about to do.
  *
- *   sh_rawmaps                  both paths (changes nothing)
- *   sh_rawmaps list [folder]    the rawmaps in a folder
- *   sh_rawmaps on | off         the shared gate
- *   sh_rawmaps load [path]      stage a file, or open the staged one now
- *   sh_rawmaps save [path]      write the OPEN map, optionally somewhere named
- *   sh_rawmaps savepath ...     the durable destination
- *   sh_rawmaps default          both paths back to the default
+ * sh_rawmaps_on/off arm a switch whose effect depends on state the person cannot see: once on, every
+ * map they open is substituted from a file some earlier click staged, and every save is mirrored to
+ * a destination set the same way. The File menu prints both paths; the console did not, so arming
+ * there meant accepting a consequence you could not read first.
  *
- * sh_rawmaps_on / sh_rawmaps_off stay: they are the original SnapHak names and are in circulation. */
+ * The fix is not only to print on arming (that is done too) but to make the console able to ANSWER
+ * THE QUESTION FIRST -- bare `sh_rawmaps` shows the state and both paths and changes nothing -- and
+ * to make choosing and arming one action, so there is no remembered state to be surprised by.
+ *
+ *   sh_rawmaps                  state + both paths (changes nothing)
+ *   sh_rawmaps list             the rawmap files sitting in the default folder
+ *   sh_rawmaps on | off         the shared gate, exactly as sh_rawmaps_on/off
+ *   sh_rawmaps load <path>      stage a file for the next map load
+ *   sh_rawmaps save [path]      write the OPEN map, optionally to a new destination
+ *   sh_rawmaps default          put both paths back to the default location
+ *
+ * sh_rawmaps_on / sh_rawmaps_off stay as they are. They are the original SnapHak names, they are in
+ * circulation, and retiring them buys nothing -- the same reasoning that made the one-shot arms
+ * additive rather than a redefinition of the gate. */
 
 /* The folder the default paths live in, derived from the default itself rather than rebuilt, so it
  * cannot drift away from where the files actually are. */
@@ -421,8 +447,15 @@ static void rawmap_print_state(void)
     sh_rawmap_get_paths(load_path, (int)sizeof load_path, save_path, (int)sizeof save_path);
     readable = sh_rawmap_source_ok(why, (int)sizeof why);
 
-    /* Off is the normal setting and changes nothing, so it gets no line -- naming it reads as "the
-     * feature is off", which is false. On changes every later action without asking again. */
+    /* THE GATE IS ONLY WORTH A LINE WHEN IT IS ON.
+     *
+     * This started as "raw snapmap save/load is OFF (File menu actions still work)", which reads as
+     * "the feature is off" -- false, since nothing here needs the gate. The fix for that was two
+     * lines explaining the off state, which was worse: four lines of state where two were wanted,
+     * with the explanation on top of the paths a person ran the command to see.
+     *
+     * Off is the normal setting and changes nothing, so it gets no line at all. On DOES change
+     * everything a person does next without being asked for it again, so it gets one. */
     if (sh_rawmap_swap_is_armed())
         sh_printf("  GATE ON - every map you open and save goes through a rawmap.\n");
     sh_printf("  load from: %s%s\n", load_path[0] ? load_path : "(none)",
@@ -468,11 +501,20 @@ static void h_sh_rawmaps(idCmdArgs *a)
         return;
     }
 
-    /* `load <path>` sets the load path and stages it. `load` with no path OPENS the staged file now.
+    /* `load <path>` SETS the load path and stages it. `load` with no path OPENS whatever the load
+     * path is set to, right now.
      *
-     * A bare `load` DISCARDS unsaved editor edits -- there is no prompt to raise from a console
-     * callback, so it says so and does it. It cannot damage a SAVED map: the rawmap opens as a new
-     * map that has to be named, the interlock sh_editor_frame_request_reload enforces. */
+     * The split is deliberate, and it fixes a gap rather than inventing one. Naming a file and
+     * opening it are different intents -- "point at this from now on" versus "put it in front of me"
+     * -- and the console could only express the first. Someone who wanted the second had to set the
+     * path and then go and open a map from the map list to trigger it, which is a strange way to ask
+     * a console for something. The File menu already had both (the picker stages, the confirm opens);
+     * this is the console catching up.
+     *
+     * A bare `load` DISCARDS unsaved editor edits, the same as answering yes to the menu's confirm.
+     * There is no prompt to raise from a console callback, so it says so and does it: the command
+     * was typed on purpose, and it cannot damage a SAVED map -- the rawmap opens as a new map that
+     * has to be named, which is the interlock sh_editor_frame_request_reload enforces. */
     if (_stricmp(verb, "load") == 0) {
         char why[192] = "";
 
@@ -489,9 +531,18 @@ static void h_sh_rawmaps(idCmdArgs *a)
                 return;
             }
 
-            /* ARM FIRST, THEN TRY TO OPEN IT NOW. With no live editor -- before a map is open --
-             * the reload declines, and the staged arm still applies to the next map opened. Arming
-             * first costs nothing when the reload succeeds: the swap spends the one-shot either way. */
+            /* ARM FIRST, THEN TRY TO OPEN IT NOW.
+             *
+             * The order is the fix. This used to call the reload and, when the reload said no,
+             * print "Cannot open it" and stop -- which is a dead end for the commonest case there
+             * is: standing at the SnapMap main menu, where there is no live editor for the reload to
+             * drive. Staging works perfectly well from there. Opening any map from the list applies
+             * the staged rawmap, so staging is not a consolation prize, it is the same outcome one
+             * click later. A command that could have done the job and reported failure instead is
+             * worse than one that does the job the long way and says so.
+             *
+             * Arming before the attempt also costs nothing when the attempt succeeds: the swap
+             * spends the one-shot on the substitution either way. */
             sh_rawmap_load_arm_once();
 
             if (sh_editor_frame_request_reload(why, (int)sizeof why)) {
@@ -506,9 +557,15 @@ static void h_sh_rawmaps(idCmdArgs *a)
             return;
         }
 
-        /* VALIDATE BEFORE STAGING, the same function and rule the File menu uses. A load path aimed
-         * at a file that is not there has no later step that creates it -- that is the save side --
-         * so remembering it only leaves something that looks armed and substitutes nothing. */
+        /* VALIDATE BEFORE STAGING, exactly as the File menu does -- same function, same reasons.
+         *
+         * This used to stage the path whatever it was and merely MENTION that the file could not be
+         * read, on the theory that refusing to remember a merely-absent file would be its own
+         * surprise. That was wrong twice over. The File menu refuses the same file outright, so one
+         * surface accepted what the other rejected. And a load path aimed at a file that is not
+         * there is good for nothing: there is no later step that creates it (that is the SAVE side),
+         * so all it can do is sit there looking armed and then substitute nothing. A typo
+         * remembered is worse than a typo refused. */
         if (!sh_rawmap_validate_source(arg, why, (int)sizeof why)) {
             sh_printf("Cannot use %s\n", arg);
             sh_printf("  %s\n", why[0] ? why : "that file cannot be read");
@@ -526,10 +583,14 @@ static void h_sh_rawmaps(idCmdArgs *a)
         return;
     }
 
-    /* The console half of the File menu's "Use Rawmap as Save Path" tick. Bare form reports.
+    /* The console half of the File menu's "Use Rawmap as Save Path" tick. Bare form reports, so the
+     * question can be asked without changing anything -- the same reason bare `sh_rawmaps` exists.
      *
-     * THREE VALUES, AND ONLY THREE: `rawmap`, `default`, or a path. No `on` / `off` aliases -- this
-     * setting names a destination and has no enabled state, so "savepath on" cannot say on what. */
+     * THREE VALUES, AND ONLY THREE. `on` / `off` used to be accepted as aliases for `rawmap` /
+     * `default`, on the theory that it is what a person types at a thing the File menu draws as a
+     * checkbox. They were removed: four words for three settings is not kindness, it is two more
+     * things to read in the help and two more rows to test, and "savepath on" cannot say ON WHAT --
+     * this setting names a destination, it does not have an enabled state. */
     if (_stricmp(verb, "savepath") == 0) {
         char fixed[MAX_PATH] = "";
         char why[192] = "";
@@ -574,17 +635,25 @@ static void h_sh_rawmaps(idCmdArgs *a)
         char why[192] = "";
         char save_path[MAX_PATH] = "";
 
-        /* ASK BEFORE CHANGING ANYTHING -- the probe has no side effects, so a refusal here cannot
-         * leave the save path moved. */
+        /* ASK BEFORE CHANGING ANYTHING. This used to set the destination first and find out
+         * afterwards whether a save was even possible, so `sh_rawmaps save <path>` at the main menu
+         * moved the person's save path and then refused -- a failed command with a side effect, and
+         * nothing on screen said the path had moved. The probe has no side effects. */
         if (!sh_editor_frame_can_rawmap_save(why, (int)sizeof why)) {
             sh_printf("Cannot save: %s\n", why[0] ? why : "the editor is not ready");
             sh_printf("Nothing was changed. Open a map in the editor first.\n");
             return;
         }
 
-        /* WORK OUT THE DESTINATION WITHOUT AIMING AT IT YET. With an argument it is that argument,
-         * without one whatever the setting resolves to -- a candidate until every check has passed,
-         * so a refused path never becomes the destination. */
+        /* WORK OUT THE DESTINATION WITHOUT AIMING AT IT YET.
+         *
+         * The order here is the whole point. An earlier version aimed first and vetted afterwards,
+         * which meant a REFUSED path still became the destination: `sh_rawmaps save <read-only file>`
+         * printed its refusal and left the save pointed at a file that cannot be written, so the
+         * next plain `sh_rawmaps save` failed too, at a path the person never chose for keeping.
+         *
+         * With an argument the destination is that argument; without one it is whatever the setting
+         * resolves to. Either way it is only a candidate until every check has passed. */
         if (arg != NULL && arg[0] != '\0')
             strncpy_s(save_path, sizeof save_path, arg, _TRUNCATE);
         else
@@ -616,8 +685,14 @@ static void h_sh_rawmaps(idCmdArgs *a)
          * reads the newest save off disk is how a never-saved map silently exports a DIFFERENT map,
          * and a console command that writes the wrong map is worse than one that says no. */
         if (sh_editor_frame_request_rawmap_save(why, (int)sizeof why)) {
-            /* Present tense: the write lands on the next editor frame, one of about thirty a
-             * second, and the checks above have already refused anything unwritable. */
+            /* Present tense, one line. This briefly said "Queued: the open map will be written to",
+             * on the reasoning that the write lands on a later editor frame and so cannot be
+             * reported as done -- true, and useless: that frame is one of about thirty a second, and
+             * "queued" reads as something that might sit there indefinitely.
+             *
+             * The problem was never this wording. It was that an unwritable destination got this far
+             * at all; the check above refuses that now, so by the time this prints the write is
+             * genuinely about to happen. */
             sh_printf("Writing the open map to %s\n", save_path);
         } else {
             /* Reachable despite the probe: the editor can leave a live state between the two calls,
@@ -769,14 +844,17 @@ static void h_sh_listres(idCmdArgs *a)
     free(buf.data);
 }
 
-/* [5] sh_entlist [filter] -- every idEntity-derived class NAME, substring-filtered by argv[1]. Clone of
- * OG FUN_180021b50, which walked its own static snapshot of the idEntity subclass set; that snapshot IS
- * the engine's idEntity-derived reflection walk [DIRECT: the live set reproduces the OG's 892
- * string-for-string]. So this enumerates the live type registry (sh_typeinfo_collect_classnames) and
- * keeps what derives from idEntity, which tracks DOOM patches and surfaces any decl-less class the
- * frozen snapshot missed. Two divergences from the OG: idTarget_Command is listed rather than hidden,
- * and there is a trailing count line. Pre-boot, with the registry unreachable, it falls back to the
- * static B2_ENTLIST_CLASSES snapshot. */
+/* [5] sh_entlist [filter] -- list every idEntity-derived class NAME; if argv[1] is present, substring-filter.
+ * Clone of OG FUN_180021b50. OG walked a STATIC ptr-table (its own hardcoded snapshot of the idEntity subclass
+ * set); we RE'd that this snapshot IS the engine's idEntity-derived reflection walk (our idEntity-derived live
+ * set reproduces OG's 892 STRING-FOR-STRING). So the
+ * clone enumerates the LIVE type registry (sh_typeinfo_collect_classnames) and keeps every class that derives
+ * from idEntity -- byte-identical to OG's list on this build BUT portable (auto-tracks DOOM patches) AND it
+ * surfaces any decl-less idEntity class OG's frozen snapshot happened to miss. Two deliberate divergences from
+ * OG: (1) we do NOT skip idTarget_Command (OG hid it; the user wants it listed -- it is a real, makeable
+ * idEntity class); (2) a trailing count line. Fallback: if the live registry is unreachable (pre-boot), walk
+ * the static B2_ENTLIST_CLASSES snapshot. The idEntity-derive filter naturally excludes non-entity types
+ * (components / managers / structs) the raw registry also holds. */
 #define SH_ENTLIST_MAX  16384   /* candidate-buffer cap (this build ~10,190 registered types) */
 static void h_sh_entlist(idCmdArgs *a)
 {
@@ -809,14 +887,15 @@ static void h_sh_entlist(idCmdArgs *a)
 }
 
 /* ----------------------------------------------------------------- [15][16] devmode -------------
- * SnapHak's snaphak_disable_devmode stomps the idSessionLocal devmode bool getter (engine 0x18a31d0:
- * movzx eax,[rcx+0x34c89]; ret) so it always returns 0; reenable restores it. This rides the sh_patch
- * layer -- code_patch_sig / code_unpatch plus the static restore-handle -- and resolves
- * SessionDevModeGetter by signature at FIRE, so a miss or an ambiguity refuses the write on a shifted
- * build instead of mis-patching.
+ * FIRST live engine-code patch. SnapHak's snaphak_disable_devmode stomps the idSessionLocal devmode bool
+ * getter (engine 0x18a31d0: movzx eax,[rcx+0x34c89]; ret) so it always returns 0; reenable restores it.
+ * We ride the sh_patch layer EXACTLY (code_patch_sig / code_unpatch + the static restore-handle), and
+ * resolve the SessionDevModeGetter site by SIGNATURE at FIRE (not a hardcoded RVA) -- version-portable, and
+ * a sig miss/ambiguity makes code_patch_sig REFUSE (no write) on a shifted build rather than mis-patch.
  *
- * Only the 3-byte head is overwritten (0F B6 81 -> 31 C0 C3, `xor eax,eax; ret`), so code_unpatch
- * restores the whole original instruction and the sig re-resolves on it: disable/reenable is repeatable. */
+ * code_patch overwrites only the 3-byte HEAD (0F B6 81 -> 31 C0 C3 = `xor eax,eax; ret`); bytes 3-7 of the
+ * original getter are never touched, so code_unpatch restores the full original instruction and the sig
+ * re-resolves on the restored bytes -> repeatable disable/reenable. */
 #define DEVMODE_SIG_NAME   "SessionDevModeGetter"
 
 /* Resolve a named engine site from the shipped sig DB (mirrors sh_cvars' NameHash resolve: iterate
@@ -881,12 +960,15 @@ static void h_reenable_devmode(idCmdArgs *a)
 }
 
 /* ----------------------------------------------------------------- [11] cs_start_render_logging ---
- * Port of OG FUN_1800224c0: open renderlog.txt and detour the engine's render-debug trace sink
- * (RenderLogStub @0xd99dc0 = `mov [rsp+0x20],r9; ret`, a no-op while logging is off) with a hook that
- * writes its trace lines to the file. The engine hands the sink a formatted printf fmt plus varargs, so
- * the hook reads no renderer internals -- it vfprintf's fmt+va. The original sink is a no-op, so the
- * hook does not trampoline. Start-only and process-lifetime, as in the OG. RenderLogStub resolves by
- * signature at FIRE through sh_install_detour_sig (SIG_OK-gated, SEH-guarded, reversible). */
+ * FIRST live engine-code DETOUR (the detour layer's first real consumer). SnapHak's
+ * cs_start_render_logging (OG FUN_1800224c0) opens renderlog.txt and detours the engine's render-debug
+ * TRACE SINK (RenderLogStub @0xd99dc0 = `mov [rsp+0x20],r9; ret`, a no-op when logging is off) with a hook
+ * that writes the engine's printf trace lines to the file. The engine hands the sink a fully-formatted
+ * printf fmt + varargs ("Source stages %s -> Dest stages: %s\n", etc.), so the hook reads ZERO renderer
+ * internals -- it just vfprintf's fmt+va to the log. The original sink was a no-op, so the hook does NOT
+ * trampoline. Start-only, process-lifetime (mirrors OG: no stop command; teardown at DLL detach is
+ * optional). We resolve RenderLogStub by SIGNATURE at FIRE (version-portable) and ride the
+ * sh_install_detour_sig (SIG_OK-gated, SEH-guarded, reversible). */
 #define RENDERLOG_SIG_NAME   "RenderLogStub"
 #define RENDERLOG_STOLEN     14   /* hook.c writes a 14-byte FF25 abs-jmp + requires stolen>=14; 14<=16 room */
 
@@ -968,11 +1050,13 @@ static void h_cs_start_render_logging(idCmdArgs *a)
     }
 
 /* ============================================================ WS-C deferred dev/asset commands ====
- * [20] sh_genmd6model / [19] sh_genbmodel / [17] sh_debugrender -- ports of OG XINPUT1_3 FUN_18000b560
- * / FUN_18000b4a0 / FUN_18001ffe0. Every engine fn resolves by signature off the live DOOM module
- * (resolve_sig_by_name over g_module_base), and every engine touch is SEH-guarded: these are faultable
- * asset compilers and a runtime renderWorld vtable. [17] ports only the read-only sub-ops and refuses
- * loadimg_n_break (an INT3 trap) and dump_megatex (a hardcoded per-machine fwrite). */
+ * [20] sh_genmd6model / [19] sh_genbmodel / [17] sh_debugrender -- OG chrispy dev/asset tools. Real ports
+ * of OG XINPUT1_3 FUN_18000b560 / FUN_18000b4a0 / FUN_18001ffe0. Every engine fn is resolved by SIGNATURE
+ * off the live DOOM module (resolve_sig_by_name over g_module_base, the same path devmode/renderlog use) --
+ * NO hardcoded base+RVA. Every engine touch is SEH-guarded (these are heavy/faultable asset compilers + a
+ * runtime renderWorld vtable). [17] ports only the SAFE READ-ONLY sub-ops; its 2 genuinely-harmful sub-ops
+ * (loadimg_n_break = INT3 debugger trap; dump_megatex = hardcoded fwrite to C:\Users\Chris\megatex.raw) are
+ * routed to a clear refusal, NOT reproduced bug-for-bug. */
 
 /* ---- engine fn typedefs for the asset-gen call-targets (resolved by sig at FIRE) ---------------- */
 typedef void *(*default_idstr_ctor_fn)(void *self);                    /* DefaultIdStrCtor 0x19fd040 */
@@ -1153,29 +1237,33 @@ static void h_sh_genbmodel(idCmdArgs *a)
 }
 
 /* ----------------------------------------------------------------- [17] sh_debugrender -------------
- * Port of OG FUN_18001ffe0 (dispatches argv[1] across 9 sub-ops). The OG reads renderWorld from the
- * .data slot *(engineBase+0x57216f0); this resolves the slot instead: the RenderWorldGetter sig anchors a
- * unique window carrying `LEA RCX,[rip+slot]`, sh_decode_rip_slot yields the slot RVA, and one deref
- * gives the live idRenderWorld*. On a miss, glb_resolve("render_world_slot") signs a second, independent
- * site for the same slot. The editor singleton for showcursor comes from glb_resolve("editor_singleton").
+ * Real port of OG FUN_18001ffe0 (dispatches argv[1] across 9 sub-ops). The OG reads renderWorld =
+ * *(engineBase+0x57216f0) -- a .data SLOT. We resolve it BUILD-PORTABLY: the RenderWorldGetter sig anchors a
+ * unique engine window carrying `LEA RCX,[rip+slot]`; sh_decode_rip_slot decodes it to the slot RVA, then we
+ * deref once for the live idRenderWorld*. If that misses, glb_resolve("render_world_slot") signs a second,
+ * independent code site for the same slot. The editor singleton (for showcursor) comes from
+ * glb_resolve("editor_singleton"), the same portable resolution sh_iface_engine uses.
  *
- * PORTED, read-only: dumprenderinfo (walk the rendermodel list, Printf each name), showcursor
- * (byte[editor+0x23624]=0), togglefpsupdate (clone-local flag), showmaterial / drawmatarg (idMaterial
- * decl reads). REFUSED with a toast: loadimg_n_break (ends in INT3, halts the game), dump_megatex
- * (hardcoded per-machine fwrite). NOT AVAILABLE, surfaced but not ported: test_rm_commit, test_sum_shit,
- * testnewgui -- render-commit / geoworld-build / GUI-alloc, outside the read-only scope. */
+ * PORTED (safe, read-only): dumprenderinfo (=OG dumpmodelinfo: walk the rendermodel list, Printf each name),
+ * showcursor (write byte[editor+0x23624]=0), togglefpsupdate (cosmetic flag toggle -- clone-local state),
+ * showmaterial / drawmatarg (GetDeclsOfType("idMaterial") lookups -- decl reads, no mutation).
+ * REFUSED (clear toast, NOT bug-for-bug -- genuinely harmful): loadimg_n_break (ends in INT3 = a debugger
+ * trap that halts the game), dump_megatex (hardcoded fwrite to C:\Users\Chris\megatex.raw, chrispy's box).
+ * NOT-AVAILABLE (heavy dev-only mutators, faithfully surfaced but not ported): test_rm_commit, test_sum_shit,
+ * testnewgui (render-commit / geoworld-build / GUI-alloc -- out of the safe read-only scope). */
 #define RW_SLOT_KNOWN_RVA         0x57216f0u  /* the renderWorld .data slot's RVA on the pinned Vulkan build
                                                * (OG *(engineBase+RVA)) -- kept for audit and per-build
                                                * re-derivation. Dereferenced only when the host IS that build. */
-/* RE-DERIVE RECIPE for the 4 build-specific offsets below. They are vtable-slot and struct-field
- * offsets, so no signature reaches them; both recipes are one command-handler decompile:
- *   - The renderWorld vtbl slots and the model-name offset: decompile the OG `dumpmodelinfo` handler
- *     (via the AddCommand("dumpmodelinfo") xref or its Printf format string). It calls
- *     `rw->vtbl[RW_VSLOT_MODEL_COUNT]()`, then loops `rw->vtbl[RW_VSLOT_GET_MODEL](i)` and reads
- *     `*(char**)(m + RW_MODEL_NAME_OFF)` -- two `call qword[rax+0xNN]` offsets and one `mov rcx,[model+0xNN]`.
- *   - ED_SHOWCURSOR_OFF: decompile the OG `showcursor` handler -> `*(uint8*)(editor + 0xNN) = 0`, with
- *     the editor base from EDITOR_SINGLETON_RVA below.
- * A wrong offset degrades to a bad read on a dev-only command, SEH-guarded. */
+/* RE-DERIVE RECIPE for the 4 BUILD-SPECIFIC offsets below (do per DOOM build -- portability discipline; these
+ * are vtable-slot/struct-field offsets, NOT sig-resolvable). All four come from TWO command-handler decompiles:
+ *   - The renderWorld vtbl slots + the model-name offset: decompile the OG `dumpmodelinfo` handler (find via the
+ *     AddCommand("dumpmodelinfo") registration xref, or its Printf format string). It does
+ *     `n = rw->vtbl[RW_VSLOT_MODEL_COUNT]()` then loops `m = rw->vtbl[RW_VSLOT_GET_MODEL](i);
+ *     name = *(char**)(m + RW_MODEL_NAME_OFF)` -> read the two `call qword[rax+0xNN]` vtbl offsets + the
+ *     `mov rcx,[model+0xNN]` name offset straight off the decompile.
+ *   - ED_SHOWCURSOR_OFF: decompile the OG `showcursor` handler -> `*(uint8*)(editor + 0xNN) = 0`; the editor base
+ *     is EDITOR_SINGLETON_RVA below (already recipe-tagged). Re-derive by decompiling the handler (<handlerRVA>) on the new build.
+ * A wrong offset here degrades to a bad read on dev-only console cmds (SEH-guarded), never a crash. */
 #define RW_VSLOT_MODEL_COUNT      0x188       /* renderWorld vtbl -> GetActiveRenderModelCount() -> uint (BUILD-SPECIFIC) */
 #define RW_VSLOT_GET_MODEL        0x190       /* renderWorld vtbl -> GetRenderModel(idx) -> model* (=400; BUILD-SPECIFIC) */
 #define RW_MODEL_NAME_OFF         0x10        /* render model -> name char* (model+0x10) (BUILD-SPECIFIC) */
@@ -1339,24 +1427,28 @@ static void h_sh_debugrender(idCmdArgs *a)
 }
 
 /* ----------------------------------------------------------------- [22] sh -- the SnapStack dispatcher
- * Port of OG XINPUT1_3 FUN_180007620 (the `sh` console command). Gates on the shared UI-interface
- * object: with no interface it reports the OG's "Ui interface doesnt exist yet!". Otherwise it looks the
- * subcommand up in the interface's runtime cmd-map (interface+0x58) and runs the handler INLINE.
+ * Port of OG XINPUT1_3 FUN_180007620 (the `sh` console command). GATES on the shared UI-interface object
+ * (sh_ui_get_iface): if it doesn't exist yet, report "Ui interface doesnt exist yet!" (the OG exact no-UI
+ * behavior -- when the frontend hasn't loaded, `sh` faithfully says this). Otherwise look the subcommand
+ * up in the interface's runtime cmd-map (interface+0x58) and, on a hit, run the handler RIGHT HERE.
  *
- * INLINE EXECUTION IS THE POINT (issue #61, a deliberate divergence from the OG -- see
- * docs/fidelity.md). This callback is an engine Cbuf command, so the engine invokes it on DOOM's MAIN
- * thread at ExecuteCommandBuffer -- the decl-safe exec point the clone_bss_apply drain and the decl
- * server also use. A SnapStack op's serialize, JSON patch, decl commit, selection writes and toast then
- * land on the engine's own thread as one unit, and the applied count stays synchronous. The OG enqueued
- * {handler,args} onto the interface work-queue instead, drained by its frontend's worker thread
- * (+0x1a0), because its handlers touched Qt objects owned by that thread; calling engine decl code from
- * there is the defect behind the #56/#59 faults. That worker is a plain CreateThread in ui_bridge.c and
- * the engine treats it as foreign. Our handlers touch no UI-thread-affine state, so nothing needs the
- * bounce.
+ * INLINE EXECUTION IS THE POINT (issue #61, a deliberate divergence from the OG dispatch -- see
+ * docs/fidelity.md). This callback is an engine Cbuf command: the engine invokes it on DOOM's MAIN
+ * thread at ExecuteCommandBuffer, the same decl-safe exec point the clone_bss_apply drain and the decl
+ * server use. That is exactly where a SnapStack op belongs -- its serialize, JSON patch, decl commit,
+ * selection writes, and toast all land on the engine's own thread as one unit, and the applied count
+ * stays synchronous. The OG instead ENQUEUED {handler,args} onto the interface work-queue, drained by
+ * its frontend's worker thread (+0x1a0); it had to (its handlers touched Qt objects owned by that
+ * thread), and calling engine decl code from that foreign thread is the defect behind the #56/#59
+ * faults. Our handlers touch no UI-thread-affine state (backend stores + vtable slots only), so nothing
+ * needs the bounce. The old comment here called the worker "the MAIN (UI) thread" -- that conflation is
+ * how the wrong-thread commit survived review, and it is exactly wrong: the worker is a plain
+ * CreateThread in ui_bridge.c and the engine treats it as foreign.
  *
- * argv keeps the OG shape -- the subcommand's own tail, so argv[0] is the subcommand. The handler call
- * is SEH-guarded, a miss reports the OG "Command %s has not been registered yet", and a bare `sh`
- * mirrors the OG usage hint. */
+ * argv shape is unchanged: the OG passes the SUBCOMMAND's args (the tail starting at the subcommand
+ * name), so argv[0] = the subcommand, argv[1..] = its args. The handler call is SEH-guarded so a
+ * handler fault degrades to a console line instead of taking the frame down. A MISS reports the OG
+ * message "Command %s has not been registered yet". With no subcommand, mirror the OG usage hint. */
 static void h_sh_dispatch(idCmdArgs *a)
 {
     sh_iface *iface = sh_ui_get_iface();
@@ -1401,29 +1493,36 @@ static void h_sh_dispatch(idCmdArgs *a)
 }
 
 /* ----------------------------------------------------------------- [12] sh_superscriptop ----------
- * Port of OG XINPUT1_3 FUN_180026450 (cmd_0x26650 gates it on argv[1]=="genevents"). Puts every
- * EV_<name>/<eventnum> and its arg-spec on the clipboard as C #defines. All hops ride sh_typeinfo's one
- * declMgr accessor, so no new signature [DIRECT, this DOOMx64vk build, base 0x140000000]:
- *   declMgr = sh_typeinfo_get_declmgr();                  // accessor @ base+0x17F7030 (lazy-init singleton)
- *   evMgr   = (*(*declMgr + 0x90))(declMgr);              // declMgr vtbl +0x90 -> evMgr sub-object @ declMgr+0x1A0
- *   count   = (*(*evMgr  + 0x28))(evMgr);                 // evMgr vtbl +0x28 -> event count
+ * Real port of OG XINPUT1_3 FUN_180026450 (cmd_0x26650 gates it on argv[1]=="genevents"). Dumps the
+ * engine's event-definition table to the clipboard as a block of C #defines, so a "superscript" author
+ * has every EV_<name>/<eventnum> + its arg-spec on the clipboard. DIRECT RE of the engine event-manager
+ * vtable (this DOOMx64vk build; base 0x140000000) -- all hops ride sh_typeinfo's ONE declMgr accessor, no
+ * new signature:
+ *   declMgr = sh_typeinfo_get_declmgr();                  // accessor @ base+0x17F7030 (0x1417f7030: lazy-init singleton)
+ *   evMgr   = (*(*declMgr + 0x90))(declMgr);              // declMgr vtbl slot +0x90 (0x17f70d0: lea rax,[rcx+0x1a0]) -> evMgr sub-object @ declMgr+0x1A0
+ *   count   = (*(*evMgr  + 0x28))(evMgr);                 // evMgr vtbl slot +0x28 (0x17f75b0: mov eax,[count]) -> event count
  *   for i in 0..count-1:
- *     name  = (*(*evMgr + 0x20))(evMgr, i);               // evMgr vtbl +0x20 getByIndex -> rec+0x00, the NAME char*
- *     rec   = (*(*evMgr + 0x10))(evMgr, name);            // evMgr vtbl +0x10 findByName -> the eventDef record
- *     fspec = *(rec + 0x10);                              // the ';'-delimited arg-spec char*
+ *     name  = (*(*evMgr + 0x20))(evMgr, i);               // evMgr vtbl slot +0x20 (0x17f7550) -> *getByIndex(i) == rec+0x00 == the event NAME char*
+ *     rec   = (*(*evMgr + 0x10))(evMgr, name);            // evMgr vtbl slot +0x10 (0x17f7320: findByName) -> the eventDef record (OG DISCARDED this -> the bug)
+ *     fspec = *(rec + 0x10);                              // eventDef rec+0x10 == the ';'-delimited arg-spec char* (slot 7 / FUN_140748650 splits it on ';')
+ *     emit  "#define EV_<name> <i>\n#define FSPEC_<name> \"<fspec>\"\n"
  *
- * eventDef record [DIRECT, registrar @0x17f7140 + slot accessors]: +0x00 name char*, +0x10 fspec char*,
- * +0x2c fspec strlen, +0x30 numArgs, +0x34 eventnum. eventnum == the array index i, because the registrar
- * stores rec at array[eventnum] and increments per registration.
+ * eventDef record layout (DIRECT, the registrar @0x17f7140 + slot accessors): +0x00 name char*,
+ * +0x10 fspec char*, +0x2c fspec strlen, +0x30 numArgs, +0x34 eventnum (== the array index i, since the
+ * registrar stores rec at array[eventnum] and eventnum increments per registration). So the OG's use of
+ * the loop index i as the %d number is correct (i == eventnum).
  *
- * The OG sprintf (@0x26450 L45) passes 4 conversions and 2 varargs, so its FSPEC_%s and "%s" read
- * register garbage. This resolves all four (name, i, name, fspec); an unreadable or NULL fspec emits an
- * empty arg-spec.
+ * THE OG sprintf BUG (in the OG decompile @0x26450, L45): FUN_180025130(buf, "#define EV_%s %d\n#define FSPEC_%s \"%s\"\n",
+ * name, i) passes 4 conversions but only 2 varargs -> the 2nd FSPEC_%s and the "%s" read register garbage.
+ * THE CLONE EMITS THE INTENDED OUTPUT, not bug-for-bug: all 4 fields resolved (name, i, name, fspec). If a
+ * record's fspec is unreadable/empty (a NULL rec+0x10 -- e.g. a no-arg event), we emit the EV_ line +
+ * FSPEC_<name> "" faithfully (an empty arg-spec), never register garbage.
  *
- * BUILD-SPECIFIC: the accessor RVA, the vtbl slots and the rec+0x10 offset are this build's
- * event-manager layout -- re-derive per build from the declMgr ctor FUN_1417f6c70's two vtables
- * (PTR_FUN_14270b958 / PTR_FUN_14270c2c8). Every hop is SEH-guarded and non-null gated, so a wrong slot
- * degrades to "event manager unavailable" or a per-event skip. */
+ * BUILD-PORTABILITY (the reference-entity-layout trap): the declMgr-accessor RVA + the declMgr-vtbl +0x90
+ * and evMgr-vtbl +0x28/+0x20/+0x10 SLOTS + the rec+0x10 fspec offset are this-build event-manager layout
+ * -- RE-DERIVE PER BUILD (disassemble the declMgr ctor FUN_1417f6c70's two vtables
+ * PTR_FUN_14270b958 / PTR_FUN_14270c2c8). Every hop is SEH-guarded + non-null gated; a wrong slot degrades
+ * to "event manager unavailable" / a clean per-event skip, never a crash (same discipline as sh_type). */
 #define SS_EVMGR_ACCESSOR_VSLOT   0x90    /* declMgr vtbl -> evMgr sub-object accessor (BUILD-SPECIFIC) */
 #define SS_EV_COUNT_VSLOT         0x28    /* evMgr   vtbl -> event count                (BUILD-SPECIFIC) */
 #define SS_EV_GETNAME_VSLOT       0x20    /* evMgr   vtbl -> name-by-index (char*)       (BUILD-SPECIFIC) */
@@ -1557,26 +1656,35 @@ static void h_sh_superscriptop(idCmdArgs *a)
 }
 
 /* ----------------------------------------------------------------- [21] cs_dumpeventdefs ----------
- * Port of the INTENT of OG XINPUT1_3 FUN_18000a1b0 (cmd thunk FUN_180022460). The OG walked a
- * SnapHak-internal eventDef vector the clone never builds and wrote a hardcoded per-machine path; this
- * sources the same data from the ENGINE -- the [12] sh_superscriptop walk -- and writes "eventdefs.txt"
- * in the DOOM cwd, the way [11] cs_start_render_logging writes "renderlog.txt".
+ * REAL port of the INTENT of OG XINPUT1_3 FUN_18000a1b0 (cmd thunk FUN_180022460). The OG walked a
+ * SnapHak-INTERNAL eventDef std::vector (DAT_18003e4d8..e4e0, stride 0x210) -- a table the clone NEVER
+ * builds -- formatting each record (FUN_18000a4e0) into a newline-joined string, then fputs'ing it to a
+ * HARDCODED "C:\Users\Chris\eternalevents.txt" (chrispy's machine) via fopen_s(...,"w"). We instead source
+ * the SAME eventDef data from the ENGINE (exactly the [12] sh_superscriptop walk: sh_typeinfo_get_declmgr
+ * -> evMgr via declMgr vtbl+0x90 -> count/getByIndex/findByName) and write it to a FILE.
  *
- * FILE FORMAT is the OG's own eventdef_ss_t table declaration [reported, sibling FUN_180026450 header
- * L38-40; the [21] formatter FUN_18000a4e0 was never decompiled]:
+ * FILE FORMAT (the OG event-def file format, RE-confirmed from the sibling FUN_180026450 header L38-40 --
+ * the OG's own eventdef-table declaration; the [21] internal-cache formatter FUN_18000a4e0 was not
+ * decompiled, so we reproduce the OG's documented eventdef_ss_t table, whose 5 members map 1:1 onto the
+ * engine record fields we have):
  *   header  "struct eventdef_ss_t {const char* m_evname;int m_rettype;const char* m_fspec;"
  *           "unsigned m_numargs; unsigned m_eventnum;};\n\tstatic const eventdef_ss_t ALLEVENTS[]={\n"
  *   per ev  "\t{\"<name>\", <rettype>, \"<fspec>\", <numargs>, <eventnum>},\n"
  *   footer  "};\n"
- * fopen mode "w" and one fputs of the whole buffer, matching the OG's shape.
+ * fopen mode = "w" (faithful to the OG fopen_s mode). The OG joined records with '\n' and fputs'd once;
+ * we fputs the whole accumulated buffer once (same single-write shape), SEH-guarded.
  *
- * Record field map [DIRECT, the [12] eventDef layout]: m_evname <- rec+0x00, m_fspec <- rec+0x10,
- * m_numargs <- rec+0x30, m_eventnum <- rec+0x34. m_rettype has no source in the four fields the engine
- * walk exposes, so it emits 0. eventnum comes from the record rather than the loop index, so a sparse
- * table stays correct.
+ * ENGINE-record field map (DIRECT, the [12] eventDef layout): m_evname  <- rec+0x00 (name, via getByIndex)
+ *   m_fspec <- rec+0x10 (';'-delimited arg-spec); m_numargs <- rec+0x30; m_eventnum <- rec+0x34. m_rettype
+ *   is NOT sourceable from the four record fields the engine walk exposes -- we emit 0 (the faithful
+ *   closest equivalent: a placeholder return-type, exactly as the OG's struct reserved the slot). Note the
+ *   record's eventnum (rec+0x34) is the AUTHORITATIVE event number (== the loop index i for a dense table,
+ *   but we emit the record's own field so a sparse table stays correct).
  *
- * The walk and the file IO are SEH-guarded: a garbage evMgr or record degrades to a per-event skip or an
- * "unavailable" line. Reuses the [12] accessor and slot wrappers, so no new signature. */
+ * SANE PATH: "eventdefs.txt" in the DOOM cwd (adapts the hardcoded chrispy path; mirrors how [11]
+ * cs_start_render_logging writes "renderlog.txt"). The full walk + the file IO are SEH-guarded: a garbage
+ * evMgr/record degrades to a clean per-event skip or an "unavailable" line, never a crash. Reuses the [12]
+ * declMgr accessor + vtable-slot wrappers -- NO new signature. */
 #define CDE_REC_EVENTNUM_OFF  0x34    /* eventDef record -> eventnum (uint)   (BUILD-SPECIFIC, [12] layout) */
 #define CDE_OUT_PATH          "eventdefs.txt"   /* sane path (DOOM cwd); adapts OG's hardcoded chrispy path */
 
@@ -1729,13 +1837,17 @@ static void h_sh_help(idCmdArgs *a);   /* defined after CMD_TABLE (it walks the 
 
 /* sh_dialogtest [buttonset] [text...] -- raise the engine's own modal with our text.
  *
- * A diagnostic: which button LAYOUT a button-set value draws lives in the Flash layer and cannot be
- * read from native code. The button set is a free parameter of the raise, not a property of the GDM id,
- * so sweeping it here is how the yes/no value gets identified. Which button was PRESSED needs no
- * sweeping -- the engine reports it through the button's action id, which `sh_dialogpoll` reads.
+ * A diagnostic, because the one part of that surface that lives in the Flash
+ * layer cannot be read out of native code: which button LAYOUT a given
+ * button-set value draws. The button set is a free parameter of the raise, not
+ * a property of the GDM id, so sweeping it here is how the yes/no value gets
+ * identified. Which button was PRESSED needs no sweeping -- the engine reports
+ * it through the button's action id -- so `sh_dialogpoll` reads an answer
+ * rather than guessing one.
  *
- * Everything after the button set is joined back into one string, since the tokeniser would otherwise
- * pass only the first word of a message. */
+ * Every argument after the button set is joined back into one string, because a
+ * real message has spaces in it and the command tokeniser would otherwise show
+ * only the first word. */
 static void h_sh_dialogtest(idCmdArgs *a)
 {
     char text[256];
@@ -1899,21 +2011,22 @@ static void h_sh_help(idCmdArgs *a)
 /* ====================================================================== command unlock ===========
  * Make EVERY console command usable once a developer command (e.g. `god`) flips developer mode on.
  *
- * THE PROBLEM. DOOM splits commands across a two-table developer gate, like cvars: a fresh console
- * scans the FULL list (cmdSys+0x08), but once dev mode is on the console scans the DEV list
- * (cmdSys+0x20) and applies a cheat guard (`ExecuteCommandText` 0x1aa4950 throws unless
- * cmd->flags@+0x20 & 2). The engine's native cheats and the clone's own commands register without the
- * dev flag, so they read "Unknown command" right after `god`.
+ * THE PROBLEM. DOOM splits commands across a two-table developer gate exactly like cvars: a fresh
+ * console scans the FULL list (cmdSys+0x08), but the instant dev mode turns on the console scans the
+ * DEV list (cmdSys+0x20) AND applies a cheat guard (`ExecuteCommandText` 0x1aa4950: throws unless
+ * cmd->flags@+0x20 & 2). The engine's native cheats (noclip/give/...) and the clone's own commands are
+ * registered without the dev flag, so they read "Unknown command" right after `god` -- the regression
+ * vs the original SnapHak (whose bundled mod flagged every command).
  *
- * THE FIX, the same one the original mod's dinput8 uses: detour the engine AddCommand (0x1aa3630) and
- * OR flags|6 (0x2 cheat-exempt | 0x4 dev-table membership) into every registration, so the engine's own
- * AddCommand inserts into BOTH tables and grows each list's own buffer. Two halves: (1) the detour, for
- * all future registrations including the gameplay commands that only register on level load; (2) a
- * one-time pass over commands already registered before the detour installed -- OR flags|6 and insert
- * into the DEV list through the engine's own idList grow.
- *
- * The two backing arrays must stay separate. Aliasing the DEV idList onto the FULL array makes
- * AddCommand's DEV-append write at the wrong index and duplicate or lose commands.
+ * THE FAITHFUL FIX (what the original mod's dinput8 does). It detours the engine AddCommand
+ * (0x1aa3630) and ORs flags|6 (=0x2 cheat-exempt | 0x4 dev-table-membership) into EVERY registration,
+ * so the engine's OWN AddCommand inserts each command into BOTH tables, growing each list's own buffer
+ * correctly. We mirror that: (1) detour AddCommand the same way for all FUTURE registrations (incl. the
+ * gameplay commands that only register on level load); (2) a one-time pass for commands ALREADY
+ * registered before our detour installed -- OR flags|6 + insert into the DEV list via the engine's OWN
+ * idList grow. NO table aliasing: an earlier attempt pointed the DEV idList at the FULL backing array
+ * with a stale DEV.count, so AddCommand's DEV-append wrote into the shared buffer at the wrong index and
+ * duplicated/lost commands. The engine never shares those buffers; neither do we.
  *
  * Offsets DIRECT from the AddCommand (0x1aa3630) + ExecuteCommandText (0x1aa4950) decompiles:
  *   cmdSys: FULL idList {array@+0x08, count@+0x10}, DEV idList {array@+0x20, count@+0x28, cap@+0x2c}.
@@ -1930,14 +2043,18 @@ static void h_sh_help(idCmdArgs *a)
 /* idList grow (engine FUN_140699a60): ensures room for one more element on the idList at `list`
  * (granularity-or-double then idList::Resize, the engine allocator).
  *
- * NOT signature-resolvable: it is one of 1,560 byte-identical instantiations of the same idList
- * template, differing only in rip-relative and rel32 displacements, so no prologue pattern separates
- * them.
+ * NOT signature-resolvable, and not for want of trying: it is ONE of 1,560 byte-identical
+ * instantiations of the same idList template in the image, differing only in rip-relative and rel32
+ * displacements. No lengthening of a prologue pattern separates them: a byte signature answers
+ * "where is this function", and is the wrong tool when the answer is "in 1,560 places".
  *
- * Resolved RELATIONALLY off AddCommand, which IS signature-resolved: AddCommand calls this on
- * cmdSys+0x08 before appending, and that call site is the pair `LEA RCX,[RSI+8]` / `CALL rel32`.
- * Scanning AddCommand's body for those five bytes and decoding the displacement finds the callee on any
- * build. A miss degrades to a skipped insert; the caller SEH-guards. */
+ * So it is resolved RELATIONALLY instead, off AddCommand, which IS signature-resolved: AddCommand
+ * calls this on cmdSys+0x08 (the FULL list) before appending, and that call site is the instruction
+ * pair `LEA RCX,[RSI+8]` / `CALL rel32`. Scanning AddCommand's own body for those five bytes and
+ * decoding the displacement yields the callee wherever this build put it. The old build-locked
+ * `module_base + 0x699a60` is retained below only as the documented cross-check.
+ *
+ * A miss degrades to a skipped insert (the caller SEH-guards), never a crash. */
 #define IDLIST_GROW_RVA     0x699a60u   /* pinned-build value -- cross-check only, never used to locate */
 typedef void (*idlist_grow_fn)(void *idlist);
 
@@ -2084,13 +2201,17 @@ static void sh_command_unlock_install(void *cmdsys, void *add_command, const uin
     backend_log(line);
 }
 
-/* Register one command through the 6-arg engine AddCommand. flags=2 is developer-EXEMPT: AddCommand
- * stores it as 6 (0x2|0x4), which appends the command into the FULL table (+0x08) AND the DEV table
- * (+0x20) and passes ExecuteCommandText's cheat guard, so it stays typeable whether or not dev mode is
- * on. The engine's own always-typeable commands (`where`, `getviewpos`) use flags=2 too.
- *   [DIRECT] ExecuteCommandText 0x141aa4950 (gate getter *(cmdSys+0x200a8): 0 => FULL@+0x08, else
- *   DEV@+0x20); AddCommand 0x141aa3630 (`flags|4 if flags&2`); cheat guard 0x1419fcb60.
- *   A divergence from the OG, which passes no flag at all and leaves its own commands dev-gated. */
+/* Register one command via the 6-arg engine AddCommand. flags=2 (developer-EXEMPT): AddCommand massages
+ * 2 -> stored 6 (bits 0x2|0x4), so the command is appended into BOTH the cmdSystem FULL table (+0x08) AND
+ * the DEV table (+0x20), and it passes ExecuteCommandText's "Attempting to call a developer command" cheat
+ * guard (which throws iff dev-mode-on AND (flag&2)==0). Result: Snapmap+'s commands are typeable in the `~`
+ * console whether or not dev mode is active (a developer tool flips dev-mode on -> the typed console then
+ * scans the DEV table; with flags=0 our commands are FULL-only and read "Unknown command" there). The
+ * engine's own always-typeable commands (`where`/`getviewpos`) use exactly flags=2.
+ *   RE: command-console-exposure -- ExecuteCommandText 0x141aa4950 (gate getter *(cmdSys+0x200a8):
+ *   0=>FULL@+0x08, !=0=>DEV@+0x20), AddCommand 0x141aa3630 (`flags|4 if flags&2`; cheat guard 0x1419fcb60).
+ *   DELIBERATE divergence from OG-faithful: the OG passes NO flag (~stack garbage, effectively 0), so the
+ *   OG's own commands are ALSO dev-gated -- flags=2 EXCEEDS OG (a console-usability fix). */
 static int register_cmd(const cmd_entry *e)
 {
     __try {
