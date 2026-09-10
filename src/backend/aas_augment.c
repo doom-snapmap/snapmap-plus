@@ -1,37 +1,8 @@
-/* aas_augment.c -- see aas_augment.h for what this is and why.
- *
- * Every constant below was measured against shipped data. Where a value is
- * copied without being understood, the comment says so rather than inventing a
- * justification for it.
- *
- * THE SHAPE OF THIS FILE
- * ----------------------
- * It is long, and deliberately one file. The obvious split -- lifting the edge
- * and link machinery out -- was measured and declined: it moves 891 lines but
- * has to export `aug_ctx` and `aug_quad`, the whole data model, so the two
- * halves would still change together. That is a header to maintain, not a
- * seam. This map is the answer to the real cost instead.
- *
- *   measured constants        the numbers, each with the corpus behind it
- *   small helpers             rounding, clamping, the agent's box
- *   BSP queries               tree root, depth, and the point-to-area walk
- *   the quad                  a walkable surface: four corners and a plane.
- *                             aug_z_at, the inward edge normal, the inset.
- *                             THE EDGE NORMAL'S SIGN IS LOAD-BEARING -- read
- *                             the comment on aug_edge_normal_in before touching
- *                             anything geometric.
- *   interning                 vertices, edges, planes, nodes, deduplicated
- *   area geometry             bounds, clusters, obstaclePVS, aug_add_area
- *   the BSP splice            aug_carve: five planes per platform
- *   reachabilities            aug_reach, and walk links between flat boxes
- *   edges and neighbours      the segment model: who is across each part of
- *                             each edge, how far, and how much higher. Two
- *                             neighbour sources, and they are not symmetric.
- *   link regimes              step, fall, climb and leap, chosen by magnitude
- *                             and direction rather than by a signed drop
- *   baked traversals          the five records a climb or a leap writes
- *   admission                 headroom and the platform bounds
- *   the driver                sh_aas_augment: two passes, areas then links
+/* Augment AAS in two passes: create areas and BSP leaves, then connect them
+ * with walk, fall, climb and leap reachabilities. Geometry, interning and
+ * link construction share aug_ctx. Keep the clockwise inward-normal
+ * convention consistent across inset, containment, BSP carving and neighbour
+ * queries.
  */
 #include <windows.h>
 #include <math.h>
@@ -68,16 +39,14 @@
  * uses it exclusively. */
 #define BSP_FLOOR_EPS           9.6f
 
-/* node.field4 by split-plane orientation. 1 on 100% of Z-plane nodes
- * (19279 + 43071 + 4895 records); 0 on 61405/61563 (XY, node, area) and
- * 150254/150292 (XY, area, area). Its MEANING is unknown -- copied, not
- * understood. */
+/* node.field4 values are copied from shipped nodes; their meaning is unknown.
+ * See the orientation rule below.
+ */
 #define NODE_F4_Z               1
-/* node.field4 is 1 exactly when the split plane HAS a z component, and 0
- * otherwise -- including for a YAWED VERTICAL plane, which is still 0. Measured
- * over 12,450 classified nodes in ten shipped payloads: axis-aligned XY 5,623 at
- * 0, yawed vertical 5,120 at 0, axis-aligned Z 1,579 at 1, oblique 128 at 1.
- * 100% consistent. A "Z versus XY" rule gets the yawed-vertical case wrong. */
+/* Set node.field4 when the split plane has a Z component, including oblique
+ * planes. Yawed vertical planes use 0. This matches all 12,450 classified
+ * donor nodes.
+ */
 #define NODE_F4_XY              0
 
 /* Spacing between successive walk reachabilities along a shared edge, and the
@@ -89,9 +58,7 @@
 /* Each endpoint is displaced one unit perpendicular, into its own area. */
 #define REACH_SIDE_OFFSET       1.0f
 
-/* Area flags for a floor area, copied from shipped data. 0x8 is what EVERY real
- * area carries -- 883 of the 947 in the largest sampled module, and all of them
- * in four others. */
+/* Floor area flags, copied from shipped data. */
 #define AREA_FLAGS_FLOOR        0x00000008u
 
 /* area.travel_flags for a floor area. 0x000A on the seven floor slabs of the
@@ -104,34 +71,20 @@
  * carries 0x0C01 (17421 of 17442 shipped instances); one shared by two areas
  * carries 0x0C00. Writing 0 leaves an edge that belongs to nothing shipped data
  * recognises. */
-/* An edge only one area uses, and one two areas share. The demotion below fires
- * when a second area asks for an edge that already exists.
- *
- * For GENERATED geometry it now essentially never fires: aug_vertex interns by
- * exact float equality, and two abutting ORIENTED quads -- inset by the agent
- * radius, each on its own plane -- will not produce bit-identical corners. That
- * costs nothing here, because nothing in the augmenter routes on shared edges;
- * chained platforms are joined by reachabilities, not by shared geometry. */
+/* Demote an edge from boundary to shared when a second area reuses it. */
 #define EDGE_FLAGS_BOUNDARY     0x00000C01
 #define EDGE_FLAGS_SHARED       0x00000C00
 
 #define AUG_INT16_LO            (-32768)
 #define AUG_INT16_HI            (32767)
 
-/* Settings-block word offsets. The block is a u32 type, three length-prefixed
- * fixed-64-byte strings (3 * 68 = 204), then 39 big-endian words -- which is
- * where 4 + 204 + 156 = 364, SH_AAS_SETTINGS_BYTES, comes from. */
+/* Settings word offsets follow type + three length-prefixed 64-byte strings. */
 #define SET_WORDS               208
 #define SET_W(n)                (SET_WORDS + (n) * 4)
 #define SET_MAX_STEP_HEIGHT     SET_W(12)
-/* minFloorCos -- the walkable-slope threshold, 0.7 (45.57 degrees) in every
- * shipped payload and identical across all three monster classes.
- *
- * Word 16, NOT 17. The disk settings record is not a packed image of
- * idAAS2Settings: it drops maxLedgeGrabHeight among others and reorders after
- * word 23, so extrapolating the struct layout lands one word late on a value
- * (minHighCeiling, 80) that is not a cosine at all. The offset comes from the
- * decoded corpus. */
+/* minFloorCos is settings word 16 (0.7 in shipped payloads). The disk layout
+ * omits and reorders fields from idAAS2Settings; struct offsets do not apply.
+ */
 #define SET_MIN_FLOOR_COS       SET_W(16)
 #define SET_MAX_FALL_HEIGHT     SET_W(15)
 #define SET_TT_WALK_OFF_LEDGE   SET_W(36)
@@ -171,13 +124,10 @@
 #define AB_MAXX                 6
 #define AB_MAXY                 8
 #define AB_MAXZ                 10
-/* trees: 24 bytes, THREE FLOATS then three ints -- ( dx dy dz ) a b c, with the
- * integers sitting outside the parentheses in the text form. Shipped files carry
- * ( 0 0 1 ) 1 1 <numAreas>, so `a` (the root node) is at +12 and `c` (the area
- * count) at +20. Reading the root from +0 instead yields the float 0.0's bits,
- * i.e. root 0, which makes the tree walk terminate immediately: every point
- * resolves to void, the splice carves nothing, and the bake silently produces
- * navigation no demon can find. */
+/* trees records are 24 bytes: three floats followed by three ints. Root node
+ * a is at +12; area count c is at +20. +0 is a direction component, not the
+ * root.
+ */
 #define TR_A                    12
 #define TR_C                    20
 
@@ -302,17 +252,10 @@ unsigned sh_aas_tree_depth(const sh_aas *a)
 
 /* ---- the augmenter state ----------------------------------------------- */
 
-/* A walkable surface: a planar convex quad wound CLOCKWISE seen from +Z.
- *
- * Not a rect. A Blocking Box can be yawed, tilted, or lying on its side, so the
- * surface has four corners each with their own z and there is no single `z` any
- * more -- `n`,`d` are its supporting plane (n.p + d = 0, n[2] > 0) and the
- * height at a point is aug_z_at.
- *
- * `x0..y1` is the XY BOUNDING BOX, kept for cheap rejection and for the record
- * fields that genuinely want an AABB. It is NOT the footprint: for a yawed quad
- * it is strictly larger, and testing containment against it is the bug that
- * makes a rotated platform swallow its own bounding square. */
+/* Planar convex surface, clockwise from +Z. n.p+d=0 defines its height and
+ * n[2]>0. x0..y1 is an AABB for rejection and bounds records; containment
+ * must use the polygon.
+ */
 typedef struct aug_quad {
     double c[SH_AUG_MAX_CORNERS][3];
     int count;
@@ -394,15 +337,10 @@ static double aug_quad_max_z(const aug_quad *q)
     return v;
 }
 
-/* The INWARD XY normal of edge i, which runs c[i] -> c[i+1].
- *
- * The winding is CLOCKWISE seen from +Z, so inward is the edge direction rotated
- * MINUS 90 degrees: (ey, -ex). Check it on the edge (x0,y1) -> (x1,y1):
- * e = (+1,0), inward = (0,-1), and the interior is indeed at y < y1.
- *
- * The +90 rotation (-ey, ex) points OUTWARD, and using it here would invert the
- * inset, containment, the carve's lateral planes and every neighbour probe at
- * once -- one sign, four silent failures. */
+/* Clockwise edges have inward XY normal (ey,-ex), a -90 degree rotation. The
+ * opposite sign breaks inset, containment, BSP lateral planes and neighbour
+ * probes.
+ */
 static void aug_edge_normal_in(const aug_quad *q, int i, double out[2])
 {
     int j = (i + 1) % q->count;
@@ -414,16 +352,10 @@ static void aug_edge_normal_in(const aug_quad *q, int i, double out[2])
     out[1] = -ex / len;
 }
 
-/* Offset every edge inward by r and re-intersect.
- *
- * Exact for a convex quad, where the axis-wise +/- radius inset this replaces is
- * correct only for an axis-aligned rectangle -- inset a 45-degree quad by its
- * AABB and the corners are eaten, refusing platforms that are actually large
- * enough for the agent.
- *
- * Corner i of the result is the intersection of edges i-1 and i, because edge
- * i-1 ends at c[i] and edge i starts there. Returns 0 if the quad collapses or
- * turns itself inside out. */
+/* Inset by shifting every edge inward by r and intersecting adjacent lines.
+ * Returns 0 if the polygon collapses or reverses. An AABB inset is incorrect
+ * for rotated faces.
+ */
 static int aug_quad_inset(const aug_quad *in, double r, aug_quad *out)
 {
     double nx[SH_AUG_MAX_CORNERS], ny[SH_AUG_MAX_CORNERS], off[SH_AUG_MAX_CORNERS], c[SH_AUG_MAX_CORNERS][3], sh = 0.0;
@@ -450,14 +382,10 @@ static int aug_quad_inset(const aug_quad *in, double r, aug_quad *out)
         sh += c[i][0]*c[j][1] - c[j][0]*c[i][1];
     }
     if (sh > -1.0) return 0;             /* collapsed, or wound the other way */
-    /* Winding is NOT enough. Over-inset a small quad and it turns inside out
-     * through itself while STAYING clockwise: a 30x30 square inset by 24 lands
-     * on (24,6),(6,6),(6,24),(24,24), whose shoelace is -648 -- still negative,
-     * still "valid", and completely wrong.
-     *
-     * The test that does hold is convexity against the inset half-planes: for a
-     * genuine inset every corner sits on the inward side of every edge. In the
-     * flipped case corner 0 is 18 units on the WRONG side of edge 1. */
+    /* Check every corner against every inset half-plane. An over-inset
+     * polygon can remain clockwise after turning inside out, so winding alone
+     * is insufficient.
+     */
     for (i = 0; i < in->count; i++) {
         int j;
         for (j = 0; j < in->count; j++)
@@ -554,11 +482,7 @@ typedef struct aug_box { double v[6]; } aug_box;
 
 /* ---- interning --------------------------------------------------------- */
 
-/* Appending a vertex/edge/plane that already exists would bloat the payload and
- * -- worse for the plane lump -- give the tree two numerically identical split
- * planes, which makes a carve chain impossible to reason about. So each of the
- * three is deduplicated by value against the whole existing lump. The lumps are
- * small enough (the Grid Room has 12 planes) that a linear scan is right. */
+/* Intern vertices, edges and planes by value to avoid duplicate geometry. */
 static int aug_vertex(aug_ctx *c, float x, float y, float z)
 {
     unsigned i, n = sh_aas_count(c->a, SH_AAS_L_VERTICES), first;
@@ -576,10 +500,9 @@ static int aug_vertex(aug_ctx *c, float x, float y, float z)
     return (int)first;
 }
 
-/* Return a SIGNED edge index: +i when the edge runs v0->v1, -i when it already
- * exists as v1->v0. A negative edgeIndex entry is the shipped convention for
- * "this edge is traversed reversed", and an edge that turns out to be shared by
- * two areas is demoted from boundary to shared. */
+/* Return a signed edge index: negative means reverse traversal. Mark an
+ * existing edge shared when a second area uses it.
+ */
 static int aug_edge(aug_ctx *c, int v0, int v1)
 {
     unsigned i, n = sh_aas_count(c->a, SH_AAS_L_EDGES), first;
@@ -641,16 +564,9 @@ static int aug_node(aug_ctx *c, int plane_num, int field4, int child0, int child
 
 /* ---- area geometry ----------------------------------------------------- */
 
-/* An area's bounds, as (minx, miny, maxx, maxy, minz, maxz).
- *
- * There is deliberately NO flatness gate. Its predecessor refused any area whose
- * minz != maxz, which did two kinds of harm: it would make every tilted
- * generated area an unlinkable island, and it ALREADY made the linkers blind to
- * the majority of shipped module areas -- 144 of 159 in d2_map_01.aas_monster48
- * have spanning bounds, 57 of 102 in hell_big_blank_room.
- *
- * Callers take maxz as the surface a demon stands on: exact for a flat area, and
- * the conservative choice for a sloped one. */
+/* Area bounds: minx, miny, maxx, maxy, minz, maxz. Sloped areas are valid;
+ * maxz is only a fallback landing height when no floor polygon is available.
+ */
 static int aug_area_box(const sh_aas *a, unsigned area, float out[6])
 {
     const unsigned char *b = sh_aas_rec_const(a, SH_AAS_L_AREABOUNDS, area);
@@ -664,13 +580,9 @@ static int aug_area_box(const sh_aas *a, unsigned area, float out[6])
     return 1;
 }
 
-/* Which cluster a platform joins: the carrier's.
- *
- * Two facts decide it. portalIndex is empty in 20/20 shipped payloads and the
- * single portals record is all-zero, so clusters cannot be linked to each other
- * in the file at all. And the one area the Grid Room does put in its own cluster
- * -- the ceiling -- is also the one area with no reachabilities. Giving a
- * platform its own cluster would reproduce exactly that unreachable shape. */
+/* Use the carrier's cluster so the platform shares its routing scope. Fall
+ * back to the largest cluster when no carrier is available.
+ */
 static int aug_choose_cluster(aug_ctx *c, int carrier)
 {
     unsigned i, n = sh_aas_count(c->a, SH_AAS_L_AREAS);
@@ -800,8 +712,7 @@ done:
 /* Append one walkable area for `eff` and return its index, or -1. */
 static int aug_add_area(aug_ctx *c, const aug_quad *eff, int carrier)
 {
-    /* A closed edge loop wound clockwise seen from +Z -- the winding of every
-     * floor area of the Grid Room, verified by shoelace on areas 2, 5 and 8. */
+    /* Closed edge loop, clockwise from +Z. */
     int vs[SH_AUG_MAX_CORNERS];
     unsigned first_ei = sh_aas_count(c->a, SH_AAS_L_EDGEINDEX);
     unsigned first_pvs = 0, first_area, first_bounds, slot;
@@ -893,10 +804,9 @@ static int aug_box_side(const aug_box *b, const unsigned char *p, double eps)
     return 0;                                   /* straddles */
 }
 
-/* Clip an AABB by an axis-aligned split plane. A non-axis-aligned plane leaves
- * the box alone, so the result is always a SUPERSET of the true convex cell --
- * which is exactly what keeps the pruning in aug_chain sound: dropping a split
- * plane the superset already satisfies can never be wrong. */
+/* Clip only against axis-aligned planes. The resulting AABB remains a
+ * superset of the BSP cell, allowing conservative pruning.
+ */
 static void aug_clip_cell(aug_box *cell, const unsigned char *p, int front)
 {
     double comps[3];
@@ -916,23 +826,11 @@ static void aug_clip_cell(aug_box *cell, const unsigned char *p, int front)
     }
 }
 
-/* Splice `area` into the BSP for the volume standing on `eff`.
- *
- * Descends from the root with the agent's standing box. Wherever that box
- * reaches a leaf slot holding a real area, the slot is replaced by a chain of at
- * most five new nodes:
- *
- *     z > eff.z - 9.6  ->  x > x0  ->  x < x1  ->  y > y0  ->  y < y1  ->  -area
- *     (any test failing)  ->  the original leaf
- *
- * Leaf slots holding 0 ("no area") are left alone. That keeps every node we
- * write in one of the child-kind combinations whose field4 value is unambiguous
- * in shipped data; the combinations with a void child carry only unexplained
- * 0x8000xxxx / 0x7fffxxxx values, so authoring one would be a guess. The
- * consequence is that a platform overhanging the module's navigable space is not
- * navigable over the overhang -- which is reported, not hidden.
- *
- * Returns the number of leaf slots carved. */
+/* Replace occupied BSP leaf slots under eff with a face-plane test and one
+ * lateral test per polygon edge. Failed tests retain the original leaf. Never
+ * carve void leaves: their field4 encoding is unresolved, so overhangs
+ * outside existing navigation remain unavailable. Returns carved slot count.
+ */
 static int aug_carve(aug_ctx *c, int area, const aug_quad *eff)
 {
     typedef struct { int node; aug_box cell; } aug_frame;
@@ -944,19 +842,15 @@ static int aug_carve(aug_ctx *c, int area, const aug_quad *eff)
     const double BIG = 1e9;
     const double eps = 1e-3;
 
-    /* The face plane, offset VERTICALLY. BSP_FLOOR_EPS was measured as
-     * areaBounds[leaf].minz - planeZ, a vertical quantity, so displacing the
-     * plane 9.6 along an oblique normal would make the vertical drop 9.6/n.z --
-     * 13.7 at the 0.7 slope gate, outside anything the corpus shows. Shifting
-     * `dist` by eps*n.z keeps the vertical drop at exactly eps for any tilt. */
+    /* Offset the face plane vertically by BSP_FLOOR_EPS. Multiply by n.z so
+     * tilted planes retain the same vertical offset.
+     */
     split[0].plane = aug_plane(c, (float)eff->n[0], (float)eff->n[1], (float)eff->n[2],
                                   (float)(eff->d + BSP_FLOOR_EPS * eff->n[2]));
     split[0].f4 = NODE_F4_Z;
-    /* One vertical plane per quad edge, on the INWARD normal: the engine takes
-     * child0 when n.p + dist > 0, so the area child must be on the interior
-     * side. For an axis-aligned quad these are exactly the four planes this
-     * replaced; for a yawed one they are the yawed edges, which is what stops a
-     * rotated platform swallowing its own bounding square. */
+    /* Each polygon edge supplies an inward-facing vertical split plane.
+     * child0 is the positive/interior side.
+     */
     for (i = 0; i < eff->count; i++) {
         double n2[2];
         aug_edge_normal_in(eff, i, n2);
@@ -1235,22 +1129,10 @@ static int aug_walk_links(aug_ctx *c, int ai, int bi)
     return added;
 }
 
-/* One SEGMENT of one platform edge, and what lies across it. Shared by every
- * link regime so they all see exactly the same geometry.
- *
- * DIRECTIONAL, not axis-aligned: a rotated platform's edge has no axis. `out` is
- * the outward unit XY normal, which for an axis-aligned quad is exactly the
- * (axis, sgn) pair this replaced.
- *
- * A SEGMENT, not the whole edge: its predecessor probed one point per side, at
- * the side's midpoint, so a neighbour abutting only part of an edge was invisible
- * and the probe answered with the module floor far below. That is what made
- * demons climb down and back up between two volumes standing together.
- *
- * `drop` is SIGNED -- near_z minus far_z -- because discovery can now see a
- * neighbour ABOVE. Every regime gates on its MAGNITUDE plus a direction; see
- * aug_regime. Gating on the signed value was safe only while a neighbour above
- * could not occur, and would now classify a 500-unit rise as a step. */
+/* One oriented edge segment and its neighbour, shared by every link regime.
+ * drop is near_z-far_z; classify its magnitude separately from direction so
+ * rises cannot be mistaken for steps.
+ */
 typedef struct aug_side {
     double p0[2], p1[2];    /* the segment on the INSET quad, in edge order */
     double out[2];          /* outward unit normal in XY */
@@ -1275,11 +1157,9 @@ typedef struct aug_peer {
     int prepared;
 } aug_peer;
 
-/* How close two UNINSET footprints must be to count as touching. Volumes an
- * author snapped together are flush, but exact zero is the wrong test against
- * float noise, and a gap below the shortest shipped leap cannot be crossed by
- * anything -- so anything within this is dispatched to the step or climb
- * regime rather than falling into a hole between the two. */
+/* Tolerance for physical footprint contact. Small floating-point gaps use
+ * step/climb policy rather than leap policy.
+ */
 #define AUG_TOUCH_EPS   4.0
 
 /* The XY clearance between two convex quads: 0 if they touch or overlap.
@@ -1327,8 +1207,7 @@ static double aug_quad_gap(const aug_quad *a, const aug_quad *b)
     return best;
 }
 
-/* Parameters along an edge, in 0..1, for segmenting it. Denser than the single
- * midpoint the predecessor used, which is the whole point. */
+/* Evenly spaced edge parameters in [0,1]. */
 static int aug_samples_unit(double *out, int cap)
 {
     int i, n = cap < 17 ? cap : 17;
@@ -1337,14 +1216,10 @@ static int aug_samples_unit(double *out, int cap)
     return n;
 }
 
-/* How far along a ray the quad is first entered, and where to stand once inside.
- *
- * Measured ALONG THE RAY, not as the minimum clearance between two whole quads.
- * Those differ whenever the neighbour is off to one side, and using the whole-
- * quad minimum picks an animation for one distance and then writes the link at
- * another -- outside the stretch envelope the animation was chosen for.
- *
- * Returns 0 if the ray never reaches it inside `maxd`. */
+/* Find entry distance and an interior landing point along a ray, or return 0
+ * beyond maxd. Animation selection and endpoint placement must use this same
+ * distance.
+ */
 static int aug_ray_entry(const aug_quad *target, double ox, double oy,
                          double dx, double dy, double maxd,
                          double *out_dist, double out_land[2])
@@ -1401,24 +1276,17 @@ static void aug_close_segment(aug_ctx *c, aug_side *sd, const aug_quad *eff,
         sd->generated = 1;
         sd->peer = q;
 
-        /* TWO casts along the same ray, because the two questions differ.
-         *
-         * The GAP is wall to wall, so it is cast from OUR uninset edge against
-         * the peer's uninset footprint. Casting from the inset edge instead
-         * would report the agent radius -- 24 to 64 units -- as a gap between
-         * two volumes an author placed flush, and the segment would be
-         * classified as a leap across a gap that does not exist.
-         *
-         * The LANDING point has to be inside the peer's AREA, which is carved at
-         * its inset quad, so that one is cast against `eff`. */
+        /* Measure physical gap against uninset footprints and landing against
+         * the peer's inset area. Otherwise agent clearance appears as a
+         * physical gap.
+         */
         wx = req->c[e][0] + mt * (req->c[j][0] - req->c[e][0]);
         wy = req->c[e][1] + mt * (req->c[j][1] - req->c[e][1]);
         if (aug_ray_entry(peers[q].req, wx, wy, out2[0], out2[1],
                           SH_TRAV_LEAP_MAX_SPAN, &dist, junk))
             sd->gap = dist < AUG_TOUCH_EPS ? 0.0 : dist;
         else {
-            /* The ray misses it even though a sample found it, which happens at
-             * a corner. The whole-quad clearance is right, just less precise. */
+            /* At a missed corner ray, fall back to whole-footprint clearance. */
             sd->gap = aug_quad_gap(req, peers[q].req);
             if (sd->gap < AUG_TOUCH_EPS) sd->gap = 0.0;
         }
@@ -1427,10 +1295,7 @@ static void aug_close_segment(aug_ctx *c, aug_side *sd, const aug_quad *eff,
             sd->land[0] = (peers[q].eff->x0 + peers[q].eff->x1) / 2.0;
             sd->land[1] = (peers[q].eff->y0 + peers[q].eff->y1) / 2.0;
         }
-        /* The height is read where the link ACTUALLY arrives. Reading it a few
-         * units outside our own edge is mid-air once there is a gap, and on a
-         * tilted neighbour it extrapolates the plane to a height no surface
-         * has. */
+        /* Evaluate the neighbour's height at the actual landing point. */
         {
             int owner;
             for(owner=0;owner<npeers;owner++)if(peers[owner].eff==eff) {
@@ -1451,15 +1316,10 @@ static void aug_close_segment(aug_ctx *c, aug_side *sd, const aug_quad *eff,
     sd->drop = sd->near_z - sd->far_z;
 }
 
-/* The peers close enough to this quad to be worth testing, by bounding box.
- *
- * Without this, gap discovery is four edges by thirty-two samples by sixty
- * ray steps by EVERY peer, and the platform cap is 512 -- billions of
- * containment tests for one bake. The AABB overlap test is exact enough as a
- * filter because it can only ever admit too many, never too few.
- *
- * `reach` is how far out the caller intends to look: the touching epsilon for
- * adjacency, the longest shipped leap for gaps. */
+/* Filter peers by AABB within reach before detailed geometry tests. The
+ * conservative filter may include extra peers but cannot exclude reachable
+ * ones.
+ */
 static int aug_candidates(const aug_quad *req, const aug_peer *peers, int npeers,
                           int ai, double reach, const aug_peer **out, int cap)
 {
@@ -1629,14 +1489,9 @@ static int aug_edge_gap_segments(aug_ctx *c,int ai,const aug_quad *eff,
     return aug_generated_segments(c,ai,eff,req,peers,npeers,out,cap,1);
 }
 
-/* Which regime carries a segment.
- *
- * On the MAGNITUDE of the height change plus an explicit direction. The
- * predecessors gated on the signed drop, which was safe only because discovery
- * refused neighbours above; with that gone, `drop > step` would call a 500-unit
- * RISE a step and emit a plain 0x20 walk link for it -- and across 94,327
- * shipped walk records joining two flat areas, not one spans more than
- * maxStepHeight. */
+/* Classify gaps first, then absolute height difference and rise/fall
+ * direction.
+ */
 enum { REGIME_NONE = 0, REGIME_STEP, REGIME_UP, REGIME_DOWN, REGIME_LEAP };
 
 static int aug_regime(const aug_side *s, double step)
@@ -1655,25 +1510,10 @@ static int aug_quad_contains_quad(const aug_quad *outer, const aug_quad *inner)
     return 1;
 }
 
-/* Emit for this segment at all?
- *
- * Two generated quads that face each other are discovered from BOTH sides, and
- * each regime writes both directions per segment, so without a rule every record
- * between them is written twice. "The lower area index owns the pair" settles
- * that -- but only while discovery really is symmetric, and it is not.
- *
- * A quad is discovered by sampling points just outside the INSPECTING quad's own
- * edges. So when one footprint sits wholly INSIDE another -- a tall pillar
- * standing through a wide slab -- every pillar edge faces the slab, and no slab
- * edge ever faces the pillar. Platforms are created lowest-first, so the slab
- * takes the lower index and would own a pair it can never see: the pillar found
- * the segments, declined to emit, and the slab never looked. The pillar came out
- * emitted, carved, passing the serving gate, and with ZERO reachabilities -- and
- * a demon that cannot be routed anywhere just stands still and shoots.
- *
- * So containment decides first, and only then the index. Mutual containment
- * (identical footprints) means both sides do discover it, and falls through to
- * the index rule rather than being emitted twice. */
+/* Emit each generated pair once. Strict containment gives ownership to the
+ * inner footprint because only it may discover the contact. Otherwise the
+ * lower area index owns the pair.
+ */
 static int aug_side_owns(const aug_side *s, int ai, const aug_quad *req,
                          const aug_peer *peers, int npeers)
 {
@@ -1688,18 +1528,10 @@ static int aug_side_owns(const aug_side *s, int ai, const aug_quad *req,
     return !(s->floor_area < ai);
 }
 
-/* Plain walk links for a platform inside the STEP regime.
- *
- * maxStepHeight is 18 for every monster class. Across the 26-payload donor
- * corpus, 94,327 plain-walk records join two flat areas and NOT ONE spans more
- * than that -- the observed |dz| distribution is 0 (99.09%), 1, 6, 8, 12 and 16.
- * A height change at or below it therefore needs no traversal animation at all;
- * the demon simply walks it. This is why players have always found short volumes
- * "sort of working".
- *
- * aug_walk_links cannot do this job: it fires only when two flat boxes share a
- * degenerate edge segment, and a generated platform is carved INSIDE a floor
- * slab, so their footprints overlap in 2D instead. */
+/* Emit reciprocal plain walks within maxStepHeight. This handles platforms
+ * carved inside an existing slab, where aug_walk_links cannot find a shared
+ * boundary.
+ */
 static int aug_step_links(aug_ctx *c, int ai, const aug_quad *eff,
                           const aug_quad *req, const aug_peer *peers, int npeers)
 {
@@ -1716,24 +1548,16 @@ static int aug_step_links(aug_ctx *c, int ai, const aug_quad *eff,
         cnt = aug_samples_unit(ts, 64);
         for (k = 0; k < cnt; k++) {
             double t = ts[k], up[3], dn[3];
-            /* The near endpoint sits inside THIS quad; the far one inside the
-             * neighbour's own inset footprint, not one unit past a shared wall.
-             * Generated areas are carved at the INSET quad, so two flush volumes
-             * have areas 2*radius apart -- 48 to 128 units -- with the floor slab
-             * between them. Probing just outside the wall lands in that dead
-             * strip, the BSP answers with the floor, and the link is refused:
-             * every step link between two chained volumes, gone. */
+            /* Place both endpoints inside their own navigable footprints. */
             dn[0] = sides[i].p0[0] + t * (sides[i].p1[0] - sides[i].p0[0])
                   - sides[i].out[0] * REACH_SIDE_OFFSET;
             dn[1] = sides[i].p0[1] + t * (sides[i].p1[1] - sides[i].p0[1])
                   - sides[i].out[1] * REACH_SIDE_OFFSET;
             dn[2] = aug_z_at(eff, dn[0], dn[1]);
             if (sides[i].generated && sides[i].peer >= 0) {
-                /* The landing point the segment already measured along its own
-                 * outward ray. Generated areas are carved at the INSET quad, so
-                 * two flush volumes have areas 2*radius apart with floor between
-                 * them: a point one unit past the shared wall is in that dead
-                 * strip and the BSP answers with the floor, refusing the link. */
+                /* Cast into the peer's effective footprint; the physical wall
+                 * alone does not establish a valid standing point.
+                 */
                 const aug_quad *pe = peers[sides[i].peer].eff;
                 double distance, land[2];
                 if(!aug_ray_entry(pe,dn[0],dn[1],sides[i].out[0],sides[i].out[1],
@@ -1755,8 +1579,7 @@ static int aug_step_links(aug_ctx *c, int ai, const aug_quad *eff,
                     aug_z_at(&floor,up[0],up[1]):sides[i].far_z;
             }
             if(fabs(up[2]-dn[2])>(double)c->step)continue;
-            /* Both endpoints must resolve to the area they claim, or the link is
-             * a lie the router will act on. */
+            /* Both endpoints must resolve through the BSP to their declared areas. */
             if (sh_aas_point_area(c->a, (float)dn[0], (float)dn[1],
                                   (float)(dn[2] + 2.0)) != ai) continue;
             if (sh_aas_point_area(c->a, (float)up[0], (float)up[1],
@@ -1769,10 +1592,9 @@ static int aug_step_links(aug_ctx *c, int ai, const aug_quad *eff,
     return added;
 }
 
-/* One walk-off-ledge link per platform edge. See the header: AUTO honours
- * maxFallHeight, which is 0 in every monster-class module, so AUTO emits none.
- * That is deliberate -- no shipped monster-class payload contains a 0x40
- * record, and inventing one is off-precedent. */
+/* Emit downward walk-off links only under the selected fall policy. AUTO
+ * follows maxFallHeight, zero in shipped monster modules.
+ */
 static int aug_fall_links(aug_ctx *c, int ai, const aug_quad *eff,
                           const aug_quad *req, const aug_peer *peers, int npeers)
 {
@@ -1854,25 +1676,12 @@ typedef struct aug_trav_spec {
 
 #define AUG_MAX_TRAVERSALS 2048
 
-/* Candidate anchor positions along one platform edge, MIDPOINT FIRST.
- *
- * A climb link needs two points to land where they claim: an inner point on the
- * platform and an outer point on the floor below, the latter sitting the chosen
- * animation's own offset.x out from the wall. That offset is PER DEMON -- a demon
- * whose clip starts further out needs more clear floor than one whose clip starts
- * close in -- so a single anchor makes the two demons' endpoints land in different
- * places, and one of them can miss the floor area (past its far edge, inside a
- * wall, or on top of a neighbouring platform) while the other is fine.
- *
- * Sampling only the midpoint therefore dropped whole demons from an edge for a
- * reason that had nothing to do with whether they can make the climb, which is
- * what "the big demons cannot use my platform" looks like from the outside.
- * Trying the midpoint first keeps every link the single-anchor build already
- * produced exactly where it was; the rest are only reached by a demon the
- * midpoint would have lost entirely. */
+/* Try midpoint anchors first, then spread along the edge. Per-demon animation
+ * offsets need different amounts of clear floor, so one anchor can reject an
+ * otherwise usable route.
+ */
 #ifdef SH_AUG_TESTING
-/* Emulate the single-anchor build, so an A/B over real module bytes can show
- * what per-demon anchor placement actually recovers. 0 = no cap. */
+/* Test-only anchor cap; 0 leaves sampling uncapped. */
 static int g_test_anchor_cap;
 int sh_aug_test_set_anchor_cap(int n)
 {
@@ -1903,17 +1712,6 @@ static int aug_trav_anchors(double lo, double hi, double *out, int cap)
     return count;
 }
 
-/* Collect up- and down-climb specs for one platform: one per demon per usable
- * edge, in both directions.
- *
- * The ledge lip is the REQUESTED rectangle, not the inset one -- the wall face
- * is where the geometry actually is, and the area is inset by the agent radius
- * exactly as the module's own floor areas are. The floor-side endpoint then sits
- * the animation's own offset.x outside that lip, which is what reproduces the
- * start positions of all fourteen traversals in our donor module.
- *
- * Every endpoint is checked with the BSP. A point that does not land in the area
- * it claims is dropped rather than written: the router would act on the lie. */
 /* Test the entire straight traversal segment against the original oriented
  * solids expanded by the agent bounds. Endpoint support is excluded because
  * climbing intentionally enters/leaves those supports. Animation-specific
@@ -1947,11 +1745,9 @@ static int aug_path_is_clear(aug_ctx *c, const aug_peer *peers, int npeers,
     return 1;
 }
 
-/* Collect climb and leap specs for one platform: one per demon per usable
- * segment, in both directions.
- *
- * Every endpoint is checked with the BSP. A point that does not land in the area
- * it claims is dropped rather than written: the router would act on the lie. */
+/* Collect per-demon climbs and leaps for usable edge segments in both
+ * directions. Refuse endpoints that resolve outside their claimed BSP areas.
+ */
 static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                                const aug_quad *req, const aug_peer *peers,
                                int npeers, aug_trav_spec *out, int cap)
@@ -1980,18 +1776,14 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
         leap = (regime == REGIME_LEAP);
         /* A climb is measured vertically, a leap horizontally. */
         span = leap ? sides[i].gap : fabs(sides[i].drop);
-        /* A leap is nearly LEVEL: over 1,754 shipped records on the six table
-         * nominals the median vertical change is one unit and |dz|/span p90 is
-         * 0.29. Anything steeper is not what these animations do. */
+        /* Limit leap slope independently from horizontal span. */
         if (leap && span > 0.0 &&
             fabs(sides[i].drop) / span > SH_TRAV_LEAP_MAX_GRADE) continue;
 
         seglen = sqrt((sides[i].p1[0] - sides[i].p0[0]) * (sides[i].p1[0] - sides[i].p0[0]) +
                       (sides[i].p1[1] - sides[i].p0[1]) * (sides[i].p1[1] - sides[i].p0[1]));
         (void)seglen;
-        /* Anchors run along THIS SEGMENT, not the whole edge, which is what
-         * makes a partially-abutting neighbour reachable by a demon whose
-         * animation offset is large. */
+        /* Sample the contact segment so partial neighbours remain reachable. */
         na = aug_trav_anchors(0.0, 1.0, anchors,
                               (int)(sizeof anchors / sizeof anchors[0]));
 #ifdef SH_AUG_TESTING
@@ -2023,18 +1815,11 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                     inner_pt[1] = by - sides[i].out[1] * TRAVERSAL_INNER_INSET;
                     inner_pt[2] = aug_z_at(eff, inner_pt[0], inner_pt[1]);
                     if (sides[i].generated && sides[i].peer >= 0) {
-                        /* Land INSIDE the neighbour's own inset footprint, at the
-                         * point the segment measured along its outward ray. The
-                         * areas are 2*radius apart even when the walls are flush,
-                         * so an endpoint measured from the wall lands in the dead
-                         * strip between them.
-                         *
-                         * The animation's own offset is NOT added here. For a
-                         * touching neighbour the two areas already stand that far
-                         * apart, and for a leap the span was selected from this
-                         * same measured distance -- adding the offset on top
-                         * would write the link at a distance the chosen clip was
-                         * never checked against. */
+                        /* Land inside the peer's effective footprint at the
+                         * measured ray distance. Do not add the animation
+                         * offset again: that would change the span after clip
+                         * selection.
+                         */
                         const aug_quad *pe = peers[sides[i].peer].eff;
                         double distance,land[2];
                         /* A touching contact follows this anchor's ray. Leaps
@@ -2088,11 +1873,10 @@ static int aug_traversal_specs(aug_ctx *c, int ai, const aug_quad *eff,
                 sp->to_area   = inward ? ai : sides[i].floor_area;
                 memcpy(sp->start, inward ? outer_pt : inner_pt, sizeof sp->start);
                 memcpy(sp->end,   inward ? inner_pt : outer_pt, sizeof sp->end);
-                /* Facing is the XY travel direction: inward coming onto this
-                 * platform, outward leaving it. A non-axis facing is on
-                 * precedent -- wc_office_arena.aas_monster48 carries (w18,w1a)
-                 * pairs of (23169,23169) and (57468,33778), and 23169 is
-                 * 0.707 * TP_DIR_UNIT. */
+                /* Facing follows XY travel: inward arriving, outward
+                 * departing. Store it in the donor fixed-point scale;
+                 * diagonal vectors are valid.
+                 */
                 dirs = inward ? -1.0 : 1.0;
                 sp->dir[0] = sides[i].out[0] * dirs;
                 sp->dir[1] = sides[i].out[1] * dirs;
@@ -2210,16 +1994,10 @@ done:
     return c->failed ? 0 : written;
 }
 
-/* Write the specs as reachabilities, traversalPoints and animation names.
- *
- * The layout is copied from a shipped donor: the traversal reachabilities are a
- * contiguous TAIL of the reachability array, traversalPoints[0] is a dummy the
- * engine's own validation deliberately skips ("traversal point %d has an invalid
- * start area" only fires for index > 0), and the real points are grouped by
- * from_area so that each area's first_trav_point / num_trav_point partition
- * them.
- *
- * Returns the number written. */
+/* Append traversal reachabilities as a contiguous tail and pair them with
+ * traversalPoints and animation names. Record 0 is a dummy; real points must
+ * be grouped by from_area. Returns count written.
+ */
 static int aug_emit_traversals(aug_ctx *c, aug_trav_spec *specs, int n)
 {
     unsigned base, first, i;
@@ -2228,20 +2006,10 @@ static int aug_emit_traversals(aug_ctx *c, aug_trav_spec *specs, int n)
 
     if (n <= 0) return 0;
 
-    /* MODULES THAT ALREADY SHIP TRAVERSALS.
-     *
-     * The predecessor of this block declined the whole set whenever a spec's
-     * from_area already owned traversal points, so an intersecting platform on
-     * any of the 312 of 696 extracted payloads that ship traversals came out an
-     * island. The constraint it protected -- each area's points contiguous,
-     * because first_trav_point/num_trav_point partition the array -- is real,
-     * but it is restored by REGROUPING: after appending, the whole array is
-     * stably reordered by from-area and the partition rebuilt. That is safe
-     * because exactly two things index traversalPoints, and both survive a
-     * reorder: the per-area partition (rebuilt below from w34) and each point's
-     * own d28, which points OUT of the array at a reachability that does not
-     * move. Shipped payloads are already grouped by ascending from-area, so the
-     * regrouped layout is the shipped layout. */
+    /* Existing traversal points remain valid when stably regrouped by
+     * from_area. Rebuild each area's range; traversalPoint.d28 still refers
+     * to an unmoved reachability.
+     */
 
     /* Animation names, deduplicated by path. */
     for (k = 0; k < n; k++) {
@@ -2324,12 +2092,9 @@ static int aug_emit_traversals(aug_ctx *c, aug_trav_spec *specs, int n)
         written++;
     }
 
-    /* REGROUP: stable insertion sort of records 1..np-1 by from-area, so each
-     * area's points are one contiguous run whatever the payload already owned.
-     * Record 0 is the engine-mandated dummy and stays put. Stability keeps the
-     * shipped points' relative order and our own per-demon order. Shipped
-     * arrays are already grouped ascending, so this is near-linear in
-     * practice. */
+    /* Stably group records 1..np-1 by from_area. Keep dummy record 0 and the
+     * relative order of shipped points.
+     */
     {
         unsigned np = sh_aas_count(c->a, SH_AAS_L_TRAVERSALPOINTS);
         size_t rs = sh_aas_record_size(SH_AAS_L_TRAVERSALPOINTS);
@@ -2549,12 +2314,9 @@ static void aug_relink(aug_ctx *c)
 
 /* ---- admission --------------------------------------------------------- */
 
-/* A platform's XY bounds and its centroid height, from its four corners.
- *
- * The corners replaced the old x0/y1/z members, so what used to be a field read
- * is a fold. The centroid is the right single height for ordering and for the
- * headroom comparison: a tilted face has no one z, and its middle is the honest
- * summary of where it sits. */
+/* Compute XY bounds and centroid height for ordering and legacy clearance
+ * checks.
+ */
 static void aug_plat_bounds(const sh_aug_platform *p, double b[4])
 {
     int i;
@@ -2582,27 +2344,15 @@ static void aug_centre(const aug_quad *p, double *x, double *y)
     *x/=p->count;*y/=p->count;
 }
 
-/* Clearance above a platform: the distance to the lowest thing that overlaps it
- * in XY and sits above it, counting both the module's own areas and the other
- * platforms in this bake.
- *
- * REFUSED platforms are counted too, and that is deliberate. A volume this bake
- * declined to make walkable -- too small, too steep, out of range -- is still a
- * solid box standing in the world. Skipping it here would let us emit a walkable
- * area in the space underneath one, and demons would spawn into a ceiling. The
- * question this asks is "what is physically above me", not "what did we
- * navigate".
- *
- * The platform overlap test is exact rather than an AABB comparison: for a yawed
- * quad the bounding box is strictly larger, so an AABB test reports overlap
- * between two rotated platforms that do not actually meet and refuses one of
- * them for headroom it really has. */
+/* Legacy clearance check against module areas and all requested platforms,
+ * including refused solids. Exact footprint overlap avoids false obstruction
+ * from rotated AABBs.
+ */
 static double aug_headroom(aug_ctx *c, const aug_quad *p,
                            const sh_aug_platform *all, int n, int self)
 {
     double best = 1e30;
-    /* A tilted face has no single height; its centroid is the honest summary of
-     * where it sits for a clearance comparison. */
+    /* Use centroid height for this legacy clearance comparison. */
     double pz = aug_quad_max_z(p);
     unsigned i, na = c->original_areas;
     int k;
@@ -2642,10 +2392,9 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
 {
     static const sh_aug_opts defaults = { SH_AUG_FALL_AUTO, 1, 0 };
     aug_ctx c;
-    /* HEAP, not stack. Two aug_quad arrays alone are 160 KB at the platform
-     * cap, and this runs on the map loader's thread beside everything else the
-     * bake needs -- a stack that only just fits is one platform away from not
-     * fitting. One block, one free, so the single exit stays single. */
+    /* Allocate scratch on the heap to keep large geometry arrays off the
+     * loader stack.
+     */
     int *order = NULL, *made = NULL, *wsrc = NULL, *wpieces = NULL;
     aug_quad *effs = NULL, *reqs = NULL;
     aug_peer *peers = NULL;
@@ -2667,19 +2416,17 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
     c.height = aug_agent_height(a);
     c.step = sh_aas_setting_f32(a, SET_MAX_STEP_HEIGHT);
     c.min_floor_cos = sh_aas_setting_f32(a, SET_MIN_FLOOR_COS);
-    /* Fail CLOSED. sh_aas_setting_f32 answers 0.0f for a model it cannot read,
-     * and a gate of "normal.z < 0" would cheerfully accept a vertical wall as
-     * floor. A payload we cannot read the slope limit out of is one we decline
-     * to augment. */
+    /* Reject unreadable or invalid minFloorCos; a zero fallback would admit
+     * walls.
+     */
     if (c.min_floor_cos <= 0.0 || c.min_floor_cos > 1.0) return 0;
     sh_aas_agent_bounds(a, mins, maxs);
     fw = maxs[0] - mins[0];
     fd = maxs[1] - mins[1];
 
-    /* Marked volumes intersect each other, so what an author asked for and what
-     * a demon can stand on are not the same set of shapes. Everything below runs
-     * on the PIECES, not on the requests -- see sh_nav_geometry_build. Heap, not
-     * stack: this loads on the same thread the rest of the bake does. */
+    /* Build walkable pieces from intersecting solids before augmentation.
+     * Keep the geometry scratch on the heap.
+     */
     {
         size_t nmax = SH_AUG_MAX_PLATFORMS;
         size_t need = nmax * (sizeof *work + sizeof *effs + sizeof *reqs +
@@ -2758,11 +2505,9 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         pr->source = wsrc[idx];
         pr->pieces = wpieces[idx];
         if (wburied[idx]) {
-            /* Every part of this face is inside another marked volume, so there
-             * is nowhere on it a demon could be standing. Refused with its own
-             * reason rather than left to fail some later gate for the wrong
-             * cause -- an author who stacked two boxes flush needs to be told
-             * that, not told their box is "too small". */
+            /* Report fully buried faces directly instead of failing an
+             * unrelated size gate.
+             */
             _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
                         "no standing room after slope, solid and agent-clearance clipping");
             continue;
@@ -2770,9 +2515,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         pr->carrier = -1;
 
         pr->tilt_degrees = (float)aug_degrees_from_horizontal(p->n[2]);
-        /* face 4 is an UPRIGHT box's top. Anything else means the author is
-         * standing on what they think of as a side, which is correct for a
-         * tipped box and worth telling them. */
+        /* Face 4 is an upright top; other faces indicate a tipped box. */
         pr->side_face = (p->face != 4);
 
         if (!aug_quad_from_platform(&req, p)) {
@@ -2820,21 +2563,11 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
             carrier = sh_aas_point_area(a, (float)mx, (float)my,
                                         (float)aug_z_at(&eff, mx, my));
         }
-        /* NOTHING UNDER THE MIDDLE OF IT.
-         *
-         * aug_carve only splices where the tree already holds a real area --
-         * `if (child == 0) continue` -- so a box that overhangs the edge of the
-         * module gets a PARTIAL splice: some leaf near an edge is replaced, the
-         * carve reports success, and the middle of the platform still resolves
-         * to void. The area record then claims ground the tree cannot find, and
-         * a demon standing there cannot be routed anywhere, which is the same
-         * "emitted but unroutable" failure that makes them stand still and
-         * shoot.
-         *
-         * This has to be caught HERE, before aug_add_area, and not after the
-         * carve: the lumps are append-only, so refusing later leaves the area
-         * stranded in the array -- counted into a cluster and included in
-         * trees[0].c -- which is precisely the phantom being avoided. */
+        /* Require a carrier under the centre before appending the area.
+         * Carving can succeed at an overhang's edge while leaving its centre
+         * in void; append-only geometry cannot safely undo that phantom area
+         * later.
+         */
         if (carrier <= 0) {
             _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
                         "nothing walkable under the middle of it -- this box "
@@ -2850,11 +2583,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         }
         pr->leaf_slots_carved = aug_carve(&c, area, &eff);
         if (pr->leaf_slots_carved <= 0) {
-            /* Belt and braces. The carrier check above already refuses the case
-             * that produces this -- a carrier area under the middle guarantees at
-             * least that leaf is replaceable -- so reaching here means something
-             * unmodelled. We cannot un-append the area, so the least bad outcome
-             * is to refuse to CLAIM it and to leave the reason visible. */
+            /* Unexpected carve failure after area append: do not report it as emitted. */
             _snprintf_s(pr->reason, sizeof pr->reason, _TRUNCATE,
                         "nowhere to splice this into the navigation tree");
             c.failed = 1; break;
@@ -2876,11 +2605,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
 
     if(c.prepared_geometry&&!c.failed&&!aug_stitch_edges(&c,effs,made,nmade))c.failed=1;
     if (!c.failed) {
-        /* Walk links first, so the step linker knows which pairs are covered.
-         * A generated area is carved inside a floor slab, so in practice the
-         * walk linker rarely fires and the step linker does the work -- both are
-         * run because a platform butting exactly against another area is the
-         * case walk links exist for. */
+        /* Create shared-boundary walks before the general step linker. */
         for (i = 0; i < nmade; i++) {
             unsigned na = sh_aas_count(a, SH_AAS_L_AREAS);
             unsigned b;
@@ -2890,14 +2615,10 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                 aug_walk_links(&c, (int)b, made[i]);
             }
         }
-        /* The peer table: every quad this bake actually created. Refused
-         * platforms are absent -- `nmade` only advances on success -- so the
-         * effs[i] <-> plats[i] identity is broken and nothing may rely on it.
-         *
-         * This is the second neighbour source, and it is what fixes chaining:
-         * the augmenter already holds every quad it made, so it does not have to
-         * rediscover them through the BSP, where the agent-radius inset hides
-         * them behind 48 to 128 units of floor. */
+        /* The peer table contains only emitted surfaces. Its indices no
+         * longer match the requested platform array. It supplies neighbours
+         * directly when agent clearance separates their BSP footprints.
+         */
         for (i = 0; i < nmade; i++) {
             peers[i].req = &reqs[i];
             peers[i].eff = &effs[i];
@@ -2919,9 +2640,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         for (i = 0; i < nmade; i++)
             aug_fall_links(&c, made[i], &effs[i], &reqs[i], peers, nmade);
 
-        /* Climbs LAST. The traversal reachabilities must be a contiguous tail of
-         * the reachability array -- that is how every shipped donor lays them
-         * out, and traversalPoint.d28 indexes into it. */
+        /* Append traversals last to keep their reachabilities in one tail. */
         {
             aug_trav_spec *specs = (aug_trav_spec *)HeapAlloc(
                 GetProcessHeap(), 0, AUG_MAX_TRAVERSALS * sizeof(aug_trav_spec));
@@ -2932,10 +2651,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                     int got = aug_traversal_specs(&c, made[i], &effs[i], &reqs[i],
                                                   peers, nmade, specs + total, room);
                     total += got;
-                    /* Filling the budget exactly means the collector stopped
-                     * because it ran out of room, not because it ran out of
-                     * geometry. Say so: a silently truncated bake reads to an
-                     * author exactly like a complete one. */
+                    /* A full collector may have omitted routes; report capacity exhaustion. */
                     if (got == room) { out->links_truncated = 1; c.failed = 1; break; }
                 }
                 /* Budget basic links and traversals together before allocating
@@ -2955,16 +2671,10 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
                 HeapFree(GetProcessHeap(), 0, specs);
             } else { c.failed = 1; }
         }
-        /* THE DEAD ZONE.
-         *
-         * A demon steps up to maxStepHeight and jumps no shorter than the
-         * shortest jump_forward animation the game ships -- 149 units. A gap
-         * between those two is crossable by neither, so the two platforms stay
-         * unlinked no matter what the linkers try. That is geometry, not a bug,
-         * but it is invisible: both platforms are emitted, both reach the floor,
-         * neither reads as an island, and the author is left wondering why
-         * demons will not walk from one to the other. Counted here so the bake
-         * line can say it. */
+        /* Report gaps beyond contact/step handling but shorter than available
+         * leaps. Both platforms can have floor routes without being linked to
+         * each other.
+         */
         for (i = 0; i < nmade; i++) {
             for (j = i + 1; j < nmade; j++) {
                 double gap = aug_quad_gap(&reqs[i], &reqs[j]);
@@ -2998,11 +2708,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
         if (t) sh_aas_put_i32(t, TR_C, (int32_t)sh_aas_count(a, SH_AAS_L_AREAS));
     }
 
-    /* Report what each platform actually got, including whether it ended up an
-     * island. An island is legal and sometimes wanted -- the Grid Room's own
-     * ceiling is one -- but the author has to be told, because a platform they
-     * expected demons to climb onto is a different thing from one they meant to
-     * spawn demons on. */
+    /* Report island status for every emitted surface. */
     for (i = 0; i < nmade; i++) {
         int links = 0, climbs = 0, neighbours = 0;
         unsigned seen[SH_TRAV_MAX_MONSTERS];
@@ -3017,11 +2723,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
             if ((int)sh_aas_get_u16(rr, RE_FROM_AREA) != made[i] &&
                 (int)sh_aas_get_u16(rr, RE_TO_AREA) != made[i]) continue;
             links++;
-            /* How many DISTINCT areas this platform reaches. The author's real
-             * question after placing two volumes together is whether they are
-             * joined to each other, and "links" alone cannot answer it -- a
-             * platform with forty links to the floor looks identical to one
-             * chained to its neighbour. */
+            /* Count distinct neighbour areas; link count alone cannot show connectivity. */
             other = (int)sh_aas_get_u16(rr, RE_FROM_AREA) == made[i]
                   ? (int)sh_aas_get_u16(rr, RE_TO_AREA)
                   : (int)sh_aas_get_u16(rr, RE_FROM_AREA);
@@ -3065,8 +2767,7 @@ int sh_aug_test_trav_anchors(double lo, double hi, double *out, int cap)
     return aug_trav_anchors(lo, hi, out, cap);
 }
 
-/* The quad geometry, reached through an opaque buffer because aug_quad is
- * internal and the tests are a separate translation unit. */
+/* Test access to the private aug_quad representation. */
 size_t sh_aug_test_quad_size(void) { return sizeof(aug_quad); }
 
 int sh_aug_test_quad_init(void *quad, const double corners[4][3])

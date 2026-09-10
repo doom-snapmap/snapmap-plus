@@ -1,70 +1,23 @@
-/* nav_traversal.h -- which demon can climb how far, and on what animation.
+/* Select per-demon climb and leap animations from the installed universal
+ * traversal table. Paths are read at runtime because naming differs by demon.
  *
- * WHAT A TRAVERSAL IS
- * -------------------
- * A walk link joins two surfaces a demon can step between -- 18 units in every
- * SnapMap monster class. Anything taller needs a BAKED TRAVERSAL: an animated
- * climb, and five records that have to agree with each other.
+ * A reachability identifies one demon and references a traversalPoint, which
+ * selects traversalAnimNames. For mask M from
+ * TraversalMonsterTypeToTraversalFlags:
+ *   travel_flags = (0x1000 | (M << 7) | 1) << 16
+ *   traversalPoint.d30 = 0x02000000 | (M << 12) | 0x908
+ * Each supported demon needs its own link. MARINE is excluded; the Cyberdemon
+ * has no traversal enum entry or usable animation.
  *
- *     reachability        travel_flags names ONE demon; from/to area; endpoints
- *          ^ d28
- *     traversalPoint      the same two areas and points as floats, a facing
- *          |              vector, and w24 selecting...
- *          v
- *     traversalAnimNames  ...the animation path
- *          ^
- *     universal_traversal_table.decl   (monster, traversal type, distance)
- *
- * The demon is encoded arithmetically, from the mask the engine's own
- * TraversalMonsterTypeToTraversalFlags yields:
- *
- *     travel_flags       = (0x1000 | (M << 7) | 1) << 16
- *     traversalPoint.d30 = 0x02000000 | (M << 12) | 0x908
- *
- * That formula was derived from one shipped donor and then found to explain ALL
- * NINE distinct traversal flag values occurring anywhere in the game's data.
- *
- * Two consequences fall out. A link is PER DEMON, so supporting nine demons
- * means nine reachabilities per direction per edge. And the Cyberdemon can never
- * use one: it has no traversal animation and is absent from the engine's
- * traversal-monster enum entirely.
- *
- * WHY THE TABLE IS READ AT RUNTIME
- * --------------------------------
- * The animation paths cannot be templated. The folder is `traversal` or
- * `traversals` depending on the demon, the hellified soldier's are prefixed
- * `rifle_`, and the zombie's are different words entirely -- it climbs and falls
- * where others jump. Anything writing traversalAnimNames must LOOK THE PATH UP.
- *
- * So this module reads the player's own copy of
- *
- *     generated/decls/universaltraversaltable/universal_traversal_table.decl
- *
- * rather than shipping a baked copy of it. That keeps the promise in README.md
- * -- no DOOM bytes in this repo -- and it means the table is automatically right
- * for whatever build the player has.
- *
- * HEIGHTS ARE NOT QUANTISED
- * -------------------------
- * The six distances the table names its rows after (64..512) name the ANIMATION,
- * not the geometry. Across 2,484 shipped traversal records only 10.5% have a
- * height equal to the number in their animation's own name; the ratio runs
- * 0.19x to 2.25x, because the engine warps the clip onto the reachability's real
- * endpoints (animDeltaCorrection_t, DELTA_CORRECTION_CATEGORY_TRAVERSAL). So the
- * nominal only SELECTS a clip. A drop is refused only past SH_TRAV_MAX_STRETCH.
- *
- * NOT EVERY DEMON CAN CLIMB EVERY HEIGHT. 58 of the table's 300 rows are `_`
- * placeholders, so only 64 and 128 are climbable by all nine: the zombie's
- * LEDGE_UP stops at 128 and the hellified soldier's at 192.
+ * Nominal distances select clips; the engine warps them to actual endpoints.
+ * Missing animation rows and stretch/squash limits can refuse a selection.
  */
 #ifndef SNAPMAP_PLUS_NAV_TRAVERSAL_H
 #define SNAPMAP_PLUS_NAV_TRAVERSAL_H
 
 #include <stddef.h>
 
-/* The engine name of the table. Pinned as a literal and asserted in the tests:
- * getting a resource name wrong fails SILENTLY -- the open misses, the shipped
- * data answers, and nothing says so. */
+/* Exact resource name; a miss silently disables traversal loading. */
 #define SH_TRAV_DECL_NAME \
     "generated/decls/universaltraversaltable/universal_traversal_table.decl"
 
@@ -87,22 +40,10 @@ extern const int SH_TRAV_DISTANCE[SH_TRAV_DISTANCES];
  * gap where the other two select on a vertical drop. */
 enum { SH_TRAV_UP = 0, SH_TRAV_DOWN = 1, SH_TRAV_ACROSS = 2 };
 
-/* The leap envelope, measured over the 1,754 shipped traversalPoints records
- * across the extracted corpus whose animation is exactly one of the six table
- * nominals:
- *
- *   horizontal span   149 .. 982 units (p50 612, p99 880)
- *   span / nominal    p50 1.58, p90 2.09, p99 3.47, max 5.35
- *   |dz|              p50 ONE unit, p90 192, max 511
- *   |dz| / span       p50 0.00, p90 0.29, max 0.83
- *
- * Two things follow. A leap stretches far harder than a climb -- the climb
- * corpus tops out at 2.25, which is why SH_TRAV_MAX_STRETCH stays 2.0 for the
- * LEDGE families and this one gets its own. And a table-nominal leap is
- * essentially LEVEL, so a steeply-graded gap is not what these animations do.
- *
- * `offset.x` on every shipped LEAP_ACROSS row is NEGATIVE (-18 to -132): the
- * animation starts BEHIND the take-off lip, where a climb's sign varies. */
+/* Leap limits use their own envelope: shipped spans range from 149 to 982
+ * units and stretch more than climbs. offset.x is negative (-18..-132),
+ * placing take-off behind the lip. Limit vertical slope separately.
+ */
 #define SH_TRAV_LEAP_MAX_STRETCH   3.5f
 #define SH_TRAV_LEAP_MIN_SPAN      149.0f
 #define SH_TRAV_LEAP_MAX_SPAN      982.0f
@@ -136,15 +77,11 @@ int sh_trav_ready(void);
 int  sh_trav_monster_count(void);
 const sh_trav_monster *sh_trav_monster_at(int i);
 
-/* Pick the animation for an ARBITRARY drop: nearest available nominal, ties to
- * the smaller. That rule reproduces the shipped file's own choice 62.6% of the
- * time and leaves the smallest residual between animation and geometry, which is
- * exactly the visual error since the engine warps the clip either way.
- *
- * Returns 1 and fills the outputs, or 0 when this demon cannot be given the
- * drop -- no animation in that family at all, or past the stretch envelope.
- * `out_path` receives the animation path to write into traversalAnimNames, and
- * `out_offset_x` how far behind the ledge the floor-side endpoint sits. */
+/* Choose the nearest available nominal, with ties to the smaller. Returns 1
+ * with the path and floor-side offset, or 0 for unavailable animations,
+ * invalid inputs or distances outside the stretch/squash envelope. ACROSS
+ * uses horizontal distance.
+ */
 int sh_trav_select(const sh_trav_monster *m, int direction, float drop,
                    char *out_path, size_t path_cap,
                    float *out_offset_x, int *out_distance, int *out_travel_time);

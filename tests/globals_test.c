@@ -1,28 +1,9 @@
-/* globals_test.c -- offline test for the engine data-global resolver (engine_globals.c).
+/* Offline data-global resolution and layout checks on an RVA-mapped PE.
+ * Run both supported renderers: pinned mode checks Vulkan RVAs; portable mode
+ * checks resolution and relative layout without fixed addresses.
  *
- * Maps an unpacked DOOM executable by RVA exactly as the Windows loader would, then resolves
- * every entry in BACKEND_ENGINE_GLOBALS against it. This is the same code path the live DLL
- * takes, with no game running.
- *
- * Run it against BOTH shipped executables. That is the point: a data RVA baked for one build is
- * the one thing that cannot survive the other, so the resolver has to be exercised somewhere it
- * has never seen the answer.
- *
- *   globals_test <DOOM_unpacked.exe>            # pinned mode: also require the pinned Vulkan RVA
- *   globals_test <DOOM_unpacked.exe> portable   # portable mode: resolution + invariants only
- *
- * Portable mode deliberately hardcodes no expected addresses. Instead it checks INVARIANTS that
- * are facts about the engine's data layout rather than about any one link output:
- *
- *   cvar_system_slot  == cmd_system_slot     + 0x10
- *   load_state        == main_thread_id      + 0x08
- *   error_state       == main_thread_id      + 0x0C
- *   material_manager_ctx == resource_manager_ctx + 0xE0
- *
- * Those relationships hold because the globals are adjacent slots the compiler emitted together.
- * If a resolver bug produced a plausible-looking wrong address, the adjacency would break -- which
- * is a far sharper check than comparing against a number we wrote down ourselves.
- */
+ *   globals_test <unpacked.exe>
+ *   globals_test <unpacked.exe> portable */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -127,12 +108,8 @@ int main(int argc, char **argv)
         }
     }
 
-    /* The visibility leaf is the one place in the product that SETS the instruction pointer: on a
-     * Class-B render-node fault the shield resumes at leaf+0x24, the predicate's own
-     * `xor al,al; ret` tail. A wrong address there does not degrade a feature, it sends the
-     * faulting thread into whatever happens to live at that offset. So assert the tail really is
-     * that instruction pair on whatever image we were handed, rather than trusting that the leaf's
-     * internal layout carried across the build. */
+    /* Class-B visibility recovery resumes at leaf+0x24. Verify the expected
+     * xor al,al; ret tail in the supplied image before trusting that offset. */
     {
         glb_status st = GLB_UNKNOWN_NAME;
         uintptr_t lo = glb_resolve(base, "vis_leaf_lo", &st);

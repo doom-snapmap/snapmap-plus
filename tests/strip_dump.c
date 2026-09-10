@@ -1,12 +1,5 @@
-/* strip_dump.c -- run the production payload strip over a real map and write the result.
- *
- * A delivered map that carries its packages is stripped in the LOAD path, and a map that fails
- * after that point gives no way to see what the strip actually produced -- the bytes never reach
- * disk. This runs the same sh_mpkg_strip the engine runs, on a file, so the output can be parsed,
- * diffed and validated like any other artifact.
- *
- *     strip_dump <in.json> <out.json>
- */
+/* Run sh_mpkg_strip on a map file and save its output for inspection.
+ * Usage: strip_dump <in.json> <out.json> */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
@@ -16,8 +9,7 @@
 int sh_decl_server_registration_succeeded(void) { return 0; }
 void sh_decl_server_request_rearm(void) { }
 
-/* The strip narrates what it did through backend_log; print it, so a refusal explains itself
- * instead of just returning NULL. */
+/* Print strip diagnostics so a refusal has an explanation. */
 void backend_log(const char *line) { printf("[log] %s\n", line ? line : "(null)"); }
 
 int main(int argc, char **argv)

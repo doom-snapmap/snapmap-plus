@@ -1,28 +1,6 @@
-/* commands.h -- clone of SnapHak's console-COMMAND surface, native C
- * (port of OG XINPUT1_3 FUN_1800229b1's AddCommand spine + the per-command handlers).
- *
- * OG registers 22 console commands with the engine cmd system via idCmdSystemLocal::AddCommand
- * (engine 0x1AA3630), each dispatching to its handler. We collapse OG's static-init std::vector
- * machinery to one install fn that calls the engine AddCommand directly per command -- no hardcoded
- * RVAs (the engine fns are signature-resolved by the signature resolver; the idCmdSystemLocal* global is
- * decoded build-portably from a sig'd accessor's RIP-relative MOV, the same LEA-decode idiom sh_strids
- * uses for its table global).
- *
- * All 22 OG command NAMES plus eight Snapmap+ additions are registered (Tier B/C handlers are
- * faithful "not yet implemented in clone" stubs that print the OG help). The trivial handlers wire to
- * the ALREADY-SHIPPED
- * ops: sh_rawmaps_on/off (OG snapHak_rawmaps_on/off) -> sh_rawmap_swap_arm. Later tranches
- * fill the decl/entity/type handlers.
- *
- * ABI (DIRECT, from the engine command-register decompiles):
- *   AddCommand(cmdsys, name, handler, help, argComp, flags)   -- we pass argComp=NULL, flags=0.
- *   handler is __fastcall(idCmdArgs*); argc @ +0x00, argv[N] @ +0x08 + 8*N.
- *   console output goes through idCommon dispatch (Printf sig 0x1A08E80) via the OG wrapper form
- *   (*(engineBase+0x1a08e80))(1, fmt, &va) -- we pre-format then call (1, "%s", &bufptr).
- *
- * Clean-room: ported from our own RE (the engine register-ABI is documented in the
- * AddCommand ABI block above). Zero OG SnapHak bytes.
- */
+/* Console registration, dispatch, and shared engine-command utilities.
+ * AddCommand uses (self,name,handler,help,completion,flags); product commands
+ * pass NULL completion and flags=2 for full/developer visibility. */
 #ifndef BACKEND_B2_COMMANDS_H
 #define BACKEND_B2_COMMANDS_H
 
@@ -30,11 +8,7 @@
 #include <stddef.h>
 #include "signatures.h"
 
-/* ---- shared console-handler ABI + utilities (commands.c owns; entity.c reuses) -------------
- * The OG console-handler callback ABI (__fastcall, arg0 only -- uniform across the OG handler bodies):
- *   idCmdArgs { int argc; char _pad[4]; const char* argv[1]; }   (argv[N] @ +0x08 + 8*N).
- * entity.c's moved handlers (sh_spawn/sh_dumpdef/sh_spawninfo) use the SAME struct + the SAME
- * SEH-guarded accessors + the SAME Printf wrapper, so we share them here rather than duplicate-and-drift. */
+/* Native callback argument layout: argc@0 and argv[N]@+8+8*N. */
 typedef struct idCmdArgs {
     int          argc;
     char         _pad[4];
@@ -48,37 +22,19 @@ const char *cmd_argv(idCmdArgs *a, int n);
 /* Console output via the resolved engine Printf dispatch (no-op until sh_commands_install caches it). */
 void sh_printf(const char *fmt, ...);
 
-/* ---- the shared build-portable global-decode scanner (commands.c owns; entity.c reuses) -----
- * sh_decode_rip_slot scans a sig'd accessor fn's first B2_RIP_SCAN_WINDOW bytes for the FIRST of the
- * four RIP-relative MOV/LEA decode-target opcodes (48 8B 0D / 48 8B 05 / 48 8D 0D / 48 8D 05) and
- * returns the global SLOT address (rip_next + disp32), NOT the dereferenced object. sh_resolve_cmdsys
- * (CmdSystemLea) and sh_resolve_gamemgr (GameMgrLea) BOTH decode through this one helper. sh_safe_read
- * is the SEH-guarded byte copy both decode + deref paths use. */
+/* Decode the first RIP-relative MOV/LEA to RAX/RCX in the accessor window.
+ * Return the slot address, not its object. sh_safe_read guards byte access. */
 #define B2_RIP_SCAN_WINDOW 0x40
 int            sh_safe_read(const uint8_t *src, uint8_t *dst, size_t n);
 const uint8_t *sh_decode_rip_slot(const uint8_t *accessor_fn);
 
-/* Resolve the idCmdSystemLocal* global build-portably from the CmdSystemLea accessor (sig "CmdSystemLea",
- * the engine bot_add/bot_remove registrar): decode its first RIP-relative load opcode
- * (48 8D 0D / 48 8B 0D / 48 8D 05 / 48 8B 05 -- the cmdSystem one is the MOV form 48 8B 0D) to the
- * cmdSystem-global SLOT, then dereference ONCE to get the live object. Returns the live cmdSystem object
- * pointer, or NULL on any failure (logged; the command install then SKIPs gracefully).
- *   results / n   = the resolved signature DB (from sig_resolve_all in dllmain).
- *   module_base   = the DOOM module base (for the *(base+0x55b7280) known-offset FALLBACK).
- */
+/* Resolve cmdSystem via the accessor, an independent global anchor, then the
+ * Vulkan-name-gated pinned slot. Return NULL when no usable object is found. */
 void *sh_resolve_cmdsys(const sig_result *results, size_t n, const uint8_t *module_base);
 
-/* Install the 34 console commands. Idempotent (one-shot latch). Guards add_command && cmdsys && printf;
- * logs a SKIPPED reason and returns 0 on any missing dependency. Each engine call is SEH-guarded.
- *   add_command   = resolved engine AddCommand (sig "AddCommand"; 0 => SKIPPED).
- *   cmdsys        = the idCmdSystemLocal* from sh_resolve_cmdsys (NULL => SKIPPED; commands cannot FIRE).
- *   printf_disp   = resolved engine idCommon dispatch (sig "Printf"; 0 => handlers can't print, SKIPPED).
- *   get_decls     = resolved engine GetDeclsOfType (sig "GetDeclsOfType"); cached for sh_listres
- *                   + the material lookups. May be 0 (those handlers then log they can't run).
- *   module_base   = the DOOM module base; cached so the devmode [15][16] handlers resolve the
- *                   SessionDevModeGetter signature at FIRE (the engine-code patch site) off it.
- * Returns the number of commands registered (0 on SKIP). Emits "B2: registered N/34 console commands".
- */
+/* Register the command table once and cache dependencies. Missing AddCommand,
+ * cmdsys, or Printf returns 0; get_decls may be NULL and its handlers then refuse.
+ * module_base supports on-demand signature lookups. Return the registered count. */
 int sh_commands_install(void *add_command, void *cmdsys, void *printf_disp, void *get_decls,
                         const uint8_t *module_base);
 

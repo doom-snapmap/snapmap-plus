@@ -1,16 +1,6 @@
-/* nav_bake_test.c -- baking the author's marked regions at map load.
- *
- * The resource-name grammar gets the most attention here, and deliberately. A
- * wrong name does not fail loudly: the engine asks for the COOKED spelling
- * first, so a mistake there simply misses, the shipped payload answers, the
- * source name is never requested at all, and the report cheerfully claims to be
- * serving something. That exact bug shipped once already in the shard path,
- * which is why navmesh_test.c pins both spellings with literal strings -- and
- * why the assertions below are literal strings too rather than being built from
- * the same helper the code uses.
- *
- * NO GAME BYTES: the maps are synthesized. See README.md.
- */
+/* Tests marked-region bake planning, resource names and load resets using
+ * synthetic maps. Resource names are independent literals because a wrong
+ * cooked name can silently fall through to shipped navigation. */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,9 +48,8 @@ int sh_config_get_bool(const char *key, int *out_value, unsigned int *out_flags)
     return 1;
 }
 
-/* The engine is not here, so no module has navigation to extend. Every bake
- * therefore refuses at the read-back step, which is the behaviour under test:
- * refusing must be quiet and must not take the map down. */
+/* No engine payload is available; verify that read-back refusal is quiet
+ * and leaves the map usable. */
 static unsigned char *no_shipped_bytes(const char *name, size_t *out_len)
 {
     (void)name;
@@ -208,9 +197,7 @@ static void test_regions_do_not_survive_the_next_map(void)
     json = make_map("ind_dlc/room", 1, 1, 0x1u, 0x1u, owner);
     sh_nav_bake_set_map(json, strlen(json));
 
-    /* Now a map with nothing marked. The previous map's regions must be gone --
-     * this is the failure nobody would attribute: demons routing onto platforms
-     * that are not in the map they are standing in. */
+    /* An unmarked map must clear every region retained from the previous load. */
     g_log_count = 0;
     json = make_map("ind_dlc/room", 1, 1, 0u, 0x1u, owner);
     sh_nav_bake_set_map(json, strlen(json));
@@ -296,22 +283,9 @@ static void test_malformed_map_does_not_take_the_load_down(void)
 }
 
 
-/* ---- the live-editor surface must never be read from inside a bake -------
- *
- * The crash reported as issues #87 and #89. sh_nav_bake_open runs INSIDE the
- * engine's AAS loader -- idDeclSnapMap::BuildAAS (0x4EBFB0) -> idAAS2File::Load
- * -> idAAS2File::LoadBinary -> the resource-provider hook -> here. Reading the
- * live entities from there means calling the engine's EntityClone (0x5A6460) on
- * whatever the editor's map object holds at that instant, and during the Play
- * build transition that is entities whose defsub (cloneBase+0x150) is still
- * NULL. EntityClone null-checks that field at 0x5A6474 and then dereferences it
- * unconditionally at 0x5A649F, so every such entity raises 0xC0000005 reading
- * [NULL+0x40] -- thousands of first-chance faults inside the loader, escalated
- * by the shield to idCommon::Error(6), which is what killed the process.
- *
- * The live read has to happen while the EDITOR is intact, not while the engine
- * is mid-build. So the invariant is structural and is pinned here: an open
- * touches nothing but the plan it was already given. */
+/* Baking runs inside the engine AAS loader, where editor entities can be
+ * partially constructed. Open must use the prepared plan without calling the
+ * live entity serializer; editor-side refresh supplies current state before this. */
 static int g_live_count_calls, g_live_valid_calls, g_live_json_calls;
 
 static int live_count(void *ctx) { (void)ctx; g_live_count_calls++; return 64; }
@@ -362,9 +336,7 @@ static void test_open_never_reads_the_live_editor(void)
     sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL);
 }
 
-/* The other half of the same change: the refresh still has to HAPPEN, just from
- * the editor side. A volume ticked this session must reach the plan without the
- * author saving and reloading the map, which is the reported bad UX. */
+/* Editor-side refresh must include unsaved navigation toggles in the plan. */
 static void test_refresh_live_is_callable_from_the_editor(void)
 {
     const int owner[1] = { 0 };

@@ -1,4 +1,4 @@
-/* nav_play.c -- see nav_play.h for what this is and why it hooks where it does. */
+/* Capture pre-build navigation snapshots and route per-instance AAS loads. */
 #include <windows.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -17,11 +17,10 @@ void backend_log(const char *message);
  * RIP-relative operand, no relative jmp or call). The installer needs >= 14. */
 #define SNAPBUILD_STOLEN 15
 
-/* int(void *, void *, void *) -- three register args and no stack args, read off
- * the call site at 0x4EE428 (RCX=R14, RDX=[RBP+0x900], R8=RDI) and off the
- * prologue, which homes RBX/RSI/RDI into the caller's shadow space rather than
- * reading anything above the frame. The return value IS used: the call site does
- * MOV EBX,EAX immediately after, so the detour must pass it through. */
+/* Three register arguments, no stack arguments; int return must pass through.
+ * The pinned Vulkan call site at 0x4EE428 sets RCX=R14, RDX=[RBP+0x900],
+ * R8=RDI and consumes EAX.
+ */
 typedef int (*snapbuild_fn_t)(void *a, void *b, void *c);
 
 static snapbuild_fn_t g_orig;
@@ -163,11 +162,9 @@ failed:
 
 static int nav_snapbuild_detour(void *a, void *b, void *c)
 {
-    /* The whole reason this hook exists. Guarded and non-fatal: the marks are a
-     * convenience over the map as loaded, and failing to read them must never be
-     * worse than not having read them. A fault here would otherwise land in the
-     * middle of the engine's map build, which is the exact shape of the bug this
-     * replaces. */
+    /* Capture the final snapshot before conversion; contain faults at the
+     * hook boundary.
+     */
     __try {
         sh_nav_bake_build_begin();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -192,9 +189,9 @@ int sh_nav_play_install(void *snapbuild_fn, int status_ok)
         return 0;
     }
     if (!status_ok) {
-        /* Same rule the rawmap swap follows: a prologue that only resolved through
-         * the hook-tolerant fallback is already detoured by somebody else, and
-         * installing over it steals detour bytes rather than the real prologue. */
+        /* Hook-tolerant resolution can point at an existing detour; its bytes
+         * are not a usable prologue.
+         */
         backend_log("NAV: pre-build live read SKIPPED -- SnapMapEditToSnapBuild resolved via "
                     "hook-tolerant fallback (prologue already hooked)");
         return 0;

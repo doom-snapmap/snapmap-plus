@@ -1,4 +1,4 @@
-/* report_scrub_test.c -- pure-logic tests for the crash-report log anonymization scrub + tail. */
+/* Tests bounded crash-report text scrubbing and log-tail selection. */
 #include <assert.h>
 #include <string.h>
 #include <stdio.h>
@@ -37,7 +37,7 @@ int main(void)
 
     /* tail: short buffer -> from 0 */
     assert(rs_tail_offset("abc\ndef\n", 8, 100) == 0);
-    /* tail: cut snaps FORWARD to the next line start (never opens with a torn line) */
+    /* tail: prefer the next complete line when one exists */
     {
         const char *b = "line1\nline2\nline3\n";   /* len 18 */
         size_t off = rs_tail_offset(b, 18, 10);     /* raw cut at 8 = mid "line2" -> snap to 12 */

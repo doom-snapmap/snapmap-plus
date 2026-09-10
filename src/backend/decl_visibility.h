@@ -5,26 +5,17 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Answer the engine's decl-resource existence probe for exactly the identities
- * the dynamic decl server published, and only after the engine's own answer is
- * "no".
+/* Extend a negative native resource-existence probe only for exact identities
+ * in the published decl table. Below map-load state 2, lookup uses the source
+ * catalog; later stages probe generated/decls paths before loading through
+ * the provider.
  *
- * Native source registration is consulted only below map-load state 2. From
- * state 2 upward -- which covers every gameplay map load -- the engine decides
- * whether an absent decl identity exists by asking the decl-resource manager
- * instead, so a lookup with makeDefault=0 refuses identities this process
- * registered and materialized minutes earlier. Answering that one probe lets
- * the engine create and load the decl through the file-system open slot this
- * product already provides.
- *
- * The slot must already hold the pinned method for the supported build, or
- * nothing is installed: a different method would take different arguments and
- * forwarding the wrong shape would corrupt the engine's stack. The two probe
- * paths are retained for diagnostics only. Call this on the engine main thread,
- * after registration has succeeded and before the first gameplay map load.
- *
- * Returns 1 when the hook is installed, 0 on any refusal. Refusal is never
- * fatal to registration: it only means new identities stay editor-only. */
+ * Call on the main thread after successful registration. Installation
+ * requires a clean prologue match equal to the live vtable slot. Diagnostic
+ * probe paths do not affect admission. Returns 1 when installed; refusal
+ * leaves registration intact but may prevent later map-load lookups of new
+ * identities.
+ */
 int sh_decl_visibility_install(const uint8_t *module_base,
                                const char *existing_probe_path,
                                const char *absent_probe_path);

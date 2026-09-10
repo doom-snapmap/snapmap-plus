@@ -1,4 +1,4 @@
-﻿/* palette_refresh_test.c -- per-registration palette rebuild service and exact gating. */
+/* palette_refresh_test.c -- per-registration palette rebuild service and exact gating. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -11,9 +11,8 @@
 #define TEST_EDITOR_SINGLETON_RVA 0x3056748u
 #define TEST_EDITOR_PALETTE_OFF   0x20660u
 #define TEST_EDITOR_INIT_OFF      0x08u
-/* Just "an address in a read-only section" and "an address in an executable section" now -- the
- * service no longer compares either against a recorded RVA, only against the section it lands in.
- * They keep the pinned build's real values so the test image resembles the thing it stands in for. */
+/* Use representative RVAs inside read-only and executable fixture sections;
+ * the gate checks section properties rather than pinned addresses. */
 #define TEST_PALETTE_VTABLE_RVA   0x20499A0u
 #define TEST_BUILDER_RVA          0x54AEE0u
 #define TEST_TEXT_RVA             0x0001000u
@@ -43,9 +42,7 @@ int sh_host_is_pinned_rva_build(void)
     return g_pinned_build;
 }
 
-/* palette-refresh locates the editor singleton through the globals resolver. Here it returns the
- * fake module's singleton, or nothing when g_globals_resolvable is cleared -- which is how the
- * "build we cannot place the singleton on" case is exercised. */
+/* Resolve the fake singleton unless g_globals_resolvable disables it. */
 uintptr_t glb_resolve(const uint8_t *module_base, const char *name, glb_status *out_status)
 {
     if (!g_globals_resolvable || strcmp(name, "editor_singleton") != 0) {
@@ -56,9 +53,7 @@ uintptr_t glb_resolve(const uint8_t *module_base, const char *name, glb_status *
     return (uintptr_t)(module_base + TEST_EDITOR_SINGLETON_RVA);
 }
 
-/* Give the fake module enough of a PE image for the section walk that validates the palette vtable:
- * an executable .text covering the builder and a read-only .rdata covering the palette vtable and
- * the editor singleton. Both shipped DOOM builds have exactly this shape. */
+/* Provide executable builder and read-only vtable sections for the PE checks. */
 static void write_pe_headers(uint8_t *module)
 {
     IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)module;
@@ -126,10 +121,8 @@ static void bind_fake(uint8_t *module)
     g_builder_raises = 0;
 }
 
-/* The builder is admitted on the strength of a CLEAN UNIQUE masked-signature match, which is
- * stronger evidence than RVA equality -- two builds can share an RVA by coincidence, a signature
- * cannot match the wrong function -- and, unlike RVA equality, it survives the second shipped DOOM
- * executable, where every function sits at a different address. */
+/* Accept a clean unique signature result at either supported image's
+ * address; reject hooked status and inconsistent address/RVA pairs. */
 static void test_install_exact_gate(uint8_t *module, int *failed_out)
 {
     int failed = *failed_out;
@@ -199,10 +192,7 @@ int main(void)
     CHECK(sh_palette_refresh_test_call_count() == 1);
     CHECK(g_last_palette == (void *)(module + TEST_EDITOR_SINGLETON_RVA + TEST_EDITOR_PALETTE_OFF));
     CHECK(g_last_progress == NULL);
-    /* A later registration pass rebuilds again. The palette is a catalog DERIVED
-     * from the decl list, so a package installed mid-session extends that list
-     * and the catalog has to be rebuilt from it or the new types stay invisible
-     * to every consumer that searches the catalog by name. */
+    /* Each registration pass must rebuild the palette from the updated decl list. */
     CHECK(sh_palette_refresh_after_decl_registration() == 1);
     CHECK(sh_palette_refresh_test_state() == SH_PALETTE_REFRESH_TEST_APPLIED);
     CHECK(g_builder_calls == 2);
@@ -222,9 +212,7 @@ int main(void)
     CHECK(g_builder_calls == 2);
     CHECK(sh_palette_refresh_test_call_count() == 2);
 
-    /* A refusal is an integrity verdict on the engine objects this service calls
-     * into, so it stays terminal: re-arming must not give a refused process a
-     * second chance to call the native builder. */
+    /* A refused service stays terminal even if its objects later look valid. */
     bind_fake(module);
     setup_editor(module, 0, 0);
     CHECK(sh_palette_refresh_after_decl_registration() == 0);
@@ -235,9 +223,7 @@ int main(void)
     CHECK(sh_palette_refresh_test_state() == SH_PALETTE_REFRESH_TEST_REFUSED);
     CHECK(g_builder_calls == 0);
 
-    /* A palette pointer inside the image but in an EXECUTABLE section is not a vtable. The check
-     * is what the pointer plausibly IS, not which build's address it equals -- the pointer is read
-     * out of the live editor object, so it is already correct for whichever build we are in. */
+    /* Reject an executable-section pointer where a read-only vtable is required. */
     bind_fake(module);
     setup_editor(module, 1, 1);
     *(void **)(module + TEST_EDITOR_SINGLETON_RVA + TEST_EDITOR_PALETTE_OFF) =
@@ -246,9 +232,8 @@ int main(void)
     CHECK(sh_palette_refresh_test_state() == SH_PALETTE_REFRESH_TEST_REFUSED);
     CHECK(g_builder_calls == 0);
 
-    /* The editor singleton is still located by a raw pinned-build DATA RVA with no signature behind
-     * it, so when the resolver cannot place the singleton the service FAILS CLOSED rather than
-     * dereference unrelated memory. A wrong pointer is worse than none: the caller cannot tell. */
+    /* If the globals resolver cannot locate the editor singleton, refuse
+     * without dereferencing a pinned-address fallback. */
     bind_fake(module);
     setup_editor(module, 1, 1);
     g_globals_resolvable = 0;

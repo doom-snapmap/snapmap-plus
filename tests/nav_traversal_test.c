@@ -1,24 +1,6 @@
-/* nav_traversal_test.c -- the universal traversal table and the animation pick.
- *
- * Three things here are worth more than the rest.
- *
- * The DECL NAME is pinned as a literal string rather than being built from the
- * macro the code uses, for the same reason navmesh_test.c pins its two
- * spellings: a wrong resource name fails SILENTLY. The open simply misses, the
- * shipped data answers, and nothing anywhere says so.
- *
- * The TRAVEL FLAG derivation is checked against all nine distinct traversal
- * flag words that occur anywhere in shipped data. One formula reproducing nine
- * independently observed values is the whole basis for believing it, so if it
- * ever stops doing that the formula is wrong -- not the expectations.
- *
- * The decl is the PLAYER'S file, read through the same hook a package can
- * shadow, so a truncated or hostile one must fail closed and must not be read
- * past. The last test puts a table at the very end of a committed page with the
- * next page unmapped, so a single byte of overrun is an access violation.
- *
- * NO GAME BYTES: every table below is synthesized. See README.md.
- */
+/* Tests traversal-table parsing, animation selection and travel flags with
+ * synthetic declarations. Independent resource-name and flag literals guard
+ * the observed format; a guard page checks bounded reads of truncated input. */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,10 +23,8 @@ static int g_checks = 0, g_fail = 0;
 
 /* ---- writing a decl ---------------------------------------------------- */
 
-/* The shipped file is machine-generated idDeclFile: one assignment per line,
- * every brace on its own line, CRLF endings, and NO trailing newline -- its
- * last byte is '}'. The writer below reproduces all of that, because each of
- * those is something a parser can get wrong. */
+/* Match the declaration's line layout: one assignment per line, separate
+ * braces, CRLF endings and no trailing newline. */
 
 static char   g_text[65536];
 static size_t g_len;
@@ -91,10 +71,7 @@ static void dcl_monster(const char *name)
     g_row_index = 0;
 }
 
-/* `offset` carries an x and nothing else -- there is no y and no z anywhere in
- * the shipped file -- and 55 of its 300 rows have no offset block at all, so
- * `has_offset` is a real case and not a synthetic one. `x_scale` is emitted
- * AFTER the offset block, which is also how the shipped file writes it. */
+/* Exercise x-only and absent offsets; x_scale follows the offset block. */
 static void dcl_row(const char *type, const char *path, int has_offset, double x,
                     int has_scale, double x_scale)
 {
@@ -150,10 +127,8 @@ static void write_family(const char *folder, const char *family, const char *ste
     }
 }
 
-/* Imp: everything. Zombie: LEDGE_UP stops at 128, exactly as the shipped table
- * has it. Cyberdemon: nothing at all, and it is not a demon we offer anyway.
- * Mancubus: LEDGE_DOWN only, with no LEDGE_UP rows written at all -- the other
- * way a family can be missing. */
+/* Cover complete families, a 128-unit zombie ledge limit, no cyberdemon
+ * entries, and mancubus LEDGE_DOWN without LEDGE_UP. */
 static void build_table(void)
 {
     dcl_begin();
@@ -234,9 +209,7 @@ static void test_the_roster(void)
     CHECK(sh_trav_monster_at(9) == NULL);
 }
 
-/* Every distinct traversal travel_flags word observed anywhere in shipped data,
- * with the demon its paired animation name identifies. Nine values, one
- * formula: this is the cross-check the derivation rests on. */
+/* Cross-check all nine observed traversal flag values against their animation families. */
 static void test_travel_flags_match_shipped_values(void)
 {
     static const struct { const char *key; unsigned flags; } OBSERVED[] = {
@@ -533,10 +506,8 @@ static void test_malformed_tables_fail_closed(void)
     CHECK(sh_trav_ready() == 0);
 }
 
-/* The decl is not NUL-terminated -- the shipped file's last byte is '}' -- so
- * put one at the very end of a committed page with the next page unmapped. A
- * single byte of overrun is an access violation, which the module's own guard
- * turns into a refusal, so the parse simply stops returning 1. */
+/* End the non-NUL-terminated declaration at a guard page so any overread
+ * faults and the parser must refuse it. */
 static int parse_at_page_end(const char *text, size_t n)
 {
     SYSTEM_INFO si;

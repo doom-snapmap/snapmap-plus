@@ -1,30 +1,9 @@
-/* shield_diag.c -- DIAGNOSTIC build: a catch-all crash + environment logger. See shield_diag.h.
- *
- * WHY THIS EXISTS: a remote end-user's DOOM crashes where the author's does not (works on our box).
- * The backend init completes cleanly in their log, and the recovery shield's VEH (veh.c) deliberately
- * EARLY-OUTS on any fault whose RIP is not inside DOOMx64vk.exe -- it is an in-editor draw-fault
- * recovery handler, not a logger. So a crash in OUR DLL, in a system/runtime DLL, in non-frame engine
- * code, or a fault the shield does not recover leaves NO trace. This module records where the process dies + what was
- * loaded, to sh_diag.log (text) and sh_crash.dmp (a minidump) under <DOOM>\snapmap-plus\logs\.
- *
- * SAFETY (this ships to a stranger -- it must NEVER make the crash worse or hide it):
- *  - Every handler is LOG-ONLY and returns EXCEPTION_CONTINUE_SEARCH; it never edits the CONTEXT.
- *  - The FIRST-CHANCE VEH is loader-lock-safe + stack-light: it records a RAW breadcrumb (code/RIP/
- *    fault, NO module lookup, NO stack walk) so it cannot deadlock on the loader lock and cannot
- *    re-fault a near-exhausted stack. The HEAVY work (module resolution, stack walk, module table,
- *    minidump) runs in the UNHANDLED-exception filter, when the process is already terminating.
- *  - STACK_OVERFLOW is special-cased to a single tiny static write (no big buffers, no walk).
- *  - The UEF chains to the REAL previous top-level filter, guarded so it can NEVER chain to itself
- *    (the bug a review caught: a re-assert that captured our own filter -> infinite self-recursion).
- *
- * COVERAGE LIMIT (documented honestly): a __fastfail / STATUS_STACK_BUFFER_OVERRUN (0xC0000409, e.g.
- * a /GS stack-cookie failure or std::terminate) and many heap-corruption stops (0xC0000374 raised via
- * RtlFailFast) trap straight to the kernel -> WER, bypassing BOTH the VEH and the UEF. Those leave no
- * crash block here. The breadcrumb + the "UEF did not fire" detach line let us INFER that class, and
- * the README tells the user to also grab any %LOCALAPPDATA%\CrashDumps\*.dmp.
- *
- * Compiled ONLY into the diagnostic DLL (build.ps1 -Diag => /DSH_DIAG); NOT in the shipped backend.
- */
+/* Diagnostic-build crash and environment logger (SH_DIAG only).
+ * Handlers preserve exception disposition. Normal first-chance capture keeps
+ * raw breadcrumbs; fatal statuses that reach the VEH and unhandled faults also
+ * attempt module, stack, and dump capture. Stack overflow skips the stack walk.
+ * Direct fail-fast termination can bypass both handlers, so absent records do
+ * not prove a clean exit. Logs and dumps live under snapmap-plus\logs. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -38,7 +17,7 @@
 #pragma comment(lib, "dbghelp.lib")   /* MiniDumpWriteDump */
 
 static char  g_dir[MAX_PATH]      = {0};   /* dir of this DLL (the DOOM root) */
-static char  g_logpath[MAX_PATH]  = {0};   /* g_dir\sh_diag.log */
+static char  g_logpath[MAX_PATH]  = {0};   /* <DOOM>\snapmap-plus\logs\sh_diag.log */
 static volatile LONG g_installed   = 0;
 static volatile LONG g_cxx_logged  = 0;    /* rate-limit first-chance C++-throw logging */
 static volatile LONG g_fc_logged   = 0;    /* rate-limit first-chance crash-class logging */
@@ -54,9 +33,7 @@ static volatile DWORD     g_last_code = 0;
 static volatile ULONG_PTR g_last_rip  = 0;
 static volatile ULONG_PTR g_last_fault = 0;
 
-/* ---------------------------------------------------------------- the diag logger ----------------
- * Independent of backend_log. Smaller stack buffers than a normal logger (a crash handler may run on
- * a tight stack). FILE_FLAG_WRITE_THROUGH so the final lines survive a hard process kill. */
+/* Independent write-through logger with smaller buffers for crash contexts. */
 static void diag_logv(const char *fmt, va_list ap)
 {
     char body[600], line[700];
@@ -84,8 +61,7 @@ static void diag_log(const char *fmt, ...)
     va_list ap; va_start(ap, fmt); diag_logv(fmt, ap); va_end(ap);
 }
 
-/* A pre-formatted, stack-light, loader-lock-free raw line for the FIRST-CHANCE path -- no module
- * lookup, no GetLocalTime formatting churn beyond a tiny buffer. Safe on a near-exhausted stack. */
+/* Raw first-chance breadcrumb without module lookup or stack walking. */
 static void diag_raw(const char *prefix, DWORD code, const void *rip, const void *fault)
 {
     char buf[160];
@@ -101,8 +77,8 @@ static void diag_raw(const char *prefix, DWORD code, const void *rip, const void
     }
 }
 
-/* Resolve an address to "module.dll+0xNNNN". Takes the loader lock -> ONLY call from the UEF / the
- * off-lock env thread, never from the first-chance VEH. Never faults. */
+/* Resolve module+offset for full fatal capture or the environment thread.
+ * This can take the loader lock; ordinary first-chance breadcrumbs avoid it. */
 static void module_for(const void *addr, char *out, size_t cap, uintptr_t *off)
 {
     HMODULE hmod = NULL;
@@ -172,8 +148,7 @@ static void dump_modules(void)
     diag_log("==== %d modules ====", count);
 }
 
-/* Dump the module table at most once on the crash path (so EVERY captured crash carries it even if the
- * timed env dumps never ran -- e.g. an early crash). */
+/* Capture the module table once, including crashes before the timed environment dump. */
 static void dump_modules_once(void)
 {
     if (InterlockedExchange(&g_mods_dumped, 1) == 0) {
@@ -218,7 +193,7 @@ static void dump_env(void)
     dump_modules();
 }
 
-/* ---------------------------------------------------- the HEAVY crash dump (UEF only) ------------- */
+/* Full fatal capture. */
 static void dump_registers(const CONTEXT *c)
 {
     char m[64]; uintptr_t off;
@@ -230,8 +205,8 @@ static void dump_registers(const CONTEXT *c)
     diag_log("  R14=%p R15=%p", (void *)c->R14, (void *)c->R15);
 }
 
-/* Module-level stack walk via the OS unwinder (no dbghelp). Logs each frame as module+offset. Walks a
- * COPY; every read SEH-guarded. Only from the UEF (loader-lock-safe enough: process is terminating). */
+/* Walk a context copy with the OS unwinder and guarded reads. Module lookup
+ * may take the loader lock, so this is limited to full fatal capture. */
 static void stack_walk(const CONTEXT *start, int maxframes)
 {
     CONTEXT c = *start;
@@ -294,9 +269,8 @@ static void log_fault_full(const char *tag, PEXCEPTION_POINTERS ep)
 
 /* ------------------------------------------------------------- the handlers -------------------- */
 
-/* FIRST-CHANCE VEH: stack-light + loader-lock-free. Records a breadcrumb + a raw line; NEVER does
- * module resolution or a stack walk here (those take the loader lock and burn stack). The heavy dump
- * is the UEF's job. Always CONTINUE_SEARCH. */
+/* Keep ordinary first-chance capture small. Fatal statuses below also attempt
+ * full capture if they reach this handler. Always continue exception search. */
 static LONG CALLBACK diag_veh(PEXCEPTION_POINTERS ep)
 {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
@@ -320,12 +294,8 @@ static LONG CALLBACK diag_veh(PEXCEPTION_POINTERS ep)
     g_last_code = code; g_last_rip = (ULONG_PTR)ep->ExceptionRecord->ExceptionAddress;
     g_last_fault = (ep->ExceptionRecord->NumberParameters >= 2) ? ep->ExceptionRecord->ExceptionInformation[1] : 0;
 
-    /* FATAL codes that reach the VEH first-chance but NEVER reach the unhandled-exception filter on x64:
-     * HEAP_CORRUPTION (0xC0000374, raised via RtlReportCriticalFailure -> RtlFailFast) and __fastfail /
-     * STACK_BUFFER_OVERRUN (0xC0000409). The process fast-fails to the kernel, so the UEF (our full dump +
-     * minidump) never runs. Capture the FULL record HERE, ONCE -- the process is dying anyway, so the
-     * loader-lock cost of the module table + stack walk + minidump is acceptable. The stack walk is
-     * heap-free (RtlVirtualUnwind), so it survives even a corrupt heap; the minidump is best-effort after. */
+    /* Some fatal paths bypass the unhandled filter. If their status reaches this
+     * VEH, attempt full capture once. Direct fail-fast can bypass the VEH too. */
     if ((code == 0xC0000374 || code == 0xC0000409) && InterlockedExchange(&g_fatal_captured, 1) == 0) {
         diag_log("############ FATAL first-chance 0x%08lx (bypasses the UEF) -- full capture here ############",
                  (unsigned long)code);
@@ -341,9 +311,7 @@ static LONG CALLBACK diag_veh(PEXCEPTION_POINTERS ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-/* UNHANDLED-exception filter: the definitive "process dying HERE" record. Runs when the process is
- * already terminating, so the loader lock + a full dump are acceptable. Re-entrancy-guarded; chains to
- * the REAL previous filter (guarded so it can never be us -> no self-recursion). */
+/* Capture an unhandled fault once, then chain to the original previous filter. */
 static LONG WINAPI diag_uef(PEXCEPTION_POINTERS ep)
 {
     LPTOP_LEVEL_EXCEPTION_FILTER prev = g_prev_uef;
@@ -364,10 +332,8 @@ static LONG WINAPI diag_uef(PEXCEPTION_POINTERS ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-/* Off the loader lock: emit the banner, dump the environment twice (boot + editor-up), and RE-ASSERT
- * the UEF frequently for the first ~30s (the engine may install its own filter during bring-up).
- * CRITICAL: the re-assert must NOT capture our own filter back into g_prev_uef (that was the recursion
- * bug) -- we discard SetUnhandledExceptionFilter's return here. */
+/* Dump the environment outside the loader lock and reassert the filter through
+ * startup. Do not replace g_prev_uef with the reassertion's return value. */
 static DWORD WINAPI env_thread(LPVOID p)
 {
     int i;
@@ -382,18 +348,15 @@ static DWORD WINAPI env_thread(LPVOID p)
     diag_log("======== ENVIRONMENT DUMP #1 (boot) ========");
     dump_env();
 
-    /* re-assert our UEF every ~1.5s for ~30s -- editor bring-up is exactly when the engine is likely
-     * to install its own top-level filter and displace ours. Discard the return (never reassign). */
+    /* Reassert for about 30 seconds without capturing our own filter as previous. */
     for (i = 0; i < 20; i++) { SetUnhandledExceptionFilter(diag_uef); Sleep(1500); }
 
     diag_log("======== ENVIRONMENT DUMP #2 (editor should be up) ========");
     dump_modules();
     SetUnhandledExceptionFilter(diag_uef);
 
-    /* DIAG SELF-TEST (opt-in): if a sentinel file sits next to the DLL, deliberately fault HERE -- post
-     * init, like the end-user's crash -- so we can verify the crash-capture path (the UNHANDLED block +
-     * the minidump + the no-self-recursion fix) end-to-end on a box that does not otherwise crash. It
-     * NEVER fires for a real user (there is no sentinel in a shipped layout). Delete the sentinel after. */
+    /* Opt-in crash test: a diag_selftest_crash file beside the DLL triggers a
+     * null write after startup. Remove the sentinel when the test is complete. */
     {
         char sentinel[MAX_PATH];
         _snprintf_s(sentinel, sizeof sentinel, _TRUNCATE, "%s\\diag_selftest_crash", g_dir);
@@ -413,7 +376,7 @@ void shield_diag_install(HINSTANCE self)
     HANDLE h;
     if (InterlockedExchange(&g_installed, 1)) return;
 
-    /* g_dir = dir of this DLL; g_logpath = g_dir\sh_diag.log. Cheap, no I/O under the loader lock. */
+    /* Resolve the DLL directory; the log path is created below. */
     len = GetModuleFileNameA((HMODULE)self, path, MAX_PATH);
     if (len == 0 || len >= MAX_PATH) { g_dir[0] = '\0'; strcpy_s(g_logpath, MAX_PATH, "sh_diag.log"); }
     else {
@@ -426,14 +389,12 @@ void shield_diag_install(HINSTANCE self)
         _snprintf_s(g_logpath, MAX_PATH, _TRUNCATE, "%s\\snapmap-plus\\logs\\sh_diag.log", g_dir);
     }
 
-    /* Install crash catchers immediately (loader-lock-safe APIs). Capture the previous UEF EXACTLY
-     * ONCE here -- env_thread re-asserts without ever overwriting g_prev_uef. */
+    /* Capture the previous filter once; later reassertions must not replace it. */
     AddVectoredExceptionHandler(1 /* first-in-chain */, diag_veh);
     g_prev_uef = SetUnhandledExceptionFilter(diag_uef);
     if (g_prev_uef == diag_uef) g_prev_uef = NULL;   /* belt: never chain to ourselves */
 
-    /* one tiny write so an early crash (before env_thread runs) still shows the diagnostic was armed.
-     * A single CreateFile/WriteFile is the minimum loader-lock exposure; OutputDebugString is deferred. */
+    /* Write an early arming marker before the environment thread starts. */
     h = CreateFileA(g_logpath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                     OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
     if (h != INVALID_HANDLE_VALUE) {
@@ -450,8 +411,9 @@ void shield_diag_detach(void)
     if (g_in_uef) {
         diag_log("DLL_PROCESS_DETACH after an unhandled exception => CRASH (see the UNHANDLED block + sh_crash.dmp)");
     } else if (g_last_code) {
-        /* the UEF never fired but a crash-class fault WAS seen first-chance -> likely a __fastfail /
-         * heap-stop that bypassed the UEF, OR our filter was displaced. The breadcrumb is the lead. */
+        /* A first-chance breadcrumb without a filter record is inconclusive: a
+         * handler may have caught it, the filter may be displaced, or termination
+         * may have bypassed the filter. */
         diag_log("DLL_PROCESS_DETACH: no UEF fired, but last first-chance crash-class was code=0x%08lx rip=0x%llx fault=0x%llx "
                  "(if DOOM crashed, suspect a __fastfail/heap-stop that bypasses the filter -- also grab %%LOCALAPPDATA%%\\CrashDumps\\*.dmp)",
                  (unsigned long)g_last_code, (unsigned long long)g_last_rip, (unsigned long long)g_last_fault);

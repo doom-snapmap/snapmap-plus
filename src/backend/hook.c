@@ -1,12 +1,5 @@
-/* hook.c -- see hook.h. The Snapmap+ backend's reversible inline-detour installer.
- *
- * Port of OG FUN_180001790 (truth snaphak/hook-install-mechanism.md), abs-jmp variant. The caller
- * supplies `stolen` (the count of whole, position-independent prologue bytes) -- we copy them to an
- * executable trampoline, append an abs jmp back into the original past the patch, record the originals
- * in the un-patch list, then overwrite the target's prologue with [abs jmp -> detour][NOP padding].
- * No length-disassembler: the target's prologue boundary + PI-ness are verified up front per call site
- * (the feature ops carry the per-target stolen count; the signature DB pins the targets).
- */
+/* Reversible 14-byte absolute detours. Callers choose the stolen-byte count;
+ * this module neither decodes nor relocates instructions for its trampolines. */
 #include <windows.h>
 #include <stdint.h>
 #include <string.h>
@@ -19,9 +12,7 @@ static void write_absjmp(uint8_t *p, void *dest)
     *(uint64_t *)(p + 6) = (uint64_t)dest;     /* the absolute 8-byte target follows inline */
 }
 
-/* The un-patch list (OG's DAT_18003e588 chain). One record per installed patch; kept so every hook is
- * reversible. A fixed table (not new[]) keeps DllMain-thread install allocation-free; 64 >> the
- * ~36-patch backend spine. */
+/* Fixed records retain original bytes and trampoline ownership until unpatch. */
 #define MAX_PATCHES 64
 typedef struct patch_record {
     void   *target;            /* engine fn whose prologue we overwrote */
@@ -40,7 +31,7 @@ void *install_inline_hook(void *target, void *detour, size_t stolen)
 
     patch_record *rec = NULL;
     for (int i = 0; i < g_patch_count; i++) {
-        if (!g_patches[i].live) { rec = &g_patches[i]; break; }   /* reuse a reverted slot */
+        if (!g_patches[i].live) { rec = &g_patches[i]; break; }
     }
     if (!rec) {
         if (g_patch_count >= MAX_PATCHES) return NULL;
@@ -50,15 +41,15 @@ void *install_inline_hook(void *target, void *detour, size_t stolen)
     uint8_t *tramp = (uint8_t *)VirtualAlloc(NULL, stolen + 14, MEM_COMMIT | MEM_RESERVE,
                                              PAGE_EXECUTE_READWRITE);
     if (!tramp) return NULL;
-    memcpy(tramp, target, stolen);                              /* the original prologue ... */
-    write_absjmp(tramp + stolen, (uint8_t *)target + stolen);   /* ... then continue in the original */
+    memcpy(tramp, target, stolen);
+    write_absjmp(tramp + stolen, (uint8_t *)target + stolen);
 
     DWORD old;
     if (!VirtualProtect(target, stolen, PAGE_EXECUTE_READWRITE, &old)) {
         VirtualFree(tramp, 0, MEM_RELEASE);
         return NULL;
     }
-    memcpy(rec->orig, target, stolen);   /* record the originals BEFORE overwriting */
+    memcpy(rec->orig, target, stolen);
     rec->target = target;
     rec->tramp  = tramp;
     rec->stolen = stolen;
@@ -66,7 +57,7 @@ void *install_inline_hook(void *target, void *detour, size_t stolen)
 
     uint8_t patch[48];
     write_absjmp(patch, detour);
-    if (stolen > 14) memset(patch + 14, 0x90, stolen - 14);     /* NOP the leftover partial instr (dead) */
+    if (stolen > 14) memset(patch + 14, 0x90, stolen - 14);     /* Pad the overwritten region after the jump. */
     memcpy(target, patch, stolen);
     VirtualProtect(target, stolen, old, &old);
     FlushInstructionCache(GetCurrentProcess(), target, stolen);
@@ -99,7 +90,7 @@ int hook_unpatch(void *tramp)
 int hook_unpatch_all(void)
 {
     int n = 0;
-    for (int i = g_patch_count - 1; i >= 0; i--)   /* LIFO, mirroring OG's list walk */
+    for (int i = g_patch_count - 1; i >= 0; i--)   /* Walk records in reverse slot order. */
         if (g_patches[i].live) n += revert_record(&g_patches[i]);
     return n;
 }

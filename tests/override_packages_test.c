@@ -1,17 +1,5 @@
-/* override_packages_test.c -- the file shadow resolves a decl out of ANY
- * installed package, not just the pre-package shared tree.
- *
- * The engine only ever asks for a decl by its canonical virtual name,
- * `generated/decls/<type>/<name>.decl`. Before packages that mapped one-to-one
- * onto `overrides\generated\decls\...`, so a straight join of the name onto the
- * overrides root was the whole resolver. A package owns its own root
- * (`overrides\cyberdemon\decls\...`), so that join can never reach it and the
- * package's decl bodies are silently never served -- the engine parses an empty
- * default instead, which is what left the Cyberdemon out of the Toybox.
- *
- * These tests pin the resolver: the legacy tree still resolves where it always
- * did, every package is reachable at any depth, and a package can serve nothing
- * outside its own `decls` subdirectory. */
+/* Tests virtual resource lookup across legacy overrides and nested package
+ * roots. Packages may serve declarations only from their own decls directory. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -30,9 +18,7 @@ static int g_failed;
     }                                                                           \
 } while (0)
 
-/* The resolver is the only thing under test here, so the rest of the overrides
- * layer's collaborators are stubbed. The user layer is reported ON because a
- * disabled user layer is a separate contract, already covered elsewhere. */
+/* Stub unrelated override services and enable the user layer for lookup tests. */
 void backend_log(const char *message)
 {
     (void)message;
@@ -157,10 +143,7 @@ static int ends_with_ci(const char *value, const char *suffix)
 }
 
 
-/* The overlap reporter, stubbed. This suite is about resolution and the provider
- * table; WHICH packages overlap is package_conflicts_test's subject, and pulling
- * its filesystem walk in here would make these cases depend on a tree they do
- * not build. */
+/* Stub overlap reporting; package_conflicts_test covers its filesystem scan. */
 int sh_pkg_conflicts_report(const char *data_root) { (void)data_root; return 0; }
 
 int main(void)
@@ -200,9 +183,7 @@ int main(void)
          "overrides\\cyberdemon\\shaders\\generated\\renderprogs\\cyberdemonshockwave_pc_vulkan.bin");
     CHECK(write_file(path, "blob-bytes"));
 
-    /* A package shipping its own Toybox tile icon: the material is an ordinary decl, and
-     * the pixels it names live under images\\. Both halves have to be servable or the
-     * tile draws black, which is exactly what shipping only the material produced. */
+    /* A package tile needs both its material declaration and image resource. */
     join(path, sizeof(path), root,
          "overrides\\cyberdemon\\images\\textures\\guis\\snapmaps\\entity_icons\\demons\\cyberdemon_enc.bimage");
     CHECK(write_file(path, "bimage-bytes"));
@@ -269,10 +250,7 @@ int main(void)
     CHECK(ends_with_ci(resolved,
                        "\\overrides\\cyberdemon\\shaders\\generated\\renderprogs\\cyberdemonshockwave_pc_vulkan.bin"));
 
-    /* 9b. A package's tile IMAGE resolves. Images were the one content class with no
-     *     package route, so a package could ship a Toybox material but never the pixels
-     *     behind it. The prefix is stripped here, unlike shaders: every engine image name
-     *     starts with the same constant, so repeating it in each package buys nothing. */
+    /* Package images omit the shared engine image prefix from their on-disk path. */
     CHECK(sh_overrides_test_resolve_existing(
               "generated/image/textures/guis/snapmaps/entity_icons/demons/cyberdemon_enc.bimage",
               resolved, sizeof(resolved)));

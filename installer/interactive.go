@@ -13,10 +13,8 @@ import (
 
 var stdin = bufio.NewReader(os.Stdin)
 
-// interactiveMain is the double-click / no-args experience: a status-aware prompt. Not installed ->
-// Enter installs (the one-keypress first run). Installed with a newer release available -> an update
-// notice, Enter updates. Either way it then drops into a command prompt, so update / uninstall /
-// changelog / status all work from a double-click -- no terminal or PATH needed.
+// interactiveMain opens the no-argument prompt. Enter installs when absent or
+// updates when a newer release is known; named commands remain available.
 func interactiveMain() {
 	fmt.Println("Snapmap+", version)
 	fmt.Println()
@@ -56,9 +54,7 @@ func interactiveMain() {
 	commandLoop(enter)
 }
 
-// enterDefault is the command a bare Enter runs at the interactive prompt: "install" when not
-// installed, "update" when a release newer than the installed one is known, "" otherwise (Enter just
-// re-prompts). Pure so it is unit-testable.
+// enterDefault selects install, update, or no action for a bare Enter.
 func enterDefault(installed bool, installedVersion, latestTag string) string {
 	if !installed {
 		return "install"
@@ -100,9 +96,7 @@ func commandLoop(enterCmd string) {
 	}
 }
 
-// splitArgs tokenizes an interactive command line, honoring double quotes so paths with spaces work
-// (install --doom "C:\Program Files (x86)\Steam\steamapps\common\DOOM"). Quote characters delimit;
-// they never become part of a token. Pure so it is unit-testable.
+// splitArgs keeps double-quoted paths together and removes their delimiters.
 func splitArgs(line string) []string {
 	var out []string
 	var cur strings.Builder
@@ -130,9 +124,8 @@ func splitArgs(line string) []string {
 // noticeClient bounds the best-effort update check -- a double-click must never hang on a dead network.
 var noticeClient = &http.Client{Timeout: 5 * time.Second}
 
-// latestDefaultTag returns the tag a no-flags update would install (the newest stable release, else the
-// newest beta while no stable exists), or "" when it can't be determined quickly (offline, rate-limited).
-// Purely informational: a "" simply means no update notice is shown.
+// latestDefaultTag returns the default release tag, or an empty string when
+// the bounded update check fails. Failure suppresses only the notice.
 func latestDefaultTag() string {
 	req, err := http.NewRequest("GET", "https://api.github.com/repos/"+repoSlug+"/releases?per_page=30", nil)
 	if err != nil {

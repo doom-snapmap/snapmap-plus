@@ -1,13 +1,6 @@
-/* imgpreview.h -- the SECOND preview producer: plain (non-megatexture) materials and direct images.
- *
- * megapreview.c serves the 5,033 materials that have a `.vmtr` atlas rect. This serves the rest,
- * which render fine in game but are backed by ordinary image assets in the `.index`/`.resources`
- * containers, plus image names selected directly in the Assets browser. Together the material
- * routes cover ~84% of the ~9,805-material catalog; the remainder are decals and particles baked
- * into shared atlases, which need a third route.
- *
- * Read-only against the shipped containers, and no engine call at all: DEFLATE and BCn are public
- * formats, unlike the megatexture page codec which had to be called rather than reimplemented.
+/* File-based previews for materials and direct images. Resolve installed
+ * index/resource records, then decode DEFLATE and BCn on the CPU. This
+ * complements the VMTR atlas route and never changes game files.
  */
 #ifndef BACKEND_IMGPREVIEW_H
 #define BACKEND_IMGPREVIEW_H
@@ -34,10 +27,10 @@ int sh_imgpreview_produce_image(const char *name, unsigned long generation);
  * parsing; the Wwise sound union and decl-less .vmtr material union are loaded only for those kinds. */
 int sh_imgpreview_list(int kind, unsigned start, char *out, size_t cap);
 
-/* Does a decl of this SH_ASSET_* type with this exact name exist in the shipped containers? The
- * answer comes from our own index, never from the engine: the engine's by-name decl find is a
- * find-OR-CREATE that fatals on a bad name, so it can only be called with a name already known to
- * be good. sh_soundpreview_play is the caller that needs this. Returns 1 if present. */
+/* Check a selectable name against the installed catalog without calling the
+ * engine. Use this before native find-or-create lookups, whose missing-name
+ * behavior can raise an engine error. Returns 1 when indexed.
+ */
 int sh_imgpreview_has(int kind, const char *name);
 
 /* Internal cooked-geometry record kind. It is intentionally outside SH_ASSET_*: baseModel rows are

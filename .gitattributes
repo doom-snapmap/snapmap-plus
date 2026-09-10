@@ -1,7 +1,5 @@
-# Go source MUST be LF: `gofmt -l` flags CRLF, and CI runners check out with autocrlf (which would otherwise
-# make the .go files CRLF and fail the installer's gofmt gate). Force LF for Go regardless of platform.
+# Keep Go source in LF form so gofmt passes on Windows checkouts.
 *.go text eol=lf
 
-# Workflow YAML MUST be LF too: release.yml has a `shell: bash` step, and CRLF (from autocrlf checkout) would
-# put stray \r into the bash script -- breaking `set -euo pipefail` and the tag comparisons. Force LF.
+# Embedded Bash scripts require LF even when Git uses autocrlf.
 *.yml text eol=lf

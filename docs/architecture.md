@@ -140,7 +140,9 @@ deadlocks the engine's command-system lock). Replicate the pump. Two thread fact
   DOOM's main thread** — the engine treats it as foreign (issue #61). Decl-edit commits issued from
   it (`apply_sync` `+0x290`) are marshaled by the backend onto the engine's thread through the
   `clone_bss_apply` command-buffer drain, with the caller blocking (normally one frame) for the
-  synchronous applied count.
+  synchronous applied count. If the main-thread identity or marshal transport
+  is unavailable, the current implementation retains an inline compatibility
+  fallback; it is not an unconditional main-thread guarantee.
 - The SnapStack subcommands no longer run on this drain at all: the `sh` console dispatch executes
   them inline on DOOM's main thread at the engine's command-exec point (see
   [`fidelity.md`](fidelity.md)'s sanctioned divergence). The `+0x1a0` drain still runs every tick —
@@ -185,10 +187,10 @@ explicit `idMemLocal::PushHeap(0)` / `PopHeap()` pair.** Everything else is fine
 and destroyed within one call cannot outlive its heap, and objects that genuinely belong to the map
 *should* die with it.
 
-Today exactly one thing we build outlives its call: the prefab staged into `editor+0x209a8` by
-`ae_mkcmd_one`. Every other engine ctor in the backend is paired with its dtor in the same function. That
-one site is scope-pushed; see [`backend-changes.md`](backend-changes.md) for the failure it caused before
-it was, and doom-re `docs/truth/engine/memory-heaps-and-allocator.md` for the engine-side derivation.
+Prefab staging in `ae_mkcmd_one` and declaration commits in `ae_apply_one` use
+an explicit process-heap scope because their allocations can outlive the map.
+Temporary engine objects still require their matching destructors. See the
+heap helpers and lifetime checks in `src/backend/apply_engine.c`.
 
 Two properties of the mechanism worth knowing before using it:
 
@@ -207,12 +209,12 @@ include that header** — it is a matched pair. The backend writes the vtable an
 frontend reads them at the same offsets.
 
 - The backend builds it (`operator_new(0x60)`), installs the vtable — the **77 original-faithful
-  slots** (`+0x00..+0x260`) plus the **clone-extension slots** appended after them (`+0x268..+0x318`
-  today, `sizeof(sh_iface_vtbl) == 0x320`: the atomic class+inherit apply, the class/inherit
+  slots** (`+0x00..+0x260`) plus the **extension slots** appended after them (`+0x268..+0x320`,
+  `sizeof(sh_iface_vtbl) == 0x328`: the atomic class+inherit apply, the class/inherit
   enumerators, the dev-layer query, the wire-edit generation counter, the synchronous `apply_sync`,
   the timeline inherit-normalize, push/clear-stack, the generic configuration getter/setter, and the
   asset-browser group — preview request/publish, request-by-name, the material atlas rect, the
-  catalog pager, sound preview/session, and prefab model resolution/mesh transport) — initializes the mutex at `+0x08`, and hangs a
+  catalog pager, sound preview/session, and prefab model, mesh and scale-default lookup) — initializes the mutex at `+0x08`, and hangs a
   sub-object off `+0x58` that holds the SnapStack subcommand map and the work-queue (drained by the
   frontend's worker thread; producer-less since the `sh` dispatch moved inline onto the engine's
   thread — see "The 30 Hz manual think-loop").
@@ -246,319 +248,6 @@ handful of validated scalars and not for unbounded data a user grows themselves.
 bytes and parses none of them; shape and validation live in the UI, the only side that knows what a
 pin means. See [`capabilities.md`](capabilities.md#persistent-settings).
 
-The backend is the sole owner of `%LOCALAPPDATA%\snapmap-plus\config.json`; the installer does not
-generate, parse, or replace it. `sh_config_init` runs after the common per-user directories are available
-and creates this version-1 document when the file is absent:
-
-```text
-config init -> immutable user-overrides snapshot -> resource-shadow install
-            -> sparse installed-resource snapshot -> command-system install
-            -> combined local/linked decl-server snapshot
-            -> one private main-thread registration command
-```
-
-The snapshot makes the user-file layer stable for that DOOM process; the setting is changed for a later
-launch, not as a live resource-loader switch.
-
-## Override packages
-
-An override package is one directory below `overrides/` holding its own content, marked by a `package.json`:
-
-```
-overrides/cyberdemon/package.json
-overrides/cyberdemon/decls/<type>/<logical-name>.decl
-overrides/cyberdemon/resources/<name>.manifest
-overrides/cyberdemon/requirements/<name>.requirements
-overrides/cyberdemon/strings/<name>.json
-overrides/cyberdemon/hud/weapons.json
-overrides/cyberdemon/shaders/generated/spirv/<name>.{vspv,fspv,cspv}
-overrides/cyberdemon/shaders/generated/renderprogs/<name>_pc_vulkan.bin
-```
-
-Installing is copying the folder in; uninstalling is deleting it. There is no compile, staging or merge step:
-DOOM never sees this layout, so the four consumers below each read N package roots instead of one shared root.
-Nothing is duplicated on disk, no generated copy can go stale, and no package can leave artefacts behind after
-its folder is gone.
-
-A directory *without* a `package.json` is not a package -- it is a grouping folder, and the search continues
-inside it. Users can therefore organise their installs to any depth (up to 8) without anything being compiled:
-
-```
-overrides/editor/lifts/package.json          -> package "editor/lifts"
-overrides/editor/toybox/package.json         -> package "editor/toybox"
-overrides/demons/hell/imps/package.json      -> package "demons/hell/imps"
-```
-
-A package is a leaf; the search never descends into one, so a package cannot contain another and its own
-subdirectories always mean what the layout above says. Inside `decls/` the path *is* the decl's identity
-(`decls/<type>/<logical-name>.decl`), so extra organisation belongs in the grouping folders above a package,
-not inside it. A package's identity is its full path below `overrides/`, so two groups may hold like-named
-packages. Scratch and notes folders are safe to keep alongside; `shader_includes/` is reserved for the file
-shadow and is never searched. Packages are read in case-insensitive name order so two machines see the same
-order, and an enumeration that could not complete -- unreadable subtree, over 64 packages, deeper than 8 --
-refuses rather than running on a partial set.
-
-### Packages compose; only disagreements are refused
-
-Two packages overlapping is the normal case, not an error -- shared gore, FX and animation assets belong to no
-single demon, and a package that vendors its own prerequisites is being self-contained, not wrong. So the same
-rule applies at every layer:
-
-| Layer | Two packages ship the same thing | They ship *different* things under one name |
-|---|---|---|
-| Decls | Byte-identical decls compose: the first copy serves the identity, the rest collapse (`decl-server COMPOSED`) | Refused, naming the packages that disagree |
-| Resource manifests | Identical rows compose into one served entry | Refused, naming both provider rows |
-| Requirements | The first request queues the command, the rest compose into it -- so `g_useResourceBlackList 0` asked for by three packages is issued once | A different value for an allowlisted name is refused |
-| Strings | Identical text for one `#str_` id composes into one row | Refused, naming both packages; the first definition stands |
-
-Nothing overwrites anything and nothing wins by ordering. A package never has to know which other packages are
-installed, and a genuine conflict fails closed with a diagnostic naming who conflicted rather than silently
-handing the player the wrong asset.
-
-Requirements are owned by the package, not by Snapmap+. Snapmap+ ships only a tiny allowlist of settings a
-package is *permitted* to ask for; it sets nothing on its own. The cut-content blacklist cvars the Cyberdemon
-needs live in `overrides/cyberdemon/requirements/cyberdemon.requirements`, so uninstalling that package removes
-the request with it.
-
-The pre-package layout -- a single shared `overrides/generated` tree -- is no longer a package. Installing or
-updating migrates it into `overrides/my-overrides`, a real package with its own marker, and a fresh install
-gets that folder empty so there is an obvious place to drop your own content. The move never overwrites and
-removes the old tree only once every file is verified present at the new location.
-
-That migration does not change which bytes the engine can be served, because the root file shadow below is a
-separate path from package resolution.
-
-### Weapon HUD policy
-
-Packages may declare exact weapon-to-ammo-display mappings in `hud/weapons.json`.
-The bounded, strictly parsed table is captured at startup and during package
-re-arm; identical requests compose and disagreements refuse the HUD table.
-One portable, verified ammo-widget call uses the table without modifying game
-mode, ammunition or declarations. It preserves engine behavior for unlisted
-weapons and when overrides are disabled or validation fails.
-See [weapon-hud.md](weapon-hud.md) for the schema, lifecycle and client limits.
-
-### The file shadow resolves across packages too
-
-The decl server publishes an identity, but the bytes the engine parses come from the file shadow, and the
-engine only ever asks for a decl by its canonical virtual name -- `generated/decls/<type>/<name>.decl`. Before
-packages that mapped one-to-one onto `overrides/generated/decls/...`, so joining the requested name onto the
-overrides root *was* the resolver. A package owns its own root, so that join can never reach it: DOOM has no
-idea `overrides/cyberdemon/` exists and will never ask for `cyberdemon/decls/...`.
-
-So a request is resolved against the overrides root first -- `overrides/<engine name>`, the plain file shadow,
-which serves ANY engine resource and is how a loose file dropped in the overrides root still works -- and
-then, for the namespaces in the table above, against each installed package as `<package root>/decls/<rest>`,
-in the same deterministic order. Only that one namespace is package-resolved,
-and only a package's own `decls/` subdirectory, so a package can never expose its `package.json` as an engine
-resource. The package set is captured once at install, because this sits on the engine's file-open path.
-
-Without this the failure is silent and total: the identity registers, the engine opens nothing, and the parse
-yields an empty default -- which for a `snapEditorEntityDef` means no resolved `entityDef`, a rejection by the
-native palette validator, and a terminal materialization failure that refuses every decl behind it.
-
-The same resolution serves a package's shaders. A render program is an ordinary decl type, so its
-`decls/renderprog/<name>.decl` needs nothing new; but the compiled module is opened separately, by the engine
-name `generated/spirv/<name>.{vspv,fspv,cspv}`, and its pre-translated source blob as
-`generated/renderprogs/<name>_pc_vulkan.bin`. Both go through the same provider slot this layer hooks, with a
-mode the hook admits. Under `shaders/` the package path mirrors the engine name verbatim, so a package can
-carry a genuinely new render program and still uninstall by deleting its folder -- and two packages shipping
-different programs can never address the same file, because the program name is part of the resource name.
-
-Only the namespaces in that table are package-resolved, and each only out of the subdirectory named for it.
-Everything else a package contains stays unreachable to the engine.
-
-### A package names its own content
-
-The editor labels an entity through the engine's `idLangDict`, so a decl's `displayNameTag` is only ever a
-`#str_` id -- and until packages could carry strings, the single place to define one was the user's global
-`strings/strids.json`. A package that added an entity therefore had no way to name it without the user
-hand-editing a document every other package also shared. That is the exact namespace collision packages
-exist to remove, and it is why the Cyberdemon's Toybox tile shipped showing the Baron's description.
-
-A package now carries `strings/<name>.json`, a flat `{ "id": "text" }` map, injected on the engine's first
-string-table sort. The order is the user's own document, then every installed package, then Snapmap+'s baked
-defaults: the user's explicit value still outranks a package's, and a package shipping a key we also bake is
-deliberately replacing our fallback. A key is never appended twice -- a duplicate corrupts the engine's
-sorted-by-hash dictionary and makes lookups collapse onto the wrong text.
-
-Prefer an id the game already ships when one exists: it is localized in every language the game supports,
-where a string a package carries is only as translated as its author made it. The Cyberdemon package uses
-the game's own codex text for that reason.
-
-## Existing shadows versus genuinely new decls
-
-The two mechanisms deliberately share one user setting and one data root, but solve different engine
-problems:
-
-| Path | Trigger | Result |
-|---|---|---|
-| Ordinary file shadow | DOOM requests an already-registered source path | The resource loader receives the user's bytes instead of the packaged bytes. |
-| Installed resource bridge | Startup resolves `overrides/<package>/resources/*.manifest` against the installed base-game pindex; DOOM later requests an admitted virtual path | Snapmap+ reads and decodes that exact slice from the user's installed archive into an in-memory stream. |
-| Dynamic decl server | Startup combines `overrides/<package>/decls/<type>/...*.decl` with linked game-owned decls; one main-thread command later excludes existing identities | The absent set is copied into an immutable exact `decltree/<type>/<logical-name>.decl` table, each source is submitted once to DOOM's native decl scanner, and missing `snapEditorEntityDef` objects are materialized before the derived palette rebuild. |
-| Package requirements | Startup validates `overrides/<package>/requirements/*.requirements`; the backend tick waits for engine `load_state == RUNNING` | Product-audited, idempotent cvar requirements are queued once per process. Arbitrary console text is refused. |
-
-The installed resource bridge is a sparse read-only source, not a virtual archive build. Each non-comment manifest
-line is exactly three tab-separated fields: decl/resource type, logical name, and installed virtual path. An empty
-third field uses the logical name as the provider path for the small number of pathless records. Snapmap+ parses the
-user's installed `gameresources.pindex`. Multiple unique provider paths may share one type/name identity for
-compiled resource bundles. Repeated exact triples collapse only when their selected metadata and stored payload
-bytes are identical; divergent or over-cap repeats refuse the whole snapshot. Snapmap+ validates the selected archive,
-offset, stored size, decoded size, provider-path uniqueness, and complete manifest bounds, then retains only the
-selected metadata. It opens `gameresources.resources` and `gameresources.patch` read-only and decodes a selected
-slice only when DOOM asks for that virtual path. The package contains no copied game payload bytes, and Snapmap+
-never rewrites, stages, or replaces a pindex, archive, `.verify` file, executable, or game-side manifest.
-
-Manifests are first-level regular files, capped at 64 files, 1 MiB each, 4 MiB total, and 4,096 exact resources.
-Each decoded resource is capped at 64 MiB and the declared snapshot at 256 MiB. Duplicate provider paths,
-unresolved rows, divergent exact-row repeats, traversal, non-ASCII fields, malformed pindex data, archive
-bounds failures, compressed slices with no decoded bytes, incomplete/truncated/reserved DEFLATE
-streams, nonzero alignment padding, trailing bytes after BFINAL or a sync-flush marker, concatenated streams,
-or unexpected enumeration/read errors refuse the whole linked snapshot. A selected compressed slice must contain
-one complete raw-DEFLATE stream ending in BFINAL, or the Doom archive's Z_SYNC_FLUSH form ending at an exact
-non-final empty stored block (`LEN=0`, `NLEN=0xffff`); its pindex `zsize` is an exact boundary, not a
-concatenated-stream container. Capture is a one-shot `NEW -> INSTALLING -> READY` publication: readers see no
-snapshot while validation is in progress, and any refusal is terminal for that process. There is no partial
-admission, fallback pindex, watcher, retry, or hot reload. On a matched resource read/decode failure, the hook
-does not silently ask the engine for a different same-named row.
-
-The dynamic path reuses the existing resource hook, but publishes a table of exact per-decl resources rather
-than inventing an aggregate source. Discovery combines local generated decls with the linked `.decl` subset
-after the resource bridge is proven ready. A same-identity local file deliberately wins over its linked
-game-owned source, which lets a package patch selected dependencies without redistributing the originals.
-Discovery, bounded structural validation, and dependency ordering happen on the backend bootstrap thread,
-producing an immutable in-memory launch snapshot. Admission remains based on the complete deterministic
-type/name/source ordering. Within that admitted set, a uniquely resolved logical name appearing as a quoted
-value creates a dependency edge, so referenced decls are registered before their consumers. Comments,
-escaped values, ambiguous names, and external identities do not create edges; independent entries remain
-stable and cycle members retain their admission order. Snapmap+ registers one private engine command, waits
-for `load_state == RUNNING`, and queues it through `BufferCommandText` after any admitted package requirements.
-DOOM drains the ordered command buffer at its command-exec point on the main thread. That thread resolves each
-short decl type through the registry's `+0x58` method and calls the clean signature-resolved `DeclSourceFind`
-first. A non-null source record is classified `SHADOWED` without calling `DeclFind`; only when the source lookup
-returns null does the command use `DeclFind(..., makeDefault=0)` as a live-object fallback. Existing source/live
-identities are `SHADOWED` and excluded; unsupported types are `REFUSED`; absent identities are `MISSING`. An
-exception from either native lookup is terminal and prevents table publication.
-
-After classification, Snapmap+ copies every `MISSING` candidate's validated single brace body into an immutable
-process-lifetime table keyed by the exact lower-case provider name `decltree/<type>/<logical-name>.decl`.
-The provider checks this table before ordinary user, linked, built-in, and packaged layers; a matching entry is
-authoritative and cannot be shadowed by a physical file. For each table entry, in dependency order, the handler
-constructs a native 48-byte `idStr` containing `<type>/<logical-name>.decl`, invokes the registry's clean
-signature-resolved `+0x38` `DeclRegisterFile(registry, &idstr, NULL)` once, and destroys the temporary with
-`IdStrDtor`. The engine canonicalizes that source to `decltree/<type>/<logical-name>.decl`, opens the matching
-body, derives the identity from the path, and scans one decl. Constructor, scanner, and destructor exceptions,
-or a false scanner result, fail the one-shot service at the first candidate with no retry or fallback.
-
-Only after every missing source scan succeeds does the command run its second phase. Registering a source
-publishes the identity but does not by itself give it a live object, and DOOM's decl parsers resolve their own
-`inherit`, `edit.entityDef` and game-ref edges with `makeDefault=0` — a lookup that succeeds only when the
-target already has an object in its manager. The second phase therefore materializes per identity rather than
-walking a typed dependency graph: every `MISSING` non-editor identity first, in the same dependency order the
-scans used, then the eligible new `snapEditorEntityDef` roots. Each one is looked up with
-`DeclFind(typeManager, logicalName, makeDefault=0)`, which lazily loads a pending object, and only a genuinely
-absent object takes `makeDefault=1`. A null manager, a null object, an unreadable decl state byte at `+0x2c`,
-an object still carrying the in-progress bit `0x01`, or a native exception is terminal for the one-shot
-service. The generic valid bit `0x04` is recorded in the diagnostics but is not an admission condition,
-because no engine consumer treats it as one.
-
-An editor entity is held to one further contract, the same one DOOM's own palette validator applies: a
-non-null resolved entityDef at `+0x1c8`, every output target flagged `0x20` and every input target flagged
-`0x10` at `+0x3cd`. Before that check, the captured body must lexically carry a real top-level
-`inherit = ...` or direct `edit.entityDef = ...` assignment; comments, quoted decoys, and nested fields do not
-satisfy the gate, and source-only abstract bodies are classified `NON-PALETTE` and never materialized at all.
-A refused root also emits a diagnostic probe of its typed edges so a cold run explains itself. The one-shot
-palette builder is called once after every eligible root passes, and must return successfully before the
-explicit registration-success bit is published. There is no aggregate alias, per-identity `AddFromText` call,
-raw object cache, `DeclFind` detour, live rollback, or retry.
-
-Registration reaches the engine's source catalog, and the engine stops consulting that catalog the moment
-a map begins loading: `DeclFind` decides existence for an identity with no live object by branching on the
-map-load lifecycle state, using the source catalog below state 2 and the decl-resource manager at state 2 and
-above. Every gameplay map load is therefore blind to a freshly registered identity, which is why a placed new
-entity used to report `Unknown entityDef` and never spawn. After the palette rebuild succeeds, the same
-main-thread command arms `decl-visibility`, which answers that one existence probe for exactly the identities
-in the published table and only after the engine's own answer was "no". It requires the manager's method slot
-to already hold the engine's own existence probe -- proven by scanning the host image for that probe's
-prologue and requiring the unique match to be exactly the address in the slot, not by comparing the slot
-against a recorded RVA -- forwards every argument of that method including its trailing quiet flag, and
-corrects the boolean result alone; the engine's output arguments are never touched. The decl bytes are then
-read back through the file-system open slot the overrides layer already serves. A refusal here is not fatal: registration still succeeds and new identities simply stay editor-only.
-
-When both native phases succeed, the same main-thread registration command
-invokes the one-shot `palette-refresh` operation synchronously. It resolves the
-editor singleton through `engine_globals`, which signs the code site that
-computes the singleton's address and reads the address out of that site, checks
-the palette object's vtable for plausibility as read from the live editor object
-rather than against a recorded address, then calls the clean signature-resolved
-`SnapPaletteBuild(editor+0x20660, NULL)` exactly once for either editor
-initialization state. `+0x20660` is a struct offset and is identical on both
-shipped executables. Only a successful return publishes the
-explicit registration-success bit; the backend never infers success from its
-generic `DONE` state because that state also covers disabled, empty, and
-all-shadowed snapshots. An unsupported signature, invalid object or vtable,
-native exception, or false palette result is terminal `REFUSED`. There is no
-tick poll or retry, rawmap hook, or literal `common.mapResources` injection.
-
-## The override provider's pinned idFile ABI
-
-The file-shadow returns a clean-room `idFile` stream with the exact 31 pointer slots used by the
-supported DOOM 2016 build (`+0x00` through `+0xf0`). Both of that build's executables, `DOOMx64vk.exe`
-and `DOOMx64.exe`, come from one source tree and share this layout; only addresses differ between them.
-The table preserves the verified read/write/seek
-methods, reports drive/storage slots `+0xc0=0`, `+0xc8=true`, `+0xd0=0`, and `+0xd8=0`, and refuses
-`SetLength` at `+0x60` for both disk-backed and memory-backed streams. Read, write, read-at, and write-at
-take the native 64-bit byte-count contract; memory streams remain bounded and read-only.
-
-The final three slots (`+0xe0`, `+0xe8`, and `+0xf0`) use the engine's native ReadString, Compare, and
-WriteString helpers directly. Snapmap+ does not reproduce their build-specific `idStr` ABI. The three
-addresses are signature-resolved and all must be clean `SIG_OK` results before the stream table is
-published; the table is fully configured before the resource-provider open slot is swapped, so an engine
-thread cannot observe a partially populated tail. A missing, ambiguous, or hook-tolerant helper refuses
-the provider for that process.
-
-Identity is proved by the resolution itself, not by an address table. The ctor and the three helpers each
-have to produce a clean unique masked-signature match -- `SIG_OK`, never the hook-tolerant `SIG_OK_HOOKED`
-fallback -- and the decoded provider vtable is resolved through `engine_globals`, out of the code site that
-computes its address. Whatever those steps yield must land inside the host image. A unique signature match
-is stronger evidence than address equality, because two builds can share an RVA by coincidence but a
-pattern that matches once cannot have matched a different function. The RVAs each of these occupies on the
-Vulkan image are still recorded in the source, but only for audit and for re-deriving a signature that
-stops matching; nothing is located with them. The gates that decide compatibility are the ABI *shape*
-checks: 31 `idFile` slots with the provider open method at `+0xf8`. A newer DOOM build has 34 slots with
-shifted meanings, and shape is what actually differs between engine revisions, so it is what is tested.
-Anything that cannot resolve, resolves ambiguously, or resolves to the wrong shape declines the provider
-for that process rather than guessing. Memory cursor additions are overflow-checked; an invalid or
-overflowing seek leaves the cursor unchanged.
-
-Package requirements are deliberately narrower than console startup scripts. Each non-comment row is
-`cvar<TAB>name<TAB>value`, and the pair must match a product-maintained allowlist. Identical requirements
-from multiple packages compose; malformed, unsupported, reparse-backed, or unexpectedly unreadable input
-refuses the complete requirements snapshot. The initial allowlist contains only the two cut-content
-blacklist gates at value `0`. They are queued once after the engine reaches `RUNNING`, never during its
-fragile startup decl parse, and there is no watcher, retry, hot reload, or arbitrary-command route.
-
-The registry anchor, type lookup, source-register method, and decl finder are independently clean
-signature-resolved. The anchor must be clean because Snapmap+ decodes its RIP-relative registry slot; live
-vtable `+0x38` and `+0x58` must exactly match the resolved source-register and type-lookup addresses. Any missing,
-ambiguous, hooked, or mismatched boundary refuses the service before table publication. A classification
-exception refuses the table before publication; a scanner exception retains the already-exposed immutable
-per-decl table and reports that DOOM may have partially cataloged the ordered prefix.
-
-Discovery first captures the complete valid path-metadata set, up to a separate 4,096-entry safety ceiling.
-The set is sorted with ASCII case-insensitive type/name/source ordering, every member of a case-insensitive
-type/name collision group is refused, and only then are the first 512 non-colliding entries admitted. Collision
-members do not consume the 512-entry quota, and a body-read refusal does not backfill its deterministic slot.
-Each file is capped at 1 MiB and the admitted bodies at 16 MiB total. Reparse points, traversal, malformed paths,
-embedded NULs, header punctuation outside the portable unquoted token alphabet, multiple top-level body blocks,
-and unbalanced text are refused. A discovery allocation failure, safety-ceiling overflow, or
-unexpected `GetFileAttributesA`, `FindFirstFileA`, or `FindNextFileA` result refuses the whole snapshot and queues
-nothing; missing directories and normal end-of-enumeration remain non-errors. DOOM's parser remains the semantic
-authority. The service intentionally has no watcher, refresh, retry, or unload path: changing a decl or resource
-manifest requires a cold restart. The bridge can expose game-owned assets that already exist in the player's
-installed DOOM archives; it does not embed dependencies in a SnapMap, download them from an author, or invent
-arbitrary new models/textures/sounds that are absent from the installation. Disabling the user override layer or
-removing the Snapmap+ DLL leaves the engine on its untouched packaged-resource path.
 
 ```json
 {
@@ -583,13 +272,11 @@ enabled. Manual config edits are consumed at the next startup; a successful `sh_
 table in `src/backend/config.c` declares each setting's key, JSON type, default, validator/normalizer, and
 backend/frontend read/write permissions. In addition to `theme`, the registry has the
 `entities.show_hidden` boolean, `entities.selection_mode` enum (`off`, `follow`, or `select_in_3d`),
-`overrides.user_enabled` boolean (true by default), and the three map-payload booleans
-`packages.embed_in_saved_maps`, `navmesh.enabled` and `navmesh.embed_in_saved_maps` (all true by
-default); the schema version and generic backend↔frontend ABI
-are unchanged. `packages.embed_in_saved_maps` was read for a release without being in this table, so it
-always answered "not set" and could not be turned off -- a key the backend reads and the registry does not
-declare is a key that does not exist. Adding a setting means adding a descriptor and its behavior/tests; the wire contract remains
-generic.
+`overrides.user_enabled` boolean (true by default), and the booleans
+`packages.embed_in_saved_maps`, `navmesh.enabled`, `navmesh.preview` and
+`navmesh.embed_in_saved_maps` (all true by default); the schema version and generic backend↔frontend ABI
+are unchanged. Add a descriptor, behavior and validation when adding a setting;
+the wire contract remains generic.
 
 Values cross the matched-pair ABI as complete UTF-8 JSON fragments. `config_get_json` at `+0x2B0`
 supports a size query and reports status flags; `config_set_json` at `+0x2B8` validates the registered
@@ -618,3 +305,344 @@ warning. `overrides.user_enabled` is the exception to that general session-only 
 launch snapshot has already been captured, so a failed `sh_user_overrides` write reports that it was not
 saved, leaves this launch unchanged, and establishes no next-launch change. The two-DLL overlay and
 installer payload are unchanged; update/uninstall/reinstall preserve this runtime-owned file.
+
+### Startup ordering
+
+The backend initializes configuration and captures the user-overrides setting
+before publishing resource providers. It then captures installed resources and
+declaration sources and arms native registration before boot resource promotion:
+
+```text
+config -> user-overrides snapshot -> resource shadow -> installed resources
+       -> command system -> combined decl snapshot -> boot-promotion hook
+       -> apply and drain requirements -> register decls -> original promotion
+```
+
+The override setting is a launch choice; changing it does not replace providers
+already serving the current process.
+
+## Override packages
+
+An override package is one directory below `overrides/` holding its own content, marked by a `package.json`:
+
+```
+overrides/cyberdemon/package.json
+overrides/cyberdemon/decls/<type>/<logical-name>.decl
+overrides/cyberdemon/resources/<name>.manifest
+overrides/cyberdemon/requirements/<name>.requirements
+overrides/cyberdemon/strings/<name>.json
+overrides/cyberdemon/hud/weapons.json
+overrides/cyberdemon/shaders/generated/spirv/<name>.{vspv,fspv,cspv}
+overrides/cyberdemon/shaders/generated/renderprogs/<name>_pc_vulkan.bin
+```
+
+Install a package by copying its folder into `overrides/`; remove it by deleting
+that folder. Consumers translate package paths into engine resource names without
+building a merged archive. Manual changes take effect on the next launch. The
+map-package installer can explicitly re-arm supported consumers during a session;
+removing files does not undo objects already registered in the running engine.
+
+A directory *without* a `package.json` is not a package -- it is a grouping folder, and the search continues
+inside it. Users can therefore organise their installs to any depth (up to 8) without anything being compiled:
+
+```
+overrides/editor/lifts/package.json          -> package "editor/lifts"
+overrides/editor/toybox/package.json         -> package "editor/toybox"
+overrides/demons/hell/imps/package.json      -> package "demons/hell/imps"
+```
+
+A package is a leaf; the search never descends into one, so a package cannot contain another and its own
+subdirectories always mean what the layout above says. Inside `decls/` the path *is* the decl's identity
+(`decls/<type>/<logical-name>.decl`), so extra organisation belongs in the grouping folders above a package,
+not inside it. A package's identity is its full path below `overrides/`, so two groups may hold like-named
+packages. Scratch and notes folders are safe to keep alongside; `shader_includes/` is reserved for the file
+shadow and is never searched. Packages are read by descending `package.json` priority (default 0), then
+case-insensitive name, and an enumeration that could not complete -- unreadable subtree, over 64 packages, deeper than 8 --
+returns failure. Decl and resource capture reject incomplete enumeration. File
+shadows, string injection and map-package boot capture can retain enumerated
+subsets, so their inventories may disagree with registration availability.
+
+### Packages compose; only disagreements are refused
+
+Packages can share prerequisites. Each consumer applies its own composition rule:
+
+| Layer | Two packages ship the same thing | They ship *different* things under one name |
+|---|---|---|
+| Decls | Byte-identical decls compose: the first copy serves the identity, the rest collapse (`decl-server COMPOSED`) | Refused, naming the packages that disagree |
+| Resource manifests | Identical rows compose into one served entry | Refused, naming both provider rows |
+| Requirements | Identical requests compose into one allowlisted cvar assignment per snapshot | A different value for an allowlisted name is refused |
+| Strings | Identical text for one `#str_` id composes into one row | Refused, naming both packages; the first definition stands |
+
+These composition rules apply to published identities and policy tables.
+Existing-file shadows use package priority instead: the first matching package
+serves the file. The overlap reporter names differing copies and their selected
+winner. A loose root override precedes package shadows. HUD policy conflicts
+refuse the complete HUD table; they do not choose by priority.
+
+Requirements are owned by the package, not by Snapmap+. Snapmap+ ships only a tiny allowlist of settings a
+package is *permitted* to ask for; it sets nothing on its own. The cut-content blacklist cvars the Cyberdemon
+needs live in `overrides/cyberdemon/requirements/cyberdemon.requirements`, so uninstalling that package removes
+the request with it.
+
+The pre-package layout -- a single shared `overrides/generated` tree -- is no longer a package. Installing or
+updating migrates it into `overrides/my-overrides`, a real package with its own marker, and a fresh install
+gets that folder empty as a place for user content. Migration copies missing files
+and keeps existing destinations. Its source-removal check tests destination path
+presence, not byte equality, and ignores enumeration errors. A same-name collision
+can therefore discard different source content. Loose root shadows remain a
+separate lookup path from package resolution.
+
+### Weapon HUD policy
+
+Packages may declare exact weapon-to-ammo-display mappings in `hud/weapons.json`.
+The bounded, strictly parsed table is captured at startup and during package
+re-arm; identical requests compose and disagreements refuse the HUD table.
+One portable, verified ammo-widget call uses the table without modifying game
+mode, ammunition or declarations. It preserves engine behavior for unlisted
+weapons and when overrides are disabled or validation fails.
+See [weapon-hud.md](weapon-hud.md) for the schema, lifecycle and client limits.
+
+### The file shadow resolves across packages too
+
+The decl server publishes an identity, but the bytes the engine parses come from the file shadow, and the
+engine only ever asks for a decl by its canonical virtual name -- `generated/decls/<type>/<name>.decl`. Before
+packages that mapped one-to-one onto `overrides/generated/decls/...`, so joining the requested name onto the
+overrides root *was* the resolver. A package owns its own root, so that join can never reach it: DOOM has no
+idea `overrides/cyberdemon/` exists and will never ask for `cyberdemon/decls/...`.
+
+So a request is resolved against the overrides root first -- `overrides/<engine name>`, the plain file shadow,
+which serves ANY engine resource and is how a loose file dropped in the overrides root still works -- and
+then, for the namespaces in the table above, against each installed package as `<package root>/decls/<rest>`,
+in the same deterministic order. Declaration requests reach only the package's
+`decls/` subtree; shader requests use the separate mapping below. Package metadata
+such as `package.json` is not exposed as an engine resource. The file-open path
+uses a captured package set, refreshed by the explicit runtime re-arm operation.
+
+Without this the failure is silent and total: the identity registers, the engine opens nothing, and the parse
+yields an empty default -- which for a `snapEditorEntityDef` means no resolved `entityDef`, a rejection by the
+native palette validator, and a terminal materialization failure that refuses every decl behind it.
+
+The same resolution serves a package's shaders. A render program is an ordinary decl type, so its
+`decls/renderprog/<name>.decl` needs nothing new; but the compiled module is opened separately, by the engine
+name `generated/spirv/<name>.{vspv,fspv,cspv}`, and its pre-translated source blob as
+`generated/renderprogs/<name>_pc_vulkan.bin`. Both go through the same provider slot this layer hooks, with a
+mode the hook admits. Under `shaders/` the package path mirrors the engine name verbatim, so a package can
+carry a new render program. Packages that reuse a compiled resource name compete
+under the same priority-based file-shadow rule.
+
+Only the declaration and compiled-shader namespaces described above are package-resolved,
+each within its designated subtree.
+Everything else a package contains stays unreachable to the engine.
+
+### A package names its own content
+
+The editor resolves an entity's `displayNameTag` through `idLangDict`. Packages
+can supply their own `#str_` text without modifying the user's global
+`strings/strids.json`.
+
+A package now carries `strings/<name>.json`, a flat `{ "id": "text" }` map, injected on the engine's first
+string-table sort. The order is the user's own document, then every installed package, then Snapmap+'s baked
+defaults: the user's explicit value still outranks a package's, and a package shipping a key we also bake is
+deliberately replacing our fallback. A key is never appended twice -- a duplicate corrupts the engine's
+sorted-by-hash dictionary and makes lookups collapse onto the wrong text.
+
+Prefer an id the game already ships when one exists: it is localized in every language the game supports,
+where a string a package carries is only as translated as its author made it. The Cyberdemon package uses
+the game's own codex text for that reason.
+
+## Existing shadows versus genuinely new decls
+
+These services share the launch user-overrides setting and data root:
+
+| Service | Input | Result |
+|---|---|---|
+| File shadow | A requested resource name | Serves a loose or package file before the installed resource. |
+| Installed resource bridge | Package `resources/*.manifest` files | Reads selected resources from the user's installed archives on demand. |
+| Dynamic decl server | Package `decls/<type>/<name>.decl` files and linked decls | Registers absent identities through exact `decltree` sources, materializes objects and requests a palette rebuild. |
+| Package requirements | Package `requirements/*.requirements` files | Applies allowlisted cvar values before decl publication. |
+
+### Startup and runtime registration
+
+At startup, `sh_decl_server_install` captures a combined decl snapshot, resolves
+the native boundaries, registers its internal commands and arms a hook on the
+engine's whole-registry promotion (`ResourceStaticPromote`). Its first main-thread
+entry applies package requirements, drains the command buffer, then runs
+registration before calling the original promotion. That native pass gives the
+new resources level 4 alongside shipped content, so later map purges do not free
+them. Publication faults are contained and the original promotion still runs.
+An after-promotion lookup logs the level of one published identity.
+
+Registration does not wait for `RUNNING`: that point is after boot promotion.
+The requirements service retains a `RUNNING` polling fallback when its snapshot
+has not already been applied. Requirements are `cvar<TAB>name<TAB>value` rows;
+the allowlist currently permits only the two cut-content blacklist gates at
+value `0`. Equal requests compose. Invalid, conflicting, reparse-backed or
+unexpectedly unreadable input refuses that requirements snapshot. A requirements
+failure is logged; it can leave the native loader unable to materialize gated
+content.
+
+The map-package installer can request an explicit runtime rearm. An atomic
+request is consumed on the next main-thread tick; the internal rearm command
+uses the same synchronous path. It refreshes package discovery, linked-resource
+manifests and weapon HUD policy, then recaptures and drains requirements. It
+reopens decl publication, captures fresh candidates and merges new exact sources
+over the previously published table. Existing source allocations remain alive
+for streams that may still reference them.
+
+Runtime registration brackets the pass with a registry watermark and promotes
+new resources to level 4 afterward. Materialization also promotes reused
+objects, which predate that watermark. It marks eligible empty placeholders and
+newly served live shadows before any reload, then drains through native lookup
+or the generic teardown/load fallback. Previously admitted identities are left
+alone. Undrained pending-load marks are cleared before the next map transition.
+Rearm is intended for the browser with no map loading; it must not repeat the
+boot-wide promotion, which would also retain unrelated map resources.
+
+This is an explicit rescan, with no filesystem watcher. A completed or failed
+decl pass can be rearmed through the command/request path; an in-flight pass is
+refused. The direct `sh_decl_server_rearm` API accepts only `DONE`. Component
+refusals still matter: a refused palette builder remains refused for the process,
+and package strings retain their separate one-shot startup injection.
+
+Two current limits matter when extending this lifecycle. An empty launch
+snapshot returns before the decl server binds native dependencies or registers
+its commands. An all-shadowed pass returns before materialization, live-shadow
+reload and palette refresh. Runtime rearm therefore does not guarantee every
+consumer has refreshed after an arbitrary package change.
+
+### Discovery and native publication
+
+Discovery combines local package decls with the bridge's linked `.decl` subset.
+A local body takes precedence over a linked body with the same identity. Equal
+local definitions compose; differing definitions are reported and refused.
+Metadata is ordered case-insensitively by type, name and source before admission.
+Discovery allows 4,096 paths, admits at most 512 identities, and limits each body
+to 1 MiB and the admitted bodies to 16 MiB. Refused collision groups do not use
+the admission quota; later body refusals do not backfill their slots.
+
+Paths must stay within the package decl root and use the supported unquoted-token
+alphabet. Reparse points, traversal, malformed paths, embedded NULs and bodies
+without one balanced top-level block are refused. Allocation failure, discovery
+overflow or unexpected directory/read errors reject the complete snapshot.
+Missing directories and normal enumeration completion are allowed. Structural
+checks do not replace DOOM's semantic parser.
+
+Within the admitted set, an unambiguous logical name in a quoted value creates
+a dependency edge. Referenced decls scan before their consumers; comments,
+escaped values, ambiguous names and external identities add no edges. Independent
+entries retain stable ordering, and cycles retain admission order.
+
+The main thread validates the registry and classifies every candidate before
+publishing bytes. It resolves the short type through registry slot `+0x58`, then
+uses `DeclSourceFind`. An existing source is `SHADOWED`. Only a source miss calls
+`DeclFind(..., makeDefault=0)` to check for a live object; existing objects are
+also `SHADOWED`. Unsupported types are `REFUSED`, and absent identities are
+`MISSING`. A native lookup exception stops the pass before publication.
+
+The provider copies missing bodies into immutable entries keyed by
+`decltree/<type>/<logical-name>.decl`. These exact entries precede loose files,
+linked resources, built-ins and packaged bytes. A matching entry is authoritative:
+failure to open it does not fall through to another same-named source. Runtime
+merge preserves earlier keys, with new entries winning exact collisions.
+
+For each missing candidate, the scanner receives a native 48-byte `idStr`
+containing `<type>/<logical-name>.decl` through registry slot `+0x38`:
+`DeclRegisterFile(registry, &source, NULL)`. The engine canonicalizes that name
+under `decltree`, opens the supplied body and derives its identity from the path.
+The temporary string is destroyed with `IdStrDtor`. A false scanner result or a
+constructor, scanner or destructor exception stops the current pass. Already
+published source storage remains available; native partial registration is not
+rolled back.
+
+### Materialization, visibility and palette state
+
+All missing sources are scanned before materialization begins. Non-editor
+identities materialize first in dependency order, followed by eligible new
+`snapEditorEntityDef` roots. Lookup uses `makeDefault=0` first and creates only
+an absent object with `makeDefault=1`. Missing managers or objects, unreadable
+state at `+0x2c`, the in-progress bit `0x01`, or a native exception fail the pass.
+The generic valid bit `0x04` is diagnostic rather than an admission requirement.
+
+An editor root must lexically contain a real top-level `inherit` or direct
+`edit.entityDef` assignment. Source-only abstract bodies are `NON-PALETTE` and
+remain registered without materialization. Eligible roots must satisfy the
+native palette contract: a resolved entityDef at `+0x1c8`, output targets carrying
+flag `0x20`, and input targets carrying flag `0x10` at target offset `+0x3cd`.
+
+After materialization, the server attempts the `decl_visibility` hook before
+palette refresh. The engine consults the source catalog below map-load state 2,
+but later probes `generated/decls` through the resource manager. The hook keeps
+native successes and output arguments unchanged; it changes only a negative
+boolean result for an exact published identity. Installation requires a clean
+prologue match at the live vtable method and preserves all seven arguments,
+including the trailing quiet flag. Without that flag, an ordinary cache miss
+can become a fatal engine error. Installation also needs the diagnostic
+owned/published candidate pair; refusal is logged without undoing registration.
+
+`palette_refresh` then resolves the editor singleton, validates the live palette
+vtable's read-only host location and calls
+`SnapPaletteBuild(editor + 0x20660, NULL)`. It can rebuild after each registration
+pass. Invalid dependencies, objects or native calls place this component in
+terminal `REFUSED` for the process.
+
+The decl server sets its explicit registration-success bit after source scans
+and required materialization, even if palette refresh declines. Visibility and
+palette outcomes must therefore be read separately when assessing map usability.
+`DONE` alone is also insufficient: disabled, empty and all-shadowed snapshots
+reach it without publishing new identities. There is no aggregate source alias,
+per-identity `AddFromText`, raw object cache, `DeclFind` detour or live rollback.
+
+### Installed resource bridge
+
+A manifest row contains exactly three tab-separated fields: type, logical name
+and installed virtual path. An empty path uses the logical name for pathless
+records. The bridge resolves these against `gameresources.pindex`; multiple
+provider paths may belong to one logical identity, but each provider path must
+be unambiguous. Identical rows compose. Repeated exact pindex rows require
+compatible metadata and identical stored payload bytes.
+
+Capture validates paths, archive selectors, offsets, sizes and file bounds,
+then retains selected metadata. It opens `gameresources.resources` and
+`gameresources.patch` read-only and reads or decodes a slice when requested.
+Limits are 64 first-level manifests, 1 MiB per manifest, 4 MiB total manifest
+text, 4,096 resource entries, 64 MiB per resource and 256 MiB declared decoded
+bytes per snapshot. Invalid or incomplete enumeration and metadata refuse
+the capture; publication is `NEW -> INSTALLING -> READY`, or `FAILED`.
+
+Explicit recapture reopens this state after package changes. Previous entry
+allocations are retained for readers already inside a lookup, so repeated
+recaptures accumulate memory. Callers must serialize this operation at a
+quiescent boundary. The file-shadow package list similarly uses two atomically
+selected buffers without tracking reader lifetime.
+
+Compressed slices must be a complete raw-DEFLATE stream ending in BFINAL, or
+the DOOM sync-flush form ending exactly at a non-final empty stored block
+(`LEN=0`, `NLEN=0xffff`). The decoder requires zero alignment padding and rejects
+trailing bytes, concatenated streams and invalid or truncated encodings. A
+matched read/decode failure is an error, not permission to choose a different
+same-named engine row. The bridge uses assets already in the player's installed
+archives; it does not download or rewrite game resources.
+
+## The override provider's idFile ABI
+
+Returned streams implement the supported 31-slot `idFile` layout (`+0x00` through
+`+0xf0`). The resource provider's separate open slot is `+0xf8`. Disk and memory
+streams preserve native 64-bit read/write counts; memory streams are bounded
+and read-only. `SetLength` at `+0x60` refuses every request. Drive/storage slots
+report `+0xc0=0`, `+0xc8=true`, `+0xd0=0` and `+0xd8=0`; invalid or overflowing
+memory seeks leave the cursor unchanged.
+
+The final three stream slots (`+0xe0`, `+0xe8`, `+0xf0`) call native ReadString,
+Compare and WriteString helpers for the engine's `idStr` ABI. All three must
+resolve with clean `SIG_OK` status before the table and provider hook are
+published. The constructor must also resolve cleanly; its first matching
+RIP-relative LEA locates the provider vtable. Installation checks function
+containment and requires the decoded vtable to lie in a read-only host section.
+Missing, ambiguous or hook-tolerant results refuse installation.
+
+Pinned RVAs are audit references. The implementation supplies the known stream
+layout; it does not dynamically count a different engine build's virtual slots.
+Signature uniqueness and address plausibility are compatibility checks, not
+proof of semantic identity for an unknown revision. The decl registry has its
+own independent checks: its decoded anchor must be clean, and live slots
+`+0x38` and `+0x58` must equal the resolved registration and type-lookup methods.

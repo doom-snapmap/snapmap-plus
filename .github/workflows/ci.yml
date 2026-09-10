@@ -1,23 +1,13 @@
-# CI -- the pull-request gate (the supply-chain defense).
-#
-# Runs on every PR in a SECRETLESS sandbox: the `pull_request` trigger gives fork PRs a read-only token and
-# zero repo secrets. NEVER switch this to `pull_request_target` -- that runs fork code with secrets + base
-# write context (the classic PR -> secret-exfil / RCE footgun). The only workflow that holds publish/signing
-# secrets is release.yml, and it runs only on a reviewed tag.
-#
-# Every third-party action is pinned to a full commit SHA (immutable) with a human-readable version comment;
-# Dependabot (.github/dependabot.yml) proposes SHA bumps as reviewable PRs. Do not replace a SHA with a tag.
+# Build and test pull requests and main without repository secrets.
+# Keep pull_request rather than pull_request_target for untrusted fork code.
+# Pin third-party actions to commit SHAs with readable version comments.
 name: CI
 
 on:
   pull_request:
   push:
     branches: [main]
-  # Manual re-run, maintainer-only. A push to main normally covers this, but a run can be
-  # missed -- v0.2.1-beta.5's commit reached main with no CI run at all -- and without a
-  # dispatch trigger there is no way to validate an already-pushed commit short of another
-  # push. Safe to add: workflow_dispatch needs repo write, so no fork can reach it, and this
-  # workflow stays secretless either way.
+  # Allow maintainers to rerun validation without another commit.
   workflow_dispatch:
 
 permissions:
@@ -58,9 +48,8 @@ jobs:
         run: |
           BASE='${{ steps.base.outputs.sha }}'
           ADDED=$(git diff "$BASE...HEAD" -- 'src/**' 'installer/**' 'tools/**' | grep -E '^\+' | grep -v '^\+\+\+' || true)
-          # BLOCK (hard-fail): code-injection + boot-persistence APIs an in-process game mod + its installer have
-          # NO legitimate reason to call. The tool hooks its OWN process (VirtualProtect + memcpy) -- it never
-          # writes another process's memory, spawns a remote thread, or installs a Run-key / scheduled task.
+          # Reject cross-process injection and boot-persistence APIs.
+          # The mod patches only its own process.
           BLOCK='WriteProcessMemory|CreateRemoteThread|NtCreateThreadEx|RtlCreateUserThread|VirtualAllocEx|QueueUserAPC|CurrentVersion..Run|schtasks'
           BAD=$(printf '%s\n' "$ADDED" | grep -nEi "$BLOCK" || true)
           if [ -n "$BAD" ]; then
@@ -69,8 +58,8 @@ jobs:
             printf '%s\n' "$BAD"
             exit 1
           fi
-          # WARN (manual review): lower-confidence surfaces -- network, process spawn, generic registry writes.
-          # The installer legitimately shells out to `reg query` / `tasklist`, so these only ask a reviewer to look.
+          # Flag network, process-launch and registry-write APIs for review.
+          # Installer reg/tasklist calls are expected.
           WARN='WinHttp|URLDownloadToFile|InternetOpen|WSAStartup|\bsocket\s*\(|CreateProcess|ShellExecute|WinExec|\bsystem\s*\(|RegSetValue'
           HITS=$(printf '%s\n' "$ADDED" | grep -nEi "$WARN" || true)
           if [ -n "$HITS" ]; then
@@ -82,17 +71,12 @@ jobs:
           fi
       - name: Changelog grammar + parser tests
         run: |
-          # CHANGELOG.md is what release.yml turns into a release body and what
-          # pages.yml turns into the website. A hand-edit that breaks the grammar
-          # must fail HERE, at PR time -- not at release time, after a tag exists.
-          # No dependency install: changelog.py is stdlib-only, and draft_changelog.py
-          # imports pydantic inside the function that calls the API, never at module
-          # scope, so its renderer tests run in this secretless job too.
+          # Check changelog grammar before tagging. These parser and renderer tests
+          # use no API credentials or optional drafting dependencies.
           python3 tools/changelog.py --lint
           python3 -m unittest discover -s tools/tests -t tools -v
       - name: Secret scan (gitleaks)
-        # The gitleaks-action@v2 requires a PAID license for organizations; the gitleaks BINARY is free.
-        # Pinned version (reproducible + supply-chain friendly). --exit-code 1 fails the job on any leak.
+        # Use the pinned standalone gitleaks binary; fail the job when it finds a leak.
         run: |
           VER=8.30.1
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" | tar -xz gitleaks
@@ -100,9 +84,7 @@ jobs:
 
   build:
     name: Build + test (Windows)
-    # Builds the backend (XINPUT1_3.dll) + the WebView2 (HTML) frontend (snapmap-plus-ui.dll) -- the sole frontend.
-    # No Qt install, no Qt bundle: the frontend renders in the system-installed WebView2 runtime. This job also
-    # covers the C unit tests + the installer's gofmt/vet/test/build (they're frontend-independent).
+    # Build both DLLs and run native, JavaScript and installer checks.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -113,9 +95,8 @@ jobs:
       - name: Build backend + frontend
         shell: pwsh
         run: |
-          # The .ps1 throws on failure (its ErrorActionPreference=Stop) -> a non-zero step exit. Do NOT gate on
-          # $LASTEXITCODE: a pure-cmdlet .ps1 (e.g. package.ps1) runs no native command, so it stays $null and
-          # "$null -ne 0" is TRUE -> a false failure.
+          # Scripts throw on failure. A cmdlet-only script may leave LASTEXITCODE
+          # unset, so do not use it as the build result.
           $ErrorActionPreference = 'Stop'
           .\build.ps1
       - name: Package the overlay
@@ -126,9 +107,7 @@ jobs:
       - name: Clean-room bundle guard (layout + genuinely Qt-free)
         shell: pwsh
         run: |
-          # The bundle is deliberately lean -- just the two clone DLLs, no Qt runtime to bundle (the frontend
-          # renders in the system WebView2 runtime). Assert the required files exist AND that nothing Qt-shaped
-          # snuck in -- a regression here would silently reintroduce a Qt dependency.
+          # Require both DLLs and reject accidental Qt dependencies.
           $ErrorActionPreference = 'Stop'
           $dist = "dist"
           $must = @("XINPUT1_3.dll", "snapmap-plus\snapmap-plus-ui.dll", "MANIFEST.sha256")

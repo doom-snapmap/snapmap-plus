@@ -516,10 +516,8 @@ static int probe_installed_snapshot(const char *root, const char *base)
     return 0;
 }
 
-/* Two packages that bridge the SAME resource is the normal case -- shared gore,
- * FX and animation assets belong to no single demon. The identical rows must
- * compose into one served entry, not refuse the whole snapshot, and a manifest
- * from an earlier package must survive a later package being present at all. */
+/* Shared identical resources must compose once, and later packages must
+ * not discard earlier manifest entries. */
 static void test_packages_compose(void)
 {
     static const unsigned char compressed[] = {

@@ -1,5 +1,5 @@
-/* map_embed.c -- see map_embed.h. Reading packages off the disk, and reading a
- * map to decide which ones to read.
+/* Pack package folders and detect their published decl references in map
+ * JSON.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -18,9 +18,9 @@
 #define ME_MAX_FILES      4096u
 #define ME_MAX_FILE_BYTES (16u * 1024u * 1024u)
 
-/* Our own sidecar, written by the installer to record which payload a folder came from. It is
- * metadata ABOUT the package, not part of it, and including it would make a repack of an
- * installed package produce a different digest than the payload that installed it. */
+/* Exclude installer digest metadata so repacking does not change content
+ * identity.
+ */
 #define ME_SIDECAR "smpkg.digest"
 
 static void me_err(char *err, size_t cap, const char *fmt, ...)
@@ -78,8 +78,7 @@ static int me_list_push(me_list *l, const char *abs, const char *rel, size_t siz
     return 1;
 }
 
-/* Deterministic order, so packing the same folder twice yields the same bytes and therefore the
- * same digest. FindFirstFile's order is not specified and is not stable across machines. */
+/* Sort paths for deterministic ZIP bytes and digests. */
 static int me_file_cmp(const void *a, const void *b)
 {
     return _stricmp(((const me_file *)a)->rel, ((const me_file *)b)->rel);
@@ -285,18 +284,10 @@ static const char *me_ifind(const char *hay, size_t n, const char *needle)
     return NULL;
 }
 
-/* Does the map name this decl identity?
- *
- * Two forms are accepted, because a map does not spell an identity the way the package's folder
- * layout does. Measured against a real map that uses a Cyberdemon package: the package holds
- * `decls/entitydef/ai/demon/cyberdemon_hell.decl`, and the map contains "cyberdemon_hell",
- * "aicomponent/cyberdemon_hell" and "threat/cyberdemon_hell" -- never the folder-shaped
- * `entitydef/ai/demon/cyberdemon_hell`. So:
- *
- *   - the logical name (everything after `decls/<type>/`) as a whole quoted string, and
- *   - the BASENAME, either as a whole quoted string or as the last segment of one.
- *
- * The basename form is the loose one, and that asymmetry is deliberate -- see the header. */
+/* Match a published decl's quoted logical name or basename, including a final
+ * path segment. Map values need not include the package's decl type/path
+ * prefix. Basename matches can conservatively include an incidental package.
+ */
 static int me_map_names(const char *json, size_t len, const char *logical)
 {
     char pat[MAX_PATH + 4];
@@ -372,9 +363,9 @@ static int me_package_used(const char *decls_root, const char *prefix, const cha
     return used;
 }
 
-/* A shard header id is lowercase [a-z0-9_-] -- the grammar the consumer's parser accepts, and
- * the grammar the reference implementation enforces. A nested package (`group/package`) or one
- * with capitals cannot be named in a header at all, so it is reported rather than mangled. */
+/* Require a lowercase [a-z0-9_-] shard id; log unsupported package names
+ * rather than changing their identity.
+ */
 static int me_id_is_embeddable(const char *name)
 {
     size_t i;
@@ -396,9 +387,7 @@ size_t sh_mpkg_used_packages(const char *json, size_t len, const char *data_root
 
     if (!json || len == 0 || !data_root || !out || cap == 0) return 0;
 
-    /* Nothing published means no package identity is live in this process, so nothing a map
-     * saved right now could be using. Say so: silence here would look like a working feature
-     * that simply found nothing. */
+    /* Without published identities, package-use detection has no candidates. */
     if (sh_overrides_internal_decl_published_count() == 0) {
         backend_log("MPKG: no package identities are published in this process, so a saved map "
                     "carries nothing -- packages travel only when the decl server has "
@@ -411,8 +400,9 @@ size_t sh_mpkg_used_packages(const char *json, size_t len, const char *data_root
     if (!packages) return 0;
 
     if (!sh_packages_enumerate(data_root, packages, ME_MAX_PACKAGES, &count)) {
-        /* A partial enumeration would silently omit a package the map needs, which is the one
-         * failure this feature exists to prevent. Embed nothing rather than embed some. */
+        /* Reject partial package enumeration so embedding cannot silently
+         * omit a root.
+         */
         backend_log("MPKG: package enumeration was incomplete; embedding nothing this save");
         HeapFree(GetProcessHeap(), 0, packages);
         return 0;

@@ -28,8 +28,7 @@ func TestMigrateUserData_scaffolds(t *testing.T) {
 	}
 }
 
-// TestMigrateUserData_foldsOldContentForward: content in the old %USERPROFILE%\snaphak\ tree is copied into the
-// new app-data dir, and the old copy is left untouched as a backup.
+// Migrate legacy content into app data and remove the old tree after presence checks.
 func TestMigrateUserData_foldsOldContentForward(t *testing.T) {
 	la, up := newDataDirs(t)
 	oldOverride := filepath.Join(up, "snaphak", "overrides", "unknown_entity.decl")
@@ -46,8 +45,7 @@ func TestMigrateUserData_foldsOldContentForward(t *testing.T) {
 	if err != nil || string(got) != "MY OVERRIDE" {
 		t.Fatalf("content not migrated to the new location: %q, %v", got, err)
 	}
-	// It's a VERIFIED MOVE: once every file is mirrored at the new location, the old home-root folder is
-	// removed (not left as a stale backup).
+	// The old folder is removed after migration.
 	if _, err := os.Stat(filepath.Join(up, "snaphak")); !os.IsNotExist(err) {
 		t.Errorf("the old %%USERPROFILE%%\\snaphak folder should be removed after a full migration, but it still exists")
 	}

@@ -12,10 +12,8 @@ import (
 
 const doomAppID = "379720"
 
-// DOOM 2016 ships two executables built from one source tree: DOOMx64vk.exe (Vulkan) and
-// DOOMx64.exe (OpenGL). Steam installs both side by side, and the game relaunches itself into the
-// other one when the r_renderAPI cvar changes -- so a player can be in either from one launch.
-// Snapmap+ supports both, so every check here has to consider both names.
+// Both renderers are installed together. Check both executable names because
+// DOOM can relaunch into the other renderer.
 var doomExes = []string{"DOOMx64vk.exe", "DOOMx64.exe"}
 
 // resolveDoom returns the DOOM install dir: an explicit --doom (verified), else Steam auto-detect.
@@ -43,10 +41,8 @@ func hasDoomExe(dir string) bool {
 	return false
 }
 
-// doomIsRunning reports whether DOOM 2016 is currently running under either of its executables, so we
-// can say "close DOOM first" instead of surfacing a raw file-lock error -- Windows won't let us replace
-// a DLL the running game has loaded. Best-effort: if we can't tell (e.g. tasklist unavailable), we
-// don't block. `IMAGENAME eq` is an exact match, so the two names never answer for each other.
+// doomIsRunning checks both process names to avoid replacing loaded DLLs.
+// Detection is best-effort: tasklist failure does not block installation.
 func doomIsRunning() bool {
 	for _, exe := range doomExes {
 		out, err := exec.Command("tasklist", "/FI", "IMAGENAME eq "+exe, "/NH").Output()

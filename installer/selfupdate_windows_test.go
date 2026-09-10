@@ -8,9 +8,8 @@ import (
 	"testing"
 )
 
-// TestReplaceExeLockedOldFallsBack reproduces the field failure: snapmap-plus.exe.old is a still-running old
-// image, which Windows will neither delete nor rename over. We simulate that lock with a handle opened
-// WITHOUT FILE_SHARE_DELETE. replaceExe must fall back to a free .old<N> aside name and still succeed.
+// Simulate a running .old image with a handle that denies delete sharing.
+// Replacement must use a free numbered aside name.
 func TestReplaceExeLockedOldFallsBack(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "snapmap-plus.exe")

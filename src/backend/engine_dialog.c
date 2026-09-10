@@ -1,35 +1,12 @@
-/* engine_dialog.c -- see engine_dialog.h.
+/* Native modal dialogs with custom descriptor text. Raise through the shell
+ * wrapper so its screen-pending flag and lock are set. Capture the shell from
+ * native dialog traffic. The manager queue pointer is at +0x900, its count at
+ * +0x908, and each descriptor spans 0x1b0 bytes.
  *
- * Three engine facts this file is built on, each read out of the binary rather
- * than assumed:
- *
- *   1. `ShowDialog(mgr, desc)` prefers `desc`'s own embedded idStr over the text
- *      it derives from the GDM id. Populating that string is the whole trick.
- *   2. The engine NEVER calls `AddDialog` directly. It goes through a shell-level
- *      wrapper that also sets a flag on the shell's screen object
- *      (shell+0x18 -> +0xA8 = 1). Raising without that flag produces a dialog
- *      that draws perfectly and ignores every keypress -- measured live, with
- *      verified key delivery, at both the hub and the map browser. So we raise
- *      through the wrapper and let the engine set its own flag, and `shell` is
- *      captured by watching the engine raise one of its own.
- *   3. The dialog queue is an inline array of 0x1B0-byte descriptors at
- *      mgr+0x900 with its count at mgr+0x908, which is how a raised dialog is
- *      found again while it is on screen.
- *   4. A DESCRIPTOR CARRIES NO ANSWER. There is no byte anywhere in it that
- *      records which button was pressed -- an earlier reading of desc+0x09 as a
- *      result was wrong; the engine's own ClearDialog log line names that byte
- *      `m.waitClear`. What a press actually does is invoke the pressed button's
- *      callback object, whose Call (vtable +0x50) hands the button's ACTION ID
- *      to the dispatcher at 0xE67BF0. For a gdm id with no case of its own --
- *      which is every id this product raises -- AddDialog's default path builds
- *      one button per label from the button set and takes each button's action
- *      id straight out of OUR params block: button 0 from params[3], button 1
- *      from params[4]. So we name the two actions, and the engine tells us
- *      which one the player chose.
- *
- * The descriptor's string is ALREADY CONSTRUCTED when the detour sees it, so it
- * is assigned (idStr::operator=) and never constructed over: constructing into a
- * live idStr would leak its buffer and hand the SWF a dangling pointer.
+ * The queued idStr is already constructed: assign through the native helper
+ * rather than constructing over it. A descriptor carries no answer;
+ * DialogAction reports the button action ID. For supported GDM IDs using the
+ * default path, params[3] and params[4] select the two close-only actions.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -56,10 +33,9 @@
 #define ED_MGR_QUEUE_PTR      0x900u
 #define ED_MGR_QUEUE_COUNT    0x908u
 
-/* `AddDialog`'s parameter block. Only these fields are read for an id with no
- * switch case, which is every id this product raises. The block is zeroed and
- * generously oversized rather than sized exactly -- the engine writes nothing
- * into it, so slack is free and a short block would not be. */
+/* Zeroed AddDialog parameter block. Reserve enough space for all fields read
+ * by the supported default GDM path; the native call does not write to it.
+ */
 #define ED_PARAMS_BYTES       0x100u
 #define ED_PARAM_GDM_ID       0u      /* int index */
 #define ED_PARAM_BUTTON_SET   1u      /* int index */
@@ -68,17 +44,11 @@
 #define ED_PARAM_SOURCE_FILE  0x26u   /* int index; a const char * spans 0x26..0x27 */
 #define ED_PARAM_SOURCE_LINE  0x28u   /* int index; log formatting only */
 
-/* The two action ids we name our buttons with.
- *
- * Both are chosen off the dispatcher's own jump table (RVA 0xE69F7C, 0x72
- * entries): actions 0x00, 0x01, 0x1F, 0x26, 0x2D, 0x44, 0x4A, 0x4B, 0x4C, 0x51,
- * 0x5F and 0x60 all land on the same block at 0xE67C55, which does exactly one
- * thing -- close the dialog. So an affirmative answer and a negative one behave
- * identically to the engine and differ only in the id it reports to us.
- *
- * 0x4A and 0x4B are used by no case in AddDialog, and AddDialog is the only
- * thing that ever builds a callback. Seeing either id therefore means OUR
- * dialog and nothing else: it cannot be produced by a prompt the game raised. */
+/* Actions 0x4a and 0x4b both reach the native close-only branch (pinned
+ * Vulkan 0xE67C55 via the 0xE69F7C jump table). They are unused by the
+ * audited AddDialog cases, allowing distinct answers without an extra native
+ * action. Also check the GDM ID when observing them.
+ */
 #define ED_ACTION_ACCEPT      0x4Au
 #define ED_ACTION_DECLINE     0x4Bu
 
@@ -127,10 +97,9 @@ static int                g_installed;
 /* The answer, as the engine reported it. -1 = no button dispatched yet. */
 static volatile LONG g_answer = -1;
 
-/* One tracked dialog at a time. The install flow asks one question and waits for
- * it, so a queue here would be capacity nothing uses and state that can go
- * stale. `g_ticket` is monotonic so a released ticket can never be confused
- * with a later one that happens to reuse the slot. */
+/* Track one dialog with a monotonic ticket so stale callers cannot poll a
+ * later occupant of the slot.
+ */
 static volatile LONG g_ticket;
 static volatile LONG g_pending_id = -1;
 static char          g_pending_key[256];
@@ -147,21 +116,11 @@ static const sig_result *ed_result(const sig_result *results, size_t count,
     return NULL;
 }
 
-/* A clean SIG_OK resolve only. These calls have a data-layout contract -- the
- * descriptor offsets and the queue shape -- so a hook-tolerant resolve is not
- * good enough even though it would be callable: SIG_OK_HOOKED means the scan
- * missed the prologue and the known-RVA fallback recovered the function past
- * somebody else's detour, which proves presence, not a clean surface.
- *
- * A unique masked-signature match is the identity proof, and it is a stronger
- * one than address equality: two builds can put unrelated functions at the same
- * RVA, but a signature that matches exactly once cannot match the wrong
- * function. `documented_rva` is where this function sits on the pinned Vulkan
- * image, kept for audit and re-derivation only -- DOOM's OpenGL executable is
- * the same source tree re-linked, so every one of these is at a shifted RVA
- * there and comparing against it only refused to arm on half the shipped game.
- * The internal-consistency check stays: the resolver's address and recovered
- * RVA must agree about the module they came from. */
+/* Require clean SIG_OK matches for the modeled descriptor and queue ABI.
+ * Hook-tolerant fallbacks are refused. Check that the resolved address and
+ * RVA describe the same module; documented_rva is only a pinned Vulkan audit
+ * reference.
+ */
 static void *ed_clean(const sig_result *results, size_t count, const char *name,
                       const uint8_t *module_base, uint32_t documented_rva)
 {
@@ -192,9 +151,9 @@ static int ed_read_byte(const void *base, unsigned offset, unsigned char *out)
     }
 }
 
-/* The injection itself, factored out so the test seam drives the same code the
- * detour does rather than an approximation of it. Returns 1 when this
- * descriptor was ours and its text was replaced. */
+/* Assign text to our queued descriptor. Tests use this same path. Returns 1
+ * if the descriptor matched and its text was replaced.
+ */
 static void *ed_find_descriptor(int gdm_id);
 
 static int ed_inject(void *descriptor)
@@ -218,15 +177,10 @@ static int ed_inject(void *descriptor)
     return 1;
 }
 
-/* Every button press on every engine dialog reaches the dispatcher, carrying the
- * action id its button was built with and a copy of the params block the dialog
- * was raised from. Both of our ids close the dialog and nothing else, so the
- * engine's behaviour is untouched: this detour reads the id and gets out of the
- * way.
- *
- * `params` is the callback's own copy, so params[0] is still the gdm id the
- * dialog was raised with -- checked here so a stray dialog can never answer
- * ours, even though no engine dialog can produce these ids in the first place. */
+/* Observe the button action and callback parameter copy, then forward
+ * unchanged. Match params[0] to our GDM ID before accepting either close-only
+ * action.
+ */
 static void ed_action_detour(void *mgr, void *params, int action, void *parms,
                              int flag)
 {
@@ -261,10 +215,7 @@ static void *ed_manager(void)
     }
 }
 
-/* Capture the shell from the engine's own traffic. Every dialog the game raises
- * comes through here, including the stay-offline notice during boot, so the
- * pointer is available long before anything of ours needs it -- and it is the
- * engine's own value rather than a singleton we guessed at. */
+/* Capture the shell from native wrapper calls before raising our own dialog. */
 static void ed_wrapper_detour(void *shell, void *params)
 {
     if (shell && !g_shell) {
@@ -338,12 +289,9 @@ int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
 
     if (!g_installed || !shell || !g_add_wrapper || !text || !text[0]) return 0;
 
-    /* One at a time -- but a claim only counts while its dialog is actually on
-     * screen. Anything can clear a dialog without going through us: the player
-     * answering it, the engine tearing the menu down, another tool dismissing
-     * it. If the claim's descriptor is gone from the queue, the claim is dead
-     * and holding it would wedge this surface for the rest of the session with
-     * no way back. Reclaim it instead of refusing forever. */
+    /* Reclaim a tracked slot when its descriptor has left the queue,
+     * including after menu teardown or external dismissal.
+     */
     {
         LONG held = InterlockedCompareExchange(&g_pending_id, 0, 0);
         if (held >= 0) {
@@ -365,18 +313,17 @@ int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
     memset(params, 0, sizeof(params));
     params[ED_PARAM_GDM_ID]     = gdm_id;
     params[ED_PARAM_BUTTON_SET] = button_set;
-    /* Name the buttons. Without this both would be built with action 0, which is
-     * also a pure close -- the dialog would answer correctly on screen and report
-     * nothing, which is exactly the hole this pair of ids closes. */
+    /* Give the two buttons distinct close-only actions so the dispatcher
+     * identifies the answer.
+     */
     params[ED_PARAM_ACTION_0]   = ED_ACTION_ACCEPT;
     params[ED_PARAM_ACTION_1]   = ED_ACTION_DECLINE;
     memcpy(&params[ED_PARAM_SOURCE_FILE], &source, sizeof(source));
     params[ED_PARAM_SOURCE_LINE] = __LINE__;
 
-    /* Through the WRAPPER, never AddDialog directly: the wrapper takes the
-     * engine's own lock and, crucially, marks the shell's screen as having a
-     * dialog pending. Without that mark the dialog draws and cannot be
-     * answered. */
+    /* The wrapper takes the native lock and marks the shell screen dialog-
+     * pending; a direct AddDialog call would omit input readiness.
+     */
     __try {
         g_add_wrapper(shell, params);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -385,9 +332,7 @@ int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
         return 0;
     }
 
-    /* AddDialogInternal copies the descriptor into the queue synchronously, so
-     * by here it exists and the text can be written straight into it. Doing it
-     * this way means no detour on the engine's dialog render path at all. */
+    /* The wrapper queues its descriptor synchronously; assign its text now. */
     desc = ed_find_descriptor((int)gdm_id);
     if (!desc) {
         InterlockedExchange(&g_pending_id, -1);
@@ -442,21 +387,18 @@ int sh_engine_dialog_poll(int ticket)
         return SH_ENGINE_DIALOG_LOST;
     if (id < 0) return SH_ENGINE_DIALOG_LOST;
 
-    /* The dispatched action IS the answer, and it is the only thing that is. It
-     * is read first because the engine closes the dialog in the same frame it
-     * dispatches, so by the time the queue is looked at the descriptor may
-     * already be gone. */
+    /* Read the dispatched answer first: the engine may remove the descriptor
+     * in the same frame.
+     */
     answer = InterlockedCompareExchange(&g_answer, 0, 0);
     if (answer >= 0) {
         InterlockedExchange(&g_pending_id, -1);
         return answer ? SH_ENGINE_DIALOG_ACCEPTED : SH_ENGINE_DIALOG_DECLINED;
     }
 
-    /* No action dispatched. Either the dialog is still up, or it left by a path
-     * that presses no button -- the menu being torn down, another tool dismissing
-     * it, the shutdown sweep. None of those is consent, so all of them decline:
-     * installing third-party content on an answer nobody gave is the one outcome
-     * worth being wrong in the safe direction about. */
+    /* Without a dispatched action, a present descriptor is pending and a
+     * missing one is declined.
+     */
     desc = ed_find_descriptor(id);
     if (!desc) {
         InterlockedExchange(&g_pending_id, -1);

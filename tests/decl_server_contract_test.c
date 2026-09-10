@@ -79,28 +79,23 @@ int main(int argc, char **argv)
     if (package_requirements && decl_server) CHECK(package_requirements < decl_server);
     if (commands && decl_server) CHECK(commands < decl_server);
 
-    /* Every override consumer discovers packages instead of hardcoding one
-     * shared tree, so a package is a folder the user can drag in and delete. */
+    /* Each override consumer must discover package roots. */
     CHECK(strstr(server, "sh_packages_enumerate(root, g_packages") != NULL);
     CHECK(strstr(server, "sh_package_subdir(&g_packages[package_index], \"decls\"") != NULL);
     CHECK(strstr(bridge, "sh_packages_enumerate(") != NULL);
     CHECK(strstr(bridge, "sh_package_subdir(&g_packages[i], \"resources\"") != NULL);
     CHECK(strstr(requirements, "sh_packages_enumerate(") != NULL);
     CHECK(strstr(requirements, "sh_package_subdir(&g_packages[package_index],") != NULL);
-    /* Packages COMPOSE. An identical decl or manifest row shipped by two
-     * packages collapses to one; only a real disagreement is refused, and the
-     * refusal has to name who disagreed or it is not actionable. */
+    /* Identical shared entries compose; conflicting entries must name both packages. */
     CHECK(strstr(server, "ds_files_identical(other->absolute, absolute_path)") != NULL);
     CHECK(strstr(server, "decl-server COMPOSED:") != NULL);
     CHECK(strstr(server, "item->package") != NULL);
     CHECK(strstr(bridge, "rb_collapse_identical_rows") != NULL);
     CHECK(strstr(bridge, "is claimed by two ") != NULL);
-    /* Manifest collection APPENDS per package. Restarting at index zero
-     * silently dropped every manifest but the last package's. */
+    /* Append manifests so later packages cannot replace earlier entries. */
     CHECK(strstr(bridge, "size_t *inout_count") != NULL);
     CHECK(strstr(bridge, "*out_count = 0;") == NULL);
-    /* 26 KB of package records must not sit on a capture's stack: it tripped
-     * the /GS guard and fast-failed DOOM with 0xC0000409. */
+    /* Keep the 26 KB package array off the capture stack to avoid /GS failure. */
     CHECK(strstr(server, "sh_package packages[SH_PACKAGES_MAX]") == NULL);
     CHECK(strstr(bridge, "sh_package packages[SH_PACKAGES_MAX]") == NULL);
     CHECK(strstr(requirements, "sh_package packages[SH_PACKAGES_MAX]") == NULL);
@@ -111,11 +106,8 @@ int main(int argc, char **argv)
     CHECK(strstr(server, "DS_IDSTR_SIZE          0x30u") != NULL);
     CHECK(strstr(server, "DS_DECL_ENTITYDEF_OFFSET 0x1c8u") != NULL);
     CHECK(strstr(server, "DS_PINNED_REGISTER_RVA") != NULL);
-    /* IDENTITY, NOT ADDRESS. Every anchor must resolve to a unique masked-signature match with a
-     * clean prologue (SIG_OK, never SIG_OK_HOOKED). The pinned RVAs stay as the audit trail back
-     * to the extraction build, but they may not gate: DOOM ships a second executable built from
-     * the same source tree, where every one of these functions is at a shifted RVA and every
-     * signature still matches uniquely. Comparing RVAs there refused to arm the whole service. */
+    /* Require clean unique signature results; pinned reference RVAs must not
+     * exclude the other supported image. */
     CHECK(strstr(server, "ds_clean_identity") != NULL);
     CHECK(strstr(server, "result->status == SIG_OK") != NULL);
     CHECK(strstr(server, "result->rva == expected_rva") == NULL);
@@ -123,73 +115,50 @@ int main(int argc, char **argv)
     CHECK(strstr(server, "result->addr == (uintptr_t)module_base + result->rva") != NULL);
     CHECK(strstr(server, "anchor->status != SIG_OK") != NULL);
     CHECK(strstr(server, "AddFromText") == NULL);
-    /* The banned dead-end was a raw DeclFind detour plus a process-wide object cache. That ban
-     * stands, and is now enforced structurally rather than by keyword: there is exactly ONE engine
-     * code patch and its target is the boot promotion, so the lookup path cannot be intercepted. */
+    /* Restrict engine code patching to boot promotion; do not detour DeclFind
+     * or retain a process-wide decl-object cache. */
     CHECK(strstr(server, "sh_install_detour") == NULL);
     CHECK(strstr(server, "install_inline_hook((void *)boot_promote,") != NULL);
 
-    /* PUBLICATION IS TRIGGERED BY THE ENGINE'S OWN STATIC SNAPSHOT, NOT BY A LOAD-STATE POLL.
-     * Every resource is born map-scoped (ctor 0x17FEAC0 writes level 1 or 2 at +0x28) and the
-     * transition purge (0x1800E80) frees by a bitwise AND against mask 1/2. Level 4 escapes it, and
-     * the only wholesale producer of level 4 is the engine's whole-registry promotion (0x1801830),
-     * called once from idCommonLocal::Init at 0x17C6479. Shipped editor content is permanent purely
-     * because it was alive when that pass ran. Publishing after it -- which the old RUNNING poll did,
-     * by a measured 2.267s -- left new content map-scoped and the first playtest destroyed it. So
-     * this service publishes from a one-shot detour ON that promotion, and the engine's own pass
-     * then covers our content and its whole closure together. */
+    /* Publish before the engine's boot promotion so it assigns static level 4
+     * to the new resources and their dependencies. Publishing afterward leaves
+     * them map-scoped and vulnerable to transition purges. */
     CHECK(strstr(server, "install_inline_hook") != NULL);
     CHECK(strstr(server, "ds_boot_promotion_detour") != NULL);
     CHECK(strstr(server, "DS_PINNED_BOOT_PROMOTE_RVA 0x1801830u") != NULL);
     CHECK(strstr(server, "g_boot_promotion_original();") != NULL);
     /* Exactly one engine code patch, and it is that one. */
     CHECK(count_occurrences(server, "install_inline_hook(") == 1);
-    /* The load-state trigger and its command-buffer delivery are gone, not merely bypassed. */
+    /* Publication must not depend on load-state polling or queued commands. */
     CHECK(strstr(server, "sh_decl_server_poll") == NULL);
     CHECK(strstr(server, "DS_LOAD_STATE_RUNNING") == NULL);
     CHECK(strstr(server, "g_buffer_command") == NULL);
-    /* REFUSE AND CONTINUE. A publication failure now happens during boot, so it must never be able
-     * to stop one: the work is inside SEH and the engine's promotion is called unconditionally. */
+    /* Guard publication failures and always continue through the engine promotion. */
     CHECK(strstr(server, "__except (EXCEPTION_EXECUTE_HANDLER) {" ) != NULL);
-    /* The cut-content gates must be live BEFORE publication parses anything, and nothing drains the
-     * command buffer between the detour and the promotion -- so they are applied synchronously. */
+    /* Apply package cvars synchronously before publication parses declarations. */
     CHECK(strstr(server, "sh_package_requirements_apply_now") != NULL);
     CHECK(strstr(server, "DS_PINNED_CMD_EXECUTE_RVA  0x1AA46B0u") != NULL);
-    /* GENERALITY IS THE POINT. The promotion never inspects the objects it promotes, so publishing
-     * before it needs no decl type, no resource class and no reference edge. A per-type table or a
-     * hand-authored edge walk would only move the failure to the next edge nobody special-cased --
-     * which is exactly how the md6Def-only build died. */
+    /* Use engine promotion without a per-type dependency walk. */
     CHECK(strstr(server, "DS_MD6DEF_MODEL_OFFSET") == NULL);
-    /* The runtime refresh is type-blind too. An interim revision deferred stale-shadowed
-     * re-parses to each type's next natural lookup and therefore had to whitelist map-load-read
-     * types (a per-type table of WHEN the engine reads things). The forced browser-instant
-     * drain removed the whitelist: the refresh now runs at the pass's own safe instant for
-     * every type, so no type literal may appear in the refresh path either. */
+    /* Runtime refresh must drain all affected types at the browser-safe pass
+     * rather than deferring selected types to their next natural lookup. */
     CHECK(strstr(server, "\"md6Def\"") == NULL);
     CHECK(strstr(server, "ds_type_defers_safely") == NULL);
     CHECK(strstr(server, "\"animWeb\"") == NULL);
-    /* And it must NEVER re-parse: FreeData 0xFF-fills joint buffers the render thread reads. */
+    /* Avoid TouchDecl: its FreeData path can invalidate buffers still read by rendering. */
     CHECK(strstr(server, "TouchDecl") == NULL);
     CHECK(strstr(server, "g_decl_touch") == NULL);
-    /* The palette rebuild IS load-bearing -- it is what makes a mid-session package's types
-     * nameable by a loading map -- but a decline still must not discard a registration that
-     * otherwise fully succeeded, because a decline is a refusal by the rebuild service alone.
-     * (Measured live: it does not refuse at boot -- the editor singleton and its embedded palette
-     * are statically constructed, so the vtable identity it validates holds from CRT init on.) */
+    /* Report palette refusal separately from otherwise successful registration. */
     CHECK(strstr(server, "palette_failed") == NULL);
     CHECK(strstr(server, "palette_declined") != NULL);
 
-    /* THE ORDERING MUST BE PROVED, NOT ASSERTED. Every "before the engine boot promotion" string in
-     * this service is its own prose and would read identically if the hook were on the wrong
-     * function. So the detour reads a published identity's resource level back out of the engine
-     * after the trampoline returns: level 4 is the field the purge (0x1800E80) tests, and only the
-     * promotion we just called could have written it. */
+    /* Read a published resource's level after promotion to verify that the
+     * engine assigned static lifetime; hook placement alone is not sufficient evidence. */
     CHECK(strstr(server, "ds_report_promotion_outcome") != NULL);
     CHECK(strstr(server, "boot-promotion PROOF") != NULL);
     CHECK(strstr(server, "boot-promotion PROOF FAILED") != NULL);
-    /* Read-only, and pinned as such: the level offset may appear exactly twice -- its #define and
-     * the single ds_safe_read that measures it -- and the static value may only ever be COMPARED.
-     * The engine writes that field; six earlier builds failed because this service tried to. */
+    /* Observe the resource level without writing it; lifetime promotion belongs
+     * to the engine. */
     CHECK(count_occurrences(server, "DS_RESOURCE_LEVEL_OFFSET") == 2);
     CHECK(strstr(server, "ds_safe_read((const uint8_t *)decl + DS_RESOURCE_LEVEL_OFFSET") != NULL);
     CHECK(strstr(server, "level == DS_RESOURCE_LEVEL_STATIC") != NULL);
@@ -254,9 +223,8 @@ int main(int argc, char **argv)
     CHECK(strstr(server, "DS_PHASE_FAILURE_SCAN") != NULL);
     CHECK(strstr(server, "DS_PHASE_FAILURE_MATERIALIZATION") != NULL);
     CHECK(strstr(server, "DS_PHASE_FAILURE_PALETTE") != NULL);
-    /* The palette phase is DETECTED and ordered last, and its consequence is non-terminal: a
-     * decline is the rebuild service's own refusal and may not discard a registration that
-     * succeeded. The two genuinely terminal phases keep their terminal handling. */
+    /* Run palette refresh last and keep its refusal non-terminal. Preserve
+     * terminal handling for discovery and registration failures. */
     CHECK(strstr(server, "palette_declined = 1;") != NULL);
     CHECK(strstr(server, "native registration success was not published") == NULL);
     CHECK(strstr(server, "materialization was terminal; exact decltree table retained; no retry") != NULL);
@@ -297,19 +265,16 @@ int main(int argc, char **argv)
             CHECK(strstr(visibility, "if (original) return original;") != NULL);
             /* Only identities this process published are ever corrected. */
             CHECK(strstr(visibility, "sh_overrides_internal_decl_published") != NULL);
-            /* The slot is proven to hold the probe before it is patched, and this is not a decl
-             * lookup detour or an object cache. The proof is the method's own PROLOGUE, matched
-             * uniquely in the host image -- the slot's address cannot be scanned for, but once
-             * read it can be checked, and a signature identifies the function on any link of this
-             * source tree where an RVA identifies only one of them. */
+            /* Verify the existing probe slot against a clean unique prologue match
+             * before patching it; the slot address alone does not establish identity. */
             CHECK(strstr(visibility, "DV_PINNED_PROBE_RVA 0x1806100u") != NULL);
             CHECK(strstr(visibility, "DV_PROBE_SIGNATURE") != NULL);
             CHECK(strstr(visibility, "sig_resolve_one(module_base, &entry, &found) != SIG_OK") != NULL);
             CHECK(strstr(visibility, "found.addr == (uintptr_t)probe") != NULL);
             CHECK(strstr(visibility, "if (!dv_method_is_probe(module_base, probe))") != NULL);
             CHECK(strstr(visibility, "method_rva != (unsigned long long)DV_PINNED_PROBE_RVA") == NULL);
-            /* The manager global is located at runtime from the code site that computes it, so
-             * it resolves on either shipped executable; the pinned RVA must not be dereferenced. */
+            /* Resolve the manager from its runtime code anchor rather than dereferencing
+             * the pinned reference RVA. */
             CHECK(strstr(visibility, "glb_resolve(module_base, \"decl_visibility_manager\"") != NULL);
             CHECK(strstr(visibility, "module_base + DV_MANAGER_PTR_RVA") == NULL);
             CHECK(strstr(visibility, "decl_find_fn") == NULL);

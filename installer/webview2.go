@@ -16,8 +16,8 @@ import (
 // HKLM (EdgeUpdate is 32-bit, so WOW6432Node on 64-bit Windows) or per-user under HKCU.
 const webview2ClientGUID = `{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}`
 
-// Microsoft's permanent "Evergreen Bootstrapper" link: a ~2 MB stub that downloads + installs the current
-// WebView2 runtime. Documented at https://developer.microsoft.com/microsoft-edge/webview2/ .
+// Microsoft's Evergreen bootstrapper downloads and installs WebView2.
+// See https://developer.microsoft.com/microsoft-edge/webview2/ .
 const webview2BootstrapURL = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
 
 // webview2Version returns the installed WebView2 runtime version, or "" if it is not installed. It reads the
@@ -50,11 +50,9 @@ func webview2Version() string {
 	return ""
 }
 
-// ensureWebView2Runtime makes sure the WebView2 runtime (which the HTML frontend renders in) is present. It
-// NEVER fails the install: the mod files are already deployed by the time this runs, so a missing runtime only
-// means the UI won't render until it's installed. On most machines (Windows 11 / updated Windows 10) this is a
-// no-op -- the runtime is already there. On install it prompts (auto-yes under --yes / non-interactive); on
-// update it is a silent presence-check unless the runtime is actually missing.
+// ensureWebView2Runtime offers setup only when the runtime is missing.
+// The mod is already installed, so setup failure does not undo the bundle install.
+// Non-interactive use and --yes accept the bootstrapper prompt automatically.
 func ensureWebView2Runtime(f flags) {
 	if v := webview2Version(); v != "" {
 		fmt.Printf("WebView2 runtime: present (%s).\n", v)

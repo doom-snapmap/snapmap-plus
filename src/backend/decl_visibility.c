@@ -1,37 +1,11 @@
-/* decl_visibility.c -- see decl_visibility.h.
+/* Keep published decls discoverable after the engine switches from source-
+ * catalog lookup to resource-manager probes at map-load state 2. A negative
+ * native probe for an exact published identity becomes true; the provider
+ * then supplies its body.
  *
- * WHY THIS EXISTS
- *
- * `DeclFind` (RVA 0x17B36F0) resolves an identity that has no live object by
- * branching on the map-load lifecycle state at RVA 0x6DDE198. Below state 2 it
- * consults the source catalog that `DeclRegisterFile` populates. At state 2 and
- * above -- which covers every gameplay map load -- it instead builds the path
- * "generated/decls/<type>/<name>.decl" (RVA 0x17AB4E0) and asks the
- * decl-resource manager behind the global at RVA 0x5557090 through vtable slot
- * +0x78 whether that resource exists. If the answer is no and the caller passed
- * makeDefault=0, the lookup returns null.
- *
- * Nothing this product writes reaches that manager. The engine's own entityDef
- * inheritance helper (RVA 0x17AEC10) looks its parent up with makeDefault=0 and
- * logs "Unknown entityDef '%s' inherited by '%s'" on null, which is exactly what
- * a gameplay map load reported for identities that had registered and
- * materialized cleanly in the editor.
- *
- * So this service answers that one probe, for exactly the identities the
- * dynamic decl server published, and only when the engine's own answer was no.
- * Everything after the probe is already provided: the engine creates the decl
- * and loads it through the file-system open-by-name slot the overrides layer
- * hooks, which serves the published bytes.
- *
- * The method is reached through a runtime-resolved vtable, so its address comes
- * from the live object rather than from a scan. The service still refuses to
- * touch a slot it cannot identify -- a different method would have a different
- * argument shape, and forwarding the wrong one would corrupt the engine's stack
- * -- but it identifies the method by scanning for ITS OWN PROLOGUE and
- * requiring that unique match to be the address the slot holds. That is a
- * stronger proof than the RVA equality this used to demand, and unlike an RVA
- * it survives the OpenGL executable, which is the same source tree re-linked
- * with every function moved. An unrecognised slot is left alone and only logged.
+ * The live vtable slot must equal a clean signature match for the seven-
+ * argument probe. Refuse an unknown method rather than forwarding an
+ * unverified ABI.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -48,40 +22,30 @@
 #include "overrides.h"
 #include "signatures.h"
 
-/* Pointer-to-manager global; the manager's own vtable is read from it. This is a raw DATA rva, not
- * a function, so no signature covers it directly. It is located at runtime as
- * "decl_visibility_manager" (engine_globals.h) by signing the code site that computes the address
- * and decoding its displacement, so it resolves on either shipped executable. The value below is
- * the RVA on the pinned Vulkan build (0x3E59350 on the OpenGL build), kept for audit and
- * re-derivation only -- it must never be used to locate anything. */
+/* Resolve the manager global through engine_globals using its referencing
+ * instruction. Pinned RVAs are audit references only: the constant below is
+ * Vulkan; OpenGL uses 0x3E59350.
+ */
 #define DV_MANAGER_PTR_RVA 0x5557090u
 #define DV_PROBE_SLOT      0x78u
-/* The RVA of the probe on the pinned Vulkan build (0x17F8A40 on the OpenGL build), recorded for
- * audit and re-derivation. NOT used to gate; the prologue signature below is what identifies the
- * method, and it matches exactly once on both shipped images. */
+/* Probe RVAs for signature repair: the constant below is Vulkan; OpenGL uses
+ * 0x17F8A40. Installation uses the prologue match.
+ */
 #define DV_PINNED_PROBE_RVA 0x1806100u
-/* The probe's own prologue. The vtable is built at runtime, so the slot's contents cannot be found
- * by scanning -- but once read, they can be CHECKED by scanning: this pattern resolves uniquely on
- * both shipped builds, so requiring the unique match to equal the slot's method proves the slot
- * holds the method this code models, on any link of this source tree. */
+/* Require the clean unique prologue match to equal the method in the live
+ * vtable slot.
+ */
 #define DV_PROBE_SIGNATURE \
     "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 78 FF FF FF " \
     "48 81 EC 88 01 00 00 48 C7 44 24 30 FE FF FF FF"
 #define DV_PATH_PREFIX     "generated/decls/"
 #define DV_KEY_CAP         512
 
-/* The pinned method is GetCacheFileInfo and takes SEVEN arguments:
- *
- *   bool GetCacheFileInfo(self, const char *path, void *out1, void *out2,
- *                         void *out3, unsigned char *out4, unsigned char quiet)
- *
- * It clears all four output slots on entry, and `quiet` (arg 7, read at
- * [rbp+0x100]) decides what a miss costs: non-zero returns false silently, zero
- * raises a fatal engine error naming the path. The engine passes quiet=1 for
- * ordinary probe lookups, so the hook MUST forward all seven arguments. An
- * earlier six-argument typedef left arg 7 as stack garbage and turned routine,
- * silent cache misses into fatal errors that aborted a fully loaded map back to
- * the SnapMap browser. */
+/* GetCacheFileInfo takes seven arguments: self, path, four output pointers
+ * and quiet. It clears the outputs on entry. Nonzero quiet makes a miss
+ * return false; zero raises an engine error. Preserve all seven arguments,
+ * including quiet on the stack.
+ */
 typedef unsigned char (*dv_probe_fn)(void *self, const char *path, void *out1,
                                      void *out2, void *out3, void *out4,
                                      unsigned char quiet);
@@ -112,8 +76,7 @@ static int dv_probe_key(const char *path, char *key, size_t key_size)
     return 1;
 }
 
-/* The engine owns `path`, and this runs on its thread during a map load, so a
- * malformed or freed string must not take the process down with it. */
+/* Guard reads of the engine-owned path during map loading. */
 static int dv_path_is_published(const char *path)
 {
     char key[DV_KEY_CAP];
@@ -141,21 +104,17 @@ static unsigned char dv_probe_hook(void *self, const char *path, void *out1,
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
     }
-    /* The engine's own answer always wins, and its output arguments are left
-     * exactly as it wrote them. Only a "does not exist" verdict for an identity
-     * this process published is corrected, and only as a boolean: the decl
-     * lookup that needs this answer ignores the output slots and falls through
-     * to the file system, which the overrides layer already serves. */
+    /* Keep native successes and all output values. Override only the boolean
+     * miss for an exact published identity; the decl lookup then loads
+     * through the provider.
+     */
     if (original) return original;
     return dv_path_is_published(path) ? (unsigned char)1 : (unsigned char)0;
 }
 
-/* Is `probe` the decl-resource existence probe? Answered by scanning the host image for the
- * probe's own prologue and requiring the unique match to be exactly this address. A signature
- * that matches once cannot have matched a different function, so this is a stronger identity
- * proof than the address comparison it replaces -- and it is portable, which the address is not.
- * SIG_OK only: SIG_OK_HOOKED would mean the scan missed and the known-RVA fallback stepped over
- * somebody else's detour, which tells us nothing about what this slot holds. */
+/* Require a clean SIG_OK match at the slot address. A hooked known-RVA
+ * fallback does not establish the method ABI.
+ */
 static int dv_method_is_probe(const uint8_t *module_base, const void *probe)
 {
     sig_entry entry;
@@ -178,8 +137,9 @@ static int dv_resolve(const uint8_t *module_base, void **out_manager,
     void **slot;
 
     if (!module_base) return 0;
-    /* Resolve the manager slot from the code site that computes it, so this works on either
-     * shipped executable. DV_MANAGER_PTR_RVA below is the pinned Vulkan value, kept for audit. */
+    /* Resolve the manager global from its code reference; the pinned RVA is
+     * diagnostic.
+     */
     {
         uintptr_t slot_addr = glb_resolve(module_base, "decl_visibility_manager", NULL);
         if (!slot_addr) return 0;
@@ -225,8 +185,7 @@ int sh_decl_visibility_install(const uint8_t *module_base,
                 (unsigned)DV_PROBE_SLOT, method_rva);
     backend_log(line);
 
-    /* An unidentified method has an unknown argument shape, and forwarding the
-     * wrong one would corrupt the engine's stack. Refuse instead. */
+    /* Refuse an unknown method because its argument shape may differ. */
     if (!dv_method_is_probe(module_base, probe)) {
         backend_log("decl-visibility REFUSED: the +0x78 method's prologue is not the decl-resource existence probe's");
         return 0;

@@ -1,13 +1,6 @@
-/* Snapmap+ site — shared behavior for every page.
-   Each feature activates only when its markup is present:
-   1. Download resolver — points [data-dl] links at the newest release's snapmap-plus.exe.
-   2. Lightbox — click any framed screenshot to focus it full-screen.
-   3. Guide TOC — builds the sticky sidebar from the rendered guide's headings.
-   4. Mobile nav — the hamburger menu in the sticky header.
-   5. Changelog copy — formatted release announcements for community posts.
-
-   The changelog page is rendered statically by Jekyll from CHANGELOG.md
-   (see .github/workflows/pages.yml); copying is a progressive enhancement. */
+/* Shared download links, screenshot lightbox, guide navigation, mobile menu and
+ * release-note copying. Start each feature only when its markup exists.
+ * Jekyll renders release notes from CHANGELOG.md; JavaScript adds copying. */
 
 (function () {
   "use strict";

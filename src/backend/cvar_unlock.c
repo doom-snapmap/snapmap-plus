@@ -1,60 +1,17 @@
-/* cvar_unlock.c -- clean-room cvar-unlock, MERGED INTO THE BACKEND XINPUT1_3.
- * Was the standalone dinput8.dll proxy; the cvar-unlock logic now rides in the backend DLL
- * (one fewer shipped file + no System32 dinput8 shadow). The dinput8 runtime-forwarder is
- * dropped -- DOOM loads the real System32 dinput8 directly. Logic is otherwise verbatim.
- *
- * cvar_unlock.c -- clean-room native cvar-unlock for Snapmap+.
- *
- * WHAT THIS IS
- *   The open-source, clean-room replacement for the effect DoomLegacyMod (DLM) provides as
- *   dinput8.dll: it "opens the cvar list" so DOOM 2016 honors `+<cvar> <value>` LAUNCH OPTIONS at
- *   startup (and the ~console recognizes production cvars). Loaded as a pre-main proxy DLL so the
- *   unlock is in place BEFORE the engine's startup +cvar apply runs.
- *
- * WHY LAUNCH OPTIONS NEED THIS (the bug it fixes)
- *   The engine resolves a startup `+cvar` at the DEVELOPER gate, which reads a cvar table that only
- *   contains CVAR_EXPOSE-flagged cvars. A normal cvar (e.g. hydra_signInWhenOnline) isn't in it, so
- *   FindCvar misses and the launch option is SILENTLY DROPPED. (Proven by our RE: a vanilla boot with
- *   `+hydra_signInWhenOnline 0` on the command line still signs in ONLINE.) DLM fixes this by flagging
- *   every cvar EXPOSE before main; we achieve the same result.
- *
- * SCOPE: ALL LOCKED CVARS, NOT ONE.
- *   The alias points the developer lookup at the FULL table (= every registered cvar); the settability
- *   pass walks the ENTIRE cvar list. hydra_signInWhenOnline was only the test case -- every locked
- *   `+cvar` launch option becomes applicable.
- *
- * CLEAN-ROOM
- *   This is OUR mechanism, live-validated in the reference implementation (unlockCvars + setCvarsSettable,
- *   2026-06-14) and ported here verbatim. It contains ZERO DLM bytes. We mirror DLM's STRATEGY
- *   (expose all cvars before the boot apply); we do NOT copy its IMPLEMENTATION (DLM inline-detours the
- *   registration fn behind a QPC/IAT hook -- see README "Alias vs detour"). The alias is simpler and is
- *   our documented clean-room design.
- *
- * STATUS: MERGED INTO THE BACKEND XINPUT1_3 (2026-06-24). Was a standalone dinput8.dll proxy whose
- *   DllMain forwarded to the real System32 dinput8 + spawned the unlock thread; now the cvar-unlock rides
- *   in the backend DLL and the forwarder is DROPPED (DOOM loads the real System32 dinput8 directly, no
- *   proxy). sh_cvar_unlock_start() spawns the deferred unlock thread from the backend DllMain. The
- *   deferred-init TIMING vs the engine's boot +cvar apply is handled by the thread's poll-then-reassert
- *   window (see unlock_thread); this is the first in-game test of the cvar-unlock.
- *
- * SEH: every engine-memory access (the two table-alias memcpys + the per-cvar flags OR) is SEH-guarded,
- *   matching the house style of the sibling backend modules (cvars.c register_one/verify_one).
- *   The thread re-asserts the alias during the early-boot
- *   registration race; a torn/stale idCVar* there becomes a skipped element + retry, never an
- *   unhandled access violation that would take the game down.
- */
+/* Expose registered cvars to console and startup +cvar lookup.
+ * A deferred worker aliases the developer lookup to the full table and marks
+ * cvars settable, then repeats briefly while boot registration continues.
+ * Engine-memory accesses are guarded because initialization can race the worker. */
 #include <windows.h>
 #include <stdint.h>
 #include <string.h>
 #include "cvar_unlock.h"
-#include "backend_log.h"   /* now in the backend: log the resolution path to sh_backend.log */
-#include "host_image.h"    /* host DOOM image on either shipped build (Vulkan / OpenGL) */
+#include "backend_log.h"
+#include "host_image.h"
 
-/* ---- the unlock (applied to ALL cvars) ------------------------------------------------------- */
+/* Developer-table alias and cvar flags. */
 
-/* SEH-guarded table alias (the two memcpys). Returns 1 if both copies completed, 0 on access violation
- * (a torn/half-constructed cvarSys during the boot race -> caller retries). Matches the house pattern of
- * cvars.c's register_one. */
+/* Copy both table headers; return 0 if the boot-time object is not readable. */
 static int alias_dev_to_full(uint8_t *cvarSys)
 {
     __try {
@@ -66,9 +23,7 @@ static int alias_dev_to_full(uint8_t *cvarSys)
     }
 }
 
-/* SEH-guarded per-cvar settability OR. The flags write dereferences a per-cvar pointer that, during the
- * early-boot registration race the re-assert thread runs against, may be torn/stale; guard each so a bad
- * pointer becomes a skipped element, never an unhandled AV (mirrors cvars.c's per-element __try). */
+/* Guard each flags write because registration can replace cvar pointers. */
 static void set_settable_one(void *cvar_v)
 {
     __try {
@@ -78,22 +33,15 @@ static void set_settable_one(void *cvar_v)
         uint32_t *flags = (uint32_t *)(cvar + CVAR_FLAGS_OFF);
         *flags |= CVAR_FLAG_NOCHEAT;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        /* unreadable/stale idCVar* during the boot race -> skip; the re-assert pass catches it later */
+        /* A later pass retries entries still being initialized. */
     }
 }
 
-/* ---- PORTABLE cvarSys resolution (the sig layer; portability hardening) ------------------------
- * The standalone dinput8 used to read cvarSys = *(base + RVA_CVAR_SYSTEM_PTR) -- a build-locked literal that
- * SILENTLY no-ops on an RVA-shifted DOOM. We now resolve it the way the backend does (sh_resolve_cvarsys):
- * sig-scan the .text for the CmdSystemLea accessor (the bot_add/bot_remove registrar whose prologue does
- * MOV RCX,[rip+cmdSystem]), decode that RIP-relative load to the cmdSystem .data slot, and cvarSys =
- * *(slot + 0x10) (the two singleton slots are adjacent: cvarSys == cmdSystem + 0x10). The hardcoded
- * RVA_CVAR_SYSTEM_PTR is demoted to a logged fallback. NO backend linkage -- a minimal self-contained PE
- * .text scan + masked match + RIP decode, mirroring signatures.c's resolver for this ONE signature. Pattern
- * + decode opcodes from the backend signature resolver "CmdSystemLea"; on a DOOM patch this is
- * regenerated by the project's signature extractor (the recipe is in engine_layout.h). */
+/* Resolve CmdSystemLea independently of backend bootstrap, then decode its
+ * singleton slot. The adjacent cvar-system slot is 0x10 bytes later.
+ * A pinned-RVA fallback remains for the encrypted early-boot window. */
 
-/* CmdSystemLea (engine 0x717a50): 65-byte sig; "??" wildcards the build-volatile rel/RIP operands. */
+/* CmdSystemLea; relative operands are wildcarded. */
 static const char *const CVU_CMDSYS_LEA_SIG =
     "40 53 48 83 EC 30 48 8B 0D ?? ?? ?? ?? 4C 8D 0D ?? ?? ?? ?? 33 DB 4C 8D 05 ?? ?? ?? ?? "
     "89 5C 24 28 48 8D 15 ?? ?? ?? ?? 48 89 5C 24 20 48 8B 01 FF 50 20 48 8B 0D ?? ?? ?? ?? "
@@ -104,8 +52,7 @@ static const char *const CVU_CMDSYS_LEA_SIG =
 
 static const uint8_t *g_cvu_cmdsys_slot = NULL;   /* sig-decoded cmdSystem .data slot, cached (scan runs once) */
 
-/* Parse an IDA-style hex sig "40 53 ?? .." -> bytes[]+mask[] (mask 1=fixed, 0=wildcard). Returns the byte
- * count, or 0 on a malformed token / cap overflow. */
+/* Parse masked hex bytes; return the byte count or 0 on malformed/oversized input. */
 static int cvu_parse_sig(const char *s, uint8_t *bytes, uint8_t *mask, int cap)
 {
     int n = 0, hi, lo;
@@ -128,7 +75,7 @@ static int cvu_parse_sig(const char *s, uint8_t *bytes, uint8_t *mask, int cap)
     return n;
 }
 
-/* Find the module's .text section [*out_start, *out_size). Returns 1 on success, SEH-guarded. */
+/* Read the PE .text span; return 0 if headers are invalid or unreadable. */
 static int cvu_find_text(const uint8_t *base, const uint8_t **out_start, size_t *out_size)
 {
     __try {
@@ -148,8 +95,7 @@ static int cvu_find_text(const uint8_t *base, const uint8_t **out_start, size_t 
     return 0;
 }
 
-/* Masked scan of [hay, hay+haylen) for the FIRST AND ONLY match of (bytes,mask,len) -- uniqueness-mandatory
- * like the backend resolver. Returns the match addr, or NULL on 0 or >1 matches. */
+/* Return the unique masked match, or NULL if absent or ambiguous. */
 static const uint8_t *cvu_scan_unique(const uint8_t *hay, size_t haylen,
                                       const uint8_t *bytes, const uint8_t *mask, int len)
 {
@@ -168,8 +114,7 @@ static const uint8_t *cvu_scan_unique(const uint8_t *hay, size_t haylen,
     return hit;
 }
 
-/* Decode the FIRST RIP-relative MOV/LEA ([rip+disp32]: 48 8B/8D 0D/05) in the accessor's first
- * CVU_RIP_SCAN_WINDOW bytes -> the .data slot. Mirrors backend sh_decode_rip_slot. NULL if none. */
+/* Decode the first supported RIP-relative MOV/LEA within the accessor window. */
 static const uint8_t *cvu_decode_rip_slot(const uint8_t *fn)
 {
     uint8_t b[CVU_RIP_SCAN_WINDOW];
@@ -185,9 +130,8 @@ static const uint8_t *cvu_decode_rip_slot(const uint8_t *fn)
     return NULL;
 }
 
-/* Resolve cvarSys build-PORTABLY: sig-scan CmdSystemLea -> decode the cmdSystem slot (cached) -> +0x10 ->
- * deref. Returns the cvarSys object pointer, or NULL if the sig path fails OR cvarSys isn't constructed yet
- * (caller distinguishes via g_cvu_cmdsys_slot: set => sig resolved, object pending; clear => sig miss). */
+/* Decode and cache the slot, then read cvarSys. A cached slot with no object
+ * means engine construction is pending; a missing slot means resolution failed. */
 static uint8_t *cvu_resolve_cvarsys_portable(const uint8_t *base)
 {
     if (g_cvu_cmdsys_slot == NULL) {
@@ -197,10 +141,10 @@ static uint8_t *cvu_resolve_cvarsys_portable(const uint8_t *base)
         int len = cvu_parse_sig(CVU_CMDSYS_LEA_SIG, bytes, mask, (int)sizeof bytes);
         if (len <= 0) return NULL;
         const uint8_t *fn = cvu_scan_unique(text, tsize, bytes, mask, len);
-        if (!fn) return NULL;                                   /* 0 or >1 matches -> sig miss */
+        if (!fn) return NULL;
         const uint8_t *slot = cvu_decode_rip_slot(fn);
         if (!slot) return NULL;
-        g_cvu_cmdsys_slot = slot;                               /* cache -- the .text scan runs ONCE */
+        g_cvu_cmdsys_slot = slot;
         backend_log("B2: cvar-unlock CmdSystemLea sig RESOLVED -> portable cvarSys path live (SteamStub .text decrypted)");
     }
     uint8_t *cvarSys = NULL;
@@ -209,36 +153,26 @@ static uint8_t *cvu_resolve_cvarsys_portable(const uint8_t *base)
     return cvarSys;
 }
 
-/* Apply the cvar-unlock once. Returns 1 if applied (the cvar system was up + populated), 0 if the
- * engine isn't ready yet (caller should retry). Touches only DATA (the cvarSys object + idCVar
- * structs are in writable engine memory) -- no code patching, so no VirtualProtect needed.
- * Every engine-memory access is SEH-guarded (see the helpers above): a torn read during the boot
- * registration race degrades to "not ready -> retry" / "skip this element", never a crash. */
+/* Apply the alias and flags once the cvar list looks populated. Return 0 to retry.
+ * Only engine data is written; each memory access is guarded against faults. */
 static int apply_unlock(uint8_t *base)
 {
-    /* Resolve cvarSys build-PORTABLY (sig-decode the cmdSystem slot, +0x10). The DOOM .text is
-     * SteamStub-ENCRYPTED at load and only decrypts ~2s in, so the CmdSystemLea scan MISSES in the early
-     * boot window -> we use the build-locked RVA there. The early RVA is made SAFE by the cvar-count
-     * VALIDATION below (a wrong RVA on an RVA-shifted build, before the sig resolves, gives an implausible
-     * count -> we bail WITHOUT writing). Once .text decrypts the sig resolves and is preferred (and logs). */
+    /* SteamStub may still hide .text during boot. Try the signature first, then
+     * the Vulkan-name-gated RVA while it is unavailable. */
     uint8_t *cvarSys = cvu_resolve_cvarsys_portable(base);
     if (cvarSys == NULL && g_cvu_cmdsys_slot == NULL && sh_host_is_pinned_rva_build()) {
-        /* Only on the build this RVA was extracted from. Elsewhere it names unrelated memory, and
-         * although the count validation below would refuse to write, there is nothing to gain from
-         * reading a wild address once per poll -- we simply wait for the signature instead. */
+        /* The gate excludes OpenGL by name; it does not verify the pinned build hash. */
         __try {
-            cvarSys = *(uint8_t **)(base + RVA_CVAR_SYSTEM_PTR);   /* sig not resolved yet -> build-locked RVA */
+            cvarSys = *(uint8_t **)(base + RVA_CVAR_SYSTEM_PTR);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             return 0;
         }
     }
     if (cvarSys == NULL)
-        return 0; /* cvar system not constructed yet (sig found the slot, object pending) -> retry */
+        return 0;
 
-    /* VALIDATE cvarSys BEFORE any write: read the cvar list (array ptr + count) + sanity-check the count.
-     * This guards the alias memcpy below against a garbage cvarSys -- the build-locked RVA on an RVA-shifted
-     * build (pre-sig), or a torn read during the boot race -- so we NEVER alias to a wrong address. The same
-     * read feeds the settability walk. (Moved AHEAD of the alias: validation-before-write.) */
+    /* Check the array and count before writing. These plausibility checks reject
+     * uninitialized data but do not establish exact build identity. */
     void   **arr   = NULL;
     uint32_t count = 0;
     __try {
@@ -248,35 +182,29 @@ static int apply_unlock(uint8_t *base)
         return 0;
     }
     if (arr == NULL || count == 0 || count > CVAR_LIST_SANITY_MAX)
-        return 0; /* list not populated yet / implausible cvarSys (wrong/torn) -> not ready -> retry */
+        return 0;
 
-    /* (1) FINDABILITY for ALL cvars -- alias the developer (gate!=0) table onto the full (gate==0) table, so
-     *     a gate-1 FindCvar resolves every registered cvar (== the reference implementation unlockCvars). Safe: cvarSys validated. */
+    /* Alias developer lookup to the full registered-cvar table. */
     if (!alias_dev_to_full(cvarSys))
-        return 0; /* half-constructed cvarSys -> not ready, retry */
+        return 0;
 
-    /* (2) SETTABILITY for ALL cvars -- OR NOCHEAT into every cvar's flags so idCVar::Set won't FATAL
-     *     ("Attempting to set a developer cvar") when the startup +cvar apply sets them at gate!=0
-     *     (== the reference implementation setCvarsSettable). Each per-cvar flags write is SEH-guarded inside set_settable_one. */
+    /* NOCHEAT permits setting cvars through the developer gate. */
     for (uint32_t i = 0; i < count; i++) {
         void *cvar_v = NULL;
         __try { cvar_v = arr[i]; }
-        __except (EXCEPTION_EXECUTE_HANDLER) { break; } /* array tail AV during a torn realloc -> stop */
+        __except (EXCEPTION_EXECUTE_HANDLER) { break; } /* Registration may reallocate the array during this walk. */
         set_settable_one(cvar_v);
     }
     return 1;
 }
 
-/* Deferred init: the engine constructs its cvar system AFTER the SteamStub unpack + early static init,
- * so we cannot touch it from DllMain. Poll until apply_unlock succeeds, then keep re-applying for a
- * short window so (a) the alias snapshot stays fresh as more cvars register and (b) we cover the boot
- * +cvar apply whenever it lands. Bounded; idempotent. */
+/* Wait for construction, then refresh the alias while boot registration continues. */
 static DWORD WINAPI unlock_thread(LPVOID param)
 {
     (void)param;
     uint8_t *base = (uint8_t *)sh_host_image_base();
 
-    /* Phase 1: wait for the cvar system to come up (up to ~60s @ 10ms). */
+    /* Wait up to about 60 seconds for the cvar system. */
     int applied = 0;
     for (int i = 0; i < 6000 && !applied; i++) {
         if (base == NULL)
@@ -287,12 +215,10 @@ static DWORD WINAPI unlock_thread(LPVOID param)
             Sleep(10);
     }
     if (!applied)
-        return 0; /* engine never readied the cvar system -- give up quietly */
+        return 0;
     backend_log("B2: cvar-unlock APPLIED -- all cvars findable+settable (dev-table alias + NOCHEAT); +cvar launch options now apply");
 
-    /* Phase 2: re-assert for a short window to keep the developer-table alias snapshot current as
-     * late cvars register, and to ensure it is in place before the startup +cvar apply. ~10s @ 50ms.
-     * (See README "Timing": if the boot apply ever beats this window, switch to the detour variant.) */
+    /* Refresh for about ten seconds; startup +cvar timing is still a polling race. */
     for (int i = 0; i < 200; i++) {
         apply_unlock(base);
         Sleep(50);
@@ -300,9 +226,8 @@ static DWORD WINAPI unlock_thread(LPVOID param)
     return 0;
 }
 
-/* Backend entry: spin the cvar-unlock onto its own thread (loader-lock-safe CreateThread). Called from
- * the backend DllMain at DLL_PROCESS_ATTACH. unlock_thread is self-contained (its own CmdSystemLea sig
- * scan) so it runs independently of the bootstrap thread; the deferred poll handles the +cvar-apply timing. */
+/* Called from DllMain; the worker waits until after loader initialization to run.
+ * Its independent signature scan does not require backend bootstrap to finish. */
 void sh_cvar_unlock_start(void)
 {
     HANDLE h = CreateThread(NULL, 0, unlock_thread, NULL, 0, NULL);

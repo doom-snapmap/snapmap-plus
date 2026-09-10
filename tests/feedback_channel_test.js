@@ -1,14 +1,6 @@
-/* The feedback relay's release-channel classifier, lifted from the deployed Worker. Pure ASCII.
- *
- * The in-app dialog reports the release TAG, which carries a leading "v" -- install.json holds
- * "v0.2.1-beta.7", not "0.2.1-beta.7". channelOf's pattern used to demand a bare x.y.z, so it
- * returned null for every real report: no issue was ever labelled beta or stable, and
- * issues-retest.yml, which only prompts beta-labelled reports when the new release is a
- * pre-release, prompted nothing for four consecutive betas.
- *
- * worker.js is an ES module that runs on Cloudflare, so this extracts the one function from the
- * source rather than importing it, the same way the decl editor tests read mockup.html.
- */
+/* Tests release-channel classification, including the v-prefixed tags sent
+ * by the UI. Extract the function from the Worker module without importing
+ * its runtime dependencies. */
 'use strict';
 const fs = require('fs');
 const path = require('path');

@@ -1,15 +1,6 @@
-/* The feedback relay's renderer classifier + the two body renderers that consume it, lifted from the
- * deployed Worker. Pure ASCII.
- *
- * DOOM 2016 ships one executable per renderer and relaunches itself when r_renderAPI changes, so a
- * report has to say which one the player was in -- an issue that only reproduces under OpenGL is
- * otherwise indistinguishable on the tracker from one that happens under both. The relay must not
- * echo whatever the POST contained into a public issue, so an unrecognized token has to degrade to
- * "unknown" (no line, no label) rather than reach the tracker.
- *
- * worker.js is an ES module that runs on Cloudflare, so this extracts the pieces from the source
- * rather than importing it, the same way feedback_channel_test.js does.
- */
+/* Tests renderer classification and issue-body formatting from the Worker
+ * source. Unknown input must produce no renderer label or raw tracker text.
+ * Extract the functions without importing Worker runtime dependencies. */
 'use strict';
 const fs = require('fs');
 const path = require('path');

@@ -1,19 +1,7 @@
-"""Extract a minimal unique masked signature for a function, and prove it ports.
-
-Given a function's RVA on the reference image, disassemble forward from its entry,
-wildcard the operands that move between builds (RIP-relative displacements and branch
-rel32s), and grow the window one instruction at a time until the pattern matches exactly
-once on the reference image. Then require it to match exactly once on the target image
-too, and report the RVA it lands on there.
-
-A signature that is unique on one image but not the other is rejected, not shipped --
-that is the failure mode `RenderLogStub` illustrates: a pattern that is a *shape*
-(`mov [rsp+0x20],r9; ret` plus padding) rather than an identity can be accidentally
-unique on the image it was extracted from and mean nothing on any other.
-
-Usage:
-    extract_sig.py <ref.exe> <target.exe> <rva> [<rva> ...]
-"""
+"""Grow a masked function signature until it matches uniquely on the reference
+image, then require uniqueness on the target. Mask relative addresses while
+retaining structural operands. A unique match still needs semantic verification.
+Usage: extract_sig.py <ref.exe> <target.exe> <rva> [<rva> ...]"""
 import struct, sys
 
 from derive_global import sections, text_of, compile_pat, scan, wildcard_slots, md

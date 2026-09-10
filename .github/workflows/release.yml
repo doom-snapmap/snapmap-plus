@@ -1,14 +1,7 @@
-# release.yml -- the maintainer-only release pipeline.
-#
-# Runs ONLY on a pushed tag v* -> it builds only reviewed code, and it is the sole place the publish token
-# lives (unreachable from a PR). Cut a release: prepare its notes with prepare-release.yml, merge that pull
-# request, then `git tag v1.2.3 && git push origin v1.2.3` -- see docs/contributing.md, "Cutting a release".
-# It builds the DLLs + the installer, assembles the overlay, and publishes a GitHub Release with the bundle
-# zip + snapmap-plus.exe + install.ps1. (The release publishes to THIS repo via the github context -- no slug.)
-#
-# Every third-party action is pinned to a full commit SHA (immutable) with a version comment; Dependabot
-# (.github/dependabot.yml) proposes bumps as reviewable PRs. This workflow also attests the provenance of the
-# published release artifacts (actions/attest-build-provenance) so a downloader can verify they came from here.
+# Build and publish the DLL bundle, installer and bootstrapper on version tags.
+# Maintainers must review and merge the changelog entry before tagging.
+# Pin actions to commit SHAs and attest the downloadable artifacts.
+# See docs/contributing.md for the release procedure.
 name: Release
 
 on:
@@ -22,30 +15,20 @@ permissions:
 
 jobs:
   release:
-    # PINNED, not windows-latest. A shipped DLL is only reproducible if it can be rebuilt with the same
-    # compiler, and "latest" is a moving alias -- when it rolls to a new image the Visual Studio version
-    # (and with it the MSVC toolset) changes underneath the release with no commit to show for it. The
-    # image pin fixes the VS major version; SNAPMAPPLUS_VCVARS_VER below fixes the exact toolset inside
-    # it; /Brepro in the build scripts removes the build timestamp. Together those make a release
-    # rebuildable byte-for-byte, which is what lets a maintainer confirm a shipped binary matches source.
+    # Pin the runner family and MSVC toolset; /Brepro removes PE timestamps.
+    # Other runner dependencies can still change, so verify reproducibility separately.
     runs-on: windows-2022
     env:
-      # The MSVC toolset every shipped binary is built with. Both build.ps1 scripts read this (the
-      # repo-root build.ps1 forwards no arguments, so an env var is what reaches both halves) and pass it
-      # to vcvars64.bat as -vcvars_ver, after checking it is installed.
-      # TO BUMP: if a runner image stops shipping this toolset the build fails with a named error listing
-      # the toolsets that ARE installed -- copy the wanted one from that error into the line below.
+      # Both DLL build scripts read this toolset version. If the runner removes it,
+      # select a supported version from the build error and validate the new output.
       SNAPMAPPLUS_VCVARS_VER: '14.44.35207'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Read this release's notes
         shell: bash
         run: |
-          # CHANGELOG.md is the source of truth: prepare-release.yml drafted this entry and
-          # a maintainer reviewed and merged it. This runs FIRST, so a tag with no entry
-          # costs seconds instead of a full Windows build. `python` (not python3) is the
-          # reliable name on the windows-2022 image, and the parser writes the file itself
-          # rather than using a shell redirect, whose encoding differs between runner OSes.
+          # Require reviewed notes before building. The parser writes UTF-8 itself
+          # to avoid shell-redirection encoding differences.
           set -euo pipefail
           python tools/changelog.py --section "$GITHUB_REF_NAME" --out notes.md
           cat notes.md
@@ -56,8 +39,7 @@ jobs:
       - name: Build + package
         shell: pwsh
         run: |
-          # The .ps1 throw on failure (ErrorActionPreference=Stop); do NOT gate on $LASTEXITCODE -- a pure-cmdlet
-          # package.ps1 runs no native command, so it stays $null and "$null -ne 0" is TRUE (a false failure).
+          # Scripts throw on failure; cmdlet-only scripts may leave LASTEXITCODE unset.
           $ErrorActionPreference = 'Stop'
           .\build.ps1
           .\package.ps1
@@ -65,35 +47,23 @@ jobs:
         shell: pwsh
         working-directory: installer
         run: |
-          # build.ps1 embeds the Windows version resource + application manifest, strips symbols, and
-          # trims local build paths (the free antivirus-false-positive mitigations), then stamps the tag.
-          # Same recipe as a local dev build, so what ships is shaped exactly like what is tested.
+          # Embed Windows metadata, strip symbols and local paths, and stamp the tag.
           .\build.ps1 -Version "${{ github.ref_name }}" -Out ..\dist\snapmap-plus.exe
           if ($LASTEXITCODE -ne 0) { throw "installer build failed" }
 
-      # --- Authenticode code signing slots in HERE (the strongest antivirus / SmartScreen lever) ---
-      # A signed dist\snapmap-plus.exe (and, ideally, the two DLLs in dist\) clears the "unknown publisher"
-      # SmartScreen prompt and sharply lowers heuristic AV scores on the direct download. The signing
-      # step is added once a signing identity is chosen + its credential is stored as a repo secret
-      # (e.g. Azure Trusted Signing via azure/trusted-signing-action, or signtool with a PFX/EV token).
-      # It must run AFTER this build and BEFORE the zip + provenance attestation below, so the attested
-      # bytes are the signed bytes.
+      # A future signing step belongs after compilation and before packaging and
+      # attestation, so the published hashes cover the signed artifacts.
       - name: Zip the overlay
         shell: pwsh
         run: |
-          # snapmap-plus-bundle.zip = the lean overlay (2 DLLs) + MANIFEST.sha256 (the installer's --release download
-          # target). snapmap-plus.exe is published as a SEPARATE asset, not bundled into the overlay zip.
+          # Bundle the two DLLs and manifest; publish the installer separately.
           Compress-Archive -Force -DestinationPath snapmap-plus-bundle.zip `
             -Path dist\XINPUT1_3.dll, dist\snapmap-plus, dist\MANIFEST.sha256
       - name: Zip the debug symbols (maintainer artifact)
         shell: pwsh
         run: |
-          # The PDB + MAP for both DLLs -- what turns a "XINPUT1_3.dll+0x1234" in a filed crash report back
-          # into a function name. Published as a SEPARATE asset because these are for maintainers, not part
-          # of what gets installed: they are deliberately NOT copied into dist\, NOT listed in
-          # MANIFEST.sha256, and NOT inside snapmap-plus-bundle.zip. That separation is load-bearing --
-          # the installer installs exactly the files the manifest lists, so anything added there would land
-          # in every user's DOOM folder. They come straight from build\, which package.ps1 never reads.
+          # Publish PDB/MAP files separately for crash symbolization. Keep them out
+          # of dist and MANIFEST.sha256 so the installer does not deploy them.
           $ErrorActionPreference = 'Stop'
           $syms = @("build\XINPUT1_3.pdb", "build\XINPUT1_3.map",
                     "build\webview\snapmap-plus-ui.pdb", "build\webview\snapmap-plus-ui.map")
@@ -102,17 +72,15 @@ jobs:
       - name: Attest build provenance (the published artifacts)
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          # Attest exactly what users download: the overlay bundle + the installer exe. A downloader can then
-          # verify origin with `gh attestation verify <file> --repo doom-snapmap/snapmap-plus`.
+          # Attest the downloadable bundle and installer.
           subject-path: |
             snapmap-plus-bundle.zip
             dist/snapmap-plus.exe
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          # A tag with a '-' (e.g. v0.3.0-beta.1) is a BETA pre-release: GitHub excludes it from "latest", so
-          # `snapmap-plus update` (end users) never gets it; beta testers opt in via `snapmap-plus install --release <tag>`.
-          # A plain tag (v0.3.0) is the stable release end users update to.
+          # Hyphenated tags are prereleases. Default installs prefer stable releases,
+          # falling back to beta only while no stable exists.
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             snapmap-plus-bundle.zip
@@ -121,8 +89,4 @@ jobs:
             snapmap-plus-symbols.zip
           body_path: notes.md
 
-# --- Auto-re-patcher (PLANNED, not built -- the portability endgame) ---
-# A future job that, on a NEW DOOM build, re-resolves the engine signatures (src/backend/signatures.c) against
-# the new binary, rebuilds, runs the in-DLL self-proof, and -- if green -- publishes a compatible release
-# automatically. Because the clone resolves engine functions by SIGNATURE (not hardcoded RVAs), many DOOM
-# patches need no rebuild at all; this job handles the ones that do. v1 ships this as a documented stub only.
+# Automatic re-porting after a DOOM update is not implemented.

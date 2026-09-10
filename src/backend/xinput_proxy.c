@@ -1,24 +1,9 @@
-/* xinput_proxy.c -- the XInput export surface for the Snapmap+ BACKEND's XINPUT1_3.dll.
- *
- * Vanilla DOOM imports XINPUT1_3.dll for controller input (XInputGetState/SetState/GetCapabilities --
- * the 3 the OG SnapHak's own XINPUT1_3.dll implements). OUR backend takes that same app-dir slot (the
- * OG SnapHak loader lived in XINPUT1_3.dll too -- our clone occupies the same vector) so our DllMain
- * runs, and these thunks keep input working by forwarding each call to the real System32 XInput at
- * runtime (LoadLibrary by absolute path -> GetProcAddress). Runtime thunks (not .def forwarders)
- * because MSVC's .def `/EXPORT:name=dll.func` treats the dotted target as a local alias, not a
- * forwarder. (Reused verbatim from the fault-shield proxy template -- the backend is
- * a DISTINCT DLL, this is only the shared export-forwarding pattern.)
- *
- * XInputGetDSoundAudioDeviceGuids is XInput-1.3-only -> from XInput9_1_0; the rest from XInput1_4.
- *
- * EXPORT ORDINALS (critical -- do NOT re-add __declspec(dllexport)): DOOM imports XINPUT1_3.dll BY
- * ORDINAL (ord 2=XInputGetState, 3=XInputSetState -- the only two it pulls). The bodies below export via
- * xinput1_3.def (/DEF: in build.ps1), which pins both the names AND the ordinals to match the real
- * System32 XInput1_3.dll. With __declspec auto-numbering these landed ALPHABETICALLY (ord 2 =
- * XInputGetBatteryInformation), so DOOM's per-frame controller poll called the wrong function and the
- * real fn wrote a battery struct through a garbage pointer -> 0xC0000374 heap corruption on any machine
- * with a controller (keyboard/mouse never polls XInput, which is why it slipped through testing).
- */
+/* XInput proxy exports keep controllers working while the backend loads in DOOM.
+ * Calls resolve system implementations lazily: XInput1_4 for common functions
+ * and XInput9_1_0 for the audio-GUID export.
+ * Export through xinput1_3.def only; do not add __declspec(dllexport). DOOM imports
+ * GetState and SetState by ordinals 2 and 3, so automatic ordinal assignment can
+ * dispatch a controller poll to an incompatible function and corrupt memory. */
 #include <windows.h>
 
 #define ERR_DEV_NOT_CONNECTED 1167u   /* ERROR_DEVICE_NOT_CONNECTED -- benign "no controller" fallback */

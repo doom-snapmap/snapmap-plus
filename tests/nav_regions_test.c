@@ -1,18 +1,6 @@
-/* nav_regions_test.c -- the author's navigation regions, read out of a map.
- *
- * Every map here is SYNTHESIZED, member by member, to the shapes a real map
- * uses: this product ships no game bytes and a test may not either. What the
- * tests pin is the part that cannot be seen by looking at one volume -- that a
- * ticked box becomes the rectangle at its TOP face, that a box nobody ticked
- * is left alone, and that ownership comes from `instanceEntities` and nothing
- * else. Two instances of one module hold their volumes at identical
- * module-local coordinates, so an attribution bug does not look wrong on one
- * instance; it looks like the other instance's geometry.
- *
- * The malformed cases are not politeness. The input is a downloaded map, so a
- * truncated, unbalanced or lying document has to come back empty rather than
- * read off the end of the buffer.
- */
+/* Tests navigation-volume extraction and instance ownership from synthetic
+ * maps. Identical module-local coordinates in separate instances must remain
+ * distinct, and malformed documents must return an empty result. */
 #include <windows.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -37,12 +25,7 @@ static int near_f(float a, float b)
     return d < 0.001f && d > -0.001f;
 }
 
-/* ---- reading a region's quad ------------------------------------------
- *
- * A region is four corners now, not a rect, so what used to be a member read is
- * a min or max over the corners. The values these return for an UPRIGHT volume
- * are exactly what the old x0/y1/top_z members held, which is what lets the
- * pre-existing cases below assert the same numbers they always did. */
+/* Quad extrema preserve the upright-volume expectations below. */
 static float quad_min_x(const sh_nav_region *r)
 {
     float v = r->c[0][0]; int i;
@@ -131,9 +114,7 @@ static void put_entity(blob *b, int first, int uid, const char *inherit, const c
          first ? "" : ",", inherit, edit, uid);
 }
 
-/* A blocking volume's `edit` object. `renderModelInfo` carries its own `size`
- * in a real map, and it is not the box -- writing a decoy one here is what
- * makes the member lookups prove they are scoped to `clipModelInfo`. */
+/* The decoy renderModelInfo.size must not replace clipModelInfo.size. */
 static void edit_box(char *out, size_t cap, const char *flags, const char *type,
                      double cx, double cy, double cz,
                      double sx, double sy, double sz)
@@ -186,12 +167,8 @@ static char *map_of(const char *instances, const char *entities,
 
 /* One instance, one ticked box. The rectangle is centred on spawnPosition in x
  * and y, and its z is the TOP of the box -- spawnPosition.z is the bottom. */
-/* One instance, one ticked Blocking Box, correctly attributed. Attribution
- * through `instanceEntities` is not optional: without it the keep filter drops
- * the region and every assertion reads zero. `orient` is a raw
- * `spawnOrientation` fragment, or NULL for none.
- *
- * The caller frees the returned document; the blobs are closed here. */
+/* Build one attributed, marked Blocking Box. orient supplies optional raw
+ * spawnOrientation JSON. The caller owns the completed document. */
 static char *map_with_volume(double sx, double sy, double sz,
                              double px, double py, double pz,
                              const char *orient, size_t *out_n)
@@ -350,10 +327,8 @@ static void test_box_shape(void)
 /* whose volume is it                                                    */
 /* ==================================================================== */
 
-/* Two instances of THE SAME module, one ticked volume each. Their coordinates
- * are module-local and identical, so `instanceEntities` is the only thing that
- * can tell the two apart -- and the Nth instance of a module is the Nth one in
- * the instance array, which is the order BuildAAS opens them in. */
+/* Identical local geometry in two module instances must remain distinct.
+ * Match instance order to the instanceEntities buckets. */
 static void test_two_instances_of_one_module(void)
 {
     blob inst, ents;
@@ -430,9 +405,7 @@ static void test_two_instances_of_one_module(void)
     bclose(&ents);
 }
 
-/* The last bucket is the orphan bucket: entities that belong to no instance.
- * A ticked volume in it is skipped, because guessing its owner by coordinates
- * is exactly what the test above shows cannot work. */
+/* Skip orphan volumes; module-local coordinates cannot identify an owner. */
 static void test_orphan_bucket(void)
 {
     blob inst, ents;
@@ -463,9 +436,7 @@ static void test_orphan_bucket(void)
     bclose(&ents);
 }
 
-/* An instance whose moduleName is not a module path keeps its slot -- the
- * multimap addresses instances by position -- but nothing can be baked for it,
- * so its volumes are dropped and it answers to no module name. */
+/* An invalid module name keeps its instance slot but contributes no volumes. */
 static void test_unnameable_instance(void)
 {
     blob inst, ents;
@@ -562,9 +533,7 @@ static void test_truncation(void)
 /* a stranger's map                                                      */
 /* ==================================================================== */
 
-/* `out` is fully overwritten even when the document is refused, so a caller
- * that ignores the return value still reads an empty map rather than whatever
- * was on its stack. */
+/* A refused document must overwrite out with an empty result. */
 static void refused(const char *json, size_t len)
 {
     sh_nav_map m;
@@ -658,25 +627,10 @@ static void test_malformed(void)
 /* the live editor                                                       */
 /* ==================================================================== */
 
-/* Pressing Play does not serialize the map, so the bytes above are what the
- * author saved and NOT what they are looking at. These tests stand in for the
- * editor: a table of entities the engine would serialize on request, driven
- * through the same two callbacks the backend passes down. No game is involved
- * and no game bytes are here -- each document is written member by member to
- * the shape the engine's reflection emits for one idSnapEntity.
- *
- * THE ID IS THE uniqueId, NOT the position in the map JSON's entities array.
- * The editor's entity table is sparse and indexed by uniqueId: measured live
- * 2026-09-08, an 11-entity map whose uniqueIds ran 56..69 produced an editor
- * table of highWater 70, and the marked Blocking Box -- entities[3], uniqueId
- * 62 -- answered at live id 62. These tests therefore place each document at its
- * uniqueId, which for the shared two-box map below is 11 and 22. An earlier
- * revision of both this file and nav_regions.c assumed the array index, which is
- * why a volume ticked in the editor never survived to the bake.
- *
- * The live document is still not obliged to CARRY `uniqueId` as a member: it is
- * addressed by the id it answers to, not by what it says about itself, and
- * several documents below leave the member out entirely to keep that honest. */
+/* Simulate unsaved editor state with synthetic entity documents. The live
+ * table is sparse and indexed by uniqueId, not the map JSON array position.
+ * Documents are placed at IDs 11 and 22 and may omit their own uniqueId member;
+ * the callback address supplies identity. */
 
 #define LIVE_MAX 640
 
@@ -706,9 +660,7 @@ static int live_json(int id, char *out, int cap, void *ctx)
     if (!e->json[id] || e->refuse[id]) return 0;
     n = strlen(e->json[id]);
     if ((int)n >= cap) return 0;
-    /* The contract is a LENGTH, not a string: fill the rest with an unbalanced
-     * brace so anything read past the reported length fails loudly instead of
-     * happening to work. */
+    /* Poison bytes after the reported length to catch reads beyond the document. */
     memset(out, '{', (size_t)cap);
     memcpy(out, e->json[id], n);
     if (e->overrun[id]) return cap + 64;
@@ -774,10 +726,8 @@ static char *two_box_map(sh_nav_map *m)
     return json;
 }
 
-/* The bug this exists for: the author ticks "AI Navigation" on a box that was
- * already in the map and presses Play. Nothing is saved, so the map bytes still
- * say the box is ordinary -- and the volume has to be picked up anyway, at its
- * top face, attributed to the instance the map said owns it. */
+/* An unsaved AI Navigation toggle must update the volume while retaining
+ * the instance ownership recorded at load. */
 static void test_live_tick_this_session(void)
 {
     sh_nav_map m;
@@ -834,17 +784,9 @@ static void test_live_untick_this_session(void)
     free(json); free(live0); free(live1);
 }
 
-/* PRESSING PLAY MUST NOT UNMARK THE MAP.
- *
- * The live entity array becomes the play session's the moment a playtest starts,
- * so entities keep answering and not one of them is a Blocking Box. That is a
- * surface that has stopped showing us this map's volumes -- NOT an author who
- * unticked them, because unticking leaves the box there without the marker.
- *
- * Reading it as the latter deleted every mark on every Play, and since the
- * commit also collapses the bake plan the feature stayed off for the rest of the
- * session: measured live 2026-09-06, editor "1 volume(s) ... ready" -> Play "no
- * volume in this map is marked for AI navigation". */
+/* A playtest surface may contain entities but no Blocking Boxes. Preserve
+ * loaded marks until the surface can distinguish an unticked box from an
+ * unavailable editor volume. */
 static void test_live_no_volumes_keeps_map_marks(void)
 {
     sh_nav_map m, before;
@@ -866,16 +808,8 @@ static void test_live_no_volumes_keeps_map_marks(void)
     free(json); free(live0); free(live1);
 }
 
-/* MARKS WE CANNOT PLACE ARE NOT EVIDENCE THE MAP HAS NONE.
- *
- * Attribution is by the id the map load recorded. When the live surface answers
- * about a different id space -- which is what a playtest does -- the marked
- * volumes are found and then every one of them falls out at the owner lookup.
- * Committing that leaves an empty table, collapses the bake plan, and the
- * feature is off for the session. The load already placed these correctly.
- *
- * Live: "the live editor read dropped 1 module(s) -- scanned 70 entity id(s),
- * found 1 marked volume(s)". */
+/* Preserve loaded marks when live IDs cannot be attributed to their recorded
+ * owners. A different ID space is not evidence that the map has no marks. */
 static void test_live_marked_but_unattributable_keeps_map_marks(void)
 {
     sh_nav_map m, before;
@@ -895,9 +829,7 @@ static void test_live_marked_but_unattributable_keeps_map_marks(void)
     free(json); free(live9);
 }
 
-/* The other side of that rule, so the guard above cannot be widened into "never
- * unmark anything": a surface that DOES show us the Blocking Boxes is entitled
- * to say none of them is marked any more. */
+/* A surface that still exposes the Blocking Boxes may explicitly unmark them. */
 static void test_live_unmarked_volumes_still_clear(void)
 {
     sh_nav_map m;
@@ -916,9 +848,7 @@ static void test_live_unmarked_volumes_still_clear(void)
     free(json); free(live0); free(live1);
 }
 
-/* ABSENT IS FALSE, live exactly as in the map: an untouched volume carries no
- * `flags.noFlood` member at all, and reading that as "ticked" would turn every
- * blocking box in the map into navigation. */
+/* Missing flags.noFlood means unmarked, matching the serialized-map default. */
 static void test_live_absent_marker_is_false(void)
 {
     sh_nav_map m;
@@ -937,9 +867,7 @@ static void test_live_absent_marker_is_false(void)
     free(json); free(live0); free(live1);
 }
 
-/* `blockDemons` rides along, and absent is false there too. A volume demons
- * fall through is not a floor, and the caller is the one that decides what to
- * do about it -- so the flag has to arrive as the author left it. */
+/* Preserve blockDemons, including its absent=false default, for floor admission. */
 static void test_live_block_demons(void)
 {
     sh_nav_map m;
@@ -963,9 +891,7 @@ static void test_live_block_demons(void)
     free(json); free(live0); free(live1);
 }
 
-/* A volume the load pass never saw has no owner anywhere. Coordinates cannot
- * rescue it -- they are module-local -- so it is skipped, and the skip is
- * visible as the gap between what was found and what was kept. */
+/* Skip newly observed volumes without recorded owners; report the lost attribution. */
 static void test_live_volume_without_attribution(void)
 {
     sh_nav_map m;
@@ -991,9 +917,7 @@ static void test_live_volume_without_attribution(void)
     }
     free(json); free(live0); free(live1); free(live2);
 
-    /* the same refusal for an id the map did have, holding something that was
-     * not a blocking volume when it was read: the multimap said nothing about
-     * a volume there, so neither does this */
+    /* An ID recorded for a non-volume does not establish volume ownership. */
     {
         blob inst, ents;
         char edit[1024];
@@ -1043,13 +967,8 @@ static void test_live_valid_gates_the_scan(void)
     if (m.region_count == 1) CHECK(m.regions[0].entity == 22);
     free(json);
 
-    /* and an entity whose serializer reports more than it wrote is refused
-     * rather than read past the end of what it handed over.
-     *
-     * Refusing it leaves NO legible Blocking Box on the surface, so the map
-     * keeps the marks it loaded with: an entity we could not read is not an
-     * entity that told us it is unmarked. Same reasoning as the no-surface case
-     * below, and the reason a Play cannot unmark a map. */
+    /* Reject a serializer length beyond the supplied buffer. With no legible
+     * Blocking Box left, preserve the loaded marks. */
     json = two_box_map(&m);
     memset(&e, 0, sizeof e);
     e.json[22] = live1;
@@ -1060,9 +979,7 @@ static void test_live_valid_gates_the_scan(void)
     free(json); free(live1);
 }
 
-/* No live surface at all. Both spellings of that leave the map EXACTLY as it
- * was loaded -- a failed refresh falls back to the marks the map arrived with,
- * never to none. */
+/* Without a live surface, retain the marks captured at load. */
 static void test_live_unreadable(void)
 {
     sh_nav_map m, before;
@@ -1081,9 +998,7 @@ static void test_live_unreadable(void)
     CHECK(memcmp(&before, &m, sizeof m) == 0);
     CHECK(sh_nav_regions_refresh_live(NULL, 4, live_valid, live_json, &e) == -1);
 
-    /* an editor that answers nothing is the same answer: an empty id range, and
-     * a range of ids that are all rejected, are both unread rather than a map
-     * whose volumes have all gone */
+    /* An empty or wholly unreadable ID range also preserves loaded marks. */
     CHECK(sh_nav_regions_refresh_live(&m, -1, live_valid, live_json, &e) == -1);
     CHECK(memcmp(&before, &m, sizeof m) == 0);
     memset(&e, 0, sizeof e);
@@ -1161,12 +1076,8 @@ static void test_live_region_cap(void)
 /* orientation: the quad is the box's real walkable face                 */
 /* ==================================================================== */
 
-/* A sparse `spawnOrientation` omits `mat[2]` entirely. Seeded with the IDENTITY
- * that is a rotation; seeded with zeros it is a degenerate matrix and every
- * corner collapses. Over the 6,932 entities carrying a `mat` in a real map, an
- * identity-seeded read yields 6,932 orthonormal matrices with determinant +1
- * and a zero-seeded read yields 1,604 -- so this is the mistake that would
- * quietly break every rotated volume in the game. */
+/* Sparse spawnOrientation matrices inherit missing rows from identity.
+ * Zero defaults would collapse corners when mat[2] is omitted. */
 static void test_sparse_orientation_seeds_identity(void)
 {
     sh_nav_map m;
@@ -1187,11 +1098,8 @@ static void test_sparse_orientation_seeds_identity(void)
     free(json);
 }
 
-/* A 90-degree yaw CANNOT pin `R` against `Rt`: for a centred box both give the
- * same corner SET, and at 45 degrees both give equal x and y extents too. Only
- * the actual corner POSITIONS distinguish them. Under Rt (correct) a 200x100
- * box yawed 45 degrees has corners at (+/-35.355, +/-106.066); under R they are
- * at (+/-106.066, +/-35.355). */
+/* Check corner positions to distinguish R from its transpose; symmetric
+ * extents alone cannot reveal reversed yaw. */
 static void test_45_yaw_on_oblong_pins_the_convention(void)
 {
     sh_nav_map m;
@@ -1216,12 +1124,8 @@ static void test_45_yaw_on_oblong_pins_the_convention(void)
         for (i = 0; i < 4; i++) {
             float cx = m.regions[0].c[i][0], cy = m.regions[0].c[i][1];
             float ax = cx < 0 ? -cx : cx, ay = cy < 0 ? -cy : cy;
-            /* A 200x100 rect at 45 degrees has corners of BOTH shapes -- two at
-             * (35.355, 106.066) and two at (106.066, 35.355) -- so the magnitudes
-             * alone say nothing. What separates the conventions is the SIGN
-             * PAIRING: a +45 yaw puts the long axis along y = x, so every corner
-             * has sign(x) == sign(y). Under the transposed reading the yaw is -45
-             * and every corner straddles y = -x instead. */
+            /* Check sign pairing as well as magnitudes: +45-degree yaw aligns the
+             * long axis with y=x; the transposed interpretation aligns it with y=-x. */
             CHECK((near_f(ax, 35.3553f) && near_f(ay, 106.0660f)) ||
                   (near_f(ax, 106.0660f) && near_f(ay, 35.3553f)));
             CHECK(cx * cy > 0.0f);
@@ -1230,9 +1134,7 @@ static void test_45_yaw_on_oblong_pins_the_convention(void)
     free(json);
 }
 
-/* A box on its side -- 58 of the 82 non-upright volumes in one real map sit at
- * exactly 90 degrees. Its walkable face is a SIDE face, footprint size.x by
- * size.z, and the old code put an area a full box-height away from any surface. */
+/* At a 90-degree tilt the walkable surface is a side face with size.x by size.z. */
 static void test_box_on_its_side_uses_a_side_face(void)
 {
     sh_nav_map m;
@@ -1253,10 +1155,8 @@ static void test_box_on_its_side_uses_a_side_face(void)
     free(json);
 }
 
-/* Rotated 180 about x: the box hangs BELOW spawnPosition, so its walkable face
- * is what was the underside, at spawnPosition.z. The old `cz + sz` put the area
- * a box-height up in open air, where nothing can stand and nothing else can
- * claim the column. */
+/* A 180-degree x rotation puts the box below spawnPosition; its walkable
+ * underside lies at spawnPosition.z. */
 static void test_inverted_box_takes_its_face_from_the_bottom(void)
 {
     sh_nav_map m;
@@ -1275,9 +1175,7 @@ static void test_inverted_box_takes_its_face_from_the_bottom(void)
     free(json);
 }
 
-/* An upright volume with no `spawnOrientation` must produce exactly what the
- * rect reader produced -- the regression guard on the 87.6% of volumes in a real
- * map that are upright. */
+/* Omitted spawnOrientation must preserve the upright-volume result. */
 static void test_absent_orientation_matches_the_old_rect(void)
 {
     sh_nav_map m;

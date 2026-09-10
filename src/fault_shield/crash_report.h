@@ -1,38 +1,21 @@
-/* crash_report.h -- crash-record capture for the SHIPPED build (the crash-reporting pipeline's
- * capture end).
- *
- * The shield's recovery layers (veh.c) keep the editor alive where they can; this module is the
- * durable evidence trail for the faults that still matter to the user: each one is written as a
- * small JSON crash record to <game>\snapmap-plus\crash\pending-*.json with crash-safe primitives only.
- * The Snapmap+ UI polls that directory and raises the crash-report dialog -- seconds later
- * for a survived (recovered) fault, or on the next launch when the process died.
- *
- * Three producers:
- *   - the Class-B recovery path in veh.c (survived fault -> record, dialog appears in-session);
- *   - the terminal idFatalException throw seen by veh.c LAYER 2 (the engine will exit after the
- *     Frame catch rethrows -- this is the ONLY capture point for that death);
- *   - the fatal handlers armed here: an unhandled-exception filter + a first-chance one-shot for
- *     the fatal codes that never reach a filter (heap corruption 0xC0000374, __fastfail 0xC0000409),
- *     both of which also write a crash dump (snapmap-plus\logs\sh_crash.dmp, local only -- the
- *     dialog never uploads it).
- *
- * Everything here is LOG-ONLY: no handler alters an exception's disposition, and a write failure
- * is silently absorbed (never make the crash worse).
- */
+/* Persist fault records under <game>\snapmap-plus\crash\pending-*.json.
+ * The UI polls these records for notices or report prompts. Recovery paths,
+ * terminal engine throws, and fatal handlers can produce records; a Class-B or
+ * off-thread record alone does not establish that the process survived.
+ * Fatal handlers also attempt a local minidump. Capture does not alter exception
+ * disposition, and write failures are ignored. */
 #ifndef SHIELD_CRASH_REPORT_H
 #define SHIELD_CRASH_REPORT_H
 
 #include <windows.h>
 #include <stdint.h>
 
-/* Resolve the record/dump directories from this DLL's own location, read the installed version
- * (so a record names the version that CRASHED, not the one that later reports it), and pre-bind
- * dbghelp's dump writer (never LoadLibrary at crash time). Call once, off the loader lock. */
+/* Resolve paths, snapshot the installed version and renderer, and bind dbghelp.
+ * Call once outside the loader lock, before arming fatal handlers. */
 void crash_report_init(void);
 
-/* Arm the fatal-path handlers: SetUnhandledExceptionFilter + a first-chance VEH one-shot for the
- * filter-bypassing fatal codes, plus a bounded re-assert loop (the engine installs its own filter
- * during bring-up and would silently displace ours). Call after crash_report_init. */
+/* Arm the fatal VEH and unhandled filter, then reassert the filter during startup.
+ * Direct fail-fast termination may bypass both handlers. Call after initialization. */
 void crash_report_arm_fatal_handlers(void);
 
 /* Write one crash record (pending-<stamp>.json, CREATE_NEW, write-through). Crash-safe: static

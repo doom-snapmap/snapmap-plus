@@ -1,34 +1,13 @@
-/* nav_regions.h -- the author's navigation regions, read out of the map.
+/* Read Blocking Box navigation geometry and instance ownership from map JSON.
  *
- * WHAT AN AUTHOR ACTUALLY DOES
- * ----------------------------
- * They build their arena out of Blocking Boxes, as they always have, and tick
- * "AI Navigation" on the ones demons are meant to walk on. That tick sets
- * `flags.noFlood` on the volume, an existing reflected idEntity boolean.
- * The runtime access audit found no gameplay consumer of its bit in either
- * supported executable. The Blocking Box decl and base constructor default it
- * to false. This uses vanilla typeinfo and serialization, not a new field.
+ * AI Navigation uses flags.noFlood. Legacy affectsNavmesh markers migrate
+ * before native parsing; an explicit new marker, including false, wins.
+ * Runtime obstacle policy is applied separately. See docs/navigation-
+ * markers.md.
  *
- * The former marker, `affectsNavmesh`, is NOT inert: the native blocking-volume
- * setup clears CONTENTS_OBSTACLE when it is true. Old marked boxes migrate at
- * map load to flags.noFlood, with affectsNavmesh cleared before native parsing.
- * An explicit new marker wins, including false. The bake reader itself never
- * falls back to affectsNavmesh. See docs/navigation-markers.md for scope and
- * compatibility limits.
- *
- * WHAT THIS MODULE DOES
- * ---------------------
- * Reads the map JSON once and answers: which module instances are placed, and
- * which ticked volumes belong to each. Attribution is by `instanceEntities` --
- * the engine's OWN record of which entities belong to which instance -- and
- * never by containment, because an entity's coordinates are module-local and
- * two instances of one module have identical local coordinates.
- *
- * A region is reported in MODULE-LOCAL space, which is the space the module's
- * AAS is baked in, so the caller can hand it straight to the augmenter without
- * knowing where the instance sits in the world.
- *
- * NO GAME BYTES: tests synthesize map JSON, they do not embed a real map.
+ * Ownership comes from instanceEntities, never spatial containment:
+ * coordinates are module-local and repeated instances can share the same
+ * local geometry.
  */
 #ifndef SNAPMAP_PLUS_NAV_REGIONS_H
 #define SNAPMAP_PLUS_NAV_REGIONS_H
@@ -37,7 +16,18 @@
 
 #define SH_NAVR_MAX_INSTANCES   256
 #define SH_NAVR_MAX_REGIONS     512
-#define SH_NAVR_MODULE_CAP      128     /* "category/module" + NUL */
+#define SH_NAVR_MODULE_CAP      128     /* A box encoded as one oriented face and
+                                         * its depth in module-local space.
+                                         * spawnPosition is centred in x/y and at
+                                         * the bottom in local z. Corners wind
+                                         * clockwise from +Z; face>>1 selects the
+                                         * OBB axis and face&1 its negative side.
+                                         *
+                                         * nav_geometry reconstructs the solid and
+                                         * considers every face. Walkability
+                                         * depends on the nav class's minFloorCos
+                                         * and clearance settings.
+                                         */
 
 /* One walkable surface an author asked for, in module-local coordinates.
  *
@@ -72,9 +62,9 @@ typedef struct sh_nav_region {
     int marked;            /* distinguishes support from an unmarked obstacle */
 } sh_nav_region;
 
-/* A placed module. `origin`/`orientation` are what BuildAAS applies to that
- * instance's navigation, and together with `module` they are the only identity
- * an instance has -- idSnapInstance carries no id field. */
+/* Placed module identity and transform used by BuildAAS. idSnapInstance has
+ * no separate id field.
+ */
 typedef struct sh_nav_instance {
     char  module[SH_NAVR_MODULE_CAP];   /* "category/module", no path, no .decl */
     float origin[3];
@@ -93,9 +83,9 @@ typedef struct sh_nav_map {
     int             obstacle_count;
 } sh_nav_map;
 
-/* Read `json` into `out`. Returns 1 if the map parsed (even with zero regions),
- * 0 if it is not a map document at all. Never raises; the input is a stranger's
- * map. `out` is fully overwritten, including on failure. */
+/* Parse into out, overwriting it even on failure. Returns 1 for a map
+ * document, including one with no regions, or 0 for invalid input.
+ */
 int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out);
 
 /* Convert legacy Blocking Box markers before native map parsing. Returns a
@@ -108,21 +98,18 @@ char *sh_nav_regions_migrate(const char *json, size_t len, size_t *out_len);
  * ownership and the instance table together with geometry, including new IDs.
  */
 
-/* Serialize live entity `id` to JSON. Returns the length written, or <= 0.
- * The engine's own reflection does this; see apply_engine.c's serialize_entity
- * slot, which is what the entity-state editor already uses in production. */
+/* Serialize live entity id with engine reflection. Returns bytes written, or
+ * <= 0 on failure.
+ */
 typedef int (*sh_navr_entity_json)(int id, char *out, int cap, void *ctx);
 
 /* Is `id` a live entity? */
 typedef int (*sh_navr_entity_valid)(int id, void *ctx);
 
-/* Re-read every Blocking Box's marker from the live entities, replacing `m`'s
- * region set while keeping its instance table and attribution. Returns the
- * number of marked volumes found, or -1 if the live surface could not be read
- * (in which case `m` is left exactly as it was, so a failure falls back to what
- * the map was loaded with rather than to nothing).
- *
- * `highest_id` bounds the scan; ids are probed through `valid`. */
+/* Legacy refresh of markers and geometry using the existing instance
+ * attribution. Returns the marked-volume count, or -1 without changing m if
+ * the live surface cannot be read. highest_id bounds probes through valid.
+ */
 int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
                                 sh_navr_entity_valid valid,
                                 sh_navr_entity_json get_json, void *ctx);

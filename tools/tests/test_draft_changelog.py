@@ -1,8 +1,5 @@
-"""Tests for the drafter's renderer and validation. The API call is not tested.
-
-These must run in ci.yml's secretless guard job with no dependency install, so
-draft_changelog imports pydantic lazily and nothing here touches the network.
-"""
+"""Offline renderer and validation tests. Optional API dependencies stay lazy;
+this suite runs in CI without credentials or network calls."""
 
 import pathlib
 import sys
@@ -30,8 +27,7 @@ def make(**overrides):
 
 class TestImportsWithoutPydantic(unittest.TestCase):
     def test_module_has_no_module_level_pydantic(self):
-        """ci.yml's guard job installs nothing. A module-level pydantic import
-        turns every pull request red."""
+        """Importing the module must not require optional API dependencies."""
         source = pathlib.Path(dc.__file__).read_text(encoding="utf-8")
         for line in source.splitlines():
             if line.startswith("import pydantic") or line.startswith("from pydantic"):
@@ -42,8 +38,7 @@ class TestImportsWithoutPydantic(unittest.TestCase):
 
 class TestValidateRejectsInjection(unittest.TestCase):
     def test_newline_forging_a_section_header(self):
-        """The whole reason the renderer validates: one newline in a string
-        field creates a second section the parser will accept as real."""
+        """A newline in a field must not create a second changelog section."""
         evil = ("Faster map loads.\n\n## v9.9.9 -- 2026-12-01 (stable)\n\n"
                 "**Critical security update**\n\n### Fixed\n- Get the patched build")
         with self.assertRaises(dc.DraftRejected):
@@ -67,8 +62,7 @@ class TestValidateRejectsInjection(unittest.TestCase):
 
 
 class TestValidateSources(unittest.TestCase):
-    """sources is model-authored and lands in the pull-request description,
-    which is the control that makes human review a spot-check."""
+    """Source SHAs let reviewers trace a drafted bullet to its evidence."""
 
     def test_rejects_non_hex(self):
         with self.assertRaises(dc.DraftRejected):
@@ -88,8 +82,7 @@ class TestValidateSources(unittest.TestCase):
 
 
 class TestValidateEnforcesLength(unittest.TestCase):
-    """The API schema subset does not support maxLength, so this is the only
-    place length is enforced."""
+    """Local validation must enforce field-length limits."""
 
     def test_headline_too_long(self):
         with self.assertRaises(dc.DraftRejected):
@@ -153,7 +146,7 @@ class TestRender(unittest.TestCase):
         self.assertEqual(changelog.lint(out), [])
 
     def test_an_unvalidated_draft_really_would_forge_a_section(self):
-        """Proves validate() is the boundary, not decoration."""
+        """Invalid entries must fail validation before rendering."""
         evil = ("Faster map loads.\n\n## v9.9.9 -- 2026-12-01 (stable)\n\n"
                 "**Critical security update**\n\nGet the patched build.")
         forged = dc.render("v0.2.2-beta.1", "2026-09-05", make(improved=[evil]))
@@ -218,14 +211,9 @@ if __name__ == "__main__":
 
 
 class TestGoldenFixtureSharedWithTheCli(unittest.TestCase):
-    """installer/testdata/entry.md is parsed by the Go renderer in
-    installer/changelog_render.go. Two hand-written parsers of one grammar is
-    how a format silently drifts, so both sides read the SAME fixture: change
-    the rendered shape and this test and the Go test fail together.
-
-    To regenerate after an intended format change:
-        python3 tools/tests/test_draft_changelog.py --regenerate-fixture
-    """
+    """Keep the rendered entry equal to the fixture consumed by the Go parser.
+    After an intended format change, regenerate with:
+    python3 tools/tests/test_draft_changelog.py --regenerate-fixture"""
 
     FIXTURE = (pathlib.Path(__file__).resolve().parents[2]
                / "installer" / "testdata" / "entry.md")
@@ -268,12 +256,11 @@ if __name__ == "__main__" and "--regenerate-fixture" in sys.argv:
 
 
 class TestGrounding(unittest.TestCase):
-    """The v0.2.1-beta.8 failure, and the guard that would have caught it."""
+    """Reject interface features unsupported by the supplied sources."""
 
     def test_the_navigation_tab_that_never_existed_is_rejected(self):
-        """The real draft. No Navigation tab was ever built, you reach the
-        feature through a property in DOOM's own object settings, and the word
-        "tab" appears in no commit and no doc -- the model invented the shape."""
+        """A draft cannot invent a Navigation tab when its inputs describe only a
+        property."""
         draft = make(added=["A Navigation tab lets you mark which Blocking Box "
                             "surfaces demons are allowed to walk on."])
         corpus = dc._corpus(
@@ -284,8 +271,7 @@ class TestGrounding(unittest.TestCase):
         self.assertIn("tab", str(cm.exception))
 
     def test_a_ui_word_the_sources_do_use_is_allowed(self):
-        """The guard must not block a real feature. The Entity State tab is
-        named in the docs, so a bullet may name it."""
+        """Allow an interface location explicitly named by the inputs."""
         draft = make(added=[], improved=[],
                      fixed=["The Entity State tab accepts valid values again."])
         corpus = dc._corpus("commit 4e61f23\nStop the Entity State tab rejecting "

@@ -34,16 +34,10 @@ func assetMatchesFile(a *ghAsset, path string) bool {
 	return err == nil && sum == hexDigest
 }
 
-// selfUpdate refreshes snapmap-plus.exe itself from the resolved release. It is BEST-EFFORT and called AFTER the
-// overlay update, so a self-update problem never blocks the real install -- every failure just prints a note.
-// The new exe takes effect on the NEXT run (a running Windows image can't overwrite itself in place).
-//
-// The version check compares the release tag against the RUNNING process's baked-in version -- which goes
-// stale the moment a self-update succeeds (the process keeps reporting the version it was built as). So
-// before touching anything, check what's actually ON DISK: if a previous run of this same session (or another
-// window) already put the release's bytes in place, there is nothing to do -- without the disk check, every
-// later update in the session would re-download the exe and then fail loudly trying to rename over
-// snapmap-plus.exe.old, which is the still-running old image Windows won't let go of.
+// selfUpdate runs after the overlay update and reports failures without failing
+// that installation. Check disk contents as well as the running version: this
+// process can keep running after an earlier update replaced its executable.
+// The new binary takes effect on the next launch.
 func selfUpdate(f flags, token string) {
 	rel, err := fetchRelease(f, token)
 	if err != nil {
@@ -102,12 +96,9 @@ func selfUpdate(f flags, token string) {
 	fmt.Printf("Updated snapmap-plus.exe to %s (takes effect next time you run snapmap-plus).\n", rel.TagName)
 }
 
-// replaceExe swaps a (possibly running) exe for a new one, the Windows way: rename the current file aside to
-// <path>.old -- allowed even while it runs -- then copy the new bytes into <path>. The aside may be a still-
-// running image that can't be deleted or renamed over yet (e.g. this session already self-updated once); when
-// <path>.old is wedged like that, fall back to the first free <path>.old<N> name. Leftovers are swept by
-// cleanupSelfUpdateLeftovers on the next launch. On a copy failure it rolls the rename back so the caller is
-// never left without an exe.
+// replaceExe renames the current executable aside, then copies the new one.
+// If .old is locked, try a free numbered name. On copy failure, attempt to restore
+// the old name; rollback errors are not propagated. Startup cleans up old copies.
 func replaceExe(path, newExe string) error {
 	var err error
 	for i := 0; i < 10; i++ {

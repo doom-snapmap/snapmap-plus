@@ -20,8 +20,8 @@ GitHub has no anonymous write path — filing an issue requires a credential, an
 never ship inside a public binary. The relay is the smallest possible fix: a stateless Worker that
 accepts the app's unauthenticated POST and files the issue as the org's **GitHub App bot identity**
 (installed on this repo with Issues read/write only — reports arrive from `<app-name>[bot]`, not a
-personal account, and the app's key mints short-lived tokens per request, so there is no expiring
-credential to rotate). Users need no account of any kind. Deploy + credential runbook:
+personal account). The Worker caches short-lived installation tokens; maintainers
+still own App-key rotation. Users need no account. Deployment and credentials:
 [`feedback/README.md`](../feedback/README.md).
 
 ## What a filed issue looks like
@@ -34,8 +34,7 @@ credential to rotate). Users need no account of any kind. Deploy + credential ru
   renderer token.
 - **Labels:** the category (`bug` / `enhancement` / `documentation` / `question`), the release channel
   (`beta` / `stable`, from the version string; dev builds get neither), the renderer (`vulkan` /
-  `opengl`), and `user-report` (marks relay-filed issues so the hygiene workflows only ever touch
-  those).
+  `opengl`), and `user-report` (identifies relay-filed issues for release retest prompts).
 
 **Why the renderer:** DOOM 2016 ships one executable per renderer (`DOOMx64vk.exe` / `DOOMx64.exe`)
 and relaunches itself when `r_renderAPI` changes, so a player can be in either one from the same Steam
@@ -44,8 +43,9 @@ that happens under both. The app reports which renderer library the game process
 not the executable name, and nothing else about the machine. The relay accepts only the two known
 tokens; an unrecognized one is dropped rather than echoed into a public issue.
 
-**Dedup:** a report whose signature matches an *open* issue becomes a comment on it ("Another report of
-this, on version …, OpenGL") instead of a duplicate — one issue with N confirmations. Closed issues
+**Dedup:** the relay scans up to 300 open reports, oldest first. A matching
+signature adds a confirmation comment. Lookup failures or concurrent submissions
+can still create duplicates. Closed issues
 are never resurrected (closed means resolved or rejected; a fresh report opens a fresh issue). Matching
 is exact by design; judging that two differently-worded reports are the same bug stays a maintainer
 call. The signature covers category + title only, so the same bug reported from both renderers stays
@@ -72,13 +72,14 @@ record so the dialog never nags twice — the full logs and any dump stay on dis
 What lands on the tracker: title `Crash: <module>+0x<rva> (0x<code>)` — the crash *location*, so the
 signature dedup groups every occurrence of the same crash onto one issue — labels `crash` +
 `user-report` + channel + renderer, a readable crash-summary body, and the attached logs as a
-**collapsed follow-up comment** (one per occurrence, each with its own logs). Repeat crashes therefore read as one
-issue with N dated confirmations, each carrying its own evidence.
+**collapsed follow-up comment**. Log attachment is best-effort: a failure after
+issue creation does not change the successful submission response.
 
 ## Tracker hygiene (the two workflows)
 
-Both are secretless (the built-in `GITHUB_TOKEN`, least-privilege `permissions:`), SHA-pinned like every
-workflow here, and scoped to `user-report` issues — they never touch maintainer-filed issues or PRs.
+Both use the built-in `GITHUB_TOKEN` with scoped permissions and pinned Actions.
+Retest prompts require `user-report`; stale handling uses the waiting labels
+below and does not require `user-report`. Pull requests are excluded.
 
 - [`issues-retest.yml`](../.github/workflows/issues-retest.yml) — on every published release, open
   user reports filed on an **older** version get a "still reproducible on vX?" comment + the
@@ -87,7 +88,8 @@ workflow here, and scoped to `user-report` issues — they never touch maintaine
   real fixes are closed by a maintainer with "fixed in vX".
 - [`issues-stale.yml`](../.github/workflows/issues-stale.yml) — nightly: issues labeled `needs-retest`
   or `awaiting-response` (i.e. waiting on their reporter) get a warning after 21 quiet days and close
-  14 days later. Confirmed bugs and feature requests never auto-close.
+  14 days later. Any issue with either waiting label is eligible, including a
+  maintainer-filed issue; remove the label when a report no longer awaits a reply.
 
 Label glossary: `user-report` (relay-filed), `crash` (filed by the crash-report dialog),
 `beta`/`stable` (reported channel), `vulkan`/`opengl` (reported renderer), `needs-retest` (superseded
@@ -102,4 +104,4 @@ by a release, awaiting confirmation),
 | Relay down / offline / DNS | Red toast in-app ("could not send"); the dialog stays open with everything typed. |
 | App key revoked / secrets misconfigured (or, on the PAT fallback, token expired) | Same red toast; fixed by re-storing the secrets — [`feedback/README.md`](../feedback/README.md). |
 | Spam | Honeypot + size caps in the relay; escalation is a Cloudflare rate-limit rule (dashboard, no code). Worst case is deletable spam issues — the token can't touch anything but Issues. |
-| GitHub API down | The relay returns failure → red toast; nothing is queued or lost silently. |
+| GitHub API down | Issue creation or confirmation failure returns an error. Dedup lookup failure can instead create a duplicate; a failed follow-up log attachment still reports success. |

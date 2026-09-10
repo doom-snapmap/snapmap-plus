@@ -1,29 +1,7 @@
-/* rawmap.h -- the keystone rawmap LOAD swap, native C
- * (port of OG's DeserializeFromJson detour FUN_180023ad0).
- *
- * This is the core rawmap feature, proven in the original SnapHak: it detours the engine's JSON-map
- * deserializer and SUBSTITUTES its own rawmap for the engine's input. With the swap armed, ANY engine
- * map load is transparently replaced by the contents of `%LOCALAPPDATA%\snapmap-plus\rawmap.json`
- * (the OG read `%USERPROFILE%\snaphak\rawmap.json`).
- *
- * MECHANISM (DIRECT): OG's LOAD handler is a detour on
- *   idSnapMap::DeserializeFromJson(const char* json, idSnapMap* out)   [engine RVA 0x5ea490; variant A,
- *   buffer-first]
- * Its body, when the `snapHak_rawmaps_on` gate (OG DAT_18003e819) is set: build the rawmap.json path,
- *   fopen_s(...,"rb"), read the whole file into a fresh malloc'd buffer, OVERWRITE the engine's input
- *   JSON pointer (param_1) with it, log "SnapHak: Rawmap size %lld, read %lld.", then parse THAT buffer.
- * The clean-room reference implementation (item 1, doDeserializeSwap) does the identical thing with
- *   an external instrumentation tool: `onEnter: if (_gate && _rawmapBuf) { args[0] = _rawmapBuf; ... }`.
- *
- * NATIVE PORT (the difference from the instrumentation-hook form): an interceptor hook can mutate `args[0]` in place;
- * an inline detour CANNOT -- it REPLACES the function. So our detour has the SAME prototype as the
- * target and, when armed, calls the engine ORIGINAL (via the trampoline) with OUR buffer as arg0
- * instead of the engine's json. That is the exact semantic of "overwrite param_1" / "args[0] = buf",
- * and -- unlike OG's full re-implementation -- it reuses the engine's own real deserialize for the
- * parse, so there is nothing to keep in sync with the engine codec. We free OUR buffer after the call
- * (OG frees its substitute buffer too).
- *
- * Clean-room: ported from our own RE (the truth above) + the proven reference implementation. Zero OG SnapHak bytes.
+/* Rawmap load substitution and save mirroring. The load detour can replace
+ * engine JSON with rawmap.json, then calls the native deserializer. Package
+ * gating, marker migration and navigation preparation apply to both normal
+ * and substituted loads.
  */
 #ifndef BACKEND_RAWMAP_H
 #define BACKEND_RAWMAP_H
@@ -31,45 +9,29 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* Install the LOAD-swap detour on the engine's DeserializeFromJson.
- *   `deser_fn`        = the resolved engine fn address (from the signature resolver, name
- *                       "DeserializeFromJson"). 0 => not resolved; logs SKIPPED and returns 0.
- *   `deser_status_ok` = 1 iff the resolve was a CLEAN scan hit (SIG_OK), NOT the hook-tolerant
- *                       known_rva fallback (SIG_OK_HOOKED). When the prologue is already inline-hooked
- *                       (e.g. an external instrumentation tool hooks this same fn during testing), the live
- *                       prologue bytes are a detour, not the real instructions -- installing our own
- *                       detour over that would corrupt the steal window. So we install ONLY on a clean
- *                       resolve. (Coexistence with such an external hook is a testing concern.)
- * Returns 1 if the detour was installed, 0 otherwise (logs the reason). Emits a "B1: rawmap LOAD-swap
- * installed ..." marker on success. */
+/* Install the DeserializeFromJson detour only for a clean SIG_OK resolution.
+ * An existing inline hook cannot supply the original stolen instructions.
+ * Returns 1 when installed, otherwise logs the refusal and returns 0.
+ */
 int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok);
 
-/* Arm / disarm the swap (the OG snapHak_rawmaps_on/off gate, DAT_18003e819). When armed AND the rawmap
- * source file exists+reads, the next engine map load parses OUR bytes. Default: DISARMED. Returns the
- * new gate state.
- *
- * TEST arm trigger (ADDITIVE -- OR'd with this explicit gate in the detour): a flag file named
- * "arm.flag" placed as a SIBLING of the rawmap source (i.e. <dir-of-rawmap.json>\arm.flag, derived from
- * the same path resolver so it tracks set_source). Each interception does one GetFileAttributes check;
- * if the flag exists AND the source reads, the swap fires and the log line carries "[flag-armed]". This
- * lets the test harness arm/disarm ONE controlled live map-load by creating/deleting the file -- no console
- * or RPC. The exact path is logged at install. The PRODUCTION arm is the sh_rawmaps_on console
- * command (OG's snapHak_rawmaps_on); this flag-file is the TEST stand-in. */
+/* Set the shared load/save arm state; default off. Returns the new state. A
+ * sibling arm.flag also arms both paths for testing and follows the
+ * configured source directory.
+ */
 int sh_rawmap_swap_arm(int on);
 
-/* Read back the EXPLICIT arm state set by sh_rawmap_swap_arm: 1 armed, 0 not.
- * Exported, so a caller resolves it by name rather than by an address that
- * changes on every build. Does NOT report the flag-file stand-in -- see the
- * definition for why. */
+/* Read the explicit arm state only; the test flag is reported separately. */
 int sh_rawmap_swap_is_armed(void);
 
-/* Whether the swap WILL fire: the explicit gate OR the test flag-file. Ask this,
- * not sh_rawmap_swap_is_armed, before calling a function the swap detours. */
+/* Read the effective arm predicate: explicit state OR arm.flag. Check before
+ * engine-direct deserialization; source availability is checked later.
+ */
 int sh_rawmap_swap_will_fire(void);
 
-/* Set the file-backed rawmap source path (the bytes the swap delivers). For this slice a simple
- * file-backed source matches how OG sources its rawmap (%USERPROFILE%\snaphak\rawmap.json). Pass NULL
- * to reset to the default path. The real source is wired later. Returns 1 if a path is set. */
+/* Set the file-backed load source. NULL restores the default rawmap.json
+ * path. Returns 1 if accepted.
+ */
 int sh_rawmap_swap_set_source(const char *path);
 
 /* How many times the swap has fired (substituted our bytes into a load). */
@@ -80,84 +42,31 @@ unsigned long sh_rawmap_swap_count(void);
  * idSnapMap pointer and emits no completion line. */
 unsigned long sh_rawmap_swap_complete_count(void);
 
-/* rawmap.h -- the rawmap SAVE shadow, native C
- * (port of OG's SerializeToJson detour FUN_180023e60 -- the INVERSE of the LOAD swap sh_rawmap_swap).
- *
- * This is the SAVE half of the rawmap feature: when the editor SAVES a SnapMap AND rawmaps are armed,
- * the backend ALSO writes the serialized map JSON to %LOCALAPPDATA%\snapmap-plus\rawmap.json (the OG wrote
- * %USERPROFILE%\snaphak\rawmap.json), so the just-saved map becomes a reusable rawmap (the inverse of
- * the LOAD swap, which substitutes rawmap.json INTO a map load).
- *
- * The arm is the SAME gate the LOAD swap reads (sh_rawmap_swap_arm / the sh_rawmaps_on command). It has to
- * be: one command named "raw map save/load" that only governed the load half meant `sh_rawmaps_off` still
- * let a save overwrite a rawmap the user had staged there on purpose. The engine's own serialize is never
- * gated -- the real save always completes, identically, either way. Only the copy to disk is conditional.
- *
- * MECHANISM (DIRECT, the OG decompile of
- * FUN_180023e60, ratified 2026-06-20): OG's SAVE handler is a detour on
- *   idSnapMap::SerializeToJson(idSnapMap* map, idStr* out, uint8 compact)   [engine RVA 0x5F2390]
- * OG's body RE-IMPLEMENTS the serialize (the engine original is never called): it reflection-serializes
- *   `map` to a parse-tree (engine 0x1a21b40 "idSnapMap"), renders the tree to JSON (engine 0x1a43730)
- *   into a local idStr, copies that JSON back into the engine's out-idStr `out` (so the NORMAL save still
- *   works), then builds the rawmap.json path (FUN_180023780, the same builder the LOAD source uses),
- *   fopen_s(...,"wb"), and fwrite(out.data, 1, out.len) -- reading len@out+0x8 / data@out+0x10 -- and
- *   logs "SnapHak: Wrote %lld bytes to rawmap.".
- *
- * NATIVE PORT (the SAME asymmetry the LOAD swap chose, vs OG's full re-implementation): an inline detour
- * REPLACES the target, but we want the engine's real serialize to run. So our detour has the SAME
- * prototype as SerializeToJson and, on every call, FIRST calls the engine ORIGINAL (via the
- * trampoline) to fill the engine's out-idStr `out` -- the normal save proceeds byte-for-byte untouched --
- * and THEN reads out.len/out.data and writes those bytes to rawmap.json. This reuses the engine's own
- * serializer (nothing to keep in sync with the engine codec) and is byte-identical in outcome to OG (the
- * engine serializer fills `out` either way). It is exactly what the proven reference implementation does
- * (the reference _saveHook: capture args[1] onEnter, read len@0x8/data@0x10 onLeave, write).
- *
- * OG writes the shadow on EVERY save -- the only gate OG has on the whole rawmap feature is
- * snapHak_rawmaps_on, which gates LOAD substitution and never the save handler. We diverge deliberately
- * (the arm note above): one switch named "raw map save/load" governs both directions here.
- *
- * `sh_pretty_on` picks the LAYOUT of the copy: set, the JSON is re-laid-out over indented lines
- * (json_pretty.h -- a whitespace-only pass, same tokens in the same order) on its way to disk. It
- * changes this file and nothing else. The engine's out-idStr -- what the player's own save is written
- * from -- is never re-laid-out, for the same reason the arm is checked after the real serialize.
- *
- * The shadow is failure-tolerant: any file op that fails simply skips the shadow write; the real save
- * (the engine original's fill of `out`) has already happened, so a shadow failure NEVER blocks or
- * corrupts the real save. A rawmap that will not lay out is written unchanged rather than mangled.
- *
- * Clean-room: ported from our own RE (the truth above + the OG decompile) + the proven reference
- * reimplementation. Zero OG SnapHak bytes.
+/* Save processing calls native SerializeToJson, preserves its bool return,
+ * embeds package/navigation payloads into the output, then optionally mirrors
+ * JSON to disk. Mirroring uses the same arm predicate as loading.
+ * sh_pretty_on changes only the mirror's layout.
  */
-/* Install the SAVE-shadow detour on the engine's SerializeToJson.
- *   `serialize_fn`        = the resolved engine fn address (resolver name "SerializeToJson"). 0 =>
- *                           not resolved; logs SKIPPED and returns 0.
- *   `serialize_status_ok` = 1 iff the resolve was a CLEAN scan hit (SIG_OK), NOT the hook-tolerant
- *                           known_rva fallback (SIG_OK_HOOKED). When the prologue is already inline-hooked
- *                           (e.g. an external instrumentation tool hooks this same fn during testing), the live
- *                           prologue bytes are a detour, not the real instructions -- installing our own
- *                           detour over that would corrupt the steal window. So we install ONLY on a clean
- *                           resolve. (Coexistence with such an external hook is a testing concern.)
- * Returns 1 if the detour was installed, 0 otherwise (logs the reason). Emits a "B1: rawmap SAVE shadow
- * installed ..." marker on success. */
+/* Install the SerializeToJson detour only for a clean SIG_OK resolution.
+ * Returns 1 when installed, otherwise logs the refusal and returns 0.
+ */
 int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok);
 
-/* Arm embed-on-save: resolve the engine idStr assignment the save path needs
- * to hand back a map with its packages inside it. Without this the feature is
- * dark and saves are byte-for-byte unchanged, which is why it resolves its own
- * signature rather than accepting an address. */
+/* Resolve native idStr assignment for package/navigation embedding. Without
+ * it, save-output replacement is unavailable.
+ */
 void sh_rawmap_embed_install(const void *module_base);
 
-/* Set the on-disk SHADOW destination path (the file each save is mirrored to). Pass NULL to reset to the
- * default %LOCALAPPDATA%\snapmap-plus\rawmap.json (the OG used %USERPROFILE%\snaphak; the same file the
- * LOAD swap reads). The default deliberately matches the LOAD source so a save-then-load round-trips.
- * Returns 1 if a path is set. */
+/* Set the mirror destination. NULL restores the default
+ * %LOCALAPPDATA%/snapmap-plus/rawmap.json. The default matches the load
+ * source; explicit overrides are independent. Returns 1 if accepted.
+ */
 int sh_rawmap_save_set_dest(const char *path);
 
-/* How many times the shadow has fired (mirrored a save to rawmap.json). Observability for the
- * test harness -- mirrors the LOAD swap's sh_rawmap_swap_count(). */
+/* Count successful save mirrors for diagnostics. */
 unsigned long sh_rawmap_save_count(void);
 
-/* Bytes written by the most recent shadow (0 if none yet) -- mirrors the reference impl's _lastSaveBytes. */
+/* Bytes in the most recent successful mirror, or 0 before any write. */
 unsigned long long sh_rawmap_save_last_bytes(void);
 
 /* Main-thread read-only serialization, bypassing save side effects. The caller

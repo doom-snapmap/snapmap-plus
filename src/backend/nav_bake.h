@@ -16,23 +16,18 @@
 
 #include <stddef.h>
 
-/* for the entity callback types the live-editor seam below is shaped to */
+/* Live entity callback types. */
 #include "nav_regions.h"
 
-/* Read this map's regions. Called from the deserialize funnel on EVERY map, so
- * the previous map's regions can never survive into the next one -- the same
- * clear-from-empty rule navmesh.c's serving table follows, and for the same
- * reason. */
+/* Replace the map's regions, including when the input is empty. Called for
+ * every deserialization so state cannot leak between maps.
+ */
 void sh_nav_bake_set_map(const char *json, size_t len);
 
-/* Reads the bytes the engine would have served for `name`, into a fresh
- * HeapAlloc(GetProcessHeap()) buffer the caller frees, or NULL.
- *
- * Passed in rather than called directly because only the resource-provider hook
- * can do it -- the provider object arrives as that hook's `self` and is not
- * published anywhere else. Keeping it a parameter also stops this module
- * depending on overrides.c, which would otherwise drag the whole shadow into
- * every test that links either one. */
+/* Read the original resource into a process-heap buffer the caller frees, or
+ * return NULL. The provider hook supplies this callback because it owns the
+ * provider instance.
+ */
 typedef unsigned char *(*sh_nav_bake_reader)(const char *name, size_t *out_len);
 
 /* If `name` is the navigation resource of a module this map marked up, bake and
@@ -44,32 +39,14 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
 /* Console report: what this map asked for and what it got. */
 void sh_nav_bake_report(void (*out)(const char *fmt, ...));
 
-/* ---- the live editor ---------------------------------------------------
- *
- * Reading the map as loaded is not enough for the author's actual flow: they
- * tick a box and press Play, and Play does not serialize the map, so the marker
- * never reaches the table. Given a way to read the LIVE entities, the bake
- * re-reads the markers from them first.
- *
- * Registered rather than called directly so this module keeps no link
- * dependency on the engine surface -- which is also what lets its tests run
- * without one. Unregistered, the bake simply uses the map as loaded, which is
- * correct for a downloaded map and was the whole behaviour before. */
+/* Legacy per-entity callbacks avoid a direct dependency on engine code.
+ * Production editor baking uses the complete-map snapshot callback below.
+ */
 typedef int (*sh_nav_bake_entity_count)(void *ctx);
 
-/* Re-read the markers from the live editor and re-plan, so a volume ticked THIS
- * SESSION is baked without the author saving and reloading the map.
- *
- * This is a separate entry point on purpose. Pressing Play does not serialize the
- * map -- SnapMapEditToSnapBuild (0x4F27B0) reaches neither DeserializeFromJson nor
- * SerializeToJson, verified against the binary -- so the map JSON the deserialize
- * funnel handed sh_nav_bake_set_map is the map as it was LOADED, and the only place
- * a session's tick exists is the live editor.
- *
- * It must run on DOOM's main thread while the editor still owns its map. The two
- * places it must NOT run are the frontend's UI worker thread (issue #61) and inside
- * the engine's AAS load (issues #87 and #89) -- by the latter the edit map is
- * already being turned into the build map and its entities have no defsub yet.
+/* Refresh geometry and ownership on DOOM's main thread before map conversion.
+ * Play does not serialize the editor map, so the loaded JSON alone misses
+ * edits. Never call from the UI worker or inside the AAS loader.
  */
 void sh_nav_bake_refresh_live(void);
 
@@ -91,9 +68,9 @@ void sh_nav_bake_set_live_editor(sh_nav_bake_entity_count count,
                                  void *ctx);
 
 #ifdef SH_NAV_BAKE_TESTING
-/* The name grammar, exposed so a test can prove it matches what the engine
- * asks for rather than what we hope it asks for. Returns 1 and fills the
- * buffers when `name` is a module navigation resource. */
+/* Test the module resource-name grammar. Returns 1 and fills the outputs for
+ * a recognized name.
+ */
 int sh_nav_bake_test_parse_name(const char *name, char *module, size_t module_cap,
                                 char *cls, size_t cls_cap);
 void sh_nav_bake_test_reset(void);

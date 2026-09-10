@@ -12,13 +12,11 @@
 int sh_palette_refresh_install(const sig_result *results, size_t count,
                                const uint8_t *module_base);
 
-/* Rebuild the entity palette synchronously after complete native registration
- * and new snapEditorEntityDef materialization. Runs once per registration PASS,
- * not once per process: the palette is a catalog derived from the decl list, so
- * a package installed mid-session needs the catalog rebuilt or nothing can name
- * its types -- including the map validator, which refuses the whole map.
- * Returns 1 only when the native rebuild completed; every refusal or exception
- * is terminal for the process and returns 0 from then on. */
+/* Rebuild the entity palette after each successful
+ * registration/materialization pass. The map validator and by-name consumers
+ * use this derived catalog, so runtime additions need another rebuild.
+ * Returns 1 on completion. Refusal or exception is terminal for this process.
+ */
 int sh_palette_refresh_after_decl_registration(void);
 
 #ifdef SH_PALETTE_REFRESH_TESTING

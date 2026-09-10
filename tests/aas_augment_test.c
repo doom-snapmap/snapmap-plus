@@ -1,18 +1,6 @@
-/* aas_augment_test.c -- the augmenter: admission, the BSP splice, the link
- * regimes, and the refusals.
- *
- * NO GAME BYTES. The fixture below is synthesized: a single flat floor area in
- * a small BSP, with a settings block carrying a plausible monster-class agent
- * box. It is not derived from any shipped file -- see README.md.
- *
- * The two cases that matter most are the two link regimes, because they are the
- * whole behavioural claim:
- *
- *   a platform 16 units up  -> inside maxStepHeight, joined by plain walk links
- *   a platform 128 units up -> outside it, and with no traversal emitted in this
- *                              build it is an ISLAND, which is legal and must be
- *                              reported as such rather than silently shipped
- */
+/* Tests AAS augmentation, BSP splicing, link selection and refusals using synthetic
+ * geometry. A 16-unit rise admits walk links; a 128-unit rise without a traversal
+ * table remains a reported island. See README.md for fixture provenance. */
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,9 +14,7 @@
 
 static int g_checks = 0, g_fail = 0;
 
-/* navmesh.c is linked in only for sh_navmesh_validate_aas -- the gate the
- * serving path applies -- so its two service dependencies are stubbed, exactly
- * as navmesh_test.c does. */
+/* navmesh.c supplies the structural validator; its service dependencies are stubbed. */
 void backend_log(const char *message) { (void)message; }
 
 int sh_config_get_bool(const char *key, int *out_value, unsigned int *out_flags)
@@ -118,9 +104,8 @@ static unsigned char *build_module(size_t *out_len)
     putf(p + SETW(3),  24.0f); putf(p + SETW(4),  24.0f); putf(p + SETW(5), 80.0f);
     putf(p + SETW(12), 18.0f);          /* maxStepHeight */
     putf(p + SETW(15), 0.0f);           /* maxFallHeight */
-    /* minFloorCos -- 0.7 in every shipped payload, so a floor up to 45.57
-     * degrees from horizontal is walkable. The augmenter fails closed without
-     * it, exactly as it would on a payload it could not read. */
+    /* minFloorCos = 0.7 admits slopes up to about 45.57 degrees.
+     * Missing or invalid settings must refuse augmentation. */
     putf(p + SETW(16), 0.7f);
     put32(p + SETW(36), 100);           /* tt_startWalkOffLedge */
 
@@ -179,12 +164,8 @@ static unsigned char *build_module(size_t *out_len)
         put32(n + 32 + 8, 0xFFFFFFFFu);             /* front -> area 1 */
         put32(n + 32 + 12, 0);                      /* back  -> void */
     }
-    /* The trees record is ( dx dy dz ) a b c -- THREE FLOATS then three ints, so
-     * the root is at +12 and the area count at +20. Shipped files carry
-     * ( 0 0 1 ) 1 1 <numAreas>, and this fixture reproduces that exactly: an
-     * earlier version wrote the root at +0, which made the augmenter's own
-     * off-by-a-vector read agree with it and hid the bug from this suite until
-     * a live map exposed it. */
+    /* Tree records contain three floats followed by three ints. The root is at
+     * +12 and the area count at +20; independent offsets catch layout drift. */
     putf(p + o[SH_AAS_L_TREES] + 8, 1.0f);          /* ( 0 0 1 ) */
     put32(p + o[SH_AAS_L_TREES] + 12, 1);           /* a = root node index */
     put32(p + o[SH_AAS_L_TREES] + 16, 1);           /* b */
@@ -235,10 +216,7 @@ static void test_fixture_resolves(void)
               "a point standing on the floor slab resolves to area 1");
     CHECK_MSG(sh_aas_point_area(a, 0.0f, 0.0f, 500.0f) == 0,
               "a point above the band is void");
-    /* A non-zero depth is the assertion that the root was read from the right
-     * field. Reading it from the record's first float yields 0, and then EVERY
-     * query below answers void and every splice carves nothing -- which looks
-     * like a working bake right up until no demon can use it. */
+    /* A nonzero depth confirms the root was read after the direction vector. */
     CHECK_MSG(sh_aas_tree_depth(a) == 2, "the tree root must come from trees[0].a at +12");
     sh_aas_free(a);
 }
@@ -254,10 +232,8 @@ static void test_island_at_128(void)
     memset(&o, 0, sizeof o);
     o.fall = SH_AUG_FALL_AUTO;
     o.inset = 1;
-    /* Say NEVER rather than relying on no traversal table having been loaded.
-     * sh_trav_load caches for the process, so once any test in this binary
-     * loads one the AUTO default stops meaning "no climbs available" -- an
-     * order dependency, not a property of the code under test. */
+    /* Disable traversal explicitly: the process-wide table cache would make AUTO
+     * depend on which earlier test loaded a table. */
     o.traversal = SH_AUG_TRAVERSAL_NEVER;
     mkplat(&p, -500.0f, -500.0f, 500.0f, 500.0f, 128.0f, "roof");
 
@@ -275,11 +251,8 @@ static void test_island_at_128(void)
     CHECK_MSG(sh_aas_point_area(a, 0.0f, 0.0f, 130.0f) == rep.platforms[0].area,
               "a point standing on the platform resolves to the new area");
 
-    /* The generated area must LOOK like a shipped floor area. These three
-     * constants were transcribed wrongly once (flags 0x1, travel 0x20, edge
-     * flags 0) and the result was a payload that validated, served and played
-     * while the AI quietly refused to route over it -- a failure no structural
-     * check can catch, so it is pinned here as literals. */
+    /* Independent literal floor flags catch format drift that structural
+     * validation alone cannot detect. */
     {
         const unsigned char *ar = sh_aas_rec_const(a, SH_AAS_L_AREAS,
                                                    (unsigned)rep.platforms[0].area);
@@ -432,19 +405,8 @@ static void test_many_platforms_stay_within_depth(void)
     sh_aas_free(a);
 }
 
-/* THE ANCHOR PATTERN A CLIMB LINK IS PLACED ON.
- *
- * The outer endpoint of a climb sits the animation's own offset.x out from the
- * ledge, and that offset is PER DEMON -- a clip that starts further out needs
- * more clear floor than one that starts close in. Sampling a single position on
- * the edge therefore decides for every demon at once: if that one spot does not
- * work for a demon with a long start offset, it loses the edge entirely even
- * though it can make the climb, which is what "the big demons ignore my
- * platform" looks like from the outside.
- *
- * The midpoint stays FIRST so every link the single-anchor build produced is
- * still produced in the same place; the rest are only reached by a demon that
- * would otherwise have been dropped. */
+/* Climb start offsets differ by demon, so test more than one anchor on each
+ * ledge. Keep the midpoint first to preserve placement when it already fits. */
 static void test_traversal_anchor_pattern(void)
 {
     double a[24];
@@ -551,9 +513,7 @@ static void test_z_at_interpolates_across_a_slope(void)
     CHECK(near_d(sh_aug_test_quad_normal_z(q), 0.894427));
 }
 
-/* Containment must be TRUE inside. If the edge normal's sign were inverted this
- * would answer exactly the opposite, and the inset, the carve and neighbour
- * discovery would all invert with it. */
+/* Inside points must pass containment; reversed normals invert carving and insets. */
 static void test_contains_is_true_inside(void)
 {
     unsigned char q[2048];
@@ -606,9 +566,7 @@ static void test_inset_refuses_a_collapsing_quad(void)
     CHECK(sh_aug_test_quad_inset(q, 24.0, in) == 0);
 }
 
-/* node.field4 is "has a z component", not "is a Z plane". The yawed-vertical
- * case is the one a Z-versus-XY rule gets wrong, and this build writes a yawed
- * vertical plane on every edge of every rotated platform. */
+/* node.field4 records any z component, including on yawed vertical planes. */
 static void test_field4_follows_the_plane_z_component(void)
 {
     printf("node.field4 follows the plane's z component\n");
@@ -639,10 +597,8 @@ static void test_minfloorcos_gate_at_the_boundary(void)
     sh_aas_free(a);
 }
 
-/* A payload whose minFloorCos does not read as a cosine is rejected outright.
- * sh_aas_setting_f32 answers 0.0f for a model it cannot read, and a gate of
- * "normal.z < 0" would accept a vertical wall as floor. The setter takes a BYTE
- * offset, and word 16 is 208 + 16*4 = 272. */
+/* Reject an invalid minFloorCos; a zero fallback could admit vertical walls.
+ * Settings offsets are bytes: word 16 is at 208 + 16*4 = 272. */
 static void test_unreadable_minfloorcos_rejects_the_payload(void)
 {
     sh_aas *a = load_module();
@@ -658,9 +614,8 @@ static void test_unreadable_minfloorcos_rejects_the_payload(void)
     sh_aas_free(a);
 }
 
-/* A rotated area must be findable through the BSP -- the property the serving
- * path checks before trusting a payload -- and must NOT swallow its own
- * bounding box, which is what an axis-aligned carve would do. */
+/* The rotated area must resolve through the BSP without claiming its whole
+ * axis-aligned bounding box. */
 static void test_a_yawed_area_resolves_through_the_bsp(void)
 {
     sh_aas *a = load_module();
@@ -703,12 +658,8 @@ static int reach_count(sh_aas *a, int from, int to)
 
 static int reach_exists(sh_aas *a, int from, int to) { return reach_count(a, from, to) > 0; }
 
-/* No two reachability records share the same areas AND the same endpoints.
- *
- * This is the shape a broken dedup rule produces: with symmetric discovery both
- * quads emit the pair, and the duplicates are identical record-for-record rather
- * than merely numerous. Counting links alone cannot see it, because a segment
- * legitimately emits one record per sample along it. */
+/* Symmetric discovery must not duplicate records with identical areas and
+ * endpoints. Link counts alone cannot distinguish duplicates from distinct samples. */
 static int no_duplicate_reach_endpoints(sh_aas *a)
 {
     unsigned i, j, n = sh_aas_count(a, SH_AAS_L_REACHABILITIES);
@@ -740,11 +691,8 @@ static int reach_count_of_type(sh_aas *a, int from, int to, unsigned type)
     return found;
 }
 
-/* THE REPORTED BUG. Two volumes standing side by side, 12 apart in z so the step
- * regime carries it and no traversal table is needed. Before this change each
- * one linked only to the module floor, so a demon walked DOWN off one, across
- * the floor, and back UP the other -- "they climb down first then climb the
- * other bv". */
+/* Adjacent volumes 12 units apart in height must link directly by stepping,
+ * without routing down to the module floor. */
 static void test_two_abutting_platforms_link_to_each_other(void)
 {
     sh_aas *a = load_module();
@@ -788,11 +736,8 @@ static void test_a_partially_abutting_neighbour_is_found(void)
     sh_aas_free(a);
 }
 
-/* Symmetric discovery means A sees B and B sees A, and the regimes already write
- * both directions per segment. Without the ownership rule every record would be
- * written twice and AUG_MAX_TRAVERSALS would fill with duplicates. Step links
- * are emitted per SAMPLE, so the count is not one -- what must hold is that the
- * two directions agree. */
+/* One owner emits both directions for each segment. Compare direction counts
+ * because a segment may contain several samples. */
 static void test_a_pair_is_not_emitted_twice(void)
 {
     sh_aas *a = load_module();
@@ -818,10 +763,8 @@ static void test_a_pair_is_not_emitted_twice(void)
 /* leaps: crossing a gap                                                 */
 /* ==================================================================== */
 
-/* A synthetic table with LEDGE and LEAP rows for two demons, served through the
- * public loader -- aas_augment_test builds without SH_TRAV_TESTING, so
- * sh_trav_test_parse is not available here. NO GAME BYTES: this is written by
- * the test. */
+/* Load a synthetic LEDGE/LEAP table through the public loader. This binary
+ * omits SH_TRAV_TESTING and contains no game bytes. */
 static const char *TRAV_TABLE_TEXT =
 "{\n"
 "\tedit = {\n"
@@ -930,9 +873,7 @@ static void test_a_gap_beyond_range_is_not_crossed(void)
     sh_aas_free(a);
 }
 
-/* A table-nominal leap is LEVEL -- the median vertical change across 1,754
- * shipped records is one unit, and |dz|/span p90 is 0.29. A steeply graded gap
- * is not what these animations do. */
+/* Nominal leap animations do not justify links across steep vertical gaps. */
 static void test_a_steep_gap_is_refused(void)
 {
     sh_aas *a = load_module();
@@ -953,14 +894,8 @@ static void test_a_steep_gap_is_refused(void)
 /* direction: a neighbour ABOVE is a climb, never a step                 */
 /* ==================================================================== */
 
-/* THE regression guard on the most dangerous edge of this change.
- *
- * Edge discovery used to refuse a neighbour above, and the regimes gated on the
- * SIGNED height change. Removing the refusal without restating the gates would
- * make aug_step_links' `drop > step` test true for every rise -- a negative drop
- * is always inside any positive step -- and a 112-unit RISE would be written as
- * a plain 0x20 walk link. Across 94,327 shipped walk records joining two flat
- * areas, not one spans more than maxStepHeight. */
+/* Gate steps by absolute height change: a negative drop for a tall rise must
+ * not pass a positive maxStepHeight limit and become a plain walk link. */
 static void test_a_tall_neighbour_gets_a_climb_not_a_walk(void)
 {
     sh_aas *a = load_module();
@@ -986,9 +921,7 @@ static void test_a_tall_neighbour_gets_a_climb_not_a_walk(void)
     sh_aas_free(a);
 }
 
-/* With the ownership rule only the lower area index emits for a pair, so it has
- * to write BOTH directions or the taller platform is a roach motel: demons climb
- * up and can never come down. */
+/* The lower area index owns the pair and must emit both climb and descent links. */
 static void test_the_climb_is_reciprocated(void)
 {
     sh_aas *a = load_module();
@@ -1010,9 +943,7 @@ static void test_the_climb_is_reciprocated(void)
     sh_aas_free(a);
 }
 
-/* Three volumes in a row, each a climb above the last. A-B and B-C must both
- * link without either routing through the module floor -- which is the whole
- * shape of the reported bug at one more step. */
+/* Each adjacent pair in a three-platform climb must link without using the floor. */
 static void test_a_three_tower_chain_links_end_to_end(void)
 {
     sh_aas *a = load_module();
@@ -1036,9 +967,7 @@ static void test_a_three_tower_chain_links_end_to_end(void)
     sh_aas_free(a);
 }
 
-/* A gap too wide to step and too narrow for the shortest shipped leap gets no
- * link at all. That is honest -- there is no animation for it -- but it must not
- * be mistaken for a leap and written with one that does not fit. */
+/* A gap beyond stepping range but below the shortest available leap gets no link. */
 static void test_a_gap_below_the_leap_minimum_is_not_crossed(void)
 {
     sh_aas *a = load_module();
@@ -1057,11 +986,7 @@ static void test_a_gap_below_the_leap_minimum_is_not_crossed(void)
     sh_aas_free(a);
 }
 
-/* The swept-path check. Without it a leap is written straight through whatever
- * stands between the two platforms -- "they can glitch through the bv during the
- * traversal and get lost". This is only meaningful now that leaps exist; before
- * them no link across this gap was attempted and the test would have passed
- * without testing anything. */
+/* Reject a leap whose swept path intersects a solid between the platforms. */
 static void test_a_leap_through_a_third_volume_is_dropped(void)
 {
     sh_aas *a = load_module();
@@ -1109,10 +1034,8 @@ static void test_an_upright_platform_is_not_a_side_face(void)
     sh_aas_free(a);
 }
 
-/* Oblique and yawed split planes are not clipped by aug_clip_cell, so the
- * running cell stays a superset, aug_box_side straddles more often, and more
- * leaves keep all five split tests. nav_bake discards the WHOLE module's bake on
- * depth_exceeded, so that cost has to be measured rather than assumed. */
+/* Unclipped oblique planes increase BSP depth. Measure the resulting depth
+ * because exceeding the limit rejects the entire module bake. */
 static void test_a_dense_yawed_chain_stays_within_the_depth_limit(void)
 {
     sh_aas *a = load_module();
@@ -1134,11 +1057,8 @@ static void test_a_dense_yawed_chain_stays_within_the_depth_limit(void)
     sh_aas_free(a);
 }
 
-/* A bake at the platform cap has to finish, and finish coherently. Gap discovery
- * casts outward as far as the longest shipped leap from every sample on every
- * edge, so without a bounding-box prefilter over the peer set this is four edges
- * by thirty-two samples by sixty ray steps by five hundred peers, per platform,
- * for five hundred platforms. That is not slow, it is never. */
+/* Exercise the platform cap; the peer bounding-box filter must keep gap
+ * discovery tractable across every edge sample. */
 static void test_a_bake_at_the_platform_cap_completes(void)
 {
     sh_aas *a = load_module();
@@ -1164,21 +1084,9 @@ static void test_a_bake_at_the_platform_cap_completes(void)
     sh_aas_free(a);
 }
 
-/* A module that already owns traversal points on the area we climb FROM.
- *
- * classic_90_climb -- this project's own donor -- ships seven, and 312 of 696
- * extracted payloads carry traversal animation names. The predecessor of the
- * augmenter refused to add ANY climb whenever a spec's from-area already owned
- * points, so an intersecting platform on roughly half of all modules came out a
- * silent island. The real constraint is only that each area's points stay
- * CONTIGUOUS, because area.first_trav_point/num_trav_point partition the array;
- * the augmenter restores that by REGROUPING the whole array by from-area after
- * appending, rather than declining.
- *
- * This gives the floor area a real pre-existing point (a dummy at index 0, then
- * one owned point) and then climbs from that same floor. The old code would set
- * climbs_declined and write nothing. The regroup must instead add the climbs AND
- * leave every area's range contiguous and correctly owned. */
+/* Add climbs from a floor that already owns traversal points. Appending must
+ * regroup points by from-area so each first_trav_point/num_trav_point range
+ * stays contiguous. Index 0 is the dummy; index 1 is an existing floor point. */
 static void test_existing_traversals_on_our_floor_are_regrouped_not_declined(void)
 {
     sh_aas *a = load_module();
@@ -1212,9 +1120,7 @@ static void test_existing_traversals_on_our_floor_are_regrouped_not_declined(voi
     CHECK_MSG(rep.climbs_declined == 0, "the set is regrouped, not declined");
     CHECK_MSG(rep.platforms[0].climbs > 0, "and the climbs are there");
 
-    /* The partition law must still hold: every area's range is in-bounds and its
-     * points carry that area in w34, and the ranges together claim exactly the
-     * real points (index 0 is the dummy, owned by nobody). */
+    /* Every real point belongs to exactly one in-bounds area range; index 0 is unowned. */
     np = sh_aas_count(a, SH_AAS_L_TRAVERSALPOINTS);
     na = sh_aas_count(a, SH_AAS_L_AREAS);
     CHECK(np > 2);
@@ -1260,22 +1166,11 @@ static void test_a_module_without_traversals_still_gets_climbs(void)
 /* ==================================================================== */
 /* the geometry matrix: every way two marked volumes can meet            */
 /* ==================================================================== */
-/*
- * The reported failure was a tall pillar standing THROUGH a wide slab: all AI
- * froze, shooting but not moving. Nothing here caught it because every fixture
- * above uses volumes that are separate or merely abutting -- which is exactly
- * the arrangement that always worked.
- *
- * These pin the rest of the matrix. The property that matters for every one of
- * them is the same: a platform that is EMITTED must not be an ISLAND, because an
- * emitted-but-unroutable area is what makes a demon stand still. A platform we
- * decline to emit is fine; silence is not.
- */
+/* In these connected overlap arrangements, each emitted platform must have
+ * a route. A refused platform is acceptable; an unexpected island is not. */
 
-/* CONTAINMENT -- the reported case. The pillar's footprint is wholly inside the
- * slab's, so no slab edge can ever face the pillar. Discovery is one-sided, and
- * an ownership rule based on area index alone hands the pair to the side that
- * cannot see it. */
+/* A pillar inside a slab is discovered only from the pillar side. Pair
+ * ownership must not assign emission to the slab, which cannot see that edge. */
 static void test_a_pillar_through_a_slab_is_linked(void)
 {
     sh_aas *a = load_module();
@@ -1323,9 +1218,8 @@ static void test_containment_works_with_the_index_order_reversed(void)
     sh_aas_free(a);
 }
 
-/* IDENTICAL footprints at different heights. Each contains the other, so the
- * containment rule must NOT fire for both -- that would emit every record twice.
- * It has to fall through to the index rule. */
+/* Identical footprints contain each other; break the tie by area index
+ * instead of letting both sides emit. */
 static void test_identical_footprints_are_not_double_linked(void)
 {
     sh_aas *a = load_module();
@@ -1347,9 +1241,7 @@ static void test_identical_footprints_are_not_double_linked(void)
     sh_aas_free(a);
 }
 
-/* PARTIAL overlap -- corners crossing. Both sides discover it, so this is the
- * symmetric case the index rule was written for. Guard against the fix breaking
- * it. */
+/* Partial overlap is discovered from both sides and must keep a single owner. */
 static void test_partially_overlapping_volumes_still_link_once(void)
 {
     sh_aas *a = load_module();
@@ -1369,9 +1261,7 @@ static void test_partially_overlapping_volumes_still_link_once(void)
     sh_aas_free(a);
 }
 
-/* A FLOATING volume that intersects a floor-standing one without reaching the
- * floor. Whatever the bake decides, it must not emit an area and then strand
- * it. */
+/* An intersecting floating volume must be connected if it is emitted. */
 static void test_a_floating_intersecting_volume_is_never_a_stranded_area(void)
 {
     sh_aas *a = load_module();
@@ -1398,9 +1288,8 @@ static void test_a_floating_intersecting_volume_is_never_a_stranded_area(void)
     sh_aas_free(a);
 }
 
-/* A platform with NOTHING under it to splice into. The carve takes no leaf
- * slots, and the area must not be reported as emitted -- a phantom counted into
- * a cluster but absent from the tree is exactly what corrupts routing. */
+/* Without an underlying leaf to splice, refuse the platform instead of
+ * counting an area that cannot be reached through the BSP. */
 static void test_a_platform_with_no_carrier_is_refused_not_phantom(void)
 {
     sh_aas *a = load_module();
@@ -1420,10 +1309,7 @@ static void test_a_platform_with_no_carrier_is_refused_not_phantom(void)
     sh_aas_free(a);
 }
 
-/* THE INVARIANT, over the whole matrix at once: nothing the bake emits may be
- * an island. This is the property that actually maps onto "demons stand still
- * and shoot", so it is asserted across every arrangement together rather than
- * only one at a time. */
+/* Across this connected fixture matrix, no emitted platform may be an island. */
 static void test_no_arrangement_emits_a_stranded_area(void)
 {
     sh_aas *a = load_module();
@@ -1453,16 +1339,8 @@ static void test_no_arrangement_emits_a_stranded_area(void)
     sh_aas_free(a);
 }
 
-/* THE PHANTOM INVARIANT: every area added must belong to a platform we claim.
- *
- * The lumps are append-only, so a platform refused AFTER aug_add_area leaves its
- * area stranded in the array -- counted into a cluster and into trees[0].c, with
- * no reachabilities and no owner. That is the same "present but unroutable"
- * shape that freezes demons, except nothing in the report mentions it.
- *
- * Counting is the whole test: areas_after - areas_before must equal the number
- * of platforms reported emitted, for every arrangement, including the ones that
- * refuse. */
+/* The area-count increase must equal the reported emitted-platform count,
+ * including refusal cases. A late refusal must not leave an unowned area behind. */
 static void test_areas_added_equals_platforms_emitted(void)
 {
     static const struct { float x0, y0, x1, y1, z; const char *name; } CASE[] = {
@@ -1495,11 +1373,8 @@ static void test_areas_added_equals_platforms_emitted(void)
     }
 }
 
-/* An emitted platform's own centre must resolve to its own area.
- *
- * aug_carve only replaces leaf slots that already hold a real area, so a box
- * overhanging the module floor used to get a partial splice: carved > 0, hence
- * reported emitted, while the middle of it still resolved to void. */
+/* An emitted platform must resolve to its own area at its centre, including
+ * when it overhangs the module floor and could receive only a partial splice. */
 static void test_an_emitted_platform_resolves_at_its_own_centre(void)
 {
     static const struct { float x0, y0, x1, y1, z; const char *name; } CASE[] = {
@@ -1532,15 +1407,8 @@ static void test_an_emitted_platform_resolves_at_its_own_centre(void)
     }
 }
 
-/* ---- volumes standing in each other's way ------------------------------
- *
- * These are the arrangements testers reported and the earlier fixtures never
- * covered: they all built volumes that touch but never INTERSECT, so a face
- * that claimed ground another solid was standing in always looked correct.
- *
- * `depth` is what makes a platform a solid rather than a face. A fixture that
- * leaves it zero gets the old behaviour exactly, which is why every test above
- * still passes unchanged -- so these set it deliberately. */
+/* Intersecting solids must subtract occupied ground. Set depth explicitly;
+ * zero-depth fixtures exercise faces without solid-volume subtraction. */
 
 static void mkbox(sh_aug_platform *p, float x0, float y0, float x1, float y1,
                   float top, float bottom, const char *name)
@@ -1568,10 +1436,8 @@ static void test_a_pillar_through_a_slab_is_cut_out_of_it(void)
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a pillar standing through a slab is cut out of the slab's top\n");
     load_synthetic_traversal_table();
-    /* Caliban's LEFT case: both boxes stand on the module floor, and the pillar
-     * rises through the slab. The slab's top used to be emitted whole, which
-     * claimed the 192x192 the pillar is standing in -- a demon routed across it
-     * walks into the pillar and stops, which is "breaks all AI". */
+    /* A pillar rising through a floor-standing slab must remove its footprint
+     * from the slab's walkable ground. */
     mkbox(&p[0], -384.0f, -384.0f, 384.0f, 384.0f,  16.0f, 0.0f, "slab");
     mkbox(&p[1],  -96.0f,  -96.0f,  96.0f,  96.0f, 128.0f, 0.0f, "pillar");
     CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
@@ -1588,9 +1454,7 @@ static void test_a_pillar_through_a_slab_is_cut_out_of_it(void)
                   "and every strip is actually emitted -- reason: %s");
     }
 
-    /* THE POINT OF THE WHOLE CHANGE. Standing room just above the slab, in the
-     * middle of the pillar's footprint, must not resolve to any area the slab
-     * produced. */
+    /* Standing room inside the pillar must not resolve to a slab area. */
     at_centre = sh_aas_point_area(a, 0.0f, 0.0f, 17.0f);
     CHECK_MSG(at_centre > 0, "that point still resolves to the module's own floor");
     for (i = 0; i < n; i++)
@@ -1652,10 +1516,7 @@ static void test_a_floating_volume_clipping_into_a_platform_is_cut_out(void)
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a floating volume clipping into a platform is cut out of it\n");
     load_synthetic_traversal_table();
-    /* Caliban's MIDDLE case: the floater never reaches the module floor, it just
-     * hangs into the slab. Reported as breaking SOME demons and not others,
-     * which is exactly what a per-class agent height does to a whole-platform
-     * headroom refusal. */
+    /* A floating box intrudes into the slab; agent height controls the required headroom. */
     mkbox(&p[0], -384.0f, -384.0f, 384.0f, 384.0f, 16.0f,  0.0f, "slab");
     mkbox(&p[1],  -96.0f,  -96.0f,  96.0f,  96.0f, 72.0f,  8.0f, "floater");
     CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
@@ -1704,9 +1565,7 @@ static void test_a_box_parked_on_a_platform_is_cut_out_of_it(void)
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a box standing on a platform is cut out of the platform's top\n");
     load_synthetic_traversal_table();
-    /* Not an intersection at all -- it is the ordinary case of stacking one
-     * marked volume on another, and the lower top has never been walkable where
-     * the upper box sits. The same subtraction answers it. */
+    /* Stacked volumes must subtract the upper box from the lower walkable face. */
     mkbox(&p[0], -384.0f, -384.0f, 384.0f, 384.0f,  16.0f,  0.0f, "floor slab");
     mkbox(&p[1],  -96.0f,  -96.0f,  96.0f,  96.0f, 112.0f, 16.0f, "crate");
     CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
@@ -1728,9 +1587,8 @@ static void test_a_low_ceiling_over_part_of_a_platform_keeps_the_rest(void)
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a low ceiling over half a platform costs it that half, not all of it\n");
     load_synthetic_traversal_table();
-    /* The agent is 80 tall. A solid 44 units above the slab used to refuse the
-     * WHOLE slab for headroom, because aug_headroom answers one number for the
-     * entire face -- so one intruding corner spoke for the rest of it. */
+    /* A solid 44 units above an 80-unit agent blocks only the affected portion
+     * of the slab, not the entire face. */
     mkbox(&p[0], -384.0f, -384.0f, 384.0f, 384.0f, 16.0f,  0.0f, "slab");
     mkbox(&p[1],    0.0f, -384.0f, 384.0f, 384.0f, 60.0f, 16.0f, "overhang");
     CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
@@ -1766,9 +1624,8 @@ static void test_a_cut_platform_never_strands_an_area(void)
         mkbox(&p[1], CASES[ci].px0, CASES[ci].py0, CASES[ci].px1, CASES[ci].py1,
               CASES[ci].ptop, CASES[ci].pbot, "intruder");
         CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);
-        /* The swallowing case legitimately emits nothing from the slab; every
-         * other arrangement must leave the author some walkable ground, or the
-         * subtraction is eating more than the intruder occupies. */
+        /* Only the fully swallowed slab may emit nothing; partial overlap must
+         * preserve the remaining walkable ground. */
         if (ci != 3) {
             int emitted = 0;
             for (i = 0; i < rep.platform_count; i++)
@@ -1779,9 +1636,7 @@ static void test_a_cut_platform_never_strands_an_area(void)
             if (!rep.platforms[i].emitted) continue;
             CHECK_MSG(rep.platforms[i].island == 0,
                       "an emitted piece nothing links is the stand-still failure");
-            /* And every emitted piece must be findable at its own centre --
-             * a piece the tree cannot resolve is ground demons are told about
-             * and can never occupy. */
+            /* Each emitted piece must resolve through the BSP at its own centre. */
             CHECK_MSG(rep.platforms[i].area > 0, "with a real area index");
         }
         sh_aas_free(a);
@@ -1798,10 +1653,8 @@ static void test_a_gap_in_the_dead_zone_is_counted_and_named(void)
     o.fall = SH_AUG_FALL_AUTO; o.inset = 1; o.traversal = SH_AUG_TRAVERSAL_AUTO;
     printf("a gap nothing can step or jump across is counted, not passed over\n");
     load_synthetic_traversal_table();
-    /* 80 units apart: past AUG_TOUCH_EPS, so no step link, and well under the
-     * 149-unit shortest jump_forward the game ships, so no leap either. Both
-     * platforms are emitted and neither is an island -- they each reach the
-     * floor -- so nothing else in the report would ever mention this. */
+    /* An 80-unit gap exceeds stepping range but is shorter than the 149-unit
+     * minimum leap. Both platforms reach the floor; test their missing direct link. */
     mkbox(&p[0], -400.0f, -200.0f,  -40.0f, 200.0f, 16.0f, 0.0f, "west");
     mkbox(&p[1],   40.0f, -200.0f,  400.0f, 200.0f, 16.0f, 0.0f, "east");
     CHECK(sh_aas_augment(a, p, 2, &o, &rep) == 1);

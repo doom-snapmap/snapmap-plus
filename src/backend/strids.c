@@ -1,21 +1,10 @@
-/* strids.c -- see strids.h. The custom #str_ string injector (port of OG FUN_18000FF10 +
- * FUN_1800102e0).
+/* Inject user, package and baked #str_ mappings once, then sort the live
+ * dictionary by hash. Installation performs the usual injection; the sort
+ * hook is a fallback.
  *
- * On the first top-level engine idLangDict sort, we load %LOCALAPPDATA%\snapmap-plus\strings\strids.json,
- * parse its flat {id: text} object, and for each row append a 32-byte idLangDict entry to the live
- * string table (the same record + the same engine fns the engine's own lang loader uses), then let the
- * real sort run so our rows sort into place. Every later call (incl. the sort's own recursion) passes
- * straight through (one-shot latch + recursion guard) so we never duplicate rows.
- *
- * The 32-byte record (DIRECT, engine insert FUN_141a29980 + OG FUN_18000FF10):
- *   +0x00  u32  hash       = engine idStr::Hash("#str_<id>")  (FNV-1a, lowercased)
- *   +0x04  u32  pad
- *   +0x08  ptr  keyHandle  = engine idStr-pool intern of "#str_<id>"
- *   +0x10  ptr  valHandle  = engine idStr-pool intern of the value text
- *   +0x18  u32  valLen     = strlen(value)   (OG mirrors the value length here)
- *   +0x1c  u32  valLen2    = strlen(value)
- *
- * Clean-room: ported from our own RE. Zero OG SnapHak bytes.
+ * Native 32-byte record: +0x00 lowercased FNV-1a hash, +0x04 padding, +0x08
+ * interned key handle, +0x10 interned value handle, and value lengths at
+ * +0x18/+0x1c. The engine owns the string pool and destination list.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -39,13 +28,12 @@
  * = 16 bytes of whole, register/rsp-only, position-independent instructions (no RIP-rel, no rel jmp). */
 #define SORT_STOLEN 16
 
-/* The engine sort body prototype: void sort(void* ctx, void* arr, uint32_t count, uint32_t radix).
- * From OG FUN_1800102e0: (base+0x1a2b490)(param_1, table[0], table_count, 0x20). */
+/* Native sort ABI: void sort(ctx, arr, uint32 count, uint32 radix). */
 typedef void (*sort_fn_t)(void *ctx, void *arr, uint32_t count, uint32_t radix);
 
-/* The radix the engine always passes to the sort body. DIRECT: the sort WRAPPER (0x1a2b480) is just
- * `MOV R9D,0x20 ; JMP 0x1a2b490` -- it hard-sets the 4th arg (radix) to 0x20 and tail-jumps the body,
- * which radix-sorts the 32-bit hash key 8 bits at a time (param_4 bits, recursing param_4-8). */
+/* The native wrapper at pinned Vulkan RVA 0x1a2b480 sets radix=0x20 before
+ * entering the body, which sorts the 32-bit hash eight bits at a time.
+ */
 #define SORT_RADIX 0x20
 
 /* The engine fns the inject calls. All resolved by the signature scanner; never hardcoded RVAs. */
@@ -63,8 +51,9 @@ static volatile LONG g_injected      = 0;      /* one-shot latch (0 = not yet in
 static volatile LONG g_in_sort       = 0;      /* recursion guard (>0 = inside the sort already) */
 static volatile LONG g_inject_count  = 0;      /* rows appended (observability) */
 
-/* strids.json source. Default %LOCALAPPDATA%\snapmap-plus\strings\strids.json (the OG read
- * %USERPROFILE%\snaphak\strings\strids.json). */
+/* User document path; default %LOCALAPPDATA%\snapmap-
+ * plus\strings\strids.json.
+ */
 static char g_src_path[MAX_PATH] = {0};
 
 static void default_source_path(char *out, size_t cap)
@@ -76,12 +65,10 @@ static void default_source_path(char *out, size_t cap)
         _snprintf_s(out, cap, _TRUNCATE, "snapmap-plus\\strings\\strids.json");
 }
 
-/* ----------------------------------------------------------------- table-global LEA decode --------
- * The table descriptor is a .data global (can't be sig-scanned -- it's not code). The engine's
- * idLangDict::GetIndexForId (resolved as StridsTableLea) starts with a `LEA RCX,[rip+disp32]` to that
- * global. We scan forward from the resolved fn entry for the FIRST `48 8D 0D` (LEA RCX, rip-rel) and
- * decode its rip-relative displacement to recover the global build-portably. (The fn has a second
- * `48 8D 0D` later -- the error-path string -- so we take the first.) */
+/* Decode the first LEA RCX,[rip+disp32] in StridsTableLea to find the
+ * dictionary descriptor. A later matching LEA references the error string, so
+ * it must not be selected.
+ */
 #define LEA_SCAN_WINDOW 0x40
 
 static int safe_read_n(const uint8_t *src, uint8_t *dst, size_t n)
@@ -105,11 +92,9 @@ static void *decode_table_global(const uint8_t *table_lea_fn)
     return NULL;
 }
 
-/* ------------------------------------------------------------------- strids.json parsing ----------
- * strids.json is a flat JSON object: { "id1" : "text1", "id2" : "text2", ... }. We do a minimal,
- * failure-tolerant scan for "string" : "string" pairs (the only shape the format uses), unescaping the
- * value's \" \\ \n \t the same way the engine lang loader does. Keys/values are bounded; a malformed
- * file degrades to "fewer / zero rows injected", never a crash. */
+/* Scan bounded string:string pairs from a flat JSON object and unescape
+ * values. Malformed pairs are skipped; parsing may retain a valid subset.
+ */
 
 /* Read a whole file into a fresh NUL-terminated heap buffer (caller HeapFrees), or NULL if it is
  * absent, unreadable, empty or implausibly large. Shared by the user's document and every package's. */
@@ -178,11 +163,11 @@ static int scan_json_string(const char **p, char *out, size_t cap)
     return (int)o;
 }
 
-/* Dedup within one inject pass: a key must NEVER be appended twice -- duplicate keys corrupt the engine's
- * sorted-by-hash string dictionary (lookups collapse -> wrong/missing strings). FIRST-writer-wins: do_inject
- * injects the user's strids.json FIRST and the baked defaults second, so for a key the user defines their
- * value WINS and the baked duplicate is skipped (a user's explicit override beats our default, matching the
- * decl file-shadow). Case-insensitive (the engine lowercases the #str_ hash). */
+/* Deduplicate case-insensitively within an injection pass because the native
+ * hash lowercases keys. First writer wins: user document, packages in
+ * precedence order, then baked defaults. Duplicate native rows would make
+ * hash lookup ambiguous.
+ */
 #define STRIDS_DEDUP_CAP 1024
 
 /* Who supplied a row, so a cross-package disagreement can name both sides. The user's file and the
@@ -199,8 +184,9 @@ typedef struct strids_row {
 static strids_row g_injected_ids[STRIDS_DEDUP_CAP];
 static int        g_injected_n;
 
-/* The package set, captured once per inject pass. Static for the same reason the decl server's is: it
- * is 10 KB and this runs on an engine callback with a live stack. */
+/* Keep the package snapshot in static storage to limit this engine callback's
+ * stack use.
+ */
 static sh_package g_str_packages[SH_PACKAGES_MAX];
 static size_t     g_str_package_count;
 
@@ -224,17 +210,17 @@ static const char *strids_owner_name(int owner)
     return g_str_packages[owner].name;
 }
 
-/* Append one #str_<id> -> text row to the live table via the engine fns. Skips a key already injected
- * this pass (baked-wins dedup). */
+/* Append one #str_<id> row through native helpers unless this pass already
+ * supplied the key.
+ */
 static void inject_row_owned(const char *id, const char *text, size_t text_len, int owner)
 {
     strids_row *seen = find_injected(id);
     if (seen != NULL) {
-        /* Two PACKAGES claiming one id is the case worth reporting. Identical text composes silently --
-         * a shared prerequisite vendored into two packages is being self-contained, not wrong. Different
-         * text is a real disagreement: keep the first and NAME BOTH, rather than letting enumeration
-         * order silently decide what the player reads. A collision with the user's file or a baked
-         * default is neither, so it stays quiet. */
+        /* For differing values from two packages, retain the first and log
+         * both owners. Equal values compose silently; user and baked
+         * precedence does not produce a package conflict.
+         */
         if (owner != STRIDS_OWNER_NONE && seen->owner != STRIDS_OWNER_NONE &&
             seen->text_hash != strids_text_hash(text)) {
             char line[320];
@@ -276,9 +262,9 @@ static void inject_row(const char *id, const char *text, size_t text_len)
     inject_row_owned(id, text, text_len, STRIDS_OWNER_NONE);
 }
 
-/* Walk one flat { "id" : "text" } document, injecting each pair on behalf of `owner`. Anything that is
- * not a well-formed quoted pair is skipped a character at a time, so braces, commas, whitespace and
- * stray text never trip the scan: a malformed file degrades to fewer rows, never a crash. */
+/* Scan one flat string:string document for this owner. Skip malformed pairs
+ * one character at a time.
+ */
 static void inject_pairs(const char *buf, int owner)
 {
     const char *p = buf;
@@ -298,12 +284,9 @@ static void inject_pairs(const char *buf, int owner)
     }
 }
 
-/* Inject every installed package's strings\*.json. A package's strings are ITS OWN: they ship with it
- * and they uninstall with it, so adding an entity no longer means hand-editing one global document that
- * every other package also has to share.
- *
- * Only first-level .json files under the package's strings\ directory are read, matching the manifest
- * rule elsewhere: a package's subdirectories mean what the package layout says they mean. */
+/* Read first-level strings/*.json from every installed package in precedence
+ * order.
+ */
 static void inject_packages(void)
 {
     char root[MAX_PATH], dir[MAX_PATH], pattern[MAX_PATH], path[MAX_PATH];
@@ -312,8 +295,9 @@ static void inject_packages(void)
 
     g_str_package_count = 0;
     if (!sh_overrides_get_root(root, sizeof root) || !root[0]) return;
-    /* A partial enumeration still injects what it did find: a missed package's labels fall back to the
-     * engine's own text, which is a worse label but never a wrong one. */
+    /* Retain the enumerated subset on failure; omitted package strings are
+     * not injected.
+     */
     (void)sh_packages_enumerate(root, g_str_packages, SH_PACKAGES_MAX, &g_str_package_count);
 
     for (i = 0; i < g_str_package_count; i++) {
@@ -336,7 +320,7 @@ static void inject_packages(void)
     }
 }
 
-/* Load + inject all rows from strids.json. Returns the count injected. Failure-tolerant. */
+/* Inject the user, package and baked layers. Return the appended row count. */
 static long do_inject(void)
 {
     if (g_table_desc == NULL || g_insert == NULL || g_hash == NULL || g_idstr_ctor == NULL)
@@ -344,9 +328,7 @@ static long do_inject(void)
 
     g_injected_n = 0;   /* fresh dedup set for this inject pass */
 
-    /* (1) USER rows FIRST -- the user's strings\strids.json is their EXPLICIT override layer, so it WINS
-     * (same precedent as the decl file-shadow: a user's own file beats our baked default). A key the user
-     * defines is injected + recorded here; the baked default for that key is then SKIPPED in (2). */
+    /* User values have highest precedence. */
     size_t len = 0;
     char *buf = read_source_file(&len);
     if (buf != NULL) {
@@ -356,30 +338,21 @@ static long do_inject(void)
         backend_log("B1: strids -- no user strids.json (optional); packages and baked defaults still apply");
     }
 
-    /* (1b) PACKAGE rows: each installed package's own strings\*.json, so a package that adds an entity
-     * can name it. AFTER the user's document, because their explicit value still outranks a package's;
-     * BEFORE the baked defaults, because a package shipping a key we also bake is deliberately replacing
-     * our fallback with something specific to its content. */
+    /* Package strings fill keys the user did not supply. */
     inject_packages();
 
-    /* (2) BAKED defaults: fill every shipped key the user did NOT override (the dedup skips a key the json
-     * already injected in (1)), so the "*Custom" tab + Timeline/Unknown strings ALWAYS resolve -- including
-     * on a clean setup with no strids.json. */
+    /* Baked defaults fill remaining keys. */
     for (size_t bi = 0; bi < B1_STRIDS_BAKED_COUNT; bi++)
         inject_row(g_strids_baked[bi].id, g_strids_baked[bi].text, strlen(g_strids_baked[bi].text));
 
     return (long)InterlockedCompareExchange(&g_inject_count, 0, 0);
 }
 
-/* Re-run the engine radix sort over the WHOLE live table so the rows we just appended sort into place.
- * MANDATORY (not optional): the engine #str_ lookup BINARY-SEARCHES the table on the +0x00 hash key
- * (DIRECT, FUN_141a2aa90 -- the comparator behind both idLangDict::GetIndexForId variants 0x1a29c20/
- * 0x1a29cb0), so an unsorted appended row is invisible until the table is re-sorted ascending-by-hash.
- * We call the engine sort BODY through the trampoline (g_sort_orig) exactly as the engine loader
- * does (FUN_141a2a050: sortWrapper(&cmp, table[0], count) -> body(ctx, arr, count, 0x20)). The body's
- * ctx (param_1) is inert for the radix sort itself (only threaded into its recursion), so we pass the
- * table descriptor as a valid ctx pointer. Reads the live array/count from the descriptor (+0 array,
- * +8 count -- DIRECT, FUN_141a29980 idList layout). SEH-guarded: a bad read => skip the sort, no crash. */
+/* Re-sort the entire live table after appending: native lookup binary-
+ * searches its +0x00 hash key. Call the original sort body with radix 0x20
+ * and the descriptor as context. The descriptor holds its array at +0 and
+ * count at +8. Pinned Vulkan lookup comparator: 0x1a2aa90.
+ */
 static void resort_table(void)
 {
     if (g_sort_orig == NULL || g_table_desc == NULL) return;
@@ -391,9 +364,9 @@ static void resort_table(void)
     } __except (EXCEPTION_EXECUTE_HANDLER) { /* bad descriptor read -> leave the table as-is */ }
 }
 
-/* Inject our rows + re-sort the table, EXACTLY ONCE (one-shot latch). Shared by the install-time direct
- * path and the sort detour. Logs the "B1: strids injected N #str_ entries" marker. Returns the count
- * injected, or -1 if another caller already latched the inject (so the caller can stay quiet). */
+/* Claim the shared one-shot latch, inject and re-sort. Returns appended rows,
+ * or -1 if another path already claimed injection.
+ */
 static long inject_and_resort_once(void)
 {
     if (InterlockedCompareExchange(&g_injected, 1, 0) != 0)
@@ -408,21 +381,18 @@ static long inject_and_resort_once(void)
     return n;
 }
 
-/* The detour. Kept installed as a harmless safety net: if the engine ever runs another top-level sort
- * after our install-time inject, the one-shot latch makes this a pass-through (we already injected), so
- * it never double-injects and never interferes with the sort's recursive partition calls. (The inject
- * normally happens at install time now -- see sh_strids_install -- because the lang table sorts ONCE at
- * engine startup, BEFORE our deferred install, so this detour would otherwise never fire.) */
+/* Fallback sort detour. Installation normally injects first; later and
+ * recursive sorts pass through without adding rows.
+ */
 static void sh_sort_detour(void *ctx, void *arr, uint32_t count, uint32_t radix)
 {
     if (g_sort_orig == NULL) return;   /* defensive: never happens once installed */
 
     LONG depth = InterlockedIncrement(&g_in_sort);
     if (depth == 1 && InterlockedCompareExchange(&g_injected, 1, 0) == 0) {
-        /* First top-level sort and we won the latch (no install-time inject has run -- e.g. a sort that
-         * somehow precedes it): inject now so THIS very sort orders our rows in. We DON'T call
-         * resort_table() here (this call IS the sort); we just append, then re-read the grown
-         * array/count below so the engine sort below covers the augmented table. */
+        /* If this top-level sort wins the latch, append now and let this
+         * native sort order the enlarged table. Do not start a nested resort.
+         */
         long n = do_inject();
         char line[96];
         _snprintf_s(line, sizeof line, _TRUNCATE, "B1: strids injected %ld #str_ entries", n);
@@ -439,12 +409,10 @@ static void sh_sort_detour(void *ctx, void *arr, uint32_t count, uint32_t radix)
     }
 
     g_sort_orig(ctx, arr, count, radix);
-    /* RETURN-VALUE NOTE. This detour does work AFTER the original returns, and InterlockedDecrement
-     * clobbers EAX -- so if the sort body's return value were ever consumed, this would silently hand
-     * the caller our decrement instead. It is safe only because that value is dead: the target's sole
-     * caller continues with `MOV ECX,[RSP+0x20]` [DIRECT, decoded from the pinned build], never reading
-     * EAX/AL. Re-check that if the target or the build changes. See docs/backend-changes.md,
-     * 2026-09-01 -- the same shape, with a live return value, silently broke every map save. */
+    /* The modeled sort returns void. Work after its call clobbers EAX; the
+     * pinned caller does not consume EAX/AL. Recheck return-value use when
+     * porting this hook.
+     */
     InterlockedDecrement(&g_in_sort);
 }
 
@@ -498,14 +466,10 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
         sort_body_fn, tramp, SORT_STOLEN, g_table_desc, g_src_path);
     backend_log(line);
 
-    /* INJECT-ON-INSTALL. The engine's idLangDict sorts its lang table exactly ONCE at startup -- well
-     * BEFORE this deferred install (~5s in, after the SteamStub decrypt) -- so the detour above would
-     * never fire on its own (editor entry does not re-sort). Same late-install class as the resolver
-     * defer. So we run the inject DIRECTLY here, immediately, exactly as the detour body would: append
-     * the #str_ rows, then RE-SORT the table (mandatory -- the engine #str_ lookup binary-searches on
-     * the +0x00 hash key, DIRECT FUN_141a2aa90, so unsorted appended rows are invisible). The one-shot
-     * latch in inject_and_resort_once means a later real sort (should one ever occur) won't double it.
-     * Emits the "B1: strids injected N #str_ entries" marker at install time. */
+    /* Inject and re-sort now because the engine's startup language sort
+     * precedes deferred installation. The shared latch prevents a later
+     * native sort from duplicating rows.
+     */
     inject_and_resort_once();
     return 1;
 }
@@ -526,10 +490,9 @@ unsigned long sh_strids_injected_count(void)
 }
 
 #ifdef SH_STRIDS_TESTING
-/* Test seam: bind stand-ins for the four engine entry points and run ONE inject pass, returning the
- * number of rows appended. The engine fns cannot be reimplemented (they intern into an engine-private
- * string pool and grow an engine-owned idList), so a test supplies doubles and inspects what the
- * injector asked them to append. */
+/* Bind doubles for the four native helpers and inspect the rows requested by
+ * one injection pass.
+ */
 int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idstr_ctor)
 {
     g_table_desc = table_desc;

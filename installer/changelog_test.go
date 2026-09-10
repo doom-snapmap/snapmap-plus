@@ -28,9 +28,7 @@ func sampleReleases() []ghRelease {
 	}
 }
 
-// TestFormatChangelogDefaultShowsNewestInFullThenAnIndex: the default view is the newest release
-// complete, then one line per earlier release. Regression guard for the closed-beta report where
-// the console showed only links, and for the opposite failure -- dumping every entry in full.
+// Expand only the newest release; older entries contribute an index row.
 func TestFormatChangelogDefaultShowsNewestInFullThenAnIndex(t *testing.T) {
 	out := formatChangelog(sampleReleases(), "", "", 78)
 
@@ -64,8 +62,7 @@ func TestFormatChangelogMarksTheInstalledRelease(t *testing.T) {
 	}
 }
 
-// TestFormatChangelogMarksTheInstalledReleaseInTheIndex: someone on the stable channel is behind
-// every beta, so the release they have is usually an older one listed in the index, not the newest.
+// The installed release can appear in the index, including on the stable channel.
 func TestFormatChangelogMarksTheInstalledReleaseInTheIndex(t *testing.T) {
 	out := formatChangelog(sampleReleases(), "v0.2.1-beta.4", "", 78)
 	for _, line := range strings.Split(out, "\n") {

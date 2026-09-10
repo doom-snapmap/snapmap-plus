@@ -1,5 +1,4 @@
-# community/wrangler.toml -- deploy config for the Community read proxy (see worker.js).
-# Deploy from this directory: npx wrangler deploy
+# Community Worker entry point and storage bindings. See README.md for setup.
 name = "snapmap-plus-community"
 main = "worker.js"
 compatibility_date = "2026-07-01"

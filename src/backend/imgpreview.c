@@ -1,19 +1,8 @@
-/* imgpreview.c -- see imgpreview.h. The SECOND preview producer: plain (non-megatexture)
- * materials and direct images, read out of the game's own `.index`/`.resources` containers and
- * decoded on the CPU.
- *
- * megapreview.c covers the 5,033 materials that have a `.vmtr` atlas rect. The other ~4,772
- * render fine in game but are backed by ordinary image assets, so the atlas route cannot see
- * them at all. The decode chain is:
- *
- *     name -> material record -> inflate decl -> `*map` field -> image record
- *          -> inflate .bimage -> first mip record -> BC1/BC3/BC7 -> RGBA
- *
- * A direct image request starts at the image-record step. Catalog metadata is retained as compact
- * strings and offsets; payload bytes stay in the installed game files until a preview is requested.
- *
- * Everything is read-only against files the game ships. No engine call at all -- unlike the
- * megatexture codec, BCn and DEFLATE are public formats. */
+/* Read installed resource containers for image and material previews.
+ * Materials resolve through their decl map field to a .bimage; direct image
+ * requests start there. Decode DEFLATE and BCn on the CPU and publish RGBA.
+ * Retain compact catalog metadata while payloads stay on disk.
+ */
 
 #include <windows.h>
 #include <stdio.h>
@@ -38,20 +27,10 @@ typedef struct { const char *name; unsigned long long roff; unsigned usz, csz;
  * hidden: excluded from the browser listing (a duplicate of a SnapMap record, or a base-game
  * record of a type we do not offer). Still findable by name -- see find_rec. */
 
-/* The decl types we index. `suffix`, when set, additionally requires the record NAME to end with
- * it -- that is how one browser category draws from more than one decl type, and how a decl type
- * contributes only part of itself.
- *
- * Counted directly out of snap_gameresources.index: model 12,630 / material 9,805 / sound 5,658 /
- * image 3,423 / entityDef 2,520 / decalatlas 1,673 / particle 1,523 / snapEditorEntityDef 1,362 /
- * md6Def 506 / fx 476. Types outside this table (renderProg, anim, cm, aas, ...) are engine
- * internals with nothing a mapper can place, so they are skipped entirely.
- *
- * MODELS is the one category that is not a straight type mapping. `renderModelInfo.model` takes
- * .lwo and .md6 values, and .md6 models live in their own decl type, so the category is the union
- * of the two. The `model` type's other 9,961 snap-box records are .bmodel -- baked brush geometry,
- * sharing no name with any .lwo. Those are not padding for Models; they get their own two categories
- * (MODULE / BMODEL) so the props list stays a props list. */
+/* Map indexed decl types to browser kinds, optionally filtering by filename
+ * suffix. Models combine .lwo, md6Def and discreteAnimation records. Baked
+ * .bmodel geometry has separate brush/module categories.
+ */
 static const struct { const char *type; unsigned len; unsigned char kind; const char *suffix; unsigned slen; } g_kinds[] = {
     { "material",            8, SH_ASSET_MATERIAL,   NULL,   0 },
     { "image",               5, SH_ASSET_IMAGE,      NULL,   0 },
@@ -63,23 +42,19 @@ static const struct { const char *type; unsigned len; unsigned char kind; const 
     { "decalatlas",         10, SH_ASSET_DECALATLAS, NULL,   0 },
     { "snapEditorEntityDef",19, SH_ASSET_SNAPDEF,    NULL,   0 },
     { "entityDef",           9, SH_ASSET_ENTITYDEF,  NULL,   0 },
-    /* The `model` type's OTHER half: baked BRUSH geometry under maps/. Split from Models on purpose --
-     * .bmodel and .lwo share ZERO stems, so these are disjoint content, not duplicates of the props.
-     * The 232 palette modules are promoted out of this kind in imgpreview_load. */
+    /* Keep baked brush geometry separate; recognized palette modules are
+     * promoted during catalog loading.
+     */
     { "model",               5, SH_ASSET_BMODEL,     ".bmodel", 7 },
     { "cm",                  2, SH_ASSET_CLIPMODEL,  NULL,   0 },
-    /* The THIRD source of Models, and the reason breakable props looked missing. A `breakable` decl
-     * describes how something shatters and NAMES a model -- `breakable/barrel2` points at
-     * `models/mapobjects/prop/destroyables/barrel2gib.lwo` -- and every one of those models is
-     * indexed under `discreteAnimation`, not `model`. All 108 are .lwo, none of them duplicates a
-     * name already in Models, and they are in the SNAP box, so unlike a base-game-only model they
-     * actually load rather than rendering as a black cube. They take renderModelInfo.model like any
-     * other model, so they belong in the same category rather than a separate one. */
+    /* Breakable .lwo props can be indexed as discreteAnimation; expose them
+     * with Models.
+     */
     { "discreteAnimation",  17, SH_ASSET_MODEL,      NULL,   0 },
     { "perks",               5, SH_ASSET_PERK,       NULL,   0 },
-    /* `file` is a mixed bag -- .bimage, .tome, .sbsp, .ambientsh -- and only the .bswf half is worth
-     * offering, so the suffix does the filtering the type cannot. See imgpreview_swf_name for why
-     * the listed name is not the name stored here. */
+    /* Only .bswf records from the mixed file type enter the browser. Convert
+     * their compiled names to decl-facing .swf names.
+     */
     { "file",                4, SH_ASSET_SWF,        ".bswf", 5 },
     /* Cooked MD6 geometry. An md6Def is the public logical model and names one of these rows through
      * its `mesh` field. Keep the row addressable by exact name, but never expose it as a browser kind. */
@@ -89,31 +64,10 @@ static const struct { const char *type; unsigned len; unsigned char kind; const 
 
 typedef struct { unsigned char *idx; size_t idxLen; HANDLE res; } box_t;
 
-/* ---- Wwise events: the OTHER half of the sound catalog -------------------------------------------
- * A `sound` decl is a thin wrapper naming a Wwise event, but the two sets are not the same and
- * NEITHER contains the other. Measured against the shipped files:
- *
- *     Wwise events (soundbanksinfo.xml) 7,649   |   sound decls (snap box) 5,658
- *     overlap 5,058   |   events with no decl 2,591   |   decls not in the manifest 600
- *     union, deduped                    8,249
- *
- * The 2,591 event-only names are what a mapper notices missing -- 594 of them are
- * `play_vo_snapmaps_*`, the generic male/female SnapMap VO, much of it DLC1-3. The 600 decl-only
- * names are mostly path-form (`ambient_events/...`, `effects/...`) plus specials like `_silence`.
- * So the browser lists the UNION and dedupes case-insensitively -- the manifest spells events
- * `Play_Vo_...` while decls are lowercase, so a naive merge would double 5,058 entries.
- *
- * That exact-name dedup is necessary but NOT sufficient, because the two sources name the same
- * sound two different ways. 5,160 decls are flat and literally named `play_*`, so they equal their
- * event outright and collapse here. The other 449 are PATH-FORM, where the rule is instead
- * `<twin> == "Play_" + the decl's LEAF` (`scripted_events/cyberdemon/head_splat_01` <->
- * `Play_head_splat_01`). Those slipped through as a second row for an already-listed sound.
- * imgpreview_hide_wrapped_sounds below is the pass that collapses them; note that the twin may be
- * either a Wwise event OR a flat `play_*` decl, and checking only the events fixes barely half of
- * them. Its comment carries the split and the evidence that dropping the decl side is lossless.
- *
- * `soundbanksinfo.xml` is the Wwise-generated manifest id shipped with the game (26 MB, next to the
- * .bnk files). Parsed for `<Event Id="..." Name="..."/>` only; everything else is ignored. */
+/* Union sound decls with events from soundbanksinfo.xml and deduplicate case-
+ * insensitively. Neither source contains every name. Path-form decl wrappers
+ * need the later play_<leaf> deduplication pass.
+ */
 static unsigned char *g_wwise;           /* compact strings; relevant tag stream only on pool OOM */
 static size_t         g_wwiseBytes;
 static size_t         g_wwiseSourceBytes;
@@ -121,46 +75,17 @@ static size_t         g_wwiseTagBytes;
 static const char   **g_ev;              /* event names NOT already present as a decl */
 static int            g_evCount;
 
-/* ---- .vmtr-only materials: the OTHER half of the MATERIAL catalog --------------------------------
- * Exactly the same shape of problem as the Wwise/sound split above, for the same reason: a material
- * has TWO independent ways to be addressed, and neither set contains the other.
- *
- *   - by NAME, through a `material` decl -> the `customMaterial` field.
- *   - by RECTANGLE, through the `.vmtr` megatexture atlas -> the `virtualmapping` renderParm.
- *
- * The atlas does not need a decl. A row in `_vmtr.vmtr` is paintable as a virtualmapping value
- * whether or not anyone ever authored a `material` decl of that name, and thousands of shipped
- * rows have no decl at all. Listing only decls therefore hides them completely -- they cannot be
- * searched for, so they cannot be applied, even though the art is right there in the atlas.
- *
- * So MATERIALS list the UNION, deduped case-insensitively, exactly like sounds. The decl record
- * wins where both exist (it can do both carriers); an atlas-only name is offered as a material
- * that supports Virtual Mapping but not Custom Material, which is what `has_decl` reports to the
- * UI so it can gate the carrier honestly instead of guessing. */
+/* Union material decl names with VMTR atlas names. A decl supports
+ * customMaterial; an atlas rectangle supports virtualmapping. Keep the decl
+ * record on duplicate names and expose has_decl so atlas-only selections use
+ * the appropriate carrier.
+ */
 static const char   **g_vt;              /* .vmtr names with NO material decl; point into megapreview */
 static int            g_vtCount;
 
-/* ---- which soundbank a sound came from -----------------------------------------------------------
- * `soundbanksinfo.xml` groups its events under <SoundBank><ShortName>doom_snapmaps</ShortName>...,
- * and that grouping is the only meaningful structure the sound catalog has. The names themselves are
- * almost entirely FLAT (5,160 of the decls are `play_*` with no path at all), so a folder tree built
- * from names is ~95% one giant root -- which is what it looks like in the browser today.
- *
- * 26 distinct banks, sensibly sized (doom_vo 1666, doom_initial 1551, doom_snapmaps 485,
- * doom_monsters 424, ... only 3 under 20 events), so they make a usable filter where a name-prefix
- * split does not: prefixes give 835 buckets, 585 of them holding a single event, and `vo` alone
- * swallowing 46% of the catalog.
- *
- * ONE EVENT CAN BE IN SEVERAL BANKS -- 1,619 of 7,649 are. That sounds fatal for a single-valued
- * filter and is not, because the overlap is almost entirely `doom_initial` (the always-loaded base
- * bank) paired with the bank that actually means something:
- *
- *     345  doom_initial + doom_monsters        121  doom_initial + doom_effects
- *     180  doom_initial + doom_scripted_events 114  doom_initial + doom_ui
- *     162  doom_initial + doom_weapon_sp       109  doom_initial + doom_ambience
- *
- * So the tie-break is "prefer the specific bank over doom_initial", which resolves nearly all of it.
- * doom_snapmaps is cleaner still: 485 events, only 27 of which appear in any other bank. */
+/* Group sounds by Wwise bank. When an event belongs to multiple banks, prefer
+ * a specific bank over the always-loaded doom_initial bank.
+ */
 typedef struct { const char *name; const char *bank; } sndbank_t;
 static sndbank_t     *g_sb;              /* one row per DISTINCT event; both ptrs into g_wwise      */
 static int            g_sbCount;
@@ -183,19 +108,10 @@ static unsigned long long be64(const unsigned char *p)
 static unsigned le32(const unsigned char *p)
 { return (unsigned)p[0]|((unsigned)p[1]<<8)|((unsigned)p[2]<<16)|((unsigned)p[3]<<24); }
 
-/* Turn the stored SWF record name into the one decls actually use.
- *
- *     generated/swf/interactables/elite_guard.bswf   <- what the index stores
- *     swf/interactables/elite_guard.swf              <- what an entityDef references
- *
- * The baked `.bswf` under `generated/` is the compiled artifact, the same relationship `.bimage`
- * has to an image decl. It appears in no decl anywhere, so listing it would give the mapper a name
- * that cannot be pasted into anything.
- *
- * Rewritten IN PLACE, which is safe only because the wanted form is strictly SHORTER: dropping
- * `generated/` frees ten bytes and `.bswf` -> `.swf` one more. The prefix is skipped by moving the
- * POINTER (no copying), and the extension is overwritten across its own five bytes. Anything not
- * shaped as expected is returned untouched rather than half-converted. */
+/* Convert generated/swf/<name>.bswf to swf/<name>.swf for decl references.
+ * The result is shorter, so advance the prefix pointer and rewrite the
+ * extension in place. Leave unexpected names unchanged.
+ */
 static const char *imgpreview_swf_name(char *name, unsigned nl)
 {
     if (nl >= 5 && _stricmp(name + nl - 5, ".bswf") == 0)
@@ -256,9 +172,9 @@ static int imgpreview_parse_box_index(int b, unsigned char *buf, size_t len)
             if (tl != g_kinds[k].len || memcmp(type, g_kinds[k].type, tl) != 0) continue;
             /* Names are not NUL-terminated here (that happens below), so match the suffix against
              * the known length rather than with strcmp. */
-            /* `continue`, NOT `break`: one decl type can map to several kinds discriminated only by
-             * extension (`model` -> .lwo Models and .bmodel Brush models). Breaking here on the
-             * first entry whose suffix misses would drop every record the later entry owns. */
+            /* Continue after a suffix miss: later rows can map the same decl
+             * type to another browser kind.
+             */
             if (g_kinds[k].suffix &&
                 (nl < g_kinds[k].slen ||
                  _strnicmp(name + nl - g_kinds[k].slen, g_kinds[k].suffix, g_kinds[k].slen) != 0))
@@ -268,11 +184,9 @@ static int imgpreview_parse_box_index(int b, unsigned char *buf, size_t len)
         }
         if (kind < 0) continue;
 
-        /* The broader base-game box contributes only the three routes this browser can actually
-         * use: material and image records can satisfy cross-box pixel previews, and sound records
-         * are deliberately offered in the catalog. Its models, collision, FX, defs, particles,
-         * decals, perks, and SWFs are neither listed nor previewed, so retaining 28,230 records
-         * and their names for those types served no request. The SnapMap box remains complete. */
+        /* The base-game index contributes material, image and sound records.
+         * Other browser kinds come from the SnapMap index.
+         */
         if (b == 1 && kind != SH_ASSET_MATERIAL && kind != SH_ASSET_IMAGE &&
             kind != SH_ASSET_SOUND && kind != SH_IMGPREVIEW_BASEMODEL_KIND)
             continue;
@@ -344,12 +258,10 @@ static int __cdecl cmp_rec_name(const void *a, const void *b)
     return c ? c : ia - ib;
 }
 
-/* The parser initially points record names into the raw index buffers. Those buffers also contain
- * every skipped type, payload path, and fixed record field, so retaining both complete files just
- * to keep the recognized names alive wastes tens of megabytes. Copy one instance of each distinct
- * recognized name into a compact pool, point duplicate records at that same immutable string, then
- * release both raw indexes. Resource payloads remain on disk and are still addressed by each
- * record's offset and sizes. Returns the number of raw bytes released. */
+/* Intern recognized names into one immutable pool, then release the raw index
+ * buffers. Records retain disk offsets and sizes for payload reads. Return
+ * the number of raw bytes released.
+ */
 static size_t imgpreview_compact_names(void)
 {
     if (g_namePool) return 0;
@@ -407,10 +319,10 @@ static int __cdecl cmp_ci(const void *a, const void *b)
     return _stricmp(*(const char * const *)a, *(const char * const *)b);
 }
 
-/* Sorts RECORD INDICES by (kind, box, name, original index) so repeats of one name inside one box
- * land next to each other. The index is the last key on purpose: it makes the order total, so the
- * pass that walks the result can rely on the earlier-indexed record always coming first and keep
- * that one. Reads through g_sortRec because qsort gives the comparator no context of its own. */
+/* Sort indices by kind, box, name and original index. The final tie-break
+ * retains the earliest record for duplicate names. g_sortRec supplies qsort
+ * context.
+ */
 static int __cdecl cmp_rec_kind_name(const void *a, const void *b)
 {
     int ia = *(const int *)a, ib = *(const int *)b;
@@ -465,10 +377,9 @@ static void imgpreview_shrink_wwise_tables(void)
     g_sb = (sndbank_t *)imgpreview_shrink_array(g_sb, (size_t)g_sbCount, sizeof *g_sb);
 }
 
-/* Parsing needs a mutable tag stream, but steady-state catalog use needs only each distinct event
- * name and each distinct bank name once. g_sb already has one row per event and g_ev is a subset of
- * those same events, so both tables can point into one interned pool instead of duplicating event
- * strings or repeating one bank name hundreds of times. */
+/* Intern distinct event and bank names so g_sb and its g_ev subset share
+ * retained strings after parsing.
+ */
 static size_t imgpreview_compact_wwise_strings(void)
 {
     const char **banks = g_sbCount ? (const char **)malloc((size_t)g_sbCount * sizeof *banks) : NULL;
@@ -530,11 +441,10 @@ static size_t imgpreview_compact_wwise_strings(void)
     return need;
 }
 
-/* Parse a mutable, NUL-padded stream of only the relevant Wwise tags into g_ev, keeping only events
- * with no `sound` decl of the same name. Takes ownership of `buf`; normal completion compacts every
- * retained pointer into a small owned string pool before releasing the transient tag stream.
- * `sourceBytes` is the full manifest size for the production measurement; tests pass their buffer
- * size directly. */
+/* Take ownership of the mutable NUL-padded Wwise tag buffer and retain events
+ * without an equal sound decl. Compact retained strings before releasing the
+ * buffer. sourceBytes records the original manifest size for diagnostics.
+ */
 static void imgpreview_parse_wwise_buffer_sized(unsigned char *buf, size_t len, size_t sourceBytes)
 {
     if (!buf) return;
@@ -544,8 +454,7 @@ static void imgpreview_parse_wwise_buffer_sized(unsigned char *buf, size_t len, 
     g_wwiseSourceBytes = sourceBytes;
     g_wwiseTagBytes = len + 1u;
 
-    /* The decl names, sorted case-insensitively, so the dedup is a binary search rather than a
-     * 7,649 x 5,658 scan. */
+    /* Sort decl names case-insensitively for binary-search deduplication. */
     const char **decl = (const char **)malloc((size_t)g_recCount * sizeof *decl);
     int dn = 0;
     if (decl) {
@@ -564,17 +473,12 @@ static void imgpreview_parse_wwise_buffer_sized(unsigned char *buf, size_t len, 
         return;
     }
 
-    /* Every (event, bank) pair, before dedup. The manifest repeats an event once per bank that
-     * includes it -- 39,971 elements for 7,649 names -- so this is the raw pair list that the
-     * prefer-specific-bank collapse below reduces to one row per event. */
+    /* Collect event/bank pairs before collapsing repeated events. */
     int sbCap = 4096;
     sndbank_t *sbRaw = (sndbank_t *)malloc((size_t)sbCap * sizeof *sbRaw);
     int sbRawCount = 0;
 
-    /* The bank whose <IncludedEvents> we are currently inside. The manifest is ordered, so tracking
-     * the most recent <SoundBank>'s <ShortName> is enough. Deliberately NOT any <ShortName>: the
-     * <StreamedFiles> block earlier in the file uses that tag too, for .wav paths. Those precede
-     * the first <SoundBank> and contain no <Event>, so anchoring to <SoundBank> skips them. */
+    /* Track ShortName only inside SoundBank, not nested streamed-file records. */
     const char *bank = "";
 
     for (char *s = (char *)buf; ; ) {
@@ -616,9 +520,7 @@ static void imgpreview_parse_wwise_buffer_sized(unsigned char *buf, size_t len, 
     }
     free(decl);
 
-    /* The manifest lists each event once PER SOUNDBANK that includes it -- 39,971 <Event> elements
-     * for 7,649 distinct names. Without this the browser would show roughly 9,400 duplicate rows.
-     * Sort case-insensitively, then collapse adjacent equals. */
+    /* Sort event names case-insensitively and collapse repeated names. */
     int raw = g_evCount;
     if (g_evCount > 1) {
         qsort(g_ev, (size_t)g_evCount, sizeof *g_ev, cmp_ci);
@@ -705,10 +607,9 @@ static int imgpreview_append_wwise_tag(unsigned char **buf, size_t *len, size_t 
            imgpreview_append_wwise(buf, len, cap, suffix, strlen(suffix));
 }
 
-/* Stream the Wwise manifest line by line and retain only bank names and Event names in a compact
- * transient tag stream. The installed document is about 26 MiB, while these relevant tags are only
- * a small fraction of it; duration, attenuation, streamed-file, media, and hash metadata never
- * enters the process. Failure is non-fatal and leaves the decl-only sound catalog available. */
+/* Lazily stream only relevant tags from soundbanksinfo.xml. Failure leaves
+ * the decl catalog available.
+ */
 static void imgpreview_load_wwise_file(void)
 {
     char p[MAX_PATH];
@@ -764,48 +665,10 @@ static void imgpreview_load_wwise_file(void)
     imgpreview_parse_wwise_buffer_sized(buf, len, sourceBytes);
 }
 
-/* Hide a sound decl that is nothing but a wrapper around a Wwise event already in the catalog.
- *
- * The manifest's exact-name dedup catches the 5,160 decls literally NAMED `play_*`,
- * because those equal their event's name outright. It cannot catch the other 449, which are
- * PATH-FORM -- and those were showing up as a second row for a sound already listed:
- *
- *     decl   scripted_events/cyberdemon/head_splat_01      <- this row, redundant
- *     event  Play_head_splat_01                            <- same sound
- *
- * The naming rule is `event == "Play_" + the decl's LEAF`, and it is safe to apply mechanically:
- * NONE of the 449 path-form decls already has a `play_` leaf, so the prefix can never double up.
- *
- * Dropping the decl side loses NOTHING. Measured across the shipped set, 5,657 of 5,658 sound decls
- * are empty wrappers -- `inherit = "default"` and an empty `edit` block. The single exception is
- * `default.decl` itself, the base they all inherit. A sound decl carries no volume, no falloff, no
- * randomisation the event does not already have, so the two rows are the same sound and the event is
- * the one that actually plays. What is lost is only the folder path, which the owner explicitly did
- * not want to keep for sounds ("I don't think we need the folder structure").
- *
- * Where two decls map to one event -- 8 pairs, e.g. monster/baron/attacks/groundpound and
- * monster/hellknight/attacks/groundpound both -> Play_groundpound -- collapsing them is correct
- * rather than lossy, for the same reason: neither decl adds anything to distinguish them.
- *
- * The twin is looked for in BOTH sources, because it can be either one and checking only the events
- * fixes only half the rows. Of the 449 path-form decls:
- *
- *     181  twin is a Wwise EVENT in g_ev          (no flat decl of that name exists)
- *     129  twin is a flat `play_<leaf>` DECL      (so the event was exact-matched OUT of g_ev)
- *     139  no twin at all -- genuinely unique, and correctly kept
- *
- * That second bucket is the trap: `g_ev` deliberately holds only events with NO exact-name decl, so
- * for `effects/explosions/rocket_explosion_default` the event `Play_rocket_explosion_default` is
- * absent from g_ev -- it was claimed by the flat decl `play_rocket_explosion_default`, which is
- * itself a listed row. Searching g_ev alone leaves that pair on screen.
- *
- * Only PATH-FORM records are ever hidden, and the name looked up (`play_` + leaf) never contains a
- * '/', so a flat row can never be hidden by this pass and two records can never hide each other.
- * The decl array is built from the records still VISIBLE at this point, so a box-1 twin that
- * the box dedup already hid cannot suppress the row that survived it.
- *
- * Deliberately does NOT touch flat-named records (no '/'), which the exact-name pass already
- * settled. Returns how many rows it hid. */
+/* Hide a path-form sound decl when play_<leaf> already exists as a Wwise
+ * event or visible flat sound decl. Keep flat names and unmatched path names.
+ * This avoids offering a wrapper and its event as separate selections.
+ */
 static int imgpreview_hide_wrapped_sounds(void)
 {
     /* The sound rows the browser would list right now, sorted for a binary search. */
@@ -854,10 +717,7 @@ static void imgpreview_load_sound_catalog(void)
     backend_log(line);
 }
 
-/* Fold the `.vmtr` atlas rows that have NO material decl into the material catalog. Same shape as
- * the sound union: sort the decl names once, then binary-search each atlas row against them.
- * Names point into megapreview's parsed table, which lives for the process, so nothing is copied.
- * Failure is non-fatal -- a missing atlas just leaves the catalog decl-only, as it was before. */
+/* Retain references to process-lifetime VMTR names for atlas-only materials. */
 static void imgpreview_load_vmtr(void)
 {
     if (g_vmtrLoaded) return;
@@ -929,11 +789,7 @@ static int imgpreview_load(void)
         (releasedIndexBytes == indexBytes) ? g_namePoolBytes : indexBytes;
     const char *indexMode = (releasedIndexBytes == indexBytes) ? "compacted" : "raw retained";
 
-    /* Promote the 232 SnapMap MODULES out of the brush-model pile. They are the only .bmodel
-     * records that pair 1:1 with a collision model, so they are the only ones that can be placed
-     * as something both visible AND solid -- a different proposition from the wall/floor pieces
-     * they are assembled from, and worth its own category rather than being lost among 9,729
-     * fragments and invisible internals. */
+    /* Promote bmodels with a same-named collision record into Modules. */
     int modules = 0;
     for (int i = 0; i < g_recCount; ++i)
         if (g_rec[i].kind == SH_ASSET_BMODEL && strstr(g_rec[i].name, "/palettes/mega_blessed/")) {
@@ -941,26 +797,13 @@ static int imgpreview_load(void)
             modules++;
         }
 
-    /* Lights is material DECLS only, and that is not an arbitrary choice -- it is what makes the
-     * list agree with a known-good one. Including `lightatlas` rows too gave 117 names; filtering to
-     * decls gives 89, which is exactly the 88 the whitelist is known to accept plus
-     * `lights/defaultprojectedlight`, sibling of defaultpointlight and defaultparallellight, both
-     * already known good.
-     *
-     * The 28 dropped rows are atlas entries with NO material decl -- the light IMAGES, several with
-     * a `.tga` on the end and five not even under lights/ (textures/common/white.tga and friends).
-     * `lightMaterial` names a material, so an image with no decl has nothing to resolve, the same
-     * reason a decl-less atlas row cannot take customMaterial.
-     *
-     * COPY, do not move. Promoting these out of Materials the way palette modules are promoted was
-     * wrong: a move is only right when the source list should not contain the rows at all, and a
-     * `lights/` material is still a material. */
+    /* Add light-material decls while retaining them in Materials. Atlas-only
+     * images cannot resolve through lightMaterial.
+     */
     int lights = 0;
     for (int i = 0, n0 = g_recCount; i < n0; ++i) {
         if (g_rec[i].kind != SH_ASSET_MATERIAL) continue;
-        /* BOTH prefixes. `lights_blended/` is a real second family -- 11 of them, and 11 of the 88
-         * names on the known-good list live there -- and matching only `lights/` silently dropped
-         * every one. It is not a subfolder of `lights/`; the underscore makes it a sibling. */
+        /* Accept both light-material prefixes. */
         if (_strnicmp(g_rec[i].name, "lights/", 7) != 0 &&
             _strnicmp(g_rec[i].name, "lights_blended/", 15) != 0)
             continue;
@@ -975,20 +818,7 @@ static int imgpreview_load(void)
         lights++;
     }
 
-    /* Collapse records that repeat a name WITHIN one box, before anything else looks at the list.
-     *
-     * The index is a record-per-blob table, not a catalog of distinct assets: the same decl can be
-     * baked into the .resources file more than once, at different offsets. `decalatlas` is where it
-     * shows -- 1,673 records for 1,024 distinct names -- and the browser was faithfully listing all
-     * of them, so a mapper saw every decal twice. Clicking one selected both rows and starring one
-     * starred both, because the two rows ARE the same name and the UI keys off the name.
-     *
-     * Measured across snap_gameresources: decalatlas 649 repeats, image 1, and exactly zero for
-     * material, model, md6Def, sound, fx, particle, entityDef, snapEditorEntityDef and cm. So this
-     * is general on purpose but only ever fires where the data actually repeats.
-     *
-     * The FIRST record wins, which is also what find_rec would have resolved to, so nothing that
-     * already previewed changes which blob it reads. */
+    /* For duplicate records in one box, keep the earliest index entry. */
     int boxdup = 0;
     {
         int *ord = (int *)malloc((size_t)g_recCount * sizeof *ord);
@@ -1008,16 +838,7 @@ static int imgpreview_load(void)
         }
     }
 
-    /* Decide, once, which records the browser will LIST.
-     *
-     * Box 0 (`snap_gameresources`) is everything SnapMap ships with. Box 1 (`gameresources`) is
-     * the base game's broader set; most of it is unreferencable from SnapMap, which is why it is not
-     * offered wholesale. SOUNDS are the exception worth making: 1,186 sound decls exist only in
-     * box 1 and 231 of those are `vo_*`, which is a category a mapper visibly misses. The browser's
-     * working play/stop path makes each offered event directly testable from a SnapMap session.
-     *
-     * Duplicates are dropped rather than shown twice: 2,401 sound names appear in both boxes. The
-     * box-0 record wins, so nothing that already worked changes route. */
+    /* SnapMap records win duplicate names; also expose base-game sound records. */
     const char **snapSounds = (const char **)malloc((size_t)g_recCount * sizeof *snapSounds);
     int snapSoundCount = 0;
     if (snapSounds) {
@@ -1081,11 +902,7 @@ static const rec_t *find_rec(const char *name, int kind)
     return NULL;
 }
 
-/* Is `name` a real decl of this type in the shipped containers? Exposed for callers that are about
- * to hand a name to an ENGINE lookup and need to know it exists first -- the engine's find-or-create
- * primitive fatals on a miss, so "does this name exist" has to be answered from our own data, never
- * by trying it. Takes the same lock as the list path; the base catalog is parsed lazily, and Wwise
- * metadata is added only for a sound lookup. */
+/* Validate names against this catalog before native lookup. */
 int sh_imgpreview_has(int kind, const char *name)
 {
     if (!name || !name[0]) return 0;
@@ -1094,11 +911,10 @@ int sh_imgpreview_has(int kind, const char *name)
     if (imgpreview_load()) {
         if (kind == SH_ASSET_SOUND) imgpreview_load_sound_catalog();
         ok = find_rec(name, kind) != NULL;
-        /* A Wwise event with no decl is still a real, playable name -- up to 2,591 relative to the
-         * SnapMap-only decl set, including generic VO (the broader sound union claims more exact
-         * matches). The engine resolves it through find-or-CREATE, which builds the
-         * decl on demand; that path is safe by default (its only fatal is gated on
-         * `resource_errorInGame == 2`, and the cvar ships at 0 = "Nothing"). */
+        /* Admit Wwise event-only names without a sound decl. Native find-or-
+         * create creates their wrappers; its missing-resource error remains
+         * subject to resource_errorInGame, including the fatal setting 2.
+         */
         if (!ok && kind == SH_ASSET_SOUND) {
             for (int e = 0; e < g_evCount && !ok; ++e)
                 if (_stricmp(g_ev[e], name) == 0) ok = 1;
@@ -1169,11 +985,9 @@ int sh_imgpreview_read_payload(int kind, const char *name, size_t max_bytes,
     return ok;
 }
 
-/* --------------------------------------------------------------------- decl parse -------------
- * Decls are plain text. The field naming its image varies by `stageprogram` -- `transmap` is by
- * far the most common, then `texturemap` -- so the rule is "any field whose name ends in `map`",
- * skipping engine built-ins (`_black`, `_vmtrpagetable`, ...) which all start with '_'.
- * Albedo-ish names are preferred so a normal or specular map never wins over the base colour. */
+/* Find a field ending in map, skip underscore-prefixed engine built-ins, and
+ * prefer albedo-like names over normal or specular maps.
+ */
 static const char *PREF[] = { "texturemap","transmap","transsortmap","transatlasmap",
                               "virtualtransmap","basecolormap","albedomap","diffusemap",
                               "colormap","sparediffusemap", NULL };
@@ -1332,8 +1146,7 @@ int sh_imgpreview_list(int kind, unsigned start, char *out, size_t cap)
 {
     if (!out || cap < 2) return 0;
     out[0] = '\0';
-    /* Bound by the ASSET id space, not the table length -- the table has more rows than there are
-     * categories now that MODELS is fed by two decl types. */
+    /* Validate the public SH_ASSET_* range before indexing category state. */
     if (kind < 0 || kind >= SH_ASSET_COUNT) return 0;
     EnterCriticalSection(&g_lock);
     int written = 0;
@@ -1352,8 +1165,7 @@ int sh_imgpreview_list(int kind, unsigned start, char *out, size_t cap)
             out[used++] = '\n';
             written++;
         }
-        /* Wwise events continue the SAME `seen` sequence, so the caller's paging (add the returned
-         * count to `start` until it returns 0) crosses the two sources without a special case. */
+        /* Page over the same ordering used to count visible names. */
         if (kind == SH_ASSET_SOUND) {
             for (int e = 0; e < g_evCount; ++e) {
                 if (seen++ < start) continue;
@@ -1364,9 +1176,9 @@ int sh_imgpreview_list(int kind, unsigned start, char *out, size_t cap)
                 written++;
             }
         }
-        /* The sound -> soundbank map, served on its own pseudo-kind as `event|bank` lines. Not
-         * folded into SH_ASSET_SOUND: that list is names the UI applies verbatim, and appending a
-         * bank to them would corrupt every one. The UI keeps this as a side map instead. */
+        /* Publish event|bank lines on a separate pseudo-kind. The sound-name
+         * list is applied verbatim and must contain only names.
+         */
         if (kind == SH_ASSET_SNDBANK) {
             for (int b = 0; b < g_sbCount; ++b) {
                 if (seen++ < start) continue;
@@ -1379,9 +1191,7 @@ int sh_imgpreview_list(int kind, unsigned start, char *out, size_t cap)
                 written++;
             }
         }
-        /* Same continuation for the decl-less `.vmtr` materials -- they are as applyable as any
-         * decl-backed one (by rectangle rather than by name), so they belong in the same list.
-         * SH_ASSET_VTONLY serves the SAME array on its own, so the UI can tell the two apart. */
+        /* Atlas-only materials remain selectable through their VMTR rectangle. */
         if (kind == SH_ASSET_MATERIAL || kind == SH_ASSET_VTONLY) {
             for (int v = 0; v < g_vtCount; ++v) {
                 if (seen++ < start) continue;

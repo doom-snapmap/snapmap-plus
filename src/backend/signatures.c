@@ -1,17 +1,6 @@
-/* signatures.c -- see signatures.h. C port of the reference implementation's signature table for the Snapmap+ backend.
- *
- * The scanner mirrors the reference resolver byte-for-byte in behaviour: compile an IDA-style hex
- * pattern to (pattern,mask), find the longest fixed (mask==0xFF) run as a memmem anchor, then verify
- * the full masked pattern at each anchor hit. The only structural difference is that the reference
- * version reads .text out of a file image (RVA<->file-offset) while this reads the LIVE mapped DOOM
- * module (each section's bytes sit at module_base + section.VirtualAddress), because the resolver runs
- * in-process against the DOOM module our backend DLL is loaded into.
- *
- * Scope of the scan: every executable section (Characteristics & IMAGE_SCN_MEM_EXECUTE), not just a
- * section literally named ".text" -- DOOM is SteamStub-unpacked and section names are not guaranteed,
- * and the engine code we sign lives in the executable image regardless of name. Uniqueness is still
- * enforced across the whole executable range, so a false second match anywhere reports AMBIGUOUS.
- */
+/* Resolve masked signatures in mapped executable sections, independent of names.
+ * Use the longest fixed run as an anchor, then verify the full pattern.
+ * Multiple matches are rejected; unreadable section tails stop that section scan. */
 #include "signatures.h"
 #include <string.h>
 
@@ -23,9 +12,9 @@ const sig_entry NAV_RENDER_TARGET_GL_SIGNATURE = {
     0x19231e0u
 };
 
-/* ------------------------------------------------------------------ pattern compile + match ------ */
+/* Pattern compilation and matching. */
 
-#define SIG_MAX_PATTERN 256   /* longest signature byte length we support (DB max is ~40 bytes) */
+#define SIG_MAX_PATTERN 256   /* Maximum supported pattern length. */
 
 static int parse_token(const char *tok, size_t len, uint8_t *b, uint8_t *m)
 {
@@ -97,7 +86,7 @@ static long find_bytes(const uint8_t *blob, size_t end, const uint8_t *needle, s
     return -1;
 }
 
-/* ----------------------------------------------------------------------- PE executable sections -- */
+/* Mapped executable sections. */
 
 typedef struct exec_section {
     const uint8_t *base;   /* module_base + VirtualAddress (mapped) */
@@ -131,26 +120,16 @@ static int collect_exec_sections(const uint8_t *module_base, exec_section *out, 
     return count;
 }
 
-/* ------------------------------------------------------------------------ hook-tolerant fallback --
- * When the masked-byte scan misses a function because its PROLOGUE was inline-hooked at runtime (the
- * stolen first bytes were overwritten with a detour jump -- an external instrumentation tool does exactly this
- * to DeserializeFromJson / AddCommand / MenuPump during testing), the function is still present and
- * callable (the detour trampolines through to the original). So if the scan finds 0 matches, we fall
- * back to the DB's known_rva: if the bytes there start with a detour jump AND the sig's fixed-byte TAIL
- * (past the stolen prologue window) still matches the live bytes, the function is present-but-hooked and
- * we resolve at known_rva. This is BUILD-SPECIFIC (known_rva is the PINNED build's RVA -- see the
- * BACKEND_ENGINE_SIGNATURES header) -- it is a deliberate fallback that fires ONLY on a detected hook;
- * the portable scan stays primary. NB this is the ONLY consumer of known_rva at runtime, which is why a
- * wrong value never shows up in ordinary testing: everything keeps working until some other mod detours
- * the same function, and then the feature quietly fails to arm. */
+/* A detour can erase a signature prologue while leaving its tail intact. After
+ * a scan miss, known_rva may identify that hooked entry when the jump form and
+ * enough fixed tail bytes match. The RVA belongs to one extraction build;
+ * it is not a portable substitute for signature resolution. */
 
 #define HOOK_MAX_STEAL   24   /* widest plausible whole-instruction steal window a detour overwrites */
 #define HOOK_MIN_TAIL     6   /* require at least this many FIXED tail bytes to match (anti-coincidence) */
 
-/* Is the byte at p[0..] the start of an x64 unconditional jmp a detour installer would write?
- *   E9 rel32 | EB rel8 | FF 25 [rip+disp32] (abs indirect) | FF /4 reg/mem jmp. Returns the opcode
- *   length consumed for the "stolen window starts here" purpose (best-effort; the tail slide is the
- *   real validator). 0 if not a recognized jmp opcode. */
+/* Recognize common x64 detour jumps and return their minimum opcode length.
+ * Tail matching, rather than this partial decoder, validates the fallback. */
 static int detour_jmp_len(const uint8_t *p)
 {
     if (p[0] == 0xE9) return 5;                    /* jmp rel32 */
@@ -195,11 +174,9 @@ static int try_hooked_known_rva(const uint8_t *module_base, const sig_entry *sig
     if (!sig_safe_read(site, live, want)) return 0;       /* unreadable -> not a confident hook hit */
 
     int jlen = detour_jmp_len(live);
-    if (jlen == 0) return 0;                               /* not detoured -> the fn genuinely moved */
+    if (jlen == 0) return 0;                               /* No recognized detour at the recorded location. */
 
-    /* The detour stole a whole-instruction window >= jlen. Slide the steal offset k and require the
-     * sig's FIXED tail (mask==0xFF positions from k to n) to match the live bytes, with enough fixed
-     * tail bytes to rule out coincidence. */
+    /* Try plausible stolen-byte windows and require enough unchanged fixed tail. */
     for (size_t k = (size_t)jlen; k <= HOOK_MAX_STEAL && k < n; k++) {
         int fixed_tail = 0, ok = 1;
         for (size_t j = k; j < n; j++) {
@@ -217,7 +194,7 @@ static int try_hooked_known_rva(const uint8_t *module_base, const sig_entry *sig
     return 0;
 }
 
-/* ----------------------------------------------------------------------------------- resolve ----- */
+/* Resolution. */
 
 sig_status sig_resolve_one(const uint8_t *module_base, const sig_entry *sig, sig_result *out)
 {
@@ -268,14 +245,12 @@ sig_status sig_resolve_one(const uint8_t *module_base, const sig_entry *sig, sig
                 pos = (size_t)apos + 1;
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            /* uncommitted section tail -- treat what we found so far as authoritative */
+            /* Stop this section on an unreadable page; retain earlier matches. */
         }
     }
 
     if (hits == 0) {
-        /* Scan missed. Before declaring NOT_FOUND, try the hook-tolerant known_rva fallback: the
-         * prologue may be inline-hooked (an external instrumentation tool may do this to a few engine fns
-         * during testing), so the fixed bytes the scan needs are overwritten -- but the fn is present + callable. */
+        /* A missing prologue may have been replaced by a validated detour. */
         if (try_hooked_known_rva(module_base, sig, pat, mask, n, out))
             return out->status;   /* SIG_OK_HOOKED */
         out->status = SIG_NOT_FOUND;
@@ -316,31 +291,14 @@ uintptr_t sig_addr_by_name(const sig_result *results, size_t n, const char *name
     return 0;
 }
 
-/* ------------------------------------------------------------ the shipped engine signature DB ----
- * Verbatim port of the reference implementation's ENGINE_SIGNATURES table (the authoring source). Each `pattern`
- * is the same masked-byte string; `known_rva` is the RVA on THE PINNED BUILD (validation/documentation
- * plus the hook-tolerant fallback -- the scanner re-finds the function with NO hardcoded RVA).
- * Regenerated by the project's signature extractor from an unpacked DOOM image when the DOOM build
- * changes; do not hand-edit.
- *
- * *** WHICH BUILD `known_rva` MUST COME FROM -- READ THIS BEFORE ADDING AN ENTRY ***
- * This table is pinned to ONE DOOM build: the SteamStub-wrapped `DOOMx64vk.exe` with SHA256
- * 139763E94F1A75B5310179F9EEEB8A949A1F53C49ACBC722FCFC5DFE7BB6D323 (Steamless-unpacked:
- * 5AD2548CEAB3DFA27F271E381222CA4A84DCAC7CB83CCE9446444C30C8309367). That is NOT the build Steam
- * currently ships. If you reverse-engineer against current retail DOOM -- or against any Ghidra project
- * or live process that is not the pinned build -- every raw address you read is for the WRONG build and
- * MUST be translated before it lands here. There is no global delta between builds: the newer build is
- * a cluster-wise re-link, so different functions move by different amounts and no single offset works.
- *
- * The `pattern` is build-portable and the `known_rva` is not. That asymmetry is why a wrong `known_rva`
- * is INVISIBLE in normal use: the scanner still finds the function on either build, so the feature works
- * and only the hook-tolerant fallback (which probes module_base + known_rva when another mod has already
- * detoured the target) silently stops working.
- *
- * VERIFY IT. `tests\run-tests.ps1 -Doom <path-to-unpacked-DOOM>` runs sig_test + hooktol_test, which
- * assert resolved == known_rva for every entry. Those two tests are the ONLY thing that catches a
- * wrong address, they are skipped without -Doom, and CI has no DOOM binary -- so a green CI proves
- * nothing here. Run them locally whenever you touch this table. */
+/* Engine signatures and extraction-build references.
+ * known_rva belongs to the pinned Vulkan image only:
+ * wrapped SHA256 139763E94F1A75B5310179F9EEEB8A949A1F53C49ACBC722FCFC5DFE7BB6D323
+ * unpacked SHA256 5AD2548CEAB3DFA27F271E381222CA4A84DCAC7CB83CCE9446444C30C8309367.
+ * Other builds require individual address mapping; no uniform delta is valid.
+ * A zero known_rva disables fallback. Preserve extracted patterns and validate
+ * entry changes with tests/run-tests.ps1 -Doom <pinned> -DoomAlt <other-renderer>.
+ * CI has no game image and cannot verify these identities. */
 const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "DeserializeFromJson",
       "40 55 56 57 48 8D 6C 24 90 48 81 EC 70 01 00 00 48 C7 44 24 68 FE FF FF FF",
@@ -385,13 +343,9 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "80 BB 8E 0C 00 00 00 74 0A 81 A3 94 0C 00 00 FF FF FD FF "
       "48 8B 8B 08 08 00 00 41 83 C8 FF 8B 93 94 0C 00 00 48 8B 01 FF 50 30",
       0x987F18u },
-    { "SnapMapEditToSnapBuild", /* int(edit map [rcx], build map [rdx], ctx [r8]) -- the edit-to-build
-                                 * conversion the editor runs when Play is pressed. It calls
-                                 * idDeclSnapMap::BuildAAS three times (once per demon size class) at
-                                 * +0x35C/+0x373/+0x38A, so its ENTRY is the last point at which the
-                                 * editor still owns its map and the first that precedes every bake.
-                                 * Snapmap+ detours it to re-read the author's live navigation marks;
-                                 * see nav_play.h. */
+    { "SnapMapEditToSnapBuild", /* int(edit map, build map, ctx). Entry precedes all three BuildAAS calls
+                                 * (+0x35C/+0x373/+0x38A), so nav_play reads live marks here
+                                 * before conversion invalidates the editable entity state. */
       "48 8B C4 55 41 54 41 55 41 56 41 57 48 8B EC 48 83 EC 60 48 C7 45 C0 FE FF FF FF "
       "48 89 58 08 48 89 70 18 48 89 78 20 4D 8B E0 48 8B F2 4C 8B E9 "
       "4C 8D 05 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 48 8D 4D E0 E8 ?? ?? ?? ?? 90 "
@@ -404,13 +358,8 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "SpawnByEntityDef",
       "40 57 48 83 EC 40 48 C7 44 24 30 FE FF FF FF 48 89 5C 24 58 48 89 74 24 60 49 8B C0",
       0x315AF0u },
-    { "NameHash",          /* cvar NAME hash (0x1a00480): case-insensitive h = h*0x1f + tolower(c), the
-                            * accumulator RegisterStaticVars (0x1a06a00) buckets each cvar into the FULL
-                            * idHashIndex (cvarSys+0x38) with. The cvar findable-insert calls THIS to place
-                            * our 9 late-registered cvars into the gate-0 findable table (the S0 alias then
-                            * makes it the gate-1 table). Fingerprint = imul r8d,r8d,0x1f (45 6B C0 1F) +
-                            * the lea/cmp dl,0x19 tolower branch; the two rel8 disps (74 ??, 77 ??) wild.
-                            * Unique at 43 bytes; pure leaf, no calls. */
+    { "NameHash",          /* Case-insensitive h=h*31+tolower(c), used by cvar lookup/insertion.
+                            * The multiply and lowercase branch distinguish the leaf. */
       "0F B6 01 45 33 C0 4C 8B C9 84 C0 74 ?? 0F 1F 00 8D 50 BF 80 FA 19 77 ?? "
       "04 20 45 6B C0 1F 49 FF C1 0F BE C8 41 0F B6 01 44 03 C1",
       0x1A00480u },
@@ -418,38 +367,19 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 5C 24 08 57 48 83 EC 20 48 8B 1D ?? ?? ?? ?? 48 8B F9 48 85 DB 74 ?? "
       "0F 1F 80 00 00 00 00 48 8B 4B 10",
       0x1800D20u },
-    { "SnapPaletteBuild", /* void(editor palette object [rcx], progress [rdx]). Rebuilds the
-                             * derived SnapMap entity palette after new decl identities have been
-                             * registered. The call is safe with a NULL progress argument, but its
-                             * object and vtable are build-specific; callers require a clean SIG_OK
-                             * resolve and validate the live palette vtable before invoking it.
-                             * DIRECT RE: 2026-08-20. */
+    { "SnapPaletteBuild", /* void(palette, progress). Rebuild after registering new decl identities.
+                             * NULL progress is allowed; callers validate the live palette vtable. */
       "48 8B C4 56 57 41 54 41 56 41 57 48 81 EC 70 07 00 00",
       0x54AEE0u },
-    /* --- dynamic decl server ----------------------------------------------------------------------
-     * DOOM already owns a generic source-catalog API. The registry object's vtable exposes source-file
-     * registration/scanning at +0x38 and type lookup at +0x58. Snapmap+ resolves and cross-checks every
-     * boundary before classifying existing identities and submitting immutable exact decltree sources:
-     *
-     *   DeclRegistryAnchor  -- a small engine helper whose +0x10 MOV RCX,[rip+registrySlot] gives the
-     *                          process registry object without a hardcoded .data RVA. The decoder requires
-     *                          a CLEAN resolve because it reads inside the prologue.
-     *   DeclRegisterFile    -- registry vtable +0x38, bool(registry, const idStr *source,
-     *                          optional default type); canonicalizes the source to decltree/<source> and
-     *                          scans one path-derived decl body. The source argument is a native 48-byte
-     *                          idStr, not a C string; the caller must construct and destroy that temporary
-     *                          around the call.
-     *   DeclTypeByName      -- registry vtable +0x58, short type name -> decl type manager.
-     *   DeclFind            -- type manager + logical name + makeDefault byte -> decl or NULL; called with
-     *                          makeDefault=0 only to exclude existing SHADOWED identities before scanning.
-     *   DeclSourceFind      -- FUN_1417B34B0, type manager + logical name -> idDeclSource or NULL. The
-     *                          scanner installer calls this at 0x1417B2314; a non-NULL result means the
-     *                          source record already exists, while NULL permits the scanner to create it.
-     *                          This is lookup-only and does not materialize a live decl object. The native
-     *                          routine accepts a logical name without `.decl` and performs its own normalization.
-     *
-     * Each pattern is unique in the pinned unpacked image. sig_test additionally proves the vtable method
-     * RVAs; decl_server.c refuses the whole service if the live vtable does not equal these resolves. */
+    /* Native declaration registration contracts:
+     * DeclRegistryAnchor: decode MOV RCX,[rip+slot] at +0x10 from a clean entry.
+     * DeclRegisterFile: registry vtable +0x38; const idStr *source points to a
+     * constructed 48-byte name. An optional default type guides source scanning.
+     * DeclTypeByName: registry +0x58, short type name -> type manager.
+     * DeclFind: manager/name/makeDefault; callers pass 0 when classifying shadows.
+     * DeclSourceFind: manager/logical name -> source record, without creating a
+     * live decl. Omit .decl; the engine normalizes the name.
+     * decl_server validates resolved methods against the live registry vtable. */
     { "DeclRegistryAnchor",
       "40 53 48 83 EC 30 48 8B D9 4C 8D 05 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? "
       "48 8B D3 48 8B 01 FF 90 C0 00 00 00",
@@ -472,81 +402,33 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 8B C4 55 57 41 54 41 56 41 57 48 8D A8 38 FE FF FF 48 81 EC A0 02 00 00 "
       "48 C7 44 24 20 FE FF FF FF 48 89 58 18 48 89 70 20",
       0x17B34B0u },
-    { "ResourceStaticPromote", /* void(void) -- the engine's WHOLE-REGISTRY resource promotion
-                            * (0x1801830). It takes the resource lock (0x18018A0 / 0x1A40CB0), walks the
-                            * global singly-linked list of per-type resource lists at 0x6217F90 (next at
-                            * +0x18, entry array at +0x20, count at +0x28) and writes 4 into the resource
-                            * level at +0x28 of every entry of every list, then unlocks (0x1A40D00).
-                            *
-                            * Level 4 is what the map-transition purge cannot free: idResource's ctor
-                            * (0x17FEAC0) stamps 1 or 2, and the purge (0x1800E80, driven by 0x1800E10
-                            * from UnloadMap 0x17C79C0 with mask 1 always and mask 2 on a full teardown)
-                            * frees by a BITWISE AND against that mask, which 4 escapes. The engine calls
-                            * this exactly once, from idCommonLocal::Init at 0x17C6479; that single
-                            * snapshot is the entire reason shipped editor content survives a playtest.
-                            *
-                            * The decl server calls it a second time, after publishing, so content that
-                            * did not exist at boot gets the same treatment. See decl_server.c.
-                            *
-                            * The anchor is the promotion store itself (C7 42 28 04 00 00 00 =
-                            * `mov dword [rdx+0x28], 4`), which is why these 79 bytes resolve UNIQUE.
-                            * Wildcards are the two rel32 lock calls, the rip-relative read of the list
-                            * head, and the two short-branch displacements.
-                            * DIRECT (our own reverse-engineering, 2026-08-26). */
+    { "ResourceStaticPromote", /* void(void). Lock the whole resource registry and promote each entry
+                            * to level 4 at resource+0x28. Map purge masks 1/2 cannot free
+                            * level 4, so newly published decls survive map transitions.
+                            * Anchor: mov dword [rdx+0x28],4 and the registry walk. */
       "40 53 48 83 EC 30 48 C7 44 24 20 FE FF FF FF E8 ?? ?? ?? ?? 48 8B D8 B2 01 "
       "48 8B C8 E8 ?? ?? ?? ?? 4C 8B 05 ?? ?? ?? ?? 4D 85 C0 74 ?? 0F 1F 00 "
       "41 8B 48 28 83 E9 01 48 63 C9 78 ?? 0F 1F 40 00 49 8B 40 20 48 8B 14 C8 "
       "C7 42 28 04 00 00 00",
       0x1801830u },
-    { "ResourceGenericLoad", /* void(idResource *decl [rcx]) -- the engine's generic decl (re)load
-                            * (0x17FF5F0). This is the function the manager lookup helper
-                            * (idResourceList::Load, 0x1800A40) runs after it clears the pending-load
-                            * bit (+0x2c & 0x02), and it performs the engine's OWN teardown before it
-                            * parses: 0x17FFDB0 destructs the decl in place (vtable slot 0 with the
-                            * no-free flag), has the owning resource list reconstruct it (owner vtable
-                            * +0x28) preserving id, name and flags, re-reads the source text (which
-                            * lands in the snapmap-plus file shadow), parses it with the type parser,
-                            * sets the has-source bit (+0x2c |= 0x04) and runs the post-parse virtual
-                            * (+0x50). So a re-parse through THIS function is never "over live
-                            * allocations" -- the old data is freed by the same code path every boot
-                            * parse uses.
-                            *
-                            * The decl server drives re-parses through DeclFind, which reaches this
-                            * function via idResourceList::Load; this direct pin exists as the
-                            * instrumented fallback for a decl whose pending bit survives that lookup.
-                            * Wildcards are the rip-relative cookie read and three rel32 calls; the
-                            * anchor is the 0x900-byte frame with the -2 EH sentinel at [rsp+0x40] plus
-                            * the vtable +0x10 owner fetch, which resolves UNIQUE.
-                            * DIRECT (our own reverse-engineering, 2026-08-27). */
+    { "ResourceGenericLoad", /* void(idResource*). Reload through native destruction/reconstruction,
+                            * preserving identity before parsing source and running post-parse.
+                            * DeclFind normally reaches this through the pending-load path;
+                            * the decl server can use it when the pending bit survives lookup.
+                            * Anchor: 0x900-byte frame and owner-vtable access. */
       "48 8B C4 57 48 81 EC 00 09 00 00 48 C7 44 24 40 FE FF FF FF 48 89 58 10 "
       "48 89 70 18 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 F0 08 00 00 48 8B F9 "
       "48 89 4C 24 38 48 8B 01 FF 50 10 48 8B C8 E8 ?? ?? ?? ?? 4C 8B C0 48 8B 57 08 "
       "48 8B CF E8 ?? ?? ?? ?? 48 8B CF E8 ?? ?? ?? ??",
       0x17FF5F0u },
-    { "CmdExecuteBuffer",  /* idCmdSystemLocal::ExecuteCommandBuffer -- void(cmdSystem [rcx]). The
-                            * public no-argument drain: it calls the worker (0x1AA46E0) twice, once with
-                            * exec context 0 and once with 1, so both command text buffers
-                            * (cmdSystem+0x40 and +0x10070, selected on +0x200A8 exactly as
-                            * BufferCommandText selects them) are executed. This is the same function
-                            * idCommonLocal::Init reaches through cmdSystem vtbl+0x60 right after it
-                            * buffers `resourceExec default.cfg -s`.
-                            *
-                            * Needed because the decl server now publishes INSIDE Init, and the package
-                            * requirement cvars must be live before that publication parses anything --
-                            * buffering alone would not run until Init returns. Wildcards are the rel32
-                            * call and the rel32 tail jmp; the anchor is the second dispatch
-                            * (BA 01 00 00 00 48 8B CB ... 5B E9), which resolves UNIQUE.
-                            * DIRECT (our own reverse-engineering, 2026-08-26). */
+    { "CmdExecuteBuffer",  /* void(cmdSystem). Drain both command buffers via contexts 0 and 1.
+                            * Used when queued work must complete before Init returns.
+                            * The second dispatch distinguishes this wrapper from its worker. */
       "40 53 48 83 EC 20 33 D2 48 8B D9 E8 ?? ?? ?? ?? BA 01 00 00 00 48 8B CB "
       "48 83 C4 20 5B E9 ?? ?? ?? ??",
       0x1AA46B0u },
-    { "GameMgrLea",        /* thin RET-leaf bool getter (0xb10870) whose prologue loads the
-                            * gameMgr global via MOV RAX,[rip+gameMgr] (48 8B 05, the FIRST decode-target
-                            * opcode, byte offset 0), then CMP [RAX+0xA54A0],0 / SETZ. Decode = rip_next +
-                            * disp32 -> gameMgr-global SLOT (RVA 0x56ffb90, == OG *(engineBase+0x56ffb90));
-                            * then DEREFERENCE ONCE: g_gamemgr = *(void**)slot. sh_resolve_gamemgr reuses
-                            * sh_decode_rip_slot (the 4-opcode scanner shared from sh_commands -- catches
-                            * 48 8B 05 at offset 0). Fallback: *(g_doom_base+0x56ffb90). 18-byte sig. */
+    { "GameMgrLea",        /* Game-manager getter starts with MOV RAX,[rip+slot]. Decode the
+                            * pointer slot and dereference lazily; it may be NULL at startup. */
       "48 8B 05 ?? ?? ?? ?? 48 83 B8 A0 54 0A 00 00 0F 94 C0",
       0xB10870u },
     { "MenuThink",
@@ -561,65 +443,39 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "ClearSelection",
       "45 33 D2 44 39 91 88 00 00 00",
       0x59FA00u },
-    { "WireConnectCreator1", /* FUN_140cdb990 -- the editor wire tool's connect creator for an OUTPUT-NODE
-                              * source (the pick processor's creator-selector 1, vs cdbb40's selector 0 for a
-                              * base-entity source). wiring_cleandirect.c detours it: while sh_target_any is in
-                              * the reveal state it transiently flags the hovered target an input-node
-                              * (decl+0x3cd bit 0x10) so the STOCK creator takes its own clean-direct branch --
-                              * binding the wire to the target ENTITY, no "which input" radial, no node
-                              * mediation -- then restores the flag. ABI: void(tool, world, idx[int]);
-                              * world+0x204c8 = the editor entity table. Unique @ a 52-byte body: the generic
-                              * save prologue + MOVSXD RDI,R8D (49 63 F8 -- distinct from the 3 sibling creators
-                              * cdb610/cdb860/cdbb40) + the source/world deref chain (world+0x204c8 -> +0x6a0 ->
-                              * entity, TEST +0x164,0x20); the 4 wildcard bytes are the rel32 jz disp
-                              * (build-volatile). Re-derive (per DOOM build): decompile FUN_140cdb990. */
+    { "WireConnectCreator1", /* void(tool,world,index): output-node source creator. The detour routes
+                              * bare targets to native references instead of CSR edges.
+                              * MOVSXD RDI,R8D plus world+0x204C8 separates sibling creators. */
       "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 49 63 F8 48 8B F2 48 8B D9 83 FF FF "
       "0F 84 ?? ?? ?? ?? 48 8B 8A C8 04 02 00 48 8B 81 A0 06 00 00 48 8B 04 F8 F6 80 64 01 00 00 20",
       0xCDB990u },
-    { "ConnectOutputCreator", /* FUN_140cdbb40 -- the editor wire tool's connect creator for a BASE-entity
-                               * source (the pick processor's creator-selector 0). wiring_cleandirect.c detours
-                               * it the same way (transient input-node flag -> the STOCK clean-direct branch
-                               * binds the wire to the target entity, no node mediation, no radial). ABI:
-                               * void(tool, world, idx[int]). Unique @ 34-byte prologue (3 reg-saves + MOV
-                               * R9,[RDX+0x204c8] + MOVSXD R10,[RCX+0x10] -- distinct from the 3 sibling
-                               * creators). Re-derive: decompile FUN_140cdbb40. */
+    { "ConnectOutputCreator", /* void(tool,world,index): base-entity source creator.
+                               * MOV R9,[RDX+0x204C8] and MOVSXD R10,[RCX+0x10]
+                               * distinguish it from the other creator variants. */
       "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 "
       "4C 8B 8A C8 04 02 00 48 8B EA 4C 63 51 10",
       0xCDBB40u },
     { "Toast",
       "40 57 48 83 EC 20 48 8B F9 48 8B 89 F0 08 00 00",
       0xCFA0B0u },
-    /* --- the engine's own dialog surface (engine_dialog.c) ------------------
-     * ShowDialog builds default body text from the GDM id as a `#str_` key,
-     * then OVERWRITES it with the descriptor's own embedded idStr when that
-     * string is non-empty, and hands the result to the SWF menu object. That
-     * override is how a dialog carries our text through the engine's own
-     * layout and buttons instead of a Win32 message box. */
+    /* Engine dialog text uses the descriptor's nonempty idStr instead of default GDM text. */
     { "AddDialog",
       "40 55 57 41 54 41 56 41 57 48 8D AC 24 F0 BC FF FF",
       0xE643C0u },
-    /* The shell-level raise. The engine NEVER calls AddDialog directly: it goes
-     * through this, which additionally sets a flag on the shell's screen object
-     * (shell+0x18 -> +0xA8 = 1). Raising without that produces a dialog that
-     * draws correctly and ignores every keypress -- measured. */
+    /* Raise through the shell wrapper: it sets screen+0xA8 for input handling.
+     * Calling AddDialog directly can display a dialog that ignores keys. */
     { "AddDialogWrapper",
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B DA 48 8B F9 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 48 90 48 8B D3 48 8B 4F 08 E8 ?? ?? ?? ?? 48 8B 47 18",
       0x17363A0u },
     { "ShowDialog",
       "48 8B C4 57 48 81 EC 80 00 00 00 48 C7 40 B8 FE FF FF FF 48 89 58 18 48 89 70 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 78 48 8B F2",
       0xE6A260u },
-    /* idStr::operator=(const char *) on an ALREADY-CONSTRUCTED idStr. Distinct
-     * from IdStrCtor, which constructs into raw memory: the descriptor's string
-     * is already live, so assigning is the only correct operation on it. */
+    /* Assign text into an already-constructed idStr; do not use its constructor here. */
     { "IdStrAssignCStr",
       "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 40 48 8B FA",
       0x19FD5F0u },
-    /* idMenuManager_Dialog::HandleDialogAction(mgr, params, action). Every
-     * button on every engine dialog arrives here and NOWHERE else: the button's
-     * callback object is the dispatcher's only caller, and it passes the action
-     * id the dialog was built with. Reading `action` here is how the engine
-     * itself reports which button the player pressed -- there is no answer byte
-     * anywhere in the descriptor to read instead. */
+    /* Dialog button callbacks report their action ID here; the descriptor
+     * does not contain a result byte to poll. */
     { "DialogAction",
       "40 55 56 57 41 56 41 57 48 8D AC 24 50 79 FF FF B8 B0 87 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 38 FE FF FF FF",
       0xE67BF0u },
@@ -670,7 +526,7 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "TreeRenderJson",
       "40 57 48 81 EC E0 00 00 00 48 C7 44 24 28 FE FF FF FF",
       0x1A43730u },
-    /* --- strids #str_ injector engine fns (port of OG FUN_18000FF10) --- */
+    /* Language-string injection. */
     { "StridsSortBody",    /* idLangDict radix-sort body (0x1a2b480 wrapper -> JMP here); detour target */
       "48 89 5C 24 18 55 56 57 48 8D AC 24 10 F8 FF FF",
       0x1A2B490u },
@@ -684,534 +540,231 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "E8 ?? ?? ?? ?? 84 C0 75 ?? 83 C8 FF 48 8B 5C 24 30 48 83 C4 20 5F C3 "
       "48 63 43 08 3B 43 0C 7D ?? 48 8B C8 8B 07 48 C1 E1 05 48 03 0B 89 01 48 8B 47 08",
       0x1A29980u },
-    { "StridsHash",        /* idStr::Hash (FNV-1a 0x811c9dc5/0x1000193, lowercasing) -- the engine hash the
-                            * record's key field uses; SnapHak inlines the same FNV-1a, we call the engine's */
+    { "StridsHash",        /* Lowercasing FNV-1a hash used by language-string keys. */
       "48 89 5C 24 08 57 48 83 EC 20 0F B6 01",
       0x1A29B90u },
-    /* --- overrides FILE-SHADOW engine anchor (port of OG FUN_18000b370 vtable swap) --- */
-    { "ResProviderCtor",   /* engine resource-provider ctor (0x1a51070): member[0]=vtable@engineBase+0x27984a0;
-                            * carries `LEA RAX,[rip+vtable]` right after the prologue -> decode to recover the
-                            * vtable build-portably. The open-by-name method = vtable slot +0xf8 (orig fn
-                            * 0x141a57a60). The overrides op swaps THAT slot with our override-open. */
+    /* Resource-provider vtable anchor. */
+    { "ResProviderCtor",   /* Decode LEA RAX,[rip+vtable] from this constructor. Override-open
+                            * replaces slot +0xF8 after provider-layout validation. */
       "48 89 4C 24 08 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 8B D9 "
       "48 8D 05 ?? ?? ?? ?? 48 89 01 33 FF C7 41 18 00 00 33 00",
       0x1A51070u },
-    { "IdFileReadString",   /* idFile::ReadString helper at the pinned old Steam build's +0xe0 vtable
-                              * slot (RVA 0x267390). Install the native helper directly; the C port
-                              * deliberately does not guess the idStr ABI. The body window masks only
-                              * its internal rel32 call and is validated against the real image. */
+    { "IdFileReadString",   /* Native idFile ReadString at +0xE0 (pinned Vulkan 0x267390).
+                              * Install directly to retain its engine idStr ABI. */
       "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B 01 48 8B DA 41 B8 04 00 00 00 "
       "C7 44 24 30 00 00 00 00 48 8D 54 24 30 48 8B F9 FF 50 28 44 8B 44 24 30 48 8B CB "
       "48 8B F0 45 85 C0 7E 2D B2 20 E8 ?? ?? ?? ?? 4C 8B 0F 48 8B CF 4C 63 44 24 30",
       0x267390u },
-    { "IdFileCompare",      /* idFile/idStr comparison helper at +0xe8 (RVA 0x267290). It has a
-                              * build-specific idStr calling convention, so install this clean native
-                              * address directly rather than introducing a guessed wrapper. */
+    { "IdFileCompare",      /* Native idFile/idStr comparison at +0xE8 (pinned Vulkan 0x267290).
+                              * Its calling convention must not be replaced by a guessed wrapper. */
       "40 53 55 56 57 48 81 EC 98 00 00 00 48 C7 44 24 20 FE FF FF FF 48 8B 05 ?? ?? ?? ?? "
       "48 33 C4 48 89 84 24 88 00 00 00 41 8B E9 49 8B F8 48 8B F2 48 8B D9 48 8D 0D ?? ?? ?? ?? "
       "E8 ?? ?? ?? ?? 48 8D 4C 24 28 E8 ?? ?? ?? ?? 90 48 8B 03 48 8D 54 24 28 48 8B CB "
       "FF 90 E0 00 00 00",
       0x267290u },
-    { "IdFileWriteString",   /* idFile::WriteString helper at +0xf0 (RVA 0x268470). This exact-build
-                              * native function is placed in the vtable only after all three helpers
-                              * report SIG_OK. */
+    { "IdFileWriteString",   /* Native WriteString at +0xF0; publish only after all three helpers are clean. */
       "40 57 48 83 EC 70 48 C7 44 24 28 FE FF FF FF 48 89 9C 24 88 00 00 00 48 8B 05 ?? ?? ?? ?? "
       "48 33 C4 48 89 44 24 60 48 8B F9 49 8B D0 48 8D 4C 24 30 E8 ?? ?? ?? ?? 90 8B 44 24 38 "
       "89 44 24 20 48 8B 07 41 B8 04 00 00 00 48 8D 54 24 20 48 8B CF FF 50 30",
       0x268470u },
-    /* --- console-command + cvar registration infra (clone of XINPUT1_3 FUN_1800229b1) --- */
-    { "Printf",            /* idCommon message-dispatch (0x1a08e80); every handler's console output via
-                            * the Printf wrapper (clone of OG FUN_180006380 -> (1, fmt, &va)) routes here */
+    /* Console and cvar registration. */
+    { "Printf",            /* Engine message dispatch; sh_printf supplies message class 1 and va_list. */
       "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 40 BA FF FF",
       0x1A08E80u },
-    { "CvarRegister",      /* OUTER cvar register (0x1a04f00); self-defaults the two .data globals + forwards
-                            * to idCVarSystem::Register 0x1a05e70. We sig THIS (not 0x1a05e70). The cvar install
-                            * calls it per cvar with flags=typecode (1=BOOL 2=INT 4=FLOAT) */
+    { "CvarRegister",      /* Outer cvar registration initializes engine globals before forwarding
+                            * to idCVarSystem::Register. Product flags include type and NOCHEAT. */
       "48 8B C4 48 89 48 08 57 48 83 EC 60 48 C7 40 E8 FE FF FF FF 48 89 58 10 48 89 68 18 "
       "48 89 70 20 41 8B F9",
       0x1A04F00u },
-    { "CmdSystemLea",      /* KEYSTONE: thin engine accessor (0x717a50, the bot_add/bot_remove registrar) whose
-                            * prologue loads the idCmdSystemLocal* global via MOV RCX,[rip+cmdSystem] (48 8B 0D,
-                            * the FIRST decode-target opcode in the fn, byte offset 6). Decode = rip_next+disp32
-                            * -> cmdSystem-global SLOT (RVA 0x55b7280, == OG *(engineBase+0x55b7280)); then
-                            * DEREFERENCE ONCE: g_cmdsys = *(void**)slot. Generic prologue forces a 65-byte sig.
-                            * Form is MOV (48 8B 0D), NOT LEA -> sh_resolve_cmdsys must scan all four decode
-                            * opcodes (48 8D 0D / 48 8B 0D / 48 8D 05 / 48 8B 05), unlike sh_strids which scans
-                            * 48 8D 0D only. Fallback: g_cmdsys = *(g_doom_base + 0x55b7280) (known offset). */
+    { "CmdSystemLea",      /* Bot-command registrar loads cmdSystem with MOV RCX,[rip+slot] at +6.
+                            * Decode MOV as well as LEA; this is a pointer slot, not the object.
+                            * The longer body distinguishes its otherwise generic prologue. */
       "40 53 48 83 EC 30 48 8B 0D ?? ?? ?? ?? 4C 8D 0D ?? ?? ?? ?? 33 DB 4C 8D 05 ?? ?? ?? ?? "
       "89 5C 24 28 48 8D 15 ?? ?? ?? ?? 48 89 5C 24 20 48 8B 01 FF 50 20 48 8B 0D ?? ?? ?? ?? "
       "4C 8D 0D ?? ?? ?? ??",
       0x717A50u },
-    /* --- type-introspection (cs_fieldinfo / sh_type; clone of XINPUT1_3 FUN_180021db0 /
-     * FUN_180021090). Both reach the reflection/type-info mgr via the hardcoded declMgr accessor RVA
-     * 0x17f7030 (NOT sig-able -- a real lazy-init singleton accessor, fixed prologue shared by ~47 fns,
-     * unique only via the build-volatile RIP disp; resolved off g_doom_base in typeinfo.c, vtable+0x80).
-     * These two engine lookups ARE sig-able + unique (sig-resolve == known_rva). */
-    { "FindTypeInfoByName", /* FindTypeInfoByName(reflect, typeName, scope=0) -> the type record. Ghidra's
-                             * void-return is a decompiler miss (recursive %s::%s scope lookup); the live
-                             * caller FUN_1409c79d0 proves a non-void record return (*(rec+0x20)). cs_fieldinfo
-                             * + sh_type CLASS branch both call it. record+0x20 field array / stride 0x48 /
-                             * varName@+0x10 CONFIRMED LIVE; offset@+0x18 size@+0x1c varType@+0x00 varOps@+0x08
-                             * comment@+0x28 OG-only BUILD-SPECIFIC (CLASS render reads 3 strings:
-                             * varType/varOps/varName). 12-byte large-frame prologue, zero wildcards. */
+    /* Reflection lookups. The decl-manager accessor resolves separately from
+     * a signed call site in engine_globals_table.gen.h. */
+    { "FindTypeInfoByName", /* record *(reflect,name,scope). A caller consumes the return value even
+                             * though the decompiler inferred void. Field-layout details live
+                             * in typeinfo.c; the large-frame prologue distinguishes this lookup. */
       "40 55 56 57 48 8D AC 24 50 BE FF FF",
       0x1A1D590u },
-    { "FindEnumByName",     /* sh_type ENUM branch: FindEnumByName(reflect, name) -> the enum record
-                             * (FUN_141a1da20 cleanly returns *(*hashIdx+0x10)+idx*0x18). sh_type falls
-                             * through to it when FindTypeInfoByName returns NULL. enumRec+0x10 members /
-                             * stride 0x10 / member name@+0 / value(uint)@+8 CONFIRMED LIVE; enum NAME@+0
-                             * OG-only BUILD-SPECIFIC. 37 bytes, 4 wildcards = the single rel32 call disp. */
+    { "FindEnumByName",     /* enum record *(reflect,name); sh_type uses it after class lookup misses.
+                             * Member-array layout is documented beside the reader in typeinfo.c. */
       "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B D9 48 8B EA 48 8B CA "
       "E8 ?? ?? ?? ?? 23 43 24",
       0x1A1DA20u },
-    { "MapGetter",          /* sh_dumpmap: MapGetter(gameMgr) -> the live SnapMap object
-                             * (FUN_14031ad60; reads gameMgr+0x29a0b0, builds DynamicSnapMap if absent).
-                             * BLACK BOX with our GameMgrLea gameMgr; no struct offset in the clone's reach.
-                             * 30-byte prologue, 0 wildcards. */
+    { "MapGetter",          /* MapGetter(gameMgr) returns or constructs the live map object. */
       "40 57 48 83 EC 40 48 C7 44 24 30 FE FF FF FF 48 89 5C 24 58 48 8B D9 48 8B B9 B0 A0 29 00",
       0x31AD60u },
-    { "MapWriter",          /* sh_dumpmap: MapWriter(map, pathCStr) writes the SnapMap to a file
-                             * (FUN_14182b740; no-ops if map+0x38 != 5; Printf's "writing %s..." itself).
-                             * BLACK BOX: pass argv[1]. 71 bytes, 4 wildcards (security-cookie rip-disp); tail
-                             * 83 79 38 05 = cmp [rcx+0x38],5 = the v5 gate. */
+    { "MapWriter",          /* MapWriter(map,path) exports v5 maps. The fixed cmp [rcx+0x38],5
+                             * anchors the format gate; entity.c validates the destination. */
       "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 50 FE FF FF 48 81 EC B0 02 00 00 "
       "48 C7 44 24 30 FE FF FF FF 48 89 9C 24 00 03 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 "
       "48 89 85 A0 01 00 00 48 8B F2 48 8B F9 83 79 38 05",
       0x182B740u },
-    { "SessionDevModeGetter", /* devmode: the 8-byte idSessionLocal bool getter at 0x18a31d0
-                               * (movzx eax,[rcx+0x34c89]; ret), CC-padded after. sh_disable_devmode
-                               * patches the head 0F B6 81 -> 31 C0 C3 (xor eax,eax; ret) so the getter
-                               * returns 0; sh_reenable_devmode code_unpatches it back. The pattern IS
-                               * the expect bytes -- the disp 0x34c89 (89 4C 03 00) is build-specific and
-                               * EMBEDDED so a shifted build REFUSES rather than mis-patches. code_patch
-                               * overwrites only the first 3 bytes (bytes 3-7 untouched), so unpatch restores
-                               * the full getter + the sig re-resolves -> repeatable. File-wide UNIQUE
-                               * (1 match @ 0x18a31d0). */
+    { "SessionDevModeGetter", /* Bool getter for session+0x34C89. Devmode disable replaces its first
+                               * three bytes with xor eax,eax; ret. The fixed field offset
+                               * refuses incompatible layouts; unpatch restores the signature. */
       "0F B6 81 89 4C 03 00 C3",
       0x18A31D0u },
-    { "RenderLogStub",        /* cs_start_render_logging: the render-debug TRACE SINK at .text
-                               * 0xd99dc0 (FUN_140d99dc0), a no-op when logging is off: `mov [rsp+0x20],r9;
-                               * ret` (4C 89 4C 24 20 C3) + 10 CC pad -> 16 bytes of safe overwrite room
-                               * (next fn @0xd99dd0). cs_start_render_logging detours it with
-                               * our_renderlog_hook so the engine's printf trace lines land in renderlog.txt;
-                               * stolen=14 (hook.c writes a 14-byte FF25 abs-jmp + requires stolen>=14; 14<=16).
-                               * The 6-byte stub alone matches twice (0xd99dc0, 0x17cb345) -- NOT unique; the
-                               * 12-byte window (stub + 6 CC) is file-wide UNIQUE (1 match @0xd99dc0). The hook
-                               * reads ZERO renderer internals (the engine passes a fully-formatted fmt+varargs)
-                               * and does NOT trampoline (the original sink was a no-op). Verified vs
-                               * an unpacked DOOM image. */
+    { "RenderLogStub",        /* Render trace sink: mov [rsp+0x20],r9; ret, followed by padding.
+                               * Padding distinguishes it from another short stub and supplies
+                               * 16 bytes of room. The replacement never calls a trampoline. */
       "4C 89 4C 24 20 C3 CC CC CC CC CC CC",
       0xD99DC0u },
-    /* --- snaphak_algo override targets (cs_dontuse; clone of the 4 OG XINPUT1_3 detours over the
-     * engine math fns). cs_dontuse FULL-replaces each engine fn with our f64 reimpl (matmul/inverse/
-     * curveEval) or bit-exact color-pack; OG hooks do NOT chain, so neither do ours. Each sig is
-     * file-wide UNIQUE @ the named RVA, verified vs an unpacked DOOM image (resolver
-     * hits==1, rva==known_rva). See algo.c. */
-    { "AlgoMatMul",        /* engine 0x1a82f10 void f(const float*A rcx[16], const float*B rdx[16],
-                            * float*out r8[16]) -- 4x4*4x4 row-major out=A*B (out[r*4+c]=sum_k A[r*4+k]*
-                            * B[k*4+c]); DIRECT-confirmed from the 0x141a82f10 decompile. f32, no clamp.
-                            * cs_dontuse FULL-replaces it with sh_algo_matmul (f64 accumulate, store f32).
-                            * Sig steals 14 (clean prologue, no RIP-rel in window). */
+    /* Optional math overrides replace complete functions; trampolines are unused. */
+    { "AlgoMatMul",        /* void(A[16],B[16],out[16]); row-major product.
+                            * sh_algo_matmul accumulates in double and stores float. */
       "48 8B C4 48 81 EC E8 00 00 00 0F 10 01 4C 8D 18",
       0x1A82F10u },
-    { "AlgoInverse",       /* engine 0x1a828f0 bool f(const float*M rcx[16], float*out rdx[16]) -- 4x4
-                            * inverse; AL=invertible. DIRECT (0x141a828f0 decompile + disasm): det via 4
-                            * cofactors dotted with row 0, singular test ABS(det) < epsilon
-                            * (DAT_14279b060=1.0000000168623835e-16f) -> if singular AL=0 + out UNTOUCHED;
-                            * else AL=1 + write the 16 adjugate*(1/det). cs_dontuse FULL-replaces it with
-                            * sh_algo_inverse (f64 adjugate/det, SAME contract). Sig steals 14. */
+    { "AlgoInverse",       /* bool(M[16],out[16]); singular |det|<1.0000000168623835e-16
+                            * returns 0 without touching output. The replacement retains this contract. */
       "48 8B C4 48 81 EC 98 01 00 00 0F 10 19 0F 10 41 10",
       0x1A828F0u },
-    { "AlgoPackRGBA",      /* engine 0x1a19470 uint32 f(const float*rgba rcx[4]) -> R|G<<8|B<<16|A<<24.
-                            * ENGINE: per-ch i=(int)(f*255.0f) cvttss2si TRUNCATE, clamp [0,255]. The OG
-                            * cs_dontuse hook (0x1cdc0, DIRECT capstone) is round-HALF-UP in double:
-                            * i=(int)floor((double)f*255.0 + 0.5) (mulsd 255.0 DAT_180038740, addsd 0.5
-                            * DAT_180038728, call floor, cvttsd2si), clamp [0,255]. cs_dontuse FULL-replaces
-                            * with sh_algo_packrgba reproducing the HOOK (BIT-EXACT to OG). 3rd instr is
-                            * RIP-rel (F3 0F 10 0D disp32) at off 10 -> masked; full-replace never executes
-                            * the original/trampoline so a 14-byte clobber is safe (hook.c blindly copies the
-                            * window to the unused trampoline). Sig steals 14. */
+    { "AlgoPackRGBA",      /* RGBA8 packing. The engine truncates; the override rounds half-up
+                            * in double. A RIP-relative instruction starts at +10, so the
+                            * 14-byte stolen window must never be executed as a trampoline. */
       "F3 0F 10 01 41 BA FF 00 00 00 F3 0F 10 0D ?? ?? ?? ??",
       0x1A19470u },
-    { "AlgoCurveEval",     /* engine 0x1a5eb40 float f(const void*c rcx, float t xmm1, uint8_t mode r8b)
-                            * -> xmm0. Keyframed curve: count@c+0x20c, times[]@c+0xc, values[]@c+0x10c,
-                            * mode bytes c+0x00/01/02. DIRECT (0x141a5eb40 decompile): count<1->0; ==1->v0;
-                            * c+0x02 set -> ALT MODE (cubic-spline tail FUN_141a5e6e0 -- FLAGGED limitation,
-                            * sh_algo falls back to the main path); else bracket-find + (c+1 set: hold v_prev
-                            * | else linear lerp (1-frac)*v_prev + frac*v_curr) with TWO flush-to-zero guards
-                            * (abs-mask 0x7fffffff, thresh DAT_141fd5940=1e-18f). cs_dontuse FULL-replaces
-                            * with sh_algo_curveeval (f64 main path). Sig steals 14. */
+    { "AlgoCurveEval",     /* float(curve,t,mode); count@+0x20C, times@+0x0C, values@+0x10C.
+                            * The replacement supports linear/hold and Catmull-Rom modes.
+                            * Only linear interpolation applies the small-value zero flush. */
       "48 89 5C 24 10 56 48 83 EC 40 8B 81 0C 02 00 00",
       0x1A5EB40u },
-    /* --- WS-C deferred dev/asset commands ([20] sh_genmd6model / [19] sh_genbmodel / [17] sh_debugrender).
-     * These engine fns are the call-targets the OG XINPUT1_3 handlers reach via *(engineBase+RVA)
-     * (FUN_18000b560 / FUN_18000b4a0 / FUN_18001ffe0). The clone resolves each by SIGNATURE off the live
-     * DOOM module (b2 handlers' resolve_sig_by_name over g_module_base) -- NO hardcoded base+RVA. Author
-     * recipe (file-image, capstone): dump <rva> <len> + scan the minimal-unique <pattern> against
-     * an unpacked DOOM image (image base 0x140000000). Each pattern below is file-wide UNIQUE
-     * (scan HITS==1 @ the named RVA); masked bytes are the RIP-rel disp32s + rel32 call operands (build-
-     * volatile). re-derive on a build bump: re-run the minimal-unique scan, confirm 1 hit. --- */
-    { "Md6Ctor",           /* [20] md6 model-compiler context ctor (engine 0x149b8d0). idMd6Builder::ctor:
-                            * RCX=&md6, stores vtable@0x14254d3a8 to [md6], default-idStr-ctor's md6+0x60,
-                            * inits the build options (md6+0x38=-1, md6+0x58=1, the size fields 0x150000/
-                            * 0x50000, the float defaults). Returns RAX=&md6. The OG sh_genmd6model calls it
-                            * FIRST on the md6 ctx. UNIQUE via the distinctive `mov dword[rbx+0x38],-1` tail
-                            * (the generic ctor prologue alone matches 109x). 51 bytes; 8 wildcards = the
-                            * rel32 ctor-call + the LEA vtable disp32. */
+    /* Model-builder and render-debug dependencies. Revalidate signatures and
+     * separate object-layout constants when porting to another build. */
+    { "Md6Ctor",           /* idMd6Builder constructor, called first. The distinctive
+                            * [self+0x38]=-1 store separates otherwise similar constructors. */
       "48 89 4C 24 08 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 8B D9 "
       "E8 ?? ?? ?? ?? 90 48 8D 05 ?? ?? ?? ?? 48 89 03 48 C7 43 38 FF FF FF FF",
       0x149B8D0u },
-    { "Md6SetOutput",      /* [20] idMd6Builder::SetOutput (engine 0x149c450). RCX=&md6, RDX=output idStr;
-                            * 0x1d0-byte frame, security-cookie-guarded, copies the output decl name into the
-                            * md6 ctx (the bmd6model target path). The OG sh_genmd6model calls it AFTER
-                            * IdStrAssign(input)+IdStrCtor(output): SetOutput(&md6, output). UNIQUE 55-byte
-                            * prologue; 4 wildcards = the security-cookie rip-disp32 (48 8B 05 ????). Note:
-                            * Ghidra did NOT auto-define a function at 0x149c450 (no static xref -- the OG
-                            * reaches it only via the computed *(base+RVA) call); the sig anchors on the raw
-                            * file-image prologue bytes, confirmed by capstone. */
+    { "Md6SetOutput",      /* void(md6,output idStr). Copies output after input/options setup.
+                            * Function discovery may require inspecting raw prologue bytes. */
       "40 57 48 81 EC D0 01 00 00 48 C7 44 24 20 FE FF FF FF 48 89 9C 24 F0 01 00 00 "
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 C0 01 00 00 48 8B DA 48 8B F9 48 8D 4C 24 60",
       0x149C450u },
-    { "Md6Build",          /* [20] the FINAL md6 call (engine 0x149bee0) the OG sh_genmd6model makes on the
-                            * md6 ctx before the idStr dtors. RE-FINDING: this fn is DESTRUCTOR-SHAPED, not a
-                            * pure "build" -- it reloads vtable@0x14254d3a8 to [md6], frees the model array
-                            * (calls the array-clear 0x149c5d0 + the 0x10-arg resource free [vtbl+0x10]),
-                            * allocates+writes the compiled buffer to md6+0xf8 (R9D=6 size-class), nulls every
-                            * field, and TAIL-JMPs to the base teardown 0x1417feb30. So the OG's last md6 call
-                            * is a compile-then-release (build folded into the dtor), NOT a separate Build().
-                            * The clone calls it faithfully (last, single-arg &md6). UNIQUE 47-byte prologue;
-                            * 4 wildcards = the LEA vtable disp32. */
+    { "Md6Build",          /* Final void(md6) operation compiles and releases the builder; do not
+                            * treat its destructor-shaped body as a separate post-build cleanup. */
       "40 57 48 83 EC 50 48 C7 44 24 40 FE FF FF FF 48 89 5C 24 60 48 89 6C 24 68 "
       "48 89 74 24 70 48 8B D9 48 8D 05 ?? ?? ?? ?? 48 89 01 33 ED 8B F5",
       0x149BEE0u },
-    { "DefaultIdStrCtor",  /* [19]+[20] SHARED idStr default ctor (engine 0x19fd040). RCX=&str; stores
-                            * vtable@0x14278b270, calls 0x19fc880, sets the inline-buffer string empty
-                            * (str+0x18=0x80000014 capacity, str+0x10=&str+0x1c data ptr, str+0x8=0 len,
-                            * byte[+0x1c]=0). Returns RAX=&str. BOTH sh_genmd6model (the options idStr) and
-                            * sh_genbmodel (the options idStr) ctor a default idStr via THIS fn (OG calls
-                            * *(base+0x19fd040) -- distinct from IdStrCtor 0x19fcef0 which copies a C-string).
-                            * Author once, reuse from both handlers. UNIQUE via the capacity/data/len init
-                            * run (the prologue alone is generic); 8 wildcards = the LEA vtable disp32 +
-                            * the rel32 sub-ctor call. 49 bytes. */
+    { "DefaultIdStrCtor",  /* Construct an empty idStr: data=self+0x1C, len=0, capacity=0x80000014.
+                            * Distinct from IdStrCtor, which constructs from a C string. */
       "40 53 48 83 EC 20 48 8D 05 ?? ?? ?? ?? 48 8B D9 48 89 01 E8 ?? ?? ?? ?? "
       "48 8D 43 1C C7 43 18 14 00 00 80 48 89 43 10 C7 43 08 00 00 00 00 C6 00 00",
       0x19FD040u },
-    { "BModelBuilder",     /* [19] idBModelBuilder entry (engine 0x14cf550). 4-arg: RCX=out (a 208-byte
-                            * result struct the OG stack-allocs), RDX=input file, R8=output file, R9=&opts (the
-                            * 0xD0-byte options struct the OG memsets to all-0x01). Security-cookie-guarded;
-                            * ctor's an internal builder @[rsp+0x40] (0x14c61b0), runs the build (0x14cf600),
-                            * on success runs 0x14d0be0, dtor's (0x14c62b0). The OG sh_genbmodel calls it as
-                            * BModelBuilder(out208, argv[1], argv[2], &opts). UNIQUE 51-byte prologue; 4
-                            * wildcards = the security-cookie rip-disp32 (48 8B 05 ????).
-                            * RECIPE-TAG (build-specific, NOT in this sig): the opts struct is 0xD0 bytes
-                            * memset to 0x01 (OG cmd_0xb4a0 `memset(auStack_e8,1,0xd0)`, DIRECT). Re-confirm
-                            * the 0xD0 size on a build bump by tracing how 0x14cf600 reads R9/opts; the clone
-                            * memsets a 0xD0 byte buffer to 0x01 and passes &buf as R9, faithful to the OG. */
+    { "BModelBuilder",     /* BModelBuilder(out208,input,output,options idStr). Arg1 is a
+                            * 0xD0 result buffer filled with 0x01; arg4 is a constructed idStr.
+                            * Recheck the caller and builder argument reads when porting. */
       "40 53 55 56 57 48 81 EC 28 01 00 00 48 C7 44 24 30 FE FF FF FF 48 8B 05 ?? ?? ?? ?? "
       "48 33 C4 48 89 84 24 10 01 00 00 49 8B F1 49 8B E8 48 8B FA 48 8B D9",
       0x14CF550u },
-    { "RenderWorldGetter", /* [17] sh_debugrender renderWorld handle. The OG reads renderWorld =
-                            * *(engineBase+0x57216f0) -- a .data SLOT (RVA 0x57216f0, holds the live
-                            * idRenderWorld* at runtime), NOT a thin accessor fn (unlike cmdSystem/gameMgr,
-                            * renderWorld has no dedicated getter). PORTABLE HANDLE: this sig anchors a UNIQUE
-                            * 32-byte engine window (in a renderWorld-registrar fn @0x5e4c28) that carries
-                            * `LEA RCX,[rip+slot]` at byte offset +6; decode rip_next(+0x5e4c35)+disp32 ->
-                            * the slot RVA 0x57216f0 (CONFIRMED: the live disp decodes exactly to 0x57216f0),
-                            * then DEREFERENCE ONCE for the live renderWorld (== OG *(base+0x57216f0)). Reuse
-                            * sh_decode_rip_slot (the shared 4-opcode RIP scanner: it catches 48 8D 0D at the
-                            * window's first decode-target). FALLBACK (CmdSystemLea/GameMgrLea philosophy):
-                            * renderWorld = *(g_doom_base + 0x57216f0). 6 LEA xrefs to the slot exist; this
-                            * site (89 B3 A8 02 00 00 | 48 8D 0D ???? | E8 ???? | 48 8B 0D ???? | 48 85 C9 74
-                            * 12 66 C7) is the unique anchor. 32 bytes; 12 wildcards = 2 disp32s + 1 rel32.
-                            * RECIPE-TAG the SLOT RVA: scan "89 B3 A8 02 00 00 48 8D 0D" -> the LEA, decode
-                            * its disp -> slot RVA (re-derive on a build bump).
-                            * RECIPE-TAG the renderWorld VTABLE indices (build-specific, NOT sig-able -- a
-                            * runtime vtable): OG uses vtbl+0x188 = GetActiveRenderModelCount() -> uint, and
-                            * vtbl+0x190 = GetRenderModel(idx) -> model (model+0x10 = name char*); vtbl+0x88 =
-                            * the test_sum world getter. Re-derive per build from the OG cmd_0x1ffe0 dispatch
-                            * (dumprenderinfo/test_rm_commit branches) or by tracing the live renderWorld vtbl.
-                            * RECIPE-TAG the editor offsets (build-specific): showcursor writes
-                            * byte[editor+0x23624]=0; the cursor-copy reads editor+0x170 (qword) + editor+0x178
-                            * (dword) -- from the OG cmd_0x1ffe0 (DAT_18003e5c0 = the editor global the clone
-                            * already resolves). */
+    { "RenderWorldGetter", /* Render-world registration window has LEA RCX,[rip+slot] at +6.
+                            * Decode then dereference; it is not an object accessor.
+                            * Render vtable and editor-field offsets remain separate contracts
+                            * documented at their consumers in commands.c. */
       "89 B3 A8 02 00 00 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? "
       "48 85 C9 74 12 66 C7",
       0x5E4C28u },
-    { "SwfTextOnKeyCall",   /* idSWFScriptObject_TextInstancePrototype::idSWFScriptFunction_onKey::Call
-                             * (0x2b3500) -- THE keyboard entry point for a FOCUSED Scaleform text field,
-                             * i.e. every SnapMap free-text property (datapad/transmission bodies, anything
-                             * using the `textinspector`). swf_textedit.c detours it to add the clipboard
-                             * copy/paste vanilla never had: the stock body has no Ctrl branch at all, only
-                             * a shift flag, so there is nothing to unlock.
-                             * ABI: void*(self, sretRetVal, thisObject, parms) -- `thisObject` is the
-                             * "TextField" script object (its +0xC0 = the idSWFTextInstance), `parms` points
-                             * at an idSWFScriptValue[2] = (scancode, isDown).
-                             * Located by RTTI-walking the onKey/onChar script-function classes and diffing
-                             * their 11-slot vtables (slot 10 is the differing `Call` override -- onChar's
-                             * sibling sits just below it). 63-byte prologue, 4 wildcards = the
-                             * security-cookie rip-disp.
-                             * Re-derive per DOOM build: decompile it -- the idSWFTextInstance offsets
-                             * swf_textedit.c uses are exactly the constants this function dereferences.
-                             * On the newer retail build this same function is at 0x17505e0 (onChar
-                             * 0x1750500); that is the OTHER build and must not be pasted into known_rva. */
+    { "SwfTextOnKeyCall",   /* void*(self,retbuf,thisObject,parms): SWF text-field onKey::Call.
+                             * TextField+0xC0 gives its instance; parms holds scancode/isDown.
+                             * Re-find via RTTI onKey/onChar classes and differing vtable slot 10,
+                             * then recheck the fields used in swf_textedit.c.
+                             * Newer retail RVA 0x17505E0 is not this table's pinned build. */
       "40 55 56 57 41 56 41 57 48 81 EC D0 00 00 00 48 C7 44 24 28 FE FF FF FF "
       "48 89 9C 24 00 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 C0 00 00 00 "
       "49 8B F9 49 8B E8 4C 8B F2 45 33 FF",
       0x2B3500u },
-    { "IdStrAssignFromStr", /* idStr::operator=(const idStr&) (0x19fd180) -- the REAL idStr assignment:
-                             * grows the destination when needed (engine allocator, frees the old heap
-                             * buffer), memcpys, NUL-terminates and writes the new length. This is the
-                             * one the engine's own SWF text-edit backspace/delete path uses to write
-                             * a spliced string back into a live text field, and swf_textedit.c's paste
-                             * uses it the same way.
-                             * NOTE: distinct from this DB's "IdStrAssign" (0x1a03e10), which despite the
-                             * name is an INTERN-AND-STORE-POINTER for decl name fields, not an idStr
-                             * assign -- do not substitute one for the other.
-                             * ABI: void(idStr *dst, const idStr *src). Reads only src's +0x08 len and
-                             * +0x10 data (its +0x18 flags only select a steal/swap fast path, which a
-                             * zeroed flags word declines), so a caller may hand it a stack-built src.
-                             * 27 bytes, 1 wildcard = the build-volatile jz disp8. */
+    { "IdStrAssignFromStr", /* Assign one idStr to another, growing destination as needed.
+                             * src length/data are +8/+0x10; zero flags decline buffer stealing.
+                             * Do not confuse this with IdStrAssign, the interned-name helper. */
       "48 89 74 24 18 57 48 83 EC 40 48 8B F2 48 8B F9 8B 49 18 8B D1 C1 EA 1F 80 E2 01 74 ?? "
       "44 8B 46 18 41 8B C0",
       0x19FD180u },
-    { "PrefabCtor",         /* idSnapEntityPrefab ctor -- idSnapEntityPrefab *(self [rcx]).
-                             * Was a raw base+RVA leaf (`PREFAB_CTOR_RVA`), which is build-locked; this is
-                             * now the primary resolve with that RVA kept only as a fallback. It matters:
-                             * ae_mkcmd_one calls it before every stage AND the Play watchdog calls it to
-                             * re-initialise the staging slot, so a wrong address here corrupts on a timer.
-                             * IDENTIFIED BEHAVIOURALLY, not by arithmetic (on-disk and runtime RVAs differ
-                             * per region on this build, so no delta is reliable): it writes every field
-                             * unconditionally with no reads and no branches -- which is exactly why
-                             * re-ctor'ing a slot with dangling pointers is safe, it leaks rather than
-                             * double-frees -- fills the identity transform from a constants block, zeroes
-                             * each list member (capacity word 0x50000), writes up to +0x118, then makes a
-                             * forward call into a second, larger ctor for the tail sub-object at +0x120.
-                             * That is a field-for-field match to this project's own description of the
-                             * runtime ctor. Unique at 23 bytes; deliberately stopped before the first
-                             * RIP-relative operand so the pattern carries NO build-volatile bytes and
-                             * needs no wildcards.
-                             * known_rva below is the PINNED-build RVA (see the table header). On the
-                             * newer retail build this function is at 0x11AC8D0 -- a different build, not
-                             * a different address space; do not paste that value here. */
+    { "PrefabCtor",         /* idSnapEntityPrefab *(self). Initializes fields without freeing old
+                             * contents, then constructs the tail at +0x120. Reinitialization
+                             * can abandon dangling staging pointers without double-freeing.
+                             * Newer retail RVA 0x11AC8D0 is a different extraction build. */
       "4C 8B DC 49 89 4B 08 53 48 83 EC 30 49 C7 43 E8 FE FF FF FF 48 8B D9",
       0x54D0A0u },
-    { "PrefabPopulate",     /* CreatePrefab -- char(prefab [rcx], editor [rdx], int *outStatus [r8]).
-                             * Fills a prefab from the current editor selection; the Create-from-selection
-                             * (+0xb0) path. Also a former raw base+RVA leaf. Located from its own error
-                             * strings ("Failed to create prefab: not hovering entity in selection." and
-                             * the three siblings), so the identification is anchored on data it prints,
-                             * not on an address delta. 46-byte prologue, fully absolute, unique.
-                             * known_rva is the PINNED-build RVA; on the newer retail build it is
-                             * 0x11ADB30 (see the table header before copying either). */
+    { "PrefabPopulate",     /* char(prefab,editor,status*). Build from current selection.
+                             * Re-find through the "Failed to create prefab" error strings.
+                             * Newer retail RVA 0x11ADB30 is not the pinned build. */
       "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 40 F7 FF FF "
       "48 81 EC C0 09 00 00 48 C7 85 10 01 00 00 FE FF FF FF 48 89 9C 24 18 0A 00 00",
       0x54E410u },
-    { "MemLocalGet",        /* idMemLocal accessor -- idMemLocal *(void). MSVC magic-static getter that
-                             * returns the ONE process-wide idMemLocal instance (and caches a pointer to it
-                             * in the global at RVA 0x6F8E2C8). Needed as the `this` for the PushHeap/PopHeap
-                             * pair below.
-                             *
-                             * Why a signature and not the object's address: the instance lives at VA
-                             * 0x1455B7190 in the Ghidra image. Computing its RVA by hand is exactly where
-                             * this went wrong once -- 0x1455B7190 - 0x140000000 is 0x55B7190, and a dropped
-                             * digit (0x155B7190) put it ~256 MB past the mapped module, so the read faulted
-                             * and the scope push silently never happened. Resolving the getter and calling
-                             * it removes the arithmetic entirely.
-                             *
-                             * CAUTION: MSVC emits many near-identical magic-static getters, so this pattern
-                             * is the most ambiguity-prone entry in this table. It is pinned by the exact
-                             * frame size (0x30), the MOV R8D,4 and the GS:[0x58] TLS load. If the scan
-                             * reports AMBIGUOUS or MISS the resolver falls back to known_rva and logs it --
-                             * check that log before trusting the heap-scope behaviour on a new build.
-                             * Wildcards: the _tls_index rip-relative and the LEA that materialises the
-                             * instance address. */
+    { "MemLocalGet",        /* idMemLocal *(void). Resolve the accessor rather than computing the
+                             * singleton address. Many magic-static getters resemble this;
+                             * frame size, MOV R8D,4, and GS TLS load distinguish the pattern. */
       "40 53 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 8B 0D ?? ?? ?? ?? "
       "65 48 8B 04 25 58 00 00 00 41 B8 04 00 00 00 48 8B 14 C8 48 8D 1D ?? ?? ?? ??",
       0x1A04BF0u },
-    { "MemLocalPushHeap",  /* idMemLocal::PushHeap -- void(this [rcx], int heapId [edx]). Pushes heapId onto
-                             * the allocator's 32-deep heap-scope stack (ids at this+0x44, depth at
-                             * this+0xC4). Every idlib container allocation asks Mem_Alloc for heap id -1,
-                             * meaning "top of this stack", so this is the ONLY lever for making an engine
-                             * allocation outlive the map: PushHeap(0) selects heap-table slot 0, which is
-                             * NULL, and Mem_Alloc falls through to GetProcessHeap() -- the same heap the
-                             * engine's own Ctrl+C clipboard lands in. The engine uses this exact
-                             * PushHeap(0)/PopHeap() idiom itself (e.g. RVA 0x4F71F0).
-                             *
-                             * Names itself: the overflow assert reads "idMemLocal::PopHeap: Heap stack
-                             * overflow" (id's own copy-paste slip -- this is the push).
-                             *
-                             * MAIN-THREAD ONLY. Both this and Mem_Alloc's -1 scope lookup are gated on the
-                             * predicate at RVA 0x19FC900, which compares GetCurrentThreadId() against the
-                             * engine main-thread DWORD at RVA 0x6DDE190. Off that thread this is a silent
-                             * no-op AND allocation falls through to the process heap anyway.
-                             *
-                             * Unique: the this+0xC4 depth access and the [rbx+rax*4+0x44] indexed store are
-                             * specific to this function. Wildcard: the rel32 call to the gate predicate. */
+    { "MemLocalPushHeap",  /* void(self,heapId). Push the 32-entry scope stack at +0x44, depth +0xC4.
+                             * Main-thread-only: heap -1 allocation consults this same gate.
+                             * PushHeap(0) selects the process heap so clipboard data survives
+                             * map teardown. The overflow assertion incorrectly names PopHeap. */
       "48 89 5C 24 08 57 48 83 EC 20 8B FA 48 8B D9 E8 ?? ?? ?? ?? 84 C0 74 16 "
       "48 63 83 C4 00 00 00 83 F8 20 7D 15 89 7C 83 44",
       0x1AC57A0u },
-    { "MemLocalPopHeap",   /* idMemLocal::PopHeap -- void(this [rcx]). Decrements the heap-scope depth at
-                             * this+0xC4 and FATALS on underflow ("idMemLocal::PopHeap: Heap stack
-                             * underflow", a non-returning error), so pushes and pops must be balanced
-                             * across early returns and exceptions -- the caller pairs them with
-                             * __try/__finally for that reason. Same main-thread gate as PushHeap.
-                             * Unique: the SUB dword [rbx+0xC4],1 followed by JS to the fatal path.
-                             * Wildcard: the rel32 call to the gate predicate. */
+    { "MemLocalPopHeap",   /* void(self). Pop the main-thread heap scope; underflow is fatal.
+                             * Balance successful pushes with __finally across every exit.
+                             * SUB [self+0xC4],1 followed by JS identifies the underflow path. */
       "40 53 48 83 EC 20 48 8B D9 E8 ?? ?? ?? ?? 84 C0 74 09 83 AB C4 00 00 00 01 78",
       0x1AC5770u },
-    { "PasteInstantiate",   /* idSnapEntityPrefab instantiate -- void(prefab [rcx], editor [rdx]).
-                             * Takes the STAGED prefab at editor+0x209a8 and builds its entities into the
-                             * live map: snapshots the map's nine id-allocation counters, computes a
-                             * camera-relative placement transform from editor+0x170 (camera origin) /
-                             * +0x180 (yaw) against the prefab's own saved yaw, then per entity
-                             * deserializes the blob (stride 0x1b0), registers it, sets its visibility bit
-                             * and calls AddToSelection; finally rebuilds connections + var-refs and sets
-                             * the hovered id to the first new entity.
-                             *
-                             * HARD PRECONDITION -- the selection MUST be empty on entry. The connection/
-                             * var-ref remap translates every stored old index i through
-                             * *(int*)(selObj+0x80 + i*4), i.e. it uses the SELECTION ARRAY as its
-                             * old->new id map, and AddToSelection APPENDS. With a live selection of k the
-                             * remap reads selection[i] instead of selection[k+i], so the pasted entities
-                             * get wired to the pre-existing selected ones and the tail reads run past the
-                             * count -- a map that still loads and is silently mis-wired. The engine never
-                             * hits this because its own paste branch lives in the IDLE sub-state.
-                             *
-                             * The engine's only call site is the idle sub-state dispatcher, on abstract
-                             * action 0x5C, gated on substate+0x41 & 0x40 (= snapEdit_enableCopyPaste != 0
-                             * AND editor+0x209e0 >= 1 AND not hovering an entity). Immediately followed
-                             * there by EnterAddPrefabGrab -- calling this ALONE leaves the placed prefab
-                             * in an inconsistent tool state (the 2026-07-06 "placed but undraggable, then
-                             * AV on the next Play transition" failure).
-                             *
-                             * 40-byte prologue, no wildcards (frame-size + xmm-save shape; no rip-relative
-                             * or rel32 in range). Unique on the pinned build.
-                             * RE-DERIVE per build: byte-search the EnterAddPrefabGrab body below (unique),
-                             * take its sole xref -- that is the paste branch -- and back up 8 bytes from
-                             * that call site (CALL rel32 = 5 + MOV RCX,RBP = 3); the instruction there is
-                             * CALL PasteInstantiate, preceded by LEA RCX,[reg+0x209A8] / MOV RDX,reg.
-                             * DIRECT (our own reverse-engineering, 2026-07-27). */
+    { "PasteInstantiate",   /* void(prefab,editor). Instantiate staged entities and remap references.
+                             * Selection must be empty: old indices map through the appended
+                             * selection array. Existing entries would silently miswire the paste.
+                             * The native idle action 0x5C calls this and then EnterAddPrefabGrab;
+                             * calling it alone leaves incomplete placement state.
+                             * Re-find via EnterAddPrefabGrab's sole caller, then the preceding
+                             * call with LEA RCX,[editor+0x209A8] and MOV RDX,editor. */
       "48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 A8 F7 FF FF "
       "48 81 EC 20 09 00 00 48 C7 45 E0 FE FF FF FF 48 89 58 18",
       0x54F950u },
-    { "EnterAddPrefabGrab",  /* void(mode) -- the editor-state transition the engine runs IMMEDIATELY after
-                             * PasteInstantiate, on the EntityMode object (editor+0x22330). Puts the mode
-                             * into the "holding an unplaced prefab" manipulation state so the placement is
-                             * draggable and its completion bookkeeping runs on click:
-                             *   mode[0x2d0] &= 0xfb;          clear DUPLICATE flavour
-                             *   mode[0x2d0] |= 0x08;          set ADD-PREFAB flavour
-                             *   mode[0x2d1] |= 0x01;          memo: restore "selected" after placing
-                             *   *(u32*)(mode+0x1ac) = 4;      -> manipulation sub-state
-                             *   mode[0xBB8] = 1;              redraw
-                             * mode+0x2d0/+0x2d1 are the manipulation sub-state's own +0x40/+0x41 flag
-                             * bytes (that sub-object is inline at mode+0x290), which is what the
-                             * place-commit handler reads to pick its "Add Prefab" vs "Duplicate" vs "Edit"
-                             * behaviour -- so the flavour bits are load-bearing, not cosmetic.
-                             * Two siblings differ ONLY in the +0x2d0 mask: &0xf7|0x04 = Duplicate,
-                             * &0xf3 = Edit/Move. Do not confuse them.
-                             *
-                             * The signature is the ENTIRE function body (38 bytes incl. the RET), fully
-                             * absolute -- no wildcards, no relocations. Its first 7 bytes alone are
-                             * already unique in the image, so this is a very strong anchor and is the
-                             * recommended starting point for re-deriving the whole paste path per build.
-                             * DIRECT (our own reverse-engineering, 2026-07-27). */
+    { "EnterAddPrefabGrab",  /* void(mode). Enter add-prefab manipulation after instantiation.
+                             * mode+0x2D0 clears Duplicate (0x04), sets Add Prefab (0x08);
+                             * +0x2D1 |= 1 restores selection, +0x1AC=4 enters manipulation,
+                             * +0xBB8 requests redraw. Siblings differ by flavor masks,
+                             * so preserve the full body when rederiving the paste path. */
       "80 A1 D0 02 00 00 FB 80 89 D0 02 00 00 08 80 89 D1 02 00 00 01 "
       "C7 81 AC 01 00 00 04 00 00 00 C6 81 B8 0B 00 00 01 C3",
       0xCF35E0u },
-    { "SoundWorldLea",      /* idSoundSystemLocal::Update -- void(void). Only wanted for its FIRST
-                             * instruction: `MOV RBX,[rip+disp32]` reading the CURRENT SOUND WORLD
-                             * global (RVA 0x6223A18 on the pinned build). That global is a plain
-                             * .data pointer with no unique code fingerprint of its own -- exactly the
-                             * cmdSystem/gameMgr situation -- so it is decoded from this accessor
-                             * instead of hardcoded. NOTE the modrm is 0x1D (-> RBX), which the SHARED
-                             * sh_decode_rip_slot does not accept (it only takes ->RAX/->RCX); the
-                             * sound module carries its own any-register variant. See soundpreview.c.
-                             *
-                             * Unique on the pinned build: the 0xFF00FF00 profile colour immediately
-                             * after the null test is what makes it so. Wildcards: the two rip-relative
-                             * displacements (the global and the profile-label string).
-                             * DIRECT (our own reverse-engineering, 2026-08-04). */
+    { "SoundWorldLea",      /* Sound-system update reads the sound-world slot with MOV RBX,[rip+disp32].
+                             * The shared decoder accepts RAX/RCX only; soundpreview uses its
+                             * any-register decoder. Profile color 0xFF00FF00 anchors the body. */
       "40 53 48 83 EC 20 48 8B 1D ?? ?? ?? ?? 48 85 DB 74 1E 48 8D 15 ?? ?? ?? ?? B9 00 FF 00 FF",
       0x18514F0u },
-    { "SoundPreview",       /* idSoundWorld PREVIEW -- void*(this [rcx], uint64 *outHandle [rdx],
-                             * const char *name [r8]). Sound-world vtable slot +0x30.
-                             *
-                             * This is the editor's own audition path, not a general play call, and it
-                             * is what makes previewing usable:
-                             *   - sets cvar s_soloSound = "preview" so the audition is the only thing
-                             *     audible, and forces the listener, so the sound arrives at the ear
-                             *     rather than positioned somewhere in the world;
-                             *   - plays through vtbl+0x40 with the label "preview" at a fixed origin
-                             *     and axis, and writes the emitter HANDLE to *outHandle;
-                             *   - when the name resolves to nothing it instead CLEARS s_soloSound and
-                             *     s_forceListener and writes handle 0 -- that branch is the whole of
-                             *     "leave preview mode".
-                             *
-                             * It DOES stack: each call allocates a fresh emitter (StartSound_wwise
-                             * @0x1854600 does `operator new(0x2200)` and appends to the emitter array
-                             * at world+0x1F70). So the caller MUST stop the previous handle first --
-                             * see the vtable +0x98 stop in soundpreview.c. That is the difference
-                             * between this and the
-                             * `testSound` console command, which throws its handle away and therefore
-                             * cannot be stopped or prevented from piling up.
-                             *
-                             * DANGER: it resolves the name through the find-OR-CREATE decl primitive
-                             * (0x17B36F0) with allowCreate=1, which fatals on a name that is not a
-                             * real decl. Only ever call it with a name sh_imgpreview_has() confirmed.
-                             *
-                             * Wildcards: the rel32 to the name-hash helper and the rip-relative read
-                             * of the solo-list count. DIRECT (our own reverse-engineering, 2026-08-04). */
+    { "SoundPreview",       /* void*(world,outHandle,name), sound-world vtable +0x30.
+                             * Editor audition sets solo/listener state and allocates an emitter;
+                             * stop the previous handle before starting another. An empty/missing
+                             * resolved name clears preview state, but find-or-create can fatal
+                             * on invalid decls: validate names through the asset index first. */
       "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 41 54 41 56 41 57 48 83 EC 50 "
       "4C 8B E1 4D 8B F0 49 8B C8 4C 8B FA E8 ?? ?? ?? ?? 33 F6 8B E8 39 35 ?? ?? ?? ?? 7E 5E",
       0x1855660u },
-    { "Mega2PageDecode",    /* the megatexture PAGE DECODER --
-                             *   void(const u8 *header16, const u8 *payload, void *unused, u8 *out)
-                             * where `unused` is NULL in every observed call and `out` is 0x50000 bytes.
-                             *
-                             * id's own DCT codec (YCoCg-R colour transform, so NOT libjpeg), anchored in
-                             * the binary by engine\renderer\jobs\transcode\Transcode.cpp. It is a PURE
-                             * function -- no engine globals, no renderer, no GPU, no virtual-texture
-                             * state and no map residency -- which is why the asset browser can call it
-                             * directly to turn one `.mega2` page into pixels. Proven by decoding 68/68
-                             * pages in a bare console process with DOOM not running at all.
-                             *
-                             * Output is 5 planes of 128x128 RGBA at +0/+0x10000/.../+0x40000; plane 0 is
-                             * albedo and the only one a preview needs. Callers MUST pre-clear the output
-                             * (skipped streams are left untouched, not zeroed) and MUST give the page
-                             * buffer >= 0x40000 of zero-filled slack -- it reads a measured mean of
-                             * 73,172 and a max of 167,220 bytes past the end of the page data.
-                             *
-                             * The prologue is whole, position-independent instructions with a single
-                             * rip-relative read at the tail, so the only wildcards are that displacement.
-                             * Previously called as a raw module_base + 0x196E140 guarded by a local
-                             * memcmp of these same bytes; that is what this entry replaces.
-                             * DIRECT (our own reverse-engineering, 2026-08-03). */
+    { "Mega2PageDecode",    /* void(header16,payload,NULL,out): CPU-only megatexture page decode.
+                             * Output is five 128x128 RGBA planes at 0x10000-byte intervals;
+                             * plane 0 is albedo. Preclear all 0x50000 output bytes because
+                             * skipped streams remain untouched. Supply at least 0x40000
+                             * zero-filled bytes after payload; the decoder reads past page data.
+                             * Re-find through the renderer Transcode.cpp code path. */
       "40 55 56 57 41 54 41 55 41 56 41 57 48 81 EC 30 01 00 00 48 8D 6C 24 40 "
       "48 C7 45 10 FE FF FF FF 48 89 9D 40 01 00 00 48 8B 05 ?? ?? ?? ??",
       0x196E140u },
-    { "PrefabDtor",         /* idSnapEntityPrefab::~idSnapEntityPrefab -- void(this [rcx]).
-                             * Pairs with PrefabCtor/PrefabPopulate; tears down the temp prefab the
-                             * serialize-from-selection path builds. Wildcards are the two rel32 call
-                             * displacements (the idStr member dtor and the base dtor).
-                             * DIRECT (our own reverse-engineering, 2026-08-05). */
+    { "PrefabDtor",         /* void(prefab). Destroy temporary storage after selection serialization. */
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B F9 "
       "48 81 C1 20 01 00 00 E8 ?? ?? ?? ?? 90 48 8D 8F F0 00 00 00",
       0x51D870u },
-    { "EntityDeshare",      /* COW make-unique -- void *(entitySlot [rcx]). De-shares an entity's 0x6f8
-                             * block before an in-place edit; the refcount test `cmp dword [rcx],1` and
-                             * the 0x6F8 allocation size are both visible in the pattern, which is what
-                             * makes it unique. Wildcard is the rel32 to the allocator.
-                             * DIRECT (our own reverse-engineering, 2026-08-05). */
+    { "EntityDeshare",      /* void*(entitySlot). Make the shared 0x6F8 block unique before editing.
+                             * Refcount==1 and the allocation size distinguish this helper. */
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 8B F9 "
       "48 8B 01 83 38 01 74 3C B9 F8 06 00 00 E8 ?? ?? ?? ?? 48 8B D8",
       0x52C920u },
-    /* --- functions the backend previously reached through a raw `module_base + RVA` constant.
-     * Each pattern below was extracted from the pinned Vulkan image and then required to match
-     * EXACTLY ONCE on DOOM's OpenGL executable too, so these are portable identities rather than
-     * build-locked addresses. Three of their neighbours could NOT be signed this way -- the
-     * idDeclManager accessor shares its prologue with ~47 functions, the idList growth helper is
-     * too generic, and the visibility leaf is too short to anchor -- and those are resolved from a
-     * call site in engine_globals_table.gen.h instead. */
+    /* Portable function identities checked on both renderers. Generic/short leaves
+     * such as decl-manager access, list growth, and visibility resolve through
+     * signed call sites in engine_globals_table.gen.h instead. */
     { "RemoveFromSelection", /* void(editor [rcx], entity handle [edx]) -- drops one entity from the
                               * editor selection. The `add rcx,0x5e0` that walks to the selection
                               * sub-object sits in the fixed bytes, which is what makes it unique.
@@ -1234,24 +787,18 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 57 48 83 EC 40 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 50 48 89 74 24 58 "
       "48 8B DA 48 8B F1",
       0x18017A0u },
-    { "EventLink",          /* the map-load event-link routine the fault shield guards. Previously
-                             * reached via RVA_EVLINK with a prologue byte-compare; the signature turns
-                             * that compare into a confirmation rather than the only identity check.
+    { "EventLink",          /* Event-link routine guarded by the fault shield.
                              * Vulkan 0x9C2370, OpenGL 0x9C1B70. */
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 89 6C 24 50 "
       "48 89 74 24 58 48 8B F2 48 8B E9",
       0x9C2370u },
-    { "InteractableSpawn",  /* the interactable spawn path the fault shield guards. Reached only
-                             * through a vtable, so there is no call site to anchor on; its own bytes
-                             * are unique once the 0x168 frame set-up is included.
-                             * Vulkan 0x1232830, OpenGL 0x12247F0. */
+    { "InteractableSpawn",  /* Interactable Spawn, reached through a vtable. Its frame setup
+                             * distinguishes the function. Vulkan 0x1232830, OpenGL 0x12247F0. */
       "48 8B C4 55 41 54 41 55 41 56 41 57 48 8D A8 98 FE FF FF 48 81 EC 40 02 00 00 "
       "48 C7 45 80 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20 0F 29 70 C8 "
       "0F 29 78 B8 44 0F 29 40 A8 48 8B 05 ?? ?? ?? ??",
       0x1232830u },
-    { "DeclResourceProbe",  /* the decl-resource existence probe reached at vtable +0x78. Signing it
-                             * lets decl-visibility confirm the method by its BYTES instead of by an
-                             * RVA that is only true on one build.
+    { "DeclResourceProbe",  /* Decl existence probe at vtable +0x78; validate the method by signature.
                              * Vulkan 0x1806100, OpenGL 0x17F8A40. */
       "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 78 FF FF FF "
       "48 81 EC 88 01 00 00 48 C7 44 24 30 FE FF FF FF",

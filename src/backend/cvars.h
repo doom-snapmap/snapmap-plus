@@ -1,71 +1,23 @@
-/* cvars.h -- register the cvar table with the engine cvar system: 2 of the 9 OG cvars (clean-room
- * reimplementation of OG XINPUT1_3's static-init cvar push_back + spine flush; the OG's snaphak_*
- * name prefix renamed to our sh_*).
- *
- * OG SnapHak declares 9 cvars as static descriptors (from our cvar-descriptor RE) and, in the install
- * spine FUN_1800229b1, flushes them through the engine cvar register fn:
- *   ( *(engineBase+0x1a04f00) )( desc+0x28, name, default, typecode, desc, argComp )
- * where typecode = 1=BOOL, 2=INT, 4=FLOAT, passed VERBATIM as the engine `flags` arg (the engine
- * massages the bits internally). None of the 9 carry EXPOSE/NOCHEAT -> they register non-EXPOSE
- * (gate-1-invisible), which is the faithful OG behavior.
- *
- * Seven of the 9 are deliberately NOT registered, because registering a name nothing can act on would
- * advertise a setting that cannot do anything: snaphak_show_rmcount (the OG read it from its spliced
- * SuperScript override fns and drew the rendermodel count over the game; the clone has no such overlay
- * to switch on) and the six cs_dash_* / cs_mh_* movement cvars (they tune the OG's spliced dash /
- * meathook SuperScript cheat cluster, which the clone does not port -- and the names appear nowhere in
- * DOOM's own binary, so there is no engine-side reader either). See the "Not carried over" entries in
- * docs/fidelity.md before re-adding any of them from the descriptor dump.
- *
- * Our reimpl carries the remaining 2 rows as a static table and calls the engine register fn (resolved by
- * the signature scanner as "CvarRegister", NO hardcoded RVA). The embedded idCVar object the engine writes
- * through lives in persistent, never-freed, 16-byte-aligned backing storage -- the engine links each
- * cvar into its process-lifetime cvar list, exactly as OG's static descriptors persist for the process.
- *
- * Clean-room: ported from our own RE (the cvar descriptor dump + register-ABI extract). Zero OG bytes.
- */
+/* Register the supported Snapmap+ cvars with process-lifetime backing storage.
+ * Settings without implemented consumers are omitted; see docs/fidelity.md. */
 #ifndef BACKEND_B2_CVARS_H
 #define BACKEND_B2_CVARS_H
 
-/* Register all table cvars with the engine via the resolved CvarRegister fn (0 => not resolved; logs
- * SKIPPED and returns 0), THEN link them into the engine's FULL findable cvar table so FindCvar (and the
- * S0-aliased gate-1 `~` console) recognizes them. ONE-SHOT-LATCHED: CvarRegister has NO dedup (it
- * unconditionally links into the pending list), and the findable-insert must run exactly once, so the
- * latch prevents OUR double-register AND any double-link.
- *
- * THE FINDABLE-INSERT (the fix): our cvars register into the pending list only; the SOLE table-hasher
- * RegisterStaticVars (0x1a06a00) already ran at static init, so our LATE cvars are in NEITHER findable
- * table -> FindCvar misses -> "Unknown command". After the CvarRegister loop we replay that fn's FULL-
- * table insert for each row: append each embedded idCVar object into the FULL idList (cvarSys+0x08) and link
- * it into the FULL idHashIndex (cvarSys+0x38) via the engine's own name-hash (sig "NameHash"). We do NOT
- * set CVAR_EXPOSE and do NOT re-call RegisterStaticVars (its static-dup guard ExitProcess(2)es). If the
- * FULL table has no spare room we BAIL per-cvar (logged skip, no realloc). Every engine call + every
- * table access is SEH-guarded (a wrong offset degrades to a logged skip, never a crash/corruption).
- *
- *   cvar_register = resolved engine CvarRegister (sig "CvarRegister"; 0 => SKIPPED, returns 0).
- *   module_base   = the DOOM module base. cvarSys is resolved build-portably from it (the CmdSystemLea
- *                   sig decode +0x10, with *(module_base+0x55b7290) as the logged fallback -- see
- *                   sh_resolve_cvarsys), and it anchors the NameHash sig resolve too.
- *                   NULL => the register loop still runs but the findable-insert is SKIPPED (logged).
- * Does NOT depend on the cmdSystem global. Emits "B2: cvars registered N/2 ..." +
- * "B2: cvar findable-insert N/2 (cvarSys=%p count=%d cap=%d ...)". Returns the count registered (0..2). */
+/* Register each row once, then insert it into the full lookup list and hash.
+ * Never rerun the engine static registration pass or grow its tables here.
+ * A missing cvar_register returns 0; a missing module_base skips lookup insertion.
+ * Return the number registered, which may exceed the number made findable. */
 int sh_cvars_install(void *cvar_register, const void *module_base);
 
-/* CVARS index constants (mirror the cvars.c CVARS[] table order) -- for consumers that read a
- * cvar's live value via sh_cvar_value_int. Rows 0..1 are the OG cvars the clone registers. */
+/* Indices match the cvars.c table and select live values below. */
 #define B2_CVAR_SH_PRETTY_ON                 0
 #define B2_CVAR_SH_COPY_RESLIST_TO_CLIPBOARD 1
 
-/* Read the live INT/BOOL value of cvar `index` (one of the B2_CVAR_* constants) from OUR engine-
- * populated backing object. The engine stores valueInteger at idCVar+0x30 (DIRECT from the source-of-
- * record (the engine idlib schema) idCVar + the OG DAT_18003d2b8==idCVar+0x30 cross-check).
- * SEH-guarded; returns `def` on a bad index, before install, or any fault.
- * NOTE (the build-specific-offset trap): +0x30 is DIRECT-from-source but the live read should be
- * spot-checked at FIRE (set the cvar to 1, confirm this returns 1). */
+/* Read integer/bool value at idCVar+0x30. Return def for an invalid index,
+ * an unregistered object, or a memory fault. */
 int sh_cvar_value_int(int index, int def);
 
-/* Read-only access to the cvar TABLE rows (name/default/description) -- for sh_help's listing.
- * Returns the row count; sh_cvar_table_row returns 1 and fills the pointers for a valid index. */
+/* Read table metadata for sh_help. A valid row returns 1 with borrowed strings. */
 int sh_cvar_table_count(void);
 int sh_cvar_table_row(int index, const char **name, const char **def, const char **desc);
 

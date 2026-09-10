@@ -1,14 +1,6 @@
-/* hook_test.c -- offline self-test for the backend inline-detour installer (hook.c).
- *
- * Exercises install_inline_hook -> call-detoured -> call-trampoline -> hook_unpatch on a hand-laid
- * SCRATCH stub -- the exact path smoke.c runs inside the DLL, but standalone so the installer is
- * proven without the game running. The stub is hand-coded machine bytes (not a C function) so the
- * optimizer can't shrink it below the 16-byte stolen window or emit a RIP-relative prologue; its first
- * 16 bytes are whole, register-only, PI instructions. NOT shipped in the DLL.
- *
- *   cl /nologo /O2 /MT hook_test.c hook.c /Fe:hook_test.exe
- *   hook_test.exe          # exit 0 iff install/detour/trampoline/un-patch all behave
- */
+/* Offline inline-hook install, detour, trampoline and removal checks. The
+ * synthetic machine-code stub supplies 16 bytes of whole, position-independent
+ * instructions so compiler optimization cannot change the stolen window. */
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>

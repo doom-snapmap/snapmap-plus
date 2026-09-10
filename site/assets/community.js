@@ -1,11 +1,6 @@
-/* Snapmap+ site — Community section behavior.
-   Renders GitHub Discussions (via the community service) natively on the site:
-   1. Index — search, sort, category tabs, the forum list (community.html).
-   2. Post view — the post, its action bar, and the discussion thread (community-post.html).
-   3. Composer — a rich-text editor for writing/editing posts (community-compose.html).
-   Shared foundations: an inline SVG icon set, in-site modals + toasts (never browser
-   confirm/alert), a WYSIWYG editor that serializes to markdown (Discussions' storage format),
-   and an opaque-session sign-in. Each feature activates only when its markup is present. */
+/* Render the Community list, post and composer pages through the service API.
+ * Shared helpers handle sessions, Markdown editing, icons, modals and toasts.
+ * Each feature starts only when its markup is present. */
 
 (function () {
   "use strict";
@@ -657,9 +652,8 @@
       var when = showUpdated && d.updatedAt
         ? "active " + fmtDate(d.updatedAt)
         : fmtDate(d.createdAt);
-      /* the whole row is ONE link — never nest the author's profile link inside it (nested
-         anchors are invalid HTML; the parser splits the row apart). Profile links live on the
-         post page. */
+      /* The row is one link. Nested author links would produce invalid HTML;
+       * profile links belong on the post page. */
       return (
         '<a class="forum-row" href="community-post.html?n=' + d.number + '">' +
           '<div class="forum-main">' +
@@ -931,8 +925,7 @@
       });
     }
 
-    /* thread + post interactions: bound ONCE by delegation — render() replaces innerHTML only,
-       so binding inside render would stack duplicate handlers on every refresh */
+    /* Delegate interactions once; render() replaces markup without adding handlers. */
     if (thread) {
       thread.addEventListener("click", function (e) {
           var t;

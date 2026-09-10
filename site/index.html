@@ -56,7 +56,7 @@
           </p>
         </div>
 
-        <!-- The signature: a SnapMap logic graph. Output chip -> Snapmap+ -> everything opens. -->
+        <!-- SnapMap-style graph linking the player, Snapmap+ and editor features. -->
         <div class="hero-graph" aria-hidden="false">
           <svg viewBox="0 0 620 430" role="img"
                aria-label="A SnapMap-style logic diagram: a Player node's On Spawned output wired into a Snapmap+ node, which wires out to Every Property, Place Anything, and No Limits.">
@@ -100,10 +100,10 @@
               <rect class="port" x="444" y="346" width="8" height="8"/>
             </g>
 
-            <!-- Signal pulses travelling the wires. Every pulse shares dur=1.6s so their periods
-                 stay phase-locked: the left pulse (wire-a) reaches the SNAPMAP+ port at
-                 begin(1.6s)+dur(1.6s)=3.2s, which is exactly when the right pulses launch, on every
-                 loop. Each pulse holds opacity 0 until its begin so no dot sits at the SVG origin. -->
+            <!-- Use the same 1.6-second period for all pulses. Right pulses begin when
+                 the
+                 left pulse reaches the center at 3.2 seconds; initial opacity hides
+                 waiting dots. -->
             <circle class="pulse" r="3.5" opacity="0">
               <set attributeName="opacity" to="1" begin="1.6s" fill="freeze"/>
               <animateMotion dur="1.6s" begin="1.6s" repeatCount="indefinite">
@@ -303,8 +303,7 @@
     </div>
   </section>
 
-  <!-- Two outputs off the project, drawn as the logic chips the hero graph opens with:
-       port in, name, output port out. Cyan = the code side, argent = the people side. -->
+  <!-- Project links reuse the graph card design. -->
   <section id="connect" class="deck connect">
     <div class="wrap">
       <div class="section-head">

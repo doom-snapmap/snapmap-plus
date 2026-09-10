@@ -1,6 +1,6 @@
-/* backend_log.h -- the Snapmap+ backend's minimal log sink (OutputDebugStringA + a log file next to
- * the DLL). Independent of the fault-shield's fault_record. OutputDebugStringA -> in-game console +
- * any attached debugger's output sink (the smoke proof surface). */
+/* Backend log sink: OutputDebugStringA and a rotating session log under the
+ * DLL directory. Independent of fault_record.
+ */
 #ifndef BACKEND_LOG_H
 #define BACKEND_LOG_H
 

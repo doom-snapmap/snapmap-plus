@@ -1,22 +1,13 @@
-/* crash_record_format.h -- the crash record's PURE JSON formatter (no I/O, no OS calls).
- *
- * A crash record is one small JSON file describing one fault: what class it was, where it hit, the
- * call stack, the engine's own error text when it exists, and when/what version. crash_report.c writes
- * it to disk at fault time; the Snapmap+ UI reads it back on its next launch (or seconds later,
- * for a recovered fault) and offers the user a crash-report dialog. Kept pure + separately-compilable
- * so the formatter and its escaping are unit-tested off-game (tests/crash_record_test.c), the same
- * split fault_record.h uses for shield_format.
- */
+/* JSON crash-record formatting, shared by the capture path and off-game tests. */
 #ifndef SHIELD_CRASH_RECORD_FORMAT_H
 #define SHIELD_CRASH_RECORD_FORMAT_H
 
 #include <stddef.h>
 
 typedef struct crash_record {
-    /* "fatal" | "classB" | "engine_fatalerror" | "offthread".
-     * The frontend splits these into "the process died" (prompt for a report) versus "the fault was
-     * contained" (quiet notice) -- see crash_record_is_terminal in the webview frontend. "classB" and
-     * "offthread" are the contained ones; adding a kind here means deciding which side it falls on. */
+    /* "fatal" | "classB" | "engine_fatalerror" | "offthread". The frontend treats
+     * classB/offthread as nonterminal notices; a record alone does not prove survival.
+     * Update crash_record_is_terminal when adding a kind. */
     const char *kind;
     unsigned long code;       /* exception code (0 if not a hardware fault) */
     unsigned long long rip_rva;    /* faulting rip - module base (0 if unknown) */
@@ -26,10 +17,8 @@ typedef struct crash_record {
     const char *engine_text;  /* the engine's own formatted error text, or "" */
     const char *dump;         /* crash-dump path if one was written, or "" */
     const char *version;      /* installed version string AT FAULT TIME (read at arm), or "" */
-    /* Renderer the crashing session was running: "vulkan" | "opengl" | "" when unresolved. DOOM
-     * ships one executable per renderer and relaunches itself when r_renderAPI changes, so this is
-     * the crashing SESSION's answer -- the reporting UI, which may run in the other one on the next
-     * launch, must carry this rather than re-asking the live process. */
+    /* Renderer at fault time: "vulkan", "opengl", or "" if unresolved. Preserve this
+     * snapshot when reporting after a restart into the other renderer. */
     const char *renderer;
     const char *time;         /* preformatted local "YYYY-MM-DD HH:MM:SS" */
 } crash_record;
@@ -39,8 +28,8 @@ typedef struct crash_record {
  * number of chars written (excluding the NUL). Pure + deterministic. */
 int crash_json_escape(char *dst, size_t cap, const char *src);
 
-/* Format the whole record as a single JSON object into buf. Returns chars written (>0), or 0 on a
- * too-small buffer / NULL args. Pure + deterministic: same record -> same bytes. */
+/* Return bytes written, including partial output on truncation; return 0 for NULL
+ * arguments or cap < 64. A positive result does not guarantee complete JSON. */
 int crash_record_json(char *buf, size_t cap, const crash_record *r);
 
 #endif /* SHIELD_CRASH_RECORD_FORMAT_H */

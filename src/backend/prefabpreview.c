@@ -212,10 +212,10 @@ static int pp_decode_bmodel(const unsigned char *data, size_t len, pp_mesh *mesh
             if (!pp_u16be(&r, &local) || local >= nv) return 0;
             mesh->indices[mesh->index_count++] = base + local;
         }
-        /* Every surface ends with a fixed 32-byte cooked metadata block. Single-surface fixtures
-         * appeared to work before this was consumed because the old decoder accepted any trailing
-         * bytes; on real multi-surface props it read this block as the next material-string length
-         * and rejected the entire model, leaving only a proxy cube. */
+        /* Consume each surface's fixed 32-byte cooked metadata block before reading
+         * the next surface. Otherwise it is mistaken for the next material-
+         * string length.
+         */
         if (!pp_take(&r, 32, NULL)) return 0;
     }
     /* The remaining model-level trailer is variable (bounds, joints, and other renderer metadata)

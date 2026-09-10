@@ -264,11 +264,13 @@ before it goes into `known_rva` or a call site. There is no single offset that c
 different build is a cluster-wise re-link, so different functions move by different — and sometimes
 opposite-signed — amounts.
 
-Those recorded RVAs do not locate anything. Functions are found by scanning for their bytes and data globals
-by decoding the RIP-relative displacement out of the signed code site that computes the address, so a
-resolver never needs to know where anything lives. The one runtime consumer of a `known_rva` is the
-hook-tolerant fallback, which probes `module_base + known_rva` only when the scan found nothing *and* the
-host is the pinned image — everywhere else a `known_rva` is validation and documentation.
+Normal resolution scans function bytes or decodes a global's RIP-relative code
+anchor. The hook-tolerant fallback can probe `module_base + known_rva` after a
+failed scan, requiring a recognized detour and at least six matching fixed tail
+bytes. It does not verify an image fingerprint. Separately, explicit RVA fallback
+consumers use `sh_host_is_pinned_rva_build`; that helper checks the Vulkan
+executable basename, not the recorded hash. Treat these as compatibility limits,
+not proof that the running image matches the reference build.
 
 The trap is that a wrong address is **invisible in normal use**. Byte signatures are build-portable, so the
 scanner still finds the function and your feature works exactly as intended on either build. The only thing
@@ -287,7 +289,7 @@ A third test, `xinput_ordinal_test.c`, is a **runtime** cross-check of the XInpu
 a built DLL and calls its exports by ordinal. CI verifies that same invariant *statically* with `dumpbin` (the
 "XInput ordinal parity" step), so you normally don't need to run it by hand.
 
-CI runs the 45 self-contained native tests, ten JavaScript tests, and the installer tests on every PR; the DOOM-image tests are local-only
+CI runs the self-contained native tests, JavaScript tests, and installer tests on every PR; the DOOM-image tests are local-only
 (CI has no game image).
 
 After the normal test run has built its executables, contributors with DOOM installed can also
@@ -416,11 +418,11 @@ behavior change with stale docs will be sent back. Use this map:
 | If you change… | Update… |
 |---|---|
 | a console command, cvar, SnapStack op, or a Studio-window feature (`src/backend/`, `src/ui/`) | [`docs/capabilities.md`](capabilities.md) — the feature inventory |
-| the frontend UI itself (`src/ui/webview/` — the host or `mockup.html`) | [`docs/webview-ui.md`](webview-ui.md) — its reference sections + a dated entry in [`webview-ui-history.md`](webview-ui-history.md) |
+| the frontend UI itself (`src/ui/webview/` — the host or `mockup.html`) | [`docs/webview-ui.md`](webview-ui.md) and the affected feature reference |
 | a release process, an external service, or a credential | [`docs/services.md`](services.md) — the service inventory |
 | the object model, the think-loop, the interface vtable, the persistent-settings registry, or the backend↔frontend boundary | [`docs/architecture.md`](architecture.md) |
 | a deliberately-reproduced original quirk, or a sanctioned divergence | [`docs/fidelity.md`](fidelity.md) |
-| a correctness bugfix in the shared `src/backend/` engine-call layer (not a fidelity divergence -- our own code was wrong) | [`docs/backend-changes.md`](backend-changes.md) |
+| a correctness bugfix in the shared `src/backend/` engine-call layer (not a fidelity divergence -- our own code was wrong) | the affected feature reference or [`docs/architecture.md`](architecture.md); explain the fix in the pull request |
 | the shipped file set / what's deliberately dropped (`package.ps1`) | [`docs/packaging.md`](packaging.md) |
 | the install / update / uninstall flow, its flags, or release channels (`installer/`) | [`installer/README.md`](../installer/README.md) and, if user-facing, the top-level [`README.md`](../README.md) |
 | the build, test, or contribution process | this file (`docs/contributing.md`) |
@@ -428,6 +430,48 @@ behavior change with stale docs will be sent back. Use this map:
 
 If a change is purely internal and user-invisible, note that in the PR description so the reviewer knows the
 docs were considered.
+
+### Documentation and comment style
+
+Keep `docs/` focused on current product behavior, supported formats, architecture,
+and contributor operations. Put user-facing release history in `CHANGELOG.md`.
+Investigation transcripts, abandoned designs and dated engineering journals
+belong in snaphak-re's findings system, not in product reference pages. External
+contributors can provide evidence in their pull request; maintaining this
+repository must not require a private research checkout.
+
+Main directories such as `src/`, `tests/` and `tools/` have a `README.md` using
+this opening structure. Keep nested guides only where they explain a separate
+workflow; do not add a README to every subdirectory.
+
+```markdown
+# Directory or component name
+
+## Purpose
+
+One short paragraph explaining what this directory owns.
+
+## Contents
+
+A short list or table of the important files and subdirectories.
+
+## Working here
+
+Entry points, relevant commands, constraints, and links to detailed guidance.
+```
+
+Add focused sections when a component needs setup or usage instructions. Keep
+file lists selective and responsibilities precise; avoid repeating full feature
+inventories in several READMEs. Generated build outputs and dependency caches
+do not need repository documentation. Website READMEs are contributor files and
+are excluded from the published site.
+
+Comments should explain a non-obvious decision, contract, limit or failure mode.
+Keep ABI offsets, ownership, thread requirements and porting clues that a reader
+cannot infer from the code. Remove stale investigation history, decorative
+banners and line-by-line narration. Preserve license notices, generated content,
+build directives and analyzer annotations. Do not reduce comments to meet a
+percentage target.
 
 ## 10. Generated headers — don't hand-edit
 
@@ -455,7 +499,7 @@ release. **Do not open a public issue for a security problem.** Use GitHub's **p
 | `tests/` | the native unit tests + `run-tests.ps1` |
 | `tools/` | the changelog parser (`changelog.py`), the release-notes drafter (`draft_changelog.py`), the published-release sync (`sync_release_notes.py`) and their tests |
 | `CHANGELOG.md` | the user-facing release notes -- the single source every consumer reads |
-| `docs/` | architecture · capabilities · fidelity · packaging · webview-ui · webview-ui-history · backend-changes · services · this guide |
+| `docs/` | current product and contributor references, indexed in [README.md](README.md) |
 | `build.ps1` | compile the DLLs → `build/` (backend + frontend; `-BackendOnly` for backend alone) |
 | `package.ps1` | assemble the deployable overlay → `dist/` (the two clone DLLs) |
 | `.github/workflows/` | `ci.yml` (the PR gate) · `prepare-release.yml` (drafts a release's notes) · `release.yml` (tag-triggered release) · `pages.yml` (the website) |

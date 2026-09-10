@@ -1,18 +1,7 @@
-/* decl_overlay_test.js -- invariant check for the decl editor's two-layer paint.
- *
- * The decl editor is a transparent <textarea> over a token-colored <pre> (mockup.html,
- * ".code-editor"). The ONLY thing keeping the two visually aligned is that renderHl()
- * reproduces the textarea's text EXACTLY -- same characters, same line count. If it ever
- * drops/adds a character (especially a newline), everything below that point paints one
- * line off from where the caret and the selection actually are.
- *
- * This lifts esc() + tokenizeDecl() + renderHl()'s body straight out of mockup.html (no copy
- * kept here -- it reads the shipped source) and asserts:
- *     stripTags(renderHl(text)) === text + '\n'
- * for a corpus of real and adversarial decl bodies.
- *
- * Run: node tests\decl_overlay_test.js
- */
+/* Tests alignment between the transparent textarea and syntax-highlighted pre.
+ * Extract the shipped tokenizer/renderer and assert that stripping markup gives
+ * the original text plus the renderer's trailing newline.
+ * Run: node tests/decl_overlay_test.js */
 'use strict';
 const fs = require('fs');
 const path = require('path');

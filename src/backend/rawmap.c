@@ -1,16 +1,6 @@
-/* rawmap.c -- see rawmap.h. The rawmap LOAD swap (port of OG FUN_180023ad0).
- *
- * Detours idSnapMap::DeserializeFromJson(const char* json, idSnapMap* out) [variant A, buffer-first].
- * When armed, our detour reads the file-backed rawmap source into a heap buffer and calls the engine
- * ORIGINAL (via the trampoline) with OUR buffer as arg0 -- the native equivalent of OG's "overwrite
- * param_1" and our reference reimplementation's "args[0] = _rawmapBuf". The engine's own deserialize then parses our
- * bytes. When the gate is off / no source / a read fails, we pass the engine's json through untouched
- * (OG's bVar2==false fallback). We free our buffer after the call.
- *
- * Why this is safe to slot in front of the engine fn: the detour has the EXACT prototype of the target
- * (int(const char*, void*)), so the stolen-prologue trampoline preserves the engine's calling
- * convention; the only thing we change is the first argument's pointer, and only when armed. Every file
- * op is failure-tolerant -- a swap failure degrades to a vanilla load, never a crash.
+/* DeserializeFromJson detour: optionally substitute a file-backed rawmap,
+ * prepare the chosen JSON, then call the native parser. The temporary buffer
+ * lives through the call. An unavailable source falls back to engine JSON.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -47,19 +37,17 @@ typedef int (*deser_fn_t)(const char *json, void *out_map);
 
 static deser_fn_t g_deser_orig = NULL;   /* the trampoline -> the real engine DeserializeFromJson */
 
-/* Gate (OG DAT_18003e819 / the reference impl _gate). Default DISARMED -- the test harness arms for the test. */
+/* Explicit load/save arm; default off. */
 static volatile LONG g_gate = 0;
 static volatile LONG g_swap_count = 0;
 static volatile LONG g_swap_complete_count = 0;
 
-/* File-backed rawmap source. Default %LOCALAPPDATA%\snapmap-plus\rawmap.json (the OG read
- * %USERPROFILE%\snaphak\rawmap.json). The test harness may override via sh_rawmap_swap_set_source. */
+/* Load source override; otherwise %LOCALAPPDATA%/snapmap-plus/rawmap.json. */
 static char g_src_path[MAX_PATH] = {0};
 
 static void default_source_path(char *out, size_t cap)
 {
-    /* OG: SHGetFolderPathA(CSIDL_PROFILE) + "\snaphak\rawmap.json" (the shared path builder FUN_180023780);
-     * ours lives in the consolidated %LOCALAPPDATA%\snapmap-plus\ data root. */
+    /* Use the shared application data root. */
     char base[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base)))
         _snprintf_s(out, cap, _TRUNCATE, "%s\\snapmap-plus\\rawmap.json", base);
@@ -67,19 +55,18 @@ static void default_source_path(char *out, size_t cap)
         _snprintf_s(out, cap, _TRUNCATE, "snapmap-plus\\rawmap.json");
 }
 
-/* Resolve the EFFECTIVE rawmap source path (the same logic the swap reads from): g_src_path if set,
- * else the default %LOCALAPPDATA%\snapmap-plus\rawmap.json. Writes into `out` (caller-provided MAX_PATH buf).
- * Centralized so the flag-file path tracks set_source() exactly -- both derive from one resolver. */
+/* Resolve the effective source into a MAX_PATH buffer. arm.flag derives from
+ * the same path.
+ */
 static void resolve_source_path(char *out, size_t cap)
 {
     if (g_src_path[0]) strncpy_s(out, cap, g_src_path, _TRUNCATE);
     else default_source_path(out, cap);
 }
 
-/* Derive the TEST arm flag-file path: a sibling of the rawmap source named "arm.flag" (i.e. the source
- * dir + "\arm.flag"). Tracks set_source() because it is built from resolve_source_path. If the source
- * has no directory component, the flag is "arm.flag" relative to the cwd (matches default_source_path's
- * relative fallback). */
+/* Test flag beside the configured source. A source without a directory uses
+ * arm.flag relative to the working directory.
+ */
 static void flag_file_path(char *out, size_t cap)
 {
     char src[MAX_PATH];
@@ -101,10 +88,7 @@ static void flag_file_path(char *out, size_t cap)
     }
 }
 
-/* TEST arm trigger: is the sibling arm.flag file present? A single GetFileAttributes per interception
- * (deserializes are infrequent map-loads, so this is cheap). The test harness creates/deletes this file to
- * arm/disarm the swap for a controlled live test, with no console/RPC needed. Additive to the explicit
- * sh_rawmap_swap_arm() gate (they are OR'd in the detour). */
+/* Test-only file trigger, additive to the explicit arm state. */
 static int flag_file_present(void)
 {
     char flag[MAX_PATH];
@@ -113,14 +97,9 @@ static int flag_file_present(void)
     return (attrs != INVALID_FILE_ATTRIBUTES) && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-/* The arm predicate BOTH detours share: the explicit gate (sh_rawmap_swap_arm, i.e. the sh_rawmaps_on
- * command) OR the test flag-file. `flag_armed_out` is optional and reports which arm won, for the log line.
- *
- * Factored because the two halves of ONE switch drifted: the LOAD swap read the gate and the SAVE shadow
- * did not, so `sh_rawmaps_off` stopped substitutions while the shadow kept overwriting rawmap.json on every
- * map save. The command's own help says "Enable raw map save/load" -- one switch, both directions -- and a
- * user who turned it off could still lose a rawmap they had staged there by hand. Sharing the predicate is
- * what stops the two sides disagreeing again. */
+/* Shared load/save predicate: explicit arm OR arm.flag. flag_armed_out
+ * optionally identifies the file trigger for logging.
+ */
 static int rawmap_armed(int *flag_armed_out)
 {
     int explicit_armed = (InterlockedCompareExchange(&g_gate, 0, 0) != 0);
@@ -129,8 +108,9 @@ static int rawmap_armed(int *flag_armed_out)
     return explicit_armed || flag_armed;
 }
 
-/* Read the whole source file into a fresh, NUL-terminated heap buffer (OG: malloc(size+1) + fread).
- * Returns the buffer (caller frees with HeapFree) + sets *out_len, or NULL on any failure. */
+/* Read a NUL-terminated process-heap buffer; caller frees it. Return NULL on
+ * failure.
+ */
 static char *read_source_file(size_t *out_len)
 {
     char buf_path[MAX_PATH];
@@ -147,7 +127,7 @@ static char *read_source_file(size_t *out_len)
         return NULL;
     }
     size_t n = (size_t)sz.QuadPart;
-    char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, n + 1);   /* +1 for the trailing NUL (OG size+1) */
+    char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, n + 1);   /* Reserve the trailing NUL. */
     if (!buf) { CloseHandle(h); return NULL; }
 
     size_t got = 0;
@@ -164,16 +144,10 @@ static char *read_source_file(size_t *out_len)
     return buf;
 }
 
-/* The MAP-PACKAGE LOAD GATE (map_package.c), wrapped in the same SEH
- * discipline the save shadow uses on engine memory. This runs on EVERY buffer
- * the engine is about to parse -- the engine's own json (local, published, and
- * network-downloaded maps all funnel through this one function) and our
- * swapped rawmap alike -- BEFORE the parse. A map that declares an override
- * package the running process does not have must NOT reach the engine: the
- * missing content is fatal at spawn/render (AddRenderModel throws on the NULL
- * model), not degraded. Returns 1 = pass to the engine, 0 = refuse the load.
- * A fault inside the gate passes the buffer through untouched -- vanilla
- * behavior, never a new crash. */
+/* Gate every normal or substituted map before native parsing. Missing
+ * declared content can fault during spawn/render, so return 0 to refuse it.
+ * Exceptions retain the existing pass-through fallback.
+ */
 static int mpkg_gate_guarded(const char *json)
 {
     __try {
@@ -185,11 +159,9 @@ static int mpkg_gate_guarded(const char *json)
     }
 }
 
-/* Strip the delivery payload, guarded like the gate itself.
- *
- * Returns a HeapAlloc'd stripped buffer (caller frees) or NULL meaning "use the original". A
- * fault in here is not allowed to change what the engine parses: on a fault we return NULL and
- * the original buffer is used, which is exactly today's behaviour. */
+/* Strip package delivery variables. Return an owned process-heap buffer, or
+ * NULL to retain the original on no change or failure.
+ */
 static char *mpkg_strip_guarded(const char *json)
 {
     __try {
@@ -202,18 +174,11 @@ static char *mpkg_strip_guarded(const char *json)
     }
 }
 
-/* Everything that has to happen to a map buffer between the gate and the parse.
- *
- * The navigation table is rebuilt FROM EMPTY here, on every buffer the engine is
- * about to parse, because that is what stops a map with no bake from inheriting
- * the previous map's platforms -- the worst silent failure this feature permits.
- * It is built BEFORE either strip, from the bytes the map arrived in.
- *
- * Then both delivery envelopes come out: packages first, navigation second. A
- * strip that declines returns NULL and the previous buffer is used, so the two
- * chain without either one being able to lose the other's work.
- *
- * Returns a HeapAlloc'd buffer (caller frees) or NULL meaning "use the original". */
+/* Prepare the chosen JSON before native parsing: migrate markers, rebuild
+ * map-scoped navigation state, then strip package and navigation envelopes.
+ * Each failed strip retains the preceding buffer. Returns an owned process-
+ * heap buffer or NULL to use the original.
+ */
 static char *prepare_map_buffer(const char *json)
 {
     char *pkg, *nav, *migrated;
@@ -244,16 +209,14 @@ static char *prepare_map_buffer(const char *json)
     return nav;
 }
 
-/* The detour. Same prototype as the engine target. When armed + a source reads, call the engine
- * original through the trampoline with OUR buffer as arg0; else pass the engine's json through.
- * Either way the chosen buffer passes the map-package gate first; a refused load returns 0 (the
- * same "failed parse" contract the engine's callers already handle as a clean bounce). */
+/* Use a readable armed source or the engine JSON. Both pass the package gate;
+ * refusal returns the native parse-failure value, 0.
+ */
 static int sh_deser_detour(const char *json, void *out_map)
 {
     if (g_deser_orig == NULL) return 0;   /* defensive: should never happen once installed */
 
-    /* armed = explicit-arm (sh_rawmap_swap_arm) OR the TEST flag-file is present. The flag-file is the
-     * test harness's no-console arm trigger; the explicit gate is the production-style arm. Either arms. */
+    /* The shared predicate includes the explicit switch and test flag. */
     int flag_armed = 0;
     if (rawmap_armed(&flag_armed)) {
         size_t len = 0;
@@ -276,11 +239,11 @@ static int sh_deser_detour(const char *json, void *out_map)
                 int rc = g_deser_orig(prepared ? prepared : ours, out_map);
                 InterlockedIncrement(&g_swap_complete_count); /* only after the substituted parse returns */
                 if (prepared) HeapFree(GetProcessHeap(), 0, prepared);
-                HeapFree(GetProcessHeap(), 0, ours);     /* OG frees its substitute buffer too */
+                HeapFree(GetProcessHeap(), 0, ours);
                 return rc;
             }
         }
-        /* armed but no readable source -> fall through to a vanilla load (OG bVar2==false). */
+        /* Unreadable substitute: use the engine input. */
     }
     if (!mpkg_gate_guarded(json)) return 0;   /* refused: engine json never parsed */
     {
@@ -302,10 +265,9 @@ int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok)
         return 0;
     }
     if (!deser_status_ok) {
-        /* Hook-tolerant fallback resolve (SIG_OK_HOOKED): the live prologue is already a detour (e.g.
-         * an external instrumentation tool has hooked this fn during testing). Installing our detour over
-         * that would steal detour bytes, not the real prologue -> corruption. Refuse; coexistence with an
-         * existing hook is handled at test time. */
+        /* Refuse an already-hooked prologue; its detour bytes cannot be
+         * stolen as native instructions.
+         */
         backend_log("B1: rawmap LOAD-swap SKIPPED -- DeserializeFromJson resolved via hook-tolerant "
                     "fallback (prologue already hooked); not installing over an existing detour");
         return 0;
@@ -345,32 +307,17 @@ int sh_rawmap_swap_arm(int on)
     return on ? 1 : 0;
 }
 
-/* Is the LOAD-swap currently armed? Reports the EXPLICIT arm only.
- *
- * Deliberately NOT the same predicate the swap itself uses: that one is
- * `explicit_armed || flag_file_present()`, because the flag-file is a test
- * stand-in that can arm the swap without anyone having said so. A caller
- * asking "is it on" wants the state a person set and can unset -- reporting
- * the file-backed arm here would show ON for a control that turning off does
- * not clear.
- *
- * Exported so a caller can read it BY NAME. `g_gate` is file-static, so the
- * alternative is an address that moves on every rebuild. */
+/* Expose the explicit control state by name. The test flag is excluded
+ * because turning the control off does not remove it.
+ */
 int sh_rawmap_swap_is_armed(void)
 {
     return (InterlockedCompareExchange(&g_gate, 0, 0) != 0) ? 1 : 0;
 }
 
-/* Whether the swap WILL fire -- the explicit gate OR the test flag-file, which
- * is what the detour itself decides on.
- *
- * Separate from sh_rawmap_swap_is_armed on purpose. That one answers "is the
- * control a person set turned on", and deliberately hides the flag-file so it
- * cannot report ON for something turning the control off would not clear. This
- * one answers "will the detour substitute a buffer", which is the question a
- * tool has to ask before it calls the function we detour: the daemon's
- * engine-direct codec oracle calls idSnapMap::DeserializeFromJson directly, and
- * doing that while the swap will fire faults inside the engine. */
+/* Expose the effective arm predicate for engine-direct callers. Calling the
+ * codec while substitution is enabled can parse the wrong buffer.
+ */
 int sh_rawmap_swap_will_fire(void)
 {
     return rawmap_armed(NULL) ? 1 : 0;
@@ -396,29 +343,12 @@ unsigned long sh_rawmap_swap_complete_count(void)
     return (unsigned long)InterlockedCompareExchange(&g_swap_complete_count, 0, 0);
 }
 
-/* ==== merged: SAVE shadow (was rawmap.c) ==== */
+/* Save processing. */
 
-/* rawmap.c -- see rawmap.h. The rawmap SAVE shadow (port of OG FUN_180023e60, the
- * INVERSE of the LOAD swap rawmap.c).
- *
- * Detours idSnapMap::SerializeToJson(idSnapMap* map, idStr* out, uint8 compact). On an ARMED save our
- * detour FIRST calls the engine ORIGINAL (via the trampoline) so the engine's own serializer fills the
- * out-idStr `out` -- the real save proceeds untouched -- and THEN reads out.len/out.data and mirrors those
- * bytes to %LOCALAPPDATA%\snapmap-plus\rawmap.json. The just-saved map thus becomes a reusable rawmap (the
- * inverse of the LOAD swap, which substitutes rawmap.json INTO a load). See the header for the full RE.
- *
- * ARMED means the same `rawmap_armed()` the LOAD swap uses -- the shadow is the save half of one switch,
- * not an always-on mirror. The engine's own serialize is never gated; only the copy to disk is.
- *
- * `sh_pretty_on` re-lays-out the bytes on their way to disk (json_pretty.h). Same reasoning as the arm:
- * the cvar governs the rawmap this project writes, so it applies where those bytes are chosen -- HERE --
- * and not to the engine's out-idStr, which is what the player's own save is written from.
- *
- * Why this is safe to slot in front of the engine fn: the detour has the EXACT prototype of the target
- * (void(idSnapMap*, idStr*, uint8)), so the stolen-prologue trampoline preserves the engine's calling
- * convention; we change nothing about the serialize itself -- we only READ the engine's output idStr and
- * write a copy to disk. Every file op is failure-tolerant and the WRITE happens AFTER the real save has
- * completed, so a shadow failure degrades to a vanilla save, never a crash and never a corrupted save.
+/* Call native SerializeToJson and preserve its bool result.
+ * Package/navigation embedding may replace the output JSON before the caller
+ * consumes it. Armed mirroring writes a separate disk copy; pretty formatting
+ * affects that copy only.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -444,32 +374,15 @@ unsigned long sh_rawmap_swap_complete_count(void)
  * These 20 bytes are exactly the SerializeToJson signature's fixed prefix in the sig DB. */
 #define SAVE_STOLEN 20
 
-/* idStr field offsets (DIRECT: the OG decompile of
- * FUN_180023e60 reads *(int*)(out+8)=len and *(void**)(out+0x10)=data; the reference impl IDSTR_LEN_OFF/DATA_OFF). */
+/* Native idStr length and data-pointer offsets. */
 #define IDSTR_LEN_OFF   0x08   /* int  len  (character count, excl NUL) */
 #define IDSTR_DATA_OFF  0x10   /* char* data (inline baseBuffer for short strings, else heap) */
 
-/* The engine target's prototype: bool SerializeToJson(idSnapMap* map, idStr* out, uint8 compact). The
- * out-idStr is arg1 (RDX); the JSON lands there after the call (serialize-to-json-rva.md).
- *
- * IT RETURNS A BOOL IN AL, AND THE ONLY CALLER CONSUMES IT [DIRECT, decoded from the pinned build].
- * At the sole call site (the save-snapshot function 0x59D2F0, +0x54) the bytes immediately after the
- * `call` are:
- *     0F B6 D8            MOVZX EBX,AL        ; latch the return value
- *     48 8D 4C 24 30      LEA   RCX,[RSP+0x30]
- *     E8 DA 08 F8 FF      CALL  <idStr dtor>
- *     0F B6 C3            MOVZX EAX,BL        ; and return it as the snapshot's own result
- * so AL IS the save's success flag: a zero there aborts the save with no error, no log and no file.
- *
- * This was typed `void` until 2026-09-01, which made the detour's own last-executed call decide the
- * save's fate. With the shadow DISARMED (the default) the final call before returning was
- * GetFileAttributesA inside rawmap_armed() -> flag_file_present(), whose miss returns 0 -- so every
- * save reported FAILURE, the editor kept the map dirty, re-prompted for a name on exit, and the map
- * never appeared in My Maps. With the shadow ARMED the trailing shadow work happened to leave AL
- * non-zero, which is why `sh_rawmaps_on` "fixed" saving -- by luck, not by design.
- *
- * The detour must therefore latch the engine's verdict and return THAT on every exit path. Nothing
- * this file does after the original returns may be allowed to speak for the engine. */
+/* SerializeToJson returns bool in AL, with output idStr in RDX. The pinned
+ * save-snapshot caller at 0x59D2F0+0x54 consumes AL with MOVZX EBX,AL.
+ * Capture and return that byte on every path; declaring this hook void lets
+ * later calls overwrite the save verdict.
+ */
 typedef unsigned char (*serialize_fn_t)(void *map, void *out_idstr, unsigned char compact);
 
 static serialize_fn_t g_ser_orig = NULL;   /* the trampoline -> the real engine SerializeToJson */
@@ -488,15 +401,12 @@ int sh_rawmap_snapshot(void *editor_serializer, void *map, void *out_idstr)
 static volatile LONG     g_shadow_count = 0;
 static volatile LONGLONG g_last_bytes   = 0;
 
-/* Shadow destination. Default matches the LOAD swap's source (%LOCALAPPDATA%\snapmap-plus\rawmap.json)
- * so a save-then-load round-trips (the OG mirrored to %USERPROFILE%\snaphak\rawmap.json). The test
- * harness may override via sh_rawmap_save_set_dest. */
+/* Mirror destination override; the default matches the load source. */
 static char g_dest_path[MAX_PATH] = {0};
 
 static void default_dest_path(char *out, size_t cap)
 {
-    /* OG: SHGetFolderPathA(CSIDL_PROFILE) + "\snaphak\rawmap.json" (the shared path builder FUN_180023780);
-     * ours lives in the consolidated %LOCALAPPDATA%\snapmap-plus\ data root. */
+    /* Use the shared application data root. */
     char base[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base)))
         _snprintf_s(out, cap, _TRUNCATE, "%s\\snapmap-plus\\rawmap.json", base);
@@ -531,16 +441,13 @@ static unsigned long long write_shadow(const char *data, size_t len)
         total += wr;
     }
     CloseHandle(h);
-    return (total == len) ? total : 0;   /* a short write -> report failure (don't leave a partial shadow) */
+    return (total == len) ? total : 0;   /* Report a short write as failure. */
 }
 
-/* sh_pretty_on: lay the engine's one-line JSON out over indented lines for the shadow copy. Returns a
- * fresh heap buffer (caller HeapFrees) + *out_len, or NULL to mean "write the engine bytes unchanged" --
- * which covers both a refusal from json_pretty (see its header: it fails closed rather than truncate)
- * and an allocation failure. NULL is never an error worth failing the shadow over: an unreadable rawmap
- * still loads, so the layout is the part we drop, never the write.
- *
- * Reads `data`, which is the engine's out-idStr buffer -- the caller keeps this inside its SEH guard. */
+/* Produce an owned pretty-printed copy, or NULL to keep the engine bytes. The
+ * caller guards reads of the engine-owned source. Formatting refusal never
+ * suppresses the mirror write.
+ */
 static char *pretty_copy(const char *data, size_t len, size_t *out_len)
 {
     size_t need = json_pretty(data, len, NULL, 0);   /* pass 1: measure (no store) */
@@ -548,8 +455,7 @@ static char *pretty_copy(const char *data, size_t len, size_t *out_len)
     if (need == 0) return NULL;
     buf = (char *)HeapAlloc(GetProcessHeap(), 0, need);
     if (buf == NULL) return NULL;
-    if (json_pretty(data, len, buf, need) != need) { /* pass 2: store. Deterministic -- a mismatch is impossible
-                                                     * unless the source moved under us; treat it as a refusal. */
+    if (json_pretty(data, len, buf, need) != need) { /* Refuse if measured and written lengths disagree. */
         HeapFree(GetProcessHeap(), 0, buf);
         return NULL;
     }
@@ -580,8 +486,7 @@ void sh_rawmap_embed_install(const void *module_base)
         backend_log("MPKG: embed-on-save DARK -- no module base to resolve the idStr assignment");
         return;
     }
-    /* Resolved independently and never guessed: this writes into the engine's out-idStr on the
-     * save path, so a wrong address would corrupt a player's map rather than merely fail. */
+    /* Resolve assignment before writing engine-owned save output. */
     for (i = 0; BACKEND_ENGINE_SIGNATURES[i].name != NULL; i++) {
         sig_result ra;
         sig_status st;
@@ -595,8 +500,9 @@ void sh_rawmap_embed_install(const void *module_base)
         : "MPKG: embed-on-save DARK -- idStr assignment unresolved; saves are unchanged");
 }
 
-/* Build the map JSON with every used package embedded, or NULL for "leave the save alone".
- * Pure: reads the engine's bytes, touches no engine state. */
+/* Build JSON with detected package payloads, or NULL for no replacement.
+ * Reads package files but does not mutate engine objects.
+ */
 static char *embed_used_packages(const char *json, size_t len, size_t *out_len)
 {
     sh_mpkg_used used[EMBED_MAX_PACKAGES];
@@ -648,11 +554,9 @@ static char *embed_used_packages(const char *json, size_t len, size_t *out_len)
     return cur;
 }
 
-/* Replace the engine's out-idStr with `body`, through the engine's own assignment.
- *
- * The source idStr is built on the stack with a zeroed flags word, which declines the assign's
- * steal/swap fast path -- so the engine COPIES our bytes and nothing of ours is aliased or
- * freed by it, and nothing of the engine's is aliased by us. */
+/* Assign body through the native idStr helper. A zero flags word disables
+ * stealing, so the engine copies the temporary bytes.
+ */
 static int replace_out_idstr(void *out_idstr, const char *body, size_t body_len)
 {
     uint8_t src[IDSTR_SIZE];
@@ -683,8 +587,9 @@ static int read_out_idstr(void *out_idstr, const char **data, int *len)
     return *data != NULL && *len > 0;
 }
 
-/* The save-path entry point. Everything is best-effort: the engine's save has already completed
- * correctly by the time this runs, and any failure here simply leaves it as it was. */
+/* Best-effort package embedding into serialized output before the save caller
+ * consumes it.
+ */
 static void mpkg_embed_on_save(void *out_idstr)
 {
     const char *data = NULL;
@@ -714,29 +619,9 @@ static void mpkg_embed_on_save(void *out_idstr)
     HeapFree(GetProcessHeap(), 0, body);
 }
 
-/* Put the current map's baked navigation back into the bytes being saved.
- *
- * The shards were stripped on load, so without this a load-then-save with no
- * fresh bake would silently discard the author's navigation. navmesh.c holds
- * every payload that survived delivery -- including ones this client refused to
- * SERVE -- precisely so a save cannot destroy work a different client can use. */
-/* Re-read the author's marked volumes from the map being SAVED.
- *
- * Regions were originally captured only on the deserialize funnel, which is
- * wrong for the way authoring actually happens: mark some volumes in the editor,
- * press Play, and no map load occurs in between -- the engine serializes the
- * live map and builds from that. The region table would still hold whatever the
- * map carried when it was last LOADED, so a volume marked this session simply
- * did not exist as far as navigation was concerned, and the author would be told
- * "no volume in this map is marked" moments after ticking one.
- *
- * This covers SAVE. It does NOT cover Play-from-the-editor: pressing Play does
- * not serialize the map at all -- verified live, this hook never runs on that
- * transition -- so the editor builds the play session straight from its live map
- * object. A volume marked and then played in the same session therefore still
- * gets nothing until the map is saved and reloaded. Closing that needs the marks
- * read from the live editor entities rather than from map JSON, which is a
- * different mechanism than anything here. */
+/* Refresh marked volumes from save output. Editor previews and the final Play
+ * snapshot separately capture unsaved edits through nav_bake.
+ */
 static void nav_regions_on_save(void *out_idstr)
 {
     const char *data = NULL;
@@ -768,67 +653,51 @@ static void nav_embed_on_save(void *out_idstr)
     HeapFree(GetProcessHeap(), 0, body);
 }
 
-/* The detour. Same prototype as the engine target. Call the engine ORIGINAL first (the real save fills
- * `out`), then read `out` and mirror it to rawmap.json. The shadow write is best-effort + fully guarded:
- * the real save has already happened by the time we touch disk. */
+/* Serialize, embed delivery payloads, then optionally mirror output. Preserve
+ * the native bool result on every return.
+ */
 static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char compact)
 {
     if (g_ser_orig == NULL) return 0;   /* defensive: should never happen once installed */
 
-    /* 1) the engine's own serialize -- the real save, untouched. This runs UNCONDITIONALLY and BEFORE the
-     *    gate check below: the player's save must complete identically whether the shadow is on or off.
-     *
-     *    LATCH THE VERDICT IMMEDIATELY. `rc` is the save's success flag (see the typedef comment): the
-     *    caller reads AL the instant we return, so every exit below returns `rc` and nothing else. The
-     *    shadow is a bystander to the save -- it may never decide whether the save succeeded. */
+    /* Call native serialization unconditionally and capture its bool result
+     * before any helper can clobber AL.
+     */
     const unsigned char rc = g_ser_orig(map, out_idstr, compact);
     if (g_snapshot_depth) return rc;
 
-    /* 1b) embed the packages this map uses, so a player who does not have them can install them
-     *     from the map itself. This runs BEFORE the shadow so the mirrored copy matches what was
-     *     actually saved, and it is independent of the rawmaps switch: it is a product feature,
-     *     not a debugging aid. A map that uses no packages is untouched. */
+    /* Embed used packages before mirroring; independent of the rawmap switch. */
     mpkg_embed_on_save(out_idstr);
 
-    /* 1c) ...and the navigation this map arrived with, or was baked with this
-     *     session. Runs AFTER the package embed so it operates on the bytes that
-     *     are actually being saved, and like it, is independent of the rawmaps
-     *     switch: losing an author's bake on an ordinary save is not a debugging
-     *     aid, it is data loss. */
+    /* Restore retained navigation shards after package embedding so ordinary
+     * saves preserve delivered payloads.
+     */
     nav_embed_on_save(out_idstr);
 
-    /* 1d) refresh the marked-volume table from what is being saved, so a volume
-     *     ticked in this session takes effect on the very next Play instead of
-     *     waiting for a map reload. */
+    /* Refresh navigation regions from the final serialized map. */
     nav_regions_on_save(out_idstr);
 
-    /* 2) the shadow is the SAVE half of the rawmaps switch, so it obeys the same arm the LOAD swap does.
-     *    Ungated, this overwrote rawmap.json on every map save even with rawmaps off -- silently discarding
-     *    a rawmap the user had put there deliberately. Checked AFTER the real save so the gate can never
-     *    affect what the engine writes. */
+    /* Gate only the disk mirror; load substitution uses the same predicate. */
     if (!rawmap_armed(NULL)) return rc;
 
     if (out_idstr == NULL) return rc;
 
-    /* 2) read the engine's output idStr (len@+0x8, data@+0x10) under SEH (the engine fills these; a layout
-     *    surprise must not fault the save path) and mirror it to disk. */
+    /* Read output idStr fields under SEH before copying engine-owned memory. */
     const char *data = NULL;
     int         len  = 0;
     __try {
         len  = *(int *)((unsigned char *)out_idstr + IDSTR_LEN_OFF);
         data = *(const char **)((unsigned char *)out_idstr + IDSTR_DATA_OFF);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return rc;   /* unreadable out-idStr -> skip the shadow (the real save already completed) */
+        return rc;   /* Unreadable output: skip mirroring and preserve the native result. */
     }
     if (data == NULL || len <= 0) return rc;
 
-    /* 3) sh_pretty_on chooses the LAYOUT of the copy. Read live per save (it is a cvar a user flips
-     *    mid-session, not a startup choice) and default OFF, which is also what a failed cvar register
-     *    reports -- so an engine we could not register into simply writes what it always wrote. */
+    /* Read the current pretty switch for each mirror; default off. */
     int pretty = sh_cvar_value_int(B2_CVAR_SH_PRETTY_ON, 0);
 
-    const char *body     = data;                     /* what actually goes to disk ... */
-    size_t      body_len = (size_t)len;              /* ... the engine's bytes, or our re-laid-out copy */
+    const char *body     = data;                     /* mirror bytes */
+    size_t      body_len = (size_t)len;              /* engine output or formatted copy */
     char       *shaped   = NULL;
 
     if (pretty) {
@@ -875,10 +744,7 @@ int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok)
         return 0;
     }
     if (!serialize_status_ok) {
-        /* Hook-tolerant fallback resolve (SIG_OK_HOOKED): the live prologue is already a detour (e.g.
-         * an external instrumentation tool has hooked this fn during testing). Installing our detour over
-         * that would steal detour bytes, not the real prologue -> corruption. Refuse; coexistence with an
-         * existing hook is handled at test time (same conservative policy as the LOAD swap). */
+        /* Refuse an already-hooked prologue, matching the load detour policy. */
         backend_log("B1: rawmap SAVE shadow SKIPPED -- SerializeToJson resolved via hook-tolerant "
                     "fallback (prologue already hooked); not installing over an existing detour");
         return 0;

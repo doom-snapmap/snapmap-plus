@@ -1,11 +1,5 @@
-/* Snapmap+ site — shared by the landing page, the changelog, the 404, and the rendered
-   markdown pages (_layouts/guide.html).
-
-   Design language: the SnapMap editor's own world. Deep blue-black editor slate, the
-   logic-wire cyan SnapMap uses for signal paths, and DOOM's argent orange reserved for
-   energy — downloads, calls to action, the "+" itself. Chamfered chips and corner
-   brackets echo the in-game HUD; section headings carry a node port, wired in like a
-   logic chip. */
+/* Shared website styles. Slate surfaces use cyan for navigation and orange for
+ * primary actions; guide and Community pages use the same tokens. */
 
 :root {
   /* surfaces */
@@ -568,14 +562,7 @@ section.deck { background: var(--deck); border-top: 1px solid var(--line-soft); 
 .community p { color: var(--muted); max-width: 44em; margin: 0 auto 14px; text-wrap: pretty; }
 .community .cta-row { justify-content: center; margin-top: 26px; }
 
-/* ---------- connect (where to find us) ----------
-
-   Each destination is drawn as a logic chip from the hero graph: an input port wired
-   into the name, an output port on the right edge where the signal leaves. The chamfered
-   outline is a two-layer clip-path — the element paints the border color, the absolutely
-   positioned ::before paints the panel fill one pixel inside it — because a plain border
-   would be sliced open by the chamfer. Accent is per-chip: cyan for the code, argent for
-   the people. */
+/* Destination cards use nested clip-path layers for a one-pixel chamfered border. */
 
 /* qualified with `section` so it outranks `section.deck`'s border and `section`'s padding */
 section.connect { padding: 72px 0 84px; border-bottom: none; }
@@ -817,8 +804,7 @@ section.connect { padding: 72px 0 84px; border-bottom: none; }
 body { min-height: 100vh; display: flex; flex-direction: column; }
 body > main { flex: 1 0 auto; }
 
-/* One button shape for the whole section — the navbar Download recipe: display face,
-   uppercase, chamfered fill, NO border, NO glow. */
+/* Community actions share the navbar button shape. */
 .community-page .btn, dialog.smp-modal .btn {
   display: inline-flex;
   align-items: center;
@@ -1698,9 +1684,7 @@ dialog.smp-modal[open] { animation: modal-in 0.18s cubic-bezier(0.22, 1, 0.36, 1
 .guide-doc blockquote p { margin: 0; }
 
 .guide-doc hr { border: 0; border-top: 1px solid var(--line-soft); margin: 44px 0; }
-/* Section boundaries are `---` immediately before an `## h2`, and the h2 draws its own
-   border-top divider — so the hr would be a redundant second line. Drop it; the heading's
-   border is the single divider. */
+/* The following h2 draws the section divider; hide the preceding redundant rule. */
 .guide-doc hr:has(+ h2) { display: none; }
 
 .guide-doc ul, .guide-doc ol { padding-left: 24px; }

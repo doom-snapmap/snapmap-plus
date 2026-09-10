@@ -1,13 +1,9 @@
-/* package_requirements.c -- declarative, allowlisted package runtime policy.
- *
- * Downloaded override packages must not become arbitrary console-script
- * launchers. This service accepts only product-audited cvar/value pairs from
- * restart-only package requirement files, waits until the engine has finished
- * startup declaration parsing, then queues the idempotent settings once.
- *
- * The initial allowlist contains the two cut-content blacklist gates. Applying
- * them during load_state==2 has historically made cold boot fragile, so the
- * RUNNING gate is a safety boundary, not a convenience delay. */
+/* Read allowlisted package cvar/value pairs; refuse arbitrary console text.
+ * Apply each snapshot once. Polling
+ * waits for RUNNING; the decl server also applies synchronously after startup
+ * parsing, before resource promotion. Both paths avoid changing gates while
+ * native declaration parsing is active.
+ */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -23,10 +19,9 @@
 #define PR_MAX_FILES            64u
 #define PR_MAX_FILE_BYTES       (64u * 1024u)
 #define PR_MAX_TOTAL_BYTES      (256u * 1024u)
-/* The load-state word's RVA on the pinned Vulkan build. AUDIT AND RE-DERIVATION ONLY: the address this
- * service reads comes from glb_resolve("load_state"), which signs the code that computes it. DOOM's two
- * executables place their data globals nearly 0x1000000 apart, so this literal is meaningless on the
- * OpenGL image and must never be read there. */
+/* Pinned Vulkan RVA for audit only. Read the signature-resolved load_state
+ * global; this address does not apply to OpenGL.
+ */
 #define PR_LOAD_STATE_PINNED_RVA 0x6dde198u
 #define PR_LOAD_STATE_RUNNING   3
 
@@ -61,8 +56,7 @@ static pr_allowed g_allowed[] = {
 
 static volatile LONG g_state = PR_STATE_NEW;
 static const uint8_t *g_module_base;
-/* The resolved load-state word, or NULL until it resolves (or never, on a build we cannot locate it on).
- * `g_load_state_reported` keeps the refusal to one log line instead of one per poll. */
+/* Resolved load-state word, or NULL. Report an unresolved gate once. */
 static const uint8_t *g_load_state_at;
 static int g_load_state_reported;
 static void *g_cmdsys;
@@ -70,20 +64,10 @@ static pr_buffer_command_fn g_buffer_command;
 static size_t g_requirement_count;
 static size_t g_manifest_count;
 
-/* Re-capture and re-apply the package requirements after a mid-session install.
- *
- * WHY THIS IS REQUIRED, NOT OPTIONAL. The cut-content blacklist matcher refuses a name BEFORE
- * the type parser ever sees it, so a package made of cut content (the Cyberdemon is listed in
- * both blacklists) simply does not load while the gates are up. Measured 2026-08-27: with the
- * gates still up, a runtime registration pass refused 296 of 296 candidates -- one md6Def's
- * native DeclFind returned null and the service treats that as terminal. Applying the two
- * cvars first took REFUSED to 0. Registering identities whose bytes the blacklist will refuse
- * is worse than not registering them at all.
- *
- * Unlike the override/decl tables, nothing here is memory the engine retains -- these are
- * queued cvar commands -- so the state can simply be reset rather than retired.
- *
- * Reuses the cmd-system pointers captured at install. Returns 1 when the settings are live. */
+/* Recapture requirements after a runtime package install, reusing the
+ * captured command system. These are queued settings, not engine-retained
+ * allocations, so state can be reset. Returns 1 when applied.
+ */
 int sh_package_requirements_rearm(const char *data_root, void *execute_command_buffer,
                                   int user_layer_enabled)
 {
@@ -99,17 +83,9 @@ int sh_package_requirements_rearm(const char *data_root, void *execute_command_b
         return 0;
     if (!sh_package_requirements_apply_now(execute_command_buffer)) return 0;
 
-    /* DRAIN, ALWAYS, and do not infer that someone else did.
-     *
-     * `apply_now` reports success when the settings are already applied -- including when the
-     * load-state RUNNING poll got there first, which QUEUES the cvars without draining them
-     * because at boot something else drains shortly after. On a runtime re-arm nothing does,
-     * so the caller was told the gates were live while they sat in the command buffer, and
-     * the decl pass then parsed every candidate against a blacklist that was still up. That
-     * is the 297-REFUSED failure: not a missing wait, a missing drain.
-     *
-     * Draining an already-empty buffer is harmless, so this is unconditional rather than
-     * conditional on having won that race. */
+    /* Always drain: a prior poll may have queued settings without executing
+     * them. Runtime registration must see their values immediately.
+     */
     if (execute_command_buffer) {
         __try {
             ((pr_execute_buffer_fn)execute_command_buffer)(g_cmdsys);
@@ -208,12 +184,7 @@ static int pr_admit(const char *kind, const char *name, const char *value)
             g_allowed[i].requested = 1;
             g_requirement_count++;
         }
-        /* Several packages may need the same setting -- the Cyberdemon and any
-         * other cut-content package both need the blacklists off. The first
-         * request queues the command and the rest compose into it, so the
-         * command is issued exactly once and no package has to know about the
-         * others. A DIFFERENT value for an allowlisted name is refused above
-         * rather than resolved by ordering. */
+        /* Combine identical requests; reject conflicting values before queueing. */
         return 1;
     }
     return 0;
@@ -248,10 +219,7 @@ static int pr_parse_file(unsigned char *body, size_t length)
     return 1;
 }
 
-/* The package set is 26 KB and these captures already carry large frames, so it
- * lives in static storage rather than on the stack: putting it on the stack
- * tripped the /GS guard and terminated DOOM with 0xC0000409. Each capture is a
- * guarded one-shot on a single thread, so a shared buffer is safe here. */
+/* Static scratch avoids a large loader-stack frame. Capture is serialized. */
 static sh_package g_packages[SH_PACKAGES_MAX];
 
 static int pr_capture(const char *data_root)
@@ -267,8 +235,7 @@ static int pr_capture(const char *data_root)
 
     if (!data_root || !data_root[0])
         return pr_fail("requirements root path is invalid or too long");
-    /* Every installed package may request its own restart-only settings; they
-     * are gathered into one set and still pass the same allowlist. */
+    /* Merge each package's requirements through the shared allowlist. */
     if (!sh_packages_enumerate(data_root, g_packages, SH_PACKAGES_MAX, &package_count))
         return pr_fail("the overrides package directory could not be enumerated completely");
 
@@ -337,8 +304,7 @@ static int pr_capture(const char *data_root)
         if (!pr_parse_file(body, length)) {
             char detail[MAX_PATH + 128];
             HeapFree(GetProcessHeap(), 0, body);
-            /* With several packages installed, "a bad row" without the file is
-             * not actionable: the author has to be told which package asked. */
+            /* Include the source file so malformed rows can be located. */
             _snprintf_s(detail, sizeof(detail), _TRUNCATE,
                         "unsupported or malformed requirement row in %s",
                         files[i].path);
@@ -364,11 +330,9 @@ static int pr_read_load_state(int *value)
     }
 #endif
     if (!g_module_base) return 0;
-    /* Locate the word by signing the code that reads it. Cached after the first success, and dllmain
-     * resolves the whole table at install, so this is a lookup rather than a scan. A build where it does
-     * not resolve reports "cannot read the load state", which holds the RUNNING gate shut: the audited
-     * cvars are restart-only conveniences, and not applying them is a delay, whereas reading a pinned
-     * address on the wrong executable is a wild read of whatever happens to live there. */
+    /* Resolve load_state through the globals table. On failure, keep the
+     * RUNNING gate closed rather than reading a build-specific address.
+     */
     if (!g_load_state_at) {
         g_load_state_at = (const uint8_t *)glb_resolve(g_module_base, "load_state", NULL);
         if (!g_load_state_at) {
@@ -395,11 +359,9 @@ int sh_package_requirements_install(const char *data_root,
                                     int user_layer_enabled)
 {
     char line[256];
-    /* Stash the engine pointers FIRST, before any early return can skip them. A launch whose
-     * packages carry no requirements still needs them retained, because a package installed
-     * LATER will -- and sh_package_requirements_rearm has no other way to reach the command
-     * system. Assigning these only on the success path made the runtime re-arm refuse with
-     * "the command system was never captured". */
+    /* Retain command pointers even for an empty launch snapshot; later
+     * package installs may need them.
+     */
     if (module_base) g_module_base = module_base;
     if (cmdsys) g_cmdsys = cmdsys;
     if (buffer_command) g_buffer_command = (pr_buffer_command_fn)buffer_command;
@@ -457,9 +419,9 @@ static void pr_apply(pr_execute_buffer_fn execute, const char *when)
     }
     __try {
         g_buffer_command(g_cmdsys, command);
-        /* Buffering only appends text. Nothing drains the command buffer between the decl server's
-         * publication point inside idCommonLocal::Init and the engine's whole-registry promotion, so
-         * that path must run the engine's own drain itself or the gates land far too late. */
+        /* Publication must drain explicitly: no engine drain intervenes
+         * before whole-registry promotion.
+         */
         if (execute) execute(g_cmdsys);
         queued = 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -486,25 +448,11 @@ void sh_package_requirements_poll(void)
     pr_apply(NULL, "at load-state RUNNING");
 }
 
-/* THE STARTUP-FRAGILITY BOUNDARY, RESTATED. The RUNNING gate above exists because applying the
- * blacklist gates while the engine was still parsing startup declarations made cold boot fragile.
- * That hazard is about being MID-PARSE, not about the load-state number.
- *
- * The window this entry point is called from is quiescent by measurement, not by assumption. A live
- * capture (Frida interceptor on the promotion, 2026-08-26) timed the boot: the last of the engine's
- * 64 startup decl loads served through our own provider completed 3.637s BEFORE the engine's
- * whole-registry resource promotion (0x1801830, called from idCommonLocal::Init at 0x17C6479), and
- * load-state RUNNING arrived 0.821s AFTER it. The decl server publishes in that gap. Startup decl
- * parsing is over; nothing else is in flight.
- *
- * Applying here is also the only ordering that still means anything: the gates are read by the
- * blacklist matcher (0x31D0B0) inside idResourceList::LoadResource (0x1801380) and the static
- * resource-handle resolve (0x18008F0), both of which refuse a blacklisted name before the type
- * parser ever sees it. If they are not live before the decl server publishes, cut content does not
- * load at all.
- *
- * `execute_command_buffer` is the engine's own drain (CmdExecuteBuffer, 0x1AA46B0). Passing NULL
- * degrades this to a plain buffer, which is exactly the pre-existing RUNNING behaviour. */
+/* Apply at the decl server's quiescent pre-promotion boundary, after startup
+ * parsing. Blacklist gates are checked before type parsing, so they must be
+ * live before publication. A NULL drain callback only queues settings,
+ * matching poll behaviour.
+ */
 int sh_package_requirements_apply_now(void *execute_command_buffer)
 {
     LONG state = InterlockedCompareExchange(&g_state, PR_STATE_ARMED, PR_STATE_ARMED);

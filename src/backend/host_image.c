@@ -5,7 +5,7 @@
 
 #include "host_image.h"
 
-/* The two shipped DOOM 2016 executables. Order is irrelevant; both are equally supported. */
+/* Accepted host names; the first also identifies the Vulkan RVA fallback gate. */
 static const char *const k_doom_names[] = {
     "DOOMx64vk.exe",   /* Vulkan  */
     "DOOMx64.exe",     /* OpenGL  */
@@ -37,8 +37,7 @@ static void resolve_once(void)
     if (InterlockedCompareExchange(&g_resolved, 1, 0) != 0)
         return;
 
-    /* Our DLL is loaded BY the game, so the process image is DOOM -- no name lookup needed
-     * to FIND it. The name is read only to refuse a non-DOOM host. */
+    /* The process image is the host; its basename gates supported executable names. */
     h = GetModuleHandleA(NULL);
     if (h == NULL)
         return;
@@ -85,8 +84,8 @@ const char *sh_host_image_name(void)
 
 int sh_host_is_pinned_rva_build(void)
 {
-    /* k_doom_names[0] is the Vulkan image, which is where every known_rva in this product
-     * was extracted from. See signatures.c for the pinned build's SHA256. */
+    /* This gate checks the Vulkan basename, not a hash or version.
+     * The extraction-build fingerprint is documented in signatures.c. */
     return sh_host_image_base() != NULL && _stricmp(g_name, k_doom_names[0]) == 0;
 }
 
@@ -94,8 +93,7 @@ int sh_host_is_vulkan(void)
 {
     if (sh_host_image_base() == NULL)
         return -1;
-    /* Decided by the loaded renderer library, not the executable name: the name tells you what
-     * was launched, this tells you what is actually driving the GPU. */
+    /* Infer the renderer from its loaded library. */
     if (GetModuleHandleW(L"vulkan-1.dll") != NULL)
         return 1;
     if (GetModuleHandleW(L"OPENGL32.dll") != NULL)
@@ -111,7 +109,7 @@ const char *sh_host_renderer_name(void)
         return cached;
     vk = sh_host_is_vulkan();
     if (vk < 0)
-        return "";          /* unresolved -- ask again later; do not cache the ignorance */
+        return "";          /* Retry until a renderer library is loaded. */
     cached = vk ? "vulkan" : "opengl";
     /* Racing callers store the same string literal, so a plain store is enough. */
     g_renderer = cached;

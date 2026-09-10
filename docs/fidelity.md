@@ -1,113 +1,49 @@
-# Fidelity — the original's quirks, what the clone reproduces, and the sanctioned divergences
+# SnapHak compatibility
 
-The clone was built to a **faithful-reproduction** bar: match the original SnapHak's observable
-behavior first — including the ugly, mislabeled, and unfinished bits — and leave *fixing* what was
-broken to a separate, later pass. That later pass happened, so several of
-the original's quirks are now **fixed** in the shipped clone rather than reproduced. This document
-records, per quirk, what the original did and what the **current** clone source actually does, so
-the two never drift apart in a contributor's mind.
+Snapmap+ preserves useful SnapHak workflows while maintaining its own frontend,
+engine integration and fault handling. This reference records compatibility
+choices contributors should retain when changing those paths.
 
-Two behaviors are deliberate divergences: the fault-shield (from the start; last section), and the
-`sh` dispatch thread (since 2026-09-07; below).
+## Preserved workflows
 
-## Still faithful (reproduced on purpose)
+- **Frontend loop:** the companion window has its own roughly 30 Hz worker
+  loop. Requests captured by WebView callbacks are issued from that loop;
+  declaration commits use the backend's main-thread transport.
+- **Save to Decl:** there is no complete class/inherit compatibility check.
+  Snapmap+ rejects known incompatible combinations, but that narrow guard does
+  not prove every accepted edit is valid.
+- **Create from selection:** the engine requires hovering an entity in the
+  selection. The frontend checks the hovered ID and reports the requirement.
+- **Prefab staging:** a loaded prefab remains available for native Ctrl+V.
+  Load / Place also requests the engine's paste action when editor state
+  permits it. Staging uses a heap that survives map transitions.
 
-### No Lua scripting
-The original has an `Editor Lua` tab (internal name `lua_scripts_page`) that is an empty widget — no
-children, no layout, no behavior; the Lua VM host behind it is dead code with no callers. The clone is
-faithful in substance: it ships **no Lua runtime** either. It does not render the empty tab (dead chrome
-isn't worth carrying); a real Lua editor is still future work.
+## Intentional differences
 
-### The manual 30 Hz think-loop
-The frontend runs its own pump — drain the work-queue, apply deferred writes, pump the window's
-messages, `Sleep(33 ms)` — rather than a framework event loop. This is faithful to the original and
-still load-bearing: the frontend's own engine-touching requests (entity reads, prefab staging, Save
-Timeline) are snapshotted off the re-entrant JS callback and issued from this one worker thread (see
-[`architecture.md`](architecture.md)). Reproduced, not modernized. Note the pump's thread is the
-frontend's **own worker**, not DOOM's main thread — since the dispatch divergence below, the SnapStack
-subcommands no longer run on it at all, and a decl-edit issued from it is marshaled onto the engine's
-thread by the `+0x290` apply slot.
+The `sh` console dispatcher executes SnapStack handlers on DOOM's main thread,
+inside the engine's command callback. SnapHak queued these handlers onto its
+UI thread because they touched Qt objects. Snapmap+'s handlers do not require
+that thread. The interface queue remains in the ABI, and its drain still runs
+the backend tick. See [threading](architecture.md#the-30-hz-manual-think-loop).
 
-### The `sh` dispatch runs SnapStack ops on the engine's thread — a sanctioned divergence
-The original's `sh` console command looks the subcommand up and **enqueues** `{handler, args}` onto
-the interface work-queue, which its frontend's UI worker thread drains — it had to, because its
-handlers touched Qt objects owned by that thread. The clone's handlers touch no thread-affine UI
-state, and calling engine decl code from that foreign worker thread is the defect behind issue #61
-(the #56/#59 crash reports), so since 2026-09-07 the clone's `sh` dispatch **executes the handler
-inline** in the engine's own command callback — on DOOM's main thread at `ExecuteCommandBuffer`, the
-decl-safe exec point. Observable behavior (arguments, toasts, counts, messages) is unchanged; only
-the executing thread differs. The work-queue and its `+0x1a0` drain remain in the ABI (the drain also
-carries the backend's per-tick hook) but ship producer-less. See
-[`backend-changes.md`](backend-changes.md) (2026-09-07) for the mechanism and history.
+`bsb` reports failed property round trips with a non-modal toast. `filtcls`
+reports the class field it filtered, rather than reusing the inherit label.
 
-### Save-to-Decl does no *full* class/inherit compatibility check
-The Entity-State "Save to Decl" commits the edited classname/inherit/displayname into the entity in
-memory and does **no full compatibility check** — matching the original (whose own guide warns
-"mismatch → crash"). The clone *does* add a narrow guard — a provably-fatal
-class+inherit pair is **refused** ("Save refused: incompatible class+inherit combination") rather
-than written, and any access violation that still slips through is caught by the fault-shield
-(below). So the faithful "no full check" stance is preserved, but the catastrophic case is fenced off.
+The backend includes a fault shield for selected engine errors and exceptions.
+Recoverable cases can return control to the editor or menu; fatal cases retain
+crash evidence. Recovery is bounded and does not make arbitrary invalid edits
+safe. See [`src/fault_shield/`](../src/fault_shield/).
 
-### Create-from-selection requires hovering a selected entity
-The engine's own `populate()` (the `+0xb0` serialize-selection body) refuses to run unless the
-editor is currently hovering an entity that's part of the selection — it prints its own message,
-`"Failed to create prefab: not hovering entity in selection."`, and returns failure rather than
-populating the temp prefab. This was initially mistaken for a clone bug (see
-[`backend-changes.md`](backend-changes.md) for the actual crash root-causes it got tangled up with)
-but is a genuine, faithfully-carried-over engine requirement, confirmed once those crashes were
-fixed. The webview UI checks for it up front (the hovered-id slot, `+0x198`) and surfaces an
-accurate "hover over an entity first" message instead of a crash or a misleading generic one.
+## Unsupported SnapHak features
 
-## Fixed (the original was wrong; the clone is now right)
+- **Lua scripting:** no Lua runtime or empty Lua tab is shipped.
+- **Render-model count overlay:** `sh_show_rmcount` is not registered.
+  `sh_debugrender dumprenderinfo` prints the count and model names. The native
+  navigation line renderer does not implement this text overlay.
+- **Dash and meathook tuning:** the six original `cs_dash_*` and `cs_mh_*`
+  movement cvars are not registered because their movement implementation is
+  absent. Add the behavior and settings together if this feature is ported.
 
-### `bsb` no longer pops `MessageBoxA("FUCK","fuckedy")`
-The original's `bsb` (bulk-set-bool) handler had a leftover debug `MessageBoxA("FUCK","fuckedy")` on
-its re-resolve-mismatch path — a development artifact that shipped. A re-resolve mismatch *is* a real
-signal (a property/value that didn't round-trip), so the clone keeps the signal but surfaces it via a
-**clean non-modal toast** ("bsb: some entities skipped …") instead of an intrusive debug box
-(`src/backend/snapstack.c`). *(Some nearby code comments still describe the faithful reproduction of the original —
-the behavior is the fixed one.)*
-
-### `filtcls` reports the correct field
-The original's `sh filtcls` (filter the stack by **classname**) reused the `filtinh` toast string and
-mislabeled its output `"… had inherit %s"`. The clone **corrects the label** — `filtcls` reports
-`"had class %s"` and `filtinh` reports `"had inherit %s"` — so the toast names the field actually
-filtered (`src/backend/snapstack.c`).
-
-## Not carried over (the original had it; the clone does not)
-
-### `snaphak_show_rmcount` — the on-screen rendermodel count
-The original registered nine cvars, and the eighth, `snaphak_show_rmcount`, drew the live count of
-active rendermodels over the game. It could do that because the original splices the engine's
-SuperScript (eventDef) API table and reads the switch from one of its own override functions each
-frame; the clone reimplements no part of that splice and has no text-overlay surface of its own, so
-there is nothing for the switch to turn on. Rather than register a name that cannot do anything, the
-clone leaves the row out (`src/backend/cvars.c`) — `sh_show_rmcount` is not a Snapmap+ cvar. The count
-itself is not lost: `sh_debugrender dumprenderinfo` prints it, followed by every model's name. Drawing
-it continuously needs a renderer hook that does not exist yet; re-add the cvar in the same change that
-adds one, not before.
-
-### The six `cs_*` movement cvars — dash and meathook tuning
-The original's other six cvars — `cs_dash_direction_multiplier`, `cs_dash_ground_velocity_multiplier`,
-`cs_dash_time_seconds`, `cs_num_dash_slices`, `cs_mh_direction_multiplier`,
-`cs_mh_movement_multiplier` — tuned the dash and meathook cheat movement it implements in its spliced
-SuperScript override functions, the same `cs_*` cluster (`cs_dash` and friends) the clone carries only
-as parked, disabled objects. The clone reimplements none of that movement code, and the names appear
-nowhere in DOOM's own binary, so there is no engine-side reader either: registering the six would
-advertise settings with nothing to multiply. As with `snaphak_show_rmcount`, the clone leaves the rows
-out (`src/backend/cvars.c`), so of the original's nine cvars it registers two: `sh_pretty_on` and
-`sh_copy_reslist_to_clipboard`. Re-add the six in the same change that ports the dash/meathook
-SuperScript cluster they tune, not before.
-
-## The original sanctioned divergence — the fault-shield
-
-The original installs two fault detours (on the engine's `Error` and `FatalError`) that each format a
-message, pop a `MessageBoxA`, and call `TerminateProcess` — destroying the engine's own recoverable
-error path and killing DOOM.
-
-The clone replaces those two kill-detours with a resident **fault-shield**: a vectored exception
-handler (`src/fault_shield/`, **compiled into the backend `XINPUT1_3.dll`**) that catches the access
-violation in DOOM's frame code, **reverts the bad edit, and shows a toast** instead of terminating the
-process. This deliberate behavioral departure from the original makes a class of
-in-editor crashes recoverable rather than fatal, and it is what makes the "no full compat check"
-stance above safe.
+The [feature inventory](capabilities.md) describes the supported surface.
+Detailed research and abandoned designs are retained in snaphak-re's findings
+system; product documentation describes maintained behavior.

@@ -1,12 +1,5 @@
-# Deploys the website (site/) to GitHub Pages.
-#
-# The site lives in site/ -- separate from docs/ (contributor documentation, not published).
-# Jekyll renders the markdown pages (the guide, the privacy policy) through site/_layouts/;
-# the HTML pages (index, changelog, 404) carry empty front matter so Jekyll pulls in the
-# shared site/_includes/header.html (the sticky nav + mobile hamburger).
-#
-# Same supply-chain rules as ci.yml: every action pinned to a full commit SHA, no secrets
-# beyond the Pages deploy token GitHub scopes to this workflow.
+# Build site/ with Jekyll and deploy it to GitHub Pages.
+# Product references in docs/ are not published. Keep actions pinned to SHAs.
 name: Deploy site
 
 on:
@@ -32,10 +25,8 @@ jobs:
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - name: Render CHANGELOG.md into the site's data
         run: |
-          # Jekyll builds with `source: ./site` and cannot read ../CHANGELOG.md, so the root
-          # file has to be brought into the Jekyll source tree. site/_data is not in the
-          # repository -- a redirect into a missing directory just fails. The page is then
-          # rendered statically, with no runtime call to the GitHub API.
+          # Stage root release notes inside the Jekyll source before rendering.
+          # Create the generated-data directory on a fresh checkout.
           set -euo pipefail
           mkdir -p site/_data
           python3 tools/changelog.py --json --out site/_data/changelog.json

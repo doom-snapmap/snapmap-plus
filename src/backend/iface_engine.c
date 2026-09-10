@@ -1,102 +1,47 @@
-/* iface_engine.c -- see iface_engine.h. The BACKEND engine-touch bodies for the UI-interface vtable
- * the LIGHT engine touches the SnapStack STORE-ops need.
- *
- * Faithful port of the reference implementation's editor bridge (the live-proven mechanism):
- *   - editor singleton  = the INLINE idSnapEditorLocal object (NOT a ptr; the OBJECT, in-place ctor
- *     0x51A8E0). A DATA global, exactly like cmdSystem/cvarSystem, so it carries no byte signature of
- *     its own; it is located by glb_resolve("editor_singleton"), which signs the code that computes the
- *     address and reads the displacement out of it. Unresolved means every editor touch below declines.
- *   - selection object  = editor+0x204d0 (ptr); ids @ sel+0x80, count @ sel+0x88; hovered @ sel+0x2c.
- *   - screen (toast)    = editor+0x21088 (ptr; Toast arg0).
- *   - loaded-map / entity array = *(editor+0x204c8); entity-ptr array @ arrObj+0x6a0, count @ arrObj+0x6a8.
- *   - entity[id] valid  = entity[id]+8 != 0; def-subobj = entity[id]+0x158.
- *   - classname (filtcls): *(ent+8)->+0x1c8->+0x38 decl-SOURCE blob, parse `class = "..."`.
- *   - inherit  (filtinh): *(ent+0x158)->+0x38 decl-SOURCE blob, parse `inherit = "..."`.
- *   - id-string (id_to_string / mkcmd): the entity name -- not byte-captured on this build, so we fall
- *     back to the decimal id (faithful per the reference implementation entityIdString; the serialize-name path is bound later).
- * The ENGINE FUNCTIONS (AddToSelection 0x59f210 / ClearSelection 0x59fa00 / Toast 0xcfa0b0 + the idStr
- * ctor/dtor for the toast args) are resolved by SIGNATURE from the shared sig DB -- never a hardcoded RVA.
- *
- * EVERY editor deref is SEH-guarded + non-null gated; a wrong/shifted-build offset degrades to a clean
- * no-op (empty selection / push-0 / "" classname), never a crash. Clean-room; zero OG SnapHak bytes.
- */
+/* Editor operations behind the shared UI interface. Globals resolve from
+ * code references; functions come from the shared signature results. Field
+ * offsets remain build-dependent. SEH contains access faults, but a readable
+ * incompatible layout can still produce incorrect engine state. */
 #include <windows.h>
-#include <shlobj.h>            /* SHGetFolderPathA -- the +0xc0 prefab path resolver (OG FUN_18000ce50) */
+#include <shlobj.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "snapmap_plus_iface.h"
 #include "iface_engine.h"
-#include "apply_engine.h"   /* the heavy slots (serialize/schedule-apply/read-prefab) */
+#include "apply_engine.h"
 #include "signatures.h"
-#include "engine_globals.h"  /* glb_resolve -- the editor singleton + the cvar-system slot */
+#include "engine_globals.h"
 #include "backend_log.h"
-#include "typeinfo.h"        /* sh_typeinfo_class_derives + the LIVE registry walks (collect_records/inherits) */
-#include "preview.h"         /* sh_preview_get / sh_preview_request -- the asset-preview transport */
-#include "imgpreview.h"      /* sh_imgpreview_list -- the Assets browser's installed-data catalogs */
-#include "megapreview.h"     /* sh_megapreview_rect -- the virtualmapping carrier's atlas rect */
-#include "soundpreview.h"    /* sh_soundpreview_play/stop -- auditioning a sound decl */
-#include "prefabpreview.h"   /* async installed geometry for the Prefab Details viewport */
-#include "valid_class_map.h" /* SH_VCM_* -- the class-dropdown static snapshot (used only if the live walk fails) */
-#include "wiring_cleandirect.h" /* sh_wiring_cleandirect_generation -- the wire-any connect-edit counter (+0x288) */
-#include "snapstack.h"          /* sh_snapstack_push_ids_backend -- the SnapStack stack push (+0x2A0) */
+#include "typeinfo.h"
+#include "preview.h"
+#include "imgpreview.h"
+#include "megapreview.h"
+#include "soundpreview.h"
+#include "prefabpreview.h"
+#include "valid_class_map.h"
+#include "wiring_cleandirect.h"
+#include "snapstack.h"
 
-/* ---- editor-struct field offsets (this-live-build; ported from the reference implementation, SEH-guarded) ------------ */
-/* EDITOR_SINGLETON_PINNED_RVA: where the INLINE idSnapEditorLocal OBJECT (NOT a pointer) sits on the
- * pinned Vulkan build. AUDIT AND RE-DERIVATION ONLY -- the address actually used comes from
- * glb_resolve("editor_singleton"). A data RVA describes one link output; DOOM's OpenGL executable moves
- * its data globals by nearly 0x1000000, so this literal names nothing there.
- * The fault-shield carries the SAME object (fault_shield/engine_layout.h RVA_EDITOR_SINGLETON) and now
- * resolves it the same way. RE-DERIVE per build: it is the inline idSnapEditorLocal singleton,
- * IN-PLACE-CONSTRUCTED by its ctor at 0x51A8E0 -- decompile that ctor; its `this` (the rcx it writes the
- * vtable + fields through) IS this object's address; RVA = that - module_base. */
+/* Editor layout. */
+/* Extraction RVA for re-derivation only; runtime uses editor_singleton.
+ * The editor is an inline object, not a pointer slot. Find its in-place
+ * constructor and recover the this address passed to it. */
 #define EDITOR_SINGLETON_PINNED_RVA   0x3056748u
 #define ED_SEL_OBJ_OFF         0x204d0      /* editor+0x204d0 -> selection object ptr */
-#define ED_CAMERA_ORIGIN_OFF   0x170        /* editor+0x170 -> camera-origin vec3 {x,y,z} (3 floats). DIRECT: the OG
-                                             * obtains it via editor_vtable[+0xd8](editor) where the engine method
-                                             * (RVA 0x5238c0, idSnapEditorLocal::GetCameraOrigin) is `return this+0x170`
-                                             * -> we read/write the field DIRECT (no vtable call -> drops the slot-index
-                                             * dependency = more portable). RE-DERIVE per build: read the qword at
-                                             * editor_vtable(0x2049fd8)+0xd8 -> the method RVA -> decompile -> `return this+OFF`. */
+#define ED_CAMERA_ORIGIN_OFF   0x170        /* Camera origin. Re-derive from the method at editor vtable +0xD8,
+ * which returns the address of this vec3. */
 #define ED_MAP_OBJ_OFF         0x204c8      /* editor+0x204c8 -> loaded-map object ptr (null off-editor) */
 #define ED_SCREEN_OFF          0x21088      /* editor+0x21088 -> menu-screen object (Toast arg0) */
-#define ED_ENTITY_MODE_OFF     0x23618      /* editor+0x23618 -> editor state id (1=ModuleMode top-level /
-                                            * 2=EntityMode tabbed-IN-a-module). DIRECT: OG XINPUT1_3 is-EntityMode
-                                            * FUN_180007f30 reads `*(int*)(DAT_18003e5c0+0x23618)==2`; the SetState
-                                            * writer 0x5298A0 + resolver 0x523F50 (editor-state-machine.md). The
-                                            * Create-New-Timeline gate (the feature spawns/morphs a timeline host,
-                                            * valid ONLY while tabbed inside a module). RE-DERIVE per build via the
-                                            * state-machine recipe. */
-/* the EntityMode object + its selection state -- the native-click-deselect fix. The engine keeps a per-editor-state
- * mode object INLINE in the editor; GetMode(editor, stateId) (engine RVA 0x1183c40 on this build) is a plain switch
- * returning editor+OFF, and `case 2:` (EntityMode, i.e. ED_ENTITY_MODE_OFF == 2) returns editor+0x22330. Its +0x1ac
- * is a small state enum: 1 = base/idle (nothing selected), 2 = an entity IS selected; +0xBB8 is the redraw/dirty
- * flag. The engine's own setters are one-liners -- SetSelected (RVA 0x1255120) is `{mode+0x1ac = 2; mode+0xBB8 = 1;}`
- * and SetIdle (RVA 0x1255100) is the same with 1 -- so we replicate the writes DIRECT rather than resolve two
- * trivial functions.
- * !! ADDRESS SPACE: every bare RVA in this comment block (GetMode 0x1183c40, SetSelected 0x1255120,
- * SetIdle 0x1255100, the click handler 0x1264ba0, and the ones in the MAP_ENT_LAYER_ARR_OFF block
- * below) was read off the NEWER RETAIL DOOM build, not the build this project pins (see the header of
- * BACKEND_ENGINE_SIGNATURES in signatures.c). They are documentation for the re-derive only and are
- * never resolved at runtime, so they are harmless here -- but do NOT copy one into a known_rva or a
- * call site without translating it first. There is no global delta between the builds.
- * Corollary, since an earlier revision of this note got it backwards: this file's
- * AddToSelection/ClearSelection RVAs 0x59f210/0x59fa00 are CORRECT on the pinned build and must not be
- * "fixed". 0x11fad50/0x11fb540 are the same two functions on the newer build (exactly +0xC5BB40). Both
- * pairs are right; they just describe different builds. The struct OFFSETS below are build-specific in
- * the ordinary way and were confirmed against the pinned build.
- * WHY: the native base-mode click handler (RVA 0x1264ba0) calls AddToSelection *and* SetSelected on a hit, and does
- * NOTHING at all on an empty-space miss. So an empty click only deselects because the editor is in state 2; a
- * selection pushed via add_to_selection alone leaves +0x1ac == 1, the editor believes nothing is selected, and the
- * miss path correctly does nothing -- the long-standing "list selection won't native-deselect" bug. Same root cause
- * as Delete-not-deleting-all and Move soft-locking on a list-driven selection. DIRECT (our own
- * reverse-engineering, 2026-07-27); empirically corroborated: a native click on top of a list-driven selection
- * sets +0x1ac = 2 and every one of those symptoms clears.
- * RE-DERIVE per build: decompile the editor's OnDeactivate (it self-identifies via
- * "idSnapEditorLocal::OnDeactivate - User is quitting SnapEditor.") -- it types the editor as longlong* and calls
- * SetIdle(editor + 0x4466) => 0x4466*8 = 0x22330. Cross-check the index math in that same function against the
- * offsets we already trust: editor[0x409a] == ED_SEL_OBJ_OFF and editor[0x4211] == ED_SCREEN_OFF. */
+#define ED_ENTITY_MODE_OFF     0x23618      /* Editor state: 1 ModuleMode, 2 EntityMode. */
+/* EntityMode is inline at editor +0x22330. Native selection changes also
+ * update mode +0x1AC and dirty +0xBB8; array-only changes break native
+ * deselect/Delete/Move behavior. Re-derive from GetMode(state 2) and the
+ * OnDeactivate call identified by its idSnapEditorLocal diagnostic string.
+ * Historical newer-retail references: GetMode 0x1183C40, SetSelected
+ * 0x1255120, SetIdle 0x1255100. These are not extraction-build call RVAs;
+ * no universal address delta exists between those builds. */
 #define ED_MODE_OBJ_OFF        0x22330      /* editor+0x22330 -> inline EntityMode object (= GetMode(editor, 2)) */
 #define MODE_SEL_STATE_OFF     0x1ac        /* mode+0x1ac -> 1 = idle/nothing selected, 2 = an entity is selected */
 #define MODE_DIRTY_OFF         0xBB8        /* mode+0xBB8 -> redraw/dirty flag (set alongside every state write) */
@@ -108,23 +53,14 @@
 #define SEL_HOVERED_OFF        0x2c         /* selObj+0x2c -> looked-at/hovered entity id */
 #define ARR_ENT_ARRAY_OFF      0x6a0        /* arrObj+0x6a0 -> entity-ptr array (8-byte entries) */
 #define ARR_ENT_COUNT_OFF      0x6a8        /* arrObj+0x6a8 -> entity count (u32) */
-/* per-entity layer index + the editor's scratch/working layer -- the "is a manipulation in progress?"
- * test. When the user grabs (or holds a staged prefab), the engine's snapshot-capture moves every
- * selected entity onto the scratch layer and stashes its REAL layer in a snapshot record, restoring it
- * on cancel. So "a selected entity currently sits on the scratch layer" == "a manipulation snapshot is
- * outstanding". DIRECT: capture is engine RVA 0x11b08d0, which reads `*(int*)(mapObj+0x6f0 + id*4)` per
- * entity and compares it against `*(int*)(mapObj+0x758)`, calling the layer setter when they differ.
- * WHY WE CARE: that snapshot is indexed POSITIONALLY against the live selection array and is never
- * re-validated, so mutating the selection while it is outstanding makes the cancel path (Escape) write
- * each saved record onto the wrong entity -- swapping entity pointers in the live map. Observed live:
- * duplicated entities, entities vanishing from the map entirely, "(no module)", and hard freezes.
- * PRE-EXISTING engine behaviour, reproduced on the v0.2.1-beta.2 release which has none of this file's
- * selection-state work. Tracked separately as an open engine-side issue. */
+/* Manipulation capture moves selected entities to the scratch layer and
+ * stores original layers in a positional snapshot. Changing selection then
+ * makes Escape restore records onto the wrong entities. Re-derive from
+ * capture's per-ID layer read and scratch-layer comparison (newer-retail
+ * reference 0x11B08D0; do not use as an extraction-build call RVA). */
 #define MAP_ENT_LAYER_ARR_OFF  0x6f0        /* mapObj+0x6f0 -> int* per-entity layer/module index */
 #define MAP_SCRATCH_LAYER_OFF  0x758        /* mapObj+0x758 -> int, the scratch/working layer id */
-/* the loaded-map MODULE table -- for the OG Entities-list id-string "<modidx>_<modname>/<inherit>_<id>" (port of
- * FUN_180003ba0 + FUN_180003c80). All build-specific (same loaded-map object the entity array lives in; re-derive
- * per build alongside ARR_ENT_*). */
+/* Loaded-map tables used to format module-qualified entity references. */
 #define LM_ENTPOS_ARR_OFF      0x708        /* loaded-map+0x708 -> entity-id-by-placement-position array (u32) */
 #define LM_ENTPOS_CNT_OFF      0x710        /* loaded-map+0x710 -> placement-position count (u32) */
 #define LM_MODBOUND_ARR_OFF    0x720        /* loaded-map+0x720 -> per-module cumulative-position boundaries (s32, sorted) */
@@ -132,74 +68,51 @@
 #define LM_MODTABLE_OFF        0x750        /* loaded-map+0x750 -> module table (stride 0x98) */
 #define MOD_STRIDE             0x98         /* module-table entry stride */
 #define MOD_NAME_OFF           0x48         /* module entry+0x48 -> module name char* */
-#define LM_ENTINST_ARR_OFF     0x6f0        /* loaded-map+0x6f0 -> ptr to the AUTHORITATIVE per-entity instance(module)
-                                            * index array (i32 indexed by entity id). The registrar (FUN_1405a4520)
-                                            * writes *(*(lm+0x6f0)+id*4) on create; the world-builder rebuilds it from
-                                            * the instanceEntities CSR on load. instanceIdx == module-COUNT is the
-                                            * engine's GLOBAL/no-module sentinel. O(1) + authoritative (vs the old
-                                            * position-boundary heuristic, which could mislabel a global entity).
-                                            * RE'd DIRECT from our own decompile. */
+#define LM_ENTINST_ARR_OFF     0x6f0        /* Per-entity instance index. The registrar writes it on create and
+ * map loading rebuilds it from instanceEntities. Index == module count
+ * means global/no-module; spatial position does not establish membership. */
 #define LM_INSTANCES_CNT_OFF   0x758        /* loaded-map+0x758 -> instances(modules) COUNT (== the no-module sentinel) */
 #define ENT_VALID_OFF          0x8          /* entity[id]+8 != 0 => valid (the +0x28 rule) */
 #define ENT_DEFSUB_OFF         0x158        /* entity[id]+0x158 -> def sub-object */
 
-/* dev-layer visibility gate (DIRECT, live build DOOMx64vk.exe.unpacked.exe). The SnapMap editor gates entity
- * visibility on the `snapEdit_enableDevLayer` cvar via a per-entity LAYER BITMASK:
- *   activeMask = enableDevLayer ? (devLayerMask|1) : 1;  entity visible iff (entity->layerBits & activeMask).
- * (engine pick paths FUN_14059a520 / FUN_14059b160 + the cvar change-callback FUN_140522eb0.) The clone mirrors
- * it for its Entities/Timelines lists: hide iff (cvar off AND (layerBits & 1)==0); show-all when on.
- * RE-DERIVE per build: xref the "snapEdit_enableDevLayer" string -> the register call's cvar obj (+0x30 is its
- * int value); a pick fn reads `entity+0x160 & (enableDevLayer ? layersDecl+0x9c|1 : 1)`. */
+/* Lists hide non-base-layer entities unless the dev-layer cvar is enabled.
+ * Native picking also intersects a dev-layer mask. Re-derive by following
+ * snapEdit_enableDevLayer registration and the entity +0x160 bit test. */
 #define ENT_LAYER_BITS_OFF     0x160        /* entity[id]+0x160 -> layer bitmask (uint) */
 #define DEVL_CVAR_VALUE_OFF    0x30         /* idCVar+0x30 -> current integer value (== cvars.c value note) */
 #define DEVL_CVAR_NAME_OFF     0x40         /* idCVar+0x40 -> registered name char* (== cvars.c IDCVAR_NAME_OFF) */
-/* The idCVarSystemLocal* slot's RVA on the pinned Vulkan build -- audit and re-derivation only. The slot
- * is located by glb_resolve("cvar_system_slot"), the same decode cvars.c sh_resolve_cvarsys performs. */
+/* Audit RVA only; runtime resolves cvar_system_slot from a signed code reference. */
 #define DEVL_CVARSYS_SLOT_PINNED_RVA  0x55b7290u
 #define DEVL_CVARSYS_ARR_OFF   0x08         /* cvarSys+0x08 -> FULL idCVar** array */
 #define DEVL_CVARSYS_CNT_OFF   0x10         /* cvarSys+0x10 -> FULL count (u32) */
 #define DEVL_CVAR_LIST_CAP     100000u      /* stale-cvarSys guard */
 #define DEVL_CVAR_NAME         "snapEdit_enableDevLayer"
 #define ENT_DECL_OFF           0x8          /* *(ent+8) -> the entity's decl object (classname blob root) */
-#define DECL_BLOB_A_OFF        0x1c8        /* declObj+0x1c8 -> ... */
-#define DECL_BLOB_B_OFF        0x38         /* ...+0x38 -> the decl-SOURCE text blob ptr */
+#define DECL_BLOB_A_OFF        0x1c8        /* Decl object to resolved source object. */
+#define DECL_BLOB_B_OFF        0x38         /* Resolved source text pointer. */
 #define IDSTR_SIZE             0x30         /* sizeof(idStr) for the toast title/text temporaries */
 
-/* ---- data-tab field offsets (this-live-build; SEH-guarded) ------------------------------------- */
-#define ENT_DISPLAYNAME_LEN_OFF 0x178      /* entity[id]+0x178 -> displayname len (u32). OG FUN_180007230 */
+/* Entity-state fields. */
+#define ENT_DISPLAYNAME_LEN_OFF 0x178      /* Display name length. */
 #define ENT_DISPLAYNAME_PTR_OFF 0x180      /* entity[id]+0x180 -> displayname data ptr */
 #define ENT_DISPLAYNAME_FIELD   0x170      /* entity[id]+0x170 -> displayname idStr field (SET target) */
 #define DEFSUB_SRC_PTR_OFF      0x140      /* defsub+0x140 -> canonical decl-source text data ptr (vt+0x30 get) */
 #define DEFSUB_SRC_LEN_OFF      0x138      /* defsub+0x138 -> canonical decl-source text len (s32) */
-#define DEFSUB_CLASS_OFF        0x60       /* defsub+0x60 -> classname idStr (SET target) */
-#define DEFSUB_INHERIT_OFF      0x58       /* defsub+0x58 -> inherit idStr (SET target) */
+#define DEFSUB_CLASS_OFF        0x60       /* Interned classname pointer slot. */
+#define DEFSUB_INHERIT_OFF      0x58       /* Interned inherit pointer slot. */
 #define ED_SEL_OBJ_OFF_C3       0x204d0    /* editor+0x204d0 -> selection object (Delete guard) */
 
-/* RemoveFromSelection (Delete, +0x130). It was believed to be a jumptable-dispatch leaf the byte-sig
- * scanner could not anchor, and so was reached by a raw base+RVA; it is in fact signable -- the
- * `add rcx,0x5e0` that walks to the selection sub-object sits in its fixed bytes, and the pattern matches
- * exactly once on BOTH shipped executables ("RemoveFromSelection" in signatures.c). The RVA below is the
- * pinned Vulkan build's, kept for audit and re-derivation only; on the OpenGL image the function is at
- * 0x59F510. RE-DERIVE: the engine call inside OG XINPUT1_3 FUN_1800073c0 -> `(DAT_18003e120 + 0x59fda0)`. */
+/* Audit RVA only. Resolve RemoveFromSelection by its signed wrapper,
+ * including add rcx,0x5E0 before the selection-subobject call. */
 #define REMOVE_FROM_SEL_PINNED_RVA     0x59fda0u
 
-/* idStr::operator=(const char*) -- engine 0x19fd5f0. The displayName field (entity+0x170) is a FULL idStr
- * (len@+0x178 / data@+0x180 / allocFlags@+0x188), so it MUST be assigned with operator= (which manages the
- * SSO/heap buffer + sets len/data). It is NOT the same as IdStrAssign 0x1a03e10 -- that is the idPoolStr
- * assign: it interns the string and writes a single pooled POINTER at field+0x00, leaving len/data UNTOUCHED.
- * Using 0x1a03e10 on the displayName wrote a pool ptr over the idStr's first qword and never set len/data, so
- * the read (len@+0x178 / data@+0x180) kept seeing the old empty string -> the box never updated (the
- * 2026-06-27 "displayname doesn't save" bug). className/inherit (defsub+0x60/+0x58) ARE idPoolStr, so they
- * correctly stay on 0x1a03e10. It is resolved from the shared signature DB as "IdStrAssignCStr", which has
- * carried this exact function all along -- the raw RVA here was redundant, not a gap. The literal below is
- * the pinned Vulkan build's, kept for audit and re-derivation only (re-derive: OG XINPUT1_3 FUN_1800072a0
- * [the +0x128 slot] -> `(DAT_18003e120 + 0x19fd5f0)(entity+0x170, data)`; decompiling 0x19fd5f0 shows the
- * len/data/realloc idStr::operator= body, distinct from 0x1a03e10's pool-ptr write). */
+/* Display name is a full idStr: assign through IdStrAssignCStr to maintain
+ * length, data, and SSO/heap ownership. Class/inherit are pooled pointer
+ * slots and use IdStrAssign instead. These helpers are not interchangeable.
+ * Audit RVA only; runtime uses the shared signature result. */
 #define IDSTR_OPASSIGN_PINNED_RVA      0x19fd5f0u
 
-/* (+0x110 enum-decls-of-resclass): the typed decl-manager node walk -- SAME shape sh_listres
- * uses (GetDeclsOfType(typeName) -> node; array @ node+0x20, count @ node+0x28; each decl's name
- * @ *decl+8). The engine GetDeclsOfType is SIGNATURE-resolved off the shared sig DB ("GetDeclsOfType"). */
+/* Asset registry node layout; decl dropdowns use the separate typeinfo walk. */
 #define DECLNODE_ARRAY_OFF      0x20        /* decl-manager node -> decl-pointer array */
 #define DECLNODE_COUNT_OFF      0x28        /* decl-manager node -> decl count (u32) */
 #define DECL_NAME_OFF           0x08        /* decl object -> name char* (*decl + 8) */
@@ -208,27 +121,27 @@
 #define SEL_MAX_IDS            65536        /* sanity cap on a selection/array count (stale-obj guard) */
 #define ENT_COUNT_CAP         1000000u      /* sanity cap on the entity array count */
 
-/* ---- engine fn typedefs (signature-resolved) ---------------------------------------------------- */
-typedef void  (*add_to_sel_fn)(void *selObj, int id);          /* AddToSelection 0x59f210 */
-typedef void  (*clear_sel_fn)(void *selObj);                   /* ClearSelection 0x59fa00 */
-typedef void  (*toast_fn)(void *screen, void *titleIdStr, void *textIdStr); /* Toast 0xcfa0b0 */
-typedef void *(*idstr_ctor_fn)(void *self, const char *cstr);  /* IdStrCtor 0x19fcef0 */
-typedef void  (*idstr_dtor_fn)(void *self);                    /* IdStrDtor 0x19fd120 */
-/* the engine setters the Entity-State Save + the Delete need -- all sig-resolved off the shared sig DB. */
-typedef void  (*idstr_assign_fn)(void *dstField, const char *cstr);          /* IdStrAssign 0x1a03e10 (idPoolStr ptr-write: className/inherit) */
-typedef void  (*idstr_opassign_fn)(void *idStrField, const char *cstr);      /* idStr::operator= 0x19fd5f0 (FULL idStr: displayName) */
-typedef void  (*decl_src_rebuild_fn)(void *defsub, const char *src, int one);/* DeclSourceRebuild 0x17ae560 */
-typedef void  (*remove_from_sel_fn)(void *selObj, int id);                    /* RemoveFromSelection 0x59fda0 */
-typedef void *(*get_decls_fn)(const char *type_name);                         /* GetDeclsOfType (sig DB) */
+/* Engine call signatures. */
+typedef void  (*add_to_sel_fn)(void *selObj, int id);
+typedef void  (*clear_sel_fn)(void *selObj);
+typedef void  (*toast_fn)(void *screen, void *titleIdStr, void *textIdStr);
+typedef void *(*idstr_ctor_fn)(void *self, const char *cstr);
+typedef void  (*idstr_dtor_fn)(void *self);
 
-/* ---- module state (resolved once at install) ---------------------------------------------------- */
+typedef void  (*idstr_assign_fn)(void *dstField, const char *cstr);          /* Interned pointer assignment for class/inherit. */
+typedef void  (*idstr_opassign_fn)(void *idStrField, const char *cstr);      /* Full idStr assignment for display name. */
+typedef void  (*decl_src_rebuild_fn)(void *defsub, const char *src, int one);
+typedef void  (*remove_from_sel_fn)(void *selObj, int id);
+typedef void *(*get_decls_fn)(const char *type_name);
+
+/* Resolved engine state. */
 static const uint8_t *g_editor   = NULL;   /* glb_resolve("editor_singleton"); NULL = unresolved */
 static add_to_sel_fn  g_add_sel  = NULL;
 static clear_sel_fn   g_clear_sel= NULL;
 static toast_fn       g_toast    = NULL;
 static idstr_ctor_fn  g_idstr_ctor = NULL;
 static idstr_dtor_fn  g_idstr_dtor = NULL;
-/* Entity-State engine fns */
+
 static idstr_assign_fn    g_idstr_assign = NULL;   /* +0x78/+0x80 set className/inherit (idPoolStr fields) */
 static idstr_opassign_fn  g_idstr_opassign = NULL; /* +0x128 set displayName (FULL idStr field entity+0x170) */
 static decl_src_rebuild_fn g_decl_rebuild = NULL;  /* +0x40 Save-to-Decl rebuild */
@@ -243,7 +156,7 @@ const uint8_t *sh_iface_engine_editor_base(void)
     return g_editor;
 }
 
-/* ---- SEH-guarded primitive reads (a shifted offset degrades to a clean fail, never a crash) ----- */
+/* Guarded primitive reads. */
 static int ie_read_ptr(const void *src, void **out)
 {
     __try { *out = *(void *const *)src; return 1; }
@@ -260,8 +173,8 @@ static int ie_read_u32(const void *src, uint32_t *out)
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-/* "editor up" guard, matching the reference implementation editorSession: the loaded-map ptr (+0x204c8) is non-null in-editor.
- * Returns the editor object base, or NULL when the editor isn't live (so every op fails CLEANLY). */
+/* Return the editor when its loaded-map pointer is readable and nonnull.
+ * This pointer can persist in the HUB; it is not a visibility/readiness gate. */
 static const uint8_t *editor_session(void)
 {
     if (!g_editor) return NULL;
@@ -270,14 +183,9 @@ static const uint8_t *editor_session(void)
     return g_editor;
 }
 
-/* +0x88 editor-ready poll: 1 in the live editor, 0 in the HUB/menu. The OG gates its own (Qt) window's
- * visibility + the per-frame dispatch on this -- the Snapmap+ window opens on editor-entry and HIDES on exit.
- * NB: this must NOT use editor_session() (the loaded-map ptr +0x204c8) -- that ptr PERSISTS as a stale value
- * in the HUB after a map was loaded, so it false-positives there (the window stayed up on exit). The editor
- * SCREEN object (+0x21088, the Toast target) goes NULL on editor->HUB exit -- the reliable editor-vs-HUB
- * signal. Live A/B (window-hide diff): editor -> non-null, HUB -> null; map + selection both persist.
- * RE-DERIVE per build: snapshot the editor edit-session region (0x20400..0x21100) in-editor vs in-HUB; the
- * offset that flips non-null(editor)->null(HUB) is this (also the documented ED_SCREEN_OFF). */
+/* Window visibility follows the editor screen pointer. Map and selection
+ * pointers can persist in the HUB and produce false positives. Re-derive
+ * by comparing the editor session fields in the editor and after HUB exit. */
 static int slot_editor_ready(sh_iface *self)
 {
     (void)self;
@@ -287,10 +195,8 @@ static int slot_editor_ready(sh_iface *self)
     return screen != NULL ? 1 : 0;
 }
 
-/* +0x1c0 IS-ENTITY-MODE: 1 when the player is TABBED INSIDE a module (EntityMode, editor+0x23618==2), else 0
- * (top-level ModuleMode is ==1). The Create-New-Timeline gate -- the feature may only spawn/morph a timeline
- * host while in a module; the button grays out otherwise. OG XINPUT1_3 FUN_180007f30. Uses editor_session()
- * (= g_editor with the map-loaded guard) so it cleanly returns 0 in the HUB / off-editor / on a fault. */
+/* EntityMode is state 2. The loaded-map guard alone does not prove the
+ * editor window is active; visibility uses slot_editor_ready separately. */
 static int slot_is_entity_mode(sh_iface *self)
 {
     (void)self;
@@ -301,19 +207,17 @@ static int slot_is_entity_mode(sh_iface *self)
     return m == 2 ? 1 : 0;
 }
 
-/* the selection object (editor+0x204d0), or NULL. */
+
 static void *selection_object(void)
 {
     const uint8_t *ed = editor_session();
     if (!ed) return NULL;
     void *sel = NULL;
     if (!ie_read_ptr(ed + ED_SEL_OBJ_OFF, &sel)) return NULL;
-    return sel;   /* may be NULL -- caller guards */
+    return sel;
 }
 
-/* +0x00 SET the editor camera-origin vec3 (the Camera Origin X/Y/Z + Lock-Position write-back). OG FUN_1800064a0:
- * (editor_vtable[+0xd8])(editor) returns editor+0x170 -> writes 3 floats; we write the field DIRECT. SEH-guarded;
- * off-editor (editor_session NULL) -> a clean no-op. */
+/* Write the camera origin through its inline vec3. */
 static void slot_set_editor_vec3(sh_iface *self, const float *xyz)
 {
     (void)self;
@@ -324,8 +228,7 @@ static void slot_set_editor_vec3(sh_iface *self, const float *xyz)
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-/* +0x08 GET the editor camera-origin vec3 (the Entity-State Camera-Origin read-sync). OG FUN_180006500. Clean
- * zeroed read off-editor / on fault. */
+/* Read camera origin; clear output when the read is unavailable. */
 static void slot_get_editor_vec3(sh_iface *self, float *out_xyz)
 {
     (void)self;
@@ -361,11 +264,11 @@ static void *entity_ptr(void *array, uint32_t count, int id)
     if (id < 0 || (uint32_t)id >= count) return NULL;
     void *e = NULL;
     if (!ie_read_ptr((const uint8_t *)array + (size_t)id * 8, &e)) return NULL;
-    return e;   /* may be NULL */
+    return e;
 }
 
-/* parse `<key> = "..."` out of a decl-source text blob into buf (SEH-guarded blob read). Returns buf on a
- * hit (empty string on a miss). The blob is a small C-string; we read it defensively then regex-lite scan. */
+/* Copy a bounded decl prefix, then find key followed by an assigned quoted
+ * value. This is a textual field lookup, not a decl parser. */
 static const char *parse_decl_field(const void *blob_ptr_addr, const char *key, char *buf, int cap)
 {
     if (cap > 0) buf[0] = '\0';
@@ -382,7 +285,7 @@ static const char *parse_decl_field(const void *blob_ptr_addr, const char *key, 
     } __except (EXCEPTION_EXECUTE_HANDLER) { got = 0; }
     if (!got) return buf;
 
-    /* find `key` then the next '"..."' after a '='. */
+
     const char *k = strstr(text, key);
     if (!k) return buf;
     const char *eq = strchr(k, '=');
@@ -399,9 +302,9 @@ static const char *parse_decl_field(const void *blob_ptr_addr, const char *key, 
     return buf;
 }
 
-/* ================================================================ the vtable slot bodies =========== */
+/* Shared interface slots. */
 
-/* +0x150 GET selection: fill out_ids[0..max) with the editor's selected ids; returns the count written. */
+/* Copy at most max selected IDs and return the count written. */
 static int slot_get_selection(sh_iface *self, int *out_ids, int max)
 {
     (void)self;
@@ -415,9 +318,7 @@ static int slot_get_selection(sh_iface *self, int *out_ids, int max)
     int n = count < max ? count : max;
     int written = 0;
     for (int i = 0; i < n; i++) {
-        /* the reference implementation readSelection reads each id as readU32 (unsigned); read it the same way for
-         * lock-step fidelity, then store into the int* out-buffer (real entity ids are small
-         * non-negative, so the value is identical -- this just matches the reference implementation's read width). */
+
         uint32_t id = 0;
         if (!ie_read_u32((const uint8_t *)arr + (size_t)i * 4, &id)) break;
         out_ids[written++] = (int)id;
@@ -425,33 +326,23 @@ static int slot_get_selection(sh_iface *self, int *out_ids, int max)
     return written;
 }
 
-/* Sync the EntityMode selection state to match what we just did to the selection ARRAY -- the native-click-deselect
- * fix (see ED_MODE_OBJ_OFF). The engine's empty-space-click handler does nothing unless the mode is in the
- * "something is selected" state, so a selection we push has to announce itself the same way a native click does.
- * Gated on ED_ENTITY_MODE_OFF == 2 (tabbed inside a module) because that is precisely the state for which
- * editor+0x22330 is the live mode object; anywhere else the write would land on an inactive sub-object.
- * SEH-guarded like every other editor deref here: a shifted offset degrades to a clean no-op. */
-/* Is a manipulation snapshot outstanding? (see MAP_ENT_LAYER_ARR_OFF for the full rationale)
- *
- * True while the user is grabbing/moving entities or holding a staged prefab. Callers must NOT mutate
- * the editor selection while this is true: the engine's cancel path restores a positionally-indexed
- * snapshot against the live selection array, so changing that array corrupts the map on Escape.
- *
- * Implemented as "does any currently-selected entity sit on the scratch layer", which is exactly what
- * the engine's snapshot-capture arranges. Fails CLOSED on any read error -- an unreadable editor is
- * treated as "in progress" so we refuse rather than risk the corrupting path. */
+
+/* Detect a positional manipulation snapshot through selected scratch-layer
+ * entities. Selection mutation would corrupt Escape restoration. Most read
+ * errors refuse mutation; an absent or unreadable selection pointer returns
+ * no active snapshot. */
 static int manipulation_in_progress(void)
 {
     const uint8_t *ed = editor_session();
-    if (!ed) return 1;                       /* can't tell -> refuse */
+    if (!ed) return 1;                       /* Unknown editor: refuse mutation. */
     void *mapObj = NULL, *sel = NULL;
     if (!ie_read_ptr(ed + ED_MAP_OBJ_OFF, &mapObj) || !mapObj) return 1;
-    if (!ie_read_ptr(ed + ED_SEL_OBJ_OFF, &sel) || !sel) return 0;   /* no selection -> nothing at risk */
+    if (!ie_read_ptr(ed + ED_SEL_OBJ_OFF, &sel) || !sel) return 0;   /* Absent or unreadable selection: no snapshot reported. */
 
     int count = 0;
     if (!ie_read_s32((const uint8_t *)sel + SEL_COUNT_OFF, &count)) return 1;
-    if (count <= 0) return 0;                /* empty selection -> no snapshot can be keyed to it */
-    if (count > SEL_MAX_IDS) return 1;       /* implausible -> refuse */
+    if (count <= 0) return 0;
+    if (count > SEL_MAX_IDS) return 1;
 
     void *ids = NULL, *layers = NULL;
     if (!ie_read_ptr((const uint8_t *)sel + SEL_IDS_OFF, &ids) || !ids) return 1;
@@ -464,41 +355,33 @@ static int manipulation_in_progress(void)
         if (!ie_read_u32((const uint8_t *)ids + (size_t)i * 4, &id)) return 1;
         int layer = 0;
         if (!ie_read_s32((const uint8_t *)layers + (size_t)id * 4, &layer)) return 1;
-        if (layer == scratch) return 1;      /* mid-manipulation */
+        if (layer == scratch) return 1;
     }
     return 0;
 }
 
-/* +0x2C0 (ext 11) query: 1 while the editor is grabbing/holding, so the UI can refuse and explain
- * rather than silently no-op. Exposed because the refusal is a user-visible restriction, not an
- * internal detail. */
+/* Expose the selection-mutation guard so the UI can explain refusals. */
 static int slot_manipulation_in_progress(sh_iface *self)
 {
     (void)self;
     return manipulation_in_progress() ? 1 : 0;
 }
 
-/* +0x2C8 (ext 12) FIND MATERIAL by name -- pure passthrough to sh_typeinfo_find_material (see typeinfo.c
- * for the cached-only-lookup rationale and the FatalError/INT3-trap warning about the primitive this
- * deliberately does NOT call). No editor/entity state involved, so no session gate here. */
+/* Cached material lookup only; do not invoke the fatal-on-miss loader. */
 static int slot_find_material(sh_iface *self, const char *name, char *out_info, int cap)
 {
     (void)self;
     return sh_typeinfo_find_material(name, out_info, (size_t)cap);
 }
 
-/* +0x2D0 (ext 13) Consume the latest asset-preview image (preview.c). Pure passthrough; no engine
- * state touched here. Returns length, 0 if nothing is published, or -(required) if the UI's buffer
- * is too small; the successful copy releases the backend's encoded buffer. */
+/* Consume published preview bytes; negative required size preserves them for retry. */
 static int slot_get_preview(sh_iface *self, char *out, int cap)
 {
     (void)self;
     return sh_preview_get(out, (size_t)(cap > 0 ? cap : 0));
 }
 
-/* +0x2D8 (ext 14) Ask for a NAMED asset to be previewed. Staging only -- production happens on the
- * sleeping CPU worker, so this returns as soon as the name is recorded and the caller polls
- * get_preview (+0x2D0). NULL/empty cancels the generation and releases any unconsumed image. */
+/* Stage asynchronous preview work; null/empty cancels and releases pending output. */
 static int slot_request_preview(sh_iface *self, const char *name)
 {
     (void)self;
@@ -516,8 +399,7 @@ static int slot_request_preview(sh_iface *self, const char *name)
     return 1;
 }
 
-/* +0x2E0 (ext 15) Page the material catalog for the Assets browser's list. Pure file/index read
- * (imgpreview.c owns the containers); no engine state touched, so no session gate. */
+/* Page the installed material index without touching engine state. */
 static int slot_list_materials(sh_iface *self, int start, char *out, int cap)
 {
     (void)self;
@@ -525,9 +407,7 @@ static int slot_list_materials(sh_iface *self, int start, char *out, int cap)
     return sh_imgpreview_list(SH_ASSET_MATERIAL, (unsigned)(start > 0 ? start : 0), out, (size_t)cap);
 }
 
-/* +0x2E8 (ext 16) The same, for any indexed asset type. `kind` is an SH_ASSET_* value; out-of-range
- * returns 0 rather than falling back to materials, so a UI/backend version mismatch shows up as an
- * empty list instead of silently serving the wrong catalog. */
+/* Page the selected asset catalog; invalid kinds return an empty result. */
 static int slot_list_assets(sh_iface *self, int kind, int start, char *out, int cap)
 {
     (void)self;
@@ -535,18 +415,14 @@ static int slot_list_assets(sh_iface *self, int kind, int start, char *out, int 
     return sh_imgpreview_list(kind, (unsigned)(start > 0 ? start : 0), out, (size_t)cap);
 }
 
-/* +0x2F0 (ext 17) A material's atlas rect, so the browser can build a `virtualmapping` renderParm
- * value and can tell when that carrier does not apply at all. Pure .vmtr read; no engine state. */
+/* Read the material's atlas rectangle from installed data. */
 static int slot_material_rect(sh_iface *self, const char *name, int *out_xywh)
 {
     (void)self;
     return sh_megapreview_rect(name, out_xywh);
 }
 
-/* +0x2F8 (ext 18) Audition a sound decl, or stop the current one when `name` is NULL/empty. The
- * play half validates the name against our own container index before it reaches the engine, so a
- * bad name here is a refusal and not a fatal error. MAIN THREAD: the UI reaches this through its
- * apply drain, never straight off the WebView thread -- this touches live audio state. */
+/* Main thread only: audition an indexed sound, or stop on null/empty name. */
 static int slot_sound_preview(sh_iface *self, const char *name)
 {
     (void)self;
@@ -554,32 +430,26 @@ static int slot_sound_preview(sh_iface *self, const char *name)
     return sh_soundpreview_play(name);
 }
 
-/* +0x300 (ext 19) Hold preview mode open while the asset browser is on screen. The audition cvars
- * cost an audio-engine suspend/resume to change, so they are set once here rather than around every
- * click -- doing it per click made short sounds fade in or miss their start entirely. MAIN THREAD. */
+/* Main thread only: hold audition cvars for the browser session to avoid
+ * audio suspend/resume on every preview click. */
 static void slot_sound_session(sh_iface *self, int on)
 {
     (void)self;
     sh_soundpreview_set_session(on);
 }
 
-/* +0x308..+0x318 (ext 20..22) Prefab Details preview bridge. Resolution is a pure, read-locked
- * entityDef lookup. Mesh work is file-only and asynchronous; no renderer or game resource is retained
- * by the frontend after the WebGL cache evicts it. */
+/* Resolve prefab models from decl/installed data; mesh extraction is asynchronous. */
 static int slot_resolve_prefab_model(sh_iface *self, const char *inherit_name,
                                      char *out_model, int out_capacity)
 {
     (void)self;
     if (out_capacity <= 0) return 0;
-    /* A pickup-spawner entityDef can inherit a generic editor model in the live resolved text while
-     * its actual preview object is named by spawnerEntityPair.entityStatic in the installed decl.
-     * Prefer that file-only semantic route for spawners so the viewport shows the pickup, not its
-     * placement helper. JavaScript caches the result per inherit, so this read occurs only once. */
+    /* Spawners can inherit an editor helper model. Prefer the installed
+ * spawnerEntityPair.entityStatic route to display the actual pickup. */
     if (inherit_name && strstr(inherit_name, "spawner") &&
         sh_prefabpreview_resolve_model(inherit_name, out_model, (size_t)out_capacity)) return 1;
     if (sh_typeinfo_inherit_model(inherit_name, out_model, (size_t)out_capacity)) return 1;
-    /* Pickup spawners deliberately have no renderModelInfo of their own. Follow their installed
-     * spawnerEntityPair -> entityStatic -> inherited pickup model without loading an engine object. */
+    /* Follow the installed spawner-to-pickup model chain if live lookup missed. */
     return sh_prefabpreview_resolve_model(inherit_name, out_model, (size_t)out_capacity);
 }
 
@@ -595,9 +465,7 @@ static int slot_get_prefab_mesh(sh_iface *self, void *out_blob, int out_capacity
     return sh_prefabpreview_get(out_blob, out_capacity);
 }
 
-/* +0x320 (ext 23) Resolve sparse prefab render state against installed entityDef defaults. The
- * prefab stores only overrides, so retaining scale from the decl is necessary for block dimensions
- * and for any prop whose authoring defaults are not the unit vector. */
+/* Sparse prefab state omits inherited scale; resolve defaults for preview dimensions. */
 static int slot_resolve_prefab_defaults(sh_iface *self, const char *inherit_name,
                                         char *out_model, int out_capacity,
                                         float *out_scale, int out_scale_count)
@@ -605,8 +473,7 @@ static int slot_resolve_prefab_defaults(sh_iface *self, const char *inherit_name
     if (!out_model || out_capacity <= 0 || !out_scale || out_scale_count < 3) return 0;
     int flags = sh_prefabpreview_resolve_defaults(inherit_name, out_model,
                                                   (size_t)out_capacity, out_scale);
-    /* Preserve ext 20's live-typeinfo preference for ordinary entities while the installed-data
-     * resolver supplies scale. It already gives spawners their semantic pickup model. */
+    /* Keep live-model preference while the installed resolver supplies scale. */
     if (slot_resolve_prefab_model(self, inherit_name, out_model, out_capacity))
         flags |= SH_PREFAB_DEFAULT_MODEL;
     else {
@@ -621,20 +488,14 @@ static void mode_set_selection_state(int state)
     if (!ed) return;
     int editor_state = 0;
     if (!ie_read_s32(ed + ED_ENTITY_MODE_OFF, &editor_state)) return;
-    if (editor_state != 2) return;              /* not EntityMode -> +0x22330 isn't the active mode object */
+    if (editor_state != 2) return;
 
-    /* NEVER stomp a state we don't recognise. mode+0x1ac is not a two-value flag: the engine drives it
-     * to other values while a manipulation is in flight (grabbing/moving an entity, holding a staged
-     * prefab awaiting placement) and while sub-screens are up, and it has its own "is the mode busy"
-     * predicate (engine RVA 0x1254e20, literally `return mode+0x1ac != 1`). Overwriting one of those
-     * mid-gesture tears the editor out of the manipulation so its completion bookkeeping never runs --
-     * observed live 2026-07-27 as the grabbed entity (or held prefab) being dropped and losing its
-     * module association, unrecoverable by a list refresh. So only ever move between idle and selected,
-     * and leave every other value strictly alone. */
+    /* Only transition between idle and selected. Other substates own gesture
+ * or screen bookkeeping that a direct state write would bypass. */
     int cur = 0;
     if (!ie_read_s32(ed + ED_MODE_OBJ_OFF + MODE_SEL_STATE_OFF, &cur)) return;
-    if (cur != MODE_STATE_IDLE && cur != MODE_STATE_SELECTED) return;   /* busy -> hands off */
-    if (cur == state) return;                                           /* already there -> no write */
+    if (cur != MODE_STATE_IDLE && cur != MODE_STATE_SELECTED) return;
+    if (cur == state) return;
 
     __try {
         *(int *)((uintptr_t)ed + ED_MODE_OBJ_OFF + MODE_SEL_STATE_OFF) = state;
@@ -642,16 +503,11 @@ static void mode_set_selection_state(int state)
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-/* +0x148 CLEAR selection (psel). Also drops the mode back to idle so the editor doesn't keep believing something is
- * selected after a programmatic clear (empty array + idle is the consistent pairing -- it is what makes the
- * Deselect button leave the editor immediately usable natively). */
+/* Clear selection and synchronize EntityMode to idle when its state permits. */
 static void slot_clear_selection(sh_iface *self)
 {
     (void)self;
-    /* HARD SAFETY GATE -- see MAP_ENT_LAYER_ARR_OFF. Mutating the selection while the editor holds a
-     * manipulation snapshot corrupts the live map on the next Escape (entity pointers swapped into the
-     * wrong slots: duplicated entities, entities deleted outright, freezes). Pre-existing engine
-     * behaviour; refusing is the only safe option until the cancel path itself is fixed. */
+    /* Selection must remain stable while a positional manipulation snapshot exists. */
     if (manipulation_in_progress()) return;
     void *sel = selection_object();
     if (!sel || !g_clear_sel) return;
@@ -659,20 +515,18 @@ static void slot_clear_selection(sh_iface *self)
     mode_set_selection_state(MODE_STATE_IDLE);
 }
 
-/* +0x138 ADD to selection (popsel). Also puts the mode into the "selected" state, exactly as the native click
- * handler does after a successful hit -- without this the pushed selection is invisible to the editor's own
- * empty-space-click / Delete / Move logic. */
+/* Add an ID and synchronize EntityMode so native deselect/Delete/Move see it. */
 static void slot_add_to_selection(sh_iface *self, int id)
 {
     (void)self;
-    if (manipulation_in_progress()) return;   /* see slot_clear_selection */
+    if (manipulation_in_progress()) return;
     void *sel = selection_object();
     if (!sel || !g_add_sel) return;
     __try { g_add_sel(sel, id); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     mode_set_selection_state(MODE_STATE_SELECTED);
 }
 
-/* +0x198 hovered id (phov): selObj+0x2c. <0 / fault -> -1. */
+/* Return hovered ID, or -1 when unavailable. */
 static int slot_hovered_id(sh_iface *self)
 {
     (void)self;
@@ -683,7 +537,7 @@ static int slot_hovered_id(sh_iface *self)
     return hovered;
 }
 
-/* +0x28 IS-VALID id: entity[id]+8 != 0 (pr's validity rule). */
+/* A valid entity has a nonnull decl pointer at +8. */
 static int slot_is_valid_id(sh_iface *self, int id)
 {
     (void)self;
@@ -696,7 +550,7 @@ static int slot_is_valid_id(sh_iface *self, int id)
     return vflag != NULL;
 }
 
-/* +0x10 ENTITY COUNT: the loaded-map entity array count. */
+
 static int slot_entity_count(sh_iface *self)
 {
     (void)self;
@@ -705,18 +559,8 @@ static int slot_entity_count(sh_iface *self)
     return (int)count;
 }
 
-/* the entity's MODULE INDEX -- AUTHORITATIVE per-entity read. The engine stores each entity's instance(module)
- * index in the array pointed to at lm+0x6f0 (registrar FUN_1405a4520 writes *(*(lm+0x6f0)+id*4) on create; the
- * world-builder rebuilds it from the instanceEntities CSR on load). A genuinely-new / orphan / global entity
- * carries instanceIdx == module-COUNT (the engine's no-module sentinel). Returns the real module index, or -1 for
- * global/no-module. O(1) -- no cache needed -- consistent in-session and post-reload, and never mislabels a global
- * entity. All reads SEH-guarded: a stale offset yields -1 (the "(no module)" form), never a crash.
- *
- * REPLACES the old position-boundary heuristic (build_module_cache: walk lm+0x708 placement positions vs lm+0x720
- * boundaries). That heuristic was a best-effort port that could assign a WRONG module to a global entity (e.g. a
- * just-spawned host showing a module-path it does not actually belong to). RE: spawn-entity-registration-re +
- * module-spatial-resolve-re proved module membership IS this per-entity instance index (the engine performs no
- * spatial fold), so reading it directly is both simpler and correct. */
+/* Read authoritative instance membership. Index == module count is global;
+ * return -1 for that sentinel or an unavailable/out-of-range index. */
 static int id_module_index(const uint8_t *lm, uint32_t id)
 {
     void *idxArr = NULL; int instIdx = 0, modCnt = 0;
@@ -726,24 +570,18 @@ static int id_module_index(const uint8_t *lm, uint32_t id)
     return (instIdx >= 0 && instIdx < modCnt) ? instIdx : -1;   /* instIdx == modCnt => global/no-module */
 }
 
-/* +0x18 resolve id -> string (the Entities-list item + the Entity-State id box). TWO tiers:
- *  - OG module-path (port of FUN_180003c80): "<modidx>_<modname>/<inherit>_<id>" -- the module is resolved via
- *    the loaded-map module table (id_module_index = FUN_180003ba0); the module NAME is a DOUBLE deref
- *    *(*(modTable + idx*0x98) + 0x48) -- the table at +0x750 is an array of module-object PTRS, not inline
- *    structs (a single deref reads empty). Live-validated 2026-06-23: entity 56 ->
- *    "0_blank_room_4x/snapmaps/visblockers/industrial/cap_05_56".
- *  - DESCRIPTIVE fallback: "<id>: <classname>" (a bare decimal is not useful) -- the classname is read from
- *    defsub+0x60 (the live-proven slot_get_classname field), for entities with no module. Degrades to the bare
- *    decimal only if even the classname is unreadable. All SEH-guarded; a stale offset never crashes. */
+/* Format module_index_module_name/inherit_id. The table entry contains a
+ * module-object pointer whose +0x48 is the name pointer. Without a module,
+ * show inherit/class and ID with an explicit no-module marker. */
 static const char *slot_id_to_string(sh_iface *self, int id, char *buf, int cap)
 {
     (void)self;
     if (!buf || cap <= 0) return "";
     buf[0] = '\0';
-    char clsbuf[128] = {0};   /* the entity classname (defsub+0x60) -- zero-init keeps it NUL-terminated */
-    char inhbuf[160] = {0};   /* the entity inherit slug (defsub+0x58) -- BOTH the module-path tail AND the no-module form use it */
+    char clsbuf[128] = {0};
+    char inhbuf[160] = {0};
     __try {
-        /* read className (defsub+0x60) + inherit (defsub+0x58) once -- the ingredients for both branches. */
+
         void *array = NULL; uint32_t count = 0;
         if (entity_array(&array, &count)) {
             void *ent = entity_ptr(array, count, id), *defsub = NULL, *cp = NULL, *ip = NULL;
@@ -758,14 +596,13 @@ static const char *slot_id_to_string(sh_iface *self, int id, char *buf, int cap)
                 }
             }
         }
-        /* AUTHORITATIVE module-path: id_module_index reads the engine's per-entity instance index (-1 = global). */
+
         const uint8_t *ed = editor_session();
         void *lm = NULL;
         if (ed && ie_read_ptr(ed + ED_MAP_OBJ_OFF, &lm) && lm) {
             int modIdx = id_module_index((const uint8_t *)lm, (uint32_t)id);
             if (modIdx >= 0) {
-                /* module NAME = *(*(modTable + idx*0x98) + 0x48) -- DOUBLE deref (the table is module-object PTRs;
-                 * a single deref lands mid-struct + reads empty). Live-validated 2026-06-23. */
+                /* Dereference the table entry, then its module-name pointer. */
                 const char *modName = NULL;
                 void *modTable = NULL, *modObj = NULL, *np = NULL;
                 if (ie_read_ptr((const uint8_t *)lm + LM_MODTABLE_OFF, &modTable) && modTable &&
@@ -780,31 +617,21 @@ static const char *slot_id_to_string(sh_iface *self, int id, char *buf, int cap)
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { buf[0] = '\0'; }
-    /* NO module (the engine's global bucket): a just-created / orphan / not-yet-saved entity -- OG-FAITHFUL (the
-     * engine performs no spatial fold; a fresh entity is genuinely module-less in-session and gains its module
-     * path on save). Show the inherit + id + an explicit "(no module)" so it reads as an intentional new/global
-     * entity, NOT the alarming "<id>: <className>" that looked like ID corruption. RE: module-spatial-resolve-re. */
+    /* Global or unresolved membership is explicit and is not a usable target reference. */
     if (inhbuf[0])      _snprintf_s(buf, (size_t)cap, _TRUNCATE, "%s_%d (no module)", inhbuf, id);
     else if (clsbuf[0]) _snprintf_s(buf, (size_t)cap, _TRUNCATE, "%s_%d (no module)", clsbuf, id);
     else                _snprintf_s(buf, (size_t)cap, _TRUNCATE, "%d (no module)", id);
     return buf;
 }
 
-/* PUBLIC wrapper over slot_id_to_string -- resolve an entity id to its full module-qualified id-string (the
- * `targets`-field ref form "<modidx>_<modname>/<inherit>_<id>"). A GLOBAL entity yields the "<inherit>_<id>
- * (no module)" form, which has no resolvable ref -- the caller must reject that. Used by the sh_target_any
- * targets-write (Fix B, apply_engine). */
+/* Target-reference wrapper; callers reject the no-module form. */
 const char *ie_resolve_id_string(int id, char *buf, int cap)
 {
     return slot_id_to_string(NULL, id, buf, cap);
 }
 
-/* +0x48 classname (filtcls + the Entity-State read-sync): read defsub+0x60 (the className idStr's data ptr)
- * DIRECTLY, matching the OG (FUN_1800068e0 reads *(defsub+0x60)). This reflects a MORPH IMMEDIATELY (the RAW
- * field the +0x268 atomic apply / the re-assert writes), unlike the resolved-decl blob *(ent+8)+0x1c8+0x38
- * which LAGS until a decl re-resolve (declsource-rebuild-trace: the blob refreshes only on the rebuild's
- * notify, so after a morph the box would show the OLD class until a re-resolve). Same direct read
- * sh_iface_class_inherit_ok uses (live-proven this session). */
+/* Read the pooled classname directly so morphs appear before resolved
+ * source blobs refresh. */
 static const char *slot_get_classname(sh_iface *self, int id, char *buf, int cap)
 {
     (void)self;
@@ -822,7 +649,7 @@ static const char *slot_get_classname(sh_iface *self, int id, char *buf, int cap
     return buf;
 }
 
-/* +0x50 inherit (filtinh): *(ent+0x158)->+0x38 decl-source blob, parse `inherit = "..."`. */
+/* Read inherit from the defsub source blob, which can lag a raw-field change. */
 static const char *slot_get_inherit(sh_iface *self, int id, char *buf, int cap)
 {
     (void)self;
@@ -836,14 +663,11 @@ static const char *slot_get_inherit(sh_iface *self, int id, char *buf, int cap)
     return parse_decl_field((const uint8_t *)defsub + DECL_BLOB_B_OFF, "inherit", buf, cap);
 }
 
-/* +0x1b8 TOAST(title,text): build two idStr temporaries, call Toast(screen,title,text), free. Faithful to
- * the reference implementation showToast (the 48-byte idStr stack objects + the ctor/dtor pairing). */
+/* Construct title/text idStr objects, show the toast, then destroy both. */
 static void slot_toast(sh_iface *self, const char *title, const char *text)
 {
     (void)self;
-    /* diagnostic: log every toast (title/text) to the backend log BEFORE the engine-side guards -- a robust,
-     * non-transient signal that an op fired + its exact text (the in-game toast is too brief to screenshot, and
-     * may not render at all if the editor menu-screen ptr is null in some modes). Clone-side only, not a game change. */
+    /* Log before editor guards so unavailable/short-lived toasts remain observable. */
     {
         char _tl[256];
         _snprintf_s(_tl, sizeof _tl, _TRUNCATE, "C2 toast: \"%s\" / \"%s\"", title ? title : "", text ? text : "");
@@ -854,7 +678,7 @@ static void slot_toast(sh_iface *self, const char *title, const char *text)
     if (!ed) return;
     void *screen = NULL;
     if (!ie_read_ptr(ed + ED_SCREEN_OFF, &screen) || screen == NULL) return;
-    /* idStr temporaries on the stack (48 bytes each). */
+
     uint8_t tStr[IDSTR_SIZE], xStr[IDSTR_SIZE];
     memset(tStr, 0, sizeof tStr);
     memset(xStr, 0, sizeof xStr);
@@ -863,16 +687,14 @@ static void slot_toast(sh_iface *self, const char *title, const char *text)
         g_idstr_ctor(xStr, text  ? text  : "");
         g_toast(screen, tStr, xStr);
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    /* free heap the idStr may have attached (dtor is SSO/heap-guarded). order mirrors the reference implementation (x then t). */
+    /* Destructors release heap storage and preserve inline buffers. */
     __try { g_idstr_dtor(xStr); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     __try { g_idstr_dtor(tStr); } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-/* ================================================================ DATA-tab slot bodies ===
- * Faithful ports of the OG XINPUT1_3 slot bodies (FUN_180007230/65b0/6a20/6ab0/72a0/6850/6ba0/6bc0/73c0).
- * Every editor deref is SEH-guarded + non-null gated -> a shifted-build offset degrades to a clean no-op. */
+/* Entity-state editing. */
 
-/* resolve entity[id]+0x158 (the def-subobj, the Save-to-Decl commit target). NULL on no map / fault. */
+
 static void *defsub_for_id(int id)
 {
     void *array = NULL; uint32_t count = 0;
@@ -884,7 +706,7 @@ static void *defsub_for_id(int id)
     return defsub;
 }
 
-/* +0x58 GET displayname (Entity-State read): entity[id]+0x178 len / +0x180 data. OG FUN_180007230. */
+/* Copy display name using the full idStr length/data fields. */
 static const char *slot_get_displayname(sh_iface *self, int id, char *buf, int cap)
 {
     (void)self;
@@ -907,8 +729,7 @@ static const char *slot_get_displayname(sh_iface *self, int id, char *buf, int c
     return buf;
 }
 
-/* +0x30 GET decl-source (Entity-State read, the QPlainTextEdit): defsub+0x140 data / +0x138 len. OG
- * FUN_1800065b0. The clone reads the SAME canonical decl-source the Save-to-Decl rebuild re-emits. */
+/* Copy canonical source text used by Save to Decl. */
 static const char *slot_get_declsource(sh_iface *self, int id, char *buf, int cap)
 {
     (void)self;
@@ -930,32 +751,15 @@ static const char *slot_get_declsource(sh_iface *self, int id, char *buf, int ca
     return buf;
 }
 
-/* +0x78 SET classname: IdStrAssign(defsub+0x60, cstr). OG FUN_180006a20 -> FUN_180004140. The OG guards a
- * non-empty string; we match (empty -> skip).
- *
- * LAYER C (crash prevention, 2026-06-22): the OG Save-to-Decl does NO compatibility check -- a class that
- * does not derive from the inherit's base type then FATALLY faults the engine's decl reparse with "Class X
- * does not derive from Y" Error(6). That Error is caught by an INNER engine handler BEFORE idCommonLocal::
- * Frame, so the fault-shield can NOT recover it (prevent-not-recover; error-dispatcher-and-recovery.md). So
- * we apply the engine's EXACT rule up front (sh_iface_class_inherit_ok): the class is accepted iff it derives
- * from the inherit decl's base type Y (sh_typeinfo_inherit_base + the validator's own type-hierarchy walk).
- * The reject is NON-fatal: log it + leave the change unchanged. An unresolvable inherit/type (fail-open) does
- * NOT block. This ALLOWS any valid class+inherit pair -- users can morph an entity into any family the engine
- * would accept (incl. cross-family + sibling morphs) -- and rejects ONLY the combos that would crash. */
-/* LAYER C shared guard: would entity `id`'s class+inherit be ACCEPTED by the engine decl validator after this
- * change? `newClass`/`newInherit` are the values being set (NULL/empty = that field is unchanged -- read the
- * live value from defsub+0x60 className / defsub+0x58 inherit). The validator's rule: the className must
- * derive from the inherit decl's base type Y. Returns 1 = OK or uncertain (apply), 0 = definite "does not
- * derive" (REJECT + logged -- this is the combo that fatally faults the reparse). Fail-open on any uncertainty
- * (defsub/inherit/type unresolvable, empty). Shared by slot_set_classname (+0x78), slot_set_inherit (+0x80),
- * and ae_apply_one (the bss-apply path, which deserializes a patched JSON -> the validator). */
+
+/* Reject known class/inherit derivation mismatches before engine parsing.
+ * Null/empty arguments retain live values. Missing types/decls fail open;
+ * this checks the known fatal mismatch, not all declaration validity. */
 int sh_iface_class_inherit_ok(int id, const char *newClass, const char *newInherit)
 {
     void *defsub = defsub_for_id(id);
     if (!defsub) return 1;
-    /* The class + inherit this change RESULTS IN: the new value where supplied, else the entity's live value
-     * (defsub+0x60 className / +0x58 inherit -- the idStr data ptrs the SET writes; slot_get_classname reads
-     * BLANK on this build, reference-entity-layout-offsets-build-specific). */
+    /* Read live pooled fields for whichever values the caller did not supply. */
     char clsbuf[256], inhbuf[256]; clsbuf[0] = '\0'; inhbuf[0] = '\0';
     const char *cls = (newClass   && newClass[0])   ? newClass   : NULL;
     const char *inh = (newInherit && newInherit[0]) ? newInherit : NULL;
@@ -969,10 +773,10 @@ int sh_iface_class_inherit_ok(int id, const char *newClass, const char *newInher
     }
     if (!cls || !inh) return 1;                       /* can't determine the resulting pair -> fail-open */
     char ybuf[256];
-    const char *Y = sh_typeinfo_inherit_base(inh, ybuf, sizeof ybuf);   /* the inherit's required base class */
-    if (!Y || !Y[0]) return 1;                        /* inherit decl not resolvable -> fail-open */
-    if (strcmp(cls, Y) == 0) return 1;                /* class IS the base -> trivially derives */
-    if (sh_typeinfo_class_derives(cls, Y) == 0) {     /* definite "does not derive" -> the fatal combo */
+    const char *Y = sh_typeinfo_inherit_base(inh, ybuf, sizeof ybuf);
+    if (!Y || !Y[0]) return 1;
+    if (strcmp(cls, Y) == 0) return 1;
+    if (sh_typeinfo_class_derives(cls, Y) == 0) {     /* Known incompatible pair. */
         char msg[360];
         _snprintf_s(msg, sizeof msg, _TRUNCATE,
             "B2 iface: class/inherit change REJECTED -- class '%s' does not derive from inherit '%s's base "
@@ -980,7 +784,7 @@ int sh_iface_class_inherit_ok(int id, const char *newClass, const char *newInher
         backend_log(msg);
         return 0;
     }
-    return 1;                                          /* derives, or uncertain -> apply */
+    return 1;
 }
 
 static void slot_set_classname(sh_iface *self, int id, const char *cstr)
@@ -989,32 +793,27 @@ static void slot_set_classname(sh_iface *self, int id, const char *cstr)
     if (!g_idstr_assign || !cstr || !cstr[0]) return;
     void *defsub = defsub_for_id(id);
     if (!defsub) return;
-    if (!sh_iface_class_inherit_ok(id, cstr, NULL)) return;  /* LAYER C: new class vs the CURRENT inherit's base */
+    if (!sh_iface_class_inherit_ok(id, cstr, NULL)) return;
     __try { g_idstr_assign((uint8_t *)defsub + DEFSUB_CLASS_OFF, cstr); }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-/* +0x80 SET inherit: IdStrAssign(defsub+0x58, cstr). OG FUN_180006ab0 -> FUN_180004070. */
+
 static void slot_set_inherit(sh_iface *self, int id, const char *cstr)
 {
     (void)self;
     if (!g_idstr_assign || !cstr || !cstr[0]) return;
     void *defsub = defsub_for_id(id);
     if (!defsub) return;
-    if (!sh_iface_class_inherit_ok(id, NULL, cstr)) return;  /* LAYER C: the CURRENT class vs the NEW inherit's base */
+    if (!sh_iface_class_inherit_ok(id, NULL, cstr)) return;
     __try { g_idstr_assign((uint8_t *)defsub + DEFSUB_INHERIT_OFF, cstr); }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-/* +0x268 (clone-extension slot 0) ATOMIC class+inherit set. The per-slot +0x78/+0x80 guards each validate ONE
- * field against the OTHER field's CURRENT (live) value -- so a cross-family MORPH (change BOTH) trips the guard
- * at the half-applied intermediate even when the FINAL pair is valid. This slot checks the FINAL pair ONCE
- * (both args non-NULL -> sh_iface_class_inherit_ok validates the pair directly, which also SIDESTEPS the
- * build-specific defsub+0x60/+0x58 live-read the single-field guards depend on), then writes BOTH idStr fields
- * directly (no per-slot guard). cls/inh NULL/empty = keep that field (degrades to the single-field semantics).
- * Returns 1 = at least one field written (applied), 0 = rejected (the fatal combo) / no map / unbound. The
- * CALLER drives the ONE +0x40 decl-rebuild after a 1, and MUST skip the rebuild on a 0 (the rejected fatal
- * pair -- else the rebuild reparses the fatal headers and re-introduces the crash the guard just prevented). */
+/* Validate the final class/inherit pair once, avoiding invalid intermediate
+ * checks during cross-family morphs. Null/empty leaves a field unchanged.
+ * Writes have separate fault guards: 1 means at least one write succeeded,
+ * not an atomic transaction. The caller rebuilds once after success. */
 static int slot_apply_class_inherit(sh_iface *self, int id, const char *cls, const char *inh)
 {
     (void)self;
@@ -1023,11 +822,10 @@ static int slot_apply_class_inherit(sh_iface *self, int id, const char *cls, con
     if (!defsub) return 0;
     const char *c = (cls && cls[0]) ? cls : NULL;
     const char *h = (inh && inh[0]) ? inh : NULL;
-    if (!c && !h) return 0;                                   /* nothing to do */
-    if (!sh_iface_class_inherit_ok(id, c, h)) return 0;       /* the fatal combo -> reject, no write */
+    if (!c && !h) return 0;
+    if (!sh_iface_class_inherit_ok(id, c, h)) return 0;
     int wrote = 0;
-    /* inherit first, then class -- mirrors the bsincls order so the caller's single +0x40 rebuild re-emits a
-     * defsub whose BOTH fields are already the new values. */
+    /* Write inherit before class, then let the caller rebuild the source header. */
     if (h) { __try { g_idstr_assign((uint8_t *)defsub + DEFSUB_INHERIT_OFF, h); wrote = 1; }
              __except (EXCEPTION_EXECUTE_HANDLER) {} }
     if (c) { __try { g_idstr_assign((uint8_t *)defsub + DEFSUB_CLASS_OFF,   c); wrote = 1; }
@@ -1035,13 +833,11 @@ static int slot_apply_class_inherit(sh_iface *self, int id, const char *cls, con
     return wrote;
 }
 
-/* +0x128 SET displayname: IdStrAssign(entity[id]+0x170, cstr). OG FUN_1800072a0 (engine 0x19fd5f0, an idStr
- * assign-from-cstr sibling -- we reuse the sig-resolved IdStrAssign 0x1a03e10, same (idStr* dst, cstr)
- * ABI). The OG does NOT guard the string non-empty here (it assigns even an empty displayname). */
+/* Assign the full display-name idStr through IdStrAssignCStr; empty names are allowed. */
 static void slot_set_displayname(sh_iface *self, int id, const char *cstr)
 {
     (void)self;
-    if (!g_idstr_opassign) return;   /* displayName = a FULL idStr -> operator= (0x19fd5f0), NOT the pool assign */
+    if (!g_idstr_opassign) return;
     void *array = NULL; uint32_t count = 0;
     if (!entity_array(&array, &count)) return;
     void *ent = entity_ptr(array, count, id);
@@ -1050,9 +846,7 @@ static void slot_set_displayname(sh_iface *self, int id, const char *cstr)
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-/* +0x40 REBUILD+SET decl-source (the Save-to-Decl route): DeclSourceRebuild(defsub, cstr, 1). OG
- * FUN_180006850 -> FUN_180003fa0 (engine 0x17ae560). Re-emits the canonical inherit/class/pool header from
- * defsub+0x58/+0x60 + appends the edit body. The OG guards defsub != 0 + a non-null source ptr. */
+/* Rebuild canonical source headers from the current class/inherit and edit body. */
 static void slot_rebuild_declsource(sh_iface *self, int id, const char *cstr)
 {
     (void)self;
@@ -1063,15 +857,12 @@ static void slot_rebuild_declsource(sh_iface *self, int id, const char *cstr)
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-/* +0x130 REMOVE id from selection (Entities ctx-menu Delete): gated on editor+0x204d0 != 0 && id != -1.
- * OG FUN_1800073c0 -> engine 0x59fda0 (RemoveFromSelection).
- * Drops the mode back to idle once the removal empties the selection -- the mirror of the add/clear sync, so the
- * editor is never left believing something is selected over an empty array (see ED_MODE_OBJ_OFF). */
+/* Remove the ID from selection; synchronize idle state if selection becomes empty. */
 static void slot_remove_from_selection(sh_iface *self, int id)
 {
     (void)self;
     if (!g_remove_sel || id == -1) return;
-    if (manipulation_in_progress()) return;   /* see slot_clear_selection */
+    if (manipulation_in_progress()) return;
     const uint8_t *ed = editor_session();
     if (!ed) return;
     void *sel = NULL;
@@ -1082,43 +873,29 @@ static void slot_remove_from_selection(sh_iface *self, int id)
         mode_set_selection_state(MODE_STATE_IDLE);
 }
 
-/* +0x110 ENUMERATE the decls of a resource class (the Timeline-Editor constrained decl-comboboxes). The
- * frontend (FUN_18000994c port) reduces an idDecl* arg-type-name to its lowercased resource-class string
- * (e.g. "idDeclSoundShader*" -> "soundshader") and calls this. We GetDeclsOfType(res_class), walk the typed
- * decl-manager node (array @ +0x20, count @ +0x28, each decl's name @ *decl+8 -- the SAME node shape
- * sh_listres walks), and PACK the names into out_buf as consecutive NUL-terminated strings.
- * Returns 1 on success (+ *out_count set), 0 on unknown type / no decls / unresolved GetDeclsOfType (the
- * frontend then falls back to a plain string box -- faithful to the OG cVar8=='\0' branch). SEH-guarded:
- * a stale/shifted node degrades to a clean 0. */
+/* Pack decl names for a short decl type into NUL-separated output. */
 static int slot_enum_decls_of_resclass(sh_iface *self, const char *res_class, char *out_buf, int cap,
                                        int *out_count)
 {
     (void)self;
-    /* REPOINTED off engine GetDeclsOfType: that is the engine's ASSET registry (idImage/idMD6Anim/...) and
-     * LOGS "Unknown resource class '%s'" to the in-game console on a decl-type miss -- the spam seen when
-     * clicking timeline events with decl-pointer args. The decl-combo feed is the NON-LOGGING declManager
-     * decl-type enumerator in sh_typeinfo (reflect = declMgr->[+0x80]; FindByName + the instance-list walk;
-     * RE: timeline-decl-resclass-re, OG XINPUT +0x100 FUN_180006eb0). `res_class` IS the decl-type
-     * short-name (the frontend reduces the arg type-name to it, e.g. "sound"/"projectile"); an unknown type
-     * degrades to 0 SILENTLY -> the combo stays editable, no console spam. (g_get_decls/GetDeclsOfType stays
-     * resolved for any future asset-registry use but is no longer on this path.) */
+    /* Use the non-logging decl-manager enumerator. GetDeclsOfType belongs to
+ * the asset registry and logs errors for these decl-type names. */
     return sh_typeinfo_enum_decls_of_type(res_class, out_buf, cap, out_count);
 }
 
-/* pack a NUL string into out_buf at *pw (double-NUL-able); bumps *pw + returns 1 if it fit, else 0. */
+/* Append a NUL-terminated name while reserving the final arena terminator. */
 static int vcm_pack(char *out_buf, int cap, int *pw, const char *s)
 {
     int nlen = (int)strlen(s);
-    if (*pw + nlen + 1 > cap - 1) return 0;          /* leave room for the trailing arena NUL */
+    if (*pw + nlen + 1 > cap - 1) return 0;
     memcpy(out_buf + *pw, s, (size_t)nlen);
     out_buf[*pw + nlen] = '\0';
     *pw += nlen + 1;
     return 1;
 }
 
-/* ---- local derive-from-Y over the walked type records. The frontend's UI thread (where these dropdowns run) cannot
- * call the engine's reflect-based derive check, so we sort the LIVE registry records by name once and chain
- * each candidate's super up the tree by bsearch -- all raw reads, thread-safe. ---- */
+/* Sort collected type records and walk superclass names locally. This avoids
+ * reflect-based engine calls from the dropdown's UI thread. */
 static int ec_rec_cmp(const void *a, const void *b)
 {
     return strcmp(((const sh_ti_record *)a)->name, ((const sh_ti_record *)b)->name);
@@ -1129,7 +906,7 @@ static const char *ec_super_of(const sh_ti_record *sorted, int n, const char *na
     const sh_ti_record *r = (const sh_ti_record *)bsearch(&key, sorted, (size_t)n, sizeof(sh_ti_record), ec_rec_cmp);
     return r ? r->super : NULL;
 }
-/* Does C derive from (or == ) Y, chaining via the records' super names? Bounded (128 levels). */
+/* Follow at most 128 superclass links, including equality. */
 static int ec_derives(const sh_ti_record *sorted, int n, const char *C, const char *Y)
 {
     const char *cur = C;
@@ -1139,7 +916,7 @@ static int ec_derives(const sh_ti_record *sorted, int n, const char *C, const ch
     }
     return 0;
 }
-/* the static-snapshot fallback (used only if the live registry is unreachable) -- the old corpus map. */
+/* Static corpus fallback when the live registry cannot be collected. */
 static int ec_fallback_valid_classes(const char *inherit, char *out_buf, int cap, int *written, int *names)
 {
     const char *ey = NULL;
@@ -1155,15 +932,9 @@ static int ec_fallback_valid_classes(const char *inherit, char *out_buf, int cap
     return 0;
 }
 
-/* +0x270 (clone-extension slot 1) ENUMERATE the valid classes for `inherit` (the linked class dropdown) ->
- * packed NUL-terminated strings (double-NUL end). Resolves Y = the inherit's base className; an EMPTY or
- * unresolvable inherit -> "idEntity" (the universal entity set -- the engine accepts a class-only entity, so
- * an empty inherit admits any idEntity class, per our RE of the engine). Then walks the LIVE
- * reflection type registry and packs every className that == Y or derives from Y. COMPLETE + THREAD-SAFE: the
- * walk roots the type array via the container global on the UI thread (reflect is null there), and
- * derive-from-Y chains LOCALLY via each record's super -- NO reflect-based engine call. Fallback: if the live
- * registry is unreachable, the static valid_class_map corpus snapshot. (Replaces the old SH_CLASS_UNIVERSE(412)
- * candidates + live derive-check, which returned null off the game thread -> fell back to the 70-group map.) */
+/* Enumerate classes derived from the inherit's base using collected live
+ * type records; use idEntity when inherit is empty/unresolved. Fall back to
+ * the static corpus if collection fails. Output is bounded by caller capacity. */
 static int slot_enum_valid_classes(sh_iface *self, const char *inherit, char *out_buf, int cap, int *out_count)
 {
     (void)self;
@@ -1174,22 +945,22 @@ static int slot_enum_valid_classes(sh_iface *self, const char *inherit, char *ou
     char ybuf[256];
     const char *Y = NULL;
     if (inherit && inherit[0]) Y = sh_typeinfo_inherit_base(inherit, ybuf, sizeof ybuf);
-    if (!Y || !Y[0]) Y = "idEntity";      /* empty/unresolvable inherit -> the universal class-only set */
+    if (!Y || !Y[0]) Y = "idEntity";
 
-    static sh_ti_record recs[SH_REGISTRY_MAX];   /* dropdown repopulate is UI-thread-serial -> static ok */
+    static sh_ti_record recs[SH_REGISTRY_MAX];   /* Shared scratch: callers must serialize dropdown enumeration. */
     int k = sh_typeinfo_collect_records(recs, SH_REGISTRY_MAX);
     int written = 0, names = 0;
     if (k > 0) {
-        qsort(recs, (size_t)k, sizeof(sh_ti_record), ec_rec_cmp);   /* sorted -> bsearch super chain + alpha output */
+        qsort(recs, (size_t)k, sizeof(sh_ti_record), ec_rec_cmp);
         for (int i = 0; i < k; i++) {
             const char *C = recs[i].name;
-            if (C && C[0] && ec_derives(recs, k, C, Y)) {           /* C==Y is handled inside ec_derives */
+            if (C && C[0] && ec_derives(recs, k, C, Y)) {
                 if (!vcm_pack(out_buf, cap, &written, C)) break;
                 names++;
             }
         }
     } else if (inherit && inherit[0]) {
-        ec_fallback_valid_classes(inherit, out_buf, cap, &written, &names);   /* live registry unreachable */
+        ec_fallback_valid_classes(inherit, out_buf, cap, &written, &names);
     }
 
     out_buf[written] = '\0';               /* double-NUL end marker */
@@ -1197,11 +968,8 @@ static int slot_enum_valid_classes(sh_iface *self, const char *inherit, char *ou
     return names > 0 ? 1 : 0;
 }
 
-/* +0x278 (clone-extension slot 2) ENUMERATE the complete valid-INHERIT set -- every loaded entityDef (the
- * inherit dropdown). Raw walk of the entityDef decl manager (sh_typeinfo_collect_inherits) -> thread-safe on
- * the UI thread. Packs the decl paths (sorted + adjacent-deduped) into out_buf. Returns 0 if the manager is
- * unreachable (the frontend then keeps its static list). Replaces the frozen 272-entry inherit list with the
- * engine's full ~2,500. */
+/* Collect loaded entityDef names, sort/deduplicate, and pack into caller storage.
+ * An unreachable manager returns zero for the frontend's static fallback. */
 static int ec_cstr_ptr_cmp(const void *a, const void *b)
 {
     return strcmp(*(const char * const *)a, *(const char * const *)b);
@@ -1213,13 +981,13 @@ static int slot_enum_inherits(sh_iface *self, char *out_buf, int cap, int *out_c
     if (cap > 0 && out_buf) out_buf[0] = '\0';
     if (!out_buf || cap <= 1) return 0;
 
-    static const char *names[SH_REGISTRY_MAX];   /* UI-thread-serial -> static ok */
+    static const char *names[SH_REGISTRY_MAX];   /* Shared scratch: callers must serialize dropdown enumeration. */
     int k = sh_typeinfo_collect_inherits(names, SH_REGISTRY_MAX);
     if (k <= 0) return 0;
-    qsort((void *)names, (size_t)k, sizeof(const char *), ec_cstr_ptr_cmp);   /* alpha + adjacent-dedup (cast: C4090) */
+    qsort((void *)names, (size_t)k, sizeof(const char *), ec_cstr_ptr_cmp);   /* Sort for adjacent deduplication; cast removes top-level pointer const. */
     int written = 0, cnt = 0;
     for (int i = 0; i < k; i++) {
-        if (i > 0 && strcmp(names[i], names[i - 1]) == 0) continue;   /* dedup (sorted) */
+        if (i > 0 && strcmp(names[i], names[i - 1]) == 0) continue;
         if (!vcm_pack(out_buf, cap, &written, names[i])) break;
         cnt++;
     }
@@ -1228,14 +996,8 @@ static int slot_enum_inherits(sh_iface *self, char *out_buf, int cap, int *out_c
     return cnt > 0 ? 1 : 0;
 }
 
-/* +0xc0 RESOLVE prefab path: %LOCALAPPDATA%\snapmap-plus\<prefix><name>.json. Port of OG FUN_18000ce50:
- * SHGetFolderPathA(CSIDL_PROFILE=0x28) + "/snaphak/" + prefix + name (the OG's profile-dir path; ours
- * lives in the consolidated %LOCALAPPDATA%\snapmap-plus\ data root). `prefix` = "prefabs/" (the OG passes
- * the prefabs\ literal). The `.json` suffix is appended by the FRONTEND (matching the OG, which does
- * FUN_1800050c4(prefix,name) + FUN_1800051bc(...,".json") -- here we resolve the DIR+prefix and the caller
- * concatenates name+".json"). To keep ONE call faithful to FUN_18000ce50's shape (path = <data-root> +
- * prefix), the FRONTEND passes prefix="prefabs/" and name=<name>.json so out_path is the full file path.
- * Pure Win32 (no engine fns). Returns 1 on success. */
+/* Join the local app-data root, snapmap-plus, prefix, and name. The caller
+ * supplies separators and any .json suffix. This is path formatting only. */
 static int slot_resolve_prefab_path(sh_iface *self, const char *prefix, const char *name,
                                     char *out_path, int cap)
 {
@@ -1244,7 +1006,7 @@ static int slot_resolve_prefab_path(sh_iface *self, const char *prefix, const ch
     out_path[0] = '\0';
     char base[MAX_PATH];
     base[0] = '\0';
-    /* SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base) -- the local app-data dir. */
+
     HRESULT hr = SHGetFolderPathA(NULL, 0x1c /*CSIDL_LOCAL_APPDATA*/, NULL, 0, base);
     if (FAILED(hr)) return 0;
     _snprintf_s(out_path, (size_t)cap, _TRUNCATE, "%s/snapmap-plus/%s%s",
@@ -1252,10 +1014,8 @@ static int slot_resolve_prefab_path(sh_iface *self, const char *prefix, const ch
     return out_path[0] != '\0';
 }
 
-/* Lazily resolve + cache the snapEdit_enableDevLayer idCVar* by walking the cvarSys FULL list by name. Pure
- * memory reads + strcmp -> thread-safe on the UI thread. Returns NULL if unreachable (caller fail-safes to
- * "not hidden"). The cvarSys slot comes from glb_resolve; unresolved means we cannot reach the cvar and
- * the gate fails safe to "show everything" rather than reading a pinned address. */
+/* Lazily find the dev-layer cvar in the full registry. A miss leaves it
+ * unresolved; the visibility caller then behaves as though it were disabled. */
 static void *resolve_devlayer_cvar(void)
 {
     if (g_devlayer_cvar) return g_devlayer_cvar;
@@ -1274,19 +1034,18 @@ static void *resolve_devlayer_cvar(void)
         if (!ie_read_ptr((const uint8_t *)cv + DEVL_CVAR_NAME_OFF, &namep) || namep == NULL) continue;
         __try {
             if (strcmp((const char *)namep, DEVL_CVAR_NAME) == 0) { g_devlayer_cvar = cv; return cv; }
-        } __except (EXCEPTION_EXECUTE_HANDLER) { /* bad name ptr -> skip */ }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {   }
     }
     return NULL;
 }
 
-/* +0x280 (ext 3): is editor entity `id` currently HIDDEN by the dev-layer gate? 1 = hide it from the lists,
- * 0 = show. Mirrors the engine: hide iff snapEdit_enableDevLayer==0 AND (entity->layerBits & 1)==0. Every read
- * SEH-guarded; any fault / cvar-on / editor-down / unresolved-cvar -> 0 (never hide on uncertainty). */
+/* Return 1 for a non-base-layer entity unless the cvar is confirmed enabled.
+ * Missing/unreadable cvar values act as disabled; entity read failures show it. */
 static int slot_id_dev_layer_hidden(sh_iface *self, int id)
 {
     (void)self;
     if (id < 0) return 0;
-    /* cvar ON -> reveal everything (no dev-layer hiding). Unresolved cvar -> fall through (fail-safe show). */
+    /* Only a readable, enabled cvar bypasses the base-layer test. */
     void *cv = resolve_devlayer_cvar();
     if (cv != NULL) {
         int enabled = 0;
@@ -1299,44 +1058,36 @@ static int slot_id_dev_layer_hidden(sh_iface *self, int id)
     if (ent == NULL) return 0;
     uint32_t bits = 0;
     if (!ie_read_u32((const uint8_t *)ent + ENT_LAYER_BITS_OFF, &bits)) return 0;
-    return (bits & 1u) == 0 ? 1 : 0;   /* not in the base layer -> dev-layer -> hidden when the cvar is off */
+    return (bits & 1u) == 0 ? 1 : 0;   /* No base-layer bit. */
 }
 
-/* +0x288 ext 4: the wire-any connect-edit GENERATION counter. Bumped by wiring_cleandirect.c each time the
- * wire-any hook processes a target pick. A wire connect nets no entity-COUNT change, so the Studio entity
- * list (rebuilt only on a count change) leaves the chain's module-name labels stale until a manual refresh.
- * The UI think-loop polls THIS alongside entity_count and forces a list rebuild when it changes -- so the
- * labels auto-settle after a wire (via the wire_rebuild_frames re-scan window). */
+/* A wire edit can change labels without changing entity count. The UI uses
+ * this generation counter to trigger another entity-list read. */
 static int slot_wire_edit_generation(sh_iface *self) { (void)self; return sh_wiring_cleandirect_generation(); }
 
-/* +0x2A0 ext 7: push `ids` onto the backend-owned SnapStack stack `index` (dedup-on-push). Lets the
- * frontend (the webview host, which never links snapstack.c directly) reach the SAME stack a
- * `sh <subcommand>` console command typed afterward will see. */
+/* Push to the backend-owned stack shared with console commands. */
 static void slot_push_to_stack(sh_iface *self, int index, const int *ids, int count)
 {
     (void)self;
     sh_snapstack_push_ids_backend(index, ids, count);
 }
 
-/* +0x2A8 ext 8: empty the backend-owned SnapStack stack `index` -- the counterpart to
- * slot_push_to_stack above, lets the webview host's "Clear stack 0" context-menu action reach the same
- * stack without needing the DOOM console. */
+/* Clear the backend-owned stack and return its previous size. */
 static int slot_clear_stack(sh_iface *self, int index)
 {
     (void)self;
     return sh_snapstack_clear_stack_backend(index);
 }
 
-/* ================================================================ install ========================== */
+/* Installation. */
 
 int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *module_base)
 {
-    if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;   /* one-shot */
+    if (InterlockedCompareExchange(&g_installed, 1, 0) != 0) return 0;
 
     if (module_base) {
         glb_status est = GLB_OK;
-        /* Both data globals come from the code that computes them, never from a baked address. A miss
-         * leaves the pointer NULL and every dependent body below already returns its empty answer. */
+        /* Decode both globals from code references; misses remain null. */
         g_editor        = (const uint8_t *)glb_resolve(module_base, "editor_singleton", &est);
         g_cvarsys_slot  = (const uint8_t *)glb_resolve(module_base, "cvar_system_slot", NULL);
         if (!g_editor) {
@@ -1354,17 +1105,14 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     g_toast      = (toast_fn)sig_addr_by_name(results, n, "Toast");
     g_idstr_ctor = (idstr_ctor_fn)sig_addr_by_name(results, n, "IdStrCtor");
     g_idstr_dtor = (idstr_dtor_fn)sig_addr_by_name(results, n, "IdStrDtor");
-    /* the Entity-State setters + the Delete remover. All sig-resolved: a signature that matches exactly
-     * once identifies a function by its bytes, wherever the link put it, and an unresolved one leaves the
-     * pointer NULL so the slot body refuses instead of calling an address it cannot vouch for. */
+    /* Read shared signature results; callbacks check unresolved dependencies. */
     g_idstr_assign = (idstr_assign_fn)    sig_addr_by_name(results, n, "IdStrAssign");
     g_decl_rebuild = (decl_src_rebuild_fn)sig_addr_by_name(results, n, "DeclSourceRebuild");
     g_get_decls    = (get_decls_fn)       sig_addr_by_name(results, n, "GetDeclsOfType"); /* +0x110 */
     g_remove_sel     = (remove_from_sel_fn)sig_addr_by_name(results, n, "RemoveFromSelection"); /* +0x130 */
     g_idstr_opassign = (idstr_opassign_fn) sig_addr_by_name(results, n, "IdStrAssignCStr");     /* +0x128 */
 
-    /* Bind the vtable slots. We bind a body even when its engine fn is unresolved -- the body null-checks
-     * the fn (toast/clear/add no-op cleanly; the pure-read slots don't need an engine fn at all). */
+    /* Bind callbacks even when some engine dependencies are unavailable. */
     sh_iface_engine_slots slots;
     memset(&slots, 0, sizeof slots);
     slots.set_editor_vec3    = slot_set_editor_vec3;          /* +0x00  (camera) */
@@ -1381,7 +1129,7 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     slots.hovered_id         = slot_hovered_id;
     slots.is_entity_mode     = slot_is_entity_mode;          /* +0x1c0 (Create-New-Timeline gate / button gray-out) */
     slots.toast              = slot_toast;
-    /* the DATA-tab slots (Entity-State read/write + Prefabs path + Delete). */
+
     slots.get_declsource_copy    = slot_get_declsource;       /* +0x30  */
     slots.rebuild_set_declsource = slot_rebuild_declsource;   /* +0x40  */
     slots.get_displayname        = slot_get_displayname;      /* +0x58  */
@@ -1390,36 +1138,31 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     slots.set_displayname        = slot_set_displayname;      /* +0x128 */
     slots.resolve_prefab_path    = slot_resolve_prefab_path;  /* +0xc0  */
     slots.remove_from_selection  = slot_remove_from_selection;/* +0x130 */
-    /* the Timeline-Editor constrained decl-combobox enumerator (+0x110). */
+
     slots.enum_decls_of_resclass = slot_enum_decls_of_resclass;/* +0x110 */
-    /* clone-extension: the atomic class+inherit morph. */
+
     slots.apply_class_inherit    = slot_apply_class_inherit;  /* +0x268 ext 0 */
-    /* clone-extension: the class-dropdown enumerator. */
+
     slots.enum_valid_classes     = slot_enum_valid_classes;   /* +0x270 ext 1 */
-    /* clone-extension: the inherit-dropdown enumerator (the complete entityDef set). */
+
     slots.enum_inherits          = slot_enum_inherits;        /* +0x278 ext 2 */
-    /* clone-extension: the dev-layer entity-hidden query (Entities/Timelines list filter). */
+
     slots.id_dev_layer_hidden    = slot_id_dev_layer_hidden;  /* +0x280 ext 3 */
-    /* clone-extension: the wire-any connect-edit generation counter (entity-list re-read signal). */
+
     slots.wire_edit_generation   = slot_wire_edit_generation; /* +0x288 ext 4 */
-    /* fold in the heavy apply-chain slots (serialize entity +0xc8 / schedule-apply +0xd0 /
-     * read-prefab +0xb8). sh_apply_engine_install must have run first (dllmain orders it before this) so
-     * its engine fns are resolved; the slot bodies themselves null-check + degrade if a dep is missing. */
+    /* Apply installation runs first; collect its checked callbacks into this binding. */
     sh_apply_engine_get_slots(&slots.serialize_entity, &slots.apply_edit, &slots.read_prefab,
-                              &slots.apply_sync,        /* +0x290 SYNCHRONOUS inline apply (OG-faithful) */
+                              &slots.apply_sync,        /* +0x290 synchronous apply, marshaled when available. */
                               &slots.normalize_timeline_inherit); /* +0x298 palette-timeline portable-inherit */
-    /* the +0xb0 serialize-SELECTION->prefab slot also lives in the apply engine (it needs the
-     * serialize engine fns). Fold it into the same bind. */
+
     sh_apply_engine_get_serialize_selection(&slots.serialize_selection);
-    /* clone-extension: push onto the backend-owned SnapStack stack (out-of-process frontends only). */
+
     slots.push_to_stack          = slot_push_to_stack;        /* +0x2A0 ext 7 */
-    /* clone-extension: empty the backend-owned SnapStack stack (out-of-process frontends only). */
+
     slots.clear_stack            = slot_clear_stack;          /* +0x2A8 ext 8 */
-    /* clone-extension: "the editor is mid-manipulation" -- every selection mutation is refused while
-     * true, because the engine's Escape/cancel path would then corrupt the live map. */
+
     slots.manipulation_in_progress = slot_manipulation_in_progress;  /* +0x2C0 ext 11 */
-    /* clone-extension: FIND a material decl by name (cached-only lookup; the Revenant asset-viewport
-     * tab's first probe -- see typeinfo.c / sh_typeinfo_find_material). */
+
     slots.find_material           = slot_find_material;              /* +0x2C8 ext 12 */
     slots.get_preview             = slot_get_preview;                /* +0x2D0 ext 13 */
     slots.request_preview         = slot_request_preview;            /* +0x2D8 ext 14 */

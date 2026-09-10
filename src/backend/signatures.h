@@ -1,19 +1,6 @@
-/* signatures.h -- version-portable masked-byte engine-function resolver for the Snapmap+ BACKEND
- * (our clean-room XINPUT1_3.dll). C port of the reference implementation's signature table.
- *
- * SnapHak hardcodes `engineBase + rva` (build-locked to its 2021 DOOM). We instead carry a masked
- * byte SIGNATURE per engine function and scan the live DOOM module's executable bytes for it, so the
- * backend ports to an RVA-shifted DOOM with no Ghidra and no hardcoded RVAs (the build-mismatch
- * lesson, memory `reference-entity-layout-offsets-build-specific`). A signature pins exactly one
- * location or it is rejected -- a resolve that is not UNIQUE is a failure, never a guess.
- *
- * This runs against the ALREADY-MAPPED DOOM module in our own address space (GetModuleHandle gives the
- * runtime base; the PE headers + section table are present in-memory), not a file on disk -- so the
- * matcher reads each section's mapped virtual bytes directly, no RVA<->file-offset translation.
- *
- * (Self-contained: no dependency on the fault-shield DLL. The fault-shield is a SEPARATE proxy with a
- *  DIFFERENT signature; this resolver lives in and ships with the backend only.)
- */
+/* Masked-byte resolver for functions in the mapped engine executable.
+ * Scan executable sections independent of section names; reject ambiguous matches.
+ * A recorded RVA can also recognize a detoured entry after a signature miss. */
 #ifndef BACKEND_SIGNATURES_H
 #define BACKEND_SIGNATURES_H
 
@@ -21,9 +8,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* One masked byte signature for one engine function. `pattern` is an IDA-style hex string with `??`
- * (or `?`) wildcards for the volatile operand bytes; `known_rva` is the RVA the signature was
- * extracted at on the pinned build (validation / documentation only -- never used to locate). */
+/* IDA-style pattern with ?/?? wildcards. known_rva is an extraction-build
+ * reference and hook-tolerant fallback location; 0 disables that fallback. */
 typedef struct sig_entry {
     const char *name;
     const char *pattern;
@@ -36,10 +22,7 @@ typedef enum sig_status {
     SIG_AMBIGUOUS,      /* more than one match -- not unique enough to identify a function */
     SIG_BAD_PATTERN,    /* empty / malformed pattern, or pattern longer than the scan buffer */
     SIG_BAD_MODULE,     /* the module base is not a parseable PE32+ image */
-    SIG_OK_HOOKED       /* scan missed (prologue inline-hooked) but the known_rva fallback found the fn:
-                         * an E9/EB/FF-25/FF-/4 detour at known_rva + the sig's fixed TAIL still matches.
-                         * Resolved at known_rva (build-specific fallback). Calling it is transparent --
-                         * the detour trampolines to the original. See sig_resolve_one. */
+    SIG_OK_HOOKED       /* scan missed, but a detour at known_rva has a matching fixed tail */
 } sig_status;
 
 typedef struct sig_result {
@@ -49,11 +32,7 @@ typedef struct sig_result {
     uint32_t    rva;    /* recovered RVA, or 0 */
 } sig_result;
 
-/* How many sig_result slots every caller of sig_resolve_all must provide. Callers used to size that
- * array with a bare 64 and CLAMP the DB count down to it, so growing the database past 64 silently
- * dropped the last entries -- they never resolved, never failed, and never appeared in the resolve
- * report. That cost a debugging session when SoundStopSound became entry 65 (2026-08-04). Size the
- * array with this and never clamp; sh_smoke_run logs loudly if the DB ever outgrows it. */
+/* Shared results capacity. Check database growth rather than silently omitting entries. */
 #define SIG_RESULTS_MAX 128
 
 /* The shipped engine signature database. NULL-terminated
@@ -68,9 +47,8 @@ size_t sig_db_count(void);
 /* Resolve one signature over `module_base`'s executable sections. Returns the status; fills *out. */
 sig_status sig_resolve_one(const uint8_t *module_base, const sig_entry *sig, sig_result *out);
 
-/* Resolve the whole DB into the caller's `results` array (cap >= sig_db_count()). Returns the number
- * that resolved (status==SIG_OK from the scan, OR status==SIG_OK_HOOKED from the known_rva hook-tolerant
- * fallback -- both are present + callable). */
+/* Resolve up to cap database entries. Return the number with SIG_OK or
+ * SIG_OK_HOOKED. Callers should provide at least sig_db_count() slots. */
 size_t sig_resolve_all(const uint8_t *module_base, sig_result *results, size_t cap);
 
 /* Look up a single resolved address by name from a results array (returns 0 if not OK / not found). */

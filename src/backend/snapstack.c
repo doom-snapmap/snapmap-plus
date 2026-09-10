@@ -1,34 +1,7 @@
-/* snapstack.c -- see snapstack.h. The SnapStack stores + 20 `sh` subcommand handlers, in pure C.
- * Faithful to the original's semantics + VERBATIM toast text (including a fix for the original's
- * filtcls mislabel -- it reused filtinh's "had inherit" string); the JSON structural work (walk/create
- * a dotted path, dedup-merge a reference list) is delegated to json_patch.c.
- *
- * SECOND ATTEMPT (2026-07-13): a first port (commit e7ee129, 2026-07-09) was hard-reset out after a
- * live-tested regression. Postmortem: it predated TWO fixes established since
- * (see docs/backend-changes.md's deferred-apply writeup + the +0x298 normalize-timeline-inherit incident)
- * and carried both bugs itself: (1) every apply-op scheduled via the DEFERRED +0xd0 apply_edit -- the
- * exact split-commit-across-threads pattern that double-frees the decl-source block on the next map
- * teardown; (2) several persistent `static` scratch buffers (two 256KB JSON buffers x3 call sites, a 1MB
- * idstr_bufs[4096][256] table) -- the same BSS-footprint pattern that caused a controller-freelook
- * regression when tried on the timeline-inherit slot. This rewrite fixes both: every kind=0 apply-op now
- * tries the SYNCHRONOUS +0x290 apply_sync first (see ic_apply below), falling
- * back to the deferred schedule only for an old backend without the slot; mkcmd (kind=1, a different
- * operation that never exhibited the crash) stays on the deferred path, matching the original's
- * convention. All scratch buffers are heap-allocated transiently per call (malloc/free), never static/BSS.
- *
- * THREADING (issue #61, 2026-09-07). These handlers now execute on DOOM's MAIN thread: the `sh` console
- * dispatch (commands.c h_sh_dispatch) runs them inline at the engine's command-exec point instead of
- * bouncing them to the frontend's UI worker via the work-queue. That puts every engine touch an op makes
- * -- serialize, decl commit, selection writes, toast -- on the thread the engine expects, as one unit,
- * and keeps every applied-count synchronous. (The 2026-07-12 "deferred +0xd0 double-frees the block"
- * explanation referenced above was later OVERTURNED: the block has one owner in either design; the real
- * hazard was the allocation heap, now pinned in ae_apply_one. See docs/backend-changes.md.) The numbered
- * STACKS are still also reachable from the frontend's worker thread through the +0x2A0 push / +0x2A8
- * clear slots, so the stack stores are guarded by g_ss_lock below; the GROUPS are touched only by these
- * handlers (one thread) and stay lock-free.
- *
- * Clean-room: ported from our own RE. Zero OG SnapHak bytes.
- */
+/* Backend-owned SnapStack stores and console handlers. JSON span edits are
+ * delegated to json_patch.c. Console dispatch runs handlers on the engine main
+ * thread; frontend stack push/clear slots share the numbered stores under a lock.
+ * Named groups are used only by console handlers. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -40,13 +13,11 @@
 #include "snapstack.h"
 #include "snapmap_plus_iface.h"
 #include "json_patch.h"
-#include "commands.h"           /* sh_printf -- the snapstack_diag console report */
-#include "backend_log.h"        /* backend_log -- the snapstack_diag persisted summary */
-#include "mkcmd_template.inc"   /* SH_MKCMD_PREFAB_TEMPLATE_C -- the C-escaped embedded prefab template */
+#include "commands.h"
+#include "backend_log.h"
+#include "mkcmd_template.inc"
 
-/* ============================================================ the growable int array ================
- * A minimal realloc-doubling int vector -- the same "small, linear, no external deps" philosophy
- * snapmap_plus_iface.c's own cmd-map already uses. Backs both a single numbered stack and a named group. */
+/* Growable ID storage shared by numbered stacks and named groups. */
 typedef struct ss_ids {
     int *items;
     int  count;
@@ -69,20 +40,20 @@ static int ss_ids_contains(const ss_ids *v, int id)
     for (int i = 0; i < v->count; i++) if (v->items[i] == id) return 1;
     return 0;
 }
-/* dedup-on-push: append only ids not already present; returns #pushed (psel's body). */
+/* Append IDs not already present; return the number added. */
 static int ss_ids_push_dedup(ss_ids *v, const int *ids, int n)
 {
     int pushed = 0;
     for (int i = 0; i < n; i++) {
         if (ss_ids_contains(v, ids[i])) continue;
-        if (!ss_ids_reserve(v, v->count + 1)) break;      /* OOM -> stop pushing further (degrade, no crash) */
+        if (!ss_ids_reserve(v, v->count + 1)) break;
         v->items[v->count++] = ids[i];
         pushed++;
     }
     return pushed;
 }
-static void ss_ids_clear(ss_ids *v) { v->count = 0; }      /* cstk: empty IN PLACE, capacity kept */
-/* move_out: hand back a HEAP COPY of the ids + empty the source (FUN_180001d84). Caller frees *out. */
+static void ss_ids_clear(ss_ids *v) { v->count = 0; }
+/* Copy IDs to caller-owned memory and empty the source; caller frees out. */
 static int ss_ids_move_out(ss_ids *v, int **out)
 {
     if (!v) { *out = NULL; return 0; }
@@ -95,7 +66,7 @@ static int ss_ids_move_out(ss_ids *v, int **out)
     *out = copy;
     return n;
 }
-/* copy (non-consuming): hand back a HEAP COPY without touching the source (a named GROUP's reuse path). */
+/* Copy IDs to caller-owned memory without consuming the source. */
 static int ss_ids_copy_out(const ss_ids *v, int **out)
 {
     if (!v) { *out = NULL; return 0; }
@@ -109,19 +80,14 @@ static int ss_ids_copy_out(const ss_ids *v, int **out)
 }
 static void ss_ids_free(ss_ids *v) { free(v->items); v->items = NULL; v->count = 0; v->cap = 0; }
 
-/* ============================================================ the STACK-OF-STACKS =================== */
-#define SS_MAX_STACKS 256   /* generous vs. any real console usage; an absurd index arg clamps in, no grow needed */
+/* Numbered stacks. */
+#define SS_MAX_STACKS 256   /* Stack indices clamp into this fixed range. */
 static ss_ids g_stacks[SS_MAX_STACKS];
 
-/* The numbered stacks are touched from TWO threads since the issue #61 dispatch move: the `sh` handlers
- * on DOOM's main thread, and the frontend's +0x2A0 push_to_stack / +0x2A8 clear_stack slots on its UI
- * worker (the Entities-tab context menu). A concurrent realloc/memcpy would corrupt our own CRT heap, so
- * every stack MUTATION takes this lock. Plain count READS (toast lines, the >=2 precondition checks) stay
- * lock-free -- an aligned int read cannot tear, and a stale count only wobbles a toast number or lets a
- * bse/acc fall through to an empty move_out, which already degrades cleanly. Initialized once in
- * sh_register_snapstack_commands_backend, which runs on the backend bootstrap thread before the frontend
- * thread exists and before any command can execute; the lazy CAS guard is belt-and-suspenders for any
- * exotic call order. GROUPS need none of this: only the handlers (one thread) reach them. */
+/* Main-thread handlers and frontend push/clear slots can mutate numbered stacks.
+ * Lock mutations and snapshots so realloc cannot invalidate an active reader.
+ * Plain count checks remain unlocked and can be stale; named groups are main-thread
+ * only. Initialize before exposing commands or starting the frontend. */
 static CRITICAL_SECTION g_ss_lock;
 static volatile LONG    g_ss_lock_state = 0;   /* 0 uninit, 1 initializing, 2 ready */
 static void ss_lock_init(void)
@@ -144,7 +110,7 @@ static int ss_clamp_index(int index)
     return index;
 }
 static ss_ids *stack_get(int index) { return &g_stacks[ss_clamp_index(index)]; }
-/* every stack MUTATION goes through these three, under g_ss_lock (see its comment). */
+/* Centralize locked stack mutations. */
 static int stack_push(int index, const int *ids, int n)
 {
     ss_lock();
@@ -166,13 +132,13 @@ static int stack_move_out(int index, int **out)
     return n;
 }
 
-/* ============================================================ the named GROUPS ======================= */
+/* Named groups. */
 #define SS_GROUP_NAME_CAP 64
 typedef struct ss_group { char name[SS_GROUP_NAME_CAP]; ss_ids ids; } ss_group;
 static ss_group *g_groups = NULL;
 static int        g_group_count = 0, g_group_cap = 0;
 
-static ss_ids *group_get(const char *name)   /* lookup-or-insert (OG FUN_180003e9c) */
+static ss_ids *group_get(const char *name)
 {
     for (int i = 0; i < g_group_count; i++)
         if (strcmp(g_groups[i].name, name) == 0) return &g_groups[i].ids;
@@ -193,7 +159,7 @@ static int group_has(const char *name)
     for (int i = 0; i < g_group_count; i++) if (strcmp(g_groups[i].name, name) == 0) return 1;
     return 0;
 }
-/* pop2g's move-into swap: the group BECOMES `ids` (replacing whatever it held). */
+/* Replace a group's contents with these IDs. */
 static void group_set(const char *name, const int *ids, int n)
 {
     ss_ids *g = group_get(name);
@@ -201,22 +167,21 @@ static void group_set(const char *name, const int *ids, int n)
     ss_ids_free(g);
     if (n > 0 && ss_ids_reserve(g, n)) { memcpy(g->items, ids, (size_t)n * sizeof(int)); g->count = n; }
 }
-/* clrgrp: DELETE a group entirely -- free its id buffer, then shift the tail down (order preserved) so it
- * no longer appears in chkgrp. Returns the id-count it held (0 if the name wasn't a group). */
+/* Remove a group and free its storage; return the previous ID count. */
 static int group_remove(const char *name)
 {
     for (int i = 0; i < g_group_count; i++) {
         if (strcmp(g_groups[i].name, name) != 0) continue;
         int had = g_groups[i].ids.count;
-        ss_ids_free(&g_groups[i].ids);                 /* free THIS group's buffer before the shift */
-        for (int j = i; j < g_group_count - 1; j++)     /* shift the tail down (shallow-copies the ptrs) */
+        ss_ids_free(&g_groups[i].ids);
+        for (int j = i; j < g_group_count - 1; j++)
             g_groups[j] = g_groups[j + 1];
-        g_group_count--;                                /* the vacated top slot's dup ptr is now unowned */
+        g_group_count--;                                /* The shifted duplicate no longer owns its buffer. */
         return had;
     }
     return 0;
 }
-/* clrgrp *: DELETE every group. Frees all id buffers; the count drops to 0. */
+
 static void group_remove_all(void)
 {
     for (int i = 0; i < g_group_count; i++) ss_ids_free(&g_groups[i].ids);
@@ -225,7 +190,7 @@ static void group_remove_all(void)
 
 static int is_valid_group_name(const char *name)
 {
-    /* pop2g (0x2998 isalpha): first char must be a letter; empty fails. */
+    /* Group names must begin with a letter. */
     return name && name[0] && isalpha((unsigned char)name[0]);
 }
 static int parse_stack_index(const char *arg)
@@ -241,11 +206,8 @@ static const char *arg_at(int argc, const char **argv, int n)
     return (argv && n >= 0 && n < argc) ? argv[n] : NULL;
 }
 
-/* ============================================================ engine-touch helpers ================== */
-/* Thin wrappers over the sh_iface vtable slots -- this module runs in-process with the backend that
- * OWNS the interface object, but still goes through the vtable (not a direct internal call) so it
- * exercises the exact proven call shape any frontend uses. Every one null-checks the slot -> a clean
- * degrade on a partial/older interface. */
+/* Interface operations. */
+/* Use the shared vtable contract and tolerate missing slots. */
 
 static int ic_get_selection(sh_iface *iface, int *out, int cap)
 {
@@ -308,8 +270,8 @@ static void ic_rebuild_declsource(sh_iface *iface, int id, const char *src)
     if (iface && iface->vtbl && iface->vtbl->rebuild_set_declsource)
         iface->vtbl->rebuild_set_declsource(iface, id, src);
 }
-/* +0x268 ATOMIC class+inherit set. 1=applied, 0=rejected (fatal combo -- caller MUST skip the rebuild),
- * -1=slot absent (old backend -> caller falls back to the legacy two-call sequence). */
+/* Apply the final class/inherit pair: 1 applied, 0 rejected, -1 slot missing.
+ * A rejection must skip rebuilding; only a missing slot permits legacy fallback. */
 static int ic_apply_class_inherit(sh_iface *iface, int id, const char *cls, const char *inh)
 {
     if (!iface || !iface->vtbl || !iface->vtbl->apply_class_inherit) return -1;
@@ -325,7 +287,7 @@ static void ic_id_string(sh_iface *iface, int id, char *buf, int cap)
     }
     if (buf[0] == '\0') _snprintf_s(buf, (size_t)cap, _TRUNCATE, "%d", id);
 }
-#define SH_APPLY_JSON_CAP (256 * 1024)   /* the full-entity JSON can be large; 256 KB proven sufficient */
+#define SH_APPLY_JSON_CAP (256 * 1024)   /* Per-entity serialization capacity. */
 static int ic_serialize_entity(sh_iface *iface, int id, char *out, int cap)
 {
     out[0] = '\0';
@@ -337,36 +299,28 @@ static int ic_schedule_apply(sh_iface *iface, const sh_apply_item *items, int n,
     if (!iface || !iface->vtbl || !iface->vtbl->apply_edit || n <= 0) return 0;
     return iface->vtbl->apply_edit(iface, items, n, op) != 0;
 }
-/* +0x290 SYNCHRONOUS apply: commit as one unit with a synchronous applied count. These handlers run on
- * DOOM's main thread (the `sh` dispatch executes them at the engine's command-exec point -- issue #61),
- * so the slot takes its inline fast path right here; were this ever called off-main, the slot itself
- * marshals to the main thread and blocks, so the count stays real either way. Returns the applied count
- * (>=0), or -1 if the slot is absent (an older backend -> the caller falls back to the deferred
- * schedule). */
+/* Prefer synchronous apply to retain an applied count. Console handlers use
+ * the main-thread inline path; off-main dispatch depends on the slot's marshal
+ * availability. Return -1 when the slot is absent. */
 static int ic_apply_sync(sh_iface *iface, const sh_apply_item *items, int n, const char *op)
 {
     if (!iface || !iface->vtbl || !iface->vtbl->apply_sync) return -1;
     if (n <= 0) return 0;
     return iface->vtbl->apply_sync(iface, items, n, op);
 }
-/* Apply a batch: SYNCHRONOUS (+0x290) when the backend has it, else the deferred +0xd0 schedule (older
- * backend only -- and in this build unreachable, since snapstack.c ships inside the backend that owns
- * the slot; kept as the documented degradation shape). ALL kind=0 decl-edit ops (bss/bsi/bsf/bsb/bse/
- * accl/acctargets) go through this. Both routes now execute the batch on DOOM's main thread with the
- * commit's allocations pinned to a surviving heap; the difference is only that the deferred route loses
- * the synchronous applied count. mkcmd (kind=1, prefab paste) intentionally stays on ic_schedule_apply
- * -- a different operation that targets the editor paste slot, matching the original's convention. */
+/* Kind 0 edits prefer synchronous apply; an absent slot uses deferred scheduling
+ * and loses the immediate count. mkcmd uses the deferred prefab-staging path. */
 static int ic_apply(sh_iface *iface, const sh_apply_item *items, int n, const char *op)
 {
     if (n <= 0) return 0;
-    int applied = ic_apply_sync(iface, items, n, op);   /* +0x290 sync -> applied count (>=0), or -1 absent */
-    if (applied >= 0) return 1;                          /* sync ran; the backend toasts the applied/total count */
-    return ic_schedule_apply(iface, items, n, op);        /* old backend without +0x290 -> deferred fallback */
+    int applied = ic_apply_sync(iface, items, n, op);
+    if (applied >= 0) return 1;                          /* The backend reports the applied count. */
+    return ic_schedule_apply(iface, items, n, op);
 }
 
-/* ============================================================ the 9 STORE-op handlers =============== */
+/* Stack and group commands. */
 
-/* psel [stack] (0x2108): read live selection -> push onto stack[N] (dedup) -> CLEAR selection -> toast. */
+/* Push selected IDs with deduplication, then clear the selection. */
 static void h_psel(void *ctx, int argc, const char **argv)
 {
     sh_iface *iface = (sh_iface *)ctx;
@@ -392,9 +346,7 @@ static void h_psel(void *ctx, int argc, const char **argv)
     ic_toast(iface, "SnapStack", text);
 }
 
-/* resolve a handler's operand arg (argv[1]) -> a HEAP-owned id array the caller must free. Reproduces OG
- * FUN_180001fa0: a GROUP NAME (letter-first, an existing group) -> COPY (preserved, reusable); else a
- * STACK INDEX -> MOVE OUT (consumed, left empty). */
+/* Return caller-owned IDs. Group operands are copied; stack operands are consumed. */
 static int resolve_operand_consume(int argc, const char **argv, int **out)
 {
     const char *arg = arg_at(argc, argv, 1);
@@ -403,7 +355,7 @@ static int resolve_operand_consume(int argc, const char **argv, int **out)
     return stack_move_out(parse_stack_index(arg), out);
 }
 
-/* popsel [stack] (0x3a14): ADD each stored id back to the selection, then CONSUME the operand. No toast. */
+/* Add stored IDs to the selection; consume stacks and preserve named groups. */
 static void h_popsel(void *ctx, int argc, const char **argv)
 {
     sh_iface *iface = (sh_iface *)ctx;
@@ -413,9 +365,7 @@ static void h_popsel(void *ctx, int argc, const char **argv)
     free(ids);
 }
 
-/* phov [stack] (0x20b4): push the HOVERED id onto stack[N], dedup. <0 -> push nothing. OG was silent; the
- * clone adds a confirm toast (naming the hovered entity + stack count) -- a hover-push is otherwise
- * invisible without a chkstk, and "nothing hovered" is a useful signal on a miss. */
+/* Push the hovered entity and report the result, including a missing hover. */
 static void h_phov(void *ctx, int argc, const char **argv)
 {
     sh_iface *iface = (sh_iface *)ctx;
@@ -432,8 +382,7 @@ static void h_phov(void *ctx, int argc, const char **argv)
     ic_toast(iface, "SnapStack", text);
 }
 
-/* cstk [stack] (0x2208): empty stack[N] in place. OG was silent; the clone adds a confirm toast (a
- * cleared stack is otherwise invisible without a chkstk). */
+/* Clear a numbered stack and report its prior count. */
 static void h_cstk(void *ctx, int argc, const char **argv)
 {
     sh_iface *iface = (sh_iface *)ctx;
@@ -445,7 +394,7 @@ static void h_cstk(void *ctx, int argc, const char **argv)
     ic_toast(iface, "SnapStack", t);
 }
 
-/* pr <stack> <lo> <hi> (0x2c9c): push every VALID id in [lo..hi] -> stack[N], dedup; toast the span. */
+/* Push valid IDs in the inclusive range, deduplicating existing entries. */
 static void h_pr(void *ctx, int argc, const char **argv)
 {
     sh_iface *iface = (sh_iface *)ctx;
@@ -455,7 +404,7 @@ static void h_pr(void *ctx, int argc, const char **argv)
     int lo = lo_s ? atoi(lo_s) : 0;
     int hi = hi_s ? atoi(hi_s) : 0;
     if (hi < lo) { int t = lo; lo = hi; hi = t; }
-    int span = hi - lo;                                  /* DIRECT 0x2c9c: span, NOT inclusive count */
+    int span = hi - lo;                                  /* Toast reports the span, not the inclusive count. */
     enum { RANGE_CAP = 65536 };
     int *in_range = (int *)malloc((size_t)RANGE_CAP * sizeof(int));
     if (!in_range) { ic_toast(iface, "SnapStack", "pr: out of memory"); return; }
@@ -470,9 +419,7 @@ static void h_pr(void *ctx, int argc, const char **argv)
     ic_toast(iface, "Pushed entities", text);
 }
 
-/* pg <stack> <group> (0x2b54): push the named group's ids -> stack[N], dedup; toast the count.
- * CONVENIENCE (same clone divergence as pop2g): a SINGLE letter-first arg is taken as the GROUP name with
- * stack 0 implied (`sh pg mygroup` == `sh pg 0 mygroup`). A numeric arg[1] means the stack (OG-faithful). */
+/* Push a group onto a stack. A single letter-first argument implies stack 0. */
 static void h_pg(void *ctx, int argc, const char **argv)
 {
     sh_iface *iface = (sh_iface *)ctx;
@@ -492,11 +439,7 @@ static void h_pg(void *ctx, int argc, const char **argv)
     ic_toast(iface, "Pushed entities", text);
 }
 
-/* pop2g <stack> <group> (0x2998): MOVE stack[N] -> named group (swap). Name must start with a letter.
- * CONVENIENCE (clone divergence from OG's strict `<stack> <group>`): a SINGLE letter-first arg is taken as
- * the GROUP name with stack 0 implied (`sh pop2g mygroup` == `sh pop2g 0 mygroup`) -- consistent with how
- * resolve_operand_consume treats a letter-first operand as a group everywhere else. A numeric arg[1] still
- * means the stack, with arg[2] the group (OG-faithful). */
+/* Consume a stack into a group. A single letter-first argument implies stack 0. */
 static void h_pop2g(void *ctx, int argc, const char **argv)
 {
     sh_iface *iface = (sh_iface *)ctx;
@@ -529,9 +472,7 @@ static void h_pop2g(void *ctx, int argc, const char **argv)
     ic_toast(iface, "SnapStack", text);
 }
 
-/* filtinh / filtcls shared body (0x3c70 / 0x3c78): KEEP only stack[N] ids whose inherit/classname ==
- * match; re-push the survivors; toast the count. filtcls toast is labeled "had class" (the OG mislabel
- * on filtcls -- reusing filtinh's "had inherit" string -- is fixed here). */
+/* Keep IDs matching the requested class or inherit and report the survivors. */
 static void do_filt(sh_iface *iface, int index, const char *match, int by_class)
 {
     int *cur = NULL;
@@ -567,9 +508,9 @@ static void h_filtcls(void *ctx, int argc, const char **argv)
     do_filt(iface, index, match ? match : "", 1);
 }
 
-/* ============================================================ the 8-pass apply chain ================ */
+/* Entity JSON edits. */
 
-/* C atoi / atof (the leading-token forms the leaf encoders need). */
+
 static long sh_c_atoi(const char *s)
 {
     if (!s) return 0;
@@ -583,9 +524,8 @@ static long sh_c_atoi(const char *s)
 }
 static double sh_c_atof(const char *s) { return s ? atof(s) : 0.0; }
 
-/* renderEngineFloat: the ENGINE-FORMAT float token -- the shortest round-trip decimal, keeping a
- * trailing ".0" on whole floats and switching to scientific notation at exp<-4 or exp>=16 (byte-for-byte
- * the engine's own float text; uses fixed buffers, no dynamic strings). */
+/* Format round-trip decimals with .0 for whole floats and scientific notation
+ * outside exponents [-4,16), matching the engine text convention. */
 static void sh_shortest_digits(double f, char *digits, int digits_cap, int *out_exp, int *out_neg)
 {
     *out_neg = (f < 0.0) || (f == 0.0 && signbit(f));
@@ -650,9 +590,7 @@ static void render_engine_float(double f, char *out, int outcap)
     _snprintf_s(out, (size_t)outcap, _TRUNCATE, "%s%s", neg ? "-" : "", body);
 }
 
-/* the per-op leaf-value ENCODING: bss -> a JSON string literal; bsi -> a bare int; bsf ->
- * renderEngineFloat(fround(atof)); bsb -> "true"/"false". Returns the RAW JSON leaf TOKEN (spliced
- * verbatim by json_patch.c -- never re-escaped). */
+/* Encode a typed JSON leaf: string, integer, float32-rounded decimal, or boolean. */
 static int encode_bulkset_leaf_json(const char *op, const char *value, char *out, int outcap)
 {
     if (strcmp(op, "bsi") == 0) {
@@ -660,7 +598,7 @@ static int encode_bulkset_leaf_json(const char *op, const char *value, char *out
         return 1;
     }
     if (strcmp(op, "bsf") == 0) {
-        float f32 = (float)sh_c_atof(value);            /* Math.fround: narrow to float32 */
+        float f32 = (float)sh_c_atof(value);            /* Narrow to the engine float width before formatting. */
         render_engine_float((double)f32, out, outcap);
         return 1;
     }
@@ -671,26 +609,21 @@ static int encode_bulkset_leaf_json(const char *op, const char *value, char *out
     return sh_json_quote_string(value, out, outcap);      /* bss / default: a JSON string literal */
 }
 
-/* --- bss/bsi/bsf/bsb shared body: per id serialize -> patch the typed leaf -> collect; schedule the
- * batch. argv: [0]=op [1]=stack [2]=propPath [3]=value. */
+/* Consume an operand, serialize each entity, patch its leaf, and apply the batch. */
 static void do_bulkset(sh_iface *iface, const char *op, int argc, const char **argv)
 {
     const char *prop = arg_at(argc, argv, 2);
     const char *val  = arg_at(argc, argv, 3);
     if (!prop || !val) { char t[64]; _snprintf_s(t, sizeof t, _TRUNCATE, "usage: %s <stack> <path> <value>", op); ic_toast(iface, "SnapStack", t); return; }
     int *ids = NULL;
-    int n = resolve_operand_consume(argc, argv, &ids);      /* CONSUME the stack (OG drains on use) */
+    int n = resolve_operand_consume(argc, argv, &ids);
     if (n <= 0) { free(ids); ic_toast(iface, "SnapStack", "no entities on the stack"); return; }
 
     char leaf[64];
     if (!encode_bulkset_leaf_json(op, val, leaf, (int)sizeof leaf)) { free(ids); ic_toast(iface, "SnapStack", "leaf encode failed"); return; }
 
-    /* full/scratch are HEAP-ALLOCATED TRANSIENTLY (malloc per call, freed before return) -- never a
-     * persistent static/BSS slot (see the module doc comment: this is the exact footprint pattern that
-     * caused a controller-freelook regression on the +0x298 timeline-inherit slot). Reused across the id
-     * loop within this one call; each item's PATCHED text is then heap-copied to exactly its own length.
-     * apply_sync/apply_edit deep-copy the text into their own storage, so these heap copies only need to
-     * outlive the apply call. */
+    /* Reuse transient scratch within this call. Each item owns its patched text
+     * until apply returns; the backend copies text that must outlive the call. */
     char *full = (char *)malloc(SH_APPLY_JSON_CAP);
     char *scratch = (char *)malloc(SH_APPLY_JSON_CAP + 1024);
     if (!full || !scratch) {
@@ -715,7 +648,7 @@ static void do_bulkset(sh_iface *iface, const char *op, int argc, const char **a
     free(scratch);
     free(ids);
     if (m == 0) { ic_toast(iface, "SnapStack", "serialize/patch produced no apply"); return; }
-    int ok = ic_apply(iface, items, m, op);   /* +0x290 SYNCHRONOUS on the main thread; deferred fallback */
+    int ok = ic_apply(iface, items, m, op);
     for (int i = 0; i < m; i++) free(owned[i]);
     if (!ok) {
         char t[96]; _snprintf_s(t, sizeof t, _TRUNCATE, "%s: apply failed (editor down?)", op);
@@ -726,9 +659,7 @@ static void h_bss(void *ctx, int argc, const char **argv) { do_bulkset((sh_iface
 static void h_bsi(void *ctx, int argc, const char **argv) { do_bulkset((sh_iface *)ctx, "bsi", argc, argv); }
 static void h_bsf(void *ctx, int argc, const char **argv) { do_bulkset((sh_iface *)ctx, "bsf", argc, argv); }
 
-/* bsb: bulk-set BOOL. A serialize/patch mismatch is a real signal (a property/value that didn't
- * round-trip) -- surfaced via a clean toast (the OG's own leftover debug MessageBoxA is deliberately
- * NOT reproduced -- a fix over the historical OG behavior). */
+/* Report serialization/patch mismatches through toasts for boolean edits. */
 static void h_bsb(void *ctx, int argc, const char **argv)
 {
     sh_iface *iface = (sh_iface *)ctx;
@@ -742,7 +673,7 @@ static void h_bsb(void *ctx, int argc, const char **argv)
     char leaf[8];
     encode_bulkset_leaf_json("bsb", val, leaf, (int)sizeof leaf);
 
-    char *full = (char *)malloc(SH_APPLY_JSON_CAP);           /* heap-transient (see module doc comment) */
+    char *full = (char *)malloc(SH_APPLY_JSON_CAP);
     char *scratch = (char *)malloc(SH_APPLY_JSON_CAP + 1024);
     if (!full || !scratch) {
         free(full); free(scratch); free(ids);
@@ -767,7 +698,7 @@ static void h_bsb(void *ctx, int argc, const char **argv)
     free(ids);
     if (mismatch) ic_toast(iface, "SnapStack", "bsb: some entities skipped (property/value re-resolve mismatch)");
     if (m > 0) {
-        int ok = ic_apply(iface, items, m, "bsb");   /* +0x290 SYNCHRONOUS on the main thread; deferred fallback */
+        int ok = ic_apply(iface, items, m, "bsb");
         for (int i = 0; i < m; i++) free(owned[i]);
         if (!ok) ic_toast(iface, "SnapStack", "bsb: apply failed (editor down?)");
     } else if (!mismatch) {
@@ -775,8 +706,8 @@ static void h_bsb(void *ctx, int argc, const char **argv)
     }
 }
 
-/* bse (0x2720): pop LAST id -> its id-STRING; for EACH remaining id set state.edit.<userPath> = that
- * id-string (delegates to the same scalar leaf-set as bss). >=2 ids, STACK-ONLY (no group operand). */
+/* Consume a stack of at least two IDs. Set each earlier entity's property to
+ * the last ID's reference string. Group operands are not supported. */
 static void h_bse(void *ctx, int argc, const char **argv)
 {
     sh_iface *iface = (sh_iface *)ctx;
@@ -785,14 +716,14 @@ static void h_bse(void *ctx, int argc, const char **argv)
     int index = parse_stack_index(arg_at(argc, argv, 1));
     if (stack_get(index)->count < 2) { ic_toast(iface, "SnapStack", "bse needs >= 2 ids on the stack"); return; }
     int *ids = NULL;
-    int n = stack_move_out(index, &ids);         /* CONSUME the stack (OG-faithful) */
+    int n = stack_move_out(index, &ids);
     int popped = ids[n - 1];
     int remaining_n = n - 1;
 
     char poppedStr[256]; ic_id_string(iface, popped, poppedStr, (int)sizeof poppedStr);
     char leaf[300]; sh_json_quote_string(poppedStr, leaf, (int)sizeof leaf);
 
-    char *full = (char *)malloc(SH_APPLY_JSON_CAP);           /* heap-transient (see module doc comment) */
+    char *full = (char *)malloc(SH_APPLY_JSON_CAP);
     char *scratch = (char *)malloc(SH_APPLY_JSON_CAP + 1024);
     if (!full || !scratch) {
         free(full); free(scratch); free(ids);
@@ -816,15 +747,13 @@ static void h_bse(void *ctx, int argc, const char **argv)
     free(scratch);
     free(ids);
     if (m == 0) { ic_toast(iface, "SnapStack", "bse: produced no apply"); return; }
-    int ok = ic_apply(iface, items, m, "bse");   /* +0x290 SYNCHRONOUS on the main thread; deferred fallback */
+    int ok = ic_apply(iface, items, m, "bse");
     for (int i = 0; i < m; i++) free(owned[i]);
     if (!ok) ic_toast(iface, "SnapStack", "bse: apply failed (editor down?)");
 }
 
-/* accl/acctargets shared body (0x2498 / 0x228c): pop LAST id (=RECEIVER); build a num/item[] LIST of ALL
- * remaining ids' id-strings at state.edit.<path>; apply on the POPPED id. acctargets HARDCODES path
- * "targets". >=2 ids, STACK-ONLY. Drops stale/deleted ids from the list (exceeds OG: a dangling
- * id-string is never a valid target). */
+/* Consume a stack of at least two IDs. Add surviving earlier IDs as references
+ * on the last entity; acctargets uses the targets property. Groups are unsupported. */
 static void do_acc(sh_iface *iface, const char *op, int argc, const char **argv, int hardcoded_targets)
 {
     const char *userPath = arg_at(argc, argv, 2);
@@ -835,12 +764,12 @@ static void do_acc(sh_iface *iface, const char *op, int argc, const char **argv,
         ic_toast(iface, "SnapStack", t); return;
     }
     int *ids = NULL;
-    int n = stack_move_out(index, &ids);          /* CONSUME the stack (OG-faithful) */
+    int n = stack_move_out(index, &ids);
     int popped = ids[n - 1];
     int remaining_n = n - 1;
     const char *path = hardcoded_targets ? "targets" : userPath;
 
-    /* heap-transient, sized to remaining_n (never a persistent 1MB static table -- see module doc comment). */
+    /* Size reference-string storage to this operand. */
     int cap = remaining_n > 0 ? remaining_n : 1;
     const char **idstr_ptrs = (const char **)malloc((size_t)cap * sizeof(char *));
     char *idstr_bufs = (char *)malloc((size_t)cap * 256);
@@ -850,7 +779,7 @@ static void do_acc(sh_iface *iface, const char *op, int argc, const char **argv,
     }
     int nvalid = 0, skipped = 0;
     for (int i = 0; i < remaining_n; i++) {
-        if (!ic_is_valid_id(iface, ids[i])) { skipped++; continue; }   /* stale/deleted -> not a target */
+        if (!ic_is_valid_id(iface, ids[i])) { skipped++; continue; }
         char *slot = idstr_bufs + (size_t)nvalid * 256;
         ic_id_string(iface, ids[i], slot, 256);
         idstr_ptrs[nvalid] = slot;
@@ -890,13 +819,11 @@ static void do_acc(sh_iface *iface, const char *op, int argc, const char **argv,
     free(idstr_bufs);
     free(full);
     sh_apply_item it; it.kind = 0; it.id = popped; it.text = patched;
-    int ok = ic_apply(iface, &it, 1, op);   /* +0x290 SYNCHRONOUS on the main thread; deferred fallback */
+    int ok = ic_apply(iface, &it, 1, op);
     free(patched);
     if (!ok) { ic_toast(iface, "SnapStack", "accl: apply failed (editor down?)"); return; }
 
-    /* success toast: how many targets/refs + WHICH receiver got them. The backend's generic "applied N/N
-     * (engine round-trip)" toast is SUPPRESSED for accl/acctargets in ae_toast_result (apply_engine.c), so
-     * without this the op would succeed SILENTLY -- this receiver toast is emitted instead. */
+    /* This receiver-specific toast replaces the backend generic apply toast. */
     {
         char rcv[256]; ic_id_string(iface, popped, rcv, (int)sizeof rcv);
         char t[160];
@@ -908,9 +835,8 @@ static void do_acc(sh_iface *iface, const char *op, int argc, const char **argv,
 static void h_accl(void *ctx, int argc, const char **argv)       { do_acc((sh_iface *)ctx, "accl", argc, argv, 0); }
 static void h_acctargets(void *ctx, int argc, const char **argv) { do_acc((sh_iface *)ctx, "acctargets", argc, argv, 1); }
 
-/* mkcmd (0x3744): synthesize an idSnapEntityPrefab command-entity into the paste-staging slot. Per id:
- * "ai_ScriptCmdEnt " + template.replace('$', idString), joined with ';' (trailing ';'). Spliced into the
- * byte-exact prefab template at its placeholder; scheduled as kind=1 (mkcmd prefab paste). */
+/* Expand each ID into the command template, retaining a trailing semicolon,
+ * and stage the resulting command-entity prefab as kind 1. */
 static void h_mkcmd(void *ctx, int argc, const char **argv)
 {
     sh_iface *iface = (sh_iface *)ctx;
@@ -920,7 +846,7 @@ static void h_mkcmd(void *ctx, int argc, const char **argv)
     const char *tmpl_arg = arg_at(argc, argv, 2);
     const char *tmpl = (tmpl_arg && tmpl_arg[0]) ? tmpl_arg : "$";
 
-    char *commandText = (char *)malloc(SH_APPLY_JSON_CAP);   /* heap-transient (see module doc comment) */
+    char *commandText = (char *)malloc(SH_APPLY_JSON_CAP);
     if (!commandText) { free(ids); ic_toast(iface, "SnapStack", "out of memory"); return; }
     size_t clen = 0;
     commandText[0] = '\0';
@@ -936,12 +862,12 @@ static void h_mkcmd(void *ctx, int argc, const char **argv)
         part[plen] = '\0';
         if (clen + plen + 2 >= SH_APPLY_JSON_CAP) break;
         memcpy(commandText + clen, part, plen); clen += plen;
-        commandText[clen++] = ';';   /* OG appends ';' after EACH part -> trailing ';' */
+        commandText[clen++] = ';';
     }
     commandText[clen] = '\0';
     free(ids);
 
-    char *prefab = (char *)malloc(SH_APPLY_JSON_CAP + 4096);   /* heap-transient (see module doc comment) */
+    char *prefab = (char *)malloc(SH_APPLY_JSON_CAP + 4096);
     if (!prefab) { free(commandText); ic_toast(iface, "SnapStack", "out of memory"); return; }
     const char *ph = "__SH_MKCMD_COMMANDTEXT__";
     const char *tmplsrc = SH_MKCMD_PREFAB_TEMPLATE_C;
@@ -959,42 +885,37 @@ static void h_mkcmd(void *ctx, int argc, const char **argv)
     _snprintf_s(prefab + pre + clen, (size_t)(SH_APPLY_JSON_CAP + 4096) - pre - clen, _TRUNCATE, "%s", tmplsrc + pre + phlen);
     free(commandText);
 
-    /* mkcmd (kind=1, prefab paste) intentionally stays on the DEFERRED path -- it targets the editor paste
-     * slot, a different operation from the kind=0 decl-edits (matches the original's convention). With the
-     * handler now running at the command-exec point, the BufferCommandText enqueue happens ON the main
-     * thread (the engine's re-entrant second buffer) and the stage runs one frame later, still main-thread. */
+    /* Defer kind 1 staging through the engine command buffer. */
     sh_apply_item it; it.kind = 1; it.id = 0; it.text = prefab;
     int ok = ic_schedule_apply(iface, &it, 1, "mkcmd");
     free(prefab);
     if (!ok) ic_toast(iface, "SnapStack", "mkcmd: schedule failed (editor down?)");
 }
 
-/* ============================================================ class/inherit-CHANGE handlers ========= */
+/* Class and inherit edits. */
 
-/* FUN_180001244(id, cls): set className (+0x78), then re-emit decl-source (+0x30 -> +0x40). ALWAYS
- * rebuilds; re-asserts the classname after (the rebuild's re-parse is last-wins from the appended old
- * source, so the explicit value must win over it). */
+/* Rebuild after changing class, then reassert it so appended old source cannot win. */
 static void do_set_classname_one(sh_iface *iface, int id, const char *cls)
 {
     ic_set_classname(iface, id, cls);
-    char *r = (char *)malloc(64 * 1024);      /* heap-transient (see module doc comment) */
+    char *r = (char *)malloc(64 * 1024);
     if (!r) return;
     ic_declsource_text(iface, id, r, 64 * 1024);
     ic_rebuild_declsource(iface, id, r);
     free(r);
-    ic_set_classname(iface, id, cls);      /* re-assert -- wins over the rebuild's revert */
+    ic_set_classname(iface, id, cls);
 }
-/* FUN_1800012dc(id, inh, rebuild): set inherit (+0x80); if rebuild, re-emit decl-source + re-assert. */
+/* Optionally rebuild after changing inherit, then reassert the requested value. */
 static void do_set_inherit_one(sh_iface *iface, int id, const char *inh, int rebuild)
 {
     ic_set_inherit(iface, id, inh);
     if (rebuild) {
-        char *r = (char *)malloc(64 * 1024);  /* heap-transient (see module doc comment) */
+        char *r = (char *)malloc(64 * 1024);
         if (!r) return;
         ic_declsource_text(iface, id, r, 64 * 1024);
         ic_rebuild_declsource(iface, id, r);
         free(r);
-        ic_set_inherit(iface, id, inh);    /* re-assert -- wins over the rebuild's revert */
+        ic_set_inherit(iface, id, inh);
     }
 }
 
@@ -1028,8 +949,8 @@ static void h_bsin(void *ctx, int argc, const char **argv)
     ic_toast(iface, "SnapStack", text);
 }
 
-/* bsincls <stack> <newInherit> <newClassName>: atomic FINAL-pair set (+0x268) -> ONE rebuild -> re-assert;
- * falls back to the legacy two-call sequence if the atomic slot is absent (old backend). */
+/* Apply the final pair before one rebuild, then reassert it. A missing paired
+ * slot falls back to the older two-call sequence. */
 static void h_bsincls(void *ctx, int argc, const char **argv)
 {
     sh_iface *iface = (sh_iface *)ctx;
@@ -1040,20 +961,20 @@ static void h_bsincls(void *ctx, int argc, const char **argv)
     int n = resolve_operand_consume(argc, argv, &ids);
     if (n <= 0) { free(ids); ic_toast(iface, "SnapStack", "no entities on the stack"); return; }
     for (int i = 0; i < n; i++) {
-        int r = ic_apply_class_inherit(iface, ids[i], cls, inh);   /* +0x268 atomic (pass 1) */
+        int r = ic_apply_class_inherit(iface, ids[i], cls, inh);
         if (r == 1) {
-            char *rsrc = (char *)malloc(64 * 1024);   /* heap-transient (see module doc comment) */
+            char *rsrc = (char *)malloc(64 * 1024);
             if (rsrc) {
                 ic_declsource_text(iface, ids[i], rsrc, 64 * 1024);
                 ic_rebuild_declsource(iface, ids[i], rsrc);
                 free(rsrc);
             }
-            ic_apply_class_inherit(iface, ids[i], cls, inh);       /* re-assert (pass 2) */
+            ic_apply_class_inherit(iface, ids[i], cls, inh);
         } else if (r == -1) {
             do_set_inherit_one(iface, ids[i], inh, 0);
             do_set_classname_one(iface, ids[i], cls);
         }
-        /* r==0: the FINAL pair is a fatal combo -> leave unchanged, skip the rebuild. */
+        /* Rejected pairs leave the entity unchanged and skip rebuild. */
     }
     free(ids);
     char text[200];
@@ -1061,11 +982,7 @@ static void h_bsincls(void *ctx, int argc, const char **argv)
     ic_toast(iface, "SnapStack", text);
 }
 
-/* ============================================================ store inspection / management =========
- * chkstk / chkgrp / clrgrp -- NEW SnapStack+ commands (NOT part of OG's 20). They read and manage the
- * SAME file-static stores (g_stacks / g_groups) every op above mutates, so they always report the true
- * live state (all SnapStack ops run these backend handlers). All output goes to the console (sh_printf)
- * with a summary toast, mirroring snapstack_diag. */
+/* Store inspection and removal. */
 
 /* chkstk [N]: N given -> list stack N's ids + count; omitted -> summarize every non-empty stack. */
 static void h_chkstk(void *ctx, int argc, const char **argv)
@@ -1074,8 +991,7 @@ static void h_chkstk(void *ctx, int argc, const char **argv)
     const char *arg = arg_at(argc, argv, 1);
     if (arg && arg[0]) {
         int index = ss_clamp_index(parse_stack_index(arg));
-        /* SNAPSHOT the stack under the lock, then release it before the per-id engine reads -- the
-         * listing walks items[], which a concurrent +0x2A0 push could realloc out from under us. */
+        /* Snapshot under the lock before engine reads; frontend pushes may reallocate. */
         int *ids = NULL;
         ss_lock();
         int n = ss_ids_copy_out(stack_get(index), &ids);
@@ -1131,9 +1047,7 @@ static void h_chkgrp(void *ctx, int argc, const char **argv)
     }
 }
 
-/* clrgrp <name>|*: DELETE a named group entirely (its entry is removed, so it no longer shows in chkgrp
- * and `popsel <name>` re-creates it empty); `*` deletes every group. Fixes "groups persist forever +
- * popsel keeps re-selecting them + chkgrp clutters with stale groups". */
+/* Remove one group or all groups with *. Deleted groups no longer appear in listings. */
 static void h_clrgrp(void *ctx, int argc, const char **argv)
 {
     sh_iface *iface = (sh_iface *)ctx;
@@ -1155,10 +1069,9 @@ static void h_clrgrp(void *ctx, int argc, const char **argv)
     ic_toast(iface, "SnapStack", t);
 }
 
-/* ============================================================ diagnostics =========================== */
+/* Diagnostics. */
 
-/* Resolve which loaded DLL owns a given code address (any function pointer). NULL / empty on failure --
- * never a crash, this only ever runs from an explicit console command. */
+/* Identify the loaded module containing a handler address for diagnostics. */
 static void diag_owning_module(const void *code_addr, char *out, int outcap)
 {
     out[0] = '\0';
@@ -1173,11 +1086,10 @@ static void diag_owning_module(const void *code_addr, char *out, int outcap)
     _snprintf_s(out, (size_t)outcap, _TRUNCATE, "%s", base);
 }
 
-/* forward-declared: registered as a 21st entry in SNAPSTACK_COMMANDS below, but its BODY (further down)
- * needs that same table to iterate -- the array only needs this prototype to take its address. */
+/* Forward declaration lets the diagnostic inspect its own registration table. */
 static void h_snapstack_diag(void *ctx, int argc, const char **argv);
 
-/* ============================================================ the registrar ========================= */
+/* Command registration. */
 typedef struct sh_subcommand { const char *name; sh_cmd_handler handler; } sh_subcommand;
 
 static const sh_subcommand SNAPSTACK_COMMANDS[] = {
@@ -1201,22 +1113,16 @@ static const sh_subcommand SNAPSTACK_COMMANDS[] = {
     { "bsin",       h_bsin },
     { "bscls",      h_bscls },
     { "bsincls",    h_bsincls },
-    /* NEW SnapStack+ store-management commands (NOT among OG's 20) -- they run this module's handlers
-     * against the live backend stores. */
+
     { "chkstk",     h_chkstk },
     { "chkgrp",     h_chkgrp },
     { "clrgrp",     h_clrgrp },
-    /* diagnostic-only: not one of the 20 OG-faithful subcommands -- it reports on whatever's
-     * ACTUALLY live in the shared cmd-map. */
+
     { "snapstack_diag", h_snapstack_diag },
 };
 #define SNAPSTACK_COMMAND_COUNT ((int)(sizeof(SNAPSTACK_COMMANDS) / sizeof(SNAPSTACK_COMMANDS[0])))
 
-/* sh snapstack_diag: for each registered subcommand name (including itself), report which ACTUAL DLL
- * module currently owns the handler in the shared cmd-map (resolved via the handler's own code address
- * -- correct regardless of which module registered the name, or last re-registered it). Answers "whose
- * copy of `sh psel` is active right now?" without guessing -- console output (sh_printf), a persisted
- * one-line summary (backend_log), and a toast (visible without opening the console history). */
+/* Report which loaded module owns each currently registered handler. */
 static void h_snapstack_diag(void *ctx, int argc, const char **argv)
 {
     (void)argc; (void)argv;
@@ -1256,11 +1162,10 @@ void sh_register_snapstack_commands_backend(sh_iface *iface)
         iface->vtbl->register_cmd(iface, SNAPSTACK_COMMANDS[i].name, SNAPSTACK_COMMANDS[i].handler, iface);
 }
 
-/* The two FRONTEND-thread entry points into the stack store (the +0x2A0/+0x2A8 slots). These are why
- * g_ss_lock exists -- see its comment. */
+/* Frontend stack access uses the same locked store as console handlers. */
 void sh_snapstack_push_ids_backend(int index, const int *ids, int count)
 {
-    if (count > 0) stack_push(index, ids, count);   /* stack_push locks */
+    if (count > 0) stack_push(index, ids, count);
 }
 
 int sh_snapstack_clear_stack_backend(int index)

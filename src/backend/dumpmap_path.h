@@ -1,12 +1,7 @@
-/* dumpmap_path.h -- pure path arithmetic for sh_dumpmap's output location.
- *
- * The map writer takes a GAME-RELATIVE path rooted at <game dir>\base\ and does two unhelpful things:
- * it silently clobbers an earlier dump of the same name, and it forces the extension, so the name on
- * disk is not necessarily the one that was typed. The command handler therefore resolves the whole
- * destination itself -- default subdirectory, collision-free filename -- before handing the writer a
- * path. This header is the string half of that: no file system, no OS calls, no engine calls, so the
- * exact same code is unit-tested off-game (tests/dumpmap_path_test.c) and compiled into the backend.
- * The handler keeps the parts that touch the disk (the collision probe, the mkdir, the size read).
+/* String-only path helpers for sh_dumpmap. The native writer accepts paths
+ * relative to the game base directory and forces the extension. These helpers
+ * choose the directory and numbered filename; the command handler owns
+ * collision checks and filesystem operations.
  */
 #ifndef SNAPMAP_PLUS_DUMPMAP_PATH_H
 #define SNAPMAP_PLUS_DUMPMAP_PATH_H
@@ -15,8 +10,7 @@
 #include <string.h>
 #include <stdio.h>
 
-/* Where a bare name lands, under the game's base directory. Its own folder, so a dump can never
- * collide with one of the engine's own resource namespaces. */
+/* Default subdirectory for a bare dump name, relative to base. */
 #define DUMPMAP_SUBDIR  "mapdumps"
 
 /* Highest _N suffix the handler tries before giving up on a name. */
@@ -30,9 +24,9 @@ static void dp_cat(char *dst, size_t cap, const char *src)
     dst[o] = '\0';
 }
 
-/* Reject a name that cannot serve as a game-relative path. 0 + *why set to a one-line printable
- * reason, or 1 if the name is usable. The Windows-path case is the one users actually hit: the
- * command reads like it wants a file path, and it does not. */
+/* Validate a game-relative name. Return 1 when usable, otherwise 0 with a
+ * printable reason in why.
+ */
 static int dumpmap_validate(const char *arg, const char **why)
 {
     *why = NULL;

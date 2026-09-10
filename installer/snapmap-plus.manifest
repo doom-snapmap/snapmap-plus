@@ -5,7 +5,7 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <!-- Runs as the current user; the overlay is written into the game's own install dir, no elevation. -->
+        <!-- Use the current user's permissions; do not request elevation. -->
         <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
       </requestedPrivileges>
     </security>

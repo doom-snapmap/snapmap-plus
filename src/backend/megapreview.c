@@ -1,10 +1,7 @@
-/* megapreview.c -- see megapreview.h. Reads DOOM's megatexture atlas off disk and decodes a named
- * material's pages with the engine's own decoder, then hands the pixels to the preview transport.
- *
- * Nothing here hooks or mutates the engine. It reads three kinds of file the game ships
- * (`*.vmtr` tables and `_vmtr_sq*.mega2` shards, both under <game>\virtualtextures) and makes one
- * call into a pure decode function. The layout and sizing constants below were verified against
- * the shipped files and controlled decoder runs. */
+/* Read .vmtr tables and _vmtr_sq*.mega2 shards from virtualtextures, decode
+ * selected pages with the native codec, then publish preview pixels.
+ * Installed files remain read-only.
+ */
 
 #include <windows.h>
 #include <stdio.h>
@@ -16,20 +13,11 @@
 #include "preview.h"
 #include "backend_log.h"
 
-/* ------------------------------------------------------------------------ the decoder -----------
- * FUN_14196E140, RVA 0x196E140 in the pinned build. Signature:
- *
- *     void decode(const u8 *header16, const u8 *payload, void *unused, u8 *out);   out is 0x50000
- *
- * 5 planes of 128x128 RGBA at +0, +0x10000, +0x20000, +0x30000, +0x40000. Plane 0 is albedo, which
- * is the only one a browser needs; controlled decodes confirmed the plane assignment.
- *
- * Resolved through the shared signature database as `Mega2PageDecode`, NOT as a hardcoded
- * module_base + RVA. This used to be the latter, guarded by a local memcmp of the prologue -- which
- * caught a moved function but could not FIND one, so any build that shifted the address lost previews
- * entirely. A signature matches the bytes wherever the loader put them, and a resolve that is not
- * unique is rejected rather than guessed, so an unrecognised build still degrades to "no previews"
- * rather than a call into the wrong code. */
+/* Mega2PageDecode (pinned Vulkan RVA 0x196E140): decode(header16, payload,
+ * unused, out). Output is five 128x128 RGBA planes totaling 0x50000 bytes;
+ * plane 0 is albedo. Resolve through the shared signature database;
+ * unavailable or ambiguous matches disable this route.
+ */
 typedef void (*decode_fn)(const unsigned char *hdr, const unsigned char *payload,
                           void *unused, unsigned char *out);
 
@@ -39,11 +27,10 @@ typedef void (*decode_fn)(const unsigned char *hdr, const unsigned char *payload
 #define PAGE_CORE    120u        /* usable pixels; the rest is a 4px border per side               */
 #define PAGE_BORDER  4u
 
-/* The decoder reads a LONG way past the end of the page data -- measured mean 73,172 B and max
- * 167,220 B over 120 sampled pages. In the engine the page sits inside a much
- * larger staging allocation so this is invisible; a tight buffer faults inside the plane codec.
- * 256 KB is ~1.6x the measured worst case. The tail is zeroed so the read-ahead is deterministic
- * rather than whatever the heap happened to hold. */
+/* Reserve a zeroed 256 KB tail after each payload. Controlled runs measured
+ * read-ahead up to 167,220 bytes beyond page data; a tightly sized buffer can
+ * fault in the plane codec.
+ */
 #define PAGE_SLACK   0x40000u
 #define PAGE_MAX     0x40000u    /* largest observed payload is ~50 KB; this is a sanity ceiling    */
 
@@ -159,9 +146,9 @@ static void megapreview_load_one_vmtr(const char *path)
     fclose(f);
 }
 
-/* Loading uses one allocation per row so the parser can grow without invalidating pointers. Once
- * every table has been read, repack the names into one exact pool and shrink the rect array. This
- * replaces the old fixed 192-byte name field on every row with only the bytes the names use. */
+/* Allocate names individually while parsing, then compact them into one pool
+ * and shrink the rectangle array.
+ */
 static void megapreview_compact_rects(void)
 {
     size_t need = 0;
@@ -230,11 +217,9 @@ static const vmtr_rect *megapreview_find(const char *name)
     return NULL;
 }
 
-/* A material's atlas rect in atlas pixels, or 0 if it has none. Two callers want this: the Assets
- * browser, to compute a `virtualmapping` renderParm value ((w,h,x,y)/245760), and the same browser
- * to know whether that carrier applies at all -- only VT-backed materials have a rect, so a null
- * answer is the honest reason to refuse the Virtual Mapping option rather than write a broken one.
- * Read-only against the already-parsed .vmtr table; takes the same lock the producer does. */
+/* Look up an atlas rectangle under the producer lock. The browser uses it to
+ * enable virtualmapping and compute {w,h,x,y}/245760.
+ */
 int sh_megapreview_rect(const char *name, int *out_xywh)
 {
     if (!name || !out_xywh) return 0;
@@ -319,9 +304,9 @@ static shard_t *megapreview_shard(int n)
     return s;
 }
 
-/* Resolve one cell by seeking to exactly one u32 page id and one 16-byte page-table entry. The
- * previous implementation copied both complete shard tables into process memory on first touch;
- * across all 16 installed shards that retained 67.9 MiB merely to read these 20 selected bytes. */
+/* Read one u32 page ID and one 16-byte page-table entry on demand instead of
+ * retaining complete shard tables.
+ */
 static int megapreview_page_entry(shard_t *s, unsigned cell,
                                   unsigned long long *out_off, unsigned long long *out_size)
 {
@@ -368,8 +353,7 @@ static int megapreview_decode_page(int level, unsigned px, unsigned py)
     if (fread(g_page, 1, (size_t)size, s->f) != (size_t)size) return 0;
     memset(g_page + size, 0, PAGE_SLACK);        /* the read-ahead tail; see PAGE_SLACK */
 
-    /* Pre-clear: skipped planes are NOT written by the decoder (evidence 08 SS2), so a stale
-     * buffer would show the previous material's pixels in any plane this page omits. */
+    /* Clear output first because the decoder leaves omitted planes untouched. */
     memset(g_out, 0, OUT_SIZE);
 
     int ok = 1;
@@ -382,11 +366,9 @@ static int megapreview_decode_page(int level, unsigned px, unsigned py)
     return ok;
 }
 
-/* One page's 120x120 albedo core, walking UP the mip chain when a page is absent.
- *
- * An absent page at a fine level is NORMAL virtual texturing: it means there is no extra detail
- * there, and the renderer samples the parent. So we upscale the parent's corresponding quadrant
- * rather than leaving a hole. Coarse levels are dense, so this always terminates. */
+/* Read the 120x120 albedo core. If a page is absent, try coarser mips and
+ * upscale the corresponding parent quadrant.
+ */
 static int megapreview_page_core(int level, unsigned px, unsigned py, unsigned char *dst)
 {
     if (level >= MAX_LEVELS) return 0;
@@ -418,10 +400,9 @@ static int megapreview_page_core(int level, unsigned px, unsigned py, unsigned c
 
 /* --------------------------------------------------------------------------- produce ------------*/
 
-/* Preview budget. A preview of P pixels costs (P/120)^2 pages regardless of the material's native
- * size, so this is a straight quality/cost dial. 2x2 = 240x240 for
- * ~4 pages and ~85 KB is the measured sweet spot: a large visible gain over a single page, with
- * diminishing returns past it. */
+/* Limit previews to a 2x2-page budget (240x240 pixels); choose the finest mip
+ * that fits.
+ */
 #define PREVIEW_MAX_PAGES_PER_AXIS 2u
 
 static int megapreview_produce(const char *name, unsigned long generation)
@@ -462,12 +443,9 @@ static int megapreview_produce(const char *name, unsigned long generation)
     for (unsigned j = 0; j < ny; ++j) {
         for (unsigned i = 0; i < nx; ++i) {
             if (!megapreview_page_core(level, px0 + i, py0 + j, tile)) continue;
-            /* Plane 0's 4th byte is NOT a coverage alpha. The albedo plane carries no per-pixel
-             * transparency, so whatever the codec leaves there is not one to honour. The old BMP
-             * transport discarded the byte and so never showed the difference; PNG honours it,
-             * which drew every opaque wall translucent over the checkerboard. Stamp opaque for
-             * the pixels we actually decoded -- and only those, so pages that failed keep the
-             * pre-cleared alpha=0 and still read as a hole rather than as black content. */
+            /* The albedo plane has no coverage alpha. Set decoded pixels
+             * opaque; failed pages retain pre-cleared alpha zero.
+             */
             for (unsigned p = 3; p < PAGE_CORE * PAGE_CORE * 4; p += 4) tile[p] = 0xFF;
             for (unsigned row = 0; row < PAGE_CORE; ++row)
                 memcpy(canvas + (((size_t)(j * PAGE_CORE + row) * cw) + i * PAGE_CORE) * 4,
@@ -515,9 +493,9 @@ static int megapreview_produce(const char *name, unsigned long generation)
 
 /* ---------------------------------------------------------------------------- worker ------------*/
 
-/* One serving thread, so decoding never runs on the UI or render thread and two requests can never
- * share the scratch buffers. It sleeps on an event rather than waking ten times a second. Scratch
- * is allocated only for an atlas-backed request and released after 30 seconds idle. */
+/* One event-driven worker owns the decode scratch. Allocate only for atlas
+ * requests and release after 30 seconds idle.
+ */
 static int megapreview_service_request(const char *want, unsigned long generation, int kind)
 {
     /* A catalog-typed Image is already the final resource. It must not load or search VMTR, and
@@ -533,9 +511,9 @@ static int megapreview_service_request(const char *want, unsigned long generatio
 
     if (ok == SH_PREVIEW_STALE) return ok;
 
-    /* Atlas route declined -> the material is not virtual-textured. Roughly half the catalog
-     * is like that; those are backed by ordinary image assets, which imgpreview reads out of
-     * the .index/.resources containers. Outside the lock: different scratch, different files. */
+    /* If atlas lookup declines, try ordinary material/image resources outside
+     * this lock; that producer owns separate scratch.
+     */
     if (!ok) ok = sh_imgpreview_produce(want, generation);
     return ok;
 }
@@ -599,8 +577,9 @@ int sh_megapreview_install(const sig_result *results, size_t n, const uint8_t *m
     g_requestEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
     if (!g_requestEvent) { backend_log("B2: megapreview -- request event failed"); return 0; }
 
-    /* 8 MB reserved stack: the decoder's own frame is small but it recurses into the plane codec,
-     * and reserve costs nothing until touched. */
+    /* Reserve an 8 MB worker stack for the native decoder and recursive plane
+     * codec.
+     */
     HANDLE t = CreateThread(NULL, 8u << 20, megapreview_worker, NULL, 0, NULL);
     if (!t) {
         CloseHandle(g_requestEvent); g_requestEvent = NULL;

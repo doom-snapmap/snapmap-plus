@@ -9,10 +9,8 @@ import (
 	"testing"
 )
 
-// TestInstallUninstallRoundTrip exercises install -> uninstall against a synthetic bundle + fake DOOM dir.
-// Fully hermetic (no real DOOM, no network): it verifies the overlay deploys, a pre-existing file is backed
-// up, a legacy root-level snaphak_logs/ is migrated into snapmap-plus/logs/ on install, and uninstall restores
-// the original + removes everything it placed (including the runtime-logs dir).
+// Test install/uninstall with a synthetic bundle: back up existing files, migrate
+// legacy logs, remove installed files and restore the original.
 func TestInstallUninstallRoundTrip(t *testing.T) {
 	tmp := t.TempDir()
 	doom := filepath.Join(tmp, "DOOM")
@@ -73,9 +71,7 @@ func TestInstallUninstallRoundTrip(t *testing.T) {
 	}
 }
 
-// TestMigrateLegacyLogs covers the legacy snaphak_logs -> snapmap-plus\logs fold directly (the round-trip
-// test exercises it via cmdInstall too, but that path refuses while a real DOOM runs on the dev box -- this
-// one always runs).
+// Exercise log migration directly, without cmdInstall's running-game check.
 func TestMigrateLegacyLogs(t *testing.T) {
 	tmp := t.TempDir()
 	doom := filepath.Join(tmp, "DOOM")
@@ -105,10 +101,8 @@ func TestMigrateLegacyLogs(t *testing.T) {
 	}
 }
 
-// TestUpdateDoesNotBackUpOwnDLL guards the vanilla-restore against the "backed up our own DLL" bug: on a clean
-// DOOM dir (no genuine XINPUT1_3.dll -- the common case), a fresh install must create no backup, an update must
-// NOT back up our own previously-installed DLL, and uninstall must then leave the dir with NO XINPUT1_3.dll
-// (there was nothing genuine to restore) rather than "restoring" our own DLL as if it were vanilla.
+// An update must retain the original backup decision. With no pre-existing DLL,
+// uninstall should remove the mod without restoring an earlier mod version.
 func TestUpdateDoesNotBackUpOwnDLL(t *testing.T) {
 	tmp := t.TempDir()
 	doom := filepath.Join(tmp, "DOOM")
@@ -181,9 +175,7 @@ func TestRuntimeConfigSurvivesInstallerLifecycle(t *testing.T) {
 	assertConfig("reinstall")
 }
 
-// TestResolveDoomAcceptsEitherExecutable: DOOM 2016 ships DOOMx64vk.exe and DOOMx64.exe, Snapmap+
-// supports both, and --doom must therefore accept a folder holding either one. A folder holding
-// neither is still refused, and the refusal names both executables so the player knows what to look for.
+// Either renderer executable identifies a DOOM directory; neither means refusal.
 func TestResolveDoomAcceptsEitherExecutable(t *testing.T) {
 	for _, exe := range []string{"DOOMx64vk.exe", "DOOMx64.exe"} {
 		dir := filepath.Join(t.TempDir(), "DOOM")

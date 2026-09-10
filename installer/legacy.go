@@ -6,19 +6,9 @@ import (
 	"path/filepath"
 )
 
-// Migration away from the original SnapHak.
-//
-// A DOOM folder that ran the original SnapHak (the closed-source tool this project supersedes) carries
-// its overlay: proxy DLLs at the game root (dinput8.dll -- a bundled console-unlock mod -- plus
-// XINPUT1_3.dll and two helper DLLs), a Qt UI runtime inside snaphak\, a Qt platform plugin, and two
-// text files. None of these are vanilla game files, and Snapmap+ replaces all of them. Install
-// (and therefore update) removes them first: left in place they'd either be backed up as if they were
-// genuine game files (XINPUT1_3.dll -- uninstall would later "restore" a non-vanilla DLL) or linger
-// as dead files nothing loads (the helper DLLs, the Qt runtime).
-//
-// Detection is deliberately conservative: it keys on files ONLY the original SnapHak ships. A lone
-// dinput8.dll (which could be an unrelated mod) or a lone changelog.txt never triggers migration --
-// those are removed only alongside a real marker.
+// Remove the recognized SnapHak runtime before installing its replacement.
+// Detection requires a tool-specific marker; generic proxy DLLs and text files
+// alone must not trigger migration.
 
 // legacyMarkers: any one of these present under the DOOM dir means the original SnapHak is installed.
 var legacyMarkers = []string{
@@ -34,11 +24,8 @@ var legacyMarkers = []string{
 	filepath.Join("plugins", "platforms", "qwindows.dll"),
 }
 
-// legacyExtras: part of the original SnapHak's bundle, but too generic (or name-shared with our own
-// files) to prove anything alone. Removed only when a marker fired. XINPUT1_3.dll is the original's
-// version of a path we still use (and snaphak\snaphakui.dll of a path our pre-rename releases used) --
-// removing them before the copy loop keeps the backup logic from saving them as "genuine" pre-existing
-// files.
+// legacyExtras contains shared or generic names removed only after marker detection.
+// Remove them before backup so uninstall does not restore the legacy runtime.
 var legacyExtras = []string{
 	"dinput8.dll",
 	"changelog.txt",
@@ -47,10 +34,8 @@ var legacyExtras = []string{
 	filepath.Join("platforms", "qwindows.dll"), // some installs carry the Qt plugin here instead
 }
 
-// legacySharedBakRels: overlay-relative paths whose saved-aside backup cannot be a genuine game
-// file once the original SnapHak is confirmed present -- vanilla DOOM 2016 ships none of these paths,
-// so a pre-existing copy that an earlier install backed up was the original SnapHak's file, and
-// uninstall must NOT "restore" it.
+// legacySharedBakRels identifies shared-name backups discarded after detecting
+// the original runtime; vanilla DOOM does not supply these paths.
 var legacySharedBakRels = map[string]bool{
 	"XINPUT1_3.dll": true,
 	filepath.Join("snaphak", "snaphakui.dll"):             true,
@@ -81,11 +66,8 @@ func detectLegacy(doom string) []string {
 	return present
 }
 
-// removeLegacy deletes the detected original-SnapHak files and prunes the Qt plugin dirs they leave
-// empty (the snaphak\ dir itself is left in place -- pre-rename releases of this project deployed
-// their UI there, and a user may keep other files in it). Best-effort per file: a locked file is
-// reported and left behind; the shared-name file (XINPUT1_3.dll) gets overwritten by the copy that
-// follows anyway. Returns what was actually removed.
+// removeLegacy reports files it removed and leaves locked files behind.
+// It prunes empty Qt plugin directories but retains the snaphak directory.
 func removeLegacy(doom string, files []string) []string {
 	var removed []string
 	for _, rel := range files {
@@ -104,10 +86,8 @@ func removeLegacy(doom string, files []string) []string {
 	return removed
 }
 
-// dropLegacyBackups is the record-side half of the migration: an install made before this migration
-// existed may have backed up the original SnapHak's XINPUT1_3.dll (etc.) as if it were a genuine
-// game file. With the original SnapHak confirmed present, delete those backup files and drop their
-// record entries, so a later uninstall restores nothing that isn't truly vanilla.
+// dropLegacyBackups removes recorded legacy DLL backups so uninstall does not
+// restore the runtime being replaced.
 func dropLegacyBackups(doom string, baks []backup) []backup {
 	kept := baks[:0]
 	for _, bk := range baks {

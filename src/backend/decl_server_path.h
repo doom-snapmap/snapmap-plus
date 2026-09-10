@@ -21,18 +21,15 @@ typedef struct sh_decl_server_order_item {
     int admitted;
 } sh_decl_server_order_item;
 
-/* Convert a path relative to overrides/generated/decls into the two identities
- * the engine API requires. Example:
+/* Convert a path relative to a package decls directory into type, name and
+ * generated/decls source identity. For example,
+ * actormodifier/demon/example.decl becomes type actormodifier and name
+ * demon/example.
  *
- *   actormodifier/actormodifier/demon/cacodemon.decl
- *       type   = actormodifier
- *       name   = actormodifier/demon/cacodemon
- *       source = generated/decls/actormodifier/actormodifier/demon/cacodemon.decl
- *
- * Both slash styles are accepted. Absolute paths, traversal, empty segments,
- * whitespace/control bytes, punctuation outside the portable unquoted decl
- * token alphabet, non-.decl files, and truncated outputs are refused. `reason`
- * receives a static diagnostic string. */
+ * Accept either slash style. Refuse absolute paths, traversal, empty
+ * segments, whitespace/control bytes, unsupported unquoted-token punctuation,
+ * non-.decl files and truncated output. reason receives a static diagnostic.
+ */
 int sh_decl_server_identity_from_relative(const char *relative,
                                           char *type, size_t type_cap,
                                           char *name, size_t name_cap,

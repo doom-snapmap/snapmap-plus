@@ -1,21 +1,7 @@
-/* recovery.c -- bad-LOAD recovery: after the VEH survives the fault, steer the editor to the My-Maps
- * browser so it doesn't re-fault on the half-built / UAF render-world.
- *
- * WHY a teardown is mandatory (editor-recovery RE): the engine's
- * own `Frame` catch does NOT navigate -- it pops a modal IN the editor and resumes on a dangling render-
- * world (GetLocalSavedMapEdit freed the old world up front; the fault unwound before the new one was
- * assigned) -> the AddRenderModel(NULL) re-fault loop. The ONLY path that destroys the render-world +
- * resets its model count is the editor-exit cycle.
- *
- * HOW (the live-proven editor->browser exit, `openStartMenu`+`exitEditor`,
- * ported to native + driven from a main-thread frame-hook): SetState(editor,0xb) opens the StartMenu
- * (synchronous), then write EXIT-pending + force the GDM dialog result to Yes(0); the StartMenu Think's
- * resolver calls ExitEditor 0x522680 in-frame -> EDITOR->BROWSER.
- *
- * Frame-hook target = idCommonLocal::Frame 0x17ce360 (collision-free: an external instrumentation tool may
- * hook the editor/menu pumps 0x523140/0x1702ba0, NOT Frame). The detour runs on the main thread,
- * before the engine's frame body, exactly the safe context the proven drives use.
- */
+/* Recover a failed editor load by driving the normal exit to the map browser.
+ * The Frame catch alone can resume with an incomplete render world and fault
+ * again. The main-thread Frame hook opens StartMenu, requests exit, and waits
+ * for editor teardown. It also services notices and save-dialog protection. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -33,32 +19,18 @@ typedef void    (*setstate_t)(void *editor, int state);   /* SetState 0x5298A0 (
 typedef int64_t (*frame_t)(void *self);                   /* idCommonLocal::Frame 0x17ce360 */
 static frame_t orig_frame = NULL;
 
-/* ---- The DATA globals this file reads, located ONCE at install --------------------------------------
- * These were `g_doom_base + <pinned RVA>` literals. Those literals describe one link output; DOOM's two
- * executables move their data globals by nearly 0x1000000, so on the other one they address unrelated
- * memory. glb_resolve signs the CODE SITE that computes each address and decodes the displacement, which
- * works on either build. 0 means "not located here" and every consumer below declines.
- *
- * Resolved in recovery_install, not in the per-frame hook: glb_resolve scans on a cache miss, and the
- * frame hook must stay allocation-free and cheap. The backend resolves the whole table at bootstrap, so
- * these are cache reads. */
+/* Cache resolved global addresses before the frame hook runs. Unresolved
+ * globals disable their dependent operations; avoid scanning in the frame path. */
 static uint8_t *g_editor_at      = NULL;   /* the inline idSnapEditorLocal object */
 static uint8_t *g_load_state_at  = NULL;   /* load_state -- 3 == RUNNING */
 static uint8_t *g_last_err_at    = NULL;   /* the engine's last formatted Error/FatalError text */
 static uint8_t *g_shell_slot_at  = NULL;   /* .data slot holding idMenuShellLocal* */
 static uint8_t *g_suppr_a_at     = NULL;   /* throw-gate suppressor A */
-/* Answered once at install. The frame hook runs every frame, and sh_host_is_pinned_rva_build() does a
- * string compare -- cheap, but not something to repeat 60 times a second for an answer that cannot
- * change while the process lives. */
+/* Cache the immutable host-build check for the frame hook. */
 static int      g_pinned_build   = 0;
 
-/* Throw-gate suppressor B has NO portable derivation: a RIP-relative reference sweep of the pinned Vulkan
- * image decodes ZERO code sites computing 0x6faf8b0 (suppressor A has 32), so there is nothing to sign.
- * See veh.c and engine_layout.h for the sweep, and for the unresolved disagreement with the Ghidra
- * reference count recorded there. With the standing finding that both suppressors read 0 and that no
- * instruction writes either, the constant looks stale or mis-derived -- it is UNVERIFIED. Rather than
- * invent a derivation, the write is kept and performed only on the build the constant came from, where it
- * is provably a no-op; everywhere else it is skipped silently. Caller SEH-guards. */
+/* Resolve suppressor B through its instruction anchor; skip an unresolved
+ * address. The caller guards this access with SEH. */
 static void write_suppressor_b(void)
 {
     uintptr_t b;
@@ -77,8 +49,7 @@ static volatile LONG g_armed = 0;
 static int g_state  = 0;            /* 1 = recover, 2 = wait-exit */
 static int g_frames = 0;
 
-/* NULL when the editor singleton did not resolve on this build. Every caller checks: reading through a
- * pinned data address on the wrong executable is a wild read, not a degraded feature. */
+/* No resolved singleton means no editor operations. */
 static uint8_t *editor(void) { return g_editor_at; }
 static int ed_state(void)
 {
@@ -100,17 +71,9 @@ void recovery_arm(void)
     if (InterlockedExchange(&g_armed, 1) == 0) { g_state = 1; g_frames = 0; }
 }
 
-/* The proven editor->browser exit, one step per frame, on the main thread.
- *
- * CONTEXT GATES (the v0.2.1-beta.1 play-transition crash, issue #43): the drive is only valid in a LIVE
- * editor context. A fault during the editor->PLAY build also arms it, but there the editor's menu-screen
- * object *(ed+ED_MENU_SCREEN) is already torn down (it exists only in-editor) -- and the StartMenu state's
- * Begin handler (0x535730) writes through that pointer as its FIRST action, so an ungated
- * SetState(ed, 0xB) itself AV'd at NULL+0xa2c and produced a second, self-inflicted crash record.
- * So before driving: (1) not in the editor at all -> nothing to steer, disarm; (2) load_state != 3 -> a
- * play/boot load is in flight (the in-editor in-place load never writes load_state, so the real Class-B
- * context always reads 3 = RUNNING) -> wait; (3) menu-screen NULL -> the StartMenu cannot be hosted yet
- * -> wait. The RECOVER_BUDGET_FRAMES backstop still bounds every wait. */
+/* Drive exit only with a live editor, RUNNING load state, and a menu screen.
+ * Play transitions tear down the screen; calling StartMenu Begin then would
+ * dereference null. Waits are bounded by RECOVER_BUDGET_FRAMES. */
 static void recovery_tick(void)
 {
     if (!g_armed) return;
@@ -121,9 +84,7 @@ static void recovery_tick(void)
         return;
     }
     uint8_t *ed = editor();
-    /* SetState is sig-resolved (g_eng.setstate); its pinned RVA is only a valid backstop on the build it
-     * was extracted from. Without the editor object or without SetState there is no drive to run, so
-     * disarm and say so -- the engine's own Error(6) recovery still keeps the process alive. */
+    /* Without both the editor and SetState, disarm this exit attempt. */
     setstate_t SetState = (setstate_t)(uintptr_t)(g_eng.setstate ? g_eng.setstate
                             : (g_pinned_build ? (uintptr_t)(g_doom_base + RVA_SETSTATE) : (uintptr_t)0));
     if (!ed || !SetState) {
@@ -138,16 +99,14 @@ static void recovery_tick(void)
     switch (g_state) {
     case 1: /* open StartMenu (synchronous), then arm the EXIT (pending + GDM result = Yes) */
         if (!in_editor()) {
-            /* Faulted outside a live editor context (e.g. during the editor->PLAY build): the engine's
-             * own Error(6) recovery is already dropping to the menu -- no editor-exit drive to run. */
+            /* Outside the editor, there is no editor-exit drive to run. */
             shield_fault f = { "load", -1,
                 "recovery: no live editor context (play/boot transition) -- editor-exit drive not needed", 0, 0 };
             shield_emit(&f);
             InterlockedExchange(&g_armed, 0);
             break;
         }
-        /* Without the load-state word we cannot tell whether a play/boot load is in flight, and driving
-         * SetState during one is the crash this gate exists to prevent -- so wait, budget-bounded. */
+        /* Wait if a play/boot load is active or its state is unknown. */
         if (!g_load_state_at || *(volatile int32_t *)g_load_state_at != 3)
             break;   /* a play/boot load is in flight (or unknowable) -- wait (budget-bounded) */
         {
@@ -177,14 +136,8 @@ static void recovery_tick(void)
     }
 }
 
-/* ---- EDITOR-NATIVE in-editor notice (Class-A): a transient toast on the editor's own screen --------
- * The VEH (on a Class-A revert) sets g_notice_armed; this tick (main-thread, per-frame) shows a transient
- * toast on the EDITOR's OWN screen object (*(editor+0x21088) = ED_MENU_SCREEN) -- NOT the menu-shell GDM
- * dialog (which activated the browser + left editor render lag, LIVE 2026-06-19). Byte-identical to the
- * engine's "limits reached" toast (FUN_140531e60): build a title + text idStr, call the toast-show, free
- * both. The toast auto-fades + self-dedups (a "shown" byte at toast+0x1b0). Shell-free: touches no shell
- * slot / AddDialog / browser. Fire ONCE then disarm (re-arming each frame would churn idStr alloc/free).
- * DIRECT: FUN_140cfa0b0 (0xCFA0B0) + the engine call site 0x531E60. */
+/* Show one transient toast on the editor screen. Using a shell dialog here
+ * would activate the browser. Destroy both temporary idStr values after use. */
 typedef void (*idstr_ctor_t)(void *buf, const char *s);
 typedef void (*idstr_dtor_t)(void *buf);
 typedef void (*toast_show_t)(void *screen, void *title, void *text);
@@ -194,13 +147,8 @@ static volatile LONG g_notice_armed = 0;   /* 1 = generic toast (Class-A), 2 = h
 void notice_request(void)     { InterlockedExchange(&g_notice_armed, 1); }
 void notice_request_msg(void) { InterlockedExchange(&g_notice_armed, 2); }
 
-/* ---- MESSAGE HARVEST: read the engine's own last-formatted-error text (Class-B / Error(6)/FatalError) ---
- * A plain SEH-guarded READ of the engine global the dispatcher 0x1A08E80 strncpy's the formatted message
- * into right before it throws -- the same buffer the Frame catch funclet 0x1F5B937 prints as the error.
- * NO new hook (zero added instrumentation-conflict surface). The buffer is located by glb_resolve; a build
- * where it does not resolve simply has no message to harvest and the caller uses the generic notice. The
- * read stays SEH-guarded on top of that. Returns the captured C-string in `out` (NUL-terminated) and 1 if
- * a non-empty message was harvested, else 0 (caller falls back to the generic NOTICE_TEXT_STR). */
+/* Read the engine's last formatted error. Return 1 for a nonempty bounded
+ * C string; unreadable or unavailable text leaves callers using a generic notice. */
 static int harvest_engine_msg(char *out, size_t n)
 {
     if (!out || n == 0 || g_last_err_at == NULL) return 0;
@@ -222,11 +170,8 @@ int shield_last_engine_msg(char *out, size_t n)
     return harvest_engine_msg(out, n);
 }
 
-/* Harvest + log the engine's own last-formatted-error text on a downgraded-FatalError / Error(6) throw,
- * INDEPENDENT of the in-editor toast (notice_tick only fires in-editor, so a LOAD-time FatalError -- e.g. a
- * decl-registry "Remove_Locked: Resource wasn't found by ID" -- would otherwise never record its verbatim text,
- * and the fault would have to be reverse-engineered from a bare fault address). Rate-limited; SEH-safe via
- * harvest_engine_msg. Called from the VEH's C++-throw (Layer 2) path. */
+/* Log engine error text even when no editor screen exists for a toast.
+ * Called from the C++-throw path; reads are guarded and logging is capped. */
 static volatile LONG g_harvest_logged = 0;
 void log_engine_error_text(void)
 {
@@ -262,8 +207,7 @@ static void notice_tick(void)
     screen = *(uint8_t **)(ed + ED_MENU_SCREEN);
     if (!screen) return;
 
-    /* All three sig-resolved (g_eng.*). The pinned RVAs are only valid on the build they were extracted
-     * from, so off it an unresolved fn means no toast rather than three calls into unrelated code. */
+    /* An unresolved function disables the toast; literal fallback is pinned-only. */
     mk    = (idstr_ctor_t)(uintptr_t)(g_eng.idstr_ctor ? g_eng.idstr_ctor
               : (g_pinned_build ? (uintptr_t)(g_doom_base + RVA_IDSTR_CTOR) : (uintptr_t)0));
     rm    = (idstr_dtor_t)(uintptr_t)(g_eng.idstr_dtor ? g_eng.idstr_dtor
@@ -275,9 +219,8 @@ static void notice_tick(void)
         return;
     }
 
-    /* MESSAGE HARVEST (Class-B/Error(6) only -- mode 2): carry the engine's verbatim last-error text if it
-     * is present, else the generic notice. Class-A (mode 1) keeps the generic string -- a raw AV has no
-     * engine error string, so the buffer would be stale. The captured text is logged for the record. */
+    /* Only an engine error populates this buffer. Generic hardware-fault notices
+     * must not display stale text from an earlier error. */
     text = NOTICE_TEXT_STR;
     if (mode == 2 && harvest_engine_msg(msgbuf, sizeof msgbuf)) {
         text = msgbuf;
@@ -296,15 +239,8 @@ static void notice_tick(void)
     InterlockedExchange(&g_notice_armed, 0);   /* fire once; the toast's own guard prevents dup re-shows */
 }
 
-/* ---- LAYER 2: keep the dispatcher's throw-gate OPEN ---------------------------------------------------
- * The level>=6 dispatcher 0x1A08E80 throws the RECOVERABLE idException only `if (DAT_146faf820==0 &&
- * DAT_146faf8b0==0)`, else it ExitProcess(1)'s (error-dispatcher-and-recovery.md, the terminal-gate
- * footgun). Nothing in the image writes either global and both read 0 on the pinned build (see
- * engine_layout.h), so clearing them each frame is a no-op there; it is kept because the gate is the one
- * thing standing between a recoverable Error(6) and an ExitProcess(1), and a build that did arm one
- * would take the process down silently. The read-then-write shape keeps the common case a plain compare.
- * Suppressor A is located by glb_resolve; suppressor B has no derivation and is only written on the build
- * its unverified constant came from. SEH-guarded: neither may fault inside the frame hook. */
+/* Keep resolved throw suppressors clear so Error(6) can throw to Frame instead
+ * of exiting. Read before writing; both are normally zero on the pinned image. */
 static void keep_throw_gate_open(void)
 {
     if (g_doom_base == NULL) return;
@@ -315,31 +251,19 @@ static void keep_throw_gate_open(void)
     } __except (EXCEPTION_EXECUTE_HANDLER) { /* unreadable page -> skip */ }
 }
 
-/* ---- RESIDENT SAVE-DELETION GUARD (B): protect the user's saves from the corrupt-verdict delete --------
- * DeleteBadSaveSlots 0x1737C90 does NOT unlink files (DIRECT decompile: it validates each slot via the save
- * load-test 0x563220 and on any bad slot SHOWS the corrupt-save dialog); the actual delete is the dialog's
- * Delete button ACTION (dispatcher 0xE67BF0, action 0x1f). DISMISS-A (DESC_CLEARFLAG_OFF=1, id-agnostic, runs
- * NO button action) closes the prompt WITHOUT deleting -- the live-proven dismiss, now resident.
- * Runs every frame (the dialog lives in the browser/menu, where idCommonLocal::Frame still ticks). SEH-guarded
- * (the menu shell is null pre-Initialize / off-menu). Access pattern ported from the live instrumentation drive
- * lcScanCorruptDialog: S=*(base+RVA_SHELL_PTR_SLOT); dlg=*(S+0x8); arr=*(dlg+0x900);
- * cnt=*(int*)(dlg+0x908); desc[i]=arr+i*0x1b0; desc+0x00=GDM id, desc+0x08=clear-flag (0=pending). */
+/* Dismiss save-rejection dialogs by setting their clear flag, without running
+ * any button action that could delete a save. The shell may be absent; all
+ * queue access is guarded. */
 static int is_corrupt_save_gdm(int gdm)
 {
-    /* All four are dismissed. GDM_CORRUPT_CONTINUE was briefly excluded on 2026-08-29, on the
-     * reading that "CONTINUE" meant "continue the load" and that dismissing it was cancelling
-     * work the user asked for. A screenshot of the live dialog settled it: the text is "The save
-     * file appears to be damaged and cannot be loaded" over a single CONTINUE button, so CONTINUE
-     * is the acknowledgement, not a choice. Leaving it up only strands a modal the guard used to
-     * clear. */
+    /* CORRUPT_CONTINUE acknowledges a failed load; it does not resume loading. */
     return gdm == GDM_LOAD_DAMAGED_FILE || gdm == GDM_CORRUPT_CONTINUE
         || gdm == GDM_SNAPMAP_DETECTED_CORRUPT || gdm == GDM_SNAPMAP_REMOVED_CORRUPT;
 }
 
 static void save_guard_tick(void)
 {
-    /* Unresolved shell slot -> no guard. Reading a pinned data address on a build it does not describe
-     * would hand this walk an arbitrary pointer and it would then WRITE through it. */
+    /* An unresolved shell slot disables the guard. */
     if (g_doom_base == NULL || g_shell_slot_at == NULL) return;
     __try {
         uint8_t *S = *(uint8_t **)g_shell_slot_at;
@@ -373,12 +297,8 @@ static void save_guard_tick(void)
                     if (shellMgr) *(volatile uint8_t *)(shellMgr + SHELLMGR_VISIBLE_OFF) = 0;
                 }
                 {
-                    /* Report WHICH dialog was dismissed. All four ids read as "a corrupt-save
-                     * dialog" in the log, but they mean very different things: a damaged save
-                     * FILE is an environment problem, while the engine deciding a SNAPMAP is
-                     * corrupt points at the map or at content it could not resolve. Chasing the
-                     * mid-session-install failure on 2026-08-29 cost several wrong turns for want
-                     * of this one number. */
+                    /* Preserve the dialog ID: damaged files and rejected map content need
+                     * different diagnosis even though both are save errors. */
                     char msg[128];
                     const char *which =
                         first_gdm == GDM_LOAD_DAMAGED_FILE        ? "LOAD_DAMAGED_FILE" :
@@ -403,24 +323,17 @@ static int64_t frame_detour(void *self)
 {
     keep_throw_gate_open();      /* LAYER 2: gate clear so engine Error(6)/downgraded-FatalError recovers */
     save_guard_tick();           /* B: resident save-deletion guard (dismiss the corrupt-save dialogs) */
-    recovery_tick();             /* main-thread, per-frame, before the engine frame body (Class-A recovery tick) */
-    notice_tick();               /* show the editor-native toast if a Class-A revert armed it */
+    recovery_tick();             /* advance a pending editor-exit recovery */
+    notice_tick();               /* show a pending editor-native notice */
     return orig_frame(self);
 }
 
-/* ---- LAYER 2: downgrade idCommon::FatalError(7) -> the RECOVERABLE Error(6) throw, with a ONE-BYTE patch.
- * The FatalError7 wrapper (0x1a089e0) is byte-identical to Error6 except it passes `mov ecx,7` (B9 07) to
- * the dispatcher; rewriting that 07 imm8 to 06 makes EVERY engine FatalError throw idException (Frame catch
- * -> drop-to-menu + resume -> DOOM survives) instead of the terminal idFatalException (always rethrows ->
- * WinMain exit). DIRECT: error-dispatcher-and-recovery.md (level taxonomy + the recovery nest); this is the
- * "downgrade FatalError(7)->Error(6) survives" implication that truth flagged as not-yet-demonstrated.
- * ROBUST: scan the wrapper's first 0x40 bytes for B9 07 00 00 00 + verify before writing, so a shifted
- * build (sig fell back to a stale RVA) refuses the patch rather than corrupting a wrong byte. */
+/* Change FatalError's level immediate from 7 to 6, allowing its throw to use
+ * the recoverable engine path. Verify MOV ECX,7 in the identified wrapper before
+ * writing; direct dispatcher calls and failures outside Frame may still exit. */
 static void patch_fatalerror_downgrade(void)
 {
-    /* Sig-resolved; the pinned RVA only means anything on the build it came from. Off it, an unresolved
-     * wrapper means we do not patch -- writing a byte into a function we cannot identify is the exact
-     * corruption the scan-and-verify below exists to prevent. */
+    /* Patch only a resolved wrapper or the exact pinned-build fallback. */
     uint8_t *fe = (uint8_t *)(uintptr_t)(g_eng.fatalerror7 ? g_eng.fatalerror7
                     : (g_pinned_build ? (uintptr_t)(g_doom_base + RVA_FATALERROR7) : (uintptr_t)0));
     if (fe == NULL) {
@@ -465,8 +378,7 @@ static void patch_fatalerror_downgrade(void)
 
 int recovery_install(void)
 {
-    /* Locate the data globals first, so the per-frame hook never has to resolve anything: glb_resolve
-     * scans on a cache miss, and the frame detour must stay cheap and allocation-free. */
+    /* Cache globals before installing the frame hook. */
     g_pinned_build = sh_host_is_pinned_rva_build();
     if (g_doom_base) {
         g_editor_at     = (uint8_t *)glb_resolve(g_doom_base, "editor_singleton", NULL);
@@ -476,12 +388,8 @@ int recovery_install(void)
         g_suppr_a_at    = (uint8_t *)glb_resolve(g_doom_base, "throw_suppressor_a", NULL);
     }
 
-    /* Hook the SIG-RESOLVED Frame entry (g_eng.frame). The 15-byte FRAME_STOLEN prologue (5 pushes +
-     * mov eax,0x119c0) IS the Frame sig's fixed bytes, so a sig hit lands the hook on exactly the
-     * stolen-byte boundary the disasm verified -- which is precisely why the pinned RVA is not an
-     * acceptable substitute anywhere else: those 15 bytes are only Frame's on the build it was extracted
-     * from. Unresolved and not the pinned build -> refuse to install rather than detour an unknown
-     * function. */
+    /* The Frame signature covers the 15 position-independent bytes stolen here.
+ * Refuse unresolved targets unless the exact pinned-build fallback applies. */
     void *target = (void *)(uintptr_t)(g_eng.frame ? g_eng.frame
                      : (g_pinned_build ? (uintptr_t)(g_doom_base + RVA_FRAME) : (uintptr_t)0));
     if (target == NULL) {

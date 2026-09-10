@@ -1,25 +1,6 @@
-/* smoke.c -- see smoke.h. The backend's end-to-end foundation proof.
- *
- * Two proofs, one line:
- *
- *  (A) RESOLVER: sig_resolve_all over the live DOOM module. Every signature in the DB must resolve
- *      UNIQUELY (the whole point -- a sig that matches 0 or >1 times can't identify a function). We
- *      also cross-check each resolved RVA against known_rva: on the PINNED build they match (proves
- *      the scanner re-finds the SAME function the sig was extracted from); on a shifted build they
- *      differ and that is EXPECTED (the resolver earning its keep) -- reported, not failed. The
- *      pass/fail bar is uniqueness, not RVA equality.
- *
- *  (B) INSTALLER: a scratch self-test (no engine side effects). We detour a hand-laid scratch stub to
- *      a hand-laid detour stub, call it through the patched entry, confirm the detour ran, call the
- *      trampoline to confirm the ORIGINAL bytes still execute, then hook_unpatch and confirm the
- *      original runs un-detoured again. This exercises the exact VirtualProtect->patch->trampoline->
- *      un-patch path the real engine detours will use, with zero risk to the live game.
- *
- * The scratch target is HAND-LAID machine code (not a C function) so the optimizer can't shrink it
- * below the 16-byte stolen window or emit a RIP-relative prologue (that combination -- a tiny /O2 fn
- * whose 6-byte body was RIP-relative AND < the steal window -- corrupted memory in an earlier draft).
- * Its first 16 bytes are whole, register-only, position-independent instructions.
- */
+/* Check live signature resolution and exercise detours on scratch memory.
+ * RVA drift is diagnostic; resolution requires uniqueness or a verified hooked
+ * fallback. Handwritten scratch code guarantees a 16-byte relocatable prologue. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -28,17 +9,13 @@
 #include "hook.h"
 #include "backend_log.h"
 
-/* ---- (B) scratch self-test target (hand-laid PI machine code) ---------------------------------- */
+/* Scratch detour target. */
 #define TAG_ORIG   1
 #define TAG_DETOUR 2
 
-/* int orig(int x_ecx, int* tag_rdx): *tag = 1; return x*2;  (16-byte PI prologue + pad + ret)
- *   C7 02 01 00 00 00     mov  dword [rdx], 1        ; *tag = TAG_ORIG               (6)
- *   8B C1                 mov  eax, ecx              ; eax = x                        (2)
- *   03 C0                 add  eax, eax              ; eax = x*2                      (2)
- *   48 87 C0              xchg rax, rax              ; PI no-op pad (REX, 3B)         (3)
- *   48 87 C0              xchg rax, rax              ; PI no-op pad                   (3)  ->16 bytes
- *   90 90 C3              nop; nop; ret                                              (3) */
+/* orig(x,tag) sets *tag=1 and returns x*2. The first 16 bytes are whole,
+ * position-independent instructions: mov [rdx],1; mov eax,ecx; add eax,eax;
+ * two three-byte xchg rax,rax pads. Two NOPs and ret follow the stolen window. */
 static const uint8_t SCRATCH_ORIG_CODE[] = {
     0xC7, 0x02, 0x01, 0x00, 0x00, 0x00,
     0x8B, 0xC1,
@@ -68,9 +45,7 @@ static const char *sig_status_str(sig_status s)
     }
 }
 
-/* SEH-guarded peek of `n` bytes from `src` into `dst`. Returns 1 if all bytes read, 0 if an access
- * violation hit (e.g. an uncommitted .text page) -- used by the failure diagnostic to distinguish a
- * runtime-patched prologue (bytes differ) from an unreadable page (read AV). */
+/* Distinguish an unreadable page from differing bytes in failure diagnostics. */
 static int safe_read(const uint8_t *src, uint8_t *dst, int n)
 {
     __try {
@@ -90,16 +65,14 @@ static void hexdump(const uint8_t *buf, int n, char *out, size_t outcap)
     if (p && out[p - 1] == ' ') out[p - 1] = '\0';
 }
 
-/* For a FAILING sig, log a diagnostic: the EXPECTED first fixed bytes (from the DB pattern, which the
- * extractor took from the on-disk unpacked exe at known_rva) vs the ACTUAL live bytes at
- * doom_base+known_rva. This is the DIRECT evidence that tells whether the live prologue is patched,
- * shifted, or on an unreadable page -- without needing a Ghidra/manual live read. */
+/* Compare expected bytes with live bytes at the recorded RVA for diagnostics.
+ * On other builds this location need not be the function. */
 #define DIAG_BYTES 16
 static void log_sig_failure_diag(const uint8_t *doom_base, const sig_entry *e, sig_status st)
 {
     char line[256], exp_hex[64] = {0}, got_hex[64] = {0};
 
-    /* Expected: the leading fixed (non-wildcard) bytes of the pattern, parsed straight from the string. */
+
     uint8_t exp[DIAG_BYTES];
     int en = 0;
     const char *p = e->pattern;
@@ -116,7 +89,7 @@ static void log_sig_failure_diag(const uint8_t *doom_base, const sig_entry *e, s
     }
     hexdump(exp, en, exp_hex, sizeof exp_hex);
 
-    /* Actual: live bytes at the OFFLINE known_rva (where the fn sits in the unpacked exe). */
+
     uint8_t got[DIAG_BYTES];
     int readable = safe_read(doom_base + e->known_rva, got, en > 0 ? en : DIAG_BYTES);
     if (readable) hexdump(got, en > 0 ? en : DIAG_BYTES, got_hex, sizeof got_hex);
@@ -128,23 +101,22 @@ static void log_sig_failure_diag(const uint8_t *doom_base, const sig_entry *e, s
     backend_log(line);
 }
 
-/* ---- lightweight resolve pass (the bootstrap poll uses this) ----------------------------------- */
+/* Bootstrap resolution probe. */
 size_t sh_resolve_count(const uint8_t *doom_base)
 {
     sig_result results[SIG_RESULTS_MAX];
     return sig_resolve_all(doom_base, results, SIG_RESULTS_MAX);
 }
 
-/* ---- the proof --------------------------------------------------------------------------------- */
+/* Full smoke check. */
 int sh_smoke_run(const uint8_t *doom_base, unsigned long deferred_ms)
 {
     char line[256];
 
-    /* (A) resolver -------------------------------------------------------------------------------- */
+
     size_t total = sig_db_count();
     sig_result results[SIG_RESULTS_MAX];
-    /* NOT a silent clamp. Truncating here is what hid an unresolved signature once already: the
-     * report said "64/64 resolved" while entry 65 had never been looked at. Say so instead. */
+    /* Refuse an undersized results array instead of silently omitting signatures. */
     if (total > SIG_RESULTS_MAX) {
         char over[160];
         _snprintf_s(over, sizeof over, _TRUNCATE,
@@ -165,8 +137,7 @@ int sh_smoke_run(const uint8_t *doom_base, unsigned long deferred_ms)
             if (results[i].rva == BACKEND_ENGINE_SIGNATURES[i].known_rva) rva_match++;
             else rva_diff++;
         } else if (results[i].status == SIG_OK_HOOKED) {
-            /* Present-but-inline-hooked (the scan missed the overwritten prologue; the known_rva
-             * fallback confirmed it via the matching fixed tail). Resolved + callable via trampoline. */
+            /* A matching tail identifies an entry whose prologue is already detoured. */
             hooked++;
             size_t l = strlen(hooked_names);
             _snprintf_s(hooked_names + l, sizeof hooked_names - l, _TRUNCATE,
@@ -176,14 +147,13 @@ int sh_smoke_run(const uint8_t *doom_base, unsigned long deferred_ms)
                 first_bad = results[i].name;
                 first_bad_status = results[i].status;
             }
-            /* Log EVERY genuinely-failing sig with a live-vs-expected byte diagnostic, so one re-smoke
-             * shows the exact set AND why each fails (patched-but-tail-mismatch / shifted / unreadable). */
+            /* Log bytes for every unresolved entry. */
             log_sig_failure_diag(doom_base, &BACKEND_ENGINE_SIGNATURES[i], results[i].status);
         }
     }
     int resolver_ok = (ok == total);
 
-    /* (B) installer self-test -------------------------------------------------------------------- */
+
     typedef int (*scratch_fn)(int, volatile int *);
     int detour_ok = 0;
     const char *detour_why = "not run";
@@ -234,7 +204,7 @@ int sh_smoke_run(const uint8_t *doom_base, unsigned long deferred_ms)
     if (orig_code) VirtualFree(orig_code, 0, MEM_RELEASE);
     if (det_code)  VirtualFree(det_code, 0, MEM_RELEASE);
 
-    /* ---- emit the single foundation-proof line -------------------------------------------------------------- */
+
     if (resolver_ok && detour_ok) {
         if (hooked > 0) {
             _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -248,8 +218,7 @@ int sh_smoke_run(const uint8_t *doom_base, unsigned long deferred_ms)
                 ok, total, deferred_ms, rva_match, rva_diff);
         }
     } else if (!resolver_ok) {
-        /* After the bootstrap poll, a still-incomplete resolve means the SteamStub decrypt never landed
-         * within the budget (or the build shifted so a sig no longer matches). */
+        /* The remaining signatures may be encrypted, patched, or incompatible. */
         _snprintf_s(line, sizeof line, _TRUNCATE,
             "PB0: FAIL resolver still %zu/%zu sigs after %lums (SteamStub not decrypted?; "
             "first bad: %s status=%d); detour %s",

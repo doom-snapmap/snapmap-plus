@@ -1,10 +1,8 @@
-/* resource_bridge.c -- sparse, manifest-selected installed-resource provider.
- *
- * This is deliberately not a virtual pindex or archive overlay. A launch-time
- * manifest names exact rows already present in the user's installed base-game
- * pindex. We retain only their metadata, then read and decode the selected
- * slices on demand through the normal SnapMap+ override idFile stream.
- * Installed files are opened read-only and never rewritten or copied. */
+/* Manifest-selected access to installed resources. Capture records exact
+ * pindex rows from package manifests; opens read and decode only the selected
+ * archive slices. Recapture refreshes this metadata after package changes.
+ * Installed archives remain read-only.
+ */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -112,15 +110,10 @@ static int rb_path_cmp_ci(const char *a, const char *b)
     }
 }
 
-/* Order every key CASE-INSENSITIVELY FIRST, then break ties exactly.
- *
- * The leading case-insensitive pass is what makes rb_collapse_identical_rows
- * correct: it collapses adjacent rows using rb_path_cmp_ci on type, name AND
- * alias, so rows this comparator considers equal under that same rule must come
- * out adjacent. Sorting the alias tie-break with strcmp alone broke that -- two
- * rows differing only in the case of their alias could be separated by a third
- * row, escape the collapse, and then be refused by the case-insensitive alias
- * check below as if two packages disagreed. */
+/* Sort all keys case-insensitively before exact tie-breaks. Duplicate
+ * collapse compares type, name and alias case-insensitively, so equivalent
+ * rows must remain adjacent.
+ */
 static int rb_identity_cmp(const rb_entry *a, const rb_entry *b)
 {
     int c = rb_path_cmp_ci(a->type, b->type);
@@ -388,11 +381,9 @@ static int rb_parse_manifest(const rb_manifest_file *manifest,
     return 1;
 }
 
-/* APPEND this package's manifests to `files`. Every installed package
- * contributes to one set, so this must never restart at index zero: an earlier
- * version overwrote the accumulated list per package, which silently dropped
- * every manifest but the last package's, and a package with an empty resources
- * directory reset the count to zero outright. */
+/* Append this package without resetting the accumulated list. Empty resources
+ * directories must preserve earlier packages.
+ */
 static int rb_collect_manifests(const char *directory, const char *package,
                                 rb_manifest_file *files, size_t capacity,
                                 size_t *inout_count)
@@ -434,13 +425,9 @@ static int rb_collect_manifests(const char *directory, const char *package,
     return 1;
 }
 
-/* Two packages that bridge the same resource is the NORMAL case, not an error:
- * shared gore, FX and animation assets belong to no single demon. An identical
- * row therefore composes -- the first copy serves it and the rest collapse away,
- * exactly as an identical cvar requirement does. Only a genuine disagreement is
- * refused: one provider path claimed by two different identities cannot be
- * served two ways at once, and guessing a winner would silently hand a player
- * the wrong asset. */
+/* Collapse identical rows shared by packages. Refuse a provider path claimed
+ * by different identities; one path cannot serve conflicting resources.
+ */
 static int rb_collapse_identical_rows(void)
 {
     size_t read, write = 1;
@@ -486,8 +473,7 @@ static int rb_validate_manifest_set(void)
         const rb_entry *b = &g_entries[alias_order[i]];
         if (rb_path_cmp_ci(a->alias, b->alias) == 0) {
             char line[512];
-            /* Name both rows: with several packages installed, "a collision"
-             * without the owners is not an actionable diagnostic. */
+            /* Include both owners in collision diagnostics. */
             _snprintf_s(line, sizeof(line), _TRUNCATE,
                         "resource-bridge REFUSED: provider path '%s' is claimed by two "
                         "different identities, %s/%s from %s and %s/%s from %s",
@@ -711,23 +697,16 @@ static int rb_validate_slices_and_open(const char *doom_base)
     return 1;
 }
 
-/* The package set is 26 KB and these captures already carry large frames, so it
- * lives in static storage rather than on the stack: putting it on the stack
- * tripped the /GS guard and terminated DOOM with 0xC0000409. Each capture is a
- * guarded one-shot on a single thread, so a shared buffer is safe here. */
+/* Keep the 26 KB package set off these already large stack frames. Capture is
+ * serialized, so it can reuse static scratch storage.
+ */
 static sh_package g_packages[SH_PACKAGES_MAX];
 
-/* Re-run the manifest capture so a package installed mid-session becomes resolvable without a
- * relaunch. Returns what the fresh capture returned.
- *
- * SAFETY. sh_resource_bridge_open refuses unless the state is READY, so moving the state off
- * READY fences off every reader that has not already entered the lookup. A reader ALREADY
- * inside it cannot be evicted, so the previous entry table is deliberately NOT freed -- it is
- * retired and leaked. That costs a bounded ~26 KB per package install and removes the
- * use-after-free entirely; freeing it would trade a real crash for a small saving.
- *
- * Call at a quiescent moment (the browser, no map loading). A MISS during the rebuild window
- * degrades to the packaged resource, which is the same failure this module already tolerates. */
+/* Reopen capture at a quiescent boundary with no map loading. Moving away
+ * from READY rejects new lookups during rebuilding. Retain previous entry
+ * allocations for readers that already entered; repeated recaptures
+ * accumulate retained memory.
+ */
 int sh_resource_bridge_recapture(const char *data_root)
 {
     char line[192];
@@ -741,7 +720,7 @@ int sh_resource_bridge_recapture(const char *data_root)
         return 0;
     }
 
-    /* Retire, do not free. See SAFETY above. */
+    /* Retain the previous entries for existing readers. */
     g_entries = NULL;
     g_entry_count = 0;
     g_entry_capacity = 0;
@@ -773,9 +752,9 @@ int sh_resource_bridge_capture(const char *data_root)
     if (InterlockedCompareExchange(&g_state, RB_STATE_INSTALLING, RB_STATE_NEW) != RB_STATE_NEW)
         return InterlockedCompareExchange(&g_state, RB_STATE_NEW, RB_STATE_NEW) == RB_STATE_READY;
     if (!data_root || !data_root[0]) return rb_fail("manifest root path is invalid");
-    /* Each installed package carries its own resources directory; they are
-     * collected into one set so the existing cross-manifest identity and alias
-     * collision checks below cover packages as well as files. */
+    /* Collect every package before validating cross-manifest identity and
+     * alias collisions.
+     */
     if (!sh_packages_enumerate(data_root, g_packages, SH_PACKAGES_MAX, &package_count))
         return rb_fail("the overrides package directory could not be enumerated completely");
     for (i = 0; i < package_count; i++) {
