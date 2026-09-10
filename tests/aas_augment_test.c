@@ -1898,6 +1898,51 @@ static int generated_walk_route(const sh_aas *a,int start,int goal)
     return seen[goal];
 }
 
+/* Independent line/convex-floor clipping. Native walking follows the area
+ * polygons and cannot cross an XY gap merely because a walk record exists. */
+static int floor_line_interval(const sh_aas *a,unsigned area,const double s[2],
+                               const double d[2],double *lo,double *hi)
+{
+    const unsigned char *ar=sh_aas_rec_const(a,SH_AAS_L_AREAS,area);
+    unsigned i,count=sh_aas_get_u16(ar,6),first=sh_aas_get_u32(ar,8);
+    *lo=0;*hi=1;
+    for(i=0;i<count;i++) {
+        const unsigned char *ix=sh_aas_rec_const(a,SH_AAS_L_EDGEINDEX,first+i);
+        int ei=sh_aas_get_i32(ix,0);
+        const unsigned char *ed=sh_aas_rec_const(a,SH_AAS_L_EDGES,(unsigned)abs(ei));
+        const unsigned char *v=sh_aas_rec_const(a,SH_AAS_L_VERTICES,sh_aas_get_u32(ed,ei<0?4:0));
+        const unsigned char *w=sh_aas_rec_const(a,SH_AAS_L_VERTICES,sh_aas_get_u32(ed,ei<0?0:4));
+        double vx=sh_aas_get_f32(v,0),vy=sh_aas_get_f32(v,4);
+        double nx=sh_aas_get_f32(w,4)-vy,ny=vx-sh_aas_get_f32(w,0);
+        double at=nx*(s[0]-vx)+ny*(s[1]-vy),slope=nx*d[0]+ny*d[1];
+        if(fabs(slope)<1e-10){if(at < -1e-5)return 0;continue;}
+        if(slope>0){double t=-at/slope;if(t>*lo)*lo=t;}
+        else {double t=-at/slope;if(t<*hi)*hi=t;}
+        if(*lo>*hi)return 0;
+    }
+    return 1;
+}
+
+static int wall_at_floor_point(const sh_aas *a,unsigned area,double x,double y)
+{
+    const unsigned char *ar=sh_aas_rec_const(a,SH_AAS_L_AREAS,area);unsigned i;
+    for(i=0;i<sh_aas_get_u16(ar,6);i++) {
+        const unsigned char *ix=sh_aas_rec_const(a,SH_AAS_L_EDGEINDEX,sh_aas_get_u32(ar,8)+i);
+        const unsigned char *ed=sh_aas_rec_const(a,SH_AAS_L_EDGES,abs(sh_aas_get_i32(ix,0)));
+        const unsigned char *v=sh_aas_rec_const(a,SH_AAS_L_VERTICES,sh_aas_get_u32(ed,0));
+        const unsigned char *w=sh_aas_rec_const(a,SH_AAS_L_VERTICES,sh_aas_get_u32(ed,4));
+        double vx=sh_aas_get_f32(v,0),vy=sh_aas_get_f32(v,4);
+        double dx=sh_aas_get_f32(w,0)-vx,dy=sh_aas_get_f32(w,4)-vy,len=hypot(dx,dy);
+        double along=len>0?((x-vx)*dx+(y-vy)*dy)/len:0;
+        /* At a corner the other incident edge can legitimately remain a wall. */
+        if(along>0.04&&along<len-0.04&&fabs(dx*(y-vy)-dy*(x-vx))<0.005*len&&
+           (sh_aas_get_u32(ed,8)&1)) {
+            printf("wall area %u point %.6f %.6f edge %.6f %.6f -> %.6f %.6f\n",area,x,y,vx,vy,vx+dx,vy+dy);return 1;
+        }
+    }
+    return 0;
+}
+
 static int bridge_links_valid(const sh_aas *a)
 {
     unsigned i;
@@ -1905,6 +1950,20 @@ static int bridge_links_valid(const sh_aas *a)
         const unsigned char *p=sh_aas_rec_const(a,SH_AAS_L_REACHABILITIES,i);
         unsigned from=sh_aas_get_u16(p,6),to=sh_aas_get_u16(p,8);
         if(from<2||to<2)continue;
+        if(sh_aas_get_u32(p,0)==0x20) {
+            double s[2]={sh_aas_get_i16(p,12),sh_aas_get_i16(p,14)};
+            double d[2]={sh_aas_get_i16(p,18)-s[0],sh_aas_get_i16(p,20)-s[1]};
+            double a0,a1,b0,b1;
+            if(!floor_line_interval(a,from,s,d,&a0,&a1)||!floor_line_interval(a,to,s,d,&b0,&b1)||
+                (b0-a1)*sqrt(d[0]*d[0]+d[1]*d[1])>0.2) {
+                printf("walk reach %u crosses disconnected floor polygons %u -> %u; s %.8f %.8f d %.8f %.8f spans %.9f %.9f %.9f %.9f\n",i,from,to,s[0],s[1],d[0],d[1],a0,a1,b0,b1);
+                return 0;
+            }
+            if(wall_at_floor_point(a,from,s[0]+a1*d[0],s[1]+a1*d[1])||
+               wall_at_floor_point(a,to,s[0]+b0*d[0],s[1]+b0*d[1])) {
+                printf("walk reach %u crosses a wall flag %u -> %u\n",i,from,to);return 0;
+            }
+        }
         if(sh_aas_point_area(a,(float)sh_aas_get_i16(p,12),(float)sh_aas_get_i16(p,14),
             (float)sh_aas_get_i16(p,16)+2)!=from ||
            sh_aas_point_area(a,(float)sh_aas_get_i16(p,18),(float)sh_aas_get_i16(p,20),
@@ -1921,6 +1980,24 @@ static int bridge_links_valid(const sh_aas *a)
         }
     }
     return 1;
+}
+
+static void test_exposed_edges_remain_walls(void)
+{
+    sh_aas *a=load_module();sh_aug_platform p;sh_aug_report rep;
+    sh_aug_opts o={SH_AUG_FALL_NEVER,1,SH_AUG_TRAVERSAL_NEVER};
+    int area;unsigned i;const unsigned char *ar;
+    mkbox(&p,-256,-256,256,256,128,0,"isolated roof");
+    CHECK(sh_aas_augment(a,&p,1,&o,&rep));
+    area=sh_aas_point_area(a,0,0,130);CHECK(area>1);
+    ar=sh_aas_rec_const(a,SH_AAS_L_AREAS,(unsigned)area);
+    CHECK(sh_aas_get_u16(ar,6)==4);
+    for(i=0;i<sh_aas_get_u16(ar,6);i++) {
+        const unsigned char *ix=sh_aas_rec_const(a,SH_AAS_L_EDGEINDEX,sh_aas_get_u32(ar,8)+i);
+        const unsigned char *ed=sh_aas_rec_const(a,SH_AAS_L_EDGES,abs(sh_aas_get_i32(ix,0)));
+        CHECK(sh_aas_get_u32(ed,8)==0xc01);
+    }
+    sh_aas_free(a);
 }
 
 static void test_intersecting_bridge_routes(void)
@@ -2009,6 +2086,7 @@ int main(void)
     printf("aas_augment_test\n");
     test_fixture_resolves();
     test_intersecting_bridge_routes();
+    test_exposed_edges_remain_walls();
     test_narrow_partial_contacts();
     test_suspended_bridge_is_continuous();
     test_rotated_ridge_has_reciprocal_walk_links();

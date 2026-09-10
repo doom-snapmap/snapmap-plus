@@ -177,11 +177,11 @@ int sh_nav_geometry_path_clear(const sh_aug_platform *src,int count,
  * edge cross products), then retain the physical floor-contact height on
  * marked walkable planes so a ramp can meet a level support continuously. */
 static int ng_obstacle(const ng_face *f,const ng_box *b,double r,double h,
-                       double floor_cos,int support,ng_poly *out)
+                       double floor_cos,int support,double step,ng_poly *out)
 {
     double axes[15][3]={{0}},centre[3];ng_poly p=f->p,q;int a,k,j,s;
     for(k=0;k<3;k++){axes[k+3][k]=1.0;centre[k]=b->c[k];}
-    centre[2]-=h*0.5;
+    centre[2]-=(h+step)*0.5;
     for(a=0;a<3;a++)for(k=0;k<3;k++)axes[a][k]=b->axis[a][k];
     for(a=0;a<3;a++)for(k=0;k<3;k++){
         double *v=axes[6+a*3+k];
@@ -192,7 +192,7 @@ static int ng_obstacle(const ng_face *f,const ng_box *b,double r,double h,
         double len=sqrt(ng_dot(axes[a],axes[a])),rad;
         if(len<1e-8)continue;
         for(k=0;k<3;k++)axes[a][k]/=len;
-        rad=r*(fabs(axes[a][0])+fabs(axes[a][1]))+h*0.5*fabs(axes[a][2]);
+        rad=r*(fabs(axes[a][0])+fabs(axes[a][1]))+(h-step)*0.5*fabs(axes[a][2]);
         for(j=0;j<3;j++)rad+=b->half[j]*fabs(ng_dot(axes[a],b->axis[j]));
         for(s=-1;s<=1;s+=2) {
             double norm[3],d,minimum=1e30;
@@ -259,17 +259,17 @@ static int ng_edge_cover(const ng_poly *other,const double *a,const double *b,
 /* A slope transition is support too. Shared edges need not have the same
  * normal: both outward faces may be walkable on a tipped box or joined ramp. */
 static int ng_support_cover(const ng_face *other,const double *a,const double *b,
-                             double ox,double oy,double *lo,double *hi)
+                             double ox,double oy,double step,double *lo,double *hi)
 {
-    double delta[3],slope,offset;int k;
+    double delta[3],slope,offset,tolerance=NG_EPS+step*other->normal[2];int k;
     if(!ng_edge_cover(&other->p,a,b,ox,oy,lo,hi))return 0;
     for(k=0;k<3;k++)delta[k]=a[k]-other->p.p[0][k];
     offset=ng_dot(other->normal,delta);
     for(k=0;k<3;k++)delta[k]=b[k]-a[k];
     slope=ng_dot(other->normal,delta);
-    if(fabs(slope)<1e-9)return fabs(offset)<NG_EPS;
+    if(fabs(slope)<1e-9)return fabs(offset)<tolerance;
     {
-        double l=(-NG_EPS-offset)/slope,h=(NG_EPS-offset)/slope;
+        double l=(-tolerance-offset)/slope,h=(tolerance-offset)/slope;
         if(l>h){double t=l;l=h;h=t;}
         if(l>*lo)*lo=l;if(h<*hi)*hi=h;
     }
@@ -301,7 +301,7 @@ static int ng_merge(const ng_poly *a,const ng_poly *b,ng_poly *out)
 }
 
 int sh_nav_geometry_build(const sh_aug_platform *src,int count,double radius,
-    double height,double floor_cos,sh_aug_platform *out,int *source,int *pieces,
+    double height,double floor_cos,double step,sh_aug_platform *out,int *source,int *pieces,
     unsigned char *buried,int capacity)
 {
     ng_box *boxes=NULL;ng_face *faces=NULL;ng_poly *mem=NULL,*a,*b,cut;
@@ -310,7 +310,8 @@ int sh_nav_geometry_build(const sh_aug_platform *src,int count,double radius,
     ng_boundary *boundaries=NULL;
     int nb=0,nbcap=0,i,j,k,f,nf=0,nout=0,rc=-1;
     if(count<0||count>SH_AUG_MAX_PLATFORMS||capacity<1||radius<0.0||height<=0.0||
-       floor_cos<=0.0||floor_cos>1.0||!isfinite(radius)||!isfinite(height)||!isfinite(floor_cos)||
+       floor_cos<=0.0||floor_cos>1.0||step<0.0||step>=height||!isfinite(step)||
+       !isfinite(radius)||!isfinite(height)||!isfinite(floor_cos)||
        (count&&!src)||!out||!source||!pieces||!buried)return -1;
     boxes=(ng_box*)calloc(count?count:1,sizeof *boxes);
     faces=(ng_face*)calloc(count?count*6:1,sizeof *faces);
@@ -334,7 +335,7 @@ int sh_nav_geometry_build(const sh_aug_platform *src,int count,double radius,
             faces[nf++]=face;
         }
     }
-        /* Erode only the exposed boundary of the entire coplanar support set. */
+        /* Erode exposed boundaries; retain support contacts within a step. */
     for(i=0;i<nf&&radius>0.0;i++) {
             for(k=0;k<faces[i].p.n;k++) {
                 double *p=faces[i].p.p[k],*q=faces[i].p.p[(k+1)%faces[i].p.n];
@@ -343,7 +344,7 @@ int sh_nav_geometry_build(const sh_aug_platform *src,int count,double radius,
                 if(len<1e-9)continue;
                 for(j=0;j<nf&&ni;j++)if(j!=i) {
                     double lo,hi;int nn=0;
-                    if(!ng_support_cover(&faces[j],p,q,-dy/len,dx/len,&lo,&hi))continue;
+                    if(!ng_support_cover(&faces[j],p,q,-dy/len,dx/len,step,&lo,&hi))continue;
                     for(v=0;v<ni;v++) {
                         if(hi<=iv[v].lo||lo>=iv[v].hi)next[nn++]=iv[v];
                         else {
@@ -376,8 +377,19 @@ int sh_nav_geometry_build(const sh_aug_platform *src,int count,double radius,
         /* Subtract occupied standing space, including the actual underside of
          * an elevated box. Steep boxes remain obstacles even with no nav face. */
         for(j=0;j<count&&np;j++)if(j!=face->source&&boxes[j].solid) {
+            double step_clearance=0.0;int axis;
+            if(!src[j].obstacle_only)for(axis=0;axis<3;axis++)
+                if(fabs(boxes[j].axis[axis][2])+1e-7>=floor_cos)step_clearance=step;
+            /* Remove buried/overhead geometry at the actual standing point.
+             * At a marked step, the expanded body starts above the step band:
+             * its riser must not erode an agent-width moat between the floors.
+             * Unmarked obstacles, steep walls and headroom retain full checks. */
+            if(step_clearance>0.0) {
+                if(!ng_obstacle(face,&boxes[j],0.0,height,floor_cos,1,0.0,&cut))goto done;
+                if(cut.n&&!ng_cut_all(&a,&b,&np,&cut,capacity))goto done;
+            }
             if(!ng_obstacle(face,&boxes[j],radius,height,floor_cos,
-                           !src[j].obstacle_only,&cut))goto done;
+                           !src[j].obstacle_only,step_clearance,&cut))goto done;
             if(cut.n&&!ng_cut_all(&a,&b,&np,&cut,capacity))goto done;
         }
         for(i=0;i<nb&&np;i++)if(ng_coplanar(face,&faces[boundaries[i].face]))

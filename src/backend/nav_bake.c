@@ -669,10 +669,17 @@ void sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line lin
             if(!model)continue;
             for(a=g_preview[i].first_area;a<sh_aas_count(model,SH_AAS_L_AREAS);a++) {
                 const unsigned char *ar=sh_aas_rec_const(model,SH_AAS_L_AREAS,a);
-                float points[SH_AUG_MAX_CORNERS][3];int e,k,n;unsigned first;
+                float local_points[SH_AUG_MAX_CORNERS][3],(*points)[3]=local_points;
+                int e,k,n;unsigned first;
                 if(!ar)continue;
                 n=sh_aas_get_u16(ar,6);first=sh_aas_get_u32(ar,8);
-                if(n<3||n>SH_AUG_MAX_CORNERS)continue;
+                if(n<3)continue;
+                /* Seam stitching adds collinear vertices beyond the convex
+                 * geometry builder's corner cap. They still form one floor. */
+                if(n>SH_AUG_MAX_CORNERS) {
+                    points=(float(*)[3])HeapAlloc(GetProcessHeap(),0,(size_t)n*sizeof *points);
+                    if(!points)continue;
+                }
                 for(e=0;e<n;e++) {
                     const unsigned char *index=sh_aas_rec_const(model,SH_AAS_L_EDGEINDEX,first+e),*edge,*vertex;
                     int ei,vi;if(!index)break;
@@ -683,6 +690,7 @@ void sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line lin
                     for(k=0;k<3;k++)points[e][k]=sh_aas_get_f32(vertex,k*4);
                 }
                 if(e==n)bake_preview_polygon(&g_map.instances[g_modules[i].instance],points,n,line,ctx);
+                if(points!=local_points)HeapFree(GetProcessHeap(),0,points);
             }
             sh_aas_free(model);
         }
