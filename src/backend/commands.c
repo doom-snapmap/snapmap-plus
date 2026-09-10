@@ -204,12 +204,12 @@ static void h_rawmaps_on(idCmdArgs *a)
               readable ? "" : "   <-- cannot be read right now");
     if (!readable && why[0]) sh_printf("             %s\n", why);
     {
-        /* Say whether this is the usual file or one the person chose. The path alone
+        /* Say whether this is the default file or one the person chose. The path alone
          * cannot tell them apart, and they answer different questions about the next save. */
         char target[MAX_PATH] = "";
         sh_rawmap_get_save_target(target, (int)sizeof target);
         sh_printf("  save to:   %s%s\n", save_path[0] ? save_path : "(none)",
-                  target[0] ? "   (you chose this file)" : "   (the usual file)");
+                  target[0] ? "   (you chose this file)" : "   (the default file)");
     }
     sh_printf("Every map you open now loads that file, and every save is mirrored to that one.\n");
     sh_printf("(legacy name -- 'sh_rawmaps' shows and changes everything, including both paths.)\n");
@@ -409,12 +409,12 @@ static void rawmap_print_state(void)
               readable ? "" : "   <-- cannot be read right now");
     if (!readable && why[0]) sh_printf("             %s\n", why);
     {
-        /* Say whether this is the usual file or one the person chose. The path alone
+        /* Say whether this is the default file or one the person chose. The path alone
          * cannot tell them apart, and they answer different questions about the next save. */
         char target[MAX_PATH] = "";
         sh_rawmap_get_save_target(target, (int)sizeof target);
         sh_printf("  save to:   %s%s\n", save_path[0] ? save_path : "(none)",
-                  target[0] ? "   (you chose this file)" : "   (the usual file)");
+                  target[0] ? "   (you chose this file)" : "   (the default file)");
     }
     if (sh_rawmap_load_oneshot_pending())
         sh_printf("  a rawmap is staged for the NEXT map you open.\n");
@@ -438,10 +438,10 @@ static void rawmap_print_usage(void)
     sh_printf("  sh_rawmaps save            write the open map to the save path\n");
     sh_printf("  sh_rawmaps save <path>     save there, and keep saving there\n");
     sh_printf("  sh_rawmaps savepath        [default|rawmap|<path>]\n");
-    sh_printf("                             where saves go: the usual file, the rawmap you\n");
-    sh_printf("                             opened, or one you name. Opening another map\n");
-    sh_printf("                             goes back to the usual file\n");
-    sh_printf("  sh_rawmaps default         put both paths back to the usual files\n");
+    sh_printf("                             where saves go: the default file, the rawmap\n");
+    sh_printf("                             you opened, or one you name. Opening another\n");
+    sh_printf("                             map goes back to the default file\n");
+    sh_printf("  sh_rawmaps default         put both paths back to the default files\n");
 }
 
 static void h_sh_rawmaps(idCmdArgs *a)
@@ -588,7 +588,7 @@ static void h_sh_rawmaps(idCmdArgs *a)
         if (target[0])
             sh_printf("Saves go to %s until you open a different map.\n", target);
         else
-            sh_printf("Saves go to the usual rawmap.json, so a map you opened is left alone.\n");
+            sh_printf("Saves go to the default rawmap.json, so a map you opened is left alone.\n");
         rawmap_print_state();
         return;
     }

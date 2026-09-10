@@ -2477,7 +2477,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 int on = 0; sh_webview_json::get_int(json, L"on", &on);
                 poc_rawmap_configure(nullptr, nullptr, on ? 3 : 4,
                                      on ? L"Saves keep going to this file until you open another map."
-                                        : L"Saves go back to the usual rawmap file.");
+                                        : L"Saves go back to the default rawmap file.");
             } else if (cmd == L"newEntity") {
                 std::wstring js, lab;
                 sh_webview_json::get_string(json, L"json", js); sh_webview_json::get_string(json, L"label", lab);

@@ -97,22 +97,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                is pending. Enabled state is set in renderRawmapStatus, not here. -->
           <button type="button" id="menuRawmapReload" role="menuitem" disabled aria-disabled="true"><span>Open Rawmap as New Map</span></button>
           <div class="menu-sep" role="separator"></div>
-          <!-- Not needed for either menu action any more: Load Rawmap arms the swap around its own
-               reload and Save Rawmap As arms one save. Kept because it is the manual override that
-               matches the sh_rawmaps_on / sh_rawmaps_off console commands, for anyone who wants it
-               held on across a whole session.
-
-               "Always" is the load-bearing word and two earlier labels got it wrong. "Rawmap Swap
-               Armed" was engine jargon. "Keep Rawmap Save/Load On" read as the master switch for
-               the whole feature -- as if Load Rawmap and Save Rawmap As did nothing without it,
-               which is backwards: they turn it on and off around themselves. What this tick adds is
-               SCOPE, not permission -- it extends rawmap save/load to every map load and save,
-               including ones this menu had no part in. -->
-          <!-- The way back to the usual file. Save Rawmap As ticks this; unticking releases
+          <!-- Scope, not permission: Load Rawmap and Save Rawmap As arm the swap around
+               themselves, so this only widens it to every map load and save, including ones
+               this menu had no part in. Same switch as sh_rawmaps_on / sh_rawmaps_off. -->
+          <!-- The way back to the default file. Save Rawmap As ticks this; unticking releases
                it. Ticking never moves the destination, it only makes the current one stick,
                so the Save Path line below is true before and after the click. -->
-          <button type="button" id="menuRawmapKeepHere" role="menuitemcheckbox" aria-checked="false"><span>Keep saving to file</span></button>
-          <button type="button" id="menuRawmapArm" role="menuitemcheckbox" aria-checked="false"><span>Always Use Rawmap Save/Load</span></button>
+          <button type="button" id="menuRawmapKeepHere" role="menuitemcheckbox" aria-checked="false"><span>Keep This Save Path</span></button>
+          <button type="button" id="menuRawmapArm" role="menuitemcheckbox" aria-checked="false"><span>Use Rawmaps for Every Map</span></button>
           <div class="menu-sep" role="separator"></div>
           <!-- Not a menu item: the staged paths, so "which file am I actually on" needs no dialog. -->
           <div class="menu-note" id="menuRawmapPaths">Loading...</div>
@@ -3195,7 +3187,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       keepBtn.setAttribute('aria-checked', RAWMAP_KEEP_HERE ? 'true' : 'false');
       keepBtn.title = RAWMAP_KEEP_HERE
         ? 'Saves keep going to the file below until you open another map.'
-        : 'Saves go to the usual file. Tick this to keep them on the file below.';
+        : 'Saves go to the default file. Tick this to keep them on the file below.';
     }
 
     // "Open Rawmap as New Map": live only when it would actually do something, and named after
@@ -3224,7 +3216,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         ? (rawPath + '\nWaiting: this file opens as a new map you name.')
         : (reloadLive
             ? (rawPath + (RAWMAP_ARMED
-                ? '\nAlways Use Rawmap Save/Load is on, so this opens the Load Path file.'
+                ? '\nUse Rawmaps for Every Map is on, so this opens the Load Path file.'
                 : '\nEvery map you open is being replaced, so this opens the Load Path file.'))
             : 'Nothing is waiting. Use Load Rawmap... to pick a file first.');
     }
@@ -3243,13 +3235,13 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       // Load Rawmap and Save Rawmap items, where a bare verb reads as one more action rather than
       // the label of a field -- the one word is what makes them read as settings.
       note.appendChild(mk('Load Path:', st.load, st.load));
-      // Say whether this is the usual file or one they picked, so "where does Save go"
+      // Say whether this is the default file or one they picked, so "where does Save go"
       // needs no second thought and no second control.
       note.appendChild(mk('Save Path:', st.save, st.save));
       var chosen = document.createElement('div');
       chosen.textContent = (st.saveTarget || '')
-        ? 'You picked this file. Opening another map goes back to the usual one.'
-        : 'The usual file. Use Save Rawmap As... to pick another.';
+        ? 'You picked this file. Opening another map goes back to the default one.'
+        : 'The default file. Use Save Rawmap As... to pick another.';
       note.appendChild(chosen);
       // No status line here on purpose. It used to report a running count of rawmap substitutions,
       // which was engine vocabulary describing something already finished -- it never answered the
