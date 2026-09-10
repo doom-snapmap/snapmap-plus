@@ -142,29 +142,21 @@ void sh_rawmap_get_default_paths(char *load_out, int load_cap, char *save_out, i
  * materialize the defaults into their own variables, so "nothing was set" is not testable. */
 int sh_rawmap_paths_are_default(void);
 
-/* THE SAVE PATH SETTING -- `sh_rawmaps savepath <rawmap|default|path>` and the File menu's
- * "Use Rawmap as Save Path" tick. Three values, and the only DURABLE way the destination moves:
- * the default rawmap.json (0), the loaded rawmap (1), or one pinned file (2). Exporting with
- * "Save Rawmap As" or `sh_rawmaps save <path>` does NOT change it -- that is one write.
+/* WHERE SAVES GO. One path, belonging to the map that is open. "" or NULL means the
+ * default rawmap.json. "Save Rawmap As" and `sh_rawmaps savepath <path>` set it, so a
+ * later save writes to the same file. Refuses anything dest_path_is_usable refuses.
  *
- * DEFAULT is the default on purpose: a loaded rawmap is an archive entry, so nothing about importing
- * one can end up writing over it. */
-#define SH_RAWMAP_DEST_DEFAULT 0
-#define SH_RAWMAP_DEST_RAWMAP  1
-#define SH_RAWMAP_DEST_FIXED   2
+ * A rawmap someone downloads and opens is an archive entry, so opening one never aims
+ * a save at it: only picking it here does, and only for the map now open. */
+int sh_rawmap_set_save_target(const char *path);
 
-/* 1 = mode RAWMAP (saves follow the loaded rawmap). The File menu's tick. */
-int sh_rawmap_dest_follows_source(void);
+/* The target as set, or "" when saves go to the default. Tells "this file" from "the
+ * usual file"; sh_rawmap_get_paths reports where bytes actually land. */
+void sh_rawmap_get_save_target(char *out, int cap);
 
-/* The mode, and the pinned file when the mode is FIXED (out_fixed is emptied otherwise). */
-int sh_rawmap_dest_mode(char *out_fixed, int fixed_cap);
-
-/* Set mode RAWMAP (on) or DEFAULT (off). Returns the resulting sh_rawmap_dest_follows_source(). */
-int sh_rawmap_set_dest_follows_source(int on);
-
-/* Pin the save destination to one file, durably (mode FIXED). "" or NULL means DEFAULT.
- * Refuses anything sh_rawmap_dest_path_is_usable refuses. */
-int sh_rawmap_set_dest_fixed(const char *path);
+/* Call when a different map is opened: drops the target, so a save cannot land on a
+ * file that was aimed at while some other map was open. */
+void sh_rawmap_clear_save_target_for_new_map(void);
 
 /* Could we write a rawmap at `path`? The file need not exist -- a save creates it -- but the path
  * must name a folder and that folder must exist. This is what stops a bare word like "banana" from
@@ -176,21 +168,6 @@ int sh_rawmap_dest_path_is_usable(const char *path, char *out_msg, int msg_capac
  * onto a later frame, so a refusal has to happen before the command reports anything. Attribute-only,
  * so a full disk or a lock still fails later; it never opens the target. */
 int sh_rawmap_dest_writable_now(const char *path, char *out_msg, int msg_capacity);
-
-/* Load the persisted "Use Rawmap as Save Path" setting into the live flag. Call once at startup,
- * after sh_config_init and before the first map load. */
-void sh_rawmap_config_load(void);
-
-/* Name a destination for ONE write ("Save Rawmap As", `sh_rawmaps save <path>`). It overrides both
- * the follow toggle and the default for that write only, and is spent once the bytes are on disk --
- * so an export cannot outlive itself and become the place every later save goes. Leaves the toggle
- * alone. "" or NULL cancels a pending one-off AND clears the toggle ("back to the default"). */
-int sh_rawmap_choose_dest(const char *path);
-
-/* Call when a NEW rawmap is staged for loading: cancels a one-off destination that was named but
- * never written, so an abandoned export does not attach itself to the next import. Leaves the
- * toggle alone -- surviving a load is what the toggle is for. */
-void sh_rawmap_reset_dest_for_new_load(void);
 
 int sh_rawmap_source_ok(char *out_msg, int msg_capacity);
 

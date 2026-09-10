@@ -204,15 +204,12 @@ static void h_rawmaps_on(idCmdArgs *a)
               readable ? "" : "   <-- cannot be read right now");
     if (!readable && why[0]) sh_printf("             %s\n", why);
     {
-        /* Say WHY the destination is what it is. The path alone cannot distinguish "this is the
-         * default", "this follows the loaded rawmap" and "this is pinned here", and those three
-         * answer very different questions about what the next save will do. */
-        char fixed[MAX_PATH] = "";
-        int  mode = sh_rawmap_dest_mode(fixed, (int)sizeof fixed);
-        const char *tag = (mode == SH_RAWMAP_DEST_RAWMAP) ? "   (following the loaded rawmap)"
-                        : (mode == SH_RAWMAP_DEST_FIXED)  ? "   (pinned by 'sh_rawmaps savepath')"
-                        : "   (the default)";
-        sh_printf("  save to:   %s%s\n", save_path[0] ? save_path : "(none)", tag);
+        /* Say whether this is the usual file or one the person chose. The path alone
+         * cannot tell them apart, and they answer different questions about the next save. */
+        char target[MAX_PATH] = "";
+        sh_rawmap_get_save_target(target, (int)sizeof target);
+        sh_printf("  save to:   %s%s\n", save_path[0] ? save_path : "(none)",
+                  target[0] ? "   (you chose this file)" : "   (the usual file)");
     }
     sh_printf("Every map you open now loads that file, and every save is mirrored to that one.\n");
     sh_printf("(legacy name -- 'sh_rawmaps' shows and changes everything, including both paths.)\n");
@@ -412,15 +409,12 @@ static void rawmap_print_state(void)
               readable ? "" : "   <-- cannot be read right now");
     if (!readable && why[0]) sh_printf("             %s\n", why);
     {
-        /* Say WHY the destination is what it is. The path alone cannot distinguish "this is the
-         * default", "this follows the loaded rawmap" and "this is pinned here", and those three
-         * answer very different questions about what the next save will do. */
-        char fixed[MAX_PATH] = "";
-        int  mode = sh_rawmap_dest_mode(fixed, (int)sizeof fixed);
-        const char *tag = (mode == SH_RAWMAP_DEST_RAWMAP) ? "   (following the loaded rawmap)"
-                        : (mode == SH_RAWMAP_DEST_FIXED)  ? "   (pinned by 'sh_rawmaps savepath')"
-                        : "   (the default)";
-        sh_printf("  save to:   %s%s\n", save_path[0] ? save_path : "(none)", tag);
+        /* Say whether this is the usual file or one the person chose. The path alone
+         * cannot tell them apart, and they answer different questions about the next save. */
+        char target[MAX_PATH] = "";
+        sh_rawmap_get_save_target(target, (int)sizeof target);
+        sh_printf("  save to:   %s%s\n", save_path[0] ? save_path : "(none)",
+                  target[0] ? "   (you chose this file)" : "   (the usual file)");
     }
     if (sh_rawmap_load_oneshot_pending())
         sh_printf("  a rawmap is staged for the NEXT map you open.\n");
@@ -442,11 +436,12 @@ static void rawmap_print_usage(void)
     sh_printf("                             if the editor is not up yet, so the next map\n");
     sh_printf("                             you open becomes it\n");
     sh_printf("  sh_rawmaps save            write the open map to the save path\n");
-    sh_printf("  sh_rawmaps save <path>     export it THERE once, then back to the save path\n");
-    sh_printf("  sh_rawmaps savepath [rawmap|default|<path>]\n");
-    sh_printf("                             where saves ALWAYS go: over the loaded rawmap,\n");
-    sh_printf("                             the default rawmap.json, or one file you name\n");
-    sh_printf("  sh_rawmaps default         put both paths back to the default\n");
+    sh_printf("  sh_rawmaps save <path>     save there, and keep saving there\n");
+    sh_printf("  sh_rawmaps savepath [default|rawmap|<path>]\n");
+    sh_printf("                             where saves go: the usual file, the rawmap you\n");
+    sh_printf("                             opened, or one you name. Opening another map\n");
+    sh_printf("                             goes back to the usual file\n");
+    sh_printf("  sh_rawmaps default         put both paths back to the usual files\n");
 }
 
 static void h_sh_rawmaps(idCmdArgs *a)
@@ -548,9 +543,6 @@ static void h_sh_rawmaps(idCmdArgs *a)
             return;
         }
         if (!sh_rawmap_swap_set_source(arg)) { sh_printf("That path could not be used.\n"); return; }
-        /* The same rule the File menu follows, and the same function it calls -- staging a rawmap
-         * to LOAD is a read, and a read does not inherit the destination an earlier export chose. */
-        sh_rawmap_reset_dest_for_new_load();
         sh_printf("Staged. Open any map -- or run 'sh_rawmaps load' with no path -- and it\n"
                   "becomes a new map you name.\n");
         sh_rawmap_load_arm_once();
@@ -558,50 +550,45 @@ static void h_sh_rawmaps(idCmdArgs *a)
         return;
     }
 
-    /* The console half of the File menu's "Use Rawmap as Save Path" tick. Bare form reports, so the
-     * question can be asked without changing anything -- the same reason bare `sh_rawmaps` exists.
+    /* `savepath` is the console's way to say where saves go, the same choice "Save
+     * Rawmap As" makes in the File menu. Bare form reports and changes nothing.
      *
-     * THREE VALUES, AND ONLY THREE. `on` / `off` used to be accepted as aliases for `rawmap` /
-     * `default`, on the theory that it is what a person types at a thing the File menu draws as a
-     * checkbox. They were removed: four words for three settings is not kindness, it is two more
-     * things to read in the help and two more rows to test, and "savepath on" cannot say ON WHAT --
-     * this setting names a destination, it does not have an enabled state. */
+     * `rawmap` is a shortcut for "the file I have loaded", so editing a rawmap and
+     * putting it back does not mean retyping its path. Opening a different map clears
+     * whatever was set, so a downloaded map is never written over by a choice made
+     * while some other map was open. */
     if (_stricmp(verb, "savepath") == 0) {
-        char fixed[MAX_PATH] = "";
+        char target[MAX_PATH] = "";
         char why[192] = "";
-        int  mode;
 
         if (arg != NULL && arg[0] != '\0') {
-            /* Anything that is not one of the two words is taken as a PATH: this is the durable
-             * "always save here" setting, and it is a different verb from `save <path>` precisely so
-             * a one-off export cannot quietly become one.
-             *
-             * The fall-through is CHECKED now. It used to pin whatever was typed, so `savepath
-             * banana` aimed every later save at a file called "banana" in DOOM's own install folder
-             * and said nothing about it. A word is not a destination. */
-            if (_stricmp(arg, "rawmap") == 0)
-                sh_rawmap_set_dest_follows_source(1);
-            else if (_stricmp(arg, "default") == 0)
-                sh_rawmap_set_dest_follows_source(0);
-            else if (!sh_rawmap_dest_path_is_usable(arg, why, (int)sizeof why)) {
+            if (_stricmp(arg, "default") == 0) {
+                sh_rawmap_set_save_target(NULL);
+            } else if (_stricmp(arg, "rawmap") == 0) {
+                char loaded[MAX_PATH] = "";
+                sh_rawmap_get_paths(loaded, (int)sizeof loaded, NULL, 0);
+                if (loaded[0] == '\0' || !sh_rawmap_set_save_target(loaded)) {
+                    sh_printf("No rawmap is loaded, so there is nothing to save back over.\n");
+                    return;
+                }
+            /* A word is not a destination: `savepath banana` would otherwise aim every
+             * later save at a file in DOOM's own install folder and say nothing. */
+            } else if (!sh_rawmap_dest_path_is_usable(arg, why, (int)sizeof why)) {
                 sh_printf("Cannot save to %s\n", arg);
                 sh_printf("  %s\n", why[0] ? why : "that is not a usable save path");
-                sh_printf("Use 'rawmap', 'default', or a full path. Nothing was changed.\n");
+                sh_printf("Use 'default', 'rawmap', or a full path. Nothing was changed.\n");
                 return;
-            }
-            else if (!sh_rawmap_set_dest_fixed(arg)) {
+            } else if (!sh_rawmap_set_save_target(arg)) {
                 sh_printf("That path could not be used as a save path.\n");
                 return;
             }
         }
 
-        mode = sh_rawmap_dest_mode(fixed, (int)sizeof fixed);
-        if (mode == SH_RAWMAP_DEST_RAWMAP)
-            sh_printf("Saves go back over the rawmap you loaded.\n");
-        else if (mode == SH_RAWMAP_DEST_FIXED)
-            sh_printf("Saves always go to %s\n", fixed);
+        sh_rawmap_get_save_target(target, (int)sizeof target);
+        if (target[0])
+            sh_printf("Saves go to %s until you open a different map.\n", target);
         else
-            sh_printf("Saves go to the default rawmap.json, so a loaded rawmap is left alone.\n");
+            sh_printf("Saves go to the usual rawmap.json, so a map you opened is left alone.\n");
         rawmap_print_state();
         return;
     }
@@ -644,10 +631,10 @@ static void h_sh_rawmaps(idCmdArgs *a)
             return;
         }
 
-        /* sh_rawmap_choose_dest, NOT sh_rawmap_save_set_dest. The setter alone left the follow
+        /* Through the shared setter, so the console and the File menu agree about what a
          * toggle on, and resolve_dest_path consults that first -- so the write went to the loaded
          * rawmap instead of the file named right here. */
-        if (arg != NULL && arg[0] != '\0' && !sh_rawmap_choose_dest(arg)) {
+        if (arg != NULL && arg[0] != '\0' && !sh_rawmap_set_save_target(arg)) {
             sh_printf("That path could not be used as a destination.\n");
             return;
         }

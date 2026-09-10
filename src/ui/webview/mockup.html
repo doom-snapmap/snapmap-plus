@@ -109,14 +109,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                SCOPE, not permission -- it extends rawmap save/load to every map load and save,
                including ones this menu had no part in. -->
           <button type="button" id="menuRawmapArm" role="menuitemcheckbox" aria-checked="false"><span>Always Use Rawmap Save/Load</span></button>
-          <!-- Replaced "Use Default Location". Rawmaps are an ARCHIVE first: a file you load is
-               a library entry, so the save destination now returns to the default rawmap.json
-               every time one is staged, and importing a map can never be the thing that
-               overwrites the file it came from. That made a reset button answer a question that
-               stops coming up, and left the opposite question unanswered -- how do I
-               deliberately edit a rawmap and put it back. This tick is that answer, off by
-               default. (Resetting both paths outright lives on as `sh_rawmaps default`.) -->
-          <button type="button" id="menuRawmapSaveBack" role="menuitemcheckbox" aria-checked="false"><span>Use Rawmap as Save Path</span></button>
           <div class="menu-sep" role="separator"></div>
           <!-- Not a menu item: the staged paths, so "which file am I actually on" needs no dialog. -->
           <div class="menu-note" id="menuRawmapPaths">Loading...</div>
@@ -1079,9 +1071,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     // the layout could never be checked outside the game.
     if (o.cmd === 'rawmapStatus' || o.cmd === 'rawmapLoadPick' ||
         o.cmd === 'rawmapSavePick' || o.cmd === 'rawmapSaveNow' || o.cmd === 'rawmapArm' ||
-        o.cmd === 'rawmapSaveBack' || o.cmd === 'rawmapLoadNow') {
+        o.cmd === 'rawmapLoadNow') {
       if (o.cmd === 'rawmapArm') previewRawmap.armed = o.on ? 1 : 0;
-      if (o.cmd === 'rawmapSaveBack') previewRawmap.saveBack = o.on ? 1 : 0;
       // Save Rawmap As arms one save; Load Rawmap raises the confirm prompt. Both are modelled here
       // so the two states the readout can show are reachable without the game.
       if (o.cmd === 'rawmapSavePick' || o.cmd === 'rawmapSaveNow') previewRawmap.savePending = 1;
@@ -1093,11 +1084,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         load: previewRawmap.load,
         // Mirrors resolve_dest_path: the toggle wins over the stored destination, so the
         // preview readout says the same thing the backend would.
-        save: previewRawmap.saveBack ? previewRawmap.load : previewRawmap.save,
+        save: previewRawmap.save,
         armed: previewRawmap.armed, saves: 0, lastBytes: 0, loads: 0, loadsDone: 0,
         savePending: previewRawmap.savePending || 0,
         loadPending: previewRawmap.loadPending || 0,
-        saveBack: previewRawmap.saveBack || 0,
         // No test file in browser preview, so this can only be the gate. Sent rather than omitted
         // so the preview exercises the field the game sends.
         willFire: previewRawmap.armed
@@ -3157,8 +3147,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var RAWMAP_ARMED = false;
   // Mirrors st.willFire: the gate OR a sibling arm.flag file. See renderRawmapStatus.
   var RAWMAP_WILL_FIRE = false;
-  // Mirrors st.saveBack so the click handler can send the OPPOSITE of what is currently set.
-  var RAWMAP_SAVEBACK = false;
   var RAWMAP_SAVE_PATH = '';   // the destination Save Rawmap reuses
 
   // Show the tail of a path. Full paths are far too long for a menu, and the filename plus its parent
@@ -3191,18 +3179,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     RAWMAP_WILL_FIRE = (st.willFire === undefined) ? RAWMAP_ARMED : !!st.willFire;
     RAWMAP_SAVE_PATH = st.save || '';
     if (armBtn) armBtn.setAttribute('aria-checked', RAWMAP_ARMED ? 'true' : 'false');
-
-    // The tick renders from the backend's status, never from anything the page remembers: the
-    // console can set it too (sh_rawmaps savepath), and two owners of one boolean is how a
-    // checkbox ends up lying about what the next save will do.
-    RAWMAP_SAVEBACK = !!st.saveBack;
-    var backBtn = document.getElementById('menuRawmapSaveBack');
-    if (backBtn) {
-      backBtn.setAttribute('aria-checked', RAWMAP_SAVEBACK ? 'true' : 'false');
-      backBtn.title = RAWMAP_SAVEBACK
-        ? 'Saves write back over the rawmap you loaded.'
-        : 'Saves go to the default rawmap.json. The rawmap you loaded is left alone.';
-    }
 
     // "Open Rawmap as New Map": live only when it would actually do something, and named after
     // the file it would open, so the item doubles as the staged-rawmap indicator.
@@ -3249,7 +3225,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       // Load Rawmap and Save Rawmap items, where a bare verb reads as one more action rather than
       // the label of a field -- the one word is what makes them read as settings.
       note.appendChild(mk('Load Path:', st.load, st.load));
+      // Say whether this is the usual file or one they picked, so "where does Save go"
+      // needs no second thought and no second control.
       note.appendChild(mk('Save Path:', st.save, st.save));
+      var chosen = document.createElement('div');
+      chosen.textContent = (st.saveTarget || '')
+        ? 'You picked this file. Opening another map goes back to the usual one.'
+        : 'The usual file. Use Save Rawmap As... to pick another.';
+      note.appendChild(chosen);
       // No status line here on purpose. It used to report a running count of rawmap substitutions,
       // which was engine vocabulary describing something already finished -- it never answered the
       // only question the menu is asked, which is what happens when you click. The paths above say
@@ -3292,10 +3275,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   });
   document.getElementById('menuRawmapArm').addEventListener('click', function(){
     post({cmd: 'rawmapArm', on: RAWMAP_ARMED ? 0 : 1});
-    closeMenus();
-  });
-  document.getElementById('menuRawmapSaveBack').addEventListener('click', function(){
-    post({cmd: 'rawmapSaveBack', on: RAWMAP_SAVEBACK ? 0 : 1});
     closeMenus();
   });
   // Refresh the readout when the menu opens, so it is never showing a stale path.

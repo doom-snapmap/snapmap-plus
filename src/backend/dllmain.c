@@ -116,10 +116,6 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
     ensure_user_dirs();
     sh_config_init(); /* nonfatal: the service retains defaults and status flags on failure */
-    /* Straight after config init and before any map can load: the rawmap save destination has a
-     * persisted setting, and it has to be in force the first time someone hits Save, not from the
-     * second one onwards. */
-    sh_rawmap_config_load();
     sh_user_overrides_capture_launch_state();
 
     /* Retry while startup code may still be encrypted; partial binding is allowed

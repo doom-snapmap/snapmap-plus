@@ -249,6 +249,12 @@ static int sh_deser_detour(const char *json, void *out_map)
 {
     if (g_deser_orig == NULL) return 0;   /* defensive: should never happen once installed */
 
+    /* A map is being opened, so the file the person picked for the last one stops
+     * applying. This is the single place that knows a map is actually opening --
+     * staging one is not the same event, and clearing there would drop the choice
+     * of someone who picked a file and then changed their mind about loading. */
+    sh_rawmap_clear_save_target_for_new_map();
+
     /* The shared predicate includes the explicit switch and test flag. */
     int flag_armed = 0;
     int oneshot    = sh_rawmap_load_oneshot_pending();
@@ -444,9 +450,16 @@ int sh_rawmap_snapshot(void *editor_serializer, void *map, void *out_idstr)
 static volatile LONG     g_shadow_count = 0;
 static volatile LONGLONG g_last_bytes   = 0;
 
-/* A destination for exactly one write, then gone. Empty means no override is in
- * force: a save then follows the save-path setting, or the default. */
-static char g_dest_once[MAX_PATH] = {0};
+/* WHERE SAVES GO.
+ *
+ * One path, belonging to the map that is open. Empty means the default
+ * %LOCALAPPDATA%\snapmap-plus\rawmap.json. "Save Rawmap As" sets it, so a later
+ * "Save Rawmap" writes to the same file; opening a different map clears it.
+ *
+ * The lifetime is the point. A rawmap someone downloads and opens is an archive
+ * entry, so nothing about opening one may aim a save at it -- only picking it in
+ * Save As does that, for the map in front of them, and not for the next one. */
+static char g_save_target[MAX_PATH] = {0};
 
 static void default_dest_path(char *out, size_t cap)
 {
@@ -458,112 +471,9 @@ static void default_dest_path(char *out, size_t cap)
         _snprintf_s(out, cap, _TRUNCATE, "snapmap-plus\\rawmap.json");
 }
 
-/* THE SAVE PATH SETTING -- `sh_rawmaps savepath <rawmap|default|path>`, and the File menu's
- * "Use Rawmap as Save Path" tick.
- *
- * One durable setting with three values, and it is the ONLY durable way the save destination moves:
- *
- *   DEFAULT  saves go to %LOCALAPPDATA%\snapmap-plus\rawmap.json
- *   RAWMAP   saves go back over whichever rawmap is currently loaded
- *   FIXED    saves go to one named file, always
- *
- * DEFAULT is the default, and that is the whole design: a rawmap you LOAD is an archive entry, not a
- * scratch file, so nothing you do to import one can end up writing over it. Exporting somewhere with
- * "Save Rawmap As" or `sh_rawmaps save <path>` does NOT change this setting -- that is a one-off
- * write (g_dest_once) which is spent as soon as the bytes land. An export that silently became the
- * new home for every later save is the bug this shape exists to make impossible.
- *
- * RAWMAP is held as a MODE consulted at resolve time, never as a path copied in when a rawmap is
- * loaded. A copy would go stale the moment a different rawmap was staged, and switching back to
- * DEFAULT would leave the archive file still wired in -- an opt-out that does not opt out. */
-/* Defined further down, next to the status JSON that is its other caller. Needed here to
- * write the save-path setting out as a JSON string. */
+/* Defined further down, next to the status JSON that is its other caller. */
 static int json_escape_into(char *out, size_t cap, const char *src);
 
-typedef enum {
-    RAWMAP_DEST_DEFAULT = 0,
-    RAWMAP_DEST_RAWMAP  = 1,
-    RAWMAP_DEST_FIXED   = 2
-} rawmap_dest_mode;
-
-static rawmap_dest_mode g_dest_mode  = RAWMAP_DEST_DEFAULT;
-static char             g_dest_fixed[MAX_PATH] = {0};
-
-/* Persisted, like the theme, so it survives a restart. ONE string key carries all three values --
- * "" for DEFAULT, "rawmap" for RAWMAP, and any other value is the FIXED path -- because two keys
- * (a bool plus a path) can disagree, and a setting that can contradict itself will. */
-#define SAVEPATH_CONFIG_KEY "rawmap.save_path"
-#define SAVEPATH_RAWMAP_WORD "rawmap"
-
-int sh_rawmap_dest_follows_source(void)
-{
-    return (g_dest_mode == RAWMAP_DEST_RAWMAP) ? 1 : 0;
-}
-
-int sh_rawmap_dest_mode(char *out_fixed, int fixed_cap)
-{
-    if (out_fixed && fixed_cap > 0) {
-        out_fixed[0] = '\0';
-        if (g_dest_mode == RAWMAP_DEST_FIXED)
-            strncpy_s(out_fixed, (size_t)fixed_cap, g_dest_fixed, _TRUNCATE);
-    }
-    return (int)g_dest_mode;
-}
-
-/* Write the setting out. A failure is not worth refusing the change over -- it still applies for
- * this session, the same degradation every other setting takes when the profile is unwritable. */
-static void save_dest_setting(void)
-{
-    char json[MAX_PATH * 2];
-    const char *value = "";
-    char esc[MAX_PATH * 2];
-
-    if (g_dest_mode == RAWMAP_DEST_RAWMAP) value = SAVEPATH_RAWMAP_WORD;
-    else if (g_dest_mode == RAWMAP_DEST_FIXED) value = g_dest_fixed;
-
-    if (!json_escape_into(esc, sizeof esc, value)) esc[0] = '\0';
-    _snprintf_s(json, sizeof json, _TRUNCATE, "\"%s\"", esc);
-    if (!sh_config_set_json(SAVEPATH_CONFIG_KEY, json))
-        backend_log("B1: rawmap save path changed, but the setting could not be saved");
-}
-
-/* Read the persisted setting. Called once from dllmain AFTER sh_config_init, not lazily from the
- * resolver: the resolver runs inside the save detour, and "when is this first read" should not have
- * an answer that depends on which map someone opened. */
-void sh_rawmap_config_load(void)
-{
-    char value[MAX_PATH] = "";
-    char line[MAX_PATH + 96];
-
-    if (sh_config_get_string(SAVEPATH_CONFIG_KEY, value, (int)sizeof value) <= 0) return;
-
-    if (value[0] == '\0') {
-        g_dest_mode = RAWMAP_DEST_DEFAULT;
-    } else if (_stricmp(value, SAVEPATH_RAWMAP_WORD) == 0) {
-        g_dest_mode = RAWMAP_DEST_RAWMAP;
-        backend_log("B1: rawmap saves follow the loaded rawmap (from settings)");
-    } else {
-        g_dest_mode = RAWMAP_DEST_FIXED;
-        strncpy_s(g_dest_fixed, sizeof g_dest_fixed, value, _TRUNCATE);
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "B1: rawmap saves go to %s (from settings)", g_dest_fixed);
-        backend_log(line);
-    }
-}
-
-int sh_rawmap_set_dest_follows_source(int on)
-{
-    g_dest_mode = on ? RAWMAP_DEST_RAWMAP : RAWMAP_DEST_DEFAULT;
-    if (!on) g_dest_fixed[0] = '\0';
-    backend_log(on ? "B1: rawmap saves now FOLLOW the loaded rawmap"
-                   : "B1: rawmap saves back to the default rawmap.json");
-    save_dest_setting();
-    return sh_rawmap_dest_follows_source();
-}
-
-/* `sh_rawmaps savepath <path>` -- pin the save destination to one file, durably. Distinct from
- * `sh_rawmaps save <path>`, which exports there once and reverts: this is the "always save here"
- * setting, and saying so takes a different verb precisely so a one-off export cannot become one. */
 /* Cut `path` down to its folder part. Returns 0 when it has none. */
 static int dest_dir_part(const char *path, char *out, size_t cap)
 {
@@ -713,91 +623,54 @@ int sh_rawmap_dest_writable_now(const char *path, char *out_msg, int msg_capacit
     return 1;
 }
 
-int sh_rawmap_set_dest_fixed(const char *path)
+/* Point saves at `path`. "" or NULL goes back to the default rawmap.json.
+ * Refuses a path whose folder does not exist, so a bare word cannot become a
+ * file in DOOM's own install folder. */
+int sh_rawmap_set_save_target(const char *path)
 {
     char line[MAX_PATH + 64];
 
-    if (path == NULL || path[0] == '\0') return sh_rawmap_set_dest_follows_source(0) == 0;
+    if (path == NULL || path[0] == '\0') {
+        if (g_save_target[0]) {
+            g_save_target[0] = '\0';
+            backend_log("B1: rawmap saves go to the default rawmap.json");
+        }
+        return 1;
+    }
     if (!dest_folder_is_usable(path, NULL, 0)) return 0;
 
-    strncpy_s(g_dest_fixed, sizeof g_dest_fixed, path, _TRUNCATE);
-    if (g_dest_fixed[0] == '\0') return 0;
-    g_dest_mode = RAWMAP_DEST_FIXED;
-    _snprintf_s(line, sizeof line, _TRUNCATE, "B1: rawmap saves now go to %s", g_dest_fixed);
+    strncpy_s(g_save_target, sizeof g_save_target, path, _TRUNCATE);
+    if (g_save_target[0] == '\0') return 0;
+    _snprintf_s(line, sizeof line, _TRUNCATE, "B1: rawmap saves go to %s", g_save_target);
     backend_log(line);
-    save_dest_setting();
     return 1;
 }
 
-/* Forward: the two rules below are stated next to the flag they depend on, above the resolver they
- * need. Declared here so the resolver can stay where it is. */
+/* The target as set, or "" when saves go to the default. For readouts that need to
+ * tell "this file" from "the usual file"; resolve_dest_path answers where bytes land. */
+void sh_rawmap_get_save_target(char *out, int cap)
+{
+    if (out == NULL || cap <= 0) return;
+    strncpy_s(out, (size_t)cap, g_save_target, _TRUNCATE);
+}
+
+/* Forward: stated next to the flag it depends on, above the resolver it needs. */
 static void resolve_dest_path(char *out, size_t cap);
 
-/* WHERE THE NEXT SAVE GOES. Four answers, in this order:
- *
- *   1. a one-off destination someone named for this write ("Save Rawmap As", `save <path>`);
- *   2. the loaded rawmap        -- savepath mode RAWMAP;
- *   3. one pinned file          -- savepath mode FIXED;
- *   4. the default rawmap.json  -- savepath mode DEFAULT.
- *
- * The one-off is first because it is the most specific thing anyone said, and it lives only until
- * the write happens. Everything below it is the ONE durable setting, so "where do my saves go" is
- * answerable from a single setting rather than from a history of exports. */
+/* Where the next save goes: the target if one is set, otherwise the default. */
 static void resolve_dest_path(char *out, size_t cap)
 {
-    if (g_dest_once[0]) { strncpy_s(out, cap, g_dest_once, _TRUNCATE); return; }
-    if (g_dest_mode == RAWMAP_DEST_RAWMAP) { resolve_source_path(out, cap); return; }
-    if (g_dest_mode == RAWMAP_DEST_FIXED && g_dest_fixed[0]) {
-        strncpy_s(out, cap, g_dest_fixed, _TRUNCATE);
-        return;
-    }
+    if (g_save_target[0]) { strncpy_s(out, cap, g_save_target, _TRUNCATE); return; }
     default_dest_path(out, cap);
 }
 
-/* Called by the writer once bytes are actually on disk. An export that never happened keeps its
- * destination, so a failed write can be retried at the place it was aimed at. */
-static void spend_dest_once(void)
+/* Opening a different map drops the target, so a save can never land on a file the
+ * person aimed at while some other map was open. */
+void sh_rawmap_clear_save_target_for_new_map(void)
 {
-    if (g_dest_once[0] == '\0') return;
-    g_dest_once[0] = '\0';
-    backend_log("B1: rawmap SAVE destination spent -- back to the default (or the loaded rawmap "
-                "if 'Use Rawmap as Save Path' is on)");
-}
-
-/* ---- the destination rules, stated ONCE ------------------------------------------------------
- *
- * Both the File menu (slot_rawmap_configure) and the console (`sh_rawmaps`) can name a destination,
- * and the first version of this feature spelled the rules out separately in each. They immediately
- * disagreed: the console's `save <path>` moved the destination without regard for the follow toggle,
- * so with the toggle on the write went somewhere other than the file just named. Two copies of a
- * rule is one copy too many, so they live here and both callers call in. */
-
-/* Name a destination for ONE write ("Save Rawmap As", `sh_rawmaps save <path>`).
- *
- * It overrides everything for that write and is spent by the writer, so it cannot outlive the export
- * that asked for it. It deliberately does NOT touch the follow toggle: a one-off export somewhere
- * else is not a statement about where saves belong from now on, and unticking a setting as a side
- * effect of a single export is exactly the kind of quiet state change this rewrite removed.
- *
- * "" or NULL cancels a pending one-off and, because "back to the default" has to mean the default,
- * also clears the toggle. */
-int sh_rawmap_choose_dest(const char *path)
-{
-    return sh_rawmap_save_set_dest((path && path[0]) ? path : NULL);
-}
-
-/* Staging a rawmap to LOAD cancels any one-off destination still standing.
- *
- * Nearly nothing left to do now that destinations are one-off by construction -- the accident this
- * was written for (an old export's destination catching a newly imported map) cannot happen any
- * more. What it still covers is an export that was named and then never written: `save <path>`
- * refused for want of a live map, say. That aim should not attach itself to whatever rawmap is
- * staged next. The toggle is untouched: surviving a load is its whole job. */
-void sh_rawmap_reset_dest_for_new_load(void)
-{
-    if (g_dest_once[0]) {
-        g_dest_once[0] = '\0';
-        backend_log("B1: rawmap SAVE one-off destination dropped -- a new rawmap was staged");
+    if (g_save_target[0]) {
+        g_save_target[0] = '\0';
+        backend_log("B1: rawmap saves go back to the default rawmap.json -- a different map was opened");
     }
 }
 
@@ -1072,9 +945,6 @@ static unsigned long long write_shadow(const char *data, size_t len)
 
     written = total;
 
-    /* Spend a one-off destination only on success, and only here: this is where the
-     * bytes reach disk, so a failed export keeps its aim for a retry. */
-    if (written) spend_dest_once();
     return written;
 }
 
@@ -1430,16 +1300,7 @@ int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok)
 
 int sh_rawmap_save_set_dest(const char *path)
 {
-    if (path == NULL || path[0] == '\0') {
-        /* "Back to the default" has to mean the default, so it clears the toggle as well as any
-         * pending one-off. Through the setter for the toggle, so the change is persisted --
-         * assigning the variable directly here was the version that came back ticked next launch. */
-        g_dest_once[0] = '\0';
-        if (g_dest_mode != RAWMAP_DEST_DEFAULT) sh_rawmap_set_dest_follows_source(0);
-        return 1;
-    }
-    strncpy_s(g_dest_once, sizeof g_dest_once, path, _TRUNCATE);
-    return g_dest_once[0] != '\0';
+    return sh_rawmap_set_save_target(path);
 }
 
 unsigned long sh_rawmap_save_count(void)
@@ -1768,9 +1629,7 @@ int sh_rawmap_paths_are_default(void)
     char src_now[MAX_PATH] = "", dst_now[MAX_PATH] = "";
     char src_def[MAX_PATH] = "", dst_def[MAX_PATH] = "";
 
-    /* A savepath setting counts as a moved save path even when nothing was typed here: it points
-     * saves somewhere other than rawmap.json, which is exactly what the note warns about. */
-    if (g_dest_mode != RAWMAP_DEST_DEFAULT) return 0;
+    if (g_save_target[0]) return 0;
 
     resolve_source_path(src_now, sizeof src_now);
     resolve_dest_path(dst_now, sizeof dst_now);
@@ -1802,7 +1661,8 @@ int sh_rawmap_source_ok(char *out_msg, int msg_capacity)
 static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
 {
     char load_path[MAX_PATH], save_path[MAX_PATH];
-    char load_esc[MAX_PATH * 2], save_esc[MAX_PATH * 2];
+    char load_esc[MAX_PATH * 2], save_esc[MAX_PATH * 2], target_esc[MAX_PATH * 2];
+    char target[MAX_PATH] = "";
     int written;
 
     (void)self;
@@ -1810,9 +1670,11 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
 
     resolve_source_path(load_path, sizeof load_path);
     resolve_dest_path(save_path, sizeof save_path);
+    sh_rawmap_get_save_target(target, (int)sizeof target);
 
     if (!json_escape_into(load_esc, sizeof load_esc, load_path)) load_esc[0] = '\0';
     if (!json_escape_into(save_esc, sizeof save_esc, save_path)) save_esc[0] = '\0';
+    if (!json_escape_into(target_esc, sizeof target_esc, target)) target_esc[0] = '\0';
 
     /* `armed` reports the EXPLICIT gate only, matching sh_rawmap_swap_is_armed's reasoning: a menu
      * checkbox must not show ON for a flag-file arm that unticking it cannot clear. `willFire` is
@@ -1829,9 +1691,9 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
     written = _snprintf_s(out_json, (size_t)out_capacity, _TRUNCATE,
         "{\"load\":\"%s\",\"save\":\"%s\",\"armed\":%d,\"saves\":%lu,\"lastBytes\":%llu,"
         "\"loads\":%lu,\"loadsDone\":%lu,\"savePending\":%d,\"loadPending\":%d,"
-        /* `saveBack` is the File menu's "Use Rawmap as Save Path" tick. It has to ride the status
-         * rather than be remembered by the page, because the console can change it too. */
-        "\"saveBack\":%d,\"willFire\":%d}",
+        /* The file Save writes to, or "" for the default. It rides the status rather than
+         * being remembered by the page, because the console can set it too. */
+        "\"saveTarget\":\"%s\",\"willFire\":%d}",
         load_esc, save_esc, sh_rawmap_swap_is_armed(),
         sh_rawmap_save_count(), sh_rawmap_save_last_bytes(),
         sh_rawmap_swap_count(), sh_rawmap_swap_complete_count(),
@@ -1840,7 +1702,7 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
          * is waiting for the next map to open. Without it the menu could only report a COUNT of past
          * substitutions, which told the person nothing about what happens next. */
         sh_rawmap_load_oneshot_pending(),
-        sh_rawmap_dest_follows_source(),
+        target_esc,
         sh_rawmap_swap_will_fire());
 
     return (written > 0) ? written : 0;
@@ -1867,9 +1729,8 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
                                        "could not set the load path", _TRUNCATE);
                 return 0;
             }
-            /* Unless this same call also names a destination -- then that choice is the one the
-             * person made, and the reset would fight it. See sh_rawmap_reset_dest_for_new_load. */
-            if (save_path == NULL) sh_rawmap_reset_dest_for_new_load();
+            /* No clearing here: staging a file is not opening one. The map-load detour
+             * does it, at the moment a map actually opens. */
         } else {
             if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, reason, _TRUNCATE);
             return 0;
@@ -1890,7 +1751,7 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
         /* REFUSE AN UNWRITABLE DESTINATION BEFORE AIMING ANYTHING AT IT. The ladder's best rung
          * queues onto the next editor frame, so "accepted" here means the write is about to happen,
          * not that it did -- exactly as the console's own save reported success for a read-only file
-         * and only the log disagreed. Checked ahead of choose_dest so a refusal leaves the
+         * and only the log disagreed. Checked ahead of the setter so a refusal leaves the
          * destination untouched. */
         if (save_path[0] != '\0') {
             char wmsg[192] = "";
@@ -1903,7 +1764,7 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
             }
         }
 
-        if (!sh_rawmap_choose_dest(save_path)) ok = 0;
+        if (!sh_rawmap_set_save_target(save_path)) ok = 0;
 
         /* NAMING A DESTINATION IS A REQUEST TO WRITE IT, not to set a preference. "Save Rawmap As"
          * is the only caller that passes one, and a destination that then does nothing is why the
@@ -1977,7 +1838,7 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
      *   -1 leave alone   0 gate off   1 gate on   2 arm ONE load   3 saves follow the rawmap   4 not */
     if (arm == 0 || arm == 1)  sh_rawmap_swap_arm(arm);
     else if (arm == 2)         sh_rawmap_load_arm_once();
-    else if (arm == 3 || arm == 4) sh_rawmap_set_dest_follows_source(arm == 3);
+    /* 3 and 4 were the old save-path tick. The target is set by naming a file. */
 
     if (out_msg && out_msg[0] == '\0') {
         strncpy_s(out_msg, (size_t)msg_capacity, ok ? "ok" : "the save path was refused", _TRUNCATE);

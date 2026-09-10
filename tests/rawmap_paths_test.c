@@ -154,39 +154,39 @@ static int file_exists(const char *p)
 static void clean_state(void)
 {
     sh_rawmap_swap_set_source(NULL);
-    sh_rawmap_choose_dest(NULL);
+    sh_rawmap_set_save_target(NULL);
 }
 
 /* --------------------------------------------------------------------------------------------- */
 
-/* THE DISPUTED BEHAVIOUR. Naming a destination must not make it the new default. */
-static void a_named_destination_is_spent_by_its_write(void)
+/* Save Rawmap As picks a file, and Save keeps writing there. */
+static void a_chosen_file_stays_chosen(void)
 {
     char picked[MAX_PATH], save[MAX_PATH];
 
-    printf("\n-- a named destination applies to ONE write, then goes back to the default\n");
+    printf("\n-- a file chosen for saving is still the target after the write\n");
 
     clean_state();
     CHECK(save_is_default());
     CHECK(temp_path("rawmap_test_export.json", picked, sizeof picked));
     DeleteFileA(picked);
 
-    /* `sh_rawmaps save <path>` / "Save Rawmap As" */
-    CHECK(sh_rawmap_choose_dest(picked) == 1);
+    CHECK(sh_rawmap_set_save_target(picked) == 1);
     eff_paths(NULL, 0, save, (int)sizeof save);
-    printf("   named:            save to: %s\n", save);
+    printf("   chosen:           save to: %s\n", save);
     CHECK(_stricmp(save, picked) == 0);
     CHECK(!save_is_default());
 
-    /* the write */
     CHECK(sh_rawmap_test_write(BODY, sizeof BODY - 1) == (sizeof BODY - 1));
     CHECK(file_exists(picked));                       /* it went where it was aimed */
 
     eff_paths(NULL, 0, save, (int)sizeof save);
     printf("   after the write:  save to: %s\n", save);
-    CHECK(save_is_default());                         /* THE POINT */
+    CHECK(_stricmp(save, picked) == 0);               /* THE POINT: still there */
+    CHECK(!save_is_default());
 
     DeleteFileA(picked);
+    clean_state();
 }
 
 /* A write that FAILED keeps its aim, so a retry still goes to the named file. */
@@ -199,7 +199,7 @@ static void a_failed_write_keeps_its_destination(void)
     printf("\n-- a write that fails keeps the destination, so a retry is still aimed there\n");
 
     clean_state();
-    CHECK(sh_rawmap_choose_dest(bad) == 1);
+    CHECK(sh_rawmap_set_save_target(bad) == 1);
     CHECK(sh_rawmap_test_write(BODY, sizeof BODY - 1) == 0);   /* the write fails */
 
     eff_paths(NULL, 0, save, (int)sizeof save);
@@ -210,92 +210,81 @@ static void a_failed_write_keeps_its_destination(void)
     clean_state();
 }
 
-/* The toggle is the DURABLE way to move the destination, and a one-off export does not clear it. */
-static void the_toggle_is_the_durable_one(const char *archive)
+/* THE ARCHIVE RULE. Opening a rawmap must never aim saves at it. */
+static void opening_a_rawmap_never_aims_saves_at_it(const char *archive)
 {
-    char save[MAX_PATH], picked[MAX_PATH];
+    char save[MAX_PATH];
 
-    printf("\n-- the toggle survives a one-off export, and outlives the write\n");
+    printf("\n-- opening a rawmap leaves saves on the usual file\n");
 
     clean_state();
     CHECK(sh_rawmap_swap_set_source(archive) == 1);
-    sh_rawmap_set_dest_follows_source(1);
 
     eff_paths(NULL, 0, save, (int)sizeof save);
-    printf("   toggle on:        save to: %s\n", save);
-    CHECK(_stricmp(save, archive) == 0);              /* saves follow the loaded rawmap */
+    printf("   after opening:    save to: %s\n", save);
+    CHECK(_stricmp(save, archive) != 0);              /* NOT the file that was opened */
+    CHECK(save_is_default());
 
-    /* a one-off export somewhere else */
-    CHECK(temp_path("rawmap_test_export2.json", picked, sizeof picked));
-    DeleteFileA(picked);
-    CHECK(sh_rawmap_choose_dest(picked) == 1);
-    CHECK(sh_rawmap_dest_follows_source() == 1);      /* the export did NOT untick it */
-    eff_paths(NULL, 0, save, (int)sizeof save);
-    CHECK(_stricmp(save, picked) == 0);               /* but it wins for this write */
-
-    CHECK(sh_rawmap_test_write(BODY, sizeof BODY - 1) == (sizeof BODY - 1));
-    CHECK(file_exists(picked));
-
-    eff_paths(NULL, 0, save, (int)sizeof save);
-    printf("   after the export: save to: %s\n", save);
-    CHECK(_stricmp(save, archive) == 0);              /* back to the toggle, not to rawmap.json */
-
-    DeleteFileA(picked);
-    sh_rawmap_set_dest_follows_source(0);
     clean_state();
 }
 
-/* Staging a new rawmap cancels an export that was named and never written. */
-static void staging_drops_an_unwritten_export(const char *archive)
+/* Choosing the opened rawmap is allowed -- it just has to be asked for. */
+static void choosing_the_opened_rawmap_works(const char *archive)
+{
+    char save[MAX_PATH];
+
+    printf("\n-- choosing the opened rawmap aims saves at it\n");
+
+    clean_state();
+    CHECK(sh_rawmap_swap_set_source(archive) == 1);
+    CHECK(sh_rawmap_set_save_target(archive) == 1);
+
+    eff_paths(NULL, 0, save, (int)sizeof save);
+    printf("   after choosing:   save to: %s\n", save);
+    CHECK(_stricmp(save, archive) == 0);
+
+    clean_state();
+}
+
+/* Opening a different map drops the target, so it cannot follow the person around. */
+static void a_different_map_drops_the_target(void)
 {
     char picked[MAX_PATH], save[MAX_PATH];
 
-    printf("\n-- staging a rawmap drops a named-but-unwritten destination\n");
+    printf("\n-- opening a different map puts saves back on the usual file\n");
 
     clean_state();
     CHECK(temp_path("rawmap_test_export3.json", picked, sizeof picked));
-    CHECK(sh_rawmap_choose_dest(picked) == 1);
+    CHECK(sh_rawmap_set_save_target(picked) == 1);
     CHECK(!save_is_default());
 
-    CHECK(sh_rawmap_swap_set_source(archive) == 1);
-    sh_rawmap_reset_dest_for_new_load();
+    sh_rawmap_clear_save_target_for_new_map();
 
     eff_paths(NULL, 0, save, (int)sizeof save);
-    printf("   after staging:    save to: %s\n", save);
+    printf("   after the change: save to: %s\n", save);
     CHECK(save_is_default());
-
-    /* and it leaves the toggle alone, which is the whole reason the toggle exists */
-    sh_rawmap_set_dest_follows_source(1);
-    CHECK(sh_rawmap_swap_set_source(archive) == 1);
-    sh_rawmap_reset_dest_for_new_load();
-    CHECK(sh_rawmap_dest_follows_source() == 1);
-    sh_rawmap_set_dest_follows_source(0);
 
     clean_state();
 }
 
-/* "Back to the default" clears both the one-off and the toggle. */
-static void default_means_default(const char *archive)
+/* A bare word is not a destination: it would land in DOOM's own install folder. */
+static void a_bare_word_is_refused(void)
 {
-    printf("\n-- restoring the default clears the one-off AND the toggle\n");
+    printf("\n-- a name with no folder is refused\n");
 
     clean_state();
-    CHECK(sh_rawmap_swap_set_source(archive) == 1);
-    sh_rawmap_set_dest_follows_source(1);
-    CHECK(sh_rawmap_dest_follows_source() == 1);
-
-    sh_rawmap_choose_dest(NULL);
-    CHECK(sh_rawmap_dest_follows_source() == 0);
+    CHECK(sh_rawmap_set_save_target("banana") == 0);
     CHECK(save_is_default());
 
     clean_state();
-    CHECK(sh_rawmap_paths_are_default() == 1);
 }
 
 /* paths_are_default must answer both ways. It tested emptiness once, which is never true after the
  * installers materialize a default, so it was stuck on "not default" forever. */
 static void are_default_answers_both_ways(const char *archive)
 {
+    char picked[MAX_PATH];
+
     printf("\n-- paths_are_default answers both ways\n");
 
     clean_state();
@@ -306,9 +295,10 @@ static void are_default_answers_both_ways(const char *archive)
     sh_rawmap_swap_set_source(NULL);
     CHECK(sh_rawmap_paths_are_default() == 1);
 
-    sh_rawmap_set_dest_follows_source(1);
-    CHECK(sh_rawmap_paths_are_default() == 0);   /* the toggle counts as a moved save path */
-    sh_rawmap_set_dest_follows_source(0);
+    CHECK(temp_path("rawmap_test_export4.json", picked, sizeof picked));
+    CHECK(sh_rawmap_set_save_target(picked) == 1);
+    CHECK(sh_rawmap_paths_are_default() == 0);   /* a chosen file counts as a moved save path */
+    sh_rawmap_set_save_target(NULL);
     CHECK(sh_rawmap_paths_are_default() == 1);
 
     clean_state();
@@ -415,11 +405,12 @@ int main(void)
         return 1;
     }
 
-    a_named_destination_is_spent_by_its_write();
+    a_chosen_file_stays_chosen();
     a_failed_write_keeps_its_destination();
-    the_toggle_is_the_durable_one(archive);
-    staging_drops_an_unwritten_export(archive);
-    default_means_default(archive);
+    opening_a_rawmap_never_aims_saves_at_it(archive);
+    choosing_the_opened_rawmap_works(archive);
+    a_different_map_drops_the_target();
+    a_bare_word_is_refused();
     are_default_answers_both_ways(archive);
     looks_like_rawmap_tells_them_apart();
 
