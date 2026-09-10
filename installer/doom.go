@@ -16,6 +16,9 @@ const doomAppID = "379720"
 // DOOM can relaunch into the other renderer.
 var doomExes = []string{"DOOMx64vk.exe", "DOOMx64.exe"}
 
+// Tests replace only this guard while operating on synthetic game directories.
+var checkDoomRunning = doomIsRunning
+
 // resolveDoom returns the DOOM install dir: an explicit --doom (verified), else Steam auto-detect.
 func resolveDoom(explicit string) (string, error) {
 	if explicit != "" {

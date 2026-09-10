@@ -28,7 +28,7 @@ func TestMigrateUserData_scaffolds(t *testing.T) {
 	}
 }
 
-// Migrate legacy content into app data and remove the old tree after presence checks.
+// Migrate legacy content into app data and retire the verified source.
 func TestMigrateUserData_foldsOldContentForward(t *testing.T) {
 	la, up := newDataDirs(t)
 	oldOverride := filepath.Join(up, "snaphak", "overrides", "unknown_entity.decl")
@@ -71,6 +71,9 @@ func TestMigrateUserData_neverClobbersNewer(t *testing.T) {
 	got, _ := os.ReadFile(newFile)
 	if string(got) != "NEW" {
 		t.Errorf("migration clobbered newer content: got %q, want %q", got, "NEW")
+	}
+	if got := readF(t, oldFile); got != "OLD" {
+		t.Fatalf("conflicting source was discarded: %q", got)
 	}
 }
 

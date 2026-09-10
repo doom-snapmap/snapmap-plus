@@ -16,21 +16,21 @@ SnapHak binary content; game assets are read from the player's installation.
 |---|---|
 | [src/](src/README.md) | Backend engine integration and the WebView2 companion window. |
 | [installer/](installer/README.md) | Install, update and uninstall CLI. |
-| [docs/](docs/README.md) | Product behavior, architecture and contribution references. |
+| [docs/](docs/README.md) | Contributor guides and cross-component contracts. |
 | [tests/](tests/README.md) | Native and JavaScript regression tests. |
 | [tools/](tools/README.md) | Release-note tooling and signature derivation. |
 | [site/](site/README.md) | Public website and player guide. |
 | [feedback/](feedback/README.md) | In-app feedback relay. |
 | [community/](community/README.md) | Website discussions, sign-in and screenshots. |
-| [.github/](.github/README.md) | CI, releases, publishing and repository policy. |
+| [.github/](.github/AUTOMATION.md) | CI, releases, publishing and repository policy. |
 | `build.ps1`, `package.ps1` | Compile both DLLs and assemble the installable bundle. |
 
 ## Working here
 
 Start with [contributing](docs/contributing.md) for setup, builds, tests and
-review requirements. Read [architecture](docs/architecture.md) before changing
-the DLL boundary, engine calls or data ownership. Each source directory has a
-README describing its responsibilities.
+review requirements and [architecture](docs/architecture.md) for component
+boundaries. Main directory READMEs explain responsibilities; source comments
+document detailed ownership, limits and thread requirements.
 
 Keep source ASCII where required by the Windows build, preserve generated
 tables and license notices, and update current documentation with behavior
@@ -52,7 +52,7 @@ snapmap-plus uninstall
 
 Close DOOM before installing or updating. Launch it afterward and enter SnapMap;
 run `sh` in the game console if the companion window does not open. See the
-[player guide](site/snapmap-plus-guide.md) and [feature inventory](docs/capabilities.md).
+[player guide](site/snapmap-plus-guide.md).
 
 The installer and player data live under `%LOCALAPPDATA%\snapmap-plus`.
 Uninstall restores recorded backups and preserves settings, overrides, prefabs
@@ -99,14 +99,12 @@ review its entry before pushing a tag; follow [Cutting a release](docs/contribut
 The backend creates `config.json` at first launch and owns its validation and
 recovery. Deleting it resets preferences on the next startup. Manual changes
 are read at startup; UI settings use the registered service. The installer
-preserves this file. See [persistent configuration](docs/architecture.md#persistent-configuration).
+preserves this file.
 
 Each override package has a `package.json` marker under `overrides/`, with
 declarations in `decls/<type>/<logical-name>.decl`. Resource manifests can refer
 to assets already installed with DOOM. Restart after manual package changes;
-the map-package installation flow has its own re-arm path. See
-[override packages](docs/architecture.md#override-packages) and
-[weapon HUD policies](docs/weapon-hud.md).
+the map-package installation flow refreshes packages within the session.
 
 ## Credits
 

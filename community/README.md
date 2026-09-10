@@ -7,7 +7,9 @@ Serves the website's Community pages through GitHub Discussions, handles GitHub 
 ## Contents
 
 - `worker.js` defines the HTTP API, authentication, discussion operations and media handling.
-- `wrangler.toml` selects the Worker entry point and binds `SESSIONS` KV and `MEDIA` R2.
+- `quota.js` and `quota_store.js` coordinate write limits across a user's sessions.
+- `wrangler.toml` binds `SESSIONS` KV, `MEDIA` R2 and the SQLite `WRITE_QUOTAS` Durable Object.
+- `../src/workers/request_body.js` bounds request bodies before parsing or uploading.
 
 ## Working here
 
@@ -15,7 +17,22 @@ Reads use a GitHub App installation token, with an optional `GITHUB_TOKEN` fallb
 
 For a fork, provision your own KV namespace and R2 bucket, set the App callback URL to this Worker's `/auth/callback`, and update the repository, App client ID and site-origin constants. Keep the Worker URL in `site/assets/community.js` aligned. CORS admits the configured site and local HTTP development origins.
 
-The service uses short-lived per-isolate read caches and KV counters for approximate write throttling. Those counters are not atomic global limits. Health is exposed at `GET /`. Preview locally with Wrangler before a maintainer deploys from this directory. See the [service inventory](../docs/services.md) and [website source](../site/README.md).
+Writes share a fixed UTC-hour quota per GitHub account: 10 posts, 60 comments,
+120 reactions, 30 uploads, 120 previews and 60 edits/deletions. Counters are atomic
+and persist across restarts; signing in again does not reset them. Quota exhaustion
+returns 429, and unavailable quota storage returns 503. The first deployment of
+this configuration provisions `CommunityQuota` through its recorded migration;
+deploy the binding and code together. KV is used for sessions and OAuth state.
+
+JSON requests are limited to 384 KiB and images to 8 MiB of actual streamed bytes.
+Malformed JSON or UTF-8 returns 400; oversize bodies return 413. Health is exposed
+at `GET /`. Preview locally before a maintainer deploys. See the
+[service inventory](../docs/services.md) and [website source](../site/README.md).
+
+From the repository root, run `node tests/worker_body_test.js` and
+`node tests/worker_quota_test.js` with Node 22.13 or newer. The optional local
+Cloudflare runtime check is `node tests/worker_runtime_test.js <miniflare-module-path>`;
+it uses Miniflare 4.20260730.0 and never calls GitHub or deployed storage.
 
 ## HTTP routes
 

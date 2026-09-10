@@ -41,8 +41,7 @@ typedef int (*name_hash_fn)(const char *name);
 #define CVAR_FLAG_NOCHEAT         0x10u
 
 /* Register only cvars with implemented consumers. The omitted render-count and
- * dash/meathook settings require features this product does not carry; see
- * docs/fidelity.md before restoring them. */
+ * dash/meathook settings require features this product does not carry. */
 typedef struct cvar_row {
     const char *name;
     const char *def;

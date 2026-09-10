@@ -18,6 +18,9 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
  * been installed yet. The returned pointer is borrowed for the process life. */
 const uint8_t *sh_iface_engine_editor_base(void);
 
+/* Native paste requires an explicitly enabled, readable engine copy/paste cvar. */
+int sh_iface_engine_copy_paste_enabled(void);
+
 /* Check whether the class derives from the inherit decl's base type. Null
  * arguments retain live values. Return 0 for a known incompatible pair, 1
  * for compatible or unknown; this fail-open check is not full validation. */

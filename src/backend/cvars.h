@@ -1,5 +1,5 @@
 /* Register the supported Snapmap+ cvars with process-lifetime backing storage.
- * Settings without implemented consumers are omitted; see docs/fidelity.md. */
+ * Settings without implemented consumers are omitted. */
 #ifndef BACKEND_B2_CVARS_H
 #define BACKEND_B2_CVARS_H
 

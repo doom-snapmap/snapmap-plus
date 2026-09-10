@@ -1,6 +1,6 @@
 /* Guarded code patches with restore handles, plus wrappers for hook.c detours.
  * Signature wrappers require a clean match; optional expected bytes are checked
- * before writing. A fault during memcpy can still leave a partial write. */
+ * before writing. Failed writes roll back; failed rollback keeps its handle. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -19,6 +19,7 @@ const char *sh_patch_status_str(sh_patch_status s)
         case B2_PATCH_FAIL_PROTECT:    return "FAIL_PROTECT";
         case B2_PATCH_FAIL_SEH:        return "FAIL_SEH";
         case B2_PATCH_FAIL_NOTLIVE:    return "FAIL_NOTLIVE";
+        case B2_PATCH_FAIL_ROLLBACK:   return "FAIL_ROLLBACK";
         default:                       return "?";
     }
 }
@@ -49,6 +50,48 @@ static int safe_memcpy(uint8_t *dst, const uint8_t *src, size_t n)
     }
 }
 
+#ifdef SH_PATCH_TESTING
+static uint64_t g_fail_protect, g_fail_write;
+static unsigned g_protect_calls, g_write_calls;
+static size_t g_write_prefix;
+static void (*g_write_observer)(void *target);
+void sh_patch_test_observe_write(void (*observer)(void *target)) { g_write_observer = observer; }
+void sh_patch_test_faults(uint64_t protect_calls, uint64_t write_calls, size_t write_prefix)
+{
+    g_fail_protect = protect_calls; g_fail_write = write_calls;
+    g_protect_calls = g_write_calls = 0; g_write_prefix = write_prefix;
+}
+#endif
+
+static int patch_protect(void *target, size_t size, DWORD protection, DWORD *old)
+{
+#ifdef SH_PATCH_TESTING
+    unsigned call = g_protect_calls++;
+    if (call < 64 && (g_fail_protect & (UINT64_C(1) << call))) return 0;
+#endif
+    return VirtualProtect(target, size, protection, old) != 0;
+}
+
+static int patch_write(uint8_t *target, const uint8_t *bytes, size_t size)
+{
+#ifdef SH_PATCH_TESTING
+    if (g_write_observer) g_write_observer(target);
+    unsigned call = g_write_calls++;
+    if (call < 64 && (g_fail_write & (UINT64_C(1) << call))) {
+        safe_memcpy(target, bytes, g_write_prefix < size ? g_write_prefix : size);
+        return 0;
+    }
+#endif
+    return safe_memcpy(target, bytes, size);
+}
+
+static sh_patch_status patch_failed(sh_patch_handle *handle, sh_patch_status reason)
+{
+    if (code_unpatch(handle) == B2_PATCH_OK) return reason;
+    backend_log("B2: patch rollback failed; restore handle retained for retry");
+    return B2_PATCH_FAIL_ROLLBACK;
+}
+
 /* Append up to `n` bytes of `buf` as hex into `out` (out must hold ~3*n+1). For log diagnostics. */
 static void hexdump(const uint8_t *buf, size_t n, char *out, size_t outcap)
 {
@@ -64,7 +107,7 @@ static void hexdump(const uint8_t *buf, size_t n, char *out, size_t outcap)
 sh_patch_status code_patch(void *target, const uint8_t *expect, const uint8_t *new_bytes,
                            size_t len, sh_patch_handle *out_handle)
 {
-    if (out_handle) { out_handle->live = 0; out_handle->atomic_rel32 = 0; }
+    if (out_handle) { out_handle->live = 0; out_handle->atomic_rel32 = 0; out_handle->protection_only = 0; }
     if (!target || !new_bytes || !out_handle || len == 0 || len > B2_PATCH_MAX_BYTES)
         return B2_PATCH_REFUSED_BADARG;
 
@@ -100,7 +143,7 @@ sh_patch_status code_patch(void *target, const uint8_t *expect, const uint8_t *n
 
 
     DWORD old = 0;
-    if (!VirtualProtect(t, len, PAGE_EXECUTE_READWRITE, &old)) {
+    if (!patch_protect(t, len, PAGE_EXECUTE_READWRITE, &old)) {
         char line[96];
         _snprintf_s(line, sizeof line, _TRUNCATE,
             "B2: code_patch FAIL_PROTECT @%p (err %lu) -- no write", target, GetLastError());
@@ -108,28 +151,18 @@ sh_patch_status code_patch(void *target, const uint8_t *expect, const uint8_t *n
         return B2_PATCH_FAIL_PROTECT;
     }
 
-    /* A fault may leave partial bytes. Protection restoration is attempted, but
-     * live stays 0, so code_unpatch cannot recover this failed write. */
-    int wrote = safe_memcpy(t, new_bytes, len);
-    if (!wrote) {
-        DWORD tmp;
-        VirtualProtect(t, len, old, &tmp);
-        backend_log("B2: code_patch FAIL_SEH (write faulted) -- protection restored");
-        return B2_PATCH_FAIL_SEH;
-    }
-
-    FlushInstructionCache(GetCurrentProcess(), t, len);
-
-
-    {
-        DWORD tmp;
-        VirtualProtect(t, len, old, &tmp);
-    }
-
     out_handle->target      = target;
     out_handle->len         = len;
     out_handle->old_protect = (uint32_t)old;
     out_handle->live        = 1;
+    if (!patch_write(t, new_bytes, len))
+        return patch_failed(out_handle, B2_PATCH_FAIL_SEH);
+    FlushInstructionCache(GetCurrentProcess(), t, len);
+    {
+        DWORD ignored;
+        if (!patch_protect(t, len, old, &ignored))
+            return patch_failed(out_handle, B2_PATCH_FAIL_PROTECT);
+    }
     return B2_PATCH_OK;
 }
 
@@ -144,31 +177,34 @@ sh_patch_status code_unpatch(sh_patch_handle *handle)
     uint8_t *t = (uint8_t *)handle->target;
 
     DWORD old = 0;
-    if (!VirtualProtect(t, handle->len, PAGE_EXECUTE_READWRITE, &old)) {
+    if (!patch_protect(t, handle->len, PAGE_EXECUTE_READWRITE, &old)) {
         backend_log("B2: code_unpatch FAIL_PROTECT -- original NOT restored");
         return B2_PATCH_FAIL_PROTECT;
     }
 
     int restored;
-    if (handle->atomic_rel32) {
+    if (handle->protection_only) restored = 1;
+    else if (handle->atomic_rel32) {
         __try {
             LONG original;
             memcpy(&original, handle->orig + 1, sizeof original);
             InterlockedExchange((volatile LONG *)(t + 1), original);
             restored = 1;
         } __except (EXCEPTION_EXECUTE_HANDLER) { restored = 0; }
-    } else restored = safe_memcpy(t, handle->orig, handle->len);
+    } else restored = patch_write(t, handle->orig, handle->len);
     FlushInstructionCache(GetCurrentProcess(), t, handle->len);
 
 
-    {
-        DWORD tmp;
-        VirtualProtect(t, handle->len, handle->old_protect, &tmp);
-    }
+    DWORD ignored;
+    int protected = patch_protect(t, handle->len, handle->old_protect, &ignored);
 
     if (!restored) {
         backend_log("B2: code_unpatch FAIL_SEH (restore write faulted)");
         return B2_PATCH_FAIL_SEH;
+    }
+    if (!protected) {
+        backend_log("B2: code_unpatch FAIL_PROTECT -- original bytes restored; protection retry needed");
+        return B2_PATCH_FAIL_PROTECT;
     }
     handle->live = 0;
     return B2_PATCH_OK;
@@ -192,18 +228,27 @@ sh_patch_status code_patch_call_sig(const sig_result *r, const uint8_t expect[5]
     if (!safe_memcmp(target, expect, 5, &match) || !match) return B2_PATCH_REFUSED_VERIFY;
     memcpy(&before, expect + 1, sizeof before);
     memcpy(&after, replacement + 1, sizeof after);
-    if (!VirtualProtect(target, 5, PAGE_EXECUTE_READWRITE, &old)) return B2_PATCH_FAIL_PROTECT;
+    if (!patch_protect(target, 5, PAGE_EXECUTE_READWRITE, &old)) return B2_PATCH_FAIL_PROTECT;
+    memcpy(handle->orig, expect, 5);
+    handle->target = target; handle->len = 5; handle->old_protect = old;
+    handle->atomic_rel32 = 1;
+    handle->protection_only = 1;
     __try {
         if (target[0] == 0xe8 &&
             InterlockedCompareExchange((volatile LONG *)(target + 1), after, before) == before) {
             memcpy(handle->orig, expect, 5);
             handle->target = target; handle->len = 5; handle->old_protect = old;
             handle->live = 1; handle->atomic_rel32 = 1;
+            handle->protection_only = 0;
             status = B2_PATCH_OK;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { status = B2_PATCH_FAIL_SEH; }
     FlushInstructionCache(GetCurrentProcess(), target, 5);
-    VirtualProtect(target, 5, old, &ignored);
+    if (!patch_protect(target, 5, old, &ignored)) {
+        /* Even an unchanged call owns the outstanding page-protection restore. */
+        handle->live = 1;
+        return patch_failed(handle, B2_PATCH_FAIL_PROTECT);
+    }
     return status;
 }
 
@@ -229,35 +274,33 @@ sh_patch_status code_patch_sig(const sig_result *r, const uint8_t *expect, const
 
 /* Inline detour wrappers. */
 
-void *sh_install_detour(void *target, void *detour, size_t stolen)
-{
-    return install_inline_hook(target, detour, stolen);
-}
-
 int sh_uninstall_detour(void *tramp)
 {
     return hook_unpatch(tramp);
 }
 
-void *sh_install_detour_sig(const sig_result *r, void *detour, size_t stolen)
+sh_patch_status sh_commit_detour(void *tramp) { return hook_commit(tramp); }
+int sh_detour_is_installed(void *tramp) { return hook_is_installed(tramp); }
+
+void *sh_prepare_detour_sig(const sig_result *r, void *detour, size_t stolen)
 {
     if (!r || r->addr == 0) {
-        backend_log("B2: install_detour_sig REFUSED_SIG (target not resolved)");
+        backend_log("B2: prepare_detour_sig REFUSED_SIG (target not resolved)");
         return NULL;
     }
     if (r->status != SIG_OK) {
         char line[160];
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "B2: install_detour_sig REFUSED_SIG %s status=%d (not a clean unique hit)",
+            "B2: prepare_detour_sig REFUSED_SIG %s status=%d (not a clean unique hit)",
             r->name ? r->name : "?", (int)r->status);
         backend_log(line);
         return NULL;
     }
-    void *tramp = sh_install_detour((void *)r->addr, detour, stolen);
+    void *tramp = hook_prepare((void *)r->addr, detour, stolen);
     if (!tramp) {
         char line[128];
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "B2: install_detour_sig %s FAILED (installer returned NULL)", r->name ? r->name : "?");
+            "B2: prepare_detour_sig %s FAILED", r->name ? r->name : "?");
         backend_log(line);
     }
     return tramp;

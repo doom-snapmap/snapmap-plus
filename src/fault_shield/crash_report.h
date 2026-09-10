@@ -18,8 +18,9 @@ void crash_report_init(void);
  * Direct fail-fast termination may bypass both handlers. Call after initialization. */
 void crash_report_arm_fatal_handlers(void);
 
-/* Write one crash record (pending-<stamp>.json, CREATE_NEW, write-through). Crash-safe: static
- * buffers, no CRT heap. Bounded per session so a fault storm cannot spam the directory. */
+/* Publish complete JSON through a write-through temporary file and rename.
+ * Uses bounded static storage and a nonblocking guard: concurrent or recursive
+ * capture is skipped, never awaited. At most eight attempts per session. */
 void crash_report_file(const char *kind, unsigned long code, uintptr_t rip_rva,
                        uintptr_t fault_addr, const char *module_name,
                        const char *stack, const char *engine_text, const char *dump_path);

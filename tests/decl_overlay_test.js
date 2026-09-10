@@ -1,35 +1,10 @@
 /* Tests alignment between the transparent textarea and syntax-highlighted pre.
- * Extract the shipped tokenizer/renderer and assert that stripping markup gives
+ * Call the shipped language module and assert that stripping markup gives
  * the original text plus the renderer's trailing newline.
  * Run: node tests/decl_overlay_test.js */
 'use strict';
-const fs = require('fs');
-const path = require('path');
-
-const HTML = path.join(__dirname, '..', 'src', 'ui', 'webview', 'mockup.html');
-const src = fs.readFileSync(HTML, 'utf8').replace(/\r\n/g, '\n');   // repo files are CRLF
-
-function grab(startRe, endMarker) {
-  const i = src.search(startRe);
-  if (i < 0) throw new Error('could not find ' + startRe + ' in mockup.html');
-  const j = src.indexOf(endMarker, i);
-  if (j < 0) throw new Error('could not find end marker after ' + startRe);
-  return src.slice(i, j + endMarker.length);
-}
-
-// esc() -- one line
-const escSrc = grab(/function esc\(s\)/, '\n');
-// tokenizeDecl() -- ends at its closing brace + "\n  }\n"
-const tokSrc = grab(/function tokenizeDecl\(text\)/, '\n    return toks;\n  }');
-// renderHl() -- take the body up to the innerHTML assignment, return h instead
-let hlSrc = grab(/function renderHl\(text, toks, diags\)/, "$('declHl').innerHTML = h;");
-hlSrc = hlSrc.replace("$('declHl').innerHTML = h;", 'return h;') + '\n}';
-
-const sandbox = {};
-new Function('exports', escSrc + '\n' + tokSrc + '\n' + hlSrc +
-  '\nexports.esc = esc; exports.tokenizeDecl = tokenizeDecl; exports.renderHl = renderHl;')(sandbox);
-
-const { tokenizeDecl, renderHl } = sandbox;
+const language = require('../src/ui/webview/decl_language.js').create(null);
+const tokenizeDecl = language.tokenize, renderHl = language.highlight;
 
 function stripTags(h) {
   return h.replace(/<span class="[^"]*">/g, '').replace(/<\/span>/g, '')

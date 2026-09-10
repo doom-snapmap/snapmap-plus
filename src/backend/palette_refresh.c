@@ -3,7 +3,9 @@
  * lookups and map validation consume. Stale entries can report "not found in palette".
  * The builder replaces its previous array.
  *
- * The decl server calls synchronously on the main thread. Missing signatures,
+ * The decl server calls synchronously on the main thread in process-heap scope.
+ * Resource-level promotion alone cannot retain the palette's array and strings.
+ * Missing signatures,
  * invalid objects, vtable checks or native exceptions enter terminal REFUSED;
  * later rearm attempts do not retry this service.
  */
@@ -184,9 +186,7 @@ int sh_palette_refresh_after_decl_registration(void)
         return 0;
     }
 
-    /* The actual call consumes the state before invoking the engine. */
-    if (InterlockedCompareExchange(&g_state, PR_STATE_APPLIED, PR_STATE_PENDING) != PR_STATE_PENDING)
-        return 0;
+    /* Keep PENDING through the native call so reentry cannot replace its array. */
     __try {
 #ifdef SH_PALETTE_REFRESH_TESTING
         InterlockedIncrement(&g_test_call_count);
@@ -196,6 +196,8 @@ int sh_palette_refresh_after_decl_registration(void)
         pr_refuse("palette-refresh REFUSED: SnapPaletteBuild raised an exception");
         return 0;
     }
+    if (InterlockedCompareExchange(&g_state, PR_STATE_APPLIED, PR_STATE_PENDING) != PR_STATE_PENDING)
+        return 0;
     backend_log("palette-refresh FIRED: native SnapPaletteBuild rebuilt the entity palette");
     return 1;
 }

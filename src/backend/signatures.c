@@ -2,6 +2,7 @@
  * Use the longest fixed run as an anchor, then verify the full pattern.
  * Multiple matches are rejected; unreadable section tails stop that section scan. */
 #include "signatures.h"
+#include "host_image.h"
 #include <string.h>
 
 const sig_entry NAV_RENDER_TARGET_GL_SIGNATURE = {
@@ -121,8 +122,8 @@ static int collect_exec_sections(const uint8_t *module_base, exec_section *out, 
 }
 
 /* A detour can erase a signature prologue while leaving its tail intact. After
- * a scan miss, known_rva may identify that hooked entry when the jump form and
- * enough fixed tail bytes match. The RVA belongs to one extraction build;
+ * a scan miss, known_rva may identify that hooked entry on a fingerprinted image
+ * when the jump form and enough fixed tail bytes match. The RVA belongs to one extraction build;
  * it is not a portable substitute for signature resolution. */
 
 #define HOOK_MAX_STEAL   24   /* widest plausible whole-instruction steal window a detour overwrites */
@@ -166,7 +167,7 @@ static int sig_safe_read(const uint8_t *src, uint8_t *dst, size_t n)
 static int try_hooked_known_rva(const uint8_t *module_base, const sig_entry *sig,
                                 const uint8_t *pat, const uint8_t *mask, size_t n, sig_result *out)
 {
-    if (sig->known_rva == 0) return 0;
+    if (sig->known_rva == 0 || !sh_host_is_pinned_rva_image(module_base)) return 0;
     const uint8_t *site = module_base + sig->known_rva;
 
     uint8_t live[SIG_MAX_PATTERN];
@@ -339,6 +340,10 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "E8 ?? ?? ?? ?? 48 8B F8 41 B4 01 48 85 C0 75 23 48 8D 4D 98 E8 ?? ?? ?? ?? "
       "90 48 8D 4D C8 E8 ?? ?? ?? ?? 44 0F B6 64 24 40 48 8B 7C 24 48",
       0x4EC207u },
+    { "NavSearchHeapPush", /* Same verified leaf on Vulkan and OpenGL. */
+      "48 89 5C 24 08 48 89 74 24 18 48 89 7C 24 20 4D 8B 08 33 C9 "
+      "44 0F B7 1A 49 8B D8 48 8B FA 66 41 39 49 04",
+      0x6C12D0u },
     { "BlockingVolumeObstacleGate", /* The native affectsNavmesh contents mask gate. */
       "80 BB 8E 0C 00 00 00 74 0A 81 A3 94 0C 00 00 FF FF FD FF "
       "48 8B 8B 08 08 00 00 41 83 C8 FF 8B 93 94 0C 00 00 48 8B 01 FF 50 30",
@@ -584,6 +589,11 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "ShowDialog",
       "48 8B C4 57 48 81 EC 80 00 00 00 48 C7 40 B8 FE FF FF FF 48 89 58 18 48 89 70 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 78 48 8B F2",
       0xE6A260u },
+    /* Hide the active widget before its descriptor callbacks are released.
+     * The shell wrapper holds the native lock and updates input visibility. */
+    { "ClearDialogWrapper",
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B DA 48 8B F9 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 48 90 48 8B D3 48 8B 4F 08 E8 ?? ?? ?? ?? 48 8B 07 48 8B CF FF 90 60 02 00 00",
+      0x1736450u },
     /* Assign text into an already-constructed idStr; do not use its constructor here. */
     { "IdStrAssignCStr",
       "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 40 48 8B FA",

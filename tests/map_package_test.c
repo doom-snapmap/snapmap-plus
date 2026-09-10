@@ -9,12 +9,14 @@
 #include <string.h>
 
 #include "map_package.h"
+#include "engine_dialog.h"
 #include "map_package_fixtures.h"
 
 /* Runtime registration and re-arm are stubbed; the live engine path is outside this suite. */
+static int g_registration_ready;
 int sh_decl_server_registration_succeeded(void)
 {
-    return 0;
+    return g_registration_ready;
 }
 
 void sh_decl_server_request_rearm(void)
@@ -251,16 +253,65 @@ static void check_round_trip(const char *json, const unsigned char *payload, siz
 }
 
 
-/* Keep consent on the g_consent_mode fallback. engine_dialog_test covers
- * routing through the native dialog surface. */
+/* Controllable native modal boundary; filesystem staging and consent polling
+ * remain the production paths. engine_dialog_test covers the native layout. */
+static int g_dialog_idle, g_dialog_asks, g_dialog_answer, g_dialog_raise_fails;
 int sh_engine_dialog_ready(void) { return 0; }
+int sh_engine_dialog_can_ask(void) { return g_dialog_idle; }
 int sh_engine_dialog_ask(unsigned gdm_id, unsigned button_set, const char *text)
 {
-    (void)gdm_id; (void)button_set; (void)text;
-    return 0;
+    CHECK(gdm_id == 0x29 && button_set == 6 && text && strstr(text, "Install"));
+    CHECK(g_dialog_idle);
+    g_dialog_asks++;
+    return g_dialog_raise_fails ? 0 : 1;
 }
-int sh_engine_dialog_poll(int ticket) { (void)ticket; return 3; }
+int sh_engine_dialog_poll(int ticket) { CHECK(ticket == 1); return g_dialog_answer; }
 void sh_engine_dialog_release(int ticket) { (void)ticket; }
+
+static void test_consent_retirement(const char *root, const char *overrides)
+{
+    char package[MAX_PATH];
+    join(package, sizeof package, overrides, FIX_PKG_ID);
+    sh_mpkg_test_reset();
+    sh_mpkg_boot_capture(root);
+    g_dialog_idle = g_dialog_asks = g_dialog_raise_fails = 0;
+    g_dialog_answer = SH_ENGINE_DIALOG_PENDING;
+    CHECK(!sh_mpkg_gate(fix_map_happy, fix_map_happy_len));
+    for (int i = 0; i < 20; i++) sh_mpkg_consent_poll();
+    CHECK(!g_dialog_asks && !dir_exists(package));
+
+    /* Waiting for native retirement retains the staged package and asks once. */
+    g_dialog_idle = 1;
+    sh_mpkg_consent_poll();
+    CHECK(g_dialog_asks == 1 && !dir_exists(package));
+    for (int i = 0; i < 3; i++) sh_mpkg_consent_poll();
+    CHECK(g_dialog_asks == 1 && !dir_exists(package));
+    g_dialog_answer = SH_ENGINE_DIALOG_ACCEPTED;
+    sh_mpkg_consent_poll();
+    CHECK(dir_exists(package) && sh_mpkg_test_session_installed_count() == 1);
+    remove_tree(package);
+
+    /* A permanently occupied native surface declines within the wait budget. */
+    sh_mpkg_test_reset();
+    sh_mpkg_boot_capture(root);
+    g_dialog_idle = g_dialog_asks = 0;
+    CHECK(!sh_mpkg_gate(fix_map_happy, fix_map_happy_len));
+    for (int i = 0; i < 610; i++) sh_mpkg_consent_poll();
+    g_dialog_idle = 1;
+    sh_mpkg_consent_poll();
+    CHECK(!g_dialog_asks && !dir_exists(package));
+    CHECK(!sh_mpkg_test_session_installed_count());
+
+    /* A native raise failure never converts a request into consent. */
+    sh_mpkg_test_reset();
+    sh_mpkg_boot_capture(root);
+    g_dialog_raise_fails = 1;
+    CHECK(!sh_mpkg_gate(fix_map_happy, fix_map_happy_len));
+    sh_mpkg_consent_poll();
+    CHECK(g_dialog_asks == 1 && !dir_exists(package));
+    CHECK(!sh_mpkg_test_session_installed_count());
+    g_dialog_raise_fails = g_dialog_idle = 0;
+}
 
 int main(void)
 {
@@ -277,6 +328,7 @@ int main(void)
     CHECK(make_dir(root));
     join(overrides, sizeof overrides, root, "overrides");
     CHECK(make_dir(overrides));
+    test_consent_retirement(root, overrides);
 
     /* ---- scan: the no-shard fast path ---------------------------------- */
     n = sh_mpkg_scan("{\"variables\":{\"string\":[]}}", 27, decls, SH_MPKG_MAX_PACKAGES);
@@ -420,8 +472,24 @@ int main(void)
     /* The registration stub still reports pending, so another load must be
      * refused with registration wording rather than a restart requirement. */
     CHECK(sh_mpkg_gate(fix_map_happy, fix_map_happy_len) == 0);
-    CHECK(strstr(sh_mpkg_test_last_refusal(), "still registering") != NULL);
+    CHECK(strstr(sh_mpkg_test_last_refusal(), "registration is incomplete or failed") != NULL);
     CHECK(strstr(sh_mpkg_test_last_refusal(), "restart") == NULL);
+    g_registration_ready = 1;
+    CHECK(sh_mpkg_gate(fix_map_happy, fix_map_happy_len) == 1);
+    {
+        /* One successful session package must not admit a second missing one. */
+        size_t combined_length = 0;
+        char error[SH_MPKG_ERR_CAP];
+        char *combined = sh_mpkg_embed(fix_map_happy, fix_map_happy_len, "another",
+                                      fix_payload, sizeof(fix_payload), &combined_length,
+                                      error, sizeof(error));
+        CHECK(combined != NULL);
+        if (combined) {
+            CHECK(sh_mpkg_gate(combined, combined_length) == 0);
+            HeapFree(GetProcessHeap(), 0, combined);
+        }
+    }
+    g_registration_ready = 0;
 
     /* ---- gate: once the package is in the captured set, the map passes ---- */
     sh_mpkg_test_reset();
@@ -592,6 +660,29 @@ int main(void)
         }
     }
 
+    {
+        char package[MAX_PATH], marker[MAX_PATH];
+        for (int i = 0; i < 65; i++) {
+            _snprintf_s(package, sizeof(package), _TRUNCATE,
+                        "%s\\overflow-%02d", overrides, i);
+            CHECK(make_dir(package));
+            join(marker, sizeof(marker), package, "package.json");
+            CHECK(touch(marker, "{}"));
+        }
+        sh_mpkg_test_reset();
+        sh_mpkg_boot_capture(root);
+        CHECK(sh_mpkg_gate(fix_map_happy, fix_map_happy_len) == 0);
+        CHECK(strstr(sh_mpkg_test_last_refusal(), "boot package snapshot is missing") != NULL);
+        for (int i = 0; i < 65; i++) {
+            _snprintf_s(package, sizeof(package), _TRUNCATE,
+                        "%s\\overflow-%02d", overrides, i);
+            remove_tree(package);
+        }
+        /* Recovery of the filesystem cannot rewrite the recorded boot decision. */
+        sh_mpkg_boot_capture(root);
+        CHECK(sh_mpkg_gate(fix_map_happy, fix_map_happy_len) == 0);
+        CHECK(strstr(sh_mpkg_test_last_refusal(), "boot package snapshot is missing") != NULL);
+    }
     remove_tree(root);
 
     if (g_failed) {

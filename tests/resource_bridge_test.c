@@ -261,6 +261,32 @@ static void cleanup_tree(const char *root, const char *base, const char *manifes
     RemoveDirectoryA(root);
 }
 
+typedef struct concurrent_read_context {
+    const unsigned char *expected;
+    size_t length;
+    volatile LONG failures;
+} concurrent_read_context;
+
+static DWORD WINAPI concurrent_read(LPVOID parameter)
+{
+    concurrent_read_context *context = (concurrent_read_context *)parameter;
+    int i;
+    for (i = 0; i < 160; i++) {
+        unsigned char *body = NULL;
+        size_t length = 0;
+        const char *source = NULL;
+        int result = sh_resource_bridge_open(
+            "generated/decls/entitydef/ai/demon/cyberdemon.decl",
+            &body, &length, &source);
+        if (result != SH_RESOURCE_BRIDGE_OPENED || !body ||
+            length != context->length || memcmp(body, context->expected, length) ||
+            !source || !strstr(source, "cyberdemon.manifest:1"))
+            InterlockedIncrement(&context->failures);
+        if (body) HeapFree(GetProcessHeap(), 0, body);
+    }
+    return 0;
+}
+
 static void test_sparse_snapshot(void)
 {
     static const unsigned char compressed[] = {
@@ -326,6 +352,26 @@ static void test_sparse_snapshot(void)
     CHECK(decl_length == sizeof(expected));
     CHECK(decl && memcmp(decl, expected, sizeof(expected)) == 0 && decl[decl_length] == '\0');
     if (decl) HeapFree(GetProcessHeap(), 0, decl);
+
+    {
+        concurrent_read_context context = {expected, sizeof(expected), 0};
+        HANDLE readers[3];
+        int i;
+        for (i = 0; i < 3; i++) {
+            readers[i] = CreateThread(NULL, 0, concurrent_read, &context, 0, NULL);
+            CHECK(readers[i] != NULL);
+        }
+        for (i = 0; i < 60; i++) CHECK(sh_resource_bridge_recapture(root) == 1);
+        for (i = 0; i < 3; i++) if (readers[i]) {
+            CHECK(WaitForSingleObject(readers[i], 30000) == WAIT_OBJECT_0);
+            CloseHandle(readers[i]);
+        }
+        CHECK(context.failures == 0);
+        /* Returned metadata is copied, so another thread's recapture cannot
+         * invalidate its strings after the operation unlocks. */
+        CHECK(strcmp(name, "ai/demon/cyberdemon") == 0);
+        CHECK(strcmp(type, "entityDef") == 0);
+    }
 
     memset(truncated, 0, sizeof(truncated));
     CHECK(sh_inflate_raw(compressed, sizeof(compressed) / 2,

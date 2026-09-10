@@ -3,6 +3,7 @@
 const fs=require('fs'), path=require('path');
 const root=path.join(__dirname,'..');
 const html=fs.readFileSync(path.join(root,'src','ui','webview','mockup.html'),'utf8');
+const css=fs.readFileSync(path.join(root,'src','ui','webview','studio.css'),'utf8');
 const transform=fs.readFileSync(path.join(root,'src','ui','webview','prefab_transform.js'),'utf8');
 const js=fs.readFileSync(path.join(root,'src','ui','webview','prefab_viewport.js'),'utf8');
 const host=fs.readFileSync(path.join(root,'src','ui','webview','snapmap_plus_ui_webview.cpp'),'utf8');
@@ -22,14 +23,14 @@ check(html.indexOf('id="pcEntityCount"') > html.indexOf('id="pcCanvas"') &&
       html.indexOf('id="pcEntityCount"') < html.indexOf('for="pcName"'),
       'aggregate entity count appears inside the preview above Name');
 check(html.includes("d.count + (d.count === 1 ? ' entity' : ' entities')"),'aggregate count uses singular/plural text');
-check(/\.pc-preview-count\s*\{[^}]*right:\s*8px;[^}]*bottom:\s*7px;/s.test(html),
+check(/\.pc-preview-count\s*\{[^}]*right:\s*8px;[^}]*bottom:\s*7px;/s.test(css),
       'aggregate count is bottom-right preview metadata');
-check(/\.pc-preview-help\s*\{[^}]*top:\s*7px;[^}]*right:\s*8px;/s.test(html),
+check(/\.pc-preview-help\s*\{[^}]*top:\s*7px;[^}]*right:\s*8px;/s.test(css),
       'orbit controls replace the count at top-right');
-check(/\.pc-preview[^}]*background:\s*var\(--field\)/s.test(html),'viewport uses the Decl Text field background');
+check(/\.pc-preview[^}]*background:\s*var\(--field\)/s.test(css),'viewport uses the Decl Text field background');
 check(html.includes('class="pc-preview-legend"') && html.includes('Logic / I/O') && html.includes('Triggers'),
       'viewport explains semantic scene roles');
-check(/\.pc-name\s*\{\s*width:\s*100%;\s*\}/.test(html),'Name has no typography override over shared field rules');
+check(/\.pc-name\s*\{\s*width:\s*100%;\s*\}/.test(css),'Name has no typography override over shared field rules');
 check(js.includes('new ResizeObserver('),'element resize is observed directly');
 check(js.includes('requestAnimationFrame('),'resize/render work is coalesced to animation frames');
 check(js.includes('canvas.width !== w || canvas.height !== h'),'drawing buffer changes only when dimensions change');

@@ -12,6 +12,7 @@ import (
 // Test install/uninstall with a synthetic bundle: back up existing files, migrate
 // legacy logs, remove installed files and restore the original.
 func TestInstallUninstallRoundTrip(t *testing.T) {
+	syntheticProcessGuard(t, false)
 	tmp := t.TempDir()
 	doom := filepath.Join(tmp, "DOOM")
 	dist := filepath.Join(tmp, "dist")
@@ -104,6 +105,7 @@ func TestMigrateLegacyLogs(t *testing.T) {
 // An update must retain the original backup decision. With no pre-existing DLL,
 // uninstall should remove the mod without restoring an earlier mod version.
 func TestUpdateDoesNotBackUpOwnDLL(t *testing.T) {
+	syntheticProcessGuard(t, false)
 	tmp := t.TempDir()
 	doom := filepath.Join(tmp, "DOOM")
 	mkdirAll(t, doom)
@@ -135,6 +137,7 @@ func TestUpdateDoesNotBackUpOwnDLL(t *testing.T) {
 // TestRuntimeConfigSurvivesInstallerLifecycle locks the ownership boundary between the runtime and
 // installer: config.json is player preference data, never an installed payload or cleanup target.
 func TestRuntimeConfigSurvivesInstallerLifecycle(t *testing.T) {
+	syntheticProcessGuard(t, false)
 	tmp := t.TempDir()
 	doom := filepath.Join(tmp, "DOOM")
 	localAppData := filepath.Join(tmp, "appdata")
@@ -249,4 +252,32 @@ func readF(t *testing.T, path string) string {
 func exists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func syntheticProcessGuard(t *testing.T, running bool) {
+	t.Helper()
+	previous := checkDoomRunning
+	checkDoomRunning = func() bool { return running }
+	t.Cleanup(func() { checkDoomRunning = previous })
+	t.Setenv("USERPROFILE", t.TempDir())
+}
+
+func TestRunningGameRefusesInstallAndUninstall(t *testing.T) {
+	syntheticProcessGuard(t, true)
+	newDataDirs(t)
+	doom := filepath.Join(t.TempDir(), "DOOM")
+	writeF(t, filepath.Join(doom, "DOOMx64vk.exe"), "game")
+	writeF(t, filepath.Join(doom, "XINPUT1_3.dll"), "original")
+	if err := cmdInstall(flags{doom: doom, local: "missing-bundle"}); err == nil || !strings.Contains(err.Error(), "DOOM is running") {
+		t.Fatalf("install did not refuse the running game: %v", err)
+	}
+	if err := saveRecord(&installRecord{DoomPath: doom, Files: []string{"XINPUT1_3.dll"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdUninstall(flags{}); err == nil || !strings.Contains(err.Error(), "DOOM is running") {
+		t.Fatalf("uninstall did not refuse the running game: %v", err)
+	}
+	if got := readF(t, filepath.Join(doom, "XINPUT1_3.dll")); got != "original" {
+		t.Fatalf("guard changed game files: %q", got)
+	}
 }

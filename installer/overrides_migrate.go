@@ -34,8 +34,7 @@ func overridesDir() string {
 }
 
 // migrateLegacyOverrides copies missing files into my-overrides and creates its
-// marker. Existing destination files win. Source removal uses fullyMirrored
-// path-presence checks, not byte comparison. Failures do not fail installation.
+// marker. Conflicting or unverifiable source files stay in the legacy folder.
 func migrateLegacyOverrides() {
 	overrides := overridesDir()
 	if overrides == "" {
@@ -45,30 +44,57 @@ func migrateLegacyOverrides() {
 	starter := filepath.Join(overrides, starterPackageName)
 
 	// Missing sources and empty directory trees copy no files.
-	moved := copyTreeMissing(legacy, starter)
+	moved, copyErr := copyTreeMissing(legacy, starter)
 
 	if err := os.MkdirAll(starter, 0o755); err != nil {
 		return
 	}
 	marker := filepath.Join(starter, "package.json")
-	if _, err := os.Stat(marker); err != nil {
-		// Never overwrite: a user may have edited the name or description, and this runs on every update.
-		os.WriteFile(marker, []byte(starterPackageJSON), 0o644)
+	if err := ensureStarterMarker(marker); err != nil {
+		fmt.Printf("  ! kept overrides\\%s -- could not create the destination package marker: %v\n", legacyOverridesName, err)
+		return
 	}
 
 	if _, err := os.Stat(legacy); err != nil {
 		return // no legacy tree at all: the starter package above is all that was needed
 	}
-	if !fullyMirrored(legacy, starter) {
+	if copyErr != nil || !fullyMirrored(legacy, starter) {
 		fmt.Printf("  ! kept overrides\\%s -- %d file(s) were copied to overrides\\%s but not all could be verified\n",
 			legacyOverridesName, moved, starterPackageName)
 		return
 	}
-	if os.RemoveAll(legacy) != nil {
+	if removeMirroredTree(legacy, starter) != nil {
 		return
 	}
 	if moved > 0 {
 		fmt.Printf("  ~ moved %d override file(s) from overrides\\%s into overrides\\%s\n",
 			moved, legacyOverridesName, starterPackageName)
 	}
+}
+
+func ensureStarterMarker(path string) error {
+	if !plainPath(path) {
+		return fmt.Errorf("package marker uses a linked path")
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if os.IsExist(err) {
+		info, err := os.Lstat(path)
+		if err == nil && !info.Mode().IsRegular() {
+			return fmt.Errorf("package marker is not a regular file")
+		}
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	_, writeErr := f.WriteString(starterPackageJSON)
+	closeErr := f.Close()
+	if writeErr != nil || closeErr != nil {
+		os.Remove(path)
+		if writeErr != nil {
+			return writeErr
+		}
+		return closeErr
+	}
+	return nil
 }

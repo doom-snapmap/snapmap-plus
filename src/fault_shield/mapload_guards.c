@@ -12,7 +12,7 @@
 #include "../backend/host_image.h"
 #include "../backend/signatures.h" /* EventLink / InteractableSpawn are signature-resolved */
 #include "fault_record.h"    /* shield_emit -> shield_faults.log */
-#include "hook.h"            /* install_inline_hook */
+#include "hook.h"
 
 /* Probe every page in a span; a one-byte read would miss an unmapped tail. */
 static int mem_range_readable(const void *addr, size_t nbytes)
@@ -210,7 +210,11 @@ int sh_evwire_guard_install(const uint8_t *module_base)
     void *target, *tramp;
 
     if (module_base == NULL) return 0;
-    if (g_orig_evlink != NULL) return 1;                     /* one-shot */
+    if (g_orig_evlink) {
+        if (hook_is_installed((void *)g_orig_evlink)) return 1;
+        if (!hook_unpatch((void *)g_orig_evlink)) return 0;
+        g_orig_evlink = NULL;
+    }
 
     target = guard_target(module_base, "EventLink", RVA_EVLINK);
     if (target == NULL) {
@@ -227,15 +231,22 @@ int sh_evwire_guard_install(const uint8_t *module_base)
         shield_emit(&f);
         return 0;
     }
-    tramp  = install_inline_hook(target, (void *)sh_evlink_detour, EVLINK_STOLEN);
+    tramp = hook_prepare(target, (void *)sh_evlink_detour, EVLINK_STOLEN);
     if (tramp == NULL) {
         shield_fault f = { "load", -1,
-            "evwire-guard: install FAIL (install_inline_hook returned NULL -- re-derive 0x9C2370)",
+            "evwire-guard: trampoline preparation failed",
             RVA_EVLINK, 0 };
         shield_emit(&f);
         return 0;
     }
     g_orig_evlink = (evlink_fn)tramp;
+    if (hook_commit(tramp) != B2_PATCH_OK) {
+        if (hook_unpatch(tramp)) g_orig_evlink = NULL;
+        shield_fault f = { "load", -1,
+            "evwire-guard: commit failed; retained callbacks require restoration", RVA_EVLINK, 0 };
+        shield_emit(&f);
+        return 0;
+    }
     {
         shield_fault f = { "load", -1,
             "evwire-guard: armed -- stale event-link list guard on the event/trigger linker (0x9C2370)",
@@ -303,7 +314,11 @@ int sh_interactable_guard_install(const uint8_t *module_base)
     void *target, *tramp;
 
     if (module_base == NULL) return 0;
-    if (g_orig_ia_spawn != NULL) return 1;                   /* one-shot */
+    if (g_orig_ia_spawn) {
+        if (hook_is_installed((void *)g_orig_ia_spawn)) return 1;
+        if (!hook_unpatch((void *)g_orig_ia_spawn)) return 0;
+        g_orig_ia_spawn = NULL;
+    }
 
     target = guard_target(module_base, "InteractableSpawn", RVA_INTERACTABLE_SPAWN);
     if (target == NULL) {
@@ -321,15 +336,23 @@ int sh_interactable_guard_install(const uint8_t *module_base)
         shield_emit(&f);
         return 0;
     }
-    tramp  = install_inline_hook(target, (void *)sh_ia_spawn_detour, INTERACTABLE_STOLEN);
+    tramp = hook_prepare(target, (void *)sh_ia_spawn_detour, INTERACTABLE_STOLEN);
     if (tramp == NULL) {
         shield_fault f = { "load", -1,
-            "interactable-guard: install FAIL (install_inline_hook returned NULL -- re-derive 0x1232830)",
+            "interactable-guard: trampoline preparation failed",
             RVA_INTERACTABLE_SPAWN, 0 };
         shield_emit(&f);
         return 0;
     }
     g_orig_ia_spawn = (ia_spawn_fn)tramp;
+    if (hook_commit(tramp) != B2_PATCH_OK) {
+        if (hook_unpatch(tramp)) g_orig_ia_spawn = NULL;
+        shield_fault f = { "load", -1,
+            "interactable-guard: commit failed; retained callbacks require restoration",
+            RVA_INTERACTABLE_SPAWN, 0 };
+        shield_emit(&f);
+        return 0;
+    }
     {
         shield_fault f = { "load", -1,
             "interactable-guard: armed -- absent-subsystem guard on idInteractable::Spawn (0x1232830)",

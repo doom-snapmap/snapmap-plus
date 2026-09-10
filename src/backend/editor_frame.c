@@ -514,13 +514,20 @@ int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
         }
     }
 
-    tramp = install_inline_hook(frame_fn, (void *)sh_editor_frame_detour, EDITOR_FRAME_STOLEN);
+    tramp = hook_prepare(frame_fn, (void *)sh_editor_frame_detour, EDITOR_FRAME_STOLEN);
     if (tramp == NULL) {
-        backend_log("EF: editor-frame hook FAIL -- install_inline_hook returned NULL");
+        backend_log("EF: editor-frame hook FAIL -- trampoline preparation failed");
         return 0;
     }
+    /* The detour's original callback must carry the trampoline before the commit. */
     g_frame_orig = (editor_frame_fn)tramp;
     g_load_map   = (ef_load_map_fn)load_map_fn;
+
+    if (hook_commit(tramp) != B2_PATCH_OK) {
+        if (hook_unpatch(tramp)) g_frame_orig = NULL;
+        backend_log("EF: editor-frame hook commit failed; retained callbacks require restoration");
+        return 0;
+    }
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "EF: editor-frame hook installed at %p (trampoline %p, stolen %d); loadmap=%p; editor=%p",

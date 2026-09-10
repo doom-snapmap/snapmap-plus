@@ -29,8 +29,7 @@ typedef struct sh_package {
 /* Enumerate below <data_root>/overrides by descending priority, then case-
  * insensitive name. Skip reparse points and stop descending at package
  * markers. Returns 1 for a complete result, including empty; 0 for read or
- * capacity failure. Always sets count; callers requiring a complete snapshot
- * must reject partial results.
+ * capacity failure. A failure always sets count to zero.
  */
 int sh_packages_enumerate(const char *data_root, sh_package *out, size_t capacity,
                           size_t *count);

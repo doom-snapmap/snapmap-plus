@@ -166,11 +166,11 @@ static void enumeration_failures(const char *root)
     CHECK(injected_closes == 1);
     injected_terminal_error = ERROR_ACCESS_DENIED;
     CHECK(!sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
-    CHECK(count == 2); /* callers can inspect partial rows, but must refuse */
+    CHECK(count == 0);
     CHECK(injected_closes == 2);
     injected_terminal_error = ERROR_READ_FAULT;
     CHECK(!sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
-    CHECK(count == 2);
+    CHECK(count == 0);
     CHECK(injected_closes == 3);
 
     injected_root_attributes = INVALID_FILE_ATTRIBUTES;
@@ -284,7 +284,7 @@ int main(void)
     /* More packages than the array holds is an incomplete enumeration, not a
      * silent truncation: the caller is told so it can refuse. */
     CHECK(sh_packages_enumerate(root, packages, 2, &count) == 0);
-    CHECK(count == 2);
+    CHECK(count == 0);
 
     /* A tree deeper than the bound is reported incomplete rather than silently
      * abandoned partway. */

@@ -21,6 +21,7 @@ dist/
 /deploy.ps1
 
 # Wrangler account caches.
+/.wrangler/
 feedback/.wrangler/
 community/.wrangler/
 

@@ -1,4 +1,4 @@
-/* Inject user, package and baked #str_ mappings once, then sort the live
+/* Inject user, package and baked #str_ mappings, then sort the live
  * dictionary by hash. Installation performs the usual injection; the sort
  * hook is a fallback.
  *
@@ -47,6 +47,8 @@ static insert_fn_t     g_insert      = NULL;
 static hash_fn_t       g_hash        = NULL;
 static idstr_ctor_fn_t g_idstr_ctor  = NULL;
 
+static volatile LONG g_refresh_busy;
+static int g_pass_failed;
 static volatile LONG g_injected      = 0;      /* one-shot latch (0 = not yet injected) */
 static volatile LONG g_in_sort       = 0;      /* recursion guard (>0 = inside the sort already) */
 static volatile LONG g_inject_count  = 0;      /* rows appended (observability) */
@@ -142,6 +144,7 @@ static int scan_json_string(const char **p, char *out, size_t cap)
     if (*s != '"') return -1;
     s++;
     size_t o = 0;
+    int overflow = 0;
     while (*s && *s != '"') {
         char c = *s++;
         if (c == '\\' && *s) {
@@ -155,12 +158,13 @@ static int scan_json_string(const char **p, char *out, size_t cap)
             }
         }
         if (o + 1 < cap) out[o++] = c;
+        else overflow = 1;
     }
     if (*s != '"') return -1;   /* unterminated */
     s++;
     out[o] = '\0';
     *p = s;
-    return (int)o;
+    return overflow ? -1 : (int)o;
 }
 
 /* Deduplicate case-insensitively within an injection pass because the native
@@ -176,13 +180,48 @@ static int scan_json_string(const char **p, char *out, size_t cap)
 #define STRIDS_OWNER_NONE (-1)
 
 typedef struct strids_row {
-    char         id[96];
+    char         id[256];
     unsigned int text_hash;   /* FNV-1a of the text: "same value?" without storing every value */
     int          owner;       /* index into g_str_packages, or STRIDS_OWNER_NONE */
 } strids_row;
 
 static strids_row g_injected_ids[STRIDS_DEDUP_CAP];
 static int        g_injected_n;
+
+typedef struct strids_owned_row {
+    char id[256];
+    void *key_handle;
+    unsigned int hash;
+    char *text;
+} strids_owned_row;
+
+/* Native sorting moves rows, so retain the interned key, never an array
+ * index or pointer. Existing keys update in place during main-thread rearm. */
+static strids_owned_row g_owned_rows[STRIDS_DEDUP_CAP];
+static int g_owned_n;
+
+static strids_owned_row *find_owned(const char *id)
+{
+    int i;
+    for (i = 0; i < g_owned_n; i++)
+        if (_stricmp(g_owned_rows[i].id, id) == 0) return &g_owned_rows[i];
+    return NULL;
+}
+
+static unsigned char *find_live_owned(const strids_owned_row *row)
+{
+    unsigned char *array = *(unsigned char **)g_table_desc;
+    unsigned int count = *(unsigned int *)((unsigned char *)g_table_desc + 8);
+    unsigned int i;
+    if (!array || count > 2000000u) return NULL;
+    for (i = 0; i < count; i++) {
+        unsigned char *entry = array + (size_t)i * 32u;
+        if (*(unsigned int *)entry == row->hash &&
+            *(void **)(entry + 8) == row->key_handle) return entry;
+    }
+    return NULL;
+}
+
 
 /* Keep the package snapshot in static storage to limit this engine callback's
  * stack use.
@@ -232,29 +271,63 @@ static void inject_row_owned(const char *id, const char *text, size_t text_len, 
         }
         return;                                             /* first-writer-wins: never append twice */
     }
-    if (g_injected_n < STRIDS_DEDUP_CAP) {
-        strncpy_s(g_injected_ids[g_injected_n].id, sizeof g_injected_ids[0].id, id, _TRUNCATE);
-        g_injected_ids[g_injected_n].text_hash = strids_text_hash(text);
-        g_injected_ids[g_injected_n].owner = owner;
-        g_injected_n++;
+    if (g_injected_n >= STRIDS_DEDUP_CAP || strlen(id) >= sizeof(g_injected_ids[0].id)) {
+        g_pass_failed = 1;
+        return;
     }
+    strncpy_s(g_injected_ids[g_injected_n].id, sizeof(g_injected_ids[0].id), id, _TRUNCATE);
+    g_injected_ids[g_injected_n].text_hash = strids_text_hash(text);
+    g_injected_ids[g_injected_n].owner = owner;
+    g_injected_n++;
 
-    char key[256];
-    _snprintf_s(key, sizeof key, _TRUNCATE, "#str_%s", id);
-
-    /* 32-byte record: { u32 hash; u32 pad; ptr keyHandle; ptr valHandle; u32 len; u32 len } */
-    uint8_t rec[32];
-    memset(rec, 0, sizeof rec);
-    uint32_t h = g_hash(key);
-    memcpy(rec + 0x00, &h, 4);
-    g_idstr_ctor(rec + 0x08, key);    /* keyHandle = intern("#str_<id>") */
-    g_idstr_ctor(rec + 0x10, text);   /* valHandle = intern(text)        */
-    uint32_t vl = (uint32_t)text_len;
-    memcpy(rec + 0x18, &vl, 4);
-    memcpy(rec + 0x1c, &vl, 4);
-
-    g_insert(g_table_desc, rec);      /* idList<StridEntry>::Append(tableDesc, &record) */
-    InterlockedIncrement(&g_inject_count);
+    {
+        strids_owned_row *owned = find_owned(id);
+        unsigned char *live = NULL;
+        unsigned char rec[32] = {0};
+        char key[sizeof(g_injected_ids[0].id) + 6];
+        char *saved_text;
+        uint32_t length = (uint32_t)text_len;
+        if (owned) {
+            live = find_live_owned(owned);
+            if (!live) { g_pass_failed = 1; return; }
+            if (strcmp(owned->text, text) == 0) return;
+            memcpy(rec, live, sizeof(rec));
+        } else {
+            if (g_owned_n >= STRIDS_DEDUP_CAP) { g_pass_failed = 1; return; }
+            _snprintf_s(key, sizeof(key), _TRUNCATE, "#str_%s", id);
+            *(uint32_t *)rec = g_hash(key);
+            g_idstr_ctor(rec + 8, key);
+        }
+        saved_text = (char *)HeapAlloc(GetProcessHeap(), 0, text_len + 1);
+        if (!saved_text) { g_pass_failed = 1; return; }
+        memcpy(saved_text, text, text_len + 1);
+        /* IdStrAssign owns replacement of the old pooled value handle. */
+        g_idstr_ctor(live ? live + 16 : rec + 16, text);
+        memcpy(live ? live + 24 : rec + 24, &length, 4);
+        memcpy(live ? live + 28 : rec + 28, &length, 4);
+        if (owned) {
+            HeapFree(GetProcessHeap(), 0, owned->text);
+        } else {
+            uint32_t before = *(uint32_t *)((unsigned char *)g_table_desc + 8);
+            if (before >= 2000000u) {
+                HeapFree(GetProcessHeap(), 0, saved_text);
+                g_pass_failed = 1;
+                return;
+            }
+            g_insert(g_table_desc, rec);
+            if (*(uint32_t *)((unsigned char *)g_table_desc + 8) != before + 1u) {
+                HeapFree(GetProcessHeap(), 0, saved_text);
+                g_pass_failed = 1;
+                return;
+            }
+            owned = &g_owned_rows[g_owned_n++];
+            strcpy_s(owned->id, sizeof(owned->id), id);
+            owned->key_handle = *(void **)(rec + 8);
+            owned->hash = *(uint32_t *)rec;
+            InterlockedIncrement(&g_inject_count);
+        }
+        owned->text = saved_text;
+    }
 }
 
 static void inject_row(const char *id, const char *text, size_t text_len)
@@ -272,14 +345,14 @@ static void inject_pairs(const char *buf, int owner)
     while (*p) {
         if (*p != '"') { p++; continue; }
         int idlen = scan_json_string(&p, id, sizeof id);
-        if (idlen < 0) { p++; continue; }
+        if (idlen < 0) { g_pass_failed = 1; if (*p) p++; continue; }
         while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
         if (*p != ':') continue;     /* not a key:value pair -- resume scanning from here */
         p++;
         while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
         if (*p != '"') continue;
         int vlen = scan_json_string(&p, text, sizeof text);
-        if (vlen < 0) continue;
+        if (vlen < 0) { g_pass_failed = 1; continue; }
         if (idlen > 0) inject_row_owned(id, text, (size_t)vlen, owner);
     }
 }
@@ -289,34 +362,41 @@ static void inject_pairs(const char *buf, int owner)
  */
 static void inject_packages(void)
 {
-    char root[MAX_PATH], dir[MAX_PATH], pattern[MAX_PATH], path[MAX_PATH];
+    char dir[MAX_PATH], pattern[MAX_PATH], path[MAX_PATH];
     WIN32_FIND_DATAA found;
     size_t i;
 
-    g_str_package_count = 0;
-    if (!sh_overrides_get_root(root, sizeof root) || !root[0]) return;
-    /* Retain the enumerated subset on failure; omitted package strings are
-     * not injected.
-     */
-    (void)sh_packages_enumerate(root, g_str_packages, SH_PACKAGES_MAX, &g_str_package_count);
-
     for (i = 0; i < g_str_package_count; i++) {
         HANDLE search;
-        if (!sh_package_subdir(&g_str_packages[i], "strings", dir, sizeof dir)) continue;
-        if (_snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*.json", dir) < 0) continue;
+        DWORD error;
+        if (!sh_package_subdir(&g_str_packages[i], "strings", dir, sizeof dir) ||
+            _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*.json", dir) < 0) {
+            g_pass_failed = 1;
+            return;
+        }
         search = FindFirstFileA(pattern, &found);
-        if (search == INVALID_HANDLE_VALUE) continue;
+        if (search == INVALID_HANDLE_VALUE) {
+            error = GetLastError();
+            if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)
+                g_pass_failed = 1;
+            continue;
+        }
         do {
             size_t len = 0;
             char *buf;
             if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-            if (_snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, found.cFileName) < 0) continue;
+            if (_snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, found.cFileName) < 0) {
+                g_pass_failed = 1;
+                continue;
+            }
             buf = read_file(path, &len);
-            if (buf == NULL) continue;
+            if (buf == NULL) { g_pass_failed = 1; continue; }
             inject_pairs(buf, (int)i);
             HeapFree(GetProcessHeap(), 0, buf);
         } while (FindNextFileA(search, &found));
+        error = GetLastError();
         FindClose(search);
+        if (error != ERROR_NO_MORE_FILES) g_pass_failed = 1;
     }
 }
 
@@ -325,6 +405,17 @@ static long do_inject(void)
 {
     if (g_table_desc == NULL || g_insert == NULL || g_hash == NULL || g_idstr_ctor == NULL)
         return 0;
+
+    {
+        char root[MAX_PATH];
+        g_str_package_count = 0;
+        if (!sh_overrides_get_root(root, sizeof(root)) ||
+            !sh_packages_enumerate(root, g_str_packages, SH_PACKAGES_MAX, &g_str_package_count)) {
+            backend_log("B1: strids REFUSED -- package enumeration was incomplete");
+            g_pass_failed = 1;
+            return -1;
+        }
+    }
 
     g_injected_n = 0;   /* fresh dedup set for this inject pass */
 
@@ -355,13 +446,17 @@ static long do_inject(void)
  */
 static void resort_table(void)
 {
-    if (g_sort_orig == NULL || g_table_desc == NULL) return;
+    if (g_sort_orig == NULL || g_table_desc == NULL) { g_pass_failed = 1; return; }
     __try {
         void    *live_arr = *(void **)g_table_desc;
         uint32_t live_cnt = *(uint32_t *)((uint8_t *)g_table_desc + 8);
+        if (live_cnt > 2000000u || (live_cnt && !live_arr)) {
+            g_pass_failed = 1;
+            return;
+        }
         if (live_arr != NULL && live_cnt > 1)
             g_sort_orig(g_table_desc, live_arr, live_cnt, SORT_RADIX);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { /* bad descriptor read -> leave the table as-is */ }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { g_pass_failed = 1; }
 }
 
 /* Claim the shared one-shot latch, inject and re-sort. Returns appended rows,
@@ -421,6 +516,12 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
 {
     char line[256];
 
+    if (g_sort_orig != NULL) {
+        if (hook_is_installed((void *)g_sort_orig)) return 1;
+        if (!hook_unpatch((void *)g_sort_orig)) return 0;
+        g_sort_orig = NULL;
+        g_table_desc = NULL; g_insert = NULL; g_hash = NULL; g_idstr_ctor = NULL;
+    }
     if (sort_body_fn == NULL) {
         backend_log("B1: strids injector SKIPPED -- StridsSortBody not resolved");
         return 0;
@@ -437,10 +538,6 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
         backend_log(line);
         return 0;
     }
-    if (g_sort_orig != NULL) {
-        backend_log("B1: strids injector already installed");
-        return 1;
-    }
 
     g_table_desc = decode_table_global((const uint8_t *)table_lea_fn);
     if (g_table_desc == NULL) {
@@ -452,15 +549,25 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
     g_hash       = (hash_fn_t)hash_fn;
     g_idstr_ctor = (idstr_ctor_fn_t)idstr_ctor_fn;
 
-    void *tramp = install_inline_hook(sort_body_fn, (void *)sh_sort_detour, SORT_STOLEN);
+    void *tramp = hook_prepare(sort_body_fn, (void *)sh_sort_detour, SORT_STOLEN);
     if (tramp == NULL) {
-        backend_log("B1: strids injector FAIL -- install_inline_hook returned NULL");
+        backend_log("B1: strids injector FAIL -- could not prepare the original callback");
         g_table_desc = NULL; g_insert = NULL; g_hash = NULL; g_idstr_ctor = NULL;
         return 0;
     }
     g_sort_orig = (sort_fn_t)tramp;
 
     if (!g_src_path[0]) default_source_path(g_src_path, sizeof g_src_path);
+    InterlockedExchange(&g_injected, 0);
+    if (hook_commit(tramp) != B2_PATCH_OK) {
+        InterlockedExchange(&g_injected, 1);
+        if (hook_unpatch(tramp)) {
+            g_sort_orig = NULL;
+            g_table_desc = NULL; g_insert = NULL; g_hash = NULL; g_idstr_ctor = NULL;
+        }
+        backend_log("B1: strids injector FAIL -- hook commit failed; pending restoration retains the original callback");
+        return 0;
+    }
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "B1: strids injector installed at %p (trampoline %p, stolen %d); table=%p; source=%s",
         sort_body_fn, tramp, SORT_STOLEN, g_table_desc, g_src_path);
@@ -472,6 +579,26 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
      */
     inject_and_resort_once();
     return 1;
+}
+
+int sh_strids_rearm(void)
+{
+    int ok;
+    if (!g_sort_orig || !hook_is_installed((void *)g_sort_orig) ||
+        !g_table_desc || !g_insert || !g_hash || !g_idstr_ctor ||
+        InterlockedCompareExchange(&g_refresh_busy, 1, 0)) return 0;
+    g_pass_failed = 0;
+    __try {
+        __try { do_inject(); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { g_pass_failed = 1; }
+        /* Even a partial native append must leave the lookup table sorted. */
+        resort_table();
+        ok = !g_pass_failed;
+    } __finally {
+        InterlockedExchange(&g_refresh_busy, 0);
+    }
+    backend_log(ok ? "B1: strids runtime refresh complete" : "B1: strids runtime refresh FAILED");
+    return ok;
 }
 
 int sh_strids_set_source(const char *path)
@@ -495,6 +622,12 @@ unsigned long sh_strids_injected_count(void)
  */
 int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idstr_ctor)
 {
+    int i;
+    for (i = 0; i < g_owned_n; i++)
+        if (g_owned_rows[i].text) HeapFree(GetProcessHeap(), 0, g_owned_rows[i].text);
+    memset(g_owned_rows, 0, sizeof(g_owned_rows));
+    g_owned_n = 0;
+    g_pass_failed = 0;
     g_table_desc = table_desc;
     g_insert     = (insert_fn_t)insert;
     g_hash       = (hash_fn_t)hash;
@@ -502,6 +635,11 @@ int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idst
     InterlockedExchange(&g_inject_count, 0);
     g_injected_n = 0;
     return (int)do_inject();
+}
+
+void sh_strids_test_set_sort(void *sort)
+{
+    g_sort_orig = (sort_fn_t)sort;
 }
 
 /* How the injector attributed each row this pass: the id, and the owning package name ("<user>" for

@@ -81,7 +81,7 @@ func cmdInstall(f flags) error {
 	if err != nil {
 		return err
 	}
-	if doomIsRunning() {
+	if checkDoomRunning() {
 		return fmt.Errorf("DOOM is running -- close it and run this again (Snapmap+'s files can't be replaced while the game has them open)")
 	}
 	b, cleanup, err := acquireBundle(f)
@@ -263,7 +263,7 @@ func cmdUninstall(f flags) error {
 	if f.doom != "" {
 		doom = f.doom
 	}
-	if doomIsRunning() {
+	if checkDoomRunning() {
 		return fmt.Errorf("DOOM is running -- close it and run this again (its files are in use)")
 	}
 	if !f.yes && isInteractive() {

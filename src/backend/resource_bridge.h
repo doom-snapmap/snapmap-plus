@@ -20,12 +20,16 @@ enum {
  */
 int sh_resource_bridge_capture(const char *data_root);
 
-/* Refresh manifests after package changes. Retain the previous entry
- * allocations for existing readers; each recapture adds retained memory. Call
- * at a serialized, quiescent boundary with no map loading. Returns the new
- * capture result.
+/* Refresh manifests after package changes. Wait for active readers before
+ * releasing old storage. Failed capture admits no resources.
  */
 int sh_resource_bridge_recapture(const char *data_root);
+
+/* Keep a group of metadata/body reads on one snapshot. Nesting on the same
+ * thread is supported. Always pair these calls; do not call engine code while
+ * holding the snapshot. Individual bridge operations also acquire this lock. */
+void sh_resource_bridge_snapshot_begin(void);
+void sh_resource_bridge_snapshot_end(void);
 
 /* Mark whether the provider hook that can serve captured entries is live. A
  * non-empty bridge snapshot gates dynamic decl registration until this is 1. */
@@ -36,12 +40,14 @@ size_t sh_resource_bridge_entry_count(void);
 
 /* Resolve an engine resource name. OPENED transfers one HeapAlloc-owned buffer
  * to the caller; MISS means the name is not admitted; ERROR means it was
- * admitted but its installed source could not be read or decoded. */
+ * admitted but its installed source could not be read or decoded. out_source
+ * is a thread-local copy valid until the next open on this thread. */
 int sh_resource_bridge_open(const char *name, unsigned char **out,
                             size_t *out_length, const char **out_source);
 
 /* Linked .decl entries are exposed to the dynamic decl server without writing
- * their game-owned bytes into the user's override tree. */
+ * their game-owned bytes into the user's override tree. Metadata strings are
+ * thread-local copies valid until the next metadata call on this thread. */
 size_t sh_resource_bridge_decl_count(void);
 int sh_resource_bridge_decl_metadata(size_t index, const char **type,
                                      const char **name, const char **source);

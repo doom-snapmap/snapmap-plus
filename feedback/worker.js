@@ -3,6 +3,8 @@
  * append a confirmation or create an issue. GitHub is the only persistent store.
  * See README.md for setup and docs/feedback.md for the client pipeline. */
 
+import { RequestError, readJsonObject } from '../src/workers/request_body.js';
+
 const REPO = 'doom-snapmap/snapmap-plus';
 const API = 'https://api.github.com';
 
@@ -140,15 +142,17 @@ export default {
     }
     if (req.method !== 'POST' || url.pathname !== '/report') return json({ ok: false, error: 'not found' }, 404);
 
-    const raw = await req.text();
-    if (raw.length > 65536) return json({ ok: false, error: 'too large' }, 413);
     let body;
-    try { body = JSON.parse(raw); } catch { return json({ ok: false, error: 'bad json' }, 400); }
+    try { body = await readJsonObject(req, 3 * 65536, 65536); }
+    catch (error) {
+      return json({ ok: false, error: error instanceof RequestError ? error.message : 'bad request body' },
+                  error instanceof RequestError ? error.status : 400);
+    }
 
     /* A filled honeypot returns success without filing a report. */
     if (body.website) return json({ ok: true, mode: 'created', number: 0 });
 
-    const cat = CATEGORIES[body.category];
+    const cat = Object.hasOwn(CATEGORIES, body.category) ? CATEGORIES[body.category] : null;
     const title = String(body.title || '').trim();
     const details = String(body.body || '').trim();
     const contact = String(body.contact || '').trim().slice(0, 200);

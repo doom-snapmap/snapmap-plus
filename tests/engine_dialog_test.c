@@ -6,12 +6,14 @@
 #include <string.h>
 
 #include "engine_dialog.h"
+#include "hook.h"
 
 #define ED_DESC_STRIDE      0x1B0u
 #define ED_DESC_GDM_ID      0x00u
 #define ED_DESC_TEXT        0x18u
 #define ED_MGR_QUEUE_PTR    0x900u
 #define ED_MGR_QUEUE_COUNT  0x908u
+#define ED_MGR_ACTIVE       0x8F0u
 
 /* Keep button indices and action IDs independent of engine_dialog.c. */
 #define ED_PARAM_ACTION_0   3
@@ -46,6 +48,7 @@ static int   g_assign_calls;
 static int   g_swallow_raise;
 static void *g_last_target;
 static char  g_last_text[512];
+static int g_clear_calls, g_fail_assign, g_fail_clear;
 
 static int failed;
 
@@ -58,11 +61,63 @@ static int failed;
 
 void backend_log(const char *message) { (void)message; }
 
-/* Installation is not exercised; stub the engine detour dependency. */
-void *install_inline_hook(void *target, void *detour, size_t stolen)
+typedef struct test_hook { void *target, *detour; int installed; } test_hook;
+static test_hook g_hooks[2];
+static int g_prepare_calls, g_commit_calls, g_fail_prepare, g_fail_commit, g_fail_unpatch;
+static int g_action_calls;
+static void fake_add_dialog(void *shell, void *params);
+
+static void invoke_hook(test_hook *hook)
 {
-    (void)target; (void)detour; (void)stolen;
+    if (hook->target == (void *)fake_add_dialog)
+        ((void (*)(void *, void *))hook->detour)(g_shell_obj, NULL);
+    else
+        ((void (*)(void *, void *, int, void *, int))hook->detour)(NULL, NULL, 0, NULL, 0);
+}
+
+void *hook_prepare(void *target, void *detour, size_t stolen)
+{
+    (void)stolen;
+    if (++g_prepare_calls == g_fail_prepare) return NULL;
+    for (int i = 0; i < 2; i++) if (!g_hooks[i].target) {
+        g_hooks[i].target = target; g_hooks[i].detour = detour;
+        return target;
+    }
     return NULL;
+}
+
+sh_patch_status hook_commit(void *tramp)
+{
+    for (int i = 0; i < 2; i++) if (g_hooks[i].target == tramp) {
+        invoke_hook(&g_hooks[i]); /* The production original callback must already be published. */
+        if (++g_commit_calls == g_fail_commit) return B2_PATCH_FAIL_ROLLBACK;
+        g_hooks[i].installed = 1;
+        return B2_PATCH_OK;
+    }
+    return B2_PATCH_REFUSED_BADARG;
+}
+
+int hook_is_installed(void *tramp)
+{
+    for (int i = 0; i < 2; i++) if (tramp && g_hooks[i].target == tramp) return g_hooks[i].installed;
+    return 0;
+}
+
+int hook_unpatch(void *tramp)
+{
+    for (int i = 0; i < 2; i++) if (tramp && g_hooks[i].target == tramp) {
+        g_hooks[i].installed = 0;
+        if (g_fail_unpatch) return 0;
+        memset(&g_hooks[i], 0, sizeof g_hooks[i]);
+        return 1;
+    }
+    return 0;
+}
+
+static void fake_action(void *mgr, void *params, int action, void *parms, int flag)
+{
+    (void)mgr; (void)params; (void)action; (void)parms; (void)flag;
+    g_action_calls++;
 }
 
 /* Stands in for the shell-level raise: appends a descriptor carrying the gdm id
@@ -85,26 +140,239 @@ static void fake_add_dialog(void *shell, void *params)
 static void fake_assign_cstr(void *idstr, const char *text)
 {
     g_assign_calls++;
+    if (g_fail_assign) {
+        g_mgr[ED_MGR_ACTIVE] = 1;
+        RaiseException(0xe0000043, 0, 0, NULL);
+    }
     g_last_target = idstr;
     strncpy_s(g_last_text, sizeof g_last_text, text ? text : "", _TRUNCATE);
+}
+
+static void fake_clear_dialog(void *shell, void *params)
+{
+    int id = *(const int *)params;
+    g_clear_calls++;
+    CHECK(shell == g_shell_obj && id == *(int *)g_queue);
+    CHECK(sh_engine_dialog_test_pending_id() == -1);
+    /* Even an action reentered during a cancellation fault owns no consent. */
+    sh_engine_dialog_test_action(id, ED_ACTION_ACCEPT);
+    if (g_fail_clear) RaiseException(0xe0000044, 0, 0, NULL);
+    g_queue[8] = 1;
+    g_mgr[ED_MGR_ACTIVE] = 0;
 }
 
 static void reset(void)
 {
     sh_engine_dialog_test_reset();
     queue_reset();
-    sh_engine_dialog_test_bind(g_shell_obj, (void *)fake_add_dialog, (void *)fake_assign_cstr);
+    sh_engine_dialog_test_bind(g_shell_obj, (void *)fake_add_dialog,
+                               (void *)fake_clear_dialog, (void *)fake_assign_cstr);
     g_add_calls = 0;
     g_assign_calls = 0;
+    g_clear_calls = g_fail_assign = g_fail_clear = 0;
     g_last_params = NULL;
     g_last_target = NULL;
     g_last_text[0] = '\0';
 }
 
+static void test_installation(void)
+{
+    const unsigned char *base = (const unsigned char *)GetModuleHandleW(NULL);
+    sig_result results[] = {
+        {"AddDialogWrapper", SIG_OK, (uintptr_t)fake_add_dialog, 0},
+        {"DialogAction", SIG_OK, (uintptr_t)fake_action, 0},
+        {"IdStrAssignCStr", SIG_OK, (uintptr_t)fake_assign_cstr, 0},
+        {"ClearDialogWrapper", SIG_OK, (uintptr_t)fake_clear_dialog, 0}
+    };
+    for (int i = 0; i < 4; i++) results[i].rva = (uint32_t)(results[i].addr - (uintptr_t)base);
+    sh_engine_dialog_test_reset();
+    queue_reset();
+    g_swallow_raise = 1;
+    g_add_calls = g_action_calls = 0;
+
+    /* Cancellation must resolve cleanly before any native hooks are prepared. */
+    CHECK(!sh_engine_dialog_install(results, 3, base));
+    CHECK(!g_prepare_calls && !sh_engine_dialog_ready());
+    results[3].status = SIG_OK_HOOKED;
+    CHECK(!sh_engine_dialog_install(results, 4, base));
+    CHECK(!g_prepare_calls && !sh_engine_dialog_ready());
+    results[3].status = SIG_OK;
+    results[3].rva++;
+    CHECK(!sh_engine_dialog_install(results, 4, base));
+    CHECK(!g_prepare_calls && !sh_engine_dialog_ready());
+    results[3].rva--;
+
+    /* A second preparation failure must leave neither hook active nor owned. */
+    g_fail_prepare = 2;
+    CHECK(!sh_engine_dialog_install(results, 4, base));
+    CHECK(!g_hooks[0].target && !g_hooks[1].target && !g_commit_calls);
+    CHECK(!sh_engine_dialog_ready() && !g_add_calls && !g_action_calls);
+
+    /* A failed second commit and failed cleanup preserve both original callbacks. */
+    g_fail_prepare = 0; g_fail_commit = 2; g_fail_unpatch = 1;
+    CHECK(!sh_engine_dialog_install(results, 4, base));
+    CHECK(g_hooks[0].target && g_hooks[1].target);
+    CHECK(g_add_calls == 1 && g_action_calls == 1 && !sh_engine_dialog_ready());
+    invoke_hook(&g_hooks[0]); invoke_hook(&g_hooks[1]);
+    CHECK(g_add_calls == 2 && g_action_calls == 2);
+    {
+        int prepared = g_prepare_calls;
+        CHECK(!sh_engine_dialog_install(results, 4, base));
+        CHECK(prepared == g_prepare_calls && !sh_engine_dialog_ready());
+    }
+
+    /* A later retry releases the retained records before installing anew. */
+    g_fail_commit = g_fail_unpatch = 0;
+    CHECK(sh_engine_dialog_install(results, 4, base));
+    CHECK(g_add_calls == 3 && g_action_calls == 3 && sh_engine_dialog_ready());
+    CHECK(sh_engine_dialog_install(NULL, 0, NULL));
+    g_hooks[0].installed = g_hooks[1].installed = 0;
+    CHECK(!sh_engine_dialog_install(NULL, 0, NULL));
+    CHECK(!g_hooks[0].target && !g_hooks[1].target);
+    g_swallow_raise = 0;
+}
+
+static void test_queue_idle(void)
+{
+    SYSTEM_INFO info;
+    unsigned char *pages, *queue;
+    DWORD old;
+    queue_reset();
+    CHECK(sh_engine_dialog_queue_idle(g_shell_obj));
+    CHECK(!sh_engine_dialog_queue_idle(NULL));
+    CHECK(!sh_engine_dialog_queue_idle((void *)1));
+    g_shell_obj[1] = NULL;
+    CHECK(!sh_engine_dialog_queue_idle(g_shell_obj));
+    g_shell_obj[1] = (void *)1;
+    CHECK(!sh_engine_dialog_queue_idle(g_shell_obj));
+    g_shell_obj[1] = g_mgr;
+    *(int *)(g_mgr + ED_MGR_QUEUE_COUNT) = 2;
+    g_queue[8] = 1;
+    CHECK(!sh_engine_dialog_queue_idle(g_shell_obj));
+    g_queue[ED_DESC_STRIDE + 8] = 1;
+    CHECK(sh_engine_dialog_queue_idle(g_shell_obj));
+    g_queue[ED_DESC_STRIDE + 8] = 2;
+    CHECK(!sh_engine_dialog_queue_idle(g_shell_obj));
+    *(int *)(g_mgr + ED_MGR_QUEUE_COUNT) = -1;
+    CHECK(!sh_engine_dialog_queue_idle(g_shell_obj));
+    *(int *)(g_mgr + ED_MGR_QUEUE_COUNT) = 65;
+    CHECK(!sh_engine_dialog_queue_idle(g_shell_obj));
+    *(int *)(g_mgr + ED_MGR_QUEUE_COUNT) = 0;
+    *(void **)(g_mgr + ED_MGR_QUEUE_PTR) = NULL;
+    CHECK(!sh_engine_dialog_queue_idle(g_shell_obj));
+    *(void **)(g_mgr + ED_MGR_QUEUE_PTR) = (void *)1;
+    CHECK(!sh_engine_dialog_queue_idle(g_shell_obj));
+    *(int *)(g_mgr + ED_MGR_QUEUE_COUNT) = 2;
+    *(void **)(g_mgr + ED_MGR_QUEUE_PTR) = (void *)(UINTPTR_MAX - 4);
+    CHECK(!sh_engine_dialog_queue_idle(g_shell_obj));
+
+    /* A readable first descriptor must not hide an inaccessible later entry. */
+    GetSystemInfo(&info);
+    pages = VirtualAlloc(NULL, (size_t)info.dwPageSize * 2, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    CHECK(pages != NULL);
+    if (pages) {
+        queue = pages + info.dwPageSize - ED_DESC_STRIDE;
+        queue[8] = 1;
+        CHECK(VirtualProtect(pages + info.dwPageSize, info.dwPageSize, PAGE_NOACCESS, &old));
+        *(void **)(g_mgr + ED_MGR_QUEUE_PTR) = queue;
+        *(int *)(g_mgr + ED_MGR_QUEUE_COUNT) = 1;
+        CHECK(sh_engine_dialog_queue_idle(g_shell_obj));
+        *(int *)(g_mgr + ED_MGR_QUEUE_COUNT) = 2;
+        CHECK(!sh_engine_dialog_queue_idle(g_shell_obj));
+        VirtualFree(pages, 0, MEM_RELEASE);
+    }
+    queue_reset();
+}
+
+static void test_native_retirement(void)
+{
+    reset();
+    CHECK(sh_engine_dialog_can_ask());
+    /* A native corrupt dialog owns the widget and its callback, even though
+     * the custom surface has no ticket of its own. */
+    *(int *)g_queue = 0x34;
+    *(int *)(g_mgr + ED_MGR_QUEUE_COUNT) = 1;
+    g_mgr[ED_MGR_ACTIVE] = 1;
+    CHECK(!sh_engine_dialog_can_ask());
+    CHECK(!sh_engine_dialog_ask(0x29, 6, "Install package?"));
+    CHECK(!g_add_calls && !g_assign_calls);
+    CHECK(sh_engine_dialog_test_pending_id() == -1);
+
+    /* A clear flag alone permits logical idleness but not modal admission. */
+    g_queue[8] = 1;
+    CHECK(sh_engine_dialog_queue_idle(g_shell_obj));
+    CHECK(!sh_engine_dialog_can_ask());
+    g_mgr[ED_MGR_ACTIVE] = 0;
+    CHECK(!sh_engine_dialog_can_ask());
+    CHECK(!sh_engine_dialog_ask(0x29, 6, "Install package?"));
+    CHECK(!g_add_calls && sh_engine_dialog_test_pending_id() == -1);
+
+    /* Retirement must complete and the widget must be inactive. */
+    *(int *)(g_mgr + ED_MGR_QUEUE_COUNT) = 0;
+    g_mgr[ED_MGR_ACTIVE] = 1;
+    CHECK(!sh_engine_dialog_can_ask());
+    g_mgr[ED_MGR_ACTIVE] = 2;
+    CHECK(!sh_engine_dialog_can_ask());
+    g_mgr[ED_MGR_ACTIVE] = 0;
+    CHECK(sh_engine_dialog_can_ask());
+    CHECK(sh_engine_dialog_ask(0x29, 6, "Install package?") > 0);
+    CHECK(g_add_calls == 1 && g_assign_calls == 1);
+
+    reset();
+    g_shell_obj[1] = (void *)1;
+    CHECK(!sh_engine_dialog_can_ask());
+    CHECK(!sh_engine_dialog_ask(0x29, 6, "Install package?"));
+    CHECK(!g_add_calls && sh_engine_dialog_test_pending_id() == -1);
+}
+
+static void test_custom_text_failure(void)
+{
+    reset();
+    sh_engine_dialog_test_bind(g_shell_obj, (void *)fake_add_dialog, NULL,
+                               (void *)fake_assign_cstr);
+    CHECK(!sh_engine_dialog_can_ask());
+    CHECK(!sh_engine_dialog_ask(0x29, 6, "Install package?"));
+    CHECK(!g_add_calls && !g_assign_calls && !g_clear_calls);
+
+    for (int cancel_faults = 0; cancel_faults < 2; cancel_faults++) {
+        int previous, next;
+        reset();
+        previous = sh_engine_dialog_ask(0x29, 6, "Earlier question");
+        CHECK(previous > 0);
+        queue_reset(); /* The earlier descriptor has fully retired. */
+        g_fail_assign = 1;
+        g_fail_clear = cancel_faults;
+        CHECK(!sh_engine_dialog_ask(0x29, 6, "Install package?"));
+        CHECK(g_add_calls == 2 && g_assign_calls == 2 && g_clear_calls == 1);
+        CHECK(sh_engine_dialog_test_pending_id() == -1);
+        CHECK(sh_engine_dialog_poll(previous) == SH_ENGINE_DIALOG_LOST);
+        CHECK(g_queue[8] == !cancel_faults);
+        CHECK(g_mgr[ED_MGR_ACTIVE] == cancel_faults);
+
+        /* Cancellation and later default-wording actions cannot become consent. */
+        sh_engine_dialog_test_action(0x29, ED_ACTION_ACCEPT);
+        CHECK(sh_engine_dialog_poll(previous) == SH_ENGINE_DIALOG_LOST);
+        CHECK(!sh_engine_dialog_can_ask());
+        g_fail_assign = g_fail_clear = 0;
+        CHECK(!sh_engine_dialog_ask(0x29, 6, "Retry too early"));
+        CHECK(g_add_calls == 2);
+
+        queue_reset();
+        next = sh_engine_dialog_ask(0x29, 6, "Install after retirement?");
+        CHECK(next > previous && g_add_calls == 3 && g_clear_calls == 1);
+        sh_engine_dialog_test_action(0x29, ED_ACTION_ACCEPT);
+        CHECK(sh_engine_dialog_poll(next) == SH_ENGINE_DIALOG_ACCEPTED);
+    }
+}
+
 int main(void)
 {
     unsigned char descriptor[ED_DESC_STRIDE];
-    int ticket, other;
+    int ticket;
+    test_installation();
+    test_queue_idle();
+    test_native_retirement();
+    test_custom_text_failure();
 
     /* A raised question puts its text into a descriptor carrying the SAME gdm
      * id, and into that descriptor's embedded string rather than its head. */

@@ -1,6 +1,6 @@
 /* Optional cs_dontuse math overrides and the sh_alginfo status command.
  * Matrix and curve calculations use f64; color packing preserves round-half-up
- * behavior. See docs/fidelity.md for the precision differences from SnapHak. */
+ * behavior. f64 does not reproduce the original x87 extended-precision results. */
 #ifndef BACKEND_B2_ALGO_H
 #define BACKEND_B2_ALGO_H
 

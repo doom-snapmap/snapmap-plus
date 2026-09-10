@@ -1,7 +1,7 @@
 /* Optional higher-precision matrix, color, and curve overrides for cs_dontuse.
  * Matrix and curve operations use f64 rather than the original x87 precision;
  * color packing keeps its round-half-up behavior. Hooks replace whole functions
- * and are disabled until the command enables them. See docs/fidelity.md. */
+ * and are disabled until the command enables them. */
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -372,7 +372,7 @@ typedef uint32_t (*pack_fn)   (const float *);
 typedef float    (*curve_fn)  (const void *, float, uint8_t);
 
 
-static void *algo_install_one(const char *name, void *hook)
+static void *algo_prepare_one(const char *name, void *hook)
 {
     sig_result r;
     if (!algo_resolve_sig(name, &r)) {
@@ -382,7 +382,7 @@ static void *algo_install_one(const char *name, void *hook)
         backend_log(line);
         return NULL;
     }
-    void *tr = sh_install_detour_sig(&r, hook, ALGO_STOLEN);
+    void *tr = sh_prepare_detour_sig(&r, hook, ALGO_STOLEN);
     if (!tr) {
         char line[160];
         _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -395,10 +395,11 @@ static void *algo_install_one(const char *name, void *hook)
 
 static void algo_uninstall_all(void)
 {
-    if (g_tramp_curve)   { sh_uninstall_detour(g_tramp_curve);   g_tramp_curve   = NULL; }
-    if (g_tramp_pack)    { sh_uninstall_detour(g_tramp_pack);    g_tramp_pack    = NULL; }
-    if (g_tramp_inverse) { sh_uninstall_detour(g_tramp_inverse); g_tramp_inverse = NULL; }
-    if (g_tramp_matmul)  { sh_uninstall_detour(g_tramp_matmul);  g_tramp_matmul  = NULL; }
+    if (g_tramp_curve && sh_uninstall_detour(g_tramp_curve)) g_tramp_curve = NULL;
+    if (g_tramp_pack && sh_uninstall_detour(g_tramp_pack)) g_tramp_pack = NULL;
+    if (g_tramp_inverse && sh_uninstall_detour(g_tramp_inverse)) g_tramp_inverse = NULL;
+    if (g_tramp_matmul && sh_uninstall_detour(g_tramp_matmul)) g_tramp_matmul = NULL;
+    g_algo_on = g_tramp_curve || g_tramp_pack || g_tramp_inverse || g_tramp_matmul;
 }
 
 /* Enable all four overrides together; roll back a partial installation. */
@@ -407,13 +408,22 @@ void h_cs_dontuse(struct idCmdArgs *a)
     (void)a;
     if (!g_algo_on) {
 
-        g_tramp_matmul  = algo_install_one(ALGO_SIG_MATMUL,  (void *)(matmul_fn) sh_algo_matmul);
-        g_tramp_inverse = algo_install_one(ALGO_SIG_INVERSE, (void *)(inverse_fn)sh_algo_inverse);
-        g_tramp_pack    = algo_install_one(ALGO_SIG_PACK,    (void *)(pack_fn)   sh_algo_packrgba);
-        g_tramp_curve   = algo_install_one(ALGO_SIG_CURVE,   (void *)(curve_fn)  sh_algo_curveeval);
+        g_tramp_matmul  = algo_prepare_one(ALGO_SIG_MATMUL,  (void *)(matmul_fn) sh_algo_matmul);
+        g_tramp_inverse = algo_prepare_one(ALGO_SIG_INVERSE, (void *)(inverse_fn)sh_algo_inverse);
+        g_tramp_pack    = algo_prepare_one(ALGO_SIG_PACK,    (void *)(pack_fn)   sh_algo_packrgba);
+        g_tramp_curve   = algo_prepare_one(ALGO_SIG_CURVE,   (void *)(curve_fn)  sh_algo_curveeval);
 
-        if (!g_tramp_matmul || !g_tramp_inverse || !g_tramp_pack || !g_tramp_curve) {
+        if (!g_tramp_matmul || !g_tramp_inverse || !g_tramp_pack || !g_tramp_curve ||
+            sh_commit_detour(g_tramp_matmul) != B2_PATCH_OK ||
+            sh_commit_detour(g_tramp_inverse) != B2_PATCH_OK ||
+            sh_commit_detour(g_tramp_pack) != B2_PATCH_OK ||
+            sh_commit_detour(g_tramp_curve) != B2_PATCH_OK) {
             algo_uninstall_all();
+            if (g_algo_on) {
+                sh_printf("cs_dontuse: install failed and rollback is incomplete; run cs_dontuse again to retry restoration.\n");
+                backend_log("B2: snaphak_algo rollback incomplete; trampoline ownership retained");
+                return;
+            }
             sh_printf("cs_dontuse: snaphak_algo override install FAILED -- rolled back, overrides OFF.\n");
             backend_log("B2: snaphak_algo cs_dontuse ON aborted (a hook refused) -- rolled back");
             return;
@@ -424,7 +434,11 @@ void h_cs_dontuse(struct idCmdArgs *a)
     } else {
 
         algo_uninstall_all();
-        g_algo_on = 0;
+        if (g_algo_on) {
+            sh_printf("snaphak_algo restoration incomplete; run cs_dontuse again to retry.\n");
+            backend_log("B2: snaphak_algo restore failed; trampoline ownership retained");
+            return;
+        }
         sh_printf("snaphak_algo overrides OFF (engine math restored).\n");
         backend_log("B2: snaphak_algo overrides OFF (4 detours uninstalled)");
     }
@@ -437,7 +451,10 @@ void h_alginfo(struct idCmdArgs *a)
     sh_printf("snaphak_algo: clone reimpl present -- matmul/inverse/curveEval f64 (more-precise than "
               "engine f32), color-pack bit-exact; NOT bit-identical to OG x87-80-bit "
               "(currently %s; off-by-default; see divergence note).\n",
-              g_algo_on ? "ON" : "OFF");
+              !g_algo_on ? "OFF" :
+              (sh_detour_is_installed(g_tramp_matmul) && sh_detour_is_installed(g_tramp_inverse) &&
+               sh_detour_is_installed(g_tramp_pack) && sh_detour_is_installed(g_tramp_curve))
+                  ? "ON" : "RESTORE PENDING");
 }
 
 void sh_algo_install(const uint8_t *module_base)

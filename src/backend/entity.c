@@ -36,7 +36,7 @@ typedef int   (*map_writer_fn)(void *map, const char *path);
 #define ENT_ENTITYDEF_OFF    0x6d0
 #define ENTITYDEF_TEXT_OFF   0x140
 
-/* Pinned Vulkan fallback; host_image gates it by basename rather than build hash. */
+/* Pinned Vulkan fallback; host_image requires a verified executable hash. */
 #define GAMEMGR_KNOWN_RVA    0x56ffb90u
 
 /* Cached dependencies. */

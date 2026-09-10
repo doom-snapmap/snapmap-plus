@@ -270,8 +270,8 @@ static void ic_rebuild_declsource(sh_iface *iface, int id, const char *src)
     if (iface && iface->vtbl && iface->vtbl->rebuild_set_declsource)
         iface->vtbl->rebuild_set_declsource(iface, id, src);
 }
-/* Apply the final class/inherit pair: 1 applied, 0 rejected, -1 slot missing.
- * A rejection must skip rebuilding; only a missing slot permits legacy fallback. */
+/* Apply the final pair: 1 applied, 0 refused, -1 slot missing, -2 partial.
+ * Only complete success permits a dependent source rebuild. */
 static int ic_apply_class_inherit(sh_iface *iface, int id, const char *cls, const char *inh)
 {
     if (!iface || !iface->vtbl || !iface->vtbl->apply_class_inherit) return -1;
@@ -314,7 +314,7 @@ static int ic_apply(sh_iface *iface, const sh_apply_item *items, int n, const ch
 {
     if (n <= 0) return 0;
     int applied = ic_apply_sync(iface, items, n, op);
-    if (applied >= 0) return 1;                          /* The backend reports the applied count. */
+    if (applied != -1) return 1; /* The backend owns completion, including an in-progress result. */
     return ic_schedule_apply(iface, items, n, op);
 }
 
@@ -949,8 +949,7 @@ static void h_bsin(void *ctx, int argc, const char **argv)
     ic_toast(iface, "SnapStack", text);
 }
 
-/* Apply the final pair before one rebuild, then reassert it. A missing paired
- * slot falls back to the older two-call sequence. */
+/* Rebuild only after an accepted pair, then require its reassertion to succeed. */
 static void h_bsincls(void *ctx, int argc, const char **argv)
 {
     sh_iface *iface = (sh_iface *)ctx;
@@ -960,25 +959,30 @@ static void h_bsincls(void *ctx, int argc, const char **argv)
     int *ids = NULL;
     int n = resolve_operand_consume(argc, argv, &ids);
     if (n <= 0) { free(ids); ic_toast(iface, "SnapStack", "no entities on the stack"); return; }
+    int completed = 0, refused = 0, partial = 0;
     for (int i = 0; i < n; i++) {
+        if (!iface || !iface->vtbl || !iface->vtbl->apply_class_inherit ||
+            !iface->vtbl->get_declsource_copy || !iface->vtbl->rebuild_set_declsource) {
+            refused++;
+            continue;
+        }
+        char *rsrc = (char *)malloc(64 * 1024);
+        if (!rsrc) { refused++; continue; }
         int r = ic_apply_class_inherit(iface, ids[i], cls, inh);
         if (r == 1) {
-            char *rsrc = (char *)malloc(64 * 1024);
-            if (rsrc) {
-                ic_declsource_text(iface, ids[i], rsrc, 64 * 1024);
-                ic_rebuild_declsource(iface, ids[i], rsrc);
-                free(rsrc);
-            }
-            ic_apply_class_inherit(iface, ids[i], cls, inh);
-        } else if (r == -1) {
-            do_set_inherit_one(iface, ids[i], inh, 0);
-            do_set_classname_one(iface, ids[i], cls);
-        }
-        /* Rejected pairs leave the entity unchanged and skip rebuild. */
+            ic_declsource_text(iface, ids[i], rsrc, 64 * 1024);
+            ic_rebuild_declsource(iface, ids[i], rsrc);
+            if (ic_apply_class_inherit(iface, ids[i], cls, inh) == 1) completed++;
+            else partial++; /* Source rebuild and the first pair already ran. */
+        } else if (r == 0 || r == -1) refused++;
+        else partial++;
+        free(rsrc);
     }
     free(ids);
     char text[200];
-    _snprintf_s(text, sizeof text, _TRUNCATE, "bsincls: set inherit=%s className=%s on %d entities", inh, cls, n);
+    _snprintf_s(text, sizeof text, _TRUNCATE,
+                "bsincls: %d completed, %d refused, %d partial (of %d entities)",
+                completed, refused, partial, n);
     ic_toast(iface, "SnapStack", text);
 }
 

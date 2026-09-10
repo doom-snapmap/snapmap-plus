@@ -87,56 +87,77 @@ func selfUpdate(f flags, token string) {
 	}
 	// Keep the stable %LOCALAPPDATA% copy current too, if we're running from somewhere else.
 	if dir := appDataDir(); dir != "" {
+		if filepath.Clean(filepath.Dir(exe)) == filepath.Clean(dir) {
+			_ = installSelfCopy(exe, exe)
+		}
 		if stable := filepath.Join(dir, selfExeAsset); !sameFile(stable, exe) {
 			if os.MkdirAll(dir, 0o755) == nil {
-				_ = copyFile(newExe, stable) // best-effort
+				_ = installSelfCopy(newExe, stable) // best-effort
 			}
 		}
 	}
 	fmt.Printf("Updated snapmap-plus.exe to %s (takes effect next time you run snapmap-plus).\n", rel.TagName)
 }
 
-// replaceExe renames the current executable aside, then copies the new one.
-// If .old is locked, try a free numbered name. On copy failure, attempt to restore
-// the old name; rollback errors are not propagated. Startup cleans up old copies.
+type replaceExeOps struct {
+	copyFile func(string, string) error
+	rename   func(string, string) error
+}
+
+// Stage complete bytes before renaming the current image. A failed rollback
+// reports the old image's recovery path and never removes that image.
 func replaceExe(path, newExe string) error {
-	var err error
+	return replaceExeWithOps(path, newExe, replaceExeOps{copyFile, os.Rename})
+}
+
+func replaceExeWithOps(path, newExe string, ops replaceExeOps) error {
+	staged, err := os.CreateTemp(filepath.Dir(path), ".snapmap-plus-update-*")
+	if err != nil {
+		return err
+	}
+	stagedPath := staged.Name()
+	defer os.Remove(stagedPath)
+	if err := staged.Close(); err != nil {
+		return err
+	}
+	if err := ops.copyFile(newExe, stagedPath); err != nil {
+		return fmt.Errorf("stage new executable: %w", err)
+	}
+	if !identicalFiles(newExe, stagedPath) {
+		return fmt.Errorf("staged executable does not match the download")
+	}
+	removeOldLeftovers(path)
 	for i := 0; i < 10; i++ {
 		old := path + ".old"
 		if i > 0 {
 			old = fmt.Sprintf("%s.old%d", path, i+1)
 		}
-		_ = os.Remove(old) // clear any stale leftover first
-		if err = os.Rename(path, old); err != nil {
+		if _, statErr := os.Lstat(old); !os.IsNotExist(statErr) {
+			continue // Existing recovery copies are never overwritten.
+		}
+		if err := forgetUpdateBackup(path, old); err != nil {
+			return fmt.Errorf("prepare executable recovery record: %w", err)
+		}
+		if err = ops.rename(path, old); err != nil {
 			continue // this aside name is held by a still-running image -- try the next one
 		}
-		if cerr := copyFile(newExe, path); cerr != nil {
-			_ = os.Rename(old, path) // roll back
-			return cerr
+		if installErr := ops.rename(stagedPath, path); installErr != nil {
+			if rollbackErr := ops.rename(old, path); rollbackErr != nil {
+				return fmt.Errorf("install new executable: %v; rollback failed: %v; recover the original from %s", installErr, rollbackErr, old)
+			}
+			return fmt.Errorf("install new executable (original restored): %w", installErr)
+		}
+		if err := recordUpdateBackup(path, old); err != nil {
+			fmt.Printf("(kept the prior installer at %s; could not record cleanup ownership: %v)\n", old, err)
 		}
 		return nil
 	}
-	return err
+	return fmt.Errorf("could not reserve an executable backup path: %v", err)
 }
 
-// cleanupSelfUpdateLeftovers best-effort deletes the <exe>.old* files previous self-updates left behind
-// (an aside can't be removed while it is still a running image). Called once at startup.
+// Clean recorded backups after a successful update. Locked images remain.
 func cleanupSelfUpdateLeftovers() {
 	if exe, err := os.Executable(); err == nil {
 		removeOldLeftovers(exe)
-	}
-}
-
-// removeOldLeftovers deletes every sibling of exe named <base>.old, <base>.old2, ... Best-effort.
-func removeOldLeftovers(exe string) {
-	prefix := filepath.Base(exe) + ".old"
-	entries, err := os.ReadDir(filepath.Dir(exe))
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasPrefix(e.Name(), prefix) {
-			_ = os.Remove(filepath.Join(filepath.Dir(exe), e.Name()))
-		}
 	}
 }

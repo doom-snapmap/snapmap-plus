@@ -13,7 +13,7 @@ and preserves player data. The runtime uses only Go's standard library.
 | `main.go`, `interactive.go` | CLI dispatch and the double-click interactive prompt. |
 | `doom.go`, `bundle.go`, `install.go` | Game discovery, bundle validation and installation records. |
 | `legacy.go`, `userdata.go`, `overrides_migrate.go` | Legacy migration and player-data handling. |
-| `selfinstall.go`, `selfupdate.go`, `webview2.go` | Installer updates and WebView2 runtime setup. |
+| `selfinstall*.go`, `selfupdate.go`, `webview2.go` | Installer ownership, updates and WebView2 runtime setup. |
 | `changelog*.go` | Release-note retrieval and terminal rendering. |
 | `*_test.go`, `testdata/` | Installer and rendering regressions. |
 | `build.ps1`, `versioninfo.json`, `snapmap-plus.manifest` | Windows build metadata. |
@@ -54,6 +54,8 @@ snapmap-plus help
 With no arguments, the executable opens an interactive prompt. Installation,
 update and uninstall ask for confirmation after checks; `--yes` or `-y` skips
 that prompt. Both DOOM executables must be closed before changing installed DLLs.
+The Go lifecycle tests use temporary game and profile directories with a controlled
+process check; they can run while your real game is open.
 
 `--doom` overrides Steam discovery. `--local` reads the repository's packaged
 `dist/` directory. Downloads use the latest stable release by default, with a
@@ -75,10 +77,21 @@ Uninstall reverses that record and removes created directories only when empty.
 Legacy SnapHak detection requires identifying files from that tool, so an
 unrelated proxy DLL alone is insufficient. Migration removes the recognized
 legacy runtime and copies player data from `%USERPROFILE%\snaphak` into the new
-data directory. Existing destination files win name collisions. Migration removes
-the old source tree after checking destination paths, without comparing file
-contents. The former shared `overrides/generated` layout is migrated into a
-marked `my-overrides` package using the same rule.
+data directory. Existing destination files keep their contents. Differing source
+files and failed copies remain in the legacy location for you to reconcile.
+Migration compares file contents before retiring a source and removes only empty
+directories; read errors and links prevent retirement. The former shared
+`overrides/generated` layout moves into a marked `my-overrides` package under
+the same rules. Unknown files in the old metadata directory also remain there.
+
+Stable installer copies are tracked by name and SHA-256 in `installer-files.json`.
+Uninstall removes only recorded copies whose bytes still match, while retaining
+the running image. Unrecorded executables and files replaced by the user remain.
+Self-updates stage and verify the replacement before renaming the old image; a
+failed rollback reports the retained original's recovery path.
+An adjacent `<installer>.updates.json` records backups from completed updates.
+Cleanup requires matching current-image and backup hashes. Unrecorded backups,
+user-modified files and recovery images from failed replacements remain untouched.
 
 `config.json` belongs to the backend. Install, update, uninstall and reinstall
 do not create, parse or rewrite it. Overrides, prefabs and rawmaps also remain

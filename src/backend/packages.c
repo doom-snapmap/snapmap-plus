@@ -194,6 +194,11 @@ int sh_packages_enumerate(const char *data_root, sh_package *out, size_t capacit
         (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return 0;
 
     complete = pk_scan(overrides, "", 0, out, capacity, count);
+    if (!complete) {
+        /* No consumer may mistake an admitted prefix for an inventory. */
+        *count = 0;
+        return 0;
+    }
     pk_sort(out, *count);
     return complete;
 }

@@ -28,8 +28,9 @@ typedef struct crash_record {
  * number of chars written (excluding the NUL). Pure + deterministic. */
 int crash_json_escape(char *dst, size_t cap, const char *src);
 
-/* Return bytes written, including partial output on truncation; return 0 for NULL
- * arguments or cap < 64. A positive result does not guarantee complete JSON. */
+/* Return the complete JSON byte count, or zero with an empty buffer on failure.
+ * Reentrant, allocation-free, and never truncates a field. Invalid UTF-8 becomes
+ * a replacement character. All scratch storage belongs to the caller. */
 int crash_record_json(char *buf, size_t cap, const crash_record *r);
 
 #endif /* SHIELD_CRASH_RECORD_FORMAT_H */

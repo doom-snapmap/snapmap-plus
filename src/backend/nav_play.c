@@ -9,6 +9,7 @@
 #include "hook.h"
 #include "patch.h"
 #include "config.h"
+#include "nav_heap_queue.h"
 
 void backend_log(const char *message);
 
@@ -34,6 +35,46 @@ static sh_patch_handle g_instance_patches[2];
 static void *g_instance_relays[2];
 static sh_patch_handle g_volume_contents_patch;
 static void *g_volume_contents_relay;
+static int g_volume_contents_ready, g_instances_ready;
+
+typedef void (*nav_heap_push_fn)(void *, const sh_nav_heap_node *, sh_nav_heap_list *);
+static nav_heap_push_fn g_heap_push;
+static LONG g_heap_refused;
+
+static void nav_heap_push(void *self, const sh_nav_heap_node *item, sh_nav_heap_list *list)
+{
+    sh_nav_heap_node pending = *item;
+    int result = sh_nav_heap_admit(list, pending);
+    if (result == SH_NAV_HEAP_NATIVE) g_heap_push(self, &pending, list);
+    else if (result == SH_NAV_HEAP_INVALID && !InterlockedExchange(&g_heap_refused, 1))
+        backend_log("NAV: refused an invalid path-search queue insertion");
+}
+
+static int nav_heap_install(const sig_result *results, size_t count)
+{
+    size_t i;
+    if (g_heap_push) {
+        if (hook_is_installed((void *)g_heap_push)) return 1;
+        if (!hook_unpatch((void *)g_heap_push)) return 0;
+        g_heap_push = NULL;
+    }
+    for (i = 0; i < count; ++i) {
+        if (!results[i].name || strcmp(results[i].name, "NavSearchHeapPush") ||
+            results[i].status != SIG_OK) continue;
+        /* Three register saves: 15 whole bytes without relative operands. */
+        g_heap_push = (nav_heap_push_fn)hook_prepare((void *)results[i].addr,
+                                                     (void *)nav_heap_push, 15);
+        if (!g_heap_push) break;
+        if (hook_commit((void *)g_heap_push) == B2_PATCH_OK) {
+            backend_log("NAV: path-search queue capacity safeguard installed");
+            return 1;
+        }
+        if (hook_unpatch((void *)g_heap_push)) g_heap_push = NULL;
+        break;
+    }
+    backend_log("NAV: path-search queue capacity safeguard unavailable");
+    return 0;
+}
 
 /* The marker is stored independently, but walkable solid geometry must not be
  * registered as an avoidance obstacle. Keep native physical collision and the
@@ -107,7 +148,13 @@ int sh_nav_play_install_volume_contents(const sig_result *results,size_t count)
     const unsigned char expected[9]={0x80,0xbb,0x8e,0x0c,0,0,0,0x74,0x0a};
     unsigned char patch[9]={0xe8,0,0,0,0,0x84,0xc0,0x74,0x0a};
     size_t i;intptr_t distance;int32_t relative;
-    if(g_volume_contents_patch.live)return 1;
+    nav_heap_install(results, count);
+    if(g_volume_contents_patch.live) {
+        if(g_volume_contents_ready)return 1;
+        if(code_unpatch(&g_volume_contents_patch)!=B2_PATCH_OK)return 0;
+        VirtualFree(g_volume_contents_relay,0,MEM_RELEASE);g_volume_contents_relay=NULL;
+    }
+    g_volume_contents_ready=0;
     for(i=0;i<count;i++)if(results[i].name&&
         !strcmp(results[i].name,"BlockingVolumeObstacleGate")&&results[i].status==SIG_OK) {
         g_volume_contents_relay=nav_near_relay(results[i].addr,
@@ -118,10 +165,13 @@ int sh_nav_play_install_volume_contents(const sig_result *results,size_t count)
             relative=(int32_t)distance;memcpy(patch+1,&relative,4);
             if(code_patch_sig(&results[i],expected,patch,sizeof patch,
                               &g_volume_contents_patch)==B2_PATCH_OK) {
+                g_volume_contents_ready=1;
                 backend_log("NAV: marked-volume obstacle policy installed");return 1;
             }
         }
-        VirtualFree(g_volume_contents_relay,0,MEM_RELEASE);g_volume_contents_relay=NULL;
+        if(!g_volume_contents_patch.live) {
+            VirtualFree(g_volume_contents_relay,0,MEM_RELEASE);g_volume_contents_relay=NULL;
+        } else backend_log("NAV: obstacle patch rollback incomplete; relay retained");
         break;
     }
     backend_log("NAV: marked-volume obstacle policy unavailable");return 0;
@@ -130,7 +180,9 @@ int sh_nav_play_install_volume_contents(const sig_result *results,size_t count)
 int sh_nav_play_install_instances(const sig_result *results,size_t count)
 {
     const sig_result *sites[2]={NULL,NULL};size_t i;int k;
-    if(!g_orig)return 0;
+    if(g_instances_ready)return 1;
+    if(g_instance_patches[0].live||g_instance_patches[1].live)goto failed;
+    if(!hook_is_installed((void *)g_orig))return 0;
     for(i=0;i<count;i++)if(results[i].name) {
         if(!strcmp(results[i].name,"BuildAASFindCall"))sites[0]=&results[i];
         if(!strcmp(results[i].name,"BuildAASLoadCall"))sites[1]=&results[i];
@@ -151,11 +203,12 @@ int sh_nav_play_install_instances(const sig_result *results,size_t count)
         if(code_patch_sig(sites[k],expected,patch,5,&g_instance_patches[k])!=B2_PATCH_OK)goto failed;
     }
     sh_nav_bake_enable_instances(1);
+    g_instances_ready=1;
     backend_log("NAV: instance-specific temporary AAS loads installed");return 1;
 failed:
     for(k=1;k>=0;k--) {
         if(g_instance_patches[k].live)code_unpatch(&g_instance_patches[k]);
-        if(g_instance_relays[k]){VirtualFree(g_instance_relays[k],0,MEM_RELEASE);g_instance_relays[k]=NULL;}
+        if(g_instance_relays[k]&&!g_instance_patches[k].live){VirtualFree(g_instance_relays[k],0,MEM_RELEASE);g_instance_relays[k]=NULL;}
     }
     backend_log("NAV: instance-specific AAS loads unavailable");return 0;
 }
@@ -184,6 +237,11 @@ int sh_nav_play_install(void *snapbuild_fn, int status_ok)
     char line[200];
     void *tramp;
 
+    if (g_orig) {
+        if (hook_is_installed((void *)g_orig)) return 1;
+        if (!hook_unpatch((void *)g_orig)) return 0;
+        g_orig = NULL;
+    }
     if (snapbuild_fn == NULL) {
         backend_log("NAV: pre-build live read SKIPPED -- SnapMapEditToSnapBuild not resolved");
         return 0;
@@ -196,14 +254,17 @@ int sh_nav_play_install(void *snapbuild_fn, int status_ok)
                     "hook-tolerant fallback (prologue already hooked)");
         return 0;
     }
-    if (g_orig != NULL) return 1;
-
-    tramp = install_inline_hook(snapbuild_fn, (void *)nav_snapbuild_detour, SNAPBUILD_STOLEN);
+    tramp = hook_prepare(snapbuild_fn, (void *)nav_snapbuild_detour, SNAPBUILD_STOLEN);
     if (tramp == NULL) {
-        backend_log("NAV: pre-build live read FAIL -- install_inline_hook returned NULL");
+        backend_log("NAV: pre-build live read FAIL -- trampoline preparation failed");
         return 0;
     }
     g_orig = (snapbuild_fn_t)tramp;
+    if (hook_commit(tramp) != B2_PATCH_OK) {
+        if (hook_unpatch(tramp)) g_orig = NULL;
+        backend_log("NAV: pre-build hook commit failed; retained callbacks require restoration");
+        return 0;
+    }
 
     _snprintf_s(line, sizeof line, _TRUNCATE,
                 "NAV: pre-build live read installed at %p (trampoline %p, stolen %d) -- "

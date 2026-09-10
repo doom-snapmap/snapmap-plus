@@ -11,11 +11,12 @@ can submit a report without a GitHub account.
 - `worker.js` validates reports, groups matching open reports and creates issues
   or confirmation comments.
 - `wrangler.toml` defines the Worker name, entry point and compatibility date.
+- `../src/workers/request_body.js` bounds and validates incoming JSON.
 
 ## Working here
 
-Read the [feedback pipeline](../docs/feedback.md) for payloads, crash attachments
-and issue-maintenance behavior. Keep the host endpoint in
+Read the [feedback pipeline](../docs/feedback.md) for the dialog-to-issue flow and
+crash-log attachments. Keep the endpoint in
 `src/ui/webview/snapmap_plus_ui_webview.cpp` aligned with the deployed Worker.
 Credentials belong in Worker secrets. The [service inventory](../docs/services.md)
 records ownership and the release-related credentials used elsewhere.
@@ -59,6 +60,10 @@ reports then use that token owner's identity. Track its expiration and rotation.
 ## Validation and limits
 
 The relay applies a honeypot, payload caps and exact report-signature matching.
+It retains the 65,536-character JSON limit and caps incoming UTF-8 at 192 KiB
+while streaming. Malformed JSON or UTF-8 returns 400; excess bytes or characters
+return 413. Run `node tests/worker_body_test.js` from the repository root for
+local validation; no credentials or report submission are needed.
 A match appends only to an open issue; a closed report is not reopened. These
 checks do not replace edge rate limiting or maintainer moderation. The credential
 should remain scoped to report management.

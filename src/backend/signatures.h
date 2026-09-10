@@ -1,6 +1,6 @@
 /* Masked-byte resolver for functions in the mapped engine executable.
  * Scan executable sections independent of section names; reject ambiguous matches.
- * A recorded RVA can also recognize a detoured entry after a signature miss. */
+ * A verified extraction-build RVA may recover a detoured entry after a scan miss. */
 #ifndef BACKEND_SIGNATURES_H
 #define BACKEND_SIGNATURES_H
 
@@ -22,7 +22,7 @@ typedef enum sig_status {
     SIG_AMBIGUOUS,      /* more than one match -- not unique enough to identify a function */
     SIG_BAD_PATTERN,    /* empty / malformed pattern, or pattern longer than the scan buffer */
     SIG_BAD_MODULE,     /* the module base is not a parseable PE32+ image */
-    SIG_OK_HOOKED       /* scan missed, but a detour at known_rva has a matching fixed tail */
+    SIG_OK_HOOKED       /* verified build; detour at known_rva has a matching fixed tail */
 } sig_status;
 
 typedef struct sig_result {

@@ -1,7 +1,7 @@
 /* Entity reflection, decl commits, and prefab staging for the shared interface.
  * Deferred work runs through clone_bss_apply on the engine command drain.
- * apply_sync marshals known off-main callers when transport is available;
- * otherwise it retains an inline fallback. Engine-owned strings and prefab
+ * apply_sync marshals known off-main callers and refuses missing transport.
+ * Engine-owned strings and prefab
  * arrays need process-heap lifetime across Play and map teardown. */
 #include <windows.h>
 #include <stdint.h>
@@ -57,7 +57,7 @@
 /* PushHeap/PopHeap use the engine main-thread gate. Off-main scope pushes
  * have no effect and the allocator defaults to the process heap. */
 #define MEMLOCAL_SCOPE_DEPTH  0xc4      /* idMemLocal +0xC4 -> heap-scope stack depth (ids at +0x44) */
-/* Heap helpers use signatures first, then filename-gated extraction RVAs.
+/* Heap helpers use signatures first, then exact-build extraction RVAs.
  * Obtain idMemLocal through its getter, never a guessed instance address. */
 #define MEMLOCAL_GET_RVA      0x1a04bf0u   /* idMemLocal *(void) -- the magic-static accessor */
 #define MEMLOCAL_PUSHHEAP_RVA 0x1ac57a0u   /* void(this, int heapId) */
@@ -227,7 +227,7 @@ static enter_prefab_grab_fn g_enter_prefab_grab = NULL;
 #define LOAD_STATE_RUNNING    3
 
 #define MAIN_THREAD_ID_PINNED_RVA 0x6dde190u
-/* Unresolved thread identity leaves the inline apply fallback available. */
+/* Unresolved thread identity refuses engine edits and maintenance. */
 static const uint8_t       *g_load_state_at = NULL;
 static const uint8_t       *g_main_thread_at = NULL;
 static volatile LONG        g_last_load_state = -1;
@@ -253,6 +253,7 @@ static int               g_pending_lock_init = 0;
 static apply_item_copy  *g_pending_items = NULL;
 static int               g_pending_count = 0;
 static char              g_pending_op[32] = {0};
+static unsigned long long g_pending_serial;
 
 /* One blocking cross-thread request. Deep copies outlive the waiter when a
  * drain is already running; timeout handling transfers or releases ownership. */
@@ -275,10 +276,12 @@ static HANDLE          g_sync_ev = NULL;        /* manual-reset; created once at
 /* First wait: the drain normally comes on the very next frame, so this only expires when the main
  * thread is parked (load screen, modal error) -- in which case the request is withdrawn un-run.
  * Grace wait: the request was picked up and is executing; give a slow batch time to finish. */
+#ifndef AE_MARSHAL_WAIT_MS
 #define AE_MARSHAL_WAIT_MS   3000
 #define AE_MARSHAL_GRACE_MS 10000
+#endif
 /* ae_marshal_publish_and_wait outcomes. */
-#define AE_MARSHAL_UNAVAILABLE (-1)  /* no transport (cmd buffer/event/lock missing) -- caller runs inline */
+#define AE_MARSHAL_UNAVAILABLE (-1)  /* Missing transport or busy slot: refuse execution. */
 #define AE_MARSHAL_DONE          0   /* executed on the main thread; *out_applied is the real count */
 #define AE_MARSHAL_NOT_RUN       1   /* never drained; withdrawn -- the batch DEFINITELY did not run */
 #define AE_MARSHAL_LOST          2   /* picked up but no completion in time -- outcome unknown */
@@ -681,6 +684,7 @@ static int ae_serialize_to_json(const char *typeName, void *cloneBase, char *out
         {
             void *defsub = NULL;
             int got = ae_read_ptr(tmpDef + 0x150, &defsub);
+            (void)got;
             AE_SER_DIAG("ser[%s]: cloned -- tmp+0x150 defsub=%s%p",
                         typeName ? typeName : "?", got ? "" : "(read-fault)", defsub);
         }
@@ -897,10 +901,9 @@ static int ae_apply_one(int id, const char *patched_text)
     }
     if (def_ctored) { __try { g_def_dtor(tmpDef); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
 
-    /* Optional one-shot commit probe: record thread identity and classify the
- * rebuilt source allocation. A map-heap result needs investigation; the
- * rebuild may reuse an existing buffer. Off-main results can reflect the
- * compatibility fallback when identity or marshal transport is unavailable. */
+    /* Record thread identity and classify the rebuilt source allocation once.
+     * The rebuild may reuse an existing buffer. Off-main or unknown identity
+     * indicates a caller bypassed the verified main-thread dispatch contract. */
     if (applied) {
         static volatile LONG s_commit_probe_done = 0;
         if (InterlockedExchange(&s_commit_probe_done, 1) == 0) {
@@ -1061,7 +1064,7 @@ static int ae_mkcmd_one(const char *prefab_text)
  * Result 2 does not confirm the engine consumed the action or entered grab. */
 #define AE_PASTE_FAILED  0
 #define AE_PASTE_STAGED  1
-#define AE_PASTE_HELD    2
+#define AE_PASTE_ARMED   2
 
 static int ae_mkcmd_instantiate(const char *prefab_text)
 {
@@ -1076,6 +1079,11 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
     int editor_state = 0;
     if (!ae_read_u32_safe(ed + ED_ENTITY_MODE_OFF, &editor_state) || editor_state != 2) {
         backend_log("C2 place: not EntityMode -> staged only");
+        return AE_PASTE_STAGED;
+    }
+
+    if (!sh_iface_engine_copy_paste_enabled()) {
+        backend_log("C2 place: native copy/paste is disabled or unavailable -> staged only");
         return AE_PASTE_STAGED;
     }
 
@@ -1125,9 +1133,8 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
         return AE_PASTE_STAGED;
     }
 
-    /* Staging leaves the cached paste bit stale. Set only that bit after checking
- * entity count and hover; preserve other action gates. This does not inspect
- * snapEdit_enableCopyPaste and can bypass a disabled cvar for this action. */
+    /* Staging leaves the cached paste bit stale. Refresh only this bit after
+     * validating the copy/paste cvar, entity count, mode and hover state. */
     unsigned char *flags1 = (unsigned char *)((uintptr_t)ed + ED_MODE_OBJ_OFF +
                                               MODE_IDLE_SUBSTATE_OFF + SUBSTATE_FLAGS1_OFF);
     /* Write the action ID before the arming word. */
@@ -1151,9 +1158,9 @@ static int ae_mkcmd_instantiate(const char *prefab_text)
 #endif
 
     char l[128];
-    _snprintf_s(l, sizeof l, _TRUNCATE, "C2 place: placed %d entities, editor now holding them", ent_count);
+    _snprintf_s(l, sizeof l, _TRUNCATE, "C2 place: native paste queued for %d staged entities", ent_count);
     backend_log(l);
-    return AE_PASTE_HELD;
+    return AE_PASTE_ARMED;
 }
 
 
@@ -1181,8 +1188,14 @@ static void ae_toast_result(const char *op, int applied, int total)
 
 /* Shared item dispatcher. A staged-only kind-2 item counts as applied;
  * g_last_place_result distinguishes it from an armed native paste action. */
+#ifdef SH_APPLY_ENGINE_TESTING
+static int (*g_apply_test_executor)(int, int, const char *);
+#endif
 static int ae_run_item(int kind, int id, const char *text)
 {
+#ifdef SH_APPLY_ENGINE_TESTING
+    return g_apply_test_executor ? g_apply_test_executor(kind, id, text) : 0;
+#else
     if (!text) return 0;
     if (kind == 2) {
         int pr = ae_mkcmd_instantiate(text);
@@ -1192,6 +1205,7 @@ static int ae_run_item(int kind, int id, const char *text)
     return (kind == 1) ? ae_mkcmd_one(text)
          : (kind == 3) ? ae_apply_target_write(id, atoi(text))
                        : ae_apply_one(id, text);
+#endif
 }
 
 
@@ -1242,6 +1256,7 @@ static void ae_sync_consume_and_run(void)
 
 static void __cdecl ae_clone_bss_apply_cmd(void)
 {
+    if (ae_on_main_thread() != 1) return;
     apply_item_copy *items = NULL;
     int count = 0;
     char op[32];
@@ -1268,10 +1283,12 @@ static void __cdecl ae_clone_bss_apply_cmd(void)
     ae_sync_consume_and_run();
 }
 
-/* Lazily register the cdecl(void) engine command. AddCommand owns its registry lock. */
+/* Publish readiness only after AddCommand returns. Concurrent first callers
+ * refuse while registration is running; AddCommand owns its registry lock. */
 static int ae_ensure_command(void)
 {
-    if (InterlockedCompareExchange(&g_cmd_registered, 1, 0) != 0) return 1;
+    LONG state = InterlockedCompareExchange(&g_cmd_registered, 1, 0);
+    if (state != 0) return state == 2;
     if (!g_add_command || !g_cmdsys) {
         InterlockedExchange(&g_cmd_registered, 0);   /* Permit a later retry after dependencies bind. */
         return 0;
@@ -1283,6 +1300,7 @@ static int ae_ensure_command(void)
         InterlockedExchange(&g_cmd_registered, 0);
         return 0;
     }
+    InterlockedExchange(&g_cmd_registered, 2);
     backend_log("C2: clone_bss_apply engine command registered (command-buffer apply routing live)");
     return 1;
 }
@@ -1302,10 +1320,10 @@ static int ae_marshal_publish_and_wait(apply_item_copy *copy, int built, const c
 
     EnterCriticalSection(&g_pending_lock);
     if (g_sync_req.state != AE_SYNC_EMPTY) {
-        /* Only one request slot exists. A busy slot declines to the caller fallback. */
+        /* Never run a competing request inline when the slot is occupied. */
         LeaveCriticalSection(&g_pending_lock);
         if (copy) { for (int i = 0; i < built; i++) free(copy[i].text); free(copy); }
-        backend_log("C2 sync-marshal: request slot busy -> declined (caller falls back)");
+        backend_log("C2 sync-marshal: request slot busy -> declined");
         return AE_MARSHAL_UNAVAILABLE;
     }
     ResetEvent(g_sync_ev);
@@ -1370,7 +1388,7 @@ static int ae_apply_marshal(const sh_apply_item *items, int count, const char *o
     for (int i = 0; i < count; i++) {
         const char *t = items[i].text ? items[i].text : "";
         size_t len = strlen(t);
-        if (len + 1 > APPLY_TEXT_CAP) len = APPLY_TEXT_CAP - 1;
+        if (len >= APPLY_TEXT_CAP) break;
         char *tc = (char *)malloc(len + 1);
         if (!tc) break;
         memcpy(tc, t, len); tc[len] = '\0';
@@ -1441,7 +1459,7 @@ int sh_apply_engine_nav_snapshot(char **out, size_t *len, void *ctx)
     void *map = NULL; char *copy = NULL;
     const uint8_t *ed;
     int initialized = 0, ok = 0, length = 0;
-    DWORD main_id = 0;
+    uint32_t main_id = 0;
     (void)ctx;
     *out = NULL; *len = 0;
     if (!g_idstr_ctor || !g_idstr_dtor || !g_editor_map_to_json || !g_main_thread_at ||
@@ -1502,8 +1520,8 @@ static void ae_nav_refresh_cmd(void)
     InterlockedExchange(&g_nav_refresh_queued, 0);
 }
 
-/* The frontend only schedules. Reflection and publication always run in the
- * engine command drain, and at most one refresh may be outstanding. */
+/* Frame maintenance schedules reflection and publication on the engine command
+ * drain, with at most one refresh outstanding. */
 static void ae_nav_refresh_poll(void)
 {
     ULONGLONG now = GetTickCount64();
@@ -1554,10 +1572,12 @@ static int tl_splice_portable_inherit(const char *src, char *out, int cap)
     return replaced;
 }
 
-/* Serialize, splice portable inherit, and commit using transient buffers.
- * Prefer main-thread execution; the slot retains an inline compatibility fallback. */
+/* Serialize, splice portable inherit, and commit on the verified main thread. */
 static int ae_normalize_timeline_inherit_body(int id)
 {
+#ifdef SH_APPLY_ENGINE_TESTING
+    return g_apply_test_executor ? g_apply_test_executor(4, id, "normalize") : 0;
+#else
     int result = 0;
     char *json = NULL, *patched = NULL;
     __try {
@@ -1576,6 +1596,7 @@ done:
     if (json) free(json);
     if (patched) free(patched);
     return result;
+#endif
 }
 
 /* Check the decl blob before allocating/serializing. A matching placeholder
@@ -1599,14 +1620,13 @@ static int slot_normalize_timeline_inherit(sh_iface *self, int id)
     } __except (EXCEPTION_EXECUTE_HANDLER) { gate = 0; }
     if (!gate) return 0;
 
-    if (ae_on_main_thread() == 0) {
+    if (ae_on_main_thread() != 1) {
+        if (ae_on_main_thread() < 0) return 0;
         int applied = 0;
         int mr = ae_marshal_publish_and_wait(NULL, 0, "tl-inherit-portable", 1, id, &applied);
         if (mr == AE_MARSHAL_DONE) return applied;
-        if (mr != AE_MARSHAL_UNAVAILABLE) return 0;   /* A later rescan retries an unfinished normalization. */
-        /* Unavailable transport retains the inline fallback. */
+        return 0;
     }
-    /* Main thread, unknown identity, or unavailable transport: execute locally. */
     return ae_normalize_timeline_inherit_body(id);
 }
 
@@ -1616,7 +1636,7 @@ static int slot_schedule_apply(sh_iface *self, const sh_apply_item *items, int c
     (void)self;
     if (!items || count <= 0 || count > APPLY_MAX_ITEMS) return 0;
     if (!ae_editor_session()) return 0;
-    if (!g_buffer_cmd || !g_cmdsys) return 0;
+    if (!g_buffer_cmd || !g_cmdsys || !g_pending_lock_init) return 0;
     if (!ae_ensure_command()) return 0;
 
 
@@ -1626,7 +1646,7 @@ static int slot_schedule_apply(sh_iface *self, const sh_apply_item *items, int c
     for (int i = 0; i < count; i++) {
         const char *t = items[i].text ? items[i].text : "";
         size_t len = strlen(t);
-        if (len + 1 > APPLY_TEXT_CAP) { len = APPLY_TEXT_CAP - 1; }
+        if (len >= APPLY_TEXT_CAP) break;
         char *tc = (char *)malloc(len + 1);
         if (!tc) break;
         memcpy(tc, t, len); tc[len] = '\0';
@@ -1635,21 +1655,36 @@ static int slot_schedule_apply(sh_iface *self, const sh_apply_item *items, int c
         copy[built].text = tc;
         built++;
     }
-    if (built == 0) { free(copy); return 0; }
+    if (built != count) {
+        for (int i = 0; i < built; i++) free(copy[i].text);
+        free(copy); return 0;
+    }
 
-    /* Replace the single pending batch; free the displaced copy after unlocking. */
+    /* Reject a full slot without discarding an already accepted batch. */
     if (g_pending_lock_init) EnterCriticalSection(&g_pending_lock);
-    apply_item_copy *stale = g_pending_items; int stale_n = g_pending_count;
+    if (g_pending_items) {
+        LeaveCriticalSection(&g_pending_lock);
+        for (int i = 0; i < built; i++) free(copy[i].text);
+        free(copy); return 0;
+    }
     g_pending_items = copy; g_pending_count = built;
+    unsigned long long serial = ++g_pending_serial;
     if (op_label) { strncpy_s(g_pending_op, sizeof g_pending_op, op_label, _TRUNCATE); }
     else          { g_pending_op[0] = '\0'; }
     if (g_pending_lock_init) LeaveCriticalSection(&g_pending_lock);
-    if (stale) { for (int i = 0; i < stale_n; i++) free(stale[i].text); free(stale); }
 
     /* Request a later main-thread command drain. */
     int enq = 0;
     __try { g_buffer_cmd(g_cmdsys, CLONE_BSS_CMD "\n"); enq = 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { enq = 0; }
+    if (!enq) {
+        EnterCriticalSection(&g_pending_lock);
+        if (g_pending_items == copy && g_pending_serial == serial) {
+            g_pending_items = NULL; g_pending_count = 0; g_pending_op[0] = '\0';
+        } else { copy = NULL; enq = 1; } /* The drain already took ownership. */
+        LeaveCriticalSection(&g_pending_lock);
+        if (copy) { for (int i = 0; i < built; i++) free(copy[i].text); free(copy); }
+    }
     return enq;
 }
 
@@ -1658,6 +1693,7 @@ static int slot_schedule_apply(sh_iface *self, const sh_apply_item *items, int c
  * native connection path. Both IDs refer to live editor entities. */
 void ae_schedule_target_write(int source_id, int target_id)
 {
+    if (ae_on_main_thread() != 1) return;
     __try { ae_apply_target_write(source_id, target_id); }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
@@ -1758,12 +1794,8 @@ static int slot_serialize_selection(sh_iface *self, char *out_json, int cap)
     return written;
 }
 
-/* Apply synchronously and return the completed item count. Main-thread calls
- * run inline; known off-main callers deep-copy to the command drain and wait.
- * Unknown thread identity or unavailable transport retains inline execution.
- * A pending timeout reports zero; an abandoned running request has unknown
- * outcome and may still complete. The executor owns result reporting.
- * Text remains caller-owned; the marshal copies it before returning. */
+/* Run only on a verified main thread. A timed-out running request returns
+ * SH_APPLY_IN_PROGRESS; zero means no item completed. Never retry inline. */
 static int slot_apply_sync(sh_iface *self, const sh_apply_item *items, int count, const char *op_label)
 {
     (void)self;
@@ -1771,16 +1803,19 @@ static int slot_apply_sync(sh_iface *self, const sh_apply_item *items, int count
     if (!ae_editor_session()) return 0;
     const char *op = op_label ? op_label : "apply";
 
-    if (ae_on_main_thread() == 0) {
+    int on_main = ae_on_main_thread();
+    if (on_main < 0) return 0;
+    for (int i = 0; i < count; i++)
+        if (items[i].text && strlen(items[i].text) >= APPLY_TEXT_CAP) return 0;
+    if (on_main == 0) {
         int applied = 0;
         int mr = ae_apply_marshal(items, count, op, &applied);
         if (mr == AE_MARSHAL_DONE)    return applied;    /* The drain completed and owns result reporting. */
         if (mr == AE_MARSHAL_NOT_RUN) {                  /* Withdrawn before execution. */
-            ae_toast_result(op, 0, count);
             return 0;
         }
-        if (mr == AE_MARSHAL_LOST)    return 0;          /* Already running; the drain may complete after this return. */
-        /* Unavailable transport retains inline execution. */
+        if (mr == AE_MARSHAL_LOST) return SH_APPLY_IN_PROGRESS;
+        return 0;
     }
 
     int applied = 0;
@@ -2036,16 +2071,17 @@ static void ae_play_log_diff(const ae_play_snap *before, const ae_play_snap *aft
 #define AE_PLAY_DIAG(...) do { } while (0)
 #endif
 
-/* Poll package/nav maintenance and staged-prefab lifetime on each UI tick.
+/* Poll package/nav maintenance after a successful native Frame on the main thread.
  * On leaving RUNNING, preserve verified process/persistent allocations; reset
  * our matching staged slot when lifetime cannot be verified. Ownership uses
  * a marker and count heuristic, not a unique clipboard identity. */
 void sh_apply_prefab_poll_play(void)
 {
+    if (ae_on_main_thread() != 1) return;
     /* Fallback package requirements application. The decl server normally applies
- * them before boot publication; both entry points share a one-shot latch. */
+     * them before boot publication; both entry points share a one-shot latch. */
     sh_package_requirements_poll();
-    /* Runtime re-arm phases need separate ticks so cvar changes can drain. */
+    /* Retry pending re-arms; the decl server owns admission and command draining. */
     sh_decl_server_rearm_poll();
     sh_mpkg_consent_poll();
     ae_nav_refresh_poll();
@@ -2168,8 +2204,7 @@ void sh_apply_prefab_poll_play(void)
 }
 
 /* Prefer a resolved signature; log disagreement with the extraction RVA.
- * On a miss, the intended fallback is the extraction build only. The current
- * host gate checks DOOMx64vk.exe by basename, not a build hash or version. */
+ * Raw-RVA fallback requires an exact reference hash of the backing executable. */
 static void *ae_pick_engine_fn(const sig_result *results, size_t n, const char *sig_name,
                                const uint8_t *base, uint32_t fallback_rva, const char *label)
 {
@@ -2230,7 +2265,7 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
     g_cmdsys = cmdsys;
 
     if (!g_pending_lock_init) { InitializeCriticalSection(&g_pending_lock); g_pending_lock_init = 1; }
-    /* Missing completion event disables marshaling and preserves inline fallback. */
+    /* A missing completion event refuses off-main synchronous work. */
     if (!g_sync_ev) g_sync_ev = CreateEventW(NULL, TRUE, FALSE, NULL);
 
     g_entity_clone = (entity_clone_fn)    sig_addr_by_name(results, n, "EntityClone");
@@ -2255,10 +2290,7 @@ int sh_apply_engine_install(const sig_result *results, size_t n, const uint8_t *
     g_paste_instantiate = (paste_instantiate_fn)sig_addr_by_name(results, n, "PasteInstantiate");
     g_enter_prefab_grab = (enter_prefab_grab_fn)sig_addr_by_name(results, n, "EnterAddPrefabGrab");
 
-    /* The shared interface also builds without engine code; register its tick hook here. */
-    sh_iface_set_tick_hook(sh_apply_prefab_poll_play);
-
-    /* Resolve prefab helpers through signature-first, filename-gated fallbacks. */
+    /* Resolve prefab helpers through signature-first, exact-build fallbacks. */
     if (module_base) {
 
         g_prefab_ctor     = (prefab_ctor_fn)    ae_pick_engine_fn(results, n, "PrefabCtor",

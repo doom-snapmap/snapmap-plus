@@ -156,6 +156,7 @@ int sh_smoke_run(const uint8_t *doom_base, unsigned long deferred_ms)
 
     typedef int (*scratch_fn)(int, volatile int *);
     int detour_ok = 0;
+    int scratch_retained = 0;
     const char *detour_why = "not run";
     volatile int tag;
 
@@ -179,18 +180,20 @@ int sh_smoke_run(const uint8_t *doom_base, unsigned long deferred_ms)
         detour_why = "baseline scratch wrong";
     } else {
         int before = hook_installed_count();
-        void *tramp = install_inline_hook((void *)orig_fn, (void *)scratch_detour, SCRATCH_STOLEN);
-        if (!tramp || hook_installed_count() != before + 1) {
+        void *tramp = hook_prepare((void *)orig_fn, (void *)scratch_detour, SCRATCH_STOLEN);
+        scratch_fn tramp_fn = (scratch_fn)tramp;
+        if (!tramp || hook_commit(tramp) != B2_PATCH_OK) {
             detour_why = "install failed";
+            if (tramp && !hook_unpatch(tramp)) scratch_retained = 1;
         } else {
             tag = 0;
             int patched = orig_fn(7, &tag);
             int detour_hit = (tag == TAG_DETOUR && patched == 1007);
             tag = 0;
-            scratch_fn tramp_fn = (scratch_fn)tramp;
             int via_tramp = tramp_fn(9, &tag);
             int tramp_ok = (tag == TAG_ORIG && via_tramp == 18);
             int reverted = hook_unpatch(tramp);
+            if (!reverted) scratch_retained = 1;
             tag = 0;
             int after = orig_fn(5, &tag);
             int revert_ok = (reverted && hook_installed_count() == before &&
@@ -201,8 +204,11 @@ int sh_smoke_run(const uint8_t *doom_base, unsigned long deferred_ms)
             else { detour_ok = 1;  detour_why = "OK"; }
         }
     }
-    if (orig_code) VirtualFree(orig_code, 0, MEM_RELEASE);
-    if (det_code)  VirtualFree(det_code, 0, MEM_RELEASE);
+    /* A pending scratch detour still owns its target and destination pages. */
+    if (!scratch_retained) {
+        if (orig_code) VirtualFree(orig_code, 0, MEM_RELEASE);
+        if (det_code) VirtualFree(det_code, 0, MEM_RELEASE);
+    }
 
 
     if (resolver_ok && detour_ok) {

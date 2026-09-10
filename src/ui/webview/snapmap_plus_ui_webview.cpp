@@ -1,7 +1,8 @@
+#include "webview_json.h"
 /* WebView2 frontend host. sh_ui_init (ordinal 10) receives loop state in arg[0]
  * and the backend interface in arg[3]. A single STA thread handles the page,
  * drains UI requests at about 30 Hz, and polls change-gated editor state.
- * Engine mutations use backend interface slots; see docs/architecture.md. */
+ * Engine mutations use backend interface slots declared in snapmap_plus_iface.h. */
 #include <windows.h>
 #include <dwmapi.h>
 #include <shlobj.h>
@@ -26,6 +27,7 @@
 #include "serialization_buffer.h"
 #include "theme_bootstrap.h"
 #include "report_scrub.h"   /* pure anonymization scrub + tail for the crash-report log attachment */
+#include "crash_pending.h"
 #include "log_rotate.h"     /* the UI log is append-only too; bound it like the backend's */
 #include "host_image.h"     /* sh_host_renderer_name -- which renderer the player is actually running */
 #include "../sh_entity_desc.h"/* generated entity descriptions */
@@ -299,55 +301,6 @@ static void poc_perf_note_poll(unsigned long long total_us, unsigned long long c
 static uint64_t hstr(uint64_t h, const char *s) { while (*s) { h = (h ^ (unsigned char)*s) * 1099511628211ull; s++; } return h; }
 static uint64_t hint(uint64_t h, int v) { for (int i = 0; i < 4; i++) { h = (h ^ (unsigned char)(v & 0xff)) * 1099511628211ull; v >>= 8; } return h; }
 
-/* String and JSON helpers. */
-/* Plain UTF-8 -> wide, NO escaping. For text that is already JSON and must be
- * forwarded verbatim; poc_json_w would escape it into a useless string literal. */
-static std::wstring poc_widen(const char *utf8)
-{
-    std::wstring w;
-    if (!utf8) return w;
-    int wl = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
-    if (wl > 0) { w.resize(wl - 1); if (wl > 1) MultiByteToWideChar(CP_UTF8, 0, utf8, -1, &w[0], wl); }
-    return w;
-}
-static std::wstring poc_json_w(const char *utf8)
-{
-    int wl = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
-    std::wstring w;
-    if (wl > 0) { w.resize(wl - 1); if (wl > 1) MultiByteToWideChar(CP_UTF8, 0, utf8, -1, &w[0], wl); }
-    std::wstring o; o.reserve(w.size() + 8);
-    for (wchar_t c : w) {
-        switch (c) {
-        case L'\\': o += L"\\\\"; break; case L'"': o += L"\\\""; break;
-        case L'\n': o += L"\\n"; break;  case L'\r': o += L"\\r"; break; case L'\t': o += L"\\t"; break;
-        default: if (c < 0x20) { wchar_t b[8]; _snwprintf_s(b, _countof(b), _TRUNCATE, L"\\u%04x", (unsigned)c); o += b; } else o += c;
-        }
-    }
-    return o;
-}
-/* narrow (UTF-8) JSON string-body escaper -- the crash payload is composed host-side as UTF-8. */
-static std::string poc_json_n(const std::string &s)
-{
-    std::string o; o.reserve(s.size() + 8);
-    for (unsigned char c : s) {
-        switch (c) {
-        case '\\': o += "\\\\"; break; case '"': o += "\\\""; break;
-        case '\n': o += "\\n"; break;  case '\r': o += "\\r"; break; case '\t': o += "\\t"; break;
-        default:
-            if (c < 0x20) { char b[8]; _snprintf_s(b, _countof(b), _TRUNCATE, "\\u%04x", (unsigned)c); o += b; }
-            else o += (char)c;
-        }
-    }
-    return o;
-}
-static std::string w_to_utf8(const std::wstring &w)
-{
-    if (w.empty()) return std::string();
-    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
-    std::string s; s.resize(n);
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], n, nullptr, nullptr);
-    return s;
-}
 /* Validate each name component before resolve_prefab_path concatenates it.
  * Reject separators and traversal here as well as in the page. */
 static bool poc_valid_name(const std::string &n)
@@ -358,83 +311,6 @@ static bool poc_valid_name(const std::string &n)
     if (n.find(':') != std::string::npos) return false;
     return true;
 }
-static bool json_get_wstr(const std::wstring &j, const wchar_t *key, std::wstring &out)
-{
-    std::wstring needle = L"\""; needle += key; needle += L"\"";
-    size_t p = j.find(needle);
-    if (p == std::wstring::npos) return false;
-    p += needle.size();
-    while (p < j.size() && j[p] != L':') p++;
-    if (p >= j.size()) return false; p++;
-    while (p < j.size() && (j[p] == L' ' || j[p] == L'\t')) p++;
-    if (p >= j.size() || j[p] != L'"') return false; p++;
-    out.clear();
-    while (p < j.size()) {
-        wchar_t c = j[p++];
-        if (c == L'"') break;
-        if (c == L'\\' && p < j.size()) {
-            wchar_t e = j[p++];
-            switch (e) {
-            case L'"': out += L'"'; break; case L'\\': out += L'\\'; break; case L'/': out += L'/'; break;
-            case L'n': out += L'\n'; break; case L'r': out += L'\r'; break; case L't': out += L'\t'; break;
-            case L'b': out += L'\b'; break; case L'f': out += L'\f'; break;
-            case L'u': if (p + 4 <= j.size()) { wchar_t h[5] = {j[p],j[p+1],j[p+2],j[p+3],0}; out += (wchar_t)wcstoul(h, nullptr, 16); p += 4; } break;
-            default: out += e; break;
-            }
-        } else out += c;
-    }
-    return true;
-}
-static bool json_get_int(const std::wstring &j, const wchar_t *key, int *out)
-{
-    std::wstring needle = L"\""; needle += key; needle += L"\"";
-    size_t p = j.find(needle);
-    if (p == std::wstring::npos) return false;
-    p += needle.size();
-    while (p < j.size() && j[p] != L':') p++;
-    if (p >= j.size()) return false; p++;
-    while (p < j.size() && (j[p] == L' ' || j[p] == L'\t')) p++;
-    bool neg = false; if (p < j.size() && j[p] == L'-') { neg = true; p++; }
-    if (p >= j.size() || j[p] < L'0' || j[p] > L'9') return false;
-    long v = 0; while (p < j.size() && j[p] >= L'0' && j[p] <= L'9') { v = v * 10 + (j[p] - L'0'); p++; }
-    *out = neg ? -(int)v : (int)v;
-    return true;
-}
-static void json_get_intarray(const std::wstring &j, const wchar_t *key, std::vector<int> &out)
-{
-    out.clear();
-    std::wstring needle = L"\""; needle += key; needle += L"\"";
-    size_t p = j.find(needle);
-    if (p == std::wstring::npos) return;
-    p += needle.size();
-    while (p < j.size() && j[p] != L'[') p++;
-    if (p >= j.size()) return; p++;
-    while (p < j.size() && j[p] != L']') {
-        while (p < j.size() && (j[p] == L' ' || j[p] == L',' || j[p] == L'\t')) p++;
-        if (p >= j.size() || j[p] == L']') break;
-        bool neg = false; if (j[p] == L'-') { neg = true; p++; }
-        if (p >= j.size() || j[p] < L'0' || j[p] > L'9') break;
-        long v = 0; while (p < j.size() && j[p] >= L'0' && j[p] <= L'9') { v = v * 10 + (j[p] - L'0'); p++; }
-        out.push_back(neg ? -(int)v : (int)v);
-    }
-}
-
-static bool json_get_double(const std::wstring &j, const wchar_t *key, double *out)
-{
-    std::wstring needle = L"\""; needle += key; needle += L"\"";
-    size_t p = j.find(needle);
-    if (p == std::wstring::npos) return false;
-    p += needle.size();
-    while (p < j.size() && j[p] != L':') p++;
-    if (p >= j.size()) return false; p++;
-    while (p < j.size() && (j[p] == L' ' || j[p] == L'\t')) p++;
-    wchar_t *end = nullptr;
-    double v = wcstod(j.c_str() + p, &end);
-    if (end == j.c_str() + p) return false;
-    *out = v;
-    return true;
-}
-
 /* Keep the user's asset pins in pinned.json, separate from validated settings.
  * A damaged pin list must not reset unrelated preferences. The host transports
  * opaque bytes; the page owns parsing, validation, and the empty-list fallback. */
@@ -462,7 +338,7 @@ static void poc_send_pins()
     }
     /* Escape file contents as a string so malformed JSON cannot break the envelope. */
     std::wstring m = L"{\"kind\":\"pins\",\"doc\":\"";
-    m += poc_json_w(data.c_str());
+    m += sh_webview_json::escape_wide(data.c_str());
     m += L"\"}";
     if (g_webview) g_webview->PostWebMessageAsJson(m.c_str());
 }
@@ -678,7 +554,7 @@ static void poc_apply_save()
             if (g_iface->vtbl->set_inherit)   g_iface->vtbl->set_inherit(g_iface, id, g_save_inherit.c_str());
         }
         /* Apply the display name only after the class/inherit pair is accepted. */
-        if (r != 0) {
+        if (r == 1 || r == -1) {
             if (g_iface->vtbl->rebuild_set_declsource) g_iface->vtbl->rebuild_set_declsource(g_iface, id, g_save_decl.c_str());
             int r2 = -1;
             if (g_iface->vtbl->apply_class_inherit) r2 = g_iface->vtbl->apply_class_inherit(g_iface, id, g_save_class.c_str(), g_save_inherit.c_str());
@@ -686,9 +562,10 @@ static void poc_apply_save()
                 if (g_iface->vtbl->set_classname) g_iface->vtbl->set_classname(g_iface, id, g_save_class.c_str());
                 if (g_iface->vtbl->set_inherit)   g_iface->vtbl->set_inherit(g_iface, id, g_save_inherit.c_str());
             }
+            if (r2 != 1 && r2 != -1) { g_save_result = -2; return; }
             if (g_iface->vtbl->set_entity_0x170) g_iface->vtbl->set_entity_0x170(g_iface, id, g_save_dname.c_str());
             g_save_result = 1;
-        } else g_save_result = 0;
+        } else g_save_result = r == 0 ? 0 : -2;
     } __except (EXCEPTION_EXECUTE_HANDLER) { g_save_result = -2; }
 }
 static void poc_apply_deletes()
@@ -773,7 +650,7 @@ static void poc_emit_timeline_data(int eid, int json_len)
     bool ok = json_len > 0;
     std::wstring m = L"{\"kind\":\"timelineData\",\"eid\":"; m += std::to_wstring(eid);
     m += L",\"ok\":"; m += ok ? L"true" : L"false";
-    m += L",\"json\":\""; if (ok) m += poc_json_w(g_tl_json.data()); m += L"\"}";
+    m += L",\"json\":\""; if (ok) m += sh_webview_json::escape_wide(g_tl_json.data()); m += L"\"}";
     g_webview->PostWebMessageAsJson(m.c_str());
 }
 /* Serialize the event's target entity into its own buffer. The page reads
@@ -786,7 +663,7 @@ static void poc_emit_entity_inherit(int eid, int json_len)
     bool ok = json_len > 0;
     std::wstring m = L"{\"kind\":\"entityInherit\",\"eid\":"; m += std::to_wstring(eid);
     m += L",\"ok\":"; m += ok ? L"true" : L"false";
-    m += L",\"json\":\""; if (ok) m += poc_json_w(g_resolve_json.data()); m += L"\"}";
+    m += L",\"json\":\""; if (ok) m += sh_webview_json::escape_wide(g_resolve_json.data()); m += L"\"}";
     g_webview->PostWebMessageAsJson(m.c_str());
 }
 /* Replace editor selection from the list. Log each call to locate a stalled slot. */
@@ -967,15 +844,16 @@ static int poc_apply_edit_seh(const sh_apply_item *it, int count, const char *op
     __try { return g_iface->vtbl->apply_edit(g_iface, it, count, op) ? 1 : 0; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
-/* Prefer apply_sync for kind=0 so the result reports an applied count. It
- * normally marshals off-main calls to the engine thread and waits, but the backend
- * also has an inline fallback. An older backend uses deferred apply_edit, whose
- * result only acknowledges scheduling. Prefab kind=1/2 uses apply_edit directly. */
+/* Preserve an in-progress result so the UI cannot mistake it for a failed save. */
 static int poc_apply_sync_seh(const sh_apply_item *it, int count, const char *op)
 {
     __try {
-        if (g_iface->vtbl->apply_sync) return g_iface->vtbl->apply_sync(g_iface, it, count, op) > 0 ? 1 : 0;
-        if (g_iface->vtbl->apply_edit) return g_iface->vtbl->apply_edit(g_iface, it, count, op) ? 1 : 0;
+        if (g_iface->vtbl->apply_sync) {
+            int result = g_iface->vtbl->apply_sync(g_iface, it, count, op);
+            return result == SH_APPLY_IN_PROGRESS ? result : result == count ? 1 : 0;
+        }
+        if (g_iface->vtbl->apply_edit)
+            return g_iface->vtbl->apply_edit(g_iface, it, count, op) ? SH_APPLY_IN_PROGRESS : 0;
         return 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
@@ -1163,18 +1041,18 @@ static void poc_emit_list(int n, int ready, const char *reason)
     unsigned long seq = ++g_list_seq;
     std::wstring json; json.reserve((size_t)(n + g_tl_count) * 96 + 96);
     json += L"{\"kind\":\"list\",\"seq\":"; json += std::to_wstring(seq);
-    json += L",\"version\":\""; json += poc_json_w(g_version.c_str());
+    json += L",\"version\":\""; json += sh_webview_json::escape_wide(g_version.c_str());
     /* the renderer rides the list message alongside the version, for the same reason: the feedback
      * dialog composes its own payload in the page and needs both there. */
-    json += L"\",\"renderer\":\""; json += poc_json_w(sh_host_renderer_name());
+    json += L"\",\"renderer\":\""; json += sh_webview_json::escape_wide(sh_host_renderer_name());
     json += L"\",\"editorReady\":"; json += ready ? L"true" : L"false";
     json += L",\"count\":"; json += std::to_wstring(n);
     json += L",\"entities\":[";
     for (int i = 0; i < n; i++) {
         if (i) json += L",";
         json += L"{\"eid\":"; json += std::to_wstring(g_ents[i].eid);
-        json += L",\"id\":\""; json += poc_json_w(g_ents[i].id);
-        json += L"\",\"name\":\""; json += poc_json_w(g_ents[i].name);
+        json += L",\"id\":\""; json += sh_webview_json::escape_wide(g_ents[i].id);
+        json += L"\",\"name\":\""; json += sh_webview_json::escape_wide(g_ents[i].name);
         json += L"\",\"hidden\":"; json += g_ents[i].hidden ? L"true" : L"false";
         json += L"}";
     }
@@ -1182,8 +1060,8 @@ static void poc_emit_list(int n, int ready, const char *reason)
     for (int i = 0; i < g_tl_count; i++) {
         if (i) json += L",";
         json += L"{\"eid\":"; json += std::to_wstring(g_tls[i].eid);
-        json += L",\"id\":\""; json += poc_json_w(g_tls[i].id);
-        json += L"\",\"name\":\""; json += poc_json_w(g_tls[i].name);
+        json += L",\"id\":\""; json += sh_webview_json::escape_wide(g_tls[i].id);
+        json += L"\",\"name\":\""; json += sh_webview_json::escape_wide(g_tls[i].name);
         json += L"\"}";   /* close the "name" string BEFORE the object brace (the missing \" was the empty-list bug) */
     }
     json += L"]}";
@@ -1220,10 +1098,10 @@ static void poc_send_state(int id, bool autoflag)
     json += L",\"eid\":"; json += std::to_wstring(id);
     json += L",\"ok\":"; json += ok ? L"true" : L"false";
     json += L",\"truncated\":"; json += truncated ? L"true" : L"false";
-    json += L",\"decl\":\"";        if (!truncated) json += poc_json_w(decl); json += L"\"";
-    json += L",\"classname\":\"";   json += poc_json_w(cls);  json += L"\"";
-    json += L",\"inherit\":\"";     json += poc_json_w(inh);  json += L"\"";
-    json += L",\"displayname\":\""; json += poc_json_w(dnm);  json += L"\"}";
+    json += L",\"decl\":\"";        if (!truncated) json += sh_webview_json::escape_wide(decl); json += L"\"";
+    json += L",\"classname\":\"";   json += sh_webview_json::escape_wide(cls);  json += L"\"";
+    json += L",\"inherit\":\"";     json += sh_webview_json::escape_wide(inh);  json += L"\"";
+    json += L",\"displayname\":\""; json += sh_webview_json::escape_wide(dnm);  json += L"\"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 /* Build + send the valid-values list for a datalist: {kind:"inherits"|"classes", inherit?, items:[...]}. */
@@ -1234,7 +1112,7 @@ static void poc_send_enum(int classes, const char *inherit)
     poc_run_enum(classes, inherit, g_enumbuf, (int)sizeof g_enumbuf, &count);
     if (count < 0) count = 0;
     std::wstring json = classes ? L"{\"kind\":\"classes\",\"inherit\":\"" : L"{\"kind\":\"inherits\"";
-    if (classes) { json += poc_json_w(inherit ? inherit : ""); json += L"\""; }
+    if (classes) { json += sh_webview_json::escape_wide(inherit ? inherit : ""); json += L"\""; }
     json += L",\"items\":[";
     const char *p = g_enumbuf;
     const char *end = g_enumbuf + sizeof g_enumbuf;
@@ -1244,7 +1122,7 @@ static void poc_send_enum(int classes, const char *inherit)
         if (len > 0) {
             if (emitted) json += L",";
             std::string s(p, len);
-            json += L"\""; json += poc_json_w(s.c_str()); json += L"\"";
+            json += L"\""; json += sh_webview_json::escape_wide(s.c_str()); json += L"\"";
             emitted++;
         }
         p += len + 1;
@@ -1271,7 +1149,7 @@ static void poc_send_arg_resclass(const char *resClass)
     int count = 0;
     poc_run_arg_resclass(resClass, g_enumbuf, (int)sizeof g_enumbuf, &count);
     if (count < 0) count = 0;
-    std::wstring json = L"{\"kind\":\"argResclass\",\"resClass\":\""; json += poc_json_w(resClass ? resClass : ""); json += L"\",\"items\":[";
+    std::wstring json = L"{\"kind\":\"argResclass\",\"resClass\":\""; json += sh_webview_json::escape_wide(resClass ? resClass : ""); json += L"\",\"items\":[";
     const char *p = g_enumbuf;
     const char *end = g_enumbuf + sizeof g_enumbuf;
     int emitted = 0;
@@ -1280,7 +1158,7 @@ static void poc_send_arg_resclass(const char *resClass)
         if (len > 0) {
             if (emitted) json += L",";
             std::string s(p, len);
-            json += L"\""; json += poc_json_w(s.c_str()); json += L"\"";
+            json += L"\""; json += sh_webview_json::escape_wide(s.c_str()); json += L"\"";
             emitted++;
         }
         p += len + 1;
@@ -1303,9 +1181,9 @@ static const ShEntDesc *poc_lookup_desc(const std::string &name)
 static void poc_json_desc_obj(std::wstring &json, const ShEntDesc *d)
 {
     if (!d) { json += L"null"; return; }
-    json += L"{\"summary\":\"";    json += poc_json_w(d->summary);    json += L"\"";
-    json += L",\"confidence\":\""; json += poc_json_w(d->confidence); json += L"\"";
-    json += L",\"source\":\"";     json += poc_json_w(d->source);     json += L"\"}";
+    json += L"{\"summary\":\"";    json += sh_webview_json::escape_wide(d->summary);    json += L"\"";
+    json += L",\"confidence\":\""; json += sh_webview_json::escape_wide(d->confidence); json += L"\"";
+    json += L",\"source\":\"";     json += sh_webview_json::escape_wide(d->source);     json += L"\"}";
 }
 static void poc_send_desc(const char *inherit, const char *classname)
 {
@@ -1328,9 +1206,9 @@ static void poc_send_material_result(const char *name)
         found = g_iface->vtbl->find_material(g_iface, name, info, (int)sizeof info);
     }
     std::wstring json = L"{\"kind\":\"materialResult\",\"name\":\"";
-    json += poc_json_w(name ? name : "");
+    json += sh_webview_json::escape_wide(name ? name : "");
     json += L"\",\"found\":"; json += found ? L"true" : L"false";
-    json += L",\"info\":\""; json += poc_json_w(info); json += L"\"}";
+    json += L",\"info\":\""; json += sh_webview_json::escape_wide(info); json += L"\"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 /* The File menu's rawmap I/O: "Load Rawmap" / "Save Rawmap As", the only caller of
@@ -1441,7 +1319,18 @@ static bool poc_pick_rawmap_file(bool save, const wchar_t *title, std::wstring &
  * up before anything opens. It rides on the status message because the file has ALREADY been staged
  * by the time we ask -- the answer only decides whether the reload runs now or waits for File >
  * Open Rawmap as New Map, so there is nothing to hold on to native-side while the person decides. It must
- * arrive already JSON-escaped (poc_json_w), like every other path that crosses this boundary. */
+ * arrive already JSON-escaped (escape_wide), like every other path that crosses this boundary. */
+/* Plain UTF-8 -> wide, NO escaping. For text that is already JSON and must be
+ * forwarded verbatim. */
+static std::wstring poc_widen(const char *utf8)
+{
+    std::wstring w;
+    if (!utf8) return w;
+    int wl = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
+    if (wl > 0) { w.resize(wl - 1); if (wl > 1) MultiByteToWideChar(CP_UTF8, 0, utf8, -1, &w[0], wl); }
+    return w;
+}
+
 static void poc_send_rawmap_status(const wchar_t *note, const wchar_t *confirm_file = nullptr)
 {
     if (!g_webview) return;
@@ -1488,8 +1377,8 @@ static void poc_rawmap_configure(const char *load_path, const char *save_path, i
      * own sentence wins -- unless the caller passes no sentence, which is how Save Rawmap As asks for
      * the backend's own: only the backend knows whether it wrote the file there and then or is
      * waiting for an editor save, and how many bytes went out. */
-    std::wstring note = ok ? (ok_note ? std::wstring(ok_note) : poc_json_w(msg))
-                           : (L"Refused: " + poc_json_w(msg));
+    std::wstring note = ok ? (ok_note ? std::wstring(ok_note) : sh_webview_json::escape_wide(msg))
+                           : (L"Refused: " + sh_webview_json::escape_wide(msg));
 
     /* poc_logf carries exactly one unsigned long, so compose the detail line first. The paths are
      * what makes this log worth having when someone reports "it did not load my file". */
@@ -1551,7 +1440,7 @@ static void poc_finish_pick()
 {
     const int  kind   = g_pick_kind;
     const bool picked = g_pick_ok;
-    std::string p8    = picked ? w_to_utf8(g_pick_path) : std::string();
+    std::string p8    = picked ? sh_webview_json::to_utf8(g_pick_path) : std::string();
 
     /* Kept before the clear below, for the confirm prompt: the person should see WHICH file they are
      * about to open, and the full path is too long for a dialog line. */
@@ -1591,7 +1480,7 @@ static void poc_finish_pick()
                                                      msg, (int)sizeof msg);
         }
         if (!staged) {
-            poc_send_rawmap_status((L"Refused: " + poc_json_w(msg)).c_str());
+            poc_send_rawmap_status((L"Refused: " + sh_webview_json::escape_wide(msg)).c_str());
         } else {
             /* Ask before opening: a reload discards whatever is in the editor, and the engine
              * offers no "has unsaved changes" query. Answering no leaves the file staged. The
@@ -1623,9 +1512,9 @@ static void poc_send_preview(const char *name)
     std::wstring json = L"{\"kind\":\"previewImage\",\"ok\":";
     json += uri.empty() ? L"false" : L"true";
     json += L",\"uri\":\"";
-    json += poc_json_w(uri.c_str());
+    json += sh_webview_json::escape_wide(uri.c_str());
     json += L"\",\"name\":\"";
-    json += poc_json_w(name ? name : "");
+    json += sh_webview_json::escape_wide(name ? name : "");
     json += L"\"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
@@ -1649,7 +1538,7 @@ static void poc_request_preview(const char *name, int asset_kind)
     std::wstring json = L"{\"kind\":\"previewRequested\",\"ok\":";
     json += ok ? L"true" : L"false";
     json += L",\"name\":\"";
-    json += poc_json_w(name ? name : "");
+    json += sh_webview_json::escape_wide(name ? name : "");
     json += L"\"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
@@ -1685,7 +1574,7 @@ static void poc_send_asset_list(int kind)
     json += L",\"count\":";
     json += std::to_wstring(total);
     json += L",\"names\":\"";
-    json += poc_json_w(all.c_str());
+    json += sh_webview_json::escape_wide(all.c_str());
     json += L"\"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
@@ -1699,12 +1588,12 @@ static void poc_send_events()
     for (int i = 0; i < SH_EVENT_CATALOG_N; i++) {
         if (i) json += L",";
         const ShEvtDef &d = SH_EVENT_CATALOG[i];
-        json += L"{\"name\":\""; json += poc_json_w(d.name); json += L"\",\"args\":[";
+        json += L"{\"name\":\""; json += sh_webview_json::escape_wide(d.name); json += L"\",\"args\":[";
         for (int a = 0; a < d.argc; a++) {
             if (a) json += L",";
             const ShEvtArg &arg = d.args[a];
-            json += L"{\"name\":\""; json += poc_json_w(arg.name ? arg.name : ""); json += L"\"";
-            json += L",\"type\":\""; json += poc_json_w(arg.type ? arg.type : ""); json += L"\"}";
+            json += L"{\"name\":\""; json += sh_webview_json::escape_wide(arg.name ? arg.name : ""); json += L"\"";
+            json += L",\"type\":\""; json += sh_webview_json::escape_wide(arg.type ? arg.type : ""); json += L"\"}";
         }
         json += L"]}";
     }
@@ -1721,16 +1610,16 @@ static void poc_send_event_docs()
     for (int i = 0; i < SH_EVENT_DOCS_N; i++) {
         if (i) json += L",";
         const ShEvtDoc &d = SH_EVENT_DOCS[i];
-        json += L"{\"name\":\""; json += poc_json_w(d.name ? d.name : ""); json += L"\"";
-        json += L",\"summary\":\""; json += poc_json_w(d.summary ? d.summary : ""); json += L"\"";
-        json += L",\"confidence\":\""; json += poc_json_w(d.confidence ? d.confidence : ""); json += L"\"";
-        json += L",\"source\":\""; json += poc_json_w(d.source ? d.source : ""); json += L"\"";
+        json += L"{\"name\":\""; json += sh_webview_json::escape_wide(d.name ? d.name : ""); json += L"\"";
+        json += L",\"summary\":\""; json += sh_webview_json::escape_wide(d.summary ? d.summary : ""); json += L"\"";
+        json += L",\"confidence\":\""; json += sh_webview_json::escape_wide(d.confidence ? d.confidence : ""); json += L"\"";
+        json += L",\"source\":\""; json += sh_webview_json::escape_wide(d.source ? d.source : ""); json += L"\"";
         json += L",\"args\":[";
         for (int a = 0; a < d.nArgs; a++) {
             if (a) json += L",";
             const ShEvtArgDoc &ad = d.args[a];
-            json += L"{\"name\":\""; json += poc_json_w(ad.name ? ad.name : ""); json += L"\"";
-            json += L",\"desc\":\""; json += poc_json_w(ad.desc ? ad.desc : ""); json += L"\"}";
+            json += L"{\"name\":\""; json += sh_webview_json::escape_wide(ad.name ? ad.name : ""); json += L"\"";
+            json += L",\"desc\":\""; json += sh_webview_json::escape_wide(ad.desc ? ad.desc : ""); json += L"\"}";
         }
         json += L"]}";
     }
@@ -1742,8 +1631,8 @@ static void poc_json_asset_items(std::wstring &json, const ShAssetItem *items, i
     json += L"[";
     for (int i = 0; i < n; i++) {
         if (i) json += L",";
-        json += L"{\"display\":\""; json += poc_json_w(items[i].display ? items[i].display : ""); json += L"\"";
-        json += L",\"value\":\"";   json += poc_json_w(items[i].value   ? items[i].value   : ""); json += L"\"}";
+        json += L"{\"display\":\""; json += sh_webview_json::escape_wide(items[i].display ? items[i].display : ""); json += L"\"";
+        json += L",\"value\":\"";   json += sh_webview_json::escape_wide(items[i].value   ? items[i].value   : ""); json += L"\"}";
     }
     json += L"]";
 }
@@ -1757,7 +1646,7 @@ static void poc_send_entity_assets()
     for (int i = 0; i < SH_ENTITY_ASSETS_N; i++) {
         if (i) json += L",";
         const ShEntityAssets &ea = SH_ENTITY_ASSETS[i];
-        json += L"{\"slug\":\""; json += poc_json_w(ea.slug ? ea.slug : ""); json += L"\"";
+        json += L"{\"slug\":\""; json += sh_webview_json::escape_wide(ea.slug ? ea.slug : ""); json += L"\"";
         json += L",\"models\":";    poc_json_asset_items(json, ea.models,    ea.nModels);
         json += L",\"animWeb\":";   poc_json_asset_items(json, ea.animWeb,   ea.nAnimWeb);
         json += L",\"md6Anim\":";   poc_json_asset_items(json, ea.md6Anim,   ea.nMd6Anim);
@@ -1861,9 +1750,9 @@ static void poc_post_config_value(const std::string &key)
     int got = poc_config_get_json(key, value, &flags);
     g_config_status_flags |= flags;
     std::wstring message = L"{\"kind\":\"configValue\",\"key\":\"";
-    message += poc_json_w(key.c_str());
+    message += sh_webview_json::escape_wide(key.c_str());
     message += L"\",\"valueJson\":\"";
-    if (got >= 0) message += poc_json_w(value.c_str());
+    if (got >= 0) message += sh_webview_json::escape_wide(value.c_str());
     message += L"\",\"result\":";
     message += got >= 0 ? L"1}" : L"0}";
     poc_post_json(message.c_str());
@@ -1872,7 +1761,7 @@ static void poc_post_config_value(const std::string &key)
 static void poc_post_config_set_result(const std::string &key, int result)
 {
     std::wstring message = L"{\"kind\":\"configSetResult\",\"key\":\"";
-    message += poc_json_w(key.c_str());
+    message += sh_webview_json::escape_wide(key.c_str());
     message += L"\",\"result\":";
     message += std::to_wstring(result);
     message += L"}";
@@ -1951,10 +1840,10 @@ static void poc_send_prefab_detail(const std::string &name, const std::string &f
          * message (PostWebMessageAsJson silently drops a malformed payload). */
         if (ok && poc_prefab_meta_path(folder, name, mp, (int)sizeof mp)) poc_read_small_file(mp, metaBody);
     }
-    std::wstring json = L"{\"kind\":\"prefabDetail\",\"name\":\""; json += poc_json_w(name.c_str());
+    std::wstring json = L"{\"kind\":\"prefabDetail\",\"name\":\""; json += sh_webview_json::escape_wide(name.c_str());
     json += L"\",\"ok\":"; json += ok ? L"true" : L"false";
-    json += L",\"meta\":\""; json += poc_json_w(metaBody.c_str());
-    json += L"\",\"scene\":\""; json += poc_json_w(sceneBody.c_str());
+    json += L",\"meta\":\""; json += sh_webview_json::escape_wide(metaBody.c_str());
+    json += L"\",\"scene\":\""; json += sh_webview_json::escape_wide(sceneBody.c_str());
     json += L"\",\"count\":"; json += std::to_wstring(entityCount);
     json += L"}";
     g_webview->PostWebMessageAsJson(json.c_str());
@@ -2018,16 +1907,16 @@ static void poc_send_prefabs()
     std::wstring json = L"{\"kind\":\"prefabs\",\"root\":[";
     for (size_t i = 0; i < rootNames.size(); i++) {
         if (i) json += L",";
-        json += L"\""; json += poc_json_w(rootNames[i].c_str()); json += L"\"";
+        json += L"\""; json += sh_webview_json::escape_wide(rootNames[i].c_str()); json += L"\"";
     }
     json += L"],\"folders\":[";
     for (size_t i = 0; i < folders.size(); i++) {
         if (i) json += L",";
-        json += L"{\"name\":\""; json += poc_json_w(folders[i].first.c_str()); json += L"\",\"items\":[";
+        json += L"{\"name\":\""; json += sh_webview_json::escape_wide(folders[i].first.c_str()); json += L"\",\"items\":[";
         const std::vector<std::string> &items = folders[i].second;
         for (size_t j = 0; j < items.size(); j++) {
             if (j) json += L",";
-            json += L"\""; json += poc_json_w(items[j].c_str()); json += L"\"";
+            json += L"\""; json += sh_webview_json::escape_wide(items[j].c_str()); json += L"\"";
         }
         json += L"]}";
     }
@@ -2038,10 +1927,10 @@ static void poc_send_prefabs()
         if (!poc_read_meta_tags(folder, name, tags) || tags.empty()) return;
         if (!firstMeta) json += L","; firstMeta = false;
         std::string key = folder.empty() ? name : (folder + "/" + name);
-        json += L"\""; json += poc_json_w(key.c_str()); json += L"\":[";
+        json += L"\""; json += sh_webview_json::escape_wide(key.c_str()); json += L"\":[";
         for (size_t t = 0; t < tags.size(); t++) {
             if (t) json += L",";
-            json += L"\""; json += poc_json_w(tags[t].c_str()); json += L"\"";
+            json += L"\""; json += sh_webview_json::escape_wide(tags[t].c_str()); json += L"\"";
         }
         json += L"]";
     };
@@ -2074,7 +1963,7 @@ static void poc_apply_save_prefab_meta(const std::string &name, const std::strin
     }
     if (!g_webview) return;
     std::wstring m = L"{\"kind\":\"savePrefabMetaResult\",\"result\":"; m += std::to_wstring(result);
-    m += L",\"name\":\""; m += poc_json_w(name.c_str()); m += L"\"}";
+    m += L",\"name\":\""; m += sh_webview_json::escape_wide(name.c_str()); m += L"\"}";
     g_webview->PostWebMessageAsJson(m.c_str());
     if (result == 1) poc_send_prefabs();
 }
@@ -2085,7 +1974,7 @@ static void poc_apply_save_prefab_meta(const std::string &name, const std::strin
  * version, renderer, and optional scrubbed log tails for crash reports.
  * Run the request on a short-lived worker so WinHTTP cannot block the STA UI.
  * The worker owns g_report_* while in flight; the loop posts its result to the page.
- * See docs/feedback.md and feedback/ for the service contract. */
+ * The relay in feedback/ owns the service contract. */
 static const wchar_t *kReportHost = L"snapmap-plus-feedback.doom-snapmap.workers.dev";   /* the deployed relay (feedback/); unreachable -> red toast, nothing else */
 static const wchar_t *kReportPath = L"/report";
 #define REPORT_PAYLOAD_CAP (64 * 1024)
@@ -2097,7 +1986,7 @@ static int           g_report_number   = 0;       /* filed issue number (0 = unk
 static char          g_report_mode[16] = "";      /* "created" | "appended" (dedup comment) */
 static std::string   g_report_payload;            /* owned by the worker thread while in flight */
 
-/* find `"key":<int>` in the relay's small JSON response (same targeted-scan approach as json_get_int,
+/* find `"key":<int>` in the relay's small JSON response (same targeted-scan approach as sh_webview_json::get_int,
  * narrow-string flavor -- no JSON library) */
 static int rp_scan_int(const char *s, const char *key)
 {
@@ -2165,7 +2054,7 @@ static const char *kCrashGlob = "snapmap-plus\\crash\\pending-*.json";
 static bool        g_report_is_crash = false;   /* the in-flight relay POST came from the crash dialog */
 static bool        g_page_loaded     = false;   /* NavigationCompleted fired -- the page can receive */
 static std::string g_crash_last_sent;           /* terminal pending-*.json already raised as the dialog */
-static std::string g_crash_last_seen;           /* newest pending-*.json already classified (ANY kind) */
+static sh_crash_pending::inventory g_crash_last_seen;
 
 /* Sort pending filenames newest-first without opening records on every poll. */
 static int crash_scan(std::vector<std::string> &names)
@@ -2179,8 +2068,7 @@ static int crash_scan(std::vector<std::string> &names)
         names.push_back(fd.cFileName);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
-    std::sort(names.begin(), names.end(),
-              [](const std::string &a, const std::string &b) { return a > b; });
+    std::sort(names.begin(), names.end(), sh_crash_pending::newest_first);
 
     /* Bound retained diagnostics even when notices need no dismissal or submission. */
     if ((int)names.size() > CRASH_RECORDS_KEEP) {
@@ -2344,9 +2232,9 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
             std::string key, value;
             bool fields_valid = config_message.fields_valid;
             if (fields_valid) {
-                key = w_to_utf8(config_message.key);
+                key = sh_webview_json::to_utf8(config_message.key);
                 if (config_message.kind == SH_CONFIG_MESSAGE_SET)
-                    value = w_to_utf8(config_message.value_json);
+                    value = sh_webview_json::to_utf8(config_message.value_json);
                 fields_valid =
                     !key.empty() && key.size() <= POC_CONFIG_KEY_CAP &&
                     key.find('\0') == std::string::npos;
@@ -2375,18 +2263,18 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
 
         std::wstring json(jp); CoTaskMemFree(jp);
         std::wstring cmd;
-        if (json_get_wstr(json, L"cmd", cmd)) {
+        if (sh_webview_json::get_string(json, L"cmd", cmd)) {
             if (cmd == L"refresh") {
                 poc_send_list("manual-refresh");
             } else if (cmd == L"perfList") {
                 int seq = 0, entities = 0, matched = 0, mounted = 0;
                 double render_ms = 0.0, handler_ms = 0.0;
-                if (json_get_int(json, L"seq", &seq) &&
-                    json_get_int(json, L"entities", &entities) &&
-                    json_get_int(json, L"matched", &matched) &&
-                    json_get_int(json, L"mounted", &mounted) &&
-                    json_get_double(json, L"renderMs", &render_ms) &&
-                    json_get_double(json, L"handlerMs", &handler_ms) &&
+                if (sh_webview_json::get_int(json, L"seq", &seq) &&
+                    sh_webview_json::get_int(json, L"entities", &entities) &&
+                    sh_webview_json::get_int(json, L"matched", &matched) &&
+                    sh_webview_json::get_int(json, L"mounted", &mounted) &&
+                    sh_webview_json::get_double(json, L"renderMs", &render_ms) &&
+                    sh_webview_json::get_double(json, L"handlerMs", &handler_ms) &&
                     seq >= 0 && entities >= 0 && entities <= POC_MAX_ENTS &&
                     matched >= 0 && matched <= entities && mounted >= 0 && mounted <= matched &&
                     std::isfinite(render_ms) && std::isfinite(handler_ms) &&
@@ -2401,13 +2289,13 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
             } else if (cmd == L"listPrefabs") {
                 poc_send_prefabs();
             } else if (cmd == L"selectPrefab") {
-                std::wstring nm, fo; json_get_wstr(json, L"name", nm); json_get_wstr(json, L"folder", fo);
-                poc_send_prefab_detail(w_to_utf8(nm), w_to_utf8(fo));
+                std::wstring nm, fo; sh_webview_json::get_string(json, L"name", nm); sh_webview_json::get_string(json, L"folder", fo);
+                poc_send_prefab_detail(sh_webview_json::to_utf8(nm), sh_webview_json::to_utf8(fo));
             } else if (cmd == L"resolvePrefabModel") {
                 int generation = 0; std::wstring inherit;
-                json_get_int(json, L"generation", &generation);
-                json_get_wstr(json, L"inherit", inherit);
-                std::string inherit8 = w_to_utf8(inherit);
+                sh_webview_json::get_int(json, L"generation", &generation);
+                sh_webview_json::get_string(json, L"inherit", inherit);
+                std::string inherit8 = sh_webview_json::to_utf8(inherit);
                 char model[512] = {0}; float scale[3] = {1.0f, 1.0f, 1.0f}; int flags = 0;
                 if (generation >= 0 && inherit8.size() < 512 && g_iface && g_iface->vtbl) {
                     if (g_iface->vtbl->resolve_prefab_defaults)
@@ -2424,9 +2312,9 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 }
                 std::wstring m = L"{\"kind\":\"prefabModelResolved\",\"generation\":";
                 m += std::to_wstring(generation);
-                m += L",\"inherit\":\""; m += poc_json_w(inherit8.c_str());
+                m += L",\"inherit\":\""; m += sh_webview_json::escape_wide(inherit8.c_str());
                 m += L"\",\"model\":\"";
-                if (flags & SH_PREFAB_DEFAULT_MODEL) m += poc_json_w(model);
+                if (flags & SH_PREFAB_DEFAULT_MODEL) m += sh_webview_json::escape_wide(model);
                 m += L"\",\"scale\":";
                 if (flags & SH_PREFAB_DEFAULT_SCALE) {
                     m += L"["; m += std::to_wstring(scale[0]); m += L",";
@@ -2437,9 +2325,9 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 poc_post_json(m.c_str());
             } else if (cmd == L"requestPrefabMesh") {
                 int generation = 0; std::wstring model;
-                json_get_int(json, L"generation", &generation);
-                json_get_wstr(json, L"model", model);
-                std::string model8 = w_to_utf8(model);
+                sh_webview_json::get_int(json, L"generation", &generation);
+                sh_webview_json::get_string(json, L"model", model);
+                std::string model8 = sh_webview_json::to_utf8(model);
                 int queued = 0;
                 if (generation >= 0 && model8.size() < 512 && g_iface && g_iface->vtbl &&
                     g_iface->vtbl->request_prefab_mesh)
@@ -2449,73 +2337,73 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 if (!queued && !model8.empty()) {
                     std::wstring m = L"{\"kind\":\"prefabMeshUnavailable\",\"generation\":";
                     m += std::to_wstring(generation);
-                    m += L",\"model\":\""; m += poc_json_w(model8.c_str()); m += L"\"}";
+                    m += L",\"model\":\""; m += sh_webview_json::escape_wide(model8.c_str()); m += L"\"}";
                     poc_post_json(m.c_str());
                 }
             } else if (cmd == L"savePrefabMeta") {
-                std::wstring nm, fo, body; json_get_wstr(json, L"name", nm); json_get_wstr(json, L"folder", fo); json_get_wstr(json, L"body", body);
-                poc_apply_save_prefab_meta(w_to_utf8(nm), w_to_utf8(fo), w_to_utf8(body));
+                std::wstring nm, fo, body; sh_webview_json::get_string(json, L"name", nm); sh_webview_json::get_string(json, L"folder", fo); sh_webview_json::get_string(json, L"body", body);
+                poc_apply_save_prefab_meta(sh_webview_json::to_utf8(nm), sh_webview_json::to_utf8(fo), sh_webview_json::to_utf8(body));
             } else if (cmd == L"createPrefab") {
-                std::wstring nm; json_get_wstr(json, L"name", nm);
-                g_create_prefab_name = w_to_utf8(nm);
+                std::wstring nm; sh_webview_json::get_string(json, L"name", nm);
+                g_create_prefab_name = sh_webview_json::to_utf8(nm);
                 g_pending_create_prefab = true;
             } else if (cmd == L"deletePrefab") {
-                std::wstring nm, fo; json_get_wstr(json, L"name", nm); json_get_wstr(json, L"folder", fo);
-                g_delete_prefab_name = w_to_utf8(nm); g_delete_prefab_folder = w_to_utf8(fo);
+                std::wstring nm, fo; sh_webview_json::get_string(json, L"name", nm); sh_webview_json::get_string(json, L"folder", fo);
+                g_delete_prefab_name = sh_webview_json::to_utf8(nm); g_delete_prefab_folder = sh_webview_json::to_utf8(fo);
                 g_pending_delete_prefab = true;
             } else if (cmd == L"loadPrefab") {
-                std::wstring nm, fo; json_get_wstr(json, L"name", nm); json_get_wstr(json, L"folder", fo);
-                g_load_prefab_name = w_to_utf8(nm); g_load_prefab_folder = w_to_utf8(fo);
+                std::wstring nm, fo; sh_webview_json::get_string(json, L"name", nm); sh_webview_json::get_string(json, L"folder", fo);
+                g_load_prefab_name = sh_webview_json::to_utf8(nm); g_load_prefab_folder = sh_webview_json::to_utf8(fo);
                 g_pending_load_prefab = true;
             } else if (cmd == L"renamePrefab") {
-                std::wstring o, nn, fo; json_get_wstr(json, L"oldName", o); json_get_wstr(json, L"newName", nn); json_get_wstr(json, L"folder", fo);
-                g_rename_prefab_old = w_to_utf8(o); g_rename_prefab_new = w_to_utf8(nn); g_rename_prefab_folder = w_to_utf8(fo);
+                std::wstring o, nn, fo; sh_webview_json::get_string(json, L"oldName", o); sh_webview_json::get_string(json, L"newName", nn); sh_webview_json::get_string(json, L"folder", fo);
+                g_rename_prefab_old = sh_webview_json::to_utf8(o); g_rename_prefab_new = sh_webview_json::to_utf8(nn); g_rename_prefab_folder = sh_webview_json::to_utf8(fo);
                 g_pending_rename_prefab = true;
             } else if (cmd == L"createFolder") {
-                std::wstring nm; json_get_wstr(json, L"name", nm);
-                g_create_folder_name = w_to_utf8(nm);
+                std::wstring nm; sh_webview_json::get_string(json, L"name", nm);
+                g_create_folder_name = sh_webview_json::to_utf8(nm);
                 g_pending_create_folder = true;
             } else if (cmd == L"renameFolder") {
-                std::wstring o, nn; json_get_wstr(json, L"oldName", o); json_get_wstr(json, L"newName", nn);
-                g_rename_folder_old = w_to_utf8(o); g_rename_folder_new = w_to_utf8(nn);
+                std::wstring o, nn; sh_webview_json::get_string(json, L"oldName", o); sh_webview_json::get_string(json, L"newName", nn);
+                g_rename_folder_old = sh_webview_json::to_utf8(o); g_rename_folder_new = sh_webview_json::to_utf8(nn);
                 g_pending_rename_folder = true;
             } else if (cmd == L"deleteFolder") {
-                std::wstring nm; json_get_wstr(json, L"name", nm);
-                g_delete_folder_name = w_to_utf8(nm);
+                std::wstring nm; sh_webview_json::get_string(json, L"name", nm);
+                g_delete_folder_name = sh_webview_json::to_utf8(nm);
                 g_pending_delete_folder = true;
             } else if (cmd == L"movePrefabToFolder") {
-                std::wstring nm, fromf, tof; json_get_wstr(json, L"name", nm); json_get_wstr(json, L"fromFolder", fromf); json_get_wstr(json, L"toFolder", tof);
-                g_move_prefab_name = w_to_utf8(nm); g_move_prefab_from = w_to_utf8(fromf); g_move_prefab_to = w_to_utf8(tof);
+                std::wstring nm, fromf, tof; sh_webview_json::get_string(json, L"name", nm); sh_webview_json::get_string(json, L"fromFolder", fromf); sh_webview_json::get_string(json, L"toFolder", tof);
+                g_move_prefab_name = sh_webview_json::to_utf8(nm); g_move_prefab_from = sh_webview_json::to_utf8(fromf); g_move_prefab_to = sh_webview_json::to_utf8(tof);
                 g_pending_move_prefab = true;
             } else if (cmd == L"select") {
                 int eid = -1;
-                if (json_get_int(json, L"eid", &eid)) { g_displayed_eid = eid; poc_send_state(eid, false); }
+                if (sh_webview_json::get_int(json, L"eid", &eid)) { g_displayed_eid = eid; poc_send_state(eid, false); }
             } else if (cmd == L"openTimeline") {
                 int eid = -1;
-                if (json_get_int(json, L"eid", &eid) && eid >= 0) { g_open_timeline_eid = eid; g_pending_open_timeline = true; }
+                if (sh_webview_json::get_int(json, L"eid", &eid) && eid >= 0) { g_open_timeline_eid = eid; g_pending_open_timeline = true; }
             } else if (cmd == L"resolveEntityInherit") {
                 int eid = -1;
-                if (json_get_int(json, L"eid", &eid) && eid >= 0) { g_resolve_entity_eid = eid; g_pending_resolve_entity = true; }
+                if (sh_webview_json::get_int(json, L"eid", &eid) && eid >= 0) { g_resolve_entity_eid = eid; g_pending_resolve_entity = true; }
             } else if (cmd == L"saveTimeline") {
                 int eid = -1; std::wstring j;
-                if (json_get_int(json, L"eid", &eid) && eid >= 0 && json_get_wstr(json, L"json", j) && !j.empty()) {
-                    g_save_timeline_eid = eid; g_save_timeline_json = w_to_utf8(j); g_pending_save_timeline = true;
+                if (sh_webview_json::get_int(json, L"eid", &eid) && eid >= 0 && sh_webview_json::get_string(json, L"json", j) && !j.empty()) {
+                    g_save_timeline_eid = eid; g_save_timeline_json = sh_webview_json::to_utf8(j); g_pending_save_timeline = true;
                 }
             } else if (cmd == L"setSync") {
-                int on = 0; json_get_int(json, L"on", &on); g_sync_on = (on != 0); g_last_editor_sel = -1; g_last_sel_sig = 0;
+                int on = 0; sh_webview_json::get_int(json, L"on", &on); g_sync_on = (on != 0); g_last_editor_sel = -1; g_last_sel_sig = 0;
             } else if (cmd == L"delete") {
-                json_get_intarray(json, L"eids", g_delete_eids);
+                sh_webview_json::get_int_array(json, L"eids", g_delete_eids);
                 if (!g_delete_eids.empty()) g_pending_delete = true;
             } else if (cmd == L"selectInEditor") {
-                json_get_intarray(json, L"eids", g_select_eids);
+                sh_webview_json::get_int_array(json, L"eids", g_select_eids);
                 g_pending_select = true;   /* applied under the loop mutex */
             } else if (cmd == L"deselect") {
                 g_pending_deselect = true;
             } else if (cmd == L"enumInherits") {
                 poc_send_enum(0, nullptr);
             } else if (cmd == L"enumClasses") {
-                std::wstring inh; json_get_wstr(json, L"inherit", inh);
-                std::string i8 = w_to_utf8(inh);
+                std::wstring inh; sh_webview_json::get_string(json, L"inherit", inh);
+                std::string i8 = sh_webview_json::to_utf8(inh);
                 poc_send_enum(1, i8.c_str());
             } else if (cmd == L"enumEvents") {
                 poc_send_events();
@@ -2524,16 +2412,16 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
             } else if (cmd == L"enumEntityAssets") {
                 poc_send_entity_assets();
             } else if (cmd == L"enumArgResclass") {
-                std::wstring rc; json_get_wstr(json, L"resClass", rc);
-                std::string rc8 = w_to_utf8(rc);
+                std::wstring rc; sh_webview_json::get_string(json, L"resClass", rc);
+                std::string rc8 = sh_webview_json::to_utf8(rc);
                 poc_send_arg_resclass(rc8.c_str());
             } else if (cmd == L"lookupDesc") {
-                std::wstring inh, cls; json_get_wstr(json, L"inherit", inh); json_get_wstr(json, L"classname", cls);
-                std::string i8 = w_to_utf8(inh), c8 = w_to_utf8(cls);
+                std::wstring inh, cls; sh_webview_json::get_string(json, L"inherit", inh); sh_webview_json::get_string(json, L"classname", cls);
+                std::string i8 = sh_webview_json::to_utf8(inh), c8 = sh_webview_json::to_utf8(cls);
                 poc_send_desc(i8.c_str(), c8.c_str());
             } else if (cmd == L"findMaterial") {
-                std::wstring nm; json_get_wstr(json, L"name", nm);
-                std::string n8 = w_to_utf8(nm);
+                std::wstring nm; sh_webview_json::get_string(json, L"name", nm);
+                std::string n8 = sh_webview_json::to_utf8(nm);
                 poc_send_material_result(n8.c_str());
             } else if (cmd == L"rawmapStatus") {
                 poc_send_rawmap_status(L"");
@@ -2550,11 +2438,11 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                  * it (see slot_rawmap_configure). So "save again here" and "save somewhere new" are
                  * one backend call that differs only in where the path came from: the picker, or
                  * the status the page already holds. */
-                std::wstring dest; json_get_wstr(json, L"path", dest);
+                std::wstring dest; sh_webview_json::get_string(json, L"path", dest);
                 if (dest.empty()) {
                     poc_send_rawmap_status(L"No rawmap location yet -- use Save Rawmap As... first.");
                 } else {
-                    std::string d8 = w_to_utf8(dest);
+                    std::string d8 = sh_webview_json::to_utf8(dest);
                     poc_rawmap_configure(nullptr, d8.c_str(), -1, nullptr);
                 }
             } else if (cmd == L"rawmapSavePick") {
@@ -2571,10 +2459,10 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     int ok = g_iface->vtbl->rawmap_load_now(g_iface, msg, (int)sizeof msg);
                     poc_log(ok ? "rawmap load-now: accepted" : "rawmap load-now: refused");
                     poc_send_rawmap_status(ok ? L"Opening as a new map -- Save will ask you to name it."
-                                              : (L"Cannot open: " + poc_json_w(msg)).c_str());
+                                              : (L"Cannot open: " + sh_webview_json::escape_wide(msg)).c_str());
                 }
             } else if (cmd == L"rawmapArm") {
-                int on = 0; json_get_int(json, L"on", &on);
+                int on = 0; sh_webview_json::get_int(json, L"on", &on);
                 /* Say what it does to the person's maps, not what it does to the detour -- and make
                  * the OFF message say the menu still works, because the tick's whole hazard is
                  * reading as the feature's master switch when it is only its scope. */
@@ -2596,78 +2484,78 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                  *
                  * Both paths ride the status back to the page, so the tick renders from the backend
                  * rather than from anything the page remembers -- the console can change it too. */
-                int on = 0; json_get_int(json, L"on", &on);
+                int on = 0; sh_webview_json::get_int(json, L"on", &on);
                 poc_rawmap_configure(nullptr, nullptr, on ? 3 : 4,
                                      on ? L"Saves now write back over the rawmap you loaded."
                                         : L"Saves go to the default rawmap.json; loaded rawmaps are left alone.");
             } else if (cmd == L"newEntity") {
                 std::wstring js, lab;
-                json_get_wstr(json, L"json", js); json_get_wstr(json, L"label", lab);
-                g_new_entity_json = w_to_utf8(js); g_new_entity_label = w_to_utf8(lab);
+                sh_webview_json::get_string(json, L"json", js); sh_webview_json::get_string(json, L"label", lab);
+                g_new_entity_json = sh_webview_json::to_utf8(js); g_new_entity_label = sh_webview_json::to_utf8(lab);
                 g_pending_new_entity = true;
             } else if (cmd == L"soundSession") {
-                int on = 0; json_get_int(json, L"on", &on);
+                int on = 0; sh_webview_json::get_int(json, L"on", &on);
                 g_sound_session_on = on ? 1 : 0;
                 g_pending_sound_session = true;
             } else if (cmd == L"soundPreview") {
-                std::wstring nm; json_get_wstr(json, L"name", nm);
-                g_sound_preview_name = w_to_utf8(nm);   /* empty = stop */
+                std::wstring nm; sh_webview_json::get_string(json, L"name", nm);
+                g_sound_preview_name = sh_webview_json::to_utf8(nm);   /* empty = stop */
                 g_pending_sound_preview = true;
             } else if (cmd == L"materialRect") {
                 /* The Assets browser asks before offering the Virtual Mapping carrier: only
                  * virtual-textured materials have a rect, and the rect IS the renderParm value. */
-                std::wstring nm; json_get_wstr(json, L"name", nm);
-                std::string n8 = w_to_utf8(nm);
+                std::wstring nm; sh_webview_json::get_string(json, L"name", nm);
+                std::string n8 = sh_webview_json::to_utf8(nm);
                 int r[4] = {0,0,0,0}, ok = 0;
                 if (g_iface && g_iface->vtbl && g_iface->vtbl->material_rect)
                     ok = g_iface->vtbl->material_rect(g_iface, n8.c_str(), r);
                 std::wstring m = L"{\"kind\":\"materialRect\",\"name\":\"";
-                m += poc_json_w(n8.c_str());
+                m += sh_webview_json::escape_wide(n8.c_str());
                 m += L"\",\"ok\":"; m += (ok ? L"true" : L"false");
                 m += L",\"x\":" + std::to_wstring(r[0]) + L",\"y\":" + std::to_wstring(r[1]);
                 m += L",\"w\":" + std::to_wstring(r[2]) + L",\"h\":" + std::to_wstring(r[3]) + L"}";
                 if (g_webview) g_webview->PostWebMessageAsJson(m.c_str());
             } else if (cmd == L"listAssets") {
-                int akind = SH_ASSET_MATERIAL; json_get_int(json, L"assetKind", &akind);
+                int akind = SH_ASSET_MATERIAL; sh_webview_json::get_int(json, L"assetKind", &akind);
                 poc_send_asset_list(akind);
             } else if (cmd == L"pinsLoad") {
                 poc_send_pins();
             } else if (cmd == L"pinsSave") {
-                std::wstring doc; json_get_wstr(json, L"doc", doc);
-                poc_save_pins(w_to_utf8(doc));
+                std::wstring doc; sh_webview_json::get_string(json, L"doc", doc);
+                poc_save_pins(sh_webview_json::to_utf8(doc));
             } else if (cmd == L"getPreview") {
-                std::wstring nm; json_get_wstr(json, L"name", nm);
-                std::string n8 = w_to_utf8(nm);
+                std::wstring nm; sh_webview_json::get_string(json, L"name", nm);
+                std::string n8 = sh_webview_json::to_utf8(nm);
                 poc_send_preview(n8.c_str());
             } else if (cmd == L"requestPreview") {
-                std::wstring nm; json_get_wstr(json, L"name", nm);
-                int asset_kind = -1; json_get_int(json, L"assetKind", &asset_kind);
-                std::string n8 = w_to_utf8(nm);
+                std::wstring nm; sh_webview_json::get_string(json, L"name", nm);
+                int asset_kind = -1; sh_webview_json::get_int(json, L"assetKind", &asset_kind);
+                std::string n8 = sh_webview_json::to_utf8(nm);
                 poc_request_preview(n8.c_str(), asset_kind);
             } else if (cmd == L"cancelPreview") {
                 poc_cancel_preview();
             /* Camera footer controls: a lock captures its supplied target; an edit queues one write. */
             } else if (cmd == L"camLock") {
-                int on = 0; json_get_int(json, L"on", &on);
+                int on = 0; sh_webview_json::get_int(json, L"on", &on);
                 g_cam_lock = (on != 0);
                 if (g_cam_lock) {   /* capture the target coordinates supplied with the request */
                     double x, y, z;
-                    if (json_get_double(json, L"x", &x)) g_cam_xyz[0] = (float)x;
-                    if (json_get_double(json, L"y", &y)) g_cam_xyz[1] = (float)y;
-                    if (json_get_double(json, L"z", &z)) g_cam_xyz[2] = (float)z;
+                    if (sh_webview_json::get_double(json, L"x", &x)) g_cam_xyz[0] = (float)x;
+                    if (sh_webview_json::get_double(json, L"y", &y)) g_cam_xyz[1] = (float)y;
+                    if (sh_webview_json::get_double(json, L"z", &z)) g_cam_xyz[2] = (float)z;
                 }
             } else if (cmd == L"camSet") {
                 double x, y, z;
-                if (json_get_double(json, L"x", &x)) g_cam_xyz[0] = (float)x;
-                if (json_get_double(json, L"y", &y)) g_cam_xyz[1] = (float)y;
-                if (json_get_double(json, L"z", &z)) g_cam_xyz[2] = (float)z;
+                if (sh_webview_json::get_double(json, L"x", &x)) g_cam_xyz[0] = (float)x;
+                if (sh_webview_json::get_double(json, L"y", &y)) g_cam_xyz[1] = (float)y;
+                if (sh_webview_json::get_double(json, L"z", &z)) g_cam_xyz[2] = (float)z;
                 g_cam_write_once = true;
             } else if (cmd == L"reportSubmit") {
                 /* opaque transport: the page composed the full report JSON; this side only size-caps it
                  * and ships it to the relay on a worker thread (see the feedback section above). */
                 std::wstring payload;
-                if (json_get_wstr(json, L"payload", payload) && !payload.empty() && !g_report_inflight) {
-                    std::string p8 = w_to_utf8(payload);
+                if (sh_webview_json::get_string(json, L"payload", payload) && !payload.empty() && !g_report_inflight) {
+                    std::string p8 = sh_webview_json::to_utf8(payload);
                     if (p8.size() <= REPORT_PAYLOAD_CAP) {
                         g_report_payload.swap(p8);
                         g_report_inflight = true;
@@ -2684,27 +2572,27 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                  * same worker and result message as ordinary feedback. */
                 std::wstring title, bodyw, contact, hp, renderer;
                 int attach = 0;
-                json_get_wstr(json, L"title", title);
-                json_get_wstr(json, L"body", bodyw);
-                json_get_wstr(json, L"contact", contact);
-                json_get_wstr(json, L"website", hp);
+                sh_webview_json::get_string(json, L"title", title);
+                sh_webview_json::get_string(json, L"body", bodyw);
+                sh_webview_json::get_string(json, L"contact", contact);
+                sh_webview_json::get_string(json, L"website", hp);
                 /* Prefer the recorded renderer: this session may differ from the one that
                  * faulted. Use the live renderer only for older records without the field. */
-                json_get_wstr(json, L"renderer", renderer);
-                json_get_int(json, L"attachLogs", &attach);
+                sh_webview_json::get_string(json, L"renderer", renderer);
+                sh_webview_json::get_int(json, L"attachLogs", &attach);
                 if (!title.empty() && !bodyw.empty() && !g_report_inflight) {
                     std::string logs = attach ? crash_collect_logs() : std::string();
                     std::string rend = renderer.empty() ? std::string(sh_host_renderer_name())
-                                                        : w_to_utf8(renderer);
+                                                        : sh_webview_json::to_utf8(renderer);
                     std::string p;
                     p.reserve(logs.size() + 12288);
-                    p += "{\"category\":\"crash\",\"title\":\"";  p += poc_json_n(w_to_utf8(title));
-                    p += "\",\"body\":\"";                         p += poc_json_n(w_to_utf8(bodyw));
-                    p += "\",\"contact\":\"";                      p += poc_json_n(w_to_utf8(contact));
-                    p += "\",\"version\":\"";                      p += poc_json_n(g_version);
-                    p += "\",\"renderer\":\"";                     p += poc_json_n(rend);
-                    p += "\",\"website\":\"";                      p += poc_json_n(w_to_utf8(hp));
-                    p += "\",\"logs\":\"";                         p += poc_json_n(logs);
+                    p += "{\"category\":\"crash\",\"title\":\"";  p += sh_webview_json::escape_utf8(sh_webview_json::to_utf8(title));
+                    p += "\",\"body\":\"";                         p += sh_webview_json::escape_utf8(sh_webview_json::to_utf8(bodyw));
+                    p += "\",\"contact\":\"";                      p += sh_webview_json::escape_utf8(sh_webview_json::to_utf8(contact));
+                    p += "\",\"version\":\"";                      p += sh_webview_json::escape_utf8(g_version);
+                    p += "\",\"renderer\":\"";                     p += sh_webview_json::escape_utf8(rend);
+                    p += "\",\"website\":\"";                      p += sh_webview_json::escape_utf8(sh_webview_json::to_utf8(hp));
+                    p += "\",\"logs\":\"";                         p += sh_webview_json::escape_utf8(logs);
                     p += "\"}";
                     if (p.size() <= REPORT_PAYLOAD_CAP) {
                         g_report_payload.swap(p);
@@ -2733,7 +2621,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 ReleaseCapture();
                 SendMessageW(g_hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);   /* start the native move loop */
             } else if (cmd == L"winResize") {
-                std::wstring dir; json_get_wstr(json, L"dir", dir);
+                std::wstring dir; sh_webview_json::get_string(json, L"dir", dir);
                 WPARAM ht = 0;
                 if      (dir == L"l")  ht = HTLEFT;      else if (dir == L"r")  ht = HTRIGHT;
                 else if (dir == L"t")  ht = HTTOP;       else if (dir == L"b")  ht = HTBOTTOM;
@@ -2750,7 +2638,7 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 else _snwprintf_s(m, _countof(m), _TRUNCATE, L"{\"kind\":\"tlUseSelectionResult\",\"ok\":false,\"count\":%d}", un);
                 poc_post_json(m);
             } else if (cmd == L"pushStack") {
-                std::vector<int> ids; json_get_intarray(json, L"eids", ids);
+                std::vector<int> ids; sh_webview_json::get_int_array(json, L"eids", ids);
                 bool ok = g_iface && g_iface->vtbl && g_iface->vtbl->push_to_stack && !ids.empty();
                 if (ok) g_iface->vtbl->push_to_stack(g_iface, 0, ids.data(), (int)ids.size());
                 wchar_t m[160];
@@ -2765,12 +2653,12 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                     L"{\"kind\":\"clearStackResult\",\"result\":%d,\"count\":%d}", ok ? 1 : 0, had);
                 poc_post_json(m);
             } else if (cmd == L"save") {
-                int eid = -1; json_get_int(json, L"eid", &eid);
+                int eid = -1; sh_webview_json::get_int(json, L"eid", &eid);
                 std::wstring decl, cls, inh, dnm;
-                json_get_wstr(json, L"decl", decl); json_get_wstr(json, L"classname", cls);
-                json_get_wstr(json, L"inherit", inh); json_get_wstr(json, L"displayname", dnm);
-                g_save_eid = eid; g_save_decl = w_to_utf8(decl); g_save_class = w_to_utf8(cls);
-                g_save_inherit = w_to_utf8(inh); g_save_dname = w_to_utf8(dnm);
+                sh_webview_json::get_string(json, L"decl", decl); sh_webview_json::get_string(json, L"classname", cls);
+                sh_webview_json::get_string(json, L"inherit", inh); sh_webview_json::get_string(json, L"displayname", dnm);
+                g_save_eid = eid; g_save_decl = sh_webview_json::to_utf8(decl); g_save_class = sh_webview_json::to_utf8(cls);
+                g_save_inherit = sh_webview_json::to_utf8(inh); g_save_dname = sh_webview_json::to_utf8(dnm);
                 g_pending_save = true;
             }
         }
@@ -2916,37 +2804,37 @@ static void poc_think_loop()
         if (did_select_refused) poc_post_json(L"{\"kind\":\"selectRefused\"}");
         if (did_create_prefab) {
             std::wstring m = L"{\"kind\":\"createPrefabResult\",\"result\":"; m += std::to_wstring(g_create_result);
-            m += L",\"name\":\""; m += poc_json_w(g_create_prefab_name.c_str()); m += L"\"}";
+            m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_create_prefab_name.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
             if (g_create_result == 1) poc_send_prefabs();
         }
         if (did_delete_prefab) {
             std::wstring m = L"{\"kind\":\"deletePrefabResult\",\"result\":"; m += std::to_wstring(g_delete_result);
-            m += L",\"name\":\""; m += poc_json_w(g_delete_prefab_name.c_str()); m += L"\"}";
+            m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_delete_prefab_name.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
             if (g_delete_result == 1) poc_send_prefabs();
         }
         if (did_rename_prefab) {
             std::wstring m = L"{\"kind\":\"renamePrefabResult\",\"result\":"; m += std::to_wstring(g_rename_result);
-            m += L",\"oldName\":\""; m += poc_json_w(g_rename_prefab_old.c_str());
-            m += L"\",\"newName\":\""; m += poc_json_w(g_rename_prefab_new.c_str()); m += L"\"}";
+            m += L",\"oldName\":\""; m += sh_webview_json::escape_wide(g_rename_prefab_old.c_str());
+            m += L"\",\"newName\":\""; m += sh_webview_json::escape_wide(g_rename_prefab_new.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
             if (g_rename_result == 1) poc_send_prefabs();
         }
         if (did_load_prefab) {
             std::wstring m = L"{\"kind\":\"loadPrefabResult\",\"result\":"; m += std::to_wstring(g_load_result);
-            m += L",\"name\":\""; m += poc_json_w(g_load_prefab_name.c_str()); m += L"\"}";
+            m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_load_prefab_name.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
         }
         if (did_sound_preview) {
             std::wstring m = L"{\"kind\":\"soundPreviewResult\",\"playing\":";
             m += (g_sound_preview_result ? L"true" : L"false");
-            m += L",\"name\":\""; m += poc_json_w(g_sound_preview_name.c_str()); m += L"\"}";
+            m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_sound_preview_name.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
         }
         if (did_new_entity) {
             std::wstring m = L"{\"kind\":\"newEntityResult\",\"result\":"; m += std::to_wstring(g_new_entity_result);
-            m += L",\"label\":\""; m += poc_json_w(g_new_entity_label.c_str()); m += L"\"}";
+            m += L",\"label\":\""; m += sh_webview_json::escape_wide(g_new_entity_label.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
         }
         if (did_open_timeline) poc_emit_timeline_data(g_open_timeline_eid, g_tl_json_len);
@@ -2958,34 +2846,34 @@ static void poc_think_loop()
         }
         if (did_create_folder) {
             std::wstring m = L"{\"kind\":\"createFolderResult\",\"result\":"; m += std::to_wstring(g_create_folder_result);
-            m += L",\"name\":\""; m += poc_json_w(g_create_folder_name.c_str()); m += L"\"}";
+            m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_create_folder_name.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
             if (g_create_folder_result == 1) poc_send_prefabs();
         }
         if (did_rename_folder) {
             std::wstring m = L"{\"kind\":\"renameFolderResult\",\"result\":"; m += std::to_wstring(g_rename_folder_result);
-            m += L",\"oldName\":\""; m += poc_json_w(g_rename_folder_old.c_str());
-            m += L"\",\"newName\":\""; m += poc_json_w(g_rename_folder_new.c_str()); m += L"\"}";
+            m += L",\"oldName\":\""; m += sh_webview_json::escape_wide(g_rename_folder_old.c_str());
+            m += L"\",\"newName\":\""; m += sh_webview_json::escape_wide(g_rename_folder_new.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
             if (g_rename_folder_result == 1) poc_send_prefabs();
         }
         if (did_delete_folder) {
             std::wstring m = L"{\"kind\":\"deleteFolderResult\",\"result\":"; m += std::to_wstring(g_delete_folder_result);
-            m += L",\"name\":\""; m += poc_json_w(g_delete_folder_name.c_str()); m += L"\"}";
+            m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_delete_folder_name.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
             if (g_delete_folder_result == 1) poc_send_prefabs();
         }
         if (did_move_prefab) {
             std::wstring m = L"{\"kind\":\"movePrefabResult\",\"result\":"; m += std::to_wstring(g_move_prefab_result);
-            m += L",\"name\":\""; m += poc_json_w(g_move_prefab_name.c_str());
-            m += L"\",\"toFolder\":\""; m += poc_json_w(g_move_prefab_to.c_str()); m += L"\"}";
+            m += L",\"name\":\""; m += sh_webview_json::escape_wide(g_move_prefab_name.c_str());
+            m += L"\",\"toFolder\":\""; m += sh_webview_json::escape_wide(g_move_prefab_to.c_str()); m += L"\"}";
             poc_post_json(m.c_str());
             if (g_move_prefab_result == 1) poc_send_prefabs();
         }
         if (g_report_done) {   /* feedback/crash POST finished on its worker thread -- relay the result */
             g_report_done = false;
             std::wstring m = L"{\"kind\":\"reportResult\",\"ok\":"; m += g_report_ok ? L"true" : L"false";
-            m += L",\"mode\":\""; m += poc_json_w(g_report_mode);
+            m += L",\"mode\":\""; m += sh_webview_json::escape_wide(g_report_mode);
             m += L"\",\"number\":"; m += std::to_wstring(g_report_number); m += L"}";
             poc_post_json(m.c_str());
             if (g_report_is_crash) {
@@ -2997,8 +2885,8 @@ static void poc_think_loop()
             g_report_inflight = false;
         }
 
-        /* On a new pending filename, scan all records for terminal kinds so a later
-         * nonterminal record cannot hide a crash prompt. Nonterminal records show
+        /* Reclassify changes anywhere in the retained inventory so an older or
+         * same-second arrival cannot hide a crash prompt. Nonterminal records show
          * notices only after startup; retained older records remain diagnostic data. */
         if (g_page_loaded && (frame == 1 || frame % 60 == 0)) {
             std::vector<std::string> names;
@@ -3008,11 +2896,10 @@ static void poc_think_loop()
                  * directory filling up again is treated as new rather than as already-seen. */
                 g_crash_last_seen.clear();
                 g_crash_last_sent.clear();
-            } else if (names[0] != g_crash_last_seen) {
+            } else if (g_crash_last_seen.changed(names)) {
                 bool startup = (frame == 1);
                 int terminal = 0, survived = 0;
                 std::string termName, termRec;
-                g_crash_last_seen = names[0];
                 for (size_t i = 0; i < names.size(); i++) {
                     std::string rec = crash_read_record(names[i]);
                     if (rec.empty()) continue;   /* torn/unreadable -- skip it, never block the rest */

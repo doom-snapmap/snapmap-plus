@@ -60,6 +60,32 @@ typedef struct rb_manifest_file {
     char package[SH_PACKAGE_NAME_CAP];
 } rb_manifest_file;
 
+/* Capture and readers share one recursive lock. Declaration snapshotting
+ * holds it across metadata and body reads; resource opens hold it through I/O.
+ * No engine callbacks run while this lock is held. */
+static INIT_ONCE g_snapshot_once = INIT_ONCE_STATIC_INIT;
+static CRITICAL_SECTION g_snapshot_lock;
+static __declspec(thread) rb_entry g_return_entry;
+static __declspec(thread) char g_return_source[SH_DECL_SERVER_SOURCE_CAP];
+
+static BOOL CALLBACK rb_init_lock(PINIT_ONCE once, PVOID parameter, PVOID *context)
+{
+    (void)once; (void)parameter; (void)context;
+    InitializeCriticalSection(&g_snapshot_lock);
+    return TRUE;
+}
+
+void sh_resource_bridge_snapshot_begin(void)
+{
+    InitOnceExecuteOnce(&g_snapshot_once, rb_init_lock, NULL, NULL);
+    EnterCriticalSection(&g_snapshot_lock);
+}
+
+void sh_resource_bridge_snapshot_end(void)
+{
+    LeaveCriticalSection(&g_snapshot_lock);
+}
+
 static volatile LONG g_state = RB_STATE_NEW;
 static volatile LONG g_provider_ready;
 static rb_entry *g_entries;
@@ -702,12 +728,9 @@ static int rb_validate_slices_and_open(const char *doom_base)
  */
 static sh_package g_packages[SH_PACKAGES_MAX];
 
-/* Reopen capture at a quiescent boundary with no map loading. Moving away
- * from READY rejects new lookups during rebuilding. Retain previous entry
- * allocations for readers that already entered; repeated recaptures
- * accumulate retained memory.
- */
-int sh_resource_bridge_recapture(const char *data_root)
+/* Exclusive capture waits for active readers, then releases the old entries
+ * and archive handles before rebuilding. Failed captures publish no entries. */
+static int rb_recapture_locked(const char *data_root)
 {
     char line[192];
     int ok;
@@ -720,11 +743,7 @@ int sh_resource_bridge_recapture(const char *data_root)
         return 0;
     }
 
-    /* Retain the previous entries for existing readers. */
-    g_entries = NULL;
-    g_entry_count = 0;
-    g_entry_capacity = 0;
-    g_decl_count = 0;
+    rb_release_entries();
     g_equivalent_row_count = 0;
     g_has_manifests = 0;
     rb_close_archives();
@@ -733,14 +752,14 @@ int sh_resource_bridge_recapture(const char *data_root)
     ok = sh_resource_bridge_capture(data_root);
     _snprintf_s(line, sizeof line, _TRUNCATE,
                 "resource-bridge RECAPTURE %s -- %u entr(ies), %u linked decl(s) now resolvable "
-                "(previous table retired, not freed)",
+                "(previous table released after readers completed)",
                 ok ? "complete" : "FAILED",
                 (unsigned)g_entry_count, (unsigned)g_decl_count);
     backend_log(line);
     return ok;
 }
 
-int sh_resource_bridge_capture(const char *data_root)
+static int rb_capture_locked(const char *data_root)
 {
     char directory[MAX_PATH], doom_base[MAX_PATH], pindex_path[MAX_PATH];
     rb_manifest_file manifests[RB_MAX_MANIFESTS];
@@ -816,7 +835,7 @@ void sh_resource_bridge_set_provider_ready(int ready)
     InterlockedExchange(&g_provider_ready, ready ? 1 : 0);
 }
 
-int sh_resource_bridge_gate_ok(void)
+static int rb_gate_ok_locked(void)
 {
     LONG state = InterlockedCompareExchange(&g_state, RB_STATE_NEW, RB_STATE_NEW);
     if (state == RB_STATE_FAILED) return 0;
@@ -825,13 +844,13 @@ int sh_resource_bridge_gate_ok(void)
     return !g_has_manifests || InterlockedCompareExchange(&g_provider_ready, 0, 0) != 0;
 }
 
-int sh_resource_bridge_has_manifests(void)
+static int rb_has_manifests_locked(void)
 {
     return InterlockedCompareExchange(&g_state, RB_STATE_NEW, RB_STATE_NEW) == RB_STATE_READY &&
            g_has_manifests;
 }
 
-size_t sh_resource_bridge_entry_count(void)
+static size_t rb_entry_count_locked(void)
 {
     return InterlockedCompareExchange(&g_state, RB_STATE_NEW, RB_STATE_NEW) == RB_STATE_READY ?
            g_entry_count : 0;
@@ -890,7 +909,7 @@ done:
     return ok;
 }
 
-int sh_resource_bridge_open(const char *name, unsigned char **out,
+static int rb_open_locked(const char *name, unsigned char **out,
                             size_t *out_length, const char **out_source)
 {
     rb_entry *entry;
@@ -902,7 +921,10 @@ int sh_resource_bridge_open(const char *name, unsigned char **out,
         !InterlockedCompareExchange(&g_provider_ready, 0, 0)) return SH_RESOURCE_BRIDGE_MISS;
     entry = rb_find_alias(name);
     if (!entry) return SH_RESOURCE_BRIDGE_MISS;
-    if (out_source) *out_source = entry->source;
+    if (out_source) {
+        strcpy_s(g_return_source, sizeof(g_return_source), entry->source);
+        *out_source = g_return_source;
+    }
     if (!rb_read_slice(entry, out, out_length)) {
         char line[SH_DECL_SERVER_SOURCE_CAP + 128];
         _snprintf_s(line, sizeof(line), _TRUNCATE,
@@ -914,7 +936,7 @@ int sh_resource_bridge_open(const char *name, unsigned char **out,
     return SH_RESOURCE_BRIDGE_OPENED;
 }
 
-size_t sh_resource_bridge_decl_count(void)
+static size_t rb_decl_count_locked(void)
 {
     return InterlockedCompareExchange(&g_state, RB_STATE_NEW, RB_STATE_NEW) == RB_STATE_READY ?
            g_decl_count : 0;
@@ -931,20 +953,21 @@ static rb_entry *rb_decl_at(size_t index)
     return NULL;
 }
 
-int sh_resource_bridge_decl_metadata(size_t index, const char **type,
+static int rb_decl_metadata_locked(size_t index, const char **type,
                                      const char **name, const char **source)
 {
     if (InterlockedCompareExchange(&g_state, RB_STATE_NEW, RB_STATE_NEW) != RB_STATE_READY)
         return 0;
     rb_entry *entry = rb_decl_at(index);
     if (!entry || !type || !name || !source) return 0;
-    *type = entry->type;
-    *name = entry->name;
-    *source = entry->alias;
+    g_return_entry = *entry;
+    *type = g_return_entry.type;
+    *name = g_return_entry.name;
+    *source = g_return_entry.alias;
     return 1;
 }
 
-int sh_resource_bridge_read_decl(size_t index, char **body, size_t *length,
+static int rb_read_decl_locked(size_t index, char **body, size_t *length,
                                  const char **reason)
 {
     rb_entry *entry;
@@ -978,13 +1001,13 @@ int sh_resource_bridge_read_decl(size_t index, char **body, size_t *length,
 }
 
 #ifdef SH_RESOURCE_BRIDGE_TESTING
-void sh_resource_bridge_test_set_doom_base(const char *path)
+static void rb_test_set_doom_base_locked(const char *path)
 {
     if (!path) g_test_doom_base[0] = '\0';
     else strncpy_s(g_test_doom_base, sizeof(g_test_doom_base), path, _TRUNCATE);
 }
 
-void sh_resource_bridge_test_reset(void)
+static void rb_test_reset_locked(void)
 {
     rb_close_archives();
     rb_release_entries();
@@ -994,17 +1017,167 @@ void sh_resource_bridge_test_reset(void)
     InterlockedExchange(&g_state, RB_STATE_NEW);
 }
 
-int sh_resource_bridge_test_entry_metadata(size_t index, const char **alias,
+static int rb_test_entry_metadata_locked(size_t index, const char **alias,
                                            size_t *decoded_bytes,
                                            size_t *stored_bytes,
                                            const char **source)
 {
     if (InterlockedCompareExchange(&g_state, RB_STATE_NEW, RB_STATE_NEW) != RB_STATE_READY ||
         index >= g_entry_count || !alias || !decoded_bytes || !stored_bytes || !source) return 0;
-    *alias = g_entries[index].alias;
-    *decoded_bytes = g_entries[index].size;
-    *stored_bytes = g_entries[index].zsize;
-    *source = g_entries[index].source;
+    g_return_entry = g_entries[index];
+    *alias = g_return_entry.alias;
+    *decoded_bytes = g_return_entry.size;
+    *stored_bytes = g_return_entry.zsize;
+    *source = g_return_entry.source;
     return 1;
+}
+#endif
+
+int sh_resource_bridge_recapture(const char *data_root)
+{
+    int result;
+    sh_resource_bridge_snapshot_begin();
+    __try {
+        result = rb_recapture_locked(data_root);
+    } __finally {
+        sh_resource_bridge_snapshot_end();
+    }
+    return result;
+}
+
+int sh_resource_bridge_capture(const char *data_root)
+{
+    int result;
+    sh_resource_bridge_snapshot_begin();
+    __try {
+        result = rb_capture_locked(data_root);
+    } __finally {
+        sh_resource_bridge_snapshot_end();
+    }
+    return result;
+}
+
+int sh_resource_bridge_gate_ok(void)
+{
+    int result;
+    sh_resource_bridge_snapshot_begin();
+    __try {
+        result = rb_gate_ok_locked();
+    } __finally {
+        sh_resource_bridge_snapshot_end();
+    }
+    return result;
+}
+
+int sh_resource_bridge_has_manifests(void)
+{
+    int result;
+    sh_resource_bridge_snapshot_begin();
+    __try {
+        result = rb_has_manifests_locked();
+    } __finally {
+        sh_resource_bridge_snapshot_end();
+    }
+    return result;
+}
+
+size_t sh_resource_bridge_entry_count(void)
+{
+    size_t result;
+    sh_resource_bridge_snapshot_begin();
+    __try {
+        result = rb_entry_count_locked();
+    } __finally {
+        sh_resource_bridge_snapshot_end();
+    }
+    return result;
+}
+
+int sh_resource_bridge_open(const char *name, unsigned char **out, size_t *out_length, const char **out_source)
+{
+    int result;
+    sh_resource_bridge_snapshot_begin();
+    __try {
+        result = rb_open_locked(name, out, out_length, out_source);
+    } __finally {
+        sh_resource_bridge_snapshot_end();
+    }
+    return result;
+}
+
+size_t sh_resource_bridge_decl_count(void)
+{
+    size_t result;
+    sh_resource_bridge_snapshot_begin();
+    __try {
+        result = rb_decl_count_locked();
+    } __finally {
+        sh_resource_bridge_snapshot_end();
+    }
+    return result;
+}
+
+int sh_resource_bridge_decl_metadata(size_t index, const char **type, const char **name, const char **source)
+{
+    int result;
+    sh_resource_bridge_snapshot_begin();
+    __try {
+        result = rb_decl_metadata_locked(index, type, name, source);
+    } __finally {
+        sh_resource_bridge_snapshot_end();
+    }
+    return result;
+}
+
+int sh_resource_bridge_read_decl(size_t index, char **body, size_t *length, const char **reason)
+{
+    int result;
+    sh_resource_bridge_snapshot_begin();
+    __try {
+        result = rb_read_decl_locked(index, body, length, reason);
+    } __finally {
+        sh_resource_bridge_snapshot_end();
+    }
+    return result;
+}
+
+#ifdef SH_RESOURCE_BRIDGE_TESTING
+
+void sh_resource_bridge_test_set_doom_base(const char *path)
+{
+    sh_resource_bridge_snapshot_begin();
+    __try {
+        rb_test_set_doom_base_locked(path);
+    } __finally {
+        sh_resource_bridge_snapshot_end();
+    }
+}
+#endif
+
+#ifdef SH_RESOURCE_BRIDGE_TESTING
+
+void sh_resource_bridge_test_reset(void)
+{
+    sh_resource_bridge_snapshot_begin();
+    __try {
+        rb_test_reset_locked();
+    } __finally {
+        sh_resource_bridge_snapshot_end();
+    }
+}
+#endif
+
+#ifdef SH_RESOURCE_BRIDGE_TESTING
+
+int sh_resource_bridge_test_entry_metadata(size_t index, const char **alias, size_t *decoded_bytes, size_t *stored_bytes, const char **source)
+{
+    int result;
+    sh_resource_bridge_snapshot_begin();
+    __try {
+        result = rb_test_entry_metadata_locked(index, alias, decoded_bytes, stored_bytes, source);
+    } __finally {
+        sh_resource_bridge_snapshot_end();
+    }
+    return result;
 }
 #endif

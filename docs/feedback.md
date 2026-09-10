@@ -26,6 +26,12 @@ still own App-key rotation. Users need no account. Deployment and credentials:
 
 ## What a filed issue looks like
 
+The relay reads at most 192 KiB of UTF-8 bytes while streaming and keeps its
+65,536-character JSON limit. It cancels oversized streams before parsing or
+calling GitHub, including requests with an absent or understated Content-Length.
+Invalid UTF-8, malformed JSON and non-object payloads return 400; excess bytes or
+characters return 413. The UI receives a failed response and retains the draft.
+
 - **Title:** `[Bug] <the user's title>` (or `[Feature]` / `[Docs]` / `[Other]`).
 - **Body:** the user's details, then a metadata block: `- Version: 0.2.0-beta.3 (beta)`, a
   `- Renderer: Vulkan` (or `OpenGL`) line, an optional `- Contact:` line, and an invisible
@@ -53,16 +59,22 @@ call. The signature covers category + title only, so the same bug reported from 
 
 ## Crash reports
 
-The same pipeline's second producer. When the game hits a serious fault, the fault machinery writes a
-small **crash record** (JSON — fault class, exception code, `module+0xRVA`, call stack, the engine's own
-error message when there is one, timestamp, installed version, renderer) to `<game>\snapmap-plus\crash\`,
-using crash-safe file writes only. The Studio UI polls that folder and auto-opens the **crash-report dialog**
-(branded header, same style as the main window): for a fault the editor *survived*, seconds after it
-happens; for a fault that killed the game, on the next launch ("Snapmap+ crashed last session"). Truly
-fatal classes also save a local crash dump (`snapmap-plus\logs\sh_crash.dmp`) — it is never uploaded;
-an issue notes where it lives so a maintainer can ask for it.
+Fault capture attempts to write a local **crash record** containing the fault
+class, exception code, `module+0xRVA`, call stack, available engine error,
+timestamp, version and renderer to `<game>\snapmap-plus\crash\`. A complete
+temporary file is renamed into the pending set only after a successful write.
+Capture is bounded and best effort: nested faults may be skipped, and some fatal
+terminations bypass handlers entirely.
 
-The dialog shows exactly what was recorded (the error + the call stack), takes an optional "what were
+The Studio UI polls all retained filenames. Newly observed `classB` and
+`offthread` records receive a notice, not a report dialog; those classifications
+do not themselves prove that the process survived. Other records prompt for a
+report in the current session when possible or on a later launch. Same-second
+records are ordered by their numeric suffix. Fatal capture also attempts a local
+dump at `snapmap-plus\logs\sh_crash.dmp`; dump creation can fail. A successful
+dump's path appears in the record, but the dump is never uploaded automatically.
+
+The dialog shows the bounded error and call stack that were recorded, takes an optional "what were
 you doing?" description and optional contact, and offers an **Attach recent logs** checkbox (on by
 default). Attached logs are the *tails* of the local log files, **anonymized before sending** — the
 Windows account name, profile-folder name, and machine name are scrubbed out (`<user>` / `<machine>`).
@@ -70,7 +82,7 @@ Send files it through the relay as `category: crash`; Dismiss (or a successful s
 record so the dialog never nags twice — the full logs and any dump stay on disk untouched.
 
 What lands on the tracker: title `Crash: <module>+0x<rva> (0x<code>)` — the crash *location*, so the
-signature dedup groups every occurrence of the same crash onto one issue — labels `crash` +
+signature lets the best-effort dedup group matching crashes — labels `crash` +
 `user-report` + channel + renderer, a readable crash-summary body, and the attached logs as a
 **collapsed follow-up comment**. Log attachment is best-effort: a failure after
 issue creation does not change the successful submission response.

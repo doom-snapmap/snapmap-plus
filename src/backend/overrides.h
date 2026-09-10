@@ -83,20 +83,20 @@ unsigned long sh_overrides_shadow_count(void);
 unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_len);
 
 /* Refresh the package list used by resource opens and return its count.
- * Readers use an atomically selected buffer; callers must serialize rescans
- * at a quiescent boundary. This exposes package bytes. decl_server rearm
- * publishes new identities.
+ * Readers hold a shared lock through path selection. Incomplete enumeration
+ * publishes an empty inventory and returns SH_OVERRIDES_RESCAN_FAILED.
  */
 unsigned long sh_overrides_rescan_packages(void);
+#define SH_OVERRIDES_RESCAN_FAILED ((unsigned long)-1)
 
-/* Reopen publication state for runtime rearm. Keep existing entries readable
- * and retain their allocations for streams that may still use them.
+/* Prepare runtime rearm without hiding existing entries. This retains READY
+ * until the replacement snapshot is complete.
  */
 void sh_overrides_internal_decl_table_reopen(void);
 
 /* Merge entries over the published table without dropping earlier identities.
- * New entries win on key collisions; prior allocations remain alive for
- * readers.
+ * New entries win on key collisions. Open streams own their bytes, so the
+ * previous snapshot can be released after publication.
  */
 int sh_overrides_internal_decl_table_merge(
     const sh_overrides_internal_decl_entry *entries, size_t count);
@@ -107,8 +107,11 @@ int sh_overrides_internal_decl_table_merge(
 int sh_overrides_uninstall(void);
 
 #ifdef SH_OVERRIDES_TESTING
+int sh_overrides_test_resolve_cached(const char *name, char *out, size_t cap);
 void sh_overrides_test_internal_decl_table_reset(void);
 int sh_overrides_test_internal_decl_table_install(
+    const sh_overrides_internal_decl_entry *entries, size_t count);
+int sh_overrides_test_internal_decl_table_merge(
     const sh_overrides_internal_decl_entry *entries, size_t count);
 void *sh_overrides_test_internal_decl_open(const char *name);
 long long sh_overrides_test_stream_read(void *stream, void *buffer, uint64_t length);

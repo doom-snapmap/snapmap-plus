@@ -146,6 +146,20 @@ static int ends_with_ci(const char *value, const char *suffix)
 /* Stub overlap reporting; package_conflicts_test covers its filesystem scan. */
 int sh_pkg_conflicts_report(const char *data_root) { (void)data_root; return 0; }
 
+static DWORD WINAPI resolve_during_rescan(LPVOID parameter)
+{
+    volatile LONG *failures = (volatile LONG *)parameter;
+    int i;
+    for (i = 0; i < 1200; i++) {
+        char path[MAX_PATH];
+        if (!sh_overrides_test_resolve_cached("generated/spirv/cyberdemonshockwave.vspv",
+                                              path, sizeof(path)) ||
+            !ends_with_ci(path, "\\cyberdemon\\shaders\\generated\\spirv\\cyberdemonshockwave.vspv"))
+            InterlockedIncrement(failures);
+    }
+    return 0;
+}
+
 int main(void)
 {
     char temp[MAX_PATH], root[MAX_PATH], path[MAX_PATH], resolved[MAX_PATH];
@@ -276,6 +290,32 @@ int main(void)
               "cooked/decls/snapeditorentitydef/demons/cyberdemon_enc.decl",
               resolved, sizeof(resolved)));
 
+    {
+        volatile LONG failures = 0;
+        HANDLE readers[3];
+        int i;
+        for (i = 0; i < 3; i++) {
+            readers[i] = CreateThread(NULL, 0, resolve_during_rescan, (void *)&failures, 0, NULL);
+            CHECK(readers[i] != NULL);
+        }
+        for (i = 0; i < 80; i++)
+            CHECK(sh_overrides_rescan_packages() != SH_OVERRIDES_RESCAN_FAILED);
+        for (i = 0; i < 3; i++) if (readers[i]) {
+            CHECK(WaitForSingleObject(readers[i], 30000) == WAIT_OBJECT_0);
+            CloseHandle(readers[i]);
+        }
+        CHECK(failures == 0);
+        for (i = 0; i < 65; i++) {
+            char suffix[100];
+            _snprintf_s(suffix, sizeof(suffix), _TRUNCATE,
+                        "overrides\\overflow-%02d\\package.json", i);
+            join(path, sizeof(path), root, suffix);
+            CHECK(write_file(path, "{}"));
+        }
+        CHECK(sh_overrides_rescan_packages() == SH_OVERRIDES_RESCAN_FAILED);
+        CHECK(!sh_overrides_test_resolve_cached("generated/spirv/cyberdemonshockwave.vspv",
+                                               resolved, sizeof(resolved)));
+    }
     remove_tree(root);
     if (g_failed) {
         fprintf(stderr, "override package resolution tests FAILED (%d)\n", g_failed);

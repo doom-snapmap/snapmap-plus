@@ -25,10 +25,13 @@
 #include "decl_text.h"
 #include "overrides.h"
 #include "palette_refresh.h"
+#include "engine_dialog.h"
 #include "decl_visibility.h"
 #include "packages.h"
 #include "resource_bridge.h"
 #include "user_overrides.h"
+#include "strids.h"
+#include "process_heap_scope.h"
 
 #define DS_INTERNAL_COMMAND     "snapmap_plus_decl_server_apply"
 #define DS_REARM_COMMAND        "snapmap_plus_decl_server_rearm"
@@ -253,17 +256,11 @@ static volatile LONG g_rearm_left_loaded;
 static volatile LONG g_rearm_drain_faults;
 static volatile LONG g_rearm_shadow_reparsed;
 static volatile LONG g_registration_succeeded = 0;
-
-/* Identities from the last completed pass distinguish newly served live decls
- * from content already published. Pre-existing objects for newly installed
- * content may contain stale or blacklist-emptied data.
- */
-typedef struct ds_pass_identity {
-    char type[SH_DECL_SERVER_TYPE_CAP];
-    char name[SH_DECL_SERVER_NAME_CAP];
-} ds_pass_identity;
-static ds_pass_identity *g_prev_identities;
-static size_t g_prev_identity_count;
+static volatile LONG g_runtime_ready = 0;
+static sh_process_heap_api g_runtime_heap;
+static volatile LONG g_visibility_required = 0;
+static uintptr_t g_boundary_editor, g_boundary_shell_slot;
+static uintptr_t g_boundary_common_slot, g_boundary_thread_slot;
 
 /* Track runtime pending-load marks so cleanup can disarm any undrained decl
  * before a later map lookup.
@@ -271,7 +268,7 @@ static size_t g_prev_identity_count;
 typedef struct ds_runtime_mark {
     void *decl;
     int candidate;
-    int shadowed;  /* 1 = newly served SHADOWED-live refresh, 0 = empty reused placeholder */
+    int shadowed;  /* 1 = live shadow refresh, 0 = empty reused placeholder */
 } ds_runtime_mark;
 static ds_runtime_mark g_rt_marks[DS_MAX_CANDIDATES];
 static int g_rt_mark_count;
@@ -294,6 +291,7 @@ static cmd_execute_buffer_fn g_execute_commands;
 static resource_generic_load_fn g_generic_load;
 static resource_promote_static_fn g_boot_promotion_original;
 static volatile LONG g_boot_promotion_entered;
+static volatile LONG g_boot_hook_retry;
 static char g_probe_type[SH_DECL_SERVER_TYPE_CAP];
 static char g_probe_name[SH_DECL_SERVER_NAME_CAP];
 static ds_find_first_fn g_find_first = FindFirstFileA;
@@ -955,7 +953,7 @@ int sh_decl_server_test_walk(const char *directory, const char *relative,
 /* Static package scratch avoids a large stack frame; capture is serialized. */
 static sh_package g_packages[SH_PACKAGES_MAX];
 
-static int ds_capture_snapshot(void)
+static int ds_capture_snapshot_locked(void)
 {
     char root[MAX_PATH];
     char directory[MAX_PATH];
@@ -966,6 +964,8 @@ static int ds_capture_snapshot(void)
     sh_decl_server_order_item *ordered = NULL;
     size_t i;
     int ok = 0;
+
+    g_capture_refused = 0;
 
     if (!sh_overrides_get_root(root, sizeof(root))) {
         backend_log("decl-server REFUSED: could not resolve the overrides root");
@@ -1140,6 +1140,18 @@ done:
     return ok;
 }
 
+static int ds_capture_snapshot(void)
+{
+    int ok;
+    sh_resource_bridge_snapshot_begin();
+    __try {
+        ok = ds_capture_snapshot_locked();
+    } __finally {
+        sh_resource_bridge_snapshot_end();
+    }
+    return ok;
+}
+
 static int ds_decode_registry(void **out_registry,
                               decl_type_by_name_fn *out_type_by_name,
                               decl_register_file_fn *out_register_file)
@@ -1192,15 +1204,21 @@ static int ds_publish_missing_table(int missing_count)
     int at = 0;
     int published;
 
-    if (missing_count <= 0 ||
-        (size_t)missing_count > SIZE_MAX / sizeof(entries[0])) return 0;
+    (void)missing_count;
+    if (g_candidate_count <= 0) return 1;
     entries = (sh_overrides_internal_decl_entry *)HeapAlloc(
         GetProcessHeap(), HEAP_ZERO_MEMORY,
-        (size_t)missing_count * sizeof(entries[0]));
+        (size_t)g_candidate_count * sizeof(entries[0]));
     if (!entries) return 0;
     for (i = 0; i < (size_t)g_candidate_count; i++) {
         ds_candidate *candidate = &g_candidates[i];
-        if (candidate->outcome != DS_CANDIDATE_MISSING) continue;
+        if (candidate->outcome != DS_CANDIDATE_MISSING) {
+            char key[SH_DECL_SERVER_TYPE_CAP + SH_DECL_SERVER_NAME_CAP + 32];
+            if (!g_rearm_is_runtime || candidate->outcome != DS_CANDIDATE_SHADOWED ||
+                _snprintf_s(key, sizeof(key), _TRUNCATE, "decltree/%s/%s.decl",
+                            candidate->type, candidate->name) < 0 ||
+                !sh_overrides_internal_decl_published(key)) continue;
+        }
         entries[at].type = candidate->type;
         entries[at].name = candidate->name;
         entries[at].body = (const unsigned char *)candidate->body;
@@ -1210,11 +1228,11 @@ static int ds_publish_missing_table(int missing_count)
     /* A runtime pass MERGES over the published table; only a boot pass replaces it. Replacing
      * on a re-arm drops identities an earlier pass published -- including packages this pass
      * never looked at -- and their decltree source stops resolving. */
-    published = at == missing_count &&
+    published = at == 0 ||
                 (InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)
-                     ? sh_overrides_internal_decl_table_merge(entries, (size_t)missing_count)
+                     ? sh_overrides_internal_decl_table_merge(entries, (size_t)at)
                      : sh_overrides_internal_decl_table_install(entries,
-                                                                (size_t)missing_count));
+                                                                (size_t)at));
     HeapFree(GetProcessHeap(), 0, entries);
     return published;
 }
@@ -1576,7 +1594,9 @@ static int ds_materialize_identity(ds_materialize_context *context, int index)
         __try {
             unsigned int *lvl = (unsigned int *)((unsigned char *)decl + DS_RES_LEVEL_OFF);
             if (*lvl != 4u) { *lvl = 4u; InterlockedIncrement(&g_rearm_touched_promoted); }
-        } __except (EXCEPTION_EXECUTE_HANDLER) { /* skip a torn decl */ }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            InterlockedIncrement(&g_rearm_drain_faults);
+        }
 
         /* Runtime premark already marked every refresh target before
          * materialization. This lookup may therefore have reloaded both this
@@ -1591,55 +1611,8 @@ static int ds_materialize_identity(ds_materialize_context *context, int index)
     return 1;
 }
 
-/* Previously admitted identities may have live consumers and must not be
- * reparsed.
- */
-static int ds_prev_identities_contain(const char *type, const char *name)
-{
-    size_t i;
-    for (i = 0; i < g_prev_identity_count; i++)
-        if (_stricmp(g_prev_identities[i].type, type) == 0 &&
-            _stricmp(g_prev_identities[i].name, name) == 0)
-            return 1;
-    return 0;
-}
-
-/* Replace the retained identity set with this pass's snapshot. Runs only when a pass
- * completes; a FAILED pass keeps the older set so a retry still treats the failed package's
- * identities as newly served. */
-static void ds_record_pass_identities(void)
-{
-    ds_pass_identity *fresh = NULL;
-    size_t recorded = 0;
-    int i;
-
-    if (g_candidate_count > 0)
-        fresh = (ds_pass_identity *)HeapAlloc(
-            GetProcessHeap(), HEAP_ZERO_MEMORY,
-            (size_t)g_candidate_count * sizeof(fresh[0]));
-    if (g_candidate_count > 0 && !fresh)
-        backend_log("decl-server: pass identity set allocation failed; the next runtime "
-                    "pass will treat every shadowed identity as newly served");
-    if (fresh) {
-        for (i = 0; i < g_candidate_count; i++) {
-            strcpy_s(fresh[recorded].type, sizeof(fresh[recorded].type), g_candidates[i].type);
-            strcpy_s(fresh[recorded].name, sizeof(fresh[recorded].name), g_candidates[i].name);
-            recorded++;
-        }
-    }
-    if (g_prev_identities) HeapFree(GetProcessHeap(), 0, g_prev_identities);
-    g_prev_identities = fresh;
-    g_prev_identity_count = fresh ? recorded : 0;
-}
-
-/* Mark all runtime refresh targets before any drain so parse-time references
- * can load pending dependencies. Targets are empty reused placeholders and
- * newly served live shadows absent from the last successful snapshot.
- *
- * Reject parse-in-progress objects. Source-only shadows load fresh on first
- * lookup. Do not restrict by decl type: the pass drains immediately at the
- * browser with no map loaded.
- */
+/* Mark every currently served live shadow before any reload. Source records
+ * and prior successful passes do not prove that the package bytes are unchanged. */
 static void ds_runtime_premark(ds_materialize_context *context)
 {
     int i;
@@ -1654,9 +1627,7 @@ static void ds_runtime_premark(ds_materialize_context *context)
 
         if (candidate->outcome == DS_CANDIDATE_MISSING) {
             shadowed_refresh = 0;
-        } else if (candidate->outcome == DS_CANDIDATE_SHADOWED &&
-                   candidate->shadow_kind == DS_SHADOW_LIVE &&
-                   !ds_prev_identities_contain(candidate->type, candidate->name)) {
+        } else if (candidate->outcome == DS_CANDIDATE_SHADOWED) {
             shadowed_refresh = 1;
         } else {
             continue;
@@ -1666,12 +1637,14 @@ static void ds_runtime_premark(ds_materialize_context *context)
             if (type_manager)
                 decl = context->find_decl(type_manager, candidate->name, 0);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            InterlockedIncrement(&g_rearm_drain_faults);
             decl = NULL;
         }
         if (!decl) continue;
         __try {
             unsigned char *st = (unsigned char *)decl + DS_DECL_STATE_OFFSET;
             if ((*st & DS_DECL_IN_PROGRESS) != 0) {
+                InterlockedIncrement(&g_rearm_drain_faults);
                 marked = 0;
             } else if (!shadowed_refresh && (*st & DS_DECL_HAS_SOURCE) != 0) {
                 InterlockedIncrement(&g_rearm_left_loaded);
@@ -1680,6 +1653,7 @@ static void ds_runtime_premark(ds_materialize_context *context)
                 marked = 1;
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            InterlockedIncrement(&g_rearm_drain_faults);
             marked = 0;
         }
         if (marked && g_rt_mark_count < DS_MAX_CANDIDATES) {
@@ -1716,7 +1690,10 @@ static void ds_runtime_reload_shadowed(ds_materialize_context *context)
         __try {
             unsigned int *lvl = (unsigned int *)((unsigned char *)decl + DS_RES_LEVEL_OFF);
             if (*lvl != 4u) { *lvl = 4u; InterlockedIncrement(&g_rearm_touched_promoted); }
-        } __except (EXCEPTION_EXECUTE_HANDLER) { }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            InterlockedIncrement(&g_rearm_drain_faults);
+            g_rt_marks[i].shadowed = 0;
+        }
     }
 
     for (i = 0; i < g_rt_mark_count; i++) {
@@ -1796,7 +1773,7 @@ static int ds_runtime_clear_stray_pending(void)
                 *st = (unsigned char)(*st & ~DS_DECL_PENDING_LOAD);
                 cleared++;
             }
-        } __except (EXCEPTION_EXECUTE_HANDLER) { }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { cleared++; }
     }
     g_rt_mark_count = 0;
     return cleared;
@@ -1972,7 +1949,8 @@ enum {
     DS_PHASE_FAILURE_NONE = 0,
     DS_PHASE_FAILURE_SCAN,
     DS_PHASE_FAILURE_MATERIALIZATION,
-    DS_PHASE_FAILURE_PALETTE
+    DS_PHASE_FAILURE_PALETTE,
+    DS_PHASE_FAILURE_VISIBILITY
 };
 
 /* This is the production two-phase boundary. Every missing source is scanned
@@ -2051,7 +2029,8 @@ static int ds_scan_and_materialize_missing(
     }
     if (!ds_materialize_missing_sedefs(registry, type_by_name, source_find,
                                        find_decl,
-                                       materialized)) {
+                                       materialized) ||
+        (g_rearm_is_runtime && g_rearm_drain_faults)) {
         if (refused) (*refused)++;
         ds_refuse_remaining(0,
                             "source registered; live materialization did not complete after a terminal materialization failure",
@@ -2064,13 +2043,16 @@ static int ds_scan_and_materialize_missing(
          * identities must remain addressable during map load even if the
          * palette step declines.
          */
-        char owned[SH_DECL_SERVER_TYPE_CAP + SH_DECL_SERVER_NAME_CAP + 32];
         char published[SH_DECL_SERVER_TYPE_CAP + SH_DECL_SERVER_NAME_CAP + 32];
-        if (ds_probe_path(DS_CANDIDATE_SHADOWED, owned, sizeof(owned)) &&
-            ds_probe_path(DS_CANDIDATE_MISSING, published, sizeof(published)))
-            (void)sh_decl_visibility_install(g_module_base, owned, published);
-        else
-            backend_log("decl-visibility REFUSED: no owned/published candidate pair was available to validate the probe");
+        if (ds_probe_path(DS_CANDIDATE_MISSING, published, sizeof(published)))
+            InterlockedExchange(&g_visibility_required, 1);
+        /* Probe paths are diagnostic only. A new-only package must not need
+         * an unrelated shipped shadow before its visibility can be installed. */
+        if (g_visibility_required &&
+            !sh_decl_visibility_install(g_module_base, NULL, NULL)) {
+            if (failure_phase) *failure_phase = DS_PHASE_FAILURE_VISIBILITY;
+            return 0;
+        }
     }
     {
         int palette_ok = 0;
@@ -2101,37 +2083,14 @@ void sh_decl_server_test_set_generic_load(sh_decl_server_test_generic_load_fn fn
 
 void sh_decl_server_test_reset_runtime_state(void)
 {
-    if (g_prev_identities) {
-        HeapFree(GetProcessHeap(), 0, g_prev_identities);
-        g_prev_identities = NULL;
-    }
-    g_prev_identity_count = 0;
     g_rt_mark_count = 0;
     g_generic_load = NULL;
+    memset(&g_runtime_heap, 0, sizeof(g_runtime_heap));
     InterlockedExchange(&g_rearm_touched_promoted, 0);
     InterlockedExchange(&g_rearm_marked_pending, 0);
     InterlockedExchange(&g_rearm_left_loaded, 0);
     InterlockedExchange(&g_rearm_drain_faults, 0);
     InterlockedExchange(&g_rearm_shadow_reparsed, 0);
-}
-
-int sh_decl_server_test_add_prev_identity(const char *type, const char *name)
-{
-    ds_pass_identity *grown;
-    if (!type || !name) return 0;
-    grown = (ds_pass_identity *)HeapAlloc(
-        GetProcessHeap(), HEAP_ZERO_MEMORY,
-        (g_prev_identity_count + 1) * sizeof(grown[0]));
-    if (!grown) return 0;
-    if (g_prev_identities) {
-        memcpy(grown, g_prev_identities, g_prev_identity_count * sizeof(grown[0]));
-        HeapFree(GetProcessHeap(), 0, g_prev_identities);
-    }
-    strcpy_s(grown[g_prev_identity_count].type, sizeof(grown[0].type), type);
-    strcpy_s(grown[g_prev_identity_count].name, sizeof(grown[0].name), name);
-    g_prev_identities = grown;
-    g_prev_identity_count++;
-    return 1;
 }
 
 void sh_decl_server_test_runtime_counters(long *marked_pending, long *left_loaded,
@@ -2326,14 +2285,14 @@ static void __cdecl ds_apply_command(void)
         missing++;
     }
 
-    if (missing == 0) {
+    if (missing == 0 && shadowed == 0) {
         char line[256];
         _snprintf_s(line, sizeof(line), _TRUNCATE,
                     "decl-server table not required: 0 MISSING, %d SHADOWED, %d REFUSED; no decltree entries published",
                     shadowed, refused);
         backend_log(line);
-        ds_record_pass_identities();
-        InterlockedExchange(&g_state, DS_STATE_DONE);
+        InterlockedExchange(&g_registration_succeeded, refused == 0);
+        InterlockedExchange(&g_state, refused ? DS_STATE_FAILED : DS_STATE_DONE);
         ds_free_candidates();
         return;
     }
@@ -2350,7 +2309,7 @@ static void __cdecl ds_apply_command(void)
         int registered = 0;
         int failed = 0;
         int materialization_failed = 0;
-        int palette_declined = 0;
+        int usability_failed = 0;
         int materialized = 0;
         int failure_phase = DS_PHASE_FAILURE_NONE;
         const char *failed_source = NULL;
@@ -2365,11 +2324,7 @@ static void __cdecl ds_apply_command(void)
                 materialization_failed = 1;
                 backend_log("decl-server FAILED: native source scans completed but a new snapEditorEntityDef could not be materialized; no palette refresh; no retry");
             } else {
-                /* A refused palette rebuild does not undo successful
-                 * declaration registration; its own log explains the
-                 * integrity failure.
-                 */
-                palette_declined = 1;
+                usability_failed = 1;
             }
         }
         if (failed) {
@@ -2387,14 +2342,17 @@ static void __cdecl ds_apply_command(void)
                         registered, shadowed, refused);
             backend_log(line);
             InterlockedExchange(&g_state, DS_STATE_FAILED);
+        } else if (usability_failed || refused ||
+                   InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) {
+            backend_log("decl-server FAILED: registered sources remain retained, but visibility, palette, or candidate refresh did not complete; map loads remain gated");
+            InterlockedExchange(&g_state, DS_STATE_FAILED);
         } else {
             char line[448];
             _snprintf_s(line, sizeof(line), _TRUNCATE,
                         "decl-server registration succeeded: %d MISSING registered in dependency order, %d live objects materialized, %d of them new editor entities held to the native palette contract, %d SHADOWED, %d REFUSED; the entity-palette rebuild that makes these types nameable by a loading map was %s",
                         registered, materialized, ds_admitted_root_count(),
                         shadowed, refused,
-                        palette_declined ? "DECLINED (see the palette-refresh line above)"
-                                         : "completed");
+                        "completed");
             backend_log(line);
             /* Retain one identity, not an object pointer, for the post-
              * promotion lifetime check.
@@ -2405,7 +2363,6 @@ static void __cdecl ds_apply_command(void)
                 strcpy_s(g_probe_name, sizeof(g_probe_name), g_candidates[i].name);
                 break;
             }
-            ds_record_pass_identities();
             InterlockedExchange(&g_registration_succeeded, 1);
             InterlockedExchange(&g_state, DS_STATE_DONE);
         }
@@ -2433,47 +2390,42 @@ static void __cdecl ds_apply_command(void)
  * every identity is created fresh and the engine's own promotion covers them all. */
 /* Registry watermark/delta promotion, defined below next to the re-arm driver. */
 static int  ds_res_watermark(void);
-static void ds_res_promote_delta(unsigned char level);
+static int ds_res_promote_delta(unsigned char level);
 
-static void __cdecl ds_rearm_command(void)
+/* Both renderer globals are signature-resolved. Require the inactive editor,
+ * settled browser menus and the common loading byte; raw load_state can stay
+ * at 2 even after a playtest finishes loading. Never infer safety from mapPtr,
+ * which remains populated after returning to the browser. */
+static int ds_runtime_boundary_safe(void)
+{
+    const unsigned char *shell, *manager, *common;
+    int current, next;
+    if (!g_module_base) return 0;
+    if (!g_boundary_editor || !g_boundary_shell_slot ||
+        !g_boundary_common_slot || !g_boundary_thread_slot) return 0;
+    __try {
+        if (*(const DWORD *)g_boundary_thread_slot != GetCurrentThreadId() ||
+            *(const unsigned char *)(g_boundary_editor + 9) != 0) return 0;
+        shell = *(const unsigned char **)g_boundary_shell_slot;
+        common = *(const unsigned char **)g_boundary_common_slot;
+        if (!shell || !common || common[0xf576] != 0) return 0;
+        manager = *(const unsigned char **)(shell + 0x18);
+        if (!manager || !sh_engine_dialog_queue_idle(shell) ||
+            *(const int *)(manager + 8) != 0x3f ||
+            *(const int *)(manager + 12) != 0x3f) return 0;
+        current = *(const int *)(manager + 0x910);
+        next = *(const int *)(manager + 0x914);
+        return current >= 0 && current != 10 && current == next;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+static void ds_rearm_in_process_heap(void)
 {
     char line[192];
     unsigned long packages;
-
-    /* Run synchronously. Requirements rearm drains its queued cvars before
-     * returning, so registration does not need a frame delay.
-     */
     {
-        LONG st = InterlockedCompareExchange(&g_state, 0, 0);
-        if (st != DS_STATE_DONE && st != DS_STATE_FAILED) {
-            backend_log("decl-server RE-ARM refused: a pass is in flight");
-            return;
-        }
-        packages = sh_overrides_rescan_packages();
-        {
-            char rr[MAX_PATH];
-            if (sh_overrides_get_root(rr, sizeof rr)) {
-                (void)sh_resource_bridge_recapture(rr);
-                (void)sh_weapon_hud_reload(rr);
-                /* Synchronous: this applies the gates AND drains them before returning. */
-                if (!sh_package_requirements_rearm(rr, (void *)g_execute_commands,
-                                                   sh_user_overrides_enabled_for_launch()))
-                    backend_log("decl-server RE-ARM: package requirements were not applied; "
-                                "cut-content packages will fail to materialize");
-            }
-        }
-        /* Reopen publication state while retaining table contents for the
-         * runtime merge.
-         */
-        sh_overrides_internal_decl_table_reopen();
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "decl-server RE-ARM: %u package(s) visible, gates applied and drained; "
-                    "registering in the same pass", (unsigned)packages);
-        backend_log(line);
-    }
-
-    {
-        /* Permit another pass after a prior failure, which may have been transient. */
         LONG st = InterlockedCompareExchange(&g_state, DS_STATE_INSTALLING, DS_STATE_DONE);
         if (st != DS_STATE_DONE)
             st = InterlockedCompareExchange(&g_state, DS_STATE_INSTALLING, DS_STATE_FAILED);
@@ -2484,6 +2436,22 @@ static void __cdecl ds_rearm_command(void)
     }
     InterlockedExchange(&g_registration_succeeded, 0);
     ds_free_candidates();
+    packages = sh_overrides_rescan_packages();
+    {
+        char root[MAX_PATH];
+        if (packages == SH_OVERRIDES_RESCAN_FAILED ||
+            !sh_overrides_get_root(root, sizeof(root)) ||
+            !sh_resource_bridge_recapture(root) ||
+            !sh_weapon_hud_reload(root) ||
+            !sh_package_requirements_rearm(root, (void *)g_execute_commands, 1) ||
+            !sh_strids_rearm()) {
+            backend_log("decl-server RE-ARM refused: package inventory, requirements, resources, HUD, or strings failed to refresh");
+            InterlockedExchange(&g_state, DS_STATE_FAILED);
+            return;
+        }
+    }
+    /* Requirements drain synchronously before any native declaration parse. */
+    sh_overrides_internal_decl_table_reopen();
 
     if (!ds_capture_snapshot()) {
         backend_log("decl-server RE-ARM refused: fresh snapshot capture failed");
@@ -2492,7 +2460,8 @@ static void __cdecl ds_rearm_command(void)
         return;
     }
     if (g_candidate_count == 0) {
-        backend_log("decl-server RE-ARM: nothing to do (no candidates in the fresh snapshot)");
+        backend_log("decl-server RE-ARM complete: no declaration candidates in the fresh snapshot");
+        InterlockedExchange(&g_registration_succeeded, 1);
         InterlockedExchange(&g_state, DS_STATE_DONE);
         ds_free_candidates();
         return;
@@ -2517,6 +2486,12 @@ static void __cdecl ds_rearm_command(void)
     {
         int marked = ds_res_watermark();
         char tline[288];
+        if (!marked) {
+            backend_log("decl-server RE-ARM refused: resource lifetime watermark unavailable");
+            InterlockedExchange(&g_state, DS_STATE_FAILED);
+            ds_free_candidates();
+            return;
+        }
         InterlockedExchange(&g_rearm_touched_promoted, 0);
         InterlockedExchange(&g_rearm_marked_pending, 0);
         InterlockedExchange(&g_rearm_left_loaded, 0);
@@ -2524,18 +2499,23 @@ static void __cdecl ds_rearm_command(void)
         InterlockedExchange(&g_rearm_shadow_reparsed, 0);
         InterlockedExchange(&g_rearm_is_runtime, 1);
         ds_apply_command();
-        InterlockedExchange(&g_rearm_is_runtime, 0);
         {
             int stray = ds_runtime_clear_stray_pending();
             if (stray) {
                 char sline[192];
+                InterlockedExchange(&g_registration_succeeded, 0);
+                InterlockedExchange(&g_state, DS_STATE_FAILED);
                 _snprintf_s(sline, sizeof sline, _TRUNCATE,
                             "decl-server: %d marked decl(s) were never drained; pending-load "
                             "cleared so nothing re-parses during the next map load", stray);
                 backend_log(sline);
             }
         }
-        if (marked) ds_res_promote_delta(4);
+        if (!ds_res_promote_delta(4)) {
+            InterlockedExchange(&g_registration_succeeded, 0);
+            InterlockedExchange(&g_state, DS_STATE_FAILED);
+            backend_log("decl-server FAILED: runtime resource lifetime promotion was incomplete");
+        }
         _snprintf_s(tline, sizeof tline, _TRUNCATE,
                     "decl-server: %ld pre-existing decl(s) the pass REUSED were also raised to "
                     "level 4; %ld empty one(s) re-parsed here at the browser, %ld left alone "
@@ -2548,6 +2528,46 @@ static void __cdecl ds_rearm_command(void)
                     (long)InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0),
                     (long)InterlockedCompareExchange(&g_rearm_shadow_reparsed, 0, 0));
         backend_log(tline);
+        InterlockedExchange(&g_rearm_is_runtime, 0);
+    }
+}
+
+static void __cdecl ds_rearm_command(void)
+{
+    sh_process_heap_scope scope;
+    int restored = 1;
+    if (!InterlockedCompareExchange(&g_runtime_ready, 0, 0) ||
+        !sh_user_overrides_enabled_for_launch()) {
+        backend_log("decl-server RE-ARM refused: runtime dependencies are unavailable");
+        return;
+    }
+    if (!ds_runtime_boundary_safe()) {
+        backend_log("decl-server RE-ARM deferred: return to the settled SnapMap browser before refreshing packages");
+        sh_decl_server_request_rearm();
+        return;
+    }
+    if (!sh_process_heap_enter(&g_runtime_heap, &scope)) {
+        InterlockedExchange(&g_registration_succeeded, 0);
+        InterlockedExchange(&g_state, DS_STATE_FAILED);
+        if (scope.active) InterlockedExchange(&g_runtime_ready, 0);
+        backend_log("decl-server RE-ARM refused: process heap scope could not be established");
+        return;
+    }
+    /* Resource levels do not protect raw palette arrays or declaration-owned
+     * strings. Match native editor initialization's process-heap scope. */
+    __try {
+        __try { ds_rearm_in_process_heap(); }
+        __finally { restored = sh_process_heap_leave(&scope); }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedExchange(&g_registration_succeeded, 0);
+        InterlockedExchange(&g_state, DS_STATE_FAILED);
+        backend_log("decl-server RE-ARM refused: native refresh raised an exception");
+    }
+    if (!restored) {
+        InterlockedExchange(&g_registration_succeeded, 0);
+        InterlockedExchange(&g_state, DS_STATE_FAILED);
+        InterlockedExchange(&g_runtime_ready, 0);
+        backend_log("decl-server RE-ARM refused: process heap scope was not restored; further refresh disabled");
     }
 }
 
@@ -2592,16 +2612,22 @@ static size_t ds_res_walk(void (*visit)(void *entry, void *ctx), void *ctx)
             void **arr = *(void ***)((unsigned char *)node + DS_RES_ARR_OFF);
             int cnt = *(int *)((unsigned char *)node + DS_RES_CNT_OFF);
             int i;
-            if (arr && cnt > 0 && (unsigned)cnt < DS_RES_MAX_ENTRIES) {
+            if (cnt < 0 || (unsigned)cnt >= DS_RES_MAX_ENTRIES || (cnt && !arr)) return 0;
+            if (arr && cnt > 0) {
                 for (i = 0; i < cnt; i++) {
                     void *e = arr[i];
-                    if (e) { if (visit) visit(e, ctx); seen++; }
+                    if (e) {
+                        if (seen >= DS_RES_MAX_ENTRIES) return 0;
+                        if (visit) visit(e, ctx);
+                        seen++;
+                    }
                 }
             }
             node = *(void **)((unsigned char *)node + DS_RES_NEXT_OFF);
         }
+        if (node) return 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return seen;
+        return 0;
     }
     return seen;
 }
@@ -2623,16 +2649,20 @@ static int ds_res_watermark(void)
     if (g_res_mark) { HeapFree(GetProcessHeap(), 0, g_res_mark); g_res_mark = NULL; }
     g_res_mark_count = 0;
 
-    ds_res_walk(ds_res_count_visit, &total);
-    if (total == 0 || total >= DS_RES_MAX_ENTRIES) {
-        backend_log("decl-server: registry watermark unavailable; runtime content will be "
-                    "left map-scoped and the next map transition will free it");
+    if (ds_res_walk(ds_res_count_visit, &total) != total ||
+        total == 0 || total >= DS_RES_MAX_ENTRIES) {
+        backend_log("decl-server: complete registry watermark unavailable; runtime registration refused");
         return 0;
     }
     g_res_mark = (void **)HeapAlloc(GetProcessHeap(), 0, total * sizeof(void *));
     if (!g_res_mark) return 0;
     g_res_mark_count = total;
-    ds_res_walk(ds_res_collect_visit, &filled);
+    if (ds_res_walk(ds_res_collect_visit, &filled) != total || filled != total) {
+        HeapFree(GetProcessHeap(), 0, g_res_mark);
+        g_res_mark = NULL;
+        g_res_mark_count = 0;
+        return 0;
+    }
     g_res_mark_count = filled;
     qsort(g_res_mark, g_res_mark_count, sizeof(void *), ds_res_ptr_cmp);
     _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -2658,13 +2688,14 @@ static void ds_res_promote_visit(void *entry, void *ctx)
 
 /* Raise everything that appeared since the watermark to `level`. 4 = permanent, which is the
  * parity boot-registered content already has. */
-static void ds_res_promote_delta(unsigned char level)
+static int ds_res_promote_delta(unsigned char level)
 {
     ds_res_promote_ctx c;
     char line[192];
-    if (!g_res_mark || g_res_mark_count == 0) return;
+    size_t visited;
+    if (!g_res_mark || g_res_mark_count == 0) return 0;
     c.fresh = 0; c.poked = 0; c.level = level;
-    ds_res_walk(ds_res_promote_visit, &c);
+    visited = ds_res_walk(ds_res_promote_visit, &c);
     _snprintf_s(line, sizeof line, _TRUNCATE,
                 "decl-server: %u resource(s) appeared during registration, %u promoted to "
                 "level %u -- they now survive the map-transition purge",
@@ -2673,6 +2704,7 @@ static void ds_res_promote_delta(unsigned char level)
     HeapFree(GetProcessHeap(), 0, g_res_mark);
     g_res_mark = NULL;
     g_res_mark_count = 0;
+    return visited != 0 && c.fresh == c.poked;
 }
 
 /* Runtime package installs request rearm from any thread; the main-thread
@@ -2684,7 +2716,7 @@ enum {
 };
 static volatile LONG g_auto_state;
 
-/* Ask for a runtime re-arm. Safe from any thread; the work happens on the engine tick. */
+/* Request refresh from any thread; the engine Frame services it at the browser. */
 void sh_decl_server_request_rearm(void)
 {
     if (InterlockedCompareExchange(&g_auto_state, DS_AUTO_RUN, DS_AUTO_IDLE) == DS_AUTO_IDLE)
@@ -2697,12 +2729,16 @@ void sh_decl_server_request_rearm(void)
  */
 void sh_decl_server_rearm_poll(void)
 {
+    LONG state = InterlockedCompareExchange(&g_state, 0, 0);
+    if (InterlockedCompareExchange(&g_auto_state, 0, 0) != DS_AUTO_RUN) return;
+    if (!InterlockedCompareExchange(&g_runtime_ready, 0, 0)) return;
+    if (state != DS_STATE_DONE && state != DS_STATE_FAILED) return;
+    if (!ds_runtime_boundary_safe()) return;
     if (InterlockedCompareExchange(&g_auto_state, DS_AUTO_IDLE, DS_AUTO_RUN) != DS_AUTO_RUN)
         return;
     ds_rearm_command();
     if (sh_decl_server_registration_succeeded())
-        backend_log("decl-server: runtime re-arm COMPLETE -- new identities are registered; "
-                    "give them a lifetime before the next map transition");
+        backend_log("decl-server: runtime re-arm COMPLETE -- declarations, palette, strings and lifetimes refreshed");
 }
 
 /* Programmatic entry point for the same pass. Returns 1 when the pass was driven.
@@ -2710,9 +2746,13 @@ void sh_decl_server_rearm_poll(void)
 int sh_decl_server_rearm(void)
 {
     LONG before = InterlockedCompareExchange(&g_state, 0, 0);
-    if (before != DS_STATE_DONE) return 0;
+    if (before != DS_STATE_DONE && before != DS_STATE_FAILED) return 0;
+    if (!ds_runtime_boundary_safe()) {
+        sh_decl_server_request_rearm();
+        return 0;
+    }
     ds_rearm_command();
-    return InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE;
+    return sh_decl_server_registration_succeeded();
 }
 
 static void ds_publish_before_boot_promotion(void)
@@ -2779,7 +2819,8 @@ static void ds_boot_promotion_detour(void)
     /* The engine calls the promotion exactly once (single xref, 0x17C6479), but a detour may not
      * assume its target's call count. Publish on the first entry only; any later entry is a plain
      * pass-through. */
-    if (InterlockedCompareExchange(&g_boot_promotion_entered, 1, 0) == 0) {
+    if (InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_ARMED &&
+        InterlockedCompareExchange(&g_boot_promotion_entered, 1, 0) == 0) {
         __try {
             ds_publish_before_boot_promotion();
         } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -2800,7 +2841,11 @@ static void ds_boot_promotion_detour(void)
 
 int sh_decl_server_registration_succeeded(void)
 {
-    return InterlockedCompareExchange(&g_registration_succeeded, 0, 0) != 0;
+    return InterlockedCompareExchange(&g_registration_succeeded, 0, 0) != 0 &&
+           InterlockedCompareExchange(&g_runtime_ready, 0, 0) != 0 &&
+           InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE &&
+           InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0) == 0 &&
+           InterlockedCompareExchange(&g_auto_state, 0, 0) == DS_AUTO_IDLE;
 }
 
 int sh_decl_server_install(const sig_result *results, size_t count,
@@ -2818,6 +2863,21 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     uintptr_t execute_commands;
     uintptr_t generic_load;
     int command_registered = 0;
+    if (g_boot_promotion_original) {
+        if (hook_is_installed((void *)g_boot_promotion_original))
+            return InterlockedCompareExchange(&g_state, 0, 0) != DS_STATE_FAILED;
+        InterlockedExchange(&g_runtime_ready, 0);
+        InterlockedExchange(&g_state, DS_STATE_FAILED);
+        if (!hook_unpatch((void *)g_boot_promotion_original)) return 0;
+        g_boot_promotion_original = NULL;
+        InterlockedExchange(&g_boot_hook_retry, 1);
+    }
+    /* Only hook setup failures may reset installation after recovery. */
+    if (InterlockedExchange(&g_boot_hook_retry, 0)) {
+        InterlockedExchange(&g_runtime_ready, 0);
+        InterlockedExchange(&g_boot_promotion_entered, 0);
+        InterlockedExchange(&g_state, DS_STATE_NEW);
+    }
     if (InterlockedCompareExchange(&g_state, DS_STATE_INSTALLING, DS_STATE_NEW) != DS_STATE_NEW)
         return 0;
     InterlockedExchange(&g_registration_succeeded, 0);
@@ -2830,11 +2890,6 @@ int sh_decl_server_install(const sig_result *results, size_t count,
         InterlockedExchange(&g_state, DS_STATE_FAILED);
         ds_free_candidates();
         return 0;
-    }
-    if (g_candidate_count == 0) {
-        InterlockedExchange(&g_state, DS_STATE_DONE);
-        ds_free_candidates();
-        return 1;
     }
     if (!sh_overrides_internal_decl_table_can_install()) {
         backend_log("decl-server REFUSED: exact per-decl provider table is unavailable, disabled, or already occupied");
@@ -2865,6 +2920,7 @@ int sh_decl_server_install(const sig_result *results, size_t count,
         !register_file->addr || !find_decl->addr ||
         !idstr_ctor || !idstr_dtor || !boot_promote || !execute_commands ||
         !generic_load || !add_command || !cmdsys || !module_base ||
+        !sh_process_heap_bind(&g_runtime_heap, results, count, module_base) ||
         !ds_clean_identity(results, count, "DeclRegistryAnchor", module_base, DS_PINNED_ANCHOR_RVA) ||
         !ds_clean_identity(results, count, "DeclTypeByName", module_base, DS_PINNED_TYPE_RVA) ||
         !ds_clean_identity(results, count, "DeclRegisterFile", module_base, DS_PINNED_REGISTER_RVA) ||
@@ -2896,6 +2952,11 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     g_find_decl = (decl_find_fn)find_decl->addr;
     g_execute_commands = (cmd_execute_buffer_fn)execute_commands;
     g_generic_load = (resource_generic_load_fn)generic_load;
+    /* Resolve once, including failure; never scan an unknown image on every tick. */
+    g_boundary_editor = glb_resolve(module_base, "editor_singleton", NULL);
+    g_boundary_shell_slot = glb_resolve(module_base, "shell_ptr_slot", NULL);
+    g_boundary_common_slot = glb_resolve(module_base, "validator_manager", NULL);
+    g_boundary_thread_slot = glb_resolve(module_base, "main_thread_id", NULL);
 
     /* Keep a named state-guarded apply command for diagnostics. Boot normally
      * invokes the same pass directly from the promotion hook.
@@ -2917,6 +2978,15 @@ int sh_decl_server_install(const sig_result *results, size_t count,
         return 0;
     }
 
+    if (g_candidate_count == 0) {
+        InterlockedExchange(&g_runtime_ready, 1);
+        backend_log("decl-server ready: empty launch; runtime commands and dependencies remain bound");
+        InterlockedExchange(&g_registration_succeeded, 1);
+        InterlockedExchange(&g_state, DS_STATE_DONE);
+        ds_free_candidates();
+        return 1;
+    }
+
     /* Arm before installing the hook so a fast boot cannot enter with NEW state. */
     InterlockedExchange(&g_state, DS_STATE_ARMED);
 
@@ -2924,15 +2994,30 @@ int sh_decl_server_install(const sig_result *results, size_t count,
      * publishes, then forwards to the original function.
      */
     g_boot_promotion_original =
-        (resource_promote_static_fn)install_inline_hook((void *)boot_promote,
+        (resource_promote_static_fn)hook_prepare((void *)boot_promote,
                                                         (void *)ds_boot_promotion_detour,
                                                         DS_BOOT_PROMOTE_STOLEN_BYTES);
     if (!g_boot_promotion_original) {
         backend_log("decl-server REFUSED: the engine boot-promotion detour could not be installed; nothing is published rather than publishing content a playtest would destroy");
         InterlockedExchange(&g_state, DS_STATE_FAILED);
+        InterlockedExchange(&g_runtime_ready, 0);
+        InterlockedExchange(&g_boot_hook_retry, 1);
         ds_free_candidates();
         return 0;
     }
+    if (hook_commit((void *)g_boot_promotion_original) != B2_PATCH_OK) {
+        /* FAILED blocks candidate access if restoration leaves the detour live. */
+        InterlockedExchange(&g_state, DS_STATE_FAILED);
+        InterlockedExchange(&g_runtime_ready, 0);
+        InterlockedExchange(&g_boot_hook_retry, 1);
+        if (hook_unpatch((void *)g_boot_promotion_original))
+            g_boot_promotion_original = NULL;
+        backend_log("decl-server REFUSED: boot-promotion commit failed; any pending restoration retains its original callback");
+        ds_free_candidates();
+        return 0;
+    }
+    /* A commit-time detour may finish publication before installation returns. */
+    InterlockedExchange(&g_runtime_ready, 1);
     {
         char line[320];
         _snprintf_s(line, sizeof(line), _TRUNCATE,
@@ -2943,3 +3028,72 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     }
     return 1;
 }
+
+#ifdef SH_DECL_SERVER_TESTING
+int sh_decl_server_test_lifetime_watermark(void) { return ds_res_watermark(); }
+int sh_decl_server_test_promote_delta(void) { return ds_res_promote_delta(4); }
+
+void sh_decl_server_test_reset_install(void)
+{
+    /* Test callers stop using the synthetic hook before resetting its owner. */
+    if (g_boot_promotion_original && !hook_unpatch((void *)g_boot_promotion_original)) return;
+    g_boot_promotion_original = NULL;
+    InterlockedExchange(&g_boot_promotion_entered, 0);
+    InterlockedExchange(&g_boot_hook_retry, 0);
+    ds_free_candidates();
+    sh_decl_server_test_reset_runtime_state();
+    g_registry_anchor = NULL;
+    g_expected_type_by_name = NULL;
+    g_expected_register_file = NULL;
+    g_find_source = NULL;
+    g_find_decl = NULL;
+    g_idstr_ctor = NULL;
+    g_idstr_dtor = NULL;
+    g_execute_commands = NULL;
+    g_generic_load = NULL;
+    g_cmdsys = NULL;
+    g_add_command = NULL;
+    g_boundary_editor = g_boundary_shell_slot = 0;
+    g_boundary_common_slot = g_boundary_thread_slot = 0;
+    InterlockedExchange(&g_state, DS_STATE_NEW);
+    InterlockedExchange(&g_runtime_ready, 0);
+    InterlockedExchange(&g_registration_succeeded, 0);
+    InterlockedExchange(&g_visibility_required, 0);
+    InterlockedExchange(&g_auto_state, DS_AUTO_IDLE);
+}
+
+int sh_decl_server_test_apply(const sh_decl_server_test_materialize_item *items,
+                              size_t count, int runtime)
+{
+    size_t i;
+    if (!items || count > DS_MAX_CANDIDATES || !g_runtime_ready) return 0;
+    ds_free_candidates();
+    g_capture_refused = 0;
+    g_candidates = (ds_candidate *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                             count * sizeof(g_candidates[0]));
+    if (!g_candidates && count) return 0;
+    g_candidate_count = (int)count;
+    for (i = 0; i < count; i++) {
+        ds_candidate *candidate = &g_candidates[i];
+        strcpy_s(candidate->type, sizeof(candidate->type), items[i].type);
+        strcpy_s(candidate->name, sizeof(candidate->name), items[i].name);
+        strcpy_s(candidate->source, sizeof(candidate->source), items[i].source);
+        candidate->body_length = items[i].body_length;
+        candidate->body = (char *)HeapAlloc(GetProcessHeap(), 0, items[i].body_length + 1);
+        if (!candidate->body) { ds_free_candidates(); return 0; }
+        memcpy(candidate->body, items[i].body, items[i].body_length);
+        candidate->body[items[i].body_length] = '\0';
+    }
+    InterlockedExchange(&g_registration_succeeded, 0);
+    InterlockedExchange(&g_rearm_is_runtime, runtime ? 1 : 0);
+    InterlockedExchange(&g_rearm_drain_faults, 0);
+    InterlockedExchange(&g_state, DS_STATE_QUEUED);
+    ds_apply_command();
+    if (ds_runtime_clear_stray_pending()) {
+        InterlockedExchange(&g_registration_succeeded, 0);
+        InterlockedExchange(&g_state, DS_STATE_FAILED);
+    }
+    InterlockedExchange(&g_rearm_is_runtime, 0);
+    return sh_decl_server_registration_succeeded();
+}
+#endif

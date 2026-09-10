@@ -296,10 +296,62 @@ static void test_file_stream_is_read_only(void)
 /* Stub overlap reporting; package_conflicts_test covers its filesystem scan. */
 int sh_pkg_conflicts_report(const char *data_root) { (void)data_root; return 0; }
 
+static void test_refresh_keeps_open_streams(void)
+{
+    static const unsigned char old_body[] = "old body";
+    static const unsigned char new_body[] = "new body";
+    sh_overrides_internal_decl_entry entry = {"material", "test/refresh", old_body, 8};
+    char bytes[16] = {0};
+    void *old_stream, *new_stream;
+    g_user_enabled = 1;
+    sh_overrides_test_internal_decl_table_reset();
+    CHECK(sh_overrides_test_internal_decl_table_install(&entry, 1) == 1);
+    old_stream = sh_overrides_test_internal_decl_open("decltree/material/test/refresh.decl");
+    CHECK(old_stream != NULL);
+    sh_overrides_internal_decl_table_reopen();
+    CHECK(sh_overrides_internal_decl_published("decltree/material/test/refresh.decl") == 1);
+    entry.body = new_body;
+    for (int i = 0; i < 80; i++)
+        CHECK(sh_overrides_test_internal_decl_table_merge(&entry, 1) == 1);
+    CHECK(sh_overrides_internal_decl_published_count() == 1);
+    new_stream = sh_overrides_test_internal_decl_open("decltree/material/test/refresh.decl");
+    CHECK(new_stream != NULL);
+    if (old_stream) {
+        CHECK(sh_overrides_test_stream_read(old_stream, bytes, 8) == 8);
+        CHECK(memcmp(bytes, old_body, 8) == 0);
+        sh_overrides_test_stream_close(old_stream);
+    }
+    if (new_stream) {
+        CHECK(sh_overrides_test_stream_read(new_stream, bytes, 8) == 8);
+        CHECK(memcmp(bytes, new_body, 8) == 0);
+        sh_overrides_test_stream_close(new_stream);
+    }
+    {
+        sh_overrides_internal_decl_entry entries[512];
+        char names[512][32];
+        for (int i = 0; i < 512; i++) {
+            _snprintf_s(names[i], sizeof(names[i]), _TRUNCATE, "test/entry-%03d", i);
+            entries[i].type = "material";
+            entries[i].name = names[i];
+            entries[i].body = old_body;
+            entries[i].body_length = 8;
+        }
+        sh_overrides_test_internal_decl_table_reset();
+        CHECK(sh_overrides_test_internal_decl_table_install(entries, 512) == 1);
+        for (int i = 0; i < 512; i++) entries[i].body = new_body;
+        CHECK(sh_overrides_test_internal_decl_table_merge(entries, 512) == 1);
+        CHECK(sh_overrides_internal_decl_published_count() == 512);
+        CHECK(sh_overrides_test_internal_decl_table_merge(&entry, 1) == 0);
+        CHECK(sh_overrides_internal_decl_published_count() == 512);
+    }
+    sh_overrides_test_internal_decl_table_reset();
+}
+
 int main(void)
 {
     test_internal_decl_table();
     test_file_stream_is_read_only();
+    test_refresh_keeps_open_streams();
     if (g_failed) {
         fprintf(stderr, "%d overrides internal-decl-table test(s) failed\n", g_failed);
         return 1;

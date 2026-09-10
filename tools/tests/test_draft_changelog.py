@@ -324,4 +324,7 @@ class TestDocsAreCollected(unittest.TestCase):
         self.assertEqual(dc.collect_docs(""), "")
 
     def test_doc_paths_cover_the_user_facing_inventory(self):
-        self.assertIn("docs/capabilities.md", dc.DOC_PATHS)
+        self.assertIn("site/snapmap-plus-guide.md", dc.DOC_PATHS)
+        root = pathlib.Path(dc.__file__).resolve().parent.parent
+        for path in dc.DOC_PATHS:
+            self.assertTrue((root / path).is_file(), path)

@@ -19,22 +19,24 @@
 int sh_decl_server_install(const sig_result *results, size_t count,
                            const uint8_t *module_base, void *cmdsys);
 
-/* Return 1 after source registration and required materialization complete.
- * Palette refusal is logged separately and does not clear this bit. DONE
- * alone is insufficient: disabled, empty and all-shadowed snapshots also
- * reach it.
+/* Return 1 only when the current pass is usable: no candidate refusals,
+ * materialization/refresh complete, required visibility installed, and palette
+ * refreshed. Pending requests and failed passes return 0. Empty snapshots can
+ * succeed after their dependencies are bound.
  */
 int sh_decl_server_registration_succeeded(void);
 
-/* Run package rescan and registration on the engine main thread from DONE.
+/* Run package rescan and registration on the engine main thread from DONE or FAILED,
+ * with the editor inactive and the SnapMap browser settled and not loading.
  * Promote newly created resources against a registry watermark and preserve
- * reused decl lifetimes. Returns 1 if the pass finishes in DONE, otherwise 0.
+ * reused decl lifetimes. Returns 1 if the pass is usable, otherwise 0.
  */
 int sh_decl_server_rearm(void);
 
 /* Request runtime rearm from any thread. The next engine tick applies
  * requirements, drains commands and registers declarations in one synchronous
- * pass.
+ * pass once the browser boundary is safe; requests remain pending during editing,
+ * gameplay, loading, dialogs or unresolved state.
  */
 void sh_decl_server_request_rearm(void);
 
@@ -104,7 +106,8 @@ enum {
     SH_DECL_SERVER_TEST_PHASE_NONE = 0,
     SH_DECL_SERVER_TEST_PHASE_SCAN = 1,
     SH_DECL_SERVER_TEST_PHASE_MATERIALIZATION = 2,
-    SH_DECL_SERVER_TEST_PHASE_PALETTE = 3
+    SH_DECL_SERVER_TEST_PHASE_PALETTE = 3,
+    SH_DECL_SERVER_TEST_PHASE_VISIBILITY = 4
 };
 
 typedef struct sh_decl_server_test_materialize_item {
@@ -139,13 +142,12 @@ int sh_decl_server_test_register_candidate(
     sh_decl_server_test_register_file_fn register_file);
 
 /* Runtime-pass refresh seams. The runtime flag switches the production materialization
- * into its premark/drain protocol; the previous-identity list feeds the newly-served
- * test; the counters and the stray sweep make the protocol's outcome assertable. */
+ * into its premark/drain protocol; counters and the stray sweep make the
+ * protocol's outcome assertable. */
 typedef void (*sh_decl_server_test_generic_load_fn)(void *decl);
 void sh_decl_server_test_set_runtime(int active);
 void sh_decl_server_test_set_generic_load(sh_decl_server_test_generic_load_fn fn);
 void sh_decl_server_test_reset_runtime_state(void);
-int sh_decl_server_test_add_prev_identity(const char *type, const char *name);
 void sh_decl_server_test_runtime_counters(long *marked_pending, long *left_loaded,
                                           long *shadow_reparsed, long *drain_faults);
 int sh_decl_server_test_clear_stray_pending(void);
@@ -171,6 +173,11 @@ int sh_decl_server_test_scan_and_materialize_missing(
     sh_decl_server_test_idstr_dtor_fn dtor,
     sh_decl_server_test_register_file_fn register_file,
     int *registered, int *materialized, int *failure_phase);
+void sh_decl_server_test_reset_install(void);
+int sh_decl_server_test_apply(const sh_decl_server_test_materialize_item *items,
+                              size_t count, int runtime);
+int sh_decl_server_test_lifetime_watermark(void);
+int sh_decl_server_test_promote_delta(void);
 #endif
 
 #endif /* BACKEND_DECL_SERVER_H */

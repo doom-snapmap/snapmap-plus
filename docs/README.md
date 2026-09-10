@@ -2,25 +2,23 @@
 
 ## Purpose
 
-Explains current Snapmap+ behavior, supported formats, architecture and maintenance procedures.
+Explains how to develop, package and operate Snapmap+, and how its major components work together.
 
 ## Contents
 
-| Reference | Use it for |
+| Guide | Purpose |
 |---|---|
 | [contributing.md](contributing.md) | Setup, builds, tests, review and releases. |
 | [architecture.md](architecture.md) | Component boundaries, threading, ownership and the DLL interface. |
-| [capabilities.md](capabilities.md) | Console commands, settings and editor features. |
-| [fidelity.md](fidelity.md) | Compatibility choices and unsupported SnapHak features. |
-| [webview-ui.md](webview-ui.md) | Frontend source, bridge, polling and configuration startup. |
-| [navigation.md](navigation.md) | Blocking Box navigation workflow and limits. |
-| [navigation-markers.md](navigation-markers.md) | Saved markers, migration and collision policy. |
-| [navigation-baking.md](navigation-baking.md) | Floor contact, clearance and movement visibility. |
-| [weapon-hud.md](weapon-hud.md) | Weapon package display policies. |
-| [packaging.md](packaging.md) | Installed files and runtime data ownership. |
-| [feedback.md](feedback.md) | Report transport and tracker behavior. |
-| [services.md](services.md) | External services and credential setup. |
+| [webview-ui.md](webview-ui.md) | Frontend modules, messages, embedding and preview. |
+| [packaging.md](packaging.md) | Shipped files, runtime dependencies and player-data ownership. |
+| [capabilities.md](capabilities.md) | Supported commands, settings and editor workflows. |
+| [fidelity.md](fidelity.md) | Compatibility choices and unsupported original features. |
+| [feedback.md](feedback.md) | Reporting across the frontend, relay and issue tracker. |
+| [services.md](services.md) | External services and credential ownership. |
 
 ## Working here
 
-Update the relevant reference with behavior changes. Keep research transcripts, abandoned designs and engineering journals in snaphak-re's findings system. The relocated backend/UI journals and deferred rawmap report are indexed by the `snapmap-plus-docs-cleanup` campaign there. Release notes belong in [CHANGELOG.md](../CHANGELOG.md); player instructions are in the [website guide](../site/snapmap-plus-guide.md).
+Retain contributor instructions and cross-component contracts here. Explain narrow backend algorithms in source and concise comments; keep their detailed investigations in snaphak-re's findings system. Navigation and weapon HUD implementation references were moved there with their source revisions preserved.
+
+Player instructions live in the [website guide](../site/snapmap-plus-guide.md); release history lives in [CHANGELOG.md](../CHANGELOG.md). External contributors can supply investigation evidence in their pull request without needing a research checkout.
