@@ -101,10 +101,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                themselves, so this only widens it to every map load and save, including ones
                this menu had no part in. Same switch as sh_rawmaps_on / sh_rawmaps_off. -->
           <!-- The way back to the default file. Save Rawmap As ticks this; unticking releases
-               it. Ticking never moves the destination, it only makes the current one stick,
-               so the Save Path line below is true before and after the click. -->
-          <button type="button" id="menuRawmapKeepHere" role="menuitemcheckbox" aria-checked="false"><span>Keep This Save Path</span></button>
-          <button type="button" id="menuRawmapArm" role="menuitemcheckbox" aria-checked="false"><span>Use Rawmaps for Every Map</span></button>
+               it. Live state is set in renderRawmapStatus, not here. -->
+          <button type="button" id="menuRawmapKeepHere" role="menuitemcheckbox" aria-checked="false" disabled aria-disabled="true"><span>Keep This Save Path</span></button>
+          <button type="button" id="menuRawmapArm" role="menuitemcheckbox" aria-checked="false"><span>Use Rawmaps for Every Save/Load</span></button>
           <div class="menu-sep" role="separator"></div>
           <!-- Not a menu item: the staged paths, so "which file am I actually on" needs no dialog. -->
           <div class="menu-note" id="menuRawmapPaths">Loading...</div>
@@ -3185,9 +3184,14 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     var keepBtn = document.getElementById('menuRawmapKeepHere');
     if (keepBtn) {
       keepBtn.setAttribute('aria-checked', RAWMAP_KEEP_HERE ? 'true' : 'false');
+      // Nothing to keep until a file is picked, and picking one ticks this, so the unticked
+      // state has no working click: the save path only ever differs from the default when a
+      // file is already held. aria-disabled as well, for the same reason as the item below.
+      keepBtn.disabled = !RAWMAP_KEEP_HERE;
+      keepBtn.setAttribute('aria-disabled', RAWMAP_KEEP_HERE ? 'false' : 'true');
       keepBtn.title = RAWMAP_KEEP_HERE
         ? 'Saves keep going to the file below until you open another map.'
-        : 'Saves go to the default file. Tick this to keep them on the file below.';
+        : 'Saves go to the default file. Use Save Rawmap As... to pick another.';
     }
 
     // "Open Rawmap as New Map": live only when it would actually do something, and named after
@@ -3216,7 +3220,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         ? (rawPath + '\nWaiting: this file opens as a new map you name.')
         : (reloadLive
             ? (rawPath + (RAWMAP_ARMED
-                ? '\nUse Rawmaps for Every Map is on, so this opens the Load Path file.'
+                ? '\nUse Rawmaps for Every Save/Load is on, so this opens the Load Path file.'
                 : '\nEvery map you open is being replaced, so this opens the Load Path file.'))
             : 'Nothing is waiting. Use Load Rawmap... to pick a file first.');
     }
