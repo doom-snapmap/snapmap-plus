@@ -37,5 +37,6 @@
  * refuse rather than stealing detour bytes. Returns 1 when installed. */
 int sh_nav_play_install(void *snapbuild_fn, int status_ok);
 int sh_nav_play_install_instances(const sig_result *results, size_t count);
+int sh_nav_play_install_volume_contents(const sig_result *results, size_t count);
 
 #endif /* SNAPMAP_PLUS_NAV_PLAY_H */

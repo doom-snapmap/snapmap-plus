@@ -473,6 +473,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
             }
             sh_nav_play_install(snapbuild, snapbuild_clean);
             sh_nav_play_install_instances(results, db);
+            sh_nav_play_install_volume_contents(results, db);
         }
 
         /* backend touch: bind the UI-interface's engine-touch vtable slots -- the LIGHT touches

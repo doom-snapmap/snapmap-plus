@@ -14,9 +14,10 @@ string references alone missed the compiled member access.
 
 `flags.noFlood` already has boolean reflection, serialization, and defaults in
 both supported executables. The Blocking Box declaration does not override its
-false default. Static examination of the field's bit accesses found no gameplay
-consumer. This is a finding about the supported retail builds, not a promise
-about every engine build or external mod. We add no unknown boolean, class, or
+false default. A bounded static examination of direct accesses to this flag
+found no gameplay consumer; the broader overlapping-memory scan was not a
+complete audit. This is a finding about the supported retail builds, not a
+promise about every engine build or external mod. We add no unknown boolean, class, or
 inheritance path. A new custom field was not selected because its vanilla
 loading behavior has not been established.
 
@@ -27,8 +28,8 @@ Before native map parsing, Snapmap+ migrates Blocking Boxes with
 
 - If `flags.noFlood` is absent, it is added as `true`.
 - An existing `flags.noFlood` value wins, including `false`.
-- `affectsNavmesh` is set to `false`, restoring the native collision-content
-  behavior to the unmarked-box setting.
+- `affectsNavmesh` is set to `false` in the serialized state. Runtime obstacle
+  handling is derived separately as described below.
 
 Other entity types, other entity flags, geometry, module ownership, and map
 variables are preserved. Migration occurs in memory for ordinary map loads
@@ -44,15 +45,46 @@ into the custom marker. Old product versions do not recognize the new marker;
 edit migrated maps with a current version. Vanilla clients know the field and
 continue to use the module's normal navigation rather than our custom bake.
 
+## Runtime obstacle handling
+
+Separating the marker did not make the original collision flag harmless.
+With Block Demons enabled, setting `affectsNavmesh` to false reintroduces
+`CONTENTS_OBSTACLE`. Native clip-model contents updates use that bit to register
+or unregister an obstacle in AAS; the movement corridor gathers those obstacles.
+The earlier migration changed this behavior as well as moving the opt-in.
+
+Snapmap+ now extends the native contents-update condition. It removes
+`CONTENTS_OBSTACLE` for a Blocking Box when all three conditions hold:
+
+- `flags.noFlood` is true.
+- Block Demons is enabled.
+- `navmesh.enabled` is enabled.
+
+An existing true `affectsNavmesh` retains its original native effect, regardless
+of the custom marker or configuration. The patch changes the runtime condition,
+not the saved flags. Already migrated maps therefore receive the policy when
+their boxes undergo native contents setup, without manually toggling or
+recreating them. Spawned and copied boxes use that same native setup path.
+
+Physical demon collision remains enabled. Block Demons also registers a
+separate expanded blocked volume; this patch does not remove that mechanism.
+The condition is evaluated during native contents updates, so changing the
+configuration alone is not a guarantee of immediate reclassification of every
+already active volume. The supported Vulkan and OpenGL builds have verified
+patch sites. If installation fails, the backend reports
+`NAV: marked-volume obstacle policy unavailable`.
+
 ## Validation and limits
 
 Offline regressions cover the new marker in map reads, editor refreshes,
 complete snapshots, and baking, plus migration with missing, empty, and
 populated flag objects, explicit on/off precedence, idempotence, refusal, and
-the shipped property binding. No live game or daemon test was performed for
-this change.
+the shipped property binding. Native evidence verifies the obstacle-bit
+consumer on both supported renderers. These checks establish storage and
+implementation behavior; they do not establish a live movement result for every
+demon class.
 
-The switch isolates the bake opt-in from a native collision flag. It does not
-prove a fix for demons becoming stuck on a platform. `blockDemons` also drives
-a separate native blocked-volume registration, and traversal still depends on
-the generated AAS connections, clearance, and the demon's movement behavior.
+The marker and runtime contents policy address different concerns. Neither
+alone proves that a demon can cross a bridge or leave a platform. Traversal also
+depends on surface contact, AAS connections, obstacle visibility, clearance and
+the demon's movement behavior. See [baking details](navigation-baking.md).

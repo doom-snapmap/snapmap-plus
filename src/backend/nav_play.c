@@ -8,6 +8,7 @@
 #include "nav_bake.h"
 #include "hook.h"
 #include "patch.h"
+#include "config.h"
 
 void backend_log(const char *message);
 
@@ -32,6 +33,20 @@ static nav_find_fn g_find;
 static nav_load_fn g_load;
 static sh_patch_handle g_instance_patches[2];
 static void *g_instance_relays[2];
+static sh_patch_handle g_volume_contents_patch;
+static void *g_volume_contents_relay;
+
+/* The marker is stored independently, but walkable solid geometry must not be
+ * registered as an avoidance obstacle. Keep native physical collision and the
+ * native flag's behavior; add the derived policy only to marked Blocking Boxes.
+ * This executes inside their contents update, including spawn and copied boxes. */
+static unsigned char nav_volume_clear_obstacle(const unsigned char *entity)
+{
+    int enabled=0;
+    if(entity[0xc8e])return 1;
+    return entity[0xc89]&&(entity[0x3ea]&0x40)&&
+        sh_config_get_bool("navmesh.enabled",&enabled,NULL)&&enabled;
+}
 
 static void *nav_instance_find(void *self,const char *name,unsigned char flags,
                                const unsigned char *record)
@@ -76,7 +91,8 @@ static void *nav_near_relay(uintptr_t call,void *handler,int instance)
                !VirtualQuery((void*)address,&mbi,sizeof mbi)||mbi.State!=MEM_FREE)continue;
             relay=(unsigned char*)VirtualAlloc((void*)address,4096,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
             if(!relay)continue;
-            if(instance){relay[at++]=0x4d;relay[at++]=0x8b;relay[at++]=0xce;}
+            if(instance==1){relay[at++]=0x4d;relay[at++]=0x8b;relay[at++]=0xce;}
+            if(instance==2){relay[at++]=0x48;relay[at++]=0x8b;relay[at++]=0xcb;}
             relay[at++]=0xff;relay[at++]=0x25;
             memset(relay+at,0,4);at+=4;memcpy(relay+at,&handler,8);at+=8;
             if(!VirtualProtect(relay,4096,PAGE_EXECUTE_READ,&old)){
@@ -85,6 +101,31 @@ static void *nav_near_relay(uintptr_t call,void *handler,int instance)
         }
     }
     return NULL;
+}
+
+int sh_nav_play_install_volume_contents(const sig_result *results,size_t count)
+{
+    const unsigned char expected[9]={0x80,0xbb,0x8e,0x0c,0,0,0,0x74,0x0a};
+    unsigned char patch[9]={0xe8,0,0,0,0,0x84,0xc0,0x74,0x0a};
+    size_t i;intptr_t distance;int32_t relative;
+    if(g_volume_contents_patch.live)return 1;
+    for(i=0;i<count;i++)if(results[i].name&&
+        !strcmp(results[i].name,"BlockingVolumeObstacleGate")&&results[i].status==SIG_OK) {
+        g_volume_contents_relay=nav_near_relay(results[i].addr,
+                                              (void*)nav_volume_clear_obstacle,2);
+        if(!g_volume_contents_relay)break;
+        distance=(intptr_t)g_volume_contents_relay-(intptr_t)(results[i].addr+5);
+        if(distance>=INT32_MIN&&distance<=INT32_MAX) {
+            relative=(int32_t)distance;memcpy(patch+1,&relative,4);
+            if(code_patch_sig(&results[i],expected,patch,sizeof patch,
+                              &g_volume_contents_patch)==B2_PATCH_OK) {
+                backend_log("NAV: marked-volume obstacle policy installed");return 1;
+            }
+        }
+        VirtualFree(g_volume_contents_relay,0,MEM_RELEASE);g_volume_contents_relay=NULL;
+        break;
+    }
+    backend_log("NAV: marked-volume obstacle policy unavailable");return 0;
 }
 
 int sh_nav_play_install_instances(const sig_result *results,size_t count)

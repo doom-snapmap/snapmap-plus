@@ -6,8 +6,9 @@ rotation and dimensions. An unmarked box that blocks demons still obstructs
 navigation on a marked box.
 
 The property uses the existing `flags.noFlood` boolean. Older maps using
-`affectsNavmesh` are migrated on load, preserving the navigation choice while
-clearing that field's native obstacle-content effect. See
+`affectsNavmesh` are migrated on load, preserving the navigation choice in the
+new marker. At runtime, marked boxes keep physical collision while Snapmap+
+excludes them from the native avoidance obstacle list when navigation is enabled. See
 [navigation markers](navigation-markers.md) for precedence and compatibility.
 
 ## Surfaces and traversal

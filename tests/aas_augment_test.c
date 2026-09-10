@@ -2146,9 +2146,140 @@ static void test_required_routes_over_native_limit_refuse_bake(void)
     sh_aas_free(a);
 }
 
+/* Decode independently into a flat membership set, bounded by the row's
+ * encoded extent rather than by subsequent rows in the same lump. */
+static int read_visibility(const sh_aas *a,unsigned area,unsigned char *bits,unsigned cap)
+{
+    unsigned n=sh_aas_count(a,SH_AAS_L_AREAS),at,end,pos=0,i;
+    const unsigned char *ar=sh_aas_rec_const(a,SH_AAS_L_AREAS,area);
+    if(n>cap)return 0;
+    memset(bits,0,cap);at=sh_aas_get_u32(ar,16);
+    end=sh_aas_count(a,SH_AAS_L_OBSTACLEPVS);
+    for(i=0;i<n;i++) {
+        unsigned other=sh_aas_get_u32(sh_aas_rec_const(a,SH_AAS_L_AREAS,i),16);
+        if(other>at&&other<end)end=other;
+    }
+    while(pos<n) {
+        unsigned b,k,skip;
+        if(at>=end)return 0;
+        b=*sh_aas_rec_const(a,SH_AAS_L_OBSTACLEPVS,at++);
+        if(b<128) {
+            for(k=0;k<7;k++,pos++) {
+                if(pos<n)bits[pos]=(unsigned char)((b>>k)&1);
+                else if(b&(1<<k))return 0;
+            }
+        } else {
+            skip=(b&63)+1;
+            if(b&64){if(at>=end)return 0;skip+=64u**sh_aas_rec_const(a,SH_AAS_L_OBSTACLEPVS,at++);}
+            pos+=skip;
+        }
+    }
+    return 1;
+}
+
+static void test_visibility_grows_with_connected_geometry(void)
+{
+    const int sizes[]={3,6,13};unsigned c;
+    for(c=0;c<sizeof sizes/sizeof sizes[0];c++) {
+        sh_aas *a=load_module();sh_aug_platform p[13];sh_aug_report rep;
+        sh_aug_opts o={SH_AUG_FALL_NEVER,0,SH_AUG_TRAVERSAL_NEVER};
+        unsigned char bits[16];unsigned i,j,n;
+        for(i=0;i<(unsigned)sizes[c];i++)
+            mkplat(&p[i],-1800+(float)i*48,-100,-1752+(float)i*48,100,
+                   16.0f,"connected deck");
+        CHECK(sh_aas_augment(a,p,sizes[c],&o,&rep));
+        n=sh_aas_count(a,SH_AAS_L_AREAS);CHECK(n==(unsigned)sizes[c]+2);
+        for(i=1;i<n;i++) {
+            CHECK(read_visibility(a,i,bits,sizeof bits));
+            for(j=1;j<n;j++)CHECK(bits[j]);
+        }
+        sh_aas_free(a);
+    }
+}
+
+static void test_visibility_extends_sparse_native_rows(void)
+{
+    sh_aas *a=load_module();sh_aug_platform p;sh_aug_report rep;
+    sh_aug_opts o={SH_AUG_FALL_NEVER,0,SH_AUG_TRAVERSAL_NEVER};
+    unsigned char bits[72];unsigned first,i;
+    CHECK(sh_aas_append(a,SH_AAS_L_AREAS,68,&first));
+    CHECK(sh_aas_append(a,SH_AAS_L_AREABOUNDS,68,&first));
+    /* Seventy original areas: literal bits0..6 followed by 63 zero bits. */
+    *sh_aas_rec(a,SH_AAS_L_OBSTACLEPVS,0)=2;
+    *sh_aas_rec(a,SH_AAS_L_OBSTACLEPVS,1)=0xbe;
+    mkplat(&p,-100,-100,100,100,16,"deck");
+    CHECK(sh_aas_augment(a,&p,1,&o,&rep));
+    CHECK(sh_aas_count(a,SH_AAS_L_AREAS)==71);
+    CHECK(read_visibility(a,1,bits,sizeof bits));CHECK(bits[1]&&bits[70]);
+    for(i=2;i<70;i++)CHECK(!bits[i]);
+    CHECK(read_visibility(a,70,bits,sizeof bits));CHECK(bits[1]&&bits[70]);
+    sh_aas_free(a);
+}
+
+static void test_truncated_visibility_refuses_bake(void)
+{
+    sh_aas *a=load_module();sh_aug_platform p;sh_aug_report rep;
+    sh_aug_opts o={SH_AUG_FALL_NEVER,0,SH_AUG_TRAVERSAL_NEVER};
+    CHECK(sh_aas_truncate(a,SH_AAS_L_OBSTACLEPVS,1));
+    *sh_aas_rec(a,SH_AAS_L_OBSTACLEPVS,0)=0xc0; /* missing extended run byte */
+    mkplat(&p,-100,-100,100,100,16,"deck");
+    CHECK(!sh_aas_augment(a,&p,1,&o,&rep));
+    sh_aas_free(a);
+}
+
+static void test_rotated_ramps_join_native_floor(void)
+{
+    const float radii[]={24,48,64};const double angles[]={-40,-25,25,40};
+    const double yaws[]={0,37,90,179};unsigned r,g,y;
+    for(r=0;r<3;r++)for(g=0;g<4;g++)for(y=0;y<4;y++) {
+        sh_aas *a=load_module();sh_aug_platform p;sh_aug_report rep;
+        sh_aug_opts o={SH_AUG_FALL_NEVER,1,SH_AUG_TRAVERSAL_NEVER};
+        const float xy[4][2]={{-2000,2000},{2000,2000},{2000,-2000},{-2000,-2000}};
+        double angle=angles[g]*3.14159265358979323846/180.0;
+        double yaw=yaws[y]*3.14159265358979323846/180.0,cs=cos(yaw),sn=sin(yaw);
+        unsigned i,nr;int down=0,up=0;
+        sh_aas_put_u32(sh_aas_rec(a,SH_AAS_L_AREAS,1),0,8);
+        sh_aas_put_u16(sh_aas_rec(a,SH_AAS_L_AREAS,1),4,10);
+        for(i=0;i<4;i++) {
+            unsigned char *v=sh_aas_rec(a,SH_AAS_L_VERTICES,i);
+            sh_aas_put_f32(v,0,xy[i][0]);sh_aas_put_f32(v,4,xy[i][1]);
+        }
+        sh_aas_put_f32(sh_aas_rec(a,SH_AAS_L_PLANES,1),12,1000);
+        sh_aas_set_setting_f32(a,SET_WORDS+0,-radii[r]);
+        sh_aas_set_setting_f32(a,SET_WORDS+4,-radii[r]);
+        sh_aas_set_setting_f32(a,SET_WORDS+12,radii[r]);
+        sh_aas_set_setting_f32(a,SET_WORDS+16,radii[r]);
+        mkplat_tilted(&p,angles[g],320,512,fabs(sin(angle))*160,"floor ramp");p.depth=32;
+        for(i=0;i<4;i++){float x=p.c[i][0],yy=p.c[i][1];p.c[i][0]=(float)(cs*x-sn*yy);p.c[i][1]=(float)(sn*x+cs*yy);}
+        {float x=p.n[0],yy=p.n[1];p.n[0]=(float)(cs*x-sn*yy);p.n[1]=(float)(sn*x+cs*yy);}
+        CHECK(sh_aas_augment(a,&p,1,&o,&rep));
+        nr=sh_aas_count(a,SH_AAS_L_REACHABILITIES);
+        for(i=0;i<nr;i++) {
+            const unsigned char *reach=sh_aas_rec_const(a,SH_AAS_L_REACHABILITIES,i);
+            unsigned from=sh_aas_get_u16(reach,6),to=sh_aas_get_u16(reach,8);
+            if(sh_aas_get_u32(reach,0)!=0x20)continue;
+            if(from>=2&&to==1) {
+                double start[2]={sh_aas_get_i16(reach,12),sh_aas_get_i16(reach,14)};
+                double d[2]={sh_aas_get_i16(reach,18)-start[0],sh_aas_get_i16(reach,20)-start[1]},lo,hi;
+                CHECK(floor_line_interval(a,from,start,d,&lo,&hi));
+                CHECK(!wall_at_floor_point(a,from,start[0]+hi*d[0],start[1]+hi*d[1]));
+                down++;
+            }
+            if(from==1&&to>=2)up++;
+        }
+        if(!down||!up)printf("native floor join missing: radius %g slope %g yaw %g pieces %d\n",radii[r],angles[g],yaws[y],rep.platform_count);
+        CHECK(down>0);CHECK(up>0);
+        sh_aas_free(a);
+    }
+}
+
 int main(void)
 {
     printf("aas_augment_test\n");
+    test_rotated_ramps_join_native_floor();
+    test_visibility_grows_with_connected_geometry();
+    test_visibility_extends_sparse_native_rows();
+    test_truncated_visibility_refuses_bake();
     test_dense_climbs_fit_native_routing();
     test_required_routes_over_native_limit_refuse_bake();
     test_fixture_resolves();
