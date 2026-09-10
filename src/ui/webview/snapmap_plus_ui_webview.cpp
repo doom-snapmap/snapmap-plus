@@ -2469,6 +2469,15 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                 poc_rawmap_configure(nullptr, nullptr, on ? 1 : 0,
                                      on ? L"Rawmaps now apply to every map load and save."
                                         : L"Rawmaps apply to the File menu's own actions only.");
+            } else if (cmd == L"rawmapKeepHere") {
+                /* "Keep saving to file". Arm codes rather than a new vtable slot: the two
+                 * DLLs must match slot for slot, and `arm` was already a verb code. Neither
+                 * value writes anything -- 3 pins the path the readout is already showing,
+                 * 4 releases it, so the line under the tick is true either way. */
+                int on = 0; sh_webview_json::get_int(json, L"on", &on);
+                poc_rawmap_configure(nullptr, nullptr, on ? 3 : 4,
+                                     on ? L"Saves keep going to this file until you open another map."
+                                        : L"Saves go back to the usual rawmap file.");
             } else if (cmd == L"newEntity") {
                 std::wstring js, lab;
                 sh_webview_json::get_string(json, L"json", js); sh_webview_json::get_string(json, L"label", lab);

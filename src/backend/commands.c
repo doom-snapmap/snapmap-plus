@@ -437,7 +437,7 @@ static void rawmap_print_usage(void)
     sh_printf("                             you open becomes it\n");
     sh_printf("  sh_rawmaps save            write the open map to the save path\n");
     sh_printf("  sh_rawmaps save <path>     save there, and keep saving there\n");
-    sh_printf("  sh_rawmaps savepath [default|rawmap|<path>]\n");
+    sh_printf("  sh_rawmaps savepath        [default|rawmap|<path>]\n");
     sh_printf("                             where saves go: the usual file, the rawmap you\n");
     sh_printf("                             opened, or one you name. Opening another map\n");
     sh_printf("                             goes back to the usual file\n");

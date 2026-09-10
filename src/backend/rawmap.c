@@ -1838,7 +1838,15 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
      *   -1 leave alone   0 gate off   1 gate on   2 arm ONE load   3 saves follow the rawmap   4 not */
     if (arm == 0 || arm == 1)  sh_rawmap_swap_arm(arm);
     else if (arm == 2)         sh_rawmap_load_arm_once();
-    /* 3 and 4 were the old save-path tick. The target is set by naming a file. */
+    /* 3 and 4 are the File menu's "Keep saving to this file" tick, and neither writes
+     * anything. 3 pins whatever the save path already resolves to, so ticking never
+     * moves the destination -- it only makes the current one stick. 4 releases it. */
+    else if (arm == 3) {
+        char now[MAX_PATH] = "";
+        resolve_dest_path(now, sizeof now);
+        if (now[0]) sh_rawmap_set_save_target(now);
+    }
+    else if (arm == 4) sh_rawmap_set_save_target(NULL);
 
     if (out_msg && out_msg[0] == '\0') {
         strncpy_s(out_msg, (size_t)msg_capacity, ok ? "ok" : "the save path was refused", _TRUNCATE);

@@ -108,6 +108,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                which is backwards: they turn it on and off around themselves. What this tick adds is
                SCOPE, not permission -- it extends rawmap save/load to every map load and save,
                including ones this menu had no part in. -->
+          <!-- The way back to the usual file. Save Rawmap As ticks this; unticking releases
+               it. Ticking never moves the destination, it only makes the current one stick,
+               so the Save Path line below is true before and after the click. -->
+          <button type="button" id="menuRawmapKeepHere" role="menuitemcheckbox" aria-checked="false"><span>Keep saving to file</span></button>
           <button type="button" id="menuRawmapArm" role="menuitemcheckbox" aria-checked="false"><span>Always Use Rawmap Save/Load</span></button>
           <div class="menu-sep" role="separator"></div>
           <!-- Not a menu item: the staged paths, so "which file am I actually on" needs no dialog. -->
@@ -1071,8 +1075,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     // the layout could never be checked outside the game.
     if (o.cmd === 'rawmapStatus' || o.cmd === 'rawmapLoadPick' ||
         o.cmd === 'rawmapSavePick' || o.cmd === 'rawmapSaveNow' || o.cmd === 'rawmapArm' ||
-        o.cmd === 'rawmapLoadNow') {
+        o.cmd === 'rawmapKeepHere' || o.cmd === 'rawmapLoadNow') {
       if (o.cmd === 'rawmapArm') previewRawmap.armed = o.on ? 1 : 0;
+      // Ticking pins the path already shown, so the readout does not move on the click.
+      if (o.cmd === 'rawmapKeepHere') previewRawmap.saveTarget = o.on ? previewRawmap.save : '';
       // Save Rawmap As arms one save; Load Rawmap raises the confirm prompt. Both are modelled here
       // so the two states the readout can show are reachable without the game.
       if (o.cmd === 'rawmapSavePick' || o.cmd === 'rawmapSaveNow') previewRawmap.savePending = 1;
@@ -1082,9 +1088,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       if (o.cmd === 'rawmapLoadNow') previewRawmap.loadPending = 0;
       var msg = {kind:'rawmapStatus', ok:true, status:{
         load: previewRawmap.load,
-        // Mirrors resolve_dest_path: the toggle wins over the stored destination, so the
-        // preview readout says the same thing the backend would.
         save: previewRawmap.save,
+        saveTarget: previewRawmap.saveTarget || '',
         armed: previewRawmap.armed, saves: 0, lastBytes: 0, loads: 0, loadsDone: 0,
         savePending: previewRawmap.savePending || 0,
         loadPending: previewRawmap.loadPending || 0,
@@ -3147,6 +3152,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var RAWMAP_ARMED = false;
   // Mirrors st.willFire: the gate OR a sibling arm.flag file. See renderRawmapStatus.
   var RAWMAP_WILL_FIRE = false;
+  // Mirrors st.saveTarget, so the click handler sends the opposite of what is set.
+  var RAWMAP_KEEP_HERE = false;
   var RAWMAP_SAVE_PATH = '';   // the destination Save Rawmap reuses
 
   // Show the tail of a path. Full paths are far too long for a menu, and the filename plus its parent
@@ -3179,6 +3186,17 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     RAWMAP_WILL_FIRE = (st.willFire === undefined) ? RAWMAP_ARMED : !!st.willFire;
     RAWMAP_SAVE_PATH = st.save || '';
     if (armBtn) armBtn.setAttribute('aria-checked', RAWMAP_ARMED ? 'true' : 'false');
+
+    // Ticked whenever a file has been picked. Renders from the backend, never from what
+    // the page remembers: Save Rawmap As and the console both set it.
+    RAWMAP_KEEP_HERE = !!(st.saveTarget || '');
+    var keepBtn = document.getElementById('menuRawmapKeepHere');
+    if (keepBtn) {
+      keepBtn.setAttribute('aria-checked', RAWMAP_KEEP_HERE ? 'true' : 'false');
+      keepBtn.title = RAWMAP_KEEP_HERE
+        ? 'Saves keep going to the file below until you open another map.'
+        : 'Saves go to the usual file. Tick this to keep them on the file below.';
+    }
 
     // "Open Rawmap as New Map": live only when it would actually do something, and named after
     // the file it would open, so the item doubles as the staged-rawmap indicator.
@@ -3271,6 +3289,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // those is true (renderRawmapStatus), so this handler needs no guard of its own.
   document.getElementById('menuRawmapReload').addEventListener('click', function(){
     post({cmd: 'rawmapLoadNow'});
+    closeMenus();
+  });
+  document.getElementById('menuRawmapKeepHere').addEventListener('click', function(){
+    post({cmd: 'rawmapKeepHere', on: RAWMAP_KEEP_HERE ? 0 : 1});
     closeMenus();
   });
   document.getElementById('menuRawmapArm').addEventListener('click', function(){
