@@ -79,6 +79,12 @@ void sh_nav_bake_preview(sh_nav_bake_reader read_shipped, sh_nav_preview_line li
 
 /* Stop the worker that bakes the preview. Call once from DllMain on detach. */
 void sh_nav_bake_preview_stop(void);
+
+/* 1 when the worker has finished a bake nobody has collected. Cheap enough to
+ * ask every frame, and worth asking: the worker finishes on its own clock, so
+ * waiting for the next read to collect it leaves the green stale for as long
+ * as that read is away. */
+int sh_nav_bake_preview_pending(void);
 void sh_nav_bake_enable_instances(int enabled);
 int sh_nav_bake_instance_name(int instance, const char *name, char *out, size_t capacity);
 

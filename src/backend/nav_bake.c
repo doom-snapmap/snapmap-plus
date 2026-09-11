@@ -768,8 +768,12 @@ static void preview_task_run(preview_task *t)
     opts.fall = SH_AUG_FALL_AUTO;
     opts.inset = 1;
     opts.traversal = 0;
-    if (sh_aas_augment(model, t->plats, t->plat_count, &opts, &rep))
-        t->baked = sh_aas_write(model, &t->baked_len);
+    {
+        SH_PERF_BEGIN(ta);
+        if (sh_aas_augment(model, t->plats, t->plat_count, &opts, &rep))
+            t->baked = sh_aas_write(model, &t->baked_len);
+        SH_PERF_END(SH_PERF_BAKE_AUGMENT, ta);
+    }
     sh_aas_free(model);
     if (!t->baked)
         _snprintf_s(t->reason, sizeof t->reason, _TRUNCATE, "%s",
@@ -820,6 +824,16 @@ static int preview_worker_ready(void)
         g_pv_thread = CreateThread(NULL, 0, preview_worker, NULL, 0, NULL);
     InterlockedExchange(&g_pv_ready, 2);
     return g_pv_thread != NULL;
+}
+
+int sh_nav_bake_preview_pending(void)
+{
+    int pending;
+    if (InterlockedCompareExchange(&g_pv_ready, 0, 0) != 2) return 0;
+    EnterCriticalSection(&g_pv_lock);
+    pending = g_pv_done != NULL;
+    LeaveCriticalSection(&g_pv_lock);
+    return pending;
 }
 
 void sh_nav_bake_preview_stop(void)

@@ -1731,11 +1731,25 @@ static void ae_nav_refresh_poll(void)
 
     ae_nav_probe(ed, &ents, &holding);
     if (holding) {
-        /* Mid-drag: whatever this read found would be stale by the next frame. */
+        /* Mid-drag: whatever this read found would be stale by the next frame.
+         * The lines already drawn are staler still -- they sit where the volume
+         * was picked up from -- so they come down until it is put back. */
+        if (!g_nav_was_holding) sh_nav_preview_clear();
         g_nav_probe_ents = ents;
         g_nav_was_holding = 1;
         return;
     }
+    /* The bake finishes on the worker's clock, not the read clock, so the green
+     * is put up on the frame it becomes ready. Both tests are ours and cheap;
+     * neither touches the engine unless one of them says there is work. */
+    {
+        int mode = -1;
+        if (ae_read_u32_safe(ed + ED_ENTITY_MODE_OFF, &mode) && mode == 2 &&
+            (sh_nav_bake_preview_pending() ||
+             sh_nav_bake_geometry_revision() != g_preview_built_revision))
+            ae_nav_preview(ed);
+    }
+
     /* What is selected is not what the map is. A marquee changes the selection
      * on every frame it covers something new, and reading the map for that costs
      * a frame each time while telling us nothing that moved. */
