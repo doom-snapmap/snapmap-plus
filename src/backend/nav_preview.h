@@ -9,4 +9,12 @@ void sh_nav_preview_begin(void *render_world);
 void sh_nav_preview_add_line(const float start[3], const float end[3], void *unused);
 void sh_nav_preview_publish(void);
 void sh_nav_preview_clear(void);
+
+/* 1 while a published set of lines is still being drawn for `world`. A caller
+ * that would rebuild the same lines can skip the work while this holds. */
+int  sh_nav_preview_published(const void *world);
+
+/* Colour for every line added after this call, until the next one. Each
+ * sh_nav_preview_begin resets it to the walkable green. */
+void sh_nav_preview_colour(float r, float g, float b);
 #endif

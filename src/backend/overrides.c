@@ -17,6 +17,7 @@
 #pragma comment(lib, "shell32.lib")   /* SHGetFolderPathA */
 #include "overrides.h"
 #include "backend_log.h"
+#include "perf.h"
 #include "decl_text.h"
 #include "packages.h"
 #include "package_conflicts.h"
@@ -900,8 +901,72 @@ unsigned long sh_overrides_rescan_packages(void)
 
 static int ov_is_regular_file(const char *path)
 {
+    SH_PERF_BEGIN(t0);
     DWORD attrs = GetFileAttributesA(path);
+    SH_PERF_END(SH_PERF_OVERRIDE_STAT, t0);
     return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* Names with no override file, for the package inventory that answered.
+ *
+ * The engine asks for the same resources over and over, and a missing-file
+ * check costs about 40us here, so the miss is the answer worth keeping. Only
+ * misses are kept: a hit goes on to open the file anyway, and the test entry
+ * points expect a fresh answer for a name that resolves.
+ *
+ * A file dropped in beside a name already asked for is invisible until the
+ * package list is re-scanned, which is the same contract packages have.
+ */
+#define OV_MISS_SLOTS     4096u
+#define OV_MISS_NAME_CAP  160
+
+typedef struct ov_miss_entry {
+    unsigned hash;                    /* 0 = empty slot */
+    char     name[OV_MISS_NAME_CAP];
+} ov_miss_entry;
+
+static ov_miss_entry g_ov_miss[OV_MISS_SLOTS];
+static SRWLOCK       g_ov_miss_lock = SRWLOCK_INIT;
+static LONG          g_ov_miss_generation = -1;
+
+static unsigned ov_miss_hash(const char *name)
+{
+    unsigned h = 2166136261u;
+    for (; *name; name++) { h ^= (unsigned char)*name; h *= 16777619u; }
+    return h ? h : 1u;   /* 0 marks an empty slot */
+}
+
+/* Drop everything the previous package inventory answered. */
+static void ov_miss_sync_generation(void)
+{
+    LONG now = InterlockedCompareExchange(&g_ov_pkg_generation, 0, 0);
+    if (g_ov_miss_generation == now) return;
+    AcquireSRWLockExclusive(&g_ov_miss_lock);
+    if (g_ov_miss_generation != now) {
+        memset(g_ov_miss, 0, sizeof g_ov_miss);
+        g_ov_miss_generation = now;
+    }
+    ReleaseSRWLockExclusive(&g_ov_miss_lock);
+}
+
+static int ov_miss_known(const char *name, unsigned hash)
+{
+    const ov_miss_entry *e = &g_ov_miss[hash % OV_MISS_SLOTS];
+    int known;
+    AcquireSRWLockShared(&g_ov_miss_lock);
+    known = e->hash == hash && strcmp(e->name, name) == 0;
+    ReleaseSRWLockShared(&g_ov_miss_lock);
+    return known;
+}
+
+static void ov_miss_remember(const char *name, unsigned hash)
+{
+    ov_miss_entry *e = &g_ov_miss[hash % OV_MISS_SLOTS];
+    if (strlen(name) >= OV_MISS_NAME_CAP) return;   /* too long to hold exactly */
+    AcquireSRWLockExclusive(&g_ov_miss_lock);
+    strcpy_s(e->name, sizeof e->name, name);
+    e->hash = hash;
+    ReleaseSRWLockExclusive(&g_ov_miss_lock);
 }
 
 /* Find a resource in the shared override tree, then installed packages
@@ -911,8 +976,12 @@ static int ov_is_regular_file(const char *path)
 static int ov_resolve_existing(const char *name, char *out, size_t cap)
 {
     size_t i, n;
+    unsigned hash;
 
     if (!name || !name[0] || !out || cap == 0) return 0;
+    ov_miss_sync_generation();
+    hash = ov_miss_hash(name);
+    if (ov_miss_known(name, hash)) { out[0] = '\0'; return 0; }
     if (!build_override_path(name, out, cap)) return 0;
     if (ov_is_regular_file(out)) return 1;
 
@@ -944,6 +1013,7 @@ static int ov_resolve_existing(const char *name, char *out, size_t cap)
         break;                      /* prefixes are disjoint; one match is all */
     }
     out[0] = '\0';
+    ov_miss_remember(name, hash);
     return 0;
 }
 
@@ -1114,7 +1184,7 @@ unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_l
     }
 }
 
-static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
+static void *ov_open_body(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
 {
     if (g_orig_open == NULL) return NULL;   /* defensive: never happens once installed */
     if (g_provider_self == NULL) g_provider_self = self;
@@ -1138,11 +1208,13 @@ static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsign
     if (mode < 2) {
         ov_stream *internal = NULL;
         int internal_match = 0;
+        SH_PERF_BEGIN(t0);
         __try {
             internal = open_internal_decl(name, &internal_match);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             internal = NULL;
         }
+        SH_PERF_END(SH_PERF_INTERNAL_DECL, t0);
         if (internal_match) {
             /* A published identity is authoritative. Do not let an
              * allocation/read failure fall through to a physical file or the
@@ -1179,8 +1251,11 @@ static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsign
                     unsigned char *linked = NULL;
                     size_t linked_length = 0;
                     const char *linked_source = NULL;
-                    int linked_status = sh_resource_bridge_open(name, &linked, &linked_length,
-                                                                &linked_source);
+                    int linked_status;
+                    SH_PERF_BEGIN(tb);
+                    linked_status = sh_resource_bridge_open(name, &linked, &linked_length,
+                                                            &linked_source);
+                    SH_PERF_END(SH_PERF_BRIDGE_OPEN, tb);
                     if (linked_status == SH_RESOURCE_BRIDGE_OPENED &&
                         linked_length <= (size_t)INT64_MAX) {
                         s = make_mem_stream(linked, (long long)linked_length, name, 1);
@@ -1225,7 +1300,22 @@ static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsign
         }
     }
     /* No shadow, or mode guard: chain with the original byte arguments. */
-    return g_orig_open(self, name, (unsigned char)(b1 & 0xff), (unsigned char)(b2 & 0xff), mode);
+    {
+        void *chained;
+        SH_PERF_BEGIN(t0);
+        chained = g_orig_open(self, name, (unsigned char)(b1 & 0xff), (unsigned char)(b2 & 0xff), mode);
+        SH_PERF_END(SH_PERF_ENGINE_OPEN, t0);
+        return chained;
+    }
+}
+
+/* Every resource the engine opens passes through here, so its cost is counted. */
+static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
+{
+    SH_PERF_BEGIN(t0);
+    void *s = ov_open_body(self, name, b1, b2, mode);
+    SH_PERF_END(SH_PERF_OVERRIDE_OPEN, t0);
+    return s;
 }
 
 /* Decode the first LEA RAX,[rip+disp32] in the resolved provider constructor

@@ -24,6 +24,7 @@
 #include "backend_log.h"
 #include "rawmap.h"
 #include "nav_bake.h"
+#include "perf.h"
 #include "nav_preview.h"
 
 /* Editor layout. */
@@ -1469,7 +1470,10 @@ int sh_apply_engine_nav_snapshot(char **out, size_t *len, void *ctx)
     if (!ed || !ae_read_ptr(ed + ED_MAP_OBJ_OFF, &map)) return 0;
     __try {
         g_idstr_ctor(str, ""); initialized = 1;
-        if (sh_rawmap_snapshot(g_editor_map_to_json, map, str) &&
+        SH_PERF_BEGIN(t0);
+        int wrote = sh_rawmap_snapshot(g_editor_map_to_json, map, str);
+        SH_PERF_END(SH_PERF_MAP_SERIALIZE, t0);
+        if (wrote &&
             ae_read_u32_safe(str + IDSTR_LEN_OFF, &length) &&
             length > 0 && length < 32 * 1024 * 1024) {
             copy = (char *)malloc((size_t)length + 1);
@@ -1483,23 +1487,195 @@ int sh_apply_engine_nav_snapshot(char **out, size_t *len, void *ctx)
     *out = copy; *len = (size_t)length; return 1;
 }
 
+static double ae_perf_msf(LONGLONG ticks)
+{
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    if (freq.QuadPart <= 0) return 0.0;
+    return (double)ticks * 1000.0 / (double)freq.QuadPart;
+}
+
+/* Compare the two ways of reading current editor geometry, once, on demand.
+ *
+ * The bake reads the whole map through the engine's serializer. The marked
+ * volumes are a handful of entities, and the engine can write one entity at a
+ * time. This says whether reading only those would be cheaper, and by how much. */
+#define AE_PROBE_ENTITY_CAP  (256 * 1024)
+#define AE_PROBE_VOLUME      "snapmaps/volume/blocking"
+
+void sh_apply_engine_read_probe(void (*out)(const char *fmt, ...))
+{
+    char    *json = NULL, *one;
+    size_t   len = 0;
+    void    *array = NULL;
+    uint32_t count = 0;
+    LONGLONG t0;
+    double   whole_ms, each_ms;
+    int      id, served = 0, volumes = 0;
+
+    if (!out) return;
+    if (ae_on_main_thread() != 1) {
+        out("Run this from the game console with the editor open.\n");
+        return;
+    }
+    if (!ae_entity_array(&array, &count)) {
+        out("No editor map is open.\n");
+        return;
+    }
+
+    t0 = sh_perf_now();
+    if (!sh_apply_engine_nav_snapshot(&json, &len, NULL)) {
+        out("The whole-map read refused.\n");
+        return;
+    }
+    whole_ms = ae_perf_msf(sh_perf_now() - t0);
+    free(json);
+
+    one = (char *)malloc(AE_PROBE_ENTITY_CAP);
+    if (!one) { out("Out of memory.\n"); return; }
+    t0 = sh_perf_now();
+    for (id = 0; id < (int)count; id++) {
+        if (slot_serialize_entity(NULL, id, one, AE_PROBE_ENTITY_CAP) <= 0) continue;
+        served++;
+        if (strstr(one, AE_PROBE_VOLUME)) volumes++;
+    }
+    each_ms = ae_perf_msf(sh_perf_now() - t0);
+    free(one);
+
+    out("reading the current editor geometry:\n");
+    out("  the whole map at once      %.1f ms  (%u bytes)\n", whole_ms, (unsigned)len);
+    out("  every entity one at a time %.1f ms  (%d of %u answered)\n", each_ms, served, count);
+    if (served > 0) {
+        out("  one entity                 %.3f ms\n", each_ms / (double)served);
+        out("  %d of those are marked navigation volumes; reading only those\n", volumes);
+        out("  would cost about %.1f ms\n", each_ms / (double)served * (double)volumes);
+    }
+    {
+        int read = 0;
+        t0 = sh_perf_now();
+        read = sh_nav_bake_refresh_volumes(NULL);
+        out("  the volumes-only read %s: %s\n",
+            read ? "answered" : "could not answer", sh_nav_bake_volumes_reason());
+        if (read) out("  it took %.1f ms\n", ae_perf_msf(sh_perf_now() - t0));
+    }
+}
+
 static volatile LONG g_nav_refresh_queued;
 static int g_nav_refresh_registered;
 static ULONGLONG g_nav_refresh_next;
+
+/* The geometry the lines on screen were built from. Published lines keep
+ * drawing every frame on their own, so rebuilding them unchanged costs about
+ * 11 ms and shows nothing new. */
+static unsigned long g_preview_built_revision = ~0UL;
+
+static void ae_nav_preview_colour(float r, float g, float b, void *ctx)
+{
+    (void)ctx;
+    sh_nav_preview_colour(r, g, b);
+}
 
 static void ae_nav_preview(const uint8_t *ed)
 {
     typedef void *(*get_object_fn)(const void *);
     void *world; void **vt; int enabled=0;
+    unsigned long revision;
     if (!sh_config_get_bool("navmesh.preview",&enabled,NULL) || !enabled) {
         sh_nav_preview_clear(); return;
     }
     vt=*(void ***)ed;
     world=((get_object_fn)vt[0x128/8])(ed);
     if (!world) { sh_nav_preview_clear(); return; }
+    revision = sh_nav_bake_geometry_revision();
+    if (revision == g_preview_built_revision && sh_nav_preview_published(world)) return;
     sh_nav_preview_begin(world);
-    sh_nav_bake_preview(sh_overrides_read_engine_resource,sh_nav_preview_add_line,NULL);
+    if (!sh_nav_bake_preview(sh_overrides_read_engine_resource,sh_nav_preview_add_line,
+                             ae_nav_preview_colour,NULL))
+        return;   /* the bake is still on the worker; leave what is drawn alone */
     sh_nav_preview_publish();
+    g_preview_built_revision = revision;
+}
+
+/* How often the bake re-reads the editor.
+ *
+ * One read costs the engine's whole-map serializer, which is tens of
+ * milliseconds on a small map and over a tenth of a second on a large one --
+ * always several frames -- so the wait is a multiple of what the last read
+ * actually cost. That holds the editor's share of frame time near 2% whatever
+ * the map size, and a cheap read earns a fast rate rather than paying for it.
+ *
+ * A read taken mid-drag would be thrown away by the next one anyway, so none
+ * is taken while the editor is holding geometry; the one that counts is taken
+ * when it is put down. Adding or deleting an entity, or changing the
+ * selection, also reads at once. */
+#define NAV_REFRESH_BASE_MS  1000
+#define NAV_REFRESH_IDLE_MS  8000
+#define NAV_REFRESH_BUDGET   50     /* wait at least 50x the cost of one read */
+
+/* Two ways to read the editor, and which is cheaper depends on the map.
+ *
+ * Reading the marked volumes one at a time wins while there are few of them;
+ * past the break-even the engine's single bulk write wins. Both costs are
+ * measured here rather than assumed, so the break-even follows the map. The
+ * margin keeps a map sitting near it from alternating every second.
+ *
+ * The cheap read only re-reads volumes it already knows, so one complete read
+ * still runs every NAV_FULL_EVERY refreshes to pick up a new volume, or a
+ * module that moved, that no count this poll can see would betray. */
+#define NAV_CHOICE_MARGIN    2.0
+#define NAV_FULL_EVERY       10
+
+static double g_nav_whole_ms;      /* last complete read, 0 = not measured */
+static double g_nav_volumes_ms;    /* last volumes-only read, 0 = not measured */
+static int    g_nav_until_full;    /* refreshes left before a complete read */
+
+/* mode+0x1ac: 1 and 2 accept a new action; any other value is the editor
+ * holding or manipulating something, which is the drag this poll sits out. */
+#define ED_MODE_STATE_OFF    (ED_MODE_OBJ_OFF + 0x1ac)
+
+static ULONGLONG g_nav_refresh_wait = NAV_REFRESH_BASE_MS;
+static int       g_nav_probe_ents   = -1;
+static int       g_nav_was_holding;
+
+static ULONGLONG ae_perf_ms(LONGLONG ticks)
+{
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    if (freq.QuadPart <= 0 || ticks <= 0) return 0;
+    return (ULONGLONG)(ticks * 1000 / freq.QuadPart);
+}
+
+/* A fingerprint of the editor's entity table. The length alone misses a
+ * delete that empties a slot without shortening the table, so the slots
+ * themselves are folded in. Reading is capped because this runs every frame. */
+#define ENT_FINGERPRINT_MAX 8192
+
+static int ae_entity_fingerprint(void)
+{
+    void *array = NULL, *slot = NULL;
+    uint32_t count = 0, i, top;
+    unsigned h = 2166136261u;
+    if (!ae_entity_array(&array, &count)) return -1;
+    h ^= count; h *= 16777619u;
+    top = count > ENT_FINGERPRINT_MAX ? ENT_FINGERPRINT_MAX : count;
+    for (i = 0; i < top; i++) {
+        uintptr_t v = 0;
+        if (ae_read_ptr((const uint8_t *)array + (size_t)i * 8, &slot)) v = (uintptr_t)slot;
+        h ^= (unsigned)v; h *= 16777619u;
+        h ^= (unsigned)(v >> 32); h *= 16777619u;
+    }
+    return (int)(h & 0x7fffffff);
+}
+
+/* What an edit changes and this poll can read without the serializer. An
+ * unreadable mode state reads as settled, so a bad read can never stop the
+ * refresh for good. */
+static void ae_nav_probe(const uint8_t *ed, int *ents, int *holding)
+{
+    int mode_state = 1;
+    *ents = ae_entity_fingerprint();
+    if (!ae_read_u32_safe(ed + ED_MODE_STATE_OFF, &mode_state)) mode_state = 1;
+    *holding = mode_state != 1 && mode_state != 2;
 }
 
 static void ae_nav_refresh_cmd(void)
@@ -1509,9 +1685,36 @@ static void ae_nav_refresh_cmd(void)
     __try {
         if (ed && ae_read_u32_safe(g_load_state_at, &state) && state == LOAD_STATE_RUNNING &&
             ae_read_u32_safe(ed + ED_ENTITY_MODE_OFF, &mode) && mode >= 0 && mode <= 2) {
-            sh_nav_bake_refresh_live();
+            unsigned long before = sh_nav_bake_geometry_revision();
+            int ents = -1, holding = 0, cheap = 0;
+            ULONGLONG budget;
+            LONGLONG started = sh_perf_now();
+
+            if (g_nav_until_full > 0 &&
+                (g_nav_volumes_ms == 0.0 ||
+                 g_nav_volumes_ms * NAV_CHOICE_MARGIN < g_nav_whole_ms))
+                cheap = sh_nav_bake_refresh_volumes(NULL);
+            if (cheap) {
+                g_nav_volumes_ms = ae_perf_msf(sh_perf_now() - started);
+                g_nav_until_full--;
+            } else {
+                sh_nav_bake_refresh_live();
+                g_nav_whole_ms = ae_perf_msf(sh_perf_now() - started);
+                g_nav_until_full = NAV_FULL_EVERY;
+            }
+            SH_PERF_BEGIN(tp);
             if (mode == 2) ae_nav_preview(ed);
             else sh_nav_preview_clear();
+            SH_PERF_END(SH_PERF_NAV_PREVIEW, tp);
+
+            ae_nav_probe(ed, &ents, &holding);
+            g_nav_probe_ents = ents;
+            g_nav_was_holding = holding;
+            budget = ae_perf_ms(sh_perf_now() - started) * NAV_REFRESH_BUDGET;
+            if (budget < NAV_REFRESH_BASE_MS) budget = NAV_REFRESH_BASE_MS;
+            if (budget > NAV_REFRESH_IDLE_MS) budget = NAV_REFRESH_IDLE_MS;
+            g_nav_refresh_wait = budget;
+            (void)before;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         sh_nav_preview_clear();
@@ -1525,13 +1728,48 @@ static void ae_nav_refresh_cmd(void)
 static void ae_nav_refresh_poll(void)
 {
     ULONGLONG now = GetTickCount64();
-    int state = -1;
-    if (!ae_editor_session() || !ae_read_u32_safe(g_load_state_at, &state) ||
+    const uint8_t *ed = ae_editor_session();
+    int state = -1, enabled = 0, ents = -1, holding = 0;
+    if (!ed || !ae_read_u32_safe(g_load_state_at, &state) ||
         state != LOAD_STATE_RUNNING) { sh_nav_preview_clear(); return; }
-    if (now < g_nav_refresh_next || !g_cmdsys || !g_add_command || !g_buffer_cmd) return;
-    g_nav_refresh_next = now + 1000;
-    if (!ae_editor_session() || !ae_read_u32_safe(g_load_state_at, &state) ||
-        state != LOAD_STATE_RUNNING) return;
+    if (!g_cmdsys || !g_add_command || !g_buffer_cmd) return;
+    /* Both consumers of the read -- the green preview and the resource served at
+     * Play -- are off with navigation disabled, so the read has no reader. */
+    if (!sh_config_get_bool("navmesh.enabled", &enabled, NULL) || !enabled) return;
+
+    ae_nav_probe(ed, &ents, &holding);
+    if (holding) {
+        /* Mid-drag: whatever this read found would be stale by the next frame.
+         * The lines already drawn are staler still -- they sit where the volume
+         * was picked up from -- so they come down until it is put back. */
+        if (!g_nav_was_holding) sh_nav_preview_clear();
+        g_nav_probe_ents = ents;
+        g_nav_was_holding = 1;
+        return;
+    }
+    /* The bake finishes on the worker's clock, not the read clock, so the green
+     * is put up on the frame it becomes ready. Both tests are ours and cheap;
+     * neither touches the engine unless one of them says there is work. */
+    {
+        int mode = -1;
+        if (ae_read_u32_safe(ed + ED_ENTITY_MODE_OFF, &mode) && mode == 2 &&
+            (sh_nav_bake_preview_pending() ||
+             sh_nav_bake_geometry_revision() != g_preview_built_revision))
+            ae_nav_preview(ed);
+    }
+
+    /* What is selected is not what the map is. A marquee changes the selection
+     * on every frame it covers something new, and reading the map for that costs
+     * a frame each time while telling us nothing that moved. */
+    if (g_nav_was_holding || ents != g_nav_probe_ents) {
+        g_nav_probe_ents = ents;
+        g_nav_was_holding = 0;
+        g_nav_refresh_wait = NAV_REFRESH_BASE_MS;
+        g_nav_refresh_next = 0;
+    }
+    if (now < g_nav_refresh_next) return;
+    g_nav_refresh_next = now + g_nav_refresh_wait;
+    if (!ae_read_u32_safe(g_load_state_at, &state) || state != LOAD_STATE_RUNNING) return;
     __try {
         if (!g_nav_refresh_registered) {
             g_add_command(g_cmdsys, "sh_nav_refresh_internal", (void *)ae_nav_refresh_cmd,

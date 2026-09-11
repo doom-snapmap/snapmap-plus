@@ -7,6 +7,7 @@
 #include <math.h>
 
 #include "nav_bake.h"
+#include "perf.h"
 #include "nav_regions.h"
 #include "aas_edit.h"
 #include "aas_augment.h"
@@ -62,14 +63,25 @@ static sh_nav_bake_snapshot g_snapshot;
 static void *g_snapshot_ctx;
 static volatile LONG g_building;
 static unsigned long g_geometry_revision;
+/* A volume the bake could not place, in module-local space, so the editor can
+ * draw it where it is instead of leaving the mapper to delete things one at a
+ * time to find it. Capped because a refusal that marks forty is no more
+ * informative than one that marks a couple of dozen. */
+#define BAKE_MAX_REFUSED 24
+typedef struct bake_refused { float c[4][3]; } bake_refused;
+
 typedef struct bake_preview_cache {
     unsigned char *bytes;
     size_t length;
     unsigned first_area;
+    bake_refused *refused;     /* process heap; bake_preview_clear frees it */
+    int           refused_count;
+    int           instance;    /* the transform those shapes need */
 } bake_preview_cache;
 static bake_preview_cache g_preview[BAKE_MAX_MODULES];
 static unsigned long g_preview_revision = ~0UL;
 static int g_preview_lines;
+static int g_preview_lines_last = -1;   /* -1 until the first pass runs */
 static int g_instance_serving;
 
 void sh_nav_bake_enable_instances(int enabled) { g_instance_serving=enabled; }
@@ -79,9 +91,10 @@ static void bake_preview_clear(void)
     int i;
     for(i=0;i<BAKE_MAX_MODULES;i++) {
         if(g_preview[i].bytes)HeapFree(GetProcessHeap(),0,g_preview[i].bytes);
+        if(g_preview[i].refused)HeapFree(GetProcessHeap(),0,g_preview[i].refused);
     }
     memset(g_preview,0,sizeof g_preview);
-    g_preview_revision=~0UL;g_preview_lines=0;
+    g_preview_revision=~0UL;g_preview_lines=0;g_preview_lines_last=-1;
 }
 
 void sh_nav_bake_build_begin(void)
@@ -306,6 +319,61 @@ static void bake_plan_locked(void)
  * conversion. Complete snapshots also refresh ownership and newly created
  * entities.
  */
+unsigned long sh_nav_bake_geometry_revision(void)
+{
+    unsigned long r;
+    AcquireSRWLockShared(&g_bake_lock);
+    r = g_geometry_revision;
+    ReleaseSRWLockShared(&g_bake_lock);
+    return r;
+}
+
+static const char *g_volumes_reason = "never tried";
+
+const char *sh_nav_bake_volumes_reason(void) { return g_volumes_reason; }
+
+int sh_nav_bake_refresh_volumes(int *volumes)
+{
+    unsigned ids[SH_NAVR_MAX_REGIONS];
+    sh_nav_region before[SH_NAVR_MAX_REGIONS];
+    int count = 0, before_count, i, marked, changed, done = 0;
+    const char *why = "read";
+
+    if (volumes) *volumes = 0;
+    if (InterlockedCompareExchange(&g_building, 0, 0)) {
+        g_volumes_reason = "a bake is in progress";
+        return 0;
+    }
+    AcquireSRWLockExclusive(&g_bake_lock);
+    __try {
+        if (!g_have_map || g_live_refused || !g_live_valid || !g_live_json) {
+            why = "no map has been read yet"; __leave;
+        }
+        before_count = g_map.region_count;
+        if (before_count <= 0 || before_count > SH_NAVR_MAX_REGIONS) {
+            why = "the map holds no marked volumes"; __leave;
+        }
+        for (i = 0; i < before_count; i++) ids[count++] = g_map.regions[i].entity;
+        memcpy(before, g_map.regions, (size_t)before_count * sizeof before[0]);
+
+        marked = sh_nav_regions_refresh_ids(&g_map, ids, count,
+                                            g_live_valid, g_live_json, g_live_ctx, &why);
+        if (marked < 0) __leave;   /* the list is stale; the caller reads the map */
+
+        changed = g_map.region_count != before_count ||
+                  memcmp(before, g_map.regions,
+                         (size_t)before_count * sizeof before[0]) != 0;
+        g_live_marked = g_map.region_count;
+        g_live_scanned = count;
+        g_live_refused = 0;
+        if (changed) { g_geometry_revision++; bake_preview_clear(); bake_plan_locked(); }
+        if (volumes) *volumes = count;
+        done = 1;
+    } __finally { ReleaseSRWLockExclusive(&g_bake_lock); }
+    g_volumes_reason = done ? "read" : why;
+    return done;
+}
+
 void sh_nav_bake_refresh_live(void)
 {
     if (InterlockedCompareExchange(&g_building, 0, 0)) return;
@@ -314,12 +382,19 @@ void sh_nav_bake_refresh_live(void)
     if (g_snapshot) {
         char *json = NULL; size_t len = 0;
         sh_nav_map *candidate = (sh_nav_map *)malloc(sizeof *candidate);
-        int ok = candidate && g_snapshot(&json, &len, g_snapshot_ctx) &&
-                 sh_nav_regions_read(json, len, candidate) && !candidate->truncated &&
-                 !candidate->invalid_geometry;
+        int ok = candidate && g_snapshot(&json, &len, g_snapshot_ctx);
+        if (ok) {
+            SH_PERF_BEGIN(t0);
+            ok = sh_nav_regions_read(json, len, candidate);
+            SH_PERF_END(SH_PERF_NAV_PARSE, t0);
+            ok = ok && !candidate->truncated && !candidate->invalid_geometry;
+        }
         if (ok) {
             int changed = !g_have_map || g_live_refused || memcmp(&g_map, candidate, sizeof g_map);
             g_map = *candidate;
+            /* The read attributed its volumes to `candidate`, which is about to be
+             * freed. A later per-entity refresh reads g_map, so it inherits them. */
+            sh_nav_regions_adopt(&g_map);
             g_have_map = 1;
             g_live_marked = g_map.region_count;
             g_live_scanned = g_map.region_count;
@@ -462,7 +537,9 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
     sh_trav_load(read_shipped);
 
     /* Augmentation requires the shipped payload as its base. */
+    SH_PERF_BEGIN(tr);
     shipped = read_shipped ? read_shipped(name, &shipped_len) : NULL;
+
     if (!shipped) {
         _snprintf_s(why, why_cap, _TRUNCATE,
                     "the module's own navigation could not be read back");
@@ -472,6 +549,7 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
     err[0] = 0;
     model = sh_aas_parse(shipped, shipped_len, err, sizeof err);
     HeapFree(GetProcessHeap(), 0, shipped);
+    SH_PERF_END(SH_PERF_BAKE_READ, tr);
     if (!model) {
         _snprintf_s(why, why_cap, _TRUNCATE, "the module's navigation did not parse: %s", err);
         return 0;
@@ -483,8 +561,12 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
     opts.inset = 1;
     opts.traversal = 0;
 
-    if (sh_aas_augment(model, plats, n, &opts, &rep)) {
-        baked = sh_aas_write(model, &baked_len);
+    {
+        SH_PERF_BEGIN(ta);
+        if (sh_aas_augment(model, plats, n, &opts, &rep)) {
+            baked = sh_aas_write(model, &baked_len);
+        }
+        SH_PERF_END(SH_PERF_BAKE_AUGMENT, ta);
     }
     sh_aas_free(model);
     if (!baked) {
@@ -618,32 +700,397 @@ static void bake_preview_polygon(const sh_nav_instance *in,const float p[][3],in
     }
 }
 
-void sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line line,void *ctx)
+/* ==================================================================== */
+/* the preview bake, off the calling thread                              */
+/* ==================================================================== */
+
+/* Folding the marked volumes into a module's navigation is tens of
+ * milliseconds of arithmetic on buffers we own, so it runs on a worker while
+ * the frame that asked for it carries on. The two reads that touch the engine
+ * -- the traversal table and the module's shipped navigation -- happen on the
+ * calling thread, before the hand-off.
+ *
+ * The cost is that the green trails a change by a frame or two. */
+
+typedef struct preview_task {
+    int              slot;                   /* index into g_modules and g_preview */
+    int              instance;
+    char             name[SH_SMNAV_RESNAME_CAP];
+    sh_aug_platform *plats;
+    int              plat_count;
+    unsigned char   *shipped;
+    size_t           shipped_len;
+    unsigned char   *baked;                  /* what the worker produced */
+    size_t           baked_len;
+    unsigned         first_area;
+    bake_refused     refused[BAKE_MAX_REFUSED];
+    int              refused_count;
+    char             reason[BAKE_REASON_CAP];
+} preview_task;
+
+typedef struct preview_batch {
+    unsigned long revision;                  /* the geometry it was gathered from */
+    int           count;
+    preview_task  t[BAKE_MAX_MODULES];
+} preview_batch;
+
+static HANDLE           g_pv_thread, g_pv_wake;
+static CRITICAL_SECTION g_pv_lock;
+static volatile LONG    g_pv_ready;          /* the lock and the event exist */
+static preview_batch   *g_pv_queued;         /* handed over, not started */
+static preview_batch   *g_pv_done;           /* finished, not installed */
+static unsigned long    g_pv_inflight;       /* revision the worker holds, 0 = idle */
+static volatile LONG    g_pv_stop;
+
+static void preview_batch_free(preview_batch *b)
 {
     int i;
-    if(!line||!read_shipped||!bake_enabled()||InterlockedCompareExchange(&g_building,0,0))return;
+    if (!b) return;
+    for (i = 0; i < b->count; i++) {
+        if (b->t[i].plats)   HeapFree(GetProcessHeap(), 0, b->t[i].plats);
+        if (b->t[i].shipped) HeapFree(GetProcessHeap(), 0, b->t[i].shipped);
+        if (b->t[i].baked)   HeapFree(GetProcessHeap(), 0, b->t[i].baked);
+    }
+    HeapFree(GetProcessHeap(), 0, b);
+}
+
+/* What the bake worked out about each volume, for a refusal that throws all of
+ * it away. Without this a refused module reports one sentence about a limit and
+ * nothing about which volume reached it. */
+static void preview_report_refusal(preview_task *t, const sh_aug_report *rep)
+{
+    char line[512];
+    int i, emitted = 0, obstacles = 0, shown = 0;
+
+    for (i = 0; i < rep->platform_count; i++)
+        if (rep->platforms[i].emitted) emitted++;
+    for (i = 0; i < t->plat_count; i++)
+        if (t->plats[i].obstacle_only) obstacles++;
+
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "NAV: preview refused '%s' -- %s",  t->name, t->reason);
+    backend_log(line);
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "NAV:   %d volume(s) offered (%d of them walls that only block), "
+                "%d walkable piece(s) had been placed, areas %u->%u, links %u->%u, "
+                "tree depth %u->%u",
+                t->plat_count, obstacles, emitted,
+                rep->areas_before, rep->areas_after,
+                rep->reach_before, rep->reach_after,
+                rep->depth_before, rep->depth_after);
+    backend_log(line);
+
+    /* Volumes that produced no floor. A successful bake has these too, so
+     * they are context, not the cause. Eight is enough to see a pattern. */
+    for (i = 0; i < rep->platform_count && shown < 8; i++) {
+        if (rep->platforms[i].emitted) continue;
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "NAV:   %s made no walkable floor -- %s",
+                    rep->platforms[i].name,
+                    rep->platforms[i].reason[0] ? rep->platforms[i].reason : "no reason recorded");
+        backend_log(line);
+        shown++;
+    }
+
+    if (!rep->reach_limit_exceeded) return;
+
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "NAV:   area %d ran out of room at %u routes out of it",
+                rep->reach_limit_area, SH_AAS_MAX_AREA_REACHABILITIES);
+    backend_log(line);
+    if (rep->blamed_count == 0) {
+        backend_log("NAV:   that area is shipped floor already at the limit; "
+                    "no volume of yours is at fault");
+        return;
+    }
+
+    /* Mark only what a mapper can act on: the volumes routing into the full
+     * area. Anything else drawn red sends them to the wrong volume. */
+    for (i = 0; i < rep->blamed_count && t->refused_count < BAKE_MAX_REFUSED; i++) {
+        int src = rep->blamed[i];
+        if (src < 0 || src >= t->plat_count) continue;
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "NAV:   %s routes into area %d; move or delete it to fit",
+                    t->plats[src].name, rep->reach_limit_area);
+        backend_log(line);
+        memcpy(t->refused[t->refused_count].c, t->plats[src].c,
+               sizeof t->refused[0].c);
+        t->refused_count++;
+    }
+}
+
+/* The whole of one module's bake that touches nothing but this task. */
+static void preview_task_run(preview_task *t)
+{
+    sh_aas *model;
+    sh_aug_opts opts;
+    sh_aug_report rep;
+    char err[192];
+
+    if (!t->shipped || t->plat_count == 0) {
+        _snprintf_s(t->reason, sizeof t->reason, _TRUNCATE,
+                    t->plat_count == 0
+                    ? "no marked volume also blocks demons, so none is a floor"
+                    : "the module's own navigation could not be read back");
+        return;
+    }
+    err[0] = 0;
+    model = sh_aas_parse(t->shipped, t->shipped_len, err, sizeof err);
+    if (!model) {
+        _snprintf_s(t->reason, sizeof t->reason, _TRUNCATE,
+                    "the module's navigation did not parse: %s", err);
+        return;
+    }
+    memset(&opts, 0, sizeof opts);
+    memset(&rep, 0, sizeof rep);
+    t->first_area = sh_aas_count(model, SH_AAS_L_AREAS);
+    opts.fall = SH_AUG_FALL_AUTO;
+    opts.inset = 1;
+    opts.traversal = 0;
+    {
+        SH_PERF_BEGIN(ta);
+        if (sh_aas_augment(model, t->plats, t->plat_count, &opts, &rep))
+            t->baked = sh_aas_write(model, &t->baked_len);
+        SH_PERF_END(SH_PERF_BAKE_AUGMENT, ta);
+    }
+    sh_aas_free(model);
+    if (!t->baked) {
+        _snprintf_s(t->reason, sizeof t->reason, _TRUNCATE, "%s",
+            rep.reach_limit_exceeded ? "required routes exceed the native 256 outgoing links per area; the whole bake was refused" :
+            rep.links_truncated ? "traversal storage could not be allocated; the whole bake was refused" :
+            rep.pieces_truncated ? "the geometry capacity was exceeded; the whole bake was refused" :
+            rep.depth_exceeded ? "the navigation tree depth was exceeded; the whole bake was refused" :
+            "the bake did not produce a payload");
+        preview_report_refusal(t, &rep);
+        return;
+    }
+
+    /* The same two gates the served bake passes. Both read only the payload,
+     * so they belong on this side of the hand-off. */
+    err[0] = 0;
+    if (!sh_navmesh_validate_aas(t->baked, t->baked_len, err, sizeof err)) {
+        HeapFree(GetProcessHeap(), 0, t->baked);
+        t->baked = NULL; t->baked_len = 0;
+        _snprintf_s(t->reason, sizeof t->reason, _TRUNCATE,
+                    "the bake did not pass validation: %s", err);
+        preview_report_refusal(t, &rep);
+        return;
+    }
+    if (rep.depth_exceeded) {
+        HeapFree(GetProcessHeap(), 0, t->baked);
+        t->baked = NULL; t->baked_len = 0;
+        _snprintf_s(t->reason, sizeof t->reason, _TRUNCATE,
+                    "too many separate platforms for one module's navigation tree");
+        preview_report_refusal(t, &rep);
+    }
+}
+
+static void preview_batch_run(preview_batch *b)
+{
+    int i;
+    SH_PERF_BEGIN(t0);
+    for (i = 0; i < b->count; i++) preview_task_run(&b->t[i]);
+    SH_PERF_END(SH_PERF_PREVIEW_BAKE, t0);
+}
+
+static DWORD WINAPI preview_worker(LPVOID unused)
+{
+    (void)unused;
+    for (;;) {
+        preview_batch *b = NULL;
+        WaitForSingleObject(g_pv_wake, INFINITE);
+        if (InterlockedCompareExchange(&g_pv_stop, 0, 0)) return 0;
+        EnterCriticalSection(&g_pv_lock);
+        b = g_pv_queued;
+        g_pv_queued = NULL;
+        LeaveCriticalSection(&g_pv_lock);
+        if (!b) continue;
+        preview_batch_run(b);
+        EnterCriticalSection(&g_pv_lock);
+        preview_batch_free(g_pv_done);   /* a result nobody collected is stale */
+        g_pv_done = b;
+        LeaveCriticalSection(&g_pv_lock);
+    }
+}
+
+/* 1 once a worker exists. A machine that refuses the thread bakes inline, which
+ * is what this did before, so the preview still works. */
+static int preview_worker_ready(void)
+{
+    if (InterlockedCompareExchange(&g_pv_ready, 0, 0) == 2) return g_pv_thread != NULL;
+    if (InterlockedCompareExchange(&g_pv_ready, 1, 0) != 0) return g_pv_thread != NULL;
+    InitializeCriticalSection(&g_pv_lock);
+    g_pv_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
+    if (g_pv_wake)
+        g_pv_thread = CreateThread(NULL, 0, preview_worker, NULL, 0, NULL);
+    InterlockedExchange(&g_pv_ready, 2);
+    return g_pv_thread != NULL;
+}
+
+int sh_nav_bake_preview_pending(void)
+{
+    int pending;
+    if (InterlockedCompareExchange(&g_pv_ready, 0, 0) != 2) return 0;
+    EnterCriticalSection(&g_pv_lock);
+    pending = g_pv_done != NULL;
+    LeaveCriticalSection(&g_pv_lock);
+    return pending;
+}
+
+void sh_nav_bake_preview_stop(void)
+{
+    if (InterlockedCompareExchange(&g_pv_ready, 0, 0) != 2) return;
+    InterlockedExchange(&g_pv_stop, 1);
+    if (g_pv_wake) SetEvent(g_pv_wake);
+    if (g_pv_thread) WaitForSingleObject(g_pv_thread, 2000);
+}
+
+/* Everything the bake needs, read on this thread while the lock is held. */
+static preview_batch *preview_gather(sh_nav_bake_reader read_shipped)
+{
+    preview_batch *b;
+    sh_aug_platform *scratch;
+    int i;
+
+    b = (preview_batch *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof *b);
+    if (!b) return NULL;
+    scratch = (sh_aug_platform *)HeapAlloc(GetProcessHeap(), 0,
+                    SH_AUG_MAX_PLATFORMS * sizeof *scratch);
+    if (!scratch) { HeapFree(GetProcessHeap(), 0, b); return NULL; }
+    b->revision = g_geometry_revision;
+
+    /* Cached for the session after the first read; without it no climbs are
+     * emitted. It reads engine resources, so it cannot go to the worker. */
+    sh_trav_load(read_shipped);
+
+    for (i = 0; i < g_module_count && b->count < BAKE_MAX_MODULES; i++) {
+        preview_task *t;
+        const char *base;
+        if (!g_modules[i].ok) continue;
+        base = strrchr(g_modules[i].module, '/');
+        if (!base) continue;
+        t = &b->t[b->count++];
+        t->slot = i;
+        t->instance = g_modules[i].instance;
+        _snprintf_s(t->name, sizeof t->name, _TRUNCATE,
+                    "generated/maps/modules/%s/%s.baas_monster48",
+                    g_modules[i].module, base + 1);
+        t->plat_count = bake_collect_platforms(&g_modules[i], scratch, SH_AUG_MAX_PLATFORMS);
+        if (t->plat_count > 0) {
+            t->plats = (sh_aug_platform *)HeapAlloc(GetProcessHeap(), 0,
+                            (size_t)t->plat_count * sizeof *t->plats);
+            if (!t->plats) { b->count--; continue; }
+            memcpy(t->plats, scratch, (size_t)t->plat_count * sizeof *t->plats);
+        }
+        SH_PERF_BEGIN(tr);
+        t->shipped = read_shipped ? read_shipped(t->name, &t->shipped_len) : NULL;
+        SH_PERF_END(SH_PERF_BAKE_READ, tr);
+    }
+    HeapFree(GetProcessHeap(), 0, scratch);
+    if (b->count == 0) { preview_batch_free(b); return NULL; }
+    return b;
+}
+
+/* Move a finished batch into the preview cache. Called with the bake lock
+ * held, and only for the geometry it was gathered from -- a batch overtaken by
+ * a later edit describes a map that no longer exists. */
+static void preview_install(preview_batch *b)
+{
+    int i;
+    if (b->revision != g_geometry_revision) return;
+    for (i = 0; i < b->count; i++) {
+        preview_task *t = &b->t[i];
+        if (t->slot < 0 || t->slot >= BAKE_MAX_MODULES) continue;
+        if (g_preview[t->slot].bytes)
+            HeapFree(GetProcessHeap(), 0, g_preview[t->slot].bytes);
+        g_preview[t->slot].bytes = t->baked;
+        g_preview[t->slot].length = t->baked_len;
+        g_preview[t->slot].first_area = t->first_area;
+        g_preview[t->slot].instance = t->instance;
+        t->baked = NULL;   /* the cache owns it now */
+        if (g_preview[t->slot].refused) {
+            HeapFree(GetProcessHeap(), 0, g_preview[t->slot].refused);
+            g_preview[t->slot].refused = NULL;
+        }
+        g_preview[t->slot].refused_count = 0;
+        if (t->refused_count > 0) {
+            size_t n = (size_t)t->refused_count * sizeof *t->refused;
+            g_preview[t->slot].refused = (bake_refused *)HeapAlloc(GetProcessHeap(), 0, n);
+            if (g_preview[t->slot].refused) {
+                memcpy(g_preview[t->slot].refused, t->refused, n);
+                g_preview[t->slot].refused_count = t->refused_count;
+            }
+        }
+        if (!g_preview[t->slot].bytes) {
+            char message[SH_SMNAV_RESNAME_CAP + BAKE_REASON_CAP + 96];
+            strncpy_s(g_modules[t->slot].reason, sizeof g_modules[t->slot].reason,
+                      t->reason, _TRUNCATE);
+            _snprintf_s(message, sizeof message, _TRUNCATE,
+                        "NAV: preview refused for copy %d '%s' -- %s",
+                        t->instance, t->name, t->reason);
+            backend_log(message);
+        }
+    }
+    g_preview_revision = b->revision;
+}
+
+int sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line line,
+                        sh_nav_preview_colour_fn colour,void *ctx)
+{
+    int i, current = 0;
+    if(!line||!read_shipped||!bake_enabled()||InterlockedCompareExchange(&g_building,0,0))return 0;
     AcquireSRWLockExclusive(&g_bake_lock);
     __try {
         if(!g_have_map||g_live_refused)__leave;
-        if(g_preview_revision!=g_geometry_revision) {
-            bake_preview_clear();
-            for(i=0;i<g_module_count;i++)if(g_modules[i].ok) {
-                char name[320];const char *base=strrchr(g_modules[i].module,'/');
-                if(!base)continue;
-                _snprintf_s(name,sizeof name,_TRUNCATE,"generated/maps/modules/%s/%s.baas_monster48",
-                            g_modules[i].module,base+1);
-                if(!bake_one(name,&g_modules[i],read_shipped,&g_preview[i].bytes,&g_preview[i].length,
-                    g_modules[i].reason,sizeof g_modules[i].reason,&g_preview[i].first_area)) {
-                    char message[SH_SMNAV_RESNAME_CAP+BAKE_REASON_CAP+96];
-                    _snprintf_s(message,sizeof message,_TRUNCATE,
-                        "NAV: preview refused for copy %d '%s' -- %s",
-                        g_modules[i].instance,name,g_modules[i].reason);
-                    backend_log(message);
-                }
+
+        /* Collect whatever the worker finished, then schedule the next bake if
+         * the geometry has moved past what is on screen. */
+        if (InterlockedCompareExchange(&g_pv_ready, 0, 0) == 2) {
+            preview_batch *done = NULL;
+            EnterCriticalSection(&g_pv_lock);
+            done = g_pv_done; g_pv_done = NULL;
+            LeaveCriticalSection(&g_pv_lock);
+            if (done) {
+                if (done->revision == g_pv_inflight) g_pv_inflight = 0;
+                preview_install(done);
+                preview_batch_free(done);
             }
-            g_preview_revision=g_geometry_revision;
         }
+        if (g_preview_revision != g_geometry_revision &&
+            g_pv_inflight != g_geometry_revision) {
+            preview_batch *b = preview_gather(read_shipped);
+            if (b && preview_worker_ready()) {
+                EnterCriticalSection(&g_pv_lock);
+                preview_batch_free(g_pv_queued);   /* an older batch is superseded */
+                g_pv_queued = b;
+                LeaveCriticalSection(&g_pv_lock);
+                g_pv_inflight = b->revision;
+                SetEvent(g_pv_wake);
+            } else if (b) {
+                preview_batch_run(b);
+                preview_install(b);
+                preview_batch_free(b);
+            }
+        }
+        /* Still waiting on the worker: the lines that are up describe the
+         * previous geometry, which is closer to the truth than none. */
+        if (g_preview_revision != g_geometry_revision) __leave;
+        current = 1;
+        SH_PERF_BEGIN(tl);
         g_preview_lines=0;
+
+        /* Volumes the bake refused, marked where they stand. Drawn first so a
+         * mark is never hidden under the walkable surface beside it. */
+        if(colour)for(i=0;i<g_module_count;i++)if(g_preview[i].refused_count>0) {
+            int r, inst=g_preview[i].instance;
+            if(inst<0||inst>=g_map.instance_count)continue;
+            colour(1.0f,0.15f,0.15f,ctx);
+            for(r=0;r<g_preview[i].refused_count;r++)
+                bake_preview_polygon(&g_map.instances[inst],
+                                     g_preview[i].refused[r].c,4,line,ctx);
+            colour(0.15f,1.0f,0.25f,ctx);
+        }
+
         for(i=0;i<g_module_count;i++)if(g_preview[i].bytes) {
             char err[128];unsigned a;
             sh_aas *model=sh_aas_parse(g_preview[i].bytes,g_preview[i].length,err,sizeof err);
@@ -675,7 +1122,31 @@ void sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line lin
             }
             sh_aas_free(model);
         }
+        SH_PERF_END(SH_PERF_PREVIEW_LINES, tl);
+
+        /* A preview that empties with volumes still marked is the one
+         * failure a mapper sees and the log never recorded. */
+        if (g_preview_lines == 0 && g_preview_lines_last > 0) {
+            char message[160];
+            int k, payloads = 0, marks = 0;
+            for (k = 0; k < g_module_count; k++) {
+                if (g_preview[k].bytes) payloads++;
+                marks += g_preview[k].refused_count;
+            }
+            _snprintf_s(message, sizeof message, _TRUNCATE,
+                        "NAV: the green preview is now empty -- %d module(s) marked, "
+                        "%d with a finished bake, %d volume(s) marked as not placed",
+                        g_module_count, payloads, marks);
+            backend_log(message);
+        } else if (g_preview_lines > 0 && g_preview_lines_last == 0) {
+            char message[96];
+            _snprintf_s(message, sizeof message, _TRUNCATE,
+                        "NAV: the green preview is back -- %d line(s)", g_preview_lines);
+            backend_log(message);
+        }
+        g_preview_lines_last = g_preview_lines;
     } __finally { ReleaseSRWLockExclusive(&g_bake_lock); }
+    return current;
 }
 
 int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
@@ -796,6 +1267,9 @@ void sh_nav_bake_report(void (*out)(const char *fmt, ...))
             out("  marked %s -- %d volume(s) in copy %d -- %s\n",
                 m->module, m->regions, m->instance,
                 m->ok ? (m->reason[0] ? m->reason : "ready") : m->reason);
+            out("    preview: %s, %d volume(s) marked as not placed\n",
+                g_preview[i].bytes ? "drawn from a finished bake" : "nothing to draw",
+                g_preview[i].refused_count);
         }
     }
     if (g_live_refused) {

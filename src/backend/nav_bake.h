@@ -49,6 +49,24 @@ typedef int (*sh_nav_bake_entity_count)(void *ctx);
  */
 void sh_nav_bake_refresh_live(void);
 
+/* Re-read only the volumes the last complete refresh found, which is a small
+ * part of the map and correspondingly cheaper. Returns 1 when it committed an
+ * answer, or 0 when it could not -- a new or deleted volume, a moved module, a
+ * map it has not read yet -- which the caller answers with a complete refresh.
+ *
+ * Main thread only, same as the complete refresh. Reports how many volumes it
+ * read through `volumes` when that is not NULL, so a caller can weigh this
+ * against the complete refresh from its own timings. */
+int sh_nav_bake_refresh_volumes(int *volumes);
+
+/* Why the last volumes-only refresh could not answer, for the console. */
+const char *sh_nav_bake_volumes_reason(void);
+
+/* Counter that advances whenever a refresh finds the editor geometry different
+ * from what the bake holds. A caller compares it across a refresh to learn
+ * whether that refresh changed anything. */
+unsigned long sh_nav_bake_geometry_revision(void);
+
 typedef int (*sh_nav_bake_snapshot)(char **json, size_t *len, void *ctx);
 void sh_nav_bake_set_snapshot(sh_nav_bake_snapshot snapshot, void *ctx);
 void sh_nav_bake_build_begin(void);
@@ -57,7 +75,27 @@ void sh_nav_bake_build_end(void);
 /* Refresh the editor preview from a validated bake for monster48. Lines are
  * world-space; the caller draws them only while the editor is active. */
 typedef void (*sh_nav_preview_line)(const float start[3], const float end[3], void *ctx);
-void sh_nav_bake_preview(sh_nav_bake_reader read_shipped, sh_nav_preview_line line, void *ctx);
+/* Emit the green lines for the geometry as it stands. Returns 0 when the bake
+ * behind them is still on the worker, in which case nothing was emitted and
+ * the caller must keep showing what it has: publishing an empty set instead
+ * blinks every line off until the worker lands. */
+/* Colour for the lines that follow. Supplied by the caller, like the line sink
+ * itself, so the bake stays independent of how anything is drawn. A caller
+ * that passes NULL gets the walkable surfaces only: a refused volume drawn in
+ * the same colour as a working one would say the opposite of the truth. */
+typedef void (*sh_nav_preview_colour_fn)(float r, float g, float b, void *ctx);
+
+int sh_nav_bake_preview(sh_nav_bake_reader read_shipped, sh_nav_preview_line line,
+                        sh_nav_preview_colour_fn colour, void *ctx);
+
+/* Stop the worker that bakes the preview. Call once from DllMain on detach. */
+void sh_nav_bake_preview_stop(void);
+
+/* 1 when the worker has finished a bake nobody has collected. Cheap enough to
+ * ask every frame, and worth asking: the worker finishes on its own clock, so
+ * waiting for the next read to collect it leaves the green stale for as long
+ * as that read is away. */
+int sh_nav_bake_preview_pending(void);
 void sh_nav_bake_enable_instances(int enabled);
 int sh_nav_bake_instance_name(int instance, const char *name, char *out, size_t capacity);
 

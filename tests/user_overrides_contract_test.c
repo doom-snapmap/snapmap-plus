@@ -180,7 +180,7 @@ int main(int argc, char **argv)
         ? strstr(baked_gate, "s = make_mem_stream(")
         : NULL;
     engine_fallback = baked_gate
-        ? strstr(baked_gate, "return g_orig_open(self, name")
+        ? strstr(baked_gate, "g_orig_open(self, name")
         : NULL;
     CHECK(baked_stream != NULL);
     CHECK(engine_fallback != NULL);

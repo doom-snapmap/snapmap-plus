@@ -14,7 +14,7 @@ param(
                            "snapstack.c", "json_patch.c",
                            # Include the cvar unlocker in the backend; DOOM uses the native dinput8 DLL.
                            "cvar_unlock.c",
-                           "backend_log.c", "xinput_proxy.c",
+                           "backend_log.c", "perf.c", "xinput_proxy.c",
                            # The fault shield shares this backend's hook and signature implementations.
                            # Do not add the shield's duplicate hook.c or signatures.c.
                            "../fault_shield/veh.c", "../fault_shield/recovery.c",
