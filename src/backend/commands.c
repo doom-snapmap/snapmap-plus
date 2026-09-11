@@ -442,6 +442,10 @@ static void rawmap_print_usage(void)
     sh_printf("                             you opened, or one you name. Opening another\n");
     sh_printf("                             map goes back to the default file\n");
     sh_printf("  sh_rawmaps default         put both paths back to the default files\n");
+    sh_printf("  sh_rawmaps overwrite [on|off]\n");
+    sh_printf("                             off by default: saving a rawmap you opened makes a\n");
+    sh_printf("                             new map. On lets the save land on the map it\n");
+    sh_printf("                             opened over, replacing it\n");
 }
 
 static void h_sh_rawmaps(idCmdArgs *a)
@@ -459,6 +463,19 @@ static void h_sh_rawmaps(idCmdArgs *a)
 
     if (_stricmp(verb, "on") == 0)      { sh_rawmap_swap_arm(1); rawmap_print_state(); return; }
     if (_stricmp(verb, "off") == 0)     { sh_rawmap_swap_arm(0); rawmap_print_state(); return; }
+
+    /* Named for the thing a person is choosing to allow, so "on" is the permissive one. */
+    if (_stricmp(verb, "overwrite") == 0) {
+        if (arg != NULL && arg[0] != '\0') {
+            if (_stricmp(arg, "on") == 0 || strcmp(arg, "1") == 0)       sh_rawmap_set_branch_tag(0);
+            else if (_stricmp(arg, "off") == 0 || strcmp(arg, "0") == 0) sh_rawmap_set_branch_tag(1);
+            else { sh_printf("sh_rawmaps overwrite: say on or off.\n"); return; }
+        }
+        sh_printf(sh_rawmap_branch_tag_enabled()
+                  ? "Saving a rawmap you opened makes a new map; it never lands on the map it opened over.\n"
+                  : "Saving a rawmap you opened OVERWRITES the map it opened over.\n");
+        return;
+    }
 
     if (_stricmp(verb, "default") == 0) {
         sh_rawmap_swap_set_source(NULL);

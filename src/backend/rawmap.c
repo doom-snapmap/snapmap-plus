@@ -207,6 +207,140 @@ static char *mpkg_strip_guarded(const char *json)
     }
 }
 
+/* ------------------------------------------------------------------ "is this a branch map?" -----
+ * The editor asks one small function whether the open map is a branch, and answers "Save over the
+ * map you opened" or "Save asks for a name" from it. That function reads the map's tag list for
+ * "map:branch".
+ *
+ * We answer it instead of writing the tag. Putting the tag in the map JSON does not work -- the
+ * loader ignores the array and the map comes back with no tags -- and adding it to the live map
+ * after the load grows that tag list under whatever already holds the array, which faults on a
+ * later read. Answering costs the engine nothing: no engine data changes. */
+
+/* Whether a map opened from a rawmap counts as a branch. On, the engine's own Save asks for a
+ * name; off, it overwrites the map the rawmap opened over. */
+static volatile LONG g_branch_tag    = 1;
+static volatile LONG g_open_is_rawmap = 0;   /* 1 = the open map was substituted by the swap */
+
+void sh_rawmap_set_branch_tag(int on) { InterlockedExchange(&g_branch_tag, on ? 1 : 0); }
+int  sh_rawmap_branch_tag_enabled(void) { return InterlockedCompareExchange(&g_branch_tag, 0, 0) != 0; }
+
+typedef unsigned char (*is_branch_map_fn)(void *editor);
+static is_branch_map_fn g_isbranch_orig = NULL;
+
+static unsigned char sh_isbranch_detour(void *editor)
+{
+    if (InterlockedCompareExchange(&g_open_is_rawmap, 0, 0) != 0 &&
+        InterlockedCompareExchange(&g_branch_tag, 0, 0) != 0)
+        return 1;
+    return g_isbranch_orig ? g_isbranch_orig(editor) : 0;
+}
+
+/* idSnapEditorLocal::IsBranchMap. Two functions in the image share its exact shape -- the same
+ * body around a call to a different tag check -- so the pattern alone is ambiguous. The one we
+ * want is the one whose callee names "map:branch", which is what this follows:
+ *
+ *     +0x10  E8 <rel32>          the tag check
+ *     callee +0x?? 48 8D 15 ...  lea rdx, [the tag literal]
+ */
+#define ISBRANCH_STOLEN 14   /* through `test rcx,rcx`, before the short jump at +0x0E */
+
+static int callee_names_branch(const unsigned char *site)
+{
+    __try {
+        const unsigned char *callee, *p;
+        int i;
+
+        if (site[0x10] != 0xE8) return 0;
+        callee = site + 0x15 + *(const int *)(site + 0x11);
+
+        for (i = 0; i < 0x40; i++) {
+            if (callee[i] == 0x48 && callee[i + 1] == 0x8D && callee[i + 2] == 0x15) {
+                p = callee + i + 7 + *(const int *)(callee + i + 3);
+                return strncmp((const char *)p, "map:branch", 11) == 0;
+            }
+        }
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+/* The 39-byte body, with only the call displacement wildcarded. The shared resolver refuses an
+ * ambiguous pattern and returns no address, and this one matches twice by design, so the scan is
+ * here where both candidates can be told apart. */
+static const unsigned char ISBRANCH_PAT[] = {
+    0x48,0x83,0xEC,0x28, 0x48,0x8B,0x89,0xC8,0x04,0x02,0x00, 0x48,0x85,0xC9, 0x74,0x10,
+    0xE8,0x00,0x00,0x00,0x00, 0x84,0xC0, 0x74,0x07, 0xB0,0x01, 0x48,0x83,0xC4,0x28,0xC3,
+    0x32,0xC0, 0x48,0x83,0xC4,0x28,0xC3
+};
+#define ISBRANCH_WILD_AT 17   /* the four rel32 bytes, which differ between builds */
+
+static void *find_is_branch_map(const unsigned char *base)
+{
+    __try {
+        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
+        const IMAGE_NT_HEADERS64 *nt;
+        const IMAGE_SECTION_HEADER *sec;
+        unsigned i, k;
+
+        if (base == NULL || dos->e_magic != IMAGE_DOS_SIGNATURE) return NULL;
+        nt = (const IMAGE_NT_HEADERS64 *)(base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) return NULL;
+        sec = IMAGE_FIRST_SECTION(nt);
+
+        for (i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+            const unsigned char *p;
+            size_t n;
+            if (!(sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+            p = base + sec[i].VirtualAddress;
+            n = sec[i].Misc.VirtualSize;
+            if (n < sizeof ISBRANCH_PAT) continue;
+            for (k = 0; k + sizeof ISBRANCH_PAT <= n; k++) {
+                unsigned j;
+                if (p[k] != ISBRANCH_PAT[0]) continue;
+                for (j = 0; j < sizeof ISBRANCH_PAT; j++) {
+                    if (j >= ISBRANCH_WILD_AT && j < ISBRANCH_WILD_AT + 4) continue;
+                    if (p[k + j] != ISBRANCH_PAT[j]) break;
+                }
+                /* Both candidates match the bytes; only one calls the map:branch check. */
+                if (j == sizeof ISBRANCH_PAT && callee_names_branch(p + k)) return (void *)(p + k);
+            }
+        }
+        return NULL;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return NULL;
+    }
+}
+
+int sh_rawmap_branch_install(const unsigned char *module_base)
+{
+    void *is_branch_fn, *tramp;
+
+    if (g_isbranch_orig != NULL) return 1;
+
+    is_branch_fn = find_is_branch_map(module_base);
+    if (is_branch_fn == NULL) {
+        backend_log("B1: branch answer SKIPPED -- IsBranchMap not found; the engine's own Save "
+                    "will overwrite the map a rawmap opened over");
+        return 0;
+    }
+
+    tramp = hook_prepare(is_branch_fn, (void *)sh_isbranch_detour, ISBRANCH_STOLEN);
+    if (tramp == NULL) {
+        backend_log("B1: branch answer FAIL -- trampoline preparation failed");
+        return 0;
+    }
+    g_isbranch_orig = (is_branch_map_fn)tramp;
+    if (hook_commit(tramp) != B2_PATCH_OK) {
+        if (hook_unpatch(tramp)) g_isbranch_orig = NULL;
+        backend_log("B1: branch answer commit failed");
+        return 0;
+    }
+    backend_log("B1: branch answer installed -- a map opened from a rawmap saves as a new map");
+    return 1;
+}
+
 /* Prepare the chosen JSON before native parsing: migrate markers, rebuild
  * map-scoped navigation state, then strip package and navigation envelopes.
  * Each failed strip retains the preceding buffer. Returns an owned process-
@@ -281,6 +415,8 @@ static int sh_deser_detour(const char *json, void *out_map)
             {
                 char *prepared = prepare_map_buffer(ours);
                 int rc = g_deser_orig(prepared ? prepared : ours, out_map);
+                /* The open map came from a rawmap, which is what the branch answer keys off. */
+                InterlockedExchange(&g_open_is_rawmap, 1);
                 InterlockedIncrement(&g_swap_complete_count); /* only after the substituted parse returns */
                 if (prepared) HeapFree(GetProcessHeap(), 0, prepared);
                 HeapFree(GetProcessHeap(), 0, ours);
@@ -290,6 +426,7 @@ static int sh_deser_detour(const char *json, void *out_map)
         /* Unreadable substitute: use the engine input. */
     }
     if (!mpkg_gate_guarded(json)) return 0;   /* refused: engine json never parsed */
+    InterlockedExchange(&g_open_is_rawmap, 0);   /* the engine's own map: let the engine answer */
     {
         char *prepared = prepare_map_buffer(json);
         int rc;
@@ -982,6 +1119,7 @@ unsigned long long sh_rawmap_test_write(const char *data, size_t len)
 {
     return write_shadow(data, len);
 }
+
 #endif
 
 /* Produce an owned pretty-printed copy, or NULL to keep the engine bytes. The

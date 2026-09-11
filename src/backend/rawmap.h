@@ -158,6 +158,20 @@ void sh_rawmap_get_save_target(char *out, int cap);
  * file that was aimed at while some other map was open. */
 void sh_rawmap_clear_save_target_for_new_map(void);
 
+/* Mark a map opened from a rawmap as a branch, so the engine's own Save asks for a name instead
+ * of overwriting the map it opened over. On by default. The tag goes into the map JSON before the
+ * engine parses it; adding it to the live map afterwards grows the map's tag list under whatever
+ * already holds the array, and a later read of it faults on freed memory. */
+void sh_rawmap_set_branch_tag(int on);
+int  sh_rawmap_branch_tag_enabled(void);
+
+/* Detour idSnapEditorLocal::IsBranchMap so a map opened from a rawmap answers yes, which is what
+ * makes the engine's own Save ask for a name instead of overwriting the map the rawmap opened
+ * over. Finds the function itself: a second function in the image has the same body around a
+ * different tag check, so the match is confirmed by the literal its callee names. Returns 1 when
+ * installed; every refusal is logged and leaves the engine's own answer in place. */
+int sh_rawmap_branch_install(const unsigned char *module_base);
+
 /* Could we write a rawmap at `path`? The file need not exist -- a save creates it -- but the path
  * must name a folder and that folder must exist. This is what stops a bare word like "banana" from
  * becoming a file in DOOM's own install folder. Writes the reason into out_msg on failure. */
@@ -181,4 +195,5 @@ int sh_rawmap_snapshot(void *editor_serializer, void *map, void *out_idstr);
 /* Test-only: write bytes through the real destination resolver, so a test can check WHERE a save
  * lands and that a one-off destination is spent by it. Not present in shipping builds. */
 unsigned long long sh_rawmap_test_write(const char *data, size_t len);
+
 #endif

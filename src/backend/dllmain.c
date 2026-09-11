@@ -180,6 +180,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                             "(maps declaring packages will be refused, never crashed)");
         }
         sh_rawmap_swap_install(deser, deser_clean);
+        /* Answer "is the open map a branch?" for a swapped map, so the engine's own Save asks for
+         * a name rather than overwriting the map the rawmap opened over. */
+        sh_rawmap_branch_install(g_doom_base);
 
         /* The editor-frame hook: a main-thread frame boundary, and the in-place map
          * reload it drives for the File menu's Load Rawmap. Installed beside the swap

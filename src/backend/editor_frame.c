@@ -40,14 +40,12 @@
 
 typedef void (*editor_frame_fn)(void *editor, void *arg);
 typedef int  (*ef_load_map_fn)(void *editor, void *id_str);
-typedef void (*ef_add_branch_tag_fn)(void *map);
 
 static editor_frame_fn g_frame_orig  = NULL;
 static ef_load_map_fn  g_load_map    = NULL;
 /* The entry as resolved, kept because installing the hook overwrites the prologue that
  * identifies it. The fault shield needs the same address and scans later. */
 static void           *g_frame_entry = NULL;
-static ef_add_branch_tag_fn g_add_branch_tag = NULL;
 /* The INLINE idSnapEditorLocal OBJECT, not a pointer to one -- it is in-place constructed at a data
  * global, exactly as iface_engine.c documents. So this address IS the `this` LoadMap wants; there is
  * no dereference step, and adding one would read the object's first field as a pointer. */
@@ -251,72 +249,6 @@ int sh_editor_frame_saved_map_dir(char *out, size_t cap, char *out_id, size_t id
  * map:branch rather than map:new because both gate the same prompt and only map:branch has a
  * single-argument add-if-absent function in the engine; map:new would mean hand-building an idStr
  * into an idStrList. */
-static unsigned long g_seen_swaps  = 0;   /* substituted parses already accounted for */
-static volatile LONG g_tag_faulted = 0;
-
-/* The engine's map load state; 3 is a finished load. */
-#define EF_LOAD_STATE_RUNNING 3
-static const uint8_t *g_load_state_at = NULL;
-
-/* Called from the frame hook, after the engine's own Think returned. Cheap on every frame: one
- * counter compare, and nothing else unless a substituted load actually landed. */
-static void ef_mark_substituted_map(void *editor)
-{
-    unsigned long now;
-    void *map = NULL;
-
-    if (g_add_branch_tag == NULL) return;
-    if (InterlockedCompareExchange(&g_tag_faulted, 0, 0) != 0) return;
-
-    now = sh_rawmap_swap_complete_count();
-    if (now == g_seen_swaps) return;          /* the common case: nothing new */
-
-    __try {
-        map = *(void *const *)((const unsigned char *)editor + ED_MAP_PTR_OFF);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        InterlockedExchange(&g_tag_faulted, 1);
-        backend_log("EF: tag-as-new ABANDONED -- could not read the editor map pointer");
-        return;
-    }
-
-    /* No map yet means the load has not finished installing it. Leave the counter alone and try
-     * again next frame rather than consuming the event against a map that is not there. */
-    if (map == NULL) return;
-
-    /* A non-null map is not a finished one. The tag add scans the map's tag list for a duplicate
-     * and grows it, so running it while the load is still filling that same list puts two writers
-     * on one array: whichever one grows it frees the other's copy. Wait for the load instead --
-     * the counter is untouched, so the tag lands a few frames later. An unresolved state global
-     * cannot answer this, and tagging a half-built list is the failure being avoided. */
-    {
-        DWORD state = 0;
-        if (g_load_state_at == NULL) return;
-        __try {
-            state = *(volatile const DWORD *)g_load_state_at;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return;
-        }
-        if (state != EF_LOAD_STATE_RUNNING) return;
-    }
-
-    __try {
-        g_add_branch_tag(map);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        InterlockedExchange(&g_tag_faulted, 1);
-        backend_log("EF: tag-as-new FAULTED inside the engine tag add; disabled for this session");
-        return;
-    }
-
-    g_seen_swaps = now;
-    {
-        char line[160];
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "EF: substituted map tagged map:branch -- Save will ask for a new name [swap #%lu]",
-                    now);
-        backend_log(line);
-    }
-}
-
 /* ------------------------------------------------- save the OPEN map as a rawmap ----------------
  * Serialising the live map is an engine touch: it reads editor state and allocates through the
  * engine's allocator, so it belongs on a frame, not on the UI thread that the click arrives on.
@@ -480,8 +412,6 @@ static void sh_editor_frame_detour(void *editor, void *arg)
     /* Runs on EVERY frame, unlike the reload below, because the map it has to mark arrives from a
      * load the PERSON started -- there is no request to wait for. It is a counter compare on the
      * frames where nothing happened. */
-    ef_mark_substituted_map(editor);
-
     if (InterlockedExchange(&g_save_pending, 0) != 0) ef_service_rawmap_save(editor);
 
     if (InterlockedCompareExchange(&g_pending, 0, 0) == 0) return;   /* the common frame: one read */
@@ -500,14 +430,6 @@ int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
     void *tramp;
 
     if (!g_msg_ready) { InitializeCriticalSection(&g_msg_lock); g_msg_ready = 1; }
-
-    /* Independent of the frame hook succeeding: it is only read from inside the hook, so a null
-     * here costs the tag and nothing else. Logged either way -- a silently missing tag would look
-     * exactly like the engine ignoring it, which is the wrong thing to go debugging. */
-    g_add_branch_tag = (ef_add_branch_tag_fn)add_branch_tag_fn;
-    backend_log(add_branch_tag_fn != NULL
-                ? "EF: map:branch tagger resolved -- substituted maps will save as new maps"
-                : "EF: map:branch tagger NOT resolved -- a substituted map would overwrite its slot");
 
     /* Published before the patch and regardless of it: a skipped hook still leaves a
      * usable address for anything that only wants to know where the function is. */
@@ -533,13 +455,6 @@ int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
      * so it is derived, never baked. A failure here is not fatal to the hook -- the frame hook is a
      * useful execution point on its own -- but it does disable the reload, which needs the object. */
     if (module_base) {
-        /* Gates the branch tag: without it the tag is never added, which costs the tag and
-         * nothing else. Adding one to a list the engine is still building is the worse half. */
-        g_load_state_at = (const uint8_t *)glb_resolve(module_base, "load_state", NULL);
-        backend_log(g_load_state_at != NULL
-                    ? "EF: load state resolved -- the branch tag waits for the load to finish"
-                    : "EF: load state UNRESOLVED -- substituted maps will not be tagged as new");
-
         g_editor_obj = glb_resolve(module_base, "editor_singleton", &st);
         if (!g_editor_obj) {
             _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -567,10 +482,6 @@ int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
         "EF: editor-frame hook installed at %p (trampoline %p, stolen %d); loadmap=%p; editor=%p",
         frame_fn, tramp, EDITOR_FRAME_STOLEN, load_map_fn, (void *)g_editor_obj);
     backend_log(line);
-
-    /* Baseline the swap counter at install. Without this, a swap that fired before the editor came
-     * up would read as "new" on the first frame and tag whatever map happened to be open. */
-    g_seen_swaps = sh_rawmap_swap_complete_count();
     return 1;
 }
 
@@ -657,10 +568,6 @@ int sh_editor_frame_request_reload(char *out_msg, int msg_capacity)
     /* THE SAFETY INTERLOCK. The reload hands LoadMap an EXISTING saved map, so the editor adopts
      * that map's identity; the map:branch tag is what stops Save from writing the borrowed slot,
      * routing it into Save As instead. No tagger, no reload -- staging still works. */
-    else if (g_add_branch_tag == NULL)                           why = "this build cannot mark a loaded rawmap as a new map, "
-                                                                       "so loading one in place could overwrite a saved map";
-    else if (InterlockedCompareExchange(&g_tag_faulted, 0, 0) != 0) why = "marking a rawmap as a new map faulted earlier this "
-                                                                          "session, so loading one in place is no longer safe";
     if (why) {
         /* LOG EVERY REFUSAL. These used to return the reason to the UI and write nothing, so a
          * person reporting "it did not load" left no trace to read afterwards -- which cost a
