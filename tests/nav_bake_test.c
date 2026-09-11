@@ -489,12 +489,15 @@ static void test_fast_snapshot_reads_ids_and_obstacles(void)
     sh_nav_bake_test_copy_map(&after);
     CHECK(!memcmp(&before, &after, sizeof before));
     CHECK(sh_nav_bake_geometry_revision() == revision);
+    /* A live entity reports the spawnPosition it was created with, so a moved
+     * box still answers from where it started. Shape stays as the last complete
+     * snapshot recorded it; only that snapshot knows where a box now stands. */
     g_box_x = 200;
     CHECK(sh_nav_bake_refresh_volumes(&read) == 1);
     sh_nav_bake_test_copy_map(&after);
-    CHECK(after.obstacles[0].c[0][0] == before.obstacles[0].c[0][0] + 200);
+    CHECK(after.obstacles[0].c[0][0] == before.obstacles[0].c[0][0]);
     CHECK(after.obstacles[0].entity == 1);
-    CHECK(sh_nav_bake_geometry_revision() != revision);
+    CHECK(sh_nav_bake_geometry_revision() == revision);
     g_box_marked = 3;
     CHECK(sh_nav_bake_refresh_volumes(&read) == 1);
     sh_nav_bake_test_copy_map(&after);

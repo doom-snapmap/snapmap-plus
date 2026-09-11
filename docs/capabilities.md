@@ -40,6 +40,7 @@ Registered with the engine command system; run from the DOOM console.
 | `sh_perf` | Report how much time each Snapmap+ hot path has taken this session: the engine resource opens that pass through the override hook, the engine writing the open map as JSON, the navigation parse, the green preview build, and the session log. `sh_perf reset` starts the counting again. |
 | `sh_help` | List every Snapmap+ console command and cvar with its description in one place. |
 | `sh_navmesh` | Report the baked AI navigation the loaded map is serving — which modules and nav classes are in effect, and for anything refused, why. Leads with how many map loads have reached the navigation table this session and what the last one found, so a map that quietly brought none is distinguishable from a load that never happened. |
+| `sh_navmesh marks <n>` | Mark the first `n` marked volumes of every module red, the way a refused bake marks the ones it could not place, so the marks can be checked without a map that refuses. `0` clears them. |
 | `sh_superscriptop` | Dump SuperScript / eventDef data (e.g. emit the eventDef table as a header). |
 | `cs_dumpeventdefs` | Dump all eventDefs to a file. |
 | `cs_fieldinfo` | Print field info for a type (developer tool). |

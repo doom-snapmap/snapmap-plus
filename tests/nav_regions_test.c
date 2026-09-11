@@ -10,6 +10,8 @@
 #include "nav_regions.h"
 #include "overrides_baked.h"
 
+void backend_log(const char *message) { (void)message; }
+
 static int g_failed;
 
 #define CHECK(expr) do {                                                         \
