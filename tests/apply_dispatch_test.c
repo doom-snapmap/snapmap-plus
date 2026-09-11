@@ -219,7 +219,7 @@ void sh_nav_bake_refresh_live(void) { assert(0); }
 unsigned long sh_nav_bake_geometry_revision(void) { return 0; }
 int sh_nav_bake_refresh_volumes(int *volumes) { (void)volumes; assert(0); return 0; }
 const char *sh_nav_bake_volumes_reason(void) { return ""; }
-void sh_nav_bake_preview(sh_nav_bake_reader reader, sh_nav_preview_line line, void *ctx) { (void)reader; (void)line; (void)ctx; assert(0); }
+int sh_nav_bake_preview(sh_nav_bake_reader reader, sh_nav_preview_line line, void *ctx) { (void)reader; (void)line; (void)ctx; assert(0); return 0; }
 int sh_nav_preview_install(const sig_result *r, size_t n) { (void)r; (void)n; assert(0); return 0; }
 void sh_nav_preview_begin(void *world) { (void)world; assert(0); }
 void sh_nav_preview_add_line(const float start[3], const float end[3], void *unused) { (void)start; (void)end; (void)unused; assert(0); }

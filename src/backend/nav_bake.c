@@ -775,13 +775,32 @@ static void preview_task_run(preview_task *t)
         SH_PERF_END(SH_PERF_BAKE_AUGMENT, ta);
     }
     sh_aas_free(model);
-    if (!t->baked)
+    if (!t->baked) {
         _snprintf_s(t->reason, sizeof t->reason, _TRUNCATE, "%s",
             rep.reach_limit_exceeded ? "required routes exceed the native 256 outgoing links per area; the whole bake was refused" :
             rep.links_truncated ? "traversal storage could not be allocated; the whole bake was refused" :
             rep.pieces_truncated ? "the geometry capacity was exceeded; the whole bake was refused" :
             rep.depth_exceeded ? "the navigation tree depth was exceeded; the whole bake was refused" :
             "the bake did not produce a payload");
+        return;
+    }
+
+    /* The same two gates the served bake passes. Both read only the payload,
+     * so they belong on this side of the hand-off. */
+    err[0] = 0;
+    if (!sh_navmesh_validate_aas(t->baked, t->baked_len, err, sizeof err)) {
+        HeapFree(GetProcessHeap(), 0, t->baked);
+        t->baked = NULL; t->baked_len = 0;
+        _snprintf_s(t->reason, sizeof t->reason, _TRUNCATE,
+                    "the bake did not pass validation: %s", err);
+        return;
+    }
+    if (rep.depth_exceeded) {
+        HeapFree(GetProcessHeap(), 0, t->baked);
+        t->baked = NULL; t->baked_len = 0;
+        _snprintf_s(t->reason, sizeof t->reason, _TRUNCATE,
+                    "too many separate platforms for one module's navigation tree");
+    }
 }
 
 static void preview_batch_run(preview_batch *b)
@@ -919,10 +938,10 @@ static void preview_install(preview_batch *b)
     g_preview_revision = b->revision;
 }
 
-void sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line line,void *ctx)
+int sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line line,void *ctx)
 {
-    int i;
-    if(!line||!read_shipped||!bake_enabled()||InterlockedCompareExchange(&g_building,0,0))return;
+    int i, current = 0;
+    if(!line||!read_shipped||!bake_enabled()||InterlockedCompareExchange(&g_building,0,0))return 0;
     AcquireSRWLockExclusive(&g_bake_lock);
     __try {
         if(!g_have_map||g_live_refused)__leave;
@@ -956,6 +975,10 @@ void sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line lin
                 preview_batch_free(b);
             }
         }
+        /* Still waiting on the worker: the lines that are up describe the
+         * previous geometry, which is closer to the truth than none. */
+        if (g_preview_revision != g_geometry_revision) __leave;
+        current = 1;
         SH_PERF_BEGIN(tl);
         g_preview_lines=0;
         for(i=0;i<g_module_count;i++)if(g_preview[i].bytes) {
@@ -991,6 +1014,7 @@ void sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line lin
         }
         SH_PERF_END(SH_PERF_PREVIEW_LINES, tl);
     } __finally { ReleaseSRWLockExclusive(&g_bake_lock); }
+    return current;
 }
 
 int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,

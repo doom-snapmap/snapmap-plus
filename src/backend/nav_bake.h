@@ -75,7 +75,11 @@ void sh_nav_bake_build_end(void);
 /* Refresh the editor preview from a validated bake for monster48. Lines are
  * world-space; the caller draws them only while the editor is active. */
 typedef void (*sh_nav_preview_line)(const float start[3], const float end[3], void *ctx);
-void sh_nav_bake_preview(sh_nav_bake_reader read_shipped, sh_nav_preview_line line, void *ctx);
+/* Emit the green lines for the geometry as it stands. Returns 0 when the bake
+ * behind them is still on the worker, in which case nothing was emitted and
+ * the caller must keep showing what it has: publishing an empty set instead
+ * blinks every line off until the worker lands. */
+int sh_nav_bake_preview(sh_nav_bake_reader read_shipped, sh_nav_preview_line line, void *ctx);
 
 /* Stop the worker that bakes the preview. Call once from DllMain on detach. */
 void sh_nav_bake_preview_stop(void);

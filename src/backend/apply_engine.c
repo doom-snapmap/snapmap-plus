@@ -1583,7 +1583,8 @@ static void ae_nav_preview(const uint8_t *ed)
     revision = sh_nav_bake_geometry_revision();
     if (revision == g_preview_built_revision && sh_nav_preview_published(world)) return;
     sh_nav_preview_begin(world);
-    sh_nav_bake_preview(sh_overrides_read_engine_resource,sh_nav_preview_add_line,NULL);
+    if (!sh_nav_bake_preview(sh_overrides_read_engine_resource,sh_nav_preview_add_line,NULL))
+        return;   /* the bake is still on the worker; leave what is drawn alone */
     sh_nav_preview_publish();
     g_preview_built_revision = revision;
 }
