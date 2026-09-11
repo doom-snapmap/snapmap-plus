@@ -655,14 +655,6 @@ static void h_sh_rawmaps(idCmdArgs *a)
             return;
         }
 
-        /* Through the shared setter, so the console and the File menu agree about what a
-         * toggle on, and resolve_dest_path consults that first -- so the write went to the loaded
-         * rawmap instead of the file named right here. */
-        if (arg != NULL && arg[0] != '\0' && !sh_rawmap_set_save_target(arg)) {
-            sh_printf("That path could not be used as a destination.\n");
-            return;
-        }
-
         /* Queued onto the editor frame -- serializing the open map touches engine state. A console
          * handler runs as a Cbuf callback on the main thread, but not inside the editor's frame, so
          * it queues like every other engine touch this project makes.
@@ -670,7 +662,7 @@ static void h_sh_rawmaps(idCmdArgs *a)
          * Only ever the OPEN map: no disk fallback, unlike the File menu's ladder. A fallback that
          * reads the newest save off disk is how a never-saved map silently exports a DIFFERENT map,
          * and a console command that writes the wrong map is worse than one that says no. */
-        if (sh_editor_frame_request_rawmap_save(why, (int)sizeof why)) {
+        if (sh_editor_frame_request_rawmap_save_to(arg && arg[0] ? arg : NULL, why, (int)sizeof why)) {
             /* Present tense, one line. This briefly said "Queued: the open map will be written to",
              * on the reasoning that the write lands on a later editor frame and so cannot be
              * reported as done -- true, and useless: that frame is one of about thirty a second, and

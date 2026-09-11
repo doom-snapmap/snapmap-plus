@@ -113,3 +113,9 @@ recovery are described in [persistent configuration](architecture.md#configurati
 - The File menu answers in browser preview with the default path pair, so the
   readout and layout can be checked outside the game. Load and Save As are inert
   there and report preview only.
+
+Rawmap saves capture the live map and destination as one queued request. The
+frame checks editor state and the load generation before serializing; a new
+map can reuse the same pointer. Save Rawmap resolves its destination in the
+backend rather than sending a path from an earlier page status. Neither a
+refused save nor a cancelled request falls back to another map on disk.

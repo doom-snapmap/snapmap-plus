@@ -3145,7 +3145,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   var RAWMAP_WILL_FIRE = false;
   // Mirrors st.saveTarget, so the click handler sends the opposite of what is set.
   var RAWMAP_KEEP_HERE = false;
-  var RAWMAP_SAVE_PATH = '';   // the destination Save Rawmap reuses
+  var RAWMAP_SAVE_PATH = '';
+  var RAWMAP_LOAD_PATH = '';
 
   // Show the tail of a path. Full paths are far too long for a menu, and the filename plus its parent
   // folder is what actually distinguishes two rawmaps from each other.
@@ -3176,6 +3177,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     // backend also arms on a test file. Used for enabling items, never for what the tick shows.
     RAWMAP_WILL_FIRE = (st.willFire === undefined) ? RAWMAP_ARMED : !!st.willFire;
     RAWMAP_SAVE_PATH = st.save || '';
+    RAWMAP_LOAD_PATH = st.load || '';
     if (armBtn) armBtn.setAttribute('aria-checked', RAWMAP_ARMED ? 'true' : 'false');
 
     // Ticked whenever a file has been picked. Renders from the backend, never from what
@@ -3273,7 +3275,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     // No "pick a location first" branch: the backend always resolves a destination, defaulting to
     // %LOCALAPPDATA%\snapmap-plus\rawmap.json, so RAWMAP_SAVE_PATH is never empty and the guard
     // that used to be here could not fire. Save Rawmap therefore always has somewhere to write.
-    post({cmd: 'rawmapSaveNow', path: RAWMAP_SAVE_PATH});
+    post({cmd: 'rawmapSaveNow'});
     closeMenus();
   });
   document.getElementById('menuRawmapSaveAs').addEventListener('click', function(){
@@ -3284,7 +3286,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   // disk, and for finishing a load that was staged and then deferred. Disabled unless one of
   // those is true (renderRawmapStatus), so this handler needs no guard of its own.
   document.getElementById('menuRawmapReload').addEventListener('click', function(){
-    post({cmd: 'rawmapLoadNow'});
+    showConfirm('Open "' + rawmapBaseName(RAWMAP_LOAD_PATH) + '" now?\n\n' +
+                'Any unsaved edits in the editor are discarded. Cancel to save your work first.',
+                function(){ post({cmd: 'rawmapLoadNow'}); });
     closeMenus();
   });
   document.getElementById('menuRawmapKeepHere').addEventListener('click', function(){

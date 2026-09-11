@@ -1335,7 +1335,7 @@ static void poc_send_rawmap_status(const wchar_t *note, const wchar_t *confirm_f
 {
     if (!g_webview) return;
 
-    char status[1024] = "";
+    char status[2048] = "";
     bool have = false;
     if (g_iface && g_iface->vtbl && g_iface->vtbl->rawmap_status) {
         have = g_iface->vtbl->rawmap_status(g_iface, status, (int)sizeof status) > 0;
@@ -2431,20 +2431,9 @@ static HRESULT on_message(ICoreWebView2 *, ICoreWebView2WebMessageReceivedEventA
                  * as long as the dialog was open, which is the lag this fixed. */
                 poc_begin_pick(0);
             } else if (cmd == L"rawmapSaveNow") {
-                /* Save Rawmap: write again to the destination already in use, no dialog.
-                 *
-                 * No new slot and no magic value -- the page hands back the very path the status
-                 * readout is already showing it, and naming a destination IS the request to write
-                 * it (see slot_rawmap_configure). So "save again here" and "save somewhere new" are
-                 * one backend call that differs only in where the path came from: the picker, or
-                 * the status the page already holds. */
-                std::wstring dest; sh_webview_json::get_string(json, L"path", dest);
-                if (dest.empty()) {
-                    poc_send_rawmap_status(L"No rawmap location yet -- use Save Rawmap As... first.");
-                } else {
-                    std::string d8 = sh_webview_json::to_utf8(dest);
-                    poc_rawmap_configure(nullptr, d8.c_str(), -1, nullptr);
-                }
+                /* Resolve the current destination in the backend; the page's last
+                 * status may belong to a map that has since closed. */
+                poc_rawmap_configure(nullptr, nullptr, 5, nullptr);
             } else if (cmd == L"rawmapSavePick") {
                 poc_begin_pick(1);
             } else if (cmd == L"rawmapLoadNow") {

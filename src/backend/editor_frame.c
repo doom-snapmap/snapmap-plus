@@ -53,7 +53,15 @@ static uintptr_t       g_editor_obj  = 0;
 
 static volatile LONG  g_faulted   = 0;
 static volatile LONG  g_pending   = 0;      /* 1 = a reload is queued for the next good frame */
-static volatile LONG  g_save_pending = 0;   /* 1 = a live rawmap save is queued for the next frame */
+static volatile LONG  g_save_pending = 0;
+static SRWLOCK g_save_lock = SRWLOCK_INIT;
+typedef struct ef_save_request {
+    void *map;
+    unsigned long generation;
+    char destination[MAX_PATH];
+    int choose_target;
+} ef_save_request;
+static ef_save_request g_save_request;
 static volatile LONG  g_state     = SH_RELOAD_IDLE;
 static volatile LONG  g_ticks     = 0;
 
@@ -232,47 +240,37 @@ int sh_editor_frame_saved_map_dir(char *out, size_t cap, char *out_id, size_t id
 }
 
 
-/* ------------------------------------------------- mark a substituted map as new ----------------
- * A rawmap parsed into an open map inherits that map's IDENTITY, so the next Save overwrites the
- * borrowed slot with no prompt. Identity cannot be forged here: minting a save needs a game.details
- * `checksum=` and a 40-byte .verify sidecar, and neither reproduces [13 hash algorithms x 6 byte
- * ranges against 54 real saves: no match; the community .verify KDF failed over 864 combinations].
- *
- * The engine gates the behaviour we want on ONE BIT OF MAP STATE: Save asks the open map for the tag
- * "map:new" or "map:branch", and either routes it into SAVE AS -- prompt for a name, then
- * CreateLocalSavedMapInternal mints a fresh slot and the ENGINE writes the checksum and sidecars.
- *
- * ON A FRAME, not in the swap detour: the detour runs inside DeserializeFromJson, which is only part
- * of the load, and whether the record's tags are applied before or after that parse is unestablished
- * -- a tag set mid-load could be overwritten by the rest of it.
- *
- * map:branch rather than map:new because both gate the same prompt and only map:branch has a
- * single-argument add-if-absent function in the engine; map:new would mean hand-building an idStr
- * into an idStrList. */
-/* ------------------------------------------------- save the OPEN map as a rawmap ----------------
- * Serialising the live map is an engine touch: it reads editor state and allocates through the
- * engine's allocator, so it belongs on a frame, not on the UI thread that the click arrives on.
- * Same discipline as the reload -- the click queues, the frame does it. */
+static int ef_editor_live_with_map(void *editor, const char **why);
+
 static void ef_service_rawmap_save(void *editor)
 {
-    void *map = NULL;
+    ef_save_request request;
+    const char *why = NULL;
     char msg[192] = "";
+    void *map = NULL;
 
-    __try {
-        map = *(void *const *)((const unsigned char *)editor + ED_MAP_PTR_OFF);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        backend_log("EF: rawmap save ABANDONED -- could not read the editor map pointer");
+    AcquireSRWLockExclusive(&g_save_lock);
+    if (!InterlockedExchange(&g_save_pending, 0)) {
+        ReleaseSRWLockExclusive(&g_save_lock);
         return;
     }
+    request = g_save_request;
+    ReleaseSRWLockExclusive(&g_save_lock);
 
-    if (map == NULL) {
-        backend_log("EF: rawmap save ABANDONED -- no map is open");
+    /* A click can outlive its map or editor state. Never export the next map
+     * through a destination selected for the previous one. */
+    if (!ef_editor_live_with_map(editor, &why)) {
+        backend_log("EF: rawmap save cancelled -- the editor state changed");
         return;
     }
-
-    /* The result is reported through the log and the status readout the page refreshes afterwards.
-     * There is no way to hand it back to the click: that returned a frame ago. */
-    (void)sh_rawmap_write_from_live(map, msg, (int)sizeof msg, NULL);
+    __try { map = *(void *const *)((const unsigned char *)editor + ED_MAP_PTR_OFF); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (map != request.map || sh_rawmap_load_generation() != request.generation) {
+        backend_log("EF: rawmap save cancelled -- a different map was opened");
+        return;
+    }
+    if (request.choose_target && !sh_rawmap_set_save_target(request.destination)) return;
+    (void)sh_rawmap_write_from_live(map, request.destination, msg, (int)sizeof msg, NULL);
 }
 
 /* ------------------------------------------------------------------ the reload ------------------ */
@@ -409,10 +407,8 @@ static void sh_editor_frame_detour(void *editor, void *arg)
     if (InterlockedCompareExchange(&g_faulted, 0, 0) != 0) return;
     if (editor == NULL) return;
 
-    /* Runs on EVERY frame, unlike the reload below, because the map it has to mark arrives from a
-     * load the PERSON started -- there is no request to wait for. It is a counter compare on the
-     * frames where nothing happened. */
-    if (InterlockedExchange(&g_save_pending, 0) != 0) ef_service_rawmap_save(editor);
+    /* Service only explicit save requests after the engine has settled this frame. */
+    if (InterlockedCompareExchange(&g_save_pending, 0, 0) != 0) ef_service_rawmap_save(editor);
 
     if (InterlockedCompareExchange(&g_pending, 0, 0) == 0) return;   /* the common frame: one read */
     if (g_load_map == NULL) return;
@@ -532,24 +528,40 @@ int sh_editor_frame_can_rawmap_save(char *out_msg, int msg_capacity)
     return 1;
 }
 
+int sh_editor_frame_request_rawmap_save_to(const char *destination, char *out_msg, int msg_capacity)
+{
+    const char *why;
+    ef_save_request request = {0};
+    int accepted = 0;
+    if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
+    AcquireSRWLockExclusive(&g_save_lock);
+    why = ef_rawmap_save_blocker();
+    if (why) goto done;
+    if (destination && strlen(destination) >= sizeof request.destination) {
+        why = "the save path is too long";
+        goto done;
+    }
+    request.choose_target = destination && destination[0];
+    if (request.choose_target) strcpy_s(request.destination, sizeof request.destination, destination);
+    else sh_rawmap_get_paths(NULL, 0, request.destination, (int)sizeof request.destination);
+    if (!sh_rawmap_dest_writable_now(request.destination, out_msg, msg_capacity)) goto done;
+    request.generation = sh_rawmap_load_generation();
+    __try { request.map = *(void *const *)(g_editor_obj + ED_MAP_PTR_OFF); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { why = "the editor map could not be read"; goto done; }
+    if (!request.map) { why = "no map is open"; goto done; }
+    g_save_request = request;
+    InterlockedExchange(&g_save_pending, 1);
+    accepted = 1;
+done:
+    ReleaseSRWLockExclusive(&g_save_lock);
+    if (out_msg && msg_capacity > 0 && (why || accepted))
+        strncpy_s(out_msg, (size_t)msg_capacity, why ? why : "Writing the open map to the rawmap file.", _TRUNCATE);
+    return accepted;
+}
+
 int sh_editor_frame_request_rawmap_save(char *out_msg, int msg_capacity)
 {
-    const char *why = ef_rawmap_save_blocker();
-
-    if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
-
-    if (why) {
-        char rl[256];
-        _snprintf_s(rl, sizeof rl, _TRUNCATE, "EF: rawmap save REFUSED -- %s", why);
-        backend_log(rl);
-        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, why, _TRUNCATE);
-        return 0;
-    }
-
-    InterlockedExchange(&g_save_pending, 1);
-    if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
-                           "saving the open map as a rawmap", _TRUNCATE);
-    return 1;
+    return sh_editor_frame_request_rawmap_save_to(NULL, out_msg, msg_capacity);
 }
 
 int sh_editor_frame_request_reload(char *out_msg, int msg_capacity)
@@ -565,9 +577,7 @@ int sh_editor_frame_request_reload(char *out_msg, int msg_capacity)
     else if (g_load_map == NULL)                                 why = "the engine's map loader was not found";
     else if (g_editor_obj == 0)                                  why = "the editor could not be located";
     else if (InterlockedCompareExchange(&g_pending, 0, 0) != 0)  why = "a reload is already waiting for the next frame";
-    /* THE SAFETY INTERLOCK. The reload hands LoadMap an EXISTING saved map, so the editor adopts
-     * that map's identity; the map:branch tag is what stops Save from writing the borrowed slot,
-     * routing it into Save As instead. No tagger, no reload -- staging still works. */
+    else if (!sh_rawmap_load_is_safe()) why = "rawmap overwrite protection is unavailable on this build";
     if (why) {
         /* LOG EVERY REFUSAL. These used to return the reason to the UI and write nothing, so a
          * person reporting "it did not load" left no trace to read afterwards -- which cost a

@@ -39,6 +39,12 @@ int sh_rawmap_swap_set_source(const char *path);
 /* How many times the swap has fired (substituted our bytes into a load). */
 unsigned long sh_rawmap_swap_count(void);
 
+/* Changes on every map parse, even when the engine reuses the same map pointer. */
+unsigned long sh_rawmap_load_generation(void);
+
+/* A substitution requires installed overwrite protection unless explicitly disabled. */
+int sh_rawmap_load_is_safe(void);
+
 /* How many substituted DeserializeFromJson calls have RETURNED. Exported by name and at ordinal 101
  * so the test harness can distinguish a completed in-place load even when the engine reuses the
  * idSnapMap pointer and emits no completion line. */
@@ -87,7 +93,7 @@ int sh_rawmap_live_serialize_ready(void);
 /* Serialize `map` and write it to the rawmap destination. MAIN THREAD ONLY: it
  * reads engine state and allocates through the engine's allocator, so it must be
  * entered from the editor-frame hook. */
-int sh_rawmap_write_from_live(void *map, char *out_msg, int msg_capacity,
+int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg, int msg_capacity,
                               unsigned long long *out_bytes);
 
 /* Set the mirror destination. NULL restores the default
@@ -158,10 +164,8 @@ void sh_rawmap_get_save_target(char *out, int cap);
  * file that was aimed at while some other map was open. */
 void sh_rawmap_clear_save_target_for_new_map(void);
 
-/* Mark a map opened from a rawmap as a branch, so the engine's own Save asks for a name instead
- * of overwriting the map it opened over. On by default. The tag goes into the map JSON before the
- * engine parses it; adding it to the live map afterwards grows the map's tag list under whatever
- * already holds the array, and a later read of it faults on freed memory. */
+/* Enable the IsBranchMap answer for substituted maps. This changes no live tags.
+ * Disabling it explicitly allows saves to overwrite the borrowed map slot. */
 void sh_rawmap_set_branch_tag(int on);
 int  sh_rawmap_branch_tag_enabled(void);
 

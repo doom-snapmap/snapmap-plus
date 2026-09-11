@@ -51,6 +51,10 @@ int sh_editor_frame_can_rawmap_save(char *out_msg, int msg_capacity);
  * out_msg (usually no map open, or a build that could not resolve the serializer). */
 int sh_editor_frame_request_rawmap_save(char *out_msg, int msg_capacity);
 
+/* Capture the map and destination together. NULL uses the current save path;
+ * an explicit path becomes the target only when that same map services the save. */
+int sh_editor_frame_request_rawmap_save_to(const char *destination, char *out_msg, int msg_capacity);
+
 /* Request an in-place map reload on the next editor frame. 1 = accepted, 0 = refused (not installed,
  * the staged rawmap is unusable, no loadable saved-map id, a request is already pending, or the
  * module has faulted). `out_msg` always gets a reason fit to show in the UI.

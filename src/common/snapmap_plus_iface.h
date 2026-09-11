@@ -252,17 +252,20 @@ typedef int (*sh_config_set_json_fn)(struct sh_iface *self, const char *key,
 typedef int (*sh_rawmap_status_fn)(struct sh_iface *self,
                                    char *out_json, int out_capacity);         /* +0x328 (ext 24) */
 
-/* Point the load swap and/or the save shadow at caller-chosen files. NULL leaves
- * that side unchanged, "" restores its default; arm is 1 = arm, 0 = disarm,
- * -1 = leave. The load path is validated here so a bad file fails at the click. */
+/* A nonempty load path stages a validated file; an empty one restores the default.
+ * A nonempty save path queues an export of the live map to that file; an empty
+ * one releases the chosen destination. NULL leaves that side unchanged.
+ * arm: -1 leave, 0/1 gate off/on, 2 stage one load, 3 keep the current save path,
+ * 4 release it, 5 queue a save to the current backend destination. Refused saves
+ * neither change the destination nor arm a future save. */
 typedef int (*sh_rawmap_configure_fn)(struct sh_iface *self,
                                       const char *load_path, const char *save_path, int arm,
                                       char *out_msg, int msg_capacity);       /* +0x330 (ext 25) */
 
 /* Reload the editor's map on the next frame, so a staged rawmap opens. Returns 1
  * when the request was accepted, not when the map is open -- the frame hook
- * re-checks and may decline. Refuses while the swap is disarmed: LoadMap would
- * then open a different map and discard unsaved work. */
+ * re-checks and may decline. The reload brackets its own call with the swap arm
+ * and requires overwrite protection unless the user explicitly disabled it. */
 typedef int (*sh_rawmap_load_now_fn)(struct sh_iface *self,
                                      char *out_msg, int msg_capacity);        /* +0x338 (ext 26) */
 

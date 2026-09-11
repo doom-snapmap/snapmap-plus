@@ -17,7 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "rawmap.h"
+#include "../src/backend/rawmap.c"
 
 /* ---- STUBS -------------------------------------------------------------------------------------
  * rawmap.c is one translation unit that also holds the hooks, the package embedder, the navmesh
@@ -77,6 +77,8 @@ int sh_editor_frame_request_rawmap_save(char *out_msg, int msg_capacity)
 { if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity,
                                              "stub: no editor in this test", _TRUNCATE);
   return 0; }
+int sh_editor_frame_request_rawmap_save_to(const char *destination, char *out_msg, int msg_capacity)
+{ (void)destination; return sh_editor_frame_request_rawmap_save(out_msg, msg_capacity); }
 int sh_editor_frame_can_rawmap_save(char *out_msg, int msg_capacity)
 { if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity,
                                              "stub: no editor in this test", _TRUNCATE);
@@ -436,6 +438,118 @@ static void looks_like_rawmap_tells_them_apart(void)
     }
 }
 
+static void refused_menu_save_changes_nothing(void)
+{
+    char original[MAX_PATH], requested[MAX_PATH], actual[MAX_PATH], message[192];
+    sh_rawmap_configure_fn configure = NULL;
+    clean_state();
+    CHECK(temp_path("rawmap_review_original.json", original, sizeof original));
+    CHECK(temp_path("rawmap_review_requested.json", requested, sizeof requested));
+    CHECK(sh_rawmap_set_save_target(original));
+    sh_rawmap_get_slots(NULL, &configure, NULL);
+    CHECK(configure(NULL, NULL, requested, -1, message, sizeof message) == 0);
+    sh_rawmap_get_save_target(actual, sizeof actual);
+    CHECK(strcmp(actual, original) == 0);
+    CHECK(!sh_rawmap_save_oneshot_pending());
+    CHECK(strstr(message, "no editor") != NULL);
+    CHECK(configure(NULL, NULL, NULL, 5, message, sizeof message) == 0);
+    CHECK(!sh_rawmap_save_oneshot_pending());
+    clean_state();
+}
+
+static void missing_overwrite_protection_refuses_staging(const char *archive)
+{
+    sh_rawmap_configure_fn configure = NULL;
+    char before[MAX_PATH], after[MAX_PATH], message[192];
+    clean_state();
+    sh_rawmap_set_branch_tag(1);
+    sh_rawmap_get_paths(before, sizeof before, NULL, 0);
+    sh_rawmap_get_slots(NULL, &configure, NULL);
+    CHECK(!sh_rawmap_load_is_safe());
+    CHECK(!configure(NULL, archive, NULL, 2, message, sizeof message));
+    sh_rawmap_get_paths(after, sizeof after, NULL, 0);
+    CHECK(strcmp(before, after) == 0);
+    CHECK(!sh_rawmap_load_oneshot_pending());
+    CHECK(strstr(message, "overwrite protection") != NULL);
+    sh_rawmap_set_branch_tag(0);
+    CHECK(sh_rawmap_load_is_safe());
+    sh_rawmap_set_branch_tag(1);
+}
+
+static int live_serializations;
+static void *fixture_idstr_ctor(void *self, const char *initial)
+{ (void)initial; memset(self, 0, IDSTR_SIZE); return self; }
+static void fixture_idstr_dtor(void *self) { (void)self; }
+static unsigned char fixture_serialize(void *map, void *out, unsigned char compact)
+{
+    (void)map; (void)compact;
+    ++live_serializations;
+    *(int *)((char *)out + IDSTR_LEN_OFF) = sizeof BODY - 1;
+    *(const char **)((char *)out + IDSTR_DATA_OFF) = BODY;
+    return 1;
+}
+static unsigned char fixture_map_to_json(void *map, void *out, unsigned char compact)
+{ return sh_ser_detour(map, out, compact); }
+
+static void a_live_export_mirrors_once(void)
+{
+    char target[MAX_PATH], msg[192];
+    unsigned long before = sh_rawmap_save_count();
+    unsigned long long wrote = 0;
+    clean_state();
+    CHECK(temp_path("rawmap_review_live.json", target, sizeof target));
+    CHECK(sh_rawmap_set_save_target(target));
+    g_map_to_json = fixture_map_to_json;
+    g_ser_orig = fixture_serialize;
+    g_idstr_ctor = fixture_idstr_ctor;
+    g_idstr_dtor = fixture_idstr_dtor;
+    sh_rawmap_swap_arm(1);
+    live_serializations = 0;
+    CHECK(sh_rawmap_write_from_live((void *)1, target, msg, sizeof msg, &wrote));
+    CHECK(live_serializations == 1 && wrote == sizeof BODY - 1);
+    CHECK(sh_rawmap_save_count() == before + 1);
+    CHECK(g_snapshot_depth == 0);
+    sh_rawmap_swap_arm(0);
+    g_map_to_json = NULL;
+    g_ser_orig = NULL;
+    g_idstr_ctor = NULL;
+    g_idstr_dtor = NULL;
+    DeleteFileA(target);
+    clean_state();
+}
+
+static void an_existing_scratch_file_survives(void)
+{
+    char target[MAX_PATH], scratch[MAX_PATH], bytes[64] = {0};
+    HANDLE h;
+    DWORD got = 0;
+    static const char saved[] = "previous scratch contents";
+    CHECK(temp_path("rawmap_review_atomic.json", target, sizeof target));
+    CHECK(write_file("rawmap_review_atomic.json.tmp", saved, scratch, sizeof scratch));
+    CHECK(sh_rawmap_set_save_target(target));
+    CHECK(sh_rawmap_test_write(BODY, sizeof BODY - 1) == sizeof BODY - 1);
+    h = CreateFileA(scratch, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    CHECK(h != INVALID_HANDLE_VALUE);
+    if (h != INVALID_HANDLE_VALUE) {
+        CHECK(ReadFile(h, bytes, sizeof bytes - 1, &got, NULL));
+        CloseHandle(h);
+        CHECK(strcmp(bytes, saved) == 0);
+    }
+    /* A target locked against replacement must retain its original complete bytes. */
+    h = CreateFileA(target, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    CHECK(h != INVALID_HANDLE_VALUE);
+    if (h != INVALID_HANDLE_VALUE) {
+        CHECK(sh_rawmap_test_write("replacement", 11) == 0);
+        memset(bytes, 0, sizeof bytes);
+        CHECK(ReadFile(h, bytes, sizeof bytes - 1, &got, NULL));
+        CHECK(strcmp(bytes, BODY) == 0);
+        CloseHandle(h);
+    }
+    DeleteFileA(scratch);
+    DeleteFileA(target);
+    clean_state();
+}
+
 int main(void)
 {
     char archive[MAX_PATH];
@@ -457,6 +571,10 @@ int main(void)
     picking_the_usual_file_releases_a_chosen_one();
     are_default_answers_both_ways(archive);
     looks_like_rawmap_tells_them_apart();
+    refused_menu_save_changes_nothing();
+    missing_overwrite_protection_refuses_staging(archive);
+    an_existing_scratch_file_survives();
+    a_live_export_mirrors_once();
 
     DeleteFileA(archive);
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);

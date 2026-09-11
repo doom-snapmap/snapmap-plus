@@ -21,7 +21,6 @@
 #include "nav_regions.h"
 #include "map_shards.h"
 #include "editor_frame.h"   /* sh_editor_frame_request_reload -- the +0x338 load-now slot */
-#include "raw_deflate.h"    /* sh_inflate_raw_upto -- map.decl holds zlib(rawmap JSON) */
 
 /* DeserializeFromJson prologue steal window. Decoded from the signature DB pattern
  *   40 55            push rbp                      (2)
@@ -43,6 +42,8 @@ static deser_fn_t g_deser_orig = NULL;   /* the trampoline -> the real engine De
 static volatile LONG g_gate = 0;
 static volatile LONG g_swap_count = 0;
 static volatile LONG g_swap_complete_count = 0;
+static volatile LONG g_load_generation = 0;
+static SRWLOCK g_paths_lock = SRWLOCK_INIT;
 
 /* Load source override; otherwise %LOCALAPPDATA%/snapmap-plus/rawmap.json. */
 static char g_src_path[MAX_PATH] = {0};
@@ -62,8 +63,10 @@ static void default_source_path(char *out, size_t cap)
  */
 static void resolve_source_path(char *out, size_t cap)
 {
-    if (g_src_path[0]) strncpy_s(out, cap, g_src_path, _TRUNCATE);
-    else default_source_path(out, cap);
+    AcquireSRWLockShared(&g_paths_lock);
+    strncpy_s(out, cap, g_src_path, _TRUNCATE);
+    ReleaseSRWLockShared(&g_paths_lock);
+    if (!out[0]) default_source_path(out, cap);
 }
 
 /* Test flag beside the configured source. A source without a directory uses
@@ -228,6 +231,12 @@ int  sh_rawmap_branch_tag_enabled(void) { return InterlockedCompareExchange(&g_b
 typedef unsigned char (*is_branch_map_fn)(void *editor);
 static is_branch_map_fn g_isbranch_orig = NULL;
 
+int sh_rawmap_load_is_safe(void)
+{
+    return !sh_rawmap_branch_tag_enabled() ||
+           (g_isbranch_orig && hook_is_installed((void *)g_isbranch_orig));
+}
+
 static unsigned char sh_isbranch_detour(void *editor)
 {
     if (InterlockedCompareExchange(&g_open_is_rawmap, 0, 0) != 0 &&
@@ -317,12 +326,12 @@ int sh_rawmap_branch_install(const unsigned char *module_base)
 {
     void *is_branch_fn, *tramp;
 
-    if (g_isbranch_orig != NULL) return 1;
+    if (g_isbranch_orig != NULL) return hook_is_installed((void *)g_isbranch_orig);
 
     is_branch_fn = find_is_branch_map(module_base);
     if (is_branch_fn == NULL) {
-        backend_log("B1: branch answer SKIPPED -- IsBranchMap not found; the engine's own Save "
-                    "will overwrite the map a rawmap opened over");
+        backend_log("B1: branch answer SKIPPED -- IsBranchMap not found; rawmap loads "
+                    "require explicit overwrite permission on this build");
         return 0;
     }
 
@@ -387,12 +396,17 @@ static int sh_deser_detour(const char *json, void *out_map)
      * applying. This is the single place that knows a map is actually opening --
      * staging one is not the same event, and clearing there would drop the choice
      * of someone who picked a file and then changed their mind about loading. */
+    InterlockedIncrement(&g_load_generation);
     sh_rawmap_clear_save_target_for_new_map();
 
     /* The shared predicate includes the explicit switch and test flag. */
     int flag_armed = 0;
     int oneshot    = sh_rawmap_load_oneshot_pending();
     if (rawmap_armed(&flag_armed) || oneshot) {
+        if (!sh_rawmap_load_is_safe()) {
+            backend_log("B1: rawmap load REFUSED -- overwrite protection is unavailable");
+            return 0;
+        }
         size_t len = 0;
         char *ours = read_source_file(&len);
         if (ours != NULL) {
@@ -465,7 +479,7 @@ int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok)
     }
     g_deser_orig = (deser_fn_t)tramp;
 
-    if (!g_src_path[0]) default_source_path(g_src_path, sizeof g_src_path);
+    /* Keep defaults implicit; the source can already have been configured. */
     if (hook_commit(tramp) != B2_PATCH_OK) {
         if (hook_unpatch(tramp)) g_deser_orig = NULL;
         backend_log("B1: rawmap LOAD-swap commit failed; retained callbacks require restoration");
@@ -473,7 +487,7 @@ int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok)
     }
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "B1: rawmap LOAD-swap installed at %p (trampoline %p, stolen %d); source=%s; gate=DISARMED",
-        deser_fn, tramp, DESER_STOLEN, g_src_path);
+        deser_fn, tramp, DESER_STOLEN, "configured rawmap source");
     backend_log(line);
     /* Log the exact TEST arm flag-file path (create it to arm the swap, delete to disarm). */
     {
@@ -511,12 +525,16 @@ int sh_rawmap_swap_will_fire(void)
 
 int sh_rawmap_swap_set_source(const char *path)
 {
-    if (path == NULL || path[0] == '\0') {
-        default_source_path(g_src_path, sizeof g_src_path);
-        return 1;
-    }
-    strncpy_s(g_src_path, sizeof g_src_path, path, _TRUNCATE);
-    return g_src_path[0] != '\0';
+    if (path && strlen(path) >= MAX_PATH) return 0;
+    AcquireSRWLockExclusive(&g_paths_lock);
+    strcpy_s(g_src_path, sizeof g_src_path, path ? path : "");
+    ReleaseSRWLockExclusive(&g_paths_lock);
+    return 1;
+}
+
+unsigned long sh_rawmap_load_generation(void)
+{
+    return (unsigned long)InterlockedCompareExchange(&g_load_generation, 0, 0);
 }
 
 unsigned long sh_rawmap_swap_count(void)
@@ -765,63 +783,35 @@ int sh_rawmap_dest_writable_now(const char *path, char *out_msg, int msg_capacit
  * file in DOOM's own install folder. */
 int sh_rawmap_set_save_target(const char *path)
 {
-    char line[MAX_PATH + 64];
-    char dflt[MAX_PATH];
-
-    if (path == NULL || path[0] == '\0') {
-        if (g_save_target[0]) {
-            g_save_target[0] = '\0';
-            backend_log("B1: rawmap saves go to the default rawmap.json");
-        }
-        return 1;
+    char chosen[MAX_PATH] = "", dflt[MAX_PATH];
+    if (path && path[0]) {
+        if (strlen(path) >= MAX_PATH || !dest_folder_is_usable(path, NULL, 0)) return 0;
+        default_dest_path(dflt, sizeof dflt);
+        if (_stricmp(path, dflt) != 0) strcpy_s(chosen, sizeof chosen, path);
     }
-    if (!dest_folder_is_usable(path, NULL, 0)) return 0;
-
-    /* Picking the usual file is not a choice to keep saves off it. Holding it as a
-     * target would behave identically and still tick the File menu's box, so the
-     * menu would claim something is in force that changes nothing. */
-    default_dest_path(dflt, sizeof dflt);
-    if (_stricmp(path, dflt) == 0) {
-        if (g_save_target[0]) {
-            g_save_target[0] = '\0';
-            backend_log("B1: rawmap saves go to the default rawmap.json");
-        }
-        return 1;
-    }
-
-    strncpy_s(g_save_target, sizeof g_save_target, path, _TRUNCATE);
-    if (g_save_target[0] == '\0') return 0;
-    _snprintf_s(line, sizeof line, _TRUNCATE, "B1: rawmap saves go to %s", g_save_target);
-    backend_log(line);
+    AcquireSRWLockExclusive(&g_paths_lock);
+    strcpy_s(g_save_target, sizeof g_save_target, chosen);
+    ReleaseSRWLockExclusive(&g_paths_lock);
     return 1;
 }
 
-/* The target as set, or "" when saves go to the default. For readouts that need to
- * tell "this file" from "the usual file"; resolve_dest_path answers where bytes land. */
 void sh_rawmap_get_save_target(char *out, int cap)
 {
-    if (out == NULL || cap <= 0) return;
+    if (!out || cap <= 0) return;
+    AcquireSRWLockShared(&g_paths_lock);
     strncpy_s(out, (size_t)cap, g_save_target, _TRUNCATE);
+    ReleaseSRWLockShared(&g_paths_lock);
 }
 
-/* Forward: stated next to the flag it depends on, above the resolver it needs. */
-static void resolve_dest_path(char *out, size_t cap);
-
-/* Where the next save goes: the target if one is set, otherwise the default. */
 static void resolve_dest_path(char *out, size_t cap)
 {
-    if (g_save_target[0]) { strncpy_s(out, cap, g_save_target, _TRUNCATE); return; }
-    default_dest_path(out, cap);
+    sh_rawmap_get_save_target(out, (int)cap);
+    if (!out[0]) default_dest_path(out, cap);
 }
 
-/* Opening a different map drops the target, so a save can never land on a file the
- * person aimed at while some other map was open. */
 void sh_rawmap_clear_save_target_for_new_map(void)
 {
-    if (g_save_target[0]) {
-        g_save_target[0] = '\0';
-        backend_log("B1: rawmap saves go back to the default rawmap.json -- a different map was opened");
-    }
+    sh_rawmap_set_save_target(NULL);
 }
 
 /* Write `len` bytes from `data` to the shadow destination ("wb", truncate). Returns the byte count
@@ -830,16 +820,7 @@ void sh_rawmap_clear_save_target_for_new_map(void)
 /* Defined below, next to the shadow that shares it: one writer for both the shadow and the
  * live path, so the destination is resolved in exactly one place. */
 static unsigned long long write_shadow(const char *data, size_t len);
-
-/* Is `path` the very file currently staged for LOADING? Used by the save ladder's disk fallback,
- * which is the only rung whose bytes might not be the open map's. */
-static int dest_is_the_staged_source(const char *path)
-{
-    char src_now[MAX_PATH] = "";
-    if (path == NULL || path[0] == '\0') return 0;
-    resolve_source_path(src_now, sizeof src_now);
-    return (src_now[0] != '\0' && _stricmp(src_now, path) == 0) ? 1 : 0;
-}
+static unsigned long long write_shadow_to(const char *data, size_t len, const char *path);
 
 /* ------------------------------------------------------- serialize the LIVE map ----------------
  * Save Rawmap used to read the newest saved map's map.decl off DISK. That is wrong in two ways the
@@ -936,7 +917,7 @@ static void nav_regions_on_save(void *out_idstr);
 /* Serialize `map` and write it to the rawmap destination. MAIN THREAD ONLY -- it reads engine state
  * and allocates through the engine's allocator, so it is called from the editor-frame hook, never
  * from the UI thread. */
-int sh_rawmap_write_from_live(void *map, char *out_msg, int msg_capacity,
+int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg, int msg_capacity,
                               unsigned long long *out_bytes)
 {
     unsigned char blk[IDSTR_SIZE];
@@ -965,7 +946,11 @@ int sh_rawmap_write_from_live(void *map, char *out_msg, int msg_capacity,
      * own, and the fault also disables this path for the session, so it can happen once. */
     __try {
         g_idstr_ctor(blk, "");
-        rc = g_map_to_json(map, blk, 1);
+        /* SnapMapToJson calls the hooked serializer. Suppress its save side effects
+         * here so the explicit export embeds and writes exactly once. */
+        g_snapshot_depth++;
+        __try { rc = g_map_to_json(map, blk, 1); }
+        __finally { g_snapshot_depth--; }
         if (rc) {
             /* The same three encoders the save detour runs, in the same order. The engine
              * hands back map state with the shards already stripped at load, so writing
@@ -977,7 +962,7 @@ int sh_rawmap_write_from_live(void *map, char *out_msg, int msg_capacity,
 
             len  = *(const int *)(blk + IDSTR_LEN_OFF);
             data = *(const char *const *)(blk + IDSTR_DATA_OFF);
-            if (data != NULL && len > 0) wrote = write_shadow(data, (size_t)len);
+            if (data != NULL && len > 0) wrote = write_shadow_to(data, (size_t)len, destination);
         }
         g_idstr_dtor(blk);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -996,7 +981,7 @@ int sh_rawmap_write_from_live(void *map, char *out_msg, int msg_capacity,
     }
     if (wrote == 0) {
         char path[MAX_PATH] = "";
-        resolve_dest_path(path, sizeof path);
+        strncpy_s(path, sizeof path, destination, _TRUNCATE);
         {
             char line[MAX_PATH + 128];
             _snprintf_s(line, sizeof line, _TRUNCATE,
@@ -1013,7 +998,7 @@ int sh_rawmap_write_from_live(void *map, char *out_msg, int msg_capacity,
     InterlockedIncrement(&g_shadow_count);
     {
         char path[MAX_PATH] = "", line[MAX_PATH + 128];
-        resolve_dest_path(path, sizeof path);
+        strncpy_s(path, sizeof path, destination, _TRUNCATE);
         _snprintf_s(line, sizeof line, _TRUNCATE,
                     "B1: rawmap SAVE wrote %llu bytes from the OPEN map -> %s [live]", wrote, path);
         backend_log(line);
@@ -1026,90 +1011,49 @@ int sh_rawmap_write_from_live(void *map, char *out_msg, int msg_capacity,
     return 1;
 }
 
+static unsigned long long write_shadow_to(const char *data, size_t len, const char *path)
+{
+    static volatile LONG sequence;
+    char temp[MAX_PATH], dir[MAX_PATH];
+    size_t total = 0;
+    HANDLE h = INVALID_HANDLE_VALUE;
+    int attempt, flushed = 0;
+
+    if (!data || !len || !path || !path[0]) return 0;
+    if (!dest_dir_part(path, dir, sizeof dir) || !ensure_dir(dir)) return 0;
+    /* CREATE_NEW never truncates someone else's scratch file. Separate writers
+     * must own separate temporaries until each publishes its complete result. */
+    for (attempt = 0; attempt < 64; ++attempt) {
+        if (_snprintf_s(temp, sizeof temp, _TRUNCATE, "%s.smp-%lu-%lu.tmp", path,
+                        GetCurrentProcessId(), (unsigned long)InterlockedIncrement(&sequence)) < 0)
+            return 0;
+        h = CreateFileA(temp, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) break;
+        if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS) return 0;
+    }
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    while (total < len) {
+        DWORD wr = 0;
+        DWORD chunk = (DWORD)((len - total) > 0x10000000 ? 0x10000000 : len - total);
+        if (!WriteFile(h, data + total, chunk, &wr, NULL) || !wr) break;
+        total += wr;
+    }
+    if (total == len) flushed = FlushFileBuffers(h) != 0;
+    CloseHandle(h);
+    if (total != len || !flushed ||
+        !MoveFileExA(temp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileA(temp);
+        backend_log("B1: rawmap write failed; the previous destination is unchanged");
+        return 0;
+    }
+    return (unsigned long long)total;
+}
+
 static unsigned long long write_shadow(const char *data, size_t len)
 {
     char path[MAX_PATH];
-    char temp[MAX_PATH];
-    char dir[MAX_PATH];
-    char line[MAX_PATH * 2 + 96];
-    unsigned long long written;
-    unsigned long long total = 0;
-    HANDLE h;
-
     resolve_dest_path(path, sizeof path);
-
-    /* MAKE THE FOLDER IF IT IS NOT THERE. A save path is allowed to name a folder that does not
-     * exist yet -- `savepath D:\archive\2026\mine.json` should work the first time, not fail once
-     * and then work after a trip to Explorer. The folder is made HERE, at the write, rather than
-     * when the setting is typed: a setting that creates directories the moment you name one turns
-     * every typo into a stray folder on the disk. If this fails, CreateFileA below fails too and
-     * reports it the same way any other unwritable destination does. */
-    if (dest_dir_part(path, dir, sizeof dir)) ensure_dir(dir);
-
-    /* WRITE BESIDE THE TARGET, THEN RENAME OVER IT. The destination file is never opened for
-     * writing, so a save that dies partway cannot destroy the rawmap already there.
-     *
-     * The version before this opened the destination with CREATE_ALWAYS, which EMPTIES the file
-     * before the first byte of the new one is written. Three megabytes then went in over perhaps a
-     * few hundred milliseconds, and anything that interrupted that window -- a full disk, an
-     * unplugged drive, the game going down -- left a fragment where an archive used to be. Deleting
-     * the fragment afterwards was honest but no help: the old map was already gone. An archival tool
-     * that can eat the thing it is archiving is not one.
-     *
-     * MoveFileEx with REPLACE_EXISTING is the swap, and on the same volume it is a rename: it either
-     * happened or it did not, and no reader ever sees a half-written file under the real name. The
-     * temp file sits next to the target rather than in %TEMP% on purpose -- a rename ACROSS volumes
-     * degrades to a copy, which would reintroduce the very window this removes.
-     *
-     * If we cannot write the temp file at all, nothing has been touched yet, so the old file
-     * survives even the total failure. */
-    if (_snprintf_s(temp, sizeof temp, _TRUNCATE, "%s.tmp", path) < 0) return 0;
-
-    h = CreateFileA(temp, GENERIC_WRITE, FILE_SHARE_READ, NULL,
-                    CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) {
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "B1: rawmap write could not open %s (err %lu) -- %s is untouched",
-                    temp, GetLastError(), path);
-        backend_log(line);
-        return 0;
-    }
-
-    while (total < len) {
-        size_t remain = len - (size_t)total;
-        DWORD chunk = (DWORD)(remain > 0x10000000 ? 0x10000000 : remain);
-        DWORD wr = 0;
-        if (!WriteFile(h, data + total, chunk, &wr, NULL) || wr == 0) break;
-        total += wr;
-    }
-    /* Flush before the rename, not after. A rename that publishes a name whose bytes are still in
-     * the cache is the same broken promise as a partial write, just harder to see. */
-    if (total == len) FlushFileBuffers(h);
-    CloseHandle(h);
-
-    if (total != len) {
-        /* Nothing was published: take the scratch file away, leave the destination alone. */
-        DeleteFileA(temp);
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "B1: rawmap write FAILED after %llu of %llu bytes -- %s is unchanged",
-                    total, (unsigned long long)len, path);
-        backend_log(line);
-        return 0;
-    }
-
-    if (!MoveFileExA(temp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        DWORD err = GetLastError();
-        DeleteFileA(temp);
-        _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "B1: rawmap write complete but the rename onto %s failed (err %lu) -- "
-                    "the previous file is unchanged", path, err);
-        backend_log(line);
-        return 0;
-    }
-
-    written = total;
-
-    return written;
+    return write_shadow_to(data, len, path);
 }
 
 #ifdef SH_RAWMAP_TESTING
@@ -1629,135 +1573,6 @@ int sh_rawmap_validate_source(const char *path, char *out_msg, int msg_capacity)
     return 1;
 }
 
-/* ------------------------------------------------------- save it NOW, from the map already on disk --
- * "Save Rawmap As" used to only name a destination and then wait for the person to save their map in
- * the editor. For a map that was ALREADY saved that is a pointless errand: the bytes exist, complete,
- * on disk. A locally saved SnapMap keeps them at
- *
- *     <the save folder>\map.decl   =   [4-byte checksum][zlib(rawmap JSON)]
- *
- * and `rawmap.json` is exactly that JSON. Both halves of that are established: the engine's map.decl
- * fetch hands the record payload straight to zlib inflate, and the layout has been decoded end-to-end
- * against real saves on disk. So this path reads, inflates and writes -- no engine call, no thread
- * discipline, no waiting.
- *
- * The 4-byte header is a CHECKSUM, not a length (verified: 0x9D4CF0F1 on a 2,638-byte file that
- * inflates to 23,638), so nothing in the file says how big the JSON is. Hence sh_inflate_raw_upto and
- * a capacity ladder rather than one sized allocation.
- *
- * Only the shadow's one-shot remains for the case this genuinely cannot serve: a map that has never
- * been saved has no map.decl to read, and only the editor can produce its bytes. */
-static int save_from_local_map(char *out_msg, int msg_capacity, unsigned long long *out_bytes)
-{
-    /* 256 KB covers every real map by a wide margin (the ones measured are 20-24 KB); the rungs above
-     * exist so an unusually large map still works rather than reporting a false "malformed". Capped at
-     * the same 64 MB the load side refuses past. */
-    static const size_t ladder[] = { 256u * 1024u, 1024u * 1024u, 4u * 1024u * 1024u,
-                                     16u * 1024u * 1024u, 64u * 1024u * 1024u };
-
-    char dir[MAX_PATH], id[64], decl[MAX_PATH];
-    HANDLE h;
-    LARGE_INTEGER sz;
-    unsigned char *raw = NULL;
-    char *json = NULL;
-    DWORD rd = 0;
-    size_t got = 0, i;
-    int ok = 0;
-
-    if (out_bytes) *out_bytes = 0;
-    if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
-
-    if (!sh_editor_frame_saved_map_dir(dir, sizeof dir, id, sizeof id)) {
-        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
-                               "no saved map found -- save your map in the editor first", _TRUNCATE);
-        return 0;
-    }
-    _snprintf_s(decl, sizeof decl, _TRUNCATE, "%s\\map.decl", dir);
-
-    h = CreateFileA(decl, GENERIC_READ, FILE_SHARE_READ, NULL,
-                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) {
-        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
-                               "the saved map's map.decl could not be opened", _TRUNCATE);
-        return 0;
-    }
-    /* 6 = the 4-byte checksum plus zlib's own 2-byte header; 4 more for the trailing Adler-32. A file
-     * that cannot hold all of that plus a byte of deflate is not a map.decl. */
-    if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 11 || sz.QuadPart > (LONGLONG)(64 * 1024 * 1024)) {
-        CloseHandle(h);
-        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
-                               "the saved map's map.decl is not a size we can read", _TRUNCATE);
-        return 0;
-    }
-    raw = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)sz.QuadPart);
-    if (raw == NULL) { CloseHandle(h); return 0; }
-    if (!ReadFile(h, raw, (DWORD)sz.QuadPart, &rd, NULL) || rd != (DWORD)sz.QuadPart) {
-        CloseHandle(h);
-        HeapFree(GetProcessHeap(), 0, raw);
-        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
-                               "the saved map's map.decl could not be read", _TRUNCATE);
-        return 0;
-    }
-    CloseHandle(h);
-
-    for (i = 0; i < sizeof ladder / sizeof ladder[0] && !got; i++) {
-        json = (char *)HeapAlloc(GetProcessHeap(), 0, ladder[i]);
-        if (json == NULL) break;
-        /* Two slices, because the decoder refuses trailing bytes: the deflate data proper (dropping
-         * zlib's 4-byte Adler-32 trailer), and failing that the whole tail -- so a variant that does
-         * not carry the trailer still decodes instead of being reported malformed. */
-        got = sh_inflate_raw_upto(raw + 6, (size_t)rd - 6 - 4, (unsigned char *)json, ladder[i]);
-        if (!got) got = sh_inflate_raw_upto(raw + 6, (size_t)rd - 6, (unsigned char *)json, ladder[i]);
-        if (!got) { HeapFree(GetProcessHeap(), 0, json); json = NULL; }
-    }
-    HeapFree(GetProcessHeap(), 0, raw);
-
-    if (!got || json == NULL) {
-        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
-                               "the saved map's map.decl did not decompress", _TRUNCATE);
-        return 0;
-    }
-
-    /* Sanity: it must look like the rawmap JSON we claim it is, not merely decompress. A silent write
-     * of the wrong bytes is worse than a refusal, because it looks like it worked. */
-    if (json[0] != '{') {
-        HeapFree(GetProcessHeap(), 0, json);
-        if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
-                               "the saved map decompressed to something that is not rawmap JSON",
-                               _TRUNCATE);
-        return 0;
-    }
-
-    {
-        unsigned long long wrote = write_shadow(json, got);
-        HeapFree(GetProcessHeap(), 0, json);
-        if (wrote > 0) {
-            char line[MAX_PATH * 2 + 128];
-            char dest_now[MAX_PATH] = "";
-            if (out_bytes) *out_bytes = wrote;
-            InterlockedExchange64(&g_last_bytes, (LONGLONG)wrote);
-            InterlockedIncrement(&g_shadow_count);
-            /* NAME THE DESTINATION. Without it this line said a write succeeded and left the one
-             * question that matters -- into WHICH file -- unanswerable, which is exactly the shape
-             * a save that "did not stick" takes: it stuck somewhere else. */
-            resolve_dest_path(dest_now, sizeof dest_now);
-            _snprintf_s(line, sizeof line, _TRUNCATE,
-                        "B1: rawmap SAVE wrote %llu bytes from saved map %s -> %s [from-disk]",
-                        wrote, id, dest_now[0] ? dest_now : "<unresolved>");
-            backend_log(line);
-            if (out_msg) {
-                _snprintf_s(out_msg, (size_t)msg_capacity, _TRUNCATE,
-                            "Wrote %llu bytes from saved map %s.", wrote, id);
-            }
-            ok = 1;
-        } else if (out_msg) {
-            strncpy_s(out_msg, (size_t)msg_capacity,
-                      "could not write to that location", _TRUNCATE);
-        }
-    }
-    return ok;
-}
-
 /* The same verdict, asked about the file the swap would ACTUALLY read.
  *
  * The reload used to refuse unless the shared gate was armed, which is why the File menu needed an
@@ -1817,6 +1632,11 @@ void sh_rawmap_get_paths(char *load_out, int load_cap, char *save_out, int save_
 int sh_rawmap_source_ok(char *out_msg, int msg_capacity)
 {
     char path[MAX_PATH];
+    if (!sh_rawmap_load_is_safe()) {
+        if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity,
+            "rawmap overwrite protection is unavailable on this build", _TRUNCATE);
+        return 0;
+    }
     resolve_source_path(path, sizeof path);
     return sh_rawmap_validate_source(path, out_msg, msg_capacity);
 }
@@ -1880,6 +1700,12 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
     (void)self;
     if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
 
+    if ((arm == 1 || arm == 2) && !sh_rawmap_load_is_safe()) {
+        if (out_msg && msg_capacity > 0) strncpy_s(out_msg, (size_t)msg_capacity,
+            "rawmap overwrite protection is unavailable on this build", _TRUNCATE);
+        return 0;
+    }
+
     /* Order matters: validate and set the load source BEFORE arming. Arming first would leave a
      * window where the swap is live against whatever the previous source was -- which for someone
      * clicking "Load Rawmap" is the one outcome they did not ask for. */
@@ -1900,96 +1726,12 @@ static int slot_rawmap_configure(sh_iface *self, const char *load_path, const ch
         }
     }
 
-    /* The save destination is NOT validated as a readable file -- it does not exist yet, and the
-     * shadow itself creates it with CREATE_ALWAYS. A bad directory surfaces as a failed shadow
-     * write, which the existing log line already reports. */
-    if (save_path != NULL) {
-        /* Saving BACK to the file you loaded from is allowed, and is the normal way to work: load a
-         * rawmap, edit it, write it out again. An earlier version of this refused that outright.
-         * The refusal was aimed at the right accident and the wrong cause -- what destroyed a staged
-         * rawmap was Save Rawmap writing the WRONG MAP'S bytes onto it (it read the newest save off
-         * disk), not the filenames matching. Serializing the open map fixed the cause, so the
-         * round trip is safe and the blanket refusal only got in the way. The one rung that can
-         * still write the wrong map guards itself -- see the ladder below. */
-        /* REFUSE AN UNWRITABLE DESTINATION BEFORE AIMING ANYTHING AT IT. The ladder's best rung
-         * queues onto the next editor frame, so "accepted" here means the write is about to happen,
-         * not that it did -- exactly as the console's own save reported success for a read-only file
-         * and only the log disagreed. Checked ahead of the setter so a refusal leaves the
-         * destination untouched. */
-        if (save_path[0] != '\0') {
-            char wmsg[192] = "";
-            if (!sh_rawmap_dest_writable_now(save_path, wmsg, (int)sizeof wmsg)) {
-                if (out_msg && msg_capacity > 0)
-                    _snprintf_s(out_msg, (size_t)msg_capacity, _TRUNCATE,
-                                "Cannot save to %s -- %s", save_path,
-                                wmsg[0] ? wmsg : "it cannot be written");
-                return 0;
-            }
-        }
-
-        if (!sh_rawmap_set_save_target(save_path)) ok = 0;
-
-        /* NAMING A DESTINATION IS A REQUEST TO WRITE IT, not to set a preference. "Save Rawmap As"
-         * is the only caller that passes one, and a destination that then does nothing is why the
-         * save half looked broken. Restoring the default ("") asks for no write, so it is skipped.
-         *
-         * WRITE IT NOW if the map is already saved -- the bytes are complete in that save's map.decl
-         * and need nothing from the engine. Only fall back to arming one editor save when there is no
-         * saved map to read, which is the one case where only the editor can produce the bytes.
-         * Sending someone off to save a map they have already saved was the wrong half of this. */
-        if (save_path[0] != '\0') {
-            char why[192];
-            unsigned long long wrote = 0;
-
-            /* THE LADDER, best first.
-             *
-             * 1. THE OPEN MAP. Ask the engine to serialize what is actually in the editor. This is
-             *    the only rung that captures UNSAVED edits, and the only one that cannot export the
-             *    wrong map. It queues onto the next editor frame, because serializing touches engine
-             *    state -- so "accepted" here means it is about to happen, not that it has.
-             *
-             * 2. THE NEWEST SAVE ON DISK. What this used to do unconditionally. Correct only when
-             *    the open map is saved and unmodified, and on a never-saved map it silently exports
-             *    a DIFFERENT map -- so it is a fallback now, for when there is no editor to ask
-             *    (no map open, or a build that could not resolve the serializer).
-             *
-             * 3. ARM THE NEXT SAVE. When neither can produce bytes, mirror the person's next
-             *    editor save. Costs them one Save and is always the right map. */
-            if (sh_editor_frame_request_rawmap_save(why, (int)sizeof why)) {
-                if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
-                                       "Writing the open map to the rawmap file.", _TRUNCATE);
-            /* NO "the editor is up but has no map" rung here, and that is a decision, not an
-             * omission. It was written and removed: the Snapmap+ window only exists once you are IN
-             * the editor, and a map is always live there, so the branch could not be reached from
-             * this menu. The residual window it would have covered is a save landing exactly during
-             * an editor transition (ED_SUBSTATE_OFF == 5) or shutdown, where rung 1 refuses and rung
-             * 2 would read a different map off disk. If that is ever seen, this is the place. */
-            } else if (dest_is_the_staged_source(save_path)) {
-                /* Rung 2 reads the newest save off DISK, which is not necessarily the map the person
-                 * has open -- and here the destination is the rawmap they staged for loading. Those
-                 * two together are what destroyed a 214KB staged file once already: the wrong map's
-                 * bytes written over the input. Rung 1 may do this freely (those are the open map's
-                 * own bytes); rung 2 may not, so it drops through to arming the next real save. */
-                backend_log("B1: rawmap SAVE skipped the disk fallback -- it would write the wrong "
-                            "map over the staged load source");
-                strncpy_s(why, sizeof why,
-                          "that file is the rawmap you staged for loading, and no map is open to "
-                          "save from", _TRUNCATE);
-                sh_rawmap_save_arm_once();
-                if (out_msg) {
-                    _snprintf_s(out_msg, (size_t)msg_capacity, _TRUNCATE,
-                                "%s -- it will be written on your next save.", why);
-                }
-            } else if (save_from_local_map(why, (int)sizeof why, &wrote)) {
-                if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity, why, _TRUNCATE);
-            } else {
-                sh_rawmap_save_arm_once();
-                if (out_msg) {
-                    _snprintf_s(out_msg, (size_t)msg_capacity, _TRUNCATE,
-                                "%s -- it will be written on your next save.", why);
-                }
-            }
-        }
+    /* A save always uses the live editor. An unavailable or busy editor must
+     * not export a different saved map or arm a future unrelated save. */
+    if ((save_path && save_path[0]) || arm == 5) {
+        if (!sh_editor_frame_request_rawmap_save_to(save_path, out_msg, msg_capacity)) return 0;
+    } else if (save_path) {
+        ok = sh_rawmap_set_save_target(NULL);
     }
 
     /* 0/1 set the shared gate, -1 leaves it alone, and 2 arms ONE load and no more. The last is
