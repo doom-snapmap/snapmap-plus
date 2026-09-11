@@ -7,6 +7,7 @@
 #include <math.h>
 
 #include "nav_bake.h"
+#include "perf.h"
 #include "nav_regions.h"
 #include "aas_edit.h"
 #include "aas_augment.h"
@@ -306,6 +307,15 @@ static void bake_plan_locked(void)
  * conversion. Complete snapshots also refresh ownership and newly created
  * entities.
  */
+unsigned long sh_nav_bake_geometry_revision(void)
+{
+    unsigned long r;
+    AcquireSRWLockShared(&g_bake_lock);
+    r = g_geometry_revision;
+    ReleaseSRWLockShared(&g_bake_lock);
+    return r;
+}
+
 void sh_nav_bake_refresh_live(void)
 {
     if (InterlockedCompareExchange(&g_building, 0, 0)) return;
@@ -314,9 +324,13 @@ void sh_nav_bake_refresh_live(void)
     if (g_snapshot) {
         char *json = NULL; size_t len = 0;
         sh_nav_map *candidate = (sh_nav_map *)malloc(sizeof *candidate);
-        int ok = candidate && g_snapshot(&json, &len, g_snapshot_ctx) &&
-                 sh_nav_regions_read(json, len, candidate) && !candidate->truncated &&
-                 !candidate->invalid_geometry;
+        int ok = candidate && g_snapshot(&json, &len, g_snapshot_ctx);
+        if (ok) {
+            SH_PERF_BEGIN(t0);
+            ok = sh_nav_regions_read(json, len, candidate);
+            SH_PERF_END(SH_PERF_NAV_PARSE, t0);
+            ok = ok && !candidate->truncated && !candidate->invalid_geometry;
+        }
         if (ok) {
             int changed = !g_have_map || g_live_refused || memcmp(&g_map, candidate, sizeof g_map);
             g_map = *candidate;

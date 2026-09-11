@@ -431,10 +431,11 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
         /* The independent unlock worker can run before backend resolution completes. */
         sh_cvar_unlock_start();
     }
-#ifdef SH_DIAG
     else if (reason == DLL_PROCESS_DETACH) {
+#ifdef SH_DIAG
         shield_diag_detach();   /* DIAGNOSTIC: record crash-vs-clean-exit in sh_diag.log */
-    }
 #endif
+        backend_log_close();
+    }
     return TRUE;
 }

@@ -49,6 +49,11 @@ typedef int (*sh_nav_bake_entity_count)(void *ctx);
  */
 void sh_nav_bake_refresh_live(void);
 
+/* Counter that advances whenever a refresh finds the editor geometry different
+ * from what the bake holds. A caller compares it across a refresh to learn
+ * whether that refresh changed anything. */
+unsigned long sh_nav_bake_geometry_revision(void);
+
 typedef int (*sh_nav_bake_snapshot)(char **json, size_t *len, void *ctx);
 void sh_nav_bake_set_snapshot(sh_nav_bake_snapshot snapshot, void *ctx);
 void sh_nav_bake_build_begin(void);

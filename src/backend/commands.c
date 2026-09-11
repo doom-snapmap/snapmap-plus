@@ -25,6 +25,7 @@
 #include "engine_dialog.h"
 #include "navmesh.h"
 #include "nav_bake.h"
+#include "perf.h"
 
 /* Engine call contracts. */
 
@@ -1699,7 +1700,20 @@ static void h_sh_navmesh(idCmdArgs *a)
     sh_nav_bake_report(sh_printf);
 }
 
+/* Where frame time goes inside snapmap-plus. */
+static void h_sh_perf(idCmdArgs *a)
+{
+    const char *verb = cmd_argv(a, 1);
+    if (verb && _stricmp(verb, "reset") == 0) {
+        sh_perf_reset();
+        sh_printf("Timings cleared. They start again from now.\n");
+        return;
+    }
+    sh_perf_report(sh_printf);
+}
+
 static const cmd_entry CMD_TABLE[] = {
+    { "sh_perf",              (void *)h_sh_perf,     "Where frame time goes inside snapmap-plus. 'sh_perf reset' starts the counting again." },
     { "sh_rawmaps",           (void *)h_sh_rawmaps,   "Raw JSON map files: state, paths, load, save. Run with no arguments to see what is set, or 'sh_rawmaps help' (or '?') for every verb." },
     { "sh_rawmaps_on",       (void *)h_rawmaps_on,  "(legacy) Same as 'sh_rawmaps on'. Kept because older guides use it." },
     { "sh_rawmaps_off",      (void *)h_rawmaps_off, "(legacy) Same as 'sh_rawmaps off'. Kept because older guides use it." },

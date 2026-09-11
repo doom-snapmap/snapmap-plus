@@ -17,6 +17,7 @@
 #pragma comment(lib, "shell32.lib")   /* SHGetFolderPathA */
 #include "overrides.h"
 #include "backend_log.h"
+#include "perf.h"
 #include "decl_text.h"
 #include "packages.h"
 #include "package_conflicts.h"
@@ -1114,7 +1115,7 @@ unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_l
     }
 }
 
-static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
+static void *ov_open_body(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
 {
     if (g_orig_open == NULL) return NULL;   /* defensive: never happens once installed */
     if (g_provider_self == NULL) g_provider_self = self;
@@ -1226,6 +1227,15 @@ static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsign
     }
     /* No shadow, or mode guard: chain with the original byte arguments. */
     return g_orig_open(self, name, (unsigned char)(b1 & 0xff), (unsigned char)(b2 & 0xff), mode);
+}
+
+/* Every resource the engine opens passes through here, so its cost is counted. */
+static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
+{
+    SH_PERF_BEGIN(t0);
+    void *s = ov_open_body(self, name, b1, b2, mode);
+    SH_PERF_END(SH_PERF_OVERRIDE_OPEN, t0);
+    return s;
 }
 
 /* Decode the first LEA RAX,[rip+disp32] in the resolved provider constructor
