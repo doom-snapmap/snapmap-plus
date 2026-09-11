@@ -34,6 +34,9 @@ site/_data/changelog.json
 # Local Jekyll output.
 site/_site/
 
+# Native test build output and logs.
+/tests/obj/
+
 # Python bytecode.
 __pycache__/
 *.pyc

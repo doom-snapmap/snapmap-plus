@@ -22,6 +22,9 @@
 typedef struct { const char *id; const char *text; } strid_baked_t;
 
 static const strid_baked_t g_strids_baked[] = {
+    { "smp_grid_room_size", "Grid Room Size" },
+    { "smp_grid_room_modern_help", "Minimum X: 864, Y: 272, Z: 432. Maximum follows snapEdit_environmentModuleBounds, world position, connected rooms and native collision/navigation limits. Out-of-range values use the nearest limit. Connected branches follow their doors; conflicting loops or overlaps prevent the edit. Objects keep their room positions. Resized rooms require Snapmap+." },
+    { "smp_grid_room_classic_help", "Minimum X: 416, Y: 416, Z: 304. Maximum follows snapEdit_environmentModuleBounds, world position, connected rooms and native collision/navigation limits. Out-of-range values use the nearest limit. Connected branches follow their doors; conflicting loops or overlaps prevent the edit. Objects keep their room positions. Resized rooms require Snapmap+." },
     /* The "unknown" placeholder entity's own palette home. The override pack ships
      * snapeditorentitydef/unknown/unknown.decl referencing these; baking them gives it a clean "Unknown"
      * tab on every install instead of a raw token. */

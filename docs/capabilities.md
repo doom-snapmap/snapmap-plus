@@ -4,6 +4,16 @@ What the clone does, grouped by kind. This is the user-facing feature inventory;
 fit together see [`architecture.md`](architecture.md), and for the intentionally-faithful quirks
 see [`fidelity.md`](fidelity.md).
 
+## Grid Room dimensions
+
+Classic and modern Grid Rooms expose independent XYZ dimensions in DOOM's native
+Module Properties panel, including Blueprint X. Fixed-size doors, connected
+branch translation, built-in lighting, collision and navigation follow the
+resized shell. Authored objects retain their module-local transforms. Values
+clamp to doorway minimums and placement-dependent world limits. See the
+[Grid Room instructions](../site/snapmap-plus-guide.md#resizing-grid-rooms).
+Maps using resized rooms require Snapmap+ on the player's PC.
+
 ## Package weapon HUD settings
 
 Override packages can supply `hud/weapons.json` to select engine-default or

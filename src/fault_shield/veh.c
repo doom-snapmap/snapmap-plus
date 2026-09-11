@@ -1,6 +1,6 @@
 /* Classify engine faults and attempt bounded recovery. Visibility-leaf faults
- * return false for the bad node. Other wild draw faults can unwind to editor
- * Think (Class A); remaining eligible faults redirect to Error(6) and request
+ * return false for the bad node. Repaired CSR/render-node faults can unwind to
+ * editor Think (Class A); remaining eligible faults redirect to Error(6) and request
  * editor exit (Class B). Known off-main threads are never given that redirect.
  * Engine C++ throws continue to their handlers after recovery-gate adjustments.
  * Fault logging is independent of recovery and may also record non-engine faults. */
@@ -576,8 +576,8 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
         if (!(data && is_wild(fault_addr)))
             return EXCEPTION_CONTINUE_SEARCH;
 
-    /* Class A: unwind a copy to editor Think and abort the current draw. A miss
-     * leaves the original context for Class B. Repeated recovered draws are not
+    /* Class A: after a known repair, unwind to editor Think and abort the draw.
+     * An unrecognized fault retains its context for Class B. Recovered draws are not
      * charged against the redirect budget; only their logging is limited. */
     {
         CONTEXT unwound = *ep->ContextRecord;
@@ -586,6 +586,10 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
             /* Use the original resolver registers to repair the persistent bad connection. */
             int reverted   = try_revert_csr_entry(ep->ContextRecord);
             int rn_cleared = try_neutralize_rendernode(ep->ContextRecord);
+            /* A frame on this stack does not establish a draw-only failure.
+             * Collision/resource faults must reach the native error boundary;
+             * skipping their callers left a second invalid return address. */
+            if(reverted || rn_cleared) {
             if (InterlockedIncrement(&g_classa_seen) <= 5) {
                 _snprintf_s(g_why, sizeof g_why, _TRUNCATE,
                     "in-editor draw fault @ 0x%llx (rip+0x%llx) -> aborted draw%s%s, resumed editor frame",
@@ -600,6 +604,7 @@ static LONG CALLBACK shield_veh(PEXCEPTION_POINTERS ep)
 
             *ep->ContextRecord = unwound;
             return EXCEPTION_CONTINUE_EXECUTION;
+            }
         }
     }
     }   /* end if (is_av) -- a wild AV the editor-unwind didn't claim falls through to Class-B */

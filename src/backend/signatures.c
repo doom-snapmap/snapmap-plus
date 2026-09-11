@@ -934,5 +934,106 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "80 B8 41 06 00 00 00 75 30", 0 },
     { "WeaponHudGameMode", /* bool(game*); separately verifies the decoded call target. */
       "48 8B 81 38 53 04 00 83 78 18 01 0F 94 C0 C3", 0 },
+    /* Native module properties and XYZ inspector. Independently matched on
+     * Vulkan/OpenGL at D0BCA0/D0B3B0, D0A0B0/D09980, D071F0/D06B70 and
+     * D306F0/D2FDB0. No pinned-image RVA fallback is authorized. */
+    { "GridModuleProperties",
+      "40 55 56 57 41 56 41 57 48 8D AC 24 70 C0 FF FF B8 90 40 00 00 E8 ?? ?? ?? ?? "
+      "48 2B E0 48 C7 44 24 60 FE FF FF FF 48 89 9C 24 C8 40 00 00 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 80 3F 00 00 49 8B F1 4D 8B F0 8B FA 48 8B D9", 0 },
+    { "GridPropertyChanged",
+      "48 85 D2 0F 84 ?? ?? ?? ?? 48 8B C4 55 56 57 48 8D 68 A1 "
+      "48 81 EC A0 00 00 00 48 C7 45 F7 FE FF FF FF", 0 },
+    { "GridAddVec3",
+      "48 8B C4 55 56 57 41 54 41 55 41 56 41 57 48 8D 68 B8 48 81 EC 10 01 00 00 "
+      "48 C7 45 90 FE FF FF FF 48 89 58 20 0F 29 70 B8 0F 29 78 A8", 0 },
+    { "GridSetVec3",
+      "40 53 B8 80 40 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 30 FE FF FF FF "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 70 40 00 00 48 8B D9 8B 02 89 81 00 01 00 00", 0 },
+    /* Native palette lookup and one-module loader, verified in both images:
+     * Vulkan 5B7380/5B7910, OpenGL 5B6A70/5B7000. */
+    { "GridFindModule",
+      "4C 8B DC 49 89 5B 18 49 89 53 10 57 48 83 EC 40 48 63 41 18 4D 8D 4B 08 "
+      "4C 8B 51 10 4D 8D 43 10 48 69 F8 98 00 00 00", 0 },
+    { "GridHasModule", /* VK 5b6f40, GL 5b6630; separate reload membership probe. */
+      "48 89 54 24 10 48 83 EC 48 48 8D 05 ?? ?? ?? ?? 48 89 44 24 30 4C 8D 4C 24 50 48 63 41 18", 0 },
+    { "GridPortalSnap", /* VK 5a9b70, GL 5a9180. */
+      "40 55 53 57 41 54 41 55 41 57 48 8D 6C 24 D1 48 81 EC B8 00 00 00 45 33 FF 44 0F 29 4C 24 70 45 0F B6 E1", 0 },
+    { "GridPortalAlign", /* VK 5a0b80, GL 5a02f0. */
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 20 57 41 54 41 55 41 56 41 57 48 83 EC 60 4C 8B F9 4D 63 E0 48 8B 09 4C 8B EA", 0 },
+    { "GridQuantizeOrigin", /* VK 514df0, GL 514610. */
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 40 0F 29 74 24 30 48 8B EA 0F 29 7C 24 20", 0 },
+    { "GridConfirmOrigins", /* VK 5a1750, GL 5a0ec0; add/move/duplicate release. */
+      "40 55 56 41 57 48 83 EC 40 45 33 FF 0F 29 74 24 30 0F 28 F1 48 8B F1 41 8B EF 44 39 79 70 0F 8E ?? ?? ?? ?? 48 89 5C 24 60", 0 },
+    { "GridPortalBounds", /* VK 5547d0, GL 553c80. */
+      "40 53 48 83 EC 40 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 38 48 8B DA 48 8B 11 4C 8B 0A", 0 },
+    { "GridPortalDirection", /* VK 5548c0, GL 553d70. */
+      "48 8B 01 4C 8B C9 4C 8B 00 48 63 C2 48 6B D0 1C 49 8B 80 E8 00 00 00", 0 },
+    { "GridLoadModule",
+      "40 55 56 57 41 56 41 57 48 81 EC 60 01 00 00 48 C7 44 24 40 FE FF FF FF "
+      "48 89 9C 24 98 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 50 01 00 00 "
+      "49 8B E9 49 8B F0 48 8B FA 4C 8B F9 48 8B 9C 24 B0 01 00 00", 0 },
+    /* Replace one compiled instance and recompute native portal connections.
+     * Vulkan 5993A0/59DA90; OpenGL 598B10/59D200. */
+    { "GridReplaceInstance",
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B 81 68 07 00 00 "
+      "48 8B F9 48 63 DA 48 81 C1 E0 05 00 00", 0 },
+    { "GridReconnectPortals",
+      "4C 8B DC 41 56 48 81 EC 80 00 00 00 49 C7 43 B0 FE FF FF FF 49 89 5B 10 "
+      "49 89 73 18 49 89 7B 20 0F 29 74 24 70 0F 29 7C 24 60", 0 },
+    /* Native collision resources cached by a module wrapper: VK 5929a0, GL 592030. */
+    { "GridBuildModuleCollision",
+      "40 55 56 57 41 56 41 57 48 83 EC 70 48 C7 44 24 20 FE FF FF FF 48 89 9C 24 B8 00 00 00 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 60 49 63 E8 4C 8B FA", 0 },
+    /* Native COW edit, local transform setter and bounds transform. Verified
+     * VK 5a0280/545040/554cf0; GL 59f9f0/544960/5541a0. */
+    { "GridEditEntity",
+      "48 8B 01 44 8B D2 44 8B CA 41 83 E2 3F 49 C1 E9 06 4C 8B 80 D0 06 00 00 48 63 D2 4B 8B 04 C8 4C 0F AB D0", 0 },
+    { "GridSetEntityTransform",
+      "8B 02 89 81 88 02 00 00 8B 42 04 89 81 8C 02 00 00 8B 42 08 89 81 90 02 00 00 8B 42 0C 89 81 94 02 00 00", 0 },
+    { "GridWorldBounds",
+      "48 8B C4 48 89 58 18 57 48 81 EC A0 00 00 00 0F 29 70 E8 0F 29 78 D8 48 8B 05 ?? ?? ?? ?? "
+      "48 33 C4 48 89 44 24 70 F2 0F 10 41 0C 49 8B F8 8B 41 14 48 8B DA 44 8B 41 18", 0 },
+    /* Native Blueprint Grid Room properties entry; both renderers verified. */
+    { "GridBlueprintUpdate", /* VK 0xcebd80, GL 0xceb760. */
+      "40 53 55 57 48 83 EC 20 F6 41 10 10 49 8B D8 48 8B FA 48 8B E9 75", 0 },
+    { "GridBlueprintHelp", /* VK 0xceb950, GL 0xceb330. */
+      "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 20 48 8D BA 90 09 02 00 48 8B EA 48 8B F1 48 8D 9A A8 11 02 00", 0 },
+    { "GridSetEditorState", /* VK 0x5298a0, GL 0x5291d0. */
+      "48 89 5C 24 08 57 48 83 EC 20 8B DA 48 8B F9 8B 91 18 36 02 00 E8 ?? ?? ?? ?? 48 8B D7 48 8B C8 4C 8B 00 41 FF 50 10", 0 },
+    { "GridInputPressed", /* VK 0x52d190, GL 0x52cac0. */
+      "48 89 5C 24 08 57 48 83 EC 20 48 63 C2 48 8B D9 48 6B F8 38 48 8D 05 ?? ?? ?? ?? 48 03 F8 44 0F B6 4F 02 44 0F B6 47 01 0F B6 17 E8 ?? ?? ?? ?? 84 C0 74 36 48 63 47 04 48 3B 83 80 00 00 00", 0 },
+    { "GridAddActionHelp", /* VK 0x551e40, GL 0x551300. */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 80 39 00 48 8D 59 30 41 8B F0 8B FA 74 7B 44 8B 43", 0 },
+    { "GridPropertiesBlocked", /* VK 0x5af830, GL 0x5aeed0. */
+      "4C 8B 01 44 8B CA 4D 85 C0 74 3C 48 63 49 08 41 8B 40 70 3B C8 75 1D 85 C0 7E 17 8D 41 FF 48 63 C8 49 8B 40 68 48 6B D1 78 44 85 4C 02 08 0F 94 C0 C3 3B C8 7D 11 49 8B 40 68 48 6B C9 78", 0 },
+    { "GridEntityTree", /* VK 0x5404a0, GL 0x53fdc0. */
+      "48 89 5C 24 10 57 48 83 EC 30 4C 8B 81 50 01 00 00 33 FF 89 7C 24 20 48 "
+      "8B DA 4D 85 C0 74 ?? 48 8D 54 24 40 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? "
+      "48 8B 08 48 89 38 48 8B 7C 24 40 48 89 0B 48 85 FF 74 ?? 48 8B CF E8 ?? "
+      "?? ?? ?? BA 48 00 00 00 48 8B CF E8 ?? ?? ?? ??", 0 },
+    { "GridApplyEntityTree", /* VK 0x545120, GL 0x544a40. */
+      "48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 30 48 8B F9 48 8B F2 48 8B 0D "
+      "?? ?? ?? ?? 48 8B 01 FF 90 40 02 00 00 F6 87 60 01 00 00 01 48 8B E8 74 "
+      "?? 48 8B 15 ?? ?? ?? ?? 4C 8D 87 94 02 00 00 4C 8B C8", 0 },
+    { "GridReadEntityProperties", /* VK 0x5415d0, GL 0x540ef0. */
+      "48 8B C4 55 57 41 56 48 8D A8 48 FF FF FF 48 81 EC A0 01 00 00 48 C7 45 "
+      "C8 FE FF FF FF 48 89 58 18 48 89 70 20 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 "
+      "89 85 90 00 00 00 48 8B FA 48 8B D9 48 8B 01 F6 80 CD 03 00 00 01", 0 },
+    { "GridTreeSetVec3", /* VK 0x1a66ee0, GL 0x1a593b0. */
+      "40 53 55 56 57 41 54 41 56 41 57 B8 30 80 00 00 E8 ?? ?? ?? ?? 48 2B E0 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 20 80 00 00 40 32 ED 4D 8B E1 "
+      "33 DB 4D 8B F8 4C 8B F2 48 8B F1 BF 78 00 00 00 44 8B CF 48 8D 15 ?? ?? "
+      "?? ?? 4D 8B C6 48 8D 4C 24 20 E8 ?? ?? ?? ?? 48 8B 16 4C 8B C0 48 8B CE "
+      "E8 ?? ?? ?? ?? 48 85 C0 75 ?? 44 8B CF 48 8D 15 ?? ?? ?? ?? 4D 8B C6 48 "
+      "8D 8C 24 20 40 00 00 E8 ?? ?? ?? ?? 4D 8B C4 48 8B D0 48 8B CE E8 ?? ?? "
+      "?? ?? 48 85 C0 74 ?? F3 41 0F 10 0C 9F 4C 8D 80 90 00 00 00 48 8B CE E8 "
+      "?? ?? ?? ?? 40 B5 01 FF C7 48 FF C3 48 83 FB 03 7C ?? 40 0F B6 C5", 0 },
+    { "GridTreeSetFloat", /* VK 0x1a66610, GL 0x1a58ae0. */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 30 48 8B FA 0F 29 74 24 20 4C "
+      "8B C2 49 8B F1 48 8B 11 0F 28 F2 48 8B D9 E8 ?? ?? ?? ?? 48 85 C0 75 ?? "
+      "4C 8B C6 48 8B D7 48 8B CB E8 ?? ?? ?? ?? 48 85 C0 74 ?? 4C 8D 80 90 00 "
+      "00 00 0F 28 CE 48 8B CB E8 ?? ?? ?? ?? B0 01 48 8B 5C 24 40 48 8B 74 24 "
+      "48", 0 },
     { NULL, NULL, 0 }   /* terminator */
 };

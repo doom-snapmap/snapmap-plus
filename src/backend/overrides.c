@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <shlobj.h>
 #pragma comment(lib, "shell32.lib")   /* SHGetFolderPathA */
 #include "overrides.h"
@@ -22,6 +23,7 @@
 #include "packages.h"
 #include "package_conflicts.h"
 #include "resource_bridge.h"
+#include "grid_room_asset.h"
 #include "user_overrides.h"
 #include "navmesh.h"                /* baked AI navigation, served under the module's own names */
 #include "nav_bake.h"           /* navigation baked from the map's own marked volumes */
@@ -1127,7 +1129,7 @@ static ov_stream *open_user_for_baked_name(const char *name, int *malformed)
  */
 static void *volatile g_provider_self = NULL;
 
-unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_len)
+static unsigned char *read_installed_resource(const char *name, size_t *out_len)
 {
     typedef long long (*ov_len_fn)(void *self);
     typedef long long (*ov_read_fn)(void *self, void *buf, uint64_t n);
@@ -1176,15 +1178,80 @@ unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_l
     }
 }
 
+static unsigned char *grid_read_installed(void *context,const char *name,size_t *length)
+{
+    (void)context;
+    return read_installed_resource(name,length);
+}
+static void grid_release_installed(void *context,void *bytes)
+{
+    (void)context;HeapFree(GetProcessHeap(),0,bytes);
+}
+
+static int grid_aas_name(const char *name)
+{return name&&(strstr(name,".aas_")||strstr(name,".baas_"));}
+static int grid_open_validated(const char *name,unsigned char **out,size_t *length)
+{
+    int claimed=sh_grid_asset_open(name,grid_read_installed,grid_release_installed,NULL,out,length);
+    if(claimed>0&&grid_aas_name(name)){
+        char error[192];
+        if(!sh_navmesh_validate_aas(*out,*length,error,sizeof error)){
+            backend_log(error);free(*out);*out=NULL;*length=0;return -1;
+        }
+    }
+    return claimed;
+}
+
+unsigned char *sh_overrides_read_engine_resource(const char *name,size_t *out_len)
+{
+    unsigned char *generated=NULL,*copy=NULL;size_t length=0;int claimed;
+    if(out_len)*out_len=0;
+    if(!name)return NULL;
+    /* A marked volume in a resized module augments that module's resized AAS.
+     * The source reader below bypasses this provider to prevent recursion. */
+    claimed=grid_open_validated(name,&generated,&length);
+    if(!claimed)return read_installed_resource(name,out_len);
+    if(claimed>0){copy=(unsigned char*)HeapAlloc(GetProcessHeap(),0,length);
+        if(copy){memcpy(copy,generated,length);if(out_len)*out_len=length;}}
+    free(generated);return copy;
+}
+
 static void *ov_open_body(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
 {
     if (g_orig_open == NULL) return NULL;   /* defensive: never happens once installed */
     if (g_provider_self == NULL) g_provider_self = self;
 
+    /* Let embedded or marked-volume navigation take precedence over the
+     * resized room's base AAS; its source reader still resolves that base. */
+    if(mode<2&&grid_aas_name(name)){
+        unsigned char *nav=NULL;size_t length=0;
+        if(!sh_navmesh_open(name,&nav,&length))
+            sh_nav_bake_open(name,sh_overrides_read_engine_resource,&nav,&length);
+        if(nav){void *stream=make_mem_stream(nav,(long long)length,name,1);
+            if(stream)return stream;HeapFree(GetProcessHeap(),0,nav);return NULL;}
+    }
+
+    if(mode<2&&name){
+        unsigned char *generated=NULL,*owned=NULL;size_t bytes=0;
+        int claimed=grid_open_validated(name,&generated,&bytes);
+        if(claimed){
+            ov_stream *stream=NULL;
+            if(claimed>0&&generated&&bytes){
+                owned=(unsigned char*)HeapAlloc(GetProcessHeap(),0,bytes);
+                if(owned){memcpy(owned,generated,bytes);stream=make_mem_stream(owned,(long long)bytes,name,1);}
+            }
+            free(generated);
+            if(!stream&&owned)HeapFree(GetProcessHeap(),0,owned);
+            /* A malformed or unsupported private resource cannot resolve to
+             * another room's stock payload. */
+            return stream;
+        }
+    }
+
     /* Map-carried navigation precedes disk overrides and is independent of
      * the launch user-layer gate.
      */
-    if (mode < 2 && name != NULL) {
+    if (mode < 2 && name != NULL && !grid_aas_name(name)) {
         unsigned char *nav = NULL;
         size_t nav_len = 0;
         /* Embedded navigation takes precedence over dynamically generated output. */

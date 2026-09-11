@@ -142,8 +142,8 @@ int shield_resolve_engine(const uint8_t *module_base)
     scanned += resolve_fn(module_base, "FatalError7", &g_eng.fatalerror7,  NULL);
     scanned += resolve_fn(module_base, "SetState",    &g_eng.setstate,     NULL);
     scanned += resolve_fn(module_base, "Frame",      &g_eng.frame,       NULL);
-    scanned += resolve_fn(module_base, "EditorPump", &g_eng.editor_pump, &g_eng.editor_pump_rva);
-    if (g_eng.editor_pump == 0) scanned += adopt_backend_editor_frame(module_base);
+    if(adopt_backend_editor_frame(module_base))++scanned;
+    else scanned += resolve_fn(module_base, "EditorPump", &g_eng.editor_pump, &g_eng.editor_pump_rva);
     scanned += resolve_fn(module_base, "Resolver",   &g_eng.resolver,    &g_eng.resolver_rva);
     scanned += resolve_fn(module_base, "Toast",      &g_eng.toast_show,  NULL);
     scanned += resolve_fn(module_base, "IdStrCtor",  &g_eng.idstr_ctor,  NULL);

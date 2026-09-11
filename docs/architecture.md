@@ -53,6 +53,62 @@ executable; the hook helper does not relocate RIP-relative instructions.
 
 ## DLL interface
 
+Grid Room resizing is implemented in the existing backend. The native DOOM
+Module Properties panel owns its XYZ control. In Blueprint mode, the normal
+module selection handler adds the native Module Properties prompt and checks
+the engine's X action for the highlighted Grid Room. It selects that placement
+and enters the native panel state while retaining the Blueprint camera. Tutorial
+restrictions, other module types and selection transitions remain guarded.
+The WebView has no resizing control or new interface slot. Dimension-bearing
+module names resolve through private native palettes and the existing resource
+provider. Newly materialized empty catalogs take the native generic source load
+before admission; accepted and stock catalogs are not reloaded. The edit handler
+changes one compiled placement and translates its owned caps, doors and frames
+through the native copy-on-write entity edit and transform setter. This uses the
+live local transform, including after a native cap replacement leaves serialized
+definition edit state null. Ordinary placed objects keep their local positions and sizes.
+Finite XYZ inputs clamp to the per-axis limits and display the applied dimensions.
+The current snapEdit_environmentModuleBounds cvar constrains the selected
+placement and every connected neighbor on each edit. Planning uses temporary
+spatial views and native bounds helpers before creating resources. Signed-short
+BCM/AAS coordinates impose independent representation limits, including navigation
+outsets beyond the shell. Changing the cvar does not change those formats.
+Connected module branches translate rigidly to follow the changed doorways. A
+conflicting loop or increased bounding-box overlap prevents the connected edit.
+The engine recomputes all portal connections before accepting the transaction;
+an unexpected change restores the prior transforms and module records. The room
+resources are constructed in memory; no map sidecars are required.
+
+Built-in lights are identified from the installed module's original entity
+names and inheritance. Native property-tree setters, commit and cached-property
+refresh update their position, coverage and distance cutoffs without changing
+authored light properties. The modern effective light center follows the roof;
+the classic central light follows the room center. Tree ownership uses the
+engine's matching destructor and delete calls, with rollback on edit failure.
+
+The resource provider supplies resized AAS for all three stock agent classes.
+Door apertures and agent clearance remain fixed. Narrow strips that collapse
+at the shrink minimum are removed with their area references, cover membership,
+visibility and route chains remapped. Native BuildAAS performs module placement
+and assembly, and marked blocking volumes augment the resized base navigation.
+
+Reload has a separate palette membership probe; it now shares the variant lookup
+so saved rooms reach instance conversion. Cold construction can run before editor
+activation once the stock palette and native main-thread heap are available.
+Portal magnet snapping corrects the selected group's discarded XY offset only
+for compatible equal-size portals involving a variant. Explicit attachment scopes
+an exact-origin exception to that operation. Add/move/duplicate confirmation
+also preserves off-grid origins in maps containing resized rooms, including a
+stock neighbor aligned to one. Native dirty marking and remainder cleanup still
+run. Native reciprocal connection checks remain exact; the normal frame updater
+replaces caps and creates doors/frames when those connections change.
+Private palettes retain their two cached collision resources across map teardown;
+their native collision builder runs in the same process heap scope as the palette.
+Stock palette collision lifetime remains native. A process holds at most 64
+distinct size/type variants, avoiding eviction while maps or undo records may
+still reference them. Save files contain the dimension-bearing module identity;
+players need Snapmap+ to reconstruct its resources. Vanilla loading is unsupported.
+
 The shared object uses an append-only vtable. Its original 77-slot prefix is
 retained, with extensions through `+0x338`; the current table occupies `0x340`
 bytes. The last three are the File menu's rawmap surface: `rawmap_status`

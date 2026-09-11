@@ -104,6 +104,9 @@ static void *ti_get_reflect(void)
     }
 }
 
+void *sh_typeinfo_get_reflect(void)
+{return ti_get_reflect();}
+
 /* Enumerate decl-type instance names through reflection's silent enum lookup.
  * GetDeclsOfType serves asset classes and logs errors for these names. Pack
  * NUL-separated strings with a double-NUL terminator; preserve partial output. */
