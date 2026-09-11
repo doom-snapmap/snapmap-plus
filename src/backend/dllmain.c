@@ -207,7 +207,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                         ed_tojson = (void *)results[i].addr;
                 }
             }
-            sh_editor_frame_install(ed_frame, ed_frame_clean, ed_loadmap, ed_addtag, g_doom_base);
+            sh_editor_frame_install(ed_frame, ed_frame_clean, ed_loadmap, g_doom_base);
             /* Save Rawmap serializes the open map, not the newest save on disk. The tag
              * function also derives the engine's idStr ctor/dtor. */
             sh_rawmap_set_live_serialize(ed_tojson, ed_addtag);

@@ -423,7 +423,7 @@ static void sh_editor_frame_detour(void *editor, void *arg)
 /* ------------------------------------------------------------------ install + API --------------- */
 
 int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
-                            void *add_branch_tag_fn, const uint8_t *module_base)
+                            const uint8_t *module_base)
 {
     glb_status st = GLB_OK;
     char line[256];

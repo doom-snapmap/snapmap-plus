@@ -33,11 +33,8 @@
  *                        fallback: never patch over a prologue that is already a detour.
  *   `load_map_fn`      = resolved "EditorLoadMap", or NULL for the frame hook with no reload
  *                        capability (still useful as an execution point).
- *   `add_branch_tag_fn`= idSnapMap::AddTag("map:branch"). Optional; null only costs the tag that
- *                        makes a substituted map save as a NEW map.
  *   `module_base`      = host image base, for resolving the editor singleton. */
 int sh_editor_frame_install(void *frame_fn, int status_ok, void *load_map_fn,
-                            void *add_branch_tag_fn,
                             const uint8_t *module_base);
 
 /* The editor Think entry as resolved, or NULL before install ran or on a build that could not
