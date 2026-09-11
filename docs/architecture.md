@@ -125,6 +125,19 @@ obstacles and use live uniqueIds; topology changes require a complete snapshot.
 Play always takes its own complete snapshot. The worker and session log handle
 have process lifetime; DllMain must not wait on them or acquire their locks.
 
+Navigation surfaces and obstacles have separate roles. The bake emits only
+exposed box faces meeting each AAS class's floor-slope threshold; ordinary
+Block Demons boxes subtract occupied standing space without adding surfaces.
+The engine also registers their clip shapes for native AAS obstacle avoidance.
+Its separate expanded blocker registration feeds flight navigation. Keep both
+native registrations intact for ordinary walls; a vertical wall does not need
+a custom walkable shell. Traversals connect valid approach and landing surfaces.
+
+Native route preparation allows 256 outgoing reachabilities per area. A custom
+bake refusal concerns that area's route complexity, not the map's entity count.
+It must remain distinguishable from a stale preview or a failed local obstacle
+query, either of which can occur while the underlying AAS remains loaded.
+
 Override misses carry the package generation that produced them. A rescan makes
 old misses inapplicable even when an earlier lookup completes concurrently.
 

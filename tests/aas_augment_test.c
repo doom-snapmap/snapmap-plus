@@ -1854,6 +1854,38 @@ static void test_exposed_edges_remain_walls(void)
     sh_aas_free(a);
 }
 
+static void test_unmarked_wall_keeps_routes_around_both_ends(void)
+{
+    static const float radii[3]={24,48,64};
+    int r,rot,i,k;
+    for(r=0;r<3;r++)for(rot=0;rot<2;rot++) {
+        sh_aas *a=load_module();sh_aug_platform p[2];sh_aug_report rep;
+        sh_aug_opts o={SH_AUG_FALL_NEVER,1,SH_AUG_TRAVERSAL_NEVER};
+        double angle=rot*0.6108652382,c=cos(angle),s=sin(angle);
+        int west,east,north,south;
+        sh_aas_set_setting_f32(a,208,-radii[r]);sh_aas_set_setting_f32(a,212,-radii[r]);
+        sh_aas_set_setting_f32(a,220,radii[r]);sh_aas_set_setting_f32(a,224,radii[r]);
+        mkbox(&p[0],-1024,-1024,1024,1024,128,0,"support");
+        mkbox(&p[1],-64,-384,64,384,1152,128,"unmarked wall");
+        p[1].obstacle_only=1;
+        for(k=0;k<4;k++) {
+            double x=p[1].c[k][0],y=p[1].c[k][1];
+            p[1].c[k][0]=(float)(x*c-y*s);p[1].c[k][1]=(float)(x*s+y*c);
+        }
+        CHECK(sh_aas_augment(a,p,2,&o,&rep));
+        CHECK(!rep.pieces_truncated&&!rep.links_truncated&&!rep.reach_limit_exceeded);
+        west=sh_aas_point_area(a,-700,0,130);east=sh_aas_point_area(a,700,0,130);
+        north=sh_aas_point_area(a,0,700,130);south=sh_aas_point_area(a,0,-700,130);
+        CHECK(west>1&&east>1&&north>1&&south>1);
+        CHECK(generated_walk_route(a,west,north)&&generated_walk_route(a,north,east));
+        CHECK(generated_walk_route(a,east,south)&&generated_walk_route(a,south,west));
+        CHECK(bridge_links_valid(a));
+        for(i=0;i<rep.platform_count;i++)if(rep.platforms[i].emitted)
+            CHECK_MSG(rep.platforms[i].source==0,"an unmarked wall must not emit a walkable roof");
+        sh_aas_free(a);
+    }
+}
+
 static void test_intersecting_bridge_routes(void)
 {
     static const int permutations[6][3]={{0,1,2},{0,2,1},{1,0,2},{1,2,0},{2,0,1},{2,1,0}};
@@ -2243,6 +2275,7 @@ int main(void)
     test_fixture_resolves();
     test_intersecting_bridge_routes();
     test_exposed_edges_remain_walls();
+    test_unmarked_wall_keeps_routes_around_both_ends();
     test_narrow_partial_contacts();
     test_suspended_bridge_is_continuous();
     test_rotated_ridge_has_reciprocal_walk_links();

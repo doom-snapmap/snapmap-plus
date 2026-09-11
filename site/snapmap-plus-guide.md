@@ -322,6 +322,13 @@ walkable surfaces for demon navigation. Rotating a box can make one of its sides
 the new walking surface. Slopes retain their actual angle, and overlapping boxes
 contribute their exposed surfaces.
 
+For a wall that demons should go around, leave **AI Navigation** off and keep
+**Block Demons** on. Ordinary Blocking Boxes already participate as obstacles,
+including where they overlap custom navigation. Enable AI Navigation when the
+box should also provide a walkable top or slope. Vertical walls and downward
+faces do not become walking surfaces; climbing uses approach and landing
+connections between valid surfaces.
+
 The green preview shows the smallest demon navigation size. Larger demons need
 more standing room and clearance, so a narrow green surface may still be too small
 for a hell knight. Climbing also requires an available traversal animation and
@@ -333,6 +340,10 @@ limits on navigation complexity. If a bake cannot fit safely, Snapmap+ refuses
 that module's custom navigation and records the reason in `sh_backend.log`.
 Use `sh_navmesh` in the game console for the current bake report. When a refusal
 identifies boxes involved in a full route area, the preview marks them red.
+That refusal concerns route complexity within an area, not a fixed number of
+entities in the map. An obstructed or disconnected route can also stop a demon
+without removing the navigation mesh. Leave enough room around wall ends for
+the intended demon size and keep spawn, approach and landing points clear.
 
 The preview updates after placement and hides while geometry is held. Baking
 runs in the background, so the previous lines can remain briefly while the new
