@@ -30,6 +30,12 @@ Function signatures identify engine code. Generated anchors derive global
 addresses from code references. Vulkan and OpenGL share these portable resolution
 paths; field layouts still need explicit verification when porting.
 
+A pattern that matches more than once is not an identification. Where two
+functions share a body, the caller must confirm its target by something the
+pattern cannot carry: the rawmap branch answer follows the call its candidate
+makes and reads the literal that callee names, because the sibling it must not
+patch differs only there.
+
 A raw-RVA fallback requires an exact fingerprint of a supported reference
 executable. The hook-tolerant fallback additionally checks the detour and remaining
 signature bytes. A filename or a readable address is not sufficient evidence.
