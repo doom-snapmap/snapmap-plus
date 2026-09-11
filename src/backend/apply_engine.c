@@ -1491,47 +1491,79 @@ static volatile LONG g_nav_refresh_queued;
 static int g_nav_refresh_registered;
 static ULONGLONG g_nav_refresh_next;
 
+/* The geometry the lines on screen were built from. Published lines keep
+ * drawing every frame on their own, so rebuilding them unchanged costs about
+ * 11 ms and shows nothing new. */
+static unsigned long g_preview_built_revision = ~0UL;
+
 static void ae_nav_preview(const uint8_t *ed)
 {
     typedef void *(*get_object_fn)(const void *);
     void *world; void **vt; int enabled=0;
+    unsigned long revision;
     if (!sh_config_get_bool("navmesh.preview",&enabled,NULL) || !enabled) {
         sh_nav_preview_clear(); return;
     }
     vt=*(void ***)ed;
     world=((get_object_fn)vt[0x128/8])(ed);
     if (!world) { sh_nav_preview_clear(); return; }
+    revision = sh_nav_bake_geometry_revision();
+    if (revision == g_preview_built_revision && sh_nav_preview_published(world)) return;
     sh_nav_preview_begin(world);
     sh_nav_bake_preview(sh_overrides_read_engine_resource,sh_nav_preview_add_line,NULL);
     sh_nav_preview_publish();
+    g_preview_built_revision = revision;
 }
 
 /* How often the bake re-reads the editor.
  *
  * One read costs the engine's whole-map serializer, which is tens of
- * milliseconds -- several frames. It buys nothing while the map is not being
- * changed, so a run of unchanged reads doubles the wait up to IDLE_MS. Holding
- * geometry keeps the fast rate, because dragging moves a volume without
- * changing any count this poll can see. */
+ * milliseconds on a small map and over a tenth of a second on a large one --
+ * always several frames -- so the wait is a multiple of what the last read
+ * actually cost. That holds the editor's share of frame time near 2% whatever
+ * the map size, and a run of reads that change nothing stretches it further.
+ *
+ * A read taken mid-drag would be thrown away by the next one anyway, so none
+ * is taken while the editor is holding geometry; the one that counts is taken
+ * when it is put down. Adding or deleting an entity, or changing the
+ * selection, also reads at once. */
 #define NAV_REFRESH_BASE_MS  1000
 #define NAV_REFRESH_IDLE_MS  8000
+#define NAV_REFRESH_BUDGET   50     /* wait at least 50x the cost of one read */
+
+/* mode+0x1ac: 1 and 2 accept a new action; any other value is the editor
+ * holding or manipulating something, which is the drag this poll sits out. */
+#define ED_MODE_STATE_OFF    (ED_MODE_OBJ_OFF + 0x1ac)
 
 static ULONGLONG g_nav_refresh_wait = NAV_REFRESH_BASE_MS;
 static int       g_nav_probe_ents   = -1;
 static int       g_nav_probe_sel    = -1;
+static int       g_nav_was_holding;
 
-/* Counts an edit changes and this poll can read without the serializer. */
-static void ae_nav_probe(const uint8_t *ed, int *ents, int *sel)
+static ULONGLONG ae_perf_ms(LONGLONG ticks)
+{
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    if (freq.QuadPart <= 0 || ticks <= 0) return 0;
+    return (ULONGLONG)(ticks * 1000 / freq.QuadPart);
+}
+
+/* What an edit changes and this poll can read without the serializer. An
+ * unreadable mode state reads as settled, so a bad read can never stop the
+ * refresh for good. */
+static void ae_nav_probe(const uint8_t *ed, int *ents, int *sel, int *holding)
 {
     void *array = NULL, *selobj = NULL;
     uint32_t count = 0;
-    int n = -1;
+    int n = -1, mode_state = 1;
     *ents = ae_entity_array(&array, &count) ? (int)count : -1;
     if (ae_read_ptr(ed + ED_SEL_OBJ_OFF, &selobj) && selobj &&
         ae_read_u32_safe((const uint8_t *)selobj + SEL_COUNT_OFF, &n))
         *sel = n;
     else
         *sel = -1;
+    if (!ae_read_u32_safe(ed + ED_MODE_STATE_OFF, &mode_state)) mode_state = 1;
+    *holding = mode_state != 1 && mode_state != 2;
 }
 
 static void ae_nav_refresh_cmd(void)
@@ -1542,23 +1574,24 @@ static void ae_nav_refresh_cmd(void)
         if (ed && ae_read_u32_safe(g_load_state_at, &state) && state == LOAD_STATE_RUNNING &&
             ae_read_u32_safe(ed + ED_ENTITY_MODE_OFF, &mode) && mode >= 0 && mode <= 2) {
             unsigned long before = sh_nav_bake_geometry_revision();
-            int ents = -1, sel = -1;
+            int ents = -1, sel = -1, holding = 0;
+            ULONGLONG budget;
+            LONGLONG started = sh_perf_now();
             sh_nav_bake_refresh_live();
             SH_PERF_BEGIN(tp);
             if (mode == 2) ae_nav_preview(ed);
             else sh_nav_preview_clear();
             SH_PERF_END(SH_PERF_NAV_PREVIEW, tp);
 
-            ae_nav_probe(ed, &ents, &sel);
+            ae_nav_probe(ed, &ents, &sel, &holding);
             g_nav_probe_ents = ents;
             g_nav_probe_sel  = sel;
-            if (before != sh_nav_bake_geometry_revision() || sel > 0) {
-                g_nav_refresh_wait = NAV_REFRESH_BASE_MS;
-            } else {
-                g_nav_refresh_wait *= 2;
-                if (g_nav_refresh_wait > NAV_REFRESH_IDLE_MS)
-                    g_nav_refresh_wait = NAV_REFRESH_IDLE_MS;
-            }
+            g_nav_was_holding = holding;
+            budget = ae_perf_ms(sh_perf_now() - started) * NAV_REFRESH_BUDGET;
+            if (budget < NAV_REFRESH_BASE_MS) budget = NAV_REFRESH_BASE_MS;
+            if (before == sh_nav_bake_geometry_revision()) budget *= 2;
+            if (budget > NAV_REFRESH_IDLE_MS) budget = NAV_REFRESH_IDLE_MS;
+            g_nav_refresh_wait = budget;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         sh_nav_preview_clear();
@@ -1573,7 +1606,7 @@ static void ae_nav_refresh_poll(void)
 {
     ULONGLONG now = GetTickCount64();
     const uint8_t *ed = ae_editor_session();
-    int state = -1, enabled = 0, ents = -1, sel = -1;
+    int state = -1, enabled = 0, ents = -1, sel = -1, holding = 0;
     if (!ed || !ae_read_u32_safe(g_load_state_at, &state) ||
         state != LOAD_STATE_RUNNING) { sh_nav_preview_clear(); return; }
     if (!g_cmdsys || !g_add_command || !g_buffer_cmd) return;
@@ -1581,10 +1614,18 @@ static void ae_nav_refresh_poll(void)
      * Play -- are off with navigation disabled, so the read has no reader. */
     if (!sh_config_get_bool("navmesh.enabled", &enabled, NULL) || !enabled) return;
 
-    ae_nav_probe(ed, &ents, &sel);
-    if (ents != g_nav_probe_ents || sel != g_nav_probe_sel) {
+    ae_nav_probe(ed, &ents, &sel, &holding);
+    if (holding) {
+        /* Mid-drag: whatever this read found would be stale by the next frame. */
         g_nav_probe_ents = ents;
         g_nav_probe_sel  = sel;
+        g_nav_was_holding = 1;
+        return;
+    }
+    if (g_nav_was_holding || ents != g_nav_probe_ents || sel != g_nav_probe_sel) {
+        g_nav_probe_ents = ents;
+        g_nav_probe_sel  = sel;
+        g_nav_was_holding = 0;
         g_nav_refresh_wait = NAV_REFRESH_BASE_MS;
         g_nav_refresh_next = 0;
     }

@@ -10,7 +10,11 @@
 #include <windows.h>
 
 typedef enum {
-    SH_PERF_OVERRIDE_OPEN = 0,  /* the engine's resource open, through our hook */
+    SH_PERF_OVERRIDE_OPEN = 0,  /* the whole hook: our decision plus the engine's open */
+    SH_PERF_OVERRIDE_STAT,      /* the file-exists checks that decision makes */
+    SH_PERF_ENGINE_OPEN,        /* the engine's own open, which the hook chains to */
+    SH_PERF_BRIDGE_OPEN,        /* the installed-resource lookup the same decision makes */
+    SH_PERF_INTERNAL_DECL,      /* the published-decl lookup the same decision makes */
     SH_PERF_MAP_SERIALIZE,      /* the engine writing the open map as JSON */
     SH_PERF_NAV_PARSE,          /* reading navigation volumes out of that JSON */
     SH_PERF_NAV_PREVIEW,        /* building the green preview lines */

@@ -64,6 +64,17 @@ void sh_nav_preview_clear(void)
     ReleaseSRWLockExclusive(&g_preview_lock);
 }
 
+int sh_nav_preview_published(const void *world)
+{
+    int live;
+    const void *backend = g_ready && world ?
+        *(void **)((unsigned char *)world + g_world_backend_offset) : NULL;
+    AcquireSRWLockShared(&g_preview_lock);
+    live = g_lines.count > 0 && g_world != NULL && g_world == backend;
+    ReleaseSRWLockShared(&g_preview_lock);
+    return live;
+}
+
 void sh_nav_preview_begin(void *world)
 {
     g_pending_count = 0;

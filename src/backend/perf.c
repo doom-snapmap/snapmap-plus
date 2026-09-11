@@ -11,7 +11,11 @@ typedef struct {
 } perf_counter;
 
 static perf_counter g_perf[SH_PERF_SLOTS] = {
-    { "engine resource open" },
+    { "resource open (all)" },
+    { "override file checks" },
+    { "engine's own open" },
+    { "installed resources" },
+    { "published decls" },
     { "map -> JSON (engine)" },
     { "navigation parse" },
     { "green preview build" },
