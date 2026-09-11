@@ -79,7 +79,14 @@ typedef void (*sh_nav_preview_line)(const float start[3], const float end[3], vo
  * behind them is still on the worker, in which case nothing was emitted and
  * the caller must keep showing what it has: publishing an empty set instead
  * blinks every line off until the worker lands. */
-int sh_nav_bake_preview(sh_nav_bake_reader read_shipped, sh_nav_preview_line line, void *ctx);
+/* Colour for the lines that follow. Supplied by the caller, like the line sink
+ * itself, so the bake stays independent of how anything is drawn. A caller
+ * that passes NULL gets the walkable surfaces only: a refused volume drawn in
+ * the same colour as a working one would say the opposite of the truth. */
+typedef void (*sh_nav_preview_colour_fn)(float r, float g, float b, void *ctx);
+
+int sh_nav_bake_preview(sh_nav_bake_reader read_shipped, sh_nav_preview_line line,
+                        sh_nav_preview_colour_fn colour, void *ctx);
 
 /* Stop the worker that bakes the preview. Call once from DllMain on detach. */
 void sh_nav_bake_preview_stop(void);

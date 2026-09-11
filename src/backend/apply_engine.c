@@ -1569,6 +1569,12 @@ static ULONGLONG g_nav_refresh_next;
  * 11 ms and shows nothing new. */
 static unsigned long g_preview_built_revision = ~0UL;
 
+static void ae_nav_preview_colour(float r, float g, float b, void *ctx)
+{
+    (void)ctx;
+    sh_nav_preview_colour(r, g, b);
+}
+
 static void ae_nav_preview(const uint8_t *ed)
 {
     typedef void *(*get_object_fn)(const void *);
@@ -1583,7 +1589,8 @@ static void ae_nav_preview(const uint8_t *ed)
     revision = sh_nav_bake_geometry_revision();
     if (revision == g_preview_built_revision && sh_nav_preview_published(world)) return;
     sh_nav_preview_begin(world);
-    if (!sh_nav_bake_preview(sh_overrides_read_engine_resource,sh_nav_preview_add_line,NULL))
+    if (!sh_nav_bake_preview(sh_overrides_read_engine_resource,sh_nav_preview_add_line,
+                             ae_nav_preview_colour,NULL))
         return;   /* the bake is still on the worker; leave what is drawn alone */
     sh_nav_preview_publish();
     g_preview_built_revision = revision;

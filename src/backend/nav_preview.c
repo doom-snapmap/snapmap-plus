@@ -75,10 +75,20 @@ int sh_nav_preview_published(const void *world)
     return live;
 }
 
+/* The colour every added line takes. Walkable green unless a caller says
+ * otherwise between begin and publish. */
+static float g_colour[3] = { 0.15f, 1.0f, 0.25f };
+
+void sh_nav_preview_colour(float r, float g, float b)
+{
+    g_colour[0] = r; g_colour[1] = g; g_colour[2] = b;
+}
+
 void sh_nav_preview_begin(void *world)
 {
     g_pending_count = 0;
     g_pending_overflow = 0;
+    sh_nav_preview_colour(0.15f, 1.0f, 0.25f);
     /* idRenderWorld owns the renderer-side world captured by render jobs.
      * Its member offset differs between Vulkan and OpenGL. */
     g_pending_world = g_ready && world ?
@@ -93,8 +103,8 @@ void sh_nav_preview_add_line(const float start[3], const float end[3], void *unu
     if (g_pending_count == PREVIEW_LINES) { g_pending_overflow = 1; return; }
     line = &g_pending_lines[g_pending_count++];
     memset(line, 0, sizeof *line);
-    line->color[0] = 0.15f; line->color[1] = 1.0f;
-    line->color[2] = 0.25f; line->color[3] = 1.0f;
+    line->color[0] = g_colour[0]; line->color[1] = g_colour[1];
+    line->color[2] = g_colour[2]; line->color[3] = 1.0f;
     memcpy(line->start, start, sizeof line->start);
     memcpy(line->end, end, sizeof line->end);
     line->depth_test = 1;

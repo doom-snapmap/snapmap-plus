@@ -63,10 +63,20 @@ static sh_nav_bake_snapshot g_snapshot;
 static void *g_snapshot_ctx;
 static volatile LONG g_building;
 static unsigned long g_geometry_revision;
+/* A volume the bake could not place, in module-local space, so the editor can
+ * draw it where it is instead of leaving the mapper to delete things one at a
+ * time to find it. Capped because a refusal that marks forty is no more
+ * informative than one that marks a couple of dozen. */
+#define BAKE_MAX_REFUSED 24
+typedef struct bake_refused { float c[4][3]; } bake_refused;
+
 typedef struct bake_preview_cache {
     unsigned char *bytes;
     size_t length;
     unsigned first_area;
+    bake_refused *refused;     /* process heap; bake_preview_clear frees it */
+    int           refused_count;
+    int           instance;    /* the transform those shapes need */
 } bake_preview_cache;
 static bake_preview_cache g_preview[BAKE_MAX_MODULES];
 static unsigned long g_preview_revision = ~0UL;
@@ -80,6 +90,7 @@ static void bake_preview_clear(void)
     int i;
     for(i=0;i<BAKE_MAX_MODULES;i++) {
         if(g_preview[i].bytes)HeapFree(GetProcessHeap(),0,g_preview[i].bytes);
+        if(g_preview[i].refused)HeapFree(GetProcessHeap(),0,g_preview[i].refused);
     }
     memset(g_preview,0,sizeof g_preview);
     g_preview_revision=~0UL;g_preview_lines=0;
@@ -711,6 +722,8 @@ typedef struct preview_task {
     unsigned char   *baked;                  /* what the worker produced */
     size_t           baked_len;
     unsigned         first_area;
+    bake_refused     refused[BAKE_MAX_REFUSED];
+    int              refused_count;
     char             reason[BAKE_REASON_CAP];
 } preview_task;
 
@@ -738,6 +751,65 @@ static void preview_batch_free(preview_batch *b)
         if (b->t[i].baked)   HeapFree(GetProcessHeap(), 0, b->t[i].baked);
     }
     HeapFree(GetProcessHeap(), 0, b);
+}
+
+/* What the bake worked out about each volume, for a refusal that throws all of
+ * it away. Without this a refused module reports one sentence about a limit and
+ * nothing about which volume reached it. */
+static void preview_report_refusal(preview_task *t, const sh_aug_report *rep)
+{
+    char line[512];
+    int i, emitted = 0, obstacles = 0, shown = 0;
+
+    for (i = 0; i < rep->platform_count; i++)
+        if (rep->platforms[i].emitted) emitted++;
+    for (i = 0; i < t->plat_count; i++)
+        if (t->plats[i].obstacle_only) obstacles++;
+
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "NAV: preview refused '%s' -- %s",  t->name, t->reason);
+    backend_log(line);
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "NAV:   %d volume(s) offered (%d of them walls that only block), "
+                "%d walkable piece(s) had been placed, areas %u->%u, links %u->%u, "
+                "tree depth %u->%u",
+                t->plat_count, obstacles, emitted,
+                rep->areas_before, rep->areas_after,
+                rep->reach_before, rep->reach_after,
+                rep->depth_before, rep->depth_after);
+    backend_log(line);
+
+    /* Name the volumes the bake could not place. Eight is enough to see a
+     * pattern; a refusal that names forty is not more useful than one that
+     * names eight. */
+    for (i = 0; i < rep->platform_count && shown < 8; i++) {
+        if (rep->platforms[i].emitted) continue;
+        _snprintf_s(line, sizeof line, _TRUNCATE, "NAV:   %s was not placed -- %s",
+                    rep->platforms[i].name,
+                    rep->platforms[i].reason[0] ? rep->platforms[i].reason : "no reason recorded");
+        backend_log(line);
+        shown++;
+    }
+
+    /* Keep the shape of each volume that did not make it, so the editor can
+     * mark it. `source` indexes the volumes as they were offered. */
+    for (i = 0; i < rep->platform_count && t->refused_count < BAKE_MAX_REFUSED; i++) {
+        int src = rep->platforms[i].source;
+        if (rep->platforms[i].emitted) continue;
+        if (src < 0 || src >= t->plat_count) continue;
+        memcpy(t->refused[t->refused_count].c, t->plats[src].c,
+               sizeof t->refused[0].c);
+        t->refused_count++;
+    }
+    /* A limit reached before any verdict was recorded leaves nothing to mark,
+     * so every volume offered is marked: all of them failed together. */
+    if (t->refused_count == 0) {
+        for (i = 0; i < t->plat_count && t->refused_count < BAKE_MAX_REFUSED; i++) {
+            memcpy(t->refused[t->refused_count].c, t->plats[i].c,
+                   sizeof t->refused[0].c);
+            t->refused_count++;
+        }
+    }
 }
 
 /* The whole of one module's bake that touches nothing but this task. */
@@ -782,6 +854,7 @@ static void preview_task_run(preview_task *t)
             rep.pieces_truncated ? "the geometry capacity was exceeded; the whole bake was refused" :
             rep.depth_exceeded ? "the navigation tree depth was exceeded; the whole bake was refused" :
             "the bake did not produce a payload");
+        preview_report_refusal(t, &rep);
         return;
     }
 
@@ -793,6 +866,7 @@ static void preview_task_run(preview_task *t)
         t->baked = NULL; t->baked_len = 0;
         _snprintf_s(t->reason, sizeof t->reason, _TRUNCATE,
                     "the bake did not pass validation: %s", err);
+        preview_report_refusal(t, &rep);
         return;
     }
     if (rep.depth_exceeded) {
@@ -800,6 +874,7 @@ static void preview_task_run(preview_task *t)
         t->baked = NULL; t->baked_len = 0;
         _snprintf_s(t->reason, sizeof t->reason, _TRUNCATE,
                     "too many separate platforms for one module's navigation tree");
+        preview_report_refusal(t, &rep);
     }
 }
 
@@ -924,7 +999,21 @@ static void preview_install(preview_batch *b)
         g_preview[t->slot].bytes = t->baked;
         g_preview[t->slot].length = t->baked_len;
         g_preview[t->slot].first_area = t->first_area;
+        g_preview[t->slot].instance = t->instance;
         t->baked = NULL;   /* the cache owns it now */
+        if (g_preview[t->slot].refused) {
+            HeapFree(GetProcessHeap(), 0, g_preview[t->slot].refused);
+            g_preview[t->slot].refused = NULL;
+        }
+        g_preview[t->slot].refused_count = 0;
+        if (t->refused_count > 0) {
+            size_t n = (size_t)t->refused_count * sizeof *t->refused;
+            g_preview[t->slot].refused = (bake_refused *)HeapAlloc(GetProcessHeap(), 0, n);
+            if (g_preview[t->slot].refused) {
+                memcpy(g_preview[t->slot].refused, t->refused, n);
+                g_preview[t->slot].refused_count = t->refused_count;
+            }
+        }
         if (!g_preview[t->slot].bytes) {
             char message[SH_SMNAV_RESNAME_CAP + BAKE_REASON_CAP + 96];
             strncpy_s(g_modules[t->slot].reason, sizeof g_modules[t->slot].reason,
@@ -938,7 +1027,8 @@ static void preview_install(preview_batch *b)
     g_preview_revision = b->revision;
 }
 
-int sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line line,void *ctx)
+int sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line line,
+                        sh_nav_preview_colour_fn colour,void *ctx)
 {
     int i, current = 0;
     if(!line||!read_shipped||!bake_enabled()||InterlockedCompareExchange(&g_building,0,0))return 0;
@@ -981,6 +1071,19 @@ int sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line line
         current = 1;
         SH_PERF_BEGIN(tl);
         g_preview_lines=0;
+
+        /* Volumes the bake refused, marked where they stand. Drawn first so a
+         * mark is never hidden under the walkable surface beside it. */
+        if(colour)for(i=0;i<g_module_count;i++)if(g_preview[i].refused_count>0) {
+            int r, inst=g_preview[i].instance;
+            if(inst<0||inst>=g_map.instance_count)continue;
+            colour(1.0f,0.15f,0.15f,ctx);
+            for(r=0;r<g_preview[i].refused_count;r++)
+                bake_preview_polygon(&g_map.instances[inst],
+                                     g_preview[i].refused[r].c,4,line,ctx);
+            colour(0.15f,1.0f,0.25f,ctx);
+        }
+
         for(i=0;i<g_module_count;i++)if(g_preview[i].bytes) {
             char err[128];unsigned a;
             sh_aas *model=sh_aas_parse(g_preview[i].bytes,g_preview[i].length,err,sizeof err);
