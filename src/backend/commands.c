@@ -26,6 +26,7 @@
 #include "navmesh.h"
 #include "nav_bake.h"
 #include "perf.h"
+#include "apply_engine.h"
 
 /* Engine call contracts. */
 
@@ -1707,6 +1708,10 @@ static void h_sh_perf(idCmdArgs *a)
     if (verb && _stricmp(verb, "reset") == 0) {
         sh_perf_reset();
         sh_printf("Timings cleared. They start again from now.\n");
+        return;
+    }
+    if (verb && _stricmp(verb, "read") == 0) {
+        sh_apply_engine_read_probe(sh_printf);
         return;
     }
     sh_perf_report(sh_printf);

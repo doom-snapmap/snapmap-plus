@@ -18,7 +18,11 @@ static perf_counter g_perf[SH_PERF_SLOTS] = {
     { "published decls" },
     { "map -> JSON (engine)" },
     { "navigation parse" },
-    { "green preview build" },
+    { "green preview (frame)" },
+    { "the bake (worker)" },
+    { "drawing lines (frame)" },
+    { "  bake: read+parse" },
+    { "  bake: augment" },
     { "session log line" },
 };
 

@@ -49,6 +49,19 @@ typedef int (*sh_nav_bake_entity_count)(void *ctx);
  */
 void sh_nav_bake_refresh_live(void);
 
+/* Re-read only the volumes the last complete refresh found, which is a small
+ * part of the map and correspondingly cheaper. Returns 1 when it committed an
+ * answer, or 0 when it could not -- a new or deleted volume, a moved module, a
+ * map it has not read yet -- which the caller answers with a complete refresh.
+ *
+ * Main thread only, same as the complete refresh. Reports how many volumes it
+ * read through `volumes` when that is not NULL, so a caller can weigh this
+ * against the complete refresh from its own timings. */
+int sh_nav_bake_refresh_volumes(int *volumes);
+
+/* Why the last volumes-only refresh could not answer, for the console. */
+const char *sh_nav_bake_volumes_reason(void);
+
 /* Counter that advances whenever a refresh finds the editor geometry different
  * from what the bake holds. A caller compares it across a refresh to learn
  * whether that refresh changed anything. */
@@ -63,6 +76,9 @@ void sh_nav_bake_build_end(void);
  * world-space; the caller draws them only while the editor is active. */
 typedef void (*sh_nav_preview_line)(const float start[3], const float end[3], void *ctx);
 void sh_nav_bake_preview(sh_nav_bake_reader read_shipped, sh_nav_preview_line line, void *ctx);
+
+/* Stop the worker that bakes the preview. Call once from DllMain on detach. */
+void sh_nav_bake_preview_stop(void);
 void sh_nav_bake_enable_instances(int enabled);
 int sh_nav_bake_instance_name(int instance, const char *name, char *out, size_t capacity);
 

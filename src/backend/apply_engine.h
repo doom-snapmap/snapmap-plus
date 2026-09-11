@@ -44,4 +44,8 @@ int sh_apply_engine_entity_json(int id, char *out, int cap, void *ctx);
  * Main thread only. Successful output is malloc-owned by the caller. */
 int sh_apply_engine_nav_snapshot(char **out, size_t *len, void *ctx);
 
+/* Time both ways of reading current editor geometry and report them. Main
+ * thread, editor open; costs one whole-map read plus one read per entity. */
+void sh_apply_engine_read_probe(void (*out)(const char *fmt, ...));
+
 #endif /* B2_APPLY_ENGINE_H */

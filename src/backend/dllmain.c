@@ -435,6 +435,7 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
 #ifdef SH_DIAG
         shield_diag_detach();   /* DIAGNOSTIC: record crash-vs-clean-exit in sh_diag.log */
 #endif
+        sh_nav_bake_preview_stop();
         backend_log_close();
     }
     return TRUE;

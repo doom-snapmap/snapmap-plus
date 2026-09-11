@@ -18,6 +18,10 @@ typedef enum {
     SH_PERF_MAP_SERIALIZE,      /* the engine writing the open map as JSON */
     SH_PERF_NAV_PARSE,          /* reading navigation volumes out of that JSON */
     SH_PERF_NAV_PREVIEW,        /* building the green preview lines */
+    SH_PERF_PREVIEW_BAKE,       /* the navigation bake those lines are drawn from */
+    SH_PERF_PREVIEW_LINES,      /* turning that bake into lines */
+    SH_PERF_BAKE_READ,          /* reading and parsing a module's shipped navigation */
+    SH_PERF_BAKE_AUGMENT,       /* folding the marked volumes into it and writing it back */
     SH_PERF_LOG_WRITE,          /* one line appended to the session log */
     SH_PERF_SLOTS
 } sh_perf_slot;

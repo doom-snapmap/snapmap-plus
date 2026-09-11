@@ -4,6 +4,7 @@
  * navigation.
  */
 #include <windows.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <float.h>
@@ -782,12 +783,65 @@ static int navr_live_region(const char *json, size_t len, sh_nav_region *r)
     return ok;
 }
 
+static int navr_live_commit(sh_nav_map *m, navr_live *w,
+                            int answered, int volumes, int marked);
+
+void sh_nav_regions_adopt(sh_nav_map *m)
+{
+    if (m && g_loaded.owner) g_loaded.owner = m;
+}
+
+/* One entity id, folded into the work-in-progress refresh. Returns -1 when the
+ * region table is full and the scan must stop, 0 otherwise. */
+static int navr_live_one(sh_nav_map *m, navr_live *w, int id,
+                         sh_navr_entity_valid valid, sh_navr_entity_json get_json,
+                         void *ctx, int *answered, int *volumes, int *marked)
+{
+    sh_nav_region r;
+    int n, owner;
+
+    if (!valid(id, ctx)) return 0;
+    n = get_json(id, w->json, (int)sizeof w->json, ctx);
+    if (n <= 0) return 0;
+    (*answered)++;
+    /* A full buffer may be truncated; refuse it before parsing. */
+    if (n >= (int)sizeof w->json) return 0;
+
+    /* Cheap text prefilter before the more expensive container walk. */
+    if (!sh_shard_find(w->json, (size_t)n, NAVR_VOLUME_INHERIT,
+                       sizeof NAVR_VOLUME_INHERIT - 1)) return 0;
+    /* Count boxes before markers to distinguish unticked boxes from the
+     * wrong live surface.
+     */
+    (*volumes)++;
+    if (!sh_shard_find(w->json, (size_t)n, NAVR_MARKER,
+                       sizeof NAVR_MARKER - 1)) return 0;
+
+    memset(&r, 0, sizeof r);
+    if (!navr_live_region(w->json, (size_t)n, &r)) return 0;
+    /* Stop at capacity so reported counts match stored regions. */
+    if (w->count >= SH_NAVR_MAX_REGIONS) { w->capped = 1; return -1; }
+    (*marked)++;
+
+    /* A per-entity refresh cannot place ids absent from its ownership cache.
+     * Skip them; complete-map snapshots handle newly created boxes.
+     */
+    owner = navr_loaded_owner(id);
+    if (owner < 0 || owner >= m->instance_count) return 0;
+    if (m->instances[owner].module[0] == '\0') return 0;
+
+    r.instance = owner;
+    r.entity = (unsigned)id;
+    w->regions[w->count++] = r;
+    return 0;
+}
+
 int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
                                 sh_navr_entity_valid valid,
                                 sh_navr_entity_json get_json, void *ctx)
 {
     navr_live *w;
-    int id, top, answered = 0, volumes = 0, marked = 0, i;
+    int id, top, answered = 0, volumes = 0, marked = 0;
 
     /* Missing callbacks or mismatched attribution refuse the refresh without
      * clearing the map.
@@ -807,47 +861,61 @@ int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
     w->count = 0;
     w->capped = 0;
 
-    for (id = 0; id <= top; id++) {
-        sh_nav_region r;
-        int n, owner;
+    for (id = 0; id <= top; id++)
+        if (navr_live_one(m, w, id, valid, get_json, ctx,
+                          &answered, &volumes, &marked) < 0) break;
 
-        if (!valid(id, ctx)) continue;
-        n = get_json(id, w->json, (int)sizeof w->json, ctx);
-        if (n <= 0) continue;
-        answered++;
-        /* A full buffer may be truncated; refuse it before parsing. */
-        if (n >= (int)sizeof w->json) continue;
+    return navr_live_commit(m, w, answered, volumes, marked);
+}
 
-        /* Cheap text prefilter before the more expensive container walk. */
-        if (!sh_shard_find(w->json, (size_t)n, NAVR_VOLUME_INHERIT,
-                           sizeof NAVR_VOLUME_INHERIT - 1)) continue;
-        /* Count boxes before markers to distinguish unticked boxes from the
-         * wrong live surface.
-         */
-        volumes++;
-        if (!sh_shard_find(w->json, (size_t)n, NAVR_MARKER,
-                           sizeof NAVR_MARKER - 1)) continue;
+int sh_nav_regions_refresh_ids(sh_nav_map *m, const unsigned *ids, int id_count,
+                               sh_navr_entity_valid valid,
+                               sh_navr_entity_json get_json, void *ctx,
+                               const char **why)
+{
+    navr_live *w;
+    int i, answered = 0, volumes = 0, marked = 0;
+    const char *ignored;
 
-        memset(&r, 0, sizeof r);
-        if (!navr_live_region(w->json, (size_t)n, &r)) continue;
-        /* Stop at capacity so reported counts match stored regions. */
-        if (w->count >= SH_NAVR_MAX_REGIONS) {
-            w->capped = 1;
-            break;
-        }
-        marked++;
+    if (!why) why = &ignored;
+    *why = "read";
+    if (!m || !ids || id_count <= 0 || !valid || !get_json) { *why = "nothing to read"; return -1; }
+    if (m != g_loaded.owner) { *why = "this map is not the one the last read attributed"; return -1; }
+    if (g_loaded.count == 0) { *why = "the last read found no volumes to attribute"; return -1; }
 
-        /* Legacy refresh cannot place ids absent from its ownership cache.
-         * Skip them; complete-map snapshots handle newly created boxes.
-         */
-        owner = navr_loaded_owner(id);
-        if (owner < 0 || owner >= m->instance_count) continue;
-        if (m->instances[owner].module[0] == '\0') continue;
+    w = (navr_live *)malloc(sizeof *w);
+    if (!w) return -1;
+    w->count = 0;
+    w->capped = 0;
 
-        r.instance = owner;
-        r.entity = (unsigned)id;
-        w->regions[w->count++] = r;
+    for (i = 0; i < id_count; i++) {
+        if (ids[i] > (unsigned)NAVR_LIVE_SCAN_MAX) continue;
+        if (navr_live_one(m, w, (int)ids[i], valid, get_json, ctx,
+                          &answered, &volumes, &marked) < 0) break;
     }
+
+    /* Every listed id was a marked volume when the list was made. One that no
+     * longer answers, or no longer is one, means the list is stale and only a
+     * complete snapshot can say what the map holds now. */
+    if (answered != id_count || marked != id_count) {
+        static char detail[160];
+        _snprintf_s(detail, sizeof detail, _TRUNCATE,
+                    "asked for %d volume(s), %d answered, %d still marked",
+                    id_count, answered, marked);
+        *why = detail;
+        free(w);
+        return -1;
+    }
+
+    return navr_live_commit(m, w, answered, volumes, marked);
+}
+
+/* Refuse or commit a finished per-entity scan. A refusal leaves the map as it
+ * was; the caller answers it with a complete snapshot. */
+static int navr_live_commit(sh_nav_map *m, navr_live *w,
+                            int answered, int volumes, int marked)
+{
+    int i;
 
     /* No readable entities means no trustworthy refresh; retain the prior map. */
     if (answered == 0) {
