@@ -1985,7 +1985,7 @@ static int aug_budget_traversals(aug_ctx *c, aug_trav_spec *specs, int n,
     int *rank = (int *)calloc(nb + n + 1, sizeof *rank);
     unsigned char *keep = (unsigned char *)calloc(nb + n + 1, 1);
     unsigned slots = 1, *last = NULL;
-    int k, round, max_rank = 0, written = 0;
+    int k, round, max_rank = 0, written = 0, full = -1;
     while (slots < 2 * (nb + (unsigned)n + 1)) slots <<= 1;
     last = (unsigned *)calloc(slots, sizeof *last);
     if (!choices || !degree || !rank || !keep || !last) { c->failed = 1; goto done; }
@@ -2009,15 +2009,19 @@ static int aug_budget_traversals(aug_ctx *c, aug_trav_spec *specs, int n,
     for (i = 0; i < original; i++) {
         const unsigned char *r = sh_aas_rec_const(c->a, SH_AAS_L_REACHABILITIES, i);
         unsigned from = sh_aas_get_u16(r, RE_FROM_AREA);
-        if (from >= na || ++degree[from] > SH_AAS_MAX_AREA_REACHABILITIES)
+        if (from >= na || ++degree[from] > SH_AAS_MAX_AREA_REACHABILITIES) {
+            full = (int)from;
             goto overflow;
+        }
     }
     for (k = 0; k < n; k++) {
         const aug_trav_spec *s = &choices[k];
         const unsigned char *name = (const unsigned char *)s->anim;
         unsigned hash = 2166136261u, bucket;
-        if (choices[k].from_area < 0 || (unsigned)choices[k].from_area >= na)
+        if (choices[k].from_area < 0 || (unsigned)choices[k].from_area >= na) {
+            full = choices[k].from_area;
             goto overflow;
+        }
         hash = (hash ^ (unsigned)s->from_area) * 16777619u;
         hash = (hash ^ (unsigned)s->to_area) * 16777619u;
         hash = (hash ^ s->travel_flags) * 16777619u;
@@ -2038,8 +2042,10 @@ static int aug_budget_traversals(aug_ctx *c, aug_trav_spec *specs, int n,
         last[bucket] = (unsigned)k + 1;
         if (rank[k] > max_rank) max_rank = rank[k];
         if (!rank[k]) {
-            if (++degree[choices[k].from_area] > SH_AAS_MAX_AREA_REACHABILITIES)
+            if (++degree[choices[k].from_area] > SH_AAS_MAX_AREA_REACHABILITIES) {
+                full = choices[k].from_area;
                 goto overflow;
+            }
             keep[k] = 1;
         }
     }
@@ -2068,6 +2074,23 @@ static int aug_budget_traversals(aug_ctx *c, aug_trav_spec *specs, int n,
     goto done;
 overflow:
     out->reach_limit_exceeded = 1;
+    out->reach_limit_area = full;
+    /* Name the volumes whose routes end in the full area, plus its own owner.
+     * These are what a mapper can act on; the area index alone is not. */
+    for (k = 0; k < n && out->blamed_count < SH_AUG_MAX_BLAMED; k++) {
+        int j, side;
+        if (choices[k].from_area != full && choices[k].to_area != full) continue;
+        side = choices[k].from_area == full ? choices[k].to_area : choices[k].from_area;
+        for (j = 0; j < out->platform_count; j++) {
+            int src = out->platforms[j].source, seen, b;
+            if (out->platforms[j].area != side && out->platforms[j].area != full)
+                continue;
+            for (seen = 0, b = 0; b < out->blamed_count; b++)
+                if (out->blamed[b] == src) seen = 1;
+            if (seen || out->blamed_count >= SH_AUG_MAX_BLAMED) continue;
+            out->blamed[out->blamed_count++] = src;
+        }
+    }
     c->failed = 1;
 done:
     free(choices); free(keep); free(rank); free(degree); free(last);
@@ -2486,6 +2509,7 @@ int sh_aas_augment(sh_aas *a, const sh_aug_platform *plats, int n,
 
     if (!a || !out) return 0;
     memset(out, 0, sizeof *out);
+    out->reach_limit_area = -1;
     if (!opts) opts = &defaults;
     if (n < 0) n = 0;
     if (n > SH_AUG_MAX_PLATFORMS || (n>0&&!plats)) return 0;

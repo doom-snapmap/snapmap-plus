@@ -15,6 +15,7 @@
 #define SH_AUG_NAME_CAP        64
 #define SH_AUG_REASON_CAP      160
 #define SH_AUG_MAX_CORNERS     32
+#define SH_AUG_MAX_BLAMED      8
 
 /* A convex surface in module-local coordinates, wound clockwise from +Z.
  * Input boxes use four corners; prepared geometry may have more. n is its
@@ -84,6 +85,12 @@ typedef struct sh_aug_report {
     int      links_truncated;           /* traversal allocation failed;
                                          * the whole candidate is refused */
     int      reach_limit_exceeded;      /* required routes cannot fit one area */
+    int      reach_limit_area;          /* that area, or -1 */
+    /* Requested volumes routing into the full area: the ones a mapper can
+     * move or delete to fit. Empty when the area is shipped floor whose own
+     * links already fill it. */
+    int      blamed[SH_AUG_MAX_BLAMED];
+    int      blamed_count;
     int      anchors_reduced;           /* alternative basic/traversal samples removed */
     int      climbs_declined;           /* climbs/leaps omitted because a source area already owns traversal points */
 } sh_aug_report;

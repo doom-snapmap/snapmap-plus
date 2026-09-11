@@ -81,6 +81,7 @@ typedef struct bake_preview_cache {
 static bake_preview_cache g_preview[BAKE_MAX_MODULES];
 static unsigned long g_preview_revision = ~0UL;
 static int g_preview_lines;
+static int g_preview_lines_last = -1;   /* -1 until the first pass runs */
 static int g_instance_serving;
 
 void sh_nav_bake_enable_instances(int enabled) { g_instance_serving=enabled; }
@@ -93,7 +94,7 @@ static void bake_preview_clear(void)
         if(g_preview[i].refused)HeapFree(GetProcessHeap(),0,g_preview[i].refused);
     }
     memset(g_preview,0,sizeof g_preview);
-    g_preview_revision=~0UL;g_preview_lines=0;
+    g_preview_revision=~0UL;g_preview_lines=0;g_preview_lines_last=-1;
 }
 
 void sh_nav_bake_build_begin(void)
@@ -779,36 +780,42 @@ static void preview_report_refusal(preview_task *t, const sh_aug_report *rep)
                 rep->depth_before, rep->depth_after);
     backend_log(line);
 
-    /* Name the volumes the bake could not place. Eight is enough to see a
-     * pattern; a refusal that names forty is not more useful than one that
-     * names eight. */
+    /* Volumes that produced no floor. A successful bake has these too, so
+     * they are context, not the cause. Eight is enough to see a pattern. */
     for (i = 0; i < rep->platform_count && shown < 8; i++) {
         if (rep->platforms[i].emitted) continue;
-        _snprintf_s(line, sizeof line, _TRUNCATE, "NAV:   %s was not placed -- %s",
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "NAV:   %s made no walkable floor -- %s",
                     rep->platforms[i].name,
                     rep->platforms[i].reason[0] ? rep->platforms[i].reason : "no reason recorded");
         backend_log(line);
         shown++;
     }
 
-    /* Keep the shape of each volume that did not make it, so the editor can
-     * mark it. `source` indexes the volumes as they were offered. */
-    for (i = 0; i < rep->platform_count && t->refused_count < BAKE_MAX_REFUSED; i++) {
-        int src = rep->platforms[i].source;
-        if (rep->platforms[i].emitted) continue;
+    if (!rep->reach_limit_exceeded) return;
+
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "NAV:   area %d ran out of room at %u routes out of it",
+                rep->reach_limit_area, SH_AAS_MAX_AREA_REACHABILITIES);
+    backend_log(line);
+    if (rep->blamed_count == 0) {
+        backend_log("NAV:   that area is shipped floor already at the limit; "
+                    "no volume of yours is at fault");
+        return;
+    }
+
+    /* Mark only what a mapper can act on: the volumes routing into the full
+     * area. Anything else drawn red sends them to the wrong volume. */
+    for (i = 0; i < rep->blamed_count && t->refused_count < BAKE_MAX_REFUSED; i++) {
+        int src = rep->blamed[i];
         if (src < 0 || src >= t->plat_count) continue;
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "NAV:   %s routes into area %d; move or delete it to fit",
+                    t->plats[src].name, rep->reach_limit_area);
+        backend_log(line);
         memcpy(t->refused[t->refused_count].c, t->plats[src].c,
                sizeof t->refused[0].c);
         t->refused_count++;
-    }
-    /* A limit reached before any verdict was recorded leaves nothing to mark,
-     * so every volume offered is marked: all of them failed together. */
-    if (t->refused_count == 0) {
-        for (i = 0; i < t->plat_count && t->refused_count < BAKE_MAX_REFUSED; i++) {
-            memcpy(t->refused[t->refused_count].c, t->plats[i].c,
-                   sizeof t->refused[0].c);
-            t->refused_count++;
-        }
     }
 }
 
@@ -1116,6 +1123,28 @@ int sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line line
             sh_aas_free(model);
         }
         SH_PERF_END(SH_PERF_PREVIEW_LINES, tl);
+
+        /* A preview that empties with volumes still marked is the one
+         * failure a mapper sees and the log never recorded. */
+        if (g_preview_lines == 0 && g_preview_lines_last > 0) {
+            char message[160];
+            int k, payloads = 0, marks = 0;
+            for (k = 0; k < g_module_count; k++) {
+                if (g_preview[k].bytes) payloads++;
+                marks += g_preview[k].refused_count;
+            }
+            _snprintf_s(message, sizeof message, _TRUNCATE,
+                        "NAV: the green preview is now empty -- %d module(s) marked, "
+                        "%d with a finished bake, %d volume(s) marked as not placed",
+                        g_module_count, payloads, marks);
+            backend_log(message);
+        } else if (g_preview_lines > 0 && g_preview_lines_last == 0) {
+            char message[96];
+            _snprintf_s(message, sizeof message, _TRUNCATE,
+                        "NAV: the green preview is back -- %d line(s)", g_preview_lines);
+            backend_log(message);
+        }
+        g_preview_lines_last = g_preview_lines;
     } __finally { ReleaseSRWLockExclusive(&g_bake_lock); }
     return current;
 }
@@ -1238,6 +1267,9 @@ void sh_nav_bake_report(void (*out)(const char *fmt, ...))
             out("  marked %s -- %d volume(s) in copy %d -- %s\n",
                 m->module, m->regions, m->instance,
                 m->ok ? (m->reason[0] ? m->reason : "ready") : m->reason);
+            out("    preview: %s, %d volume(s) marked as not placed\n",
+                g_preview[i].bytes ? "drawn from a finished bake" : "nothing to draw",
+                g_preview[i].refused_count);
         }
     }
     if (g_live_refused) {
