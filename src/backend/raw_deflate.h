@@ -17,6 +17,16 @@
 size_t sh_inflate_raw(const unsigned char *src, size_t src_len,
                       unsigned char *dst, size_t dst_len);
 
+/* The same decoder, with `dst_cap` a CAPACITY instead of the finished length. Returns the actual
+ * number of bytes decoded, or zero -- including when the output would not fit, so a zero return can
+ * mean either "malformed" or "buffer too small" and the caller retries larger to tell them apart.
+ * Stream validation is unchanged: same completeness, padding and trailing-byte rules.
+ *
+ * For streams whose uncompressed length is not recorded anywhere. A saved map's `map.decl` is one:
+ * 4-byte checksum, then zlib(rawmap JSON), and nothing states how big the JSON is. */
+size_t sh_inflate_raw_upto(const unsigned char *src, size_t src_len,
+                           unsigned char *dst, size_t dst_cap);
+
 #ifdef SH_RAW_DEFLATE_TESTING
 enum {
     SH_INFLATE_HUFF_CODE_LENGTH = 0,

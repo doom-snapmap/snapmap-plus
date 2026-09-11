@@ -186,7 +186,18 @@ typedef int           (*sh_list_materials_fn)(struct sh_iface *self, int start, 
 /* Light projection/falloff materials: light decls plus atlas-only rows.
  * Kept separate from surface Materials for the lightMaterial field. */
 #define SH_ASSET_LIGHT       16
-#define SH_ASSET_COUNT       17
+/* PROJECTILE: the `projectile` decl type. Reference-only for the same reason PERK is -- a
+ * projectile is named by a weapon/ammo decl's `projectileDecl` (and siblings: `subProjectile`,
+ * `meleeProjectile`, `detonateProjectile`, `fullyChargedProjectileDecl`, ...), never placed or
+ * applied directly, so this is a name you copy and wire by hand. */
+#define SH_ASSET_PROJECTILE  17
+/* WEAPON: the `weapon` decl type, 204 of them. Reference-only, same shape as PROJECTILE -- named
+ * by a `weaponDecl`/`declWeapon` field, not placed or applied. This is the id idTarget_FireWeapon
+ * and idTarget_DummyFire actually take: those SnapMap actions fire a WEAPON decl (which in turn
+ * names the projectile/ammo it launches), there is no logic-side way to fire a projectile decl
+ * directly. */
+#define SH_ASSET_WEAPON       18
+#define SH_ASSET_COUNT       19
 
 /* Page an asset kind, skipping start names. list_materials remains the
  * kind-0 compatibility slot. */
@@ -235,6 +246,28 @@ typedef int (*sh_config_get_json_fn)(struct sh_iface *self, const char *key,
                                      unsigned int *out_flags);               /* +0x2B0 (ext 9) */
 typedef int (*sh_config_set_json_fn)(struct sh_iface *self, const char *key,
                                      const char *value_json);                /* +0x2B8 (ext 10) */
+
+/* Rawmap file slots for the File menu. Status crosses as a JSON fragment, so
+ * both paths, the arm state and the save counter travel in one call. */
+typedef int (*sh_rawmap_status_fn)(struct sh_iface *self,
+                                   char *out_json, int out_capacity);         /* +0x328 (ext 24) */
+
+/* A nonempty load path stages a validated file; an empty one restores the default.
+ * A nonempty save path queues an export of the live map to that file; an empty
+ * one releases the chosen destination. NULL leaves that side unchanged.
+ * arm: -1 leave, 0/1 gate off/on, 2 stage one load, 3 keep the current save path,
+ * 4 release it, 5 queue a save to the current backend destination. Refused saves
+ * neither change the destination nor arm a future save. */
+typedef int (*sh_rawmap_configure_fn)(struct sh_iface *self,
+                                      const char *load_path, const char *save_path, int arm,
+                                      char *out_msg, int msg_capacity);       /* +0x330 (ext 25) */
+
+/* Reload the editor's map on the next frame, so a staged rawmap opens. Returns 1
+ * when the request was accepted, not when the map is open -- the frame hook
+ * re-checks and may decline. The reload brackets its own call with the swap arm
+ * and requires overwrite protection unless the user explicitly disabled it. */
+typedef int (*sh_rawmap_load_now_fn)(struct sh_iface *self,
+                                     char *out_msg, int msg_capacity);        /* +0x338 (ext 26) */
 
 /* Reflection and apply callbacks. Engine work prefers the main-thread
  * command drain; apply_sync documents its inline compatibility fallback. */
@@ -393,6 +426,9 @@ typedef struct sh_iface_vtbl {
     sh_request_prefab_mesh_fn  request_prefab_mesh;  /* +0x310 (ext 21) async installed geometry */
     sh_get_prefab_mesh_fn      get_prefab_mesh;      /* +0x318 (ext 22) consume geometry blob */
     sh_resolve_prefab_defaults_fn resolve_prefab_defaults; /* +0x320 (ext 23) model + scale defaults */
+    sh_rawmap_status_fn        rawmap_status;        /* +0x328 (ext 24) staged paths + arm state */
+    sh_rawmap_configure_fn     rawmap_configure;     /* +0x330 (ext 25) choose those paths / arm */
+    sh_rawmap_load_now_fn      rawmap_load_now;      /* +0x338 (ext 26) reload the map now */
 } sh_iface_vtbl;
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
@@ -410,7 +446,10 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, resolve_prefab_model) == 0x308);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, request_prefab_mesh) == 0x310);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, get_prefab_mesh) == 0x318);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, resolve_prefab_defaults) == 0x320);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x328);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_status) == 0x328);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_configure) == 0x330);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_load_now) == 0x338);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x340);
 
 /* Fixed object layout: vtable +0, reserved bytes +0x08..+0x57, subobject
  * pointer +0x58. Reserved bytes stay zero; private subobject storage holds
@@ -543,6 +582,10 @@ typedef struct sh_iface_engine_slots {
     sh_request_prefab_mesh_fn  request_prefab_mesh;         /* +0x310 (ext 21) */
     sh_get_prefab_mesh_fn      get_prefab_mesh;             /* +0x318 (ext 22) */
     sh_resolve_prefab_defaults_fn resolve_prefab_defaults;  /* +0x320 (ext 23) */
+    /* clone-extension: the File menu's rawmap load/save file surface. */
+    sh_rawmap_status_fn        rawmap_status;               /* +0x328 (ext 24) */
+    sh_rawmap_configure_fn     rawmap_configure;            /* +0x330 (ext 25) */
+    sh_rawmap_load_now_fn      rawmap_load_now;             /* +0x338 (ext 26) */
 } sh_iface_engine_slots;
 
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *slots);

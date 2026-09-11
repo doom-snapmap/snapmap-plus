@@ -576,33 +576,40 @@ directly, or by turning on `sh_target_any` and wiring it up with the native wire
 
 ## Rawmaps
 
-A **rawmap** is a full, human-readable copy of a map's contents, stored at
-`%LOCALAPPDATA%\snapmap-plus\rawmap.json`. A few things it's useful for:
+A **rawmap** is a human-readable JSON copy of a map. Use one to share a map
+without publishing it, keep backups, or edit its contents in a text editor.
+The default file is `%LOCALAPPDATA%\snapmap-plus\rawmap.json`.
 
-- Sharing a map with another Snapmap+ user without publishing it, or without either of you needing to be
-  connected to the game's servers.
-- Keeping your own permanent backups, stored wherever you like.
-- Updating an already-published map from *any* of your saves, instead of being limited to the one save
-  you originally published from.
-- Editing the map file directly in a text editor.
+**To save the map you are editing:** choose **File > Save Rawmap As...** and
+pick a file. This captures the open map, including unsaved edits. **Save Rawmap**
+writes to the same file again. Opening another map resets the destination to
+the default file; unticking **Keep This Save Path** also resets it. A save is
+refused if the live editor is unavailable, and a queued save is cancelled if
+the editor leaves the map before it can run.
 
-Both saving and loading a rawmap go through the same switch: open the console (**~**) and run
-`sh_rawmaps_on` to turn it on, `sh_rawmaps_off` to turn it off.
+**To open a rawmap:** choose **File > Load Rawmap...** and select its JSON file.
+The file is staged for the next map load. Confirm the prompt to open it in the
+current editor, discarding unsaved edits, or cancel to save your work first.
+**Open Rawmap as New Map** lets you finish that staged load, with confirmation.
+Opening in place requires at least one local map saved through DOOM. You can
+also open a map from DOOM's list to apply the staged file.
 
-**To write a rawmap:** turn on `sh_rawmaps_on` *before* you save. While it's on, saving the map also
-mirrors that save to `rawmap.json`. **It is not automatic** — with `sh_rawmaps_on` off, saving the map
-only writes the normal save, and `rawmap.json` is left untouched.
+Opening a rawmap does not select it as the save destination. By default, DOOM's
+own Save asks for a new name instead of replacing the saved map it opened over.
+If that overwrite protection cannot be installed, rawmap loads are refused.
+To write back to the rawmap file itself, select it with **Save Rawmap As...**.
 
-**To load a rawmap into the editor:** run `sh_rawmaps_on`. Whatever map you open next (an existing save,
-to overwrite it, or a blank template) loads from `rawmap.json` instead of its own saved data. Once it's
-loaded, run `sh_rawmaps_off` again.
+The File menu actions work without **Use Rawmaps for Every Save/Load**. That
+optional switch applies the staged source and save destination to every map
+load and save, including actions outside the File menu. The console aliases
+`sh_rawmaps_on` and `sh_rawmaps_off` control the same switch.
 
-Since one switch governs both directions, be deliberate about *why* it's on: turn it on to load a rawmap,
-turn it back off before you keep working normally, then turn it on again only when you actually want a
-save to also write to `rawmap.json`.
-
-A `rawmap.json` from someone else works the same way — drop it into your own `snapmap-plus` folder
-(replacing your own `rawmap.json`) and load it in with `sh_rawmaps_on` as above.
+Run `sh_rawmaps help` for the console commands. `sh_rawmaps list [folder]`
+lists rawmap files, `sh_rawmaps load <path>` stages a file, `sh_rawmaps load`
+opens it, and `sh_rawmaps save [path]` exports the live map. Console loads
+discard unsaved edits without a confirmation prompt. The advanced command
+`sh_rawmaps overwrite on` allows DOOM's Save to replace the borrowed saved map;
+that choice lasts only until DOOM closes. Keep it off to preserve that map.
 
 ---
 

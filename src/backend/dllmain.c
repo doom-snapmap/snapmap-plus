@@ -12,6 +12,7 @@
 #include "hook.h"
 #include "smoke.h"
 #include "rawmap.h"
+#include "editor_frame.h"
 #include "map_package.h"
 #include "palette_refresh.h"
 #include "engine_dialog.h"
@@ -179,6 +180,38 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                             "(maps declaring packages will be refused, never crashed)");
         }
         sh_rawmap_swap_install(deser, deser_clean);
+        /* Answer "is the open map a branch?" for a swapped map, so the engine's own Save asks for
+         * a name rather than overwriting the map the rawmap opened over. */
+        sh_rawmap_branch_install(g_doom_base);
+
+        /* The editor-frame hook: a main-thread frame boundary, and the in-place map
+         * reload it drives for the File menu's Load Rawmap. Installed beside the swap
+         * it serves, and like it does not depend on the editor being up. */
+        {
+            void *ed_frame = NULL, *ed_loadmap = NULL, *ed_addtag = NULL, *ed_tojson = NULL;
+            int   ed_frame_clean = 0;
+            for (size_t i = 0; i < db; i++) {
+                if (results[i].name == NULL) continue;
+                if (strcmp(results[i].name, "EditorFrame") == 0) {
+                    if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
+                        ed_frame = (void *)results[i].addr;
+                    ed_frame_clean = (results[i].status == SIG_OK);
+                } else if (strcmp(results[i].name, "EditorLoadMap") == 0) {
+                    if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
+                        ed_loadmap = (void *)results[i].addr;
+                } else if (strcmp(results[i].name, "SnapMapAddBranchTag") == 0) {
+                    if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
+                        ed_addtag = (void *)results[i].addr;
+                } else if (strcmp(results[i].name, "SnapMapToJson") == 0) {
+                    if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
+                        ed_tojson = (void *)results[i].addr;
+                }
+            }
+            sh_editor_frame_install(ed_frame, ed_frame_clean, ed_loadmap, g_doom_base);
+            /* Save Rawmap serializes the open map, not the newest save on disk. The tag
+             * function also derives the engine's idStr ctor/dtor. */
+            sh_rawmap_set_live_serialize(ed_tojson, ed_addtag);
+        }
 
         /* Mirror saves to rawmap JSON. Require a clean serialization prologue before
          * installing this always-active shadow hook. */

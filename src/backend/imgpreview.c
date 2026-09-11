@@ -52,6 +52,8 @@ static const struct { const char *type; unsigned len; unsigned char kind; const 
      */
     { "discreteAnimation",  17, SH_ASSET_MODEL,      NULL,   0 },
     { "perks",               5, SH_ASSET_PERK,       NULL,   0 },
+    { "projectile",         10, SH_ASSET_PROJECTILE, NULL,   0 },
+    { "weapon",              6, SH_ASSET_WEAPON,     NULL,   0 },
     /* Only .bswf records from the mixed file type enter the browser. Convert
      * their compiled names to decl-facing .swf names.
      */

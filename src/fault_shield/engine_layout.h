@@ -66,7 +66,8 @@
 /* Range starts follow resolved function entries. Ends use the measured body
  * spans below; remeasure those spans if a build changes the function length. */
 #define RVA_EDITOR_FRAME_LO   0x523140u   /* idSnapEditorLocal per-frame Think FUN_140523140 entry (== EditorPump sig) */
-#define EDITOR_FRAME_SPAN     0x75Au      /* RE-DERIVE: 0x52389A - 0x523140 (the Class-A resume-target body length) */
+#define EDITOR_FRAME_SPAN     0x75Au      /* RE-DERIVE: 0x52389A - 0x523140 (the Class-A resume-target body length); the
+                                           * ret is at +0x75A on both shipped executables, followed by int3 padding */
 #define RVA_EDITOR_FRAME_HI   (RVA_EDITOR_FRAME_LO + EDITOR_FRAME_SPAN)  /* ...body end (the Class-A resume target range) */
 #define RVA_RESOLVER_LO       0x5E0AD0u   /* connection resolver FUN_1405e0ad0 entry (== Resolver sig) */
 #define RESOLVER_SPAN         0x396u      /* RE-DERIVE: 0x5E0E66 - 0x5E0AD0 (the resolver body length) */

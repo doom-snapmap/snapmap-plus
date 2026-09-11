@@ -65,6 +65,7 @@ The header defines the complete ABI. These are the main entry points:
 | Timeline inheritance | The normalization slot at `+0x298`. |
 | Persistent settings | `config_get_json` at `+0x2B0` and `config_set_json` at `+0x2B8`. |
 | Prefab geometry | Model lookup and request/completion slots at `+0x308` through `+0x320`. |
+| File menu rawmap I/O | `rawmap_status` at `+0x328`, `rawmap_configure` at `+0x330` and `rawmap_load_now` at `+0x338`. The picker is host-side and touches no engine state. Loading stages a file: the swap substitutes it into the next map the engine parses. |
 
 Prefab files and metadata use the path returned by `resolve_prefab_path`; their
 rename, delete and folder operations are native filesystem work. Feedback and
@@ -109,3 +110,12 @@ recovery are described in [persistent configuration](architecture.md#configurati
   committed engine edit.
 - Browser preview verifies page behavior, not engine calls, native window
   behavior or gameplay. Changes to those paths need the corresponding tests.
+- The File menu answers in browser preview with the default path pair, so the
+  readout and layout can be checked outside the game. Load and Save As are inert
+  there and report preview only.
+
+Rawmap saves capture the live map and destination as one queued request. The
+frame checks editor state and the load generation before serializing; a new
+map can reuse the same pointer. Save Rawmap resolves its destination in the
+backend rather than sending a path from an earlier page status. Neither a
+refused save nor a cancelled request falls back to another map on disk.

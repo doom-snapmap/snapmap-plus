@@ -30,6 +30,12 @@ Function signatures identify engine code. Generated anchors derive global
 addresses from code references. Vulkan and OpenGL share these portable resolution
 paths; field layouts still need explicit verification when porting.
 
+A pattern that matches more than once is not an identification. Where two
+functions share a body, the caller must confirm its target by something the
+pattern cannot carry: the rawmap branch answer follows the call its candidate
+makes and reads the literal that callee names, because the sibling it must not
+patch differs only there.
+
 A raw-RVA fallback requires an exact fingerprint of a supported reference
 executable. The hook-tolerant fallback additionally checks the detour and remaining
 signature bytes. A filename or a readable address is not sufficient evidence.
@@ -48,8 +54,10 @@ executable; the hook helper does not relocate RIP-relative instructions.
 ## DLL interface
 
 The shared object uses an append-only vtable. Its original 77-slot prefix is
-retained, with extensions through `+0x320`; the current table occupies `0x328`
-bytes. Static assertions pin the layout. Do not insert, reorder or repurpose
+retained, with extensions through `+0x338`; the current table occupies `0x340`
+bytes. The last three are the File menu's rawmap surface: `rawmap_status`
+(`+0x328`), `rawmap_configure` (`+0x330`) and `rawmap_load_now` (`+0x338`).
+Static assertions pin the layout. Do not insert, reorder or repurpose
 existing slots. Add new capability slots at the end and update both DLLs.
 
 Headers define buffer ownership, return values and thread requirements. Keep

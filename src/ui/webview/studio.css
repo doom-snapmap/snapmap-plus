@@ -520,3 +520,21 @@
   .toast.ok   { background: #2e7d46; }
   .toast.warn { background: #9a6a1a; }
   .toast.err  { background: #a3352f; }
+
+/* File menu: disabled items stay readable, the arm toggle shares the tick
+   gutter with the theme radios, and the staged-path readout sizes the popup. */
+  /* A disabled item still has to be readable -- it is carrying information ("nothing is
+     staged"), not just refusing a click -- so it dims rather than fades, and drops the hover
+     highlight that would otherwise promise it is clickable. */
+  .menu-popup button[disabled] { color: var(--muted); }
+  .menu-popup button[disabled]:hover, .menu-popup button[disabled]:focus-visible { background: transparent; color: var(--muted); }
+  /* the arm toggle uses the same tick gutter as the theme radios so both menus align */
+  .menu-popup button[role="menuitemcheckbox"]::before { content: ""; width: 12px; flex: 0 0 12px; text-align: center; }
+  .menu-popup button[role="menuitemcheckbox"][aria-checked="true"]::before { content: "\2713"; }
+  .menu-sep { height: 1px; margin: 3px 4px; background: var(--border2); }
+  /* the staged-path readout. A fixed width, not max-width: the popup sizes to its content, and a
+     max-width alone let it stay narrow and wrap every path over three lines. This sets the popup's
+     width for the whole File menu. overflow-wrap still catches a pathological filename. */
+  .menu-note { width: 296px; padding: 3px 8px 2px; color: var(--textDim, var(--text)); font-size: 11px; line-height: 1.5; opacity: .85; overflow-wrap: anywhere; }
+  .menu-note > div + div { margin-top: 1px; }
+  .menu-note b { font-weight: 600; opacity: .8; }

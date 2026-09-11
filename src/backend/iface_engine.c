@@ -25,6 +25,7 @@
 #include "valid_class_map.h"
 #include "wiring_cleandirect.h"
 #include "snapstack.h"
+#include "rawmap.h"
 
 /* Editor layout. */
 /* Extraction RVA for re-derivation only; runtime uses editor_singleton.
@@ -1162,6 +1163,12 @@ int sh_iface_engine_install(const sig_result *results, size_t n, const uint8_t *
     slots.request_prefab_mesh     = slot_request_prefab_mesh;        /* +0x310 ext 21 */
     slots.get_prefab_mesh         = slot_get_prefab_mesh;            /* +0x318 ext 22 */
     slots.resolve_prefab_defaults = slot_resolve_prefab_defaults;    /* +0x320 ext 23 */
+    /* the File menu's rawmap load/save file surface. These bodies live in rawmap.c beside the gate and
+     * path state they act on, and touch no engine memory, so they bind unconditionally -- there is no
+     * signature for them to depend on and nothing for a shifted build to break. */
+    sh_rawmap_get_slots(&slots.rawmap_status,        /* +0x328 ext 24 */
+                        &slots.rawmap_configure,     /* +0x330 ext 25 */
+                        &slots.rawmap_load_now);     /* +0x338 ext 26 */
     sh_iface_bind_engine_slots(&slots);
 
     char line[200];
