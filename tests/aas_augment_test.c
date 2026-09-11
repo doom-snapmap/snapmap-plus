@@ -11,6 +11,7 @@
 #include "../src/backend/aas_augment.h"
 #include "../src/backend/nav_traversal.h"
 #include "../src/backend/navmesh.h"
+#include "../src/backend/nav_geometry.h"
 
 static int g_checks = 0, g_fail = 0;
 
@@ -763,8 +764,7 @@ static void test_a_pair_is_not_emitted_twice(void)
 /* leaps: crossing a gap                                                 */
 /* ==================================================================== */
 
-/* Load a synthetic LEDGE/LEAP table through the public loader. This binary
- * omits SH_TRAV_TESTING and contains no game bytes. */
+/* Load a synthetic LEDGE/LEAP table through the public loader. */
 static const char *TRAV_TABLE_TEXT =
 "{\n"
 "\tedit = {\n"
@@ -1075,9 +1075,10 @@ static void test_a_bake_at_the_platform_cap_completes(void)
         float y = -950.0f  + (float)(i / 20) * 190.0f;
         mkplat(&p[i], x, y, x + 150.0f, y + 150.0f, 16.0f + (float)(i % 3) * 6.0f, "cell");
     }
-    CHECK_MSG(sh_aas_augment(a, p, 200, &o, &rep) == 0,
-              "a traversal budget overflow must reject the whole candidate");
-    CHECK(rep.links_truncated);
+    CHECK_MSG(sh_aas_augment(a, p, 200, &o, &rep) == 1,
+              "candidate storage grows beyond the old 2048-entry ceiling");
+    CHECK(!rep.links_truncated);
+    CHECK(sh_aas_count(a, SH_AAS_L_REACHABILITIES) > 2048);
     for (i = 0; i < rep.platform_count; i++) if (rep.platforms[i].emitted) emitted++;
     CHECK_MSG(emitted > 100, "most of them should land");
     CHECK_MSG(rep.depth_exceeded == 0, "and the tree stays inside the loader limit");
@@ -2126,9 +2127,111 @@ static void test_rotated_ramps_join_native_floor(void)
     }
 }
 
+/* Independent synthetic declarations exercise the full class multiplicity.
+ * No installed paths or animation data are required. */
+static void load_all_test_monsters(void)
+{
+    char text[16384];size_t used=0;int m,d;
+    const char *families[]={"LEDGE_UP_128","LEDGE_DOWN_128","LEAP_ACROSS_256"};
+    used+=(size_t)sprintf(text+used,"{\nedit = {\ntable = {\n");
+    for(m=0;m<sh_trav_monster_count();m++) {
+        used+=(size_t)sprintf(text+used,"table[%d] = {\nmonster = \"%s\";\ntraversal = {\n",
+                             m,sh_trav_monster_at(m)->decl_name);
+        for(d=0;d<3;d++)used+=(size_t)sprintf(text+used,
+            "traversal[%d] = {\ntype = \"%s\";\npath = \"test/monster%d/move%d\";\noffset = {\nx = -32;\n}\n}\n",
+            d,families[d],m,d);
+        used+=(size_t)sprintf(text+used,"}\n}\n");
+    }
+    used+=(size_t)sprintf(text+used,"}\n}\n}\n");
+    CHECK(sh_trav_test_parse(text,used));
+}
+
+static void test_traversal_collection_grows_without_losing_demon_routes(void)
+{
+    sh_aas *a=load_module();sh_aug_platform p[24];sh_aug_report rep;
+    sh_aug_opts opts={SH_AUG_FALL_AUTO,1,SH_AUG_TRAVERSAL_AUTO};
+    unsigned i,nr;int j,m;unsigned degree[128]={0};
+    load_all_test_monsters();
+    for(j=0;j<24;j++)mkbox(&p[j],-1800+(j%5)*700,-1800+(j/5)*700,
+        -1544+(j%5)*700,-1544+(j/5)*700,128,0,"dense box");
+    CHECK(sh_aas_augment(a,p,24,&opts,&rep));
+    nr=sh_aas_count(a,SH_AAS_L_REACHABILITIES);
+    CHECK(nr>1024);CHECK(!rep.links_truncated);
+    for(i=0;i<nr;i++) {
+        const unsigned char *r=sh_aas_rec_const(a,SH_AAS_L_REACHABILITIES,i);
+        unsigned from=sh_aas_get_u16(r,6);
+        CHECK(from<128);if(from<128)CHECK(++degree[from]<=256);
+    }
+    for(j=0;j<24;j++) {
+        unsigned incoming=0,outgoing=0;
+        CHECK(rep.platforms[j].emitted);
+        for(i=0;i<nr;i++) {
+            const unsigned char *r=sh_aas_rec_const(a,SH_AAS_L_REACHABILITIES,i);
+            for(m=0;m<sh_trav_monster_count();m++)if(sh_aas_get_u32(r,0)==sh_trav_monster_at(m)->travel_flags) {
+                if(sh_aas_get_u16(r,6)==1&&sh_aas_get_u16(r,8)==rep.platforms[j].area)incoming|=1u<<m;
+                if(sh_aas_get_u16(r,8)==1&&sh_aas_get_u16(r,6)==rep.platforms[j].area)outgoing|=1u<<m;
+            }
+        }
+        CHECK(incoming==511);CHECK(outgoing==511);
+    }
+    {
+        size_t len;char err[192];unsigned char *bytes=sh_aas_write(a,&len);
+        CHECK(bytes!=NULL);
+        if(bytes){CHECK_MSG(sh_navmesh_validate_aas(bytes,len,err,sizeof err),err);HeapFree(GetProcessHeap(),0,bytes);}
+    }
+    sh_aas_free(a);sh_trav_test_reset();
+}
+
+static void test_climb_floor_endpoints_clear_rotated_solids(void)
+{
+    const double slopes[]={0,25,40,90};const double yaws[]={0,37,90};
+    unsigned s,y;
+    load_all_test_monsters();
+    for(s=0;s<4;s++)for(y=0;y<3;y++) {
+        sh_aas *a=load_module();sh_aug_platform p;sh_aug_report rep;
+        sh_aug_opts opts={SH_AUG_FALL_AUTO,1,SH_AUG_TRAVERSAL_AUTO};
+        double angle=slopes[s]*3.14159265358979323846/180.0;
+        double yaw=yaws[y]*3.14159265358979323846/180.0,cs=cos(yaw),sn=sin(yaw);
+        int i,up=0,down=0;unsigned r,nr;
+        sh_aas_put_f32(sh_aas_rec(a,SH_AAS_L_PLANES,1),12,1000);
+        sh_aas_set_setting_f32(a,SET_WORDS+0,-64);sh_aas_set_setting_f32(a,SET_WORDS+4,-64);
+        sh_aas_set_setting_f32(a,SET_WORDS+12,64);sh_aas_set_setting_f32(a,SET_WORDS+16,64);
+        if(slopes[s]==90) {
+            mkbox(&p,-128,-256,128,256,512,0,"sideways solid");
+            for(i=0;i<4;i++){float x=p.c[i][0];p.c[i][0]=p.c[i][2]-256;p.c[i][2]=-x+128;}
+            p.n[0]=1;p.n[2]=0;p.face=0;
+        } else {
+            mkplat_tilted(&p,slopes[s],512,512,slopes[s]?256*sin(angle):128,"ramp");p.depth=128;
+        }
+        for(i=0;i<4;i++){float x=p.c[i][0],yy=p.c[i][1];p.c[i][0]=(float)(cs*x-sn*yy);p.c[i][1]=(float)(sn*x+cs*yy);}
+        {float x=p.n[0],yy=p.n[1];p.n[0]=(float)(cs*x-sn*yy);p.n[1]=(float)(sn*x+cs*yy);}
+        CHECK(sh_aas_augment(a,&p,1,&opts,&rep));
+        nr=sh_aas_count(a,SH_AAS_L_REACHABILITIES);
+        for(r=0;r<nr;r++) {
+            const unsigned char *rr=sh_aas_rec_const(a,SH_AAS_L_REACHABILITIES,r);
+            unsigned from=sh_aas_get_u16(rr,6),to=sh_aas_get_u16(rr,8),off;
+            double point[3];
+            if(!(sh_aas_get_u32(rr,0)&0xffff0000)||(from!=1&&to!=1))continue;
+            off=from==1?12:18;
+            for(i=0;i<3;i++)point[i]=sh_aas_get_i16(rr,off+2*i);
+            CHECK(sh_nav_geometry_path_clear(&p,1,-1,-1,point,point,64,80));
+            /* The level controls allow an independent square-body check. */
+            if(slopes[s]==0&&yaws[y]==0)CHECK(fabs(point[0])>=320||fabs(point[1])>=320);
+            if(sh_aas_get_u32(rr,0)==sh_trav_monster_at(5)->travel_flags) {
+                if(from==1)up++;else down++;
+            }
+        }
+        CHECK(up>0);CHECK(down>0);
+        sh_aas_free(a);
+    }
+    sh_trav_test_reset();
+}
+
 int main(void)
 {
     printf("aas_augment_test\n");
+    test_traversal_collection_grows_without_losing_demon_routes();
+    test_climb_floor_endpoints_clear_rotated_solids();
     test_rotated_ramps_join_native_floor();
     test_visibility_grows_with_connected_geometry();
     test_visibility_extends_sparse_native_rows();

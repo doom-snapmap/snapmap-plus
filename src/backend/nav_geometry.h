@@ -25,4 +25,10 @@ int sh_nav_geometry_path_clear(const sh_aug_platform *boxes, int count,
     int skip_a, int skip_b, const double start[3], const double end[3],
     double radius, double height);
 
+/* Last intersection along an outward standing-body ray, in direction units.
+ * A clear ray returns distance zero. Used to place floor-side traversal
+ * endpoints outside the real solid, including tilted overhangs. */
+int sh_nav_geometry_ray_exit(const sh_aug_platform *box,const double start[3],
+    const double direction[3],double radius,double height,double *distance);
+
 #endif

@@ -490,7 +490,7 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
     if (!baked) {
         _snprintf_s(why, why_cap, _TRUNCATE, "%s",
                     rep.reach_limit_exceeded ? "required routes exceed the native 256 outgoing links per area; the whole bake was refused" :
-                    rep.links_truncated ? "the traversal capacity was exceeded; the whole bake was refused" :
+                    rep.links_truncated ? "traversal storage could not be allocated; the whole bake was refused" :
                     rep.pieces_truncated ? "the geometry capacity was exceeded; the whole bake was refused" :
                     rep.depth_exceeded ? "the navigation tree depth was exceeded; the whole bake was refused" :
                     "the bake did not produce a payload");
@@ -632,8 +632,14 @@ void sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line lin
                 if(!base)continue;
                 _snprintf_s(name,sizeof name,_TRUNCATE,"generated/maps/modules/%s/%s.baas_monster48",
                             g_modules[i].module,base+1);
-                bake_one(name,&g_modules[i],read_shipped,&g_preview[i].bytes,&g_preview[i].length,
-                    g_modules[i].reason,sizeof g_modules[i].reason,&g_preview[i].first_area);
+                if(!bake_one(name,&g_modules[i],read_shipped,&g_preview[i].bytes,&g_preview[i].length,
+                    g_modules[i].reason,sizeof g_modules[i].reason,&g_preview[i].first_area)) {
+                    char message[SH_SMNAV_RESNAME_CAP+BAKE_REASON_CAP+96];
+                    _snprintf_s(message,sizeof message,_TRUNCATE,
+                        "NAV: preview refused for copy %d '%s' -- %s",
+                        g_modules[i].instance,name,g_modules[i].reason);
+                    backend_log(message);
+                }
             }
             g_preview_revision=g_geometry_revision;
         }
@@ -678,7 +684,7 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
     char module[SH_NAVR_MODULE_CAP], cls[32];
     char why[BAKE_REASON_CAP];
     bake_module *m;
-    int hit = 0, i, known = 0, instance=-1;
+    int hit = 0, i, known = 0, instance=-1, attempted=0;
     unsigned long revision=0;
     char canonical[384];
 
@@ -731,6 +737,7 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
         if(sh_nav_regions_nth_instance(&g_map,module,1)<0)m=bake_find(module);
     }
     if (m && m->ok) {
+        attempted = 1;
         why[0] = 0;
         __try {
             int slot=(int)(m-g_modules);
@@ -760,6 +767,11 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
     if (hit) {
         char line[SH_SMNAV_RESNAME_CAP + 160];
         _snprintf_s(line, sizeof line, _TRUNCATE, "NAV: baked '%s' -- %s", name, why);
+        backend_log(line);
+    } else if(attempted) {
+        char line[SH_SMNAV_RESNAME_CAP+BAKE_REASON_CAP+96];
+        _snprintf_s(line,sizeof line,_TRUNCATE,"NAV: bake refused for copy %d '%s' -- %s",
+            instance,name,why);
         backend_log(line);
     }
     if(!hit&&instance>=0&&read_shipped) {

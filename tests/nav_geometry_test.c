@@ -47,6 +47,27 @@ static int contains(int n,double x,double y,double z)
 static int bake_steps(int n,double radius)
 {return sh_nav_geometry_build(boxes,n,radius,80,0.7,18,result,source,pieces,buried,SH_AUG_MAX_PLATFORMS);}
 
+static void test_body_ray_exit(void)
+{
+    double start[3]={0,0,0},direction[3]={1,0,0},distance;
+    box(0,-256,-256,256,256,0,128);
+    CHECK(sh_nav_geometry_ray_exit(&boxes[0],start,direction,64,80,&distance));
+    CHECK(fabs(distance-320)<0.01);
+    start[0]=400;direction[0]=-1;
+    CHECK(sh_nav_geometry_ray_exit(&boxes[0],start,direction,64,80,&distance));
+    CHECK(fabs(distance-720)<0.01);
+    direction[0]=1;
+    CHECK(sh_nav_geometry_ray_exit(&boxes[0],start,direction,64,80,&distance));
+    CHECK(distance==0);
+    start[0]=0;start[2]=128;
+    CHECK(sh_nav_geometry_ray_exit(&boxes[0],start,direction,64,80,&distance));
+    CHECK(distance==0); /* Standing on the top is contact, not penetration. */
+    direction[0]=0;
+    CHECK(!sh_nav_geometry_ray_exit(&boxes[0],start,direction,64,80,&distance));
+    direction[0]=NAN;
+    CHECK(!sh_nav_geometry_ray_exit(&boxes[0],start,direction,64,80,&distance));
+}
+
 /* Independent rectilinear oracle: partition the agent footprint at every box
  * boundary, then require each open cell to have support. Four-corner tests are
  * insufficient for concave unions and holes. This uses no baker predicates. */
@@ -173,6 +194,7 @@ static void test_rotated_obstacle_occupancy(void)
 }
 int main(void)
 {
+    test_body_ray_exit();
     test_step_clearance();
     int n,i,k;double a;
     test_union_oracle();
