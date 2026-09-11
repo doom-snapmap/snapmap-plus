@@ -20,14 +20,48 @@ the game's built-in editor UI. That gives you three things the stock editor can'
 - **Entities SnapMap was never built to place.** The DOOM engine contains far more object types than
   SnapMap's palette exposes. Snapmap+ can place and configure any of them.
 
-Everything Snapmap+ does happens to the **map file itself** — the same file that gets uploaded when you
-publish. That means maps built with Snapmap+ work for everyone who plays them, console players included;
-nothing needs to be installed on the player's end, and every asset referenced already ships with the base
-game.
+Edits that use stock engine behavior and installed assets can travel with the
+**map file itself**, including to console players. Features that supply new
+runtime resources have additional requirements: **resized Grid Rooms require
+Snapmap+ on the player's PC** and cannot be delivered to vanilla or console players.
 
 ![Snapmap+ full window: Entities tab open, DOOM editor visible behind it](images/snapmap-window-and-doom.png)
 
 ---
+
+## Resizing Grid Rooms
+
+Highlight a **classic or modern Grid Room** in DOOM's editor and press **X** to
+open **Module Properties**. Change **Grid Room Size** X, Y and Z. This works in
+Blueprint mode and keeps the Blueprint camera. Left Ctrl opens the action menu;
+the size controls are in DOOM itself.
+
+Each room keeps its own dimensions. Doors and frames stay their original size,
+and built-in room lights follow the resized room with adjusted coverage. Objects
+you placed keep their module-local positions and sizes, so inspect objects near
+the walls after shrinking. Connected branches move to retain their doorways;
+conflicting connection loops and new overlaps can prevent an edit.
+
+| Grid Room | Minimum X / Y / Z |
+|---|---|
+| Classic | 416 / 416 / 304 |
+| Modern | 864 / 272 / 432 |
+
+Out-of-range values clamp and the panel shows the applied dimensions. The maximum
+follows the current `snapEdit_environmentModuleBounds` cvar, the room's world
+position and its connected neighbors. Raising that cvar allows larger rooms
+without restarting, up to native collision and navigation coordinate limits.
+Snapmap+ does not change the cvar for you. The current process retains up to
+64 distinct size/type combinations; restart DOOM if that cache fills.
+Keep the world cvar large enough when reopening or playing a map authored with
+a raised limit; the room dimensions are saved, but this cvar is not stored in
+the map. For example, `snapEdit_environmentModuleBounds 30000` permits a larger
+world box, while each room still has to fit at its actual position.
+
+Save and load normally. Collision, navigation and marked blocking-volume
+navigation use the resized room. **Players need Snapmap+ to load these maps.**
+The resizing feature is included in the existing backend DLL; it needs no
+separate override package or map sidecar file.
 
 ## Installing Snapmap+
 

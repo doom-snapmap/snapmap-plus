@@ -451,3 +451,7 @@ int main(void)
     printf("strids_packages_test: ok\n");
     return 0;
 }
+
+/* AAS validation is exercised by grid_room_nav_test, not these lookup tests. */
+int sh_navmesh_validate_aas(const unsigned char *p,size_t n,char *e,size_t cap)
+{(void)p;(void)n;if(e&&cap)e[0]=0;return 0;}

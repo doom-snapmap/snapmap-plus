@@ -20,6 +20,11 @@ choices contributors should retain when changing those paths.
 
 ## Intentional differences
 
+Grid Room resizing is included in the backend and uses DOOM's native Module
+Properties panel and Blueprint X action. Its saved module identities require
+runtime resources reconstructed by Snapmap+. Such maps are not compatible with
+vanilla or console players, even when their placed entities use stock assets.
+
 The `sh` console dispatcher executes SnapStack handlers on DOOM's main thread,
 inside the engine's command callback. SnapHak queued these handlers onto its
 UI thread because they touched Qt objects. Snapmap+'s handlers do not require

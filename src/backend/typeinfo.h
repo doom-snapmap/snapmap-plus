@@ -15,6 +15,9 @@ int sh_typeinfo_install(const sig_result *results, size_t n, const uint8_t *modu
 /* Call the resolved decl-manager accessor. Return NULL if unavailable or faulting.
  * Shared by reflection, entity apply, and event-manager code after installation. */
 void *sh_typeinfo_get_declmgr(void);
+/* Borrow the engine reflection context through the established decl-manager
+ * accessor. Different manager interfaces use different vtable layouts. */
+void *sh_typeinfo_get_reflect(void);
 
 /* Enumerate decl instances as NUL-separated names with a double-NUL terminator.
  * Use silent reflection lookup for types such as sound/projectile. Return 1 with

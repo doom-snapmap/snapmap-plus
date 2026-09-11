@@ -19,6 +19,9 @@
 #include "../fault_shield/mapload_guards.h"
 #include "strids.h"
 #include "overrides.h"
+#include "grid_room_native.h"
+#include "grid_room_editor.h"
+#include "grid_room_snap.h"
 #include "package_requirements.h"
 #include "weapon_hud.h"
 #include "navmesh.h"
@@ -302,6 +305,14 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                                                        compare, compare_clean,
                                                        write_string, write_string_clean);
 
+        /* Dimension-bearing module names use the same backend resource provider.
+         * Construct native variants only when a map actually requests one. */
+        int grid_installed = overrides_installed && sh_grid_native_install(results, db, g_doom_base);
+        if (overrides_installed && !grid_installed)
+            backend_log("GRID: native module variants unavailable on this build");
+        if (grid_installed && !sh_grid_snap_install(results, db, g_doom_base))
+            backend_log("GRID: exact doorway attachment unavailable on this build");
+
         /* Navigation uses the resource shadow and map funnel; report its startup state. */
         sh_navmesh_install();
 
@@ -334,6 +345,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
         /* Bind apply dependencies before publishing their interface slots. */
         sh_apply_engine_install(results, db, g_doom_base, cmdsys);
+        if(grid_installed&&!sh_grid_editor_install(results,db,sh_grid_native_read,sh_grid_native_apply))
+            backend_log("GRID: native dimension properties unavailable on this build");
 
         /* Expose live entity reads so navigation sees marks edited since map load. */
         sh_nav_bake_set_live_editor(sh_apply_engine_entity_count,

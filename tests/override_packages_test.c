@@ -336,3 +336,7 @@ int main(void)
     printf("override package resolution tests passed\n");
     return 0;
 }
+
+/* AAS validation is exercised by grid_room_nav_test, not these lookup tests. */
+int sh_navmesh_validate_aas(const unsigned char *p,size_t n,char *e,size_t cap)
+{(void)p;(void)n;if(e&&cap)e[0]=0;return 0;}

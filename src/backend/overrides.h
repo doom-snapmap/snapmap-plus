@@ -1,5 +1,6 @@
 /* Resource-provider file shadowing through the open-by-name vtable slot
- * (+0xf8). Ordinary opens try map navigation, exact published decltree
+ * (+0xf8). Private Grid Room resources are generated from installed originals.
+ * Ordinary opens try map navigation, exact published decltree
  * entries, user files, linked installed resources, built-in defaults, then
  * the engine. Mode >= 2 bypasses shadowing.
  *
