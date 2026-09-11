@@ -2075,14 +2075,15 @@ static int aug_budget_traversals(aug_ctx *c, aug_trav_spec *specs, int n,
 overflow:
     out->reach_limit_exceeded = 1;
     out->reach_limit_area = full;
-    /* Name the volumes whose routes end in the full area, plus its own owner.
-     * These are what a mapper can act on; the area index alone is not. */
+    /* Only routes leaving this area consume its budget. Incoming-only routes
+     * cannot identify a cause, and un-emitted reports have no area to match. */
     for (k = 0; k < n && out->blamed_count < SH_AUG_MAX_BLAMED; k++) {
         int j, side;
-        if (choices[k].from_area != full && choices[k].to_area != full) continue;
-        side = choices[k].from_area == full ? choices[k].to_area : choices[k].from_area;
+        if (choices[k].from_area != full) continue;
+        side = choices[k].to_area;
         for (j = 0; j < out->platform_count; j++) {
             int src = out->platforms[j].source, seen, b;
+            if (!out->platforms[j].emitted) continue;
             if (out->platforms[j].area != side && out->platforms[j].area != full)
                 continue;
             for (seen = 0, b = 0; b < out->blamed_count; b++)

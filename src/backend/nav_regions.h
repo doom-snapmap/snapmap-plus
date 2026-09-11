@@ -114,18 +114,12 @@ int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
                                 sh_navr_entity_valid valid,
                                 sh_navr_entity_json get_json, void *ctx);
 
-/* The same refresh, reading only the listed entity ids. Marked volumes are a
- * small part of a map, so reading them one at a time beats asking the engine
- * to write every entity -- until there are enough of them that the bulk write
- * wins, which is the caller's call to make from its own timings.
- *
- * Returns the marked count, or -1 to refuse with the map untouched. A refusal
- * means the ids no longer describe the map, so the caller must answer it with
- * a complete snapshot rather than keep what it has. */
-int sh_nav_regions_refresh_ids(sh_nav_map *m, const unsigned *ids, int id_count,
-                               sh_navr_entity_valid valid,
-                               sh_navr_entity_json get_json, void *ctx,
-                               const char **why);
+/* Refresh all cached Blocking Boxes by their live uniqueIds, including
+ * unmarked obstacles. Preserve map-array indices and instance ownership.
+ * Returns 0 without changing m when a complete snapshot is required. */
+int sh_nav_regions_refresh_known(sh_nav_map *m, sh_navr_entity_valid valid,
+                                 sh_navr_entity_json get_json, void *ctx,
+                                 int *read_count, const char **why);
 
 /* Move the right to refresh onto `m`, which must already hold a copy of what
  * the last read produced. Only one map at a time may be refreshed, and a

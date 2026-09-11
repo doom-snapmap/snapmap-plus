@@ -922,12 +922,12 @@ static int ov_is_regular_file(const char *path)
 
 typedef struct ov_miss_entry {
     unsigned hash;                    /* 0 = empty slot */
+    LONG generation;
     char     name[OV_MISS_NAME_CAP];
 } ov_miss_entry;
 
 static ov_miss_entry g_ov_miss[OV_MISS_SLOTS];
 static SRWLOCK       g_ov_miss_lock = SRWLOCK_INIT;
-static LONG          g_ov_miss_generation = -1;
 
 static unsigned ov_miss_hash(const char *name)
 {
@@ -936,36 +936,25 @@ static unsigned ov_miss_hash(const char *name)
     return h ? h : 1u;   /* 0 marks an empty slot */
 }
 
-/* Drop everything the previous package inventory answered. */
-static void ov_miss_sync_generation(void)
-{
-    LONG now = InterlockedCompareExchange(&g_ov_pkg_generation, 0, 0);
-    if (g_ov_miss_generation == now) return;
-    AcquireSRWLockExclusive(&g_ov_miss_lock);
-    if (g_ov_miss_generation != now) {
-        memset(g_ov_miss, 0, sizeof g_ov_miss);
-        g_ov_miss_generation = now;
-    }
-    ReleaseSRWLockExclusive(&g_ov_miss_lock);
-}
-
-static int ov_miss_known(const char *name, unsigned hash)
+static int ov_miss_known(const char *name, unsigned hash, LONG generation)
 {
     const ov_miss_entry *e = &g_ov_miss[hash % OV_MISS_SLOTS];
     int known;
     AcquireSRWLockShared(&g_ov_miss_lock);
-    known = e->hash == hash && strcmp(e->name, name) == 0;
+    known = e->hash == hash && e->generation == generation &&
+            strcmp(e->name, name) == 0;
     ReleaseSRWLockShared(&g_ov_miss_lock);
     return known;
 }
 
-static void ov_miss_remember(const char *name, unsigned hash)
+static void ov_miss_remember(const char *name, unsigned hash, LONG generation)
 {
     ov_miss_entry *e = &g_ov_miss[hash % OV_MISS_SLOTS];
     if (strlen(name) >= OV_MISS_NAME_CAP) return;   /* too long to hold exactly */
     AcquireSRWLockExclusive(&g_ov_miss_lock);
     strcpy_s(e->name, sizeof e->name, name);
     e->hash = hash;
+    e->generation = generation;
     ReleaseSRWLockExclusive(&g_ov_miss_lock);
 }
 
@@ -977,11 +966,12 @@ static int ov_resolve_existing(const char *name, char *out, size_t cap)
 {
     size_t i, n;
     unsigned hash;
+    LONG generation;
 
     if (!name || !name[0] || !out || cap == 0) return 0;
-    ov_miss_sync_generation();
+    generation = InterlockedCompareExchange(&g_ov_pkg_generation, 0, 0);
     hash = ov_miss_hash(name);
-    if (ov_miss_known(name, hash)) { out[0] = '\0'; return 0; }
+    if (ov_miss_known(name, hash, generation)) { out[0] = '\0'; return 0; }
     if (!build_override_path(name, out, cap)) return 0;
     if (ov_is_regular_file(out)) return 1;
 
@@ -1013,7 +1003,9 @@ static int ov_resolve_existing(const char *name, char *out, size_t cap)
         break;                      /* prefixes are disjoint; one match is all */
     }
     out[0] = '\0';
-    ov_miss_remember(name, hash);
+    /* A concurrent rescan cannot turn this old miss into a new one.
+     * Small caller buffers also cannot poison ordinary opens. */
+    if (cap >= MAX_PATH) ov_miss_remember(name, hash, generation);
     return 0;
 }
 
@@ -1681,6 +1673,7 @@ int sh_overrides_install(const uint8_t *module_base,
 
 int sh_overrides_set_root(const char *path)
 {
+    InterlockedIncrement(&g_ov_pkg_generation);
     if (path == NULL || path[0] == '\0') {
         default_root(g_root, sizeof g_root);
         return 1;

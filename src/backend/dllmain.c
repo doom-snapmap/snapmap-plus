@@ -435,8 +435,8 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
 #ifdef SH_DIAG
         shield_diag_detach();   /* DIAGNOSTIC: record crash-vs-clean-exit in sh_diag.log */
 #endif
-        sh_nav_bake_preview_stop();
-        backend_log_close();
+        /* Process exit releases the preview worker and log handle.
+         * Waiting or taking their locks here can deadlock the loader. */
     }
     return TRUE;
 }

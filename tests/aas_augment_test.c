@@ -1997,6 +1997,8 @@ static void test_required_routes_over_native_limit_refuse_bake(void)
     mkplat(&p, -150, -150, 150, 150, 128, "raised block");
     CHECK(!sh_aas_augment(a, &p, 1, &o, &rep));
     CHECK(rep.reach_limit_exceeded);
+    CHECK(rep.reach_limit_area == 1);
+    CHECK(rep.blamed_count == 1 && rep.blamed[0] == 0);
     sh_aas_free(a);
 }
 

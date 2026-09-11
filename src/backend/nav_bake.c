@@ -334,11 +334,9 @@ const char *sh_nav_bake_volumes_reason(void) { return g_volumes_reason; }
 
 int sh_nav_bake_refresh_volumes(int *volumes)
 {
-    unsigned ids[SH_NAVR_MAX_REGIONS];
-    sh_nav_region before[SH_NAVR_MAX_REGIONS];
-    int count = 0, before_count, i, marked, changed, done = 0;
+    sh_nav_map *before = NULL;
+    int count = 0, done = 0;
     const char *why = "read";
-
     if (volumes) *volumes = 0;
     if (InterlockedCompareExchange(&g_building, 0, 0)) {
         g_volumes_reason = "a bake is in progress";
@@ -349,27 +347,19 @@ int sh_nav_bake_refresh_volumes(int *volumes)
         if (!g_have_map || g_live_refused || !g_live_valid || !g_live_json) {
             why = "no map has been read yet"; __leave;
         }
-        before_count = g_map.region_count;
-        if (before_count <= 0 || before_count > SH_NAVR_MAX_REGIONS) {
-            why = "the map holds no marked volumes"; __leave;
-        }
-        for (i = 0; i < before_count; i++) ids[count++] = g_map.regions[i].entity;
-        memcpy(before, g_map.regions, (size_t)before_count * sizeof before[0]);
-
-        marked = sh_nav_regions_refresh_ids(&g_map, ids, count,
-                                            g_live_valid, g_live_json, g_live_ctx, &why);
-        if (marked < 0) __leave;   /* the list is stale; the caller reads the map */
-
-        changed = g_map.region_count != before_count ||
-                  memcmp(before, g_map.regions,
-                         (size_t)before_count * sizeof before[0]) != 0;
+        before = (sh_nav_map *)malloc(sizeof *before);
+        if (!before) { why = "allocation failed"; __leave; }
+        *before = g_map;
+        if (!sh_nav_regions_refresh_known(&g_map, g_live_valid, g_live_json,
+                                          g_live_ctx, &count, &why)) __leave;
         g_live_marked = g_map.region_count;
         g_live_scanned = count;
-        g_live_refused = 0;
-        if (changed) { g_geometry_revision++; bake_preview_clear(); bake_plan_locked(); }
+        if (memcmp(before, &g_map, sizeof g_map)) {
+            g_geometry_revision++; bake_preview_clear(); bake_plan_locked();
+        }
         if (volumes) *volumes = count;
         done = 1;
-    } __finally { ReleaseSRWLockExclusive(&g_bake_lock); }
+    } __finally { free(before); ReleaseSRWLockExclusive(&g_bake_lock); }
     g_volumes_reason = done ? "read" : why;
     return done;
 }
@@ -403,6 +393,7 @@ void sh_nav_bake_refresh_live(void)
         } else {
             /* An unreadable current snapshot must never reuse moved or deleted
              * geometry from an earlier edit generation. */
+            if (!g_live_refused) g_geometry_revision++;
             g_live_refused = 1;
             g_module_count = 0;
             bake_preview_clear();
@@ -799,8 +790,8 @@ static void preview_report_refusal(preview_task *t, const sh_aug_report *rep)
                 rep->reach_limit_area, SH_AAS_MAX_AREA_REACHABILITIES);
     backend_log(line);
     if (rep->blamed_count == 0) {
-        backend_log("NAV:   that area is shipped floor already at the limit; "
-                    "no volume of yours is at fault");
+        backend_log("NAV:   no requested volume could be attributed to the "
+                    "full area's outgoing routes");
         return;
     }
 
@@ -810,7 +801,7 @@ static void preview_report_refusal(preview_task *t, const sh_aug_report *rep)
         int src = rep->blamed[i];
         if (src < 0 || src >= t->plat_count) continue;
         _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "NAV:   %s routes into area %d; move or delete it to fit",
+                    "NAV:   %s contributes routes from area %d; reduce nearby route complexity",
                     t->plats[src].name, rep->reach_limit_area);
         backend_log(line);
         memcpy(t->refused[t->refused_count].c, t->plats[src].c,
@@ -1041,7 +1032,11 @@ int sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line line
     if(!line||!read_shipped||!bake_enabled()||InterlockedCompareExchange(&g_building,0,0))return 0;
     AcquireSRWLockExclusive(&g_bake_lock);
     __try {
-        if(!g_have_map||g_live_refused)__leave;
+        if(!g_have_map||g_live_refused) { current = 1; __leave; }
+        if (!g_module_count) {
+            g_preview_revision = g_geometry_revision;
+            current = 1; __leave;
+        }
 
         /* Collect whatever the worker finished, then schedule the next bake if
          * the geometry has moved past what is on screen. */

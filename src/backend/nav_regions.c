@@ -868,46 +868,72 @@ int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
     return navr_live_commit(m, w, answered, volumes, marked);
 }
 
-int sh_nav_regions_refresh_ids(sh_nav_map *m, const unsigned *ids, int id_count,
-                               sh_navr_entity_valid valid,
-                               sh_navr_entity_json get_json, void *ctx,
-                               const char **why)
+int sh_nav_regions_refresh_known(sh_nav_map *m,
+                                 sh_navr_entity_valid valid,
+                                 sh_navr_entity_json get_json, void *ctx,
+                                 int *read_count, const char **why)
 {
-    navr_live *w;
-    int i, answered = 0, volumes = 0, marked = 0;
+    sh_nav_map *next;
+    char *json;
+    int i, ok = 0;
     const char *ignored;
-
     if (!why) why = &ignored;
+    *why = "the cached box inventory is unavailable";
+    if (read_count) *read_count = 0;
+    if (!m || !valid || !get_json || m != g_loaded.owner ||
+        !g_loaded.count || g_loaded.count >= NAVR_MAX_VOLUMES) return 0;
+    next = (sh_nav_map *)malloc(sizeof *next);
+    json = (char *)malloc(NAVR_LIVE_JSON_CAP);
+    if (!next || !json) { *why = "allocation failed"; goto done; }
+    *next = *m;
+    memset(next->regions, 0, sizeof next->regions);
+    memset(next->obstacles, 0, sizeof next->obstacles);
+    next->region_count = next->obstacle_count = 0;
+    for (i = 0; i < next->instance_count; i++) next->instances[i].region_count = 0;
+    for (i = 0; i < g_loaded.count; i++) {
+        const navr_volume *v = &g_loaded.v[i];
+        sh_shard_doc doc;
+        sh_nav_region r;
+        char inherit[64];
+        int n, ed, state, at, parsed = 0;
+        *why = "a cached box no longer answers; a complete snapshot is required";
+        if (v->uid < 0 || v->uid > NAVR_LIVE_SCAN_MAX || !valid(v->uid, ctx)) goto done;
+        n = get_json(v->uid, json, NAVR_LIVE_JSON_CAP, ctx);
+        if (n <= 0 || n >= NAVR_LIVE_JSON_CAP ||
+            !sh_shard_doc_build(json, (size_t)n, &doc)) goto done;
+        memset(&r, 0, sizeof r);
+        ed = navr_member(json, n, &doc, 0, "entityDef", '{');
+        state = navr_member(json, n, &doc, ed, "state", '{');
+        at = navr_member(json, n, &doc, state, "edit", '{');
+        if (doc.c[0].kind == '{' && at >= 0 &&
+            navr_str(json, n, &doc, ed, "inherit", inherit, sizeof inherit) &&
+            !strcmp(inherit, NAVR_VOLUME_INHERIT)) {
+            r.marked = navr_marked(json, n, &doc, at);
+            r.block_demons = navr_bool(json, n, &doc, at, "blockDemons");
+            parsed = (!r.marked && !r.block_demons) ||
+                     navr_volume_face(json, n, &doc, at, &r);
+        }
+        sh_shard_doc_free(&doc);
+        if (!parsed) goto done;
+        if (read_count) (*read_count)++;
+        if (!r.marked && !r.block_demons) continue;
+        if (v->instance < 0 || v->instance >= next->instance_count ||
+            !next->instances[v->instance].module[0]) continue;
+        *why = "the geometry capacity requires a complete snapshot";
+        if (next->region_count + next->obstacle_count >= SH_NAVR_MAX_REGIONS) goto done;
+        r.instance = v->instance;
+        r.entity = v->entity;
+        if (r.marked) {
+            next->regions[next->region_count++] = r;
+            next->instances[r.instance].region_count++;
+        } else next->obstacles[next->obstacle_count++] = r;
+    }
+    *m = *next;
     *why = "read";
-    if (!m || !ids || id_count <= 0 || !valid || !get_json) { *why = "nothing to read"; return -1; }
-    if (m != g_loaded.owner) { *why = "this map is not the one the last read attributed"; return -1; }
-    if (g_loaded.count == 0) { *why = "the last read found no volumes to attribute"; return -1; }
-
-    w = (navr_live *)malloc(sizeof *w);
-    if (!w) return -1;
-    w->count = 0;
-    w->capped = 0;
-
-    for (i = 0; i < id_count; i++) {
-        if (ids[i] > (unsigned)NAVR_LIVE_SCAN_MAX) continue;
-        if (navr_live_one(m, w, (int)ids[i], valid, get_json, ctx,
-                          &answered, &volumes, &marked) < 0) break;
-    }
-
-    /* Every listed id was a marked volume when the list was made. One that no
-     * longer answers, or no longer is one, means the list is stale and only a
-     * complete snapshot can say what the map holds now. */
-    if (answered != id_count || marked != id_count) {
-        static char detail[160];
-        _snprintf_s(detail, sizeof detail, _TRUNCATE,
-                    "asked for %d volume(s), %d answered, %d still marked",
-                    id_count, answered, marked);
-        *why = detail;
-        free(w);
-        return -1;
-    }
-
-    return navr_live_commit(m, w, answered, volumes, marked);
+    ok = 1;
+done:
+    free(json); free(next);
+    return ok;
 }
 
 /* Refuse or commit a finished per-entity scan. A refusal leaves the map as it

@@ -452,9 +452,88 @@ static void test_snapshot_moves_and_changes_ownership(void)
     sh_nav_bake_set_snapshot(NULL,NULL);
 }
 
+static unsigned g_box_marked = 1, g_box_blocks = 3;
+static float g_box_x;
+static int g_box_missing;
+static int box_valid(int id, void *ctx)
+{
+    (void)ctx;
+    return id >= 100 && id <= 101 && id != g_box_missing;
+}
+static int box_json(int id, char *out, int cap, void *ctx)
+{
+    unsigned bit = 1u << (id - 100);
+    (void)ctx;
+    return _snprintf_s(out, cap, _TRUNCATE,
+        "{\"entityDef\":{\"inherit\":\"snapmaps/volume/blocking\",\"state\":{\"edit\":{"
+        "\"clipModelInfo\":{\"size\":{\"x\":1024.0,\"y\":1024.0,\"z\":128.0}},"
+        "\"spawnPosition\":{\"x\":%.1f,\"y\":0.0,\"z\":0.0},"
+        "\"blockDemons\":%s,\"flags\":{\"noFlood\":%s}}}}}",
+        id == 101 ? g_box_x : 0.0f,
+        g_box_blocks & bit ? "true" : "false", g_box_marked & bit ? "true" : "false");
+}
+static void test_fast_snapshot_reads_ids_and_obstacles(void)
+{
+    const int owner[2] = {0, 0};
+    static sh_nav_map before, after;
+    unsigned long revision;
+    int read = 0;
+    sh_nav_bake_test_reset();
+    sh_nav_bake_set_snapshot(snapshot_read, NULL);
+    sh_nav_bake_set_live_editor(live_count, box_valid, box_json, NULL);
+    g_snapshot_json = make_map("ind_dlc/room", 1, 2, 1, 3, owner);
+    sh_nav_bake_refresh_live();
+    sh_nav_bake_test_copy_map(&before);
+    revision = sh_nav_bake_geometry_revision();
+    CHECK(sh_nav_bake_refresh_volumes(&read) == 1 && read == 2);
+    sh_nav_bake_test_copy_map(&after);
+    CHECK(!memcmp(&before, &after, sizeof before));
+    CHECK(sh_nav_bake_geometry_revision() == revision);
+    g_box_x = 200;
+    CHECK(sh_nav_bake_refresh_volumes(&read) == 1);
+    sh_nav_bake_test_copy_map(&after);
+    CHECK(after.obstacles[0].c[0][0] == before.obstacles[0].c[0][0] + 200);
+    CHECK(after.obstacles[0].entity == 1);
+    CHECK(sh_nav_bake_geometry_revision() != revision);
+    g_box_marked = 3;
+    CHECK(sh_nav_bake_refresh_volumes(&read) == 1);
+    sh_nav_bake_test_copy_map(&after);
+    CHECK(after.region_count == 2 && after.obstacle_count == 0);
+    CHECK(after.regions[1].entity == 1 && after.regions[1].marked);
+    g_box_blocks = 1; g_box_marked = 1;
+    CHECK(sh_nav_bake_refresh_volumes(&read) == 1);
+    sh_nav_bake_test_copy_map(&before);
+    CHECK(before.region_count == 1 && before.obstacle_count == 0);
+    g_box_missing = 101;
+    CHECK(sh_nav_bake_refresh_volumes(&read) == 0);
+    sh_nav_bake_test_copy_map(&after);
+    CHECK(!memcmp(&before, &after, sizeof before));
+    g_box_missing = 0; g_box_x = 0; g_box_blocks = 3; g_box_marked = 1;
+    sh_nav_bake_set_live_editor(NULL, NULL, NULL, NULL);
+    sh_nav_bake_set_snapshot(NULL, NULL);
+}
+
+static void unexpected_line(const float a[3], const float b[3], void *ctx)
+{
+    (void)a; (void)b; (void)ctx; CHECK(0);
+}
+static void test_empty_preview_completes(void)
+{
+    const int owner[1] = {0};
+    char *json;
+    sh_nav_bake_test_reset();
+    json = make_map("ind_dlc/room", 1, 0, 0, 0, owner);
+    sh_nav_bake_set_map(json, strlen(json));
+    CHECK(sh_nav_bake_preview(no_shipped_bytes, unexpected_line, NULL, NULL) == 1);
+    sh_nav_bake_set_map(NULL, 0);
+    CHECK(sh_nav_bake_preview(no_shipped_bytes, unexpected_line, NULL, NULL) == 1);
+}
+
 int main(void)
 {
     printf("nav_bake_test\n");
+    test_fast_snapshot_reads_ids_and_obstacles();
+    test_empty_preview_completes();
     test_name_grammar();
     test_marked_volume_is_planned();
     test_unmarked_map_is_silent();

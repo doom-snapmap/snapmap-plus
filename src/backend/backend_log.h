@@ -12,7 +12,7 @@ void backend_set_logpath_from_module(HINSTANCE self);
 /* Timestamp + "[snapmap+] " prefix; write to OutputDebugStringA and append to the log file. */
 void backend_log(const char *msg);
 
-/* Release the session log handle. Call once from DllMain on detach. */
+/* Release the session log handle outside DllMain, after writers stop. */
 void backend_log_close(void);
 
 #endif /* BACKEND_LOG_H */

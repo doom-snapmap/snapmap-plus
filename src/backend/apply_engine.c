@@ -1606,8 +1606,7 @@ static void ae_nav_preview(const uint8_t *ed)
  *
  * A read taken mid-drag would be thrown away by the next one anyway, so none
  * is taken while the editor is holding geometry; the one that counts is taken
- * when it is put down. Adding or deleting an entity, or changing the
- * selection, also reads at once. */
+ * when it is put down. Adding or deleting an entity also reads at once. */
 #define NAV_REFRESH_BASE_MS  1000
 #define NAV_REFRESH_IDLE_MS  8000
 #define NAV_REFRESH_BUDGET   50     /* wait at least 50x the cost of one read */
@@ -1735,7 +1734,9 @@ static void ae_nav_refresh_poll(void)
     if (!g_cmdsys || !g_add_command || !g_buffer_cmd) return;
     /* Both consumers of the read -- the green preview and the resource served at
      * Play -- are off with navigation disabled, so the read has no reader. */
-    if (!sh_config_get_bool("navmesh.enabled", &enabled, NULL) || !enabled) return;
+    if (!sh_config_get_bool("navmesh.enabled", &enabled, NULL) || !enabled) {
+        sh_nav_preview_clear(); g_preview_built_revision = ~0UL; return;
+    }
 
     ae_nav_probe(ed, &ents, &holding);
     if (holding) {
@@ -1766,6 +1767,7 @@ static void ae_nav_refresh_poll(void)
         g_nav_was_holding = 0;
         g_nav_refresh_wait = NAV_REFRESH_BASE_MS;
         g_nav_refresh_next = 0;
+        g_nav_until_full = 0; /* changed topology or module transform */
     }
     if (now < g_nav_refresh_next) return;
     g_nav_refresh_next = now + g_nav_refresh_wait;

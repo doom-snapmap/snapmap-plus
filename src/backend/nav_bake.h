@@ -49,7 +49,7 @@ typedef int (*sh_nav_bake_entity_count)(void *ctx);
  */
 void sh_nav_bake_refresh_live(void);
 
-/* Re-read only the volumes the last complete refresh found, which is a small
+/* Re-read all boxes the last complete refresh found, including obstacles, a small
  * part of the map and correspondingly cheaper. Returns 1 when it committed an
  * answer, or 0 when it could not -- a new or deleted volume, a moved module, a
  * map it has not read yet -- which the caller answers with a complete refresh.
@@ -88,7 +88,7 @@ typedef void (*sh_nav_preview_colour_fn)(float r, float g, float b, void *ctx);
 int sh_nav_bake_preview(sh_nav_bake_reader read_shipped, sh_nav_preview_line line,
                         sh_nav_preview_colour_fn colour, void *ctx);
 
-/* Stop the worker that bakes the preview. Call once from DllMain on detach. */
+/* Request worker shutdown outside DllMain; test/process teardown only. */
 void sh_nav_bake_preview_stop(void);
 
 /* 1 when the worker has finished a bake nobody has collected. Cheap enough to

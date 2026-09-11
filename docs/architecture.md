@@ -115,6 +115,19 @@ player's installed game and enabled packages. The product does not embed DOOM
 assets. Resource caches and package snapshots need explicit reader lifetimes;
 rescanning must not invalidate storage a reader or native object still uses.
 
+Navigation snapshots and shipped resource reads run on the engine thread.
+A worker owns copied preview inputs and performs the arithmetic bake, while the
+frame installs only a result matching the current geometry revision. The bake
+lock precedes the worker handoff lock; the worker never acquires the bake lock.
+Published lines remain until their replacement completes, except during a drag
+or after an empty or refused snapshot. Sparse box refreshes include unmarked
+obstacles and use live uniqueIds; topology changes require a complete snapshot.
+Play always takes its own complete snapshot. The worker and session log handle
+have process lifetime; DllMain must not wait on them or acquire their locks.
+
+Override misses carry the package generation that produced them. A rescan makes
+old misses inapplicable even when an earlier lookup completes concurrently.
+
 ## Configuration
 
 The backend owns `%LOCALAPPDATA%/snapmap-plus/config.json`, including defaults,

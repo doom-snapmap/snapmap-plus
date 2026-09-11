@@ -290,6 +290,18 @@ int main(void)
               "cooked/decls/snapeditorentitydef/demons/cyberdemon_enc.decl",
               resolved, sizeof(resolved)));
 
+    /* A cached miss is retained until a rescan, then a new file must resolve. */
+    CHECK(!sh_overrides_test_resolve_cached("generated/spirv/new_file.vspv",
+                                           resolved, sizeof resolved));
+    join(path, sizeof path, root,
+         "overrides\\cyberdemon\\shaders\\generated\\spirv\\new_file.vspv");
+    CHECK(write_file(path, "shader"));
+    CHECK(!sh_overrides_test_resolve_cached("generated/spirv/new_file.vspv",
+                                           resolved, sizeof resolved));
+    CHECK(sh_overrides_rescan_packages() != SH_OVERRIDES_RESCAN_FAILED);
+    CHECK(sh_overrides_test_resolve_cached("generated/spirv/new_file.vspv",
+                                          resolved, sizeof resolved));
+
     {
         volatile LONG failures = 0;
         HANDLE readers[3];

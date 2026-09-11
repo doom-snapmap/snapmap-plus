@@ -331,7 +331,13 @@ whole rotated box, including an overhanging slope.
 Adding boxes does not impose a fixed 2,048-traversal cutoff. There are still engine
 limits on navigation complexity. If a bake cannot fit safely, Snapmap+ refuses
 that module's custom navigation and records the reason in `sh_backend.log`.
-Use `sh_navmesh` in the game console for the current bake report.
+Use `sh_navmesh` in the game console for the current bake report. When a refusal
+identifies boxes involved in a full route area, the preview marks them red.
+
+The preview updates after placement and hides while geometry is held. Baking
+runs in the background, so the previous lines can remain briefly while the new
+result arrives. `sh_perf` reports time spent reading the map and building the
+preview; `sh_perf reset` clears those counters.
 
 ## The Assets Tab
 
