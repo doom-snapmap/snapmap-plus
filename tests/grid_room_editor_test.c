@@ -6,6 +6,7 @@ static sh_grid_size rooms[2];
 static unsigned char widget[0x130];
 static int rows,changes,native_changes,reads,refuse_apply;
 static unsigned placement_max;
+static float input_ranges[18];
 static unsigned char editor[0x23700],edit_data[0x100];
 static int pressed,blocked,opened,opened_index,help_rows,updates,transition;
 void backend_log(const char *s){(void)s;}
@@ -24,9 +25,13 @@ static void add(void *p,int id,const char *label,const uint32_t *a,const uint32_
     unsigned char enabled,const float *v,float min,float max,float small_step,float large_step,
     unsigned char integral,void *context,const char *extra,const void *value)
 {
-    assert(id==GRID_PROPERTY_SIZE&&!strcmp(label,"Grid Room Size"));
-    assert(a&&b&&enabled&&min==1&&max==65534&&small_step==1&&large_step==16&&integral);
+    unsigned char *c=context;int i,n=*(int*)(c+0xa8);
+    assert((id==GRID_PROPERTY_SIZE||id==11)&&label);
+    assert(a&&b&&enabled&&small_step>0&&large_step>0&&integral);
     assert(context==(char*)p+0x280&&!extra&&!value);
+    assert(n==0&&*(void**)(c+0xa0)==input_ranges&&*(int*)(c+0xac)==9);
+    for(i=0;i<3;i++){input_ranges[i*2]=min;input_ranges[i*2+1]=max;}
+    *(int*)(c+0xa8)=3;
     *(int*)(widget+0x40)=id;set_vec(widget,v);++rows;
 }
 static unsigned char input_pressed(void *input,int action)
@@ -87,7 +92,10 @@ int main(void)
     sh_grid_default(SH_GRID_MODERN,&rooms[0]);sh_grid_default(SH_GRID_MODERN,&rooms[1]);second=rooms[1];
     g_populate=native_populate;g_change=native_change;g_add_vec=add;g_set_vec=set_vec;
     g_hash=hash;g_read=read_room;g_apply=apply_room;
+    *(void**)(panel+0x320)=input_ranges;*(int*)(panel+0x328)=3;*(int*)(panel+0x32c)=9;
+    input_ranges[1]=input_ranges[3]=input_ranges[5]=63;
     grid_populate(panel,0,rooms,NULL,NULL);assert(rows==1);
+    assert(input_ranges[0]==1&&input_ranges[1]==65534&&*(int*)(panel+0x328)==3);
     *(float*)(widget+0x100)=1536;*(float*)(widget+0x104)=1024;*(float*)(widget+0x108)=512;
     grid_changed(panel,widget,100);assert(changes==1&&rooms[0].xyz[0]==1536);
     assert(!memcmp(&rooms[1],&second,sizeof second));
@@ -108,5 +116,9 @@ int main(void)
     assert(rooms[0].xyz[1]==700&&*(float*)(widget+0x104)==700);placement_max=0;
     rooms[1].kind=SH_GRID_NONE;grid_populate(panel,1,rooms,NULL,NULL);assert(rows==1);
     grid_populate(panel,-1,rooms,NULL,NULL);assert(rows==1);
+    /* Returning to ordinary Settings must restore its smaller range too. */
+    {uint32_t text=1;float offset[3]={0};
+        grid_add_vec(panel,11,"Grid Offset",&text,&text,1,offset,0,63,1,10,1,panel+0x280,NULL,NULL);
+        assert(input_ranges[0]==0&&input_ranges[1]==63&&*(int*)(panel+0x328)==3);}
     assert(reads>=5);blueprint_tests();puts("grid_room_editor_test: passed");return 0;
 }

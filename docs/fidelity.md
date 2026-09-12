@@ -24,6 +24,20 @@ Grid Room resizing is included in the backend and uses DOOM's native Module
 Properties panel and Blueprint X action. Its saved module identities require
 runtime resources reconstructed by Snapmap+. Such maps are not compatible with
 vanilla or console players, even when their placed entities use stock assets.
+Restoring the original dimensions restores the stock module declaration.
+Map rendering defaults to the game's original module environments; its explicit
+native-mode setting is an ordinary map variable that vanilla can load.
+Custom rendering from earlier saves remains enabled until the author turns it off.
+
+Embedded packages are selected from the map's current declaration references
+on each native save. Deleting the last dependent object removes its package
+payload from that map; packages still referenced by objects or logic remain,
+and installed client packages are not removed. A native save/reopen test with a
+resized room, custom rendering and Cyberdemon retained the identical embedded
+package. After deleting Cyberdemon and resetting the room and rendering,
+the same saved map loaded and completed Play/return with both Snapmap+ DLLs
+uninstalled on Vulkan. This does not establish compatibility for unrelated
+mod-only content or console platforms.
 
 The `sh` console dispatcher executes SnapStack handlers on DOOM's main thread,
 inside the engine's command callback. SnapHak queued these handlers onto its

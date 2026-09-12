@@ -7,6 +7,7 @@
 
 void backend_log(const char *message);
 #define RENDER_PROPERTY 0x534d5000u
+#define RENDER_CUSTOM (RENDER_PROPERTY+SH_RENDER_FIELDS)
 typedef void (*state_fn)(void *,void *);
 typedef void (*populate_fn)(void *,int);
 typedef void (*controller_fn)(void *);
@@ -14,6 +15,9 @@ typedef unsigned char (*dirty_fn)(void *);
 typedef void *(*float_fn)(void *,const char *,const uint32_t *,const uint32_t *,
     unsigned char,float,float,float,float,float,unsigned char);
 typedef void (*title_fn)(void *,const char *);
+typedef void (*bool_fn)(void *,unsigned,const char *,const uint32_t *,const uint32_t *,
+    unsigned char,unsigned char,const char *,const char *);
+typedef void (*enable_fn)(void *,unsigned char);
 typedef uint32_t (*hash_fn)(const char *);
 static state_fn g_enter,g_exit;
 static populate_fn g_populate;
@@ -21,12 +25,16 @@ static controller_fn g_apply,g_reset;
 static dirty_fn g_dirty;
 static float_fn g_add;
 static title_fn g_title;
+static bool_fn g_add_bool;
+static enable_fn g_enable;
+static controller_fn g_bool_refresh;
 static hash_fn g_hash;
 static void *g_editor,*g_map,*g_panel,*g_manager;
 static sh_map_render g_base,g_draft;
 static int g_active,g_installed;
 static LONG g_faulted;
 static void *g_widgets[SH_RENDER_FIELDS];
+static unsigned char *g_custom_widget;
 
 typedef struct field_info {const char *name,*label,*help;float min,max,small_step,large_step;} field_info;
 static const field_info fields[SH_RENDER_FIELDS]={
@@ -47,10 +55,16 @@ static int active(void)
 static void refresh_values(void)
 {
     unsigned i;
+    if(g_custom_widget) {
+        g_custom_widget[0xd0]=(unsigned char)g_draft.custom;
+        g_custom_widget[0xc8]=(unsigned char)(g_draft.custom!=g_base.custom);
+        g_bool_refresh(g_custom_widget);
+    }
     for(i=0;i<SH_RENDER_FIELDS;i++)if(g_widgets[i]) {
         unsigned char *v=(unsigned char*)g_widgets[i];
         *(float*)(v+0x120)=g_draft.value[i];
         v[0xc8]=(unsigned char)(g_draft.value[i]!=g_base.value[i]);
+        g_enable(v,(unsigned char)g_draft.custom);
     }
 }
 static int changed(void *panel,void *widget,int action)
@@ -58,9 +72,12 @@ static int changed(void *panel,void *widget,int action)
     unsigned id;int handled=0;(void)action;
     __try {
         id=*(unsigned*)((unsigned char*)widget+0x40);
-        if(id<RENDER_PROPERTY||id>=RENDER_PROPERTY+SH_RENDER_FIELDS)return 0;
+        if(id<RENDER_PROPERTY||id>RENDER_CUSTOM)return 0;
         handled=1;
-        if(active()&&panel==g_panel&&widget==g_widgets[id-RENDER_PROPERTY]) {
+        if(active()&&panel==g_panel&&id==RENDER_CUSTOM&&widget==g_custom_widget) {
+            g_draft.custom=g_custom_widget[0xd0]!=0;
+            refresh_values();
+        } else if(active()&&panel==g_panel&&id<RENDER_CUSTOM&&g_draft.custom&&widget==g_widgets[id-RENDER_PROPERTY]) {
             sh_map_render_adjust(&g_draft,id-RENDER_PROPERTY,*(float*)((unsigned char*)widget+0x120));
             refresh_values();
         }
@@ -69,7 +86,7 @@ static int changed(void *panel,void *widget,int action)
 }
 static void enter(void *state,void *editor)
 {
-    g_active=0;g_editor=editor;g_panel=NULL;memset(g_widgets,0,sizeof g_widgets);
+    g_active=0;g_editor=editor;g_panel=NULL;g_custom_widget=NULL;memset(g_widgets,0,sizeof g_widgets);
     __try {
         unsigned char *e=(unsigned char*)editor;
         g_map=*(void**)(e+0x204c8);
@@ -80,7 +97,7 @@ static void enter(void *state,void *editor)
 }
 static void leave(void *state,void *editor)
 {
-    g_active=0;g_panel=NULL;g_map=NULL;memset(g_widgets,0,sizeof g_widgets);
+    g_active=0;g_panel=NULL;g_map=NULL;g_custom_widget=NULL;memset(g_widgets,0,sizeof g_widgets);
     g_exit(state,editor);
 }
 static void populate(void *panel,int category)
@@ -89,12 +106,24 @@ static void populate(void *panel,int category)
     g_populate(panel,category);
     __try {
         if(!active())return;
-        memset(g_widgets,0,sizeof g_widgets);g_panel=panel;
+        memset(g_widgets,0,sizeof g_widgets);g_custom_widget=NULL;g_panel=panel;
         if(category!=0)return;
         g_title(panel,"Map Rendering");
+        {
+            unsigned char *p=(unsigned char*)panel;
+            int n=*(int*)(p+0x200);
+            uint32_t label=g_hash("#str_smp_render_custom"),help=g_hash("#str_smp_render_custom_help");
+            g_add_bool(panel,RENDER_CUSTOM,"Custom Rendering",&label,&help,1,
+                (unsigned char)g_base.custom,"#swf_guis_on","#swf_guis_off");
+            if(*(int*)(p+0x200)!=n+1||!*(void**)(p+0x1f8)) {
+                InterlockedExchange(&g_faulted,1);return;
+            }
+            g_custom_widget=(*(unsigned char***)(p+0x1f8))[n];
+            if(!g_custom_widget){InterlockedExchange(&g_faulted,1);return;}
+        }
         for(i=0;i<SH_RENDER_FIELDS;i++) {
             uint32_t label=g_hash(fields[i].label),help=g_hash(fields[i].help);
-            unsigned char *v=(unsigned char*)g_add(panel,fields[i].name,&label,&help,1,g_base.value[i],
+            unsigned char *v=(unsigned char*)g_add(panel,fields[i].name,&label,&help,(unsigned char)g_draft.custom,g_base.value[i],
                 fields[i].min,fields[i].max,fields[i].small_step,fields[i].large_step,1);
             if(!v){InterlockedExchange(&g_faulted,1);return;}
             *(unsigned*)(v+0x40)=RENDER_PROPERTY+i;g_widgets[i]=v;
@@ -133,16 +162,18 @@ static const sig_result *binding(const sig_result *r,size_t n,const char *name)
 int sh_map_render_editor_install(const sig_result *results,size_t count)
 {
     static const char *names[]={"RenderSettingsEnter","RenderSettingsExit","RenderSettingsPopulate",
-        "RenderSettingsApply","RenderSettingsReset","RenderSettingsDirtyCall","RenderAddFloat","RenderAddTitle","StridsHash"};
-    const sig_result *r[9];void **originals[]={(void**)&g_enter,(void**)&g_exit,(void**)&g_populate,
+        "RenderSettingsApply","RenderSettingsReset","RenderSettingsDirtyCall","RenderAddFloat","RenderAddTitle","StridsHash",
+        "RenderAddBool","RenderWidgetEnable","RenderBoolRefresh"};
+    const sig_result *r[12];void **originals[]={(void**)&g_enter,(void**)&g_exit,(void**)&g_populate,
         (void**)&g_apply,(void**)&g_reset,(void**)&g_dirty};
     void *handlers[]={(void*)enter,(void*)leave,(void*)populate,(void*)apply,(void*)reset,(void*)dirty};
     const size_t stolen[]={15,16,20,16,20,16};unsigned i;uintptr_t address;int32_t rel;
     static const unsigned char dirty_prefix[]={0x48,0x89,0x5c,0x24,8,0x57,0x48,0x83,0xec,0x20,0x8b,0x51,8,0x48,0x8b,0xf9};
     if(g_installed)return 1;
     for(i=0;i<6;i++)if(*originals[i])return 0;
-    for(i=0;i<9;i++){r[i]=binding(results,count,names[i]);if(!r[i])return 0;}
+    for(i=0;i<12;i++){r[i]=binding(results,count,names[i]);if(!r[i])return 0;}
     g_add=(float_fn)r[6]->addr;g_title=(title_fn)r[7]->addr;g_hash=(hash_fn)r[8]->addr;
+    g_add_bool=(bool_fn)r[9]->addr;g_enable=(enable_fn)r[10]->addr;g_bool_refresh=(controller_fn)r[11]->addr;
     for(i=0;i<6;i++) {
         address=r[i]->addr;
         if(i==5) {

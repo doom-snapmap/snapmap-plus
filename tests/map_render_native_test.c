@@ -13,6 +13,26 @@ static void row(unsigned char *r,const char *name,const char *value)
     *(int*)(r+8)=(int)strlen(name);*(const char**)(r+16)=name;
     *(int*)(r+64)=(int)strlen(value);*(const char**)(r+72)=value;
 }
+static unsigned char heap_state[0xc8],storage[8*104];
+static char strings[16][193];
+static int assigns,fail_resize;
+static void *heap_get(void){return heap_state;}
+static void heap_push(void *h,int id)
+{int *depth=(int*)((unsigned char*)h+0xc4);assert(id==0);*(int*)((unsigned char*)h+0x44+(*depth)++*4)=id;}
+static void heap_pop(void *h){--*(int*)((unsigned char*)h+0xc4);}
+static unsigned char resize_list(void *p,int count)
+{
+    unsigned char *list=p;int n=*(int*)(list+8);
+    assert(*(int*)(heap_state+0xc4)==2&&*(int*)(heap_state+0x48)==0);
+    if(fail_resize)return 0;
+    assert(count<=8);if(n)memcpy(storage,*(void**)list,(size_t)n*104);
+    *(void**)list=storage;*(int*)(list+12)=count;return 1;
+}
+static void assign_string(void *p,const char *s)
+{
+    unsigned char *str=p;assert(assigns<16&&strlen(s)<193&&*(int*)(heap_state+0xc4)==2);
+    strcpy_s(strings[assigns],193,s);*(int*)(str+8)=(int)strlen(s);*(char**)(str+16)=strings[assigns++];
+}
 int main(void)
 {
     unsigned char saved[0x770]={0},edit[0x800]={0},rows[208]={0},block[48]={0},ops[48]={0};
@@ -34,8 +54,13 @@ int main(void)
     assert(values[12]==100*.00002f&&values[20]==1500&&values[16]==6500);
     assert(values[8]==.35f&&values[9]==.4f&&values[10]==.45f&&values[11]==1);
     /* A fresh map and a failed load cannot inherit the previous map's fog. */
-    sh_map_render_build(edit);assert(g_ready&&g_runtime.value[1]==0);
-    render_clip(block,NULL,0);assert(values[12]==0);
+    for(i=0;i<24;i++)values[i]=(float)(i+42);
+    sh_map_render_build(edit);assert(g_ready&&!g_runtime.custom);
+    render_clip(block,NULL,0);for(i=0;i<24;i++)assert(values[i]==(float)(i+42));
+    row(rows,SH_RENDER_VARIABLE,"2;0;200000;80;500;1500;.1;.2;.3");
+    sh_map_render_loaded(saved);assert(g_ready&&!g_runtime.custom);
+    render_clip(block,NULL,0);for(i=0;i<24;i++)assert(values[i]==(float)(i+42));
+    row(rows,SH_RENDER_VARIABLE,"1;60000;100;1500;6500;0.35;0.4;0.45");
     sh_map_render_loaded(NULL);assert(!g_ready);values[4]=8192;
     assert(render_clip(block,NULL,0)==8192);
     sh_map_render_loaded(saved);game=0;
@@ -45,5 +70,24 @@ int main(void)
     *(int*)(saved+0x1a8)=2;sh_map_render_loaded(saved);assert(!g_ready);
     *(int*)(saved+0x1a8)=1;sh_map_render_loaded(saved);
     *(int*)(block+32)=5;assert(render_clip(block,NULL,0)==8192);
+    /* Save conversion persists even the native mode, appends without moving
+     * another string's index, and returns to the caller's original heap. */
+    g_resize=resize_list;g_assign=assign_string;
+    g_heap.get=heap_get;g_heap.push=heap_push;g_heap.pop=heap_pop;
+    *(int*)(heap_state+0xc4)=1;*(int*)(heap_state+0x44)=2;
+    memset(rows,0,sizeof rows);row(rows,"author_variable","leave this value");
+    *(void**)(edit+0xa8)=rows;*(int*)(edit+0xb0)=1;*(int*)(edit+0xb4)=1;
+    *(int*)(edit+0x5c8)=12;
+    sh_map_render_build(edit);assert(g_ready&&!g_runtime.custom&&assigns==2);
+    assert(*(int*)(heap_state+0xc4)==1&&*(int*)(heap_state+0x44)==2);
+    assert(*(int*)(edit+0xb0)==2&&*(int*)(edit+0x5c8)==12);
+    assert(!strcmp(*(char**)(storage+16),"author_variable")&&!strcmp(*(char**)(storage+72),"leave this value"));
+    assert(sh_map_render_read(edit,&settings)&&!settings.custom);
+    settings.custom=1;settings.value[1]=73;assert(sh_map_render_write(edit,&settings)&&assigns==3);
+    settings.custom=0;assert(sh_map_render_write(edit,&settings)&&assigns==4);
+    assert(sh_map_render_read(edit,&settings)&&!settings.custom&&settings.value[1]==73);
+    sh_map_render_build(edit);assert(assigns==4&&*(int*)(edit+0xb0)==2);
+    memset(edit,0,sizeof edit);fail_resize=1;
+    assert(!sh_map_render_write(edit,&settings)&&*(int*)(edit+0xb0)==0&&*(int*)(heap_state+0xc4)==1);
     puts("map_render_native_test: passed");return 0;
 }

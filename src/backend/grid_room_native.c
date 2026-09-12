@@ -33,6 +33,14 @@ typedef void (*set_transform_fn)(void *,const float *);
 typedef float *(*portal_bounds_fn)(void *,float *,int);
 typedef float *(*world_bounds_fn)(void *,float *,const float *);
 typedef unsigned char (*build_collision_fn)(void *,void *,int);
+typedef void (*refresh_surfaces_fn)(void *,void *,void *);
+typedef int (*containing_module_fn)(void *,const float *);
+typedef struct grid_ray_hit {
+    float point[3],normal[3];
+    int module,unused;
+    float fraction;
+} grid_ray_hit;
+typedef grid_ray_hit *(*module_ray_fn)(void *,grid_ray_hit *,const float *,const float *,int,void *,int);
 typedef void **(*entity_tree_fn)(void *,void **);
 typedef void (*entity_tree_apply_fn)(void *,void *);
 typedef unsigned char (*tree_vec_fn)(void *,const char *,const float *,void *);
@@ -70,6 +78,9 @@ static set_transform_fn g_set_transform;
 static portal_bounds_fn g_portal_bounds;
 static world_bounds_fn g_world_bounds;
 static build_collision_fn g_build_collision;
+static refresh_surfaces_fn g_refresh_surfaces;
+static containing_module_fn g_containing_module;
+static module_ray_fn g_module_ray;
 static const float *g_environment_bounds;
 static entity_tree_fn g_entity_tree;
 static entity_tree_apply_fn g_apply_tree,g_read_properties;
@@ -78,6 +89,41 @@ static tree_float_fn g_tree_float;
 static tree_destroy_fn g_tree_destroy;
 static tree_free_fn g_tree_free;
 static sh_process_heap_api g_heap;
+
+static int grid_containing_module(void *collision,const float *point)
+{
+    int result=g_containing_module(collision,point),i,n,k;unsigned j;
+    unsigned char *map,*records,*record,*wrapper,*module;
+    float bounds[6],end[3],reach;grid_ray_hit up={0},down={0};
+    if(result!=-1||!g_editor||collision!=g_editor+0x20550||!g_editor[8])return result;
+    for(k=0;k<3;++k)if(!isfinite(point[k]))return result;
+    map=*(unsigned char**)(g_editor+0x204c8);if(!map)return result;
+    n=*(int*)(map+0x758);records=*(unsigned char**)(map+0x750);
+    if(n<1||n>4096||!records)return result;
+    for(i=0;i<n;++i){
+        record=records+(size_t)i*0x98;if(!record[0x30])continue;
+        wrapper=*(unsigned char**)record;
+        for(j=0;j<g_count;++j)if(g_entries[j].state==2&&
+            *(void**)g_entries[j].record==wrapper)break;
+        if(j==g_count||g_entries[j].size.xyz[2]<=6000)continue;
+        module=*(unsigned char**)wrapper;if(!module)continue;
+        g_world_bounds(record,bounds,(const float*)(module+0xa0));
+        for(k=0;k<3;++k)if(!isfinite(bounds[k])||!isfinite(bounds[k+3])||
+            point[k]<bounds[k]||point[k]>bounds[k+3])break;
+        if(k!=3)continue;
+        /* Native containment requires opposing hits on the same room, but its
+         * fixed 6000-unit rays cannot reach a tall room's ceiling or floor.
+         * Keep that collision test and extend it only for an admitted variant. */
+        reach=fmaxf(6000,bounds[5]-bounds[2]+16);
+        memcpy(end,point,sizeof end);end[2]+=reach;
+        g_module_ray(collision,&up,point,end,-1,*(void**)collision,*(int*)((char*)collision+8));
+        if(up.module!=i)continue;
+        end[2]=point[2]-reach;
+        g_module_ray(collision,&down,point,end,-1,*(void**)collision,*(int*)((char*)collision+8));
+        if(down.module==i)return i;
+    }
+    return result;
+}
 
 static unsigned char grid_build_collision(void *collision,void *map,int instance)
 {
@@ -528,6 +574,16 @@ static int owned_entity(unsigned char *map,int instance,int id)
     for(i=start;i<end;++i)if(values[i]==id)return 1;
     return 0;
 }
+static void refresh_placement_surfaces(unsigned char *map)
+{
+    void *surfaces=*(void**)(g_editor+0x20548),*world=*(void**)(g_editor+0x198);
+    /* The native camera normally rebuilds these on Object Mode entry. A
+     * dimension edit replaces module geometry without re-entering that mode.
+     * Keep its placement rays and glowing surface display on the same module
+     * revision. Blueprint leaves an uninitialized display to the native entry. */
+    if(surfaces&&world&&*(int*)((unsigned char*)surfaces+8)>0)
+        g_refresh_surfaces(surfaces,map,world);
+}
 int sh_grid_native_apply(void *edit_data,int instance,const sh_grid_size *size)
 {
     sh_grid_size before,accepted;sh_grid_warp warp;sh_process_heap_scope heap={0};
@@ -537,7 +593,7 @@ int sh_grid_native_apply(void *edit_data,int instance,const sh_grid_size *size)
     int *old_connections=NULL;
     int *keys,*doors,*frames,*connections;void *wrapper;
     const char *reason="GRID: native size edit refused";
-    if(!g_replace||!g_reconnect||!g_edit_entity||!g_set_transform||!g_portal_bounds||!g_world_bounds||
+    if(!g_replace||!g_reconnect||!g_edit_entity||!g_set_transform||!g_portal_bounds||!g_world_bounds||!g_refresh_surfaces||
        !g_editor||!size||!sh_grid_warp_init(size,&warp)||
        InterlockedCompareExchange(&g_edit_faulted,0,0)||InterlockedCompareExchange(&g_edit_busy,1,0))return 0;
     __try {
@@ -608,6 +664,8 @@ int sh_grid_native_apply(void *edit_data,int instance,const sh_grid_size *size)
             for(i=0;i<n;++i)if(moves[i].assigned&&!records[(size_t)i*0x98+0x30])__leave;
             reason="GRID: native portal connection changed; restoring the previous layout";
             if(*(int*)(map+0x7c8)!=ports||memcmp(*(void**)(map+0x7c0),old_connections,(size_t)ports*sizeof(int)))__leave;
+            reason="GRID: placement surface refresh failed; restoring the previous room dimensions";
+            refresh_placement_surfaces(map);
             ok=1;
         } __finally {
             if(!ok&&(attempted||light_attempted||replaced)){
@@ -621,6 +679,7 @@ int sh_grid_native_apply(void *edit_data,int instance,const sh_grid_size *size)
                         if(moves)for(i=0;i<n;++i)if(memcmp(moves[i].before,moves[i].after,0x98))
                             g_replace(map,(unsigned)i,moves[i].before);
                         g_reconnect(map);
+                        if(replaced)refresh_placement_surfaces(map);
                     }
                 } __except(EXCEPTION_EXECUTE_HANDLER){restored=0;}
                 if(!restored){InterlockedExchange(&g_edit_faulted,1);
@@ -642,7 +701,11 @@ int sh_grid_native_install(const sig_result *r,size_t n,const uint8_t *base)
 {
     void *find=clean(r,n,"GridFindModule"),*has=clean(r,n,"GridHasModule");
     void *collision=clean(r,n,"GridBuildModuleCollision");
-    if(g_find)return hook_is_installed((void*)g_find)&&hook_is_installed(g_has_hook);
+    void *containing=clean(r,n,"GridContainingModule");
+    if(g_find)return hook_is_installed((void*)g_find)&&hook_is_installed(g_has_hook)&&
+        hook_is_installed((void*)g_containing_module);
+    g_module_ray=(module_ray_fn)clean(r,n,"GridModuleRay");
+    g_refresh_surfaces=(refresh_surfaces_fn)clean(r,n,"GridRefreshPlacementSurfaces");
     g_load=(load_module_fn)clean(r,n,"GridLoadModule");g_ctor=(str_ctor_fn)clean(r,n,"IdStrCtor");
     g_dtor=(str_dtor_fn)clean(r,n,"IdStrDtor");g_anchor=clean(r,n,"DeclRegistryAnchor");
     g_type=(type_fn)clean(r,n,"DeclTypeByName");g_register=(register_fn)clean(r,n,"DeclRegisterFile");
@@ -674,7 +737,7 @@ int sh_grid_native_install(const sig_result *r,size_t n,const uint8_t *base)
         }
     }
     g_editor=(unsigned char*)glb_resolve(base,"editor_singleton",NULL);
-    if(!find||!has||!collision||!g_environment_bounds||!g_load||!g_ctor||!g_dtor||!g_anchor||!g_type||!g_register||!g_source||!g_decl||
+    if(!find||!has||!collision||!containing||!g_module_ray||!g_refresh_surfaces||!g_environment_bounds||!g_load||!g_ctor||!g_dtor||!g_anchor||!g_type||!g_register||!g_source||!g_decl||
         !g_generic_load||!g_editor||!g_replace||!g_reconnect||!g_edit_entity||!g_set_transform||
         !g_portal_bounds||!g_world_bounds||!g_entity_tree||!g_apply_tree||!g_read_properties||
         !g_tree_vec||!g_tree_float||!g_tree_destroy||!g_tree_free||!sh_process_heap_bind(&g_heap,r,n,base))return 0;
@@ -685,10 +748,14 @@ int sh_grid_native_install(const sig_result *r,size_t n,const uint8_t *base)
      * the original FindModule for stock names instead. */
     g_has_hook=hook_prepare(has,(void*)has_variant,16);
     g_build_collision=(build_collision_fn)hook_prepare(collision,(void*)grid_build_collision,21);
-    if(g_find&&g_has_hook&&g_build_collision&&hook_commit((void*)g_build_collision)==B2_PATCH_OK&&
+    /* The first 19 bytes save registers and reserve stack on both renderers. */
+    g_containing_module=(containing_module_fn)hook_prepare(containing,(void*)grid_containing_module,19);
+    if(g_find&&g_has_hook&&g_build_collision&&g_containing_module&&
+       hook_commit((void*)g_containing_module)==B2_PATCH_OK&&hook_commit((void*)g_build_collision)==B2_PATCH_OK&&
        hook_commit((void*)g_find)==B2_PATCH_OK&&hook_commit(g_has_hook)==B2_PATCH_OK){
         backend_log("GRID: private module lookup and reload admission installed");return 1;}
     if(g_has_hook&&hook_unpatch(g_has_hook))g_has_hook=NULL;
+    if(g_containing_module&&hook_unpatch((void*)g_containing_module))g_containing_module=NULL;
     if(g_build_collision&&hook_unpatch((void*)g_build_collision))g_build_collision=NULL;
     if(g_find&&hook_unpatch((void*)g_find))g_find=NULL;return 0;
 }

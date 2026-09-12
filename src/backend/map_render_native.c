@@ -105,12 +105,20 @@ static void publish(const sh_map_render *settings,int valid)
     if(valid)g_runtime=*settings;
     g_ready=valid;
     ReleaseSRWLockExclusive(&g_lock);
-    backend_log(valid?"RENDER: selected this map's settings for play":
-                      "RENDER: invalid map rendering metadata; native environment retained");
+    backend_log(valid?(settings->custom?"RENDER: selected this map's custom rendering settings":
+        "RENDER: selected this map's original module environments"):
+        "RENDER: no valid map rendering metadata; native environment retained");
 }
 void sh_map_render_build(void *map)
 {
     sh_map_render settings;int valid=sh_map_render_read(map,&settings);
+    /* Native conversion serves both Save and Play. Make the default explicit
+     * in each saved map without shifting existing variable indices. */
+    if(valid) {
+        int index,count;
+        if(variable((unsigned char*)map+0xa8,&index,&count)&&index<0)
+            (void)sh_map_render_write(map,&settings);
+    }
     publish(&settings,valid);
 }
 void sh_map_render_loaded(void *map)
@@ -132,7 +140,7 @@ static float render_clip(void *block,void *decl,uintptr_t context)
     if(!g_game_type||*g_game_type!=1||InterlockedCompareExchange(&g_faulted,0,0))
         return g_float(block,decl,context);
     AcquireSRWLockShared(&g_lock);ready=g_ready;settings=g_runtime;ReleaseSRWLockShared(&g_lock);
-    if(ready) {
+    if(ready&&settings.custom) {
         __try {
             /* The resource registry canonicalizes declaration names to lowercase. */
             static const char *names[]={"maxviewdistance","fogscale","fogstart","fogend","fogcolor"};

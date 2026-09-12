@@ -301,6 +301,14 @@ uintptr_t sig_addr_by_name(const sig_result *results, size_t n, const char *name
  * entry changes with tests/run-tests.ps1 -Doom <pinned> -DoomAlt <other-renderer>.
  * CI has no game image and cannot verify these identities. */
 const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
+    /* Resized-room containment: independently verified on Vulkan and OpenGL. */
+    { "GridRefreshPlacementSurfaces",
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 89 6C 24 50 "
+      "48 89 74 24 58 49 8B E8 48 8B F2 48 8B D9 E8 ?? ?? ?? ?? 8B BE 58 07 00 00 3B 7B 0C", 0 },
+    { "GridContainingModule",
+      "48 8B C4 48 89 58 08 48 89 68 10 57 48 81 EC B0 00 00 00 F3 0F 10 05 ?? ?? ?? ?? 4C 8D 4C 24 40 F3 0F 10 0D ?? ?? ?? ?? 48 8B DA", 0 },
+    { "GridModuleRay",
+      "40 55 53 57 48 8D 6C 24 90 48 81 EC 70 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 30 80 79 48 00 48 8B DA 48 8B 95 B8 00 00 00 49 8B F9 75 40 48 C7 45 88 00 00 00 00", 0 },
     /* Native map rendering controls and the environment far-clip read.
      * Each binding is unique in both independently linked renderer images. */
     { "RenderSettingsEnter",
@@ -317,6 +325,12 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "E8 ?? ?? ?? ?? 84 C0 0F 84 ?? ?? ?? ?? C7 44 24 30 16 00 00 00 45 33 C0 48 8D 54 24 30 48 8B CB E8 ?? ?? ?? ?? C6 47 08 01 48 8D 15 ?? ?? ?? ??", 0 },
     { "RenderAddFloat",
       "48 8B C4 57 41 56 41 57 48 81 EC 80 00 00 00 48 C7 40 A8 FE FF FF FF 48 89 58 10 48 89 68 18 48 89 70 20 4D 8B F1 4D 8B F8 48 8B EA 48 8B F1 B9 38 01 00 00 E8 ?? ?? ?? ?? 48 8B F8 48 89 84 24 A0 00 00 00 48 85 C0 74 ?? 8B 9E E0 01 00 00 8D 53 01 89 96 E0 01 00 00 48 8B CE E8 ?? ?? ?? ?? 4C 8B C0 44 8B CB", 0 },
+    { "RenderAddBool",
+      "48 8B C4 57 41 56 41 57 48 83 EC 70 48 C7 40 A8 FE FF FF FF 48 89 58 10 48 89 68 18 48 89 70 20 4D 8B F1 49 8B E8 44 8B FA 48 8B F1 B9 E0 00 00 00 E8 ?? ?? ?? ?? 48 8B F8 48 89 84 24 90 00 00 00 48 85 C0 74 39 8B 9E E0 01 00 00 8D 53 01 89 96 E0 01 00 00 48 8B CE E8 ?? ?? ?? ?? 4C 8B C0", 0 },
+    { "RenderWidgetEnable",
+      "40 53 48 83 EC 20 48 8B 59 08 4C 8D 05 ?? ?? ?? ?? 0F B6 C2 88 51 28 84 C0 48 8D 15 ?? ?? ?? ?? 48 8B CB 49 0F 45 D0 E8 ?? ?? ?? ?? 8B D0", 0 },
+    { "RenderBoolRefresh",
+      "40 53 48 81 EC 90 00 00 00 48 C7 44 24 50 FE FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 88 00 00 00 48 8B D9 80 B9 D0 00 00 00 00 74 09 48 81 C1 D4 00 00 00 EB ?? 48 81 C1 D8 00 00 00 E8 ?? ?? ?? ?? 48 8B D0", 0 },
     { "RenderAddTitle",
       "48 8B C4 57 41 56 41 57 48 81 EC 90 00 00 00 48 C7 40 98 FE FF FF FF 48 89 58 10 48 89 68 18 48 89 70 20 48 8B DA 48 8B E9 B9 20 00 00 00 E8 ?? ?? ?? ??", 0 },
     { "RenderClipRead",

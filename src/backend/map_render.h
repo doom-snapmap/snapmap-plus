@@ -6,7 +6,8 @@
 
 #define SH_RENDER_VARIABLE "smp.render.v1"
 #define SH_RENDER_FIELDS 7
-typedef struct sh_map_render { float value[SH_RENDER_FIELDS]; } sh_map_render;
+typedef struct sh_map_render { float value[SH_RENDER_FIELDS]; int custom; } sh_map_render;
+/* custom=0 retains the game's per-module environment after native blending. */
 /* View distance, fog strength (percent), start, end, and linear RGB. */
 void sh_map_render_default(sh_map_render *settings);
 int sh_map_render_valid(const sh_map_render *settings);

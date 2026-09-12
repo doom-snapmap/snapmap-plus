@@ -42,10 +42,10 @@ you placed keep their module-local positions and sizes, so inspect objects near
 the walls after shrinking. Connected branches move to retain their doorways;
 conflicting connection loops and new overlaps can prevent an edit.
 
-| Grid Room | Minimum X / Y / Z |
-|---|---|
-| Classic | 416 / 416 / 304 |
-| Modern | 864 / 272 / 432 |
+| Grid Room | Original X / Y / Z | Minimum X / Y / Z |
+|---|---|---|
+| Classic | 2560 / 2560 / 2048 | 416 / 416 / 304 |
+| Modern | 5120 / 5120 / 3392 | 864 / 272 / 432 |
 
 Out-of-range values clamp and the panel shows the applied dimensions. The maximum
 follows the current `snapEdit_environmentModuleBounds` cvar, the room's world
@@ -63,15 +63,33 @@ navigation use the resized room. **Players need Snapmap+ to load these maps.**
 The resizing feature is included in the existing backend DLL; it needs no
 separate override package or map sidecar file.
 
+To return a map to vanilla compatibility, restore every Grid Room to its
+original dimensions, turn **Custom Rendering** off, and remove any objects or
+logic that require packages. Save again. Removing the last use of a package
+removes that map's embedded dependency; it keeps your installed package available
+for other maps. Other mod-only content must also be removed.
+
+The faint green surface grid appears when placing or moving objects that use
+the game's navigation placement display, such as demons. Its brightness pulses,
+so it can become very faint while still enabled. It follows the room's native
+display surfaces, rather than covering every wall or appearing for every prop
+or logic object. **Snap to Grid** moves the held object to the editing grid;
+it does not toggle this display. The custom blocking-volume navigation preview
+is a separate overlay.
+
 ## Map view distance and fog
 
 Open **Settings > Properties** in DOOM's SnapMap editor and scroll to
-**View Distance** and **Fog Strength**. These controls apply to the whole map during play.
+**Custom Rendering**. Leave it **Off** to use the game's original module
+environments. Turn it **On** to apply **View Distance** and **Fog Strength**
+to the whole map during play.
 Choose **Apply**, then save your map normally. Cancel discards unapplied changes.
-The values are stored inside the map and work with both OpenGL and Vulkan.
-Players need Snapmap+ for these rendering settings to take effect.
+The choice and values are stored inside this map and work with both OpenGL and
+Vulkan. Loading another map uses that map's own settings. Turning customization
+off retains your custom values for later, but restores the original environments.
+Players need Snapmap+ for custom rendering to take effect.
 
-| Setting | Default | Range |
+| Setting | Initial custom value | Range |
 |---|---|---|
 | View Distance | 60000 | 256 to 200000 game units |
 | Fog Strength | 0 (off) | 0 to 100 |
@@ -79,7 +97,7 @@ Players need Snapmap+ for these rendering settings to take effect.
 | Fog End | 6500 | 1 to 200000 game units |
 | Fog Red / Green / Blue | 0.35 / 0.40 / 0.45 | 0 to 1 each |
 
-The extended default view distance removes the nearby black cutoff in large
+With customization on, the extended view distance removes the nearby black cutoff in large
 Grid Rooms. Fog Strength 0 gives a clear view; raising it blends distant geometry
 into the selected color. Fog End always stays beyond Fog Start.
 
@@ -87,6 +105,9 @@ For a shorter rendering range, lower View Distance and tune fog to conceal the
 cutoff before that distance. Fog alone does not reduce the geometry being drawn;
 the view distance controls that tradeoff. Check the result from several positions
 in Play mode, especially in large open rooms.
+
+Maps saved with custom rendering by earlier releases retain those settings.
+Turn Custom Rendering off and save to restore their original environments.
 
 ## Installing Snapmap+
 

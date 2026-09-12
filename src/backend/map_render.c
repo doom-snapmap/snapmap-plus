@@ -8,10 +8,11 @@ void sh_map_render_default(sh_map_render *s)
 {
     static const float defaults[SH_RENDER_FIELDS]={60000,0,1500,6500,.35f,.4f,.45f};
     memcpy(s->value,defaults,sizeof defaults);
+    s->custom=0;
 }
 int sh_map_render_valid(const sh_map_render *s)
 {
-    unsigned i;if(!s)return 0;
+    unsigned i;if(!s||(s->custom!=0&&s->custom!=1))return 0;
     for(i=0;i<SH_RENDER_FIELDS;i++)if(!isfinite(s->value[i]))return 0;
     return s->value[0]>=256&&s->value[0]<=200000&&
         s->value[1]>=0&&s->value[1]<=100&&
@@ -21,16 +22,27 @@ int sh_map_render_valid(const sh_map_render *s)
 }
 int sh_map_render_decode(const char *text,sh_map_render *out)
 {
-    sh_map_render s;int end=0;
-    if(!text||!out||strlen(text)>192||sscanf_s(text,"1;%f;%f;%f;%f;%f;%f;%f%n",
-        &s.value[0],&s.value[1],&s.value[2],&s.value[3],&s.value[4],&s.value[5],&s.value[6],&end)!=7||
-        !end||text[end]||!sh_map_render_valid(&s))return 0;
+    sh_map_render s;int end=0,n;
+    if(!text||!out||strlen(text)>192)return 0;
+    /* Existing version-1 maps explicitly selected overrides, including the
+     * old 60000/no-fog defaults. Preserve their saved appearance. */
+    s.custom=1;
+    if(!strncmp(text,"1;",2))
+        n=sscanf_s(text,"1;%f;%f;%f;%f;%f;%f;%f%n",
+            &s.value[0],&s.value[1],&s.value[2],&s.value[3],&s.value[4],&s.value[5],&s.value[6],&end);
+    else if(!strncmp(text,"2;0;",4)||!strncmp(text,"2;1;",4)) {
+        s.custom=text[2]-'0';
+        n=sscanf_s(text+4,"%f;%f;%f;%f;%f;%f;%f%n",
+            &s.value[0],&s.value[1],&s.value[2],&s.value[3],&s.value[4],&s.value[5],&s.value[6],&end);
+        if(end)end+=4;
+    } else return 0;
+    if(n!=7||!end||text[end]||!sh_map_render_valid(&s))return 0;
     *out=s;return 1;
 }
 int sh_map_render_encode(const sh_map_render *s,char *out,size_t cap)
 {
     int n;if(!out||!cap||!sh_map_render_valid(s))return 0;
-    n=snprintf(out,cap,"1;%.9g;%.9g;%.9g;%.9g;%.9g;%.9g;%.9g",
+    n=snprintf(out,cap,"2;%d;%.9g;%.9g;%.9g;%.9g;%.9g;%.9g;%.9g",s->custom,
         s->value[0],s->value[1],s->value[2],s->value[3],s->value[4],s->value[5],s->value[6]);
     return n>0&&(size_t)n<cap;
 }

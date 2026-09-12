@@ -22,8 +22,10 @@
 typedef struct { const char *id; const char *text; } strid_baked_t;
 
 static const strid_baked_t g_strids_baked[] = {
+    { "smp_render_custom", "Custom Rendering" },
+    { "smp_render_custom_help", "Saved with this map. Off restores the game's original module environments. On applies the custom distance and fog values below." },
     { "smp_render_distance", "View Distance" },
-    { "smp_render_distance_help", "Saved with this map. Maximum visible distance in world units. Larger distances can increase rendering cost. Default: 60000." },
+    { "smp_render_distance_help", "Saved with this map. Maximum visible distance in world units when Custom Rendering is on. Larger distances can increase rendering cost." },
     { "smp_render_strength", "Fog Strength" },
     { "smp_render_strength_help", "Saved with this map. Distance fog strength from 0 to 100. Zero disables distance fog. Fog alone does not reduce rendering cost." },
     { "smp_render_start", "Fog Start" },

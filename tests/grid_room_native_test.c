@@ -13,6 +13,15 @@ static int catalog_empty=1,catalog_fail,catalog_state;
 static unsigned char entity_storage[7][0x6f8];
 static unsigned char *entity_slots[7];
 static int commit_calls,fail_commit,replace_calls,reconnect_calls;
+static int surface_state[4],surface_refreshes;
+static void *surface_wrapper;
+static void refresh_surfaces(void *root,void *map,void *world)
+{
+    int depth=*(int*)(heap_state+0xc4);
+    assert(root==surface_state&&map==map_data&&world==anchor);
+    assert(depth>0&&*(int*)(heap_state+0x44+(depth-1)*4)==0);
+    surface_wrapper=**(void***)(map_data+0x750);++surface_refreshes;
+}
 typedef struct light_tree {float radius[3],center[3],visible,shadow,color[3];} light_tree;
 static light_tree live_trees[7];static unsigned tree_allocs,tree_frees;
 static const char *installed_light_source="{edit={module={entities={}}}}";
@@ -67,6 +76,47 @@ static float *world_bounds(void *record,float *out,const float *bounds)
 static float *portal_bounds(void *record,float *out,int door)
 {unsigned char *module=**(unsigned char***)record;assert(door>=0&&door<2);
  return world_bounds(record,out,*(float**)(module+0xe8)+door*7);}
+static int containment_result=-1,ray_calls,ray_up,ray_down;
+static int native_containment(void *collision,const float *point)
+{(void)collision;(void)point;return containment_result;}
+static grid_ray_hit *native_ray(void *collision,grid_ray_hit *out,const float *point,
+    const float *end,int ignore,void *records,int count)
+{
+    assert(collision==editor+0x20550&&ignore==-1&&records==editor&&count==2);
+    assert(end[0]==point[0]&&end[1]==point[1]&&fabsf(end[2]-point[2])>=10016);
+    ++ray_calls;out->module=end[2]>point[2]?ray_up:ray_down;return out;
+}
+static void containment_checks(void)
+{
+    unsigned char records[2][0x98]={0};float point[]={1000,1280,256};
+    sh_grid_size huge={SH_GRID_MODERN,{10000,10000,10000}};
+    void *saved=*(void**)(editor+0x204c8);
+    g_containing_module=native_containment;g_module_ray=native_ray;
+    *(void**)records[0]=sh_grid_native_wrapper(&huge);records[0][0x30]=1;
+    *(void**)records[1]=stock_wrappers[1];records[1][0x30]=1;
+    *(void**)(map_data+0x750)=records;*(int*)(map_data+0x758)=2;
+    *(void**)(editor+0x204c8)=map_data;
+    *(void**)(editor+0x20550)=editor;*(int*)(editor+0x20558)=2;
+    ray_up=ray_down=0;ray_calls=0;
+    assert(grid_containing_module(editor+0x20550,point)==0&&ray_calls==2);
+    point[2]=9500;assert(grid_containing_module(editor+0x20550,point)==0&&ray_calls==4);
+    containment_result=1;assert(grid_containing_module(editor+0x20550,point)==1&&ray_calls==4);
+    containment_result=-1;ray_down=1;
+    assert(grid_containing_module(editor+0x20550,point)==-1&&ray_calls==6);
+    ray_up=-1;assert(grid_containing_module(editor+0x20550,point)==-1&&ray_calls==7);
+    ray_up=ray_down=0;point[2]=10256;
+    assert(grid_containing_module(editor+0x20550,point)==-1&&ray_calls==7);
+    point[2]=-256;assert(grid_containing_module(editor+0x20550,point)==-1&&ray_calls==7);
+    point[2]=256;point[0]=6000;
+    assert(grid_containing_module(editor+0x20550,point)==-1&&ray_calls==7);
+    point[0]=NAN;assert(grid_containing_module(editor+0x20550,point)==-1&&ray_calls==7);
+    point[0]=1000;records[0][0x30]=0;
+    assert(grid_containing_module(editor+0x20550,point)==-1&&ray_calls==7);
+    records[0][0x30]=1;*(void**)records[0]=stock_wrappers[1];
+    assert(grid_containing_module(editor+0x20550,point)==-1&&ray_calls==7);
+    assert(grid_containing_module(editor,point)==-1&&ray_calls==7);
+    *(void**)(editor+0x204c8)=saved;
+}
 static void reconnect(void *map)
 {
     int *keys=*(int**)(map_data+0x7d8),*links=*(int**)(map_data+0x7c0);
@@ -278,6 +328,8 @@ int main(void)
             float *cap0=(float*)(entity_storage[1]+0x290),*cap1=(float*)(entity_storage[2]+0x290);
             unsigned char untouched[0x98];void *resized;
             g_replace=replace_instance;g_reconnect=reconnect;g_edit_entity=edit_entity;g_set_transform=set_transform;
+            g_refresh_surfaces=refresh_surfaces;surface_state[2]=2;
+            *(void**)(editor+0x20548)=surface_state;*(void**)(editor+0x198)=anchor;
             g_world_bounds=world_bounds;g_portal_bounds=portal_bounds;
             for(i=1;i<7;++i){entity_slots[i]=entity_storage[i];*(void**)(entity_slots[i]+8)=editor;}
             *(void**)(map_data+0x6a0)=entity_slots;*(int*)(map_data+0x6a8)=7;
@@ -295,14 +347,18 @@ int main(void)
             *(float*)(placed[1]+0xc)=30000;*(float*)(placed[1]+0x10)=30000;
             memset(placed[1]+0x40,0xa5,0x58);memcpy(untouched,placed[1],sizeof untouched);
             connected[0]=2;assert(!sh_grid_native_apply(edit_data,0,&target)&&!commit_calls&&!replace_calls);
+            assert(!surface_refreshes);
             connected[0]=-1;
             assert(sh_grid_native_apply(edit_data,0,&target));resized=*(void**)placed[0];
+            assert(surface_refreshes==1&&surface_wrapper==resized);
+            assert(sh_grid_native_apply(edit_data,0,&target)&&surface_refreshes==1);
             assert(resized!=a&&resized!=b&&!memcmp(placed[1],untouched,sizeof untouched));
             assert(sh_grid_native_read(edit_data,0,&read)&&!memcmp(&read,&target,sizeof target));
             assert(cap0[1]==2304&&cap1[1]==256);
             assert(cap0[3]==1&&cap0[7]==1&&cap0[11]==1);
             memcpy(saved_caps[0],cap0,48);memcpy(saved_caps[1],cap1,48);fail_commit=commit_calls+2;
             assert(!sh_grid_native_apply(edit_data,0,&large));
+            assert(surface_refreshes==1&&surface_wrapper==resized);
             assert(*(void**)placed[0]==resized&&!memcmp(saved_caps[0],cap0,48)&&!memcmp(saved_caps[1],cap1,48));
             assert(!memcmp(placed[1],untouched,sizeof untouched)&&!g_edit_faulted);
             assert(replace_calls==2&&reconnect_calls==2&&*(int*)(heap_state+0xc4)==0);
@@ -368,6 +424,7 @@ int main(void)
         }
     }
     layout_checks();
+    containment_checks();
     assert(find_variant(editor+0x206c0,"unrelated.decl")==end_record(editor+0x206c0));
     /* A native string destructor fault must still restore the heap scope. */
     compact.xyz[0]=1600;throw_dtor=1;assert(!sh_grid_native_wrapper(&compact));
