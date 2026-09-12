@@ -12,6 +12,40 @@ static int append_fails, delay_execution;
 static HANDLE registration_entered, registration_release;
 static int registration_fails;
 static int maintenance_allowed, maintenance_step;
+
+static void snapshot_dimensions_follow_array_order(void)
+{
+    static sh_nav_map out;
+    unsigned char snapshot[0x30] = {0}, entities[2 * AE_SNAPSHOT_ENTITY_SIZE] = {0};
+    unsigned char str[IDSTR_SIZE] = {0};
+    const char *decls[] = {
+        "edit={clipModelInfo={type=\"CLIPMODEL_BOX\";size={x=73;y=157;z=91;}}}",
+        "edit={clipModelInfo={type=\"CLIPMODEL_BOX\";size={x=83;y=167;z=101;}}}"
+    };
+    static const char json[] =
+        "{\"instances\":[{\"moduleName\":\"maps/modules/test/room.decl\"}],"
+        "\"entities\":["
+        "{\"uniqueId\":11,\"entityDef\":{\"inherit\":\"snapmaps/volume/blocking\",\"state\":{\"edit\":{\"flags\":{\"noFlood\":true},\"blockDemons\":true}}}},"
+        "{\"uniqueId\":11,\"entityDef\":{\"inherit\":\"snapmaps/volume/blocking\",\"state\":{\"edit\":{\"flags\":{\"noFlood\":true},\"blockDemons\":true}}}}],"
+        "\"instanceEntities\":{\"keyValues\":[0,1,1],\"values\":[11]}}";
+    int i;
+    *(void **)(snapshot + AE_SNAPSHOT_ENTITIES_OFF) = entities;
+    *(uint32_t *)(snapshot + AE_SNAPSHOT_COUNT_OFF) = 2;
+    *(const char **)(str + IDSTR_DATA_OFF) = json;
+    *(uint32_t *)(str + IDSTR_LEN_OFF) = sizeof json - 1;
+    for(i=0;i<2;i++) {
+        unsigned char *resolved = entities + i * AE_SNAPSHOT_ENTITY_SIZE + AE_DECL_RESOLVED_OFF;
+        *(const char **)(resolved + IDSTR_DATA_OFF) = decls[i];
+        *(uint32_t *)(resolved + IDSTR_LEN_OFF) = (uint32_t)strlen(decls[i]);
+    }
+    assert(ae_nav_snapshot_visit(snapshot,str,&out));
+    assert(!out.invalid_geometry && out.ids_unusable && out.region_count == 2);
+    assert(out.regions[0].depth == 91 && out.regions[1].depth == 101);
+    assert(out.regions[0].c[0][0] == -36.5f && out.regions[1].c[0][0] == -41.5f);
+    assert(!memcmp(json,*(const char **)(str+IDSTR_DATA_OFF),sizeof json));
+    *(uint32_t *)(snapshot + AE_SNAPSHOT_COUNT_OFF) = 1;
+    assert(ae_nav_snapshot_visit(snapshot,str,&out) && out.invalid_geometry);
+}
 void backend_log(const char *text) { (void)text; }
 sh_iface *sh_ui_get_iface(void) { return NULL; }
 
@@ -107,6 +141,7 @@ static void test_maintenance_thread(void)
 
 int main(void)
 {
+    snapshot_dimensions_follow_array_order();
     unsigned char editor[0x20500] = {0};
     sh_apply_item item = {0, 1, "original"};
     g_editor = editor;
@@ -215,6 +250,8 @@ int sh_host_is_pinned_rva_build(void) { assert(0); return 0; }
 unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *len) { (void)name; (void)len; assert(0); return NULL; }
 int sh_config_get_bool(const char *key, int *value, unsigned *flags) { (void)key; (void)value; (void)flags; assert(0); return 0; }
 int sh_rawmap_snapshot(void *serializer, void *map, void *out) { (void)serializer; (void)map; (void)out; assert(0); return 0; }
+int sh_rawmap_snapshot_inspect(void *serializer, void *map, void *out, sh_rawmap_snapshot_visit visit, void *ctx)
+{ (void)serializer; (void)map; (void)out; (void)visit; (void)ctx; assert(0); return 0; }
 void sh_nav_bake_refresh_live(void) { assert(0); }
 unsigned long sh_nav_bake_geometry_revision(void) { return 0; }
 int sh_nav_bake_refresh_volumes(int *volumes) { (void)volumes; assert(0); return 0; }

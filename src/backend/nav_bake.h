@@ -67,7 +67,9 @@ const char *sh_nav_bake_volumes_reason(void);
  * whether that refresh changed anything. */
 unsigned long sh_nav_bake_geometry_revision(void);
 
-typedef int (*sh_nav_bake_snapshot)(char **json, size_t *len, void *ctx);
+/* Return a complete attributed map with effective native collision sizes.
+ * The callback owns engine access; the bake keeps only copied geometry. */
+typedef int (*sh_nav_bake_snapshot)(sh_nav_map *out, void *ctx);
 void sh_nav_bake_set_snapshot(sh_nav_bake_snapshot snapshot, void *ctx);
 void sh_nav_bake_build_begin(void);
 void sh_nav_bake_build_end(void);

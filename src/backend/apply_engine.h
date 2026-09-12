@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include "signatures.h"
 #include "snapmap_plus_iface.h"
+#include "nav_regions.h"
 
 /* Resolve dependencies once after signatures and typeinfo bind. cmdsys may be
  * null, disabling deferred transport. Return 1 for a complete binding; each
@@ -43,6 +44,9 @@ int sh_apply_engine_entity_json(int id, char *out, int cap, void *ctx);
 /* A complete current edit map, including live instanceEntities ownership.
  * Main thread only. Successful output is malloc-owned by the caller. */
 int sh_apply_engine_nav_snapshot(char **out, size_t *len, void *ctx);
+/* Navigation geometry with collision dimensions resolved by the native entity
+ * declarations in that same temporary snapshot. Main thread only. */
+int sh_apply_engine_nav_regions(sh_nav_map *out, void *ctx);
 
 /* Time both ways of reading current editor geometry and report them. Main
  * thread, editor open; costs one whole-map read plus one read per entity. */

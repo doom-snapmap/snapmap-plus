@@ -93,6 +93,16 @@ typedef struct sh_nav_map {
  */
 int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out);
 
+/* Effective collision size of the entity at this exact snapshot-array index.
+ * The callback and JSON must come from the same native snapshot; uniqueIds
+ * cannot identify duplicated boxes reliably. No engine pointers are retained. */
+typedef int (*sh_navr_entity_size)(unsigned entity, float size[3], void *ctx);
+int sh_nav_regions_read_resolved(const char *json, size_t len, sh_nav_map *out,
+                                sh_navr_entity_size read_size, void *ctx);
+/* Read edit.clipModelInfo.size from a bounded, inheritance-resolved native
+ * declaration. Requires all components and a box type; never supplies sizes. */
+int sh_nav_regions_decl_size(const char *text, size_t len, float size[3]);
+
 /* Convert legacy Blocking Box markers before native map parsing. Returns a
  * NUL-terminated HeapAlloc buffer (caller HeapFrees), or NULL for no change or
  * a refusal. Other entities and unrelated bytes are preserved. */

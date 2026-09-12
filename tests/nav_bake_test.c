@@ -371,14 +371,11 @@ static void test_refresh_live_without_a_map_is_a_no_op(void)
 }
 
 static const char *g_snapshot_json;
-static int snapshot_read(char **out, size_t *len, void *ctx)
+static int snapshot_read(sh_nav_map *out, void *ctx)
 {
-    (void)ctx; *out = NULL; *len = 0;
+    (void)ctx;
     if (!g_snapshot_json) return 0;
-    *len = strlen(g_snapshot_json);
-    *out = (char *)malloc(*len + 1);
-    if (!*out) return 0;
-    memcpy(*out, g_snapshot_json, *len + 1); return 1;
+    return sh_nav_regions_read(g_snapshot_json, strlen(g_snapshot_json), out);
 }
 
 static void test_complete_snapshot_tracks_creation_and_deletion(void)

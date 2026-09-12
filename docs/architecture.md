@@ -215,6 +215,10 @@ assets. Resource caches and package snapshots need explicit reader lifetimes;
 rescanning must not invalidate storage a reader or native object still uses.
 
 Navigation snapshots and shipped resource reads run on the engine thread.
+The snapshot reader takes collision dimensions from each cloned entity's
+resolved declaration while the native snapshot is alive. It pairs declarations
+with JSON by array position, preserving inherited sizes and duplicate IDs
+without adding fields to saved maps. Only copied geometry reaches the bake.
 A worker owns copied preview inputs and performs the arithmetic bake, while the
 frame installs only a result matching the current geometry revision. The bake
 lock precedes the worker handoff lock; the worker never acquires the bake lock.

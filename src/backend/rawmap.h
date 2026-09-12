@@ -193,6 +193,13 @@ int sh_rawmap_source_ok(char *out_msg, int msg_capacity);
  * constructs and destroys the output idStr with the engine's own helpers. */
 int sh_rawmap_snapshot(void *editor_serializer, void *map, void *out_idstr);
 
+/* Visit the native idSnapMap and its JSON together, before the editor destroys
+ * the temporary snapshot. Read-only, synchronous, main thread only. A visitor
+ * failure refuses the snapshot without changing native serialization or saves. */
+typedef int (*sh_rawmap_snapshot_visit)(const void *snapshot, const void *json_idstr, void *ctx);
+int sh_rawmap_snapshot_inspect(void *editor_serializer, void *map, void *out_idstr,
+                              sh_rawmap_snapshot_visit visit, void *ctx);
+
 #endif /* BACKEND_RAWMAP_H */
 
 #ifdef SH_RAWMAP_TESTING

@@ -355,7 +355,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_nav_bake_set_live_editor(sh_apply_engine_entity_count,
                                     sh_apply_engine_entity_valid,
                                     sh_apply_engine_entity_json, NULL);
-        sh_nav_bake_set_snapshot(sh_apply_engine_nav_snapshot, NULL);
+        sh_nav_bake_set_snapshot(sh_apply_engine_nav_regions, NULL);
 
         /* Read marks at entry to edit-to-build conversion, on the engine main thread.
          * Later bake callbacks can see entities with incomplete defsub state and

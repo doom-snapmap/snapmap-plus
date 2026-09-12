@@ -594,14 +594,34 @@ typedef unsigned char (*serialize_fn_t)(void *map, void *out_idstr, unsigned cha
 
 static serialize_fn_t g_ser_orig = NULL;   /* the trampoline -> the real engine SerializeToJson */
 static __declspec(thread) int g_snapshot_depth;
+static __declspec(thread) sh_rawmap_snapshot_visit g_snapshot_visit;
+static __declspec(thread) void *g_snapshot_visit_ctx;
+static __declspec(thread) int g_snapshot_visited;
 
 int sh_rawmap_snapshot(void *editor_serializer, void *map, void *out_idstr)
 {
+    return sh_rawmap_snapshot_inspect(editor_serializer, map, out_idstr, NULL, NULL);
+}
+
+int sh_rawmap_snapshot_inspect(void *editor_serializer, void *map, void *out_idstr,
+                              sh_rawmap_snapshot_visit visit, void *ctx)
+{
     int ok=0;
+    sh_rawmap_snapshot_visit previous = g_snapshot_visit;
+    void *previous_ctx = g_snapshot_visit_ctx;
+    int previous_visited = g_snapshot_visited;
     if (!g_ser_orig || !editor_serializer || !map || !out_idstr) return 0;
+    g_snapshot_visit = visit; g_snapshot_visit_ctx = ctx; g_snapshot_visited = 0;
     g_snapshot_depth++;
-    __try { ok=((serialize_fn_t)editor_serializer)(map,out_idstr,0)!=0; }
-    __finally { g_snapshot_depth--; }
+    __try {
+        ok=((serialize_fn_t)editor_serializer)(map,out_idstr,0)!=0;
+        if (visit && !g_snapshot_visited) ok = 0;
+    }
+    __finally {
+        g_snapshot_depth--;
+        g_snapshot_visit = previous; g_snapshot_visit_ctx = previous_ctx;
+        g_snapshot_visited = previous_visited;
+    }
     return ok;
 }
 
@@ -1291,7 +1311,11 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
      * before any helper can clobber AL.
      */
     const unsigned char rc = g_ser_orig(map, out_idstr, compact);
-    if (g_snapshot_depth) return rc;
+    if (g_snapshot_depth) {
+        if (rc && g_snapshot_visit)
+            g_snapshot_visited = g_snapshot_visit(map, out_idstr, g_snapshot_visit_ctx);
+        return rc;
+    }
 
     /* Embed used packages before mirroring; independent of the rawmap switch. */
     mpkg_embed_on_save(out_idstr);

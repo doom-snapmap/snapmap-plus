@@ -1487,6 +1487,70 @@ int sh_apply_engine_nav_snapshot(char **out, size_t *len, void *ctx)
     *out = copy; *len = (size_t)length; return 1;
 }
 
+/* idSnapMap::entities is a contiguous array of cloned idSnapEntity declarations.
+ * Read it while SerializeToJson's temporary map is alive, in JSON array order.
+ * Live sparse IDs are unsuitable here: duplicates can share their saved ID. */
+#define AE_SNAPSHOT_ENTITIES_OFF 0x20
+#define AE_SNAPSHOT_COUNT_OFF   0x28
+#define AE_SNAPSHOT_ENTITY_SIZE 0x1b0
+#define AE_DECL_RESOLVED_OFF    0x130
+#define AE_DECL_TEXT_CAP        (4 * 1024 * 1024)
+
+static int ae_snapshot_box_size(unsigned index, float size[3], void *ctx)
+{
+    const uint8_t *snapshot = (const uint8_t *)ctx;
+    void *entities = NULL, *text = NULL;
+    uint32_t count = 0, length = 0;
+    const uint8_t *resolved;
+    if (!ae_read_u32(snapshot + AE_SNAPSHOT_COUNT_OFF, &count) ||
+        count > ENT_COUNT_CAP || index >= count ||
+        !ae_read_ptr(snapshot + AE_SNAPSHOT_ENTITIES_OFF, &entities)) return 0;
+    resolved = (const uint8_t *)entities + (size_t)index * AE_SNAPSHOT_ENTITY_SIZE + AE_DECL_RESOLVED_OFF;
+    if (!ae_read_u32(resolved + IDSTR_LEN_OFF, &length) ||
+        !length || length >= AE_DECL_TEXT_CAP ||
+        !ae_read_ptr(resolved + IDSTR_DATA_OFF, &text)) return 0;
+    return sh_nav_regions_decl_size((const char *)text, length, size);
+}
+
+static int ae_nav_snapshot_visit(const void *snapshot, const void *json_idstr, void *ctx)
+{
+    uint32_t length = 0;
+    void *text = NULL;
+    int ok;
+    if (!ae_read_u32((const uint8_t *)json_idstr + IDSTR_LEN_OFF, &length) ||
+        !length || length >= 32 * 1024 * 1024 ||
+        !ae_read_ptr((const uint8_t *)json_idstr + IDSTR_DATA_OFF, &text)) return 0;
+    SH_PERF_BEGIN(t0);
+    ok = sh_nav_regions_read_resolved((const char *)text, length, (sh_nav_map *)ctx,
+                                      ae_snapshot_box_size, (void *)snapshot);
+    SH_PERF_END(SH_PERF_NAV_PARSE, t0);
+    return ok;
+}
+
+int sh_apply_engine_nav_regions(sh_nav_map *out, void *ctx)
+{
+    uint8_t str[IDSTR_SIZE] = {0};
+    const uint8_t *ed;
+    void *map = NULL;
+    int initialized = 0, ok = 0;
+    (void)ctx;
+    if (!out || ae_on_main_thread() != 1 || !g_idstr_ctor || !g_idstr_dtor ||
+        !g_editor_map_to_json) return 0;
+    ed = ae_editor_session();
+    if (!ed || !ae_read_ptr(ed + ED_MAP_OBJ_OFF, &map)) return 0;
+    __try {
+        g_idstr_ctor(str, ""); initialized = 1;
+        SH_PERF_BEGIN(t0);
+        ok = sh_rawmap_snapshot_inspect(g_editor_map_to_json, map, str,
+                                        ae_nav_snapshot_visit, out);
+        SH_PERF_END(SH_PERF_MAP_SERIALIZE, t0);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    if (initialized) {
+        __try { g_idstr_dtor(str); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    }
+    return ok;
+}
+
 static double ae_perf_msf(LONGLONG ticks)
 {
     LARGE_INTEGER freq;

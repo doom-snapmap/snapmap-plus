@@ -128,8 +128,8 @@ static int navr_num_at(const char *json, size_t len, size_t off, double *out)
     return end != text && *end == '\0' && _finite(*out);
 }
 
-/* A number member, or `dflt`. The editor omits a vector component that is zero,
- * so an absent member is not a malformed one. */
+/* A number member, or its inherited/default value. Native serialization omits
+ * unchanged members, including nonzero components inherited from a decl. */
 static float navr_num(const char *json, size_t len, const sh_shard_doc *doc,
                       int parent, const char *key, float dflt)
 {
@@ -138,6 +138,100 @@ static float navr_num(const char *json, size_t len, const sh_shard_doc *doc,
     if (!navr_value(json, len, doc, parent, key, &v)) return dflt;
     if (!navr_num_at(json, len, v, &d)) return (float)NAN;
     return (float)d;
+}
+
+/* The resolved declaration is native decl syntax, not the default-eliding
+ * JSON state. Walk direct members so model scale, strings and comments cannot
+ * masquerade as collision dimensions. All spans remain bounded by the idStr. */
+typedef struct navr_decl_span { const char *p; size_t n; } navr_decl_span;
+
+static int navr_decl_token(navr_decl_span *rest, navr_decl_span *token)
+{
+    const char *p = rest->p, *end = p + rest->n, *start;
+    for (;;) {
+        while (p < end && sh_shard_is_ws(*p)) p++;
+        if (end - p >= 2 && p[0] == '/' && p[1] == '/') {
+            while (p < end && *p != '\n') p++;
+        } else if (end - p >= 2 && p[0] == '/' && p[1] == '*') {
+            p += 2;
+            while (end - p >= 2 && !(p[0] == '*' && p[1] == '/')) p++;
+            if (end - p < 2) return 0;
+            p += 2;
+        } else break;
+    }
+    if (p == end) return 0;
+    start = p++;
+    if (*start == '"') {
+        while (p < end && *p != '"') {
+            if (*p++ == '\\') { if (p == end) return 0; p++; }
+        }
+        if (p == end) return 0;
+        p++;
+    } else if (!strchr("{}=;", *start)) {
+        while (p < end && !sh_shard_is_ws(*p) && !strchr("{}=;\"", *p) &&
+               !(end - p >= 2 && p[0] == '/' && (p[1] == '/' || p[1] == '*'))) p++;
+    }
+    token->p = start; token->n = (size_t)(p - start);
+    rest->p = p; rest->n = (size_t)(end - p);
+    return 1;
+}
+
+static int navr_decl_equal(navr_decl_span token, const char *text)
+{
+    return token.n == strlen(text) && !memcmp(token.p, text, token.n);
+}
+
+static int navr_decl_member(navr_decl_span scope, const char *key,
+                             navr_decl_span *value)
+{
+    navr_decl_span token;
+    int depth = 0;
+    while (navr_decl_token(&scope, &token)) {
+        if (!depth && navr_decl_equal(token, key)) {
+            if (!navr_decl_token(&scope, &token) || !navr_decl_equal(token, "=") ||
+                !navr_decl_token(&scope, &token)) return 0;
+            *value = token;
+            if (!navr_decl_equal(token, "{")) return 1;
+            value->p = scope.p;
+            depth = 1;
+            while (navr_decl_token(&scope, &token)) {
+                if (navr_decl_equal(token, "{")) depth++;
+                if (navr_decl_equal(token, "}") && --depth == 0) {
+                    value->n = (size_t)(token.p - value->p); return 1;
+                }
+            }
+            return 0;
+        }
+        if (navr_decl_equal(token, "{")) depth++;
+        if (navr_decl_equal(token, "}") && --depth < 0) return 0;
+    }
+    return 0;
+}
+
+int sh_nav_regions_decl_size(const char *text, size_t len, float size[3])
+{
+    static const char *axis[3] = { "x", "y", "z" };
+    navr_decl_span scope = { text, len }, clip, box, token;
+    float result[3];
+    int i;
+    if (!text || !len || !size ||
+        !navr_decl_member(scope, "edit", &scope) ||
+        !navr_decl_member(scope, "clipModelInfo", &clip) ||
+        !navr_decl_member(clip, "type", &token) ||
+        !navr_decl_equal(token, "\"CLIPMODEL_BOX\"") ||
+        !navr_decl_member(clip, "size", &box)) return 0;
+    for (i = 0; i < 3; i++) {
+        char number[NAVR_NUM_MAX + 1], *end;
+        double d;
+        if (!navr_decl_member(box, axis[i], &token) || !token.n || token.n > NAVR_NUM_MAX)
+            return 0;
+        memcpy(number, token.p, token.n); number[token.n] = 0;
+        d = strtod(number, &end);
+        if (end != number + token.n || !_finite(d) || d <= 0 || d > FLT_MAX) return 0;
+        result[i] = (float)d;
+        if (result[i] <= 0) return 0;
+    }
+    memcpy(size, result, sizeof result); return 1;
 }
 
 /* Absent flags.noFlood and blockDemons members default to false. */
@@ -297,7 +391,7 @@ static int navr_mat3(const char *json, size_t len, const sh_shard_doc *doc,
  * evaluates all faces. Load and legacy live refresh share this conversion.
  */
 static int navr_volume_face(const char *json, size_t len, const sh_shard_doc *doc,
-                            int edit, sh_nav_region *r)
+                            int edit, sh_nav_region *r, const float *resolved)
 {
     static const float SU[4] = { -1.0f, +1.0f, +1.0f, -1.0f };
     static const float SV[4] = { -1.0f, -1.0f, +1.0f, +1.0f };
@@ -306,15 +400,19 @@ static int navr_volume_face(const char *json, size_t len, const sh_shard_doc *do
     float sx, sy, sz, cx, cy, cz, m[3][3], half[3], centre[3], s;
     float bestz, bestarea;
     double sh;
+    size_t value;
 
     clip = navr_member(json, len, doc, edit, "clipModelInfo", '{');
-    if (clip >= 0 && navr_str(json, len, doc, clip, "type", text, sizeof text) &&
-        strcmp(text, NAVR_CLIPMODEL_BOX) != 0) return 0;    /* no face to derive */
+    if (clip < 0 && navr_value(json, len, doc, edit, "clipModelInfo", &value)) return 0;
+    if (navr_value(json, len, doc, clip, "type", &value) &&
+        (!navr_str(json, len, doc, clip, "type", text, sizeof text) ||
+         strcmp(text, NAVR_CLIPMODEL_BOX) != 0)) return 0;
 
     box = navr_member(json, len, doc, clip, "size", '{');
-    sx = navr_num(json, len, doc, box, "x", 0.0f);
-    sy = navr_num(json, len, doc, box, "y", 0.0f);
-    sz = navr_num(json, len, doc, box, "z", 0.0f);
+    if (box < 0 && navr_value(json, len, doc, clip, "size", &value)) return 0;
+    sx = navr_num(json, len, doc, box, "x", resolved ? resolved[0] : NAN);
+    sy = navr_num(json, len, doc, box, "y", resolved ? resolved[1] : NAN);
+    sz = navr_num(json, len, doc, box, "z", resolved ? resolved[2] : NAN);
     if (!_finite(sx) || !_finite(sy) || !_finite(sz) ||
         sx <= 0.0f || sy <= 0.0f || sz <= 0.0f) return 0;
 
@@ -596,6 +694,12 @@ done:
 
 int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
 {
+    return sh_nav_regions_read_resolved(json, len, out, NULL, NULL);
+}
+
+int sh_nav_regions_read_resolved(const char *json, size_t len, sh_nav_map *out,
+                                sh_navr_entity_size read_size, void *ctx)
+{
     /* the volume's uniqueId, parallel to out->regions, until attribution */
     int uid[SH_NAVR_MAX_REGIONS];
     sh_shard_doc doc;
@@ -661,6 +765,7 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
         sh_nav_region region;
         int ed, edit, vuid;
         unsigned self;
+        float resolved[3];
 
         if (doc.c[i].parent != arr || doc.c[i].kind != '{') continue;
         /* Diagnostic index counts object elements in entities. */
@@ -690,7 +795,8 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
         if (!navr_marked(json, len, &doc, edit) &&
             !navr_bool(json, len, &doc, edit, "blockDemons")) continue;
 
-        if (!navr_volume_face(json, len, &doc, edit, &region)) {
+        if ((read_size && !read_size(self, resolved, ctx)) ||
+            !navr_volume_face(json, len, &doc, edit, &region, read_size ? resolved : NULL)) {
             char note[160];
             char kind[64];
             int clip = navr_member(json, len, &doc, edit, "clipModelInfo", 0x7b);
@@ -788,7 +894,7 @@ static int navr_live_region(const char *json, size_t len, sh_nav_region *r)
             /* ABSENT IS FALSE here exactly as it is in the map: an untouched
              * volume simply has no `flags.noFlood` member to read. */
             if (edit >= 0 && navr_marked(json, len, &doc, edit) &&
-                navr_volume_face(json, len, &doc, edit, r)) {
+                navr_volume_face(json, len, &doc, edit, r, NULL)) {
                 r->block_demons = navr_bool(json, len, &doc, edit, "blockDemons");
                 ok = 1;
             }

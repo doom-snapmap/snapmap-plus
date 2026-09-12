@@ -416,13 +416,9 @@ void sh_nav_bake_refresh_live(void)
     AcquireSRWLockExclusive(&g_bake_lock);
     __try {
     if (g_snapshot) {
-        char *json = NULL; size_t len = 0;
         sh_nav_map *candidate = (sh_nav_map *)malloc(sizeof *candidate);
-        int ok = candidate && g_snapshot(&json, &len, g_snapshot_ctx);
+        int ok = candidate && g_snapshot(candidate, g_snapshot_ctx);
         if (ok) {
-            SH_PERF_BEGIN(t0);
-            ok = sh_nav_regions_read(json, len, candidate);
-            SH_PERF_END(SH_PERF_NAV_PARSE, t0);
             if (ok && candidate->ids_unusable != g_ids_unusable) {
                 g_ids_unusable = candidate->ids_unusable;
                 backend_log(g_ids_unusable
@@ -459,7 +455,7 @@ void sh_nav_bake_refresh_live(void)
             g_module_count = 0;
             bake_preview_clear();
         }
-        free(json); free(candidate);
+        free(candidate);
     } else if (g_have_map) bake_refresh_live_locked();
     } __finally { ReleaseSRWLockExclusive(&g_bake_lock); }
 }

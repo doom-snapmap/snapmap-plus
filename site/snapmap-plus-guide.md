@@ -408,6 +408,9 @@ walkable surfaces for demon navigation. Rotating a box can make one of its sides
 the new walking surface. Slopes retain their actual angle, and overlapping boxes
 contribute their exposed surfaces.
 
+Default-sized boxes work too, including in maps created before Snapmap+ was
+installed. You do not need to resize a box or recreate the map to enable navigation.
+
 For a wall that demons should go around, leave **AI Navigation** off and keep
 **Block Demons** on. Ordinary Blocking Boxes already participate as obstacles,
 including where they overlap custom navigation. Enable AI Navigation when the

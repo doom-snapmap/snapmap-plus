@@ -53,7 +53,7 @@ $tests = @(
     @{ name = "json_patch_test"; src = 'json_patch_test.c ..\src\backend\json_patch.c'; arg = "" }
     @{ name = "edit_pair_test"; src = 'edit_pair_test.c'; arg = "" }
     @{ name = "engine_cvar_read_test"; src = 'engine_cvar_read_test.c'; arg = "" }
-    @{ name = "apply_dispatch_test"; src = 'apply_dispatch_test.c ..\src\backend\perf.c'; defs = '/Gy'; arg = "" }
+    @{ name = "apply_dispatch_test"; src = 'apply_dispatch_test.c ..\src\backend\perf.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c'; defs = '/Gy'; arg = "" }
     @{ name = "snapstack_pair_test"; src = 'snapstack_pair_test.c'; defs = '/Gy'; arg = "" }
     @{ name = "crash_report_test"; src = 'crash_report_test.c ..\src\fault_shield\crash_record_format.c ..\src\backend\config_json.c'; arg = "" }
     @{ name = "recovery_dialog_test"; src = 'recovery_dialog_test.c'; defs = '/Gy'; arg = "" }

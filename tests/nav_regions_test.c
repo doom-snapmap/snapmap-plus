@@ -704,6 +704,112 @@ static char *live_box(const char *flags, double cx, double cy, double cz,
 static const char *TICKED  = "\"flags\":{\"noFlood\":true},\"blockDemons\":true,";
 static const char *UNTICKED = "\"blockDemons\":true,";
 
+/* Deliberately unrelated to the shipped declaration's dimensions. */
+static int resolved_size(unsigned entity, float size[3], void *ctx)
+{
+    CHECK(entity == 0);
+    if (!ctx) return 0;
+    memcpy(size, ctx, 3 * sizeof(float)); return 1;
+}
+
+static void test_resolved_decl_size(void)
+{
+    static const char good[] =
+        "edit = { renderModelInfo = { scale = { x=999;y=999;z=999; } }"
+        " note = \"clipModelInfo = { size={x=1;y=1;z=1;} }\";"
+        " /* clipModelInfo = {} */ clipModelInfo = { type=\"CLIPMODEL_BOX\";"
+        "size={z=9.125e1; x=7.35e1; // unrelated y=1\n y=157.25;} } }";
+    static const char *bad[] = {
+        "edit={clipModelInfo={type=\"CLIPMODEL_BOX\";size={x=1;y=2;}}}",
+        "edit={clipModelInfo={type=\"CLIPMODEL_BOX\";size={x=0;y=2;z=3;}}}",
+        "edit={clipModelInfo={type=\"CLIPMODEL_BOX\";size={x=-1;y=2;z=3;}}}",
+        "edit={clipModelInfo={type=\"CLIPMODEL_BOX\";size={x=1e999;y=2;z=3;}}}",
+        "edit={clipModelInfo={type=\"CLIPMODEL_BOX\";size={x=1foo;y=2;z=3;}}}",
+        "edit={clipModelInfo={type=\"CLIPMODEL_BOX\";size={x=\"1\";y=2;z=3;}}}",
+        "edit={clipModelInfo={type=\"CLIPMODEL_CYLINDER\";size={x=1;y=2;z=3;}}}",
+        "edit={clipModelInfo={size={x=1;y=2;z=3;}}}",
+        "edit={renderModelInfo={scale={x=1;y=2;z=3;}}}",
+        "edit={clipModelInfo={type=\"CLIPMODEL_BOX\";size={x=1;y=2;z=3;}}",
+        "edit={/* unterminated"
+    };
+    float size[3];
+    size_t i;
+    CHECK(sh_nav_regions_decl_size(good, sizeof good-1, size));
+    CHECK(near_f(size[0],73.5f) && near_f(size[1],157.25f) && near_f(size[2],91.25f));
+    for (i=0;i<sizeof bad/sizeof bad[0];i++)
+        CHECK(!sh_nav_regions_decl_size(bad[i],strlen(bad[i]),size));
+    for (i=0;i<sizeof good-2;i++) CHECK(!sh_nav_regions_decl_size(good,i,size));
+}
+
+static void test_inherited_box_dimensions(void)
+{
+    static const struct {
+        const char *geometry;
+        float x, y, z;
+        int valid;
+    } cases[] = {
+        { "", 73, 157, 91, 1 },
+        { "\"clipModelInfo\":{}", 73, 157, 91, 1 },
+        { "\"clipModelInfo\":{\"size\":{}}", 73, 157, 91, 1 },
+        { "\"clipModelInfo\":{\"size\":{\"x\":132}}", 132, 157, 91, 1 },
+        { "\"clipModelInfo\":{\"size\":{\"y\":192}}", 73, 192, 91, 1 },
+        { "\"clipModelInfo\":{\"size\":{\"z\":96}}", 73, 157, 96, 1 },
+        { "\"clipModelInfo\":{\"size\":{\"x\":132,\"y\":192}}", 132, 192, 91, 1 },
+        { "\"clipModelInfo\":{\"size\":{\"x\":132,\"z\":96}}", 132, 157, 96, 1 },
+        { "\"clipModelInfo\":{\"size\":{\"y\":192,\"z\":96}}", 73, 192, 96, 1 },
+        { "\"clipModelInfo\":{\"size\":{\"x\":132,\"y\":192,\"z\":96}}", 132, 192, 96, 1 },
+        { "\"clipModelInfo\":{\"size\":{\"x\":0}}", 0, 0, 0, 0 },
+        { "\"clipModelInfo\":{\"size\":{\"y\":-1}}", 0, 0, 0, 0 },
+        { "\"clipModelInfo\":{\"size\":{\"z\":0}}", 0, 0, 0, 0 },
+        { "\"clipModelInfo\":{\"size\":{\"z\":1e999}}", 0, 0, 0, 0 },
+        { "\"clipModelInfo\":{\"size\":{\"x\":null}}", 0, 0, 0, 0 },
+        { "\"clipModelInfo\":{\"size\":{\"y\":\"128\"}}", 0, 0, 0, 0 },
+        { "\"clipModelInfo\":null", 0, 0, 0, 0 },
+        { "\"clipModelInfo\":[]", 0, 0, 0, 0 },
+        { "\"clipModelInfo\":{\"size\":null}", 0, 0, 0, 0 },
+        { "\"clipModelInfo\":{\"size\":[]}", 0, 0, 0, 0 },
+        { "\"clipModelInfo\":{\"type\":null}", 0, 0, 0, 0 },
+        { "\"clipModelInfo\":{\"type\":\"CLIPMODEL_CYLINDER\"}", 0, 0, 0, 0 }
+    };
+    size_t c;
+    int marked;
+    for (c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+        for (marked = 0; marked <= 1; marked++) {
+            blob inst, ents, edit;
+            char *json;
+            size_t n;
+            sh_nav_map m;
+            bopen(&inst); bopen(&ents); bopen(&edit);
+            put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
+            bput(&edit, "%s\"spawnPosition\":{\"z\":32},"
+                        "\"renderModelInfo\":{\"scale\":{\"x\":999,\"y\":999,\"z\":999}}%s%s",
+                 marked ? TICKED : UNTICKED,
+                 cases[c].geometry[0] ? "," : "", cases[c].geometry);
+            put_entity(&ents, 1, 7, INHERIT, edit.p);
+            json = map_of(inst.p, ents.p, "0,1,1", "7", &n);
+            float effective[3] = {cases[c].x, cases[c].y, cases[c].z};
+            /* Explicit malformed JSON must still fail even with a valid native size. */
+            if (!cases[c].valid) { effective[0]=73; effective[1]=157; effective[2]=91; }
+            CHECK(sh_nav_regions_read_resolved(json, n, &m, resolved_size, effective));
+            CHECK(m.invalid_geometry == !cases[c].valid);
+            CHECK(!m.truncated);
+            CHECK(m.region_count == (marked && cases[c].valid));
+            CHECK(m.obstacle_count == (!marked && cases[c].valid));
+            if (cases[c].valid) {
+                sh_nav_region *r = marked ? &m.regions[0] : &m.obstacles[0];
+                CHECK(near_f(quad_extent_x(r), cases[c].x));
+                CHECK(near_f(quad_extent_y(r), cases[c].y));
+                CHECK(near_f(quad_top_z(r), 32 + cases[c].z));
+                CHECK(r->instance == 0);
+                /* A failed current entity read cannot reuse an earlier size. */
+                CHECK(sh_nav_regions_read_resolved(json, n, &m, resolved_size, NULL));
+                CHECK(m.invalid_geometry);
+            }
+            free(json); bclose(&inst); bclose(&ents); bclose(&edit);
+        }
+    }
+}
+
 /* The map every test below starts from: one instance, two blocking boxes, and
  * only the first of them ticked when it was read. */
 static char *two_box_map(sh_nav_map *m)
@@ -1362,6 +1468,8 @@ static void test_duplicate_box_ids(void)
 
 int main(void)
 {
+    test_resolved_decl_size();
+    test_inherited_box_dimensions();
     test_duplicate_box_ids();
     test_marker_migration();
     test_marker_migration_boundaries();

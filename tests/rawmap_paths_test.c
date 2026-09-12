@@ -492,6 +492,43 @@ static unsigned char fixture_serialize(void *map, void *out, unsigned char compa
 static unsigned char fixture_map_to_json(void *map, void *out, unsigned char compact)
 { return sh_ser_detour(map, out, compact); }
 
+static int snapshot_visits, snapshot_accept;
+static int fixture_visit(const void *map, const void *out, void *ctx)
+{
+    CHECK(map == (void *)1 && ctx == (void *)2);
+    CHECK(*(const char *const *)((const char *)out + IDSTR_DATA_OFF) == BODY);
+    CHECK(g_snapshot_depth == 1);
+    snapshot_visits++;
+    if (snapshot_accept < 0) RaiseException(0xe0000001, 0, 0, NULL);
+    return snapshot_accept;
+}
+
+static void snapshots_visit_without_save_effects(void)
+{
+    unsigned char str[IDSTR_SIZE] = {0};
+    unsigned long before = sh_rawmap_save_count();
+    int caught = 0;
+    clean_state();
+    g_ser_orig = fixture_serialize;
+    sh_rawmap_save_arm_once();
+    snapshot_visits = 0; snapshot_accept = 1;
+    CHECK(sh_rawmap_snapshot_inspect(fixture_map_to_json,(void *)1,str,fixture_visit,(void *)2));
+    CHECK(snapshot_visits == 1 && sh_rawmap_save_count() == before);
+    CHECK(sh_rawmap_save_oneshot_pending());
+    CHECK(!g_snapshot_depth && !g_snapshot_visit && !g_snapshot_visit_ctx);
+    CHECK(sh_rawmap_snapshot(fixture_map_to_json,(void *)1,str));
+    CHECK(snapshot_visits == 1);
+    snapshot_accept = 0;
+    CHECK(!sh_rawmap_snapshot_inspect(fixture_map_to_json,(void *)1,str,fixture_visit,(void *)2));
+    snapshot_accept = -1;
+    __try { sh_rawmap_snapshot_inspect(fixture_map_to_json,(void *)1,str,fixture_visit,(void *)2); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { caught = 1; }
+    CHECK(caught && !g_snapshot_depth && !g_snapshot_visit && !g_snapshot_visit_ctx);
+    CHECK(sh_rawmap_save_count() == before && sh_rawmap_save_oneshot_pending());
+    g_ser_orig = NULL;
+    clean_state();
+}
+
 static void a_live_export_mirrors_once(void)
 {
     char target[MAX_PATH], msg[192];
@@ -576,6 +613,7 @@ int main(void)
     missing_overwrite_protection_refuses_staging(archive);
     an_existing_scratch_file_survives();
     a_live_export_mirrors_once();
+    snapshots_visit_without_save_effects();
 
     DeleteFileA(archive);
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);
