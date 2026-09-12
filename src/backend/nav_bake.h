@@ -96,6 +96,11 @@ void sh_nav_bake_preview_stop(void);
  * waiting for the next read to collect it leaves the green stale for as long
  * as that read is away. */
 int sh_nav_bake_preview_pending(void);
+
+/* Mark the first `count` marked volumes of every module as unplaced, the way
+ * a refused bake does, so the marks can be seen without a map that refuses.
+ * Zero clears them. Returns how many are marked. */
+int sh_nav_bake_show_marks(int count);
 void sh_nav_bake_enable_instances(int enabled);
 int sh_nav_bake_instance_name(int instance, const char *name, char *out, size_t capacity);
 

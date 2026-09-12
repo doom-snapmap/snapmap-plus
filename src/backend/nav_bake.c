@@ -82,9 +82,54 @@ static bake_preview_cache g_preview[BAKE_MAX_MODULES];
 static unsigned long g_preview_revision = ~0UL;
 static int g_preview_lines;
 static int g_preview_lines_last = -1;   /* -1 until the first pass runs */
+static int g_ids_unusable;              /* last reported duplicate-id state */
 static int g_instance_serving;
 
 void sh_nav_bake_enable_instances(int enabled) { g_instance_serving=enabled; }
+
+/* Say what a refresh changed, so two readers that disagree can be told apart
+ * by what each one produced rather than by the flicker they cause. */
+static void bake_log_change(const char *who, const sh_nav_map *a, const sh_nav_map *b)
+{
+    char line[256];
+    int i, n;
+    if (a->region_count != b->region_count || a->obstacle_count != b->obstacle_count) {
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "NAV: %s changed the count -- floors %d->%d, walls %d->%d",
+                    who, a->region_count, b->region_count,
+                    a->obstacle_count, b->obstacle_count);
+        backend_log(line);
+        return;
+    }
+    for (i = 0; i < a->region_count; i++) {
+        const sh_nav_region *x = &a->regions[i], *y = &b->regions[i];
+        if (!memcmp(x, y, sizeof *x)) continue;
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "NAV: %s moved floor %u in copy %d->%d from %.1f %.1f %.1f "
+                    "to %.1f %.1f %.1f",
+                    who, y->entity, x->instance, y->instance,
+                    x->c[0][0], x->c[0][1], x->c[0][2],
+                    y->c[0][0], y->c[0][1], y->c[0][2]);
+        backend_log(line);
+        return;
+    }
+    n = a->obstacle_count;
+    for (i = 0; i < n; i++) {
+        const sh_nav_region *x = &a->obstacles[i], *y = &b->obstacles[i];
+        if (!memcmp(x, y, sizeof *x)) continue;
+        _snprintf_s(line, sizeof line, _TRUNCATE,
+                    "NAV: %s moved wall %u in copy %d->%d from %.1f %.1f %.1f "
+                    "to %.1f %.1f %.1f",
+                    who, y->entity, x->instance, y->instance,
+                    x->c[0][0], x->c[0][1], x->c[0][2],
+                    y->c[0][0], y->c[0][1], y->c[0][2]);
+        backend_log(line);
+        return;
+    }
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "NAV: %s changed something other than a box", who);
+    backend_log(line);
+}
 
 static void bake_preview_clear(void)
 {
@@ -355,6 +400,7 @@ int sh_nav_bake_refresh_volumes(int *volumes)
         g_live_marked = g_map.region_count;
         g_live_scanned = count;
         if (memcmp(before, &g_map, sizeof g_map)) {
+            bake_log_change("the per-box refresh", before, &g_map);
             g_geometry_revision++; bake_preview_clear(); bake_plan_locked();
         }
         if (volumes) *volumes = count;
@@ -377,10 +423,25 @@ void sh_nav_bake_refresh_live(void)
             SH_PERF_BEGIN(t0);
             ok = sh_nav_regions_read(json, len, candidate);
             SH_PERF_END(SH_PERF_NAV_PARSE, t0);
+            if (ok && candidate->ids_unusable != g_ids_unusable) {
+                g_ids_unusable = candidate->ids_unusable;
+                backend_log(g_ids_unusable
+                    ? "NAV: two volumes share an id, which duplicating a box does "
+                      "until the map is saved; reading the whole map each time"
+                    : "NAV: every volume has its own id again");
+            }
+            if (ok && (candidate->truncated || candidate->invalid_geometry))
+                backend_log(candidate->truncated
+                    ? "NAV: the map has more volumes than the reader holds; "
+                      "no navigation is available"
+                    : "NAV: a volume could not be read, so the whole map read "
+                      "was refused and no navigation is available");
             ok = ok && !candidate->truncated && !candidate->invalid_geometry;
         }
         if (ok) {
             int changed = !g_have_map || g_live_refused || memcmp(&g_map, candidate, sizeof g_map);
+            if (changed && g_have_map && !g_live_refused)
+                bake_log_change("the complete snapshot", &g_map, candidate);
             g_map = *candidate;
             /* The read attributed its volumes to `candidate`, which is about to be
              * freed. A later per-entity refresh reads g_map, so it inherits them. */
@@ -916,6 +977,44 @@ static int preview_worker_ready(void)
         g_pv_thread = CreateThread(NULL, 0, preview_worker, NULL, 0, NULL);
     InterlockedExchange(&g_pv_ready, 2);
     return g_pv_thread != NULL;
+}
+
+int sh_nav_bake_show_marks(int count)
+{
+    int i, marked = 0;
+    if (count < 0) count = 0;
+    if (count > BAKE_MAX_REFUSED) count = BAKE_MAX_REFUSED;
+    AcquireSRWLockExclusive(&g_bake_lock);
+    for (i = 0; i < g_module_count; i++) {
+        int want = 0, r;
+        if (g_preview[i].refused) {
+            HeapFree(GetProcessHeap(), 0, g_preview[i].refused);
+            g_preview[i].refused = NULL;
+        }
+        g_preview[i].refused_count = 0;
+        g_preview[i].instance = g_modules[i].instance;
+        if (count == 0) continue;
+        for (r = 0; r < g_map.region_count && want < count; r++)
+            if (g_map.regions[r].instance == g_modules[i].instance) want++;
+        if (want == 0) continue;
+        g_preview[i].refused = (bake_refused *)HeapAlloc(GetProcessHeap(), 0,
+                                    (size_t)want * sizeof *g_preview[i].refused);
+        if (!g_preview[i].refused) continue;
+        want = 0;
+        for (r = 0; r < g_map.region_count && want < count; r++) {
+            if (g_map.regions[r].instance != g_modules[i].instance) continue;
+            memcpy(g_preview[i].refused[want].c, g_map.regions[r].c,
+                   sizeof g_preview[i].refused[0].c);
+            want++;
+        }
+        g_preview[i].refused_count = want;
+        marked += want;
+    }
+    /* The line pass runs on a geometry change, so ask for one. */
+    g_geometry_revision++;
+    g_preview_revision = g_geometry_revision;
+    ReleaseSRWLockExclusive(&g_bake_lock);
+    return marked;
 }
 
 int sh_nav_bake_preview_pending(void)

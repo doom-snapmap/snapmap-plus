@@ -79,6 +79,11 @@ typedef struct sh_nav_map {
     int             region_count;
     int             truncated;          /* a cap was hit; the caller should say so */
     int             invalid_geometry;   /* invalid solid, transform or ownership */
+    /* Two volumes share an id, or one carries none. The shapes are still
+     * good; only the per-entity refresh, which addresses a box by id, is
+     * not. Duplicating a box in the editor produces this until the map is
+     * saved, and it must not cost the map its navigation. */
+    int             ids_unusable;
     sh_nav_region   obstacles[SH_NAVR_MAX_REGIONS];
     int             obstacle_count;
 } sh_nav_map;

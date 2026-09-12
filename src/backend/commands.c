@@ -1695,7 +1695,20 @@ static void h_sh_dialogdump(idCmdArgs *a)
 /* Report served baked navigation and reasons for falling back to shipped data. */
 static void h_sh_navmesh(idCmdArgs *a)
 {
-    (void)a;
+    const char *verb = cmd_argv(a, 1);
+    if (verb && _stricmp(verb, "marks") == 0) {
+        const char *howmany = cmd_argv(a, 2);
+        int n = howmany ? atoi(howmany) : 4;
+        int marked = sh_nav_bake_show_marks(n);
+        if (marked > 0)
+            sh_printf("Marked %d volume(s) red, the way a refused bake marks "
+                      "the ones it could not place. Run sh_navmesh marks 0 to clear.\n",
+                      marked);
+        else
+            sh_printf("Nothing to mark: no volume in this map is marked for AI "
+                      "navigation.\n");
+        return;
+    }
     sh_navmesh_report(sh_printf);
     /* Compose stored-shard and marked-volume reports without coupling the modules. */
     sh_nav_bake_report(sh_printf);

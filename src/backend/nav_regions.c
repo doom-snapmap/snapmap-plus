@@ -11,6 +11,7 @@
 #include <math.h>
 
 #include "nav_regions.h"
+#include "backend_log.h"
 #include "map_shards.h"
 
 /* Module decl names follow maps/modules/<category>/<module>.decl. */
@@ -685,6 +686,15 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
             !navr_bool(json, len, &doc, edit, "blockDemons")) continue;
 
         if (!navr_volume_face(json, len, &doc, edit, &region)) {
+            char note[160];
+            char kind[64];
+            int clip = navr_member(json, len, &doc, edit, "clipModelInfo", 0x7b);
+            if (!navr_str(json, len, &doc, clip, "type", kind, sizeof kind))
+                strcpy_s(kind, sizeof kind, "a box");
+            _snprintf_s(note, sizeof note, _TRUNCATE,
+                        "NAV: volume %u has no shape this reader can use (%s)",
+                        self, kind);
+            backend_log(note);
             out->invalid_geometry = 1;
             continue;
         }
@@ -693,8 +703,8 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
             out->truncated = 1;
             break;
         }
-        if(vuid<0)out->invalid_geometry=1;
-        for(keep=0;keep<out->region_count;keep++)if(uid[keep]==vuid)out->invalid_geometry=1;
+        if(vuid<0)out->ids_unusable=1;
+        for(keep=0;keep<out->region_count;keep++)if(uid[keep]==vuid)out->ids_unusable=1;
         region.instance = -1;
         region.marked = navr_marked(json,len,&doc,edit);
         region.block_demons = navr_bool(json, len, &doc, edit, "blockDemons");
@@ -729,7 +739,9 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
                (size_t)(out->region_count - keep) * sizeof out->regions[0]);
     out->region_count = keep;
 
-    /* This map, and only this one, may now be refreshed from the live editor. */
+    /* This map, and only this one, may now be refreshed from the live editor,
+     * and only while every box can be addressed by its own id. */
+    if (out->ids_unusable) g_loaded.count = 0;
     g_loaded.owner = out;
 
     sh_shard_doc_free(&doc);
@@ -868,6 +880,30 @@ int sh_nav_regions_refresh_live(sh_nav_map *m, int highest_id,
     return navr_live_commit(m, w, answered, volumes, marked);
 }
 
+/* The shape a complete snapshot recorded for this box.
+ *
+ * A live entity carries its current flags, but its spawnPosition is the value
+ * it was created with: the editor writes a moved box out only when it
+ * serializes the whole map. Reading shape from the entity draws the box where
+ * it used to be. Measured on a box dragged 312 units: the entity kept
+ * reporting its original spawnPosition indefinitely while the map reported the
+ * new one. */
+static int navr_shape_of(const sh_nav_map *m, unsigned entity, sh_nav_region *r)
+{
+    const sh_nav_region *src = NULL;
+    int i;
+    for (i = 0; i < m->region_count && !src; i++)
+        if (m->regions[i].entity == entity) src = &m->regions[i];
+    for (i = 0; i < m->obstacle_count && !src; i++)
+        if (m->obstacles[i].entity == entity) src = &m->obstacles[i];
+    if (!src) return 0;
+    memcpy(r->c, src->c, sizeof r->c);
+    memcpy(r->n, src->n, sizeof r->n);
+    r->face = src->face;
+    r->depth = src->depth;
+    return 1;
+}
+
 int sh_nav_regions_refresh_known(sh_nav_map *m,
                                  sh_navr_entity_valid valid,
                                  sh_navr_entity_json get_json, void *ctx,
@@ -910,13 +946,16 @@ int sh_nav_regions_refresh_known(sh_nav_map *m,
             !strcmp(inherit, NAVR_VOLUME_INHERIT)) {
             r.marked = navr_marked(json, n, &doc, at);
             r.block_demons = navr_bool(json, n, &doc, at, "blockDemons");
-            parsed = (!r.marked && !r.block_demons) ||
-                     navr_volume_face(json, n, &doc, at, &r);
+            parsed = 1;
         }
         sh_shard_doc_free(&doc);
         if (!parsed) goto done;
         if (read_count) (*read_count)++;
         if (!r.marked && !r.block_demons) continue;
+        /* A box with no recorded shape was neither a floor nor a wall when
+         * the map was last read, so only a complete snapshot can place it. */
+        *why = "a box became a floor or a wall; a complete snapshot is required";
+        if (!navr_shape_of(m, v->entity, &r)) goto done;
         if (v->instance < 0 || v->instance >= next->instance_count ||
             !next->instances[v->instance].module[0]) continue;
         *why = "the geometry capacity requires a complete snapshot";
