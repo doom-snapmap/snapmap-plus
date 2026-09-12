@@ -5,23 +5,22 @@ latest stable version is what `snapmap-plus update` installs.
 
 ## v0.2.1-beta.11 -- 2026-09-12 (beta)
 
-**Resize Grid Rooms and steadier navigation previews**
+**Resizable Grid Rooms, a rawmap File menu and steadier navigation**
 
-Classic and modern Grid Rooms now take independent XYZ dimensions in DOOM's native Module Properties panel, raw map handling moves to one command with its own save destination, and navigation previews stay put, refresh after edits and no longer stall dense maps.
+Resize individual Grid Rooms in DOOM's Module Properties, open and export rawmaps through the File menu, and keep navigation previews steady after moving or duplicating boxes. Navigation baking runs in the background, with fixes for dense routes and rotated climb approaches.
 
 ### New
-- Classic and modern Grid Rooms expose independent XYZ dimensions in DOOM's native Module Properties panel, including Blueprint, with doors, lighting, collision, navigation and authored objects following the resized shell.
-- Raw map files are handled through one command covering state, paths, loading and saving, with a chosen save destination and a choice about whether an opened raw map may replace the map it opened over.
+- Classic and modern Grid Rooms have independent X, Y and Z dimensions under **Grid Room Size** in DOOM's **Module Properties**, including Blueprint mode. Doors retain their size and placed objects retain their local positions and sizes; built-in lighting, collision and navigation adjust to the room. **Players need Snapmap+ to load maps with resized Grid Rooms; vanilla and console players cannot use them.**
+- The **File** menu can load rawmaps and export the open map, including unsaved edits, with **Save Rawmap** and **Save Rawmap As...**. Opening a rawmap protects the saved map it opened over by default, and changing maps resets the export destination.
 
 ### Improved
-- Navigation previews keep the box positions from the last saved map instead of snapping back to older spawn positions while flags refresh.
-- Preview baking happens away from the frame and refreshes after box edits or module movement, so editing stays responsive and the green preview stays current.
+- Navigation previews retain box shapes from the latest complete map snapshot instead of returning to stale spawn positions during live flag refreshes. Placement and module movement refresh the snapshot without requiring a save.
+- Preview baking runs in the background to reduce editor stalls. Refused bakes report their reason; route-limit diagnostics can mark affected volumes red, and `sh_perf` reports editing costs.
 
 ### Fixed
-- Dense maps no longer throw away the whole custom bake when there is too much geometry, and refused bakes now point at the volumes involved so crowded maps are easier to diagnose.
-- Climb approaches on rotated boxes are placed clear of the box itself and pick the right animation for each height, so demons reach them reliably.
-
-_Plus 9 smaller fixes and internal changes._
+- Duplicated boxes sharing an ID retain navigation when their owning module is unambiguous. Until the IDs are unique, refreshes read the whole map; IDs assigned across modules still refuse the bake.
+- Dense bakes no longer hit the former 2,048-traversal candidate cutoff, and repeated path-search candidates cannot overflow the native queue. Engine route limits still apply.
+- Climb approaches clear the physical rotated box and select traversal animations for each anchor height, repairing blocked approaches without changing the authored surface.
 
 ## v0.2.1-beta.10 -- 2026-09-10 (beta)
 
