@@ -3,6 +3,26 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.11 -- 2026-09-12 (beta)
+
+**Resize Grid Rooms and steadier navigation previews**
+
+Classic and modern Grid Rooms now take independent XYZ dimensions in DOOM's native Module Properties panel, raw map handling moves to one command with its own save destination, and navigation previews stay put, refresh after edits and no longer stall dense maps.
+
+### New
+- Classic and modern Grid Rooms expose independent XYZ dimensions in DOOM's native Module Properties panel, including Blueprint, with doors, lighting, collision, navigation and authored objects following the resized shell.
+- Raw map files are handled through one command covering state, paths, loading and saving, with a chosen save destination and a choice about whether an opened raw map may replace the map it opened over.
+
+### Improved
+- Navigation previews keep the box positions from the last saved map instead of snapping back to older spawn positions while flags refresh.
+- Preview baking happens away from the frame and refreshes after box edits or module movement, so editing stays responsive and the green preview stays current.
+
+### Fixed
+- Dense maps no longer throw away the whole custom bake when there is too much geometry, and refused bakes now point at the volumes involved so crowded maps are easier to diagnose.
+- Climb approaches on rotated boxes are placed clear of the box itself and pick the right animation for each height, so demons reach them reliably.
+
+_Plus 9 smaller fixes and internal changes._
+
 ## v0.2.1-beta.10 -- 2026-09-10 (beta)
 
 **Connected navigation for custom bridges and ramps**
