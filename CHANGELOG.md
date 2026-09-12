@@ -3,6 +3,25 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.11 -- 2026-09-12 (beta)
+
+**Resizable Grid Rooms, a rawmap File menu and steadier navigation**
+
+Resize individual Grid Rooms in DOOM's Module Properties, open and export rawmaps through the File menu, and keep navigation previews steady after moving or duplicating boxes. Navigation baking runs in the background, with fixes for dense routes and rotated climb approaches.
+
+### New
+- Classic and modern Grid Rooms have independent X, Y and Z dimensions under **Grid Room Size** in DOOM's **Module Properties**, including Blueprint mode. Doors retain their size and placed objects retain their local positions and sizes; built-in lighting, collision and navigation adjust to the room. **Players need Snapmap+ to load maps with resized Grid Rooms; vanilla and console players cannot use them.**
+- The **File** menu can load rawmaps and export the open map, including unsaved edits, with **Save Rawmap** and **Save Rawmap As...**. Opening a rawmap protects the saved map it opened over by default, and changing maps resets the export destination.
+
+### Improved
+- Navigation previews retain box shapes from the latest complete map snapshot instead of returning to stale spawn positions during live flag refreshes. Placement and module movement refresh the snapshot without requiring a save.
+- Preview baking runs in the background to reduce editor stalls. Refused bakes report their reason; route-limit diagnostics can mark affected volumes red, and `sh_perf` reports editing costs.
+
+### Fixed
+- Duplicated boxes sharing an ID retain navigation when their owning module is unambiguous. Until the IDs are unique, refreshes read the whole map; IDs assigned across modules still refuse the bake.
+- Dense bakes no longer hit the former 2,048-traversal candidate cutoff, and repeated path-search candidates cannot overflow the native queue. Engine route limits still apply.
+- Climb approaches clear the physical rotated box and select traversal animations for each anchor height, repairing blocked approaches without changing the authored surface.
+
 ## v0.2.1-beta.10 -- 2026-09-10 (beta)
 
 **Connected navigation for custom bridges and ramps**
