@@ -3,6 +3,23 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.12 -- 2026-09-12 (beta)
+
+**Map rendering controls and reliable Grid Room placement**
+
+Adjust view distance and fog per map, place objects inside tall Grid Rooms, and restore the game's original environments when customization is off. Reset resized rooms and remove package-dependent content to return otherwise stock maps to vanilla compatibility.
+
+### New
+- DOOM's **Settings / Properties** panel now offers **Custom Rendering**, with view distance and fog strength, range and color controls saved inside each map on OpenGL and Vulkan.
+
+### Improved
+- Turning **Custom Rendering** off restores each module's original environment, while saved custom values remain available when re-enabled.
+- Restoring every Grid Room to its original dimensions and removing package-dependent content permits otherwise stock maps to load in vanilla after saving with **Custom Rendering** off.
+
+### Fixed
+- Objects can be placed inside tall resized Grid Rooms, and resizing refreshes the faint native placement grid.
+- **Grid Room Size** no longer inherits the **Grid Offset** field's 0-63 input range; dimensions still clamp to the door and portal limits.
+
 ## v0.2.1-beta.11 -- 2026-09-12 (beta)
 
 **Resizable Grid Rooms, a rawmap File menu and steadier navigation**
