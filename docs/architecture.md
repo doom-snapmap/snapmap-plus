@@ -57,16 +57,21 @@ Map rendering lives in the backend and DOOM's native Settings / Properties
 panel. The panel owns an Apply/Cancel draft tied to the current editable map.
 Apply stores a versioned `smp.render.v1` string in native map variables; the
 native serializer carries it through normal saves without a sidecar. The
-reserved value contains an explicit custom-mode flag, view distance, fog strength,
-start/end and linear RGB. Version 2 adds the flag; version 1 is read as custom
-to preserve existing saved maps. Missing metadata uses native module environments;
-Save/Play conversion stores that choice explicitly. Malformed or duplicate metadata disables the
+reserved value contains view distance, fog strength, start/end and linear RGB.
+Version 3 stores only these seven values. Version 1 and enabled version 2 values
+are read directly; disabled version 2 maps migrate to native defaults. Missing
+metadata also uses native defaults. Save/Play conversion writes the current
+canonical values without reallocating an unchanged string or shifting variable
+indices. Malformed or duplicate metadata disables the
 override. The reserved variable should not be edited through generic variables.
 Map deserialization clears the previous runtime selection and reads the loaded
 map's variables. Editor-to-play conversion refreshes that selection from the
 current editable map. A locked value copy crosses to rendering, where the
-blended environment's literal view-distance and fog values are changed only when
-this map enables customization, before
+blended environment's literal view-distance and fog values are changed independently:
+view distance 8192 or zero leaves native distance intact, and fog strength zero
+leaves native fog intact. Fog range/color values do not enable an override while
+strength is zero. The controls are always editable and there is no stored enable
+flag. Overrides run before
 the engine reads its far clip. This applies only to SnapMap and uses signed
 bindings in both renderer executables. No WebView interface change is involved.
 

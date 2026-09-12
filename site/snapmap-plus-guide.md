@@ -64,7 +64,8 @@ The resizing feature is included in the existing backend DLL; it needs no
 separate override package or map sidecar file.
 
 To return a map to vanilla compatibility, restore every Grid Room to its
-original dimensions, turn **Custom Rendering** off, and remove any objects or
+original dimensions, restore **View Distance** to 8192 (or zero) and **Fog Strength**
+to zero, and remove any objects or
 logic that require packages. Save again. Removing the last use of a package
 removes that map's embedded dependency; it keeps your installed package available
 for other maps. Other mod-only content must also be removed.
@@ -80,34 +81,39 @@ is a separate overlay.
 ## Map view distance and fog
 
 Open **Settings > Properties** in DOOM's SnapMap editor and scroll to
-**Custom Rendering**. Leave it **Off** to use the game's original module
-environments. Turn it **On** to apply **View Distance** and **Fog Strength**
-to the whole map during play.
+**Map Rendering**. All seven settings are always available for editing.
 Choose **Apply**, then save your map normally. Cancel discards unapplied changes.
-The choice and values are stored inside this map and work with both OpenGL and
-Vulkan. Loading another map uses that map's own settings. Turning customization
-off retains your custom values for later, but restores the original environments.
-Players need Snapmap+ for custom rendering to take effect.
+The values are stored inside this map and work with both OpenGL and Vulkan.
+Loading another map uses that map's own settings.
 
-| Setting | Initial custom value | Range |
+**View Distance** at 8192 (default) or zero uses each module's original view
+distance. Other values apply a distance override automatically. **Fog Strength**
+at zero uses each module's original fog; positive values apply the fog range and
+color below. Distance and fog operate independently. Returning these settings
+to their defaults restores the original environments automatically, even if
+unused fog colors or ranges remain edited. There is no separate enable or
+vanilla-compatibility switch. Players need Snapmap+ for custom values to take effect.
+
+| Setting | Default value | Range |
 |---|---|---|
-| View Distance | 60000 | 256 to 200000 game units |
-| Fog Strength | 0 (off) | 0 to 100 |
+| View Distance | 8192 (original environment) | 0, or 256 to 200000 game units |
+| Fog Strength | 0 (original environment) | 0 to 100 |
 | Fog Start | 1500 | 0 to 199999 game units |
 | Fog End | 6500 | 1 to 200000 game units |
 | Fog Red / Green / Blue | 0.35 / 0.40 / 0.45 | 0 to 1 each |
 
-With customization on, the extended view distance removes the nearby black cutoff in large
-Grid Rooms. Fog Strength 0 gives a clear view; raising it blends distant geometry
-into the selected color. Fog End always stays beyond Fog Start.
+An extended view distance such as 60000 removes the nearby black cutoff in large
+Grid Rooms. Raising Fog Strength blends distant geometry into the selected color.
+Fog End always stays beyond Fog Start.
 
 For a shorter rendering range, lower View Distance and tune fog to conceal the
 cutoff before that distance. Fog alone does not reduce the geometry being drawn;
 the view distance controls that tradeoff. Check the result from several positions
 in Play mode, especially in large open rooms.
 
-Maps saved with custom rendering by earlier releases retain those settings.
-Turn Custom Rendering off and save to restore their original environments.
+Earlier saved custom values are read automatically. Maps saved with the former
+enable switch off load with native defaults instead of activating unused values.
+Zero Fog Strength now restores native fog, including a module's built-in fog.
 
 ## Installing Snapmap+
 

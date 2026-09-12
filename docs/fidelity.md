@@ -25,9 +25,12 @@ Properties panel and Blueprint X action. Its saved module identities require
 runtime resources reconstructed by Snapmap+. Such maps are not compatible with
 vanilla or console players, even when their placed entities use stock assets.
 Restoring the original dimensions restores the stock module declaration.
-Map rendering defaults to the game's original module environments; its explicit
-native-mode setting is an ordinary map variable that vanilla can load.
-Custom rendering from earlier saves remains enabled until the author turns it off.
+Map rendering defaults to the game's original module environments. View Distance
+8192 (or zero) and Fog Strength zero restore those environments automatically;
+unused fog range/color values do not keep an override active. The seven saved
+values occupy an ordinary map variable that vanilla can load, with no separate
+enable or compatibility flag. Legacy saved values remain readable; the former
+disabled mode migrates to defaults. Zero fog now preserves built-in module fog.
 
 Embedded packages are selected from the map's current declaration references
 on each native save. Deleting the last dependent object removes its package

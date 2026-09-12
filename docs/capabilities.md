@@ -17,11 +17,14 @@ Maps using resized rooms require Snapmap+ on the player's PC.
 ## Map rendering
 
 DOOM's native Settings > Properties panel includes map-wide View Distance,
-Fog Strength, Fog Start/End and RGB controls. The defaults are 60000 game units
-and zero fog. Apply commits the draft to native map variables; normal saving
+Fog Strength, Fog Start/End and RGB controls, all always editable. View Distance
+8192 or zero retains original module distance; Fog Strength zero retains original
+module fog. Other values apply their overrides automatically and independently.
+Apply commits the draft to native map variables; normal saving
 retains those values inside the map. Both editor playtests and direct saved-map
-loads use the settings, with bindings for OpenGL and Vulkan. Players require
-Snapmap+. See the [rendering controls](../site/snapmap-plus-guide.md#map-view-distance-and-fog).
+loads use the settings, with bindings for OpenGL and Vulkan. Custom values take
+effect on Snapmap+ clients; restoring defaults does not retain a rendering
+requirement. See the [rendering controls](../site/snapmap-plus-guide.md#map-view-distance-and-fog).
 
 ## Package weapon HUD settings
 

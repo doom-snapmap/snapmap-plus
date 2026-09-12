@@ -90,6 +90,8 @@ int sh_map_render_write(void *map,const sh_map_render *settings)
                     *(int*)((unsigned char*)map+0x5c8)=count+1;
             } else {
                 row=*(unsigned char**)list+(size_t)index*104;
+                if(*(int*)(row+64)==(int)strlen(text)&&*(const char**)(row+72)&&
+                   !memcmp(*(const char**)(row+72),text,strlen(text))){ok=1;__leave;}
                 g_assign(row+56,text);
             }
             {sh_map_render check;ok=sh_map_render_read(map,&check)&&!memcmp(&check,settings,sizeof check);}
@@ -105,20 +107,17 @@ static void publish(const sh_map_render *settings,int valid)
     if(valid)g_runtime=*settings;
     g_ready=valid;
     ReleaseSRWLockExclusive(&g_lock);
-    backend_log(valid?(settings->custom?"RENDER: selected this map's custom rendering settings":
+    backend_log(valid?((sh_map_render_distance_override(settings)||sh_map_render_fog_override(settings))?
+        "RENDER: selected this map's rendering values":
         "RENDER: selected this map's original module environments"):
         "RENDER: no valid map rendering metadata; native environment retained");
 }
 void sh_map_render_build(void *map)
 {
     sh_map_render settings;int valid=sh_map_render_read(map,&settings);
-    /* Native conversion serves both Save and Play. Make the default explicit
-     * in each saved map without shifting existing variable indices. */
-    if(valid) {
-        int index,count;
-        if(variable((unsigned char*)map+0xa8,&index,&count)&&index<0)
-            (void)sh_map_render_write(map,&settings);
-    }
+    /* Native conversion serves both Save and Play. Persist current values,
+     * including migrated/default values, without shifting variable indices. */
+    if(valid)(void)sh_map_render_write(map,&settings);
     publish(&settings,valid);
 }
 void sh_map_render_loaded(void *map)
@@ -140,7 +139,7 @@ static float render_clip(void *block,void *decl,uintptr_t context)
     if(!g_game_type||*g_game_type!=1||InterlockedCompareExchange(&g_faulted,0,0))
         return g_float(block,decl,context);
     AcquireSRWLockShared(&g_lock);ready=g_ready;settings=g_runtime;ReleaseSRWLockShared(&g_lock);
-    if(ready&&settings.custom) {
+    if(ready&&(sh_map_render_distance_override(&settings)||sh_map_render_fog_override(&settings))) {
         __try {
             /* The resource registry canonicalizes declaration names to lowercase. */
             static const char *names[]={"maxviewdistance","fogscale","fogstart","fogend","fogcolor"};
@@ -154,11 +153,15 @@ static float render_clip(void *block,void *decl,uintptr_t context)
                     name=*(const char**)((unsigned char*)resource+8);if(!name)continue;
                     for(j=0;j<5;j++)if(!strcmp(name,names[j]))slots[j]=values+(size_t)i*4;
                 }
-                if(slots[0]&&slots[1]&&slots[2]&&slots[3]&&slots[4]) {
+                {
                     float scalar[]={settings.value[0],settings.value[1]*.00002f,settings.value[2],settings.value[3]};
-                    for(i=0;i<4;i++)for(j=0;j<4;j++)slots[i][j]=scalar[i];
-                    for(j=0;j<3;j++)slots[4][j]=settings.value[j+4];
-                    slots[4][3]=1;
+                    if(slots[0]&&sh_map_render_distance_override(&settings))
+                        for(j=0;j<4;j++)slots[0][j]=scalar[0];
+                    if(slots[1]&&slots[2]&&slots[3]&&slots[4]&&sh_map_render_fog_override(&settings)) {
+                        for(i=1;i<4;i++)for(j=0;j<4;j++)slots[i][j]=scalar[i];
+                        for(j=0;j<3;j++)slots[4][j]=settings.value[j+4];
+                        slots[4][3]=1;
+                    }
                 }
             }
         } __except(EXCEPTION_EXECUTE_HANDLER) {
