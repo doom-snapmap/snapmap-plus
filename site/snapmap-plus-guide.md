@@ -379,8 +379,12 @@ entities in the map. An obstructed or disconnected route can also stop a demon
 without removing the navigation mesh. Leave enough room around wall ends for
 the intended demon size and keep spawn, approach and landing points clear.
 
-The preview updates after placement and hides while geometry is held. Baking
-runs in the background, so the previous lines can remain briefly while the new
+The preview updates after placement and hides while geometry is held. Box shapes
+come from complete map snapshots; live flag refreshes keep that recorded shape.
+Duplicated boxes that share an ID keep their navigation when the map assigns
+that ID to one module. Until their IDs are unique again, refreshes read the whole
+map. An ID assigned to different modules is ambiguous and still refuses the bake.
+Baking runs in the background, so the previous lines can remain briefly while the new
 result arrives. `sh_perf` reports time spent reading the map and building the
 preview; `sh_perf reset` clears those counters.
 

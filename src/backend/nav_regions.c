@@ -477,9 +477,11 @@ static void navr_attribute(const char *json, size_t len, const sh_shard_doc *doc
         if (id >= 0 && pos >= kv[bucket]) {
             for (r = 0; r < out->region_count; r++) {
                 if (uid[r] == id) {
-                    if(out->regions[r].instance!=-1)out->invalid_geometry=1;
+                    /* Shared IDs are usable only when every reference names
+                     * the same room. Attribute every shape with that ID. */
+                    if(out->regions[r].instance!=-1 &&
+                       out->regions[r].instance!=bucket)out->invalid_geometry=1;
                     out->regions[r].instance = bucket;
-                    break;
                 }
             }
             for (r = 0; r < g_loaded.count; r++) {
@@ -674,6 +676,9 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
 
         /* Cache unmarked boxes too for the legacy live-refresh path. */
         vuid = navr_index(navr_num(json, len, &doc, i, "uniqueId", -1.0f));
+        if (vuid < 0) out->ids_unusable = 1;
+        for (keep = 0; keep < g_loaded.count; keep++)
+            if (g_loaded.v[keep].uid == vuid) out->ids_unusable = 1;
         if (g_loaded.count < NAVR_MAX_VOLUMES) {
             navr_volume *v = &g_loaded.v[g_loaded.count++];
             v->entity = self;
@@ -703,8 +708,6 @@ int sh_nav_regions_read(const char *json, size_t len, sh_nav_map *out)
             out->truncated = 1;
             break;
         }
-        if(vuid<0)out->ids_unusable=1;
-        for(keep=0;keep<out->region_count;keep++)if(uid[keep]==vuid)out->ids_unusable=1;
         region.instance = -1;
         region.marked = navr_marked(json,len,&doc,edit);
         region.block_demons = navr_bool(json, len, &doc, edit, "blockDemons");

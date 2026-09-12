@@ -1298,8 +1298,71 @@ static void test_marker_migration_boundaries(void)
     }
 }
 
+static void test_duplicate_box_ids(void)
+{
+    blob inst, ents;
+    char edit[1024], *json;
+    size_t n;
+    sh_nav_map m;
+    int repeated;
+
+    bopen(&inst); bopen(&ents);
+    put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
+    edit_box(edit, sizeof edit, "\"flags\":{\"noFlood\":true},\"blockDemons\":true,", "",
+             0, 0, 0, 64, 64, 8);
+    put_entity(&ents, 1, 7, INHERIT, edit);
+    edit_box(edit, sizeof edit, "\"flags\":{\"noFlood\":true},\"blockDemons\":true,", "",
+             256, 0, 0, 64, 64, 8);
+    put_entity(&ents, 0, 7, INHERIT, edit);
+    /* Either one reference or repeated references name the same owning room. */
+    for (repeated = 0; repeated < 2; repeated++) {
+        live_editor live = {0};
+        int reads = -1;
+        const char *why = NULL;
+        json = map_of(inst.p, ents.p, repeated ? "0,2,2" : "0,1,1",
+                      repeated ? "7,7" : "7", &n);
+        CHECK(sh_nav_regions_read(json, n, &m));
+        CHECK(m.ids_unusable);
+        CHECK(!m.invalid_geometry);
+        CHECK(m.region_count == 2);
+        CHECK(m.instances[0].region_count == 2);
+        CHECK(m.regions[0].instance == 0 && m.regions[1].instance == 0);
+        CHECK(near_f(quad_min_x(&m.regions[1]) - quad_min_x(&m.regions[0]), 256));
+        CHECK(!sh_nav_regions_refresh_known(&m, live_valid, live_json, &live,
+                                            &reads, &why));
+        CHECK(reads == 0 && live.valid_calls == 0);
+        free(json);
+    }
+    /* The shared ID cannot decide which box belongs to which room. */
+    put_instance(&inst, 0, MODULE_DECL, 1024, 0, 0, 0);
+    json = map_of(inst.p, ents.p, "0,1,2,2", "7,7", &n);
+    CHECK(sh_nav_regions_read(json, n, &m));
+    CHECK(m.ids_unusable && m.invalid_geometry);
+    free(json);
+    bclose(&inst); bclose(&ents);
+
+    /* A duplicate with no navigation flags must also disable lookup by ID. */
+    bopen(&inst); bopen(&ents);
+    put_instance(&inst, 1, MODULE_DECL, 0, 0, 0, 0);
+    put_entity(&ents, 1, 7, INHERIT, edit);
+    edit_box(edit, sizeof edit, "", "", 512, 0, 0, 64, 64, 8);
+    put_entity(&ents, 0, 7, INHERIT, edit);
+    json = map_of(inst.p, ents.p, "0,1,1", "7", &n);
+    CHECK(sh_nav_regions_read(json, n, &m));
+    CHECK(m.ids_unusable && !m.invalid_geometry);
+    CHECK(m.region_count == 1);
+    {
+        live_editor live = {0};
+        CHECK(!sh_nav_regions_refresh_known(&m, live_valid, live_json, &live,
+                                            NULL, NULL));
+        CHECK(live.valid_calls == 0);
+    }
+    free(json); bclose(&inst); bclose(&ents);
+}
+
 int main(void)
 {
+    test_duplicate_box_ids();
     test_marker_migration();
     test_marker_migration_boundaries();
     test_one_volume();

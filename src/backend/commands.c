@@ -1700,7 +1700,9 @@ static void h_sh_navmesh(idCmdArgs *a)
         const char *howmany = cmd_argv(a, 2);
         int n = howmany ? atoi(howmany) : 4;
         int marked = sh_nav_bake_show_marks(n);
-        if (marked > 0)
+        if (n <= 0)
+            sh_printf("Navigation refusal marks cleared.\n");
+        else if (marked > 0)
             sh_printf("Marked %d volume(s) red, the way a refused bake marks "
                       "the ones it could not place. Run sh_navmesh marks 0 to clear.\n",
                       marked);
