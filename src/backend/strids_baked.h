@@ -22,6 +22,18 @@
 typedef struct { const char *id; const char *text; } strid_baked_t;
 
 static const strid_baked_t g_strids_baked[] = {
+    { "smp_render_distance", "View Distance" },
+    { "smp_render_distance_help", "Saved with this map. Maximum visible distance in world units. Larger distances can increase rendering cost. Default: 60000." },
+    { "smp_render_strength", "Fog Strength" },
+    { "smp_render_strength_help", "Saved with this map. Distance fog strength from 0 to 100. Zero disables distance fog. Fog alone does not reduce rendering cost." },
+    { "smp_render_start", "Fog Start" },
+    { "smp_render_start_help", "Saved with this map. Distance in world units before distance fog begins." },
+    { "smp_render_end", "Fog End" },
+    { "smp_render_end_help", "Saved with this map. End of the fog distance range. Use a value below View Distance and enough Fog Strength to hide the render cutoff." },
+    { "smp_render_red", "Fog Red" },
+    { "smp_render_green", "Fog Green" },
+    { "smp_render_blue", "Fog Blue" },
+    { "smp_render_color_help", "Saved with this map. Linear fog color component from 0 to 1. Color is used when Fog Strength is above zero." },
     { "smp_grid_room_size", "Grid Room Size" },
     { "smp_grid_room_modern_help", "Minimum X: 864, Y: 272, Z: 432. Maximum follows snapEdit_environmentModuleBounds, world position, connected rooms and native collision/navigation limits. Out-of-range values use the nearest limit. Connected branches follow their doors; conflicting loops or overlaps prevent the edit. Objects keep their room positions. Resized rooms require Snapmap+." },
     { "smp_grid_room_classic_help", "Minimum X: 416, Y: 416, Z: 304. Maximum follows snapEdit_environmentModuleBounds, world position, connected rooms and native collision/navigation limits. Out-of-range values use the nearest limit. Connected branches follow their doors; conflicting loops or overlaps prevent the edit. Objects keep their room positions. Resized rooms require Snapmap+." },

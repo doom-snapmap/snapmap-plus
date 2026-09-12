@@ -1,3 +1,4 @@
+#include "map_render.h"
 /* DeserializeFromJson detour: optionally substitute a file-backed rawmap,
  * prepare the chosen JSON, then call the native parser. The temporary buffer
  * lives through the call. An unavailable source falls back to engine JSON.
@@ -391,6 +392,7 @@ static char *prepare_map_buffer(const char *json)
 static int sh_deser_detour(const char *json, void *out_map)
 {
     if (g_deser_orig == NULL) return 0;   /* defensive: should never happen once installed */
+    sh_map_render_loaded(NULL);
 
     /* A map is being opened, so the file the person picked for the last one stops
      * applying. This is the single place that knows a map is actually opening --
@@ -429,6 +431,7 @@ static int sh_deser_detour(const char *json, void *out_map)
             {
                 char *prepared = prepare_map_buffer(ours);
                 int rc = g_deser_orig(prepared ? prepared : ours, out_map);
+                if (rc) sh_map_render_loaded(out_map);
                 /* The open map came from a rawmap, which is what the branch answer keys off. */
                 InterlockedExchange(&g_open_is_rawmap, 1);
                 InterlockedIncrement(&g_swap_complete_count); /* only after the substituted parse returns */
@@ -444,9 +447,9 @@ static int sh_deser_detour(const char *json, void *out_map)
     {
         char *prepared = prepare_map_buffer(json);
         int rc;
-        if (!prepared) return g_deser_orig(json, out_map);
-        rc = g_deser_orig(prepared, out_map);
-        HeapFree(GetProcessHeap(), 0, prepared);
+        rc = g_deser_orig(prepared ? prepared : json, out_map);
+        if (rc) sh_map_render_loaded(out_map);
+        if (prepared) HeapFree(GetProcessHeap(), 0, prepared);
         return rc;
     }
 }

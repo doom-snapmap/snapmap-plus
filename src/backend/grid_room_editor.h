@@ -10,6 +10,10 @@
 typedef int (*sh_grid_editor_read_fn)(void *map_data,int instance,sh_grid_size *size);
 typedef int (*sh_grid_editor_apply_fn)(void *map_data,int instance,const sh_grid_size *size);
 
+/* Share the existing native dispatcher detour with other property families. */
+typedef int (*sh_native_property_handler)(void *panel,void *inspector,int action);
+int sh_grid_editor_set_property_handler(sh_native_property_handler handler);
+
 int sh_grid_editor_install(const sig_result *results,size_t count,
                             sh_grid_editor_read_fn read,
                             sh_grid_editor_apply_fn apply);

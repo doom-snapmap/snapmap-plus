@@ -63,6 +63,31 @@ navigation use the resized room. **Players need Snapmap+ to load these maps.**
 The resizing feature is included in the existing backend DLL; it needs no
 separate override package or map sidecar file.
 
+## Map view distance and fog
+
+Open **Settings > Properties** in DOOM's SnapMap editor and scroll to
+**View Distance** and **Fog Strength**. These controls apply to the whole map during play.
+Choose **Apply**, then save your map normally. Cancel discards unapplied changes.
+The values are stored inside the map and work with both OpenGL and Vulkan.
+Players need Snapmap+ for these rendering settings to take effect.
+
+| Setting | Default | Range |
+|---|---|---|
+| View Distance | 60000 | 256 to 200000 game units |
+| Fog Strength | 0 (off) | 0 to 100 |
+| Fog Start | 1500 | 0 to 199999 game units |
+| Fog End | 6500 | 1 to 200000 game units |
+| Fog Red / Green / Blue | 0.35 / 0.40 / 0.45 | 0 to 1 each |
+
+The extended default view distance removes the nearby black cutoff in large
+Grid Rooms. Fog Strength 0 gives a clear view; raising it blends distant geometry
+into the selected color. Fog End always stays beyond Fog Start.
+
+For a shorter rendering range, lower View Distance and tune fog to conceal the
+cutoff before that distance. Fog alone does not reduce the geometry being drawn;
+the view distance controls that tradeoff. Check the result from several positions
+in Play mode, especially in large open rooms.
+
 ## Installing Snapmap+
 
 ### Get the pre-patch DOOM files

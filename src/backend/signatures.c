@@ -301,6 +301,30 @@ uintptr_t sig_addr_by_name(const sig_result *results, size_t n, const char *name
  * entry changes with tests/run-tests.ps1 -Doom <pinned> -DoomAlt <other-renderer>.
  * CI has no game image and cannot verify these identities. */
 const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
+    /* Native map rendering controls and the environment far-clip read.
+     * Each binding is unique in both independently linked renderer images. */
+    { "RenderSettingsEnter",
+      "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 20 48 8B 9A 88 10 02 00 48 8B E9 48 8B F2 48 8B BB E0 09 00 00 48 8B CF 48 8B 07 FF 90 E8 00 00 00", 0 },
+    { "RenderSettingsExit",
+      "40 53 48 83 EC 20 48 8B 82 88 10 02 00 48 8B DA 48 8B 88 E0 09 00 00 48 8B 01 FF 90 F0 00 00 00 48 8B 8B 88 10 02 00 C6 83 24 36 02 00 00 E8 ?? ?? ?? ??", 0 },
+    { "RenderSettingsPopulate",
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 F0 BF FF FF B8 10 41 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 45 A0 FE FF FF FF 48 89 9C 24 60 41 00 00", 0 },
+    { "RenderSettingsApply",
+      "40 53 48 83 EC 20 0F B6 01 48 8B D9 48 8B 51 48 48 81 C2 28 36 02 00 88 02 0F B6 41 01 88 42 01 0F B6 41 02 88 42 02 0F B6 41 03 88 42 03 0F B6 41 04", 0 },
+    { "RenderSettingsReset",
+      "40 53 48 83 EC 20 48 8B 51 48 48 8B D9 48 81 C2 28 36 02 00 0F B6 02 88 01 0F B6 42 01 88 41 01 0F B6 42 02 88 41 02 0F B6 42 03 88 41 03 0F B6 42 04", 0 },
+    { "RenderSettingsDirtyCall",
+      "E8 ?? ?? ?? ?? 84 C0 0F 84 ?? ?? ?? ?? C7 44 24 30 16 00 00 00 45 33 C0 48 8D 54 24 30 48 8B CB E8 ?? ?? ?? ?? C6 47 08 01 48 8D 15 ?? ?? ?? ??", 0 },
+    { "RenderAddFloat",
+      "48 8B C4 57 41 56 41 57 48 81 EC 80 00 00 00 48 C7 40 A8 FE FF FF FF 48 89 58 10 48 89 68 18 48 89 70 20 4D 8B F1 4D 8B F8 48 8B EA 48 8B F1 B9 38 01 00 00 E8 ?? ?? ?? ?? 48 8B F8 48 89 84 24 A0 00 00 00 48 85 C0 74 ?? 8B 9E E0 01 00 00 8D 53 01 89 96 E0 01 00 00 48 8B CE E8 ?? ?? ?? ?? 4C 8B C0 44 8B CB", 0 },
+    { "RenderAddTitle",
+      "48 8B C4 57 41 56 41 57 48 81 EC 90 00 00 00 48 C7 40 98 FE FF FF FF 48 89 58 10 48 89 68 18 48 89 70 20 48 8B DA 48 8B E9 B9 20 00 00 00 E8 ?? ?? ?? ??", 0 },
+    { "RenderClipRead",
+      "E8 ?? ?? ?? ?? F3 0F 10 15 ?? ?? ?? ?? 0F 57 DB 44 0F 28 84 24 D0 00 00 00 F3 0F 10 D8 F3 0F 10 05 ?? ?? ?? ?? 0F 28 CA F3 0F 5F CB 0F 2E C1 7A ??", 0 },
+    { "RenderParmFromOp",
+      "0F B7 41 02 B9 3F 09 00 00 66 3B C1 7D ?? 48 8B 0D ?? ?? ?? ?? 0F BF D0 E9 ?? ?? ?? ?? 33 C0 C3 48 83 EC 58 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 40", 0 },
+    { "RenderVariablesResize",
+      "48 89 4C 24 08 55 56 57 41 56 41 57 48 83 EC 40 48 C7 44 24 30 FE FF FF FF 48 89 9C 24 88 00 00 00 8B EA 4C 8B F1 85 D2 7F ?? 0F B6 41 13 33 DB 84 C0 74 ?? 2C 03 3C 01 77 ?? 48 8B 09 48 85 C9 74 ?? 41 8B 56 0C E8 ?? ?? ?? ?? 49 89 1E 41 89 5E 0C 41 89 5E 08 E9 ?? ?? ?? ?? 8B 41 0C 3B E8 0F 84 ?? ?? ?? ?? 0F B6 49 13 80 F9 02 0F 85 ?? ?? ?? ?? 3B E8 0F 8E ?? ?? ?? ?? 41 0F B6 56 12 45 33 C0 8B CD E8 ?? ?? ?? ?? 4C 8B F8 48 89 84 24 80 00 00 00 48 85 C0 75 ?? 32 C0 E9 ?? ?? ?? ?? 41 C6 46 13 00 33 DB 89 5C 24 78 41 39 5E 08 7E ?? 48 63 C3 48 6B F0 68 49 8B 16 48 03 D6 4A 8D 0C 3E E8 ?? ?? ?? ?? 49 8B 3E 48 03 FE 48 8D 4F 38 E8 ?? ?? ?? ?? 48 8B CF E8 ?? ?? ?? ?? 49 8B 06 48 8D 0C 06 48 89 8C 24 80 00 00 00 48 85 C9", 0 },
     { "DeserializeFromJson",
       "40 55 56 57 48 8D 6C 24 90 48 81 EC 70 01 00 00 48 C7 44 24 68 FE FF FF FF",
       0x5EA490u },

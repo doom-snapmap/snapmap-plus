@@ -2,6 +2,7 @@
 #include "../src/backend/nav_play.c"
 
 void backend_log(const char *message) {(void)message;}
+void sh_map_render_build(void *map) {(void)map;}
 int sh_config_get_bool(const char *key,int *value,unsigned *flags)
 {(void)key;(void)flags;*value=1;return 1;}
 void sh_nav_bake_build_begin(void) {}

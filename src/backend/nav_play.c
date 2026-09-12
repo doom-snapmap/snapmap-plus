@@ -10,6 +10,7 @@
 #include "patch.h"
 #include "config.h"
 #include "nav_heap_queue.h"
+#include "map_render.h"
 
 void backend_log(const char *message);
 
@@ -219,6 +220,7 @@ static int nav_snapbuild_detour(void *a, void *b, void *c)
      * hook boundary.
      */
     __try {
+        sh_map_render_build(b);
         sh_nav_bake_build_begin();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         backend_log("NAV: the pre-build editor snapshot faulted");

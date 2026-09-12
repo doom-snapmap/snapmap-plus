@@ -40,6 +40,7 @@
 const sig_entry BACKEND_ENGINE_SIGNATURES[] = { { NULL, NULL, 0u } };
 
 void backend_log(const char *line) { (void)line; }
+void sh_map_render_loaded(void *map) { (void)map; }
 
 void *install_inline_hook(void *target, void *detour, size_t stolen)
 { (void)target; (void)detour; (void)stolen; return NULL; }

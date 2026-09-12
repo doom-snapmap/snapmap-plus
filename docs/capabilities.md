@@ -14,6 +14,15 @@ clamp to doorway minimums and placement-dependent world limits. See the
 [Grid Room instructions](../site/snapmap-plus-guide.md#resizing-grid-rooms).
 Maps using resized rooms require Snapmap+ on the player's PC.
 
+## Map rendering
+
+DOOM's native Settings > Properties panel includes map-wide View Distance,
+Fog Strength, Fog Start/End and RGB controls. The defaults are 60000 game units
+and zero fog. Apply commits the draft to native map variables; normal saving
+retains those values inside the map. Both editor playtests and direct saved-map
+loads use the settings, with bindings for OpenGL and Vulkan. Players require
+Snapmap+. See the [rendering controls](../site/snapmap-plus-guide.md#map-view-distance-and-fog).
+
 ## Package weapon HUD settings
 
 Override packages can supply `hud/weapons.json` to select engine-default or

@@ -53,6 +53,20 @@ executable; the hook helper does not relocate RIP-relative instructions.
 
 ## DLL interface
 
+Map rendering lives in the backend and DOOM's native Settings / Properties
+panel. The panel owns an Apply/Cancel draft tied to the current editable map.
+Apply stores a versioned `smp.render.v1` string in native map variables; the
+native serializer carries it through normal saves without a sidecar. The
+reserved value contains view distance, fog strength, start/end and linear RGB.
+Missing metadata uses defaults; malformed or duplicate metadata disables the
+override. The reserved variable should not be edited through generic variables.
+Map deserialization clears the previous runtime selection and reads the loaded
+map's variables. Editor-to-play conversion refreshes that selection from the
+current editable map. A locked value copy crosses to rendering, where the
+blended environment's literal view-distance and fog values are changed before
+the engine reads its far clip. This applies only to SnapMap and uses signed
+bindings in both renderer executables. No WebView interface change is involved.
+
 Grid Room resizing is implemented in the existing backend. The native DOOM
 Module Properties panel owns its XYZ control. In Blueprint mode, the normal
 module selection handler adds the native Module Properties prompt and checks

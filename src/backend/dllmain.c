@@ -21,6 +21,7 @@
 #include "overrides.h"
 #include "grid_room_native.h"
 #include "grid_room_editor.h"
+#include "map_render.h"
 #include "grid_room_snap.h"
 #include "package_requirements.h"
 #include "weapon_hud.h"
@@ -347,6 +348,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         sh_apply_engine_install(results, db, g_doom_base, cmdsys);
         if(grid_installed&&!sh_grid_editor_install(results,db,sh_grid_native_read,sh_grid_native_apply))
             backend_log("GRID: native dimension properties unavailable on this build");
+        if(!sh_map_render_install(results,db,g_doom_base)||!sh_map_render_editor_install(results,db))
+            backend_log("RENDER: per-map rendering controls unavailable on this build");
 
         /* Expose live entity reads so navigation sees marks edited since map load. */
         sh_nav_bake_set_live_editor(sh_apply_engine_entity_count,

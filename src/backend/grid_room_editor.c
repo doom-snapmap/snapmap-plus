@@ -38,6 +38,13 @@ static pressed_fn g_pressed;
 static blocked_fn g_blocked;
 static set_state_fn g_set_state;
 static action_help_fn g_action_help;
+static sh_native_property_handler g_property_handler;
+
+int sh_grid_editor_set_property_handler(sh_native_property_handler handler)
+{
+    if(!g_change||!hook_is_installed((void*)g_change)||g_property_handler)return 0;
+    g_property_handler=handler;return 1;
+}
 
 static int blueprint_grid(void *normal,void *editor)
 {
@@ -104,6 +111,7 @@ static void grid_changed(void *panel,void *inspector,int action)
     float dims[3],requested[3];unsigned i;int instance,adjusted=0;void *map;
     /* The null guard at the original entry precedes our detour. Other native
      * IDs always reach their original dispatcher with unchanged arguments. */
+    if(g_property_handler&&g_property_handler(panel,inspector,action))return;
     if(*(const int*)(v+0x40)!=GRID_PROPERTY_SIZE){g_change(panel,inspector,action);return;}
     if(InterlockedCompareExchange(&g_failed,0,0))return;
     __try {
