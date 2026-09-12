@@ -3,6 +3,16 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.12 -- 2026-09-12 (beta)
+
+**NEEDS WRITING**
+
+Automatic drafting did not run (DraftRejected: summary contains '>', which could forge markup or a section header), so this entry is the raw commit list and must be rewritten before merging.
+
+### New
+- Fix Grid Room placement and restore native map defaults
+- Add map-saved view distance and fog controls
+
 ## v0.2.1-beta.11 -- 2026-09-12 (beta)
 
 **Resizable Grid Rooms, a rawmap File menu and steadier navigation**
