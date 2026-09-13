@@ -95,7 +95,8 @@ size_t sh_inflate_raw_upto(const unsigned char *src, size_t src_len,
                            unsigned char *dst, size_t dst_cap)
 { (void)src; (void)src_len; (void)dst; (void)dst_cap; return 0; }
 
-int sh_cvar_value_int(int index, int def) { (void)index; return def; }
+static int g_pretty_on;   /* sh_pretty_on is the only cvar rawmap.c reads */
+int sh_cvar_value_int(int index, int def) { (void)index; return g_pretty_on ? 1 : def; }
 
 /* ---- end stubs -------------------------------------------------------------------------------- */
 
@@ -451,10 +452,8 @@ static void refused_menu_save_changes_nothing(void)
     CHECK(configure(NULL, NULL, requested, -1, message, sizeof message) == 0);
     sh_rawmap_get_save_target(actual, sizeof actual);
     CHECK(strcmp(actual, original) == 0);
-    CHECK(!sh_rawmap_save_oneshot_pending());
     CHECK(strstr(message, "no editor") != NULL);
     CHECK(configure(NULL, NULL, NULL, 5, message, sizeof message) == 0);
-    CHECK(!sh_rawmap_save_oneshot_pending());
     clean_state();
 }
 
@@ -510,11 +509,9 @@ static void snapshots_visit_without_save_effects(void)
     int caught = 0;
     clean_state();
     g_ser_orig = fixture_serialize;
-    sh_rawmap_save_arm_once();
     snapshot_visits = 0; snapshot_accept = 1;
     CHECK(sh_rawmap_snapshot_inspect(fixture_map_to_json,(void *)1,str,fixture_visit,(void *)2));
     CHECK(snapshot_visits == 1 && sh_rawmap_save_count() == before);
-    CHECK(sh_rawmap_save_oneshot_pending());
     CHECK(!g_snapshot_depth && !g_snapshot_visit && !g_snapshot_visit_ctx);
     CHECK(sh_rawmap_snapshot(fixture_map_to_json,(void *)1,str));
     CHECK(snapshot_visits == 1);
@@ -524,7 +521,7 @@ static void snapshots_visit_without_save_effects(void)
     __try { sh_rawmap_snapshot_inspect(fixture_map_to_json,(void *)1,str,fixture_visit,(void *)2); }
     __except(EXCEPTION_EXECUTE_HANDLER) { caught = 1; }
     CHECK(caught && !g_snapshot_depth && !g_snapshot_visit && !g_snapshot_visit_ctx);
-    CHECK(sh_rawmap_save_count() == before && sh_rawmap_save_oneshot_pending());
+    CHECK(sh_rawmap_save_count() == before);
     g_ser_orig = NULL;
     clean_state();
 }
@@ -548,6 +545,37 @@ static void a_live_export_mirrors_once(void)
     CHECK(sh_rawmap_save_count() == before + 1);
     CHECK(g_snapshot_depth == 0);
     sh_rawmap_swap_arm(0);
+    g_map_to_json = NULL;
+    g_ser_orig = NULL;
+    g_idstr_ctor = NULL;
+    g_idstr_dtor = NULL;
+    DeleteFileA(target);
+    clean_state();
+}
+
+static void a_live_export_is_pretty_when_asked(void)
+{
+    char target[MAX_PATH], msg[192], bytes[128] = {0};
+    unsigned long long wrote = 0;
+    DWORD got = 0;
+    HANDLE h;
+    clean_state();
+    CHECK(temp_path("rawmap_review_pretty.json", target, sizeof target));
+    g_map_to_json = fixture_map_to_json;
+    g_ser_orig = fixture_serialize;
+    g_idstr_ctor = fixture_idstr_ctor;
+    g_idstr_dtor = fixture_idstr_dtor;
+    g_pretty_on = 1;
+    CHECK(sh_rawmap_write_from_live((void *)1, target, msg, sizeof msg, &wrote));
+    g_pretty_on = 0;
+    CHECK(wrote > sizeof BODY - 1);
+    h = CreateFileA(target, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    CHECK(h != INVALID_HANDLE_VALUE);
+    if (h != INVALID_HANDLE_VALUE) {
+        CHECK(ReadFile(h, bytes, sizeof bytes - 1, &got, NULL));
+        CloseHandle(h);
+        CHECK(got == wrote && strchr(bytes, '\n') != NULL);
+    }
     g_map_to_json = NULL;
     g_ser_orig = NULL;
     g_idstr_ctor = NULL;
@@ -613,6 +641,7 @@ int main(void)
     missing_overwrite_protection_refuses_staging(archive);
     an_existing_scratch_file_survives();
     a_live_export_mirrors_once();
+    a_live_export_is_pretty_when_asked();
     snapshots_visit_without_save_effects();
 
     DeleteFileA(archive);

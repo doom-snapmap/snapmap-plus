@@ -690,29 +690,32 @@ A **rawmap** is a human-readable JSON copy of a map. Use one to share a map
 without publishing it, keep backups, or edit its contents in a text editor.
 The default file is `%LOCALAPPDATA%\snapmap-plus\rawmap.json`.
 
-**To save the map you are editing:** choose **File > Save Rawmap As...** and
-pick a file. This captures the open map, including unsaved edits. **Save Rawmap**
-writes to the same file again. Opening another map resets the destination to
-the default file; unticking **Keep This Save Path** also resets it. A save is
-refused if the live editor is unavailable, and a queued save is cancelled if
-the editor leaves the map before it can run.
+All rawmap actions are in the **File** menu:
 
-**To open a rawmap:** choose **File > Load Rawmap...** and select its JSON file.
-The file is staged for the next map load. Confirm the prompt to open it in the
-current editor, discarding unsaved edits, or cancel to save your work first.
-**Open Rawmap as New Map** lets you finish that staged load, with confirmation.
-Opening in place requires at least one local map saved through DOOM. You can
-also open a map from DOOM's list to apply the staged file.
+| Menu option | What it does |
+|---|---|
+| **Load Rawmap...** | Pick a rawmap file. Snapmap+ asks if you want to open it now. **OK** opens it as a new map and discards unsaved edits in the editor. **Cancel** keeps the file waiting, so you can save your work first. |
+| **Save Rawmap** | Write the map you are editing to the **Save Path**, including unsaved edits. |
+| **Save Rawmap As...** | Pick a file and write the map you are editing to it. Later **Save Rawmap** clicks go to the same file. |
+| **Open *file* as New Map** | Open the rawmap that is waiting. It shows the file name, and it is grey when no file is waiting. Use it after you cancel **Load Rawmap...**, or to open a rawmap again after you change it in a text editor. |
+| **Keep This Save Path** | Ticked after **Save Rawmap As...**. Untick it to send saves back to the default file. Opening another map also sends saves back to the default file. |
+| **Use Rawmaps for Every Save/Load** | Off by default. On, every map you open is replaced by the **Load Path** file, and every DOOM Save also writes the **Save Path** file. The console commands `sh_rawmaps_on` and `sh_rawmaps_off` do the same. |
 
-Opening a rawmap does not select it as the save destination. By default, DOOM's
-own Save asks for a new name instead of replacing the saved map it opened over.
-If that overwrite protection cannot be installed, rawmap loads are refused.
-To write back to the rawmap file itself, select it with **Save Rawmap As...**.
+Under these options, **Load Path** and **Save Path** show the files Snapmap+
+uses. Hover over one to see the full path.
 
-The File menu actions work without **Use Rawmaps for Every Save/Load**. That
-optional switch applies the staged source and save destination to every map
-load and save, including actions outside the File menu. The console aliases
-`sh_rawmaps_on` and `sh_rawmaps_off` control the same switch.
+A rawmap you open is a new map. DOOM's own Save asks for a new name, so it
+does not replace the saved map it opened over. If Snapmap+ cannot give that
+protection, it refuses to load rawmaps. Opening a rawmap in place needs at least
+one local map saved through DOOM. You can also open a map from DOOM's list while
+a rawmap is waiting.
+
+A save is refused when no map is open in the editor. A save is cancelled if you
+leave the map before it runs.
+
+Rawmaps are saved as compact JSON on one line. To save them with line breaks and
+indents, type `sh_pretty_on 1` in the console before you save. Type
+`sh_pretty_on 0` to go back to compact JSON.
 
 Run `sh_rawmaps help` for the console commands. `sh_rawmaps list [folder]`
 lists rawmap files, `sh_rawmaps load <path>` stages a file, `sh_rawmaps load`
@@ -976,6 +979,12 @@ sections above.)
 | `sh_validclasses <inherit>` | List the engine-valid classnames for a given inherit — the same list that fills the Classname dropdown in the [Entity State Panel](#the-entity-state-panel). |
 | `sh_dumpmap <name>` | Dump the currently generated `.map` (including SnapMap's own auto-generated version) to a file, for debugging. Works in the SnapMap menu as well as in the editor. The name is **game-relative**, not a Windows path: a bare name lands in `<game dir>\base\mapdumps\<name>.map`, and the `.map` extension is always forced. Dumping the same name twice never overwrites — repeats become `<name>_2.map`, `<name>_3.map`, and so on. Pass a name containing a `/` (e.g. `arena/pass1`) to choose your own subfolder under `base\`; it is created for you. The command prints the full path it wrote. |
 
+### Rawmaps
+
+| Command | What it does |
+|---|---|
+| `sh_rawmaps` | Show the rawmap state, the Load Path and the Save Path. `sh_rawmaps help` lists every verb: `list`, `on`/`off`, `load`, `save`, `savepath`, `default` and `overwrite`. See [Rawmaps](#rawmaps). |
+
 ### Compiling assets
 
 | Command | What it does |
@@ -1007,7 +1016,7 @@ Settings you read or change with `<name>` or `<name> <value>` in the console:
 
 | Cvar | Default | What it does |
 |---|---|---|
-| `sh_pretty_on` | `0` | Pretty-print the JSON Snapmap+ writes for [rawmaps](#rawmaps). |
+| `sh_pretty_on` | `0` | Type `sh_pretty_on 1` to turn on, `sh_pretty_on 0` to turn off. On, it pretty-prints every rawmap Snapmap+ saves: **Save Rawmap**, **Save Rawmap As...**, `sh_rawmaps save`, and DOOM's own Save while **Use Rawmaps for Every Save/Load** is on. At `0`, rawmaps are compact JSON. |
 | `sh_copy_reslist_to_clipboard` | `0` | Copy `sh_listres` output to the clipboard automatically. |
 
 ### Developer and diagnostic tools
@@ -1017,6 +1026,9 @@ them, but they're listed here for completeness since `sh_help` shows them too:
 
 | Command | What it does |
 |---|---|
+| `sh_navmesh` | Show the baked AI navigation the current map uses: which modules and nav classes, or why a bake was refused. See [AI navigation on Blocking Boxes](#ai-navigation-on-blocking-boxes). |
+| `sh_navmesh marks [count]` | Mark navigation boxes red in the preview, the same way a refused bake marks them. It marks up to `count` boxes in each module (default `4`, maximum `24`). `sh_navmesh marks 0` clears the marks. |
+| `sh_perf` | Show where Snapmap+ spends frame time, such as reading the map and building navigation previews. `sh_perf reset` sets the counters to zero. `sh_perf read` times two ways to read the open map: the whole map at once, and each entity one at a time. It also estimates the cost to read only the navigation boxes. Run it with a map open in the editor. |
 | `sh_alginfo` | Report the status of Snapmap+'s optional math-acceleration layer. |
 | `sh_debugrender` | Renderer debug toggle; `sh_debugrender dumprenderinfo` prints how many rendermodels are active, then names them. |
 | `cs_dontuse` | Toggle higher-precision engine-math overrides — a performance tradeoff, off by default; the name is the warning. |

@@ -114,21 +114,6 @@ static int rawmap_armed(int *flag_armed_out)
     return explicit_armed || flag_armed;
 }
 
-/* One-shot save arm: "Save Rawmap As" authorizes exactly one save, then disarms
- * itself. Additive to the shared gate, so sh_rawmaps_on keeps its meaning. */
-static volatile LONG g_shadow_oneshot = 0;
-
-int sh_rawmap_save_arm_once(void)
-{
-    InterlockedExchange(&g_shadow_oneshot, 1);
-    return 1;
-}
-
-int sh_rawmap_save_oneshot_pending(void)
-{
-    return (InterlockedCompareExchange(&g_shadow_oneshot, 0, 0) != 0) ? 1 : 0;
-}
-
 /* The load-side counterpart, so opening one rawmap does not substitute every map
  * opened after it. Consumed only on a real substitution: the detour clears it
  * once the source reads, not when it decides to look. */
@@ -844,6 +829,7 @@ void sh_rawmap_clear_save_target_for_new_map(void)
  * live path, so the destination is resolved in exactly one place. */
 static unsigned long long write_shadow(const char *data, size_t len);
 static unsigned long long write_shadow_to(const char *data, size_t len, const char *path);
+static char *pretty_copy(const char *data, size_t len, size_t *out_len);
 
 /* ------------------------------------------------------- serialize the LIVE map ----------------
  * Save Rawmap used to read the newest saved map's map.decl off DISK. That is wrong in two ways the
@@ -948,6 +934,7 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg,
     int len = 0;
     const char *data = NULL;
     unsigned char rc = 0;
+    int laid_out = 0;
 
     if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
     if (out_bytes) *out_bytes = 0;
@@ -985,7 +972,15 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg,
 
             len  = *(const int *)(blk + IDSTR_LEN_OFF);
             data = *(const char *const *)(blk + IDSTR_DATA_OFF);
-            if (data != NULL && len > 0) wrote = write_shadow_to(data, (size_t)len, destination);
+            if (data != NULL && len > 0) {
+                size_t shaped_len = 0;
+                char *shaped = sh_cvar_value_int(B2_CVAR_SH_PRETTY_ON, 0)
+                             ? pretty_copy(data, (size_t)len, &shaped_len) : NULL;
+                laid_out = (shaped != NULL);
+                wrote = laid_out ? write_shadow_to(shaped, shaped_len, destination)
+                                 : write_shadow_to(data, (size_t)len, destination);
+                if (shaped != NULL) HeapFree(GetProcessHeap(), 0, shaped);
+            }
         }
         g_idstr_dtor(blk);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1023,7 +1018,8 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg,
         char path[MAX_PATH] = "", line[MAX_PATH + 128];
         strncpy_s(path, sizeof path, destination, _TRUNCATE);
         _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "B1: rawmap SAVE wrote %llu bytes from the OPEN map -> %s [live]", wrote, path);
+                    "B1: rawmap SAVE wrote %llu bytes from the OPEN map -> %s [live]%s", wrote, path,
+                    laid_out ? " [pretty]" : "");
         backend_log(line);
         if (out_msg) {
             _snprintf_s(out_msg, (size_t)msg_capacity, _TRUNCATE,
@@ -1303,8 +1299,6 @@ static void nav_embed_on_save(void *out_idstr)
  */
 static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char compact)
 {
-    int used_oneshot = 0;   /* did a "Save Rawmap As" one-shot authorize this write? */
-
     if (g_ser_orig == NULL) return 0;   /* defensive: should never happen once installed */
 
     /* Call native serialization unconditionally and capture its bool result
@@ -1328,11 +1322,8 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
     /* Refresh navigation regions from the final serialized map. */
     nav_regions_on_save(out_idstr);
 
-    /* Gate only the disk mirror; load substitution uses the same predicate. A
-     * one-shot from "Save Rawmap As" also passes, and is consumed here rather than
-     * after the write, so two racing saves cannot both spend it. */
-    used_oneshot = (InterlockedExchange(&g_shadow_oneshot, 0) != 0);
-    if (!rawmap_armed(NULL) && !used_oneshot) return rc;
+    /* Gate only the disk mirror; load substitution uses the same predicate. */
+    if (!rawmap_armed(NULL)) return rc;
 
     if (out_idstr == NULL) return rc;
 
@@ -1378,8 +1369,7 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
         unsigned long n = (unsigned long)InterlockedIncrement(&g_shadow_count);
         char line[200];
         _snprintf_s(line, sizeof line, _TRUNCATE,
-            "B1: rawmap SAVE shadow wrote %llu bytes -> rawmap.json [#%lu]%s%s", wrote, n,
-            used_oneshot ? " [one-shot]" : "",
+            "B1: rawmap SAVE shadow wrote %llu bytes -> rawmap.json [#%lu]%s", wrote, n,
             pretty ? (laid_out ? " [pretty]"
                                : " [pretty requested; JSON did not re-lay-out -- wrote it unchanged]")
                    : "");
@@ -1696,21 +1686,16 @@ static int slot_rawmap_status(sh_iface *self, char *out_json, int out_capacity)
      * identical on screen: never fired (0), fired but the parse did not return (loads > loadsDone),
      * and a completed substituted load. Without this the only way to tell was reading
      * sh_backend.log for "B1: rawmap swap FIRED". */
-    /* `savePending` is the same question for the save half: "Save Rawmap As" arms one save and then
-     * waits for the person to save their map, and a waiting arm is invisible otherwise. */
     written = _snprintf_s(out_json, (size_t)out_capacity, _TRUNCATE,
         "{\"load\":\"%s\",\"save\":\"%s\",\"armed\":%d,\"saves\":%lu,\"lastBytes\":%llu,"
-        "\"loads\":%lu,\"loadsDone\":%lu,\"savePending\":%d,\"loadPending\":%d,"
+        "\"loads\":%lu,\"loadsDone\":%lu,\"loadPending\":%d,"
         /* The file Save writes to, or "" for the default. It rides the status rather than
          * being remembered by the page, because the console can set it too. */
         "\"saveTarget\":\"%s\",\"willFire\":%d}",
         load_esc, save_esc, sh_rawmap_swap_is_armed(),
         sh_rawmap_save_count(), sh_rawmap_save_last_bytes(),
         sh_rawmap_swap_count(), sh_rawmap_swap_complete_count(),
-        sh_rawmap_save_oneshot_pending(),
-        /* `loadPending` is the load half of the same question savePending answers: a staged rawmap
-         * is waiting for the next map to open. Without it the menu could only report a COUNT of past
-         * substitutions, which told the person nothing about what happens next. */
+        /* `loadPending`: a staged rawmap is waiting for the next map to open. */
         sh_rawmap_load_oneshot_pending(),
         target_esc,
         sh_rawmap_swap_will_fire());
