@@ -3,6 +3,20 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.13 -- 2026-09-13 (beta)
+
+**Simpler map rendering and navigation on default boxes**
+
+Map Rendering no longer needs an enable switch: all seven settings stay editable, and leaving View Distance and Fog Strength at their defaults restores each module's original environments automatically. AI Navigation now also works on Blocking Boxes that still use their inherited default dimensions.
+
+### Improved
+- All seven Map Rendering settings are always editable, with distance and fog each falling back to the module's original environment at their default values instead of using a separate enable switch.
+- Blocking Boxes that keep their inherited default dimensions now support AI Navigation, including in maps created before Snapmap+ was installed, so you do not need to resize a box or recreate the map.
+
+### Fixed
+- A Fog Strength of zero now restores native fog, including a module's built-in fog.
+- Maps saved with the former enable switch turned off load with native defaults instead of applying values that were never meant to be active.
+
 ## v0.2.1-beta.12 -- 2026-09-12 (beta)
 
 **Map rendering controls and reliable Grid Room placement**
