@@ -424,8 +424,6 @@ static void rawmap_print_state(void)
     }
     if (sh_rawmap_load_oneshot_pending())
         sh_printf("  a rawmap is staged for the NEXT map you open.\n");
-    if (sh_rawmap_save_oneshot_pending())
-        sh_printf("  waiting for your next save in DOOM to write the rawmap.\n");
     sh_printf("  'sh_rawmaps help' lists what else it can do.\n");
 }
 
@@ -1886,7 +1884,7 @@ static void h_sh_overrides_off(idCmdArgs *a)
 
 static const cmd_entry CMD_TABLE[] = {
     { "sh_packages",          (void *)h_sh_packages, "Show installed package sources and compiler results. 'sh_packages dependencies [type name]' inspects observed native dependencies." },
-    { "sh_perf",              (void *)h_sh_perf,     "Where frame time goes inside snapmap-plus. 'sh_perf reset' starts the counting again." },
+    { "sh_perf",              (void *)h_sh_perf,     "Where frame time goes inside snapmap-plus. 'sh_perf reset' starts the counting again. 'sh_perf read' times reading the open map whole and entity by entity." },
     { "sh_overrides_off",     (void *)h_sh_overrides_off, "Remove our resource layer for the rest of this session, to measure the engine without it. Editor resources go with it; restart to get them back." },
     { "sh_rawmaps",           (void *)h_sh_rawmaps,   "Raw JSON map files: state, paths, load, save. Run with no arguments to see what is set, or 'sh_rawmaps help' (or '?') for every verb." },
     { "sh_rawmaps_on",       (void *)h_rawmaps_on,  "(legacy) Same as 'sh_rawmaps on'. Kept because older guides use it." },
@@ -1926,7 +1924,7 @@ static const cmd_entry CMD_TABLE[] = {
     { "sh_user_overrides", (void *)h_sh_user_overrides,
       "sh_user_overrides [0|1] -- persist whether player override files load on the next DOOM launch; restart required; built-in defaults stay enabled." },
     { "sh_navmesh",          (void *)h_sh_navmesh,
-      "Reports the baked AI navigation the current map is serving -- which modules and nav classes, or why a bake was refused. `reads` counts what the editor has cost it." },
+      "Reports the baked AI navigation the current map is serving -- which modules and nav classes, or why a bake was refused. 'sh_navmesh marks [count]' marks boxes red like a refused bake; 'sh_navmesh marks 0' clears them. 'sh_navmesh reads' counts what the editor has cost it." },
 
     { "sh_help",             (void *)h_sh_help,        "Lists every Snapmap+ console command and cvar with its description." },
 };

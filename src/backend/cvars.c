@@ -50,7 +50,7 @@ typedef struct cvar_row {
 } cvar_row;
 
 static const cvar_row CVARS[] = {
-    { "sh_pretty_on",                        "0",    1, "enables pretty printing of saved rawmap json" },
+    { "sh_pretty_on",                        "0",    1, "1 = pretty-print saved rawmap JSON, 0 = compact" },
     { "sh_copy_reslist_to_clipboard",        "0",    1, "when sh_listres is used the contents will be copied to the clipboard" },
 };
 #define CVAR_COUNT ((int)(sizeof(CVARS) / sizeof(CVARS[0])))

@@ -59,7 +59,7 @@ Registered with the engine command system; run from the DOOM console.
 | `sh_genmd6model` | Compile a `.md6model` into a `bmd6model`. |
 | `sh_debugrender` | Renderer debug toggle (developer tool); `dumprenderinfo` prints the active rendermodel count and every model's name. |
 | `sh_alginfo` | Report the math-acceleration status. |
-| `sh_perf` | Report how much time each Snapmap+ hot path has taken this session: the engine resource opens that pass through the override hook, the engine writing the open map as JSON, the navigation parse, the green preview build, and the session log. `sh_perf reset` starts the counting again. |
+| `sh_perf` | Report how much time each Snapmap+ hot path has taken this session: the engine resource opens that pass through the override hook, the engine writing the open map as JSON, the navigation parse, the green preview build, and the session log. `sh_perf reset` starts the counting again. `sh_perf read` times reading the open editor map whole and entity by entity, and estimates the cost of reading only the marked navigation volumes. |
 | `sh_help` | List every Snapmap+ console command and cvar with its description in one place. |
 | `sh_navmesh` | Report the baked AI navigation the loaded map is serving — which modules and nav classes are in effect, and for anything refused, why. Leads with how many map loads have reached the navigation table this session and what the last one found, so a map that quietly brought none is distinguishable from a load that never happened. |
 | `sh_navmesh marks <n>` | Mark the first `n` marked volumes of every module red, the way a refused bake marks the ones it could not place, so the marks can be checked without a map that refuses. `0` clears them. |
