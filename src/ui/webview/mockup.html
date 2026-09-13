@@ -1070,9 +1070,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
       if (o.cmd === 'rawmapArm') previewRawmap.armed = o.on ? 1 : 0;
       // Ticking pins the path already shown, so the readout does not move on the click.
       if (o.cmd === 'rawmapKeepHere') previewRawmap.saveTarget = o.on ? previewRawmap.save : '';
-      // Save Rawmap As arms one save; Load Rawmap raises the confirm prompt. Both are modelled here
-      // so the two states the readout can show are reachable without the game.
-      if (o.cmd === 'rawmapSavePick' || o.cmd === 'rawmapSaveNow') previewRawmap.savePending = 1;
       // The load half, so the greying of "Open ... as New Map" is reachable in browser preview:
       // picking stages a file, opening it spends the stage.
       if (o.cmd === 'rawmapLoadPick') previewRawmap.loadPending = 1;
@@ -1082,7 +1079,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
         save: previewRawmap.save,
         saveTarget: previewRawmap.saveTarget || '',
         armed: previewRawmap.armed, saves: 0, lastBytes: 0, loads: 0, loadsDone: 0,
-        savePending: previewRawmap.savePending || 0,
         loadPending: previewRawmap.loadPending || 0,
         // No test file in browser preview, so this can only be the gate. Sent rather than omitted
         // so the preview exercises the field the game sends.

@@ -65,17 +65,7 @@ int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok);
  */
 void sh_rawmap_embed_install(const void *module_base);
 
-/* Arm the shadow for exactly one save, then let it disarm itself. OR'd with the
- * shared gate, so sh_rawmaps_on / sh_rawmaps_off keep their meaning. The first
- * save to reach the shadow spends it, whether or not the write succeeds.
- * Always returns 1. */
-int sh_rawmap_save_arm_once(void);
-
-/* 1 = a one-shot save arm is still waiting. Read-only; it does not consume. */
-int sh_rawmap_save_oneshot_pending(void);
-
-/* Arm the LOAD swap for exactly one map parse. The counterpart of
- * sh_rawmap_save_arm_once, and likewise additive to the shared gate. */
+/* Arm the LOAD swap for exactly one map parse. Additive to the shared gate. */
 int sh_rawmap_load_arm_once(void);
 
 /* 1 = a one-shot load arm is still waiting. Does not consume it. */
