@@ -1,11 +1,7 @@
-/* Resource-provider open hook and native idFile streams. See overrides.h for
- * precedence and ownership. Built-in names receive a brace/quote check before
- * a user file replaces them; other disk resources pass through unchanged.
- *
- * Installation reclaims files matching old built-in defaults, ignoring CR
- * bytes, and logs active user overrides. Each shadow path has an SEH
- * boundary; faults fall back to the original resource open where that path
- * permits it.
+/* Resource-provider open hook and native idFile streams. Package resources
+ * come from immutable compiled snapshots; existing streams retain their bytes
+ * across a refresh. See overrides.h for built-in and map-resource ordering.
+ * Each provider path has an SEH boundary and preserves native file semantics.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -21,8 +17,8 @@
 #include "perf.h"
 #include "decl_text.h"
 #include "packages.h"
-#include "package_conflicts.h"
-#include "resource_bridge.h"
+#include "package_runtime.h"
+#include "resource_graph.h"
 #include "grid_room_asset.h"
 #include "user_overrides.h"
 #include "navmesh.h"                /* baked AI navigation, served under the module's own names */
@@ -72,9 +68,7 @@ enum {
     OV_INTERNAL_DECL_TABLE_FAILED = 3
 };
 
-#define OV_INTERNAL_DECL_MAX_ENTRIES 512u
-
-/* The overrides ROOT (holds overrides\ + overrides\shader_includes\). Default %LOCALAPPDATA%\snapmap-plus. */
+/* Application data root; authored packages live in its overrides directory. */
 static char g_root[MAX_PATH] = {0};
 
 /* Native idFile stream head: +0x00 vtable, +0x08 FILE*, +0x10 name, +0x18
@@ -468,7 +462,6 @@ static int ov_internal_decl_table_publish_locked(
     size_t i, j;
     LONG expected;
     if (!provider_ready || !user_enabled || !entries || count == 0 ||
-        count > OV_INTERNAL_DECL_MAX_ENTRIES ||
         count > SIZE_MAX / sizeof(copy[0])) return 0;
     expected = InterlockedCompareExchange(&g_internal_decl_table_state,
                                           OV_INTERNAL_DECL_TABLE_INSTALLING,
@@ -524,10 +517,15 @@ static ov_stream *open_internal_decl_locked(const char *name, int *matched)
         if (matched) *matched = 1;
         {
             ov_stream *stream;
-            size_t length = g_internal_decls[i].body_length;
-            unsigned char *body = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, length);
-            if (!body) return NULL;
-            memcpy(body, g_internal_decls[i].body, length);
+            size_t length = 0;
+            unsigned char *current = NULL;
+            int claimed = sh_package_runtime_read_decl_alias(name, &current, &length);
+            unsigned char *body;
+            if (claimed != 1) { free(current); return NULL; }
+            body = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, length ? length : 1u);
+            if (!body) { free(current); return NULL; }
+            if (length) memcpy(body, current, length);
+            free(current);
             stream = make_mem_stream(body, (long long)length, g_internal_decls[i].name, 1);
             if (!stream) HeapFree(GetProcessHeap(), 0, body);
             return stream;
@@ -551,7 +549,8 @@ int sh_overrides_internal_decl_published_locked(const char *name)
         InterlockedCompareExchange(&g_internal_decl_table_state, 0, 0) !=
             OV_INTERNAL_DECL_TABLE_READY) return 0;
     for (i = 0; i < g_internal_decl_count; i++)
-        if (_stricmp(name, g_internal_decls[i].name) == 0) return 1;
+        if (_stricmp(name, g_internal_decls[i].name) == 0)
+            return sh_package_runtime_decl_alias_exists(name);
     return 0;
 }
 
@@ -579,9 +578,10 @@ static int ov_internal_decl_table_merge_locked(
     char line[192];
 
     if (!provider_ready || !sh_user_overrides_enabled_for_launch()) return 0;
-    if (!entries || count == 0 || count > OV_INTERNAL_DECL_MAX_ENTRIES) return 0;
+    if (!entries || count == 0) return 0;
     if (count > SIZE_MAX - old_count) return 0;
     total = old_count + count;
+    if (total > SIZE_MAX / sizeof(merged[0])) return 0;
     merged = (ov_internal_decl *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
                                            total * sizeof(merged[0]));
     if (!merged) return 0;
@@ -619,10 +619,6 @@ static int ov_internal_decl_table_merge_locked(
             if (strcmp(old[i].name, merged[j].name) == 0) { superseded = 1; break; }
         }
         if (superseded) continue;
-        if (at >= OV_INTERNAL_DECL_MAX_ENTRIES) {
-            ov_internal_decl_table_free(merged, total);
-            return 0;
-        }
         merged[at].name = (char *)HeapAlloc(GetProcessHeap(), 0, strlen(old[i].name) + 1);
         merged[at].body = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, old[i].body_length);
         if (!merged[at].name || !merged[at].body) {
@@ -640,9 +636,9 @@ static int ov_internal_decl_table_merge_locked(
     ov_internal_decl_table_free(old, old_count);
     InterlockedExchange(&g_internal_decl_table_state, OV_INTERNAL_DECL_TABLE_READY);
     _snprintf_s(line, sizeof line, _TRUNCATE,
-                "B1: overrides internal decl table MERGED -- %u new + %u carried forward = %u "
+                "B1: overrides internal decl table MERGED -- %zu new + %zu carried forward = %zu "
                 "published (previous snapshot released)",
-                (unsigned)count, (unsigned)(at - count), (unsigned)at);
+                count, at - count, at);
     backend_log(line);
     return 1;
 }
@@ -675,6 +671,19 @@ void *sh_overrides_test_internal_decl_open(const char *name)
 {
     int matched = 0;
     return open_internal_decl(name, &matched);
+}
+
+void *sh_overrides_test_memory_stream(const unsigned char *body, size_t length)
+{
+    unsigned char *copy;
+    ov_stream *stream;
+    if (!body || length > INT64_MAX) return NULL;
+    copy = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, length ? length : 1u);
+    if (!copy) return NULL;
+    memcpy(copy, body, length);
+    stream = make_mem_stream(copy, (long long)length, "memory-test", 1);
+    if (!stream) HeapFree(GetProcessHeap(), 0, copy);
+    return stream;
 }
 
 long long sh_overrides_test_stream_read(void *stream, void *buffer, uint64_t length)
@@ -788,267 +797,51 @@ int sh_overrides_get_root(char *out, size_t cap)
     return out[0] != '\0';
 }
 
-/* Build a disk override path. The first terminal ".inc" match selects
- * shader_includes; other resources use the shared override tree.
- */
-static int build_override_path(const char *name, char *out, size_t cap)
-{
-    if (!name || !name[0]) return 0;
-    char root[MAX_PATH];
-    resolve_root(root, sizeof root);
-
-    /* Only the first ".inc" occurrence counts, and it must end the name. */
-    const char *match = strstr(name, ".inc");
-    int is_shader_include = (match != NULL && match[4] == '\0');
-
-    const char *rel = name;
-    if (is_shader_include) {
-        /* Strip the first component unless the name starts with "includes". */
-        const char *slash = strchr(name, '/');
-        if (slash != NULL && strstr(name, "includes") != name)
-            rel = slash + 1;
-    }
-
-    if (is_shader_include)
-        _snprintf_s(out, cap, _TRUNCATE, "%s\\overrides\\shader_includes\\%s", root, rel);
-    else
-        _snprintf_s(out, cap, _TRUNCATE, "%s\\overrides\\%s", root, name);
-
-    /* Normalize separators. */
-    for (char *p = out; *p; ++p)
-        if (*p == '/') *p = '\\';
-    return 1;
-}
-
 /* ============================================================ package resolution ==================*/
 
-/* Map supported engine namespaces to package subdirectories. Decl and image
- * prefixes are stripped; shader paths retain their full generated namespace.
- * Restricting this table prevents unrelated package files from becoming
- * engine resources.
- */
-typedef struct ov_namespace {
-    const char *engine_prefix;   /* what the engine asks for */
-    const char *package_subdir;  /* which package subdirectory may answer */
-    int strip_prefix;            /* 1: path is <subdir>\<rest>; 0: <subdir>\<whole name> */
-} ov_namespace;
-
-static const ov_namespace g_ov_namespaces[] = {
-    { "generated/decls/",       "decls",   1 },
-    { "generated/spirv/",       "shaders", 0 },
-    { "generated/renderprogs/", "shaders", 0 },
-    { "generated/image/",       "images",  1 },
-};
-
-/* Cache package enumeration outside the resource-open path. Capture at
- * installation and refresh during runtime rearm.
- */
-/* Readers hold the shared lock through path selection. A rescan exclusively
- * owns both buffers until it publishes a complete inventory. */
-static SRWLOCK g_ov_packages_lock = SRWLOCK_INIT;
-static sh_package g_ov_packages_buf[2][SH_PACKAGES_MAX];
-static size_t g_ov_package_counts[2];
-static volatile LONG g_ov_pkg_active;   /* 0 or 1 */
-/* Report overlapping files once per process. */
-static volatile LONG g_ov_conflicts_reported;
+/* The compiler publishes one complete inventory. Resource opens retain that
+ * snapshot; a failed refresh leaves it available. */
 static volatile LONG g_ov_pkg_generation;
 
-static int ov_capture_packages(void)
+unsigned long sh_overrides_rescan_packages_activated(sh_package_activation_fn activate, void *context)
 {
-    char root[MAX_PATH];
-    size_t count = 0;
-    LONG active, target;
-    int complete;
-
-    resolve_root(root, sizeof root);
-    AcquireSRWLockExclusive(&g_ov_packages_lock);
-    active = g_ov_pkg_active;
-    target = active ^ 1;
-    complete = root[0] && sh_packages_enumerate(root, g_ov_packages_buf[target],
-                                               SH_PACKAGES_MAX, &count);
-    if (!complete) count = 0;
-    g_ov_package_counts[target] = count;
-    InterlockedExchange(&g_ov_pkg_active, target);   /* publish: one atomic store */
-    InterlockedIncrement(&g_ov_pkg_generation);
-    ReleaseSRWLockExclusive(&g_ov_packages_lock);
-
-    /* Log overlapping package files so the selected precedence is visible. */
-    if (count > 1 && !InterlockedCompareExchange(&g_ov_conflicts_reported, 1, 0))
-        (void)sh_pkg_conflicts_report(root);
-    if (!complete) backend_log("B1: overrides package inventory REFUSED -- enumeration incomplete");
-    return complete;
+    char root[MAX_PATH], line[192];
+    const sh_package_compilation *compiled;
+    size_t count;
+    LONG generation;
+    if (!sh_user_overrides_enabled_for_launch()) return 0;
+    resolve_root(root, sizeof(root));
+    if (!root[0] || !sh_package_runtime_refresh_activated(root, (sh_package_activation_guard){
+            sh_nav_bake_source_update_begin, sh_nav_bake_source_update_end}, activate, context)) {
+        backend_log("B1: overrides package inventory REFUSED -- preparation or activation failed");
+        return SH_OVERRIDES_RESCAN_FAILED;
+    }
+    compiled = sh_package_runtime_acquire();
+    count = compiled ? compiled->sources->package_count : 0;
+    sh_package_runtime_release();
+    generation = InterlockedIncrement(&g_ov_pkg_generation);
+    snprintf(line, sizeof(line),
+        "B1: overrides package list RE-SCANNED -- %zu package(s) now visible (generation %ld)",
+        count, (long)generation);
+    backend_log(line);
+    /* This diagnostic return shares a Win32 unsigned-long ABI with existing
+     * callers. Success must never collide with the failure sentinel. */
+    return count >= SH_OVERRIDES_RESCAN_FAILED ? SH_OVERRIDES_RESCAN_FAILED - 1 : (unsigned long)count;
 }
 
-/* Refresh package paths used by opens. New decl identities still require
- * decl_server rearm. Returns the visible package count.
- */
 unsigned long sh_overrides_rescan_packages(void)
 {
-    char line[160];
-    LONG active;
-    if (!ov_capture_packages()) return SH_OVERRIDES_RESCAN_FAILED;
-    AcquireSRWLockShared(&g_ov_packages_lock);
-    active = InterlockedCompareExchange(&g_ov_pkg_active, 0, 0);
-    _snprintf_s(line, sizeof line, _TRUNCATE,
-                "B1: overrides package list RE-SCANNED -- %u package(s) now visible (generation %ld)",
-                (unsigned)g_ov_package_counts[active],
-                (long)InterlockedCompareExchange(&g_ov_pkg_generation, 0, 0));
-    {
-        unsigned long count = (unsigned long)g_ov_package_counts[active];
-        ReleaseSRWLockShared(&g_ov_packages_lock);
-        backend_log(line);
-        return count;
-    }
+    return sh_overrides_rescan_packages_activated(NULL, NULL);
 }
 
-static int ov_is_regular_file(const char *path)
+int sh_overrides_activate_map(sh_package_map_plan *plan, sh_package_activation_fn activate, void *context)
 {
-    SH_PERF_BEGIN(t0);
-    DWORD attrs = GetFileAttributesA(path);
-    SH_PERF_END(SH_PERF_OVERRIDE_STAT, t0);
-    return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
-}
-
-/* Names with no override file, for the package inventory that answered.
- *
- * The engine asks for the same resources over and over, and a missing-file
- * check costs about 40us here, so the miss is the answer worth keeping. Only
- * misses are kept: a hit goes on to open the file anyway, and the test entry
- * points expect a fresh answer for a name that resolves.
- *
- * A file dropped in beside a name already asked for is invisible until the
- * package list is re-scanned, which is the same contract packages have.
- */
-#define OV_MISS_SLOTS     4096u
-#define OV_MISS_NAME_CAP  160
-
-typedef struct ov_miss_entry {
-    unsigned hash;                    /* 0 = empty slot */
-    LONG generation;
-    char     name[OV_MISS_NAME_CAP];
-} ov_miss_entry;
-
-static ov_miss_entry g_ov_miss[OV_MISS_SLOTS];
-static SRWLOCK       g_ov_miss_lock = SRWLOCK_INIT;
-
-static unsigned ov_miss_hash(const char *name)
-{
-    unsigned h = 2166136261u;
-    for (; *name; name++) { h ^= (unsigned char)*name; h *= 16777619u; }
-    return h ? h : 1u;   /* 0 marks an empty slot */
-}
-
-static int ov_miss_known(const char *name, unsigned hash, LONG generation)
-{
-    const ov_miss_entry *e = &g_ov_miss[hash % OV_MISS_SLOTS];
-    int known;
-    AcquireSRWLockShared(&g_ov_miss_lock);
-    known = e->hash == hash && e->generation == generation &&
-            strcmp(e->name, name) == 0;
-    ReleaseSRWLockShared(&g_ov_miss_lock);
-    return known;
-}
-
-static void ov_miss_remember(const char *name, unsigned hash, LONG generation)
-{
-    ov_miss_entry *e = &g_ov_miss[hash % OV_MISS_SLOTS];
-    if (strlen(name) >= OV_MISS_NAME_CAP) return;   /* too long to hold exactly */
-    AcquireSRWLockExclusive(&g_ov_miss_lock);
-    strcpy_s(e->name, sizeof e->name, name);
-    e->hash = hash;
-    e->generation = generation;
-    ReleaseSRWLockExclusive(&g_ov_miss_lock);
-}
-
-/* Find a resource in the shared override tree, then installed packages
- * ordered by descending priority and case-insensitive name. Return 0 if no
- * file exists.
- */
-static int ov_resolve_existing(const char *name, char *out, size_t cap)
-{
-    size_t i, n;
-    unsigned hash;
-    LONG generation;
-
-    if (!name || !name[0] || !out || cap == 0) return 0;
-    generation = InterlockedCompareExchange(&g_ov_pkg_generation, 0, 0);
-    hash = ov_miss_hash(name);
-    if (ov_miss_known(name, hash, generation)) { out[0] = '\0'; return 0; }
-    if (!build_override_path(name, out, cap)) return 0;
-    if (ov_is_regular_file(out)) return 1;
-
-    for (n = 0; n < sizeof(g_ov_namespaces) / sizeof(g_ov_namespaces[0]); n++) {
-        const ov_namespace *ns = &g_ov_namespaces[n];
-        size_t prefix_length = strlen(ns->engine_prefix);
-        const char *relative;
-
-        if (_strnicmp(name, ns->engine_prefix, prefix_length) != 0) continue;
-        relative = ns->strip_prefix ? name + prefix_length : name;
-        if (!relative[0]) break;
-
-        AcquireSRWLockShared(&g_ov_packages_lock);
-        LONG act = InterlockedCompareExchange(&g_ov_pkg_active, 0, 0);
-        size_t pkg_count = g_ov_package_counts[act];
-        for (i = 0; i < pkg_count; i++) {
-            char *p;
-            if (_snprintf_s(out, cap, _TRUNCATE, "%s\\%s\\%s",
-                            g_ov_packages_buf[act][i].root, ns->package_subdir, relative) < 0)
-                continue;
-            for (p = out; *p; ++p)
-                if (*p == '/') *p = '\\';
-            if (ov_is_regular_file(out)) {
-                ReleaseSRWLockShared(&g_ov_packages_lock);
-                return 1;
-            }
-        }
-        ReleaseSRWLockShared(&g_ov_packages_lock);
-        break;                      /* prefixes are disjoint; one match is all */
-    }
-    out[0] = '\0';
-    /* A concurrent rescan cannot turn this old miss into a new one.
-     * Small caller buffers also cannot poison ordinary opens. */
-    if (cap >= MAX_PATH) ov_miss_remember(name, hash, generation);
-    return 0;
-}
-
-#ifdef SH_OVERRIDES_TESTING
-int sh_overrides_test_resolve_existing(const char *name, char *out, size_t cap)
-{
-    ov_capture_packages();
-    return ov_resolve_existing(name, out, cap);
-}
-
-int sh_overrides_test_resolve_cached(const char *name, char *out, size_t cap)
-{
-    return ov_resolve_existing(name, out, cap);
-}
-#endif
-
-/* SEH-guarded open of the override file; returns an ov_stream* (caller returns it to the engine) or
- * NULL if no file / open failed. On success the FILE* is owned by the stream (its dtor fcloses). */
-static ov_stream *try_open_override(const char *name)
-{
-    char path[MAX_PATH];
-    if (!ov_resolve_existing(name, path, sizeof path)) return NULL;
-
-    /* exists? (cheap negative for the common no-override case before fopen) */
-    DWORD attrs = GetFileAttributesA(path);
-    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY)) return NULL;
-
-    FILE *fp = NULL;
-    if (fopen_s(&fp, path, "rb") != 0 || fp == NULL) return NULL;
-
-    /* Measure with seek-end/tell, then restore the cursor. */
-    long long length;
-    if (_fseeki64(fp, 0, SEEK_END) != 0 || (length = _ftelli64(fp)) < 0 ||
-        _fseeki64(fp, 0, SEEK_SET) != 0) {
-        fclose(fp);
-        return NULL;
-    }
-
-    ov_stream *s = make_stream(fp, length, name);
-    if (!s) { fclose(fp); return NULL; }
-    return s;
+    if (!sh_user_overrides_enabled_for_launch()) return 0;
+    if (!sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){
+        sh_nav_bake_source_update_begin, sh_nav_bake_source_update_end}, activate, context)) return 0;
+    InterlockedIncrement(&g_ov_pkg_generation);
+    backend_log(plan ? "B1: prepared map resource provider activated" : "B1: local resource provider restored");
+    return 1;
 }
 
 /* ====================================================== built-in default lookup + validation =======*/
@@ -1076,52 +869,6 @@ static const ov_baked_decl_t *find_baked(const char *name)
     for (size_t i = 0; i < sizeof g_ov_baked_decls / sizeof g_ov_baked_decls[0]; i++)
         if (ov_name_eq(name, g_ov_baked_decls[i].name)) return &g_ov_baked_decls[i];
     return NULL;
-}
-
-/* Read a whole file into a heap buffer (cap 8 MiB -- decls are KB-scale; a bigger file is served
- * unvalidated as a plain stream rather than slurped). NULL on absent/oversize/failure. */
-#define OV_SLURP_CAP (8u * 1024u * 1024u)
-static unsigned char *read_all_file(const char *path, long long *out_len)
-{
-    FILE *fp = NULL;
-    if (fopen_s(&fp, path, "rb") != 0 || fp == NULL) return NULL;
-    long long len = 0;
-    if (_fseeki64(fp, 0, SEEK_END) == 0) { len = _ftelli64(fp); _fseeki64(fp, 0, SEEK_SET); }
-    if (len < 0 || len > (long long)OV_SLURP_CAP) { fclose(fp); return NULL; }
-    unsigned char *buf = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (size_t)len + 1);
-    if (!buf) { fclose(fp); return NULL; }
-    size_t got = fread(buf, 1, (size_t)len, fp);
-    fclose(fp);
-    if ((long long)got != len) { HeapFree(GetProcessHeap(), 0, buf); return NULL; }
-    buf[len] = 0;
-    *out_len = len;
-    return buf;
-}
-
-/* Validate user replacements for built-in names before returning an owned
- * memory stream. Invalid text falls back to the built-in. Oversize files or
- * allocation failures instead try a plain file stream.
- */
-static ov_stream *open_user_for_baked_name(const char *name, int *malformed)
-{
-    *malformed = 0;
-    char path[MAX_PATH];
-    if (!ov_resolve_existing(name, path, sizeof path)) return NULL;
-    DWORD attrs = GetFileAttributesA(path);
-    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY)) return NULL;
-
-    long long len = 0;
-    unsigned char *buf = read_all_file(path, &len);
-    if (!buf) return try_open_override(name);            /* unusual size/alloc -> plain file stream */
-
-    if (!sh_decl_text_well_formed(buf, (size_t)len)) {
-        HeapFree(GetProcessHeap(), 0, buf);
-        *malformed = 1;
-        return NULL;
-    }
-    ov_stream *s = make_mem_stream(buf, len, name, 1);
-    if (!s) { HeapFree(GetProcessHeap(), 0, buf); return NULL; }
-    return s;
 }
 
 /* Capture the provider object from the first hook call so original-resource
@@ -1178,12 +925,58 @@ static unsigned char *read_installed_resource(const char *name, size_t *out_len)
     }
 }
 
-static unsigned char *grid_read_installed(void *context,const char *name,size_t *length)
+/* Inputs to product transforms use the same published package result as a
+ * direct engine read. Stay below Grid/navigation here so derived reads cannot
+ * recurse into themselves. An owned read failure must not select stock bytes. */
+static unsigned char *read_effective_resource(const char *name, size_t *out_len)
 {
-    (void)context;
-    return read_installed_resource(name,length);
+    unsigned char *compiled = NULL, *copy;
+    const unsigned char *source;
+    const ov_baked_decl_t *baked;
+    size_t length = 0;
+    int claimed = 0;
+    if (out_len) *out_len = 0;
+    if (!name || !out_len) return NULL;
+    if (sh_user_overrides_enabled_for_launch())
+        claimed = sh_package_runtime_read(name, &compiled, &length);
+    if (claimed < 0) { free(compiled); return NULL; }
+    if (claimed) source = compiled;
+    else {
+        baked = find_baked(name);
+        if (!baked) {
+            copy = read_installed_resource(name, out_len);
+            if (copy) sh_resource_graph_file(name);
+            return copy;
+        }
+        source = (const unsigned char *)baked->text; length = baked->len;
+    }
+    copy = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, length ? length : 1u);
+    if (copy) {
+        if (length) memcpy(copy, source, length);
+        *out_len = length;
+        sh_resource_graph_file(name);
+    }
+    free(compiled); return copy;
 }
-static void grid_release_installed(void *context,void *bytes)
+
+typedef struct grid_source_context {
+    const char *target;
+    sh_resource_graph_frame frame;
+    int active;
+} grid_source_context;
+
+static unsigned char *grid_read_effective(void *context,const char *name,size_t *length)
+{
+    grid_source_context *source = context;
+    /* The transform owns an exact file identity even when a preview requests
+     * it outside a native parse. Later native loads can follow these inputs. */
+    if (!source->active) {
+        sh_resource_graph_begin(&source->frame, "", source->target);
+        source->active = 1;
+    }
+    return read_effective_resource(name,length);
+}
+static void grid_release_effective(void *context,void *bytes)
 {
     (void)context;HeapFree(GetProcessHeap(),0,bytes);
 }
@@ -1192,12 +985,28 @@ static int grid_aas_name(const char *name)
 {return name&&(strstr(name,".aas_")||strstr(name,".baas_"));}
 static int grid_open_validated(const char *name,unsigned char **out,size_t *length)
 {
-    int claimed=sh_grid_asset_open(name,grid_read_installed,grid_release_installed,NULL,out,length);
-    if(claimed>0&&grid_aas_name(name)){
-        char error[192];
-        if(!sh_navmesh_validate_aas(*out,*length,error,sizeof error)){
-            backend_log(error);free(*out);*out=NULL;*length=0;return -1;
+    grid_source_context source = {0};
+    int claimed = -1;
+    source.target = name;
+    __try {
+        char *canonical = NULL, *normalized = sh_package_engine_path(name);
+        int identity = normalized ? sh_grid_asset_canonical(normalized, &canonical) : 0;
+        free(normalized);
+        /* A compiler-owned private output already includes its generated
+         * contribution and every authored input. Do not generate over it. */
+        if (identity > 0 && sh_user_overrides_enabled_for_launch())
+            claimed = sh_package_runtime_read(name, out, length);
+        else claimed = identity < 0 ? -1 : 0;
+        free(canonical);
+        if (!claimed) claimed=sh_grid_asset_open(name,grid_read_effective,grid_release_effective,&source,out,length);
+        if(claimed>0&&grid_aas_name(name)){
+            char error[192];
+            if(!sh_navmesh_validate_aas(*out,*length,error,sizeof error)){
+                backend_log(error);free(*out);*out=NULL;*length=0;claimed=-1;
+            }
         }
+    } __finally {
+        if (source.active) sh_resource_graph_end(&source.frame, !AbnormalTermination() && claimed > 0);
     }
     return claimed;
 }
@@ -1207,10 +1016,10 @@ unsigned char *sh_overrides_read_engine_resource(const char *name,size_t *out_le
     unsigned char *generated=NULL,*copy=NULL;size_t length=0;int claimed;
     if(out_len)*out_len=0;
     if(!name)return NULL;
-    /* A marked volume in a resized module augments that module's resized AAS.
-     * The source reader below bypasses this provider to prevent recursion. */
+    /* Navigation consumes the resized Grid result where applicable, otherwise
+     * the compiled base. Neither path can re-enter map navigation generation. */
     claimed=grid_open_validated(name,&generated,&length);
-    if(!claimed)return read_installed_resource(name,out_len);
+    if(!claimed)return read_effective_resource(name,out_len);
     if(claimed>0){copy=(unsigned char*)HeapAlloc(GetProcessHeap(),0,length);
         if(copy){memcpy(copy,generated,length);if(out_len)*out_len=length;}}
     free(generated);return copy;
@@ -1218,7 +1027,9 @@ unsigned char *sh_overrides_read_engine_resource(const char *name,size_t *out_le
 
 static void *ov_open_body(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
 {
+#ifndef SH_OVERRIDES_TESTING
     if (g_orig_open == NULL) return NULL;   /* defensive: never happens once installed */
+#endif
     if (g_provider_self == NULL) g_provider_self = self;
 
     /* Let embedded or marked-volume navigation take precedence over the
@@ -1289,49 +1100,43 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
         }
     }
 
+    if (mode < 2 && name && sh_user_overrides_enabled_for_launch()) {
+        FILE *file = NULL;
+        uint64_t file_length = 0;
+        unsigned char *bytes = NULL;
+        size_t length = 0;
+        int claimed = sh_package_runtime_open_file(name, &file, &file_length);
+        if (claimed) {
+            ov_stream *stream = claimed > 0 && file_length <= LLONG_MAX ?
+                make_stream(file, (long long)file_length, name) : NULL;
+            if (!stream && file) fclose(file);
+            if (stream) InterlockedIncrement(&g_shadow_count);
+            return stream;
+        }
+        claimed = sh_package_runtime_read(name, &bytes, &length);
+        if (claimed) {
+            unsigned char *owned = NULL;
+            ov_stream *stream = NULL;
+            if (claimed > 0) {
+                owned = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, length ? length : 1u);
+                if (owned) {
+                    if (length) memcpy(owned, bytes, length);
+                    stream = make_mem_stream(owned, (long long)length, name, 1);
+                }
+            }
+            free(bytes);
+            if (!stream && owned) HeapFree(GetProcessHeap(), 0, owned);
+            if (stream) InterlockedIncrement(&g_shadow_count);
+            return stream;
+        }
+    }
+
     if (mode < 2 && name != NULL) {
         ov_stream *s = NULL;
         const char *src = NULL;
-        int bridge_error = 0;
         __try {
             const ov_baked_decl_t *baked = find_baked(name);
             int user_on = sh_user_overrides_enabled_for_launch();
-            if (user_on) {
-                if (baked) {
-                    int malformed = 0;
-                    s = open_user_for_baked_name(name, &malformed);
-                    if (s) src = "user";
-                    else if (malformed) src = "built-in (user file malformed, refused)";
-                } else {
-                    s = try_open_override(name);
-                    if (s) src = "user";
-                }
-                if (s == NULL) {
-                    unsigned char *linked = NULL;
-                    size_t linked_length = 0;
-                    const char *linked_source = NULL;
-                    int linked_status;
-                    SH_PERF_BEGIN(tb);
-                    linked_status = sh_resource_bridge_open(name, &linked, &linked_length,
-                                                            &linked_source);
-                    SH_PERF_END(SH_PERF_BRIDGE_OPEN, tb);
-                    if (linked_status == SH_RESOURCE_BRIDGE_OPENED &&
-                        linked_length <= (size_t)INT64_MAX) {
-                        s = make_mem_stream(linked, (long long)linked_length, name, 1);
-                        if (s) src = "installed resource bridge";
-                        else {
-                            HeapFree(GetProcessHeap(), 0, linked);
-                            bridge_error = 1;
-                        }
-                    } else if (linked_status == SH_RESOURCE_BRIDGE_OPENED) {
-                        HeapFree(GetProcessHeap(), 0, linked);
-                        bridge_error = 1;
-                    } else if (linked_status == SH_RESOURCE_BRIDGE_ERROR) {
-                        bridge_error = 1;
-                    }
-                    (void)linked_source;
-                }
-            }
             if (s == NULL && baked != NULL) {
                 s = make_mem_stream((const unsigned char *)baked->text, (long long)baked->len, name, 0);
                 if (s && src == NULL)
@@ -1349,20 +1154,13 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
             backend_log(line);
             return s;   /* the engine reads the override bytes through our idFile vtable */
         }
-        if (bridge_error) {
-            char line[MAX_PATH + 128];
-            _snprintf_s(line, sizeof(line), _TRUNCATE,
-                        "B1: installed resource bridge REFUSED engine fallback for admitted '%s'",
-                        name);
-            backend_log(line);
-            return NULL;
-        }
+
     }
     /* No shadow, or mode guard: chain with the original byte arguments. */
     {
         void *chained;
         SH_PERF_BEGIN(t0);
-        chained = g_orig_open(self, name, (unsigned char)(b1 & 0xff), (unsigned char)(b2 & 0xff), mode);
+        chained = g_orig_open ? g_orig_open(self, name, (unsigned char)(b1 & 0xff), (unsigned char)(b2 & 0xff), mode) : NULL;
         SH_PERF_END(SH_PERF_ENGINE_OPEN, t0);
         return chained;
     }
@@ -1373,9 +1171,17 @@ static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsign
 {
     SH_PERF_BEGIN(t0);
     void *s = ov_open_body(self, name, b1, b2, mode);
+    if (s && mode < 2 && name) sh_resource_graph_file(name);
     SH_PERF_END(SH_PERF_OVERRIDE_OPEN, t0);
     return s;
 }
+
+#ifdef SH_OVERRIDES_TESTING
+void *sh_overrides_test_open(const char *name, unsigned int mode)
+{
+    return ov_open_hook(NULL, name, 0xff, 0xff, mode);
+}
+#endif
 
 /* Decode the first LEA RAX,[rip+disp32] in the resolved provider constructor
  * to find its vtable. Installation then requires the target to lie in a read-
@@ -1402,24 +1208,6 @@ static void *decode_vtable_global(const uint8_t *ctor_fn)
         }
     }
     return NULL;
-}
-
-/* Remove legacy disk copies that match built-in defaults with CR bytes
- * ignored, allowing current in-memory defaults to serve. Keep every differing
- * file. Reclaim faults leave the existing disk shadow in place.
- */
-static int file_equals_baked_ignoring_cr(const unsigned char *fbuf, size_t flen,
-                                         const char *baked, size_t blen)
-{
-    size_t fi = 0, bi = 0;
-    while (fi < flen && (char)fbuf[fi] == '\r') fi++;    /* the baked text is LF-only */
-    while (fi < flen && bi < blen) {
-        if ((char)fbuf[fi] == '\r') { fi++; continue; }
-        if ((char)fbuf[fi] != baked[bi]) return 0;
-        fi++; bi++;
-        while (fi < flen && (char)fbuf[fi] == '\r') fi++;
-    }
-    return fi == flen && bi == blen;
 }
 
 /* SEH-guarded host-image bounds checks. Invalid or unreadable PE headers
@@ -1519,118 +1307,6 @@ int sh_overrides_test_address_in_readonly_section(const uint8_t *module_base, co
 }
 #endif
 
-static int ov_suffix_ci(const char *value, const char *suffix)
-{
-    size_t value_length, suffix_length;
-    if (!value || !suffix) return 0;
-    value_length = strlen(value);
-    suffix_length = strlen(suffix);
-    return value_length >= suffix_length &&
-           _stricmp(value + value_length - suffix_length, suffix) == 0;
-}
-
-static void reclaim_baked_overrides(void)
-{
-    for (size_t i = 0; i < sizeof g_ov_baked_decls / sizeof g_ov_baked_decls[0]; i++) {
-        __try {
-            char path[MAX_PATH];
-            if (!build_override_path(g_ov_baked_decls[i].name, path, sizeof path)) continue;
-            if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) continue;   /* nothing on disk */
-            long long len = 0;
-            unsigned char *buf = read_all_file(path, &len);
-            if (!buf) continue;
-            int ours = file_equals_baked_ignoring_cr(buf, (size_t)len,
-                                                     g_ov_baked_decls[i].text, g_ov_baked_decls[i].len);
-            HeapFree(GetProcessHeap(), 0, buf);
-            char msg[MAX_PATH + 96];
-            if (ours && DeleteFileA(path)) {
-                _snprintf_s(msg, sizeof msg, _TRUNCATE,
-                            "B1: reclaimed previously-written default '%s' (built-in serves from memory now)",
-                            g_ov_baked_decls[i].name);
-                backend_log(msg);
-            } else if (!ours) {
-                _snprintf_s(msg, sizeof msg, _TRUNCATE,
-                            "B1: user-owned override kept at built-in name '%s' (it wins over the built-in)",
-                            g_ov_baked_decls[i].name);
-                backend_log(msg);
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) { /* leave the file; old behavior */ }
-    }
-}
-
-/* Log a bounded list of active user files and flag failed text-balance
- * checks.
- */
-#define OV_AUDIT_MAX_FILES 512
-#define OV_AUDIT_MAX_NAMED 24
-#define OV_AUDIT_MAX_DEPTH 8
-static void audit_walk(const char *dir, const char *rel, int depth, int *count, int *named, int *warned)
-{
-    if (depth > OV_AUDIT_MAX_DEPTH || *count >= OV_AUDIT_MAX_FILES) return;
-    char pattern[MAX_PATH];
-    _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*", dir);
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(pattern, &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    do {
-        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
-        char sub[MAX_PATH], subrel[MAX_PATH];
-        _snprintf_s(sub,    sizeof sub,    _TRUNCATE, "%s\\%s", dir, fd.cFileName);
-        _snprintf_s(subrel, sizeof subrel, _TRUNCATE, "%s%s%s", rel, rel[0] ? "/" : "", fd.cFileName);
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            audit_walk(sub, subrel, depth + 1, count, named, warned);
-        } else {
-            (*count)++;
-            int bad = 0;
-            if (ov_suffix_ci(subrel, ".decl")) {
-                long long len = 0;
-                unsigned char *buf = read_all_file(sub, &len);
-                if (buf) {
-                    bad = !sh_decl_text_well_formed(buf, (size_t)len);
-                    HeapFree(GetProcessHeap(), 0, buf);
-                }
-            }
-            if (bad) (*warned)++;
-            if (*named < OV_AUDIT_MAX_NAMED || bad) {
-                char msg[MAX_PATH + 96];
-                _snprintf_s(msg, sizeof msg, _TRUNCATE, "B1:   override %s'%s'",
-                            bad ? "STRUCTURALLY-SUSPECT (unbalanced braces/quotes) " : "", subrel);
-                backend_log(msg);
-                (*named)++;
-            }
-        }
-        if (*count >= OV_AUDIT_MAX_FILES) break;
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-}
-
-static void audit_user_overrides(void)
-{
-    __try {
-        char root[MAX_PATH], dir[MAX_PATH];
-        resolve_root(root, sizeof root);
-        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s\\overrides", root);
-        int count = 0, named = 0, warned = 0;
-        audit_walk(dir, "", 0, &count, &named, &warned);
-        char msg[MAX_PATH + 192];
-        if (!sh_user_overrides_enabled_for_launch()) {
-            _snprintf_s(msg, sizeof msg, _TRUNCATE,
-                        "B1: overrides audit -- user layer DISABLED by config; "
-                        "%d file(s) under %s are ignored (set sh_user_overrides 1 "
-                        "and restart DOOM to re-enable)",
-                        count, dir);
-        } else {
-            _snprintf_s(msg, sizeof msg, _TRUNCATE,
-                        "B1: overrides audit -- %d user override file(s) active "
-                        "under %s%s%s (bisect: set sh_user_overrides 0 and "
-                        "restart DOOM)",
-                        count, dir, warned ? ", " : "",
-                        warned ? "with structural warnings above" : "");
-        }
-        backend_log(msg);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("B1: overrides audit skipped (fault)"); }
-}
-
 /* ============================================================ the install (slot swap) ==============*/
 
 int sh_overrides_install(const uint8_t *module_base,
@@ -1673,11 +1349,6 @@ int sh_overrides_install(const uint8_t *module_base,
     if (g_orig_open != NULL) {
         backend_log("B1: overrides file-shadow already installed");
         return 1;
-    }
-
-    if (sh_user_overrides_enabled_for_launch() && !sh_resource_bridge_capture(g_root)) {
-        backend_log("B1: overrides file-shadow SKIPPED -- installed resource manifest snapshot failed closed");
-        return 0;
     }
 
     if (!ov_stream_helpers_install(read_string_fn, read_string_status_ok,
@@ -1725,10 +1396,8 @@ int sh_overrides_install(const uint8_t *module_base,
     FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void *));
     g_slot = slot;
 
-    sh_resource_bridge_set_provider_ready(1);
-    ov_capture_packages();       /* Capture the initial package list for resource opens. */
-    reclaim_baked_overrides();   /* Reclaim matching legacy copies so in-memory defaults can serve. */
-    audit_user_overrides();      /* log what the user's folder actively shadows */
+    /* Initial package compilation belongs to the main-thread pre-promotion
+     * boundary. Arming this provider must not wait for native reader setup. */
     _snprintf_s(line, sizeof line, _TRUNCATE,
         "B1: overrides file-shadow installed (vtable=%p slot+0x%x=%p, orig open=%p); root=%s\\overrides; "
         "built-in defaults: %u from memory",
@@ -1764,7 +1433,6 @@ int sh_overrides_uninstall(void)
         FlushInstructionCache(GetCurrentProcess(), g_slot, sizeof(void *));
     }
     backend_log("B1: overrides file-shadow uninstalled (vtable slot restored)");
-    sh_resource_bridge_set_provider_ready(0);
     g_slot = NULL;
     g_orig_open = NULL;
     return 1;

@@ -1,8 +1,9 @@
-/* Tests package-marker discovery, legacy overrides and deterministic ordering. */
+/* Tests package discovery, grouped folders, complete inventories and ordering. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "packages.h"
@@ -142,7 +143,7 @@ static void enumeration_failures(const char *root)
 {
     sh_packages_test_find_api api = {injected_first, injected_next,
                                     injected_close, injected_attributes};
-    sh_package packages[SH_PACKAGES_MAX];
+    sh_package *packages = NULL;
     size_t count;
     injected_root_attributes = FILE_ATTRIBUTE_DIRECTORY;
     injected_root_error = ERROR_SUCCESS;
@@ -152,48 +153,56 @@ static void enumeration_failures(const char *root)
     injected_searches = injected_closes = 0;
     sh_packages_test_set_api(&api);
 
-    CHECK(sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(sh_packages_enumerate(root, &packages, &count));
     CHECK(count == 0);
     injected_first_error = ERROR_ACCESS_DENIED;
-    CHECK(!sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(!sh_packages_enumerate(root, &packages, &count));
     CHECK(count == 0);
 
     injected_entries = 2;
-    CHECK(sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(sh_packages_enumerate(root, &packages, &count));
     CHECK(count == 2);
     CHECK(index_of(packages, count, "injected-0") >= 0);
     CHECK(index_of(packages, count, "injected-1") >= 0);
     CHECK(injected_closes == 1);
     injected_terminal_error = ERROR_ACCESS_DENIED;
-    CHECK(!sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(!sh_packages_enumerate(root, &packages, &count));
     CHECK(count == 0);
     CHECK(injected_closes == 2);
     injected_terminal_error = ERROR_READ_FAULT;
-    CHECK(!sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(!sh_packages_enumerate(root, &packages, &count));
     CHECK(count == 0);
     CHECK(injected_closes == 3);
 
     injected_root_attributes = INVALID_FILE_ATTRIBUTES;
     injected_searches = 0;
     injected_root_error = ERROR_FILE_NOT_FOUND;
-    CHECK(sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(sh_packages_enumerate(root, &packages, &count));
     CHECK(count == 0);
     injected_root_error = ERROR_PATH_NOT_FOUND;
-    CHECK(sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(sh_packages_enumerate(root, &packages, &count));
     CHECK(count == 0);
     injected_root_error = ERROR_ACCESS_DENIED;
-    CHECK(!sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(!sh_packages_enumerate(root, &packages, &count));
     CHECK(count == 0);
     injected_root_error = ERROR_SHARING_VIOLATION;
-    CHECK(!sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(!sh_packages_enumerate(root, &packages, &count));
     CHECK(count == 0);
     injected_root_attributes = FILE_ATTRIBUTE_NORMAL;
-    CHECK(!sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(!sh_packages_enumerate(root, &packages, &count));
     CHECK(count == 0);
     injected_root_attributes = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT;
-    CHECK(!sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count));
+    CHECK(!sh_packages_enumerate(root, &packages, &count));
     CHECK(count == 0);
     CHECK(injected_searches == 0);
+    injected_root_attributes = FILE_ATTRIBUTE_DIRECTORY;
+    injected_terminal_error = ERROR_NO_MORE_FILES;
+    injected_entries = 257;
+    CHECK(sh_packages_enumerate(root, &packages, &count) && count == 257);
+    CHECK(index_of(packages, count, "injected-256") >= 0);
+    injected_terminal_error = ERROR_ACCESS_DENIED;
+    CHECK(!sh_packages_enumerate(root, &packages, &count) && !packages && !count);
+    free(packages);
     sh_packages_test_reset_api();
 }
 
@@ -201,7 +210,7 @@ int main(void)
 {
     char temp[MAX_PATH], root[MAX_PATH], overrides[MAX_PATH];
     char sub[MAX_PATH], expected[MAX_PATH];
-    sh_package packages[SH_PACKAGES_MAX];
+    sh_package *packages = NULL;
     size_t count = 0;
     DWORD pid = GetCurrentProcessId();
 
@@ -214,12 +223,12 @@ int main(void)
 
     /* A data root with no overrides directory at all is a complete, empty
      * enumeration -- a fresh install must not look like a read failure. */
-    CHECK(sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count) == 1);
+    CHECK(sh_packages_enumerate(root, &packages, &count) == 1);
     CHECK(count == 0);
 
     join(overrides, sizeof(overrides), root, "overrides");
     CHECK(make_dir(overrides));
-    CHECK(sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count) == 1);
+    CHECK(sh_packages_enumerate(root, &packages, &count) == 1);
     CHECK(count == 0);
 
     install(overrides, "cyberdemon", 1);
@@ -230,7 +239,7 @@ int main(void)
     join(sub, sizeof(sub), overrides, "loose-file.txt");
     CHECK(touch(sub));                       /* a file is never a package */
 
-    CHECK(sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count) == 1);
+    CHECK(sh_packages_enumerate(root, &packages, &count) == 1);
     CHECK(count == 2);
     CHECK(index_of(packages, count, "notes") < 0);
     CHECK(index_of(packages, count, "shader_includes") < 0);
@@ -244,7 +253,7 @@ int main(void)
     install(overrides, "editor/toybox", 1);
     install(overrides, "editor/scratch", 0);
     install(overrides, "demons/hell/imps", 1);
-    CHECK(sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count) == 1);
+    CHECK(sh_packages_enumerate(root, &packages, &count) == 1);
     CHECK(count == 5);
     CHECK(index_of(packages, count, "editor") < 0);
     CHECK(index_of(packages, count, "editor/scratch") < 0);
@@ -260,7 +269,7 @@ int main(void)
     /* A package is a leaf: anything below it is its own content, never another
      * package, so its layout always means what the package layout says. */
     install(overrides, "cyberdemon/decls", 1);
-    CHECK(sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count) == 1);
+    CHECK(sh_packages_enumerate(root, &packages, &count) == 1);
     CHECK(count == 5);
     CHECK(index_of(packages, count, "cyberdemon/decls") < 0);
 
@@ -274,22 +283,18 @@ int main(void)
 
     /* Bad arguments report failure and still leave the count defined. */
     count = 99;
-    CHECK(sh_packages_enumerate(NULL, packages, SH_PACKAGES_MAX, &count) == 0);
+    CHECK(sh_packages_enumerate(NULL, &packages, &count) == 0);
     CHECK(count == 0);
     count = 99;
-    CHECK(sh_packages_enumerate(root, NULL, SH_PACKAGES_MAX, &count) == 0);
+    CHECK(sh_packages_enumerate(root, NULL, &count) == 0);
     CHECK(count == 0);
-    CHECK(sh_packages_enumerate(root, packages, 0, &count) == 0);
+    CHECK(!sh_packages_enumerate(root, &packages, NULL) && !packages);
 
-    /* More packages than the array holds is an incomplete enumeration, not a
-     * silent truncation: the caller is told so it can refuse. */
-    CHECK(sh_packages_enumerate(root, packages, 2, &count) == 0);
-    CHECK(count == 0);
-
-    /* A tree deeper than the bound is reported incomplete rather than silently
-     * abandoned partway. */
+    /* Grouping depth follows supported filesystem paths, with no depth8 quota. */
     install(overrides, "a/b/c/d/e/f/g/h/i/deep", 1);
-    CHECK(sh_packages_enumerate(root, packages, SH_PACKAGES_MAX, &count) == 0);
+    CHECK(sh_packages_enumerate(root, &packages, &count) && count == 6);
+    CHECK(index_of(packages, count, "a/b/c/d/e/f/g/h/i/deep") >= 0);
+    free(packages);
 
     remove_tree(root);
     if (g_failed) {

@@ -23,6 +23,7 @@
 #include "config.h"
 #include "backend_log.h"
 #include "rawmap.h"
+#include "map_published.h"
 #include "nav_bake.h"
 #include "perf.h"
 #include "nav_preview.h"
@@ -2386,8 +2387,11 @@ void sh_apply_prefab_poll_play(void)
      * them before boot publication; both entry points share a one-shot latch. */
     sh_package_requirements_poll();
     /* Retry pending re-arms; the decl server owns admission and command draining. */
+    sh_map_published_poll();
+    sh_rawmap_map_context_poll();
     sh_decl_server_rearm_poll();
     sh_mpkg_consent_poll();
+    sh_rawmap_pending_map_poll();
     ae_nav_refresh_poll();
     if (!g_doom_base) return;
 

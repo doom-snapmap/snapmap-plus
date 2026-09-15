@@ -510,8 +510,26 @@ void sh_engine_dialog_dump(void (*printf_fn)(const char *fmt, ...))
 
 void sh_engine_dialog_release(int ticket)
 {
-    if (ticket > 0 && ticket == (int)InterlockedCompareExchange(&g_ticket, 0, 0))
-        InterlockedExchange(&g_pending_id, -1);
+    LONG id;
+    unsigned params[ED_PARAMS_BYTES / sizeof(unsigned)] = {0};
+    const char *source = "package dialog cancellation";
+    void *descriptor;
+    unsigned char cleared;
+    if (ticket <= 0 || ticket != (int)InterlockedCompareExchange(&g_ticket, 0, 0)) return;
+    id = InterlockedExchange(&g_pending_id, -1);
+    InterlockedExchange(&g_answer, -1);
+    /* Retire the claim before the native clear: a reentrant button action must
+     * never authorize the abandoned request. An already-polled answer has no
+     * pending ID, so releasing it cannot clear a later native question. */
+    if (id < 0 || !g_clear_wrapper || !g_shell || !(descriptor = ed_find_descriptor((int)id))) return;
+    if (ed_read_byte(descriptor, ED_DESC_CLEARED, &cleared) && cleared == 1) return;
+    params[ED_PARAM_GDM_ID] = (unsigned)id;
+    memcpy(&params[ED_PARAM_SOURCE_FILE], &source, sizeof(source));
+    params[ED_PARAM_SOURCE_LINE] = __LINE__;
+    __try { g_clear_wrapper(g_shell, params); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        backend_log("engine-dialog: abandoned question could not be cleared; physical dialog admission stays closed");
+    }
 }
 
 #ifdef SH_ENGINE_DIALOG_TESTING

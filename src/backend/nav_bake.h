@@ -23,7 +23,17 @@
  */
 void sh_nav_bake_set_map(const char *json, size_t len);
 
-/* Read the original resource into a process-heap buffer the caller frees, or
+/* Retain map geometry while retiring source-derived previews and traversal
+ * rows. Older worker results cannot publish into the new revision. No engine
+ * callbacks occur. Package publication uses the paired boundary below. */
+void sh_nav_bake_invalidate_sources(void);
+/* Paired final-publication boundary: no bake/gather/cache read overlaps the
+ * provider swap. Acquire before the compilation lock, release after it. A
+ * refused activation leaves the current cache and geometry revision intact. */
+void sh_nav_bake_source_update_begin(void);
+void sh_nav_bake_source_update_end(int committed);
+
+/* Read the effective base resource into a process-heap buffer the caller frees, or
  * return NULL. The provider hook supplies this callback because it owns the
  * provider instance.
  */
@@ -120,6 +130,10 @@ int sh_nav_bake_test_parse_name(const char *name, char *module, size_t module_ca
 void sh_nav_bake_test_reset(void);
 int  sh_nav_bake_test_bake_count(void);
 void sh_nav_bake_test_copy_map(sh_nav_map *out);
+/* Deliver a synthetic completed worker result through the production publisher. */
+void sh_nav_bake_test_preview_complete(unsigned long revision, const char *bytes);
+void sh_nav_bake_test_preview_inputs(unsigned long revision, const char *bytes,
+    const char *source, int traversal);
 #endif
 
 #endif /* SNAPMAP_PLUS_NAV_BAKE_H */

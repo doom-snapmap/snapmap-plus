@@ -7,6 +7,7 @@
 #include <string.h>
 #include "weapon_hud.h"
 #include "packages.h"
+#include "package_runtime.h"
 #include "config_json.h"
 #include "backend_log.h"
 #include "patch.h"
@@ -60,13 +61,12 @@ static int hud_string(const char *raw, char *out, size_t cap)
 static int hud_parse(hud_table *table, const char *json, size_t length, const char *owner)
 {
     sh_json_object root = {0}, weapons = {0};
-    char schema[64], message[512];
+    char message[512];
     const char *raw;
     int ok = 0;
     if (length > HUD_FILE_CAP || !sh_json_parse_object(json, length, 5, &root)) goto done;
-    if (root.count != 2 ||
-        !hud_string(sh_json_object_get(&root, "schema"), schema, sizeof schema) ||
-        strcmp(schema, "snapmap-plus.weapon-hud.v1") != 0) goto done;
+    if (!root.count) { ok = 1; goto done; }
+    if (root.count != 1) goto done;
     raw = sh_json_object_get(&root, "weapons");
     if (!raw || !sh_json_parse_object(raw, strlen(raw), 3, &weapons)) goto done;
     for (size_t i = 0; i < weapons.count; i++) {
@@ -107,81 +107,22 @@ done:
     return ok;
 }
 
-static char *hud_read(const char *path, size_t *length)
-{
-    HANDLE file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-    BY_HANDLE_FILE_INFORMATION info;
-    LARGE_INTEGER size;
-    DWORD got = 0;
-    char *body = NULL;
-    *length = 0;
-    if (file == INVALID_HANDLE_VALUE) return NULL;
-    if (!GetFileInformationByHandle(file, &info) ||
-        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
-        !GetFileSizeEx(file, &size) || size.QuadPart < 0 || size.QuadPart > HUD_FILE_CAP) goto done;
-    body = (char *)malloc((size_t)size.QuadPart + 1);
-    if (!body) goto done;
-    if (!ReadFile(file, body, (DWORD)size.QuadPart, &got, NULL) || got != size.QuadPart) {
-        free(body); body = NULL; goto done;
-    }
-    *length = got;
-    body[got] = 0;
-done:
-    CloseHandle(file);
-    return body;
-}
-
 int sh_weapon_hud_reload(const char *data_root)
 {
-    sh_package *packages = (sh_package *)calloc(SH_PACKAGES_MAX, sizeof(sh_package));
     hud_table *next = (hud_table *)calloc(1, sizeof(hud_table));
-    size_t count = 0, total = 0;
-    char path[MAX_PATH] = "", directory[MAX_PATH], message[512];
+    size_t length = 0;
+    char *json = NULL, message[512];
     int ok = 0;
-    if (!g_enabled) { free(next); free(packages); return 1; }
-    if (!next || !packages || !data_root ||
-        !sh_packages_enumerate(data_root, packages, SH_PACKAGES_MAX, &count)) goto done;
-    for (size_t i = 0; i < count; i++) {
-        DWORD attr, error;
-        size_t length = 0;
-        char *body;
-        if (!sh_package_subdir(&packages[i], "hud", directory, sizeof directory)) goto done;
-        attr = GetFileAttributesA(directory);
-        if (attr == INVALID_FILE_ATTRIBUTES) {
-            error = GetLastError();
-            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) continue;
-            goto done;
-        }
-        if (!(attr & FILE_ATTRIBUTE_DIRECTORY) || (attr & FILE_ATTRIBUTE_REPARSE_POINT)) goto done;
-        if (_snprintf_s(path, sizeof path, _TRUNCATE, "%s\\weapons.json", directory) < 0) goto done;
-        attr = GetFileAttributesA(path);
-        if (attr == INVALID_FILE_ATTRIBUTES) {
-            if (GetLastError() == ERROR_FILE_NOT_FOUND) continue;
-            goto done;
-        }
-        body = hud_read(path, &length);
-        if (!body) goto done;
-        int parsed = total <= HUD_TOTAL_CAP - length &&
-            hud_parse(next, body, length, packages[i].name);
-        free(body);
-        if (!parsed) goto done;
-        total += length;
-    }
-    ok = 1;
-done:
+    (void)data_root;
+    if (!g_enabled) { free(next); return 1; }
+    json = sh_package_runtime_active_policy("hud", &length);
+    if (next && json) ok = hud_parse(next, json, length, "compiled packages");
     AcquireSRWLockExclusive(&g_lock);
-    if (ok) g_rules = *next;
-    else memset(&g_rules, 0, sizeof g_rules);
+    if (ok) g_rules = *next; else memset(&g_rules, 0, sizeof(g_rules));
     InterlockedExchange(&g_reported, 0);
-    if (ok) _snprintf_s(message, sizeof message, _TRUNCATE,
-        "weapon-hud captured: %zu rule(s)", g_rules.count);
-    else _snprintf_s(message, sizeof message, _TRUNCATE,
-        "weapon-hud REFUSED: invalid, conflicting or unreadable policy near %s; engine display retained", path);
+    snprintf(message, sizeof(message), "weapon-hud %s: %zu rules", ok ? "compiled" : "REFUSED", g_rules.count);
     ReleaseSRWLockExclusive(&g_lock);
-    backend_log(message);
-    free(next); free(packages);
-    return ok;
+    backend_log(message); free(json); free(next); return ok;
 }
 
 unsigned char sh_weapon_hud_select(const char *weapon, unsigned char engine_mode)

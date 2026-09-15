@@ -24,5 +24,9 @@ int sh_map_render_write(void *map, const sh_map_render *settings);
 /* Publish from the exact map entering native SnapMap conversion. */
 void sh_map_render_build(void *map);
 void sh_map_render_loaded(void *map);
+/* Retain serialized-map settings without changing the active environment.
+ * Select them only when that map reaches its resource activation boundary. */
+int sh_map_render_capture(void *snapshot, sh_map_render *settings);
+void sh_map_render_select(const sh_map_render *settings);
 int sh_map_render_editor_install(const sig_result *results, size_t count);
 #endif

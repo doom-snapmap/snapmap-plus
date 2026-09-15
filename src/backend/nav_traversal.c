@@ -394,6 +394,13 @@ int sh_trav_ready(void)
     return r;
 }
 
+void sh_trav_invalidate(void)
+{
+    AcquireSRWLockExclusive(&g_trav_lock);
+    trav_clear_locked();
+    ReleaseSRWLockExclusive(&g_trav_lock);
+}
+
 int sh_trav_monster_count(void)
 {
     return TRAV_MONSTER_COUNT;
@@ -505,9 +512,7 @@ int sh_trav_test_parse(const char *text, size_t len)
 
 void sh_trav_test_reset(void)
 {
-    AcquireSRWLockExclusive(&g_trav_lock);
-    trav_clear_locked();
-    ReleaseSRWLockExclusive(&g_trav_lock);
+    sh_trav_invalidate();
 }
 
 int sh_trav_test_row_count(void)

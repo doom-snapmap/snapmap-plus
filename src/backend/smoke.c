@@ -101,32 +101,25 @@ static void log_sig_failure_diag(const uint8_t *doom_base, const sig_entry *e, s
     backend_log(line);
 }
 
-/* Bootstrap resolution probe. */
-size_t sh_resolve_count(const uint8_t *doom_base)
-{
-    sig_result results[SIG_RESULTS_MAX];
-    return sig_resolve_all(doom_base, results, SIG_RESULTS_MAX);
-}
-
 /* Full smoke check. */
-int sh_smoke_run(const uint8_t *doom_base, unsigned long deferred_ms)
+int sh_smoke_run(const uint8_t *doom_base, const sig_result *results, size_t count,
+                 unsigned long deferred_ms)
 {
     char line[256];
 
 
     size_t total = sig_db_count();
-    sig_result results[SIG_RESULTS_MAX];
+    size_t ok = 0;
     /* Refuse an undersized results array instead of silently omitting signatures. */
-    if (total > SIG_RESULTS_MAX) {
+    if (total > count) {
         char over[160];
         _snprintf_s(over, sizeof over, _TRUNCATE,
-            "PB0: SIGNATURE DB OVERFLOW -- %zu entries but only %d result slots; raise "
+            "PB0: SIGNATURE DB OVERFLOW -- %zu entries but only %zu result slots; raise "
             "SIG_RESULTS_MAX. The last %zu signature(s) were NOT resolved.",
-            total, SIG_RESULTS_MAX, total - (size_t)SIG_RESULTS_MAX);
+            total, count, total - count);
         backend_log(over);
-        total = SIG_RESULTS_MAX;
+        total = count;
     }
-    size_t ok = sig_resolve_all(doom_base, results, SIG_RESULTS_MAX);
 
     int rva_match = 0, rva_diff = 0, hooked = 0;
     char hooked_names[160] = {0};   /* comma-list of the hook-tolerant sigs for the success line */
@@ -134,9 +127,11 @@ int sh_smoke_run(const uint8_t *doom_base, unsigned long deferred_ms)
     sig_status  first_bad_status = SIG_OK;
     for (size_t i = 0; i < total; i++) {
         if (results[i].status == SIG_OK) {
+            ok++;
             if (results[i].rva == BACKEND_ENGINE_SIGNATURES[i].known_rva) rva_match++;
             else rva_diff++;
         } else if (results[i].status == SIG_OK_HOOKED) {
+            ok++;
             /* A matching tail identifies an entry whose prologue is already detoured. */
             hooked++;
             size_t l = strlen(hooked_names);
@@ -151,7 +146,7 @@ int sh_smoke_run(const uint8_t *doom_base, unsigned long deferred_ms)
             log_sig_failure_diag(doom_base, &BACKEND_ENGINE_SIGNATURES[i], results[i].status);
         }
     }
-    int resolver_ok = (ok == total);
+    int resolver_ok = (ok == sig_db_count());
 
 
     typedef int (*scratch_fn)(int, volatile int *);

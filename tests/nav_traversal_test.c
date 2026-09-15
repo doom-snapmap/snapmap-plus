@@ -558,6 +558,7 @@ static void test_the_buffer_is_never_read_past(void)
 static int   g_reads;
 static char  g_asked[256];
 static int   g_reader_fails;
+static int   g_reader_changed;
 
 static unsigned char *reader(const char *name, size_t *out_len)
 {
@@ -567,6 +568,11 @@ static unsigned char *reader(const char *name, size_t *out_len)
     if (out_len) *out_len = 0;
     if (g_reader_fails) return NULL;
     build_table();
+    if (g_reader_changed) {
+        dcl_begin(); dcl_monster("Imp");
+        dcl_row("LEDGE_UP_64", "fixture/changed_traversal", 0, 0, 0, 0);
+        dcl_monster_end(); dcl_finish();
+    }
     copy = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, g_len);
     if (!copy) return NULL;
     memcpy(copy, g_text, g_len);
@@ -576,7 +582,7 @@ static unsigned char *reader(const char *name, size_t *out_len)
 
 static void test_the_table_is_read_once_and_cached(void)
 {
-    printf("the table is a property of the install, so it is read once\n");
+    printf("the effective table is cached until source publication changes\n");
     sh_trav_test_reset();
     g_reads = 0;
     g_asked[0] = 0;
@@ -591,8 +597,20 @@ static void test_the_table_is_read_once_and_cached(void)
     CHECK(sh_trav_load(reader) == 1);
     CHECK(g_reads == 1);
 
+    g_reader_changed = 1;
+    sh_trav_invalidate();
+    CHECK(!sh_trav_ready() && !sh_trav_test_row_count());
+    CHECK(sh_trav_load(reader) == 1 && g_reads == 2);
+    {
+        char selected[SH_TRAV_PATH_CAP];
+        CHECK(sh_trav_select(sh_trav_monster_at(0), SH_TRAV_UP, 64,
+            selected, sizeof(selected), NULL, NULL, NULL));
+        CHECK(!strcmp(selected, "fixture/changed_traversal"));
+    }
+    CHECK(sh_trav_load(reader) == 1 && g_reads == 2);
+    g_reader_changed = 0;
     /* A reader that answers with nothing leaves the feature off, not half on. */
-    sh_trav_test_reset();
+    sh_trav_invalidate();
     g_reader_fails = 1;
     CHECK(sh_trav_load(reader) == 0);
     CHECK(sh_trav_ready() == 0);

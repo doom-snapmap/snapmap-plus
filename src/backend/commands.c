@@ -27,6 +27,9 @@
 #include "nav_bake.h"
 #include "perf.h"
 #include "apply_engine.h"
+#include "package_runtime.h"
+#include "resource_graph.h"
+#include "resource_graph_native.h"
 
 /* Engine call contracts. */
 
@@ -1717,6 +1720,59 @@ static void h_sh_navmesh(idCmdArgs *a)
 }
 
 /* Where frame time goes inside snapmap-plus. */
+typedef struct package_graph_report { char *text; size_t length, capacity, edges, shown; } package_graph_report;
+static int package_graph_line(void *context, const char *parent_type, const char *parent_name,
+                              const char *type, const char *name)
+{
+    package_graph_report *report = (package_graph_report *)context;
+    int written;
+    report->edges++;
+    if (report->capacity - report->length < strlen(parent_type ? parent_type : "root") +
+        strlen(parent_name ? parent_name : "") + strlen(type) + strlen(name) + 8) return 1;
+    written = snprintf(report->text + report->length, report->capacity - report->length,
+        "%s:%s -> %s:%s\n", parent_type ? parent_type : "root", parent_name ? parent_name : "", type, name);
+    if (written < 0 || (size_t)written >= report->capacity - report->length) return -1;
+    report->length += (size_t)written;
+    report->shown++;
+    return 1;
+}
+static void h_sh_packages(idCmdArgs *a)
+{
+    char *text = NULL;
+    const char *operation = cmd_argv(a, 1);
+    if (operation && !strcmp(operation, "dependencies")) {
+        const char *type = cmd_argv(a, 2), *name = cmd_argv(a, 3);
+        size_t nodes, complete, edges;
+        sh_resource_graph_counts(&nodes, &complete, &edges);
+        sh_printf("Native dependency capture: %s; %zu nodes, %zu complete, %zu edges.\n",
+            sh_resource_graph_native_ready() ? "active" : "unavailable", nodes, complete, edges);
+        if (type && name) {
+            package_graph_report report = {0};
+            int covered;
+            report.capacity = 128 * 1024;
+            report.text = (char *)calloc(report.capacity, 1);
+            if (!report.text) return;
+            covered = sh_resource_graph_walk(type, name, package_graph_line, &report);
+            sh_printf("%s:%s dependency traversal: %s (%zu edges visited).\n", type, name,
+                covered ? "all visited source/state phases recorded" : "unobserved or incomplete resource", report.edges);
+            if (report.shown != report.edges)
+                sh_printf("Listing shows %zu of %zu visits; traversal checked every recorded edge.\n", report.shown, report.edges);
+            text = report.text;
+        }
+    } else text = sh_package_runtime_summary();
+    if (text) {
+        const char *line = text;
+        while (*line) {
+            char piece[1000];
+            size_t length = strcspn(line, "\n");
+            if (length >= sizeof(piece)) length = sizeof(piece) - 1;
+            memcpy(piece, line, length); piece[length] = 0;
+            sh_printf("%s\n", piece);
+            line += length; if (*line == '\n') line++;
+        }
+        free(text);
+    }
+}
 static void h_sh_perf(idCmdArgs *a)
 {
     const char *verb = cmd_argv(a, 1);
@@ -1733,6 +1789,7 @@ static void h_sh_perf(idCmdArgs *a)
 }
 
 static const cmd_entry CMD_TABLE[] = {
+    { "sh_packages",          (void *)h_sh_packages, "Show installed package sources and compiler results. 'sh_packages dependencies [type name]' inspects observed native dependencies." },
     { "sh_perf",              (void *)h_sh_perf,     "Where frame time goes inside snapmap-plus. 'sh_perf reset' starts the counting again." },
     { "sh_rawmaps",           (void *)h_sh_rawmaps,   "Raw JSON map files: state, paths, load, save. Run with no arguments to see what is set, or 'sh_rawmaps help' (or '?') for every verb." },
     { "sh_rawmaps_on",       (void *)h_rawmaps_on,  "(legacy) Same as 'sh_rawmaps on'. Kept because older guides use it." },

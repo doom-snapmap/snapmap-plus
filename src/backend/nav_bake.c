@@ -14,6 +14,7 @@
 #include "nav_traversal.h"
 #include "navmesh.h"
 #include "config.h"
+#include "resource_graph.h"
 
 #ifndef SH_NAV_BAKE_NO_LOG
 void backend_log(const char *message);
@@ -77,6 +78,8 @@ typedef struct bake_preview_cache {
     bake_refused *refused;     /* process heap; bake_preview_clear frees it */
     int           refused_count;
     int           instance;    /* the transform those shapes need */
+    char          source[SH_SMNAV_RESNAME_CAP]; /* exact gathered provider input */
+    int           traversal;   /* this revision had a usable traversal table */
 } bake_preview_cache;
 static bake_preview_cache g_preview[BAKE_MAX_MODULES];
 static unsigned long g_preview_revision = ~0UL;
@@ -140,6 +143,25 @@ static void bake_preview_clear(void)
     }
     memset(g_preview,0,sizeof g_preview);
     g_preview_revision=~0UL;g_preview_lines=0;g_preview_lines_last=-1;
+}
+
+static void bake_invalidate_sources_locked(void)
+{
+    g_geometry_revision++;
+    bake_preview_clear();
+    sh_trav_invalidate();
+    if (g_have_map && !g_live_refused) bake_plan_locked();
+}
+
+void sh_nav_bake_source_update_begin(void) { AcquireSRWLockExclusive(&g_bake_lock); }
+void sh_nav_bake_source_update_end(int committed)
+{
+    if (committed) bake_invalidate_sources_locked();
+    ReleaseSRWLockExclusive(&g_bake_lock);
+}
+void sh_nav_bake_invalidate_sources(void)
+{
+    sh_nav_bake_source_update_begin(); sh_nav_bake_source_update_end(1);
 }
 
 void sh_nav_bake_build_begin(void)
@@ -560,7 +582,7 @@ static int bake_collect_platforms(const bake_module *m, sh_aug_platform *out, in
 
 static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader read_shipped,
                     unsigned char **out_bytes, size_t *out_len, char *why, size_t why_cap,
-                    unsigned *first_area)
+                    unsigned *first_area, int *traversal)
 {
     unsigned char *shipped = NULL, *baked = NULL;
     size_t shipped_len = 0, baked_len = 0;
@@ -570,6 +592,7 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
     sh_aug_report rep;
     char err[192];
     int n, rc = 0;
+    *traversal = 0;
 
     n = bake_collect_platforms(m, plats, SH_AUG_MAX_PLATFORMS);
     if (n == 0) {
@@ -582,7 +605,7 @@ static int bake_one(const char *name, const bake_module *m, sh_nav_bake_reader r
      * successful reads are cached for the session. Without a table, no climbs
      * are emitted.
      */
-    sh_trav_load(read_shipped);
+    *traversal = sh_trav_load(read_shipped);
 
     /* Augmentation requires the shipped payload as its base. */
     SH_PERF_BEGIN(tr);
@@ -768,6 +791,7 @@ typedef struct preview_task {
     int              plat_count;
     unsigned char   *shipped;
     size_t           shipped_len;
+    int              traversal;
     unsigned char   *baked;                  /* what the worker produced */
     size_t           baked_len;
     unsigned         first_area;
@@ -1036,7 +1060,7 @@ static preview_batch *preview_gather(sh_nav_bake_reader read_shipped)
 {
     preview_batch *b;
     sh_aug_platform *scratch;
-    int i;
+    int i, traversal;
 
     b = (preview_batch *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof *b);
     if (!b) return NULL;
@@ -1045,9 +1069,9 @@ static preview_batch *preview_gather(sh_nav_bake_reader read_shipped)
     if (!scratch) { HeapFree(GetProcessHeap(), 0, b); return NULL; }
     b->revision = g_geometry_revision;
 
-    /* Cached for the session after the first read; without it no climbs are
-     * emitted. It reads engine resources, so it cannot go to the worker. */
-    sh_trav_load(read_shipped);
+    /* Cached until package sources change; without it no climbs are emitted.
+     * It reads effective resources, so it cannot go to the worker. */
+    traversal = sh_trav_load(read_shipped);
 
     for (i = 0; i < g_module_count && b->count < BAKE_MAX_MODULES; i++) {
         preview_task *t;
@@ -1058,6 +1082,7 @@ static preview_batch *preview_gather(sh_nav_bake_reader read_shipped)
         t = &b->t[b->count++];
         t->slot = i;
         t->instance = g_modules[i].instance;
+        t->traversal = traversal;
         _snprintf_s(t->name, sizeof t->name, _TRUNCATE,
                     "generated/maps/modules/%s/%s.baas_monster48",
                     g_modules[i].module, base + 1);
@@ -1093,6 +1118,8 @@ static void preview_install(preview_batch *b)
         g_preview[t->slot].length = t->baked_len;
         g_preview[t->slot].first_area = t->first_area;
         g_preview[t->slot].instance = t->instance;
+        strcpy_s(g_preview[t->slot].source, sizeof(g_preview[t->slot].source), t->name);
+        g_preview[t->slot].traversal = t->traversal;
         t->baked = NULL;   /* the cache owns it now */
         if (g_preview[t->slot].refused) {
             HeapFree(GetProcessHeap(), 0, g_preview[t->slot].refused);
@@ -1239,6 +1266,14 @@ int sh_nav_bake_preview(sh_nav_bake_reader read_shipped,sh_nav_preview_line line
     return current;
 }
 
+static void bake_record_inputs(const char *output, const char *source, int traversal, int served)
+{
+    const char *inputs[2] = {source, SH_TRAV_DECL_NAME};
+    if (!sh_resource_graph_producer_inputs("navigation bake", output, inputs,
+            served ? (traversal ? 2 : 1) : 0))
+        backend_log("NAV: could not retain generated navigation input dependencies");
+}
+
 int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
                      unsigned char **out_bytes, size_t *out_len)
 {
@@ -1247,7 +1282,9 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
     bake_module *m;
     int hit = 0, i, known = 0, instance=-1, attempted=0;
     unsigned long revision=0;
-    char canonical[384];
+    char canonical[384], source[SH_SMNAV_RESNAME_CAP];
+    const char *requested = name;
+    int traversal = 0;
 
     if (!name || !out_bytes || !out_len) return 0;
     *out_bytes = NULL;
@@ -1269,8 +1306,10 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
     if (!bake_parse_name(name, module, sizeof module, cls, sizeof cls)) return 0;
     for (i = 0; i < NAV_CLASS_COUNT; i++) if (strcmp(cls, NAV_CLASSES[i]) == 0) known = 1;
     if (!known) return 0;
+    if (strcpy_s(source, sizeof(source), name)) return 0;
     if (InterlockedCompareExchange(&g_faulted, 0, 0) != 0) {
         if(instance>=0 && read_shipped) *out_bytes=read_shipped(name,out_len);
+        bake_record_inputs(requested, source, 0, *out_bytes != NULL);
         return *out_bytes!=NULL;
     }
 
@@ -1281,6 +1320,7 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
     if (!g_have_map) {
         ReleaseSRWLockExclusive(&g_bake_lock);
         if(instance>=0 && read_shipped) *out_bytes=read_shipped(name,out_len);
+        bake_record_inputs(requested, source, 0, *out_bytes != NULL);
         return *out_bytes!=NULL;
     }
     /* Do not inspect live entities here. This runs inside BuildAAS after
@@ -1306,9 +1346,11 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
                g_preview[slot].bytes) {
                 *out_bytes=(unsigned char*)HeapAlloc(GetProcessHeap(),0,g_preview[slot].length);
                 if(*out_bytes){memcpy(*out_bytes,g_preview[slot].bytes,g_preview[slot].length);
-                    *out_len=g_preview[slot].length;hit=1;}
+                    *out_len=g_preview[slot].length;hit=1;
+                    strcpy_s(source, sizeof(source), g_preview[slot].source);
+                    traversal = g_preview[slot].traversal;}
                 strncpy_s(why,sizeof why,m->reason,_TRUNCATE);
-            } else hit = bake_one(name, m, read_shipped, out_bytes, out_len, why, sizeof why,NULL);
+            } else hit = bake_one(name, m, read_shipped, out_bytes, out_len, why, sizeof why,NULL,&traversal);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             /* Disable baking after a fault to avoid repeating it during map load. */
             InterlockedExchange(&g_faulted, 1);
@@ -1323,6 +1365,7 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
             InterlockedIncrement(&g_bakes);
         }
     }
+    if (hit) bake_record_inputs(requested, source, traversal, 1);
     ReleaseSRWLockExclusive(&g_bake_lock);
 
     if (hit) {
@@ -1336,9 +1379,12 @@ int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
         backend_log(line);
     }
     if(!hit&&instance>=0&&read_shipped) {
+        traversal = 0;
         *out_bytes=read_shipped(name,out_len);
         hit=*out_bytes!=NULL;
+        bake_record_inputs(requested, source, 0, hit);
     }
+    else if (!hit) bake_record_inputs(requested, source, 0, 0);
     return hit;
 }
 
@@ -1413,5 +1459,35 @@ void sh_nav_bake_test_copy_map(sh_nav_map *out)
     AcquireSRWLockShared(&g_bake_lock);
     *out = g_map;
     ReleaseSRWLockShared(&g_bake_lock);
+}
+
+void sh_nav_bake_test_preview_inputs(unsigned long revision, const char *bytes, const char *source, int traversal)
+{
+    preview_batch *batch = (preview_batch *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*batch));
+    size_t length = strlen(bytes);
+    if (!batch) return;
+    batch->revision = revision; batch->count = 1;
+    strcpy_s(batch->t[0].name, sizeof(batch->t[0].name), source);
+    batch->t[0].traversal = traversal;
+    batch->t[0].baked = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, length);
+    if (!batch->t[0].baked) { preview_batch_free(batch); return; }
+    memcpy(batch->t[0].baked, bytes, length); batch->t[0].baked_len = length;
+    AcquireSRWLockExclusive(&g_bake_lock);
+    batch->t[0].instance = g_modules[0].instance;
+    preview_install(batch);
+    ReleaseSRWLockExclusive(&g_bake_lock);
+    preview_batch_free(batch);
+}
+
+void sh_nav_bake_test_preview_complete(unsigned long revision, const char *bytes)
+{
+    char source[SH_SMNAV_RESNAME_CAP];
+    const char *base;
+    AcquireSRWLockShared(&g_bake_lock);
+    base = strrchr(g_modules[0].module, '/');
+    snprintf(source, sizeof(source), "generated/maps/modules/%s/%s.baas_monster48",
+        g_modules[0].module, base ? base + 1 : "");
+    ReleaseSRWLockShared(&g_bake_lock);
+    sh_nav_bake_test_preview_inputs(revision, bytes, source, 0);
 }
 #endif

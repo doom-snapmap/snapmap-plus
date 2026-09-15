@@ -12,6 +12,8 @@ Explains how to develop, package and operate Snapmap+, and how its major compone
 | [architecture.md](architecture.md) | Component boundaries, threading, ownership and the DLL interface. |
 | [webview-ui.md](webview-ui.md) | Frontend modules, messages, embedding and preview. |
 | [packaging.md](packaging.md) | Shipped files, runtime dependencies and player-data ownership. |
+| [package-compiler.md](package-compiler.md) | Package authoring format and implemented compilation behavior. |
+| [resource-composition.md](resource-composition.md) | Target schema architecture and remaining collection coverage. |
 | [capabilities.md](capabilities.md) | Supported commands, settings and editor workflows. |
 | [fidelity.md](fidelity.md) | Compatibility choices and unsupported original features. |
 | [feedback.md](feedback.md) | Reporting across the frontend, relay and issue tracker. |

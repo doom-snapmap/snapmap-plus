@@ -2,12 +2,13 @@
 # Run: pwsh -File build.ps1 [-Out XINPUT1_3.dll] [-Diag] [-VcVarsVer <version>]
 # Add backend translation units to Sources below. Keep this script ASCII for PS 5.1.
 param(
-    [string[]]$Sources = @("dllmain.c", "host_image.c", "signatures.c", "engine_globals.c", "hook.c", "smoke.c",
-                           "rawmap.c", "editor_frame.c", "grid_room.c", "grid_room_resources.c", "grid_room_decl.c", "map_shards.c", "map_package.c", "map_embed.c", "navmesh.c", "nav_regions.c", "nav_bake.c", "nav_play.c", "nav_traversal.c", "aas_edit.c", "aas_augment.c", "nav_geometry.c", "nav_preview.c", "palette_refresh.c", "engine_dialog.c", "package_conflicts.c", "strids.c",
-                           "overrides.c", "resource_bridge.c", "grid_room_editor.c", "map_render.c", "map_render_native.c", "map_render_editor.c", "grid_room_asset.c", "grid_room_nav.c", "grid_room_native.c", "grid_room_snap.c", "grid_room_edit.c", "package_requirements.c", "weapon_hud.c", "raw_deflate.c", "decl_text.c", "decl_server_path.c", "packages.c", "decl_server.c", "decl_visibility.c",
-                           "user_overrides.c", "cvars.c", "commands.c", "clipboard.c",
-                           "config.c", "config_json.c",
-                           "entity.c", "typeinfo.c", "preview.c", "megapreview.c", "imgpreview.c", "prefabpreview.c", "soundpreview.c", "bcn.c", "patch.c", "algo.c", "target_any.c", "wiring_cleandirect.c", "swf_textedit.c", "ui_bridge.c",
+    [string[]]$Sources = @("dllmain.c", "host_image.c", "signatures.c", "startup_bindings.c", "engine_globals.c", "hook.c", "smoke.c",
+                           "rawmap.c", "editor_frame.c", "grid_room.c", "grid_room_resources.c", "grid_room_decl.c", "map_shards.c", "map_package.c", "map_payload.c", "map_source.c", "map_native.c", "map_session_json.c", "map_published.c", "map_transition.c", "map_embed.c", "navmesh.c", "nav_regions.c", "nav_bake.c", "nav_play.c", "nav_traversal.c", "aas_edit.c", "aas_augment.c", "nav_geometry.c", "nav_preview.c", "palette_refresh.c", "engine_dialog.c", "strids.c",
+                           "overrides.c", "grid_room_editor.c", "map_render.c", "map_render_native.c", "map_render_editor.c", "grid_room_asset.c", "grid_room_nav.c", "grid_room_native.c", "grid_room_snap.c", "grid_room_edit.c", "package_requirements.c", "weapon_hud.c", "raw_deflate.c", "decl_text.c", "decl_server_path.c", "packages.c", "decl_server.c", "decl_visibility.c",
+                           "user_overrides.c", "cvars.c", "commands.c", "clipboard.c", "package_audio.c",
+                           "decl_native_schema.c", "decl_native_registry.c", "decl_entity_class.c", "decl_graph.c", "decl_graph_compose.c", "decl_md6_compose.c", "decl_material.c", "decl_material_compose.c", "decl_native_lex.c", "package_material.c", "decl_graph_dependencies.c", "decl_polymorphic.c", "resource_graph_prepared.c", "decl_json_dependencies.c",
+                           "config.c", "config_json.c", "package_usage.c", "package_source_graph.c", "package_archive.c", "raw_deflate_encode.c", "package_descriptor.c", "package_sources.c", "package_compiler.c", "package_runtime.c", "resource_catalog.c", "resource_graph.c", "resource_graph_native.c", "resource_resident.c", "decl_compose.c", "decl_tree.c", "decl_dependencies.c",
+                           "entity.c", "typeinfo.c", "preview.c", "megapreview.c", "imgpreview.c", "prefabpreview.c", "soundpreview.c", "audio_banks.c", "audio_packages.c", "audio_originals.c", "audio_banks_native.c", "audio_files.c", "audio_files_native.c", "bcn.c", "patch.c", "algo.c", "target_any.c", "wiring_cleandirect.c", "swf_textedit.c", "ui_bridge.c",
                            "iface_engine.c", "apply_engine.c", "../common/snapmap_plus_iface.c",
                            "../common/log_rotate.c",
                            # The backend owns the SnapStack command handlers and stores.
@@ -23,6 +24,7 @@ param(
                            "../fault_shield/crash_record_format.c", "../fault_shield/crash_report.c",
                            # Guards for event-link walks and interactable spawning.
                            "../fault_shield/mapload_guards.c",
+                           "../fault_shield/serialized_entities_guard.c",
                            "../fault_shield/fault_shield.c"),
     [string]$Out = "XINPUT1_3.dll",
     # Diag adds SH_DIAG and the crash/environment logger for troubleshooting.
@@ -115,4 +117,3 @@ if ($Diag) {
     # Remove an earlier diagnostic object from the release object directory.
     Remove-Item (Join-Path $outDir "obj\backend\shield_diag.obj") -ErrorAction SilentlyContinue
 }
-

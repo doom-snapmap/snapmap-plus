@@ -1,3 +1,4 @@
+#include <limits.h>
 /* Shared bounded JSON shard scanning and splicing; payload families supply
  * grammar and policy.
  */
@@ -428,12 +429,21 @@ void sh_shard_doc_free(sh_shard_doc *doc)
 
 int sh_shard_doc_innermost(const sh_shard_doc *doc, size_t off)
 {
-    int best = -1;
-    size_t i;
-    for (i = 0; i < doc->count; i++) {
-        if (doc->c[i].open < off && off < doc->c[i].close) best = (int)i;
+    size_t low = 0, high;
+    int index;
+    if (!doc || !doc->c) return -1;
+    high = doc->count;
+    while (low < high) {
+        size_t mid = low + (high - low) / 2;
+        if (doc->c[mid].open < off) low = mid + 1; else high = mid;
     }
-    return best;
+    if (!low) return -1;
+    index = (int)(low - 1);
+    while (index >= 0) {
+        if (off < doc->c[index].close) return index;
+        index = doc->c[index].parent;
+    }
+    return -1;
 }
 
 int sh_shard_doc_array_element(const sh_shard_doc *doc, int idx)
@@ -583,14 +593,18 @@ char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t mag
            sh_shard_next(json, len, magic, magic_len, &pos, &hdr, &hdr_len, &chunk, &chunk_len)) {
         int el;
         size_t from, to;
-        int dup = 0;
         if (filter && !filter(hdr, hdr_len, ctx)) continue;
         el = sh_shard_doc_array_element(&doc, sh_shard_doc_innermost(&doc, pos));
         if (el < 0) continue;
         from = doc.c[el].open;
         to   = doc.c[el].close + 1;
-        for (i = 0; i < cut_count; i++) if (cuts[i].from == from) { dup = 1; break; }
-        if (dup) continue;
+        /* The scanner advances in source order; repeated headers inside one
+         * variable are consecutive. Avoid quadratic duplicate searches. */
+        if (cut_count && cuts[cut_count - 1].from == from) continue;
+        if (cut_count && cuts[cut_count - 1].from > from) {
+            if (doc_failed) *doc_failed = 1;
+            HeapFree(GetProcessHeap(), 0, cuts); sh_shard_doc_free(&doc); return NULL;
+        }
 
         cuts[cut_count].from = from;
         cuts[cut_count].to = to;
@@ -663,6 +677,32 @@ char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t mag
 
     HeapFree(GetProcessHeap(), 0, cuts);
     sh_shard_doc_free(&doc);
+    /* Delivery variables are not map state. Keep the engine's string count
+     * consistent after removing them, including a previously empty bucket. */
+    {
+        sh_shard_doc remaining;
+        int variables, bucket, alloc;
+        size_t from, to;
+        if (!sh_shard_doc_build(out, w, &remaining)) {
+            if (doc_failed) *doc_failed = 1;
+            HeapFree(GetProcessHeap(), 0, out); return NULL;
+        }
+        variables = sh_shard_doc_member(out, w, &remaining, 0, "variables");
+        bucket = variables >= 0 ? sh_shard_doc_member(out, w, &remaining, variables, "string") : -1;
+        alloc = variables >= 0 ? sh_shard_doc_member(out, w, &remaining, variables, "allocCount") : -1;
+        if (bucket >= 0 && alloc >= 0 && sh_shard_doc_flat_element(out, &remaining, alloc, 4, &from, &to)) {
+            char number[16];
+            int digits = _snprintf_s(number, sizeof(number), _TRUNCATE, "%u", sh_shard_doc_array_count(out, &remaining, bucket));
+            if (digits < 0 || w - (to - from) + (size_t)digits > len) {
+                sh_shard_doc_free(&remaining); HeapFree(GetProcessHeap(), 0, out);
+                if (doc_failed) *doc_failed = 1;
+                return NULL;
+            }
+            memmove(out + from + digits, out + to, w - to + 1);
+            memcpy(out + from, number, (size_t)digits); w = w - (to - from) + (size_t)digits;
+        }
+        sh_shard_doc_free(&remaining);
+    }
     if (out_len) *out_len = w;
     if (elements_out) *elements_out = (unsigned)elements;
     if (runs_out) *runs_out = (unsigned)cut_count;
@@ -682,11 +722,11 @@ static size_t shard_write_var(char *out, const char *header, const char *chunk, 
     static const char MID[] = "\",\"~type\":\"snapVarInfo_t\"},\"initialValue\":\"";
     static const char POST[] = "\",\"~type\":\"snapVarString_t\"}";
     size_t w = 0, n;
-    n = sizeof PRE - 1;      memcpy(out + w, PRE, n);      w += n;
-    n = strlen(header);      memcpy(out + w, header, n);   w += n;
-    n = sizeof MID - 1;      memcpy(out + w, MID, n);      w += n;
-    memcpy(out + w, chunk, chunk_len);                     w += chunk_len;
-    n = sizeof POST - 1;     memcpy(out + w, POST, n);     w += n;
+    n = sizeof PRE - 1;      if (out) memcpy(out + w, PRE, n);      w += n;
+    n = strlen(header);      if (out) memcpy(out + w, header, n);   w += n;
+    n = sizeof MID - 1;      if (out) memcpy(out + w, MID, n);      w += n;
+    if (out) memcpy(out + w, chunk, chunk_len);                     w += chunk_len;
+    n = sizeof POST - 1;     if (out) memcpy(out + w, POST, n);     w += n;
     return w;
 }
 
@@ -702,7 +742,7 @@ char *sh_shard_insert(const char *json, size_t len,
 {
     sh_shard_doc doc;
     char *out = NULL;
-    size_t i, insert, w = 0, need, chunk_total = 0, header_total = 0;
+    size_t i, insert, w = 0, need;
     int vars, bucket, alloc;
     unsigned existing;
 
@@ -733,21 +773,35 @@ char *sh_shard_insert(const char *json, size_t len,
         goto fail;
     }
 
-    for (i = 0; i < count; i++) {
-        if (!shards[i].header || !shards[i].chunk) {
-            shard_err(err, err_cap, "a shard is missing its header or its chunk");
-            goto fail;
-        }
-        header_total += strlen(shards[i].header);
-        chunk_total += shards[i].chunk_len;
-    }
-
     existing = sh_shard_doc_array_count(json, &doc, bucket);
-
-    /* Worst case: everything before the insert point, every shard with its
-     * wrapper and comma, everything after, and room for allocCount growing by a
-     * few digits. */
-    need = len + chunk_total + header_total + count * 256 + 64;
+    if (len > INT_MAX || count > (size_t)INT_MAX - existing) {
+        shard_err(err, err_cap, "map exceeds the native string or variable-count representation"); goto fail;
+    }
+    need = len;
+    for (i = 0; i < count; i++) {
+        size_t added;
+        if (!shards[i].header || !shards[i].chunk || strlen(shards[i].header) > SH_SHARD_HEADER_MAX ||
+            shards[i].chunk_len > SH_SHARD_MAX_CHUNK) {
+            shard_err(err, err_cap, "invalid shard header or chunk"); goto fail;
+        }
+        added = shard_write_var(NULL, shards[i].header, shards[i].chunk, shards[i].chunk_len) + (existing || i ? 1u : 0u);
+        if (added > (size_t)INT_MAX - need) {
+            shard_err(err, err_cap, "complete map with embedded packages exceeds the native 2 GiB string representation"); goto fail;
+        }
+        need += added;
+    }
+    {
+        size_t from, to, final_length;
+        char count_text[16]; int digits;
+        if (!sh_shard_doc_flat_element(json, &doc, alloc, 4, &from, &to)) {
+            shard_err(err, err_cap, "map has no variables.allocCount[4]"); goto fail;
+        }
+        digits = _snprintf_s(count_text, sizeof(count_text), _TRUNCATE, "%u", (unsigned)(existing + count));
+        final_length = need - (to - from) + (size_t)digits;
+        if (digits < 0 || final_length > INT_MAX) {
+            shard_err(err, err_cap, "complete map exceeds the native string representation"); goto fail;
+        }
+    }
     out = (char *)HeapAlloc(GetProcessHeap(), 0, need + 1);
     if (!out) { shard_err(err, err_cap, "out of memory building the map"); goto fail; }
 

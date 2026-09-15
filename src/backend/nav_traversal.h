@@ -62,10 +62,12 @@ typedef struct sh_trav_monster {
  * nav_bake takes one: only the resource-provider hook can do it. */
 typedef unsigned char *(*sh_trav_reader)(const char *name, size_t *out_len);
 
-/* Load the table from the player's install. Returns 1 on success. Safe to call
- * repeatedly; the table is cached after the first success, because it is a
- * property of the install and not of the map. */
+/* Load the effective table. Returns 1 on success. Repeated calls reuse the
+ * table until a newly published package source invalidates it. */
 int sh_trav_load(sh_trav_reader read_decl);
+/* Forget source-derived rows under the same lock used by readers. The next
+ * load reads the new effective table; no native resources are called here. */
+void sh_trav_invalidate(void);
 
 /* True once a table is loaded. With no table, no traversal can be emitted and
  * every platform out of step range is simply an island. */

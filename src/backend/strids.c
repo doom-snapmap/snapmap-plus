@@ -8,7 +8,9 @@
  */
 #include <windows.h>
 #include <stdint.h>
+#include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <shlobj.h>
 #pragma comment(lib, "shell32.lib")   /* SHGetFolderPathA */
@@ -18,6 +20,9 @@
 #include "backend_log.h"
 #include "overrides.h"
 #include "packages.h"
+#include "package_runtime.h"
+#include "user_overrides.h"
+#include "config_json.h"
 
 /* StridsSortBody prologue steal window (DIRECT, disasm of 0x1a2b490):
  *   48 89 5C 24 18        mov [rsp+0x18],rbx        (5)
@@ -94,33 +99,36 @@ static void *decode_table_global(const uint8_t *table_lea_fn)
     return NULL;
 }
 
-/* Scan bounded string:string pairs from a flat JSON object and unescape
- * values. Malformed pairs are skipped; parsing may retain a valid subset.
- */
-
-/* Read a whole file into a fresh NUL-terminated heap buffer (caller HeapFrees), or NULL if it is
- * absent, unreadable, empty or implausibly large. Shared by the user's document and every package's. */
+/* Read the local document in chunks. Only a missing optional file is ignored;
+ * allocation, size and I/O failures must not masquerade as an absent override. */
 static char *read_file(const char *path, size_t *out_len)
 {
     HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) return NULL;
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)
+            g_pass_failed = 1;
+        return NULL;
+    }
     LARGE_INTEGER sz;
-    if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 0 || sz.QuadPart > (LONGLONG)(16 * 1024 * 1024)) {
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart < 0 || (uint64_t)sz.QuadPart >= SIZE_MAX) {
+        g_pass_failed = 1;
         CloseHandle(h);
         return NULL;
     }
     size_t n = (size_t)sz.QuadPart;
     char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, n + 1);
-    if (!buf) { CloseHandle(h); return NULL; }
+    if (!buf) { g_pass_failed = 1; CloseHandle(h); return NULL; }
     size_t got = 0;
     while (got < n) {
         DWORD rd = 0;
-        if (!ReadFile(h, buf + got, (DWORD)(n - got), &rd, NULL) || rd == 0) break;
+        DWORD chunk = n - got > 1024u * 1024u ? 1024u * 1024u : (DWORD)(n - got);
+        if (!ReadFile(h, buf + got, chunk, &rd, NULL) || rd == 0) break;
         got += rd;
     }
     CloseHandle(h);
-    if (got != n) { HeapFree(GetProcessHeap(), 0, buf); return NULL; }
+    if (got != n) { g_pass_failed = 1; HeapFree(GetProcessHeap(), 0, buf); return NULL; }
     buf[n] = '\0';
     *out_len = n;
     return buf;
@@ -135,74 +143,128 @@ static char *read_source_file(size_t *out_len)
     return read_file(path, out_len);
 }
 
-/* Scan one JSON "string" starting at *p (which must point AT the opening quote). Copies the unescaped
- * content into out[0..cap) NUL-terminated, advances *p past the closing quote. Returns out length, or
- * -1 if no well-formed string is found. */
-static int scan_json_string(const char **p, char *out, size_t cap)
-{
-    const char *s = *p;
-    if (*s != '"') return -1;
-    s++;
-    size_t o = 0;
-    int overflow = 0;
-    while (*s && *s != '"') {
-        char c = *s++;
-        if (c == '\\' && *s) {
-            char e = *s++;
-            switch (e) {
-                case 'n': c = '\n'; break;
-                case 't': c = '\t'; break;
-                case '"': c = '"';  break;
-                case '\\': c = '\\'; break;
-                default:  c = e;    break;   /* unknown escape -> literal (engine warns; we keep it) */
-            }
-        }
-        if (o + 1 < cap) out[o++] = c;
-        else overflow = 1;
-    }
-    if (*s != '"') return -1;   /* unterminated */
-    s++;
-    out[o] = '\0';
-    *p = s;
-    return overflow ? -1 : (int)o;
-}
-
 /* Deduplicate case-insensitively within an injection pass because the native
  * hash lowercases keys. First writer wins: user document, packages in
  * precedence order, then baked defaults. Duplicate native rows would make
  * hash lookup ambiguous.
  */
-#define STRIDS_DEDUP_CAP 1024
-
 /* Who supplied a row, so a cross-package disagreement can name both sides. The user's file and the
  * baked defaults are not packages and never conflict-report: the user outranks a package by design and
  * the baked set is only a backstop, so both use STRIDS_OWNER_NONE. */
 #define STRIDS_OWNER_NONE (-1)
+#define STRIDS_OWNER_PACKAGES (-2)
 
 typedef struct strids_row {
-    char         id[256];
+    const char  *id;          /* borrows the stable owned ID allocation */
     unsigned int text_hash;   /* FNV-1a of the text: "same value?" without storing every value */
-    int          owner;       /* index into g_str_packages, or STRIDS_OWNER_NONE */
+    int          owner;       /* compiled packages or user/default layer */
 } strids_row;
 
-static strids_row g_injected_ids[STRIDS_DEDUP_CAP];
-static int        g_injected_n;
+static strids_row *g_injected_ids;
+static size_t g_injected_n, g_injected_capacity;
 
 typedef struct strids_owned_row {
-    char id[256];
+    char *id;
     void *key_handle;
     unsigned int hash;
     char *text;
+    unsigned char original[32]; /* borrowed native pointers, restored on retirement */
+    int replaced;
 } strids_owned_row;
 
 /* Native sorting moves rows, so retain the interned key, never an array
  * index or pointer. Existing keys update in place during main-thread rearm. */
-static strids_owned_row g_owned_rows[STRIDS_DEDUP_CAP];
-static int g_owned_n;
+static strids_owned_row *g_owned_rows;
+static size_t g_owned_n, g_owned_capacity;
+typedef struct strids_index_row {
+    uint32_t hash, index;
+    const char *key;
+} strids_index_row;
+static strids_index_row *g_index;
+static size_t g_index_n, g_index_capacity;
+
+static int strids_reserve(void **rows, size_t *capacity, size_t count, size_t stride)
+{
+    size_t next;
+    void *grown;
+    if (count <= *capacity) return 1;
+    if (count > SIZE_MAX / stride) return 0;
+    next = *capacity ? *capacity : 32;
+    while (next < count) {
+        if (next > SIZE_MAX / stride / 2) { next = count; break; }
+        next *= 2;
+    }
+    grown = realloc(*rows, next * stride);
+    if (!grown) return 0;
+    *rows = grown; *capacity = next;
+    return 1;
+}
+
+/* idList uses signed 32-bit counts and capacity; this is a native layout
+ * check, not an application quota. The sort ABI receives the same count. */
+static int strids_table(unsigned char **array, uint32_t *count)
+{
+    uint32_t capacity;
+    *array = *(unsigned char **)g_table_desc;
+    *count = *(uint32_t *)((unsigned char *)g_table_desc + 8);
+    capacity = *(uint32_t *)((unsigned char *)g_table_desc + 12);
+    return *count <= capacity && capacity <= INT_MAX && (!*count || *array);
+}
+
+static int strids_index_compare(const void *a, const void *b)
+{
+    const strids_index_row *x = a, *y = b;
+    return x->hash < y->hash ? -1 : x->hash > y->hash;
+}
+
+static int strids_index_begin(void)
+{
+    unsigned char *array;
+    uint32_t count, i;
+    uintptr_t cursor, end;
+    if (!strids_table(&array, &count) || (size_t)count > SIZE_MAX / 32u) return 0;
+    cursor = (uintptr_t)array;
+    if ((size_t)count * 32u > UINTPTR_MAX - cursor) return 0;
+    end = cursor + (size_t)count * 32u;
+    /* A claimed native extent is not proof of an allocated table. Check the
+     * entire readable range before indexing any entries. */
+    while (cursor < end) {
+        MEMORY_BASIC_INFORMATION region;
+        uintptr_t next;
+        if (!VirtualQuery((void *)cursor, &region, sizeof(region)) || region.State != MEM_COMMIT ||
+            (region.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
+            !(region.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                               PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) ||
+            region.RegionSize > UINTPTR_MAX - (uintptr_t)region.BaseAddress) return 0;
+        next = (uintptr_t)region.BaseAddress + region.RegionSize;
+        if (next <= cursor) return 0;
+        cursor = next;
+    }
+    g_index_n = 0;
+    for (i = 0; i < count; i++) {
+        unsigned char *row = array + (size_t)i * 32u;
+        const char *key = *(const char **)(row + 8);
+        if (!key) continue;
+        if (!strids_reserve((void **)&g_index, &g_index_capacity, g_index_n + 1, sizeof(*g_index))) return 0;
+        g_index[g_index_n++] = (strids_index_row){*(uint32_t *)row, i, key};
+    }
+    if (g_index_n > 1) qsort(g_index, g_index_n, sizeof(*g_index), strids_index_compare);
+    return 1;
+}
+
+static size_t strids_index_first(uint32_t hash)
+{
+    size_t low = 0, high = g_index_n;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (g_index[middle].hash < hash) low = middle + 1; else high = middle;
+    }
+    return low;
+}
 
 static strids_owned_row *find_owned(const char *id)
 {
-    int i;
+    size_t i;
     for (i = 0; i < g_owned_n; i++)
         if (_stricmp(g_owned_rows[i].id, id) == 0) return &g_owned_rows[i];
     return NULL;
@@ -210,24 +272,47 @@ static strids_owned_row *find_owned(const char *id)
 
 static unsigned char *find_live_owned(const strids_owned_row *row)
 {
-    unsigned char *array = *(unsigned char **)g_table_desc;
-    unsigned int count = *(unsigned int *)((unsigned char *)g_table_desc + 8);
-    unsigned int i;
-    if (!array || count > 2000000u) return NULL;
-    for (i = 0; i < count; i++) {
-        unsigned char *entry = array + (size_t)i * 32u;
-        if (*(unsigned int *)entry == row->hash &&
-            *(void **)(entry + 8) == row->key_handle) return entry;
+    unsigned char *array;
+    uint32_t count;
+    size_t i;
+    unsigned char *found = NULL;
+    if (!strids_table(&array, &count)) return NULL;
+    for (i = strids_index_first(row->hash); i < g_index_n && g_index[i].hash == row->hash; i++) {
+        if (g_index[i].key == row->key_handle) {
+            unsigned char *entry;
+            if (g_index[i].index >= count) return NULL;
+            entry = array + (size_t)g_index[i].index * 32u;
+            if (*(unsigned int *)entry != row->hash || *(void **)(entry + 8) != row->key_handle) return NULL;
+            if (found) return NULL; /* Ambiguous ownership must not remove a row. */
+            found = entry;
+        }
     }
-    return NULL;
+    return found;
 }
 
+/* Adopt an existing game row instead of appending a duplicate key. Native
+ * AtomicString assignment and dictionary copies do not transfer ownership of
+ * the pool's text; keeping the original record permits exact restoration. */
+static int find_existing_key(unsigned int hash, const char *key, unsigned char **found)
+{
+    unsigned char *array;
+    uint32_t count;
+    size_t i;
+    *found = NULL;
+    if (!strids_table(&array, &count)) return 0;
+    for (i = strids_index_first(hash); i < g_index_n && g_index[i].hash == hash; i++) {
+        if (!_stricmp(g_index[i].key, key)) {
+            unsigned char *row;
+            if (g_index[i].index >= count) return 0;
+            row = array + (size_t)g_index[i].index * 32u;
+            if (*(uint32_t *)row != hash || *(const char **)(row + 8) != g_index[i].key) return 0;
+            if (*found) return 0;
+            *found = row;
+        }
+    }
+    return 1;
+}
 
-/* Keep the package snapshot in static storage to limit this engine callback's
- * stack use.
- */
-static sh_package g_str_packages[SH_PACKAGES_MAX];
-static size_t     g_str_package_count;
 
 static unsigned int strids_text_hash(const char *text)
 {
@@ -238,15 +323,14 @@ static unsigned int strids_text_hash(const char *text)
 
 static strids_row *find_injected(const char *id)
 {
-    for (int i = 0; i < g_injected_n; i++)
+    for (size_t i = 0; i < g_injected_n; i++)
         if (_stricmp(g_injected_ids[i].id, id) == 0) return &g_injected_ids[i];
     return NULL;
 }
 
 static const char *strids_owner_name(int owner)
 {
-    if (owner < 0 || (size_t)owner >= g_str_package_count) return "<user>";
-    return g_str_packages[owner].name;
+    return owner == STRIDS_OWNER_PACKAGES ? "<packages>" : "<user>";
 }
 
 /* Append one #str_<id> row through native helpers unless this pass already
@@ -271,62 +355,88 @@ static void inject_row_owned(const char *id, const char *text, size_t text_len, 
         }
         return;                                             /* first-writer-wins: never append twice */
     }
-    if (g_injected_n >= STRIDS_DEDUP_CAP || strlen(id) >= sizeof(g_injected_ids[0].id)) {
+    size_t id_length = strlen(id);
+    if (!id_length || id_length > INT_MAX - 5u || text_len > INT_MAX ||
+        g_injected_n == SIZE_MAX ||
+        !strids_reserve((void **)&g_injected_ids, &g_injected_capacity,
+                        g_injected_n + 1, sizeof(*g_injected_ids))) {
         g_pass_failed = 1;
         return;
     }
-    strncpy_s(g_injected_ids[g_injected_n].id, sizeof(g_injected_ids[0].id), id, _TRUNCATE);
-    g_injected_ids[g_injected_n].text_hash = strids_text_hash(text);
-    g_injected_ids[g_injected_n].owner = owner;
-    g_injected_n++;
-
     {
         strids_owned_row *owned = find_owned(id);
         unsigned char *live = NULL;
         unsigned char rec[32] = {0};
-        char key[sizeof(g_injected_ids[0].id) + 6];
+        unsigned char original[32] = {0};
+        int replaced = 0;
+        char *key = NULL, *saved_id = NULL;
         char *saved_text;
         uint32_t length = (uint32_t)text_len;
         if (owned) {
             live = find_live_owned(owned);
             if (!live) { g_pass_failed = 1; return; }
-            if (strcmp(owned->text, text) == 0) return;
+            if (strcmp(owned->text, text) == 0 && *(char **)(live + 16) &&
+                strcmp(*(char **)(live + 16), text) == 0) goto record_seen;
             memcpy(rec, live, sizeof(rec));
         } else {
-            if (g_owned_n >= STRIDS_DEDUP_CAP) { g_pass_failed = 1; return; }
-            _snprintf_s(key, sizeof(key), _TRUNCATE, "#str_%s", id);
+            unsigned char *array;
+            uint32_t count;
+            if (!strids_table(&array, &count) ||
+                g_owned_n == SIZE_MAX ||
+                !strids_reserve((void **)&g_owned_rows, &g_owned_capacity,
+                                g_owned_n + 1, sizeof(*g_owned_rows))) {
+                g_pass_failed = 1; return;
+            }
+            key = (char *)malloc(id_length + 6);
+            saved_id = _strdup(id);
+            if (!key || !saved_id) { free(key); free(saved_id); g_pass_failed = 1; return; }
+            memcpy(key, "#str_", 5); memcpy(key + 5, id, id_length + 1);
             *(uint32_t *)rec = g_hash(key);
-            g_idstr_ctor(rec + 8, key);
+            if (!find_existing_key(*(uint32_t *)rec, key, &live) || (!live && count == INT_MAX)) {
+                free(key); free(saved_id); g_pass_failed = 1; return;
+            }
+            if (live) {
+                memcpy(original, live, sizeof(original));
+                memcpy(rec, live, sizeof(rec)); replaced = 1;
+            } else g_idstr_ctor(rec + 8, key);
+            free(key);
         }
         saved_text = (char *)HeapAlloc(GetProcessHeap(), 0, text_len + 1);
-        if (!saved_text) { g_pass_failed = 1; return; }
+        if (!saved_text) { free(saved_id); g_pass_failed = 1; return; }
         memcpy(saved_text, text, text_len + 1);
-        /* IdStrAssign owns replacement of the old pooled value handle. */
+        /* AtomicString assignment interns text and writes its borrowed pointer.
+         * It does not release the old value; dictionary rows own no pool memory. */
         g_idstr_ctor(live ? live + 16 : rec + 16, text);
         memcpy(live ? live + 24 : rec + 24, &length, 4);
         memcpy(live ? live + 28 : rec + 28, &length, 4);
         if (owned) {
             HeapFree(GetProcessHeap(), 0, owned->text);
         } else {
-            uint32_t before = *(uint32_t *)((unsigned char *)g_table_desc + 8);
-            if (before >= 2000000u) {
-                HeapFree(GetProcessHeap(), 0, saved_text);
-                g_pass_failed = 1;
-                return;
-            }
-            g_insert(g_table_desc, rec);
-            if (*(uint32_t *)((unsigned char *)g_table_desc + 8) != before + 1u) {
-                HeapFree(GetProcessHeap(), 0, saved_text);
-                g_pass_failed = 1;
-                return;
+            if (!live) {
+                uint32_t before = *(uint32_t *)((unsigned char *)g_table_desc + 8);
+                g_insert(g_table_desc, rec);
+                if (*(uint32_t *)((unsigned char *)g_table_desc + 8) != before + 1u) {
+                    HeapFree(GetProcessHeap(), 0, saved_text);
+                    free(saved_id);
+                    g_pass_failed = 1;
+                    return;
+                }
+                InterlockedIncrement(&g_inject_count);
             }
             owned = &g_owned_rows[g_owned_n++];
-            strcpy_s(owned->id, sizeof(owned->id), id);
+            memset(owned, 0, sizeof(*owned));
+            owned->id = saved_id;
             owned->key_handle = *(void **)(rec + 8);
             owned->hash = *(uint32_t *)rec;
-            InterlockedIncrement(&g_inject_count);
+            owned->replaced = replaced;
+            memcpy(owned->original, original, sizeof(original));
         }
         owned->text = saved_text;
+record_seen:
+        g_injected_ids[g_injected_n].id = owned->id;
+        g_injected_ids[g_injected_n].text_hash = strids_text_hash(text);
+        g_injected_ids[g_injected_n].owner = owner;
+        g_injected_n++;
     }
 }
 
@@ -335,87 +445,127 @@ static void inject_row(const char *id, const char *text, size_t text_len)
     inject_row_owned(id, text, text_len, STRIDS_OWNER_NONE);
 }
 
-/* Scan one flat string:string document for this owner. Skip malformed pairs
- * one character at a time.
- */
-static void inject_pairs(const char *buf, int owner)
+typedef struct strids_retirement {
+    uint32_t index;
+    size_t owner;
+} strids_retirement;
+
+static int retirement_compare(const void *left, const void *right)
 {
-    const char *p = buf;
-    char id[256], text[4096];
-    while (*p) {
-        if (*p != '"') { p++; continue; }
-        int idlen = scan_json_string(&p, id, sizeof id);
-        if (idlen < 0) { g_pass_failed = 1; if (*p) p++; continue; }
-        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
-        if (*p != ':') continue;     /* not a key:value pair -- resume scanning from here */
-        p++;
-        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
-        if (*p != '"') continue;
-        int vlen = scan_json_string(&p, text, sizeof text);
-        if (vlen < 0) { g_pass_failed = 1; continue; }
-        if (idlen > 0) inject_row_owned(id, text, (size_t)vlen, owner);
-    }
+    const strids_retirement *a = left, *b = right;
+    return a->index < b->index ? -1 : a->index > b->index;
 }
 
-/* Read first-level strings/*.json from every installed package in precedence
- * order.
+/* At the main-thread refresh boundary, remove only absent product-owned rows.
+ * Preflight the complete set before changing the list; compact once, retaining
+ * unrelated rows and order. Native list resize/clear copies/frees only records,
+ * never their AtomicString pointers. The engine pool remains untouched. */
+static void retire_absent_rows(void)
+{
+    strids_retirement *retired;
+    unsigned char *array;
+    uint32_t count, read, written = 0;
+    size_t i, n = 0, next = 0, kept = 0;
+    if (g_pass_failed || !g_owned_n) return;
+    if (g_owned_n > SIZE_MAX / sizeof(*retired) ||
+        !(retired = malloc(g_owned_n * sizeof(*retired)))) { g_pass_failed = 1; return; }
+    if (!strids_table(&array, &count)) { g_pass_failed = 1; goto done; }
+    for (i = 0; i < g_owned_n; i++) if (!find_injected(g_owned_rows[i].id)) {
+        unsigned char *row = find_live_owned(&g_owned_rows[i]);
+        if (!row) { g_pass_failed = 1; goto done; }
+        retired[n++] = (strids_retirement){(uint32_t)((row - array) / 32u), i};
+    }
+    if (!n) goto done;
+    qsort(retired, n, sizeof(*retired), retirement_compare);
+    for (i = 1; i < n; i++) if (retired[i - 1].index == retired[i].index) {
+        g_pass_failed = 1; goto done;
+    }
+    for (read = 0; read < count; read++) {
+        const unsigned char *source = array + (size_t)read * 32u;
+        if (next < n && retired[next].index == read) {
+            const strids_owned_row *owned = &g_owned_rows[retired[next++].owner];
+            if (!owned->replaced) continue;
+            source = owned->original;
+        }
+        memmove(array + (size_t)written++ * 32u, source, 32u);
+    }
+    *(uint32_t *)((unsigned char *)g_table_desc + 8) = written;
+    for (i = 0; i < g_owned_n; i++) {
+        if (!find_injected(g_owned_rows[i].id)) {
+            HeapFree(GetProcessHeap(), 0, g_owned_rows[i].text);
+            free(g_owned_rows[i].id);
+        } else g_owned_rows[kept++] = g_owned_rows[i];
+    }
+    g_owned_n = kept;
+done:
+    free(retired);
+}
+
+/* Decode the whole flat dictionary before publishing any of its rows. The
+ * shared JSON reader handles Unicode escapes and rejects malformed input.
+ * Native text handles are NUL-terminated, so embedded NUL is unsupported.
  */
+static void inject_pairs(const char *buf, size_t length, int owner)
+{
+    sh_json_object pairs = {0};
+    size_t i;
+    /* Windows text writers may prefix an otherwise ordinary UTF-8 document. */
+    if (length >= 3 && memcmp(buf, "\xef\xbb\xbf", 3) == 0) {
+        buf += 3;
+        length -= 3;
+    }
+    if (!buf || !sh_json_parse_object(buf, length, 1, &pairs)) goto invalid;
+    for (i = 0; i < pairs.count; i++) {
+        sh_json_member *member = &pairs.members[i];
+        size_t encoded_length = strlen(member->value_json), decoded_length = 0;
+        if (!member->key_length || member->key_length > INT_MAX - 5u ||
+            strlen(member->key) != member->key_length ||
+            !sh_json_decode_string(member->value_json, encoded_length,
+                                   member->value_json, encoded_length + 1, &decoded_length) ||
+            strlen(member->value_json) != decoded_length || decoded_length > INT_MAX)
+            goto invalid;
+    }
+    for (i = 0; i < pairs.count; i++)
+        inject_row_owned(pairs.members[i].key, pairs.members[i].value_json,
+                         strlen(pairs.members[i].value_json), owner);
+    sh_json_object_free(&pairs);
+    return;
+invalid:
+    g_pass_failed = 1;
+    backend_log("B1: strids REFUSED: expected a JSON object of valid text strings and nonempty IDs");
+    sh_json_object_free(&pairs);
+}
+
+/* Policies are already composed and checked before any native insertion. */
 static void inject_packages(void)
 {
-    char dir[MAX_PATH], pattern[MAX_PATH], path[MAX_PATH];
-    WIN32_FIND_DATAA found;
-    size_t i;
-
-    for (i = 0; i < g_str_package_count; i++) {
-        HANDLE search;
-        DWORD error;
-        if (!sh_package_subdir(&g_str_packages[i], "strings", dir, sizeof dir) ||
-            _snprintf_s(pattern, sizeof pattern, _TRUNCATE, "%s\\*.json", dir) < 0) {
-            g_pass_failed = 1;
-            return;
-        }
-        search = FindFirstFileA(pattern, &found);
-        if (search == INVALID_HANDLE_VALUE) {
-            error = GetLastError();
-            if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)
-                g_pass_failed = 1;
-            continue;
-        }
-        do {
-            size_t len = 0;
-            char *buf;
-            if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-            if (_snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, found.cFileName) < 0) {
-                g_pass_failed = 1;
-                continue;
-            }
-            buf = read_file(path, &len);
-            if (buf == NULL) { g_pass_failed = 1; continue; }
-            inject_pairs(buf, (int)i);
-            HeapFree(GetProcessHeap(), 0, buf);
-        } while (FindNextFileA(search, &found));
-        error = GetLastError();
-        FindClose(search);
-        if (error != ERROR_NO_MORE_FILES) g_pass_failed = 1;
+    size_t length = 0;
+    char *json;
+    sh_json_object locales = {0};
+    const char *english;
+    const sh_package_compilation *compiled;
+    if (!sh_user_overrides_enabled_for_launch()) return;
+    compiled = sh_package_runtime_acquire();
+    /* No provider means local/baked text only, including recovery of a failed
+     * first activation. Package admission is the runtime transaction's job. */
+    if (!compiled) { sh_package_runtime_release(); return; }
+    /* A failed refresh may still have a valid prior snapshot. Copy it before
+     * calling the native string pool; latest-refresh readiness is not ownership. */
+    json = compiled ? sh_json_serialize_object(&compiled->policy.strings, 0, &length) : NULL;
+    sh_package_runtime_release();
+    if (!json || !sh_json_parse_object(json, length, 4, &locales)) {
+        g_pass_failed = 1; free(json); return;
     }
+    english = sh_json_object_get(&locales, "en");
+    if (english) inject_pairs(english, strlen(english), STRIDS_OWNER_PACKAGES);
+    sh_json_object_free(&locales); free(json);
 }
 
 /* Inject the user, package and baked layers. Return the appended row count. */
-static long do_inject(void)
+static long inject_layers(void)
 {
     if (g_table_desc == NULL || g_insert == NULL || g_hash == NULL || g_idstr_ctor == NULL)
         return 0;
-
-    {
-        char root[MAX_PATH];
-        g_str_package_count = 0;
-        if (!sh_overrides_get_root(root, sizeof(root)) ||
-            !sh_packages_enumerate(root, g_str_packages, SH_PACKAGES_MAX, &g_str_package_count)) {
-            backend_log("B1: strids REFUSED -- package enumeration was incomplete");
-            g_pass_failed = 1;
-            return -1;
-        }
-    }
 
     g_injected_n = 0;   /* fresh dedup set for this inject pass */
 
@@ -423,10 +573,11 @@ static long do_inject(void)
     size_t len = 0;
     char *buf = read_source_file(&len);
     if (buf != NULL) {
-        inject_pairs(buf, STRIDS_OWNER_NONE);
+        inject_pairs(buf, len, STRIDS_OWNER_NONE);
         HeapFree(GetProcessHeap(), 0, buf);
     } else {
-        backend_log("B1: strids -- no user strids.json (optional); packages and baked defaults still apply");
+        backend_log(g_pass_failed ? "B1: strids REFUSED: could not read the local string document" :
+                    "B1: strids -- no user strids.json (optional); packages and baked defaults still apply");
     }
 
     /* Package strings fill keys the user did not supply. */
@@ -436,7 +587,21 @@ static long do_inject(void)
     for (size_t bi = 0; bi < B1_STRIDS_BAKED_COUNT; bi++)
         inject_row(g_strids_baked[bi].id, g_strids_baked[bi].text, strlen(g_strids_baked[bi].text));
 
+    retire_absent_rows();
     return (long)InterlockedCompareExchange(&g_inject_count, 0, 0);
+}
+
+static long do_inject(void)
+{
+    long result = 0;
+    if (!g_table_desc || !g_insert || !g_hash || !g_idstr_ctor) return 0;
+    __try {
+        if (strids_index_begin()) result = inject_layers();
+        else g_pass_failed = 1;
+    } __finally {
+        free(g_index); g_index = NULL; g_index_n = g_index_capacity = 0;
+    }
+    return result;
 }
 
 /* Re-sort the entire live table after appending: native lookup binary-
@@ -448,9 +613,9 @@ static void resort_table(void)
 {
     if (g_sort_orig == NULL || g_table_desc == NULL) { g_pass_failed = 1; return; }
     __try {
-        void    *live_arr = *(void **)g_table_desc;
-        uint32_t live_cnt = *(uint32_t *)((uint8_t *)g_table_desc + 8);
-        if (live_cnt > 2000000u || (live_cnt && !live_arr)) {
+        unsigned char *live_arr;
+        uint32_t live_cnt;
+        if (!strids_table(&live_arr, &live_cnt)) {
             g_pass_failed = 1;
             return;
         }
@@ -573,10 +738,8 @@ int sh_strids_install(void *sort_body_fn, int sort_status_ok,
         sort_body_fn, tramp, SORT_STOLEN, g_table_desc, g_src_path);
     backend_log(line);
 
-    /* Inject and re-sort now because the engine's startup language sort
-     * precedes deferred installation. The shared latch prevents a later
-     * native sort from duplicating rows.
-     */
+    /* Built-in declarations can load before compilation. Supply their text
+     * now; the publication pass adds package policy after it becomes available. */
     inject_and_resort_once();
     return 1;
 }
@@ -622,10 +785,13 @@ unsigned long sh_strids_injected_count(void)
  */
 int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idstr_ctor)
 {
-    int i;
-    for (i = 0; i < g_owned_n; i++)
+    size_t i;
+    for (i = 0; i < g_owned_n; i++) {
         if (g_owned_rows[i].text) HeapFree(GetProcessHeap(), 0, g_owned_rows[i].text);
-    memset(g_owned_rows, 0, sizeof(g_owned_rows));
+        free(g_owned_rows[i].id);
+    }
+    free(g_owned_rows); g_owned_rows = NULL; g_owned_capacity = 0;
+    free(g_injected_ids); g_injected_ids = NULL; g_injected_capacity = 0;
     g_owned_n = 0;
     g_pass_failed = 0;
     g_table_desc = table_desc;
@@ -646,7 +812,7 @@ void sh_strids_test_set_sort(void *sort)
  * the user's own document and for the baked defaults). Returns 0 past the end. */
 int sh_strids_test_row(int index, const char **id_out, const char **owner_out)
 {
-    if (index < 0 || index >= g_injected_n) return 0;
+    if (index < 0 || (size_t)index >= g_injected_n) return 0;
     if (id_out)    *id_out    = g_injected_ids[index].id;
     if (owner_out) *owner_out = strids_owner_name(g_injected_ids[index].owner);
     return 1;

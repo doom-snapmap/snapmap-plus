@@ -62,7 +62,7 @@ int main(int argc, char **argv)
     signatures = read_file(argv[1], "src\\backend\\signatures.c");
     build = read_file(argv[1], "src\\backend\\build.ps1");
     overrides = read_file(argv[1], "src\\backend\\overrides.c");
-    bridge = read_file(argv[1], "src\\backend\\resource_bridge.c");
+    bridge = read_file(argv[1], "src\\backend\\resource_catalog.c");
     requirements = read_file(argv[1], "src\\backend\\package_requirements.c");
     CHECK(dllmain && server && signatures && build && overrides && bridge && requirements);
     if (!dllmain || !server || !signatures || !build || !overrides || !bridge || !requirements) goto done;
@@ -79,22 +79,18 @@ int main(int argc, char **argv)
     if (package_requirements && decl_server) CHECK(package_requirements < decl_server);
     if (commands && decl_server) CHECK(commands < decl_server);
 
-    /* Each override consumer must discover package roots. */
-    CHECK(strstr(server, "sh_packages_enumerate(root, g_packages") != NULL);
-    CHECK(strstr(server, "sh_package_subdir(&g_packages[package_index], \"decls\"") != NULL);
-    CHECK(strstr(bridge, "sh_packages_enumerate(") != NULL);
-    CHECK(strstr(bridge, "sh_package_subdir(&g_packages[i], \"resources\"") != NULL);
-    CHECK(strstr(requirements, "sh_packages_enumerate(") != NULL);
-    CHECK(strstr(requirements, "sh_package_subdir(&g_packages[package_index],") != NULL);
+    /* Consumers share the compiler snapshot and inline policy sections. */
+    CHECK(strstr(server, "sh_package_runtime_acquire()") != NULL);
+    CHECK(strstr(server, "sh_package_runtime_release()") != NULL);
+    CHECK(strstr(requirements, "sh_package_runtime_policy(\"requirements\"") != NULL);
+    CHECK(strstr(overrides, "sh_package_runtime_read(name") != NULL);
     /* Identical shared entries compose; conflicting entries must name both packages. */
     CHECK(strstr(server, "ds_files_identical(other->absolute, absolute_path)") != NULL);
     CHECK(strstr(server, "decl-server COMPOSED:") != NULL);
     CHECK(strstr(server, "item->package") != NULL);
-    CHECK(strstr(bridge, "rb_collapse_identical_rows") != NULL);
-    CHECK(strstr(bridge, "is claimed by two ") != NULL);
-    /* Append manifests so later packages cannot replace earlier entries. */
-    CHECK(strstr(bridge, "size_t *inout_count") != NULL);
-    CHECK(strstr(bridge, "*out_count = 0;") == NULL);
+    CHECK(strstr(bridge, "sh_resource_catalog_read_path") != NULL);
+    CHECK(strstr(bridge, "first_length == other_length") != NULL);
+    CHECK(strstr(bridge, "if (!same) { result = -1;") != NULL);
     /* Keep the 26 KB package array off the capture stack to avoid /GS failure. */
     CHECK(strstr(server, "sh_package packages[SH_PACKAGES_MAX]") == NULL);
     CHECK(strstr(bridge, "sh_package packages[SH_PACKAGES_MAX]") == NULL);
@@ -137,7 +133,8 @@ int main(int argc, char **argv)
     /* Guard publication failures and always continue through the engine promotion. */
     CHECK(strstr(server, "__except (EXCEPTION_EXECUTE_HANDLER) {" ) != NULL);
     /* Apply package cvars synchronously before publication parses declarations. */
-    CHECK(strstr(server, "sh_package_requirements_apply_now") != NULL);
+    CHECK(strstr(server, "sh_package_requirements_rearm") != NULL);
+    CHECK(strstr(requirements, "return sh_package_requirements_apply_now(execute_command_buffer);") != NULL);
     CHECK(strstr(server, "DS_PINNED_CMD_EXECUTE_RVA  0x1AA46B0u") != NULL);
     /* Use engine promotion without a per-type dependency walk. */
     CHECK(strstr(server, "DS_MD6DEF_MODEL_OFFSET") == NULL);
@@ -171,10 +168,9 @@ int main(int argc, char **argv)
     CHECK(strstr(server, "ds_log(\"REFUSED\"") != NULL);
     CHECK(strstr(server, "Sleep(") == NULL);
 
-    walk = strstr(server, "!ds_walk(&discovery, g_packages[package_index].name, directory");
-    collisions = strstr(server,
-                        "sh_decl_server_order_and_admit(ordered, discovery.count, DS_MAX_CANDIDATES);");
-    admission = strstr(server, "if (!ordered[i].admitted)");
+    walk = strstr(server, "for (i = 0; i < compiled->resource_count; i++)");
+    collisions = strstr(server, "if (!resource->type) continue;");
+    admission = strstr(server, "candidate = &g_candidates[g_candidate_count++];");
     CHECK(walk && collisions && admission);
     if (walk && collisions) CHECK(walk < collisions);
     if (collisions && admission) CHECK(collisions < admission);
@@ -184,7 +180,6 @@ int main(int argc, char **argv)
     CHECK(strstr(server, "ERROR_NO_MORE_FILES") != NULL);
     CHECK(strstr(server, "if (search == INVALID_HANDLE_VALUE) return;") == NULL);
     CHECK(strstr(server, "sh_decl_text_order_by_references") != NULL);
-    CHECK(strstr(server, "quoted identity edge(s)") != NULL);
     CHECK(strstr(server, "ds_decl_body_is_single_block") != NULL);
     classify = strstr(server, "ds_classify_candidate");
     source_lookup = strstr(server, "source_record = source_find(type_manager, candidate->name);");
@@ -310,33 +305,32 @@ int main(int argc, char **argv)
     CHECK(strstr(build, "\"decl_text.c\"") != NULL);
     CHECK(strstr(build, "\"decl_server_path.c\"") != NULL);
     CHECK(strstr(build, "\"decl_server.c\"") != NULL);
-    CHECK(strstr(build, "\"resource_bridge.c\"") != NULL);
+    CHECK(strstr(build, "\"resource_bridge.c\"") == NULL);
+    CHECK(strstr(build, "\"resource_catalog.c\"") != NULL);
     CHECK(strstr(build, "\"package_requirements.c\"") != NULL);
     CHECK(strstr(build, "\"raw_deflate.c\"") != NULL);
-    CHECK(strstr(overrides, "sh_decl_text_well_formed") != NULL);
+    CHECK(strstr(server, "sh_decl_text_well_formed") != NULL);
     CHECK(strstr(overrides, "int sh_overrides_get_root") != NULL);
     CHECK(strstr(overrides, "int sh_overrides_internal_decl_table_install") != NULL);
     CHECK(strstr(overrides, "published identity is authoritative") != NULL);
     CHECK(strstr(overrides, "decltree/") != NULL);
-    CHECK(strstr(overrides, "sh_resource_bridge_open") != NULL);
+    CHECK(strstr(overrides, "sh_resource_bridge_open") == NULL);
     CHECK(strstr(overrides, "31-entry table") != NULL);
     CHECK(strstr(overrides, "OV_PINNED_PROVIDER_VTABLE_RVA") != NULL);
     CHECK(strstr(overrides, "ov_supported_build_abi") != NULL);
     CHECK(strstr(overrides, "OV_STREAM_HELPERS_FAILED") != NULL);
     CHECK(strstr(overrides, "ov_set_length") != NULL);
-    CHECK(strstr(server, "sh_resource_bridge_gate_ok") != NULL);
-    CHECK(strstr(server, "sh_resource_bridge_decl_count") != NULL);
-    CHECK(strstr(bridge, "gameresources.pindex") != NULL);
+    CHECK(strstr(server, "sh_package_runtime_acquire") != NULL);
+    CHECK(strstr(server, "compiled->resource_count") != NULL);
+    CHECK(strstr(bridge, "snap_gameresources") != NULL);
+    CHECK(strstr(bridge, "gameresources") != NULL);
     CHECK(strstr(bridge, "GENERIC_READ") != NULL);
     CHECK(strstr(bridge, "GENERIC_WRITE") == NULL);
-    CHECK(strstr(bridge, "RB_STATE_INSTALLING") != NULL);
-    CHECK(strstr(bridge, "InterlockedCompareExchange(&g_state, RB_STATE_INSTALLING, RB_STATE_NEW)") != NULL);
-    CHECK(strstr(bridge, "if (!entry->size && entry->zsize) return 0") != NULL);
-    CHECK(strstr(bridge, "RB_STATE_FAILED") != NULL);
     CHECK(strstr(requirements, "g_useResourceBlackList") != NULL);
     CHECK(strstr(requirements, "g_useImageBlackList") != NULL);
     CHECK(strstr(requirements, "PR_LOAD_STATE_RUNNING") != NULL);
-    CHECK(strstr(requirements, "arbitrary") != NULL);
+    /* Requirement admission and command rejection have executable coverage
+     * in package_requirements_test; a comment keyword is not a contract. */
 
 done:
     free(dllmain); free(server); free(signatures); free(build); free(overrides); free(bridge); free(requirements);

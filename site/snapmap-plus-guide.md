@@ -835,11 +835,9 @@ guessing what's in them:
 
 ## Overrides
 
-**Overrides** are Snapmap+'s way of soft-modding the game — replacing resource files at launch, while
-Snapmap+ is running, without touching anything that affects actual gameplay for players who load your
-map (a gameplay-affecting override wouldn't travel with the map anyway, so there's no point using one for
-that). For Snapmap+ itself, overrides remove editor-side restrictions and save you from typing out edits
-by hand that would otherwise be tedious.
+**Overrides** add or replace game resources through packages. Packages can supply editor tools,
+gameplay assets, or both. When a map uses a package's gameplay assets, Snapmap+ embeds the complete
+authored package. Another Snapmap+ client can install the missing packages from an in-game prompt.
 
 The [Custom palette tab](#the-custom-palette-tab) — the Unknown, Timeline, and Lift entities available
 straight from DOOM's own Create menu — is itself built on this system: it's an override that ships with
@@ -848,16 +846,41 @@ Snapmap+ by default.
 ### Overrides are packages
 
 An override is organized as a **package**: a folder under `%LOCALAPPDATA%\snapmap-plus\overrides\`
-containing whatever it adds (decls, resources, strings...) plus a `package.json` marking it as one. The
-package folder *is* the whole thing:
+with one descriptor and an engine-shaped asset tree:
+
+```text
+my-package/
+  package.json
+  assets/
+    generated/decls/...
+    generated/images/...
+    generated/renderprogs/...
+    generated/spirv/...
+    cooked/...
+    sound/...
+```
+
+Preserve each resource's extracted game path beneath `assets/`, including model and animation files.
+The paths above are examples, not a list of required directories. The descriptor starts with:
+
+```json
+{
+  "id": "example.my-package",
+  "name": "My package"
+}
+```
+
+Optional requirements, localized strings and supported HUD rules live in `package.json`. Authors
+do not maintain path mappings, manifests, content hashes, installation receipts or version fields.
+The package folder is the delivery unit:
 
 - **Installing** one is copying its folder in.
-- **Uninstalling** one is deleting its folder.
+- **Uninstalling** one removes its folder from `overrides` and refreshes packages at the browser.
 - **Sharing** one is sending someone that folder — they drop it into their own `overrides\` and it's
   installed.
 
-Nothing needs compiling or merging, and nothing a package adds can be left behind once its folder is gone.
-A package can sit directly under `overrides\` — a shared mod you were handed, say
+Snapmap+ compiles the installed packages automatically into the resources the game consumes.
+Authored files stay intact. A package can sit directly under `overrides\` — a shared mod you were handed, say
 `overrides\cyberdemon\`, installs exactly like that, as its own top-level package — or you can organize
 packages into subfolders as deep as you like; a subfolder without its own `package.json` is just an
 organizing folder, not a package itself.
@@ -867,28 +890,23 @@ fresh install, as an obvious place to drop anything you make yourself rather tha
 package folder and `package.json` for it. It isn't special beyond that, and it isn't required — your own
 content is just as free to live in a package folder of its own as anyone else's is.
 
-**Dropping a loose file still works.** Placing a file at `overrides\<resource path>`, matching the
-path/filename of the thing you want to replace, shadows that resource exactly as it always did — it is
-checked before any package, so it wins. What a package adds on top is *publishing* identities DOOM never
-shipped (the thing a loose file cannot do), and uninstalling by deleting one folder.
+Loose files outside a component's `assets/` tree are not game resource inputs. Auxiliary files inside
+a package still travel with that package. The installer preserves existing authored files and creates
+the starter with `package.json` and an empty `assets/` directory.
 
-**If you're updating from an older version**, the one shared `overrides\generated\` tree that older
-releases put everything in is moved into a real `my-overrides` package the first time you update. Files
-are copied before the old folder is removed and nothing is ever overwritten, so a `my-overrides` you
-already had keeps its own copy of anything that collides.
+**Overlapping packages retain their original contents.** Identical resources share one compiled
+result with all source owners retained. Compatible declaration changes combine, including supported
+collections that append options. Contradictory values or different opaque replacements report a
+conflict naming the resources and packages. Folder order and an author priority field do not choose
+a hidden winner.
 
-**Packages overlap safely.** Two packages both shipping the same shared asset is normal and composes
-without complaint. Where they genuinely disagree, what happens depends on which kind of thing they
-disagree about:
+Map inclusion is automatic. An editor-only reference does not select a package. Gameplay use of a
+mixed package includes its editor support and strings too. Unknown, Timeline and Lift entities that
+already ship in DOOM do not require package embedding merely because editor tools exposed them.
 
-- A **new identity DOOM never shipped**, claimed by two packages with differing contents, is **refused** —
-  loudly, and naming both packages, so neither silently wins and you know exactly what to fix.
-- An **existing DOOM resource** both packages shadow is a precedence question, so it is settled by the
-  `"priority"` in each `package.json` (higher wins; ties break by name) and every contested resource is
-  reported. Install order never decides it, and nothing is silently overwritten.
-
-Actually authoring a package's *contents* is a separate skill from placing the folder — the format
-depends entirely on which resource you're replacing, and isn't covered in this guide.
+One installation prompt covers the map's missing packages. Preparation stays outside the active
+overrides folder; one directory move publishes the complete set. If preparation is interrupted,
+install again. Authored duplicates and empty directories remain in the delivered packages.
 
 ### How a file gets picked
 

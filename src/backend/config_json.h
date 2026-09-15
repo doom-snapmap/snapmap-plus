@@ -32,6 +32,33 @@ typedef struct sh_json_object {
     size_t capacity;
 } sh_json_object;
 
+/* Read-only member spans for a postorder object visitor. Spans and decoded
+ * keys are valid only during the callback; values reference the input buffer.
+ * A zero callback result refuses traversal. No partial result is trustworthy
+ * until the complete document validates. */
+typedef struct sh_json_field_span {
+    char *key;
+    size_t key_length;
+    const char *value;
+    size_t value_length;
+    sh_json_kind kind;
+} sh_json_field_span;
+typedef int (*sh_json_object_visitor)(void *context, const sh_json_field_span *fields,
+                                      size_t count, unsigned depth);
+int sh_json_visit_objects(const char *json, size_t length, unsigned max_depth,
+                          sh_json_object_visitor visitor, void *context);
+
+/* The field filter sees each decoded member key before its value is scanned.
+ * Positive visits normally, zero suppresses callbacks throughout that value,
+ * and negative aborts. Suppressed values still receive full JSON validation,
+ * including duplicate keys and depth checks. depth is the containing object's
+ * depth. The same context is passed to both callbacks. */
+typedef int (*sh_json_field_filter)(void *context, const char *key,
+                                     size_t key_length, unsigned depth);
+int sh_json_visit_objects_filtered(const char *json, size_t length, unsigned max_depth,
+                                   sh_json_object_visitor visitor,
+                                   sh_json_field_filter filter, void *context);
+
 int sh_json_validate(const char *json, size_t length, unsigned max_depth,
                      sh_json_kind *out_kind);
 int sh_json_parse_object(const char *json, size_t length, unsigned max_depth,

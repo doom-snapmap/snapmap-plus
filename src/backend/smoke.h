@@ -6,12 +6,12 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "signatures.h"
 
-/* Count signatures resolving now, including verified hooked fallbacks; no logging. */
-size_t sh_resolve_count(const uint8_t *doom_base);
-
-/* Test resolution and a scratch detour; return 1 if both pass. deferred_ms is
+/* Report the bootstrap's pre-install resolution snapshot and test a scratch
+ * detour; return 1 if both pass. deferred_ms is
  * elapsed startup time for the result log, not a delay performed by this call. */
-int sh_smoke_run(const uint8_t *doom_base, unsigned long deferred_ms);
+int sh_smoke_run(const uint8_t *doom_base, const sig_result *results, size_t count,
+                 unsigned long deferred_ms);
 
 #endif /* BACKEND_PB0_SMOKE_H */

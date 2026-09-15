@@ -126,8 +126,16 @@ void sh_map_render_loaded(void *map)
      * covers playing a saved/downloaded map without first entering the editor.
      * NULL clears the previous map before a load, including failed loads. */
     sh_map_render settings;
-    int valid=map&&read_list((unsigned char*)map+0x1a0,&settings);
-    publish(&settings,valid);
+    int valid=sh_map_render_capture(map,&settings);
+    sh_map_render_select(valid?&settings:NULL);
+}
+int sh_map_render_capture(void *snapshot,sh_map_render *settings)
+{
+    return snapshot&&settings&&read_list((unsigned char*)snapshot+0x1a0,settings);
+}
+void sh_map_render_select(const sh_map_render *settings)
+{
+    publish(settings,settings&&sh_map_render_valid(settings));
 }
 
 /* This call occurs after environment blending and before the engine applies

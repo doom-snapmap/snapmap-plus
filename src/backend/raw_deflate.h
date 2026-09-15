@@ -16,6 +16,9 @@
  * callers accept only a result equal to dst_len. */
 size_t sh_inflate_raw(const unsigned char *src, size_t src_len,
                       unsigned char *dst, size_t dst_len);
+/* Unambiguous validation, including a correctly encoded zero-byte result. */
+int sh_inflate_raw_exact(const unsigned char *src, size_t src_len,
+                         unsigned char *dst, size_t dst_len);
 
 /* The same decoder, with `dst_cap` a CAPACITY instead of the finished length. Returns the actual
  * number of bytes decoded, or zero -- including when the output would not fit, so a zero return can

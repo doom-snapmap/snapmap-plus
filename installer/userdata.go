@@ -98,8 +98,9 @@ func migrateUserData() {
 		}
 	}
 
-	// Migrate overrides last so newly copied legacy content follows the same layout.
-	migrateLegacyOverrides()
+	if err := ensureStarterPackage(); err != nil {
+		fmt.Printf("  ! could not prepare the starter package: %v\n", err)
+	}
 }
 
 // fullyMirrored rejects missing entries, byte differences, links and read errors.

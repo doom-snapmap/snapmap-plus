@@ -5,6 +5,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdint.h>
+#include <bcrypt.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -17,7 +18,8 @@
 #include "engine_dialog.h"
 #include "packages.h"
 #include "decl_server.h"
-#include "raw_deflate.h"
+#include "package_archive.h"
+#include "package_runtime.h"
 #include "backend_log.h"
 
 /* ==================================================================== */
@@ -26,11 +28,6 @@
 
 /* The smpkg package-id character class -- the one text rule that is this
  * family's and not the envelope's. Everything else lives in map_shards.c. */
-static int mpkg_is_idc(char c)
-{
-    return (c >= 'a' && c <= 'z') || sh_shard_is_digit(c) || c == '_' || c == '-';
-}
-
 static void mpkg_err(char *err, size_t cap, const char *fmt, ...)
 {
     va_list ap;
@@ -67,11 +64,21 @@ static int mpkg_parse_header(const char *p, size_t plen, mpkg_hdr *hdr)
 
     if (plen <= MPKG_MAGIC_LEN) return 0;
 
-    /* package id: [a-z0-9_-]+ */
-    while (c < end && mpkg_is_idc(*c) && n < SH_MPKG_ID_CAP - 1) hdr->id[n++] = *c++;
-    if (n == 0 || c >= end || *c != '.') return 0;
-    hdr->id[n] = '\0';
-    c++;
+    /* The final three separators delimit transport fields. Dots are valid
+     * authored ID characters and never participate in implicit name folding. */
+    {
+        const char *separator = end;
+        unsigned fields = 0;
+        while (separator > c && fields < 3) {
+            separator--;
+            if (*separator == '.') fields++;
+        }
+        n = (size_t)(separator - c);
+        if (fields != 3 || !n || n >= sizeof(hdr->id)) return 0;
+        memcpy(hdr->id, c, n); hdr->id[n] = 0;
+        if (!sh_package_id_valid(hdr->id)) return 0;
+        c = separator + 1;
+    }
 
     /* index */
     v = 0; digits = 0;
@@ -187,13 +194,12 @@ char *sh_mpkg_embed(const char *json, size_t len, const char *pkg_id,
 
     if (out_len) *out_len = 0;
     if (err && err_cap) err[0] = '\0';
-    if (!json || len == 0 || !pkg_id || !payload) {
+    if (!json || len == 0 || !sh_package_id_valid(pkg_id) || !payload) {
         mpkg_err(err, err_cap, "embed called with nothing to embed");
         return NULL;
     }
     if (payload_len == 0 || payload_len > SH_MPKG_MAX_PAYLOAD) {
-        mpkg_err(err, err_cap, "payload is %zu bytes, over the %u-byte embed budget",
-                 payload_len, (unsigned)SH_MPKG_MAX_PAYLOAD);
+        mpkg_err(err, err_cap, "package needs %zu bytes before map encoding; it cannot fit the native map string representation", payload_len);
         return NULL;
     }
 
@@ -256,7 +262,7 @@ done:
 /* ==================================================================== */
 
 typedef struct mpkg_seen {
-    unsigned char bits[SH_MPKG_MAX_SHARDS / 8];
+    unsigned char *bits;
 } mpkg_seen;
 
 static int mpkg_seen_test_set(mpkg_seen *s, unsigned idx)
@@ -267,50 +273,65 @@ static int mpkg_seen_test_set(mpkg_seen *s, unsigned idx)
     return 0;
 }
 
-static size_t mpkg_scan_internal(const char *json, size_t len,
-                                 sh_mpkg_decl *out, size_t cap, int *overflow)
+typedef struct mpkg_scan_entry { sh_mpkg_decl decl; mpkg_seen seen; } mpkg_scan_entry;
+
+static size_t mpkg_scan_internal(const char *json, size_t len, sh_mpkg_decl **out)
 {
-    mpkg_seen seen[SH_MPKG_MAX_PACKAGES];
-    size_t count = 0, pos = 0, i;
+    mpkg_scan_entry *entries = NULL;
+    size_t count = 0, capacity = 0, pos = 0, i, result = SIZE_MAX;
     mpkg_hdr hdr;
     const char *chunk;
     size_t chunk_len;
-
-    if (overflow) *overflow = 0;
-    if (!json || !out || cap == 0) { if (overflow && json) *overflow = 1; return 0; }
-    if (cap > SH_MPKG_MAX_PACKAGES) cap = SH_MPKG_MAX_PACKAGES;
-    memset(seen, 0, sizeof seen);
-
+    *out = NULL;
+    if (!json) return 0;
     while (mpkg_next_shard(json, len, &pos, &hdr, &chunk, &chunk_len)) {
-        sh_mpkg_decl *d = NULL;
-        for (i = 0; i < count; i++)
-            if (strcmp(out[i].id, hdr.id) == 0) { d = &out[i]; break; }
-        if (!d) {
-            if (count >= cap) { if (overflow) *overflow = 1; continue; }
-            d = &out[count++];
-            memset(d, 0, sizeof *d);
-            strcpy_s(d->id, sizeof d->id, hdr.id);
-            strcpy_s(d->digest, sizeof d->digest, hdr.digest);
-            d->total = hdr.total;
-            d->consistent = 1;
+        sh_mpkg_decl *d;
+        for (i = 0; i < count; i++) if (!strcmp(entries[i].decl.id, hdr.id)) break;
+        if (i == count) {
+            if (count == capacity) {
+                size_t next = capacity ? capacity * 2 : 16;
+                mpkg_scan_entry *grown;
+                if (next < capacity || next > SIZE_MAX / sizeof(*grown)) goto done;
+                grown = (mpkg_scan_entry *)realloc(entries, next * sizeof(*grown));
+                if (!grown) goto done;
+                entries = grown; capacity = next;
+            }
+            memset(&entries[count], 0, sizeof(entries[count])); count++;
+            d = &entries[i].decl;
+            strcpy_s(d->id, sizeof(d->id), hdr.id);
+            strcpy_s(d->digest, sizeof(d->digest), hdr.digest);
+            d->total = hdr.total; d->consistent = 1;
+            entries[i].seen.bits = (unsigned char *)calloc(((size_t)hdr.total + 7u) / 8u, 1);
+            if (!entries[i].seen.bits) goto done;
         }
-        if (d->total != hdr.total || strcmp(d->digest, hdr.digest) != 0) {
-            d->consistent = 0;   /* two versions of one package in one map */
-            continue;
+        d = &entries[i].decl;
+        if (d->total != hdr.total || strcmp(d->digest, hdr.digest) ||
+            hdr.idx >= d->total || !chunk || mpkg_seen_test_set(&entries[i].seen, hdr.idx)) {
+            d->consistent = 0; continue;
         }
-        if (hdr.idx >= d->total) { d->consistent = 0; continue; }
-        if (chunk == NULL) { d->consistent = 0; continue; }
-        if (mpkg_seen_test_set(&seen[d - out], hdr.idx)) { d->consistent = 0; continue; }
         d->present++;
     }
-    for (i = 0; i < count; i++)
-        out[i].complete = out[i].consistent && out[i].present == out[i].total;
-    return count;
+    if (count > SIZE_MAX / sizeof(**out) ||
+        (count && !(*out = (sh_mpkg_decl *)malloc(count * sizeof(**out))))) goto done;
+    for (i = 0; i < count; i++) {
+        entries[i].decl.complete = entries[i].decl.consistent &&
+            entries[i].decl.present == entries[i].decl.total;
+        (*out)[i] = entries[i].decl;
+    }
+    result = count;
+done:
+    for (i = 0; i < count; i++) free(entries[i].seen.bits);
+    free(entries); return result;
 }
 
 size_t sh_mpkg_scan(const char *json, size_t len, sh_mpkg_decl *out, size_t cap)
 {
-    return mpkg_scan_internal(json, len, out, cap, NULL);
+    sh_mpkg_decl *decls = NULL;
+    size_t count = mpkg_scan_internal(json, len, &decls);
+    if (count != SIZE_MAX && count <= cap && (!count || out)) {
+        if (count) memcpy(out, decls, count * sizeof(*out));
+    } else count = SIZE_MAX;
+    free(decls); return count;
 }
 
 /* ==================================================================== */
@@ -346,7 +367,7 @@ unsigned char *sh_mpkg_extract(const char *json, size_t len, const char *pkg_id,
         }
         if (hdr.total != total || strcmp(hdr.digest, digest) != 0) {
             mpkg_err(err, err_cap, "package '%s' has inconsistent shard headers -- "
-                     "the map carries two different versions", pkg_id);
+                     "the map carries two different contents", pkg_id);
             goto fail;
         }
         if (hdr.idx >= total) {
@@ -413,308 +434,30 @@ fail:
 /* zip unpack (deflate via the shared raw_deflate.c; no second inflate)  */
 /* ==================================================================== */
 
-#define MPKG_ZIP_EOCD_SIG   0x06054b50u
-#define MPKG_ZIP_CEN_SIG    0x02014b50u
-#define MPKG_ZIP_LOC_SIG    0x04034b50u
-#define MPKG_ZIP_MAX_ENTRIES     4096u
-#define MPKG_ZIP_MAX_FILE_BYTES  (64u * 1024u * 1024u)
-#define MPKG_ZIP_MAX_TOTAL_BYTES (256u * 1024u * 1024u)
-
-static uint32_t rd32(const unsigned char *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
-static uint16_t rd16(const unsigned char *p) { return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8)); }
-
-typedef struct mpkg_zentry {
-    const char *name;        /* NOT NUL-terminated */
-    unsigned    name_len;
-    unsigned    method, csize, usize;
-    const unsigned char *data;   /* compressed bytes inside the payload */
-    int         is_dir;
-} mpkg_zentry;
-
-/* Locate the central directory. Return 1 with cd and count, or 0 if
- * malformed.
- */
-static int mpkg_zip_open(const unsigned char *payload, size_t len,
-                         const unsigned char **cd, unsigned *count,
-                         char *err, size_t err_cap)
-{
-    size_t i, floor_ = 0;
-    if (len < 22) { mpkg_err(err, err_cap, "payload too small to be a zip"); return 0; }
-    if (len > 22 + 65535) floor_ = len - 22 - 65535;
-    for (i = len - 22; ; i--) {
-        if (rd32(payload + i) == MPKG_ZIP_EOCD_SIG) {
-            unsigned n = rd16(payload + i + 10);
-            uint32_t cd_size = rd32(payload + i + 12);
-            uint32_t cd_off  = rd32(payload + i + 16);
-            if (n > MPKG_ZIP_MAX_ENTRIES) { mpkg_err(err, err_cap, "zip has too many entries (%u)", n); return 0; }
-            if (cd_off > i || cd_size > i - cd_off) { mpkg_err(err, err_cap, "zip central directory out of bounds"); return 0; }
-            *cd = payload + cd_off;
-            *count = n;
-            return 1;
-        }
-        if (i == floor_) break;
-    }
-    mpkg_err(err, err_cap, "zip end-of-central-directory not found");
-    return 0;
-}
-
-/* Read one central-directory entry at *cursor and resolve its data span
- * through the local header. Advances *cursor. */
-static int mpkg_zip_entry(const unsigned char *payload, size_t len,
-                          const unsigned char **cursor, mpkg_zentry *e,
-                          char *err, size_t err_cap)
-{
-    const unsigned char *c = *cursor;
-    uint32_t loc_off;
-    unsigned nlen, xlen, clen;
-    if ((size_t)(c - payload) + 46 > len || rd32(c) != MPKG_ZIP_CEN_SIG) {
-        mpkg_err(err, err_cap, "zip central directory entry malformed");
-        return 0;
-    }
-    e->method = rd16(c + 10);
-    e->csize  = rd32(c + 20);
-    e->usize  = rd32(c + 24);
-    nlen = rd16(c + 28); xlen = rd16(c + 30); clen = rd16(c + 32);
-    loc_off = rd32(c + 42);
-    if ((size_t)(c - payload) + 46 + nlen + xlen + clen > len) {
-        mpkg_err(err, err_cap, "zip central directory entry out of bounds");
-        return 0;
-    }
-    e->name = (const char *)(c + 46);
-    e->name_len = nlen;
-    e->is_dir = nlen > 0 && e->name[nlen - 1] == '/';
-    if (e->csize == 0xFFFFFFFFu || e->usize == 0xFFFFFFFFu) {
-        mpkg_err(err, err_cap, "zip64 archives are not supported");
-        return 0;
-    }
-    /* resolve the data span through the local header (its own name/extra
-     * lengths differ from the central copy in general). */
-    if ((size_t)loc_off + 30 > len || rd32(payload + loc_off) != MPKG_ZIP_LOC_SIG) {
-        mpkg_err(err, err_cap, "zip local header out of bounds");
-        return 0;
-    }
-    {
-        unsigned lnlen = rd16(payload + loc_off + 26);
-        unsigned lxlen = rd16(payload + loc_off + 28);
-        size_t data_off = (size_t)loc_off + 30 + lnlen + lxlen;
-        if (data_off > len || (size_t)e->csize > len - data_off) {
-            mpkg_err(err, err_cap, "zip member data out of bounds");
-            return 0;
-        }
-        e->data = payload + data_off;
-    }
-    *cursor = c + 46 + nlen + xlen + clen;
-    return 1;
-}
-
-/* Require relative forward-slash paths without dot segments, drive letters or
- * control characters.
- */
-static int mpkg_member_path_safe(const char *name, unsigned n)
-{
-    unsigned i, seg_start = 0;
-    if (n == 0 || n >= MAX_PATH) return 0;
-    if (name[0] == '/') return 0;
-    for (i = 0; i <= n; i++) {
-        char c = (i < n) ? name[i] : '/';   /* virtual terminator closes the last segment */
-        if (i < n && (c == '\\' || c == ':' || (unsigned char)c < 0x20)) return 0;
-        if (c == '/') {
-            unsigned seg_len = i - seg_start;
-            if (seg_len == 0) return 0;                                  /* "//" or leading '/' */
-            if (seg_len == 1 && name[seg_start] == '.') return 0;
-            if (seg_len == 2 && name[seg_start] == '.' && name[seg_start + 1] == '.') return 0;
-            seg_start = i + 1;
-        }
-    }
-    return 1;
-}
-
-/* Create every directory of `rel` (forward-slashed, possibly ending in the
- * file name which is NOT created) under `base`. */
-static int mpkg_make_parents(const char *base, const char *rel, int whole_is_dir)
-{
-    char path[MAX_PATH];
-    size_t base_len, i;
-    if (_snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", base, rel) < 0) return 0;
-    base_len = strlen(base) + 1;
-    for (i = base_len; path[i]; i++) {
-        if (path[i] != '/') continue;
-        path[i] = '\0';
-        if (!CreateDirectoryA(path, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return 0;
-        path[i] = '\\';
-    }
-    if (whole_is_dir) {
-        if (!CreateDirectoryA(path, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return 0;
-    }
-    return 1;
-}
-
-static int mpkg_write_file(const char *base, const char *rel,
-                           const unsigned char *bytes, size_t n)
-{
-    char path[MAX_PATH];
-    size_t i;
-    HANDLE h;
-    size_t total = 0;
-    if (_snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", base, rel) < 0) return 0;
-    for (i = strlen(base) + 1; path[i]; i++)
-        if (path[i] == '/') path[i] = '\\';
-    h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) return 0;
-    while (total < n) {
-        DWORD chunk = (DWORD)((n - total) > 0x10000000 ? 0x10000000 : (n - total));
-        DWORD wr = 0;
-        if (!WriteFile(h, bytes + total, chunk, &wr, NULL) || wr == 0) break;
-        total += wr;
-    }
-    CloseHandle(h);
-    return total == n;
-}
-
-/* Count file members + verify the payload IS a package (a top-level
- * package.json) without writing anything. */
 static int mpkg_zip_survey(const unsigned char *payload, size_t len,
-                           unsigned *files_out, char *err, size_t err_cap)
-{
-    const unsigned char *cd, *cursor;
-    unsigned count, i, files = 0;
-    int has_marker = 0;
-    unsigned long long total_bytes = 0;
-    mpkg_zentry e;
-    if (!mpkg_zip_open(payload, len, &cd, &count, err, err_cap)) return 0;
-    cursor = cd;
-    for (i = 0; i < count; i++) {
-        if (!mpkg_zip_entry(payload, len, &cursor, &e, err, err_cap)) return 0;
-        if (e.is_dir) {
-            /* A directory entry is vetted here too, so nothing is written to
-             * disk before EVERY member path has passed. */
-            if (e.name_len > 1 && !mpkg_member_path_safe(e.name, e.name_len - 1)) {
-                mpkg_err(err, err_cap, "unsafe member path in package: '%.*s'",
-                         (int)(e.name_len > 200 ? 200 : e.name_len), e.name);
-                return 0;
-            }
-            continue;
-        }
-        if (!mpkg_member_path_safe(e.name, e.name_len)) {
-            mpkg_err(err, err_cap, "unsafe member path in package: '%.*s'",
-                     (int)(e.name_len > 200 ? 200 : e.name_len), e.name);
-            return 0;
-        }
-        if (e.method != 0 && e.method != 8) {
-            mpkg_err(err, err_cap, "unsupported zip method %u for '%.*s'",
-                     e.method, (int)e.name_len, e.name);
-            return 0;
-        }
-        if (e.usize > MPKG_ZIP_MAX_FILE_BYTES) {
-            mpkg_err(err, err_cap, "zip member '%.*s' too large", (int)e.name_len, e.name);
-            return 0;
-        }
-        total_bytes += e.usize;
-        if (total_bytes > MPKG_ZIP_MAX_TOTAL_BYTES) {
-            mpkg_err(err, err_cap, "zip expands past the %u-byte cap", MPKG_ZIP_MAX_TOTAL_BYTES);
-            return 0;
-        }
-        if (e.name_len == 12 && memcmp(e.name, "package.json", 12) == 0) has_marker = 1;
-        files++;
-    }
-    if (!has_marker) {
-        mpkg_err(err, err_cap, "payload is not a package (no top-level package.json)");
-        return 0;
-    }
-    *files_out = files;
-    return 1;
-}
+                           unsigned *files, char *err, size_t capacity)
+{ return sh_package_archive_inspect(payload, len, NULL, files, err, capacity); }
 
-int sh_mpkg_unpack(const unsigned char *payload, size_t len, const char *dest_dir,
-                   unsigned *files_out, char *err, size_t err_cap)
-{
-    const unsigned char *cd, *cursor;
-    unsigned count, i, files = 0;
-    mpkg_zentry e;
-    char rel[MAX_PATH];
-
-    mpkg_err(err, err_cap, "");
-    if (files_out) *files_out = 0;
-    if (!payload || !dest_dir || !dest_dir[0]) { mpkg_err(err, err_cap, "bad arguments"); return 0; }
-
-    /* The whole archive is vetted BEFORE the first byte is written, so an
-     * unsafe path refuses the install with nothing on disk. */
-    if (!mpkg_zip_survey(payload, len, &files, err, err_cap)) return 0;
-
-    if (!CreateDirectoryA(dest_dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
-        mpkg_err(err, err_cap, "cannot create '%s' (err %lu)", dest_dir, GetLastError());
-        return 0;
-    }
-    if (!mpkg_zip_open(payload, len, &cd, &count, err, err_cap)) return 0;
-    cursor = cd;
-    for (i = 0; i < count; i++) {
-        if (!mpkg_zip_entry(payload, len, &cursor, &e, err, err_cap)) return 0;
-        if (e.name_len >= sizeof rel) { mpkg_err(err, err_cap, "member path too long"); return 0; }
-        memcpy(rel, e.name, e.name_len);
-        rel[e.name_len] = '\0';
-        if (e.is_dir) {
-            rel[e.name_len - 1] = '\0';   /* drop the trailing '/' */
-            if (rel[0] && !mpkg_member_path_safe(rel, e.name_len - 1)) {
-                mpkg_err(err, err_cap, "unsafe member path in package: '%s'", rel);
-                return 0;
-            }
-            if (rel[0] && !mpkg_make_parents(dest_dir, rel, 1)) {
-                mpkg_err(err, err_cap, "cannot create directory '%s'", rel);
-                return 0;
-            }
-            continue;
-        }
-        if (!mpkg_make_parents(dest_dir, rel, 0)) {
-            mpkg_err(err, err_cap, "cannot create parents for '%s'", rel);
-            return 0;
-        }
-        if (e.method == 0) {
-            if (e.csize != e.usize) { mpkg_err(err, err_cap, "stored member size mismatch"); return 0; }
-            if (!mpkg_write_file(dest_dir, rel, e.data, e.usize)) {
-                mpkg_err(err, err_cap, "cannot write '%s'", rel);
-                return 0;
-            }
-        } else {   /* method 8: raw deflate through the shared decoder */
-            unsigned char *buf = (unsigned char *)HeapAlloc(GetProcessHeap(), 0,
-                                                            e.usize ? e.usize : 1);
-            if (!buf) { mpkg_err(err, err_cap, "out of memory"); return 0; }
-            /* usize==0: write an empty file without decoding (a deflated empty
-             * member still carries a 2-byte stream; its content is moot). */
-            if (e.usize != 0 &&
-                sh_inflate_raw(e.data, e.csize, buf, e.usize) != e.usize) {
-                HeapFree(GetProcessHeap(), 0, buf);
-                mpkg_err(err, err_cap, "deflate stream for '%s' is malformed", rel);
-                return 0;
-            }
-            if (!mpkg_write_file(dest_dir, rel, buf, e.usize)) {
-                HeapFree(GetProcessHeap(), 0, buf);
-                mpkg_err(err, err_cap, "cannot write '%s'", rel);
-                return 0;
-            }
-            HeapFree(GetProcessHeap(), 0, buf);
-        }
-    }
-    if (files_out) *files_out = files;
-    return 1;
-}
+int sh_mpkg_unpack(const unsigned char *payload, size_t len, const char *destination,
+                   unsigned *files, char *err, size_t capacity)
+{ return sh_package_archive_unpack(payload, len, destination, files, err, capacity); }
 
 /* ==================================================================== */
 /* the boot snapshot + session state                                     */
 /* ==================================================================== */
 
-#define MPKG_SIDECAR_NAME "smpkg.digest"
-#define MPKG_SESSION_MAX  32
-
 typedef struct mpkg_boot_pkg {
-    char folded[SH_PACKAGE_NAME_CAP];   /* lowercased, '/'->'-' */
-    char digest[SH_MPKG_DIGEST_CHARS + 1];
-    int  has_digest;
+    char id[SH_MPKG_ID_CAP];
+    char root[MAX_PATH];
+    unsigned char fingerprint[32];
 } mpkg_boot_pkg;
 
 typedef struct mpkg_session_entry {
     char id[SH_MPKG_ID_CAP];
     char digest[SH_MPKG_DIGEST_CHARS + 1];
-    int  outcome;   /* 1 installed, 0 declined, 2 prompt in flight */
+    char root[MAX_PATH];
+    unsigned char fingerprint[32];
+    int  outcome;   /* 1 active, 2 prompt, 3 retry on a later load, 4 activating */
 } mpkg_session_entry;
 
 static CRITICAL_SECTION g_mpkg_lock;
@@ -722,14 +465,26 @@ static INIT_ONCE        g_mpkg_lock_once = INIT_ONCE_STATIC_INIT;
 
 static int           g_boot_captured = 0;
 static char          g_data_root[MAX_PATH] = {0};
-static mpkg_boot_pkg g_boot[SH_PACKAGES_MAX];
+static mpkg_boot_pkg *g_boot;
 static size_t        g_boot_count = 0;
 
-static mpkg_session_entry g_session[MPKG_SESSION_MAX];
-static size_t             g_session_count = 0;
+static mpkg_session_entry *g_session;
+static size_t             g_session_count, g_session_capacity;
 
 static int g_consent_mode = -1;   /* SH_MPKG_CONSENT_PROMPT */
 static char g_last_refusal[SH_MPKG_ERR_CAP] = "";
+static char g_notice[256];
+static unsigned g_notice_revision;
+static int g_notice_ticket;
+
+/* The engine tick owns installation and activation. Keep the cross-process
+ * lock until activation commits or the entire new group leaves overrides. */
+static struct {
+    HANDLE mutex;
+    char working[MAX_PATH], marker[MAX_PATH];
+    int active, failed;
+} g_install;
+static int mpkg_recover_interrupted(const char *root, char *error, size_t capacity);
 
 static BOOL CALLBACK mpkg_lock_init(PINIT_ONCE once, PVOID param, PVOID *ctx)
 {
@@ -741,127 +496,112 @@ static BOOL CALLBACK mpkg_lock_init(PINIT_ONCE once, PVOID param, PVOID *ctx)
 static void mpkg_lock(void)   { InitOnceExecuteOnce(&g_mpkg_lock_once, mpkg_lock_init, NULL, NULL); EnterCriticalSection(&g_mpkg_lock); }
 static void mpkg_unlock(void) { LeaveCriticalSection(&g_mpkg_lock); }
 
-static void mpkg_fold_name(const char *name, char *out, size_t cap)
+void sh_mpkg_report_error(const char *message)
 {
-    size_t i;
-    for (i = 0; name[i] && i < cap - 1; i++) {
-        char c = name[i];
-        if (c == '/' || c == '\\') c = '-';
-        else if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-        out[i] = c;
-    }
-    out[i] = '\0';
+    if (!message || !*message) return;
+    backend_log(message);
+    mpkg_lock();
+    strncpy_s(g_notice, sizeof(g_notice), message, _TRUNCATE); g_notice_revision++;
+    mpkg_unlock();
 }
 
-static int mpkg_read_sidecar(const char *pkg_root, char *digest_out)
+static void mpkg_notice_poll(void)
 {
-    char path[MAX_PATH];
-    char buf[SH_MPKG_DIGEST_CHARS + 1];
-    HANDLE h;
-    DWORD rd = 0;
-    size_t i;
-    if (_snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", pkg_root, MPKG_SIDECAR_NAME) < 0)
-        return 0;
-    h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) return 0;
-    if (!ReadFile(h, buf, SH_MPKG_DIGEST_CHARS, &rd, NULL) || rd != SH_MPKG_DIGEST_CHARS) {
-        CloseHandle(h);
-        return 0;
+    char message[256]; unsigned revision;
+    if (g_notice_ticket) {
+        if (sh_engine_dialog_poll(g_notice_ticket) == SH_ENGINE_DIALOG_PENDING) return;
+        sh_engine_dialog_release(g_notice_ticket); g_notice_ticket = 0;
     }
-    CloseHandle(h);
-    for (i = 0; i < SH_MPKG_DIGEST_CHARS; i++)
-        if (!sh_shard_is_hex(buf[i])) return 0;
-    memcpy(digest_out, buf, SH_MPKG_DIGEST_CHARS);
-    digest_out[SH_MPKG_DIGEST_CHARS] = '\0';
-    return 1;
+    if (!sh_engine_dialog_can_ask()) return;
+    mpkg_lock(); strcpy_s(message, sizeof(message), g_notice); revision = g_notice_revision; mpkg_unlock();
+    if (!message[0]) return;
+    g_notice_ticket = sh_engine_dialog_ask(0x29u, 1u, message);
+    if (g_notice_ticket) { mpkg_lock(); if (revision == g_notice_revision) g_notice[0] = 0; mpkg_unlock(); }
 }
 
 void sh_mpkg_boot_capture(const char *data_root)
 {
-    sh_package pkgs[SH_PACKAGES_MAX];
-    size_t count = 0, i;
-    char line[256];
-
+    sh_package_sources *sources;
+    size_t i;
+    char error[512] = "";
     if (!data_root || !data_root[0]) return;
     mpkg_lock();
-    if (g_boot_captured) { mpkg_unlock(); return; }   /* first capture wins: it is the BOOT state */
-    strncpy_s(g_data_root, sizeof g_data_root, data_root, _TRUNCATE);
-    if (!sh_packages_enumerate(data_root, pkgs, SH_PACKAGES_MAX, &count)) {
-        g_boot_count = 0;
-        /* Keep the failed launch snapshot terminal; a later disk scan must
-         * never become an implicit consent decision. */
-        g_boot_captured = -1;
-        mpkg_unlock();
-        backend_log("MPKG: boot inventory refused -- package enumeration was incomplete");
-        return;
+    if (g_boot_captured == 1) { mpkg_unlock(); return; }
+    strncpy_s(g_data_root, sizeof(g_data_root), data_root, _TRUNCATE);
+    if (!mpkg_recover_interrupted(data_root, error, sizeof(error))) {
+        g_boot_captured = -1; mpkg_unlock(); sh_mpkg_report_error(error); return;
+    }
+    sources = sh_package_sources_scan(data_root, error, sizeof(error));
+    if (!sources) {
+        g_boot_captured = -1; mpkg_unlock(); backend_log(error); return;
+    }
+    if (sources->package_count > SIZE_MAX / sizeof(*g_boot) ||
+        (sources->package_count && !(g_boot = (mpkg_boot_pkg *)calloc(sources->package_count, sizeof(*g_boot))))) {
+        sh_package_sources_free(sources); g_boot_captured = -1; mpkg_unlock();
+        backend_log("MPKG: cannot allocate authored package startup identities"); return;
     }
     g_boot_count = 0;
-    for (i = 0; i < count && g_boot_count < SH_PACKAGES_MAX; i++) {
-        mpkg_boot_pkg *b = &g_boot[g_boot_count++];
-        mpkg_fold_name(pkgs[i].name, b->folded, sizeof b->folded);
-        b->has_digest = mpkg_read_sidecar(pkgs[i].root, b->digest);
-        if (!b->has_digest) b->digest[0] = '\0';
+    for (i = 0; i < sources->package_count; i++) {
+        size_t j;
+        mpkg_boot_pkg *entry;
+        entry = &g_boot[g_boot_count];
+        for (j = 0; j < sources->component_count; j++) if (sources->components[j].owner == i && !sources->components[j].relative[0]) {
+            strcpy_s(entry->id, sizeof(entry->id), sources->components[j].descriptor.id); break;
+        }
+        strcpy_s(entry->root, sizeof(entry->root), sources->packages[i].root);
+        memcpy(entry->fingerprint, sources->fingerprints[i], 32); g_boot_count++;
     }
-    g_boot_captured = 1;
-    mpkg_unlock();
-    _snprintf_s(line, sizeof line, _TRUNCATE,
-        "MPKG: boot snapshot captured -- %zu package(s) under %s\\overrides",
-        g_boot_count, data_root);
-    backend_log(line);
+    sh_package_sources_free(sources); g_boot_captured = 1; mpkg_unlock();
+    backend_log("MPKG: exact authored package identities captured; no installation sidecars");
 }
 
-/* Name equivalence between a declared id and a boot package's folded name:
- * equal, or one ends with "-" + the other (grouping-folder prefixes fold to
- * leading "<group>-"). Generous by design -- see map_package.h. */
-static int mpkg_names_match(const char *declared, const char *folded)
+int sh_mpkg_startup_ready(void)
 {
-    size_t dn = strlen(declared), fn = strlen(folded);
-    if (dn == 0 || fn == 0) return 0;
-    if (strcmp(declared, folded) == 0) return 1;
-    if (dn > fn + 1 && declared[dn - fn - 1] == '-' &&
-        strcmp(declared + (dn - fn), folded) == 0) return 1;
-    if (fn > dn + 1 && folded[fn - dn - 1] == '-' &&
-        strcmp(folded + (fn - dn), declared) == 0) return 1;
-    return 0;
+    int ready;
+    mpkg_lock(); ready = g_boot_captured == 1; mpkg_unlock(); return ready;
 }
 
-/* Read the digest sidecar an install leaves beside a package. Returns 0 when the
- * package predates the sidecar or it cannot be read -- in which case its content
- * identity is simply unknown, which is different from known-and-different. */
-static int mpkg_read_sidecar_digest(const char *package_root, char *out, size_t out_cap)
+static int mpkg_source_satisfies(const char *root, const unsigned char fingerprint[32])
 {
-    char path[MAX_PATH];
-    HANDLE handle;
-    DWORD got = 0;
-
-    if (!package_root || !out || out_cap <= SH_MPKG_DIGEST_CHARS) return 0;
-    if (_snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", package_root,
-                    MPKG_SIDECAR_NAME) < 0) return 0;
-    handle = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                         FILE_ATTRIBUTE_NORMAL, NULL);
-    if (handle == INVALID_HANDLE_VALUE) return 0;
-    if (!ReadFile(handle, out, SH_MPKG_DIGEST_CHARS, &got, NULL) ||
-        got != SH_MPKG_DIGEST_CHARS) {
-        CloseHandle(handle);
-        return 0;
-    }
-    CloseHandle(handle);
-    out[SH_MPKG_DIGEST_CHARS] = '\0';
-    return 1;
+    char error[256];
+    sh_package_sources *sources = sh_package_sources_scan_directory(root, error, sizeof(error));
+    int matches = sources && !memcmp(sources->fingerprints[0], fingerprint, 32);
+    sh_package_sources_free(sources); return matches;
 }
 
-static int mpkg_boot_satisfies(const sh_mpkg_decl *d)
+/* 1: unchanged startup source; 2: matching runtime source requiring registration.
+ * ZIP compression, timestamps and member order are transport details. */
+static int mpkg_installed_kind(const sh_mpkg_decl *d, const unsigned char fingerprint[32])
 {
     size_t i;
     for (i = 0; i < g_boot_count; i++) {
-        const mpkg_boot_pkg *b = &g_boot[i];
-        if (b->has_digest && strcmp(b->digest, d->digest) == 0) return 1;
-        if (mpkg_names_match(d->id, b->folded)) {
-            if (b->has_digest && strcmp(b->digest, d->digest) != 0)
-                continue;   /* same name, different version: not satisfied */
-            return 1;
+        const mpkg_boot_pkg *entry = &g_boot[i];
+        if (!strcmp(entry->id, d->id) && !memcmp(entry->fingerprint, fingerprint, 32) &&
+            mpkg_source_satisfies(entry->root, fingerprint)) return 1;
+    }
+    for (i = 0; i < g_session_count; i++) {
+        mpkg_session_entry *entry = &g_session[i];
+        if (entry->outcome != 1 || strcmp(entry->id, d->id) || memcmp(entry->fingerprint, fingerprint, 32)) continue;
+        if (mpkg_source_satisfies(entry->root, fingerprint)) return 2;
+        entry->outcome = 3;
+    }
+    /* Authors can edit or add packages and refresh them without restarting.
+     * The boot snapshot and install history do not describe those sources.
+     * Match the current compilation and revalidate its complete on-disk tree;
+     * the caller still requires successful runtime registration before load. */
+    {
+        const sh_package_compilation *compiled = sh_package_runtime_library_acquire();
+        const sh_package_sources *sources = compiled ? compiled->sources : NULL;
+        int matches = 0;
+        if (sources) for (i = 0; i < sources->component_count; i++) {
+            const sh_package_component *component = &sources->components[i];
+            if (component->relative[0] || strcmp(component->descriptor.id, d->id) ||
+                memcmp(sources->fingerprints[component->owner], fingerprint, 32)) continue;
+            matches = mpkg_source_satisfies(sources->packages[component->owner].root, fingerprint);
+            if (matches) break;
         }
+        sh_package_runtime_release();
+        if (matches) return 2;
     }
     return 0;
 }
@@ -880,8 +620,16 @@ static mpkg_session_entry *mpkg_session_find(const char *id, const char *digest)
 static mpkg_session_entry *mpkg_session_add(const char *id, const char *digest, int outcome)
 {
     mpkg_session_entry *e;
-    if (g_session_count >= MPKG_SESSION_MAX) return NULL;
+    if (g_session_count == g_session_capacity) {
+        size_t capacity = g_session_capacity ? g_session_capacity * 2 : 16;
+        mpkg_session_entry *entries;
+        if (capacity < g_session_capacity || capacity > SIZE_MAX / sizeof(*entries)) return NULL;
+        entries = (mpkg_session_entry *)realloc(g_session, capacity * sizeof(*entries));
+        if (!entries) return NULL;
+        g_session = entries; g_session_capacity = capacity;
+    }
     e = &g_session[g_session_count++];
+    memset(e, 0, sizeof(*e));
     strcpy_s(e->id, sizeof e->id, id);
     strcpy_s(e->digest, sizeof e->digest, digest);
     e->outcome = outcome;
@@ -894,11 +642,16 @@ static mpkg_session_entry *mpkg_session_add(const char *id, const char *digest, 
 
 /* Stage every missing package in a chain for one consent decision. */
 typedef struct mpkg_staged {
+    sh_mpkg_install_completion completion;
+    void *completion_context;
     char id[SH_MPKG_ID_CAP];
     char digest[SH_MPKG_DIGEST_CHARS + 1];
     unsigned char *payload;
     size_t payload_len;
     unsigned files;
+    char destination[MAX_PATH], staging[MAX_PATH];
+    unsigned char fingerprint[32];
+    int existing;
     struct mpkg_staged *next;
 } mpkg_staged;
 
@@ -934,69 +687,459 @@ static unsigned mpkg_staged_files(const mpkg_staged *s)
     return n;
 }
 
-/* Perform the consented install. Returns 1 on success (and records it as
- * installed-this-session), 0 with `err` filled. Never touches an existing
- * folder: the user's overrides tree is not ours to overwrite. */
-static int mpkg_install_staged(const mpkg_staged *s, char *err, size_t err_cap)
+#ifdef SH_MAP_PACKAGE_TESTING
+static sh_mpkg_test_publish_fn g_publish_test;
+static void (*g_prepare_test)(const char *package);
+#endif
+
+/* No copy fallback or destination replacement: one same-volume directory
+ * rename publishes the complete set. Successful activation commits it. */
+static int mpkg_publish(const char *staging, const char *destination)
 {
-    char dest[MAX_PATH], sidecar[MAX_PATH], line[512];
-    char root[MAX_PATH];
-    unsigned files = 0;
-    DWORD attrs;
+#ifdef SH_MAP_PACKAGE_TESTING
+    if (g_publish_test) return g_publish_test(staging, destination);
+#endif
+    return MoveFileExA(staging, destination, MOVEFILE_WRITE_THROUGH) != 0;
+}
 
-    mpkg_lock();
-    strncpy_s(root, sizeof root, g_data_root, _TRUNCATE);
-    mpkg_unlock();
-    if (!root[0]) { mpkg_err(err, err_cap, "no data root captured"); return 0; }
-    if (_snprintf_s(dest, sizeof dest, _TRUNCATE, "%s\\overrides\\%s", root, s->id) < 0) {
-        mpkg_err(err, err_cap, "destination path too long");
-        return 0;
+/* Delete only our unpublished working directory. Never follow redirected
+ * entries, including a directory replaced by a junction during enumeration. */
+static int mpkg_discard_tree(const wchar_t *path)
+{
+    WIN32_FIND_DATAW found;
+    HANDLE search;
+    DWORD attributes = GetFileAttributesW(path), last;
+    size_t length = wcslen(path), capacity = length + MAX_PATH + 2u;
+    wchar_t *child;
+    int ok = 1;
+    if (attributes == INVALID_FILE_ATTRIBUTES) return GetLastError() == ERROR_FILE_NOT_FOUND;
+    if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) return 0;
+    if (!(attributes & FILE_ATTRIBUTE_DIRECTORY)) return DeleteFileW(path) != 0;
+    if (capacity > SH_PACKAGE_SOURCE_PATH_CAP) return 0;
+    child = (wchar_t *)malloc(capacity * sizeof(*child));
+    if (!child) return 0;
+    swprintf_s(child, capacity, L"%s\\*", path);
+    search = FindFirstFileW(child, &found);
+    if (search == INVALID_HANDLE_VALUE) ok = GetLastError() == ERROR_FILE_NOT_FOUND;
+    else {
+        do {
+            if (!wcscmp(found.cFileName, L".") || !wcscmp(found.cFileName, L"..")) continue;
+            swprintf_s(child, capacity, L"%s\\%s", path, found.cFileName);
+            if (!mpkg_discard_tree(child)) ok = 0;
+        } while (FindNextFileW(search, &found));
+        last = GetLastError(); FindClose(search);
+        if (last != ERROR_NO_MORE_FILES) ok = 0;
     }
-    attrs = GetFileAttributesA(dest);
-    if (attrs != INVALID_FILE_ATTRIBUTES) {
-        /* Report a differing installed digest as a version clash. Never
-         * overwrite an occupied folder, which another map may depend on.
-         */
-        char installed[SH_MPKG_DIGEST_CHARS + 1];
-        if (mpkg_read_sidecar_digest(dest, installed, sizeof installed) &&
-            strcmp(installed, s->digest) != 0) {
-            mpkg_err(err, err_cap,
-                     "a DIFFERENT version of '%s' is already installed (has %s, this map needs "
-                     "%s). Remove or rename the installed one to use this map's version",
-                     s->id, installed, s->digest);
-        } else {
-            mpkg_err(err, err_cap, "'%s' already exists on disk; not overwriting it", dest);
-        }
-        return 0;
-    }
-    if (!sh_mpkg_unpack(s->payload, s->payload_len, dest, &files, err, err_cap))
-        return 0;
-    /* Record the payload digest beside the package so future gates match by
-     * content, not by name. */
-    if (_snprintf_s(sidecar, sizeof sidecar, _TRUNCATE, "%s\\%s", dest, MPKG_SIDECAR_NAME) >= 0) {
-        HANDLE h = CreateFileA(sidecar, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-                               FILE_ATTRIBUTE_NORMAL, NULL);
-        if (h != INVALID_HANDLE_VALUE) {
-            DWORD wr;
-            WriteFile(h, s->digest, SH_MPKG_DIGEST_CHARS, &wr, NULL);
-            CloseHandle(h);
-        }
-    }
-    mpkg_lock();
-    {
-        mpkg_session_entry *e = mpkg_session_find(s->id, s->digest);
-        if (e) e->outcome = 1;
-        else mpkg_session_add(s->id, s->digest, 1);
-    }
-    mpkg_unlock();
-    _snprintf_s(line, sizeof line, _TRUNCATE,
-        "MPKG: package '%s' (digest %s) INSTALLED to %s -- %u file(s); "
-        "requesting a runtime re-arm, no restart needed", s->id, s->digest, dest, files);
-    backend_log(line);
+    free(child);
+    return ok && RemoveDirectoryW(path);
+}
 
-    /* Request a synchronous registration pass on the next engine tick. */
-    sh_decl_server_request_rearm();
+static int mpkg_working_name(const char *name)
+{
+    size_t i;
+    if (strlen(name) != 20 || strncmp(name, "map-", 4)) return 0;
+    for (i = 4; i < 20; i++) if (!((name[i] >= '0' && name[i] <= '9') ||
+                                 (name[i] >= 'a' && name[i] <= 'f'))) return 0;
     return 1;
+}
+
+static int mpkg_directory(const char *path)
+{
+    DWORD attributes;
+    if (!CreateDirectoryA(path, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return 0;
+    attributes = GetFileAttributesA(path);
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) &&
+        !(attributes & FILE_ATTRIBUTE_REPARSE_POINT);
+}
+
+static int mpkg_plain_ancestors(const char *path)
+{
+    wchar_t *wide = sh_package_source_wide_path(path);
+    size_t i;
+    int ok = wide != NULL;
+    if (!wide) return 0;
+    for (i = 7; ; i++) if (!wide[i] || wide[i] == L'\\') {
+        wchar_t saved = wide[i];
+        DWORD attributes;
+        wide[i] = 0; attributes = GetFileAttributesW(wide); wide[i] = saved;
+        if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+            (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) { ok = 0; break; }
+        if (!saved) break;
+    }
+    free(wide); return ok;
+}
+
+static HANDLE mpkg_install_lock(const char *root, char *error, size_t capacity)
+{
+    char canonical[MAX_PATH], name[80];
+    uint64_t hash = UINT64_C(14695981039346656037);
+    DWORD length, wait;
+    HANDLE mutex;
+    size_t i;
+    length = GetFullPathNameA(root, sizeof(canonical), canonical, NULL);
+    if (!root[0] || !length || length >= sizeof(canonical) || !mpkg_plain_ancestors(canonical)) {
+        mpkg_err(error, capacity, "package data root is unavailable or redirected"); return NULL;
+    }
+    CharLowerBuffA(canonical, (DWORD)strlen(canonical));
+    for (i = 0; canonical[i]; i++) { hash ^= (unsigned char)canonical[i]; hash *= UINT64_C(1099511628211); }
+    snprintf(name, sizeof(name), "Local\\SnapmapPlusPackageInstall-%016llx", (unsigned long long)hash);
+    mutex = CreateMutexA(NULL, FALSE, name);
+    wait = mutex ? WaitForSingleObject(mutex, 0) : WAIT_FAILED;
+    if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED) return mutex;
+    if (mutex) CloseHandle(mutex);
+    mpkg_err(error, capacity, "another package installation is active; retry after it finishes"); return NULL;
+}
+
+struct sh_mpkg_context {
+    char root[MAX_PATH];
+    size_t count;
+};
+
+const char *sh_mpkg_context_root(const sh_mpkg_context *context)
+{ return context && context->root[0] ? context->root : NULL; }
+
+size_t sh_mpkg_context_count(const sh_mpkg_context *context)
+{ return context ? context->count : 0; }
+
+int sh_mpkg_context_close(sh_mpkg_context **context)
+{
+    wchar_t *wide;
+    int ok;
+    if (!context || !*context) return 1;
+    if ((*context)->root[0]) {
+        /* Only this opaque handle can supply the private directory name. */
+        if (!mpkg_plain_ancestors((*context)->root)) return 0;
+        wide = sh_package_source_wide_path((*context)->root);
+        ok = wide && mpkg_discard_tree(wide);
+        free(wide);
+        if (!ok) return 0;
+    }
+    free(*context); *context = NULL; return 1;
+}
+
+sh_mpkg_context *sh_mpkg_context_open(const char *data_root, const char *json, size_t len,
+    char *error, size_t capacity)
+{
+    sh_mpkg_context *context = NULL;
+    sh_mpkg_decl *decls = NULL;
+    char canonical[MAX_PATH], cache[MAX_PATH], maps[MAX_PATH], directory[MAX_PATH];
+    DWORD root_length;
+    size_t count, i;
+    int created = 0;
+    if (error && capacity) error[0] = 0;
+    if (!json || !sh_json_validate(json, len, 128, NULL)) {
+        mpkg_err(error, capacity, "map package context requires valid map JSON"); return NULL;
+    }
+    count = mpkg_scan_internal(json, len, &decls);
+    if (count == SIZE_MAX || !(context = calloc(1, sizeof(*context)))) {
+        mpkg_err(error, capacity, "cannot allocate the complete map package context"); goto bad;
+    }
+    if (!count) { free(decls); return context; }
+    root_length = data_root && data_root[0] ? GetFullPathNameA(data_root, sizeof(canonical), canonical, NULL) : 0;
+    if (!root_length || root_length >= sizeof(canonical) || !mpkg_plain_ancestors(canonical) ||
+        snprintf(cache, sizeof(cache), "%s\\package-cache", canonical) >= sizeof(cache) ||
+        !mpkg_directory(cache) ||
+        snprintf(maps, sizeof(maps), "%s\\maps", cache) >= sizeof(maps) || !mpkg_directory(maps)) {
+        mpkg_err(error, capacity, "private map source cache is unavailable or redirected"); goto bad;
+    }
+    for (i = 0; i < 16; i++) {
+        unsigned char random[16]; char name[33]; size_t j;
+        if (BCryptGenRandom(NULL, random, sizeof(random), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) break;
+        for (j = 0; j < sizeof(random); j++) snprintf(name + j * 2, 3, "%02x", random[j]);
+        if (snprintf(directory, sizeof(directory), "%s\\map-%s", maps, name) >= sizeof(directory)) break;
+        if (CreateDirectoryA(directory, NULL)) { created = 1; break; }
+        if (GetLastError() != ERROR_ALREADY_EXISTS) break;
+    }
+    if (!created) { mpkg_err(error, capacity, "cannot reserve private map source directory"); goto bad; }
+    strcpy_s(context->root, sizeof(context->root), directory);
+    if (snprintf(directory, sizeof(directory), "%s\\overrides", context->root) >= sizeof(directory) ||
+        !CreateDirectoryA(directory, NULL)) {
+        mpkg_err(error, capacity, "cannot create private map source inventory"); goto bad;
+    }
+    for (i = 0; i < count; i++) {
+        unsigned char *payload, fingerprint[32];
+        size_t payload_length = 0;
+        char id[SH_PACKAGE_ID_CAP], destination[MAX_PATH];
+        int ok;
+        payload = sh_mpkg_extract(json, len, decls[i].id, &payload_length, error, capacity);
+        if (!payload) goto bad;
+        ok = sh_package_archive_identity(payload, payload_length, id, fingerprint, error, capacity);
+        if (ok && strcmp(id, decls[i].id)) {
+            mpkg_err(error, capacity, "map package descriptor does not match its delivery identity"); ok = 0;
+        }
+        if (ok && snprintf(destination, sizeof(destination), "%s\\%s", directory, id) >= sizeof(destination)) {
+            mpkg_err(error, capacity, "private map package root is too long"); ok = 0;
+        }
+        if (ok) ok = sh_package_archive_unpack(payload, payload_length, destination, NULL, error, capacity);
+        HeapFree(GetProcessHeap(), 0, payload);
+        if (ok && !mpkg_source_satisfies(destination, fingerprint)) {
+            mpkg_err(error, capacity, "private map source verification failed"); ok = 0;
+        }
+        if (!ok) goto bad;
+        context->count++;
+    }
+    free(decls); return context;
+bad:
+    free(decls);
+    if (!sh_mpkg_context_close(&context)) {
+        /* An abandoned private cache is never discovered as an installation. */
+        backend_log("MPKG: incomplete private map cache could not be discarded");
+        free(context);
+    }
+    return NULL;
+}
+
+static const char g_pending_magic[] = "Snapmap+ pending package installation\n";
+
+static int mpkg_pending_marker(const char *path, int create)
+{
+    char text[sizeof(g_pending_magic)];
+    DWORD attributes, bytes = 0;
+    HANDLE file;
+    int ok;
+    attributes = GetFileAttributesA(path);
+    if (!create && (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)))) return 0;
+    file = CreateFileA(path, create ? GENERIC_WRITE : GENERIC_READ, 0, NULL,
+        create ? CREATE_NEW : OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    if (create) ok = WriteFile(file, g_pending_magic, sizeof(g_pending_magic), &bytes, NULL) &&
+        bytes == sizeof(g_pending_magic) && FlushFileBuffers(file);
+    else ok = GetFileSize(file, NULL) == sizeof(g_pending_magic) &&
+        ReadFile(file, text, sizeof(text), &bytes, NULL) && bytes == sizeof(text) &&
+        !memcmp(text, g_pending_magic, sizeof(text));
+    CloseHandle(file); return ok;
+}
+
+/* A valid private marker is written before publishing the complete group.
+ * Cancel by moving the whole group outside overrides before deleting anything.
+ * The marker contains no author paths; only our checked group name is used. */
+static int mpkg_cancel_working(const char *root, const char *working,
+    const char *group, char *error, size_t capacity)
+{
+    char marker[MAX_PATH], destination[MAX_PATH], content[MAX_PATH], parent[MAX_PATH];
+    DWORD attributes;
+    wchar_t *wide;
+    if (!mpkg_working_name(group) || !mpkg_plain_ancestors(working) ||
+        snprintf(marker, sizeof(marker), "%s\\pending", working) >= sizeof(marker) ||
+        snprintf(content, sizeof(content), "%s\\content", working) >= sizeof(content) ||
+        snprintf(parent, sizeof(parent), "%s\\overrides", root) >= sizeof(parent) ||
+        snprintf(destination, sizeof(destination), "%s\\%s", parent, group) >= sizeof(destination)) goto refused;
+    attributes = GetFileAttributesA(marker);
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        if (!mpkg_pending_marker(marker, 0)) goto refused;
+        attributes = GetFileAttributesA(destination);
+        if (attributes != INVALID_FILE_ATTRIBUTES) {
+            if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+                !mpkg_plain_ancestors(parent) || !MoveFileExA(destination, content, MOVEFILE_WRITE_THROUGH)) goto refused;
+        } else if (GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND) goto refused;
+    } else if (GetLastError() != ERROR_FILE_NOT_FOUND) goto refused;
+    wide = sh_package_source_wide_path(working);
+    if (!wide || !mpkg_discard_tree(wide))
+        backend_log("MPKG: canceled temporary files remain outside overrides; the next install will discard them");
+    free(wide); return 1;
+refused:
+    mpkg_err(error, capacity, "cannot cancel unfinished package group '%s'; its cancellation record was retained", group);
+    return 0;
+}
+
+/* Cross-process lock held. Interrupted attempts are canceled, never resumed. */
+static int mpkg_discard_interrupted(const char *root, char *error, size_t capacity)
+{
+    WIN32_FIND_DATAA found;
+    char parent[MAX_PATH], path[MAX_PATH];
+    HANDLE search;
+    DWORD last;
+    int ok = 1;
+    if (snprintf(parent, sizeof(parent), "%s\\package-staging", root) >= sizeof(parent)) return 0;
+    last = GetFileAttributesA(parent);
+    if (last == INVALID_FILE_ATTRIBUTES) return GetLastError() == ERROR_FILE_NOT_FOUND;
+    if (!mpkg_plain_ancestors(parent)) return 0;
+    if (snprintf(path, sizeof(path), "%s\\*", parent) >= sizeof(path)) return 0;
+    search = FindFirstFileA(path, &found);
+    if (search == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND;
+    do {
+        if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !mpkg_working_name(found.cFileName)) continue;
+        if ((found.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+            snprintf(path, sizeof(path), "%s\\%s", parent, found.cFileName) >= sizeof(path) ||
+            !mpkg_cancel_working(root, path, found.cFileName, error, capacity)) { ok = 0; break; }
+    } while (FindNextFileA(search, &found));
+    last = GetLastError(); FindClose(search);
+    if (ok && last != ERROR_NO_MORE_FILES) ok = 0;
+    if (!ok && !error[0]) mpkg_err(error, capacity, "unfinished package installation could not be canceled");
+    return ok;
+}
+
+static int mpkg_recover_interrupted(const char *root, char *error, size_t capacity)
+{
+    HANDLE mutex = mpkg_install_lock(root, error, capacity);
+    int ok;
+    if (!mutex) return 0;
+    ok = mpkg_discard_interrupted(root, error, capacity);
+    ReleaseMutex(mutex); CloseHandle(mutex); return ok;
+}
+
+/* Only called at the engine browser boundary, after native consumers and their
+ * allocator scope have completed, while the previous compiler is still held. */
+int sh_mpkg_activation_commit(char *error, size_t capacity)
+{
+    size_t i;
+    HANDLE mutex;
+    mpkg_lock();
+    if (!g_install.active) { mpkg_unlock(); return 1; }
+    if (g_install.failed) {
+        mpkg_err(error, capacity, "the previous package installation still needs cancellation"); goto refused;
+    }
+    for (i = 0; i < g_session_count; i++) if (g_session[i].outcome == 4 &&
+        !mpkg_source_satisfies(g_session[i].root, g_session[i].fingerprint)) {
+        mpkg_err(error, capacity, "package '%s' changed during activation", g_session[i].id); goto refused;
+    }
+    if (g_install.marker[0] && !DeleteFileA(g_install.marker)) {
+        mpkg_err(error, capacity, "cannot commit package activation; load the map to retry"); goto refused;
+    }
+    for (i = 0; i < g_session_count; i++) if (g_session[i].outcome == 4) g_session[i].outcome = 1;
+    if (g_install.working[0]) RemoveDirectoryA(g_install.working);
+    mutex = g_install.mutex; memset(&g_install, 0, sizeof(g_install));
+    mpkg_unlock(); ReleaseMutex(mutex); CloseHandle(mutex);
+    backend_log("MPKG: whole package installation COMMITTED after successful runtime activation; no restart needed");
+    return 1;
+refused:
+    mpkg_unlock(); return 0;
+}
+
+int sh_mpkg_activation_cancel(void)
+{
+    char error[256] = "";
+    HANDLE mutex;
+    size_t i;
+    mpkg_lock();
+    if (!g_install.active) { mpkg_unlock(); return 1; }
+    g_install.failed = 1;
+    if (g_install.working[0] && !mpkg_cancel_working(g_data_root, g_install.working,
+        strrchr(g_install.working, '\\') + 1, error, sizeof(error))) {
+        mpkg_unlock(); sh_mpkg_report_error(error); return 0;
+    }
+    for (i = 0; i < g_session_count; i++) if (g_session[i].outcome == 4) g_session[i].outcome = 3;
+    mutex = g_install.mutex; memset(&g_install, 0, sizeof(g_install));
+    mpkg_unlock(); ReleaseMutex(mutex); CloseHandle(mutex);
+    sh_mpkg_report_error("Package installation canceled. Check the Snapmap+ log, resolve the reported error, then load the map to try again.");
+    return 1;
+}
+
+static int mpkg_install_batch(mpkg_staged *head, char *err, size_t err_cap)
+{
+    char root[MAX_PATH], parent[MAX_PATH], batch[MAX_PATH] = "", destination[MAX_PATH], line[512];
+    char content[MAX_PATH], marker[MAX_PATH] = "", group[24];
+    uint64_t nonce;
+    HANDLE mutex = NULL;
+    sh_package_sources *sources = NULL;
+    mpkg_staged *s;
+    size_t added = 0, i;
+    int success = 0, prepared = 0;
+    mpkg_lock();
+    if (g_install.active) {
+        mpkg_unlock(); mpkg_err(err, err_cap, "a package installation is awaiting activation or cancellation"); return 0;
+    }
+    strncpy_s(root, sizeof(root), g_data_root, _TRUNCATE); mpkg_unlock();
+    mutex = mpkg_install_lock(root, err, err_cap);
+    if (!mutex || !mpkg_discard_interrupted(root, err, err_cap)) goto done;
+    sources = sh_package_sources_scan(root, err, err_cap);
+    if (!sources) goto done;
+    for (s = head; s; s = s->next) {
+        char descriptor_id[SH_PACKAGE_ID_CAP];
+        if (!sh_package_archive_identity(s->payload, s->payload_len, descriptor_id,
+                                        s->fingerprint, err, err_cap)) goto done;
+        if (strcmp(descriptor_id, s->id)) {
+            mpkg_err(err, err_cap, "package descriptor does not match its map identity"); goto done;
+        }
+        for (i = 0; i < sources->component_count; i++) {
+            const sh_package_component *component = &sources->components[i];
+            if (component->relative[0] || strcmp(component->descriptor.id, s->id)) continue;
+            /* Another authored variant stays intact in its own directory. */
+            if (memcmp(sources->fingerprints[component->owner], s->fingerprint, 32)) continue;
+            strcpy_s(s->destination, sizeof(s->destination), sources->packages[component->owner].root);
+            s->existing = 1; break;
+        }
+        if (!s->existing) added++;
+    }
+    mpkg_lock();
+    for (s = head; s; s = s->next) if (!mpkg_session_find(s->id, s->digest)) break;
+    mpkg_unlock();
+    if (s) { mpkg_err(err, err_cap, "package consent state was lost before installation"); goto done; }
+    if (snprintf(parent, sizeof(parent), "%s\\package-staging", root) >= sizeof(parent) || !mpkg_directory(parent)) {
+        mpkg_err(err, err_cap, "cannot prepare package installation staging"); goto done;
+    }
+    if (added) {
+        if (BCryptGenRandom(NULL, (PUCHAR)&nonce, sizeof(nonce), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) {
+            mpkg_err(err, err_cap, "cannot create a unique installation folder"); goto done;
+        }
+        snprintf(group, sizeof(group), "map-%016llx", (unsigned long long)nonce);
+        if (snprintf(batch, sizeof(batch), "%s\\%s", parent, group) >= sizeof(batch) ||
+            snprintf(destination, sizeof(destination), "%s\\overrides\\%s", root, group) >= sizeof(destination) ||
+            snprintf(content, sizeof(content), "%s\\content", batch) >= sizeof(content) ||
+            snprintf(marker, sizeof(marker), "%s\\pending", batch) >= sizeof(marker) ||
+            !CreateDirectoryA(batch, NULL)) {
+            mpkg_err(err, err_cap, "cannot create package installation staging"); goto done;
+        }
+        prepared = 1;
+        if (!CreateDirectoryA(content, NULL)) {
+            mpkg_err(err, err_cap, "cannot create package content staging"); goto done;
+        }
+        for (s = head; s; s = s->next) if (!s->existing) {
+            if (snprintf(s->staging, sizeof(s->staging), "%s\\%s", content, s->id) >= sizeof(s->staging) ||
+                snprintf(s->destination, sizeof(s->destination), "%s\\%s", destination, s->id) >= sizeof(s->destination) ||
+                !sh_mpkg_unpack(s->payload, s->payload_len, s->staging, &s->files, err, err_cap)) goto done;
+#ifdef SH_MAP_PACKAGE_TESTING
+            if (g_prepare_test) g_prepare_test(s->staging);
+#endif
+        }
+    }
+    for (s = head; s; s = s->next) if (!mpkg_source_satisfies(
+            s->existing ? s->destination : s->staging, s->fingerprint)) {
+        mpkg_err(err, err_cap, "prepared package '%s' changed before publication", s->id); goto done;
+    }
+    snprintf(parent, sizeof(parent), "%s\\overrides", root);
+    if (!mpkg_directory(parent)) {
+        mpkg_err(err, err_cap, "cannot publish packages into overrides"); goto done;
+    }
+    if (added && !mpkg_pending_marker(marker, 1)) {
+        mpkg_err(err, err_cap, "cannot prepare the installation cancellation record"); goto done;
+    }
+    if (added && !mpkg_publish(content, destination)) {
+        mpkg_err(err, err_cap, "package installation canceled before commit (Windows error %lu); load the map to retry", GetLastError()); goto done;
+    }
+    /* Published as one complete group, but not committed until native activation
+     * succeeds. A crash retains the private marker so startup cancels this set. */
+    success = 1;
+    mpkg_lock();
+    g_install.active = 1; g_install.mutex = mutex; mutex = NULL;
+    if (added) {
+        strcpy_s(g_install.working, sizeof(g_install.working), batch);
+        strcpy_s(g_install.marker, sizeof(g_install.marker), marker);
+    }
+    for (s = head; s; s = s->next) {
+        mpkg_session_entry *e = mpkg_session_find(s->id, s->digest);
+        e->outcome = 4; strcpy_s(e->root, sizeof(e->root), s->destination);
+        memcpy(e->fingerprint, s->fingerprint, 32);
+    }
+    mpkg_unlock();
+    for (s = head; s; s = s->next) {
+        snprintf(line, sizeof(line), "MPKG: package '%s' (digest %s) PREPARED at %s -- %u file(s)",
+            s->id, s->digest, s->destination, s->files);
+        backend_log(line);
+    }
+    backend_log("MPKG: complete package set prepared; awaiting runtime activation before installation commits");
+    if (!head->completion) sh_decl_server_request_rearm();
+done:
+    if (!success && prepared) {
+        wchar_t *wide = sh_package_source_wide_path(batch);
+        if (!wide || !mpkg_discard_tree(wide))
+            backend_log("MPKG: canceled temporary data remains outside overrides; the next install will discard it");
+        free(wide);
+    }
+    sh_package_sources_free(sources);
+    if (mutex) { ReleaseMutex(mutex); CloseHandle(mutex); }
+    return success;
 }
 
 static void mpkg_record_decline(const char *id, const char *digest)
@@ -1005,14 +1148,46 @@ static void mpkg_record_decline(const char *id, const char *digest)
     mpkg_lock();
     {
         mpkg_session_entry *e = mpkg_session_find(id, digest);
-        if (e) e->outcome = 0;
-        else mpkg_session_add(id, digest, 0);
+        if (e) e->outcome = 3;
+        else mpkg_session_add(id, digest, 3);
     }
     mpkg_unlock();
     _snprintf_s(line, sizeof line, _TRUNCATE,
-        "MPKG: user DECLINED install of package '%s' (digest %s); "
-        "it will not be asked again this session", id, digest);
+        "MPKG: package '%s' (digest %s) was not installed for this load; "
+        "a later map load can request installation again", id, digest);
     backend_log(line);
+}
+
+static void mpkg_retry_staged(mpkg_staged *head)
+{
+    mpkg_staged *s;
+    mpkg_lock();
+    for (s = head; s; s = s->next) {
+        mpkg_session_entry *e = mpkg_session_find(s->id, s->digest);
+        if (e && e->outcome == 2) e->outcome = 3;
+    }
+    mpkg_unlock();
+}
+
+static void mpkg_decide_staged(mpkg_staged *head, int accepted)
+{
+    sh_mpkg_install_completion completion = head->completion;
+    void *context = head->completion_context;
+    int outcome = 0;
+    if (accepted) {
+        char error[SH_MPKG_ERR_CAP], line[SH_MPKG_ERR_CAP + 64];
+        outcome = mpkg_install_batch(head, error, sizeof(error)) ? 1 : -1;
+        if (outcome < 0) {
+            _snprintf_s(line, sizeof(line), _TRUNCATE, "MPKG: package set installation FAILED: %s", error);
+            sh_mpkg_report_error(line);
+            mpkg_retry_staged(head);
+        }
+    } else {
+        mpkg_staged *s;
+        for (s = head; s; s = s->next) mpkg_record_decline(s->id, s->digest);
+    }
+    mpkg_staged_free(head);
+    if (completion) completion(context, outcome);
 }
 
 /* Consent runs as a state machine on the engine main-thread tick, which owns
@@ -1045,36 +1220,19 @@ static void mpkg_consent_finish(int accepted)
 {
     mpkg_staged *s = g_consent_staged;
 
+    if (g_consent_ticket) sh_engine_dialog_release(g_consent_ticket);
     g_consent_staged = NULL;
     g_consent_ticket = 0;
     InterlockedExchange(&g_consent_state, MPKG_CONSENT_IDLE);
     if (!s) return;
 
-    if (accepted) {
-        /* Attempt each consented package and record failures independently. */
-        mpkg_staged *item;
-        for (item = s; item; item = item->next) {
-            char err[SH_MPKG_ERR_CAP];
-            if (mpkg_install_staged(item, err, sizeof err)) continue;
-            {
-                char line[512];
-                _snprintf_s(line, sizeof line, _TRUNCATE,
-                            "MPKG: install of package '%s' FAILED: %s", item->id, err);
-                backend_log(line);
-            }
-            mpkg_lock();
-            {
-                mpkg_session_entry *e = mpkg_session_find(item->id, item->digest);
-                if (e && e->outcome == 2) e->outcome = 0;   /* failed = do not re-prompt */
-            }
-            mpkg_unlock();
-        }
-    } else {
-        mpkg_staged *item;
-        for (item = s; item; item = item->next)
-            mpkg_record_decline(item->id, item->digest);
-    }
-    mpkg_staged_free(s);
+    mpkg_decide_staged(s, accepted);
+}
+
+void sh_mpkg_cancel_map_consent(void *context)
+{
+    if (g_consent_staged && g_consent_staged->completion &&
+        g_consent_staged->completion_context == context) mpkg_consent_finish(0);
 }
 
 void sh_mpkg_consent_poll(void)
@@ -1083,7 +1241,7 @@ void sh_mpkg_consent_poll(void)
     char text[256];
     mpkg_staged *s;
 
-    if (state == MPKG_CONSENT_IDLE) return;
+    if (state == MPKG_CONSENT_IDLE) { mpkg_notice_poll(); return; }
     s = g_consent_staged;
     if (!s) { InterlockedExchange(&g_consent_state, MPKG_CONSENT_IDLE); return; }
 
@@ -1096,40 +1254,29 @@ void sh_mpkg_consent_poll(void)
             }
             return;
         }
-        /* Keep the modal body within its 256-byte native string; details stay
-         * in the log.
-         */
+        /* Put the decision before the names and reserve the remainder count.
+         * Even long IDs and large sets must fit the native 256-byte body. */
         {
             unsigned count = mpkg_staged_count(s);
-            unsigned kb = (unsigned)((mpkg_staged_bytes(s) + 1023) / 1024);
+            unsigned long long kb = (unsigned long long)((mpkg_staged_bytes(s) + 1023) / 1024);
             unsigned files = mpkg_staged_files(s);
-            if (count == 1) {
-                _snprintf_s(text, sizeof text, _TRUNCATE,
-                            "This map brings its own mod package:  %s  (%u files, %u KB).  "
-                            "It has to be installed before the map can load.  Install it now?",
-                            s->id, files, kb);
-            } else {
-                /* List names that fit and report the remainder count. */
-                char names[168];
-                unsigned listed = 0;
-                mpkg_staged *item;
-                names[0] = '\0';
-                for (item = s; item; item = item->next) {
-                    size_t used = strlen(names);
-                    if (used + strlen(item->id) + 4 >= sizeof names) break;
-                    if (used) strncat_s(names, sizeof names, ", ", _TRUNCATE);
-                    strncat_s(names, sizeof names, item->id, _TRUNCATE);
-                    listed++;
-                }
-                if (listed < count) {
-                    char more[32];
-                    _snprintf_s(more, sizeof more, _TRUNCATE, " and %u more", count - listed);
-                    strncat_s(names, sizeof names, more, _TRUNCATE);
-                }
-                _snprintf_s(text, sizeof text, _TRUNCATE,
-                            "This map brings %u mod packages:  %s  (%u files, %u KB).  "
-                            "They have to be installed before the map can load.  Install them now?",
-                            count, names, files, kb);
+            unsigned listed = 0;
+            mpkg_staged *item;
+            _snprintf_s(text, sizeof(text), _TRUNCATE,
+                "This map needs %u mod package%s (%u files, %llu KB). Install %s now? ",
+                count, count == 1 ? "" : "s", files, kb, count == 1 ? "it" : "them");
+            for (item = s; item; item = item->next) {
+                char more[32] = "";
+                size_t used = strlen(text), separator = listed ? 2 : 0;
+                if (item->next) snprintf(more, sizeof(more), " and %u more", count - listed - 1);
+                if (used + separator + strlen(item->id) + strlen(more) >= sizeof(text)) break;
+                if (listed) strcat_s(text, sizeof(text), ", ");
+                strcat_s(text, sizeof(text), item->id); listed++;
+            }
+            if (listed < count) {
+                char more[48];
+                snprintf(more, sizeof(more), listed ? " and %u more" : "%u packages (see log)", count - listed);
+                strcat_s(text, sizeof(text), more);
             }
         }
         g_consent_ticket = sh_engine_dialog_ask(MPKG_CONSENT_GDM_ID,
@@ -1167,33 +1314,13 @@ static void mpkg_request_consent(mpkg_staged *s)
     mode = g_consent_mode;
     mpkg_unlock();
 
-    if (mode == 1) {          /* test seam: synchronous accept */
-        char err[SH_MPKG_ERR_CAP];
-        if (!mpkg_install_staged(s, err, sizeof err)) {
-            char line[512];
-            _snprintf_s(line, sizeof line, _TRUNCATE,
-                        "MPKG: install of package '%s' FAILED: %s", s->id, err);
-            backend_log(line);
-            mpkg_lock();
-            {
-                mpkg_session_entry *e = mpkg_session_find(s->id, s->digest);
-                if (e && e->outcome == 2) e->outcome = 0;
-            }
-            mpkg_unlock();
-        }
-        mpkg_staged_free(s);
-        return;
-    }
-    if (mode == 0) {          /* test seam: synchronous decline */
-        mpkg_record_decline(s->id, s->digest);
-        mpkg_staged_free(s);
-        return;
-    }
+    if (mode == 0 || mode == 1) { mpkg_decide_staged(s, mode); return; }
 
     if (InterlockedCompareExchange(&g_consent_state, MPKG_CONSENT_RAISE,
                                    MPKG_CONSENT_IDLE) != MPKG_CONSENT_IDLE) {
-        backend_log("MPKG: a consent dialog is already up; this one is declined rather than queued");
-        mpkg_record_decline(s->id, s->digest);
+        backend_log("MPKG: a consent dialog is already up; this package set can be offered on a later load");
+        mpkg_retry_staged(s);
+        if (s->completion) s->completion(s->completion_context, 0);
         mpkg_staged_free(s);
         return;
     }
@@ -1216,58 +1343,150 @@ static void mpkg_set_refusal(const char *reason)
     backend_log(line);
 }
 
-int sh_mpkg_gate(const char *json, size_t len)
+int sh_mpkg_activation_ready(void)
 {
-    sh_mpkg_decl decls[SH_MPKG_MAX_PACKAGES];
-    size_t count, i;
-    int overflow = 0;
-    size_t missing_count = 0;
+    int captured, installing;
+    mpkg_lock();
+    g_last_refusal[0] = 0; captured = g_boot_captured == 1; installing = g_install.active;
+    mpkg_unlock();
+    if (!captured || installing ||
+        InterlockedCompareExchange(&g_consent_state, 0, 0) != MPKG_CONSENT_IDLE) {
+        mpkg_set_refusal("package startup, consent or installation is still pending"); return 0;
+    }
+    if (!sh_package_runtime_admission_ready()) {
+        mpkg_set_refusal("installed package compilation or registration is incomplete or failed"); return 0;
+    }
+    return 1;
+}
+
+int sh_mpkg_request_map_install(const char *json, size_t length,
+    const sh_package_compilation *candidate, const sh_package_owners *owners,
+    sh_mpkg_install_completion completion, void *context, char *error, size_t capacity)
+{
+    sh_mpkg_decl *decls = NULL;
+    mpkg_staged *head = NULL, *tail = NULL;
+    const sh_package_sources *sources = candidate ? candidate->sources : NULL;
+    size_t count;
+    int ok = 0;
+    if (error && capacity) error[0] = 0;
+    if (!json || !length || !sources || !completion ||
+        !sh_package_owners_within(owners, sources->package_count) ||
+        !sh_package_owners_count(owners) || !sh_mpkg_activation_ready()) {
+        mpkg_err(error, capacity, "map installation requires a ready runtime and complete supplying owners"); return 0;
+    }
+    count = mpkg_scan_internal(json, length, &decls);
+    if (count == SIZE_MAX) goto done;
+    for (size_t owner = 0; owner < sources->package_count; owner++) {
+        const char *id = NULL;
+        const sh_mpkg_decl *decl = NULL;
+        mpkg_staged *entry;
+        unsigned char fingerprint[32];
+        char archive_id[SH_PACKAGE_ID_CAP];
+        if (!sh_package_owners_contains(owners, owner)) continue;
+        for (size_t i = 0; i < sources->component_count; i++) {
+            const sh_package_component *component = &sources->components[i];
+            if (component->owner == owner && !component->relative[0]) { id = component->descriptor.id; break; }
+        }
+        if (!id) goto done;
+        for (size_t i = 0; i < count; i++) if (!strcmp(decls[i].id, id)) { decl = &decls[i]; break; }
+        if (!decl) { mpkg_err(error, capacity, "map omits supplying package '%s'", id); goto done; }
+        /* Distinct owners must never be collapsed by an ambiguous identity. */
+        for (entry = head; entry; entry = entry->next) if (!strcmp(entry->id, id)) {
+            mpkg_err(error, capacity, "map has ambiguous delivery identity '%s'", id); goto done;
+        }
+        entry = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*entry));
+        if (!entry) goto done;
+        if (tail) tail->next = entry; else head = entry;
+        tail = entry;
+        strcpy_s(entry->id, sizeof(entry->id), id);
+        strcpy_s(entry->digest, sizeof(entry->digest), decl->digest);
+        entry->payload = sh_mpkg_extract(json, length, id, &entry->payload_len, error, capacity);
+        if (!entry->payload || !sh_package_archive_identity(entry->payload, entry->payload_len,
+            archive_id, fingerprint, error, capacity) || strcmp(archive_id, id) ||
+            memcmp(fingerprint, sources->fingerprints[owner], 32) ||
+            !mpkg_zip_survey(entry->payload, entry->payload_len, &entry->files, error, capacity)) {
+            if (error && capacity && !error[0]) mpkg_err(error, capacity, "map package '%s' changed after compilation", id);
+            goto done;
+        }
+    }
+    /* Reserve the entire request before any consent or publication. */
+    mpkg_lock();
+    for (mpkg_staged *entry = head; entry; entry = entry->next) {
+        mpkg_session_entry *session = mpkg_session_find(entry->id, entry->digest);
+        if (!session) session = mpkg_session_add(entry->id, entry->digest, 3);
+        if (!session) { mpkg_unlock(); goto done; }
+        session->outcome = 2;
+    }
+    mpkg_unlock();
+    head->completion = completion; head->completion_context = context;
+    mpkg_request_consent(head); head = NULL; ok = 1;
+done:
+    if (!ok) {
+        if (error && capacity && !error[0]) mpkg_err(error, capacity, "cannot prepare the complete map installation request");
+        mpkg_retry_staged(head);
+    }
+    mpkg_staged_free(head); free(decls); return ok;
+}
+
+static int mpkg_gate_declared(const char *json, size_t len,
+    const sh_mpkg_decl *decls, size_t count, int *installed)
+{
+    size_t i, missing_count = 0, session_installed_count = 0;
     const sh_mpkg_decl *first_missing = NULL;
-    size_t session_installed_count = 0;
     char reason[SH_MPKG_ERR_CAP];
 
-    if (!json || len == 0) return 1;
-
-    /* The fast path: one substring sweep, no allocation. */
-    if (!sh_shard_find(json, len, MPKG_HEADER_MAGIC, MPKG_MAGIC_LEN)) return 1;
-
-    count = mpkg_scan_internal(json, len, decls, SH_MPKG_MAX_PACKAGES, &overflow);
-    if (count == 0 && !overflow) return 1;   /* "smpkg." was prose, not a shard header */
-    if (overflow) {
-        mpkg_set_refusal("map declares more packages than the gate can vet");
+    mpkg_lock();
+    if (g_install.active) {
+        mpkg_unlock();
+        mpkg_set_refusal("package compilation or registration is incomplete or failed; installation has not committed");
         return 0;
     }
+    mpkg_unlock();
+
     if (g_boot_captured != 1) {
         /* A declared package requires a captured boot state; refuse otherwise. */
         mpkg_set_refusal("map declares packages but the boot package snapshot is missing");
         return 0;
     }
 
-    mpkg_lock();
     for (i = 0; i < count; i++) {
         const sh_mpkg_decl *d = &decls[i];
-        mpkg_session_entry *e;
-        if (mpkg_boot_satisfies(d)) continue;
-        e = mpkg_session_find(d->id, d->digest);
+        size_t payload_len = 0;
+        unsigned char fingerprint[32], *payload;
+        char id[SH_PACKAGE_ID_CAP], error[SH_MPKG_ERR_CAP];
+        int valid;
+        payload = sh_mpkg_extract(json, len, d->id, &payload_len, error, sizeof(error));
+        valid = payload && sh_package_archive_identity(payload, payload_len, id, fingerprint, error, sizeof(error));
+        if (payload) HeapFree(GetProcessHeap(), 0, payload);
+        if (!valid || strcmp(id, d->id)) {
+            _snprintf_s(reason, sizeof(reason), _TRUNCATE, "package '%s' cannot be loaded: %s", d->id,
+                        valid ? "descriptor does not match its map identity" : error);
+            mpkg_set_refusal(reason); return 0;
+        }
+        mpkg_lock(); installed[i] = mpkg_installed_kind(d, fingerprint); mpkg_unlock();
+        if (installed[i] == 1) continue;
         missing_count++;
-        if (e && e->outcome == 1) session_installed_count++;
+        if (installed[i] == 2) session_installed_count++;
         if (!first_missing) {
             first_missing = d;
         }
     }
-    mpkg_unlock();
 
-    if (missing_count == 0) return 1;   /* everything already installed: silent pass */
+    if (missing_count == 0) {
+        /* Startup identities prove disk content, not a successful activation. */
+        if (sh_package_runtime_ready() && sh_decl_server_registration_succeeded()) return 1;
+        mpkg_set_refusal("installed package compilation or registration is incomplete or failed"); return 0;
+    }
 
     if (session_installed_count == missing_count) {
         /* Session installs pass only after declaration registration reports success. */
-        if (sh_decl_server_registration_succeeded()) {
-            backend_log("MPKG: package installed and registered at runtime this session; "
+        if (sh_package_runtime_ready() && sh_decl_server_registration_succeeded()) {
+            backend_log("MPKG: matching authored package compiled and registered at runtime; "
                         "allowing the load without a restart");
             return 1;
         }
         _snprintf_s(reason, sizeof reason, _TRUNCATE,
-            "package '%s' was installed this session but its registration is incomplete or failed; "
+            "package '%s' is present but its compilation or registration is incomplete or failed; "
             "check the package registration log before retrying", first_missing->id);
         mpkg_set_refusal(reason);
         return 0;
@@ -1279,67 +1498,64 @@ int sh_mpkg_gate(const char *json, size_t len)
         first_missing->present, first_missing->total);
     mpkg_set_refusal(reason);
 
-    /* Stage all extractable missing packages together. Skip prior decisions,
-     * in-flight prompts and failed extractions, recording each outcome.
-     */
+    /* Prepare one complete consent request. An allocation or extraction failure
+     * must not turn the available prefix into a smaller installation offer. */
     {
         mpkg_staged *head = NULL, *tail = NULL;
-        size_t i;
+        char err[SH_MPKG_ERR_CAP] = "";
+        int complete = 1;
 
         for (i = 0; i < count; i++) {
             const sh_mpkg_decl *d = &decls[i];
             mpkg_session_entry *e;
+            mpkg_staged *s;
             int should_offer = 0;
-            char err[SH_MPKG_ERR_CAP];
-            size_t payload_len = 0;
-            unsigned char *payload;
-            unsigned files = 0;
 
-            if (mpkg_boot_satisfies(d)) continue;
+            if (installed[i]) continue;
 
             mpkg_lock();
             e = mpkg_session_find(d->id, d->digest);
-            if (!e && mpkg_session_add(d->id, d->digest, 2))
-                should_offer = 1;              /* marked in-flight */
+            if (!e) e = mpkg_session_add(d->id, d->digest, 3);
+            if (e && e->outcome == 3) { e->outcome = 2; should_offer = 1; }
             mpkg_unlock();
+            if (!e) { complete = 0; mpkg_err(err, sizeof(err), "cannot reserve package consent state"); break; }
             if (!should_offer) continue;
-
-            payload = sh_mpkg_extract(json, len, d->id, &payload_len, err, sizeof err);
-            if (payload && !mpkg_zip_survey(payload, payload_len, &files, err, sizeof err)) {
-                HeapFree(GetProcessHeap(), 0, payload);
-                payload = NULL;
-            }
-            if (!payload) {
-                char line[SH_MPKG_ERR_CAP + 96];
-                _snprintf_s(line, sizeof line, _TRUNCATE,
-                    "MPKG: package '%s' cannot be offered for install -- %s", d->id, err);
-                backend_log(line);
+            s = (mpkg_staged *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*s));
+            if (!s) {
                 mpkg_lock();
                 e = mpkg_session_find(d->id, d->digest);
-                if (e && e->outcome == 2) e->outcome = 0;   /* nothing installable: don't re-ask */
+                if (e && e->outcome == 2) e->outcome = 3;
                 mpkg_unlock();
-                continue;
+                complete = 0; mpkg_err(err, sizeof(err), "cannot allocate complete package consent request"); break;
             }
-            {
-                mpkg_staged *s = (mpkg_staged *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
-                                                          sizeof *s);
-                if (!s) {
-                    HeapFree(GetProcessHeap(), 0, payload);
-                    continue;
-                }
-                strcpy_s(s->id, sizeof s->id, d->id);
-                strcpy_s(s->digest, sizeof s->digest, d->digest);
-                s->payload = payload;
-                s->payload_len = payload_len;
-                s->files = files;
-                s->next = NULL;
-                if (tail) tail->next = s; else head = s;
-                tail = s;
+            strcpy_s(s->id, sizeof(s->id), d->id);
+            strcpy_s(s->digest, sizeof(s->digest), d->digest);
+            if (tail) tail->next = s; else head = s;
+            tail = s;
+            s->payload = sh_mpkg_extract(json, len, d->id, &s->payload_len, err, sizeof(err));
+            if (!s->payload || !mpkg_zip_survey(s->payload, s->payload_len, &s->files, err, sizeof(err))) {
+                complete = 0; break;
             }
         }
-        if (head) mpkg_request_consent(head);   /* takes ownership of the chain */
+        if (!complete) {
+            sh_mpkg_report_error(err); mpkg_retry_staged(head); mpkg_staged_free(head);
+        } else if (head) mpkg_request_consent(head);   /* takes ownership of the chain */
     }
     return 0;
+}
+
+int sh_mpkg_gate(const char *json, size_t len)
+{
+    sh_mpkg_decl *decls = NULL;
+    int *installed = NULL, result = 0;
+    size_t count;
+    if (!json || !len || !sh_shard_find(json, len, MPKG_HEADER_MAGIC, MPKG_MAGIC_LEN)) return 1;
+    count = mpkg_scan_internal(json, len, &decls);
+    if (count == SIZE_MAX || count > SIZE_MAX / sizeof(*installed) ||
+        (count && !(installed = (int *)calloc(count, sizeof(*installed))))) {
+        mpkg_set_refusal("cannot allocate the complete map package inventory");
+    } else result = !count || mpkg_gate_declared(json, len, decls, count, installed);
+    free(installed); free(decls); return result;
 }
 
 /* ==================================================================== */
@@ -1354,15 +1570,27 @@ void sh_mpkg_test_set_consent_mode(int mode)
     mpkg_unlock();
 }
 
+void sh_mpkg_test_set_publish(sh_mpkg_test_publish_fn publish) { g_publish_test = publish; }
+void sh_mpkg_test_set_prepare(void (*prepare)(const char *package)) { g_prepare_test = prepare; }
+
 void sh_mpkg_test_reset(void)
 {
+    sh_mpkg_activation_cancel();
+    if (g_consent_ticket) sh_engine_dialog_release(g_consent_ticket);
+    if (g_notice_ticket) sh_engine_dialog_release(g_notice_ticket);
+    mpkg_staged_free(g_consent_staged); g_consent_staged = NULL;
+    g_consent_ticket = g_notice_ticket = 0;
+    g_consent_state = g_consent_waited = 0;
     mpkg_lock();
     g_boot_captured = 0;
     g_data_root[0] = '\0';
-    g_boot_count = 0;
-    g_session_count = 0;
+    free(g_boot); g_boot = NULL; g_boot_count = 0;
+    free(g_session); g_session = NULL; g_session_count = g_session_capacity = 0;
     g_last_refusal[0] = '\0';
     g_consent_mode = -1;
+    g_publish_test = NULL;
+    g_prepare_test = NULL;
+    g_notice[0] = 0; g_notice_revision = 0;
     mpkg_unlock();
 }
 
@@ -1377,7 +1605,7 @@ int sh_mpkg_test_session_installed_count(void)
     size_t i;
     mpkg_lock();
     for (i = 0; i < g_session_count; i++)
-        if (g_session[i].outcome == 1) n++;
+        if (g_session[i].outcome == 1 || g_session[i].outcome == 4) n++;
     mpkg_unlock();
     return n;
 }

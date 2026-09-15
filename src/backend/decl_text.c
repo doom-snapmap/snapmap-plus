@@ -66,17 +66,20 @@ static int quote_is_inherit_key(const unsigned char *text, size_t quote_start)
     return ascii_equal_span(text + i, key_end - i, "inherit");
 }
 
-static void add_quoted_reference(const sh_decl_reference_item *items, size_t count,
+static void add_reference(const sh_decl_reference_item *items, size_t count,
                                  size_t dependent, const unsigned char *text,
                                  size_t length, unsigned char *edges,
                                  unsigned char *inherit_edges,
                                  size_t *indegree, size_t *edge_count,
-                                 int is_inherit)
+                                 int is_inherit, const char *required_type)
 {
     size_t i;
     size_t match = count;
     size_t matches = 0;
     for (i = 0; i < count; i++) {
+        if (required_type && (!items[i].type ||
+            !ascii_equal_span((const unsigned char *)items[i].type,
+                               strlen(items[i].type), required_type))) continue;
         if (!ascii_equal_span(text, length, items[i].name)) continue;
         match = i;
         matches++;
@@ -144,10 +147,27 @@ static void scan_references(const sh_decl_reference_item *items, size_t count,
                 }
             }
             if (i < length && !escaped)
-                add_quoted_reference(items, count, dependent, text + start,
+                add_reference(items, count, dependent, text + start,
                                      i - start, edges, inherit_edges, indegree,
-                                     edge_count, quote_is_inherit_key(text, quote_start));
+                                     edge_count, quote_is_inherit_key(text, quote_start), NULL);
             if (i < length) i++;
+            continue;
+        }
+        /* Table lookups in native material expressions are bare identifiers,
+         * not quoted paths. Match the complete token and only the table type:
+         * an unrelated decl with the same name cannot make this ambiguous.
+         * Array fields in other decl types are not material expressions. */
+        if (is_decl_key_char(c) && items[dependent].type &&
+            ascii_equal_span((const unsigned char *)items[dependent].type,
+                              strlen(items[dependent].type), "material")) {
+            size_t start = i;
+            size_t end;
+            while (i < length && is_decl_key_char(text[i])) i++;
+            end = i;
+            while (i < length && is_decl_space(text[i])) i++;
+            if (i < length && text[i] == '[')
+                add_reference(items, count, dependent, text + start, end - start,
+                              edges, inherit_edges, indegree, edge_count, 0, "table");
             continue;
         }
         i++;

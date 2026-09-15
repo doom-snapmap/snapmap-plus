@@ -342,9 +342,9 @@ void h_sh_spawn(idCmdArgs *a)
 
     char cmd[256];
     _snprintf_s(cmd, sizeof cmd, _TRUNCATE,
-        "ai_ScriptCmdEnt %s teleport %f %f %f", spawnname, v[0], v[1], v[2]);
+        "ai_ScriptCmdEnt %s teleport %f %f %f 0 0 0", spawnname, v[0], v[1], v[2]);
     if (cmd_exec_text(g_cmdsys, cmd))
-        sh_printf("sh_spawn: teleported '%s' to the player at (%f %f %f).\n", spawnname, v[0], v[1], v[2]);
+        sh_printf("sh_spawn: requested teleport of '%s' to the player at (%f %f %f).\n", spawnname, v[0], v[1], v[2]);
     else
         sh_printf("sh_spawn: teleport dispatch failed.\n");
 }

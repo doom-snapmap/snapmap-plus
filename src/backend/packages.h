@@ -5,34 +5,22 @@
 #include <windows.h>
 #include <stddef.h>
 
-#define SH_PACKAGES_MAX      64
-#define SH_PACKAGE_NAME_CAP  160
-/* Bound grouping-folder depth to keep enumeration finite. */
-#define SH_PACKAGES_MAX_DEPTH 8
+#define SH_PACKAGE_NAME_CAP  MAX_PATH
 
-/* A package is a folder below overrides with a package.json marker. Folders
- * without a marker are grouping folders; enumeration stops descending at each
- * package. Decl identities follow decls/<type>/<logical-name>.decl.
- *
- * Shadow lookup uses descending package priority (default 0), then case-
- * insensitive name. package_conflicts reports overlapping files. New decl
- * publication instead rejects differing bodies for the same identity and
- * combines identical duplicates. Direct overrides/<engine-name> lookup
- * remains a separate shadow path.
- */
+/* Discover outer package folders. A folder with package.json is one authored
+ * delivery unit; nested components are inventoried by package_sources. Unmarked
+ * folders are groups, never direct engine-provider roots. */
 typedef struct sh_package {
     char name[SH_PACKAGE_NAME_CAP];  /* path below overrides\, '/'-separated */
     char root[MAX_PATH];             /* absolute path to the package folder */
-    int  priority;                   /* package.json "priority", default 0 */
 } sh_package;
 
-/* Enumerate below <data_root>/overrides by descending priority, then case-
- * insensitive name. Skip reparse points and stop descending at package
+/* Enumerate below <data_root>/overrides by case-insensitive folder name. Skip reparse points and stop descending at package
  * markers. Returns 1 for a complete result, including empty; 0 for read or
- * capacity failure. A failure always sets count to zero.
+ * allocation failure. Initialize *out to NULL; a repeat call releases the prior
+ * inventory. Free *out when finished. Failure clears both outputs.
  */
-int sh_packages_enumerate(const char *data_root, sh_package *out, size_t capacity,
-                          size_t *count);
+int sh_packages_enumerate(const char *data_root, sh_package **out, size_t *count);
 
 /* Join `<package root>\<subdirectory>` into `out`. Returns 0 when it would not
  * fit. */

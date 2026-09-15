@@ -5,16 +5,14 @@
 #include <windows.h>
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "packages.h"
 
 #define PK_OVERRIDES_SUFFIX "\\overrides"
 #define PK_MARKER           "package.json"
-/* Engine-meaningful, never a package or a grouping folder: the file shadow
- * serves ".inc" shader includes straight out of it. */
-#define PK_RESERVED_NAME    "shader_includes"
-
 typedef HANDLE (WINAPI *pk_find_first_fn)(LPCSTR, LPWIN32_FIND_DATAA);
 typedef BOOL (WINAPI *pk_find_next_fn)(HANDLE, LPWIN32_FIND_DATAA);
 typedef BOOL (WINAPI *pk_find_close_fn)(HANDLE);
@@ -41,39 +39,6 @@ static int pk_is_file(const char *path)
            !(attributes & FILE_ATTRIBUTE_REPARSE_POINT);
 }
 
-/* Read priority from a bounded package.json prefix using a narrow integer
- * scan. Missing keys or unusable values default to 0; this is not full JSON
- * validation.
- */
-static int pk_read_priority(const char *directory)
-{
-    char marker[MAX_PATH];
-    char body[1024];
-    FILE *file = NULL;
-    size_t read_bytes;
-    const char *key;
-    int sign = 1, value = 0, digits = 0;
-
-    if (_snprintf_s(marker, sizeof(marker), _TRUNCATE, "%s\\%s",
-                    directory, PK_MARKER) < 0) return 0;
-    if (fopen_s(&file, marker, "rb") != 0 || !file) return 0;
-    read_bytes = fread(body, 1, sizeof(body) - 1, file);
-    fclose(file);
-    body[read_bytes] = '\0';
-
-    key = strstr(body, "\"priority\"");
-    if (!key) return 0;
-    key += 10;                                     /* past the quoted key */
-    while (*key == ' ' || *key == '	' || *key == ':') key++;
-    if (*key == '-') { sign = -1; key++; }
-    while (*key >= '0' && *key <= '9' && digits < 9) {
-        value = value * 10 + (*key - '0');
-        key++;
-        digits++;
-    }
-    return digits ? sign * value : 0;
-}
-
 static int pk_has_marker(const char *directory)
 {
     char marker[MAX_PATH];
@@ -82,50 +47,36 @@ static int pk_has_marker(const char *directory)
     return pk_is_file(marker);
 }
 
-static int pk_append(sh_package *out, size_t capacity, size_t *count,
-                     const char *name, const char *root, int priority)
-{
-    size_t i;
-    if (*count >= capacity) return 0;
-    for (i = 0; i < *count; i++)
-        if (_stricmp(out[i].name, name) == 0) return 1;   /* already present */
-    if (strcpy_s(out[*count].name, sizeof(out[*count].name), name) != 0 ||
-        strcpy_s(out[*count].root, sizeof(out[*count].root), root) != 0)
-        return 0;
-    out[*count].priority = priority;
-    (*count)++;
-    return 1;
-}
+typedef struct pk_inventory { sh_package *items; size_t count, capacity; } pk_inventory;
 
-/* Higher priority first, then case-insensitive name; insertion sort is
- * stable.
- */
-static int pk_before(const sh_package *a, const sh_package *b)
+static int pk_append(pk_inventory *inventory, const char *name, const char *root)
 {
-    if (a->priority != b->priority) return a->priority > b->priority;
-    return _stricmp(a->name, b->name) < 0;
-}
-
-static void pk_sort(sh_package *out, size_t count)
-{
-    size_t i, j;
-    for (i = 1; i < count; i++) {
-        sh_package key = out[i];
-        j = i;
-        while (j > 0 && pk_before(&key, &out[j - 1])) {
-            out[j] = out[j - 1];
-            j--;
-        }
-        out[j] = key;
+    sh_package *grown, *entry;
+    size_t capacity;
+    if (inventory->count == inventory->capacity) {
+        capacity = inventory->capacity ? inventory->capacity * 2 : 16;
+        if (capacity < inventory->capacity || capacity > SIZE_MAX / sizeof(*grown)) return 0;
+        grown = (sh_package *)realloc(inventory->items, capacity * sizeof(*grown));
+        if (!grown) return 0;
+        inventory->items = grown; inventory->capacity = capacity;
     }
+    entry = &inventory->items[inventory->count];
+    if (strcpy_s(entry->name, sizeof(entry->name), name) ||
+        strcpy_s(entry->root, sizeof(entry->root), root)) return 0;
+    inventory->count++; return 1;
+}
+
+/* Stable display order; conflicts are resolved by the compiler. */
+static int pk_compare(const void *a, const void *b)
+{
+    return _stricmp(((const sh_package *)a)->name, ((const sh_package *)b)->name);
 }
 
 /* Search `directory` (whose path below overrides\ is `prefix`) for packages.
  * A directory carrying the marker IS a package and is not descended into; any
  * other directory is a grouping folder and is searched. Returns 0 if any part
  * of the subtree could not be read or did not fit. */
-static int pk_scan(const char *directory, const char *prefix, unsigned depth,
-                   sh_package *out, size_t capacity, size_t *count)
+static int pk_scan(const char *directory, const char *prefix, pk_inventory *inventory)
 {
     char pattern[MAX_PATH];
     char child[MAX_PATH];
@@ -134,7 +85,6 @@ static int pk_scan(const char *directory, const char *prefix, unsigned depth,
     HANDLE search;
     int complete = 1;
 
-    if (depth > SH_PACKAGES_MAX_DEPTH) return 0;
     if (_snprintf_s(pattern, sizeof(pattern), _TRUNCATE, "%s\\*", directory) < 0)
         return 0;
     search = g_find_first(pattern, &found);
@@ -147,7 +97,6 @@ static int pk_scan(const char *directory, const char *prefix, unsigned depth,
         if (found.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
         if (strcmp(found.cFileName, ".") == 0 ||
             strcmp(found.cFileName, "..") == 0) continue;
-        if (depth == 0 && _stricmp(found.cFileName, PK_RESERVED_NAME) == 0) continue;
 
         if (_snprintf_s(child, sizeof(child), _TRUNCATE, "%s\\%s",
                         directory, found.cFileName) < 0) { complete = 0; continue; }
@@ -160,11 +109,10 @@ static int pk_scan(const char *directory, const char *prefix, unsigned depth,
          * searchable groups.
          */
         if (pk_has_marker(child)) {
-            if (!pk_append(out, capacity, count, name, child,
-                           pk_read_priority(child))) complete = 0;
+            if (!pk_append(inventory, name, child)) complete = 0;
             continue;                       /* a package is a leaf */
         }
-        if (!pk_scan(child, name, depth + 1, out, capacity, count)) complete = 0;
+        if (!pk_scan(child, name, inventory)) complete = 0;
     } while (g_find_next(search, &found));
     /* FindNextFile also returns FALSE when enumeration was interrupted. Read
      * its error before FindClose can overwrite it: a partial package set is
@@ -174,15 +122,16 @@ static int pk_scan(const char *directory, const char *prefix, unsigned depth,
     return complete;
 }
 
-int sh_packages_enumerate(const char *data_root, sh_package *out, size_t capacity,
-                          size_t *count)
+int sh_packages_enumerate(const char *data_root, sh_package **out, size_t *count)
 {
     char overrides[MAX_PATH];
     DWORD attributes;
     int complete;
+    pk_inventory inventory = {0};
 
+    if (out) { free(*out); *out = NULL; }
     if (count) *count = 0;
-    if (!data_root || !data_root[0] || !out || capacity == 0 || !count) return 0;
+    if (!data_root || !data_root[0] || !out || !count) return 0;
     if (_snprintf_s(overrides, sizeof(overrides), _TRUNCATE, "%s%s",
                     data_root, PK_OVERRIDES_SUFFIX) < 0) return 0;
     attributes = g_get_attributes(overrides);
@@ -193,13 +142,13 @@ int sh_packages_enumerate(const char *data_root, sh_package *out, size_t capacit
     if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) ||
         (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return 0;
 
-    complete = pk_scan(overrides, "", 0, out, capacity, count);
+    complete = pk_scan(overrides, "", &inventory);
     if (!complete) {
         /* No consumer may mistake an admitted prefix for an inventory. */
-        *count = 0;
-        return 0;
+        free(inventory.items); return 0;
     }
-    pk_sort(out, *count);
+    if (inventory.count) qsort(inventory.items, inventory.count, sizeof(*inventory.items), pk_compare);
+    *out = inventory.items; *count = inventory.count;
     return complete;
 }
 

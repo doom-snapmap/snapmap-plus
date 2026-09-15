@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "backend_log.h"
 #include "decl_visibility.h"
@@ -39,7 +40,6 @@
     "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 78 FF FF FF " \
     "48 81 EC 88 01 00 00 48 C7 44 24 30 FE FF FF FF"
 #define DV_PATH_PREFIX     "generated/decls/"
-#define DV_KEY_CAP         512
 
 /* GetCacheFileInfo takes seven arguments: self, path, four output pointers
  * and quiet. It clears the outputs on entry. Nonzero quiet makes a miss
@@ -52,6 +52,7 @@ typedef unsigned char (*dv_probe_fn)(void *self, const char *path, void *out1,
 
 static dv_probe_fn g_orig_probe;
 static void **g_slot;
+static void *g_manager;
 
 static int dv_safe_read(const void *source, void *destination, size_t length)
 {
@@ -79,16 +80,18 @@ static int dv_probe_key(const char *path, char *key, size_t key_size)
 /* Guard reads of the engine-owned path during map loading. */
 static int dv_path_is_published(const char *path)
 {
-    char key[DV_KEY_CAP];
-    int mapped = 0;
-
+    char *key = NULL;
+    size_t length;
+    int result = -1;
     __try {
-        mapped = dv_probe_key(path, key, sizeof(key));
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-    if (!mapped) return 0;
-    return sh_overrides_internal_decl_published(key);
+        if (!path || _strnicmp(path, DV_PATH_PREFIX, sizeof(DV_PATH_PREFIX) - 1)) return 0;
+        length = strlen(path);
+        if (length > SIZE_MAX - sizeof(SH_OVERRIDES_INTERNAL_DECL_PREFIX)) return -1;
+        key = (char *)malloc(length + sizeof(SH_OVERRIDES_INTERNAL_DECL_PREFIX));
+        if (key) result = dv_probe_key(path, key, length + sizeof(SH_OVERRIDES_INTERNAL_DECL_PREFIX)) ?
+            sh_overrides_internal_decl_published(key) : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { result = -1; }
+    free(key); return result;
 }
 
 static unsigned char dv_probe_hook(void *self, const char *path, void *out1,
@@ -109,7 +112,18 @@ static unsigned char dv_probe_hook(void *self, const char *path, void *out1,
      * through the provider.
      */
     if (original) return original;
-    return dv_path_is_published(path) ? (unsigned char)1 : (unsigned char)0;
+    return dv_path_is_published(path) > 0 ? (unsigned char)1 : (unsigned char)0;
+}
+
+int sh_decl_visibility_source_exists(const char *path)
+{
+    uint64_t offset = 0, size = 0, stored_size = 0;
+    unsigned char compressed = 0, present;
+    if (!path || !*path || !g_orig_probe || !g_manager) return -1;
+    __try {
+        present = g_orig_probe(g_manager, path, &offset, &size, &stored_size, &compressed, 1);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    return present ? 1 : dv_path_is_published(path);
 }
 
 /* Require a clean SIG_OK match at the slot address. A hooked known-RVA
@@ -196,6 +210,7 @@ int sh_decl_visibility_install(const uint8_t *module_base,
         return 0;
     }
     g_orig_probe = probe;
+    g_manager = manager;
     *slot = (void *)dv_probe_hook;
     VirtualProtect(slot, sizeof(void *), old, &old);
     FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void *));
@@ -219,6 +234,7 @@ int sh_decl_visibility_uninstall(void)
     }
     g_slot = NULL;
     g_orig_probe = NULL;
+    g_manager = NULL;
     backend_log("decl-visibility uninstalled");
     return 1;
 }

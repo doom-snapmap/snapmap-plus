@@ -10,6 +10,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include "engine_globals.h"
+#include "decl_native_schema.h"
+#include "map_source.h"
+#include "map_native.h"
+#include "map_published.h"
+#include "map_transition.h"
+#include "resource_resident.h"
+
+typedef struct metadata_image { const uint8_t *base; size_t size; uintptr_t last; } metadata_image;
+static int metadata_read(void *context, uintptr_t address, void *out, size_t length)
+{
+    metadata_image *image = (metadata_image *)context;
+    uintptr_t base = (uintptr_t)image->base;
+    image->last = address;
+    if (address < base || address - base > image->size || length > image->size - (address - base)) return 0;
+    memcpy(out, (const void *)address, length); return 1;
+}
 
 static uint8_t *map_pe_by_rva(const char *path, size_t *image_sz)
 {
@@ -54,6 +70,33 @@ static uint32_t rva_of(const uint8_t *base, const char *name, int *bad)
     return (uint32_t)(a - (uintptr_t)base);
 }
 
+static uintptr_t image_export(const uint8_t *base, size_t size, const char *name)
+{
+    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
+    const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
+    IMAGE_DATA_DIRECTORY directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    const IMAGE_EXPORT_DIRECTORY *exports;
+    const DWORD *names, *functions;
+    const WORD *ordinals;
+    DWORD i;
+    if (!directory.VirtualAddress || directory.VirtualAddress > size ||
+        sizeof(*exports) > size - directory.VirtualAddress) return 0;
+    exports = (const IMAGE_EXPORT_DIRECTORY *)(base + directory.VirtualAddress);
+    if (exports->AddressOfNames > size || exports->NumberOfNames > (size - exports->AddressOfNames) / sizeof(DWORD) ||
+        exports->AddressOfNameOrdinals > size || exports->NumberOfNames > (size - exports->AddressOfNameOrdinals) / sizeof(WORD) ||
+        exports->AddressOfFunctions > size || exports->NumberOfFunctions > (size - exports->AddressOfFunctions) / sizeof(DWORD)) return 0;
+    names = (const DWORD *)(base + exports->AddressOfNames);
+    ordinals = (const WORD *)(base + exports->AddressOfNameOrdinals);
+    functions = (const DWORD *)(base + exports->AddressOfFunctions);
+    for (i = 0; i < exports->NumberOfNames; i++) {
+        size_t length = strlen(name);
+        if (names[i] >= size || length >= size - names[i] || memcmp(base + names[i], name, length + 1)) continue;
+        if (ordinals[i] >= exports->NumberOfFunctions || functions[ordinals[i]] >= size) return 0;
+        return (uintptr_t)base + functions[ordinals[i]];
+    }
+    return 0;
+}
+
 static void check_adjacent(const uint8_t *base, const char *lo, const char *hi,
                            uint32_t gap, int *bad)
 {
@@ -87,6 +130,58 @@ int main(int argc, char **argv)
     size_t ok = 0;
     int bad = 0;
 
+    /* The native profile reader derives its filesystem/allocator slots from
+     * instructions adjacent to the signed-length guard on each renderer. */
+    {
+        const char *names[] = {"SnapMapReadSizeLimit", "MemLocalGet", "MemLocalPushHeap", "MemLocalPopHeap",
+            "PublishedMapComplete", "PublishedMapSelectionConstruct", "PublishedMapMetadataDestroy", "DeserializeFromJson",
+            "PublishedMapOfflineLaunch", "PublishedMapLobbyLaunch", "PublishedMapDirectLaunch", "PublishedMapCacheReady",
+            "PublishedMapRead", "PublishedMapCacheSet", "SerializeToJson"};
+        sig_result source[15] = {0};
+        int bound = 1;
+        for (size_t i = 0; i < 15; i++) {
+            const sig_entry *entry = NULL;
+            for (size_t j = 0; BACKEND_ENGINE_SIGNATURES[j].name; j++)
+                if (!strcmp(BACKEND_ENGINE_SIGNATURES[j].name, names[i])) entry = &BACKEND_ENGINE_SIGNATURES[j];
+            if (!entry || sig_resolve_one(base, entry, &source[i]) != SIG_OK) {
+                printf("BAD published source signature %s\n", names[i]); bound = 0;
+            }
+        }
+        if (!bound || !sh_map_source_install(source, 15, base) || !sh_map_native_bind(source, 15, base) ||
+            !sh_map_published_bind(source, 15, base)) {
+            printf("BAD native profile source binding\n"); bad++;
+        } else printf("OK  native profile source binding\n");
+    }
+
+    {
+        const char *names[] = {"AllocateGameResources", "UnloadGameResources", "FinalizeMapChange", "CancelMapChange"};
+        sig_result source[4] = {0};
+        int bound = 1;
+        for (size_t i = 0; i < 4; i++) {
+            const sig_entry *entry = NULL;
+            for (size_t j = 0; BACKEND_ENGINE_SIGNATURES[j].name; j++)
+                if (!strcmp(BACKEND_ENGINE_SIGNATURES[j].name, names[i])) entry = &BACKEND_ENGINE_SIGNATURES[j];
+            if (!entry || sig_resolve_one(base, entry, &source[i]) != SIG_OK) bound = 0;
+        }
+        if (!bound || !sh_map_transition_bind(source, 4, base)) {
+            printf("BAD native map transition binding\n"); bad++;
+        } else printf("OK  native map transition binding\n");
+    }
+    {
+        const char *names[] = {"ResourceReloadRenderScope", "PublishedMapComplete", "DeclSourceModeCall",
+            "ResourceReconstruct", "ResourceGenericLoad", "ResourceLookup", "MemLocalGet", "MemLocalPushHeap", "MemLocalPopHeap"};
+        sig_result source[9] = {0};
+        int bound = 1;
+        for (size_t i = 0; i < 9; i++) {
+            const sig_entry *entry = NULL;
+            for (size_t j = 0; BACKEND_ENGINE_SIGNATURES[j].name; j++)
+                if (!strcmp(BACKEND_ENGINE_SIGNATURES[j].name, names[i])) entry = &BACKEND_ENGINE_SIGNATURES[j];
+            if (!entry || sig_resolve_one(base, entry, &source[i]) != SIG_OK) bound = 0;
+        }
+        if (!bound || !sh_resource_resident_bind(source, 9, base)) {
+            printf("BAD native resident refresh binding\n"); bad++;
+        } else printf("OK  native resident refresh binding\n");
+    }
     for (size_t i = 0; i < total; i++) {
         const global_entry *e = &BACKEND_ENGINE_GLOBALS[i];
         glb_status st = GLB_UNKNOWN_NAME;
@@ -125,6 +220,45 @@ int main(int argc, char **argv)
                        "the shield must not redirect here\n", tail[0], tail[1], tail[2]);
                 bad++;
             }
+        }
+    }
+
+    /* The runtime metadata binder must locate reflection without executing the
+     * lazy singleton accessor. Static PE state has not initialized its readers. */
+    {
+        metadata_image image = {base, image_sz, 0};
+        sh_decl_native_source source = {&image, metadata_read, 0};
+        uintptr_t accessor = glb_resolve(base, "declmgr_accessor", NULL);
+        uintptr_t container = glb_resolve(base, "type_container", NULL);
+        uintptr_t rva = container - (uintptr_t)base;
+        uintptr_t expected = rva == 0x3082b10u ? (uintptr_t)base + 0x6012120u :
+            rva == 0x30c78e0u ? (uintptr_t)base + 0x4910430u : 0;
+        int state = sh_decl_native_source_bind(&source, accessor, container);
+        if (state != 0 || source.reflection || image.last != expected) {
+            printf("BAD read-only metadata binder state=%d read=0x%llx expected=0x%llx\n",
+                state, (unsigned long long)(image.last - (uintptr_t)base),
+                (unsigned long long)(expected - (uintptr_t)base));
+            bad++;
+        } else printf("OK  read-only metadata binder locates uninitialized reflection at 0x%llx\n",
+            (unsigned long long)(expected - (uintptr_t)base));
+
+        /* Use the actual export directory, as runtime GetProcAddress does.
+         * The getter's relative target and native list layout must agree on
+         * both images; static reader allocation alone is not readiness. */
+        {
+            uintptr_t getter = image_export(base, image_sz, "GetGameSystemInterface");
+            uintptr_t system = rva == 0x3082b10u ? (uintptr_t)base + 0x2dfa1b0u :
+                rva == 0x30c78e0u ? (uintptr_t)base + 0x2e3f050u : 0;
+            source.reflection = 1;
+            state = sh_decl_native_source_ready(&source, accessor, container, getter);
+            if (!getter || state != 0 || source.reflection || image.last != system + 8) {
+                printf("BAD native reader readiness state=%d getter=0x%llx read=0x%llx\n", state,
+                    (unsigned long long)(getter - (uintptr_t)base),
+                    (unsigned long long)(image.last - (uintptr_t)base));
+                bad++;
+            } else printf("OK  native reader readiness waits at system 0x%llx through exported getter 0x%llx\n",
+                (unsigned long long)(system - (uintptr_t)base),
+                (unsigned long long)(getter - (uintptr_t)base));
         }
     }
 

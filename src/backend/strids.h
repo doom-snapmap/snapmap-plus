@@ -1,11 +1,16 @@
 /* Inject custom #str_ mappings into the native language dictionary. Read the
- * user strings/strids.json, installed package strings/*.json, then baked
+ * user strings/strids.json, compiled package.json strings, then baked
  * defaults. Keys are case-insensitive and first-writer-wins. Use the native
  * hash, string pool and list append functions, then re-sort the table.
  *
- * Installation injects immediately. Runtime rearm updates keys owned by this
- * injector and appends new keys before sorting; it never appends a duplicate
- * owned key. Removed keys remain available to already loaded content.
+ * Installation supplies local and baked text before package compilation.
+ * Published package text joins on runtime rearm, which updates keys owned by this
+ * injector and appends new keys before sorting. Existing vanilla keys are
+ * replaced in place with their original records retained. Removing a mapping
+ * restores that record or removes a newly introduced row; engine-pool text is
+ * never freed. Complete input and ownership validation precedes retirement.
+ * IDs and bookkeeping grow dynamically; native signed count/length fields
+ * and successful allocation bound injection, not fixed application quotas.
  */
 #ifndef BACKEND_B1_STRIDS_H
 #define BACKEND_B1_STRIDS_H

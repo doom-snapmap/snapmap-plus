@@ -7,7 +7,6 @@
 #include <string.h>
 
 #include "overrides.h"
-#include "resource_bridge.h"
 
 static int g_failed;
 static int g_user_enabled;
@@ -29,26 +28,8 @@ int sh_user_overrides_enabled_for_launch(void)
     return g_user_enabled;
 }
 
-int sh_resource_bridge_capture(const char *data_root)
-{
-    (void)data_root;
-    return 1;
-}
 
-void sh_resource_bridge_set_provider_ready(int ready)
-{
-    (void)ready;
-}
 
-int sh_resource_bridge_open(const char *name, unsigned char **out,
-                            size_t *out_length, const char **out_source)
-{
-    (void)name;
-    if (out) *out = NULL;
-    if (out_length) *out_length = 0;
-    if (out_source) *out_source = NULL;
-    return SH_RESOURCE_BRIDGE_MISS;
-}
 
 /* Baked navigation is a different subsystem with its own tests; the file shadow
  * only has to ask it first. */
@@ -56,6 +37,8 @@ int sh_resource_bridge_open(const char *name, unsigned char **out,
 
 /* Navigation baked from a map's marked volumes. No map is loaded in this test,
  * so the hook must fall through to the shadow exactly as it does in game. */
+void sh_nav_bake_source_update_begin(void) {}
+void sh_nav_bake_source_update_end(int committed) { (void)committed; }
 int sh_nav_bake_open(const char *name, sh_nav_bake_reader read_shipped,
                      unsigned char **out_bytes, size_t *out_len)
 {
@@ -196,13 +179,17 @@ static void test_internal_decl_table(void)
     g_user_enabled = 1;
     CHECK(sh_overrides_test_internal_decl_table_install(entries, 2) == 1);
     CHECK(sh_overrides_test_internal_decl_table_install(entries, 2) == 0);
-    source[0] = 'X'; /* publication must own a process-lifetime copy */
+    stream = sh_overrides_test_memory_stream(source, sizeof(source) - 1);
+    source[0] = 'X'; /* An opened memory stream owns its bytes. */
     source_two[0] = 'X';
     CHECK(sh_overrides_test_internal_decl_open("decltree/ActorModifier/custom/first.decl") == NULL);
     CHECK(sh_overrides_test_internal_decl_open("generated/decls/actormodifier/custom/first.decl") == NULL);
     CHECK(sh_overrides_test_internal_decl_open("decltree/actormodifier/custom/first.decl.extra") == NULL);
 
-    stream = sh_overrides_test_internal_decl_open("decltree/actormodifier/custom/first.decl");
+    /* Registry history alone cannot serve declarations without a compiler.
+     * Raw stream I/O is tested independently of declaration admission. */
+    CHECK(sh_overrides_test_internal_decl_open("decltree/actormodifier/custom/first.decl") == NULL);
+    CHECK(!sh_overrides_internal_decl_published("decltree/actormodifier/custom/first.decl"));
     CHECK(stream != NULL);
     if (stream) {
         CHECK(sh_overrides_test_stream_length(stream) == (long long)(sizeof(source) - 1));
@@ -247,7 +234,8 @@ static void test_internal_decl_table(void)
         sh_overrides_test_stream_close(stream);
     }
 
-    stream = sh_overrides_test_internal_decl_open("decltree/entitydef/custom/second.decl");
+    CHECK(sh_overrides_test_internal_decl_open("decltree/entitydef/custom/second.decl") == NULL);
+    stream = sh_overrides_test_memory_stream((const unsigned char *)"second-stream", sizeof(source_two) - 1);
     CHECK(stream != NULL);
     if (stream) {
         CHECK(sh_overrides_test_stream_read(stream, readback, 6) == 6);
@@ -293,9 +281,6 @@ static void test_file_stream_is_read_only(void)
 }
 
 
-/* Stub overlap reporting; package_conflicts_test covers its filesystem scan. */
-int sh_pkg_conflicts_report(const char *data_root) { (void)data_root; return 0; }
-
 static void test_refresh_keeps_open_streams(void)
 {
     static const unsigned char old_body[] = "old body";
@@ -306,15 +291,16 @@ static void test_refresh_keeps_open_streams(void)
     g_user_enabled = 1;
     sh_overrides_test_internal_decl_table_reset();
     CHECK(sh_overrides_test_internal_decl_table_install(&entry, 1) == 1);
-    old_stream = sh_overrides_test_internal_decl_open("decltree/material/test/refresh.decl");
+    old_stream = sh_overrides_test_memory_stream(old_body, 8);
     CHECK(old_stream != NULL);
     sh_overrides_internal_decl_table_reopen();
-    CHECK(sh_overrides_internal_decl_published("decltree/material/test/refresh.decl") == 1);
+    CHECK(sh_overrides_internal_decl_published("decltree/material/test/refresh.decl") == 0);
     entry.body = new_body;
     for (int i = 0; i < 80; i++)
         CHECK(sh_overrides_test_internal_decl_table_merge(&entry, 1) == 1);
     CHECK(sh_overrides_internal_decl_published_count() == 1);
-    new_stream = sh_overrides_test_internal_decl_open("decltree/material/test/refresh.decl");
+    CHECK(sh_overrides_test_internal_decl_open("decltree/material/test/refresh.decl") == NULL);
+    new_stream = sh_overrides_test_memory_stream(new_body, 8);
     CHECK(new_stream != NULL);
     if (old_stream) {
         CHECK(sh_overrides_test_stream_read(old_stream, bytes, 8) == 8);
@@ -327,9 +313,9 @@ static void test_refresh_keeps_open_streams(void)
         sh_overrides_test_stream_close(new_stream);
     }
     {
-        sh_overrides_internal_decl_entry entries[512];
-        char names[512][32];
-        for (int i = 0; i < 512; i++) {
+        sh_overrides_internal_decl_entry entries[1025];
+        char names[1025][32];
+        for (int i = 0; i < 1025; i++) {
             _snprintf_s(names[i], sizeof(names[i]), _TRUNCATE, "test/entry-%03d", i);
             entries[i].type = "material";
             entries[i].name = names[i];
@@ -337,12 +323,27 @@ static void test_refresh_keeps_open_streams(void)
             entries[i].body_length = 8;
         }
         sh_overrides_test_internal_decl_table_reset();
-        CHECK(sh_overrides_test_internal_decl_table_install(entries, 512) == 1);
-        for (int i = 0; i < 512; i++) entries[i].body = new_body;
-        CHECK(sh_overrides_test_internal_decl_table_merge(entries, 512) == 1);
-        CHECK(sh_overrides_internal_decl_published_count() == 512);
-        CHECK(sh_overrides_test_internal_decl_table_merge(&entry, 1) == 0);
-        CHECK(sh_overrides_internal_decl_published_count() == 512);
+        CHECK(sh_overrides_test_internal_decl_table_install(entries, SIZE_MAX) == 0);
+        CHECK(sh_overrides_test_internal_decl_table_install(entries, 1025) == 1);
+        for (int i = 0; i < 1025; i++) entries[i].body = new_body;
+        CHECK(sh_overrides_test_internal_decl_table_merge(entries, 1025) == 1);
+        CHECK(sh_overrides_internal_decl_published_count() == 1025);
+        /* Carry forward a table larger than the old limit while adding a key. */
+        CHECK(sh_overrides_test_internal_decl_table_merge(&entry, 1) == 1);
+        CHECK(sh_overrides_internal_decl_published_count() == 1026);
+        for (int i = 0; i < 1025; i++) {
+            char key[96];
+            void *current;
+            _snprintf_s(key, sizeof(key), _TRUNCATE,
+                        "decltree/material/test/entry-%03d.decl", i);
+            current = sh_overrides_test_internal_decl_open(key);
+            CHECK(current == NULL);
+            CHECK(!sh_overrides_internal_decl_published(key));
+        }
+        /* Refuse impossible allocation arithmetic without damaging publication. */
+        CHECK(sh_overrides_test_internal_decl_table_merge(&entry, SIZE_MAX) == 0);
+        CHECK(sh_overrides_test_internal_decl_table_merge(&entry, SIZE_MAX / 8) == 0);
+        CHECK(sh_overrides_internal_decl_published_count() == 1026);
     }
     sh_overrides_test_internal_decl_table_reset();
 }

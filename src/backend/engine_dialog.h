@@ -65,7 +65,8 @@ int sh_engine_dialog_poll(int ticket);
  */
 void sh_engine_dialog_dump(void (*printf_fn)(const char *fmt, ...));
 
-/* Forget a ticket without waiting for it. */
+/* Main thread: forget this ticket and clear its still-pending native question.
+ * Already-polled answers and stale tickets cannot clear another dialog. */
 void sh_engine_dialog_release(int ticket);
 
 #ifdef SH_ENGINE_DIALOG_TESTING

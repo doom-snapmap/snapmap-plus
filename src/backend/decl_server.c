@@ -11,6 +11,7 @@
 #include <windows.h>
 
 #include <stdint.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,8 @@
 #include "backend_log.h"
 #include "engine_globals.h"  /* engine data globals, resolved not hardcoded */
 #include "decl_server.h"
+#include "map_transition.h"
+#include "rawmap.h"
 #include "hook.h"
 #include "package_requirements.h"
 #include "weapon_hud.h"
@@ -28,18 +31,21 @@
 #include "engine_dialog.h"
 #include "decl_visibility.h"
 #include "packages.h"
-#include "resource_bridge.h"
+#include "package_runtime.h"
+#include "map_package.h"
 #include "user_overrides.h"
 #include "strids.h"
 #include "process_heap_scope.h"
+#include "audio_banks_native.h"
+#include "resource_resident.h"
+
+static sh_resource_resident *g_resident_pass;
 
 #define DS_INTERNAL_COMMAND     "snapmap_plus_decl_server_apply"
 #define DS_REARM_COMMAND        "snapmap_plus_decl_server_rearm"
-#define DS_MAX_CANDIDATES       512
-#define DS_MAX_DISCOVERED       (DS_MAX_CANDIDATES * 8)
+#define DS_RES_MAX_ENTRIES  262144u
+#define DS_MAX_DISCOVERED       32768u
 #define DS_MAX_DEPTH            16
-#define DS_MAX_FILE_BYTES       (1024u * 1024u)
-#define DS_MAX_TOTAL_BYTES      (16u * 1024u * 1024u)
 #define DS_REGISTRY_REGISTER_FILE_SLOT 0x38u
 #define DS_REGISTRY_TYPE_SLOT          0x58u
 #define DS_IDSTR_SIZE          0x30u
@@ -61,11 +67,10 @@
  */
 #define DS_PINNED_BOOT_PROMOTE_RVA 0x1801830u
 #define DS_PINNED_CMD_EXECUTE_RVA  0x1AA46B0u
-/* Generic native decl reload tears down and reconstructs the object while
- * preserving id/name/flags. Runtime refresh uses this when ordinary DeclFind
- * leaves pending-load set.
- */
+/* GenericLoad reads without unconditional reconstruction. Refresh first uses
+ * the separate native reconstruction entry point. */
 #define DS_PINNED_GENERIC_LOAD_RVA 0x17FF5F0u
+#define DS_PINNED_RECONSTRUCT_RVA 0x17FFDB0u
 /* Resource-level fields used to verify boot promotion after the engine
  * returns.
  */
@@ -82,11 +87,10 @@
  * generic load (0x17FF5F0), so setting it makes the next ordinary lookup re-read the
  * decl through the file shadow and re-parse it with its own type parser. */
 #define DS_DECL_PENDING_LOAD   0x02u
-/* Bit 0x04 records an acquired source. Native reload tears down old
- * allocations safely, but consumers may retain pointers into them. Runtime
- * refresh must run at the browser with no map loaded.
- */
-#define DS_DECL_HAS_SOURCE     0x04u
+/* Bit 0x04 marks a fallback/default resource, not a successful source parse.
+ * Consumers may retain pointers into parsed allocations. Runtime refresh must
+ * run at the browser with no map loaded. */
+#define DS_DECL_DEFAULTED      0x04u
 #define DS_DECL_ENTITYDEF_OFFSET 0x1c8u
 
 enum {
@@ -113,6 +117,11 @@ typedef void *(*decl_find_fn)(void *type_manager, const char *logical_name,
 typedef int (*decl_palette_refresh_fn)(void);
 typedef void (*resource_promote_static_fn)(void);
 typedef void (*resource_generic_load_fn)(void *decl);
+static resource_generic_load_fn g_reconstruct;
+static int g_boot_refresh;
+#ifdef SH_DECL_SERVER_TESTING
+static decl_find_fn g_test_peek;
+#endif
 typedef void (*cmd_execute_buffer_fn)(void *cmdsys);
 typedef HANDLE (WINAPI *ds_find_first_fn)(LPCSTR pattern, LPWIN32_FIND_DATAA found);
 typedef BOOL (WINAPI *ds_find_next_fn)(HANDLE search, LPWIN32_FIND_DATAA found);
@@ -270,8 +279,11 @@ typedef struct ds_runtime_mark {
     int candidate;
     int shadowed;  /* 1 = live shadow refresh, 0 = empty reused placeholder */
 } ds_runtime_mark;
-static ds_runtime_mark g_rt_marks[DS_MAX_CANDIDATES];
+static ds_runtime_mark *g_rt_marks;
 static int g_rt_mark_count;
+#ifdef SH_DECL_SERVER_TESTING
+static int g_test_fail_mark_allocation;
+#endif
 
 static ds_candidate *g_candidates;
 static int g_candidate_count;
@@ -286,6 +298,7 @@ static decl_register_file_fn g_expected_register_file;
 static idstr_ctor_fn g_idstr_ctor;
 static idstr_dtor_fn g_idstr_dtor;
 static decl_source_find_fn g_find_source;
+static uintptr_t g_source_mode_address;
 static decl_find_fn g_find_decl;
 static cmd_execute_buffer_fn g_execute_commands;
 static resource_generic_load_fn g_generic_load;
@@ -605,14 +618,14 @@ static char *ds_read_file(const char *path, size_t *out_length, const char **rea
         return NULL;
     }
     if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 ||
-        size.QuadPart > (LONGLONG)DS_MAX_FILE_BYTES) {
+        size.QuadPart > (LONGLONG)MAXDWORD) {
         CloseHandle(file);
-        *reason = "file is empty or exceeds the 1 MiB cap";
+        *reason = "file is empty or its length cannot be represented by ReadFile";
         return NULL;
     }
-    if (g_total_bytes + (size_t)size.QuadPart > DS_MAX_TOTAL_BYTES) {
+    if ((uint64_t)size.QuadPart >= SIZE_MAX || (size_t)size.QuadPart > SIZE_MAX - g_total_bytes) {
         CloseHandle(file);
-        *reason = "launch snapshot exceeds the 16 MiB total cap";
+        *reason = "snapshot size arithmetic overflow";
         return NULL;
     }
     body = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)size.QuadPart + 1);
@@ -651,41 +664,6 @@ static char *ds_read_file(const char *path, size_t *out_length, const char **rea
     return body;
 }
 
-static char *ds_read_linked(size_t index, size_t *out_length, const char **reason)
-{
-    char *body = NULL;
-    size_t length = 0;
-    if (!sh_resource_bridge_read_decl(index, &body, &length, reason) || !body) return NULL;
-    if (!length || length > DS_MAX_FILE_BYTES) {
-        HeapFree(GetProcessHeap(), 0, body);
-        *reason = "linked decl is empty or exceeds the 1 MiB cap";
-        return NULL;
-    }
-    if (g_total_bytes + length > DS_MAX_TOTAL_BYTES) {
-        HeapFree(GetProcessHeap(), 0, body);
-        *reason = "launch snapshot exceeds the 16 MiB total cap";
-        return NULL;
-    }
-    if (length >= 3 && (unsigned char)body[0] == 0xef &&
-        (unsigned char)body[1] == 0xbb && (unsigned char)body[2] == 0xbf) {
-        memmove(body, body + 3, length - 3);
-        length -= 3;
-        body[length] = '\0';
-    }
-    if (!sh_decl_text_well_formed((const unsigned char *)body, length)) {
-        HeapFree(GetProcessHeap(), 0, body);
-        *reason = "structural validation failed (NUL, braces, quote, or comment)";
-        return NULL;
-    }
-    if (!ds_decl_body_is_single_block((const unsigned char *)body, length)) {
-        HeapFree(GetProcessHeap(), 0, body);
-        *reason = "decl body requires exactly one top-level brace block";
-        return NULL;
-    }
-    *out_length = length;
-    return body;
-}
-
 static int ds_identity_equal(const ds_discovered *item,
                              const char *type, const char *name);
 
@@ -706,7 +684,7 @@ static int ds_files_identical(const char *left_path, const char *right_path)
     if (left == INVALID_HANDLE_VALUE || right == INVALID_HANDLE_VALUE) goto done;
     if (!GetFileSizeEx(left, &left_size) || !GetFileSizeEx(right, &right_size)) goto done;
     if (left_size.QuadPart != right_size.QuadPart) goto done;
-    if (left_size.QuadPart > (LONGLONG)DS_MAX_FILE_BYTES) goto done;
+    if (left_size.QuadPart < 0) goto done;
     for (;;) {
         DWORD got_left = 0, got_right = 0;
         if (!ReadFile(left, left_chunk, sizeof(left_chunk), &got_left, NULL) ||
@@ -813,61 +791,6 @@ static int ds_validate_identity_parts(const char *type, const char *name,
     return 1;
 }
 
-static int ds_discover_linked(ds_discovery *discovery)
-{
-    size_t count = sh_resource_bridge_decl_count();
-    size_t index;
-    for (index = 0; index < count; index++) {
-        const char *type = NULL, *name = NULL, *source = NULL;
-        ds_discovered *item;
-        size_t i;
-        int local_wins = 0;
-        if (!sh_resource_bridge_decl_metadata(index, &type, &name, &source) ||
-            !type || !name || !source) {
-            backend_log("decl-server REFUSED: linked decl metadata was incomplete; whole snapshot refused");
-            g_capture_refused++;
-            return 0;
-        }
-        {
-            const char *reason = NULL;
-            if (!ds_validate_identity_parts(type, name, &reason)) {
-                ds_log("REFUSED", source, reason);
-                g_capture_refused++;
-                continue;
-            }
-        }
-        for (i = 0; i < discovery->count; i++) {
-            if (!discovery->items[i].linked &&
-                ds_identity_equal(&discovery->items[i], type, name)) {
-                ds_log("LINKED-SHADOWED", source,
-                       "same-identity local generated decl wins for this launch");
-                local_wins = 1;
-                break;
-            }
-        }
-        if (local_wins) continue;
-        if (discovery->count >= DS_MAX_DISCOVERED) {
-            ds_log("REFUSED", source,
-                   "combined discovery metadata exceeds the 4096-entry safety cap; whole snapshot refused");
-            g_capture_refused++;
-            return 0;
-        }
-        if (discovery->count == discovery->capacity && !ds_grow_discovery(discovery)) {
-            ds_log("REFUSED", source, "combined discovery metadata allocation failed; whole snapshot refused");
-            g_capture_refused++;
-            return 0;
-        }
-        item = &discovery->items[discovery->count++];
-        strcpy_s(item->type, sizeof(item->type), type);
-        strcpy_s(item->name, sizeof(item->name), name);
-        strcpy_s(item->source, sizeof(item->source), source);
-        strcpy_s(item->package, sizeof(item->package), "linked");
-        item->linked_index = index;
-        item->linked = 1;
-    }
-    return 1;
-}
-
 static int ds_walk(ds_discovery *discovery, const char *package,
                    const char *directory, const char *relative, int depth)
 {
@@ -950,135 +873,46 @@ int sh_decl_server_test_walk(const char *directory, const char *relative,
 }
 #endif
 
-/* Static package scratch avoids a large stack frame; capture is serialized. */
-static sh_package g_packages[SH_PACKAGES_MAX];
-
-static int ds_capture_snapshot_locked(void)
+static int ds_capture_snapshot_locked(const sh_package_compilation *compiled)
 {
-    char root[MAX_PATH];
-    char directory[MAX_PATH];
-    size_t package_count = 0, package_index;
-    DWORD attributes;
-    DWORD error;
-    ds_discovery discovery = {0};
-    sh_decl_server_order_item *ordered = NULL;
-    size_t i;
+    size_t i, count = 0;
     int ok = 0;
-
     g_capture_refused = 0;
-
-    if (!sh_overrides_get_root(root, sizeof(root))) {
-        backend_log("decl-server REFUSED: could not resolve the overrides root");
+    if (!compiled) {
+        backend_log("decl-server: package compilation unavailable");
         g_capture_refused++;
         return 0;
     }
-    /* Collect all package decl roots together so collisions are checked
-     * globally.
-     */
-    if (!sh_packages_enumerate(root, g_packages, SH_PACKAGES_MAX, &package_count)) {
-        backend_log("decl-server REFUSED: the overrides package directory could not be enumerated completely");
-        g_capture_refused++;
-        return 0;
+    if (compiled->resource_count > SIZE_MAX / sizeof(*compiled->resources) ||
+        (compiled->resource_count && !compiled->resources)) goto done;
+    for (i = 0; i < compiled->resource_count; i++) if (compiled->resources[i].type) count++;
+    if (count > INT_MAX || count > SIZE_MAX / sizeof(ds_candidate)) goto done;
+    if (count) {
+        g_candidates = (ds_candidate *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                                 count * sizeof(ds_candidate));
+        if (!g_candidates) goto done;
     }
-    if (package_count == 0) {
-        backend_log("decl-server idle: no override packages installed");
-    }
-    for (package_index = 0; package_index < package_count; package_index++) {
-        if (!sh_package_subdir(&g_packages[package_index], "decls", directory,
-                               sizeof(directory))) {
-            backend_log("decl-server REFUSED: a package decls path exceeded its bounded length");
-            g_capture_refused++;
-            goto done;
-        }
-        attributes = GetFileAttributesA(directory);
-        if (attributes == INVALID_FILE_ATTRIBUTES) {
-            error = GetLastError();
-            if (ds_root_attributes_status(attributes, error) != DS_ENUM_DONE) {
-                ds_log_win32_refusal(g_packages[package_index].name,
-                                     "GetFileAttributesA", error);
-                g_capture_refused++;
-                goto done;
-            }
-            continue;                    /* a package may carry no decls at all */
-        }
-        if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) ||
-            (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
-            backend_log("decl-server REFUSED: a package decls root is not a regular directory");
-            g_capture_refused++;
-            goto done;
-        }
-        if (!ds_walk(&discovery, g_packages[package_index].name, directory, "", 0))
-            goto done;
-    }
-    if (!sh_resource_bridge_gate_ok()) {
-        backend_log("decl-server REFUSED: installed-resource manifest snapshot/provider is unavailable; whole decl snapshot refused");
-        g_capture_refused++;
-        goto done;
-    }
-    if (!ds_discover_linked(&discovery)) goto done;
-    if (discovery.count == 0) {
-        ok = 1;
-        goto done;
-    }
-
-    ordered = (sh_decl_server_order_item *)HeapAlloc(
-        GetProcessHeap(), HEAP_ZERO_MEMORY, discovery.count * sizeof(ordered[0]));
-    if (!ordered) {
-        backend_log("decl-server REFUSED: ordering-table allocation failed; whole snapshot refused");
-        g_capture_refused++;
-        goto done;
-    }
-    for (i = 0; i < discovery.count; i++) {
-        ordered[i].type = discovery.items[i].type;
-        ordered[i].name = discovery.items[i].name;
-        ordered[i].source = discovery.items[i].source;
-        ordered[i].value = &discovery.items[i];
-    }
-    sh_decl_server_order_and_admit(ordered, discovery.count, DS_MAX_CANDIDATES);
-
-    g_candidates = (ds_candidate *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
-                                             sizeof(ds_candidate) * DS_MAX_CANDIDATES);
-    if (!g_candidates) {
-        backend_log("decl-server REFUSED: candidate-table allocation failed");
-        g_capture_refused++;
-        goto done;
-    }
-    for (i = 0; i < discovery.count; i++) {
-        ds_discovered *item = (ds_discovered *)ordered[i].value;
+    for (i = 0; i < compiled->resource_count; i++) {
+        const sh_compiled_resource *resource = &compiled->resources[i];
         ds_candidate *candidate;
-        const char *reason = NULL;
-        char *body;
-        size_t body_length;
-
-        if (ordered[i].duplicate) {
-            char detail[320];
-            /* Identical bodies were combined earlier; remaining duplicates conflict. */
-            _snprintf_s(detail, sizeof(detail), _TRUNCATE,
-                        "case-insensitive duplicate type/name identity published by "
-                        "package '%s' with differing content", item->package);
-            ds_log("REFUSED", item->source, detail);
-            g_capture_refused++;
-            continue;
-        }
-        if (!ordered[i].admitted) {
-            ds_log("REFUSED", item->source, "launch snapshot exceeds the 512-decl cap");
-            g_capture_refused++;
-            continue;
-        }
-        body = item->linked ? ds_read_linked(item->linked_index, &body_length, &reason) :
-                              ds_read_file(item->absolute, &body_length, &reason);
-        if (!body) {
-            ds_log("REFUSED", item->source, reason);
-            g_capture_refused++;
-            continue;
+        size_t length;
+        const unsigned char *body;
+        if (!resource->type) continue;
+        if (!resource->body || resource->body_length > PTRDIFF_MAX ||
+            resource->body_length > SIZE_MAX - g_total_bytes) goto done;
+        body = resource->body; length = resource->body_length;
+        if (length >= 3 && body[0] == 0xef && body[1] == 0xbb && body[2] == 0xbf) { body += 3; length -= 3; }
+        if (!sh_decl_text_well_formed(body, length) || !ds_decl_body_is_single_block(body, length)) {
+            ds_log("REFUSED", resource->engine_path, "compiled declaration is not one valid native body"); goto done;
         }
         candidate = &g_candidates[g_candidate_count++];
-        strcpy_s(candidate->type, sizeof(candidate->type), item->type);
-        strcpy_s(candidate->name, sizeof(candidate->name), item->name);
-        strcpy_s(candidate->source, sizeof(candidate->source), item->source);
-        candidate->body = body;
-        candidate->body_length = body_length;
-        g_total_bytes += body_length;
+        if (strcpy_s(candidate->type, sizeof(candidate->type), resource->type) ||
+            strcpy_s(candidate->name, sizeof(candidate->name), resource->name) ||
+            strcpy_s(candidate->source, sizeof(candidate->source), resource->engine_path)) goto done;
+        candidate->body = (char *)HeapAlloc(GetProcessHeap(), 0, length + 1u);
+        if (!candidate->body) goto done;
+        memcpy(candidate->body, body, length); candidate->body[length] = 0;
+        candidate->body_length = length; g_total_bytes += length;
     }
 
     if (g_candidate_count > 1) {
@@ -1102,6 +936,7 @@ static int ds_capture_snapshot_locked(void)
         }
         for (i = 0; i < (size_t)g_candidate_count; i++) {
             references[i].name = g_candidates[i].name;
+            references[i].type = g_candidates[i].type;
             references[i].text = (const unsigned char *)g_candidates[i].body;
             references[i].text_length = g_candidates[i].body_length;
             references[i].value = (void *)(uintptr_t)(i + 1u);
@@ -1124,7 +959,7 @@ static int ds_capture_snapshot_locked(void)
         {
             char line[224];
             _snprintf_s(line, sizeof(line), _TRUNCATE,
-                        "decl-server dependency order: %zu quoted identity edge(s), %zu SCC cycle member(s); deterministic component order",
+                        "decl-server dependency order: %zu identity edge(s), %zu SCC cycle member(s); deterministic component order",
                         edge_count, cycle_count);
             backend_log(line);
         }
@@ -1134,20 +969,32 @@ static int ds_capture_snapshot_locked(void)
     ok = 1;
 
 done:
-    if (ordered) HeapFree(GetProcessHeap(), 0, ordered);
-    ds_free_discovery(&discovery);
-    if (!ok) ds_free_candidates();
+    if (!ok) { g_capture_refused++; ds_free_candidates(); }
     return ok;
 }
+
+#ifdef SH_DECL_SERVER_TESTING
+int sh_decl_server_test_capture(const sh_package_compilation *compiled,
+                                 size_t *count, size_t *bytes)
+{
+    int ok;
+    ds_free_candidates();
+    ok = ds_capture_snapshot_locked(compiled);
+    if (count) *count = (size_t)g_candidate_count;
+    if (bytes) *bytes = g_total_bytes;
+    ds_free_candidates();
+    return ok;
+}
+#endif
 
 static int ds_capture_snapshot(void)
 {
     int ok;
-    sh_resource_bridge_snapshot_begin();
+    const sh_package_compilation *compiled = sh_package_runtime_acquire();
     __try {
-        ok = ds_capture_snapshot_locked();
+        ok = ds_capture_snapshot_locked(compiled);
     } __finally {
-        sh_resource_bridge_snapshot_end();
+        sh_package_runtime_release();
     }
     return ok;
 }
@@ -1328,9 +1175,8 @@ int sh_decl_server_test_register_candidate(
 #endif
 
 /* Native materialization contract (pinned Vulkan layout):
- *   idDecl+0x2c: bit 0x01 means parsing, 0x02 pending load, 0x04 acquired
- * source.
- *   Lookup loads pending targets; source acquisition alone is diagnostic.
+ *   idDecl+0x2c: bit 0x01 means parsing, 0x02 pending load, 0x04 defaulted.
+ *   Lookup loads pending targets; +0x18 holds a native parse error.
  *   snapEditorEntityDef requires entityDef at +0x1c8, outputs +0x440/+0x448
  * with flag 0x20 at +0x3cd, and inputs +0x458/+0x460 with flag 0x10.
  * Native parsers resolve dependencies with makeDefault=0. Materialize
@@ -1369,12 +1215,12 @@ static int ds_read_decl_state(void *decl, unsigned char *state)
                                 state, sizeof(*state));
 }
 
-/* A live object is usable as a parse-time dependency when the engine can read
- * it and it is not mid-parse. This mirrors the only state the native parsers
- * test before consuming a resolved decl. */
+/* A published package identity must have completed its actual source parse.
+ * Native make-default success alone can return a fallback object. */
 static int ds_decl_usable(void *decl, const char **reason)
 {
     unsigned char state = 0;
+    void *error = NULL;
 
     if (reason) *reason = NULL;
     if (!decl) {
@@ -1389,6 +1235,75 @@ static int ds_decl_usable(void *decl, const char **reason)
         if (reason) *reason = "decl remained in progress";
         return 0;
     }
+    if (!ds_safe_read((const uint8_t *)decl + 0x18, &error, sizeof(error)) || error ||
+        (state & (DS_DECL_PENDING_LOAD | DS_DECL_DEFAULTED)) != 0) {
+        if (reason) *reason = "package declaration did not complete source parsing";
+        return 0;
+    }
+    return 1;
+}
+
+static void ds_bind_source_mode(const sig_result *results, size_t count)
+{
+    const sig_result *site = ds_result(results, count, "DeclSourceModeCall");
+    unsigned char call[5], getter[7];
+    int32_t displacement;
+    uintptr_t target;
+    g_source_mode_address = 0;
+    if (!site || site->status != SIG_OK || !site->addr ||
+        !ds_safe_read((void *)site->addr, call, sizeof(call)) || call[0] != 0xe8) return;
+    memcpy(&displacement, call + 1, sizeof(displacement));
+    target = site->addr + 5 + (intptr_t)displacement;
+    if (!ds_safe_read((void *)target, getter, sizeof(getter)) ||
+        getter[0] != 0x8b || getter[1] != 0x05 || getter[6] != 0xc3) return;
+    memcpy(&displacement, getter + 2, sizeof(displacement));
+    g_source_mode_address = target + 6 + (intptr_t)displacement;
+}
+static int ds_registry_read(void *context, uintptr_t address, void *out, size_t length)
+{ (void)context; return address && ds_safe_read((const void *)address, out, length); }
+static int ds_registry_source_exists(void *context, uintptr_t manager, const char *type, const char *name)
+{
+    static const char prefix[] = "generated/decls/";
+    int32_t mode;
+    int result = -1;
+    size_t type_length, name_length, length;
+    char *path;
+    (void)context;
+    if (!g_source_mode_address || !manager || !type || !name ||
+        !ds_safe_read((void *)g_source_mode_address, &mode, sizeof(mode)) || mode < 0) return -1;
+    if (mode < 2) {
+        if (!g_find_source) return -1;
+        __try { return g_find_source((void *)manager, name) ? 1 : 0; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    }
+    type_length = strlen(type); name_length = strlen(name);
+    if (type_length > SIZE_MAX - sizeof(prefix) - 6 ||
+        name_length > SIZE_MAX - sizeof(prefix) - 6 - type_length) return -1;
+    length = sizeof(prefix) + type_length + name_length + 6;
+    path = (char *)malloc(length);
+    if (!path) return -1;
+    memcpy(path, prefix, sizeof(prefix) - 1);
+    memcpy(path + sizeof(prefix) - 1, type, type_length);
+    path[sizeof(prefix) - 1 + type_length] = '/';
+    memcpy(path + sizeof(prefix) + type_length, name, name_length);
+    memcpy(path + sizeof(prefix) + type_length + name_length, ".decl", 6);
+    result = sh_decl_visibility_source_exists(path);
+    free(path); return result;
+}
+int sh_decl_server_registry_source(sh_decl_registry_source *source)
+{
+    void *registry;
+    DWORD main_thread;
+    decl_type_by_name_fn type_by_name;
+    decl_register_file_fn register_file;
+    if (!source) return 0;
+    memset(source, 0, sizeof(*source));
+    if (!g_boundary_thread_slot || !ds_safe_read((void *)g_boundary_thread_slot,
+        &main_thread, sizeof(main_thread)) || main_thread != GetCurrentThreadId()) return 0;
+    if (!ds_decode_registry(&registry, &type_by_name, &register_file)) return 0;
+    source->registry = (uintptr_t)registry;
+    source->read = ds_registry_read;
+    source->source_exists = ds_registry_source_exists;
     return 1;
 }
 
@@ -1611,13 +1526,49 @@ static int ds_materialize_identity(ds_materialize_context *context, int index)
     return 1;
 }
 
-/* Mark every currently served live shadow before any reload. Source records
- * and prior successful passes do not prove that the package bytes are unchanged. */
+/* Inventory lookups must not drain pending resources while collecting the
+ * refresh set. Both native managers expose the resource array at +0x20/+0x28;
+ * names here are already canonicalized by candidate capture. */
+static void *ds_peek_decl(void *manager, const char *name)
+{
+    void **entries;
+    int i, count;
+#ifdef SH_DECL_SERVER_TESTING
+    if (g_test_peek) return g_test_peek(manager, name, 0);
+#endif
+    if (!manager || !name) return NULL;
+    entries = *(void ***)((unsigned char *)manager + 0x20);
+    count = *(int *)((unsigned char *)manager + 0x28);
+    if (count < 0 || count > DS_RES_MAX_ENTRIES || (count && !entries)) return NULL;
+    for (i = 0; i < count; i++) {
+        void *entry = entries[i];
+        const char *existing = entry ? *(const char **)((unsigned char *)entry + 8) : NULL;
+        if (existing && !_stricmp(existing, name)) return entry;
+    }
+    return NULL;
+}
+
+/* Collect first, reconstruct second, then mark the complete set. No parser
+ * may run while another target still contains its previous allocations. */
 static void ds_runtime_premark(ds_materialize_context *context)
 {
     int i;
 
     g_rt_mark_count = 0;
+    if (g_rt_marks) HeapFree(GetProcessHeap(), 0, g_rt_marks);
+    g_rt_marks = NULL;
+    if (g_candidate_count) {
+#ifdef SH_DECL_SERVER_TESTING
+        if (!g_test_fail_mark_allocation)
+#endif
+        g_rt_marks = (ds_runtime_mark *)HeapAlloc(GetProcessHeap(), 0,
+            (size_t)g_candidate_count * sizeof(*g_rt_marks));
+        if (!g_rt_marks) {
+            InterlockedIncrement(&g_rearm_drain_faults);
+            backend_log("decl-server REFUSED: runtime refresh allocation failed before reconstruction");
+            return;
+        }
+    }
     for (i = 0; i < g_candidate_count; i++) {
         ds_candidate *candidate = &g_candidates[i];
         void *type_manager = NULL;
@@ -1635,7 +1586,7 @@ static void ds_runtime_premark(ds_materialize_context *context)
         __try {
             type_manager = context->type_by_name(context->registry, candidate->type);
             if (type_manager)
-                decl = context->find_decl(type_manager, candidate->name, 0);
+                decl = ds_peek_decl(type_manager, candidate->name);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             InterlockedIncrement(&g_rearm_drain_faults);
             decl = NULL;
@@ -1646,23 +1597,66 @@ static void ds_runtime_premark(ds_materialize_context *context)
             if ((*st & DS_DECL_IN_PROGRESS) != 0) {
                 InterlockedIncrement(&g_rearm_drain_faults);
                 marked = 0;
-            } else if (!shadowed_refresh && (*st & DS_DECL_HAS_SOURCE) != 0) {
+            } else if (!shadowed_refresh && (*st & DS_DECL_DEFAULTED) == 0 &&
+                       *(void **)((unsigned char *)decl + 0x18) == NULL) {
                 InterlockedIncrement(&g_rearm_left_loaded);
             } else {
-                *st = (unsigned char)(*st | DS_DECL_PENDING_LOAD);
                 marked = 1;
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             InterlockedIncrement(&g_rearm_drain_faults);
             marked = 0;
         }
-        if (marked && g_rt_mark_count < DS_MAX_CANDIDATES) {
+        if (marked) {
             g_rt_marks[g_rt_mark_count].decl = decl;
             g_rt_marks[g_rt_mark_count].candidate = i;
             g_rt_marks[g_rt_mark_count].shadowed = shadowed_refresh;
             g_rt_mark_count++;
             if (!shadowed_refresh)
                 InterlockedIncrement(&g_rearm_marked_pending);
+        }
+    }
+    for (i = 0; i < g_rt_mark_count; i++) {
+        void *decl = g_rt_marks[i].decl;
+        sh_resource_resident_external(g_resident_pass, decl);
+        __try {
+            if (!g_reconstruct) {
+                InterlockedIncrement(&g_rearm_drain_faults);
+                continue;
+            }
+            unsigned int *level =
+                (unsigned int *)((unsigned char *)decl + DS_RES_LEVEL_OFF);
+            /* Reconstruction keeps the object storage but runs its native
+             * destructor. Release static lifetime for that synchronous call:
+             * level 2 still survives an ordinary map purge. Runtime callers
+             * have already required the main thread and settled browser.
+             * Restore permanent lifetime even if the constructor throws;
+             * no parser or later map transition may see a demoted target. */
+            __try {
+                if (*level == 4u) *level = 2u;
+                g_reconstruct(decl);
+            } __finally {
+                *level = 4u;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            InterlockedIncrement(&g_rearm_drain_faults);
+        }
+    }
+    if (InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) return;
+    if (g_resident_pass) {
+        char error[256];
+        if (!sh_resource_resident_reconstruct(g_resident_pass, error, sizeof(error))) {
+            backend_log(error); InterlockedIncrement(&g_rearm_drain_faults); return;
+        }
+    }
+    for (i = 0; i < g_rt_mark_count; i++) {
+        unsigned char *state = (unsigned char *)g_rt_marks[i].decl + DS_DECL_STATE_OFFSET;
+        *state = (unsigned char)(*state | DS_DECL_PENDING_LOAD);
+    }
+    if (g_resident_pass) {
+        char error[256];
+        if (!sh_resource_resident_defaults(g_resident_pass, error, sizeof(error))) {
+            backend_log(error); InterlockedIncrement(&g_rearm_drain_faults);
         }
     }
 }
@@ -1673,7 +1667,7 @@ static void ds_runtime_premark(ds_materialize_context *context)
  *
  * Try ordinary DeclFind for native name and redirect handling. If its thread
  * guard leaves pending-load set, clear the bit and call generic load
- * directly; that path tears down old data before parsing.
+ * directly. Type-specific reload lifetime still requires native validation.
  */
 static void ds_runtime_reload_shadowed(ds_materialize_context *context)
 {
@@ -1682,7 +1676,6 @@ static void ds_runtime_reload_shadowed(ds_materialize_context *context)
     for (i = 0; i < g_rt_mark_count; i++) {
         void *decl;
 
-        if (!g_rt_marks[i].shadowed) continue;
         decl = g_rt_marks[i].decl;
         /* Promote all targets before draining to preserve lifetime and allow
          * nested loads.
@@ -1702,14 +1695,17 @@ static void ds_runtime_reload_shadowed(ds_materialize_context *context)
         unsigned char state = 0;
         int fault = 0;
 
-        if (!g_rt_marks[i].shadowed) continue;
         candidate = &g_candidates[g_rt_marks[i].candidate];
         decl = g_rt_marks[i].decl;
         __try {
             void *type_manager =
                 context->type_by_name(context->registry, candidate->type);
-            if (type_manager)
-                (void)context->find_decl(type_manager, candidate->name, 0);
+            if (type_manager) {
+                void *resolved = context->find_decl(type_manager, candidate->name, 0);
+                if (resolved) decl = resolved;
+                else fault = 1;
+                g_rt_marks[i].decl = decl;
+            }
             state = *((unsigned char *)decl + DS_DECL_STATE_OFFSET);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             fault = 1;
@@ -1741,17 +1737,17 @@ static void ds_runtime_reload_shadowed(ds_materialize_context *context)
                 continue;
             }
         }
-        if ((state & DS_DECL_PENDING_LOAD) == 0) {
+        if (ds_decl_usable(decl, NULL)) {
             char detail[160];
-            InterlockedIncrement(&g_rearm_shadow_reparsed);
-            /* Report state without treating has-source as a parse-success
-             * test. A healthy make-default decl can leave that bit clear.
-             */
+            if (g_rt_marks[i].shadowed)
+                InterlockedIncrement(&g_rearm_shadow_reparsed);
+            /* Defaulted resources are not proof that package source parsed. */
             _snprintf_s(detail, sizeof detail, _TRUNCATE,
                         "stale shadowed identity re-parsed in place at the browser (post-drain state=0x%02x)",
                         (unsigned)state);
             ds_log("RELOADED", candidate->source, detail);
         } else {
+            InterlockedIncrement(&g_rearm_drain_faults);
             ds_log("DRAIN-FAILED", candidate->source,
                    "pending mark survived both the lookup and the direct generic load; it will be swept, and this identity stays stale");
         }
@@ -1776,6 +1772,8 @@ static int ds_runtime_clear_stray_pending(void)
         } __except (EXCEPTION_EXECUTE_HANDLER) { cleared++; }
     }
     g_rt_mark_count = 0;
+    if (g_rt_marks) HeapFree(GetProcessHeap(), 0, g_rt_marks);
+    g_rt_marks = NULL;
     return cleared;
 }
 
@@ -1911,8 +1909,19 @@ static int ds_materialize_missing_sedefs(void *registry,
 
     /* A runtime pass refreshes stale pre-existing decls with the engine's own pending-load
      * mechanism; every mark must exist before the first drain (see ds_runtime_premark). */
-    if (InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0))
+    if (g_boot_refresh || InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0))
         ds_runtime_premark(&context);
+    if ((g_boot_refresh || InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)) &&
+        InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) return 0;
+
+    /* Finish every reconstructed object before validating new identities.
+     * A rejected new material must not strand unrelated existing resources
+     * in their empty constructor state. This also drains reused defaults;
+     * dependency lookups may have completed some targets already. */
+    if (g_boot_refresh || InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)) {
+        ds_runtime_reload_shadowed(&context);
+        if (InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) return 0;
+    }
 
     for (i = 0; i < g_candidate_count; i++) {
         ds_candidate *candidate = &g_candidates[i];
@@ -1940,9 +1949,8 @@ static int ds_materialize_missing_sedefs(void *registry,
             continue;
         if (!ds_materialize_root(&context, i)) return 0;
     }
-    if (InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0))
-        ds_runtime_reload_shadowed(&context);
-    return 1;
+    return !(g_boot_refresh || InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)) ||
+           InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0) == 0;
 }
 
 enum {
@@ -2054,6 +2062,20 @@ static int ds_scan_and_materialize_missing(
             return 0;
         }
     }
+    /* Finish the native resident refresh before the palette is rebuilt. The
+     * palette builder constructs an entity per template, and those entities
+     * resolve the very resources this pass captured; rebuilding while they are
+     * still marked pending drops their templates and the native entity bank
+     * then reports a missing palette entry. */
+    if (g_resident_pass) {
+        char error[256];
+        if (!sh_resource_resident_reconstruct(g_resident_pass, error, sizeof(error)) ||
+            !sh_resource_resident_drain(g_resident_pass, error, sizeof(error))) {
+            backend_log(error);
+            if (failure_phase) *failure_phase = DS_PHASE_FAILURE_PALETTE;
+            return 0;
+        }
+    }
     {
         int palette_ok = 0;
         int palette_fault = 0;
@@ -2080,10 +2102,19 @@ void sh_decl_server_test_set_generic_load(sh_decl_server_test_generic_load_fn fn
 {
     g_generic_load = (resource_generic_load_fn)fn;
 }
+void sh_decl_server_test_set_reconstruct(sh_decl_server_test_generic_load_fn fn,
+                                        sh_decl_server_test_find_decl_fn peek)
+{
+    g_reconstruct = (resource_generic_load_fn)fn;
+    g_test_peek = (decl_find_fn)peek;
+}
 
 void sh_decl_server_test_reset_runtime_state(void)
 {
     g_rt_mark_count = 0;
+    if (g_rt_marks) HeapFree(GetProcessHeap(), 0, g_rt_marks);
+    g_rt_marks = NULL;
+    g_test_fail_mark_allocation = 0;
     g_generic_load = NULL;
     memset(&g_runtime_heap, 0, sizeof(g_runtime_heap));
     InterlockedExchange(&g_rearm_touched_promoted, 0);
@@ -2092,6 +2123,9 @@ void sh_decl_server_test_reset_runtime_state(void)
     InterlockedExchange(&g_rearm_drain_faults, 0);
     InterlockedExchange(&g_rearm_shadow_reparsed, 0);
 }
+
+void sh_decl_server_test_fail_mark_allocation(int fail)
+{ g_test_fail_mark_allocation = fail; }
 
 void sh_decl_server_test_runtime_counters(long *marked_pending, long *left_loaded,
                                           long *shadow_reparsed, long *drain_faults)
@@ -2123,7 +2157,7 @@ int sh_decl_server_test_materialize_missing_sedefs(
     size_t i;
     int ok;
 
-    if (!items || count > DS_MAX_CANDIDATES || !type_by_name || !source_find ||
+    if (!items || count > INT_MAX || count > SIZE_MAX / sizeof(ds_candidate) || !type_by_name || !source_find ||
         !find_decl)
         return 0;
     if (count) {
@@ -2179,7 +2213,7 @@ int sh_decl_server_test_scan_and_materialize_missing(
     size_t i;
     int ok;
 
-    if (!items || count > DS_MAX_CANDIDATES || !type_by_name || !source_find ||
+    if (!items || count > INT_MAX || count > SIZE_MAX / sizeof(ds_candidate) || !type_by_name || !source_find ||
         !find_decl || !palette_refresh || !ctor || !dtor || !register_file)
         return 0;
     if (count) {
@@ -2322,7 +2356,7 @@ static void __cdecl ds_apply_command(void)
                 failed = 1;
             } else if (failure_phase == DS_PHASE_FAILURE_MATERIALIZATION) {
                 materialization_failed = 1;
-                backend_log("decl-server FAILED: native source scans completed but a new snapEditorEntityDef could not be materialized; no palette refresh; no retry");
+                backend_log("decl-server FAILED: native source scans completed but package declaration materialization failed; no palette refresh; no retry");
             } else {
                 usability_failed = 1;
             }
@@ -2401,6 +2435,7 @@ static int ds_runtime_boundary_safe(void)
     const unsigned char *shell, *manager, *common;
     int current, next;
     if (!g_module_base) return 0;
+    if (sh_map_transition_at_boundary()) return 1;
     if (!g_boundary_editor || !g_boundary_shell_slot ||
         !g_boundary_common_slot || !g_boundary_thread_slot) return 0;
     __try {
@@ -2410,38 +2445,33 @@ static int ds_runtime_boundary_safe(void)
         common = *(const unsigned char **)g_boundary_common_slot;
         if (!shell || !common || common[0xf576] != 0) return 0;
         manager = *(const unsigned char **)(shell + 0x18);
-        if (!manager || !sh_engine_dialog_queue_idle(shell) ||
-            *(const int *)(manager + 8) != 0x3f ||
-            *(const int *)(manager + 12) != 0x3f) return 0;
+        if (!manager || !sh_engine_dialog_queue_idle(shell)) return 0;
+        current = *(const int *)(manager + 8);
+        next = *(const int *)(manager + 12);
+        /* Map information, browser, tile browser and lobby are native map
+         * launch surfaces. Screen equality alone does not establish safety:
+         * require an inactive editor, no loading and settled menu state too. */
+        if (current != next || (current != 59 && current != 63 && current != 64 && current != 65)) return 0;
         current = *(const int *)(manager + 0x910);
         next = *(const int *)(manager + 0x914);
-        return current >= 0 && current != 10 && current == next;
+        return current >= 1 && current <= 4 && current == next;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
     }
 }
 
-static void ds_rearm_in_process_heap(void)
+static void ds_rearm_published(void)
 {
     char line[192];
-    unsigned long packages;
-    {
-        LONG st = InterlockedCompareExchange(&g_state, DS_STATE_INSTALLING, DS_STATE_DONE);
-        if (st != DS_STATE_DONE)
-            st = InterlockedCompareExchange(&g_state, DS_STATE_INSTALLING, DS_STATE_FAILED);
-        if (st != DS_STATE_DONE && st != DS_STATE_FAILED) {
-            backend_log("decl-server RE-ARM refused: a pass is in flight");
-            return;
-        }
-    }
+    size_t packages;
+    const sh_package_compilation *compiled = sh_package_runtime_acquire();
+    packages = compiled ? compiled->sources->package_count : 0;
+    sh_package_runtime_release();
     InterlockedExchange(&g_registration_succeeded, 0);
     ds_free_candidates();
-    packages = sh_overrides_rescan_packages();
     {
         char root[MAX_PATH];
-        if (packages == SH_OVERRIDES_RESCAN_FAILED ||
-            !sh_overrides_get_root(root, sizeof(root)) ||
-            !sh_resource_bridge_recapture(root) ||
+        if (!sh_overrides_get_root(root, sizeof(root)) ||
             !sh_weapon_hud_reload(root) ||
             !sh_package_requirements_rearm(root, (void *)g_execute_commands, 1) ||
             !sh_strids_rearm()) {
@@ -2532,13 +2562,17 @@ static void ds_rearm_in_process_heap(void)
     }
 }
 
+static void ds_rearm_transaction(void);
+
 static void __cdecl ds_rearm_command(void)
 {
-    sh_process_heap_scope scope;
-    int restored = 1;
+    if (sh_rawmap_defers_install_commit()) {
+        sh_decl_server_request_rearm(); return;
+    }
     if (!InterlockedCompareExchange(&g_runtime_ready, 0, 0) ||
         !sh_user_overrides_enabled_for_launch()) {
         backend_log("decl-server RE-ARM refused: runtime dependencies are unavailable");
+        sh_mpkg_activation_cancel();
         return;
     }
     if (!ds_runtime_boundary_safe()) {
@@ -2546,29 +2580,25 @@ static void __cdecl ds_rearm_command(void)
         sh_decl_server_request_rearm();
         return;
     }
-    if (!sh_process_heap_enter(&g_runtime_heap, &scope)) {
-        InterlockedExchange(&g_registration_succeeded, 0);
-        InterlockedExchange(&g_state, DS_STATE_FAILED);
-        if (scope.active) InterlockedExchange(&g_runtime_ready, 0);
-        backend_log("decl-server RE-ARM refused: process heap scope could not be established");
-        return;
+    if (!sh_mpkg_startup_ready()) {
+        char root[MAX_PATH];
+        if (sh_overrides_get_root(root, sizeof(root))) sh_mpkg_boot_capture(root);
+        if (!sh_mpkg_startup_ready()) {
+            InterlockedExchange(&g_registration_succeeded, 0);
+            InterlockedExchange(&g_state, DS_STATE_FAILED);
+            backend_log("decl-server RE-ARM refused: interrupted installation recovery or package startup capture is incomplete");
+            sh_mpkg_activation_cancel();
+            return;
+        }
     }
-    /* Resource levels do not protect raw palette arrays or declaration-owned
-     * strings. Match native editor initialization's process-heap scope. */
     __try {
-        __try { ds_rearm_in_process_heap(); }
-        __finally { restored = sh_process_heap_leave(&scope); }
+        ds_rearm_transaction();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         InterlockedExchange(&g_registration_succeeded, 0);
         InterlockedExchange(&g_state, DS_STATE_FAILED);
         backend_log("decl-server RE-ARM refused: native refresh raised an exception");
     }
-    if (!restored) {
-        InterlockedExchange(&g_registration_succeeded, 0);
-        InterlockedExchange(&g_state, DS_STATE_FAILED);
-        InterlockedExchange(&g_runtime_ready, 0);
-        backend_log("decl-server RE-ARM refused: process heap scope was not restored; further refresh disabled");
-    }
+    if (!sh_decl_server_registration_succeeded()) sh_mpkg_activation_cancel();
 }
 
 /* Registry watermark/delta promotion uses the same list as native promotion:
@@ -2583,7 +2613,6 @@ static void __cdecl ds_rearm_command(void)
 #define DS_RES_ARR_OFF      0x20
 #define DS_RES_CNT_OFF      0x28
 #define DS_RES_MAX_LISTS    4096u
-#define DS_RES_MAX_ENTRIES  262144u
 
 static void **g_res_mark;          /* sorted snapshot of entry pointers */
 static size_t g_res_mark_count;
@@ -2730,8 +2759,11 @@ void sh_decl_server_request_rearm(void)
 void sh_decl_server_rearm_poll(void)
 {
     LONG state = InterlockedCompareExchange(&g_state, 0, 0);
+    if (sh_rawmap_defers_install_commit()) return;
     if (InterlockedCompareExchange(&g_auto_state, 0, 0) != DS_AUTO_RUN) return;
-    if (!InterlockedCompareExchange(&g_runtime_ready, 0, 0)) return;
+    if (!InterlockedCompareExchange(&g_runtime_ready, 0, 0)) {
+        sh_mpkg_activation_cancel(); return;
+    }
     if (state != DS_STATE_DONE && state != DS_STATE_FAILED) return;
     if (!ds_runtime_boundary_safe()) return;
     if (InterlockedCompareExchange(&g_auto_state, DS_AUTO_IDLE, DS_AUTO_RUN) != DS_AUTO_RUN)
@@ -2746,6 +2778,9 @@ void sh_decl_server_rearm_poll(void)
 int sh_decl_server_rearm(void)
 {
     LONG before = InterlockedCompareExchange(&g_state, 0, 0);
+    if (sh_rawmap_defers_install_commit()) {
+        sh_decl_server_request_rearm(); return 0;
+    }
     if (before != DS_STATE_DONE && before != DS_STATE_FAILED) return 0;
     if (!ds_runtime_boundary_safe()) {
         sh_decl_server_request_rearm();
@@ -2755,19 +2790,260 @@ int sh_decl_server_rearm(void)
     return sh_decl_server_registration_succeeded();
 }
 
-static void ds_publish_before_boot_promotion(void)
+static void ds_boot_published(void)
 {
-    /* Apply and drain blacklist gates before publication. Native load-by-name
-     * rejects blocked identities before the type parser runs.
-     */
-    if (!sh_package_requirements_apply_now((void *)g_execute_commands))
-        backend_log("decl-server: package requirements were not applied before publication; cut-content gates may refuse some packages");
+    char root[MAX_PATH];
+    if (!sh_overrides_get_root(root, sizeof(root)) ||
+        !sh_weapon_hud_reload(root) ||
+        !sh_package_requirements_rearm(root, (void *)g_execute_commands, 1) ||
+        !sh_strids_rearm() || !ds_capture_snapshot()) {
+        backend_log("decl-server FAILED: initial package compilation, policy refresh, or snapshot capture failed");
+        InterlockedExchange(&g_registration_succeeded, 0);
+        InterlockedExchange(&g_state, DS_STATE_FAILED);
+        ds_free_candidates();
+        return;
+    }
 
     /* Claim the same ARMED -> QUEUED transition the command buffer used to make. ds_apply_command
      * keeps its own QUEUED -> APPLYING claim, so its contract is unchanged; only delivery moved. */
     if (InterlockedCompareExchange(&g_state, DS_STATE_QUEUED, DS_STATE_ARMED) != DS_STATE_ARMED)
         return;
-    ds_apply_command();
+    g_boot_refresh = 1;
+    __try { ds_apply_command(); }
+    __finally {
+        g_boot_refresh = 0;
+        if (ds_runtime_clear_stray_pending() ||
+            InterlockedCompareExchange(&g_rearm_drain_faults, 0, 0)) {
+            InterlockedExchange(&g_registration_succeeded, 0);
+            InterlockedExchange(&g_state, DS_STATE_FAILED);
+        }
+    }
+}
+
+static int ds_activate_audio(char *error, size_t capacity)
+{
+    const sh_package_compilation *compiled = sh_package_runtime_acquire();
+    char **names = NULL;
+    uint32_t *events = NULL;
+    sh_package_audio *audio = NULL;
+    sh_package_audio_report audio_report = {0};
+    const sh_package_audio_bank *banks = NULL;
+    const sh_package_audio_media *media = NULL;
+    size_t bank_count = 0, media_count = 0;
+    size_t count = 0, used = 0;
+    int result = 0;
+    void *registry = NULL, *manager = NULL;
+    decl_type_by_name_fn type_by_name = NULL;
+    decl_register_file_fn register_file = NULL;
+    if (compiled) {
+        audio = sh_package_audio_open(compiled, &audio_report, error, capacity);
+        for (size_t i = 0; i < compiled->resource_count; ++i) {
+            const sh_compiled_resource *r = compiled->resources+i;
+            if (r->source_count && r->type && !strcmp(r->type, "sound") && r->name) ++count;
+        }
+        if (count && count <= SIZE_MAX / sizeof(*names) && count <= SIZE_MAX / sizeof(*events)) {
+            names = (char **)calloc(count, sizeof(*names));
+            events = (uint32_t *)malloc(count*sizeof(*events));
+            if (names && events) for (size_t i = 0; i < compiled->resource_count; ++i) {
+                const sh_compiled_resource *r = compiled->resources+i;
+                if (r->source_count && r->type && !strcmp(r->type, "sound") && r->name) {
+                    names[used] = _strdup(r->name);
+                    if (!names[used]) break;
+                    ++used;
+                }
+            }
+        }
+    }
+    sh_package_runtime_release();
+    if ((compiled && !audio) || audio_report.invalid) {
+        if (audio_report.invalid) snprintf(error, capacity, "%s", audio_report.first_gap);
+        goto done;
+    }
+    if (count != used) {
+        snprintf(error, capacity, "prepared audio event snapshot allocation failed"); goto done;
+    }
+    if (count) {
+        if (!ds_decode_registry(&registry, &type_by_name, &register_file)) {
+            snprintf(error, capacity, "prepared audio registry is unavailable"); goto done;
+        }
+        __try {
+            manager = type_by_name(registry, "sound");
+            for (size_t i = 0; i < count; ++i) {
+                void *decl = ds_peek_decl(manager, names[i]);
+                unsigned char state = 0;
+                /* Prepared idSoundShader keeps its Wwise event identity at
+                 * +0xac in both renderers. Do not guess aliases from filenames. */
+                if (!decl || !ds_safe_read((const uint8_t *)decl+DS_DECL_STATE_OFFSET, &state, 1) ||
+                    (state & 7) || !ds_safe_read((const uint8_t *)decl+0xacu, events+i, sizeof(*events))) {
+                    snprintf(error, capacity, "sound '%s' has no prepared native event", names[i]); goto done;
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            snprintf(error, capacity, "prepared audio event inspection failed"); goto done;
+        }
+    }
+    bank_count = sh_package_audio_banks(audio, &banks);
+    media_count = sh_package_audio_media_files(audio, &media);
+    result = sh_audio_banks_native_activate(events, count, banks, bank_count,
+        media, media_count, error, capacity);
+done:
+    sh_package_audio_close(audio);
+    for (size_t i = 0; i < used; ++i) free(names[i]);
+    free(names); free(events); return result;
+}
+
+static int ds_activate_provider(void *context, int restoring,
+    const sh_package_changes *changes, char *error, size_t capacity)
+{
+    sh_process_heap_scope scope = {0};
+    sh_resource_resident *resident = NULL;
+    int succeeded = 0, heap_restored = 1;
+    char transition[160];
+    snprintf(transition, sizeof(transition), "decl-server: package %s has %zu changed provider resources",
+        restoring ? "recovery" : "activation", changes->count);
+    backend_log(transition);
+    InterlockedExchange(&g_state, context ? DS_STATE_ARMED : DS_STATE_INSTALLING);
+    InterlockedExchange(&g_registration_succeeded, 0);
+    InterlockedExchange(&g_rearm_drain_faults, 0);
+    if (restoring) backend_log("decl-server: recovering consumers against the previous package provider");
+    /* Match native editor allocation lifetime, and verify scope restoration
+     * BEFORE either the compiler or a pending installation can commit. */
+    if (!context && (!InterlockedCompareExchange(&g_runtime_ready, 0, 0) ||
+        !sh_process_heap_enter(&g_runtime_heap, &scope))) {
+        if (scope.active) InterlockedExchange(&g_runtime_ready, 0);
+        InterlockedExchange(&g_state, DS_STATE_FAILED);
+        snprintf(error, capacity, "process heap scope could not be established for package %s",
+            restoring ? "recovery" : "activation"); return 0;
+    }
+    __try {
+        resident = sh_resource_resident_begin(changes, restoring, error, capacity);
+        if (resident) {
+            g_resident_pass = resident;
+            if (context) ds_boot_published(); else ds_rearm_published();
+            succeeded = InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE &&
+                InterlockedCompareExchange(&g_registration_succeeded, 0, 0) != 0;
+            if (!succeeded) snprintf(error, capacity, "declaration and policy %s did not complete",
+                restoring ? "recovery" : "activation");
+            /* A provider containing only cooked files has no declaration
+             * premark phase. Its captured resources still need reconstruction. */
+            if (succeeded) succeeded = sh_resource_resident_reconstruct(resident, error, capacity) &&
+                sh_resource_resident_drain(resident, error, capacity);
+            if (succeeded) succeeded = ds_activate_audio(error, capacity);
+        }
+    }
+    __finally {
+        /* This also runs when an engine call raises an exception. The runtime
+         * restores the provider before retrying this consumer pass. */
+        if (ds_runtime_clear_stray_pending()) {
+            InterlockedExchange(&g_registration_succeeded, 0);
+            InterlockedExchange(&g_state, DS_STATE_FAILED);
+        }
+        InterlockedExchange(&g_rearm_is_runtime, 0);
+        g_boot_refresh = 0;
+        if (g_res_mark) HeapFree(GetProcessHeap(), 0, g_res_mark);
+        g_res_mark = NULL; g_res_mark_count = 0;
+        ds_free_candidates();
+        g_resident_pass = NULL;
+        succeeded = sh_resource_resident_end(resident, succeeded &&
+            InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE, error, capacity);
+        if (!context) heap_restored = sh_process_heap_leave(&scope);
+        if (!heap_restored) {
+            InterlockedExchange(&g_registration_succeeded, 0);
+            InterlockedExchange(&g_state, DS_STATE_FAILED);
+            InterlockedExchange(&g_runtime_ready, 0);
+            backend_log("decl-server RE-ARM refused: process heap scope was not restored; further refresh disabled");
+        }
+    }
+    succeeded = succeeded && heap_restored && InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE &&
+        InterlockedCompareExchange(&g_registration_succeeded, 0, 0) != 0;
+    if (succeeded && !context && !restoring && !sh_rawmap_defers_install_commit())
+        succeeded = sh_mpkg_activation_commit(error, capacity);
+    if (!succeeded) {
+        InterlockedExchange(&g_registration_succeeded, 0);
+        InterlockedExchange(&g_state, DS_STATE_FAILED);
+    }
+    return succeeded;
+}
+
+static void ds_publish_before_boot_promotion(void)
+{
+    /* Both native startup paths complete game-reader registration before
+     * reaching promotion. Keep the previous provider through boot activation
+     * too, without moving compilation ahead of native reader registration. */
+    if (!sh_mpkg_startup_ready() ||
+        sh_overrides_rescan_packages_activated(ds_activate_provider, (void *)1) == SH_OVERRIDES_RESCAN_FAILED) {
+        InterlockedExchange(&g_registration_succeeded, 0);
+        InterlockedExchange(&g_state, DS_STATE_FAILED);
+        backend_log("decl-server FAILED: initial package preparation or activation failed");
+    }
+}
+
+static void ds_rearm_transaction(void)
+{
+    LONG st = InterlockedCompareExchange(&g_state, DS_STATE_INSTALLING, DS_STATE_DONE);
+    if (st != DS_STATE_DONE)
+        st = InterlockedCompareExchange(&g_state, DS_STATE_INSTALLING, DS_STATE_FAILED);
+    if (st != DS_STATE_DONE && st != DS_STATE_FAILED) {
+        backend_log("decl-server RE-ARM refused: a pass is in flight");
+        return;
+    }
+    InterlockedExchange(&g_registration_succeeded, 0);
+    if (sh_overrides_rescan_packages_activated(ds_activate_provider, NULL) == SH_OVERRIDES_RESCAN_FAILED) {
+        /* Recovery may have succeeded; it must not admit the failed install. */
+        InterlockedExchange(&g_registration_succeeded, 0);
+        InterlockedExchange(&g_state, DS_STATE_FAILED);
+        backend_log("decl-server RE-ARM refused: package preparation or activation failed");
+    }
+}
+
+int sh_decl_server_map_preparation_ready(void)
+{
+    LONG state = InterlockedCompareExchange(&g_state, 0, 0);
+    __try {
+        return (state == DS_STATE_DONE || state == DS_STATE_FAILED) &&
+            InterlockedCompareExchange(&g_runtime_ready, 0, 0) && g_boundary_thread_slot &&
+            *(const DWORD *)g_boundary_thread_slot == GetCurrentThreadId();
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+int sh_decl_server_map_boundary_safe(void)
+{
+    return sh_decl_server_map_preparation_ready() && ds_runtime_boundary_safe();
+}
+
+int sh_decl_server_map_browser_present(void)
+{
+    /* Conservative on unavailable state: a launch must observe real departure
+     * before a later browser tick can retire its just-activated provider. */
+    __try {
+        const unsigned char *shell, *manager, *common;
+        if (!g_boundary_editor || !g_boundary_shell_slot || !g_boundary_common_slot ||
+            !g_boundary_thread_slot || *(const DWORD *)g_boundary_thread_slot != GetCurrentThreadId()) return 1;
+        shell = *(const unsigned char **)g_boundary_shell_slot;
+        common = *(const unsigned char **)g_boundary_common_slot;
+        if (!shell || !common || !(manager = *(const unsigned char **)(shell + 0x18))) return 1;
+        return !*(const unsigned char *)(g_boundary_editor + 9) && !common[0xf576] &&
+            *(const int *)(manager + 8) == 63 && *(const int *)(manager + 12) == 63;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 1; }
+}
+
+int sh_decl_server_map_retirement_safe(void)
+{
+    return sh_decl_server_map_boundary_safe() && sh_decl_server_map_browser_present();
+}
+
+int sh_decl_server_map_editor_matches(const void *editor)
+{ return editor && (uintptr_t)editor == g_boundary_editor; }
+
+int sh_decl_server_activate_map(sh_package_map_plan *plan)
+{
+    if (!sh_decl_server_map_boundary_safe()) return 0;
+    if (!sh_overrides_activate_map(plan, ds_activate_provider, NULL)) {
+        InterlockedExchange(&g_registration_succeeded, 0);
+        InterlockedExchange(&g_state, DS_STATE_FAILED);
+        backend_log("decl-server: map provider activation failed"); return 0;
+    }
+    return sh_decl_server_registration_succeeded();
 }
 
 /* After native promotion, look up one published identity without creating it
@@ -2861,7 +3137,7 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     uintptr_t idstr_dtor;
     uintptr_t boot_promote;
     uintptr_t execute_commands;
-    uintptr_t generic_load;
+    uintptr_t generic_load, reconstruct;
     int command_registered = 0;
     if (g_boot_promotion_original) {
         if (hook_is_installed((void *)g_boot_promotion_original))
@@ -2886,11 +3162,6 @@ int sh_decl_server_install(const sig_result *results, size_t count,
         InterlockedExchange(&g_state, DS_STATE_DONE);
         return 1;
     }
-    if (!ds_capture_snapshot()) {
-        InterlockedExchange(&g_state, DS_STATE_FAILED);
-        ds_free_candidates();
-        return 0;
-    }
     if (!sh_overrides_internal_decl_table_can_install()) {
         backend_log("decl-server REFUSED: exact per-decl provider table is unavailable, disabled, or already occupied");
         InterlockedExchange(&g_state, DS_STATE_FAILED);
@@ -2913,13 +3184,14 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     execute_commands = ds_clean_addr(results, count, "CmdExecuteBuffer");
     /* Require a clean generic-load signature for the runtime fallback. */
     generic_load = ds_clean_addr(results, count, "ResourceGenericLoad");
+    reconstruct = ds_clean_addr(results, count, "ResourceReconstruct");
     if (!anchor || anchor->status != SIG_OK || !type_method || !register_file || !find_decl ||
         !source_find || source_find->status != SIG_OK || !source_find->addr ||
         type_method->status != SIG_OK || register_file->status != SIG_OK ||
         find_decl->status != SIG_OK || !type_method->addr ||
         !register_file->addr || !find_decl->addr ||
         !idstr_ctor || !idstr_dtor || !boot_promote || !execute_commands ||
-        !generic_load || !add_command || !cmdsys || !module_base ||
+        !generic_load || !reconstruct || !add_command || !cmdsys || !module_base ||
         !sh_process_heap_bind(&g_runtime_heap, results, count, module_base) ||
         !ds_clean_identity(results, count, "DeclRegistryAnchor", module_base, DS_PINNED_ANCHOR_RVA) ||
         !ds_clean_identity(results, count, "DeclTypeByName", module_base, DS_PINNED_TYPE_RVA) ||
@@ -2933,7 +3205,9 @@ int sh_decl_server_install(const sig_result *results, size_t count,
         !ds_clean_identity(results, count, "CmdExecuteBuffer", module_base,
                            DS_PINNED_CMD_EXECUTE_RVA) ||
         !ds_clean_identity(results, count, "ResourceGenericLoad", module_base,
-                           DS_PINNED_GENERIC_LOAD_RVA)) {
+                           DS_PINNED_GENERIC_LOAD_RVA) ||
+        !ds_clean_identity(results, count, "ResourceReconstruct", module_base,
+                           DS_PINNED_RECONSTRUCT_RVA)) {
         backend_log("decl-server REFUSED: a registry/idStr/boot-promotion ABI, command-system, or module-base dependency did not resolve to a clean, uniquely identified engine function");
         InterlockedExchange(&g_state, DS_STATE_FAILED);
         ds_free_candidates();
@@ -2949,9 +3223,11 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     g_idstr_ctor = (idstr_ctor_fn)idstr_ctor;
     g_idstr_dtor = (idstr_dtor_fn)idstr_dtor;
     g_find_source = (decl_source_find_fn)source_find->addr;
+    ds_bind_source_mode(results, count);
     g_find_decl = (decl_find_fn)find_decl->addr;
     g_execute_commands = (cmd_execute_buffer_fn)execute_commands;
     g_generic_load = (resource_generic_load_fn)generic_load;
+    g_reconstruct = (resource_generic_load_fn)reconstruct;
     /* Resolve once, including failure; never scan an unknown image on every tick. */
     g_boundary_editor = glb_resolve(module_base, "editor_singleton", NULL);
     g_boundary_shell_slot = glb_resolve(module_base, "shell_ptr_slot", NULL);
@@ -2976,15 +3252,6 @@ int sh_decl_server_install(const sig_result *results, size_t count,
         InterlockedExchange(&g_state, DS_STATE_FAILED);
         ds_free_candidates();
         return 0;
-    }
-
-    if (g_candidate_count == 0) {
-        InterlockedExchange(&g_runtime_ready, 1);
-        backend_log("decl-server ready: empty launch; runtime commands and dependencies remain bound");
-        InterlockedExchange(&g_registration_succeeded, 1);
-        InterlockedExchange(&g_state, DS_STATE_DONE);
-        ds_free_candidates();
-        return 1;
     }
 
     /* Arm before installing the hook so a fast boot cannot enter with NEW state. */
@@ -3021,8 +3288,7 @@ int sh_decl_server_install(const sig_result *results, size_t count,
     {
         char line[320];
         _snprintf_s(line, sizeof(line), _TRUNCATE,
-                    "decl-server armed: immutable launch snapshot has %d candidate(s), %zu body bytes; publishes inside idCommonLocal::Init immediately before the engine whole-registry resource promotion (0x%X); no hot reload",
-                    g_candidate_count, g_total_bytes,
+                    "decl-server armed: compile packages and publish inside idCommonLocal::Init before whole-registry resource promotion (0x%X)",
                     (unsigned)(boot_promote - (uintptr_t)module_base));
         backend_log(line);
     }
@@ -3046,6 +3312,7 @@ void sh_decl_server_test_reset_install(void)
     g_expected_type_by_name = NULL;
     g_expected_register_file = NULL;
     g_find_source = NULL;
+    g_source_mode_address = 0;
     g_find_decl = NULL;
     g_idstr_ctor = NULL;
     g_idstr_dtor = NULL;
@@ -3066,7 +3333,7 @@ int sh_decl_server_test_apply(const sh_decl_server_test_materialize_item *items,
                               size_t count, int runtime)
 {
     size_t i;
-    if (!items || count > DS_MAX_CANDIDATES || !g_runtime_ready) return 0;
+    if (!items || count > INT_MAX || count > SIZE_MAX / sizeof(ds_candidate) || !g_runtime_ready) return 0;
     ds_free_candidates();
     g_capture_refused = 0;
     g_candidates = (ds_candidate *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,

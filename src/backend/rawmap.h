@@ -16,6 +16,75 @@
  * Returns 1 when installed, otherwise logs the refusal and returns 0.
  */
 int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok);
+/* Read saved-map JSON before EditorLoadMap initializes the editor. Requires
+ * clean signatures and the bound native idStr helpers. The checked bytes are
+ * retained through the matching native parse. */
+int sh_rawmap_preflight_install(void *load_fn, int load_clean, void *read_text_fn, int read_clean);
+/* Retire the map provider only after native teardown reaches the browser. */
+void sh_rawmap_map_context_poll(void);
+/* Continue the user's retained saved-map request after native consent, without
+ * rereading its source, forcing a reload, or changing the running process. */
+void sh_rawmap_pending_map_poll(void);
+/* Abandon the retained request and its whole install before replacing a native
+ * selection. Main thread only; 0 means cleanup is still held or busy. */
+int sh_rawmap_cancel_pending_map(void);
+
+/* An actual map launch can retain its own native selection instead of borrowing
+ * a download callback or temporary deserializer output. Main thread only.
+ * valid checks that the same user request still exists; enter performs the
+ * original launch and returns zero on success. Its next native parse receives
+ * the retained JSON. release frees only caller-owned state and runs exactly once
+ * after acceptance, including cancellation. It must not initiate another load.
+ *
+ * Return 1 transfers context ownership, copies JSON, prepares packages and queues
+ * continuation. Return 0 transfers nothing and supplies an error. No native
+ * callback or source buffer passed here may depend on the caller's stack.
+ * Downloads, inspectors and previews are not launch requests.
+ */
+typedef struct sh_rawmap_request {
+    void *context;
+    int (*valid)(void *context);
+    int (*enter)(void *context, const char *json);
+    void (*release)(void *context);
+} sh_rawmap_request;
+int sh_rawmap_preflight_request(const char *json, size_t length,
+    const sh_rawmap_request *request, char *error, size_t capacity);
+/* Internal native launch continuation. Preparation retains the old map until
+ * its requested unload completes. waiting validates lobby ownership; matches
+ * validates the exact gameSpawnInfo at allocation; select publishes copied
+ * map settings after activation, without issuing another native launch. */
+typedef struct sh_rawmap_loading {
+    int (*waiting)(void *context);
+    int (*matches)(void *context, const void *parameters);
+    int (*select)(void *context);
+} sh_rawmap_loading;
+int sh_rawmap_preflight_loading_request(const char *json, size_t length,
+    const sh_rawmap_request *request, const sh_rawmap_loading *loading,
+    char *error, size_t capacity);
+int sh_rawmap_transition_pending(void *manager, const void *parameters);
+int sh_rawmap_transition_activate(void);
+int sh_rawmap_transition_commit(void);
+/* The native map-change owner, rather than an unrelated resource refresh,
+ * must finish the pending installation for a deferred launch. */
+int sh_rawmap_defers_install_commit(void);
+void sh_rawmap_transition_finished(int loaded);
+/* Bracket native published-cache / inspector readers, including their async
+ * completion bodies. Nestable and thread-local; callers must leave in finally.
+ * Parses strip delivery but do not select policy, install packages, consume
+ * rawmap arms or replace the active map's save/render state. Actual launches
+ * leave this scope before entering their retained source. */
+void sh_rawmap_inspection_enter(void);
+void sh_rawmap_inspection_leave(void);
+/* Bracket an initial published read. Only its first parse from the verified
+ * native return address may use a resource-free session snapshot. Nested
+ * callbacks and later full-map decodes retain normal inspection behavior.
+ * Stack-owned, thread-local and paired in finally. NULL disables admission. */
+typedef struct sh_rawmap_read_scope {
+    struct sh_rawmap_read_scope *previous;
+    const void *return_address;
+} sh_rawmap_read_scope;
+void sh_rawmap_read_enter(sh_rawmap_read_scope *scope, const void *return_address);
+void sh_rawmap_read_leave(sh_rawmap_read_scope *scope);
 
 /* Set the shared load/save arm state; default off. Returns the new state. A
  * sibling arm.flag also arms both paths for testing and follows the
@@ -59,6 +128,11 @@ unsigned long sh_rawmap_swap_complete_count(void);
  * Returns 1 when installed, otherwise logs the refusal and returns 0.
  */
 int sh_rawmap_save_install(void *serialize_fn, int serialize_status_ok);
+
+/* Refresh package policy before the Play command can deactivate the editor.
+ * Refusal leaves the editor active and reports the package error in-game.
+ * The snapshot is read without saving, embedding, or spending rawmap arms. */
+int sh_rawmap_play_install(void *play_fn, int status_ok);
 
 /* Resolve native idStr assignment for package/navigation embedding. Without
  * it, save-output replacement is unavailable.

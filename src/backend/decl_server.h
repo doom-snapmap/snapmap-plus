@@ -5,16 +5,19 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "signatures.h"
+#include "decl_native_registry.h"
 
-/* Snapshot package decl roots and linked installed resources. On the engine
- * main thread, classify sources before live decls, publish missing identities
+/* Arm boot publication without reading package files or native reader tables.
+ * On the engine main thread, compile the current inventory, refresh its policy,
+ * snapshot declarations, classify sources before live decls, publish missing identities
  * through the exact decltree provider, scan them in dependency order, then
  * materialize and validate eligible palette entries. Source arguments are
  * native 48-byte idStr temporaries.
  *
  * Boot publication runs immediately before whole-registry promotion so new
- * content receives permanent lifetime with shipped dependencies. Returns 1
- * for armed or empty work, 0 on refusal.
+ * content receives permanent lifetime with shipped dependencies. Native reader
+ * registration is complete at that boundary on both supported renderers.
+ * Returns 1 when armed (including an empty authored inventory), 0 on refusal.
  */
 int sh_decl_server_install(const sig_result *results, size_t count,
                            const uint8_t *module_base, void *cmdsys);
@@ -42,9 +45,32 @@ void sh_decl_server_request_rearm(void);
 
 /* Advance a requested re-arm. Call from the engine tick (main thread). No-op when idle. */
 void sh_decl_server_rearm_poll(void);
+/* Main-thread map preflight admits settled SnapMap map information, browser,
+ * tile browser and lobby menus with no active editor or native loading. */
+int sh_decl_server_map_boundary_safe(void);
+/* Pure source preparation needs a ready main thread, not released consumers. */
+int sh_decl_server_map_preparation_ready(void);
+/* Retirement additionally requires return to the browser. Browser presence
+ * ignores dialogs and compiler readiness so they cannot imitate a departure. */
+int sh_decl_server_map_retirement_safe(void);
+int sh_decl_server_map_browser_present(void);
+/* Same resolved singleton that native EditorLoadMap receives. */
+int sh_decl_server_map_editor_matches(const void *editor);
+struct sh_package_map_plan;
+int sh_decl_server_activate_map(struct sh_package_map_plan *plan);
+
+/* Bind the verified native registry and read-only source existence for a
+ * short main-thread dependency pass. No compiler snapshot lock may be held
+ * while the returned source callback enters the native source probe. */
+int sh_decl_server_registry_source(sh_decl_registry_source *source);
 
 #ifdef SH_DECL_SERVER_TESTING
 #include <windows.h>
+
+struct sh_package_compilation;
+int sh_decl_server_test_capture(const struct sh_package_compilation *compiled,
+                                 size_t *count, size_t *bytes);
+void sh_decl_server_test_fail_mark_allocation(int fail);
 
 typedef struct sh_decl_server_test_find_api {
     HANDLE (WINAPI *find_first)(LPCSTR pattern, LPWIN32_FIND_DATAA found);
@@ -147,6 +173,8 @@ int sh_decl_server_test_register_candidate(
 typedef void (*sh_decl_server_test_generic_load_fn)(void *decl);
 void sh_decl_server_test_set_runtime(int active);
 void sh_decl_server_test_set_generic_load(sh_decl_server_test_generic_load_fn fn);
+void sh_decl_server_test_set_reconstruct(sh_decl_server_test_generic_load_fn fn,
+                                        sh_decl_server_test_find_decl_fn peek);
 void sh_decl_server_test_reset_runtime_state(void);
 void sh_decl_server_test_runtime_counters(long *marked_pending, long *left_loaded,
                                           long *shadow_reparsed, long *drain_faults);

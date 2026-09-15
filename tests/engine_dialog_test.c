@@ -434,6 +434,21 @@ int main(void)
     CHECK(sh_engine_dialog_test_pending_id() == -1);
     CHECK(sh_engine_dialog_ask(0x6Du, 1u, "third") > 0);
 
+    /* Abandoning a live request closes its own prompt, including a reentrant
+     * native button action. Releasing a stale ticket cannot touch the new one. */
+    reset();
+    ticket = sh_engine_dialog_ask(0x6Du, 1u, "old map"); CHECK(ticket > 0);
+    sh_engine_dialog_release(ticket + 1); CHECK(g_clear_calls == 0);
+    sh_engine_dialog_release(ticket);
+    CHECK(g_clear_calls == 1 && g_queue[8] == 1 && sh_engine_dialog_test_pending_id() == -1);
+    CHECK(sh_engine_dialog_poll(ticket) != SH_ENGINE_DIALOG_ACCEPTED);
+    sh_engine_dialog_release(ticket); CHECK(g_clear_calls == 1);
+    reset();
+    ticket = sh_engine_dialog_ask(0x6Du, 1u, "clear failure"); CHECK(ticket > 0);
+    g_fail_clear = 1; sh_engine_dialog_release(ticket);
+    CHECK(g_clear_calls == 1 && sh_engine_dialog_test_pending_id() == -1);
+    CHECK(!sh_engine_dialog_can_ask() && sh_engine_dialog_poll(ticket) != SH_ENGINE_DIALOG_ACCEPTED);
+
     /* Text longer than the descriptor's inline string is refused outright: the
      * engine would copy 256 bytes by value and truncate mid-message. */
     reset();

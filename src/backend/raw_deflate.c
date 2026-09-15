@@ -162,12 +162,13 @@ static const unsigned short DEXT[30] = {
  * cannot decode a stream whose output length you do not already know, and guessing by doubling can
  * never land on it. */
 static size_t inflate_body(const unsigned char *src, size_t src_len,
-                           unsigned char *dst, size_t dst_len, int exact)
+                           unsigned char *dst, size_t dst_len, int exact, int *valid)
 {
     inf_t s;
     size_t out = 0;
     huff_t lit, dist;
-    if (!src || !dst || !src_len || !dst_len) return 0;
+    if (valid) *valid = 0;
+    if (!src || !dst || !src_len) return 0;
     memset(&s, 0, sizeof(s));
     s.src = src;
     s.len = src_len;
@@ -195,6 +196,7 @@ static size_t inflate_body(const unsigned char *src, size_t src_len,
                  * non-final empty stored block. Do not continue into a second
                  * stream or tolerate trailing bytes. */
                 if ((exact && out != dst_len) || s.pos != s.len) return 0;
+                if (valid) *valid = 1;
                 return out;
             }
         } else if (type == 1 || type == 2) {
@@ -283,6 +285,7 @@ static size_t inflate_body(const unsigned char *src, size_t src_len,
         } else return 0;
         if (final) {
             if ((exact && out != dst_len) || !inf_at_exact_end(&s)) return 0;
+            if (valid) *valid = 1;
             return out;
         }
     }
@@ -291,13 +294,20 @@ static size_t inflate_body(const unsigned char *src, size_t src_len,
 size_t sh_inflate_raw(const unsigned char *src, size_t src_len,
                       unsigned char *dst, size_t dst_len)
 {
-    return inflate_body(src, src_len, dst, dst_len, 1);
+    return inflate_body(src, src_len, dst, dst_len, 1, NULL);
 }
 
 size_t sh_inflate_raw_upto(const unsigned char *src, size_t src_len,
                            unsigned char *dst, size_t dst_cap)
 {
-    return inflate_body(src, src_len, dst, dst_cap, 0);
+    return inflate_body(src, src_len, dst, dst_cap, 0, NULL);
+}
+
+int sh_inflate_raw_exact(const unsigned char *src, size_t src_len, unsigned char *dst, size_t dst_len)
+{
+    int valid = 0;
+    inflate_body(src, src_len, dst, dst_len, 1, &valid);
+    return valid;
 }
 
 #ifdef SH_RAW_DEFLATE_TESTING

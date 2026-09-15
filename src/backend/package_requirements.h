@@ -5,21 +5,24 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Capture each installed package's requirements/*.requirements. Rows use
- * cvar<TAB>name<TAB>value; only audited idempotent pairs are admitted. The
- * poll queues them at RUNNING, while declaration publication uses the
- * synchronous apply entry point.
+/* Capture compiled package.json requirements.cvars. Only supported idempotent
+ * name/value pairs are admitted. Registration needs the installed set while
+ * preparing and serving resident resources, including across map changes.
+ * Map policy selection is a separate compiler operation. Both poll at RUNNING and publication apply synchronously, with
+ * native readback. Capture alone never changes game values.
  */
 int sh_package_requirements_install(const char *data_root,
                                     const uint8_t *module_base,
                                     void *cmdsys,
                                     void *buffer_command,
+                                    void *execute_command_buffer,
                                     int user_layer_enabled);
 
-/* Apply once regardless of load state. When supplied, execute_command_buffer
- * drains queued settings before returning. Call only at the decl server's
+/* Apply once regardless of load state. A supplied execute_command_buffer
+ * replaces the captured drain callback. Call only at the decl server's
  * quiescent publication boundary. Shares the one-shot state with polling;
- * returns 1 if applied/already applied, or 0 on refusal.
+ * returns 1 if applied/verified or already applied, or 0 on refusal. Removed
+ * requirements restore their displaced values unless changed by another user.
  */
 int sh_package_requirements_apply_now(void *execute_command_buffer);
 
@@ -36,6 +39,7 @@ void sh_package_requirements_poll(void);
 #ifdef SH_PACKAGE_REQUIREMENTS_TESTING
 void sh_package_requirements_test_reset(void);
 void sh_package_requirements_test_set_load_state(volatile int *state);
+void sh_package_requirements_test_set_cvar_slot(const void *slot);
 size_t sh_package_requirements_test_count(void);
 #endif
 

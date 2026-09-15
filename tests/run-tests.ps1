@@ -3,6 +3,7 @@
 #
 #   tests\run-tests.ps1
 #   tests\run-tests.ps1 -Doom <unpacked Vulkan exe> -DoomAlt <unpacked OpenGL exe>
+#   tests\run-tests.ps1 -Skip map_published_test
 #
 # The default suite needs no game or built DLL. -Doom adds pinned signature,
 # hook-fallback and global checks; -DoomAlt checks the second image in portable
@@ -10,10 +11,10 @@
 # Exit 0 means every selected test passed; failures include their build log.
 #
 # Optional manual probes:
-#   tests\obj\resource_bridge_test.exe <data-root> <doom-base>
+#   tests\obj\package_compiler_test.exe <data-root> <doom-base>
 # Both resource paths are required; there is no autodiscovery.
 # For xinput_ordinal_test against the built proxy, see docs\contributing.md.
-param([string]$Doom = "", [string]$DoomAlt = "")
+param([string]$Doom = "", [string]$DoomAlt = "", [string[]]$Only = @(), [string[]]$Skip = @())
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $obj  = Join-Path $here "obj"
@@ -38,6 +39,42 @@ if (-not (Get-Command cl -ErrorAction SilentlyContinue)) { throw "cl not on PATH
 
 # name | sources (relative to tests\) | runtime arg
 $tests = @(
+    @{ name = "package_owners_test"; src = 'package_owners_test.c'; arg = "" }
+    @{ name = "decl_tree_test"; src = 'decl_tree_test.c ..\src\backend\decl_tree.c'; arg = "" }
+    @{ name = "decl_native_lex_test"; src = 'decl_native_lex_test.c ..\src\backend\decl_native_lex.c'; arg = "" }
+    @{ name = "decl_material_test"; src = 'decl_material_test.c ..\src\backend\decl_material.c ..\src\backend\decl_native_lex.c'; arg = "" }
+    @{ name = "decl_renderparm_test"; src = 'decl_renderparm_test.c ..\src\backend\decl_material.c ..\src\backend\decl_native_lex.c'; arg = "" }
+    @{ name = "decl_material_compose_test"; src = 'decl_material_compose_test.c ..\src\backend\decl_material_compose.c ..\src\backend\decl_material.c ..\src\backend\decl_native_lex.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
+    @{ name = "decl_polymorphic_test"; src = 'decl_polymorphic_test.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_compose.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_tree.c'; arg = "" }
+    @{ name = "decl_graph_compose_test"; src = 'decl_graph_compose_test.c ..\src\backend\decl_graph_compose.c ..\src\backend\decl_graph.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
+    @{ name = "decl_md6_compose_test"; src = 'decl_md6_compose_test.c ..\src\backend\decl_md6_compose.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
+    @{ name = "decl_graph_test"; src = 'decl_graph_test.c ..\src\backend\decl_graph.c ..\src\backend\decl_tree.c'; arg = "" }
+    @{ name = "decl_entity_class_test"; src = 'decl_entity_class_test.c ..\src\backend\decl_entity_class.c ..\src\backend\decl_tree.c'; arg = "" }
+    @{ name = "decl_dependencies_test"; src = 'decl_dependencies_test.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_json_dependencies.c ..\src\backend\config_json.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
+    @{ name = "decl_native_schema_test"; src = 'decl_native_schema_test.c ..\src\backend\decl_graph_compose.c ..\src\backend\decl_native_schema.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_compose.c ..\src\backend\decl_graph.c ..\src\backend\decl_graph_dependencies.c'; arg = "" }
+    @{ name = "decl_native_registry_test"; src = 'decl_native_registry_test.c ..\src\backend\decl_native_registry.c'; arg = "" }
+    @{ name = "decl_visibility_test"; src = 'decl_visibility_test.c'; arg = "" }
+    @{ name = "resource_graph_prepared_test"; src = 'resource_graph_prepared_test.c ..\src\backend\resource_graph_prepared.c ..\src\backend\resource_graph.c ..\src\backend\decl_native_registry.c ..\src\backend\decl_native_schema.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_json_dependencies.c ..\src\backend\config_json.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; defs = '/DSH_RESOURCE_GRAPH_TESTING'; arg = "" }
+    @{ name = "startup_bindings_test"; src = 'startup_bindings_test.c ..\src\backend\startup_bindings.c'; arg = "" }
+    @{ name = "serialized_entities_guard_test"; src = 'serialized_entities_guard_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
+    @{ name = "resource_graph_test"; src = 'resource_graph_test.c ..\src\backend\resource_graph.c'; defs = '/DSH_RESOURCE_GRAPH_TESTING'; arg = "" }
+    @{ name = "resource_resident_test"; src = 'resource_resident_test.c ..\src\backend\resource_graph.c'; defs = '/DSH_RESOURCE_GRAPH_TESTING'; arg = "" }
+    @{ name = "resource_graph_native_test"; src = 'resource_graph_native_test.c ..\src\backend\resource_graph.c'; defs = '/DSH_RESOURCE_GRAPH_TESTING'; arg = "" }
+    @{ name = "package_archive_test"; src = 'package_archive_test.c ..\src\backend\package_archive.c ..\src\backend\raw_deflate_encode.c ..\src\backend\raw_deflate.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\map_package.c ..\src\backend\map_shards.c'; arg = "" }
+    @{ name = "package_descriptor_test"; src = 'package_descriptor_test.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; arg = "" }
+    @{ name = "decl_compose_test"; src = 'decl_compose_test.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
+    @{ name = "decl_composition_classes_test"; src = 'decl_composition_classes_test.c ..\src\backend\decl_compose.c ..\src\backend\decl_entity_class.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
+    @{ name = "package_sources_test"; src = 'package_sources_test.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; arg = "" }
+    @{ name = "package_compiler_test"; src = 'package_compiler_test.c ..\src\backend\package_compiler.c ..\src\backend\decl_entity_class.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_server_path.c ..\src\backend\decl_text.c ..\src\backend\resource_catalog.c ..\src\backend\raw_deflate.c'; arg = "" }
+    @{ name = "package_environment_test"; src = 'package_environment_test.c ..\src\backend\package_compiler.c ..\src\backend\decl_entity_class.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_server_path.c ..\src\backend\decl_text.c ..\src\backend\resource_catalog.c ..\src\backend\raw_deflate.c'; arg = "" }
+    @{ name = "package_context_test"; src = 'package_context_test.c ..\src\backend\package_compiler.c ..\src\backend\decl_entity_class.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_server_path.c ..\src\backend\decl_text.c ..\src\backend\resource_catalog.c ..\src\backend\raw_deflate.c'; arg = "" }
+    @{ name = "package_runtime_context_test"; src = 'package_runtime_context_test.c ..\src\backend\decl_graph_compose.c ..\src\backend\decl_md6_compose.c ..\src\backend\decl_graph.c ..\src\backend\package_compiler.c ..\src\backend\decl_entity_class.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_server_path.c ..\src\backend\decl_text.c ..\src\backend\resource_catalog.c ..\src\backend\raw_deflate.c'; arg = "" }
+    @{ name = "package_producers_test"; src = 'package_producers_test.c ..\src\backend\package_compiler.c ..\src\backend\decl_entity_class.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_server_path.c ..\src\backend\decl_text.c ..\src\backend\resource_catalog.c ..\src\backend\raw_deflate.c'; arg = "" }
+    @{ name = "package_source_view_test"; src = 'package_source_view_test.c ..\src\backend\package_compiler.c ..\src\backend\decl_entity_class.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_server_path.c ..\src\backend\decl_text.c ..\src\backend\resource_catalog.c ..\src\backend\raw_deflate.c'; arg = "" }
+    @{ name = "package_decl_families_test"; src = 'package_decl_families_test.c ..\src\backend\decl_graph_compose.c ..\src\backend\decl_md6_compose.c ..\src\backend\decl_graph.c ..\src\backend\package_compiler.c ..\src\backend\decl_entity_class.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_server_path.c ..\src\backend\decl_text.c ..\src\backend\resource_catalog.c ..\src\backend\raw_deflate.c'; arg = "" }
+    @{ name = "package_usage_test"; src = 'package_usage_test.c ..\src\backend\resource_graph.c ..\src\backend\package_usage.c ..\src\backend\package_compiler.c ..\src\backend\decl_entity_class.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_server_path.c ..\src\backend\decl_text.c ..\src\backend\resource_catalog.c ..\src\backend\raw_deflate.c'; defs = '/DSH_RESOURCE_GRAPH_TESTING'; arg = "" }
+    @{ name = "package_source_graph_test"; src = 'package_source_graph_test.c ..\src\backend\resource_graph.c ..\src\backend\package_usage.c ..\src\backend\package_compiler.c ..\src\backend\decl_entity_class.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_server_path.c ..\src\backend\decl_text.c ..\src\backend\resource_catalog.c ..\src\backend\raw_deflate.c ..\src\backend\package_source_graph.c ..\src\backend\decl_native_registry.c ..\src\backend\decl_native_schema.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_json_dependencies.c ..\src\backend\decl_graph.c ..\src\backend\decl_graph_dependencies.c'; defs = '/DSH_RESOURCE_GRAPH_TESTING'; arg = "" }
+    @{ name = "package_scale_test"; src = 'package_scale_test.c ..\src\backend\resource_graph.c ..\src\backend\package_usage.c ..\src\backend\package_compiler.c ..\src\backend\decl_entity_class.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_server_path.c ..\src\backend\decl_text.c ..\src\backend\resource_catalog.c ..\src\backend\raw_deflate.c ..\src\backend\map_embed.c ..\src\backend\package_archive.c ..\src\backend\raw_deflate_encode.c'; defs = '/DSH_RESOURCE_GRAPH_TESTING'; arg = "" }
     @{ name = "map_render_test"; src = 'map_render_test.c ..\src\backend\map_render.c'; arg = "" }
     @{ name = "map_render_editor_test"; src = 'map_render_editor_test.c ..\src\backend\map_render.c ..\src\backend\patch.c ..\src\backend\hook.c'; arg = "" }
     @{ name = "map_render_native_test"; src = 'map_render_native_test.c ..\src\backend\map_render.c ..\src\backend\patch.c ..\src\backend\hook.c'; arg = "" }
@@ -50,6 +87,12 @@ $tests = @(
     @{ name = "nav_heap_test"; src = 'nav_heap_test.c'; arg = "" }
     @{ name = "nav_heap_hook_test"; src = 'nav_heap_hook_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "patch_test"; src = 'patch_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
+    @{ name = "map_payload_test"; src = 'map_payload_test.c ..\src\backend\map_payload.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
+    @{ name = "map_source_test"; src = 'map_source_test.c'; arg = "" }
+    @{ name = "map_native_test"; src = 'map_native_test.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c'; arg = "" }
+    @{ name = "map_session_json_test"; src = 'map_session_json_test.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c'; arg = "" }
+    @{ name = "map_published_test"; src = 'map_published_test.c'; arg = "" }
+    @{ name = "map_transition_test"; src = 'map_transition_test.c'; arg = "" }
     @{ name = "json_patch_test"; src = 'json_patch_test.c ..\src\backend\json_patch.c'; arg = "" }
     @{ name = "edit_pair_test"; src = 'edit_pair_test.c'; arg = "" }
     @{ name = "engine_cvar_read_test"; src = 'engine_cvar_read_test.c'; arg = "" }
@@ -78,19 +121,18 @@ $tests = @(
     @{ name = "palette_refresh_test"; src = 'palette_refresh_test.c ..\src\backend\palette_refresh.c'; defs = '/DSH_PALETTE_REFRESH_TESTING'; arg = "" }
     @{ name = "process_heap_scope_test"; src = 'process_heap_scope_test.c'; arg = "" }
     @{ name = "engine_dialog_test"; src = 'engine_dialog_test.c ..\src\backend\engine_dialog.c'; defs = '/DSH_ENGINE_DIALOG_TESTING'; arg = "" }
-    @{ name = "package_conflicts_test"; src = 'package_conflicts_test.c ..\src\backend\package_conflicts.c ..\src\backend\packages.c'; arg = "" }
     @{ name = "palette_refresh_contract_test"; src = 'palette_refresh_contract_test.c'; arg = (Join-Path $here '..') }
-    @{ name = "resource_bridge_test"; src = 'resource_bridge_test.c ..\src\backend\resource_bridge.c ..\src\backend\packages.c ..\src\backend\raw_deflate.c ..\src\backend\decl_text.c'; defs = '/DSH_RESOURCE_BRIDGE_TESTING /DSH_RAW_DEFLATE_TESTING'; arg = "" }
+    @{ name = "resource_catalog_test"; src = 'resource_catalog_test.c ..\src\backend\resource_catalog.c ..\src\backend\raw_deflate.c'; defs = '/DSH_RAW_DEFLATE_TESTING'; arg = "" }
     @{ name = "packages_test"; src = 'packages_test.c ..\src\backend\packages.c'; defs = '/DSH_PACKAGES_TESTING'; arg = "" }
-    @{ name = "map_package_test"; src = 'map_package_test.c ..\src\backend\map_package.c ..\src\backend\map_shards.c ..\src\backend\packages.c ..\src\backend\raw_deflate.c'; defs = '/DSH_MAP_PACKAGE_TESTING'; arg = "" }
+    @{ name = "map_package_test"; src = 'map_package_test.c ..\src\backend\map_package.c ..\src\backend\map_shards.c ..\src\backend\packages.c ..\src\backend\raw_deflate.c ..\src\backend\raw_deflate_encode.c ..\src\backend\package_archive.c ..\src\backend\package_sources.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; defs = '/DSH_MAP_PACKAGE_TESTING'; arg = "" }
     @{ name = "navmesh_test"; src = 'navmesh_test.c ..\src\backend\navmesh.c ..\src\backend\map_shards.c'; defs = '/DSH_NAVMESH_TESTING'; arg = "" }
     @{ name = "nav_regions_test"; src = 'nav_regions_test.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c'; arg = "" }
     @{ name = "aas_edit_test"; src = 'aas_edit_test.c ..\src\backend\aas_edit.c'; arg = "" }
     @{ name = "nav_geometry_test"; src = 'nav_geometry_test.c ..\src\backend\nav_geometry.c'; arg = "" }
     @{ name = "aas_augment_test"; src = 'aas_augment_test.c ..\src\backend\aas_augment.c ..\src\backend\nav_geometry.c ..\src\backend\aas_edit.c ..\src\backend\nav_traversal.c ..\src\backend\navmesh.c ..\src\backend\map_shards.c'; defs = '/DSH_NAVMESH_TESTING /DSH_AUG_TESTING /DSH_TRAV_TESTING'; arg = "" }
-    @{ name = "nav_bake_test"; src = 'nav_bake_test.c ..\src\backend\perf.c ..\src\backend\nav_bake.c ..\src\backend\nav_regions.c ..\src\backend\aas_edit.c ..\src\backend\aas_augment.c ..\src\backend\nav_geometry.c ..\src\backend\nav_traversal.c ..\src\backend\map_shards.c'; defs = '/DSH_NAV_BAKE_TESTING'; arg = "" }
+    @{ name = "nav_bake_test"; src = 'nav_bake_test.c ..\src\backend\resource_graph.c ..\src\backend\perf.c ..\src\backend\nav_bake.c ..\src\backend\nav_regions.c ..\src\backend\aas_edit.c ..\src\backend\aas_augment.c ..\src\backend\nav_geometry.c ..\src\backend\nav_traversal.c ..\src\backend\map_shards.c'; defs = '/DSH_NAV_BAKE_TESTING /DSH_RESOURCE_GRAPH_TESTING'; arg = "" }
     @{ name = "nav_traversal_test"; src = 'nav_traversal_test.c ..\src\backend\nav_traversal.c'; defs = '/DSH_TRAV_TESTING'; arg = "" }
-    @{ name = "override_packages_test"; src = 'override_packages_test.c ..\src\backend\perf.c ..\src\backend\overrides.c ..\src\backend\packages.c ..\src\backend\decl_text.c ..\src\backend\grid_room_asset.c ..\src\backend\grid_room_nav.c ..\src\backend\aas_edit.c ..\src\backend\grid_room.c ..\src\backend\grid_room_resources.c ..\src\backend\grid_room_decl.c ..\src\backend\config_json.c'; defs = '/DSH_OVERRIDES_TESTING'; libs = 'shell32.lib'; arg = "" }
+    @{ name = "override_packages_test"; src = 'override_packages_test.c ..\src\backend\perf.c ..\src\backend\overrides.c ..\src\backend\packages.c ..\src\backend\decl_text.c ..\src\backend\grid_room_asset.c ..\src\backend\grid_room_nav.c ..\src\backend\aas_edit.c ..\src\backend\grid_room.c ..\src\backend\grid_room_resources.c ..\src\backend\grid_room_decl.c ..\src\backend\config_json.c'; defs = '/DSH_OVERRIDES_TESTING /DSH_RESOURCE_GRAPH_TESTING'; libs = 'shell32.lib'; arg = "" }
     # Link the real globals resolver to verify refusal when this non-game process
     # cannot provide the load-state address.
     @{ name = "package_requirements_test"; src = 'package_requirements_test.c ..\src\backend\package_requirements.c ..\src\backend\packages.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_PACKAGE_REQUIREMENTS_TESTING'; arg = "" }
@@ -104,6 +146,11 @@ $tests = @(
     @{ name = "growing_text_buffer_test"; src = 'growing_text_buffer_test.cpp'; cxx = $true; arg = "" }
     @{ name = "preview_test";     src = 'preview_test.c ..\src\backend\preview.c';              arg = "" }
     @{ name = "bcn_test";         src = 'bcn_test.c ..\src\backend\bcn.c';                      arg = "" }
+    @{ name = "audio_banks_test"; src = 'audio_banks_test.c ..\src\backend\audio_banks.c';             arg = "" }
+    @{ name = "audio_packages_test"; src = 'audio_packages_test.c ..\src\backend\audio_packages.c'; arg = "" }
+    @{ name = "audio_originals_test"; src = 'audio_originals_test.c'; arg = "" }
+    @{ name = "audio_banks_native_test"; src = 'audio_banks_native_test.c ..\src\backend\audio_banks.c'; arg = "" }
+    @{ name = "audio_files_test"; src = 'audio_files_test.c ..\src\backend\audio_files.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; arg = "" }
     @{ name = "soundpreview_queue_test"; src = 'soundpreview_queue_test.c';                       arg = "" }
     @{ name = "imgpreview_index_test"; src = 'imgpreview_index_test.c ..\src\backend\bcn.c ..\src\backend\raw_deflate.c';      arg = "" }
     @{ name = "imgpreview_catalog_test"; src = 'imgpreview_catalog_test.c ..\src\backend\bcn.c ..\src\backend\raw_deflate.c';  arg = "" }
@@ -116,14 +163,51 @@ if ($Doom) {
     $da = (Resolve-Path $Doom).Path
     $tests += @{ name = "sig_test";     src = 'sig_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c';     arg = $da }
     $tests += @{ name = "hooktol_test"; src = 'hooktol_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $da }
-    $tests += @{ name = "globals_test"; src = 'globals_test.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = $da }
+    $tests += @{ name = "globals_test"; src = 'globals_test.c map_published_bindings_stubs.c ..\src\backend\resource_resident.c ..\src\backend\resource_catalog.c ..\src\backend\resource_graph.c ..\src\backend\raw_deflate.c ..\src\backend\map_source.c ..\src\backend\map_native.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c ..\src\backend\map_published.c ..\src\backend\map_transition.c ..\src\backend\decl_native_schema.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = $da }
 }
 # Check the second executable without requiring the pinned image's addresses.
 if ($DoomAlt) {
     if (-not (Test-Path $DoomAlt)) { throw "-DoomAlt path not found: $DoomAlt" }
     $alt = (Resolve-Path $DoomAlt).Path
     $tests += @{ name = "sig_test_alt"; src = 'sig_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; arg = @($alt, "portable") }
-    $tests += @{ name = "globals_test_alt"; src = 'globals_test.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = @($alt, "portable") }
+    $tests += @{ name = "globals_test_alt"; src = 'globals_test.c map_published_bindings_stubs.c ..\src\backend\resource_resident.c ..\src\backend\resource_catalog.c ..\src\backend\resource_graph.c ..\src\backend\raw_deflate.c ..\src\backend\map_source.c ..\src\backend\map_native.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c ..\src\backend\map_published.c ..\src\backend\map_transition.c ..\src\backend\decl_native_schema.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = @($alt, "portable") }
+}
+
+$compiledConsumers = @("package_runtime_context_test", "weapon_hud_test", "package_requirements_test", "strids_packages_test", "override_packages_test", "overrides_internal_test", "decl_server_test")
+$compiledConsumers += "audio_originals_test"
+$compilerSources = @("grid_room_asset.c", "grid_room_nav.c", "aas_edit.c", "grid_room.c", "grid_room_resources.c", "grid_room_decl.c", "package_runtime.c", "resource_graph.c", "package_usage.c", "package_source_graph.c", "decl_native_registry.c", "decl_dependencies.c", "decl_json_dependencies.c", "decl_graph.c", "decl_graph_compose.c", "decl_md6_compose.c", "decl_graph_dependencies.c", "package_compiler.c", "decl_entity_class.c", "decl_native_schema.c", "package_sources.c", "packages.c", "package_descriptor.c", "config_json.c", "decl_compose.c", "decl_tree.c", "decl_polymorphic.c", "decl_server_path.c", "decl_text.c", "resource_catalog.c", "raw_deflate.c")
+$compilerSources += @("decl_native_lex.c", "decl_material.c", "decl_material_compose.c", "package_material.c")
+$compilerSources += @("audio_banks.c", "audio_packages.c", "audio_originals.c", "package_audio.c")
+$materialSources = 'package_material_test.c ..\src\backend\package_material.c ..\src\backend\decl_material.c ..\src\backend\decl_material_compose.c ..\src\backend\decl_native_lex.c'
+$materialSources += ' ' + (($tests | Where-Object { $_.name -eq 'package_source_view_test' }).src -replace '^package_source_view_test.c ', '')
+$tests += @{ name = "package_material_test"; src = $materialSources; arg = "" }
+$audioSources = 'package_audio_test.c ..\src\backend\package_audio.c ..\src\backend\audio_banks.c'
+$audioSources += ' ' + (($tests | Where-Object { $_.name -eq 'package_source_view_test' }).src -replace '^package_source_view_test.c ', '')
+$tests += @{ name = "package_audio_test"; src = $audioSources; arg = "" }
+$opaqueSources = ($tests | Where-Object { $_.name -eq 'package_compiler_test' }).src -replace '^package_compiler_test.c ', 'package_opaque_test.c '
+$tests += @{ name = "package_opaque_test"; src = $opaqueSources; arg = "" }
+foreach ($t in $tests) {
+    if ($t.name -eq "package_source_graph_test") { $t.src += ' ..\src\backend\decl_material.c ..\src\backend\decl_native_lex.c ..\src\backend\audio_banks.c ..\src\backend\package_audio.c' }
+    if ($t.name -in $compiledConsumers) {
+        foreach ($source in $compilerSources) {
+            $relative = '..\src\backend\' + $source
+            if ($relative -notin ($t.src -split ' ')) { $t.src += ' ' + $relative }
+        }
+        $t.defs = "$($t.defs) /DSH_PACKAGE_RUNTIME_TESTING"
+    }
+}
+
+if ($Skip.Count) {
+    $unknown = @($Skip | Where-Object { $_ -notin $tests.name })
+    if ($unknown.Count) { throw "Unknown skipped test(s): $($unknown -join ', ')." }
+    if (@($Skip | Where-Object { $_ -in $Only }).Count) { throw "A test cannot be selected by both -Only and -Skip." }
+    foreach ($name in $Skip) { Write-Host "[skip] $name (explicit -Skip selection)" }
+    $tests = @($tests | Where-Object { $_.name -notin $Skip })
+}
+if ($Only.Count) {
+    $unknown = @($Only | Where-Object { $_ -notin $tests.name })
+    if ($unknown.Count) { throw "Unknown test selector(s): $($unknown -join ', '). Use complete names from this manifest, including _test." }
+    $tests = @($tests | Where-Object { $_.name -in $Only })
 }
 
 $fail = 0
@@ -144,6 +228,8 @@ foreach ($t in $tests) {
 }
 if ($fail -gt 0) { Write-Host ""; Write-Host "$fail native test(s) FAILED"; exit 1 }
 Write-Host ""; Write-Host "all native tests passed ($($tests.Count))"
+
+if ($Only.Count) { exit 0 }
 
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) { Write-Host "[FAIL] node not found (required for decl editor tests)"; exit 1 }

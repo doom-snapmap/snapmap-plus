@@ -336,9 +336,57 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "DeserializeFromJson",
       "40 55 56 57 48 8D 6C 24 90 48 81 EC 70 01 00 00 48 C7 44 24 68 FE FF FF FF",
       0x5EA490u },
+    /* Native saved-map builder checks unsigned (idStr length - 1) before
+     * hashing/compression. Vulkan 568cee; independently OpenGL 5682de. */
+    { "SnapMapSaveSizeLimit",
+      "3D FF FF 9F 00 77 12 48 8B D1 49 8B 4F 10 E8 ?? ?? ?? ?? 89 06 B0 01",
+      0x568CEEu },
+    /* Saved/published map reader: signed positive length, then 10 MiB ceiling.
+     * Vulkan 581fa3; independently OpenGL 581633. Upper branch is at +21. */
+    { "SnapMapReadSizeLimit",
+      "83 F8 01 7D 0A BB 94 01 00 00 E9 ?? ?? ?? ?? 3B 05 ?? ?? ?? ?? "
+      "7E 07 BB 93 01 00 00 EB ?? 33 C0 48 89 44 24 38 89 44 24 40 88 44 24 44",
+      0x581FA3u },
     { "SerializeToJson",
       "40 53 56 57 48 81 EC E0 00 00 00 48 C7 44 24 70 FE FF FF FF",
       0x5F2390u },
+    /* Published completion owns a temporary map and path; derive their native
+     * constructors/destructors from its checked CALL sites on both renderers. */
+    { "PublishedMapCacheReady",
+      "40 57 B8 80 17 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 20 FE FF FF FF 48 89 9C 24 98 17 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 70 17 00 00 49 8B F9 49 8B D8 48 8B 89 38 0A 00 00 48 85 C9 74 ?? 48 8B 01 33 D2 FF 50 30 48 8B 0D ?? ?? ?? ?? 48 8B 01", 0x170f2a0u },
+    { "PublishedMapOfflineLaunch",
+      "40 53 56 57 48 83 EC 70 48 C7 44 24 28 FE FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 60 49 8B D8 48 8B FA 48 8B F1 48 8D 4C 24 20 E8 ?? ?? ?? ?? 90 E8 ?? ?? ?? ?? 4C 8B 08 48 8B C8 41 FF 51 38 4C 8B 08 4C 8B C3 48 8B D7 48 8B C8 41 FF 91 90 01 00 00", 0x170d920u },
+    { "PublishedMapLobbyLaunch",
+      "40 55 41 54 41 55 41 56 41 57 48 8D AC 24 10 BF FF FF B8 F0 41 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 38 FE FF FF FF 48 89 9C 24 28 42 00 00 48 89 B4 24 30 42 00 00 48 89 BC 24 38 42 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 E0 40 00 00 44 0F B6 FA", 0x170dc90u },
+    { "PublishedMapDirectLaunch",
+      "40 53 55 56 57 41 54 41 56 41 57 48 81 EC 90 00 00 00 48 C7 44 24 20 FE FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 88 00 00 00 4D 8B F0 48 8B EA 4C 8B F9 48 8D 8A 08 04 00 00 48 8D 15 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 95 C8 03 00 00 48 8D 0D ?? ?? ?? ??", 0x170ed10u },
+    { "PublishedMapRead",
+      "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 F8 F2 FF FF 48 81 EC 08 0E 00 00 48 C7 45 B0 FE FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 F8 0C 00 00 49 8B D9 4D 8B F0 48 8B F2 4C 8B E1 4C 8B BD 70 0D 00 00 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 48", 0x568400u },
+    { "PublishedMapCacheSet",
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 89 74 24 48 49 8B D8 48 8B FA 48 8B F1 48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 48 90 48 8B 06 48 8B D3 48 8B CE FF 90 98 01 00 00 48 8D 97 70 05 00 00 48 8D 8E F0 43 02 00 E8 ?? ?? ?? ?? 48 8D 8E 08 44 02 00 48 8B D7 E8 ?? ?? ?? ?? 48 8D 57 30", 0x529930u },
+    { "FinalizeMapChange",
+      "40 53 56 57 41 54 41 55 41 56 41 57 B8 70 74 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 48 FE FF FF FF 0F 29 B4 24 60 74 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 58 74 00 00 4D 8B F0 4C 8B EA 48 8B F1 48 89 4C 24 38 48 89 54 24 40 48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 90 58 03 00 00 8B F8 48 8B CE", 0x17d9e70u },
+    { "CancelMapChange",
+      "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 57 B8 30 40 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 20 40 00 00 41 B0 01 0F B6 EA 48 8B F9 41 0F B6 D0 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 50 38 0F B6 F0 E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B C8", 0x17d9700u },
+    { "AllocateGameResources", /* Native requested unload precedes all loading locals. */
+      "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 98 E9 FF FF B8 68 17 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 68 FE FF FF FF 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 50 16 00 00 4C 89 4C 24 58 49 8B F0 4C 89 44 24 48 48 89 54 24 60 48 89 4C 24 50 45 33 FF 44 89 7C 24 44 4C 89 3D ?? ?? ?? ?? 44 39 3D ?? ?? ?? ??", 0x18034A0u },
+    { "UnloadGameResources", /* Independently matched GL 17ba4b0. */
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20 83 3D ?? ?? ?? ?? 00 48 8B F1 48 8B 0D ?? ?? ?? ?? 41 0F B6 E8 0F B6 FA 41 0F 95 C6 48 8B 01 FF 50 68 48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 90 88 01 00 00 48 8B 06 33 D2 48 8B CE FF 50 58 48 8B CE E8 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ??", 0x17C79C0u },
+    { "PublishedMapComplete",
+      "48 8B C4 57 48 81 EC E0 07 00 00 48 C7 44 24 20 FE FF FF FF 48 89 58 10 48 89 70 18 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 D0 07 00 00 48 8B D9 48 83 B9 E8 05 00 00 00 0F 84 ?? ?? ?? ?? 48 8D 4C 24 60 E8 ?? ?? ?? ?? 90 48 8D 4C 24 28 E8 ?? ?? ?? ?? 90", 0x58B320u },
+    { "PublishedMapSelectionConstruct",
+      "48 89 4C 24 08 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 89 74 24 50 49 8B F0 48 8B D9 48 C7 01 00 00 00 00 89 51 08 C7 41 0C 01 00 00 00 48 8D 05 ?? ?? ?? ?? 48 89 41 10 FF 05 ?? ?? ?? ?? B9 90 05 00 00 E8 ?? ?? ?? ?? 48 8B F8 48 89 44 24 58", 0x173ED50u },
+    { "PublishedMapMetadataDestroy",
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 89 74 24 48 48 8B F9 0F B6 81 83 05 00 00 33 F6 84 C0 74 ?? 2C 03 3C 01 77 ?? 48 8B 89 70 05 00 00 48 85 C9 74 ?? 8B 97 7C 05 00 00 E8 ?? ?? ?? ?? 90 48 89 B7 70 05 00 00 89 B7 7C 05 00 00 89 B7 78 05 00 00", 0x4E9260u },
+    /* Native editor Play action, before closing menus and deactivating.
+     * Vulkan 537070; independently OpenGL 536940. The 19-byte steal requires
+     * explicit relocation of the seven-byte RIP-relative LEA at +12. */
+    { "EditorSaveAndPlay",
+      "40 53 48 83 EC 20 48 8B D9 41 B0 01 48 8D 0D ?? ?? ?? ?? "
+      "33 D2 E8 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? BA 26 00 00 00 "
+      "48 8B CB E8 ?? ?? ?? ?? 48 8B CB C6 83 0D 12 02 00 01 "
+      "C7 83 6C 36 02 00 03 00 00 00 48 83 C4 20 5B E9 ?? ?? ?? ??",
+      0x537070u },
     { "EditorMapToJson", /* Constructs an idSnapMap from idSnapMapEdit, serializes,
                           * and destroys the temporary. No save-slot writes. */
       "40 53 56 57 48 81 EC B0 07 00 00 48 C7 44 24 20 FE FF FF FF "
@@ -408,6 +456,11 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                              * NULL progress is allowed; callers validate the live palette vtable. */
       "48 8B C4 56 57 41 54 41 56 41 57 48 81 EC 70 07 00 00",
       0x54AEE0u },
+    { "SnapEntityTraversalDecode", /* void(entity,data); empty palette defaults are not late additions. */
+      "48 8B C4 55 57 41 56 48 8D 68 A1 48 81 EC D0 00 00 00 "
+      "48 C7 45 DF FE FF FF FF 48 89 58 18 48 89 70 20 48 8B 05 ?? ?? ?? ?? "
+      "48 33 C4 48 89 45 3F 48 8B FA 48 8B D9 48 8B B1 50 01 00 00",
+      0x543660u },
     /* Native declaration registration contracts:
      * DeclRegistryAnchor: decode MOV RCX,[rip+slot] at +0x10 from a clean entry.
      * DeclRegisterFile: registry vtable +0x38; const idStr *source points to a
@@ -439,6 +492,12 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 8B C4 55 57 41 54 41 56 41 57 48 8D A8 38 FE FF FF 48 81 EC A0 02 00 00 "
       "48 C7 44 24 20 FE FF FF FF 48 89 58 18 48 89 70 20",
       0x17B34B0u },
+    { "DeclSourceModeCall", /* Direct call to the native source-mode getter,
+                              * before DeclFind chooses production paths or
+                              * development records. Decode rel32 at +1.
+                              * Vulkan 0x17B3A6C, OpenGL 0x17A652C. */
+      "E8 ?? ?? ?? ?? 48 8B CF 83 F8 02 0F 8C ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B D0 4D 8B C7",
+      0x17B3A6Cu },
     { "ResourceStaticPromote", /* void(void). Lock the whole resource registry and promote each entry
                             * to level 4 at resource+0x28. Map purge masks 1/2 cannot free
                             * level 4, so newly published decls survive map transitions.
@@ -448,8 +507,30 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "41 8B 48 28 83 E9 01 48 63 C9 78 ?? 0F 1F 40 00 49 8B 40 20 48 8B 14 C8 "
       "C7 42 28 04 00 00 00",
       0x1801830u },
-    { "ResourceGenericLoad", /* void(idResource*). Reload through native destruction/reconstruction,
-                            * preserving identity before parsing source and running post-parse.
+    { "ResourceReloadRenderScope", /* Native MD6 command's renderer synchronization,
+                                     * suspension and consumer-update protocol.
+                                     * Vulkan 0x14d27f0, OpenGL 0x14c5d10. */
+      "48 83 EC 38 48 8D 0D ?? ?? ?? ?? 0F 29 74 24 20 E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? "
+      "48 8B 0D ?? ?? ?? ?? 41 B1 01 45 33 C0 33 D2 66 0F 6E F0 48 8B 01 0F 5B F6 "
+      "FF 90 80 00 00 00 48 8B 0D ?? ?? ?? ?? BA 01 00 00 00 48 8B 01 FF 90 10 01 00 00 "
+      "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 74 10 48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 90 08 01 00 00",
+      0x14D27F0u },
+    { "ResourceLookup", /* Native typed lookup, including previously loaded resources. */
+      "40 55 56 57 48 8D AC 24 60 FE FF FF 48 81 EC A0 02 00 00 48 C7 44 24 28 FE FF FF FF "
+      "48 89 9C 24 D0 02 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 90 01 00 00 48 8B F2 48 8B F9",
+      0x1800A40u },
+    { "ResourceMaterialize", /* Allocate/register a native resource if lookup has no instance. */
+      "41 54 41 56 41 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 58 48 89 74 24 60 "
+      "48 89 7C 24 68 45 0F B6 F9 45 0F B6 E0 4C 8B F2 48 8B F1 48 8B 49 08 48 85 C9",
+      0x1801380u },
+    { "ResourceReconstruct", /* In-place native destructor/constructor with name restoration.
+                              * Independently verified GL 0x17f2700 and Vulkan 0x17ffdb0. */
+      "48 8B C4 57 41 56 41 57 48 81 EC 70 01 00 00 48 C7 44 24 20 FE FF FF FF "
+      "48 89 58 10 48 89 70 18 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 60 01 00 00 "
+      "4C 8B F1 8B 71 20 0F B6 79 24 40 80 E7 01 48 8B 59 08",
+      0x17FFDB0u },
+    { "ResourceGenericLoad", /* void(idResource*). Read source and run native post-parse.
+                             * Reconstruction belongs to its fallback path, not every load.
                             * DeclFind normally reaches this through the pending-load path;
                             * the decl server can use it when the pending bit survives lookup.
                             * Anchor: 0x900-byte frame and owner-vtable access. */
@@ -458,6 +539,34 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 4C 24 38 48 8B 01 FF 50 10 48 8B C8 E8 ?? ?? ?? ?? 4C 8B C0 48 8B 57 08 "
       "48 8B CF E8 ?? ?? ?? ?? 48 8B CF E8 ?? ?? ?? ??",
       0x17FF5F0u },
+    { "DeclRead", /* uint32_t(decl, errorText). The production-file branch calls
+                    * the typed parser directly; implicit text returns without
+                    * parsing. Independently verified VK 0x17aab70 / GL 0x179d660.
+                    * First 16 bytes are whole position-independent instructions. */
+      "40 56 57 41 54 41 56 41 57 48 81 EC 10 0A 00 00 "
+      "48 C7 44 24 48 FE FF FF FF 48 89 9C 24 50 0A 00 00 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 08 0A 00 00 "
+      "4C 8B FA 48 8B F1 48 89 4C 24 40 48 89 54 24 38 80 79 48 00",
+      0x17AAB70u },
+    { "DeclParseSource", /* uint32_t(decl, readSource, errorText). Zero means parsed.
+                            * "No text for decl" independently identifies Vulkan
+                            * 0x17ab5e0 and OpenGL 0x179e0c0. Direct edit/touch paths
+                            * bypass GenericLoad. First 19 bytes are relocatable. */
+      "48 8B C4 57 41 54 41 55 41 56 41 57 48 81 EC 90 0F 00 00 "
+      "48 C7 44 24 68 FE FF FF FF 48 89 58 10 48 89 70 20 0F 29 70 C8 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 78 0F 00 00 49 8B F8 "
+      "4C 89 44 24 50 0F B6 DA 48 8B F1 48 89 4C 24 58 4C 89 44 24 60 "
+      "48 8B 01 80 79 48 00",
+      0x17AB5E0u },
+    { "SetEntityEditState", /* void(typeInfoTools, entity, reader, initialize).
+                              * Native error-string xrefs independently establish Vulkan
+                              * 0x9d1ef0 and OpenGL 0x9d16b0. First 20 bytes contain
+                              * complete, position-independent prologue instructions. */
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 10 FD FF FF "
+      "48 81 EC F0 03 00 00 48 C7 44 24 40 FE FF FF FF 48 89 9C 24 48 04 00 00 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 E0 02 00 00 41 0F B6 F9 "
+      "4D 8B F8 4C 8B F2 4C 8B E9 48 8B 92 88 03 00 00 48 85 D2",
+      0x9D1EF0u },
     { "CmdExecuteBuffer",  /* void(cmdSystem). Drain both command buffers via contexts 0 and 1.
                             * Used when queued work must complete before Init returns.
                             * The second dispatch distinguishes this wrapper from its worker. */
@@ -554,6 +663,18 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 58 48 8B F9 48 8D 15 ?? ?? ?? ?? "
       "49 8D 4B C0 E8 ?? ?? ?? ?? 90 48 81 C7 98 09 00 00 8B 77 08 83 EE 01",
       0x5992C0u },
+
+    { "ReadLocalSavedMapText", /* Read and unpack map.decl into an initialized idStr.
+                                * Return 0 on success. No map deserialization or
+                                * editor activation. Vulkan 0x56F780, GL 0x56ED70;
+                                * both native callers pass (saveId, out, 0, -1).
+                                * Main-thread preflight runs before EditorLoadMap.
+                                * Stack frame plus captured args and first call;
+                                * the cookie displacement is renderer-specific. */
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 A0 48 81 EC 60 01 00 00 "
+      "48 C7 45 10 FE FF FF FF 48 89 9C 24 B0 01 00 00 48 8B 05 ?? ?? ?? ?? "
+      "48 33 C4 48 89 45 50 4C 8B E2 4C 8B F9 E8",
+      0x56F780u },
 
     { "WriteLocalSavedMapText",
       /* Same: no wildcards, unique at 20 bytes by both tools (target 0x576530). */
@@ -892,6 +1013,41 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                              * any-register decoder. Profile color 0xFF00FF00 anchors the body. */
       "40 53 48 83 EC 20 48 8B 1D ?? ?? ?? ?? 48 85 DB 74 1E 48 8D 15 ?? ?? ?? ?? B9 00 FF 00 FF",
       0x18514F0u },
+    { "AudioFileResolverInit", /* Global stream resolver constructor. LEA +4 is
+                               * the object; LEA +0x10 is its final primary vtable. */
+      "48 83 EC 28 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 05 ?? ?? ?? ?? "
+      "C7 05 ?? ?? ?? ?? 00 00 00 00 48 89 05 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? "
+      "48 8D 05 ?? ?? ?? ?? C6 05 ?? ?? ?? ?? 00 48 89 05 ?? ?? ?? ?? 0F 57 C0",
+      0xF7FB0u },
+    { "AudioFileOpenId",    /* Primary resolver vtable +8, numeric bank/media ID. */
+      "40 53 55 56 57 41 54 41 55 41 56 41 57 48 83 EC 68 48 8B 05 ?? ?? ?? ?? "
+      "48 33 C4 48 89 44 24 58 4C 8B A4 24 D0 00 00 00 49 8B F1 "
+      "4C 8B B4 24 D8 00 00 00 45 8B E8 8B EA 4C 8B F9",
+      0x2BA1C0u },
+    { "AudioFileOpenName",  /* Primary resolver vtable +0x10, wide filename. */
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57 "
+      "48 83 EC 30 4C 8B 74 24 78 49 8B F9 45 8B F8 48 8B EA 48 8B F1 "
+      "45 85 C0 0F 85 B0 00 00 00 4D 85 C9 0F 84 A7 00 00 00",
+      0x2BA340u },
+    { "AudioFileLanguage",  /* LEA returns the current stream-manager language.
+                             * Following device-default initialization disambiguates it. */
+      "48 8D 05 ?? ?? ?? ?? C3 CC CC CC CC CC CC CC CC 33 C0 "
+      "48 C7 41 18 01 00 00 00 48 89 01 C7 41 08 00 00 20 00 "
+      "C7 41 0C 04 00 00 00 C7 41 10 02 00 00 00 C7 41 14 00 40 00 00",
+      0x1DA2C10u },
+    { "AudioBankLoad",      /* int(name, pool, outId), synchronous native bank load.
+                             * 1 loaded; 69 already loaded. Audio bank manager waits
+                             * for completion before returning. */
+      "48 89 5C 24 08 57 48 81 EC B0 00 00 00 49 8B D8 8B FA E8 ?? ?? ?? ?? "
+      "89 03 48 8D 54 24 58 48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 50 20 83 F8 01 "
+      "0F 85 ?? ?? ?? ?? 8B 03 48 8D 54 24 70 33 C9",
+      0x1D13500u },
+    { "AudioBankUnload",    /* int(id, memory=NULL, outPool=NULL), synchronous release.
+                             * Only release a bank whose new load we own. */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 81 EC B0 00 00 00 8B F1 48 8B FA "
+      "48 8B 0D ?? ?? ?? ?? 48 8D 54 24 58 49 8B D8 48 8B 01 FF 50 20 83 F8 01 "
+      "0F 85 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8D 54 24",
+      0x1D14E70u },
     { "SoundPreview",       /* void*(world,outHandle,name), sound-world vtable +0x30.
                              * Editor audition sets solo/listener state and allocates an emitter;
                              * stop the previous handle before starting another. An empty/missing
@@ -943,6 +1099,12 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "40 57 48 83 EC 40 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 50 48 89 74 24 58 "
       "48 8B DA 48 8B F1",
       0x18017A0u },
+    { "SerializedEntityIndexWrite", /* Swap-removal's moved-entity index write.
+                             * Vulkan 0x350CE1, OpenGL 0x350D31. The following
+                             * count decrement and state reset identify this site. */
+      "89 A8 64 0B 00 00 8B 97 70 A0 49 00 FF CA E8 ?? ?? ?? ?? "
+      "33 D2 C7 86 64 0B 00 00 FF FF FF FF 48 8B CE E8 ?? ?? ?? ??",
+      0x350CE1u },
     { "EventLink",          /* Event-link routine guarded by the fault shield.
                              * Vulkan 0x9C2370, OpenGL 0x9C1B70. */
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 89 6C 24 50 "

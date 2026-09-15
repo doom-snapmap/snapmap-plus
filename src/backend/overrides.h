@@ -1,8 +1,8 @@
 /* Resource-provider file shadowing through the open-by-name vtable slot
  * (+0xf8). Private Grid Room resources are generated from installed originals.
- * Ordinary opens try map navigation, exact published decltree
- * entries, user files, linked installed resources, built-in defaults, then
- * the engine. Mode >= 2 bypasses shadowing.
+ * Ordinary opens try map navigation, exact published decltree entries,
+ * compiled package resources (including matching built-in contributions),
+ * unclaimed built-in defaults, then the engine. Mode >= 2 bypasses shadowing.
  *
  * Returned streams implement the supported 31-slot idFile ABI and own their
  * file handles or heap buffers. Installation requires clean
@@ -58,7 +58,8 @@ int sh_overrides_get_root(char *out, size_t cap);
  * below.
  */
 /* Return 1 when this exact decltree/<type>/<name>.decl key names a published
- * new identity. Case-insensitive, because the engine spells a decl type with
+ * new identity present in the current compilation. Retired aliases and a
+ * missing provider return 0. Case-insensitive, because the engine spells a decl type with
  * its registered casing while the table is keyed from the override path.
  * Read-only: it never opens or copies a body. */
 int sh_overrides_internal_decl_published(const char *name);
@@ -75,19 +76,30 @@ int sh_overrides_internal_decl_table_install(
 /* Number of opens served by the shadow; used by diagnostics. */
 unsigned long sh_overrides_shadow_count(void);
 
-/* Read the original engine resource into a new process-heap buffer; caller
- * frees it. Returns NULL on a miss, unavailable provider, or fault. Mode 2
- * bypasses shadowing so navigation baking can extend the shipped payload
- * without recursion. Requires a previous hook call to capture the provider
- * object.
+/* Read the effective base for navigation into a new process-heap buffer.
+ * This applies Grid generation to compiled package/product/original inputs,
+ * without re-entering navigation. Caller frees the result. An owned source
+ * failure does not fall back to stock. Reading originals requires a previous
+ * hook call to capture the provider object.
  */
 unsigned char *sh_overrides_read_engine_resource(const char *name, size_t *out_len);
 
 /* Refresh the package list used by resource opens and return its count.
  * Readers hold a shared lock through path selection. Incomplete enumeration
- * publishes an empty inventory and returns SH_OVERRIDES_RESCAN_FAILED.
+ * retains the previous inventory and returns SH_OVERRIDES_RESCAN_FAILED.
  */
 unsigned long sh_overrides_rescan_packages(void);
+/* Run consumer activation before committing the provider. The callback has the
+ * sh_package_runtime_refresh_activated contract, including restoring=1 after
+ * a failure. Both publication and restoration retire derived source caches. */
+struct sh_package_changes;
+unsigned long sh_overrides_rescan_packages_activated(
+    int (*activate)(void *context, int restoring, const struct sh_package_changes *changes,
+        char *error, size_t capacity), void *context);
+struct sh_package_map_plan;
+int sh_overrides_activate_map(struct sh_package_map_plan *plan,
+    int (*activate)(void *context, int restoring, const struct sh_package_changes *changes,
+        char *error, size_t capacity), void *context);
 #define SH_OVERRIDES_RESCAN_FAILED ((unsigned long)-1)
 
 /* Prepare runtime rearm without hiding existing entries. This retains READY
@@ -108,13 +120,14 @@ int sh_overrides_internal_decl_table_merge(
 int sh_overrides_uninstall(void);
 
 #ifdef SH_OVERRIDES_TESTING
-int sh_overrides_test_resolve_cached(const char *name, char *out, size_t cap);
+void *sh_overrides_test_open(const char *name, unsigned int mode);
 void sh_overrides_test_internal_decl_table_reset(void);
 int sh_overrides_test_internal_decl_table_install(
     const sh_overrides_internal_decl_entry *entries, size_t count);
 int sh_overrides_test_internal_decl_table_merge(
     const sh_overrides_internal_decl_entry *entries, size_t count);
 void *sh_overrides_test_internal_decl_open(const char *name);
+void *sh_overrides_test_memory_stream(const unsigned char *body, size_t length);
 long long sh_overrides_test_stream_read(void *stream, void *buffer, uint64_t length);
 long long sh_overrides_test_stream_read_at(void *stream, long long offset,
                                            void *buffer, uint64_t length);
@@ -140,11 +153,6 @@ int sh_overrides_test_supported_build_abi(const uint8_t *module_base,
 int sh_overrides_test_address_in_readonly_section(const uint8_t *module_base, const void *address);
 void *sh_overrides_test_stream_open_file(const char *path);
 void sh_overrides_test_stream_close(void *stream);
-/* Resolve a resource to an existing file: the shared override tree first,
- * then the package namespaces supported by the resolver. Returns 0 and
- * empties out on a miss.
- */
-int sh_overrides_test_resolve_existing(const char *name, char *out, size_t cap);
 #endif
 
 #endif /* BACKEND_B1_OVERRIDES_H */

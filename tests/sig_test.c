@@ -132,6 +132,35 @@ int main(int argc, char **argv)
         }
     }
     {
+        const sig_result *ctor=NULL, *id=NULL, *name=NULL, *language=NULL;
+        int abi=1; int32_t displacement;
+        uint64_t table_rva=0, object_rva=0, language_rva=0, id_va=0, name_va=0;
+        IMAGE_DOS_HEADER *dos=(IMAGE_DOS_HEADER *)base;
+        IMAGE_NT_HEADERS64 *nt=(IMAGE_NT_HEADERS64 *)(base+dos->e_lfanew);
+        uint64_t preferred=nt->OptionalHeader.ImageBase;
+        for(size_t i=0;i<total;++i) {
+            if(!strcmp(results[i].name,"AudioFileResolverInit"))ctor=results+i;
+            else if(!strcmp(results[i].name,"AudioFileOpenId"))id=results+i;
+            else if(!strcmp(results[i].name,"AudioFileOpenName"))name=results+i;
+            else if(!strcmp(results[i].name,"AudioFileLanguage"))language=results+i;
+        }
+        if(!ctor || !id || !name || !language || ctor->status!=SIG_OK || id->status!=SIG_OK ||
+            name->status!=SIG_OK || language->status!=SIG_OK) abi=0;
+        if(abi) {
+            memcpy(&displacement,base+ctor->rva+7,4);object_rva=(int64_t)ctor->rva+11+displacement;
+            memcpy(&displacement,base+ctor->rva+19,4);table_rva=(int64_t)ctor->rva+23+displacement;
+            memcpy(&displacement,base+language->rva+3,4);language_rva=(int64_t)language->rva+7+displacement;
+            if(table_rva>=image_sz || image_sz-table_rva<24 || object_rva>=image_sz ||
+                image_sz-object_rva<0x658 || language_rva>=image_sz || image_sz-language_rva<2)abi=0;
+        }
+        if(abi) {
+            memcpy(&id_va,base+table_rva+8,8);memcpy(&name_va,base+table_rva+16,8);
+            abi=id_va==preferred+id->rva && name_va==preferred+name->rva;
+        }
+        if(!abi){puts("BAD audio resolver ABI: constructor table/open methods/language");++bad;}
+        else puts("OK  audio resolver ABI: constructor table +8/+0x10 match numeric/name open methods");
+    }
+    {
         sig_result target;
         sig_status status = sig_resolve_one(base, &NAV_RENDER_TARGET_GL_SIGNATURE, &target);
         int is_gl = strstr(argv[1], "DOOMx64.exe") != NULL;

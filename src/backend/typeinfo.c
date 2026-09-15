@@ -4,6 +4,8 @@
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 #include "typeinfo.h"
 #include "commands.h"
@@ -51,9 +53,6 @@ typedef void *(*find_enum_fn)(void *reflect, const char *name);
 
 /* Bound unterminated field and enum records. */
 #define TI_WALK_CAP   4096u
-
-/* Collect one bounded dump for both console output and clipboard copy. */
-#define TI_DUMP_CAP   0x4000
 
 /* Cached dependencies. */
 
@@ -568,15 +567,24 @@ void h_cs_fieldinfo(idCmdArgs *a)
 }
 
 /* A tiny SEH-safe append into the fixed dump buffer (truncates on overflow; never overruns). */
-static void ti_dump_append(char *buf, size_t cap, size_t *len, const char *s)
+static void ti_dump_append(char **buf, size_t *cap, size_t *len, const char *s)
 {
-    if (s == NULL || *len >= cap - 1) return;
-    size_t room = cap - 1 - *len;
-    size_t add  = strlen(s);
-    if (add > room) add = room;
-    memcpy(buf + *len, s, add);
+    size_t add, needed, capacity;
+    char *grown;
+    if (s == NULL || *len == SIZE_MAX) return;
+    add = strlen(s);
+    if (add >= INT_MAX || *len >= (size_t)INT_MAX - add) { *len = SIZE_MAX; return; }
+    needed = *len + add + 1;
+    if (needed > *cap) {
+        capacity = *cap ? *cap : 4096;
+        while (capacity < needed) capacity = capacity > INT_MAX / 2 ? INT_MAX : capacity * 2;
+        grown = (char *)realloc(*buf, capacity);
+        if (!grown) { *len = SIZE_MAX; return; }
+        *buf = grown; *cap = capacity;
+    }
+    memcpy(*buf + *len, s, add);
     *len += add;
-    buf[*len] = '\0';
+    (*buf)[*len] = '\0';
 }
 
 /* Console output truncates each sh_printf call near 1 KB. Emit bounded chunks,
@@ -620,9 +628,8 @@ void h_sh_type(idCmdArgs *a)
         return;
     }
 
-    static char dump[TI_DUMP_CAP];
-    size_t dlen = 0;
-    dump[0] = '\0';
+    char *dump = NULL;
+    size_t dlen = 0, dcap = 0;
     char tmp[1024];
 
     void *rec = ti_find_type(reflect, type);
@@ -633,10 +640,10 @@ void h_sh_type(idCmdArgs *a)
 
         const char *cname = ti_read_cstr(rec, ENUM_NAME_OFF);
         _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "struct %s {\n", (cname && cname[0]) ? cname : type);
-        ti_dump_append(dump, sizeof dump, &dlen, tmp);
+        ti_dump_append(&dump, &dcap, &dlen, tmp);
         if (super && super[0]) {
             _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "\t%s base;\n", super);
-            ti_dump_append(dump, sizeof dump, &dlen, tmp);
+            ti_dump_append(&dump, &dcap, &dlen, tmp);
         }
 
         const uint8_t *fields = (const uint8_t *)ti_read_ptr(rec, REC_FIELDS_OFF);
@@ -659,24 +666,26 @@ void h_sh_type(idCmdArgs *a)
                 _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "\t%s%s %s", vartype, varops, fname);
             else
                 _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "\t%s %s%s", vartype, fname, varops);
-            ti_dump_append(dump, sizeof dump, &dlen, tmp);
+            ti_dump_append(&dump, &dcap, &dlen, tmp);
 
             if (verbose)
                 _snprintf_s(tmp, sizeof tmp, _TRUNCATE, ";//offset %d size %d\n", foff, fsize);
             else
                 _snprintf_s(tmp, sizeof tmp, _TRUNCATE, ";\n");
-            ti_dump_append(dump, sizeof dump, &dlen, tmp);
+            ti_dump_append(&dump, &dcap, &dlen, tmp);
             if (fcmt && fcmt[0]) {
                 _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "\t// %s\n", fcmt);
-                ti_dump_append(dump, sizeof dump, &dlen, tmp);
+                ti_dump_append(&dump, &dcap, &dlen, tmp);
             }
         }
-        ti_dump_append(dump, sizeof dump, &dlen, "};\n");
+        ti_dump_append(&dump, &dcap, &dlen, "};\n");
 
+        if (dlen == SIZE_MAX) { free(dump); sh_printf("sh_type: cannot allocate the complete type dump.\n"); return; }
         ti_emit_long(dump);
         sh_printf("Dumped type is a Class\n");
         if (sh_clipboard_set(dump))
             sh_printf("sh_type: copied type '%s' to the clipboard.\n", type);
+        free(dump);
         return;
     }
 
@@ -689,7 +698,7 @@ void h_sh_type(idCmdArgs *a)
 
     const char *ename = ti_read_cstr(en, ENUM_NAME_OFF);
     _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "enum %s {\n", (ename && ename[0]) ? ename : type);
-    ti_dump_append(dump, sizeof dump, &dlen, tmp);
+    ti_dump_append(&dump, &dcap, &dlen, tmp);
 
     const uint8_t *members = (const uint8_t *)ti_read_ptr(en, ENUM_MEMBERS_OFF);
     for (uint32_t i = 0; members != NULL && i < TI_WALK_CAP; i++) {
@@ -699,14 +708,16 @@ void h_sh_type(idCmdArgs *a)
         uint32_t mval = 0;
         ti_read_u32(m, EMEMBER_VALUE_OFF, &mval);
         _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "\t%s = %d,\n", mname, mval);
-        ti_dump_append(dump, sizeof dump, &dlen, tmp);
+        ti_dump_append(&dump, &dcap, &dlen, tmp);
     }
-    ti_dump_append(dump, sizeof dump, &dlen, "};\n");
+    ti_dump_append(&dump, &dcap, &dlen, "};\n");
 
+    if (dlen == SIZE_MAX) { free(dump); sh_printf("sh_type: cannot allocate the complete enum dump.\n"); return; }
     ti_emit_long(dump);
     sh_printf("Dumped type is a Enum\n");
     if (sh_clipboard_set(dump))
         sh_printf("sh_type: copied enum '%s' to the clipboard.\n", type);
+    free(dump);
 }
 
 /* Emit a candidate satisfying the class/inherit ancestry rule. */

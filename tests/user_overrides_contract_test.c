@@ -147,7 +147,7 @@ int main(int argc, char **argv)
     CHECK(strstr(overrides, "overrides.disabled") == NULL);
     CHECK(strstr(overrides, "sh_cvar_value_int_reg") == NULL);
     CHECK(strstr(overrides, "g_user_layer_off") == NULL);
-    user_gate = strstr(overrides, "if (user_on)");
+    user_gate = strstr(overrides, "if (mode < 2 && name && sh_user_overrides_enabled_for_launch())");
     user_gate_open = user_gate ? strchr(user_gate, '{') : NULL;
     user_gate_close = matching_brace(user_gate_open);
     baked_gate = strstr(overrides, "if (s == NULL && baked != NULL)");
@@ -161,13 +161,19 @@ int main(int argc, char **argv)
     CHECK(baked_gate_close != NULL);
     user_baked_open = user_gate
         ? strstr(user_gate,
-                 "s = open_user_for_baked_name(name, &malformed);")
+                 "sh_package_runtime_read(name, &bytes, &length);")
         : NULL;
     user_general_open = user_gate
-        ? strstr(user_gate, "s = try_open_override(name);")
+        ? strstr(user_gate, "stream = make_mem_stream(owned,")
         : NULL;
     CHECK(user_baked_open != NULL);
     CHECK(user_general_open != NULL);
+    {
+        const char *file_open = user_gate ? strstr(user_gate, "sh_package_runtime_open_file(name,") : NULL;
+        CHECK(file_open != NULL);
+        if (user_gate_open && user_gate_close && file_open)
+            CHECK(user_gate_open < file_open && file_open < user_gate_close);
+    }
     if (user_gate_open && user_gate_close && user_baked_open)
         CHECK(user_gate_open < user_baked_open &&
               user_baked_open < user_gate_close);

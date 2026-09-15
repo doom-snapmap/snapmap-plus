@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 #include "hook.h"
 
 void backend_log(const char *line) { (void)line; }
@@ -38,8 +39,94 @@ static void before_target_write(void *target)
     }
 }
 
+static uintptr_t (*lea_original)(void);
+static uintptr_t lea_detour(void) { return lea_original() + 1; }
+
+static void rip_lea_preserves_addresses(void)
+{
+    const unsigned registers[] = {0, 1, 2, 8, 9, 10, 11};
+    unsigned char original[18], *code;
+    size_t i;
+    int sign, before = hook_owned_count();
+    code = VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    CHECK(code != NULL); if (!code) return;
+    for (i = 0; i < sizeof(registers) / sizeof(registers[0]); ++i) {
+        unsigned reg = registers[i];
+        for (sign = -1; sign <= 1; sign += 2) {
+            int32_t displacement = sign * 8;
+            uintptr_t expected = (uintptr_t)(code + 14) + displacement;
+            memset(original, 0x90, sizeof(original));
+            original[7] = (unsigned char)(reg >= 8 ? 0x4c : 0x48);
+            original[8] = 0x8d; original[9] = (unsigned char)(5 | ((reg & 7) << 3));
+            memcpy(original + 10, &displacement, 4);
+            original[14] = original[7]; original[15] = 0x89;
+            original[16] = (unsigned char)(0xc0 | ((reg & 7) << 3)); original[17] = 0xc3;
+            memcpy(code, original, sizeof(original));
+            FlushInstructionCache(GetCurrentProcess(), code, 64);
+            CHECK(((uintptr_t (*)(void))code)() == expected);
+            CHECK(!hook_prepare_rip_lea(code, lea_detour, 14, SIZE_MAX));
+            CHECK(!hook_prepare_rip_lea(code, lea_detour, 14, 8));
+            CHECK(!hook_prepare_rip_lea(code, lea_detour, 14, 0));
+            lea_original = (uintptr_t (*)(void))hook_prepare_rip_lea(code, lea_detour, 14, 7);
+            CHECK(lea_original != NULL);
+            if (!lea_original) continue;
+            CHECK(lea_original() == expected);
+            CHECK(!memcmp(code, original, sizeof(original)));
+            CHECK(hook_commit((void *)lea_original) == B2_PATCH_OK);
+            CHECK(((uintptr_t (*)(void))code)() == expected + 1);
+            CHECK(hook_unpatch((void *)lea_original)); lea_original = NULL;
+            CHECK(!memcmp(code, original, sizeof(original)));
+        }
+    }
+    CHECK(hook_owned_count() == before);
+    VirtualFree(code, 0, MEM_RELEASE);
+}
+
+static void relative_call_preserves_execution(void)
+{
+    unsigned char *page = VirtualAlloc(NULL, 256, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    unsigned char original[32];
+    int baseline = hook_owned_count();
+    CHECK(page != NULL); if (!page) return;
+    /* Caller has an aligned stack and normal shadow space. The callee observes
+     * the incoming volatile registers, writes through RDX, and returns in RAX. */
+    for (int direction = -1; direction <= 1; direction += 2) {
+        unsigned char *code = page + (direction < 0 ? 128 : 0);
+        unsigned char *callee = page + (direction < 0 ? 0 : 128);
+        int32_t displacement = (int32_t)(callee - (code + 12));
+        volatile int tag = 0;
+        memset(original, 0x90, sizeof(original));
+        memcpy(original, "\x48\x83\xec\x28\x8b\xc1\x90\xe8", 8);
+        memcpy(original + 8, &displacement, 4);
+        memcpy(original + 16, "\x48\x83\xc4\x28\xc3", 5);
+        memcpy(callee, "\x89\x0a\x03\xc1\xc3", 5);
+        memcpy(code, original, sizeof(original));
+        FlushInstructionCache(GetCurrentProcess(), page, 256);
+        CHECK(((scratch_fn)code)(21, &tag) == 42 && tag == 21);
+        CHECK(!hook_prepare_relative_call(code, detour, 16, SIZE_MAX));
+        CHECK(!hook_prepare_relative_call(code, detour, 16, 12));
+        CHECK(!hook_prepare_relative_call(code, detour, 16, 6));
+        published_original = (scratch_fn)hook_prepare_relative_call(code, detour, 16, 7);
+        CHECK(published_original != NULL);
+        if (published_original) {
+            CHECK(!memcmp(code, original, sizeof(original)));
+            CHECK(published_original(37, &tag) == 74 && tag == 37);
+            CHECK(hook_commit((void *)published_original) == B2_PATCH_OK);
+            CHECK(((scratch_fn)code)(21, &tag) == 1042 && tag == 21);
+            CHECK(hook_unpatch((void *)published_original)); published_original = NULL;
+            CHECK(!memcmp(code, original, sizeof(original)));
+        }
+        displacement = -5; memcpy(code + 8, &displacement, 4);
+        CHECK(!hook_prepare_relative_call(code, detour, 16, 7));
+    }
+    CHECK(hook_owned_count() == baseline);
+    VirtualFree(page, 0, MEM_RELEASE);
+}
+
 int main(void)
 {
+    rip_lea_preserves_addresses();
+    relative_call_preserves_execution();
     unsigned char *code = VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     scratch_fn target = (scratch_fn)code;
     volatile int tag = 0;

@@ -168,9 +168,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1 -Doom C:
 identical except for `vulkan-1.dll` vs `OPENGL32.dll`, both import `XINPUT1_3.dll`, and the game
 *relaunches itself into the other one* when the `r_renderAPI` cvar changes (`0` = OpenGL, `1` = Vulkan).
 There is no separate launcher binary and no Steam launch option that picks a renderer, so a player can land
-in either from a single launch and we get loaded into whichever it is. Struct field layouts are identical
-between the two; only addresses move — and they move by different amounts for code (roughly `-0x400` to
-`-0xE460`) and for data (roughly `+0xE00000` to `+0x1000000`), with no uniform delta anywhere.
+in either from a single launch and we get loaded into whichever it is. Verify structure layouts in both
+images as well as addresses: the render-model list, for example, begins 64 bytes earlier in OpenGL.
+Code and data addresses also move by different amounts, with no uniform delta between executables.
 
 So: **a resolver that works on one image is not finished until it works on the other.** Point `-DoomAlt` at
 the second unpacked executable and the suite re-runs `sig_test` and `globals_test` against it in portable

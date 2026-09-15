@@ -306,9 +306,31 @@ static char *make_map(const char *json, const char *module, const char *cls,
         shards = 1;
         _snprintf_s(headers, SH_SMNAV_HEADER_CAP, _TRUNCATE, "smnav1.%s.%s.0.1.%s.%s",
                     module, cls, digest, "fedcba9876543210");
+        {
+            char error[256]; size_t ignored;
+            char *invalid = sh_shard_insert(json, strlen(json), parts, shards, &ignored, error, sizeof(error));
+            CHECK(!invalid); if (invalid) HeapFree(GetProcessHeap(), 0, invalid);
+        }
+        parts[0].chunk_len = 1; /* mutate a legal envelope after the writer */
     }
 
     out = insert_shards(json, parts, shards, out_len);
+    if (out && fault == MAP_OVERSIZE_CHUNK) {
+        const char *header = strstr(out, headers);
+        const char *value = header ? strstr(header, "\"initialValue\":\"") : NULL;
+        size_t fat_len = strlen(fat), offset;
+        char *grown;
+        CHECK(value);
+        if (value) {
+            offset = (size_t)(value - out) + strlen("\"initialValue\":\"");
+            grown = (char *)HeapReAlloc(GetProcessHeap(), 0, out, *out_len + fat_len);
+            CHECK(grown);
+            if (grown) {
+                out = grown; memmove(out + offset + fat_len, out + offset + 1, *out_len - offset);
+                memcpy(out + offset, fat, fat_len); *out_len += fat_len - 1;
+            }
+        }
+    }
     free(b64);
     free(fat);
     free(parts);

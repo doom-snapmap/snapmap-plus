@@ -42,6 +42,20 @@ int main(void)
     *(void**)(saved+0x1a0)=rows;*(int*)(saved+0x1a8)=1;*(int*)(saved+0x1ac)=2;
     row(rows,SH_RENDER_VARIABLE,"1;60000;100;1500;6500;0.35;0.4;0.45");
     sh_map_render_loaded(saved);assert(g_ready&&g_runtime.value[1]==100);
+    {
+        sh_map_render retained;
+        row(rows,SH_RENDER_VARIABLE,"3;16000;60;500;1500;.1;.2;.3");
+        assert(sh_map_render_capture(saved,&retained));
+        assert(g_ready&&g_runtime.value[0]==60000&&g_runtime.value[1]==100);
+        row(rows,SH_RENDER_VARIABLE,"malformed");
+        sh_map_render_select(&retained);
+        assert(g_ready&&g_runtime.value[0]==16000&&g_runtime.value[1]==60);
+        assert(!sh_map_render_capture(saved,&retained));
+        assert(g_ready&&g_runtime.value[1]==60);
+        retained.value[1]=-1;sh_map_render_select(&retained);assert(!g_ready);
+        row(rows,SH_RENDER_VARIABLE,"1;60000;100;1500;6500;0.35;0.4;0.45");
+        sh_map_render_loaded(saved);
+    }
     g_game_type=&game;g_float=get_float;g_decl=lookup;
     *(void**)block=ops;*(int*)(block+8)=6;*(void**)(block+24)=values;*(int*)(block+32)=6;
     for(i=0;i<6;i++){

@@ -23,6 +23,12 @@ int sh_decl_visibility_install(const uint8_t *module_base,
 /* Restore the original method. Idempotent; returns 1 when a hook was removed. */
 int sh_decl_visibility_uninstall(void);
 
+/* Read-only production source availability, including published declarations.
+ * Call on the engine main thread after installation. Uses quiet native lookup
+ * with correctly sized outputs; never loads a resource. Returns 1 present,
+ * 0 absent, -1 unavailable or faulting. */
+int sh_decl_visibility_source_exists(const char *path);
+
 #ifdef SH_DECL_VISIBILITY_TESTING
 /* Map an engine probe path to the published-table key, without consulting the
  * table. Returns 1 and fills `key` when the path is inside the engine's decl

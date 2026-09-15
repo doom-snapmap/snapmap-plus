@@ -63,6 +63,12 @@ static void requests(void)
     };
     reader r={0};size_t bytes;unsigned char *out;unsigned i;
     for(i=0;i<sizeof names/sizeof names[0];++i){
+        char *key = NULL, *again = NULL;
+        assert(sh_grid_asset_canonical(names[i], &key) == 1 && key);
+        assert(sh_grid_asset_canonical(key, &again) == 1 && again && !strcmp(key, again));
+        assert(sh_grid_asset_open(key,read_source,release,&r,&out,&bytes)==-1);
+        assert(!strcmp(r.requested,sources[i]));
+        free(key); free(again);
         unsigned calls=r.calls;assert(sh_grid_asset_open(names[i],read_source,release,&r,&out,&bytes)==-1);
         assert(!out&&!bytes&&r.calls==calls+1);assert(!strcmp(r.requested,sources[i]));
     }
@@ -78,7 +84,8 @@ static void requests(void)
         "maps/modules/smpgrid/v1/m/1536_1024_512/1536_1024_512.aas_monster999",
         "generated/maps/modules/smpgrid/v1/m/1536_1024_512/1536_1024_512.baas_monster999",
         "generated/maps/modules/smpgrid/v1/m/1536_1024_512/a"};
-        for(i=0;i<sizeof bad/sizeof bad[0];++i){unsigned calls=r.calls;
+        for(i=0;i<sizeof bad/sizeof bad[0];++i){unsigned calls=r.calls; char *key = NULL;
+            assert(sh_grid_asset_canonical(bad[i], &key) == -1 && !key);
             assert(sh_grid_asset_open(bad[i],read_source,release,&r,&out,&bytes)==-1&&calls==r.calls);}}
     assert(!sh_grid_asset_open("maps/modules/classic/classic_blank_room.decl",read_source,release,&r,&out,&bytes));
 }

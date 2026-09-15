@@ -10,6 +10,10 @@ typedef struct json_cursor {
     const unsigned char *p;
     const unsigned char *end;
     unsigned max_depth;
+    sh_json_object_visitor visitor;
+    void *visitor_context;
+    sh_json_field_filter filter;
+    unsigned suppressed;
 } json_cursor;
 
 static void skip_ws(json_cursor *c)
@@ -236,16 +240,13 @@ static int decode_string_alloc(const unsigned char *start, const unsigned char *
 
 static int scan_value(json_cursor *c, unsigned depth, sh_json_kind *out_kind);
 
-typedef struct decoded_key {
-    char *bytes;
-    size_t length;
-} decoded_key;
+typedef sh_json_field_span decoded_key;
 
 static void free_keys(decoded_key *keys, size_t count)
 {
     size_t i;
     if (!keys) return;
-    for (i = 0; i < count; i++) free(keys[i].bytes);
+    for (i = 0; i < count; i++) free(keys[i].key);
     free(keys);
 }
 
@@ -255,8 +256,8 @@ static int add_unique_key(decoded_key **keys, size_t *count, size_t *capacity,
     decoded_key *grown;
     size_t i, next;
     for (i = 0; i < *count; i++) {
-        if ((*keys)[i].length == key_length &&
-            memcmp((*keys)[i].bytes, key, key_length) == 0)
+        if ((*keys)[i].key_length == key_length &&
+            memcmp((*keys)[i].key, key, key_length) == 0)
             return 0;
     }
     if (*count == *capacity) {
@@ -267,8 +268,8 @@ static int add_unique_key(decoded_key **keys, size_t *count, size_t *capacity,
         *keys = grown;
         *capacity = next;
     }
-    (*keys)[*count].bytes = key;
-    (*keys)[*count].length = key_length;
+    (*keys)[*count].key = key;
+    (*keys)[*count].key_length = key_length;
     (*count)++;
     return 1;
 }
@@ -283,12 +284,13 @@ static int scan_object(json_cursor *c, unsigned depth)
     skip_ws(c);
     if (c->p < c->end && *c->p == '}') {
         c->p++;
-        return 1;
+        return !c->visitor || c->suppressed || c->visitor(c->visitor_context, NULL, 0, depth);
     }
     for (;;) {
         const unsigned char *key_start, *key_end;
         char *key = NULL;
         size_t key_length = 0;
+        int follow = 1, scanned;
         key_start = c->p;
         if (!scan_string(c)) goto done;
         key_end = c->p;
@@ -301,7 +303,15 @@ static int scan_object(json_cursor *c, unsigned depth)
         if (c->p >= c->end || *c->p != ':') goto done;
         c->p++;
         skip_ws(c);
-        if (!scan_value(c, depth + 1, NULL)) goto done;
+        keys[key_count - 1].value = (const char *)c->p;
+        if (c->filter && !c->suppressed)
+            follow = c->filter(c->visitor_context, key, key_length, depth);
+        if (follow < 0) goto done;
+        if (!follow) c->suppressed++;
+        scanned = scan_value(c, depth + 1, &keys[key_count - 1].kind);
+        if (!follow) c->suppressed--;
+        if (!scanned) goto done;
+        keys[key_count - 1].value_length = (size_t)((const char *)c->p - keys[key_count - 1].value);
         skip_ws(c);
         if (c->p >= c->end) goto done;
         if (*c->p == '}') {
@@ -314,6 +324,7 @@ static int scan_object(json_cursor *c, unsigned depth)
         skip_ws(c);
     }
 done:
+    if (ok && c->visitor && !c->suppressed) ok = c->visitor(c->visitor_context, keys, key_count, depth);
     free_keys(keys, key_count);
     return ok;
 }
@@ -412,7 +423,7 @@ static int scan_value(json_cursor *c, unsigned depth, sh_json_kind *out_kind)
 int sh_json_validate(const char *json, size_t length, unsigned max_depth,
                      sh_json_kind *out_kind)
 {
-    json_cursor c;
+    json_cursor c = {0};
     sh_json_kind kind;
     if (!json || max_depth == 0) return 0;
     c.begin = (const unsigned char *)json;
@@ -425,6 +436,26 @@ int sh_json_validate(const char *json, size_t length, unsigned max_depth,
     if (c.p != c.end) return 0;
     if (out_kind) *out_kind = kind;
     return 1;
+}
+
+int sh_json_visit_objects(const char *json, size_t length, unsigned max_depth,
+                          sh_json_object_visitor visitor, void *context)
+{
+    return sh_json_visit_objects_filtered(json, length, max_depth, visitor, NULL, context);
+}
+
+int sh_json_visit_objects_filtered(const char *json, size_t length, unsigned max_depth,
+                                   sh_json_object_visitor visitor,
+                                   sh_json_field_filter filter, void *context)
+{
+    json_cursor c = {0};
+    if (!json || !max_depth || !visitor) return 0;
+    c.begin = (const unsigned char *)json; c.p = c.begin; c.end = c.begin + length;
+    c.max_depth = max_depth; c.visitor = visitor; c.visitor_context = context;
+    c.filter = filter;
+    skip_ws(&c);
+    if (!scan_value(&c, 0, NULL)) return 0;
+    skip_ws(&c); return c.p == c.end;
 }
 
 static char *copy_range(const unsigned char *begin, const unsigned char *end)
@@ -464,7 +495,7 @@ static int object_append_owned(sh_json_object *object, char *key, size_t key_len
 int sh_json_parse_object(const char *json, size_t length, unsigned max_depth,
                          sh_json_object *out)
 {
-    json_cursor c;
+    json_cursor c = {0};
     sh_json_kind kind;
     sh_json_object parsed = {0};
     if (!out || !sh_json_validate(json, length, max_depth, &kind) ||
@@ -588,7 +619,7 @@ int sh_json_object_set_n(sh_json_object *object, const char *key,
 int sh_json_decode_string(const char *json, size_t length,
                           char *out, size_t out_capacity, size_t *out_length)
 {
-    json_cursor c;
+    json_cursor c = {0};
     char *decoded = NULL;
     size_t decoded_length = 0;
     if (!json) return 0;

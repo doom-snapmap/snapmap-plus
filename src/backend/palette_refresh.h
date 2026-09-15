@@ -31,6 +31,8 @@ void sh_palette_refresh_test_reset(void);
 void sh_palette_refresh_test_bind(const uint8_t *module_base, void *builder);
 int sh_palette_refresh_test_state(void);
 int sh_palette_refresh_test_call_count(void);
+void sh_palette_refresh_test_decoder(void *decoder);
+void sh_palette_refresh_test_decode(void *entity, void *data);
 #endif
 
 #endif /* BACKEND_PALETTE_REFRESH_H */

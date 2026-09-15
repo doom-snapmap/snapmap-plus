@@ -9,14 +9,21 @@
 #include <shlobj.h>
 #pragma comment(lib, "shell32.lib")
 #include "signatures.h"
+#include "startup_bindings.h"
 #include "hook.h"
 #include "smoke.h"
 #include "rawmap.h"
 #include "editor_frame.h"
 #include "map_package.h"
+#include "map_payload.h"
+#include "map_source.h"
+#include "map_native.h"
+#include "map_published.h"
+#include "map_transition.h"
 #include "palette_refresh.h"
 #include "engine_dialog.h"
 #include "../fault_shield/mapload_guards.h"
+#include "../fault_shield/serialized_entities_guard.h"
 #include "strids.h"
 #include "overrides.h"
 #include "grid_room_native.h"
@@ -37,6 +44,7 @@
 #include "imgpreview.h"
 #include "prefabpreview.h"
 #include "soundpreview.h"
+#include "audio_banks_native.h"
 #include "patch.h"
 #include "algo.h"
 #include "target_any.h"
@@ -45,6 +53,10 @@
 #include "ui_bridge.h"
 #include "config.h"
 #include "user_overrides.h"
+#include "package_runtime.h"
+#include "resource_graph_native.h"
+#include "resource_resident.h"
+#include "audio_files_native.h"
 #include "iface_engine.h"
 #include "apply_engine.h"
 #include "cvar_unlock.h"
@@ -122,21 +134,32 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
     sh_config_init(); /* nonfatal: the service retains defaults and status flags on failure */
     sh_user_overrides_capture_launch_state();
 
+    /* These scratch-only checks do not depend on engine symbol resolution. */
+    sh_patch_selftest();
+    sh_algo_selftest();
+
     /* Retry while startup code may still be encrypted; partial binding is allowed
      * after timeout and each feature must validate its own dependencies. */
     size_t total = sig_db_count();
+    size_t db = total < SIG_RESULTS_MAX ? total : SIG_RESULTS_MAX;
+    sig_result results[SIG_RESULTS_MAX];
+    sh_startup_bindings bindings;
+    sh_startup_bindings_init(&bindings, BACKEND_ENGINE_SIGNATURES, results, db);
     DWORD  t0 = GetTickCount();
     size_t last_ok = 0;
     for (;;) {
-        last_ok = sh_resolve_count(g_doom_base);
+        int final_pass = total > SIG_RESULTS_MAX || GetTickCount() - t0 >= PB0_POLL_TIMEOUT_MS;
+        last_ok = sh_startup_bindings_step(&bindings, g_doom_base,
+            sh_resource_graph_native_signature, sh_resource_graph_native_install, final_pass);
         if (last_ok == total) break;
-        if (GetTickCount() - t0 >= PB0_POLL_TIMEOUT_MS) break;
+        if (final_pass) break;
         Sleep(PB0_POLL_INTERVAL_MS);
     }
     DWORD elapsed = GetTickCount() - t0;
 
-    /* Record resolution and scratch-detour results from a fresh scan. */
-    sh_smoke_run(g_doom_base, elapsed);
+    /* Reuse the verified pre-install snapshot: an early observer already owns
+     * its detours, including on OpenGL where Vulkan RVA fallback is invalid. */
+    sh_smoke_run(g_doom_base, results, db, elapsed);
 
     /* Resolve and log all data anchors here so unsupported dependencies are visible. */
     {
@@ -148,18 +171,11 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         backend_log(gline);
     }
 
-    /* Check guarded patches on scratch memory before installing consumers. */
-    sh_patch_selftest();
-
-    /* Check math implementations without touching engine state. */
-    sh_algo_selftest();
-
     /* Bind features from the final resolution results, including partial results. */
     {
-        sig_result results[SIG_RESULTS_MAX];
-        sig_resolve_all(g_doom_base, results, SIG_RESULTS_MAX);
-        size_t db = sig_db_count();
-        if (db > SIG_RESULTS_MAX) db = SIG_RESULTS_MAX;
+        /* Idempotent after early binding, or report unavailable dependencies
+         * after a partial startup. Never infer that earlier loads were seen. */
+        sh_resource_graph_native_install(results, db);
 
         /* Install rawmap load interception only on a clean prologue. The swap starts
          * disarmed; package admission also runs inside this detour. */
@@ -173,8 +189,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                 break;
             }
         }
-        /* Capture the immutable installed-package snapshot before load interception
-         * can run. Packages added later require a restart to become active. */
+        /* Capture installed source identities before load interception can run.
+         * Later installs pass the gate after successful runtime registration. */
         {
             char mpkg_root[MAX_PATH];
             if (sh_overrides_get_root(mpkg_root, sizeof mpkg_root))
@@ -193,7 +209,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * it serves, and like it does not depend on the editor being up. */
         {
             void *ed_frame = NULL, *ed_loadmap = NULL, *ed_addtag = NULL, *ed_tojson = NULL;
-            int   ed_frame_clean = 0;
+            void *ed_readtext = NULL;
+            int   ed_frame_clean = 0, ed_load_clean = 0, ed_read_clean = 0;
             for (size_t i = 0; i < db; i++) {
                 if (results[i].name == NULL) continue;
                 if (strcmp(results[i].name, "EditorFrame") == 0) {
@@ -203,6 +220,10 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                 } else if (strcmp(results[i].name, "EditorLoadMap") == 0) {
                     if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
                         ed_loadmap = (void *)results[i].addr;
+                    ed_load_clean = results[i].status == SIG_OK;
+                } else if (strcmp(results[i].name, "ReadLocalSavedMapText") == 0) {
+                    if (results[i].status == SIG_OK) ed_readtext = (void *)results[i].addr;
+                    ed_read_clean = results[i].status == SIG_OK;
                 } else if (strcmp(results[i].name, "SnapMapAddBranchTag") == 0) {
                     if (results[i].status == SIG_OK || results[i].status == SIG_OK_HOOKED)
                         ed_addtag = (void *)results[i].addr;
@@ -215,6 +236,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
             /* Save Rawmap serializes the open map, not the newest save on disk. The tag
              * function also derives the engine's idStr ctor/dtor. */
             sh_rawmap_set_live_serialize(ed_tojson, ed_addtag);
+            sh_rawmap_preflight_install(ed_loadmap, ed_load_clean, ed_readtext, ed_read_clean);
         }
 
         /* Mirror saves to rawmap JSON. Require a clean serialization prologue before
@@ -230,6 +252,25 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
             }
         }
         sh_rawmap_save_install(serialize, serialize_clean);
+        for (size_t i = 0; i < db; i++) {
+            if (results[i].name && !strcmp(results[i].name, "EditorSaveAndPlay")) {
+                sh_rawmap_play_install((void *)results[i].addr, results[i].status == SIG_OK);
+                break;
+            }
+        }
+        sh_map_payload_install(results, db);
+        if (!sh_resource_resident_bind(results, db, g_doom_base))
+            backend_log("MPKG: native cached-resource refresh binding unavailable");
+        {
+            const sh_map_transition_callbacks callbacks = {sh_rawmap_transition_pending,
+                sh_rawmap_transition_activate, sh_rawmap_transition_commit, sh_rawmap_transition_finished};
+            if (!sh_map_transition_install(results, db, g_doom_base, &callbacks))
+                backend_log("MPKG: native package activation boundary unavailable");
+        }
+        if (!sh_map_source_install(results, db, g_doom_base) ||
+            !sh_map_native_bind(results, db, g_doom_base) ||
+            !sh_map_published_install(results, db, g_doom_base))
+            backend_log("MPKG: published-map ownership and launch binding unavailable");
 
         sh_rawmap_embed_install(g_doom_base);
 
@@ -244,9 +285,18 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * Their implementations define the engine-layout checks and recovery limits. */
         sh_evwire_guard_install(g_doom_base);
         sh_interactable_guard_install(g_doom_base);
+        sh_serialized_entities_guard_install(results, db);
 
         void *get_decls = (void *)sig_addr_by_name(results, db, "GetDeclsOfType");
 
+
+        /* Bind read-only compiler metadata now. Initial compilation runs on
+         * the main thread at the pre-promotion boundary, after native reader
+         * setup. Do not wait or scan packages before arming that hook. */
+        sh_package_runtime_bind_native(
+            glb_resolve(g_doom_base, "declmgr_accessor", NULL),
+            glb_resolve(g_doom_base, "type_container", NULL),
+            (uintptr_t)GetProcAddress((HMODULE)g_doom_base, "GetGameSystemInterface"));
 
         /* Inject custom #str_ entries before the first top-level language-table sort.
          * The detour needs a clean prologue; helper functions come from the same scan. */
@@ -327,13 +377,15 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         void *cmdsys   = sh_resolve_cmdsys(results, db, g_doom_base);
         sh_commands_install(add_cmd, cmdsys, printf_d, get_decls, g_doom_base);
 
-        /* Capture allowlisted package cvars, then queue them once the engine is RUNNING.
+        /* Capture allowlisted package cvars, then verify them at native publication.
          * Do not alter these gates during startup declaration parsing. */
         {
             char override_root[MAX_PATH];
             void *buffer_cmd = (void *)sig_addr_by_name(results, db, "BufferCommandText");
+            void *execute_cmds = (void *)sig_addr_by_name(results, db, "CmdExecuteBuffer");
             if (sh_overrides_get_root(override_root, sizeof(override_root))) {
                 sh_package_requirements_install(override_root, g_doom_base, cmdsys, buffer_cmd,
+                                                execute_cmds,
                                                 sh_user_overrides_enabled_for_launch());
                 sh_weapon_hud_install(override_root, g_doom_base, results, db,
                                       sh_user_overrides_enabled_for_launch());
@@ -386,6 +438,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* Install native prompts before the decl server can raise a package dialog.
          * Failed binding leaves the OS message-box fallback available. */
         sh_engine_dialog_install(results, db, g_doom_base);
+
+        sh_audio_banks_native_install(results, db);
+        sh_audio_files_native_install(results, db, g_doom_base);
 
         /* Queue immutable new-declaration registration on the engine main thread.
          * The interface and palette callbacks must be ready before its command runs. */

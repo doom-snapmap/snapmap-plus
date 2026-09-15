@@ -12,7 +12,7 @@ and preserves player data. The runtime uses only Go's standard library.
 |---|---|
 | `main.go`, `interactive.go` | CLI dispatch and the double-click interactive prompt. |
 | `doom.go`, `bundle.go`, `install.go` | Game discovery, bundle validation and installation records. |
-| `legacy.go`, `userdata.go`, `overrides_migrate.go` | Legacy migration and player-data handling. |
+| `legacy.go`, `userdata.go`, `overrides_package.go` | Earlier-install cleanup, player data and package authoring helpers. |
 | `selfinstall*.go`, `selfupdate.go`, `webview2.go` | Installer ownership, updates and WebView2 runtime setup. |
 | `changelog*.go` | Release-note retrieval and terminal rendering. |
 | `*_test.go`, `testdata/` | Installer and rendering regressions. |
@@ -80,9 +80,12 @@ legacy runtime and copies player data from `%USERPROFILE%\snaphak` into the new
 data directory. Existing destination files keep their contents. Differing source
 files and failed copies remain in the legacy location for you to reconcile.
 Migration compares file contents before retiring a source and removes only empty
-directories; read errors and links prevent retirement. The former shared
-`overrides/generated` layout moves into a marked `my-overrides` package under
-the same rules. Unknown files in the old metadata directory also remain there.
+directories; read errors and links prevent retirement. Unknown files in the old
+metadata directory also remain there. The installer creates a `my-overrides`
+starter containing `package.json` and `assets/`. Copy engine-shaped resource
+paths into `assets/`; requirements and strings belong in the descriptor.
+Existing descriptors and authored files are preserved. Loose override files
+are not reinterpreted or moved into packages.
 
 Stable installer copies are tracked by name and SHA-256 in `installer-files.json`.
 Uninstall removes only recorded copies whose bytes still match, while retaining

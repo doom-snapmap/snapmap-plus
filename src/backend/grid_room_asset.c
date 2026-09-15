@@ -108,6 +108,36 @@ static int request(const char *name,sh_grid_size *size,char source[768],int *typ
     return 0;
 }
 
+int sh_grid_asset_canonical(const char *name, char **path)
+{
+    sh_grid_size size;
+    char source[768], module[128], canonical[1024];
+    const char *kind;
+    int type = 0, claimed, n = -1;
+    if (!path) return -1;
+    *path = NULL;
+    if (!name) return 0;
+    claimed = request(name, &size, source, &type);
+    if (claimed <= 0) return claimed;
+    if (!sh_grid_name(&size, module, sizeof(module))) return -1;
+    switch (type) {
+    case ASSET_MODULE: n = snprintf(canonical, sizeof(canonical), "%s.decl", module); break;
+    case ASSET_INFO:
+        n = snprintf(canonical, sizeof(canonical), "generated/decls/snapmoduleinfo/%s.decl", module + 13); break;
+    case ASSET_GEOMETRY:
+        if (!sh_grid_resource_name(&size, source, canonical, sizeof(canonical))) return -1;
+        n = (int)strlen(canonical); break;
+    case ASSET_COPY:
+        n = snprintf(canonical, sizeof(canonical), "%s/lightprobes/light_probe_1_compressed.bimage", module); break;
+    case ASSET_NAV:
+        kind = strstr(source, ".baas_");
+        if (!kind) return -1;
+        n = snprintf(canonical, sizeof(canonical), "generated/%s/%s%s", module, strrchr(module, '/') + 1, kind); break;
+    }
+    if (n < 0 || (size_t)n >= sizeof(canonical)) return -1;
+    *path = _strdup(canonical); return *path ? 1 : -1;
+}
+
 int sh_grid_asset_open(const char *name,sh_grid_asset_read_fn read,
                         sh_grid_asset_release_fn release,void *context,
                         unsigned char **out,size_t *length)

@@ -125,13 +125,13 @@ static void test_maintenance_thread(void)
     CloseHandle(worker);
     assert(maintenance_step == 0);
 
-    /* The real poll reaches its three native maintenance dependencies only on
+    /* The real poll reaches native maintenance dependencies only on
      * the engine thread. Null host/command pointers prevent native writes. */
     maintenance_allowed = 1;
     for (int i = 0; i < 2; i++) {
         maintenance_step = 0;
         sh_apply_prefab_poll_play();
-        assert(maintenance_step == 3);
+        assert(maintenance_step == 6);
         assert(!g_nav_refresh_queued && !g_nav_refresh_registered);
         assert(g_last_load_state == -1);
     }
@@ -239,8 +239,11 @@ static void maintenance_call(int step)
     assert(maintenance_step == step);
     maintenance_step++;
 }
-void sh_decl_server_rearm_poll(void) { maintenance_call(1); }
-void sh_mpkg_consent_poll(void) { maintenance_call(2); }
+void sh_map_published_poll(void) { maintenance_call(1); }
+void sh_rawmap_map_context_poll(void) { maintenance_call(2); }
+void sh_decl_server_rearm_poll(void) { maintenance_call(3); }
+void sh_mpkg_consent_poll(void) { maintenance_call(4); }
+void sh_rawmap_pending_map_poll(void) { maintenance_call(5); }
 void sh_package_requirements_poll(void) { maintenance_call(0); }
 void *sh_typeinfo_get_declmgr(void) { assert(0); return NULL; }
 int sh_iface_class_inherit_ok(int id, const char *c, const char *h) { (void)id; (void)c; (void)h; assert(0); return 0; }

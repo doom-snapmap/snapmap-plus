@@ -73,6 +73,12 @@ var errUnknownCommand = errors.New("unknown command")
 // runCommand dispatches one command; shared by the CLI entry point and the interactive prompt so both
 // surfaces stay identical.
 func runCommand(cmd string, args []string) error {
+	for _, arg := range args {
+		if arg == "--help" || arg == "-h" {
+			usage()
+			return nil
+		}
+	}
 	f := parseFlags(args)
 	switch cmd {
 	case "install":

@@ -22,6 +22,7 @@
 #include "host_image.h"
 #include "iface_engine.h"
 #include "palette_refresh.h"
+#include "hook.h"
 
 /* PR_EDITOR_PALETTE_OFF is the supported structure offset. RVAs below are
  * pinned Vulkan audit references, not lookup gates. Resolve the builder by
@@ -45,6 +46,43 @@ typedef void (*palette_build_fn)(void *palette, void *progress);
 static volatile LONG g_state = PR_STATE_IDLE;
 static const uint8_t *g_module_base;
 static palette_build_fn g_builder;
+typedef void (*traversal_decode_fn)(void *entity, void *data);
+static traversal_decode_fn g_traversal_original;
+static volatile LONG g_template_thread;
+/* Anonymous universal templates are skipped, as R017 established. Setting this
+ * to 1 forwards them too, which attributes a palette-build failure to the
+ * guard instead of to the builder's inputs. */
+static int g_forward_all = 0;
+
+/* Anonymous palette defaults have no traversal to add. Both images use
+ * entityDef@entity+150, name@decl+8 and className@decl+60. For the universal
+ * class the native branch only warns; real entity decoding must still run. */
+static int pr_empty_universal_template(const void *entity)
+{
+    const unsigned char *decl;
+    const char *name, *class_name;
+    static const char universal[] = "idInfo_UniversalTraversal";
+    if ((DWORD)InterlockedCompareExchange(&g_template_thread, 0, 0) != GetCurrentThreadId()) return 0;
+    __try {
+        if (!entity || !(decl = *(const unsigned char *const *)((const unsigned char *)entity + 0x150))) return 0;
+        name = *(const char *const *)(decl + 8);
+        class_name = *(const char *const *)(decl + 0x60);
+        return name && !name[0] && class_name && !strncmp(class_name, universal, sizeof(universal));
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+static volatile LONG g_template_matches, g_template_forwarded;
+static int sh_palette_refresh_forward_all(void)
+{ return g_forward_all; }
+static void pr_decode_traversal(void *entity, void *data)
+{
+    if (pr_empty_universal_template(entity)) {
+        InterlockedIncrement(&g_template_matches);
+        if (!sh_palette_refresh_forward_all()) return;
+    }
+    InterlockedIncrement(&g_template_forwarded);
+    if (g_traversal_original) g_traversal_original(entity, data);
+}
 
 #ifdef SH_PALETTE_REFRESH_TESTING
 static volatile LONG g_test_call_count;
@@ -111,10 +149,10 @@ static void pr_refuse(const char *reason)
 int sh_palette_refresh_install(const sig_result *results, size_t count,
                                const uint8_t *module_base)
 {
-    const sig_result *builder;
+    const sig_result *builder, *traversal;
 
     if (InterlockedCompareExchange(&g_state, PR_STATE_IDLE, PR_STATE_IDLE) != PR_STATE_IDLE ||
-        g_builder != NULL)
+        g_builder != NULL || g_traversal_original != NULL)
         return 0;
     builder = pr_result(results, count, "SnapPaletteBuild");
     /* This call has a vtable/data-layout contract, so a hook-tolerant resolve
@@ -130,6 +168,24 @@ int sh_palette_refresh_install(const sig_result *results, size_t count,
         return 0;
     }
 
+    traversal = pr_result(results, count, "SnapEntityTraversalDecode");
+    if (!traversal || traversal->status != SIG_OK || !traversal->addr ||
+        traversal->addr != (uintptr_t)module_base + traversal->rva) {
+        pr_refuse("palette-refresh REFUSED: clean traversal decoder unavailable");
+        return 0;
+    }
+    /* Eighteen whole position-independent bytes, ending after SUB RSP,0xd0. */
+    g_traversal_original = (traversal_decode_fn)hook_prepare((void *)traversal->addr,
+                                                           pr_decode_traversal, 18);
+    if (!g_traversal_original) {
+        pr_refuse("palette-refresh REFUSED: traversal template hook preparation failed");
+        return 0;
+    }
+    if (hook_commit((void *)g_traversal_original) != B2_PATCH_OK) {
+        if (hook_unpatch((void *)g_traversal_original)) g_traversal_original = NULL;
+        pr_refuse("palette-refresh REFUSED: traversal template hook commit failed");
+        return 0;
+    }
     g_module_base = module_base;
     g_builder = (palette_build_fn)builder->addr;
     backend_log("palette-refresh installed: waiting for complete native decl registration");
@@ -191,14 +247,27 @@ int sh_palette_refresh_after_decl_registration(void)
 #ifdef SH_PALETTE_REFRESH_TESTING
         InterlockedIncrement(&g_test_call_count);
 #endif
-        g_builder((void *)(editor + PR_EDITOR_PALETTE_OFF), NULL);
+        InterlockedExchange(&g_template_thread, (LONG)GetCurrentThreadId());
+        __try {
+            g_builder((void *)(editor + PR_EDITOR_PALETTE_OFF), NULL);
+        } __finally {
+            InterlockedExchange(&g_template_thread, 0);
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         pr_refuse("palette-refresh REFUSED: SnapPaletteBuild raised an exception");
         return 0;
     }
     if (InterlockedCompareExchange(&g_state, PR_STATE_APPLIED, PR_STATE_PENDING) != PR_STATE_PENDING)
         return 0;
-    backend_log("palette-refresh FIRED: native SnapPaletteBuild rebuilt the entity palette");
+    {
+        char line[192];
+        snprintf(line, sizeof(line),
+            "palette-refresh FIRED: native SnapPaletteBuild rebuilt the entity palette "
+            "(anonymous universal templates matched %ld, decoded %ld, forward_all=%d)",
+            InterlockedCompareExchange(&g_template_matches, 0, 0),
+            InterlockedCompareExchange(&g_template_forwarded, 0, 0), g_forward_all);
+        backend_log(line);
+    }
     return 1;
 }
 
@@ -209,6 +278,8 @@ void sh_palette_refresh_test_reset(void)
     InterlockedExchange(&g_test_call_count, 0);
     g_module_base = NULL;
     g_builder = NULL;
+    g_traversal_original = NULL;
+    InterlockedExchange(&g_template_thread, 0);
 }
 
 void sh_palette_refresh_test_bind(const uint8_t *module_base, void *builder)
@@ -225,5 +296,15 @@ int sh_palette_refresh_test_state(void)
 int sh_palette_refresh_test_call_count(void)
 {
     return (int)InterlockedCompareExchange(&g_test_call_count, 0, 0);
+}
+
+void sh_palette_refresh_test_decoder(void *decoder)
+{
+    g_traversal_original = (traversal_decode_fn)decoder;
+}
+
+void sh_palette_refresh_test_decode(void *entity, void *data)
+{
+    pr_decode_traversal(entity, data);
 }
 #endif

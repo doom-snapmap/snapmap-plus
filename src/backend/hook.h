@@ -11,6 +11,17 @@
  * instructions: no RIP-relative operands or relative calls/jumps are relocated. */
 void *hook_prepare(void *target, void *detour, size_t stolen);
 
+/* Like hook_prepare, but expand one caller-verified 64-bit RIP-relative LEA
+ * at lea_offset into MOV reg,imm64. All other stolen instructions must remain
+ * whole and position-independent. Reject any other opcode/addressing form. */
+void *hook_prepare_rip_lea(void *target, void *detour, size_t stolen, size_t lea_offset);
+
+/* Expand one caller-verified E8 rel32 call to an indirect absolute call without
+ * consuming a scratch register. The callee returns past the inline address.
+ * Other stolen instructions must be whole and position-independent; calls back
+ * into the stolen interval are refused. Useful for native stack-probe prologues. */
+void *hook_prepare_relative_call(void *target, void *detour, size_t stolen, size_t call_offset);
+
 /* Publish the trampoline in the detour's original callback BEFORE committing.
  * Commit never releases ownership. A failed commit must be removed or retried;
  * FAIL_ROLLBACK requires removal before another commit. Callers must quiesce

@@ -49,7 +49,10 @@ They must preserve those resources until restoration succeeds and no execution
 can still use them. Failed rollback remains a recoverable state, not a successful
 uninstall. The patch and hook headers define the supported installation and
 restoration sequence. Stolen instructions must be complete and independently
-executable; the hook helper does not relocate RIP-relative instructions.
+executable. The ordinary hook helper performs no relocation; its explicit
+`hook_prepare_rip_lea` variant expands one verified 64-bit RIP-relative LEA.
+Callers still verify every other stolen instruction. Original target bytes
+remain separate from relocated code for commit validation and restoration.
 
 ## DLL interface
 
@@ -267,6 +270,13 @@ resource references and supported settings. Discovery, conflict checking and
 native publication are separate operations. Incomplete inventories must not
 silently publish a partial package set.
 
+Package inventories and resource ownership grow with the installed set. There
+is no fixed package-count quota in discovery, compilation, saved-map selection,
+or installation. Duplicate resources keep every contributing package as an
+owner; their authored directories remain intact. Internal ownership sets are
+never serialized into author descriptors. A failed allocation or incomplete
+scan refuses the new inventory and preserves the published compiler snapshot.
+
 The override provider serves file content and an immutable declaration view.
 The declaration server registers new identities and refreshes existing shadows;
 the installed-resource bridge supplies data already present in the game. A
@@ -297,6 +307,11 @@ Every required package must satisfy the gate. `decl_server.h`, `overrides.h`,
 The fault shield handles selected, understood engine faults. It does not make
 arbitrary native calls safe. Expected recoveries, nonterminal notices and fatal
 records have different meanings; a captured record alone does not prove survival.
+
+The serialized-entity cleanup guard permits an empty moved handle, as the native
+snapshot writer already does. It skips that handle's index write and preserves
+the engine's list reduction and removed-entity reset. Startup requires a unique
+instruction signature and exact-byte verification on both supported renderers.
 
 Crash formatting produces complete JSON or an empty failure. Capture uses bounded
 storage and nonblocking guards so nested faults cannot wait on a faulting thread.
