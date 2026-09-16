@@ -290,6 +290,19 @@ The declaration server registers new identities and refreshes existing shadows;
 the installed-resource bridge supplies data already present in the game. A
 package can therefore refer to installed assets without redistributing them.
 
+An existing loaded declaration is reconstructed only when the provider diff or
+the captured native dependency graph selects it. Merely remaining in a package
+does not invalidate its caches. Recovery retains the affected identities even
+if a failed parse erased their dependency edges. Archive aliases count as direct
+changes even when the native path names cooked data. Reflection-verified native
+parent links also select declarations that copied fields from a changed ancestor,
+including startup children whose lifetime has not yet been promoted. Ordinary
+startup consumers and runtime map-owned consumers keep their lifetime exclusions.
+After settings reload, native
+World Text font resolution runs before palette previews, under the same heap
+and renderer scopes as material rebinding; parsing font names alone does not
+restore the editor's cached font objects.
+
 Boot binds runtime dependencies even when no package declarations are present.
 Runtime refresh is a main-thread operation at a settled My Maps browser, with
 the editor inactive, no loading transition and no dialog. Unsafe requests remain

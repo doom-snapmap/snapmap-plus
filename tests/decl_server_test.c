@@ -16,9 +16,13 @@ int sh_rawmap_defers_install_commit(void) { return g_defer_install_commit; }
 #include "resource_resident.h"
 static int g_resident_begin_calls, g_resident_drain_calls, g_resident_end_calls;
 static int g_resident_fail_begin, g_resident_fail_drain;
-sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *changes, int restoring, char *error, size_t capacity)
+static void *g_resident_only;
+static int g_resident_filter;
+int sh_resource_resident_selected(const sh_resource_resident *pass, const void *object)
+{ (void)pass; return !g_resident_filter || object == g_resident_only; }
+sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *changes, int restoring, int initial, char *error, size_t capacity)
 {
-    (void)changes; (void)restoring; ++g_resident_begin_calls;
+    (void)changes; (void)restoring; (void)initial; ++g_resident_begin_calls;
     if (g_resident_fail_begin) { g_resident_fail_begin = 0; snprintf(error, capacity, "resident capture failed"); return NULL; }
     return (sh_resource_resident *)1;
 }
@@ -2158,6 +2162,41 @@ static void test_runtime_premark_reused_empties(void)
     HeapFree(GetProcessHeap(), 0, b);
 }
 
+static void test_runtime_preserves_unaffected_caches(void)
+{
+    unsigned char objects[2][0x800] = {0};
+    sh_decl_server_test_materialize_item items[] = {
+        {"snapEditorSettings", "settings", "generated/decls/snapeditorsettings/settings.decl",
+         SH_DECL_SERVER_TEST_SHADOWED, NULL, 0, SH_DECL_SERVER_TEST_SHADOW_LIVE},
+        {"entityDef", "changed", "generated/decls/entitydef/changed.decl",
+         SH_DECL_SERVER_TEST_SHADOWED, NULL, 0, SH_DECL_SERVER_TEST_SHADOW_LIVE}
+    };
+    int materialized;
+    rt_reset(); sh_decl_server_test_reset_runtime_state();
+    for (int i = 0; i < 2; i++) {
+        g_rt_names[i] = items[i].name; g_rt_objects[i] = objects[i];
+        *(unsigned *)(objects[i] + 0x28) = 4;
+    }
+    *(void **)(objects[0] + 0x688) = objects[0];
+    sh_decl_server_test_set_runtime(1);
+    sh_decl_server_test_set_resident((void *)1);
+    g_resident_filter = 1; g_resident_only = NULL;
+    CHECK(sh_decl_server_test_materialize_missing_sedefs(items, 2, (void *)1,
+        rt_type_by_name, rt_source_find, rt_find_decl, &materialized));
+    CHECK(g_rt_reconstructs == 0 && g_rt_load_total == 0);
+    CHECK(*(void **)(objects[0] + 0x688) == objects[0]);
+    /* A changed dependency can select a consumer even if its own bytes did
+     * not change. The declaration pass follows the captured resident set. */
+    g_resident_only = objects[1];
+    CHECK(sh_decl_server_test_materialize_missing_sedefs(items, 2, (void *)1,
+        rt_type_by_name, rt_source_find, rt_find_decl, &materialized));
+    CHECK(g_rt_reconstructs == 1 && g_rt_loads[0] == 0 && g_rt_loads[1] == 1);
+    CHECK(*(void **)(objects[0] + 0x688) == objects[0]);
+    sh_decl_server_test_set_resident(NULL); sh_decl_server_test_set_runtime(0);
+    g_resident_filter = 0; g_resident_only = NULL;
+    sh_decl_server_test_reset_runtime_state();
+}
+
 static void test_runtime_shadowed_refresh(void)
 {
     sh_decl_server_test_materialize_item items[] = {
@@ -3219,6 +3258,7 @@ int main(void)
     test_sedef_materialization();
     test_runtime_premark_reused_empties();
     test_runtime_shadowed_refresh();
+    test_runtime_preserves_unaffected_caches();
     test_runtime_reconstruction_fault_restores_lifetime();
     test_rejected_new_identity_does_not_strand_replacements();
     test_runtime_shadowed_drain_fallback();

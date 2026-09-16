@@ -13,12 +13,13 @@ static int failures, rebuilds, loads, updates, strings, defaults, fault, lookup_
  * how many reloads had finished, whether the consumer update had already run
  * and whether the renderer was still held. */
 static int rebinds, rebind_heap, rebind_loads, rebind_updates, rebind_held;
+static int font_resolves;
 /* Bitmask of the objects a case expects the pass to reconstruct. */
 static int expect_reconstructed = 3;
 static unsigned char heap_object[0xd0], renderer_object[0x20], manager_object[0x30];
 /* Wide enough for every field the pass reads, including the implicit-text
  * flag at +0x48. */
-static unsigned char objects[3][0x80];
+static unsigned char objects[3][0x800];
 static void *render_table[35], *resource_table[12], *entries[3], *head, *renderer;
 static DWORD main_thread;
 static const char *paths[3] = {"cooked/model/body.bmodel", "cooked/material/skin.bmaterial", "cooked/model/unrelated.bmodel"};
@@ -27,6 +28,11 @@ static int counts[3];
 uintptr_t glb_resolve(const uint8_t *base, const char *name, glb_status *status)
 { (void)base; (void)name; (void)status; return 0; }
 const sh_resource_catalog *sh_package_runtime_catalog(void) { return NULL; }
+int sh_typeinfo_class_derives(const char *name, const char *base)
+{
+    CHECK(!strcmp(base, "idDeclTypeInfo"));
+    return !strcmp(name, "TestInheritedDecl");
+}
 size_t sh_resource_catalog_find_path(const sh_resource_catalog *catalog, const char *path,
     const sh_resource_catalog_entry *const **rows)
 {
@@ -84,6 +90,18 @@ static void rebind(void)
     if (fault == 6) RaiseException(0xe0800006, 0, 0, NULL);
 }
 static void *lookup(void *manager, const char *name);
+static void world_text_fonts(void *self)
+{
+    void **fonts = self;
+    int depth = *(int *)(heap_object + 0xc4);
+    CHECK(depth && *(int *)(heap_object + 0x44 + 4 * (depth - 1)) == 0);
+    CHECK(!updates && !rebinds && *(int *)(renderer_object + 0x14) == 1);
+    CHECK(!(objects[0][0x2c] & RR_PENDING));
+    font_resolves++;
+    if (fault == 8) RaiseException(0xe0800008, 0, 0, NULL);
+    fonts[0] = objects[0]; fonts[1] = objects[1];
+    fonts[2] = fault == 9 ? NULL : objects[2];
+}
 static void make_default(void *self)
 {
     defaults++; CHECK(((unsigned char *)self)[0x2c] & RR_DEFAULT);
@@ -125,6 +143,7 @@ static void reset(void)
     memset(manager_object, 0, sizeof(manager_object)); memset(renderer_object, 0, sizeof(renderer_object));
     memset(counts, 0, sizeof(counts)); rebuilds = loads = updates = strings = defaults = fault = lookup_leaves_pending = 0;
     rebinds = 0; rebind_heap = rebind_loads = rebind_updates = rebind_held = -1;
+    font_resolves = 0;
     expect_reconstructed = 3;
     source_mode = 3; main_thread = GetCurrentThreadId(); head = manager_object; renderer = renderer_object;
     *(const char **)(manager_object + 8) = "model";
@@ -142,6 +161,7 @@ static void reset(void)
     g_rr.mode = mode_get; g_rr.string_free = string_free;
     g_rr.reconstruct = reconstruct; g_rr.load = load; g_rr.lookup = lookup;
     g_rr.rebind = rebind;
+    g_rr.world_text_fonts = world_text_fonts;
     sh_resource_graph_test_reset();
     /* Identity dependency exists, but the primary file was loaded before
      * instrumentation. Native path/catalog seeds must still find consumers. */
@@ -153,13 +173,13 @@ static sh_resource_resident *begin(const char *path, int restoring, char error[2
 {
     sh_package_change change = {(char *)path, SH_PACKAGE_RESOURCE_REPLACED};
     sh_package_changes changes = {&change, 1};
-    return sh_resource_resident_begin(&changes, restoring, error, 256);
+    return sh_resource_resident_begin(&changes, restoring, 0, error, 256);
 }
 static void check_restored(void)
 {
     CHECK(!strings && !*(int *)(heap_object + 0xc4) && !*(int *)(renderer_object + 0x14));
     for (int i = 0; i < 3; i++) CHECK(!(objects[i][0x2c] & RR_PENDING) && *(int *)(objects[i] + 0x28) == 4);
-    CHECK(source_mode == 3 && !counts[2]);
+    CHECK(source_mode == 3);
 }
 static void success_cases(void)
 {
@@ -170,6 +190,9 @@ static void success_cases(void)
         pass = begin(alternate ? "shaders/body.fspv" : paths[0], 0, error);
         CHECK(pass && pass->count == 2 && !rebuilds && !loads);
         if (!pass) continue;
+        CHECK(sh_resource_resident_selected(pass, objects[0]));
+        CHECK(sh_resource_resident_selected(pass, objects[1]));
+        CHECK(!sh_resource_resident_selected(pass, objects[2]));
         CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
         CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)) && rebuilds == 2);
         CHECK(sh_resource_resident_drain(pass, error, sizeof(error)) && loads == 2 && updates == 1);
@@ -184,7 +207,7 @@ static void success_cases(void)
     {
         sh_package_change row = {(char *)paths[0], SH_PACKAGE_RESOURCE_REMOVED};
         sh_package_changes changes = {&row, 1};
-        sh_resource_resident *pass = sh_resource_resident_begin(&changes, 0, error, sizeof(error));
+        sh_resource_resident *pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));
         CHECK(pass && pass->count == 2); if (!pass) return;
         CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)) && defaults == 0);
         CHECK(sh_resource_resident_drain(pass, error, sizeof(error)) && loads == 1 && defaults == 1);
@@ -245,7 +268,7 @@ static void success_cases(void)
         sh_package_changes changes = {rows, 2};
         sh_resource_resident *pass;
         fault = 7; g_log[0] = 0;
-        pass = sh_resource_resident_begin(&changes, 0, error, sizeof(error));
+        pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));
         CHECK(pass && pass->count == 2); if (!pass) return;
         CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
         CHECK(sh_resource_resident_drain(pass, error, sizeof(error)));
@@ -355,6 +378,107 @@ static void success_cases(void)
         sh_resource_resident_touch(objects[2]); CHECK(*(int *)(objects[2] + 0x28) == 1);
     }
 }
+static void world_text_cases(void)
+{
+    char error[256];
+    for (int external = 0; external < 2; external++) for (int fail = 0; fail < 3; fail++) {
+        sh_resource_resident *pass;
+        reset(); expect_reconstructed = 1;
+        *(const char **)(manager_object + 8) = "snapeditorsettings";
+        pass = begin(paths[0], 0, error);
+        CHECK(pass && pass->count == 1); if (!pass) continue;
+        if (external) sh_resource_resident_external(pass, objects[0]);
+        CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+        fault = fail ? fail + 7 : 0;
+        CHECK(sh_resource_resident_drain(pass, error, sizeof(error)) == !fail);
+        CHECK(font_resolves == 1);
+        if (!fail) {
+            CHECK(*(void **)(objects[0] + 0x688) == objects[0]);
+            CHECK(sh_resource_resident_drain(pass, error, sizeof(error)) && font_resolves == 1);
+        }
+        CHECK(sh_resource_resident_end(pass, !fail, error, sizeof(error)) == !fail);
+        check_restored();
+        if (fail) {
+            CHECK(g_rr_recovery != NULL); fault = 0;
+            sh_resource_graph_test_reset();
+            pass = begin(paths[0], 1, error);
+            CHECK(pass && sh_resource_resident_selected(pass, objects[0]));
+            if (!pass) continue;
+            CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+            CHECK(sh_resource_resident_drain(pass, error, sizeof(error)));
+            CHECK(font_resolves == 2 && *(void **)(objects[0] + 0x698) == objects[2]);
+            CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error)) && !g_rr_recovery);
+            check_restored();
+        }
+    }
+}
+static void initial_publication_cases(void)
+{
+    char error[256];
+    for (int initial = 0; initial < 2; initial++) {
+        sh_package_change row = {"shaders/body.fspv", SH_PACKAGE_RESOURCE_REPLACED};
+        sh_package_changes changes = {&row, 1};
+        sh_resource_resident *pass;
+        reset();
+        *(const char **)(manager_object + 0x10) = "TestInheritedDecl";
+        *(void **)(objects[1] + 0x58) = objects[0];
+        /* The source alias differs from the native cooked path. Its object
+         * and inherited child both predate startup lifetime promotion. */
+        *(unsigned *)(objects[0] + 0x28) = 1;
+        *(unsigned *)(objects[1] + 0x28) = 1;
+        pass = sh_resource_resident_begin(&changes, 0, initial, error, sizeof(error));
+        CHECK(pass && sh_resource_resident_selected(pass, objects[0]));
+        CHECK(sh_resource_resident_selected(pass, objects[1]) == initial);
+        CHECK(!sh_resource_resident_selected(pass, objects[2]));
+        if (!pass) continue;
+        expect_reconstructed = initial ? 3 : 1;
+        CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+        CHECK(sh_resource_resident_drain(pass, error, sizeof(error)));
+        CHECK(counts[0] == 1 && counts[1] == initial && !counts[2]);
+        CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error)));
+        CHECK(*(unsigned *)(objects[0] + 0x28) == 1 && *(unsigned *)(objects[1] + 0x28) == 1);
+        *(unsigned *)(objects[0] + 0x28) = *(unsigned *)(objects[1] + 0x28) = 4;
+        check_restored();
+    }
+    reset();
+    {
+        sh_package_change row = {"shaders/body.fspv", SH_PACKAGE_RESOURCE_REPLACED};
+        sh_package_changes changes = {&row, 1};
+        sh_resource_resident *pass;
+        /* Ordinary startup consumers keep initialized caches; they do not
+         * acquire an inheritance relationship from sharing a dependency. */
+        *(unsigned *)(objects[1] + 0x28) = 1;
+        *(void **)(objects[1] + 0x58) = objects[0];
+        pass = sh_resource_resident_begin(&changes, 0, 1, error, sizeof(error));
+        CHECK(pass && pass->count == 1);
+        CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error)));
+        *(unsigned *)(objects[1] + 0x28) = 4;
+        check_restored();
+    }
+    reset();
+    {
+        sh_resource_resident *pass;
+        /* Native parent chains retain coverage if the original parse happened
+         * before graph instrumentation, including a grandchild. */
+        sh_resource_graph_test_reset();
+        *(const char **)(manager_object + 0x10) = "TestInheritedDecl";
+        *(void **)(objects[1] + 0x58) = objects[0];
+        *(void **)(objects[2] + 0x58) = objects[1];
+        pass = begin(paths[0], 0, error);
+        CHECK(pass && pass->count == 3);
+        expect_reconstructed = 7;
+        CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+        CHECK(sh_resource_resident_drain(pass, error, sizeof(error)));
+        CHECK(counts[0] == 1 && counts[1] == 1 && counts[2] == 1);
+        CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error)));
+        check_restored();
+        /* Malformed or dangling parent chains fail before native mutation. */
+        *(void **)(objects[1] + 0x58) = objects[2];
+        CHECK(!begin(paths[0], 0, error)); check_restored();
+        *(void **)(objects[1] + 0x58) = (void *)1;
+        CHECK(!begin(paths[0], 0, error)); check_restored();
+    }
+}
 static void failure_cases(void)
 {
     char error[256];
@@ -383,19 +507,21 @@ static void failure_cases(void)
     {
         sh_package_change rows[] = {{"z", 0}, {"a", 0}};
         sh_package_changes changes = {rows, 2};
-        CHECK(!sh_resource_resident_begin(&changes, 0, error, sizeof(error))); check_restored();
+        CHECK(!sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error))); check_restored();
     }
     {
         sh_package_changes changes = {0};
-        sh_resource_resident *pass = sh_resource_resident_begin(&changes, 0, error, sizeof(error));
+        sh_resource_resident *pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));
         CHECK(pass && !pass->count && pass->held); /* Declaration/policy rearm still needs renderer ownership. */
-        CHECK(!sh_resource_resident_begin(&changes, 0, error, sizeof(error))); /* Nested capture cannot replace its owner. */
+        CHECK(!sh_resource_resident_selected(pass, objects[0]));
+        CHECK(!sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error))); /* Nested capture cannot replace its owner. */
         CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error))); check_restored();
     }
 }
 int main(void)
 {
-    success_cases(); failure_cases(); rr_free(g_rr_recovery); g_rr_recovery = NULL;
+    success_cases(); world_text_cases(); initial_publication_cases(); failure_cases();
+    rr_free(g_rr_recovery); g_rr_recovery = NULL;
     sh_resource_graph_test_reset();
     printf("resident refresh: %d failure(s)\n", failures); return failures ? 1 : 0;
 }

@@ -11,6 +11,7 @@
 #include "engine_globals.h"
 #include "process_heap_scope.h"
 #include "backend_log.h"
+#include "typeinfo.h"
 
 #define RR_LIST_LIMIT 4096u
 #define RR_ENTRY_LIMIT 262144u
@@ -23,7 +24,7 @@
 #define RR_LEVEL_OFFSET 0x28u
 #define RR_LEVEL_PERMANENT 4u
 typedef struct rr_entry {
-    void *resource, *manager;
+    void *resource, *manager, *parent;
     char *type, *name;
     int selected, external, retired, reconstructed;
     /* State as captured before this pass touched anything. A resource the
@@ -40,7 +41,7 @@ typedef struct rr_entry {
 /* Every identity that already existed when the pass began, with the lifetime
  * tier it had. Touch consults this to tell a resource the pass just created
  * from one the map owns. */
-typedef struct rr_known { void *resource; unsigned int level; } rr_known;
+typedef struct rr_known { void *resource; unsigned int level; size_t entry; } rr_known;
 struct sh_resource_resident {
     rr_entry *items;
     size_t count, capacity, default_faults, recovered_defaults;
@@ -61,6 +62,7 @@ static struct {
     void *(*lookup)(void *, const char *);
     int (*mode)(void);
     void (*rebind)(void);
+    void (*world_text_fonts)(void *);
 } g_rr;
 static sh_resource_resident *g_rr_recovery;
 static __declspec(thread) sh_resource_resident *g_rr_active;
@@ -155,6 +157,7 @@ static int rr_known_snapshot(sh_resource_resident *pass)
                 pass->known = next; capacity = next_capacity;
             }
             pass->known[pass->known_count].resource = items[i];
+            pass->known[pass->known_count].entry = SIZE_MAX;
             pass->known[pass->known_count].level =
                 *(unsigned int *)((unsigned char *)items[i] + RR_LEVEL_OFFSET);
             pass->known_count++;
@@ -183,7 +186,7 @@ static void *rr_relative(const uint8_t *instruction, size_t offset, size_t lengt
 }
 int sh_resource_resident_bind(const sig_result *results, size_t count, const uint8_t *base)
 {
-    const uint8_t *command, *complete, *mode, *reconstruct, *load, *lookup, *rebind;
+    const uint8_t *command, *complete, *mode, *reconstruct, *load, *lookup, *rebind, *fonts;
     sh_process_heap_api heap;
     void **renderer;
     void *materials;
@@ -195,8 +198,9 @@ int sh_resource_resident_bind(const sig_result *results, size_t count, const uin
     load = rr_site(results, count, base, "ResourceGenericLoad");
     lookup = rr_site(results, count, base, "ResourceLookup");
     rebind = rr_site(results, count, base, "MaterialVirtualTextureRebind");
+    fonts = rr_site(results, count, base, "SnapWorldTextFonts");
     materials = (void *)glb_resolve(base, "material_manager_ctx", NULL);
-    if (!command || !complete || !mode || !reconstruct || !load || !lookup || !rebind || !materials) return 0;
+    if (!command || !complete || !mode || !reconstruct || !load || !lookup || !rebind || !fonts || !materials) return 0;
     __try {
         /* The rebind walks the material manager itself; its only list load is
          * lea rcx at +0x30. Any other manager means a different function. */
@@ -224,6 +228,7 @@ int sh_resource_resident_bind(const sig_result *results, size_t count, const uin
     g_rr.load = (void (*)(void *))load;
     g_rr.lookup = (void *(*)(void *, const char *))lookup;
     g_rr.rebind = (void (*)(void))rebind;
+    g_rr.world_text_fonts = (void (*)(void *))fonts;
     return 1;
 }
 static int rr_inventory(sh_resource_resident *pass)
@@ -234,7 +239,10 @@ static int rr_inventory(sh_resource_resident *pass)
         unsigned char *manager = list;
         void **items = *(void ***)(manager + 0x20);
         const char *type = *(const char **)(manager + 8);
+        const char *class_name = *(const char **)(manager + 0x10);
+        int inherits = class_name ? sh_typeinfo_class_derives(class_name, "idDeclTypeInfo") : 0;
         int count = *(int *)(manager + 0x28);
+        if (inherits < 0) return 0;
         if (count < 0 || count >= RR_ENTRY_LIMIT || (count && !items)) return 0;
         for (int i = 0; i < count; i++) if (items[i]) {
             rr_entry *entry;
@@ -247,6 +255,15 @@ static int rr_inventory(sh_resource_resident *pass)
             }
             entry = pass->items + pass->count++; memset(entry, 0, sizeof(*entry));
             entry->resource = items[i]; entry->manager = list;
+            {
+                rr_known *known = bsearch(&entry->resource, pass->known, pass->known_count,
+                    sizeof(*pass->known), rr_known_compare);
+                if (!known) return 0;
+                known->entry = pass->count - 1;
+            }
+            /* Reflection proves this prefix before reading the native parent.
+             * Other resource families use +0x58 for unrelated state. */
+            if (inherits) entry->parent = *(void **)((unsigned char *)items[i] + 0x58);
             if (*(void **)((unsigned char *)items[i] + 0x10) != list) return 0;
             entry->type = rr_copy(type);
             entry->name = rr_copy(*(const char **)((unsigned char *)items[i] + 8));
@@ -297,7 +314,7 @@ done:;
     return result;
 }
 sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *changes,
-    int restoring, char *error, size_t capacity)
+    int restoring, int initial, char *error, size_t capacity)
 {
     sh_resource_resident *pass = calloc(1, sizeof(*pass));
     sh_resource_graph_impact seeds = {0}, impact = {0};
@@ -345,8 +362,11 @@ sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *chang
         qsort(seeds.items, seeds.count, sizeof(*seeds.items), rr_compare);
         for (size_t i = 0; i < pass->count; i++) {
             rr_entry *entry = pass->items + i;
-            int supplied = entry->selected;   /* its own native path changed */
-            entry->selected |= rr_has(&seeds, entry) || rr_has(&impact, entry);
+            /* Archive aliases identify source declarations whose virtual path
+             * names their cooked representation. They are direct changes too,
+             * even before startup promotes them to permanent lifetime. */
+            int supplied = entry->selected || rr_has(&seeds, entry);
+            entry->selected = supplied || rr_has(&impact, entry);
             /* Only content this provider supplies, or permanent content it can
              * change, may be rebuilt. A map-scoped identity such as the live
              * entitydef:world is built by the map that is already gone --
@@ -358,6 +378,28 @@ sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *chang
              * does supply the bytes still selects the identity by path. */
             if (!supplied && (entry->implicit || entry->captured_level != RR_LEVEL_PERMANENT))
                 entry->selected = 0;
+        }
+        /* Type-info inheritance copies fields from the parent; retaining the
+         * parent's address does not update a child's copy. Capture and follow
+         * these native links even when the source was parsed before our graph.
+         * Startup children are not permanent yet. Only this proven inheritance
+         * relationship may admit them, not arbitrary startup consumers. */
+        phase = "native inheritance";
+        for (size_t i = 0; i < pass->count; i++) {
+            rr_entry *entry = pass->items + i;
+            void *parent = entry->parent;
+            size_t depth = 0;
+            if (entry->selected || entry->implicit ||
+                (!initial && entry->captured_level != RR_LEVEL_PERMANENT)) continue;
+            while (parent) {
+                const rr_known *known = bsearch(&parent, pass->known, pass->known_count,
+                    sizeof(*pass->known), rr_known_compare);
+                const rr_entry *ancestor;
+                if (!known || known->entry >= pass->count || ++depth > pass->count) goto done;
+                ancestor = pass->items + known->entry;
+                if (ancestor->selected) { entry->selected = 1; break; }
+                parent = ancestor->parent;
+            }
         }
         /* Compact only after native path capture; no engine call may mutate the
          * inventory during its collection. Names survive native reconstruction. */
@@ -409,6 +451,12 @@ void sh_resource_resident_touch(void *resource)
     if (known && known->level != RR_LEVEL_PERMANENT) return;
     __try { *(unsigned int *)((unsigned char *)resource + RR_LEVEL_OFFSET) = RR_LEVEL_PERMANENT; }
     __except (EXCEPTION_EXECUTE_HANDLER) { pass->touch_failed = 1; }
+}
+int sh_resource_resident_selected(const sh_resource_resident *pass, const void *resource)
+{
+    if (pass) for (size_t i = 0; i < pass->count; i++)
+        if (pass->items[i].resource == resource) return 1;
+    return 0;
 }
 void sh_resource_resident_external(sh_resource_resident *pass, void *resource)
 {
@@ -554,6 +602,21 @@ int sh_resource_resident_drain(sh_resource_resident *pass, char *error, size_t c
                         retained ? ", source newly retained" : "");
                     return 0;
                 }
+            }
+        }
+        /* The settings parser retains font names but does not resolve its three
+         * cached idFont pointers. The stock editor copies those pointers into
+         * its World Text manager without the game's initialization step. Run
+         * that native finalizer after every load, including declaration-owned
+         * loads, before palette previews can consume the settings. Both images
+         * place snapWorldTextSettings_t at +0x688. */
+        for (size_t i = 0; i < pass->count; i++) {
+            rr_entry *entry = pass->items + i;
+            if (!strcmp(entry->type, "snapeditorsettings")) {
+                void **fonts = (void **)((unsigned char *)entry->resource + 0x688);
+                g_rr.world_text_fonts(fonts);
+                if (!fonts[0] || !fonts[1] || !fonts[2])
+                    return rr_error_at(error, capacity, "world text fonts did not resolve", entry->type, entry->name);
             }
         }
         /* Reconstruction discarded each rebuilt material's virtual-texture parm

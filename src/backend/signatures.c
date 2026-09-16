@@ -529,6 +529,14 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 58 10 48 89 70 18 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 60 01 00 00 "
       "4C 8B F1 8B 71 20 0F B6 79 24 40 80 E7 01 48 8B 59 08",
       0x17FFDB0u },
+    { "SnapWorldTextFonts", /* void(snapWorldTextSettings_t*). Resolve all three native
+                            * font caches after settings parsing. Vulkan 0x4f91e0,
+                            * OpenGL 0x4f8bd0; settings member +0x688 on both. */
+      "40 53 48 83 EC 20 48 8B 51 28 48 8B D9 48 8D 0D ?? ?? ?? ?? 45 33 C9 41 B0 01 "
+      "E8 ?? ?? ?? ?? 48 8B 53 60 48 8D 0D ?? ?? ?? ?? 45 33 C9 48 89 03 41 B0 01 "
+      "E8 ?? ?? ?? ?? 48 8B 93 98 00 00 00 48 8D 0D ?? ?? ?? ?? 45 33 C9 48 89 43 08 "
+      "41 B0 01 E8 ?? ?? ?? ?? 48 89 43 10 48 83 C4 20 5B C3",
+      0x4F91E0u },
     { "MaterialVirtualTextureRebind", /* void(void). Rebuilds every material's virtual-texture
                                        * parm binding; the engine runs it after map preload
                                        * and texture reloads. Unique in both renderers:

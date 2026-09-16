@@ -17,6 +17,14 @@
 #include "map_transition.h"
 #include "resource_resident.h"
 
+/* Binding checks must never invoke live reflection on the mapped PE. */
+int sh_typeinfo_class_derives(const char *name, const char *base)
+{
+    (void)name; (void)base;
+    fputs("unexpected live reflection during binding checks\n", stderr);
+    abort();
+}
+
 typedef struct metadata_image { const uint8_t *base; size_t size; uintptr_t last; } metadata_image;
 static int metadata_read(void *context, uintptr_t address, void *out, size_t length)
 {
@@ -170,16 +178,16 @@ int main(int argc, char **argv)
     {
         const char *names[] = {"ResourceReloadRenderScope", "PublishedMapComplete", "DeclSourceModeCall",
             "ResourceReconstruct", "ResourceGenericLoad", "ResourceLookup", "MemLocalGet", "MemLocalPushHeap", "MemLocalPopHeap",
-            "MaterialVirtualTextureRebind"};
-        sig_result source[10] = {0};
+            "MaterialVirtualTextureRebind", "SnapWorldTextFonts"};
+        sig_result source[sizeof(names) / sizeof(names[0])] = {0};
         int bound = 1;
-        for (size_t i = 0; i < 10; i++) {
+        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
             const sig_entry *entry = NULL;
             for (size_t j = 0; BACKEND_ENGINE_SIGNATURES[j].name; j++)
                 if (!strcmp(BACKEND_ENGINE_SIGNATURES[j].name, names[i])) entry = &BACKEND_ENGINE_SIGNATURES[j];
             if (!entry || sig_resolve_one(base, entry, &source[i]) != SIG_OK) bound = 0;
         }
-        if (!bound || !sh_resource_resident_bind(source, 10, base)) {
+        if (!bound || !sh_resource_resident_bind(source, sizeof(source) / sizeof(source[0]), base)) {
             printf("BAD native resident refresh binding\n"); bad++;
         } else printf("OK  native resident refresh binding\n");
     }

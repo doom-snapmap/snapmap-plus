@@ -1592,6 +1592,14 @@ static void ds_runtime_premark(ds_materialize_context *context)
             decl = NULL;
         }
         if (!decl) continue;
+        /* Source presence is not a change. Preserve initialized caches unless
+         * provider bytes or a recorded dependency selected this object. Keep
+         * the existing fallback repair path for unloaded/defaulted identities. */
+        if (shadowed_refresh && g_resident_pass && ds_decl_usable(decl, NULL) &&
+            !sh_resource_resident_selected(g_resident_pass, decl)) {
+            InterlockedIncrement(&g_rearm_left_loaded);
+            continue;
+        }
         __try {
             unsigned char *st = (unsigned char *)decl + DS_DECL_STATE_OFFSET;
             if ((*st & DS_DECL_IN_PROGRESS) != 0) {
@@ -2096,6 +2104,10 @@ static int ds_scan_and_materialize_missing(
 void sh_decl_server_test_set_runtime(int active)
 {
     InterlockedExchange(&g_rearm_is_runtime, active ? 1 : 0);
+}
+void sh_decl_server_test_set_resident(void *pass)
+{
+    g_resident_pass = (sh_resource_resident *)pass;
 }
 
 void sh_decl_server_test_set_generic_load(sh_decl_server_test_generic_load_fn fn)
@@ -2934,7 +2946,7 @@ static int ds_activate_provider(void *context, int restoring,
             restoring ? "recovery" : "activation"); return 0;
     }
     __try {
-        resident = sh_resource_resident_begin(changes, restoring, error, capacity);
+        resident = sh_resource_resident_begin(changes, restoring, context != NULL, error, capacity);
         if (resident) {
             g_resident_pass = resident;
             if (context) ds_boot_published(); else ds_rearm_published();

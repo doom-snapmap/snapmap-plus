@@ -172,6 +172,7 @@ int sh_decl_server_test_register_candidate(
  * protocol's outcome assertable. */
 typedef void (*sh_decl_server_test_generic_load_fn)(void *decl);
 void sh_decl_server_test_set_runtime(int active);
+void sh_decl_server_test_set_resident(void *pass);
 void sh_decl_server_test_set_generic_load(sh_decl_server_test_generic_load_fn fn);
 void sh_decl_server_test_set_reconstruct(sh_decl_server_test_generic_load_fn fn,
                                         sh_decl_server_test_find_decl_fn peek);

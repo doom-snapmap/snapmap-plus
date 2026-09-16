@@ -8,9 +8,13 @@ typedef struct sh_resource_resident sh_resource_resident;
 int sh_resource_resident_bind(const sig_result *results, size_t count, const uint8_t *base);
 /* Main thread, admitted native map/browser boundary. Captures identities before
  * parsing changes the graph; holds native renderer and process-heap scopes.
- * Recovery includes identities retained from the failed activation. */
+ * Recovery includes identities retained from the failed activation. Initial
+ * publication runs before startup lifetime promotion, with no map loaded. */
 sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *changes,
-    int restoring, char *error, size_t capacity);
+    int restoring, int initial, char *error, size_t capacity);
+/* Captured changed resources and their affected native consumers, including
+ * identities retained for recovery. Unchanged loaded declarations stay intact. */
+int sh_resource_resident_selected(const sh_resource_resident *pass, const void *resource);
 /* A declaration pass owns these objects' reconstruction and pending marks.
  * Register exclusions before reconstruct. No object is rebuilt twice. */
 void sh_resource_resident_external(sh_resource_resident *pass, void *resource);
