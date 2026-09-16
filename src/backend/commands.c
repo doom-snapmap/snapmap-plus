@@ -741,6 +741,72 @@ static void lr_buf_append(lr_buf *b, const char *s)
     b->data[b->len]   = '\0';
 }
 
+/* Print what the runtime would serve for one engine path: its length and, when
+ * a match string is given, every line of the served bytes that contains it.
+ * Read-only; it serves the same bytes a consumer would receive, so it reports
+ * which source currently governs without changing any state. */
+static void h_sh_resread(idCmdArgs *a)
+{
+    const char *path = cmd_argv(a, 1), *match = cmd_argv(a, 2);
+    unsigned char *body = NULL;
+    size_t length = 0, shown = 0;
+    int found;
+    if (!path) { sh_printf("usage: sh_resread <engine path> [substring]\n"); return; }
+    found = sh_package_runtime_read(path, &body, &length);
+    if (found != 1 || !body) {
+        sh_printf("sh_resread: %s -- no package source serves this path (%d)\n", path, found);
+        free(body); return;
+    }
+    sh_printf("sh_resread: %s -- %zu byte(s) served\n", path, length);
+    if (match && *match) {
+        size_t begin = 0;
+        for (size_t i = 0; i <= length; i++) {
+            if (i != length && body[i] != '\n') continue;
+            size_t end = i;
+            while (end > begin && (body[end - 1] == '\r' || body[end - 1] == ' ' ||
+                body[end - 1] == '\t')) end--;
+            if (end > begin) {
+                char line[512];
+                size_t n = end - begin < sizeof(line) - 1 ? end - begin : sizeof(line) - 1;
+                memcpy(line, body + begin, n); line[n] = 0;
+                if (strstr(line, match) && shown < 16) { sh_printf("  %s\n", line); shown++; }
+            }
+            begin = i + 1;
+        }
+        if (!shown) sh_printf("  no line contains '%s'\n", match);
+    }
+    free(body);
+}
+
+/* Print the composition route of every registered declaration family: the
+ * engine's own reflected state type, a verified custom adapter, or none.
+ * Read-only; it loads no declaration and changes no state. */
+typedef struct sh_family_tally { int reflected, graph, adapter, custom, unknown; } sh_family_tally;
+
+static void h_family_row(void *context, const char *type, const char *state, const char *route)
+{
+    sh_family_tally *tally = context;
+    sh_printf("%-34s %-28s %s\n", type, state && *state ? state : "-", route);
+    if (!strcmp(route, "reflected state")) tally->reflected++;
+    else if (!strcmp(route, "graph adapter")) tally->graph++;
+    else if (!strcmp(route, "custom reader, no adapter")) tally->custom++;
+    else if (!strcmp(route, "metadata unavailable")) tally->unknown++;
+    else tally->adapter++;
+}
+
+static void h_sh_declfamilies(idCmdArgs *a)
+{
+    sh_family_tally tally = {0};
+    char error[512] = "";
+    int count;
+    (void)a;
+    count = sh_package_runtime_declaration_families(h_family_row, &tally, error, sizeof(error));
+    if (count < 0) { sh_printf("sh_declfamilies: %s\n", error[0] ? error : "unavailable"); return; }
+    sh_printf("families %d: %d reflected state, %d graph adapter, %d dedicated adapter, "
+        "%d custom reader without an adapter, %d metadata unavailable\n",
+        count, tally.reflected, tally.graph, tally.adapter, tally.custom, tally.unknown);
+}
+
 /* List resource names with optional substring filtering and clipboard copy. */
 static void h_sh_listres(idCmdArgs *a)
 {
@@ -1810,6 +1876,8 @@ static const cmd_entry CMD_TABLE[] = {
     { "sh_dialogpoll",       (void *)h_sh_dialogpoll, "read the answer to the dialog sh_dialogtest raised (diagnostic)" },
     { "sh_dialogdump",       (void *)h_sh_dialogdump, "print the engine dialog queue: id, button set and flag bytes (diagnostic)" },
     { "sh_listres",          (void *)h_sh_listres,  "<resource classname (ex:idMaterial)> <optional: filter> list all resources of a given type" },
+    { "sh_declfamilies",     (void *)h_sh_declfamilies, "list every declaration family and the composition route it takes (diagnostic)" },
+    { "sh_resread",          (void *)h_sh_resread,  "<engine path> [substring] print what the runtime currently serves for one resource path (diagnostic)" },
     { "sh_alginfo",          (void *)h_alginfo,     "Prints CPU dispatcher info for the engine-math (algo) override layer." },
     { "sh_debugrender",      (void *)h_sh_debugrender,"Internal renderer-test mutators -- not for normal use" },
     { "cs_dontuse",          (void *)h_cs_dontuse,  "Overrides some calculations in the engine to be more precise, just for shiggles. probably degrades performance and breaks stuff." },

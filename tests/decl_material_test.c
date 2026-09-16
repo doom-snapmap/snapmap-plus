@@ -86,6 +86,16 @@ int main(void)
     refused("{ a () }"); refused("{ a (time time) }"); refused("{ a curve[] }");
     refused("{ a other[1] }"); refused("{ a tex }"); refused("{ a time.xyzww }");
     refused("{ label value }"); refused("{ label\nvalue\n}"); refused("{ buffer something }");
+    /* The native parm-block reader sends every kind outside image, sampler,
+     * render program and String through the same expression path a vector write
+     * uses, so a buffer write binds through the parameters it names. */
+    m = read("{ buffer time buffer.x (a + b) }");
+    CHECK(m.count == 2);
+    if (m.count == 2) {
+        CHECK(m.writes[0].kind == 13 && m.writes[0].reference_count == 2 && !m.writes[0].constant);
+        CHECK(m.writes[1].kind == 13 && m.writes[1].mask == 1 && m.writes[1].reference_count == 3);
+    }
+    sh_decl_material_free(&m);
     m = read("{ a dot3(time, {1,2,3}) b dot4(a, dot3(time, a)) }");
     CHECK(m.count == 2 && m.writes[0].reference_count == 2 && m.writes[1].reference_count == 4);
     sh_decl_material_free(&m);

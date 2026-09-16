@@ -12,6 +12,18 @@ C_ASSERT(offsetof(sh_audio_file_descriptor, custom) == 16);
 C_ASSERT(offsetof(sh_audio_file_descriptor, handle) == 24);
 C_ASSERT(offsetof(sh_audio_file_descriptor, device) == 32);
 
+/* A relative name that walks out of the resource namespace with a ".." segment
+ * is not a name the compiled provider may answer. */
+static int af_escapes(const wchar_t *name)
+{
+    for (const wchar_t *at = name; *at; at++) {
+        if (at != name && at[-1] != L'/' && at[-1] != L'\\') continue;
+        if (at[0] != L'.' || at[1] != L'.') continue;
+        if (!at[2] || at[2] == L'/' || at[2] == L'\\') return 1;
+    }
+    return name[0] == L'.' && name[1] == L'.' && (!name[2] || name[2] == L'/' || name[2] == L'\\');
+}
+
 int sh_audio_file_path(const wchar_t *name, uint32_t id, int by_id,
     const void *flags, const wchar_t *bank_prefix, const wchar_t *media_prefix,
     const wchar_t *language, char **path)
@@ -22,7 +34,7 @@ int sh_audio_file_path(const wchar_t *name, uint32_t id, int by_id,
     char *utf8;
     size_t a, b, c, r = sizeof(root)/sizeof(root[0])-1, total;
     uint32_t company = 0, codec = 0;
-    int length;
+    int length, external = 0;
     if (!path) return -1;
     *path = NULL;
     if (flags) {
@@ -37,13 +49,20 @@ int sh_audio_file_path(const wchar_t *name, uint32_t id, int by_id,
             codec == 0 ? L"%u.bnk" : L"%u.wem", id);
         name = number;
     } else {
-        /* Native external-source absolute paths bypass its bank root. */
-        if (!name || !name[0] || (flags && company == 0 && codec == 201)) return 0;
-        if (flags && company == 0 && codec == 0) prefix = bank_prefix;
+        if (!name || !name[0]) return 0;
+        /* An external source names its own complete location: the native
+         * location base writes no base path and no bank directory for it, and
+         * still applies the language directory when the request is localized.
+         * Reproduce exactly that, so a legitimate request under the resource
+         * namespace is answered while an escaping one is left native. */
+        external = flags && company == 0 && codec == 201;
+        if (!external && flags && company == 0 && codec == 0) prefix = bank_prefix;
+        if (external) r = 0;
     }
     if (!prefix) prefix = L"";
     /* Do not reinterpret absolute filenames as package-relative names. */
     if (name[0] == L'/' || name[0] == L'\\' || wcschr(name, L':')) return 0;
+    if (af_escapes(name)) return 0;
     a = wcslen(prefix); b = wcslen(locale); c = wcslen(name);
     if (a > SIZE_MAX-r-2 || b > SIZE_MAX-r-a-2 || c > SIZE_MAX-r-a-b-2) return -1;
     total = r+a+b+(b != 0)+c+1;

@@ -244,17 +244,32 @@ static int ao_packed(sh_audio_originals *originals,const char *path,const char *
     }
     if(!ao_external_id(name,&ids[count])){free(locale);free(wide_locale);return -1;}
     kinds[count++]=SH_AUDIO_PACKAGE_EXTERNAL;
+    /* Native mount order is initial.pck, then every .pck the platform directory
+     * lists, then every .pck the language directory lists; each load is pushed
+     * on the front of the package list and every lookup walks that list from its
+     * head. A later mount stage therefore answers first. The engine lists a
+     * directory unsorted, so two differing payloads inside one stage have no
+     * native winner and stay ambiguous. */
+    int stage_best=0;
     for(size_t i=0;i<originals->count;i++) {
         ao_file *file=originals->files[i];const char *slash=strchr(file->path,'/');uint32_t language=0;
         if(!file->packed)continue;
         const char *selected=locale ? locale : originals->language;
         if(slash && ((size_t)(slash-file->path)!=strlen(selected) || strncmp(file->path,selected,(size_t)(slash-file->path))))continue;
         if(locale && !sh_audio_package_language_id(&file->package,wide_locale,&language))continue;
+        int stage=slash ? 2 : 1;
         for(size_t j=0;j<count;j++) {
             const sh_audio_package_entry *row=sh_audio_package_find(&file->package,kinds[j],ids[j],language);
             sh_package_file_identity candidate;
             if(!row)continue;
-            if(!present) { span->file=file;span->offset=row->offset;span->length=row->length;present=1;continue; }
+            if(!present) { span->file=file;span->offset=row->offset;span->length=row->length;present=1;stage_best=stage;continue; }
+            if(stage!=stage_best) {
+                if(stage>stage_best) {
+                    span->file=file;span->offset=row->offset;span->length=row->length;
+                    stage_best=stage;hashed=0;
+                }
+                continue;
+            }
             if(!hashed) {
                 if(!ao_digest(span->file,span->offset,span->length,identity)){present=-1;goto done;}
                 hashed=1;

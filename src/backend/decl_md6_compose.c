@@ -181,6 +181,12 @@ static char *mc_unhex(mc_context *c, const sh_decl_node *node)
     }
     out[n / 2] = 0; return out;
 }
+/* A record identity is the bytes the native lexer interns. Its flags disable
+ * escape processing, so a backslash is an ordinary byte -- including one
+ * immediately before the closing quote -- and a quote can only end the token.
+ * Bytes above ASCII are carried through unchanged; the engine stores bytes, not
+ * code points, and nothing here re-encodes an engine or Windows path. Control
+ * bytes cannot appear: the tokenizer refuses them inside a string. */
 static char *mc_identity(mc_context *c, const mc_input *in, size_t i, int path)
 {
     const char *s; size_t n; char *name;
@@ -188,11 +194,12 @@ static char *mc_identity(mc_context *c, const mc_input *in, size_t i, int path)
     s = in->source.text + in->tokens[i].begin; n = in->tokens[i].end - in->tokens[i].begin;
     if (n < 3 || *s != '"' || s[n - 1] != '"') { mc_fail(c, "record identity must be a nonempty quoted string"); return NULL; }
     s++; n -= 2;
-    for (size_t j = 0; j < n; j++) if ((unsigned char)s[j] < 32 || (unsigned char)s[j] > 126 || s[j] == '\\' || s[j] == '"') {
-        mc_fail(c, "escaped or non-ASCII record identity needs a native string adapter"); return NULL;
+    for (size_t j = 0; j < n; j++) if ((unsigned char)s[j] < 32) {
+        mc_fail(c, "record identity contains a control byte"); return NULL;
     }
     /* Native animation event paths lowercase and strip a single-root prefix.
-     * UNC prefixes are preserved; backslash/escape forms remain unsupported. */
+     * UNC prefixes are preserved. Lowercasing is the reader's ASCII fold, so a
+     * multi-byte sequence keeps its own bytes. */
     if (path && *s == '/' && (n < 2 || s[1] != '/')) { do { s++; n--; } while (n && *s == '/'); }
     name = mc_copy(c, s, n);
     if (name && path) for (size_t j = 0; j < n; j++) if (name[j] >= 'A' && name[j] <= 'Z') name[j] += 'a' - 'A';
@@ -325,10 +332,15 @@ static int mc_alias(mc_context *c, mc_input *in, sh_decl_node *entry, size_t sta
     mc_count(c, number, count);
     return !c->failed;
 }
-/* True when two tokens sit on one source line. The native args, per-joint and
- * animation-event readers take a key and then the remaining tokens on its line:
- * a flag enum consumes several constants that way. Every one of the 374503
- * payload lines in the shipped 503-definition corpus is one such key. */
+/* True when two tokens sit on one source line. The engine reads to the end of a
+ * line in exactly two places -- a contentsFlags list and a flag-enum argument,
+ * both through its read-token-on-this-line helper -- so line position is part of
+ * the native grammar only for those value lists. Every other key has a fixed
+ * native arity and is parsed without regard to how the author wrapped the
+ * source. A value list additionally stops at anything that can begin a key,
+ * which is what keeps an author's wrapping out of the composition granularity;
+ * because every value is retained and re-emitted as its authored slice, this
+ * choice cannot change the bytes the engine sees either way. */
 static int mc_same_line(const mc_input *in, size_t a, size_t b)
 {
     if (a >= in->count || b >= in->count) return 0;
@@ -336,26 +348,103 @@ static int mc_same_line(const mc_input *in, size_t a, size_t b)
         if (in->source.text[at] == '\n') return 0;
     return 1;
 }
-/* A native assignment payload: each key owns the value tokens on its line, so
- * independent edits of different keys compose and two edits of one key conflict.
- * The authored slice is retained whole; no value is reinterpreted. */
-static int mc_keys(mc_context *c, mc_input *in, sh_decl_node *parent, size_t begin, size_t end)
+/* Native key sets. Joint-group payloads take the category's own scalar plus
+ * offset (per-joint) or vec3 (args), surfType and contentsFlags, and refuse
+ * anything else the way the readers do. Animation-event payloads take
+ * frame/row/locked and then arguments written as their native type names. */
+typedef struct mc_key_rules { const char *scalar; int event, args; } mc_key_rules;
+
+static const char *mc_event_single[] = {"frame", "row", "locked", "bool", "float",
+    "string", "animalias", "joint", "jointName"};
+static const char *mc_event_group[] = {"vec3", "angles"};
+
+static const char *mc_declaration_family(const mc_input *in, size_t i);
+
+static int mc_numeric(const mc_input *in, size_t i)
+{
+    if (i >= in->count || in->tokens[i].end == in->tokens[i].begin) return 0;
+    for (size_t at = in->tokens[i].begin; at < in->tokens[i].end; at++) {
+        char ch = in->source.text[at];
+        if (!isdigit((unsigned char)ch) && ch != '-' && ch != '+' && ch != '.' &&
+            ch != 'e' && ch != 'E') return 0;
+    }
+    return 1;
+}
+/* Whether this token can begin a key of the payload being read. */
+static int mc_key_start(const mc_input *in, size_t i, const mc_key_rules *rules)
+{
+    if (rules->event) {
+        for (size_t n = 0; n < sizeof(mc_event_single) / sizeof(mc_event_single[0]); n++)
+            if (mc_is_ci(in, i, mc_event_single[n])) return 1;
+        for (size_t n = 0; n < sizeof(mc_event_group) / sizeof(mc_event_group[0]); n++)
+            if (mc_is_ci(in, i, mc_event_group[n])) return 1;
+        return mc_is_ci(in, i, "int") || mc_declaration_family(in, i) != NULL;
+    }
+    if (mc_is(in, i, "surfType") || mc_is(in, i, "contentsFlags")) return 1;
+    if (mc_is(in, i, rules->args ? "vec3" : "offset")) return 1;
+    return rules->scalar && rules->scalar[0] && mc_is(in, i, rules->scalar);
+}
+/* Index one past the last token of this key's value, or key_at + 1 when the key
+ * has no value at all. */
+static size_t mc_value_extent(mc_context *c, const mc_input *in, const mc_key_rules *rules,
+    size_t key_at, size_t end)
+{
+    size_t i = key_at + 1;
+    int single = 0, group = 0;
+    if (i >= end) return i;
+    if (rules->event) {
+        for (size_t n = 0; n < sizeof(mc_event_single) / sizeof(mc_event_single[0]); n++)
+            if (mc_is_ci(in, key_at, mc_event_single[n])) single = 1;
+        for (size_t n = 0; n < sizeof(mc_event_group) / sizeof(mc_event_group[0]); n++)
+            if (mc_is_ci(in, key_at, mc_event_group[n])) group = 1;
+        /* A declaration-typed argument reads one token. `int` reads one number,
+         * or an enum type name whose flag form keeps reading constants. Any
+         * other type name is such an enum. */
+        if (!single && !group && mc_declaration_family(in, key_at)) single = 1;
+        if (!single && !group && mc_is_ci(in, key_at, "int") && mc_numeric(in, i)) single = 1;
+    } else {
+        if (mc_is(in, key_at, "surfType")) single = 1;
+        else if (mc_is(in, key_at, rules->args ? "vec3" : "offset")) group = 1;
+        else if (rules->scalar && rules->scalar[0] && mc_is(in, key_at, rules->scalar)) single = 1;
+        else if (!mc_is(in, key_at, "contentsFlags")) {
+            mc_fail(c, "unsupported key in a native joint-group payload");
+            return i;
+        }
+    }
+    if (group) {
+        if (!mc_is(in, i, "(") || in->tokens[i].close >= end) {
+            mc_fail(c, "native vector value needs its complete parenthesized group");
+            return i;
+        }
+        return in->tokens[i].close + 1;
+    }
+    if (single) return i + 1;
+    /* The value lists the engine reads to the end of their line. */
+    i++;
+    while (i < end && mc_same_line(in, i - 1, i) && !mc_key_start(in, i, rules) &&
+           !mc_is(in, i, "{") && !mc_is(in, i, "}") && !mc_is(in, i, "(")) i++;
+    return i;
+}
+/* A native assignment payload: each key owns its native value, so independent
+ * edits of different keys compose and two edits of one key conflict, however the
+ * source is wrapped. The authored slice is retained whole; no value is
+ * reinterpreted. */
+static int mc_keys(mc_context *c, mc_input *in, sh_decl_node *parent, size_t begin, size_t end,
+    const mc_key_rules *rules)
 {
     sh_decl_node *keys = mc_add(parent, mc_node(c, "keys", NULL));
     sh_decl_node *number = mc_add(keys, mc_node(c, "num", "0"));
     size_t i = begin, count = 0;
     while (i < end && !c->failed) {
-        size_t key_at = i++, stop;
+        size_t key_at = i, stop;
         char *name; sh_decl_node *item;
-        if (mc_is(in, key_at, "{") || mc_is(in, key_at, "}")) {
+        if (mc_is(in, key_at, "{") || mc_is(in, key_at, "}") || mc_is(in, key_at, "(")) {
             mc_fail(c, "nested block inside a native assignment payload"); break;
         }
-        while (i < end && mc_same_line(in, key_at, i) && !mc_is(in, i, "{")) {
-            if (in->tokens[i].close != SIZE_MAX) i = in->tokens[i].close;
-            i++;
-        }
-        stop = i;
-        if (stop == key_at + 1) { mc_fail(c, "native payload key has no value on its line"); break; }
+        stop = mc_value_extent(c, in, rules, key_at, end);
+        if (c->failed) break;
+        if (stop == key_at + 1) { mc_fail(c, "native payload key has no value"); break; }
+        i = stop;
         name = mc_copy(c, in->source.text + in->tokens[key_at].begin,
             in->tokens[key_at].end - in->tokens[key_at].begin);
         item = name ? mc_occurrence(c, keys, count++, name) : NULL;
@@ -365,17 +454,23 @@ static int mc_keys(mc_context *c, mc_input *in, sh_decl_node *parent, size_t beg
     mc_count(c, number, count);
     return !c->failed;
 }
-/* The first value token of a named key on its own line, unquoted. Used for the
- * native identity of an animation event, which is its name plus frame and row. */
+/* The value of a named animation-event key, unquoted, located by walking the
+ * payload with its native arities rather than by source line. */
 static char *mc_key_value(mc_context *c, const mc_input *in, size_t begin, size_t end, const char *key)
 {
-    for (size_t i = begin; i + 1 < end; i++) {
-        const char *s; size_t n;
-        if (!mc_is_ci(in, i, key) || (i > begin && mc_same_line(in, i - 1, i))) continue;
-        s = in->source.text + in->tokens[i + 1].begin;
-        n = in->tokens[i + 1].end - in->tokens[i + 1].begin;
-        if (n >= 2 && *s == '"') { s++; n -= 2; }
-        return mc_copy(c, s, n);
+    static const mc_key_rules rules = {"", 1, 0};
+    mc_context quiet = {NULL, 0, 0};
+    size_t i = begin;
+    while (i < end && !quiet.failed) {
+        size_t stop = mc_value_extent(&quiet, in, &rules, i, end);
+        if (quiet.failed || stop <= i + 1) break;
+        if (mc_is_ci(in, i, key)) {
+            const char *s = in->source.text + in->tokens[i + 1].begin;
+            size_t n = in->tokens[i + 1].end - in->tokens[i + 1].begin;
+            if (n >= 2 && *s == '"') { s++; n -= 2; }
+            return mc_copy(c, s, n);
+        }
+        i = stop;
     }
     return NULL;
 }
@@ -386,8 +481,13 @@ static char *mc_key_value(mc_context *c, const mc_input *in, size_t begin, size_
  * index, so a payload travels with its entry and the composed order re-derives
  * every index. Repeated joint names are native, so identity is the lowercased
  * name the reader resolves plus its occurrence. */
-static int mc_group_body(mc_context *c, mc_input *in, sh_decl_node *entry, size_t begin, size_t end)
+static int mc_group_body(mc_context *c, mc_input *in, sh_decl_node *entry, int category,
+    size_t begin, size_t end)
 {
+    const mc_key_rules args_rules = {"", 0, 1};
+    const mc_key_rules joint_rules = {category >= 0 &&
+        category < (int)(sizeof(mc_group_scalars) / sizeof(mc_group_scalars[0])) ?
+        mc_group_scalars[category] : "", 0, 0};
     sh_decl_node *list = mc_add(entry, mc_node(c, "records", NULL));
     sh_decl_node *number = mc_add(list, mc_node(c, "num", "0"));
     size_t i = begin, count = 0;
@@ -401,7 +501,7 @@ static int mc_group_body(mc_context *c, mc_input *in, sh_decl_node *entry, size_
             record = mc_occurrence(c, list, count++, "args");
             if (!record) break;
             mc_add(record, mc_node(c, "args", "1"));
-            mc_keys(c, in, record, i + 2, close);
+            mc_keys(c, in, record, i + 2, close, &args_rules);
             i = close + 1;
         } else {
             size_t at = i++, n = in->tokens[at].end - in->tokens[at].begin;
@@ -425,7 +525,7 @@ static int mc_group_body(mc_context *c, mc_input *in, sh_decl_node *entry, size_
                 if (i < end && mc_is(in, i, "{")) {
                     size_t close = in->tokens[i].close;
                     if (close >= end) mc_fail(c, "joint payload needs a complete native block");
-                    else { mc_keys(c, in, record, i + 1, close); i = close + 1; }
+                    else { mc_keys(c, in, record, i + 1, close, &joint_rules); i = close + 1; }
                 }
             }
             free(name); free(id);
@@ -464,7 +564,10 @@ static int mc_event_records(mc_context *c, mc_input *in, sh_decl_node *entry, si
         record = id ? mc_occurrence(c, list, count++, id) : NULL;
         if (record) {
             mc_slice(c, in, record, "head", start, i + 3);
-            mc_keys(c, in, record, i + 3, close);
+            {
+                static const mc_key_rules rules = {"", 1, 0};
+                mc_keys(c, in, record, i + 3, close, &rules);
+            }
         }
         free(name); free(frame); free(row); free(id);
         i = close + 1;
@@ -591,7 +694,7 @@ static int mc_records(mc_context *c, mc_input *in, sh_decl_node *list, int kind,
                 else if (target || obsolete >= 0) mc_slice(c, in, entry, "body", start, i);
                 else if (kind == 2) {
                     mc_slice(c, in, entry, "head", start, body + 1);
-                    mc_group_body(c, in, entry, body + 1, in->tokens[body].close);
+                    mc_group_body(c, in, entry, category, body + 1, in->tokens[body].close);
                 } else if (kind == 3) {
                     mc_slice(c, in, entry, "head", start, body + 1);
                     mc_event_records(c, in, entry, body + 1, in->tokens[body].close);
@@ -1082,8 +1185,8 @@ static char *mc_argument_identity(mc_context *c, const mc_input *in, size_t i)
     s = in->source.text + in->tokens[i].begin; n = in->tokens[i].end - in->tokens[i].begin;
     if (n >= 2 && *s == '"' && s[n - 1] == '"') { s++; n -= 2; }
     if (!n) { mc_fail(c, "event argument names an empty identity"); return NULL; }
-    for (size_t j = 0; j < n; j++) if ((unsigned char)s[j] < 32 || (unsigned char)s[j] > 126) {
-        mc_fail(c, "event argument identity is not native ASCII"); return NULL;
+    for (size_t j = 0; j < n; j++) if ((unsigned char)s[j] < 32) {
+        mc_fail(c, "event argument identity contains a control byte"); return NULL;
     }
     return mc_copy(c, s, n);
 }
@@ -1153,18 +1256,20 @@ int sh_decl_md6_references(sh_decl_source source, sh_decl_md6_reference_visitor 
                         (record = in.tokens[e + 2].close) > close) {
                         mc_fail(&c, "animation event record is not native"); break;
                     }
-                    for (size_t k = e + 3; k + 1 < record && !c.failed; k++) {
-                        const char *family;
-                        /* Only the first token of a line is a key; the rest are
-                         * its values. */
-                        if (k > e + 3 && mc_same_line(&in, k - 1, k)) continue;
-                        family = mc_declaration_family(&in, k);
-                        if (!family) continue;
-                        /* The reader skips the lookup for an empty name, and
-                         * shipped content uses that to mean no declaration. */
-                        if (mc_is(&in, k + 1, "\"\"")) continue;
-                        if (!mc_emit_reference(&c, visitor, context, family,
-                                mc_argument_identity(&c, &in, k + 1))) break;
+                    {
+                        static const mc_key_rules rules = {"", 1, 0};
+                        size_t k = e + 3;
+                        while (k + 1 < record && !c.failed) {
+                            size_t stop = mc_value_extent(&c, &in, &rules, k, record);
+                            const char *family = mc_declaration_family(&in, k);
+                            if (c.failed || stop <= k + 1) break;
+                            /* The reader skips the lookup for an empty name, and
+                             * shipped content uses that to mean no declaration. */
+                            if (family && !mc_is(&in, k + 1, "\"\"") &&
+                                !mc_emit_reference(&c, visitor, context, family,
+                                    mc_argument_identity(&c, &in, k + 1))) break;
+                            k = stop;
+                        }
                     }
                     e = record + 1;
                 }

@@ -145,6 +145,16 @@ int sh_package_runtime_audio_original(const char *path, sh_package_original_iden
 int sh_package_runtime_audio_originals_ready(void);
 int sh_package_runtime_audio_original_read(const char *path, uint64_t offset, void *out,
     size_t span, uint64_t *length, char *error, size_t capacity);
+/* Read-only enumeration of every registered declaration family and the
+ * composition route the compiler takes for it: the engine's reflected state
+ * type, one of the verified custom adapters, or none. Opens its own
+ * metadata-only schema and loads no declaration. Returns the number of families
+ * reported, or -1 with error set. */
+typedef void (*sh_package_family_visit)(void *context, const char *type,
+    const char *state, const char *route);
+int sh_package_runtime_declaration_families(sh_package_family_visit visit, void *context,
+    char *error, size_t capacity);
+
 int sh_package_runtime_audio_packaged_banks(sh_audio_originals_bank_visit visit, void *visitor,
     char *error, size_t capacity);
 

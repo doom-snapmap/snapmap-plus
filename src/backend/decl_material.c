@@ -234,7 +234,11 @@ static int mt_value(mt_context *c, size_t *p, size_t end, sh_decl_material_write
     size_t start = *p;
     sh_decl_tokens *tokens = &c->out->tokens;
     if (start >= end) return 0;
-    if (write->kind == 0) {
+    /* The native parm-block reader dispatches image, sampler, render-program and
+     * String kinds; every other kind, including the buffer kinds, falls into the
+     * same four-component expression path a vector write uses, and binds through
+     * the render parameters that expression names. */
+    if (write->kind == 0 || write->kind > 12) {
         if (!mt_expression(c, p, end, write->components, &write->constant)) return 0;
         while (c->pending_count) {
             mt_range range = c->pending[--c->pending_count];
@@ -260,7 +264,7 @@ static int mt_value(mt_context *c, size_t *p, size_t end, sh_decl_material_write
         if (*p == end && tokens->items[end].line == write->line) {
             c->reason = "String value consumes the block terminator on its line"; return 0;
         }
-    } else { c->reason = "custom buffer renderparm requires its native reader"; return 0; }
+    }
     if (*p == start) return 0;
     write->value = mt_slice(c, start, *p); return 1;
 }

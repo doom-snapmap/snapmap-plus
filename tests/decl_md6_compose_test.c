@@ -138,10 +138,44 @@ int main(void)
         MD6(INIT,HIT("radius 3\n"),"",A,""), "same field");
     pass(MD6(INIT,HIT("radius 1\n"),"",A,""), MD6(INIT,HIT("radius 2\n"),"",A,""),
         MD6(INIT,HIT("radius 1\noffset ( 1 2 3 )\n"),"",A,""), "radius 2", "offset ( 1 2 3 )");
-    /* A payload authored on one line is one native key: equal contributions
-     * coalesce and divergent ones conflict at that whole key. */
-    refuse(MD6(INIT,HIT("radius 1 "),"",A,""), MD6(INIT,HIT("radius 1 offset ( 1 2 3 ) "),"",A,""),
-        MD6(INIT,HIT("radius 2 "),"",A,""), "same field");
+    /* Source wrapping is not part of the grammar: the same two contributions
+     * compose when the whole payload sits on one physical line, and the one
+     * real contradiction on such a line is still diagnosed as one field. */
+    pass(MD6(INIT,HIT("radius 1 "),"",A,""), MD6(INIT,HIT("radius 2 "),"",A,""),
+        MD6(INIT,HIT("radius 1 offset ( 1 2 3 ) "),"",A,""), "radius 2", "offset ( 1 2 3 )");
+    refuse(MD6(INIT,HIT("radius 1 offset ( 0 0 0 ) "),"",A,""),
+        MD6(INIT,HIT("radius 1 offset ( 1 2 3 ) "),"",A,""),
+        MD6(INIT,HIT("radius 1 offset ( 4 5 6 ) "),"",A,""), "same field");
+    /* Two packages editing distinct fields of one physical line both survive,
+     * in either merge order, and an equal contribution changes nothing. */
+    {
+        const char *base = MD6(INIT,HIT("radius 1 offset ( 0 0 0 ) surfType Metal "),"",A,"");
+        const char *a = MD6(INIT,HIT("radius 7 offset ( 0 0 0 ) surfType Metal "),"",A,"");
+        const char *b = MD6(INIT,HIT("radius 1 offset ( 1 2 3 ) surfType Metal "),"",A,"");
+        char error[512], *out = compose(base, a, b, error), *reverse;
+        CHECK(out);
+        if (out) {
+            CHECK(contains(out, "radius 7") && contains(out, "offset ( 1 2 3 )"));
+            CHECK(contains(out, "surfType Metal"));
+            reverse = compose(base, b, a, error);
+            CHECK(reverse && !strcmp(reverse, out));
+            free(reverse);
+        }
+        free(out);
+        /* A lone contribution and an equal pair both keep their own result. */
+        pass(base, a, a, "radius 7", "surfType Metal");
+        pass(base, base, b, "offset ( 1 2 3 )", "radius 1");
+    }
+    /* A flag list keeps reading its line the way the native reader does, and
+     * still stops at anything that can begin another key. */
+    pass(MD6(INIT,HIT("contentsFlags SOLID\nradius 1\n"),"",A,""),
+        MD6(INIT,HIT("contentsFlags SOLID OPAQUE\nradius 1\n"),"",A,""),
+        MD6(INIT,HIT("contentsFlags SOLID\nradius 4\n"),"",A,""),
+        "contentsFlags SOLID OPAQUE", "radius 4");
+    pass(MD6(INIT,HIT("contentsFlags SOLID radius 1 "),"",A,""),
+        MD6(INIT,HIT("contentsFlags SOLID OPAQUE radius 1 "),"",A,""),
+        MD6(INIT,HIT("contentsFlags SOLID radius 4 "),"",A,""),
+        "contentsFlags SOLID OPAQUE", "radius 4");
     /* A repeated joint name is native: each occurrence keeps its own payload. */
     pass(MD6(INIT,"hitTestGroup \"a\" { head {\nradius 1\n} head {\nradius 2\n} } ","",A,""),
         MD6(INIT,"hitTestGroup \"a\" { head {\nradius 1\n} head {\nradius 2\n} neck {\nradius 3\n} } ","",A,""),
@@ -211,7 +245,13 @@ int main(void)
         "AICF_WORLD AICF_AI AICF_PLAYERS", NULL);
     refuse("{}", MD6(INIT,G,"anim \"a.md6anim\" { frame 1 } ",A,""), "{}", "only event records");
     refuse("{}", MD6(INIT,G,"anim \"a.md6anim\" { event \"ae_x\" {\nframe\n} } ",A,""), "{}",
-        "no value on its line");
+        "key has no value");
+    /* An event payload on one physical line composes per argument too. */
+    pass(MD6(INIT,G,EV("locked 0 sound \"one\" float 1 "),A,""),
+        MD6(INIT,G,EV("locked 1 sound \"one\" float 1 "),A,""),
+        MD6(INIT,G,EV("locked 0 sound \"two\" float 1 "),A,""), "locked 1", "sound \"two\"");
+    /* An unsupported key inside a joint payload is refused, as the reader does. */
+    refuse("{}", MD6(INIT,HIT("unknownKey 1\n"),"",A,""), "{}", "unsupported key");
     refuse(MD6(INIT,G,"",A,""), MD6(INIT,"","",A,""),
         MD6(INIT,"damageGroup \"head\" { neck } ","",A,""), "same field");
     refuse(MD6(INIT,G,"",A,""), MD6("init { mesh \"other.md6mesh\" } ",G,"",A,""),
@@ -275,7 +315,36 @@ int main(void)
     /* Delimiters in comments/quoted payloads do not change envelope nesting. */
     pass("{}", MD6(INIT,G,E,A,"prop \"a\" { /* } */ tag \"{[()] }\" { } }"),
         MD6(INIT,G,E,A,"prop \"a\" { /* } */ tag \"{[()] }\" { } }"), "/* } */", "tag \"{[()] }\"");
-    refuse("{}", MD6(INIT,"damageGroup \"he\\ad\" {}","",A,""), "{}", "escaped");
+    /* The native lexer disables escapes, so a backslash is an ordinary byte in a
+     * record identity and an engine path keeps its own spelling. Bytes above
+     * ASCII pass through unchanged. Only a control byte is malformed. */
+    pass("{}", MD6(INIT,"damageGroup \"he\\ad\" { head } ","",A,""),
+        MD6(INIT,"damageGroup \"he\\ad\" { head neck } ","",A,""), "he\\ad", "neck");
+    pass("{}", MD6(INIT,"damageGroup \"m\xc3" "\xb6" "dell\\zion\" { head } ","",A,""),
+        MD6(INIT,"damageGroup \"m\xc3" "\xb6" "dell\\zion\" { head neck } ","",A,""),
+        "m\xc3" "\xb6" "dell\\zion", "neck");
+    refuse(MD6(INIT,"hitTestGroup \"he\\ad\" { head {\nradius 1\n} } ","",A,""),
+        MD6(INIT,"hitTestGroup \"he\\ad\" { head {\nradius 2\n} } ","",A,""),
+        MD6(INIT,"hitTestGroup \"he\\ad\" { head {\nradius 3\n} } ","",A,""), "same field");
+    /* Two spellings that differ only by a backslash are two records, because the
+     * reader interns the bytes it read. */
+    pass("{}", MD6(INIT,"damageGroup \"he\\ad\" { head } damageGroup \"head\" { neck } ","",A,""),
+        MD6(INIT,"damageGroup \"he\\ad\" { head } damageGroup \"head\" { neck } ","",A,""),
+        "he\\ad", "\"head\"");
+    /* An animation event path keeps its backslashes while the reader's own
+     * lowercase and root strip still apply, so one contribution can add an event
+     * to the animation another one already carries under that spelling. */
+    pass(MD6(INIT,G,"anim \"/CLIPS\\Idle.md6anim\" { event \"ae_x\" {\nframe 1\nrow 0\n} } ",A,""),
+        MD6(INIT,G,"anim \"/CLIPS\\Idle.md6anim\" { event \"ae_x\" {\nframe 1\nrow 0\n} event \"ae_y\" {\nframe 2\nrow 0\n} } ",A,""),
+        MD6(INIT,G,"anim \"/CLIPS\\Idle.md6anim\" { event \"ae_x\" {\nframe 1\nrow 4\n} } ",A,""),
+        "ae_y", "row 4");
+    /* Two spellings of one normalized animation path are one record, so their
+     * differing authored heads are a real contradiction. */
+    refuse("{}", MD6(INIT,G,"anim \"/CLIPS\\Idle.md6anim\" { event \"ae_x\" {\nframe 1\nrow 0\n} } ",A,""),
+        MD6(INIT,G,"anim \"clips\\idle.md6anim\" { event \"ae_x\" {\nframe 1\nrow 0\n} } ",A,""),
+        "same field");
+    refuse("{}", MD6(INIT,"damageGroup \"he\tad\" { head } ","",A,""), "{}", "control byte");
+    refuse("{}", MD6(INIT,"damageGroup \"\" { head } ","",A,""), "{}", "nonempty quoted string");
     refuse("{}", "{ init { offset ( 0 0 0 ] } }", "{}", "mismatched");
     refuse("{}", "{ init { mesh \"m\" } jointGroups {} events {} props {} aliases {} }", "{}", "out-of-order");
     /* No fixed delimiter-stack budget or call-stack recursion. */

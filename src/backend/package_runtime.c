@@ -10,8 +10,10 @@
 #include "backend_log.h"
 #include "overrides_baked.h"
 #include "decl_native_schema.h"
+#include "resource_types.h"
 #include "decl_graph_compose.h"
 #include "decl_md6_compose.h"
+#include "decl_block_compose.h"
 #include "package_material.h"
 #include "grid_room_asset.h"
 #include "resource_graph.h"
@@ -158,6 +160,10 @@ static int pr_compose_custom(void *context, const char *type, sh_decl_source bas
         *body = sh_decl_md6_compose(baseline, sources, count, length, error, capacity, conflict);
         return *body ? 1 : -1;
     }
+    if (sh_decl_block_family(type)) {
+        *body = sh_decl_block_compose(type, baseline, sources, count, length, error, capacity, conflict);
+        return *body ? 1 : -1;
+    }
     result = sh_decl_native_schema_decl_type(native, type, &root);
     if (result > 0) result = sh_decl_native_schema_graph_type(native, root);
     if (result < 0) { snprintf(error, capacity, "native graph reader metadata is unavailable"); return -1; }
@@ -165,6 +171,53 @@ static int pr_compose_custom(void *context, const char *type, sh_decl_source bas
     *body = sh_decl_graph_compose(baseline, sources, count, sh_decl_native_schema_view(native),
         root, length, error, capacity, conflict);
     return *body ? 1 : -1;
+}
+
+int sh_package_runtime_declaration_families(sh_package_family_visit visit, void *context,
+    char *error, size_t capacity)
+{
+    sh_decl_native_source source = {NULL, pr_native_read, 0};
+    sh_decl_native_schema *schema;
+    size_t reported = 0;
+    if (error && capacity) error[0] = 0;
+    if (!visit) return -1;
+    AcquireSRWLockShared(&g_refresh_lock);
+    if (sh_decl_native_source_ready(&source, g_native_accessor, g_native_types,
+            g_native_game_system) != 1) {
+        ReleaseSRWLockShared(&g_refresh_lock);
+        if (error && capacity) snprintf(error, capacity, "native declaration metadata is unavailable");
+        return -1;
+    }
+    schema = sh_decl_native_schema_open(source, (sh_decl_dependency_observer){0}, error, capacity);
+    ReleaseSRWLockShared(&g_refresh_lock);
+    if (!schema) return -1;
+    for (size_t i = 0; i < sizeof(SH_RESOURCE_TYPES) / sizeof(SH_RESOURCE_TYPES[0]); i++) {
+        const char *type = SH_RESOURCE_TYPES[i].type;
+        sh_decl_value_type state = {0};
+        const char *route, *name = "";
+        int resolved, graph = 0;
+        size_t previous;
+        if (!type || !*type) continue;
+        for (previous = 0; previous < i; previous++)
+            if (!strcmp(SH_RESOURCE_TYPES[previous].type, type)) break;
+        if (previous < i) continue;
+        resolved = sh_decl_native_schema_decl_type(schema, type, &state);
+        if (resolved > 0) {
+            name = state.name ? state.name : "";
+            graph = sh_decl_native_schema_graph_type(schema, state);
+        }
+        if (!strcmp(type, "material")) route = "material adapter";
+        else if (!strcmp(type, "md6def")) route = "md6 adapter";
+        else if (sh_decl_block_family(type)) route = "block adapter";
+        else if (resolved < 0 || graph < 0) route = "metadata unavailable";
+        else if (graph > 0) route = "graph adapter";
+        else if (resolved > 0) route = "reflected state";
+        else route = "custom reader, no adapter";
+        visit(context, type, name, route);
+        reported++;
+    }
+    sh_decl_native_schema_close(schema);
+    return (int)reported;
 }
 
 static pr_inventory *pr_inventory_retain(pr_inventory *inventory)

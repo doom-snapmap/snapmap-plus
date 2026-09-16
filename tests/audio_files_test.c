@@ -81,8 +81,19 @@ static void paths(void)
     flags[0]=2;
     expect_path(NULL,17,1,flags,L"",L"",L"",NULL);
     expect_path(NULL,17,1,NULL,L"",L"",L"",NULL);
-    flags[0]=0; flags[1]=201;
-    expect_path(L"external.wav",0,0,flags,L"",L"",L"",NULL);
+    /* An external source names its own complete location: the native location
+     * base writes no base path and no bank directory for company 0 codec 201,
+     * so a legitimate relative request is answered as it stands and a request
+     * that leaves the resource namespace is left native. */
+    flags[0]=0; flags[1]=201; flags[6]=0;
+    expect_path(L"external.wav",0,0,flags,L"banks/",L"media/",L"English(US)","external.wav");
+    expect_path(L"streamed/external.wav",0,0,flags,L"banks/",L"media/",L"English(US)","streamed/external.wav");
+    expect_path(L"..\\outside.wav",0,0,flags,L"",L"",L"",NULL);
+    expect_path(L"streamed/../../outside.wav",0,0,flags,L"",L"",L"",NULL);
+    expect_path(L"C:\\outside.wav",0,0,flags,L"",L"",L"",NULL);
+    expect_path(L"/outside.wav",0,0,flags,L"",L"",L"",NULL);
+    flags[6]=1;
+    expect_path(L"external.wav",0,0,flags,L"banks/",L"media/",L"English(US)","english(us)/external.wav");
     flags[1]=0;
     expect_path(L"C:\\external.bnk",0,0,flags,L"",L"",L"",NULL);
     expect_path(L"/external.bnk",0,0,flags,L"",L"",L"",NULL);

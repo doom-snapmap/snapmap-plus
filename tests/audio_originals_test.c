@@ -217,10 +217,26 @@ int main(void)
         CHECK(!visited && strstr(error,"initializing"));
     }
     sh_audio_originals_close(originals);
+    /* Two differing payloads inside one mount stage have no native winner: the
+     * engine lists a directory unsorted, so the order is not defined. */
     packed("conflict/sound/soundbanks/pc/a.pck",0,foo,0,"FIRST");
     packed("conflict/sound/soundbanks/pc/b.pck",0,foo,0,"SECOND");
     originals=open_originals("conflict",L"english");
     CHECK(sh_audio_originals_identity(originals,"sound/soundbanks/pc/foo.bnk",&answer,error,sizeof(error))==-1 && strstr(error,"ambiguous") && !answer.scope);
+    sh_audio_originals_close(originals);
+    /* Across stages the order is defined: the language directory is mounted
+     * after the platform directory and every lookup walks the package list from
+     * its head, so the language package answers. */
+    packed("stage/sound/soundbanks/pc/a.pck",0,foo,0,"PLATFORM");
+    packed("stage/sound/soundbanks/pc/english/voice.pck",0,foo,0,"LANGUAGE");
+    originals=open_originals("stage",L"english");
+    expect(originals,"foo.bnk",2,"LANGUAGE");
+    sh_audio_originals_close(originals);
+    /* A package in another language directory is not mounted for this run. */
+    packed("otherlang/sound/soundbanks/pc/a.pck",0,foo,0,"PLATFORM");
+    packed("otherlang/sound/soundbanks/pc/french/voice.pck",0,foo,0,"FRENCH");
+    originals=open_originals("otherlang",L"english");
+    expect(originals,"foo.bnk",2,"PLATFORM");
     sh_audio_originals_close(originals);
     create("broken/sound/soundbanks/pc/bad.pck","AKPK");originals=open_originals("broken",L"english");
     CHECK(sh_audio_originals_identity(originals,"sound/soundbanks/pc/foo.bnk",&answer,error,sizeof(error))==-1 && strstr(error,"metadata"));

@@ -1,15 +1,11 @@
 # Resource composition architecture
 
-This is the target architecture. The current compiler merges all contributions
-together, including new nested objects and compatible collection ordering, but
-still selects collection identities from a small rule table. That table is not
-complete coverage of the game's collections. The shared composer now accepts
-the dependency walker's native schema and handles sparse fixed arrays with
-extent validation. Runtime entityDef and ordinary reflected declaration roots
-use that schema. The registered graph reader has an ordered composition adapter,
-and MD6 definitions compose their verified named-record envelope. Other custom
-root grammars remain open. Index-referenced collections are covered where the
-engine has them: an MD6 joint payload travels with its entry and the engine
+The compiler merges authored and built-in contributions against verified originals.
+Native schema metadata supplies ordinary reflected fields and sparse fixed-array
+extents. Dedicated adapters cover ordered graphs, MD6 definitions, materials and
+the structured custom declaration blocks described below. Opaque binary and
+program bodies retain complete-payload selection. Index-referenced collections
+use their native binding rules: an MD6 joint payload travels with its entry and the engine
 re-derives every joint index from the composed order, a mesh-kit entry keeps the
 mesh names the engine resolves to surface indices itself, and an authored index
 such as a limb-loss group's is checked for collisions rather than renumbered.
@@ -47,10 +43,11 @@ Candidate source inspection retains material parameter and table sources, and
 collects typed image/program references for catalog resolution. Parameter defaults
 are inspected too, including image/program defaults and named buffer struct
 definitions. Null defaults, buffer sizes and image-store formats do not invent
-file dependencies. Material String values, sampler paths, custom buffer values
-inside material blocks and late consumers still need additional adapters.
-Single/equal custom-resource passthrough remains supported; these checks do not
-establish complete native activation or dependency coverage for every material.
+file dependencies. Samplers are inline renderer state. The native consumers of
+material String parameters use parameter presence or source-art file checks,
+not a runtime image identity from the string value. Buffer writes follow the
+native four-expression and write-mask grammar. Single/equal resource inputs
+retain their authored bytes; native activation is a separate transaction.
 
 Resident reconstruction completes virtual-texture material binding inside the
 verified process-heap scope before consumer updates. A permanent material must
@@ -253,8 +250,8 @@ composition instead of relying on native shadowing or error behavior. A change
 to the selected model or parent cannot silently receive another contribution's
 records authored against a different binding. This is direct binding validation,
 not inherited-state expansion or validation of skeleton joints against the
-selected skeleton. Escaped record identities remain an explicit gap: they need a
-native string adapter and are refused rather than guessed at. A heap-based
+selected skeleton. Record identities preserve native literal backslashes and
+UTF-8 bytes; empty identities and control bytes are refused. A heap-based
 delimiter stack handles deep opaque payloads without adding an author size/depth
 setting.
 
@@ -262,11 +259,11 @@ A material parameter value composes by its native kind. Image, program and
 sampler values are typed by the grammar; expressions, masked writes and opaque
 values retain their native text. A sampler names inline renderer state, not a
 resource, so it carries no dependency. A String parameter is a late value the
-parse path never looks up: it keeps the tokens on its own line and contributes no
-dependency, because the shipped corpus writes source art names there that no
-installed resource answers. A buffer parameter is engine-side GPU state; a
-material write to one is refused with its reason, and the struct render parameter
-naming a buffer's layout is the dependency that does exist.
+parse path never looks up. Its verified consumers test parameter presence for
+virtual-texture material selection or check source-art files in developer tooling;
+neither resolves the value as a runtime image. Buffer writes use the native
+four-component expression and write-mask path and retain dependencies named by
+their expressions and parameter schemas.
 One complete replacement or exact duplicates retain their original bytes.
 Overlapping changes to an unsupported family fail explicitly. Alternate native
 source dialects, including legacy particle syntax, also remain intact when no
@@ -324,8 +321,8 @@ or incomplete/active graph nodes return incomplete coverage with the known set
 retained. A complete result covers the recorded graph only; native registry
 coverage must be checked separately before claiming every resident consumer.
 
-This query prepares consumer selection; it does not yet implement native asset
-retirement. The verified native MD6/image reload callbacks use source metadata
+This query prepares consumer selection for the resident activation pass. The
+native MD6/image reload callbacks use source metadata
 and can invoke source-to-cooked-file generation. Static model reload explicitly
 skips names containing `.bmodel`. Those callbacks cannot serve as a blanket
 package installation step. Cooked resource loading, renderer synchronization,
@@ -452,10 +449,12 @@ map transition or the settled browser with an inactive editor and no loading. No
 gameplay world is playing voices there, so no voice is interrupted by a
 replacement in the first place.
 
-Remaining audio limits: a bank identity present only inside a mounted package has
-no name the loader can open, and is counted rather than activated; differing
-packed candidates still refuse as an ambiguity instead of modelling mount order;
-and external-source requests stay native.
+Package-only bank identities use the verified numeric/native-name adapter.
+Packed originals follow reverse native mount order: language packages mounted
+after platform packages take precedence. Differing candidates within the same
+native unsorted mount stage are diagnosed as ambiguous; directory spelling does
+not invent a stable winner. Relative external-source requests follow their native
+root and optional locale, while absolute paths and traversal are not claimed.
 
 The audio file adapter now resolves native numeric and named bank/media opens
 through the active immutable package provider, before the native packed or loose
@@ -474,15 +473,27 @@ sparse file larger than 4 GiB. This is file-routing coverage; the activation and
 recovery described above is what replaces a loaded bank. An open-file adapter
 cannot certify a native voice or stream transition on its own.
 
-This supplies provider rollback around the declaration, policy and installed
-audio-bank passes.
-It does not yet undo every native side effect: newly registered declaration
-identities, resident opaque resources and renderer-owned consumers still need
-their lifecycle handling. Dictionary key retirement and vanilla-record
-restoration now participate in consumer recovery. The filesystem installation
-batch remains provisional through consumer activation and commits afterward.
-Cancellation or activation failure rolls the provisional batch back as a whole.
-Complete package activation and delivery acceptance remain release requirements.
+Provider rollback encloses declaration, policy, resident-resource and audio-bank
+passes. Dictionary key retirement, vanilla records and renderer-owned consumers
+participate in recovery. A newly registered identity with no previous source
+returns to its native default after the prior provider is restored. The complete
+filesystem group stays provisional until native activation and map loading
+succeed. Cancellation or activation failure removes that whole new group.
+The combined publication/partial-activation/failure/removal/retry case has live
+Vulkan evidence without a restart; repeated Play/Edit restoration has evidence
+on both renderers.
+
+## Structured custom declaration blocks
+
+The block adapter covers breakable, env, table, renderparm, skins,
+articulatedfigure, animweb, cloth, renderprogflag and visemeset. Native keyword
+vocabularies establish record boundaries and owned values; physical source line
+breaks do not define merge keys. Named records, nested bodies and indivisible
+native records retain their appropriate identity. The MD6 adapter likewise uses
+native arity, so independent edits on one line compose like wrapped source.
+Native invalid control bytes and duplicate identities are diagnosed rather than
+silently normalized. Binary/file-backed families and render program text keep
+whole-payload semantics instead of fabricated key/value grammars.
 
 Coverage is a release criterion: known syntax is not the same as known merge
 semantics. Tests must exercise real resource families, additions at colliding
