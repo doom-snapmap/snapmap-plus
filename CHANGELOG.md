@@ -3,6 +3,28 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.14 -- 2026-09-16 (beta)
+
+**Complete mod packages travel with maps, with steadier editor previews**
+
+Author packages with one `package.json` and an `assets/` tree using extracted engine paths. Maps carry their complete authored packages, reuse resources already installed on another player's machine, and preserve their own gameplay values without changing that player's local files.
+
+### New
+- Packages use `package.json` for identity, requirements, localized strings and supported presentation settings, with game resources under `assets/`. Package authors no longer need separate manifest files or hand-written mappings for every resource.
+- Maps carry the complete packages whose gameplay resources they use, including nested components and their editor support. When resources are missing, an in-game prompt installs the complete supplying bundles and continues loading without restarting DOOM.
+
+### Improved
+- Installation checks use available resources, so a different package name, grouping or local gameplay value does not by itself trigger another installation. Each map's authored values remain active in Play and Edit without rewriting local packages or game archives.
+- Compatible changes from multiple packages and built-in overrides compose against the original resources, including supported MD6 collections and animation events. Conflicting edits report the resource and contributing packages.
+- Unchanged vanilla SnapMap resources and editor-only exposure do not cause packages to be embedded. Ordinary stock-entity authoring retains vanilla compatibility when it needs no additional gameplay resources or features.
+- Package discovery and delivery no longer impose fixed package-count or total-payload quotas; available memory, storage and engine limits still apply.
+- An interrupted or failed installation cancels the whole new install group instead of leaving part of a package behind.
+
+### Fixed
+- Packages installed from a map stay available in your library after you leave that map, so you can use them in new maps.
+- Package refresh preserves unchanged editor caches and restores World Text fonts, preventing the associated toybox disconnects. Custom entities and inherited Doors entries receive their intended editor properties.
+- Resource classification no longer creates declarations while inspecting them, preventing a crash caused by declarations retaining released skeleton data.
+
 ## v0.2.1-beta.13 -- 2026-09-13 (beta)
 
 **Simpler map rendering and navigation on default boxes**
