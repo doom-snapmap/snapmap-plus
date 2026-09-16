@@ -13,6 +13,7 @@ and preserves player data. The runtime uses only Go's standard library.
 | `main.go`, `interactive.go` | CLI dispatch and the double-click interactive prompt. |
 | `doom.go`, `bundle.go`, `install.go` | Game discovery, bundle validation and installation records. |
 | `legacy.go`, `userdata.go`, `overrides_package.go` | Earlier-install cleanup, player data and package authoring helpers. |
+| `overrides_*.go` | Conversion of override packages from earlier releases: discovery, legacy readers, installed catalog, planning and recoverable publication. |
 | `selfinstall*.go`, `selfupdate.go`, `webview2.go` | Installer ownership, updates and WebView2 runtime setup. |
 | `changelog*.go` | Release-note retrieval and terminal rendering. |
 | `*_test.go`, `testdata/` | Installer and rendering regressions. |
@@ -47,6 +48,7 @@ snapmap-plus update    [--doom <path>] [--release <tag>] [--beta] [--yes]
 snapmap-plus uninstall [--doom <path>] [--yes]
 snapmap-plus changelog [<version>|latest|all]
 snapmap-plus status
+snapmap-plus migrate-overrides [--doom <path>]
 snapmap-plus version
 snapmap-plus help
 ```
@@ -84,8 +86,7 @@ directories; read errors and links prevent retirement. Unknown files in the old
 metadata directory also remain there. The installer creates a `my-overrides`
 starter containing `package.json` and `assets/`. Copy engine-shaped resource
 paths into `assets/`; requirements and strings belong in the descriptor.
-Existing descriptors and authored files are preserved. Loose override files
-are not reinterpreted or moved into packages.
+Current descriptors and packages are preserved byte for byte.
 
 Stable installer copies are tracked by name and SHA-256 in `installer-files.json`.
 Uninstall removes only recorded copies whose bytes still match, while retaining
@@ -103,6 +104,51 @@ and uninstall cycle.
 
 The installer checks for WebView2 and offers Microsoft's runtime bootstrapper
 when needed. See [packaging](../docs/packaging.md) for the installed file contract.
+
+## Converting overrides from earlier releases
+
+Install and update convert override packages from earlier releases before any
+DLL is replaced. `migrate-overrides` runs the same conversion for manual DLL
+updates and for older packages copied in later. DOOM must be closed.
+
+Discovery follows the runtime: a folder with `package.json` is one outer
+package and other folders are groups. A package is converted when its
+descriptor has no `id`, is empty, has the old
+`snapmap-plus.override-package.v1` schema, when it has an old
+`smpkg.digest` installation sidecar, or when its root has old namespaces with
+their old content (`decls/`, `images/`, `shaders/generated/`, `resources/*.manifest`,
+`requirements/*.requirements`, `strings/*.json`, `hud/weapons.json`). An unmarked
+folder with those namespaces is converted in place. Loose content in
+`overrides/generated`, `overrides/shader_includes`, an unmarked
+`overrides/assets`, folders named after installed engine roots, and loose files
+at installed engine paths becomes one new `legacy-overrides` package.
+
+Conversion mirrors the old readers. Declarations, images and shader programs
+move to their engine paths below `assets/`; an `assets/decls` tree from a
+partial manual move is recognized unless its path is installed engine content.
+Requirement rows, flat string files and version 1 weapon HUD files fold into
+`package.json` with the runtime's validation. Manifest rows resolve by exact
+type, name and provider path in `gameresources.pindex`; records identical to
+the SnapMap archive remain installed dependencies and the rest are copied as
+package files. Files the old runtime never served, such as `.backup` copies,
+stay outside `assets/`. Retired descriptor fields are `schema`, `version`,
+`priority`, `contents` and `restart_required`; a missing `id` becomes
+`local.<folder>`. Declaration contents are never edited.
+
+A package whose content cannot be represented is reported and left unchanged:
+invalid JSON or ids, unsupported requirements, conflicting strings, different
+bytes for one output path, invalid declaration paths, unresolved manifest rows,
+links and package markers inside old namespaces. Other packages still convert.
+Storage, catalog and recovery failures stop the command, and installation stops
+before replacing the runtime.
+
+Each converted package is one transaction in
+`%LOCALAPPDATA%\snapmap-plus\override-backups\migration-*`. The complete new
+tree is staged and each copied byte is checked against a snapshot; the journal
+is written; originals move to `original/`; the moved originals are hashed
+again; only then is the new tree renamed into place. A later run finishes a
+verified transaction or restores an unverified one, and never overwrites a path
+that appeared in the meantime. Backups are never removed automatically.
 
 ## Private release repositories
 

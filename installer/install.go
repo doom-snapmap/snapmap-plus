@@ -126,14 +126,17 @@ func cmdInstall(f flags) error {
 			return nil
 		}
 	}
-	// Convert user files before replacing the working runtime. Each outer
-	// package is staged and backed up independently; storage/recovery failures
-	// abort installation while diagnosed bad units are reported and retained.
+	// Convert packages from earlier releases before replacing the runtime that
+	// may still read them. Each outer package converts completely or not at
+	// all; a package that needs attention is reported and left unchanged.
 	migrateUserData()
 	report, err := migrateOverrides(appDataDir(), doom)
 	printOverrideMigration(report)
 	if err != nil {
-		return fmt.Errorf("override migration failed before runtime replacement: %w", err)
+		return fmt.Errorf("could not convert existing overrides, so nothing was installed: %w", err)
+	}
+	if err := ensureStarterPackage(); err != nil {
+		fmt.Printf("  ! could not prepare the starter package: %v\n", err)
 	}
 	if len(legacy) > 0 {
 		fmt.Println("Removing the original SnapHak:")

@@ -515,8 +515,35 @@ static void test_local_isolation(void)
     create("isolated/overrides/text/assets/generated/decls/snapeditorentitydef/bad.decl", "{}");
     CHECK(sh_package_runtime_refresh(data));
     expect_current("generated/decls/snapeditorentitydef/rejected.decl", "{ value = 1; }");
-    sh_package_runtime_test_dispose();
 
+    /* A file that cannot be a declaration identity belongs to its own package. */
+    create("isolated/overrides/identity/package.json", "{\"id\":\"identity\",\"name\":\"Identity\"}");
+    create("isolated/overrides/identity/assets/generated/decls/notype.decl", "{}");
+    create("isolated/overrides/identity/assets/generated/decls/entitydef/identity-only.decl", "{ edit = { value = 1; } }");
+    /* When two packages must be composed, a contribution the compiler cannot
+     * parse on its own isolates that package; the valid edit still loads. */
+    create("isolated/overrides/garbled/package.json", "{\"id\":\"garbled\",\"name\":\"Garbled\"}");
+    create("isolated/overrides/garbled/assets/generated/decls/entitydef/ai/cyberdemon.decl", "{ edit = { health = !12000; } }");
+    CHECK(sh_package_runtime_refresh(data)); CHECK(sh_package_runtime_ready());
+    expect_current(health_path, "health = 12000");
+    expect_current("generated/decls/entitydef/identity-only.decl", NULL);
+    summary = sh_package_runtime_summary();
+    CHECK(summary && strstr(summary, "Installed library: 2 packages") && strstr(summary, "missing decl type directory") &&
+        strstr(summary, "garbled") && strstr(summary, "identity")); free(summary);
+
+    /* Two valid packages with incompatible edits are a peer conflict, never a
+     * folder-order winner: the refresh fails and the previous output stays. */
+    create("isolated/overrides/garbled/assets/generated/decls/entitydef/ai/cyberdemon.decl", "{ edit = { health = 11; } }");
+    {
+        const sh_package_compilation *before = sh_package_runtime_acquire(), *after;
+        sh_package_runtime_release();
+        CHECK(!sh_package_runtime_refresh(data));
+        after = sh_package_runtime_acquire(); CHECK(after == before); sh_package_runtime_release();
+        sh_package_runtime_error(error, sizeof(error));
+        CHECK(strstr(error, "garbled") && strstr(error, "boss"));
+    }
+    expect_current(health_path, "health = 12000");
+    sh_package_runtime_test_dispose();
 }
 
 int main(int argc, char **argv)

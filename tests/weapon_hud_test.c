@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "weapon_hud.h"
 #include "packages.h"
@@ -12,9 +13,9 @@ void backend_log(const char *s) { (void)s; }
 static const char valid[] = "{\"weapons\":{"
     "\"weapon/test/unlimited\":{\"ammo_display\":\"weapon\"}}}";
 static int parse(const char *s, const char *owner) { return sh_weapon_hud_test_parse(s, strlen(s), owner); }
-static BOOL WINAPI broken_next(HANDLE handle, LPWIN32_FIND_DATAA found)
+static BOOL WINAPI broken_next(HANDLE handle, LPWIN32_FIND_DATAW found)
 {
-    BOOL result = FindNextFileA(handle, found);
+    BOOL result = FindNextFileW(handle, found);
     if (!result) SetLastError(ERROR_ACCESS_DENIED);
     return result;
 }
@@ -129,16 +130,23 @@ int main(void)
     CHECK(sh_package_runtime_select_map(map, sizeof map - 1, NULL, policy_error, sizeof policy_error));
     CHECK(sh_weapon_hud_reload(root));
     CHECK(sh_weapon_hud_test_relay(root));
-    sh_packages_test_find_api api = {FindFirstFileA, broken_next, FindClose, GetFileAttributesA};
+    sh_packages_test_find_api api = {FindFirstFileW, broken_next, FindClose, GetFileAttributesW};
     sh_packages_test_set_api(&api);
     CHECK(!sh_package_runtime_refresh(root));
     CHECK(sh_weapon_hud_reload(root));
     CHECK(sh_weapon_hud_test_count() == 1);
     sh_packages_test_reset_api();
+    /* A malformed package is skipped by name; its rule leaves with it while the
+     * unrelated package still compiles. Repair restores the rule. */
     write_text(marker, "invalid");
-    CHECK(!sh_package_runtime_refresh(root));
+    CHECK(sh_package_runtime_refresh(root));
     CHECK(sh_weapon_hud_reload(root));
-    CHECK(sh_weapon_hud_test_count() == 1);
+    CHECK(sh_weapon_hud_test_count() == 0);
+    {
+        char *summary = sh_package_runtime_summary();
+        CHECK(summary && strstr(summary, "Skipped local package") && strstr(summary, "migrate-overrides"));
+        free(summary);
+    }
     write_text(marker, descriptor);
     CHECK(sh_package_runtime_refresh(root));
     CHECK(sh_weapon_hud_reload(root));

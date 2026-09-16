@@ -519,6 +519,17 @@ static void mpkg_notice_poll(void)
     if (g_notice_ticket) { mpkg_lock(); if (revision == g_notice_revision) g_notice[0] = 0; mpkg_unlock(); }
 }
 
+/* Local authoring defects exclude only their own outer package. Map-carried
+ * bundles are still read strictly before any installation. */
+static int mpkg_local_rejected(void *context, const sh_package *package, const char *reason)
+{
+    char line[1024];
+    (void)context;
+    snprintf(line, sizeof(line), "MPKG: local package %s is excluded until repaired: %s", package->root, reason);
+    backend_log(line);
+    return 1;
+}
+
 void sh_mpkg_boot_capture(const char *data_root)
 {
     sh_package_sources *sources;
@@ -531,7 +542,7 @@ void sh_mpkg_boot_capture(const char *data_root)
     if (!mpkg_recover_interrupted(data_root, error, sizeof(error))) {
         g_boot_captured = -1; mpkg_unlock(); sh_mpkg_report_error(error); return;
     }
-    sources = sh_package_sources_scan(data_root, error, sizeof(error));
+    sources = sh_package_sources_scan_local(data_root, mpkg_local_rejected, NULL, error, sizeof(error));
     if (!sources) {
         g_boot_captured = -1; mpkg_unlock(); backend_log(error); return;
     }
@@ -1174,7 +1185,7 @@ static int mpkg_install_batch(mpkg_staged *head, char *err, size_t err_cap)
     strncpy_s(root, sizeof(root), g_data_root, _TRUNCATE); mpkg_unlock();
     mutex = mpkg_install_lock(root, err, err_cap);
     if (!mutex || !mpkg_discard_interrupted(root, err, err_cap)) goto done;
-    sources = sh_package_sources_scan(root, err, err_cap);
+    sources = sh_package_sources_scan_local(root, mpkg_local_rejected, NULL, err, err_cap);
     if (!sources) goto done;
     for (s = head; s; s = s->next) {
         char descriptor_id[SH_PACKAGE_ID_CAP];

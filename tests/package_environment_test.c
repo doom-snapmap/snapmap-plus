@@ -61,6 +61,18 @@ static void authored(const char *package, const char *name, const char *body)
     snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s.decl", package, name);
     create(path, body);
 }
+static void remove_authored(const char *package, const char *name)
+{
+    char path[4096];
+    wchar_t *wide;
+    snprintf(path, sizeof(path), "%s/overrides/%s/assets/generated/decls/entitydef/%s.decl", root, package, name);
+    wide = sh_package_source_wide_path(path); CHECK(wide && DeleteFileW(wide)); free(wide);
+}
+static const size_t *owner_named(const sh_package_sources *sources, size_t index, const char *name)
+{
+    static const size_t found = 0;
+    return sources && index < sources->package_count && !strcmp(sources->packages[index].name, name) ? &found : NULL;
+}
 static sh_package_compilation *compile(sh_package_compile_environment *environment,
     sh_package_sources **sources, char *error)
 {
@@ -76,11 +88,23 @@ int main(void)
         {"generated/decls/entitydef/a_child.decl", (const unsigned char *)child_builtin, 0}
     };
     sh_package_compile_environment environment = {baseline, NULL, builtins, 2, &types, NULL, derives};
+    size_t invalid = SIZE_MAX;
+    /* Defects that a package has on its own, with only the installed game and
+     * product defaults, whatever other packages are installed. */
+    static const struct { const char *body, *reason; } defects[] = {
+        {"{ class = \"Deirved\"; edit = { health = 1; } }", "metadata is unavailable"},
+        {"{ inherit = \"z_parnet\"; edit = { health = 1; } }", "parent declaration is absent"},
+        {"{ inherit = \"z_parent\"; edit = { slots = { slots[7] = { x = 1; } } } }", "out-of-range"},
+        {"{ edit = { health = 1; } }", "no class or inherited class"}
+    };
     sh_package_sources *sources;
     sh_package_compilation *compiled;
     const sh_compiled_resource *child, *builtin;
     size_t i;
     for (i = 0; i < 2; i++) builtins[i].length = strlen((const char *)builtins[i].body);
+    /* Local isolation must never blame one package for peer conflicts, class
+     * or inheritance failures, or anything it did not author alone. */
+    environment.invalid_package = &invalid;
     CHECK(GetTempPathA(sizeof(temporary), temporary)); CHECK(GetTempFileNameA(temporary, "pce", 0, root));
     CHECK(DeleteFileA(root)); CHECK(CreateDirectoryA(root, NULL));
     create("overrides/a/package.json", "{\"id\":\"a\",\"name\":\"A\"}");
@@ -106,19 +130,20 @@ int main(void)
      * different package's resulting class to legitimize its own unknown field. */
     authored("b", "a_child", child_a);
     compiled = compile(&environment, &sources, error);
-    CHECK(!compiled && strstr(error, "extended") && strstr(error, "reader type"));
+    CHECK(!compiled && strstr(error, "extended") && strstr(error, "reader type") && invalid == SIZE_MAX);
     sh_package_compilation_free(compiled); sh_package_sources_free(sources);
     authored("b", "a_child", child_b);
     /* A parent's headers are merged from all original sources before child
      * state, even when parent sorts later and its final object does not exist. */
     authored("b", "z_parent", "{ class = \"Rewritten\"; edit = {} }");
     compiled = compile(&environment, &sources, error);
-    CHECK(!compiled && strstr(error, "class") && strstr(error, "incompatible"));
+    CHECK(!compiled && strstr(error, "class") && strstr(error, "incompatible") && invalid == SIZE_MAX);
     sh_package_compilation_free(compiled); sh_package_sources_free(sources);
     authored("b", "z_parent", "{ class = \"Base\"; edit = {} }");
     authored("a", "z_parent", "{ inherit = \"a_child\"; class = \"Derived\"; edit = {} }");
+    /* This cycle is complete inside package a, so a fails alone. */
     compiled = compile(&environment, &sources, error);
-    CHECK(!compiled && strstr(error, "cycl"));
+    CHECK(!compiled && strstr(error, "cycl") && owner_named(sources, invalid, "a"));
     sh_package_compilation_free(compiled); sh_package_sources_free(sources);
     /* A product-only parent is available to new package resources. */
     authored("a", "z_parent", "{ class = \"Derived\"; edit = {} }");
@@ -129,7 +154,60 @@ int main(void)
     compiled = compile(&environment, &sources, error);
     if (!compiled) fprintf(stderr, "%s\n", error);
     CHECK(compiled && sh_package_compilation_find(compiled, "generated/decls/entitydef/new_child.decl"));
-    sh_package_compilation_free(compiled);
+    sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+    /* A typed contribution that cannot be parsed on its own belongs to its
+     * package, even when another package supplies a valid edit. */
+    create("overrides/c/package.json", "{\"id\":\"c\",\"name\":\"C\"}");
+    authored("c", "a_child", "{ inherit = \"z_parent\"; edit = { health = !300; } }");
+    compiled = compile(&environment, &sources, error);
+    CHECK(!compiled && sources && invalid < sources->package_count && !strcmp(sources->packages[invalid].name, "c"));
+    sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+    /* A class view contains the original and the contribution's own package,
+     * so a parent that only another package declares is reported as missing.
+     * That depends on a peer and is never attributed to either package. */
+    authored("c", "a_child", child_b);
+    create("overrides/d/package.json", "{\"id\":\"d\",\"name\":\"D\"}");
+    authored("c", "c_parent", "{ class = \"Derived\"; edit = {} }");
+    authored("d", "d_child", "{ inherit = \"c_parent\"; edit = { extended = 3; } }");
+    compiled = compile(&environment, &sources, error);
+    CHECK(!compiled && strstr(error, "d_child") && strstr(error, "parent declaration is absent") && invalid == SIZE_MAX);
+    sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+    authored("d", "d_child", "{ inherit = \"z_parent\"; edit = { health = 3; } }");
+    create("overrides/e/package.json", "{\"id\":\"e\",\"name\":\"E\"}");
+    for (i = 0; i < sizeof(defects) / sizeof(defects[0]); i++) {
+        authored("e", "e_new", defects[i].body);
+        compiled = compile(&environment, &sources, error);
+        CHECK(!compiled && owner_named(sources, invalid, "e") && strstr(error, "[e]") && strstr(error, defects[i].reason));
+        if (compiled || !strstr(error, defects[i].reason)) fprintf(stderr, "defect %zu: %s\n", i, compiled ? "compiled" : error);
+        sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+    }
+    /* A parent that disappears after the scan is a read failure, not a defect. */
+    authored("e", "e_new", "{ inherit = \"e_parent\"; edit = { health = 1; } }");
+    authored("e", "e_parent", "{ inherit = \"z_parent\"; edit = {} }");
+    sources = sh_package_sources_scan(root, error, sizeof(error)); CHECK(sources);
+    remove_authored("e", "e_parent");
+    compiled = sources ? sh_package_compile_with(sources, &environment, error, sizeof(error)) : NULL;
+    CHECK(!compiled && strstr(error, "e_new") && invalid == SIZE_MAX);
+    sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+    authored("e", "e_parent", "{ inherit = \"z_parent\"; edit = {} }");
+    /* Packages that are valid alone but disagree remain one peer conflict. */
+    authored("e", "a_child", "{ inherit = \"z_parent\"; edit = { health = 300; shared = 0; "
+        "slots = { slots[0] = { x = 1; } } } }");
+    compiled = compile(&environment, &sources, error);
+    CHECK(!compiled && strstr(error, "incompatible edits") && invalid == SIZE_MAX);
+    sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+    /* A product default is always installed, so contradicting it fails alone. */
+    authored("e", "a_child", "{ inherit = \"z_parent\"; edit = { health = 200; shared = 4; "
+        "slots = { slots[0] = { x = 1; } } } }");
+    compiled = compile(&environment, &sources, error);
+    CHECK(!compiled && owner_named(sources, invalid, "e") && strstr(error, "built-in default"));
+    sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+    authored("e", "a_child", child_b);
+    compiled = compile(&environment, &sources, error);
+    if (!compiled) fprintf(stderr, "%s\n", error);
+    CHECK(compiled && invalid == SIZE_MAX);
+    sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+    sources = sh_package_sources_scan(root, error, sizeof(error));
     /* Invalid producer inventories fail before any prospective output exists. */
     builtins[1] = builtins[0];
     compiled = sh_package_compile_with(sources, &environment, error, sizeof(error));

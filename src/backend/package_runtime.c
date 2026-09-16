@@ -544,11 +544,16 @@ static pr_provider *pr_prepare(const char *data_root, const char *source_root,
             !sh_package_sources_remove(sources, invalid_package)) goto done;
     }
     if (inventory_out) {
+        /* The inventory has its own diagnostic: a composition failure above
+         * remains the reported cause when the inventory itself succeeds. */
+        char inventory_error[2048] = "";
         sh_package_sources empty = {0};
-        sh_package_sources *snapshot = sh_package_sources_join(sources, &empty, error, sizeof(error));
-        if (!snapshot) goto done;
-        *inventory_out = pr_inventory_build(snapshot, error, sizeof(error));
-        if (!*inventory_out) goto done;
+        sh_package_sources *snapshot = sh_package_sources_join(sources, &empty, inventory_error, sizeof(inventory_error));
+        if (snapshot) *inventory_out = pr_inventory_build(snapshot, inventory_error, sizeof(inventory_error));
+        if (!*inventory_out) {
+            strcpy_s(error, sizeof(error), inventory_error[0] ? inventory_error : "cannot retain the installed package inventory");
+            goto done;
+        }
     }
     if (!compiled) { if (composition_failed) *composition_failed = 1; goto done; }
     if (!pr_cache_resources(compiled, data_root, error, sizeof(error))) goto done;
@@ -1082,7 +1087,9 @@ char *sh_package_runtime_summary(void)
     if (!text) goto done;
     length += (size_t)snprintf(text + length, capacity - length, "Installed library: %zu packages.\n",
         g_inventory ? g_inventory->sources->package_count : 0);
-    if (rejections) length += (size_t)snprintf(text + length, capacity - length, "%s", rejections);
+    if (rejections) length += (size_t)snprintf(text + length, capacity - length, "%s%s", rejections,
+        "Skipped packages stay unchanged on disk. Packages made for earlier Snapmap+ releases can be "
+        "converted: close DOOM and run snapmap-plus migrate-overrides.\n");
     if (g_authoring_error[0]) length += (size_t)snprintf(text + length, capacity - length,
         "Local authoring composition unavailable: %s\nIndependent map packages can still compile.\n", g_authoring_error);
     if (!g_ready) length += (size_t)snprintf(text + length, capacity - length,

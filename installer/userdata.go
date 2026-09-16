@@ -97,10 +97,6 @@ func migrateUserData() {
 			os.Remove(oldAD) // Only an empty directory can be retired.
 		}
 	}
-
-	if err := ensureStarterPackage(); err != nil {
-		fmt.Printf("  ! could not prepare the starter package: %v\n", err)
-	}
 }
 
 // fullyMirrored rejects missing entries, byte differences, links and read errors.

@@ -1481,21 +1481,47 @@ int main(int argc, char **argv)
         }
         sh_mpkg_test_reset();
         sh_mpkg_boot_capture(root);
-        CHECK(sh_mpkg_gate(fix_map_happy, fix_map_happy_len) == 0);
-        CHECK(strstr(sh_mpkg_test_last_refusal(), "boot package snapshot is missing") != NULL);
-        for (int i = 0; i < 65; i++) {
-            _snprintf_s(package, sizeof(package), _TRUNCATE,
-                        "%s\\overflow-%02d", overrides, i);
-            remove_tree(package);
-        }
-        /* A failed capture can retry after malformed sources are removed.
-         * Admission still requires native activation of the recovered sources. */
-        sh_mpkg_boot_capture(root);
+        /* Malformed local packages are excluded by name; they do not block
+         * startup identities for healthy packages or map admission. */
         CHECK(sh_mpkg_startup_ready());
         g_registration_ready = 0;
         CHECK(sh_mpkg_gate(fix_map_happy, fix_map_happy_len) == 0);
         g_registration_ready = 1;
         CHECK(sh_mpkg_gate(fix_map_happy, fix_map_happy_len) == 1);
+        for (int i = 0; i < 65; i++) {
+            _snprintf_s(package, sizeof(package), _TRUNCATE,
+                        "%s\\overflow-%02d", overrides, i);
+            remove_tree(package);
+        }
+        /* A source that cannot be read is a storage failure, not a package
+         * defect: capture fails rather than publishing a partial inventory. */
+        {
+            char locked_file[MAX_PATH];
+            HANDLE lock;
+            _snprintf_s(package, sizeof(package), _TRUNCATE, "%s\\locked", overrides);
+            CHECK(make_dir(package));
+            join(marker, sizeof(marker), package, "package.json");
+            CHECK(touch(marker, "{\"id\":\"locked\",\"name\":\"Locked\"}"));
+            join(locked_file, sizeof(locked_file), package, "notes.txt");
+            CHECK(touch(locked_file, "held open without sharing"));
+            lock = CreateFileA(locked_file, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            CHECK(lock != INVALID_HANDLE_VALUE);
+            sh_mpkg_test_reset();
+            sh_mpkg_boot_capture(root);
+            CHECK(!sh_mpkg_startup_ready());
+            CHECK(sh_mpkg_gate(fix_map_happy, fix_map_happy_len) == 0);
+            CHECK(strstr(sh_mpkg_test_last_refusal(), "boot package snapshot is missing") != NULL);
+            CloseHandle(lock);
+            /* A failed capture can retry once the source is readable again.
+             * Admission still requires native activation of the recovered sources. */
+            sh_mpkg_boot_capture(root);
+            CHECK(sh_mpkg_startup_ready());
+            g_registration_ready = 0;
+            CHECK(sh_mpkg_gate(fix_map_happy, fix_map_happy_len) == 0);
+            g_registration_ready = 1;
+            CHECK(sh_mpkg_gate(fix_map_happy, fix_map_happy_len) == 1);
+            remove_tree(package);
+        }
     }
     remove_tree(root);
 

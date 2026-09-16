@@ -43,6 +43,11 @@ With no argument it shows the newest release and lists the earlier ones.
 With no --local, install/update download from GitHub. Uninstall restores any files it
 replaced and leaves your Snapmap+ modding data untouched.
 
+Install and update convert override packages made for earlier Snapmap+ releases before
+replacing the runtime. After copying the DLLs by hand, or after unzipping an older package
+into your overrides folder, close DOOM and run "snapmap-plus migrate-overrides". Converted
+originals are kept in %LOCALAPPDATA%\snapmap-plus\override-backups.
+
 Running snapmap-plus with no arguments (a double-click) opens an interactive prompt: it offers
 to install (or to update when a newer version is out), and takes any command above.
 `)

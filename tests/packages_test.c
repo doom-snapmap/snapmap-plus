@@ -90,24 +90,24 @@ static DWORD injected_root_attributes, injected_root_error;
 static DWORD injected_first_error, injected_terminal_error;
 static unsigned injected_entries, injected_cursor, injected_searches, injected_closes;
 
-static DWORD WINAPI injected_attributes(LPCSTR path)
+static DWORD WINAPI injected_attributes(LPCWSTR path)
 {
-    size_t length = strlen(path);
-    if (length >= 13 && !strcmp(path + length - 13, "\\package.json"))
+    size_t length = wcslen(path);
+    if (length >= 13 && !wcscmp(path + length - 13, L"\\package.json"))
         return FILE_ATTRIBUTE_NORMAL;
     SetLastError(injected_root_error);
     return injected_root_attributes;
 }
 
-static void injected_entry(LPWIN32_FIND_DATAA found, unsigned index)
+static void injected_entry(LPWIN32_FIND_DATAW found, unsigned index)
 {
     memset(found, 0, sizeof *found);
     found->dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
-    _snprintf_s(found->cFileName, sizeof found->cFileName, _TRUNCATE,
-                "injected-%u", index);
+    _snwprintf_s(found->cFileName, sizeof found->cFileName / sizeof found->cFileName[0], _TRUNCATE,
+                 L"injected-%u", index);
 }
 
-static HANDLE WINAPI injected_first(LPCSTR pattern, LPWIN32_FIND_DATAA found)
+static HANDLE WINAPI injected_first(LPCWSTR pattern, LPWIN32_FIND_DATAW found)
 {
     (void)pattern;
     injected_searches++;
@@ -120,7 +120,7 @@ static HANDLE WINAPI injected_first(LPCSTR pattern, LPWIN32_FIND_DATAA found)
     return (HANDLE)(ULONG_PTR)1;
 }
 
-static BOOL WINAPI injected_next(HANDLE search, LPWIN32_FIND_DATAA found)
+static BOOL WINAPI injected_next(HANDLE search, LPWIN32_FIND_DATAW found)
 {
     (void)search;
     if (injected_cursor < injected_entries) {
@@ -294,6 +294,42 @@ int main(void)
     install(overrides, "a/b/c/d/e/f/g/h/i/deep", 1);
     CHECK(sh_packages_enumerate(root, &packages, &count) && count == 6);
     CHECK(index_of(packages, count, "a/b/c/d/e/f/g/h/i/deep") >= 0);
+
+    /* Unicode folder names are found and reported in UTF-8. A marked folder
+     * beyond the runtime's path buffers is listed with its problem rather than
+     * failing discovery of every other package. */
+    {
+        wchar_t wide_overrides[MAX_PATH], group[MAX_PATH], package[MAX_PATH], marker[MAX_PATH];
+        wchar_t long_path[1024], long_marker[1100];
+        size_t i, found_long = 0;
+        CHECK(MultiByteToWideChar(CP_ACP, 0, overrides, -1, wide_overrides, MAX_PATH) > 0);
+        _snwprintf_s(group, MAX_PATH, _TRUNCATE, L"%s\\Gr\u00fcpp\u00e9", wide_overrides);
+        _snwprintf_s(package, MAX_PATH, _TRUNCATE, L"%s\\\u89d2\u8272", group);
+        _snwprintf_s(marker, MAX_PATH, _TRUNCATE, L"%s\\package.json", package);
+        CHECK(CreateDirectoryW(group, NULL) && CreateDirectoryW(package, NULL));
+        CHECK(CloseHandle(CreateFileW(marker, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL)));
+        _snwprintf_s(long_path, 1024, _TRUNCATE, L"\\\\?\\%s\\long", wide_overrides);
+        CHECK(CreateDirectoryW(long_path, NULL));
+        for (i = 0; i < 12; i++) {
+            wcscat_s(long_path, 1024, L"\\a-long-group-folder-name");
+            CHECK(CreateDirectoryW(long_path, NULL));
+        }
+        _snwprintf_s(long_marker, 1100, _TRUNCATE, L"%s\\package.json", long_path);
+        CHECK(CloseHandle(CreateFileW(long_marker, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL)));
+        CHECK(sh_packages_enumerate(root, &packages, &count) && count == 8);
+        CHECK(index_of(packages, count, "Gr\xc3\xbcpp\xc3\xa9/\xe8\xa7\x92\xe8\x89\xb2") >= 0);
+        for (i = 0; i < count; i++) {
+            if (strncmp(packages[i].name, "long/", 5)) CHECK(!packages[i].problem);
+            else { found_long++; CHECK(packages[i].problem != NULL); }
+        }
+        CHECK(found_long == 1);
+        CHECK(DeleteFileW(long_marker));
+        for (i = 0; i < 13; i++) {
+            CHECK(RemoveDirectoryW(long_path));
+            *wcsrchr(long_path, L'\\') = 0;
+        }
+        CHECK(DeleteFileW(marker) && RemoveDirectoryW(package) && RemoveDirectoryW(group));
+    }
     free(packages);
 
     remove_tree(root);

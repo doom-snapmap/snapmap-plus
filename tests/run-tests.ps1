@@ -12,7 +12,8 @@
 #
 # Optional manual probes:
 #   tests\obj\package_compiler_test.exe <data-root> <doom-base>
-# Both resource paths are required; there is no autodiscovery.
+# Both resource paths are required; there is no autodiscovery. The probe skips
+# invalid local packages like the runtime and prints each skipped package.
 # For xinput_ordinal_test against the built proxy, see docs\contributing.md.
 param([string]$Doom = "", [string]$DoomAlt = "", [string[]]$Only = @(), [string[]]$Skip = @())
 $ErrorActionPreference = "Stop"

@@ -52,10 +52,13 @@ int sh_package_bytes_identity(const void *body, size_t length, sh_package_file_i
  * create separate delivery units. Older layouts must be migrated first. */
 sh_package_sources *sh_package_sources_scan(const char *data_root,
                                            char *error, size_t error_capacity);
-/* Local authoring libraries isolate invalid outer packages. Discovery failure
- * still fails the whole scan. The callback must record the rejection; returning
- * zero aborts rather than silently admitting an incomplete inventory. Map and
- * archive callers continue to use the strict scanners above/below. */
+/* Local authoring libraries isolate outer packages whose own content is
+ * invalid: a descriptor, an unusable or duplicate name, a link, or a path the
+ * runtime cannot address. Discovery, read, hashing and allocation failures and
+ * changes during the scan still fail the whole scan. The callback must record
+ * each rejection; returning zero aborts rather than silently admitting an
+ * incomplete inventory. Package names stay folder-derived. Map and archive
+ * callers continue to use the strict scanners above/below. */
 typedef int (*sh_package_source_rejected)(void *context, const sh_package *package,
                                          const char *reason);
 sh_package_sources *sh_package_sources_scan_local(const char *data_root,

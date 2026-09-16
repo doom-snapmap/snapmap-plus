@@ -165,6 +165,9 @@ A few practical notes:
   Snapmap+ fully replaces it, so nothing of the old tool needs to stay behind. Your maps, prefabs and
   overrides carry straight over: anything in the old `%USERPROFILE%\snaphak` folder is copied into
   Snapmap+'s own data folder (`%LOCALAPPDATA%\snapmap-plus`), and the old folder itself is never touched.
+- **Packages from an earlier release?** Install and update convert them to the current package
+  format first, keeping the originals; see
+  [Packages from earlier Snapmap+ releases](#packages-from-earlier-snapmap-releases).
 - **Uninstalling:** `snapmap-plus uninstall` restores your DOOM folder to exactly what it was before.
   Your own Snapmap+ data (`config.json`, prefabs, rawmaps, overrides under
   `%LOCALAPPDATA%\snapmap-plus`) is left untouched.
@@ -909,6 +912,55 @@ it. Runtime refresh waits for the settled My Maps browser, outside an editor, tr
 map installation handles this boundary automatically. Authored sources remain available for making
 new maps after installation.
 
+### When a package cannot load
+
+A package with a problem of its own, such as an invalid `package.json`, a declaration with a syntax
+error, an unknown class or parent, an unsupported requirement or a file name the game cannot use, is
+skipped as a whole: its nested components and assets stay unloaded together. Every other package
+still loads. Run `sh_packages` in the console to see each skipped package folder and the reason.
+Skipped files are not changed on disk, so fixing the reported problem and refreshing brings the
+package back.
+
+Some problems are not about one package. If a file cannot be read because another program has it
+open, or two healthy packages make incompatible edits to the same value, loading keeps the previous
+working result and reports the files or packages involved instead of guessing. The same happens when
+a declaration inherits from a new declaration that only a different package adds, so keep new parent
+declarations in the same package as the declarations that inherit from them. Maps are stricter:
+a package carried by a map must be complete and valid, or that map does not load it.
+
+### Packages from earlier Snapmap+ releases
+
+Earlier releases used a different layout: `decls/`, `images/` and `shaders/` folders instead of
+`assets/`, separate `resources/`, `requirements/`, `strings/` and `hud/` files, a `package.json`
+without an `id`, loose files directly under `overrides`, and `shader_includes`. Installing or
+updating Snapmap+ converts all of these to the current format before the new DLLs are copied.
+
+Each package converts completely or not at all. Conversion keeps your folders and package
+boundaries, moves resources to their engine paths below `assets/`, and folds requirements, strings
+and weapon HUD settings into `package.json`. Manifest entries become the installed game resources
+they named, except resources SnapMap already ships unchanged. Loose files become a
+`legacy-overrides` package. Disabled or unused files, such as `.backup` copies, stay in the package
+outside `assets/` and never become active. Declaration contents are never edited, even when they
+contain a mistake.
+
+The originals are moved, byte for byte, to
+`%LOCALAPPDATA%\snapmap-plus\override-backups\migration-...\original`. Nothing there is loaded
+or deleted automatically. To undo a conversion, close DOOM, remove the converted package folder and
+move the original back to the same place under `overrides`.
+
+If you copied the DLLs by hand, or later unzip a package made for an older release into your
+overrides folder, close DOOM and run this in a terminal next to `snapmap-plus.exe`:
+
+```text
+snapmap-plus migrate-overrides
+```
+
+Add `--doom "C:\path\to\DOOM"` when your DOOM folder is not found automatically; loose files,
+manifests and shader includes are identified from its installed resource catalog. Running the
+command again does nothing to packages that are already current. A package that cannot be converted
+is listed with the reason and left untouched, for example a `package.json` that is not valid JSON or
+two files that supply different bytes for the same resource. Fix it and run the command again.
+
 ### Combining packages
 
 The compiler combines compatible changes from packages and built-in editor support against the
@@ -1018,6 +1070,7 @@ Five toggles for your own player, mainly useful while testing a map solo:
 
 | Command | What it does |
 |---|---|
+| `sh_packages` | Lists installed packages, compiler results and every [skipped package](#when-a-package-cannot-load) with its reason. `sh_packages dependencies [type name]` inspects observed native dependencies. |
 | `sh_user_overrides [0\|1]` | On a successful save, controls whether player [override](#overrides) files load on the next DOOM launch. `0` disables and `1` enables only the first resource layer; restart DOOM to apply either value. A failed save is reported and leaves this launch unchanged, with no next-launch change guaranteed. With no argument, reports this launch's state plus either the saved next-launch state or a volatile value not confirmed saved. |
 
 ### Cvars

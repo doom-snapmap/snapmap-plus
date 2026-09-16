@@ -29,18 +29,36 @@ static int baseline(void *context, const char *path, unsigned char **body, size_
     *length = strlen(value); *body = (unsigned char *)_strdup(value); return *body ? 1 : -1;
 }
 
+static int probe_skipped(void *context, const sh_package *package, const char *reason)
+{
+    (void)context;
+    printf("skipped: %s: %s\n", package->name, reason);
+    return 1;
+}
+
+/* Offline library probe with the runtime's local isolation: invalid packages
+ * are reported and removed; any other failure fails the probe. It has no
+ * product built-ins, native reflection or live engine state. */
 static void probe(const char *data_root, const char *base)
 {
     char error[2048];
     sh_resource_catalog *catalog = sh_resource_catalog_open(base, error, sizeof(error));
     sh_package_sources *sources;
-    sh_package_compilation *compiled;
-    size_t i, bytes = 0, decls = 0;
+    sh_package_compilation *compiled = NULL;
+    sh_package_compile_environment environment = {0};
+    size_t i, bytes = 0, decls = 0, invalid = SIZE_MAX;
     if (!catalog) { fprintf(stderr, "%s\n", error); CHECK(0); return; }
     printf("catalog: %zu rows\n", sh_resource_catalog_count(catalog));
-    sources = sh_package_sources_scan(data_root, error, sizeof(error));
+    sources = sh_package_sources_scan_local(data_root, probe_skipped, NULL, error, sizeof(error));
     if (!sources) { fprintf(stderr, "%s\n", error); CHECK(0); sh_resource_catalog_close(catalog); return; }
-    compiled = sh_package_compile(sources, sh_resource_catalog_read_path, catalog, error, sizeof(error));
+    environment.baseline = sh_resource_catalog_read_path; environment.baseline_context = catalog;
+    environment.invalid_package = &invalid;
+    for (;;) {
+        compiled = sh_package_compile_with(sources, &environment, error, sizeof(error));
+        if (compiled || invalid >= sources->package_count) break;
+        printf("skipped: %s: %s\n", sources->packages[invalid].name, error);
+        if (!sh_package_sources_remove(sources, invalid)) break;
+    }
     if (!compiled) { fprintf(stderr, "%s\n", error); CHECK(0); goto done; }
     for (i = 0; i < compiled->resource_count; i++) {
         size_t length = 0;
@@ -48,8 +66,8 @@ static void probe(const char *data_root, const char *base)
         if (!body) { fprintf(stderr, "%s: %s\n", compiled->resources[i].engine_path, error); CHECK(0); }
         bytes += length; decls += compiled->resources[i].type != NULL; free(body);
     }
-    printf("compiled: %zu resources, %zu declarations, %zu bytes; %zu identical duplicates, %zu composed\n",
-        compiled->resource_count, decls, bytes, compiled->duplicate_count, compiled->composed_count);
+    printf("compiled: %zu packages, %zu resources, %zu declarations, %zu bytes; %zu identical duplicates, %zu composed\n",
+        sources->package_count, compiled->resource_count, decls, bytes, compiled->duplicate_count, compiled->composed_count);
 done:
     sh_package_compilation_free(compiled); sh_package_sources_free(sources); sh_resource_catalog_close(catalog);
 }

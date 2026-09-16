@@ -36,6 +36,137 @@ static int rejected(void *context, const sh_package *package, const char *reason
     (*count)++; return 1;
 }
 
+typedef struct rejection_log {
+    size_t count;
+    char names[16][MAX_PATH];
+    char reasons[16][1024];
+} rejection_log;
+
+static int record_rejection(void *context, const sh_package *package, const char *reason)
+{
+    rejection_log *log = context;
+    if (log->count < 16) {
+        strcpy_s(log->names[log->count], MAX_PATH, package->name);
+        strncpy_s(log->reasons[log->count], 1024, reason, _TRUNCATE);
+    }
+    log->count++; return 1;
+}
+
+static const char *rejection_reason(const rejection_log *log, const char *name)
+{
+    size_t i;
+    for (i = 0; i < log->count && i < 16; i++) if (!strcmp(log->names[i], name)) return log->reasons[i];
+    return NULL;
+}
+
+/* Directory junctions need no symlink privilege. The fixture removes the link
+ * itself with RemoveDirectoryW, never the target. */
+static void make_junction(const char *link, const char *target)
+{
+    char path[4096];
+    wchar_t *wide_link, *wide_target, *substitute;
+    unsigned char buffer[16384] = {0};
+    size_t s, p;
+    DWORD returned = 0;
+    HANDLE handle;
+    create(link, NULL);
+    snprintf(path, sizeof(path), "%s/%s", root, link); wide_link = sh_package_source_wide_path(path);
+    snprintf(path, sizeof(path), "%s/%s", root, target); wide_target = sh_package_source_wide_path(path);
+    CHECK(wide_link && wide_target);
+    if (!wide_link || !wide_target) { free(wide_link); free(wide_target); return; }
+    substitute = wide_target + 4; /* past the extended-length prefix */
+    s = wcslen(substitute); p = s;
+    CHECK(16 + 2 * (4 + s + 1 + p + 1) <= sizeof(buffer));
+    memcpy(buffer, "\x03\x00\x00\xa0", 4);
+    buffer[4] = (unsigned char)((8 + 2 * (4 + s + 1 + p + 1)) & 0xff);
+    buffer[5] = (unsigned char)((8 + 2 * (4 + s + 1 + p + 1)) >> 8);
+    buffer[10] = (unsigned char)((2 * (4 + s)) & 0xff); buffer[11] = (unsigned char)((2 * (4 + s)) >> 8);
+    buffer[12] = (unsigned char)((2 * (4 + s + 1)) & 0xff); buffer[13] = (unsigned char)((2 * (4 + s + 1)) >> 8);
+    buffer[14] = (unsigned char)((2 * p) & 0xff); buffer[15] = (unsigned char)((2 * p) >> 8);
+    memcpy(buffer + 16, L"\\??\\", 8);
+    memcpy(buffer + 24, substitute, 2 * s);
+    memcpy(buffer + 24 + 2 * (s + 1), substitute, 2 * p);
+    handle = CreateFileW(wide_link, GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    CHECK(handle != INVALID_HANDLE_VALUE);
+    if (handle != INVALID_HANDLE_VALUE) {
+        CHECK(DeviceIoControl(handle, FSCTL_SET_REPARSE_POINT, buffer,
+            (DWORD)(16 + 2 * (4 + s + 1 + p + 1)), NULL, 0, &returned, NULL));
+        CloseHandle(handle);
+    }
+    free(wide_link); free(wide_target);
+}
+
+/* Local libraries skip packages whose own content is invalid, keep every other
+ * package with folder-derived names, and fail completely for storage failures. */
+static void local_isolation(void)
+{
+    char error[1024], path[4096];
+    rejection_log log = {0};
+    sh_package_sources *sources;
+    size_t i, delivered = SIZE_MAX, healthy = SIZE_MAX;
+    wchar_t *wide;
+    HANDLE lock;
+    create("outside/data.bin", "outside");
+    create("overrides/healthy/package.json", "{\"id\":\"tests.healthy\",\"name\":\"Healthy\"}");
+    create("overrides/healthy/assets/generated/decls/entitydef/h.decl", "{}");
+    create("overrides/map-0123456789abcdef/tests.healthy/package.json", "{\"id\":\"tests.healthy\",\"name\":\"Delivered\"}");
+    create("overrides/map-0123456789abcdef/tests.healthy/nested/package.json", "{\"id\":\"tests.healthy.nested\",\"name\":\"Nested\"}");
+    create("overrides/map-0123456789abcdef/tests.healthy/nested/assets/n.bin", "nested");
+    create("overrides/bad-descriptor/package.json", "{\"name\":\"No identity\"}");
+    create("overrides/bad-descriptor/assets/generated/decls/entitydef/b.decl", "{}");
+    create("overrides/reserved-name/package.json", "{\"id\":\"tests.reserved\",\"name\":\"Reserved\"}");
+    create("overrides/reserved-name/assets/aux.bin", "reserved device name");
+    create("overrides/linked/package.json", "{\"id\":\"tests.linked\",\"name\":\"Linked\"}");
+    make_junction("overrides/linked/assets", "outside");
+    sources = sh_package_sources_scan_local(root, record_rejection, &log, error, sizeof(error));
+    if (!sources) fprintf(stderr, "local isolation: %s\n", error);
+    CHECK(sources && log.count == 3);
+    CHECK(rejection_reason(&log, "bad-descriptor") && strstr(rejection_reason(&log, "bad-descriptor"), "id"));
+    CHECK(rejection_reason(&log, "reserved-name") && strstr(rejection_reason(&log, "reserved-name"), "not usable"));
+    CHECK(rejection_reason(&log, "linked") && strstr(rejection_reason(&log, "linked"), "links"));
+    if (sources) {
+        CHECK(sources->package_count == 2 && sources->component_count == 3);
+        for (i = 0; i < sources->package_count; i++) {
+            if (!strcmp(sources->packages[i].name, "healthy")) healthy = i;
+            if (!strcmp(sources->packages[i].name, "map-0123456789abcdef/tests.healthy")) delivered = i;
+        }
+        CHECK(healthy != SIZE_MAX && delivered != SIZE_MAX);
+        if (healthy != SIZE_MAX && delivered != SIZE_MAX) {
+            CHECK(!sh_package_source_delivered(sources, healthy) && sh_package_source_delivered(sources, delivered));
+            CHECK(!strcmp(sh_package_source_identity(sources, delivered), "tests.healthy"));
+        }
+        for (i = 0; i < sources->file_count; i++) {
+            const sh_package_source_file *file = &sources->files[i];
+            CHECK(file->owner < sources->package_count && file->component < sources->component_count);
+            CHECK(sources->components[file->component].owner == file->owner);
+        }
+    }
+    sh_package_sources_free(sources);
+    /* Map-carried and archive inventories stay all-or-nothing. */
+    sources = sh_package_sources_scan(root, error, sizeof(error));
+    CHECK(!sources && error[0]); sh_package_sources_free(sources);
+
+    /* An unreadable source is a storage failure: nothing is published or skipped. */
+    snprintf(path, sizeof(path), "%s/overrides/healthy/assets/generated/decls/entitydef/h.decl", root);
+    wide = sh_package_source_wide_path(path);
+    lock = wide ? CreateFileW(wide, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
+    free(wide);
+    CHECK(lock != INVALID_HANDLE_VALUE);
+    memset(&log, 0, sizeof(log));
+    sources = sh_package_sources_scan_local(root, record_rejection, &log, error, sizeof(error));
+    CHECK(!sources && strstr(error, "healthy"));
+    sh_package_sources_free(sources);
+    if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
+
+    /* Repairing a skipped package returns it on the next scan. */
+    create("overrides/bad-descriptor/package.json", "{\"id\":\"tests.repaired\",\"name\":\"Repaired\"}");
+    memset(&log, 0, sizeof(log));
+    sources = sh_package_sources_scan_local(root, record_rejection, &log, error, sizeof(error));
+    CHECK(sources && sources->package_count == 3 && log.count == 2);
+    sh_package_sources_free(sources);
+}
+
 static void scale_inventory(void)
 {
     char path[2048] = "overrides/deep", error[512], descriptor[128];
@@ -389,6 +520,8 @@ done:
     cleanup();
     CHECK(GetTempFileNameA(temp, "ps2", 0, root)); CHECK(DeleteFileA(root)); CHECK(CreateDirectoryA(root, NULL));
     scale_inventory(); cleanup();
+    CHECK(GetTempFileNameA(temp, "ps2", 0, root)); CHECK(DeleteFileA(root)); CHECK(CreateDirectoryA(root, NULL));
+    local_isolation(); cleanup();
     if (failures) return 1;
     puts("package source inventory checks passed"); return 0;
 }

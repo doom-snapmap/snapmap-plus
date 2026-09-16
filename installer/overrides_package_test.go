@@ -14,6 +14,9 @@ func overridesPath(la string, parts ...string) string {
 func TestStarterPackageUsesAuthoredFormat(t *testing.T) {
 	la, _ := newDataDirs(t)
 	migrateUserData()
+	if err := ensureStarterPackage(); err != nil {
+		t.Fatal(err)
+	}
 	data, err := os.ReadFile(overridesPath(la, starterPackageName, "package.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -47,8 +50,12 @@ func TestStarterPackagePreservesAuthoredContent(t *testing.T) {
 	original := `{"id":"personal.tools","name":"My custom package","strings":{"en":{"mine":"My label"}}}`
 	writeF(t, marker, original)
 	writeF(t, source, "MY DECLARATION")
-	migrateUserData()
-	migrateUserData()
+	for i := 0; i < 2; i++ {
+		migrateUserData()
+		if err := ensureStarterPackage(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if readF(t, marker) != original || readF(t, source) != "MY DECLARATION" {
 		t.Fatal("install changed existing authored content")
 	}
@@ -59,6 +66,9 @@ func TestStarterPackageDoesNotReinterpretLooseFiles(t *testing.T) {
 	source := overridesPath(la, "generated", "decls", "file.decl")
 	writeF(t, source, "UNCLAIMED")
 	migrateUserData()
+	if err := ensureStarterPackage(); err != nil {
+		t.Fatal(err)
+	}
 	if readF(t, source) != "UNCLAIMED" {
 		t.Fatal("loose content was moved or changed")
 	}

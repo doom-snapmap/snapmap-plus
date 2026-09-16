@@ -17,6 +17,9 @@ typedef struct ps_scan {
     size_t file_capacity, component_capacity;
     char *error;
     size_t error_capacity;
+    /* The failure is the package's own content, not storage, memory or a
+     * change during the scan. Only content failures may isolate a package. */
+    int content;
 } ps_scan;
 
 static int ps_error(char *out, size_t capacity, const char *format, ...)
@@ -24,6 +27,16 @@ static int ps_error(char *out, size_t capacity, const char *format, ...)
     va_list args;
     if (out && capacity) {
         va_start(args, format); vsnprintf(out, capacity, format, args); va_end(args);
+    }
+    return 0;
+}
+
+static int ps_refuse(ps_scan *scan, const char *format, ...)
+{
+    va_list args;
+    scan->content = 1;
+    if (scan->error && scan->error_capacity && !scan->error[0]) {
+        va_start(args, format); vsnprintf(scan->error, scan->error_capacity, format, args); va_end(args);
     }
     return 0;
 }
@@ -124,14 +137,49 @@ wchar_t *sh_package_source_wide_path(const char *absolute)
     return out;
 }
 
-static char *ps_utf8(const wchar_t *text)
+/* 1 converted, 0 not valid Unicode, -1 allocation failure. */
+static int ps_utf8(const wchar_t *text, char **out)
 {
     int length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, -1, NULL, 0, NULL, NULL);
-    char *out = length ? (char *)malloc((size_t)length) : NULL;
-    if (out && !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, -1, out, length, NULL, NULL)) {
-        free(out); out = NULL;
+    *out = NULL;
+    if (!length) return 0;
+    *out = (char *)malloc((size_t)length);
+    if (!*out) return -1;
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, -1, *out, length, NULL, NULL)) {
+        free(*out); *out = NULL; return 0;
     }
-    return out;
+    return 1;
+}
+
+/* The per-name rules of sh_package_engine_path, without allocating, so an
+ * unusable authored name is not mistaken for an allocation failure. */
+static int ps_name_valid(const char *name, size_t n)
+{
+    size_t i, stem = 0;
+    if (!n || name[n - 1] == '.' || name[n - 1] == ' ') return 0;
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if (c < 0x20 || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' ||
+            c == '|' || c == '/' || c == '\\') return 0;
+    }
+    while (stem < n && name[stem] != '.') stem++;
+    if (stem == 3 && (!_strnicmp(name, "con", 3) || !_strnicmp(name, "prn", 3) ||
+                      !_strnicmp(name, "aux", 3) || !_strnicmp(name, "nul", 3))) return 0;
+    return !(stem == 4 && (!_strnicmp(name, "com", 3) || !_strnicmp(name, "lpt", 3)) &&
+             name[3] >= '1' && name[3] <= '9');
+}
+
+static int ps_path_valid(const char *path)
+{
+    const char *part = path;
+    size_t length = strlen(path);
+    if (!length || length >= SH_PACKAGE_SOURCE_PATH_CAP) return 0;
+    for (;;) {
+        size_t n = strcspn(part, "/\\");
+        if (!ps_name_valid(part, n)) return 0;
+        if (!part[n]) return 1;
+        part += n + 1;
+    }
 }
 
 static DWORD ps_attributes(const char *path)
@@ -432,8 +480,13 @@ static int ps_component(ps_scan *scan, size_t owner, const char *relative,
     component->owner = owner; component->relative = ps_copy(relative); component->root = ps_copy(root);
     if (!component->relative || !component->root ||
         !ps_read(marker, &body, (size_t)PTRDIFF_MAX, &length, digest)) goto done;
+    /* The JSON reader reports a failed allocation like invalid text. The C
+     * runtime allocators record that failure, and it is not the package's. */
+    errno = 0;
     if (!sh_package_descriptor_parse((const char *)body, (size_t)length,
-                                     &component->descriptor, scan->error, scan->error_capacity)) goto done;
+                                     &component->descriptor, scan->error, scan->error_capacity)) {
+        scan->content = errno != ENOMEM; goto done;
+    }
     memcpy(component->descriptor_digest, digest, sizeof(digest));
     ok = 1;
 done:
@@ -442,13 +495,10 @@ done:
     free(marker); free(body); return ok;
 }
 
-static char *ps_engine(const sh_package_component *component, const char *relative)
+static const char *ps_local(const sh_package_component *component, const char *relative)
 {
-    const char *local = relative;
-    size_t n = strlen(component->relative);
-    if (n) local += n + 1u;
-    if (!_strnicmp(local, "assets/", 7)) return sh_package_engine_path(local + 7);
-    return NULL;
+    const char *local = relative + strlen(component->relative);
+    return *local == '/' ? local + 1 : local;
 }
 
 typedef struct ps_directory {
@@ -489,14 +539,26 @@ static int ps_walk_directory(ps_scan *scan, size_t owner, size_t component_index
         ok = GetLastError() == ERROR_FILE_NOT_FOUND; goto done;
     }
     do {
-        char *name = NULL, *path = NULL, *rel = NULL, *canonical = NULL;
+        char *name = NULL, *path = NULL, *rel = NULL;
         sh_package_source_file *file;
-        int entry_ok = 0;
+        const char *local;
+        int entry_ok = 0, converted;
         if (!wcscmp(found.cFileName, L".") || !wcscmp(found.cFileName, L"..")) continue;
-        name = ps_utf8(found.cFileName);
-        if (!name || !(canonical = sh_package_engine_path(name)) ||
-            !(path = ps_join(root, name)) || !(rel = ps_join(relative, name)) ||
-            (found.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) goto entry_done;
+        converted = ps_utf8(found.cFileName, &name);
+        if (converted <= 0) {
+            if (!converted) ps_refuse(scan, "a file name is not valid Unicode in %s", root);
+            goto entry_done;
+        }
+        if (!ps_name_valid(name, strlen(name))) {
+            ps_refuse(scan, "name is not usable in a package: %s/%s", root, name); goto entry_done;
+        }
+        if (found.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+            ps_refuse(scan, "links and reparse points are not supported in packages: %s/%s", root, name); goto entry_done;
+        }
+        if (strlen(root) + strlen(name) + 2u >= SH_PACKAGE_SOURCE_PATH_CAP) {
+            ps_refuse(scan, "package path is too long: %s/%s", root, name); goto entry_done;
+        }
+        if (!(path = ps_join(root, name)) || !(rel = ps_join(relative, name))) goto entry_done;
         if (!ps_grow((void **)&scan->out->files, &scan->file_capacity, scan->out->file_count,
                       sizeof(*file))) goto entry_done;
         file = &scan->out->files[scan->out->file_count++];
@@ -506,19 +568,26 @@ static int ps_walk_directory(ps_scan *scan, size_t owner, size_t component_index
         if (file->directory) {
             entry_ok = ps_enqueue(pending, component_index, file->absolute, file->relative);
         } else {
-            const sh_package_component *component = &scan->out->components[component_index];
-            const char *local = file->relative + strlen(component->relative);
-            if (*local == '/') local++;
-            file->engine_path = ps_engine(component, file->relative);
-            if (!_strnicmp(local, "assets/", 7) && !file->engine_path) goto entry_done;
+            local = ps_local(&scan->out->components[component_index], file->relative);
+            if (!_strnicmp(local, "assets/", 7)) {
+                if (!ps_path_valid(local + 7)) {
+                    ps_refuse(scan, "engine path is not usable in a package: %s", file->relative); goto entry_done;
+                }
+                if (!(file->engine_path = sh_package_engine_path(local + 7))) goto entry_done;
+            }
             entry_ok = ps_read(file->absolute, NULL, 0, &file->length, file->digest);
-            if (!_stricmp(local, "package.json") && memcmp(file->digest, component->descriptor_digest, 32))
+            if (!entry_ok && scan->error && scan->error_capacity && !scan->error[0])
+                ps_error(scan->error, scan->error_capacity, "cannot read package source: %s", file->absolute);
+            if (entry_ok && !_stricmp(local, "package.json") &&
+                memcmp(file->digest, scan->out->components[component_index].descriptor_digest, 32)) {
+                ps_error(scan->error, scan->error_capacity, "package descriptor changed during the scan: %s", file->absolute);
                 entry_ok = 0;
+            }
         }
 entry_done:
         if (!entry_ok && scan->error && scan->error_capacity && !scan->error[0])
-            ps_error(scan->error, scan->error_capacity, "invalid, unreadable or unallocatable package source: %s/%s", root, name ? name : "?");
-        free(name); free(path); free(rel); free(canonical);
+            ps_error(scan->error, scan->error_capacity, "cannot record package source in %s", root);
+        free(name); free(path); free(rel);
         if (!entry_ok) goto done;
     } while (FindNextFileW(search, &found));
     end_error = GetLastError();
@@ -550,7 +619,8 @@ static int ps_walk(ps_scan *scan, size_t owner, size_t component_index,
             attributes = ps_attributes(marker); error = GetLastError();
             free(marker);
             if (attributes != INVALID_FILE_ATTRIBUTES) {
-                ok = !(attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) &&
+                ok = (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ?
+                    ps_refuse(scan, "package.json must be a regular file: %s", current.root) :
                     ps_component(scan, owner, current.relative, current.root, &current.component);
             } else ok = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
         }
@@ -607,23 +677,30 @@ done:
 }
 
 static sh_package_sources *ps_inventory(const char *data_root, const char *single_root,
-                                        char *error, size_t error_capacity)
+                                        char *error, size_t error_capacity, int *content)
 {
     sh_package_sources *out = (sh_package_sources *)calloc(1, sizeof(*out));
-    ps_scan scan = {out, 0, 0, error, error_capacity};
+    ps_scan scan = {out, 0, 0, error, error_capacity, 0};
     size_t i;
     if (error && error_capacity) error[0] = 0;
+    if (content) *content = 0;
     if (!out) goto bad;
     if (single_root) {
         out->packages = (sh_package *)calloc(1, sizeof(sh_package));
         if (!out->packages) goto bad;
-        if (strcpy_s(out->packages[0].root, sizeof(out->packages[0].root), single_root)) goto bad;
+        if (strlen(single_root) >= sizeof(out->packages[0].root)) {
+            ps_refuse(&scan, "package path is too long: %s", single_root); goto bad;
+        }
+        strcpy_s(out->packages[0].root, sizeof(out->packages[0].root), single_root);
         out->package_count = 1;
     } else if (!sh_packages_enumerate(data_root, &out->packages, &out->package_count)) {
         ps_error(error, error_capacity, "package directory enumeration failed"); goto bad;
     }
     for (i = 0; i < out->package_count; i++) {
         size_t component;
+        if (out->packages[i].problem) {
+            ps_refuse(&scan, "%s: %s", out->packages[i].root, out->packages[i].problem); goto bad;
+        }
         if (!ps_component(&scan, i, "", out->packages[i].root, &component) ||
             !ps_walk(&scan, i, component, out->packages[i].root, "")) goto bad;
         if (single_root && strcpy_s(out->packages[i].name, sizeof(out->packages[i].name),
@@ -632,20 +709,21 @@ static sh_package_sources *ps_inventory(const char *data_root, const char *singl
     if (out->file_count) qsort(out->files, out->file_count, sizeof(*out->files), ps_file_compare);
     for (i = 1; i < out->file_count; i++) if (out->files[i - 1].owner == out->files[i].owner &&
         !_stricmp(out->files[i - 1].relative, out->files[i].relative)) {
-        ps_error(error, error_capacity, "case-insensitive duplicate source path: %s", out->files[i].relative); goto bad;
+        ps_refuse(&scan, "case-insensitive duplicate source path: %s", out->files[i].relative); goto bad;
     }
     if (!ps_fingerprints(out)) goto bad;
     return out;
 bad:
     if (error && error_capacity && !error[0]) ps_error(error, error_capacity, "package inventory allocation or hashing failed");
+    if (content) *content = scan.content;
     sh_package_sources_free(out); return NULL;
 }
 
 sh_package_sources *sh_package_sources_scan(const char *data_root, char *error, size_t capacity)
-{ return ps_inventory(data_root, NULL, error, capacity); }
+{ return ps_inventory(data_root, NULL, error, capacity, NULL); }
 
 sh_package_sources *sh_package_sources_scan_directory(const char *root, char *error, size_t capacity)
-{ return root && *root ? ps_inventory(NULL, root, error, capacity) : NULL; }
+{ return root && *root ? ps_inventory(NULL, root, error, capacity, NULL) : NULL; }
 
 /* Move an already complete unit into growing vectors; do not repeatedly clone
  * earlier packages when a library contains many small delivery units. */
@@ -689,14 +767,20 @@ sh_package_sources *sh_package_sources_scan_local(const char *data_root,
     out = calloc(1, sizeof(*out));
     if (!out) goto bad;
     for (i = 0; i < count; i++) {
-        errno = 0; SetLastError(ERROR_SUCCESS);
-        unit = sh_package_sources_scan_directory(packages[i].root, detail, sizeof(detail));
-        if (!unit) {
-            DWORD system_error = GetLastError();
-            if (errno == ENOMEM || system_error == ERROR_NOT_ENOUGH_MEMORY ||
-                system_error == ERROR_OUTOFMEMORY || system_error == ERROR_NO_SYSTEM_RESOURCES ||
-                !detail[0] || !rejected(context, &packages[i], detail)) {
+        int content = 0;
+        const char *reason = packages[i].problem;
+        if (!reason) {
+            unit = ps_inventory(NULL, packages[i].root, detail, sizeof(detail), &content);
+            if (!unit && !content) {
+                /* Storage, memory and concurrent changes are not package
+                 * defects; publishing the remaining units would hide them. */
                 ps_error(error, capacity, "local package scan failed: %s: %s", packages[i].name, detail); goto bad;
+            }
+            reason = detail;
+        }
+        if (!unit) {
+            if (!rejected(context, &packages[i], reason)) {
+                ps_error(error, capacity, "cannot record the skipped local package %s", packages[i].name); goto bad;
             }
             continue;
         }

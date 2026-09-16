@@ -272,6 +272,36 @@ files. Discovery, semantic compilation and native publication are separate
 operations. Incomplete inventories must not publish a partial package set.
 Author-facing format and examples live in the [player guide](../site/snapmap-plus-guide.md#overrides).
 
+The local authoring library isolates defects that belong to one outer package.
+`sh_package_sources_scan_local` skips a package whose own content is invalid:
+its descriptor, an unusable or case-duplicate name, a link, or a path the
+runtime cannot address. The compiler reports an invalid package through
+`invalid_package` for bad per-package policy, text that is not a declaration, a
+path under `generated/decls` that is not a declaration identity, a contribution
+the declaration parser cannot read, and a resource that fails composition again
+with only that package, the installed original and product defaults. Typical
+typed defects are an unknown class, a parent no package declares, an inheritance
+cycle inside the package, an out-of-range fixed array entry or a contradiction
+of a product default. The runtime removes that whole package with its nested
+components and compiles again. Storage, hashing, read and allocation failures,
+sources that change during a scan, conflicts between packages that each compose
+alone, a parent that only another package declares, unavailable reader metadata
+and original failures are never attributed to a package: they keep the previous
+provider. Startup package identities and map installation planning scan the
+local library with the same isolation; a map-carried bundle is still read with
+the strict all-or-nothing scanner. Skipped folders and reasons appear in
+`sh_packages`, never as silent omissions.
+
+Discovery uses wide-character enumeration, so Unicode and long group paths are
+found. A marked folder whose path does not fit the runtime package record is
+reported as a skipped package. The data root itself still comes from the ANSI
+`SHGetFolderPathA`; a profile path outside ASCII remains unsupported.
+
+Older package layouts are not read by the runtime. The installer converts them
+before replacing the DLLs and exposes the same conversion as
+`snapmap-plus migrate-overrides`; its contract is in the
+[installer README](../installer/README.md#converting-overrides-from-earlier-releases).
+
 Compilation includes built-in overrides and package sources relative to verified
 originals. Compatible changes compose using native field and collection semantics;
 contradictions are reported before publication. Opaque payloads are selected whole.

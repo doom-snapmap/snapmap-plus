@@ -316,17 +316,21 @@ int main(void)
     map_selection_retains_requirements(root, package, marker);
     policy(root, marker, both);
 
-    /* A package cannot smuggle an arbitrary command or non-audited cvar. */
+    /* A package cannot smuggle an arbitrary command or non-audited cvar. The
+     * package is skipped as a whole: none of its policy, safe or not, applies. */
     reset_native(1, 1);
     CHECK(write_text(marker, "{\"id\":\"example\",\"name\":\"Example\","
-        "\"requirements\":{\"cvars\":{\"quit\":1}}}"));
-    CHECK(!sh_package_runtime_refresh(root));
-    /* Failed new source cannot replace the already published safe policy. */
+        "\"requirements\":{\"cvars\":{\"quit\":1,\"g_useImageBlackList\":0}}}"));
+    CHECK(sh_package_runtime_refresh(root));
+    {
+        char *summary = sh_package_runtime_summary();
+        CHECK(summary && strstr(summary, "Skipped local package") && strstr(summary, "unsupported setting"));
+        free(summary);
+    }
     CHECK(install(root) && sh_package_requirements_apply_now(NULL));
-    CHECK(sh_package_requirements_test_count() == 2);
-    CHECK(g_buffer_calls == 1);
+    CHECK(sh_package_requirements_test_count() == 0);
     CHECK(!strstr(g_buffered, "quit"));
-    CHECK(strcmp(g_buffered, "g_useImageBlackList 0\ng_useResourceBlackList 0\n") == 0);
+    CHECK(!strstr(g_buffered, "g_useImageBlackList"));
 
     DeleteFileA(marker);
     RemoveDirectoryA(package);

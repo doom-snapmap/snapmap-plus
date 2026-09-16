@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +8,7 @@
 #include "decl_server_path.h"
 #include "decl_text.h"
 #include "decl_entity_class.h"
+#include "decl_tree.h"
 
 typedef struct pc_input {
     const sh_package_source_file *file;
@@ -52,9 +54,23 @@ typedef struct pc_class_context {
     size_t input_count;
     const pc_input *inputs;
     size_t source_input_count;
+    /* An owner-alone check sees one package's contributions, the original and
+     * product defaults. It records reads that only another package could
+     * satisfy and reads that failed rather than finding authored content. */
+    int alone, peer_source, operational;
+    size_t alone_owner, alone_count;
 } pc_class_context;
 
 static char *pc_key(const sh_package_compile_environment *environment, const char *path);
+
+/* A contribution reads its own package; a result reads every package, or only
+ * the package being checked alone. */
+static int pc_view_includes(const pc_class_context *view, sh_decl_composition_role role,
+    size_t owner, const sh_package_source_file *file)
+{
+    if (role != SH_DECL_COMPOSITION_RESULT) return file->owner == owner;
+    return !view->alone || file->owner == view->alone_owner;
+}
 
 void sh_package_resource_inputs_free(sh_package_resource_inputs *inputs)
 {
@@ -84,7 +100,9 @@ static int pc_source_inputs(void *context, sh_decl_composition_role role, size_t
     if (out->original_scope < 0 || (out->original_scope && !body)) goto done;
     out->original = (sh_decl_source){(char *)body, length}; body = NULL;
     if (role == SH_DECL_COMPOSITION_ORIGINAL) { result = out->original_scope ? 1 : 0; goto done; }
-    if (role == SH_DECL_COMPOSITION_CONTRIBUTION && index < view->resource->source_count)
+    if (role == SH_DECL_COMPOSITION_CONTRIBUTION && view->alone)
+        owner = index < view->alone_count ? view->alone_owner : SIZE_MAX;
+    else if (role == SH_DECL_COMPOSITION_CONTRIBUTION && index < view->resource->source_count)
         owner = view->sources->files[view->resource->sources[index]].owner;
     if (role == SH_DECL_COMPOSITION_RESULT || owner == SIZE_MAX) builtin = pc_builtin(environment, path);
     /* Reuse the compiler's sorted canonical index. A schema read touches only
@@ -97,9 +115,10 @@ static int pc_source_inputs(void *context, sh_decl_composition_role role, size_t
     }
     count = builtin != NULL;
     while (end < view->source_input_count && !strcmp(view->inputs[end].path, path)) {
-        if (role == SH_DECL_COMPOSITION_RESULT || view->inputs[end].file->owner == owner) count++;
+        if (pc_view_includes(view, role, owner, view->inputs[end].file)) count++;
         end++;
     }
+    if (view->alone && end > first && !count && !out->original_scope) view->peer_source = 1;
     if (count > SIZE_MAX / sizeof(*out->contributions) || count > SIZE_MAX / sizeof(*out->owners)) goto done;
     if (count) {
         out->contributions = calloc(count, sizeof(*out->contributions));
@@ -108,7 +127,7 @@ static int pc_source_inputs(void *context, sh_decl_composition_role role, size_t
     }
     for (size_t i = first; i < end; i++) {
         const sh_package_source_file *file = view->inputs[i].file;
-        if (role != SH_DECL_COMPOSITION_RESULT && file->owner != owner) continue;
+        if (!pc_view_includes(view, role, owner, file)) continue;
         body = sh_package_source_read(file, (size_t)PTRDIFF_MAX, &length, error, capacity);
         if (!body) goto done;
         out->contributions[out->count] = (sh_decl_source){(char *)body, length};
@@ -125,6 +144,7 @@ static int pc_source_inputs(void *context, sh_decl_composition_role role, size_t
 done:
     free(path); free(body);
     if (result < 0) {
+        view->operational = 1;
         sh_package_resource_inputs_free(out);
         if (error && capacity && !*error) snprintf(error, capacity, "resource source view is unreadable or invalid: %s",
             engine_path ? engine_path : "(missing path)");
@@ -172,7 +192,7 @@ static int pc_entity_class(void *context, const sh_decl_node *definition,
     sh_decl_entity_class_source source = {view, pc_parent_read, pc_class_derives};
     pc_class_name *owned = (pc_class_name *)calloc(1, sizeof(*owned));
     view->role = role; view->index = index; view->parent_error[0] = 0;
-    if (!owned) return -1;
+    if (!owned) { view->operational = 1; return -1; }
     owned->name = sh_decl_entity_tree_class(definition, &source, error, capacity);
     if (!owned->name) {
         if (view->parent_error[0] && error && capacity) snprintf(error, capacity, "%s", view->parent_error);
@@ -190,11 +210,13 @@ static void pc_classes_free(pc_class_context *context)
     }
 }
 
+/* *allocation distinguishes memory failure from invalid or conflicting authored
+ * policy, so a failed allocation never isolates the package being checked. */
 static int pc_policy_merge(sh_json_object *target, const sh_json_object *source,
-                            const char *path, unsigned depth, char *error, size_t capacity)
+                            const char *path, unsigned depth, char *error, size_t capacity, int *allocation)
 {
     size_t i;
-    if (depth > 12u) return 0;
+    if (depth > 12u) { snprintf(error, capacity, "package policy is nested too deeply at %s", path); return 0; }
     for (i = 0; i < source->count; i++) {
         const sh_json_member *member = &source->members[i];
         const char *previous = NULL;
@@ -211,7 +233,7 @@ static int pc_policy_merge(sh_json_object *target, const sh_json_object *source,
             char *field;
             if (path_length > SIZE_MAX - 2u || member->key_length > SIZE_MAX - path_length - 2u ||
                 !(field = (char *)malloc(path_length + member->key_length + 2u))) {
-                snprintf(error, capacity, "could not allocate package policy path"); return 0;
+                *allocation = 1; snprintf(error, capacity, "could not allocate package policy path"); return 0;
             }
             memcpy(field, path, path_length); field[path_length] = '.';
             memcpy(field + path_length + 1u, member->key, member->key_length + 1u);
@@ -219,12 +241,14 @@ static int pc_policy_merge(sh_json_object *target, const sh_json_object *source,
                          sh_json_parse_object(member->value_json, strlen(member->value_json), 16u, &right);
             if (parsed) {
                 char *merged; size_t length;
-                int ok = pc_policy_merge(&left, &right, field, depth + 1u, error, capacity);
+                int ok = pc_policy_merge(&left, &right, field, depth + 1u, error, capacity, allocation);
                 free(field);
                 sh_json_object_free(&right);
                 merged = ok ? sh_json_serialize_object(&left, 0, &length) : NULL;
                 sh_json_object_free(&left);
-                ok = merged && sh_json_object_set(target, target->members[j].key, merged, 16u);
+                if (ok && (!merged || !sh_json_object_set(target, target->members[j].key, merged, 16u))) {
+                    *allocation = 1; ok = 0;
+                }
                 free(merged);
                 if (!ok) return 0;
                 continue;
@@ -236,12 +260,15 @@ static int pc_policy_merge(sh_json_object *target, const sh_json_object *source,
                 char *a = (char *)malloc(an), *b = (char *)malloc(bn);
                 int same = a && b && sh_json_decode_string(previous, an - 1u, a, an, &al) &&
                     sh_json_decode_string(member->value_json, bn - 1u, b, bn, &bl) && al == bl && !memcmp(a, b, al);
+                if (!a || !b) { free(a); free(b); free(field); *allocation = 1; return 0; }
                 free(a); free(b);
                 if (same) { free(field); continue; }
             }
             snprintf(error, capacity, "conflicting package policy: %s", field); free(field); return 0;
         }
-        if (!previous && !sh_json_object_set(target, member->key, member->value_json, 16u)) return 0;
+        if (!previous && !sh_json_object_set(target, member->key, member->value_json, 16u)) {
+            *allocation = 1; return 0;
+        }
     }
     return 1;
 }
@@ -249,11 +276,13 @@ static int pc_policy_merge(sh_json_object *target, const sh_json_object *source,
 static int pc_variant_shadowed(const sh_package_sources *sources, size_t candidate, size_t primary);
 
 static int pc_policies(const sh_package_sources *sources, const sh_package_owners *owners,
-                        sh_package_policy *out, char *error, size_t capacity)
+                        sh_package_policy *out, char *error, size_t capacity, int *allocation)
 {
     const char *names[] = {"requirements", "strings", "hud"};
     sh_json_object *targets[] = {&out->requirements, &out->strings, &out->hud};
     size_t i, section, other_package;
+    int ignored = 0;
+    if (!allocation) allocation = &ignored;
     for (i = 0; i < sources->component_count; i++) {
         const sh_package_component *component = &sources->components[i];
         int shadowed = 0;
@@ -269,9 +298,16 @@ static int pc_policies(const sh_package_sources *sources, const sh_package_owner
             sh_json_object object = {0};
             int ok;
             if (!raw) continue;
-            ok = sh_json_parse_object(raw, strlen(raw), 16, &object) &&
-                 pc_policy_merge(targets[section], &object, names[section], 0, error, capacity);
-            if (!ok) {
+            if (!sh_json_parse_object(raw, strlen(raw), 16, &object)) {
+                /* The descriptor already validated this fragment at depth 24. */
+                sh_json_kind kind;
+                if (sh_json_validate(raw, strlen(raw), 16, &kind)) *allocation = 1;
+                else snprintf(error, capacity, "%s policy of package %s is nested too deeply",
+                    names[section], sources->packages[component->owner].name);
+                return 0;
+            }
+            ok = pc_policy_merge(targets[section], &object, names[section], 0, error, capacity, allocation);
+            if (!ok && !*allocation) {
                 size_t previous;
                 /* Find an actual incompatible pair for the diagnostic, rather
                  * than assigning precedence to an arbitrary package order. */
@@ -281,8 +317,10 @@ static int pc_policies(const sh_package_sources *sources, const sh_package_owner
                     const char *other_raw = sh_package_descriptor_section(&other->descriptor, names[section]);
                     sh_json_object probe = {0};
                     char detail[1024] = "";
+                    int probe_allocation = 0;
                     int conflict = other_raw && sh_json_parse_object(other_raw, strlen(other_raw), 16, &probe) &&
-                        !pc_policy_merge(&probe, &object, names[section], 0, detail, sizeof(detail));
+                        !pc_policy_merge(&probe, &object, names[section], 0, detail, sizeof(detail), &probe_allocation) &&
+                        !probe_allocation;
                     sh_json_object_free(&probe);
                     if (conflict) {
                         snprintf(error, capacity, "%s; packages %s (%s) and %s (%s)", detail,
@@ -353,12 +391,12 @@ static int pc_view_policies(const sh_package_compilation *compiled, const sh_pac
     sh_package_owners local = {0}, map = {0};
     sh_package_policy upper = {0};
     size_t i; int ok = 0;
-    if (!compiled->map_overlay) return pc_policies(compiled->sources, owners, out, error, capacity);
+    if (!compiled->map_overlay) return pc_policies(compiled->sources, owners, out, error, capacity, NULL);
     if (compiled->map_owner_begin > compiled->sources->package_count) goto done;
     for (i = 0; i < compiled->sources->package_count; i++) if (!owners || sh_package_owners_contains(owners, i))
         if (!sh_package_owners_add(i < compiled->map_owner_begin ? &local : &map, i)) goto done;
-    if (!pc_policies(compiled->sources, &local, out, error, capacity) ||
-        !pc_policies(compiled->sources, &map, &upper, error, capacity)) goto done;
+    if (!pc_policies(compiled->sources, &local, out, error, capacity, NULL) ||
+        !pc_policies(compiled->sources, &map, &upper, error, capacity, NULL)) goto done;
     ok = pc_policy_overlay(&out->requirements, &upper.requirements, 0) &&
         pc_policy_overlay(&out->strings, &upper.strings, 0) &&
         pc_policy_overlay(&out->hud, &upper.hud, 0);
@@ -435,17 +473,29 @@ static const sh_decl_collection_rule *pc_rules(const char *type, size_t *count)
     return NULL;
 }
 
-static int pc_identity(sh_compiled_resource *resource, char *error, size_t capacity)
+/* *invalid reports an authored path that cannot be a declaration identity. */
+static int pc_identity(sh_compiled_resource *resource, int *invalid, char *error, size_t capacity)
 {
     char type[SH_DECL_SERVER_TYPE_CAP], name[SH_DECL_SERVER_NAME_CAP], source[SH_DECL_SERVER_SOURCE_CAP];
     const char *reason = NULL;
     if (strncmp(resource->engine_path, "generated/decls/", 16)) return 1;
     if (!sh_decl_server_identity_from_relative(resource->engine_path + 16,
         type, sizeof(type), name, sizeof(name), source, sizeof(source), &reason)) {
+        *invalid = 1;
         snprintf(error, capacity, "%s: %s", resource->engine_path, reason ? reason : "invalid declaration identity"); return 0;
     }
     resource->type = _strdup(type); resource->name = _strdup(name);
     return resource->type && resource->name;
+}
+
+static int pc_unparseable(sh_decl_source text)
+{
+    char reason[256] = "";
+    sh_decl_node *tree;
+    errno = 0;
+    tree = sh_decl_tree_parse(text, reason, sizeof(reason));
+    if (tree) { sh_decl_tree_free(tree); return 0; }
+    return errno != ENOMEM && !strstr(reason, "allocation");
 }
 
 static void pc_report_conflict(const sh_package_compilation *compilation,
@@ -605,6 +655,89 @@ static void pc_resolve_variants(const sh_package_sources *sources, sh_compiled_r
     resource->source_count = kept;
 }
 
+/* A resource that fails to compose belongs to one package only when that
+ * package's contributions fail the same composition alone, against the
+ * original and product defaults. A check that needs a source only another
+ * package supplies, fails to read or allocate, or cannot name one of the
+ * package's own contributions attributes nothing: peer conflicts, inheritance
+ * from another package and original failures keep the whole transaction.
+ * Returns the owner, with its own diagnostic in error, or SIZE_MAX. */
+static size_t pc_alone_invalid(const sh_package_compilation *out, const sh_compiled_resource *resource,
+    const sh_package_compile_environment *environment, const sh_package_builtin *builtin,
+    pc_class_context *classes, const sh_decl_composition_schema *schema, int typed, int custom_reader,
+    sh_decl_source base, int have_base, const sh_decl_source *texts, char *error, size_t capacity)
+{
+    const sh_package_source_file *files = out->sources->files;
+    const sh_decl_collection_rule *rules;
+    size_t count = resource->source_count, saved_inputs = classes->input_count, rule_count = 0;
+    size_t found = SIZE_MAX, i, j, *map = NULL;
+    sh_decl_source *alone = NULL;
+    rules = pc_rules(resource->type, &rule_count);
+    if (count >= SIZE_MAX / sizeof(*alone) ||
+        !(map = (size_t *)malloc((count + 1u) * sizeof(*map))) ||
+        !(alone = (sh_decl_source *)malloc((count + 1u) * sizeof(*alone)))) goto done;
+    for (i = 0; i < count; i++) {
+        size_t owner = files[resource->sources[i]].owner, own = 0, total, distinct = 0;
+        sh_decl_conflict cause = {SIZE_MAX, SIZE_MAX}, changes = {SIZE_MAX, SIZE_MAX};
+        char detail[512] = "", *body = NULL;
+        size_t length = 0;
+        int result = 0, failed = 0;
+        for (j = 0; j < i; j++) if (files[resource->sources[j]].owner == owner) break;
+        if (j < i) continue;
+        for (j = i; j < count; j++) if (files[resource->sources[j]].owner == owner) {
+            alone[own] = texts[j]; map[own++] = j;
+        }
+        total = own;
+        if (builtin) { alone[total] = texts[count]; map[total++] = count; }
+        for (j = 0; j < total; j++) {
+            size_t previous;
+            if (have_base && pc_equal((const unsigned char *)base.text, base.length,
+                (const unsigned char *)alone[j].text, alone[j].length)) continue;
+            for (previous = 0; previous < j; previous++)
+                if (pc_equal((const unsigned char *)alone[previous].text, alone[previous].length,
+                    (const unsigned char *)alone[j].text, alone[j].length)) break;
+            if (previous < j) continue;
+            if (!distinct) changes.first = j;
+            else if (distinct == 1) changes.second = j;
+            distinct++;
+        }
+        /* Without an original reader, composition is unavailable to everyone. */
+        if (((!typed || !schema->resolve) && distinct <= 1u) ||
+            (!have_base && !environment->baseline && !builtin)) continue;
+        classes->alone = 1; classes->alone_owner = owner; classes->alone_count = own;
+        classes->input_count = total; classes->peer_source = classes->operational = 0;
+        errno = 0;
+        if (environment->compose_custom) {
+            sh_package_source_view view = {classes, pc_source_inputs};
+            result = environment->compose_custom(environment->type_context, resource->type,
+                have_base ? base : (sh_decl_source){"{}", 2}, alone, total, &body, &length,
+                detail, sizeof(detail), &cause, &view);
+            failed = result < 0 || (result > 0 && !body);
+            free(body); body = NULL;
+        }
+        if (!result && custom_reader) {
+            snprintf(detail, sizeof(detail), "native declaration family requires a verified composition adapter");
+            cause = changes; failed = 1;
+        } else if (!result) {
+            body = sh_decl_compose_resource(resource->type, have_base ? base : (sh_decl_source){"{}", 2},
+                alone, total, rules, rule_count, typed ? schema : NULL, &length,
+                detail, sizeof(detail), &cause);
+            failed = !body; free(body); body = NULL;
+        }
+        classes->alone = 0; classes->input_count = saved_inputs;
+        if (!failed) continue;
+        if (classes->operational || errno == ENOMEM || strstr(detail, "allocation")) break;
+        if (classes->peer_source || !(cause.first < own || cause.second < own)) continue;
+        cause.first = cause.first < total ? map[cause.first] : SIZE_MAX;
+        cause.second = cause.second < total ? map[cause.second] : SIZE_MAX;
+        pc_report_conflict(out, resource, cause, builtin != NULL, detail, error, capacity);
+        found = owner; break;
+    }
+done:
+    classes->alone = 0; classes->input_count = saved_inputs;
+    free(map); free(alone); return found;
+}
+
 static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource *resource,
                                 const sh_package_compile_environment *environment,
                                 const sh_package_builtin *generated,
@@ -623,13 +756,18 @@ static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource
     pc_class_context classes = {0};
     sh_package_source_view source_view = {&classes, pc_source_inputs};
     sh_decl_composition_schema schema = {0};
-    int typed = 0, custom_reader = 0;
+    int typed = 0, custom_reader = 0, composing = 0;
     int have_base = 0, all_equal = 1, ok = 0;
     char detail[512] = "";
     classes.sources = out->sources; classes.resource = resource; classes.environment = environment;
     classes.input_count = input_count;
     classes.inputs = inputs; classes.source_input_count = source_input_count;
-    if (!pc_identity(resource, error, error_capacity)) goto done;
+    int invalid_identity = 0;
+    if (!pc_identity(resource, &invalid_identity, error, error_capacity)) {
+        if (invalid_identity && environment->invalid_package && resource->source_count)
+            *environment->invalid_package = files[resource->sources[0]].owner;
+        goto done;
+    }
     if (!resource->type) return pc_compile_opaque(out, resource, environment, builtin, error, error_capacity);
     if (environment->baseline || builtin) {
         have_base = pc_original((void *)environment, resource->engine_path, &base, &base_length);
@@ -710,6 +848,7 @@ static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource
         if (resource->source_count && !pc_equal((const unsigned char *)texts[0].text,
             texts[0].length, builtin->body, builtin->length)) all_equal = 0;
     }
+    composing = 1;
     /* Entity headers require normalization even without overlapping changes.
      * Other native families can also accept custom source dialects (particles
      * are one example); preserve their bytes when no composition is needed. */
@@ -754,10 +893,23 @@ static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource
         (sh_decl_source){(const char *)base, base_length} : (sh_decl_source){"{}", 2},
         texts, input_count, rules, rule_count, typed ? &schema : NULL,
         &resource->body_length, detail, sizeof(detail), &cause);
-    if (!resource->body) goto conflict;
+    if (!resource->body) {
+        /* A contribution that cannot be parsed on its own is that package's
+         * defect. Conflicts, missing parents and adapters stay unattributed. */
+        if (environment->invalid_package && cause.first < resource->source_count &&
+            cause.second == SIZE_MAX && pc_unparseable(texts[cause.first]))
+            *environment->invalid_package = files[resource->sources[cause.first]].owner;
+        goto conflict;
+    }
     resource->composed = distinct > 1 && !all_equal;
     resource->source = resource->source_count ? resource->sources[0] : SIZE_MAX; ok = 1; goto done;
 conflict:
+    if (composing && environment->invalid_package && *environment->invalid_package == SIZE_MAX) {
+        size_t owner = pc_alone_invalid(out, resource, environment, builtin, &classes, &schema, typed,
+            custom_reader, (sh_decl_source){(const char *)base, base_length}, have_base, texts,
+            error, error_capacity);
+        if (owner != SIZE_MAX) { *environment->invalid_package = owner; goto done; }
+    }
     pc_report_conflict(out, resource, cause, builtin != NULL, detail, error, error_capacity);
 done:
     if (resource->type && (!strncmp(resource->type, "snapeditor", 10) ||
@@ -1021,15 +1173,20 @@ sh_package_compilation *sh_package_compile_with(const sh_package_sources *source
     if (environment->invalid_package) for (i = 0; i < sources->package_count; i++) {
         sh_package_owners owner = {0};
         sh_package_policy policy = {0};
+        int allocation = 0;
         if (!sh_package_owners_add(&owner, i)) goto bad;
-        int valid = pc_policies(sources, &owner, &policy, error, error_capacity);
+        /* Policy JSON reports a failed allocation like invalid text; the C
+         * runtime allocators record it, and it never isolates a package. */
+        errno = 0;
+        int valid = pc_policies(sources, &owner, &policy, error, error_capacity, &allocation);
+        if (!valid && errno == ENOMEM) allocation = 1;
         sh_package_owners_free(&owner); sh_package_policy_free(&policy);
         if (!valid) {
-            if (error[0]) *environment->invalid_package = i;
+            if (error[0] && !allocation) *environment->invalid_package = i;
             goto bad;
         }
     }
-    if (!pc_policies(sources, NULL, &out->policy, error, error_capacity)) goto bad;
+    if (!pc_policies(sources, NULL, &out->policy, error, error_capacity, NULL)) goto bad;
     for (i = 0; i < sources->file_count; i++) if (sources->files[i].engine_path) {
         inputs[count].file = &sources->files[i]; inputs[count].index = i;
         inputs[count].path = pc_key(environment, sources->files[i].engine_path);
