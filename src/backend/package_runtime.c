@@ -33,6 +33,7 @@ typedef struct pr_provider {
     sh_audio_originals *audio_originals;
     struct pr_provider *parent;
     char *data_root;
+    char *rejections;
     size_t references;
 } pr_provider;
 typedef struct pr_inventory_entry { char *path; size_t source; } pr_inventory_entry;
@@ -86,7 +87,7 @@ static void pr_release(pr_provider *provider)
         sh_resource_catalog_close(provider->catalog);
         sh_audio_originals_close(provider->audio_originals);
     }
-    pr_release(provider->parent); free(provider->data_root); free(provider);
+    pr_release(provider->parent); free(provider->data_root); free(provider->rejections); free(provider);
 }
 
 static void pr_publish(pr_provider *current, pr_provider *library, pr_provider *map)
@@ -433,6 +434,19 @@ static int pr_activate(sh_package_activation_fn activate, void *context, int res
     }
 }
 
+static int pr_rejected(void *context, const sh_package *package, const char *reason)
+{
+    char **report = context;
+    size_t used = *report ? strlen(*report) : 0;
+    size_t add = strlen(package->root) + strlen(reason) + 96;
+    char *grown;
+    if (used > SIZE_MAX - add || !(grown = realloc(*report, used + add))) return 0;
+    *report = grown;
+    snprintf(grown + used, add, "Skipped local package %s: %s\n", package->root, reason);
+    backend_log(grown + used);
+    return 1;
+}
+
 static pr_provider *pr_prepare(const char *data_root, const char *source_root,
     const pr_provider *previous, int product_only, pr_inventory **inventory_out,
     int *composition_failed, char *out_error, size_t out_capacity)
@@ -449,7 +463,8 @@ static pr_provider *pr_prepare(const char *data_root, const char *source_root,
     char doom_base[4096], error[2048] = "";
     DWORD n;
     size_t default_index;
-    char *slash;
+    char *slash, *rejections = NULL;
+    size_t invalid_package = SIZE_MAX;
     pr_provider *provider = NULL;
     if (inventory_out) *inventory_out = NULL;
     if (composition_failed) *composition_failed = 0;
@@ -472,8 +487,9 @@ static pr_provider *pr_prepare(const char *data_root, const char *source_root,
         environment.declaration_state = pr_declaration_state;
         environment.compose_custom = pr_compose_custom;
     }
-    sources = product_only ? calloc(1, sizeof(*sources)) :
-        sh_package_sources_scan(source_root ? source_root : data_root, error, sizeof(error));
+    sources = product_only ? calloc(1, sizeof(*sources)) : source_root ?
+        sh_package_sources_scan(source_root, error, sizeof(error)) :
+        sh_package_sources_scan_local(data_root, pr_rejected, &rejections, error, sizeof(error));
     if (!sources) goto done;
     /* Built-ins can inherit vanilla parents even on the first launch with no
      * authored packages. Their typed source views still require originals. */
@@ -519,6 +535,14 @@ static pr_provider *pr_prepare(const char *data_root, const char *source_root,
         const ov_baked_decl_t *value = &g_ov_baked_decls[default_index];
         builtins[default_index] = (sh_package_builtin){value->name, (const unsigned char *)value->text, value->len};
     }
+    if (!source_root && !product_only) environment.invalid_package = &invalid_package;
+    for (;;) {
+        compiled = sh_package_compile_with(sources, &environment, error, sizeof(error));
+        if (compiled || invalid_package == SIZE_MAX) break;
+        if (invalid_package >= sources->package_count ||
+            !pr_rejected(&rejections, &sources->packages[invalid_package], error) ||
+            !sh_package_sources_remove(sources, invalid_package)) goto done;
+    }
     if (inventory_out) {
         sh_package_sources empty = {0};
         sh_package_sources *snapshot = sh_package_sources_join(sources, &empty, error, sizeof(error));
@@ -526,7 +550,6 @@ static pr_provider *pr_prepare(const char *data_root, const char *source_root,
         *inventory_out = pr_inventory_build(snapshot, error, sizeof(error));
         if (!*inventory_out) goto done;
     }
-    compiled = sh_package_compile_with(sources, &environment, error, sizeof(error));
     if (!compiled) { if (composition_failed) *composition_failed = 1; goto done; }
     if (!pr_cache_resources(compiled, data_root, error, sizeof(error))) goto done;
     provider = calloc(1, sizeof(*provider));
@@ -539,12 +562,14 @@ static pr_provider *pr_prepare(const char *data_root, const char *source_root,
     provider->sources = sources; provider->compiled = compiled; provider->catalog = catalog;
     provider->audio_originals = audio_originals; audio_originals = NULL;
     provider->references = 1;
+    provider->rejections = rejections; rejections = NULL;
     sources = NULL; compiled = NULL; catalog = NULL;
 done:
     if (!provider) snprintf(out_error, out_capacity, "%s", error[0] ? error : "package compilation could not be prepared");
     sh_package_compilation_free(compiled); sh_package_sources_free(sources); sh_resource_catalog_close(catalog);
     sh_audio_originals_close(audio_originals);
     sh_decl_native_schema_close(native_schema);
+    free(rejections);
     return provider;
 }
 
@@ -566,6 +591,9 @@ static pr_provider *pr_view(pr_provider *library, const pr_provider *map, char *
     view->audio_originals = library->audio_originals;
     return view;
 }
+
+static int pr_compiled_available(void *context, const char *path, char *error, size_t capacity)
+{ return sh_package_compilation_probe(context, path, error, capacity); }
 
 static int pr_update(const char *data_root, int change_map, const char *map_source_root,
     const sh_package_map_plan *prepared,
@@ -605,6 +633,17 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
                 backend_log("package library rescan for committed sources failed; the current provider is kept");
                 goto done;
             }
+            /* A malformed newly installed unit may be isolated locally, but
+             * cannot retire the map provider which still supplies its bytes. */
+            sh_package_missing missing = {0};
+            int complete = !g_map_provider || sh_package_compilation_payload_missing(
+                g_map_provider->compiled, pr_compiled_available, rescanned->compiled,
+                &missing, error, sizeof(error));
+            if (!complete || missing.count) {
+                if (missing.count) snprintf(error, sizeof(error), "installed packages no longer supply the active map; repair the rejected package before leaving its provider");
+                sh_package_missing_free(&missing); pr_release(rescanned); goto done;
+            }
+            sh_package_missing_free(&missing);
             pr_release(library); library = rescanned; library_rescanned = 1;
         }
         if (prepared) map = pr_retain(prepared->provider);
@@ -771,17 +810,20 @@ const sh_package_compilation *sh_package_map_plan_compilation(const sh_package_m
 int sh_package_map_plan_prepare_inventory(sh_package_map_plan *plan,
     const char *data_root, char *error, size_t capacity)
 {
-    sh_package_sources *sources;
     pr_inventory *inventory;
     if (!plan || !data_root || !*data_root) {
         if (error && capacity) snprintf(error, capacity, "installed inventory requires a prepared map and data root");
         return 0;
     }
-    sources = sh_package_sources_scan(data_root, error, capacity);
-    if (!sources) return 0;
-    inventory = pr_inventory_build(sources, error, capacity);
-    if (!inventory) return 0;
     AcquireSRWLockExclusive(&g_refresh_lock);
+    int composition_failed = 0;
+    pr_provider *checked = pr_prepare(data_root, NULL, g_library_provider, 0,
+        &inventory, &composition_failed, error, capacity);
+    pr_release(checked);
+    if (!inventory || (!checked && !composition_failed)) {
+        pr_inventory_release(inventory);
+        ReleaseSRWLockExclusive(&g_refresh_lock); return 0;
+    }
     pr_inventory_release(plan->inventory); plan->inventory = inventory;
     ReleaseSRWLockExclusive(&g_refresh_lock); return 1;
 }
@@ -1033,11 +1075,14 @@ char *sh_package_runtime_summary(void)
     size_t i, j, length = 0, capacity;
     char *text;
     AcquireSRWLockShared(&g_lock);
-    capacity = 4096 + (g_sources ? g_sources->package_count : 0) * 1024;
+    const char *rejections = g_library_provider ? g_library_provider->rejections : NULL;
+    capacity = 4096 + (g_sources ? g_sources->package_count : 0) * 1024 +
+        (rejections ? strlen(rejections) : 0);
     text = (char *)calloc(capacity, 1);
     if (!text) goto done;
     length += (size_t)snprintf(text + length, capacity - length, "Installed library: %zu packages.\n",
         g_inventory ? g_inventory->sources->package_count : 0);
+    if (rejections) length += (size_t)snprintf(text + length, capacity - length, "%s", rejections);
     if (g_authoring_error[0]) length += (size_t)snprintf(text + length, capacity - length,
         "Local authoring composition unavailable: %s\nIndependent map packages can still compile.\n", g_authoring_error);
     if (!g_ready) length += (size_t)snprintf(text + length, capacity - length,

@@ -480,6 +480,45 @@ static void run_conflicting_startup(void)
     CloseHandle(process.hThread); CloseHandle(process.hProcess);
 }
 
+static void test_local_isolation(void)
+{
+    char data[MAX_PATH], map[MAX_PATH], error[2048], *summary;
+    sh_package_map_plan *plan;
+    sh_package_missing missing = {0};
+    snprintf(data, sizeof(data), "%s/isolated", root);
+    snprintf(map, sizeof(map), "%s/strict", root);
+    create("isolated/overrides/boss/package.json", "{\"id\":\"boss\",\"name\":\"Boss\"}");
+    create("isolated/overrides/boss/assets/generated/decls/entitydef/ai/cyberdemon.decl", "{ edit = { health = 12000; } }");
+    create("isolated/overrides/bad/package.json", "{\"schema\":\"old\"}");
+    create("isolated/overrides/text/package.json", "{\"id\":\"text\",\"name\":\"Text\"}");
+    create("isolated/overrides/text/assets/generated/decls/snapeditorentitydef/bad.decl", "{} }");
+    create("isolated/overrides/text/assets/generated/decls/snapeditorentitydef/rejected.decl", "{ value = 1; }");
+    create("isolated/overrides/policy/package.json", "{\"id\":\"policy\",\"name\":\"Policy\",\"requirements\":{\"cvars\":{\"unsupported\":0}}}");
+    create("isolated/overrides/outer/package.json", "{\"id\":\"outer\",\"name\":\"Outer\"}");
+    create("isolated/overrides/outer/child/package.json", "invalid");
+    create("isolated/overrides/outer/assets/rejected-nested.bin", "also unavailable");
+    sh_package_runtime_test_baseline(baseline, NULL);
+    CHECK(sh_package_runtime_refresh(data)); CHECK(sh_package_runtime_ready());
+    expect_current(health_path, "health = 12000"); expect_current("generated/decls/snapeditorentitydef/rejected.decl", NULL);
+    summary = sh_package_runtime_summary();
+    CHECK(summary && strstr(summary, "Installed library: 1 packages") && strstr(summary, "Skipped local package") &&
+        strstr(summary, "malformed declaration") && strstr(summary, "unsupported setting")); free(summary);
+    create("strict/overrides/map/package.json", "{\"id\":\"map\",\"name\":\"Map\"}");
+    create("strict/overrides/map/assets/generated/decls/snapeditorentitydef/rejected.decl", "{ value = 2; }");
+    plan = sh_package_runtime_prepare_map(data, map, error, sizeof(error));
+    CHECK(plan && sh_package_map_plan_payload_missing(plan, &missing, error, sizeof(error)));
+    CHECK(missing.count == 1); sh_package_missing_free(&missing); sh_package_map_plan_free(plan);
+    create("strict/overrides/broken/package.json", "invalid");
+    plan = sh_package_runtime_prepare_map(data, map, error, sizeof(error));
+    CHECK(!plan && error[0]); sh_package_map_plan_free(plan);
+    expect_current(health_path, "health = 12000");
+    create("isolated/overrides/text/assets/generated/decls/snapeditorentitydef/bad.decl", "{}");
+    CHECK(sh_package_runtime_refresh(data));
+    expect_current("generated/decls/snapeditorentitydef/rejected.decl", "{ value = 1; }");
+    sh_package_runtime_test_dispose();
+
+}
+
 int main(int argc, char **argv)
 {
     const sh_package_change map_a_changes[] = {
@@ -504,6 +543,7 @@ int main(int argc, char **argv)
         test_conflicting_startup(); cleanup(); return failures ? 1 : 0;
     }
     run_conflicting_startup();
+    test_local_isolation();
     snprintf(map_a, sizeof(map_a), "%s\\map-a", root); snprintf(map_b, sizeof(map_b), "%s\\map-b", root);
     create("overrides/local/package.json", descriptor);
     create("overrides/local/assets/generated/decls/entitydef/ai/cyberdemon.decl", "{ edit = { health = 12000; } }");
@@ -589,7 +629,8 @@ int main(int argc, char **argv)
     CHECK(sh_package_runtime_refresh(root)); CHECK(sh_package_runtime_has_map_provider());
     expect_current(health_path, "health = 10"); library = expect_library("health = 15000");
     /* Failed local refresh also retains both exact prior providers. */
-    create("overrides/local/package.json", "malformed external edit");
+    create("overrides/conflict/package.json", "{\"id\":\"conflict\",\"name\":\"Conflicting edit\"}");
+    create("overrides/conflict/assets/generated/decls/entitydef/ai/cyberdemon.decl", "{ edit = { health = 17000; } }");
     const sh_package_compilation *previous = sh_package_runtime_acquire(); sh_package_runtime_release();
     CHECK(!sh_package_runtime_refresh(root));
     const sh_package_compilation *after = sh_package_runtime_acquire(); CHECK(after == previous); sh_package_runtime_release();
@@ -599,6 +640,7 @@ int main(int argc, char **argv)
     state.expected = map_b_changes;
     CHECK(switch_map(NULL, &state)); CHECK(!sh_package_runtime_has_map_provider());
     expect_current(health_path, "health = 15000");
+    create("overrides/conflict/package.json", "invalid");
     create("overrides/local/package.json", descriptor);
     test_prepared_map(map_a);
     test_committed_install_joins_library();

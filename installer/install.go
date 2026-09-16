@@ -126,6 +126,15 @@ func cmdInstall(f flags) error {
 			return nil
 		}
 	}
+	// Convert user files before replacing the working runtime. Each outer
+	// package is staged and backed up independently; storage/recovery failures
+	// abort installation while diagnosed bad units are reported and retained.
+	migrateUserData()
+	report, err := migrateOverrides(appDataDir(), doom)
+	printOverrideMigration(report)
+	if err != nil {
+		return fmt.Errorf("override migration failed before runtime replacement: %w", err)
+	}
 	if len(legacy) > 0 {
 		fmt.Println("Removing the original SnapHak:")
 		rec.Backups = dropLegacyBackups(doom, rec.Backups)
@@ -187,7 +196,6 @@ func cmdInstall(f flags) error {
 		}
 	}
 	migrateLegacyLogs(doom) // runtime logs live in snapmap-plus\logs\ -- fold older locations (snaphak_logs\, snaphak\logs\) in (best-effort)
-	migrateUserData()       // scaffold the app-data content tree + fold a user's old %USERPROFILE%\snaphak\ content forward (best-effort)
 	fmt.Printf("Done. Snapmap+ %s installed.\n", rec.Version)
 	ensureWebView2Runtime(f) // the HTML UI renders in the WebView2 runtime -- ensure it's present (never fails the install)
 	fmt.Println("Launch DOOM and open the SnapMap editor.")

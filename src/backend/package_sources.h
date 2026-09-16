@@ -52,6 +52,17 @@ int sh_package_bytes_identity(const void *body, size_t length, sh_package_file_i
  * create separate delivery units. Older layouts must be migrated first. */
 sh_package_sources *sh_package_sources_scan(const char *data_root,
                                            char *error, size_t error_capacity);
+/* Local authoring libraries isolate invalid outer packages. Discovery failure
+ * still fails the whole scan. The callback must record the rejection; returning
+ * zero aborts rather than silently admitting an incomplete inventory. Map and
+ * archive callers continue to use the strict scanners above/below. */
+typedef int (*sh_package_source_rejected)(void *context, const sh_package *package,
+                                         const char *reason);
+sh_package_sources *sh_package_sources_scan_local(const char *data_root,
+    sh_package_source_rejected rejected, void *context, char *error, size_t capacity);
+/* Remove one complete outer unit from an unpublished inventory, rebasing all
+ * component and file ownership. Never changes source files on disk. */
+int sh_package_sources_remove(sh_package_sources *sources, size_t package);
 /* Inventory a single outer package, including every nested component. */
 sh_package_sources *sh_package_sources_scan_directory(const char *root,
                                                       char *error, size_t error_capacity);

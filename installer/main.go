@@ -20,6 +20,7 @@ Usage:
   snapmap-plus uninstall [--doom <path>] [--yes]
   snapmap-plus changelog [<version>|latest|all]
   snapmap-plus status
+  snapmap-plus migrate-overrides [--doom <path>]
   snapmap-plus version
   snapmap-plus help
 
@@ -89,6 +90,8 @@ func runCommand(cmd string, args []string) error {
 		return cmdUninstall(f)
 	case "status":
 		return cmdStatus(f)
+	case "migrate-overrides":
+		return cmdMigrateOverrides(f)
 	case "changelog", "info", "--info":
 		return cmdChangelog(f, args)
 	case "set-token":

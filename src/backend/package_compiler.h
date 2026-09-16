@@ -106,6 +106,10 @@ typedef struct sh_package_compile_environment {
         sh_decl_conflict *conflict, const sh_package_source_view *source_view);
     sh_package_baseline_identity_reader baseline_identity;
     void *identity_context;
+    /* Optional diagnostic output for a proven malformed outer package. Reset
+     * to SIZE_MAX on entry. Peer conflicts, missing native metadata and failed
+     * originals never select a package to discard. Strict callers omit it. */
+    size_t *invalid_package;
 } sh_package_compile_environment;
 
 typedef struct sh_compiled_resource {

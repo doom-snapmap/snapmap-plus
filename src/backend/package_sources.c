@@ -7,6 +7,7 @@
 #include <stdarg.h>
 #include <io.h>
 #include <fcntl.h>
+#include <errno.h>
 #include "package_sources.h"
 
 #pragma comment(lib, "bcrypt.lib")
@@ -645,6 +646,106 @@ sh_package_sources *sh_package_sources_scan(const char *data_root, char *error, 
 
 sh_package_sources *sh_package_sources_scan_directory(const char *root, char *error, size_t capacity)
 { return root && *root ? ps_inventory(NULL, root, error, capacity) : NULL; }
+
+/* Move an already complete unit into growing vectors; do not repeatedly clone
+ * earlier packages when a library contains many small delivery units. */
+static int ps_append_unit(sh_package_sources *out, sh_package_sources *unit,
+    size_t *packages, size_t *components, size_t *files, size_t *fingerprints)
+{
+    size_t p = out->package_count, c = out->component_count, f = out->file_count, i;
+    if (unit->package_count != 1 || unit->component_count > SIZE_MAX - c ||
+        unit->file_count > SIZE_MAX - f || p == SIZE_MAX ||
+        !ps_grow((void **)&out->packages, packages, p, sizeof(*out->packages)) ||
+        !ps_grow((void **)&out->fingerprints, fingerprints, p, sizeof(*out->fingerprints)) ||
+        (unit->component_count && !ps_grow((void **)&out->components, components,
+            c + unit->component_count - 1, sizeof(*out->components))) ||
+        (unit->file_count && !ps_grow((void **)&out->files, files,
+            f + unit->file_count - 1, sizeof(*out->files)))) return 0;
+    out->packages[p] = unit->packages[0];
+    memcpy(out->fingerprints[p], unit->fingerprints[0], 32);
+    for (i = 0; i < unit->component_count; i++) {
+        out->components[c + i] = unit->components[i]; out->components[c + i].owner = p;
+    }
+    for (i = 0; i < unit->file_count; i++) {
+        out->files[f + i] = unit->files[i]; out->files[f + i].owner = p;
+        out->files[f + i].component += c;
+    }
+    out->package_count++; out->component_count += unit->component_count; out->file_count += unit->file_count;
+    unit->package_count = unit->component_count = unit->file_count = 0;
+    return 1;
+}
+
+sh_package_sources *sh_package_sources_scan_local(const char *data_root,
+    sh_package_source_rejected rejected, void *context, char *error, size_t capacity)
+{
+    sh_package *packages = NULL;
+    sh_package_sources *out = NULL, *unit = NULL;
+    size_t count = 0, i, pc = 0, cc = 0, fc = 0, hc = 0;
+    char detail[2048];
+    if (error && capacity) error[0] = 0;
+    if (!rejected || !sh_packages_enumerate(data_root, &packages, &count)) {
+        ps_error(error, capacity, "local package directory enumeration failed"); goto bad;
+    }
+    out = calloc(1, sizeof(*out));
+    if (!out) goto bad;
+    for (i = 0; i < count; i++) {
+        errno = 0; SetLastError(ERROR_SUCCESS);
+        unit = sh_package_sources_scan_directory(packages[i].root, detail, sizeof(detail));
+        if (!unit) {
+            DWORD system_error = GetLastError();
+            if (errno == ENOMEM || system_error == ERROR_NOT_ENOUGH_MEMORY ||
+                system_error == ERROR_OUTOFMEMORY || system_error == ERROR_NO_SYSTEM_RESOURCES ||
+                !detail[0] || !rejected(context, &packages[i], detail)) {
+                ps_error(error, capacity, "local package scan failed: %s: %s", packages[i].name, detail); goto bad;
+            }
+            continue;
+        }
+        /* Keep discovery's folder-derived name, including map-* provenance. */
+        unit->packages[0] = packages[i];
+        if (!ps_append_unit(out, unit, &pc, &cc, &fc, &hc)) goto bad;
+        sh_package_sources_free(unit); unit = NULL;
+    }
+    free(packages); return out;
+bad:
+    if (error && capacity && !error[0]) ps_error(error, capacity, "cannot allocate complete local package inventory");
+    free(packages); sh_package_sources_free(unit); sh_package_sources_free(out); return NULL;
+}
+
+int sh_package_sources_remove(sh_package_sources *sources, size_t package)
+{
+    size_t *map, i, kept = 0;
+    if (!sources || package >= sources->package_count || sources->component_count > SIZE_MAX / sizeof(*map)) return 0;
+    map = malloc((sources->component_count ? sources->component_count : 1) * sizeof(*map));
+    if (!map) return 0;
+    for (i = 0; i < sources->component_count; i++) {
+        sh_package_component *item = &sources->components[i];
+        if (item->owner == package) {
+            map[i] = SIZE_MAX; free(item->relative); free(item->root);
+            sh_package_descriptor_free(&item->descriptor);
+        } else {
+            map[i] = kept;
+            if (item->owner > package) item->owner--;
+            sources->components[kept++] = *item;
+        }
+    }
+    sources->component_count = kept; kept = 0;
+    for (i = 0; i < sources->file_count; i++) {
+        sh_package_source_file *item = &sources->files[i];
+        if (item->owner == package) {
+            free(item->relative); free(item->absolute); free(item->engine_path);
+        } else {
+            item->component = map[item->component];
+            if (item->owner > package) item->owner--;
+            sources->files[kept++] = *item;
+        }
+    }
+    sources->file_count = kept; free(map);
+    memmove(sources->packages + package, sources->packages + package + 1,
+        (sources->package_count - package - 1) * sizeof(*sources->packages));
+    memmove(sources->fingerprints + package, sources->fingerprints + package + 1,
+        (sources->package_count - package - 1) * sizeof(*sources->fingerprints));
+    sources->package_count--; return 1;
+}
 
 sh_package_sources *sh_package_sources_join(const sh_package_sources *local,
     const sh_package_sources *map, char *error, size_t capacity)

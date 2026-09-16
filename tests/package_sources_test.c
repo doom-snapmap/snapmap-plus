@@ -29,6 +29,13 @@ static void paths(void)
     for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) { normal = sh_package_engine_path(bad[i]); CHECK(!normal); free(normal); }
 }
 
+static int rejected(void *context, const sh_package *package, const char *reason)
+{
+    size_t *count = context;
+    CHECK(strstr(package->name, "boss-demons") && reason[0]);
+    (*count)++; return 1;
+}
+
 static void scale_inventory(void)
 {
     char path[2048] = "overrides/deep", error[512], descriptor[128];
@@ -362,6 +369,21 @@ int main(int argc, char **argv)
     sh_package_sources_free(sources); sources = NULL;
     create("overrides/boss-demons/hell_guard/package.json", "{\"schema\":\"snapmap-plus.package.v2\"}");
     sources = sh_package_sources_scan(root, error, sizeof(error)); CHECK(!sources); CHECK(error[0]);
+    {
+        size_t rejected_count = 0;
+        sources = sh_package_sources_scan_local(root, rejected, &rejected_count, error, sizeof(error));
+        CHECK(sources && rejected_count == 1);
+        if (sources) {
+            CHECK(sources->package_count == 2 && !strcmp(sources->packages[0].name, "cyberdemon"));
+            CHECK(sources->component_count == 2);
+            CHECK(sh_package_sources_remove(sources, 0));
+            CHECK(sources->package_count == 1 && !strcmp(sources->packages[0].name, "editor"));
+            for (i = 0; i < sources->file_count; i++) CHECK(!sources->files[i].owner && !sources->files[i].component);
+            CHECK(sh_package_sources_remove(sources, 0));
+            CHECK(!sources->package_count && !sources->component_count && !sources->file_count);
+            CHECK(!sh_package_sources_remove(sources, 0));
+        }
+    }
 done:
     sh_package_sources_free(sources);
     cleanup();
