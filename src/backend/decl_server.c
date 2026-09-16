@@ -166,14 +166,16 @@ enum {
     DS_LOOKUP_LIVE
 };
 
-/* A source record is the engine's authoritative existence signal. DeclFind
- * with makeDefault=0 is only a fallback for a live decl that predates (or was
- * created independently of) its source record. Keep both calls in this small
- * helper so the source-first order is exercised by production and tests alike. */
+static void *ds_peek_decl(void *manager, const char *name);
+
+/* Classification must not load resources. DeclFind with makeDefault=0 still
+ * materializes archive declarations, whose dependencies would predate the
+ * pending refresh while the new declaration misses its captured inventory.
+ * Inspect source records and the live registry without invoking a parser. */
 static int ds_classify_candidate(const ds_candidate *candidate, void *registry,
                                  decl_type_by_name_fn type_by_name,
                                  decl_source_find_fn source_find,
-                                 decl_find_fn find_decl, const char **reason)
+                                 decl_source_find_fn peek_decl, const char **reason)
 {
     void *type_manager = NULL;
     void *source_record = NULL;
@@ -182,7 +184,7 @@ static int ds_classify_candidate(const ds_candidate *candidate, void *registry,
     int fault = 0;
 
     if (reason) *reason = NULL;
-    if (!candidate || !registry || !type_by_name || !source_find || !find_decl) {
+    if (!candidate || !registry || !type_by_name || !source_find || !peek_decl) {
         if (reason) *reason = "source-first classification ABI was unavailable";
         return DS_CLASSIFY_TERMINAL;
     }
@@ -194,7 +196,7 @@ static int ds_classify_candidate(const ds_candidate *candidate, void *registry,
             source_record = source_find(type_manager, candidate->name);
             if (!source_record) {
                 lookup_stage = DS_LOOKUP_LIVE;
-                live_decl = find_decl(type_manager, candidate->name, 0);
+                live_decl = peek_decl(type_manager, candidate->name);
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -498,7 +500,7 @@ int sh_decl_server_test_classify_candidate(
     const char *type, const char *name, void *registry,
     sh_decl_server_test_type_by_name_fn type_by_name,
     sh_decl_server_test_source_find_fn source_find,
-    sh_decl_server_test_find_decl_fn find_decl)
+    sh_decl_server_test_source_find_fn peek_decl)
 {
     ds_candidate candidate;
     const char *reason = NULL;
@@ -511,7 +513,7 @@ int sh_decl_server_test_classify_candidate(
     return ds_classify_candidate(&candidate, registry,
                                  (decl_type_by_name_fn)type_by_name,
                                  (decl_source_find_fn)source_find,
-                                 (decl_find_fn)find_decl, &reason);
+                                 peek_decl ? (decl_source_find_fn)peek_decl : ds_peek_decl, &reason);
 }
 
 #endif
@@ -2292,7 +2294,7 @@ static void __cdecl ds_apply_command(void)
         ds_candidate *candidate = &g_candidates[i];
         const char *reason = NULL;
         int classification = ds_classify_candidate(
-            candidate, registry, type_by_name, g_find_source, g_find_decl, &reason);
+            candidate, registry, type_by_name, g_find_source, ds_peek_decl, &reason);
 
         if (classification == DS_CLASSIFY_TERMINAL) {
             ds_log("REFUSED", candidate->source, reason);

@@ -183,7 +183,8 @@ int main(int argc, char **argv)
     CHECK(strstr(server, "ds_decl_body_is_single_block") != NULL);
     classify = strstr(server, "ds_classify_candidate");
     source_lookup = strstr(server, "source_record = source_find(type_manager, candidate->name);");
-    live_lookup = strstr(server, "live_decl = find_decl(type_manager, candidate->name, 0);");
+    live_lookup = strstr(server, "live_decl = peek_decl(type_manager, candidate->name);");
+    CHECK(strstr(server, "candidate, registry, type_by_name, g_find_source, ds_peek_decl, &reason)") != NULL);
     table_install = strstr(server, "sh_overrides_internal_decl_table_install(entries,");
     register_each = strstr(server, "ds_register_candidate_source(registry, source_name,");
     scan = strstr(server, "register_file(registry, &idstr, NULL) ?");

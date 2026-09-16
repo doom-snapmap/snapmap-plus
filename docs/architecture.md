@@ -290,6 +290,12 @@ The declaration server registers new identities and refreshes existing shadows;
 the installed-resource bridge supplies data already present in the game. A
 package can therefore refer to installed assets without redistributing them.
 
+Declaration classification reads source records and the live registry without
+loading content. Native `DeclFind` can materialize archive resources even with
+`makeDefault=0`; using it after the resident snapshot creates consumers that miss
+the refresh and retain pointers into reconstructed dependencies. Materialization
+starts only after the complete refresh set has been reconstructed and marked.
+
 An existing loaded declaration is reconstructed only when the provider diff or
 the captured native dependency graph selects it. Merely remaining in a package
 does not invalidate its caches. Recovery retains the affected identities even

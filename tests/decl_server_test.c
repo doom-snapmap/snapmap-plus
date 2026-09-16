@@ -660,13 +660,11 @@ static void *classify_source_find(void *type_manager, const char *logical_name)
     return g_classify_source_record;
 }
 
-static void *classify_find_decl(void *type_manager, const char *logical_name,
-                                unsigned char make_default)
+static void *classify_find_decl(void *type_manager, const char *logical_name)
 {
     (void)type_manager;
     (void)logical_name;
     g_classify_find_calls++;
-    CHECK(make_default == 0);
     if (g_classify_find_throws)
         RaiseException(0xE000D507u, EXCEPTION_NONCONTINUABLE, 0, NULL);
     return g_classify_live_decl;
@@ -722,6 +720,32 @@ static void test_source_first_classification(void)
     CHECK(g_classify_type_calls == 1);
     CHECK(g_classify_source_calls == 0);
     CHECK(g_classify_find_calls == 0);
+
+    /* Use the real registry reader. An archive-only identity must stay absent
+     * during classification, and an existing pending object must stay pending.
+     * Neither case may invoke the native loader after the resident snapshot. */
+    {
+        unsigned char manager[0x30] = {0}, object[0x50] = {0};
+        unsigned char before[sizeof(object)];
+        void *entries[] = {object};
+        classify_reset();
+        sh_decl_server_test_set_reconstruct(NULL, NULL);
+        g_classify_manager = manager;
+        *(void ***)(manager + 0x20) = entries;
+        *(const char **)(object + 8) = "custom/entity";
+        object[0x2c] = 2;
+        memcpy(before, object, sizeof(object));
+        CHECK(sh_decl_server_test_classify_candidate("snapEditorEntityDef", "custom/entity",
+            manager, classify_type_by_name, classify_source_find, NULL) ==
+            SH_DECL_SERVER_TEST_CLASSIFY_MISSING);
+        CHECK(*(int *)(manager + 0x28) == 0);
+        *(int *)(manager + 0x28) = 1;
+        CHECK(sh_decl_server_test_classify_candidate("snapEditorEntityDef", "custom/entity",
+            manager, classify_type_by_name, classify_source_find, NULL) ==
+            SH_DECL_SERVER_TEST_CLASSIFY_SHADOWED_LIVE);
+        CHECK(!memcmp(before, object, sizeof(object)));
+        CHECK(g_classify_find_calls == 0);
+    }
 }
 
 static int g_materialize_type_calls;

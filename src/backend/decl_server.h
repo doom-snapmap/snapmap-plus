@@ -154,7 +154,7 @@ int sh_decl_server_test_classify_candidate(
     const char *type, const char *name, void *registry,
     sh_decl_server_test_type_by_name_fn type_by_name,
     sh_decl_server_test_source_find_fn source_find,
-    sh_decl_server_test_find_decl_fn find_decl);
+    sh_decl_server_test_source_find_fn peek_decl);
 
 /* Exercise the native idStr marshalling and one-source scanner boundary without
  * touching a live engine. The return value is the internal registration status:
