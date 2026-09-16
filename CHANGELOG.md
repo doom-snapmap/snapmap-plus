@@ -19,6 +19,9 @@ Installing or updating Snapmap+ now converts packages made for earlier releases 
 - A package with a problem of its own is skipped on its own while every other package still loads, and sh_packages lists each skipped package folder with its reason.
 - A package that cannot be converted is reported with the reason and left untouched on disk, so you can fix it and run the conversion again.
 
+### Fixed
+- A failed modded-map load now restores local resources and rolls back its new packages, allowing another installation attempt without restarting DOOM.
+
 _Plus 2 smaller fixes and internal changes._
 
 ## v0.2.1-beta.14 -- 2026-09-16 (beta)
