@@ -3,6 +3,27 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.15 -- 2026-09-16 (beta)
+
+**Packages from earlier releases convert automatically**
+
+Installing or updating Snapmap+ now converts packages made for earlier releases to the current format before the new files are copied, keeping your originals byte for byte. A single broken package no longer stops the rest of your library from loading.
+
+### New
+- Install and update convert packages from earlier releases to the current format, including loose files, manifests and shader includes, before the new runtime files are copied.
+- The migrate-overrides command runs the same conversion for manually copied files and for older packages unzipped into your overrides folder later.
+- Originals are moved byte for byte into a separate backup folder that is never loaded or deleted automatically, so you can undo a conversion by hand.
+
+### Improved
+- Each package converts completely or not at all, and an interrupted run is finished or restored on the next attempt without ever overwriting a path that appeared in the meantime.
+- A package with a problem of its own is skipped on its own while every other package still loads, and sh_packages lists each skipped package folder with its reason.
+- A package that cannot be converted is reported with the reason and left untouched on disk, so you can fix it and run the conversion again.
+
+### Fixed
+- A failed modded-map load now restores local resources and rolls back its new packages, allowing another installation attempt without restarting DOOM.
+
+_Plus 2 smaller fixes and internal changes._
+
 ## v0.2.1-beta.14 -- 2026-09-16 (beta)
 
 **Complete mod packages travel with maps, with steadier editor previews**
