@@ -317,7 +317,7 @@ sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *chang
     int restoring, int initial, char *error, size_t capacity)
 {
     sh_resource_resident *pass = calloc(1, sizeof(*pass));
-    sh_resource_graph_impact seeds = {0}, impact = {0};
+    sh_resource_graph_impact seeds = {0}, impact = {0}, retired = {0};
     const sh_resource_catalog *catalog = sh_package_runtime_catalog();
     const char *phase = "arguments";
     const rr_entry *current = NULL;
@@ -344,6 +344,18 @@ sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *chang
             size_t count = sh_resource_catalog_find_path(catalog, changes->items[i].path, &rows);
             if (!rr_seed(&seeds, "", changes->items[i].path)) goto done;
             for (size_t j = 0; j < count; j++) if (!rr_seed(&seeds, rows[j]->type, rows[j]->name)) goto done;
+            /* A new declaration has no archive row, and its native GetPath
+             * may name a cooked file rather than the supplied source. Keep the
+             * compiler's identity so removing it retires the object instead
+             * of trying to reload a source that no longer exists. */
+            const sh_package_change *change = &changes->items[i];
+            if (change->type && change->name) {
+                if (!rr_seed(&seeds, change->type, change->name)) goto done;
+                int stock = 0;
+                for (size_t j = 0; j < count; j++) if (rows[j]->archive < 2) stock = 1;
+                if (change->kind == SH_PACKAGE_RESOURCE_REMOVED && !stock &&
+                    !rr_seed(&retired, change->type, change->name)) goto done;
+            }
         }
         if (g_rr_recovery) {
             if (!restoring) goto done;
@@ -360,12 +372,14 @@ sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *chang
         current = NULL; phase = "recorded consumers";
         if (sh_resource_graph_consumers(seeds.items, seeds.count, &impact) == SH_RESOURCE_GRAPH_ERROR) goto done;
         qsort(seeds.items, seeds.count, sizeof(*seeds.items), rr_compare);
+        qsort(retired.items, retired.count, sizeof(*retired.items), rr_compare);
         for (size_t i = 0; i < pass->count; i++) {
             rr_entry *entry = pass->items + i;
             /* Archive aliases identify source declarations whose virtual path
              * names their cooked representation. They are direct changes too,
              * even before startup promotes them to permanent lifetime. */
             int supplied = entry->selected || rr_has(&seeds, entry);
+            if (rr_has(&retired, entry)) entry->retired = 1;
             entry->selected = supplied || rr_has(&impact, entry);
             /* Only content this provider supplies, or permanent content it can
              * change, may be rebuilt. A map-scoped identity such as the live
@@ -429,6 +443,7 @@ render_scope:
 done:;
     } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
     sh_resource_graph_impact_free(&seeds); sh_resource_graph_impact_free(&impact);
+    sh_resource_graph_impact_free(&retired);
     if (!ok) {
         if (error && capacity) snprintf(error, capacity, "native resident %s failed%s%s%s%s", phase,
             current ? " for " : "", current ? current->type : "", current ? ":" : "", current ? current->name : "");

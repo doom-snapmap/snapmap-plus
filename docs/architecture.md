@@ -330,7 +330,10 @@ An existing loaded declaration is reconstructed only when the provider diff or
 the captured native dependency graph selects it. Merely remaining in a package
 does not invalidate its caches. Recovery retains the affected identities even
 if a failed parse erased their dependency edges. Archive aliases count as direct
-changes even when the native path names cooked data. Reflection-verified native
+changes even when the native path names cooked data. Compiled declaration
+identities also travel with the provider diff: a package-only source
+has no archive alias, and its removal must retire the native object rather than
+attempt to reload the missing source. Reflection-verified native
 parent links also select declarations that copied fields from a changed ancestor,
 including startup children whose lifetime has not yet been promoted. Ordinary
 startup consumers and runtime map-owned consumers keep their lifetime exclusions.

@@ -1535,7 +1535,10 @@ int sh_package_compilation_probe(const sh_package_compilation *compilation,
 void sh_package_changes_free(sh_package_changes *changes)
 {
     if (!changes) return;
-    for (size_t i = 0; i < changes->count; i++) free(changes->items[i].path);
+    for (size_t i = 0; i < changes->count; i++) {
+        free(changes->items[i].path);
+        free(changes->items[i].type); free(changes->items[i].name);
+    }
     free(changes->items); memset(changes, 0, sizeof(*changes));
 }
 
@@ -1635,9 +1638,14 @@ int sh_package_compilation_changes(const sh_package_compilation *before,
                 !(grown = realloc(out->items, next * sizeof(*grown)))) goto allocation_failed;
             out->items = grown; allocated = next;
         }
-        char *copy = _strdup(path);
-        if (!copy) goto allocation_failed;
-        out->items[out->count++] = (sh_package_change){copy, kind};
+        const sh_compiled_resource *identity = order < 0 ? a : b;
+        sh_package_change *change = &out->items[out->count++];
+        *change = (sh_package_change){_strdup(path), kind};
+        if (identity->type && identity->name) {
+            change->type = _strdup(identity->type); change->name = _strdup(identity->name);
+            if (!change->type || !change->name) goto allocation_failed;
+        }
+        if (!change->path) goto allocation_failed;
     }
     return 1;
 allocation_failed:
