@@ -5,23 +5,25 @@ latest stable version is what `snapmap-plus update` installs.
 
 ## v0.2.1-beta.14 -- 2026-09-16 (beta)
 
-**Packages get a simpler format and travel with maps**
+**Complete mod packages travel with maps, with steadier editor previews**
 
-Override packages are now one descriptor plus an assets tree at exact engine paths, with requirements and localized strings in the same file. Maps carry the complete packages they use, and another player can install them from an in-game prompt without restarting DOOM.
+Author packages with one `package.json` and an `assets/` tree using extracted engine paths. Maps carry their complete authored packages, reuse resources already installed on another player's machine, and preserve their own gameplay values without changing that player's local files.
 
 ### New
-- An override package is now a folder with one package.json and resources at their exact extracted engine paths inside assets, with requirements and localized strings in that same descriptor instead of separate manifest files.
-- Maps carry the complete packages whose gameplay resources they use, and a player missing that content can accept an in-game prompt that installs and activates it and continues the load without restarting DOOM.
+- Packages use `package.json` for identity, requirements, localized strings and supported presentation settings, with game resources under `assets/`. Package authors no longer need separate manifest files or hand-written mappings for every resource.
+- Maps carry the complete packages whose gameplay resources they use, including nested components and their editor support. When resources are missing, an in-game prompt installs the complete supplying bundles and continues loading without restarting DOOM.
 
 ### Improved
-- Compatible changes from several packages and Snapmap+'s own editor support are combined against the original resource, and genuinely conflicting edits produce a diagnostic naming the resource and the packages rather than letting folder order pick a winner.
-- Grouping folders and nested components now travel with a map, and there is no longer a fixed package count or total payload limit.
+- Installation checks use available resources, so a different package name, grouping or local gameplay value does not by itself trigger another installation. Each map's authored values remain active in Play and Edit without rewriting local packages or game archives.
+- Compatible changes from multiple packages and built-in overrides compose against the original resources, including supported MD6 collections and animation events. Conflicting edits report the resource and contributing packages.
+- Unchanged vanilla SnapMap resources and editor-only exposure do not cause packages to be embedded. Ordinary stock-entity authoring retains vanilla compatibility when it needs no additional gameplay resources or features.
+- Package discovery and delivery no longer impose fixed package-count or total-payload quotas; available memory, storage and engine limits still apply.
 - An interrupted or failed installation cancels the whole new install group instead of leaving part of a package behind.
 
 ### Fixed
 - Packages installed from a map stay available in your library after you leave that map, so you can use them in new maps.
-
-_Plus 2 smaller fixes and internal changes._
+- Package refresh preserves unchanged editor caches and restores World Text fonts, preventing the associated toybox disconnects. Custom entities and inherited Doors entries receive their intended editor properties.
+- Resource classification no longer creates declarations while inspecting them, preventing a crash caused by declarations retaining released skeleton data.
 
 ## v0.2.1-beta.13 -- 2026-09-13 (beta)
 
