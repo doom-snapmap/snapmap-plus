@@ -47,7 +47,7 @@ static const sh_package_compilation *expect_library(const char *health)
 typedef struct activation {
     const char *next_health, *previous_health, *library_health;
     const sh_package_compilation *previous, *library;
-    int fail, calls, recoveries, map_active, previous_map_active;
+    int fail, calls, recoveries, map_active, previous_map_active, library_changed;
     const sh_package_change *expected;
     size_t expected_count;
 } activation;
@@ -74,7 +74,10 @@ static int activate(void *context, int restoring,
     CHECK(!sh_package_runtime_admission_ready());
     CHECK(sh_package_runtime_has_map_provider() == (restoring ? state->previous_map_active : state->map_active));
     expect_current(health_path, restoring ? state->previous_health : state->next_health);
-    CHECK(expect_library(state->library_health) == state->library);
+    /* A committed installation rescans the library in the same transaction, so
+     * the activation pass sees a new library; recovery restores the old one. */
+    if (state->library_changed && !restoring) CHECK(expect_library(state->library_health) != state->library);
+    else CHECK(expect_library(state->library_health) == state->library);
     if (restoring) { state->recoveries++; return 1; }
     state->calls++;
     if (state->fail == 2) RaiseException(0xe04d504e, 0, 0, NULL);
@@ -196,6 +199,75 @@ static void test_prepared_map(const char *map_root)
     for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) expect_current(paths[i], "prepared");
     state.fail = 0; CHECK(activate_plan(NULL, &state)); CHECK(!sh_package_runtime_has_map_provider());
     for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) expect_current(paths[i], "local");
+}
+
+/* A whole-package installation commits its files into the shared package tree
+ * while the temporary map provider is still the only thing supplying them.
+ * Retiring that overlay against the pre-install library would report every
+ * committed resource as removed and retire content the consumers are using. */
+static void test_committed_install_joins_library(void)
+{
+    static const char *committed_mesh = "delivered.md6mesh";
+    static const char *committed_decl = "generated/decls/entitydef/ai/delivered_demon.decl";
+    static const char *identity = "{\"id\":\"delivered-demons\",\"name\":\"Delivered Demons\"}";
+    static const char *decl_bytes = "{ edit = { health = 7; } }";
+    const sh_package_change installed[] = {
+        {"delivered.md6mesh", SH_PACKAGE_RESOURCE_ADDED},
+        {"generated/decls/entitydef/ai/delivered_demon.decl", SH_PACKAGE_RESOURCE_ADDED}
+    };
+    char map_root[MAX_PATH], path[4096], error[2048];
+    const sh_package_compilation *library;
+    sh_package_map_plan *plan;
+    activation state = {0};
+    int calls;
+    snprintf(map_root, sizeof(map_root), "%s/map-install", root);
+    create("map-install/overrides/map/package.json", identity);
+    snprintf(path, sizeof(path), "map-install/overrides/map/assets/%s", committed_mesh);
+    create(path, "delivered mesh");
+    snprintf(path, sizeof(path), "map-install/overrides/map/assets/%s", committed_decl);
+    create(path, decl_bytes);
+    CHECK(sh_package_runtime_refresh(root)); CHECK(sh_package_runtime_ready());
+    expect_current(committed_mesh, NULL);
+    plan = sh_package_runtime_prepare_map(root, map_root, error, sizeof(error)); CHECK(plan);
+    if (!plan) return;
+    state.next_health = state.previous_health = state.library_health = "health = 16000";
+    state.map_active = 1; state.expected = installed; state.expected_count = 2;
+    CHECK(activate_plan(plan, &state)); CHECK(state.calls == 1);
+    expect_current(committed_mesh, "delivered mesh");
+    sh_package_map_plan_free(plan);
+    create("overrides/delivered-demons/package.json", identity);
+    snprintf(path, sizeof(path), "overrides/delivered-demons/assets/%s", committed_mesh);
+    create(path, "delivered mesh");
+    snprintf(path, sizeof(path), "overrides/delivered-demons/assets/%s", committed_decl);
+    create(path, decl_bytes);
+    sh_package_runtime_note_sources_changed();
+    /* A library rescan that cannot compile retires nothing and keeps the overlay. */
+    create("overrides/delivered-demons/package.json", "malformed after commit");
+    state.map_active = 0; calls = state.calls;
+    CHECK(!activate_plan(NULL, &state));
+    CHECK(state.calls == calls && !state.recoveries);
+    CHECK(sh_package_runtime_has_map_provider());
+    expect_current(committed_mesh, "delivered mesh");
+    create("overrides/delivered-demons/package.json", identity);
+    /* Now the committed sources compile: the overlay retires with no change at
+     * all, because the library already supplies exactly the same resources. */
+    state.library_changed = 1; state.expected_count = 0;
+    CHECK(activate_plan(NULL, &state)); CHECK(state.calls == calls + 1);
+    CHECK(!sh_package_runtime_has_map_provider());
+    expect_current(committed_mesh, "delivered mesh");
+    expect_current(committed_decl, "health = 7");
+    library = sh_package_runtime_library_acquire();
+    CHECK(library && sh_package_compilation_find(library, committed_mesh));
+    CHECK(sh_package_compilation_find(library, committed_decl));
+    sh_package_runtime_release();
+    /* The rescan is consumed. A later map transition keeps the same library. */
+    plan = sh_package_runtime_prepare_map(root, map_root, error, sizeof(error)); CHECK(plan);
+    state.library_changed = 0; state.map_active = 1; state.expected_count = 0;
+    CHECK(activate_plan(plan, &state));
+    state.map_active = 0; CHECK(activate_plan(NULL, &state));
+    CHECK(!sh_package_runtime_has_map_provider());
+    expect_current(committed_mesh, "delivered mesh");
+    sh_package_map_plan_free(plan);
 }
 
 static int inventory_commit_calls, inventory_commit_failure;
@@ -455,6 +527,7 @@ int main(int argc, char **argv)
     expect_current(health_path, "health = 15000");
     create("overrides/local/package.json", descriptor);
     test_prepared_map(map_a);
+    test_committed_install_joins_library();
     test_installed_inventory_is_not_active_composition();
     cleanup(); if (failures) return 1;
     puts("package runtime map context tests passed"); return 0;

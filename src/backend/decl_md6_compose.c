@@ -556,6 +556,78 @@ static int mc_alias_slots(mc_context *c, mc_input *in, const mc_input *baseline)
 }
 static void mc_free(mc_input *in)
 { free(in->tokens); free(in->binding); free(in->text); sh_decl_tree_free(in->tree); }
+
+/* Resource identities this envelope names, in the reader's own terms: the
+ * inherited definition, the bound mesh and each alias animation. Mesh kits,
+ * joint groups and event payloads name native records, not resources. */
+static int mc_emit_reference(mc_context *c, sh_decl_md6_reference_visitor visitor,
+    void *context, const char *type, char *name)
+{
+    int ok = name && visitor(context, type, name);
+    if (name && !ok) mc_fail(c, "reference visitor refused an identity");
+    free(name); return ok;
+}
+int sh_decl_md6_references(sh_decl_source source, sh_decl_md6_reference_visitor visitor,
+    void *context, char *error, size_t capacity)
+{
+    mc_context c = {error, capacity, 0};
+    mc_input in = {0};
+    size_t i = 1;
+    if (error && capacity) error[0] = 0;
+    if (!visitor) return 0;
+    in.source = source;
+    if (!mc_tokenize(&c, &in)) goto done;
+    if (!mc_is(&in, 0, "{") || in.tokens[0].close != in.count - 1) {
+        mc_fail(&c, "expected one complete MD6 definition"); goto done;
+    }
+    while (i + 1 < in.count && !c.failed) {
+        size_t start = i++, block = i, end;
+        int section = -1;
+        for (int n = 0; n < (int)(sizeof(mc_sections) / sizeof(mc_sections[0])); n++)
+            if (mc_is(&in, start, mc_sections[n])) { section = n; break; }
+        if (section < 0) { mc_fail(&c, "unknown MD6 section"); break; }
+        if (section == 6) block++;   /* eyeInfoCollection has a leading count */
+        if (!mc_is(&in, block, "{") || in.tokens[block].close >= in.count - 1) {
+            mc_fail(&c, "section needs a complete native block"); break;
+        }
+        end = in.tokens[block].close; i = end + 1;
+        if (section == 0) {
+            size_t f = block + 1;
+            while (f < end && !c.failed) {
+                if (mc_is(&in, f, "inherit")) {
+                    if (!mc_is(&in, f + 1, "\"\"") &&
+                        !mc_emit_reference(&c, visitor, context, "md6def", mc_identity(&c, &in, f + 1, 0))) break;
+                    f += 2;
+                } else if (mc_is(&in, f, "mesh")) {
+                    if (!mc_emit_reference(&c, visitor, context, "basemodel", mc_identity(&c, &in, f + 1, 0))) break;
+                    f += 2;
+                } else if (mc_is(&in, f, "offset")) {
+                    if (!mc_is(&in, f + 1, "(") || in.tokens[f + 1].close >= end) { mc_fail(&c, "invalid init offset"); break; }
+                    f = in.tokens[f + 1].close + 1;
+                } else if (mc_is(&in, f, "calcRefBoundsFromJoints")) {
+                    f += 2;
+                } else { mc_fail(&c, "unsupported init field"); break; }
+            }
+        } else if (section == 4) {
+            size_t a = block + 1;
+            while (a < end && !c.failed) {
+                size_t body;
+                if (!mc_is(&in, a, "alias") || !mc_is(&in, a + 1, "{") || in.tokens[a + 1].close >= end) {
+                    mc_fail(&c, "alias must begin with its native block"); break;
+                }
+                body = in.tokens[a + 1].close;
+                for (size_t t = a + 2; t < body; t++) if (mc_is(&in, t, "anim")) {
+                    if (!mc_emit_reference(&c, visitor, context, "anim",
+                            mc_animation_identity(&c, &in, t + 1))) break;
+                }
+                a = body + 1;
+            }
+        }
+    }
+done:
+    mc_free(&in);
+    return !c.failed;
+}
 char *sh_decl_md6_compose(sh_decl_source baseline, const sh_decl_source *sources, size_t count,
     size_t *length, char *error, size_t capacity, sh_decl_conflict *conflict)
 {

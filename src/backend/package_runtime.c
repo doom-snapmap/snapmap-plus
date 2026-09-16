@@ -30,6 +30,7 @@ typedef struct pr_provider {
     sh_resource_catalog *catalog;
     sh_audio_originals *audio_originals;
     struct pr_provider *parent;
+    char *data_root;
     size_t references;
 } pr_provider;
 typedef struct pr_inventory_entry { char *path; size_t source; } pr_inventory_entry;
@@ -57,6 +58,16 @@ static sh_package_references g_map_references;
 static sh_package_policy g_map_policy;
 static uintptr_t g_native_accessor, g_native_types, g_native_game_system;
 static int g_native_bound;
+/* Set when the package tree gained or lost sources behind the compiled library:
+ * a whole-package installation commits its files while a temporary map provider
+ * is already carrying them. Until the library is recompiled those resources exist
+ * only in the overlay, so retiring the overlay would retire live content. */
+static volatile LONG g_sources_changed;
+
+void sh_package_runtime_note_sources_changed(void)
+{
+    InterlockedExchange(&g_sources_changed, 1);
+}
 
 static pr_provider *pr_retain(pr_provider *provider)
 {
@@ -73,7 +84,7 @@ static void pr_release(pr_provider *provider)
         sh_resource_catalog_close(provider->catalog);
         sh_audio_originals_close(provider->audio_originals);
     }
-    pr_release(provider->parent); free(provider);
+    pr_release(provider->parent); free(provider->data_root); free(provider);
 }
 
 static void pr_publish(pr_provider *current, pr_provider *library, pr_provider *map)
@@ -463,6 +474,11 @@ static pr_provider *pr_prepare(const char *data_root, const char *source_root,
     if (!pr_cache_resources(compiled, data_root, error, sizeof(error))) goto done;
     provider = calloc(1, sizeof(*provider));
     if (!provider) goto done;
+    /* Remember where this compilation was scanned from so the library can be
+     * recompiled later without the caller supplying the root again. */
+    if (data_root && !source_root && !(provider->data_root = _strdup(data_root))) {
+        free(provider); provider = NULL; goto done;
+    }
     provider->sources = sources; provider->compiled = compiled; provider->catalog = catalog;
     provider->audio_originals = audio_originals; audio_originals = NULL;
     provider->references = 1;
@@ -509,7 +525,7 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
     pr_original_source originals = {0};
     char error[2048] = "", line[512];
     char source_error[2048] = "";
-    int ok = 0, guarded = 0, composition_failed = 0, old_usable = 0;
+    int ok = 0, guarded = 0, composition_failed = 0, old_usable = 0, library_rescanned = 0;
     AcquireSRWLockExclusive(&g_refresh_lock);
     if ((guard.begin != NULL) != (guard.end != NULL)) {
         snprintf(error, sizeof(error), "package activation guard is incomplete"); goto done;
@@ -519,10 +535,26 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
             snprintf(error, sizeof(error), "map resources require an initialized local library and a valid source root"); goto done;
         }
         library = pr_retain(g_library_provider);
+        /* A committed installation belongs to the persistent library, not to the
+         * temporary map provider that carried it through activation. Recompile the
+         * library in this same transaction, before the overlay is composed or
+         * retired, so those resources are never mistaken for removals and retired
+         * out from under the consumers still using them. A failed rescan leaves
+         * the current provider in place: nothing is retired on a guess. */
+        if (InterlockedCompareExchange(&g_sources_changed, 0, 0) && library->data_root) {
+            pr_provider *rescanned = pr_prepare(library->data_root, NULL, library, 0,
+                &inventory, NULL, error, sizeof(error));
+            if (!rescanned) {
+                backend_log("package library rescan for committed sources failed; the current provider is kept");
+                goto done;
+            }
+            pr_release(library); library = rescanned; library_rescanned = 1;
+        }
         if (prepared) map = pr_retain(prepared->provider);
         else if (map_source_root && !(map = pr_prepare(data_root, map_source_root,
             g_map_provider, 0, NULL, NULL, error, sizeof(error)))) goto done;
     } else {
+        library_rescanned = 1;
         library = pr_prepare(data_root, NULL, g_library_provider, 0, &inventory,
             &composition_failed, error, sizeof(error));
         if (!library) {
@@ -623,6 +655,7 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
         current->sources->package_count, current->sources->component_count, current->compiled->resource_count,
         current->compiled->duplicate_count, current->compiled->composed_count, map ? "; temporary map provider active" : "");
     backend_log(line);
+    if (library_rescanned) InterlockedExchange(&g_sources_changed, 0);
     library = map = current = NULL;
     if (inventory) { pr_inventory_release(old_inventory); inventory = NULL; }
     pr_release(old_current); pr_release(old_library); pr_release(old_map);

@@ -48,6 +48,12 @@ inside material blocks and late consumers still need additional adapters.
 Single/equal custom-resource passthrough remains supported; these checks do not
 establish complete native activation or dependency coverage for every material.
 
+Resident reconstruction completes virtual-texture material binding inside the
+verified process-heap scope before consumer updates. A permanent material must
+not keep binding arrays allocated from a heap that the engine destroys on map
+exit. This lifetime requirement applies to reconstructed stock materials as well
+as package additions.
+
 ## Author inputs
 
 Installed game archives are read-only inputs. "Replacement" denotes the runtime

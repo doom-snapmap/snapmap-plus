@@ -529,6 +529,16 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 58 10 48 89 70 18 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 60 01 00 00 "
       "4C 8B F1 8B 71 20 0F B6 79 24 40 80 E7 01 48 8B 59 08",
       0x17FFDB0u },
+    { "MaterialVirtualTextureRebind", /* void(void). Rebuilds every material's virtual-texture
+                                       * parm binding; the engine runs it after map preload
+                                       * and texture reloads. Unique in both renderers:
+                                       * Vulkan 0xe1b0c0, OpenGL 0xe0cfb0. */
+      "40 57 48 83 EC 40 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 50 33 DB "
+      "C7 44 24 38 00 00 85 00 48 89 5C 24 28 48 89 5C 24 30 41 B0 01 48 8D 54 24 28 "
+      "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 39 5C 24 30 7E 28 8B FB 0F 1F 40 00 "
+      "0F 1F 84 00 00 00 00 00 48 8B 4C 24 28 48 8B 0C 0F E8 ?? ?? ?? ?? FF C3 "
+      "48 8D 7F 08 3B 5C 24 30 7C E6",
+      0xE1B0C0u },
     { "ResourceGenericLoad", /* void(idResource*). Read source and run native post-parse.
                              * Reconstruction belongs to its fallback path, not every load.
                             * DeclFind normally reaches this through the pending-load path;

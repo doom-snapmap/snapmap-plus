@@ -16,6 +16,12 @@
 #define RR_ENTRY_LIMIT 262144u
 #define RR_PENDING 2u
 #define RR_DEFAULT 4u
+/* idDecl::Read tests this byte and returns success without reading a source;
+ * the dependency observer uses the same flag (resource_graph_native.c). */
+#define RR_IMPLICIT_TEXT_OFFSET 0x48u
+/* idResource lifetime tier; the map-transition purge tests only this field. */
+#define RR_LEVEL_OFFSET 0x28u
+#define RR_LEVEL_PERMANENT 4u
 typedef struct rr_entry {
     void *resource, *manager;
     char *type, *name;
@@ -25,10 +31,21 @@ typedef struct rr_entry {
      * record, must be allowed to come back the same way. */
     unsigned char captured_state;
     int captured_source;
+    /* The engine's own implicit-text flag: this declaration carries no source
+     * to re-read, so reconstruction could only replace it with a default. */
+    int implicit;
+    /* Lifetime tier as found: 1 map, 2 full teardown, 4 permanent. */
+    unsigned int captured_level;
 } rr_entry;
+/* Every identity that already existed when the pass began, with the lifetime
+ * tier it had. Touch consults this to tell a resource the pass just created
+ * from one the map owns. */
+typedef struct rr_known { void *resource; unsigned int level; } rr_known;
 struct sh_resource_resident {
     rr_entry *items;
     size_t count, capacity;
+    rr_known *known;
+    size_t known_count;
     sh_process_heap_scope heap;
     void *renderer;
     void (*adjust)(void *, int);
@@ -43,6 +60,7 @@ static struct {
     void (*reconstruct)(void *), (*load)(void *), (*string_free)(void *);
     void *(*lookup)(void *, const char *);
     int (*mode)(void);
+    void (*rebind)(void);
 } g_rr;
 static sh_resource_resident *g_rr_recovery;
 static __declspec(thread) sh_resource_resident *g_rr_active;
@@ -50,6 +68,14 @@ static __declspec(thread) sh_resource_resident *g_rr_active;
 static int rr_error(char *error, size_t capacity, const char *message)
 {
     if (error && capacity) snprintf(error, capacity, "%s", message);
+    return 0;
+}
+/* Same failure, with the identity the engine raised on. */
+static int rr_error_at(char *error, size_t capacity, const char *message,
+    const char *type, const char *name)
+{
+    if (error && capacity) snprintf(error, capacity, "%s for %s:%s", message,
+        type ? type : "?", name ? name : "?");
     return 0;
 }
 static char rr_fold(char c)
@@ -93,7 +119,51 @@ static void rr_free(sh_resource_resident *pass)
     for (size_t i = 0; i < pass->count; i++) {
         free(pass->items[i].type); free(pass->items[i].name);
     }
-    free(pass->items); free(pass);
+    free(pass->items); free(pass->known); free(pass);
+}
+static int rr_known_compare(const void *key, const void *row)
+{
+    void *const *a = key;
+    const rr_known *b = row;
+    if ((uintptr_t)*a < (uintptr_t)b->resource) return -1;
+    return (uintptr_t)*a > (uintptr_t)b->resource ? 1 : 0;
+}
+static int rr_known_order(const void *a, const void *b)
+{
+    const rr_known *x = a, *y = b;
+    if ((uintptr_t)x->resource < (uintptr_t)y->resource) return -1;
+    return (uintptr_t)x->resource > (uintptr_t)y->resource ? 1 : 0;
+}
+/* Pointer/level snapshot of the whole registry. Cheaper than the inventory:
+ * no identity strings, no native path calls. */
+static int rr_known_snapshot(sh_resource_resident *pass)
+{
+    void *list = *g_rr.head;
+    unsigned lists = 0;
+    size_t capacity = 0;
+    while (list && lists++ < RR_LIST_LIMIT) {
+        unsigned char *manager = list;
+        void **items = *(void ***)(manager + 0x20);
+        int count = *(int *)(manager + 0x28);
+        if (count < 0 || (unsigned)count >= RR_ENTRY_LIMIT || (count && !items)) return 0;
+        for (int i = 0; i < count; i++) if (items[i]) {
+            if (pass->known_count == capacity) {
+                size_t next_capacity = capacity ? capacity * 2 : 4096;
+                rr_known *next = next_capacity > capacity && next_capacity <= SIZE_MAX / sizeof(*next) ?
+                    realloc(pass->known, next_capacity * sizeof(*next)) : NULL;
+                if (!next) return 0;
+                pass->known = next; capacity = next_capacity;
+            }
+            pass->known[pass->known_count].resource = items[i];
+            pass->known[pass->known_count].level =
+                *(unsigned int *)((unsigned char *)items[i] + RR_LEVEL_OFFSET);
+            pass->known_count++;
+        }
+        list = *(void **)(manager + 0x18);
+    }
+    if (list) return 0;
+    qsort(pass->known, pass->known_count, sizeof(*pass->known), rr_known_order);
+    return 1;
 }
 static const uint8_t *rr_site(const sig_result *results, size_t count, const uint8_t *base, const char *name)
 {
@@ -113,9 +183,10 @@ static void *rr_relative(const uint8_t *instruction, size_t offset, size_t lengt
 }
 int sh_resource_resident_bind(const sig_result *results, size_t count, const uint8_t *base)
 {
-    const uint8_t *command, *complete, *mode, *reconstruct, *load, *lookup;
+    const uint8_t *command, *complete, *mode, *reconstruct, *load, *lookup, *rebind;
     sh_process_heap_api heap;
     void **renderer;
+    void *materials;
     if (!results || !base || !sh_process_heap_bind(&heap, results, count, base)) return 0;
     command = rr_site(results, count, base, "ResourceReloadRenderScope");
     complete = rr_site(results, count, base, "PublishedMapComplete");
@@ -123,8 +194,13 @@ int sh_resource_resident_bind(const sig_result *results, size_t count, const uin
     reconstruct = rr_site(results, count, base, "ResourceReconstruct");
     load = rr_site(results, count, base, "ResourceGenericLoad");
     lookup = rr_site(results, count, base, "ResourceLookup");
-    if (!command || !complete || !mode || !reconstruct || !load || !lookup) return 0;
+    rebind = rr_site(results, count, base, "MaterialVirtualTextureRebind");
+    materials = (void *)glb_resolve(base, "material_manager_ctx", NULL);
+    if (!command || !complete || !mode || !reconstruct || !load || !lookup || !rebind || !materials) return 0;
     __try {
+        /* The rebind walks the material manager itself; its only list load is
+         * lea rcx at +0x30. Any other manager means a different function. */
+        if (memcmp(rebind + 0x30, "\x48\x8d\x0d", 3) || rr_relative(rebind + 0x30, 3, 7) != materials) return 0;
         static const size_t slots[] = {0x1a, 0x39, 0x5e, 0x6e};
         static const size_t calls[] = {0x33, 0x48, 0x68, 0x7b};
         static const uint32_t virtuals[] = {0x80, 0x110, 0x108, 0x110};
@@ -147,6 +223,7 @@ int sh_resource_resident_bind(const sig_result *results, size_t count, const uin
     g_rr.reconstruct = (void (*)(void *))reconstruct;
     g_rr.load = (void (*)(void *))load;
     g_rr.lookup = (void *(*)(void *, const char *))lookup;
+    g_rr.rebind = (void (*)(void))rebind;
     return 1;
 }
 static int rr_inventory(sh_resource_resident *pass)
@@ -176,6 +253,8 @@ static int rr_inventory(sh_resource_resident *pass)
             if (!entry->type || !entry->name) return 0;
             entry->captured_state = *((unsigned char *)items[i] + 0x2c);
             entry->captured_source = *(void **)((unsigned char *)items[i] + 0x18) != NULL;
+            entry->implicit = *((unsigned char *)items[i] + RR_IMPLICIT_TEXT_OFFSET) != 0;
+            entry->captured_level = *(unsigned int *)((unsigned char *)items[i] + RR_LEVEL_OFFSET);
         }
         list = *(void **)(manager + 0x18);
     }
@@ -236,6 +315,8 @@ sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *chang
         pass->thread = GetCurrentThreadId();
         if (!g_rr.thread || *g_rr.thread != pass->thread || !g_rr.mode ||
             (g_rr.mode() != 2 && g_rr.mode() != 3) || !sh_process_heap_enter(&g_rr.heap, &pass->heap)) goto done;
+        phase = "registry snapshot";
+        if (!rr_known_snapshot(pass)) goto done;
         if (!changes->count && !g_rr_recovery) goto render_scope;
         phase = "inventory";
         if (!rr_inventory(pass)) goto done;
@@ -261,8 +342,22 @@ sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *chang
         current = NULL; phase = "recorded consumers";
         if (sh_resource_graph_consumers(seeds.items, seeds.count, &impact) == SH_RESOURCE_GRAPH_ERROR) goto done;
         qsort(seeds.items, seeds.count, sizeof(*seeds.items), rr_compare);
-        for (size_t i = 0; i < pass->count; i++)
-            pass->items[i].selected |= rr_has(&seeds, pass->items + i) || rr_has(&impact, pass->items + i);
+        for (size_t i = 0; i < pass->count; i++) {
+            rr_entry *entry = pass->items + i;
+            int supplied = entry->selected;   /* its own native path changed */
+            entry->selected |= rr_has(&seeds, entry) || rr_has(&impact, entry);
+            /* Only content this provider supplies, or permanent content it can
+             * change, may be rebuilt. A map-scoped identity such as the live
+             * entitydef:world is built by the map that is already gone --
+             * it exists in no archive, so reconstruction replaces live engine
+             * state with a default and then refuses the whole activation, and
+             * the next map load rebuilds it from the new provider anyway.
+             * Implicit-text declarations carry no source to re-read at all.
+             * Both are reached only as recorded consumers; a provider that
+             * does supply the bytes still selects the identity by path. */
+            if (!supplied && (entry->implicit || entry->captured_level != RR_LEVEL_PERMANENT))
+                entry->selected = 0;
+        }
         /* Compact only after native path capture; no engine call may mutate the
          * inventory during its collection. Names survive native reconstruction. */
         {
@@ -302,8 +397,16 @@ done:;
 void sh_resource_resident_touch(void *resource)
 {
     sh_resource_resident *pass = g_rr_active;
+    const rr_known *known;
     if (!pass || !resource) return;
-    __try { *(unsigned int *)((unsigned char *)resource + 0x28) = 4; }
+    /* New content this pass created needs permanent lifetime to survive the
+     * map-transition purge. An identity that already existed keeps the tier it
+     * had: promoting a map-scoped object would outlive the heap that owns it
+     * and leave the registry pointing at freed storage. */
+    known = pass->known ? bsearch(&resource, pass->known, pass->known_count,
+                                  sizeof(*pass->known), rr_known_compare) : NULL;
+    if (known && known->level != RR_LEVEL_PERMANENT) return;
+    __try { *(unsigned int *)((unsigned char *)resource + RR_LEVEL_OFFSET) = RR_LEVEL_PERMANENT; }
     __except (EXCEPTION_EXECUTE_HANDLER) { pass->touch_failed = 1; }
 }
 void sh_resource_resident_external(sh_resource_resident *pass, void *resource)
@@ -323,12 +426,15 @@ int sh_resource_resident_reconstruct(sh_resource_resident *pass, char *error, si
             unsigned char *object = entry->resource;
             if (entry->external) continue;
             /* Preserve storage/identity. Native level-four destructors warn;
-             * level two permits their synchronous in-place reconstruction. */
+             * level two permits their synchronous in-place reconstruction.
+             * Restore the tier this identity already had: a supplied map-scoped
+             * resource stays map-scoped and is still purged with its map. */
             pass->mutated = 1; entry->reconstructed = 1;
             __try {
-                if (*(unsigned int *)(object + 0x28) == 4) *(unsigned int *)(object + 0x28) = 2;
+                if (*(unsigned int *)(object + RR_LEVEL_OFFSET) == RR_LEVEL_PERMANENT)
+                    *(unsigned int *)(object + RR_LEVEL_OFFSET) = 2;
                 g_rr.reconstruct(object);
-            } __finally { *(unsigned int *)(object + 0x28) = 4; }
+            } __finally { *(unsigned int *)(object + RR_LEVEL_OFFSET) = RR_LEVEL_PERMANENT; }
         }
         for (size_t i = 0; i < pass->count; i++) if (!pass->items[i].external) {
             unsigned char *state = (unsigned char *)pass->items[i].resource + 0x2c;
@@ -345,6 +451,9 @@ int sh_resource_resident_defaults(sh_resource_resident *pass, char *error, size_
     if (!pass || pass->thread != GetCurrentThreadId() || !pass->rebuilt)
         return rr_error(error, capacity, "resident defaults preceded reconstruction");
     if (pass->defaults_ready) return 1;
+    /* Name the identity under the callback: a failure here is the engine's own
+     * default handler raising, and the report has to say which resource it was. */
+    volatile const rr_entry *failing = NULL;
     __try {
         /* A removed, non-stock source must not fall through to an old native
          * declaration source record. Use the same default callback as native
@@ -353,6 +462,7 @@ int sh_resource_resident_defaults(sh_resource_resident *pass, char *error, size_
         for (size_t i = 0; i < pass->count; i++) {
             rr_entry *entry = pass->items + i;
             if (!entry->external && entry->retired) {
+                failing = entry;
                 sh_resource_graph_frame frame;
                 sh_resource_graph_begin(&frame, entry->type, entry->name);
                 __try {
@@ -363,6 +473,8 @@ int sh_resource_resident_defaults(sh_resource_resident *pass, char *error, size_
         }
         pass->defaults_ready = 1; return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (failing) return rr_error_at(error, capacity, "native resident retirement failed",
+            ((const rr_entry *)failing)->type, ((const rr_entry *)failing)->name);
         return rr_error(error, capacity, "native resident retirement failed");
     }
 }
@@ -404,6 +516,13 @@ int sh_resource_resident_drain(sh_resource_resident *pass, char *error, size_t c
                 }
             }
         }
+        /* Reconstruction discarded each rebuilt material's virtual-texture parm
+         * binding, which the engine established once at boot in process heap 0.
+         * Left alone, the next map load rebuilds it inside the map or persist
+         * heap scope; a permanent material then owns storage ResetPersistHeap
+         * frees when Play exits, and the following rebind writes through it.
+         * Rebind every material here, still inside this pass's heap-0 scope. */
+        g_rr.rebind();
         if (pass->held) pass->update(pass->renderer);
         pass->drained = 1;
         return 1;
@@ -422,6 +541,12 @@ int sh_resource_resident_end(sh_resource_resident *pass, int succeeded, char *er
         __try {
             unsigned char *state = (unsigned char *)pass->items[i].resource + 0x2c;
             if (*state & RR_PENDING) { *state &= 0xfdu; clean = 0; }
+            /* The pass works at permanent lifetime so nested loads pass the
+             * engine's depth guard, then gives each identity back the tier it
+             * had: a map-scoped resource stays map-scoped and is retired with
+             * its map instead of outliving the heap that owns it. */
+            *(unsigned int *)((unsigned char *)pass->items[i].resource + RR_LEVEL_OFFSET) =
+                pass->items[i].captured_level;
         } __except (EXCEPTION_EXECUTE_HANDLER) { clean = 0; }
     }
     if (pass->held) {

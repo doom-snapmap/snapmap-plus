@@ -2,6 +2,9 @@
 #include "decl_entity_class.h"
 #include "decl_graph_dependencies.h"
 #include "decl_material.h"
+#include "decl_md6_compose.h"
+#include "md6_binary.h"
+#include "model_binary.h"
 #include "package_audio.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -191,6 +194,80 @@ static int sg_material_references(sg_walk *walk,
     return !walk->failed;
 }
 
+/* An MD6 definition names its inherited definition, its bound mesh and one
+ * animation per alias. The mesh and the animations are cooked binaries, so they
+ * enter the queue as catalog identities and are resolved like any other
+ * non-declaration resource. */
+static int sg_md6_reference(void *context, const char *type, const char *name)
+{
+    sg_walk *walk = context;
+    walk->report.references++;
+    return sg_add(walk, type, name);
+}
+
+static int sg_md6(sg_walk *walk, sh_decl_source source)
+{
+    char detail[1024];
+    if (!sh_decl_md6_references(source, sg_md6_reference, walk, detail, sizeof(detail)) && !walk->failed)
+        sg_gap(walk, "", "md6def", detail[0] ? detail : "md6 definition source is unsupported");
+    return !walk->failed;
+}
+
+/* A cooked mesh names the skeleton the engine loads with it and one material per
+ * mesh and per material record. Read the bytes this candidate would supply, not
+ * whatever is installed. */
+static int sg_basemodel(sg_walk *walk, const char *path)
+{
+    unsigned char *body = NULL;
+    size_t length = 0;
+    char detail[1024];
+    int status = sg_read_path(walk, path, &body, &length);
+    if (status <= 0 || !body) {
+        free(body);
+        sg_gap(walk, "", "basemodel", status < 0 ? "cooked mesh is unreadable" : "cooked mesh is absent");
+        return !walk->failed;
+    }
+    if (!sh_md6_mesh_references(body, length, sg_md6_reference, walk, detail, sizeof(detail)) && !walk->failed)
+        sg_gap(walk, "", "basemodel", detail[0] ? detail : "cooked mesh envelope is unsupported");
+    free(body); return !walk->failed;
+}
+
+/* A cooked static model binds its materials per surface. */
+static int sg_model(sg_walk *walk, const char *path)
+{
+    unsigned char *body = NULL;
+    size_t length = 0;
+    char detail[1024];
+    int status = sg_read_path(walk, path, &body, &length);
+    if (status <= 0 || !body) {
+        free(body);
+        sg_gap(walk, "", "model", status < 0 ? "cooked model is unreadable" : "cooked model is absent");
+        return !walk->failed;
+    }
+    if (!sh_model_references(body, length, sg_md6_reference, walk, detail, sizeof(detail)) && !walk->failed)
+        sg_gap(walk, "", "model", detail[0] ? detail : "cooked model envelope is unsupported");
+    free(body); return !walk->failed;
+}
+
+/* generated/basemodel/<mesh name without its .md6mesh suffix>.bmd6model, the
+ * naming every shipped catalog row uses. Only needed for a mesh the installed
+ * catalog has never seen, which a package can legitimately add. */
+static char *sg_cooked_path(const char *type, const char *name)
+{
+    int mesh = !strcmp(type, "basemodel");
+    const char *prefix = mesh ? "generated/basemodel/" : "cooked/model/";
+    const char *suffix = mesh ? ".bmd6model" : ".bmodel";
+    const char *source = mesh ? ".md6mesh" : ".lwo";
+    size_t length = strlen(name), drop = strlen(source), capacity;
+    char *raw, *path;
+    if (length > drop && !_stricmp(name + length - drop, source)) length -= drop;
+    capacity = length + strlen(prefix) + strlen(suffix) + 2;
+    raw = malloc(capacity);
+    if (!raw) return NULL;
+    snprintf(raw, capacity, "%s%.*s%s", prefix, (int)length, name, suffix);
+    path = sh_package_engine_path(raw); free(raw); return path;
+}
+
 static int sg_material(sg_walk *walk, sh_decl_source source)
 {
     sh_decl_material material = {0}; char detail[1024];
@@ -270,22 +347,43 @@ static int sg_inspect(sg_walk *walk, const char *type, const char *name)
     compiled_resource = sh_package_compilation_find(walk->compiled, path);
     /* Material is a verified custom grammar, independent of reflected edit
      * classes. Read the prospective provider before considering loaded state. */
-    if (!strcmp(type, "material") || !strcmp(type, "renderparm")) {
+    if (!strcmp(type, "material") || !strcmp(type, "renderparm") || !strcmp(type, "md6def")) {
         if (!sg_file(walk, path)) { ok = 0; goto done; }
         status = sg_read_path(walk, path, &body, &source.length);
         if (status <= 0 || !body) {
             sg_gap(walk, "", type, status < 0 ? "candidate source is unreadable" : "candidate source is absent"); goto done;
         }
         walk->report.declarations++; source.text = (const char *)body;
-        ok = !strcmp(type, "material") ? sg_material(walk, source) : sg_renderparm(walk, source); goto done;
+        ok = !strcmp(type, "material") ? sg_material(walk, source) :
+            !strcmp(type, "md6def") ? sg_md6(walk, source) : sg_renderparm(walk, source); goto done;
     }
     if (sh_decl_native_registry_type_class(walk->registry, type, &native_class) != 1 ||
         ((!compiled_resource || !compiled_resource->type) &&
          sh_decl_native_schema_reader(walk->schema, (sh_decl_value_type){native_class, "*"}) != SH_DECL_READER_DECL)) {
         const sh_resource_catalog_entry *const *entries;
         size_t count = sh_resource_catalog_find(walk->catalog, type, name, &entries);
-        for (size_t i = 0; i < count; i++) if (*entries[i]->path && !sg_file(walk, entries[i]->path)) { ok = 0; break; }
-        sg_gap(walk, "", type, "non-declaration resource requires its format reader"); goto done;
+        int cooked = !strcmp(type, "basemodel"), model = !strcmp(type, "model"), inspected = 0;
+        for (size_t i = 0; i < count; i++) {
+            if (!*entries[i]->path) continue;
+            if (!sg_file(walk, entries[i]->path)) { ok = 0; break; }
+            if (!cooked && !model) continue;
+            if (!(cooked ? sg_basemodel(walk, entries[i]->path) : sg_model(walk, entries[i]->path))) { ok = 0; break; }
+            inspected = 1;
+        }
+        /* A mesh this candidate adds has no catalog row; its cooked path follows
+         * the same naming rule, so the provider's own bytes can still be read. */
+        if (ok && (cooked || model) && !inspected) {
+            char *cooked_path = sg_cooked_path(type, name);
+            if (!cooked_path) { walk->failed = 1; ok = 0; }
+            else {
+                if (sg_file(walk, cooked_path))
+                    inspected = cooked ? sg_basemodel(walk, cooked_path) : sg_model(walk, cooked_path);
+                ok = !walk->failed;
+                free(cooked_path);
+            }
+        }
+        if (ok && !inspected) sg_gap(walk, "", type, "non-declaration resource requires its format reader");
+        goto done;
     }
     if (!sg_file(walk, path)) { ok = 0; goto done; }
     status = sg_read_path(walk, path, &body, &source.length);
@@ -398,8 +496,11 @@ int sh_package_source_graph(const sh_package_compilation *compiled,
         const char *type = walk.queue.items[i].type, *name = walk.queue.items[i].name;
         if (!sg_inspect(&walk, type, name)) goto done;
     }
-    /* Source pointers do not cover late string consumers or opaque formats. */
-    walk.paths.incomplete = 1; *out = walk.paths; memset(&walk.paths, 0, sizeof(walk.paths)); ok = 1;
+    /* Closure is only claimed when nothing in this walk was left to an adapter:
+     * every recorded gap (unsupported reader, unexpanded inheritance, late
+     * string consumer) keeps the result explicitly incomplete. */
+    walk.paths.incomplete = walk.report.gaps != 0;
+    *out = walk.paths; memset(&walk.paths, 0, sizeof(walk.paths)); ok = 1;
 done:
     if (!ok && !error[0]) snprintf(error, capacity, "candidate source dependency inspection failed");
     if (report) *report = walk.report;

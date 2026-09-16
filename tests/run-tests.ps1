@@ -48,6 +48,8 @@ $tests = @(
     @{ name = "decl_polymorphic_test"; src = 'decl_polymorphic_test.c ..\src\backend\decl_polymorphic.c ..\src\backend\decl_compose.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_tree.c'; arg = "" }
     @{ name = "decl_graph_compose_test"; src = 'decl_graph_compose_test.c ..\src\backend\decl_graph_compose.c ..\src\backend\decl_graph.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
     @{ name = "decl_md6_compose_test"; src = 'decl_md6_compose_test.c ..\src\backend\decl_md6_compose.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
+    @{ name = "md6_binary_test"; src = 'md6_binary_test.c ..\src\backend\md6_binary.c'; arg = "" }
+    @{ name = "model_binary_test"; src = 'model_binary_test.c ..\src\backend\model_binary.c'; arg = "" }
     @{ name = "decl_graph_test"; src = 'decl_graph_test.c ..\src\backend\decl_graph.c ..\src\backend\decl_tree.c'; arg = "" }
     @{ name = "decl_entity_class_test"; src = 'decl_entity_class_test.c ..\src\backend\decl_entity_class.c ..\src\backend\decl_tree.c'; arg = "" }
     @{ name = "decl_dependencies_test"; src = 'decl_dependencies_test.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_json_dependencies.c ..\src\backend\config_json.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
@@ -175,7 +177,7 @@ if ($DoomAlt) {
 
 $compiledConsumers = @("package_runtime_context_test", "weapon_hud_test", "package_requirements_test", "strids_packages_test", "override_packages_test", "overrides_internal_test", "decl_server_test")
 $compiledConsumers += "audio_originals_test"
-$compilerSources = @("grid_room_asset.c", "grid_room_nav.c", "aas_edit.c", "grid_room.c", "grid_room_resources.c", "grid_room_decl.c", "package_runtime.c", "resource_graph.c", "package_usage.c", "package_source_graph.c", "decl_native_registry.c", "decl_dependencies.c", "decl_json_dependencies.c", "decl_graph.c", "decl_graph_compose.c", "decl_md6_compose.c", "decl_graph_dependencies.c", "package_compiler.c", "decl_entity_class.c", "decl_native_schema.c", "package_sources.c", "packages.c", "package_descriptor.c", "config_json.c", "decl_compose.c", "decl_tree.c", "decl_polymorphic.c", "decl_server_path.c", "decl_text.c", "resource_catalog.c", "raw_deflate.c")
+$compilerSources = @("grid_room_asset.c", "grid_room_nav.c", "aas_edit.c", "grid_room.c", "grid_room_resources.c", "grid_room_decl.c", "package_runtime.c", "resource_graph.c", "package_usage.c", "package_source_graph.c", "decl_native_registry.c", "decl_dependencies.c", "decl_json_dependencies.c", "decl_graph.c", "decl_graph_compose.c", "decl_md6_compose.c", "md6_binary.c", "model_binary.c", "decl_graph_dependencies.c", "package_compiler.c", "decl_entity_class.c", "decl_native_schema.c", "package_sources.c", "packages.c", "package_descriptor.c", "config_json.c", "decl_compose.c", "decl_tree.c", "decl_polymorphic.c", "decl_server_path.c", "decl_text.c", "resource_catalog.c", "raw_deflate.c")
 $compilerSources += @("decl_native_lex.c", "decl_material.c", "decl_material_compose.c", "package_material.c")
 $compilerSources += @("audio_banks.c", "audio_packages.c", "audio_originals.c", "package_audio.c")
 $materialSources = 'package_material_test.c ..\src\backend\package_material.c ..\src\backend\decl_material.c ..\src\backend\decl_material_compose.c ..\src\backend\decl_native_lex.c'
@@ -187,7 +189,7 @@ $tests += @{ name = "package_audio_test"; src = $audioSources; arg = "" }
 $opaqueSources = ($tests | Where-Object { $_.name -eq 'package_compiler_test' }).src -replace '^package_compiler_test.c ', 'package_opaque_test.c '
 $tests += @{ name = "package_opaque_test"; src = $opaqueSources; arg = "" }
 foreach ($t in $tests) {
-    if ($t.name -eq "package_source_graph_test") { $t.src += ' ..\src\backend\decl_material.c ..\src\backend\decl_native_lex.c ..\src\backend\audio_banks.c ..\src\backend\package_audio.c' }
+    if ($t.name -eq "package_source_graph_test") { $t.src += ' ..\src\backend\decl_material.c ..\src\backend\decl_md6_compose.c ..\src\backend\md6_binary.c ..\src\backend\model_binary.c ..\src\backend\decl_native_lex.c ..\src\backend\audio_banks.c ..\src\backend\package_audio.c' }
     if ($t.name -in $compiledConsumers) {
         foreach ($source in $compilerSources) {
             $relative = '..\src\backend\' + $source

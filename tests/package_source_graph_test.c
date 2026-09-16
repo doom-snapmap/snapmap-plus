@@ -115,6 +115,30 @@ static void setup(fixture *f)
         fields(f, (char *)records + 4 * 0x38, 1, t, o, n);
     }
 }
+/* A minimal but complete cooked md6mesh: one skeleton, one mesh whose material
+ * is a declaration this fixture can serve, no geometry and no material records. */
+static size_t cooked_mesh(unsigned char *out, const char *skeleton, const char *material)
+{
+    static const unsigned char magic[4] = {0x2b, 0x02, 0x4d, 0x4d};
+    size_t at = 0;
+    #define PUT(bytes, count) do { memcpy(out + at, (bytes), (count)); at += (count); } while (0)
+    #define ZERO(count) do { memset(out + at, 0, (count)); at += (count); } while (0)
+    #define NAME(text) do { size_t n = strlen(text); out[at]=(unsigned char)n; out[at+1]=(unsigned char)(n>>8); \
+        out[at+2]=0; out[at+3]=0; at += 4; memcpy(out + at, (text), n); at += n; } while (0)
+    #define BE32(value) do { unsigned v=(value); out[at]=(unsigned char)(v>>24); out[at+1]=(unsigned char)(v>>16); \
+        out[at+2]=(unsigned char)(v>>8); out[at+3]=(unsigned char)v; at += 4; } while (0)
+    PUT(magic, 4); ZERO(8); NAME(skeleton); ZERO(24); ZERO(1); NAME(""); ZERO(2); ZERO(24);
+    BE32(0); ZERO(36);
+    BE32(1); NAME("body"); NAME(material); ZERO(1); BE32(1); BE32(0); BE32(0); ZERO(24);
+    BE32(0); BE32(0); BE32(0); ZERO(1); BE32(0);
+    BE32(0); PUT(magic, 4);
+    #undef PUT
+    #undef ZERO
+    #undef NAME
+    #undef BE32
+    return at;
+}
+
 static int original(void *context, const char *path, unsigned char **body, size_t *length)
 {
     fixture *f = context;
@@ -122,6 +146,13 @@ static int original(void *context, const char *path, unsigned char **body, size_
     char generated[160];
     unsigned index;
     *body = NULL; *length = 0;
+    if (!strcmp(path, "generated/basemodel/md6/boss/boss.bmd6model")) {
+        unsigned char cooked[512];
+        size_t size = cooked_mesh(cooked, "md6/boss/boss.md6skl", "boss");
+        *body = malloc(size);
+        if (!*body) return -1;
+        memcpy(*body, cooked, size); *length = size; return 2;
+    }
     if (f->unreadable && !strcmp(path, f->unreadable)) return -1;
     if (!strcmp(path, "generated/decls/entitydef/base.decl")) text = "{ class = \"Entity\"; edit = { target = \"parent-only\"; } }";
     else if (!strcmp(path, "generated/decls/entitydef/map-child.decl")) text = "{ class = \"Entity\"; edit = { target = \"root\"; } }";
@@ -136,6 +167,15 @@ static int original(void *context, const char *path, unsigned char **body, size_
     else if (!strcmp(path, "generated/decls/renderparm/buffer.decl")) text = "{ StructuredBuffer writable_cs boss_t }";
     else if (!strcmp(path, "generated/decls/renderparm/boss_t.decl")) text = "{ struct { uint offset; } }";
     else if (!strcmp(path, "generated/decls/table/curve.decl")) text = "{ {0,1} }";
+    else if (!strcmp(path, "generated/decls/md6def/mesh-only.decl"))
+        text = "{ init { mesh \"md6/boss/boss.md6mesh\" } }";
+    else if (!strcmp(path, "generated/decls/md6def/boss.decl"))
+        text = "{ init { inherit \"demons/base\" mesh \"md6/boss/absent.md6mesh\" calcRefBoundsFromJoints 1 }"
+               " aliases { alias { name \"idle\" anim \"md6/boss/motion/idle.md6anim\" }"
+               " alias { name \"attack\" anim \"md6/boss/motion/attack.md6anim\" } } }";
+    else if (!strcmp(path, "generated/decls/md6def/demons/base.decl"))
+        text = "{ init { mesh \"md6/base/base.md6mesh\" } }";
+    else if (!strcmp(path, "generated/decls/md6def/broken.decl")) text = "{ init { unknownField 1 } }";
     else if (sscanf(path, "generated/decls/entitydef/chain/%u.decl", &index) == 1 && index < 1024) {
         if (index < 1023) snprintf(generated, sizeof(generated), "{ class = \"Entity\"; edit = { target = \"chain/%u\"; } }", index + 1);
         else strcpy(generated, "{ class = \"Entity\"; edit = {} }");
@@ -238,6 +278,45 @@ int main(void)
         json, strlen(json), &paths, &report, error, sizeof(error)));
     assert(has(&paths, "renderparm/buffer.decl") && has(&paths, "renderparm/boss_t.decl") && report.references == 1);
     assert(report.declarations == 2 && !report.gaps && !f.object_state_reads);
+    /* Nothing was left to an adapter here, so this closure is not incomplete. */
+    assert(!paths.incomplete);
+    /* An MD6 definition names its inherited definition, its mesh and one
+     * animation per alias. The cooked binaries are resolved from the catalog,
+     * so they contribute their own known paths, not a manufactured decl path. */
+    json = "{\"targetType\":\"idDeclMD6\",\"value\":\"boss\"}";
+    assert(sh_package_source_graph(&compiled, NULL, original, &f, registry, (uintptr_t)f.reflection,
+        json, strlen(json), &paths, &report, error, sizeof(error)));
+    assert(has(&paths, "md6def/boss.decl") && has(&paths, "md6def/demons/base.decl"));
+    assert(!has(&paths, "decls/basemodel") && !has(&paths, "decls/anim"));
+    /* Four identities from the child (inherit, mesh, two alias animations) and
+     * the inherited definition's own mesh. */
+    assert(report.declarations == 2 && report.references == 5 && !f.object_state_reads);
+    /* The cooked mesh and animations have no source reader, and that stays
+     * visible: their identities are reported as gaps, not as closure. */
+    assert(report.gaps == 4 && paths.incomplete);
+    json = "{\"targetType\":\"idDeclMD6\",\"value\":\"broken\"}";
+    assert(sh_package_source_graph(&compiled, NULL, original, &f, registry, (uintptr_t)f.reflection,
+        json, strlen(json), &paths, &report, error, sizeof(error)));
+    assert(has(&paths, "md6def/broken.decl") && report.gaps == 1 && paths.incomplete);
+    /* A mesh the provider supplies is read through the same cooked reader: its
+     * skeleton and material identities become references of their own, and the
+     * material resolves to a real declaration source. */
+    {
+        sh_compiled_resource material = {0};
+        material.engine_path = "generated/decls/material/boss.decl";
+        material.body = (unsigned char *)"{ color curve[color] }";
+        material.body_length = strlen((const char *)material.body);
+        compiled.resources = &material; compiled.resource_count = 1;
+        json = "{\"targetType\":\"idDeclMD6\",\"value\":\"mesh-only\"}";
+        assert(sh_package_source_graph(&compiled, NULL, original, &f, registry, (uintptr_t)f.reflection,
+            json, strlen(json), &paths, &report, error, sizeof(error)));
+        assert(has(&paths, "basemodel/md6/boss/boss.bmd6model"));
+        assert(has(&paths, "material/boss.decl") && has(&paths, "renderparm/color.decl"));
+        /* The skeleton has no reader of its own, so it stays an explicit gap. */
+        assert(report.gaps && paths.incomplete && !has(&paths, "decls/skeleton"));
+        compiled.resources = &resource; compiled.resource_count = 1;
+    }
+    json = "{\"targetType\":\"idDeclRenderParm\",\"value\":\"buffer\"}";
     json = "{\"targetType\":\"idMaterial\",\"value\":\"boss\"}";
     f.unreadable = "generated/decls/renderparm/color.decl";
     assert(!sh_package_source_graph(&compiled, NULL, original, &f, registry, (uintptr_t)f.reflection,

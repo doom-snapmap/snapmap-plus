@@ -77,7 +77,11 @@ The overlay retains every authored source member and independent ownership;
 creating or freeing it does not write the installed package trees.
 
 The runtime retains the local library separately from its effective map view.
-Switching maps uses that captured library without rescanning its authored files.
+Switching maps uses that captured library unless a committed installation has
+changed its sources. A commit marks the library for recompilation from its data
+root before the map overlay is next composed or retired. A failed rescan keeps
+the current provider and retires nothing, so newly installed resources cannot
+disappear when the temporary map view ends.
 Refreshing local packages while a map is active updates the library while
 retaining the map's resource precedence. Provider publication and native callback
 failure restore the previous library, map view and selected policy together.
@@ -203,6 +207,13 @@ excluded. Supported expanded entity inheritance follows parent-first effective
 state, including replaced fields and per-layer counted-array pruning. Unknown
 readers, unsupported inheritance forms and late gameplay string consumers still
 report gaps before this pass can certify a complete dependency set.
+
+MD6 source inspection follows inherited definitions, meshes and alias animations.
+Cooked MD6 mesh inspection follows the skeleton and per-mesh materials; cooked
+static model inspection follows surface materials. These readers use the
+candidate's effective source bytes. Unsupported format revisions and unhandled
+readers retain explicit gaps. The incomplete flag reflects recorded gaps; it is
+not set unconditionally and does not turn a partial walk into complete coverage.
 
 Audio bank catalog entries validate the filename against the cooked bank's
 internal identity before native loading, in both spellings the native loader

@@ -34,9 +34,18 @@ typedef int (*sh_package_activation_fn)(void *context, int restoring,
     const sh_package_changes *changes, char *error, size_t capacity);
 int sh_package_runtime_refresh_activated(const char *data_root, sh_package_activation_guard guard,
     sh_package_activation_fn activate, void *context);
+/* Record that the package tree gained or lost sources outside a refresh: a
+ * committed whole-package installation publishes files the compiled library has
+ * never scanned while a temporary map provider already supplies them. The next
+ * map activation or restoration recompiles the library from disk first, in the
+ * same transaction, so committed resources are not reported as removed and
+ * retired. Idempotent, lock-free, and cleared only by a successful rescan. */
+void sh_package_runtime_note_sources_changed(void);
 /* Activate private, already validated map source trees under
  * <map_source_root>/overrides; NULL restores the retained local library.
- * Existing library sources are not rescanned, changed or replaced by map data.
+ * Map data never changes or replaces library sources. The library is rescanned
+ * here only when note_sources_changed reported a committed installation, and
+ * then before the overlay is composed or retired.
  * Resource/provider and policy rollback use the same native callback contract.
  * Restoring the library also retires selected map JSON/references and policy;
  * failure restores that selection with its prior resource provider.
@@ -95,7 +104,8 @@ int sh_package_map_plan_source_resources(const sh_package_map_plan *plan,
     sh_package_source_graph_report *report, char *error, size_t capacity);
 /* NULL restores the library. A non-NULL plan is retained by successful
  * activation; the caller can free its handle afterward, including on failure.
- * No source rescan occurs. The same native boundary/rollback contract applies. */
+ * Sources are rescanned only for a reported committed installation, as in
+ * activate_map. The same native boundary/rollback contract applies. */
 int sh_package_runtime_activate_prepared_map(sh_package_map_plan *plan,
     sh_package_activation_guard guard, sh_package_activation_fn activate, void *context);
 void sh_package_map_plan_free(sh_package_map_plan *plan);

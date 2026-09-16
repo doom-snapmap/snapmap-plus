@@ -743,6 +743,120 @@ static int mpkg_working_name(const char *name)
     return 1;
 }
 
+/* A delivered package lives at overrides\map-<16 hex>\<package>. Only those are
+ * ours to supersede; anything else is the author's own tree and is never moved.
+ * Returns the overrides-relative path of a delivered root. */
+static int mpkg_delivered_relative(const char *root, const char *package_root,
+    char *out, size_t capacity)
+{
+    char prefix[MAX_PATH], group[24];
+    const char *rest, *slash;
+    size_t length;
+    if (snprintf(prefix, sizeof(prefix), "%s\\overrides\\", root) >= (int)sizeof(prefix)) return 0;
+    length = strlen(prefix);
+    if (_strnicmp(package_root, prefix, length)) return 0;
+    rest = package_root + length;
+    slash = strchr(rest, '\\');
+    if (!slash || (size_t)(slash - rest) >= sizeof(group) || !slash[1]) return 0;
+    memcpy(group, rest, (size_t)(slash - rest)); group[slash - rest] = 0;
+    if (!mpkg_working_name(group) || strstr(rest, "..") || strchr(rest, ':')) return 0;
+    return snprintf(out, capacity, "%s", rest) < (int)capacity;
+}
+
+/* Move one delivered package out of overrides into this batch's cancellation
+ * area, recording where it came from. The pending marker is already written, so
+ * an interrupted run restores it from that record instead of losing it. */
+static int mpkg_supersede_one(const char *root, const char *batch, size_t index,
+    const char *relative, char *error, size_t capacity)
+{
+    char area[MAX_PATH], slot[MAX_PATH], origin[MAX_PATH], content[MAX_PATH], source[MAX_PATH];
+    HANDLE file;
+    DWORD written = 0;
+    size_t length = strlen(relative);
+    if (snprintf(area, sizeof(area), "%s\\superseded", batch) >= (int)sizeof(area) ||
+        snprintf(slot, sizeof(slot), "%s\\%zu", area, index) >= (int)sizeof(slot) ||
+        snprintf(origin, sizeof(origin), "%s\\origin", slot) >= (int)sizeof(origin) ||
+        snprintf(content, sizeof(content), "%s\\content", slot) >= (int)sizeof(content) ||
+        snprintf(source, sizeof(source), "%s\\overrides\\%s", root, relative) >= (int)sizeof(source) ||
+        !mpkg_directory(area) || !mpkg_directory(slot)) {
+        mpkg_err(error, capacity, "cannot prepare the supersession record for '%s'", relative); return 0;
+    }
+    file = CreateFileA(origin, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
+    if (file == INVALID_HANDLE_VALUE ||
+        !WriteFile(file, relative, (DWORD)length, &written, NULL) || written != length ||
+        !FlushFileBuffers(file)) {
+        if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+        mpkg_err(error, capacity, "cannot record where '%s' came from", relative); return 0;
+    }
+    CloseHandle(file);
+    if (!mpkg_plain_ancestors(source) || !MoveFileExA(source, content, MOVEFILE_WRITE_THROUGH)) {
+        mpkg_err(error, capacity, "cannot retire the superseded package '%s'", relative); return 0;
+    }
+    return 1;
+}
+
+/* Read one recorded origin back. Only a plain relative path below overrides is
+ * accepted; the record is ours, but it is still validated before any move. */
+static int mpkg_superseded_origin(const char *slot, char *out, size_t capacity)
+{
+    char path[MAX_PATH];
+    HANDLE file;
+    DWORD size, read = 0;
+    if (snprintf(path, sizeof(path), "%s\\origin", slot) >= (int)sizeof(path)) return 0;
+    file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    size = GetFileSize(file, NULL);
+    if (size == INVALID_FILE_SIZE || !size || size >= capacity ||
+        !ReadFile(file, out, size, &read, NULL) || read != size) { CloseHandle(file); return 0; }
+    CloseHandle(file); out[size] = 0;
+    return !strstr(out, "..") && !strchr(out, ':') && out[0] != '\\' && strchr(out, '\\') != NULL;
+}
+
+/* Put every superseded package of an unfinished installation back exactly where
+ * it was. Runs under the cross-process install lock, before anything is
+ * deleted, so a canceled or interrupted install never loses installed content. */
+static int mpkg_restore_superseded(const char *root, const char *working,
+    char *error, size_t capacity)
+{
+    char area[MAX_PATH], pattern[MAX_PATH], slot[MAX_PATH], content[MAX_PATH];
+    char relative[MAX_PATH], destination[MAX_PATH], *slash;
+    WIN32_FIND_DATAA found;
+    HANDLE search;
+    DWORD last;
+    int ok = 1;
+    if (snprintf(area, sizeof(area), "%s\\superseded", working) >= (int)sizeof(area)) return 0;
+    if (GetFileAttributesA(area) == INVALID_FILE_ATTRIBUTES)
+        return GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND;
+    if (snprintf(pattern, sizeof(pattern), "%s\\*", area) >= (int)sizeof(pattern)) return 0;
+    search = FindFirstFileA(pattern, &found);
+    if (search == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND;
+    do {
+        if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+            !strcmp(found.cFileName, ".") || !strcmp(found.cFileName, "..")) continue;
+        if ((found.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+            snprintf(slot, sizeof(slot), "%s\\%s", area, found.cFileName) >= (int)sizeof(slot) ||
+            snprintf(content, sizeof(content), "%s\\content", slot) >= (int)sizeof(content) ||
+            !mpkg_superseded_origin(slot, relative, sizeof(relative)) ||
+            snprintf(destination, sizeof(destination), "%s\\overrides\\%s", root, relative) >= (int)sizeof(destination)) {
+            ok = 0; break;
+        }
+        if (GetFileAttributesA(content) == INVALID_FILE_ATTRIBUTES) continue;  /* already restored */
+        slash = strrchr(destination, '\\');
+        if (slash) {
+            *slash = 0;
+            ok = mpkg_directory(destination);
+            *slash = '\\';
+        }
+        if (!ok || GetFileAttributesA(destination) != INVALID_FILE_ATTRIBUTES ||
+            !MoveFileExA(content, destination, MOVEFILE_WRITE_THROUGH)) { ok = 0; break; }
+    } while (FindNextFileA(search, &found));
+    last = GetLastError(); FindClose(search);
+    if (ok && last != ERROR_NO_MORE_FILES) ok = 0;
+    if (!ok) mpkg_err(error, capacity, "a superseded package could not be put back; its data was retained");
+    return ok;
+}
+
 static int mpkg_directory(const char *path)
 {
     DWORD attributes;
@@ -933,6 +1047,8 @@ static int mpkg_cancel_working(const char *root, const char *working,
             if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
                 !mpkg_plain_ancestors(parent) || !MoveFileExA(destination, content, MOVEFILE_WRITE_THROUGH)) goto refused;
         } else if (GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND) goto refused;
+        /* Whatever this attempt superseded goes back before anything is deleted. */
+        if (!mpkg_restore_superseded(root, working, error, capacity)) return 0;
     } else if (GetLastError() != ERROR_FILE_NOT_FOUND) goto refused;
     wide = sh_package_source_wide_path(working);
     if (!wide || !mpkg_discard_tree(wide))
@@ -998,9 +1114,20 @@ int sh_mpkg_activation_commit(char *error, size_t capacity)
         mpkg_err(error, capacity, "cannot commit package activation; load the map to retry"); goto refused;
     }
     for (i = 0; i < g_session_count; i++) if (g_session[i].outcome == 4) g_session[i].outcome = 1;
-    if (g_install.working[0]) RemoveDirectoryA(g_install.working);
+    if (g_install.working[0]) {
+        /* The marker is gone, so this tree can never restore anything again.
+         * Discard it whole: it may still hold the packages this set superseded. */
+        wchar_t *wide = sh_package_source_wide_path(g_install.working);
+        if (!wide || !mpkg_discard_tree(wide))
+            backend_log("MPKG: committed installation left temporary data outside overrides; the next install will discard it");
+        free(wide);
+    }
     mutex = g_install.mutex; memset(&g_install, 0, sizeof(g_install));
     mpkg_unlock(); ReleaseMutex(mutex); CloseHandle(mutex);
+    /* The committed files are now permanent library sources even though the
+     * active provider only carries them as a temporary map overlay. Tell the
+     * runtime so it recompiles the library before that overlay changes. */
+    sh_package_runtime_note_sources_changed();
     backend_log("MPKG: whole package installation COMMITTED after successful runtime activation; no restart needed");
     return 1;
 refused:
@@ -1034,7 +1161,8 @@ static int mpkg_install_batch(mpkg_staged *head, char *err, size_t err_cap)
     HANDLE mutex = NULL;
     sh_package_sources *sources = NULL;
     mpkg_staged *s;
-    size_t added = 0, i;
+    char **superseded = NULL;
+    size_t added = 0, i, superseded_count = 0;
     int success = 0, prepared = 0;
     mpkg_lock();
     if (g_install.active) {
@@ -1054,11 +1182,29 @@ static int mpkg_install_batch(mpkg_staged *head, char *err, size_t err_cap)
         }
         for (i = 0; i < sources->component_count; i++) {
             const sh_package_component *component = &sources->components[i];
+            const char *package_root = sources->packages[component->owner].root;
+            char relative[MAX_PATH], **grown;
             if (component->relative[0] || strcmp(component->descriptor.id, s->id)) continue;
-            /* Another authored variant stays intact in its own directory. */
-            if (memcmp(sources->fingerprints[component->owner], s->fingerprint, 32)) continue;
-            strcpy_s(s->destination, sizeof(s->destination), sources->packages[component->owner].root);
-            s->existing = 1; break;
+            if (!memcmp(sources->fingerprints[component->owner], s->fingerprint, 32)) {
+                strcpy_s(s->destination, sizeof(s->destination), package_root);
+                s->existing = 1; break;
+            }
+            /* One identity cannot supply two different byte sets: the library
+             * would compile the same package twice with contradictory content.
+             * A previously delivered variant is superseded by this delivery. An
+             * authored package is the user's own work and is never moved, so the
+             * whole installation is refused instead. */
+            if (!mpkg_delivered_relative(root, package_root, relative, sizeof(relative))) {
+                mpkg_err(err, err_cap, "package '%s' is already installed from your own sources with "
+                    "different content; update or remove that package to use this map's version", s->id);
+                goto done;
+            }
+            grown = (char **)realloc(superseded, (superseded_count + 1) * sizeof(*superseded));
+            if (!grown || !(grown[superseded_count] = _strdup(relative))) {
+                superseded = grown ? grown : superseded;
+                mpkg_err(err, err_cap, "cannot record the superseded package '%s'", s->id); goto done;
+            }
+            superseded = grown; superseded_count++;
         }
         if (!s->existing) added++;
     }
@@ -1069,7 +1215,9 @@ static int mpkg_install_batch(mpkg_staged *head, char *err, size_t err_cap)
     if (snprintf(parent, sizeof(parent), "%s\\package-staging", root) >= sizeof(parent) || !mpkg_directory(parent)) {
         mpkg_err(err, err_cap, "cannot prepare package installation staging"); goto done;
     }
-    if (added) {
+    /* Retiring a superseded package needs the same cancellation record as a
+     * publication, so the batch exists whenever either one has work to do. */
+    if (added || superseded_count) {
         if (BCryptGenRandom(NULL, (PUCHAR)&nonce, sizeof(nonce), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) {
             mpkg_err(err, err_cap, "cannot create a unique installation folder"); goto done;
         }
@@ -1082,7 +1230,7 @@ static int mpkg_install_batch(mpkg_staged *head, char *err, size_t err_cap)
             mpkg_err(err, err_cap, "cannot create package installation staging"); goto done;
         }
         prepared = 1;
-        if (!CreateDirectoryA(content, NULL)) {
+        if (added && !CreateDirectoryA(content, NULL)) {
             mpkg_err(err, err_cap, "cannot create package content staging"); goto done;
         }
         for (s = head; s; s = s->next) if (!s->existing) {
@@ -1102,8 +1250,15 @@ static int mpkg_install_batch(mpkg_staged *head, char *err, size_t err_cap)
     if (!mpkg_directory(parent)) {
         mpkg_err(err, err_cap, "cannot publish packages into overrides"); goto done;
     }
-    if (added && !mpkg_pending_marker(marker, 1)) {
+    if (prepared && !mpkg_pending_marker(marker, 1)) {
         mpkg_err(err, err_cap, "cannot prepare the installation cancellation record"); goto done;
+    }
+    /* After the marker, before publication: a crash from here on restores every
+     * superseded package during the next startup cancellation. */
+    for (i = 0; i < superseded_count; i++) {
+        if (!mpkg_supersede_one(root, batch, i, superseded[i], err, err_cap)) goto done;
+        snprintf(line, sizeof(line), "MPKG: superseding the previously delivered package at overrides\\%s", superseded[i]);
+        backend_log(line);
     }
     if (added && !mpkg_publish(content, destination)) {
         mpkg_err(err, err_cap, "package installation canceled before commit (Windows error %lu); load the map to retry", GetLastError()); goto done;
@@ -1113,7 +1268,7 @@ static int mpkg_install_batch(mpkg_staged *head, char *err, size_t err_cap)
     success = 1;
     mpkg_lock();
     g_install.active = 1; g_install.mutex = mutex; mutex = NULL;
-    if (added) {
+    if (prepared) {
         strcpy_s(g_install.working, sizeof(g_install.working), batch);
         strcpy_s(g_install.marker, sizeof(g_install.marker), marker);
     }
@@ -1132,11 +1287,21 @@ static int mpkg_install_batch(mpkg_staged *head, char *err, size_t err_cap)
     if (!head->completion) sh_decl_server_request_rearm();
 done:
     if (!success && prepared) {
-        wchar_t *wide = sh_package_source_wide_path(batch);
-        if (!wide || !mpkg_discard_tree(wide))
-            backend_log("MPKG: canceled temporary data remains outside overrides; the next install will discard it");
-        free(wide);
+        char restore_error[SH_MPKG_ERR_CAP] = "";
+        /* Put back what this attempt retired before deleting anything. A failed
+         * restore keeps the data: the next startup cancellation retries it. */
+        if (!mpkg_restore_superseded(root, batch, restore_error, sizeof(restore_error)))
+            backend_log(restore_error[0] ? restore_error :
+                "MPKG: a superseded package could not be put back; its data was retained");
+        else {
+            wchar_t *wide = sh_package_source_wide_path(batch);
+            if (!wide || !mpkg_discard_tree(wide))
+                backend_log("MPKG: canceled temporary data remains outside overrides; the next install will discard it");
+            free(wide);
+        }
     }
+    for (i = 0; i < superseded_count; i++) free(superseded[i]);
+    free(superseded);
     sh_package_sources_free(sources);
     if (mutex) { ReleaseMutex(mutex); CloseHandle(mutex); }
     return success;

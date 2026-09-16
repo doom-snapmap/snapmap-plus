@@ -169,16 +169,17 @@ int main(int argc, char **argv)
     }
     {
         const char *names[] = {"ResourceReloadRenderScope", "PublishedMapComplete", "DeclSourceModeCall",
-            "ResourceReconstruct", "ResourceGenericLoad", "ResourceLookup", "MemLocalGet", "MemLocalPushHeap", "MemLocalPopHeap"};
-        sig_result source[9] = {0};
+            "ResourceReconstruct", "ResourceGenericLoad", "ResourceLookup", "MemLocalGet", "MemLocalPushHeap", "MemLocalPopHeap",
+            "MaterialVirtualTextureRebind"};
+        sig_result source[10] = {0};
         int bound = 1;
-        for (size_t i = 0; i < 9; i++) {
+        for (size_t i = 0; i < 10; i++) {
             const sig_entry *entry = NULL;
             for (size_t j = 0; BACKEND_ENGINE_SIGNATURES[j].name; j++)
                 if (!strcmp(BACKEND_ENGINE_SIGNATURES[j].name, names[i])) entry = &BACKEND_ENGINE_SIGNATURES[j];
             if (!entry || sig_resolve_one(base, entry, &source[i]) != SIG_OK) bound = 0;
         }
-        if (!bound || !sh_resource_resident_bind(source, 9, base)) {
+        if (!bound || !sh_resource_resident_bind(source, 10, base)) {
             printf("BAD native resident refresh binding\n"); bad++;
         } else printf("OK  native resident refresh binding\n");
     }

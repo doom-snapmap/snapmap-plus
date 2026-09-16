@@ -34,6 +34,9 @@ void sh_decl_server_request_rearm(void)
     g_rearm_requests++;
 }
 
+static int g_source_notices;
+void sh_package_runtime_note_sources_changed(void) { g_source_notices++; }
+
 static int g_failed;
 
 #define CHECK(expr) do {                                                        \
@@ -46,12 +49,21 @@ static int g_failed;
 static void complete_install(void)
 {
     char error[256] = "";
+    int notices = g_source_notices;
     CHECK(sh_mpkg_activation_commit(error, sizeof(error)));
+    /* The committed files become library sources the compiled provider has not
+     * scanned; the runtime has to be told before the map overlay changes. */
+    CHECK(g_source_notices == notices + 1);
 }
 
+/* Most assertions are on returned state; supersession also has to be readable
+ * in the log, because that is where the user learns a package was replaced. */
+static char g_log[4096];
 void backend_log(const char *message)
 {
-    (void)message;   /* the unit tests assert on returned state, not log text */
+    size_t used = strlen(g_log), length = message ? strlen(message) : 0;
+    if (!length || used + length + 2 >= sizeof(g_log)) return;
+    memcpy(g_log + used, message, length); g_log[used + length] = '\n'; g_log[used + length + 1] = 0;
 }
 
 static void join(char *out, size_t size, const char *a, const char *b)
@@ -486,6 +498,7 @@ static void test_batch_install(const char *root)
         /* A final commit failure keeps the entire group pending. No package
          * can pass the gate until the caller recovers and cancels the set. */
         char pending[MAX_PATH], error[256]; HANDLE blocked;
+        int notices = g_source_notices;
         strcpy_s(pending, sizeof(pending), batch_staging);
         strcpy_s(strrchr(pending, '\\') + 1, sizeof(pending) - (strrchr(pending, '\\') + 1 - pending), "pending");
         blocked = CreateFileA(pending, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -495,6 +508,8 @@ static void test_batch_install(const char *root)
         CHECK(!sh_mpkg_activation_cancel() && installed_count(client) == 2);
         if (blocked != INVALID_HANDLE_VALUE) CloseHandle(blocked);
         CHECK(!sh_mpkg_activation_commit(error, sizeof(error))); /* Failed cancellation cannot become success. */
+        /* Nothing was committed, so the library has no new sources to rescan. */
+        CHECK(g_source_notices == notices);
         CHECK(sh_mpkg_activation_cancel() && installed_count(client) == 0);
         CHECK(!sh_mpkg_gate(map, length)); complete_install();
         CHECK(installed_count(client) == 2 && sh_mpkg_gate(map, length));
@@ -556,8 +571,10 @@ static void test_batch_install(const char *root)
     complete_install();
     remove_tree(overrides); CHECK(make_dir(overrides));
 
-    /* Existing author content is preserved. Same-ID variants are published
-     * separately; an identical tree at another label is reused. */
+    /* Existing author content is preserved: a different-content variant of an
+     * authored identity is refused rather than published beside it, because the
+     * library cannot compile one identity from two byte sets. An identical tree
+     * at another label is reused. */
     sh_mpkg_test_reset(); sh_mpkg_boot_capture(client);
     g_dialog_idle = 1; g_dialog_asks = g_dialog_raise_fails = 0; g_dialog_answer = SH_ENGINE_DIALOG_PENDING;
     CHECK(!sh_mpkg_gate(map, length)); sh_mpkg_consent_poll(); CHECK(g_dialog_asks == 1);
@@ -570,10 +587,11 @@ static void test_batch_install(const char *root)
             HeapFree(GetProcessHeap(), 0, payload);
         }
         join(marker, sizeof(marker), renamed, "assets\\shared.bimage"); CHECK(touch(marker, "author change"));
-        g_rearm_requests = 0; g_dialog_answer = SH_ENGINE_DIALOG_ACCEPTED; sh_mpkg_consent_poll();
-        CHECK(g_rearm_requests == 1 && sh_mpkg_test_session_installed_count() == 2 && installed_count(client) == 3);
+        g_rearm_requests = 0; g_log[0] = 0;
+        g_dialog_answer = SH_ENGINE_DIALOG_ACCEPTED; sh_mpkg_consent_poll();
+        CHECK(!g_rearm_requests && !sh_mpkg_test_session_installed_count() && installed_count(client) == 1);
+        CHECK(strstr(g_log, "already installed from your own sources with different content"));
         { unsigned char bytes[32]; CHECK(read_file(marker, bytes, sizeof(bytes)) == 13 && !memcmp(bytes, "author change", 13)); }
-        CHECK(sh_mpkg_activation_cancel()); CHECK(installed_count(client) == 1);
         g_rearm_requests = 0;
         CHECK(touch(marker, "unchanged shared resource"));
         sh_mpkg_test_set_consent_mode(SH_MPKG_CONSENT_ACCEPT);
@@ -616,6 +634,114 @@ static void test_batch_install(const char *root)
     }
     sh_mpkg_test_reset(); g_registration_ready = g_rearm_requests = 0;
     g_dialog_idle = g_dialog_asks = 0; g_dialog_answer = SH_ENGINE_DIALOG_PENDING;
+    remove_tree(client); remove_tree(author);
+}
+
+/* Build a one-package map whose content is chosen by the caller, so two maps can
+ * deliver the same package identity with genuinely different bytes. */
+static char *make_variant_map(const char *author, const char *id, const char *body,
+    unsigned char fingerprint[32], size_t *length)
+{
+    char folder[MAX_PATH], path[MAX_PATH], descriptor[160], error[512];
+    sh_package_sources *sources;
+    unsigned char *archive = NULL;
+    size_t archive_length = 0;
+    char *map = NULL;
+    CHECK(make_dir(author));
+    join(folder, sizeof(folder), author, id); remove_tree(folder); CHECK(make_dir(folder));
+    join(path, sizeof(path), folder, "package.json");
+    snprintf(descriptor, sizeof(descriptor), "{\"id\":\"%s\",\"name\":\"Variant package\"}", id);
+    CHECK(touch(path, descriptor));
+    join(path, sizeof(path), folder, "assets"); CHECK(make_dir(path));
+    join(path, sizeof(path), folder, "assets\\variant.bimage"); CHECK(touch(path, body));
+    sources = sh_package_sources_scan_directory(folder, error, sizeof(error));
+    CHECK(sources); if (!sources) return NULL;
+    memcpy(fingerprint, sources->fingerprints[0], 32);
+    archive = sh_package_archive_pack(sources, 0, &archive_length, error, sizeof(error));
+    sh_package_sources_free(sources);
+    CHECK(archive); if (!archive) return NULL;
+    map = sh_mpkg_embed(EMPTY_MAP, strlen(EMPTY_MAP), id, archive, archive_length, length, error, sizeof(error));
+    free(archive); CHECK(map); return map;
+}
+
+static int variant_matches(const char *root, const char *id, const unsigned char fingerprint[32])
+{
+    char folder[MAX_PATH], error[512];
+    sh_package_sources *sources;
+    int matches;
+    if (!installed_package(root, id, folder)) return 0;
+    sources = sh_package_sources_scan_directory(folder, error, sizeof(error));
+    matches = sources && !memcmp(sources->fingerprints[0], fingerprint, 32);
+    sh_package_sources_free(sources); return matches;
+}
+
+/* One package identity can only supply one set of bytes: the library would
+ * otherwise compile the same package twice with contradictory content. A second
+ * delivery of the same identity supersedes the delivered copy inside the same
+ * transaction; the user's own authored package is never moved. */
+static void test_supersession(const char *root)
+{
+    char author[MAX_PATH], client[MAX_PATH], overrides[MAX_PATH], authored[MAX_PATH], path[MAX_PATH];
+    unsigned char first_print[32], second_print[32], third_print[32];
+    char *first = NULL, *second = NULL, *third = NULL;
+    size_t first_length = 0, second_length = 0, third_length = 0;
+    join(author, sizeof(author), root, "supersede-author");
+    join(client, sizeof(client), root, "supersede-client"); CHECK(make_dir(client));
+    join(overrides, sizeof(overrides), client, "overrides"); CHECK(make_dir(overrides));
+    first = make_variant_map(author, "demons-variant", "variant one bytes", first_print, &first_length);
+    second = make_variant_map(author, "demons-variant", "variant two bytes, longer", second_print, &second_length);
+    third = make_variant_map(author, "demons-variant", "variant three", third_print, &third_length);
+    if (!first || !second || !third) goto done;
+    CHECK(memcmp(first_print, second_print, 32) && memcmp(second_print, third_print, 32));
+
+    sh_mpkg_test_reset(); sh_mpkg_boot_capture(client);
+    sh_mpkg_test_set_consent_mode(SH_MPKG_CONSENT_ACCEPT);
+    g_registration_ready = 1; g_rearm_requests = 0;
+    CHECK(!sh_mpkg_gate(first, first_length));
+    complete_install();
+    CHECK(installed_count(client) == 1 && variant_matches(client, "demons-variant", first_print));
+    /* The same bytes again need no installation at all. */
+    CHECK(sh_mpkg_gate(first, first_length));
+    CHECK(installed_count(client) == 1);
+
+    g_log[0] = 0;
+    CHECK(!sh_mpkg_gate(second, second_length));
+    CHECK(strstr(g_log, "superseding the previously delivered package"));
+    /* Exactly one variant is visible even before the commit. */
+    CHECK(installed_count(client) == 1 && variant_matches(client, "demons-variant", second_print));
+    complete_install();
+    CHECK(installed_count(client) == 1 && variant_matches(client, "demons-variant", second_print));
+    CHECK(sh_mpkg_gate(second, second_length));
+
+    /* A canceled supersession puts the previous delivery back untouched. */
+    CHECK(!sh_mpkg_gate(third, third_length));
+    CHECK(installed_count(client) == 1 && variant_matches(client, "demons-variant", third_print));
+    CHECK(sh_mpkg_activation_cancel());
+    CHECK(installed_count(client) == 1 && variant_matches(client, "demons-variant", second_print));
+    /* And the restored delivery is still a complete, usable installation. */
+    CHECK(sh_mpkg_gate(second, second_length));
+
+    /* An authored package of the same identity is the user's own work: refuse
+     * the whole installation instead of moving or replacing it. */
+    remove_tree(overrides); CHECK(make_dir(overrides));
+    join(authored, sizeof(authored), overrides, "my-variant"); CHECK(make_dir(authored));
+    join(path, sizeof(path), authored, "package.json");
+    CHECK(touch(path, "{\"id\":\"demons-variant\",\"name\":\"Authored variant\"}"));
+    join(path, sizeof(path), authored, "assets"); CHECK(make_dir(path));
+    join(path, sizeof(path), authored, "assets\\variant.bimage"); CHECK(touch(path, "authored bytes"));
+    sh_mpkg_test_reset(); sh_mpkg_boot_capture(client);
+    sh_mpkg_test_set_consent_mode(SH_MPKG_CONSENT_ACCEPT);
+    g_registration_ready = 1; g_log[0] = 0;
+    CHECK(!sh_mpkg_gate(second, second_length));
+    CHECK(strstr(g_log, "already installed from your own sources with different content"));
+    CHECK(installed_count(client) == 1 && dir_exists(authored) && file_exists(path));
+    CHECK(!sh_mpkg_test_session_installed_count());
+done:
+    sh_mpkg_test_reset();
+    if (first) HeapFree(GetProcessHeap(), 0, first);
+    if (second) HeapFree(GetProcessHeap(), 0, second);
+    if (third) HeapFree(GetProcessHeap(), 0, third);
+    g_registration_ready = 0; g_log[0] = 0;
     remove_tree(client); remove_tree(author);
 }
 
@@ -960,6 +1086,7 @@ int main(int argc, char **argv)
     test_private_map_context(root);
     test_resource_owner_install(root);
     test_batch_install(root);
+    test_supersession(root);
     test_refreshed_author_sources(root);
     test_consent_retirement(root, overrides);
 
