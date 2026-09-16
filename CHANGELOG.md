@@ -12,7 +12,7 @@ Installing or updating Snapmap+ now converts packages made for earlier releases 
 ### New
 - Install and update convert packages from earlier releases to the current format, including loose files, manifests and shader includes, before the new runtime files are copied.
 - The migrate-overrides command runs the same conversion for manually copied files and for older packages unzipped into your overrides folder later.
-- Originals are moved byte for byte into a dated backup folder that is never loaded or deleted automatically, so you can undo a conversion by hand.
+- Originals are moved byte for byte into a separate backup folder that is never loaded or deleted automatically, so you can undo a conversion by hand.
 
 ### Improved
 - Each package converts completely or not at all, and an interrupted run is finished or restored on the next attempt without ever overwriting a path that appeared in the meantime.
