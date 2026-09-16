@@ -912,6 +912,20 @@ it. Runtime refresh waits for the settled My Maps browser, outside an editor, tr
 map installation handles this boundary automatically. Authored sources remain available for making
 new maps after installation.
 
+### Authoring imported demons
+
+A custom demon's conductor declaration needs its spawn registration in `aiTypeList` and a matching
+`globalAIMods` row for its AI type. Without the modifier row, the native conductor can spawn the demon
+but ignore SnapMap's Health and Damage percentages. Use neutral `healthMod = 1` and `damageMod = 1`
+defaults unless your package deliberately changes them. Keep existing rows and authored values;
+package composition combines the added rows with the stock conductor and other packages.
+
+Set the initial team in the demon's settings. For later team changes, use the stock Encounter object's
+Assign Team input with Include Spawned enabled; directly placed demons do not expose that input.
+Campaign bosses retain native shields, phase rules and stagger restrictions, so accepting a SnapMap
+setting does not remove those behaviors. A package update also does not rewrite packages already
+embedded in a saved map: the author must update that map's package content to adopt a repair.
+
 ### When a package cannot load
 
 A package with a problem of its own, such as an invalid `package.json`, a declaration with a syntax
@@ -1132,4 +1146,3 @@ files a `crash`-labeled issue the same way, and repeat crashes at the same spot 
 issue rather than filing duplicates.
 
 Nothing is sent unless you click Send — Snapmap+ makes no other network requests on its own.
-
