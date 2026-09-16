@@ -3,6 +3,26 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.14 -- 2026-09-16 (beta)
+
+**Packages get a simpler format and travel with maps**
+
+Override packages are now one descriptor plus an assets tree at exact engine paths, with requirements and localized strings in the same file. Maps carry the complete packages they use, and another player can install them from an in-game prompt without restarting DOOM.
+
+### New
+- An override package is now a folder with one package.json and resources at their exact extracted engine paths inside assets, with requirements and localized strings in that same descriptor instead of separate manifest files.
+- Maps carry the complete packages whose gameplay resources they use, and a player missing that content can accept an in-game prompt that installs and activates it and continues the load without restarting DOOM.
+
+### Improved
+- Compatible changes from several packages and Snapmap+'s own editor support are combined against the original resource, and genuinely conflicting edits produce a diagnostic naming the resource and the packages rather than letting folder order pick a winner.
+- Grouping folders and nested components now travel with a map, and there is no longer a fixed package count or total payload limit.
+- An interrupted or failed installation cancels the whole new install group instead of leaving part of a package behind.
+
+### Fixed
+- Packages installed from a map stay available in your library after you leave that map, so you can use them in new maps.
+
+_Plus 2 smaller fixes and internal changes._
+
 ## v0.2.1-beta.13 -- 2026-09-13 (beta)
 
 **Simpler map rendering and navigation on default boxes**
