@@ -184,6 +184,23 @@ static void check_restored(void)
 static void success_cases(void)
 {
     char error[256];
+    for (int removed = 0; removed < 2; removed++) {
+        /* A package-only declaration has no catalog row; its native path can
+         * differ from the compiled source. Both publication and removal must
+         * select its identity and consumers. Only removal permits defaulting. */
+        reset();
+        sh_package_change row = {"generated/decls/model/body.lwo.decl",
+            removed ? SH_PACKAGE_RESOURCE_REMOVED : SH_PACKAGE_RESOURCE_ADDED,
+            "model", "body.lwo"};
+        sh_package_changes changes = {&row, 1};
+        sh_resource_resident *pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));
+        CHECK(pass && pass->count == 2); if (!pass) continue;
+        CHECK(pass->items[0].retired == removed);
+        CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+        CHECK(sh_resource_resident_drain(pass, error, sizeof(error)));
+        CHECK(loads == (removed ? 1 : 2) && defaults == removed);
+        CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error))); check_restored();
+    }
     for (int alternate = 0; alternate < 2; alternate++) {
         sh_resource_resident *pass;
         reset(); lookup_leaves_pending = alternate;

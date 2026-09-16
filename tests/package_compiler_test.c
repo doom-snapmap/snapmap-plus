@@ -86,11 +86,25 @@ static void test_changes(const sh_package_compilation *compiled)
     CHECK(sh_package_compilation_changes(NULL, NULL, &changes, error, sizeof(error)) && !changes.count);
     CHECK(sh_package_compilation_changes(NULL, compiled, &changes, error, sizeof(error)));
     CHECK(changes.count == compiled->resource_count);
-    for (size_t i = 0; i < changes.count; i++)
+    for (size_t i = 0; i < changes.count; i++) {
         expect_change(&changes, i, compiled->resources[i].engine_path, SH_PACKAGE_RESOURCE_ADDED);
+        if (compiled->resources[i].type) {
+            CHECK(changes.items[i].type && changes.items[i].name);
+            CHECK(changes.items[i].type != compiled->resources[i].type);
+            CHECK(changes.items[i].name != compiled->resources[i].name);
+            CHECK(!strcmp(changes.items[i].type, compiled->resources[i].type));
+            CHECK(!strcmp(changes.items[i].name, compiled->resources[i].name));
+        } else CHECK(!changes.items[i].type && !changes.items[i].name);
+    }
     CHECK(sh_package_compilation_changes(compiled, NULL, &changes, error, sizeof(error)));
-    for (size_t i = 0; i < changes.count; i++)
+    for (size_t i = 0; i < changes.count; i++) {
         expect_change(&changes, i, compiled->resources[i].engine_path, SH_PACKAGE_RESOURCE_REMOVED);
+        if (compiled->resources[i].type) {
+            CHECK(changes.items[i].type && changes.items[i].name);
+            CHECK(!strcmp(changes.items[i].type, compiled->resources[i].type));
+            CHECK(!strcmp(changes.items[i].name, compiled->resources[i].name));
+        }
+    }
 
     /* Different bundle ownership and duplicate counts do not change the game
      * payload. No copying/removal of those authored sources is required. */

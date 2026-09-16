@@ -218,6 +218,9 @@ typedef enum sh_package_change_kind {
 typedef struct sh_package_change {
     char *path;
     sh_package_change_kind kind;
+    /* Compiled declaration identity, independent of its native cooked path.
+     * Owned copies survive retirement of the source provider. */
+    char *type, *name;
 } sh_package_change;
 typedef struct sh_package_changes {
     sh_package_change *items;
