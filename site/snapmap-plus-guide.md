@@ -908,9 +908,11 @@ use your own package folders instead. Files outside an `assets/` tree are not ga
 but auxiliary files and empty directories still travel with their authored package.
 
 Copy a complete package into `overrides` to add it to your library. Remove its folder to uninstall
-it. Runtime refresh waits for the settled My Maps browser, outside an editor, transition or dialog;
-map installation handles this boundary automatically. Authored sources remain available for making
-new maps after installation.
+it. After manually adding, editing or repairing package files while DOOM is running, run
+`snapmap_plus_decl_server_rearm` in the console and return to My Maps. The refresh waits for that
+settled browser, outside an editor, transition or dialog; no game restart is needed. Map installation
+requests this refresh automatically. Authored sources remain available for making new maps after
+installation.
 
 ### Authoring imported demons
 
