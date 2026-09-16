@@ -101,10 +101,11 @@ recovery. Deleting it resets preferences on the next startup. Manual changes
 are read at startup; UI settings use the registered service. The installer
 preserves this file.
 
-Each override package has a `package.json` marker under `overrides/`, with
-declarations in `decls/<type>/<logical-name>.decl`. Resource manifests can refer
-to assets already installed with DOOM. Restart after manual package changes;
-the map-package installation flow refreshes packages within the session.
+Each override package has one `package.json` and an `assets/` tree preserving
+extracted engine paths. Maps carry complete authored packages and prompt only
+when required resources are missing. In-game installation activates them and
+continues loading without restarting DOOM. See the
+[package guide](site/snapmap-plus-guide.md#overrides) for authoring and delivery.
 
 ## Credits
 

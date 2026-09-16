@@ -265,10 +265,18 @@ Installer updates and uninstall preserve player configuration.
 
 ## Packages and refresh boundaries
 
-A package has a `package.json` marker and can contribute declarations, strings,
-resource references and supported settings. Discovery, conflict checking and
-native publication are separate operations. Incomplete inventories must not
-silently publish a partial package set.
+A package has one `package.json` with identity, requirements, strings and supported
+presentation policy, plus engine-shaped resources under `assets/`. The outer
+package is the intact delivery unit, including nested components and auxiliary
+files. Discovery, semantic compilation and native publication are separate
+operations. Incomplete inventories must not publish a partial package set.
+Author-facing format and examples live in the [player guide](../site/snapmap-plus-guide.md#overrides).
+
+Compilation includes built-in overrides and package sources relative to verified
+originals. Compatible changes compose using native field and collection semantics;
+contradictions are reported before publication. Opaque payloads are selected whole.
+The provider never modifies authored sources or installed game archives. Native
+reader and resource-family details belong alongside their implementation.
 
 Package inventories and resource ownership grow with the installed set. There
 is no fixed package-count quota in discovery, compilation, saved-map selection,
@@ -297,10 +305,29 @@ names. Reader synchronization keeps old snapshots valid until readers release
 them. Success includes materialization, required visibility and palette refresh;
 registration alone is insufficient to authorize loading a package-dependent map.
 
-Map package consent uses the boot inventory plus this session's own authorized
-installs. An arbitrary file appearing on disk does not bypass that consent state.
-Every required package must satisfy the gate. `decl_server.h`, `overrides.h`,
-`resource_bridge.h`, `strids.h` and `map_package.h` define the detailed contracts.
+The registered installed-resource inventory determines whether a map needs an
+installation. IDs, grouping, fingerprints and different local values are not
+installation requirements. Private incoming map sources cannot satisfy that
+installed-inventory check. Gameplay ownership selects complete authored bundles;
+unchanged vanilla SnapMap resources and built-in editor exposure add no delivery
+owner. Mixed bundles retain their editor support when gameplay selects them.
+
+Local-library and map-authored views have separate ownership. The map view is
+authoritative in Play and Edit; retirement restores the local view without
+rewriting its files. Saving retains incoming bundle provenance even when existing
+resources allowed installation to be skipped. Declared resource-loading permissions
+remain active for installed packages; unused gameplay presentation policy does not.
+
+Consent covers complete supplying bundles for missing resources. Preparation,
+publication, activation and native load form one transaction. Successful activation
+continues the retained load request; cancellation, interruption or failure rolls
+back the entire new install group. Recovery records prevent admission of an
+uncommitted group after interruption. Restoring the prior provider precedes native
+consumer recovery. Open streams retain immutable sources until released. No game
+restart/reset or forced map reload is an installation recovery mechanism.
+
+`decl_server.h`, `overrides.h`, `resource_bridge.h`, `strids.h` and `map_package.h`
+define the detailed contracts.
 
 ## Failure reporting
 

@@ -1,5 +1,5 @@
 /* Resource type/class bindings verified independently in Vulkan and OpenGL.
- * See docs/package-compiler.md for the registry evidence and scope. */
+ * Publication and ownership contracts: docs/architecture.md, Packages and refresh boundaries. */
 #ifndef SH_RESOURCE_TYPES_H
 #define SH_RESOURCE_TYPES_H
 typedef struct sh_resource_type_binding { const char *class_name, *type; } sh_resource_type_binding;
