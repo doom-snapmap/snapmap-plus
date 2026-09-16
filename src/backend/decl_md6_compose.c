@@ -1,4 +1,5 @@
 #include "decl_md6_compose.h"
+#include "resource_types.h"
 #include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -18,9 +19,21 @@ typedef struct mc_input {
 typedef struct mc_context { char *error; size_t capacity; int failed; } mc_context;
 static const char *mc_sections[] = {"init", "userProps", "jointGroups", "events", "aliases", "props",
     "eyeInfoCollection", "meshKits", "userChannelToAnimationAliasOverrides", "baseUserChannel", "userChannelWeightGroupOverride", "rigs"};
+/* The native joint-group collection reader dispatches these thirteen category
+ * names case-insensitively, in this order; category 9 also answers to "misc".
+ * Each category owns one per-joint scalar key, empty where it has none. */
 static const char *mc_groups[] = {"damageGroup", "painGroup", "twitchGroup", "deathGroup", "limblossGroup",
     "headTrackingGroup", "focusGroup", "orientationGroup", "hitTestGroup", "eyeGroup", "feetGroup",
     "silhouetteGroup", "traceGroup"};
+static const char *mc_group_scalars[] = {"", "", "", "", "index", "weight", "", "", "radius", "",
+    "", "bias", "radius"};
+/* The same reader skips these five obsolete group kinds and their whole block
+ * without an error, so a source that still carries one stays composable. */
+static const char *mc_obsolete_groups[] = {"radiusDamageGroup", "headTrackingIKGroup",
+    "reparentGroup", "upgradeGroup", "autoblendGroup"};
+/* Mesh kits are read in this fixed order; each kit carries a reservation count
+ * the reader recomputes from the entries it actually reads. */
+static const char *mc_kit_names[] = {"Heads", "Gear", "Gore", "Door", "Melee_Highlight"};
 static int mc_fail(mc_context *c, const char *reason)
 {
     if (!c->failed && c->error && c->capacity) snprintf(c->error, c->capacity, "MD6 composition: %s", reason);
@@ -55,10 +68,23 @@ static int mc_is(const mc_input *in, size_t i, const char *word)
     return i < in->count && in->tokens[i].end - in->tokens[i].begin == strlen(word) &&
         !memcmp(in->source.text + in->tokens[i].begin, word, strlen(word));
 }
+static int mc_is_ci(const mc_input *in, size_t i, const char *word)
+{
+    size_t n = strlen(word);
+    if (i >= in->count || in->tokens[i].end - in->tokens[i].begin != n) return 0;
+    return !_strnicmp(in->source.text + in->tokens[i].begin, word, n);
+}
 static int mc_group(const mc_input *in, size_t i)
 {
     for (int n = 0; n < (int)(sizeof(mc_groups) / sizeof(mc_groups[0])); n++)
-        if (mc_is(in, i, mc_groups[n])) return n;
+        if (mc_is_ci(in, i, mc_groups[n])) return n;
+    if (mc_is_ci(in, i, "misc")) return 9;   /* native alias for eyeGroup */
+    return -1;
+}
+static int mc_obsolete_group(const mc_input *in, size_t i)
+{
+    for (int n = 0; n < (int)(sizeof(mc_obsolete_groups) / sizeof(mc_obsolete_groups[0])); n++)
+        if (mc_is_ci(in, i, mc_obsolete_groups[n])) return n;
     return -1;
 }
 /* Token boundaries are used only for this envelope, never to infer fields in
@@ -299,6 +325,217 @@ static int mc_alias(mc_context *c, mc_input *in, sh_decl_node *entry, size_t sta
     mc_count(c, number, count);
     return !c->failed;
 }
+/* True when two tokens sit on one source line. The native args, per-joint and
+ * animation-event readers take a key and then the remaining tokens on its line:
+ * a flag enum consumes several constants that way. Every one of the 374503
+ * payload lines in the shipped 503-definition corpus is one such key. */
+static int mc_same_line(const mc_input *in, size_t a, size_t b)
+{
+    if (a >= in->count || b >= in->count) return 0;
+    for (size_t at = in->tokens[a].end; at < in->tokens[b].begin; at++)
+        if (in->source.text[at] == '\n') return 0;
+    return 1;
+}
+/* A native assignment payload: each key owns the value tokens on its line, so
+ * independent edits of different keys compose and two edits of one key conflict.
+ * The authored slice is retained whole; no value is reinterpreted. */
+static int mc_keys(mc_context *c, mc_input *in, sh_decl_node *parent, size_t begin, size_t end)
+{
+    sh_decl_node *keys = mc_add(parent, mc_node(c, "keys", NULL));
+    sh_decl_node *number = mc_add(keys, mc_node(c, "num", "0"));
+    size_t i = begin, count = 0;
+    while (i < end && !c->failed) {
+        size_t key_at = i++, stop;
+        char *name; sh_decl_node *item;
+        if (mc_is(in, key_at, "{") || mc_is(in, key_at, "}")) {
+            mc_fail(c, "nested block inside a native assignment payload"); break;
+        }
+        while (i < end && mc_same_line(in, key_at, i) && !mc_is(in, i, "{")) {
+            if (in->tokens[i].close != SIZE_MAX) i = in->tokens[i].close;
+            i++;
+        }
+        stop = i;
+        if (stop == key_at + 1) { mc_fail(c, "native payload key has no value on its line"); break; }
+        name = mc_copy(c, in->source.text + in->tokens[key_at].begin,
+            in->tokens[key_at].end - in->tokens[key_at].begin);
+        item = name ? mc_occurrence(c, keys, count++, name) : NULL;
+        if (item) { mc_slice(c, in, item, "name", key_at, key_at + 1); mc_slice(c, in, item, "body", key_at, stop); }
+        free(name);
+    }
+    mc_count(c, number, count);
+    return !c->failed;
+}
+/* The first value token of a named key on its own line, unquoted. Used for the
+ * native identity of an animation event, which is its name plus frame and row. */
+static char *mc_key_value(mc_context *c, const mc_input *in, size_t begin, size_t end, const char *key)
+{
+    for (size_t i = begin; i + 1 < end; i++) {
+        const char *s; size_t n;
+        if (!mc_is_ci(in, i, key) || (i > begin && mc_same_line(in, i - 1, i))) continue;
+        s = in->source.text + in->tokens[i + 1].begin;
+        n = in->tokens[i + 1].end - in->tokens[i + 1].begin;
+        if (n >= 2 && *s == '"') { s++; n -= 2; }
+        return mc_copy(c, s, n);
+    }
+    return NULL;
+}
+/* A joint-group body is an ordered sequence of native records: an args block
+ * that sets the running defaults for the joints listed after it, and joint
+ * entries that may carry their own payload block. The engine appends each
+ * joint's skeleton index to the group and writes that joint's payload at that
+ * index, so a payload travels with its entry and the composed order re-derives
+ * every index. Repeated joint names are native, so identity is the lowercased
+ * name the reader resolves plus its occurrence. */
+static int mc_group_body(mc_context *c, mc_input *in, sh_decl_node *entry, size_t begin, size_t end)
+{
+    sh_decl_node *list = mc_add(entry, mc_node(c, "records", NULL));
+    sh_decl_node *number = mc_add(list, mc_node(c, "num", "0"));
+    size_t i = begin, count = 0;
+    while (i < end && !c->failed) {
+        sh_decl_node *record;
+        if (mc_is(in, i, "args")) {
+            size_t close;
+            if (!mc_is(in, i + 1, "{") || (close = in->tokens[i + 1].close) >= end) {
+                mc_fail(c, "joint-group args needs a complete native block"); break;
+            }
+            record = mc_occurrence(c, list, count++, "args");
+            if (!record) break;
+            mc_add(record, mc_node(c, "args", "1"));
+            mc_keys(c, in, record, i + 2, close);
+            i = close + 1;
+        } else {
+            size_t at = i++, n = in->tokens[at].end - in->tokens[at].begin;
+            char *name = NULL, *id = NULL;
+            if (mc_is(in, at, "{") || mc_is(in, at, "}") || mc_is(in, at, "(")) {
+                mc_fail(c, "joint group expects a joint name or an args block"); break;
+            }
+            name = mc_copy(c, in->source.text + in->tokens[at].begin, n);
+            if (name) {
+                id = n <= SIZE_MAX - 8 ? malloc(n + 8) : NULL;
+                if (!id) mc_fail(c, "joint identity allocation failed");
+                else {
+                    for (char *letter = name; *letter; letter++)
+                        if (*letter >= 'A' && *letter <= 'Z') *letter += 'a' - 'A';
+                    snprintf(id, n + 8, "joint:%s", name);
+                }
+            }
+            record = id ? mc_occurrence(c, list, count++, id) : NULL;
+            if (record) {
+                mc_slice(c, in, record, "name", at, at + 1);
+                if (i < end && mc_is(in, i, "{")) {
+                    size_t close = in->tokens[i].close;
+                    if (close >= end) mc_fail(c, "joint payload needs a complete native block");
+                    else { mc_keys(c, in, record, i + 1, close); i = close + 1; }
+                }
+            }
+            free(name); free(id);
+        }
+    }
+    mc_count(c, number, count);
+    return !c->failed;
+}
+/* One animation's event records. The reader accepts only event blocks here and
+ * refuses a duplicate animation block outright. An event is identified by its
+ * frame-command name with the frame and row it is placed at, plus an occurrence
+ * for the eleven shipped cases that repeat all three. */
+static int mc_event_records(mc_context *c, mc_input *in, sh_decl_node *entry, size_t begin, size_t end)
+{
+    sh_decl_node *list = mc_add(entry, mc_node(c, "records", NULL));
+    sh_decl_node *number = mc_add(list, mc_node(c, "num", "0"));
+    size_t i = begin, count = 0;
+    while (i < end && !c->failed) {
+        size_t start = i, close = 0;
+        char *name, *frame, *row, *id = NULL;
+        sh_decl_node *record;
+        if (!mc_is(in, i, "event")) { mc_fail(c, "animation block accepts only event records"); break; }
+        name = mc_identity(c, in, i + 1, 0);
+        if (!name) break;
+        if (!mc_is(in, i + 2, "{") || (close = in->tokens[i + 2].close) >= end) {
+            free(name); mc_fail(c, "animation event needs a complete native block"); break;
+        }
+        frame = mc_key_value(c, in, i + 3, close, "frame");
+        row = mc_key_value(c, in, i + 3, close, "row");
+        if (!c->failed) {
+            size_t n = strlen(name) + strlen(frame ? frame : "") + strlen(row ? row : "");
+            id = n <= SIZE_MAX - 32 ? malloc(n + 32) : NULL;
+            if (!id) mc_fail(c, "event identity allocation failed");
+            else snprintf(id, n + 32, "%s|%s|%s", name, frame ? frame : "", row ? row : "");
+        }
+        record = id ? mc_occurrence(c, list, count++, id) : NULL;
+        if (record) {
+            mc_slice(c, in, record, "head", start, i + 3);
+            mc_keys(c, in, record, i + 3, close);
+        }
+        free(name); free(frame); free(row); free(id);
+        i = close + 1;
+    }
+    mc_count(c, number, count);
+    return !c->failed;
+}
+/* eyeInfoCollection is a counted list of anonymous eyeInfo records whose native
+ * index is assignment order; the leading count is a reservation the reader
+ * recomputes from the records it reads. Existing records stay positional, so one
+ * record cannot be edited two different ways. */
+static int mc_eye_records(mc_context *c, mc_input *in, sh_decl_node *list, size_t begin, size_t end)
+{
+    sh_decl_node *number = mc_add(list, mc_node(c, "num", "0"));
+    size_t i = begin, count = 0;
+    while (i < end && !c->failed) {
+        size_t start = i, close;
+        char key[48]; sh_decl_node *record;
+        if (!mc_is(in, i, "eyeInfo")) { mc_fail(c, "eye info collection accepts only eyeInfo records"); break; }
+        if (!mc_is(in, i + 1, "{") || (close = in->tokens[i + 1].close) >= end) {
+            mc_fail(c, "eyeInfo needs a complete native block"); break;
+        }
+        snprintf(key, sizeof(key), "slot:%zu", count);
+        record = mc_entry(c, list, count++, key);
+        if (record) mc_slice(c, in, record, "body", start, close + 1);
+        i = close + 1;
+    }
+    mc_count(c, number, count);
+    return !c->failed;
+}
+/* meshKits holds up to five fixed kits in reader order. A kit entry names one
+ * mesh set of the selected model; the engine resolves those names to surface
+ * indices itself, so the composed text keeps the names and never an index. */
+static int mc_kits(mc_context *c, mc_input *in, sh_decl_node *list, size_t begin, size_t end)
+{
+    sh_decl_node *number = mc_add(list, mc_node(c, "num", "0"));
+    size_t i = begin, count = 0;
+    int previous = -1;
+    while (i < end && !c->failed) {
+        size_t close, block = i + 1, entries_count = 0;
+        int kit = -1;
+        sh_decl_node *record, *entries, *entry_number;
+        for (int n = 0; n < (int)(sizeof(mc_kit_names) / sizeof(mc_kit_names[0])); n++)
+            if (mc_is_ci(in, i, mc_kit_names[n])) { kit = n; break; }
+        if (kit < 0 || kit <= previous) { mc_fail(c, "unknown, repeated or out-of-order mesh kit"); break; }
+        previous = kit;
+        if (!mc_is(in, block, "{")) block++;   /* the reservation count is optional */
+        if (!mc_is(in, block, "{") || (close = in->tokens[block].close) >= end) {
+            mc_fail(c, "mesh kit needs a complete native block"); break;
+        }
+        record = mc_entry(c, list, count++, mc_kit_names[kit]);
+        if (!record) break;
+        mc_slice(c, in, record, "name", i, i + 1);
+        entries = mc_add(record, mc_node(c, "entries", NULL));
+        entry_number = mc_add(entries, mc_node(c, "num", "0"));
+        i = block + 1;
+        while (i < close && !c->failed) {
+            char *name = mc_identity(c, in, i, 0);
+            sh_decl_node *item = NULL;
+            if (!name) break;
+            if (!mc_is(in, i + 1, "=") || i + 2 >= close) mc_fail(c, "mesh kit entry needs its native assignment");
+            else item = mc_entry(c, entries, entries_count++, name);
+            if (item) mc_slice(c, in, item, "body", i, i + 3);
+            free(name); i += 3;
+        }
+        mc_count(c, entry_number, entries_count);
+        i = close + 1;
+    }
+    mc_count(c, number, count);
+    return !c->failed;
+}
 static int mc_records(mc_context *c, mc_input *in, sh_decl_node *list, int kind, size_t begin, size_t end)
 {
     size_t i = begin, count = 0;
@@ -307,12 +544,23 @@ static int mc_records(mc_context *c, mc_input *in, sh_decl_node *list, int kind,
         size_t start = i, body;
         char *name = NULL, *id = NULL, *target = NULL;
         sh_decl_node *entry;
-        int category = -1;
+        int category = -1, obsolete = -1;
         if (kind == 2) {
-            category = mc_group(in, i++);
-            if (category < 0) { mc_fail(c, "unsupported joint-group category or obsolete syntax"); break; }
+            /* The collection reader ignores a bare jointGroup token. */
+            if (mc_is_ci(in, i, "jointGroup")) { i++; continue; }
+            category = mc_group(in, i);
+            obsolete = category < 0 ? mc_obsolete_group(in, i) : -1;
+            if (category < 0 && obsolete < 0) { mc_fail(c, "unsupported joint-group category or obsolete syntax"); break; }
+            i++;
             name = mc_identity(c, in, i++, 0);
-            if (name) id = mc_group_id(c, category, name);
+            if (name && obsolete >= 0) {
+                size_t n = strlen(name) + strlen(mc_obsolete_groups[obsolete]);
+                id = n <= SIZE_MAX - 16 ? malloc(n + 16) : NULL;
+                /* The engine skips these without an error, so they are retained
+                 * whole rather than interpreted or dropped. */
+                if (!id) mc_fail(c, "identity allocation failed");
+                else snprintf(id, n + 16, "skipped:%s:%s", mc_obsolete_groups[obsolete], name);
+            } else if (name) id = mc_group_id(c, category, name);
         } else if (kind == 3) {
             if (!mc_is(in, i++, "anim")) { mc_fail(c, "expected animation event block"); break; }
             name = mc_identity(c, in, i++, 1);
@@ -340,7 +588,14 @@ static int mc_records(mc_context *c, mc_input *in, sh_decl_node *list, int kind,
             entry = mc_entry(c, list, count++, id);
             if (entry) {
                 if (kind == 4) mc_alias(c, in, entry, start, body);
-                else mc_slice(c, in, entry, "body", start, i);
+                else if (target || obsolete >= 0) mc_slice(c, in, entry, "body", start, i);
+                else if (kind == 2) {
+                    mc_slice(c, in, entry, "head", start, body + 1);
+                    mc_group_body(c, in, entry, body + 1, in->tokens[body].close);
+                } else if (kind == 3) {
+                    mc_slice(c, in, entry, "head", start, body + 1);
+                    mc_event_records(c, in, entry, body + 1, in->tokens[body].close);
+                } else mc_slice(c, in, entry, "body", start, i);
                 if (target) mc_add(entry, mc_node(c, "target", target));
             }
         }
@@ -415,6 +670,12 @@ static int mc_parse(mc_context *c, mc_input *in)
         } else if (section >= 2 && section <= 4) {
             sh_decl_node *list = mc_add(edit, mc_node(c, mc_sections[section], NULL));
             mc_records(c, in, list, section, block + 1, end);
+        } else if (section == 6) {
+            sh_decl_node *list = mc_add(edit, mc_node(c, mc_sections[section], NULL));
+            mc_eye_records(c, in, list, block + 1, end);
+        } else if (section == 7) {
+            sh_decl_node *list = mc_add(edit, mc_node(c, mc_sections[section], NULL));
+            mc_kits(c, in, list, block + 1, end);
         } else {
             mc_slice(c, in, edit, mc_sections[section], start, i);
         }
@@ -454,6 +715,89 @@ static void mc_emit_alias(mc_context *c, char **out, size_t *length, const sh_de
     }
     mc_append(c, out, length, "}\n");
 }
+static void mc_emit_keys(mc_context *c, char **out, size_t *length, const sh_decl_node *parent)
+{
+    const sh_decl_node *keys = sh_decl_tree_member(parent, "keys");
+    for (const sh_decl_node *item = keys ? keys->children : NULL; item && !c->failed; item = item->next)
+        if (strcmp(item->key, "num")) mc_emit_slice(c, out, length, sh_decl_tree_member(item, "body"));
+}
+static size_t mc_records_count(const sh_decl_node *list)
+{
+    size_t count = 0;
+    for (const sh_decl_node *item = list ? list->children : NULL; item; item = item->next)
+        count += strcmp(item->key, "num") != 0;
+    return count;
+}
+/* A joint group re-emits its authored head, then its args blocks and joint
+ * entries in composed order. The engine derives every joint index from that
+ * order, so no index is written here. */
+static void mc_emit_group(mc_context *c, char **out, size_t *length, const sh_decl_node *entry)
+{
+    const sh_decl_node *body = sh_decl_tree_member(entry, "records");
+    if (!sh_decl_tree_member(entry, "head")) {
+        mc_emit_slice(c, out, length, sh_decl_tree_member(entry, "body")); return;
+    }
+    mc_emit_slice(c, out, length, sh_decl_tree_member(entry, "head"));
+    for (const sh_decl_node *record = body ? body->children : NULL; record && !c->failed; record = record->next) {
+        if (!strcmp(record->key, "num")) continue;
+        if (sh_decl_tree_member(record, "args")) {
+            mc_append(c, out, length, "args {\n");
+            mc_emit_keys(c, out, length, record);
+            mc_append(c, out, length, "}\n");
+        } else {
+            char *name = mc_unhex(c, sh_decl_tree_member(record, "name"));
+            if (name) mc_append(c, out, length, name);
+            free(name);
+            if (sh_decl_tree_member(record, "keys")) {
+                mc_append(c, out, length, " {\n");
+                mc_emit_keys(c, out, length, record);
+                mc_append(c, out, length, "}\n");
+            } else mc_append(c, out, length, "\n");
+        }
+    }
+    mc_append(c, out, length, "}\n");
+}
+static void mc_emit_events(mc_context *c, char **out, size_t *length, const sh_decl_node *entry)
+{
+    const sh_decl_node *body = sh_decl_tree_member(entry, "records");
+    mc_emit_slice(c, out, length, sh_decl_tree_member(entry, "head"));
+    for (const sh_decl_node *record = body ? body->children : NULL; record && !c->failed; record = record->next) {
+        if (!strcmp(record->key, "num")) continue;
+        mc_emit_slice(c, out, length, sh_decl_tree_member(record, "head"));
+        mc_emit_keys(c, out, length, record);
+        mc_append(c, out, length, "}\n");
+    }
+    mc_append(c, out, length, "}\n");
+}
+/* Both counted collections are re-counted from the records that survive
+ * composition; the native readers size their storage from these numbers. */
+static void mc_emit_eye(mc_context *c, char **out, size_t *length, const sh_decl_node *node)
+{
+    char head[64];
+    snprintf(head, sizeof(head), "eyeInfoCollection %zu {\n", mc_records_count(node));
+    mc_append(c, out, length, head);
+    for (const sh_decl_node *item = node->children; item && !c->failed; item = item->next)
+        if (strcmp(item->key, "num")) mc_emit_slice(c, out, length, sh_decl_tree_member(item, "body"));
+    mc_append(c, out, length, "}\n");
+}
+static void mc_emit_kits(mc_context *c, char **out, size_t *length, const sh_decl_node *node)
+{
+    mc_append(c, out, length, "meshKits {\n");
+    for (const sh_decl_node *kit = node->children; kit && !c->failed; kit = kit->next) {
+        const sh_decl_node *entries = sh_decl_tree_member(kit, "entries");
+        char *name; char count[32];
+        if (!strcmp(kit->key, "num")) continue;
+        name = mc_unhex(c, sh_decl_tree_member(kit, "name"));
+        if (name) { mc_append(c, out, length, name); mc_append(c, out, length, " "); }
+        free(name);
+        snprintf(count, sizeof(count), "%zu {\n", mc_records_count(entries));
+        mc_append(c, out, length, count);
+        for (const sh_decl_node *item = entries ? entries->children : NULL; item && !c->failed; item = item->next)
+            if (strcmp(item->key, "num")) mc_emit_slice(c, out, length, sh_decl_tree_member(item, "body"));
+        mc_append(c, out, length, "}\n");
+    }
+    mc_append(c, out, length, "}\n");
+}
 static char *mc_emit(mc_context *c, const sh_decl_node *root, size_t *length)
 {
     const sh_decl_node *edit = sh_decl_tree_member(root, "edit");
@@ -462,11 +806,15 @@ static char *mc_emit(mc_context *c, const sh_decl_node *root, size_t *length)
     for (size_t section = 0; edit && section < sizeof(mc_sections) / sizeof(mc_sections[0]) && !c->failed; section++) {
         const sh_decl_node *node = sh_decl_tree_member(edit, mc_sections[section]);
         if (!node) continue;
+        if (section == 6) { mc_emit_eye(c, &out, length, node); continue; }
+        if (section == 7) { mc_emit_kits(c, &out, length, node); continue; }
         if (!section || (section >= 2 && section <= 4)) {
             mc_append(c, &out, length, mc_sections[section]); mc_append(c, &out, length, " {\n");
             for (const sh_decl_node *entry = node->children; entry && !c->failed; entry = entry->next) {
                 char *body;
                 if (!strcmp(entry->key, "num")) continue;
+                if (section == 2) { mc_emit_group(c, &out, length, entry); continue; }
+                if (section == 3) { mc_emit_events(c, &out, length, entry); continue; }
                 if (section == 4) { mc_emit_alias(c, &out, length, entry); continue; }
                 body = mc_unhex(c, sh_decl_tree_member(entry, "body"));
                 if (body) { mc_append(c, &out, length, body); mc_append(c, &out, length, "\n"); } free(body);
@@ -507,6 +855,159 @@ static const sh_decl_node *mc_match_entry(const sh_decl_node *list, const sh_dec
         if (id && other && !strcmp(id->value, other->value)) return item;
     }
     return NULL;
+}
+/* The key items of one payload carry their native key name, so a semantic rule
+ * can find the key it governs without reinterpreting any value. */
+static const sh_decl_node *mc_key_item(mc_context *c, const sh_decl_node *record, const char *name)
+{
+    const sh_decl_node *keys = sh_decl_tree_member(record, "keys");
+    for (const sh_decl_node *item = keys ? keys->children : NULL; item; item = item->next) {
+        char *text;
+        if (!strcmp(item->key, "num")) continue;
+        text = mc_unhex(c, sh_decl_tree_member(item, "name"));
+        if (text && !strcmp(text, name)) { free(text); return item; }
+        free(text);
+    }
+    return NULL;
+}
+/* The args vec3 in force when the reader reaches one joint entry: it writes that
+ * default into the joint it is listed before, so a composed order that moves a
+ * joint across an args block would silently change its payload. */
+static const sh_decl_node *mc_running_vec3(mc_context *c, const sh_decl_node *body,
+    const char *joint_id, int *found)
+{
+    const sh_decl_node *vec3 = NULL;
+    *found = 0;
+    for (const sh_decl_node *record = body ? body->children : NULL; record; record = record->next) {
+        const sh_decl_node *id;
+        if (!strcmp(record->key, "num")) continue;
+        if (sh_decl_tree_member(record, "args")) {
+            const sh_decl_node *item = mc_key_item(c, record, "vec3");
+            if (item) vec3 = sh_decl_tree_member(item, "body");
+            continue;
+        }
+        id = sh_decl_tree_member(record, "id");
+        if (id && joint_id && !strcmp(id->value, joint_id)) { *found = 1; return vec3; }
+    }
+    return vec3;
+}
+/* surfType and contentsFlags are single group-wide values wherever they appear,
+ * so the last writer in body order is the one the engine keeps. */
+static const sh_decl_node *mc_final_writer(mc_context *c, const sh_decl_node *body, const char *key)
+{
+    const sh_decl_node *writer = NULL;
+    for (const sh_decl_node *record = body ? body->children : NULL; record; record = record->next) {
+        const sh_decl_node *item;
+        if (!strcmp(record->key, "num")) continue;
+        item = mc_key_item(c, record, key);
+        if (item) writer = sh_decl_tree_member(item, "body");
+    }
+    return writer;
+}
+/* "<category>:<name>" as the group list stores it. */
+static char *mc_group_identity(mc_context *c, const sh_decl_node *group, int *category)
+{
+    const sh_decl_node *id = sh_decl_tree_member(group, "id");
+    char *text = id ? mc_unhex(c, id) : NULL;
+    const char *colon = text ? strchr(text, ':') : NULL;
+    *category = -1;
+    if (colon && colon != text) {
+        int value = 0;
+        for (const char *at = text; at < colon; at++) {
+            if (*at < '0' || *at > '9') { value = -1; break; }
+            value = value * 10 + (*at - '0');
+        }
+        *category = value;
+    }
+    return text;
+}
+static const sh_decl_node *mc_section_node(const mc_input *in, const char *section)
+{ return sh_decl_tree_member(sh_decl_tree_member(in->tree, "edit"), section); }
+
+/* Joint-group payload semantics beyond record identity: the running args default
+ * each joint inherits and the single group-wide surfType/contentsFlags writer.
+ * A contribution that changed either one must still see its own value in the
+ * composed result, exactly as the init setters are checked. */
+static int mc_group_semantics(mc_context *c, const mc_input *original, const mc_input *input,
+    const mc_input *result, sh_decl_conflict *conflict, size_t index)
+{
+    const sh_decl_node *base = mc_section_node(original, "jointGroups");
+    const sh_decl_node *mine = mc_section_node(input, "jointGroups");
+    const sh_decl_node *out = mc_section_node(result, "jointGroups");
+    for (const sh_decl_node *group = mine ? mine->children : NULL; group && !c->failed; group = group->next) {
+        const sh_decl_node *original_group, *result_group, *body, *result_body;
+        char detail[320], *name; int category;
+        if (!strcmp(group->key, "num")) continue;
+        original_group = mc_match_entry(base, group);
+        result_group = mc_match_entry(out, group);
+        if (!result_group) continue;
+        body = sh_decl_tree_member(group, "records");
+        result_body = sh_decl_tree_member(result_group, "records");
+        name = mc_group_identity(c, group, &category);
+        for (int k = 0; k < 2 && !c->failed; k++) {
+            const char *key = k ? "contentsFlags" : "surfType";
+            const sh_decl_node *was = mc_final_writer(c, sh_decl_tree_member(original_group, "records"), key);
+            const sh_decl_node *contributed = mc_final_writer(c, body, key);
+            const sh_decl_node *now = mc_final_writer(c, result_body, key);
+            if (mc_same(was, contributed) || mc_same(contributed, now)) continue;
+            snprintf(detail, sizeof(detail), "joint group '%s' %s write would be overwritten by another contribution",
+                name ? name : "?", key);
+            if (conflict) conflict->first = index;
+            mc_fail(c, detail);
+        }
+        for (const sh_decl_node *record = body ? body->children : NULL; record && !c->failed; record = record->next) {
+            const sh_decl_node *id = sh_decl_tree_member(record, "id"), *was, *now, *before;
+            int found_input = 0, found_result = 0, found_original = 0;
+            char *joint;
+            if (!strcmp(record->key, "num") || sh_decl_tree_member(record, "args") || !id) continue;
+            was = mc_running_vec3(c, body, id->value, &found_input);
+            now = mc_running_vec3(c, result_body, id->value, &found_result);
+            before = mc_running_vec3(c, sh_decl_tree_member(original_group, "records"),
+                id->value, &found_original);
+            if (!found_input || !found_result || mc_same(was, now)) continue;
+            /* An entry the original already carried is only contended when this
+             * contribution itself changed the default it inherits. */
+            if (found_original && mc_same(before, was)) continue;
+            joint = mc_unhex(c, sh_decl_tree_member(record, "name"));
+            snprintf(detail, sizeof(detail),
+                "joint group '%s' entry %s would inherit a different args default after composition",
+                name ? name : "?", joint ? joint : "?");
+            free(joint);
+            if (conflict) conflict->first = index;
+            mc_fail(c, detail);
+        }
+        free(name);
+    }
+    return !c->failed;
+}
+/* A limb-loss group's per-joint index is authored, not derived, so two entries
+ * of one group may not claim the same index in the composed result. */
+static int mc_group_indices(mc_context *c, const mc_input *result)
+{
+    const sh_decl_node *out = mc_section_node(result, "jointGroups");
+    for (const sh_decl_node *group = out ? out->children : NULL; group && !c->failed; group = group->next) {
+        const sh_decl_node *body;
+        char *name; int category;
+        if (!strcmp(group->key, "num")) continue;
+        name = mc_group_identity(c, group, &category);
+        body = category == 4 ? sh_decl_tree_member(group, "records") : NULL;
+        for (const sh_decl_node *record = body ? body->children : NULL; record && !c->failed; record = record->next) {
+            const sh_decl_node *item = mc_key_item(c, record, mc_group_scalars[4]);
+            if (!item || !strcmp(record->key, "num")) continue;
+            for (const sh_decl_node *other = record->next; other && !c->failed; other = other->next) {
+                const sh_decl_node *rival = mc_key_item(c, other, mc_group_scalars[4]);
+                char detail[320], *text;
+                if (!rival || !mc_same(sh_decl_tree_member(item, "body"), sh_decl_tree_member(rival, "body")))
+                    continue;
+                text = mc_unhex(c, sh_decl_tree_member(item, "body"));
+                snprintf(detail, sizeof(detail), "joint group '%s' has two entries claiming '%s'",
+                    name ? name : "?", text ? text : "?");
+                free(text); mc_fail(c, detail);
+            }
+        }
+        free(name);
+    }
+    return !c->failed;
 }
 static int mc_alias_slots(mc_context *c, mc_input *in, const mc_input *baseline)
 {
@@ -557,9 +1058,39 @@ static int mc_alias_slots(mc_context *c, mc_input *in, const mc_input *baseline)
 static void mc_free(mc_input *in)
 { free(in->tokens); free(in->binding); free(in->text); sh_decl_tree_free(in->tree); }
 
+/* An animation event argument is written as its native type name followed by one
+ * value. The frame-command reader resolves that type name through the engine's
+ * declaration-type registry and then looks the value up in that type's manager,
+ * so an argument whose type is a declaration family is a dependency of this
+ * definition. These are the reader's own primitive and skeleton-resolved forms,
+ * which name no resource. */
+static const char *mc_event_primitives[] = {"frame", "row", "locked", "bool", "int", "float",
+    "vec3", "angles", "string", "animalias", "joint", "jointName"};
+static const char *mc_declaration_family(const mc_input *in, size_t i)
+{
+    for (size_t n = 0; n < sizeof(mc_event_primitives) / sizeof(mc_event_primitives[0]); n++)
+        if (mc_is_ci(in, i, mc_event_primitives[n])) return NULL;
+    for (size_t n = 0; n < sizeof(SH_RESOURCE_TYPES) / sizeof(SH_RESOURCE_TYPES[0]); n++)
+        if (mc_is_ci(in, i, SH_RESOURCE_TYPES[n].type)) return SH_RESOURCE_TYPES[n].type;
+    return NULL;
+}
+/* The value token of such an argument, quoted or bare. */
+static char *mc_argument_identity(mc_context *c, const mc_input *in, size_t i)
+{
+    const char *s; size_t n;
+    if (i >= in->count) { mc_fail(c, "event argument has no value"); return NULL; }
+    s = in->source.text + in->tokens[i].begin; n = in->tokens[i].end - in->tokens[i].begin;
+    if (n >= 2 && *s == '"' && s[n - 1] == '"') { s++; n -= 2; }
+    if (!n) { mc_fail(c, "event argument names an empty identity"); return NULL; }
+    for (size_t j = 0; j < n; j++) if ((unsigned char)s[j] < 32 || (unsigned char)s[j] > 126) {
+        mc_fail(c, "event argument identity is not native ASCII"); return NULL;
+    }
+    return mc_copy(c, s, n);
+}
 /* Resource identities this envelope names, in the reader's own terms: the
- * inherited definition, the bound mesh and each alias animation. Mesh kits,
- * joint groups and event payloads name native records, not resources. */
+ * inherited definition, the bound mesh, each alias animation and every
+ * declaration an animation event argument resolves. Mesh kits and joint groups
+ * name native records of the selected model, not resources. */
 static int mc_emit_reference(mc_context *c, sh_decl_md6_reference_visitor visitor,
     void *context, const char *type, char *name)
 {
@@ -608,6 +1139,37 @@ int sh_decl_md6_references(sh_decl_source source, sh_decl_md6_reference_visitor 
                     f += 2;
                 } else { mc_fail(&c, "unsupported init field"); break; }
             }
+        } else if (section == 3) {
+            size_t a = block + 1;
+            while (a < end && !c.failed) {
+                size_t close;
+                if (!mc_is(&in, a, "anim") || !mc_is(&in, a + 2, "{") ||
+                    (close = in.tokens[a + 2].close) >= end) {
+                    mc_fail(&c, "animation event block is not native"); break;
+                }
+                for (size_t e = a + 3; e < close && !c.failed; ) {
+                    size_t record;
+                    if (!mc_is(&in, e, "event") || !mc_is(&in, e + 2, "{") ||
+                        (record = in.tokens[e + 2].close) > close) {
+                        mc_fail(&c, "animation event record is not native"); break;
+                    }
+                    for (size_t k = e + 3; k + 1 < record && !c.failed; k++) {
+                        const char *family;
+                        /* Only the first token of a line is a key; the rest are
+                         * its values. */
+                        if (k > e + 3 && mc_same_line(&in, k - 1, k)) continue;
+                        family = mc_declaration_family(&in, k);
+                        if (!family) continue;
+                        /* The reader skips the lookup for an empty name, and
+                         * shipped content uses that to mean no declaration. */
+                        if (mc_is(&in, k + 1, "\"\"")) continue;
+                        if (!mc_emit_reference(&c, visitor, context, family,
+                                mc_argument_identity(&c, &in, k + 1))) break;
+                    }
+                    e = record + 1;
+                }
+                a = close + 1;
+            }
         } else if (section == 4) {
             size_t a = block + 1;
             while (a < end && !c.failed) {
@@ -632,8 +1194,14 @@ char *sh_decl_md6_compose(sh_decl_source baseline, const sh_decl_source *sources
     size_t *length, char *error, size_t capacity, sh_decl_conflict *conflict)
 {
     static const sh_decl_collection_rule rules[] = {{"edit.init", "id"}, {"edit.jointGroups", "id"},
-        {"edit.events", "id"}, {"edit.aliases", "id"}, {"edit.aliases.item[*].body", "id"},
-        {"edit.aliases.item[*].body.item[*].flags", "id"}};
+        {"edit.jointGroups.item[*].records", "id"},
+        {"edit.jointGroups.item[*].records.item[*].keys", "id"},
+        {"edit.events", "id"}, {"edit.events.item[*].records", "id"},
+        {"edit.events.item[*].records.item[*].keys", "id"},
+        {"edit.aliases", "id"}, {"edit.aliases.item[*].body", "id"},
+        {"edit.aliases.item[*].body.item[*].flags", "id"},
+        {"edit.eyeInfoCollection", "id"}, {"edit.meshKits", "id"},
+        {"edit.meshKits.item[*].entries", "id"}};
     mc_context c = {error, capacity, 0};
     mc_input original = {0}, result = {0}, *inputs = NULL;
     sh_decl_source *views = NULL;
@@ -675,6 +1243,9 @@ char *sh_decl_md6_compose(sh_decl_source baseline, const sh_decl_source *sources
             mc_fail(&c, detail); goto done;
         }
     }
+    for (size_t i = 0; i < count; i++)
+        if (!mc_group_semantics(&c, &original, &inputs[i], &result, conflict, i)) goto done;
+    if (!mc_group_indices(&c, &result)) goto done;
     /* A group/animation edit was authored against a selected model/parent.
      * Do not transplant it onto another contribution's different binding.
      * Resolving changes inside that referenced parent/skeleton remains a native

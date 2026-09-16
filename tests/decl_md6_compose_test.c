@@ -13,6 +13,14 @@ static int failures;
 #define A "alias { name \"idle\" anim \"idle.md6anim\" } "
 #define B "alias { name \"attack\" anim \"attack.md6anim\" } "
 #define E "anim \"idle.md6anim\" { event \"ae_sound\" { frame 1 } event \"ae_sound\" { frame 1 } } "
+/* One hit-test group whose single joint carries the given payload lines, one
+ * mesh-kit or eye-info section, and one animation event body. The shipped cooked
+ * format writes one key per line and these fixtures follow it. */
+#define HIT(k) "hitTestGroup \"a\" { head {\n" k "} } "
+#define SECTIONS(s) "{" INIT "jointGroups {} events {} aliases {} props {} " s "}"
+#define KITS(k) SECTIONS("meshKits { " k " }")
+#define EYES(e) SECTIONS("eyeInfoCollection " e)
+#define EV(k) "anim \"a.md6anim\" { event \"ae_sound\" {\nframe 1\nrow 0\n" k "} } "
 static sh_decl_source view(const char *s) { return (sh_decl_source){s, strlen(s)}; }
 static char *flat(const char *s)
 {
@@ -119,9 +127,91 @@ int main(void)
         MD6(INIT,G,E,A B,""), "duplicate named record");
     refuse(MD6(INIT,G,"",A,""), MD6(INIT,P G,"",A,""), MD6(INIT,G,"",A B,""), "earlier local group");
     refuse(MD6(INIT,G,"",A,""), MD6(INIT,"","",A,""), MD6(INIT,G P,"",A B,""), "earlier local group");
-    /* Two different edits to the same payload remain a conflict. */
-    refuse(MD6(INIT,G,"",A,""), MD6(INIT,"damageGroup \"head\" { neck } ","",A,""),
-        MD6(INIT,"damageGroup \"head\" { spine } ","",A,""), "same field");
+    /* Independent joint additions to one group combine; the removal both
+     * contributions agree on still applies. */
+    pass(MD6(INIT,G,"",A,""), MD6(INIT,"damageGroup \"head\" { neck } ","",A,""),
+        MD6(INIT,"damageGroup \"head\" { spine } ","",A,""), "neck", "spine");
+    /* Two different payloads for one joint remain a conflict, and different keys
+     * of that payload combine. Each key owns the value tokens on its line, the
+     * way the native reader takes them. */
+    refuse(MD6(INIT,HIT("radius 1\n"),"",A,""), MD6(INIT,HIT("radius 2\n"),"",A,""),
+        MD6(INIT,HIT("radius 3\n"),"",A,""), "same field");
+    pass(MD6(INIT,HIT("radius 1\n"),"",A,""), MD6(INIT,HIT("radius 2\n"),"",A,""),
+        MD6(INIT,HIT("radius 1\noffset ( 1 2 3 )\n"),"",A,""), "radius 2", "offset ( 1 2 3 )");
+    /* A payload authored on one line is one native key: equal contributions
+     * coalesce and divergent ones conflict at that whole key. */
+    refuse(MD6(INIT,HIT("radius 1 "),"",A,""), MD6(INIT,HIT("radius 1 offset ( 1 2 3 ) "),"",A,""),
+        MD6(INIT,HIT("radius 2 "),"",A,""), "same field");
+    /* A repeated joint name is native: each occurrence keeps its own payload. */
+    pass(MD6(INIT,"hitTestGroup \"a\" { head {\nradius 1\n} head {\nradius 2\n} } ","",A,""),
+        MD6(INIT,"hitTestGroup \"a\" { head {\nradius 1\n} head {\nradius 2\n} neck {\nradius 3\n} } ","",A,""),
+        MD6(INIT,"hitTestGroup \"a\" { head {\nradius 1\n} head {\nradius 9\n} } ","",A,""),
+        "radius 9", "neck { radius 3 }");
+    /* args sets the running default for the joints listed after it: an
+     * independent args key composes, and a joint that would inherit a different
+     * default after composition is a conflict. */
+    pass(MD6(INIT,"hitTestGroup \"a\" { args {\nsurfType Metal\n} head {\nradius 1\n} } ","",A,""),
+        MD6(INIT,"hitTestGroup \"a\" { args {\nsurfType Metal\n} head {\nradius 2\n} } ","",A,""),
+        MD6(INIT,"hitTestGroup \"a\" { args {\nsurfType Metal\nvec3 ( 1 0 0 )\n} head {\nradius 1\n} } ","",A,""),
+        "radius 2", "vec3 ( 1 0 0 )");
+    refuse(MD6(INIT,"hitTestGroup \"a\" { args {\nvec3 ( 1 0 0 )\n} head } ","",A,""),
+        MD6(INIT,"hitTestGroup \"a\" { args {\nvec3 ( 1 0 0 )\n} head neck } ","",A,""),
+        MD6(INIT,"hitTestGroup \"a\" { args {\nvec3 ( 2 0 0 )\n} head } ","",A,""),
+        "args default");
+    /* surfType and contentsFlags are one group-wide value wherever they appear,
+     * so a contribution whose write another one would overwrite is diagnosed. */
+    refuse(MD6(INIT,"hitTestGroup \"a\" { head neck } ","",A,""),
+        MD6(INIT,"hitTestGroup \"a\" { head {\nsurfType Concrete\n} neck } ","",A,""),
+        MD6(INIT,"hitTestGroup \"a\" { head neck {\nsurfType Metal\n} } ","",A,""), "surfType write");
+    /* A limb-loss index is authored, so a composed group cannot claim one twice. */
+    refuse(MD6(INIT,"limblossGroup \"a\" { head {\nindex 1\n} } ","",A,""),
+        MD6(INIT,"limblossGroup \"a\" { head {\nindex 1\n} neck {\nindex 2\n} } ","",A,""),
+        MD6(INIT,"limblossGroup \"a\" { head {\nindex 1\n} spine {\nindex 2\n} } ","",A,""),
+        "claiming");
+    /* Category names are matched the way the native reader matches them, misc is
+     * its alias for eyeGroup, and a bare jointGroup token is ignored. */
+    refuse(MD6(INIT,"eyeGroup \"a\" { head } ","",A,""),
+        MD6(INIT,"EYEGROUP \"a\" { neck } ","",A,""),
+        MD6(INIT,"misc \"a\" { spine } ","",A,""), "same field");
+    pass(MD6(INIT,"jointGroup eyeGroup \"a\" { head } ","",A,""),
+        MD6(INIT,"misc \"a\" { head neck } ","",A,""),
+        MD6(INIT,"eyeGroup \"a\" { head spine } ","",A,""), "neck", "spine");
+    /* The five obsolete group kinds the reader skips stay composable. */
+    pass(MD6(INIT,G "reparentGroup \"a\" { head } ","",A,""),
+        MD6(INIT,G "reparentGroup \"a\" { head } ","",A B,""),
+        MD6(INIT,G P "reparentGroup \"a\" { head } ","",A,""), "reparentGroup \"a\"", P);
+    /* Mesh kit entries from two owners combine and the native count is rebuilt. */
+    pass(KITS("Gore 1 { \"a\" = \"a\" }"), KITS("Gore 2 { \"a\" = \"a\" \"b\" = \"b\" }"),
+        KITS("Gore 2 { \"a\" = \"a\" \"c\" = \"c\" }"), "Gore 3 {", "\"c\" = \"c\"");
+    refuse(KITS("Gore 1 { \"a\" = \"a\" }"), KITS("Gore 1 { \"a\" = \"b\" }"),
+        KITS("Gore 1 { \"a\" = \"c\" }"), "same field");
+    refuse("{}", KITS("Gore 0 {} Heads 0 {}"), "{}", "out-of-order mesh kit");
+    /* An eye info record is positional, and the collection count is rebuilt. */
+    pass(EYES("1 { eyeInfo {\njointName \"head\"\n} }"),
+        EYES("2 { eyeInfo {\njointName \"head\"\n} eyeInfo {\njointName \"neck\"\n} }"),
+        EYES("1 { eyeInfo {\njointName \"head\"\n} }"), "eyeInfoCollection 2", "jointName \"neck\"");
+    /* Animation event payloads compose per key; one event is identified by its
+     * frame command with the frame and row it is placed at. */
+    pass(MD6(INIT,G,EV("locked 0\nsound \"one\"\n"),A,""),
+        MD6(INIT,G,EV("locked 1\nsound \"one\"\n"),A,""),
+        MD6(INIT,G,EV("locked 0\nsound \"two\"\n"),A,""), "locked 1", "sound \"two\"");
+    refuse(MD6(INIT,G,EV("locked 0\nsound \"one\"\n"),A,""),
+        MD6(INIT,G,EV("locked 0\nsound \"two\"\n"),A,""),
+        MD6(INIT,G,EV("locked 0\nsound \"three\"\n"),A,""), "same field");
+    /* Two events of one animation that differ only in frame or row are separate
+     * records, so independent additions to that animation combine. */
+    pass(MD6(INIT,G,"anim \"a.md6anim\" { event \"ae_sound\" {\nframe 1\nrow 0\n} } ",A,""),
+        MD6(INIT,G,"anim \"a.md6anim\" { event \"ae_sound\" {\nframe 1\nrow 0\n} event \"ae_sound\" {\nframe 2\nrow 0\n} } ",A,""),
+        MD6(INIT,G,"anim \"a.md6anim\" { event \"ae_sound\" {\nframe 1\nrow 0\n} event \"ae_sound\" {\nframe 1\nrow 3\n} } ",A,""),
+        "frame 2", "row 3");
+    /* A flag enum takes several constants on its line. */
+    pass(MD6(INIT,G,EV("aiCollisionFlags_t AICF_WORLD AICF_AI\n"),A,""),
+        MD6(INIT,G,EV("aiCollisionFlags_t AICF_WORLD AICF_AI AICF_PLAYERS\n"),A,""),
+        MD6(INIT,G,EV("aiCollisionFlags_t AICF_WORLD AICF_AI\n"),A,""),
+        "AICF_WORLD AICF_AI AICF_PLAYERS", NULL);
+    refuse("{}", MD6(INIT,G,"anim \"a.md6anim\" { frame 1 } ",A,""), "{}", "only event records");
+    refuse("{}", MD6(INIT,G,"anim \"a.md6anim\" { event \"ae_x\" {\nframe\n} } ",A,""), "{}",
+        "no value on its line");
     refuse(MD6(INIT,G,"",A,""), MD6(INIT,"","",A,""),
         MD6(INIT,"damageGroup \"head\" { neck } ","",A,""), "same field");
     refuse(MD6(INIT,G,"",A,""), MD6("init { mesh \"other.md6mesh\" } ",G,"",A,""),

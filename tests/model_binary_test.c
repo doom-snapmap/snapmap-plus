@@ -14,7 +14,13 @@ static void raw(const void *bytes, size_t length)
     assert(g_used + length <= sizeof(g_file));
     memcpy(g_file + g_used, bytes, length); g_used += length;
 }
-static void magic(void) { raw("\x1b\x4c\x4d\x42", 4); }
+/* The writer emits the file's own magic as each surface terminator. */
+static unsigned g_revision = 0x1b;
+static void magic(void)
+{
+    unsigned char bytes[4] = {(unsigned char)g_revision, 0x4c, 0x4d, 0x42};
+    raw(bytes, 4);
+}
 static void be32(unsigned value)
 {
     unsigned char bytes[4] = {(unsigned char)(value >> 24), (unsigned char)(value >> 16),
@@ -35,16 +41,26 @@ static void zeros(size_t count)
 }
 /* name, three fields, the material table, then an opaque geometry block and the
  * magic that ends the surface. */
+static unsigned g_surface_fields = 3;
+
 static void surface(const char *surface_name, const char *const *materials, size_t count,
     const void *geometry, size_t geometry_length)
 {
-    name(surface_name); be32(0); be32(0); be32(0);
+    name(surface_name);
+    for (unsigned i = 0; i < g_surface_fields; i++) be32(0);
     be32((unsigned)count);
     for (size_t i = 0; i < count; i++) name(materials[i]);
     if (geometry_length) raw(geometry, geometry_length);
     magic();
 }
-static void head(unsigned surfaces) { g_used = 0; magic(); be32(0x1234); be32(surfaces); }
+static void head(unsigned surfaces) { g_used = 0; g_surface_fields = 3; g_revision = 0x1b; magic(); be32(0x1234); be32(surfaces); }
+/* The two revisions the engine calls BMODEL_MAGIC_PREVIOUS share this layout
+ * with one fewer big-endian field in each surface header. */
+static void previous_head(unsigned revision, unsigned surfaces)
+{
+    g_used = 0; g_surface_fields = 2; g_revision = revision;
+    magic(); be32(0x1234); be32(surfaces);
+}
 static void trailer(const char *const *names, size_t count)
 {
     be32((unsigned)count);
@@ -118,9 +134,15 @@ int main(void)
     assert(!read_file(complete, error, sizeof(error)) && g_seen_count == 2 && strstr(error, "refused"));
     g_refuse_at = -1;
 
-    /* An older revision of the container is declined, not guessed at. */
+    /* Both previous revisions parse, with their own surface header width. */
+    previous_head(0x1a, 1); surface("body", horn_materials, 1, "geometry", 8); trailer(trailing, 1);
+    assert(read_file(g_used, error, sizeof(error)));
+    assert(g_seen_count == 1 && !strcmp(g_seen[0], "art/box/horn"));
+    previous_head(0x19, 0); trailer(NULL, 0);
+    assert(read_file(g_used, error, sizeof(error)) && !g_seen_count);
+    /* A foreign container is declined, not guessed at. */
     head(1); surface("body", horn_materials, 1, "g", 1); trailer(NULL, 0);
-    g_file[0] = 0x1a;
+    g_file[0] = 0x17;
     assert(!read_file(g_used, error, sizeof(error)) && strstr(error, "not a cooked model"));
 
     /* Implausible counts are refused before any allocation or long scan. */

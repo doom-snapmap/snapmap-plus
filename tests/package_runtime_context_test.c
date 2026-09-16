@@ -270,6 +270,80 @@ static void test_committed_install_joins_library(void)
     sh_package_map_plan_free(plan);
 }
 
+/* One package identity, two variants: the author's own tree and a map's
+ * delivery. The delivery installs beside the author's copy instead of being
+ * refused or overwriting it. The author owns every resource they supply, the
+ * delivery fills what they do not, and the map's own values govern only while
+ * that map is loaded. */
+static void test_variant_ownership(void)
+{
+    static const char *identity = "{\"id\":\"shared-boss\",\"name\":\"Shared boss\"}";
+    static const char *scalar = "generated/decls/entitydef/ai/variant_boss.decl";
+    static const char *extra = "delivered-only.bimage";
+    char map_root[MAX_PATH], error[2048], path[MAX_PATH];
+    const sh_package_compilation *library;
+    sh_package_map_plan *plan;
+    sh_package_missing missing = {0};
+    activation state = {0};
+    snprintf(map_root, sizeof(map_root), "%s/map-variant", root);
+
+    /* The author's own package. */
+    create("overrides/authored-boss/package.json", identity);
+    create("overrides/authored-boss/assets/generated/decls/entitydef/ai/variant_boss.decl",
+           "{ edit = { health = 12000; } }");
+    CHECK(sh_package_runtime_refresh(root)); CHECK(sh_package_runtime_ready());
+    expect_current(scalar, "health = 12000");
+    expect_current(extra, NULL);
+
+    /* The same identity delivered by a map: a different scalar and one resource
+     * the author does not have, installed where deliveries go. */
+    create("overrides/map-00112233445566aa/shared-boss/package.json", identity);
+    create("overrides/map-00112233445566aa/shared-boss/assets/generated/decls/entitydef/ai/variant_boss.decl",
+           "{ edit = { health = 10; } }");
+    create("overrides/map-00112233445566aa/shared-boss/assets/delivered-only.bimage", "delivered bytes");
+    CHECK(sh_package_runtime_refresh(root)); CHECK(sh_package_runtime_ready());
+    /* No contradiction is reported, the author's value stands, and the new
+     * resource is available for later authoring. */
+    expect_current(scalar, "health = 12000");
+    expect_current(extra, "delivered bytes");
+    library = sh_package_runtime_library_acquire();
+    CHECK(library && sh_package_compilation_find(library, extra));
+    sh_package_runtime_release();
+
+    /* Its own map view still governs transiently. */
+    create("map-variant/overrides/shared-boss/package.json", identity);
+    create("map-variant/overrides/shared-boss/assets/generated/decls/entitydef/ai/variant_boss.decl",
+           "{ edit = { health = 10; } }");
+    create("map-variant/overrides/shared-boss/assets/delivered-only.bimage", "delivered bytes");
+    plan = sh_package_runtime_prepare_map(root, map_root, error, sizeof(error)); CHECK(plan);
+    if (!plan) return;
+    /* Everything this map needs is already available: no installation. */
+    CHECK(sh_package_map_plan_payload_missing(plan, &missing, error, sizeof(error)) && !missing.count);
+    sh_package_missing_free(&missing);
+    state.next_health = state.previous_health = state.library_health = "health = 16000";
+    state.map_active = 1;
+    CHECK(activate_plan(plan, &state));
+    expect_current(scalar, "health = 10");
+    expect_current(extra, "delivered bytes");
+    /* Leaving restores the local policy; the delivered resource stays. */
+    state.map_active = 0;
+    CHECK(activate_plan(NULL, &state));
+    expect_current(scalar, "health = 12000");
+    expect_current(extra, "delivered bytes");
+    sh_package_map_plan_free(plan);
+
+    /* The author's bytes were never touched. */
+    {
+        unsigned char body[64] = {0}; size_t length = 0;
+        FILE *stream = NULL;
+        snprintf(path, sizeof(path), "%s/overrides/authored-boss/assets/%s", root, scalar);
+        CHECK(!fopen_s(&stream, path, "rb") && stream);
+        if (stream) { length = fread(body, 1, sizeof(body) - 1, stream); fclose(stream); }
+        body[length] = 0;
+        CHECK(strstr((const char *)body, "12000") != NULL);
+    }
+}
+
 static int inventory_commit_calls, inventory_commit_failure;
 static int commit_inventory(char *error, size_t capacity)
 {
@@ -528,6 +602,7 @@ int main(int argc, char **argv)
     create("overrides/local/package.json", descriptor);
     test_prepared_map(map_a);
     test_committed_install_joins_library();
+    test_variant_ownership();
     test_installed_inventory_is_not_active_composition();
     cleanup(); if (failures) return 1;
     puts("package runtime map context tests passed"); return 0;

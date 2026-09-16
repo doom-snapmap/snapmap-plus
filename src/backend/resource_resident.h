@@ -21,6 +21,9 @@ int sh_resource_resident_defaults(sh_resource_resident *pass, char *error, size_
 /* Reloads pending resources, then rebinds material virtual-texture parms inside
  * the heap-0 scope before the consumer update. Idempotent once it succeeds. */
 int sh_resource_resident_drain(sh_resource_resident *pass, char *error, size_t capacity);
+/* How many identities recovery left at the engine default because the restored
+ * provider supplies no source for them. Reported, never hidden. */
+size_t sh_resource_resident_recovered_defaults(const sh_resource_resident *pass);
 /* Native load/lookup observers preserve existing and newly loaded dependency
  * lifetimes only while the admitted main-thread refresh scope owns them. */
 void sh_resource_resident_touch(void *resource);

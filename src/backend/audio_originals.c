@@ -18,6 +18,10 @@ typedef struct ao_file {
 typedef struct ao_answer { char *path; sh_package_original_identity original; } ao_answer;
 struct sh_audio_originals {
     char *root, *language;
+    /* "sound/soundbanks/pc/" plus the engine's configured bank prefix. The
+     * engine requests every bank and media file below it, so discovery and the
+     * identity reader must use it instead of assuming the plain root. */
+    char *engine_prefix;
     ao_file **files;
     size_t count;
     ao_answer *answers;
@@ -53,16 +57,26 @@ void sh_audio_originals_close(sh_audio_originals *originals)
     if(!originals)return;
     for(size_t i=0;i<originals->count;i++)ao_file_free(originals->files[i]);
     for(size_t i=0;i<originals->answer_count;i++)free(originals->answers[i].path);
-    free(originals->files);free(originals->answers);free(originals->root);free(originals->language);free(originals);
+    free(originals->files);free(originals->answers);free(originals->root);free(originals->language);
+    free(originals->engine_prefix);free(originals);
 }
-sh_audio_originals *sh_audio_originals_open(const char *doom_base,const wchar_t *language)
+sh_audio_originals *sh_audio_originals_open(const char *doom_base,const wchar_t *language,
+    const char *bank_prefix)
 {
-    sh_audio_originals *out;
+    sh_audio_originals *out;size_t length;
     if(!doom_base || !*doom_base)return NULL;
     out=calloc(1,sizeof(*out));if(!out)return NULL;
     InitializeSRWLock(&out->lock);
-    out->root=ao_join(doom_base,"sound/soundbanks/pc");out->language=language ? ao_utf8(language) : NULL;
-    if(!out->root || (language && !out->language)){sh_audio_originals_close(out);return NULL;}
+    /* The native prefix is already lowercased with forward slashes and, when
+     * present, ends in a separator. An empty prefix is the ordinary root. */
+    length=sizeof("sound/soundbanks/pc/")+(bank_prefix ? strlen(bank_prefix) : 0);
+    out->engine_prefix=malloc(length);
+    if(out->engine_prefix)snprintf(out->engine_prefix,length,"sound/soundbanks/pc/%s",
+        bank_prefix ? bank_prefix : "");
+    out->root=out->engine_prefix ? ao_join(doom_base,out->engine_prefix) : NULL;
+    out->language=language ? ao_utf8(language) : NULL;
+    if(!out->root || !out->engine_prefix || (language && !out->language)){sh_audio_originals_close(out);return NULL;}
+    if(out->root[0]){size_t used=strlen(out->root);while(used>1 && (out->root[used-1]=='/' || out->root[used-1]=='\\'))out->root[--used]=0;}
     if(out->language)for(char *p=out->language;*p;p++)if(*p>='A' && *p<='Z')*p+='a'-'A';
     return out;
 }
@@ -257,16 +271,17 @@ done:
 int sh_audio_originals_identity(void *context,const char *path,sh_package_original_identity *out,
     char *error,size_t capacity)
 {
-    static const char prefix[]="sound/soundbanks/pc/";
     sh_audio_originals *originals=context;char *canonical;const char *relative,*name,*extension;
+    const char *prefix;size_t prefix_length;
     sh_package_original_identity candidate={0};int result=1,present;ao_answer *grown;ao_span span={0};
     if(!out)return ao_fail(error,capacity,"missing installed audio identity output");
     memset(out,0,sizeof(*out));
     if(error && capacity)error[0]=0;
     if(!originals || !path)return 0;
     canonical=sh_package_engine_path(path);if(!canonical)return ao_fail(error,capacity,"invalid installed audio path");
-    if(strncmp(canonical,prefix,sizeof(prefix)-1)){free(canonical);return 0;}
-    relative=canonical+sizeof(prefix)-1;name=strrchr(relative,'/');name=name ? name+1 : relative;
+    prefix=originals->engine_prefix;prefix_length=prefix ? strlen(prefix) : 0;
+    if(!prefix_length || strncmp(canonical,prefix,prefix_length)){free(canonical);return 0;}
+    relative=canonical+prefix_length;name=strrchr(relative,'/');name=name ? name+1 : relative;
     extension=strrchr(name,'.');
     if(!extension || (strcmp(extension,".bnk") && strcmp(extension,".wem") && strcmp(extension,".pck"))){free(canonical);return 0;}
     if(!originals->language){free(canonical);return ao_fail(error,capacity,"native audio language is still initializing");}
@@ -316,15 +331,16 @@ done:
 int sh_audio_originals_read(void *context,const char *path,uint64_t offset,void *out,size_t span,
     uint64_t *length,char *error,size_t capacity)
 {
-    static const char prefix[]="sound/soundbanks/pc/";
+    const char *prefix;size_t prefix_length;
     sh_audio_originals *originals=context;char *canonical;const char *relative,*name,*extension;
     sh_package_file_identity identity={0};ao_span located={0};int result=0,present;
     if(length)*length=0;
     if(error && capacity)error[0]=0;
     if(!originals || !path || (span && !out))return 0;
     canonical=sh_package_engine_path(path);if(!canonical)return ao_fail(error,capacity,"invalid installed audio path");
-    if(strncmp(canonical,prefix,sizeof(prefix)-1)){free(canonical);return 0;}
-    relative=canonical+sizeof(prefix)-1;name=strrchr(relative,'/');name=name ? name+1 : relative;
+    prefix=originals->engine_prefix;prefix_length=prefix ? strlen(prefix) : 0;
+    if(!prefix_length || strncmp(canonical,prefix,prefix_length)){free(canonical);return 0;}
+    relative=canonical+prefix_length;name=strrchr(relative,'/');name=name ? name+1 : relative;
     extension=strrchr(name,'.');
     if(!extension || (strcmp(extension,".bnk") && strcmp(extension,".wem"))){free(canonical);return 0;}
     if(!originals->language){free(canonical);return ao_fail(error,capacity,"native audio language is still initializing");}

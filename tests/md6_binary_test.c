@@ -182,5 +182,35 @@ int main(void)
 
     assert(!sh_md6_mesh_references(NULL, 0, visit, NULL, error, sizeof(error)) && error[0]);
     assert(!sh_md6_mesh_references(g_file, g_used, NULL, NULL, error, sizeof(error)));
+
+    /* A cooked animation: the md6 header family, then the skeleton it plays on. */
+    g_used = 0; raw("\x26\x02\x41\x4d", 4); zeros(8); name("md6/boss/boss.md6skl"); zeros(64);
+    g_seen_count = 0; error[0] = 0;
+    assert(sh_md6_anim_references(g_file, g_used, visit, (void *)0x1234, error, sizeof(error)));
+    assert(g_seen_count == 1);
+    expect(0, "skeleton", "md6/boss/boss.md6skl");
+    /* A per-skeleton default clip carries a placeholder, not a path: reading it
+     * succeeds and names nothing, so the caller uses the identity instead. */
+    g_used = 0; raw("\x26\x02\x41\x4d", 4); zeros(8); name("_defaulted_"); zeros(32);
+    g_seen_count = 0;
+    assert(sh_md6_anim_references(g_file, g_used, visit, (void *)0x1234, error, sizeof(error)));
+    assert(!g_seen_count);
+    /* Wrong magic, truncation and a refused visit are all reported. */
+    g_used = 0; raw("\x26\x02\x4d\x4d", 4); zeros(8); name("md6/boss/boss.md6skl");
+    g_seen_count = 0;
+    assert(!sh_md6_anim_references(g_file, g_used, visit, (void *)0x1234, error, sizeof(error)));
+    assert(strstr(error, "not a cooked md6 animation"));
+    g_used = 0; raw("\x26\x02\x41\x4d", 4); zeros(8); name("md6/boss/boss.md6skl");
+    for (size_t at = 1; at < g_used; at++) {
+        g_seen_count = 0; error[0] = 0;
+        assert(!sh_md6_anim_references(g_file, at, visit, (void *)0x1234, error, sizeof(error)) || !g_seen_count);
+    }
+    g_used = 0; raw("\x26\x02\x41\x4d", 4); zeros(8); name("md6/boss/boss.md6skl"); zeros(16);
+    g_refuse_at = 0; g_seen_count = 0;
+    assert(!sh_md6_anim_references(g_file, g_used, visit, (void *)0x1234, error, sizeof(error)));
+    assert(g_seen_count == 1 && strstr(error, "refused"));
+    g_refuse_at = -1;
+    assert(!sh_md6_anim_references(NULL, 0, visit, NULL, error, sizeof(error)) && error[0]);
+    assert(!sh_md6_anim_references(g_file, g_used, NULL, NULL, error, sizeof(error)));
     puts("md6 binary reader tests passed"); return 0;
 }

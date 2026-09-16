@@ -56,6 +56,17 @@ sh_package_sources *sh_package_sources_scan(const char *data_root,
 sh_package_sources *sh_package_sources_scan_directory(const char *root,
                                                       char *error, size_t error_capacity);
 void sh_package_sources_free(sh_package_sources *sources);
+/* The descriptor identity of an outer package: the id of its top-level
+ * component, or NULL when the inventory has none. Nested components keep their
+ * own ids and are not delivery units. */
+const char *sh_package_source_identity(const sh_package_sources *sources, size_t package);
+/* Whether a package was delivered by a map rather than authored in place.
+ * Delivery publishes each installed group under one "map-<16 hex>" folder, so
+ * that leading segment is the runtime's own mark, never an author's setting.
+ * Two packages that share a descriptor identity are variants of one package:
+ * the authored one owns every resource it supplies, and a delivered variant
+ * fills only what the author does not. */
+int sh_package_source_delivered(const sh_package_sources *sources, size_t package);
 /* Copy two immutable inventories into one ownership space. Every authored
  * member is retained, including duplicate paths and empty directories. This
  * does not discover files, compile peers or write either package tree. */

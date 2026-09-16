@@ -3,7 +3,26 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const unsigned char g_model_magic[4] = {0x1b, 0x4c, 0x4d, 0x42};
+/* The current revision plus the two the engine calls BMODEL_MAGIC_PREVIOUS.
+ * All three share this layout: the three shipped older-revision models parse
+ * with the same walk, and the writer emits the file's own magic as its surface
+ * terminator, so the value read from the header is the one to match. */
+static const unsigned char g_model_magic[3][4] = {
+    {0x1b, 0x4c, 0x4d, 0x42}, {0x1a, 0x4c, 0x4d, 0x42}, {0x19, 0x4c, 0x4d, 0x42}
+};
+
+/* Returns the count of big-endian fields between a surface name and its material
+ * count, which is the one way the previous revisions differ: the current one
+ * writes three, the previous two write two. Verified against the only shipped
+ * non-empty previous-revision model; the other two carry no surfaces at all.
+ * Returns 0 when the word is not a cooked-model magic at all. */
+static unsigned mb_surface_fields(const unsigned char *at)
+{
+    if (!memcmp(at, g_model_magic[0], 4)) return 3;
+    for (size_t i = 1; i < sizeof(g_model_magic) / sizeof(g_model_magic[0]); i++)
+        if (!memcmp(at, g_model_magic[i], 4)) return 2;
+    return 0;
+}
 #define MB_NAME_CAP      0x10000u
 #define MB_SURFACE_CAP   262144u
 #define MB_TRAILING_CAP  65536u
@@ -13,6 +32,7 @@ typedef struct mb_reader {
     size_t length, at, scanned, budget;
     char *error;
     size_t capacity;
+    unsigned surface_fields;
     int failed;
 } mb_reader;
 
@@ -70,9 +90,10 @@ static int mb_emit(mb_reader *r, sh_model_binary_visitor visitor, void *context,
 static size_t mb_surface_header(mb_reader *r, size_t at, sh_model_binary_visitor visitor, void *context)
 {
     unsigned materials, length, i;
+    size_t fields = (size_t)r->surface_fields * 4u;
     if (!mb_name(r, &at, &length)) return 0;
-    if (!mb_raw(r, at, 12)) return 0;
-    at += 12;
+    if (!mb_raw(r, at, fields)) return 0;
+    at += fields;
     materials = mb_be32(r, &at);
     if (r->failed || materials > MB_SURFACE_CAP) { r->failed = 0; return 0; }
     for (i = 0; i < materials; i++) {
@@ -101,7 +122,7 @@ static int mb_trailer(mb_reader *r, size_t at)
 int sh_model_references(const unsigned char *body, size_t length,
     sh_model_binary_visitor visitor, void *context, char *error, size_t capacity)
 {
-    mb_reader r = {body, length, 0, 0, 0, error, capacity, 0};
+    mb_reader r = {body, length, 0, 0, 0, error, capacity, 0, 0};
     size_t *start = NULL, *scan = NULL, at = 0;
     unsigned surfaces, i;
     long long depth = 0;
@@ -109,7 +130,8 @@ int sh_model_references(const unsigned char *body, size_t length,
     if (error && capacity) error[0] = 0;
     if (!body || !visitor) return mb_fail(&r, "cooked model inspection needs a source and a visitor");
     if (!mb_raw(&r, 0, 12)) return mb_fail(&r, "cooked model is truncated");
-    if (memcmp(body, g_model_magic, 4)) return mb_fail(&r, "not a cooked model of this revision");
+    r.surface_fields = mb_surface_fields(body);
+    if (!r.surface_fields) return mb_fail(&r, "not a cooked model");
     at = 4;
     mb_be32(&r, &at);                           /* stamp */
     surfaces = mb_be32(&r, &at);
@@ -132,7 +154,7 @@ int sh_model_references(const unsigned char *body, size_t length,
         if (r.failed) break;
         if (!body_end) { depth--; continue; }
         cursor = scan[depth] > body_end ? scan[depth] : body_end;
-        while (cursor + 4 <= r.length && memcmp(r.body + cursor, g_model_magic, 4)) {
+        while (cursor + 4 <= r.length && memcmp(r.body + cursor, body, 4)) {
             cursor++;
             if (++r.scanned > r.budget) { mb_fail(&r, "cooked model surface walk did not converge"); break; }
         }

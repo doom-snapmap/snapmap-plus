@@ -40,16 +40,21 @@ static void packed(const char *relative,unsigned kind,uint64_t id,uint32_t langu
     }
     memcpy(bytes+512,body,length);binary(relative,bytes,512+length);
 }
-static sh_audio_originals *open_originals(const char *base,const wchar_t *language)
+static sh_audio_originals *open_prefixed(const char *base,const wchar_t *language,const char *prefix)
 {
     char path[4096];snprintf(path,sizeof(path),"%s/%s",root,base);
-    sh_audio_originals *out=sh_audio_originals_open(path,language);CHECK(out);return out;
+    sh_audio_originals *out=sh_audio_originals_open(path,language,prefix);CHECK(out);return out;
 }
+static sh_audio_originals *open_originals(const char *base,const wchar_t *language)
+{ return open_prefixed(base,language,NULL); }
+static const char *g_prefix="";
 static void expect(sh_audio_originals *originals,const char *relative,int scope,const char *body)
 {
     char path[4096],error[256];sh_package_original_identity answer;sh_package_file_identity wanted;
-    snprintf(path,sizeof(path),"sound/soundbanks/pc/%s",relative);
+    snprintf(path,sizeof(path),"sound/soundbanks/pc/%s%s",g_prefix,relative);
     CHECK(sh_audio_originals_identity(originals,path,&answer,error,sizeof(error))==1 && !error[0]);
+    if(error[0]) fprintf(stderr,"identity failed for %s: %s\n",path,error);
+    if(answer.scope!=scope) fprintf(stderr,"scope %d wanted %d for %s\n",answer.scope,scope,path);
     CHECK(answer.scope==scope);
     if(scope) {
         CHECK(sh_package_bytes_identity(body,strlen(body),&wanted));
@@ -152,6 +157,28 @@ int main(void)
     expect(originals,"deeper/path/loose.bnk",2,"DEEP");expect(originals,"extra_initial.pck",2,"EXCLUDED");
     expect(originals,"missing.wem",0,NULL);
     CHECK(sh_audio_originals_identity(originals,"generated/image.bimage",&answer,error,sizeof(error))==0 && !answer.scope);
+    /* The engine's configured bank prefix moves the whole tree the audio system
+     * requests, so discovery and the identity reader must both follow it. A path
+     * without the prefix is not this reader's to answer. */
+    {
+        sh_audio_originals *prefixed;
+        create("prefixed/sound/soundbanks/pc/custom/kept.bnk","PREFIXED");
+        create("prefixed/sound/soundbanks/pc/plain.bnk","OUTSIDE");
+        packed("prefixed/sound/soundbanks/pc/custom/english/voice.pck",0,bar,1,"PREFIXED ENGLISH");
+        prefixed=open_prefixed("prefixed",L"ENGLISH","custom/");
+        g_prefix="custom/";
+        expect(prefixed,"kept.bnk",1,"PREFIXED");
+        /* Only inside a mounted package here, so startup would not have listed
+         * it: available to install checks, not proof it is already loaded. */
+        expect(prefixed,"english/bar.bnk",2,"PREFIXED ENGLISH");
+        g_prefix="";
+        /* A path outside the configured prefix is not this reader's to answer. */
+        CHECK(sh_audio_originals_identity(prefixed,"sound/soundbanks/pc/kept.bnk",&answer,
+            error,sizeof(error))==0 && !answer.scope);
+        CHECK(sh_audio_originals_identity(prefixed,"sound/soundbanks/pc/plain.bnk",&answer,
+            error,sizeof(error))==0 && !answer.scope);
+        sh_audio_originals_close(prefixed);
+    }
     snprintf(path,sizeof(path),"%s/base/sound/soundbanks/pc/a.pck",root);
     HANDLE writer=CreateFileA(path,GENERIC_WRITE,FILE_SHARE_READ,NULL,OPEN_EXISTING,0,NULL);
     CHECK(writer==INVALID_HANDLE_VALUE && GetLastError()==ERROR_SHARING_VIOLATION);

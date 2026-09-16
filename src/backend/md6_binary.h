@@ -27,4 +27,16 @@ typedef int (*sh_md6_binary_visitor)(void *context, const char *type, const char
 int sh_md6_mesh_references(const unsigned char *body, size_t length,
     sh_md6_binary_visitor visitor, void *context, char *error, size_t capacity);
 
+/* Cooked animation reader. A cooked animation shares the md6 header family --
+ * magic+version "AM", its own timestamp, the skeleton timestamp -- and then an
+ * idStr naming the skeleton it plays on. Verified over every shipped animation:
+ * 25923 payloads, no bad magic, 24976 naming their skeleton here. The remaining
+ * 947 are the per-skeleton default clips, whose placeholder name is reported as
+ * absent so the caller can use the skeleton in their identity instead.
+ *
+ * Emits at most one "skeleton" identity. Returns 1 when the header was read,
+ * whether or not it named a skeleton; 0 on a refused visit or a payload that is
+ * not a cooked animation, with the reason in error. */
+int sh_md6_anim_references(const unsigned char *body, size_t length,
+    sh_md6_binary_visitor visitor, void *context, char *error, size_t capacity);
 #endif

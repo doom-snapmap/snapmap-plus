@@ -743,6 +743,9 @@ static int mpkg_working_name(const char *name)
     return 1;
 }
 
+static int mpkg_directory(const char *path);
+static int mpkg_plain_ancestors(const char *path);
+
 /* A delivered package lives at overrides\map-<16 hex>\<package>. Only those are
  * ours to supersede; anything else is the author's own tree and is never moved.
  * Returns the overrides-relative path of a delivered root. */
@@ -1189,16 +1192,16 @@ static int mpkg_install_batch(mpkg_staged *head, char *err, size_t err_cap)
                 strcpy_s(s->destination, sizeof(s->destination), package_root);
                 s->existing = 1; break;
             }
-            /* One identity cannot supply two different byte sets: the library
-             * would compile the same package twice with contradictory content.
-             * A previously delivered variant is superseded by this delivery. An
-             * authored package is the user's own work and is never moved, so the
-             * whole installation is refused instead. */
-            if (!mpkg_delivered_relative(root, package_root, relative, sizeof(relative))) {
-                mpkg_err(err, err_cap, "package '%s' is already installed from your own sources with "
-                    "different content; update or remove that package to use this map's version", s->id);
-                goto done;
-            }
+            /* A previously delivered variant of this identity is superseded by
+             * this delivery: one delivered copy per identity is enough, and the
+             * old bundle rides the same cancellation record.
+             *
+             * An authored variant is the user's own work. It is neither moved
+             * nor refused: the compiler treats same-identity packages as
+             * variants, so the author keeps every resource they supply while
+             * this delivery fills what they do not, and the map's own values
+             * govern transiently while it is loaded. */
+            if (!mpkg_delivered_relative(root, package_root, relative, sizeof(relative))) continue;
             grown = (char **)realloc(superseded, (superseded_count + 1) * sizeof(*superseded));
             if (!grown || !(grown[superseded_count] = _strdup(relative))) {
                 superseded = grown ? grown : superseded;

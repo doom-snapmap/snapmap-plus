@@ -256,14 +256,33 @@ done:
     return result;
 }
 
-/* A packaged identity with no installed name cannot be opened by name, so it
- * is counted and reported instead of being silently absent from the catalog. */
+/* A packaged identity with no installed file name is still openable: the native
+ * loader reopens a bank it knows only by its identity through a decimal file
+ * stem, and the installed package index answers that name from inside the .pck
+ * it lives in. Index it under that name so the catalog describes and serves it.
+ * One that still cannot be read stays counted and logged rather than failing
+ * the whole catalog for a bank nothing has requested. */
+typedef struct an_packaged_scan {
+    size_t *unnamed;
+    int indexed;
+    char *error;
+    size_t capacity;
+} an_packaged_scan;
+
 static int an_packaged(void *context, uint32_t id, uint32_t language)
 {
-    size_t *unnamed = context;
+    an_packaged_scan *scan = context;
+    char name[32], detail[320];
     (void)language;
     for (size_t i = 0; i < g_count; ++i) if (g_slots[i].id == id) return 1;
-    ++*unnamed; return 1;
+    snprintf(name, sizeof(name), "%u.bnk", (unsigned)id);
+    if (an_index(name, scan->indexed, scan->error, scan->capacity)) return 1;
+    snprintf(detail, sizeof(detail),
+        "native audio catalog: packaged bank %u has no installed name and could not be opened (%s)",
+        (unsigned)id, scan->error && scan->error[0] ? scan->error : "no reason reported");
+    backend_log(detail);
+    if (scan->error && scan->capacity) scan->error[0] = 0;
+    ++*scan->unnamed; return 1;
 }
 
 static int an_build(char *error, size_t capacity)
@@ -290,8 +309,11 @@ static int an_build(char *error, size_t capacity)
     }
     for (size_t i = 0; i < names.count; ++i)
         if (!an_index(names.items[i], indexed, error, capacity)) goto done;
-    if (indexed && sh_package_runtime_audio_packaged_banks(an_packaged, &g_packaged_only,
-        error, capacity) < 0) goto done;
+    {
+        an_packaged_scan scan = {&g_packaged_only, indexed, error, capacity};
+        if (indexed && sh_package_runtime_audio_packaged_banks(an_packaged, &scan,
+            error, capacity) < 0) goto done;
+    }
     g_installed_count = g_count;
     g_catalog_ready = 1; g_catalog_provisional = !indexed || !g_language[0];
     result = 1;

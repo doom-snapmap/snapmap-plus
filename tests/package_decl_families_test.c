@@ -218,10 +218,26 @@ int main(void)
             strstr((char *)resource->body, "name \"attack\"") && strstr((char *)resource->body, "event \"ae_attack\""));
     }
     end(compiled, sources);
+    /* Two packages adding different joints to one group both keep their entry. */
     begin(path, "{ init { mesh \"model\" } jointGroups { damageGroup \"head\" { head } } events {} aliases {} props {} }");
     compiled = compile(
-        "{ init { mesh \"model\" } jointGroups { damageGroup \"head\" { neck } } events {} aliases {} props {} }",
-        "{ init { mesh \"model\" } jointGroups { damageGroup \"head\" { spine } } events {} aliases {} props {} }",
+        "{ init { mesh \"model\" } jointGroups { damageGroup \"head\" { head neck } } events {} aliases {} props {} }",
+        "{ init { mesh \"model\" } jointGroups { damageGroup \"head\" { head spine } } events {} aliases {} props {} }",
+        NULL, &sources, error);
+    if (!compiled) fprintf(stderr, "%s\n", error);
+    CHECK(compiled);
+    if (compiled) {
+        resource = sh_package_compilation_find(compiled, path);
+        CHECK(resource && resource->composed && resource->gameplay_owners.bits == 3);
+        CHECK(resource && strstr((char *)resource->body, "neck") && strstr((char *)resource->body, "spine"));
+    }
+    end(compiled, sources);
+    /* Two different payloads for one joint of one group still report the exact
+     * overlapping owners. */
+    begin(path, "{ init { mesh \"model\" } jointGroups { hitTestGroup \"a\" { head {\nradius 1\n} } } events {} aliases {} props {} }");
+    compiled = compile(
+        "{ init { mesh \"model\" } jointGroups { hitTestGroup \"a\" { head {\nradius 2\n} } } events {} aliases {} props {} }",
+        "{ init { mesh \"model\" } jointGroups { hitTestGroup \"a\" { head {\nradius 3\n} } } events {} aliases {} props {} }",
         NULL, &sources, error);
     CHECK(!compiled && strstr(error, "same field") && strstr(error, "[a; b]")); end(compiled, sources);
     /* Init contributions use the same package and built-in composition pass. */

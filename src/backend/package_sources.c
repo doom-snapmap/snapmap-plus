@@ -45,6 +45,30 @@ static char *ps_join(const char *parent, const char *child)
     return out;
 }
 
+const char *sh_package_source_identity(const sh_package_sources *sources, size_t package)
+{
+    size_t i;
+    if (!sources || package >= sources->package_count) return NULL;
+    for (i = 0; i < sources->component_count; i++) {
+        const sh_package_component *component = &sources->components[i];
+        if (component->owner == package && component->relative && !component->relative[0])
+            return component->descriptor.id;
+    }
+    return NULL;
+}
+
+int sh_package_source_delivered(const sh_package_sources *sources, size_t package)
+{
+    const char *name;
+    size_t i;
+    if (!sources || package >= sources->package_count) return 0;
+    name = sources->packages[package].name;
+    if (!name || strncmp(name, "map-", 4)) return 0;
+    for (i = 4; i < 20; i++)
+        if (!((name[i] >= '0' && name[i] <= '9') || (name[i] >= 'a' && name[i] <= 'f'))) return 0;
+    return name[20] == '/';
+}
+
 char *sh_package_engine_path(const char *path)
 {
     char *out, *part, *p;

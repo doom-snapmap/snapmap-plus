@@ -208,12 +208,19 @@ state, including replaced fields and per-layer counted-array pruning. Unknown
 readers, unsupported inheritance forms and late gameplay string consumers still
 report gaps before this pass can certify a complete dependency set.
 
-MD6 source inspection follows inherited definitions, meshes and alias animations.
-Cooked MD6 mesh inspection follows the skeleton and per-mesh materials; cooked
-static model inspection follows surface materials. These readers use the
-candidate's effective source bytes. Unsupported format revisions and unhandled
-readers retain explicit gaps. The incomplete flag reflects recorded gaps; it is
-not set unconditionally and does not turn a partial walk into complete coverage.
+MD6 source inspection follows inherited definitions, meshes, alias animations and
+every declaration an animation event argument names. An event argument is written
+as its native type name and one value; when that type name is a declaration
+family the frame command reader resolves it through the declaration-type
+registry, so the walk carries it. An empty value names nothing. Cooked MD6 mesh
+inspection follows the skeleton and per-mesh materials; cooked static model
+inspection follows surface materials, including the two previous container
+revisions the engine still accepts. Cooked animations name their skeleton, and
+cooked skeletons, images, collision models, AAS files, rigs and opaque binary
+files are verified dependency leaves rather than unread formats. These readers
+use the candidate's effective source bytes. Unhandled readers retain explicit
+gaps. The incomplete flag reflects recorded gaps; it is not set unconditionally
+and does not turn a partial walk into complete coverage.
 
 Audio bank catalog entries validate the filename against the cooked bank's
 internal identity before native loading, in both spellings the native loader
@@ -233,11 +240,18 @@ unrelated to the map's sound references do not select packages. The index reads
 verified file streams or immutable cache handles and skips embedded media.
 Malformed bank metadata remains an explicit dependency gap; stale bytes or
 failed IO refuse the snapshot. Installed audio originals now use a separate
-immutable index of PC soundbanks. PCK metadata supplies exact bank, media and
+immutable index of PC soundbanks below the engine's own configured bank prefix,
+so a configured prefix moves discovery, identity reads and bounded reads with it
+and a path outside that prefix is not answered. A bank identity that exists only
+inside a mounted package is indexed under the decimal file stem the native loader
+uses to reopen a bank it knows only by identity; one that still cannot be read
+stays counted and logged. PCK metadata supplies exact bank, media and
 external-source IDs and per-package language IDs; matching packed payloads take
 precedence over loose files. Only selected payload ranges are hashed, through
 retained read-only handles. Equal packed candidates coalesce; differing candidates
-refuse an ambiguous original until native mounted-package ordering is modeled.
+refuse an ambiguous original rather than choosing by directory order. On this
+installation the ambiguity is unreachable: five packages, 7689 entries and 161
+identities present in more than one package, none with differing payloads.
 Copied SnapMap originals do not gain delivery ownership. Installed campaign banks
 still require gameplay activation, but their existing files satisfy availability
 without an install prompt. Map-authored bytes remain authoritative and transient.

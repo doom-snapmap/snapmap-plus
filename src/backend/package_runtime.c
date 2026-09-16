@@ -358,6 +358,7 @@ static int g_test_empty_catalog;
 static sh_package_baseline_reader g_test_baseline;
 static void *g_test_baseline_context;
 static const char *g_test_audio_root;
+static const char *g_test_audio_bank_prefix;
 static const wchar_t *g_test_audio_language;
 void sh_package_runtime_test_audio_originals(const char *root, const wchar_t *language)
 { g_test_audio_root = root; g_test_audio_language = language; }
@@ -440,15 +441,18 @@ static pr_provider *pr_prepare(const char *data_root, const char *source_root,
 #ifndef SH_PACKAGE_RUNTIME_TESTING
     if (catalog) {
         wchar_t language[260];
+        char bank_prefix[MAX_PATH];
         int audio_ready = sh_audio_files_native_language(language,260);
-        audio_originals = sh_audio_originals_open(doom_base,audio_ready ? language : NULL);
+        if (!sh_audio_files_native_bank_prefix(bank_prefix,sizeof(bank_prefix))) bank_prefix[0] = 0;
+        audio_originals = sh_audio_originals_open(doom_base,audio_ready ? language : NULL,bank_prefix);
         if (!audio_originals) goto done;
     }
 #endif
 #ifdef SH_PACKAGE_RUNTIME_TESTING
     if (g_test_empty_catalog) { baseline = g_test_baseline; baseline_context = g_test_baseline_context; }
     if (g_test_audio_root) {
-        audio_originals = sh_audio_originals_open(g_test_audio_root,g_test_audio_language);
+        audio_originals = sh_audio_originals_open(g_test_audio_root,g_test_audio_language,
+            g_test_audio_bank_prefix);
         if (!audio_originals) goto done;
     }
 #endif

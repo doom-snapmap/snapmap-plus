@@ -2892,6 +2892,24 @@ done:
     free(names); free(events); return result;
 }
 
+/* One-shot activation-failure diagnostic, armed by placing an empty
+ * "activation-fault" file in the private package-staging directory. It only
+ * takes the existing consumer-stage failure path, so provider restoration,
+ * consumer recovery and installation rollback can be exercised deliberately on
+ * a real build; it never skips or weakens a check. The file is deleted as it
+ * fires, so a staged failure cannot leave the installation unable to activate.
+ * Nothing in authored packages or the interface can set it. */
+static int ds_activation_fault_armed(void)
+{
+    char root[MAX_PATH], marker[MAX_PATH];
+    if (!sh_overrides_get_root(root, sizeof(root))) return 0;
+    if (_snprintf_s(marker, sizeof(marker), _TRUNCATE, "%s\\package-staging\\activation-fault", root) < 0)
+        return 0;
+    if (GetFileAttributesA(marker) == INVALID_FILE_ATTRIBUTES) return 0;
+    DeleteFileA(marker);
+    return 1;
+}
+
 static int ds_activate_provider(void *context, int restoring,
     const sh_package_changes *changes, char *error, size_t capacity)
 {
@@ -2922,6 +2940,18 @@ static int ds_activate_provider(void *context, int restoring,
             if (context) ds_boot_published(); else ds_rearm_published();
             succeeded = InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_DONE &&
                 InterlockedCompareExchange(&g_registration_succeeded, 0, 0) != 0;
+            if (succeeded && ds_activation_fault_armed()) {
+                /* The declaration pass has already published and registered.
+                 * Failing here is the real consumer-stage failure path, so the
+                 * runtime must restore the previous provider, recover consumers
+                 * and roll back any pending installation. */
+                backend_log("decl-server: diagnostics.activation_fault fired; failing this activation "
+                            "at the consumer stage to exercise recovery");
+                InterlockedExchange(&g_registration_succeeded, 0);
+                InterlockedExchange(&g_state, DS_STATE_FAILED);
+                snprintf(error, capacity, "package activation failed by the activation-fault diagnostic");
+                succeeded = 0;
+            }
             if (!succeeded) snprintf(error, capacity, "declaration and policy %s did not complete",
                 restoring ? "recovery" : "activation");
             /* A provider containing only cooked files has no declaration

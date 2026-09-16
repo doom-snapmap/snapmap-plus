@@ -43,14 +43,14 @@ typedef struct rr_entry {
 typedef struct rr_known { void *resource; unsigned int level; } rr_known;
 struct sh_resource_resident {
     rr_entry *items;
-    size_t count, capacity;
+    size_t count, capacity, default_faults, recovered_defaults;
     rr_known *known;
     size_t known_count;
     sh_process_heap_scope heap;
     void *renderer;
     void (*adjust)(void *, int);
     void (*update)(void *);
-    int render_count, held, rebuilt, defaults_ready, drained, mutated, touch_failed;
+    int render_count, held, rebuilt, defaults_ready, drained, mutated, touch_failed, restoring;
     DWORD thread;
 };
 static struct {
@@ -313,6 +313,7 @@ sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *chang
             if (!changes->items[i].path || !*changes->items[i].path ||
                 (i && strcmp(changes->items[i-1].path, changes->items[i].path) >= 0)) goto done;
         pass->thread = GetCurrentThreadId();
+    pass->restoring = restoring != 0;
         if (!g_rr.thread || *g_rr.thread != pass->thread || !g_rr.mode ||
             (g_rr.mode() != 2 && g_rr.mode() != 3) || !sh_process_heap_enter(&g_rr.heap, &pass->heap)) goto done;
         phase = "registry snapshot";
@@ -451,33 +452,51 @@ int sh_resource_resident_defaults(sh_resource_resident *pass, char *error, size_
     if (!pass || pass->thread != GetCurrentThreadId() || !pass->rebuilt)
         return rr_error(error, capacity, "resident defaults preceded reconstruction");
     if (pass->defaults_ready) return 1;
-    /* Name the identity under the callback: a failure here is the engine's own
-     * default handler raising, and the report has to say which resource it was. */
-    volatile const rr_entry *failing = NULL;
-    __try {
-        /* A removed, non-stock source must not fall through to an old native
-         * declaration source record. Use the same default callback as native
-         * GenericLoad after reconstruction, before any surviving consumer can
-         * look it up. No missing-file read or source-generation fallback. */
-        for (size_t i = 0; i < pass->count; i++) {
-            rr_entry *entry = pass->items + i;
-            if (!entry->external && entry->retired) {
-                failing = entry;
-                sh_resource_graph_frame frame;
-                sh_resource_graph_begin(&frame, entry->type, entry->name);
-                __try {
-                    void **table = *(void ***)entry->resource;
-                    ((void (*)(void *))table[0x50/8])(entry->resource);
-                } __finally { sh_resource_graph_end(&frame, 0); }
-            }
+    /* A removed, non-stock source must not fall through to an old native
+     * declaration source record. Reconstruction already gave each retired
+     * identity fresh storage and set its defaulted state, so the engine's own
+     * generic load would default it on next use; this calls the same default
+     * callback eagerly, before any surviving consumer can look it up. No
+     * missing-file read or source-generation fallback.
+     *
+     * Some resources are derived rather than loaded -- a discrete animation is
+     * generated from a model -- and their default callback can refuse once that
+     * input is gone. That is per identity: it is reported with the identity and
+     * counted, and the pass continues, because the identity is already
+     * reconstructed and flagged defaulted. Aborting instead would abandon every
+     * remaining retirement, including during recovery from a failed activation,
+     * where there is nothing further to fall back to. */
+    for (size_t i = 0; i < pass->count; i++) {
+        rr_entry *entry = pass->items + i;
+        if (entry->external || !entry->retired) continue;
+        __try {
+            sh_resource_graph_frame frame;
+            sh_resource_graph_begin(&frame, entry->type, entry->name);
+            __try {
+                void **table = *(void ***)entry->resource;
+                ((void (*)(void *))table[0x50/8])(entry->resource);
+            } __finally { sh_resource_graph_end(&frame, 0); }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            char line[512];
+            pass->default_faults++;
+            snprintf(line, sizeof(line),
+                "native resident default construction refused for %s:%s; the identity stays "
+                "reconstructed and defaulted, so the engine defaults it on next use",
+                entry->type ? entry->type : "?", entry->name ? entry->name : "?");
+            backend_log(line);
         }
-        pass->defaults_ready = 1; return 1;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        if (failing) return rr_error_at(error, capacity, "native resident retirement failed",
-            ((const rr_entry *)failing)->type, ((const rr_entry *)failing)->name);
-        return rr_error(error, capacity, "native resident retirement failed");
     }
+    pass->defaults_ready = 1;
+    if (pass->default_faults) {
+        char line[192];
+        snprintf(line, sizeof(line), "native resident retirement: %zu identity default(s) refused",
+            pass->default_faults);
+        backend_log(line);
+    }
+    return 1;
 }
+size_t sh_resource_resident_recovered_defaults(const sh_resource_resident *pass)
+{ return pass ? pass->recovered_defaults : 0; }
 int sh_resource_resident_drain(sh_resource_resident *pass, char *error, size_t capacity)
 {
     if (!pass || pass->thread != GetCurrentThreadId() || !pass->rebuilt)
@@ -504,6 +523,27 @@ int sh_resource_resident_drain(sh_resource_resident *pass, char *error, size_t c
             {
                 int defaulted = (object[0x2c] & RR_DEFAULT) && !(entry->captured_state & RR_DEFAULT);
                 int retained = *(void **)(object + 0x18) != NULL && !entry->captured_source;
+                /* Recovery restores the provider that was live before a failed
+                 * activation. That provider has no source for an identity the
+                 * failed attempt created, so the engine's default is the correct
+                 * state for it; the retirement decision cannot know that,
+                 * because it reads the change set and the installed catalog, not
+                 * the provider being restored. Report each one and continue:
+                 * failing recovery instead would leave the session with the
+                 * attempt's half-published state and no way back. A still
+                 * pending mark is a real inconsistency and still fails. */
+                if (pass->restoring && !(object[0x2c] & RR_PENDING) && (defaulted || retained)) {
+                    char line[512];
+                    snprintf(line, sizeof(line),
+                        "native resident recovery left %s:%s at the engine default (state=0x%02x was 0x%02x%s%s); "
+                        "the restored provider supplies no source for it",
+                        entry->type ? entry->type : "?", entry->name ? entry->name : "?",
+                        (unsigned)object[0x2c], (unsigned)entry->captured_state,
+                        defaulted ? ", newly defaulted" : "", retained ? ", source newly retained" : "");
+                    backend_log(line);
+                    pass->recovered_defaults++;
+                    continue;
+                }
                 if ((object[0x2c] & RR_PENDING) || (!entry->retired && (defaulted || retained))) {
                     if (error && capacity) snprintf(error, capacity,
                         "resource '%s:%s' failed native refresh (state=0x%02x was 0x%02x%s%s%s)",

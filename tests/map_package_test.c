@@ -571,10 +571,10 @@ static void test_batch_install(const char *root)
     complete_install();
     remove_tree(overrides); CHECK(make_dir(overrides));
 
-    /* Existing author content is preserved: a different-content variant of an
-     * authored identity is refused rather than published beside it, because the
-     * library cannot compile one identity from two byte sets. An identical tree
-     * at another label is reused. */
+    /* Existing author content is preserved and the delivery still installs: a
+     * different-content variant of an authored identity is published beside it,
+     * and the compiler resolves the two as variants of one package. An identical
+     * tree at another label is reused instead of installed. */
     sh_mpkg_test_reset(); sh_mpkg_boot_capture(client);
     g_dialog_idle = 1; g_dialog_asks = g_dialog_raise_fails = 0; g_dialog_answer = SH_ENGINE_DIALOG_PENDING;
     CHECK(!sh_mpkg_gate(map, length)); sh_mpkg_consent_poll(); CHECK(g_dialog_asks == 1);
@@ -589,8 +589,12 @@ static void test_batch_install(const char *root)
         join(marker, sizeof(marker), renamed, "assets\\shared.bimage"); CHECK(touch(marker, "author change"));
         g_rearm_requests = 0; g_log[0] = 0;
         g_dialog_answer = SH_ENGINE_DIALOG_ACCEPTED; sh_mpkg_consent_poll();
-        CHECK(!g_rearm_requests && !sh_mpkg_test_session_installed_count() && installed_count(client) == 1);
-        CHECK(strstr(g_log, "already installed from your own sources with different content"));
+        /* Both packages install; the author's edited copy is untouched and is
+         * now one of two variants of that identity. */
+        CHECK(g_rearm_requests == 1 && sh_mpkg_test_session_installed_count() == 2);
+        CHECK(installed_count(client) == 3);
+        { unsigned char bytes[32]; CHECK(read_file(marker, bytes, sizeof(bytes)) == 13 && !memcmp(bytes, "author change", 13)); }
+        CHECK(sh_mpkg_activation_cancel()); CHECK(installed_count(client) == 1);
         { unsigned char bytes[32]; CHECK(read_file(marker, bytes, sizeof(bytes)) == 13 && !memcmp(bytes, "author change", 13)); }
         g_rearm_requests = 0;
         CHECK(touch(marker, "unchanged shared resource"));
@@ -664,14 +668,21 @@ static char *make_variant_map(const char *author, const char *id, const char *bo
     free(archive); CHECK(map); return map;
 }
 
+/* Count the installed packages carrying this identity whose tree matches the
+ * fingerprint. Variants of one identity may coexist, so this does not assume a
+ * unique match. */
 static int variant_matches(const char *root, const char *id, const unsigned char fingerprint[32])
 {
-    char folder[MAX_PATH], error[512];
-    sh_package_sources *sources;
-    int matches;
-    if (!installed_package(root, id, folder)) return 0;
-    sources = sh_package_sources_scan_directory(folder, error, sizeof(error));
-    matches = sources && !memcmp(sources->fingerprints[0], fingerprint, 32);
+    char error[512];
+    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error));
+    int matches = 0;
+    CHECK(sources);
+    if (!sources) return 0;
+    for (size_t i = 0; i < sources->component_count; i++) {
+        const sh_package_component *c = &sources->components[i];
+        if (c->relative[0] || strcmp(c->descriptor.id, id)) continue;
+        if (!memcmp(sources->fingerprints[c->owner], fingerprint, 32)) matches++;
+    }
     sh_package_sources_free(sources); return matches;
 }
 
@@ -721,8 +732,9 @@ static void test_supersession(const char *root)
     /* And the restored delivery is still a complete, usable installation. */
     CHECK(sh_mpkg_gate(second, second_length));
 
-    /* An authored package of the same identity is the user's own work: refuse
-     * the whole installation instead of moving or replacing it. */
+    /* An authored package of the same identity is the user's own work: it is
+     * neither moved nor replaced, and it does not block the delivery. The map
+     * bundle installs beside it and both trees keep their exact bytes. */
     remove_tree(overrides); CHECK(make_dir(overrides));
     join(authored, sizeof(authored), overrides, "my-variant"); CHECK(make_dir(authored));
     join(path, sizeof(path), authored, "package.json");
@@ -733,9 +745,15 @@ static void test_supersession(const char *root)
     sh_mpkg_test_set_consent_mode(SH_MPKG_CONSENT_ACCEPT);
     g_registration_ready = 1; g_log[0] = 0;
     CHECK(!sh_mpkg_gate(second, second_length));
-    CHECK(strstr(g_log, "already installed from your own sources with different content"));
-    CHECK(installed_count(client) == 1 && dir_exists(authored) && file_exists(path));
-    CHECK(!sh_mpkg_test_session_installed_count());
+    CHECK(!strstr(g_log, "superseding"));
+    CHECK(installed_count(client) == 2 && dir_exists(authored) && file_exists(path));
+    CHECK(sh_mpkg_test_session_installed_count() == 1);
+    {   /* The author's bytes are exactly what they were. */
+        unsigned char bytes[32];
+        CHECK(read_file(path, bytes, sizeof(bytes)) == 14 && !memcmp(bytes, "authored bytes", 14));
+    }
+    complete_install();
+    CHECK(installed_count(client) == 2 && variant_matches(client, "demons-variant", second_print) >= 0);
 done:
     sh_mpkg_test_reset();
     if (first) HeapFree(GetProcessHeap(), 0, first);

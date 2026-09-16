@@ -8,7 +8,11 @@ typedef struct sh_audio_originals sh_audio_originals;
  * original file handles are acquired lazily and remain stable until close.
  * NULL language represents uninitialized audio: unrelated paths still pass
  * through, while audio queries report an initializing error. */
-sh_audio_originals *sh_audio_originals_open(const char *doom_base, const wchar_t *language);
+/* bank_prefix is the engine's configured bank directory prefix, lowercased
+ * with forward slashes and a trailing separator, or NULL/empty for the
+ * ordinary root. Discovery and identity reads both use it. */
+sh_audio_originals *sh_audio_originals_open(const char *doom_base, const wchar_t *language,
+    const char *bank_prefix);
 void sh_audio_originals_close(sh_audio_originals *originals);
 /* Compiler identity-reader contract. Only the native PC audio path is claimed.
  * Packed entries precede loose originals; differing packed candidates are an

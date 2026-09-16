@@ -1,5 +1,13 @@
 /* Exercise native refresh ordering, identity selection, recovery and scopes. */
 #include "../src/backend/resource_resident.c"
+static char g_log[4096];
+void backend_log(const char *message)
+{
+    size_t used = strlen(g_log), length = message ? strlen(message) : 0;
+    if (!length || used + length + 2 >= sizeof(g_log)) return;
+    memcpy(g_log + used, message, length); g_log[used + length] = 10; g_log[used + length + 1] = 0;
+}
+
 static int failures, rebuilds, loads, updates, strings, defaults, fault, lookup_leaves_pending, source_mode = 3;
 /* What the virtual-texture rebind observed: the heap on top of the scope stack,
  * how many reloads had finished, whether the consumer update had already run
@@ -81,6 +89,8 @@ static void make_default(void *self)
     defaults++; CHECK(((unsigned char *)self)[0x2c] & RR_DEFAULT);
     CHECK(!(((unsigned char *)self)[0x2c] & RR_PENDING));
     CHECK(counts[0] && counts[1]);
+    /* A derived resource whose input is gone can refuse its own default. */
+    if (fault == 7) RaiseException(0xe0800007, 0, 0, NULL);
 }
 static void load(void *self)
 {
@@ -94,7 +104,7 @@ static void load(void *self)
     if (fault == 3 && index == 1) RaiseException(0xe0800003, 0, 0, NULL);
     if (!index && (objects[1][0x2c] & RR_PENDING) && !lookup_leaves_pending)
         lookup(manager_object, "skin");
-    if (fault == 4) object[0x2c] |= RR_DEFAULT;
+    if (fault == 4 && index == 1) object[0x2c] |= RR_DEFAULT;
 }
 static void *lookup(void *manager, const char *name)
 {
@@ -181,6 +191,70 @@ static void success_cases(void)
         CHECK(rebinds == 1 && rebind_heap == 0);
         CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error))); check_restored();
         CHECK(objects[0][0x2c] & RR_DEFAULT);
+    }
+    reset();
+    {
+        /* A reload that comes back as the engine default when the provider does
+         * supply the resource is a failed refresh, and a forward activation must
+         * not accept it. */
+        sh_resource_resident *pass;
+        fault = 4;   /* the consumer reload marks the object defaulted */
+        pass = begin(paths[0], 0, error);
+        CHECK(pass && pass->count == 2); if (!pass) return;
+        CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+        CHECK(!sh_resource_resident_drain(pass, error, sizeof(error)));
+        CHECK(strstr(error, "failed native refresh") && strstr(error, "newly defaulted"));
+        CHECK(strstr(error, "skin") != NULL);
+        CHECK(!sh_resource_resident_end(pass, 0, error, sizeof(error)));
+        fault = 0; check_restored();
+    }
+    reset();
+    {
+        /* The same outcome during recovery is the accepted one. The provider
+         * being restored has no source for an identity the failed attempt
+         * created, so the engine default is correct for it: the pass reports and
+         * counts it and completes, because failing here would leave the session
+         * on the attempt's half-published state with no way back. */
+        sh_resource_resident *pass;
+        fault = 3;   /* the consumer reload throws: a real failed activation */
+        pass = begin(paths[0], 0, error);
+        CHECK(pass != NULL); if (!pass) return;
+        CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+        CHECK(!sh_resource_resident_drain(pass, error, sizeof(error)));
+        CHECK(!sh_resource_resident_end(pass, 0, error, sizeof(error)));
+        check_restored(); CHECK(g_rr_recovery != NULL);
+        fault = 4; g_log[0] = 0;
+        pass = begin(paths[0], 1, error);
+        CHECK(pass && pass->count == 2); if (!pass) return;
+        CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+        CHECK(sh_resource_resident_drain(pass, error, sizeof(error)));
+        CHECK(sh_resource_resident_recovered_defaults(pass) == 1);
+        CHECK(strstr(g_log, "at the engine default") && strstr(g_log, "model:skin"));
+        CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error)) && !g_rr_recovery);
+        fault = 0; check_restored();
+    }
+    reset();
+    {
+        /* A default the engine refuses is reported with its identity and
+         * counted, and does not abandon the rest of the pass: the identity is
+         * already reconstructed and flagged defaulted, so the engine defaults it
+         * on next use. Recovery from a failed activation depends on this. */
+        /* The change list is searched, so it stays in sorted path order. */
+        sh_package_change rows[2] = {{(char *)paths[1], SH_PACKAGE_RESOURCE_REMOVED},
+                                     {(char *)paths[0], SH_PACKAGE_RESOURCE_REMOVED}};
+        sh_package_changes changes = {rows, 2};
+        sh_resource_resident *pass;
+        fault = 7; g_log[0] = 0;
+        pass = sh_resource_resident_begin(&changes, 0, error, sizeof(error));
+        CHECK(pass && pass->count == 2); if (!pass) return;
+        CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+        CHECK(sh_resource_resident_drain(pass, error, sizeof(error)));
+        CHECK(defaults == 2);
+        CHECK(strstr(g_log, "default construction refused for") != NULL);
+        CHECK(strstr(g_log, "2 identity default(s) refused") != NULL);
+        CHECK((objects[0][0x2c] & RR_DEFAULT) && (objects[1][0x2c] & RR_DEFAULT));
+        CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error))); check_restored();
+        fault = 0;
     }
     reset();
     {

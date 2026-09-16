@@ -246,15 +246,24 @@ static int pc_policy_merge(sh_json_object *target, const sh_json_object *source,
     return 1;
 }
 
+static int pc_variant_shadowed(const sh_package_sources *sources, size_t candidate, size_t primary);
+
 static int pc_policies(const sh_package_sources *sources, const sh_package_owners *owners,
                         sh_package_policy *out, char *error, size_t capacity)
 {
     const char *names[] = {"requirements", "strings", "hud"};
     sh_json_object *targets[] = {&out->requirements, &out->strings, &out->hud};
-    size_t i, section;
+    size_t i, section, other_package;
     for (i = 0; i < sources->component_count; i++) {
         const sh_package_component *component = &sources->components[i];
+        int shadowed = 0;
         if (owners && !sh_package_owners_contains(owners, component->owner)) continue;
+        /* A delivered variant's policy follows its resources: the authored
+         * variant of the same package identity owns it. */
+        for (other_package = 0; !shadowed && other_package < sources->package_count; other_package++)
+            if (!owners || sh_package_owners_contains(owners, other_package))
+                shadowed = pc_variant_shadowed(sources, component->owner, other_package);
+        if (shadowed) continue;
         for (section = 0; section < 3; section++) {
             const char *raw = sh_package_descriptor_section(&component->descriptor, names[section]);
             sh_json_object object = {0};
@@ -559,6 +568,41 @@ static int pc_compile_opaque(sh_package_compilation *out, sh_compiled_resource *
         resource->body[builtin->length] = 0; resource->body_length = builtin->length;
     } else return 0;
     return 1;
+}
+
+/* Two packages that share a descriptor identity are variants of one package, not
+ * peers. An authored variant owns every resource it supplies; a delivered one
+ * fills only what the author does not. This keeps a map's delivery installable
+ * beside the author's own copy without overwriting it, without inventing a
+ * priority setting, and without reporting a contradiction the transient map
+ * layer already resolves. Peer packages with different identities are unchanged:
+ * their overlapping edits still compose or conflict. */
+static int pc_variant_shadowed(const sh_package_sources *sources, size_t candidate, size_t primary)
+{
+    const char *a, *b;
+    if (candidate == primary) return 0;
+    if (!sh_package_source_delivered(sources, candidate)) return 0;
+    if (sh_package_source_delivered(sources, primary)) return 0;
+    a = sh_package_source_identity(sources, candidate);
+    b = sh_package_source_identity(sources, primary);
+    return a && b && !strcmp(a, b);
+}
+
+/* Drop a delivered variant's contributions to a resource an authored variant of
+ * the same package also supplies. Contributions from other packages, and the
+ * delivered variant's own new resources, are untouched. */
+static void pc_resolve_variants(const sh_package_sources *sources, sh_compiled_resource *resource)
+{
+    size_t i, j, kept = 0;
+    if (resource->source_count < 2) return;
+    for (i = 0; i < resource->source_count; i++) {
+        size_t owner = sources->files[resource->sources[i]].owner;
+        int shadowed = 0;
+        for (j = 0; !shadowed && j < resource->source_count; j++)
+            shadowed = pc_variant_shadowed(sources, owner, sources->files[resource->sources[j]].owner);
+        if (!shadowed) resource->sources[kept++] = resource->sources[i];
+    }
+    resource->source_count = kept;
 }
 
 static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource *resource,
@@ -991,9 +1035,11 @@ sh_package_compilation *sh_package_compile_with(const sh_package_sources *source
         resource->sources = (size_t *)malloc(resource->source_count * sizeof(*resource->sources));
         if (!resource->sources) goto bad;
         for (i = position; i < end; i++) resource->sources[i - position] = inputs[i].index;
-        for (i = position + 1u; i < end; i++) {
+        pc_resolve_variants(sources, resource);
+        for (i = 1; i < resource->source_count; i++) {
             size_t j;
-            for (j = position; j < i; j++) if (pc_identical(inputs[i].file, inputs[j].file)) break;
+            for (j = 0; j < i; j++)
+                if (pc_identical(&sources->files[resource->sources[i]], &sources->files[resource->sources[j]])) break;
             out->duplicate_count += j < i;
         }
         position = end;

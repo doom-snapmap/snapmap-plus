@@ -8,7 +8,11 @@ the dependency walker's native schema and handles sparse fixed arrays with
 extent validation. Runtime entityDef and ordinary reflected declaration roots
 use that schema. The registered graph reader has an ordered composition adapter,
 and MD6 definitions compose their verified named-record envelope. Other custom
-root grammars and general index-reference relocation remain open.
+root grammars remain open. Index-referenced collections are covered where the
+engine has them: an MD6 joint payload travels with its entry and the engine
+re-derives every joint index from the composed order, a mesh-kit entry keeps the
+mesh names the engine resolves to surface indices itself, and an authored index
+such as a limb-loss group's is checked for collisions rather than renumbered.
 
 Entity source-class resolution now follows a caller-selected parent source view
 and verifies the native class ancestry. Missing parents, unknown classes,
@@ -188,14 +192,39 @@ still follow their own schema: this envelope adapter does not invent semantics
 for unknown custom readers, inherited state or late consumers of strings.
 
 MD6 definitions use a separate envelope adapter. Joint groups match by native
-category and name, animation event blocks by normalized animation path, and
-animation aliases by name. Compatible record additions, removal and ordering
-compose against the original, including built-in contributions. Repeated events
-inside one animation block remain repeated; their complete block is currently
-atomic. Group payloads and other custom sections retain their native
-syntax rather than being interpreted as assignment dictionaries. Independent
-changes to different records combine; divergent edits within the same opaque
-payload explicitly conflict.
+category and name -- the thirteen registered categories matched the way the
+reader matches them, with `misc` as its alias for `eyeGroup` -- animation event
+blocks by normalized animation path, and animation aliases by name. Compatible
+record additions, removal and ordering compose against the original, including
+built-in contributions. A bare `jointGroup` token is ignored as the reader
+ignores it, and the five obsolete group kinds the reader skips without an error
+are retained whole instead of refusing the file.
+
+A joint group's payload composes as the ordered native sequence it is: `args`
+blocks and joint entries, each joint identified by the lowercased name the reader
+resolves plus its occurrence, because repeated joint names are native. A joint's
+own block composes per key, so two contributions editing different keys of one
+joint combine and two editing the same key conflict. Each key owns the value
+tokens on its source line, which is how the reader takes them and how a flag enum
+carries several constants. Three semantics are checked beyond record identity:
+an `args` `vec3` is the running default for the joints listed after it, so a
+contribution whose entry would inherit a different default is diagnosed;
+`surfType` and `contentsFlags` are one group-wide value wherever they appear, so
+a write another contribution would overwrite is diagnosed; and a limb-loss
+`index` is authored, so two entries claiming one index conflict.
+
+Animation events compose the same way. An event is identified by its frame
+command with the frame and row it is placed at, plus an occurrence for the
+shipped cases that repeat all three, and its body composes per key. Every
+declaration-typed event argument is a dependency of the definition: the frame
+command reader resolves the argument's type name through the declaration-type
+registry and then looks the value up in that type's manager. An empty value
+names nothing, as shipped content uses it.
+
+`eyeInfoCollection` and `meshKits` are counted collections whose counts the
+compiler rebuilds, as the readers do. Eye info records are anonymous and stay
+positional. Mesh kits keep the reader's fixed kit order, and their entries
+combine by name.
 
 Inside an animation alias, animation references and flag blocks compose in
 authored order. Existing animation slots retain their original positions, so
@@ -213,8 +242,9 @@ MD6 initialization composes ordered setters for inheritance, mesh, offset and
 bounds calculation. Independent setter edits combine; repeated writes retain
 their order. Inheritance also writes the model, offset and bounds flag, so the
 compiler checks the final writer for each affected value and diagnoses an edit
-that another contribution would silently overwrite. Individual offset vectors
-remain atomic. The author files retain their original bytes.
+that another contribution would silently overwrite. An offset is one native three-float vector
+in every place the readers accept one, so it composes as a single value rather
+than per component. The author files retain their original bytes.
 
 MD6 emission follows native section order, including optional base user channel
 and rig sections. Group copies must resolve an earlier local group in each input
@@ -222,12 +252,21 @@ and in the emitted result. Duplicate group/alias/event-block identities refuse
 composition instead of relying on native shadowing or error behavior. A change
 to the selected model or parent cannot silently receive another contribution's
 records authored against a different binding. This is direct binding validation,
-not inherited-state expansion or validation of skeleton joints, animation event
-arguments and nested custom data. Unsupported obsolete syntax and escaped record
-identities remain explicit gaps. A heap-based delimiter stack handles deep opaque
-payloads without adding an author size/depth setting.
+not inherited-state expansion or validation of skeleton joints against the
+selected skeleton. Escaped record identities remain an explicit gap: they need a
+native string adapter and are refused rather than guessed at. A heap-based
+delimiter stack handles deep opaque payloads without adding an author size/depth
+setting.
 
-Materials and other custom root grammars still need their own composers.
+A material parameter value composes by its native kind. Image, program and
+sampler values are typed by the grammar; expressions, masked writes and opaque
+values retain their native text. A sampler names inline renderer state, not a
+resource, so it carries no dependency. A String parameter is a late value the
+parse path never looks up: it keeps the tokens on its own line and contributes no
+dependency, because the shipped corpus writes source art names there that no
+installed resource answers. A buffer parameter is engine-side GPU state; a
+material write to one is refused with its reason, and the struct render parameter
+naming a buffer's layout is the dependency that does exist.
 One complete replacement or exact duplicates retain their original bytes.
 Overlapping changes to an unsupported family fail explicitly. Alternate native
 source dialects, including legacy particle syntax, also remain intact when no
@@ -351,7 +390,9 @@ composer or an explicit incompatibility report.
    additions, edits and removals relative to its baseline.
 3. Compose using the shared schema, retaining contributor provenance down to
    fields and collection entries.
-4. Resolve ordering and reference relocation, then rebuild counts and indices.
+4. Resolve ordering and reference relocation, then rebuild counts. Native indices
+   the engine derives itself, such as joint and mesh-kit indices, follow from the
+   composed order and names.
 5. Validate types, references, resource dependencies and package policy before
    emitting the game-facing payload.
 6. Publish the prospective provider for activation while retaining the previous

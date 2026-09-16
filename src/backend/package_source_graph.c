@@ -183,9 +183,13 @@ static int sg_material_references(sg_walk *walk,
         const sh_decl_material_reference *ref = &references[i];
         char *name;
         walk->report.references++;
-        if (!strcmp(ref->family, "sampler")) {
-            sg_gap(walk, "", "sampler", "sampler identity needs its native registry adapter"); continue;
-        }
+        /* A sampler value is inline renderer state, not a resource identity.
+         * idParmBlock::Load resolves render programs and render parameters
+         * through their declaration managers, but binds a sampler by name from
+         * the renderer's own table, which creates its samplers from numeric
+         * filter/repeat state. There is nothing for a package to deliver, so
+         * this is a resolved reference rather than a coverage gap. */
+        if (!strcmp(ref->family, "sampler")) continue;
         if (ref->name.length == SIZE_MAX || !(name = malloc(ref->name.length + 1))) { walk->failed = 1; break; }
         memcpy(name, ref->name.text, ref->name.length); name[ref->name.length] = 0;
         if (!sg_add(walk, ref->family, name)) { free(name); break; }
@@ -232,6 +236,100 @@ static int sg_basemodel(sg_walk *walk, const char *path)
     free(body); return !walk->failed;
 }
 
+/* A render program's catalog rows already enumerate the files the cook consumed:
+ * its permutation declarations, compiled binaries, SPIR-V (in the archive's own
+ * split spelling) and every #include it used. Measured over the installed
+ * corpus: of 1231 #include directives in 923 program declarations, 1230 appear
+ * in that identity's own rows. The remaining one sits in a preprocessor branch
+ * the cook did not take, so the text is also read and any include it names is
+ * added as a known file. Includes are files, not typed identities. */
+static int sg_renderprog(sg_walk *walk, const char *name)
+{
+    unsigned char *body = NULL;
+    size_t length = 0;
+    char *path = sg_path("renderprog", name);
+    int status;
+    if (!path) { walk->failed = 1; return 0; }
+    status = sg_read_path(walk, path, &body, &length);
+    free(path);
+    if (status <= 0 || !body) { free(body); return !walk->failed; }
+    walk->report.declarations++;
+    for (size_t at = 0; body && at + 10 < length; at++) {
+        const char *text = (const char *)body + at;
+        const char *quote, *end;
+        char *include;
+        size_t used;
+        if (memcmp(text, "#include", 8)) continue;
+        quote = memchr(text, '"', length - at);
+        if (!quote) break;
+        end = memchr(quote + 1, '"', length - (size_t)(quote + 1 - (const char *)body));
+        if (!end) break;
+        used = (size_t)(end - quote - 1);
+        if (!used || used > 512) { at = (size_t)(end - (const char *)body); continue; }
+        include = malloc(used + 32);
+        if (!include) { walk->failed = 1; break; }
+        snprintf(include, used + 32, "decls/renderprogs/%.*s", (int)used, quote + 1);
+        walk->report.references++;
+        if (!sg_file(walk, include)) { free(include); break; }
+        free(include);
+        at = (size_t)(end - (const char *)body);
+    }
+    free(body);
+    return !walk->failed;
+}
+
+/* Families whose cooked payload names no other engine resource. Measured over
+ * the installed corpus with a scan for resource-path-shaped text: image 7436
+ * files / 2.78 GB, cm 20117 / 4.25 GB, aas 863 / 194 MB, skeleton 945 / 5.8 MB,
+ * binaryfile 48 / 56 MB and md6rig 2 -- none contained one. A leaf reports no
+ * gap: reading it could not add a dependency. */
+static int sg_leaf_family(const char *type)
+{
+    static const char *const leaves[] = {"image", "skeleton", "cm", "aas", "binaryfile", "md6rig"};
+    for (size_t i = 0; i < sizeof(leaves) / sizeof(leaves[0]); i++)
+        if (!strcmp(type, leaves[i])) return 1;
+    return 0;
+}
+
+/* A cooked animation plays on exactly one skeleton, named in its header. The
+ * per-skeleton default clips carry a placeholder there and name the skeleton in
+ * their own identity instead; both forms are covered over the whole corpus. */
+static int sg_anim(sg_walk *walk, const char *path, const char *name)
+{
+    unsigned char *body = NULL;
+    size_t length = 0, before;
+    char detail[1024];
+    int status = sg_read_path(walk, path, &body, &length), emitted = 0;
+    if (status <= 0 || !body) {
+        free(body);
+        sg_gap(walk, "", "anim", status < 0 ? "cooked animation is unreadable" : "cooked animation is absent");
+        return !walk->failed;
+    }
+    before = walk->report.references;
+    if (!sh_md6_anim_references(body, length, sg_md6_reference, walk, detail, sizeof(detail))) {
+        if (!walk->failed)
+            sg_gap(walk, "", "anim", detail[0] ? detail : "cooked animation envelope is unsupported");
+        free(body); return !walk->failed;
+    }
+    emitted = walk->report.references != before;
+    free(body);
+    if (!emitted) {
+        /* "<skeleton>.md6skl/<clip>.md6anim": the identity carries it. */
+        const char *marker = strstr(name, ".md6skl/");
+        char *skeleton;
+        size_t used;
+        if (!marker) { sg_gap(walk, "", "anim", "cooked animation names no skeleton"); return !walk->failed; }
+        used = (size_t)(marker - name) + 7;
+        skeleton = malloc(used + 1);
+        if (!skeleton) { walk->failed = 1; return 0; }
+        memcpy(skeleton, name, used); skeleton[used] = 0;
+        walk->report.references++;
+        if (!sg_add(walk, "skeleton", skeleton)) { free(skeleton); return 0; }
+        free(skeleton);
+    }
+    return !walk->failed;
+}
+
 /* A cooked static model binds its materials per surface. */
 static int sg_model(sg_walk *walk, const char *path)
 {
@@ -254,10 +352,10 @@ static int sg_model(sg_walk *walk, const char *path)
  * catalog has never seen, which a package can legitimately add. */
 static char *sg_cooked_path(const char *type, const char *name)
 {
-    int mesh = !strcmp(type, "basemodel");
-    const char *prefix = mesh ? "generated/basemodel/" : "cooked/model/";
-    const char *suffix = mesh ? ".bmd6model" : ".bmodel";
-    const char *source = mesh ? ".md6mesh" : ".lwo";
+    int mesh = !strcmp(type, "basemodel"), clip = !strcmp(type, "anim");
+    const char *prefix = mesh ? "generated/basemodel/" : clip ? "cooked/anim/" : "cooked/model/";
+    const char *suffix = mesh ? ".bmd6model" : clip ? ".bmd6anim" : ".bmodel";
+    const char *source = mesh ? ".md6mesh" : clip ? ".md6anim" : ".lwo";
     size_t length = strlen(name), drop = strlen(source), capacity;
     char *raw, *path;
     if (length > drop && !_stricmp(name + length - drop, source)) length -= drop;
@@ -362,22 +460,27 @@ static int sg_inspect(sg_walk *walk, const char *type, const char *name)
          sh_decl_native_schema_reader(walk->schema, (sh_decl_value_type){native_class, "*"}) != SH_DECL_READER_DECL)) {
         const sh_resource_catalog_entry *const *entries;
         size_t count = sh_resource_catalog_find(walk->catalog, type, name, &entries);
-        int cooked = !strcmp(type, "basemodel"), model = !strcmp(type, "model"), inspected = 0;
+        int cooked = !strcmp(type, "basemodel"), model = !strcmp(type, "model");
+        int anim = !strcmp(type, "anim"), program = !strcmp(type, "renderprog");
+        int leaf = sg_leaf_family(type), inspected = leaf;
+        if (program) inspected = sg_renderprog(walk, name);
         for (size_t i = 0; i < count; i++) {
             if (!*entries[i]->path) continue;
             if (!sg_file(walk, entries[i]->path)) { ok = 0; break; }
-            if (!cooked && !model) continue;
-            if (!(cooked ? sg_basemodel(walk, entries[i]->path) : sg_model(walk, entries[i]->path))) { ok = 0; break; }
+            if (leaf || program || (!cooked && !model && !anim)) continue;
+            if (!(cooked ? sg_basemodel(walk, entries[i]->path) :
+                  model ? sg_model(walk, entries[i]->path) : sg_anim(walk, entries[i]->path, name))) { ok = 0; break; }
             inspected = 1;
         }
         /* A mesh this candidate adds has no catalog row; its cooked path follows
          * the same naming rule, so the provider's own bytes can still be read. */
-        if (ok && (cooked || model) && !inspected) {
+        if (ok && (cooked || model || anim) && !inspected) {
             char *cooked_path = sg_cooked_path(type, name);
             if (!cooked_path) { walk->failed = 1; ok = 0; }
             else {
                 if (sg_file(walk, cooked_path))
-                    inspected = cooked ? sg_basemodel(walk, cooked_path) : sg_model(walk, cooked_path);
+                    inspected = cooked ? sg_basemodel(walk, cooked_path) :
+                        model ? sg_model(walk, cooked_path) : sg_anim(walk, cooked_path, name);
                 ok = !walk->failed;
                 free(cooked_path);
             }

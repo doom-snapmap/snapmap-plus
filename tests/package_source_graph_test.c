@@ -139,6 +139,18 @@ static size_t cooked_mesh(unsigned char *out, const char *skeleton, const char *
     return at;
 }
 
+/* A cooked animation: the md6 header family, then the skeleton it plays on. */
+static size_t cooked_anim(unsigned char *out, const char *skeleton)
+{
+    size_t n = strlen(skeleton);
+    memcpy(out, "\x26\x02\x41\x4d", 4);
+    memset(out + 4, 0, 8);
+    out[12] = (unsigned char)n; out[13] = (unsigned char)(n >> 8); out[14] = 0; out[15] = 0;
+    memcpy(out + 16, skeleton, n);
+    memset(out + 16 + n, 0, 32);
+    return 16 + n + 32;
+}
+
 static int original(void *context, const char *path, unsigned char **body, size_t *length)
 {
     fixture *f = context;
@@ -146,6 +158,15 @@ static int original(void *context, const char *path, unsigned char **body, size_
     char generated[160];
     unsigned index;
     *body = NULL; *length = 0;
+    if (!strncmp(path, "cooked/anim/md6/boss/motion/", 28) ||
+        !strcmp(path, "cooked/anim/md6/boss/boss.md6skl/_default.bmd6anim")) {
+        unsigned char cooked[256];
+        /* The clip names its skeleton; the per-skeleton default clip does not. */
+        size_t size = cooked_anim(cooked, strstr(path, "_default") ? "_defaulted_" : "md6/boss/boss.md6skl");
+        *body = malloc(size);
+        if (!*body) return -1;
+        memcpy(*body, cooked, size); *length = size; return 2;
+    }
     if (!strcmp(path, "generated/basemodel/md6/boss/boss.bmd6model")) {
         unsigned char cooked[512];
         size_t size = cooked_mesh(cooked, "md6/boss/boss.md6skl", "boss");
@@ -170,12 +191,22 @@ static int original(void *context, const char *path, unsigned char **body, size_
     else if (!strcmp(path, "generated/decls/md6def/mesh-only.decl"))
         text = "{ init { mesh \"md6/boss/boss.md6mesh\" } }";
     else if (!strcmp(path, "generated/decls/md6def/boss.decl"))
+        /* The animation event carries one declaration-typed argument, one string
+         * and one enum constant: only the first names a resource. */
         text = "{ init { inherit \"demons/base\" mesh \"md6/boss/absent.md6mesh\" calcRefBoundsFromJoints 1 }"
+               " events { anim \"md6/boss/motion/idle.md6anim\" { event \"ae_hit\" {\n"
+               "frame 1\nrow 0\nlocked 0\nmaterial \"boss\"\nstring \"boss\"\n"
+               "fxCondition_t FX_WEAPON_START_FIRE_QUAD\n} } }"
                " aliases { alias { name \"idle\" anim \"md6/boss/motion/idle.md6anim\" }"
                " alias { name \"attack\" anim \"md6/boss/motion/attack.md6anim\" } } }";
     else if (!strcmp(path, "generated/decls/md6def/demons/base.decl"))
         text = "{ init { mesh \"md6/base/base.md6mesh\" } }";
     else if (!strcmp(path, "generated/decls/md6def/broken.decl")) text = "{ init { unknownField 1 } }";
+    else if (!strcmp(path, "generated/decls/md6def/default-clip.decl"))
+        text = "{ init { mesh \"md6/absent.md6mesh\" }"
+               " aliases { alias { name \"idle\" anim \"md6/boss/boss.md6skl/_default.md6anim\" } } }";
+    else if (!strcmp(path, "generated/decls/renderprog/glow.decl"))
+        text = "{ hlsl_vp { #include \"includes/vertex.inc\"\n#include \"global.inc\" } }";
     else if (sscanf(path, "generated/decls/entitydef/chain/%u.decl", &index) == 1 && index < 1024) {
         if (index < 1023) snprintf(generated, sizeof(generated), "{ class = \"Entity\"; edit = { target = \"chain/%u\"; } }", index + 1);
         else strcpy(generated, "{ class = \"Entity\"; edit = {} }");
@@ -240,10 +271,13 @@ int main(void)
     assert(!sh_package_source_graph(&compiled, NULL, original, &f, registry, (uintptr_t)f.reflection,
         "{", 1, &paths, &report, error, sizeof(error)) && !paths.count);
     /* A registered resource manager is not necessarily a declaration manager.
-     * Never manufacture generated/decls/image for an image root. */
+     * Never manufacture generated/decls/image for an image root. An image is a
+     * dependency leaf, so it reports no gap either: reading its payload could
+     * not add a reference. */
     json = "{\"targetType\":\"idImage\",\"value\":\"image/body\"}";
     assert(sh_package_source_graph(&compiled, NULL, original, &f, registry, (uintptr_t)f.reflection,
-        json, strlen(json), &paths, &report, error, sizeof(error)) && !paths.count && report.gaps == 1);
+        json, strlen(json), &paths, &report, error, sizeof(error)) && !paths.count && !report.gaps);
+    assert(!paths.incomplete);
     /* Custom material source retains parameter schemas and table sources.
      * Typed image names never manufacture a generated/decls/image path, and
      * String content never creates an image edge just from its spelling. */
@@ -273,6 +307,26 @@ int main(void)
         assert(report.references == 2 && has(&paths, "renderparm/color.decl") && !has(&paths, "table/curve.decl"));
     }
     compiled.resources = &resource; compiled.resource_count = 1;
+    /* A cooked animation plays on exactly one skeleton. The md6 definition
+     * reaches its alias clips, each clip names its skeleton, and the skeleton is
+     * a leaf: the whole closure is then complete with no gap. */
+    json = "{\"targetType\":\"idDeclMD6\",\"value\":\"boss\"}";
+    assert(sh_package_source_graph(&compiled, NULL, original, &f, registry, (uintptr_t)f.reflection,
+        json, strlen(json), &paths, &report, error, sizeof(error)));
+    assert(has(&paths, "cooked/anim/md6/boss/motion/idle.bmd6anim"));
+    assert(!has(&paths, "decls/skeleton") && !has(&paths, "decls/anim"));
+    /* A per-skeleton default clip carries a placeholder, so the skeleton comes
+     * from its identity instead. Both routes are covered. */
+    json = "{\"targetType\":\"idDeclMD6\",\"value\":\"default-clip\"}";
+    assert(sh_package_source_graph(&compiled, NULL, original, &f, registry, (uintptr_t)f.reflection,
+        json, strlen(json), &paths, &report, error, sizeof(error)));
+    assert(has(&paths, "cooked/anim/md6/boss/boss.md6skl/_default.bmd6anim"));
+    /* A render program carries the includes its text names, as files. */
+    json = "{\"targetType\":\"idDeclRenderProg\",\"value\":\"glow\"}";
+    assert(sh_package_source_graph(&compiled, NULL, original, &f, registry, (uintptr_t)f.reflection,
+        json, strlen(json), &paths, &report, error, sizeof(error)));
+    assert(has(&paths, "decls/renderprogs/includes/vertex.inc"));
+    assert(has(&paths, "decls/renderprogs/global.inc"));
     json = "{\"targetType\":\"idDeclRenderParm\",\"value\":\"buffer\"}";
     assert(sh_package_source_graph(&compiled, NULL, original, &f, registry, (uintptr_t)f.reflection,
         json, strlen(json), &paths, &report, error, sizeof(error)));
@@ -288,12 +342,18 @@ int main(void)
         json, strlen(json), &paths, &report, error, sizeof(error)));
     assert(has(&paths, "md6def/boss.decl") && has(&paths, "md6def/demons/base.decl"));
     assert(!has(&paths, "decls/basemodel") && !has(&paths, "decls/anim"));
-    /* Four identities from the child (inherit, mesh, two alias animations) and
-     * the inherited definition's own mesh. */
-    assert(report.declarations == 2 && report.references == 5 && !f.object_state_reads);
-    /* The cooked mesh and animations have no source reader, and that stays
-     * visible: their identities are reported as gaps, not as closure. */
-    assert(report.gaps == 4 && paths.incomplete);
+    /* Four identities from the child (inherit, mesh, two alias animations), the
+     * inherited definition's own mesh, the skeleton each cooked clip names, and
+     * the material one animation event argument resolves, which brings its own
+     * render parameter and table with it. The event's string and enum arguments
+     * name no resource. */
+    assert(has(&paths, "material/boss.decl") && has(&paths, "renderparm/color.decl"));
+    assert(!has(&paths, "decls/string") && !has(&paths, "fxCondition"));
+    assert(report.declarations == 6 && report.references == 15 && !f.object_state_reads);
+    /* Both meshes are absent from this fixture, and that stays visible; the
+     * skeletons the clips named are leaves and add no gap of their own. The
+     * third gap is the image the resolved material names. */
+    assert(report.gaps == 3 && paths.incomplete);
     json = "{\"targetType\":\"idDeclMD6\",\"value\":\"broken\"}";
     assert(sh_package_source_graph(&compiled, NULL, original, &f, registry, (uintptr_t)f.reflection,
         json, strlen(json), &paths, &report, error, sizeof(error)));
