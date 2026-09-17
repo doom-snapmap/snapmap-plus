@@ -55,7 +55,9 @@ static int pf_install_requests, pf_inventory_reads, pf_install_outcome, pf_cance
 static sh_mpkg_install_completion pf_completion;
 static void *pf_completion_context;
 static char pf_parsed[256];
-void sh_mpkg_report_error(const char *line) { if (line && *line) package_errors++; }
+static char package_last_error[1024];
+void sh_mpkg_report_error(const char *line)
+{ if (line && *line) { package_errors++; snprintf(package_last_error, sizeof(package_last_error), "%s", line); } }
 void sh_map_render_loaded(void *map) { (void)map; render_loaded_calls++; }
 int sh_decl_server_map_boundary_safe(void) { return pf_testing && pf_boundary; }
 int sh_decl_server_map_preparation_ready(void) { return pf_testing; }
@@ -78,10 +80,20 @@ const char *sh_mpkg_context_root(const sh_mpkg_context *context) { (void)context
 size_t sh_mpkg_context_count(const sh_mpkg_context *context) { (void)context; return pf_packages; }
 int sh_mpkg_context_close(sh_mpkg_context **context)
 {
+    if (!context || !*context) return 1;
     if (pf_active && !pf_deferred) pf_order_error++;
     if (pf_held) return 0;
     if (*context) pf_closes++;
     *context = NULL; return 1;
+}
+static int pf_queued_cleanup;
+void sh_mpkg_context_retire(sh_mpkg_context **context)
+{
+    if (!sh_mpkg_context_close(context)) { pf_queued_cleanup++; *context = NULL; }
+}
+void sh_mpkg_context_collect(void)
+{
+    if (!pf_held) { pf_closes += pf_queued_cleanup; pf_queued_cleanup = 0; }
 }
 sh_package_map_plan *sh_package_runtime_prepare_map(const char *root, const char *map, char *err, size_t cap)
 { (void)root; (void)map; (void)err; (void)cap; pf_plans++; return pf_fail == 2 ? NULL : (sh_package_map_plan *)1; }
@@ -163,8 +175,11 @@ int sh_package_runtime_select_map(const char *json, size_t length,
     }
     return 1;
 }
-int sh_mpkg_prepare_map(const char *json, size_t length, sh_package_references *references)
-{ (void)json; (void)length; memset(references, 0, sizeof(*references)); return !play_prepare_fail; }
+int sh_mpkg_prepare_map(const char *json, size_t length, sh_package_references *references,
+                        char *error, size_t capacity)
+{ (void)json; (void)length; memset(references, 0, sizeof(*references));
+  if (error && capacity) snprintf(error, capacity, "%s", play_prepare_fail ? "fixture dependency failure" : "");
+  return !play_prepare_fail; }
 void sh_package_references_free(sh_package_references *references) { (void)references; }
 int sh_weapon_hud_reload(const char *root) { (void)root; return !play_hud_fail; }
 
@@ -202,8 +217,9 @@ unsigned char *sh_mpkg_pack_dir(const char *root, size_t *out_len, char *err, si
 { (void)root; if (out_len) *out_len = 0; if (err && err_cap) err[0] = '\0'; return NULL; }
 
 size_t sh_mpkg_used_packages(const char *json, size_t len, const char *data_root,
-                             sh_mpkg_used **out)
-{ (void)json; (void)len; (void)data_root; if (out) *out = NULL; return 0; }
+                             sh_mpkg_used **out, char *error, size_t capacity)
+{ (void)json; (void)len; (void)data_root; if (out) *out = NULL;
+  if (error && capacity) error[0] = 0; return 0; }
 
 int sh_overrides_get_root(char *out, size_t cap)
 { if (out && cap) strcpy_s(out, cap, pf_testing ? "fixture-root" : ""); return pf_testing; }
@@ -833,6 +849,8 @@ static void play_uses_current_snapshot_without_saving(void)
         g_idstr_ctor = i == 8 ? NULL : play_ctor;
         sh_play_detour(editor);
         CHECK(play_allocations == allocations && editor[8] == 0);
+        if (i == 4) CHECK(strstr(package_last_error, "fixture dependency failure"));
+        if (i == 7) CHECK(strstr(package_last_error, "weapon HUD policy"));
         if (i != 7) CHECK(play_selections == selections);
         CHECK(!g_snapshot_depth && !g_snapshot_visit && !g_snapshot_visit_ctx);
         CHECK(sh_rawmap_save_count() == saves && sh_rawmap_save_oneshot_pending());
@@ -1010,8 +1028,8 @@ static void saved_map_preflight_retains_checked_bytes(void)
     pf_boundary = 1; pf_fail = 4; sh_rawmap_map_context_poll();
     CHECK(pf_active && g_map_context_active && !pf_closes);
     pf_fail = 0; pf_held = 1; sh_rawmap_map_context_poll();
-    CHECK(!pf_active && !g_map_context_active && g_map_context && !pf_closes);
-    pf_held = 0; sh_rawmap_map_context_poll(); CHECK(!g_map_context && pf_closes == 1 && !pf_order_error);
+    CHECK(!pf_active && !g_map_context_active && !g_map_context && !pf_closes && pf_queued_cleanup == 1);
+    pf_held = 0; sh_mpkg_context_collect(); CHECK(!g_map_context && pf_closes == 1 && !pf_order_error);
     for (int failure = 0; failure < 4; failure++) {
         pf_reset(); pf_packages = 1; pf_gate = 1;
         if (failure == 0) { pf_coverage = 0; pf_gate = 0; }
@@ -1187,9 +1205,9 @@ static void owned_map_requests_survive_consent(void)
     pf_reset(); pf_packages = 1; pf_coverage = 0;
     memset(&owner, 0, sizeof(owner)); owner.valid = 1;
     CHECK(sh_rawmap_preflight_request("{}", 2, &request, error, sizeof(error)));
-    pf_held = 1; CHECK(!sh_rawmap_cancel_pending_map());
-    CHECK(!pf_completion && !owner.releases && !owner.entries);
-    pf_held = 0; CHECK(sh_rawmap_cancel_pending_map());
+    pf_held = 1; CHECK(sh_rawmap_cancel_pending_map());
+    CHECK(!pf_completion && owner.releases == 1 && !owner.entries && pf_queued_cleanup == 1);
+    pf_held = 0; sh_mpkg_context_collect(); CHECK(!pf_queued_cleanup && sh_rawmap_cancel_pending_map());
     CHECK(owner.releases == 1 && !g_pending_map.state && !pf_active);
     CHECK(sh_rawmap_cancel_pending_map() && owner.releases == 1);
     for (int failure = 0; failure < 5; failure++) {
@@ -1297,7 +1315,7 @@ static void deferred_requests_publish_at_native_boundary(void)
         CHECK(pf_activations == 1 && !pf_restorations && !pf_order_error);
         CHECK(sh_rawmap_load_generation() == generation + 1);
         pf_boundary = 1; sh_rawmap_map_context_poll();
-        CHECK(!g_map_context && !pf_active && !g_source_cleanup);
+        CHECK(!g_map_context && !pf_active);
     }
     /* Missing-resource consent is decided without replacing the old provider.
      * Decline/abandonment frees only pending sources. */

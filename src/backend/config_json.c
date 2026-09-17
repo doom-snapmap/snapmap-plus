@@ -14,7 +14,17 @@ typedef struct json_cursor {
     void *visitor_context;
     sh_json_field_filter filter;
     unsigned suppressed;
+    sh_json_error *error;
 } json_cursor;
+
+static int json_fail(json_cursor *c, const char *reason)
+{
+    if (c->error && !c->error->reason) {
+        c->error->offset = (size_t)(c->p - c->begin);
+        c->error->reason = reason;
+    }
+    return 0;
+}
 
 static void skip_ws(json_cursor *c)
 {
@@ -116,7 +126,7 @@ static int scan_string(json_cursor *c)
     while (c->p < c->end) {
         unsigned char ch = *c->p++;
         if (ch == '"') return 1;
-        if (ch < 0x20) return 0;
+        if (ch < 0x20) return json_fail(c, "unescaped control byte in string");
         if (ch == '\\') {
             unsigned escaped;
             if (c->p >= c->end) return 0;
@@ -125,7 +135,8 @@ static int scan_string(json_cursor *c)
                 ch == 'b' || ch == 'f' || ch == 'n' ||
                 ch == 'r' || ch == 't')
                 continue;
-            if (ch != 'u' || !read_hex4(c->p, c->end, &escaped)) return 0;
+            if (ch != 'u' || !read_hex4(c->p, c->end, &escaped))
+                return json_fail(c, "invalid string escape");
             c->p += 4;
             if (escaped >= 0xD800 && escaped <= 0xDBFF) {
                 unsigned low;
@@ -133,21 +144,21 @@ static int scan_string(json_cursor *c)
                     c->p[0] != '\\' || c->p[1] != 'u' ||
                     !read_hex4(c->p + 2, c->end, &low) ||
                     low < 0xDC00 || low > 0xDFFF)
-                    return 0;
+                    return json_fail(c, "unpaired Unicode surrogate");
                 c->p += 6;
             } else if (escaped >= 0xDC00 && escaped <= 0xDFFF) {
-                return 0;
+                return json_fail(c, "unpaired Unicode surrogate");
             }
             continue;
         }
         if (ch >= 0x80) {
             size_t used;
             c->p--;
-            if (!valid_utf8_at(c->p, c->end, &used)) return 0;
+            if (!valid_utf8_at(c->p, c->end, &used)) return json_fail(c, "invalid UTF-8 in string");
             c->p += used;
         }
     }
-    return 0;
+    return json_fail(c, "unterminated string");
 }
 
 static int append_utf8(unsigned codepoint, char *out, size_t cap, size_t *at)
@@ -258,7 +269,7 @@ static int add_unique_key(decoded_key **keys, size_t *count, size_t *capacity,
     for (i = 0; i < *count; i++) {
         if ((*keys)[i].key_length == key_length &&
             memcmp((*keys)[i].key, key, key_length) == 0)
-            return 0;
+            return -1;
     }
     if (*count == *capacity) {
         next = *capacity ? *capacity * 2 : 8;
@@ -279,7 +290,8 @@ static int scan_object(json_cursor *c, unsigned depth)
     decoded_key *keys = NULL;
     size_t key_count = 0, key_capacity = 0;
     int ok = 0;
-    if (depth >= c->max_depth || c->p >= c->end || *c->p != '{') return 0;
+    if (depth >= c->max_depth) return json_fail(c, "nesting limit exceeded");
+    if (c->p >= c->end || *c->p != '{') return 0;
     c->p++;
     skip_ws(c);
     if (c->p < c->end && *c->p == '}') {
@@ -294,8 +306,12 @@ static int scan_object(json_cursor *c, unsigned depth)
         key_start = c->p;
         if (!scan_string(c)) goto done;
         key_end = c->p;
-        if (!decode_string_alloc(key_start, key_end, &key, &key_length)) goto done;
-        if (!add_unique_key(&keys, &key_count, &key_capacity, key, key_length)) {
+        if (!decode_string_alloc(key_start, key_end, &key, &key_length)) {
+            json_fail(c, "cannot allocate object key"); goto done;
+        }
+        scanned = add_unique_key(&keys, &key_count, &key_capacity, key, key_length);
+        if (scanned <= 0) {
+            json_fail(c, scanned < 0 ? "duplicate object key" : "cannot allocate object members");
             free(key);
             goto done;
         }
@@ -331,7 +347,8 @@ done:
 
 static int scan_array(json_cursor *c, unsigned depth)
 {
-    if (depth >= c->max_depth || c->p >= c->end || *c->p != '[') return 0;
+    if (depth >= c->max_depth) return json_fail(c, "nesting limit exceeded");
+    if (c->p >= c->end || *c->p != '[') return 0;
     c->p++;
     skip_ws(c);
     if (c->p < c->end && *c->p == ']') {
@@ -423,17 +440,28 @@ static int scan_value(json_cursor *c, unsigned depth, sh_json_kind *out_kind)
 int sh_json_validate(const char *json, size_t length, unsigned max_depth,
                      sh_json_kind *out_kind)
 {
+    return sh_json_validate_ex(json, length, max_depth, out_kind, NULL);
+}
+
+int sh_json_validate_ex(const char *json, size_t length, unsigned max_depth,
+                        sh_json_kind *out_kind, sh_json_error *error)
+{
     json_cursor c = {0};
     sh_json_kind kind;
-    if (!json || max_depth == 0) return 0;
+    if (error) { error->offset = 0; error->reason = NULL; }
+    if (!json || max_depth == 0) {
+        if (error) error->reason = "missing input or nesting limit";
+        return 0;
+    }
     c.begin = (const unsigned char *)json;
     c.p = c.begin;
     c.end = c.begin + length;
     c.max_depth = max_depth;
+    c.error = error;
     skip_ws(&c);
-    if (!scan_value(&c, 0, &kind)) return 0;
+    if (!scan_value(&c, 0, &kind)) return json_fail(&c, "invalid JSON syntax");
     skip_ws(&c);
-    if (c.p != c.end) return 0;
+    if (c.p != c.end) return json_fail(&c, "trailing data after JSON value");
     if (out_kind) *out_kind = kind;
     return 1;
 }

@@ -433,6 +433,59 @@ static void test_malformed_catalog(void)
         sh_resource_catalog_close(catalog);
     }
 }
+static void test_legacy_imports(void)
+{
+    unsigned char index[1024] = {0};
+    sh_resource_catalog *catalog;
+    unsigned char *body = NULL;
+    size_t length = 0, n, pos;
+    char error[512];
+    fixture_reset();
+    catalog = open_catalog(); if (!catalog) return;
+    CHECK(sh_resource_catalog_legacy_read(catalog, "entityDef", "ai/demon/cyberdemon", resource_path,
+        &body, &length, error, sizeof(error)) == 1 && body && length == 832);
+    free(body); body = NULL;
+    CHECK(!sh_resource_catalog_legacy_read(catalog, "model", "ai/demon/cyberdemon", resource_path,
+        &body, &length, error, sizeof(error)) && !body);
+    CHECK(sh_resource_catalog_legacy_read(catalog, NULL, NULL, resource_path, NULL, NULL, error, sizeof(error)) == 1);
+    CHECK(sh_resource_catalog_legacy_read(catalog, NULL, "directory", "generated/decls", NULL, NULL, error, sizeof(error)) == 1);
+    sh_resource_catalog_close(catalog);
+    n = build_pindex(index, sizeof(index), 832, sizeof(compressed_body));
+    put_file("snap_gameresources.pindex", index, n);
+    put_file("snap_gameresources.resources", compressed_body, sizeof(compressed_body));
+    catalog = open_catalog(); if (!catalog) return;
+    CHECK(sh_resource_catalog_legacy_read(catalog, "entityDef", "ai/demon/cyberdemon", resource_path,
+        &body, &length, error, sizeof(error)) == 2 && !body && !length);
+    sh_resource_catalog_close(catalog);
+    /* Same exact campaign identity/path with different bytes cannot choose a winner. */
+    pos = append_pindex_row(index, 0x24, 1, "entityDef", "ai/demon/cyberdemon", resource_path, 0, 1, 1, 1);
+    pos = append_pindex_row(index, pos, 2, "entityDef", "ai/demon/cyberdemon", resource_path, 1, 1, 1, 1);
+    n = finish_pindex(index, sizeof(index), 2, pos);
+    put_file("gameresources.pindex", index, n); put_file("gameresources.patch", "AB", 2);
+    catalog = open_catalog(); if (!catalog) return;
+    CHECK(!sh_resource_catalog_legacy_read(catalog, "entityDef", "ai/demon/cyberdemon", resource_path,
+        &body, &length, error, sizeof(error)) && !body && strstr(error, "conflicting"));
+    sh_resource_catalog_close(catalog);
+
+    /* Legacy provider selection falls back to name when the index path is
+     * empty. These valid zero-byte collision rows occur in campaign imports. */
+    fixture_reset();
+    pos = append_pindex_row(index, 0x24, 1, "cm", "models/boss.md6", "", 0, 0, 0, 0);
+    n = finish_pindex(index, sizeof(index), 1, pos);
+    put_file("gameresources.pindex", index, n);
+    catalog = open_catalog(); if (!catalog) return;
+    CHECK(sh_resource_catalog_legacy_read(catalog, "cm", "models/boss.md6", "models/boss.md6",
+        &body, &length, error, sizeof(error)) == 1 && body && !length);
+    free(body); body = NULL;
+    CHECK(sh_resource_catalog_legacy_read(catalog, NULL, NULL, "models/boss.md6", NULL, NULL, error, sizeof(error)) == 1);
+    sh_resource_catalog_close(catalog);
+    put_file("snap_gameresources.pindex", index, n);
+    catalog = open_catalog(); if (!catalog) return;
+    CHECK(sh_resource_catalog_legacy_read(catalog, "cm", "models/boss.md6", "models/boss.md6",
+        &body, &length, error, sizeof(error)) == 2 && !body && !length);
+    sh_resource_catalog_close(catalog);
+}
+
 int main(void)
 {
     static const char *files[] = {"snap_gameresources.pindex", "gameresources.pindex", "snap_gameresources.resources", "snap_gameresources.patch", "gameresources.resources", "gameresources.patch"};
@@ -442,6 +495,7 @@ int main(void)
     CHECK(DeleteFileA(fixture)); CHECK(make_dir(fixture));
     test_huffman_code_spaces(); test_full_stream_contract(); test_catalog_reads();
     test_patch_duplicates_and_baselines(); test_encoded_aliases(); test_malformed_catalog();
+    test_legacy_imports();
     for (i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
         snprintf(path, sizeof(path), "%s/%s", fixture, files[i]); CHECK(DeleteFileA(path));
     }

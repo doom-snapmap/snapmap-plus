@@ -248,7 +248,7 @@ func TestOverrideMigrationConvertsMarkedLegacyPackage(t *testing.T) {
 		d.member("description").text != "keep me" || d.member("author") == nil {
 		t.Fatalf("identity or metadata lost:\n%s", descriptor)
 	}
-	for _, retired := range retiredDescriptorFields {
+	for _, retired := range []string{"schema", "version", "priority", "contents", "restart_required"} {
 		if d.member(retired) != nil {
 			t.Fatalf("retired field %s kept:\n%s", retired, descriptor)
 		}
@@ -330,14 +330,14 @@ func TestOverrideMigrationConvertsLooseLayouts(t *testing.T) {
 		"maps/game/sp/new.bin":                            "new map data",
 		"demons/imp/package.json":                         `{"id":"tests.imp","name":"Imp"}`,
 		"demons/readme.txt":                               "group notes",
-		"legacy-overrides/package.json":                   `{"id":"tests.existing","name":"Existing"}`,
+		"my-overrides/package.json":                       `{"id":"tests.existing","name":"Existing"}`,
 		"readme.txt":                                      "root notes",
 	})
 	report := lib.migrate()
-	if len(report.Converted) != 1 || report.Converted[0].Package != "legacy-overrides-2" || len(report.Rejected) != 0 {
+	if len(report.Converted) != 1 || report.Converted[0].Package != "my-overrides-2" || len(report.Rejected) != 0 {
 		t.Fatalf("report: %+v", report)
 	}
-	got := treeOf(t, lib.path("legacy-overrides-2"))
+	got := treeOf(t, lib.path("my-overrides-2"))
 	for rel, want := range map[string]string{
 		"assets/generated/decls/entitydef/loose.decl":  "{ loose }",
 		"generated/decls/notes.txt":                    "notes",
@@ -357,7 +357,7 @@ func TestOverrideMigrationConvertsLooseLayouts(t *testing.T) {
 		}
 	}
 	d := descriptorOf(t, got["package.json"])
-	if d.member("id").text != "local.legacy-overrides-2" || d.member("name").text != "Legacy overrides" ||
+	if d.member("id").text != "local.my-overrides-2" || d.member("name").text != "My overrides" ||
 		d.member("requirements").member("cvars").member("g_useImageBlackList") == nil {
 		t.Fatalf("descriptor:\n%s", got["package.json"])
 	}
@@ -367,7 +367,7 @@ func TestOverrideMigrationConvertsLooseLayouts(t *testing.T) {
 		}
 	}
 	if lib.read("demons/readme.txt") != "group notes" || lib.read("readme.txt") != "root notes" ||
-		lib.read("legacy-overrides/package.json") != `{"id":"tests.existing","name":"Existing"}` {
+		lib.read("my-overrides/package.json") != `{"id":"tests.existing","name":"Existing"}` {
 		t.Fatal("group or unrelated files changed")
 	}
 	notes := strings.Join(report.Notes, "\n")
@@ -504,7 +504,7 @@ func TestOverrideMigrationRecoversFromEveryBoundary(t *testing.T) {
 		"maps/game/x.entities":             "entities",
 		"maps/empty/":                      "",
 	}
-	for _, point := range []string{"journaled", "moved:generated", "moved:maps", "verified", "published:legacy-overrides"} {
+	for _, point := range []string{"journaled", "moved:generated", "moved:maps", "verified", "published:my-overrides"} {
 		t.Run(point, func(t *testing.T) {
 			lib := newOverrideLibrary(t, fakeRecord{kind: "mapEntities", name: "x", path: "maps/game/x.entities", body: "stock"})
 			lib.write(files)
@@ -517,11 +517,11 @@ func TestOverrideMigrationRecoversFromEveryBoundary(t *testing.T) {
 				t.Fatalf("report after recovery: %+v", report)
 			}
 			got := treeOf(t, lib.root)
-			if got["legacy-overrides/assets/generated/decls/entitydef/a.decl"] != "{ a }" ||
-				got["legacy-overrides/assets/maps/game/x.entities"] != "entities" {
+			if got["my-overrides/assets/generated/decls/entitydef/a.decl"] != "{ a }" ||
+				got["my-overrides/assets/maps/game/x.entities"] != "entities" {
 				t.Fatalf("conversion incomplete after recovery: %v", got)
 			}
-			if _, ok := got["legacy-overrides/assets/maps/empty/"]; !ok {
+			if _, ok := got["my-overrides/assets/maps/empty/"]; !ok {
 				t.Fatal("empty folder lost")
 			}
 			var originals int

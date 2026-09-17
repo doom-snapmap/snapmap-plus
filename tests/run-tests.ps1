@@ -40,6 +40,8 @@ if (-not (Get-Command cl -ErrorAction SilentlyContinue)) { throw "cl not on PATH
 
 # name | sources (relative to tests\) | runtime arg
 $tests = @(
+    @{ name = "package_legacy_test"; src = 'package_legacy_test.c ..\src\backend\resource_catalog.c ..\src\backend\package_legacy.c ..\src\backend\package_migration.c ..\src\backend\decl_server_path.c ..\src\backend\package_archive.c ..\src\backend\raw_deflate_encode.c ..\src\backend\raw_deflate.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; arg = "" }
+    @{ name = "package_migration_test"; src = 'package_migration_test.c ..\src\backend\package_migration.c ..\src\backend\decl_server_path.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\package_sources.c ..\src\backend\packages.c'; arg = "" }
     @{ name = "package_owners_test"; src = 'package_owners_test.c'; arg = "" }
     @{ name = "decl_tree_test"; src = 'decl_tree_test.c ..\src\backend\decl_tree.c'; arg = "" }
     @{ name = "decl_native_lex_test"; src = 'decl_native_lex_test.c ..\src\backend\decl_native_lex.c'; arg = "" }
@@ -64,7 +66,7 @@ $tests = @(
     @{ name = "resource_graph_test"; src = 'resource_graph_test.c ..\src\backend\resource_graph.c'; defs = '/DSH_RESOURCE_GRAPH_TESTING'; arg = "" }
     @{ name = "resource_resident_test"; src = 'resource_resident_test.c ..\src\backend\resource_graph.c'; defs = '/DSH_RESOURCE_GRAPH_TESTING'; arg = "" }
     @{ name = "resource_graph_native_test"; src = 'resource_graph_native_test.c ..\src\backend\resource_graph.c'; defs = '/DSH_RESOURCE_GRAPH_TESTING'; arg = "" }
-    @{ name = "package_archive_test"; src = 'package_archive_test.c ..\src\backend\package_archive.c ..\src\backend\raw_deflate_encode.c ..\src\backend\raw_deflate.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\map_package.c ..\src\backend\map_shards.c'; arg = "" }
+    @{ name = "package_archive_test"; src = 'package_archive_test.c ..\src\backend\package_archive.c ..\src\backend\raw_deflate_encode.c ..\src\backend\raw_deflate.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c ..\src\backend\map_package.c ..\src\backend\decl_server_path.c ..\src\backend\package_migration.c ..\src\backend\package_legacy.c ..\src\backend\map_shards.c'; arg = "" }
     @{ name = "package_descriptor_test"; src = 'package_descriptor_test.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; arg = "" }
     @{ name = "decl_compose_test"; src = 'decl_compose_test.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
     @{ name = "decl_composition_classes_test"; src = 'decl_composition_classes_test.c ..\src\backend\decl_compose.c ..\src\backend\decl_entity_class.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
@@ -128,7 +130,7 @@ $tests = @(
     @{ name = "palette_refresh_contract_test"; src = 'palette_refresh_contract_test.c'; arg = (Join-Path $here '..') }
     @{ name = "resource_catalog_test"; src = 'resource_catalog_test.c ..\src\backend\resource_catalog.c ..\src\backend\raw_deflate.c'; defs = '/DSH_RAW_DEFLATE_TESTING'; arg = "" }
     @{ name = "packages_test"; src = 'packages_test.c ..\src\backend\packages.c'; defs = '/DSH_PACKAGES_TESTING'; arg = "" }
-    @{ name = "map_package_test"; src = 'map_package_test.c ..\src\backend\map_package.c ..\src\backend\map_shards.c ..\src\backend\packages.c ..\src\backend\raw_deflate.c ..\src\backend\raw_deflate_encode.c ..\src\backend\package_archive.c ..\src\backend\package_sources.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; defs = '/DSH_MAP_PACKAGE_TESTING'; arg = "" }
+    @{ name = "map_package_test"; src = 'map_package_test.c ..\src\backend\map_package.c ..\src\backend\decl_server_path.c ..\src\backend\package_migration.c ..\src\backend\package_legacy.c ..\src\backend\map_shards.c ..\src\backend\packages.c ..\src\backend\raw_deflate.c ..\src\backend\raw_deflate_encode.c ..\src\backend\package_archive.c ..\src\backend\package_sources.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; defs = '/DSH_MAP_PACKAGE_TESTING'; arg = "" }
     @{ name = "navmesh_test"; src = 'navmesh_test.c ..\src\backend\navmesh.c ..\src\backend\map_shards.c'; defs = '/DSH_NAVMESH_TESTING'; arg = "" }
     @{ name = "nav_regions_test"; src = 'nav_regions_test.c ..\src\backend\nav_regions.c ..\src\backend\map_shards.c'; arg = "" }
     @{ name = "aas_edit_test"; src = 'aas_edit_test.c ..\src\backend\aas_edit.c'; arg = "" }

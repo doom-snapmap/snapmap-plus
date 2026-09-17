@@ -50,10 +50,8 @@ static char *g_preflight_json;
 static DWORD g_preflight_thread;
 static int g_preflight_busy, g_preflight_consumed, g_preflight_rawmap;
 static sh_mpkg_context *g_map_context;
-static sh_mpkg_context *g_source_cleanup;
 static int g_map_context_active;
 static int g_map_context_await_departure;
-static int g_map_cleanup_reported;
 static __declspec(thread) unsigned g_inspection_depth;
 static __declspec(thread) sh_rawmap_read_scope *g_initial_read;
 
@@ -440,9 +438,12 @@ static int select_map_policy(const char *json, size_t length)
     sh_package_references references = {0};
     int ok = 0;
     __try {
-        ok = sh_mpkg_prepare_map(json, length, &references) &&
-             sh_package_runtime_select_map(json, length, &references, error, sizeof(error)) &&
-             sh_weapon_hud_reload(NULL);
+        ok = sh_mpkg_prepare_map(json, length, &references, error, sizeof(error)) &&
+             sh_package_runtime_select_map(json, length, &references, error, sizeof(error));
+        if (ok && !sh_weapon_hud_reload(NULL)) {
+            ok = 0;
+            strcpy_s(error, sizeof(error), "The map's weapon HUD policy could not be activated.");
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         strcpy_s(error, sizeof(error), "map package policy selection raised an exception");
     }
@@ -1058,7 +1059,7 @@ static int preflight_pending_discard(void)
     sh_mpkg_cancel_map_consent(&g_pending_map);
     if (!sh_mpkg_activation_cancel()) return 0;
     sh_package_map_plan_free(g_pending_map.plan); g_pending_map.plan = NULL;
-    if (g_pending_map.sources && !sh_mpkg_context_close(&g_pending_map.sources)) return 0;
+    sh_mpkg_context_retire(&g_pending_map.sources);
     if (g_pending_map.json) HeapFree(GetProcessHeap(), 0, g_pending_map.json);
     if (g_pending_map.request.release) {
         sh_rawmap_request request = g_pending_map.request;
@@ -1080,11 +1081,7 @@ static void preflight_retire_context(void)
         if (!sh_decl_server_activate_map(NULL)) return;
         g_map_context_active = 0;
     }
-    if (sh_mpkg_context_close(&g_map_context)) g_map_cleanup_reported = 0;
-    else if (!g_map_cleanup_reported) {
-        g_map_cleanup_reported = 1;
-        backend_log("MPKG: retired map sources remain held; cleanup will retry");
-    }
+    sh_mpkg_context_retire(&g_map_context);
 }
 
 int sh_rawmap_cancel_pending_map(void)
@@ -1096,8 +1093,10 @@ int sh_rawmap_cancel_pending_map(void)
 
 void sh_rawmap_map_context_poll(void)
 {
+    static ULONGLONG next_cleanup;
+    ULONGLONG now = GetTickCount64();
     if (g_preflight_busy || sh_rawmap_defers_install_commit()) return;
-    if (g_source_cleanup) (void)sh_mpkg_context_close(&g_source_cleanup);
+    if (now >= next_cleanup) { sh_mpkg_context_collect(); next_cleanup = now + 5000; }
     if (g_map_context_await_departure) {
         if (sh_decl_server_map_browser_present()) return;
         g_map_context_await_departure = 0;
@@ -1290,9 +1289,6 @@ int sh_rawmap_transition_activate(void)
     __try {
         sh_mpkg_context *previous;
         const char *chosen;
-        if (g_source_cleanup && !sh_mpkg_context_close(&g_source_cleanup)) {
-            strcpy_s(g_transition_error, sizeof(g_transition_error), "Previous package cleanup is still pending."); goto done;
-        }
         if (!sh_decl_server_activate_map(g_pending_map.plan)) {
             sh_package_runtime_error(g_transition_error, sizeof(g_transition_error)); goto done;
         }
@@ -1302,7 +1298,7 @@ int sh_rawmap_transition_activate(void)
         g_map_context = g_pending_map.sources; g_pending_map.sources = NULL;
         g_map_context_active = g_pending_map.plan != NULL;
         g_map_context_await_departure = 0;
-        if (previous && !sh_mpkg_context_close(&previous)) g_source_cleanup = previous;
+        sh_mpkg_context_retire(&previous);
         prepared = prepare_map_buffer(g_pending_map.json);
         chosen = prepared ? prepared : g_pending_map.json;
         if (!select_map_policy(chosen, strlen(chosen)) ||
@@ -1369,9 +1365,6 @@ static int preflight_request(const char *json, size_t length,
         if (!preflight_pending_discard()) {
             snprintf(error, capacity, "The previous installation could not be canceled."); goto done;
         }
-        if (g_source_cleanup && !sh_mpkg_context_close(&g_source_cleanup)) {
-            snprintf(error, capacity, "Previous private package cleanup is still pending."); goto done;
-        }
         if (!loading) preflight_retire_context();
         if (!loading && g_map_context) {
             snprintf(error, capacity, "The previous map's resources could not be retired."); goto done;
@@ -1420,7 +1413,7 @@ done:;
     }
     if (copy) HeapFree(GetProcessHeap(), 0, copy);
     sh_package_map_plan_free(plan); sh_package_missing_free(&missing);
-    if (sources && !sh_mpkg_context_close(&sources)) g_source_cleanup = sources;
+    sh_mpkg_context_retire(&sources);
     g_preflight_busy = 0;
     if (accepted && error[0]) sh_mpkg_report_error(error);
     return accepted;
@@ -1522,7 +1515,7 @@ done:;
     if (json) HeapFree(GetProcessHeap(), 0, json);
     sh_package_map_plan_free(plan);
     sh_package_missing_free(&missing);
-    if (sources && !sh_mpkg_context_close(&sources)) g_map_context = sources;
+    sh_mpkg_context_retire(&sources);
     g_preflight_busy = 0;
     if (error[0]) sh_mpkg_report_error(error);
     return result;
@@ -1817,15 +1810,19 @@ void sh_rawmap_embed_install(const void *module_base)
 static char *embed_used_packages(const char *json, size_t len, size_t *out_len, int *failed)
 {
     sh_mpkg_used *used = NULL;
-    char root[MAX_PATH];
+    char root[MAX_PATH], error[SH_MPKG_ERR_CAP], message[SH_MPKG_ERR_CAP + 32];
     char *cur = NULL;
     size_t cur_len = len, count, i;
     *failed = 0;
     *out_len = 0;
     if (!sh_overrides_get_root(root, sizeof root)) return NULL;
 
-    count = sh_mpkg_used_packages(json, len, root, &used);
-    if (count == SIZE_MAX) { *failed = 1; sh_mpkg_report_error("Map save failed: package usage could not be resolved completely. Check the package compiler diagnostic."); return NULL; }
+    count = sh_mpkg_used_packages(json, len, root, &used, error, sizeof(error));
+    if (count == SIZE_MAX) {
+        *failed = 1;
+        snprintf(message, sizeof(message), "Map save failed: %s", error);
+        sh_mpkg_report_error(message); return NULL;
+    }
     if (count == 0) { free(used); return NULL; }
 
     for (i = 0; i < count; i++) {

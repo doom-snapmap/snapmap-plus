@@ -385,6 +385,41 @@ static void test_new_declarations(void)
     sh_package_compilation_free(compiled); sh_package_sources_free(sources);
 }
 
+static int import_baseline(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    (void)path;
+    *body = (unsigned char *)_strdup("{ stageProgram uncooked }");
+    *length = strlen((char *)*body);
+    return *(int *)context;
+}
+
+static void test_native_original_provenance(void)
+{
+    char error[512];
+    int scope;
+    cleanup(); CHECK(CreateDirectoryA(root, NULL));
+    create("overrides/native/package.json", "{\"id\":\"native\",\"name\":\"Native import\"}");
+    create("overrides/native/assets/generated/decls/material/imported.decl", "{ stageProgram uncooked }");
+    for (scope = 1; scope <= 3; scope++) {
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error));
+        sh_package_compilation *compiled = sh_package_compile(sources, import_baseline, &scope, error, sizeof(error));
+        CHECK(sources && compiled);
+        const sh_compiled_resource *resource = sh_package_compilation_find(compiled, "generated/decls/material/imported.decl");
+        CHECK(resource && resource->native_original == (scope != 3));
+        sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+    }
+    create("overrides/native/assets/generated/decls/material/imported.decl", "{ stageProgram authored }");
+    scope = 2;
+    {
+        sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error));
+        sh_package_compilation *compiled = sh_package_compile(sources, import_baseline, &scope, error, sizeof(error));
+        CHECK(sources && compiled);
+        const sh_compiled_resource *resource = sh_package_compilation_find(compiled, "generated/decls/material/imported.decl");
+        CHECK(resource && !resource->native_original);
+        sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+    }
+}
+
 int main(int argc, char **argv)
 {
     char temp[MAX_PATH], error[2048];
@@ -469,7 +504,7 @@ int main(int argc, char **argv)
     CHECK(!compiled); CHECK(strstr(error, "opaque replacements")); CHECK(strstr(error, "[a; b]"));
 done:
     sh_package_compilation_free(compiled); sh_package_sources_free(sources);
-    test_new_declarations(); cleanup();
+    test_new_declarations(); test_native_original_provenance(); cleanup();
     if (failures) return 1;
     puts("package compiler checks passed"); return 0;
 }

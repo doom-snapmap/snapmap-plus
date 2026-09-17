@@ -10,6 +10,7 @@ $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 Push-Location $here
 try {
+    & "$here\build-migration.ps1"
     # Numeric FixedFileInfo from a vMAJOR.MINOR.PATCH tag; a plain "dev" build stays 0.0.0.
     $maj = 0; $min = 0; $pat = 0
     $m = [regex]::Match($Version, '^v?(\d+)\.(\d+)\.(\d+)')

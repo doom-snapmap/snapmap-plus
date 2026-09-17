@@ -337,9 +337,9 @@ func discoverOverrides(root string, catalog *overrideCatalog) (*libraryDiscovery
 		}
 	}
 	if len(loose.loose) > 0 {
-		name := "legacy-overrides"
+		name := starterPackageName
 		for i := 2; tree.child(name) != nil; i++ {
-			name = fmt.Sprintf("legacy-overrides-%d", i)
+			name = fmt.Sprintf("%s-%d", starterPackageName, i)
 		}
 		loose.rel = name
 		d.units = append(d.units, loose)

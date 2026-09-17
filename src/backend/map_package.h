@@ -12,6 +12,9 @@
 #include <stddef.h>
 #include <limits.h>
 #include "package_compiler.h"
+#include "package_legacy.h"
+/* Configure before map interception starts; callback owns catalog lifetime. */
+void sh_mpkg_set_legacy_reader(sh_package_legacy_reader reader, void *context);
 
 /* Format constants -- keep in lockstep with src/map_package.py. */
 #define SH_MPKG_DIGEST_CHARS   16          /* sha256 hexdigest prefix length */
@@ -72,6 +75,10 @@ sh_mpkg_context *sh_mpkg_context_open(const char *data_root, const char *json, s
 const char *sh_mpkg_context_root(const sh_mpkg_context *context);
 size_t sh_mpkg_context_count(const sh_mpkg_context *context);
 int sh_mpkg_context_close(sh_mpkg_context **context);
+/* Only after the provider has released this context: transfer temporary-file
+ * cleanup to the retry queue. A filesystem lock must not block the next map. */
+void sh_mpkg_context_retire(sh_mpkg_context **context);
+void sh_mpkg_context_collect(void);
 
 /* Capture authored source identities at startup and retain the installation
  * destination. Exact source rechecks reject removed or changed package trees.

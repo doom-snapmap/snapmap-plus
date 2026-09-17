@@ -7,6 +7,25 @@
  * and offsets use ZIP64 as needed, without aggregate package-size quotas. */
 #define SH_PACKAGE_ARCHIVE_MAX_FILE_BYTES ((size_t)INT_MAX)
 
+/* Owned, fully verified archive members for compiler input conversion. Reading
+ * raw members validates ZIP structure, paths and every CRC before returning;
+ * descriptor semantics are the converter's responsibility. */
+typedef struct sh_package_archive_file {
+    char *name;
+    unsigned char *body;
+    size_t length;
+    int directory;
+} sh_package_archive_file;
+typedef struct sh_package_archive_files {
+    sh_package_archive_file *items;
+    size_t count;
+} sh_package_archive_files;
+int sh_package_archive_read(const unsigned char *bytes, size_t length,
+    sh_package_archive_files *out, char *error, size_t capacity);
+void sh_package_archive_files_free(sh_package_archive_files *files);
+unsigned char *sh_package_archive_write(const sh_package_archive_files *files,
+    size_t *length, char *error, size_t capacity);
+
 /* All returned buffers are malloc-owned. Files and empty directories retain
  * their exact paths and bytes. A changed source refuses the entire archive. */
 unsigned char *sh_package_archive_pack(const sh_package_sources *sources, size_t owner,

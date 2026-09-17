@@ -193,6 +193,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * Later installs pass the gate after successful runtime registration. */
         {
             char mpkg_root[MAX_PATH];
+            sh_mpkg_set_legacy_reader(sh_package_runtime_legacy_read, NULL);
             if (sh_overrides_get_root(mpkg_root, sizeof mpkg_root))
                 sh_mpkg_boot_capture(mpkg_root);
             else

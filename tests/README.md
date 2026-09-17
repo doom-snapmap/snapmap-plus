@@ -14,6 +14,20 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   fail; the default continues to run every suite.
 - `*_test.c` and `*_test.cpp` exercise runtime helpers and source contracts.
 - `*_test.js` checks page behavior, browser modules and Worker services.
+- `package_migration_test.c` checks the shared legacy descriptor, namespace and
+  policy planner. `package_legacy_test.c` checks old archives, mixed and nested
+  components, untouched current descriptors, authored bytes and stock imports.
+  Its optional installed-data probe is `tests/obj/package_legacy_test.exe
+  <legacy-zip> <doom-base> <delivery-id> <converted-zip>`. Inputs are read-only;
+  only the explicit output is written. Use the historical writer's archive
+  representation when reconstructing a beta 13 map payload.
+- Installer onboarding tests cover original SnapHak profile relocation,
+  loose declaration conversion, exact backups and idempotency. Optional private
+  tests accept `SNAPMAP_TEST_OVERRIDE_ARCHIVE` (an `overrides/` archive) and
+  `SNAPMAP_TEST_DOOM`. Adapter conformance additionally uses
+  `SNAPMAP_TEST_LEGACY_ARCHIVE` and `SNAPMAP_TEST_CONVERTED_ARCHIVE` from the native
+  probe, comparing every file and descriptor policy. No supplied user or game
+  bytes are committed. Build `installer/build-migration.ps1` before Go tests.
 - `package_audio_test.c` checks effective bank event indexes, locale paths,
   duplicate contributors, transient map replacements, stale sources and sealed
   cache reads. `package_source_graph_test.c` checks that reachable sounds select
@@ -182,6 +196,10 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
 - `package_usage_test.c` checks direct and transitive package selection,
   vanilla dependency replacements, duplicate owners, editor subtree pruning
   and incomplete coverage without losing known owners.
+- `config_json_test.c` checks rejection reasons and byte offsets as well as
+  strict validation. Package scale/context tests retain those diagnostics and
+  distinguish missing compiler state. Rawmap tests verify dependency and HUD
+  failures retain their specific notice while refusing the pending play request.
 - `decl_server_test.c` compiles and captures eight 17 MiB declarations with a
   descriptor containing 2 MiB of inline strings. It also checks 4,097-candidate
   admission and runtime refresh, allocation failure before reconstruction, and

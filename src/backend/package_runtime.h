@@ -6,6 +6,9 @@
 #include "package_usage.h"
 #include "package_source_graph.h"
 #include "audio_originals.h"
+int sh_package_runtime_legacy_read(void *context, const char *type,
+    const char *name, const char *path, unsigned char **body, size_t *length,
+    char *error, size_t capacity);
 
 int sh_package_runtime_refresh(const char *data_root);
 /* Product consumers hold their derived-resource boundary across the final

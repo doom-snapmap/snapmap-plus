@@ -1,0 +1,4 @@
+; Standalone policy library embedded in the installer. No game initialization.
+EXPORTS
+    sh_package_migration_run
+    sh_package_migration_release

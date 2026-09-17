@@ -292,15 +292,50 @@ local library with the same isolation; a map-carried bundle is still read with
 the strict all-or-nothing scanner. Skipped folders and reasons appear in
 `sh_packages`, never as silent omissions.
 
+Map admission and save failures carry the first diagnostic back to the native
+notice and backend log. JSON validation includes a byte offset and rejection
+reason; preparation distinguishes inline dependency traversal from ownership
+selection, and HUD activation has its own diagnostic. Embedded archive identity
+errors include the supplying package ID. These diagnostics report where the
+product refused data; they do not establish that the engine would refuse the
+same map or that a package's assets are corrupt.
+
 Discovery uses wide-character enumeration, so Unicode and long group paths are
 found. A marked folder whose path does not fit the runtime package record is
 reported as a skipped package. The data root itself still comes from the ANSI
 `SHGetFolderPathA`; a profile path outside ASCII remains unsupported.
 
-Older package layouts are not read by the runtime. The installer converts them
-before replacing the DLLs and exposes the same conversion as
-`snapmap-plus migrate-overrides`; its contract is in the
-[installer README](../installer/README.md#converting-overrides-from-earlier-releases).
+Local libraries use the current layout. The installer converts old folders
+before replacing the DLLs and exposes that conversion as
+`snapmap-plus migrate-overrides`. Its contract, including original SnapHak
+onboarding, is in the [installer README](../installer/README.md#converting-overrides-from-earlier-releases).
+
+Old map-carried packages convert before current descriptor validation.
+Unchanged installed declarations retain the engine's completed fallback behavior:
+the compiler records exact equality against game originals, and native admission
+permits a completed default only for those bytes. Modified declarations still
+require a successful parse; pending loads, exceptions and the editor palette's
+entity contract remain failures. This handles uncooked campaign placeholders
+without rewriting source data or adding package-specific exceptions.
+
+`package_migration.c` supplies the shared, read-only planner for descriptors,
+namespaces, manifests, requirements, strings and HUD rules. The backend links
+it directly; the installer embeds a private DLL built from the same source.
+The Go adapter owns discovery, verified filesystem snapshots, installed-file
+reads and recoverable publication. `package_legacy.c` owns verified ZIP input,
+nested components and private map-context output. Original transport checksums
+are verified first; conversion never rewrites the original save or local
+library. Current archive bytes pass through unchanged. Imported campaign
+records use their resource name when the index filename is empty, and bytes
+identical to all SnapMap providers stay installed dependencies.
+
+Installation still depends on resource availability, not package folder names
+or descriptor equality. A migrated map activates its authored resource view;
+it does not substitute an installed variant's values. Missing resources require
+consent to install complete converted bundles. Declining leaves the library
+unchanged. After the native provider releases a private context, filesystem
+locks defer deletion of that retired cache without preventing another map load.
+Failures to release a live provider or roll back an installation remain gates.
 
 Compilation includes built-in overrides and package sources relative to verified
 originals. Compatible changes compose using native field and collection semantics;

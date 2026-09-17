@@ -120,6 +120,7 @@ typedef struct sh_compiled_resource {
     sh_package_owners owners;         /* changes to the original resource */
     sh_package_owners gameplay_owners; /* excludes editor types/editorVars-only edits */
     int baseline_known, composed; /* original scope: 0 absent, 1 SnapMap, 2 campaign, 3 product */
+    int native_original;         /* declaration bytes exactly match an installed game original */
     int restored_original;       /* owns engine_path; no authored source or owners */
     unsigned char *body;          /* owned native text or composed result */
     size_t body_length;

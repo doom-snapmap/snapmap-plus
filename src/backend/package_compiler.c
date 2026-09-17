@@ -912,6 +912,8 @@ conflict:
     }
     pc_report_conflict(out, resource, cause, builtin != NULL, detail, error, error_capacity);
 done:
+    if (ok && (have_base == 1 || have_base == 2) && resource->body)
+        resource->native_original = pc_equal(base, base_length, resource->body, resource->body_length);
     if (resource->type && (!strncmp(resource->type, "snapeditor", 10) ||
                           !strncmp(resource->type, "snappropertyinspector", 21)))
         sh_package_owners_free(&resource->gameplay_owners);
@@ -1296,6 +1298,7 @@ static int pc_copy_resource(sh_compiled_resource *to, const sh_compiled_resource
     if (!to->engine_path || (from->type && !to->type) || (from->name && !to->name) ||
         (from->cache_path && !to->cache_path)) return 0;
     to->baseline_known = from->baseline_known; to->composed = from->composed;
+    to->native_original = from->native_original;
     to->restored_original = from->restored_original; to->generated = from->generated;
     to->source = SIZE_MAX;
     if (from->source != SIZE_MAX) {

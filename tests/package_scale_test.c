@@ -90,7 +90,8 @@ int main(void)
         strstr(sh_json_object_get(&policy.strings, "en"), "nested_label") &&
         !strstr(sh_json_object_get(&policy.strings, "en"), "label_0"));
     sh_package_policy_free(&policy);
-    count = sh_mpkg_used_packages(high_map, sizeof(high_map) - 1, root, &selected);
+    count = sh_mpkg_used_packages(high_map, sizeof(high_map) - 1, root, &selected, error, sizeof(error));
+    CHECK(!error[0]);
     CHECK(count == 1 && selected && !strcmp(selected[0].id, "p128"));
     if (count == 1) {
         size_t length;
@@ -101,7 +102,7 @@ int main(void)
             !strcmp(id, "p128") && !memcmp(fingerprint, sources->fingerprints[128], 32));
         if (archive) HeapFree(GetProcessHeap(), 0, archive);
     }
-    count = sh_mpkg_used_packages(all_map, sizeof(all_map) - 1, root, &selected);
+    count = sh_mpkg_used_packages(all_map, sizeof(all_map) - 1, root, &selected, error, sizeof(error));
     CHECK(count == 129);
     for (i = 0; count == 129 && i < count; i++) {
         snprintf(body, sizeof(body), "p%03zu", i); CHECK(!strcmp(selected[i].id, body));
@@ -110,7 +111,15 @@ int main(void)
     CHECK(sh_package_owners_count(&owners) == 129 && sh_package_owners_within(&owners, 129));
     CHECK(sh_package_owners_add(&owners, 4096));
     CHECK(!sh_package_compilation_policy(compiled, &owners, &policy, error, sizeof(error)) && error[0]);
-    CHECK(sh_mpkg_used_packages("{", 1, root, &selected) == SIZE_MAX && !selected && !acquired);
+    CHECK(sh_mpkg_used_packages("{", 1, root, &selected, error, sizeof(error)) == SIZE_MAX && !selected && !acquired);
+    CHECK(strstr(error, "byte 1") && strstr(error, "JSON"));
+    {
+        sh_package_compilation *saved = compiled;
+        compiled = NULL;
+        CHECK(sh_mpkg_used_packages("{}", 2, root, &selected, error, sizeof(error)) == SIZE_MAX);
+        CHECK(!selected && !acquired && strstr(error, "library is unavailable"));
+        compiled = saved;
+    }
     for (i = 0; i < sources->file_count; i++)
         if (!sources->files[i].directory) CHECK(sh_package_source_verify(&sources->files[i]));
     {

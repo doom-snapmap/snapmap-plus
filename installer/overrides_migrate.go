@@ -628,6 +628,9 @@ func cmdMigrateOverrides(f flags) error {
 	if len(report.Rejected) > 0 {
 		return fmt.Errorf("%d package(s) were left unchanged; resolve the reasons above, then run migrate-overrides again", len(report.Rejected))
 	}
+	if err := ensureStarterPackage(); err != nil {
+		return fmt.Errorf("could not prepare the starter package: %w", err)
+	}
 	if len(report.Converted) == 0 {
 		fmt.Println("Overrides are already in the current package format.")
 	}

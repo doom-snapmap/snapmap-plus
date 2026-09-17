@@ -2497,6 +2497,35 @@ static void test_runtime_shadowed_drain_failed_is_swept(void)
     HeapFree(GetProcessHeap(), 0, fsm);
 }
 
+static void test_runtime_import_keeps_native_fallback(void)
+{
+    unsigned char decl[0x300] = {0};
+    sh_decl_server_test_materialize_item item = {
+        "material", "rt/stock", "generated/decls/material/rt/stock.decl",
+        SH_DECL_SERVER_TEST_SHADOWED, NULL, 0, SH_DECL_SERVER_TEST_SHADOW_LIVE, 1
+    };
+    int materialized = -1;
+    long faults = 0, shadow = 0;
+    rt_reset();
+    g_rt_names[0] = "rt/stock"; g_rt_objects[0] = decl; g_rt_no_drain = 1;
+    sh_decl_server_test_reset_runtime_state();
+    sh_decl_server_test_set_generic_load(rt_fallback_load);
+    sh_decl_server_test_set_runtime(1);
+    CHECK(sh_decl_server_test_materialize_missing_sedefs(&item, 1,
+        (void *)1, rt_type_by_name, rt_source_find, rt_find_decl, &materialized));
+    sh_decl_server_test_runtime_counters(NULL, NULL, &shadow, &faults);
+    CHECK(shadow == 1 && faults == 0);
+    CHECK((decl[0x2c] & 2) == 0 && (decl[0x2c] & 4) != 0);
+    CHECK(sh_decl_server_test_clear_stray_pending() == 0);
+    /* A known original never excuses an unfinished load. */
+    sh_decl_server_test_set_generic_load(NULL);
+    CHECK(!sh_decl_server_test_materialize_missing_sedefs(&item, 1,
+        (void *)1, rt_type_by_name, rt_source_find, rt_find_decl, &materialized));
+    CHECK(sh_decl_server_test_clear_stray_pending() == 1);
+    sh_decl_server_test_set_runtime(0);
+    sh_decl_server_test_reset_runtime_state();
+}
+
 static void test_runtime_stray_pending_cleared(void)
 {
     static const unsigned char body[] = "{ }";
@@ -3289,6 +3318,7 @@ int main(void)
     test_runtime_keeps_successful_missing_identity();
     test_runtime_rejects_native_fallback();
     test_runtime_shadowed_drain_failed_is_swept();
+    test_runtime_import_keeps_native_fallback();
     test_runtime_stray_pending_cleared();
     test_runtime_off_leaves_placeholders_alone();
     test_integrated_scan_materialize_pipeline();

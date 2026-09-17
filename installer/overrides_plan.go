@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -451,7 +452,7 @@ func (p *unitPlan) build() error {
 
 func (p *unitPlan) planLoose() error {
 	outputs := newOutputSet(p)
-	cv := &componentConversion{plan: p, outputs: outputs, cvars: map[string]bool{}, wrappers: true,
+	cv := &componentConversion{plan: p, outputs: outputs, wrappers: true,
 		nested: map[*libraryNode]bool{},
 		comp:   &componentInfo{descriptor: jsonValue{kind: jsonObject}, synthetic: true, legacyDesc: true, empty: true}}
 	type pending struct{ target, local string }
@@ -584,10 +585,10 @@ func (p *unitPlan) planLoose() error {
 			return err
 		}
 	}
-	if err := cv.materialize(); err != nil {
+	if err := cv.descriptor(); err != nil {
 		return err
 	}
-	if err := cv.descriptor(); err != nil {
+	if err := cv.materialize(); err != nil {
 		return err
 	}
 	if err := outputs.finish(); err != nil {
@@ -604,9 +605,7 @@ type componentConversion struct {
 	outputs   *outputSet
 	prefix    string // output prefix of this component
 	source    string // snapshot key of this component root
-	cvars     map[string]bool
-	strings   []jsonMember
-	weapons   []jsonMember
+	policies  map[string]migrationInputPolicy
 	manifests []manifestRow
 	wrappers  bool // assets/ may contain legacy namespaces
 	nested    map[*libraryNode]bool
@@ -642,41 +641,11 @@ func (p *unitPlan) convertTree(c *componentInfo, prefix string, outputs *outputS
 		return copyNode(c.node, "")
 	}
 	cv := &componentConversion{plan: p, comp: c, outputs: outputs, prefix: prefix, source: source,
-		cvars: map[string]bool{}, wrappers: c.legacyDesc, nested: map[*libraryNode]bool{}}
+		wrappers: c.legacyDesc, nested: map[*libraryNode]bool{}}
 	for _, child := range c.children {
 		cv.nested[child.node] = true
 	}
-	var walk func(n *libraryNode, local string) error
-	walk = func(n *libraryNode, local string) error {
-		for _, child := range n.children {
-			childLocal := joinRel(local, child.name)
-			if cv.nested[child] {
-				continue
-			}
-			if child.dir {
-				if len(child.children) == 0 {
-					if err := cv.emptyDir(childLocal); err != nil {
-						return err
-					}
-				}
-				if err := walk(child, childLocal); err != nil {
-					return err
-				}
-				continue
-			}
-			if err := cv.file(childLocal); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if err := walk(c.node, ""); err != nil {
-		return err
-	}
-	if err := cv.materialize(); err != nil {
-		return err
-	}
-	if err := cv.descriptor(); err != nil {
+	if err := cv.sharedComponent(); err != nil {
 		return err
 	}
 	for _, child := range c.children {
@@ -755,128 +724,30 @@ func namespaceTarget(segments []string) string {
 	return ""
 }
 
-func (cv *componentConversion) file(local string) error {
-	segments := splitRel(local)
-	first := strings.ToLower(segments[0])
-	switch {
-	case len(segments) == 1 && strings.EqualFold(local, "package.json") && !cv.comp.synthetic:
-		return nil
-	case len(segments) == 1 && strings.EqualFold(local, "smpkg.digest") && cv.comp.sidecar:
-		cv.plan.note("retired the old map installation digest %s (kept in the backup)", cv.key(local))
-		return nil
-	case first == "decls" && len(segments) > 1:
-		if legacyDeclIdentity(strings.Join(segments[1:], "/")) {
-			return cv.put(namespaceTarget(segments), local)
-		}
-		return cv.aux(local, local)
-	case first == "images" && len(segments) > 1:
-		return cv.put(namespaceTarget(segments), local)
-	case first == "shaders":
-		if target := namespaceTarget(segments); target != "" && len(segments) > 3 {
-			return cv.put(target, local)
-		}
-		return cv.aux(local, local)
-	case first == "assets" && len(segments) > 1:
-		if cv.wrappers {
-			return cv.wrapped(local, segments[1:])
-		}
-		return cv.put(local, local)
-	}
-	if handled, err := cv.policy(local, segments); handled || err != nil {
-		return err
-	}
-	return cv.aux(local, local)
-}
-
 func (cv *componentConversion) policy(local string, segments []string) (bool, error) {
 	if len(segments) != 2 {
 		return false, nil
 	}
-	origin := cv.key(local)
-	switch first := strings.ToLower(segments[0]); {
-	case first == "resources" && hasSuffixFold(segments[1], ".manifest"):
-		body, err := cv.read(local)
-		if err != nil {
-			return true, err
-		}
-		rows, err := parseLegacyManifest(body, origin)
-		cv.manifests = append(cv.manifests, rows...)
+	first := asciiLower(segments[0])
+	recognized := (first == "resources" && hasSuffixFold(segments[1], ".manifest")) ||
+		(first == "requirements" && hasSuffixFold(segments[1], ".requirements")) ||
+		(first == "strings" && hasSuffixFold(segments[1], ".json")) ||
+		(first == "hud" && strings.EqualFold(segments[1], "weapons.json"))
+	if !recognized {
+		return false, nil
+	}
+	body, err := cv.read(local)
+	if err != nil {
 		return true, err
-	case first == "requirements" && hasSuffixFold(segments[1], ".requirements"):
-		body, err := cv.read(local)
-		if err != nil {
-			return true, err
-		}
-		cvars, err := parseLegacyRequirements(body, origin)
-		for _, name := range cvars {
-			cv.cvars[name] = true
-		}
-		return true, err
-	case first == "strings" && hasSuffixFold(segments[1], ".json"):
-		body, err := cv.read(local)
-		if err != nil {
-			return true, err
-		}
-		members, err := parseLegacyStrings(body, origin)
-		if err != nil {
-			return true, err
-		}
-		for _, m := range members {
-			if err := mergeText(&cv.strings, m, origin); err != nil {
-				return true, err
-			}
-		}
-		return true, nil
-	case first == "hud" && strings.EqualFold(segments[1], "weapons.json"):
-		body, err := cv.read(local)
-		if err != nil {
-			return true, err
-		}
-		weapons, err := parseLegacyHud(body, origin)
-		if err != nil {
-			return true, err
-		}
-		for _, w := range weapons.members {
-			if err := mergeWeapon(&cv.weapons, w, origin); err != nil {
-				return true, err
-			}
-		}
-		return true, nil
 	}
-	return false, nil
-}
-
-// Strings keys fold case like the native dictionary; equal text composes.
-func mergeText(target *[]jsonMember, m jsonMember, origin string) error {
-	for _, old := range *target {
-		if strings.EqualFold(old.key, m.key) {
-			if old.value.text != m.value.text {
-				return rejectOverride("%s: string %q conflicts with another definition in the same package", origin, m.key)
-			}
-			return nil
-		}
+	if !utf8.Valid(body) {
+		return true, rejectOverride("%s: policy is not valid UTF-8", cv.key(local))
 	}
-	*target = append(*target, m)
-	return nil
-}
-
-func mergeWeapon(target *[]jsonMember, m jsonMember, origin string) error {
-	mode := func(v jsonValue) string {
-		if d := v.member("ammo_display"); d != nil && d.kind == jsonString {
-			return d.text
-		}
-		return ""
+	if cv.policies == nil {
+		cv.policies = map[string]migrationInputPolicy{}
 	}
-	for _, old := range *target {
-		if old.key == m.key {
-			if mode(old.value) != mode(m.value) {
-				return rejectOverride("%s: conflicting HUD rule for %s", origin, m.key)
-			}
-			return nil
-		}
-	}
-	*target = append(*target, m)
-	return nil
+	cv.policies[cv.key(local)] = migrationInputPolicy{Path: strings.Join(segments, "/"), Body: string(body)}
+	return true, nil
 }
 
 // The partially migrated layout moved legacy namespaces under assets/. Paths
@@ -998,145 +869,25 @@ func (cv *componentConversion) materialize() error {
 	return nil
 }
 
-var retiredDescriptorFields = []string{"schema", "version", "priority", "contents", "restart_required"}
-
+// Loose-source discovery supplies historical path aliases; descriptor and
+// policy conversion still use the same planner as every marked package.
 func (cv *componentConversion) descriptor() error {
-	c := cv.comp
-	origin := joinRel(cv.source, "package.json")
-	d := jsonValue{kind: jsonObject, members: append([]jsonMember(nil), c.descriptor.members...)}
-	changed := c.legacyDesc
-	if c.legacyDesc && !c.empty {
-		var retired []string
-		for _, key := range retiredDescriptorFields {
-			v := d.member(key)
-			if v == nil {
-				continue
-			}
-			if key == "schema" && (v.kind != jsonString || !strings.HasPrefix(v.text, "snapmap-plus.")) {
-				continue
-			}
-			if key == "priority" && v.kind == jsonNumber && v.raw != "0" {
-				cv.plan.note("%s: retired priority %s; overlapping packages now compose or report conflicts", origin, v.raw)
-			}
-			d.remove(key)
-			retired = append(retired, key)
-		}
-		if len(retired) > 0 {
-			cv.plan.note("%s: retired %s (the original is kept in the backup)", origin, strings.Join(retired, ", "))
-		}
+	request := migrationInput{Descriptor: "{}", ID: cv.plan.ctx.assignID(cv.plan.unit.rel),
+		Name: "My overrides", Legacy: true, Files: map[string]migrationInputFile{}, Policies: cv.policies}
+	response, err := runNativeMigration(request)
+	if err != nil {
+		return err
 	}
-	folderName := filepath.Base(filepath.FromSlash(joinRel(cv.plan.unit.rel, c.rel)))
-	if c.rel == "" && cv.plan.unit.kind == unitLoose {
-		folderName = cv.plan.unit.rel
+	var plan migrationOutput
+	if err := json.Unmarshal(response, &plan); err != nil {
+		return err
 	}
-	if name := d.member("name"); name == nil || (name.kind == jsonString && name.text == "" && c.legacyDesc) {
-		display := folderName
-		if cv.plan.unit.kind == unitLoose && c.rel == "" {
-			display = "Legacy overrides"
-		}
-		for len(display) >= packageNameCapacity {
-			_, size := utf8.DecodeLastRuneInString(display)
-			display = display[:len(display)-size]
-		}
-		if name == nil {
-			d.members = append([]jsonMember{{key: "name", value: jsonText(display)}}, d.members...)
-		} else {
-			*name = jsonText(display)
-		}
-		changed = true
+	for _, row := range plan.Imports {
+		cv.manifests = append(cv.manifests, manifestRow{row.Kind, row.Name, row.Provider, row.Origin})
 	}
-	if d.member("id") == nil {
-		folders := []string{folderName}
-		for parent := c.parent; parent != nil; parent = parent.parent {
-			folders = append([]string{filepath.Base(filepath.FromSlash(joinRel(cv.plan.unit.rel, parent.rel)))}, folders...)
-		}
-		d.members = append([]jsonMember{{key: "id", value: jsonText(cv.plan.ctx.assignID(folders...))}}, d.members...)
-		changed = true
+	if err := validateDescriptor(plan.Descriptor); err != nil {
+		return err
 	}
-	section := func(key string) (*jsonValue, error) {
-		if v := d.member(key); v != nil {
-			if v.kind != jsonObject {
-				return nil, rejectOverride("%s: %s must be an object", origin, key)
-			}
-			return v, nil
-		}
-		d.members = append(d.members, jsonMember{key: key, value: jsonValue{kind: jsonObject}})
-		return &d.members[len(d.members)-1].value, nil
-	}
-	if len(cv.cvars) > 0 {
-		requirements, err := section("requirements")
-		if err != nil {
-			return err
-		}
-		cvars := requirements.member("cvars")
-		if cvars == nil {
-			requirements.members = append(requirements.members, jsonMember{key: "cvars", value: jsonValue{kind: jsonObject}})
-			cvars = &requirements.members[len(requirements.members)-1].value
-		}
-		for _, name := range []string{"g_useResourceBlackList", "g_useImageBlackList"} {
-			if !cv.cvars[name] {
-				continue
-			}
-			if old := cvars.member(name); old != nil {
-				if old.kind != jsonNumber || old.raw != "0" {
-					return rejectOverride("%s: conflicting requirement %s", origin, name)
-				}
-				continue
-			}
-			cvars.members = append(cvars.members, jsonMember{key: name, value: jsonValue{kind: jsonNumber, raw: "0"}})
-		}
-		changed = true
-	}
-	if len(cv.strings) > 0 {
-		strs, err := section("strings")
-		if err != nil {
-			return err
-		}
-		en := strs.member("en")
-		if en == nil {
-			strs.members = append(strs.members, jsonMember{key: "en", value: jsonValue{kind: jsonObject}})
-			en = &strs.members[len(strs.members)-1].value
-		}
-		if en.kind != jsonObject {
-			return rejectOverride("%s: strings.en must be an object", origin)
-		}
-		for _, m := range cv.strings {
-			if err := mergeText(&en.members, m, origin); err != nil {
-				return err
-			}
-		}
-		changed = true
-	}
-	if len(cv.weapons) > 0 {
-		hud, err := section("hud")
-		if err != nil {
-			return err
-		}
-		weapons := hud.member("weapons")
-		if weapons == nil {
-			hud.members = append(hud.members, jsonMember{key: "weapons", value: jsonValue{kind: jsonObject}})
-			weapons = &hud.members[len(hud.members)-1].value
-		}
-		if weapons.kind != jsonObject {
-			return rejectOverride("%s: hud.weapons must be an object", origin)
-		}
-		for _, w := range cv.weapons {
-			if err := mergeWeapon(&weapons.members, w, origin); err != nil {
-				return err
-			}
-		}
-		changed = true
-	}
-	target := joinRel(cv.prefix, "package.json")
-	if !changed && c.bom {
-		return cv.outputs.add(&plannedOutput{rel: joinRel(cv.prefix, c.markerName), data: c.raw, origin: origin})
-	}
-	if !changed {
-		return cv.outputs.add(&plannedOutput{rel: joinRel(cv.prefix, c.markerName), source: joinRel(cv.source, c.markerName), origin: origin})
-	}
-	data := formatNativeJSON(d)
-	if err := validateDescriptor(data); err != nil {
-		return rejectOverride("%s: %v", origin, err)
-	}
-	return cv.outputs.add(&plannedOutput{rel: target, data: data, origin: origin})
+	return cv.outputs.add(&plannedOutput{rel: joinRel(cv.prefix, "package.json"), data: plan.Descriptor,
+		origin: joinRel(cv.source, "package.json")})
 }

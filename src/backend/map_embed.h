@@ -14,7 +14,8 @@
 /* Main-thread preparation, before any compiler snapshot is acquired. Caller
  * supplies an empty result and frees it after use. Missing reader coverage is
  * recorded separately from failure; no entity is constructed or modified. */
-int sh_mpkg_prepare_map(const char *json, size_t length, sh_package_references *references);
+int sh_mpkg_prepare_map(const char *json, size_t length, sh_package_references *references,
+                        char *error, size_t error_capacity);
 
 /* Pack every authored file and directory into deterministic ZIP delivery.
  * Compression affects transport only. Source bytes are verified before use.
@@ -32,6 +33,6 @@ typedef struct sh_mpkg_used {
 } sh_mpkg_used;
 
 size_t sh_mpkg_used_packages(const char *json, size_t len, const char *data_root,
-                             sh_mpkg_used **out);
+                             sh_mpkg_used **out, char *error, size_t error_capacity);
 
 #endif /* SNAPMAP_PLUS_MAP_EMBED_H */

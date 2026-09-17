@@ -71,21 +71,28 @@ static void pa_free(pa_zip *z)
     free(z->entries); memset(z, 0, sizeof(*z));
 }
 
-unsigned char *sh_package_archive_pack(const sh_package_sources *s, size_t owner,
-                                       size_t *length, char *error, size_t capacity)
+static unsigned char *pa_pack(const sh_package_sources *s, size_t owner,
+    const sh_package_archive_files *files, size_t *length, char *error, size_t capacity)
 {
     pa_zip z = {0}; pa_buffer b = {0};
     size_t i, cd, cd_size;
     unsigned char *raw = NULL, *deflated = NULL, *p;
     if (length) *length = 0;
     if (error && capacity) error[0] = 0;
-    if (!s || owner >= s->package_count || !length) goto bad;
-    z.entries = (pa_entry *)calloc(s->file_count ? s->file_count : 1, sizeof(pa_entry));
+    size_t count = files ? files->count : s ? s->file_count : 0;
+    if ((!files && (!s || owner >= s->package_count)) || !length) goto bad;
+    z.entries = (pa_entry *)calloc(count ? count : 1, sizeof(pa_entry));
     if (!z.entries) goto bad;
-    for (i = 0; i < s->file_count; i++) {
-        const sh_package_source_file *f = &s->files[i];
+    for (i = 0; i < count; i++) {
+        sh_package_source_file memory = {0};
+        const sh_package_source_file *f;
         pa_entry *e;
         size_t n, got = 0, packed = 0;
+        if (files) {
+            memory.relative = files->items[i].name; memory.length = files->items[i].length;
+            memory.directory = files->items[i].directory; memory.owner = owner;
+            f = &memory;
+        } else f = &s->files[i];
         if (f->owner != owner) continue;
         if (f->length > SH_PACKAGE_ARCHIVE_MAX_FILE_BYTES) goto bad;
         e = &z.entries[z.count++]; n = strlen(f->relative) + (f->directory ? 1u : 0u);
@@ -94,7 +101,10 @@ unsigned char *sh_package_archive_pack(const sh_package_sources *s, size_t owner
         if (f->directory) strcat_s(e->name, n + 1, "/");
         e->directory = f->directory; e->offset = b.size;
         if (!f->directory) {
-            raw = sh_package_source_read(f, SH_PACKAGE_ARCHIVE_MAX_FILE_BYTES, &got, error, capacity);
+            if (files) {
+                got = (size_t)f->length; raw = malloc(got + 1);
+                if (raw) { if (got) memcpy(raw, files->items[i].body, got); raw[got] = 0; }
+            } else raw = sh_package_source_read(f, SH_PACKAGE_ARCHIVE_MAX_FILE_BYTES, &got, error, capacity);
             if (!raw) goto bad;
             deflated = sh_deflate_raw(raw, got, &packed);
             if (!deflated) goto bad;
@@ -145,6 +155,10 @@ bad:
     if (error && capacity && !error[0]) pa_error(error, capacity, "package exceeds archive limits or cannot be read completely");
     free(raw); free(deflated); pa_free(&z); free(b.data); return NULL;
 }
+
+unsigned char *sh_package_archive_pack(const sh_package_sources *s, size_t owner,
+    size_t *length, char *error, size_t capacity)
+{ return pa_pack(s, owner, NULL, length, error, capacity); }
 
 static unsigned char *pa_decode(const pa_entry *e)
 {
@@ -284,7 +298,8 @@ static int pa_zip64_extra(const unsigned char *extra, size_t length,
     return !needed || found;
 }
 
-static int pa_open(const unsigned char *bytes, size_t length, pa_zip *z, char *error, size_t capacity)
+static int pa_open(const unsigned char *bytes, size_t length, pa_zip *z,
+    int descriptor_required, char *error, size_t capacity)
 {
     const unsigned char *end, *c;
     size_t count, cd, i, local_end = 0;
@@ -344,8 +359,8 @@ static int pa_open(const unsigned char *bytes, size_t length, pa_zip *z, char *e
         if (BCryptHash(algorithm, NULL, 0, decoded, e->size, e->digest, 32) < 0) { free(decoded); goto done; }
         if (!strcmp(e->name, "package.json")) {
             sh_package_descriptor descriptor;
-            marker = sh_package_descriptor_parse((char *)decoded, e->size, &descriptor, error, capacity);
-            if (marker) { strcpy_s(z->id, sizeof(z->id), descriptor.id); sh_package_descriptor_free(&descriptor); }
+            marker = !descriptor_required || sh_package_descriptor_parse((char *)decoded, e->size, &descriptor, error, capacity);
+            if (marker && descriptor_required) { strcpy_s(z->id, sizeof(z->id), descriptor.id); sh_package_descriptor_free(&descriptor); }
             if (!marker) { free(decoded); goto done; }
         }
         free(decoded);
@@ -380,7 +395,7 @@ int sh_package_archive_inspect(const unsigned char *bytes, size_t length,
 {
     pa_zip z;
     if (error && capacity) error[0] = 0;
-    if (!pa_open(bytes, length, &z, error, capacity)) return 0;
+    if (!pa_open(bytes, length, &z, 1, error, capacity)) return 0;
     if (id) strcpy_s(id, SH_PACKAGE_ID_CAP, z.id);
     if (files) *files = z.files;
     pa_free(&z); return 1;
@@ -392,10 +407,53 @@ int sh_package_archive_identity(const unsigned char *bytes, size_t length,
 {
     pa_zip z;
     if (error && capacity) error[0] = 0;
-    if (!pa_open(bytes, length, &z, error, capacity)) return 0;
+    if (!pa_open(bytes, length, &z, 1, error, capacity)) return 0;
     if (id) strcpy_s(id, SH_PACKAGE_ID_CAP, z.id);
     if (fingerprint) memcpy(fingerprint, z.fingerprint, 32);
     pa_free(&z); return 1;
+}
+
+void sh_package_archive_files_free(sh_package_archive_files *files)
+{
+    size_t i;
+    if (!files) return;
+    for (i = 0; i < files->count; i++) { free(files->items[i].name); free(files->items[i].body); }
+    free(files->items); memset(files, 0, sizeof(*files));
+}
+
+int sh_package_archive_read(const unsigned char *bytes, size_t length,
+    sh_package_archive_files *out, char *error, size_t capacity)
+{
+    pa_zip z;
+    size_t i;
+    if (error && capacity) error[0] = 0;
+    if (!out) return pa_error(error, capacity, "missing archive conversion output");
+    memset(out, 0, sizeof(*out));
+    if (!pa_open(bytes, length, &z, 0, error, capacity)) return 0;
+    out->items = calloc(z.count, sizeof(*out->items));
+    if (!out->items) goto bad;
+    for (i = 0; i < z.count; i++) {
+        sh_package_archive_file *file = &out->items[out->count++];
+        file->name = _strdup(z.entries[i].name); file->directory = z.entries[i].directory;
+        file->length = z.entries[i].size;
+        if (!file->name || (!file->directory && !(file->body = pa_decode(&z.entries[i])))) goto bad;
+    }
+    pa_free(&z); return 1;
+bad:
+    pa_free(&z); sh_package_archive_files_free(out);
+    return pa_error(error, capacity, "cannot read complete archive for conversion");
+}
+
+unsigned char *sh_package_archive_write(const sh_package_archive_files *files,
+    size_t *length, char *error, size_t capacity)
+{
+    pa_zip verified;
+    unsigned char *bytes = pa_pack(NULL, 0, files, length, error, capacity);
+    if (bytes && !pa_open(bytes, *length, &verified, 0, error, capacity)) {
+        free(bytes); *length = 0; return NULL;
+    }
+    if (bytes) pa_free(&verified);
+    return bytes;
 }
 
 static int pa_directory(wchar_t *path)
@@ -415,7 +473,7 @@ int sh_package_archive_unpack(const unsigned char *bytes, size_t length, const c
     int ok = 0;
     if (files) *files = 0;
     if (error && capacity) error[0] = 0;
-    if (!pa_open(bytes, length, &z, error, capacity)) return 0;
+    if (!pa_open(bytes, length, &z, 1, error, capacity)) return 0;
     base = sh_package_source_wide_path(destination); if (!base) goto done;
     base_length = wcslen(base);
     /* Check every existing ancestor; extraction may not traverse a junction. */

@@ -111,6 +111,20 @@ Install and update convert override packages from earlier releases before any
 DLL is replaced. `migrate-overrides` runs the same conversion for manual DLL
 updates and for older packages copied in later. DOOM must be closed.
 
+This includes the original SnapHak layout, before Snapmap+: content under
+`%USERPROFILE%\snaphak` is verified and brought into the current data folder,
+then loose `overrides/generated/decls/...` files become a current package.
+Their declaration bytes are retained, and conversion keeps an original backup.
+Already present destination files are never overwritten by the old-profile copy.
+
+Format conversion is implemented in `src/backend/package_migration.c`, shared
+with automatic migration of packages inside old saved maps. The installer
+embeds a private build of that core; run `build-migration.ps1` before standalone
+Go builds or tests. The normal repository and installer builds do this
+automatically. Filesystem transactions remain in Go; map ZIP decoding and
+temporary activation remain in the backend. An old map can migrate in memory
+without running the installer, rewriting the saved map or restarting DOOM.
+
 Discovery follows the runtime: a folder with `package.json` is one outer
 package and other folders are groups. A package is converted when its
 descriptor has no `id`, is empty, has the old
@@ -121,7 +135,10 @@ their old content (`decls/`, `images/`, `shaders/generated/`, `resources/*.manif
 folder with those namespaces is converted in place. Loose content in
 `overrides/generated`, `overrides/shader_includes`, an unmarked
 `overrides/assets`, folders named after installed engine roots, and loose files
-at installed engine paths becomes one new `legacy-overrides` package.
+at installed engine paths becomes one new `my-overrides` package. If that folder
+already contains a package, migration chooses `my-overrides-2` (or the next free
+suffix) and preserves the existing package. A fresh install creates `my-overrides`
+with a basic descriptor and an empty `assets/` directory.
 
 Conversion mirrors the old readers. Declarations, images and shader programs
 move to their engine paths below `assets/`; an `assets/decls` tree from a

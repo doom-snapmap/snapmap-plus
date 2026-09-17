@@ -47,6 +47,8 @@ static int embed_prepare_reference(void *context, const char *type, const char *
 typedef struct embed_preparation {
     sh_resource_graph_preparation *native;
     sh_package_references *references;
+    char *error;
+    size_t error_capacity;
 } embed_preparation;
 
 static int embed_prepare_state(void *context, const char *class_name, const char *inherit,
@@ -57,25 +59,45 @@ static int embed_prepare_state(void *context, const char *class_name, const char
     if (!sh_resource_graph_prepare_inline(preparation->native, class_name, inherit, edit, length,
             sh_package_references_add, preparation->references, &result))
         preparation->references->incomplete = 1;
+    if (result.aborted && preparation->error && preparation->error_capacity)
+        snprintf(preparation->error, preparation->error_capacity,
+            "Inline dependency traversal failed for class '%s', inherit '%s'.", class_name, inherit);
     return !result.aborted;
 }
 
-int sh_mpkg_prepare_map(const char *json, size_t length, sh_package_references *references)
+int sh_mpkg_prepare_map(const char *json, size_t length, sh_package_references *references,
+                        char *error, size_t error_capacity)
 {
     sh_decl_registry_source source;
     embed_preparation preparation = {0};
     uintptr_t reflection;
     int ok;
-    if (!references) return 0;
-    if (!json) return !length;
-    if (!sh_json_validate(json, length, 128, NULL)) return 0;
+    sh_json_error problem;
+    if (error && error_capacity) error[0] = 0;
+    if (!references || (!json && length)) {
+        if (error && error_capacity) snprintf(error, error_capacity, "Map dependency input is unavailable.");
+        return 0;
+    }
+    if (!json) return 1;
+    if (!sh_json_validate_ex(json, length, 128, NULL, &problem)) {
+        if (error && error_capacity) snprintf(error, error_capacity,
+            "Map JSON rejected at byte %zu: %s.", problem.offset, problem.reason);
+        return 0;
+    }
     if (!sh_decl_server_registry_source(&source) ||
         !(reflection = (uintptr_t)sh_typeinfo_get_reflect())) { references->incomplete = 1; return 1; }
     preparation.references = references;
+    preparation.error = error; preparation.error_capacity = error_capacity;
     preparation.native = sh_resource_graph_prepare_open(source, reflection);
     if (!preparation.native) { references->incomplete = 1; return 1; }
-    ok = sh_package_map_states(json, length, embed_prepare_state, &preparation) &&
-         sh_package_map_references(json, length, embed_prepare_reference, preparation.native);
+    ok = sh_package_map_states(json, length, embed_prepare_state, &preparation);
+    if (!ok && error && error_capacity && !error[0])
+        snprintf(error, error_capacity, "Map entity-state dependency traversal failed.");
+    if (ok) {
+        ok = sh_package_map_references(json, length, embed_prepare_reference, preparation.native);
+        if (!ok && error && error_capacity)
+            snprintf(error, error_capacity, "Map resource-reference traversal failed.");
+    }
     if (ok) {
         size_t i;
         for (i = 0; i < references->count; i++)
@@ -87,7 +109,7 @@ int sh_mpkg_prepare_map(const char *json, size_t length, sh_package_references *
 }
 
 size_t sh_mpkg_used_packages(const char *json, size_t len, const char *data_root,
-                             sh_mpkg_used **out)
+                             sh_mpkg_used **out, char *error, size_t error_capacity)
 {
     const sh_package_compilation *compiled;
     sh_package_owners owners = {0};
@@ -95,23 +117,34 @@ size_t sh_mpkg_used_packages(const char *json, size_t len, const char *data_root
     sh_package_references references = {0};
     size_t count = 0, i, capacity;
     sh_mpkg_used *selected = NULL;
-    if (!out) return SIZE_MAX;
+    const char *failure = "Map package inventory output is unavailable.";
+    if (error && error_capacity) error[0] = 0;
+    if (!out) {
+        if (error && error_capacity) snprintf(error, error_capacity, "%s", failure);
+        return SIZE_MAX;
+    }
     free(*out); *out = NULL;
     (void)data_root;
     /* Source probes may enter the engine. Finish this pass before acquiring
      * the immutable compiler snapshot used for package ownership. */
-    if (!sh_mpkg_prepare_map(json, len, &references)) return SIZE_MAX;
+    if (!sh_mpkg_prepare_map(json, len, &references, error, error_capacity)) return SIZE_MAX;
     compiled = sh_package_runtime_acquire();
-    if (!compiled || !sh_package_map_owners(compiled, sh_package_runtime_catalog(), json, len,
-                                           &references, &owners, &dependencies_complete)) goto bad;
+    failure = "The compiled package library is unavailable.";
+    if (!compiled) goto bad;
+    failure = "Map gameplay resource ownership traversal failed.";
+    if (!sh_package_map_owners(compiled, sh_package_runtime_catalog(), json, len,
+                               &references, &owners, &dependencies_complete)) goto bad;
     capacity = sh_package_owners_count(&owners);
+    failure = "Cannot allocate the map's supplying package list.";
     if (capacity > SIZE_MAX / sizeof(*selected) ||
         (capacity && !(selected = (sh_mpkg_used *)calloc(capacity, sizeof(*selected))))) goto bad;
     for (i = 0; i < compiled->sources->package_count; i++) if (sh_package_owners_contains(&owners, i)) {
         const sh_package_sources *sources = compiled->sources;
         size_t j;
+        failure = "The compiled package ownership inventory is inconsistent.";
         if (count == capacity) goto bad;
         for (j = 0; j < sources->component_count; j++) if (sources->components[j].owner == i && !sources->components[j].relative[0]) break;
+        failure = "A supplying package has no delivery root or its path exceeds the save buffer.";
         if (j == sources->component_count || strcpy_s(selected[count].id, sizeof(selected[count].id), sources->components[j].descriptor.id) ||
             strcpy_s(selected[count].root, sizeof(selected[count].root), sources->packages[i].root)) goto bad;
         count++;
@@ -126,6 +159,7 @@ size_t sh_mpkg_used_packages(const char *json, size_t len, const char *data_root
     }
     *out = selected; sh_package_owners_free(&owners); return count;
 bad:
+    if (error && error_capacity) snprintf(error, error_capacity, "%s", failure);
     sh_package_runtime_release(); sh_package_references_free(&references);
     free(selected); sh_package_owners_free(&owners); return SIZE_MAX;
 }

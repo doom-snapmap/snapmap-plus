@@ -29,6 +29,12 @@ int sh_resource_catalog_read_path(void *catalog, const char *path,
                                    unsigned char **body, size_t *length);
 int sh_resource_catalog_read_entry(sh_resource_catalog *catalog, size_t index,
                                     unsigned char **body, size_t *length);
+/* Exact campaign identity/path with duplicate verification: 1 = malloc bytes,
+ * 2 = identical to every shipped SnapMap provider, 0 = failure. type == NULL
+ * queries a path (name == "directory" queries a directory): 1/0/-1. */
+int sh_resource_catalog_legacy_read(void *context, const char *type,
+    const char *name, const char *path, unsigned char **body, size_t *length,
+    char *error, size_t capacity);
 
 /* List all native paths associated with an identity, including permutations.
  * The returned span is stable for the catalog lifetime. */

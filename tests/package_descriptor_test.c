@@ -71,6 +71,13 @@ int main(void)
     CHECK(!sh_package_id_valid("Boss"));
     CHECK(!sh_package_id_valid("boss..demons"));
     CHECK(!sh_package_id_valid("boss."));
+    CHECK(!sh_package_descriptor_parse("{}", 2, &descriptor, error, sizeof(error)));
+    CHECK(strstr(error, "missing its required id"));
+    {
+        const char *invalid = "{\"id\":7,\"name\":\"Name\"}";
+        CHECK(!sh_package_descriptor_parse(invalid, strlen(invalid), &descriptor, error, sizeof(error)));
+        CHECK(strstr(error, "id must be a string"));
+    }
     {
         const char *head = "{\"id\":\"large\",\"name\":\"Large strings\",\"strings\":{\"en\":{\"text\":\"";
         const char *tail = "\"}}}";

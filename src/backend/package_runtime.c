@@ -1033,6 +1033,17 @@ const sh_package_compilation *sh_package_runtime_acquire(void)
 
 const sh_resource_catalog *sh_package_runtime_catalog(void) { return g_catalog; }
 
+int sh_package_runtime_legacy_read(void *context, const char *type,
+    const char *name, const char *path, unsigned char **body, size_t *length,
+    char *error, size_t capacity)
+{
+    int result;
+    (void)context;
+    AcquireSRWLockShared(&g_lock);
+    result = sh_resource_catalog_legacy_read(g_catalog, type, name, path, body, length, error, capacity);
+    ReleaseSRWLockShared(&g_lock); return result;
+}
+
 int sh_package_runtime_audio_original(const char *path, sh_package_original_identity *out,
     char *error, size_t capacity)
 {

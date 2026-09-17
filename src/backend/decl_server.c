@@ -136,6 +136,7 @@ typedef struct ds_candidate {
     size_t body_length;
     int outcome;
     int shadow_kind;
+    int native_original;
 } ds_candidate;
 
 enum {
@@ -908,6 +909,7 @@ static int ds_capture_snapshot_locked(const sh_package_compilation *compiled)
             ds_log("REFUSED", resource->engine_path, "compiled declaration is not one valid native body"); goto done;
         }
         candidate = &g_candidates[g_candidate_count++];
+        candidate->native_original = resource->native_original;
         if (strcpy_s(candidate->type, sizeof(candidate->type), resource->type) ||
             strcpy_s(candidate->name, sizeof(candidate->name), resource->name) ||
             strcpy_s(candidate->source, sizeof(candidate->source), resource->engine_path)) goto done;
@@ -1245,6 +1247,24 @@ static int ds_decl_usable(void *decl, const char **reason)
     return 1;
 }
 
+/* Shipped declarations can intentionally reach the engine's fallback (for
+ * example, old campaign materials naming uncooked programs). Importing their
+ * unchanged bytes must preserve that native behavior. Only the compiler's
+ * exact installed-original comparison authorizes it; authored changes still
+ * require a successful parse, and editor entities still pass the palette gate. */
+static int ds_candidate_usable(const ds_candidate *candidate, void *decl, const char **reason)
+{
+    unsigned char state;
+    if (ds_decl_usable(decl, reason)) return 1;
+    if (candidate->native_original && ds_read_decl_state(decl, &state) &&
+        (state & DS_DECL_DEFAULTED) && !(state & (DS_DECL_PENDING_LOAD | DS_DECL_IN_PROGRESS))) {
+        if (reason) *reason = NULL;
+        ds_log("NATIVE-FALLBACK", candidate->source, "unchanged installed declaration completed with the engine's default");
+        return 1;
+    }
+    return 0;
+}
+
 static void ds_bind_source_mode(const sig_result *results, size_t count)
 {
     const sig_result *site = ds_result(results, count, "DeclSourceModeCall");
@@ -1492,7 +1512,7 @@ static int ds_materialize_identity(ds_materialize_context *context, int index)
         reason = "engine exception during identity materialization";
     }
 
-    if (!fault && !reason && !ds_decl_usable(decl, &reason) && !reason)
+    if (!fault && !reason && !ds_candidate_usable(candidate, decl, &reason) && !reason)
         reason = "materialized identity failed native state validation";
     if (fault || reason) {
         ds_log_decl_state("after materialization", candidate->source,
@@ -1747,7 +1767,7 @@ static void ds_runtime_reload_shadowed(ds_materialize_context *context)
                 continue;
             }
         }
-        if (ds_decl_usable(decl, NULL)) {
+        if (ds_candidate_usable(candidate, decl, NULL)) {
             char detail[160];
             if (g_rt_marks[i].shadowed)
                 InterlockedIncrement(&g_rearm_shadow_reparsed);
@@ -1757,9 +1777,13 @@ static void ds_runtime_reload_shadowed(ds_materialize_context *context)
                         (unsigned)state);
             ds_log("RELOADED", candidate->source, detail);
         } else {
+            char detail[256];
+            const char *reason = NULL;
+            ds_decl_usable(decl, &reason);
             InterlockedIncrement(&g_rearm_drain_faults);
-            ds_log("DRAIN-FAILED", candidate->source,
-                   "pending mark survived both the lookup and the direct generic load; it will be swept, and this identity stays stale");
+            snprintf(detail, sizeof(detail), "%s (state=0x%02x); this identity stays stale",
+                reason ? reason : "native refresh failed", (unsigned)state);
+            ds_log("DRAIN-FAILED", candidate->source, detail);
         }
     }
 }
@@ -2194,6 +2218,7 @@ int sh_decl_server_test_materialize_missing_sedefs(
                     DS_SHADOW_SOURCE : DS_SHADOW_NONE;
             test_candidates[i].body = (char *)items[i].body;
             test_candidates[i].body_length = items[i].body_length;
+            test_candidates[i].native_original = items[i].native_original;
         }
     }
     g_candidates = test_candidates;
@@ -2250,6 +2275,7 @@ int sh_decl_server_test_scan_and_materialize_missing(
                     DS_SHADOW_SOURCE : DS_SHADOW_NONE;
             test_candidates[i].body = (char *)items[i].body;
             test_candidates[i].body_length = items[i].body_length;
+            test_candidates[i].native_original = items[i].native_original;
         }
     }
     g_candidates = test_candidates;
@@ -3390,6 +3416,7 @@ int sh_decl_server_test_apply(const sh_decl_server_test_materialize_item *items,
         strcpy_s(candidate->name, sizeof(candidate->name), items[i].name);
         strcpy_s(candidate->source, sizeof(candidate->source), items[i].source);
         candidate->body_length = items[i].body_length;
+        candidate->native_original = items[i].native_original;
         candidate->body = (char *)HeapAlloc(GetProcessHeap(), 0, items[i].body_length + 1);
         if (!candidate->body) { ds_free_candidates(); return 0; }
         memcpy(candidate->body, items[i].body, items[i].body_length);

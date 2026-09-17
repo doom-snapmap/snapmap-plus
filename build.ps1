@@ -9,6 +9,8 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$here\installer\build-migration.ps1"
+if ($LASTEXITCODE -ne 0) { throw "shared migration build failed" }
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$here\src\backend\build.ps1" @Rest
 if ($LASTEXITCODE -ne 0) { throw "backend build failed" }
 if ($BackendOnly) {

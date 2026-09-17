@@ -22,6 +22,32 @@
 #include "package_runtime.h"
 #include "backend_log.h"
 
+static sh_package_legacy_reader g_legacy_reader;
+static void *g_legacy_context;
+void sh_mpkg_set_legacy_reader(sh_package_legacy_reader reader, void *context)
+{ g_legacy_reader = reader; g_legacy_context = context; }
+
+/* Verify the original carrier before conversion. The public extractor keeps
+ * returning exact transport bytes for export and forensic tools. */
+static unsigned char *mpkg_compiled_payload(const char *json, size_t length, const char *id,
+    size_t *out_length, char *error, size_t capacity)
+{
+    unsigned char *original, *converted = NULL, *out;
+    size_t converted_length = 0;
+    original = sh_mpkg_extract(json, length, id, out_length, error, capacity);
+    if (!original) return NULL;
+    if (!sh_package_legacy_convert(original, *out_length, id, g_legacy_reader, g_legacy_context,
+        &converted, &converted_length, error, capacity)) {
+        HeapFree(GetProcessHeap(), 0, original); *out_length = 0; return NULL;
+    }
+    if (!converted) return original;
+    out = HeapAlloc(GetProcessHeap(), 0, converted_length);
+    if (out) memcpy(out, converted, converted_length);
+    else if (error && capacity) snprintf(error, capacity, "cannot retain migrated package '%s'", id);
+    free(converted); HeapFree(GetProcessHeap(), 0, original);
+    *out_length = out ? converted_length : 0; return out;
+}
+
 /* ==================================================================== */
 /* small text helpers                                                    */
 /* ==================================================================== */
@@ -76,7 +102,20 @@ static int mpkg_parse_header(const char *p, size_t plen, mpkg_hdr *hdr)
         n = (size_t)(separator - c);
         if (fields != 3 || !n || n >= sizeof(hdr->id)) return 0;
         memcpy(hdr->id, c, n); hdr->id[n] = 0;
-        if (!sh_package_id_valid(hdr->id)) return 0;
+        if (!sh_package_id_valid(hdr->id)) {
+            char digest[SH_MPKG_DIGEST_CHARS + 1];
+            size_t j;
+            /* Beta 13 used folder identities and allowed leading/trailing
+             * '-' and '_'. Decode those carriers with one stable modern id;
+             * extraction still verifies the original payload's checksum. */
+            if (n >= 100) return 0;
+            for (j = 0; j < n; j++) {
+                char ch = hdr->id[j];
+                if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_')) return 0;
+            }
+            sh_shard_digest16((const unsigned char *)hdr->id, n, digest);
+            snprintf(hdr->id, sizeof(hdr->id), "legacy.%s", digest);
+        }
         c = separator + 1;
     }
 
@@ -921,7 +960,10 @@ static HANDLE mpkg_install_lock(const char *root, char *error, size_t capacity)
 struct sh_mpkg_context {
     char root[MAX_PATH];
     size_t count;
+    struct sh_mpkg_context *cleanup_next;
 };
+static SRWLOCK g_context_cleanup_lock = SRWLOCK_INIT;
+static sh_mpkg_context *g_context_cleanup;
 
 const char *sh_mpkg_context_root(const sh_mpkg_context *context)
 { return context && context->root[0] ? context->root : NULL; }
@@ -945,6 +987,30 @@ int sh_mpkg_context_close(sh_mpkg_context **context)
     free(*context); *context = NULL; return 1;
 }
 
+void sh_mpkg_context_retire(sh_mpkg_context **context)
+{
+    sh_mpkg_context *retired;
+    if (sh_mpkg_context_close(context)) return;
+    retired = *context; *context = NULL;
+    AcquireSRWLockExclusive(&g_context_cleanup_lock);
+    retired->cleanup_next = g_context_cleanup; g_context_cleanup = retired;
+    ReleaseSRWLockExclusive(&g_context_cleanup_lock);
+    backend_log("MPKG: retired temporary cache is locked; cleanup queued without blocking map loading");
+}
+
+void sh_mpkg_context_collect(void)
+{
+    sh_mpkg_context **link;
+    AcquireSRWLockExclusive(&g_context_cleanup_lock);
+    link = &g_context_cleanup;
+    while (*link) {
+        sh_mpkg_context *item = *link, *next = item->cleanup_next;
+        if (sh_mpkg_context_close(&item)) *link = next;
+        else link = &item->cleanup_next;
+    }
+    ReleaseSRWLockExclusive(&g_context_cleanup_lock);
+}
+
 sh_mpkg_context *sh_mpkg_context_open(const char *data_root, const char *json, size_t len,
     char *error, size_t capacity)
 {
@@ -954,9 +1020,12 @@ sh_mpkg_context *sh_mpkg_context_open(const char *data_root, const char *json, s
     DWORD root_length;
     size_t count, i;
     int created = 0;
+    sh_json_error problem;
     if (error && capacity) error[0] = 0;
-    if (!json || !sh_json_validate(json, len, 128, NULL)) {
-        mpkg_err(error, capacity, "map package context requires valid map JSON"); return NULL;
+    if (!sh_json_validate_ex(json, len, 128, NULL, &problem)) {
+        if (error && capacity) snprintf(error, capacity,
+            "Map JSON rejected at byte %zu: %s.", problem.offset, problem.reason);
+        return NULL;
     }
     count = mpkg_scan_internal(json, len, &decls);
     if (count == SIZE_MAX || !(context = calloc(1, sizeof(*context)))) {
@@ -988,10 +1057,13 @@ sh_mpkg_context *sh_mpkg_context_open(const char *data_root, const char *json, s
         unsigned char *payload, fingerprint[32];
         size_t payload_length = 0;
         char id[SH_PACKAGE_ID_CAP], destination[MAX_PATH];
+        char detail[SH_MPKG_ERR_CAP] = "";
         int ok;
-        payload = sh_mpkg_extract(json, len, decls[i].id, &payload_length, error, capacity);
+        payload = mpkg_compiled_payload(json, len, decls[i].id, &payload_length, error, capacity);
         if (!payload) goto bad;
-        ok = sh_package_archive_identity(payload, payload_length, id, fingerprint, error, capacity);
+        ok = sh_package_archive_identity(payload, payload_length, id, fingerprint, detail, sizeof(detail));
+        if (!ok && error && capacity)
+            snprintf(error, capacity, "Embedded package '%s': %s", decls[i].id, detail);
         if (ok && strcmp(id, decls[i].id)) {
             mpkg_err(error, capacity, "map package descriptor does not match its delivery identity"); ok = 0;
         }
@@ -1009,11 +1081,7 @@ sh_mpkg_context *sh_mpkg_context_open(const char *data_root, const char *json, s
     free(decls); return context;
 bad:
     free(decls);
-    if (!sh_mpkg_context_close(&context)) {
-        /* An abandoned private cache is never discovered as an installation. */
-        backend_log("MPKG: incomplete private map cache could not be discarded");
-        free(context);
-    }
+    sh_mpkg_context_retire(&context);
     return NULL;
 }
 
@@ -1163,7 +1231,7 @@ int sh_mpkg_activation_cancel(void)
     for (i = 0; i < g_session_count; i++) if (g_session[i].outcome == 4) g_session[i].outcome = 3;
     mutex = g_install.mutex; memset(&g_install, 0, sizeof(g_install));
     mpkg_unlock(); ReleaseMutex(mutex); CloseHandle(mutex);
-    sh_mpkg_report_error("Package installation canceled. Check the Snapmap+ log, resolve the reported error, then load the map to try again.");
+    backend_log("MPKG: package installation canceled and rolled back; the map can be requested again");
     return 1;
 }
 
@@ -1579,7 +1647,7 @@ int sh_mpkg_request_map_install(const char *json, size_t length,
         tail = entry;
         strcpy_s(entry->id, sizeof(entry->id), id);
         strcpy_s(entry->digest, sizeof(entry->digest), decl->digest);
-        entry->payload = sh_mpkg_extract(json, length, id, &entry->payload_len, error, capacity);
+        entry->payload = mpkg_compiled_payload(json, length, id, &entry->payload_len, error, capacity);
         if (!entry->payload || !sh_package_archive_identity(entry->payload, entry->payload_len,
             archive_id, fingerprint, error, capacity) || strcmp(archive_id, id) ||
             memcmp(fingerprint, sources->fingerprints[owner], 32) ||
@@ -1634,7 +1702,7 @@ static int mpkg_gate_declared(const char *json, size_t len,
         unsigned char fingerprint[32], *payload;
         char id[SH_PACKAGE_ID_CAP], error[SH_MPKG_ERR_CAP];
         int valid;
-        payload = sh_mpkg_extract(json, len, d->id, &payload_len, error, sizeof(error));
+        payload = mpkg_compiled_payload(json, len, d->id, &payload_len, error, sizeof(error));
         valid = payload && sh_package_archive_identity(payload, payload_len, id, fingerprint, error, sizeof(error));
         if (payload) HeapFree(GetProcessHeap(), 0, payload);
         if (!valid || strcmp(id, d->id)) {
@@ -1711,7 +1779,7 @@ static int mpkg_gate_declared(const char *json, size_t len,
             strcpy_s(s->digest, sizeof(s->digest), d->digest);
             if (tail) tail->next = s; else head = s;
             tail = s;
-            s->payload = sh_mpkg_extract(json, len, d->id, &s->payload_len, err, sizeof(err));
+            s->payload = mpkg_compiled_payload(json, len, d->id, &s->payload_len, err, sizeof(err));
             if (!s->payload || !mpkg_zip_survey(s->payload, s->payload_len, &s->files, err, sizeof(err))) {
                 complete = 0; break;
             }

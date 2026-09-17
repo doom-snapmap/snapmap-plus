@@ -61,6 +61,14 @@ int sh_json_visit_objects_filtered(const char *json, size_t length, unsigned max
 
 int sh_json_validate(const char *json, size_t length, unsigned max_depth,
                      sh_json_kind *out_kind);
+/* Failure positions are zero-based byte offsets into the supplied buffer.
+ * reason is static text; neither it nor the input is owned by the result. */
+typedef struct sh_json_error {
+    size_t offset;
+    const char *reason;
+} sh_json_error;
+int sh_json_validate_ex(const char *json, size_t length, unsigned max_depth,
+                        sh_json_kind *out_kind, sh_json_error *error);
 int sh_json_parse_object(const char *json, size_t length, unsigned max_depth,
                          sh_json_object *out);
 const char *sh_json_object_get(const sh_json_object *object, const char *key);

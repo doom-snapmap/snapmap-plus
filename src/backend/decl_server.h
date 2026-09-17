@@ -144,6 +144,7 @@ typedef struct sh_decl_server_test_materialize_item {
     const unsigned char *body;
     size_t body_length;
     int shadow_kind;
+    int native_original;
 } sh_decl_server_test_materialize_item;
 
 /* Exercise the production source-first classification order. The return value

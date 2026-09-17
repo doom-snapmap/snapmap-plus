@@ -485,11 +485,12 @@ static void test_batch_install(const char *root)
     batch_fail = 0;
     CHECK(!sh_mpkg_gate(map, length));
     CHECK(installed_count(client) == 2 && g_rearm_requests == 1);
+    sh_mpkg_report_error("specific activation failure");
     CHECK(sh_mpkg_activation_cancel());
     CHECK(installed_count(client) == 0 && !sh_mpkg_test_session_installed_count());
     g_dialog_idle = 1; g_dialog_asks = 0; g_dialog_answer = SH_ENGINE_DIALOG_PENDING;
     sh_mpkg_consent_poll();
-    CHECK(g_dialog_asks == 1 && strstr(g_dialog_text, "resolve the reported error"));
+    CHECK(g_dialog_asks == 1 && !strcmp(g_dialog_text, "specific activation failure"));
     g_dialog_answer = SH_ENGINE_DIALOG_ACCEPTED; sh_mpkg_consent_poll();
     g_dialog_idle = 0;
     CHECK(!sh_mpkg_gate(map, length));
@@ -925,6 +926,7 @@ static void test_private_map_context(const char *root)
     CHECK(sh_mpkg_context_close(&a));
     CHECK(!sh_mpkg_context_open("", fix_map_happy, fix_map_happy_len, error, sizeof(error)));
     CHECK(!sh_mpkg_context_open(root, "{", 1, error, sizeof(error)));
+    CHECK(strstr(error, "byte 1") && strstr(error, "invalid JSON syntax"));
     CHECK(!sh_mpkg_context_open(root, fix_map_wrongdigest, fix_map_wrongdigest_len, error, sizeof(error)));
     CHECK(!sh_mpkg_context_open(root, fix_map_incomplete, fix_map_incomplete_len, error, sizeof(error)));
     /* A valid prefix followed by a mismatched descriptor must publish nothing. */
@@ -954,9 +956,15 @@ static void test_private_map_context(const char *root)
                 HANDLE held = CreateFileA(package, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
                 CHECK(held != INVALID_HANDLE_VALUE);
                 CHECK(!sh_mpkg_context_close(&a) && a);
+                /* After provider retirement, a locked cache no longer holds
+                 * the map context. A different map can prepare immediately. */
+                sh_mpkg_context_retire(&a); CHECK(!a && dir_exists(folder));
+                b = sh_mpkg_context_open(root, fix_map_happy, fix_map_happy_len, error, sizeof(error));
+                CHECK(b && sh_mpkg_context_count(b) == 1);
+                CHECK(sh_mpkg_context_close(&b));
                 if (held != INVALID_HANDLE_VALUE) CloseHandle(held);
             }
-            CHECK(sh_mpkg_context_close(&a) && !a);
+            sh_mpkg_context_collect(); CHECK(!dir_exists(folder));
         }
         HeapFree(GetProcessHeap(), 0, combined);
     }
@@ -1082,6 +1090,52 @@ done:
     free(json); return result;
 }
 
+static void test_legacy_map_context(const char *root)
+{
+    const char marker[] = "{\"schema\":\"snapmap-plus.override-package.v1\",\"name\":\"Old boss\"}";
+    const char decl[] = "{ health = 10; }";
+    sh_package_archive_file members[] = {
+        {"package.json", (unsigned char *)marker, sizeof(marker) - 1, 0},
+        {"decls/entitydef/boss.decl", (unsigned char *)decl, sizeof(decl) - 1, 0}
+    };
+    sh_package_archive_files files = {members, 2};
+    unsigned char *zip, *original;
+    char *map, error[512], path[MAX_PATH];
+    size_t length, map_length, original_length;
+    sh_mpkg_context *context;
+    zip = sh_package_archive_write(&files, &length, error, sizeof(error)); CHECK(zip != NULL);
+    if (!zip) return;
+    map = sh_mpkg_embed(EMPTY_MAP, strlen(EMPTY_MAP), "old-boss", zip, length, &map_length, error, sizeof(error)); CHECK(map != NULL);
+    if (!map) { free(zip); return; }
+    context = sh_mpkg_context_open(root, map, map_length, error, sizeof(error));
+    if (!context) fprintf(stderr, "legacy private context: %s\n", error);
+    CHECK(context != NULL);
+    if (context) {
+        CHECK(sh_mpkg_context_count(context) == 1);
+        snprintf(path, sizeof(path), "%s/overrides/old-boss/assets/generated/decls/entitydef/boss.decl", sh_mpkg_context_root(context));
+        CHECK(file_exists(path));
+        CHECK(sh_mpkg_context_close(&context));
+    }
+    /* Reconstructing the private view does not rewrite the original map. */
+    original = sh_mpkg_extract(map, map_length, "old-boss", &original_length, error, sizeof(error));
+    CHECK(original && original_length == length && !memcmp(original, zip, length));
+    if (original) HeapFree(GetProcessHeap(), 0, original);
+    {
+        char *name = strstr(map, "smpkg.old-boss.");
+        sh_mpkg_decl declaration;
+        CHECK(name != NULL);
+        if (name) {
+            memcpy(name + 6, "-boss__", 7);
+            CHECK(sh_mpkg_scan(map, map_length, &declaration, 1) == 1);
+            CHECK(!strncmp(declaration.id, "legacy.", 7));
+            context = sh_mpkg_context_open(root, map, map_length, error, sizeof(error));
+            CHECK(context && sh_mpkg_context_count(context) == 1);
+            CHECK(sh_mpkg_context_close(&context));
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, map); free(zip);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 4 && !strcmp(argv[1], "--map-context"))
@@ -1099,6 +1153,7 @@ int main(int argc, char **argv)
                 temp, (unsigned long)pid);
     remove_tree(root);
     CHECK(make_dir(root));
+    test_legacy_map_context(root);
     join(overrides, sizeof overrides, root, "overrides");
     CHECK(make_dir(overrides));
     test_private_map_context(root);

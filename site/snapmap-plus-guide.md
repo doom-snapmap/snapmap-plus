@@ -946,6 +946,15 @@ a package carried by a map must be complete and valid, or that map does not load
 
 ### Packages from earlier Snapmap+ releases
 
+Maps carrying packages from the older format convert automatically when opened.
+You do not need to enter the map first or export a rawmap. The original saved map
+is left intact; conversion prepares the package content for that load. Installation
+still asks for consent only when resources are missing, and installs complete
+converted packages. Saving the map carries the current package format forward.
+
+Onboarding also imports the original SnapHak profile's loose `overrides/generated/`
+tree and converts it using the same rules as older Snapmap+ packages.
+
 Earlier releases used a different layout: `decls/`, `images/` and `shaders/` folders instead of
 `assets/`, separate `resources/`, `requirements/`, `strings/` and `hud/` files, a `package.json`
 without an `id`, loose files directly under `overrides`, and `shader_includes`. Installing or
@@ -955,9 +964,14 @@ Each package converts completely or not at all. Conversion keeps your folders an
 boundaries, moves resources to their engine paths below `assets/`, and folds requirements, strings
 and weapon HUD settings into `package.json`. Manifest entries become the installed game resources
 they named, except resources SnapMap already ships unchanged. Loose files become a
-`legacy-overrides` package. Disabled or unused files, such as `.backup` copies, stay in the package
+`my-overrides` package. Disabled or unused files, such as `.backup` copies, stay in the package
 outside `assets/` and never become active. Declaration contents are never edited, even when they
 contain a mistake.
+
+Fresh installations create `my-overrides/package.json` and an empty
+`my-overrides/assets/` directory. Loose legacy content uses that same package
+name. If a package already occupies it, migration uses the next free suffix
+(`my-overrides-2`, and so on) without overwriting your existing files.
 
 The originals are moved, byte for byte, to
 `%LOCALAPPDATA%\snapmap-plus\override-backups\migration-...\original`. Nothing there is loaded
@@ -976,6 +990,28 @@ manifests and shader includes are identified from its installed resource catalog
 command again does nothing to packages that are already current. A package that cannot be converted
 is listed with the reason and left untouched, for example a `package.json` that is not valid JSON or
 two files that supply different bytes for the same resource. Fix it and run the command again.
+
+### In-game package prompts
+
+Opening a supported older map converts its package format automatically. That
+conversion itself has no prompt. These are the package-related DOOM dialogs:
+
+| Dialog | When it should appear | Result |
+| --- | --- | --- |
+| **This map needs ... mod package(s). Install it now?** (Yes / No) | The installed resources do not cover the map's supplied resources. It lists whole packages, file counts and size. | Yes installs the complete required bundles and continues that map request without restarting. No cancels the request and installs nothing. |
+| **NOTICE** with a map JSON, package descriptor, archive or payload diagnostic | Input is actually incomplete, corrupt or unsafe, or cannot be reconstructed faithfully. Supported legacy layout alone is not an error. | The request stops; the original map and authored files are retained. |
+| **NOTICE** naming a resource, policy or compilation failure | Required content is missing or inconsistent, edits conflict, or the engine cannot apply the required policy. | The attempted map provider is rolled back. A completed native fallback for unchanged game declarations is allowed. |
+| **NOTICE** with an installation or filesystem failure | Staging, verification, publication or final commit fails, including disk, permission or source-change failures. | The entire attempted install is canceled; retry after resolving the cause. |
+| **NOTICE** about an unfinished installation or previous map resources | An actual rollback or native resource retirement cannot finish. | Reuse stops to preserve existing data. A locked, already-retired temporary cache alone does not block another map. |
+| **NOTICE** about native map continuation | The retained native request fails to resume or load. | That request and pending installation are canceled. |
+| **Map save failed ...** or **package ... could NOT be packed/embedded ...** | Required package usage cannot be established, source files changed or cannot be read, or the complete payload cannot be written. | The save is refused instead of publishing a map with missing content. |
+| **Play could not read the current map's package requirements** | The editor cannot serialize or prepare the map for Play. | Play does not start; the editor state remains available. |
+
+The specific **NOTICE** text comes from the failed operation, so filenames and
+details vary. Ordinary cancellation, successful migration, complete resource
+coverage, a differently named bundle using already available resources, and
+vanilla-only maps should produce no package error notice. Map-authored resource
+values remain active for that map even when different local values are installed.
 
 ### Combining packages
 

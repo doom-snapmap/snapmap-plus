@@ -15,7 +15,7 @@
 struct sh_resource_catalog {
     sh_resource_catalog_entry *rows;
     size_t count, capacity;
-    sh_resource_catalog_entry **paths, **identities;
+    sh_resource_catalog_entry **paths, **identities, **legacy_paths;
     HANDLE archives[4];
     uint64_t archive_sizes[4];
     SRWLOCK archive_lock;
@@ -121,6 +121,16 @@ static int rc_identity_cmp(const void *a, const void *b)
     return c ? c : rc_path_cmp(a, b);
 }
 
+static const char *rc_legacy_provider(const sh_resource_catalog_entry *row)
+{ return row->path[0] ? row->path : row->name; }
+
+static int rc_legacy_path_cmp(const void *a, const void *b)
+{
+    const sh_resource_catalog_entry *left = *(const sh_resource_catalog_entry *const *)a;
+    const sh_resource_catalog_entry *right = *(const sh_resource_catalog_entry *const *)b;
+    return strcmp(rc_legacy_provider(left), rc_legacy_provider(right));
+}
+
 sh_resource_catalog *sh_resource_catalog_open(const char *doom_base, char *error, size_t error_capacity)
 {
     static const char *const stems[] = {"snap_gameresources", "gameresources"};
@@ -154,16 +164,18 @@ sh_resource_catalog *sh_resource_catalog_open(const char *doom_base, char *error
     }
     catalog->paths = (sh_resource_catalog_entry **)calloc(catalog->count ? catalog->count : 1u, sizeof(*catalog->paths));
     catalog->identities = (sh_resource_catalog_entry **)calloc(catalog->count ? catalog->count : 1u, sizeof(*catalog->identities));
-    if (!catalog->paths || !catalog->identities) goto bad;
+    catalog->legacy_paths = (sh_resource_catalog_entry **)calloc(catalog->count ? catalog->count : 1u, sizeof(*catalog->legacy_paths));
+    if (!catalog->paths || !catalog->identities || !catalog->legacy_paths) goto bad;
     for (i = 0; i < catalog->count; i++) {
         const sh_resource_catalog_entry *row = &catalog->rows[i];
         uint64_t archive_size = catalog->archive_sizes[row->archive];
         if (row->offset > archive_size || row->stored_size > archive_size - row->offset ||
             ((!row->size) != (!row->stored_size))) goto bad;
-        catalog->paths[i] = catalog->identities[i] = &catalog->rows[i];
+        catalog->legacy_paths[i] = catalog->paths[i] = catalog->identities[i] = &catalog->rows[i];
     }
     qsort(catalog->paths, catalog->count, sizeof(*catalog->paths), rc_path_cmp);
     qsort(catalog->identities, catalog->count, sizeof(*catalog->identities), rc_identity_cmp);
+    qsort(catalog->legacy_paths, catalog->count, sizeof(*catalog->legacy_paths), rc_legacy_path_cmp);
     return catalog;
 bad:
     if (error && error_capacity) snprintf(error, error_capacity, "installed resource catalog or archive validation failed under %s", doom_base ? doom_base : "(null)");
@@ -176,7 +188,7 @@ void sh_resource_catalog_close(sh_resource_catalog *catalog)
     if (!catalog) return;
     for (i = 0; i < 4; i++) if (catalog->archives[i] && catalog->archives[i] != INVALID_HANDLE_VALUE) CloseHandle(catalog->archives[i]);
     for (i = 0; i < catalog->count; i++) { free(catalog->rows[i].type); free(catalog->rows[i].name); free(catalog->rows[i].path); }
-    free(catalog->paths); free(catalog->identities); free(catalog->rows); free(catalog);
+    free(catalog->legacy_paths); free(catalog->paths); free(catalog->identities); free(catalog->rows); free(catalog);
 }
 
 size_t sh_resource_catalog_count(const sh_resource_catalog *catalog) { return catalog ? catalog->count : 0; }
@@ -332,4 +344,78 @@ size_t sh_resource_catalog_find(const sh_resource_catalog *catalog, const char *
          !strcmp(catalog->identities[end]->name, name_key); end++) {}
     if (end > low) *entries = (const sh_resource_catalog_entry *const *)(catalog->identities + low);
     free(type_key); free(name_key); return end - low;
+}
+
+static size_t rc_find_legacy_path(const sh_resource_catalog *catalog, const char *path,
+    const sh_resource_catalog_entry *const **entries)
+{
+    size_t low = 0, high = catalog->count, end;
+    while (low < high) {
+        size_t mid = low + (high - low) / 2u;
+        if (_stricmp(rc_legacy_provider(catalog->legacy_paths[mid]), path) < 0) low = mid + 1u;
+        else high = mid;
+    }
+    for (end = low; end < catalog->count && !_stricmp(rc_legacy_provider(catalog->legacy_paths[end]), path); end++) {}
+    *entries = (const sh_resource_catalog_entry *const *)(catalog->legacy_paths + low);
+    return end - low;
+}
+
+int sh_resource_catalog_legacy_read(void *context, const char *type,
+    const char *name, const char *path, unsigned char **body, size_t *length,
+    char *error, size_t capacity)
+{
+    sh_resource_catalog *catalog = context;
+    const sh_resource_catalog_entry *const *rows = NULL;
+    unsigned char *first = NULL;
+    size_t count, i, size = 0;
+    int result = 0, stock = 0, same_stock = 1;
+    const char *failure = "installed game resource catalog is unavailable";
+    if (body) *body = NULL;
+    if (length) *length = 0;
+    if (!catalog || !path) goto done;
+    if (!type) {
+        const char *slash = strchr(path, '/'), *second = slash ? strchr(slash + 1, '/') : NULL;
+        size_t n = second ? (size_t)(second - path) : strlen(path);
+        if (!name && rc_find_legacy_path(catalog, path, &rows)) return 1;
+        /* Match disk migration: an installed first-two-segment namespace
+         * preserves new authored files too, including shader includes. */
+        if (slash && (second || (name && !strcmp(name, "directory"))))
+            for (i = 0; i < catalog->count; i++) {
+                const char *provider = rc_legacy_provider(&catalog->rows[i]);
+                if (!_strnicmp(provider, path, n) && provider[n] == '/') return 1;
+            }
+        return 0;
+    }
+    if (!body || !length || !name) goto done;
+    count = sh_resource_catalog_find(catalog, type, name, &rows);
+    failure = "legacy manifest resource is missing from the installed campaign";
+    for (i = 0; i < count; i++) if (rows[i]->archive / 2u == 1u && !_stricmp(rc_legacy_provider(rows[i]), path)) {
+        unsigned char *other = NULL;
+        size_t other_size;
+        failure = "legacy manifest resource could not be read";
+        if (!rc_read(catalog, rows[i], &other, &other_size, NULL)) goto done;
+        if (!first) { first = other; size = other_size; }
+        else {
+            int same = size == other_size && (!size || !memcmp(first, other, size));
+            free(other); failure = "legacy manifest resource has conflicting installed providers";
+            if (!same) goto done;
+        }
+    }
+    if (!first) goto done;
+    count = rc_find_legacy_path(catalog, path, &rows);
+    for (i = 0; i < count; i++) if (rows[i]->archive / 2u == 0u) {
+        unsigned char *other = NULL;
+        size_t other_size;
+        stock = 1; failure = "shipped SnapMap resource could not be verified";
+        if (!rc_read(catalog, rows[i], &other, &other_size, NULL)) goto done;
+        if (size != other_size || (size && memcmp(first, other, size))) same_stock = 0;
+        free(other);
+    }
+    if (stock && same_stock) result = 2;
+    else { *body = first; *length = size; first = NULL; result = 1; }
+done:
+    free(first);
+    if (!result && error && capacity) snprintf(error, capacity, "%s: %s/%s (%s)",
+        failure, type ? type : "path", name ? name : "", path ? path : "");
+    return !type && !catalog ? -1 : result;
 }

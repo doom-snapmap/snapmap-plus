@@ -175,6 +175,30 @@ static void test_serializes_nested_config_deterministically(void)
     sh_json_object_free(&root);
 }
 
+static void test_failure_diagnostics(void)
+{
+    static const struct { const char *json, *reason; size_t offset; unsigned depth; } cases[] = {
+        { "{", "invalid JSON syntax", 1, 64 },
+        { "{\"x\":1,\"x\":2}", "duplicate object key", 10, 64 },
+        { "\"\xc0\xaf\"", "invalid UTF-8 in string", 1, 64 },
+        { "[]x", "trailing data after JSON value", 2, 64 },
+        { "[[]]", "nesting limit exceeded", 1, 1 },
+        { "\"\\q\"", "invalid string escape", 3, 64 },
+        { "\"abc", "unterminated string", 4, 64 },
+        { "\"\\uD800\"", "unpaired Unicode surrogate", 7, 64 },
+    };
+    sh_json_error error;
+    size_t i;
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        CHECK(!sh_json_validate_ex(cases[i].json, strlen(cases[i].json), cases[i].depth, NULL, &error));
+        CHECK(error.reason && !strcmp(error.reason, cases[i].reason));
+        CHECK(error.offset == cases[i].offset);
+    }
+    CHECK(sh_json_validate_ex("{}", 2, 64, NULL, &error));
+    CHECK(!error.reason && !error.offset);
+    CHECK(!sh_json_validate_ex(NULL, 0, 64, NULL, &error) && error.reason);
+}
+
 int main(void)
 {
     test_valid_object_preserves_raw_values();
@@ -185,6 +209,7 @@ int main(void)
     test_mutates_objects_without_losing_order();
     test_decodes_json_strings_with_size_query();
     test_serializes_nested_config_deterministically();
+    test_failure_diagnostics();
 
     if (g_failed) {
         fprintf(stderr, "config_json_test: %d failure(s)\n", g_failed);

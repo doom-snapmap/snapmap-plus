@@ -16,7 +16,7 @@ static int pd_error(char *error, size_t capacity, const char *message)
 static int pd_string(const char *raw, char *out, size_t capacity)
 {
     size_t length = 0;
-    return raw && sh_json_decode_string(raw, strlen(raw), out, capacity, &length) &&
+    return raw && sh_json_decode_string(raw, strlen(raw), out, capacity, &length) && length < capacity &&
            strlen(out) == length;
 }
 
@@ -145,9 +145,13 @@ int sh_package_descriptor_parse(const char *json, size_t length,
     if (!json || !length || length > PTRDIFF_MAX ||
         !sh_json_parse_object(json, length, PD_MAX_DEPTH, &parsed.fields)) goto fail;
 
+    failure = "package.json is missing its required id";
+    raw = sh_json_object_get(&parsed.fields, "id");
+    if (!raw) goto fail;
+    failure = "package.json id must be a string shorter than 128 bytes without embedded NULs";
+    if (!pd_string(raw, parsed.id, sizeof(parsed.id))) goto fail;
     failure = "package id must be a stable lowercase identifier";
-    if (!pd_string(sh_json_object_get(&parsed.fields, "id"), parsed.id, sizeof(parsed.id)) ||
-        !sh_package_id_valid(parsed.id)) goto fail;
+    if (!sh_package_id_valid(parsed.id)) goto fail;
     failure = "package name must be a nonempty string";
     if (!pd_string(sh_json_object_get(&parsed.fields, "name"), parsed.name, sizeof(parsed.name)) ||
         !parsed.name[0]) goto fail;
