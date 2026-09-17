@@ -215,6 +215,8 @@ char *sh_mpkg_embed(const char *json, size_t len, const char *pkg_id,
 
 unsigned char *sh_mpkg_pack_dir(const char *root, size_t *out_len, char *err, size_t err_cap)
 { (void)root; if (out_len) *out_len = 0; if (err && err_cap) err[0] = '\0'; return NULL; }
+unsigned char *sh_mpkg_pack_used(const sh_mpkg_used *used, size_t *out_len, char *err, size_t err_cap)
+{ return sh_mpkg_pack_dir(used->root, out_len, err, err_cap); }
 
 size_t sh_mpkg_used_packages(const char *json, size_t len, const char *data_root,
                              sh_mpkg_used **out, char *error, size_t capacity)

@@ -27,6 +27,14 @@ static void *g_legacy_context;
 void sh_mpkg_set_legacy_reader(sh_package_legacy_reader reader, void *context)
 { g_legacy_reader = reader; g_legacy_context = context; }
 
+static int mpkg_delivery_id(const char *id)
+{
+    size_t i;
+    if (!id || strlen(id) != 73 || strncmp(id, "delivery.", 9)) return 0;
+    for (i = 9; i < 73; i++) if (!((id[i] >= '0' && id[i] <= '9') || (id[i] >= 'a' && id[i] <= 'f'))) return 0;
+    return 1;
+}
+
 /* Verify the original carrier before conversion. The public extractor keeps
  * returning exact transport bytes for export and forensic tools. */
 static unsigned char *mpkg_compiled_payload(const char *json, size_t length, const char *id,
@@ -36,6 +44,18 @@ static unsigned char *mpkg_compiled_payload(const char *json, size_t length, con
     size_t converted_length = 0;
     original = sh_mpkg_extract(json, length, id, out_length, error, capacity);
     if (!original) return NULL;
+    if (mpkg_delivery_id(id)) {
+        char descriptor_id[SH_PACKAGE_ID_CAP], expected[SH_PACKAGE_ID_CAP];
+        unsigned char fingerprint[32];
+        if (!sh_package_archive_identity(original, *out_length, descriptor_id, fingerprint, error, capacity)) {
+            HeapFree(GetProcessHeap(), 0, original); *out_length = 0; return NULL;
+        }
+        sh_package_archive_delivery_id(fingerprint, expected);
+        if (strcmp(id, expected) && strcmp(id, descriptor_id)) {
+            if (error && capacity) snprintf(error, capacity, "map package does not match its complete delivery identity");
+            HeapFree(GetProcessHeap(), 0, original); *out_length = 0; return NULL;
+        }
+    }
     if (!sh_package_legacy_convert(original, *out_length, id, g_legacy_reader, g_legacy_context,
         &converted, &converted_length, error, capacity)) {
         HeapFree(GetProcessHeap(), 0, original); *out_length = 0; return NULL;
@@ -623,17 +643,17 @@ static int mpkg_source_satisfies(const char *root, const unsigned char fingerpri
 
 /* 1: unchanged startup source; 2: matching runtime source requiring registration.
  * ZIP compression, timestamps and member order are transport details. */
-static int mpkg_installed_kind(const sh_mpkg_decl *d, const unsigned char fingerprint[32])
+static int mpkg_installed_kind(const unsigned char fingerprint[32])
 {
     size_t i;
     for (i = 0; i < g_boot_count; i++) {
         const mpkg_boot_pkg *entry = &g_boot[i];
-        if (!strcmp(entry->id, d->id) && !memcmp(entry->fingerprint, fingerprint, 32) &&
+        if (!memcmp(entry->fingerprint, fingerprint, 32) &&
             mpkg_source_satisfies(entry->root, fingerprint)) return 1;
     }
     for (i = 0; i < g_session_count; i++) {
         mpkg_session_entry *entry = &g_session[i];
-        if (entry->outcome != 1 || strcmp(entry->id, d->id) || memcmp(entry->fingerprint, fingerprint, 32)) continue;
+        if (entry->outcome != 1 || memcmp(entry->fingerprint, fingerprint, 32)) continue;
         if (mpkg_source_satisfies(entry->root, fingerprint)) return 2;
         entry->outcome = 3;
     }
@@ -647,7 +667,7 @@ static int mpkg_installed_kind(const sh_mpkg_decl *d, const unsigned char finger
         int matches = 0;
         if (sources) for (i = 0; i < sources->component_count; i++) {
             const sh_package_component *component = &sources->components[i];
-            if (component->relative[0] || strcmp(component->descriptor.id, d->id) ||
+            if (component->relative[0] ||
                 memcmp(sources->fingerprints[component->owner], fingerprint, 32)) continue;
             matches = mpkg_source_satisfies(sources->packages[component->owner].root, fingerprint);
             if (matches) break;
@@ -697,6 +717,7 @@ typedef struct mpkg_staged {
     sh_mpkg_install_completion completion;
     void *completion_context;
     char id[SH_MPKG_ID_CAP];
+    char package_id[SH_PACKAGE_ID_CAP];
     char digest[SH_MPKG_DIGEST_CHARS + 1];
     unsigned char *payload;
     size_t payload_len;
@@ -704,8 +725,20 @@ typedef struct mpkg_staged {
     char destination[MAX_PATH], staging[MAX_PATH];
     unsigned char fingerprint[32];
     int existing;
+    unsigned char (*required)[32];
+    size_t required_count;
     struct mpkg_staged *next;
 } mpkg_staged;
+
+static int mpkg_retain_required(mpkg_staged *head, const unsigned char (*fingerprints)[32], size_t count)
+{
+    if (!head || count > SIZE_MAX / 32u || (count && !fingerprints)) return 0;
+    if (!count) return 1;
+    head->required = malloc(count * 32u);
+    if (!head->required) return 0;
+    memcpy(head->required, fingerprints, count * 32u); head->required_count = count;
+    return 1;
+}
 
 /* Frees the whole chain from `s` onward. */
 static void mpkg_staged_free(mpkg_staged *s)
@@ -713,6 +746,7 @@ static void mpkg_staged_free(mpkg_staged *s)
     while (s) {
         mpkg_staged *next = s->next;
         if (s->payload) HeapFree(GetProcessHeap(), 0, s->payload);
+        free(s->required);
         HeapFree(GetProcessHeap(), 0, s);
         s = next;
     }
@@ -1066,10 +1100,10 @@ sh_mpkg_context *sh_mpkg_context_open(const char *data_root, const char *json, s
         ok = sh_package_archive_identity(payload, payload_length, id, fingerprint, detail, sizeof(detail));
         if (!ok && error && capacity)
             snprintf(error, capacity, "Embedded package '%s': %s", decls[i].id, detail);
-        if (ok && strcmp(id, decls[i].id)) {
+        if (ok && strcmp(id, decls[i].id) && !mpkg_delivery_id(decls[i].id)) {
             mpkg_err(error, capacity, "map package descriptor does not match its delivery identity"); ok = 0;
         }
-        if (ok && snprintf(destination, sizeof(destination), "%s\\%s", directory, id) >= sizeof(destination)) {
+        if (ok && snprintf(destination, sizeof(destination), "%s\\%s", directory, decls[i].id) >= sizeof(destination)) {
             mpkg_err(error, capacity, "private map package root is too long"); ok = 0;
         }
         if (ok) ok = sh_package_archive_unpack(payload, payload_length, destination, NULL, error, capacity);
@@ -1258,31 +1292,41 @@ static int mpkg_install_batch(mpkg_staged *head, char *err, size_t err_cap)
     sources = sh_package_sources_scan_local(root, mpkg_local_rejected, NULL, err, err_cap);
     if (!sources) goto done;
     for (s = head; s; s = s->next) {
-        char descriptor_id[SH_PACKAGE_ID_CAP];
-        if (!sh_package_archive_identity(s->payload, s->payload_len, descriptor_id,
+        if (!sh_package_archive_identity(s->payload, s->payload_len, s->package_id,
                                         s->fingerprint, err, err_cap)) goto done;
-        if (strcmp(descriptor_id, s->id)) {
+        if (strcmp(s->package_id, s->id) && !mpkg_delivery_id(s->id)) {
             mpkg_err(err, err_cap, "package descriptor does not match its map identity"); goto done;
         }
+    }
+    for (s = head; s; s = s->next) {
         for (i = 0; i < sources->component_count; i++) {
             const sh_package_component *component = &sources->components[i];
             const char *package_root = sources->packages[component->owner].root;
             char relative[MAX_PATH], **grown;
-            if (component->relative[0] || strcmp(component->descriptor.id, s->id)) continue;
+            mpkg_staged *required;
+            size_t previous;
+            if (component->relative[0] || strcmp(component->descriptor.id, s->package_id)) continue;
             if (!memcmp(sources->fingerprints[component->owner], s->fingerprint, 32)) {
                 strcpy_s(s->destination, sizeof(s->destination), package_root);
-                s->existing = 1; break;
+                s->existing = 1; continue;
             }
-            /* A previously delivered variant of this identity is superseded by
-             * this delivery: one delivered copy per identity is enough, and the
-             * old bundle rides the same cancellation record.
+            /* Retain every variant required by this batch. Retire obsolete
+             * delivered variants once, under the same cancellation record.
              *
              * An authored variant is the user's own work. It is neither moved
              * nor refused: the compiler treats same-identity packages as
              * variants, so the author keeps every resource they supply while
              * this delivery fills what they do not, and the map's own values
              * govern transiently while it is loaded. */
+            for (required = head; required; required = required->next)
+                if (!memcmp(sources->fingerprints[component->owner], required->fingerprint, 32)) break;
+            if (required) continue;
+            for (previous = 0; previous < head->required_count; previous++)
+                if (!memcmp(sources->fingerprints[component->owner], head->required[previous], 32)) break;
+            if (previous < head->required_count) continue;
             if (!mpkg_delivered_relative(root, package_root, relative, sizeof(relative))) continue;
+            for (previous = 0; previous < superseded_count; previous++) if (!strcmp(superseded[previous], relative)) break;
+            if (previous < superseded_count) continue;
             grown = (char **)realloc(superseded, (superseded_count + 1) * sizeof(*superseded));
             if (!grown || !(grown[superseded_count] = _strdup(relative))) {
                 superseded = grown ? grown : superseded;
@@ -1318,9 +1362,21 @@ static int mpkg_install_batch(mpkg_staged *head, char *err, size_t err_cap)
             mpkg_err(err, err_cap, "cannot create package content staging"); goto done;
         }
         for (s = head; s; s = s->next) if (!s->existing) {
-            if (snprintf(s->staging, sizeof(s->staging), "%s\\%s", content, s->id) >= sizeof(s->staging) ||
-                snprintf(s->destination, sizeof(s->destination), "%s\\%s", destination, s->id) >= sizeof(s->destination) ||
-                !sh_mpkg_unpack(s->payload, s->payload_len, s->staging, &s->files, err, err_cap)) goto done;
+            char leaf[SH_PACKAGE_ID_CAP];
+            size_t suffix = 1;
+            strcpy_s(leaf, sizeof(leaf), s->package_id);
+            for (;;) {
+                mpkg_staged *previous;
+                if (snprintf(s->staging, sizeof(s->staging), "%s\\%s", content, leaf) >= sizeof(s->staging) ||
+                    snprintf(s->destination, sizeof(s->destination), "%s\\%s", destination, leaf) >= sizeof(s->destination)) {
+                    mpkg_err(err, err_cap, "package installation path is too long"); goto done;
+                }
+                for (previous = head; previous != s; previous = previous->next)
+                    if (!previous->existing && !_stricmp(previous->staging, s->staging)) break;
+                if (previous == s) break;
+                snprintf(leaf, sizeof(leaf), "%.96s-%zu", s->package_id, ++suffix);
+            }
+            if (!sh_mpkg_unpack(s->payload, s->payload_len, s->staging, &s->files, err, err_cap)) goto done;
 #ifdef SH_MAP_PACKAGE_TESTING
             if (g_prepare_test) g_prepare_test(s->staging);
 #endif
@@ -1516,11 +1572,12 @@ void sh_mpkg_consent_poll(void)
                 count, count == 1 ? "" : "s", files, kb, count == 1 ? "it" : "them");
             for (item = s; item; item = item->next) {
                 char more[32] = "";
+                const char *label = item->package_id[0] ? item->package_id : item->id;
                 size_t used = strlen(text), separator = listed ? 2 : 0;
                 if (item->next) snprintf(more, sizeof(more), " and %u more", count - listed - 1);
-                if (used + separator + strlen(item->id) + strlen(more) >= sizeof(text)) break;
+                if (used + separator + strlen(label) + strlen(more) >= sizeof(text)) break;
                 if (listed) strcat_s(text, sizeof(text), ", ");
-                strcat_s(text, sizeof(text), item->id); listed++;
+                strcat_s(text, sizeof(text), label); listed++;
             }
             if (listed < count) {
                 char more[48];
@@ -1637,19 +1694,31 @@ int sh_mpkg_request_map_install(const char *json, size_t length,
             if (component->owner == owner && !component->relative[0]) { id = component->descriptor.id; break; }
         }
         if (!id) goto done;
-        for (size_t i = 0; i < count; i++) if (!strcmp(decls[i].id, id)) { decl = &decls[i]; break; }
+        {
+            const char *leaf = strrchr(sources->packages[owner].root, '\\');
+            char delivery[SH_PACKAGE_ID_CAP];
+            leaf = leaf ? leaf + 1 : sources->packages[owner].root;
+            sh_package_archive_delivery_id(sources->fingerprints[owner], delivery);
+            for (size_t i = 0; i < count; i++)
+                if (!strcmp(decls[i].id, leaf) || !strcmp(decls[i].id, delivery)) { decl = &decls[i]; break; }
+            if (!decl) for (size_t i = 0; i < count; i++)
+                if (!strcmp(decls[i].id, id)) { decl = &decls[i]; break; }
+        }
         if (!decl) { mpkg_err(error, capacity, "map omits supplying package '%s'", id); goto done; }
         /* Distinct owners must never be collapsed by an ambiguous identity. */
-        for (entry = head; entry; entry = entry->next) if (!strcmp(entry->id, id)) {
-            mpkg_err(error, capacity, "map has ambiguous delivery identity '%s'", id); goto done;
+        for (entry = head; entry; entry = entry->next) if (!strcmp(entry->id, decl->id)) break;
+        if (entry) {
+            if (!memcmp(entry->fingerprint, sources->fingerprints[owner], 32)) continue;
+            mpkg_err(error, capacity, "map has ambiguous delivery identity '%s'", decl->id); goto done;
         }
         entry = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*entry));
         if (!entry) goto done;
         if (tail) tail->next = entry; else head = entry;
         tail = entry;
-        strcpy_s(entry->id, sizeof(entry->id), id);
+        strcpy_s(entry->id, sizeof(entry->id), decl->id);
+        strcpy_s(entry->package_id, sizeof(entry->package_id), id);
         strcpy_s(entry->digest, sizeof(entry->digest), decl->digest);
-        entry->payload = mpkg_compiled_payload(json, length, id, &entry->payload_len, error, capacity);
+        entry->payload = mpkg_compiled_payload(json, length, decl->id, &entry->payload_len, error, capacity);
         if (!entry->payload || !sh_package_archive_identity(entry->payload, entry->payload_len,
             archive_id, fingerprint, error, capacity) || strcmp(archive_id, id) ||
             memcmp(fingerprint, sources->fingerprints[owner], 32) ||
@@ -1657,8 +1726,10 @@ int sh_mpkg_request_map_install(const char *json, size_t length,
             if (error && capacity && !error[0]) mpkg_err(error, capacity, "map package '%s' changed after compilation", id);
             goto done;
         }
+        memcpy(entry->fingerprint, fingerprint, 32);
     }
     /* Reserve the entire request before any consent or publication. */
+    if (!mpkg_retain_required(head, sources->fingerprints, sources->package_count)) goto done;
     mpkg_lock();
     for (mpkg_staged *entry = head; entry; entry = entry->next) {
         mpkg_session_entry *session = mpkg_session_find(entry->id, entry->digest);
@@ -1678,7 +1749,8 @@ done:
 }
 
 static int mpkg_gate_declared(const char *json, size_t len,
-    const sh_mpkg_decl *decls, size_t count, int *installed)
+                              const sh_mpkg_decl *decls, size_t count, int *installed,
+                              unsigned char (*required)[32])
 {
     size_t i, missing_count = 0, session_installed_count = 0;
     const sh_mpkg_decl *first_missing = NULL;
@@ -1707,12 +1779,13 @@ static int mpkg_gate_declared(const char *json, size_t len,
         payload = mpkg_compiled_payload(json, len, d->id, &payload_len, error, sizeof(error));
         valid = payload && sh_package_archive_identity(payload, payload_len, id, fingerprint, error, sizeof(error));
         if (payload) HeapFree(GetProcessHeap(), 0, payload);
-        if (!valid || strcmp(id, d->id)) {
+        if (!valid || (strcmp(id, d->id) && !mpkg_delivery_id(d->id))) {
             _snprintf_s(reason, sizeof(reason), _TRUNCATE, "package '%s' cannot be loaded: %s", d->id,
                         valid ? "descriptor does not match its map identity" : error);
             mpkg_set_refusal(reason); return 0;
         }
-        mpkg_lock(); installed[i] = mpkg_installed_kind(d, fingerprint); mpkg_unlock();
+        memcpy(required[i], fingerprint, 32);
+        mpkg_lock(); installed[i] = mpkg_installed_kind(fingerprint); mpkg_unlock();
         if (installed[i] == 1) continue;
         missing_count++;
         if (installed[i] == 2) session_installed_count++;
@@ -1782,9 +1855,14 @@ static int mpkg_gate_declared(const char *json, size_t len,
             if (tail) tail->next = s; else head = s;
             tail = s;
             s->payload = mpkg_compiled_payload(json, len, d->id, &s->payload_len, err, sizeof(err));
-            if (!s->payload || !mpkg_zip_survey(s->payload, s->payload_len, &s->files, err, sizeof(err))) {
+            if (!s->payload || !sh_package_archive_identity(s->payload, s->payload_len, s->package_id,
+                s->fingerprint, err, sizeof(err)) ||
+                !mpkg_zip_survey(s->payload, s->payload_len, &s->files, err, sizeof(err))) {
                 complete = 0; break;
             }
+        }
+        if (complete && head && !mpkg_retain_required(head, required, count)) {
+            complete = 0; mpkg_err(err, sizeof(err), "cannot retain the complete map package requirements");
         }
         if (!complete) {
             sh_mpkg_report_error(err); mpkg_retry_staged(head); mpkg_staged_free(head);
@@ -1796,15 +1874,17 @@ static int mpkg_gate_declared(const char *json, size_t len,
 int sh_mpkg_gate(const char *json, size_t len)
 {
     sh_mpkg_decl *decls = NULL;
+    unsigned char (*required)[32] = NULL;
     int *installed = NULL, result = 0;
     size_t count;
     if (!json || !len || !sh_shard_find(json, len, MPKG_HEADER_MAGIC, MPKG_MAGIC_LEN)) return 1;
     count = mpkg_scan_internal(json, len, &decls);
-    if (count == SIZE_MAX || count > SIZE_MAX / sizeof(*installed) ||
-        (count && !(installed = (int *)calloc(count, sizeof(*installed))))) {
+    if (count == SIZE_MAX || count > SIZE_MAX / sizeof(*required) ||
+        (count && (!(installed = (int *)calloc(count, sizeof(*installed))) ||
+                   !(required = calloc(count, sizeof(*required)))))) {
         mpkg_set_refusal("cannot allocate the complete map package inventory");
-    } else result = !count || mpkg_gate_declared(json, len, decls, count, installed);
-    free(installed); free(decls); return result;
+    } else result = !count || mpkg_gate_declared(json, len, decls, count, installed, required);
+    free(required); free(installed); free(decls); return result;
 }
 
 /* ==================================================================== */

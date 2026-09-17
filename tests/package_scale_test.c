@@ -52,7 +52,8 @@ int main(void)
     CHECK(DeleteFileA(root)); CHECK(CreateDirectoryA(root, NULL));
     for (i = 0; i < 130; i++) {
         snprintf(path, sizeof(path), "overrides/p%03zu/package.json", i);
-        snprintf(body, sizeof(body), "{\"id\":\"p%03zu\",\"name\":\"Package %zu\",\"strings\":{\"en\":{\"label_%zu\":\"Package %zu\"}}}", i, i, i, i);
+        /* Two independently authored roots intentionally share an ID. */
+        snprintf(body, sizeof(body), "{\"id\":\"p%03zu\",\"name\":\"Package %zu\",\"strings\":{\"en\":{\"label_%zu\":\"Package %zu\"}}}", i == 1 ? 0 : i, i, i, i);
         create(path, body);
         snprintf(path, sizeof(path), "overrides/p%03zu/assets/generated/decls/%s/scale/shared.decl", i,
             i == 129 ? "snapeditorentitydef" : "entitydef");
@@ -92,11 +93,12 @@ int main(void)
     sh_package_policy_free(&policy);
     count = sh_mpkg_used_packages(high_map, sizeof(high_map) - 1, root, &selected, error, sizeof(error));
     CHECK(!error[0]);
-    CHECK(count == 1 && selected && !strcmp(selected[0].id, "p128"));
+    sh_package_archive_delivery_id(sources->fingerprints[128], body);
+    CHECK(count == 1 && selected && !strcmp(selected[0].id, body));
     if (count == 1) {
         size_t length;
         char id[SH_PACKAGE_ID_CAP];
-        unsigned char fingerprint[32], *archive = sh_mpkg_pack_dir(selected[0].root, &length, error, sizeof(error));
+        unsigned char fingerprint[32], *archive = sh_mpkg_pack_used(&selected[0], &length, error, sizeof(error));
         CHECK(archive);
         CHECK(archive && sh_package_archive_identity(archive, length, id, fingerprint, error, sizeof(error)) &&
             !strcmp(id, "p128") && !memcmp(fingerprint, sources->fingerprints[128], 32));
@@ -105,8 +107,10 @@ int main(void)
     count = sh_mpkg_used_packages(all_map, sizeof(all_map) - 1, root, &selected, error, sizeof(error));
     CHECK(count == 129);
     for (i = 0; count == 129 && i < count; i++) {
-        snprintf(body, sizeof(body), "p%03zu", i); CHECK(!strcmp(selected[i].id, body));
+        sh_package_archive_delivery_id(sources->fingerprints[i], body); CHECK(!strcmp(selected[i].id, body));
     }
+    CHECK(!strcmp(sources->components[0].descriptor.id, sources->components[1].descriptor.id));
+    CHECK(strcmp(selected[0].id, selected[1].id));
     CHECK(sh_package_map_owners(compiled, NULL, all_map, sizeof(all_map) - 1, NULL, &owners, NULL));
     CHECK(sh_package_owners_count(&owners) == 129 && sh_package_owners_within(&owners, 129));
     CHECK(sh_package_owners_add(&owners, 4096));
@@ -125,8 +129,16 @@ int main(void)
     {
         sh_package_sources *conflicting_sources;
         sh_package_compilation *conflicting;
+        sh_mpkg_used selected_before_edit;
+        unsigned char *changed;
+        size_t length;
+        count = sh_mpkg_used_packages(high_map, sizeof(high_map) - 1, root, &selected, error, sizeof(error));
+        CHECK(count == 1); selected_before_edit = selected[0];
         create("overrides/p128/assets/generated/decls/material/scale/composed.decl",
             "{ edit = { independent0 = 777; independent128 = 128; } }");
+        changed = sh_mpkg_pack_used(&selected_before_edit, &length, error, sizeof(error));
+        CHECK(!changed && !length && strstr(error, "changed after"));
+        if (changed) HeapFree(GetProcessHeap(), 0, changed);
         conflicting_sources = sh_package_sources_scan(root, error, sizeof(error)); CHECK(conflicting_sources);
         conflicting = sh_package_compile(conflicting_sources, original, NULL, error, sizeof(error));
         CHECK(!conflicting && strstr(error, "p000") && strstr(error, "p128"));

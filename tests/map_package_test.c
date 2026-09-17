@@ -983,6 +983,87 @@ static int map_install_calls, map_install_outcome;
 static void map_install_completed(void *context, int outcome)
 { CHECK(context == &map_install_calls); map_install_calls++; map_install_outcome = outcome; }
 
+static void test_same_id_deliveries(const char *root)
+{
+    char author[MAX_PATH], client[MAX_PATH], folder[MAX_PATH], path[MAX_PATH], error[512];
+    char key[SH_PACKAGE_ID_CAP], forged[SH_PACKAGE_ID_CAP];
+    char *map = HeapAlloc(GetProcessHeap(), 0, strlen(EMPTY_MAP) + 1), *next;
+    size_t length = strlen(EMPTY_MAP), next_length, archive_length;
+    unsigned char *archive, fingerprint[32];
+    sh_mpkg_context *context = NULL;
+    sh_package_sources *sources = NULL;
+    sh_package_compilation candidate = {0};
+    sh_package_owners selected = {0};
+    CHECK(map); if (!map) return; memcpy(map, EMPTY_MAP, length + 1);
+    join(author, sizeof(author), root, "same-id-author"); CHECK(make_dir(author));
+    join(client, sizeof(client), root, "same-id-client"); CHECK(make_dir(client));
+    join(path, sizeof(path), client, "overrides"); CHECK(make_dir(path));
+    for (size_t i = 0; i < 2; i++) {
+        snprintf(folder, sizeof(folder), "%s\\part%zu", author, i); CHECK(make_dir(folder));
+        join(path, sizeof(path), folder, "package.json");
+        CHECK(touch(path, "{\"id\":\"same.identity\",\"name\":\"Same package family\"}"));
+        join(path, sizeof(path), folder, "assets"); CHECK(make_dir(path));
+        snprintf(path, sizeof(path), "%s\\assets\\part%zu.bimage", folder, i);
+        CHECK(touch(path, i ? "second complete asset" : "first complete asset"));
+        sources = sh_package_sources_scan_directory(folder, error, sizeof(error)); CHECK(sources);
+        if (!sources) goto done;
+        sh_package_archive_delivery_id(sources->fingerprints[0], key);
+        archive = sh_package_archive_pack(sources, 0, &archive_length, error, sizeof(error));
+        sh_package_sources_free(sources); sources = NULL; CHECK(archive); if (!archive) goto done;
+        next = sh_mpkg_embed(map, length, key, archive, archive_length, &next_length, error, sizeof(error));
+        CHECK(next);
+        if (!i) {
+            char *bad; size_t bad_length;
+            strcpy_s(forged, sizeof(forged), key); forged[9] = forged[9] == 'a' ? 'b' : 'a';
+            bad = sh_mpkg_embed(EMPTY_MAP, strlen(EMPTY_MAP), forged, archive, archive_length, &bad_length, error, sizeof(error));
+            CHECK(bad && !sh_mpkg_context_open(client, bad, bad_length, error, sizeof(error)));
+            CHECK(strstr(error, "delivery identity")); if (bad) HeapFree(GetProcessHeap(), 0, bad);
+        }
+        free(archive); if (!next) goto done;
+        HeapFree(GetProcessHeap(), 0, map); map = next; length = next_length;
+    }
+    {
+        sh_mpkg_decl declarations[2];
+        CHECK(sh_mpkg_scan(map, length, declarations, 2) == 2);
+        CHECK(strcmp(declarations[0].id, declarations[1].id));
+    }
+    context = sh_mpkg_context_open(client, map, length, error, sizeof(error));
+    CHECK(context && sh_mpkg_context_count(context) == 2); if (!context) goto done;
+    sources = sh_package_sources_scan(sh_mpkg_context_root(context), error, sizeof(error));
+    CHECK(sources && sources->package_count == 2); if (!sources) goto done;
+    candidate.sources = sources;
+    sh_mpkg_test_reset(); sh_mpkg_boot_capture(client);
+    sh_mpkg_test_set_consent_mode(SH_MPKG_CONSENT_ACCEPT); map_install_calls = 0;
+    CHECK(sh_package_owners_add(&selected, 0) && sh_package_owners_add(&selected, 1));
+    CHECK(sh_mpkg_request_map_install(map, length, &candidate, &selected,
+        map_install_completed, &map_install_calls, error, sizeof(error)));
+    CHECK(map_install_outcome == 1 && installed_count(client) == 2);
+    CHECK(sh_mpkg_activation_cancel() && !installed_count(client));
+    sh_package_owners_free(&selected); CHECK(sh_package_owners_add(&selected, 0));
+    CHECK(sh_mpkg_request_map_install(map, length, &candidate, &selected,
+        map_install_completed, &map_install_calls, error, sizeof(error)));
+    CHECK(map_install_outcome == 1); complete_install(); CHECK(installed_count(client) == 1);
+    memcpy(fingerprint, sources->fingerprints[0], 32);
+    CHECK(variant_matches(client, "same.identity", fingerprint) == 1);
+    sh_package_owners_free(&selected); CHECK(sh_package_owners_add(&selected, 1));
+    CHECK(sh_mpkg_request_map_install(map, length, &candidate, &selected,
+        map_install_completed, &map_install_calls, error, sizeof(error)));
+    CHECK(map_install_outcome == 1 && installed_count(client) == 2);
+    CHECK(variant_matches(client, "same.identity", fingerprint) == 1);
+    CHECK(sh_mpkg_activation_cancel() && installed_count(client) == 1);
+    CHECK(sh_mpkg_request_map_install(map, length, &candidate, &selected,
+        map_install_completed, &map_install_calls, error, sizeof(error)));
+    CHECK(map_install_outcome == 1); complete_install(); CHECK(installed_count(client) == 2);
+    CHECK(variant_matches(client, "same.identity", sources->fingerprints[0]) == 1);
+    CHECK(variant_matches(client, "same.identity", sources->fingerprints[1]) == 1);
+    sh_mpkg_test_reset(); sh_mpkg_boot_capture(client); g_registration_ready = 1;
+    CHECK(sh_mpkg_gate(map, length)); /* Both complete variants survive a fresh inventory. */
+done:
+    sh_package_owners_free(&selected); sh_package_sources_free(sources);
+    CHECK(sh_mpkg_context_close(&context)); HeapFree(GetProcessHeap(), 0, map);
+    sh_mpkg_test_reset(); remove_tree(author); remove_tree(client);
+}
+
 static void test_resource_owner_install(const char *root)
 {
     char author[MAX_PATH], client[MAX_PATH], overrides[MAX_PATH], package[MAX_PATH], error[512];
@@ -1158,6 +1239,7 @@ int main(int argc, char **argv)
     CHECK(make_dir(overrides));
     test_private_map_context(root);
     test_resource_owner_install(root);
+    test_same_id_deliveries(root);
     test_batch_install(root);
     test_supersession(root);
     test_refreshed_author_sources(root);

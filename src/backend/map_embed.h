@@ -28,9 +28,12 @@ unsigned char *sh_mpkg_pack_dir(const char *root, size_t *out_len,
  * or traversal; missing observations are separately reported in diagnostics.
  * Initialize *out to NULL. Repeated calls replace it; free(*out) after use. */
 typedef struct sh_mpkg_used {
-    char id[SH_MPKG_ID_CAP];   /* authored stable package id */
+    char id[SH_MPKG_ID_CAP];   /* complete-tree transport identity, not descriptor id */
+    char name[SH_PACKAGE_DISPLAY_CAP]; /* authored label for save diagnostics */
     char root[MAX_PATH];       /* absolute path to the package folder, ready to pack */
 } sh_mpkg_used;
+unsigned char *sh_mpkg_pack_used(const sh_mpkg_used *used, size_t *out_len,
+                               char *error, size_t capacity);
 
 size_t sh_mpkg_used_packages(const char *json, size_t len, const char *data_root,
                              sh_mpkg_used **out, char *error, size_t error_capacity);

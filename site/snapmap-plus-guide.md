@@ -903,6 +903,10 @@ mark in `package.json` is accepted. Runtime normalization does not rewrite your 
 installer migration writes corrected metadata and keeps the original backup.
 Copies or variants of one package may share an ID. Independently authored mods should
 use different IDs, even when they edit the same game asset.
+Maps distinguish complete bundles by their content, so different variants sharing
+an ID can travel together without one replacing the other. If both need installation,
+they get separate folders; their descriptors and asset trees stay intact. Sharing an
+ID does not make incompatible resource edits compatible.
 Optional `hud.weapons.<weapon declaration name>.ammo_display` accepts `weapon` or `engine`.
 There are no versions, file lists, path mappings, author hashes, receipts, priorities or map-inclusion
 switches to maintain. Boss startup behavior belongs in its asset declarations and travels with them.

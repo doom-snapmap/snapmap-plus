@@ -1831,12 +1831,13 @@ static char *embed_used_packages(const char *json, size_t len, size_t *out_len, 
         char err[SH_MPKG_ERR_CAP];
         char *next;
         char line[SH_MPKG_ERR_CAP + 128];
+        const char *label = used[i].name[0] ? used[i].name : used[i].id;
 
-        payload = sh_mpkg_pack_dir(used[i].root, &payload_len, err, sizeof err);
+        payload = sh_mpkg_pack_used(&used[i], &payload_len, err, sizeof err);
         if (!payload) {
             _snprintf_s(line, sizeof line, _TRUNCATE,
                         "MPKG: package '%s' could NOT be packed for this save (%s); the map is "
-                        "not saved", used[i].id, err);
+                        "not saved", label, err);
             sh_mpkg_report_error(line);
             *failed = 1; free(used); if (cur) HeapFree(GetProcessHeap(), 0, cur); return NULL;
         }
@@ -1846,7 +1847,7 @@ static char *embed_used_packages(const char *json, size_t len, size_t *out_len, 
         if (!next) {
             _snprintf_s(line, sizeof line, _TRUNCATE,
                         "MPKG: package '%s' could NOT be embedded in this save (%s); the map is "
-                        "not saved", used[i].id, err);
+                        "not saved", label, err);
             sh_mpkg_report_error(line);
             *failed = 1; free(used); if (cur) HeapFree(GetProcessHeap(), 0, cur); return NULL;
         }

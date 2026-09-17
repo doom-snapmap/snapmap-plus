@@ -343,6 +343,16 @@ unchanged. After the native provider releases a private context, filesystem
 locks defer deletion of that retired cache without preventing another map load.
 Failures to release a live provider or roll back an installation remain gates.
 
+Save transport identifies each complete source tree independently of its descriptor
+ID. This prevents two different same-ID variants from replacing each other's shards;
+identical complete copies need only one payload. The existing shard grammar remains
+unchanged, and descriptor-ID carriers are still accepted. Complete-tree keys are
+verified against the original archive before any conversion. Installation keeps all
+variants required by the current map, including those already present when only a
+different variant is missing. Published folders use package IDs with numeric suffixes
+when needed; authored descriptors and member paths remain intact. Save packing also
+rechecks the selected tree identity so changed sources cannot publish a mismatched map.
+
 Compilation includes built-in overrides and package sources relative to verified
 originals. Compatible changes compose using native field and collection semantics;
 contradictions are reported before publication. Opaque payloads are selected whole.

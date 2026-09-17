@@ -6,6 +6,18 @@
 #include <stdarg.h>
 #include <string.h>
 #include "package_archive.h"
+
+void sh_package_archive_delivery_id(const unsigned char fingerprint[32], char out[SH_PACKAGE_ID_CAP])
+{
+    static const char hex[] = "0123456789abcdef";
+    size_t i;
+    memcpy(out, "delivery.", 9);
+    for (i = 0; i < 32; i++) {
+        out[9 + i * 2] = hex[fingerprint[i] >> 4];
+        out[10 + i * 2] = hex[fingerprint[i] & 15];
+    }
+    out[73] = 0;
+}
 #include "raw_deflate_encode.h"
 #include "raw_deflate.h"
 

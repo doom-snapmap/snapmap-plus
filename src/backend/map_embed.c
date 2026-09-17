@@ -16,6 +16,20 @@
 
 #include "package_archive.h"
 
+unsigned char *sh_mpkg_pack_used(const sh_mpkg_used *used, size_t *out_len, char *error, size_t capacity)
+{
+    unsigned char fingerprint[32], *payload;
+    char delivery[SH_PACKAGE_ID_CAP];
+    payload = sh_mpkg_pack_dir(used->root, out_len, error, capacity);
+    if (!payload) return NULL;
+    if (sh_package_archive_identity(payload, *out_len, NULL, fingerprint, error, capacity)) {
+        sh_package_archive_delivery_id(fingerprint, delivery);
+        if (!strcmp(delivery, used->id)) return payload;
+        if (error && capacity) snprintf(error, capacity, "package files changed after the map's supplying packages were selected");
+    }
+    HeapFree(GetProcessHeap(), 0, payload); *out_len = 0; return NULL;
+}
+
 unsigned char *sh_mpkg_pack_dir(const char *root, size_t *out_len, char *err, size_t err_cap)
 {
     sh_package_sources *sources = sh_package_sources_scan_directory(root, err, err_cap);
@@ -145,8 +159,12 @@ size_t sh_mpkg_used_packages(const char *json, size_t len, const char *data_root
         if (count == capacity) goto bad;
         for (j = 0; j < sources->component_count; j++) if (sources->components[j].owner == i && !sources->components[j].relative[0]) break;
         failure = "A supplying package has no delivery root or its path exceeds the save buffer.";
-        if (j == sources->component_count || strcpy_s(selected[count].id, sizeof(selected[count].id), sources->components[j].descriptor.id) ||
+        if (j == sources->component_count || !sources->fingerprints ||
+            strcpy_s(selected[count].name, sizeof(selected[count].name), sources->components[j].descriptor.name) ||
             strcpy_s(selected[count].root, sizeof(selected[count].root), sources->packages[i].root)) goto bad;
+        sh_package_archive_delivery_id(sources->fingerprints[i], selected[count].id);
+        for (j = 0; j < count; j++) if (!strcmp(selected[j].id, selected[count].id)) break;
+        if (j < count) continue; /* Identical complete copies need one carrier. */
         count++;
     }
     sh_package_runtime_release();
