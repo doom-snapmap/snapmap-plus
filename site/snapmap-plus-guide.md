@@ -1032,10 +1032,26 @@ original resource. For example, two packages adding different Blocking Box prope
 additions and Snapmap+'s own navigation property. Identical contributions share an effective result
 while retaining every source owner. Authored duplicates remain in both package folders.
 
+Editor properties keep their identity when moved between pages. One package can move a property
+to another page while another changes its description or adds different properties. For collections
+whose entries have known identities, the compiler also repairs counts and gaps in numbering and
+combines identical duplicate entries. These repairs affect the served output; your files stay intact.
+Fixed arrays and collections whose indices are referenced elsewhere keep their original indices.
+
 Incompatible edits to the same value, contradictory collection ordering, or a deletion that conflicts
 with another edit produce a diagnostic naming the resource and packages. Folder order does not
 silently choose a winner. Binary models, images, compiled shaders and audio banks are served as
 whole payloads; concatenating them would corrupt their formats. No game archive is overwritten.
+
+A malformed local package is skipped as one complete package. When otherwise valid packages
+disagree over a field, the packages changing that field are skipped together; independent edits to
+the same resource remain available. Structural conflicts that cannot identify individual field edits
+skip the changing packages for that resource. Unrelated packages and built-in support remain available.
+Conflicting package strings or HUD settings
+exclude the incompatible package pairs. `sh_packages` shows the skipped folders and reasons.
+Correcting the files allows those packages to return on the next refresh. Valid conflicting packages
+still count as installed files when a map supplies its own valid authored policy, avoiding unnecessary
+reinstallation. A map's required packages must compile together before that map can load.
 
 ### What a map carries
 

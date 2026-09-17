@@ -3,6 +3,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -26,6 +27,8 @@ typedef struct dc_context {
     dc_annotation *annotations;
     size_t annotation_count, annotation_capacity;
     int record_types;
+    int inherited_input, inherited_layout_changed;
+    unsigned char *conflicting_sources;
 } dc_context;
 typedef struct dc_buffer { char *text; size_t length, capacity; } dc_buffer;
 
@@ -319,6 +322,165 @@ static int dc_native_index(const char *key, const char *prefix, size_t *out)
     *out = index; return 1;
 }
 
+typedef struct dc_indexed_item { dc_node *node; size_t index; } dc_indexed_item;
+static int dc_index_compare(const void *a, const void *b)
+{
+    size_t x = ((const dc_indexed_item *)a)->index, y = ((const dc_indexed_item *)b)->index;
+    return x < y ? -1 : x > y;
+}
+
+/* A native inherited list can override selected slots without restating their
+ * identities or count. Those slots are addresses into the parent's collection,
+ * not an incomplete full list that the compiler may compact. */
+static int dc_sparse_collection(const dc_node *list, const sh_decl_collection_rule *rule,
+    const dc_context *context)
+{
+    const dc_node *num, *item;
+    size_t count = 0;
+    char *end;
+    unsigned long long extent;
+    if (!context->inherited_input || !list || !list->compound || list->reset) return 0;
+    num = dc_member(list, "num");
+    if (!num) return 1;
+    if (num->compound || !num->value || !isdigit((unsigned char)*num->value)) return 0;
+    errno = 0; extent = strtoull(num->value, &end, 10);
+    if (*end || errno == ERANGE) return 0;
+    for (item = list->children; item; item = item->next) if (strcmp(item->key, "num")) {
+        count++;
+        if (!rule->group_items && !dc_item_id(item, rule)) return 1;
+        if (rule->group_items) {
+            sh_decl_collection_rule members = {0};
+            const dc_node *items = dc_member(item, rule->group_items);
+            members.item_key = rule->group_identity;
+            if (!items || dc_sparse_collection(items, &members, context)) return 1;
+        }
+    }
+    return extent > count;
+}
+
+static int dc_sparse_valid(const dc_node *list, dc_context *context, const char *path)
+{
+    const dc_node *item, *num = dc_member(list, "num");
+    unsigned long long extent = num ? strtoull(num->value, NULL, 10) : ULLONG_MAX;
+    for (item = list->children; item; item = item->next) {
+        size_t index;
+        if (!strcmp(item->key, "num")) continue;
+        if (!dc_native_index(item->key, "item", &index) || index >= extent)
+            return dc_fail(context, path, "inherited collection has an invalid slot index");
+    }
+    return 1;
+}
+
+/* Only an identity adapter establishes that these numeric slots are storage,
+ * not references from other engine objects. Repair its count/gaps in a private
+ * tree and coalesce exact semantic duplicates. Fixed arrays stay untouched. */
+static int dc_normalize_list(dc_node *list, const sh_decl_collection_rule *rule,
+    dc_context *context, const char *path)
+{
+    dc_node *node, *num, **tail;
+    dc_indexed_item *items = NULL;
+    size_t count = 0, kept = 0, i, j;
+    char value[40];
+    if (dc_sparse_collection(list, rule, context)) return dc_sparse_valid(list, context, path);
+    if (!rule->group_items && rule->item_key && !*rule->item_key) return 1;
+    if (!list->compound) return dc_fail(context, path, "semantic collection requires a state block");
+    for (node = list->children; node; node = node->next) if (strcmp(node->key, "num")) count++;
+    if (count > SIZE_MAX / sizeof(*items) || !(items = calloc(count ? count : 1, sizeof(*items))))
+        return dc_fail(context, path, "collection normalization allocation failed");
+    for (node = list->children, i = 0; node; node = node->next) {
+        if (!strcmp(node->key, "num")) continue;
+        if (!dc_native_index(node->key, "item", &items[i].index) ||
+            (!rule->group_items && !dc_item_id(node, rule))) {
+            free(items); return dc_fail(context, path, "collection entry has no valid index or semantic identity");
+        }
+        items[i++].node = node;
+    }
+    qsort(items, count, sizeof(*items), dc_index_compare);
+    for (i = 0; i < count; i++) {
+        if (i && items[i].index == items[i-1].index) {
+            free(items); return dc_fail(context, path, "duplicate collection index");
+        }
+        if (!rule->group_items) for (j = 0; j < i; j++) {
+            if (!strcmp(dc_item_id(items[i].node, rule), dc_item_id(items[j].node, rule)) &&
+                !dc_equal(items[i].node, items[j].node)) {
+                free(items); return dc_fail(context, path, "different entries use the same collection identity");
+            }
+        }
+    }
+    num = dc_member(list, "num");
+    if (num && num->compound) {
+        free(items); return dc_fail(context, path, "collection count must be a scalar");
+    }
+    if (!num) {
+        num = calloc(1, sizeof(*num));
+        if (!num || !(num->key = dc_copy("num", 3))) {
+            dc_free(num); free(items); return dc_fail(context, path, "collection count allocation failed");
+        }
+        num->next = list->children; list->children = num;
+    }
+    /* Validation above completes before any nodes are detached. */
+    list->children = num; num->next = NULL; tail = &num->next;
+    for (i = 0; i < count; i++) {
+        node = items[i].node; node->next = NULL;
+        if (!rule->group_items) {
+            for (j = 0; j < kept; j++)
+                if (!strcmp(dc_item_id(items[j].node, rule), dc_item_id(node, rule))) break;
+            if (j < kept) { dc_free(node); continue; }
+        }
+        snprintf(value, sizeof(value), "item[%zu]", kept);
+        char *key = dc_copy(value, strlen(value));
+        if (!key) {
+            *tail = node; tail = &node->next;
+            for (j = i + 1; j < count; j++) { *tail = items[j].node; tail = &items[j].node->next; }
+            *tail = NULL; free(items); return dc_fail(context, path, "collection index allocation failed");
+        }
+        free(node->key); node->key = key;
+        *tail = node; tail = &node->next; items[kept++].node = node;
+    }
+    snprintf(value, sizeof(value), "%zu", kept);
+    char *count_text = dc_copy(value, strlen(value));
+    if (!count_text) { free(items); return dc_fail(context, path, "collection count allocation failed"); }
+    dc_free(num->children); num->children = NULL;
+    free(num->value); num->value = count_text; num->compound = num->reset = 0; num->assignment = 1;
+    free(items); return 1;
+}
+
+static int dc_normalize(dc_node *node, dc_context *context, const char *path)
+{
+    const sh_decl_collection_rule *rule = dc_rule(context, path);
+    dc_node *child;
+    if (rule && !dc_normalize_list(node, rule, context, path)) return 0;
+    if (rule && rule->group_items && !dc_sparse_collection(node, rule, context)) {
+        sh_decl_collection_rule members = {0};
+        dc_node *group, *other, *item;
+        members.item_key = rule->group_identity;
+        if (!members.item_key || !*members.item_key)
+            return dc_fail(context, path, "grouped collection requires a member identity");
+        for (group = node->children; group; group = group->next) {
+            dc_node *items;
+            if (!strcmp(group->key, "num")) continue;
+            items = dc_member(group, rule->group_items);
+            if (!items) return dc_fail(context, path, "group has no member collection");
+            if (!dc_normalize_list(items, &members, context, path)) return 0;
+            for (item = items->children; item; item = item->next) {
+                if (!strcmp(item->key, "num")) continue;
+                for (other = node->children; other != group; other = other->next) {
+                    if (!strcmp(other->key, "num")) continue;
+                    if (dc_find_item(dc_member(other, rule->group_items), dc_item_id(item, &members), &members))
+                        return dc_fail(context, path, "member identity appears in multiple groups");
+                }
+            }
+        }
+    }
+    for (child = node->children; child; child = child->next) {
+        char nested[DC_PATH_CAP];
+        if (!dc_join_path(nested, sizeof(nested), path, child->key))
+            return dc_fail(context, path, "field path exceeds limit");
+        if (!dc_normalize(child, context, nested)) return 0;
+    }
+    return 1;
+}
+
 static sh_decl_value_type dc_child_type(dc_context *context, sh_decl_value_type type,
     const dc_node *parent, const char *key)
 {
@@ -373,7 +535,8 @@ static int dc_validate(const dc_node *node, dc_context *context, const char *pat
         if (!dc_join_path(nested, sizeof(nested), path, "object")) return dc_fail(context, path, "field path exceeds limit");
         return dc_validate(state.object, context, nested, state.type);
     }
-    if (rule && !dc_list_valid(node, rule)) return dc_fail(context, path, "invalid indexed collection or duplicate entry identity");
+    if (rule && !dc_sparse_collection(node, rule, context) && !dc_list_valid(node, rule))
+        return dc_fail(context, path, "invalid indexed collection or duplicate entry identity");
     if (rule && typed && (shape.kind != SH_DECL_VALUE_COLLECTION ||
         !shape.item_key || strcmp(shape.item_key, "item") ||
         !shape.count_key || strcmp(shape.count_key, "num")))
@@ -612,13 +775,96 @@ static void dc_entry_error(dc_context *context, const char *id)
         snprintf(context->error + length, context->error_capacity - length, " (entry %s)", id);
 }
 
+/* Emit a semantic collection from already merged entries. The caller retains
+ * positions and unconsumed nodes; emitted nodes transfer to the result. */
+static dc_node *dc_emit_entries(const dc_node *first, dc_entry *entries, size_t entry_count,
+    size_t source_count, dc_context *context, const char *path)
+{
+    dc_node *result = NULL, *num = NULL;
+    const dc_node *item;
+    size_t i, j, count = 0;
+    /* Keep O(entries * sources) storage. Relations are recomputed during the
+     * topological walk instead of allocating a quadratic adjacency matrix. */
+    for (i = 0; i < entry_count; i++) if (entries[i].merged) {
+        for (j = i + 1; j < entry_count; j++) if (entries[j].merged) {
+            size_t first_source = SIZE_MAX, second_source = SIZE_MAX;
+            int relation = dc_entry_relation(context, path, &entries[i], &entries[j], source_count, &first_source, &second_source);
+            if (relation == 2) {
+                dc_fail_from(context, path, "incompatible collection ordering between authored entries",
+                    first_source, second_source);
+                dc_entry_error(context, entries[i].id); dc_entry_error(context, entries[j].id); goto failed;
+            }
+            if (relation < 0) entries[j].incoming++;
+            else if (relation > 0) entries[i].incoming++;
+        }
+    }
+    result = dc_header(first, context); num = (dc_node *)calloc(1, sizeof(*num));
+    if (!result || !num) goto allocation;
+    result->children = num; num->key = dc_copy("num", 3); num->assignment = 1;
+    if (!num->key) goto allocation;
+    for (;;) {
+        size_t next = SIZE_MAX;
+        int remaining = 0;
+        for (i = 0; i < entry_count; i++) if (entries[i].merged && !entries[i].emitted) {
+            remaining = 1;
+            if (!entries[i].incoming) { next = i; break; }
+        }
+        if (!remaining) break;
+        if (next == SIZE_MAX) {
+            if (context->conflict) context->conflict->all_sources = 1;
+            dc_fail(context, path, "collection ordering constraints form a cycle"); goto failed;
+        }
+        entries[next].emitted = 1;
+        for (j = 0; j < entry_count; j++) if (entries[j].merged && !entries[j].emitted &&
+            dc_entry_relation(context, path, &entries[next], &entries[j], source_count, NULL, NULL) < 0) entries[j].incoming--;
+        item = entries[next].merged; entries[next].merged = NULL;
+        if (!dc_append_item(result, (dc_node *)item, &count, context)) goto failed;
+    }
+    {
+        char number[40];
+        snprintf(number, sizeof(number), "%zu", count);
+        num->value = dc_copy(number, strlen(number));
+        if (!num->value) goto allocation;
+    }
+    return result;
+allocation:
+    if (num && (!result || result->children != num)) dc_free(num);
+    dc_fail(context, path, "composition allocation failed");
+failed:
+    dc_free(result); return NULL;
+}
+
+static int dc_deleted_order(dc_entry *entries, size_t entry_count, size_t source_count,
+    dc_context *context, const char *path)
+{
+    size_t i, j, k;
+    /* Removing an entry conflicts with moving that same baseline entry. New
+     * neighbors alone do not count as a move of an existing entry. */
+    for (i = 0; i < entry_count; i++) if (!entries[i].merged && entries[i].positions[0] != SIZE_MAX) {
+        for (j = 0; j < entry_count; j++) if (i != j && entries[j].positions[0] != SIZE_MAX) {
+            int original = entries[i].positions[0] < entries[j].positions[0];
+            for (k = 1; k <= source_count; k++) if (entries[i].positions[k] != SIZE_MAX &&
+                entries[j].positions[k] != SIZE_MAX &&
+                original != (entries[i].positions[k] < entries[j].positions[k])) {
+                size_t removed;
+                for (removed = 1; removed <= source_count; removed++)
+                    if (entries[i].positions[removed] == SIZE_MAX) break;
+                dc_fail_from(context, path, "collection deletion conflicts with reordering",
+                    removed <= source_count ? removed - 1 : SIZE_MAX, k - 1);
+                dc_entry_error(context, entries[i].id); return 0;
+            }
+        }
+    }
+    return 1;
+}
+
 static dc_node *dc_merge_list(const dc_node *base, const dc_node *const *sources, size_t source_count,
     const sh_decl_collection_rule *rule, dc_context *context, const char *path, sh_decl_value_type type)
 {
     const dc_node *first = base, *item, **members = NULL;
-    dc_node *result = NULL, *num = NULL;
+    dc_node *result = NULL;
     dc_entry *entries = NULL;
-    size_t entry_count = 0, capacity = 0, i, j, k, count = 0;
+    size_t entry_count = 0, capacity = 0, i, j;
     for (i = 0; i < source_count; i++) if (!first && sources[i]) first = sources[i];
     if (!first) return NULL;
     if (source_count == SIZE_MAX || source_count > SIZE_MAX / sizeof(*members) ||
@@ -633,7 +879,8 @@ static dc_node *dc_merge_list(const dc_node *base, const dc_node *const *sources
         }
         if (rule->item_key && !rule->item_key[0] &&
             !dc_equal(dc_member(first, "num"), dc_member(list, "num"))) {
-            dc_fail(context, path, "fixed positional collection ordering requires an unchanged extent"); goto failed;
+            dc_fail_from(context, path, "fixed positional collection ordering requires an unchanged extent",
+                i ? i - 1 : SIZE_MAX, SIZE_MAX); goto failed;
         }
         for (item = list->children; item; item = item->next) {
             const char *id;
@@ -674,68 +921,10 @@ static dc_node *dc_merge_list(const dc_node *base, const dc_node *const *sources
             dc_child_type(context, type, first, example->key));
         if (context->failed) { dc_entry_error(context, entries[i].id); goto failed; }
     }
-    /* Removing an entry conflicts with moving that same baseline entry. New
-     * neighbors alone do not count as a move of an existing entry. */
-    for (i = 0; i < entry_count; i++) if (!entries[i].merged && entries[i].positions[0] != SIZE_MAX) {
-        for (j = 0; j < entry_count; j++) if (i != j && entries[j].positions[0] != SIZE_MAX) {
-            int original = entries[i].positions[0] < entries[j].positions[0];
-            for (k = 1; k <= source_count; k++) if (entries[i].positions[k] != SIZE_MAX &&
-                entries[j].positions[k] != SIZE_MAX &&
-                original != (entries[i].positions[k] < entries[j].positions[k])) {
-                size_t removed;
-                for (removed = 1; removed <= source_count; removed++)
-                    if (entries[i].positions[removed] == SIZE_MAX) break;
-                dc_fail_from(context, path, "collection deletion conflicts with reordering",
-                    removed <= source_count ? removed - 1 : SIZE_MAX, k - 1);
-                dc_entry_error(context, entries[i].id); goto failed;
-            }
-        }
-    }
-    /* Keep O(entries * sources) storage. Relations are recomputed during the
-     * topological walk instead of allocating a quadratic adjacency matrix. */
-    for (i = 0; i < entry_count; i++) if (entries[i].merged) {
-        for (j = i + 1; j < entry_count; j++) if (entries[j].merged) {
-            size_t first_source = SIZE_MAX, second_source = SIZE_MAX;
-            int relation = dc_entry_relation(context, path, &entries[i], &entries[j], source_count, &first_source, &second_source);
-            if (relation == 2) {
-                dc_fail_from(context, path, "incompatible collection ordering between authored entries",
-                    first_source, second_source);
-                dc_entry_error(context, entries[i].id); dc_entry_error(context, entries[j].id); goto failed;
-            }
-            if (relation < 0) entries[j].incoming++;
-            else if (relation > 0) entries[i].incoming++;
-        }
-    }
-    result = dc_header(first, context); num = (dc_node *)calloc(1, sizeof(*num));
-    if (!result || !num) goto allocation;
-    result->children = num; num->key = dc_copy("num", 3); num->assignment = 1;
-    if (!num->key) goto allocation;
-    for (;;) {
-        size_t next = SIZE_MAX;
-        int remaining = 0;
-        for (i = 0; i < entry_count; i++) if (entries[i].merged && !entries[i].emitted) {
-            remaining = 1;
-            if (!entries[i].incoming) { next = i; break; }
-        }
-        if (!remaining) break;
-        if (next == SIZE_MAX) {
-            dc_fail(context, path, "collection ordering constraints form a cycle"); goto failed;
-        }
-        entries[next].emitted = 1;
-        for (j = 0; j < entry_count; j++) if (entries[j].merged && !entries[j].emitted &&
-            dc_entry_relation(context, path, &entries[next], &entries[j], source_count, NULL, NULL) < 0) entries[j].incoming--;
-        item = entries[next].merged; entries[next].merged = NULL;
-        if (!dc_append_item(result, (dc_node *)item, &count, context)) goto failed;
-    }
-    {
-        char number[40];
-        snprintf(number, sizeof(number), "%zu", count);
-        num->value = dc_copy(number, strlen(number));
-        if (!num->value) goto allocation;
-    }
+    if (!dc_deleted_order(entries, entry_count, source_count, context, path)) goto failed;
+    result = dc_emit_entries(first, entries, entry_count, source_count, context, path);
     goto done;
 allocation:
-    if (num && (!result || result->children != num)) dc_free(num);
     dc_fail(context, path, "composition allocation failed");
 failed:
     dc_free(result); result = NULL;
@@ -754,6 +943,217 @@ static int dc_indexed(const dc_node *node)
     return 0;
 }
 
+/* Presentation groups partition one semantic collection. A member's value,
+ * placement and order are independent edits. Numeric group slots describe the
+ * layout, not the identity of the member being edited. */
+static const dc_node *dc_group_member(const dc_node *list, const char *id,
+    const sh_decl_collection_rule *rule, size_t *group, size_t *position)
+{
+    const dc_node *page;
+    sh_decl_collection_rule members = {0};
+    size_t index = 0;
+    members.item_key = rule->group_identity;
+    *group = *position = SIZE_MAX;
+    for (page = list ? list->children : NULL; page; page = page->next) {
+        const dc_node *items, *found;
+        if (!strcmp(page->key, "num")) continue;
+        items = dc_member(page, rule->group_items);
+        found = dc_find_item(items, id, &members);
+        if (found) {
+            *group = index; *position = dc_position(items, id, &members); return found;
+        }
+        index++;
+    }
+    return NULL;
+}
+
+/* Temporarily omit the independently merged member list from private parsed
+ * trees. Keeping the original nodes preserves native reader annotations. */
+static dc_node *dc_group_metadata(const dc_node *base, const dc_node *const *sources,
+    size_t count, const char *key, dc_context *context, const char *path, sh_decl_value_type type)
+{
+    dc_node ***links = NULL, **saved = NULL, *result = NULL;
+    size_t i;
+    if (count == SIZE_MAX || count + 1 > SIZE_MAX / sizeof(*links)) goto allocation;
+    links = calloc(count + 1, sizeof(*links)); saved = calloc(count + 1, sizeof(*saved));
+    if (!links || !saved) goto allocation;
+    for (i = 0; i <= count; i++) {
+        dc_node *node = (dc_node *)(i ? sources[i - 1] : base), **link;
+        if (!node) continue;
+        for (link = &node->children; *link; link = &(*link)->next) if (!strcmp((*link)->key, key)) {
+            links[i] = link; saved[i] = *link; *link = (*link)->next; break;
+        }
+    }
+    result = dc_merge(base, sources, count, context, path, type);
+    for (i = 0; i <= count; i++) if (links[i]) *links[i] = saved[i];
+    free(links); free(saved); return result;
+allocation:
+    free(links); free(saved); dc_fail(context, path, "group metadata allocation failed"); return NULL;
+}
+
+static dc_node *dc_merge_groups(const dc_node *base, const dc_node *const *sources, size_t source_count,
+    const sh_decl_collection_rule *rule, dc_context *context, const char *path, sh_decl_value_type type)
+{
+    sh_decl_collection_rule member_rule = {0};
+    const dc_node *first = base, **members = NULL;
+    dc_entry *entries = NULL;
+    dc_node **pages = NULL, *result = NULL;
+    size_t *destinations = NULL, *groups = NULL;
+    size_t entry_count = 0, page_count = 0, i, j, k, output_count = 0;
+    member_rule.item_key = rule->group_identity;
+    if (!rule->group_identity || !*rule->group_identity) {
+        dc_fail(context, path, "grouped collection requires a member identity"); return NULL;
+    }
+    if (source_count == SIZE_MAX || source_count + 1 > SIZE_MAX / sizeof(*members)) goto allocation;
+    members = calloc(source_count + 1, sizeof(*members));
+    groups = malloc((source_count + 1) * sizeof(*groups));
+    if (!members || !groups) goto allocation;
+    for (i = 0; i <= source_count; i++) {
+        const dc_node *list = i ? sources[i - 1] : base, *page;
+        size_t n = 0;
+        if (!first) first = list;
+        for (page = list ? list->children : NULL; page; page = page->next) {
+            const dc_node *items, *item;
+            if (!strcmp(page->key, "num")) continue;
+            n++; items = dc_member(page, rule->group_items);
+            for (item = items ? items->children : NULL; item; item = item->next) {
+                const char *id;
+                dc_entry *grown;
+                if (!strcmp(item->key, "num")) continue;
+                id = dc_item_id(item, &member_rule);
+                if (!id) {
+                    dc_fail_from(context, path, "group member has no identity", i ? i - 1 : SIZE_MAX, SIZE_MAX); goto done;
+                }
+                for (j = 0; j < entry_count; j++) if (!strcmp(entries[j].id, id)) break;
+                if (j < entry_count) continue;
+                if (entry_count == SIZE_MAX / sizeof(*entries)) goto allocation;
+                grown = realloc(entries, (entry_count + 1) * sizeof(*entries));
+                if (!grown) goto allocation;
+                entries = grown; memset(&entries[entry_count], 0, sizeof(*entries));
+                entries[entry_count++].id = id;
+            }
+        }
+        if (n > page_count) page_count = n;
+    }
+    if (page_count > SIZE_MAX / sizeof(*pages) || entry_count > SIZE_MAX / sizeof(*destinations)) goto allocation;
+    pages = calloc(page_count ? page_count : 1, sizeof(*pages));
+    destinations = malloc((entry_count ? entry_count : 1) * sizeof(*destinations));
+    if (!pages || !destinations) goto allocation;
+    if (entry_count > 1) qsort(entries, entry_count, sizeof(*entries), dc_entry_compare);
+    for (i = 0; i < entry_count; i++) {
+        const dc_node *original, *example, *example_page, *example_items;
+        sh_decl_value_type page_type, list_type;
+        size_t destination, mover = SIZE_MAX, removed = SIZE_MAX;
+        char key[40], nested[DC_PATH_CAP], item_path[DC_PATH_CAP];
+        entries[i].positions = malloc((source_count + 1) * sizeof(size_t));
+        if (!entries[i].positions) goto allocation;
+        original = dc_group_member(base, entries[i].id, rule, &groups[0], &entries[i].positions[0]);
+        example = original;
+        destination = groups[0];
+        for (j = 0; j < source_count; j++) {
+            members[j] = dc_group_member(sources[j], entries[i].id, rule, &groups[j+1], &entries[i].positions[j+1]);
+            if (!example) example = members[j];
+            if (!members[j]) { if (original) removed = j; continue; }
+            if (groups[j+1] == groups[0]) continue;
+            if (mover != SIZE_MAX && destination != groups[j+1]) {
+                dc_fail_from(context, path, "member moved to different groups", mover, j);
+                dc_entry_error(context, entries[i].id); goto done;
+            }
+            destination = groups[j+1]; mover = j;
+        }
+        if (removed != SIZE_MAX && mover != SIZE_MAX) {
+            dc_fail_from(context, path, "member deletion conflicts with group placement", removed, mover);
+            dc_entry_error(context, entries[i].id); goto done;
+        }
+        destinations[i] = destination;
+        /* Only entries that coexisted in the destination can constrain its
+         * ordering. Their old page cannot invent relations on a new page. */
+        for (j = 0; j <= source_count; j++)
+            if (groups[j] != destination) entries[i].positions[j] = SIZE_MAX;
+        k = original ? 0 : 1;
+        while (k <= source_count && groups[k] == SIZE_MAX) k++;
+        if (k > source_count) goto allocation;
+        snprintf(key, sizeof(key), "item[%zu]", groups[k]);
+        example_page = dc_member(k ? sources[k-1] : base, key);
+        example_items = dc_member(example_page, rule->group_items);
+        page_type = dc_child_type(context, type, first, key);
+        list_type = dc_child_type(context, page_type, example_page, rule->group_items);
+        if (!dc_join_path(nested, sizeof(nested), path, key) ||
+            !dc_join_path(item_path, sizeof(item_path), nested, rule->group_items) ||
+            !dc_join_path(nested, sizeof(nested), item_path, example->key)) goto allocation;
+        entries[i].merged = dc_merge(original, members, source_count, context, nested,
+            dc_child_type(context, list_type, example_items, example->key));
+        if (context->failed) { dc_entry_error(context, entries[i].id); goto done; }
+    }
+    /* Deleted members still participate in move/delete validation. Check
+     * each partition separately so positions on different pages never compare. */
+    for (i = 0; i < page_count; i++) {
+        dc_entry *selected = calloc(entry_count ? entry_count : 1, sizeof(*selected));
+        size_t n = 0;
+        if (!selected) goto allocation;
+        for (j = 0; j < entry_count; j++) if (destinations[j] == i) selected[n++] = entries[j];
+        int valid = dc_deleted_order(selected, n, source_count, context, path);
+        free(selected);
+        if (!valid) goto done;
+    }
+    for (i = 0; i < page_count; i++) {
+        const dc_node *original, *example;
+        dc_node *items;
+        dc_entry *selected;
+        size_t selected_count = 0;
+        char key[40], nested[DC_PATH_CAP], list_path[DC_PATH_CAP];
+        snprintf(key, sizeof(key), "item[%zu]", i);
+        original = dc_member(base, key); example = original;
+        for (j = 0; j < source_count; j++) {
+            members[j] = dc_member(sources[j], key);
+            if (!example) example = members[j];
+        }
+        if (!dc_join_path(nested, sizeof(nested), path, key) ||
+            !dc_join_path(list_path, sizeof(list_path), nested, rule->group_items)) goto allocation;
+        pages[i] = dc_group_metadata(original, members, source_count, rule->group_items, context, nested,
+            dc_child_type(context, type, first, key));
+        if (context->failed) goto done;
+        for (j = 0; j < entry_count; j++) if (entries[j].merged && destinations[j] == i) selected_count++;
+        if (!pages[i]) {
+            if (selected_count) {
+                if (context->conflict) context->conflict->all_sources = 1;
+                dc_fail(context, nested, "removed group still contains authored members"); goto done;
+            }
+            continue;
+        }
+        selected = calloc(selected_count ? selected_count : 1, sizeof(*selected));
+        if (!selected) goto allocation;
+        for (j = 0, k = 0; j < entry_count; j++) if (entries[j].merged && destinations[j] == i) {
+            selected[k++] = entries[j]; entries[j].merged = NULL;
+        }
+        /* Even an empty authored group retains its native list header. */
+        example = dc_member(example, rule->group_items);
+        if (!example) {
+            dc_fail(context, list_path, "group has no member collection"); items = NULL;
+        } else items = dc_emit_entries(example, selected, selected_count, source_count, context, list_path);
+        for (j = 0; j < selected_count; j++) dc_free(selected[j].merged);
+        free(selected);
+        if (!items) goto done;
+        items->next = pages[i]->children; pages[i]->children = items;
+    }
+    result = dc_emit_entries(first, NULL, 0, source_count, context, path);
+    if (!result) goto done;
+    for (i = 0; i < page_count; i++) if (pages[i]) {
+        dc_node *page = pages[i]; pages[i] = NULL;
+        if (!dc_append_item(result, page, &output_count, context)) goto done;
+    }
+    if (!dc_normalize_list(result, rule, context, path)) goto done;
+    goto done;
+allocation:
+    dc_fail(context, path, "grouped collection allocation or field path limit exceeded");
+done:
+    for (i = 0; i < entry_count; i++) { dc_free(entries[i].merged); free(entries[i].positions); }
+    if (pages) for (i = 0; i < page_count; i++) dc_free(pages[i]);
+    free(entries); free(pages); free(members); free(groups); free(destinations);
+    if (context->failed) { dc_free(result); result = NULL; }
+    return result;
+}
+
 static dc_node *dc_merge(const dc_node *base, const dc_node *const *sources, size_t source_count,
                           dc_context *context, const char *path, sh_decl_value_type type)
 {
@@ -762,7 +1162,7 @@ static dc_node *dc_merge(const dc_node *base, const dc_node *const *sources, siz
     sh_decl_value_shape shape;
     dc_node *result = NULL, **tail;
     size_t i, first_change = SIZE_MAX, second_change = SIZE_MAX;
-    int changed = 0, distinct = 0, all_compound = 1, indexed = dc_indexed(base);
+    int changed = 0, distinct = 0, all_compound = 1, indexed = dc_indexed(base), sparse = 0;
     if (context->annotation_count && type.name) {
         int replacing = base && !dc_compatible_type(context, dc_recorded_type(context, base), type, base->compound);
         const dc_node **converted = NULL;
@@ -821,11 +1221,30 @@ static dc_node *dc_merge(const dc_node *base, const dc_node *const *sources, siz
     }
     if (!all_compound) {
         if (!distinct) return dc_clone_result(change, context, path, type, first_change);
+        if (context->conflicting_sources && context->conflict) {
+            context->conflict->precise_sources = 1;
+            for (i = 0; i < source_count; i++)
+                context->conflicting_sources[i] = !dc_typed_equal(base, sources[i], context);
+        }
         dc_fail_from(context, path, "incompatible edits to the same field", first_change, second_change); return NULL;
     }
     rule = dc_rule(context, path);
+    if (rule) {
+        int complete = base && !dc_sparse_collection(base, rule, context);
+        sparse = dc_sparse_collection(base, rule, context);
+        for (i = 0; i < source_count; i++) if (sources[i]) {
+            if (dc_sparse_collection(sources[i], rule, context)) sparse = 1;
+            else complete = 1;
+        }
+        if (sparse && (complete || context->inherited_layout_changed)) {
+            if (context->conflict) context->conflict->all_sources = 1;
+            dc_fail(context, path, "inherited collection composition requires a consistent parent layout"); return NULL;
+        }
+        if (sparse) { rule = NULL; indexed = 0; }
+    }
+    if (rule && rule->group_items) return dc_merge_groups(base, sources, source_count, rule, context, path, type);
     if (rule) return dc_merge_list(base, sources, source_count, rule, context, path, type);
-    if (dc_shape(context, type, &shape)) {
+    if (!sparse && dc_shape(context, type, &shape)) {
         if (shape.kind == SH_DECL_VALUE_COLLECTION) {
             /* Only native fixed positions compose without an identity adapter.
              * A dynamic collection remains a collection even without num. */
@@ -1033,7 +1452,7 @@ char *sh_decl_compose_root_metadata(sh_decl_source baseline,
     size_t i;
     if (out_length) *out_length = 0;
     if (error && error_capacity) error[0] = 0;
-    if (conflict) conflict->first = conflict->second = SIZE_MAX;
+    if (conflict) { conflict->first = conflict->second = SIZE_MAX; conflict->all_sources = conflict->precise_sources = 0; }
     context.error = error; context.error_capacity = error_capacity; context.conflict = conflict;
     if (!out_length || !sources || !count || count > SIZE_MAX / sizeof(*inputs)) {
         dc_fail(&context, NULL, "invalid metadata composition inputs"); return NULL;
@@ -1062,11 +1481,47 @@ done:
     return buffer.text;
 }
 
+static int dc_same_order(const dc_node *a, const dc_node *b)
+{
+    const dc_node *left = a->children, *right = b->children;
+    for (; left && right; left = left->next, right = right->next)
+        if (strcmp(left->key, right->key) || !dc_same_order(left, right)) return 0;
+    return !left && !right;
+}
+
+int sh_decl_normalize_collections(sh_decl_source source,
+    const sh_decl_collection_rule *rules, size_t rule_count, char **body,
+    size_t *length, char *error, size_t error_capacity)
+{
+    dc_context context = {0};
+    dc_node *original = NULL, *normalized = NULL;
+    dc_buffer buffer = {0};
+    int ok = 0;
+    context.rules = rules; context.rule_count = rule_count;
+    context.error = error; context.error_capacity = error_capacity;
+    *body = NULL; *length = 0;
+    if (error && error_capacity) *error = 0;
+    original = dc_parse(source); normalized = dc_parse(source);
+    if (!original || !normalized) {
+        dc_fail(&context, NULL, "source has unsupported or malformed syntax"); goto done;
+    }
+    context.inherited_input = dc_member(original, "inherit") != NULL;
+    if (!dc_normalize(normalized, &context, "") ||
+        !dc_validate(normalized, &context, "", (sh_decl_value_type){0})) goto done;
+    if (dc_equal(original, normalized) && dc_same_order(original, normalized)) { ok = 1; goto done; }
+    if (!dc_emit(&buffer, normalized) || !dc_append(&buffer, "\n", 1)) {
+        dc_fail(&context, NULL, "normalized collection output allocation failed"); goto done;
+    }
+    *body = buffer.text; *length = buffer.length; buffer.text = NULL; ok = 1;
+done:
+    dc_free(original); dc_free(normalized); free(buffer.text); return ok;
+}
+
 static char *dc_compose_resource(const char *declaration_type,
     sh_decl_source baseline, const sh_decl_source *sources,
     size_t count, const sh_decl_collection_rule *rules, size_t rule_count,
     const sh_decl_composition_schema *schema, const sh_decl_collection_order *order, size_t *out_length,
-    char *error, size_t error_capacity, sh_decl_conflict *conflict)
+    char *error, size_t error_capacity, sh_decl_conflict *conflict, unsigned char *conflicting_sources)
 {
     dc_context context = {0};
     dc_node *base = NULL, *combined = NULL, *metadata = NULL;
@@ -1076,8 +1531,10 @@ static char *dc_compose_resource(const char *declaration_type,
     context.rules = rules; context.rule_count = rule_count;
     context.error = error; context.error_capacity = error_capacity;
     context.conflict = conflict; context.schema = schema; context.order = order;
+    context.conflicting_sources = conflicting_sources;
+    if (conflicting_sources) memset(conflicting_sources, 0, count);
     if (out_length) *out_length = 0;
-    if (conflict) conflict->first = conflict->second = SIZE_MAX;
+    if (conflict) { conflict->first = conflict->second = SIZE_MAX; conflict->all_sources = conflict->precise_sources = 0; }
     if (error && error_capacity) error[0] = '\0';
     if (!out_length || !sources || !count || (rule_count && !rules) || (order && !order->relation)) {
         dc_fail(&context, NULL, "invalid composition inputs"); return NULL;
@@ -1091,6 +1548,8 @@ static char *dc_compose_resource(const char *declaration_type,
     }
     base = dc_parse(baseline);
     if (!base) { dc_fail(&context, NULL, "baseline has unsupported or malformed syntax"); goto done; }
+    context.inherited_input = dc_member(base, "inherit") != NULL;
+    if (!dc_normalize(base, &context, "")) goto done;
     context.record_types = schema != NULL;
     if (!dc_resolve_state(&context, base, SH_DECL_COMPOSITION_ORIGINAL, 0)) goto done;
     if (!dc_validate(base, &context, "", (sh_decl_value_type){0})) goto done;
@@ -1103,13 +1562,25 @@ static char *dc_compose_resource(const char *declaration_type,
         if (!inputs[i]) {
             dc_fail_from(&context, NULL, "source has unsupported or malformed syntax", i, SIZE_MAX); goto done;
         }
-        if (!dc_resolve_state(&context, inputs[i], SH_DECL_COMPOSITION_CONTRIBUTION, i) ||
+        context.inherited_input = dc_member(inputs[i], "inherit") != NULL;
+        if (!dc_normalize((dc_node *)inputs[i], &context, "") ||
+            !dc_resolve_state(&context, inputs[i], SH_DECL_COMPOSITION_CONTRIBUTION, i) ||
             !dc_validate(inputs[i], &context, "", (sh_decl_value_type){0})) {
             if (conflict) conflict->first = i;
             goto done;
         }
     }
     context.record_types = 0;
+    {
+        const dc_node *parent = dc_member(base, "inherit");
+        context.inherited_input = parent != NULL;
+        for (i = 0; i < count; i++) {
+            const dc_node *next = dc_member(inputs[i], "inherit");
+            if (!parent) parent = next;
+            if (next) context.inherited_input = 1;
+            if (parent && !dc_equal(parent, next)) context.inherited_layout_changed = 1;
+        }
+    }
     if (context.annotation_count > 1)
         qsort(context.annotations, context.annotation_count, sizeof(*context.annotations), dc_annotation_compare);
     if (schema && schema->resolve) {
@@ -1120,6 +1591,7 @@ static char *dc_compose_resource(const char *declaration_type,
     if (!combined || context.failed) goto done;
     if (declaration_type && !_stricmp(declaration_type, "entitydef")) dc_entity_headers(combined);
     else if (declaration_type && schema) dc_reflected_headers(combined);
+    context.inherited_input = dc_member(combined, "inherit") != NULL;
     if (!dc_validate(combined, &context, "", (sh_decl_value_type){0}) || !dc_emit(&buffer, combined) ||
         !dc_append(&buffer, "\n", 1)) {
         dc_fail(&context, NULL, "compiled declaration exceeds output limits"); goto done;
@@ -1140,7 +1612,18 @@ char *sh_decl_compose_resource(const char *declaration_type,
     char *error, size_t error_capacity, sh_decl_conflict *conflict)
 {
     return dc_compose_resource(declaration_type, baseline, sources, count, rules,
-        rule_count, schema, NULL, out_length, error, error_capacity, conflict);
+        rule_count, schema, NULL, out_length, error, error_capacity, conflict, NULL);
+}
+
+char *sh_decl_compose_resource_report(const char *declaration_type,
+    sh_decl_source baseline, const sh_decl_source *sources,
+    size_t count, const sh_decl_collection_rule *rules, size_t rule_count,
+    const sh_decl_composition_schema *schema, size_t *out_length,
+    char *error, size_t error_capacity, sh_decl_conflict *conflict,
+    unsigned char *conflicting_sources)
+{
+    return dc_compose_resource(declaration_type, baseline, sources, count, rules,
+        rule_count, schema, NULL, out_length, error, error_capacity, conflict, conflicting_sources);
 }
 
 char *sh_decl_compose_ordered(sh_decl_source baseline, const sh_decl_source *sources,
@@ -1149,7 +1632,7 @@ char *sh_decl_compose_ordered(sh_decl_source baseline, const sh_decl_source *sou
     char *error, size_t error_capacity, sh_decl_conflict *conflict)
 {
     return dc_compose_resource(NULL, baseline, sources, count, rules, rule_count,
-        NULL, order, out_length, error, error_capacity, conflict);
+        NULL, order, out_length, error, error_capacity, conflict, NULL);
 }
 
 char *sh_decl_compose_typed(sh_decl_source baseline, const sh_decl_source *sources,

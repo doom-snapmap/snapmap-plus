@@ -452,7 +452,7 @@ static const sh_decl_collection_rule *pc_rules(const char *type, size_t *count)
     static const sh_decl_collection_rule blocking = {"edit.renderModelInfoList", "renderModelMaterial"};
     static const sh_decl_collection_rule encounters = {"edit.validEncounters", NULL};
     static const sh_decl_collection_rule editor_properties[] = {
-        {"edit.propertySheets", ""},
+        {"edit.propertySheets", "", "properties", "path"},
         {"edit.propertySheets.item[*].properties", "path"}
     };
     static const sh_decl_collection_rule conductor[] = {
@@ -503,7 +503,7 @@ static void pc_report_conflict(const sh_package_compilation *compilation,
     const char *detail, char *error, size_t capacity)
 {
     size_t i, used, total = resource->source_count + (built_in ? 1u : 0u);
-    int selected = cause.first < total || cause.second < total, names = 0, n;
+    int selected = !cause.all_sources && (cause.first < total || cause.second < total), names = 0, n;
     if (!error || !capacity) return;
     n = snprintf(error, capacity, "%s [", resource->engine_path);
     if (n < 0 || (size_t)n >= capacity) return;
@@ -534,6 +534,58 @@ static void pc_report_conflict(const sh_package_compilation *compilation,
 static int pc_file_equal(const sh_package_file_identity *a, const sh_package_file_identity *b)
 {
     return a->length == b->length && !memcmp(a->digest, b->digest, sizeof(a->digest));
+}
+
+/* Only used after every owner passed its own policy check. Find all conflicting
+ * pairs, including duplicate copies on either side, without blaming packages
+ * that merely carry unrelated strings or HUD settings. */
+static void pc_conflicted_policies(const sh_package_sources *sources, sh_package_owners *rejected)
+{
+    size_t i, j, k;
+    if (!rejected) return;
+    for (i = 0; i < sources->package_count; i++) {
+        for (k = 0; k < sources->package_count; k++) if (pc_variant_shadowed(sources, i, k)) break;
+        if (k != sources->package_count) continue;
+        for (j = i + 1; j < sources->package_count; j++) {
+            sh_package_owners pair = {0};
+            sh_package_policy policy = {0};
+            char detail[1024] = "";
+            int allocation = 0, valid;
+            for (k = 0; k < sources->package_count; k++) if (pc_variant_shadowed(sources, j, k)) break;
+            if (k != sources->package_count) continue;
+            if (!sh_package_owners_add(&pair, i) || !sh_package_owners_add(&pair, j)) {
+                sh_package_owners_free(&pair); goto failed;
+            }
+            errno = 0;
+            valid = pc_policies(sources, &pair, &policy, detail, sizeof(detail), &allocation);
+            sh_package_policy_free(&policy);
+            if (!valid && (allocation || errno == ENOMEM || !detail[0])) {
+                sh_package_owners_free(&pair); goto failed;
+            }
+            if (!valid && !sh_package_owners_union(rejected, &pair)) {
+                sh_package_owners_free(&pair); goto failed;
+            }
+            sh_package_owners_free(&pair);
+        }
+    }
+    return;
+failed:
+    sh_package_owners_free(rejected);
+}
+
+static void pc_conflicted_resource(const sh_package_compile_environment *environment,
+    const sh_package_sources *sources, const sh_compiled_resource *resource,
+    sh_decl_conflict cause, const unsigned char *participants)
+{
+    if (!environment->conflicted_packages) return;
+    if (cause.precise_sources && participants) {
+        for (size_t i = 0; i < resource->source_count; i++) if (participants[i])
+            if (!sh_package_owners_add(environment->conflicted_packages, sources->files[resource->sources[i]].owner))
+                goto failed;
+    } else if (!sh_package_owners_union(environment->conflicted_packages, &resource->owners)) goto failed;
+    return;
+failed:
+    sh_package_owners_free(environment->conflicted_packages);
 }
 
 /* Opaque payloads are indivisible replacements. Compare verified identities,
@@ -600,6 +652,20 @@ static int pc_compile_opaque(sh_package_compilation *out, sh_compiled_resource *
         if (effective == SIZE_MAX) { selected = current; effective = i; cause.first = i; }
         else if (!pc_file_equal(&selected, &current)) {
             cause.second = i;
+            /* Include later contributors too. Otherwise a third copy of one
+             * conflicting payload would become a winner by scan order. */
+            if (environment->conflicted_packages) {
+                int valid = 1;
+                for (size_t j = 0; j < resource->source_count; j++) {
+                    const sh_package_source_file *peer = &out->sources->files[resource->sources[j]];
+                    sh_package_file_identity identity = {peer->length, {0}};
+                    memcpy(identity.digest, peer->digest, sizeof(identity.digest));
+                    if (!sh_package_source_verify(peer)) { valid = 0; break; }
+                    if ((!original.scope || !pc_file_equal(&original.file, &identity)) &&
+                        !sh_package_owners_add(environment->conflicted_packages, peer->owner)) { valid = 0; break; }
+                }
+                if (!valid) sh_package_owners_free(environment->conflicted_packages);
+            }
             pc_report_conflict(out, resource, cause, builtin != NULL,
                 !environment->baseline && !environment->baseline_identity && !builtin ?
                     "different contributions have no verified original for composition" :
@@ -702,7 +768,7 @@ static size_t pc_alone_invalid(const sh_package_compilation *out, const sh_compi
             distinct++;
         }
         /* Without an original reader, composition is unavailable to everyone. */
-        if (((!typed || !schema->resolve) && distinct <= 1u) ||
+        if ((!rule_count && (!typed || !schema->resolve) && distinct <= 1u) ||
             (!have_base && !environment->baseline && !builtin)) continue;
         classes->alone = 1; classes->alone_owner = owner; classes->alone_count = own;
         classes->input_count = total; classes->peer_source = classes->operational = 0;
@@ -727,7 +793,7 @@ static size_t pc_alone_invalid(const sh_package_compilation *out, const sh_compi
         classes->alone = 0; classes->input_count = saved_inputs;
         if (!failed) continue;
         if (classes->operational || errno == ENOMEM || strstr(detail, "allocation")) break;
-        if (classes->peer_source || !(cause.first < own || cause.second < own)) continue;
+        if (classes->peer_source || !(cause.all_sources || cause.first < own || cause.second < own)) continue;
         cause.first = cause.first < total ? map[cause.first] : SIZE_MAX;
         cause.second = cause.second < total ? map[cause.second] : SIZE_MAX;
         pc_report_conflict(out, resource, cause, builtin != NULL, detail, error, capacity);
@@ -747,6 +813,7 @@ static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource
     const sh_package_source_file *files = out->sources->files;
     const sh_package_builtin *builtin = generated ? generated : pc_builtin(environment, resource->engine_path);
     unsigned char *base = NULL, **bodies = NULL;
+    unsigned char *participants = NULL;
     size_t base_length = 0, i, effective = 0, distinct = 0, rule_count = 0;
     size_t input_count = resource->source_count + (builtin != NULL);
     size_t *lengths = NULL;
@@ -756,7 +823,7 @@ static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource
     pc_class_context classes = {0};
     sh_package_source_view source_view = {&classes, pc_source_inputs};
     sh_decl_composition_schema schema = {0};
-    int typed = 0, custom_reader = 0, composing = 0;
+    int typed = 0, custom_reader = 0, composing = 0, operational = 0;
     int have_base = 0, all_equal = 1, ok = 0;
     char detail[512] = "";
     classes.sources = out->sources; classes.resource = resource; classes.environment = environment;
@@ -795,6 +862,7 @@ static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource
     lengths = (size_t *)calloc(input_count, sizeof(*lengths));
     texts = (sh_decl_source *)calloc(input_count, sizeof(*texts));
     if (!bodies || !lengths || !texts) goto done;
+    if (environment->conflicted_packages && !(participants = calloc(input_count, 1))) goto done;
     for (i = 0; i < resource->source_count; i++) {
         size_t previous;
         const sh_package_source_file *file = &files[resource->sources[i]];
@@ -849,11 +917,20 @@ static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource
             texts[0].length, builtin->body, builtin->length)) all_equal = 0;
     }
     composing = 1;
+    errno = 0;
+    rules = pc_rules(resource->type, &rule_count);
     /* Entity headers require normalization even without overlapping changes.
      * Other native families can also accept custom source dialects (particles
      * are one example); preserve their bytes when no composition is needed. */
     if ((!typed || !schema.resolve) && (distinct <= 1u || all_equal)) {
         resource->source = effective < resource->source_count ? resource->sources[effective] : SIZE_MAX;
+        if (rule_count) {
+            if (!sh_decl_normalize_collections(texts[effective], rules, rule_count,
+                (char **)&resource->body, &resource->body_length, detail, sizeof(detail))) {
+                cause.first = effective; cause.second = SIZE_MAX; goto conflict;
+            }
+            if (resource->body) { ok = 1; goto done; }
+        }
         if (resource->type || resource->source == SIZE_MAX) {
             resource->body = (unsigned char *)malloc(texts[effective].length + 1u);
             if (!resource->body) goto done;
@@ -863,7 +940,7 @@ static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource
         }
         ok = 1; goto done;
     }
-    if (!resource->type || (!have_base && !environment->baseline && !builtin)) {
+    if (!resource->type || (distinct > 1u && !all_equal && !have_base && !environment->baseline && !builtin)) {
         snprintf(detail, sizeof(detail), "%s", !have_base && !environment->baseline && !builtin ?
             "different contributions have no verified original for composition" :
             "different opaque replacements cannot be combined"); goto conflict;
@@ -889,10 +966,10 @@ static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource
     /* A reader-proven absent identity is a new declaration. Its original is
      * empty state, so compatible additions compose without an author-supplied
      * baseline file. A missing reader never establishes absence. */
-    resource->body = (unsigned char *)sh_decl_compose_resource(resource->type, have_base ?
+    resource->body = (unsigned char *)sh_decl_compose_resource_report(resource->type, have_base ?
         (sh_decl_source){(const char *)base, base_length} : (sh_decl_source){"{}", 2},
         texts, input_count, rules, rule_count, typed ? &schema : NULL,
-        &resource->body_length, detail, sizeof(detail), &cause);
+        &resource->body_length, detail, sizeof(detail), &cause, participants);
     if (!resource->body) {
         /* A contribution that cannot be parsed on its own is that package's
          * defect. Conflicts, missing parents and adapters stay unattributed. */
@@ -904,12 +981,18 @@ static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource
     resource->composed = distinct > 1 && !all_equal;
     resource->source = resource->source_count ? resource->sources[0] : SIZE_MAX; ok = 1; goto done;
 conflict:
+    /* Source-view read failures and allocation failures are transaction
+     * failures. Never turn them into a content-rejection decision. */
+    operational = classes.operational || errno == ENOMEM || strstr(detail, "allocation") != NULL;
     if (composing && environment->invalid_package && *environment->invalid_package == SIZE_MAX) {
         size_t owner = pc_alone_invalid(out, resource, environment, builtin, &classes, &schema, typed,
             custom_reader, (sh_decl_source){(const char *)base, base_length}, have_base, texts,
             error, error_capacity);
         if (owner != SIZE_MAX) { *environment->invalid_package = owner; goto done; }
     }
+    if (composing && !operational && !classes.operational &&
+        (cause.all_sources || cause.first < input_count || cause.second < input_count))
+        pc_conflicted_resource(environment, out->sources, resource, cause, participants);
     pc_report_conflict(out, resource, cause, builtin != NULL, detail, error, error_capacity);
 done:
     if (ok && (have_base == 1 || have_base == 2) && resource->body)
@@ -922,7 +1005,7 @@ done:
         for (j = 0; j + 1u < i; j++) if (bodies[j] == bodies[i - 1u]) break;
         if (j + 1u == i) free(bodies[i - 1u]);
     }
-    free(bodies); free(lengths); free(texts); free(base); pc_classes_free(&classes); return ok;
+    free(bodies); free(lengths); free(texts); free(base); free(participants); pc_classes_free(&classes); return ok;
 }
 
 static int pc_resource_compare(const void *a, const void *b)
@@ -1144,6 +1227,7 @@ sh_package_compilation *sh_package_compile_with(const sh_package_sources *source
     error[0] = 0;
     build.error = error; build.error_capacity = error_capacity;
     if (environment && environment->invalid_package) *environment->invalid_package = SIZE_MAX;
+    if (environment && environment->conflicted_packages) sh_package_owners_free(environment->conflicted_packages);
     if (!sources || !environment ||
         (environment->builtin_count && !environment->builtins) ||
         (environment->types && !environment->class_derives)) goto bad;
@@ -1188,7 +1272,15 @@ sh_package_compilation *sh_package_compile_with(const sh_package_sources *source
             goto bad;
         }
     }
-    if (!pc_policies(sources, NULL, &out->policy, error, error_capacity, NULL)) goto bad;
+    {
+        int allocation = 0;
+        errno = 0;
+        if (!pc_policies(sources, NULL, &out->policy, error, error_capacity, &allocation)) {
+            if (!allocation && errno != ENOMEM && environment->invalid_package)
+                pc_conflicted_policies(sources, environment->conflicted_packages);
+            goto bad;
+        }
+    }
     for (i = 0; i < sources->file_count; i++) if (sources->files[i].engine_path) {
         inputs[count].file = &sources->files[i]; inputs[count].index = i;
         inputs[count].path = pc_key(environment, sources->files[i].engine_path);

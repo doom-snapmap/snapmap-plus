@@ -43,22 +43,19 @@ static void create(const char *relative, const char *body)
     strcpy_s(created[created_count], sizeof(created[0]), path); directories[created_count++] = 0;
 }
 
-static void cleanup(void)
+/* Also used by tests with a nested data root. Never inspect a cache outside
+ * the fixture, and delete only the runtime's verified flat hash filenames. */
+static void cleanup_resources(const char *fixture_root)
 {
-    size_t i;
-#ifdef SH_PACKAGE_RUNTIME_TESTING
-    /* The fixture owns no native consumers. Retire its provider seals before
-     * deleting cached files, while tests close their own retained streams. */
-    extern void sh_package_runtime_test_dispose(void);
-    sh_package_runtime_test_dispose();
-#endif
+    CHECK(!strncmp(fixture_root, root, strlen(root)) &&
+        (!fixture_root[strlen(root)] || fixture_root[strlen(root)] == '/' || fixture_root[strlen(root)] == '\\'));
     /* Runtime tests may prepare a flat, content-addressed resource cache.
      * Delete only verified hash filenames inside this fixture's own root. */
     {
         char directory[4096], pattern[4096], path[4352];
         WIN32_FIND_DATAA found;
         HANDLE search;
-        snprintf(directory, sizeof(directory), "%s/package-cache/resources", root);
+        snprintf(directory, sizeof(directory), "%s/package-cache/resources", fixture_root);
         snprintf(pattern, sizeof(pattern), "%s/*", directory);
         search = FindFirstFileA(pattern, &found);
         if (search != INVALID_HANDLE_VALUE) {
@@ -77,10 +74,22 @@ static void cleanup(void)
             } while (FindNextFileA(search, &found));
             FindClose(search);
             CHECK(RemoveDirectoryA(directory));
-            snprintf(directory, sizeof(directory), "%s/package-cache", root);
+            snprintf(directory, sizeof(directory), "%s/package-cache", fixture_root);
             CHECK(RemoveDirectoryA(directory));
         }
     }
+ }
+
+static void cleanup(void)
+{
+    size_t i;
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+    /* The fixture owns no native consumers. Retire its provider seals before
+     * deleting cached files, while tests close their own retained streams. */
+    extern void sh_package_runtime_test_dispose(void);
+    sh_package_runtime_test_dispose();
+#endif
+    cleanup_resources(root);
     while (created_count) {
         wchar_t *wide;
         i = --created_count; CHECK(!strncmp(created[i], root, strlen(root)));

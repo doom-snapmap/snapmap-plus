@@ -14,8 +14,8 @@ int sh_decl_entity_gameplay_equal(sh_decl_source baseline, sh_decl_source source
 
 /* These rules are supplied by verified engine-family adapters, never package
  * metadata. NULL item_key identifies a scalar collection; an object collection
- * names its stable direct child key. An empty key retains fixed positional
- * containers such as editor sheets; their count must remain unchanged.
+ * names its stable direct child key. An empty key retains fixed positions and
+ * extent unless the rule explicitly describes a grouped semantic collection.
  * A path may use [*] for a numeric index in a verified nested collection.
  * Semantic collections preserve compatible authored ordering constraints;
  * independent additions use identity order only to break unconstrained ties.
@@ -23,6 +23,11 @@ int sh_decl_entity_gameplay_equal(sh_decl_source baseline, sh_decl_source source
 typedef struct sh_decl_collection_rule {
     const char *path;
     const char *item_key;
+    /* A presentation partition of one semantic collection. Members keep their
+     * identity across groups; moving one is independent of editing its fields.
+     * Group positions are presentation order, never externally referenced IDs. */
+    const char *group_items;
+    const char *group_identity;
 } sh_decl_collection_rule;
 
 /* Native adapters derive extra ordering from merged entry references before
@@ -42,7 +47,18 @@ typedef struct sh_decl_collection_order {
  * contributors). The optional report is initialized on every call. */
 typedef struct sh_decl_conflict {
     size_t first, second;
+    /* A collection-wide conflict (for example an ordering cycle) may require
+     * more than two contributions. Never infer this from an error string. */
+    int all_sources;
+    int precise_sources; /* Optional source bitmap identifies every participant. */
 } sh_decl_conflict;
+
+/* Validate/repair registered collections in one complete contribution without
+ * reformatting an already valid file. Success sets body only when normalization
+ * changed its tree. Output is malloc-owned; source bytes remain untouched. */
+int sh_decl_normalize_collections(sh_decl_source source,
+    const sh_decl_collection_rule *rules, size_t rule_count, char **body,
+    size_t *length, char *error, size_t error_capacity);
 
 /* Compose only scalar root metadata from complete source declarations. This
  * resolves parent/class source views before state can be interpreted. The
@@ -110,5 +126,15 @@ char *sh_decl_compose_resource(const char *declaration_type,
     size_t count, const sh_decl_collection_rule *rules, size_t rule_count,
     const sh_decl_composition_schema *schema, size_t *out_length,
     char *error, size_t error_capacity, sh_decl_conflict *conflict);
+
+/* Same composition with an optional caller-owned byte per source. When
+ * precise_sources is set, every source changing the conflicting value is
+ * marked, including nonidentical files that make the same field edit. */
+char *sh_decl_compose_resource_report(const char *declaration_type,
+    sh_decl_source baseline, const sh_decl_source *sources,
+    size_t count, const sh_decl_collection_rule *rules, size_t rule_count,
+    const sh_decl_composition_schema *schema, size_t *out_length,
+    char *error, size_t error_capacity, sh_decl_conflict *conflict,
+    unsigned char *conflicting_sources);
 
 #endif

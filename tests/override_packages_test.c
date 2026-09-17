@@ -240,13 +240,19 @@ static void test_activation_rollback(void)
     create(descriptor, "{\"id\":\"cyberdemon\",\"name\":\"Cyberdemon\",\"strings\":{\"en\":{\"#str_activation\":\"candidate\"}}}");
     create(image_path, "candidate");
     create(decl_path, "{ class = \"idAI\"; health = 200; }");
-    /* Invalid preparation must not expose the candidate or call consumers. */
+    /* An operational read failure must not expose the candidate or call
+     * consumers. Unlike a content conflict, it cannot isolate an owner. */
     invalidations = source_invalidations;
-    create("overrides/boss-demons/cyberdemon/assets/generated/spirv/shock.vspv", "conflicting shader");
-    CHECK(sh_overrides_rescan_packages_activated(activation_callback, &test) == SH_OVERRIDES_RESCAN_FAILED);
-    CHECK(!test.calls && !test.recoveries && source_invalidations == invalidations);
-    CHECK(matches("generated/image/demon.bimage", "previous"));
-    create("overrides/boss-demons/cyberdemon/assets/generated/spirv/shock.vspv", "shader bytes");
+    {
+        char locked_path[4096];
+        snprintf(locked_path, sizeof(locked_path), "%s/%s", root, image_path);
+        HANDLE locked = CreateFileA(locked_path, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        CHECK(locked != INVALID_HANDLE_VALUE);
+        CHECK(sh_overrides_rescan_packages_activated(activation_callback, &test) == SH_OVERRIDES_RESCAN_FAILED);
+        CHECK(!test.calls && !test.recoveries && source_invalidations == invalidations);
+        CHECK(matches("generated/image/demon.bimage", "previous"));
+        if (locked != INVALID_HANDLE_VALUE) CloseHandle(locked);
+    }
     for (int mode = 0; mode < 4; mode++) {
         const sh_package_compilation *current;
         invalidations = source_invalidations;
@@ -473,16 +479,18 @@ static void test_private_outputs(void)
         int found = 0;
         CHECK(sh_resource_graph_walk("", alias, transform_reference, &found)); CHECK(found);
     }
-    /* A stock change cannot be silently shadowed by either private copy. */
+    /* Conflicting complete output bundles are excluded; their original
+     * generated fallback remains available, and old open streams stay valid. */
     create(stock, "changed stock");
     {
         unsigned invalidations = source_invalidations;
-        char error[2048];
-        CHECK(sh_overrides_rescan_packages() == SH_OVERRIDES_RESCAN_FAILED);
-        CHECK(source_invalidations == invalidations);
-        sh_package_runtime_error(error, sizeof(error));
-        CHECK(strstr(error, "opaque replacements") && strstr(error, "generated resource"));
-        CHECK(matches(alias, "private probe"));
+        char *summary;
+        CHECK(sh_overrides_rescan_packages() == 0);
+        CHECK(source_invalidations == invalidations + 1 && sh_package_runtime_ready());
+        summary = sh_package_runtime_summary();
+        CHECK(summary && strstr(summary, "opaque replacements") && strstr(summary, "generated resource"));
+        free(summary);
+        CHECK(matches(alias, "installed probe"));
     }
     /* Remove both output files from assets without damaging fixture sources. */
     snprintf(from, sizeof(from), "%s/%s", root, direct);
@@ -656,15 +664,13 @@ int main(void)
         CHECK(matches("decltree/material/test/alias.decl", "{ value = 2; }"));
     }
     create("overrides/boss-demons/cyberdemon/assets/generated/spirv/shock.vspv", "conflicting shader");
-    CHECK(sh_overrides_rescan_packages() == SH_OVERRIDES_RESCAN_FAILED);
-    CHECK(!sh_package_runtime_ready());
-    /* The last successful provider is retained; no conflicting source wins. */
-    CHECK(matches("generated/spirv/shock.vspv", "shader bytes"));
+    CHECK(sh_overrides_rescan_packages() == 0);
+    CHECK(sh_package_runtime_ready());
+    /* No conflicting source wins; healthy built-ins remain. */
     {
         const sh_package_compilation *compiled = sh_package_runtime_acquire();
         const sh_compiled_resource *resource = sh_package_compilation_find(compiled, "generated/spirv/shock.vspv");
-        CHECK(compiled && compiled->sources->package_count == 2);
-        CHECK(resource && resource->gameplay_owners.bits == 3);
+        CHECK(compiled && !compiled->sources->package_count && !resource);
         sh_package_runtime_release();
     }
     {

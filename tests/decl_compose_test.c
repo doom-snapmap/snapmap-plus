@@ -29,6 +29,19 @@ static char *compose(const char *base, const char *a, const char *b,
 
 static void fields(void)
 {
+    {
+        sh_decl_source inputs[] = {
+            view("{ edit = { x = 0; y = 1; } }"), view("{ edit = { x = 2; y = 0; } }"),
+            view("{ edit = { x = 3; y = 0; } }"), view("{ edit = { x = 2; y = 0; z = 7; } }")
+        };
+        unsigned char participants[4] = {9,9,9,9};
+        sh_decl_conflict cause = {0};
+        char reason[512]; size_t length;
+        char *output = sh_decl_compose_resource_report("entitydef", view("{ edit = { x = 0; y = 0; } }"),
+            inputs, 4, NULL, 0, NULL, &length, reason, sizeof(reason), &cause, participants);
+        CHECK(!output && cause.precise_sources && !participants[0] && participants[1] && participants[2] && participants[3]);
+        free(output);
+    }
     const char *base = "{ class = \"idAI2\"; editorVars { color = ( 1, 1, 1, 1 ); } edit = { x = 1; y = 2; } }";
     const char *a = "{ class = \"idAI2\"; editorVars { color = ( 1, 1, 1, 1 ); } edit = { x = 3; y = 2; } }";
     const char *b = "{ class = \"idAI2\"; editorVars { color = ( 1, 1, 1, 1 ); } edit = { x = 1; y = 4; } }";
@@ -73,13 +86,102 @@ static void lists(void)
     CHECK(!ab); CHECK(strstr(error, "adapter")); free(ab);
     ab = compose(base, a, "{ edit = { validEncounters = { num = 9; item[0] = \"stock\"; } } }",
                  &rule, 1, error, sizeof(error));
-    CHECK(!ab); CHECK(strstr(error, "invalid indexed collection")); free(ab);
+    CHECK(ab); if (ab) CHECK(strstr(ab, "num = 2;")); free(ab);
     ab = compose(base, a, "{ edit = { validEncounters = { num = 2; item[0] = \"stock\"; item[1] = \"stock\"; } } }",
                  &rule, 1, error, sizeof(error));
-    CHECK(!ab); free(ab);
+    CHECK(ab); if (ab) CHECK(strstr(ab, "num = 2;")); free(ab);
     ab = compose(base, a, "{ edit = { validEncounters = { num = 2; item[0] = \"new\"; item[1] = \"stock\"; } } }",
                  &rule, 1, error, sizeof(error));
     CHECK(ab); if (ab) CHECK(strstr(ab, "item[0] = \"new\";")); free(ab);
+}
+
+static void grouped_collections(void)
+{
+    const sh_decl_collection_rule rules[] = {
+        {"groups", "", "members", "id"}, {"groups.item[*].members", "id"}
+    };
+    const char *base = "{ groups = { num = 1; item[0] = { title = 1; members = { num = 2; "
+        "item[0] = { id = \"a\"; label = 0; } item[1] = { id = \"b\"; label = 0; } } } } }";
+    const char *move = "{ groups = { num = 2; item[0] = { title = 1; members = { num = 10; "
+        "item[3] = { id = \"a\"; label = 0; } } } item[1] = { members = { num = 1; "
+        "item[0] = { id = \"b\"; label = 0; } } } } }";
+    const char *edit = "{ groups = { num = 1; item[0] = { title = 2; members = { num = 3; "
+        "item[0] = { id = \"a\"; label = 0; } item[1] = { id = \"b\"; label = 9; } "
+        "item[2] = { id = \"c\"; label = 4; } } } } }";
+    const char *duplicates = "{ groups = { num = 1; item[0] = { title = 1; members = { num = 3; "
+        "item[0] = { id = \"a\"; label = 0; } item[1] = { id = \"b\"; label = 0; } "
+        "item[7] = { id = \"b\"; label = 0; } } } } }";
+    const char *ambiguous = "{ groups = { num = 1; item[0] = { title = 1; members = { num = 3; "
+        "item[0] = { id = \"a\"; label = 0; } item[1] = { id = \"b\"; label = 0; } "
+        "item[7] = { id = \"b\"; label = 3; } } } } }";
+    const char *remove = "{ groups = { num = 1; item[0] = { title = 1; members = { num = 1; "
+        "item[0] = { id = \"a\"; label = 0; } } } } }";
+    const char *move_again = "{ groups = { num = 3; item[0] = { title = 1; members = { num = 1; "
+        "item[0] = { id = \"a\"; label = 0; } } } item[1] = { members = { num = 0; } } "
+        "item[2] = { members = { num = 1; item[0] = { id = \"b\"; label = 0; } } } } }";
+    char error[512];
+    char *ab = compose(base, move, edit, rules, 2, error, sizeof(error));
+    char *ba = compose(base, edit, move, rules, 2, error, sizeof(error));
+    CHECK(ab && ba);
+    if (!ab) fprintf(stderr, "group merge: %s\n", error);
+    if (ab && ba) {
+        sh_decl_node *tree = sh_decl_tree_parse(view(ab), error, sizeof(error));
+        const sh_decl_node *groups = sh_decl_tree_member(tree, "groups");
+        const sh_decl_node *first = sh_decl_tree_member(groups, "item[0]");
+        const sh_decl_node *second = sh_decl_tree_member(groups, "item[1]");
+        const sh_decl_node *items = sh_decl_tree_member(second, "members");
+        const sh_decl_node *item = sh_decl_tree_member(items, "item[0]");
+        CHECK(!strcmp(ab, ba));
+        CHECK(first && !strcmp(sh_decl_tree_member(first, "title")->value, "2"));
+        CHECK(item && !strcmp(sh_decl_tree_member(item, "id")->value, "\"b\""));
+        CHECK(item && !strcmp(sh_decl_tree_member(item, "label")->value, "9"));
+        CHECK(!strcmp(sh_decl_tree_member(items, "num")->value, "1"));
+        items = sh_decl_tree_member(first, "members");
+        CHECK(!strcmp(sh_decl_tree_member(items, "num")->value, "2"));
+        sh_decl_tree_free(tree);
+    }
+    free(ab); free(ba);
+    ab = compose(base, duplicates, edit, rules, 2, error, sizeof(error)); CHECK(ab); free(ab);
+    ab = compose(base, ambiguous, edit, rules, 2, error, sizeof(error));
+    CHECK(!ab && strstr(error, "same collection identity")); free(ab);
+    ab = compose(base, move, remove, rules, 2, error, sizeof(error));
+    CHECK(!ab && strstr(error, "deletion conflicts")); free(ab);
+    ab = compose(base, move, move_again, rules, 2, error, sizeof(error));
+    CHECK(!ab && strstr(error, "different groups")); free(ab);
+    ab = compose("{}", move, move, rules, 2, error, sizeof(error)); CHECK(ab); free(ab);
+    ab = compose(base, move, move, rules, 2, error, sizeof(error)); CHECK(ab); free(ab);
+    /* Removing an empty page preserves another package's member edits. */
+    ab = compose(move_again, move, move_again, rules, 2, error, sizeof(error)); CHECK(ab); free(ab);
+}
+
+static void inherited_collection_patches(void)
+{
+    const sh_decl_collection_rule rules[] = {
+        {"groups", "", "members", "id"}, {"groups.item[*].members", "id"}
+    };
+    const char *base = "{ inherit = \"parent\"; groups = { item[0] = { members = { item[4] = { label = 0; } } } } }";
+    const char *a = "{ inherit = \"parent\"; groups = { item[0] = { members = { item[4] = { label = 9; } } } } }";
+    const char *b = "{ inherit = \"parent\"; groups = { item[0] = { members = { num = 6; item[4] = { label = 0; caption = 7; } } } } }";
+    const char *other = "{ inherit = \"different\"; groups = { item[0] = { members = { item[4] = { label = 0; } } } } }";
+    char error[512], *normalized = NULL;
+    size_t length = 99;
+    CHECK(sh_decl_normalize_collections(view(a), rules, 2, &normalized, &length, error, sizeof(error)));
+    CHECK(!normalized && !length); free(normalized);
+    CHECK(sh_decl_normalize_collections(view(b), rules, 2, &normalized, &length, error, sizeof(error)));
+    CHECK(!normalized && !length); free(normalized);
+    char *ab = compose(base, a, b, rules, 2, error, sizeof(error));
+    char *ba = compose(base, b, a, rules, 2, error, sizeof(error));
+    CHECK(ab && ba);
+    if (ab && ba) {
+        CHECK(!strcmp(ab, ba)); CHECK(strstr(ab, "item[4]"));
+        CHECK(strstr(ab, "label = 9;") && strstr(ab, "caption = 7;") && strstr(ab, "num = 6;"));
+        CHECK(!strstr(ab, "id ="));
+    }
+    free(ab); free(ba);
+    ab = compose(base, a, other, rules, 2, error, sizeof(error));
+    CHECK(!ab && strstr(error, "consistent parent layout")); free(ab);
+    CHECK(!sh_decl_normalize_collections(view("{ groups = { item[0] = { members = { item[4] = { label = 9; } } } } }"),
+        rules, 2, &normalized, &length, error, sizeof(error))); free(normalized);
 }
 
 static char *blocking_list(size_t count, const char *addition)
@@ -596,6 +698,8 @@ static void large_text(void)
 
 int main(int argc, char **argv)
 {
+    grouped_collections();
+    inherited_collection_patches();
     fields(); lists(); blocking(); editor_properties(); ordering(); derived_ordering(); added_objects(); conflict_sources(); typed_collections(); entity_header_order(); malformed(); large_text();
     if (argc == 2) native_file(argv[1]);
     if (failures) return 1;

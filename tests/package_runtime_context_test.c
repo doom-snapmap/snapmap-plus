@@ -29,6 +29,9 @@ static void expect_current(const char *path, const char *wanted)
 {
     unsigned char *bytes = NULL; size_t length = 0;
     int result = sh_package_runtime_read(path, &bytes, &length);
+    if (!(wanted ? result == 1 && bytes && strstr((const char *)bytes, wanted) : result == 0))
+        fprintf(stderr, "resource %s: wanted %s; got %d: %.160s\n", path, wanted ? wanted : "absent", result,
+            bytes ? (const char *)bytes : "(no bytes)");
     CHECK(wanted ? result == 1 && bytes && strstr((const char *)bytes, wanted) : result == 0);
     free(bytes);
 }
@@ -394,8 +397,13 @@ static void test_installed_inventory_is_not_active_composition(void)
     CHECK(sh_package_runtime_commit_map(plan, commit_inventory, error, sizeof(error)) && inventory_commit_calls == 3);
     CHECK(sh_package_map_plan_payload_missing(plan, &missing, error, sizeof(error)) && !missing.count);
     expect_current(health_path, "health = 10"); expect_library("health = 16000");
-    CHECK(!sh_package_runtime_refresh(root));
-    CHECK(!sh_package_runtime_ready() && sh_package_runtime_admission_ready());
+    CHECK(sh_package_runtime_refresh(root));
+    CHECK(sh_package_runtime_ready() && sh_package_runtime_admission_ready());
+    /* This physical delivered package intentionally differs from the local
+     * authoring package. Its files stay available for map admission. Reconcile
+     * the authoring collision before the remaining map-exit assertions. */
+    create("overrides/delivered/bosses/assets/generated/decls/entitydef/ai/cyberdemon.decl", "{ edit = { health = 16000; } }");
+    CHECK(sh_package_runtime_refresh(root));
     /* An unrelated rejected local composition does not invalidate the same
      * successfully activated map or require another installation. */
     CHECK(sh_package_runtime_commit_map(plan, commit_inventory, error, sizeof(error)));
@@ -404,7 +412,7 @@ static void test_installed_inventory_is_not_active_composition(void)
     state.next_health = "health = 16000"; state.previous_health = "health = 10"; state.map_active = 0;
     CHECK(activate_plan(NULL, &state));
     CHECK(sh_package_map_plan_payload_missing(plan, &missing, error, sizeof(error)) && !missing.count);
-    expect_current(health_path, "health = 16000"); expect_current("boss.md6mesh", NULL);
+    expect_current(health_path, "health = 16000"); expect_current("boss.md6mesh", "authored mesh");
     /* No installed source changed, and cached active-map data alone never
      * certifies a source file that was subsequently removed or changed. */
     create("overrides/delivered/bosses/assets/boss.md6mesh", "changed externally");
@@ -444,13 +452,13 @@ static void test_conflicting_startup(void)
     CHECK(!sh_package_runtime_admission_ready());
     library = sh_package_runtime_library_acquire(); CHECK(!library); sh_package_runtime_release();
     fail = 0;
-    CHECK(!sh_package_runtime_refresh_activated(root, (sh_package_activation_guard){0}, startup_activation, &fail));
-    CHECK(!sh_package_runtime_ready() && sh_package_runtime_admission_ready());
+    CHECK(sh_package_runtime_refresh_activated(root, (sh_package_activation_guard){0}, startup_activation, &fail));
+    CHECK(sh_package_runtime_ready() && sh_package_runtime_admission_ready());
     library = sh_package_runtime_library_acquire();
     CHECK(library && !library->sources->package_count && !sh_package_compilation_find(library, health_path));
     sh_package_runtime_release();
     summary = sh_package_runtime_summary();
-    CHECK(summary && strstr(summary, "Installed library: 2 packages") && strstr(summary, "Local authoring composition unavailable")); free(summary);
+    CHECK(summary && strstr(summary, "Installed library: 2 packages") && strstr(summary, "Skipped local package")); free(summary);
     plan = sh_package_runtime_prepare_map(root, map_root, error, sizeof(error)); CHECK(plan);
     CHECK(sh_package_map_plan_payload_missing(plan, &missing, error, sizeof(error)) && !missing.count);
     CHECK(sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, startup_activation, &fail));
@@ -514,7 +522,7 @@ static void test_local_isolation(void)
     expect_current(health_path, "health = 12000");
     create("isolated/overrides/text/assets/generated/decls/snapeditorentitydef/bad.decl", "{}");
     CHECK(sh_package_runtime_refresh(data));
-    expect_current("generated/decls/snapeditorentitydef/rejected.decl", "{ value = 1; }");
+    expect_current("generated/decls/snapeditorentitydef/rejected.decl", "value = 1;");
 
     /* A file that cannot be a declaration identity belongs to its own package. */
     create("isolated/overrides/identity/package.json", "{\"id\":\"identity\",\"name\":\"Identity\"}");
@@ -531,19 +539,60 @@ static void test_local_isolation(void)
     CHECK(summary && strstr(summary, "Installed library: 2 packages") && strstr(summary, "missing decl type directory") &&
         strstr(summary, "garbled") && strstr(summary, "identity")); free(summary);
 
-    /* Two valid packages with incompatible edits are a peer conflict, never a
-     * folder-order winner: the refresh fails and the previous output stays. */
+    /* Every edit to the disputed field is excluded, including a nonidentical
+     * snapshot repeating one value. An independent edit to the same resource
+     * remains usable; the resource path itself is not a quarantine boundary. */
+    create("isolated/overrides/independent/package.json", "{\"id\":\"independent\",\"name\":\"Independent\"}");
+    create("isolated/overrides/independent/assets/generated/decls/entitydef/ai/cyberdemon.decl", "{ edit = { health = 25000; armor = 1; } }");
+    create("isolated/overrides/repeated/package.json", "{\"id\":\"repeated\",\"name\":\"Repeated\"}");
+    create("isolated/overrides/repeated/assets/generated/decls/entitydef/ai/cyberdemon.decl", "{ edit = { health = 11; speed = 7; } }");
     create("isolated/overrides/garbled/assets/generated/decls/entitydef/ai/cyberdemon.decl", "{ edit = { health = 11; } }");
-    {
-        const sh_package_compilation *before = sh_package_runtime_acquire(), *after;
-        sh_package_runtime_release();
-        CHECK(!sh_package_runtime_refresh(data));
-        after = sh_package_runtime_acquire(); CHECK(after == before); sh_package_runtime_release();
-        sh_package_runtime_error(error, sizeof(error));
-        CHECK(strstr(error, "garbled") && strstr(error, "boss"));
-    }
-    expect_current(health_path, "health = 12000");
+    CHECK(sh_package_runtime_refresh(data)); CHECK(sh_package_runtime_ready());
+    expect_current("generated/decls/snapeditorentitydef/rejected.decl", "value = 1;");
+    expect_current(health_path, "health = 25000"); expect_current(health_path, "armor = 1");
+    summary = sh_package_runtime_summary();
+    /* Valid excluded peers remain physically installed for authored maps. */
+    const sh_package_compilation *isolated_library = sh_package_runtime_library_acquire();
+    CHECK(isolated_library && isolated_library->sources->package_count == 2);
+    sh_package_runtime_release();
+    CHECK(summary && strstr(summary, "Installed library: 5 packages") &&
+        strstr(summary, "garbled") && strstr(summary, "boss") && strstr(summary, "repeated")); free(summary);
+    create("isolated/overrides/garbled/assets/generated/decls/entitydef/ai/cyberdemon.decl", "{ edit = { health = 12000; } }");
+    create("isolated/overrides/repeated/assets/generated/decls/entitydef/ai/cyberdemon.decl", "{ edit = { health = 12000; speed = 7; } }");
+    CHECK(sh_package_runtime_refresh(data)); expect_current(health_path, "health = 12000");
+    expect_current(health_path, "armor = 1"); expect_current(health_path, "speed = 7");
+    /* Binary collisions and policy collisions use the same whole-owner
+     * isolation boundary. Duplicate copies on either side cannot win by order. */
+    create("isolated/overrides/opaque-a/package.json", "{\"id\":\"opaque-a\",\"name\":\"Opaque A\"}");
+    create("isolated/overrides/opaque-b/package.json", "{\"id\":\"opaque-b\",\"name\":\"Opaque B\"}");
+    create("isolated/overrides/opaque-c/package.json", "{\"id\":\"opaque-c\",\"name\":\"Opaque C\"}");
+    create("isolated/overrides/opaque-a/assets/shared.bimage", "a");
+    create("isolated/overrides/opaque-b/assets/shared.bimage", "b");
+    create("isolated/overrides/opaque-c/assets/shared.bimage", "b");
+    CHECK(sh_package_runtime_refresh(data)); CHECK(sh_package_runtime_ready());
+    expect_current("shared.bimage", NULL); expect_current(health_path, "health = 12000");
+    expect_current("generated/decls/snapeditorentitydef/rejected.decl", "value = 1;");
+    create("isolated/overrides/opaque-a/assets/shared.bimage", "b");
+    CHECK(sh_package_runtime_refresh(data)); expect_current("shared.bimage", "b");
+    create("isolated/overrides/policy-a/package.json", "{\"id\":\"policy-a\",\"name\":\"Policy A\",\"strings\":{\"en\":{\"collision\":\"a\"}}}");
+    create("isolated/overrides/policy-b/package.json", "{\"id\":\"policy-b\",\"name\":\"Policy B\",\"strings\":{\"en\":{\"collision\":\"b\"}}}");
+    create("isolated/overrides/policy-c/package.json", "{\"id\":\"policy-c\",\"name\":\"Policy C\",\"strings\":{\"en\":{\"collision\":\"b\"}}}");
+    CHECK(sh_package_runtime_refresh(data)); CHECK(sh_package_runtime_ready());
+    expect_current("shared.bimage", "b"); expect_current(health_path, "health = 12000");
+    summary = sh_package_runtime_summary();
+    CHECK(summary && strstr(summary, "policy-a") && strstr(summary, "policy-b") && strstr(summary, "policy-c")); free(summary);
+    /* Unsupported index semantics are isolated, never guessed or allowed to
+     * disable unrelated resources. Authored map compilation stays strict. */
+    create("isolated/overrides/index-a/package.json", "{\"id\":\"index-a\",\"name\":\"Index A\"}");
+    create("isolated/overrides/index-b/package.json", "{\"id\":\"index-b\",\"name\":\"Index B\"}");
+    create("isolated/overrides/index-a/assets/generated/decls/entitydef/unadapted.decl", "{ edit = { entries = { num = 1; item[0] = 1; } } }");
+    create("isolated/overrides/index-b/assets/generated/decls/entitydef/unadapted.decl", "{ edit = { entries = { num = 1; item[0] = 2; } } }");
+    CHECK(sh_package_runtime_refresh(data)); expect_current(health_path, "health = 12000");
+    expect_current("generated/decls/entitydef/unadapted.decl", NULL);
+    summary = sh_package_runtime_summary();
+    CHECK(summary && strstr(summary, "index-a") && strstr(summary, "index-b") && strstr(summary, "composition adapter")); free(summary);
     sh_package_runtime_test_dispose();
+    cleanup_resources(data);
 }
 
 int main(int argc, char **argv)
@@ -655,13 +704,15 @@ int main(int argc, char **argv)
     create("overrides/local/assets/generated/decls/entitydef/ai/cyberdemon.decl", "{ edit = { health = 15000; } }");
     CHECK(sh_package_runtime_refresh(root)); CHECK(sh_package_runtime_has_map_provider());
     expect_current(health_path, "health = 10"); library = expect_library("health = 15000");
-    /* Failed local refresh also retains both exact prior providers. */
+    /* Peer conflicts isolate local owners while the map keeps its authored
+     * policy. Fixing the local conflict restores its library before map exit. */
     create("overrides/conflict/package.json", "{\"id\":\"conflict\",\"name\":\"Conflicting edit\"}");
     create("overrides/conflict/assets/generated/decls/entitydef/ai/cyberdemon.decl", "{ edit = { health = 17000; } }");
-    const sh_package_compilation *previous = sh_package_runtime_acquire(); sh_package_runtime_release();
-    CHECK(!sh_package_runtime_refresh(root));
-    const sh_package_compilation *after = sh_package_runtime_acquire(); CHECK(after == previous); sh_package_runtime_release();
-    CHECK(expect_library("health = 15000") == library); expect_current(health_path, "health = 10");
+    CHECK(sh_package_runtime_refresh(root));
+    expect_current(health_path, "health = 10");
+    create("overrides/conflict/package.json", "invalid");
+    CHECK(sh_package_runtime_refresh(root));
+    expect_library("health = 15000"); expect_current(health_path, "health = 10");
     state.next_health = "health = 15000"; state.previous_health = "health = 10";
     state.library_health = "health = 15000"; state.map_active = 0;
     state.expected = map_b_changes;

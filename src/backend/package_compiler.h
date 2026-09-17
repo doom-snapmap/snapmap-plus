@@ -110,6 +110,12 @@ typedef struct sh_package_compile_environment {
      * to SIZE_MAX on entry. Peer conflicts, missing native metadata and failed
      * originals never select a package to discard. Strict callers omit it. */
     size_t *invalid_package;
+    /* Optional local-library isolation report, reset on entry. A malformed
+     * owner is reported above; an unresolved peer resource marks its changing
+     * owners together, never a folder-order winner. Policy collisions mark
+     * incompatible pairs. Operational failures leave this empty. Map builds
+     * omit both outputs and remain strict. Caller owns/frees the set. */
+    sh_package_owners *conflicted_packages;
 } sh_package_compile_environment;
 
 typedef struct sh_compiled_resource {

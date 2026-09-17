@@ -642,14 +642,13 @@ int main(void)
     run_inject();
     CHECK(count_key("shared_key") == 1);
 
-    /* Conflicting new source is refused; insertion still uses the entire last
-     * successful snapshot, including its unchanged shared string. */
+    /* Conflicting packages are excluded together; unrelated package strings
+     * and product defaults still compile and inject. */
     CHECK(install_strings(overrides, "zz-second", "shared.json",
                           "{ \"shared_key\" : \"A DIFFERENT VALUE\" }"));
     run_inject();
-    CHECK(count_key("shared_key") == 1);
-    CHECK(value_for("shared_key") && !strcmp(value_for("shared_key"), "Shared Text"));
-    CHECK(!sh_package_runtime_ready());
+    CHECK(count_key("shared_key") == 0);
+    CHECK(sh_package_runtime_ready());
     CHECK(strstr(g_log, "shared_key") != NULL);
     CHECK(strstr(g_log, "zz-second") != NULL);
     CHECK(strstr(g_log, "cyberdemon") != NULL);
@@ -728,8 +727,8 @@ int main(void)
     CHECK(count_key("append_refusal") == 1);
     test_dictionary_retirement(overrides, path);
     test_sort_hook_recovery(path);
-    /* Inventory size is not a policy conflict. A true high-index conflict
-     * still refuses the whole new string set until the author corrects it. */
+    /* Reject every conflicting pair across a high-index inventory, while the
+     * remaining strings still refresh successfully. */
     for (int i = 0; i < 65; i++) {
         char package[32];
         _snprintf_s(package, sizeof(package), _TRUNCATE, "overflow-%02d", i);
@@ -738,7 +737,7 @@ int main(void)
     }
     CHECK(install_strings(overrides, "overflow-64", "value.json",
                           "{ \"partial_key\" : \"conflicting value\" }"));
-    CHECK(rearm_strings() == 0);
+    CHECK(rearm_strings() == 1);
     CHECK(count_key("partial_key") == 0);
     CHECK(install_strings(overrides, "overflow-64", "value.json",
                           "{ \"partial_key\" : \"must not appear\" }"));

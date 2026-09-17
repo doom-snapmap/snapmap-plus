@@ -451,7 +451,7 @@ static pr_provider *pr_prepare(const char *data_root, const char *source_root,
     const pr_provider *previous, int product_only, pr_inventory **inventory_out,
     int *composition_failed, char *out_error, size_t out_capacity)
 {
-    sh_package_sources *sources = NULL;
+    sh_package_sources *sources = NULL, *inventory_sources = NULL;
     sh_package_compilation *compiled = NULL;
     sh_resource_catalog *catalog = NULL;
     sh_audio_originals *audio_originals = NULL;
@@ -465,6 +465,7 @@ static pr_provider *pr_prepare(const char *data_root, const char *source_root,
     size_t default_index;
     char *slash, *rejections = NULL;
     size_t invalid_package = SIZE_MAX;
+    sh_package_owners conflicted = {0};
     pr_provider *provider = NULL;
     if (inventory_out) *inventory_out = NULL;
     if (composition_failed) *composition_failed = 0;
@@ -535,21 +536,44 @@ static pr_provider *pr_prepare(const char *data_root, const char *source_root,
         const ov_baked_decl_t *value = &g_ov_baked_decls[default_index];
         builtins[default_index] = (sh_package_builtin){value->name, (const unsigned char *)value->text, value->len};
     }
-    if (!source_root && !product_only) environment.invalid_package = &invalid_package;
+    if (!source_root && !product_only) {
+        environment.invalid_package = &invalid_package;
+        environment.conflicted_packages = &conflicted;
+    }
+    if (inventory_out) {
+        sh_package_sources empty = {0};
+        inventory_sources = sh_package_sources_join(sources, &empty, error, sizeof(error));
+        if (!inventory_sources) goto done;
+    }
     for (;;) {
         compiled = sh_package_compile_with(sources, &environment, error, sizeof(error));
-        if (compiled || invalid_package == SIZE_MAX) break;
-        if (invalid_package >= sources->package_count ||
-            !pr_rejected(&rejections, &sources->packages[invalid_package], error) ||
-            !sh_package_sources_remove(sources, invalid_package)) goto done;
+        if (compiled) break;
+        if (invalid_package != SIZE_MAX) {
+            if (invalid_package >= sources->package_count) goto done;
+            /* Invalid content cannot establish installed availability. Valid
+             * peers that only disagree retain their physical inventory: a
+             * map's authored policy may use these files without reinstalling. */
+            if (inventory_sources) for (size_t i = 0; i < inventory_sources->package_count; i++)
+                if (!strcmp(inventory_sources->packages[i].name, sources->packages[invalid_package].name)) {
+                    if (!sh_package_sources_remove(inventory_sources, i)) goto done;
+                    break;
+                }
+            if (!pr_rejected(&rejections, &sources->packages[invalid_package], error) ||
+                !sh_package_sources_remove(sources, invalid_package)) goto done;
+            continue;
+        }
+        if (!sh_package_owners_count(&conflicted)) break;
+        for (size_t i = sources->package_count; i > 0; i--) if (sh_package_owners_contains(&conflicted, i - 1)) {
+            if (!pr_rejected(&rejections, &sources->packages[i - 1], error) ||
+                !sh_package_sources_remove(sources, i - 1)) goto done;
+        }
     }
     if (inventory_out) {
         /* The inventory has its own diagnostic: a composition failure above
          * remains the reported cause when the inventory itself succeeds. */
         char inventory_error[2048] = "";
-        sh_package_sources empty = {0};
-        sh_package_sources *snapshot = sh_package_sources_join(sources, &empty, inventory_error, sizeof(inventory_error));
-        if (snapshot) *inventory_out = pr_inventory_build(snapshot, inventory_error, sizeof(inventory_error));
+        *inventory_out = pr_inventory_build(inventory_sources, inventory_error, sizeof(inventory_error));
+        inventory_sources = NULL;
         if (!*inventory_out) {
             strcpy_s(error, sizeof(error), inventory_error[0] ? inventory_error : "cannot retain the installed package inventory");
             goto done;
@@ -574,6 +598,7 @@ done:
     sh_package_compilation_free(compiled); sh_package_sources_free(sources); sh_resource_catalog_close(catalog);
     sh_audio_originals_close(audio_originals);
     sh_decl_native_schema_close(native_schema);
+    sh_package_sources_free(inventory_sources); sh_package_owners_free(&conflicted);
     free(rejections);
     return provider;
 }

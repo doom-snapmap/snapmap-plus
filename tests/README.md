@@ -217,6 +217,10 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   custom readers and dynamic collections that omit their serialized count.
   Resource-family emission preserves entity header order for new declarations
   and newly added headers, without reordering similarly named nested fields.
+  Grouped collections cover cross-page moves plus independent field edits, new
+  pages, duplicate identities and conflicting moves. Registered full lists repair
+  counts/gaps and exact duplicates; inherited sparse patches retain their slot
+  indices and unchanged source bytes. Different unresolved parent layouts refuse.
 - `package_context_test.c` checks map-over-local resource precedence, unchanged
   authored inventories, nested policy, duplicate resources, ownership beyond64
   packages, and readable-versus-missing resource probes including immutable
@@ -230,6 +234,12 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   formats, audio and an unknown future family. Native consumers are callbacks.
   Availability checks distinguish SnapMap originals from campaign-only archives
   and exclude active map-private files from the installed library.
+  Field conflicts retain independent edits to the same resource while excluding
+  every contributor to the disputed value, including nonidentical snapshots.
+  Malformed owners, policy conflicts, opaque collisions and unsupported index
+  composition leave unrelated packages usable. Valid conflicting packages retain
+  physical availability for authored maps; repaired sources rejoin on refresh.
+  String tests include all incompatible pairs in inventories above 64 packages.
 - `rawmap_paths_test.c` also drives saved-map preflight: retained JSON replaces a
   different second engine read, refusal prevents native loading, parse failures
   defer retirement until the browser, and held files retain cleanup ownership.

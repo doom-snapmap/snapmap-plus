@@ -283,12 +283,24 @@ with only that package, the installed original and product defaults. Typical
 typed defects are an unknown class, a parent no package declares, an inheritance
 cycle inside the package, an out-of-range fixed array entry or a contradiction
 of a product default. The runtime removes that whole package with its nested
-components and compiles again. Storage, hashing, read and allocation failures,
-sources that change during a scan, conflicts between packages that each compose
-alone, a parent that only another package declares, unavailable reader metadata
-and original failures are never attributed to a package: they keep the previous
-provider. Startup package identities and map installation planning scan the
-local library with the same isolation; a map-carried bundle is still read with
+components and compiles again. A local resource conflict between independently
+valid packages reports its changing owners through `conflicted_packages` and
+excludes those complete units together. Scalar field conflicts identify every
+source editing that value, preserving independent edits to the same resource.
+Structural conflicts and adapters without precise attribution conservatively
+identify the resource's changing owners. This includes duplicate contributors;
+none becomes a winner through discovery order. Policy conflicts identify all
+incompatible owner pairs, preserving unrelated policy keys and packages.
+The runtime recompiles the remaining library, including built-ins. Valid excluded
+peers remain in the physical installation inventory: a map's own valid authored
+provider can use their available paths without another installation. Invalid
+packages do not establish availability. Source files are never removed.
+
+Storage, hashing, read and allocation failures, sources that change during a scan,
+a parent that only another package declares, unavailable reader metadata and
+original failures are not content-isolation decisions: they preserve the previous
+provider. Startup package identities and map installation planning use the same
+separation of inventory and effective compilation; a map-carried bundle is still read with
 the strict all-or-nothing scanner. Skipped folders and reasons appear in
 `sh_packages`, never as silent omissions.
 
@@ -358,6 +370,29 @@ originals. Compatible changes compose using native field and collection semantic
 contradictions are reported before publication. Opaque payloads are selected whole.
 The provider never modifies authored sources or installed game archives. Native
 reader and resource-family details belong alongside their implementation.
+
+Registered semantic collections normalize their count, index gaps and identical
+duplicate entries in private parsed trees. Different entries claiming one identity
+are rejected. Single contributions take the same validation route; an already
+valid contribution keeps its exact bytes. Fixed native arrays and unadapted
+index-referenced collections never undergo this renumbering.
+
+Native inherited declarations can instead contain sparse slot patches with no
+count or member identity in the child (for example, only `item[4].descriptionTag`).
+These retain their inherited indices and compose independent field edits at the
+same slot when the parent layout is consistent. They are not full collections
+with missing entries. Mixing complete layouts with unresolved inherited patches,
+or changing the parent while composing those patches, requires resolving that
+layout and is refused rather than guessing identities from numeric positions.
+
+Grouped collection adapters separate stable member identity from presentation
+placement. All SnapMap editor property sheets use this contract: a property's
+`path` remains its identity across pages, and adding/removing pages or moving a
+property can compose with independent edits to its fields. Ordering constraints
+apply within the final page; conflicting moves, deletions versus edits, ambiguous
+duplicate identities and ordering cycles remain conflicts. The reusable adapter
+is registered by the product for known formats, never by an author switch or a
+specific resource filename. Sources and embedded delivery bundles stay intact.
 
 Package inventories and resource ownership grow with the installed set. There
 is no fixed package-count quota in discovery, compilation, saved-map selection,
