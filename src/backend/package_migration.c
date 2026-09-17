@@ -333,6 +333,7 @@ sh_package_migration *sh_package_migration_open(const char *descriptor, size_t l
 {
     sh_package_migration *m = calloc(1, sizeof(*m));
     char *text = NULL;
+    char canonical[SH_PACKAGE_ID_CAP];
     const char *raw;
     size_t i;
     if (error && capacity) error[0] = 0;
@@ -347,9 +348,10 @@ sh_package_migration *sh_package_migration_open(const char *descriptor, size_t l
     raw = sh_json_object_get(&m->descriptor, "id");
     if (raw) {
         text = pm_text(raw);
-        if (!text || !sh_package_id_valid(text)) { pm_error(m, "package.json has an invalid id"); goto bad; }
+        if (!text || !sh_package_id_normalize(text, canonical)) { pm_error(m, "package.json has an invalid id"); goto bad; }
+        if (strcmp(text, canonical) && !pm_string(&m->descriptor, "id", canonical)) goto bad;
         free(text); text = NULL;
-    } else if (!id || !sh_package_id_valid(id) || !pm_string(&m->descriptor, "id", id)) goto bad;
+    } else if (!sh_package_id_normalize(id, canonical) || !pm_string(&m->descriptor, "id", canonical)) goto bad;
     if (legacy) {
         const char *retired[] = {"version", "priority", "contents", "restart_required"};
         for (i = 0; i < sizeof(retired) / sizeof(retired[0]); i++) pm_remove(&m->descriptor, retired[i]);

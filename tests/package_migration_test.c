@@ -94,6 +94,10 @@ static void marker_and_existing_policy(void)
     assert(!sh_package_migration_open("{\"id\":\"Bad ID\"}", 15, "valid", "Valid", 1, error, sizeof(error)));
     m = open_legacy("{\"schema\":\"author.extension\",\"custom\":{\"value\":12.00}}");
     out = finish(m); assert(strstr(out, "author.extension") && strstr(out, "12.00")); free(out);
+    m = open_legacy("{\"id\":\" Alex.BOSS-Demons \\t\",\"name\":\"Campaign Boss Demons\"}");
+    out = finish(m);
+    assert(strstr(out, "alex.boss-demons") && strstr(out, "Campaign Boss Demons"));
+    assert(!strstr(out, "Alex.BOSS-Demons")); free(out);
 }
 int main(void)
 {

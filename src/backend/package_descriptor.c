@@ -48,6 +48,36 @@ int sh_package_id_valid(const char *id)
     return 1;
 }
 
+int sh_package_id_normalize(const char *id, char out[SH_PACKAGE_ID_CAP])
+{
+    char canonical[SH_PACKAGE_ID_CAP];
+    const char *end;
+    size_t i, length;
+    if (!id || !out) return 0;
+    while (*id && strchr(" \t\r\n", *id)) id++;
+    end = id + strlen(id);
+    while (end > id && strchr(" \t\r\n", end[-1])) end--;
+    length = (size_t)(end - id);
+    if (!length || length >= sizeof(canonical)) return 0;
+    for (i = 0; i < length; i++) {
+        unsigned char c = (unsigned char)id[i];
+        canonical[i] = (char)((c >= 'A' && c <= 'Z') ? c + 'a' - 'A' : c);
+    }
+    canonical[length] = 0;
+    if (!sh_package_id_valid(canonical)) return 0;
+    memcpy(out, canonical, length + 1u);
+    return 1;
+}
+
+static int pd_identity(const char *raw, char out[SH_PACKAGE_ID_CAP])
+{
+    size_t capacity = strlen(raw) + 1u;
+    char *decoded = malloc(capacity);
+    int ok = decoded && pd_string(raw, decoded, capacity) && sh_package_id_normalize(decoded, out);
+    free(decoded);
+    return ok;
+}
+
 static int pd_locale_valid(const char *locale, size_t length)
 {
     size_t i;
@@ -142,16 +172,21 @@ int sh_package_descriptor_parse(const char *json, size_t length,
     if (error && error_capacity) error[0] = '\0';
     if (!out) return pd_error(error, error_capacity, "missing package descriptor output");
     memset(out, 0, sizeof(*out));
+    if (json && length >= 3 && length <= PTRDIFF_MAX && !memcmp(json, "\xef\xbb\xbf", 3)) { json += 3; length -= 3; }
     if (!json || !length || length > PTRDIFF_MAX ||
         !sh_json_parse_object(json, length, PD_MAX_DEPTH, &parsed.fields)) goto fail;
 
     failure = "package.json is missing its required id";
     raw = sh_json_object_get(&parsed.fields, "id");
     if (!raw) goto fail;
-    failure = "package.json id must be a string shorter than 128 bytes without embedded NULs";
-    if (!pd_string(raw, parsed.id, sizeof(parsed.id))) goto fail;
-    failure = "package id must be a stable lowercase identifier";
-    if (!sh_package_id_valid(parsed.id)) goto fail;
+    failure = "package.json id must be a string of 1-127 letters, digits or internal dots, dashes and underscores, without internal spaces or consecutive dots";
+    if (!pd_identity(raw, parsed.id)) goto fail;
+    {
+        char canonical[SH_PACKAGE_ID_CAP + 2];
+        snprintf(canonical, sizeof(canonical), "\"%s\"", parsed.id);
+        failure = "cannot retain normalized package id";
+        if (!sh_json_object_set(&parsed.fields, "id", canonical, PD_MAX_DEPTH)) goto fail;
+    }
     failure = "package name must be a nonempty string";
     if (!pd_string(sh_json_object_get(&parsed.fields, "name"), parsed.name, sizeof(parsed.name)) ||
         !parsed.name[0]) goto fail;

@@ -102,7 +102,7 @@ static int mpkg_parse_header(const char *p, size_t plen, mpkg_hdr *hdr)
         n = (size_t)(separator - c);
         if (fields != 3 || !n || n >= sizeof(hdr->id)) return 0;
         memcpy(hdr->id, c, n); hdr->id[n] = 0;
-        if (!sh_package_id_valid(hdr->id)) {
+        if (!sh_package_id_normalize(hdr->id, hdr->id)) {
             char digest[SH_MPKG_DIGEST_CHARS + 1];
             size_t j;
             /* Beta 13 used folder identities and allowed leading/trailing
@@ -230,13 +230,15 @@ char *sh_mpkg_embed(const char *json, size_t len, const char *pkg_id,
     size_t b64_len, shards, i, w = 0;
     char digest[SH_MPKG_DIGEST_CHARS + 1];
     char line[224];
+    char canonical_id[SH_PACKAGE_ID_CAP];
 
     if (out_len) *out_len = 0;
     if (err && err_cap) err[0] = '\0';
-    if (!json || len == 0 || !sh_package_id_valid(pkg_id) || !payload) {
+    if (!json || len == 0 || !sh_package_id_normalize(pkg_id, canonical_id) || !payload) {
         mpkg_err(err, err_cap, "embed called with nothing to embed");
         return NULL;
     }
+    pkg_id = canonical_id;
     if (payload_len == 0 || payload_len > SH_MPKG_MAX_PAYLOAD) {
         mpkg_err(err, err_cap, "package needs %zu bytes before map encoding; it cannot fit the native map string representation", payload_len);
         return NULL;
