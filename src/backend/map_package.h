@@ -1,6 +1,8 @@
 /* Map-embedded package delivery, extraction, consent and load gating.
  * Each variables.string shard carries base64 and an smpkg header. Authored
- * IDs may contain dots; trailing index/count/digest fields delimit transport.
+ * Delivery keys may contain dots; trailing index/count/digest fields delimit
+ * transport. New saves use complete-tree keys independent of authored IDs;
+ * previous descriptor-ID carriers remain accepted.
  * Prepared saved maps use compiled payload availability. Other entry points
  * and missing-payload consent still match identity and complete source content.
  * Verified missing payloads are staged for native in-game consent and installed

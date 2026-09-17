@@ -20,6 +20,7 @@ Supported legacy packages embedded in maps now convert during loading. You do no
 - Installation continues to ask for consent only when required resources are missing, installs complete bundles and resumes the same map request without restarting DOOM.
 
 ### Fixed
+- Maps retain different complete bundles that share a package ID instead of letting one replace the other's embedded content. Installing a missing variant also preserves other variants needed by that map.
 - Locked temporary files no longer block another map after their game resources have been released.
 - Unchanged declarations imported from the installed game may finish with the engine's normal fallback instead of causing the entire map to be refused. Modified declarations still require successful activation.
 - An installation rollback no longer replaces the original error with a generic cancellation notice; normal cancellation does not show an error.
