@@ -11,6 +11,37 @@ import (
 
 const legacyMarker = `{"schema":"snapmap-plus.override-package.v1","name":"my-overrides","version":"1.0.0","description":"Your own overrides."}`
 
+func TestOverrideIdentityNormalization(t *testing.T) {
+	lib := newOverrideLibrary(t)
+	original := "\xef\xbb\xbf" + `{"id":" Alex.BOSS-Demons \t","name":"Campaign Boss Demons","description":"Keep Me"}`
+	lib.write(map[string]string{
+		"Boss Collection/package.json":                       original,
+		"Boss Collection/assets/generated/model/boss.bmodel": "exact authored bytes",
+		"Same Identity/package.json":                         `{"id":"alex.boss-demons","name":"Another Copy"}`,
+	})
+	report := lib.migrate()
+	if len(report.Converted) != 1 || len(report.Rejected) != 0 {
+		t.Fatalf("normalization report: %+v", report)
+	}
+	descriptor := descriptorOf(t, lib.read("Boss Collection/package.json"))
+	if descriptor.member("id").text != "alex.boss-demons" || descriptor.member("name").text != "Campaign Boss Demons" || descriptor.member("description").text != "Keep Me" {
+		t.Fatal("identity was not normalized or display metadata changed")
+	}
+	if lib.read("Boss Collection/assets/generated/model/boss.bmodel") != "exact authored bytes" {
+		t.Fatal("normalization changed an asset")
+	}
+	backups := transactions(t, lib.data)
+	if len(backups) != 1 || readF(t, filepath.Join(backups[0], "original", "Boss Collection", "package.json")) != original {
+		t.Fatal("original descriptor backup was not retained")
+	}
+	before := treeOf(t, lib.root)
+	again := lib.migrate()
+	if len(again.Converted) != 0 || len(again.Rejected) != 0 {
+		t.Fatalf("normalization was not idempotent: %+v", again)
+	}
+	sameTree(t, treeOf(t, lib.root), before, "normalized library")
+}
+
 type overrideLibrary struct {
 	t    *testing.T
 	data string

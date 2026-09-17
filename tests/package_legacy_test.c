@@ -110,6 +110,31 @@ static void mixed_components(void)
     free(zip); sh_package_archive_files_free(&f);
 }
 /* Optional read-only installed-data probe; no game bytes enter test fixtures. */
+static void normalized_identity(void)
+{
+    const char *descriptor = "{\"id\":\" Alex.BOSS-Demons \\t\",\"name\":\"Campaign Boss Demons\"}";
+    sh_package_archive_files files = {0}, result = {0};
+    unsigned char *zip, *converted = NULL, *again = NULL;
+    size_t length, converted_length, again_length;
+    char error[2048], id[SH_PACKAGE_ID_CAP];
+    sh_package_archive_file *marker;
+    add(&files, "package.json", descriptor);
+    add(&files, "assets/generated/model/boss.bmodel", "authored bytes stay exact");
+    zip = sh_package_archive_write(&files, &length, error, sizeof(error)); assert(zip);
+    assert(sh_package_archive_inspect(zip, length, id, NULL, error, sizeof(error)));
+    assert(!strcmp(id, "alex.boss-demons"));
+    assert(sh_package_legacy_convert(zip, length, id, NULL, NULL, &converted, &converted_length, error, sizeof(error)));
+    assert(converted && sh_package_archive_read(converted, converted_length, &result, error, sizeof(error)));
+    marker = find(&result, "package.json");
+    assert(marker && strstr((char *)marker->body, "alex.boss-demons") && strstr((char *)marker->body, "Campaign Boss Demons"));
+    marker = find(&result, "assets/generated/model/boss.bmodel");
+    assert(marker && !strcmp((char *)marker->body, "authored bytes stay exact"));
+    assert(sh_package_legacy_convert(converted, converted_length, id, NULL, NULL, &again, &again_length, error, sizeof(error)));
+    assert(!again && !again_length);
+    assert(!strcmp((char *)files.items[0].body, descriptor));
+    free(zip); free(converted); sh_package_archive_files_free(&files); sh_package_archive_files_free(&result);
+}
+
 static int probe(const char *source, const char *base, const char *id, const char *destination)
 {
     FILE *file = NULL;
@@ -143,5 +168,5 @@ done:
 int main(int argc, char **argv)
 {
     if (argc == 5) return probe(argv[1], argv[2], argv[3], argv[4]);
-    migration(); mixed_components(); puts("legacy archive migration tests passed"); return 0;
+    migration(); mixed_components(); normalized_identity(); puts("legacy archive migration tests passed"); return 0;
 }

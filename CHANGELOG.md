@@ -14,6 +14,7 @@ Supported legacy packages embedded in maps now convert during loading. You do no
 - The guide explains each kind of package-related DOOM prompt and what happens to the map and installed files.
 
 ### Improved
+- Package IDs accept uppercase letters and surrounding whitespace automatically. Display names keep their capitalization, asset files stay untouched, and the installer backs up corrected descriptors. UTF-8 byte-order marks in package.json are also accepted.
 - Loose override migration uses my-overrides, adding a numeric suffix if necessary. Existing packages keep their grouping, and fresh installations include an empty starter package.
 - Original SnapHak onboarding and older Snapmap+ packages use the same conversion rules as map-carried content; disk migration retains backups of the originals.
 - Installation continues to ask for consent only when required resources are missing, installs complete bundles and resumes the same map request without restarting DOOM.

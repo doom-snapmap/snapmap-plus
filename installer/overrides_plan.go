@@ -252,17 +252,23 @@ func (p *unitPlan) inspectComponent(unitAbs string, node *libraryNode, rel strin
 			schema := c.descriptor.member("schema")
 			c.legacyDesc = c.descriptor.member("id") == nil ||
 				(schema != nil && schema.kind == jsonString && strings.HasPrefix(schema.text, "snapmap-plus.override-package."))
-			if id := c.descriptor.member("id"); id != nil && (id.kind != jsonString || !packageIDValid(id.text)) {
-				return nil, rejectOverride("%s/package.json has an invalid id; ids use lowercase letters, digits, dots, dashes and underscores", origin)
+			if id := c.descriptor.member("id"); id != nil {
+				if id.kind != jsonString || strings.ContainsRune(id.text, 0) {
+					return nil, rejectOverride("%s/package.json id must be a string without embedded NULs", origin)
+				}
+				// Route noncanonical spelling through the shared planner. It owns
+				// normalization and rejects identities that cannot be repaired.
+				c.legacy = !packageIDValid(id.text)
 			}
-			if !c.legacyDesc {
+			if !c.legacyDesc && !c.legacy {
 				if err := validateDescriptor(body); err != nil {
 					return nil, rejectOverride("%s/package.json: %v", origin, err)
 				}
 			}
 			if id := c.descriptor.member("id"); id != nil {
-				if owner, taken := p.ctx.ids[id.text]; !taken || owner == "" {
-					p.ctx.ids[id.text] = origin
+				key := asciiLower(strings.Trim(id.text, " \t\r\n"))
+				if owner, taken := p.ctx.ids[key]; !taken || owner == "" {
+					p.ctx.ids[key] = origin
 				}
 			}
 		}
@@ -278,9 +284,8 @@ func (p *unitPlan) inspectComponent(unitAbs string, node *libraryNode, rel strin
 	if err != nil {
 		return nil, err
 	}
-	// A byte-order mark alone makes a current descriptor unreadable; only
-	// those three bytes are removed.
-	c.legacy = c.legacyDesc || c.bom || c.sidecar || evidence
+	// Normalize descriptor spelling and encoding together with legacy layout.
+	c.legacy = c.legacy || c.legacyDesc || c.bom || c.sidecar || evidence
 	var visit func(n *libraryNode, local string) error
 	visit = func(n *libraryNode, local string) error {
 		for _, child := range n.children {

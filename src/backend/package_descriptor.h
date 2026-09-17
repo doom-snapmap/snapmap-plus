@@ -29,5 +29,9 @@ void sh_package_descriptor_free(sh_package_descriptor *descriptor);
 const char *sh_package_descriptor_section(const sh_package_descriptor *descriptor,
                                           const char *section);
 int sh_package_id_valid(const char *id);
+/* Canonical identity: ASCII case folding and surrounding JSON whitespace only.
+ * Internal spaces, invalid punctuation and non-ASCII letters remain errors.
+ * out may alias id; failed normalization leaves out untouched. */
+int sh_package_id_normalize(const char *id, char out[SH_PACKAGE_ID_CAP]);
 
 #endif

@@ -7,8 +7,9 @@
 
 typedef struct sh_package_migration sh_package_migration;
 
-/* Missing/empty legacy markers are accepted. Existing invalid ids are not
- * repaired speculatively. fallback_id/name come from the delivery adapter. */
+/* Missing/empty legacy markers are accepted. IDs receive the descriptor's
+ * case/whitespace normalization; other invalid identities are not guessed.
+ * fallback_id/name come from the delivery adapter. */
 sh_package_migration *sh_package_migration_open(const char *descriptor, size_t length,
     const char *fallback_id, const char *fallback_name, int legacy,
     char *error, size_t capacity);

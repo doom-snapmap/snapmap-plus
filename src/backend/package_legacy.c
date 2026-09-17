@@ -151,7 +151,8 @@ static int pl_classify(pl_conversion *c, const sh_package_archive_files *origina
     const char *body = (const char *)component->marker->body;
     size_t length = component->marker->length, prefix = strlen(component->prefix), i;
     sh_json_object descriptor = {0};
-    char *schema = NULL;
+    char *schema = NULL, *identity = NULL;
+    char canonical[SH_PACKAGE_ID_CAP];
     int ok = 0;
     if (length >= 3 && !memcmp(body, "\xef\xbb\xbf", 3)) { body += 3; length -= 3; component->convert = 1; }
     while (length && strchr(" \t\r\n", *body)) { body++; length--; }
@@ -159,6 +160,9 @@ static int pl_classify(pl_conversion *c, const sh_package_archive_files *origina
         pl_error(c, "%s must contain a valid JSON object", component->marker->name); goto done;
     }
     schema = pl_decode(sh_json_object_get(&descriptor, "schema"));
+    identity = pl_decode(sh_json_object_get(&descriptor, "id"));
+    if (identity && sh_package_id_normalize(identity, canonical) && strcmp(identity, canonical))
+        component->convert = 1;
     component->legacy = !sh_json_object_get(&descriptor, "id") ||
         (schema && !strncmp(schema, "snapmap-plus.override-package.", 30));
     component->convert |= component->legacy;
@@ -194,7 +198,7 @@ static int pl_classify(pl_conversion *c, const sh_package_archive_files *origina
     }
     ok = 1;
 done:
-    free(schema); sh_json_object_free(&descriptor); return ok;
+    free(identity); free(schema); sh_json_object_free(&descriptor); return ok;
 }
 
 static int pl_convert_component(pl_conversion *c, const sh_package_archive_files *original,

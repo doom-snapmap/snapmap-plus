@@ -127,7 +127,8 @@ without running the installer, rewriting the saved map or restarting DOOM.
 
 Discovery follows the runtime: a folder with `package.json` is one outer
 package and other folders are groups. A package is converted when its
-descriptor has no `id`, is empty, has the old
+descriptor needs ID case/whitespace normalization, has a byte-order mark,
+has no `id`, is empty, has the old
 `snapmap-plus.override-package.v1` schema, when it has an old
 `smpkg.digest` installation sidecar, or when its root has old namespaces with
 their old content (`decls/`, `images/`, `shaders/generated/`, `resources/*.manifest`,

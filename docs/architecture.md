@@ -310,7 +310,13 @@ before replacing the DLLs and exposes that conversion as
 `snapmap-plus migrate-overrides`. Its contract, including original SnapHak
 onboarding, is in the [installer README](../installer/README.md#converting-overrides-from-earlier-releases).
 
-Old map-carried packages convert before current descriptor validation.
+Old map-carried packages convert before current descriptor validation. Descriptor
+parsing canonicalizes IDs with ASCII case folding and trims surrounding JSON
+whitespace, while preserving display names and authored source bytes. The same
+normalizer serves migration and map carrier identities. A UTF-8 BOM is accepted;
+invalid punctuation, internal spaces, embedded NULs and corrupt JSON still fail.
+The installer routes noncanonical IDs through the shared planner before strict
+output validation, writes the corrected descriptor and retains the original backup.
 Unchanged installed declarations retain the engine's completed fallback behavior:
 the compiler records exact equality against game originals, and native admission
 permits a completed default only for those bytes. Modified declarations still

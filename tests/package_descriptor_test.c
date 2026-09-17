@@ -71,6 +71,24 @@ int main(void)
     CHECK(!sh_package_id_valid("Boss"));
     CHECK(!sh_package_id_valid("boss..demons"));
     CHECK(!sh_package_id_valid("boss."));
+    {
+        const char *json = "\xef\xbb\xbf{\"id\":\" \\tAlex.BOSS-Demons\\r\\n\",\"name\":\"Campaign Boss Demons\"}";
+        char canonical[SH_PACKAGE_ID_CAP] = "unchanged";
+        CHECK(sh_package_descriptor_parse(json, strlen(json), &descriptor, error, sizeof(error)));
+        CHECK(!strcmp(descriptor.id, "alex.boss-demons"));
+        CHECK(!strcmp(descriptor.name, "Campaign Boss Demons"));
+        CHECK(!strcmp(sh_package_descriptor_section(&descriptor, "id"), "\"alex.boss-demons\""));
+        sh_package_descriptor_free(&descriptor);
+        CHECK(sh_package_id_normalize("  Alex.BOSS-Demons \n", canonical));
+        CHECK(!strcmp(canonical, "alex.boss-demons"));
+        CHECK(sh_package_id_normalize(canonical, canonical));
+        CHECK(!sh_package_id_normalize("Bad ID", canonical));
+        CHECK(!sh_package_id_normalize("../Boss", canonical));
+        CHECK(!sh_package_id_normalize("Boss..Demon", canonical));
+        CHECK(!sh_package_id_normalize(" \r\n ", canonical));
+        CHECK(!sh_package_id_normalize("B\xc3\xb6ss", canonical));
+        CHECK(!strcmp(canonical, "alex.boss-demons"));
+    }
     CHECK(!sh_package_descriptor_parse("{}", 2, &descriptor, error, sizeof(error)));
     CHECK(strstr(error, "missing its required id"));
     {

@@ -1174,6 +1174,29 @@ int main(int argc, char **argv)
     n = sh_mpkg_scan(fix_map_happy, fix_map_happy_len, decls, 16);
     CHECK(n == 1);
     CHECK(strcmp(decls[0].id, FIX_PKG_ID) == 0);
+    {
+        char *mixed = _strdup(fix_map_happy), *cursor = mixed;
+        unsigned char *payload;
+        size_t length, j;
+        sh_mpkg_context *context;
+        CHECK(mixed);
+        if (mixed) {
+            while ((cursor = strstr(cursor, FIX_PKG_ID)) != NULL) {
+                for (j = 0; j < strlen(FIX_PKG_ID); j++)
+                    if (cursor[j] >= 'a' && cursor[j] <= 'z') cursor[j] -= 'a' - 'A';
+                cursor += strlen(FIX_PKG_ID);
+            }
+            CHECK(sh_mpkg_scan(mixed, strlen(mixed), decls, 16) == 1);
+            CHECK(!strcmp(decls[0].id, FIX_PKG_ID));
+            payload = sh_mpkg_extract(mixed, strlen(mixed), FIX_PKG_ID, &length, err, sizeof(err));
+            CHECK(payload && length == fix_payload_len && !memcmp(payload, fix_payload, length));
+            if (payload) HeapFree(GetProcessHeap(), 0, payload);
+            context = sh_mpkg_context_open(root, mixed, strlen(mixed), err, sizeof(err));
+            CHECK(context && sh_mpkg_context_count(context) == 1);
+            CHECK(sh_mpkg_context_close(&context));
+            free(mixed);
+        }
+    }
     CHECK(strcmp(decls[0].digest, FIX_DIGEST) == 0);
     CHECK(decls[0].total == FIX_SHARDS);
     CHECK(decls[0].present == FIX_SHARDS);

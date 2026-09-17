@@ -895,6 +895,14 @@ Only `id` and `name` are required in `package.json`. Requirements and strings go
 ```
 
 Omit sections you do not need. Requirements accept supported settings, not arbitrary commands.
+The ID, display name and folder name do not have to match. IDs are normalized to
+lowercase automatically, with surrounding spaces, tabs and newlines removed;
+display names keep their capitalization. IDs use letters and digits, with dots,
+dashes and underscores allowed internally, and no consecutive dots. A UTF-8 byte-order
+mark in `package.json` is accepted. Runtime normalization does not rewrite your files;
+installer migration writes corrected metadata and keeps the original backup.
+Copies or variants of one package may share an ID. Independently authored mods should
+use different IDs, even when they edit the same game asset.
 Optional `hud.weapons.<weapon declaration name>.ammo_display` accepts `weapon` or `engine`.
 There are no versions, file lists, path mappings, author hashes, receipts, priorities or map-inclusion
 switches to maintain. Boss startup behavior belongs in its asset declarations and travels with them.
