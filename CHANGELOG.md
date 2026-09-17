@@ -7,19 +7,21 @@ latest stable version is what `snapmap-plus update` installs.
 
 **Older maps convert as they open**
 
-Maps that carry packages in the older format now convert automatically when you open them, without entering the map first, exporting anything or restarting DOOM, and your saved map stays untouched. Onboarding also brings across the original SnapHak profile, and the converted package is now called my-overrides.
+Supported legacy packages embedded in maps now convert during loading. You do not need to enter the map first or export a rawmap, and the original saved map stays untouched. The installer and map loader share conversion rules for declarations, resource paths and package policies.
 
 ### New
-- Maps carrying packages from the older format convert automatically when opened, leaving the original saved map intact and needing no rawmap export or restart.
-- Onboarding imports the loose overrides tree from the original SnapHak profile and converts it with the same rules as older Snapmap+ packages, keeping a backup of the originals and never overwriting files already in place.
-- A written guide to every package-related DOOM message now explains when each one should appear and what happens to your map and files.
+- The map loader reconstructs supported older embedded packages, including their legacy requirements, strings and manifest resource imports, before normal compilation.
+- The guide explains each kind of package-related DOOM prompt and what happens to the map and installed files.
 
 ### Improved
-- Converted and freshly installed content lands in a package named my-overrides, and if that name is already taken migration picks the next free suffix instead of touching your existing files.
-- Installation still asks for your consent only when resources the map needs are missing, and then installs the complete converted packages.
+- Loose override migration uses my-overrides, adding a numeric suffix if necessary. Existing packages keep their grouping, and fresh installations include an empty starter package.
+- Original SnapHak onboarding and older Snapmap+ packages use the same conversion rules as map-carried content; disk migration retains backups of the originals.
+- Installation continues to ask for consent only when required resources are missing, installs complete bundles and resumes the same map request without restarting DOOM.
 
 ### Fixed
-- A leftover temporary cache from a previous map no longer blocks the next map from loading, and a map that only needs unchanged game declarations can still finish on the stock path.
+- Locked temporary files no longer block another map after their game resources have been released.
+- Unchanged declarations imported from the installed game may finish with the engine's normal fallback instead of causing the entire map to be refused. Modified declarations still require successful activation.
+- An installation rollback no longer replaces the original error with a generic cancellation notice; normal cancellation does not show an error.
 
 ## v0.2.1-beta.15 -- 2026-09-16 (beta)
 
