@@ -3,6 +3,28 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.16 -- 2026-09-17 (beta)
+
+**Older maps convert as they open**
+
+Supported legacy packages embedded in maps now convert during loading. You do not need to enter the map first or export a rawmap, and the original saved map stays untouched. The installer and map loader share conversion rules for declarations, resource paths and package policies.
+
+### New
+- The map loader reconstructs supported older embedded packages, including their legacy requirements, strings and manifest resource imports, before normal compilation.
+- The guide explains each kind of package-related DOOM prompt and what happens to the map and installed files.
+
+### Improved
+- Package IDs accept uppercase letters and surrounding whitespace automatically. Display names keep their capitalization, asset files stay untouched, and the installer backs up corrected descriptors. UTF-8 byte-order marks in package.json are also accepted.
+- Loose override migration uses my-overrides, adding a numeric suffix if necessary. Existing packages keep their grouping, and fresh installations include an empty starter package.
+- Original SnapHak onboarding and older Snapmap+ packages use the same conversion rules as map-carried content; disk migration retains backups of the originals.
+- Installation continues to ask for consent only when required resources are missing, installs complete bundles and resumes the same map request without restarting DOOM.
+
+### Fixed
+- Maps retain different complete bundles that share a package ID instead of letting one replace the other's embedded content. Installing a missing variant also preserves other variants needed by that map.
+- Locked temporary files no longer block another map after their game resources have been released.
+- Unchanged declarations imported from the installed game may finish with the engine's normal fallback instead of causing the entire map to be refused. Modified declarations still require successful activation.
+- An installation rollback no longer replaces the original error with a generic cancellation notice; normal cancellation does not show an error.
+
 ## v0.2.1-beta.15 -- 2026-09-16 (beta)
 
 **Packages from earlier releases convert automatically**
