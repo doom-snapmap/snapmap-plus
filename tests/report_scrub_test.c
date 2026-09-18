@@ -9,7 +9,7 @@ int main(void)
     char out[512];
 
     /* the canonical leak shape: a Windows profile path, mixed case */
-    rs_scrub(out, sizeof out, "log: C:\\Users\\AlexD\\thing.log opened by alexd", "alexd", "<user>");
+    rs_scrub(out, sizeof out, "log: C:\\Users\\SampleUser\\thing.log opened by sampleuser", "sampleuser", "<user>");
     assert(strcmp(out, "log: C:\\Users\\<user>\\thing.log opened by <user>") == 0);
 
     /* machine name, embedded mid-token */

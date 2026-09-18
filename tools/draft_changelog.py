@@ -54,8 +54,8 @@ that unlocks its SnapMap editor. You are given the commits in one release. Produ
 the entry a player reads.
 
 Rules:
-- At most 6 named bullets in TOTAL across New, Improved and Fixed, one sentence \
-each, present tense. Six is a ceiling, not a target: combine related changes \
+- At most 6 named bullets in TOTAL across New, Improved and Fixed, in present \
+tense. Six is a ceiling, not a target: combine related changes \
 and use fewer bullets when there are fewer distinct player-visible outcomes.
 - Name a fix only if a user could have hit it and remembered it. Everything a user \
 could never have noticed is counted in collapsed_count and never described.
@@ -72,14 +72,13 @@ string. Text containing them is rejected and your draft is discarded.
 ELI5 policy -- make the headline, summary and every bullet easy to understand:
 - Write for a player who knows SnapMap but has no programming or modding expertise. Use a friendly, respectful tone without baby talk.
 - Describe the visible outcome, not the machinery producing it. Each bullet should answer "What can I do now?" or "What problem will I stop seeing?" using only outcomes supported by the sources.
-- Use literal, specific headlines, not slogans or metaphors. Keep the summary to one or two short sentences about the main outcome; leave secondary details to the bullets.
-- Aim for 25 words or fewer per bullet, with one main idea in active voice. Remove secondary details instead of squeezing them into a long sentence with several clauses. Keep a necessary factual limit even if it needs a few more words.
-- Do not turn implementation work into a standalone bullet. Compiler repairs, list counts, indices, serialized bytes, field ownership, served output, and similar mechanisms belong out of the notes. If the sources do not establish a clear player-visible outcome, omit the detail rather than inventing one.
-- Translate developer terms into the supported behavior. Do not leave phrases such as "semantic collection entries" or "input actions and output listeners" for players to decode. Keep exact feature names only when players need them to recognize what changed; briefly explain an unavoidable unfamiliar term.
-- Release notes are not troubleshooting instructions. Omit diagnostic commands and repair procedures unless users must take that action for this release; do not add them just because the documentation describes them.
+- Use literal, specific headlines, not slogans or metaphors. Keep the summary focused on the main outcome; explain supporting details in the bullets.
+- Give each bullet one main topic, using active voice and familiar words. There is no per-bullet word or sentence limit: use enough short sentences to explain what changed, when it matters and any important conditions. Remove repetition, not context needed to understand the change.
+- Include technical details only when they help a player understand or use the change. Translate implementation terminology into supported behavior, preserve recognizable feature names, and briefly explain unavoidable unfamiliar terms. If the sources do not establish a player-visible outcome, omit the detail rather than inventing one.
+- Include instructions when users need them to understand or act on the change. Leave unrelated troubleshooting and optional diagnostics to the documentation.
 - Make fixes concrete: name the situation and the visible problem that no longer happens. Avoid vague claims such as "various improvements" or "better stability" when the sources support a more specific description.
-- Preserve important limits, affected modes and required user actions. Never invent a benefit, cause or guarantee. Do not turn an example involving two packages into a rule that exactly two packages are affected, or turn "compatible edits combine" into "every change works together". Name the affected group without inventing its size.
-- Examples of style only, not facts to include: "Preserve serialized prop transforms" becomes "Props keep their saved position and rotation when you reopen the map." "Isolate conflicting contributors" becomes "Packages with conflicting changes are skipped while unrelated packages keep working." Use either claim only when the release sources support it.
+- Preserve the sources' scope: who is affected, under what conditions, any exceptions and required user actions. Never invent a benefit, cause, quantity or guarantee. Do not turn an example into a universal rule or imply that a limited change applies everywhere.
+- Apply these language and tone rules equally to every feature. Select topics from this release's evidence, without favoring a particular subsystem or carrying over claims from another release.
 - Before returning the entry, check EVERY sentence, including the headline and summary: can a new player understand the change without knowing the code, and does the source support its scope? Remove jargon, repeated outcomes and unsupported words such as "all", "always", "only" or "never". Source documentation is evidence, not a writing style to imitate.
 
 Grounding -- this is what makes the entry TRUE rather than merely plausible:
@@ -329,14 +328,11 @@ def draft(commits, omitted_count, docs=""):
         "\nFinal editing pass before returning the structured entry:\n"
         "- Treat the material above as evidence, not prose to copy. Write for a player.\n"
         "- Keep only distinct, supported outcomes a player can understand; do not fill six slots.\n"
-        "- Delete bullets about compiler internals, list counts, numbering or duplicate-entry repairs.\n"
-        "- Delete optional diagnostic commands and troubleshooting procedures.\n"
-        "- Rewrite unfamiliar developer terms as the behavior they describe, or omit the detail "
-        "if the sources do not support a clear explanation.\n"
-        "- Shorten each bullet toward 25 words and one main idea without dropping factual limits.\n"
-        "- Check the headline and summary too: compatible changes combining does not mean "
-        "conflicting changes work together, and skipping conflicting packages does not mean "
-        "only one or exactly two are skipped.\n"
+        "- Explain unfamiliar terms and keep the context needed to understand each change. "
+        "Use additional short sentences when helpful; do not compress explanations to a word target.\n"
+        "- Remove repetition and technical details that do not help the reader understand or use the change.\n"
+        "- Check every claim, including the headline and summary, against the sources: preserve "
+        "who is affected, conditions, exceptions and required actions without adding guarantees.\n"
     )
 
     counted = client.messages.count_tokens(
