@@ -346,14 +346,8 @@ still apply, so choose a version that has no tag, changelog entry or draft branc
    feature names, explain unavoidable technical terms, and preserve important limits and required actions.
    Be respectful, avoid baby talk, and never invent a benefit to make an explanation simpler. The drafter's
    prompt in `tools/draft_changelog.py` follows this policy and does not use older notes as a style example.
-   It uses one editorial brief for writing and factual review, followed by a separate output contract
-   for the structured fields and validation limits.
-   Six bullets is a ceiling, not a target: combine related changes around one main topic per bullet.
-   Each bullet has a maximum of 40 whitespace-separated words, enforced by the drafter's validation.
-   Use short sentences and preserve important conditions; remove repetition and secondary details before
-   cutting context needed to understand the change. Include technical
-   details or instructions when they help the reader understand or use the change, explaining unfamiliar terms.
-   Apply these language and tone rules across all features without favoring any particular subsystem.
+   Six bullets is a ceiling, not a target: combine related changes and aim for 25 words or fewer per bullet.
+   Describe visible outcomes, leaving out implementation mechanics and optional troubleshooting commands.
    Keep headlines literal, and check that simplification has not turned an example into a general rule or
    broadened a limited fix into a guarantee, including in the summary.
    Review readability by hand; the automated checks do not establish that an explanation is easy to understand.

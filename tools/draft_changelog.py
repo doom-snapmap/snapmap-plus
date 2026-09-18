@@ -32,7 +32,6 @@ UI_NOUNS = ("tab", "panel", "button", "menu", "dialog", "checkbox", "slider",
 MAX_HEADLINE = 60
 MAX_SUMMARY = 320
 MAX_ITEMS = 6
-MAX_ITEM_WORDS = 40
 MAX_SKELETON_SUBJECTS = 20
 
 # Canonical user-facing commit filter; keep contributing.md aligned.
@@ -51,42 +50,44 @@ SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 FORBIDDEN = ("\n", "\r", "[", "]", "<", ">", "`")
 
 SYSTEM = """\
-Write release notes for Snapmap+ users who understand the basic SnapMap editor \
-but have no programming knowledge.
+You write the release notes for Snapmap+, a free open-source mod for DOOM (2016) \
+that unlocks its SnapMap editor. You are given the commits in one release. Produce \
+the entry a player reads.
 
-Use the supplied commits and documentation to identify what changed for those \
-users. Organize the notes around their experience: what they can do, what \
-problem is fixed, and any conditions they need to understand.
+Rules:
+- At most 6 named bullets in TOTAL across New, Improved and Fixed, one sentence \
+each, present tense. Six is a ceiling, not a target: combine related changes \
+and use fewer bullets when there are fewer distinct player-visible outcomes.
+- Name a fix only if a user could have hit it and remembered it. Everything a user \
+could never have noticed is counted in collapsed_count and never described.
+- Plain language. No symbol names, addresses, file paths, test counts, commit \
+subjects copied verbatim, or internal jargon.
+- headline: at most 60 characters, the one thing this release is about.
+- summary: at most 320 characters, one to three sentences on what changed and what \
+it means for someone using Snapmap+.
+- sources: the short commit hashes backing your named bullets, lowercase hex only, \
+for maintainer review.
+- Never use newlines, square brackets, angle brackets, or backticks inside any \
+string. Text containing them is rejected and your draft is discarded.
 
-Explain each change as you would to someone using the feature for the first \
-time. Use familiar words and concrete descriptions. Keep recognizable feature \
-names, and explain unfamiliar terms when they are necessary. Keep each bullet \
-to 40 words or fewer, using short sentences to explain one main change. Remove \
-repetition and secondary details before cutting conditions needed for accuracy.
+ELI5 policy -- make the headline, summary and every bullet easy to understand:
+- Write for a player who knows SnapMap but has no programming or modding expertise. Use a friendly, respectful tone without baby talk.
+- Describe the visible outcome, not the machinery producing it. Each bullet should answer "What can I do now?" or "What problem will I stop seeing?" using only outcomes supported by the sources.
+- Use literal, specific headlines, not slogans or metaphors. Keep the summary to one or two short sentences about the main outcome; leave secondary details to the bullets.
+- Aim for 25 words or fewer per bullet, with one main idea in active voice. Remove secondary details instead of squeezing them into a long sentence with several clauses. Keep a necessary factual limit even if it needs a few more words.
+- Do not turn implementation work into a standalone bullet. Compiler repairs, list counts, indices, serialized bytes, field ownership, served output, and similar mechanisms belong out of the notes. If the sources do not establish a clear player-visible outcome, omit the detail rather than inventing one.
+- Translate developer terms into the supported behavior. Do not leave phrases such as "semantic collection entries" or "input actions and output listeners" for players to decode. Keep exact feature names only when players need them to recognize what changed; briefly explain an unavoidable unfamiliar term.
+- Release notes are not troubleshooting instructions. Omit diagnostic commands and repair procedures unless users must take that action for this release; do not add them just because the documentation describes them.
+- Make fixes concrete: name the situation and the visible problem that no longer happens. Avoid vague claims such as "various improvements" or "better stability" when the sources support a more specific description.
+- Preserve important limits, affected modes and required user actions. Never invent a benefit, cause or guarantee. Do not turn an example involving two packages into a rule that exactly two packages are affected, or turn "compatible edits combine" into "every change works together". Name the affected group without inventing its size.
+- Examples of style only, not facts to include: "Preserve serialized prop transforms" becomes "Props keep their saved position and rotation when you reopen the map." "Isolate conflicting contributors" becomes "Packages with conflicting changes are skipped while unrelated packages keep working." Use either claim only when the release sources support it.
+- Before returning the entry, check EVERY sentence, including the headline and summary: can a new player understand the change without knowing the code, and does the source support its scope? Remove jargon, repeated outcomes and unsupported words such as "all", "always", "only" or "never". Source documentation is evidence, not a writing style to imitate.
 
-Write in a calm, direct, respectful tone. Avoid promotional claims, baby talk, \
-and vague assurances. Technical details belong only when they help the reader \
-understand the change.
-
-Stay within the evidence. Preserve who is affected, when the change applies, \
-its limitations, and any required action. If the sources do not explain the \
-user-visible result, omit that detail rather than guessing.
-
-Before returning the notes, check each statement against its source. Then read \
-the entry as a new user and rewrite anything that requires developer knowledge.
-
-Return the required structured format. Group related changes, avoid repetition, \
-and include only as many bullets as the release needs within the maximum below.
-
-Output contract:
-- headline: at most 60 characters, the main theme of this release.
-- summary: at most 320 characters, what changed and what it means for users.
-- added, improved, fixed: lists of plain-text bullets, at most 6 in total and 40 whitespace-separated words per bullet.
-- collapsed_count: the number of commits not described, including the supplied omitted count.
-- sources: the short commit hashes backing the named bullets, lowercase hex only, for maintainer review.
-- Do not include symbol names, addresses, file paths, test counts or verbatim commit subjects in the reader-facing text.
-- Do not name an interface location unless that word appears in the supplied commits or documentation; unsupported interface-location words are rejected.
-- Never use newlines, square brackets, angle brackets or backticks inside a string; these are rejected.
+Grounding -- this is what makes the entry TRUE rather than merely plausible:
+- You are given the commits AND the diff of the user-facing documentation. A behaviour change is required to update those docs in the same pull request, so the docs diff is the account of what a user actually sees.
+- Say only what those sources support. If they tell you a capability changed but not how it is reached, describe the capability and stop.
+- NEVER invent where something lives. Do not name a tab, panel, button, menu, dialog, checkbox, window or any other place in the interface unless that exact word appears in the sources. A draft naming a UI surface the sources never mention is rejected and discarded.
+- Use the docs diff to establish what a feature is and where it lives, then explain it under the ELI5 policy. Preserve exact feature names and factual limits.
 """
 
 
@@ -168,11 +169,6 @@ def validate(draft, min_collapsed=0):
         for item in items:
             if not item.strip():
                 raise DraftRejected(name + " contains an empty item")
-            word_count = len(item.split())
-            if word_count > MAX_ITEM_WORDS:
-                raise DraftRejected(
-                    "%s item has %d words (max %d)"
-                    % (name, word_count, MAX_ITEM_WORDS))
     if draft.collapsed_count < 0:
         raise DraftRejected("collapsed_count is negative")
     # The collapsed count includes both omitted inputs and commits the draft leaves
@@ -327,8 +323,22 @@ def draft(commits, omitted_count, docs=""):
     if docs:
         prompt += (
             "\nThe diff of the user-facing documentation over the same range. "
-            "Use this as evidence for the release notes:\n\n"
+            "This is what a user can now do and where; explain it under the ELI5 "
+            "policy, and do not name any part of the interface it does not name:\n\n"
             + docs + "\n")
+    prompt += (
+        "\nFinal editing pass before returning the structured entry:\n"
+        "- Treat the material above as evidence, not prose to copy. Write for a player.\n"
+        "- Keep only distinct, supported outcomes a player can understand; do not fill six slots.\n"
+        "- Delete bullets about compiler internals, list counts, numbering or duplicate-entry repairs.\n"
+        "- Delete optional diagnostic commands and troubleshooting procedures.\n"
+        "- Rewrite unfamiliar developer terms as the behavior they describe, or omit the detail "
+        "if the sources do not support a clear explanation.\n"
+        "- Shorten each bullet toward 25 words and one main idea without dropping factual limits.\n"
+        "- Check the headline and summary too: compatible changes combining does not mean "
+        "conflicting changes work together, and skipping conflicting packages does not mean "
+        "only one or exactly two are skipped.\n"
+    )
 
     counted = client.messages.count_tokens(
         model=MODEL, system=SYSTEM, messages=[{"role": "user", "content": prompt}]
