@@ -385,6 +385,53 @@ static void test_new_declarations(void)
     sh_package_compilation_free(compiled); sh_package_sources_free(sources);
 }
 
+static int wiring_baseline(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    if (strcmp(path, "generated/decls/snapeditorentitydef/test/logic.decl")) return 0;
+    *body = (unsigned char *)_strdup(context); *length = strlen(context);
+    return *body ? 1 : -1;
+}
+
+static void test_editor_wiring_collections(void)
+{
+    const char *base = "{ edit = { inputs = { num = 2; item[0] = \"action/base\"; item[1] = \"action/remove\"; }"
+        " outputs = { num = 1; item[0] = \"listener/base\"; } } }";
+    const char *builtin = "{ edit = { inputs = { num = 4; item[0] = \"action/base\"; item[1] = \"action/remove\";"
+        " item[2] = \"action/builtin\"; item[3] = \"action/shared\"; }"
+        " outputs = { num = 2; item[0] = \"listener/base\"; item[1] = \"listener/builtin\"; } } }";
+    const char *path = "generated/decls/snapeditorentitydef/test/logic.decl";
+    sh_package_builtin contribution = {path, (const unsigned char *)builtin, strlen(builtin)};
+    sh_package_compile_environment environment = {wiring_baseline, (void *)base, &contribution, 1};
+    sh_package_sources *sources;
+    sh_package_compilation *compiled;
+    const sh_compiled_resource *resource;
+    char directory[MAX_PATH], error[2048];
+    snprintf(directory, sizeof(directory), "%s/wiring", root);
+    create("wiring/overrides/a/package.json", "{\"id\":\"a\",\"name\":\"A\"}");
+    create("wiring/overrides/b/package.json", "{\"id\":\"b\",\"name\":\"B\"}");
+    create("wiring/overrides/a/assets/generated/decls/snapeditorentitydef/test/logic.decl",
+        "{ edit = { inputs = { num = 3; item[0] = \"action/base\"; item[1] = \"action/a\"; item[2] = \"action/shared\"; }"
+        " outputs = { num = 2; item[0] = \"listener/base\"; item[1] = \"listener/a\"; } } }");
+    create("wiring/overrides/b/assets/generated/decls/snapeditorentitydef/test/logic.decl",
+        "{ edit = { inputs = { num = 4; item[0] = \"action/base\"; item[1] = \"action/remove\";"
+        " item[2] = \"action/b\"; item[3] = \"action/shared\"; }"
+        " outputs = { num = 2; item[0] = \"listener/base\"; item[1] = \"listener/builtin\"; } } }");
+    sources = sh_package_sources_scan(directory, error, sizeof(error)); CHECK(sources);
+    if (!sources) return;
+    compiled = sh_package_compile_with(sources, &environment, error, sizeof(error));
+    CHECK(compiled); if (!compiled) fprintf(stderr, "%s\n", error);
+    resource = sh_package_compilation_find(compiled, path);
+    CHECK(resource && resource->composed && resource->owners.bits == 3 && !resource->gameplay_owners.bits);
+    if (resource) {
+        const char *body = (const char *)resource->body;
+        CHECK(strstr(body, "num = 5;") && strstr(body, "num = 3;"));
+        CHECK(strstr(body, "action/a") && strstr(body, "action/builtin") && strstr(body, "action/b\""));
+        CHECK(strstr(body, "item[4] = \"action/shared\";") && !strstr(body, "action/remove"));
+        CHECK(strstr(body, "listener/a") && strstr(body, "listener/builtin"));
+    }
+    sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+}
+
 static int import_baseline(void *context, const char *path, unsigned char **body, size_t *length)
 {
     (void)path;
@@ -486,6 +533,7 @@ int main(int argc, char **argv)
     test_changes(compiled);
     test_restoration(compiled);
     test_builtin_composition(compiled);
+    test_editor_wiring_collections();
     sh_package_compilation_free(compiled); compiled = NULL;
     compiled = sh_package_compile(sources, NULL, NULL, error, sizeof(error)); CHECK(!compiled); CHECK(strstr(error, "verified original"));
     sh_package_sources_free(sources); sources = NULL;

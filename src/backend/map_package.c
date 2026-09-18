@@ -1058,7 +1058,7 @@ sh_mpkg_context *sh_mpkg_context_open(const char *data_root, const char *json, s
     int created = 0;
     sh_json_error problem;
     if (error && capacity) error[0] = 0;
-    if (!sh_json_validate_ex(json, len, 128, NULL, &problem)) {
+    if (!sh_native_json_validate(json, len, 128, NULL, &problem)) {
         if (error && capacity) snprintf(error, capacity,
             "Map JSON rejected at byte %zu: %s.", problem.offset, problem.reason);
         return NULL;

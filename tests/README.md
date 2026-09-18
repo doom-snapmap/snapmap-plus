@@ -50,6 +50,15 @@ Checks native helpers, engine-interface contracts, frontend JavaScript and optio
   displacements, preserved call arguments and return flow.
 - `rawmap_paths_test.c` checks save destinations and read-only Play snapshots,
   unsaved policy changes, refusal before editor deactivation, and retry.
+- `config_json_test.c` separates strict UTF-8 documents from native byte strings,
+  preserving every high byte and mixed text while rejecting invalid syntax,
+  escapes, duplicate keys, raw controls and excess nesting. `package_usage_test.c`,
+  `decl_dependencies_test.c`, `map_session_json_test.c` and `map_package_test.c`
+  exercise legacy text through inline state discovery, typed references,
+  session extraction and unmodded/modded map admission without transcoding.
+- `package_compiler_test.c` combines editor input actions and output listeners
+  from two packages and a product default, including shared identities,
+  original-relative deletion, authored ordering and editor-only ownership.
 - `sig_test.c`, `globals_test.c` and `hooktol_test.c` use optional local game images.
 - `startup_bindings_test.c` checks early observer binding, delayed code readiness,
   preserved pre-install addresses and partial startup without repeated hooks.

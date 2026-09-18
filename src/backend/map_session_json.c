@@ -20,7 +20,7 @@ static int session_type(const sh_json_field_span *field, const char *expected)
 {
     char decoded[64];
     return field && field->kind == SH_JSON_STRING &&
-        sh_json_decode_string(field->value, field->value_length, decoded, sizeof(decoded), NULL) &&
+        sh_native_json_decode_string(field->value, field->value_length, decoded, sizeof(decoded), NULL) &&
         !strcmp(decoded, expected);
 }
 static int session_int(const sh_json_field_span *field, int *out)
@@ -62,7 +62,7 @@ static int session_four_elements(const char *json, size_t length)
 {
     unsigned depth = 0, separators = 0;
     int quoted = 0;
-    /* Input already passed the shared strict JSON validator. Count only the
+    /* Input already passed the shared native JSON validator. Count only the
      * outer array separators; the visitor separately requires four objects. */
     for (size_t i = 0; i < length; i++) {
         char c = json[i];
@@ -82,9 +82,9 @@ char *sh_map_session_json(const char *json, size_t length, const char *native_de
     char slots[768], *out = NULL;
     size_t used = 1;
     if (error && capacity) *error = 0;
-    if (!json || !sh_json_visit_objects_filtered(json, length, 128, session_root, session_filter, &session) ||
+    if (!json || !sh_native_json_visit_objects_filtered(json, length, 128, session_root, session_filter, &session) ||
         !session.slots || !session_four_elements(session.slots, session.length) ||
-        !sh_json_visit_objects_filtered(session.slots, session.length, 8,
+        !sh_native_json_visit_objects_filtered(session.slots, session.length, 8,
             session_slot, session_filter, &session) || session.count != 4) {
         if (error && capacity) snprintf(error, capacity, "The map's native format or four lobby slots are invalid.");
         return NULL;
@@ -96,7 +96,7 @@ char *sh_map_session_json(const char *json, size_t length, const char *native_de
         "%s{\"~type\":\"snapLobbySlotSetting_t\",\"race\":%d,\"state\":%d,\"team\":%d}",
         i ? "," : "", session.values[i][0], session.values[i][1], session.values[i][2]);
     memcpy(slots + used, "]", 2);
-    if (native_defaults && sh_json_parse_object(native_defaults, defaults_length, 128, &defaults) &&
+    if (native_defaults && sh_native_json_parse_object(native_defaults, defaults_length, 128, &defaults) &&
         sh_json_object_set(&defaults, "snapSlotSettings", slots, 128))
         out = sh_json_serialize_object(&defaults, 0, NULL);
     sh_json_object_free(&defaults);

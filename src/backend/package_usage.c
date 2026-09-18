@@ -52,7 +52,7 @@ static int pu_text(const sh_json_field_span *field, char *out, size_t capacity)
 {
     size_t length;
     return field && field->kind == SH_JSON_STRING &&
-        sh_json_decode_string(field->value, field->value_length, out, capacity, &length) && strlen(out) == length;
+        sh_native_json_decode_string(field->value, field->value_length, out, capacity, &length) && strlen(out) == length;
 }
 static int pu_object(void *context, const sh_json_field_span *fields, size_t count, unsigned depth)
 {
@@ -104,7 +104,7 @@ static int pu_state(void *context, const sh_json_field_span *fields, size_t coun
     if (field && field->kind != SH_JSON_NULL && !pu_text(field, class_name, sizeof(class_name))) return 0;
     field = pu_field(fields, count, "inherit");
     if (field && field->kind != SH_JSON_NULL && !pu_text(field, inherit, sizeof(inherit))) return 0;
-    if (!sh_json_parse_object(state->value, state->value_length, 128, &object)) return 0;
+    if (!sh_native_json_parse_object(state->value, state->value_length, 128, &object)) return 0;
     edit = sh_json_object_get(&object, "edit");
     if (edit && strcmp(edit, "null"))
         ok = visit->visitor(visit->context, class_name, inherit, edit, strlen(edit));
@@ -115,14 +115,14 @@ int sh_package_map_states(const char *json, size_t length,
     sh_package_state_visitor visitor, void *context)
 {
     pu_states visit = {visitor, context};
-    return visitor && sh_json_visit_objects_filtered(json, length, 128, pu_state, pu_gameplay_field, &visit);
+    return visitor && sh_native_json_visit_objects_filtered(json, length, 128, pu_state, pu_gameplay_field, &visit);
 }
 
 int sh_package_map_references(const char *json, size_t length,
                               sh_package_reference_visitor visitor, void *context)
 {
     pu_visit visit = {visitor, context};
-    return visitor && sh_json_visit_objects_filtered(json, length, 128, pu_object, pu_gameplay_field, &visit);
+    return visitor && sh_native_json_visit_objects_filtered(json, length, 128, pu_object, pu_gameplay_field, &visit);
 }
 
 typedef struct pu_owners {

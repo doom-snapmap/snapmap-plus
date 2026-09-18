@@ -451,9 +451,13 @@ static const sh_decl_collection_rule *pc_rules(const char *type, size_t *count)
 {
     static const sh_decl_collection_rule blocking = {"edit.renderModelInfoList", "renderModelMaterial"};
     static const sh_decl_collection_rule encounters = {"edit.validEncounters", NULL};
-    static const sh_decl_collection_rule editor_properties[] = {
+    static const sh_decl_collection_rule editor_collections[] = {
         {"edit.propertySheets", "", "properties", "path"},
-        {"edit.propertySheets.item[*].properties", "path"}
+        {"edit.propertySheets.item[*].properties", "path"},
+        /* Input actions and output listeners are admitted by declaration
+         * identity, not their position in the editor's presentation list. */
+        {"edit.inputs", NULL},
+        {"edit.outputs", NULL}
     };
     static const sh_decl_collection_rule conductor[] = {
         {"edit.aiTypeList", "aiType"},
@@ -465,7 +469,7 @@ static const sh_decl_collection_rule *pc_rules(const char *type, size_t *count)
     if (!_stricmp(type, "snappropertyinspector_whitelistencounterdecl") ||
         !_stricmp(type, "snappropertyinspector_whitelistencounterdecllist")) { *count = 1; return &encounters; }
     if (!_stricmp(type, "snapeditorentitydef")) {
-        *count = sizeof(editor_properties) / sizeof(editor_properties[0]); return editor_properties;
+        *count = sizeof(editor_collections) / sizeof(editor_collections[0]); return editor_collections;
     }
     if (!_stricmp(type, "entitydef")) {
         *count = sizeof(conductor) / sizeof(conductor[0]); return conductor;

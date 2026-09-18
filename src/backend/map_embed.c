@@ -93,7 +93,7 @@ int sh_mpkg_prepare_map(const char *json, size_t length, sh_package_references *
         return 0;
     }
     if (!json) return 1;
-    if (!sh_json_validate_ex(json, length, 128, NULL, &problem)) {
+    if (!sh_native_json_validate(json, length, 128, NULL, &problem)) {
         if (error && error_capacity) snprintf(error, error_capacity,
             "Map JSON rejected at byte %zu: %s.", problem.offset, problem.reason);
         return 0;

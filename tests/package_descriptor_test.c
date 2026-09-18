@@ -60,6 +60,10 @@ int main(void)
     section_case(",\"strings\":{\"../en\":{}}", 0);
     section_case(",\"strings\":{\"en-US\":{\"a\":\"line\\nquote\\\"\"}}", 1);
     section_case(",\"strings\":{\"en\":{\"a\":\"x\",\"\\u0061\":\"y\"}}", 0);
+    /* Native map byte strings do not relax authored package JSON. */
+    section_case(",\"description\":\"legacy \x97 text\"", 0);
+    section_case(",\"strings\":{\"en\":{\"label\":\"\xe9\"}}", 0);
+    section_case(",\"description\":\"UTF-8 \xc3\xa9\"", 1);
     for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         CHECK(!sh_package_descriptor_parse(bad[i], strlen(bad[i]), &descriptor,
                                              error, sizeof(error)));

@@ -170,7 +170,7 @@ static char *unquote(const char *text)
 {
     size_t n;if(!text)return NULL;n=strlen(text);
     {char *out=(char*)malloc(n+1);if(!out)return NULL;
-        if(!sh_json_decode_string(text,n,out,n+1,NULL)){free(out);return NULL;}return out;}
+        if(!sh_native_json_decode_string(text,n,out,n+1,NULL)){free(out);return NULL;}return out;}
 }
 static char *quote(const char *text)
 {

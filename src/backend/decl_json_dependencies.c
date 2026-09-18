@@ -90,7 +90,7 @@ static int dj_value(dj_walk *walk, const char *json, size_t length,
         size_t decoded = 0;
         if (length == 4 && !memcmp(json, "null", 4)) return 1;
         if (length == SIZE_MAX || !(name = (char *)malloc(length + 1))) return 0;
-        if (!sh_json_decode_string(json, length, name, length + 1, &decoded) || strlen(name) != decoded)
+        if (!sh_native_json_decode_string(json, length, name, length + 1, &decoded) || strlen(name) != decoded)
             ok = dj_gap(walk, path, type, "resource JSON is not a literal name");
         else if (decoded) {
             ok = walk->schema->reference(walk->schema->context, path, type, name, decoded);
@@ -102,7 +102,7 @@ static int dj_value(dj_walk *walk, const char *json, size_t length,
         return dj_array(walk, json, length, &shape, type, path, depth);
     if (shape.kind != SH_DECL_VALUE_OBJECT)
         return dj_gap(walk, path, type, "type requires a verified native reader adapter");
-    if (!sh_json_parse_object(json, length, 128, &object))
+    if (!sh_native_json_parse_object(json, length, 128, &object))
         return dj_gap(walk, path, type, "native object state is not a JSON object");
     for (i = 0; ok && i < object.count; i++) {
         const sh_json_member *member = &object.members[i];
@@ -133,7 +133,7 @@ int sh_decl_json_state_dependencies(const char *json, size_t length, sh_decl_val
     if (result) memset(result, 0, sizeof(*result));
     if (!result) return 0;
     if (!schema || !schema->describe || !schema->field || !schema->reference ||
-        !json || !sh_json_validate(json, length, 128, &kind) || kind != SH_JSON_OBJECT) {
+        !json || !sh_native_json_validate(json, length, 128, &kind, NULL) || kind != SH_JSON_OBJECT) {
         result->aborted = 1; return 0;
     }
     ok = dj_value(&walk, json, length, type, "edit", 0);

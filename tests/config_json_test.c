@@ -199,6 +199,50 @@ static void test_failure_diagnostics(void)
     CHECK(!sh_json_validate_ex(NULL, 0, 64, NULL, &error) && error.reason);
 }
 
+static int native_visit(void *context, const sh_json_field_span *fields, size_t count, unsigned depth)
+{
+    size_t *seen = context;
+    (void)depth;
+    CHECK(count == 1 && fields[0].key_length == 1 && (unsigned char)fields[0].key[0] == 0x97);
+    CHECK(fields[0].kind == SH_JSON_STRING && fields[0].value_length == 130);
+    (*seen)++; return 1;
+}
+
+static void test_native_byte_strings(void)
+{
+    char string[131], document[138], decoded[129], *serialized;
+    sh_json_object object = {0};
+    sh_json_error error;
+    size_t i, length = 0, seen = 0;
+    const char *bad[] = { "{\"x\":\"\x97\",\"x\":0}", "{\"x\":\"\x97\",\"\\u0078\":0}",
+        "{\"x\":\"\x97\",}", "\"\x97\\q\"", "\"\x97\\uD800\"", "\"\x97\n\"", "\"\x97", "[\x97]" };
+    string[0] = '"';
+    for (i = 0; i < 128; i++) string[i + 1] = (char)(i + 128);
+    string[129] = '"'; string[130] = 0;
+    snprintf(document, sizeof(document), "{\"\x97\":%s}", string);
+    CHECK(!sh_json_validate(document, strlen(document), 8, NULL));
+    CHECK(!sh_json_parse_object(document, strlen(document), 8, &object));
+    CHECK(!sh_json_decode_string(string, 130, decoded, sizeof(decoded), NULL));
+    CHECK(sh_native_json_validate(document, strlen(document), 8, NULL, &error) && !error.reason);
+    CHECK(sh_native_json_decode_string(string, 130, NULL, 0, &length) && length == 128);
+    CHECK(sh_native_json_decode_string(string, 130, decoded, sizeof(decoded), &length));
+    CHECK(length == 128 && !memcmp(decoded, string + 1, 128) && !decoded[128]);
+    CHECK(sh_native_json_parse_object(document, strlen(document), 8, &object));
+    CHECK(object.count == 1 && !strcmp(sh_json_object_get(&object, "\x97"), string));
+    serialized = sh_json_serialize_object(&object, 0, &length);
+    CHECK(serialized && strstr(serialized, string));
+    CHECK(serialized && sh_native_json_validate(serialized, length, 8, NULL, NULL));
+    free(serialized); sh_json_object_free(&object);
+    CHECK(!sh_json_visit_objects_filtered(document, strlen(document), 8, native_visit, NULL, &seen) && !seen);
+    CHECK(sh_native_json_visit_objects_filtered(document, strlen(document), 8, native_visit, NULL, &seen) && seen == 1);
+    for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+        CHECK(!sh_native_json_validate(bad[i], strlen(bad[i]), 8, NULL, &error) && error.reason);
+    CHECK(!sh_native_json_validate("[[]]", 4, 1, NULL, &error));
+    CHECK(!sh_native_json_validate("\"a\0b\"", 5, 8, NULL, &error));
+    CHECK(sh_native_json_decode_string("\"\x97\xc3\xa9\\u2014\"", 11, decoded, sizeof(decoded), &length));
+    CHECK(length == 6 && !memcmp(decoded, "\x97\xc3\xa9\xe2\x80\x94", 6));
+}
+
 int main(void)
 {
     test_valid_object_preserves_raw_values();
@@ -210,6 +254,7 @@ int main(void)
     test_decodes_json_strings_with_size_query();
     test_serializes_nested_config_deterministically();
     test_failure_diagnostics();
+    test_native_byte_strings();
 
     if (g_failed) {
         fprintf(stderr, "config_json_test: %d failure(s)\n", g_failed);

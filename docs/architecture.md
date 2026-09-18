@@ -312,6 +312,24 @@ errors include the supplying package ID. These diagnostics report where the
 product refused data; they do not establish that the engine would refuse the
 same map or that a package's assets are corrupt.
 
+Native map/state strings follow DOOM's byte-string contract. The shared JSON
+parser exposes explicit `sh_native_json_*` entry points for map admission,
+save preparation, dependency traversal, session extraction and native grid-room
+string decoding. These retain unescaped high bytes verbatim, including older
+Windows text mixed with UTF-8. They share syntax, escape, duplicate-key and depth
+validation with the strict parser; they do not infer a code page or rewrite a
+save. Configuration, package descriptors and embedded archive metadata still
+require UTF-8 through the ordinary `sh_json_*` entry points. Override-folder
+migration is separate and cannot repair or invalidate a native map's text.
+
+Editor definition collections include input-action and output-listener lists.
+Their declaration paths are semantic identities; adding an action in one
+package and another in a product default combines them through the same scalar
+collection composer. Identical entries deduplicate, compatible ordering is
+preserved, and deletions are evaluated against the original. These editor
+capabilities carry no gameplay ownership and do not embed their package merely
+because a map uses the exposed vanilla entity.
+
 Discovery uses wide-character enumeration, so Unicode and long group paths are
 found. A marked folder whose path does not fit the runtime package record is
 reported as a skipped package. The data root itself still comes from the ANSI

@@ -925,6 +925,22 @@ static void test_private_map_context(const char *root)
     CHECK(a && !sh_mpkg_context_count(a) && !sh_mpkg_context_root(a));
     CHECK(sh_mpkg_context_close(&a));
     CHECK(!sh_mpkg_context_open("", fix_map_happy, fix_map_happy_len, error, sizeof(error)));
+    {
+        const char native[] = "{\"message\":\"old \x97 and UTF-8 \xc3\xa9\","
+            "\"variables\":{\"string\":[],\"allocCount\":[0,0,0,0,0]}}";
+        a = sh_mpkg_context_open(NULL, native, sizeof(native) - 1, error, sizeof(error));
+        CHECK(a && !sh_mpkg_context_count(a) && !sh_mpkg_context_root(a));
+        CHECK(sh_mpkg_context_close(&a));
+        combined = sh_mpkg_embed(native, sizeof(native) - 1, FIX_PKG_ID,
+            fix_payload, fix_payload_len, &combined_length, error, sizeof(error));
+        CHECK(combined && strstr(combined, "old \x97 and UTF-8 \xc3\xa9"));
+        if (combined) {
+            a = sh_mpkg_context_open(root, combined, combined_length, error, sizeof(error));
+            CHECK(a && sh_mpkg_context_count(a) == 1);
+            CHECK(sh_mpkg_context_close(&a));
+            HeapFree(GetProcessHeap(), 0, combined);
+        }
+    }
     CHECK(!sh_mpkg_context_open(root, "{", 1, error, sizeof(error)));
     CHECK(strstr(error, "byte 1") && strstr(error, "invalid JSON syntax"));
     CHECK(!sh_mpkg_context_open(root, fix_map_wrongdigest, fix_map_wrongdigest_len, error, sizeof(error)));

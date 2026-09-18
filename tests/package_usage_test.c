@@ -230,9 +230,9 @@ static int inline_state(void *context, const char *class_name, const char *inher
 static void inline_checks(sh_package_compilation *compiled)
 {
     static const char json[] = "{\"entities\":[{\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
-        "\"className\":\"Entity\",\"inherit\":\"stock/unknown\",\"state\":{\"edit\":{\"target\":\"gameplay/child\"}}}}],"
+        "\"className\":\"Entity\",\"inherit\":\"stock/unknown\",\"state\":{\"edit\":{\"target\":\"gameplay/child\",\"text\":\"\x97\"}}}}],"
         "\"editorVars\":{\"entityDef\":{\"targetType\":\"idDeclEntityDef\",\"className\":\"Preview\","
-        "\"state\":{\"edit\":{\"target\":\"preview/child\"}}}},"
+        "\"state\":{\"edit\":{\"target\":\"preview/child\",\"text\":\"\xe9\"}}}},"
         "\"empty\":{\"~type\":\"idDeclEntityDef\",\"state\":{\"edit\":null}}}";
     sh_package_references references = {0};
     sh_package_policy policy = {0};

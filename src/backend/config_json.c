@@ -14,6 +14,7 @@ typedef struct json_cursor {
     void *visitor_context;
     sh_json_field_filter filter;
     unsigned suppressed;
+    int native_strings;
     sh_json_error *error;
 } json_cursor;
 
@@ -151,7 +152,7 @@ static int scan_string(json_cursor *c)
             }
             continue;
         }
-        if (ch >= 0x80) {
+        if (ch >= 0x80 && !c->native_strings) {
             size_t used;
             c->p--;
             if (!valid_utf8_at(c->p, c->end, &used)) return json_fail(c, "invalid UTF-8 in string");
@@ -443,8 +444,8 @@ int sh_json_validate(const char *json, size_t length, unsigned max_depth,
     return sh_json_validate_ex(json, length, max_depth, out_kind, NULL);
 }
 
-int sh_json_validate_ex(const char *json, size_t length, unsigned max_depth,
-                        sh_json_kind *out_kind, sh_json_error *error)
+static int validate(const char *json, size_t length, unsigned max_depth,
+                    sh_json_kind *out_kind, sh_json_error *error, int native_strings)
 {
     json_cursor c = {0};
     sh_json_kind kind;
@@ -458,6 +459,7 @@ int sh_json_validate_ex(const char *json, size_t length, unsigned max_depth,
     c.end = c.begin + length;
     c.max_depth = max_depth;
     c.error = error;
+    c.native_strings = native_strings;
     skip_ws(&c);
     if (!scan_value(&c, 0, &kind)) return json_fail(&c, "invalid JSON syntax");
     skip_ws(&c);
@@ -466,24 +468,51 @@ int sh_json_validate_ex(const char *json, size_t length, unsigned max_depth,
     return 1;
 }
 
+int sh_json_validate_ex(const char *json, size_t length, unsigned max_depth,
+                        sh_json_kind *out_kind, sh_json_error *error)
+{
+    return validate(json, length, max_depth, out_kind, error, 0);
+}
+
+int sh_native_json_validate(const char *json, size_t length, unsigned max_depth,
+                            sh_json_kind *out_kind, sh_json_error *error)
+{
+    return validate(json, length, max_depth, out_kind, error, 1);
+}
+
 int sh_json_visit_objects(const char *json, size_t length, unsigned max_depth,
                           sh_json_object_visitor visitor, void *context)
 {
     return sh_json_visit_objects_filtered(json, length, max_depth, visitor, NULL, context);
 }
 
-int sh_json_visit_objects_filtered(const char *json, size_t length, unsigned max_depth,
-                                   sh_json_object_visitor visitor,
-                                   sh_json_field_filter filter, void *context)
+static int visit_objects_filtered(const char *json, size_t length, unsigned max_depth,
+                                  sh_json_object_visitor visitor,
+                                  sh_json_field_filter filter, void *context, int native_strings)
 {
     json_cursor c = {0};
     if (!json || !max_depth || !visitor) return 0;
     c.begin = (const unsigned char *)json; c.p = c.begin; c.end = c.begin + length;
     c.max_depth = max_depth; c.visitor = visitor; c.visitor_context = context;
     c.filter = filter;
+    c.native_strings = native_strings;
     skip_ws(&c);
     if (!scan_value(&c, 0, NULL)) return 0;
     skip_ws(&c); return c.p == c.end;
+}
+
+int sh_json_visit_objects_filtered(const char *json, size_t length, unsigned max_depth,
+                                   sh_json_object_visitor visitor,
+                                   sh_json_field_filter filter, void *context)
+{
+    return visit_objects_filtered(json, length, max_depth, visitor, filter, context, 0);
+}
+
+int sh_native_json_visit_objects_filtered(const char *json, size_t length, unsigned max_depth,
+                                          sh_json_object_visitor visitor,
+                                          sh_json_field_filter filter, void *context)
+{
+    return visit_objects_filtered(json, length, max_depth, visitor, filter, context, 1);
 }
 
 static char *copy_range(const unsigned char *begin, const unsigned char *end)
@@ -520,19 +549,20 @@ static int object_append_owned(sh_json_object *object, char *key, size_t key_len
     return 1;
 }
 
-int sh_json_parse_object(const char *json, size_t length, unsigned max_depth,
-                         sh_json_object *out)
+static int parse_object(const char *json, size_t length, unsigned max_depth,
+                        sh_json_object *out, int native_strings)
 {
     json_cursor c = {0};
     sh_json_kind kind;
     sh_json_object parsed = {0};
-    if (!out || !sh_json_validate(json, length, max_depth, &kind) ||
+    if (!out || !validate(json, length, max_depth, &kind, NULL, native_strings) ||
         kind != SH_JSON_OBJECT)
         return 0;
     c.begin = (const unsigned char *)json;
     c.p = c.begin;
     c.end = c.begin + length;
     c.max_depth = max_depth;
+    c.native_strings = native_strings;
     skip_ws(&c);
     c.p++;
     skip_ws(&c);
@@ -576,6 +606,18 @@ int sh_json_parse_object(const char *json, size_t length, unsigned max_depth,
 fail:
     sh_json_object_free(&parsed);
     return 0;
+}
+
+int sh_json_parse_object(const char *json, size_t length, unsigned max_depth,
+                         sh_json_object *out)
+{
+    return parse_object(json, length, max_depth, out, 0);
+}
+
+int sh_native_json_parse_object(const char *json, size_t length, unsigned max_depth,
+                                sh_json_object *out)
+{
+    return parse_object(json, length, max_depth, out, 1);
 }
 
 const char *sh_json_object_get(const sh_json_object *object, const char *key)
@@ -644,8 +686,8 @@ int sh_json_object_set_n(sh_json_object *object, const char *key,
     return 1;
 }
 
-int sh_json_decode_string(const char *json, size_t length,
-                          char *out, size_t out_capacity, size_t *out_length)
+static int decode_string(const char *json, size_t length,
+                         char *out, size_t out_capacity, size_t *out_length, int native_strings)
 {
     json_cursor c = {0};
     char *decoded = NULL;
@@ -655,6 +697,7 @@ int sh_json_decode_string(const char *json, size_t length,
     c.p = c.begin;
     c.end = c.begin + length;
     c.max_depth = 1;
+    c.native_strings = native_strings;
     if (!scan_string(&c) || c.p != c.end ||
         !decode_string_alloc(c.begin, c.end, &decoded, &decoded_length))
         return 0;
@@ -665,6 +708,18 @@ int sh_json_decode_string(const char *json, size_t length,
     }
     free(decoded);
     return 1;
+}
+
+int sh_json_decode_string(const char *json, size_t length,
+                          char *out, size_t out_capacity, size_t *out_length)
+{
+    return decode_string(json, length, out, out_capacity, out_length, 0);
+}
+
+int sh_native_json_decode_string(const char *json, size_t length,
+                                 char *out, size_t out_capacity, size_t *out_length)
+{
+    return decode_string(json, length, out, out_capacity, out_length, 1);
 }
 
 typedef struct json_builder {

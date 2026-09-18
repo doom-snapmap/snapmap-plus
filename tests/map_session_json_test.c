@@ -16,7 +16,7 @@ static void rejected(const char *json)
 int main(void)
 {
     const char *source = "{\"entities\":[{\"inherit\":\"missing/boss\",\"health\":10}],"
-        "\"variables\":{\"string\":[\"package payload\"]},\"~type\":\"idSnapMap\","
+        "\"variables\":{\"string\":[\"package payload\",\"legacy \x97 text\"]},\"~type\":\"idSnapMap\","
         "\"~version\":91,\"snapSlotSettings\":[" SLOTS "]}";
     char error[256], *out = sh_map_session_json(source, strlen(source), defaults, strlen(defaults), error, sizeof(error));
     assert(out && !*error && !strstr(out, "missing") && !strstr(out, "payload"));

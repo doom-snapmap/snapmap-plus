@@ -79,6 +79,23 @@ int sh_json_object_set_n(sh_json_object *object, const char *key,
                          unsigned max_depth);
 int sh_json_decode_string(const char *json, size_t length,
                           char *out, size_t out_capacity, size_t *out_length);
+
+/* DOOM's native map/state JSON uses byte strings: unescaped bytes >= 0x80
+ * are retained verbatim, even when they are not UTF-8. These entry points
+ * share all syntax, escape, duplicate-key and depth checks above. Use them
+ * only for engine-owned documents, never package/configuration JSON. They
+ * do not guess a code page, transcode text, or repair malformed syntax.
+ * Objects share the normal get/free/serialize helpers; raw values survive
+ * serialization unchanged. New values passed to object_set remain strict. */
+int sh_native_json_validate(const char *json, size_t length, unsigned max_depth,
+                            sh_json_kind *out_kind, sh_json_error *error);
+int sh_native_json_visit_objects_filtered(const char *json, size_t length, unsigned max_depth,
+                                          sh_json_object_visitor visitor,
+                                          sh_json_field_filter filter, void *context);
+int sh_native_json_parse_object(const char *json, size_t length, unsigned max_depth,
+                                sh_json_object *out);
+int sh_native_json_decode_string(const char *json, size_t length,
+                                 char *out, size_t out_capacity, size_t *out_length);
 char *sh_json_serialize_object(const sh_json_object *object,
                                unsigned base_indent, size_t *out_length);
 void sh_json_object_free(sh_json_object *object);

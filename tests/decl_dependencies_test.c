@@ -106,7 +106,7 @@ static void json_checks(void)
     fixture f = {0};
     sh_decl_dependency_result result;
     const char *json = "{\"inventoryItemDecl\":\"\\u0077eapon\\/test\","
-        "\"name\":\"weapon/not-a-reference\",\"~type\":\"TestEntity\","
+        "\"name\":\"weapon/not-a-reference \x97 \xc3\xa9\",\"~type\":\"TestEntity\","
         "\"renderModelInfo\":{\"model\":\"model/test\"},"
         "\"startingInventory\":[{\"inventoryDecl\":\"ammo/with,comma[0]\"},{\"inventoryDecl\":null}],"
         "\"links\":[\"entity/test\",\"\",null],"
@@ -119,6 +119,9 @@ static void json_checks(void)
     memset(&f, 0, sizeof(f));
     assert(inspect_json("{\"arrays\":[[\"nested/reference\"]],\"startingInventory\":[]}", &f, &result));
     assert(result.references == 1 && !result.gaps && strstr(f.references, "nested/reference"));
+    memset(&f, 0, sizeof(f));
+    assert(inspect_json("{\"inventoryItemDecl\":\"legacy/\x97\",\"name\":\"\xe9\"}", &f, &result));
+    assert(result.references == 1 && !result.gaps && strstr(f.references, "legacy/\x97"));
     memset(&f, 0, sizeof(f));
     assert(!inspect_json("{\"custom\":{\"name\":\"unknown/ref\"},\"inventoryItemDecl\":\"known/ref\"}", &f, &result));
     assert(result.references == 1 && result.gaps == 1 && !result.aborted);
