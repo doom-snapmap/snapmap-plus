@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Draft one CHANGELOG.md entry in the credential-bearing, read-only workflow job.
-A separate job opens the pull request. validate() enforces content and length
+"""Draft one CHANGELOG.md entry locally or in the read-only workflow job.
+Use --dry-run to print a local preview without writing files. A separate workflow
+job opens the pull request. validate() enforces content and length
 limits before rendering; contributor-controlled text must not introduce Markdown
 structure. Import optional API dependencies inside draft() so offline tests work."""
 
@@ -49,43 +50,41 @@ SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 FORBIDDEN = ("\n", "\r", "[", "]", "<", ">", "`")
 
 SYSTEM = """\
-You write the release notes for Snapmap+, a free open-source mod for DOOM (2016) \
-that unlocks its SnapMap editor. You are given the commits in one release. Produce \
-the entry a player reads.
+Write release notes for Snapmap+ users who understand the basic SnapMap editor \
+but have no programming knowledge.
 
-Rules:
-- At most 6 named bullets in TOTAL across New, Improved and Fixed, in present \
-tense. Six is a ceiling, not a target: combine related changes \
-and use fewer bullets when there are fewer distinct player-visible outcomes.
-- Name a fix only if a user could have hit it and remembered it. Everything a user \
-could never have noticed is counted in collapsed_count and never described.
-- Plain language. No symbol names, addresses, file paths, test counts, commit \
-subjects copied verbatim, or internal jargon.
-- headline: at most 60 characters, the one thing this release is about.
-- summary: at most 320 characters, one to three sentences on what changed and what \
-it means for someone using Snapmap+.
-- sources: the short commit hashes backing your named bullets, lowercase hex only, \
-for maintainer review.
-- Never use newlines, square brackets, angle brackets, or backticks inside any \
-string. Text containing them is rejected and your draft is discarded.
+Use the supplied commits and documentation to identify what changed for those \
+users. Organize the notes around their experience: what they can do, what \
+problem is fixed, and any conditions they need to understand.
 
-ELI5 policy -- make the headline, summary and every bullet easy to understand:
-- Write for a player who knows SnapMap but has no programming or modding expertise. Use a friendly, respectful tone without baby talk.
-- Describe the visible outcome, not the machinery producing it. Each bullet should answer "What can I do now?" or "What problem will I stop seeing?" using only outcomes supported by the sources.
-- Use literal, specific headlines, not slogans or metaphors. Keep the summary focused on the main outcome; explain supporting details in the bullets.
-- Give each bullet one main topic, using active voice and familiar words. There is no per-bullet word or sentence limit: use enough short sentences to explain what changed, when it matters and any important conditions. Remove repetition, not context needed to understand the change.
-- Include technical details only when they help a player understand or use the change. Translate implementation terminology into supported behavior, preserve recognizable feature names, and briefly explain unavoidable unfamiliar terms. If the sources do not establish a player-visible outcome, omit the detail rather than inventing one.
-- Include instructions when users need them to understand or act on the change. Leave unrelated troubleshooting and optional diagnostics to the documentation.
-- Make fixes concrete: name the situation and the visible problem that no longer happens. Avoid vague claims such as "various improvements" or "better stability" when the sources support a more specific description.
-- Preserve the sources' scope: who is affected, under what conditions, any exceptions and required user actions. Never invent a benefit, cause, quantity or guarantee. Do not turn an example into a universal rule or imply that a limited change applies everywhere.
-- Apply these language and tone rules equally to every feature. Select topics from this release's evidence, without favoring a particular subsystem or carrying over claims from another release.
-- Before returning the entry, check EVERY sentence, including the headline and summary: can a new player understand the change without knowing the code, and does the source support its scope? Remove jargon, repeated outcomes and unsupported words such as "all", "always", "only" or "never". Source documentation is evidence, not a writing style to imitate.
+Explain each change as you would to someone using the feature for the first \
+time. Use familiar words and concrete descriptions. Keep recognizable feature \
+names, and explain unfamiliar terms when they are necessary. Use enough \
+sentences to make the explanation clear; there is no per-bullet word target.
 
-Grounding -- this is what makes the entry TRUE rather than merely plausible:
-- You are given the commits AND the diff of the user-facing documentation. A behaviour change is required to update those docs in the same pull request, so the docs diff is the account of what a user actually sees.
-- Say only what those sources support. If they tell you a capability changed but not how it is reached, describe the capability and stop.
-- NEVER invent where something lives. Do not name a tab, panel, button, menu, dialog, checkbox, window or any other place in the interface unless that exact word appears in the sources. A draft naming a UI surface the sources never mention is rejected and discarded.
-- Use the docs diff to establish what a feature is and where it lives, then explain it under the ELI5 policy. Preserve exact feature names and factual limits.
+Write in a calm, direct, respectful tone. Avoid promotional claims, baby talk, \
+and vague assurances. Technical details belong only when they help the reader \
+understand the change.
+
+Stay within the evidence. Preserve who is affected, when the change applies, \
+its limitations, and any required action. If the sources do not explain the \
+user-visible result, omit that detail rather than guessing.
+
+Before returning the notes, check each statement against its source. Then read \
+the entry as a new user and rewrite anything that requires developer knowledge.
+
+Return the required structured format. Group related changes, avoid repetition, \
+and include only as many bullets as the release needs within the maximum below.
+
+Output contract:
+- headline: at most 60 characters, the main theme of this release.
+- summary: at most 320 characters, what changed and what it means for users.
+- added, improved, fixed: lists of plain-text bullets, at most 6 in total.
+- collapsed_count: the number of commits not described, including the supplied omitted count.
+- sources: the short commit hashes backing the named bullets, lowercase hex only, for maintainer review.
+- Do not include symbol names, addresses, file paths, test counts or verbatim commit subjects in the reader-facing text.
+- Do not name an interface location unless that word appears in the supplied commits or documentation; unsupported interface-location words are rejected.
+- Never use newlines, square brackets, angle brackets or backticks inside a string; these are rejected.
 """
 
 
@@ -321,19 +320,8 @@ def draft(commits, omitted_count, docs=""):
     if docs:
         prompt += (
             "\nThe diff of the user-facing documentation over the same range. "
-            "This is what a user can now do and where; explain it under the ELI5 "
-            "policy, and do not name any part of the interface it does not name:\n\n"
+            "Use this as evidence for the release notes:\n\n"
             + docs + "\n")
-    prompt += (
-        "\nFinal editing pass before returning the structured entry:\n"
-        "- Treat the material above as evidence, not prose to copy. Write for a player.\n"
-        "- Keep only distinct, supported outcomes a player can understand; do not fill six slots.\n"
-        "- Explain unfamiliar terms and keep the context needed to understand each change. "
-        "Use additional short sentences when helpful; do not compress explanations to a word target.\n"
-        "- Remove repetition and technical details that do not help the reader understand or use the change.\n"
-        "- Check every claim, including the headline and summary, against the sources: preserve "
-        "who is affected, conditions, exceptions and required actions without adding guarantees.\n"
-    )
 
     counted = client.messages.count_tokens(
         model=MODEL, system=SYSTEM, messages=[{"role": "user", "content": prompt}]
@@ -364,9 +352,16 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--tag", required=True)
     ap.add_argument("--base", default="")
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--sources-out", required=True)
+    ap.add_argument("--out")
+    ap.add_argument("--sources-out")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print notes to stdout and sources to stderr; write no files")
     args = ap.parse_args(argv)
+    if args.dry_run:
+        if args.out or args.sources_out:
+            ap.error("--dry-run cannot be combined with output file options")
+    elif not args.out or not args.sources_out:
+        ap.error("--out and --sources-out are required unless --dry-run is used")
 
     date = datetime.date.today().isoformat()
     subjects = []
@@ -379,12 +374,20 @@ def main(argv=None):
         validate(parsed, omitted)
         check_grounded(parsed, _corpus(commits, docs))
         section, sources = render(args.tag, date, parsed), render_sources(parsed)
-    except Exception as exc:            # noqa: BLE001 -- every failure degrades
+    except Exception as exc:            # noqa: BLE001 -- file mode retains its fallback
         reason = _one_line("%s: %s" % (type(exc).__name__, exc))
+        if args.dry_run:
+            print("Draft preview failed: " + reason, file=sys.stderr)
+            return 1
         print("::warning::drafting failed, falling back to a skeleton -- " + reason,
               file=sys.stderr)
         section = render_skeleton(args.tag, date, subjects, reason)
         sources = "_Drafting failed; there are no cited commits._\n"
+
+    if args.dry_run:
+        print(section, end="")
+        print(sources, end="", file=sys.stderr)
+        return 0
 
     for path, content in [(args.out, section), (args.sources_out, sources)]:
         with open(path, "w", encoding="utf-8", newline="\n") as fh:

@@ -317,7 +317,16 @@ to say whatever is useful. The canonical list is `INTERNAL_PREFIX_RE` in
 
 ### Cutting a release (maintainer)
 
-For a preview, run `gh workflow run prepare-release.yml -f version=v0.2.2-beta.1 -F dry_run=true`.
+For a local preview, install `tools/requirements.txt` in your existing Python environment with
+`python -m pip install --require-hashes -r tools/requirements.txt` and supply `ANTHROPIC_API_KEY`
+through your local environment or secret manager. Do not put the key in tracked files.
+Run `python tools/draft_changelog.py --dry-run --tag v0.2.2-beta.1 --base <previous-tag>`
+from the repository root. This reads local commits and documentation through `HEAD`, including local
+prompt edits but not uncommitted product changes. It prints notes to stdout and supporting commits
+to stderr, without creating files or contacting GitHub. It still calls the paid drafting API.
+A failed or rejected draft exits nonzero rather than printing a fallback as a successful preview.
+
+For a GitHub-hosted preview, run `gh workflow run prepare-release.yml -f version=v0.2.2-beta.1 -F dry_run=true`.
 This uses the same paid drafting API and saves `section.md` and `sources.md` in the run's
 `changelog-draft` artifact, available for one day. It skips the proposal job, so it does not create
 a changelog branch or pull request, edit `CHANGELOG.md`, or publish a release. Download the artifact
@@ -337,6 +346,8 @@ still apply, so choose a version that has no tag, changelog entry or draft branc
    feature names, explain unavoidable technical terms, and preserve important limits and required actions.
    Be respectful, avoid baby talk, and never invent a benefit to make an explanation simpler. The drafter's
    prompt in `tools/draft_changelog.py` follows this policy and does not use older notes as a style example.
+   It uses one editorial brief for writing and factual review, followed by a separate output contract
+   for the structured fields and validation limits.
    Six bullets is a ceiling, not a target: combine related changes around one main topic per bullet.
    There is no per-bullet word or sentence limit. Use enough short sentences to explain the change and its
    important conditions; remove repetition rather than context needed to understand it. Include technical

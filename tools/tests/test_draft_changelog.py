@@ -1,9 +1,12 @@
 """Offline renderer and validation tests. Optional API dependencies stay lazy;
 this suite runs in CI without credentials or network calls."""
 
+import contextlib
+import io
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -34,6 +37,46 @@ class TestImportsWithoutPydantic(unittest.TestCase):
                 self.fail("pydantic imported at module scope: " + line)
             if line.startswith("import anthropic"):
                 self.fail("anthropic imported at module scope: " + line)
+
+
+class TestLocalPreview(unittest.TestCase):
+    def run_preview(self, draft):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), \
+                mock.patch.object(dc, "collect", return_value=("Consent dialog fixes", [], 0)), \
+                mock.patch.object(dc, "collect_docs", return_value=""), \
+                mock.patch.object(dc, "draft", return_value=draft), \
+                mock.patch.object(dc, "render_sources", return_value="source evidence\n"), \
+                mock.patch("builtins.open", side_effect=AssertionError("preview wrote a file")):
+            status = dc.main(["--dry-run", "--tag", "v1.2.3", "--base", "v1.2.2"])
+        return status, stdout.getvalue(), stderr.getvalue()
+
+    def test_preview_prints_notes_and_separate_sources_without_files(self):
+        status, stdout, stderr = self.run_preview(make())
+        self.assertEqual(status, 0)
+        self.assertIn("## v1.2.3 --", stdout)
+        self.assertIn("One-prompt map installs", stdout)
+        self.assertNotIn("source evidence", stdout)
+        self.assertEqual(stderr, "source evidence\n")
+
+    def test_rejected_preview_fails_without_publishing_a_skeleton(self):
+        status, stdout, stderr = self.run_preview(make(headline=""))
+        self.assertEqual(status, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("headline is empty", stderr)
+        self.assertNotIn("NEEDS WRITING", stderr)
+
+    def test_preview_rejects_file_options_before_drafting(self):
+        with mock.patch.object(dc, "draft") as draft, \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            dc.main(["--dry-run", "--tag", "v1.2.3", "--out", "section.md"])
+        self.assertEqual(cm.exception.code, 2)
+        draft.assert_not_called()
+
+    def test_file_mode_still_requires_both_destinations(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            dc.main(["--tag", "v1.2.3", "--out", "section.md"])
+        self.assertEqual(cm.exception.code, 2)
 
 
 class TestValidateRejectsInjection(unittest.TestCase):
