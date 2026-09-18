@@ -317,6 +317,13 @@ to say whatever is useful. The canonical list is `INTERNAL_PREFIX_RE` in
 
 ### Cutting a release (maintainer)
 
+For a preview, run `gh workflow run prepare-release.yml -f version=v0.2.2-beta.1 -F dry_run=true`.
+This uses the same paid drafting API and saves `section.md` and `sources.md` in the run's
+`changelog-draft` artifact, available for one day. It skips the proposal job, so it does not create
+a changelog branch or pull request, edit `CHANGELOG.md`, or publish a release. Download the artifact
+with `gh run download <run-id> -n changelog-draft` and review both files. The normal version checks
+still apply, so choose a version that has no tag, changelog entry or draft branch yet.
+
 1. `gh workflow run prepare-release.yml -f version=v0.2.2-beta.1` -- drafts that release's `CHANGELOG.md`
    entry and opens a pull request. It refuses a version that is already tagged, already has an entry, or
    already has an open branch, and it refuses a malformed version string before spending anything.

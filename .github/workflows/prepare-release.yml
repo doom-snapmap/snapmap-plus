@@ -10,6 +10,10 @@ on:
       version:
         description: 'Tag to prepare, e.g. v0.2.2-beta.1'
         required: true
+      dry_run:
+        description: 'Save a draft artifact without creating a branch or pull request'
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -98,6 +102,7 @@ jobs:
   propose:
     name: Open the pull request
     needs: draft
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
