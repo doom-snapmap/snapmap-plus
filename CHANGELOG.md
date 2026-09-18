@@ -3,6 +3,24 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.17 -- 2026-09-18 (beta)
+
+**Mods combine better, broken ones skipped alone**
+
+Multiple packages can now change the same editor properties without cancelling each other out, and a broken or conflicting package no longer takes the rest down with it. Text you authored in maps keeps its original characters.
+
+### Improved
+- Packages that edit different parts of the same editor property now combine instead of one being ignored.
+- Your own edits to editor actions and event responses now sit alongside the built-in defaults rather than replacing or being skipped.
+- Text in your maps keeps the exact characters you authored, from loading through saving.
+
+### Fixed
+- A broken package is skipped on its own, and unrelated packages plus built-in content stay available.
+- When packages disagree over the same setting, just the disagreeing ones are set aside; fixing the files brings them back on the next refresh.
+- A map only loads once the packages it needs work together.
+
+_Plus 8 smaller fixes and internal changes._
+
 ## v0.2.1-beta.16 -- 2026-09-17 (beta)
 
 **Older maps convert as they open**
