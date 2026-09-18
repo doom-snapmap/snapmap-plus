@@ -69,11 +69,21 @@ for maintainer review.
 - Never use newlines, square brackets, angle brackets, or backticks inside any \
 string. Text containing them is rejected and your draft is discarded.
 
+ELI5 policy -- make the headline, summary and every bullet easy to understand:
+- Write for a player who knows SnapMap but has no programming or modding expertise. Use a friendly, respectful tone without baby talk.
+- Lead with what the player can do, what they see, or the problem that is fixed. Explain why it matters when the sources support that benefit.
+- Use familiar words, active voice and short sentences with one main idea. Avoid dense clauses, unexplained acronyms and implementation details.
+- Keep exact feature names players need to recognize. If a technical term is necessary, explain it briefly in everyday words; otherwise replace it with what it means for the player.
+- Make fixes concrete: name the situation and the visible problem that no longer happens. Avoid vague claims such as "various improvements" or "better stability" when the sources support a more specific description.
+- Simplify the explanation without changing the facts. Preserve important limits, affected modes and required user actions; never invent a benefit, cause or guarantee to make a sentence sound clearer.
+- Example of style only, not a fact to include: "Preserve serialized prop transforms" becomes "Props keep their saved position and rotation when you reopen the map."
+- Before returning the entry, reread it as a new player: can they tell what changed and how it affects them without knowing the code? Rewrite anything that requires developer knowledge. These rules take priority over the previous release's writing style.
+
 Grounding -- this is what makes the entry TRUE rather than merely plausible:
 - You are given the commits AND the diff of the user-facing documentation. A behaviour change is required to update those docs in the same pull request, so the docs diff is the account of what a user actually sees.
 - Say only what those sources support. If they tell you a capability changed but not how it is reached, describe the capability and stop.
 - NEVER invent where something lives. Do not name a tab, panel, button, menu, dialog, checkbox, window or any other place in the interface unless that exact word appears in the sources. A draft naming a UI surface the sources never mention is rejected and discarded.
-- Prefer the docs diff's own wording for what a feature is and where it lives.
+- Use the docs diff to establish what a feature is and where it lives, then explain it under the ELI5 policy. Preserve exact feature names and factual limits.
 """
 
 
@@ -322,12 +332,13 @@ def draft(commits, style, omitted_count, docs=""):
     if docs:
         prompt += (
             "\nThe diff of the user-facing documentation over the same range. "
-            "This is what a user can now do and where; prefer its wording, and do "
-            "not name any part of the interface it does not name:\n\n"
+            "This is what a user can now do and where; explain it under the ELI5 "
+            "policy, and do not name any part of the interface it does not name:\n\n"
             + docs + "\n")
     if style:
         prompt += ("\nThe previous release's entry, for voice and length only "
-                   "-- do not repeat its content:\n\n" + style + "\n")
+                   "-- do not repeat its content or carry over wording that "
+                   "conflicts with the ELI5 policy:\n\n" + style + "\n")
 
     counted = client.messages.count_tokens(
         model=MODEL, system=SYSTEM, messages=[{"role": "user", "content": prompt}]

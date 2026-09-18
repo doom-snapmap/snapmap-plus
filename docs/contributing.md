@@ -324,6 +324,14 @@ to say whatever is useful. The canonical list is `INTERNAL_PREFIX_RE` in
    spot-checked without reading the whole range. Edit the entry directly on the branch if a sentence is
    wrong -- the pull-request gate re-checks the grammar.
 
+   **Apply the ELI5 policy to the headline, summary and every bullet.** Write for a player who knows
+   SnapMap but has no programming or modding expertise. Lead with what they can do or the visible problem
+   that is fixed, using familiar words and short, active sentences with one main idea. Keep recognizable
+   feature names, explain unavoidable technical terms, and preserve important limits and required actions.
+   Be respectful, avoid baby talk, and never invent a benefit to make an explanation simpler. The drafter's
+   prompt in `tools/draft_changelog.py` follows this policy even when older notes use denser language.
+   Review readability by hand; the automated checks do not establish that an explanation is easy to understand.
+
    **Read every bullet as a claim about the product, not as prose.** The drafter is given the commits and
    the diff of the user-facing docs, and it is told never to name a part of the interface those sources do
    not name; a draft that does is rejected outright. That guard exists because it happened: the first
