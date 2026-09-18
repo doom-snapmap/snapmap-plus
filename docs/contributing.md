@@ -336,7 +336,7 @@ still apply, so choose a version that has no tag, changelog entry or draft branc
    that is fixed, using familiar words and short, active sentences with one main idea. Keep recognizable
    feature names, explain unavoidable technical terms, and preserve important limits and required actions.
    Be respectful, avoid baby talk, and never invent a benefit to make an explanation simpler. The drafter's
-   prompt in `tools/draft_changelog.py` follows this policy even when older notes use denser language.
+   prompt in `tools/draft_changelog.py` follows this policy and does not use older notes as a style example.
    Six bullets is a ceiling, not a target: combine related changes and aim for 25 words or fewer per bullet.
    Describe visible outcomes, leaving out implementation mechanics and optional troubleshooting commands.
    Keep headlines literal, and check that simplification has not turned an example into a general rule or

@@ -7,7 +7,6 @@ structure. Import optional API dependencies inside draft() so offline tests work
 import argparse
 import dataclasses
 import datetime
-import os
 import re
 import subprocess
 import sys
@@ -81,7 +80,7 @@ ELI5 policy -- make the headline, summary and every bullet easy to understand:
 - Make fixes concrete: name the situation and the visible problem that no longer happens. Avoid vague claims such as "various improvements" or "better stability" when the sources support a more specific description.
 - Preserve important limits, affected modes and required user actions. Never invent a benefit, cause or guarantee. Do not turn an example involving two packages into a rule that exactly two packages are affected, or turn "compatible edits combine" into "every change works together". Name the affected group without inventing its size.
 - Examples of style only, not facts to include: "Preserve serialized prop transforms" becomes "Props keep their saved position and rotation when you reopen the map." "Isolate conflicting contributors" becomes "Packages with conflicting changes are skipped while unrelated packages keep working." Use either claim only when the release sources support it.
-- Before returning the entry, check EVERY sentence, including the headline and summary: can a new player understand the change without knowing the code, and does the source support its scope? Remove jargon, repeated outcomes and unsupported words such as "all", "always", "only" or "never". These rules take priority over the previous release's writing style.
+- Before returning the entry, check EVERY sentence, including the headline and summary: can a new player understand the change without knowing the code, and does the source support its scope? Remove jargon, repeated outcomes and unsupported words such as "all", "always", "only" or "never". Source documentation is evidence, not a writing style to imitate.
 
 Grounding -- this is what makes the entry TRUE rather than merely plausible:
 - You are given the commits AND the diff of the user-facing documentation. A behaviour change is required to update those docs in the same pull request, so the docs diff is the account of what a user actually sees.
@@ -299,20 +298,7 @@ def check_grounded(draft, corpus):
                         "lives: %s" % (name, noun, _one_line(item, 120)))
 
 
-def previous_section(path):
-    """The most recent entry, as a style anchor."""
-    try:
-        with open(path, encoding="utf-8") as fh:
-            text = fh.read()
-    except OSError:
-        return ""
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import changelog
-    sections = changelog.parse(text)
-    return sections[0]["body"] if sections else ""
-
-
-def draft(commits, style, omitted_count, docs=""):
+def draft(commits, omitted_count, docs=""):
     """The one API call. pydantic and anthropic are imported here, not above."""
     import anthropic
     from pydantic import BaseModel
@@ -339,10 +325,19 @@ def draft(commits, style, omitted_count, docs=""):
             "This is what a user can now do and where; explain it under the ELI5 "
             "policy, and do not name any part of the interface it does not name:\n\n"
             + docs + "\n")
-    if style:
-        prompt += ("\nThe previous release's entry, for voice and length only "
-                   "-- do not repeat its content or carry over wording that "
-                   "conflicts with the ELI5 policy:\n\n" + style + "\n")
+    prompt += (
+        "\nFinal editing pass before returning the structured entry:\n"
+        "- Treat the material above as evidence, not prose to copy. Write for a player.\n"
+        "- Keep only distinct, supported outcomes a player can understand; do not fill six slots.\n"
+        "- Delete bullets about compiler internals, list counts, numbering or duplicate-entry repairs.\n"
+        "- Delete optional diagnostic commands and troubleshooting procedures.\n"
+        "- Rewrite unfamiliar developer terms as the behavior they describe, or omit the detail "
+        "if the sources do not support a clear explanation.\n"
+        "- Shorten each bullet toward 25 words and one main idea without dropping factual limits.\n"
+        "- Check the headline and summary too: compatible changes combining does not mean "
+        "conflicting changes work together, and skipping conflicting packages does not mean "
+        "only one or exactly two are skipped.\n"
+    )
 
     counted = client.messages.count_tokens(
         model=MODEL, system=SYSTEM, messages=[{"role": "user", "content": prompt}]
@@ -375,7 +370,6 @@ def main(argv=None):
     ap.add_argument("--base", default="")
     ap.add_argument("--out", required=True)
     ap.add_argument("--sources-out", required=True)
-    ap.add_argument("--changelog", default="CHANGELOG.md")
     args = ap.parse_args(argv)
 
     date = datetime.date.today().isoformat()
@@ -385,7 +379,7 @@ def main(argv=None):
         # a skeleton like every other failure, not kill the workflow.
         commits, subjects, omitted = collect(args.base)
         docs = collect_docs(args.base)
-        parsed = draft(commits, previous_section(args.changelog), omitted, docs)
+        parsed = draft(commits, omitted, docs)
         validate(parsed, omitted)
         check_grounded(parsed, _corpus(commits, docs))
         section, sources = render(args.tag, date, parsed), render_sources(parsed)
