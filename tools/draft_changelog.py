@@ -56,7 +56,8 @@ the entry a player reads.
 
 Rules:
 - At most 6 named bullets in TOTAL across New, Improved and Fixed, one sentence \
-each, present tense.
+each, present tense. Six is a ceiling, not a target: combine related changes \
+and use fewer bullets when there are fewer distinct player-visible outcomes.
 - Name a fix only if a user could have hit it and remembered it. Everything a user \
 could never have noticed is counted in collapsed_count and never described.
 - Plain language. No symbol names, addresses, file paths, test counts, commit \
@@ -71,13 +72,16 @@ string. Text containing them is rejected and your draft is discarded.
 
 ELI5 policy -- make the headline, summary and every bullet easy to understand:
 - Write for a player who knows SnapMap but has no programming or modding expertise. Use a friendly, respectful tone without baby talk.
-- Lead with what the player can do, what they see, or the problem that is fixed. Explain why it matters when the sources support that benefit.
-- Use familiar words, active voice and short sentences with one main idea. Avoid dense clauses, unexplained acronyms and implementation details.
-- Keep exact feature names players need to recognize. If a technical term is necessary, explain it briefly in everyday words; otherwise replace it with what it means for the player.
+- Describe the visible outcome, not the machinery producing it. Each bullet should answer "What can I do now?" or "What problem will I stop seeing?" using only outcomes supported by the sources.
+- Use literal, specific headlines, not slogans or metaphors. Keep the summary to one or two short sentences about the main outcome; leave secondary details to the bullets.
+- Aim for 25 words or fewer per bullet, with one main idea in active voice. Remove secondary details instead of squeezing them into a long sentence with several clauses. Keep a necessary factual limit even if it needs a few more words.
+- Do not turn implementation work into a standalone bullet. Compiler repairs, list counts, indices, serialized bytes, field ownership, served output, and similar mechanisms belong out of the notes. If the sources do not establish a clear player-visible outcome, omit the detail rather than inventing one.
+- Translate developer terms into the supported behavior. Do not leave phrases such as "semantic collection entries" or "input actions and output listeners" for players to decode. Keep exact feature names only when players need them to recognize what changed; briefly explain an unavoidable unfamiliar term.
+- Release notes are not troubleshooting instructions. Omit diagnostic commands and repair procedures unless users must take that action for this release; do not add them just because the documentation describes them.
 - Make fixes concrete: name the situation and the visible problem that no longer happens. Avoid vague claims such as "various improvements" or "better stability" when the sources support a more specific description.
-- Simplify the explanation without changing the facts. Preserve important limits, affected modes and required user actions; never invent a benefit, cause or guarantee to make a sentence sound clearer.
-- Example of style only, not a fact to include: "Preserve serialized prop transforms" becomes "Props keep their saved position and rotation when you reopen the map."
-- Before returning the entry, reread it as a new player: can they tell what changed and how it affects them without knowing the code? Rewrite anything that requires developer knowledge. These rules take priority over the previous release's writing style.
+- Preserve important limits, affected modes and required user actions. Never invent a benefit, cause or guarantee. Do not turn an example involving two packages into a rule that exactly two packages are affected, or turn "compatible edits combine" into "every change works together". Name the affected group without inventing its size.
+- Examples of style only, not facts to include: "Preserve serialized prop transforms" becomes "Props keep their saved position and rotation when you reopen the map." "Isolate conflicting contributors" becomes "Packages with conflicting changes are skipped while unrelated packages keep working." Use either claim only when the release sources support it.
+- Before returning the entry, check EVERY sentence, including the headline and summary: can a new player understand the change without knowing the code, and does the source support its scope? Remove jargon, repeated outcomes and unsupported words such as "all", "always", "only" or "never". These rules take priority over the previous release's writing style.
 
 Grounding -- this is what makes the entry TRUE rather than merely plausible:
 - You are given the commits AND the diff of the user-facing documentation. A behaviour change is required to update those docs in the same pull request, so the docs diff is the account of what a user actually sees.
