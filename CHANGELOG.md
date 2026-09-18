@@ -5,21 +5,18 @@ latest stable version is what `snapmap-plus update` installs.
 
 ## v0.2.1-beta.17 -- 2026-09-18 (beta)
 
-**Mods combine better, broken ones skipped alone**
+**Older map text loads correctly, and compatible mods combine**
 
-Multiple packages can now change the same editor properties without cancelling each other out, and a broken or conflicting package no longer takes the rest down with it. Text you authored in maps keeps its original characters.
+Maps containing older text characters now open without the UTF-8 error. Compatible editor changes combine, while broken or conflicting packages no longer disable unrelated mods.
 
 ### Improved
-- Packages that edit different parts of the same editor property now combine instead of one being ignored.
-- Your own edits to editor actions and event responses now sit alongside the built-in defaults rather than replacing or being skipped.
-- Text in your maps keeps the exact characters you authored, from loading through saving.
+- Packages can move an editor property between pages while other packages edit that property or add different properties.
+- Editor actions and event responses added by packages now combine with built-in entries.
+- Supported lists recover incorrect counts, numbering gaps and identical duplicates without changing your package files.
 
 ### Fixed
-- A broken package is skipped on its own, and unrelated packages plus built-in content stay available.
-- When packages disagree over the same setting, just the disagreeing ones are set aside; fixing the files brings them back on the next refresh.
-- A map only loads once the packages it needs work together.
-
-_Plus 8 smaller fixes and internal changes._
+- Maps with older text characters no longer fail to open with "invalid UTF-8 in string." Their text remains unchanged when saved.
+- Broken packages are skipped individually. Packages making incompatible changes are skipped together, while unrelated packages and built-in editor support remain available.
 
 ## v0.2.1-beta.16 -- 2026-09-17 (beta)
 
