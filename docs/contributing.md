@@ -349,8 +349,9 @@ still apply, so choose a version that has no tag, changelog entry or draft branc
    It uses one editorial brief for writing and factual review, followed by a separate output contract
    for the structured fields and validation limits.
    Six bullets is a ceiling, not a target: combine related changes around one main topic per bullet.
-   There is no per-bullet word or sentence limit. Use enough short sentences to explain the change and its
-   important conditions; remove repetition rather than context needed to understand it. Include technical
+   Each bullet has a maximum of 40 whitespace-separated words, enforced by the drafter's validation.
+   Use short sentences and preserve important conditions; remove repetition and secondary details before
+   cutting context needed to understand the change. Include technical
    details or instructions when they help the reader understand or use the change, explaining unfamiliar terms.
    Apply these language and tone rules across all features without favoring any particular subsystem.
    Keep headlines literal, and check that simplification has not turned an example into a general rule or

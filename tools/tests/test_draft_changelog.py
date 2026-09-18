@@ -336,6 +336,19 @@ class TestGrounding(unittest.TestCase):
         dc.check_grounded(draft, dc._corpus("", ""))
 
 
+class TestBulletWordLimit(unittest.TestCase):
+    def test_forty_words_are_accepted_in_every_group(self):
+        for group in ("added", "improved", "fixed"):
+            with self.subTest(group=group):
+                dc.validate(make(**{group: [" ".join(["word"] * 40)]}))
+
+    def test_forty_one_words_are_rejected_in_every_group(self):
+        for group in ("added", "improved", "fixed"):
+            with self.subTest(group=group):
+                with self.assertRaisesRegex(dc.DraftRejected, group + r" item has 41 words"):
+                    dc.validate(make(**{group: [" ".join(["word"] * 41)]}))
+
+
 class TestTotalBulletCap(unittest.TestCase):
     def test_six_per_group_is_no_longer_eighteen_bullets(self):
         """The prompt says six in TOTAL; the check used to allow six EACH."""

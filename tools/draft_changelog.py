@@ -32,6 +32,7 @@ UI_NOUNS = ("tab", "panel", "button", "menu", "dialog", "checkbox", "slider",
 MAX_HEADLINE = 60
 MAX_SUMMARY = 320
 MAX_ITEMS = 6
+MAX_ITEM_WORDS = 40
 MAX_SKELETON_SUBJECTS = 20
 
 # Canonical user-facing commit filter; keep contributing.md aligned.
@@ -59,8 +60,9 @@ problem is fixed, and any conditions they need to understand.
 
 Explain each change as you would to someone using the feature for the first \
 time. Use familiar words and concrete descriptions. Keep recognizable feature \
-names, and explain unfamiliar terms when they are necessary. Use enough \
-sentences to make the explanation clear; there is no per-bullet word target.
+names, and explain unfamiliar terms when they are necessary. Keep each bullet \
+to 40 words or fewer, using short sentences to explain one main change. Remove \
+repetition and secondary details before cutting conditions needed for accuracy.
 
 Write in a calm, direct, respectful tone. Avoid promotional claims, baby talk, \
 and vague assurances. Technical details belong only when they help the reader \
@@ -79,7 +81,7 @@ and include only as many bullets as the release needs within the maximum below.
 Output contract:
 - headline: at most 60 characters, the main theme of this release.
 - summary: at most 320 characters, what changed and what it means for users.
-- added, improved, fixed: lists of plain-text bullets, at most 6 in total.
+- added, improved, fixed: lists of plain-text bullets, at most 6 in total and 40 whitespace-separated words per bullet.
 - collapsed_count: the number of commits not described, including the supplied omitted count.
 - sources: the short commit hashes backing the named bullets, lowercase hex only, for maintainer review.
 - Do not include symbol names, addresses, file paths, test counts or verbatim commit subjects in the reader-facing text.
@@ -166,6 +168,11 @@ def validate(draft, min_collapsed=0):
         for item in items:
             if not item.strip():
                 raise DraftRejected(name + " contains an empty item")
+            word_count = len(item.split())
+            if word_count > MAX_ITEM_WORDS:
+                raise DraftRejected(
+                    "%s item has %d words (max %d)"
+                    % (name, word_count, MAX_ITEM_WORDS))
     if draft.collapsed_count < 0:
         raise DraftRejected("collapsed_count is negative")
     # The collapsed count includes both omitted inputs and commits the draft leaves
