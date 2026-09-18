@@ -3,6 +3,21 @@
 Every Snapmap+ release, newest first. Beta versions are opt-in previews; the
 latest stable version is what `snapmap-plus update` installs.
 
+## v0.2.1-beta.17 -- 2026-09-18 (beta)
+
+**Older map text loads correctly, and compatible mods combine**
+
+Maps containing older text characters now open without the UTF-8 error. Compatible editor changes combine, while broken or conflicting packages no longer disable unrelated mods.
+
+### Improved
+- Packages can move an editor property between pages while other packages edit that property or add different properties.
+- Editor actions and event responses added by packages now combine with built-in entries.
+- Supported lists recover incorrect counts, numbering gaps and identical duplicates without changing your package files.
+
+### Fixed
+- Maps with older text characters no longer fail to open with "invalid UTF-8 in string." Their text remains unchanged when saved.
+- Broken packages are skipped individually. Packages making incompatible changes are skipped together, while unrelated packages and built-in editor support remain available.
+
 ## v0.2.1-beta.16 -- 2026-09-17 (beta)
 
 **Older maps convert as they open**
