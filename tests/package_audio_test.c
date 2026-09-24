@@ -1126,6 +1126,18 @@ static int probe_policy(const char *base,const char *filename)
     }
     printf("composed/bound %s: %zu input banks, %zu selected banks, %zu buses, %zu settings, %zu removed, %zu shared controls; original IDs/bytes, no package owners\n",
         filename,compiled.resource_count,sh_package_audio_program_banks(program,0),bound->bus_count,bound->count,removed,shared->count);ok=1;
+    /* Field inventory of the native bus configuration a publication must own. */
+    static const char *const names[]={"parent","property","setting","duck-setting","duck","bypass","effect","mixer",
+        "flags","rtpc-mode","rtpc-curve","state-group","state"};
+    size_t fields[13]={0},kinds[2]={0},zero_parent=0;
+    for(size_t i=0;i<bound->count;i++)if(bound->settings[i].field.field<13 && !bound->settings[i].removed) {
+        const sh_audio_bus_setting *s=bound->settings+i;fields[s->field.field]++;
+        if(s->field.field==SH_AUDIO_BUS_FIELD_PARENT && s->field.length==4 && !s->body[0] && !s->body[1] && !s->body[2] && !s->body[3])zero_parent++;
+    }
+    for(size_t i=0;i<bound->bus_count;i++)kinds[bound->buses[i].kind==20]++;
+    printf("bus fields %s: %zu normal, %zu auxiliary, %zu root parents;",filename,kinds[0],kinds[1],zero_parent);
+    for(size_t f=0;f<13;f++)printf(" %s %zu",names[f],fields[f]);
+    printf("\n");
 done:
     if(!ok)fprintf(stderr,"audio bus policy probe: %s\n",error);
     sh_package_audio_program_close(program);
