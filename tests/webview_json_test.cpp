@@ -35,6 +35,12 @@ int main()
     CHECK(!get_double(json, L"missing", &offset));
     const std::wstring payload = L"{\"value\":\"" + escape_wide(utf8.c_str()) + L"\"}";
     CHECK(get_string(payload, L"value", value) && to_utf8(value) == utf8);
+    const std::wstring named = L"{\"cmd\":\"savePrefabMeta\",\"name\":\"body\",\"folder\":\"f\",\"body\":\"{\\\"desc\\\":\\\"folder\\\"}\"}";
+    CHECK(get_string(named, L"body", value) && value == L"{\"desc\":\"folder\"}");
+    CHECK(get_string(named, L"folder", value) && value == L"f");
+    CHECK(get_string(named, L"name", value) && value == L"body");
+    const std::wstring moved = L"{\"cmd\":\"movePrefabToFolder\",\"name\":\"toFolder\",\"toFolder\":\"dst\"}";
+    CHECK(get_string(moved, L"toFolder", value) && value == L"dst");
     std::printf("webview_json_test: %d failures\n", failed);
     return failed != 0;
 }

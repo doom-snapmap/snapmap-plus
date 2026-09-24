@@ -1100,14 +1100,49 @@ int sh_package_runtime_audio_original_read(const char *path, uint64_t offset, vo
     return result;
 }
 
+typedef struct pr_bank_list {
+    uint32_t *ids, *languages;
+    size_t count, capacity;
+    int failed;
+} pr_bank_list;
+
+static int pr_collect_bank(void *context, uint32_t id, uint32_t language)
+{
+    pr_bank_list *list = context;
+    if (list->count == list->capacity) {
+        size_t grown = list->capacity ? list->capacity * 2 : 64;
+        uint32_t *ids = realloc(list->ids, grown * sizeof(*ids));
+        if (ids) list->ids = ids;
+        uint32_t *languages = ids ? realloc(list->languages, grown * sizeof(*languages)) : NULL;
+        if (!languages) { list->failed = 1; return 0; }
+        list->languages = languages;
+        list->capacity = grown;
+    }
+    list->ids[list->count] = id;
+    list->languages[list->count++] = language;
+    return 1;
+}
+
+/* Visitors may read audio originals, which takes both locks again, so they run
+ * after the walk releases them. */
 int sh_package_runtime_audio_packaged_banks(sh_audio_originals_bank_visit visit, void *visitor,
     char *error, size_t capacity)
 {
+    pr_bank_list list = {0};
     int result;
+    if (!visit) return sh_audio_originals_packaged_banks(NULL, NULL, NULL, error, capacity);
     AcquireSRWLockShared(&g_lock);
     result = sh_audio_originals_packaged_banks(g_current_provider ?
-        g_current_provider->audio_originals : NULL, visit, visitor, error, capacity);
+        g_current_provider->audio_originals : NULL, pr_collect_bank, &list, error, capacity);
     ReleaseSRWLockShared(&g_lock);
+    if (list.failed) {
+        if (error && capacity) snprintf(error, capacity, "out of memory listing packaged audio banks");
+        result = -1;
+    }
+    for (size_t i = 0; result == 1 && i < list.count; i++)
+        if (!visit(visitor, list.ids[i], list.languages[i])) result = 0;
+    free(list.ids);
+    free(list.languages);
     return result;
 }
 

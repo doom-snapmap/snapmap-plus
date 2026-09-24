@@ -33,6 +33,7 @@ int sh_audio_originals_read(void *context, const char *path, uint64_t offset,
 
 /* Visit each bank identity carried by the mounted packages that serve the
  * current language or no language. The visitor returns 0 to stop early.
+ * It runs under the originals lock and must not call back into this module.
  * 1 complete, 0 stopped, -1 package metadata is unreadable. */
 typedef int (*sh_audio_originals_bank_visit)(void *context, uint32_t id, uint32_t language);
 int sh_audio_originals_packaged_banks(void *context,
