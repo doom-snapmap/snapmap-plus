@@ -108,6 +108,17 @@ sh_package_source_link *sh_package_source_link_open_roots(
     const sh_package_source_link_native *native, const sh_package_source_root_plan *roots,
     char *error, size_t capacity);
 void sh_package_source_link_close(sh_package_source_link *source);
+/* Reverse discovery stops at stock sources beyond the registered readers
+ * instead of refusing every package. scope SIZE_MAX names the stock unit whose
+ * reader stopped; any other scope changed a stock root whose closure crosses
+ * such a unit, so no derived variant was exposed for it. Unreadable originals
+ * and allocation failures still fail the candidate. Borrowed until close. */
+typedef struct sh_package_reverse_gap {
+    size_t scope;
+    const char *family, *name, *reason;
+} sh_package_reverse_gap;
+size_t sh_package_source_link_reverse_gaps(const sh_package_source_link *source,
+    const sh_package_reverse_gap **gaps);
 /* Borrowed, captured source units, sorted by scope/family/name. */
 const sh_package_link_inputs *sh_package_source_link_inputs(const sh_package_source_link *source);
 /* One byte per input unit: its complete captured dependency closure has no

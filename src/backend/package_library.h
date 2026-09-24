@@ -41,6 +41,9 @@ typedef struct sh_package_library {
     /* Immutable constructor requests, retained with this provider's files. */
     sh_package_consumers *consumers;
     sh_package_audio_program *audio;
+    /* Owned text accounting missing product coverage that did not refuse the
+     * library, one line per item; NULL when coverage was complete. */
+    char *coverage;
 } sh_package_library;
 
 /* Compile lexical component scopes before comparing any peer gameplay edits.

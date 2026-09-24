@@ -19,7 +19,7 @@ typedef struct region { void *address; size_t length; } region;
 typedef struct fixture {
     region regions[192]; size_t count;
     void *registry, *reflection;
-    int missing_unrelated, absent_target, implicit_root;
+    int missing_unrelated, absent_target, implicit_root, reader_gap;
 } fixture;
 static void *allocate(fixture *f, size_t length)
 {
@@ -80,9 +80,10 @@ static void setup(fixture *f)
     pointer(pointers, 4 * 16 + 8, (void *)0x40); pointer(pointers, 5 * 16 + 8, (void *)0x50);
     pointer(pointers, 6 * 16 + 8, (void *)0x60); pointer(objects, 7 * 16 + 8, (void *)0x70);
     pointer(objects, 8 * 16 + 8, (void *)0x30);
-    const char *et[] = {"idRenderModel", "idImage", "idDeclEntityDef"};
-    const char *eo[] = {"*", "*", "*"}, *en[] = {"model", "image", "target"};
-    fields(f, (char *)records + 0x38, 3, et, eo, en);
+    /* idSWF has no registered reader in this schema: a stock coverage gap. */
+    const char *et[] = {"idRenderModel", "idImage", "idDeclEntityDef", "idSWF"};
+    const char *eo[] = {"*", "*", "*", "*"}, *en[] = {"model", "image", "target", "gui"};
+    fields(f, (char *)records + 0x38, 4, et, eo, en);
     const char *st[] = {"idDeclEntityDef", "idStr", "idStr"};
     const char *so[] = {"*", "", ""}, *sn[] = {"entityDef", "category", "displayName"};
     fields(f, (char *)records + 3 * 0x38, 3, st, so, sn);
@@ -116,7 +117,15 @@ static int original(void *context, const char *path, unsigned char **body, size_
             "{ class = \"Entity\"; edit = { model = \"models/rock.lwo\"; } }";
     else if (!strcmp(path, "generated/decls/entitydef/props/unrelated.decl")) {
         if (f->absent_target) return 0;
-        value = "{ class = \"Entity\"; edit = { image = \"textures/unrelated\"; } }";
+        value = f->reader_gap ? "{ class = \"Entity\"; edit = { image = \"textures/unrelated\"; "
+            "model = \"models/campaign.lwo\"; gui = \"swf/unrelated\"; } }" :
+            "{ class = \"Entity\"; edit = { image = \"textures/unrelated\"; } }";
+    }
+    else if (!strcmp(path, "cooked/model/models/campaign.bmodel")) {
+        /* Present only in the campaign archive: absent from SnapMap. */
+        b = model("generic/rock");
+        *length = b.length; *body = malloc(*length + 1); assert(*body);
+        memcpy(*body, b.data, *length); (*body)[*length] = 0; return 2;
     }
     else if (!strcmp(path, "cooked/model/models/rock.bmodel")) b = model("generic/rock");
     else if (!strcmp(path, "generated/decls/material/generic/rock.decl")) value = "{ tex \"textures/rock\" }";
@@ -503,6 +512,31 @@ int main(void)
     assert(!resource(&recorded, "entitydef", "props/unrelated"));
     assert(binding(&recorded, sources, "Red", "", "entitydef", "props/rock"));
     sh_package_library_free(&recorded);
+    /* A stock declaration beyond the registered readers is accounted where it
+     * occurs. Unrelated packages keep their variants; a package changing that
+     * stock root's known dependency gets no guessed variant and a diagnosis. */
+    f.absent_target = 0; f.reader_gap = 1;
+    ok = sh_package_library_compile(sources, &env, catalog, original, &f, registry,
+        (uintptr_t)f.reflection, &native, &recorded, error, sizeof(error));
+    if (!ok) fprintf(stderr, "stock reader gap: %s\n", error); assert(ok);
+    assert(binding(&recorded, sources, "Red", "", "entitydef", "props/rock"));
+    if (!recorded.coverage || !strstr(recorded.coverage, "entitydef props/unrelated"))
+        fprintf(stderr, "stock reader gap coverage: %s\n", recorded.coverage ? recorded.coverage : "(none)");
+    assert(recorded.coverage && strstr(recorded.coverage, "entitydef props/unrelated") &&
+        strstr(recorded.coverage, "gui") && !strstr(recorded.coverage, "no toybox variant"));
+    sh_package_library_free(&recorded);
+    package("gap", "Gap Image", "generated/image/textures/unrelated.bimage", "changed-unrelated");
+    sh_package_sources *gap_sources = sh_package_sources_scan(root, error, sizeof(error)); assert(gap_sources);
+    ok = sh_package_library_compile(gap_sources, &env, catalog, original, &f, registry,
+        (uintptr_t)f.reflection, &native, &recorded, error, sizeof(error));
+    if (!ok) fprintf(stderr, "stock reader gap with changed dependency: %s\n", error); assert(ok);
+    assert(binding(&recorded, gap_sources, "Red", "", "entitydef", "props/rock"));
+    assert(!binding(&recorded, gap_sources, "Gap Image", "", "snapeditorentitydef", "unrelated"));
+    assert(!binding(&recorded, gap_sources, "Gap Image", "", "entitydef", "props/unrelated"));
+    assert(strstr(recorded.coverage, "Gap Image [same]: no toybox variant for stock snapeditorentitydef unrelated"));
+    for (size_t i = 0; i < gap_sources->file_count; i++) if (!gap_sources->files[i].directory)
+        assert(sh_package_source_verify(gap_sources->files + i));
+    sh_package_library_free(&recorded); sh_package_sources_free(gap_sources); f.reader_gap = 0;
     /* An unreadable baseline edge is a product coverage defect, never a package
      * invalidation or permission to publish a partially discovered library. */
     size_t invalid = 0; env.invalid_package = &invalid; f.missing_unrelated = 1;
