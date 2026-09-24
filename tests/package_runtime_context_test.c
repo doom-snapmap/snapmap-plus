@@ -901,6 +901,91 @@ static void test_failed_local_compilation_admission(void)
     cleanup_resources(data);
 }
 
+static void write_bank(const char *relative, const char *name, uint32_t event)
+{
+    unsigned char bank[49] = {0}; uint32_t id = 0, value; char path[4096]; FILE *file = NULL;
+    CHECK(sh_audio_bank_identity(name, &id));
+    memcpy(bank, "BKHD", 4); value = 16; memcpy(bank + 4, &value, 4); value = 113; memcpy(bank + 8, &value, 4);
+    memcpy(bank + 12, &id, 4); memcpy(bank + 24, "HIRC", 4); value = 17; memcpy(bank + 28, &value, 4);
+    value = 1; memcpy(bank + 32, &value, 4); bank[36] = 4; value = 8; memcpy(bank + 37, &value, 4); memcpy(bank + 41, &event, 4);
+    create(relative, "");
+    snprintf(path, sizeof(path), "%s/%s", root, relative);
+    CHECK(!fopen_s(&file, path, "wb") && file);
+    if (file) { CHECK(fwrite(bank, 1, sizeof(bank), file) == sizeof(bank)); fclose(file); }
+}
+/* A map's audio compiles into one retained program; the published view lists
+ * it, a copied occurrence keeps it listed after the map departs, and the
+ * native layer's owner reference keeps it usable until released. */
+static void test_audio_programs(void)
+{
+    const char *json = "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},"
+        "\"entities\":[{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"audio/root\"}]}";
+    char data[MAX_PATH], map[MAX_PATH], base[MAX_PATH], error[2048];
+    sh_package_runtime_audio *rows = NULL; size_t count = 7; int fail = 0;
+    sh_package_occurrence_snapshot *document = NULL; sh_package_map_plan *plan = NULL;
+    void *owner = NULL; sh_package_audio_program *program = NULL;
+    admission_fixture f; admission_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    snprintf(data, sizeof(data), "%s/audio-library", root);
+    snprintf(map, sizeof(map), "%s/audio-map", root);
+    snprintf(base, sizeof(base), "%s/audio-base", root);
+    create("audio-base/sound", NULL);
+    create("audio-library/overrides", NULL);
+    create("audio-map/overrides/sound/package.json", "{\"id\":\"sound\",\"name\":\"Sound\"}");
+    create("audio-map/overrides/sound/assets/generated/decls/entitydef/audio/root.decl", "{ class = \"Entity\"; edit = { health = 7; } }");
+    write_bank("audio-map/overrides/sound/assets/sound/soundbanks/pc/mapbank.bnk", "mapbank.bnk", 77);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
+    sh_package_runtime_test_audio_originals(base, L"English(US)");
+    CHECK(sh_package_runtime_refresh_activated(data, (sh_package_activation_guard){0}, startup_activation, &fail));
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    CHECK(sh_package_runtime_audio_programs(&rows, &count, error, sizeof(error)) && !count);
+    free(rows); rows = NULL;
+    plan = sh_package_runtime_prepare_map(data, map, error, sizeof(error));
+    if (!plan) fprintf(stderr, "audio program map: %s\n", error);
+    CHECK(plan); if (!plan) goto done;
+    CHECK(sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, startup_activation, &fail));
+    CHECK(sh_package_runtime_audio_programs(&rows, &count, error, sizeof(error)) && count == 1);
+    if (count) { owner = rows[0].owner; program = rows[0].program; }
+    size_t banks = 0, scopes = program ? sh_package_audio_program_scopes(program) : 0;
+    for (size_t i = 0; i < scopes; i++) banks += sh_package_audio_program_banks(program, i);
+    if (banks != 1) fprintf(stderr, "audio program scopes %zu banks %zu\n", scopes, banks);
+    CHECK(owner && program && scopes >= 1 && banks == 1);
+    free(rows); rows = NULL;
+    /* A copied occurrence retains the map provider and so its program. */
+    size_t rebound_length = 0, captured_length = 0;
+    char *rebound = sh_package_map_plan_rebind(plan, NULL, json, strlen(json), &rebound_length, error, sizeof(error));
+    if (!rebound) fprintf(stderr, "audio rebind: %s\n", error);
+    CHECK(rebound);
+    if (rebound) {
+        char *captured = sh_package_runtime_capture_document(plan, NULL, NULL, 0, rebound, rebound_length,
+            &captured_length, &document, NULL, NULL, error, sizeof(error));
+        if (!captured) fprintf(stderr, "audio capture: %s\n", error);
+        CHECK(captured && document); free(captured); HeapFree(GetProcessHeap(), 0, rebound);
+    }
+    CHECK(sh_package_runtime_activate_occurrences(NULL, (sh_package_activation_guard){0}, startup_activation, &fail));
+    sh_package_map_plan_free(plan); plan = NULL;
+    CHECK(sh_package_runtime_activate_prepared_map(NULL, (sh_package_activation_guard){0}, startup_activation, &fail));
+    CHECK(sh_package_runtime_audio_programs(&rows, &count, error, sizeof(error)) && count == 1 && rows[0].program == program);
+    for (size_t i = 0; i < count; i++) sh_package_runtime_audio_release(rows[i].owner);
+    free(rows); rows = NULL;
+    sh_package_occurrence_release(document); document = NULL;
+    CHECK(sh_package_runtime_activate_occurrences(NULL, (sh_package_activation_guard){0}, startup_activation, &fail));
+    CHECK(sh_package_runtime_audio_programs(&rows, &count, error, sizeof(error)) && !count);
+    free(rows); rows = NULL;
+    /* The departed program stays usable while the native layer holds it. */
+    size_t retained_banks = 0;
+    for (size_t i = 0; program && i < sh_package_audio_program_scopes(program); i++) retained_banks += sh_package_audio_program_banks(program, i);
+    CHECK(retained_banks == 1);
+done:
+    if (owner) sh_package_runtime_audio_release(owner);
+    sh_package_occurrence_release(document); sh_package_map_plan_free(plan);
+    sh_package_runtime_test_dispose();
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0);
+    sh_package_runtime_test_audio_originals(NULL, NULL);
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data);
+}
 static void test_local_isolation(void)
 {
     char data[MAX_PATH], map[MAX_PATH], error[2048], *summary;
@@ -2495,6 +2580,7 @@ int main(int argc, char **argv)
     }
     run_conflicting_startup();
     test_duplicate_editor_controls();
+    test_audio_programs();
     test_local_isolation();
     test_map_usage_admission();
     snprintf(map_a, sizeof(map_a), "%s\\map-a", root); snprintf(map_b, sizeof(map_b), "%s\\map-b", root);

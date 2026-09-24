@@ -125,6 +125,25 @@ int sh_audio_banks_native_additions_end(sh_audio_bank_addition **addition, int a
 int sh_audio_banks_native_additions_ready(sh_audio_bank_addition *addition, char *error, size_t capacity)
 { (void)error; (void)capacity; return addition != NULL; }
 void sh_audio_banks_native_additions_accept(sh_audio_bank_addition **addition) { *addition = NULL; }
+/* Retained-program route: each call counts as one audio activation and
+ * releases every owner reference it receives, as the native adapter does on
+ * failure or duplicate delivery. */
+int sh_audio_banks_native_programs_activate(const sh_audio_active_program *programs, size_t count,
+    const sh_audio_shared_policy *baseline, void (*release)(void *), char *error, size_t capacity)
+{
+    (void)baseline;
+    for (size_t i = 0; i < count; i++) if (release && programs[i].owner) release(programs[i].owner);
+    return sh_audio_banks_native_activate(NULL, 0, NULL, 0, NULL, 0, error, capacity);
+}
+int sh_audio_banks_native_programs_add(sh_audio_bank_addition *addition,
+    const sh_audio_active_program *programs, size_t count, void (*release)(void *), char *error, size_t capacity)
+{
+    (void)addition;
+    for (size_t i = 0; i < count; i++) if (release && programs[i].owner) release(programs[i].owner);
+    return sh_audio_banks_native_activate(NULL, 0, NULL, 0, NULL, 0, error, capacity);
+}
+int sh_audio_banks_native_programs_retire(char *error, size_t capacity) { (void)error; (void)capacity; return 0; }
+size_t sh_audio_banks_native_programs_count(void) { return 0; }
 #include "palette_refresh.h"
 int sh_palette_entries_ready(void) { return 1; }
 int sh_palette_entries_prepare(const sh_palette_entry_source *sources, size_t count,

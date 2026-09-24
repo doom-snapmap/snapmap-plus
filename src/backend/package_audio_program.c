@@ -377,6 +377,15 @@ done:
     if(!ok && error && capacity && !*error)pap_fail(error,capacity,"cannot compose shared bus policy",NULL);
     return ok;
 }
+int sh_package_audio_program_bus_edited(const sh_package_audio_program *p)
+{
+    if(!p || !p->graph)return 0;
+    for(size_t i=0;i<p->bus_policy.count;i++) {
+        const sh_audio_bus_setting *setting=p->bus_policy.settings+i;
+        if(setting->removed || setting->recipe>=p->bus_recipe_count || !p->bus_recipes[setting->recipe].baseline)return 1;
+    }
+    return 0;
+}
 const sh_audio_bus_policy *sh_package_audio_program_bus_policy(const sh_package_audio_program *p)
 { return p && p->graph ? &p->bus_policy : NULL; }
 const sh_audio_bus_policy *sh_package_audio_program_bound_bus_policy(const sh_package_audio_program *p)
@@ -531,6 +540,46 @@ done:
     pap_shared_inputs_free(&inputs);
     sh_audio_shared_policy_free(&policy);
     if(!ok && error && capacity && !*error)pap_fail(error,capacity,"cannot compose shared audio controls",NULL);
+    return ok;
+}
+typedef struct pap_original_reader { sh_audio_originals *originals;const char *path; } pap_original_reader;
+static int pap_original_read(void *context,uint64_t at,void *body,size_t length)
+{
+    pap_original_reader *r=context;
+    return sh_audio_originals_read(r->originals,r->path,at,body,length,NULL,NULL,0)==1;
+}
+int sh_package_audio_baseline_shared(sh_audio_originals *originals,sh_audio_shared_policy *out,
+    char *error,size_t capacity)
+{
+    const sh_audio_original_bank *banks=NULL;size_t count=0,used=0;uint32_t init=0;int ok=0;
+    sh_audio_shared_input inputs[3];unsigned char *bodies[3]={0};sh_audio_bank_codec codec={0};
+    if(error && capacity)*error=0;
+    if(!out)return 0;memset(out,0,sizeof(*out));
+    if(!sh_audio_bank_identity("init.bnk",&init) || sh_audio_originals_banks(originals,&banks,&count,error,capacity)!=1)
+        return pap_fail(error,capacity,"native audio baseline is unavailable",NULL);
+    const sh_audio_original_bank *bank=NULL;
+    for(size_t i=0;i<count && !bank;i++)if(banks[i].metadata.id==init)bank=banks+i;
+    if(!bank)return 1;
+    uint64_t length=0;pap_original_reader reader={originals,bank->path};
+    if(sh_audio_originals_read(originals,bank->path,0,NULL,0,&length,error,capacity)!=1)
+        return pap_fail(error,capacity,"cannot read the native audio baseline",bank->path);
+    if(sh_audio_bank_codec_read((sh_audio_bank_source){&reader,length,pap_original_read},&codec,error,capacity)!=1)
+        return pap_fail(error,capacity,"cannot decode the native audio baseline",bank->path);
+    for(size_t c=0;c<codec.chunk_count;c++) {
+        const sh_audio_bank_chunk *chunk=codec.chunks+c;
+        const char *tag=!strcmp(chunk->tag,"STMG") ? "STMG" : !strcmp(chunk->tag,"ENVS") ? "ENVS" :
+            !strcmp(chunk->tag,"PLAT") ? "PLAT" : NULL;
+        if(!tag)continue;
+        if(used==3){pap_fail(error,capacity,"native audio baseline repeats a shared chunk",bank->path);goto done;}
+        bodies[used]=malloc(chunk->length ? chunk->length : 1);if(!bodies[used])goto done;
+        if(!pap_original_read(&reader,chunk->offset+8,bodies[used],chunk->length)){free(bodies[used]);bodies[used]=NULL;goto done;}
+        inputs[used]=(sh_audio_shared_input){tag,bodies[used],chunk->length,0,1};used++;
+    }
+    ok=sh_audio_shared_policy_compile(inputs,used,out,error,capacity);
+done:
+    for(size_t i=0;i<3;i++)free(bodies[i]);
+    sh_audio_bank_codec_free(&codec);
+    if(!ok && error && capacity && !*error)pap_fail(error,capacity,"cannot compose the native audio baseline",NULL);
     return ok;
 }
 const sh_audio_shared_policy *sh_package_audio_program_shared(const sh_package_audio_program *p)
@@ -768,6 +817,28 @@ const sh_audio_graph_bank *sh_package_audio_program_bank(const sh_package_audio_
     if (index >= sh_package_audio_program_banks(p, scope)) return NULL;
     if (binding) *binding = sh_audio_link_graph_bank(p->graph, scope, index);
     return sh_package_audio_capture_input(p->scopes[scope].capture)->banks + index;
+}
+int sh_package_audio_program_loads(const sh_package_audio_program *p,
+    int (*visit)(void *, uint32_t id, const char *filename, int numeric), void *context,
+    char *error, size_t capacity)
+{
+    if(!p || !p->graph || !visit)return pap_fail(error,capacity,"invalid audio activation plan request",NULL);
+    for(size_t s=0;s<p->count;s++)for(size_t j=0;j<sh_package_audio_program_banks(p,s);j++) {
+        const sh_audio_bank_binding *binding=NULL;uint32_t bound=0,numeric=0;
+        const sh_audio_graph_bank *bank=sh_package_audio_program_bank(p,s,j,&binding);
+        const char *leaf=bank ? strrchr(bank->path,'/') : NULL;
+        if(!bank || !binding || !leaf || !sh_audio_link_graph_bank_id(p->graph,s,bank->codec->metadata.id,&bound))
+            return pap_fail(error,capacity,"audio program has not been bound",bank ? bank->path : NULL);
+        leaf++;
+        /* A relocated bank is served under its decimal identity; the native
+         * name loader would hash that stem. Named originals keep their name. */
+        int by_id=bound!=bank->codec->metadata.id || (sh_audio_bank_numeric_identity(leaf,&numeric) && numeric==bound);
+        if(!visit(context,bound,leaf,by_id)) {
+            if(error && capacity && !*error)pap_fail(error,capacity,"cannot plan audio bank activation",bank->path);
+            return 0;
+        }
+    }
+    return 1;
 }
 typedef struct pap_media_visit {
     const sh_package_audio_program *program;

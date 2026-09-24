@@ -851,6 +851,7 @@ static void bus_program(void)
         CHECK(!sh_package_audio_program_bus_equal(p,fx[0],fx[1]));
         CHECK(sh_package_audio_program_bus_equal(p,prop[0],prop[1]));
         const sh_audio_bus_policy *policy=sh_package_audio_program_bus_policy(p);CHECK(policy && policy->bus_count==1);
+        CHECK(sh_package_audio_program_bus_edited(p));
         size_t selected_fx=SIZE_MAX;
         for(size_t i=0;policy && i<policy->count;i++) {
             const sh_audio_bus_setting *s=policy->settings+i;const sh_package_owners *owners=NULL,*gameplay=NULL;
@@ -1094,6 +1095,7 @@ static int probe_policy(const char *base,const char *filename)
     program=sh_package_audio_program_open(&input,1,originals,error,sizeof(error));
     if(!program || !sh_package_audio_program_prepare(program,error,sizeof(error)) ||
         !sh_package_audio_program_bind(program,&output,probe_original_id,NULL,error,sizeof(error)))goto done;
+    if(sh_package_audio_program_bus_edited(program)){snprintf(error,sizeof(error),"original buses reported an edit");goto done;}
     const sh_audio_bus_policy *unbound=sh_package_audio_program_bus_policy(program);
     const sh_audio_bus_policy *bound=sh_package_audio_program_bound_bus_policy(program);
     if(!unbound || !bound || bound->count!=unbound->count)goto done;

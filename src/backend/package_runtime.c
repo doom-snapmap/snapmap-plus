@@ -57,6 +57,11 @@ typedef struct pr_provider {
     sh_virtual_material_view *virtual_materials;
     sh_package_consumers *consumers;
     sh_package_audio_program *audio;
+    /* Views retain every root provider whose audio program they serve: the
+     * current map, the library and retained occurrence/selector owners. The
+     * native audio layer retains these same owners until consumers retire. */
+    struct pr_provider **audio_sources;
+    size_t audio_source_count;
 #ifndef SH_PACKAGE_RUNTIME_TESTING
     sh_strids_reservation *strings;
     sh_audio_id_lease *audio_ids;
@@ -177,8 +182,28 @@ static void pr_release(pr_provider *provider)
         sh_audio_originals_close(provider->audio_originals);
         sh_package_native_assets_close(provider->native_assets);
     }
+    for (size_t i = 0; i < provider->audio_source_count; i++) pr_release(provider->audio_sources[i]);
+    free(provider->audio_sources);
     pr_release(provider->parent); free(provider->data_root); free(provider->rejections);
     free(provider->coverage); free(provider);
+}
+/* Precedence follows call order; one owner appears once. A view contributes
+ * the owners it already retains, a root provider itself when it has audio. */
+static int pr_audio_source_add(pr_provider *view, const pr_provider *source)
+{
+    if (!source) return 1;
+    if (!source->audio) {
+        for (size_t i = 0; i < source->audio_source_count; i++)
+            if (!pr_audio_source_add(view, source->audio_sources[i])) return 0;
+        return 1;
+    }
+    for (size_t i = 0; i < view->audio_source_count; i++) if (view->audio_sources[i] == source) return 1;
+    if (view->audio_source_count >= SIZE_MAX / sizeof(*view->audio_sources) - 1) return 0;
+    pr_provider **grown = realloc(view->audio_sources, (view->audio_source_count + 1) * sizeof(*grown));
+    if (!grown) return 0;
+    view->audio_sources = grown;
+    view->audio_sources[view->audio_source_count++] = pr_retain((pr_provider *)source);
+    return 1;
 }
 
 static void pr_publish(pr_provider *current, pr_provider *library, pr_provider *map)
@@ -985,6 +1010,9 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             sh_decl_registry_source registry = {0};
             pr_original_source originals = {baseline, baseline_context, native_assets};
             sh_package_library_native native = sh_package_native_assets_adapter(native_assets);
+            /* Audio compiles into one retained program per provider. Native
+             * activation publishes that program; there is no old-path fallback. */
+            native.audio = audio_originals;
 #ifndef SH_PACKAGE_RUNTIME_TESTING
             /* One pending namespace includes the retained peer provider before
              * assigning this candidate's private string identities. */
@@ -1870,6 +1898,9 @@ static pr_provider *pr_view(pr_provider *library, const pr_provider *map,
     view->parent = pr_retain(library); view->catalog = library->catalog;
     view->audio_originals = library->audio_originals;
     view->native_assets = library->native_assets;
+    if (!pr_audio_source_add(view, map) || !pr_audio_source_add(view, library)) {
+        snprintf(error, capacity, "cannot retain active audio programs"); pr_release(view); return NULL;
+    }
     if (!pr_view_bundles(view, library, map, error, capacity)) { pr_release(view); return NULL; }
     if (!sh_package_provenance_overlay(&library->bindings, map ? &map->bindings : NULL, &view->bindings)) {
         snprintf(error, capacity, "cannot retain map source bindings"); pr_release(view); return NULL;
@@ -1889,7 +1920,10 @@ static pr_provider *pr_view(pr_provider *library, const pr_provider *map,
             if (previous->provider == lease->provider && InterlockedCompareExchange((volatile LONG *)&previous->references, 0, 0) > 0) break;
         if (previous != lease) continue;
         if (!pr_view_retained(view, lease->provider, retained_begin, promoted, NULL,
-            PR_RETAIN_OCCURRENCES, NULL, error, capacity)) { pr_release(view); return NULL; }
+            PR_RETAIN_OCCURRENCES, NULL, error, capacity) || !pr_audio_source_add(view, lease->provider)) {
+            if (!*error) snprintf(error, capacity, "cannot retain active audio programs");
+            pr_release(view); return NULL;
+        }
     }
     for (const sh_package_selector_hold *hold = g_selectors; hold; hold = hold->next) {
         if (!InterlockedCompareExchange((volatile LONG *)&hold->live, 0, 0)) continue;
@@ -1898,7 +1932,10 @@ static pr_provider *pr_view(pr_provider *library, const pr_provider *map,
             if (prior->provider == hold->provider && InterlockedCompareExchange((volatile LONG *)&prior->live, 0, 0)) break;
         if (prior != hold) continue;
         if (!pr_view_retained(view, hold->provider, retained_begin, promoted, NULL,
-            PR_RETAIN_SELECTORS, NULL, error, capacity)) { pr_release(view); return NULL; }
+            PR_RETAIN_SELECTORS, NULL, error, capacity) || !pr_audio_source_add(view, hold->provider)) {
+            if (!*error) snprintf(error, capacity, "cannot retain active audio programs");
+            pr_release(view); return NULL;
+        }
     }
 #ifndef SH_PACKAGE_RUNTIME_TESTING
     if (view->compiled->policy.localized_count) {
@@ -1923,6 +1960,7 @@ static pr_provider *pr_clone_serving(pr_provider *base, char *error, size_t capa
     view->references = 1; view->parent = pr_retain(base);
     view->catalog = base->catalog; view->audio_originals = base->audio_originals;
     view->native_assets = base->native_assets;
+    if (!pr_audio_source_add(view, base)) goto failed;
     if (base->data_root && !(view->data_root = _strdup(base->data_root))) goto failed;
     view->sources = sh_package_sources_join(base->sources, &empty, error, capacity);
     if (!view->sources) goto failed;
@@ -3113,6 +3151,44 @@ int sh_package_runtime_sound_event(const char *name, uint32_t *event)
     found = sh_package_sound_event(g_compiled, name, event);
     ReleaseSRWLockShared(&g_lock);
     return found;
+}
+
+int sh_package_runtime_audio_programs(sh_package_runtime_audio **rows, size_t *count,
+    char *error, size_t capacity)
+{
+    sh_package_runtime_audio *out = NULL; size_t used = 0;
+    if (error && capacity) *error = 0;
+    if (!rows || !count) return 0;
+    *rows = NULL; *count = 0;
+    AcquireSRWLockShared(&g_lock);
+    const pr_provider *current = g_current_provider;
+    size_t total = current ? current->audio_source_count : 0;
+    if (total <= SIZE_MAX / sizeof(*out)) out = calloc(total ? total : 1, sizeof(*out));
+    if (out) for (size_t i = 0; i < total; i++) {
+        pr_provider *source = current->audio_sources[i];
+        out[used].owner = pr_retain(source); out[used].program = source->audio;
+#ifndef SH_PACKAGE_RUNTIME_TESTING
+        out[used].lease = source->audio_ids;
+#endif
+        used++;
+    }
+    ReleaseSRWLockShared(&g_lock);
+    if (!out) {
+        if (error && capacity) snprintf(error, capacity, "cannot retain active audio programs");
+        return 0;
+    }
+    *rows = out; *count = used; return 1;
+}
+void sh_package_runtime_audio_release(void *owner) { pr_release(owner); }
+int sh_package_runtime_audio_baseline(sh_audio_shared_policy *out, char *error, size_t capacity)
+{
+    int result;
+    AcquireSRWLockShared(&g_lock);
+    sh_audio_originals *originals = g_current_provider ? g_current_provider->audio_originals : NULL;
+    result = originals ? sh_package_audio_baseline_shared(originals, out, error, capacity) : 0;
+    ReleaseSRWLockShared(&g_lock);
+    if (!originals && error && capacity) snprintf(error, capacity, "native audio originals are unavailable");
+    return result;
 }
 
 int sh_package_runtime_audio_original(const char *path, sh_package_original_identity *out,

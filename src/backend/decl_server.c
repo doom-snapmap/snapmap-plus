@@ -2811,7 +2811,21 @@ void sh_decl_server_request_rearm(void)
  */
 void sh_decl_server_rearm_poll(void)
 {
-    static ULONGLONG next_retirement;
+    static ULONGLONG next_retirement, next_audio;
+    LONG audio_state = InterlockedCompareExchange(&g_state, 0, 0);
+    /* Superseded audio programs wait for their playing items and registered
+     * objects; poll that idle state between provider transitions. */
+    if ((audio_state == DS_STATE_DONE || audio_state == DS_STATE_FAILED) && sh_audio_banks_native_programs_count()) {
+        ULONGLONG now = GetTickCount64();
+        if (now >= next_audio) {
+            char detail[256];
+            next_audio = now + 250;
+            if (sh_audio_banks_native_programs_retire(detail, sizeof(detail)) < 0) {
+                static ULONGLONG next_report;
+                if (now >= next_report) { next_report = now + 10000; backend_log(detail); }
+            }
+        }
+    }
     if (!ds_shader_recovery_poll()) return;
     if (!ds_occurrence_maintenance()) return;
     LONG state = InterlockedCompareExchange(&g_state, 0, 0);
@@ -2887,77 +2901,44 @@ static void ds_boot_published(void)
     }
 }
 
+/* Publish the view's retained audio programs. Compiled audio exists only in
+ * programs: private banks, relocated events and shared controls activate
+ * together, and superseded programs retire once their consumers have. There
+ * is no fallback to replaying authored banks under their original names. */
 static int ds_activate_audio_mode(sh_audio_bank_addition *addition, char *error, size_t capacity)
 {
-    const sh_package_compilation *compiled = sh_package_runtime_acquire();
-    char **names = NULL;
-    uint32_t *events = NULL;
-    sh_package_audio *audio = NULL;
-    sh_package_audio_report audio_report = {0};
-    const sh_package_audio_bank *banks = NULL;
-    const sh_package_audio_media *media = NULL;
-    size_t bank_count = 0, media_count = 0;
-    size_t count = 0, used = 0;
-    int result = 0;
-    void *registry = NULL, *manager = NULL;
-    decl_type_by_name_fn type_by_name = NULL;
-    decl_register_file_fn register_file = NULL;
-    if (compiled) {
-        audio = sh_package_audio_open(compiled, &audio_report, error, capacity);
-        for (size_t i = 0; i < compiled->resource_count; ++i) {
-            const sh_compiled_resource *r = compiled->resources+i;
-            if (r->source_count && r->type && !strcmp(r->type, "sound") && r->name) ++count;
-        }
-        if (count && count <= SIZE_MAX / sizeof(*names) && count <= SIZE_MAX / sizeof(*events)) {
-            names = (char **)calloc(count, sizeof(*names));
-            events = (uint32_t *)malloc(count*sizeof(*events));
-            if (names && events) for (size_t i = 0; i < compiled->resource_count; ++i) {
-                const sh_compiled_resource *r = compiled->resources+i;
-                if (r->source_count && r->type && !strcmp(r->type, "sound") && r->name) {
-                    names[used] = _strdup(r->name);
-                    if (!names[used]) break;
-                    ++used;
-                }
+    sh_package_runtime_audio *rows = NULL;
+    sh_audio_active_program *programs = NULL;
+    sh_audio_shared_policy baseline = {0};
+    size_t count = 0;
+    int result = 0, have_baseline = 0;
+    if (!sh_package_runtime_audio_programs(&rows, &count, error, capacity)) return 0;
+    programs = (sh_audio_active_program *)calloc(count ? count : 1, sizeof(*programs));
+    if (!programs) {
+        for (size_t i = 0; i < count; ++i) sh_package_runtime_audio_release(rows[i].owner);
+        free(rows); snprintf(error, capacity, "cannot retain active audio programs"); return 0;
+    }
+    for (size_t i = 0; i < count; ++i)
+        programs[i] = (sh_audio_active_program){rows[i].owner, rows[i].program, rows[i].lease};
+    free(rows);
+    if (addition) {
+        result = sh_audio_banks_native_programs_add(addition, programs, count,
+            sh_package_runtime_audio_release, error, capacity);
+    } else {
+        /* The native Init baseline restores controls a departing program
+         * edited; it is not needed while no program was ever published. */
+        if (count || sh_audio_banks_native_programs_count()) {
+            have_baseline = sh_package_runtime_audio_baseline(&baseline, error, capacity);
+            if (!have_baseline) {
+                for (size_t i = 0; i < count; ++i) sh_package_runtime_audio_release(programs[i].owner);
+                free(programs); return 0;
             }
         }
+        result = sh_audio_banks_native_programs_activate(programs, count, have_baseline ? &baseline : NULL,
+            sh_package_runtime_audio_release, error, capacity);
     }
-    sh_package_runtime_release();
-    if ((compiled && !audio) || audio_report.invalid) {
-        if (audio_report.invalid) snprintf(error, capacity, "%s", audio_report.first_gap);
-        goto done;
-    }
-    if (count != used) {
-        snprintf(error, capacity, "prepared audio event snapshot allocation failed"); goto done;
-    }
-    if (count) {
-        if (!ds_decode_registry(&registry, &type_by_name, &register_file)) {
-            snprintf(error, capacity, "prepared audio registry is unavailable"); goto done;
-        }
-        __try {
-            manager = type_by_name(registry, "sound");
-            for (size_t i = 0; i < count; ++i) {
-                void *decl = ds_peek_decl(manager, names[i]);
-                unsigned char state = 0;
-                /* Prepared idSoundShader keeps its Wwise event identity at
-                 * +0xac in both renderers. Do not guess aliases from filenames. */
-                if (!decl || !ds_safe_read((const uint8_t *)decl+DS_DECL_STATE_OFFSET, &state, 1) ||
-                    (state & 7) || !ds_safe_read((const uint8_t *)decl+0xacu, events+i, sizeof(*events))) {
-                    snprintf(error, capacity, "sound '%s' has no prepared native event", names[i]); goto done;
-                }
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            snprintf(error, capacity, "prepared audio event inspection failed"); goto done;
-        }
-    }
-    bank_count = sh_package_audio_banks(audio, &banks);
-    media_count = sh_package_audio_media_files(audio, &media);
-    result = addition ? sh_audio_banks_native_activate_additive(addition, events, count, banks, bank_count,
-        media, media_count, error, capacity) : sh_audio_banks_native_activate(events, count, banks, bank_count,
-        media, media_count, error, capacity);
-done:
-    sh_package_audio_close(audio);
-    for (size_t i = 0; i < used; ++i) free(names[i]);
-    free(names); free(events); return result;
+    free(programs); sh_audio_shared_policy_free(&baseline);
+    return result;
 }
 static int ds_activate_audio(char *error, size_t capacity)
 { return ds_activate_audio_mode(NULL, error, capacity); }

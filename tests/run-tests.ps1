@@ -189,6 +189,7 @@ $tests = @(
     @{ name = "audio_banks_test"; src = 'audio_banks_test.c ..\src\backend\audio_banks.c';             arg = "" }
     @{ name = "audio_hirc_test"; src = 'audio_hirc_test.c ..\src\backend\audio_hirc.c';               arg = "" }
     @{ name = "audio_shared_policy_test"; src = 'audio_shared_policy_test.c ..\src\backend\audio_shared_policy.c ..\src\backend\audio_hirc.c'; arg = "" }
+    @{ name = "audio_effective_policy_test"; src = 'audio_effective_policy_test.c ..\src\backend\audio_effective_policy.c ..\src\backend\audio_shared_policy.c ..\src\backend\audio_hirc.c'; arg = "" }
     @{ name = "audio_bank_codec_test"; src = 'audio_bank_codec_test.c ..\src\backend\audio_bank_codec.c ..\src\backend\audio_hirc.c ..\src\backend\audio_banks.c'; arg = "" }
     @{ name = "audio_link_graph_test"; src = 'audio_link_graph_test.c ..\src\backend\audio_id_reservations.c ..\src\backend\audio_link_graph.c ..\src\backend\audio_bank_codec.c ..\src\backend\audio_hirc.c ..\src\backend\audio_banks.c ..\src\backend\package_link_graph.c ..\src\backend\package_link_identity.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; arg = "" }
     @{ name = "audio_packages_test"; src = 'audio_packages_test.c ..\src\backend\audio_packages.c'; arg = "" }
@@ -270,7 +271,7 @@ $tests += @{ name = "package_audio_test"; src = $audioSources; arg = "" }
 # well as the legacy catalog. Keep its link closure aligned with that program.
 $nativeAudio = $tests | Where-Object { $_.name -eq 'audio_banks_native_test' }
 $nativeAudio.src = ($audioSources -replace '^package_audio_test.c ', 'audio_banks_native_test.c ')
-$nativeAudio.src += ' ..\src\backend\audio_id_reservations.c ..\src\backend\hook.c ..\src\backend\patch.c'
+$nativeAudio.src += ' ..\src\backend\audio_id_reservations.c ..\src\backend\audio_effective_policy.c ..\src\backend\hook.c ..\src\backend\patch.c'
 $soundSources = ($tests | Where-Object { $_.name -eq 'package_compiler_test' }).src -replace '^package_compiler_test.c ', 'package_sound_test.c '
 $soundSources += ' ..\src\backend\package_sound.c ..\src\backend\audio_banks.c'
 $tests += @{ name = "package_sound_test"; src = $soundSources; arg = "" }

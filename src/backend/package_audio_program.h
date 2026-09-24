@@ -56,6 +56,9 @@ int sh_package_audio_program_bus_equal(const sh_package_audio_program *program,
  * values do not acquire delivery owners. Numeric binding/native publication
  * must still be performed transactionally before using these recipes. */
 const sh_audio_bus_policy *sh_package_audio_program_bus_policy(const sh_package_audio_program *program);
+/* Whether the composed bus policy changes anything relative to the native
+ * baseline recipes (an authored value, a removal or a new bus). */
+int sh_package_audio_program_bus_edited(const sh_package_audio_program *program);
 /* Available after bind. Values use the same committed private IDs as the bank
  * streams; failures preserve this entire prior view. This is prepared output,
  * not proof of native bus publication. Owners use the unbound policy indexes. */
@@ -78,6 +81,10 @@ const sh_audio_shared_policy *sh_package_audio_program_bound_shared(const sh_pac
  * plus its private dependency suppliers. Baseline-equal settings own nothing. */
 int sh_package_audio_program_shared_owners(const sh_package_audio_program *program,
     size_t setting, const sh_package_owners **owners, const sh_package_owners **gameplay);
+/* Installed native Init controls as a baseline-only policy (every setting
+ * unedited). Empty when no Init bank is installed. Reads originals only. */
+int sh_package_audio_baseline_shared(sh_audio_originals *originals, sh_audio_shared_policy *out,
+    char *error, size_t capacity);
 /* Identity includes exact resolved HIRC/media behavior. Equal digest roots are
  * checked with the graph's exact partition before being returned to the outer
  * compiler. A sound must have been collected before prepare. */
@@ -108,6 +115,14 @@ size_t sh_package_audio_program_banks(const sh_package_audio_program *program, s
 size_t sh_package_audio_program_scopes(const sh_package_audio_program *program);
 const sh_audio_graph_bank *sh_package_audio_program_bank(const sh_package_audio_program *program,
     size_t scope, size_t index, const sh_audio_bank_binding **binding);
+/* Native activation plan for a bound program: every scope bank in native
+ * registration order, deduplicated by the caller. numeric=1 loads the bound
+ * identity by file ID (relocated or decimally named banks); otherwise the
+ * native name loader opens filename. The native baseline witness scope is not
+ * an activation scope. Visit returns 0 to stop; the call then fails. */
+int sh_package_audio_program_loads(const sh_package_audio_program *program,
+    int (*visit)(void *, uint32_t id, const char *filename, int numeric), void *context,
+    char *error, size_t capacity);
 /* Bound streamed media (including prefetched streams) uses its assigned
  * numeric filename. Resident DATA is already in the prepared bank stream.
  * Requires a successful bind when this scope contains streamed media. */

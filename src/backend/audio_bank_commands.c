@@ -122,6 +122,46 @@ done:
     return result;
 }
 
+/* Usage slots are 0x80-byte objects chained at +0x20 with ID +0x10, backing
+ * memory +0x18, slot references +0x70, preparation references +0x74 and the
+ * loaded flag in bit 0 of +0x78 on both renderers. */
+int sh_audio_registry_bank(const sh_audio_registry *registry,uint32_t id,sh_audio_bank_usage *out,
+    char *error,size_t capacity)
+{
+    const unsigned char *manager=NULL;int result=-1;volatile int held=0;
+    if(error && capacity)*error=0;
+    if(out)memset(out,0,sizeof(*out));
+    if(!out || !id || !registry || !registry->manager_slot || !registry->bank_lock)goto done;
+    __try { manager=*registry->manager_slot; }
+    __except(EXCEPTION_EXECUTE_HANDLER) { goto done; }
+    if(!manager)goto done;
+    __try {
+        __try {
+            EnterCriticalSection(registry->bank_lock);held=1;result=0;
+            for(size_t i=0;i<193 && result==0;i++) {
+                const unsigned char *node,*slow,*fast;memcpy(&node,manager+0x690+i*sizeof(void *),sizeof(node));
+                slow=fast=node;
+                while(node) {
+                    uint32_t value;const void *memory;memcpy(&value,node+0x10,4);memcpy(&memory,node+0x18,sizeof(memory));
+                    if(value==id && !memory) {
+                        memcpy(&out->references,node+0x70,4);memcpy(&out->prepared,node+0x74,4);
+                        out->loaded=node[0x78]&1;result=1;break;
+                    }
+                    memcpy(&node,node+0x20,sizeof(node));
+                    if(slow)memcpy(&slow,slow+0x20,sizeof(slow));
+                    if(fast)memcpy(&fast,fast+0x20,sizeof(fast));
+                    if(fast)memcpy(&fast,fast+0x20,sizeof(fast));
+                    if(slow && slow==fast){result=-1;break;}
+                }
+            }
+        } __finally { if(held)LeaveCriticalSection(registry->bank_lock); }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { result=-1; }
+done:
+    if(result<0 && out)memset(out,0,sizeof(*out));
+    if(result<0 && error && capacity)snprintf(error,capacity,"native audio bank usage is unavailable or invalid");
+    return result;
+}
+
 int sh_audio_bank_commands_bind(sh_audio_bank_commands *commands,
     const unsigned char *image, const sig_result *results, size_t count)
 {

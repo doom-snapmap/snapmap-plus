@@ -199,6 +199,20 @@ int sh_audio_id_lease_ready(sh_audio_id_lease *lease, char *error, size_t capaci
 }
 void sh_audio_id_lease_activate(sh_audio_id_lease *lease)
 { if (lease) { ar_comparisons_clear(lease, NULL); lease->active = 1; } }
+int sh_audio_id_lease_active(const sh_audio_id_lease *lease)
+{ return lease && lease->active; }
+int sh_audio_id_lease_exclusive(const sh_audio_id_lease *lease,
+    int (*visit)(void *, sh_audio_identity_domain, uint32_t), void *context)
+{
+    if (!lease || !visit) return 0;
+    for (const ar_claim *c = lease->claims; c; c = c->next) {
+        const ar_entry *e = c->entry; int shared = 0;
+        if (e->original || e->absent) continue;
+        for (const ar_claim *peer = e->claims; peer && !shared; peer = peer->peer) shared = peer->owner != lease;
+        if (!shared && !visit(context, e->domain, e->id)) return 0;
+    }
+    return 1;
+}
 void sh_audio_id_lease_release(sh_audio_id_lease *lease)
 {
     if (!lease) return;

@@ -10,6 +10,7 @@
 #include "package_runtime.h"
 #include "backend_log.h"
 #include "hook.h"
+#include "audio_effective_policy.h"
 
 typedef int (*ab_load_fn)(const char *name, int pool, uint32_t *id);
 typedef int (*ab_unload_fn)(uint32_t id, const void *memory, int *pool);
@@ -45,8 +46,16 @@ struct sh_audio_bank_addition {
     size_t count;
     DWORD thread;
     int prepared;
+    /* Retained-program mode: programs appended from first_program and the
+     * bank loads this addition took belong to it until accept or rollback. */
+    int programs;
+    size_t first_program;
+    uint32_t *loaded;
+    size_t loaded_count;
 };
 static sh_audio_bank_addition *g_addition;
+static void an_programs_addition_rollback(sh_audio_bank_addition *addition);
+static void an_programs_addition_accept(sh_audio_bank_addition *addition);
 
 static int an_error(char *error, size_t capacity, const char *message)
 { if (error && capacity) snprintf(error, capacity, "%s", message); return 0; }
@@ -790,7 +799,8 @@ void sh_audio_banks_native_additions_accept(sh_audio_bank_addition **handle)
 {
     sh_audio_bank_addition *addition = handle ? *handle : NULL;
     if (!addition) return;
-    free(addition->before); free(addition); *handle = NULL; g_addition = NULL;
+    if (addition->programs && addition->prepared) an_programs_addition_accept(addition);
+    free(addition->loaded); free(addition->before); free(addition); *handle = NULL; g_addition = NULL;
 }
 
 int sh_audio_banks_native_additions_end(sh_audio_bank_addition **handle,
@@ -802,7 +812,436 @@ int sh_audio_banks_native_additions_end(sh_audio_bank_addition **handle,
         return an_error(error,capacity,"playback settings must be restored or accepted before ending bank activation");
     if (addition != g_addition || addition->thread != GetCurrentThreadId() ||
         (accepted && !addition->prepared)) return an_error(error, capacity, "additive audio session has not completed");
-    if (!accepted && !sh_audio_banks_restore_additions(g_slots, g_count, addition->before,
+    if (!accepted && addition->programs) {
+        an_programs_addition_rollback(addition); addition->prepared = 0;
+    } else if (!accepted && !sh_audio_banks_restore_additions(g_slots, g_count, addition->before,
         addition->count, (sh_audio_bank_ops){NULL, an_load, an_unload}, error, capacity)) return 0;
     sh_audio_banks_native_additions_accept(handle); return 1;
 }
+
+/* Retained audio programs. Each active program's scope banks stay loaded while
+ * the program is published; superseded programs retire only after their banks
+ * are idle (no playback item holds a slot reference), native unload succeeded
+ * and every identity only they reserved has left the native registries. Their
+ * owners (and so graphs, sources and ID leases) are released only then. */
+typedef struct an_pbank {
+    uint32_t id;
+    char filename[260];
+    int numeric, owned, uncertain;
+    size_t active, retiring;
+} an_pbank;
+typedef struct an_program {
+    void *owner;
+    sh_package_audio_program *program;
+    sh_audio_id_lease *lease;
+    size_t *banks, bank_count;
+    int retiring;
+} an_program;
+static an_pbank *g_pbanks;
+static size_t g_pbank_count;
+static an_program *g_programs;
+static size_t g_program_count;
+static void (*g_program_release)(void *owner);
+static int g_shared_published;
+static sh_audio_limits_change g_tx_limits;
+static sh_audio_environment_change g_tx_environment;
+static sh_audio_state_change g_tx_state;
+static sh_audio_parameter_change g_tx_parameter;
+
+static int an_fail(char *error, size_t capacity, const char *format, uint32_t value)
+{ if (error && capacity) snprintf(error, capacity, format, (unsigned)value); return 0; }
+static size_t an_pbank_find(uint32_t id)
+{
+    for (size_t i = 0; i < g_pbank_count; i++) if (g_pbanks[i].id == id) return i;
+    return SIZE_MAX;
+}
+static size_t an_pbank_add(uint32_t id, const char *filename, int numeric)
+{
+    size_t index = an_pbank_find(id);
+    if (index != SIZE_MAX) return index;
+    if (!filename || strlen(filename) >= sizeof(g_pbanks[0].filename) ||
+        g_pbank_count >= SIZE_MAX / sizeof(*g_pbanks) - 1) return SIZE_MAX;
+    an_pbank *grown = realloc(g_pbanks, (g_pbank_count + 1) * sizeof(*grown));
+    if (!grown) return SIZE_MAX;
+    g_pbanks = grown; memset(g_pbanks + g_pbank_count, 0, sizeof(*g_pbanks));
+    g_pbanks[g_pbank_count].id = id; g_pbanks[g_pbank_count].numeric = numeric;
+    strcpy_s(g_pbanks[g_pbank_count].filename, sizeof(g_pbanks[0].filename), filename);
+    return g_pbank_count++;
+}
+typedef struct an_plan { size_t *banks, count, capacity; int failed; } an_plan;
+static int an_plan_visit(void *context, uint32_t id, const char *filename, int numeric)
+{
+    an_plan *plan = context;
+    size_t index = an_pbank_add(id, filename, numeric);
+    if (index == SIZE_MAX) { plan->failed = 1; return 0; }
+    for (size_t i = 0; i < plan->count; i++) if (plan->banks[i] == index) return 1;
+    if (plan->count == plan->capacity) {
+        size_t next = plan->capacity ? plan->capacity * 2 : 16;
+        if (next < plan->capacity || next > SIZE_MAX / sizeof(*plan->banks)) { plan->failed = 1; return 0; }
+        size_t *grown = realloc(plan->banks, next * sizeof(*grown));
+        if (!grown) { plan->failed = 1; return 0; }
+        plan->banks = grown; plan->capacity = next;
+    }
+    plan->banks[plan->count++] = index; return 1;
+}
+/* Drop table rows nothing references or owns, remapping program indexes. */
+static void an_pbank_compact(void)
+{
+    size_t *map = malloc((g_pbank_count ? g_pbank_count : 1) * sizeof(*map)), kept = 0;
+    if (!map) return;
+    for (size_t i = 0; i < g_pbank_count; i++) {
+        const an_pbank *b = g_pbanks + i;
+        if (!b->active && !b->retiring && !b->owned && !b->uncertain) { map[i] = SIZE_MAX; continue; }
+        map[i] = kept; g_pbanks[kept++] = *b;
+    }
+    for (size_t p = 0; p < g_program_count; p++)
+        for (size_t j = 0; j < g_programs[p].bank_count; j++) g_programs[p].banks[j] = map[g_programs[p].banks[j]];
+    g_pbank_count = kept; free(map);
+}
+static void an_pbank_holders(void)
+{
+    for (size_t i = 0; i < g_pbank_count; i++) g_pbanks[i].active = g_pbanks[i].retiring = 0;
+    for (size_t p = 0; p < g_program_count; p++)
+        for (size_t j = 0; j < g_programs[p].bank_count; j++) {
+            an_pbank *b = g_pbanks + g_programs[p].banks[j];
+            if (g_programs[p].retiring) b->retiring++; else b->active++;
+        }
+}
+static int an_named_load(const char *filename, uint32_t id)
+{
+    uint32_t loaded = 0; int result;
+    if (!g_load) return 2;
+    __try { result = g_load(filename, -1, &loaded); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    /* The name loader hashes the stem. A different identity is not this bank. */
+    if ((result == 1 || result == 69) && loaded != id) return result == 1 ? -1 : 2;
+    return result;
+}
+/* Load a planned bank unless a native slot already serves it. Existing banks
+ * are shared, not owned: their native owner decides their lifetime. */
+static int an_pbank_load(size_t index, uint32_t **loaded, size_t *loaded_count, char *error, size_t capacity)
+{
+    an_pbank *b = g_pbanks + index; sh_audio_bank_usage usage;
+    if (b->uncertain) return an_fail(error, capacity, "native audio bank %u has an uncertain earlier load or unload", b->id);
+    int present = sh_audio_registry_bank(&g_registry, b->id, &usage, error, capacity);
+    if (present < 0) return 0;
+    if (present && usage.loaded) return 1;
+    b->owned = 0; /* An owned load that vanished was unloaded externally. */
+    int result = b->numeric ? sh_audio_bank_commands_load(&g_commands, b->id) : an_named_load(b->filename, b->id);
+    if (result == 69) return 1;
+    if (result != 1) {
+        if (result < 0) b->uncertain = 1;
+        return an_fail(error, capacity, result < 0 ? "native audio bank %u load had uncertain effects" :
+            "native audio bank %u could not be loaded", b->id);
+    }
+    b->owned = 1;
+    if (loaded) {
+        uint32_t *grown = realloc(*loaded, (*loaded_count + 1) * sizeof(*grown));
+        if (!grown) return an_fail(error, capacity, "cannot record native audio bank %u ownership", b->id);
+        *loaded = grown; grown[(*loaded_count)++] = b->id;
+    }
+    return 1;
+}
+/* 1 unloaded or already gone, 0 still in use, -1 native failure/uncertain. */
+static int an_pbank_unload_idle(size_t index, char *error, size_t capacity)
+{
+    an_pbank *b = g_pbanks + index; sh_audio_bank_usage usage; int result;
+    if (!b->owned) return 1;
+    if (b->uncertain) return -1;
+    int present = sh_audio_registry_bank(&g_registry, b->id, &usage, error, capacity);
+    if (present < 0) return -1;
+    if (!present) { b->owned = 0; return 1; }
+    /* Our load holds exactly one slot reference. Any other means a playing
+     * item still reads this bank; native unload would stop it. */
+    if (!usage.loaded || usage.references != 1 || usage.prepared) return 0;
+    __try { result = g_unload ? g_unload(b->id, NULL, NULL) : 2; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { result = -1; }
+    if (result == 1) { b->owned = 0; return 1; }
+    if (result < 0) b->uncertain = 1;
+    an_fail(error, capacity, "native audio bank %u could not be unloaded", b->id);
+    return -1;
+}
+typedef struct an_vacancy { int state; } an_vacancy;
+static int an_vacant(void *context, sh_audio_identity_domain domain, uint32_t id)
+{
+    an_vacancy *vacancy = context; (void)domain;
+    int occupied = sh_audio_registry_occupied(&g_registry, id, NULL, 0);
+    if (occupied) { vacancy->state = occupied < 0 ? -1 : 1; return 0; }
+    return 1;
+}
+static void an_program_free(an_program *program)
+{
+    free(program->banks);
+    if (g_program_release && program->owner) g_program_release(program->owner);
+    memset(program, 0, sizeof(*program));
+}
+static int an_programs_busy(void)
+{
+    return g_limits.pending || g_environment.pending || g_state.pending || g_parameter.pending ||
+        g_bank_gate.scope || g_commands.uncertain;
+}
+
+/* Main-thread boundary with no provider, publication or render lock held.
+ * Unloads owned banks no active program needs once they are idle, then
+ * releases superseded programs whose private identities left the engine.
+ * Returns the number of programs still retiring, or -1 on a native failure. */
+int sh_audio_banks_native_programs_retire(char *error, size_t capacity)
+{
+    int failed = 0; size_t remaining = 0;
+    if (error && capacity) *error = 0;
+    if (an_programs_busy() || g_addition) return (int)g_program_count;
+    an_pbank_holders();
+    for (size_t i = 0; i < g_pbank_count; i++)
+        if (!g_pbanks[i].active && g_pbanks[i].owned && an_pbank_unload_idle(i, error, capacity) < 0) failed = 1;
+    for (size_t p = 0; p < g_program_count;) {
+        an_program *program = g_programs + p; int ready = program->retiring;
+        for (size_t j = 0; ready && j < program->bank_count; j++) {
+            const an_pbank *b = g_pbanks + program->banks[j];
+            ready = !b->owned || b->active;
+        }
+        if (ready) {
+            an_vacancy vacancy = {0};
+            if (program->lease && !sh_audio_id_lease_exclusive(program->lease, an_vacant, &vacancy) && !vacancy.state)
+                vacancy.state = -1;
+            ready = !vacancy.state; failed |= vacancy.state < 0;
+        }
+        if (!ready) { remaining += program->retiring != 0; p++; continue; }
+        an_program_free(program);
+        memmove(g_programs + p, g_programs + p + 1, (g_program_count - p - 1) * sizeof(*g_programs));
+        g_program_count--;
+    }
+    an_pbank_holders(); an_pbank_compact();
+    if (failed && error && capacity && !*error) snprintf(error, capacity, "native audio retirement is waiting on an uncertain native state");
+    return failed ? -1 : (int)remaining;
+}
+
+static int an_policy_views(const sh_audio_active_program *programs, size_t count,
+    const sh_audio_shared_policy ***views, char *error, size_t capacity)
+{
+    *views = calloc(count ? count : 1, sizeof(**views));
+    if (!*views) return an_error(error, capacity, "cannot compose active audio controls");
+    for (size_t i = 0; i < count; i++) {
+        (*views)[i] = sh_package_audio_program_bound_shared(programs[i].program);
+        if (!(*views)[i]) return an_error(error, capacity, "active audio program has no bound shared controls");
+    }
+    return 1;
+}
+/* One serialized publication of every shared-control leg. Bank commands have
+ * completed before this and none are submitted while it holds the gate. */
+static int an_shared_publish(const sh_audio_shared_policy *effective, char *error, size_t capacity)
+{
+    sh_audio_bank_scope scope = {0}; int stage = 0, ok = 0;
+    if (!sh_audio_bank_gate_begin(&g_bank_gate, &scope, error, capacity)) return 0;
+    memset(&g_tx_limits, 0, sizeof(g_tx_limits)); memset(&g_tx_environment, 0, sizeof(g_tx_environment));
+    memset(&g_tx_state, 0, sizeof(g_tx_state)); memset(&g_tx_parameter, 0, sizeof(g_tx_parameter));
+    if (sh_audio_limits_native_apply(&g_limits, effective, &g_tx_limits, error, capacity) != 1) goto recover;
+    stage = 1;
+    if (sh_audio_environment_native_apply(&g_environment, effective, &g_tx_environment, error, capacity) != 1) goto recover;
+    stage = 2;
+    if (sh_audio_state_native_apply(&g_state, effective, &g_tx_state, error, capacity) != 1) goto recover;
+    stage = 3;
+    if (sh_audio_parameter_native_apply(&g_parameter, effective, &g_tx_parameter, error, capacity) != 1) goto recover;
+    stage = 4;
+    if (!sh_audio_banks_native_shared_ready(&scope, error, capacity)) goto recover;
+    sh_audio_limits_native_accept(&g_tx_limits); sh_audio_environment_native_accept(&g_tx_environment);
+    sh_audio_state_native_accept(&g_tx_state); sh_audio_parameter_native_accept(&g_tx_parameter);
+    ok = 1;
+recover:
+    if (!ok) {
+        /* Reverse order; a leg whose restore fails keeps its receipt and blocks
+         * later transitions until recovery succeeds. */
+        char ignored[256];
+        if (stage >= 4) sh_audio_parameter_native_restore(&g_tx_parameter, ignored, sizeof(ignored));
+        if (stage >= 3) sh_audio_state_native_restore(&g_tx_state, ignored, sizeof(ignored));
+        if (stage >= 2) sh_audio_environment_native_restore(&g_tx_environment, ignored, sizeof(ignored));
+        if (stage >= 1) sh_audio_limits_native_restore(&g_tx_limits, ignored, sizeof(ignored));
+    }
+    sh_audio_bank_gate_end(&scope, NULL, 0);
+    if (ok) {
+        char detail[256];
+        if (g_environment.pending && !sh_audio_environment_native_release(&g_tx_environment, detail, sizeof(detail))) backend_log(detail);
+        if (g_state.pending && !sh_audio_state_native_release(&g_tx_state, detail, sizeof(detail))) backend_log(detail);
+        if (g_parameter.pending && !sh_audio_parameter_native_release(&g_tx_parameter, detail, sizeof(detail))) backend_log(detail);
+    }
+    return ok;
+}
+static int an_program_known(const void *owner)
+{
+    for (size_t i = 0; i < g_program_count; i++) if (g_programs[i].owner == owner) return 1;
+    return 0;
+}
+static void an_release_owners(const sh_audio_active_program *programs, size_t count)
+{
+    for (size_t i = 0; i < count; i++) if (g_program_release && programs[i].owner) g_program_release(programs[i].owner);
+}
+static void an_unload_new(const uint32_t *loaded, size_t count)
+{
+    char ignored[256];
+    an_pbank_holders();
+    for (size_t i = count; i > 0; i--) {
+        size_t index = an_pbank_find(loaded[i - 1]);
+        if (index != SIZE_MAX && !g_pbanks[index].active) (void)an_pbank_unload_idle(index, ignored, sizeof(ignored));
+    }
+}
+/* Plan, ready and load the programs this call newly admits. On success the
+ * programs are appended (retiring=0) and own their planned bank indexes. */
+static int an_programs_admit(const sh_audio_active_program *programs, size_t count, size_t **plans,
+    size_t *plan_counts, uint32_t **loaded, size_t *loaded_count, char *error, size_t capacity)
+{
+    for (size_t i = 0; i < count; i++) {
+        an_plan plan = {0};
+        if (!programs[i].program || !sh_package_audio_program_loads(programs[i].program, an_plan_visit, &plan, error, capacity)) {
+            free(plan.banks);
+            if (!error || !capacity || !*error) an_error(error, capacity, "cannot plan active audio program banks");
+            return 0;
+        }
+        plans[i] = plan.banks; plan_counts[i] = plan.count;
+        if (programs[i].lease && !sh_audio_id_lease_active(programs[i].lease) &&
+            !sh_audio_id_lease_ready(programs[i].lease, error, capacity)) return 0;
+    }
+    for (size_t i = 0; i < count; i++)
+        for (size_t j = 0; j < plan_counts[i]; j++)
+            if (!an_pbank_load(plans[i][j], loaded, loaded_count, error, capacity)) return 0;
+    return 1;
+}
+
+/* Every effective edit needs a native leg that can publish and restore it. An
+ * edit without one is refused explicitly rather than silently not applied. */
+static int an_publishable(const sh_audio_active_program *programs, size_t count,
+    const sh_audio_shared_policy *effective, char *error, size_t capacity)
+{
+    for (size_t i = 0; i < effective->count; i++)
+        if (effective->settings[i].edited && effective->settings[i].record.kind == SH_AUDIO_SHARED_SWITCH)
+            return an_error(error, capacity, "native audio switch publication is not available for this edit");
+    for (size_t i = 0; i < count; i++)
+        if (sh_package_audio_program_bus_edited(programs[i].program))
+            return an_error(error, capacity, "native audio bus publication is not available for this edit");
+    return 1;
+}
+int sh_audio_banks_native_programs_activate(const sh_audio_active_program *programs, size_t count,
+    const sh_audio_shared_policy *baseline, void (*release)(void *), char *error, size_t capacity)
+{
+    size_t **plans = NULL, *plan_counts = NULL; uint32_t *loaded = NULL; size_t loaded_count = 0;
+    const sh_audio_shared_policy **views = NULL; sh_audio_shared_policy effective = {0};
+    an_program *next = NULL; int ok = 0;
+    if (error && capacity) *error = 0;
+    if (release) g_program_release = release;
+    if ((count && !programs) || count > SIZE_MAX / sizeof(*next) - g_program_count) {
+        an_release_owners(programs, count); return an_error(error, capacity, "invalid active audio program set");
+    }
+    if (an_programs_busy() || g_addition) {
+        an_release_owners(programs, count);
+        return an_error(error, capacity, "native audio recovery or another transaction must finish first");
+    }
+    plans = calloc(count ? count : 1, sizeof(*plans)); plan_counts = calloc(count ? count : 1, sizeof(*plan_counts));
+    next = calloc(count + g_program_count + 1, sizeof(*next));
+    if (!plans || !plan_counts || !next) { an_error(error, capacity, "cannot plan active audio programs"); goto done; }
+    for (size_t i = 0; i < count; i++) for (size_t j = 0; j < i; j++) if (programs[i].owner == programs[j].owner) {
+        an_error(error, capacity, "active audio program is listed twice"); goto done;
+    }
+    if (!an_policy_views(programs, count, &views, error, capacity) ||
+        !sh_audio_effective_shared(baseline, views, count, &effective, error, capacity) ||
+        !an_publishable(programs, count, &effective, error, capacity) ||
+        !an_programs_admit(programs, count, plans, plan_counts, &loaded, &loaded_count, error, capacity)) goto done;
+    /* An untouched native configuration stays untouched for vanilla content;
+     * once an edit was published, later transitions publish the complete
+     * effective policy so removed edits return to the native baseline. */
+    int edited = sh_audio_effective_shared_edited(&effective);
+    if ((edited || g_shared_published) && !an_shared_publish(&effective, error, capacity)) goto done;
+    g_shared_published = edited;
+    /* Commit: nothing below can fail. */
+    size_t used = 0;
+    for (size_t i = 0; i < count; i++) {
+        size_t known = SIZE_MAX;
+        for (size_t p = 0; p < g_program_count; p++) if (g_programs[p].owner == programs[i].owner) known = p;
+        if (known != SIZE_MAX) {
+            next[used] = g_programs[known]; g_programs[known].owner = NULL; free(next[used].banks);
+            if (g_program_release) g_program_release(programs[i].owner);
+        } else next[used] = (an_program){programs[i].owner, programs[i].program, programs[i].lease, NULL, 0, 0};
+        next[used].banks = plans[i]; next[used].bank_count = plan_counts[i]; plans[i] = NULL; next[used].retiring = 0;
+        if (next[used].lease && !sh_audio_id_lease_active(next[used].lease)) sh_audio_id_lease_activate(next[used].lease);
+        used++;
+    }
+    for (size_t p = 0; p < g_program_count; p++) if (g_programs[p].owner) {
+        next[used] = g_programs[p]; next[used].retiring = 1; used++;
+    }
+    free(g_programs); g_programs = next; g_program_count = used; next = NULL; ok = 1;
+done:
+    if (!ok) {
+        an_unload_new(loaded, loaded_count);
+        an_release_owners(programs, count);
+        an_pbank_holders(); an_pbank_compact();
+    }
+    if (plans) for (size_t i = 0; i < count; i++) free(plans[i]);
+    free(plans); free(plan_counts); free(loaded); free(next); free((void *)views);
+    sh_audio_shared_policy_free(&effective);
+    if (ok) {
+        char detail[256];
+        an_pbank_holders();
+        if (sh_audio_banks_native_programs_retire(detail, sizeof(detail)) < 0) backend_log(detail);
+    }
+    return ok;
+}
+
+/* Active-editor admission never retires or republishes shared controls: the
+ * clone view keeps current metadata. New programs load their banks now and
+ * activate their leases only at accept; rollback unloads what it took. */
+int sh_audio_banks_native_programs_add(sh_audio_bank_addition *addition,
+    const sh_audio_active_program *programs, size_t count, void (*release)(void *),
+    char *error, size_t capacity)
+{
+    size_t **plans = NULL, *plan_counts = NULL, fresh = 0, kept = 0;
+    sh_audio_active_program *admitted = NULL; int ok = 0;
+    if (error && capacity) *error = 0;
+    if (release) g_program_release = release;
+    if (!addition || addition != g_addition || addition->thread != GetCurrentThreadId() || addition->prepared ||
+        addition->programs || an_programs_busy() || (count && !programs)) {
+        an_release_owners(programs, count); return an_error(error, capacity, "additive audio session is unavailable");
+    }
+    admitted = calloc(count ? count : 1, sizeof(*admitted));
+    if (!admitted) { an_release_owners(programs, count); return an_error(error, capacity, "cannot admit audio programs"); }
+    for (size_t i = 0; i < count; i++) {
+        if (an_program_known(programs[i].owner)) { if (g_program_release) g_program_release(programs[i].owner); continue; }
+        admitted[fresh++] = programs[i];
+    }
+    addition->programs = 1; addition->first_program = g_program_count;
+    plans = calloc(fresh ? fresh : 1, sizeof(*plans)); plan_counts = calloc(fresh ? fresh : 1, sizeof(*plan_counts));
+    if (!plans || !plan_counts || fresh > SIZE_MAX / sizeof(*g_programs) - g_program_count - 1) {
+        an_error(error, capacity, "cannot plan admitted audio programs"); goto done;
+    }
+    if (!an_programs_admit(admitted, fresh, plans, plan_counts, &addition->loaded, &addition->loaded_count, error, capacity)) goto done;
+    an_program *grown = realloc(g_programs, (g_program_count + fresh + 1) * sizeof(*grown));
+    if (!grown) { an_error(error, capacity, "cannot retain admitted audio programs"); goto done; }
+    g_programs = grown;
+    for (size_t i = 0; i < fresh; i++) {
+        g_programs[g_program_count++] = (an_program){admitted[i].owner, admitted[i].program, admitted[i].lease,
+            plans[i], plan_counts[i], 0};
+        plans[i] = NULL;
+    }
+    kept = fresh; an_pbank_holders(); ok = 1;
+done:
+    if (!ok) {
+        an_unload_new(addition->loaded, addition->loaded_count);
+        free(addition->loaded); addition->loaded = NULL; addition->loaded_count = 0;
+        an_pbank_holders(); an_pbank_compact();
+    }
+    for (size_t i = kept; i < fresh; i++) if (g_program_release && admitted[i].owner) g_program_release(admitted[i].owner);
+    if (plans) for (size_t i = 0; i < fresh; i++) free(plans[i]);
+    free(plans); free(plan_counts); free(admitted);
+    addition->prepared = ok;
+    return ok;
+}
+/* Rollback of a program-mode addition: its programs leave at once and the
+ * banks it loaded unload when idle (or retire later). */
+static void an_programs_addition_rollback(sh_audio_bank_addition *addition)
+{
+    while (g_program_count > addition->first_program) an_program_free(g_programs + --g_program_count);
+    an_unload_new(addition->loaded, addition->loaded_count);
+    an_pbank_holders(); an_pbank_compact();
+}
+static void an_programs_addition_accept(sh_audio_bank_addition *addition)
+{
+    for (size_t p = addition->first_program; p < g_program_count; p++)
+        if (g_programs[p].lease && !sh_audio_id_lease_active(g_programs[p].lease)) sh_audio_id_lease_activate(g_programs[p].lease);
+}
+size_t sh_audio_banks_native_programs_count(void) { return g_program_count; }
