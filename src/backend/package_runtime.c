@@ -75,6 +75,7 @@ typedef struct pr_provider {
     struct pr_provider *parent;
     char *data_root;
     char *rejections;
+    char *unserved; /* Valid installed packages this build cannot link yet. */
     char *coverage; /* Accounted missing product coverage; packages still served. */
     volatile LONG references;
 } pr_provider;
@@ -185,7 +186,7 @@ static void pr_release(pr_provider *provider)
     for (size_t i = 0; i < provider->audio_source_count; i++) pr_release(provider->audio_sources[i]);
     free(provider->audio_sources);
     pr_release(provider->parent); free(provider->data_root); free(provider->rejections);
-    free(provider->coverage); free(provider);
+    free(provider->unserved); free(provider->coverage); free(provider);
 }
 /* Precedence follows call order; one owner appears once. A view contributes
  * the owners it already retains, a root provider itself when it has audio. */
@@ -512,6 +513,8 @@ static sh_package_baseline_reader g_test_baseline;
 static void *g_test_baseline_context;
 static sh_decl_registry_source g_test_source_registry;
 static uintptr_t g_test_source_reflection;
+static int g_test_installed_links;
+void sh_package_runtime_test_installed_links(int enabled) { g_test_installed_links = enabled; }
 static const char *g_test_audio_root;
 static const char *g_test_audio_bank_prefix;
 static const wchar_t *g_test_audio_language;
@@ -819,7 +822,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
 #endif
     DWORD n;
     size_t default_index;
-    char *slash, *rejections = NULL;
+    char *slash, *rejections = NULL, *unserved = NULL;
     size_t invalid_package = SIZE_MAX, unserved_package = SIZE_MAX;
     sh_package_owners conflicted = {0};
     sh_package_library isolated = {0};
@@ -1005,6 +1008,8 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
         if (contexts
 #ifndef SH_PACKAGE_RUNTIME_TESTING
             || (!source_root && !product_only && sources->component_count)
+#else
+            || (g_test_installed_links && !source_root && !product_only && sources->component_count)
 #endif
         ) {
             sh_decl_registry_source registry = {0};
@@ -1077,7 +1082,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             if (unserved_package >= sources->package_count) goto done;
             /* Its files are valid and stay available to map installation;
              * healthy peers compile without it. */
-            if (!pr_unserved(&rejections, &sources->packages[unserved_package], error) ||
+            if (!pr_unserved(&unserved, &sources->packages[unserved_package], error) ||
                 !sh_package_sources_remove(sources, unserved_package)) goto done;
             continue;
         }
@@ -1163,6 +1168,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
 #endif
     provider->references = 1;
     provider->rejections = rejections; rejections = NULL;
+    provider->unserved = unserved; unserved = NULL;
     provider->coverage = isolated.coverage; isolated.coverage = NULL;
     if (provider->coverage) backend_log(provider->coverage);
     sources = NULL; compiled = NULL; catalog = NULL;
@@ -1187,7 +1193,7 @@ done:
     sh_strids_reservation_free(strings);
     free(prepared_tasks);
 #endif
-    free(rejections);
+    free(rejections); free(unserved);
     return provider;
 }
 
@@ -3256,8 +3262,10 @@ char *sh_package_runtime_summary(void)
     AcquireSRWLockShared(&g_lock);
     const char *rejections = g_library_provider ? g_library_provider->rejections : NULL;
     const char *coverage = g_library_provider ? g_library_provider->coverage : NULL;
+    const char *unserved = g_library_provider ? g_library_provider->unserved : NULL;
     capacity = 4096 + (g_sources ? g_sources->package_count : 0) * 1024 +
-        (rejections ? strlen(rejections) : 0) + (coverage ? strlen(coverage) : 0);
+        (rejections ? strlen(rejections) : 0) + (coverage ? strlen(coverage) : 0) +
+        (unserved ? strlen(unserved) : 0);
     text = (char *)calloc(capacity, 1);
     if (!text) goto done;
     length += (size_t)snprintf(text + length, capacity - length, "Installed library: %zu packages.\n",
@@ -3265,6 +3273,8 @@ char *sh_package_runtime_summary(void)
     if (rejections) length += (size_t)snprintf(text + length, capacity - length, "%s%s", rejections,
         "Skipped packages stay unchanged on disk. Packages made for earlier Snapmap+ releases can be "
         "converted: close DOOM and run snapmap-plus migrate-overrides.\n");
+    if (unserved) length += (size_t)snprintf(text + length, capacity - length, "%s%s", unserved,
+        "Packages not served yet stay installed and unchanged; they need a Snapmap+ update, not an edit.\n");
     if (coverage) length += (size_t)snprintf(text + length, capacity - length, "%s", coverage);
     if (g_authoring_error[0]) length += (size_t)snprintf(text + length, capacity - length,
         "Local authoring composition unavailable: %s\nIndependent map packages can still compile.\n", g_authoring_error);

@@ -60,6 +60,7 @@ struct sh_package_audio_program {
     sh_audio_bus_policy bound_bus_policy;
     int bus_bound;
     pap_bus_owners *bus_policy_owners;
+    size_t failed_scope; /* Scope whose capture failed in the last prepare. */
 };
 static int pap_fail(char *error, size_t capacity, const char *message, const char *name)
 {
@@ -158,7 +159,7 @@ sh_package_audio_program *sh_package_audio_program_open(
     if (!p) goto invalid;
     p->scopes = calloc(count ? count : 1, sizeof(*p->scopes));
     if (!p->scopes) { free(p); goto invalid; }
-    p->count = count; p->originals = originals;
+    p->count = count; p->originals = originals; p->failed_scope = SIZE_MAX;
     for (size_t i = 0; i < count; i++) {
         if (!scopes[i]) { sh_package_audio_program_close(p); goto invalid; }
         p->scopes[i].compiled = scopes[i];
@@ -601,12 +602,17 @@ int sh_package_audio_program_shared_origin(const sh_package_audio_program *p,
     *scope=row.scope<p->count ? row.scope : SIZE_MAX;*bank=row.scope<p->count ? row.bank : SIZE_MAX;
     *baseline=row.baseline;return 1;
 }
+int sh_package_audio_program_contains(const sh_package_audio_program *p, size_t scope, const char *sound)
+{ return pap_find(p, scope, sound) != NULL; }
+size_t sh_package_audio_program_failed_scope(const sh_package_audio_program *p)
+{ return p ? p->failed_scope : SIZE_MAX; }
 int sh_package_audio_program_prepare(sh_package_audio_program *p, char *error, size_t capacity)
 {
     if (!p) return pap_fail(error, capacity, "audio program is unavailable", NULL);
     if (p->graph) return 1;
     sh_audio_graph_scope *inputs = NULL; sh_audio_link_graph *graph = NULL;
     pap_root_ref *roots = NULL; size_t count = 0, at = 0; int ok = 0;
+    p->failed_scope = SIZE_MAX;
     if (p->count >= SIZE_MAX / sizeof(*inputs)) goto done;
     inputs = calloc(p->count+1, sizeof(*inputs)); if (!inputs) goto done;
     for (size_t i = 0; i < p->count; i++) {
@@ -614,6 +620,7 @@ int sh_package_audio_program_prepare(sh_package_audio_program *p, char *error, s
         if (scope->count > SIZE_MAX - count || scope->count > SIZE_MAX / sizeof(uint32_t)) goto done;
         count += scope->count;
         if (!scope->count && !scope->inventory) continue;
+        p->failed_scope = i;
         if (!pap_inventory(p, i, error, capacity)) goto done;
         uint32_t *events = malloc((scope->count ? scope->count : 1) * sizeof(*events)); if (!events) goto done;
         for (size_t j = 0; j < scope->count; j++) events[j] = scope->sounds[j].event;
@@ -626,6 +633,7 @@ int sh_package_audio_program_prepare(sh_package_audio_program *p, char *error, s
         }
         free(events); if (!captured) goto done;
         inputs[i] = *sh_package_audio_capture_input(scope->capture);
+        p->failed_scope = SIZE_MAX;
     }
     if(!pap_bus_capture_baseline(p,inputs,error,capacity))goto done;
     if(p->bus_baseline)inputs[p->count]=*sh_package_audio_capture_input(p->bus_baseline);
@@ -634,7 +642,9 @@ int sh_package_audio_program_prepare(sh_package_audio_program *p, char *error, s
     roots = calloc(count ? count : 1, sizeof(*roots)); if (!roots) goto done;
     for (size_t i = 0; i < p->count; i++) for (size_t j = 0; j < p->scopes[i].count; j++) {
         pap_sound *sound = p->scopes[i].sounds + j;
-        if (!sh_audio_link_graph_event(graph, i, sound->event, &sound->root, error, capacity)) goto done;
+        if (!sh_audio_link_graph_event(graph, i, sound->event, &sound->root, error, capacity)) {
+            p->failed_scope = i; goto done;
+        }
         pap_sources sources = {p->scopes[i].compiled, sound};
         if (!sh_audio_link_graph_sources(graph, i, sound->event, pap_source_owners, &sources, error, capacity)) goto done;
         roots[at++].sound = sound;

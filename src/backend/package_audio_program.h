@@ -31,6 +31,12 @@ int sh_package_audio_program_affected(const sh_package_audio_program *program,
     size_t scope, const char *sound);
 int sh_package_audio_program_prepare(sh_package_audio_program *program,
     char *error, size_t capacity);
+/* Whether a sound was collected. Uncollected SnapMap sounds keep their native
+ * event binding and need no program root, owners or output. */
+int sh_package_audio_program_contains(const sh_package_audio_program *program,
+    size_t scope, const char *sound);
+/* The scope whose audio capture failed during the last prepare, else SIZE_MAX. */
+size_t sh_package_audio_program_failed_scope(const sh_package_audio_program *program);
 /* Retained shared bus assignments with exact private dependency identities and
  * delivery ownership. These are composition inputs, not independent bus objects
  * or authorization to replay the native constructor. Metadata and owners remain

@@ -2555,6 +2555,54 @@ done:
     cleanup_resources(data);
 }
 
+/* A package whose own content reaches a dependency SnapMap does not ship stays
+ * installed but is not served; its healthy peer still compiles, and neither is
+ * reported as a malformed package to skip. */
+static void test_unserved_coverage(void)
+{
+    char data[MAX_PATH], *summary;
+    admission_fixture f; admission_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    snprintf(data, sizeof(data), "%s/unserved", root);
+    create("unserved/overrides/healthy/package.json", "{\"id\":\"healthy\",\"name\":\"Healthy\"}");
+    create("unserved/overrides/healthy/assets/generated/decls/entitydef/admission/healthy.decl",
+        "{ class = \"Entity\"; edit = { health = 5; } }");
+    create("unserved/overrides/gap/package.json", "{\"id\":\"gap\",\"name\":\"Gap\"}");
+    create("unserved/overrides/gap/assets/generated/decls/entitydef/admission/gap.decl",
+        "{ class = \"Entity\"; edit = { target = \"ai/cyberdemon\"; } }");
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(baseline, NULL);
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    sh_package_runtime_test_installed_links(1);
+    CHECK(sh_package_runtime_refresh(data)); CHECK(sh_package_runtime_ready());
+    const sh_package_compilation *library = sh_package_runtime_library_acquire();
+    int healthy = 0, gap = 0;
+    for (size_t i = 0; library && i < library->resource_count; i++) {
+        char error[256]; size_t length = 0;
+        unsigned char *body = sh_package_compilation_read(library, library->resources + i, SIZE_MAX,
+            &length, error, sizeof(error));
+        unsigned char *text = body ? realloc(body, length + 1) : NULL;
+        if (!text) { free(body); continue; }
+        text[length] = 0;
+        healthy += strstr((const char *)text, "health = 5") != NULL;
+        gap += strstr((const char *)text, "ai/cyberdemon") != NULL;
+        free(text);
+    }
+    sh_package_runtime_release();
+    CHECK(healthy == 1 && !gap);
+    summary = sh_package_runtime_summary();
+    int reported = summary && strstr(summary, "Installed library: 2 packages") &&
+        strstr(summary, "is not served yet (product coverage)") && strstr(summary, "campaign dependency") &&
+        strstr(summary, "(via entitydef ai/cyberdemon <- entitydef admission/gap)") &&
+        strstr(summary, "need a Snapmap+ update") && !strstr(summary, "Skipped local package");
+    if (!reported) fprintf(stderr, "unserved summary: %s\n", summary ? summary : "(none)");
+    CHECK(reported); free(summary);
+    sh_package_runtime_test_installed_links(0);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data);
+}
+
 int main(int argc, char **argv)
 {
     const sh_package_change map_a_changes[] = {
@@ -2582,6 +2630,7 @@ int main(int argc, char **argv)
     test_duplicate_editor_controls();
     test_audio_programs();
     test_local_isolation();
+    test_unserved_coverage();
     test_map_usage_admission();
     snprintf(map_a, sizeof(map_a), "%s\\map-a", root); snprintf(map_b, sizeof(map_b), "%s\\map-b", root);
     create("overrides/local/package.json", descriptor);

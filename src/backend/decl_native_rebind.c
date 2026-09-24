@@ -647,13 +647,54 @@ static int nr_material(nr_walk *walk, const sh_decl_material_reference *refs, si
     return 1;
 }
 
+/* idDeclEnv::Parse (Vulkan 0x1417af1d0): inherit { base } finds its parent env
+ * without a default (an unknown base is a parse error); renderParms { ... } is
+ * read by the same parm block reader materials use (0x140db3710), so it binds
+ * render parameters and their values exactly like a material's parameters;
+ * allowOverride takes one boolean. */
+static int nr_environment(nr_walk *walk, const sh_decl_material_schema *schema, char *error, size_t capacity)
+{
+    sh_decl_tokens tokens = {0}; size_t at = 0; int ok = 0;
+    if (!sh_decl_native_lex(walk->source, &tokens, error, capacity)) return 0;
+    if (!nr_take(&tokens, &at, "{")) goto done;
+    while (at < tokens.count && !sh_decl_token_is(&tokens, at, "}")) {
+        if (nr_keyword(&tokens, at, "inherit")) {
+            at++;
+            if (!nr_take(&tokens, &at, "{")) goto done;
+            if (!sh_decl_token_is(&tokens, at, "}") && !nr_reference(walk, &tokens, &at, "env", 0)) goto done;
+            if (!nr_take(&tokens, &at, "}")) goto done;
+        } else if (nr_keyword(&tokens, at, "renderParms")) {
+            at++;
+            if (!sh_decl_token_is(&tokens, at, "{")) goto done;
+            size_t close = tokens.items[at].close;
+            if (close >= tokens.count) goto done;
+            sh_decl_source block = {walk->source.text + tokens.items[at].begin,
+                tokens.items[close].end - tokens.items[at].begin};
+            sh_decl_material parameters = {0};
+            int read = sh_decl_material_read(block, schema, &parameters, error, capacity) &&
+                nr_material(walk, parameters.references, parameters.reference_count);
+            sh_decl_material_free(&parameters);
+            if (!read) goto done;
+            at = close + 1;
+        } else if (nr_keyword(&tokens, at, "allowOverride")) {
+            at++;
+            if (!nr_atom(&tokens, &at, 0)) goto done;
+        } else goto done;
+    }
+    ok = nr_take(&tokens, &at, "}") && at == tokens.count;
+done:
+    if (!ok && error && capacity && !*error) snprintf(error, capacity, "unsupported environment grammar at byte %zu",
+        at < tokens.count ? tokens.items[at].begin : walk->source.length);
+    sh_decl_tokens_free(&tokens); return ok;
+}
+
 int sh_decl_native_binding_family(const char *family, sh_decl_native_binding_format *format)
 {
     static const struct { const char *family; sh_decl_native_binding_format format; } formats[] = {
         {"material", SH_BINDING_MATERIAL}, {"renderparm", SH_BINDING_RENDERPARM},
         {"md6def", SH_BINDING_MD6_DEFINITION}, {"table", SH_BINDING_TABLE},
         {"articulatedfigure", SH_BINDING_ARTICULATED_FIGURE}, {"breakable", SH_BINDING_BREAKABLE},
-        {"animweb", SH_BINDING_ANIMATION_WEB}
+        {"animweb", SH_BINDING_ANIMATION_WEB}, {"env", SH_BINDING_ENVIRONMENT}
     };
     if (family) for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); i++)
         if (!_stricmp(family, formats[i].family)) {
@@ -677,6 +718,8 @@ int sh_decl_native_reference_sites(sh_decl_native_binding_format format, sh_decl
     if (format == SH_BINDING_ANIMATION_WEB) return nr_animation_web(&walk, error, capacity);
     if (format == SH_BINDING_MD6_DEFINITION)
         return sh_decl_md6_reference_sites(source, nr_md6, &walk, error, capacity);
+    if (format == SH_BINDING_ENVIRONMENT)
+        return schema && schema->resolve && nr_environment(&walk, schema, error, capacity);
     if (schema && schema->resolve && format == SH_BINDING_MATERIAL) {
         sh_decl_material material = {0};
         if (sh_decl_material_read(source, schema, &material, error, capacity))

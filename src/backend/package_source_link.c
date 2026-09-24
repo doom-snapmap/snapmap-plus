@@ -62,6 +62,7 @@ struct sh_package_source_link {
     sh_package_reverse_gap *reverse_gaps;
     size_t reverse_gap_count, reverse_gap_capacity;
     int reader_gap; /* The last discovery stopped in a registered reader, not I/O. */
+    int malformed; /* That reader could not parse the text in the native grammar. */
     int environment; /* A failure came from I/O, allocation or configuration. */
     sl_unit *discovering; /* Unit whose readers are requesting new units. */
     const sl_unit *failed_unit; /* Unit whose strict discovery failed, if known. */
@@ -413,7 +414,21 @@ static int sl_files(sh_package_source_link *s, sl_unit *unit)
     }
     if (!unit->unit.file_count) {
         if (s->observe) return 1;
-        int status = s->native.admit ? s->native.admit(s->native.context, unit->scope,
+        /* SnapMap registers some identities with no data. Loading one reports
+         * "No data" through the non-fatal load reporter and defaults it (MD6
+         * anim, skeleton and mesh loaders, Vulkan 0x1414865e0 / 0x1414ab4b0 /
+         * 0x14149c950); stock declarations name such rows and load normally.
+         * The registered name is the whole identity: nothing to deliver. */
+        int registered = 0, status;
+        for (size_t i = 0; i < count; i++) registered |= !*rows[i]->path && rows[i]->archive < 2;
+        if (registered) {
+            char identity[512]; sh_package_file_identity digest;
+            int n = snprintf(identity, sizeof(identity), "doom2016:engine-registered-fileless:%s:%s",
+                unit->unit.family, unit->unit.name);
+            status = n > 0 && (size_t)n < sizeof(identity) &&
+                sh_package_bytes_identity(identity, (size_t)n, &digest) ? 1 : -1;
+            if (status == 1) memcpy(unit->unit.semantics, digest.digest, 32);
+        } else status = s->native.admit ? s->native.admit(s->native.context, unit->scope,
             unit->unit.family, unit->unit.name, unit->unit.semantics, s->error, s->error_capacity) : 0;
         if (status != 1) return sl_fail(s, "resource has no admitted native source", unit->unit.name);
         unit->unit.original_binding = 1;
@@ -454,8 +469,11 @@ static unsigned char *sl_bind_member(sh_package_source_link *s, sl_unit *unit,
         }
         snprintf(error, capacity, "file is outside its captured shader unit"); return NULL;
     }
-    return (s->observe ? sh_package_source_observe : sh_package_source_bind)(s->readers[unit->scope], unit->unit.family, unit->unit.name,
-        body, length, reference, context, output_length, NULL, error, capacity);
+    sh_package_source_binding result;
+    unsigned char *out = (s->observe ? sh_package_source_observe : sh_package_source_bind)(s->readers[unit->scope],
+        unit->unit.family, unit->unit.name, body, length, reference, context, output_length, &result, error, capacity);
+    if (!out && result.malformed) s->malformed = 1;
+    return out;
 }
 
 /* Physical shader paths supply seeds; the selected renderer's verified reader
@@ -490,11 +508,16 @@ static size_t sl_font_stem(const char *path)
     }
     return 0;
 }
+int sh_package_source_link_ancillary(const char *path)
+{
+    return path && !strncmp(path, "generated/transsortatlas/", 25);
+}
 static const char *sl_deferred_binary_family(sh_package_source_link *s, const sh_compiled_resource *file)
 {
     const sh_resource_catalog_entry *const *rows = NULL;
     size_t n = strlen(file->engine_path);
-    if (file->type || n <= 7 || sh_resource_catalog_find_path(s->catalog, file->engine_path, &rows)) return NULL;
+    if (file->type || n <= 7 || sh_package_source_link_ancillary(file->engine_path) ||
+        sh_resource_catalog_find_path(s->catalog, file->engine_path, &rows)) return NULL;
     if (sl_font_stem(file->engine_path)) return "font";
     if (!strcmp(file->engine_path + n - 7, ".bimage")) return "image";
     if (!strcmp(file->engine_path + n - 7, ".dmodel")) return "discreteanimation";
@@ -526,6 +549,7 @@ static int sl_seed_inputs(sh_package_source_link *s)
         for (size_t i = 0; ok && i < original->resource_count; i++) {
             const sh_compiled_resource *file = original->resources + i; char *name = NULL;
             if (s->native.audio && sh_package_audio_path_kind(file->engine_path)) continue;
+            if (sh_package_source_link_ancillary(file->engine_path)) continue;
             /* A cooked movie and its atlas are one constructor unit, whichever
              * member this scope supplies; the other resolves in scope then originals. */
             sh_package_movie_names movie;
@@ -867,7 +891,8 @@ static int sl_discover_unit_requests(sh_package_source_link *s, sl_unit *unit)
 static int sl_reverse_leaf(const char *family)
 {
     return !strcmp(family, "image") || !strcmp(family, "skeleton") || !strcmp(family, "cm") ||
-        !strcmp(family, "aas") || !strcmp(family, "binaryfile") || !strcmp(family, "md6rig");
+        !strcmp(family, "aas") || !strcmp(family, "binaryfile") || !strcmp(family, "md6rig") ||
+        !strcmp(family, "transsortatlas") || !strcmp(family, "fga");
 }
 /* Account one reverse-discovery coverage gap. scope is SIZE_MAX for the stock
  * unit whose reader stopped, or the discovery scope whose changed dependency
@@ -1176,7 +1201,7 @@ static void sl_attribute(const sh_package_source_link *s, sh_package_source_fail
         }
     }
     if (supplier) {
-        failure->kind = supplier == failed && s->reader_gap ?
+        failure->kind = supplier == failed && s->malformed ?
             SH_PACKAGE_SOURCE_FAILURE_SOURCE : SH_PACKAGE_SOURCE_FAILURE_COVERAGE;
         failure->scope = failed->scope;
     } else if (root && root->nominated) {
@@ -1270,14 +1295,19 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
         if (pass && !sl_seed_orphan_binaries(s)) goto failed;
         for (; inspected < s->count; inspected++) {
             sl_unit *unit = s->units[inspected];
-            s->reader_gap = 0;
+            s->reader_gap = s->malformed = 0;
             if (!sl_discover_unit(s, unit)) { s->failed_unit = unit; goto failed; }
             if (unit->unit.file_count > 1) qsort((void *)unit->unit.files, unit->unit.file_count, sizeof(*unit->unit.files), sl_file_order);
             if (!sl_movie_identities(s, unit)) { s->failed_unit = unit; goto failed; }
         }
     }
     if (!sl_shader_accounted(s)) goto failed;
-    if (s->native.audio && !sh_package_audio_program_prepare(s->native.audio, error, capacity)) goto failed;
+    if (s->native.audio && !sh_package_audio_program_prepare(s->native.audio, error, capacity)) {
+        /* The capture of one scope's sounds and banks failed: that scope's
+         * supplied audio is responsible, not its peers. */
+        s->failed_scope = sh_package_audio_program_failed_scope(s->native.audio);
+        goto failed;
+    }
     /* Complete explicit source closure before preparing potentially large
      * implicit renderer/audio data. A missing reference or malformed source
      * must fail before any expensive native-provider capture. */

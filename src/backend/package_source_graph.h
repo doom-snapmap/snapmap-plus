@@ -117,6 +117,9 @@ typedef int (*sh_package_binding_resolver)(void *context, const char *slot,
 typedef struct sh_package_source_binding {
     size_t references, changed;
     sh_package_source_graph_report inspection;
+    /* The declaration text itself does not parse in the native grammar. A
+     * missing reader adapter or unresolved reference is not malformation. */
+    int malformed;
 } sh_package_source_binding;
 /* Bind one supported source envelope. NULL on incomplete grammar or failed
  * resolution; output is an owned exact copy for a no-op. No source is changed.

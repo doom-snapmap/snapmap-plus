@@ -496,11 +496,13 @@ static int sg_renderprog(sg_walk *walk, const char *name)
 /* Families whose cooked payload names no other engine resource. Measured over
  * the installed corpus with a scan for resource-path-shaped text: image 7436
  * files / 2.78 GB, cm 20117 / 4.25 GB, aas 863 / 194 MB, skeleton 945 / 5.8 MB,
- * binaryfile 48 / 56 MB and md6rig 2 -- none contained one. A leaf still needs
- * a verified payload path before it can establish resource availability. */
+ * binaryfile 48 / 56 MB and md6rig 2 -- none contained one. Transparency atlas
+ * entries (249 files / 88 MB, cooked images) and fga vector-field grids (7
+ * files / 4 MB of comma-separated numbers) scanned the same way contain none.
+ * A leaf still needs a verified payload path to establish availability. */
 static int sg_leaf_family(const char *type)
 {
-    static const char *const leaves[] = {"image", "skeleton", "cm", "aas", "binaryfile", "md6rig"};
+    static const char *const leaves[] = {"image", "skeleton", "cm", "aas", "binaryfile", "md6rig", "transsortatlas", "fga"};
     for (size_t i = 0; i < sizeof(leaves) / sizeof(leaves[0]); i++)
         if (!strcmp(type, leaves[i])) return 1;
     return 0;
@@ -1092,6 +1094,68 @@ static int sg_bind_typed(void *context, const char *slot, sh_decl_value_type typ
     sh_decl_native_reference_clear(&reference); return result;
 }
 
+/* Consumers whose native loader asks the target's manager with makeDefault
+ * set. A target that neither this scope nor SnapMap ships, including one only
+ * the campaign archive carries, becomes an engine object named by the
+ * reference: the consumer keeps the authored name with no binding edge or
+ * install requirement, like its stock counterpart. 1 defaults.
+ * - MD6 mesh surface materials: mesh loader Vulkan 0x14149b240 / OpenGL
+ *   0x14148ea40 and the model-level list Vulkan 0x14149c950 call DeclFind.
+ * - Animation clips named by md6def and animweb aliases (below).
+ * - Images named by material parameters and renderparm defaults: Material
+ *   Parse (Vulkan 0x140d76bb0 / OpenGL 0x140d76df0) reads its parameters with
+ *   the parm block reader (0x140db3710 / 0x140da9930), and renderparm parsing
+ *   uses the same value reader; texture kinds reach 0x140d7b540 / 0x140d7b780,
+ *   which Materialize the image by name with makeDefault (0x141801380 /
+ *   0x1417f3cc0). Engine-created targets such as _viewDepth are found there. */
+static int sg_native_default_target(sg_binding *binding, const char *family, const char *name)
+{
+    unsigned char *body = NULL; size_t length = 0;
+    char *path = NULL;
+    if (!binding->family || binding->reader->bound_exists) return 0;
+    if (!strcmp(binding->family, "basemodel") && !strcmp(family, "material")) path = sg_path("material", name);
+    else if (!strcmp(binding->family, "md6def") && strcmp(family, "md6def") && strcmp(family, "basemodel") &&
+        strcmp(family, "anim") && strcmp(family, "skeleton") && strcmp(family, "image") && strcmp(family, "sound")) {
+        /* Declaration-typed animation event arguments: ReadEventCallInfo
+         * (Vulkan 0x1409caa70 / OpenGL 0x1409ca230) finds the argument's type
+         * manager and calls DeclFind with makeDefault. A sound keeps its
+         * name-derived event and stays strict, as in declaration text. */
+        path = sg_path(family, name);
+    }
+    else if ((!strcmp(binding->family, "md6def") || !strcmp(binding->family, "animweb")) &&
+        !strcmp(family, "anim")) {
+        /* Alias clips load through the anim list with makeDefault and only warn
+         * on failure (md6def aliases Vulkan 0x14147c4f0 / OpenGL 0x14146fe10,
+         * lazy alias loads 0x14147c460 / 0x14146fd80); a registered row with
+         * no data reports "No data" and defaults (Vulkan 0x1414865e0). Stock
+         * animwebs name such clips and load in shipping SnapMap. */
+        path = sh_package_cooked_path("anim", name);
+        if (!path) return 0;
+    } else if (!strcmp(binding->family, "anim") && !strcmp(family, "skeleton")) {
+        /* MD6Anim load (Vulkan 0x1414865e0 / OpenGL 0x141479f10) checks its
+         * skeleton through the skeleton registry; one that does not exist
+         * fails the remap check and reports "Old skeleton" through the load
+         * warning (0x141800450 / 0x1417f2da0), leaving the clip defaulted. */
+        static const char prefix[] = "generated/skeleton/";
+        size_t n = strlen(name);
+        if (n <= 7 || strcmp(name + n - 7, ".md6skl")) return 0;
+        /* Catalogued skeletons store name.md6skl as generated/skeleton/name.bmd6skl. */
+        if (!(path = malloc(sizeof(prefix) + n + 2))) { binding->reader->failed = 1; return -1; }
+        snprintf(path, sizeof(prefix) + n + 2, "%s%.*s.bmd6skl", prefix, (int)(n - 7), name);
+    } else if ((!strcmp(binding->family, "material") || !strcmp(binding->family, "renderparm") ||
+        !strcmp(binding->family, "env")) && !strcmp(family, "image")) {
+        /* Engine-named images have no physical path. Materialize returns the
+         * renderer's object of that name (render targets, intrinsics) or
+         * creates a defaulted one, so the name alone is the identity. */
+        path = sh_package_cooked_path("image", name);
+        if (!path) return name[0] == '_';
+    } else return 0;
+    int status = path ? sg_read_path(binding->reader, path, &body, &length) : -1;
+    free(body); free(path);
+    if (status < 0) { binding->reader->failed = 1; return -1; }
+    return status == 0 || status == 2;
+}
+
 static int sg_bind_native(void *context, const char *family, const char *name, const char **replacement)
 {
     sg_binding *binding = context;
@@ -1103,8 +1167,13 @@ static int sg_bind_native(void *context, const char *family, const char *name, c
      * canonical names, just like reflected references and catalog inputs. Keep
      * the authored token intact unless the resolver actually replaces it. */
     char *normalized_family = sg_name(family), *normalized_name = sg_name(name);
-    int result = normalized_family && normalized_name ?
-        binding->resolver(binding->context, slot, normalized_family, normalized_name, replacement) : -1;
+    int result = -1;
+    if (normalized_family && normalized_name) {
+        int defaulted = sg_native_default_target(binding, normalized_family, normalized_name);
+        if (defaulted > 0) { *replacement = NULL; result = 0; }
+        else if (!defaulted) result = binding->resolver(binding->context, slot, normalized_family,
+            normalized_name, replacement);
+    }
     free(normalized_family); free(normalized_name); return result;
 }
 
@@ -1391,7 +1460,8 @@ static unsigned char *sg_bind_source(sh_package_source_reader *reader,
         int is_graph = 0;
         if (!strcmp(family, "entitydef")) {
             tree = sh_decl_tree_parse_ordered(source, error, capacity);
-            if (!tree || !(class_name = sh_decl_entity_tree_class(tree, &classes, error, capacity))) goto done;
+            if (!tree) { if (result) result->malformed = 1; goto done; }
+            if (!(class_name = sh_decl_entity_tree_class(tree, &classes, error, capacity))) goto done;
             binding.state = (sh_decl_value_type){class_name, ""};
         } else {
             if (sh_decl_native_schema_decl_type(reader->schema, family, &binding.state) != 1 ||
@@ -1401,11 +1471,11 @@ static unsigned char *sg_bind_source(sh_package_source_reader *reader,
             }
             if (is_graph) {
                 graph = sh_decl_graph_open(source, error, capacity);
-                if (!graph) goto done;
+                if (!graph) { if (result) result->malformed = 1; goto done; }
             } else {
                 tree = sg_open_body(family) ? sh_decl_tree_parse_reflected_body(source, 1, error, capacity) :
                     sh_decl_tree_parse_ordered(source, error, capacity);
-                if (!tree) goto done;
+                if (!tree) { if (result) result->malformed = 1; goto done; }
             }
         }
         binding.tree = tree; binding.graph = graph;

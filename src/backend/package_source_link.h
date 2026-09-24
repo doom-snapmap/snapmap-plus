@@ -111,7 +111,8 @@ sh_package_source_link *sh_package_source_link_open_roots(
  * unit whose reader first requested it, so a failure carries its causal chain
  * back to the seed that reached it. Only content an input scope supplied can
  * make that scope responsible:
- * SOURCE: the scope's own supplied unit was refused by its reader.
+ * SOURCE: the text of the scope's own supplied unit does not parse in the
+ *   native grammar (a reader without an adapter for it is COVERAGE).
  * COVERAGE: the scope's supplied content (or a stock root nominated because
  *   of it) reaches a unit the product cannot link: missing reader/admission
  *   coverage, or a dependency SnapMap does not ship and the scope does not
@@ -139,6 +140,10 @@ sh_package_source_link *sh_package_source_link_open_attributed(
     const sh_package_source_link_native *native, const sh_package_source_root_plan *roots,
     sh_package_source_failure *failure, char *error, size_t capacity);
 void sh_package_source_link_close(sh_package_source_link *source);
+/* Supplied files the linker carries in their bundle but does not link, with an
+ * accounted reason: transparency atlas entries are packed by the renderer once
+ * at startup, and materials name them by string with precomputed coordinates. */
+int sh_package_source_link_ancillary(const char *path);
 /* Reverse discovery stops at stock sources beyond the registered readers
  * instead of refusing every package. scope SIZE_MAX names the stock unit whose
  * reader stopped; any other scope changed a stock root whose closure crosses

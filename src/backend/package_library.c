@@ -126,11 +126,17 @@ static int pl_semantics(void *context, size_t scope, const char *family, const c
         int original = b->native->source.semantics ?
             b->native->source.semantics(b->native->source.context, scope, family, name,
                 combined, error, capacity) : 0;
+        if (original >= 0 && original <= 1 && !sh_package_audio_program_contains(b->audio, scope, name)) {
+            memcpy(semantics, combined, 32); return original; /* Native event binding. */
+        }
         if (original < 0 || original > 1 || !sh_package_audio_program_prepare(b->audio, error, capacity) ||
             !sh_package_audio_program_root(b->audio, scope, name, &root, error, capacity)) return -1;
+        /* An exact native audio graph keeps the plain native certificate, the
+         * same one an uncollected SnapMap sound carries in another scope. */
+        if (original && root.original) { memcpy(semantics, combined, 32); return 1; }
         memcpy(combined + 32, root.identity, 32);
         if (!sh_package_bytes_identity(combined, sizeof(combined), &identity)) return -1;
-        memcpy(semantics, identity.digest, 32); return original && root.original;
+        memcpy(semantics, identity.digest, 32); return 0;
     }
     if (!strcmp(family, "material") && b->materials) {
         sh_package_virtual_atlas atlas = {0}; int original = 0;
@@ -186,8 +192,16 @@ static int pl_implicit(void *context, size_t scope, int observing, const sh_pack
     char *error, size_t capacity)
 {
     pl_build *b = context;
-    if (b->audio && !observing && unit->file_count && !strcmp(unit->family, "sound") &&
-        !sh_package_audio_program_collect(b->audio, scope, unit->name, error, capacity)) return 0;
+    if (b->audio && !observing && unit->file_count && !strcmp(unit->family, "sound")) {
+        /* Only a declaration a scope changed, or a SnapMap sound its banks
+         * affect, needs an audio program root. Other SnapMap sounds keep their
+         * native event binding, including events no bank implements (the
+         * stock "default" sound posts play_default, which nothing plays). */
+        int member = sh_package_audio_program_affected(b->audio, scope, unit->name);
+        for (size_t f = 0; !member && f < unit->file_count; f++)
+            member = unit->files[f]->source_count && !unit->files[f]->native_original;
+        if (member && !sh_package_audio_program_collect(b->audio, scope, unit->name, error, capacity)) return 0;
+    }
     return !b->native || !b->native->source.implicit ||
         b->native->source.implicit(b->native->source.context, scope, observing, unit,
             visit, visit_context, error, capacity) == 1;
@@ -222,6 +236,7 @@ static int pl_source_owners(void *context, size_t scope, const char *family, con
         return !b->native || !b->native->source.owners ||
             b->native->source.owners(b->native->source.context, scope, family, name,
                 owners, gameplay, error, capacity) == 1;
+    if (!sh_package_audio_program_contains(b->audio, scope, name)) return 1; /* Native binding. */
     if (sh_package_audio_program_owners(b->audio, scope, name, owners, gameplay)) return 1;
     snprintf(error, capacity, "sound has no captured dependency ownership: %s", name); return 0;
 }
@@ -244,11 +259,15 @@ static int pl_coverage(const pl_build *b, const sh_package_sources *sources, cha
     const sh_package_reverse_gap *gaps = NULL;
     size_t count = sh_package_source_link_reverse_gaps(b->reader, &gaps), stock = 0, capacity = 0;
     const sh_package_reverse_gap *first = NULL;
+    size_t atlas = 0;
     char *text = NULL;
     *out = NULL;
     for (size_t i = 0; i < count; i++) if (gaps[i].scope == SIZE_MAX) { stock++; if (!first) first = gaps + i; }
+    for (size_t scope = 0; scope < b->authored_count; scope++)
+        for (size_t f = 0; b->scopes[scope] && f < b->scopes[scope]->resource_count; f++)
+            atlas += sh_package_source_link_ancillary(b->scopes[scope]->resources[f].engine_path);
     /* Measure, then write the identical text. */
-    for (size_t pass = 0; count && pass < 2; pass++) {
+    for (size_t pass = 0; (count || atlas) && pass < 2; pass++) {
         size_t used = 0;
         if (first) {
             int n = snprintf(text ? text + used : NULL, text ? capacity - used : 0,
@@ -272,7 +291,31 @@ static int pl_coverage(const pl_build *b, const sh_package_sources *sources, cha
             if (n < 0) return 0;
             used += (size_t)n;
         }
+        /* The renderer packs transparency atlas entries once at startup and
+         * materials carry precomputed atlas coordinates; a package entry is
+         * delivered intact but does not reach that atlas yet. */
+        for (size_t scope = 0; scope < b->authored_count; scope++) {
+            const sh_package_compilation *compiled = b->scopes[scope];
+            for (size_t f = 0; compiled && f < compiled->resource_count; f++) {
+                const sh_compiled_resource *file = compiled->resources + f;
+                if (!file->source_count || !sh_package_source_link_ancillary(file->engine_path)) continue;
+                const char *label = "map source", *id = "";
+                if (!b->contexts && scope < sources->component_count) {
+                    const sh_package_component *component = sources->components + scope;
+                    label = component->descriptor.name[0] ? component->descriptor.name :
+                        sources->packages[component->owner].name;
+                    id = component->descriptor.id;
+                }
+                int n = snprintf(text ? text + used : NULL, text ? capacity - used : 0,
+                    "%s%s%s%s: transparency atlas entry %s is kept in the package but the renderer's atlas "
+                    "does not use package entries yet.\n", label, *id ? " [" : "", id, *id ? "]" : "",
+                    file->engine_path + 25);
+                if (n < 0) return 0;
+                used += (size_t)n;
+            }
+        }
         if (!pass) {
+            if (!used) break;
             if (used == SIZE_MAX || !(text = malloc(used + 1))) return 0;
             capacity = used + 1; *text = 0;
         }
@@ -1309,6 +1352,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         for (size_t i = 0; i < assignment.inputs->count; i++) {
             const sh_package_link_unit *unit = assignment.inputs->units + i;
             if (unit->file_count && !strcmp(unit->family, "sound") &&
+                sh_package_audio_program_contains(b.audio, assignment.inputs->scopes[i], unit->name) &&
                 !sh_package_audio_program_output(b.audio, assignment.inputs->scopes[i], unit->name,
                     b.linked.names[b.linked.classes.nodes[i]], error, capacity)) goto done;
         }

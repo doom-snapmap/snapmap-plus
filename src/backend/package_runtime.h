@@ -422,6 +422,9 @@ void sh_package_runtime_test_baseline(sh_package_baseline_reader reader, void *c
  * This small-schema fixture omits baked product defaults during preparation.
  * Passing a zero source disables the seam and preserves older offline fixtures. */
 void sh_package_runtime_test_source_readers(sh_decl_registry_source registry, uintptr_t reflection);
+/* Link the installed library through those readers, as production does, so
+ * owner isolation and unserved coverage run end to end. Off by default. */
+void sh_package_runtime_test_installed_links(int enabled);
 int sh_package_runtime_test_source_inputs(sh_decl_registry_source *registry, uintptr_t *reflection,
     sh_package_baseline_reader *baseline, void **baseline_context);
 /* Offline fixture teardown only. No engine callbacks or native game reset. */

@@ -135,6 +135,10 @@ static int original(void *context, const char *path, unsigned char **body, size_
     else if (!strcmp(path, "generated/image/textures/rock.bimage")) value = "stock-image";
     else if (!strcmp(path, "generated/image/textures/other.bimage")) value = "other-image";
     else if (!strcmp(path, "generated/image/textures/unrelated.bimage")) value = "unrelated-image";
+    else if (!strcmp(path, "generated/transsortatlas/textures/fx/glow.bimage")) value = "stock-atlas";
+    else if (!strcmp(path, "generated/transsortatlas/textures/fx/campaignglow.bimage")) {
+        *length = 14; *body = malloc(15); assert(*body); memcpy(*body, "campaign-atlas", 15); return 2;
+    }
     else return 0;
     *length = value ? strlen(value) : b.length; *body = malloc(*length + 1); assert(*body);
     memcpy(*body, value ? (const void *)value : b.data, *length); (*body)[*length] = 0; return 1;
@@ -147,9 +151,24 @@ static void binary_file(const char *relative, const unsigned char *body, size_t 
 static void catalog_file(const char *relative, int campaign, int images)
 {
     bytes b = {0}; unsigned char head[0x20] = {5, 'S', 'E', 'R'}, tail[21] = {0};
-    unsigned count = campaign ? 1u : images ? 4u : 2u;
+    unsigned count = campaign ? 2u : images ? 6u : 2u;
     raw(&b, head, sizeof(head)); be(&b, count);
     for (unsigned i = 0; i < count; i++) {
+        if (i == 5) {
+            /* SnapMap registers this model with no data. */
+            be(&b, i); string(&b, "model"); string(&b, "models/fileless.lwo");
+            string(&b, ""); raw(&b, tail, sizeof(tail)); continue;
+        }
+        if (campaign && i == 1) {
+            /* A transparency atlas entry only the campaign archive lists. */
+            be(&b, i); string(&b, "transSortAtlas"); string(&b, "textures/fx/campaignglow");
+            string(&b, "generated/transsortatlas/textures/fx/campaignglow.bimage"); raw(&b, tail, sizeof(tail)); continue;
+        }
+        if (i == 4) {
+            /* A transparency atlas entry: an opaque cooked image. */
+            be(&b, i); string(&b, "transSortAtlas"); string(&b, "textures/fx/glow");
+            string(&b, "generated/transsortatlas/textures/fx/glow.bimage"); raw(&b, tail, sizeof(tail)); continue;
+        }
         if (i == 2) {
             be(&b, i); string(&b, "image"); string(&b, "textures/rock");
             string(&b, "generated/image/textures/rock.bimage"); raw(&b, tail, sizeof(tail)); continue;
@@ -335,11 +354,17 @@ static void test_failure_attribution(fixture *f, const sh_package_compile_enviro
     create("attribution/overrides/broken/assets/generated/decls/entitydef/props/broken.decl",
         "{ class = \"Entity\"; edit = { model = \"models/campaign.lwo\"; } }");
     create("attribution/overrides/malformed/package.json", "{\"id\":\"malformed\",\"name\":\"Malformed\"}");
+    /* The native reflected reader expects ';' after a scalar. */
     create("attribution/overrides/malformed/assets/generated/decls/entitydef/props/malformed.decl",
+        "{ class = \"Entity\"; edit = { model = \"models/rock.lwo\"\r\n target = \"props/rock\"; } }");
+    create("attribution/overrides/unsupported/package.json", "{\"id\":\"unsupported\",\"name\":\"Unsupported\"}");
+    /* Well-formed text the product has no syntax adapter for: coverage. */
+    create("attribution/overrides/unsupported/assets/generated/decls/entitydef/props/unsupported.decl",
         "{ class = \"Entity\"; edit = { model = { path = \"models/rock.lwo\"; } } }");
     snprintf(path, sizeof(path), "%s/attribution", root);
     sh_package_sources *sources = sh_package_sources_scan(path, error, sizeof(error)); assert(sources);
     assert(sh_package_sources_remove(sources, owner(sources, "Malformed")));
+    assert(sh_package_sources_remove(sources, owner(sources, "Unsupported")));
     /* The package's own entity reaches a model SnapMap does not ship. That is
      * missing coverage for this delivery, not corruption of its files. */
     assert(!sh_package_library_compile(sources, &env, catalog, original, f, registry,
@@ -349,14 +374,24 @@ static void test_failure_attribution(fixture *f, const sh_package_compile_enviro
     assert(strstr(error, "campaign dependency") &&
         strstr(error, "(via model models/campaign.lwo <- entitydef props/broken)"));
     sh_package_library_free(&out); sh_package_sources_free(sources);
-    /* The reader refuses another package's own declaration: malformed. */
+    /* Text the product has no syntax adapter for is coverage, not malformation. */
     sources = sh_package_sources_scan(path, error, sizeof(error)); assert(sources);
     assert(sh_package_sources_remove(sources, owner(sources, "Broken")));
+    assert(sh_package_sources_remove(sources, owner(sources, "Malformed")));
+    assert(!sh_package_library_compile(sources, &env, catalog, original, f, registry,
+        (uintptr_t)f->reflection, native, &out, error, sizeof(error)));
+    if (unserved != owner(sources, "Unsupported") || invalid != SIZE_MAX) fprintf(stderr, "unsupported owner: %s\n", error);
+    assert(unserved == owner(sources, "Unsupported") && invalid == SIZE_MAX &&
+        strstr(error, "(via entitydef props/unsupported)"));
+    sh_package_library_free(&out); sh_package_sources_free(sources);
+    /* Text that does not parse in the native grammar is malformed. */
+    sources = sh_package_sources_scan(path, error, sizeof(error)); assert(sources);
+    assert(sh_package_sources_remove(sources, owner(sources, "Broken")));
+    assert(sh_package_sources_remove(sources, owner(sources, "Unsupported")));
     assert(!sh_package_library_compile(sources, &env, catalog, original, f, registry,
         (uintptr_t)f->reflection, native, &out, error, sizeof(error)));
     if (invalid != owner(sources, "Malformed") || unserved != SIZE_MAX) fprintf(stderr, "malformed owner: %s\n", error);
-    assert(invalid == owner(sources, "Malformed") && unserved == SIZE_MAX &&
-        strstr(error, "(via entitydef props/malformed)"));
+    assert(invalid == owner(sources, "Malformed") && unserved == SIZE_MAX);
     sh_package_library_free(&out);
     assert(sh_package_sources_remove(sources, invalid));
     int ok = sh_package_library_compile(sources, &env, catalog, original, f, registry,
@@ -365,6 +400,45 @@ static void test_failure_attribution(fixture *f, const sh_package_compile_enviro
     assert(ok && invalid == SIZE_MAX && unserved == SIZE_MAX);
     assert(binding(&out, sources, "Red", "", "entitydef", "props/rock"));
     sh_package_library_free(&out);
+    /* A model SnapMap registers with no data loads defaulted natively; a
+     * package naming it compiles with that name-only identity. */
+    create("attribution/overrides/fileless/package.json", "{\"id\":\"fileless\",\"name\":\"Fileless\"}");
+    create("attribution/overrides/fileless/assets/generated/decls/entitydef/props/fileless.decl",
+        "{ class = \"Entity\"; edit = { model = \"models/fileless.lwo\"; } }");
+    sh_package_sources *fileless_sources = sh_package_sources_scan(path, error, sizeof(error)); assert(fileless_sources);
+    for (const char *const *name = (const char *const[]){"Broken", "Malformed", "Unsupported", NULL}; *name; name++)
+        assert(sh_package_sources_remove(fileless_sources, owner(fileless_sources, *name)));
+    ok = sh_package_library_compile(fileless_sources, &env, catalog, original, f, registry,
+        (uintptr_t)f->reflection, native, &out, error, sizeof(error));
+    if (!ok) fprintf(stderr, "fileless model: %s\n", error);
+    assert(ok && invalid == SIZE_MAX && unserved == SIZE_MAX);
+    sh_package_library_free(&out); sh_package_sources_free(fileless_sources);
+    /* A package's transparency atlas entries are carried in its bundle but not
+     * linked: the renderer packs its atlas at startup. The rest of the package
+     * compiles and each entry is accounted, new or replacing a SnapMap one. */
+    create("attribution/overrides/atlas/package.json", "{\"id\":\"atlas\",\"name\":\"Atlas\"}");
+    create("attribution/overrides/atlas/assets/generated/transsortatlas/textures/fx/campaignglow.bimage", "package-atlas");
+    sh_package_sources *atlas_sources = sh_package_sources_scan(path, error, sizeof(error)); assert(atlas_sources);
+    for (const char *const *name = (const char *const[]){"Broken", "Malformed", "Unsupported", NULL}; *name; name++)
+        assert(sh_package_sources_remove(atlas_sources, owner(atlas_sources, *name)));
+    ok = sh_package_library_compile(atlas_sources, &env, catalog, original, f, registry,
+        (uintptr_t)f->reflection, native, &out, error, sizeof(error));
+    if (!ok) fprintf(stderr, "atlas entry: %s\n", error);
+    assert(ok && out.coverage && strstr(out.coverage, "Atlas [atlas]: transparency atlas entry textures/fx/campaignglow"));
+    sh_package_library_free(&out); sh_package_sources_free(atlas_sources);
+    create("attribution/overrides/atlas/assets/generated/transsortatlas/textures/fx/glow.bimage", "package-atlas");
+    atlas_sources = sh_package_sources_scan(path, error, sizeof(error)); assert(atlas_sources);
+    for (const char *const *name = (const char *const[]){"Broken", "Malformed", "Unsupported", NULL}; *name; name++)
+        assert(sh_package_sources_remove(atlas_sources, owner(atlas_sources, *name)));
+    ok = sh_package_library_compile(atlas_sources, &env, catalog, original, f, registry,
+        (uintptr_t)f->reflection, native, &out, error, sizeof(error));
+    if (!ok) fprintf(stderr, "replaced atlas entry: %s\n", error);
+    assert(ok && invalid == SIZE_MAX && unserved == SIZE_MAX &&
+        strstr(out.coverage, "transparency atlas entry textures/fx/glow") &&
+        strstr(out.coverage, "transparency atlas entry textures/fx/campaignglow"));
+    /* Nothing replaces the stock entry for other packages or vanilla maps. */
+    assert(!sh_package_compilation_find(out.compiled, "generated/transsortatlas/textures/fx/glow.bimage"));
+    sh_package_library_free(&out); sh_package_sources_free(atlas_sources);
     /* A product built-in reaching the same gap in every scope is a product
      * defect: the candidate fails and no package, not even an empty one, is
      * selected for exclusion. */

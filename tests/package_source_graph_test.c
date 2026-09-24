@@ -233,6 +233,17 @@ static int original(void *context, const char *path, unsigned char **body, size_
         memcpy(*body, cooked, size); *length = size; return 2;
     }
     if (f->unreadable && !strcmp(path, f->unreadable)) return -1;
+    if (!strcmp(path, "generated/decls/material/meshbound.decl")) {
+        /* The one material here that SnapMap itself ships. */
+        *length = 3; *body = (unsigned char *)_strdup("{ }"); return *body ? 1 : -1;
+    }
+    if (!strcmp(path, "generated/skeleton/md6/present/present.bmd6skl")) {
+        *length = 8; *body = (unsigned char *)_strdup("skeleton"); return *body ? 1 : -1;
+    }
+    if (!strcmp(path, "generated/image/image/snap.bimage")) {
+        /* The one image here that SnapMap itself ships. */
+        *length = 10; *body = (unsigned char *)_strdup("snap image"); return *body ? 1 : -1;
+    }
     if (!strcmp(path, "generated/image/image/body.bimage") ||
         !strcmp(path, "generated/image/models/boss/body.bimage") ||
         !strcmp(path, "generated/image/textures/default/body.bimage")) text = "original image payload";
@@ -264,6 +275,7 @@ static int original(void *context, const char *path, unsigned char **body, size_
     else if (!strcmp(path, "generated/decls/md6def/demons/base.decl"))
         text = "{ init { mesh \"md6/base/base.md6mesh\" } }";
     else if (!strcmp(path, "generated/decls/md6def/broken.decl")) text = "{ init { unknownField 1 } }";
+    else if (!strcmp(path, "generated/decls/material/meshcampaign.decl")) text = "{ }";
     else if (!strcmp(path, "generated/decls/md6def/default-clip.decl"))
         text = "{ init { mesh \"md6/absent.md6mesh\" }"
                " aliases { alias { name \"idle\" anim \"md6/boss/boss.md6skl/_default.md6anim\" } } }";
@@ -384,13 +396,27 @@ static void test_bind(fixture *f, sh_package_compilation *compiled, sh_decl_regi
         assert(!length && !result.changed && result.inspection.gaps);
     }
     {
-        const char *material = "{ color curve[color] tex image/body label image/body\n}";
+        const char *material = "{ color curve[color] tex image/snap label image/body\n}";
         out = sh_package_source_bind(reader, "material", "example", (const unsigned char *)material,
             strlen(material), bind_reference, &bindings, &length, &result, error, sizeof(error));
         /* The expression also names color as its input render parameter. */
         if (!out) fprintf(stderr, "material binding: %s\n", error);
         assert(out && result.references == 6 && result.changed == 6);
-        assert(strstr((char *)out, "bound/tex bound/image/body") && strstr((char *)out, "bound/label image/body")); free(out);
+        assert(strstr((char *)out, "bound/tex bound/image/snap") && strstr((char *)out, "bound/label image/body")); free(out);
+        /* An image only the campaign carries, or none at all, is materialized by
+         * name with makeDefault: the parameter keeps it with no binding edge. */
+        const char *defaulted[] = {"{ color curve[color] tex image/body label image/body\n}",
+            "{ color curve[color] tex image/absent label image/body\n}",
+            "{ color curve[color] tex _viewDepth label image/body\n}"};
+        const char *kept[] = {"bound/tex image/body", "bound/tex image/absent", "bound/tex _viewDepth"};
+        for (size_t i = 0; i < 3; i++) {
+            size_t before = bindings.count;
+            out = sh_package_source_bind(reader, "material", "example", (const unsigned char *)defaulted[i],
+                strlen(defaulted[i]), bind_reference, &bindings, &length, &result, error, sizeof(error));
+            if (!out) fprintf(stderr, "defaulted material image: %s\n", error);
+            assert(out && result.references == 6 && result.changed == 5 && bindings.count == before + 5);
+            assert(strstr((char *)out, kept[i])); free(out);
+        }
     }
     {
         const char *table = "{ clamp { -1:0, 2:1 } }";
@@ -419,10 +445,89 @@ static void test_bind(fixture *f, sh_package_compilation *compiled, sh_decl_regi
         assert(!length && !result.changed && strstr(error, "skin"));
     }
     {
-        unsigned char mesh[512]; size_t mesh_length = cooked_mesh(mesh, "md6/body.md6skl", "boss");
+        /* An environment names its base env and a render parameter block read
+         * like a material's, including an image materialized by name. */
+        const char *env = "{\n\tinherit {\n\t\tsnapbase\n\t}\n\trenderParms {\n\t\ttex\t\t\timage/snap\n"
+            "\t\tlabel\t\t\timage/body\n\t\ttex\t\t\timage/absent\n\t}\n\tallowOverride 1\n}";
+        size_t before = bindings.count;
+        out = sh_package_source_bind(reader, "env", "example", (const unsigned char *)env, strlen(env),
+            bind_reference, &bindings, &length, &result, error, sizeof(error));
+        if (!out) fprintf(stderr, "environment binding: %s\n", error);
+        if (out && (result.references != 6 || result.changed != 5))
+            fprintf(stderr, "environment references %zu changed %zu\n", result.references, result.changed);
+        assert(out && result.references == 6 && result.changed == 5 && bindings.count == before + 5);
+        assert(strstr((char *)out, "bound/snapbase") && strstr((char *)out, "bound/tex\t\t\tbound/image/snap") &&
+            strstr((char *)out, "bound/tex\t\t\timage/absent")); free(out);
+    }
+    {
+        /* A clip whose skeleton exists binds it; one whose skeleton no archive
+         * holds fails its native skeleton check and loads defaulted, so the
+         * name stays with no edge. */
+        const char *skeletons[] = {"md6/present/present.md6skl", "md6/absent/absent.md6skl"};
+        for (size_t i = 0; i < 2; i++) {
+            unsigned char clip[256]; size_t clip_length = cooked_anim(clip, skeletons[i]);
+            size_t before = bindings.count;
+            out = sh_package_source_bind(reader, "anim", "md6/clip.md6anim", clip, clip_length,
+                bind_reference, &bindings, &length, &result, error, sizeof(error));
+            if (!out) fprintf(stderr, "clip skeleton %s: %s\n", skeletons[i], error);
+            assert(out && result.references == 1 && result.changed == (i ? 0u : 1u) &&
+                bindings.count == before + (i ? 0u : 1u)); free(out);
+        }
+    }
+    {
+        /* Vector-field grids and transparency atlas entries name no resource:
+         * their bytes pass through unchanged with no references. */
+        const char *leaves[][2] = {{"fga", "2,2,2,-1,-1,-1,1,1,1,0.5,0,0"}, {"transsortatlas", "cooked atlas bytes"}};
+        for (size_t i = 0; i < 2; i++) {
+            size_t n = strlen(leaves[i][1]);
+            out = sh_package_source_bind(reader, leaves[i][0], "leaf", (const unsigned char *)leaves[i][1], n,
+                bind_reference, &bindings, &length, &result, error, sizeof(error));
+            if (!out) fprintf(stderr, "%s leaf: %s\n", leaves[i][0], error);
+            assert(out && length == n && !memcmp(out, leaves[i][1], n) && !result.references && !result.changed); free(out);
+        }
+    }
+    {
+        /* Alias clips only the campaign carries, or that no archive holds,
+         * load by name with makeDefault: the md6def keeps them, no edges. */
+        /* A declaration-typed event argument no scope or SnapMap source holds is
+         * found by ReadEventCallInfo with makeDefault: no edge either. */
+        const char *md6 = "{ init { mesh \"md6/boss/boss.md6mesh\" } events {"
+            " anim \"md6/boss/motion/idle.md6anim\" { event \"ae_giveItem\" {\nframe 1\nrow 0\nlocked 0\n"
+            "inventoryItem \"weapon/absent\"\n} } } aliases {"
+            " alias { name \"idle\" anim \"md6/boss/motion/idle.md6anim\" }"
+            " alias { name \"gone\" anim \"md6/boss/motion/gone.md6anim\" } } }";
+        size_t before = bindings.count;
+        out = sh_package_source_bind(reader, "md6def", "example", (const unsigned char *)md6, strlen(md6),
+            bind_reference, &bindings, &length, &result, error, sizeof(error));
+        if (!out) fprintf(stderr, "defaulted md6def clips: %s\n", error);
+        if (out && result.references != 4) fprintf(stderr, "md6def references: %zu\n", result.references);
+        assert(out && result.references == 4 && result.changed == 1 && bindings.count == before + 1 &&
+            strstr((char *)out, "inventoryItem \"weapon/absent\""));
+        assert(strstr((char *)out, "bound/md6/boss/boss.md6mesh") &&
+            strstr((char *)out, "anim \"md6/boss/motion/idle.md6anim\"") &&
+            strstr((char *)out, "anim \"md6/boss/motion/gone.md6anim\"")); free(out);
+    }
+    {
+        /* A surface material SnapMap ships binds. One only the campaign
+         * archive carries, or none at all, is the loader's default object:
+         * the mesh keeps its name and only the skeleton reaches the resolver. */
+        unsigned char mesh[512]; size_t mesh_length = cooked_mesh(mesh, "md6/body.md6skl", "meshbound");
         out = sh_package_source_bind(reader, "basemodel", "md6/body.md6mesh", mesh, mesh_length,
             bind_reference, &bindings, &length, &result, error, sizeof(error));
         assert(out && result.references == 2 && result.changed == 2 && length == mesh_length + 12); free(out);
+        const char *defaulted[] = {"boss", "meshcampaign"};
+        for (size_t i = 0; i < 2; i++) {
+            size_t before = bindings.count;
+            mesh_length = cooked_mesh(mesh, "md6/body.md6skl", defaulted[i]);
+            out = sh_package_source_bind(reader, "basemodel", "md6/body.md6mesh", mesh, mesh_length,
+                bind_reference, &bindings, &length, &result, error, sizeof(error));
+            if (!out) fprintf(stderr, "defaulted mesh material %s: %s\n", defaulted[i], error);
+            assert(out && result.references == 2 && result.changed == 1 && length == mesh_length + 6);
+            int kept = 0; size_t n = strlen(defaulted[i]);
+            for (size_t at = 0; !kept && at + n <= length; at++) kept = !memcmp(out + at, defaulted[i], n);
+            assert(bindings.count == before + 1 && kept);
+            free(out);
+        }
     }
     {
         const char *breakable = "{ model models\\part.lwo pieceNames {1 \"models\\part.lwo\"} "
@@ -1685,7 +1790,8 @@ static int sound_original(void *context, const char *path, unsigned char **body,
     *body = NULL; *length = 0;
     if (strcmp(path, "generated/decls/sound/effects/sample.decl") &&
         strcmp(path, "generated/decls/sound/play_sample.decl") &&
-        strcmp(path, "generated/decls/sound/stop_sample.decl")) return 0;
+        strcmp(path, "generated/decls/sound/stop_sample.decl") &&
+        strcmp(path, "generated/decls/sound/default.decl")) return 0;
     const char *text = "{ edit = { } }";
     *body = (unsigned char *)_strdup(text); *length = strlen(text); return *body ? 1 : -1;
 }
@@ -1995,6 +2101,45 @@ static void test_sound_inventory_library(void)
     sh_audio_id_lease_release(restored_ids); sh_audio_id_lease_release(local_ids);
     assert(sh_audio_id_pool_close(reservations));
     sh_package_library_free(&restored); sh_package_library_free(&library); sh_package_sources_free(sources);
+    sh_audio_originals_close(audio); sh_resource_catalog_close(catalog); cleanup(); assert(!failures);
+    while (f.count) free(f.regions[--f.count].address);
+}
+
+/* A package reaching a SnapMap sound whose event no bank implements (the stock
+ * "default" sound posts play_default) keeps that sound's native binding: the
+ * engine plays nothing for it, so the library compiles without an audio root. */
+static void test_bankless_stock_sound(void)
+{
+    fixture f; setup_sound(&f);
+    void *container = *(void **)f.reflection;
+    unsigned char *records = *(void **)((char *)container + 0x20);
+    const char *types[] = {"idSoundShader"}, *ops[] = {"*"}, *names[] = {"sound"};
+    fields(&f, records + 0x38, 1, types, ops, names);
+    sh_decl_registry_source registry = {&f, read_memory, (uintptr_t)f.registry, NULL};
+    char temporary[MAX_PATH], base[4096], error[2048]; uint32_t event;
+    assert(GetTempPathA(sizeof(temporary), temporary));
+    snprintf(root, sizeof(root), "%ssmp-bankless-%lu-%llu", temporary, GetCurrentProcessId(), GetTickCount64());
+    assert(CreateDirectoryA(root, NULL)); assert(sh_audio_event_identity("play_sample", &event));
+    unsigned char bank[127] = {0}; audio_bank(bank, 84696446, event, 0);
+    sound_binary("base/sound/soundbanks/pc/a.bnk", bank, sizeof(bank));
+    sound_catalog("base/snap_gameresources.pindex", 0); sound_catalog("base/gameresources.pindex", 1);
+    create("base/snap_gameresources.resources", ""); create("base/snap_gameresources.patch", "");
+    create("base/gameresources.resources", ""); create("base/gameresources.patch", "");
+    create("overrides/quiet/package.json", "{\"id\":\"quiet\",\"name\":\"Quiet\"}");
+    create("overrides/quiet/assets/generated/decls/entitydef/audio/quiet.decl",
+        "{ class = \"Entity\"; edit = { sound = \"default\"; } }");
+    snprintf(base, sizeof(base), "%s/base", root);
+    sh_resource_catalog *catalog = sh_resource_catalog_open(base, error, sizeof(error)); assert(catalog);
+    sh_audio_originals *audio = sh_audio_originals_open(base, L"English(US)", NULL); assert(audio);
+    sh_package_library_native native = sh_package_native_assets_adapter(NULL); native.atlas = NULL; native.audio = audio;
+    sh_package_compile_environment env = {0}; env.baseline = sound_inventory_original; env.baseline_context = audio;
+    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    sh_package_library library = {0};
+    int ok = sh_package_library_compile(sources, &env, catalog, sound_inventory_original, audio,
+        registry, (uintptr_t)f.reflection, &native, &library, error, sizeof(error));
+    if (!ok) fprintf(stderr, "bankless stock sound: %s\n", error);
+    assert(ok && library.audio && !sh_package_audio_program_contains(library.audio, 0, "default"));
+    sh_package_library_free(&library); sh_package_sources_free(sources);
     sh_audio_originals_close(audio); sh_resource_catalog_close(catalog); cleanup(); assert(!failures);
     while (f.count) free(f.regions[--f.count].address);
 }
@@ -3280,6 +3425,7 @@ int main(void)
     test_sound_original_binding();
     test_sound_program_library();
     test_sound_inventory_library();
+    test_bankless_stock_sound();
     test_absent_declaration_defaults();
     test_contribution_projection();
     test_bound_contributions(&f, registry);
