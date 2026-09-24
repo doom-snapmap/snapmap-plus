@@ -384,6 +384,43 @@ static void test_native_identity_changes(void)
     sh_native_resource_registry_close(r); cleanup(&f, NULL);
 }
 
+/* Repeated queries of one snapshot revalidate only what each read: the manager
+ * header and the entries sharing the queried ID. Registration, removal, array
+ * replacement and a changed bucket entry fail; the full check covers the rest. */
+static void test_native_identity_bucket_validation(void)
+{
+    for (int fault = 0; fault < 5; fault++) {
+        fixture f;
+        uintptr_t head = native_setup(&f), object = loaded_id(&f, 0, "same");
+        sh_native_resource_registry *r = native_open(&f, head); assert(r);
+        sh_native_resource_identity same = {0}, unused = {0};
+        char error[256];
+        assert(sh_native_resource_registry_identity(r, "image", "same", &same, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_SAME_NAME);
+        assert(sh_native_resource_registry_identity(r, "image", "unused", &unused, error, sizeof(error)) == SH_NATIVE_RESOURCE_ID_FREE);
+        assert(sh_native_resource_registry_validate_identity(r, &same, error, sizeof(error)));
+        assert(sh_native_resource_registry_validate_identity(r, &unused, error, sizeof(error)));
+        void *array = (void *)pointer_at(f.managers[0], 0x20);
+        if (fault == 0) num((void *)object, 0x20, 17);                  /* bucket entry ID */
+        if (fault == 1) num(f.managers[0], 0x28, 2);                     /* registration count */
+        if (fault == 2) {                                                /* replaced array */
+            void *copy = alloc(&f, sizeof(uintptr_t)); ptr(copy, 0, (void *)object);
+            ptr(f.managers[0], 0x20, copy);
+        }
+        if (fault == 3) ptr(array, 0, (void *)loaded_id(&f, 1, "same")); /* swapped entry */
+        if (fault == 4) ptr(f.managers[0], 8, str(&f, "Image"));        /* manager identity */
+        if (fault == 0 || fault == 3) {
+            /* The bucket owner changed; the absent name's own reads did not. */
+            assert(!sh_native_resource_registry_validate_identity(r, &same, error, sizeof(error)) && *error);
+        } else {
+            assert(!sh_native_resource_registry_validate_identity(r, &same, error, sizeof(error)) && *error);
+            assert(!sh_native_resource_registry_validate_identity(r, &unused, error, sizeof(error)) && *error);
+        }
+        assert(!sh_native_resource_registry_validate(r, error, sizeof(error)));
+        sh_native_resource_identity_clear(&same); sh_native_resource_identity_clear(&unused);
+        sh_native_resource_registry_close(r); cleanup(&f, NULL);
+    }
+}
+
 static void test_native_identity_empty_and_malformed(void)
 {
     fixture f;
@@ -443,6 +480,6 @@ int main(void)
     test_lookup_order(); test_unknown_and_ancestry(); test_memory_and_names(); test_type_class();
     test_candidate_sources(); test_candidate_observation();
     test_decl_identity(); test_native_identity_collisions(); test_native_identity_changes();
-    test_native_identity_empty_and_malformed();
+    test_native_identity_bucket_validation(); test_native_identity_empty_and_malformed();
     puts("decl_native_registry_test: PASS"); return 0;
 }

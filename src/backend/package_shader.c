@@ -394,8 +394,11 @@ static int ps_module_path(const char *name, unsigned stage, char out[256])
 static int ps_emit_path(sh_package_shader_path_visitor visitor, void *context,
     sh_package_shader_path_kind kind, const char *original, const char *linked, char *error, size_t capacity)
 {
-    if (!visitor(context, kind, original, linked))
+    if (!visitor(context, kind, original, linked)) {
+        /* Keep the visitor's specific reason when it gave one. */
+        if (error && capacity && *error) return SH_PACKAGE_SHADER_ERROR;
         return ps_error(error, capacity, SH_PACKAGE_SHADER_ERROR, "shader companion visitor rejected a path");
+    }
     return SH_PACKAGE_SHADER_OK;
 }
 int sh_package_shader_paths(sh_package_shader_renderer renderer,

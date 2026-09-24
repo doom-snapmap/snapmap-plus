@@ -296,6 +296,43 @@ static void preparation_contract(void)
     }
     assert(c.calls==4);sh_package_native_assets_close(assets);clear(&f);
 }
+typedef struct read_counter { fixture *fixture; size_t count; } read_counter;
+static int counted_read(void *context,uintptr_t address,void *out,size_t length)
+{ read_counter *c=context;c->count++;return read_memory(c->fixture,address,out,length); }
+/* One compilation's checks share a native identity snapshot: a later check
+ * reads only what it revalidates. A change during the scope fails that check
+ * and the scope, and unscoped checks afterward open their own snapshot. */
+static void shader_scope_contract(void)
+{
+    fixture f;setup(&f,0);char error[512];
+    unsigned char *head=memory(&f,8),*manager=memory(&f,0x30);ptr(head,0,manager);
+    unsigned char *object=native_object(&f,manager,"renderParm","tex",parameter,1,0x410);
+    read_counter reads={&f,0};uint32_t id=0;assert(sh_native_resource_id("renderParm","tex",&id));
+    sh_package_native_assets *assets=sh_package_native_assets_open("C:/shader-scope-fixture");assert(assets);
+    sh_native_resource_registry_source registry={&reads,counted_read,(uintptr_t)head};
+    assert(sh_package_native_assets_configure_shader(assets,SH_PACKAGE_SHADER_OPENGL,registry,original,&f,error,sizeof(error)));
+    sh_package_library_native adapter=sh_package_native_assets_adapter(assets);
+    const sh_package_source_shader *shader=adapter.source.shader;int kind=0;uint32_t index=0;
+    sh_decl_source source={parameter,strlen(parameter)};
+    sh_package_shader_receipt_invalidate((uintptr_t)object);
+    size_t start=reads.count;
+    assert(shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error)) && kind==1 && index==0x410);
+    size_t unscoped=reads.count-start;
+    sh_package_native_assets_shader_scope_begin(assets);
+    assert(shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error)));
+    start=reads.count;
+    assert(shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error)) && kind==1 && index==0x410);
+    assert(reads.count-start<unscoped);
+    assert(sh_package_native_assets_shader_scope_end(assets,error,sizeof(error)) && !*error);
+    sh_package_native_assets_shader_scope_begin(assets);
+    assert(shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error)));
+    num(object,0x20,17);
+    assert(!shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error)));
+    assert(!sh_package_native_assets_shader_scope_end(assets,error,sizeof(error)) && *error);
+    num(object,0x20,(int)id);
+    assert(shader->parameter(shader->context,"tex",source,&kind,&index,error,sizeof(error)) && kind==1);
+    sh_package_native_assets_close(assets);clear(&f);
+}
 typedef struct cook_context {
     fixture *fixture;
     sh_package_native_assets *assets;
@@ -427,4 +464,4 @@ static void native_contract(void)
     sh_package_native_assets_close(assets);clear(&f);
 }
 int main(void)
-{ complete_and_bind(SH_PACKAGE_SHADER_VULKAN);complete_and_bind(SH_PACKAGE_SHADER_OPENGL);reject_incomplete();native_contract();preparation_contract();source_only_opengl(0);source_only_opengl(1);puts("package_shader_link_test: PASS");return 0; }
+{ complete_and_bind(SH_PACKAGE_SHADER_VULKAN);complete_and_bind(SH_PACKAGE_SHADER_OPENGL);reject_incomplete();native_contract();preparation_contract();shader_scope_contract();source_only_opengl(0);source_only_opengl(1);puts("package_shader_link_test: PASS");return 0; }

@@ -993,10 +993,24 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             }
             native.source.implicit = g_test_constructor ? pr_test_constructor : NULL;
 #endif
+            ULONGLONG started = GetTickCount64();
+            char scope_error[512], line[768];
+            sh_package_native_assets_shader_scope_begin(native_assets);
             int linked = contexts ? sh_package_library_compile_contexts(sources, contexts, &environment,
                 catalog, pr_original, &originals, registry, reflection, &native, &isolated, error, sizeof(error)) :
                 sh_package_library_compile(sources, &environment, catalog, pr_original, &originals,
                     registry, reflection, &native, &isolated, error, sizeof(error));
+            if (!sh_package_native_assets_shader_scope_end(native_assets, scope_error, sizeof(scope_error)) && linked) {
+                /* Native identities changed under this candidate: environmental. */
+                sh_package_library_free(&isolated); linked = 0;
+                strcpy_s(error, sizeof(error), scope_error);
+            }
+            snprintf(line, sizeof(line), "package library compile (%s): %s in %llu ms%s%s",
+                contexts ? "map contexts" : "installed library", linked ? "linked" : "failed",
+                (unsigned long long)(GetTickCount64() - started), linked ? "" : ": ", linked ? "" : error);
+            backend_log(line);
+            /* Accounted coverage gaps help diagnose a later refusal too. */
+            if (!linked && isolated.coverage) backend_log(isolated.coverage);
             if (linked) {
                 compiled = isolated.compiled; isolated.compiled = NULL;
             }
@@ -2878,9 +2892,16 @@ int sh_package_map_plan_source_resources(const sh_package_map_plan *plan,
     if (plan) {
         sh_package_source_audio audio = {plan->provider->audio_originals};
         sh_package_library_native native = sh_package_native_assets_adapter(plan->provider->native_assets);
+        char scope_error[512];
+        sh_package_native_assets_shader_scope_begin(plan->provider->native_assets);
         ok = sh_package_source_graph_with_contracts(plan->provider->compiled, plan->provider->catalog,
             pr_original, &original, registry, reflection, native.source.shader,
             audio.originals ? &audio : NULL, json, length, out, report, error, capacity);
+        if (!sh_package_native_assets_shader_scope_end(plan->provider->native_assets, scope_error,
+            sizeof(scope_error)) && ok) {
+            ok = 0; if (out) sh_package_references_free(out);
+            if (error && capacity) snprintf(error, capacity, "%s", scope_error);
+        }
     }
     else if (error && capacity) snprintf(error, capacity, "candidate source graph requires a prepared map");
     return ok;
