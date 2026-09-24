@@ -1583,6 +1583,7 @@ sh_package_compilation *sh_package_compile_with(const sh_package_sources *source
     error[0] = 0;
     build.error = error; build.error_capacity = error_capacity;
     if (environment && environment->invalid_package) *environment->invalid_package = SIZE_MAX;
+    if (environment && environment->unserved_package) *environment->unserved_package = SIZE_MAX;
     if (environment && environment->conflicted_packages) sh_package_owners_free(environment->conflicted_packages);
     if (!sources || !environment ||
         (environment->builtin_count && !environment->builtins) ||

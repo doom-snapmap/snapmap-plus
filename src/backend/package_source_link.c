@@ -32,6 +32,8 @@ typedef struct sl_unit {
     sl_implicit *implicit;
     size_t implicit_count;
     size_t reverse_gap; /* Observation only: 1 + index of its accounted reader gap. */
+    struct sl_unit *parent; /* Unit whose discovery first requested it; NULL for seeds. */
+    int nominated; /* Seeded as a stock root affected by its scope's changes. */
     int movie_captured; /* Constructor requests of a cooked movie were enumerated. */
     sh_package_link_file_identity *identities; /* Owned per-file identities (movie pairs). */
 } sl_unit;
@@ -60,6 +62,10 @@ struct sh_package_source_link {
     sh_package_reverse_gap *reverse_gaps;
     size_t reverse_gap_count, reverse_gap_capacity;
     int reader_gap; /* The last discovery stopped in a registered reader, not I/O. */
+    int environment; /* A failure came from I/O, allocation or configuration. */
+    sl_unit *discovering; /* Unit whose readers are requesting new units. */
+    const sl_unit *failed_unit; /* Unit whose strict discovery failed, if known. */
+    size_t failed_scope; /* Input scope whose supplied files failed seeding. */
 };
 
 static uint64_t sl_hash_text(uint64_t hash, const char *text)
@@ -75,6 +81,13 @@ static int sl_fail(sh_package_source_link *s, const char *reason, const char *na
     if (s->error && s->error_capacity && !*s->error)
         snprintf(s->error, s->error_capacity, "%s%s%s", reason, name ? ": " : "", name ? name : "");
     return 0;
+}
+/* I/O, allocation, internal state or configuration: never evidence against
+ * the input whose closure was being read. */
+static int sl_env_fail(sh_package_source_link *s, const char *reason, const char *name)
+{
+    s->environment = 1;
+    return sl_fail(s, reason, name);
 }
 /* Missing product coverage for a source that was read successfully. Ordinary
  * linking still refuses it. Reverse observation of stock roots accounts it as
@@ -111,7 +124,9 @@ static int sl_unit_rehash(sh_package_source_link *s)
 static sl_unit *sl_find(sh_package_source_link *s, size_t scope, const char *family, const char *name, int add)
 {
     size_t at;
-    if (scope >= s->scope_count || !family || !*family || !name || !*name) goto bad;
+    if (scope >= s->scope_count || !family || !*family || !name || !*name) {
+        sl_fail(s, "resource reference has no scoped identity", name); return NULL;
+    }
     if (!s->unit_slot_count || (add && s->count >= s->unit_slot_count / 2))
         if (!sl_unit_rehash(s)) goto bad;
     at = (size_t)sl_unit_hash(scope, family, name) & (s->unit_slot_count - 1);
@@ -129,9 +144,10 @@ static sl_unit *sl_find(sh_package_source_link *s, size_t scope, const char *fam
         free((char *)unit->unit.family); free((char *)unit->unit.name); free(unit); goto bad;
     }
     unit->scope = scope; unit->unit.compilation = s->scopes[scope];
+    unit->parent = s->discovering && s->discovering->scope == scope ? s->discovering : NULL;
     unit->index = s->count; s->units[s->count++] = unit; s->unit_slots[at] = unit; return unit;
 bad:
-    sl_fail(s, "cannot retain scoped resource identity", name); return NULL;
+    sl_env_fail(s, "cannot retain scoped resource identity", name); return NULL;
 }
 static int sl_original_rehash(sh_package_source_link *s)
 {
@@ -157,7 +173,7 @@ static sl_original *sl_original_get(sh_package_source_link *s, const char *path)
         if (!strcmp(file->resource.engine_path, path)) return file;
         at = (at + 1) & (s->original_slot_count - 1);
     }
-    if (s->frozen) { sl_fail(s, "source binding requested an uncaptured original", path); return NULL; }
+    if (s->frozen) { sl_env_fail(s, "source binding requested an uncaptured original", path); return NULL; }
     if (!sl_grow((void ***)&s->originals, &s->original_capacity, s->original_count)) goto bad;
     sl_original *file = calloc(1, sizeof(*file));
     if (!file) goto bad;
@@ -168,7 +184,7 @@ static sl_original *sl_original_get(sh_package_source_link *s, const char *path)
     s->originals[s->original_count++] = file; s->original_slots[at] = file;
     if (file->status < 0 || file->status > 3 || (file->status && !file->resource.body) ||
         file->resource.body_length == SIZE_MAX) {
-        file->status = -1; sl_fail(s, "original resource could not be captured", path);
+        file->status = -1; sl_env_fail(s, "original resource could not be captured", path);
     } else if (!file->status) {
         free(file->resource.body); file->resource.body = NULL; file->resource.body_length = 0;
     }
@@ -176,7 +192,7 @@ static sl_original *sl_original_get(sh_package_source_link *s, const char *path)
     file->resource.native_original = file->status == 1;
     return file;
 bad:
-    sl_fail(s, "cannot allocate original resource snapshot", path); return NULL;
+    sl_env_fail(s, "cannot allocate original resource snapshot", path); return NULL;
 }
 static int sl_read_original(void *context, const char *path, unsigned char **body, size_t *length)
 {
@@ -186,7 +202,7 @@ static int sl_read_original(void *context, const char *path, unsigned char **bod
     if (!file || file->status < 0) return -1;
     if (!file->status) return 0;
     *body = malloc(file->resource.body_length + 1);
-    if (!*body) { sl_fail(s, "cannot copy captured original", path); return -1; }
+    if (!*body) { sl_env_fail(s, "cannot copy captured original", path); return -1; }
     memcpy(*body, file->resource.body, file->resource.body_length); (*body)[file->resource.body_length] = 0;
     *length = file->resource.body_length; return file->status;
 }
@@ -195,7 +211,7 @@ static int sl_member(sh_package_source_link *s, sl_unit *unit, const sh_compiled
     for (size_t i = 0; i < unit->unit.file_count; i++)
         if (!strcmp(unit->unit.files[i]->engine_path, file->engine_path)) return 1;
     if (!sl_grow((void ***)&unit->unit.files, &unit->capacity, unit->unit.file_count))
-        return sl_fail(s, "cannot retain native resource permutations", unit->unit.name);
+        return sl_env_fail(s, "cannot retain native resource permutations", unit->unit.name);
     ((const sh_compiled_resource **)unit->unit.files)[unit->unit.file_count++] = file; return 1;
 }
 /* Capture availability separately from membership. Optional consumers may
@@ -245,7 +261,7 @@ static size_t sl_shader_program_add(sh_package_source_link *s, sl_unit *unit,
     if (unit->program_count >= SIZE_MAX / sizeof(*unit->programs)) return SIZE_MAX;
     char *copy = _strdup(name);
     sl_shader_program *grown = copy ? realloc(unit->programs, (unit->program_count + 1) * sizeof(*grown)) : NULL;
-    if (!grown) { free(copy); sl_fail(s, "cannot retain shader permutation identities", name); return SIZE_MAX; }
+    if (!grown) { free(copy); sl_env_fail(s, "cannot retain shader permutation identities", name); return SIZE_MAX; }
     unit->programs = grown;
     unit->programs[unit->program_count] = (sl_shader_program){copy, parent, mask, {0}};
     return unit->program_count++;
@@ -294,7 +310,7 @@ static int sl_shader_collect_path(void *context, sh_package_shader_path_kind kin
     for (size_t i = 0; i < unit->shader_file_count; i++) if (unit->shader_files[i].file == file) return 1;
     if (unit->shader_file_count >= SIZE_MAX / sizeof(*unit->shader_files)) return 0;
     sl_shader_file *grown = realloc(unit->shader_files, (unit->shader_file_count + 1) * sizeof(*grown));
-    if (!grown) return sl_fail(s, "cannot retain shader file roles", original);
+    if (!grown) return sl_env_fail(s, "cannot retain shader file roles", original);
     unit->shader_files = grown;
     unit->shader_files[unit->shader_file_count++] = (sl_shader_file){file, walk->program, kind}; return 1;
 }
@@ -302,7 +318,7 @@ static int sl_shader_files(sh_package_source_link *s, sl_unit *unit)
 {
     sh_package_shader_program empty = {0};
     sl_shader_collect probe = {s, unit, 0, 0, &empty, NULL, 1, 0, 0};
-    if (!s->native.shader) return sl_fail(s, "shader unit requires the current renderer and fixed ABI contract", unit->unit.name);
+    if (!s->native.shader) return sl_env_fail(s, "shader unit requires the current renderer and fixed ABI contract", unit->unit.name);
     /* The selected renderer's companions define publication. Supplied files for
      * other renderers remain in their intact source bundle, never substituted. */
     unit->unit.file_count = 0;
@@ -351,7 +367,7 @@ static int sl_material_member(void *context, const char *role, const sh_compiled
     char *copy = _strdup(role);
     sh_package_link_witness *grown = copy ? realloc((void *)unit->witnesses,
         (unit->witness_count + 1) * sizeof(*grown)) : NULL;
-    if (!grown) { free(copy); return sl_fail(walk->source, "cannot retain material companions", role); }
+    if (!grown) { free(copy); return sl_env_fail(walk->source, "cannot retain material companions", role); }
     unit->witnesses = grown; grown[unit->witness_count++] = (sh_package_link_witness){copy, file}; return 1;
 }
 static int sl_movie_files(sh_package_source_link *s, sl_unit *unit);
@@ -371,7 +387,7 @@ static int sl_files(sh_package_source_link *s, sl_unit *unit)
             sh_font_binary_paths paths;
             const sh_compiled_resource *file;
             if (!sh_font_binary_paths_for(unit->unit.name, (sh_font_binary_variant)i, &paths))
-                return sl_fail(s, "cannot construct font source paths", unit->unit.name);
+                return sl_env_fail(s, "cannot construct font source paths", unit->unit.name);
             int status = sl_source_file(s, unit->scope, paths.file, 1, &file);
             sh_font_binary_paths_clear(&paths);
             if (status < 0 || (status == 1 && !sl_member(s, unit, file))) return 0;
@@ -391,7 +407,7 @@ static int sl_files(sh_package_source_link *s, sl_unit *unit)
     } else if (!unit->unit.file_count) {
         char *path = sh_package_cooked_path(unit->unit.family, unit->unit.name);
         if (!path) path = sl_decl_path(unit->unit.family, unit->unit.name);
-        if (!path) return sl_fail(s, "cannot construct native source path", unit->unit.name);
+        if (!path) return sl_env_fail(s, "cannot construct native source path", unit->unit.name);
         int status = sl_path(s, unit, path); free(path);
         if (status < 0) return 0;
     }
@@ -487,18 +503,17 @@ static const char *sl_deferred_binary_family(sh_package_source_link *s, const sh
     return NULL;
 }
 typedef struct sl_material_seed { sh_package_source_link *source; size_t scope; } sl_material_seed;
+static int sl_seed_family(sl_material_seed *walk, const char *family, const char *name)
+{
+    sl_unit *unit = sl_find(walk->source, walk->scope, family, name, 1);
+    if (unit && sl_files(walk->source, unit)) return 1;
+    if (unit) walk->source->failed_unit = unit;
+    return 0;
+}
 static int sl_seed_material(void *context, const char *name)
-{
-    sl_material_seed *walk = context;
-    sl_unit *unit = sl_find(walk->source, walk->scope, "material", name, 1);
-    return unit && sl_files(walk->source, unit);
-}
+{ return sl_seed_family(context, "material", name); }
 static int sl_seed_sound(void *context, const char *name)
-{
-    sl_material_seed *walk = context;
-    sl_unit *unit = sl_find(walk->source, walk->scope, "sound", name, 1);
-    return unit && sl_files(walk->source, unit);
-}
+{ return sl_seed_family(context, "sound", name); }
 static int sl_seed_inputs(sh_package_source_link *s)
 {
     for (size_t scope = 0; scope < s->scope_count; scope++) {
@@ -506,7 +521,7 @@ static int sl_seed_inputs(sh_package_source_link *s)
         sh_package_compilation filtered = *original; sh_package_link_inputs roots = {0};
         filtered.resources = calloc(original->resource_count ? original->resource_count : 1, sizeof(*filtered.resources));
         filtered.resource_count = 0;
-        if (!filtered.resources) return sl_fail(s, "cannot enumerate shader source inputs", NULL);
+        if (!filtered.resources) return sl_env_fail(s, "cannot enumerate shader source inputs", NULL);
         int ok = 1;
         for (size_t i = 0; ok && i < original->resource_count; i++) {
             const sh_compiled_resource *file = original->resources + i; char *name = NULL;
@@ -533,10 +548,14 @@ static int sl_seed_inputs(sh_package_source_link *s)
             else if (name) ok = sl_find(s, scope, "renderprog", name, 1) != NULL;
             else if (!shader) filtered.resources[filtered.resource_count++] = *file;
             else {
+                /* A shared shader source reaches the SnapMap programs catalogued
+                 * beneath it. Campaign-only programs are not SnapMap resources;
+                 * a scope that needs one supplies its declaration, which seeds it. */
                 const sh_resource_catalog_entry *const *rows = NULL;
                 size_t count = sh_resource_catalog_find_path(s->catalog, file->engine_path, &rows);
-                for (size_t r = 0; ok && r < count; r++) if (!strcmp(rows[r]->type, "renderprog") && *rows[r]->name)
-                    ok = sl_find(s, scope, "renderprog", rows[r]->name, 1) != NULL;
+                for (size_t r = 0; ok && r < count; r++)
+                    if (rows[r]->archive < 2 && !strcmp(rows[r]->type, "renderprog") && *rows[r]->name)
+                        ok = sl_find(s, scope, "renderprog", rows[r]->name, 1) != NULL;
             }
             free(name);
         }
@@ -561,7 +580,7 @@ static int sl_seed_inputs(sh_package_source_link *s)
             ok = sh_package_audio_program_seed(s->native.audio, scope, s->catalog, sl_seed_sound, &walk,
                 s->error, s->error_capacity);
         }
-        if (!ok) return 0;
+        if (!ok) { s->failed_scope = scope; return 0; }
     }
     return 1;
 }
@@ -588,10 +607,11 @@ static int sl_seed_orphan_binaries(sh_package_source_link *s)
             } else inverse = sh_package_cooked_identity(file->engine_path, &inverse_family, &name);
             if (inverse != 1 ||
                 !inverse_family || strcmp(inverse_family, family)) {
-                free(name); return sl_fail(s, "unreferenced binary has no native identity", file->engine_path);
+                free(name); s->failed_scope = scope;
+                return sl_fail(s, "unreferenced binary has no native identity", file->engine_path);
             }
             sl_unit *unit = sl_find(s, scope, family, name, 1); free(name);
-            if (!unit || !sl_member(s, unit, file)) return 0;
+            if (!unit || !sl_member(s, unit, file)) { s->failed_scope = scope; return 0; }
         }
     }
     return 1;
@@ -614,7 +634,7 @@ static int sl_shader_accounted(sh_package_source_link *s)
         int found = 0;
         for (size_t u = 0; !found && u < s->count; u++) if (s->units[u]->scope == scope)
             for (size_t m = 0; !found && m < s->units[u]->unit.file_count; m++) found = s->units[u]->unit.files[m] == file;
-        if (!found) return sl_fail(s, "shader source input has no verified companion owner", path);
+        if (!found) { s->failed_scope = scope; return sl_fail(s, "shader source input has no verified companion owner", path); }
     }
     return 1;
 }
@@ -627,7 +647,7 @@ static int sl_reference(void *context, const char *slot, const char *family, con
     (void)slot; *replacement = NULL;
     if (!target) return -1;
     if (!sl_grow((void ***)&unit->dependencies, &unit->dependency_capacity, unit->dependency_count)) {
-        sl_fail(walk->source, "cannot retain scoped dependency", name); return -1;
+        sl_env_fail(walk->source, "cannot retain scoped dependency", name); return -1;
     }
     unit->dependencies[unit->dependency_count++] = target;
     return 0;
@@ -642,14 +662,14 @@ static int sl_implicit_reference(void *context, const char *slot, const char *fa
         return unit->implicit[i].target == target ? 1 :
             sl_fail(walk->source, "implicit native slot has contradictory targets", slot);
     if (unit->implicit_count >= SIZE_MAX / sizeof(*unit->implicit))
-        return sl_fail(walk->source, "too many implicit native requests", name);
+        return sl_env_fail(walk->source, "too many implicit native requests", name);
     char *copy = _strdup(slot);
     sl_implicit *grown = copy ? realloc(unit->implicit, (unit->implicit_count + 1) * sizeof(*grown)) : NULL;
-    if (!grown) { free(copy); return sl_fail(walk->source, "cannot retain implicit native request", name); }
+    if (!grown) { free(copy); return sl_env_fail(walk->source, "cannot retain implicit native request", name); }
     unit->implicit = grown;
     unit->implicit[unit->implicit_count++] = (sl_implicit){copy, target};
     if (!sl_grow((void ***)&unit->dependencies, &unit->dependency_capacity, unit->dependency_count))
-        return sl_fail(walk->source, "cannot retain implicit native dependency", name);
+        return sl_env_fail(walk->source, "cannot retain implicit native dependency", name);
     unit->dependencies[unit->dependency_count++] = target;
     return 1;
 }
@@ -708,7 +728,7 @@ static int sl_movie_request(void *context, const char *slot, const char *family,
         for (unsigned i = 0; i < 3; i++) {
             sh_font_binary_paths paths;
             if (!sh_font_binary_paths_for(name, (sh_font_binary_variant)i, &paths)) {
-                sl_fail(s, "cannot construct font source paths", name); return -1;
+                sl_env_fail(s, "cannot construct font source paths", name); return -1;
             }
             status = sl_source_file(s, walk->unit->scope, paths.file, 1, forms + i);
             sh_font_binary_paths_clear(&paths);
@@ -747,7 +767,7 @@ static int sl_movie_files(sh_package_source_link *s, sl_unit *unit)
     size_t length = 0;
     unsigned char *body = sh_package_compilation_read(unit->unit.compilation, movie, SIZE_MAX,
         &length, s->error, s->error_capacity);
-    if (!body) return sl_fail(s, "cooked movie could not be read", names.movie);
+    if (!body) return sl_env_fail(s, "cooked movie could not be read", names.movie);
     sl_discover walk = {s, unit};
     int ok = sh_package_movie_capture(body, length, sl_movie_request, &walk, s->error, s->error_capacity);
     free(body);
@@ -793,7 +813,7 @@ static int sl_movie_identities(sh_package_source_link *s, sl_unit *unit)
         return sl_fail(s, "cooked movie unit does not hold exactly its native pair", unit->unit.name);
     sh_package_link_file_identity *identities = calloc(2, sizeof(*identities));
     char *atlas = _strdup(names.atlas);
-    if (!identities || !atlas) { free(identities); free(atlas); return sl_fail(s, "cannot retain movie identities", unit->unit.name); }
+    if (!identities || !atlas) { free(identities); free(atlas); return sl_env_fail(s, "cannot retain movie identities", unit->unit.name); }
     for (size_t i = 0; i < 2; i++) {
         const char *path = unit->unit.files[i]->engine_path;
         if (!strcmp(path, names.atlas)) { identities[i].family = "image"; identities[i].name = atlas; atlas = NULL; }
@@ -807,7 +827,15 @@ static int sl_movie_identities(sh_package_source_link *s, sl_unit *unit)
     free(unit->identities);
     unit->identities = identities; unit->unit.file_identities = identities; return 1;
 }
+static int sl_discover_unit_requests(sh_package_source_link *s, sl_unit *unit);
 static int sl_discover_unit(sh_package_source_link *s, sl_unit *unit)
+{
+    sl_unit *previous = s->discovering;
+    s->discovering = unit;
+    int ok = sl_discover_unit_requests(s, unit);
+    s->discovering = previous; return ok;
+}
+static int sl_discover_unit_requests(sh_package_source_link *s, sl_unit *unit)
 {
     if (!sl_files(s, unit)) {
         if (s->observe && !s->failed) s->reader_gap = 1;
@@ -822,6 +850,7 @@ static int sl_discover_unit(sh_package_source_link *s, sl_unit *unit)
             body, length, sl_reference, &walk, &bound_length, s->error, s->error_capacity);
         int ok = body && bound && length == bound_length && !memcmp(body, bound, length) && !s->failed;
         if (!ok && body && !bound && !s->failed) s->reader_gap = 1;
+        if (!body) s->environment = 1; /* An unreadable captured file blames no input. */
         free(body); free(bound);
         if (!ok) return 0;
     }
@@ -853,14 +882,14 @@ static int sl_reverse_gap_add(sh_package_source_link *s, size_t scope, const sl_
         size_t next = s->reverse_gap_capacity ? s->reverse_gap_capacity * 2 : 16;
         sh_package_reverse_gap *grown = next > s->reverse_gap_capacity && next <= SIZE_MAX / sizeof(*grown) ?
             realloc(s->reverse_gaps, next * sizeof(*grown)) : NULL;
-        if (!grown) return sl_fail(s, "cannot account reverse discovery coverage", unit->unit.name);
+        if (!grown) return sl_env_fail(s, "cannot account reverse discovery coverage", unit->unit.name);
         s->reverse_gaps = grown; s->reverse_gap_capacity = next;
     }
     sh_package_reverse_gap gap = {scope, _strdup(unit->unit.family), _strdup(unit->unit.name),
         _strdup(reason && *reason ? reason : "reader coverage is incomplete")};
     if (!gap.family || !gap.name || !gap.reason) {
         free((char *)gap.family); free((char *)gap.name); free((char *)gap.reason);
-        return sl_fail(s, "cannot account reverse discovery coverage", unit->unit.name);
+        return sl_env_fail(s, "cannot account reverse discovery coverage", unit->unit.name);
     }
     s->reverse_gaps[s->reverse_gap_count++] = gap; return 1;
 }
@@ -939,7 +968,7 @@ static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_r
     sl_reverse_native admission = {s, plan ? plan->baseline_scope : SIZE_MAX};
     if (!plan) return 1;
     if (plan->baseline_scope >= s->scope_count)
-        return sl_fail(s, "reverse authoring roots require an original-only scope", NULL);
+        return sl_env_fail(s, "reverse authoring roots require an original-only scope", NULL);
     /* A saved derived root need not have an authored declaration file. It must
      * still bind in exactly the recorded source context, never current local. */
     if (plan->recorded) for (size_t i = 0; i < plan->recorded->binding_count; i++) {
@@ -1032,8 +1061,10 @@ static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_r
                     s->reverse_gaps[gap->reverse_gap - 1].reason : NULL)) goto done;
                 continue;
             }
-            if (!sl_find(s, scope, unit->unit.family, unit->unit.name, 1) ||
-                !sl_find(s, plan->baseline_scope, unit->unit.family, unit->unit.name, 1)) goto done;
+            size_t before = s->count;
+            sl_unit *root = sl_find(s, scope, unit->unit.family, unit->unit.name, 1);
+            if (!root || !sl_find(s, plan->baseline_scope, unit->unit.family, unit->unit.name, 1)) goto done;
+            if (s->count > before && s->units[before] == root) root->nominated = 1;
         }
     }
     ok = 1;
@@ -1092,8 +1123,65 @@ static int sl_shared(sh_package_source_link *s)
     ok = sh_package_link_originals(nodes, s->count, s->shared, s->shared, s->error, s->error_capacity);
 done:
     free(nodes); free(edges);
-    if (!ok) return sl_fail(s, "cannot classify scoped source dependencies", NULL);
+    if (!ok) return sl_env_fail(s, "cannot classify scoped source dependencies", NULL);
     return 1;
+}
+
+/* A unit carries content its scope supplied, not only product built-ins
+ * (which have no input files) or captured originals. */
+static int sl_unit_supplied(const sl_unit *unit)
+{
+    for (size_t i = 0; i < unit->unit.file_count; i++) if (unit->unit.files[i]->source_count) return 1;
+    for (size_t i = 0; i < unit->unit.witness_count; i++)
+        if (unit->unit.witnesses[i].resource->source_count) return 1;
+    return 0;
+}
+static int sl_scope_supplies(const sh_package_source_link *s, size_t scope)
+{
+    const sh_package_compilation *compiled = scope < s->scope_count ? s->scopes[scope] : NULL;
+    for (size_t i = 0; compiled && i < compiled->resource_count; i++)
+        if (compiled->resources[i].source_count) return 1;
+    return 0;
+}
+/* Classify a failed closure by the content that reached it (see the header).
+ * The chain follows first requesters from the failing unit back to its seed. */
+static void sl_attribute(const sh_package_source_link *s, sh_package_source_failure *failure)
+{
+    const sl_unit *failed = s->failed_unit, *supplier = NULL, *root = NULL;
+    size_t used = 0;
+    failure->kind = SH_PACKAGE_SOURCE_FAILURE_NONE; failure->scope = SIZE_MAX;
+    failure->family[0] = failure->name[0] = failure->chain[0] = 0;
+    if (s->environment) { failure->kind = SH_PACKAGE_SOURCE_FAILURE_ENVIRONMENT; return; }
+    if (!failed) {
+        if (s->failed_scope != SIZE_MAX && sl_scope_supplies(s, s->failed_scope)) {
+            failure->kind = SH_PACKAGE_SOURCE_FAILURE_COVERAGE; failure->scope = s->failed_scope;
+        }
+        return;
+    }
+    snprintf(failure->family, sizeof(failure->family), "%s", failed->unit.family);
+    snprintf(failure->name, sizeof(failure->name), "%s", failed->unit.name);
+    for (const sl_unit *unit = failed; unit; unit = unit->parent) {
+        if (!supplier && sl_unit_supplied(unit)) supplier = unit;
+        root = unit;
+        if (used + 1 < sizeof(failure->chain)) {
+            int n = snprintf(failure->chain + used, sizeof(failure->chain) - used, "%s%s %s",
+                unit == failed ? "" : " <- ", unit->unit.family, unit->unit.name);
+            if (n < 0 || (size_t)n >= sizeof(failure->chain) - used) {
+                /* Keep the nearest requesters; mark the omitted seed side. */
+                size_t keep = sizeof(failure->chain) - 8;
+                if (used > keep) used = keep;
+                snprintf(failure->chain + used, sizeof(failure->chain) - used, " <- ...");
+                used = sizeof(failure->chain);
+            } else used += (size_t)n;
+        }
+    }
+    if (supplier) {
+        failure->kind = supplier == failed && s->reader_gap ?
+            SH_PACKAGE_SOURCE_FAILURE_SOURCE : SH_PACKAGE_SOURCE_FAILURE_COVERAGE;
+        failure->scope = failed->scope;
+    } else if (root && root->nominated) {
+        failure->kind = SH_PACKAGE_SOURCE_FAILURE_COVERAGE; failure->scope = failed->scope;
+    } else failure->kind = SH_PACKAGE_SOURCE_FAILURE_PRODUCT;
 }
 
 void sh_package_source_link_close(sh_package_source_link *s)
@@ -1132,10 +1220,10 @@ size_t sh_package_source_link_reverse_gaps(const sh_package_source_link *source,
     if (gaps) *gaps = source ? source->reverse_gaps : NULL;
     return source ? source->reverse_gap_count : 0;
 }
-sh_package_source_link *sh_package_source_link_open_roots(const sh_package_compilation *const *scopes, size_t count,
+sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_compilation *const *scopes, size_t count,
     const sh_resource_catalog *catalog, sh_package_baseline_reader original, void *original_context,
     sh_decl_registry_source registry, uintptr_t reflection, const sh_package_source_link_native *native,
-    const sh_package_source_root_plan *root_plan,
+    const sh_package_source_root_plan *root_plan, sh_package_source_failure *failure,
     char *error, size_t capacity)
 {
     sh_package_source_link *s = calloc(1, sizeof(*s));
@@ -1143,34 +1231,49 @@ sh_package_source_link *sh_package_source_link_open_roots(const sh_package_compi
     char fallback[1024];
     if (!error || !capacity) { error = fallback; capacity = sizeof(fallback); }
     *error = 0;
-    if (!s) { snprintf(error, capacity, "cannot allocate source linker"); return NULL; }
+    if (failure) {
+        failure->kind = SH_PACKAGE_SOURCE_FAILURE_NONE; failure->scope = SIZE_MAX;
+        failure->family[0] = failure->name[0] = failure->chain[0] = 0;
+    }
+    if (!s) {
+        if (failure) failure->kind = SH_PACKAGE_SOURCE_FAILURE_ENVIRONMENT;
+        snprintf(error, capacity, "cannot allocate source linker"); return NULL;
+    }
+    s->failed_scope = SIZE_MAX;
     s->error = error; s->error_capacity = capacity; s->catalog = catalog;
     s->original = original; s->original_context = original_context;
     if (native) {
         s->native = *native;
         if (native->shader) { s->shader = *native->shader; s->native.shader = &s->shader; }
     }
-    if ((count && !scopes) || count > SIZE_MAX / sizeof(*s->scopes) || count > SIZE_MAX / sizeof(*s->readers)) goto failed;
+    if ((count && !scopes) || count > SIZE_MAX / sizeof(*s->scopes) || count > SIZE_MAX / sizeof(*s->readers)) {
+        s->environment = 1; goto failed;
+    }
     s->scopes = calloc(count ? count : 1, sizeof(*s->scopes));
     s->readers = calloc(count ? count : 1, sizeof(*s->readers));
-    if (!s->scopes || !s->readers) goto failed;
+    if (!s->scopes || !s->readers) { s->environment = 1; goto failed; }
     s->scope_count = count;
     for (size_t i = 0; i < count; i++) {
         s->scopes[i] = scopes[i];
         s->readers[i] = sh_package_source_reader_open(scopes[i], catalog, sl_read_original, s,
             registry, reflection, error, capacity);
-        if (!s->readers[i]) goto failed;
-        if (s->native.shader && !sh_package_source_reader_shader(s->readers[i], s->native.shader)) goto failed;
+        if (!s->readers[i]) { s->environment = 1; goto failed; }
+        if (s->native.shader && !sh_package_source_reader_shader(s->readers[i], s->native.shader)) {
+            s->environment = 1; goto failed;
+        }
     }
-    if (!sl_seed_inputs(s) || !sl_reverse_roots(s, root_plan, registry, reflection)) goto failed;
+    if (!sl_seed_inputs(s)) goto failed;
+    /* Stock reverse discovery refuses only for I/O, allocation or setup. */
+    if (!sl_reverse_roots(s, root_plan, registry, reflection)) { s->environment = 1; goto failed; }
     size_t inspected = 0;
     for (int pass = 0; pass < 2; pass++) {
         if (pass && !sl_seed_orphan_binaries(s)) goto failed;
         for (; inspected < s->count; inspected++) {
             sl_unit *unit = s->units[inspected];
-            if (!sl_discover_unit(s, unit)) goto failed;
+            s->reader_gap = 0;
+            if (!sl_discover_unit(s, unit)) { s->failed_unit = unit; goto failed; }
             if (unit->unit.file_count > 1) qsort((void *)unit->unit.files, unit->unit.file_count, sizeof(*unit->unit.files), sl_file_order);
-            if (!sl_movie_identities(s, unit)) goto failed;
+            if (!sl_movie_identities(s, unit)) { s->failed_unit = unit; goto failed; }
         }
     }
     if (!sl_shader_accounted(s)) goto failed;
@@ -1183,7 +1286,7 @@ sh_package_source_link *sh_package_source_link_open_roots(const sh_package_compi
         if (!unit->unit.file_count) continue;
         int original_bytes = s->native.semantics(s->native.context, unit->scope, unit->unit.family,
             unit->unit.name, unit->unit.semantics, error, capacity);
-        if (original_bytes < 0 || original_bytes > 1) goto failed;
+        if (original_bytes < 0 || original_bytes > 1) { s->failed_unit = unit; goto failed; }
         for (size_t j = 0; original_bytes && j < unit->unit.file_count; j++) {
             sl_original *original = sl_original_get(s, unit->unit.files[j]->engine_path);
             size_t length = 0;
@@ -1201,7 +1304,7 @@ sh_package_source_link *sh_package_source_link_open_roots(const sh_package_compi
         sl_unit *unit = s->units[i];
         if (unit->unit.file_count && s->native.owners(s->native.context, unit->scope,
             unit->unit.family, unit->unit.name, &unit->unit.implicit_owners,
-            &unit->unit.implicit_gameplay_owners, error, capacity) != 1) goto failed;
+            &unit->unit.implicit_gameplay_owners, error, capacity) != 1) { s->failed_unit = unit; goto failed; }
     }
     if (s->count > 1) qsort(s->units, s->count, sizeof(*s->units), sl_unit_order);
     if (s->count > SIZE_MAX / sizeof(*s->inputs.units) || s->count > SIZE_MAX / sizeof(*s->inputs.scopes)) goto failed;
@@ -1226,7 +1329,16 @@ sh_package_source_link *sh_package_source_link_open_roots(const sh_package_compi
     sh_package_link_inputs_free(&roots); return s;
 failed:
     if (!*error) snprintf(error, capacity, "scoped source dependency closure could not be completed");
+    if (failure) sl_attribute(s, failure);
     sh_package_link_inputs_free(&roots); sh_package_source_link_close(s); return NULL;
+}
+sh_package_source_link *sh_package_source_link_open_roots(const sh_package_compilation *const *scopes, size_t count,
+    const sh_resource_catalog *catalog, sh_package_baseline_reader original, void *original_context,
+    sh_decl_registry_source registry, uintptr_t reflection, const sh_package_source_link_native *native,
+    const sh_package_source_root_plan *root_plan, char *error, size_t capacity)
+{
+    return sh_package_source_link_open_attributed(scopes, count, catalog, original, original_context,
+        registry, reflection, native, root_plan, NULL, error, capacity);
 }
 sh_package_source_link *sh_package_source_link_open(const sh_package_compilation *const *scopes, size_t count,
     const sh_resource_catalog *catalog, sh_package_baseline_reader original, void *original_context,

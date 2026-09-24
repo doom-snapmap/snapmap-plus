@@ -319,6 +319,68 @@ static void test_implicit_roots(fixture *game, const sh_package_sources *sources
     sh_package_library_free(&out); game->implicit_root = game->absent_target = 0;
 }
 
+/* Only content a package supplied can make it responsible for a failed
+ * closure: its own refused unit is malformed; content reaching a unit the
+ * product cannot link leaves it unserved; product-only chains blame nobody. */
+static void test_failure_attribution(fixture *f, const sh_package_compile_environment *base,
+    const sh_resource_catalog *catalog, sh_decl_registry_source registry, const sh_package_library_native *native)
+{
+    char path[4096], error[2048]; sh_package_library out = {0};
+    size_t invalid = SIZE_MAX, unserved = SIZE_MAX;
+    sh_package_compile_environment env = *base; env.invalid_package = &invalid; env.unserved_package = &unserved;
+    create("attribution/overrides/red/package.json", "{\"id\":\"red\",\"name\":\"Red\"}");
+    create("attribution/overrides/red/assets/generated/image/textures/rock.bimage", "red-image");
+    create("attribution/overrides/empty/package.json", "{\"id\":\"empty\",\"name\":\"Empty\"}");
+    create("attribution/overrides/broken/package.json", "{\"id\":\"broken\",\"name\":\"Broken\"}");
+    create("attribution/overrides/broken/assets/generated/decls/entitydef/props/broken.decl",
+        "{ class = \"Entity\"; edit = { model = \"models/campaign.lwo\"; } }");
+    create("attribution/overrides/malformed/package.json", "{\"id\":\"malformed\",\"name\":\"Malformed\"}");
+    create("attribution/overrides/malformed/assets/generated/decls/entitydef/props/malformed.decl",
+        "{ class = \"Entity\"; edit = { model = { path = \"models/rock.lwo\"; } } }");
+    snprintf(path, sizeof(path), "%s/attribution", root);
+    sh_package_sources *sources = sh_package_sources_scan(path, error, sizeof(error)); assert(sources);
+    assert(sh_package_sources_remove(sources, owner(sources, "Malformed")));
+    /* The package's own entity reaches a model SnapMap does not ship. That is
+     * missing coverage for this delivery, not corruption of its files. */
+    assert(!sh_package_library_compile(sources, &env, catalog, original, f, registry,
+        (uintptr_t)f->reflection, native, &out, error, sizeof(error)));
+    if (unserved != owner(sources, "Broken") || invalid != SIZE_MAX) fprintf(stderr, "coverage owner: %s\n", error);
+    assert(unserved == owner(sources, "Broken") && invalid == SIZE_MAX && !out.compiled);
+    assert(strstr(error, "campaign dependency") &&
+        strstr(error, "(via model models/campaign.lwo <- entitydef props/broken)"));
+    sh_package_library_free(&out); sh_package_sources_free(sources);
+    /* The reader refuses another package's own declaration: malformed. */
+    sources = sh_package_sources_scan(path, error, sizeof(error)); assert(sources);
+    assert(sh_package_sources_remove(sources, owner(sources, "Broken")));
+    assert(!sh_package_library_compile(sources, &env, catalog, original, f, registry,
+        (uintptr_t)f->reflection, native, &out, error, sizeof(error)));
+    if (invalid != owner(sources, "Malformed") || unserved != SIZE_MAX) fprintf(stderr, "malformed owner: %s\n", error);
+    assert(invalid == owner(sources, "Malformed") && unserved == SIZE_MAX &&
+        strstr(error, "(via entitydef props/malformed)"));
+    sh_package_library_free(&out);
+    assert(sh_package_sources_remove(sources, invalid));
+    int ok = sh_package_library_compile(sources, &env, catalog, original, f, registry,
+        (uintptr_t)f->reflection, native, &out, error, sizeof(error));
+    if (!ok) fprintf(stderr, "healthy remainder: %s\n", error);
+    assert(ok && invalid == SIZE_MAX && unserved == SIZE_MAX);
+    assert(binding(&out, sources, "Red", "", "entitydef", "props/rock"));
+    sh_package_library_free(&out);
+    /* A product built-in reaching the same gap in every scope is a product
+     * defect: the candidate fails and no package, not even an empty one, is
+     * selected for exclusion. */
+    sh_package_builtin builtin = {"generated/decls/entitydef/props/builtin.decl",
+        (const unsigned char *)"{ class = \"Entity\"; edit = { model = \"models/campaign.lwo\"; } }", 0};
+    builtin.length = strlen((const char *)builtin.body);
+    env.builtins = &builtin; env.builtin_count = 1;
+    assert(!sh_package_library_compile(sources, &env, catalog, original, f, registry,
+        (uintptr_t)f->reflection, native, &out, error, sizeof(error)));
+    if (invalid != SIZE_MAX || unserved != SIZE_MAX) fprintf(stderr, "product defect: %s\n", error);
+    assert(invalid == SIZE_MAX && unserved == SIZE_MAX && !out.compiled);
+    assert(strstr(error, "via model models/campaign.lwo <- entitydef props/builtin") &&
+        strstr(error, "reached only from product and stock content"));
+    sh_package_library_free(&out); sh_package_sources_free(sources);
+}
+
 int main(void)
 {
     char temporary[MAX_PATH], path[4096], error[1024]; fixture f = {0}; setup(&f);
@@ -537,6 +599,7 @@ int main(void)
     for (size_t i = 0; i < gap_sources->file_count; i++) if (!gap_sources->files[i].directory)
         assert(sh_package_source_verify(gap_sources->files + i));
     sh_package_library_free(&recorded); sh_package_sources_free(gap_sources); f.reader_gap = 0;
+    test_failure_attribution(&f, &env, catalog, registry, &native);
     /* An unreadable baseline edge is a product coverage defect, never a package
      * invalidation or permission to publish a partially discovered library. */
     size_t invalid = 0; env.invalid_package = &invalid; f.missing_unrelated = 1;

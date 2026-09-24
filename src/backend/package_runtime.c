@@ -552,6 +552,20 @@ static int pr_rejected(void *context, const sh_package *package, const char *rea
     backend_log(grown + used);
     return 1;
 }
+/* Missing product coverage is not an author error: the delivery remains
+ * installed and available; only the current library candidate omits it. */
+static int pr_unserved(char **report, const sh_package *package, const char *reason)
+{
+    size_t used = *report ? strlen(*report) : 0;
+    size_t add = strlen(package->root) + strlen(reason) + 128;
+    char *grown;
+    if (used > SIZE_MAX - add || !(grown = realloc(*report, used + add))) return 0;
+    *report = grown;
+    snprintf(grown + used, add, "Local package %s is not served yet (product coverage): %s\n",
+        package->root, reason);
+    backend_log(grown + used);
+    return 1;
+}
 
 /* Derive old-name bindings from the historical composition before private
  * linking. Every known root retains the complete original contributor context;
@@ -781,7 +795,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     DWORD n;
     size_t default_index;
     char *slash, *rejections = NULL;
-    size_t invalid_package = SIZE_MAX;
+    size_t invalid_package = SIZE_MAX, unserved_package = SIZE_MAX;
     sh_package_owners conflicted = {0};
     sh_package_library isolated = {0};
     sh_package_provenance historical = {0}, authoring_contexts = {0};
@@ -898,6 +912,7 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
 #endif
     if (!source_root && !product_only) {
         environment.invalid_package = &invalid_package;
+        environment.unserved_package = &unserved_package;
         environment.conflicted_packages = &conflicted;
     }
     if (inventory_out) {
@@ -934,7 +949,8 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             }
             contexts = authoring_contexts.context_count ? &authoring_contexts : NULL;
             environment.previous = NULL;
-            environment.invalid_package = NULL; environment.conflicted_packages = NULL;
+            environment.invalid_package = NULL; environment.unserved_package = NULL;
+            environment.conflicted_packages = NULL;
             if (!contexts) environment.builtin_count = 0;
         }
     }
@@ -1024,11 +1040,19 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
             if (!pr_prepare_native_sources(native_assets, &prepared_tasks, &prepared_task_count,
                 error, sizeof(error))) goto done;
             sh_package_library_free(&isolated);
-            invalid_package = SIZE_MAX; sh_package_owners_free(&conflicted);
+            invalid_package = unserved_package = SIZE_MAX; sh_package_owners_free(&conflicted);
             error[0] = 0;
             continue;
         }
 #endif
+        if (unserved_package != SIZE_MAX) {
+            if (unserved_package >= sources->package_count) goto done;
+            /* Its files are valid and stay available to map installation;
+             * healthy peers compile without it. */
+            if (!pr_unserved(&rejections, &sources->packages[unserved_package], error) ||
+                !sh_package_sources_remove(sources, unserved_package)) goto done;
+            continue;
+        }
         if (invalid_package != SIZE_MAX) {
             if (invalid_package >= sources->package_count) goto done;
             /* Invalid content cannot establish installed availability. Valid

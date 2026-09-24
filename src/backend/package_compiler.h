@@ -110,6 +110,13 @@ typedef struct sh_package_compile_environment {
      * to SIZE_MAX on entry. Peer conflicts, missing native metadata and failed
      * originals never select a package to discard. Strict callers omit it. */
     size_t *invalid_package;
+    /* Optional local-library report, reset to SIZE_MAX on entry: an outer
+     * package whose own supplied content reaches a unit the product cannot
+     * link yet (missing product coverage, or a dependency SnapMap does not ship
+     * that it does not supply). It is not malformed; the caller excludes it
+     * from this candidate only and keeps its installed availability. Chains
+     * reached only from product/stock content never select a package. */
+    size_t *unserved_package;
     /* Optional local-library isolation report, reset on entry. A malformed
      * owner is reported above; an unresolved peer resource marks its changing
      * owners together, never a folder-order winner. Policy collisions mark

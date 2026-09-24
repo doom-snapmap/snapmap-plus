@@ -1,4 +1,6 @@
 /* Synthetic shader units through the production source reader and linker. */
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #include "package_source_link.h"
 #include "package_native_assets.h"
 #include "package_shader_receipt.h"
@@ -198,6 +200,45 @@ static void complete_and_bind(sh_package_shader_renderer renderer)
     unsigned char *bad=sh_package_source_link_bind_file(s,unit,file,file->body,file->body_length,bind_fixture,&b,&length,error,sizeof(error));assert(!bad && strstr(error,"fixed native ABI"));
     sh_package_link_classes identity={0};assert(sh_package_source_link_identify(s,&identity,error,sizeof(error)));assert(identity.count==4);
     sh_package_link_classes_free(&identity);sh_package_source_link_close(s);clear(&f);
+}
+static void write_file(const char *path,const void *body,size_t length)
+{ FILE *file=fopen(path,"wb");assert(file);assert(!length || fwrite(body,1,length,file)==length);assert(!fclose(file)); }
+static void include_index(const char *path,const char *program)
+{
+    bytes b={0};unsigned char head[0x20]={5,'S','E','R'},tail[21]={0};
+    raw(&b,head,sizeof(head));be(&b,1);
+    be(&b,0);str(&b,"renderProg");str(&b,program);str(&b,"decls/renderprogs/common.inc");raw(&b,tail,sizeof(tail));
+    uint32_t size=(uint32_t)b.length-0x20;
+    b.data[4]=(unsigned char)(size>>24);b.data[5]=(unsigned char)(size>>16);b.data[6]=(unsigned char)(size>>8);b.data[7]=(unsigned char)size;
+    write_file(path,b.data,b.length);
+}
+/* A supplied shared include reaches the SnapMap programs catalogued beneath
+ * it, never a program only the campaign archive lists. */
+static void include_fanout_snapmap_only(void)
+{
+    static const char *const archives[]={"snap_gameresources.resources","snap_gameresources.patch",
+        "gameresources.resources","gameresources.patch","snap_gameresources.pindex","gameresources.pindex"};
+    fixture f;setup(&f,0);char error[512],base[128],path[256];
+    snprintf(base,sizeof(base),"obj/shader-include-catalog-%lu",(unsigned long)GetCurrentProcessId());
+    assert(CreateDirectoryA(base,NULL) || GetLastError()==ERROR_ALREADY_EXISTS);
+    for(size_t i=0;i<4;i++){snprintf(path,sizeof(path),"%s/%s",base,archives[i]);write_file(path,"",0);}
+    snprintf(path,sizeof(path),"%s/%s",base,archives[4]);include_index(path,"fixture");
+    snprintf(path,sizeof(path),"%s/%s",base,archives[5]);include_index(path,"campaignonly");
+    sh_resource_catalog *catalog=sh_resource_catalog_open(base,error,sizeof(error));assert(catalog);
+    sh_compiled_resource include=*sh_package_compilation_find(&f.compiled,"decls/renderprogs/common.inc");
+    sh_package_compilation supplied={0};supplied.resources=&include;supplied.resource_count=1;
+    const sh_package_compilation *scope=&supplied;
+    sh_package_source_shader shader={SH_PACKAGE_SHADER_VULKAN,&f,abi,flag_abi};
+    sh_package_source_link_native native={&f,admit,semantics,&shader};
+    sh_package_source_link *s=sh_package_source_link_open(&scope,1,catalog,original,&f,
+        (sh_decl_registry_source){&f,read_memory,f.registry,NULL},f.reflection,&native,error,sizeof(error));
+    if(!s)fprintf(stderr,"include fan-out: %s\n",error);assert(s);
+    const sh_package_link_inputs *inputs=sh_package_source_link_inputs(s);
+    assert(sh_package_link_inputs_find(inputs,0,"renderprog","fixture")!=SIZE_MAX);
+    assert(sh_package_link_inputs_find(inputs,0,"renderprog","campaignonly")==SIZE_MAX);
+    sh_package_source_link_close(s);sh_resource_catalog_close(catalog);clear(&f);
+    for(size_t i=0;i<6;i++){snprintf(path,sizeof(path),"%s/%s",base,archives[i]);assert(DeleteFileA(path));}
+    assert(RemoveDirectoryA(base));
 }
 static void reject_incomplete(void)
 {
@@ -464,4 +505,4 @@ static void native_contract(void)
     sh_package_native_assets_close(assets);clear(&f);
 }
 int main(void)
-{ complete_and_bind(SH_PACKAGE_SHADER_VULKAN);complete_and_bind(SH_PACKAGE_SHADER_OPENGL);reject_incomplete();native_contract();preparation_contract();shader_scope_contract();source_only_opengl(0);source_only_opengl(1);puts("package_shader_link_test: PASS");return 0; }
+{ complete_and_bind(SH_PACKAGE_SHADER_VULKAN);complete_and_bind(SH_PACKAGE_SHADER_OPENGL);include_fanout_snapmap_only();reject_incomplete();native_contract();preparation_contract();shader_scope_contract();source_only_opengl(0);source_only_opengl(1);puts("package_shader_link_test: PASS");return 0; }

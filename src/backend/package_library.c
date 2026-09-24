@@ -1175,6 +1175,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     if (!out) return 0;
     sh_package_library_free(out);
     if (environment && environment->invalid_package) *environment->invalid_package = SIZE_MAX;
+    if (environment && environment->unserved_package) *environment->unserved_package = SIZE_MAX;
     if (environment && environment->conflicted_packages) sh_package_owners_free(environment->conflicted_packages);
     if (!sources || !environment || (contexts && !contexts->context_count)) goto done;
     if (!contexts && !sources->component_count) {
@@ -1241,11 +1242,31 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
     if (!contexts || !contexts->binding_count) for (size_t i = 0; i < b.authored_count; i++)
         discover[i] = !contexts || contexts->contexts[i].mode == SH_PACKAGE_CONTEXT_ISOLATED;
     sh_package_source_root_plan root_plan = {discover, b.count - 1, contexts};
-    b.reader = sh_package_source_link_open_roots((const sh_package_compilation *const *)b.scopes,
+    sh_package_source_failure failure;
+    b.reader = sh_package_source_link_open_attributed((const sh_package_compilation *const *)b.scopes,
         b.count, catalog, original, original_context, registry, reflection, &source_native,
-        &root_plan, error, capacity);
+        &root_plan, &failure, error, capacity);
     free(discover);
-    if (!b.reader) goto done;
+    if (!b.reader) {
+        /* Only content a local component supplied makes it responsible: its own
+         * unit refused by a reader is malformed source; content reaching a unit
+         * the product cannot link leaves its complete delivery unserved for this
+         * candidate. Healthy peers then compile without it. Product/stock-only
+         * chains, environment, map contexts and product/baseline scopes keep
+         * refusing the whole candidate and blame no package. */
+        size_t used = strlen(error);
+        if (failure.chain[0] && used < capacity)
+            snprintf(error + used, capacity - used, " (via %s%s)", failure.chain,
+                failure.kind == SH_PACKAGE_SOURCE_FAILURE_PRODUCT ? "; reached only from product and stock content" : "");
+        if (!contexts && failure.scope < b.authored_count && failure.scope < sources->component_count) {
+            size_t owner = sources->components[failure.scope].owner;
+            if (failure.kind == SH_PACKAGE_SOURCE_FAILURE_SOURCE && environment->invalid_package)
+                *environment->invalid_package = owner;
+            else if (failure.kind == SH_PACKAGE_SOURCE_FAILURE_COVERAGE && environment->unserved_package)
+                *environment->unserved_package = owner;
+        }
+        goto done;
+    }
     if (!pl_coverage(&b, sources, &out->coverage)) {
         snprintf(error, capacity, "cannot account package coverage"); goto done;
     }

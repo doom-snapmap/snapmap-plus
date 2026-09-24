@@ -107,6 +107,37 @@ sh_package_source_link *sh_package_source_link_open_roots(
     void *original_context, sh_decl_registry_source registry, uintptr_t reflection,
     const sh_package_source_link_native *native, const sh_package_source_root_plan *roots,
     char *error, size_t capacity);
+/* Where a failed closure stopped and why. Each discovered unit remembers the
+ * unit whose reader first requested it, so a failure carries its causal chain
+ * back to the seed that reached it. Only content an input scope supplied can
+ * make that scope responsible:
+ * SOURCE: the scope's own supplied unit was refused by its reader.
+ * COVERAGE: the scope's supplied content (or a stock root nominated because
+ *   of it) reaches a unit the product cannot link: missing reader/admission
+ *   coverage, or a dependency SnapMap does not ship and the scope does not
+ *   supply. The scope's files are not proven corrupt.
+ * PRODUCT: only product built-ins and stock units reach the failing unit.
+ * ENVIRONMENT: I/O, allocation, changed native state or setup.
+ * scope is the responsible input scope for SOURCE/COVERAGE, else SIZE_MAX. */
+typedef enum sh_package_source_failure_kind {
+    SH_PACKAGE_SOURCE_FAILURE_NONE,
+    SH_PACKAGE_SOURCE_FAILURE_ENVIRONMENT,
+    SH_PACKAGE_SOURCE_FAILURE_PRODUCT,
+    SH_PACKAGE_SOURCE_FAILURE_COVERAGE,
+    SH_PACKAGE_SOURCE_FAILURE_SOURCE
+} sh_package_source_failure_kind;
+typedef struct sh_package_source_failure {
+    sh_package_source_failure_kind kind;
+    size_t scope;
+    char family[64], name[256];
+    char chain[512]; /* "family name <- requester <- ... <- seed". */
+} sh_package_source_failure;
+sh_package_source_link *sh_package_source_link_open_attributed(
+    const sh_package_compilation *const *scopes, size_t count,
+    const sh_resource_catalog *catalog, sh_package_baseline_reader original,
+    void *original_context, sh_decl_registry_source registry, uintptr_t reflection,
+    const sh_package_source_link_native *native, const sh_package_source_root_plan *roots,
+    sh_package_source_failure *failure, char *error, size_t capacity);
 void sh_package_source_link_close(sh_package_source_link *source);
 /* Reverse discovery stops at stock sources beyond the registered readers
  * instead of refusing every package. scope SIZE_MAX names the stock unit whose
