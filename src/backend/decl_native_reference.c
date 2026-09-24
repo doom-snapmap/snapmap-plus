@@ -29,9 +29,19 @@ int sh_decl_native_reference_read(sh_decl_native_schema *schema,
     reader = sh_decl_native_schema_reader(schema, type);
     if (reader == SH_DECL_READER_DECL) {
         result = sh_decl_native_registry_resolve_source(registry, type.name, copy, &out->resource);
-        /* An absent declaration can invoke a native default. It is not a
-         * proven dependency-free object and cannot certify equal bindings. */
-        if (!result) result = -1;
+        /* The native pointer reader asks the class's own manager with
+         * makeDefault (Vulkan 0x1409ca890, OpenGL 0x1409ca050); a class without
+         * one searches every manager without it. A name with no source in this
+         * scope therefore yields null or that manager's defaulted object, whose
+         * body is the manager's constant default definition, never text chosen
+         * by name or by a package: a name-only native identity (2) with no
+         * source dependency. Sound derives its native event from the
+         * declaration name, so an absent sound stays unavailable (-1). */
+        if (!result) {
+            const char *family = NULL;
+            int typed = sh_decl_native_registry_class_type(registry, type.name, &family);
+            result = typed < 0 || (typed && family && !_stricmp(family, "sound")) ? -1 : 2;
+        }
     } else if (reader == SH_DECL_READER_MODEL) {
         result = sh_model_reference_read(copy, &out->model);
         if (result == 1) {

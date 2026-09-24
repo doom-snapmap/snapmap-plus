@@ -238,6 +238,18 @@ int sh_decl_native_registry_type_class(sh_decl_native_registry *r,
     *class_name = found; return found != NULL;
 }
 
+int sh_decl_native_registry_class_type(sh_decl_native_registry *r,
+    const char *class_name, const char **type)
+{
+    if (!type) return -1;
+    *type = NULL;
+    if (!r || !class_name || !*class_name) return -1;
+    for (size_t i = 0; i < r->count; i++) if (dr_equal(r->managers[i].class_name, class_name)) {
+        *type = r->managers[i].type; return 1;
+    }
+    return 0;
+}
+
 static int dr_lookup_source(sh_decl_native_registry *r, size_t manager,
     const char *name, size_t *chosen, uintptr_t *resource)
 {
