@@ -6,9 +6,10 @@
 typedef struct asp_row {
     sh_audio_shared_record record;
     const unsigned char *body;
-    size_t scope,input,order;
+    size_t scope,input,order,index;
     int baseline;
 } asp_row;
+typedef struct asp_compare { const sh_audio_shared_exact *exact; int failed; } asp_compare;
 static int asp_fail(char *error,size_t capacity,const char *message)
 { if(error && capacity)snprintf(error,capacity,"%s",message);return 0; }
 static int asp_key(const sh_audio_shared_record *a,const sh_audio_shared_record *b)
@@ -30,6 +31,25 @@ static int asp_bytes(const asp_row *a,const asp_row *b)
     int compared=length ? memcmp(a->body,b->body,length) : 0;
     return compared ? compared : a->record.length<b->record.length ? -1 : a->record.length>b->record.length;
 }
+/* Byte equality is necessary but, with graph identities, not sufficient: equal
+ * cooked numbers can name different scoped private definitions. */
+static int asp_same(asp_compare *c,const asp_row *a,const asp_row *b)
+{
+    if(asp_bytes(a,b))return 0;
+    if(!c->exact || (a->input==b->input && a->index==b->index))return 1;
+    int equal=c->exact->equal(c->exact->context,a->input,a->index,b->input,b->index);
+    if(equal<0)c->failed=1;
+    return equal==1;
+}
+static int asp_rank(asp_compare *c,const asp_row *a,const asp_row *b)
+{
+    int order=asp_bytes(a,b);
+    if(order || !c->exact || (a->input==b->input && a->index==b->index))return order;
+    const unsigned char *x=c->exact->identity(c->exact->context,a->input,a->index);
+    const unsigned char *y=c->exact->identity(c->exact->context,b->input,b->index);
+    if(!x || !y){c->failed=1;return 0;}
+    return memcmp(x,y,32);
+}
 static uint16_t asp_u16(const unsigned char *p) { return (uint16_t)(p[0]|(uint16_t)p[1]<<8); }
 static int asp_effective(const asp_row *row)
 {
@@ -50,15 +70,39 @@ static int asp_constraint(const asp_row *candidate,const asp_row *winner)
 void sh_audio_shared_policy_free(sh_audio_shared_policy *policy)
 {
     if(!policy)return;
-    for(size_t i=0;i<policy->count;i++)free(policy->settings[i].body);
+    for(size_t i=0;i<policy->count;i++){free(policy->settings[i].body);free(policy->settings[i].contributors);}
     free(policy->settings);memset(policy,0,sizeof(*policy));
 }
-int sh_audio_shared_policy_compile(const sh_audio_shared_input *inputs,size_t count,
-    sh_audio_shared_policy *out,char *error,size_t capacity)
+int sh_audio_shared_policy_copy(const sh_audio_shared_policy *policy,sh_audio_shared_policy *out)
+{
+    sh_audio_shared_policy copy={0};
+    if(!out)return 0;memset(out,0,sizeof(*out));
+    if(!policy || (policy->count && !policy->settings) || policy->count>SIZE_MAX/sizeof(*copy.settings))return 0;
+    copy.settings=calloc(policy->count ? policy->count : 1,sizeof(*copy.settings));if(!copy.settings)return 0;
+    for(size_t i=0;i<policy->count;i++) {
+        const sh_audio_shared_setting *from=policy->settings+i;sh_audio_shared_setting *to=copy.settings+copy.count++;
+        *to=*from;to->body=NULL;to->contributors=NULL;to->contributor_count=0;
+        to->body=malloc(from->record.length ? from->record.length : 1);if(!to->body)goto failed;
+        if(from->record.length)memcpy(to->body,from->body,from->record.length);
+        if(from->contributor_count) {
+            if(from->contributor_count>SIZE_MAX/sizeof(*to->contributors))goto failed;
+            to->contributors=malloc(from->contributor_count*sizeof(*to->contributors));if(!to->contributors)goto failed;
+            memcpy(to->contributors,from->contributors,from->contributor_count*sizeof(*to->contributors));
+            to->contributor_count=from->contributor_count;
+        }
+    }
+    *out=copy;return 1;
+failed:
+    sh_audio_shared_policy_free(&copy);return 0;
+}
+int sh_audio_shared_policy_compile_exact(const sh_audio_shared_input *inputs,size_t count,
+    const sh_audio_shared_exact *exact,sh_audio_shared_policy *out,char *error,size_t capacity)
 {
     asp_row *rows=NULL;size_t used=0,allocated=0;sh_audio_shared_policy policy={0};int ok=0;
+    asp_compare compare={exact,0};
     if(error && capacity)*error=0;if(!out)return 0;memset(out,0,sizeof(*out));
     if(count && !inputs)return asp_fail(error,capacity,"shared audio inputs are missing");
+    if(exact && (!exact->equal || !exact->identity))return asp_fail(error,capacity,"shared audio identities are incomplete");
     for(size_t i=0;i<count;i++) {
         sh_audio_hirc parsed={0};const sh_audio_shared_input *input=inputs+i;
         if(sh_audio_shared_chunk_read(input->tag,input->body,input->length,&parsed,error,capacity)!=1)goto done;
@@ -75,7 +119,7 @@ int sh_audio_shared_policy_compile(const sh_audio_shared_input *inputs,size_t co
         for(size_t j=0;j<parsed.shared_count;j++) {
             sh_audio_shared_record record=parsed.shared[j];
             rows[used]=(asp_row){record,(const unsigned char *)input->body+record.offset,
-                input->baseline ? 0 : input->scope,i,used,!!input->baseline};used++;
+                input->baseline ? 0 : input->scope,i,used,j,!!input->baseline};used++;
         }
         sh_audio_hirc_free(&parsed);
     }
@@ -109,27 +153,37 @@ int sh_audio_shared_policy_compile(const sh_audio_shared_input *inputs,size_t co
         int changed=0;sh_audio_shared_kind kind=winner->record.kind;
         if(kind==SH_AUDIO_SHARED_THRESHOLD || kind==SH_AUDIO_SHARED_VOICES) {
             for(size_t j=i+1;j<end;j++)if(asp_constraint(rows+j,winner) ||
-                (!asp_constraint(winner,rows+j) && asp_bytes(rows+j,winner)<0))winner=rows+j;
+                (!asp_constraint(winner,rows+j) && asp_rank(&compare,rows+j,winner)<0))winner=rows+j;
+            changed=!winner->baseline && (!baseline || !asp_same(&compare,winner,baseline));
         } else {
             for(size_t j=i;j<end;j++) {
                 const asp_row *candidate=rows+j;
-                int edited=!candidate->baseline && (!baseline || asp_bytes(candidate,baseline));
-                if(edited>changed || (edited==changed && asp_bytes(candidate,winner)<0)) {
+                int edited=!candidate->baseline && (!baseline || !asp_same(&compare,candidate,baseline));
+                if(edited>changed || (edited==changed && asp_rank(&compare,candidate,winner)<0)) {
                     winner=candidate;changed=edited;
                 }
             }
         }
-        sh_audio_shared_setting *setting=policy.settings+policy.count;
+        sh_audio_shared_setting *setting=policy.settings+policy.count++;
         setting->record=winner->record;setting->record.offset=0;
-        setting->input=winner->input;setting->alternatives=end-i;
+        setting->input=winner->input;setting->index=winner->index;setting->alternatives=end-i;
+        setting->edited=changed;
         setting->body=malloc(winner->record.length ? winner->record.length : 1);
-        if(!setting->body)goto memory;
-        memcpy(setting->body,winner->body,winner->record.length);policy.count++;i=end;
+        setting->contributors=malloc((end-i)*sizeof(*setting->contributors));
+        if(!setting->body || !setting->contributors)goto memory;
+        memcpy(setting->body,winner->body,winner->record.length);
+        for(size_t j=i;j<end;j++)if(asp_same(&compare,rows+j,winner))
+            setting->contributors[setting->contributor_count++]=(sh_audio_shared_contributor){rows[j].input,rows[j].index};
+        if(compare.failed){asp_fail(error,capacity,"cannot compare retained shared audio recipes");goto done;}
+        i=end;
     }
     *out=policy;memset(&policy,0,sizeof(policy));ok=1;goto done;
 memory: asp_fail(error,capacity,"cannot allocate shared audio policy");
 done: free(rows);sh_audio_shared_policy_free(&policy);return ok;
 }
+int sh_audio_shared_policy_compile(const sh_audio_shared_input *inputs,size_t count,
+    sh_audio_shared_policy *out,char *error,size_t capacity)
+{ return sh_audio_shared_policy_compile_exact(inputs,count,NULL,out,error,capacity); }
 
 typedef struct asp_bytes_out { unsigned char *body;size_t length,allocated; } asp_bytes_out;
 static int asp_emit(asp_bytes_out *out,const void *bytes,size_t length)

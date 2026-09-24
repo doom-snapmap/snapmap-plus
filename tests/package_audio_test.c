@@ -1108,8 +1108,22 @@ static int probe_policy(const char *base,const char *filename)
         }
         removed+=b->removed!=0;
     }
-    printf("composed/bound %s: %zu input banks, %zu selected banks, %zu buses, %zu settings, %zu removed; original IDs/bytes, no package owners\n",
-        filename,compiled.resource_count,sh_package_audio_program_banks(program,0),bound->bus_count,bound->count,removed);ok=1;
+    /* Shared STMG/ENVS/PLAT: exact graph identities certify the installed
+     * controls as baseline, and binding never changes their bytes. */
+    const sh_audio_shared_policy *shared=sh_package_audio_program_shared(program);
+    const sh_audio_shared_policy *bound_shared=sh_package_audio_program_bound_shared(program);
+    if(!shared || !bound_shared || shared->count!=bound_shared->count)goto done;
+    for(size_t i=0;i<shared->count;i++) {
+        const sh_audio_shared_setting *a=shared->settings+i,*b=bound_shared->settings+i;
+        const sh_package_owners *owners=NULL,*gameplay=NULL;
+        if(a->edited || !sh_package_audio_program_shared_owners(program,i,&owners,&gameplay) ||
+            sh_package_owners_count(owners) || sh_package_owners_count(gameplay) ||
+            a->record.length!=b->record.length || memcmp(a->body,b->body,a->record.length)) {
+            snprintf(error,sizeof(error),"original shared setting gained an edit or owner");goto done;
+        }
+    }
+    printf("composed/bound %s: %zu input banks, %zu selected banks, %zu buses, %zu settings, %zu removed, %zu shared controls; original IDs/bytes, no package owners\n",
+        filename,compiled.resource_count,sh_package_audio_program_banks(program,0),bound->bus_count,bound->count,removed,shared->count);ok=1;
 done:
     if(!ok)fprintf(stderr,"audio bus policy probe: %s\n",error);
     sh_package_audio_program_close(program);
@@ -1117,6 +1131,108 @@ done:
     free(compiled.resources);sh_audio_originals_close(originals);return ok ? 0 : 1;
 }
 
+/* Init copies whose STMG switch is driven by a private modulator. The cooked
+ * STMG bytes are identical; only the modulator definition differs. */
+static int program_sink(void *context,const void *bytes,size_t length)
+{
+    struct { unsigned char *body;size_t used; } *sink=context;
+    memcpy(sink->body+sink->used,bytes,length);sink->used+=length;return 1;
+}
+static size_t modulator_bank(unsigned char bank[256],uint32_t id,unsigned tone)
+{
+    memset(bank,0,256);memcpy(bank,"BKHD",4);put32(bank+4,16);put32(bank+8,113);put32(bank+12,id);
+    size_t at=24;memcpy(bank+at,"HIRC",4);put32(bank+at+4,35);put32(bank+at+8,2);at+=12;
+    bank[at]=4;put32(bank+at+1,8);put32(bank+at+5,90);at+=13;
+    bank[at]=22;put32(bank+at+1,13);put32(bank+at+5,555);bank[at+9]=1;bank[at+10]=7;put32(bank+at+11,tone);at+=18;
+    memcpy(bank+at,"STMG",4);put32(bank+at+4,43);at+=8;
+    float threshold=-60;memcpy(bank+at,&threshold,4);bank[at+4]=64;at+=10;put32(bank+at,1);at+=4;
+    put32(bank+at,700);put32(bank+at+4,555);bank[at+8]=2;put32(bank+at+9,1);put32(bank+at+17,3);put32(bank+at+21,4);at+=25;
+    at+=4;return at;
+}
+static uint32_t bound_modulator(sh_package_audio_program *p,size_t scope)
+{
+    const sh_audio_bank_binding *binding=NULL;char error[512];size_t written=0;uint32_t id=0;
+    const sh_audio_graph_bank *bank=sh_package_audio_program_bank(p,scope,0,&binding);
+    CHECK(bank && binding);if(!bank || !binding)return 0;
+    unsigned char *out=malloc((size_t)binding->output_length);CHECK(out);if(!out)return 0;
+    struct { unsigned char *body;size_t used; } sink={out,0};
+    CHECK(sh_audio_bank_binding_write(bank->source,binding,program_sink,&sink,error,sizeof(error)));written=sink.used;
+    for(size_t at=0;at+8<=written;) {
+        uint32_t size=(uint32_t)out[at+4]|(uint32_t)out[at+5]<<8|(uint32_t)out[at+6]<<16|(uint32_t)out[at+7]<<24;
+        if(!memcmp(out+at,"HIRC",4)) {
+            size_t cursor=at+12,end=at+8+size;
+            while(cursor+5<=end) {
+                uint32_t length=(uint32_t)out[cursor+1]|(uint32_t)out[cursor+2]<<8|(uint32_t)out[cursor+3]<<16|(uint32_t)out[cursor+4]<<24;
+                if(out[cursor]==22)memcpy(&id,out+cursor+5,4);
+                cursor+=5+length;
+            }
+        }
+        at+=8+size;
+    }
+    free(out);return id;
+}
+static uint32_t bound_switch_controller(sh_package_audio_program *p,size_t *setting_index)
+{
+    const sh_audio_shared_policy *bound=sh_package_audio_program_bound_shared(p);CHECK(bound);if(!bound)return 0;
+    for(size_t i=0;i<bound->count;i++)if(bound->settings[i].record.kind==SH_AUDIO_SHARED_SWITCH) {
+        uint32_t controller;memcpy(&controller,bound->settings[i].body+4,4);if(setting_index)*setting_index=i;return controller;
+    }
+    CHECK(0);return 0;
+}
+static void shared_modulator_program(void)
+{
+    unsigned char native[256],a[256],b[256],copy[256];uint32_t init_id;char base[4096],error[1024]={0};
+    CHECK(sh_audio_bank_identity("init.bnk",&init_id));
+    size_t native_length=modulator_bank(native,init_id,1),a_length=modulator_bank(a,init_id,2);
+    size_t b_length=modulator_bank(b,init_id,3),copy_length=modulator_bank(copy,init_id,2);
+    binary("modulator-base/sound/soundbanks/pc/init.bnk",native,native_length);
+    snprintf(base,sizeof(base),"%s/modulator-base",root);
+    sh_audio_originals *originals=sh_audio_originals_open(base,L"English(US)",NULL);CHECK(originals);
+    sh_compiled_resource files[3]={{0},{0},{0}};sh_package_compilation scopes[3]={{0},{0},{0}};
+    const sh_package_compilation *inputs[]={scopes,scopes+1,scopes+2};
+    unsigned char *bodies[3]={a,b,copy};size_t lengths[3]={a_length,b_length,copy_length};
+    for(size_t i=0;i<3;i++) {
+        files[i].engine_path="sound/soundbanks/pc/init.bnk";files[i].body=bodies[i];files[i].body_length=lengths[i];
+        files[i].owners.bits=files[i].gameplay_owners.bits=(uint64_t)1<<i;
+        scopes[i].resources=files+i;scopes[i].resource_count=1;
+    }
+    sh_package_audio_program *p=sh_package_audio_program_open(inputs,3,originals,error,sizeof(error));CHECK(p);
+    int ready=p && sh_package_audio_program_prepare(p,error,sizeof(error));
+    if(!ready)fprintf(stderr,"modulator program: %s\n",error);CHECK(ready);
+    if(ready) {
+        const sh_audio_shared_policy *policy=sh_package_audio_program_shared(p);CHECK(policy);
+        const sh_audio_shared_setting *choice=NULL;size_t choice_index=0;
+        for(size_t i=0;policy && i<policy->count;i++)if(policy->settings[i].record.kind==SH_AUDIO_SHARED_SWITCH){choice=policy->settings+i;choice_index=i;}
+        /* Byte-identical STMG from every scope, yet the switch is an edit: its
+         * modulator is not the native one. Only exact contributors share it. */
+        CHECK(choice && choice->edited);
+        size_t winner=SIZE_MAX,bank=SIZE_MAX;int baseline=1;
+        CHECK(choice && sh_package_audio_program_shared_origin(p,choice->input,&winner,&bank,&baseline) && !baseline);
+        const sh_package_owners *owners=NULL,*gameplay=NULL;
+        CHECK(sh_package_audio_program_shared_owners(p,choice_index,&owners,&gameplay));
+        uint64_t expected=winner==1 ? 2 : 5;
+        CHECK(owners && owners->bits==expected && gameplay && gameplay->bits==expected);
+        CHECK(choice && choice->contributor_count==(winner==1 ? 1u : 2u));
+        /* The unchanged threshold stays native and owns nothing. */
+        for(size_t i=0;policy && i<policy->count;i++)if(policy->settings[i].record.kind==SH_AUDIO_SHARED_THRESHOLD) {
+            CHECK(!policy->settings[i].edited);
+            CHECK(sh_package_audio_program_shared_owners(p,i,&owners,&gameplay) && !owners->bits);
+        }
+        CHECK(!sh_package_audio_program_bound_shared(p));
+        sh_package_compilation provider={0};program_ids ids={0};ids.remaining=1000;
+        CHECK(sh_package_audio_program_bind(p,&provider,program_assign,&ids,error,sizeof(error)));
+        uint32_t controller=bound_switch_controller(p,NULL);
+        CHECK(controller && controller!=555 && winner<3 && controller==bound_modulator(p,winner));
+        CHECK(bound_modulator(p,1)!=bound_modulator(p,0) && bound_modulator(p,0)==bound_modulator(p,2));
+        /* The unbound policy keeps the authored number for comparison. */
+        uint32_t authored;memcpy(&authored,choice->body+4,4);CHECK(authored==555);
+        /* A failed reservation keeps the complete prior bound view. */
+        program_ids refused={0};refused.remaining=0;
+        CHECK(!sh_package_audio_program_bind(p,&provider,program_assign,&refused,error,sizeof(error)));
+        CHECK(bound_switch_controller(p,NULL)==controller);
+    }
+    sh_package_audio_program_close(p);sh_audio_originals_close(originals);
+}
 int main(int argc, char **argv)
 {
     if (argc == 4 && !strcmp(argv[1], "--capture-originals")) return probe_capture(argv[2], argv[3], 0);
@@ -1127,7 +1243,7 @@ int main(int argc, char **argv)
     CHECK(GetTempPathA(sizeof(temp),temp)>0);
     snprintf(root,sizeof(root),"%ssh-package-audio-%lu",temp,(unsigned long)GetCurrentProcessId());
     CHECK(CreateDirectoryA(root,NULL));
-    memory_index(); media_index(); bank_content_identity(); authored_and_map(); immutable_scope(); typed_capture(); retained_program(); inventory_capture(); retry_program(); shared_program(); shared_native_baseline(); bus_program(); bus_baseline_program(); cleanup();
+    memory_index(); media_index(); bank_content_identity(); authored_and_map(); immutable_scope(); typed_capture(); retained_program(); inventory_capture(); retry_program(); shared_program(); shared_native_baseline(); bus_program(); bus_baseline_program(); shared_modulator_program(); cleanup();
     if(failures) return 1;
     puts("package audio source indexes passed"); return 0;
 }

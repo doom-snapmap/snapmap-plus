@@ -63,6 +63,16 @@ int sh_audio_link_graph_bus_object(const sh_audio_link_graph *graph,size_t scope
 int sh_audio_link_graph_bus_value(const sh_audio_link_graph *graph, size_t scope,
     size_t bank, size_t record, int bound, unsigned char **body, size_t *length,
     char *error, size_t capacity);
+/* Shared STMG/ENVS/PLAT records (record indexes the checked codec's
+ * shared_records array) use the same exact partition. A modulator-driven switch
+ * therefore depends on its scoped modulator definition, not on the cooked
+ * number alone. Values are owned; bound=1 relocates only private references.
+ * These accessors select or publish nothing. */
+int sh_audio_link_graph_shared_record(const sh_audio_link_graph *graph, size_t scope,
+    size_t bank, size_t record, sh_audio_graph_root *out);
+int sh_audio_link_graph_shared_value(const sh_audio_link_graph *graph, size_t scope,
+    size_t bank, size_t record, int bound, unsigned char **body, size_t *length,
+    char *error, size_t capacity);
 /* Traverse a retained graph root, including its exact source record and all
  * private dependencies. This also supports scalar bus roots with no edges. */
 int sh_audio_link_graph_root_sources(const sh_audio_link_graph *graph, size_t node,
@@ -114,6 +124,9 @@ typedef struct sh_audio_link_binding sh_audio_link_binding;
 sh_audio_link_binding *sh_audio_link_graph_prepare_bind(sh_audio_link_graph *graph,
     sh_audio_graph_assign assign,void *context,char *error,size_t capacity);
 int sh_audio_link_binding_bus_value(const sh_audio_link_binding *binding,
+    size_t scope,size_t bank,size_t record,unsigned char **body,size_t *length,
+    char *error,size_t capacity);
+int sh_audio_link_binding_shared_value(const sh_audio_link_binding *binding,
     size_t scope,size_t bank,size_t record,unsigned char **body,size_t *length,
     char *error,size_t capacity);
 void sh_audio_link_graph_commit_bind(sh_audio_link_binding *binding);

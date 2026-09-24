@@ -295,6 +295,29 @@ static void shared(void)
     assert(!object.count); sh_audio_hirc_free(&object);
     assert(sh_audio_shared_chunk_read("PLAT", b.body, b.count - 1, &object, error, sizeof(error)) == 0);
 }
+/* The native subscription dispatch uses the modulator registry only for
+ * controller type 2; every other type is a shared parameter. An empty curve
+ * never reaches the setter, so its controller is not a dependency. */
+static void switch_controllers(void)
+{
+    bytes b = {0}; sh_audio_hirc object = {0}; char error[512];
+    zeros(&b, 6); put(&b, 0, 4); put(&b, 3, 4);
+    size_t modulated = b.count; put(&b, 700, 4); put(&b, 555, 4); put(&b, 2, 1); put(&b, 1, 4); zeros(&b, 12);
+    size_t midi = b.count; put(&b, 701, 4); put(&b, 556, 4); put(&b, 1, 1); put(&b, 1, 4); zeros(&b, 12);
+    size_t empty = b.count; put(&b, 702, 4); put(&b, 557, 4); put(&b, 2, 1); put(&b, 0, 4);
+    put(&b, 0, 4);
+    assert(sh_audio_shared_chunk_read("STMG", b.body, b.count, &object, error, sizeof(error)) == 1);
+    assert(span(&object, modulated, SH_AUDIO_ID_SWITCH_GROUP, SH_AUDIO_ID_SHARED));
+    assert(span(&object, modulated + 4, SH_AUDIO_ID_MODULATOR, 0));
+    assert(span(&object, midi + 4, SH_AUDIO_ID_RTPC, SH_AUDIO_ID_SHARED));
+    assert(span(&object, empty, SH_AUDIO_ID_SWITCH_GROUP, SH_AUDIO_ID_SHARED) && !span(&object, empty + 4, SH_AUDIO_ID_MODULATOR, 0));
+    size_t switches = 0;
+    for (size_t i = 0; i < object.shared_count; i++) if (object.shared[i].kind == SH_AUDIO_SHARED_SWITCH) {
+        assert(object.shared[i].key[0] == 700 || object.shared[i].key[0] == 701);
+        assert(object.shared[i].length == 25); switches++;
+    }
+    assert(switches == 2); sh_audio_hirc_free(&object);
+}
 static int corpus_file(const char *path, size_t *accepted, size_t *pending)
 {
     FILE *file = fopen(path, "rb"); unsigned char header[8]; int ok = 1;
@@ -342,7 +365,7 @@ static int corpus_file(const char *path, size_t *accepted, size_t *pending)
 }
 int main(int argc, char **argv)
 {
-    basic(); actions(); optional_children(); music(); shared(); buses();
+    basic(); actions(); optional_children(); music(); shared(); buses(); switch_controllers();
     if (argc == 2) {
         WIN32_FIND_DATAA entry; char search[4096], path[4096], localized[4096];
         size_t accepted[256] = {0}, pending[256] = {0};

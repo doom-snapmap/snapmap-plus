@@ -25,7 +25,10 @@ typedef struct pap_scope {
     pap_file *files;
     size_t file_count;
 } pap_scope;
-typedef struct pap_shared_origin { size_t scope,bank;int baseline; } pap_shared_origin;
+/* Graph scope/bank/chunk of one shared policy input. The native baseline scope
+ * is index count; public origin queries report it as SIZE_MAX. */
+typedef struct pap_shared_origin { size_t scope,bank,chunk,records;int baseline; } pap_shared_origin;
+typedef struct pap_shared_owners { sh_package_owners owners,gameplay; } pap_shared_owners;
 typedef struct pap_bus_recipe {
     size_t first,count;
     uint32_t bus;
@@ -40,9 +43,13 @@ struct sh_package_audio_program {
     size_t count;
     sh_audio_originals *originals;
     sh_audio_link_graph *graph;
-    sh_audio_shared_policy shared;
+    sh_audio_shared_policy shared, bound_shared;
     pap_shared_origin *shared_origins;
     size_t shared_count;
+    pap_shared_owners *shared_owners;
+    int shared_bound;
+    uint32_t *baseline_roots;
+    size_t baseline_root_count;
     sh_package_audio_bus_value *bus_values;
     size_t bus_count;
     sh_package_audio_capture *bus_baseline;
@@ -111,11 +118,22 @@ static void pap_bus_clear(sh_package_audio_program *p)
     }
     free(p->bus_values);p->bus_values=NULL;p->bus_count=0;
 }
+static void pap_shared_clear(sh_package_audio_program *p)
+{
+    if(p->shared_owners)for(size_t i=0;i<p->shared.count;i++) {
+        sh_package_owners_free(&p->shared_owners[i].owners);
+        sh_package_owners_free(&p->shared_owners[i].gameplay);
+    }
+    free(p->shared_owners);p->shared_owners=NULL;
+    sh_audio_shared_policy_free(&p->bound_shared);p->shared_bound=0;
+    sh_audio_shared_policy_free(&p->shared);free(p->shared_origins);p->shared_origins=NULL;p->shared_count=0;
+    free(p->baseline_roots);p->baseline_roots=NULL;p->baseline_root_count=0;
+}
 void sh_package_audio_program_close(sh_package_audio_program *p)
 {
     if (!p) return;
     pap_bus_clear(p);
-    sh_audio_shared_policy_free(&p->shared);free(p->shared_origins);
+    pap_shared_clear(p);
     sh_audio_link_graph_close(p->graph);
     sh_package_audio_capture_close(p->bus_baseline);
     for (size_t i = 0; i < p->count; i++) {
@@ -248,11 +266,13 @@ static int pap_root_order(const void *a, const void *b)
     const pap_root_ref *x = a, *y = b;
     return memcmp(x->sound->root.identity, y->sound->root.identity, 32);
 }
+static int pap_policy_bank(const sh_audio_bank_codec *codec)
+{ return codec->bus_record_count || codec->shared_chunks; }
 static int pap_bus_capture_baseline(sh_package_audio_program *p,const sh_audio_graph_scope *scopes,
     char *error,size_t capacity)
 {
     int any=0;
-    for(size_t s=0;s<p->count;s++)for(size_t b=0;b<scopes[s].bank_count;b++)any|=!!scopes[s].banks[b].codec->bus_record_count;
+    for(size_t s=0;s<p->count;s++)for(size_t b=0;b<scopes[s].bank_count;b++)any|=pap_policy_bank(scopes[s].banks[b].codec);
     if(!any)return 1;
     const sh_audio_original_bank *banks=NULL;size_t count=0;uint32_t init=0;
     if(!sh_audio_bank_identity("init.bnk",&init) || sh_audio_originals_banks(p->originals,&banks,&count,error,capacity)!=1 ||
@@ -261,14 +281,17 @@ static int pap_bus_capture_baseline(sh_package_audio_program *p,const sh_audio_g
     for(size_t i=0;i<count;i++) {
         int needed=banks[i].metadata.id==init;
         for(size_t s=0;s<p->count && !needed;s++)for(size_t b=0;b<scopes[s].bank_count && !needed;b++)
-            needed=scopes[s].banks[b].codec->bus_record_count && scopes[s].banks[b].codec->metadata.id==banks[i].metadata.id;
+            needed=pap_policy_bank(scopes[s].banks[b].codec) && scopes[s].banks[b].codec->metadata.id==banks[i].metadata.id;
         if(needed)roots[used++]=banks[i].metadata.id;
     }
     /* A separate scope prevents original definitions from filling holes in an
      * authored recipe. Its graph witnesses certify equality, not availability
-     * from a peer. Capture follows the same typed closure as event selection. */
+     * from a peer. Capture follows the same typed closure as event selection.
+     * The engine loads Init independently of any event; newly named banks and
+     * edited shared controls are therefore compared with native Init too. */
     if(used)p->bus_baseline=sh_package_audio_capture_open_roots(&p->baseline_scope,p->originals,roots,used,error,capacity);
-    free(roots);return !used || p->bus_baseline!=NULL;
+    if(!used || !p->bus_baseline){free(roots);return !used;}
+    p->baseline_roots=roots;p->baseline_root_count=used;return 1;
 }
 static int pap_bus_prepare(sh_package_audio_program *p,const sh_audio_graph_scope *scopes,
     sh_audio_link_graph *graph,char *error,size_t capacity)
@@ -387,8 +410,31 @@ int sh_package_audio_program_bus_equal(const sh_package_audio_program *p,size_t 
 typedef struct pap_shared_inputs {
     sh_audio_shared_input *rows;
     pap_shared_origin *origins;
+    sh_audio_graph_root **roots; /* Exact graph root of each parsed record. */
     size_t count,allocated;
+    const sh_audio_link_graph *graph;
 } pap_shared_inputs;
+static void pap_shared_inputs_free(pap_shared_inputs *inputs)
+{
+    for(size_t i=0;i<inputs->count;i++){free((void *)inputs->rows[i].body);free(inputs->roots[i]);}
+    free(inputs->rows);free(inputs->origins);free(inputs->roots);memset(inputs,0,sizeof(*inputs));
+}
+static const sh_audio_graph_root *pap_shared_root(const pap_shared_inputs *inputs,size_t input,size_t record)
+{
+    return input<inputs->count && record<inputs->origins[input].records && inputs->roots[input] ?
+        inputs->roots[input]+record : NULL;
+}
+static int pap_shared_equal(void *context,size_t li,size_t lr,size_t ri,size_t rr)
+{
+    const pap_shared_inputs *inputs=context;
+    const sh_audio_graph_root *left=pap_shared_root(inputs,li,lr),*right=pap_shared_root(inputs,ri,rr);
+    return left && right ? sh_audio_link_graph_equal(inputs->graph,left->node,right->node) : -1;
+}
+static const unsigned char *pap_shared_identity(void *context,size_t input,size_t record)
+{
+    const sh_audio_graph_root *root=pap_shared_root(context,input,record);
+    return root ? root->identity : NULL;
+}
 static int pap_shared_bank(pap_shared_inputs *inputs,const sh_audio_graph_bank *bank,
     size_t scope,size_t index,int baseline,char *error,size_t capacity)
 {
@@ -402,79 +448,109 @@ static int pap_shared_bank(pap_shared_inputs *inputs,const sh_audio_graph_bank *
             if(next<inputs->allocated || next>SIZE_MAX/sizeof(*inputs->rows) || next>SIZE_MAX/sizeof(*inputs->origins))return 0;
             sh_audio_shared_input *rows=realloc(inputs->rows,next*sizeof(*rows));if(!rows)return 0;inputs->rows=rows;
             pap_shared_origin *origins=realloc(inputs->origins,next*sizeof(*origins));if(!origins)return 0;
-            inputs->origins=origins;inputs->allocated=next;
+            inputs->origins=origins;
+            sh_audio_graph_root **roots=realloc(inputs->roots,next*sizeof(*roots));if(!roots)return 0;
+            inputs->roots=roots;inputs->allocated=next;
         }
-        unsigned char *body=malloc(chunk->length ? chunk->length : 1);if(!body)return 0;
-        if(!bank->source.read(bank->source.context,chunk->offset+8,body,chunk->length)) {
-            free(body);return pap_fail(error,capacity,"cannot capture shared audio settings",bank->path);
-        }
+        if(chunk->shared_record_count>SIZE_MAX/sizeof(sh_audio_graph_root))return 0;
+        unsigned char *body=malloc(chunk->length ? chunk->length : 1);
+        sh_audio_graph_root *roots=calloc(chunk->shared_record_count ? chunk->shared_record_count : 1,sizeof(*roots));
+        sh_audio_hirc parsed={0};int valid=body && roots;
+        /* The codec retains this chunk's records in the same order the policy
+         * reader parses them; each maps to its exact graph root. */
+        if(valid)valid=bank->source.read(bank->source.context,chunk->offset+8,body,chunk->length) &&
+            sh_audio_shared_chunk_read(tag,body,chunk->length,&parsed,error,capacity)==1 &&
+            parsed.shared_count==chunk->shared_record_count;
+        for(size_t r=0;valid && r<chunk->shared_record_count;r++)
+            valid=sh_audio_link_graph_shared_record(inputs->graph,scope,index,chunk->first_shared_record+r,roots+r);
+        sh_audio_hirc_free(&parsed);
+        if(!valid){free(body);free(roots);return pap_fail(error,capacity,"cannot capture shared audio settings",bank->path);}
         inputs->rows[inputs->count]=(sh_audio_shared_input){tag,body,chunk->length,scope,baseline};
-        inputs->origins[inputs->count++]=(pap_shared_origin){scope,index,baseline};
+        inputs->roots[inputs->count]=roots;
+        inputs->origins[inputs->count++]=(pap_shared_origin){scope,index,c,chunk->shared_record_count,baseline};
     }
     return 1;
 }
-typedef struct pap_original_reader { sh_audio_originals *originals;const char *path; } pap_original_reader;
-static int pap_original_read(void *context,uint64_t at,void *body,size_t length)
+static int pap_baseline_root(const sh_package_audio_program *p,uint32_t id)
 {
-    pap_original_reader *r=context;
-    return sh_audio_originals_read(r->originals,r->path,at,body,length,NULL,NULL,0)==1;
+    for(size_t i=0;i<p->baseline_root_count;i++)if(p->baseline_roots[i]==id)return 1;
+    return 0;
 }
-static int pap_shared_original(pap_shared_inputs *inputs,sh_audio_originals *originals,
-    const char *path,size_t scope,size_t bank,char *error,size_t capacity)
+typedef struct pap_record_owners { const sh_package_compilation *compiled;sh_audio_graph_root root;pap_shared_owners *out; } pap_record_owners;
+static int pap_record_owner(void *context,const char *path,uint64_t offset,uint64_t length)
 {
-    uint64_t length=0;pap_original_reader reader={originals,path};
-    int present=sh_audio_originals_read(originals,path,0,NULL,0,&length,error,capacity);
-    if(present<=0)return present==0;
-    sh_audio_bank_codec codec={0};sh_audio_bank_source source={&reader,length,pap_original_read};
-    if(sh_audio_bank_codec_read(source,&codec,error,capacity)!=1)return 0;
-    sh_audio_graph_bank baseline={path,source,&codec,1};
-    int copied=pap_shared_bank(inputs,&baseline,scope,bank,1,error,capacity);
-    sh_audio_bank_codec_free(&codec);return copied;
+    pap_record_owners *walk=context;(void)offset;(void)length;
+    const sh_compiled_resource *resource=sh_package_compilation_find(walk->compiled,path);
+    if(!resource || (walk->root.original && resource->baseline_known==1))return 1;
+    return sh_package_owners_union(&walk->out->owners,&resource->owners) &&
+        sh_package_owners_union(&walk->out->gameplay,&resource->gameplay_owners);
 }
 static int pap_shared_prepare(sh_package_audio_program *p,const sh_audio_graph_scope *scopes,
-    char *error,size_t capacity)
+    const sh_audio_link_graph *graph,char *error,size_t capacity)
 {
-    pap_shared_inputs inputs={0};sh_audio_shared_policy policy={0};const char **seen=NULL;
-    char *init_paths[2]={0};size_t seen_count=0;int ok=0,any=0;
+    pap_shared_inputs inputs={0};sh_audio_shared_policy policy={0};pap_shared_owners *owners=NULL;int ok=0,any=0;
+    inputs.graph=graph;
     for(size_t s=0;s<p->count;s++)for(size_t b=0;b<scopes[s].bank_count;b++)any|=!!scopes[s].banks[b].codec->shared_chunks;
-    if(any) {
-        /* Init is loaded by the engine independently of an event's bank closure.
-         * Its platform and permissive limits apply even to newly named banks. */
-        if(!sh_audio_originals_paths(p->originals,"init.bnk",init_paths,init_paths+1) ||
-            !pap_shared_original(&inputs,p->originals,init_paths[1],SIZE_MAX,SIZE_MAX,error,capacity))goto done;
-        seen=malloc(sizeof(*seen));if(!seen)goto done;seen[seen_count++]=init_paths[1];
+    if(any && p->bus_baseline) {
+        /* Native witnesses: Init and the original counterparts of edited banks.
+         * They retain their own typed closure and carry no delivery owner. */
+        const sh_audio_graph_scope *baseline=scopes+p->count;
+        for(size_t b=0;b<baseline->bank_count;b++)
+            if(baseline->banks[b].codec->shared_chunks && pap_baseline_root(p,baseline->banks[b].codec->metadata.id) &&
+                !pap_shared_bank(&inputs,baseline->banks+b,p->count,b,1,error,capacity))goto done;
     }
     for(size_t s=0;s<p->count;s++)for(size_t b=0;b<scopes[s].bank_count;b++) {
         const sh_audio_graph_bank *bank=scopes[s].banks+b;
-        if(!bank->codec->shared_chunks)continue;
-        size_t known=0;while(known<seen_count && strcmp(seen[known],bank->path))known++;
-        if(known==seen_count) {
-            if(seen_count>=SIZE_MAX/sizeof(*seen))goto done;
-            const char **grown=realloc(seen,(seen_count+1)*sizeof(*seen));if(!grown)goto done;
-            seen=grown;seen[seen_count++]=bank->path;
-            if(bank->original) {
-                if(!pap_shared_bank(&inputs,bank,s,b,1,error,capacity))goto done;
-            } else {
-                if(!pap_shared_original(&inputs,p->originals,bank->path,s,b,error,capacity))goto done;
-            }
-        }
-        if(!bank->original && !pap_shared_bank(&inputs,bank,s,b,0,error,capacity))goto done;
+        /* An exact original copy is another native witness, not an edit. */
+        if(bank->codec->shared_chunks && !pap_shared_bank(&inputs,bank,s,b,!!bank->original,error,capacity))goto done;
     }
-    if(!sh_audio_shared_policy_compile(inputs.rows,inputs.count,&policy,error,capacity))goto done;
+    sh_audio_shared_exact compare={&inputs,pap_shared_equal,pap_shared_identity};
+    if(!sh_audio_shared_policy_compile_exact(inputs.rows,inputs.count,&compare,&policy,error,capacity))goto done;
+    owners=calloc(policy.count ? policy.count : 1,sizeof(*owners));if(!owners)goto done;
+    for(size_t i=0;i<policy.count;i++) {
+        const sh_audio_shared_setting *setting=policy.settings+i;
+        if(!setting->edited)continue;
+        for(size_t c=0;c<setting->contributor_count;c++) {
+            const sh_audio_shared_contributor *source=setting->contributors+c;
+            const pap_shared_origin *origin=inputs.origins+source->input;
+            if(origin->baseline || origin->scope>=p->count)continue;
+            const sh_audio_graph_root *root=pap_shared_root(&inputs,source->input,source->record);
+            pap_record_owners walk={p->scopes[origin->scope].compiled,{0},owners+i};
+            if(!root)goto done;
+            walk.root=*root;
+            if(!sh_audio_link_graph_root_sources(graph,walk.root.node,pap_record_owner,&walk,error,capacity))goto done;
+        }
+    }
     p->shared=policy;memset(&policy,0,sizeof(policy));p->shared_origins=inputs.origins;
-    p->shared_count=inputs.count;inputs.origins=NULL;ok=1;
+    p->shared_count=inputs.count;inputs.origins=NULL;p->shared_owners=owners;owners=NULL;ok=1;
 done:
-    for(size_t i=0;i<inputs.count;i++)free((void *)inputs.rows[i].body);
-    free(inputs.rows);free(inputs.origins);free(seen);free(init_paths[0]);free(init_paths[1]);
-    sh_audio_shared_policy_free(&policy);return ok;
+    if(owners)for(size_t i=0;i<policy.count;i++) {
+        sh_package_owners_free(&owners[i].owners);sh_package_owners_free(&owners[i].gameplay);
+    }
+    free(owners);
+    pap_shared_inputs_free(&inputs);
+    sh_audio_shared_policy_free(&policy);
+    if(!ok && error && capacity && !*error)pap_fail(error,capacity,"cannot compose shared audio controls",NULL);
+    return ok;
 }
 const sh_audio_shared_policy *sh_package_audio_program_shared(const sh_package_audio_program *p)
 { return p && p->graph ? &p->shared : NULL; }
+const sh_audio_shared_policy *sh_package_audio_program_bound_shared(const sh_package_audio_program *p)
+{ return p && p->shared_bound ? &p->bound_shared : NULL; }
+int sh_package_audio_program_shared_owners(const sh_package_audio_program *p,size_t setting,
+    const sh_package_owners **owners,const sh_package_owners **gameplay)
+{
+    if(owners)*owners=NULL;if(gameplay)*gameplay=NULL;
+    if(!p || !p->graph || !owners || !gameplay || setting>=p->shared.count)return 0;
+    *owners=&p->shared_owners[setting].owners;*gameplay=&p->shared_owners[setting].gameplay;return 1;
+}
 int sh_package_audio_program_shared_origin(const sh_package_audio_program *p,
     size_t input,size_t *scope,size_t *bank,int *baseline)
 {
     if(!p || !p->graph || input>=p->shared_count || !scope || !bank || !baseline)return 0;
-    pap_shared_origin row=p->shared_origins[input];*scope=row.scope;*bank=row.bank;*baseline=row.baseline;return 1;
+    pap_shared_origin row=p->shared_origins[input];
+    *scope=row.scope<p->count ? row.scope : SIZE_MAX;*bank=row.scope<p->count ? row.bank : SIZE_MAX;
+    *baseline=row.baseline;return 1;
 }
 int sh_package_audio_program_prepare(sh_package_audio_program *p, char *error, size_t capacity)
 {
@@ -523,7 +599,7 @@ int sh_package_audio_program_prepare(sh_package_audio_program *p, char *error, s
         if (!pap_files_capture(p->scopes + i)) goto done;
     }
     if(!pap_bus_prepare(p,inputs,graph,error,capacity) || !pap_bus_compose(p,graph,error,capacity) ||
-        !pap_shared_prepare(p,inputs,error,capacity))goto done;
+        !pap_shared_prepare(p,inputs,graph,error,capacity))goto done;
     for (size_t i = 0; i < p->count; i++) {
         sh_package_audio_capture_seal(p->scopes[i].capture);
         p->scopes[i].compiled = NULL;
@@ -533,7 +609,7 @@ int sh_package_audio_program_prepare(sh_package_audio_program *p, char *error, s
 done:
     sh_audio_link_graph_close(graph); free(inputs); free(roots);
     if (!ok) {
-        pap_bus_clear(p);
+        pap_bus_clear(p);pap_shared_clear(p);
         sh_package_audio_capture_close(p->bus_baseline);p->bus_baseline=NULL;
         for (size_t i = 0; i < p->count; i++) {
             pap_files_clear(p->scopes + i);
@@ -607,11 +683,34 @@ static int pap_bus_bind(const sh_package_audio_program *p,const sh_audio_link_bi
     }
     return 1;
 }
+/* Winning shared values relocate their private references with the same
+ * transaction IDs as the bank streams. Baseline witnesses keep original IDs. */
+static int pap_shared_bind(const sh_package_audio_program *p,const sh_audio_link_binding *binding,
+    sh_audio_shared_policy *out,char *error,size_t capacity)
+{
+    if(!sh_audio_shared_policy_copy(&p->shared,out))return pap_fail(error,capacity,"cannot retain bound shared audio policy",NULL);
+    for(size_t i=0;i<out->count;i++) {
+        sh_audio_shared_setting *setting=out->settings+i;
+        if(setting->input>=p->shared_count)return pap_fail(error,capacity,"shared audio policy has no retained binding",NULL);
+        const pap_shared_origin *origin=p->shared_origins+setting->input;
+        const sh_audio_graph_scope *scope=origin->scope<p->count ?
+            sh_package_audio_capture_input(p->scopes[origin->scope].capture) : sh_package_audio_capture_input(p->bus_baseline);
+        if(!scope || origin->bank>=scope->bank_count || setting->index>=origin->records)
+            return pap_fail(error,capacity,"shared audio policy has no retained binding",NULL);
+        const sh_audio_bank_chunk *chunk=scope->banks[origin->bank].codec->chunks+origin->chunk;
+        unsigned char *body=NULL;size_t length=0;
+        if(!sh_audio_link_binding_shared_value(binding,origin->scope,origin->bank,chunk->first_shared_record+setting->index,
+            &body,&length,error,capacity))return 0;
+        if(length!=setting->record.length){free(body);return pap_fail(error,capacity,"bound shared audio value changed shape",NULL);}
+        free(setting->body);setting->body=body;
+    }
+    return 1;
+}
 int sh_package_audio_program_bind(sh_package_audio_program *p, sh_package_compilation *compiled,
     sh_audio_graph_assign assign, void *context, char *error, size_t capacity)
 {
     pap_binding *bindings = NULL; size_t count = 0; int ok = 0;
-    sh_audio_link_binding *transaction=NULL;sh_audio_bus_policy bus={0};
+    sh_audio_link_binding *transaction=NULL;sh_audio_bus_policy bus={0};sh_audio_shared_policy shared={0};
     if (!p || !p->graph || !compiled || !assign || compiled->resource_count > SIZE_MAX / sizeof(*bindings))
         return pap_fail(error, capacity, "invalid audio publication input", NULL);
     bindings = calloc(compiled->resource_count ? compiled->resource_count : 1, sizeof(*bindings));
@@ -635,11 +734,13 @@ int sh_package_audio_program_bind(sh_package_audio_program *p, sh_package_compil
         bindings[count++] = (pap_binding){r, scope, found->event};
     }
     transaction=sh_audio_link_graph_prepare_bind(p->graph,assign,context,error,capacity);
-    if(!transaction || !pap_bus_bind(p,transaction,&bus,error,capacity))goto done;
+    if(!transaction || !pap_bus_bind(p,transaction,&bus,error,capacity) ||
+        !pap_shared_bind(p,transaction,&shared,error,capacity))goto done;
     /* Every root was proved during prepare; a successful bind assigns all
      * roots atomically. No fallible allocation or validation remains here. */
     sh_audio_link_graph_commit_bind(transaction);transaction=NULL;
     sh_audio_bus_policy_free(&p->bound_bus_policy);p->bound_bus_policy=bus;memset(&bus,0,sizeof(bus));p->bus_bound=1;
+    sh_audio_shared_policy_free(&p->bound_shared);p->bound_shared=shared;memset(&shared,0,sizeof(shared));p->shared_bound=1;
     for (size_t i = 0; i < count; i++) {
         uint32_t event = 0;
         (void)sh_audio_link_graph_event_id(p->graph, bindings[i].scope, bindings[i].event, &event);
@@ -647,7 +748,7 @@ int sh_package_audio_program_bind(sh_package_audio_program *p, sh_package_compil
     }
     ok = 1;
 done:
-    sh_audio_link_graph_cancel_bind(transaction);sh_audio_bus_policy_free(&bus);
+    sh_audio_link_graph_cancel_bind(transaction);sh_audio_bus_policy_free(&bus);sh_audio_shared_policy_free(&shared);
     free(bindings);
     if (!ok && error && capacity && !*error) pap_fail(error, capacity, "cannot bind audio program", NULL);
     return ok;
