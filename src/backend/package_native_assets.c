@@ -8,6 +8,7 @@
 #include "package_shader_receipt.h"
 #include "audio_banks.h"
 #include "package_virtual_pages.h"
+#include "package_movie.h"
 
 typedef struct na_file {
     char *path;
@@ -762,6 +763,13 @@ static int na_implicit(void *context, size_t scope, int observing, const sh_pack
     if (!observing && !strcmp(unit->family, "font") &&
         (!a || !a->consumers_ready || !a->consumers_ready(unit->family))) {
         if (error && capacity) snprintf(error, capacity, "font native consumer adapter is not configured");
+        return 0;
+    }
+    /* A UI movie resolves its fonts and fixed GUI materials inside its native
+     * constructor; bound variants of those requests need the movie route. */
+    if (!observing && sh_package_movie_owner(unit->family, unit->name) &&
+        (!a || !a->consumers_ready || !a->consumers_ready(unit->family))) {
+        if (error && capacity) snprintf(error, capacity, "UI movie native consumer adapter is not configured");
         return 0;
     }
     return 1;

@@ -27,12 +27,13 @@ struct sh_decl_native_schema {
     sh_decl_dependency_schema schema;
     dn_owned *owned;
     dn_index classes, enums;
-    uintptr_t references[5], string_reader, atomic_string_reader, color_reader, list_reader, static_list_reader;
+    uintptr_t references[6], string_reader, atomic_string_reader, color_reader, list_reader, static_list_reader;
     uintptr_t float_wrapper_reader, time_wrapper_reader, time_container_reader, random_value_reader;
     uintptr_t anim_path_reader, atomic_anim_path_reader, type_info_reader, type_info_ptr_reader;
     uintptr_t alias_handle_reader, atomic_alias_handle_reader, managed_handle_reader;
     uintptr_t polymorphic_reader;
     uintptr_t script_reader;
+    uintptr_t movie_file_reader;
 };
 
 static void *dn_allocate(sh_decl_native_schema *s, size_t size)
@@ -320,7 +321,9 @@ static int dn_describe(void *context, sh_decl_value_type value, sh_decl_value_sh
         }
     } else if (*ops) return 0;
     else if (type) {
-        if ((s->string_reader && type->object_reader == s->string_reader) ||
+        if (s->movie_file_reader && type->object_reader == s->movie_file_reader)
+            shape->kind = SH_DECL_VALUE_REFERENCE;
+        else if ((s->string_reader && type->object_reader == s->string_reader) ||
             (s->atomic_string_reader && type->object_reader == s->atomic_string_reader) ||
             (s->color_reader && type->object_reader == s->color_reader) ||
             (s->anim_path_reader && type->object_reader == s->anim_path_reader) ||
@@ -438,8 +441,10 @@ sh_decl_native_schema *sh_decl_native_schema_open(sh_decl_native_source source,
     sh_decl_dependency_observer observer, char *error, size_t error_capacity)
 {
     sh_decl_native_schema *s = NULL;
+    /* Order matches sh_decl_reference_reader after UNKNOWN. idSWF's pointer
+     * reader constructs a movie from its string; empty means null. */
     const char *const resources[] = {"idDeclEntityDef", "idImage", "idRenderModel", "idStaticModel",
-        "idStaticParticleModelData"};
+        "idStaticParticleModelData", "idSWF"};
     uintptr_t container;
     dn_type *type;
     size_t i;
@@ -497,6 +502,10 @@ sh_decl_native_schema *sh_decl_native_schema_open(sh_decl_native_source source,
     if (type) s->random_value_reader = type->object_reader;
     type = dn_find(&s->classes, "idSSObject");
     if (type) s->script_reader = type->pointer_reader;
+    /* idSWFFile stores the same constructor string by value (and can precache
+     * a temporary movie). Only its registered reader establishes the contract. */
+    type = dn_find(&s->classes, "idSWFFile");
+    if (type) s->movie_file_reader = type->object_reader;
     s->list_reader = dn_family(&s->classes, "idList < ");
     s->static_list_reader = dn_family(&s->classes, "idStaticList < ");
     s->polymorphic_reader = dn_family(&s->classes, "idTypeInfoObjectPtr < ");
@@ -578,6 +587,11 @@ sh_decl_reference_reader sh_decl_native_schema_reader(sh_decl_native_schema *s,
     if (!strcmp(value.ops, DN_SCRIPT_DECL))
         return sh_decl_native_schema_class_derives(s, value.name, "idDecl") == 1 ?
             SH_DECL_READER_DECL : SH_DECL_READER_UNKNOWN;
+    if (!*value.ops) {
+        type = dn_find(&s->classes, value.name);
+        return type && s->movie_file_reader && type->object_reader == s->movie_file_reader ?
+            SH_DECL_READER_MOVIE : SH_DECL_READER_UNKNOWN;
+    }
     if (strcmp(value.ops, "*")) return SH_DECL_READER_UNKNOWN;
     type = dn_find(&s->classes, value.name);
     if (type && type->pointer_reader) for (i = 0; i < sizeof(s->references) / sizeof(s->references[0]); i++)

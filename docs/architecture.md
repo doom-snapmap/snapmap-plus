@@ -392,12 +392,23 @@ resolve to the same physical path the corresponding native consumer will open.
 reports direct material/font idStr records and exposes command payloads without
 treating local text or script bytes as arbitrary resource paths. Its paired
 filename helper follows the native constructor: derive the atlas with the
-filesystem routine, then derive the movie from that atlas name. A successful
-envelope read is not a complete movie admission decision; the consumer adapter
-must also bind the paired atlas, native font fallback, generated atlas materials,
-fixed GUI materials and runtime script requests before publishing a linked movie.
-Atlas materials are generated from image and stage-program references, with names
-derived from their movie; they are additional native identities to retain.
+filesystem routine, then derive the movie from that atlas name.
+
+`package_movie` makes a cooked movie one link unit: the `file` movie and its
+`image` atlas, captured in the movie's scope and then from originals. idSWF
+pointers and idSWFFile values name it through their registered readers; a
+relocated pair writes back a constructor spelling that derives it. Dictionary
+material records are rewritten like other idStr sites. Dictionary fonts are not:
+the native resolver makes language decisions from their original names, so each
+font, the resolver's fixed fallback fonts and the constructor's fixed GUI
+materials become constructor slots. Absent requests keep the native default.
+While a compiled movie constructs, `resource_graph_native` holds its plan and
+routes only requests bound to a different identity; nested loads never inherit
+it, and an unpreparable plan keeps native lookups with a diagnostic. Atlas
+materials are generated from the movie's own name and atlas, so a private pair
+yields private generated materials. ActionScript requests made after
+construction (sounds, font effects and local strings) still resolve by their
+original names; they are not yet routed through the movie's plan.
 
 `font_binary` checks the native glyph header and counted glyph/index records,
 preserving uninterpreted metric bits and unread trailing data. It also derives
@@ -421,6 +432,8 @@ scope; a failed read aborts capture instead of pretending the material is absent
 Uncatalogued glyph files first belong to any typed consumer that names them;
 remaining files receive their native path-derived font identity. Missing and empty
 selected forms use the native 12.dat fallback. Glyph bytes are never rewritten.
+Exact installed originals whose envelope the native loader rejects (older idf*
+files still ship) capture no requests and keep the engine's own failure path.
 
 These edges drive exact dedupe, private identity assignment, consumer catalogs and
 saved-context reconstruction. The routing helper matches only the proven material
@@ -435,10 +448,10 @@ resolution. The engine still selects the glyph form and performs 12.dat fallback
 the adapter does not change the global distance-font setting.
 
 The native asset handle admits fonts only with a configured, ready constructor
-adapter. This capability is process wiring, not package metadata. Movie-level
-language fallback, generated materials and script requests remain separate
-admission requirements. Native-shaped callback tests and two-image signature
-checks do not replace live acceptance.
+adapter. This capability is process wiring, not package metadata. UI movies
+likewise require their constructor route; see `package_movie` above.
+Native-shaped callback tests and two-image signature checks do not replace
+live acceptance.
 
 Native custom readers preserve animation state paths, animation alias handles
 and C++ class names as data rather than treating their spelling as resource
@@ -822,8 +835,6 @@ The movie naming adapter uses the verified constructor rule to assign a cooked
 `file` movie and its `image` atlas together, including filename partitioning and
 consumer capacities. It validates the original pair and preserves it for an
 original binding. This is an internal adapter, with no package descriptor change.
-It does not yet admit complete UI movie graphs: generated/fixed GUI materials, font fallback
-and script-driven resource requests still require their dependency bindings.
 
 `package_link_inputs` discovers these units from retained component compilations.
 Declarations use compiler identities; opaque resources use the installed catalog,

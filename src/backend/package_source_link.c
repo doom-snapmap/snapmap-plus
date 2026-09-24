@@ -1,6 +1,7 @@
 #include "package_source_link.h"
 #include "package_virtual_material.h"
 #include "package_font.h"
+#include "package_movie.h"
 #include "package_audio_program.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +32,8 @@ typedef struct sl_unit {
     sl_implicit *implicit;
     size_t implicit_count;
     size_t reverse_gap; /* Observation only: 1 + index of its accounted reader gap. */
+    int movie_captured; /* Constructor requests of a cooked movie were enumerated. */
+    sh_package_link_file_identity *identities; /* Owned per-file identities (movie pairs). */
 } sl_unit;
 typedef struct sl_original {
     sh_compiled_resource resource;
@@ -351,11 +354,16 @@ static int sl_material_member(void *context, const char *role, const sh_compiled
     if (!grown) { free(copy); return sl_fail(walk->source, "cannot retain material companions", role); }
     unit->witnesses = grown; grown[unit->witness_count++] = (sh_package_link_witness){copy, file}; return 1;
 }
+static int sl_movie_files(sh_package_source_link *s, sl_unit *unit);
+static unsigned char *sl_movie_bind(sl_unit *unit, const sh_compiled_resource *file,
+    const unsigned char *body, size_t length, sh_package_binding_resolver reference, void *context,
+    size_t *output_length, char *error, size_t capacity);
 static int sl_files(sh_package_source_link *s, sl_unit *unit)
 {
     const sh_resource_catalog_entry *const *rows = NULL;
     size_t count;
     if (!strcmp(unit->unit.family, "renderprog")) return sl_shader_files(s, unit);
+    if (sh_package_movie_owner(unit->unit.family, unit->unit.name)) return sl_movie_files(s, unit);
     if (!strcmp(unit->unit.family, "font")) {
         /* Native selection is between these forms, including an empty selected
          * file's 12.dat fallback. Catalog order is not a selection policy. */
@@ -410,6 +418,8 @@ static unsigned char *sl_bind_member(sh_package_source_link *s, sl_unit *unit,
     sh_package_binding_resolver reference, void *context, size_t *output_length,
     char *error, size_t capacity)
 {
+    if (sh_package_movie_owner(unit->unit.family, unit->unit.name))
+        return sl_movie_bind(unit, file, body, length, reference, context, output_length, error, capacity);
     if (!strcmp(unit->unit.family, "font")) {
         /* Name-derived references belong to the complete constructor plan,
          * not to offsets in glyph bytes. Empty members are native fallbacks. */
@@ -501,6 +511,14 @@ static int sl_seed_inputs(sh_package_source_link *s)
         for (size_t i = 0; ok && i < original->resource_count; i++) {
             const sh_compiled_resource *file = original->resources + i; char *name = NULL;
             if (s->native.audio && sh_package_audio_path_kind(file->engine_path)) continue;
+            /* A cooked movie and its atlas are one constructor unit, whichever
+             * member this scope supplies; the other resolves in scope then originals. */
+            sh_package_movie_names movie;
+            if (sh_package_movie_names_for_path(file->engine_path, &movie) == 1) {
+                sl_unit *unit = sl_find(s, scope, "file", movie.movie, 1);
+                if (!unit || !sl_member(s, unit, file)) { ok = 0; break; }
+                continue;
+            }
             /* A typed consumer can name this file through another native
              * spelling. Give that exact identity first ownership of the file. */
             if (sl_deferred_binary_family(s, file)) continue;
@@ -660,11 +678,134 @@ static int sl_font_capture(sh_package_source_link *s, sl_unit *unit)
             SIZE_MAX, &members[i].length, s->error, s->error_capacity);
         if (!members[i].body) goto done;
     }
+    /* Exact installed originals keep the engine's own behavior, including a
+     * shipped envelope its loader rejects: no request is captured or routed. */
+    int native_owned = 1, rejected = 0;
+    for (size_t i = 0; i < count; i++) {
+        native_owned &= unit->unit.files[i]->native_original != 0;
+        rejected |= sh_font_binary_native_rejected(members[i].body, members[i].length);
+    }
+    if (native_owned && rejected) { ok = 1; goto done; }
     ok = sh_package_font_capture(unit->unit.name, members, count, sl_font_material, &walk, s->error, s->error_capacity);
     if (!ok && !s->failed) s->reader_gap = 1;
 done:
     for (size_t i = 0; i < count; i++) free((void *)members[i].body);
     return ok;
+}
+/* Cooked UI movies. The idFileResource movie and the constructor-derived atlas
+ * image form one unit; dictionary fonts, the language resolver's fallback
+ * fonts and the fixed GUI materials are constructor requests bound in this
+ * scope. All of them are native create-or-default lookups, so a positively
+ * absent request is retained as absence rather than borrowed from a peer. */
+static int sl_movie_request(void *context, const char *slot, const char *family, const char *name)
+{
+    sl_discover *walk = context; sh_package_source_link *s = walk->source;
+    const sh_compiled_resource *file = NULL;
+    sl_unit *target;
+    int status;
+    if (!strcmp(family, "font")) {
+        const sh_compiled_resource *forms[3] = {0}; int present = 0;
+        for (unsigned i = 0; i < 3; i++) {
+            sh_font_binary_paths paths;
+            if (!sh_font_binary_paths_for(name, (sh_font_binary_variant)i, &paths)) {
+                sl_fail(s, "cannot construct font source paths", name); return -1;
+            }
+            status = sl_source_file(s, walk->unit->scope, paths.file, 1, forms + i);
+            sh_font_binary_paths_clear(&paths);
+            if (status < 0) return -1;
+            present |= status == 1;
+        }
+        if (!present) return 0;
+        if (!(target = sl_find(s, walk->unit->scope, "font", name, 1))) return -1;
+        for (unsigned i = 0; i < 3; i++) if (forms[i] && !sl_member(s, target, forms[i])) return -1;
+    } else {
+        char *path = sl_decl_path(family, name);
+        status = path ? sl_source_file(s, walk->unit->scope, path, 1, &file) : -1;
+        free(path);
+        if (status != 1) return status;
+        if (!(target = sl_find(s, walk->unit->scope, family, name, 1)) || !sl_member(s, target, file)) return -1;
+    }
+    return sl_implicit_reference(walk, slot, family, name) == 1 ? 1 : -1;
+}
+static int sl_movie_files(sh_package_source_link *s, sl_unit *unit)
+{
+    sh_package_movie_names names;
+    const sh_compiled_resource *movie = NULL, *atlas = NULL;
+    if (sh_package_movie_names_for_path(unit->unit.name, &names) != 1)
+        return sl_gap_fail(s, "cooked movie pair cannot be derived from its native name", unit->unit.name);
+    int movie_status = sl_source_file(s, unit->scope, names.movie, 0, &movie);
+    int atlas_status = movie_status < 0 ? -1 : sl_source_file(s, unit->scope, names.atlas, 0, &atlas);
+    if (movie_status < 0 || atlas_status < 0) return 0;
+    if (!movie_status || !atlas_status) {
+        /* Observation keeps an absent stock pair as a boundary. A delivered
+         * half pair cannot construct: the constructor loads both files. */
+        if (s->observe && !movie_status && !atlas_status) return 1;
+        return sl_gap_fail(s, "cooked movie and its atlas must both be available", unit->unit.name);
+    }
+    if (!sl_member(s, unit, movie) || !sl_member(s, unit, atlas)) return 0;
+    if (unit->movie_captured) return 1;
+    size_t length = 0;
+    unsigned char *body = sh_package_compilation_read(unit->unit.compilation, movie, SIZE_MAX,
+        &length, s->error, s->error_capacity);
+    if (!body) return sl_fail(s, "cooked movie could not be read", names.movie);
+    sl_discover walk = {s, unit};
+    int ok = sh_package_movie_capture(body, length, sl_movie_request, &walk, s->error, s->error_capacity);
+    free(body);
+    if (!ok) return s->failed ? 0 : sl_gap_fail(s, "cooked movie constructor requests are unsupported", unit->unit.name);
+    unit->movie_captured = 1; return 1;
+}
+typedef struct sl_movie_sites { sh_package_binding_resolver reference; void *context; size_t record; } sl_movie_sites;
+static int sl_movie_resolve(void *context, const char *family, const char *name, const char **replacement)
+{
+    sl_movie_sites *sites = context; char slot[48], normalized[256];
+    *replacement = NULL;
+    if (!sh_package_movie_native_name(name, strlen(name), normalized, sizeof(normalized))) return -1;
+    snprintf(slot, sizeof(slot), "movie/dictionary/%zu", sites->record++);
+    return sites->reference(sites->context, slot, family, normalized, replacement);
+}
+static unsigned char *sl_movie_bind(sl_unit *unit, const sh_compiled_resource *file,
+    const unsigned char *body, size_t length, sh_package_binding_resolver reference, void *context,
+    size_t *output_length, char *error, size_t capacity)
+{
+    sh_package_movie_names names;
+    if (sh_package_movie_names_for_path(unit->unit.name, &names) != 1 || !file || !file->engine_path) {
+        snprintf(error, capacity, "cooked movie unit lost its native pair"); return NULL;
+    }
+    if (!strcmp(file->engine_path, names.atlas)) {
+        /* The atlas is pixel data; its identity is bound by name derivation. */
+        unsigned char *out = length == SIZE_MAX ? NULL : malloc(length + 1);
+        if (out) { if (length) memcpy(out, body, length); out[length] = 0; *output_length = length; }
+        return out;
+    }
+    if (strcmp(file->engine_path, names.movie)) {
+        snprintf(error, capacity, "file is outside its captured movie unit"); return NULL;
+    }
+    sl_movie_sites sites = {reference, context, 0}; size_t changed = 0;
+    return sh_resource_rebind_with(sh_package_movie_material_sites, NULL, SH_BINDING_IDSTR,
+        body, length, sl_movie_resolve, &sites, output_length, &changed, error, capacity);
+}
+/* Paired native identities follow the frozen, path-sorted member order. */
+static int sl_movie_identities(sh_package_source_link *s, sl_unit *unit)
+{
+    sh_package_movie_names names;
+    if (!sh_package_movie_owner(unit->unit.family, unit->unit.name) || !unit->unit.file_count) return 1;
+    if (unit->unit.file_count != 2 || sh_package_movie_names_for_path(unit->unit.name, &names) != 1)
+        return sl_fail(s, "cooked movie unit does not hold exactly its native pair", unit->unit.name);
+    sh_package_link_file_identity *identities = calloc(2, sizeof(*identities));
+    char *atlas = _strdup(names.atlas);
+    if (!identities || !atlas) { free(identities); free(atlas); return sl_fail(s, "cannot retain movie identities", unit->unit.name); }
+    for (size_t i = 0; i < 2; i++) {
+        const char *path = unit->unit.files[i]->engine_path;
+        if (!strcmp(path, names.atlas)) { identities[i].family = "image"; identities[i].name = atlas; atlas = NULL; }
+        else if (strcmp(path, names.movie)) {
+            free((char *)identities[0].name); free(identities); free(atlas);
+            return sl_fail(s, "cooked movie unit holds an unrelated file", path);
+        }
+    }
+    if (atlas) { free(identities); free(atlas); return sl_fail(s, "cooked movie unit lost its atlas", unit->unit.name); }
+    if (unit->identities) for (size_t i = 0; i < 2; i++) free((char *)unit->identities[i].name);
+    free(unit->identities);
+    unit->identities = identities; unit->unit.file_identities = identities; return 1;
 }
 static int sl_discover_unit(sh_package_source_link *s, sl_unit *unit)
 {
@@ -970,6 +1111,8 @@ void sh_package_source_link_close(sh_package_source_link *s)
             free(unit->programs[p].name); sh_package_shader_program_clear(&unit->programs[p].decoded);
         }
         free(unit->programs); free(unit->shader_files);
+        if (unit->identities) for (size_t j = 0; j < unit->unit.file_count; j++) free((char *)unit->identities[j].name);
+        free(unit->identities);
         free(unit->dependencies); free(unit);
     }
     for (size_t i = 0; i < s->original_count; i++) {
@@ -1027,6 +1170,7 @@ sh_package_source_link *sh_package_source_link_open_roots(const sh_package_compi
             sl_unit *unit = s->units[inspected];
             if (!sl_discover_unit(s, unit)) goto failed;
             if (unit->unit.file_count > 1) qsort((void *)unit->unit.files, unit->unit.file_count, sizeof(*unit->unit.files), sl_file_order);
+            if (!sl_movie_identities(s, unit)) goto failed;
         }
     }
     if (!sl_shader_accounted(s)) goto failed;

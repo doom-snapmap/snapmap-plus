@@ -29,6 +29,12 @@ typedef struct sh_swf_binary_paths {
  * lookup spellings; package path validation remains a separate boundary.
  * Empty names mean no movie and return zero. Failure clears both outputs. */
 int sh_swf_binary_paths_for(const char *name, sh_swf_binary_paths *out);
+/* Inverse for a regular cooked pair: generated/swf/<stem>.bswf with atlas
+ * generated/swf/<stem>.bimage. Writes the constructor spelling swf/<stem>.swf
+ * and returns 1 only when the forward rule reproduces both input paths.
+ * Partitioned long names and a directory containing .bimage are ambiguous
+ * inverses and return 0; those consumers keep their authored field text. */
+int sh_swf_binary_consumer_for(const char *movie, sh_swf_binary_paths *paths, char consumer[256]);
 
 /* Walk all counted records and direct material/font idStr sites, preserving
  * local labels, display strings, geometry and command bytes. A material name

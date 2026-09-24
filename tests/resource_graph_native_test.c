@@ -755,6 +755,115 @@ static void test_font_construction(void)
     CHECK(!rg_font_read_hook(font_objects[2], (void *)19) && !font_holds);
     sh_resource_graph_test_reset();
 }
+static unsigned char movie_swf[0x40], movie_fonts[3][0x60], movie_materials[3][0x60];
+static unsigned char movie_font_manager[0x30], movie_material_manager[0x30];
+static void *movie_head;
+static int movie_prepares, movie_native_fonts, movie_native_materials, movie_constructs;
+static int movie_prepare_failure, movie_throw, movie_expect_frame, movie_nested;
+static void *movie_materialize(void *owner, const char *name, unsigned char create_default, unsigned char flags)
+{
+    CHECK(!flags);
+    if (owner == movie_font_manager) {
+        if (!strcmp(name, "smp/font1")) {
+            CHECK(!g_movie_frame && !create_default); movie_prepares++;
+            movie_fonts[0][0x2c] = movie_prepare_failure ? 4 : 0;
+            return movie_fonts[0];
+        }
+        movie_native_fonts++; return movie_fonts[2];
+    }
+    CHECK(owner == movie_material_manager);
+    if (!strcmp(name, "smp/mat1")) {
+        CHECK(!g_movie_frame && !create_default); movie_prepares++; return movie_materials[0];
+    }
+    movie_native_materials++; return movie_materials[2];
+}
+static void *movie_optional(void *owner, const char *name, unsigned char create_default)
+{
+    CHECK(owner == movie_material_manager && name); (void)create_default;
+    movie_native_materials++; return movie_materials[2];
+}
+static void movie_nested_load(void *resource)
+{
+    /* Nested construction work never borrows the movie plan. */
+    CHECK(!g_movie_frame && resource == movie_materials[2]);
+    CHECK(rg_materialize_hook(movie_font_manager, "TT Supermolot", 1, 0) == movie_fonts[2]);
+}
+static void *movie_construct(void *swf, const char *name, void *parent, unsigned char flags)
+{
+    CHECK(swf == movie_swf && !parent && flags == 3); movie_constructs++;
+    if (!movie_expect_frame) {
+        CHECK(!g_movie_frame);
+        CHECK(rg_materialize_hook(movie_font_manager, "TT Supermolot", 1, 0) == movie_fonts[2]);
+        return swf;
+    }
+    CHECK(g_movie_frame && font_holds == 1);
+    /* The language resolver and fixed lookups reach the prepared bindings. */
+    CHECK(rg_materialize_hook(movie_font_manager, "TT Supermolot", 1, 0) == movie_fonts[0]);
+    CHECK(rg_optional_material_hook(movie_material_manager, "guiSolid", 1) == movie_materials[0]);
+    /* Original bindings and unrelated requests keep native lookup. */
+    CHECK(rg_optional_material_hook(movie_material_manager, "_white", 1) == movie_materials[2]);
+    CHECK(rg_materialize_hook(movie_font_manager, "V7Gothic-Medium-P", 1, 0) == movie_fonts[2]);
+    if (movie_nested) {
+        rg_movie_frame *frame = g_movie_frame;
+        rg_load_hook(movie_materials[2]); CHECK(g_movie_frame == frame);
+    }
+    if (movie_throw) RaiseException(0xe0123457, 0, 0, NULL);
+    return swf;
+}
+static void test_movie_construction(void)
+{
+    char error[256];
+    sh_package_consumer_target targets[] = {
+        {"movie/font/tt supermolot", "font", "smp/font1"},
+        {"movie/material/guisolid", "material", "smp/mat1"},
+        {"movie/material/_white", "material", "_white"}};
+    sh_package_consumer owner = {"file", "generated/swf/hud/panel.bswf", targets, 3};
+    font_catalog = sh_package_consumers_create(&owner, 1, error, sizeof(error)); CHECK(font_catalog);
+    memset(movie_font_manager, 0, sizeof(movie_font_manager)); memset(movie_material_manager, 0, sizeof(movie_material_manager));
+    put_pointer(movie_font_manager, 8, "font"); put_pointer(movie_font_manager, 0x18, movie_material_manager);
+    put_pointer(movie_material_manager, 8, "material"); movie_head = movie_font_manager; g_resource_head = &movie_head;
+    for (size_t i = 0; i < 3; i++) {
+        put_pointer(movie_fonts[i], 0x10, movie_font_manager); put_pointer(movie_materials[i], 0x10, movie_material_manager);
+    }
+    g_ready = 1; g_materialize = movie_materialize; g_optional_material = movie_optional;
+    g_swf_construct = movie_construct; g_load = movie_nested_load;
+    CHECK(!sh_resource_graph_native_consumer_ready("file"));
+    g_movie_ready = 1;
+    CHECK(sh_resource_graph_native_consumer_ready("file"));
+    font_acquires = font_releases = font_holds = 0;
+    movie_expect_frame = 1; movie_nested = 1;
+    CHECK(rg_swf_construct_hook(movie_swf, "hud/panel", NULL, 3) == movie_swf);
+    CHECK(movie_constructs == 1 && movie_prepares == 2 && !font_holds && font_releases == 1 && !g_movie_frame);
+    movie_nested = 0;
+    /* Uncompiled or ambiguous movies keep native construction without a plan. */
+    movie_expect_frame = 0;
+    CHECK(rg_swf_construct_hook(movie_swf, "swf/other.swf", NULL, 3) == movie_swf && !font_holds);
+    CHECK(rg_swf_construct_hook(movie_swf, "swf/a.bimage/b.swf", NULL, 3) == movie_swf && !font_holds);
+    CHECK(rg_swf_construct_hook(movie_swf, NULL, NULL, 3) == movie_swf && movie_constructs == 4);
+    /* A constructor cannot fail: an unpreparable plan keeps native lookups. */
+    movie_prepare_failure = 1; movie_prepares = 0;
+    CHECK(rg_swf_construct_hook(movie_swf, "swf/hud/panel.swf", NULL, 3) == movie_swf);
+    CHECK(movie_prepares == 1 && !font_holds && !g_movie_frame);
+    movie_prepare_failure = 0;
+    /* Native exceptions unwind the held plan and restore the outer frame. */
+    movie_expect_frame = 1; movie_throw = 1;
+    {
+        int caught = 0, releases = font_releases;
+        rg_movie_frame outer = {0}; g_movie_frame = &outer;
+        __try { rg_swf_construct_hook(movie_swf, "swf/hud/panel.swf", NULL, 3); }
+        __except (GetExceptionCode() == 0xe0123457 ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) { caught = 1; }
+        CHECK(caught && g_movie_frame == &outer && !font_holds && font_releases == releases + 1);
+        g_movie_frame = NULL;
+    }
+    movie_throw = 0;
+    /* Before the movie route is installed, construction is a call-through. */
+    g_movie_ready = 0; movie_expect_frame = 0;
+    int acquires = font_acquires;
+    CHECK(rg_swf_construct_hook(movie_swf, "swf/hud/panel.swf", NULL, 3) == movie_swf && font_acquires == acquires);
+    sh_package_consumers_free(font_catalog); font_catalog = NULL;
+    g_swf_construct = NULL; g_load = NULL;
+    sh_resource_graph_test_reset();
+}
 int main(void)
 {
     sh_resource_graph_frame outer, pause;
@@ -881,6 +990,7 @@ int main(void)
     test_shader_state();
     test_isolated_program_cook();
     test_font_construction();
+    test_movie_construction();
     if (failures) return 1;
     puts("canonical entity-state, direct source and production read capture checks passed"); return 0;
 }

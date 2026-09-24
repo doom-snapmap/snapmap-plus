@@ -12,6 +12,8 @@
 #include "package_audio.h"
 #include "package_sound.h"
 #include "map_binding_sites.h"
+#include "package_movie.h"
+#include "package_font.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -660,6 +662,104 @@ static int sg_sound(sg_walk *walk, const char *name)
     return 1;
 }
 
+/* Present (1), positively absent (0) or unreadable (-1), without adding the
+ * path to the closure. Candidate files win over the original baseline. */
+static int sg_available(sg_walk *walk, const char *path)
+{
+    unsigned char *body = NULL; size_t length = 0;
+    if (sh_package_compilation_find(walk->compiled, path)) return 1;
+    int status = sg_read_path(walk, path, &body, &length);
+    free(body); return status > 0 ? 1 : status;
+}
+/* Glyph forms carry no resource strings; the loader derives its material
+ * names from the font identity and the form it selects. */
+typedef struct sg_font_requests { sg_walk *walk; } sg_font_requests;
+static int sg_font_material(void *context, const char *slot, const char *material, int optional)
+{
+    sg_walk *walk = ((sg_font_requests *)context)->walk;
+    char *path = sg_path("material", material);
+    int status = path ? sg_available(walk, path) : -1;
+    (void)slot; free(path);
+    if (status < 0) { walk->failed = 1; return -1; }
+    if (!status) return optional ? 0 : 1; /* A missing required material is reported by its own inspection. */
+    return sg_add(walk, "material", material) ? 1 : -1;
+}
+static int sg_font(sg_walk *walk, const char *name)
+{
+    sh_package_font_member members[3] = {0}; size_t count = 0; int ok = 1;
+    for (unsigned i = 0; i < 3 && ok; i++) {
+        sh_font_binary_paths paths;
+        if (!sh_font_binary_paths_for(name, (sh_font_binary_variant)i, &paths)) { walk->failed = 1; return 0; }
+        int status = sg_available(walk, paths.file);
+        if (status < 0) ok = 0;
+        else if (status && sg_file(walk, paths.file)) {
+            members[count].path = _strdup(paths.file);
+            ok = members[count].path && sg_read_path(walk, paths.file,
+                (unsigned char **)&members[count].body, &members[count].length) > 0;
+            count++;
+        } else if (status) ok = 0;
+        sh_font_binary_paths_clear(&paths);
+    }
+    if (ok && !count) sg_gap(walk, "", "font", "candidate and original glyph sources are absent");
+    else if (ok) {
+        sg_font_requests requests = {walk};
+        char detail[256] = "";
+        if (!sh_package_font_capture(name, members, count, sg_font_material, &requests, detail, sizeof(detail)) && !walk->failed)
+            sg_gap(walk, "", "font", detail[0] ? detail : "glyph envelope is unsupported");
+    }
+    for (size_t i = 0; i < count; i++) { free((void *)members[i].path); free((void *)members[i].body); }
+    return ok && !walk->failed;
+}
+/* A cooked UI movie is a constructor pair: the dictionary names materials and
+ * fonts, and the constructor itself requests fixed GUI materials and the
+ * language fallback fonts. Local text and ActionScript bytes stay opaque. */
+typedef struct sg_movie_requests { sg_walk *walk; } sg_movie_requests;
+static int sg_movie_request(void *context, const char *slot, const char *family, const char *name)
+{
+    sg_walk *walk = ((sg_movie_requests *)context)->walk;
+    int status;
+    (void)slot;
+    if (!strcmp(family, "font")) {
+        sh_font_binary_paths paths; status = 0;
+        for (unsigned i = 0; i < 3 && status == 0; i++) {
+            if (!sh_font_binary_paths_for(name, (sh_font_binary_variant)i, &paths)) return -1;
+            status = sg_available(walk, paths.file);
+            sh_font_binary_paths_clear(&paths);
+        }
+    } else {
+        char *path = sg_path(family, name);
+        status = path ? sg_available(walk, path) : -1;
+        free(path);
+    }
+    if (status < 0) { walk->failed = 1; return -1; }
+    return status && !sg_add(walk, family, name) ? -1 : status;
+}
+static int sg_movie_material(void *context, const char *family, const char *name, size_t offset, size_t length)
+{
+    (void)offset; (void)length;
+    return sg_add(context, family, name);
+}
+static int sg_movie(sg_walk *walk, const char *name)
+{
+    sh_package_movie_names names;
+    unsigned char *body = NULL; size_t length = 0; int status;
+    if (sh_package_movie_names_for_path(name, &names) != 1) {
+        sg_gap(walk, "", "file", "cooked movie pair cannot be derived from its native name"); return 1;
+    }
+    if (!sg_file(walk, names.movie) || !sg_leaf_file(walk, names.atlas)) return 0;
+    status = sg_read_path(walk, names.movie, &body, &length);
+    if (status <= 0) {
+        sg_gap(walk, "", "file", status < 0 ? "candidate movie is unreadable" : "candidate and original movie sources are absent");
+        free(body); return !walk->failed;
+    }
+    walk->report.declarations++;
+    sg_movie_requests requests = {walk}; char detail[256] = "";
+    int ok = sh_package_movie_material_sites(NULL, body, length, sg_movie_material, walk, detail, sizeof(detail)) &&
+        sh_package_movie_capture(body, length, sg_movie_request, &requests, detail, sizeof(detail));
+    if (!ok && !walk->failed) sg_gap(walk, "", "file", detail[0] ? detail : "cooked movie envelope is unsupported");
+    free(body); return !walk->failed;
+}
+
 static int sg_inspect(sg_walk *walk, const char *type, const char *name)
 {
     sh_decl_source source = {0};
@@ -682,6 +782,8 @@ static int sg_inspect(sg_walk *walk, const char *type, const char *name)
     if (!strcmp(type, "sound") && !sg_sound(walk, name)) { ok = 0; goto done; }
     compiled_resource = sh_package_compilation_find(walk->compiled, path);
     if (!strcmp(type, "renderprog")) { ok = sg_renderprog(walk, name); goto done; }
+    if (sh_package_movie_owner(type, name)) { ok = sg_movie(walk, name); goto done; }
+    if (!strcmp(type, "font")) { ok = sg_font(walk, name); goto done; }
     if (!strcmp(type, "renderprogflag")) {
         if (!sg_file(walk, path) || !sg_shader_flag(walk, name))
             sg_gap(walk, "", type, "shader flag needs its fixed native mask contract");

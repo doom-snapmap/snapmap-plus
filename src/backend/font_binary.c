@@ -32,6 +32,8 @@ int sh_font_binary_read(const unsigned char *body, size_t length,
     return 1;
 }
 
+int sh_font_binary_native_rejected(const unsigned char *body, size_t length)
+{ return body && length >= 4 && memcmp(body, "idf+", 4) != 0; }
 void sh_font_binary_paths_clear(sh_font_binary_paths *paths)
 {
     if (!paths) return;

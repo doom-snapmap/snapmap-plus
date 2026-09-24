@@ -84,10 +84,14 @@ typedef enum sh_decl_reference_reader {
     SH_DECL_READER_IMAGE,
     SH_DECL_READER_MODEL,
     SH_DECL_READER_STATIC_MODEL,
-    SH_DECL_READER_STATIC_PARTICLE
+    SH_DECL_READER_STATIC_PARTICLE,
+    /* idSWF pointers and idSWFFile values construct a UI movie from the field
+     * string; the native constructor derives its cooked file/atlas pair. */
+    SH_DECL_READER_MOVIE
 } sh_decl_reference_reader;
 /* Select the identity resolver using the registered reader, including types
- * sharing it. Class-name spelling alone does not define a reader contract. */
+ * sharing it. Class-name spelling alone does not define a reader contract.
+ * Value types qualify only through a registered reference object reader. */
 sh_decl_reference_reader sh_decl_native_schema_reader(sh_decl_native_schema *schema,
     sh_decl_value_type type);
 

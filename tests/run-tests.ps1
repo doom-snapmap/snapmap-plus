@@ -72,6 +72,7 @@ $tests = @(
     @{ name = "model_binary_test"; src = 'model_binary_test.c ..\src\backend\model_binary.c ..\src\backend\md6_binary.c ..\src\backend\resource_rebind.c'; arg = "" }
     @{ name = "swf_binary_test"; src = 'swf_binary_test.c ..\src\backend\swf_binary.c ..\src\backend\model_binary.c ..\src\backend\md6_binary.c ..\src\backend\resource_rebind.c'; arg = "" }
     @{ name = "font_binary_test"; src = 'font_binary_test.c ..\src\backend\font_binary.c'; arg = "" }
+    @{ name = "package_movie_test"; src = 'package_movie_test.c ..\src\backend\package_movie.c ..\src\backend\swf_binary.c ..\src\backend\package_consumers.c ..\src\backend\resource_rebind.c ..\src\backend\model_binary.c ..\src\backend\md6_binary.c'; arg = "" }
     @{ name = "decl_graph_test"; src = 'decl_graph_test.c ..\src\backend\decl_graph.c ..\src\backend\decl_tree.c'; arg = "" }
     @{ name = "decl_entity_class_test"; src = 'decl_entity_class_test.c ..\src\backend\decl_entity_class.c ..\src\backend\decl_tree.c'; arg = "" }
     @{ name = "decl_dependencies_test"; src = 'decl_dependencies_test.c ..\src\backend\decl_dependencies.c ..\src\backend\decl_json_dependencies.c ..\src\backend\config_json.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
@@ -332,6 +333,19 @@ foreach ($t in $tests) {
     if ('..\src\backend\package_source_link.c' -in ($t.src -split ' ') -and
         '..\src\backend\package_font.c' -notin ($t.src -split ' ')) {
         $t.src += ' ..\src\backend\package_font.c'
+    }
+    # Movie identities are derived wherever native references, source graphs,
+    # source links or the native adapter are compiled.
+    if (('..\src\backend\decl_native_reference.c' -in ($t.src -split ' ') -or
+         '..\src\backend\package_source_graph.c' -in ($t.src -split ' ') -or
+         '..\src\backend\package_source_link.c' -in ($t.src -split ' ') -or
+         '..\src\backend\package_native_assets.c' -in ($t.src -split ' ') -or
+         $t.name -eq 'resource_graph_native_test') -and
+        '..\src\backend\package_movie.c' -notin ($t.src -split ' ')) {
+        foreach ($source in @('package_movie.c', 'swf_binary.c', 'package_consumers.c', 'font_binary.c', 'package_font.c')) {
+            $relative = '..\src\backend\' + $source
+            if ($relative -notin ($t.src -split ' ')) { $t.src += ' ' + $relative }
+        }
     }
     if ('..\src\backend\package_library.c' -in ($t.src -split ' ') -or
         '..\src\backend\package_source_graph.c' -in ($t.src -split ' ')) {
