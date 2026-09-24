@@ -617,6 +617,17 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 40 80 00 00 "
       "4C 8B F2 48 8B D9 C7 41 48 FF FF FF FF 48 8B 79 40",
       0x1819C30u },
+    { "SwfConstruct", /* idSWF*(swf, name, parent, flags): UI movie constructor.
+                        * Resolves dictionary fonts and fixed GUI materials before
+                        * returning. First 20 bytes (seven pushes, frame LEA) are
+                        * position independent; VK 0x285a50 / GL 0x285060. */
+      "40 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 10 FE FF FF "
+      "48 81 EC F0 02 00 00 48 C7 44 24 50 FE FF FF FF 48 89 9C 24 40 03 00 00 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 E0 01 00 00 45 0F B6 E9 "
+      "4C 89 44 24 48 48 8B FA 48 8B F1 48 89 4C 24 58 48 8B 05 ?? ?? ?? ?? "
+      "48 89 01 48 83 C1 10 E8 ?? ?? ?? ?? 90 33 DB 48 89 9E D0 01 00 00 "
+      "C7 86 84 05 00 00 10 00 00 00 89 9E 80 05 00 00",
+      0x285A50u },
     { "DeclRead", /* uint32_t(decl, errorText). The production-file branch calls
                     * the typed parser directly; implicit text returns without
                     * parsing. Independently verified VK 0x17aab70 / GL 0x179d660.

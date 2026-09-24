@@ -1,5 +1,6 @@
 #include "decl_native_reference.h"
 #include "resource_types.h"
+#include "package_movie.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -36,6 +37,16 @@ int sh_decl_native_reference_read(sh_decl_native_schema *schema,
         if (result == 1) {
             out->resource.type = out->model.family;
             out->resource.name = _strdup(out->model.name);
+            if (!out->resource.name) result = -1;
+        }
+    } else if (reader == SH_DECL_READER_MOVIE) {
+        /* The constructor tests the authored swf/ prefix before normalizing,
+         * so the identity is derived from these exact bytes, not a folded copy. */
+        sh_package_movie_names names;
+        result = sh_package_movie_names_for_consumer(copy, length, &names);
+        if (result == 1) {
+            out->resource.type = "file"; out->movie = 1;
+            out->resource.name = _strdup(names.movie);
             if (!out->resource.name) result = -1;
         }
     } else if (reader == SH_DECL_READER_IMAGE || reader == SH_DECL_READER_STATIC_MODEL ||
@@ -77,5 +88,11 @@ char *sh_decl_native_reference_bind(const sh_decl_native_reference *reference,
 {
     if (!reference || !reference->resource.type || !reference->resource.name || !manager_name || !*manager_name)
         return NULL;
+    if (reference->movie) {
+        /* An unchanged binding keeps its authored spelling at the caller. A
+         * relocated pair is regular by construction and always invertible. */
+        sh_swf_binary_paths paths; char consumer[256];
+        return sh_swf_binary_consumer_for(manager_name, &paths, consumer) ? _strdup(consumer) : NULL;
+    }
     return reference->model.family ? sh_model_reference_bind(&reference->model, manager_name) : _strdup(manager_name);
 }

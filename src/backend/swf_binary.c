@@ -37,6 +37,23 @@ done:
     return ok;
 }
 
+int sh_swf_binary_consumer_for(const char *movie, sh_swf_binary_paths *paths, char consumer[256])
+{
+    size_t length = movie ? strlen(movie) : 0;
+    if (paths) memset(paths, 0, sizeof(*paths));
+    if (consumer) *consumer = 0;
+    if (!paths || !consumer || length <= 19 || length >= 256 || strncmp(movie, "generated/swf/", 14) ||
+        strcmp(movie + length - 5, ".bswf")) return 0;
+    /* stem = text between generated/swf/ and .bswf; the constructor strips the
+     * authored extension, so swf/<stem>.swf reproduces this exact pair. */
+    int n = snprintf(consumer, 256, "swf/%.*s.swf", (int)(length - 19), movie + 14);
+    if (n < 0 || n >= 256 || !sh_swf_binary_paths_for(consumer, paths) || strcmp(paths->movie, movie) ||
+        strncmp(paths->atlas, movie, length - 5) || strcmp(paths->atlas + length - 5, ".bimage")) {
+        memset(paths, 0, sizeof(*paths)); *consumer = 0; return 0;
+    }
+    return 1;
+}
+
 typedef struct sw_cursor {
     const unsigned char *body;
     size_t length, at;

@@ -18,6 +18,10 @@ typedef struct sh_font_binary_view {
  * is borrowed and cleared on failure; NULL output performs validation only. */
 int sh_font_binary_read(const unsigned char *body, size_t length,
     sh_font_binary_view *out, char *error, size_t capacity);
+/* Both native loaders compare the first word with idf+ only and take their
+ * wrong-version path for any other envelope (older idf* files ship in the
+ * game). 1 for such a payload, 0 otherwise; the caller decides applicability. */
+int sh_font_binary_native_rejected(const unsigned char *body, size_t length);
 
 typedef enum sh_font_binary_variant {
     SH_FONT_BITMAP_48,

@@ -8,6 +8,7 @@
 typedef struct sh_decl_native_reference {
     sh_decl_reference resource;
     sh_model_reference model;
+    int movie; /* resource is a cooked UI movie file; bind writes its constructor name. */
 } sh_decl_native_reference;
 
 /* 1 resource, 0 native runtime/null identity, -1 unavailable. Only the verified
@@ -19,7 +20,8 @@ int sh_decl_native_reference_read(sh_decl_native_schema *schema,
     sh_decl_native_registry *registry, sh_decl_value_type type,
     const char *name, size_t length, sh_decl_native_reference *out);
 /* Return an owned field value for a new manager identity, retaining native
- * model dispatcher syntax. It does not establish that the resource is loaded. */
+ * model dispatcher syntax. A movie identity is written as the constructor name
+ * that derives exactly that cooked pair; it does not establish loading. */
 char *sh_decl_native_reference_bind(const sh_decl_native_reference *reference,
     const char *manager_name);
 void sh_decl_native_reference_clear(sh_decl_native_reference *reference);

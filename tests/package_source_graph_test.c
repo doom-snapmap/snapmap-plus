@@ -16,6 +16,7 @@
 #include "decl_script_schema.h"
 #include "model_binary.h"
 #include "font_binary.h"
+#include "package_movie.h"
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include "package_fixture.h"
@@ -2865,6 +2866,253 @@ static void test_strings(void)
     while (f.count) free(f.regions[--f.count].address);
 }
 
+static int resource_order(const void *a, const void *b)
+{ return strcmp(((const sh_compiled_resource *)a)->engine_path, ((const sh_compiled_resource *)b)->engine_path); }
+/* Cooked UI movie fixture: dictionary with one external material, one local
+ * atlas record and one font. No shapes, sprites or script bytes are needed. */
+typedef struct movie_bytes { unsigned char data[512]; size_t used; } movie_bytes;
+static void mv_put(movie_bytes *m, const void *p, size_t n)
+{ assert(n <= sizeof(m->data) - m->used); memcpy(m->data + m->used, p, n); m->used += n; }
+static void mv_zero(movie_bytes *m, size_t n)
+{ assert(n <= sizeof(m->data) - m->used); memset(m->data + m->used, 0, n); m->used += n; }
+static void mv_word(movie_bytes *m, unsigned n)
+{ unsigned char p[4] = {(unsigned char)(n >> 24), (unsigned char)(n >> 16), (unsigned char)(n >> 8), (unsigned char)n}; mv_put(m, p, 4); }
+static void mv_text(movie_bytes *m, const char *s)
+{ unsigned n = (unsigned)strlen(s); unsigned char p[4] = {(unsigned char)n, (unsigned char)(n >> 8), 0, 0};
+  mv_put(m, p, 4); mv_put(m, s, n); }
+static void mv_build(movie_bytes *m, const char *material, const char *font)
+{
+    m->used = 0; mv_word(m, 0x42535717); mv_zero(m, 22);
+    mv_zero(m, 2); mv_word(m, 0); mv_word(m, 0); mv_word(m, 0); mv_word(m, 0);
+    mv_word(m, 3);
+    mv_word(m, 1); mv_text(m, material); mv_zero(m, 32);
+    mv_word(m, 1); mv_text(m, ".atlas"); mv_zero(m, 32);
+    mv_word(m, 5); mv_text(m, font); mv_zero(m, 6); mv_word(m, 0);
+}
+typedef struct movie_source_fixture { int stock, fail; movie_bytes stock_movie; } movie_source_fixture;
+static int movie_original(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    movie_source_fixture *f = context; const char *text = NULL; const unsigned char *bytes = NULL;
+    static const unsigned char glyphs[14] = {'i','d','f','+',0,12,0,0,0,12,0,12,0,0};
+    static const unsigned char atlas[] = "stock atlas pixels";
+    size_t n = 0;
+    *body = NULL; *length = 0;
+    if (f->fail) return -1;
+    if (!strcmp(path, "generated/decls/renderparm/color.decl")) text = "{ Vec 0 }";
+    else if (!strcmp(path, "generated/decls/renderparm/landpagefile.decl")) text = "{ String }";
+    else if (f->stock && !strcmp(path, "generated/swf/stock/panel.bswf")) { bytes = f->stock_movie.data; n = f->stock_movie.used; }
+    else if (f->stock && !strcmp(path, "generated/swf/stock/panel.bimage")) { bytes = atlas; n = sizeof(atlas) - 1; }
+    else if (f->stock && !strcmp(path, "fonts/title/64_df.dat")) { bytes = glyphs; n = sizeof(glyphs); }
+    else if (f->stock && !strcmp(path, "generated/decls/material/fonts/title/64_df.tga.decl")) text = "{ color {1,0,0} }";
+    else if (f->stock && !strcmp(path, "generated/decls/material/gui/paint.decl")) text = "{ color {0,0,1} }";
+    else if (f->stock && !strcmp(path, "generated/decls/material/guisolid.decl")) text = "{ color {1,1,1} }";
+    else return 0;
+    if (text) { bytes = (const unsigned char *)text; n = strlen(text); }
+    *body = malloc(n + 1); assert(*body);
+    memcpy(*body, bytes, n); (*body)[n] = 0; *length = n; return 1;
+}
+static int movie_semantics(void *context, size_t scope, const char *family, const char *name,
+    unsigned char semantics[32], char *error, size_t capacity)
+{
+    (void)context; (void)scope; (void)name; (void)semantics; (void)error; (void)capacity;
+    /* Synthetic native state: every family here keeps its name when its exact
+     * original bytes and dependencies are retained. */
+    return 1;
+}
+static const sh_package_link_unit *movie_unit(const sh_package_link_inputs *inputs, size_t scope,
+    const char *family, const char *name, size_t *index)
+{
+    *index = sh_package_link_inputs_find(inputs, scope, family, name);
+    return *index < inputs->count ? inputs->units + *index : NULL;
+}
+static void test_movie_source_link(void)
+{
+    /* Extend a private reflection fixture: Entity gains an idSWF* field whose
+     * registered pointer reader is distinct from every resource reader. */
+    fixture storage; fixture *native = &storage; setup(native);
+    {
+        void *container = *(void **)native->reflection;
+        void *records = alloc(native, 21 * 0x38), *objects = alloc(native, 21 * 16), *pointers = alloc(native, 21 * 16);
+        memcpy(records, *(void **)((char *)container + 0x20), 20 * 0x38);
+        memcpy(objects, *(void **)((char *)native->reflection + 0x88), 20 * 16);
+        memcpy(pointers, *(void **)((char *)native->reflection + 0xa0), 20 * 16);
+        pointer(container, 0x20, records);
+        pointer(native->reflection, 0x88, objects); number(native->reflection, 0x90, 21);
+        pointer(native->reflection, 0xa0, pointers); number(native->reflection, 0xa8, 21);
+        pointer(records, 19 * 0x38, string(native, "idSWF")); pointer(records, 19 * 0x38 + 8, string(native, ""));
+        pointer(pointers, 19 * 16 + 8, (void *)0xa0);
+        const char *t[] = {"idDeclEntityDef", "OpaqueStringReader", "idDeclActorModifier", "idDeclSnapEditorEntity", "idRenderModel", "idImage", "idSWF"};
+        const char *o[] = {"*", "", "*", "*", "*", "*", "*"}, *n[] = {"target", "custom", "modifier", "preview", "model", "image", "gui"};
+        fields(native, (char *)records + 0x38, 7, t, o, n);
+    }
+    sh_decl_registry_source registry = {native, read_memory, (uintptr_t)native->registry, NULL};
+    static const unsigned char glyphs[14] = {'i','d','f','+',0,12,0,0,0,12,0,12,0,0};
+    static const char atlas_red[] = "red atlas pixels", atlas_green[] = "green atlas pixels";
+    const char *screen = "{ class = \"Entity\"; edit = { gui = \"swf/hud/panel.swf\"; } }";
+    movie_bytes m; mv_build(&m, "GUI/Paint", "Title");
+    sh_package_sources inventory = {0}; sh_compiled_resource files[4][6];
+    sh_package_compilation compiled[4] = {0};
+    const sh_package_compilation *scopes[] = {compiled, compiled + 1, compiled + 2, compiled + 3};
+    movie_source_fixture f = {0};
+    sh_package_source_link_native admission = {0}; admission.semantics = movie_semantics;
+    sh_package_link_output out = {0}; char error[1024];
+    for (size_t i = 0; i < 4; i++) {
+        memset(files[i], 0, sizeof(files[i]));
+        files[i][0] = link_decl("screen", "generated/decls/entitydef/screen.decl", screen);
+        files[i][1].engine_path = "generated/swf/hud/panel.bswf";
+        files[i][1].body = m.data; files[i][1].body_length = m.used; files[i][1].source = SIZE_MAX;
+        files[i][2].engine_path = "generated/swf/hud/panel.bimage";
+        files[i][2].body = (unsigned char *)(i == 1 ? atlas_green : atlas_red);
+        files[i][2].body_length = strlen(i == 1 ? atlas_green : atlas_red); files[i][2].source = SIZE_MAX;
+        files[i][3].engine_path = "fonts/title/64_df.dat";
+        files[i][3].body = (unsigned char *)glyphs; files[i][3].body_length = sizeof(glyphs); files[i][3].source = SIZE_MAX;
+        files[i][4] = link_decl("fonts/title/64_df.tga", "generated/decls/material/fonts/title/64_df.tga.decl",
+            i == 3 ? "{ color {0,1,0} }" : "{ color {1,0,0} }");
+        files[i][4].type = "material";
+        files[i][5] = link_decl("gui/paint", "generated/decls/material/gui/paint.decl", "{ color {0,0,1} }");
+        files[i][5].type = "material";
+        compiled[i].resources = files[i]; compiled[i].resource_count = 6; compiled[i].sources = &inventory;
+        /* Compilation lookup is ordered by engine path. */
+        qsort(files[i], 6, sizeof(files[i][0]), resource_order);
+    }
+    sh_package_source_link *source = sh_package_source_link_open(scopes, 4, NULL, movie_original, &f,
+        registry, (uintptr_t)native->reflection, &admission, error, sizeof(error));
+    if (!source) fprintf(stderr, "movie source capture: %s\n", error);
+    assert(source);
+    const sh_package_link_inputs *inputs = sh_package_source_link_inputs(source);
+    size_t movies[4], screens[4], fonts[4], paints[4];
+    for (size_t i = 0; i < 4; i++) {
+        const sh_package_link_unit *movie = movie_unit(inputs, i, "file", "generated/swf/hud/panel.bswf", movies + i);
+        assert(movie && movie->file_count == 2 && movie->file_identities);
+        /* Sorted members: the atlas image identity, then the primary movie. */
+        assert(!strcmp(movie->files[0]->engine_path, "generated/swf/hud/panel.bimage"));
+        assert(!strcmp(movie->file_identities[0].family, "image") &&
+            !strcmp(movie->file_identities[0].name, "generated/swf/hud/panel.bimage"));
+        assert(!movie->file_identities[1].family && !movie->file_identities[1].name);
+        assert(movie_unit(inputs, i, "font", "title", fonts + i) && movie_unit(inputs, i, "material", "gui/paint", paints + i));
+        assert(movie->implicit_count == 1 && !strcmp(movie->implicit[0].slot, "movie/font/title") &&
+            movie->implicit[0].target == fonts[i]);
+        assert(movie_unit(inputs, i, "entitydef", "screen", screens + i));
+    }
+    /* No fixed constructor material or fallback font exists in these scopes
+     * or their originals: native default behavior is retained, not borrowed. */
+    assert(sh_package_link_inputs_find(inputs, 0, "material", "guisolid") == SIZE_MAX);
+    assert(sh_package_link_inputs_find(inputs, 0, "font", "square721 cn tl") == SIZE_MAX);
+    sh_package_link_adapter adapter = {(void *)inputs, NULL, NULL, sh_package_native_names_assign};
+    adapter.assign_members = sh_package_native_names_assign_members;
+    int linked = sh_package_source_link_compile(source, &inventory, &adapter, NULL, NULL, &out, error, sizeof(error));
+    if (!linked) fprintf(stderr, "movie source compile: %s\n", error);
+    assert(linked);
+    /* Equal pairs share one binding; a changed atlas or a changed font
+     * material behind identical movie bytes each form their own variant. */
+    assert(out.classes.nodes[movies[0]] == out.classes.nodes[movies[2]]);
+    assert(out.classes.nodes[movies[0]] != out.classes.nodes[movies[1]]);
+    assert(out.classes.nodes[movies[0]] != out.classes.nodes[movies[3]]);
+    assert(out.classes.nodes[screens[0]] == out.classes.nodes[screens[2]]);
+    assert(out.classes.nodes[screens[1]] != out.classes.nodes[screens[0]] && out.classes.nodes[screens[3]] != out.classes.nodes[screens[0]]);
+    size_t movie_rows = 0;
+    for (size_t i = 0; i < out.implicit_count; i++)
+        if (out.implicit[i].owner == out.classes.nodes[movies[0]] || out.implicit[i].owner == out.classes.nodes[movies[1]]) {
+            assert(!strcmp(out.implicit[i].slot, "movie/font/title")); movie_rows++;
+        }
+    assert(movie_rows == 2);
+    for (size_t i = 0; i < 4; i++) {
+        const char *movie_name = out.names[out.classes.nodes[movies[i]]];
+        sh_package_movie_names names;
+        assert(!strncmp(movie_name, "generated/swf/smp/", 18) && sh_package_movie_names_for_path(movie_name, &names) == 1);
+        const sh_compiled_resource *cooked = sh_package_compilation_find(out.compiled, names.movie);
+        const sh_compiled_resource *pixels = sh_package_compilation_find(out.compiled, names.atlas);
+        assert(cooked && pixels && cooked->body && pixels->body);
+        assert(pixels->body_length == strlen(i == 1 ? atlas_green : atlas_red));
+        /* The dictionary material follows its scoped binding; the font record
+         * keeps its original name for the native language resolver. */
+        const char *paint = out.names[out.classes.nodes[paints[i]]];
+        char needle[128]; int material_found = 0, font_found = 0;
+        snprintf(needle, sizeof(needle), "%s", paint);
+        for (size_t j = 0; j + strlen(needle) <= cooked->body_length; j++)
+            if (!memcmp(cooked->body + j, needle, strlen(needle))) material_found = 1;
+        for (size_t j = 0; j + 5 <= cooked->body_length; j++)
+            if (!memcmp(cooked->body + j, "Title", 5)) font_found = 1;
+        assert(material_found && font_found);
+        /* The entity field names a constructor spelling that derives the pair. */
+        const char *entity = out.names[out.classes.nodes[screens[i]]];
+        char path[512]; snprintf(path, sizeof(path), "generated/decls/entitydef/%s.decl", entity);
+        const sh_compiled_resource *decl = sh_package_compilation_find(out.compiled, path);
+        assert(decl && decl->body);
+        char expected[300]; snprintf(expected, sizeof(expected), "gui = \"%s\";", names.consumer);
+        assert(strstr((const char *)decl->body, expected));
+    }
+    sh_package_link_output_free(&out); sh_package_source_link_close(source);
+
+    /* Exact installed originals keep their native names and field spelling. */
+    f.stock = 1; f.stock_movie = m;
+    {
+        const char *stock = "{ class = \"Entity\"; edit = { gui = \"stock/panel\"; } }";
+        sh_compiled_resource only = link_decl("stock-screen", "generated/decls/entitydef/stock-screen.decl", stock);
+        compiled[0].resources = &only; compiled[0].resource_count = 1;
+        source = sh_package_source_link_open(scopes, 1, NULL, movie_original, &f,
+            registry, (uintptr_t)native->reflection, &admission, error, sizeof(error));
+        if (!source) fprintf(stderr, "stock movie capture: %s\n", error);
+        assert(source); inputs = sh_package_source_link_inputs(source);
+        size_t stock_movie, fixed;
+        const sh_package_link_unit *movie = movie_unit(inputs, 0, "file", "generated/swf/stock/panel.bswf", &stock_movie);
+        assert(movie && movie->file_count == 2 && movie->implicit_count == 2);
+        assert(movie_unit(inputs, 0, "material", "guisolid", &fixed));
+        adapter.context = (void *)inputs;
+        assert(sh_package_source_link_compile(source, &inventory, &adapter, NULL, NULL, &out, error, sizeof(error)));
+        assert(!strcmp(out.names[out.classes.nodes[stock_movie]], "generated/swf/stock/panel.bswf"));
+        size_t screen_index = sh_package_link_inputs_find(inputs, 0, "entitydef", "stock-screen");
+        const char *entity = out.names[out.classes.nodes[screen_index]];
+        char path[512]; snprintf(path, sizeof(path), "generated/decls/entitydef/%s.decl", entity);
+        const sh_compiled_resource *decl = sh_package_compilation_find(out.compiled, path);
+        assert(!decl || strstr((const char *)decl->body, "gui = \"stock/panel\";"));
+        sh_package_link_output_free(&out); sh_package_source_link_close(source);
+        /* A delivered half pair cannot construct. */
+        sh_compiled_resource half[2] = {only, files[0][0]};
+        half[1].engine_path = "generated/swf/stock/panel.bswf"; half[1].type = NULL; half[1].name = NULL;
+        half[1].body = m.data; half[1].body_length = m.used; half[1].source = SIZE_MAX;
+        compiled[0].resources = half; compiled[0].resource_count = 2;
+        qsort(half, 2, sizeof(half[0]), resource_order);
+        f.stock = 0;
+        source = sh_package_source_link_open(scopes, 1, NULL, movie_original, &f,
+            registry, (uintptr_t)native->reflection, &admission, error, sizeof(error));
+        assert(!source && strstr(error, "atlas must both be available"));
+        /* I/O failure is never treated as positive absence. */
+        f.stock = 1; f.fail = 1; compiled[0].resources = &only; compiled[0].resource_count = 1;
+        source = sh_package_source_link_open(scopes, 1, NULL, movie_original, &f,
+            registry, (uintptr_t)native->reflection, &admission, error, sizeof(error));
+        assert(!source && strstr(error, "could not be captured"));
+        f.fail = 0;
+        /* A valid graph is not an installed constructor route. */
+        sh_package_library_native production = sh_package_native_assets_adapter(NULL);
+        source = sh_package_source_link_open(scopes, 1, NULL, movie_original, &f,
+            registry, (uintptr_t)native->reflection, &production.source, error, sizeof(error));
+        assert(!source && strstr(error, "UI movie native consumer adapter is not configured"));
+    }
+    f.stock = 0;
+    {
+        /* The shared schema recognizes the registered movie reader. */
+        sh_decl_native_registry *r = sh_decl_native_registry_open(registry, error, sizeof(error));
+        sh_decl_native_schema *schema = sh_decl_native_schema_open(
+            (sh_decl_native_source){native, read_memory, (uintptr_t)native->reflection},
+            (sh_decl_dependency_observer){0}, error, sizeof(error));
+        sh_decl_native_reference reference = {0}; char *bound;
+        assert(r && schema);
+        assert(sh_decl_native_schema_reader(schema, (sh_decl_value_type){"idSWF", "*"}) == SH_DECL_READER_MOVIE);
+        assert(sh_decl_native_schema_reader(schema, (sh_decl_value_type){"idSWF", ""}) == SH_DECL_READER_UNKNOWN);
+        assert(sh_decl_native_reference_read(schema, r, (sh_decl_value_type){"idSWF", "*"}, "Hud\\Panel.swf", 13, &reference) == 1);
+        assert(reference.movie && !strcmp(reference.resource.type, "file") &&
+            !strcmp(reference.resource.name, "generated/swf/hud/panel.bswf"));
+        bound = sh_decl_native_reference_bind(&reference, "generated/swf/smp/0123456789abcdef.bswf");
+        assert(bound && !strcmp(bound, "swf/smp/0123456789abcdef.swf")); free(bound);
+        assert(!sh_decl_native_reference_bind(&reference, "generated/swf/a.bimage/b.bswf"));
+        assert(sh_decl_native_reference_read(schema, r, (sh_decl_value_type){"idSWF", "*"}, "", 0, &reference) == 0 && !reference.resource.name);
+        assert(sh_decl_native_reference_read(schema, r, (sh_decl_value_type){"idSWF", "*"}, "swf/a.bimage/b.swf", 18, &reference) == -1);
+        sh_decl_native_reference_clear(&reference);
+        sh_decl_native_registry_close(r); sh_decl_native_schema_close(schema);
+    }
+    while (native->count) free(native->regions[--native->count].address);
+}
 int main(void)
 {
     fixture f;
@@ -2888,6 +3136,7 @@ int main(void)
     test_implicit_source_link(&f, registry);
     test_font_source_link(&f, registry);
     test_font_library(&f, registry);
+    test_movie_source_link();
     test_map_occurrences(&f, registry);
     test_library(&f, registry);
     test_library_hud();
