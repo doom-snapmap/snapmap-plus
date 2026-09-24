@@ -30,6 +30,7 @@ typedef struct sl_unit {
     int material_members;
     sl_implicit *implicit;
     size_t implicit_count;
+    size_t reverse_gap; /* Observation only: 1 + index of its accounted reader gap. */
 } sl_unit;
 typedef struct sl_original {
     sh_compiled_resource resource;
@@ -53,6 +54,9 @@ struct sh_package_source_link {
     int frozen, failed, observe;
     char *error;
     size_t error_capacity;
+    sh_package_reverse_gap *reverse_gaps;
+    size_t reverse_gap_count, reverse_gap_capacity;
+    int reader_gap; /* The last discovery stopped in a registered reader, not I/O. */
 };
 
 static uint64_t sl_hash_text(uint64_t hash, const char *text)
@@ -65,6 +69,17 @@ static uint64_t sl_unit_hash(size_t scope, const char *family, const char *name)
 static int sl_fail(sh_package_source_link *s, const char *reason, const char *name)
 {
     s->failed = 1;
+    if (s->error && s->error_capacity && !*s->error)
+        snprintf(s->error, s->error_capacity, "%s%s%s", reason, name ? ": " : "", name ? name : "");
+    return 0;
+}
+/* Missing product coverage for a source that was read successfully. Ordinary
+ * linking still refuses it. Reverse observation of stock roots accounts it as
+ * a gap in that root instead; only I/O and allocation failures stay fatal. */
+static int sl_gap_fail(sh_package_source_link *s, const char *reason, const char *name)
+{
+    if (!s->observe) return sl_fail(s, reason, name);
+    s->reader_gap = 1;
     if (s->error && s->error_capacity && !*s->error)
         snprintf(s->error, s->error_capacity, "%s%s%s", reason, name ? ": " : "", name ? name : "");
     return 0;
@@ -197,7 +212,9 @@ static int sl_source_file(sh_package_source_link *s, size_t scope_index,
     else {
         sl_original *original = sl_original_get(s, key);
         if (original && original->status == 2) {
-            if (optional) result = 0;
+            /* Campaign-only data is absent from SnapMap. Reverse observation
+             * treats that like any proven absence: a boundary, not admission. */
+            if (optional || s->observe) result = 0;
             else sl_fail(s, "campaign dependency is absent from its authored scope", key);
         } else if (original && original->status > 0) { *out = &original->resource; result = 1; }
         else if (original && !original->status) result = 0;
@@ -254,7 +271,7 @@ static int sl_shader_collect_path(void *context, sh_package_shader_path_kind kin
         if (kind == SH_PACKAGE_SHADER_BINARY) walk->cooked = status;
         return status >= 0;
     }
-    if (status != 1) return status < 0 ? 0 : sl_fail(s, "required shader companion is absent", original);
+    if (status != 1) return status < 0 ? 0 : sl_gap_fail(s, "required shader companion is absent", original);
     const sh_compiled_resource *file = NULL;
     for (size_t i = 0; i < unit->unit.file_count; i++) if (!strcmp(unit->unit.files[i]->engine_path, original)) {
         file = unit->unit.files[i]; break;
@@ -291,7 +308,7 @@ static int sl_shader_files(sh_package_source_link *s, sl_unit *unit)
     if (!probe.declaration && !probe.cooked) {
         int status = s->native.admit ? s->native.admit(s->native.context, unit->scope,
             unit->unit.family, unit->unit.name, unit->unit.semantics, s->error, s->error_capacity) : 0;
-        if (status != 1) return sl_fail(s, "source-free shader has no verified native admission", unit->unit.name);
+        if (status != 1) return sl_gap_fail(s, "source-free shader has no verified native admission", unit->unit.name);
         unit->unit.original_binding = 1; return 1;
     }
     if (probe.declaration == 1 && !probe.cooked && s->native.shader->program) {
@@ -302,7 +319,7 @@ static int sl_shader_files(sh_package_source_link *s, sl_unit *unit)
         free(declaration); free(binary); sh_package_shader_program_clear(&decoded);
     }
     if (probe.declaration != 1 || probe.cooked != 1)
-        return sl_fail(s, "shader declaration and selected renderer binary must both be supplied", unit->unit.name);
+        return sl_gap_fail(s, "shader declaration and selected renderer binary must both be supplied", unit->unit.name);
     if (sl_shader_program_add(s, unit, unit->unit.name, SIZE_MAX, 0) == SIZE_MAX) return 0;
     for (size_t p = 0; p < unit->program_count; p++) {
         unsigned char *declaration = NULL, *binary = NULL; size_t declaration_length = 0, binary_length = 0;
@@ -636,7 +653,7 @@ static int sl_font_capture(sh_package_source_link *s, sl_unit *unit)
     sh_package_font_member members[3] = {0}; size_t count = unit->unit.file_count;
     sl_discover walk = {s, unit}; int ok = 0;
     if (!count && s->observe) return 1;
-    if (!count || count > 3) return sl_fail(s, "font has invalid captured glyph forms", unit->unit.name);
+    if (!count || count > 3) return sl_gap_fail(s, "font has invalid captured glyph forms", unit->unit.name);
     for (size_t i = 0; i < count; i++) {
         members[i].path = unit->unit.files[i]->engine_path;
         members[i].body = sh_package_compilation_read(unit->unit.compilation, unit->unit.files[i],
@@ -644,13 +661,17 @@ static int sl_font_capture(sh_package_source_link *s, sl_unit *unit)
         if (!members[i].body) goto done;
     }
     ok = sh_package_font_capture(unit->unit.name, members, count, sl_font_material, &walk, s->error, s->error_capacity);
+    if (!ok && !s->failed) s->reader_gap = 1;
 done:
     for (size_t i = 0; i < count; i++) free((void *)members[i].body);
     return ok;
 }
 static int sl_discover_unit(sh_package_source_link *s, sl_unit *unit)
 {
-    if (!sl_files(s, unit)) return 0;
+    if (!sl_files(s, unit)) {
+        if (s->observe && !s->failed) s->reader_gap = 1;
+        return 0;
+    }
     for (size_t j = 0; j < unit->unit.file_count; j++) {
         size_t length = 0, bound_length = 0;
         unsigned char *body = sh_package_compilation_read(unit->unit.compilation, unit->unit.files[j],
@@ -659,6 +680,7 @@ static int sl_discover_unit(sh_package_source_link *s, sl_unit *unit)
         if (body) bound = sl_bind_member(s, unit, unit->unit.files[j],
             body, length, sl_reference, &walk, &bound_length, s->error, s->error_capacity);
         int ok = body && bound && length == bound_length && !memcmp(body, bound, length) && !s->failed;
+        if (!ok && body && !bound && !s->failed) s->reader_gap = 1;
         free(body); free(bound);
         if (!ok) return 0;
     }
@@ -676,6 +698,46 @@ static int sl_reverse_leaf(const char *family)
 {
     return !strcmp(family, "image") || !strcmp(family, "skeleton") || !strcmp(family, "cm") ||
         !strcmp(family, "aas") || !strcmp(family, "binaryfile") || !strcmp(family, "md6rig");
+}
+/* Account one reverse-discovery coverage gap. scope is SIZE_MAX for the stock
+ * unit whose reader stopped, or the discovery scope whose changed dependency
+ * reaches an incompletely read stock root. Owned copies survive the walk. */
+static int sl_reverse_gap_add(sh_package_source_link *s, size_t scope, const sl_unit *unit, const char *reason)
+{
+    for (size_t i = 0; i < s->reverse_gap_count; i++) {
+        const sh_package_reverse_gap *gap = s->reverse_gaps + i;
+        if (gap->scope == scope && !strcmp(gap->family, unit->unit.family) && !strcmp(gap->name, unit->unit.name)) return 1;
+    }
+    if (s->reverse_gap_count == s->reverse_gap_capacity) {
+        size_t next = s->reverse_gap_capacity ? s->reverse_gap_capacity * 2 : 16;
+        sh_package_reverse_gap *grown = next > s->reverse_gap_capacity && next <= SIZE_MAX / sizeof(*grown) ?
+            realloc(s->reverse_gaps, next * sizeof(*grown)) : NULL;
+        if (!grown) return sl_fail(s, "cannot account reverse discovery coverage", unit->unit.name);
+        s->reverse_gaps = grown; s->reverse_gap_capacity = next;
+    }
+    sh_package_reverse_gap gap = {scope, _strdup(unit->unit.family), _strdup(unit->unit.name),
+        _strdup(reason && *reason ? reason : "reader coverage is incomplete")};
+    if (!gap.family || !gap.name || !gap.reason) {
+        free((char *)gap.family); free((char *)gap.name); free((char *)gap.reason);
+        return sl_fail(s, "cannot account reverse discovery coverage", unit->unit.name);
+    }
+    s->reverse_gaps[s->reverse_gap_count++] = gap; return 1;
+}
+/* First incompletely read unit reachable from root, for attribution only. */
+static const sl_unit *sl_reverse_gap_reached(sh_package_source_link *base, size_t root, unsigned char *seen, size_t *stack)
+{
+    const sl_unit *found = NULL; size_t depth = 0;
+    memset(seen, 0, base->count);
+    stack[depth++] = root; seen[root] = 1;
+    while (depth && !found) {
+        const sl_unit *unit = base->units[stack[--depth]];
+        if (unit->reverse_gap) { found = unit; break; }
+        for (size_t d = 0; d < unit->dependency_count; d++) {
+            size_t next = unit->dependencies[d]->index;
+            if (!seen[next]) { seen[next] = 1; stack[depth++] = next; }
+        }
+    }
+    return found;
 }
 typedef struct sl_reverse_native { sh_package_source_link *source; size_t baseline; } sl_reverse_native;
 static int sl_reverse_admit(void *context, size_t scope, const char *family, const char *name,
@@ -728,7 +790,8 @@ static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_r
     sh_package_source_link *base = NULL;
     sh_package_link_node *nodes = NULL;
     sh_package_link_edge *edges = NULL;
-    unsigned char *local = NULL, *unchanged = NULL;
+    unsigned char *local = NULL, *unchanged = NULL, *complete = NULL, *seen = NULL;
+    size_t *stack = NULL;
     size_t roots = 0, edge_count = 0, at = 0;
     int needed = 0, ok = 0;
     sh_package_compilation empty = {0};
@@ -778,20 +841,38 @@ static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_r
     roots = base->count;
     for (size_t i = 0; i < base->count; i++) {
         sl_unit *unit = base->units[i];
-        if (!sl_reverse_leaf(unit->unit.family) && !sl_discover_unit(base, unit)) goto done;
+        base->reader_gap = 0;
+        if (!sl_reverse_leaf(unit->unit.family) && !sl_discover_unit(base, unit)) {
+            /* Unreadable originals, allocation and constructor capture failures
+             * stop discovery. A stock source beyond the registered readers is a
+             * product coverage gap in that root, not in an unrelated package:
+             * account it, keep its proven edges and never nominate across it. */
+            char reason[768];
+            if (base->failed || !base->reader_gap) goto done;
+            snprintf(reason, sizeof(reason), "%s", s->error && *s->error ? s->error : "");
+            if (s->error && s->error_capacity) *s->error = 0;
+            if (!sl_reverse_gap_add(s, SIZE_MAX, unit, reason)) goto done;
+            unit->reverse_gap = s->reverse_gap_count;
+        }
         if (unit->dependency_count > SIZE_MAX - edge_count) goto done;
         edge_count += unit->dependency_count;
     }
-    if (base->count > SIZE_MAX / sizeof(*nodes) || edge_count > SIZE_MAX / sizeof(*edges)) goto done;
+    if (base->count > SIZE_MAX / sizeof(*nodes) || base->count > SIZE_MAX / sizeof(*stack) ||
+        edge_count > SIZE_MAX / sizeof(*edges)) goto done;
     nodes = calloc(base->count ? base->count : 1, sizeof(*nodes));
     edges = calloc(edge_count ? edge_count : 1, sizeof(*edges));
     local = malloc(base->count ? base->count : 1); unchanged = malloc(base->count ? base->count : 1);
-    if (!nodes || !edges || !local || !unchanged) goto done;
+    complete = malloc(base->count ? base->count : 1); seen = malloc(base->count ? base->count : 1);
+    stack = malloc((base->count ? base->count : 1) * sizeof(*stack));
+    if (!nodes || !edges || !local || !unchanged || !complete || !seen || !stack) goto done;
     for (size_t i = 0; i < base->count; i++) {
         const sl_unit *unit = base->units[i];
         nodes[i].edges = edges + at; nodes[i].edge_count = unit->dependency_count;
         for (size_t j = 0; j < unit->dependency_count; j++) edges[at++].target = unit->dependencies[j]->index;
+        local[i] = !unit->reverse_gap;
     }
+    /* A root is completely observed only when no reachable unit stopped early. */
+    if (!sh_package_link_originals(nodes, base->count, local, complete, s->error, s->error_capacity)) goto done;
     for (size_t scope = 0; scope < s->scope_count; scope++) if (plan->discover[scope]) {
         memset(local, 1, base->count);
         for (size_t i = 0; i < base->count; i++)
@@ -801,6 +882,15 @@ static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_r
         if (!sh_package_link_originals(nodes, base->count, local, unchanged, s->error, s->error_capacity)) goto done;
         for (size_t i = 0; i < roots; i++) if (!unchanged[i]) {
             const sl_unit *unit = base->units[i];
+            if (!complete[i]) {
+                /* This scope changes a stock entry whose remaining closure the
+                 * readers cannot bind faithfully. Expose no guessed variant;
+                 * attribute the missing coverage to this scope and continue. */
+                const sl_unit *gap = sl_reverse_gap_reached(base, i, seen, stack);
+                if (!sl_reverse_gap_add(s, scope, unit, gap && gap->reverse_gap ?
+                    s->reverse_gaps[gap->reverse_gap - 1].reason : NULL)) goto done;
+                continue;
+            }
             if (!sl_find(s, scope, unit->unit.family, unit->unit.name, 1) ||
                 !sl_find(s, plan->baseline_scope, unit->unit.family, unit->unit.name, 1)) goto done;
         }
@@ -813,7 +903,8 @@ done:
             "baseline palette reverse dependency coverage is incomplete: %s", detail);
         s->failed = 1;
     }
-    free(nodes); free(edges); free(local); free(unchanged); sh_package_source_link_close(base); return ok;
+    free(nodes); free(edges); free(local); free(unchanged); free(complete); free(seen); free(stack);
+    sh_package_source_link_close(base); return ok;
 }
 static int sl_unit_order(const void *a, const void *b)
 {
@@ -884,8 +975,19 @@ void sh_package_source_link_close(sh_package_source_link *s)
     for (size_t i = 0; i < s->original_count; i++) {
         free((void *)s->originals[i]->resource.engine_path); free(s->originals[i]->resource.body); free(s->originals[i]);
     }
+    for (size_t i = 0; i < s->reverse_gap_count; i++) {
+        free((char *)s->reverse_gaps[i].family); free((char *)s->reverse_gaps[i].name);
+        free((char *)s->reverse_gaps[i].reason);
+    }
+    free(s->reverse_gaps);
     free(s->originals); free(s->original_slots); free(s->units); free(s->unit_slots);
     free(s->inputs.units); free(s->inputs.scopes); free(s->readers); free(s->scopes); free(s->shared); free(s);
+}
+size_t sh_package_source_link_reverse_gaps(const sh_package_source_link *source,
+    const sh_package_reverse_gap **gaps)
+{
+    if (gaps) *gaps = source ? source->reverse_gaps : NULL;
+    return source ? source->reverse_gap_count : 0;
 }
 sh_package_source_link *sh_package_source_link_open_roots(const sh_package_compilation *const *scopes, size_t count,
     const sh_resource_catalog *catalog, sh_package_baseline_reader original, void *original_context,

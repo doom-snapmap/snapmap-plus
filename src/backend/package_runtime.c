@@ -70,6 +70,7 @@ typedef struct pr_provider {
     struct pr_provider *parent;
     char *data_root;
     char *rejections;
+    char *coverage; /* Accounted missing product coverage; packages still served. */
     volatile LONG references;
 } pr_provider;
 typedef struct pr_occurrence_lease {
@@ -176,7 +177,8 @@ static void pr_release(pr_provider *provider)
         sh_audio_originals_close(provider->audio_originals);
         sh_package_native_assets_close(provider->native_assets);
     }
-    pr_release(provider->parent); free(provider->data_root); free(provider->rejections); free(provider);
+    pr_release(provider->parent); free(provider->data_root); free(provider->rejections);
+    free(provider->coverage); free(provider);
 }
 
 static void pr_publish(pr_provider *current, pr_provider *library, pr_provider *map)
@@ -1095,6 +1097,8 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
 #endif
     provider->references = 1;
     provider->rejections = rejections; rejections = NULL;
+    provider->coverage = isolated.coverage; isolated.coverage = NULL;
+    if (provider->coverage) backend_log(provider->coverage);
     sources = NULL; compiled = NULL; catalog = NULL;
 done:
     if (!provider) snprintf(out_error, out_capacity, "%s", error[0] ? error : "package compilation could not be prepared");
@@ -3130,8 +3134,9 @@ char *sh_package_runtime_summary(void)
     char *text;
     AcquireSRWLockShared(&g_lock);
     const char *rejections = g_library_provider ? g_library_provider->rejections : NULL;
+    const char *coverage = g_library_provider ? g_library_provider->coverage : NULL;
     capacity = 4096 + (g_sources ? g_sources->package_count : 0) * 1024 +
-        (rejections ? strlen(rejections) : 0);
+        (rejections ? strlen(rejections) : 0) + (coverage ? strlen(coverage) : 0);
     text = (char *)calloc(capacity, 1);
     if (!text) goto done;
     length += (size_t)snprintf(text + length, capacity - length, "Installed library: %zu packages.\n",
@@ -3139,6 +3144,7 @@ char *sh_package_runtime_summary(void)
     if (rejections) length += (size_t)snprintf(text + length, capacity - length, "%s%s", rejections,
         "Skipped packages stay unchanged on disk. Packages made for earlier Snapmap+ releases can be "
         "converted: close DOOM and run snapmap-plus migrate-overrides.\n");
+    if (coverage) length += (size_t)snprintf(text + length, capacity - length, "%s", coverage);
     if (g_authoring_error[0]) length += (size_t)snprintf(text + length, capacity - length,
         "Local authoring composition unavailable: %s\nIndependent map packages can still compile.\n", g_authoring_error);
     if (!g_ready) length += (size_t)snprintf(text + length, capacity - length,

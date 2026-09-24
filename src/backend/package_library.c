@@ -233,7 +233,51 @@ void sh_package_library_free(sh_package_library *library)
     sh_package_compilation_free(library->compiled);
     sh_virtual_material_runtime_retire(&library->virtual_materials);
     sh_package_consumers_free(library->consumers);
+    free(library->coverage);
     sh_package_provenance_free(&library->bindings); memset(library, 0, sizeof(*library));
+}
+
+/* Describe accounted reverse-discovery gaps with their supplying delivery. The
+ * stock summary is one line; each affected scope names its package. */
+static int pl_coverage(const pl_build *b, const sh_package_sources *sources, char **out)
+{
+    const sh_package_reverse_gap *gaps = NULL;
+    size_t count = sh_package_source_link_reverse_gaps(b->reader, &gaps), stock = 0, capacity = 0;
+    const sh_package_reverse_gap *first = NULL;
+    char *text = NULL;
+    *out = NULL;
+    for (size_t i = 0; i < count; i++) if (gaps[i].scope == SIZE_MAX) { stock++; if (!first) first = gaps + i; }
+    /* Measure, then write the identical text. */
+    for (size_t pass = 0; count && pass < 2; pass++) {
+        size_t used = 0;
+        if (first) {
+            int n = snprintf(text ? text + used : NULL, text ? capacity - used : 0,
+                "Toybox variant discovery skipped %zu stock SnapMap resource%s whose format is not yet supported; "
+                "package edits reachable only through them add no variant (first: %s %s: %s).\n",
+                stock, stock == 1 ? "" : "s", first->family, first->name, first->reason);
+            if (n < 0) return 0;
+            used += (size_t)n;
+        }
+        for (size_t i = 0; i < count; i++) if (gaps[i].scope != SIZE_MAX) {
+            const char *label = "map source", *id = "";
+            if (!b->contexts && gaps[i].scope < sources->component_count) {
+                const sh_package_component *component = sources->components + gaps[i].scope;
+                label = component->descriptor.name[0] ? component->descriptor.name :
+                    sources->packages[component->owner].name;
+                id = component->descriptor.id;
+            }
+            int n = snprintf(text ? text + used : NULL, text ? capacity - used : 0,
+                "%s%s%s%s: no toybox variant for stock %s %s because its format is not yet supported (%s).\n",
+                label, *id ? " [" : "", id, *id ? "]" : "", gaps[i].family, gaps[i].name, gaps[i].reason);
+            if (n < 0) return 0;
+            used += (size_t)n;
+        }
+        if (!pass) {
+            if (used == SIZE_MAX || !(text = malloc(used + 1))) return 0;
+            capacity = used + 1; *text = 0;
+        }
+    }
+    *out = text; return 1;
 }
 
 /* Policy and product defaults have their own view. Peer declaration bytes are
@@ -1201,7 +1245,11 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         b.count, catalog, original, original_context, registry, reflection, &source_native,
         &root_plan, error, capacity);
     free(discover);
-    if (!b.reader || !pl_contributions_open(&b, sources, error, capacity)) goto done;
+    if (!b.reader) goto done;
+    if (!pl_coverage(&b, sources, &out->coverage)) {
+        snprintf(error, capacity, "cannot account package coverage"); goto done;
+    }
+    if (!pl_contributions_open(&b, sources, error, capacity)) goto done;
     if (contexts && !pl_document_shared(&b, original, original_context, error, capacity)) goto done;
     /* Authored documents carry their own selector/inspector behavior. Changed
      * editor units receive ordinary bound aliases just like their gameplay
