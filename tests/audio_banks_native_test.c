@@ -279,6 +279,23 @@ static sh_audio_parameter_node *program_parameter_ensure(sh_audio_parameter_tabl
 }
 static void program_parameter_destroy(sh_audio_parameter_node *node)
 {CHECK(ap_idle(node));}
+/* Native publication consumes a bound program. Originals keep their authored
+ * ABI; each distinct private binding receives a fresh fixture identity. */
+typedef struct native_assigned { unsigned domain; unsigned char key[32]; uint32_t id; } native_assigned;
+static native_assigned g_native_assigned[64];
+static size_t g_native_assigned_count;
+static int native_program_assign(void *context,const sh_audio_link_graph *graph,size_t node,
+    sh_audio_identity_domain domain,uint32_t authored,const unsigned char binding[32],int original,int absent,
+    uint32_t *id,char *error,size_t capacity)
+{
+    (void)context;(void)graph;(void)node;(void)absent;(void)error;(void)capacity;
+    if(original){*id=authored;return 1;}
+    for(size_t i=0;i<g_native_assigned_count;i++)if(g_native_assigned[i].domain==(unsigned)domain &&
+        !memcmp(g_native_assigned[i].key,binding,32)){*id=g_native_assigned[i].id;return 1;}
+    if(g_native_assigned_count==64)return 0;
+    native_assigned *row=g_native_assigned+g_native_assigned_count;row->domain=(unsigned)domain;
+    memcpy(row->key,binding,32);*id=row->id=200000+(uint32_t)g_native_assigned_count++;return 1;
+}
 static void compiled_playback_settings(void)
 {
     unsigned char bank[2][224]={{0},{0}};char error[512];sh_compiled_resource files[2]={{0},{0}};
@@ -311,6 +328,11 @@ static void compiled_playback_settings(void)
     int prepared=sh_package_audio_program_prepare(program,error,sizeof(error));
     if(!prepared)fprintf(stderr,"playback program: %s\n",error);
     CHECK(prepared);if(!prepared){sh_package_audio_program_close(program);sh_audio_originals_close(originals);return;}
+    /* Unbound programs have no publishable shared view. */
+    CHECK(!sh_package_audio_program_bound_shared(program));
+    sh_package_compilation bound_output={0};
+    CHECK(sh_package_audio_program_bind(program,&bound_output,native_program_assign,NULL,error,sizeof(error)));
+    CHECK(sh_package_audio_program_bound_shared(program)!=NULL);
     playback=(sh_audio_limits_value){-48,0.003f,0,1,64};sh_audio_limits_value before=playback;
     CRITICAL_SECTION lock;InitializeCriticalSection(&lock);void *manager=&playback;
     g_limits=(sh_audio_limits_native){playback_threshold,playback_voices,&playback.threshold,&playback.amplitude,

@@ -70,6 +70,14 @@ int sh_package_audio_program_bus_policy_owners(const sh_package_audio_program *p
 const sh_audio_shared_policy *sh_package_audio_program_shared(const sh_package_audio_program *program);
 int sh_package_audio_program_shared_origin(const sh_package_audio_program *program,
     size_t input, size_t *scope, size_t *bank, int *baseline);
+/* Available after bind: the same settings with private references (such as a
+ * switch's modulator) relocated by the committed transaction. Native
+ * publication consumes this view; failed binds preserve the previous one. */
+const sh_audio_shared_policy *sh_package_audio_program_bound_shared(const sh_package_audio_program *program);
+/* Delivery owners of an edited setting: every equivalent authored contributor
+ * plus its private dependency suppliers. Baseline-equal settings own nothing. */
+int sh_package_audio_program_shared_owners(const sh_package_audio_program *program,
+    size_t setting, const sh_package_owners **owners, const sh_package_owners **gameplay);
 /* Identity includes exact resolved HIRC/media behavior. Equal digest roots are
  * checked with the graph's exact partition before being returned to the outer
  * compiler. A sound must have been collected before prepare. */

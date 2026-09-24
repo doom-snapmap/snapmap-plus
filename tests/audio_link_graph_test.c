@@ -566,10 +566,113 @@ static void reservation_growth(void)
     for (size_t i = 0; i < count; i++) sh_audio_bank_codec_free(&files[i].codec);
     free(scopes); free(files);
 }
+/* A modulator-driven STMG switch names a private HIRC object. Equal cooked
+ * bytes whose modulators differ are different shared values; exact copies
+ * dedupe, originals certify, and binding relocates only the modulator. */
+static void switch_bank(fixture *f, uint32_t bank_id, unsigned tone, unsigned type)
+{
+    memset(f, 0, sizeof(*f)); bytes *b = &f->bank;
+    chunk(b, "BKHD", 16); put(b, 113, 4); put(b, bank_id, 4); zero(b, 8);
+    chunk(b, "HIRC", 22); put(b, 1, 4);
+    put(b, 22, 1); put(b, 13, 4); put(b, 555, 4); put(b, 1, 1); put(b, 7, 1); put(b, tone, 4); zero(b, 1); zero(b, 2);
+    chunk(b, "STMG", 43); put(b, 0, 4); put(b, 64, 2); zero(b, 4); put(b, 1, 4);
+    put(b, 700, 4); put(b, 555, 4); put(b, type, 1); put(b, 1, 4); zero(b, 4); put(b, 3, 4); put(b, 4, 4);
+    zero(b, 4);
+    char error[512]; assert(sh_audio_bank_codec_read(source(b), &f->codec, error, sizeof(error)) == 1);
+    f->input = (sh_audio_graph_bank){"sound/init.bnk", source(b), &f->codec, 0};
+}
+static size_t switch_record(const fixture *f)
+{
+    for (size_t i = 0; i < f->codec.shared_record_count; i++)
+        if (f->codec.shared_records[i].kind == SH_AUDIO_SHARED_SWITCH) return i;
+    assert(0); return SIZE_MAX;
+}
+static uint32_t bound_controller(sh_audio_link_graph *g, size_t scope_id, const fixture *f)
+{
+    unsigned char *body = NULL; size_t length = 0; char error[512];
+    assert(sh_audio_link_graph_shared_value(g, scope_id, 0, switch_record(f), 1, &body, &length, error, sizeof(error)));
+    assert(length == 25); uint32_t controller = u32(body + 4); free(body); return controller;
+}
+static void shared_switch_modulators(void)
+{
+    fixture a, b, copy, native; char error[512];
+    switch_bank(&a, 42, 1, 2); switch_bank(&b, 42, 2, 2); switch_bank(&copy, 42, 1, 2); switch_bank(&native, 42, 1, 2);
+    native.input.original = 1;
+    int private_controller = 0;
+    for (size_t i = 0; i < a.codec.span_count; i++)
+        if (a.codec.spans[i].value == 555 && a.codec.spans[i].domain == SH_AUDIO_ID_MODULATOR &&
+            !(a.codec.spans[i].flags & (SH_AUDIO_ID_SHARED | SH_AUDIO_ID_DEFINITION))) private_controller = 1;
+    assert(private_controller);
+    sh_audio_graph_scope scopes[] = {scope(&a), scope(&b), scope(&copy), scope(&native)};
+    sh_audio_link_graph *g = sh_audio_link_graph_open(scopes, 4, error, sizeof(error));
+    if (!g) fprintf(stderr, "%s\n", error); assert(g);
+    sh_audio_graph_root ra, rb, rc, rn;
+    assert(sh_audio_link_graph_shared_record(g, 0, 0, switch_record(&a), &ra));
+    assert(sh_audio_link_graph_shared_record(g, 1, 0, switch_record(&b), &rb));
+    assert(sh_audio_link_graph_shared_record(g, 2, 0, switch_record(&copy), &rc));
+    assert(sh_audio_link_graph_shared_record(g, 3, 0, switch_record(&native), &rn));
+    unsigned char *left = NULL, *right = NULL; size_t left_length = 0, right_length = 0;
+    assert(sh_audio_link_graph_shared_value(g, 0, 0, switch_record(&a), 0, &left, &left_length, error, sizeof(error)));
+    assert(sh_audio_link_graph_shared_value(g, 1, 0, switch_record(&b), 0, &right, &right_length, error, sizeof(error)));
+    assert(left_length == right_length && !memcmp(left, right, left_length)); free(left); free(right);
+    assert(!sh_audio_link_graph_equal(g, ra.node, rb.node) && memcmp(ra.identity, rb.identity, 32));
+    assert(sh_audio_link_graph_equal(g, ra.node, rc.node) && sh_audio_link_graph_equal(g, ra.node, rn.node));
+    assert(rn.original && ra.original && !rb.original);
+    /* Settings without private references stay independent of the modulator. */
+    sh_audio_graph_root ta, tb;
+    assert(sh_audio_link_graph_shared_record(g, 0, 0, 0, &ta) && sh_audio_link_graph_shared_record(g, 1, 0, 0, &tb));
+    assert(sh_audio_link_graph_equal(g, ta.node, tb.node));
+    assert(!sh_audio_link_graph_shared_record(g, 0, 0, a.codec.shared_record_count, &ta));
+    allocator ids = {0}; ids.fail_after = SIZE_MAX;
+    assert(sh_audio_link_graph_bind(g, assign, &ids, error, sizeof(error)));
+    uint32_t ca = bound_controller(g, 0, &a), cb = bound_controller(g, 1, &b), cc = bound_controller(g, 2, &copy);
+    uint32_t cn = bound_controller(g, 3, &native);
+    assert(ca == 555 && cn == 555 && cc == 555 && cb != 555);
+    /* The bound value names the same identity as the bank's bound modulator. */
+    bytes out = {0}; sh_audio_bank_codec codec = {0};
+    assert(sh_audio_bank_binding_write(source(&b.bank), sh_audio_link_graph_bank(g, 1, 0), write_bytes, &out, error, sizeof(error)));
+    assert(sh_audio_bank_codec_read(source(&out), &codec, error, sizeof(error)) == 1);
+    assert(codec.object_count == 1 && codec.objects[0].kind == 22 && codec.objects[0].id == cb);
+    sh_audio_bank_codec_free(&codec);
+    /* A prepared transaction exposes its own bound value; cancel keeps the
+     * committed view and a failed bind changes nothing. */
+    allocator other = {0}; other.fail_after = SIZE_MAX;
+    sh_audio_link_binding *pending = sh_audio_link_graph_prepare_bind(g, assign, &other, error, sizeof(error)); assert(pending);
+    unsigned char *value = NULL; size_t value_length = 0;
+    assert(sh_audio_link_binding_shared_value(pending, 1, 0, switch_record(&b), &value, &value_length, error, sizeof(error)));
+    assert(value_length == 25 && u32(value + 4) != 555); free(value);
+    sh_audio_link_graph_cancel_bind(pending);
+    assert(bound_controller(g, 1, &b) == cb);
+    ids.fail_after = ids.calls; assert(!sh_audio_link_graph_bind(g, assign, &ids, error, sizeof(error)));
+    assert(bound_controller(g, 1, &b) == cb);
+    sh_audio_link_graph_close(g);
+    /* A missing modulator definition is a required gap, never borrowed from a peer. */
+    fixture missing; switch_bank(&missing, 43, 1, 2);
+    missing.bank.data[24 + 8 + 4 + 1 + 4] = 0x99;
+    sh_audio_bank_codec_free(&missing.codec);
+    assert(sh_audio_bank_codec_read(source(&missing.bank), &missing.codec, error, sizeof(error)) == 1);
+    missing.input.source = source(&missing.bank);
+    sh_audio_graph_scope gap[] = {scope(&missing), scope(&a)};
+    assert(!sh_audio_link_graph_open(gap, 2, error, sizeof(error)) && strstr(error, "audio-modulator"));
+    /* A parameter-driven switch has no private dependency. */
+    fixture pa, pb; switch_bank(&pa, 42, 1, 0); switch_bank(&pb, 42, 2, 0);
+    sh_audio_graph_scope parameters[] = {scope(&pa), scope(&pb)};
+    g = sh_audio_link_graph_open(parameters, 2, error, sizeof(error)); assert(g);
+    assert(sh_audio_link_graph_shared_record(g, 0, 0, switch_record(&pa), &ra) &&
+        sh_audio_link_graph_shared_record(g, 1, 0, switch_record(&pb), &rb));
+    assert(sh_audio_link_graph_equal(g, ra.node, rb.node));
+    ids = (allocator){0}; ids.fail_after = SIZE_MAX;
+    assert(sh_audio_link_graph_bind(g, assign, &ids, error, sizeof(error)));
+    assert(bound_controller(g, 0, &pa) == 555 && bound_controller(g, 1, &pb) == 555);
+    sh_audio_link_graph_close(g);
+    fixture *all[] = {&a, &b, &copy, &native, &missing, &pa, &pb};
+    for (size_t i = 0; i < sizeof(all) / sizeof(*all); i++) sh_audio_bank_codec_free(&all[i]->codec);
+}
 int main(void)
 {
     variants(0); variants(1); variants(2); absence_and_failure(); originals_and_order(); music_absence();
     source_ownership(); shared_projection_transaction(); bus_bindings();
     retained_reservations(); reservation_absence_and_originals(); reservation_growth();original_capture_closures();
+    shared_switch_modulators();
     puts("audio_link_graph_test: passed"); return 0;
 }

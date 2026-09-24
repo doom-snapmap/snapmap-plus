@@ -193,8 +193,70 @@ static void corpus(const char *path)
         printf("%s: %zu authored bytes, %zu composed bytes\n",inputs[i].tag,inputs[i].length,out.length);free(bodies[i]);}
     printf("%zu shared control records\n",p.count);sh_audio_shared_policy_free(&p);
 }
+/* Exact identities: equal cooked bytes naming different scoped definitions
+ * (for example a switch driven by a private modulator) are different values. */
+typedef struct exact_fixture { unsigned classes[8][4];int fail; } exact_fixture;
+static int exact_equal(void *context,size_t li,size_t lr,size_t ri,size_t rr)
+{
+    exact_fixture *f=context;if(f->fail)return -1;
+    assert(li<8 && ri<8 && lr<4 && rr<4);return f->classes[li][lr]==f->classes[ri][rr];
+}
+static const unsigned char *exact_identity(void *context,size_t input,size_t record)
+{
+    static unsigned char identities[16][32];exact_fixture *f=context;assert(input<8 && record<4);
+    unsigned id=f->classes[input][record];assert(id<16);memset(identities[id],0,32);identities[id][0]=(unsigned char)(0x80^id);
+    return identities[id];
+}
+static sh_audio_shared_policy exact_compile(const sh_audio_shared_input *inputs,size_t count,exact_fixture *f)
+{
+    sh_audio_shared_policy p={0};char error[512];sh_audio_shared_exact exact={f,exact_equal,exact_identity};
+    if(!sh_audio_shared_policy_compile_exact(inputs,count,&exact,&p,error,sizeof(error))){fprintf(stderr,"%s\n",error);assert(0);}
+    return p;
+}
+static void exact_identities(void)
+{
+    bytes body={0};header(&body,-60,64,0);put(&body,1,4);control(&body,700,555,1);put(&body,0,4);
+    /* Same bytes in every input: baseline(0), authored A(1), authored B(2), copy of A(3). */
+    sh_audio_shared_input inputs[4]={input("STMG",&body,0,1),input("STMG",&body,1,0),input("STMG",&body,2,0),input("STMG",&body,3,0)};
+    exact_fixture f={0};
+    f.classes[1][2]=3;f.classes[2][2]=5;f.classes[3][2]=3;
+    sh_audio_shared_policy p=exact_compile(inputs,4,&f);
+    const sh_audio_shared_setting *s=setting(&p,SH_AUDIO_SHARED_SWITCH,700,0,0);
+    /* identity 0x80^3 sorts before 0x80^5: A's binding wins and its exact copy contributes. */
+    assert(s && s->edited && s->input==1 && s->index==2 && s->contributor_count==2);
+    assert(s->contributors[0].input==1 && s->contributors[1].input==3);
+    assert(!setting(&p,SH_AUDIO_SHARED_THRESHOLD,0,0,0)->edited);
+    /* Byte composition cannot see the difference and keeps the baseline. */
+    sh_audio_shared_policy bytes_only=compile(inputs,4);
+    assert(!setting(&bytes_only,SH_AUDIO_SHARED_SWITCH,700,0,0)->edited);sh_audio_shared_policy_free(&bytes_only);
+    /* Enumeration order does not choose between different bindings. */
+    sh_audio_shared_input reversed[4]={inputs[0],input("STMG",&body,1,0),input("STMG",&body,2,0),input("STMG",&body,3,0)};
+    exact_fixture g={0};g.classes[1][2]=5;g.classes[2][2]=3;g.classes[3][2]=5;
+    sh_audio_shared_policy q=exact_compile(reversed,4,&g);
+    s=setting(&q,SH_AUDIO_SHARED_SWITCH,700,0,0);assert(s && s->edited && s->input==2 && s->contributor_count==1);
+    sh_audio_shared_policy_free(&q);
+    /* An authored copy equal to the native binding is a witness, not an edit. */
+    exact_fixture h={0};h.classes[2][2]=5;
+    q=exact_compile(inputs,3,&h);s=setting(&q,SH_AUDIO_SHARED_SWITCH,700,0,0);
+    assert(s && s->edited && s->input==2);sh_audio_shared_policy_free(&q);
+    exact_fixture w={0};q=exact_compile(inputs,2,&w);s=setting(&q,SH_AUDIO_SHARED_SWITCH,700,0,0);
+    assert(s && !s->edited && s->input==0 && s->contributor_count==2);sh_audio_shared_policy_free(&q);
+    /* Deep copies are independent of their source. */
+    sh_audio_shared_policy copy={0};assert(sh_audio_shared_policy_copy(&p,&copy) && copy.count==p.count);
+    for(size_t i=0;i<p.count;i++) {
+        assert(copy.settings[i].body!=p.settings[i].body && !memcmp(copy.settings[i].body,p.settings[i].body,p.settings[i].record.length));
+        assert(copy.settings[i].contributor_count==p.settings[i].contributor_count && copy.settings[i].edited==p.settings[i].edited);
+    }
+    sh_audio_shared_policy_free(&p);s=setting(&copy,SH_AUDIO_SHARED_SWITCH,700,0,0);assert(s && s->contributor_count==2);
+    sh_audio_shared_policy_free(&copy);
+    /* A retained-source comparison failure refuses the whole plan. */
+    f.fail=1;sh_audio_shared_policy failed={0};char error[512];sh_audio_shared_exact exact={&f,exact_equal,exact_identity};
+    assert(!sh_audio_shared_policy_compile_exact(inputs,4,&exact,&failed,error,sizeof(error)) && !failed.count && strstr(error,"compare"));
+    sh_audio_shared_exact incomplete={&f,exact_equal,NULL};
+    assert(!sh_audio_shared_policy_compile_exact(inputs,4,&incomplete,&failed,error,sizeof(error)));
+}
 int main(int argc,char **argv)
 {
-    composition();ordered_noops();environments();platform_and_failures();growth();
+    composition();ordered_noops();environments();platform_and_failures();growth();exact_identities();
     if(argc==2)corpus(argv[1]);puts("shared audio policy checks passed");return 0;
 }

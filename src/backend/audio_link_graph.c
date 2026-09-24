@@ -24,7 +24,7 @@ typedef struct ag_slot { size_t scope, node; uint32_t id; unsigned domain; } ag_
 typedef struct ag_bank {
     const sh_audio_graph_bank *input;
     size_t scope, record;
-    size_t *targets, *bus_nodes, *object_nodes;
+    size_t *targets, *bus_nodes, *object_nodes, *shared_nodes;
     sh_audio_bank_binding binding,private_binding;
 } ag_bank;
 struct sh_audio_link_graph {
@@ -233,6 +233,54 @@ static int ag_bus_records(sh_audio_link_graph *g,ag_bank *bank,const sh_audio_ba
     }
     return 1;
 }
+/* Shared STMG/ENVS/PLAT records compose globally, but a modulator-driven switch
+ * names a private HIRC object. Each record receives its own exact identity with
+ * only the private dependencies inside its span, as bus values do, so equal
+ * cooked numbers naming different scoped definitions stay distinct. */
+static int ag_shared_records(sh_audio_link_graph *g,ag_bank *bank,char *error,size_t capacity)
+{
+    const sh_audio_bank_codec *codec=bank->input->codec;
+    for(size_t c=0;c<codec->chunk_count;c++) {
+        const sh_audio_bank_chunk *chunk=codec->chunks+c;
+        if(!chunk->shared_record_count)continue;
+        if(chunk->first_shared_record>codec->shared_record_count ||
+            chunk->shared_record_count>codec->shared_record_count-chunk->first_shared_record)
+            return ag_fail(error,capacity,"audio shared records exceed checked bank");
+        uint64_t body=chunk->offset+8,end=body+chunk->length;size_t first=SIZE_MAX,last=0;
+        /* One chunk's spans are appended together while the codec reads it. */
+        for(size_t j=0;j<codec->span_count;j++)if(codec->spans[j].offset>=body && codec->spans[j].offset<end) {
+            if(first==SIZE_MAX)first=j;last=j;
+        }
+        for(size_t r=chunk->first_shared_record;r<chunk->first_shared_record+chunk->shared_record_count;r++) {
+            const sh_audio_shared_record *field=codec->shared_records+r;size_t record;
+            if(bank->shared_nodes[r]!=SIZE_MAX || field->offset<body || field->offset>end ||
+                field->length>end-field->offset)
+                return ag_fail(error,capacity,"audio shared record exceeds checked chunk");
+            if(!ag_record(g,bank->scope,"audio-shared-value",field->key[0],(unsigned)field->kind+1u,
+                bank->input->source,field->offset,field->length,bank->input->original,bank->input->path,
+                &record,error,capacity))return 0;
+            ag_node *node=g->nodes+record;
+            for(unsigned k=0;k<3;k++)for(unsigned byte=0;byte<4;byte++)
+                node->shape.semantics[1+k*4+byte]=(unsigned char)(field->key[k]>>(8*byte));
+            memcpy(node->shape.semantics+13,chunk->tag,4);
+            snprintf(node->path,sizeof(node->path),"%s/%u/%u/%u/%u",chunk->tag,(unsigned)field->kind,
+                field->key[0],field->key[1],field->key[2]);
+            bank->shared_nodes[r]=record;
+            for(size_t j=first;first!=SIZE_MAX && j<=last;j++) {
+                const sh_audio_identity_span *span=codec->spans+j;
+                if(bank->targets[j]==SIZE_MAX || span->offset<field->offset ||
+                    span->offset-field->offset>=field->length)continue;
+                if(field->length-(span->offset-field->offset)<4)
+                    return ag_fail(error,capacity,"audio shared record splits a typed reference");
+                if(!ag_fields(g,bank,record,field->offset,j,1))
+                    return ag_fail(error,capacity,"cannot retain audio shared dependencies");
+            }
+        }
+    }
+    for(size_t r=0;r<codec->shared_record_count;r++)if(bank->shared_nodes[r]==SIZE_MAX)
+        return ag_fail(error,capacity,"audio shared record has no owning chunk");
+    return 1;
+}
 static int ag_is_name(const sh_audio_bank_codec *codec, size_t offset)
 {
     for (size_t i = 0; i < codec->name_count; i++) if (codec->names[i].offset == offset) return 1;
@@ -246,10 +294,14 @@ static int ag_bank_scan(sh_audio_link_graph *g, ag_bank *bank, char *error, size
         return ag_fail(error, capacity, "audio graph needs a checked bank inventory");
     bank->targets = malloc((codec->span_count ? codec->span_count : 1) * sizeof(*bank->targets));
     bank->bus_nodes = malloc((codec->bus_record_count ? codec->bus_record_count : 1) * sizeof(*bank->bus_nodes));
-    if(codec->object_count>SIZE_MAX/sizeof(*bank->object_nodes))return ag_fail(error,capacity,"audio object count overflows");
+    if(codec->object_count>SIZE_MAX/sizeof(*bank->object_nodes) ||
+        codec->shared_record_count>SIZE_MAX/sizeof(*bank->shared_nodes))return ag_fail(error,capacity,"audio object count overflows");
     bank->object_nodes=malloc((codec->object_count ? codec->object_count : 1)*sizeof(*bank->object_nodes));
-    if (!bank->targets || !bank->bus_nodes || !bank->object_nodes) return ag_fail(error, capacity, "cannot allocate audio fields");
+    bank->shared_nodes=malloc((codec->shared_record_count ? codec->shared_record_count : 1)*sizeof(*bank->shared_nodes));
+    if (!bank->targets || !bank->bus_nodes || !bank->object_nodes || !bank->shared_nodes)
+        return ag_fail(error, capacity, "cannot allocate audio fields");
     for(size_t i=0;i<codec->bus_record_count;i++)bank->bus_nodes[i]=SIZE_MAX;
+    for(size_t i=0;i<codec->shared_record_count;i++)bank->shared_nodes[i]=SIZE_MAX;
     for (size_t i = 0; i < codec->span_count; i++) {
         const sh_audio_identity_span *f = &codec->spans[i]; bank->targets[i] = SIZE_MAX;
         if (!f->value || f->flags & (SH_AUDIO_ID_SHARED | SH_AUDIO_ID_LITERAL)) continue;
@@ -285,6 +337,7 @@ static int ag_bank_scan(sh_audio_link_graph *g, ag_bank *bank, char *error, size
     }
     for(size_t i=0;i<codec->bus_record_count;i++)if(bank->bus_nodes[i]==SIZE_MAX)
         return ag_fail(error,capacity,"audio bus record has no owning object");
+    if(!ag_shared_records(g,bank,error,capacity))return 0;
     /* Retain every resident/prefetched contribution to a media identity. The
      * opaque payload is never searched for IDs or rewritten. */
     const sh_audio_bank_chunk *data = NULL;
@@ -315,7 +368,7 @@ void sh_audio_link_graph_close(sh_audio_link_graph *g)
         free(g->nodes[i].edges);
     }
     if (g->banks) for (size_t i = 0; i < g->bank_count; i++) {
-        free(g->banks[i].targets);free(g->banks[i].bus_nodes);free(g->banks[i].object_nodes);
+        free(g->banks[i].targets);free(g->banks[i].bus_nodes);free(g->banks[i].object_nodes);free(g->banks[i].shared_nodes);
         sh_audio_bank_binding_free(&g->banks[i].binding);sh_audio_bank_binding_free(&g->banks[i].private_binding);
     }
     sh_package_link_classes_free(&g->classes);
@@ -431,6 +484,29 @@ int sh_audio_link_graph_bus_object(const sh_audio_link_graph *g,size_t scope,siz
     size_t node=input->object_nodes[object];out->node=node;out->original=g->originals[node];
     memcpy(out->identity,g->classes.identities[g->classes.nodes[node]],sizeof(out->identity));return 1;
 }
+/* Owned bytes of one checked value span. bound=1 relocates only the typed
+ * private references inside that span; masked packed fields stay masked. */
+static int ag_span_value(const sh_audio_link_graph *g,const uint32_t *ids,const ag_bank *input,
+    size_t node,uint64_t offset,size_t span,int bound,unsigned char **body,size_t *length,
+    char *error,size_t capacity)
+{
+    unsigned char *bytes=malloc(span ? span : 1);
+    if(!bytes)return ag_fail(error,capacity,"cannot retain audio policy value");
+    if(!ag_read(g->nodes+node,0,bytes,span)) {
+        free(bytes);return ag_fail(error,capacity,"cannot read retained audio policy value");
+    }
+    if(bound)for(size_t i=0;i<input->input->codec->span_count;i++) {
+        const sh_audio_identity_span *field=input->input->codec->spans+i;
+        if(input->targets[i]==SIZE_MAX || field->offset<offset || field->offset-offset>=span)continue;
+        size_t at=(size_t)(field->offset-offset);
+        if(span-at<4 || !ids[input->targets[i]]) {
+            free(bytes);return ag_fail(error,capacity,"audio policy value has an invalid typed binding");
+        }
+        uint32_t id=ids[input->targets[i]];
+        for(unsigned j=0;j<4;j++)bytes[at+j]=(unsigned char)(id>>(8*j));
+    }
+    *body=bytes;*length=span;return 1;
+}
 static int ag_bus_value(const sh_audio_link_graph *g,const uint32_t *ids,size_t scope,size_t bank,
     size_t record,int bound,unsigned char **body,size_t *length,char *error,size_t capacity)
 {
@@ -439,22 +515,7 @@ static int ag_bus_value(const sh_audio_link_graph *g,const uint32_t *ids,size_t 
     if(!body || !length || !sh_audio_link_graph_bus_record(g,scope,bank,record,&root) || (bound && !ids))
         return ag_fail(error,capacity,"audio bus value is unavailable or unbound");
     const sh_audio_bus_record *value=input->input->codec->bus_records+record;
-    unsigned char *bytes=malloc(value->length ? value->length : 1);
-    if(!bytes)return ag_fail(error,capacity,"cannot retain audio bus value");
-    if(!ag_read(g->nodes+root.node,0,bytes,value->length)) {
-        free(bytes);return ag_fail(error,capacity,"cannot read retained audio bus value");
-    }
-    if(bound)for(size_t i=0;i<input->input->codec->span_count;i++) {
-        const sh_audio_identity_span *field=input->input->codec->spans+i;
-        if(input->targets[i]==SIZE_MAX || field->offset<value->offset || field->offset-value->offset>=value->length)continue;
-        size_t at=field->offset-value->offset;
-        if(value->length-at<4 || !ids[input->targets[i]]) {
-            free(bytes);return ag_fail(error,capacity,"audio bus value has an invalid typed binding");
-        }
-        uint32_t id=ids[input->targets[i]];
-        for(unsigned j=0;j<4;j++)bytes[at+j]=(unsigned char)(id>>(8*j));
-    }
-    *body=bytes;*length=value->length;return 1;
+    return ag_span_value(g,ids,input,root.node,value->offset,value->length,bound,body,length,error,capacity);
 }
 int sh_audio_link_graph_bus_value(const sh_audio_link_graph *g,size_t scope,size_t bank,
     size_t record,int bound,unsigned char **body,size_t *length,char *error,size_t capacity)
@@ -463,6 +524,35 @@ int sh_audio_link_binding_bus_value(const sh_audio_link_binding *binding,size_t 
     size_t record,unsigned char **body,size_t *length,char *error,size_t capacity)
 {
     return ag_bus_value(binding ? binding->graph : NULL,binding ? binding->ids : NULL,
+        scope,bank,record,1,body,length,error,capacity);
+}
+int sh_audio_link_graph_shared_record(const sh_audio_link_graph *g,size_t scope,size_t bank,
+    size_t record,sh_audio_graph_root *out)
+{
+    if(out)memset(out,0,sizeof(*out));
+    const ag_bank *input=ag_bank_at(g,scope,bank);
+    if(!out || !input || record>=input->input->codec->shared_record_count)return 0;
+    size_t node=input->shared_nodes[record];if(node>=g->count)return 0;
+    out->node=node;out->original=g->originals[node];
+    memcpy(out->identity,g->classes.identities[g->classes.nodes[node]],sizeof(out->identity));return 1;
+}
+static int ag_shared_value(const sh_audio_link_graph *g,const uint32_t *ids,size_t scope,size_t bank,
+    size_t record,int bound,unsigned char **body,size_t *length,char *error,size_t capacity)
+{
+    if(body)*body=NULL;if(length)*length=0;if(error && capacity)*error=0;
+    const ag_bank *input=ag_bank_at(g,scope,bank);sh_audio_graph_root root;
+    if(!body || !length || !sh_audio_link_graph_shared_record(g,scope,bank,record,&root) || (bound && !ids))
+        return ag_fail(error,capacity,"audio shared value is unavailable or unbound");
+    const sh_audio_shared_record *value=input->input->codec->shared_records+record;
+    return ag_span_value(g,ids,input,root.node,value->offset,value->length,bound,body,length,error,capacity);
+}
+int sh_audio_link_graph_shared_value(const sh_audio_link_graph *g,size_t scope,size_t bank,
+    size_t record,int bound,unsigned char **body,size_t *length,char *error,size_t capacity)
+{ return ag_shared_value(g,g ? g->ids : NULL,scope,bank,record,bound,body,length,error,capacity); }
+int sh_audio_link_binding_shared_value(const sh_audio_link_binding *binding,size_t scope,size_t bank,
+    size_t record,unsigned char **body,size_t *length,char *error,size_t capacity)
+{
+    return ag_shared_value(binding ? binding->graph : NULL,binding ? binding->ids : NULL,
         scope,bank,record,1,body,length,error,capacity);
 }
 

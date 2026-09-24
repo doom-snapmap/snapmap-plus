@@ -138,7 +138,7 @@ int sh_audio_banks_native_limits_apply(const sh_package_audio_program *program,
     if(!sh_audio_bank_gate_ready(g_bank_gate.scope,error,capacity))return 0;
     if(g_commands.uncertain || (g_addition && (!g_addition->prepared || g_addition->thread!=GetCurrentThreadId())))
         return an_error(error,capacity,"native bank activation must complete before publishing playback settings");
-    return sh_audio_limits_native_apply(&g_limits,sh_package_audio_program_shared(program),change,error,capacity);
+    return sh_audio_limits_native_apply(&g_limits,sh_package_audio_program_bound_shared(program),change,error,capacity);
 }
 
 int sh_audio_banks_native_environment_apply(const sh_package_audio_program *program,
@@ -148,7 +148,7 @@ int sh_audio_banks_native_environment_apply(const sh_package_audio_program *prog
     if(!sh_audio_bank_gate_ready(g_bank_gate.scope,error,capacity))return 0;
     if(g_commands.uncertain || (g_addition && (!g_addition->prepared || g_addition->thread!=GetCurrentThreadId())))
         return an_error(error,capacity,"native bank activation must complete before publishing environment settings");
-    return sh_audio_environment_native_apply(&g_environment,sh_package_audio_program_shared(program),change,error,capacity);
+    return sh_audio_environment_native_apply(&g_environment,sh_package_audio_program_bound_shared(program),change,error,capacity);
 }
 
 int sh_audio_banks_native_state_apply(const sh_package_audio_program *program,
@@ -158,7 +158,7 @@ int sh_audio_banks_native_state_apply(const sh_package_audio_program *program,
     if(!sh_audio_bank_gate_ready(g_bank_gate.scope,error,capacity))return 0;
     if(g_commands.uncertain || (g_addition && (!g_addition->prepared || g_addition->thread!=GetCurrentThreadId())))
         return an_error(error,capacity,"native bank activation must complete before publishing state settings");
-    return sh_audio_state_native_apply(&g_state,sh_package_audio_program_shared(program),change,error,capacity);
+    return sh_audio_state_native_apply(&g_state,sh_package_audio_program_bound_shared(program),change,error,capacity);
 }
 
 int sh_audio_banks_native_parameter_apply(const sh_package_audio_program *program,
@@ -168,7 +168,7 @@ int sh_audio_banks_native_parameter_apply(const sh_package_audio_program *progra
     if(!sh_audio_bank_gate_ready(g_bank_gate.scope,error,capacity))return 0;
     if(g_commands.uncertain || (g_addition && (!g_addition->prepared || g_addition->thread!=GetCurrentThreadId())))
         return an_error(error,capacity,"native bank activation must complete before publishing parameter settings");
-    return sh_audio_parameter_native_apply(&g_parameter,sh_package_audio_program_shared(program),change,error,capacity);
+    return sh_audio_parameter_native_apply(&g_parameter,sh_package_audio_program_bound_shared(program),change,error,capacity);
 }
 
 static void an_clear_catalog(void)
