@@ -182,6 +182,13 @@ static int sg_exists(void *context, uintptr_t manager, const char *type, const c
     free(body); free(path); return status > 0 ? 1 : status;
 }
 
+/* Declaration text may keep a stock-style reference to a declaration that has
+ * no source anywhere in its scope: the engine defaults it by name, as it does
+ * for the stock original. A map's own reference, or a derived body checked
+ * against bound outputs, must still resolve to an actual source. */
+static int sg_native_default(const sg_walk *walk)
+{ return walk->current_type && strcmp(walk->current_type, "map") && !walk->bound_exists; }
+
 static int sg_reference(void *context, const char *field, sh_decl_value_type type,
     const char *name, size_t length)
 {
@@ -190,7 +197,8 @@ static int sg_reference(void *context, const char *field, sh_decl_value_type typ
     int status, ok = 1;
     walk->report.references++;
     status = sh_decl_native_reference_read(walk->schema, walk->registry, type, name, length, &reference);
-    if (status > 0) ok = sg_add(walk, reference.resource.type, reference.resource.name);
+    if (status == 2) status = sg_native_default(walk) ? 0 : -1;
+    if (status == 1) ok = sg_add(walk, reference.resource.type, reference.resource.name);
     else if (status < 0) sg_gap(walk, field, type.name, "reference identity is unavailable");
     sh_decl_native_reference_clear(&reference); return ok;
 }
@@ -953,6 +961,9 @@ static int sg_bind_typed(void *context, const char *slot, sh_decl_value_type typ
     }
     int result = sh_decl_native_reference_read(binding->reader->schema, binding->reader->registry,
         type, name, length, &reference);
+    /* Authored declaration text keeps an engine-defaulted absent declaration
+     * unchanged, with no binding edge, like its stock counterpart. */
+    if (result == 2) result = sg_native_default(binding->reader) ? 0 : -1;
     if (result == 1) {
         /* Native registry labels retain mixed case (entityDef, for example).
          * Source-unit identities use the same canonical family as the source

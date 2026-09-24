@@ -334,8 +334,13 @@ static void test_bind(fixture *f, sh_package_compilation *compiled, sh_decl_regi
             strlen(absent), bind_reference, &bindings, &length, &result, error, sizeof(error));
         assert(out && length == strlen(absent) && !memcmp(out, absent, length) && result.references == 1);
         free(out);
-        assert(!sh_package_source_bind(reader, "entitydef", "observer", (const unsigned char *)absent,
-            strlen(absent), bind_reference, &bindings, &length, &result, error, sizeof(error)));
+        /* Strict binding keeps the engine's default for an absent declaration:
+         * the authored bytes stay unchanged and no binding edge is requested. */
+        size_t requested = bindings.count;
+        out = sh_package_source_bind(reader, "entitydef", "observer", (const unsigned char *)absent,
+            strlen(absent), bind_reference, &bindings, &length, &result, error, sizeof(error));
+        assert(out && length == strlen(absent) && !memcmp(out, absent, length));
+        assert(bindings.count == requested && !result.references); free(out);
         bindings = (bind_fixture){0};
     }
     {
@@ -1306,9 +1311,11 @@ static void test_source_link(fixture *native, sh_decl_registry_source registry)
             bind_reference, &capture, admit_derived, &exists, &length, error, sizeof(error));
         assert(bound && exists.calls && capture.count == 1 && !strcmp((char *)bound, (char *)derived)); free(bound);
         size_t calls = exists.calls;
-        /* A successful derived call grants nothing to the ordinary reader. */
+        /* A successful derived call grants nothing to the ordinary reader. Its
+         * frozen snapshot never observed this name, so absence is unproven. */
         assert(!sh_package_source_link_bind_unit(source, roots[0], derived, strlen((char *)derived),
             bind_reference, &capture, &length, error, sizeof(error)));
+        assert(strstr(error, "uncaptured original"));
         assert(exists.calls == calls);
         exists.result = -1;
         assert(!sh_package_source_link_bind_derived(source, roots[0], derived, strlen((char *)derived),
@@ -1353,11 +1360,18 @@ static void test_source_link(fixture *native, sh_decl_registry_source registry)
     for (size_t i = 0; i < f.inputs->count; i++) assert(shared[i] == (f.inputs->scopes[i] != 1));
     sh_package_source_link_close(source); files[1][0].gameplay_owners.bits = 0;
     /* A peer's source never fills a hole in this scope, even though it is one
-     * of the same driver's other inputs. */
+     * of the same driver's other inputs. The absent name keeps the engine's
+     * default binding: no edge to the peer's child is captured. */
     compiled[0].resources = files[0] + 1; compiled[0].resource_count = 1;
     source = sh_package_source_link_open(scopes, 2, NULL, link_original, &f,
         registry, (uintptr_t)native->reflection, NULL, error, sizeof(error));
-    assert(!source && strstr(error, "native source binding could not be resolved"));
+    if (!source) fprintf(stderr, "absent peer child: %s\n", error);
+    assert(source);
+    f.inputs = sh_package_source_link_inputs(source);
+    assert(sh_package_link_inputs_find(f.inputs, 0, "entitydef", "child") == SIZE_MAX);
+    assert(sh_package_link_inputs_find(f.inputs, 1, "entitydef", "child") != SIZE_MAX);
+    assert(sh_package_link_inputs_find(f.inputs, 0, "entitydef", "root") != SIZE_MAX);
+    sh_package_source_link_close(source);
     compiled[0].resources = files[0]; compiled[0].resource_count = 2;
     /* A campaign-only dependency cannot silently become shipped bundle data. */
     f.campaign = 1;
@@ -1843,6 +1857,44 @@ static void sound_inventory_materialize(sh_package_library *library, const char 
         }
     }
     assert(banks == 2 && media == 2 && merged == 1);
+}
+static int absent_resolver(void *context, const char *slot, const char *family,
+    const char *name, const char **replacement)
+{
+    size_t *calls = context; (void)slot; (void)family; (void)name;
+    *replacement = NULL; ++*calls; return 0;
+}
+static int absent_original(void *context, const char *path, unsigned char **body, size_t *length)
+{ (void)context; (void)path; *body = NULL; *length = 0; return 0; }
+/* The native declaration pointer reader defaults an absent typed name in its
+ * own manager. Authored text keeps that reference unchanged with no source
+ * edge, like the stock data it was copied from; sound derives an event from the
+ * name, so its absence stays a binding failure. */
+static void test_absent_declaration_defaults(void)
+{
+    fixture f; setup_sound(&f);
+    void *container = *(void **)f.reflection;
+    unsigned char *records = *(void **)((char *)container + 0x20);
+    const char *types[] = {"idDeclEntityDef", "idSoundShader"}, *ops[] = {"*", "*"}, *names[] = {"target", "sound"};
+    fields(&f, records + 0x38, 2, types, ops, names);
+    sh_decl_registry_source registry = {&f, read_memory, (uintptr_t)f.registry, NULL};
+    sh_package_sources sources = {0}; sh_package_compilation empty = {0}; empty.sources = &sources;
+    char error[1024]; size_t calls = 0, length = 0;
+    sh_package_source_reader *reader = sh_package_source_reader_open(&empty, NULL, absent_original, NULL,
+        registry, (uintptr_t)f.reflection, error, sizeof(error));
+    if (!reader) fprintf(stderr, "absent declaration reader: %s\n", error);
+    assert(reader);
+    const char *entity = "{ class = \"Entity\"; edit = { target = \"stock/absent\"; } }";
+    unsigned char *out = sh_package_source_bind(reader, "entitydef", "root", (const unsigned char *)entity,
+        strlen(entity), absent_resolver, &calls, &length, NULL, error, sizeof(error));
+    if (!out) fprintf(stderr, "absent declaration default: %s\n", error);
+    assert(out && length == strlen(entity) && !memcmp(out, entity, length) && !calls); free(out);
+    const char *sound = "{ class = \"Entity\"; edit = { sound = \"absent_sound\"; } }";
+    out = sh_package_source_bind(reader, "entitydef", "root", (const unsigned char *)sound, strlen(sound),
+        absent_resolver, &calls, &length, NULL, error, sizeof(error));
+    assert(!out && strstr(error, "native source binding could not be resolved") && !calls);
+    sh_package_source_reader_close(reader);
+    while (f.count) free(f.regions[--f.count].address);
 }
 static void test_sound_inventory_library(void)
 {
@@ -2894,6 +2946,7 @@ int main(void)
     test_sound_original_binding();
     test_sound_program_library();
     test_sound_inventory_library();
+    test_absent_declaration_defaults();
     test_contribution_projection();
     test_bound_contributions(&f, registry);
     test_material_path(&f, registry);

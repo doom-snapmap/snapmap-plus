@@ -10,7 +10,9 @@ typedef struct sh_decl_native_reference {
     sh_model_reference model;
 } sh_decl_native_reference;
 
-/* 1 resource, 0 native runtime/null identity, -1 unavailable. Only the verified
+/* 1 resource, 0 native runtime/null identity, 2 declaration with no source in
+ * this scope (the engine supplies null or its constant default by name; not a
+ * source dependency), -1 unavailable. Only the verified
  * pointer reader selects semantics: image names do not use declaration search,
  * and a model field can dispatch to several different resource managers.
  * The registry must describe the prospective source scope. Initialize output

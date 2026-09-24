@@ -37,6 +37,11 @@ void sh_decl_native_registry_close(sh_decl_native_registry *registry);
  * 1 found, 0 absent, -1 ambiguous/invalid; class is borrowed until close. */
 int sh_decl_native_registry_type_class(sh_decl_native_registry *registry,
     const char *type, const char **class_name);
+/* The inverse: the first manager in native order whose class is exactly this
+ * one, which the typed declaration pointer reader selects. 1 found, 0 none
+ * (the reader then searches every manager), -1 invalid. Borrowed until close. */
+int sh_decl_native_registry_class_type(sh_decl_native_registry *registry,
+    const char *class_name, const char **type);
 
 enum sh_native_resource_identity_result {
     SH_NATIVE_RESOURCE_ID_ERROR = -1,
