@@ -946,6 +946,11 @@ static int an_pbank_load(size_t index, uint32_t **loaded, size_t *loaded_count, 
             "native audio bank %u could not be loaded", b->id);
     }
     b->owned = 1;
+    {
+        char line[160];
+        snprintf(line, sizeof(line), "audio programs: loaded bank %u by %s", (unsigned)b->id, b->numeric ? "file ID" : "name");
+        backend_log(line);
+    }
     if (loaded) {
         uint32_t *grown = realloc(*loaded, (*loaded_count + 1) * sizeof(*grown));
         if (!grown) return an_fail(error, capacity, "cannot record native audio bank %u ownership", b->id);
@@ -967,7 +972,12 @@ static int an_pbank_unload_idle(size_t index, char *error, size_t capacity)
     if (!usage.loaded || usage.references != 1 || usage.prepared) return 0;
     __try { result = g_unload ? g_unload(b->id, NULL, NULL) : 2; }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -1; }
-    if (result == 1) { b->owned = 0; return 1; }
+    if (result == 1) {
+        char line[96];
+        b->owned = 0;
+        snprintf(line, sizeof(line), "audio programs: unloaded idle bank %u", (unsigned)b->id);
+        backend_log(line); return 1;
+    }
     if (result < 0) b->uncertain = 1;
     an_fail(error, capacity, "native audio bank %u could not be unloaded", b->id);
     return -1;
@@ -1022,6 +1032,11 @@ int sh_audio_banks_native_programs_retire(char *error, size_t capacity)
         an_program_free(program);
         memmove(g_programs + p, g_programs + p + 1, (g_program_count - p - 1) * sizeof(*g_programs));
         g_program_count--;
+        {
+            char line[96];
+            snprintf(line, sizeof(line), "audio programs: released a superseded program; %zu remain", g_program_count);
+            backend_log(line);
+        }
     }
     an_pbank_holders(); an_pbank_compact();
     if (failed && error && capacity && !*error) snprintf(error, capacity, "native audio retirement is waiting on an uncertain native state");
@@ -1190,8 +1205,8 @@ int sh_audio_banks_native_programs_activate(const sh_audio_active_program *progr
     /* An untouched native configuration stays untouched for vanilla content;
      * once an edit was published, later transitions publish the complete
      * effective policy so removed edits return to the native baseline. */
-    int edited = sh_audio_effective_shared_edited(&effective);
-    if ((edited || g_shared_published) && !an_shared_publish(&effective, error, capacity)) goto done;
+    int edited = sh_audio_effective_shared_edited(&effective), published = edited || g_shared_published;
+    if (published && !an_shared_publish(&effective, error, capacity)) goto done;
     g_shared_published = edited;
     /* Commit: nothing below can fail. */
     size_t used = 0;
@@ -1210,6 +1225,12 @@ int sh_audio_banks_native_programs_activate(const sh_audio_active_program *progr
         next[used] = g_programs[p]; next[used].retiring = 1; used++;
     }
     free(g_programs); g_programs = next; g_program_count = used; next = NULL; ok = 1;
+    {
+        char line[160];
+        snprintf(line, sizeof(line), "audio programs: %zu active, %zu retiring, %zu banks loaded; shared controls %s",
+            count, used - count, loaded_count, published ? "published" : "untouched");
+        backend_log(line);
+    }
 done:
     if (!ok) {
         an_unload_new(loaded, loaded_count);
