@@ -22,6 +22,7 @@
 #include "audio_environment_native.h"
 #include "audio_state_native.h"
 #include "audio_parameter_native.h"
+#include "audio_switch_native.h"
 #include "audio_bank_gate.h"
 
 /* Binding checks must never invoke live reflection on the mapped PE. */
@@ -243,6 +244,23 @@ int main(int argc, char **argv)
             parameter.render_lock!=limits.render_lock || parameter.manager_slot!=limits.manager_slot) {
             puts("BAD native parameter settings binding");bad++;
         } else puts("OK  native parameter settings binding");
+        /* Switch-group construction and the common subscription core are
+         * reached from the STMG reader through identical call sites. */
+        sh_audio_subscription_native subscription={0};sh_audio_switch_native switches={0};
+        if(!resolved || !sh_audio_subscription_native_bind(&subscription,base,parameter_results,3,&parameter,&environment) ||
+            (uintptr_t)subscription.switch_slot!=(uintptr_t)base+(pinned ? 0x70d3fd8u : 0x59df728u) ||
+            (uintptr_t)subscription.modulator_slot!=(uintptr_t)base+(pinned ? 0x70d3fd0u : 0x59df720u) ||
+            (uintptr_t)subscription.switch_ensure!=(uintptr_t)base+(pinned ? 0x1d3e580u : 0x1d57a40u) ||
+            (uintptr_t)subscription.reverse_remove!=(uintptr_t)base+(pinned ? 0x1d1c580u : 0x1d35960u) ||
+            (uintptr_t)subscription.modulator_remove!=(uintptr_t)base+(pinned ? 0x1d45d00u : 0x1d5f0a0u) ||
+            (uintptr_t)subscription.modulator_add!=(uintptr_t)base+(pinned ? 0x1d456a0u : 0x1d5ea40u) ||
+            (uintptr_t)subscription.reverse_add!=(uintptr_t)base+(pinned ? 0x1d19260u : 0x1d32640u) ||
+            (uintptr_t)subscription.refresh!=(uintptr_t)base+(pinned ? 0x1d1ea60u : 0x1d37e40u) ||
+            subscription.parameters!=&parameter || subscription.set_curve!=environment.set_curve ||
+            !sh_audio_switch_native_bind(&switches,&subscription,&limits) || switches.render_lock!=limits.render_lock ||
+            switches.manager_slot!=limits.manager_slot) {
+            puts("BAD native audio subscription binding");bad++;
+        } else puts("OK  native audio subscription binding");
         const sig_entry *dispatch=NULL;sig_result dispatch_result={0};sh_audio_bank_gate gate={0};
         for(size_t i=0;BACKEND_ENGINE_SIGNATURES[i].name;i++)
             if(!strcmp(BACKEND_ENGINE_SIGNATURES[i].name,"AudioBankDispatch"))dispatch=BACKEND_ENGINE_SIGNATURES+i;

@@ -11,6 +11,7 @@
 #include "backend_log.h"
 #include "hook.h"
 #include "audio_effective_policy.h"
+#include "audio_switch_native.h"
 
 typedef int (*ab_load_fn)(const char *name, int pool, uint32_t *id);
 typedef int (*ab_unload_fn)(uint32_t id, const void *memory, int *pool);
@@ -22,6 +23,8 @@ static sh_audio_limits_native g_limits;
 static sh_audio_environment_native g_environment;
 static sh_audio_state_native g_state;
 static sh_audio_parameter_native g_parameter;
+static sh_audio_subscription_native g_subscription;
+static sh_audio_switch_native g_switch;
 static sh_audio_bank_gate g_bank_gate;
 static void *g_bank_gate_hook;
 static int g_shared_recovery;
@@ -56,6 +59,7 @@ struct sh_audio_bank_addition {
 static sh_audio_bank_addition *g_addition;
 static void an_programs_addition_rollback(sh_audio_bank_addition *addition);
 static void an_programs_addition_accept(sh_audio_bank_addition *addition);
+static int an_shared_settle(char *error, size_t capacity);
 
 static int an_error(char *error, size_t capacity, const char *message)
 { if (error && capacity) snprintf(error, capacity, "%s", message); return 0; }
@@ -87,6 +91,10 @@ void sh_audio_banks_native_install(const sig_result *results, size_t count)
     if (!sh_audio_parameter_native_bind(&g_parameter,
         (const unsigned char *)GetModuleHandleA(NULL), results, count, &g_limits))
         backend_log("audio banks: parameter settings binding unavailable");
+    if (!sh_audio_subscription_native_bind(&g_subscription,
+        (const unsigned char *)GetModuleHandleA(NULL), results, count, &g_parameter, &g_environment) ||
+        !sh_audio_switch_native_bind(&g_switch, &g_subscription, &g_limits))
+        backend_log("audio banks: switch settings binding unavailable");
     if (sh_audio_bank_gate_bind(&g_bank_gate,(const unsigned char *)GetModuleHandleA(NULL),results,count,&g_limits) &&
         sh_audio_bank_gate_initialize(&g_bank_gate)) {
         g_bank_gate_hook=hook_prepare((void *)g_bank_gate.entry,an_dispatch,16);
@@ -105,7 +113,7 @@ void sh_audio_banks_native_install(const sig_result *results, size_t count)
 
 int sh_audio_banks_native_shared_begin(sh_audio_bank_scope *scope,char *error,size_t capacity)
 {
-    if(g_limits.pending || g_environment.pending || g_state.pending || g_parameter.pending || g_commands.uncertain ||
+    if(g_limits.pending || g_environment.pending || g_state.pending || g_parameter.pending || g_switch.pending || g_commands.uncertain ||
         (g_addition && (!g_addition->prepared || g_addition->thread!=GetCurrentThreadId())))
         return an_error(error,capacity,"native audio preparation or recovery must finish before shared publication");
     return sh_audio_bank_gate_begin(&g_bank_gate,scope,error,capacity);
@@ -113,11 +121,12 @@ int sh_audio_banks_native_shared_begin(sh_audio_bank_scope *scope,char *error,si
 int sh_audio_banks_native_shared_recover(sh_audio_bank_scope *scope,char *error,size_t capacity)
 {
     DWORD thread=GetCurrentThreadId();
-    if((!g_limits.pending && !g_environment.pending && !g_state.pending && !g_parameter.pending) ||
+    if((!g_limits.pending && !g_environment.pending && !g_state.pending && !g_parameter.pending && !g_switch.pending) ||
         (g_limits.pending && g_limits.pending->thread!=thread) ||
         (g_environment.pending && g_environment.pending->thread!=thread) ||
         (g_state.pending && g_state.pending->thread!=thread) ||
-        (g_parameter.pending && g_parameter.pending->thread!=thread))
+        (g_parameter.pending && g_parameter.pending->thread!=thread) ||
+        (g_switch.pending && g_switch.pending->thread!=thread))
         return an_error(error,capacity,"no retained shared audio recovery belongs to this thread");
     if(!sh_audio_bank_gate_begin(&g_bank_gate,scope,error,capacity))return 0;
     g_shared_recovery=1;return 1;
@@ -128,12 +137,13 @@ int sh_audio_banks_native_shared_ready(const sh_audio_bank_scope *scope,char *er
         (!g_limits.pending || sh_audio_limits_native_ready(g_limits.pending,error,capacity)) &&
         (!g_environment.pending || sh_audio_environment_native_ready(g_environment.pending,error,capacity)) &&
         (!g_state.pending || sh_audio_state_native_ready(g_state.pending,error,capacity)) &&
+        (!g_switch.pending || sh_audio_switch_native_ready(g_switch.pending,error,capacity)) &&
         (!g_parameter.pending || sh_audio_parameter_native_ready(g_parameter.pending,error,capacity));
 }
 int sh_audio_banks_native_shared_end(sh_audio_bank_scope *scope,char *error,size_t capacity)
 {
     if(!scope || scope->owner!=&g_bank_gate)return an_error(error,capacity,"shared publication scope is unavailable");
-    int complete=!g_limits.pending && !g_environment.pending && !g_state.pending && !g_parameter.pending;
+    int complete=!g_limits.pending && !g_environment.pending && !g_state.pending && !g_parameter.pending && !g_switch.pending;
     int released=sh_audio_bank_gate_end(scope,error,capacity);
     if(scope->owner)return released;
     g_shared_recovery=0;
@@ -664,7 +674,7 @@ static int an_activate(sh_audio_bank_addition *addition, const uint32_t *events,
     int result = 0;
     sh_audio_bank_ops ops = {NULL, an_load, an_unload};
     carried_detail[0] = 0;
-    if(g_limits.pending || g_environment.pending || g_state.pending || g_parameter.pending || g_bank_gate.scope)
+    if(g_limits.pending || g_environment.pending || g_state.pending || g_parameter.pending || g_switch.pending || g_bank_gate.scope)
         return an_error(error,capacity,"playback settings must be restored or accepted before another bank activation");
     if (g_addition != addition || (addition && addition->thread != GetCurrentThreadId()))
         return an_error(error, capacity, "audio activation is owned by another native transaction");
@@ -759,7 +769,7 @@ int sh_audio_banks_native_activate(const uint32_t *events, size_t count,
 sh_audio_bank_addition *sh_audio_banks_native_additions_begin(char *error, size_t capacity)
 {
     sh_audio_bank_addition *addition;
-    if(g_limits.pending || g_environment.pending || g_state.pending || g_parameter.pending || g_bank_gate.scope) { an_error(error,capacity,"shared audio settings transition is still pending");return NULL; }
+    if(g_limits.pending || g_environment.pending || g_state.pending || g_parameter.pending || g_switch.pending || g_bank_gate.scope) { an_error(error,capacity,"shared audio settings transition is still pending");return NULL; }
     if (g_addition) { an_error(error, capacity, "another additive audio transaction is active"); return NULL; }
     addition = calloc(1, sizeof(*addition));
     if (!addition || g_count > SIZE_MAX / sizeof(*addition->before)) {
@@ -808,7 +818,7 @@ int sh_audio_banks_native_additions_end(sh_audio_bank_addition **handle,
 {
     sh_audio_bank_addition *addition = handle ? *handle : NULL;
     if (!addition) return 1;
-    if(g_limits.pending || g_environment.pending || g_state.pending || g_parameter.pending || g_bank_gate.scope)
+    if(g_limits.pending || g_environment.pending || g_state.pending || g_parameter.pending || g_switch.pending || g_bank_gate.scope)
         return an_error(error,capacity,"playback settings must be restored or accepted before ending bank activation");
     if (addition != g_addition || addition->thread != GetCurrentThreadId() ||
         (accepted && !addition->prepared)) return an_error(error, capacity, "additive audio session has not completed");
@@ -847,6 +857,7 @@ static sh_audio_limits_change g_tx_limits;
 static sh_audio_environment_change g_tx_environment;
 static sh_audio_state_change g_tx_state;
 static sh_audio_parameter_change g_tx_parameter;
+static sh_audio_switch_change g_tx_switch;
 
 static int an_fail(char *error, size_t capacity, const char *format, uint32_t value)
 { if (error && capacity) snprintf(error, capacity, format, (unsigned)value); return 0; }
@@ -977,7 +988,7 @@ static void an_program_free(an_program *program)
 }
 static int an_programs_busy(void)
 {
-    return g_limits.pending || g_environment.pending || g_state.pending || g_parameter.pending ||
+    return g_limits.pending || g_environment.pending || g_state.pending || g_parameter.pending || g_switch.pending ||
         g_bank_gate.scope || g_commands.uncertain;
 }
 
@@ -989,7 +1000,9 @@ int sh_audio_banks_native_programs_retire(char *error, size_t capacity)
 {
     int failed = 0; size_t remaining = 0;
     if (error && capacity) *error = 0;
-    if (an_programs_busy() || g_addition) return (int)g_program_count;
+    if (g_addition) return (int)g_program_count;
+    if (!an_shared_settle(error, capacity)) return -1;
+    if (an_programs_busy()) return (int)g_program_count;
     an_pbank_holders();
     for (size_t i = 0; i < g_pbank_count; i++)
         if (!g_pbanks[i].active && g_pbanks[i].owned && an_pbank_unload_idle(i, error, capacity) < 0) failed = 1;
@@ -1026,32 +1039,38 @@ static int an_policy_views(const sh_audio_active_program *programs, size_t count
     }
     return 1;
 }
-/* One serialized publication of every shared-control leg. Bank commands have
+/* One serialized publication of every shared-control leg, switch groups
+ * before parameters as the native STMG reader orders them. Bank commands have
  * completed before this and none are submitted while it holds the gate. */
 static int an_shared_publish(const sh_audio_shared_policy *effective, char *error, size_t capacity)
 {
     sh_audio_bank_scope scope = {0}; int stage = 0, ok = 0;
     if (!sh_audio_bank_gate_begin(&g_bank_gate, &scope, error, capacity)) return 0;
     memset(&g_tx_limits, 0, sizeof(g_tx_limits)); memset(&g_tx_environment, 0, sizeof(g_tx_environment));
-    memset(&g_tx_state, 0, sizeof(g_tx_state)); memset(&g_tx_parameter, 0, sizeof(g_tx_parameter));
+    memset(&g_tx_state, 0, sizeof(g_tx_state)); memset(&g_tx_switch, 0, sizeof(g_tx_switch));
+    memset(&g_tx_parameter, 0, sizeof(g_tx_parameter));
     if (sh_audio_limits_native_apply(&g_limits, effective, &g_tx_limits, error, capacity) != 1) goto recover;
     stage = 1;
     if (sh_audio_environment_native_apply(&g_environment, effective, &g_tx_environment, error, capacity) != 1) goto recover;
     stage = 2;
     if (sh_audio_state_native_apply(&g_state, effective, &g_tx_state, error, capacity) != 1) goto recover;
     stage = 3;
-    if (sh_audio_parameter_native_apply(&g_parameter, effective, &g_tx_parameter, error, capacity) != 1) goto recover;
+    if (sh_audio_switch_native_apply(&g_switch, effective, &g_tx_switch, error, capacity) != 1) goto recover;
     stage = 4;
+    if (sh_audio_parameter_native_apply(&g_parameter, effective, &g_tx_parameter, error, capacity) != 1) goto recover;
+    stage = 5;
     if (!sh_audio_banks_native_shared_ready(&scope, error, capacity)) goto recover;
     sh_audio_limits_native_accept(&g_tx_limits); sh_audio_environment_native_accept(&g_tx_environment);
-    sh_audio_state_native_accept(&g_tx_state); sh_audio_parameter_native_accept(&g_tx_parameter);
+    sh_audio_state_native_accept(&g_tx_state); sh_audio_switch_native_accept(&g_tx_switch);
+    sh_audio_parameter_native_accept(&g_tx_parameter);
     ok = 1;
 recover:
     if (!ok) {
         /* Reverse order; a leg whose restore fails keeps its receipt and blocks
-         * later transitions until recovery succeeds. */
+         * later transitions until a settle retry succeeds. */
         char ignored[256];
-        if (stage >= 4) sh_audio_parameter_native_restore(&g_tx_parameter, ignored, sizeof(ignored));
+        if (stage >= 5) sh_audio_parameter_native_restore(&g_tx_parameter, ignored, sizeof(ignored));
+        if (stage >= 4) sh_audio_switch_native_restore(&g_tx_switch, ignored, sizeof(ignored));
         if (stage >= 3) sh_audio_state_native_restore(&g_tx_state, ignored, sizeof(ignored));
         if (stage >= 2) sh_audio_environment_native_restore(&g_tx_environment, ignored, sizeof(ignored));
         if (stage >= 1) sh_audio_limits_native_restore(&g_tx_limits, ignored, sizeof(ignored));
@@ -1061,9 +1080,35 @@ recover:
         char detail[256];
         if (g_environment.pending && !sh_audio_environment_native_release(&g_tx_environment, detail, sizeof(detail))) backend_log(detail);
         if (g_state.pending && !sh_audio_state_native_release(&g_tx_state, detail, sizeof(detail))) backend_log(detail);
+        if (g_switch.pending && !sh_audio_switch_native_release(&g_tx_switch, detail, sizeof(detail))) backend_log(detail);
         if (g_parameter.pending && !sh_audio_parameter_native_release(&g_tx_parameter, detail, sizeof(detail))) backend_log(detail);
     }
     return ok;
+}
+/* Receipts a publication could not restore or release stay pending and block
+ * every later transition. Retry them at a main-thread boundary before anything
+ * else starts: accepted legs release, the others restore in reverse order. */
+static int an_shared_settle(char *error, size_t capacity)
+{
+    char ignored[256];
+    if (!g_limits.pending && !g_environment.pending && !g_state.pending && !g_switch.pending && !g_parameter.pending) return 1;
+    if (g_bank_gate.scope || g_addition || g_commands.uncertain)
+        return an_error(error, capacity, "shared audio recovery is waiting on another native transaction");
+    sh_audio_bank_scope scope = {0};
+    if (!sh_audio_bank_gate_begin(&g_bank_gate, &scope, error, capacity)) return 0;
+    if (g_parameter.pending && !sh_audio_parameter_native_release(g_parameter.pending, ignored, sizeof(ignored)))
+        sh_audio_parameter_native_restore(g_parameter.pending, ignored, sizeof(ignored));
+    if (g_switch.pending && !sh_audio_switch_native_release(g_switch.pending, ignored, sizeof(ignored)))
+        sh_audio_switch_native_restore(g_switch.pending, ignored, sizeof(ignored));
+    if (g_state.pending && !sh_audio_state_native_release(g_state.pending, ignored, sizeof(ignored)))
+        sh_audio_state_native_restore(g_state.pending, ignored, sizeof(ignored));
+    if (g_environment.pending && !sh_audio_environment_native_release(g_environment.pending, ignored, sizeof(ignored)))
+        sh_audio_environment_native_restore(g_environment.pending, ignored, sizeof(ignored));
+    if (g_limits.pending) sh_audio_limits_native_restore(g_limits.pending, ignored, sizeof(ignored));
+    sh_audio_bank_gate_end(&scope, NULL, 0);
+    if (g_limits.pending || g_environment.pending || g_state.pending || g_switch.pending || g_parameter.pending)
+        return an_error(error, capacity, "shared audio recovery still retains native ownership");
+    return 1;
 }
 static int an_program_known(const void *owner)
 {
@@ -1110,9 +1155,7 @@ static int an_programs_admit(const sh_audio_active_program *programs, size_t cou
 static int an_publishable(const sh_audio_active_program *programs, size_t count,
     const sh_audio_shared_policy *effective, char *error, size_t capacity)
 {
-    for (size_t i = 0; i < effective->count; i++)
-        if (effective->settings[i].edited && effective->settings[i].record.kind == SH_AUDIO_SHARED_SWITCH)
-            return an_error(error, capacity, "native audio switch publication is not available for this edit");
+    (void)effective;
     for (size_t i = 0; i < count; i++)
         if (sh_package_audio_program_bus_edited(programs[i].program))
             return an_error(error, capacity, "native audio bus publication is not available for this edit");
@@ -1129,6 +1172,7 @@ int sh_audio_banks_native_programs_activate(const sh_audio_active_program *progr
     if ((count && !programs) || count > SIZE_MAX / sizeof(*next) - g_program_count) {
         an_release_owners(programs, count); return an_error(error, capacity, "invalid active audio program set");
     }
+    if (!g_addition && !an_shared_settle(error, capacity)) { an_release_owners(programs, count); return 0; }
     if (an_programs_busy() || g_addition) {
         an_release_owners(programs, count);
         return an_error(error, capacity, "native audio recovery or another transaction must finish first");
