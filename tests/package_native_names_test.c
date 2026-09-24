@@ -5,6 +5,7 @@
 #include "package_native_names.h"
 #include "swf_binary.h"
 #include "font_binary.h"
+#include "model_reference.h"
 
 static void release(char *name, char **paths, size_t count)
 { free(name); if (paths) for (size_t i = 0; i < count; i++) free(paths[i]); free(paths); }
@@ -201,6 +202,17 @@ int main(void)
     mapping("staticparticlemodel", "models/particle.lwo", "generated/models/particle.pmodel", "smp/", ".pmodel");
     mapping("basemodel", "md6/prop.md6mesh", "generated/basemodel/md6/prop.bmd6model", "smp/", ".bmd6model");
     mapping("anim", "md6/motion.md6anim", "cooked/anim/md6/motion.bmd6anim", "smp/", ".bmd6anim");
+    /* Model fields dispatch to an md6def by its .md6 name: the alias keeps it. */
+    mapping("md6def", "zion/gore/chunk.md6", "generated/decls/md6def/zion/gore/chunk.md6.decl", "smp/", ".md6.decl");
+    mapping("md6def", "demons/base", "generated/decls/md6def/demons/base.decl", "smp/", ".decl");
+    {
+        sh_model_reference reference = {0};
+        assert(sh_model_reference_read("zion/gore/chunk.md6", &reference) == 1);
+        char *bound = sh_model_reference_bind(&reference, "smp/0123456789abcdef.md6");
+        assert(bound && !strcmp(bound, "smp/0123456789abcdef.md6")); free(bound);
+        assert(!sh_model_reference_bind(&reference, "smp/0123456789abcdef"));
+        sh_model_reference_clear(&reference);
+    }
     mapping("image", "textures/surface.tga$clamp$bc7", "generated/image/textures/surface.tga$clamp$bc7.bimage", "generated/image/smp/", ".bimage");
     mapping("image", "generated/swf/icon.bimage", "generated/swf/icon.bimage", "generated/image/smp/", ".bimage");
     sh_compiled_resource resources[2] = {0};

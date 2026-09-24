@@ -204,6 +204,12 @@ int sh_package_native_names_assign_bounded(void *context, size_t index,
         }
         if (!declaration) suffix = (!strcmp(unit->family, "model") || !strcmp(unit->family, "discreteanimation")) ? ".lwo" :
             !strcmp(unit->family, "basemodel") ? ".md6mesh" : !strcmp(unit->family, "anim") ? ".md6anim" : "";
+        else if (!strcmp(unit->family, "md6def")) {
+            /* A model field reaches an md6def only through its .md6 name; keep
+             * that dispatch suffix so the field still names the definition. */
+            size_t n = strlen(unit->name);
+            if (n > 4 && !strcmp(unit->name + n - 4, ".md6")) suffix = ".md6";
+        }
     }
     for (size_t digits = 64; digits >= 16; digits -= 2) {
         char *physical;
