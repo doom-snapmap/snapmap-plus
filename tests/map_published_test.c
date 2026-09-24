@@ -16,6 +16,7 @@ static __declspec(thread) sh_rawmap_read_scope *read_scope;
 static sh_rawmap_request retained;
 static sh_rawmap_loading retained_loading;
 static char retained_json[64];
+static const char rebound_json[] = "compiled source with scoped aliases";
 static void *call_callbacks[PUB_HOOKS];
 
 void backend_log(const char *text) { (void)text; }
@@ -59,7 +60,10 @@ int sh_map_native_enter(const sh_map_native_selection *selection, const char *js
     sh_map_native_enter_fn enter, void *context, char *error, size_t capacity)
 {
     int snapshot = 123;
-    assert(inspection && !strcmp(json, "retained source")); decoded++;
+    assert(inspection && !strcmp(json, rebound_json)); decoded++;
+    /* Selection identity remains the captured request; only gameplay source is
+     * supplied by the compiled context at the activation boundary. */
+    assert(!strcmp(sh_map_native_source(selection, NULL), "retained source"));
     if (mode == 3) { snprintf(error, capacity, "decode refused"); return 0; }
     return enter(context, selection->metadata, &snapshot);
 }
@@ -102,7 +106,7 @@ static int finish(int consent)
         assert(retained_loading.waiting(request.context));
         assert(!retained_loading.matches(request.context, (void *)0x778));
         assert(retained_loading.matches(request.context, (void *)0x777));
-        result = retained_loading.select(request.context);
+        result = retained_loading.select(request.context, rebound_json);
     }
     if (request.release) request.release(request.context);
     return result;

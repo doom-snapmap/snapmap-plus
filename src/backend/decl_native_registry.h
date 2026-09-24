@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 typedef struct sh_decl_native_registry sh_decl_native_registry;
+struct sh_decl_script_schema;
 typedef struct sh_decl_registry_source {
     void *context;
     int (*read)(void *context, uintptr_t address, void *destination, size_t length);
@@ -14,6 +15,7 @@ typedef struct sh_decl_registry_source {
      * the effective generated/decls path, not just development source records.
      * Never create defaults, parse declarations or instantiate entities here. */
     int (*source_exists)(void *context, uintptr_t manager, const char *type, const char *name);
+    const struct sh_decl_script_schema *scripts; /* borrowed immutable metadata */
 } sh_decl_registry_source;
 
 typedef struct sh_decl_reference {
@@ -36,6 +38,61 @@ void sh_decl_native_registry_close(sh_decl_native_registry *registry);
 int sh_decl_native_registry_type_class(sh_decl_native_registry *registry,
     const char *type, const char **class_name);
 
+enum sh_native_resource_identity_result {
+    SH_NATIVE_RESOURCE_ID_ERROR = -1,
+    SH_NATIVE_RESOURCE_ID_UNREGISTERED = 0,
+    SH_NATIVE_RESOURCE_ID_FREE = 1,
+    SH_NATIVE_RESOURCE_ID_SAME_NAME = 2,
+    SH_NATIVE_RESOURCE_ID_COLLISION = 3
+};
+typedef struct sh_native_resource_identity {
+    const char *type;          /* copied native spelling; borrowed until close */
+    char *name;                /* owned normalized candidate name */
+    uint32_t id, resident_id;  /* prospective ID; stored ID when occupied */
+    uintptr_t manager, resource;
+    const char *resident_name; /* copied occupant name; borrowed until close */
+} sh_native_resource_identity;
+
+/* Read-only identity checks for a logical, ASCII-insensitive family. IDs use
+ * the exact registered type spelling, never the logical spelling supplied by
+ * the caller. A different-name ID occupant takes precedence over a same-name
+ * occupant. SAME_NAME establishes identity occupancy only, not equal payloads,
+ * safe replacement, or authorization to reuse a resident object.
+ *
+ * Loaded IDs/names are captured and verified on first query of each manager;
+ * subsequent queries use the copied index at the required stable boundary.
+ * Call identity_validate after the complete allocation batch and before
+ * publication to reject changed membership, names, owners, IDs or metadata.
+ * No native/source-existence function is called. Unknown or inconsistent IDs
+ * fail closed. Output must be empty; failures leave it empty. This decl view
+ * covers exactly its supplied registration array, without extra class filters. */
+int sh_decl_native_registry_identity(sh_decl_native_registry *registry,
+    const char *family, const char *name, sh_native_resource_identity *out,
+    char *error, size_t capacity);
+int sh_decl_native_registry_identity_validate(sh_decl_native_registry *registry,
+    char *error, size_t capacity);
+void sh_native_resource_identity_clear(sh_native_resource_identity *identity);
+
+/* Identity-only view of the complete native linked manager registry. head_slot
+ * is the ADDRESS OF THE POINTER that stores the first manager, not the first
+ * manager itself. Next links are at manager+0x18. This view reads no declaration
+ * class/parent fields and never changes declaration resolution order. The same
+ * stable-boundary, query/validate, result and ownership contracts above apply. */
+typedef struct sh_native_resource_registry sh_native_resource_registry;
+typedef struct sh_native_resource_registry_source {
+    void *context;
+    int (*read)(void *context, uintptr_t address, void *destination, size_t length);
+    uintptr_t head_slot;
+} sh_native_resource_registry_source;
+sh_native_resource_registry *sh_native_resource_registry_open(sh_native_resource_registry_source source,
+    char *error, size_t capacity);
+void sh_native_resource_registry_close(sh_native_resource_registry *registry);
+int sh_native_resource_registry_identity(sh_native_resource_registry *registry,
+    const char *family, const char *name, sh_native_resource_identity *out,
+    char *error, size_t capacity);
+int sh_native_resource_registry_validate(sh_native_resource_registry *registry,
+    char *error, size_t capacity);
+
 /* Only for the generic declaration-pointer reader; image and render-model
  * readers have different contracts. Returns 1 resolved, 0 absent, -1 unknown.
  * Class matching is ASCII-insensitive. A matching manager searches its loaded
@@ -54,6 +111,15 @@ int sh_decl_native_registry_resolve(sh_decl_native_registry *registry,
  * A successful result has resource=0. The same return/ownership contract applies. */
 int sh_decl_native_registry_resolve_source(sh_decl_native_registry *registry,
     const char *class_name, const char *name, sh_decl_reference *reference);
+
+/* Candidate discovery only: enumerate the managers that the native declaration
+ * pointer reader can search, without requiring a source or resident object.
+ * Names of absent/tombstoned resources remain boundaries in a reverse graph.
+ * This is not a binding or an admission certificate. Callback returns 1 to
+ * continue, 0 to abort; names/types are borrowed only during the call. */
+typedef int (*sh_decl_source_candidate)(void *context, const char *family, const char *name);
+int sh_decl_native_registry_source_candidates(sh_decl_native_registry *registry,
+    const char *class_name, const char *name, sh_decl_source_candidate candidate, void *context);
 void sh_decl_reference_clear(sh_decl_reference *reference);
 
 typedef struct sh_decl_prepared_state {

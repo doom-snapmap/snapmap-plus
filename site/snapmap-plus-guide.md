@@ -908,6 +908,12 @@ an ID can travel together without one replacing the other. If both need installa
 they get separate folders; their descriptors and asset trees stay intact. Sharing an
 ID does not make incompatible resource edits compatible.
 Optional `hud.weapons.<weapon declaration name>.ammo_display` accepts `weapon` or `engine`.
+Use the weapon declaration's name, not its entityDef name or file path. The compiler
+keeps the setting with each weapon variant automatically. If identical weapons
+share one native identity and request different modes, `weapon` wins among peers;
+an explicit setting authored in the map takes precedence over a local setting.
+`weapon` preserves the weapon's own capacity display, while `engine` preserves the
+game's normal mode override. Neither setting changes ammunition or weapon behavior.
 There are no versions, file lists, path mappings, author hashes, receipts, priorities or map-inclusion
 switches to maintain. Boss startup behavior belongs in its asset declarations and travels with them.
 

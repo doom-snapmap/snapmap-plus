@@ -15,6 +15,9 @@ typedef struct sh_decl_node {
     char *key, *value;
     struct sh_decl_node *children, *next;
     int compound, reset, assignment;
+    /* Native type/ops tokens before an assignment key. Retained verbatim;
+     * reference binding still uses the registered field schema. */
+    char *annotation;
 } sh_decl_node;
 
 /* Parse a complete braced declaration. Unsupported syntax, duplicate keys,
@@ -34,9 +37,9 @@ char *sh_decl_tree_write(const sh_decl_node *root, size_t *length);
 void sh_decl_tree_free(sh_decl_node *node);
 const sh_decl_node *sh_decl_tree_member(const sh_decl_node *parent, const char *key);
 
-/* Borrow one plain token or quoted string, without its quotes. Escape sequences
- * and expressions return zero: the owning resource reader must interpret those
- * with its native lexer settings, rather than guessing a resource name. */
+/* Borrow one plain token or quoted string, without its quotes. Declaration
+ * lexer flags disable escapes, so backslashes remain literal path bytes.
+ * Expressions and multiple quoted tokens return zero. JSON has its own reader. */
 int sh_decl_tree_literal(const sh_decl_node *node, const char **text, size_t *length);
 
 #endif

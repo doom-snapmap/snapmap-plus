@@ -9,18 +9,22 @@
 
 typedef struct region { void *data; size_t size; } region;
 typedef struct fixture {
-    region regions[256];
+    region regions[320];
     size_t region_count;
     unsigned char *reflect, *records, *objects, *pointers;
     uintptr_t unreadable;
     char references[4096];
     size_t gaps;
+    const sh_decl_script_schema *scripts;
+    uintptr_t script_tables[2];
+    size_t script_lookups;
+    int script_fail;
 } fixture;
 
 static void *allocate(fixture *f, size_t size)
 {
     void *memory = calloc(1, size);
-    assert(memory && f->region_count < 256);
+    assert(memory && f->region_count < sizeof(f->regions) / sizeof(f->regions[0]));
     f->regions[f->region_count++] = (region){memory, size}; return memory;
 }
 static char *text(fixture *f, const char *value)
@@ -76,7 +80,7 @@ static void gap(void *context, const char *path, sh_decl_value_type value, const
 static void setup(fixture *f)
 {
     unsigned char *container, *record, *fields, *element, *enums, *enum_readers;
-    size_t count = 28;
+    size_t count = 52;
     memset(f, 0, sizeof(*f));
     f->reflect = (unsigned char *)allocate(f, 0xc0);
     container = (unsigned char *)allocate(f, 0x30);
@@ -86,8 +90,8 @@ static void setup(fixture *f)
     pointer(f->reflect, 0, container); pointer(container, 0x20, f->records);
     pointer(f->reflect, 0x88, f->objects); number(f->reflect, 0x90, (int32_t)count + 1);
     pointer(f->reflect, 0xa0, f->pointers); number(f->reflect, 0xa8, (int32_t)count + 1);
-    type(f, 0, "idDeclEntityDef", "", 0, 0x10);
-    type(f, 1, "idDeclInventory", "", 0, 0x10);
+    type(f, 0, "idDeclEntityDef", "idDecl", 0, 0x10);
+    type(f, 1, "idDeclInventory", "idDecl", 0, 0x10);
     type(f, 2, "idStr", "", 0x20, 0);
     type(f, 3, "idAtomicString", "", 0x30, 0);
     type(f, 4, "int", "", 0x40, 0);
@@ -95,7 +99,7 @@ static void setup(fixture *f)
     fields = (unsigned char *)allocate(f, 2 * 0x48); pointer(record, 0x20, fields);
     field(f, fields, 0, "target", "idDeclEntityDef", "*", 8);
     record = type(f, 6, "Entity", "Base", 0, 0);
-    fields = (unsigned char *)allocate(f, 12 * 0x48); pointer(record, 0x20, fields);
+    fields = (unsigned char *)allocate(f, 28 * 0x48); pointer(record, 0x20, fields);
     field(f, fields, 0, "inventory", "idList < Ref , TAG >", "", 24);
     field(f, fields, 1, "name", "idStr", "", 24);
     field(f, fields, 2, "custom", "OpaqueAtom", "", 8);
@@ -107,6 +111,22 @@ static void setup(fixture *f)
     field(f, fields, 8, "atomic", "idAtomicString", "", 8);
     field(f, fields, 9, "alias", "SharedAtom", "", 8);
     field(f, fields, 10, "variant", "idTypeInfoObjectPtr < Base >", "", 16);
+    field(f, fields, 11, "color", "idColor", "", 16);
+    field(f, fields, 12, "duration", "idTypesafeTime < float , secondUnique_t , 1 >", "", 4);
+    field(f, fields, 13, "animState", "idAnimWebPath", "", 48);
+    field(f, fields, 14, "atomicState", "idAnimWebPath_Atomic", "", 64);
+    field(f, fields, 15, "nativeClass", "idTypeInfo", "*", 8);
+    field(f, fields, 16, "classReference", "idTypeInfoPtr < Base >", "", 8);
+    field(f, fields, 17, "animationAlias", "idHandle < unsigned short , invalidAliasHandle_t , INVALID_ALIAS_HANDLE >", "", 2);
+    field(f, fields, 18, "atomicAlias", "idAtomicHandleT < aliasRefType_t >", "", 8);
+    field(f, fields, 19, "deadline", "timeContainer_t", "", 12);
+    field(f, fields, 20, "volume", "randomValue_t", "", 12);
+    field(f, fields, 21, "randomAlias", "RandomAlias", "", 12);
+    field(f, fields, 22, "script", "idSSObject", "*", 8);
+    field(f, fields, 23, "bindParent", "idManagedClassPtr < idEntity >", "", 24);
+    field(f, fields, 24, "targetActor", "idManagedClassPtr < idAI2 >", "", 24);
+    field(f, fields, 25, "activateOnArrival", "idList < ManagedRefs >", "", 24);
+    field(f, fields, 26, "staticData", "idStaticParticleModelData", "*", 8);
     record = type(f, 7, "idList < Ref , TAG >", "", 0x50, 0);
     element = (unsigned char *)allocate(f, 0x48); pointer(record, 0x18, element);
     field(f, element, 0, "element", "idDeclInventory", "*", 8);
@@ -139,6 +159,34 @@ static void setup(fixture *f)
     element = (unsigned char *)allocate(f, 0x48); pointer(record, 0x18, element);
     field(f, element, 0, "element", "idTypeInfoGraphNode", "", 16);
     type(f, 27, "CustomEntity", "Base", 0xb0, 0);
+    type(f, 28, "idColor", "", 0xc0, 0);
+    type(f, 29, "OtherColor", "", 0xc1, 0);
+    record = type(f, 30, "idTypesafeTime < float , secondUnique_t , 1 >", "", 0xd0, 0);
+    element = (unsigned char *)allocate(f, 0x48); pointer(record, 0x18, element);
+    field(f, element, 0, "element", "float", "", 4);
+    type(f, 31, "idAnimWebPath", "", 0xe0, 0);
+    type(f, 32, "idAnimWebPath_Atomic", "", 0xe1, 0);
+    type(f, 33, "idTypeInfo", "", 0, 0xe2);
+    type(f, 34, "idTypeInfoPtr < Base >", "", 0xe3, 0);
+    type(f, 35, "UnknownPath", "", 0xe4, 0);
+    type(f, 36, "UnknownClassPointer", "", 0, 0xe4);
+    type(f, 37, "idHandle < unsigned short , invalidAliasHandle_t , INVALID_ALIAS_HANDLE >", "", 0xf0, 0);
+    type(f, 38, "idAtomicHandleT < aliasRefType_t >", "", 0xf1, 0);
+    type(f, 39, "idAtomicHandleT < otherRefType_t >", "", 0xf2, 0);
+    type(f, 40, "timeContainer_t", "", 0xf3, 0);
+    type(f, 41, "OtherTimer", "", 0xf4, 0);
+    type(f, 42, "idSSObject", "", 0, 0xf5);
+    type(f, 43, "idDecl", "", 0, 0x10);
+    type(f, 44, "randomValue_t", "", 0xf6, 0);
+    type(f, 45, "RandomAlias", "", 0xf6, 0);
+    type(f, 46, "idManagedClassPtr < idEntity >", "", 0x100, 0);
+    type(f, 47, "idManagedClassPtr < idAI2 >", "", 0x100, 0);
+    type(f, 48, "OtherManagedHandle", "", 0x101, 0);
+    record = type(f, 49, "idList < ManagedRefs >", "", 0x50, 0);
+    element = (unsigned char *)allocate(f, 0x48); pointer(record, 0x18, element);
+    field(f, element, 0, "element", "idManagedClassPtr < idEntity >", "", 24);
+    type(f, 50, "idStaticParticleModelData", "", 0, 0x110);
+    type(f, 51, "OtherParticleData", "", 0, 0x111);
     enums = (unsigned char *)allocate(f, 2 * 0x18);
     enum_readers = (unsigned char *)allocate(f, 2 * 16);
     pointer(enums, 0, text(f, "Mode")); pointer(container, 0x10, enums);
@@ -148,7 +196,7 @@ static void cleanup(fixture *f)
 { while (f->region_count) free(f->regions[--f->region_count].data); }
 static sh_decl_native_schema *open_schema(fixture *f)
 {
-    sh_decl_native_source source = {f, read_memory, (uintptr_t)f->reflect};
+    sh_decl_native_source source = {f, read_memory, (uintptr_t)f->reflect, f->scripts};
     sh_decl_dependency_observer observer = {f, reference, gap};
     return sh_decl_native_schema_open(source, observer, NULL, 0);
 }
@@ -378,8 +426,125 @@ static void graph_dependencies(fixture *f)
     sh_decl_native_schema_close(schema);
 }
 
+static int script_lookup(void *context, const char *name, uintptr_t *table)
+{
+    fixture *f = context;
+    f->script_lookups++;
+    *table = 0;
+    if (f->script_fail) return -1;
+    if (!strcmp(name, "Entity")) *table = f->script_tables[0];
+    else if (!strcmp(name, "Nested")) *table = f->script_tables[1];
+    return *table ? 1 : 0;
+}
+static void script_field(fixture *f, uintptr_t table, size_t index,
+    const char *name, const char *type_name)
+{
+    unsigned char *row = (unsigned char *)table + index * 40;
+    pointer(row, 0, text(f, type_name)); pointer(row, 8, text(f, ""));
+    pointer(row, 16, text(f, name));
+}
+static int inspect_script(fixture *f, const char *body, sh_decl_dependency_result *result)
+{
+    sh_decl_native_schema *native = open_schema(f);
+    sh_decl_node *root = sh_decl_tree_parse_ordered((sh_decl_source){body, strlen(body)}, NULL, 0);
+    int ok;
+    assert(native && root);
+    f->references[0] = 0; f->gaps = 0;
+    ok = sh_decl_state_dependencies(root, (sh_decl_value_type){"idSSObject", "*"},
+        sh_decl_native_schema_view(native), result);
+    sh_decl_tree_free(root); sh_decl_native_schema_close(native); return ok;
+}
+static void script_metadata(void)
+{
+    fixture f;
+    uintptr_t *names;
+    sh_decl_script_source source;
+    sh_decl_script_schema *scripts;
+    sh_decl_dependency_result result;
+    char error[256];
+    size_t calls;
+    setup(&f);
+    names = allocate(&f, 3 * sizeof(*names));
+    names[0] = (uintptr_t)text(&f, "Entity"); names[1] = (uintptr_t)text(&f, "Empty");
+    /* The terminator needs only one readable pointer, like the native loop. */
+    f.script_tables[0] = (uintptr_t)allocate(&f, 4 * 40 + 8);
+    f.script_tables[1] = (uintptr_t)allocate(&f, 2 * 40 + 8);
+    script_field(&f, f.script_tables[0], 0, "target", "idDeclEntityDef");
+    script_field(&f, f.script_tables[0], 1, "label", "ssString");
+    script_field(&f, f.script_tables[0], 2, "nested", "Nested");
+    script_field(&f, f.script_tables[0], 3, "items", "ssList<idDeclInventory>");
+    script_field(&f, f.script_tables[1], 0, "target", "idDeclEntityDef");
+    script_field(&f, f.script_tables[1], 1, "recursive", "Nested");
+    source = (sh_decl_script_source){&f, read_memory, (uintptr_t)names, script_lookup};
+    scripts = sh_decl_script_schema_capture(source, error, sizeof(error));
+    assert(scripts && !error[0]); f.scripts = scripts;
+    calls = f.script_lookups; assert(calls == 7);
+    assert(sh_decl_script_schema_find(scripts, "Entity")->constructible);
+    assert(!sh_decl_script_schema_find(scripts, "Nested")->constructible);
+    assert(!sh_decl_script_schema_find(scripts, "Empty")->has_fields);
+    assert(!sh_decl_script_schema_find(scripts, "unknown"));
+    /* Script dispatch uses generic idDecl resolution directly, even when the
+     * same native class registers a different ordinary pointer reader. */
+    pointer(f.pointers, 1 * 16 + 8, (const void *)0xf7);
+    /* Change the backing module field name: the snapshot owns every string. */
+    pointer((void *)f.script_tables[0], 16, text(&f, "changed"));
+    assert(inspect_script(&f, "{ object = \"Entity\"; target = \"one\"; target = \"two\";"
+        " label = \"unrelated/path\"; nested = { target = \"three\"; recursive = { target = \"four\"; } }"
+        " items = { num = 1; item[0] = \"five\"; } obsolete = \"not/a/resource\"; }", &result));
+    assert(result.references == 5 && !result.gaps && f.script_lookups == calls);
+    assert(strstr(f.references, "edit.target|idDeclEntityDef|one") &&
+        strstr(f.references, "edit.target|idDeclEntityDef|two") &&
+        strstr(f.references, "edit.nested.recursive.target|idDeclEntityDef|four") &&
+        strstr(f.references, "edit.items.item[0]|idDeclInventory|five"));
+    {
+        const char *json = "{\"object\":\"Entity\",\"target\":\"one\","
+            "\"nested\":{\"target\":\"three\"},\"items\":[\"four\"],\"label\":\"unrelated/path\"}";
+        sh_decl_native_schema *native = open_schema(&f);
+        f.references[0] = 0;
+        int inspected = sh_decl_json_state_dependencies(json, strlen(json), (sh_decl_value_type){"idSSObject", "*"},
+            sh_decl_native_schema_view(native), &result);
+        if (!inspected) fprintf(stderr, "script JSON: visited=%zu references=%zu gaps=%zu aborted=%d\n",
+            result.visited, result.references, result.gaps, result.aborted);
+        assert(inspected);
+        assert(result.references == 3 && !result.gaps && strstr(f.references, "edit.items.[0]|idDeclInventory|four"));
+        json = "{\"target\":\"one\",\"object\":\"Entity\"}";
+        assert(!sh_decl_json_state_dependencies(json, strlen(json), (sh_decl_value_type){"idSSObject", "*"},
+            sh_decl_native_schema_view(native), &result) && result.gaps == 1);
+        json = "{\"object\":null}";
+        assert(sh_decl_json_state_dependencies(json, strlen(json), (sh_decl_value_type){"idSSObject", "*"},
+            sh_decl_native_schema_view(native), &result) && !result.references);
+        json = "{\"object\":\"NULL\"}";
+        assert(sh_decl_json_state_dependencies(json, strlen(json), (sh_decl_value_type){"idSSObject", "*"},
+            sh_decl_native_schema_view(native), &result) && !result.references);
+        json = "{\"script\":\"NULL\"}";
+        assert(!sh_decl_json_state_dependencies(json, strlen(json), (sh_decl_value_type){"Entity", ""},
+            sh_decl_native_schema_view(native), &result) && result.gaps == 1);
+        json = "{\"script\":null}";
+        assert(sh_decl_json_state_dependencies(json, strlen(json), (sh_decl_value_type){"Entity", ""},
+            sh_decl_native_schema_view(native), &result) && !result.references && !result.gaps);
+        sh_decl_native_schema_close(native);
+    }
+    assert(inspect_script(&f, "{ object = \"Empty\"; ignored = \"anything\"; }", &result) && !result.references);
+    assert(inspect_script(&f, "{}", &result) && !result.references);
+    assert(inspect_script(&f, "{ object = NULL; }", &result) && !result.references);
+    assert(inspect_script(&f, "{ object = \"NULL\"; }", &result) && !result.references);
+    assert(!inspect(&f, "{ edit = { script = \"NULL\"; } }", &result) && result.gaps == 1);
+    assert(inspect(&f, "{ edit = { script = NULL; } }", &result) && !result.references && !result.gaps);
+    assert(!inspect_script(&f, "{ object = \"Nested\"; }", &result) && result.gaps == 1);
+    assert(!inspect_script(&f, "{ target = \"one\"; object = \"Entity\"; }", &result) && result.gaps == 1);
+    f.scripts = NULL;
+    assert(!inspect_script(&f, "{ object = \"Entity\"; }", &result) && result.gaps == 1);
+    sh_decl_script_schema_free(scripts);
+    f.script_fail = 1;
+    assert(!sh_decl_script_schema_capture(source, error, sizeof(error)) && error[0]);
+    f.script_fail = 0; f.unreadable = f.script_tables[1];
+    assert(!sh_decl_script_schema_capture(source, error, sizeof(error)) && error[0]);
+    cleanup(&f);
+}
+
 int main(void)
 {
+    script_metadata();
     fixture f;
     sh_decl_dependency_result result;
     sh_decl_native_schema *schema;
@@ -399,7 +564,11 @@ int main(void)
     assert(sh_decl_native_schema_reader(schema, (sh_decl_value_type){"idDeclEntityDef", "*"}) == SH_DECL_READER_DECL);
     assert(sh_decl_native_schema_reader(schema, (sh_decl_value_type){"idDeclInventory", "*[2]"}) == SH_DECL_READER_UNKNOWN);
     assert(sh_decl_native_schema_reader(schema, (sh_decl_value_type){"idAtomicString", ""}) == SH_DECL_READER_UNKNOWN);
+    assert(sh_decl_native_schema_reader(schema, (sh_decl_value_type){"idStaticParticleModelData", "*"}) == SH_DECL_READER_STATIC_PARTICLE);
+    assert(sh_decl_native_schema_reader(schema, (sh_decl_value_type){"OtherParticleData", "*"}) == SH_DECL_READER_UNKNOWN);
     sh_decl_native_schema_close(schema);
+    assert(inspect(&f, "{ edit = { staticData = \"models/particle.lwo\"; } }", &result));
+    assert(result.references == 1 && !result.gaps && strstr(f.references, "edit.staticData|idStaticParticleModelData|models/particle.lwo"));
     assert(inspect(&f, "{ edit = { target = \"base/ref\"; name = \"not/a/ref\"; mode = \"MODE_TEST\"; bit = 1;"
                       " inventory = { num = 1; item[0] = \"weapon/ref\"; }"
                       " array = { array[5] = \"array/ref\"; } angle = 45; } }", &result));
@@ -409,8 +578,58 @@ int main(void)
     assert(strstr(f.references, "edit.array.array[5]|idDeclInventory|array/ref"));
     assert(!strstr(f.references, "not/a/ref"));
     assert(inspect(&f, "{ edit = { angle = { value = 30; } } }", &result) && !result.references);
+    assert(inspect(&f, "{ edit = { duration = 1.25; } }", &result) && !result.references);
+    assert(inspect(&f, "{ edit = { duration = { value = 2; } } }", &result) && !result.references);
+    assert(inspect(&f, "{ edit = { deadline = 1000; } }", &result) && !result.references);
+    assert(inspect(&f, "{ edit = { deadline = { milliseconds = 1000; } } }", &result) && !result.references);
+    assert(inspect(&f, "{ edit = { deadline = { obsolete = \"not/a/resource\"; } } }", &result) && !result.references);
+    assert(inspect(&f, "{ edit = { color = { r = 0.5; g = 1; b = 0; a = 1; } } }", &result) && !result.references);
+    assert(inspect(&f, "{ edit = { animState = \"movement/run:start\"; atomicState = \"combat.attack\";"
+                      " nativeClass = \"RuntimeClass\"; classReference = \"RuntimeClass\";"
+                      " target = \"real/resource\"; } }", &result));
+    assert(result.references == 1 && !result.gaps && strstr(f.references, "real/resource") &&
+        !strstr(f.references, "RuntimeClass") && !strstr(f.references, "combat.attack"));
+    assert(inspect(&f, "{ edit = { animationAlias = \"locomotion/run\"; atomicAlias = \"combat/fire\";"
+                      " target = \"real/resource\"; } }", &result));
+    assert(result.references == 1 && !result.gaps && strstr(f.references, "real/resource") &&
+        !strstr(f.references, "locomotion/run") && !strstr(f.references, "combat/fire"));
+    /* A different registered custom reader is still unknown, even when the
+     * type name sounds like a color. The exact anchor follows native metadata. */
+    schema = open_schema(&f); assert(schema);
+    sh_decl_value_shape shape = {0};
+    assert(sh_decl_native_schema_view(schema)->describe(schema,
+        (sh_decl_value_type){"OtherColor", ""}, &shape) && shape.kind == SH_DECL_VALUE_UNKNOWN);
+    shape = (sh_decl_value_shape){0};
+    assert(sh_decl_native_schema_view(schema)->describe(schema,
+        (sh_decl_value_type){"UnknownPath", ""}, &shape) && shape.kind == SH_DECL_VALUE_UNKNOWN);
+    shape = (sh_decl_value_shape){0};
+    assert(sh_decl_native_schema_view(schema)->describe(schema,
+        (sh_decl_value_type){"UnknownClassPointer", "*"}, &shape) && shape.kind == SH_DECL_VALUE_UNKNOWN);
+    shape = (sh_decl_value_shape){0};
+    assert(sh_decl_native_schema_view(schema)->describe(schema,
+        (sh_decl_value_type){"idAtomicHandleT < otherRefType_t >", ""}, &shape) && shape.kind == SH_DECL_VALUE_UNKNOWN);
+    sh_decl_native_schema_close(schema);
     assert(inspect(&f, "{ edit = { atomic = \"not/a/typed/resource\"; alias = \"also/text\"; } }", &result));
     assert(!result.references && !result.gaps);
+    assert(inspect(&f, "{ edit = { volume = { min = 0.2; max = 0.8; granularity = 0.1;"
+        " unused = \"not/a/resource\"; } randomAlias = 0.5; target = \"real/resource\"; } }", &result));
+    assert(result.references == 1 && !result.gaps && !strstr(f.references, "not/a/resource"));
+    pointer(f.objects, 45 * 16 + 8, (const void *)0xf8);
+    assert(!inspect(&f, "{ edit = { randomAlias = 0.5; } }", &result) && result.gaps == 1);
+    pointer(f.objects, 45 * 16 + 8, (const void *)0xf6);
+    assert(inspect(&f, "{ edit = { bindParent = \"looks/like/a/resource\"; targetActor = \"monster_001\"; "
+        "activateOnArrival = { num = 2; item[0] = \"door_001\"; item[1] = \"\"; } "
+        "target = \"real/resource\"; } }", &result));
+    assert(result.references == 1 && !result.gaps && !strstr(f.references, "looks/like") &&
+        !strstr(f.references, "monster_001") && !strstr(f.references, "door_001"));
+    schema = open_schema(&f); assert(schema); shape = (sh_decl_value_shape){0};
+    assert(sh_decl_native_schema_view(schema)->describe(schema,
+        (sh_decl_value_type){"OtherManagedHandle", ""}, &shape) && shape.kind == SH_DECL_VALUE_UNKNOWN);
+    sh_decl_native_schema_close(schema);
+    pointer(f.objects, 47 * 16 + 8, (const void *)0x101);
+    assert(!inspect(&f, "{ edit = { bindParent = \"instance\"; targetActor = \"instance\"; } }", &result) &&
+        result.gaps == 2 && !result.references);
+    pointer(f.objects, 47 * 16 + 8, (const void *)0x100);
     pointer(f.objects, 24 * 16 + 8, (const void *)0x31);
     assert(!inspect(&f, "{ edit = { alias = \"unknown/reader\"; } }", &result) && result.gaps == 1);
     pointer(f.objects, 24 * 16 + 8, (const void *)0x30);
@@ -437,7 +656,7 @@ int main(void)
     assert(!inspect(&f, "{ edit = { nonexistent = 0; } }", &result) && result.gaps == 1);
     number(f.reflect, 0xa8, 0);
     schema = open_schema(&f); assert(!schema);
-    number(f.reflect, 0xa8, 29);
+    number(f.reflect, 0xa8, 32);
     f.unreadable = (uintptr_t)f.reflect;
     schema = open_schema(&f); assert(!schema);
     cleanup(&f);

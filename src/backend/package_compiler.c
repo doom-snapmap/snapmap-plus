@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "package_compiler.h"
+#include "package_hud.h"
 #include "decl_compose.h"
 #include "decl_server_path.h"
 #include "decl_text.h"
@@ -275,8 +276,64 @@ static int pc_policy_merge(sh_json_object *target, const sh_json_object *source,
 
 static int pc_variant_shadowed(const sh_package_sources *sources, size_t candidate, size_t primary);
 
+/* These are capability requests, not commands or desired global snapshots.
+ * Zero opens an audited blacklist gate; one contributes no request. The native
+ * requirements owner restores its captured value when the last zero goes away.
+ * Keep this reduction separate from policy values with different semantics. */
+static int pc_requirements_merge(sh_json_object *target, const sh_json_object *source,
+    char *error, size_t capacity, int *allocation)
+{
+    static const char *const names[] = {"g_useImageBlackList", "g_useResourceBlackList"};
+    static const char *const values[] = {"{}", "{\"g_useImageBlackList\":0}",
+        "{\"g_useResourceBlackList\":0}",
+        "{\"g_useImageBlackList\":0,\"g_useResourceBlackList\":0}"};
+    sh_json_object cvars = {0}, previous = {0};
+    const char *raw, *old;
+    unsigned requested = 0;
+    int ok = 0;
+    if (!source->count) return 1;
+    raw = sh_json_object_get(source, "cvars");
+    if (source->count != 1 || !raw) goto invalid;
+    if (!sh_json_parse_object(raw, strlen(raw), 2, &cvars)) {
+        sh_json_kind kind;
+        if (sh_json_validate(raw, strlen(raw), 2, &kind) && kind == SH_JSON_OBJECT) goto memory;
+        goto invalid;
+    }
+    for (size_t i = 0; i < cvars.count; i++) {
+        const sh_json_member *member = cvars.members + i;
+        size_t gate;
+        if (member->key_length != strlen(member->key)) goto invalid;
+        for (gate = 0; gate < 2 && strcmp(member->key, names[gate]); gate++) {}
+        if (gate == 2) goto invalid;
+        if (!strcmp(member->value_json, "0") || !strcmp(member->value_json, "false"))
+            requested |= 1u << gate;
+        else if (strcmp(member->value_json, "1") && strcmp(member->value_json, "true")) goto invalid;
+    }
+    old = sh_json_object_get(target, "cvars");
+    if (old) {
+        if (!sh_json_parse_object(old, strlen(old), 2, &previous)) goto memory;
+        for (size_t gate = 0; gate < 2; gate++)
+            if (sh_json_object_get(&previous, names[gate])) requested |= 1u << gate;
+    }
+    /* Fixed spelling and ordering make the emitted request independent of
+     * descriptor member order, component discovery, and boolean spelling. */
+    if (!sh_json_object_set(target, "cvars", values[requested], 2)) goto memory;
+    ok = 1;
+    goto done;
+invalid:
+    snprintf(error, capacity, "requirements contain an unsupported setting");
+    goto done;
+memory:
+    *allocation = 1;
+    snprintf(error, capacity, "could not allocate package requirements");
+done:
+    sh_json_object_free(&cvars); sh_json_object_free(&previous);
+    return ok;
+}
+
 static int pc_policies(const sh_package_sources *sources, const sh_package_owners *owners,
-                        sh_package_policy *out, char *error, size_t capacity, int *allocation)
+                        sh_package_policy *out, char *error, size_t capacity, int *allocation,
+                        int independent)
 {
     const char *names[] = {"requirements", "strings", "hud"};
     sh_json_object *targets[] = {&out->requirements, &out->strings, &out->hud};
@@ -289,11 +346,14 @@ static int pc_policies(const sh_package_sources *sources, const sh_package_owner
         if (owners && !sh_package_owners_contains(owners, component->owner)) continue;
         /* A delivered variant's policy follows its resources: the authored
          * variant of the same package identity owns it. */
-        for (other_package = 0; !shadowed && other_package < sources->package_count; other_package++)
+        for (other_package = 0; !independent && !shadowed && other_package < sources->package_count; other_package++)
             if (!owners || sh_package_owners_contains(owners, other_package))
                 shadowed = pc_variant_shadowed(sources, component->owner, other_package);
         if (shadowed) continue;
         for (section = 0; section < 3; section++) {
+            /* Modern asset metadata is bound in its owning source component
+             * before library union. A global raw-key merge loses that scope. */
+            if (independent && section == 1) continue;
             const char *raw = sh_package_descriptor_section(&component->descriptor, names[section]);
             sh_json_object object = {0};
             int ok;
@@ -306,8 +366,11 @@ static int pc_policies(const sh_package_sources *sources, const sh_package_owner
                     names[section], sources->packages[component->owner].name);
                 return 0;
             }
-            ok = pc_policy_merge(targets[section], &object, names[section], 0, error, capacity, allocation);
-            if (!ok && !*allocation) {
+            if (!section) ok = pc_requirements_merge(targets[section], &object, error, capacity, allocation);
+            else if (independent && section == 2)
+                ok = sh_package_hud_merge_provisional(targets[section], &object, error, capacity, allocation);
+            else ok = pc_policy_merge(targets[section], &object, names[section], 0, error, capacity, allocation);
+            if (!ok && section && !(independent && section == 2) && !*allocation) {
                 size_t previous;
                 /* Find an actual incompatible pair for the diagnostic, rather
                  * than assigning precedence to an arbitrary package order. */
@@ -355,7 +418,112 @@ void sh_package_policy_free(sh_package_policy *policy)
     sh_json_object_free(&policy->requirements);
     sh_json_object_free(&policy->strings);
     sh_json_object_free(&policy->hud);
+    for (size_t i = 0; i < policy->localized_count; i++) {
+        free(policy->localized[i].key); free(policy->localized[i].mapping);
+        sh_package_owners_free(&policy->localized[i].owners);
+    }
+    free(policy->localized); sh_package_owners_free(&policy->legacy_string_owners);
+    for (size_t i = 0; i < policy->hud_binding_count; i++) {
+        free(policy->hud_bindings[i].name); sh_package_owners_free(&policy->hud_bindings[i].owners);
+    }
+    free(policy->hud_bindings);
     memset(policy, 0, sizeof(*policy));
+}
+
+int sh_package_policy_localization(sh_package_policy *policy, const char *key,
+    const char *mapping, const sh_package_owners *owners, char *error, size_t capacity)
+{
+    sh_json_object root = {0}, locales = {0};
+    const char *native, *translations;
+    sh_package_localized_string value = {0};
+    int ok = 0;
+    if (!policy || !key || strncmp(key, "#str_", 5) || !key[5] || !mapping) goto done;
+    for (size_t i = 0; i < policy->localized_count; i++) if (!_stricmp(policy->localized[i].key, key)) {
+        if (strcmp(policy->localized[i].mapping, mapping)) goto done;
+        return !owners || sh_package_owners_union(&policy->localized[i].owners, owners);
+    }
+    if (!sh_json_parse_object(mapping, strlen(mapping), 4, &root) || root.count != 2 ||
+        !(native = sh_json_object_get(&root, "native")) ||
+        !(translations = sh_json_object_get(&root, "locales")) ||
+        !sh_json_parse_object(translations, strlen(translations), 2, &locales) || !locales.count) goto done;
+    {
+        size_t n = strlen(native), length = 0;
+        char *decoded = malloc(n + 1);
+        ok = decoded && sh_json_decode_string(native, n, decoded, n + 1, &length) &&
+            strlen(decoded) == length && length > 5 && !_strnicmp(decoded, "#str_", 5);
+        free(decoded); if (!ok) goto done; ok = 0;
+    }
+    for (size_t i = 0; i < locales.count; i++) {
+        const sh_json_member *locale = locales.members + i;
+        sh_json_object pairs = {0};
+        const char *previous = sh_json_object_get(&policy->strings, locale->key);
+        char *combined = NULL, *decoded = malloc(strlen(locale->value_json) + 1);
+        size_t length = 0;
+        int valid = locale->key_length && strlen(locale->key) == locale->key_length && decoded &&
+            sh_json_decode_string(locale->value_json, strlen(locale->value_json), decoded,
+                strlen(locale->value_json) + 1, &length) && strlen(decoded) == length &&
+            (!previous || sh_json_parse_object(previous, strlen(previous), 2, &pairs));
+        const char *old = valid ? sh_json_object_get(&pairs, key + 5) : NULL;
+        valid = valid && (!old || !strcmp(old, locale->value_json)) &&
+            sh_json_object_set(&pairs, key + 5, locale->value_json, 1) &&
+            (combined = sh_json_serialize_object(&pairs, 0, NULL)) &&
+            sh_json_object_set(&policy->strings, locale->key, combined, 2);
+        free(decoded); free(combined); sh_json_object_free(&pairs);
+        if (!valid) goto done;
+    }
+    value.key = _strdup(key); value.mapping = _strdup(mapping);
+    if (!value.key || !value.mapping || (owners && !sh_package_owners_union(&value.owners, owners)) ||
+        policy->localized_count >= SIZE_MAX / sizeof(*policy->localized)) goto done;
+    sh_package_localized_string *grown = realloc(policy->localized,
+        (policy->localized_count + 1) * sizeof(*grown));
+    if (!grown) goto done;
+    policy->localized = grown; policy->localized[policy->localized_count++] = value;
+    memset(&value, 0, sizeof(value)); ok = 1;
+done:
+    sh_json_object_free(&root); sh_json_object_free(&locales);
+    free(value.key); free(value.mapping); sh_package_owners_free(&value.owners);
+    if (!ok && error && capacity) snprintf(error, capacity, "invalid or conflicting bound string mapping");
+    return ok;
+}
+
+static int pc_localized_copy(sh_package_policy *out, const sh_package_policy *from,
+    const sh_package_owners *selected, size_t count, size_t offset, char *error, size_t capacity)
+{
+    if (!sh_package_owners_within(&from->legacy_string_owners, count)) return 0;
+    for (size_t owner = 0; owner < count; owner++)
+        if ((!selected || sh_package_owners_contains(selected, owner)) &&
+            sh_package_owners_contains(&from->legacy_string_owners, owner) &&
+            (owner > SIZE_MAX - offset || !sh_package_owners_add(&out->legacy_string_owners, owner + offset))) return 0;
+    for (size_t i = 0; i < from->localized_count; i++) {
+        const sh_package_localized_string *value = from->localized + i;
+        sh_package_owners owners = {0};
+        if (!sh_package_owners_within(&value->owners, count)) return 0;
+        for (size_t owner = 0; owner < count; owner++)
+            if (sh_package_owners_contains(&value->owners, owner) &&
+                (!selected || sh_package_owners_contains(selected, owner)) &&
+                (owner > SIZE_MAX - offset || !sh_package_owners_add(&owners, owner + offset))) {
+                sh_package_owners_free(&owners); return 0;
+            }
+        int keep = !selected || sh_package_owners_count(&owners);
+        int ok = !keep || sh_package_policy_localization(out, value->key, value->mapping, &owners, error, capacity);
+        sh_package_owners_free(&owners); if (!ok) return 0;
+    }
+    return 1;
+}
+
+static int pc_legacy_strings(const sh_package_compilation *compiled, const sh_package_owners *selected,
+    sh_package_policy *out, char *error, size_t capacity)
+{
+    int allocation = 0, ok = 0;
+    sh_package_owners owners = {0}; sh_package_policy legacy = {0};
+    for (size_t i = 0; i < compiled->sources->package_count; i++)
+        if (sh_package_owners_contains(&compiled->policy.legacy_string_owners, i) &&
+            (!selected || sh_package_owners_contains(selected, i)) && !sh_package_owners_add(&owners, i)) goto done;
+    ok = !sh_package_owners_count(&owners) ||
+        (pc_policies(compiled->sources, &owners, &legacy, error, capacity, &allocation, 0) &&
+            pc_policy_merge(&out->strings, &legacy.strings, "strings", 0, error, capacity, &allocation));
+done:
+    sh_package_policy_free(&legacy); sh_package_owners_free(&owners); return ok;
 }
 
 /* Peer policies have already been validated separately. Only this map-to-local
@@ -391,15 +559,23 @@ static int pc_view_policies(const sh_package_compilation *compiled, const sh_pac
     sh_package_owners local = {0}, map = {0};
     sh_package_policy upper = {0};
     size_t i; int ok = 0;
-    if (!compiled->map_overlay) return pc_policies(compiled->sources, owners, out, error, capacity, NULL);
+    if (!compiled->map_overlay) return pc_policies(compiled->sources, owners, out, error, capacity, NULL,
+        compiled->independent_sources) && pc_legacy_strings(compiled, owners, out, error, capacity) &&
+        pc_localized_copy(out, &compiled->policy, owners, compiled->sources->package_count, 0, error, capacity) &&
+        sh_package_hud_copy(out, &compiled->policy, owners, compiled->sources->package_count, 0) &&
+        sh_package_hud_publish(out, 0, 0);
     if (compiled->map_owner_begin > compiled->sources->package_count) goto done;
     for (i = 0; i < compiled->sources->package_count; i++) if (!owners || sh_package_owners_contains(owners, i))
         if (!sh_package_owners_add(i < compiled->map_owner_begin ? &local : &map, i)) goto done;
-    if (!pc_policies(compiled->sources, &local, out, error, capacity, NULL) ||
-        !pc_policies(compiled->sources, &map, &upper, error, capacity, NULL)) goto done;
+    if (!pc_policies(compiled->sources, &local, out, error, capacity, NULL, compiled->independent_sources) ||
+        !pc_policies(compiled->sources, &map, &upper, error, capacity, NULL, compiled->map_independent_sources)) goto done;
     ok = pc_policy_overlay(&out->requirements, &upper.requirements, 0) &&
         pc_policy_overlay(&out->strings, &upper.strings, 0) &&
-        pc_policy_overlay(&out->hud, &upper.hud, 0);
+        pc_policy_overlay(&out->hud, &upper.hud, 0) &&
+        pc_legacy_strings(compiled, owners, out, error, capacity) &&
+        pc_localized_copy(out, &compiled->policy, owners, compiled->sources->package_count, 0, error, capacity) &&
+        sh_package_hud_copy(out, &compiled->policy, owners, compiled->sources->package_count, 0) &&
+        sh_package_hud_publish(out, compiled->map_owner_begin, 1);
 done:
     sh_package_owners_free(&local); sh_package_owners_free(&map); sh_package_policy_free(&upper);
     if (!ok && !error[0]) snprintf(error, capacity, "cannot prepare map package policy overlay");
@@ -451,9 +627,10 @@ static const sh_decl_collection_rule *pc_rules(const char *type, size_t *count)
 {
     static const sh_decl_collection_rule blocking = {"edit.renderModelInfoList", "renderModelMaterial"};
     static const sh_decl_collection_rule encounters = {"edit.validEncounters", NULL};
+    static const char *const property_labels[] = {"displayNameTag", "descriptionTag", NULL};
     static const sh_decl_collection_rule editor_collections[] = {
-        {"edit.propertySheets", "", "properties", "path"},
-        {"edit.propertySheets.item[*].properties", "path"},
+        {"edit.propertySheets", "", "properties", "path", property_labels},
+        {"edit.propertySheets.item[*].properties", "path", NULL, NULL, property_labels},
         /* Input actions and output listeners are admitted by declaration
          * identity, not their position in the editor's presentation list. */
         {"edit.inputs", NULL},
@@ -475,6 +652,174 @@ static const sh_decl_collection_rule *pc_rules(const char *type, size_t *count)
         *count = sizeof(conductor) / sizeof(conductor[0]); return conductor;
     }
     return NULL;
+}
+
+int sh_package_editor_contribution_phase(const char *type)
+{
+    if (!type) return 0;
+    if (!_stricmp(type, "snappropertyinspector_blockingvolumerendermodel") ||
+        !_stricmp(type, "snappropertyinspector_whitelistencounterdecl") ||
+        !_stricmp(type, "snappropertyinspector_whitelistencounterdecllist")) return 1;
+    if (!_stricmp(type, "entitydef")) return 2;
+    return !_stricmp(type, "snapeditorentitydef") ? 3 : 0;
+}
+
+static int pc_editor_field(const char *type, const char *key)
+{
+    int phase = sh_package_editor_contribution_phase(type);
+    if (phase == 2) return !strcmp(key, "editorVars");
+    if (phase == 3) return !strcmp(key, "propertySheets") || !strcmp(key, "inputs") || !strcmp(key, "outputs");
+    if (phase == 1) return !strcmp(key, !_stricmp(type, "snappropertyinspector_blockingvolumerendermodel") ?
+        "renderModelInfoList" : "validEncounters");
+    return 0;
+}
+
+/* Split an owned tree without copying native fields or changing their order. */
+static sh_decl_node *pc_editor_take(sh_decl_node *parent, const char *type)
+{
+    sh_decl_node *out = NULL, **tail = &out, **next = &parent->children;
+    while (*next) {
+        sh_decl_node *node = *next;
+        if (!pc_editor_field(type, node->key)) { next = &node->next; continue; }
+        *next = node->next; node->next = NULL; *tail = node; tail = &node->next;
+    }
+    return out;
+}
+
+static char *pc_editor_projection(const char *type, sh_decl_source text, size_t *length, int *present,
+    char *error, size_t capacity)
+{
+    sh_decl_node *tree = sh_decl_tree_parse(text, error, capacity), *parent, *selected = NULL;
+    char *out = NULL;
+    if (!tree) return NULL;
+    parent = sh_package_editor_contribution_phase(type) == 2 ? tree :
+        (sh_decl_node *)sh_decl_tree_member(tree, "edit");
+    if (parent) {
+        if (!parent->compound) { snprintf(error, capacity, "editor contribution state must be an object"); goto done; }
+        selected = pc_editor_take(parent, type);
+        if (selected) *present = 1;
+    }
+    if (parent && parent != tree) {
+        sh_decl_tree_free(parent->children); parent->children = selected; selected = NULL;
+        sh_decl_node **link = &tree->children;
+        while (*link != parent) link = &(*link)->next;
+        *link = parent->next; parent->next = NULL;
+        sh_decl_tree_free(tree->children); tree->children = parent;
+    } else {
+        sh_decl_tree_free(tree->children); tree->children = selected; selected = NULL;
+    }
+    out = sh_decl_tree_write(tree, length);
+done:
+    sh_decl_tree_free(selected); sh_decl_tree_free(tree); return out;
+}
+
+/* A missing projected field contributes nothing. An explicitly supplied list
+ * still compares against the baseline, including explicit entry removals. This
+ * matters for a product default which adds properties but supplies no wiring. */
+static char *pc_editor_complete(const char *type, sh_decl_source baseline, sh_decl_source part,
+    size_t *length, char *error, size_t capacity)
+{
+    sh_decl_node *base = sh_decl_tree_parse(baseline, error, capacity);
+    sh_decl_node *tree = sh_decl_tree_parse(part, error, capacity);
+    char *out = NULL;
+    if (!base || !tree) goto done;
+    int entity = sh_package_editor_contribution_phase(type) == 2;
+    sh_decl_node *from = entity ? base : (sh_decl_node *)sh_decl_tree_member(base, "edit");
+    sh_decl_node *to = entity ? tree : (sh_decl_node *)sh_decl_tree_member(tree, "edit");
+    if (!to && from) {
+        tree->children = base->children; base->children = NULL;
+    } else if (to && from) {
+        sh_decl_node **next = &from->children, **tail = &to->children;
+        while (*tail) tail = &(*tail)->next;
+        while (*next) {
+            sh_decl_node *node = *next;
+            if (sh_decl_tree_member(to, node->key)) { next = &node->next; continue; }
+            *next = node->next; node->next = NULL; *tail = node; tail = &node->next;
+        }
+    }
+    out = sh_decl_tree_write(tree, length);
+done:
+    sh_decl_tree_free(base); sh_decl_tree_free(tree); return out;
+}
+
+char *sh_package_editor_contributions(const char *type, sh_decl_source baseline,
+    const sh_decl_source *sources, size_t count, sh_decl_source target, int private_binding,
+    size_t *length, char *error, size_t capacity)
+{
+    static const char *const labels[] = {"displayNameTag", "descriptionTag", NULL};
+    static const sh_decl_collection_rule controls[] = {
+        {"edit.propertySheets", "", "properties", "path", labels,
+            SH_DECL_COLLECTION_PRESENTATION_ORDER | SH_DECL_COLLECTION_DISTINCT_BEHAVIOR},
+        {"edit.propertySheets.item[*].properties", "path", NULL, NULL, labels,
+            SH_DECL_COLLECTION_PRESENTATION_ORDER | SH_DECL_COLLECTION_DISTINCT_BEHAVIOR},
+        {"edit.inputs", NULL, NULL, NULL, NULL, SH_DECL_COLLECTION_PRESENTATION_ORDER},
+        {"edit.outputs", NULL, NULL, NULL, NULL, SH_DECL_COLLECTION_PRESENTATION_ORDER}
+    };
+    sh_decl_source *parts = NULL;
+    char *base = NULL, *merged = NULL, *out = NULL;
+    sh_decl_node *tree = NULL, *addition = NULL, *parent, *added;
+    const sh_decl_collection_rule *rules;
+    size_t base_length = 0, merged_length = 0, rule_count = 0;
+    char fallback[1024];
+    if (!error || !capacity) { error = fallback; capacity = sizeof(fallback); }
+    *error = 0; if (length) *length = 0;
+    int phase = sh_package_editor_contribution_phase(type), present = 0;
+    if (!phase || !length || (count && !sources) || count > SIZE_MAX / sizeof(*parts)) goto done;
+    parts = calloc(count ? count : 1, sizeof(*parts));
+    base = pc_editor_projection(type, baseline, &base_length, &present, error, capacity);
+    if (!parts || !base) goto done;
+    for (size_t i = 0; i < count; i++) {
+        parts[i].text = pc_editor_projection(type, sources[i], &parts[i].length, &present, error, capacity);
+        if (!parts[i].text) goto done;
+        char *completed = pc_editor_complete(type, (sh_decl_source){base, base_length}, parts[i],
+            &parts[i].length, error, capacity);
+        free((char *)parts[i].text); parts[i].text = completed;
+        if (!completed) goto done;
+    }
+    if (!present) {
+        if (target.length == SIZE_MAX || !(out = malloc(target.length + 1))) goto done;
+        memcpy(out, target.text, target.length); out[target.length] = 0; *length = target.length; goto done;
+    }
+    rules = phase == 3 ? controls : phase == 1 ? pc_rules(type, &rule_count) : NULL;
+    if (phase == 3) rule_count = sizeof(controls) / sizeof(*controls);
+    if (phase == 2) {
+        size_t target_length = 0;
+        char *projected = pc_editor_projection(type, private_binding ? target : baseline,
+            &target_length, &present, error, capacity);
+        char *completed = projected ? pc_editor_complete(type, (sh_decl_source){base, base_length},
+            (sh_decl_source){projected, target_length}, &target_length, error, capacity) : NULL;
+        free(projected);
+        if (!completed) goto done;
+        merged = sh_decl_compose_editor_variant((sh_decl_source){base, base_length}, parts, count,
+            (sh_decl_source){completed, target_length}, &merged_length, error, capacity);
+        free(completed);
+    } else merged = sh_decl_compose_resource(type, (sh_decl_source){base, base_length},
+        parts, count, rules, rule_count, NULL, &merged_length, error, capacity, NULL);
+    if (!merged || !(tree = sh_decl_tree_parse(target, error, capacity)) ||
+        !(addition = sh_decl_tree_parse((sh_decl_source){merged, merged_length}, error, capacity))) goto done;
+    parent = phase == 2 ? tree : (sh_decl_node *)sh_decl_tree_member(tree, "edit");
+    added = phase == 2 ? addition : (sh_decl_node *)sh_decl_tree_member(addition, "edit");
+    if (!parent && added && added->children) {
+        parent = calloc(1, sizeof(*parent));
+        if (!parent) goto done;
+        parent->key = _strdup("edit"); parent->compound = parent->assignment = 1;
+        if (!parent->key) { free(parent); goto done; }
+        sh_decl_node **tail = &tree->children;
+        while (*tail) tail = &(*tail)->next;
+        *tail = parent;
+    }
+    if (parent) {
+        sh_decl_tree_free(pc_editor_take(parent, type));
+        sh_decl_node **tail = &parent->children;
+        while (*tail) tail = &(*tail)->next;
+        if (added) { *tail = added->children; added->children = NULL; }
+    }
+    out = sh_decl_tree_write(tree, length);
+done:
+    if (parts) for (size_t i = 0; i < count; i++) free((char *)parts[i].text);
+    free(parts); free(base); free(merged); sh_decl_tree_free(tree); sh_decl_tree_free(addition);
+    if (!out && !*error) snprintf(error, capacity, "bound editor contribution could not be composed");
+    return out;
 }
 
 /* *invalid reports an authored path that cannot be a declaration identity. */
@@ -543,25 +888,29 @@ static int pc_file_equal(const sh_package_file_identity *a, const sh_package_fil
 /* Only used after every owner passed its own policy check. Find all conflicting
  * pairs, including duplicate copies on either side, without blaming packages
  * that merely carry unrelated strings or HUD settings. */
-static void pc_conflicted_policies(const sh_package_sources *sources, sh_package_owners *rejected)
+static void pc_conflicted_policies(const sh_package_sources *sources, sh_package_owners *rejected, int independent)
 {
     size_t i, j, k;
     if (!rejected) return;
     for (i = 0; i < sources->package_count; i++) {
-        for (k = 0; k < sources->package_count; k++) if (pc_variant_shadowed(sources, i, k)) break;
-        if (k != sources->package_count) continue;
+        if (!independent) {
+            for (k = 0; k < sources->package_count; k++) if (pc_variant_shadowed(sources, i, k)) break;
+            if (k != sources->package_count) continue;
+        }
         for (j = i + 1; j < sources->package_count; j++) {
             sh_package_owners pair = {0};
             sh_package_policy policy = {0};
             char detail[1024] = "";
             int allocation = 0, valid;
-            for (k = 0; k < sources->package_count; k++) if (pc_variant_shadowed(sources, j, k)) break;
-            if (k != sources->package_count) continue;
+            if (!independent) {
+                for (k = 0; k < sources->package_count; k++) if (pc_variant_shadowed(sources, j, k)) break;
+                if (k != sources->package_count) continue;
+            }
             if (!sh_package_owners_add(&pair, i) || !sh_package_owners_add(&pair, j)) {
                 sh_package_owners_free(&pair); goto failed;
             }
             errno = 0;
-            valid = pc_policies(sources, &pair, &policy, detail, sizeof(detail), &allocation);
+            valid = pc_policies(sources, &pair, &policy, detail, sizeof(detail), &allocation, independent);
             sh_package_policy_free(&policy);
             if (!valid && (allocation || errno == ENOMEM || !detail[0])) {
                 sh_package_owners_free(&pair); goto failed;
@@ -926,9 +1275,12 @@ static int pc_compile_resource(sh_package_compilation *out, sh_compiled_resource
     /* Entity headers require normalization even without overlapping changes.
      * Other native families can also accept custom source dialects (particles
      * are one example); preserve their bytes when no composition is needed. */
-    if ((!typed || !schema.resolve) && (distinct <= 1u || all_equal)) {
+    int deferred_editor = environment->independent_sources &&
+        sh_package_editor_contribution_phase(resource->type) &&
+        sh_package_editor_contribution_phase(resource->type) != 2;
+    if ((!typed || !schema.resolve || deferred_editor) && (distinct <= 1u || all_equal)) {
         resource->source = effective < resource->source_count ? resource->sources[effective] : SIZE_MAX;
-        if (rule_count) {
+        if (rule_count && !deferred_editor) {
             if (!sh_decl_normalize_collections(texts[effective], rules, rule_count,
                 (char **)&resource->body, &resource->body_length, detail, sizeof(detail))) {
                 cause.first = effective; cause.second = SIZE_MAX; goto conflict;
@@ -1256,6 +1608,7 @@ sh_package_compilation *sh_package_compile_with(const sh_package_sources *source
     if (!out || !inputs) goto bad;
     out->sources = sources;
     out->canonical_path = environment->canonical_path;
+    out->independent_sources = environment->independent_sources;
     build.out = out; build.environment = environment; build.view = *environment;
     if (environment->baseline || environment->produce) {
         build.view.baseline = pc_build_original; build.view.baseline_context = &build;
@@ -1268,7 +1621,8 @@ sh_package_compilation *sh_package_compile_with(const sh_package_sources *source
         /* Policy JSON reports a failed allocation like invalid text; the C
          * runtime allocators record it, and it never isolates a package. */
         errno = 0;
-        int valid = pc_policies(sources, &owner, &policy, error, error_capacity, &allocation);
+        int valid = pc_policies(sources, &owner, &policy, error, error_capacity, &allocation,
+            environment->independent_sources);
         if (!valid && errno == ENOMEM) allocation = 1;
         sh_package_owners_free(&owner); sh_package_policy_free(&policy);
         if (!valid) {
@@ -1279,9 +1633,10 @@ sh_package_compilation *sh_package_compile_with(const sh_package_sources *source
     {
         int allocation = 0;
         errno = 0;
-        if (!pc_policies(sources, NULL, &out->policy, error, error_capacity, &allocation)) {
+        if (!pc_policies(sources, NULL, &out->policy, error, error_capacity, &allocation,
+            environment->independent_sources)) {
             if (!allocation && errno != ENOMEM && environment->invalid_package)
-                pc_conflicted_policies(sources, environment->conflicted_packages);
+                pc_conflicted_policies(sources, environment->conflicted_packages, environment->independent_sources);
             goto bad;
         }
     }
@@ -1303,7 +1658,7 @@ sh_package_compilation *sh_package_compile_with(const sh_package_sources *source
         resource->sources = (size_t *)malloc(resource->source_count * sizeof(*resource->sources));
         if (!resource->sources) goto bad;
         for (i = position; i < end; i++) resource->sources[i - position] = inputs[i].index;
-        pc_resolve_variants(sources, resource);
+        if (!environment->independent_sources) pc_resolve_variants(sources, resource);
         for (i = 1; i < resource->source_count; i++) {
             size_t j;
             for (j = 0; j < i; j++)
@@ -1363,39 +1718,148 @@ sh_package_compilation *sh_package_compile(const sh_package_sources *sources,
     return sh_package_compile_with(sources, &environment, error, error_capacity);
 }
 
+size_t sh_package_resource_native_count(const sh_compiled_resource *resource)
+{
+    if (!resource) return 0;
+    return resource->native_alias_count + (resource->native_type || resource->type ? 1u : 0u);
+}
+sh_package_native_identity sh_package_resource_native_at(const sh_compiled_resource *resource, size_t index)
+{
+    if (!resource) return (sh_package_native_identity){0};
+    if (resource->native_type || resource->type) {
+        if (!index) return resource->native_type ?
+            (sh_package_native_identity){resource->native_type, resource->native_name} :
+            (sh_package_native_identity){resource->type, resource->name};
+        index--;
+    }
+    return index < resource->native_alias_count && resource->native_aliases ?
+        resource->native_aliases[index] : (sh_package_native_identity){0};
+}
+int sh_package_resource_native_matches(const sh_compiled_resource *resource, const char *type, const char *name)
+{
+    if (!type || !name) return 0;
+    size_t count = sh_package_resource_native_count(resource);
+    for (size_t i = 0; i < count; i++) {
+        sh_package_native_identity identity = sh_package_resource_native_at(resource, i);
+        if (identity.type && identity.name && !_stricmp(identity.type, type) && !_stricmp(identity.name, name)) return 1;
+    }
+    return 0;
+}
+int sh_package_resource_native_add(sh_compiled_resource *resource, const char *type, const char *name)
+{
+    if (!resource || !type || !*type || !name || !*name ||
+        (resource->native_alias_count && !resource->native_aliases) ||
+        (resource->type && (!resource->name || _stricmp(resource->type, type) || _stricmp(resource->name, name)))) return 0;
+    if (sh_package_resource_native_matches(resource, type, name)) return 1;
+    char *family = _strdup(type), *key = _strdup(name);
+    if (!family || !key) { free(family); free(key); return 0; }
+    if (!resource->native_type && !resource->type) {
+        resource->native_type = family; resource->native_name = key; return 1;
+    }
+    if (resource->native_alias_count >= SIZE_MAX / sizeof(*resource->native_aliases)) {
+        free(family); free(key); return 0;
+    }
+    sh_package_native_identity *aliases = realloc(resource->native_aliases,
+        (resource->native_alias_count + 1) * sizeof(*aliases));
+    if (!aliases) { free(family); free(key); return 0; }
+    resource->native_aliases = aliases;
+    aliases[resource->native_alias_count++] = (sh_package_native_identity){family, key}; return 1;
+}
+static int pc_native_valid(const sh_compiled_resource *resource)
+{
+    if ((resource->native_type == NULL) != (resource->native_name == NULL) ||
+        (resource->native_type && (!*resource->native_type || !*resource->native_name)) ||
+        (resource->native_type && resource->type && (!resource->name || strcmp(resource->type, resource->native_type) ||
+            strcmp(resource->name, resource->native_name))) ||
+        resource->native_alias_count > SIZE_MAX / sizeof(*resource->native_aliases) ||
+        (resource->native_alias_count && !resource->native_aliases)) return 0;
+    size_t count = sh_package_resource_native_count(resource);
+    for (size_t i = 0; i < count; i++) {
+        sh_package_native_identity a = sh_package_resource_native_at(resource, i);
+        if (!a.type || !*a.type || !a.name || !*a.name ||
+            (resource->type && (strcmp(resource->type, a.type) || strcmp(resource->name, a.name)))) return 0;
+        for (size_t j = 0; j < i; j++) {
+            sh_package_native_identity b = sh_package_resource_native_at(resource, j);
+            if (!_stricmp(a.type, b.type) && !_stricmp(a.name, b.name)) return 0;
+        }
+    }
+    return 1;
+}
+static void pc_native_free(sh_compiled_resource *resource)
+{
+    free(resource->native_type); free(resource->native_name);
+    resource->native_type = resource->native_name = NULL;
+    for (size_t i = 0; i < resource->native_alias_count; i++) {
+        free(resource->native_aliases[i].type); free(resource->native_aliases[i].name);
+    }
+    free(resource->native_aliases); resource->native_aliases = NULL; resource->native_alias_count = 0;
+}
 static void pc_resource_free(sh_compiled_resource *resource)
 {
     size_t i;
     if (resource->restored_original || resource->owns_engine_path) free((void *)resource->engine_path);
     sh_package_owners_free(&resource->owners); sh_package_owners_free(&resource->gameplay_owners);
     free(resource->body); free(resource->sources); free(resource->type);
-    free(resource->name); free(resource->cache_path);
+    free(resource->name); free(resource->cache_path); free(resource->original_path);
+    pc_native_free(resource);
     sh_package_file_release(resource->cache_file);
     for (i = 0; i < resource->generated_input_count; i++) free(resource->generated_inputs[i]);
     free(resource->generated_inputs);
+    for (i = 0; i < resource->bound_dependency_count; i++) free(resource->bound_dependencies[i]);
+    free(resource->bound_dependencies);
+}
+
+static int pc_bound_dependency(sh_compiled_resource *to, const char *path)
+{
+    if (!path || !*path) return 0;
+    for (size_t i = 0; i < to->bound_dependency_count; i++)
+        if (!strcmp(to->bound_dependencies[i], path)) return 1;
+    if (to->bound_dependency_count == SIZE_MAX / sizeof(*to->bound_dependencies)) return 0;
+    char *copy = _strdup(path);
+    char **grown = copy ? realloc(to->bound_dependencies,
+        (to->bound_dependency_count + 1) * sizeof(*grown)) : NULL;
+    if (!grown) { free(copy); return 0; }
+    to->bound_dependencies = grown; grown[to->bound_dependency_count++] = copy;
+    return 1;
+}
+
+static int pc_sound_binding_valid(const sh_compiled_resource *resource)
+{
+    const char *type = resource->native_type ? resource->native_type : resource->type;
+    return (!resource->sound_authored_event && !resource->sound_event) ||
+        (resource->sound_authored_event && resource->sound_event && type && !strcmp(type, "sound"));
 }
 
 static int pc_copy_resource(sh_compiled_resource *to, const sh_compiled_resource *from,
     const sh_package_sources *sources, size_t owner_offset, size_t file_offset)
 {
     size_t i;
-    if (!from->engine_path || from->body_length == SIZE_MAX ||
+    if (!from->engine_path || from->body_length == SIZE_MAX || !pc_sound_binding_valid(from) || !pc_native_valid(from) ||
         from->source_count > SIZE_MAX / sizeof(*to->sources) ||
         from->generated_input_count > SIZE_MAX / sizeof(*to->generated_inputs) ||
+        from->bound_dependency_count > SIZE_MAX / sizeof(*to->bound_dependencies) ||
         (from->source_count && !from->sources) ||
         (from->generated_input_count && !from->generated_inputs) ||
+        (from->bound_dependency_count && !from->bound_dependencies) ||
         !sh_package_owners_within(&from->owners, sources->package_count) ||
         !sh_package_owners_within(&from->gameplay_owners, sources->package_count)) return 0;
     to->engine_path = _strdup(from->engine_path); to->owns_engine_path = 1;
     to->type = from->type ? _strdup(from->type) : NULL;
     to->name = from->name ? _strdup(from->name) : NULL;
+    to->native_type = from->native_type ? _strdup(from->native_type) : NULL;
+    to->native_name = from->native_name ? _strdup(from->native_name) : NULL;
     to->cache_path = from->cache_path ? _strdup(from->cache_path) : NULL;
+    to->original_path = from->original_path ? _strdup(from->original_path) : NULL;
     to->cache_file = sh_package_file_retain(from->cache_file);
     if (!to->engine_path || (from->type && !to->type) || (from->name && !to->name) ||
-        (from->cache_path && !to->cache_path)) return 0;
+        (from->cache_path && !to->cache_path) || (from->original_path && !to->original_path) ||
+        (from->native_type && (!to->native_type || !to->native_name))) return 0;
+    for (i = 0; i < from->native_alias_count; i++)
+        if (!sh_package_resource_native_add(to, from->native_aliases[i].type, from->native_aliases[i].name)) return 0;
     to->baseline_known = from->baseline_known; to->composed = from->composed;
     to->native_original = from->native_original;
     to->restored_original = from->restored_original; to->generated = from->generated;
+    to->sound_authored_event = from->sound_authored_event; to->sound_event = from->sound_event;
     to->source = SIZE_MAX;
     if (from->source != SIZE_MAX) {
         if (from->source >= sources->file_count) return 0;
@@ -1430,9 +1894,200 @@ static int pc_copy_resource(sh_compiled_resource *to, const sh_compiled_resource
             to->generated_input_count++;
         }
     }
+    for (i = 0; i < from->bound_dependency_count; i++)
+        if (!pc_bound_dependency(to, from->bound_dependencies[i])) return 0;
     return 1;
 }
 
+static int pc_source_index_compare(const void *left, const void *right)
+{
+    size_t a = *(const size_t *)left, b = *(const size_t *)right;
+    return a < b ? -1 : a > b;
+}
+
+sh_package_compilation *sh_package_compilation_project(const sh_package_sources *sources,
+    const sh_package_resource_projection *projections, size_t count,
+    const sh_package_policy *policy, char *(*canonical_path)(const char *),
+    char *error, size_t capacity)
+{
+    sh_package_compilation *out = NULL;
+    char fallback[1024];
+    if (!error || !capacity) { error = fallback; capacity = sizeof(fallback); }
+    *error = 0;
+    if (!sources || (count && !projections) || count > SIZE_MAX / sizeof(*out->resources)) goto failed;
+    out = calloc(1, sizeof(*out));
+    if (!out) goto failed;
+    out->sources = sources; out->canonical_path = canonical_path;
+    out->resources = calloc(count ? count : 1, sizeof(*out->resources));
+    if (!out->resources) goto failed;
+    for (size_t i = 0; i < count; i++) {
+        const sh_package_resource_projection *projection = &projections[i];
+        sh_compiled_resource *resource = &out->resources[out->resource_count++];
+        const sh_compiled_resource *first;
+        const char *original;
+        size_t members = 0, used = 0;
+        char *path;
+        int invalid = 0;
+        if (!projection->input_count || !projection->inputs || !projection->inputs[0] ||
+            !projection->engine_path || (projection->length && !projection->body) || projection->length == SIZE_MAX) goto failed;
+        first = projection->inputs[0]; original = first->original_path ? first->original_path : first->engine_path;
+        if (!original || !pc_copy_resource(resource, first, sources, 0, 0)) goto failed;
+        path = canonical_path ? canonical_path(projection->engine_path) : sh_package_engine_path(projection->engine_path);
+        if (!path || strcmp(path, projection->engine_path)) { free(path); goto failed; }
+        free((void *)resource->engine_path); resource->engine_path = path;
+        free(resource->type); free(resource->name); resource->type = resource->name = NULL;
+        if (!pc_identity(resource, &invalid, error, capacity)) goto failed;
+        pc_native_free(resource);
+        if ((projection->native_type == NULL) != (projection->native_name == NULL)) goto failed;
+        if (projection->native_type) {
+            if (!*projection->native_type || !*projection->native_name ||
+                (resource->type && (strcmp(resource->type, projection->native_type) ||
+                    strcmp(resource->name, projection->native_name)))) {
+                snprintf(error, capacity, "projected native identity disagrees with declaration path: %s", path);
+                goto failed;
+            }
+            resource->native_type = _strdup(projection->native_type);
+            resource->native_name = _strdup(projection->native_name);
+            if (!resource->native_type || !resource->native_name) goto failed;
+        }
+        if (strcmp(path, original)) {
+            free(resource->original_path); resource->original_path = _strdup(original);
+            if (!resource->original_path) goto failed;
+            resource->native_original = resource->restored_original = 0;
+        }
+        for (size_t j = 0; j < projection->input_count; j++) {
+            const sh_compiled_resource *input = projection->inputs[j];
+            if (!input || !input->engine_path || (input->source_count && !input->sources) ||
+                (input->bound_dependency_count && !input->bound_dependencies) ||
+                strcmp(input->original_path ? input->original_path : input->engine_path, original) ||
+                !pc_sound_binding_valid(input) || !pc_native_valid(input) ||
+                input->sound_authored_event != resource->sound_authored_event || input->sound_event != resource->sound_event ||
+                !sh_package_owners_within(&input->owners, sources->package_count) ||
+                !sh_package_owners_within(&input->gameplay_owners, sources->package_count) ||
+                input->source_count > SIZE_MAX / sizeof(*resource->sources) - members) goto failed;
+            members += input->source_count;
+            if (!sh_package_owners_union(&resource->owners, &input->owners) ||
+                (!projection->editor_contributions &&
+                    !sh_package_owners_union(&resource->gameplay_owners, &input->gameplay_owners))) goto failed;
+            for (size_t k = 0; k < input->bound_dependency_count; k++)
+                if (!pc_bound_dependency(resource, input->bound_dependencies[k])) goto failed;
+            /* A regenerated body at the same served path still serves every
+             * positively captured alias. A renamed projection starts a new
+             * binding and must not inherit the old path's logical identities. */
+            if (!strcmp(input->engine_path, resource->engine_path))
+                for (size_t k = 0; k < sh_package_resource_native_count(input); k++) {
+                    sh_package_native_identity identity = sh_package_resource_native_at(input, k);
+                    if (!sh_package_resource_native_add(resource, identity.type, identity.name)) goto failed;
+                }
+        }
+        if (!pc_sound_binding_valid(resource)) goto failed;
+        free(resource->sources); resource->sources = NULL; resource->source_count = 0;
+        if (members && !(resource->sources = malloc(members * sizeof(*resource->sources)))) goto failed;
+        for (size_t j = 0; j < projection->input_count; j++) {
+            const sh_compiled_resource *input = projection->inputs[j];
+            for (size_t k = 0; k < input->source_count; k++) {
+                if (input->sources[k] >= sources->file_count) goto failed;
+                resource->sources[used++] = input->sources[k];
+            }
+        }
+        if (used > 1) qsort(resource->sources, used, sizeof(*resource->sources), pc_source_index_compare);
+        for (size_t j = 0; j < used; j++)
+            if (!resource->source_count || resource->sources[resource->source_count - 1] != resource->sources[j])
+                resource->sources[resource->source_count++] = resource->sources[j];
+        if (projection->body) {
+            resource->native_original = 0;
+            free(resource->body); resource->body = malloc(projection->length + 1);
+            resource->body_length = 0;
+            if (!resource->body) goto failed;
+            memcpy(resource->body, projection->body, projection->length); resource->body[projection->length] = 0;
+            resource->body_length = projection->length;
+            sh_package_file_release(resource->cache_file); resource->cache_file = NULL;
+            free(resource->cache_path); resource->cache_path = NULL;
+        }
+        out->composed_count += resource->composed != 0;
+        if (projection->input_count - 1 > SIZE_MAX - out->duplicate_count) goto failed;
+        out->duplicate_count += projection->input_count - 1;
+    }
+    if (count > 1) qsort(out->resources, count, sizeof(*out->resources), pc_resource_compare);
+    for (size_t i = 1; i < count; i++) if (!strcmp(out->resources[i - 1].engine_path, out->resources[i].engine_path)) {
+        snprintf(error, capacity, "linker projected two resources to one engine identity: %s", out->resources[i].engine_path); goto failed;
+    }
+    if (policy && (!pc_policy_overlay(&out->policy.requirements, &policy->requirements, 0) ||
+        !pc_policy_overlay(&out->policy.strings, &policy->strings, 0) ||
+        !pc_policy_overlay(&out->policy.hud, &policy->hud, 0) ||
+        !pc_localized_copy(&out->policy, policy, NULL, sources->package_count, 0, error, capacity) ||
+        !sh_package_hud_copy(&out->policy, policy, NULL, sources->package_count, 0))) goto failed;
+    return out;
+failed:
+    if (!*error) snprintf(error, capacity, "resource binding projection is invalid or could not be allocated");
+    sh_package_compilation_free(out); return NULL;
+}
+
+typedef struct pc_alias_input { const unsigned char *body; FILE *stream; uint64_t length, offset; } pc_alias_input;
+static int pc_alias_input_open(const sh_package_compilation *compiled, const sh_compiled_resource *resource,
+    pc_alias_input *out, char *error, size_t capacity)
+{
+    memset(out, 0, sizeof(*out));
+    if (resource->body) { out->body = resource->body; out->length = resource->body_length; return 1; }
+    if (resource->cache_file) out->stream = sh_package_file_open(resource->cache_file, &out->length, error, capacity);
+    else if (compiled->sources && resource->source < compiled->sources->file_count) {
+        sh_package_source_file source = compiled->sources->files[resource->source];
+        if (resource->cache_path) source.absolute = resource->cache_path;
+        out->length = source.length; out->stream = sh_package_source_open(&source, error, capacity);
+    }
+    if (out->stream) return 1;
+    if (!*error) snprintf(error, capacity, "physical alias source is unavailable: %s", resource->engine_path);
+    return 0;
+}
+static int pc_alias_input_read(pc_alias_input *input, unsigned char *out, size_t length)
+{
+    if (input->body) memcpy(out, input->body + (size_t)input->offset, length);
+    else if (fread(out, 1, length, input->stream) != length) return 0;
+    input->offset += length; return 1;
+}
+static int pc_alias_equal(const sh_package_compilation *a, const sh_compiled_resource *left,
+    const sh_package_compilation *b, const sh_compiled_resource *right, char *error, size_t capacity)
+{
+    pc_alias_input x = {0}, y = {0}; unsigned char first[16384], second[16384]; int result = -1;
+    if (!pc_alias_input_open(a, left, &x, error, capacity) || !pc_alias_input_open(b, right, &y, error, capacity)) goto done;
+    if (x.length != y.length) { result = 0; goto done; }
+    while (x.offset < x.length) {
+        uint64_t remaining = x.length - x.offset;
+        size_t length = remaining < sizeof(first) ? (size_t)remaining : sizeof(first);
+        if (!pc_alias_input_read(&x, first, length) || !pc_alias_input_read(&y, second, length)) goto done;
+        if (memcmp(first, second, length)) { result = 0; goto done; }
+    }
+    if ((x.stream && (fgetc(x.stream) != EOF || ferror(x.stream))) ||
+        (y.stream && (fgetc(y.stream) != EOF || ferror(y.stream)))) goto done;
+    result = 1;
+done:
+    if (x.stream) fclose(x.stream);
+    if (y.stream) fclose(y.stream);
+    if (result < 0 && !*error) snprintf(error, capacity, "physical alias equality could not be verified: %s", left->engine_path);
+    return result;
+}
+static int pc_overlay_aliases(sh_compiled_resource *out, const sh_package_compilation *selected,
+    const sh_compiled_resource *chosen, const sh_package_compilation *other,
+    const sh_compiled_resource *source, char *error, size_t capacity)
+{
+    if (!pc_native_valid(source)) return 0;
+    size_t count = sh_package_resource_native_count(source); int missing = 0;
+    for (size_t i = 0; i < count; i++) {
+        sh_package_native_identity identity = sh_package_resource_native_at(source, i);
+        if (!sh_package_resource_native_matches(out, identity.type, identity.name)) missing = 1;
+    }
+    if (!missing) return 1;
+    int equal = pc_alias_equal(selected, chosen, other, source, error, capacity);
+    if (equal < 0) return 0;
+    if (!equal) return 1; /* Different map bytes retain their selected identity set. */
+    for (size_t i = 0; i < count; i++) {
+        sh_package_native_identity identity = sh_package_resource_native_at(source, i);
+        if (!sh_package_resource_native_add(out, identity.type, identity.name)) return 0;
+    }
+    for (size_t i = 0; i < source->bound_dependency_count; i++)
+        if (!pc_bound_dependency(out, source->bound_dependencies[i])) return 0;
+    return 1;
+}
 sh_package_compilation *sh_package_compilation_overlay(
     const sh_package_compilation *local, const sh_package_compilation *map,
     char *error, size_t capacity)
@@ -1450,6 +2105,8 @@ sh_package_compilation *sh_package_compilation_overlay(
     if (!out) goto bad;
     out->owns_sources = out->map_overlay = 1;
     out->map_owner_begin = local->sources->package_count;
+    out->independent_sources = local->independent_sources;
+    out->map_independent_sources = map->independent_sources;
     out->canonical_path = local->canonical_path;
     out->sources = sh_package_sources_join(local->sources, map->sources, error, capacity);
     if (!out->sources) goto bad;
@@ -1461,18 +2118,24 @@ sh_package_compilation *sh_package_compilation_overlay(
             strcmp(local->resources[lower].engine_path, map->resources[upper].engine_path);
         const sh_package_compilation *from;
         const sh_compiled_resource *resource;
+        const sh_package_compilation *alias_source = NULL;
+        const sh_compiled_resource *alias_resource = NULL;
         if (!order) {
             const sh_compiled_resource *candidate = &map->resources[upper];
             int authored = candidate->source_count || sh_package_owners_count(&candidate->owners) ||
                 sh_package_owners_count(&candidate->gameplay_owners);
             from = authored ? map : local;
-            resource = authored ? candidate : &local->resources[lower]; lower++; upper++;
+            resource = authored ? candidate : &local->resources[lower];
+            alias_source = authored ? local : map;
+            alias_resource = authored ? &local->resources[lower] : candidate;
+            lower++; upper++;
         } else if (order < 0) { from = local; resource = &local->resources[lower++]; }
         else { from = map; resource = &map->resources[upper++]; }
         sh_compiled_resource *copy = &out->resources[out->resource_count++];
         if (!pc_copy_resource(copy, resource, from->sources,
             from == map ? local->sources->package_count : 0,
             from == map ? local->sources->file_count : 0)) goto bad;
+        if (alias_source && !pc_overlay_aliases(copy, from, resource, alias_source, alias_resource, error, capacity)) goto bad;
         out->composed_count += copy->composed != 0;
         for (size_t i = 1; i < copy->source_count; i++) {
             size_t j;
@@ -1481,6 +2144,13 @@ sh_package_compilation *sh_package_compilation_overlay(
             out->duplicate_count += j < i;
         }
     }
+    if (!pc_localized_copy(&out->policy, &local->policy, NULL, local->sources->package_count, 0, error, capacity) ||
+        !pc_localized_copy(&out->policy, &map->policy, NULL, map->sources->package_count,
+            local->sources->package_count, error, capacity) ||
+        !sh_package_hud_copy(&out->policy, &local->policy, NULL, local->sources->package_count, 0) ||
+        !sh_package_hud_copy(&out->policy, &map->policy, NULL, map->sources->package_count, local->sources->package_count) ||
+        !sh_package_hud_publish(&out->policy, out->map_owner_begin, 1) ||
+        !pc_legacy_strings(out, NULL, &out->policy, error, capacity)) goto bad;
     return out;
 bad:
     if (!error[0]) snprintf(error, capacity, "cannot retain map and local resource providers");
@@ -1507,7 +2177,7 @@ int sh_package_compilation_restore_missing(sh_package_compilation *current,
         unsigned char *body = NULL;
         size_t length = 0;
         int scope;
-        if (!old->type || (old->baseline_known != 1 && old->baseline_known != 3)) continue;
+        if (old->original_path || !old->type || (old->baseline_known != 1 && old->baseline_known != 3)) continue;
         while (position < current->resource_count &&
                strcmp(current->resources[position].engine_path, old->engine_path) < 0) position++;
         if (position < current->resource_count &&
@@ -1603,6 +2273,29 @@ unsigned char *sh_package_compilation_read(const sh_package_compilation *compila
     *length = resource->body_length; return out;
 }
 
+int sh_package_compilation_identity(const sh_package_compilation *compilation,
+    const sh_compiled_resource *resource, sh_package_file_identity *out,
+    char *error, size_t capacity)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (compilation && resource && out) {
+        if (resource->body) {
+            if (sh_package_bytes_identity(resource->body, resource->body_length, out)) return 1;
+        } else if (resource->cache_file) {
+            if (sh_package_file_get_identity(resource->cache_file, out)) return 1;
+        } else if (compilation->sources && compilation->sources->files &&
+                   resource->source < compilation->sources->file_count) {
+            const sh_package_source_file *file = compilation->sources->files + resource->source;
+            if (!file->directory) {
+                out->length = file->length; memcpy(out->digest, file->digest, 32); return 1;
+            }
+        }
+    }
+    if (error && capacity) snprintf(error, capacity, "compiled resource has no captured payload identity: %s",
+        resource && resource->engine_path ? resource->engine_path : "(null)");
+    return 0;
+}
+
 int sh_package_compilation_probe(const sh_package_compilation *compilation,
     const char *engine_path, char *error, size_t capacity)
 {
@@ -1637,8 +2330,92 @@ void sh_package_changes_free(sh_package_changes *changes)
     for (size_t i = 0; i < changes->count; i++) {
         free(changes->items[i].path);
         free(changes->items[i].type); free(changes->items[i].name);
+        free(changes->items[i].previous_type); free(changes->items[i].previous_name);
     }
+    for (size_t i = 0; i < changes->added_count; i++) { free(changes->added[i].type); free(changes->added[i].name); }
+    for (size_t i = 0; i < changes->removed_count; i++) { free(changes->removed[i].type); free(changes->removed[i].name); }
+    for (size_t i = 0; i < changes->rebound_count; i++) { free(changes->rebound[i].type); free(changes->rebound[i].name); }
+    free(changes->rebound);
+    free(changes->added); free(changes->removed);
     free(changes->items); memset(changes, 0, sizeof(*changes));
+}
+
+void sh_package_changes_reverse(sh_package_changes *changes)
+{
+    if (!changes) return;
+    for (size_t i = 0; i < changes->count; i++) {
+        sh_package_change *change = changes->items + i;
+        if (change->kind == SH_PACKAGE_RESOURCE_ADDED) change->kind = SH_PACKAGE_RESOURCE_REMOVED;
+        else if (change->kind == SH_PACKAGE_RESOURCE_REMOVED) change->kind = SH_PACKAGE_RESOURCE_ADDED;
+        else if (changes->identities_complete) {
+            char *type = change->type, *name = change->name;
+            change->type = change->previous_type; change->name = change->previous_name;
+            change->previous_type = type; change->previous_name = name;
+        }
+    }
+    sh_package_native_identity *set = changes->added; size_t count = changes->added_count;
+    changes->added = changes->removed; changes->added_count = changes->removed_count;
+    changes->removed = set; changes->removed_count = count;
+}
+
+static sh_package_native_identity pc_native_identity(const sh_compiled_resource *resource)
+{
+    return resource->native_type ? (sh_package_native_identity){resource->native_type, resource->native_name} :
+        (sh_package_native_identity){resource->type, resource->name};
+}
+static int pc_native_compare(const void *a, const void *b)
+{
+    const sh_package_native_identity *x = a, *y = b;
+    int order = strcmp(x->type, y->type);
+    return order ? order : strcmp(x->name, y->name);
+}
+static int pc_native_copy(sh_package_native_identity from, char **type, char **name)
+{
+    *type = from.type ? _strdup(from.type) : NULL;
+    *name = from.name ? _strdup(from.name) : NULL;
+    return !from.type || (*type && *name);
+}
+static sh_package_native_identity *pc_native_set(const sh_package_compilation *compiled, size_t *count)
+{
+    size_t capacity = 0;
+    sh_package_native_identity *set;
+    *count = 0;
+    for (size_t i = 0; compiled && i < compiled->resource_count; i++) {
+        size_t n = sh_package_resource_native_count(compiled->resources + i);
+        if (n > SIZE_MAX - capacity) return NULL;
+        capacity += n;
+    }
+    if (capacity > SIZE_MAX / sizeof(*set) || !(set = calloc(capacity ? capacity : 1, sizeof(*set)))) return NULL;
+    for (size_t i = 0; compiled && i < compiled->resource_count; i++)
+        for (size_t j = 0; j < sh_package_resource_native_count(compiled->resources + i); j++)
+            set[(*count)++] = sh_package_resource_native_at(compiled->resources + i, j);
+    if (*count > 1) qsort(set, *count, sizeof(*set), pc_native_compare);
+    size_t used = 0;
+    for (size_t i = 0; i < *count; i++)
+        if (!used || pc_native_compare(set + used - 1, set + i)) set[used++] = set[i];
+    *count = used; return set;
+}
+static int pc_native_difference(const sh_package_native_identity *from, size_t count,
+    const sh_package_native_identity *to, size_t to_count,
+    sh_package_native_identity **out, size_t *out_count)
+{
+    size_t selected = 0;
+    for (size_t i = 0; i < count; i++) if (!bsearch(from + i, to, to_count, sizeof(*to), pc_native_compare)) selected++;
+    if (selected > SIZE_MAX / sizeof(**out) || !(*out = calloc(selected ? selected : 1, sizeof(**out)))) return 0;
+    for (size_t i = 0; i < count; i++) if (!bsearch(from + i, to, to_count, sizeof(*to), pc_native_compare)) {
+        sh_package_native_identity *identity = *out + (*out_count)++;
+        if (!pc_native_copy(from[i], &identity->type, &identity->name)) return 0;
+    }
+    return 1;
+}
+static int pc_native_changes(const sh_package_compilation *before, const sh_package_compilation *after,
+    sh_package_changes *out)
+{
+    size_t a_count = 0, b_count = 0;
+    sh_package_native_identity *a = pc_native_set(before, &a_count), *b = pc_native_set(after, &b_count);
+    int ok = a && b && pc_native_difference(a, a_count, b, b_count, &out->removed, &out->removed_count) &&
+        pc_native_difference(b, b_count, a, a_count, &out->added, &out->added_count);
+    free(a); free(b); out->identities_complete = ok; return ok;
 }
 
 static const sh_package_source_file *pc_change_source(const sh_package_compilation *compiled,
@@ -1663,6 +2440,10 @@ static int pc_change_equal(const sh_package_compilation *before, const sh_compil
     }
     if ((a->type == NULL) != (b->type == NULL) || (a->name == NULL) != (b->name == NULL) ||
         (a->type && strcmp(a->type, b->type)) || (a->name && strcmp(a->name, b->name))) return 0;
+    /* Logical identity additions/removals are recorded separately. Choosing a
+     * different primary alias cannot turn unchanged physical bytes into a
+     * replacement that reconstructs existing native consumers. */
+    if (a->sound_authored_event != b->sound_authored_event || a->sound_event != b->sound_event) return 0;
     uint64_t alen = a->body ? a->body_length : af->length;
     uint64_t blen = b->body ? b->body_length : bf->length;
     if (alen != blen) return 0;
@@ -1695,10 +2476,12 @@ static int pc_change_equal(const sh_package_compilation *before, const sh_compil
 static int pc_changes_valid(const sh_package_compilation *compiled)
 {
     if (!compiled) return 1;
-    if (compiled->resource_count && !compiled->resources) return 0;
+    if ((compiled->resource_count && !compiled->resources) ||
+        compiled->resource_count > SIZE_MAX / sizeof(*compiled->resources)) return 0;
     for (size_t i = 0; i < compiled->resource_count; i++) {
         const sh_compiled_resource *r = &compiled->resources[i];
-        if (!r->engine_path || !*r->engine_path ||
+        if (!r->engine_path || !*r->engine_path || !pc_sound_binding_valid(r) || !pc_native_valid(r) ||
+            (r->type == NULL) != (r->name == NULL) || (r->type && (!*r->type || !*r->name)) ||
             (i && strcmp(compiled->resources[i - 1].engine_path, r->engine_path) >= 0) ||
             (!r->body && !pc_change_source(compiled, r))) return 0;
     }
@@ -1716,6 +2499,7 @@ int sh_package_compilation_changes(const sh_package_compilation *before,
         if (error && capacity) snprintf(error, capacity, "invalid or unordered compilation in resource comparison");
         return 0;
     }
+    if (!pc_native_changes(before, after, out)) goto allocation_failed;
     while ((before && ai < before->resource_count) || (after && bi < after->resource_count)) {
         const sh_compiled_resource *a = before && ai < before->resource_count ? &before->resources[ai] : NULL;
         const sh_compiled_resource *b = after && bi < after->resource_count ? &after->resources[bi] : NULL;
@@ -1740,10 +2524,9 @@ int sh_package_compilation_changes(const sh_package_compilation *before,
         const sh_compiled_resource *identity = order < 0 ? a : b;
         sh_package_change *change = &out->items[out->count++];
         *change = (sh_package_change){_strdup(path), kind};
-        if (identity->type && identity->name) {
-            change->type = _strdup(identity->type); change->name = _strdup(identity->name);
-            if (!change->type || !change->name) goto allocation_failed;
-        }
+        if (!pc_native_copy(pc_native_identity(identity), &change->type, &change->name)) goto allocation_failed;
+        if (!order && !pc_native_copy(pc_native_identity(a), &change->previous_type, &change->previous_name))
+            goto allocation_failed;
         if (!change->path) goto allocation_failed;
     }
     return 1;
@@ -1838,15 +2621,22 @@ int sh_package_compilation_missing(const sh_package_compilation *map,
     if (count && !(result.paths = calloc(count, sizeof(*result.paths)))) goto done;
     for (size_t i = 0; i < count; i++) {
         const sh_compiled_resource *resource;
+        const char *original;
         int present;
         if (i && !strcmp(paths[i - 1], paths[i])) continue;
         resource = sh_package_compilation_find(map, paths[i]); result.checked++;
         if (resource && resource->generated) continue;
-        present = available(context, paths[i], error, capacity);
+        original = resource && resource->original_path ? resource->original_path : paths[i];
+        if (resource && resource->original_path) {
+            char *canonical = map->canonical_path ? map->canonical_path(original) : sh_package_engine_path(original);
+            int valid = canonical && !strcmp(canonical, original);
+            free(canonical); if (!valid) goto done;
+        }
+        present = available(context, original, error, capacity);
         if (present == 1) continue;
         if (present != 0) goto done;
         if (!resource || !resource->source_count) {
-            snprintf(error, capacity, "%s: required resource is unavailable and the map carries no supplying package", paths[i]);
+            snprintf(error, capacity, "%s: required resource is unavailable and the map carries no supplying package", original);
             goto done;
         }
         for (size_t j = 0; j < resource->source_count; j++) {
@@ -1854,9 +2644,18 @@ int sh_package_compilation_missing(const sh_package_compilation *map,
             if (file >= map->sources->file_count || map->sources->files[file].owner >= map->sources->package_count ||
                 !sh_package_owners_add(&result.packages, map->sources->files[file].owner)) goto done;
         }
-        result.paths[result.count] = _strdup(paths[i]);
+        result.paths[result.count] = _strdup(original);
         if (!result.paths[result.count]) goto done;
         result.count++;
+    }
+    if (result.count > 1) {
+        size_t kept = 0;
+        qsort(result.paths, result.count, sizeof(*result.paths), pc_required_compare);
+        for (size_t i = 0; i < result.count; i++) {
+            if (kept && !strcmp(result.paths[kept - 1], result.paths[i])) free(result.paths[i]);
+            else result.paths[kept++] = result.paths[i];
+        }
+        result.count = kept;
     }
     ok = 1;
 done:

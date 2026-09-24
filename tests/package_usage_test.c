@@ -257,12 +257,54 @@ static void inline_checks(sh_package_compilation *compiled)
     CHECK(!references.count && !references.items && !references.incomplete);
     sh_package_owners_free(&owners);
 }
+
+typedef struct map_spans { const char *start, *end; size_t roots, states; } map_spans;
+static int inline_span(void *context, const char *class_name, const char *inherit, const char *json, size_t length)
+{
+    map_spans *spans = context;
+    CHECK(class_name && inherit && json >= spans->start && json + length <= spans->end);
+    CHECK(length && json[0] == '{'); spans->states++; return 1;
+}
+static int root_span(void *context, const char *native_class, const char *type,
+    const char *name, const char *json, size_t length)
+{
+    map_spans *spans = context;
+    CHECK(!strcmp(native_class, "idDeclEntityDef") && !strcmp(type, "entitydef"));
+    CHECK(!strcmp(name, "saved/actor") && json >= spans->start && json + length <= spans->end);
+    CHECK(length == strlen("\"saved\\/actor\"")); spans->roots++; return 1;
+}
+static void compiled_alias_checks(void)
+{
+    sh_compiled_resource files[2] = {0}; sh_package_compilation compiled = {0};
+    sh_package_references references = {0}, paths = {0};
+    sh_package_owners owners = {0};
+    const char *json = "{\"targetType\":\"idDeclEntityDef\",\"inherit\":\"saved\\/actor\","
+        "\"state\":{\"edit\": { \"text\":\"\x97\" }},"
+        "\"editorVars\":{\"targetType\":\"idDeclEntityDef\",\"value\":\"preview\"}}";
+    map_spans spans = {json, json + strlen(json)};
+    CHECK(sh_package_map_reference_sites(json, strlen(json), root_span, &spans) && spans.roots == 1);
+    CHECK(sh_package_map_state_sites(json, strlen(json), inline_span, &spans) && spans.states == 1);
+    files[0].engine_path = "generated/models/smp/a.bmodel";
+    files[1].engine_path = "generated/models/smp/a_extra.bmodel";
+    for (size_t i = 0; i < 2; i++) {
+        files[i].native_type = "model"; files[i].native_name = "smp/a.lwo";
+        files[i].gameplay_owners.bits = 1ull << i;
+    }
+    compiled.resources = files; compiled.resource_count = 2;
+    CHECK(sh_package_references_add(&references, "model", "smp/a.lwo"));
+    CHECK(sh_package_map_owners(&compiled, NULL, "{}", 2, &references, &owners, NULL));
+    CHECK(owners.bits == 3);
+    CHECK(sh_package_map_resources(&compiled, NULL, "{}", 2, &references, &paths));
+    CHECK(paths.count == 2 && !strcmp(paths.items[0].name, files[0].engine_path));
+    sh_package_references_free(&references); sh_package_references_free(&paths); sh_package_owners_free(&owners);
+}
 int main(void)
 {
     char temp[MAX_PATH], error[1024];
     sh_package_sources *sources = NULL;
     sh_package_compilation *compiled = NULL;
     sh_package_owners owners = {0};
+    compiled_alias_checks();
     CHECK(GetTempPathA(sizeof(temp), temp)); CHECK(GetTempFileNameA(temp, "pu", 0, root));
     CHECK(DeleteFileA(root)); CHECK(CreateDirectoryA(root, NULL));
     create("overrides/a-editor/package.json", "{\"id\":\"editor\",\"name\":\"Editor\","

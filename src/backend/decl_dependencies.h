@@ -12,7 +12,8 @@ typedef enum sh_decl_value_kind {
     SH_DECL_VALUE_OBJECT,       /* normal reflected members, including bases */
     SH_DECL_VALUE_REFERENCE,    /* a verified native resource-reader contract */
     SH_DECL_VALUE_COLLECTION,   /* a verified native collection-reader contract */
-    SH_DECL_VALUE_POLYMORPHIC   /* native className/object wrapper; element is its base class */
+    SH_DECL_VALUE_POLYMORPHIC,  /* native className/object wrapper; element is its base class */
+    SH_DECL_VALUE_SCRIPT       /* object selector followed by script-module fields */
 } sh_decl_value_kind;
 
 typedef struct sh_decl_value_shape {
@@ -23,6 +24,16 @@ typedef struct sh_decl_value_shape {
     size_t count;
     int count_known;
 } sh_decl_value_shape;
+
+/* A verified reference location, borrowed for the duration of the walk. A
+ * declaration supplies node; JSON supplies its exact original value span.
+ * Observers must queue changes and apply them only after a successful walk.
+ * Never mutate a node or the source buffer from a traversal callback. */
+typedef struct sh_decl_reference_site {
+    const sh_decl_node *node;
+    const char *json;
+    size_t json_length;
+} sh_decl_reference_site;
 
 /* These adapters belong to the compiler, never package.json. Type strings and
  * shape strings returned by an adapter must remain valid throughout the walk.
@@ -43,12 +54,18 @@ typedef struct sh_decl_dependency_schema {
      * otherwise unavailable. This is a compiler adapter, never author policy. */
     int (*dynamic_type)(void *context, sh_decl_value_type base_type,
         const char *class_name, size_t length, sh_decl_value_type *selected_type);
+    int (*reference_site)(void *context, const char *path, sh_decl_value_type type,
+        const char *name, size_t name_length, const sh_decl_reference_site *site);
 } sh_decl_dependency_schema;
 
 typedef struct sh_decl_dependency_result {
     size_t visited, references, gaps;
     int aborted;
 } sh_decl_dependency_result;
+
+/* Native pointer-reader literal. An unquoted NULL clears the pointer; a
+ * quoted "NULL" remains a name. Empty names have length zero. */
+int sh_decl_reference_literal(const sh_decl_node *node, const char **name, size_t *length);
 
 /* Visit known edges even when siblings have unsupported state. Return 1 only
  * with complete coverage and successful callbacks. No engine code is called.
@@ -63,6 +80,13 @@ int sh_decl_state_dependencies(const sh_decl_node *state, sh_decl_value_type typ
  * This emits the declaration's explicit contributions, not a merged parent. */
 int sh_decl_entity_dependencies(const sh_decl_node *definition, sh_decl_value_type entity_type,
     const sh_decl_dependency_schema *schema, sh_decl_dependency_result *result);
+
+/* The reflected declaration envelope uses the same ordered edit/inherit sites
+ * with a family-specific parent pointer. Every occurrence is visited; this is
+ * binding, not a choice of which assignment the native reader will retain. */
+int sh_decl_envelope_dependencies(const sh_decl_node *definition, sh_decl_value_type state_type,
+    sh_decl_value_type parent_type, const sh_decl_dependency_schema *schema,
+    sh_decl_dependency_result *result);
 
 /* Inspect an inline map edit object using the same native field schema.
  * JSON strings become references only where the native reader defines a

@@ -215,8 +215,8 @@ static void test_restoration_failures(void)
     reset();
     assert(sh_process_heap_enter(&api, &scope));
     pop_mode = POP_FAULT_AFTER;
-    assert(!sh_process_heap_leave(&scope) && scope.active && allocator.depth == 1);
-    assert(!sh_process_heap_leave(&scope) && pops == 1);
+    assert(!sh_process_heap_leave(&scope) && !scope.active && allocator.depth == 1);
+    assert(sh_process_heap_leave(&scope) && pops == 1);
     assert(sh_process_heap_leave(NULL));
 }
 

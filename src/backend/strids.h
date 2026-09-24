@@ -17,6 +17,44 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "package_strings.h"
+
+/* Main-thread, read-only reservations using the installed native hash and
+ * dictionary, plus user/baked keys. No native row is inserted by this service.
+ * Keep the transaction through candidate preparation, validate at activation,
+ * and free it on success or failure. Exact owned mappings may reuse aliases. */
+typedef struct sh_strids_reservation sh_strids_reservation;
+sh_strids_reservation *sh_strids_reservation_open(char *error, size_t capacity);
+sh_package_string_reservations sh_strids_reservation_adapter(sh_strids_reservation *reservation,
+    size_t max_attempts);
+int sh_strids_reservation_validate(const sh_strids_reservation *reservation, char *error, size_t capacity);
+struct sh_package_policy;
+/* Seed all private and historical/global keys of another pending provider.
+ * Call before allocating peer aliases, then check the final combined policy. */
+int sh_strids_reservation_policy(sh_strids_reservation *reservation,
+    const struct sh_package_policy *policy, char *error, size_t capacity);
+void sh_strids_reservation_free(sh_strids_reservation *reservation);
+
+typedef struct sh_strids_localization {
+    void *context;
+    /* Complete verified locale order, stable until this synchronous refresh
+     * returns. No implicit English or regional fallback is added. */
+    int (*locales)(void *context, const char *const **order, size_t *count,
+        char *error, size_t capacity);
+    /* Original native lookup result under that same language snapshot, including
+     * the engine's missing-key behavior. Return malloc-owned exact native bytes;
+     * do not read a package-overridden row or transcode a byte string. */
+    int (*original)(void *context, const char *key, unsigned char **text, size_t *length,
+        char *error, size_t capacity);
+} sh_strids_localization;
+/* Bind before publishing scoped strings; callback state outlives every rearm.
+ * A language/dictionary change requires rearm at the admitted native boundary. */
+void sh_strids_set_localization(const sh_strids_localization *localization);
+/* Production adapter for the verified single native language table. The
+ * resolved cvar-system pointer slot is borrowed; no native setter is called.
+ * Known language names accept the documented descriptor locale aliases, with
+ * no implicit English translation. Original values bypass injector-owned rows. */
+int sh_strids_bind_native_localization(const void *cvar_system_slot);
 
 /* Install the sort-body detour and attempt immediate injection/resort.
  * sort_status_ok must be clean SIG_OK; missing dependencies or a hooked sort
@@ -44,6 +82,8 @@ unsigned long sh_strids_injected_count(void);
 /* Bind test doubles for the four engine entry points and run one inject pass; returns rows appended. */
 int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idstr_ctor);
 void sh_strids_test_set_sort(void *sort);
+/* Exercise the native parser's sort boundary after replacing the test table. */
+int sh_strids_test_native_sort(void);
 /* Read back how row `index` was attributed: its id and its owning package ("<user>" if not a package). */
 int sh_strids_test_row(int index, const char **id_out, const char **owner_out);
 #endif

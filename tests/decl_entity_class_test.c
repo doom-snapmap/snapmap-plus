@@ -26,6 +26,8 @@ static int read_parent(void *context, const char *name, sh_decl_source *out)
     if (!strcmp(name, "base")) value = f->view ? "{ class = \"Child\"; }" : "{ class = \"Base\"; }";
     else if (!strcmp(name, "child")) value = "{ inherit = \"base\"; class = \"Child\"; }";
     else if (!strcmp(name, "empty")) value = "{ edit = {} }";
+    else if (!strcmp(name, "annotated")) value =
+        "{ class = \"Base\"; \"Base\" \"\" edit = { \"int\" \"\" target = 1; target = 2; } }";
     else if (!strcmp(name, "bad")) value = "{ inherit = \"base\"; class = \"Other\"; }";
     else if (!strcmp(name, "cycle/a")) value = "{ inherit = \"/CYCLE/B\"; class = \"Child\"; }";
     else if (!strcmp(name, "cycle/b")) value = "{ inherit = \"cycle/a\"; }";
@@ -125,8 +127,11 @@ int main(void)
     expect(&f, "{ inherit = \"cycle/a\"; class = \"Grandchild\"; }", NULL, "cyclic");
     expect(&f, "{ class = ! \"Base\"; }", NULL, "malformed");
     expect(&f, "{ class = { name = \"Base\"; } }", NULL, "header");
-    expect(&f, "{ inherit = \"ba\\se\"; }", NULL, "header");
-    expect(&f, "{ class = \"Base\"; class = \"Child\"; }", NULL, "duplicate");
+    expect(&f, "{ inherit = \"ba\\se\"; }", NULL, "ba/se");
+    expect(&f, "{ inherit = \"state\\base\"; }", "Base", NULL);
+    expect(&f, "{ class = \"Base\"; class = \"Child\"; }", NULL, "repeated entity header");
+    expect(&f, "{ inherit = \"annotated\"; edit = { target = 3; target = 4; } }", "Base", NULL);
+    expect(&f, "{ inherit = \"base\"; inherit = \"child\"; }", NULL, "repeated entity header");
     expect(&f, "{ inherit = \"deep/4096\"; }", "Base", NULL);
     /* Parent contributions must be read from the selected compilation view,
      * never a stale loaded object or a process-global class cache. */

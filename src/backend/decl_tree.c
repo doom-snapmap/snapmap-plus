@@ -48,7 +48,7 @@ void sh_decl_tree_free(sh_decl_node *node)
             last->next = next;
             next = node->children;
         }
-        free(node->key); free(node->value); free(node);
+        free(node->key); free(node->value); free(node->annotation); free(node);
         node = next;
     }
 }
@@ -100,18 +100,67 @@ static char *dt_key(dt_parser *p)
     return start == p->offset ? NULL : dt_copy(p->text + start, p->offset - start);
 }
 
+/* Native saved declarations can prefix a key with type and ops tokens.
+ * Keep those tokens as source spelling; they never become declaration paths.
+ * A quoted field name is also accepted. The field schema decides its meaning. */
+static char *dt_field(dt_parser *p, char **annotation)
+{
+    size_t begin, starts[3], ends[3], token_begin[3], count = 0;
+    dt_space(p); begin = p->offset;
+    while (!p->failed && p->offset < p->length) {
+        unsigned char c = (unsigned char)p->text[p->offset];
+        if (c == '=' || c == '{' || c == '!' || c == '}' || c == ';') break;
+        if (count == 3) return NULL;
+        token_begin[count] = p->offset;
+        if (c == '"') {
+            starts[count] = ++p->offset;
+            while (p->offset < p->length && p->text[p->offset] != '"') {
+                c = (unsigned char)p->text[p->offset++];
+                if (c < 32 || c == '\\') return NULL;
+            }
+            if (p->offset == p->length) return NULL;
+            ends[count++] = p->offset++;
+        } else {
+            starts[count] = p->offset;
+            if (c == '*') p->offset++;
+            else {
+                char *token = dt_key(p);
+                if (!token) return NULL;
+                free(token);
+            }
+            ends[count++] = p->offset;
+        }
+        dt_space(p);
+    }
+    if (!count || p->failed) return NULL;
+    count--;
+    size_t key_begin = token_begin[count];
+    char *key = dt_copy(p->text + starts[count], ends[count] - starts[count]);
+    if (!key || !*key) { free(key); return NULL; }
+    for (size_t i = 0; key[i]; i++) {
+        unsigned char c = (unsigned char)key[i];
+        if (!(isalnum(c) || c == '_' || c == '.' || c == '[' || c == ']' || c == '-')) {
+            free(key); return NULL;
+        }
+    }
+    if (count && !(*annotation = dt_copy(p->text + begin, key_begin - begin))) {
+        free(key); return NULL;
+    }
+    return key;
+}
+
 static char *dt_value(dt_parser *p)
 {
     size_t start, end, parentheses = 0;
-    int quoted = 0, escaped = 0;
+    int quoted = 0;
     dt_space(p); start = p->offset;
     while (p->offset < p->length) {
         unsigned char c = (unsigned char)p->text[p->offset++];
         if (quoted) {
-            if (escaped) { escaped = 0; continue; }
-            if (c == '\\') escaped = 1;
-            else if (c == '"') quoted = 0;
-            else if (c < 32) return NULL;
+            /* Declaration lexer flags disable escapes. A backslash before
+             * the closing quote is still a path byte, not an escape. */
+            if (c == '"') quoted = 0;
+            else if (c < 32 && c != '\t') return NULL;
             continue;
         }
         if (c == '"') { quoted = 1; continue; }
@@ -205,7 +254,7 @@ static sh_decl_node *dt_parse(sh_decl_source source, int unique_fields, char *er
         }
         node = (sh_decl_node *)calloc(1, sizeof(*node));
         if (!node) { dt_fail(&p, "allocation failed"); break; }
-        node->key = dt_key(&p);
+        node->key = dt_field(&p, &node->annotation);
         if (!node->key || !dt_insert(&p, node, unique_fields)) {
             sh_decl_tree_free(node); dt_fail(&p, "expected field or closing brace"); break;
         }
@@ -268,7 +317,8 @@ char *sh_decl_tree_write(const sh_decl_node *root, size_t *length)
             if (!depth) break;
             node = stack[--depth]; continue;
         }
-        if (!node->key || !dt_append(&out, node->key) ||
+        if (!node->key || (node->annotation && !dt_append(&out, node->annotation)) ||
+            !dt_append(&out, node->key) ||
             !dt_append(&out, node->assignment ? " = " : " ") ||
             (node->reset && !dt_append(&out, "! "))) goto done;
         if (!node->compound) {
@@ -307,11 +357,11 @@ int sh_decl_tree_literal(const sh_decl_node *node, const char **text, size_t *le
     if (*value == '"') {
         if (size < 2 || value[size - 1] != '"') return 0;
         value++; size -= 2;
-        for (i = 0; i < size; i++) if (value[i] == '"' || value[i] == '\\') return 0;
+        for (i = 0; i < size; i++) if (value[i] == '"') return 0;
     } else {
         for (i = 0; i < size; i++) {
             unsigned char c = (unsigned char)value[i];
-            if (!(isalnum(c) || strchr("_/.:$-", c))) return 0;
+            if (!(isalnum(c) || strchr("_/\\.:$-", c))) return 0;
         }
     }
     *text = value; *length = size;

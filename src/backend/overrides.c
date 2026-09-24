@@ -19,6 +19,7 @@
 #include "packages.h"
 #include "package_runtime.h"
 #include "resource_graph.h"
+#include "package_shader_receipt.h"
 #include "grid_room_asset.h"
 #include "user_overrides.h"
 #include "navmesh.h"                /* baked AI navigation, served under the module's own names */
@@ -347,6 +348,18 @@ static ov_stream *make_stream(FILE *fp, long long length, const char *name)
     return s;
 }
 
+void *sh_overrides_stream_take_file(FILE *file, uint64_t length, const char *name)
+{
+    ov_stream *stream = NULL;
+    if (file && name && *name && length <= LLONG_MAX &&
+        InterlockedCompareExchange(&g_stream_helpers_state, OV_STREAM_HELPERS_NEW,
+            OV_STREAM_HELPERS_NEW) == OV_STREAM_HELPERS_READY &&
+        _fseeki64(file, 0, SEEK_SET) == 0)
+        stream = make_stream(file, (long long)length, name);
+    if (!stream && file) fclose(file);
+    return stream;
+}
+
 /* Construct a MEMORY-backed stream over `buf`/`length`. owns_buf=1 hands the (heap) buffer to the
  * stream's dtor; owns_buf=0 leaves it (the static baked text). NULL on alloc failure. */
 static ov_stream *make_mem_stream(const unsigned char *buf, long long length, const char *name, int owns_buf)
@@ -358,6 +371,19 @@ static ov_stream *make_mem_stream(const unsigned char *buf, long long length, co
     s->pos      = 0;
     s->owns_buf = owns_buf;
     return s;
+}
+
+void *sh_overrides_stream_copy_bytes(const void *bytes, size_t length, const char *name)
+{
+    if ((!bytes && length) || length > LLONG_MAX || !name || !*name ||
+        InterlockedCompareExchange(&g_stream_helpers_state, OV_STREAM_HELPERS_NEW,
+            OV_STREAM_HELPERS_NEW) != OV_STREAM_HELPERS_READY) return NULL;
+    unsigned char *owned = HeapAlloc(GetProcessHeap(), 0, length ? length : 1u);
+    if (!owned) return NULL;
+    if (length) memcpy(owned, bytes, length);
+    ov_stream *stream = make_mem_stream(owned, (long long)length, name, 1);
+    if (!stream) HeapFree(GetProcessHeap(), 0, owned);
+    return stream;
 }
 
 /* Resource names normally map to overrides/<name>. The shader-include branch
@@ -844,6 +870,16 @@ int sh_overrides_activate_map(sh_package_map_plan *plan, sh_package_activation_f
     return 1;
 }
 
+int sh_overrides_activate_occurrences(const sh_package_occurrence_snapshot *map,
+    sh_package_activation_fn activate, void *context)
+{
+    if (!sh_user_overrides_enabled_for_launch()) return 0;
+    if (!sh_package_runtime_activate_occurrences(map, (sh_package_activation_guard){
+        sh_nav_bake_source_update_begin, sh_nav_bake_source_update_end}, activate, context)) return 0;
+    InterlockedIncrement(&g_ov_pkg_generation);
+    return 1;
+}
+
 /* ====================================================== built-in default lookup + validation =======*/
 
 /* Path-tolerant name compare for the baked table: case-insensitive, '/' == '\\' (the engine asks with
@@ -1166,12 +1202,88 @@ static void *ov_open_body(void *self, const char *name, unsigned char b1, unsign
     }
 }
 
+/* Observe the bytes actually returned to a fixed shader declaration's parser.
+ * Keep the original idFile object and every name/time/seek/provider method.
+ * Only Read and destruction are wrapped in a private copy of the audited base
+ * vtable. No extra file reads, source replacement or inferred baseline occurs.
+ * Files whose metadata cannot be observed keep their original behavior and do
+ * not acquire a positive receipt. */
+typedef struct ov_receipt_stream {
+    void *table[31];
+    void **original;
+    char *path;
+} ov_receipt_stream;
+static long long ov_receipt_read(void *self, void *body, uint64_t wanted)
+{
+    ov_receipt_stream *receipt = *(ov_receipt_stream **)self;
+    typedef long long (*read_fn)(void *, void *, uint64_t);
+    typedef long long (*value_fn)(void *);
+    long long offset = -1, total = -1;
+    int observing = sh_package_shader_receipt_wants(receipt->path);
+    if (observing) {
+        __try {
+            offset = ((value_fn)receipt->original[13])(self);
+            total = ((value_fn)receipt->original[11])(self);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { offset = total = -1; }
+    }
+    long long got = ((read_fn)receipt->original[5])(self, body, wanted);
+    if (observing) {
+        __try {
+            if (offset >= 0 && total > 0 && got >= 0 && (uint64_t)got <= wanted &&
+                (uint64_t)total <= SIZE_MAX && (uint64_t)offset <= SIZE_MAX && (uint64_t)got <= SIZE_MAX)
+                sh_package_shader_receipt_bytes(receipt->path, (size_t)total, (size_t)offset, body, (size_t)got);
+            else sh_package_shader_receipt_bytes(receipt->path, 0, 0, NULL, 0);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            sh_package_shader_receipt_bytes(receipt->path, 0, 0, NULL, 0);
+        }
+    }
+    return got;
+}
+static void *ov_receipt_destroy(void *self, unsigned flags)
+{
+    ov_receipt_stream *receipt = *(ov_receipt_stream **)self;
+    typedef void *(*destroy_fn)(void *, unsigned);
+    destroy_fn original = (destroy_fn)receipt->original[0];
+    *(void ***)self = receipt->original;
+    void *result = NULL;
+    __try { result = original(self, flags); }
+    __finally { free(receipt->path); free(receipt); }
+    return result;
+}
+static void ov_receipt_attach(void *stream, const char *path)
+{
+    if (!sh_package_shader_receipt_wants(path)) return;
+    ov_receipt_stream *receipt = calloc(1, sizeof(*receipt));
+    if (!receipt) return;
+    receipt->path = _strdup(path);
+    if (!receipt->path) { free(receipt); return; }
+    int attached = 0;
+    __try {
+        receipt->original = *(void ***)stream;
+        if (receipt->original && receipt->original[0] && receipt->original[5] &&
+            receipt->original[11] && receipt->original[13] &&
+            receipt->original[5] != (void *)ov_receipt_read) {
+            memcpy(receipt->table, receipt->original, sizeof(receipt->table));
+            receipt->table[0] = (void *)ov_receipt_destroy; receipt->table[5] = (void *)ov_receipt_read;
+            *(void ***)stream = receipt->table; attached = 1;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { attached = 0; }
+    if (!attached) { free(receipt->path); free(receipt); }
+}
+#ifdef SH_OVERRIDES_TESTING
+void sh_overrides_test_receipt_attach(void *stream, const char *path)
+{ ov_receipt_attach(stream, path); }
+#endif
+
 /* Every resource the engine opens passes through here, so its cost is counted. */
 static void *ov_open_hook(void *self, const char *name, unsigned char b1, unsigned char b2, unsigned int mode)
 {
     SH_PERF_BEGIN(t0);
     void *s = ov_open_body(self, name, b1, b2, mode);
-    if (s && mode < 2 && name) sh_resource_graph_file(name);
+    if (s && mode < 2 && name) {
+        sh_resource_graph_file(name);
+        ov_receipt_attach(s, name);
+    }
     SH_PERF_END(SH_PERF_OVERRIDE_OPEN, t0);
     return s;
 }

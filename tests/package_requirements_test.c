@@ -128,6 +128,36 @@ static int install(const char *root)
                                            (void *)fake_buffer, (void *)fake_execute, 1);
 }
 
+static void overlapping_permissions(const char *root, const char *marker)
+{
+    char peer[MAX_PATH], peer_marker[MAX_PATH];
+    snprintf(peer, sizeof(peer), "%s/overrides/permission-peer", root);
+    snprintf(peer_marker, sizeof(peer_marker), "%s/package.json", peer);
+    CHECK(make_dir(peer));
+    CHECK(write_text(peer_marker, "{\"id\":\"permission-peer\",\"name\":\"Permission peer\","
+        "\"requirements\":{\"cvars\":{\"g_useResourceBlackList\":false,\"g_useImageBlackList\":0}}}"));
+    policy(root, marker, "{\"g_useImageBlackList\":true,\"g_useResourceBlackList\":1}");
+    {
+        char *summary = sh_package_runtime_summary();
+        CHECK(summary && !strstr(summary, "Skipped local package")); free(summary);
+    }
+    reset_native(1, 1);
+    CHECK(install(root) && sh_package_requirements_apply_now(NULL));
+    CHECK(sh_package_requirements_test_count() == 2 && *value(0) == 0 && *value(1) == 0);
+    CHECK(g_execute_calls == 1 && !strcmp(g_buffered,
+        "g_useImageBlackList 0\ng_useResourceBlackList 0\n"));
+    CHECK(DeleteFileA(peer_marker)); CHECK(RemoveDirectoryA(peer));
+    policy(root, marker, "{\"g_useImageBlackList\":true,\"g_useResourceBlackList\":1}");
+    CHECK(sh_package_requirements_rearm(root, NULL, 1));
+    CHECK(!sh_package_requirements_test_count() && *value(0) == 1 && *value(1) == 1);
+    /* A lone restrictive request does not acquire or force the native gate.
+     * In particular, it cannot override a previously disabled native value. */
+    reset_native(0, 1);
+    CHECK(install(root) && sh_package_requirements_apply_now(NULL));
+    CHECK(!sh_package_requirements_test_count() && !g_buffer_calls && !g_execute_calls);
+    CHECK(*value(0) == 0 && *value(1) == 1);
+}
+
 static void map_selection_retains_requirements(const char *root, const char *package, const char *marker)
 {
     char *selected;
@@ -313,6 +343,7 @@ int main(void)
     sh_package_requirements_poll();
     CHECK(*value(0) == 0 && *value(1) == 0);
 
+    overlapping_permissions(root, marker);
     map_selection_retains_requirements(root, package, marker);
     policy(root, marker, both);
 

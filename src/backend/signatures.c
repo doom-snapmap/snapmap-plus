@@ -456,6 +456,51 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                              * NULL progress is allowed; callers validate the live palette vtable. */
       "48 8B C4 56 57 41 54 41 56 41 57 48 81 EC 70 07 00 00",
       0x54AEE0u },
+    { "SnapPaletteFindEntity", /* Exact-name lookup; miss returns palette+0x28 end pointer. */
+      "4C 8B DC 49 89 5B 18 49 89 53 10 57 48 83 EC 40 48 8B 79 28 "
+      "48 8D 05 ?? ?? ?? ?? 49 89 43 E8 4D 8D 4B 08 4C 8B C7 "
+      "48 B8 5D A8 39 09 C4 85 9A 93 4C 2B 41 10 48 8B 49 10",
+      0x54AB50u },
+    { "SnapPaletteEntryConstruct", /* Native 0x6f0-byte template from snapEditorEntity. */
+      "48 89 4C 24 08 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF "
+      "48 89 5C 24 50 48 89 74 24 58 48 8B DA 48 8B F9 48 89 11 "
+      "48 83 C1 08 E8 ?? ?? ?? ?? 0F 10 05 ?? ?? ?? ?? 0F 11 87 28 01 00 00 "
+      "C7 87 38 01 00 00 00 00 80 3F",
+      0x53C3F0u },
+    { "SnapPaletteEntryValid", /* Boolean return is AL; checks entityDef and typed I/O. */
+      "48 83 EC 28 48 83 B9 C8 01 00 00 00 48 8B D1 75 ?? 48 8B 51 08 "
+      "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 32 C0 48 83 C4 28 C3 "
+      "48 8B 89 40 04 00 00 48 63 82 48 04 00 00 4C 8D 04 C1 49 3B C8",
+      0x4F8180u },
+    { "SnapPaletteArrayResize",
+      "48 89 4C 24 08 53 55 56 57 41 56 48 83 EC 40 48 C7 44 24 30 FE FF FF FF "
+      "8B EA 48 8B F9 85 D2 7F ?? 0F B6 41 13 33 F6 84 C0 74 ?? 2C 03 3C 01 77 "
+      "?? 48 8B 09 48 85 C9 74 ?? 8B 57 0C E8 ?? ?? ?? ?? 48 89 37 89 77 0C 89 "
+      "77 08 E9 ?? ?? ?? ?? 8B 41 0C 3B E8 0F 84 ?? ?? ?? ?? 0F B6 49 13 80 F9 "
+      "02 0F 85 ?? ?? ?? ?? 3B E8 0F 8E ?? ?? ?? ?? 0F B6 57 12 45 33 C0 8B CD "
+      "E8 ?? ?? ?? ?? 4C 8B F0 48 89 84 24 80 00 00 00 48 85 C0 75 ?? 32 C0 E9 "
+      "?? ?? ?? ?? C6 47 13 00 33 F6 89 74 24 78 39 77 08 7E ?? 0F 1F 40 00 66 "
+      "0F 1F 84 00 00 00 00 00 48 63 C6 48 69 D8 F0 06 00 00",
+      0x54B180u },
+    { "SnapPaletteDestroy",
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B D9 0F "
+      "B6 41 5B 33 FF 84 C0 74 ?? 2C 03 3C 01 77 ?? 48 8B 49 48 48 85 C9 74 ?? "
+      "8B 53 54 E8 ?? ?? ?? ?? 90 48 89 7B 48 89 7B 54 89 7B 50 0F B6 43 43 84 "
+      "C0 74 ?? 2C 03 3C 01 77 ?? 48 8B 53 30 48 85 D2 74 ?? 48 8B 0D ?? ?? ?? "
+      "?? 48 8B 01 41 B8 10 00 00 00 FF 50 10 90 48 89 7B 30 89 7B 3C 89 7B 38 "
+      "0F B6 43 23 84 C0 74 ?? 2C 03 3C 01 77 ?? 48 8B 4B 10",
+      0x51D740u },
+    { "SnapPaletteAddPrepare",
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B F9 48 8B DA 48 8B CA E8 ?? ?? ?? ?? "
+      "0F B6 47 0C",
+      0xCD7590u },
+    { "SnapPaletteFpsPrepare",
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8D BA 60 06 02 00",
+      0xCD8D80u },
+    { "SnapEntityModeCtor",
+      "48 89 4C 24 08 57 48 83 EC 40 48 C7 44 24 30 FE FF FF FF 48 89 5C 24 68 "
+      "48 8B F9 48 8D 05 ?? ?? ?? ?? 48 89 01 48 83 C1 08",
+      0xCF3190u },
     { "SnapEntityTraversalDecode", /* void(entity,data); empty palette defaults are not late additions. */
       "48 8B C4 55 57 41 56 48 8D 68 A1 48 81 EC D0 00 00 00 "
       "48 C7 45 DF FE FF FF FF 48 89 58 18 48 89 70 20 48 8B 05 ?? ?? ?? ?? "
@@ -537,6 +582,13 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "E8 ?? ?? ?? ?? 48 8B 93 98 00 00 00 48 8D 0D ?? ?? ?? ?? 45 33 C9 48 89 43 08 "
       "41 B0 01 E8 ?? ?? ?? ?? 48 89 43 10 48 83 C4 20 5B C3",
       0x4F91E0u },
+    { "VirtualMaterialLookup", /* row*(atlasContext, material). Cached native row or
+                                * name lookup; private aliases need independent associations.
+                                * Vulkan 0xe0f9d0, OpenGL 0xe013f0. */
+      "40 55 57 48 83 EC 28 48 8B EA 48 8B F9 48 85 D2 75 09 33 C0 48 83 C4 28 5F 5D C3 "
+      "48 8B 82 70 01 00 00 48 85 C0 0F 85 4C 01 00 00 48 89 5C 24 40 48 8D 15 ?? ?? ?? ?? "
+      "48 89 74 24 48 48 8D 0D ?? ?? ?? ?? 4C 89 74 24 50 41 B0 01 4C 89 7C 24 20",
+      0xE0F9D0u },
     { "MaterialVirtualTextureRebind", /* void(void). Rebuilds every material's virtual-texture
                                        * parm binding; the engine runs it after map preload
                                        * and texture reloads. Unique in both renderers:
@@ -557,6 +609,14 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 89 4C 24 38 48 8B 01 FF 50 10 48 8B C8 E8 ?? ?? ?? ?? 4C 8B C0 48 8B 57 08 "
       "48 8B CF E8 ?? ?? ?? ?? 48 8B CF E8 ?? ?? ?? ??",
       0x17FF5F0u },
+    { "FontRead", /* uint32_t(font, errorText), zero on success. First 18 bytes
+                    * end before the stack-probe call; VK 0x1819c30 / GL 0x180c5c0. */
+      "40 55 57 41 56 48 8D AC 24 B0 7F FF FF B8 50 81 00 00 "
+      "E8 ?? ?? ?? ?? 48 2B E0 48 C7 44 24 48 FE FF FF FF "
+      "48 89 9C 24 80 81 00 00 48 89 B4 24 88 81 00 00 "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 40 80 00 00 "
+      "4C 8B F2 48 8B D9 C7 41 48 FF FF FF FF 48 8B 79 40",
+      0x1819C30u },
     { "DeclRead", /* uint32_t(decl, errorText). The production-file branch calls
                     * the typed parser directly; implicit text returns without
                     * parsing. Independently verified VK 0x17aab70 / GL 0x179d660.
@@ -565,7 +625,56 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "48 C7 44 24 48 FE FF FF FF 48 89 9C 24 50 0A 00 00 "
       "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 08 0A 00 00 "
       "4C 8B FA 48 8B F1 48 89 4C 24 40 48 89 54 24 38 80 79 48 00",
-      0x17AAB70u },
+        0x17AAB70u },
+    { "ShaderParmDefaultsPublish", /* Global manager fanout of one default to
+                                     * registered renderer states; VK 0x192e730 /
+                                     * GL 0x1921380. First four stack stores: 20. */
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 "
+      "48 83 EC 20 48 63 B1 90 01 01 00 33 DB 49 8B E8 4C 8B F2 48 8B F9 "
+      "48 85 F6 7E 1E 48 8B 8F 88 01 01 00 4C 8B C5 49 8B D6 48 8B 0C D9 "
+      "E8 ?? ?? ?? ?? 48 FF C3 48 3B DE 7C E2",
+      0x192E730u },
+    { "ShaderParmStateWrite", /* Native 16-byte state update plus native dirty
+                                * counters; VK 0x1930340 / GL 0x1925500. */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 63 42 68 49 8B F0 "
+      "48 8B FA 48 8B D9 44 8B 8C 81 70 94 00 00 44 85 89 7C B9 00 00 "
+      "74 07 B2 01 E8 ?? ?? ?? ?? 48 63 47 68 0F 10 06 48 83 C0 07 "
+      "48 8B 74 24 38 48 03 C0 0F 11 04 C3 48 63 4F 68 48 8B 05 ?? ?? ?? ?? "
+      "0F B7 94 48 00 4A 00 00 48 FF 03",
+      0x1930340u },
+    { "ShaderBufferFindName", /* Native structured-buffer entry lookup, before
+                                * the parser publishes pooled type text.
+                                * VK 0xdfed70 / GL 0xdf30f0; stolen 17 bytes. */
+      "48 89 6C 24 20 41 56 48 83 EC 20 4C 8B F2 48 85 D2 75 0F 83 C8 FF "
+      "48 8B 6C 24 48 48 83 C4 20 41 5E C3 48 89 5C 24 30 83 CD FF "
+      "48 89 74 24 38 33 F6 48 89 7C 24 40 8B DE 48 8D 79 08 0F 1F 40 00 "
+      "48 8B 17 48 85 D2 74 0C 49 8B CE E8 ?? ?? ?? ?? 85 C0 74 11 "
+      "FF C6 48 FF C3 48 83 C7 20 48 83 FB 10 7C DD",
+      0xDFED70u },
+    { "ShaderMetadataWrite", /* void(native metadata, idFile). Read-only native
+                               * serialization; VK 0xd80280 / GL 0xd80630.
+                               * Used only within admitted source preparation. */
+      "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 55 41 54 41 55 41 56 41 57 "
+      "48 8B EC 48 83 EC 30 F3 0F 10 01 48 8B FA F3 0F 11 45 30 48 8B F1 "
+      "0F B6 45 33 48 8B CF 44 0F B6 45 30 88 45 30 0F B6 45 32 44 88 45 33 "
+      "44 0F B6 45 31 88 45 31 48 8B 02 48 8D 55 30 44 88 45 32 41 B8 04 00 00 00 FF 50",
+      0xD80280u },
+    { "ShaderSourceCompile", /* Nine integer/pointer arguments, returns metadata
+                               * result. VK 0xd8e940 / GL 0xd8ed30. First 21
+                               * bytes are whole position-independent pushes/LEA. */
+      "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 D8 89 FF FF "
+      "B8 28 77 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 C7 45 E0 FE FF FF FF "
+      "48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 10 76 00 00 49 8B F9 4D 8B E8 "
+      "48 89 55 C8 48 89 4C 24 78",
+      0xD8E940u },
+    { "DeclSetText", /* void(decl, bytes, length). Observe the actual normalized
+                         * parser input before production Read retires it.
+                         * Independently verified VK 0x17ac910 / GL 0x179f3f0;
+                         * the first 15 bytes are three complete stack stores. */
+      "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 40 "
+      "48 8B F2 33 DB 48 8B 51 38 41 8B E8 48 8B F9 48 85 D2 74 15 "
+      "48 8B 0D ?? ?? ?? ?? 44 8D 43 10 48 8B 01 FF 50 10 48 89 5F 38",
+      0x17AC910u },
     { "DeclParseSource", /* uint32_t(decl, readSource, errorText). Zero means parsed.
                             * "No text for decl" independently identifies Vulkan
                             * 0x17ab5e0 and OpenGL 0x179e0c0. Direct edit/touch paths
@@ -724,6 +833,13 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
                             * main thread. */
       "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 89 6C 24 48 48 89 74 24 50 48 8B F2 48 8B D9",
       0x525250u },
+    { "EditorSetActive", /* Native editor activation/deactivation and state write.
+                           * Vulkan 0x529720, OpenGL 0x529050. */
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 0F B6 FA 48 8B D9 "
+      "48 8B 0D ?? ?? ?? ?? 48 8B 01 33 D2 FF 50 48 90 80 7B 08 00 75 10 40 84 FF 74 0B "
+      "48 8B 03 33 D2 48 8B CB FF 50 08 0F B6 43 09 84 C0 75 13 40 84 FF 74 0A 48 8B CB "
+      "E8 ?? ?? ?? ?? EB 11 84 C0 74 0D 40 84 FF 75 08 48 8B CB E8 ?? ?? ?? ?? 40 88 7B 09",
+      0x529720u },
     { "MenuPump",
       "40 56 41 57 48 81 EC 18 01 00 00",
       0x1702BA0u },
@@ -815,6 +931,27 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
     { "EntityClone",
       "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B 81 50 01 00 00",
       0x5A6460u },
+    /* Flat idSnapEntity copy assignment; the source survives until its destructor. */
+    { "FlatEntityAssign",
+      "48 89 5C 24 08 57 48 83 EC 20 48 8B DA 48 8B F9 48 81 C2 68 01 00 00 48 81 C1 68 01 00 00",
+      0x5E9F00u },
+    /* Paired editor body lifetime boundaries. Assignment tail anchors are
+     * resolved back to their independently verified native entry prologues. */
+    { "EntityBodyCopyCtor",
+      "48 89 4C 24 08 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 50 48 89 74 24 58 48 8B FA 48 8B F1 48 8B 02 48 89 01 48 8D 41 08",
+      0x53D800u },
+    { "EntityBodyCopyAssignAnchor",
+      "00 00 0F 10 8B 68 04 00 00 0F 11 8E 68 04 00 00 0F 10 83 78 04 00 00 0F 11 86 78 04 00 00 0F B6 83 88 04 00 00 88 86 88 04 00 00 8B 83 8C 04 00 00 89 86 8C 04 00 00 8B 83 90 04 00 00 89 86 90 04 00 00 8B 83 94 04 00 00 89 86 94 04 00 00 8B 83 98 04 00 00 89 86 98 04 00 00 8B 83 9C 04 00 00 89 86 9C 04 00 00 8B 83 A0 04 00 00 89 86 A0 04 00 00 8B 83 A4 04 00 00 48 8D 93 80 05 00 00",
+      0x53F632u },
+    { "EntityBodyMoveAssignAnchor",
+      "04 00 00 0F 10 8B 68 04 00 00 0F 11 8E 68 04 00 00 0F 10 83 78 04 00 00 0F 11 86 78 04 00 00 0F B6 83 88 04 00 00 88 86 88 04 00 00 8B 83 8C 04 00 00 89 86 8C 04 00 00 8B 83 90 04 00 00 89 86 90 04 00 00 8B 83 94 04 00 00 89 86 94 04 00 00 8B 83 98 04 00 00 89 86 98 04 00 00 8B 83 9C 04 00 00 89 86 9C 04 00 00 8B 83 A0 04 00 00 89 86 A0 04 00 00 8B 83 A4 04 00 00 89 86 A4 04 00 00",
+      0x53EDD1u },
+    { "EntityBodyDtor",
+      "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 40 48 8B D9 48 81 C1 20 06 00 00",
+      0x2E7DC0u },
+    { "EntityFromFlat",
+      "40 53 55 56 57 48 81 EC 38 07 00 00 48 C7 44 24 20 FE FF FF FF",
+      0x5A6530u },
     { "StructSerialize",
       "4C 8B DC 57 48 81 EC 80 00 00 00 49 C7 43 B8 FE FF FF FF 49 89 5B 10 49 89 73 18",
       0x1A21B40u },
@@ -1060,12 +1197,79 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "89 03 48 8D 54 24 58 48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 50 20 83 F8 01 "
       "0F 85 ?? ?? ?? ?? 8B 03 48 8D 54 24 70 33 C9",
       0x1D13500u },
+    { "AudioEventPost",     /* Index slot at +0x1a, event table at index+0x12a8.
+                             * Lookup acquires a reference; occupancy never calls it. */
+      "48 89 74 24 20 41 54 41 56 41 57 48 83 EC 30 4C 8B E2 4D 8B F1 8B D1 "
+      "45 8B F8 48 8B 0D ?? ?? ?? ?? 48 81 C1 A8 12 00 00 E8 ?? ?? ?? ?? 48 8B F0 48 85 C0",
+      0x1D13760u },
+    { "AudioBankPrepare",   /* Bank usage registry lock is the LEA at +0x26. */
+      "44 89 4C 24 20 4C 89 44 24 18 55 56 57 41 54 41 55 41 56 41 57 "
+      "48 8B EC 48 81 EC 80 00 00 00 44 8B 62 20 4C 8B E9 48 8D 0D ?? ?? ?? ?? "
+      "44 89 65 B4 45 8B F9 4D 8B F0 48 8B FA",
+      0x1D2C9D0u },
+    { "AudioThresholdSet",  /* int(float, priority); success can mean priority suppressed the write. */
+      "48 83 EC 58 0F 29 74 24 40 0F 29 7C 24 30 0F 28 F8 0F 2F 3D ?? ?? ?? ?? "
+      "0F 82 ?? ?? ?? ?? 0F 57 F6 0F 2F FE 0F 87 ?? ?? ?? ?? 3B 15 ?? ?? ?? ?? "
+      "0F 8F ?? ?? ?? ?? 44 0F 29 44 24 20 44 0F 28 C0",
+      0x1D14820u },
+    { "AudioVoiceLimitSet", /* int(u16, priority); zero is a native no-op failure. */
+      "66 85 C9 75 06 B8 1F 00 00 00 C3 3B 15 ?? ?? ?? ?? 7F 0D 89 15 ?? ?? ?? ?? "
+      "66 89 0D ?? ?? ?? ?? B8 01 00 00 00 C3",
+      0x1D14450u },
+    { "AudioRenderTick",   /* Native audio processing holds the lock from the LEA at +0x1c. */
+      "48 89 5C 24 08 48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 30 48 8B F9 "
+      "0F 29 74 24 20 48 8D 0D ?? ?? ?? ?? FF 15 ?? ?? ?? ?? "
+      "48 8D 0D ?? ?? ?? ?? FF 15 ?? ?? ?? ?? 48 8B CF E8 ?? ?? ?? ?? 33 ED 8B F0 85 C0",
+      0x1D494D0u },
+    { "AudioBankDispatch", /* Common bank operation dispatcher; native queue lock is not held here. */
+      "48 89 5C 24 08 48 89 7C 24 10 55 48 8D 6C 24 A9 48 81 EC 90 00 00 00 "
+      "48 63 02 48 8B F9 BB 01 00 00 00 83 F8 0B 0F 87 ?? ?? ?? ?? "
+      "48 8D 0D ?? ?? ?? ?? 44 8B 84 81 ?? ?? ?? ?? 4C 03 C1 41 FF E0",
+      0x1D2C030u },
+    { "AudioStateSettingsRead", /* Shared STMG controls; group rules are distinct from runtime state. */
+      "40 55 53 48 8B EC 48 83 EC 68 BB 01 00 00 00 85 D2 0F 84 ?? ?? ?? ?? "
+      "48 89 7C 24 60 44 8D 43 03 48 8D 79 08 4C 89 7C 24 50 48 8B CF "
+      "48 8D 55 D4 E8 ?? ?? ?? ?? F3 0F 10 45 D4 BA 02 00 00 00 8B D8 E8 ?? ?? ?? ?? 83 FB 01",
+      0x1D2EB70u },
+    { "AudioStateGroupEnsure", /* Native detached group construction from a manager table prefix. */
+      "48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20 "
+      "48 8B 01 8B F2 44 8B 41 08 4C 8B F1 49 C1 E0 04 BF 01 00 00 00 "
+      "4C 03 C0 49 3B C0 74 0D 39 30 74 09 48 83 C0 10 49 3B C0 75 F3",
+      0x1D28900u },
+    { "AudioParameterEnsure", /* Parameter hash table construction; active consumers remain separate. */
+      "48 89 5C 24 08 57 48 83 EC 20 8B DA B8 49 09 39 15 F7 E2 44 8B C3 "
+      "48 8B F9 C1 EA 04 69 C2 C1 00 00 00 44 2B C0 4A 8B 04 C1 48 85 C0 74 1A "
+      "66 90 39 18 74 0B 48 8B 40 08 48 85 C0 75 F3 EB 09 48 85 C0 0F 85 85 00 00 00 "
+      "8B 0D ?? ?? ?? ?? BA 70 00 00 00 E8 ?? ?? ?? ??",
+      0x1D1A340u },
+    { "AudioParameterDestroy", /* Full detached node disposal, including subscriber/value storage. */
+      "48 8B C4 48 89 58 08 48 89 70 10 57 48 83 EC 50 33 F6 C6 40 E0 FF "
+      "48 8D 50 C8 89 70 D0 89 70 D8 48 8B D9 48 89 70 F0 48 89 70 C8 C6 40 E8 FF "
+      "E8 ?? ?? ?? ?? 48 8D 4B 20 E8 ?? ?? ?? ?? 48 8B 53 50 48 85 D2 74 15",
+      0x1D18B10u },
+    { "AudioEnvironmentRead", /* Six global curves; native reader ignores curve setter failure. */
+      "48 83 EC 68 48 83 3D ?? ?? ?? ?? 00 75 0A B8 02 00 00 00 48 83 C4 68 C3 "
+      "48 89 5C 24 70 48 89 6C 24 78 48 89 74 24 60 48 89 7C 24 58 "
+      "4C 89 64 24 50 4C 89 74 24 48 4C 89 7C 24 40 85 D2 0F 84 ?? ?? ?? ?? "
+      "45 33 FF 4C 8D 71 08 45 33 E4",
+      0x1D2E9C0u },
+    { "AudioEnvironmentSet", /* Native allocation and first-column curve conversion. */
+      "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 63 C2 45 8B D1 "
+      "44 8B 4C 24 58 48 8B 54 24 50 49 63 F8 45 8B C2 48 8D 34 40 "
+      "48 03 F7 48 C1 E6 04 48 03 F1 48 8D 4E 08 E8 ?? ?? ?? ?? 8B D8 "
+      "83 F8 01 75 0F 85 FF 75 0B 48 8D 4E 08 E8 ?? ?? ?? ?? 8B C3",
+      0x1D523F0u },
     { "AudioBankUnload",    /* int(id, memory=NULL, outPool=NULL), synchronous release.
                              * Only release a bank whose new load we own. */
       "48 89 5C 24 08 48 89 74 24 10 57 48 81 EC B0 00 00 00 8B F1 48 8B FA "
       "48 8B 0D ?? ?? ?? ?? 48 8D 54 24 58 49 8B D8 48 8B 01 FF 50 20 83 F8 01 "
       "0F 85 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 48 8D 54 24",
       0x1D14E70u },
+    { "SoundEventInitialize", /* void(sound*): shared parse, event-table constructor,
+                                * and preview initializer. Name +8 becomes event +0xac. */
+      "48 8B C4 55 41 56 41 57 48 8D A8 48 FE FF FF 48 81 EC A0 02 00 00 "
+      "48 C7 44 24 20 FE FF FF FF 48 89 58 10 48 89 70 18 48 89 78 20",
+      0x184D3B0u },
     { "SoundPreview",       /* void*(world,outHandle,name), sound-world vtable +0x30.
                              * Editor audition sets solo/listener state and allocates an emitter;
                              * stop the previous handle before starting another. An empty/missing

@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "../src/backend/rawmap.c"
+int sh_prefab_import_pending(void) { return 0; }
 
 /* ---- STUBS -------------------------------------------------------------------------------------
  * rawmap.c is one translation unit that also holds the hooks, the package embedder, the navmesh
@@ -44,17 +45,21 @@ static int package_errors, package_gate_fault;
 static int inspection_packages, inspection_strip_fail, inspection_parses, render_loaded_calls;
 static int initial_read_parses, initial_read_mode;
 static int play_prepare_fail, play_select_fail, play_hud_fail, play_selections;
+static int occurrence_policy_selections;
 static char play_selected_json[256];
 static int pf_testing, pf_boundary, pf_packages, pf_gate = 1, pf_fail, pf_held;
 static int pf_lobby, pf_transition, pf_deferred;
+static int pf_editor_reload, pf_editor_frame, pf_editor_handoffs;
 static void *pf_native_editor;
 static int pf_reads, pf_loads, pf_parses, pf_ctors, pf_dtors, pf_closes, pf_plans, pf_frees;
 static int pf_activations, pf_restorations, pf_active, pf_order_error;
+static int pf_binding_plans, pf_rebinds, pf_legacy_rebinds, pf_rebind_fail;
 static int pf_coverage, pf_ready, pf_gate_calls, pf_availability_calls;
 static int pf_install_requests, pf_inventory_reads, pf_install_outcome, pf_cancellations, pf_commits, pf_aborts;
 static sh_mpkg_install_completion pf_completion;
 static void *pf_completion_context;
 static char pf_parsed[256];
+static const char *pf_source_json;
 static char package_last_error[1024];
 void sh_mpkg_report_error(const char *line)
 { if (line && *line) { package_errors++; snprintf(package_last_error, sizeof(package_last_error), "%s", line); } }
@@ -63,6 +68,24 @@ int sh_decl_server_map_boundary_safe(void) { return pf_testing && pf_boundary; }
 int sh_decl_server_map_preparation_ready(void) { return pf_testing; }
 int sh_map_transition_ready(void) { return pf_testing; }
 int sh_map_transition_at_boundary(void) { return pf_transition; }
+void *sh_editor_transition_capture(const void *editor)
+{ return pf_editor_reload && editor == (void *)3 ? (void *)17 : NULL; }
+int sh_editor_transition_frame_ready(void *editor, void *previous)
+{ return pf_editor_frame && previous == sh_editor_transition_capture(editor); }
+int sh_editor_transition_load(void *editor, void *previous, const void *name,
+    sh_editor_transition_load_fn load, const sh_editor_transition_callbacks *callbacks,
+    char *error, size_t capacity)
+{
+    int result;
+    if (!sh_editor_transition_frame_ready(editor, previous)) return 1;
+    pf_editor_handoffs++; pf_transition = 1;
+    result = !callbacks->activate(callbacks->context);
+    pf_transition = 0;
+    if (!result) result = load(editor, name);
+    if (!result) result = !callbacks->commit(callbacks->context);
+    if (result && !error[0]) snprintf(error, capacity, "transition fixture failed");
+    return result;
+}
 int sh_decl_server_map_browser_present(void) { return pf_boundary && !pf_lobby; }
 int sh_decl_server_map_retirement_safe(void) { return pf_testing && pf_boundary && !pf_lobby; }
 int sh_decl_server_map_editor_matches(const void *editor) { return editor == (void *)3 || (editor && editor == pf_native_editor); }
@@ -78,6 +101,18 @@ sh_mpkg_context *sh_mpkg_context_open(const char *root, const char *json, size_t
 { (void)root; (void)json; (void)len; (void)err; (void)cap; return pf_testing && pf_fail != 1 ? (sh_mpkg_context *)1 : NULL; }
 const char *sh_mpkg_context_root(const sh_mpkg_context *context) { (void)context; return "private-map"; }
 size_t sh_mpkg_context_count(const sh_mpkg_context *context) { (void)context; return pf_packages; }
+static int pf_bundle_fail, pf_bundle_attaches;
+static sh_package_bundle_binding pf_bundle;
+const sh_package_bundle_binding *sh_mpkg_context_bundles(const sh_mpkg_context *context, size_t *count)
+{ (void)context; *count = pf_packages; return pf_packages ? &pf_bundle : NULL; }
+int sh_package_map_plan_attach_bundles(sh_package_map_plan *plan,
+    const sh_package_bundle_binding *bundles, size_t count, char *error, size_t capacity)
+{
+    if (!plan || count != (size_t)pf_packages || (count && bundles != &pf_bundle)) pf_order_error++;
+    pf_bundle_attaches++;
+    if (pf_bundle_fail) { snprintf(error, capacity, "fixture bundle failure"); return 0; }
+    return 1;
+}
 int sh_mpkg_context_close(sh_mpkg_context **context)
 {
     if (!context || !*context) return 1;
@@ -97,6 +132,43 @@ void sh_mpkg_context_collect(void)
 }
 sh_package_map_plan *sh_package_runtime_prepare_map(const char *root, const char *map, char *err, size_t cap)
 { (void)root; (void)map; (void)err; (void)cap; pf_plans++; return pf_fail == 2 ? NULL : (sh_package_map_plan *)1; }
+sh_package_map_plan *sh_package_runtime_prepare_map_with_bindings(const char *root, const char *map,
+    const sh_package_provenance *bindings, char *error, size_t capacity)
+{
+    if (!bindings || bindings->context_count != 1 || bindings->binding_count != 1 ||
+        strcmp(bindings->bindings[0].name, "smp/saved")) pf_order_error++;
+    pf_binding_plans++;
+    return sh_package_runtime_prepare_map(root, map, error, capacity);
+}
+sh_package_map_plan *sh_package_runtime_prepare_map_deliveries(const char *root, const char *map,
+    const sh_package_provenance *bindings, const sh_package_bundle_binding *bundles,
+    size_t count, char *error, size_t capacity)
+{
+    if (count != (size_t)pf_packages || (count && bundles != &pf_bundle)) pf_order_error++;
+    pf_bundle_attaches++;
+    if (pf_bundle_fail) { snprintf(error, capacity, "fixture bundle failure"); return NULL; }
+    return bindings ? sh_package_runtime_prepare_map_with_bindings(root, map, bindings, error, capacity) :
+        sh_package_runtime_prepare_map(root, map, error, capacity);
+}
+char *sh_package_map_plan_rebind(const sh_package_map_plan *plan, const sh_package_provenance *saved,
+    const char *json, size_t length, size_t *out_length, char *error, size_t capacity)
+{
+    char *out;
+    if (!plan) pf_order_error++;
+    if (saved) pf_rebinds++; else pf_legacy_rebinds++;
+    *out_length = 0;
+    if (pf_rebind_fail) { snprintf(error, capacity, "fixture binding failure"); return NULL; }
+    out = HeapAlloc(GetProcessHeap(), 0, length + 2);
+    if (out) {
+        char *site;
+        memcpy(out, json, length); out[length] = saved ? ' ' : 0; out[length + 1] = 0;
+        *out_length = length + (saved ? 1 : 0);
+        /* Emulate the compiler changing a typed site, keeping prose untouched. */
+        site = strstr(out, "\"value\":\"smp/saved\"");
+        if (site) memcpy(site + strlen("\"value\":\""), "smp/bound", strlen("smp/bound"));
+    }
+    return out;
+}
 void sh_package_map_plan_free(sh_package_map_plan *plan) { if (plan) pf_frees++; }
 const sh_package_compilation *sh_package_map_plan_compilation(const sh_package_map_plan *plan)
 { return (const sh_package_compilation *)plan; }
@@ -137,8 +209,8 @@ int sh_package_runtime_commit_map(sh_package_map_plan *plan,
 int sh_package_map_plan_resources(const sh_package_map_plan *plan, const char *json, size_t length,
     const sh_package_references *references, sh_package_references *out)
 { (void)plan; (void)json; (void)length; (void)references; (void)out; return 0; }
-int sh_decl_server_registry_source(sh_decl_registry_source *source) { (void)source; return 0; }
-void *sh_typeinfo_get_reflect(void) { return NULL; }
+int sh_decl_server_registry_source(sh_decl_registry_source *source) { (void)source; return pf_testing; }
+void *sh_typeinfo_get_reflect(void) { return pf_testing ? (void *)1 : NULL; }
 int sh_package_map_plan_source_resources(const sh_package_map_plan *plan,
     sh_decl_registry_source registry, uintptr_t reflection, const char *json, size_t length,
     sh_package_references *out, sh_package_source_graph_report *report, char *error, size_t capacity)
@@ -149,11 +221,14 @@ int sh_package_map_plan_missing(const sh_package_map_plan *plan, const char *con
     sh_package_missing *out, char *error, size_t capacity)
 { (void)plan; (void)paths; (void)count; (void)out; (void)error; (void)capacity; return 0; }
 void sh_package_missing_free(sh_package_missing *missing) { (void)missing; }
-int sh_package_map_plan_payload_missing(const sh_package_map_plan *plan,
-    sh_package_missing *out, char *error, size_t capacity)
+int sh_package_map_plan_usage_missing(const sh_package_map_plan *plan,
+    sh_decl_registry_source registry, uintptr_t reflection, const char *json, size_t length,
+    sh_package_missing *out, sh_package_source_graph_report *report, char *error, size_t capacity)
 {
     static char *missing[] = {"missing.fixture"};
-    if (!plan || (!pf_deferred && (!pf_boundary || pf_active || pf_loads))) pf_order_error++;
+    (void)registry; (void)report;
+    if (!reflection || !json || length != strlen(json) || !plan ||
+        (!pf_deferred && ((!pf_boundary && !pf_editor_reload) || pf_active || pf_loads))) pf_order_error++;
     pf_availability_calls++; out->checked = 73;
     if (pf_coverage == -2) RaiseException(0xe0422003u, 0, 0, NULL);
     if (pf_coverage < 0) { snprintf(error, capacity, "fixture unavailable source"); return 0; }
@@ -174,6 +249,13 @@ int sh_package_runtime_select_map(const char *json, size_t length,
         play_selections++;
     }
     return 1;
+}
+int sh_package_runtime_select_map_occurrences(const char *json, size_t length,
+    const sh_package_references *references, const sh_package_occurrence_snapshot *document,
+    char *error, size_t capacity)
+{
+    if (document) occurrence_policy_selections++;
+    return sh_package_runtime_select_map(json, length, references, error, capacity);
 }
 int sh_mpkg_prepare_map(const char *json, size_t length, sh_package_references *references,
                         char *error, size_t capacity)
@@ -216,12 +298,49 @@ char *sh_mpkg_embed(const char *json, size_t len, const char *pkg_id,
 unsigned char *sh_mpkg_pack_dir(const char *root, size_t *out_len, char *err, size_t err_cap)
 { (void)root; if (out_len) *out_len = 0; if (err && err_cap) err[0] = '\0'; return NULL; }
 unsigned char *sh_mpkg_pack_used(const sh_mpkg_used *used, size_t *out_len, char *err, size_t err_cap)
-{ return sh_mpkg_pack_dir(used->root, out_len, err, err_cap); }
+{ (void)used; return sh_mpkg_pack_dir("retained-fixture", out_len, err, err_cap); }
 
 size_t sh_mpkg_used_packages(const char *json, size_t len, const char *data_root,
                              sh_mpkg_used **out, char *error, size_t capacity)
 { (void)json; (void)len; (void)data_root; if (out) *out = NULL;
   if (error && capacity) error[0] = 0; return 0; }
+size_t sh_mpkg_used_packages_with_bindings(const char *json, size_t len, const char *data_root,
+    sh_mpkg_used **out, sh_package_provenance *bindings, char *error, size_t capacity)
+{ (void)bindings; return sh_mpkg_used_packages(json, len, data_root, out, error, capacity); }
+void sh_mpkg_used_free(sh_mpkg_used *used) { free(used); }
+static int occurrence_capture_failed, occurrence_attach_failed, occurrence_attaches, occurrence_captures;
+static sh_package_provenance empty_occurrences = {.semantics = SH_PACKAGE_PROVENANCE_USES};
+static sh_package_occurrence_snapshot *occurrence_world;
+int sh_package_editor_ready(void) { return 1; }
+int sh_package_editor_healthy(char *error, size_t capacity) { (void)error; (void)capacity; return 1; }
+sh_package_occurrence_snapshot *sh_package_editor_snapshot(unsigned kind, const void *flat, char *error, size_t capacity)
+{ (void)kind; (void)flat; (void)error; (void)capacity; return (sh_package_occurrence_snapshot *)1; }
+int sh_package_editor_attach(unsigned kind, const void *flat, const sh_package_occurrence_snapshot *document, char *error, size_t capacity)
+{ (void)kind; (void)flat; (void)document; (void)error; (void)capacity; occurrence_attaches++;
+  if (!occurrence_attach_failed) occurrence_world = (sh_package_occurrence_snapshot *)2; return !occurrence_attach_failed; }
+void sh_package_editor_clear_world(void) { occurrence_world = NULL; }
+sh_package_occurrence_snapshot *sh_package_editor_world(void) { return occurrence_world; }
+void sh_package_editor_restore_world(sh_package_occurrence_snapshot *world) { occurrence_world = world; }
+sh_package_occurrence_snapshot *sh_package_occurrence_retain(sh_package_occurrence_snapshot *value) { return value; }
+void sh_package_occurrence_release(sh_package_occurrence_snapshot *value) { (void)value; }
+const sh_package_provenance *sh_package_occurrence_provenance(const sh_package_occurrence_snapshot *value)
+{ return value ? &empty_occurrences : NULL; }
+const sh_package_bundle_binding *sh_package_occurrence_bundles(const sh_package_occurrence_snapshot *value, size_t *count)
+{ (void)value; if (count) *count = 0; return NULL; }
+char *sh_package_runtime_capture_document(const sh_package_map_plan *plan, const sh_package_provenance *saved,
+    const sh_package_bundle_binding *additional, size_t additional_count, const char *json, size_t length,
+    size_t *output_length, sh_package_occurrence_snapshot **ownership, sh_mpkg_used **deliveries,
+    size_t *delivery_count, char *error, size_t capacity)
+{
+    (void)plan; (void)saved; (void)additional; (void)additional_count;
+    occurrence_captures++; if (output_length) *output_length = 0;
+    if (occurrence_capture_failed) { if (error && capacity) snprintf(error, capacity, "occurrence fixture failed"); return NULL; }
+    char *out = malloc(length + 1); if (!out) return NULL;
+    memcpy(out, json, length); out[length] = 0; *output_length = length;
+    *ownership = (sh_package_occurrence_snapshot *)1;
+    if (deliveries) *deliveries = NULL; if (delivery_count) *delivery_count = 0;
+    return out;
+}
 
 int sh_overrides_get_root(char *out, size_t cap)
 { if (out && cap) strcpy_s(out, cap, pf_testing ? "fixture-root" : ""); return pf_testing; }
@@ -798,7 +917,7 @@ static unsigned char play_serialize(void *snapshot, void *out, unsigned char com
     const char *json = *(const char **)snapshot;
     ++play_serializations;
     CHECK(snapshot == play_expected_snapshot);
-    CHECK(!compact && g_snapshot_depth == 1 && !g_snapshot_visit);
+    CHECK(!compact && g_snapshot_depth == 1 && g_snapshot_visit == capture_save_ownership);
     if (play_native_fault == 2) RaiseException(0xe0421003u, 0, 0, NULL);
     if (play_native_refuse) return 0;
     *(int *)((char *)out + IDSTR_LEN_OFF) = (int)strlen(json);
@@ -828,7 +947,7 @@ static void play_uses_current_snapshot_without_saving(void)
     play_expected_snapshot = &current_map;
     play_expected_editor = editor;
     g_play_orig = play_allocate; g_ser_orig = play_serialize;
-    g_map_to_json = play_serialize;
+    g_map_to_json = fixture_map_to_json;
     g_idstr_ctor = play_ctor; g_idstr_dtor = play_dtor;
     sh_play_detour(editor);
     CHECK(play_allocations == 1 && editor[8] == 1);
@@ -923,11 +1042,11 @@ static void pf_dtor(void *self)
 }
 static int pf_reader(const char *id, void *out, int flags, int slot)
 {
-    const char *json = "{\"from\":\"prepared\"}";
+    const char *json = pf_source_json ? pf_source_json : "{\"from\":\"prepared\"}";
     size_t length = strlen(json);
     char *body;
     CHECK(!strcmp(id, "0123456789ABCDEF0123") && flags == 0 && slot == -1);
-    CHECK(pf_boundary && !pf_loads); pf_reads++;
+    CHECK((pf_boundary || pf_editor_reload) && !pf_loads); pf_reads++;
     if (pf_fail == 5) return -1;
     body = HeapAlloc(GetProcessHeap(), 0, length + 1); CHECK(body);
     if (!body) return -1;
@@ -989,16 +1108,91 @@ static void pf_reset(void)
     CHECK(!g_map_context && !g_preflight_json && !g_preflight_busy && !pf_active && !g_pending_map.state);
     pf_testing = pf_boundary = pf_gate = 1; pf_packages = pf_fail = pf_held = 0;
     pf_transition = pf_deferred = 0;
+    pf_editor_reload = pf_editor_frame = pf_editor_handoffs = 0;
     pf_reads = pf_loads = pf_parses = pf_ctors = pf_dtors = pf_closes = pf_plans = pf_frees = 0;
     pf_activations = pf_restorations = pf_order_error = 0; pf_parsed[0] = 0;
+    pf_binding_plans = pf_rebinds = pf_legacy_rebinds = pf_rebind_fail = 0;
+    occurrence_capture_failed = occurrence_attach_failed = occurrence_attaches = occurrence_captures = 0;
+    pf_bundle_fail = pf_bundle_attaches = 0;
     pf_coverage = pf_ready = 1; pf_gate_calls = pf_availability_calls = 0;
     pf_install_requests = pf_inventory_reads = pf_cancellations = pf_commits = pf_aborts = 0;
     pf_install_outcome = 2; pf_completion = NULL; pf_completion_context = NULL;
+    pf_source_json = NULL;
 }
+static void saved_map_bindings_use_authored_context(void)
+{
+    const char text[] = "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},\"message\":\"old \x97 text\"}";
+    unsigned char tree[1][32] = {{7}};
+    sh_package_provenance value = {0}; sh_package_map_plan *plan = NULL;
+    char error[512], *json, *before, *prepared; size_t length, old_length;
+    size_t context = sh_package_provenance_context_add(&value, SH_PACKAGE_CONTEXT_ISOLATED, tree, 1, "");
+    int failed;
+    CHECK(sh_package_provenance_bind(&value, "entitydef", "actors/example", "smp/saved", &context, 1));
+    pf_reset(); pf_packages = 1;
+    json = sh_map_provenance_write(text, sizeof(text) - 1, &value, &length, error, sizeof(error));
+    CHECK(json != NULL); if (!json) goto done;
+    old_length = length; before = json;
+    pf_rebind_fail = 1;
+    CHECK(!sh_package_document_bind("fixture-root", (sh_mpkg_context *)1,
+        &json, &length, &plan, error, sizeof(error)));
+    CHECK(json == before && length == old_length && !plan && pf_frees == 1);
+    CHECK(pf_binding_plans == 1 && pf_rebinds == 1 && !pf_order_error);
+    CHECK(pf_bundle_attaches == 1);
+    pf_rebind_fail = 0;
+    CHECK(sh_package_document_bind("fixture-root", (sh_mpkg_context *)1,
+        &json, &length, &plan, error, sizeof(error)));
+    CHECK(plan && length == old_length + 1 && json[length - 1] == ' ');
+    CHECK(strstr(json, "old \x97 text") && pf_binding_plans == 2 && pf_rebinds == 2);
+    sh_package_map_plan_free(plan); plan = NULL;
+    prepared = prepare_map_buffer_mode(json, 0, &failed);
+    CHECK(!failed && prepared && !strstr(prepared, "smpbind.") && strstr(prepared, "old \x97 text"));
+    HeapFree(GetProcessHeap(), 0, prepared);
+    /* Once no packaged assets are used, saving removes stale bindings rather
+     * than attaching metadata to a vanilla map. The empty inventory is stubbed
+     * here; the compiler's used-owner selection has separate filesystem tests. */
+    size_t saved_length = 0;
+    prepared = embed_used_packages(json, length, &saved_length, &failed);
+    CHECK(!failed && prepared && !strstr(prepared, "smpbind.") && strstr(prepared, "old \x97 text"));
+    CHECK(saved_length == strlen(prepared)); HeapFree(GetProcessHeap(), 0, prepared);
+    /* No package archives cannot silently turn a recorded variant into a local
+     * object. Malformed owned metadata likewise cannot choose the old route. */
+    pf_packages = 0; before = json;
+    CHECK(!sh_package_document_bind("fixture-root", (sh_mpkg_context *)1,
+        &json, &length, &plan, error, sizeof(error)) && json == before && !plan);
+    CHECK(pf_binding_plans == 2 && pf_rebinds == 2);
+    pf_packages = 1;
+    char *header = strstr(json, "smpbind.0."); CHECK(header != NULL);
+    if (header) header[8] = 'x';
+    CHECK(!sh_package_document_bind("fixture-root", (sh_mpkg_context *)1,
+        &json, &length, &plan, error, sizeof(error)) && json == before && !plan);
+    CHECK(pf_binding_plans == 2 && pf_rebinds == 2);
+    HeapFree(GetProcessHeap(), 0, json);
+    json = sh_map_provenance_strip(text, sizeof(text) - 1, &length, error, sizeof(error));
+    CHECK(json && sh_package_document_bind("fixture-root", (sh_mpkg_context *)1,
+        &json, &length, &plan, error, sizeof(error)));
+    CHECK(plan && !memcmp(json, text, sizeof(text)) && pf_binding_plans == 2 && pf_rebinds == 2);
+    CHECK(pf_legacy_rebinds == 1);
+    prepared = embed_used_packages(json, length, &saved_length, &failed);
+    CHECK(!prepared && !failed && !saved_length);
+    sh_package_map_plan_free(plan); HeapFree(GetProcessHeap(), 0, json);
+done:
+    sh_package_provenance_free(&value); pf_testing = pf_packages = 0;
+}
+typedef struct pf_observer { int calls, loaded, fault; } pf_observer;
+static void pf_observed(void *context, int loaded)
+{
+    pf_observer *observer = context;
+    CHECK(!g_pending_map.state && !g_pending_map.json && !g_pending_map.plan);
+    CHECK(!loaded || (pf_commits == 1 && pf_loads == 1 && pf_parses == 1));
+    observer->calls++; observer->loaded = loaded;
+    if (observer->fault) RaiseException(0xe0422090, 0, 0, NULL);
+}
+
 static void saved_map_preflight_retains_checked_bytes(void)
 {
     unsigned char name[IDSTR_SIZE] = {0};
     char source[MAX_PATH];
+    pf_observer observer = {0}, second = {0};
     native_saved_cancellation_uses_owned_editor();
     *(const char **)(name + 0x10) = "0123456789ABCDEF0123";
     clean_state(); sh_rawmap_swap_arm(0); InterlockedExchange(&g_swap_oneshot, 0);
@@ -1010,7 +1204,7 @@ static void saved_map_preflight_retains_checked_bytes(void)
     g_preflight_abort = pf_abort;
     g_idstr_ctor = pf_ctor; g_idstr_dtor = pf_dtor; g_deser_orig = pf_parser;
     pf_reset(); CHECK(preflight_load((void *)3, name) == 0);
-    CHECK(pf_reads == 1 && pf_loads == 1 && pf_parses == 1 && pf_ctors == 1 && pf_dtors == 1);
+    CHECK(pf_reads == 1 && pf_loads == 1 && pf_parses == 1 && pf_ctors == 2 && pf_dtors == 2);
     CHECK(!strcmp(pf_parsed, "{\"from\":\"prepared\"}"));
     CHECK(!pf_plans && !pf_active && pf_closes == 1 && !pf_order_error);
     for (int failure = 1; failure <= 6; failure++) {
@@ -1018,7 +1212,7 @@ static void saved_map_preflight_retains_checked_bytes(void)
         if (failure == 4) { pf_fail = 0; pf_gate = 0; pf_coverage = 0; }
         CHECK(preflight_load((void *)3, name) == 0);
         CHECK(!pf_loads && !pf_parses && !pf_active && !g_map_context);
-        CHECK(pf_ctors == 1 && pf_dtors == 1 && !pf_order_error);
+        CHECK(pf_ctors == (failure == 3 ? 2 : 1) && pf_dtors == pf_ctors && !pf_order_error);
     }
     pf_reset(); pf_packages = 1;
     pf_gate = 0; /* Changed package contents would fail the old exact gate. */
@@ -1026,6 +1220,7 @@ static void saved_map_preflight_retains_checked_bytes(void)
     CHECK(!pf_gate_calls && pf_availability_calls == 1);
     CHECK(pf_active && g_map_context_active && g_map_context);
     CHECK(pf_plans == 1 && pf_frees == 1 && pf_activations == 1 && !pf_closes);
+    CHECK(pf_inventory_reads == 1 && pf_commits == 1 && !pf_install_requests && !g_pending_map.state);
     sh_rawmap_map_context_poll(); CHECK(!pf_restorations && !pf_closes);
     pf_boundary = 1; pf_fail = 4; sh_rawmap_map_context_poll();
     CHECK(pf_active && g_map_context_active && !pf_closes);
@@ -1046,7 +1241,8 @@ static void saved_map_preflight_retains_checked_bytes(void)
     for (int failure = 7; failure <= 8; failure++) {
         pf_reset(); pf_packages = 1; pf_fail = failure;
         CHECK(preflight_load((void *)3, name) == (failure == 7 ? 1 : 9));
-        CHECK(pf_active && g_map_context && !g_preflight_busy && !g_preflight_json && pf_frees == 1);
+        CHECK(!pf_active && !g_map_context && !g_preflight_busy && !g_preflight_json && pf_frees == 1);
+        CHECK(pf_aborts == 1 && !pf_commits && !pf_install_requests && !g_pending_map.state);
         pf_fail = 0; pf_boundary = 1; sh_rawmap_map_context_poll();
         CHECK(!pf_active && !g_map_context && pf_closes == 1 && !pf_order_error);
     }
@@ -1055,6 +1251,14 @@ static void saved_map_preflight_retains_checked_bytes(void)
     pf_reset(); pf_packages = 1; pf_coverage = 0;
     CHECK(preflight_load((void *)3, name) == 0);
     CHECK(g_pending_map.state == 1 && !pf_loads && !pf_frees && !pf_closes && pf_completion);
+    CHECK(!sh_rawmap_observe_saved_load((void *)4, "0123456789ABCDEF0123", pf_observed, &observer));
+    CHECK(!sh_rawmap_observe_saved_load((void *)3, "0123456789ABCDEF0124", pf_observed, &observer));
+    g_pending_map.thread++;
+    CHECK(!sh_rawmap_observe_saved_load((void *)3, "0123456789ABCDEF0123", pf_observed, &observer));
+    g_pending_map.thread--;
+    CHECK(sh_rawmap_observe_saved_load((void *)3, "0123456789ABCDEF0123", pf_observed, &observer));
+    CHECK(!sh_rawmap_observe_saved_load((void *)3, "0123456789ABCDEF0123", pf_observed, &second));
+    CHECK(!observer.calls && !second.calls);
     sh_rawmap_pending_map_poll(); CHECK(!pf_inventory_reads && !pf_loads);
     pf_completion(pf_completion_context, 1); pf_completion = NULL;
     pf_boundary = 0; sh_rawmap_pending_map_poll(); CHECK(!pf_inventory_reads);
@@ -1062,27 +1266,44 @@ static void saved_map_preflight_retains_checked_bytes(void)
     CHECK(!g_pending_map.state && pf_loads == 1 && pf_parses == 1 && pf_reads == 1);
     CHECK(pf_inventory_reads == 1 && pf_activations == 1 && pf_frees == 1 && pf_active);
     CHECK(pf_commits == 1 && !sh_rawmap_defers_install_commit());
+    CHECK(observer.calls == 1 && observer.loaded && !second.calls);
     CHECK(pf_ctors == 2 && pf_dtors == 2 && !strcmp(pf_parsed, "{\"from\":\"prepared\"}"));
     sh_rawmap_pending_map_poll(); CHECK(pf_loads == 1);
+    CHECK(observer.calls == 1 && !sh_rawmap_observe_saved_load((void *)3,
+        "0123456789ABCDEF0123", pf_observed, &second));
     pf_boundary = 1; sh_rawmap_map_context_poll(); CHECK(!pf_order_error && !g_map_context);
     /* Installation stays provisional through native parse failures, exceptions,
      * commit refusal and a zero-returning request that never loaded its map. */
-    for (int scenario = 0; scenario < 4; scenario++) {
-        pf_reset(); pf_packages = 1; pf_coverage = 0;
-        CHECK(preflight_load((void *)3, name) == 0 && pf_completion);
-        pf_completion(pf_completion_context, 1); pf_completion = NULL;
-        pf_fail = scenario < 2 ? scenario + 7 : scenario == 2 ? 10 : 12;
-        sh_rawmap_pending_map_poll();
-        CHECK(!g_pending_map.state && !sh_rawmap_defers_install_commit());
-        CHECK(pf_loads == 1 && pf_commits == (scenario == 2));
-        CHECK(pf_aborts == 1 && pf_cancellations && !pf_active && !g_map_context);
-        CHECK(pf_restorations == 1 && pf_closes == 1 && !pf_order_error);
+    for (int covered = 0; covered <= 1; covered++) {
+        for (int scenario = 0; scenario < 4; scenario++) {
+            int failure = scenario < 2 ? scenario + 7 : scenario == 2 ? 10 : 12;
+            pf_reset(); pf_packages = 1; pf_coverage = covered;
+            memset(&observer, 0, sizeof(observer));
+            if (covered) {
+                pf_fail = failure;
+                CHECK(preflight_load((void *)3, name) == (failure == 8 ? 9 : 1));
+                CHECK(!pf_completion && !pf_install_requests);
+            } else {
+                CHECK(preflight_load((void *)3, name) == 0 && pf_completion);
+                CHECK(sh_rawmap_observe_saved_load((void *)3, "0123456789ABCDEF0123", pf_observed, &observer));
+                pf_completion(pf_completion_context, 1); pf_completion = NULL;
+                pf_fail = failure;
+                sh_rawmap_pending_map_poll();
+            }
+            CHECK(!g_pending_map.state && !sh_rawmap_defers_install_commit());
+            CHECK(pf_loads == 1 && pf_commits == (scenario == 2));
+            CHECK(pf_aborts == 1 && pf_cancellations && !pf_active && !g_map_context);
+            CHECK(pf_restorations == 1 && pf_closes == 1 && !pf_order_error);
+            CHECK(observer.calls == !covered && !observer.loaded);
+        }
     }
     /* Decline, publication failure, lost boundary, invalid caller and failed
      * preparation/activation all cancel without entering native map loading. */
     for (int scenario = 0; scenario < 7; scenario++) {
         pf_reset(); pf_packages = 1; pf_coverage = 0;
+        memset(&observer, 0, sizeof(observer));
         CHECK(preflight_load((void *)3, name) == 0 && pf_completion);
+        CHECK(sh_rawmap_observe_saved_load((void *)3, "0123456789ABCDEF0123", pf_observed, &observer));
         pf_completion(pf_completion_context, scenario < 2 ? -scenario : 1); pf_completion = NULL;
         if (scenario == 2) { pf_boundary = 0; g_pending_map.published_at = GetTickCount64() - 30001; }
         if (scenario == 3) g_pending_map.editor = (void *)4;
@@ -1092,13 +1313,86 @@ static void saved_map_preflight_retains_checked_bytes(void)
         sh_rawmap_pending_map_poll();
         CHECK(!g_pending_map.state && !pf_loads && !pf_parses && !pf_active);
         CHECK(pf_cancellations && pf_frees == 1 && pf_closes == 1 && !pf_order_error);
+        CHECK(observer.calls == 1 && !observer.loaded);
     }
     /* A new explicit load withdraws the old request. Consent for an abandoned
      * map can never install or load it afterward. */
     pf_reset(); pf_packages = 1; pf_coverage = 0;
+    memset(&observer, 0, sizeof(observer)); observer.fault = 1;
     CHECK(preflight_load((void *)3, name) == 0 && pf_completion);
+    CHECK(sh_rawmap_observe_saved_load((void *)3, "0123456789ABCDEF0123", pf_observed, &observer));
     pf_packages = 0; CHECK(preflight_load((void *)3, name) == 0);
     CHECK(!pf_completion && !g_pending_map.state && pf_loads == 1 && pf_closes == 2);
+    CHECK(observer.calls == 1 && !observer.loaded);
+    /* The common saved-load continuation must keep compiled reference edits,
+     * preserve native prose bytes, and strip its bookkeeping on every route. */
+    {
+        const char text[] = "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},"
+            "\"actor\":{\"targetType\":\"idDeclEntityDef\",\"value\":\"smp/saved\"},"
+            "\"message\":\"smp/saved \x97 prose\"}";
+        unsigned char tree[1][32] = {{7}};
+        sh_package_provenance bindings = {0};
+        size_t context = sh_package_provenance_context_add(&bindings, SH_PACKAGE_CONTEXT_ISOLATED, tree, 1, "");
+        char *json, error[256]; size_t length;
+        CHECK(sh_package_provenance_bind(&bindings, "entitydef", "actors/example", "smp/saved", &context, 1));
+        json = sh_map_provenance_write(text, sizeof(text) - 1, &bindings, &length, error, sizeof(error));
+        CHECK(json != NULL);
+        for (int covered = 0; json && covered < 2; covered++) for (int failed = 0; failed < 2; failed++) {
+            pf_reset(); pf_packages = 1; pf_coverage = covered; pf_source_json = json;
+            if (covered) pf_fail = failed ? 7 : 0;
+            CHECK(preflight_load((void *)3, name) == (covered && failed ? 1 : 0));
+            if (!covered) {
+                CHECK(pf_completion != NULL); pf_completion(pf_completion_context, 1); pf_completion = NULL;
+                pf_fail = failed ? 7 : 0; sh_rawmap_pending_map_poll();
+            }
+            CHECK(pf_reads == 1 && pf_loads == 1 && pf_parses == 1 && pf_commits == !failed);
+            CHECK(pf_binding_plans == 1 && pf_rebinds == 1 && pf_install_requests == !covered);
+            CHECK(strstr(pf_parsed, "\"value\":\"smp/bound\"") != NULL);
+            CHECK(strstr(pf_parsed, "\"message\":\"smp/saved \x97 prose\"") != NULL);
+            CHECK(!strstr(pf_parsed, "SMP_BINDINGS") && !g_pending_map.state);
+            CHECK(strstr(json, "\"value\":\"smp/saved\"") && !strstr(json, "smp/bound"));
+            CHECK(!pf_order_error && pf_aborts == failed);
+            pf_fail = 0; pf_boundary = 1; sh_rawmap_map_context_poll(); CHECK(!g_map_context);
+        }
+        if (json) HeapFree(GetProcessHeap(), 0, json);
+        sh_package_provenance_free(&bindings);
+    }
+    /* An editor reload keeps the outgoing map alive through preparation and
+     * consent. Its native handoff is admitted only before Think, with the same
+     * map and generation; browser idleness is not required for this route. */
+    for (int covered = 0; covered <= 1; covered++) {
+        pf_reset(); pf_packages = 1; pf_coverage = covered;
+        pf_editor_reload = 1; pf_boundary = 0;
+        CHECK(preflight_load((void *)3, name) == 0);
+        CHECK(g_pending_map.previous_map == (void *)17 && !pf_editor_handoffs);
+        CHECK(!pf_inventory_reads && !pf_loads && !pf_activations);
+        if (!covered) {
+            CHECK(pf_completion != NULL);
+            pf_completion(pf_completion_context, 1); pf_completion = NULL;
+        }
+        sh_rawmap_pending_map_poll();
+        CHECK(g_pending_map.state == 2 && !pf_inventory_reads && !pf_loads);
+        pf_editor_frame = 1; sh_rawmap_pending_map_poll();
+        CHECK(!g_pending_map.state && pf_editor_handoffs == 1);
+        CHECK(pf_loads == 1 && pf_parses == 1 && pf_reads == 1 && pf_activations == 1);
+        CHECK(pf_inventory_reads == 1 && pf_commits == 1 && !pf_aborts && !pf_order_error);
+        sh_rawmap_pending_map_poll(); CHECK(pf_editor_handoffs == 1 && pf_loads == 1);
+        pf_boundary = 1; sh_rawmap_map_context_poll(); CHECK(!g_map_context && !pf_active);
+    }
+    /* A canceled request or a changed native map cannot activate a retained
+     * candidate, even after installation publishes its provisional files. */
+    for (int scenario = 0; scenario < 3; scenario++) {
+        pf_reset(); pf_packages = 1; pf_coverage = 0;
+        pf_editor_reload = 1; pf_boundary = 0;
+        CHECK(preflight_load((void *)3, name) == 0 && pf_completion);
+        pf_completion(pf_completion_context, scenario == 0 ? 0 : 1); pf_completion = NULL;
+        if (scenario == 1) InterlockedIncrement(&g_load_generation);
+        if (scenario == 2) pf_editor_reload = 0;
+        pf_editor_frame = 1; sh_rawmap_pending_map_poll();
+        CHECK(!g_pending_map.state && !pf_editor_handoffs && !pf_loads && !pf_activations);
+        CHECK(!pf_inventory_reads && !pf_commits && !pf_aborts);
+        CHECK(pf_cancellations && pf_frees == 1 && pf_closes == 1 && !pf_order_error);
+    }
     pf_reset(); pf_testing = 0;
     g_preflight_orig = NULL; g_saved_map_text = NULL; g_deser_orig = NULL;
     g_preflight_abort = preflight_abort_saved_load;
@@ -1247,15 +1541,21 @@ static void owned_map_requests_survive_consent(void)
     pf_reset(); pf_testing = 0; g_deser_orig = NULL; clean_state();
 }
 
-typedef struct deferred_owner { int valid, waiting, selected, entered, released, synchronous, fail_select; } deferred_owner;
+typedef struct deferred_owner {
+    int valid, waiting, selected, entered, released, synchronous, fail_select, expect_rebound;
+} deferred_owner;
 static int deferred_valid(void *context) { return ((deferred_owner *)context)->valid; }
 static int deferred_waiting(void *context) { return ((deferred_owner *)context)->waiting; }
 static int deferred_matches(void *context, const void *parameters)
 { (void)context; return parameters == (void *)0x77; }
-static int deferred_select(void *context)
+static int deferred_select(void *context, const char *json)
 {
     deferred_owner *owner = context;
     CHECK(pf_transition && g_preflight_busy && !owner->released);
+    if (owner->expect_rebound) {
+        CHECK(json && strstr(json, "\"value\":\"smp/bound\"") &&
+            strstr(json, "smp/saved \x97 prose") && !strstr(json, "smpbind.") && !strstr(json, "smpkg."));
+    } else CHECK(json && !strcmp(json, "{}"));
     owner->selected++; return !owner->fail_select;
 }
 static void deferred_release(void *context)
@@ -1266,7 +1566,9 @@ static void deferred_release(void *context)
 static int deferred_enter(void *context, const char *json)
 {
     deferred_owner *owner = context;
-    CHECK(!strcmp(json, "{}") && !pf_activations && !pf_restorations && !owner->released);
+    CHECK(json && !pf_activations && !pf_restorations && !owner->released);
+    if (owner->expect_rebound) CHECK(strstr(json, "\"value\":\"smp/bound\"") && strstr(json, "smpbind."));
+    else CHECK(!strcmp(json, "{}"));
     owner->entered++;
     if (owner->synchronous) {
         CHECK(sh_rawmap_transition_pending(NULL, (void *)0x77) == 1);
@@ -1346,6 +1648,40 @@ static void deferred_requests_publish_at_native_boundary(void)
     CHECK(g_map_context == (sh_mpkg_context *)2 && pf_active);
     sh_rawmap_transition_finished(0); CHECK(owner.released == 1 && !g_preflight_busy);
     pf_fail = 0; pf_boundary = 1; sh_rawmap_map_context_poll(); CHECK(!g_map_context);
+    /* The deferred cache selection must receive the compiled map, after owned
+     * carriers are stripped, on both installed-resource and install routes.
+     * A failed native selection cannot commit its pending installation. */
+    {
+        const char text[] = "{\"variables\":{\"allocCount\":[0,0,0,0,0],\"string\":[]},"
+            "\"actor\":{\"targetType\":\"idDeclEntityDef\",\"value\":\"smp/saved\"},"
+            "\"message\":\"smp/saved \x97 prose\"}";
+        unsigned char tree[1][32] = {{7}};
+        sh_package_provenance bindings = {0};
+        size_t context = sh_package_provenance_context_add(&bindings, SH_PACKAGE_CONTEXT_ISOLATED, tree, 1, "");
+        char *json; size_t length;
+        CHECK(sh_package_provenance_bind(&bindings, "entitydef", "actors/example", "smp/saved", &context, 1));
+        json = sh_map_provenance_write(text, sizeof(text) - 1, &bindings, &length, error, sizeof(error));
+        CHECK(json != NULL);
+        for (int failure = 0; json && failure < 2; failure++) for (int covered = 0; covered < 2; covered++) {
+            pf_reset(); pf_deferred = 1; pf_boundary = 0; pf_packages = 1; pf_coverage = covered;
+            memset(&owner, 0, sizeof(owner)); owner.valid = owner.waiting = owner.expect_rebound = 1;
+            owner.fail_select = failure;
+            CHECK(sh_rawmap_preflight_loading_request(json, length, &request, &loading, error, sizeof(error)));
+            CHECK(pf_binding_plans == 1 && pf_rebinds == 1 && pf_install_requests == !covered);
+            if (!covered) { CHECK(pf_completion != NULL); pf_completion(pf_completion_context, 1); pf_completion = NULL; }
+            sh_rawmap_pending_map_poll(); CHECK(owner.entered == 1 && !owner.selected);
+            CHECK(sh_rawmap_transition_pending(NULL, (void *)0x77) == 1);
+            pf_transition = 1; CHECK(sh_rawmap_transition_activate() == !failure); pf_transition = 0;
+            CHECK(owner.selected == 1 && !owner.released && !pf_order_error);
+            if (!failure) CHECK(sh_rawmap_transition_commit());
+            sh_rawmap_transition_finished(!failure);
+            CHECK(owner.released == 1 && pf_commits == !failure && !g_pending_map.state);
+            CHECK(strstr(json, "\"value\":\"smp/saved\"") && !strstr(json, "smp/bound"));
+            pf_boundary = 1; sh_rawmap_map_context_poll(); CHECK(!g_map_context);
+        }
+        if (json) HeapFree(GetProcessHeap(), 0, json);
+        sh_package_provenance_free(&bindings);
+    }
     pf_reset(); pf_testing = 0; g_deser_orig = NULL;
 }
 
@@ -1477,6 +1813,38 @@ static void preflight_hook_publishes_helpers_before_detour(void)
     sh_patch_test_observe_write(NULL); VirtualFree(code, 0, MEM_RELEASE);
 }
 
+static void occurrence_failures_do_not_save_or_attach_partial_sources(void)
+{
+    static const char native_json[] = "{\"entities\":[],\"message\":\"native \x97 bytes\"}";
+    unsigned char text[IDSTR_SIZE] = {0}; size_t length = 0; int failed = 0;
+    pf_reset(); occurrence_capture_failed = 1;
+    CHECK(!attach_loaded_occurrences(native_json, native_json, (void *)2));
+    CHECK(occurrence_captures == 1 && occurrence_attaches == 0);
+    CHECK(!embed_used_packages(native_json, sizeof(native_json) - 1, &length, &failed));
+    CHECK(failed && !length && occurrence_captures == 2);
+    occurrence_capture_failed = 0; occurrence_attach_failed = 1;
+    CHECK(!attach_loaded_occurrences(native_json, native_json, (void *)2));
+    CHECK(occurrence_attaches == 1);
+    occurrence_attach_failed = 0;
+    CHECK(attach_loaded_occurrences(native_json, native_json, (void *)2));
+    CHECK(occurrence_attaches == 2);
+    occurrence_world = (sh_package_occurrence_snapshot *)7;
+    g_deser_orig = pf_parser; occurrence_attach_failed = 1;
+    play_prepare_fail = play_select_fail = play_hud_fail = 0;
+    CHECK(!sh_deser_detour(native_json, (void *)2));
+    CHECK(occurrence_world == (sh_package_occurrence_snapshot *)7);
+    occurrence_attach_failed = 0;
+    CHECK(sh_deser_detour(native_json, (void *)2));
+    CHECK(occurrence_world == (sh_package_occurrence_snapshot *)2);
+    g_deser_orig = NULL; occurrence_world = NULL;
+    g_ser_orig = fixture_serialize; occurrence_capture_failed = 1;
+    sh_rawmap_save_arm_once(); unsigned long before = sh_rawmap_save_count();
+    CHECK(!sh_ser_detour((void *)1, text, 1));
+    CHECK(sh_rawmap_save_count() == before && sh_rawmap_save_oneshot_pending());
+    occurrence_capture_failed = 0; g_ser_orig = NULL; pf_testing = 0;
+    clean_state();
+}
+
 int main(void)
 {
     char archive[MAX_PATH];
@@ -1510,12 +1878,14 @@ int main(void)
     large_sources_use_native_lengths();
     play_uses_current_snapshot_without_saving();
     play_hook_publishes_original_before_detour();
+    saved_map_bindings_use_authored_context();
     saved_map_preflight_retains_checked_bytes();
     owned_map_requests_survive_consent();
     deferred_requests_publish_at_native_boundary();
     inspection_preserves_active_map_state();
     initial_published_reads();
     preflight_hook_publishes_helpers_before_detour();
+    occurrence_failures_do_not_save_or_attach_partial_sources();
 
     DeleteFileA(archive);
     printf("\n%s -- %d checks, %d failed\n", g_failed ? "FAILED" : "ok", g_checks, g_failed);

@@ -28,6 +28,15 @@ void sh_rawmap_pending_map_poll(void);
 /* Abandon the retained request and its whole install before replacing a native
  * selection. Main thread only; 0 means cleanup is still held or busy. */
 int sh_rawmap_cancel_pending_map(void);
+/* Observe the retained saved-load request immediately after its native entry
+ * returns. Return 1 attaches exactly one completion callback to this matching
+ * editor/save ID on the main thread. The context must survive until completion;
+ * loaded is true only after native loading and package commit both succeed.
+ * Return 0 means no matching retained request was observed. No callback is made.
+ * Completion may update caller state, but must not initiate another native load. */
+typedef void (*sh_rawmap_saved_completion)(void *context, int loaded);
+int sh_rawmap_observe_saved_load(void *editor, const char *save_id,
+    sh_rawmap_saved_completion completion, void *context);
 
 /* An actual map launch can retain its own native selection instead of borrowing
  * a download callback or temporary deserializer output. Main thread only.
@@ -52,11 +61,14 @@ int sh_rawmap_preflight_request(const char *json, size_t length,
 /* Internal native launch continuation. Preparation retains the old map until
  * its requested unload completes. waiting validates lobby ownership; matches
  * validates the exact gameSpawnInfo at allocation; select publishes copied
- * map settings after activation, without issuing another native launch. */
+ * map settings after activation, without issuing another native launch. select
+ * receives the compiled, rebound JSON with private carriers removed. It must
+ * decode those bytes, not the earlier cached source. The buffer is borrowed for
+ * that synchronous callback only; retain native state through a deep copy. */
 typedef struct sh_rawmap_loading {
     int (*waiting)(void *context);
     int (*matches)(void *context, const void *parameters);
-    int (*select)(void *context);
+    int (*select)(void *context, const char *json);
 } sh_rawmap_loading;
 int sh_rawmap_preflight_loading_request(const char *json, size_t length,
     const sh_rawmap_request *request, const sh_rawmap_loading *loading,

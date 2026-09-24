@@ -6,6 +6,7 @@
 #include <string.h>
 #include "audio_originals.h"
 #include "audio_packages.h"
+#include "audio_bank_codec.h"
 #pragma comment(lib,"bcrypt.lib")
 
 typedef struct ao_file {
@@ -28,6 +29,15 @@ struct sh_audio_originals {
     size_t answer_count;
     SRWLOCK lock;
     int scanned, scan_failed;
+    char **bank_names;
+    size_t bank_name_count;
+    SRWLOCK catalog_lock;
+    sh_audio_original_bank *banks;
+    size_t bank_count;
+    int catalog_ready;
+    uint32_t *ids, *loose_media;
+    size_t id_count, loose_media_count, loose_media_capacity;
+    int ids_ready;
 };
 
 static char *ao_utf8(const wchar_t *text)
@@ -57,6 +67,12 @@ void sh_audio_originals_close(sh_audio_originals *originals)
     if(!originals)return;
     for(size_t i=0;i<originals->count;i++)ao_file_free(originals->files[i]);
     for(size_t i=0;i<originals->answer_count;i++)free(originals->answers[i].path);
+    for(size_t i=0;i<originals->bank_name_count;i++)free(originals->bank_names[i]);
+    for(size_t i=0;i<originals->bank_count;i++) {
+        free((char *)originals->banks[i].path);sh_audio_bank_free(&originals->banks[i].metadata);
+    }
+    free(originals->bank_names);free(originals->banks);
+    free(originals->ids);free(originals->loose_media);
     free(originals->files);free(originals->answers);free(originals->root);free(originals->language);
     free(originals->engine_prefix);free(originals);
 }
@@ -67,6 +83,7 @@ sh_audio_originals *sh_audio_originals_open(const char *doom_base,const wchar_t 
     if(!doom_base || !*doom_base)return NULL;
     out=calloc(1,sizeof(*out));if(!out)return NULL;
     InitializeSRWLock(&out->lock);
+    InitializeSRWLock(&out->catalog_lock);
     /* The native prefix is already lowercased with forward slashes and, when
      * present, ends in a separator. An empty prefix is the ordinary root. */
     length=sizeof("sound/soundbanks/pc/")+(bank_prefix ? strlen(bank_prefix) : 0);
@@ -126,6 +143,28 @@ static int ao_pck_mounted(const char *path)
      * containing initial, in both native modes and both renderers. */
     return !strcmp(path,"initial.pck") || !strstr(path,"initial");
 }
+static int ao_bank_name(sh_audio_originals *originals,const char *name)
+{
+    for(size_t i=0;i<originals->bank_name_count;i++)
+        if(!strcmp(originals->bank_names[i],name))return 1;
+    if(originals->bank_name_count>=SIZE_MAX/sizeof(char *)-1)return 0;
+    char **grown=realloc(originals->bank_names,(originals->bank_name_count+1)*sizeof(*grown));
+    if(!grown)return 0;
+    originals->bank_names=grown;grown[originals->bank_name_count]=_strdup(name);
+    if(!grown[originals->bank_name_count])return 0;
+    originals->bank_name_count++;return 1;
+}
+static int ao_id_append(uint32_t **ids,size_t *count,size_t *capacity,uint32_t id)
+{
+    if(!id)return 1;
+    if(*count==*capacity) {
+        size_t next=*capacity ? *capacity*2 : 256;
+        if(next<=*capacity || next>SIZE_MAX/sizeof(**ids))return 0;
+        uint32_t *grown=realloc(*ids,next*sizeof(**ids));if(!grown)return 0;
+        *ids=grown;*capacity=next;
+    }
+    (*ids)[(*count)++]=id;return 1;
+}
 static int ao_scan(sh_audio_originals *originals,const char *relative,int descend)
 {
     char *directory=relative[0] ? ao_join(originals->root,relative) : _strdup(originals->root);
@@ -150,6 +189,19 @@ static int ao_scan(sh_audio_originals *originals,const char *relative,int descen
         if(found.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY) {
             if(descend)result=ao_scan(originals,path,0);
         } else {
+            if(dot && !strcmp(dot,".wem") &&
+                (!*relative || (originals->language && !strcmp(relative,originals->language)))) {
+                const char *filename=strrchr(path,'/');uint32_t id=0;
+                filename=filename ? filename+1 : path;
+                if(sh_audio_media_identity(filename,&id) &&
+                    !ao_id_append(&originals->loose_media,&originals->loose_media_count,
+                        &originals->loose_media_capacity,id))result=-1;
+            }
+            if(dot && !strcmp(dot,".bnk") &&
+                (!*relative || (originals->language && !strcmp(relative,originals->language)))) {
+                const char *filename=strrchr(path,'/');filename=filename ? filename+1 : path;
+                if((found.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT) || !ao_bank_name(originals,filename))result=-1;
+            }
             if(is_package) {
                 ao_file *file=NULL;result=ao_open(originals,path,&file);
                 if(result==1 && !file->packed) {
@@ -385,10 +437,15 @@ done:
 int sh_audio_originals_packaged_banks(void *context,sh_audio_originals_bank_visit visit,
     void *visitor,char *error,size_t capacity)
 {
-    sh_audio_originals *originals=context;int result=1;
+    sh_audio_originals *originals=context;int result=1;wchar_t *language=NULL;
     if(error && capacity)error[0]=0;
     if(!originals || !visit)return ao_fail(error,capacity,"installed audio package index is unavailable");
     if(!originals->language)return ao_fail(error,capacity,"native audio language is still initializing");
+    int units=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,originals->language,-1,NULL,0);
+    language=units ? malloc((size_t)units*sizeof(*language)) : NULL;
+    if(!language || !MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,originals->language,-1,language,units)) {
+        free(language);return ao_fail(error,capacity,"cannot resolve captured audio language");
+    }
     AcquireSRWLockExclusive(&originals->lock);
     if(!originals->scanned) { originals->scanned=1;originals->scan_failed=ao_scan(originals,"",1)!=1; }
     if(originals->scan_failed){result=ao_fail(error,capacity,"installed audio package metadata is unreadable or invalid");goto done;}
@@ -398,18 +455,204 @@ int sh_audio_originals_packaged_banks(void *context,sh_audio_originals_bank_visi
         /* A package inside a language directory serves only that language. */
         if(slash && ((size_t)(slash-file->path)!=strlen(originals->language) ||
             strncmp(file->path,originals->language,(size_t)(slash-file->path))))continue;
+        uint32_t language_id=0;int localized=sh_audio_package_language_id(&file->package,language,&language_id);
         for(size_t j=0;j<file->package.counts[SH_AUDIO_PACKAGE_BANK] && result==1;j++) {
             const sh_audio_package_entry *row=file->package.entries[SH_AUDIO_PACKAGE_BANK]+j;
+            if(row->language && (!localized || row->language!=language_id))continue;
             if(row->id>UINT32_MAX)continue;
             if(!visit(visitor,(uint32_t)row->id,row->language))result=0;
         }
     }
 done:
-    ReleaseSRWLockExclusive(&originals->lock);return result;
+    ReleaseSRWLockExclusive(&originals->lock);free(language);return result;
 }
 
 int sh_audio_originals_ready(void *context)
 {
     sh_audio_originals *originals=context;
     return originals && originals->language != NULL;
+}
+
+int sh_audio_originals_matches(const sh_audio_originals *originals,
+    const char *language,const char *bank_prefix)
+{
+    return originals && originals->language && language &&
+        !_stricmp(originals->language,language) &&
+        !strcmp(originals->engine_prefix+strlen("sound/soundbanks/pc/"),bank_prefix ? bank_prefix : "");
+}
+
+int sh_audio_originals_paths(sh_audio_originals *originals,const char *filename,
+    char **localized,char **root)
+{
+    if(localized)*localized=NULL;if(root)*root=NULL;
+    if(!originals || !originals->language || !filename || !*filename ||
+        strchr(filename,'/') || strchr(filename,'\\') || !localized || !root)return 0;
+    size_t prefix=strlen(originals->engine_prefix),language=strlen(originals->language),name=strlen(filename);
+    if(prefix>SIZE_MAX-language-2 || name>SIZE_MAX-prefix-language-2)return 0;
+    *root=malloc(prefix+name+1);*localized=malloc(prefix+language+name+2);
+    if(!*root || !*localized){free(*root);free(*localized);*root=*localized=NULL;return 0;}
+    snprintf(*root,prefix+name+1,"%s%s",originals->engine_prefix,filename);
+    snprintf(*localized,prefix+language+name+2,"%s%s/%s",originals->engine_prefix,originals->language,filename);
+    return 1;
+}
+typedef struct ao_bank_reader {
+    sh_audio_originals *originals;
+    const char *path;
+    uint64_t length,at;
+    size_t held;
+    unsigned char window[65536];
+    char *error;size_t capacity;
+} ao_bank_reader;
+static int ao_bank_read(void *context,uint64_t offset,void *out,size_t length)
+{
+    ao_bank_reader *reader=context;unsigned char *cursor=out;
+    if(offset>reader->length || length>reader->length-offset)return 0;
+    while(length) {
+        if(offset<reader->at || offset-reader->at>=reader->held) {
+            size_t span=reader->length-offset>sizeof(reader->window) ? sizeof(reader->window) : (size_t)(reader->length-offset);
+            if(sh_audio_originals_read(reader->originals,reader->path,offset,reader->window,span,NULL,
+                reader->error,reader->capacity)!=1)return 0;
+            reader->at=offset;reader->held=span;
+        }
+        size_t span=reader->held-(size_t)(offset-reader->at);if(span>length)span=length;
+        memcpy(cursor,reader->window+(size_t)(offset-reader->at),span);cursor+=span;offset+=span;length-=span;
+    }
+    return 1;
+}
+static int ao_bank_index(sh_audio_originals *originals,const char *name,int optional,
+    char *error,size_t capacity)
+{
+    char *paths[2]={0};ao_bank_reader *reader=NULL;sh_audio_bank bank={0};int ok=0,found=0;
+    if(!sh_audio_originals_paths(originals,name,paths,paths+1))goto done;
+    reader=calloc(1,sizeof(*reader));if(!reader)goto done;
+    reader->originals=originals;reader->error=error;reader->capacity=capacity;
+    for(size_t i=0;i<2;i++) {
+        int status=sh_audio_originals_read(originals,paths[i],0,NULL,0,&reader->length,error,capacity);
+        if(status<0)goto done;
+        if(status){reader->path=paths[i];found=1;break;}
+    }
+    if(!found){ok=optional;goto done;}
+    if(sh_audio_bank_read_source((sh_audio_bank_source){reader,reader->length,ao_bank_read},&bank,error,capacity)!=1)goto done;
+    if(!sh_audio_bank_names_identity(name,bank.id)) {
+        ao_fail(error,capacity,"installed audio bank filename does not match its cooked identity");goto done;
+    }
+    for(size_t i=0;i<originals->bank_count;i++)if(originals->banks[i].metadata.id==bank.id) {
+        sh_package_original_identity a,b;
+        if(sh_audio_originals_identity(originals,reader->path,&a,error,capacity)!=1 ||
+            sh_audio_originals_identity(originals,originals->banks[i].path,&b,error,capacity)!=1)goto done;
+        if(!a.scope || !b.scope || a.file.length!=b.file.length || memcmp(a.file.digest,b.file.digest,32)) {
+            ao_fail(error,capacity,"installed audio bank identity has different effective bytes");goto done;
+        }
+        ok=1;goto done;
+    }
+    if(originals->bank_count>=SIZE_MAX/sizeof(*originals->banks)-1)goto done;
+    sh_audio_original_bank *grown=realloc(originals->banks,(originals->bank_count+1)*sizeof(*grown));
+    if(!grown)goto done;
+    originals->banks=grown;
+    char *path=_strdup(reader->path);if(!path)goto done;
+    grown[originals->bank_count++]=(sh_audio_original_bank){path,strrchr(path,'/')+1,bank};
+    memset(&bank,0,sizeof(bank));ok=1;
+done:
+    sh_audio_bank_free(&bank);free(reader);free(paths[0]);free(paths[1]);
+    if(!ok && error && capacity && !*error)ao_fail(error,capacity,"cannot capture installed audio bank metadata");
+    return ok;
+}
+static int ao_bank_order(const void *a,const void *b)
+{ return strcmp(*(const char *const *)a,*(const char *const *)b); }
+typedef struct ao_bank_ids {uint32_t *ids;size_t count;} ao_bank_ids;
+static int ao_bank_id(void *context,uint32_t id,uint32_t language)
+{
+    ao_bank_ids *list=context;(void)language;
+    for(size_t i=0;i<list->count;i++)if(list->ids[i]==id)return 1;
+    if(list->count>=SIZE_MAX/sizeof(*list->ids)-1)return 0;
+    uint32_t *grown=realloc(list->ids,(list->count+1)*sizeof(*grown));if(!grown)return 0;
+    list->ids=grown;grown[list->count++]=id;return 1;
+}
+int sh_audio_originals_banks(sh_audio_originals *originals,const sh_audio_original_bank **banks,
+    size_t *count,char *error,size_t capacity)
+{
+    ao_bank_ids packed={0};int ok=0;
+    if(banks)*banks=NULL;if(count)*count=0;if(error && capacity)*error=0;
+    if(!banks || !count || !sh_audio_originals_ready(originals))
+        return ao_fail(error,capacity,"installed audio metadata is unavailable");
+    AcquireSRWLockExclusive(&originals->catalog_lock);
+    if(originals->catalog_ready){ok=1;goto done;}
+    /* This also freezes the one existing package and loose-name inventory.
+     * Copy IDs under its lock, then parse through the ordinary pinned reader. */
+    if(sh_audio_originals_packaged_banks(originals,ao_bank_id,&packed,error,capacity)!=1)goto done;
+    if(originals->bank_name_count>1)qsort(originals->bank_names,originals->bank_name_count,sizeof(char *),ao_bank_order);
+    for(size_t i=0;i<originals->bank_name_count;i++)
+        if(!ao_bank_index(originals,originals->bank_names[i],0,error,capacity))goto done;
+    for(size_t i=0;i<packed.count;i++) {
+        int found=0;char name[32];
+        for(size_t b=0;b<originals->bank_count;b++)if(originals->banks[b].metadata.id==packed.ids[i]){found=1;break;}
+        if(found)continue;
+        snprintf(name,sizeof(name),"%u.bnk",packed.ids[i]);
+        if(!ao_bank_index(originals,name,1,error,capacity))goto done;
+    }
+    originals->catalog_ready=1;ok=1;
+done:
+    free(packed.ids);
+    if(ok){*banks=originals->banks;*count=originals->bank_count;}
+    else {
+        for(size_t i=0;i<originals->bank_count;i++) {
+            free((char *)originals->banks[i].path);sh_audio_bank_free(&originals->banks[i].metadata);
+        }
+        free(originals->banks);originals->banks=NULL;originals->bank_count=0;
+    }
+    ReleaseSRWLockExclusive(&originals->catalog_lock);return ok ? 1 : -1;
+}
+
+static int ao_id_compare(const void *a,const void *b)
+{ uint32_t x=*(const uint32_t *)a,y=*(const uint32_t *)b;return x<y ? -1 : x>y; }
+
+int sh_audio_originals_ids(sh_audio_originals *originals,const uint32_t **ids,
+    size_t *count,char *error,size_t capacity)
+{
+    const sh_audio_original_bank *banks=NULL;size_t bank_count=0,used=0,allocated=0;
+    uint32_t *pending=NULL;ao_bank_reader *reader=NULL;int ok=0;
+    if(ids)*ids=NULL;if(count)*count=0;if(error && capacity)*error=0;
+    if(!ids || !count)return ao_fail(error,capacity,"original audio identity output is missing");
+    if(sh_audio_originals_banks(originals,&banks,&bank_count,error,capacity)!=1)return -1;
+    AcquireSRWLockExclusive(&originals->catalog_lock);
+    if(originals->ids_ready){ok=1;goto done;}
+    reader=calloc(1,sizeof(*reader));if(!reader)goto done;
+    reader->originals=originals;reader->error=error;reader->capacity=capacity;
+    for(size_t b=0;b<bank_count;b++) {
+        sh_audio_bank_codec codec={0};reader->path=banks[b].path;reader->at=0;reader->held=0;
+        if(sh_audio_originals_read(originals,reader->path,0,NULL,0,&reader->length,error,capacity)!=1 ||
+            sh_audio_bank_codec_read((sh_audio_bank_source){reader,reader->length,ao_bank_read},&codec,error,capacity)!=1)goto done;
+        int copied=1;
+        for(size_t i=0;i<codec.span_count && copied;i++) {
+            const sh_audio_identity_span *span=codec.spans+i;
+            if(!(span->flags&SH_AUDIO_ID_LITERAL))copied=ao_id_append(&pending,&used,&allocated,span->value);
+        }
+        sh_audio_bank_codec_free(&codec);if(!copied)goto done;
+    }
+    /* Reserve even unused file identities. The engine can open media directly,
+     * and a package's numeric inventory is authoritative without decoding DATA.
+     * Including other languages here is conservative and permits later locale
+     * changes without reusing a numeric file name from the installed packages. */
+    int copied=1;
+    AcquireSRWLockExclusive(&originals->lock);
+    for(size_t f=0;f<originals->count && copied;f++) {
+        const ao_file *file=originals->files[f];if(!file->packed)continue;
+        for(unsigned kind=0;kind<2 && copied;kind++)for(size_t i=0;i<file->package.counts[kind] && copied;i++) {
+            uint64_t id=file->package.entries[kind][i].id;
+            if(id<=UINT32_MAX)copied=ao_id_append(&pending,&used,&allocated,(uint32_t)id);
+        }
+    }
+    for(size_t i=0;i<originals->loose_media_count && copied;i++)
+        copied=ao_id_append(&pending,&used,&allocated,originals->loose_media[i]);
+    ReleaseSRWLockExclusive(&originals->lock);
+    if(!copied)goto done;
+    if(used>1)qsort(pending,used,sizeof(*pending),ao_id_compare);
+    size_t unique=0;
+    for(size_t i=0;i<used;i++)if(!i || pending[i]!=pending[i-1])pending[unique++]=pending[i];
+    originals->ids=pending;originals->id_count=unique;originals->ids_ready=1;pending=NULL;ok=1;
+done:
+    free(pending);free(reader);
+    if(ok){*ids=originals->ids;*count=originals->id_count;}
+    else if(error && capacity && !*error)ao_fail(error,capacity,"cannot capture original audio identities");
+    ReleaseSRWLockExclusive(&originals->catalog_lock);return ok ? 1 : -1;
 }

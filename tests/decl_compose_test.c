@@ -154,6 +154,74 @@ static void grouped_collections(void)
     ab = compose(move_again, move, move_again, rules, 2, error, sizeof(error)); CHECK(ab); free(ab);
 }
 
+static void presentation_duplicates(void)
+{
+    static const char *const labels[] = {"label", "help", NULL};
+    const sh_decl_collection_rule rules[] = {
+        {"groups", "", "members", "id", labels},
+        {"groups.item[*].members", "id", NULL, NULL, labels}
+    };
+    const sh_decl_collection_rule exact_rules[] = {
+        {"groups", "", "members", "id"}, {"groups.item[*].members", "id"}
+    };
+    /* Physical textual order does not choose the winner: page/slot order does.
+     * The later duplicate fills missing help but keeps the earlier label. */
+    const char *source = "{ inherit = \"parent\"; groups = { num = 2; "
+        "item[1] = { members = { num = 3; "
+        "item[0] = { id = \"size\"; inspector = \"vector\"; label = \"stock\"; help = \"tip\"; } "
+        "item[1] = { id = \"other\"; inspector = \"vector\"; label = \"custom\"; } "
+        "item[2] = { id = \"other\"; inspector = \"vector\"; label = \"different label\"; } } } "
+        "item[0] = { members = { num = 1; item[0] = { id = \"size\"; inspector = \"vector\"; label = \"custom\"; } } } } }";
+    char error[512], *out = NULL, *again = NULL;
+    size_t length, again_length;
+    CHECK(sh_decl_normalize_collections(view(source), rules, 2, &out, &length, error, sizeof(error)));
+    CHECK(out);
+    if (out) {
+        sh_decl_node *tree = sh_decl_tree_parse(view(out), error, sizeof(error));
+        const sh_decl_node *groups = sh_decl_tree_member(tree, "groups");
+        const sh_decl_node *first = sh_decl_tree_member(sh_decl_tree_member(groups, "item[0]"), "members");
+        const sh_decl_node *second = sh_decl_tree_member(sh_decl_tree_member(groups, "item[1]"), "members");
+        const sh_decl_node *item = sh_decl_tree_member(first, "item[0]");
+        CHECK(!strcmp(sh_decl_tree_member(first, "num")->value, "1"));
+        CHECK(!strcmp(sh_decl_tree_member(second, "num")->value, "1"));
+        CHECK(!strcmp(sh_decl_tree_member(item, "label")->value, "\"custom\""));
+        CHECK(!strcmp(sh_decl_tree_member(item, "help")->value, "\"tip\""));
+        item = sh_decl_tree_member(second, "item[0]");
+        CHECK(!strcmp(sh_decl_tree_member(item, "id")->value, "\"other\""));
+        CHECK(!strcmp(sh_decl_tree_member(item, "label")->value, "\"custom\""));
+        CHECK(!sh_decl_tree_member(second, "item[1]"));
+        sh_decl_tree_free(tree);
+        CHECK(sh_decl_normalize_collections(view(out), rules, 2, &again, &again_length, error, sizeof(error)));
+        CHECK(!again && !again_length);
+    }
+    free(out); free(again); out = NULL;
+    /* Any registered presentation partition can collapse exact repeats, even
+     * without special display fields. Empty groups retain their authored slot. */
+    const char *exact = "{ groups = { num = 2; item[0] = { members = { num = 1; "
+        "item[0] = { id = \"a\"; behavior = 7; } } } item[1] = { members = { num = 1; "
+        "item[0] = { id = \"a\"; behavior = 7; } } } } }";
+    CHECK(sh_decl_normalize_collections(view(exact), exact_rules, 2, &out, &length, error, sizeof(error)));
+    CHECK(out && strstr(out, "num = 0;")); free(out); out = NULL;
+    const char *different = "{ groups = { num = 2; item[0] = { members = { num = 1; "
+        "item[0] = { id = \"a\"; inspector = \"vector\"; label = 1; } } } item[1] = { members = { num = 1; "
+        "item[0] = { id = \"a\"; inspector = \"scalar\"; label = 2; } } } } }";
+    CHECK(!sh_decl_normalize_collections(view(different), rules, 2, &out, &length, error, sizeof(error)));
+    CHECK(!out && strstr(error, "same collection identity across groups"));
+    /* Ignoring display fields must not erase a difference in the native block
+     * operation. Equality already distinguishes assignment from a bare block. */
+    const char *different_operation = "{ groups = { num = 2; item[0] = { members = { num = 1; "
+        "item[0] = { id = \"a\"; inspector = \"vector\"; label = 1; } } } item[1] = { members = { num = 1; "
+        "item[0] { id = \"a\"; inspector = \"vector\"; label = 2; } } } } }";
+    CHECK(!sh_decl_normalize_collections(view(different_operation), rules, 2, &out, &length, error, sizeof(error)));
+    CHECK(!out && strstr(error, "same collection identity across groups"));
+    /* Metadata precedence belongs to duplicate rows inside one input. Two
+     * packages deliberately editing one label differently still conflict. */
+    const char *base = "{ groups = { num = 1; item[0] = { members = { num = 1; item[0] = { id = \"a\"; label = 0; } } } } }";
+    const char *a = "{ groups = { num = 1; item[0] = { members = { num = 1; item[0] = { id = \"a\"; label = 1; } } } } }";
+    const char *b = "{ groups = { num = 1; item[0] = { members = { num = 1; item[0] = { id = \"a\"; label = 2; } } } } }";
+    out = compose(base, a, b, rules, 2, error, sizeof(error)); CHECK(!out); free(out);
+}
+
 static void inherited_collection_patches(void)
 {
     const sh_decl_collection_rule rules[] = {
@@ -284,12 +352,14 @@ static char *sequence(const char *ids)
     return text;
 }
 
-static char *order_merge(const char *original, const char *const *edits, size_t count, char *error)
+static char *order_merge_flags(const char *original, const char *const *edits, size_t count,
+    unsigned flags, char *error)
 {
     sh_decl_collection_rule rule = {"items", NULL};
     sh_decl_source *sources = (sh_decl_source *)calloc(count, sizeof(*sources));
     char *base = sequence(original), *result = NULL;
     size_t i, length;
+    rule.flags = flags;
     CHECK(sources && base);
     if (!sources || !base) goto done;
     for (i = 0; i < count; i++) {
@@ -303,6 +373,9 @@ done:
     if (sources) for (i = 0; i < count; i++) free((char *)sources[i].text);
     free(sources); free(base); return result;
 }
+
+static char *order_merge(const char *original, const char *const *edits, size_t count, char *error)
+{ return order_merge_flags(original, edits, count, 0, error); }
 
 static void order_is(const char *text, const char *expected)
 {
@@ -419,6 +492,154 @@ static void derived_ordering(void)
         &length, error, sizeof(error), NULL);
     CHECK(!result && !length && strstr(error, "invalid")); free(result);
     free(base); free(a); free(b); free(c);
+}
+
+static void presentation_ordering(void)
+{
+    const char *opposed[] = {"abx", "axb"}, *cycle[] = {"bac", "acb"};
+    const char *three_cycle[] = {"axy", "ayz", "azx"}, *compatible[] = {"ax", "ay", "ayx"};
+    char error[512], *result;
+    const unsigned flags = SH_DECL_COLLECTION_PRESENTATION_ORDER;
+    for (size_t i = 0; i < 2; i++) {
+        const char *edits[] = {opposed[i], opposed[1-i]};
+        result = order_merge_flags("a", edits, 2, flags, error);
+        order_is(result, "abx"); CHECK(!*error); free(result);
+        edits[0] = cycle[i]; edits[1] = cycle[1-i];
+        result = order_merge_flags("abc", edits, 2, flags, error);
+        order_is(result, "abc"); CHECK(!*error); free(result);
+    }
+    for (size_t i = 0; i < 3; i++) for (size_t j = 0; j < 3; j++) for (size_t k = 0; k < 3; k++) {
+        if (i == j || i == k || j == k) continue;
+        const char *edits[] = {three_cycle[i], three_cycle[j], three_cycle[k]};
+        result = order_merge_flags("a", edits, 3, flags, error);
+        order_is(result, "axyz"); free(result);
+        edits[0] = compatible[i]; edits[1] = compatible[j]; edits[2] = compatible[k];
+        result = order_merge_flags("a", edits, 3, flags, error);
+        order_is(result, "ayx"); free(result);
+    }
+    {
+        sh_decl_collection_rule rule = {"items", NULL, NULL, NULL, NULL, flags};
+        int mode = 1; sh_decl_collection_order order = {&mode, derived_relation};
+        char *base = sequence("ab"), *a = sequence("a"), *b = sequence("b"), *c = sequence("c");
+        sh_decl_source sources[] = {view(base), view(base), view(c)};
+        size_t length;
+        result = sh_decl_compose_ordered(view(base), sources, 2, &rule, 1, &order,
+            &length, error, sizeof(error), NULL);
+        order_is(result, "ba"); free(result); /* Native order beats layout. */
+        {
+            char *original = sequence("abc"), *left = sequence("bac"), *right = sequence("acb");
+            sh_decl_source cycle_sources[] = {view(left), view(right)};
+            result = sh_decl_compose_ordered(view(original), cycle_sources, 2, &rule, 1, &order,
+                &length, error, sizeof(error), NULL);
+            order_is(result, "bac"); free(result); /* Soft cycle drops no hard edge. */
+            free(original); free(left); free(right);
+        }
+        free(base); base = sequence(""); sources[0] = view(a); sources[1] = view(b);
+        mode = 2;
+        result = sh_decl_compose_ordered(view(base), sources, 3, &rule, 1, &order,
+            &length, error, sizeof(error), NULL);
+        CHECK(!result && !length && strstr(error, "cycle")); free(result);
+        for (mode = 3; mode <= 4; mode++) {
+            result = sh_decl_compose_ordered(view(base), sources, 2, &rule, 1, &order,
+                &length, error, sizeof(error), NULL);
+            CHECK(!result && !length && strstr(error, "ordering")); free(result);
+        }
+        /* A consumer cannot opt a fixed positional array into layout rules. */
+        rule.item_key = "";
+        result = sh_decl_compose(view(base), sources, 2, &rule, 1, &length, error, sizeof(error), NULL);
+        CHECK(!result && !length && strstr(error, "adapter")); free(result);
+        CHECK(!sh_decl_normalize_collections(view(base), &rule, 1, &result, &length, error, sizeof(error)));
+        CHECK(!result && !length); free(result);
+        free(base); free(a); free(b); free(c);
+    }
+}
+
+static char *control_source(size_t page, const char *inspector, const char *action,
+    const char *type, const char *label)
+{
+    char *text = malloc(2048); size_t used;
+    if (!text) return NULL;
+    used = (size_t)snprintf(text, 2048, "{ groups = { num = %zu; ", page + 1);
+    for (size_t i = 0; i < page; i++) used += (size_t)snprintf(text + used, 2048 - used,
+        "item[%zu] = { members = { num = 0; } } ", i);
+    snprintf(text + used, 2048 - used,
+        "item[%zu] = { members = { num = 1; item[0] = { id = \"size\"; inspector = \"%s\"; "
+        "action = \"%s\"; type = \"%s\"; label = \"%s\"; } } } } }", page, inspector, action, type, label);
+    return text;
+}
+
+static size_t control_count(const char *text, size_t *last_page)
+{
+    sh_decl_node *tree = text ? sh_decl_tree_parse(view(text), NULL, 0) : NULL;
+    const sh_decl_node *groups = sh_decl_tree_member(tree, "groups");
+    size_t count = 0, page = 0;
+    CHECK(tree && groups);
+    for (const sh_decl_node *group = groups ? groups->children : NULL; group; group = group->next) {
+        if (!strcmp(group->key, "num")) continue;
+        const sh_decl_node *items = sh_decl_tree_member(group, "members");
+        for (const sh_decl_node *item = items ? items->children : NULL; item; item = item->next)
+            if (strcmp(item->key, "num")) { count++; if (last_page) *last_page = page; }
+        page++;
+    }
+    sh_decl_tree_free(tree); return count;
+}
+
+static void control_behavior_identity(void)
+{
+    static const char *const labels[] = {"label", "help", NULL};
+    const unsigned flags = SH_DECL_COLLECTION_PRESENTATION_ORDER | SH_DECL_COLLECTION_DISTINCT_BEHAVIOR;
+    const sh_decl_collection_rule rules[] = {
+        {"groups", "", "members", "id", labels, flags},
+        {"groups.item[*].members", "id", NULL, NULL, labels, flags}
+    };
+    char error[512], *result = NULL, *again = NULL; size_t length, again_length, page = SIZE_MAX;
+    char *base = control_source(0, "vector", "edit", "Vec3", "stock");
+    char *a = control_source(1, "vector", "edit", "Vec3", "red");
+    char *b = control_source(2, "vector", "edit", "Vec3", "green");
+    CHECK(base && a && b);
+    if (!base || !a || !b) goto done;
+    result = compose(base, a, b, rules, 2, error, sizeof(error));
+    again = compose(base, b, a, rules, 2, error, sizeof(error));
+    CHECK(result && again && !strcmp(result, again));
+    CHECK(control_count(result, &page) == 1 && page == 1);
+    CHECK(result && strstr(result, "label = \"green\""));
+    free(result); free(again); result = again = NULL;
+    /* A removal cannot erase a peer's changed control or page placement. */
+    result = compose(base, a, "{ groups = { num = 0; } }", rules, 2, error, sizeof(error));
+    CHECK(control_count(result, &page) == 1); free(result); result = NULL;
+    {
+        char *different[] = {
+            control_source(0, "scalar", "edit", "Vec3", "other"),
+            control_source(0, "vector", "private/other_action", "Vec3", "other"),
+            control_source(0, "vector", "edit", "Scalar", "other")
+        };
+        for (size_t i = 0; i < 3; i++) {
+            CHECK(different[i]);
+            if (!different[i]) continue;
+            result = compose("{ groups = { num = 0; } }", base, different[i], rules, 2, error, sizeof(error));
+            again = compose("{ groups = { num = 0; } }", different[i], base, rules, 2, error, sizeof(error));
+            CHECK(result && again && !strcmp(result, again));
+            CHECK(control_count(result, NULL) == 2);
+            free(result); free(again); result = again = NULL; free(different[i]);
+        }
+    }
+    {
+        const char *duplicates = "{ groups = { num = 2; item[0] = { members = { num = 1; "
+            "item[0] = { id = \"size\"; inspector = \"vector\"; label = \"first\"; } } } "
+            "item[1] = { members = { num = 3; "
+            "item[0] = { label = \"second\"; inspector = \"vector\"; id = \"size\"; } "
+            "item[1] = { id = \"size\"; inspector = \"scalar\"; } "
+            "item[2] { id = \"size\"; inspector = \"vector\"; } } } } }";
+        CHECK(sh_decl_normalize_collections(view(duplicates), rules, 2, &result, &length, error, sizeof(error)));
+        CHECK(result && control_count(result, NULL) == 3 && strstr(result, "label = \"first\""));
+        CHECK(result && !strstr(result, "label = \"second\""));
+        if (result) {
+            CHECK(sh_decl_normalize_collections(view(result), rules, 2, &again, &again_length, error, sizeof(error)));
+            CHECK(!again && !again_length);
+        }
+    }
+done:
+    free(base); free(a); free(b); free(result); free(again);
 }
 
 static void added_objects(void)
@@ -640,6 +861,28 @@ static void entity_header_order(void)
     free(body);
 }
 
+static void typed_source_annotations(void)
+{
+    const char *base = "{ \"Fixture\" \"\" edit = { int x = 1; int y = 2; } }";
+    const char *a = "{ \"Fixture\" \"\" edit = { int x = 3; int y = 2; } }";
+    const char *b = "{ \"Fixture\" \"\" edit = { int x = 1; int y = 4; idDeclEntityDef * target = \"child\"; } }";
+    char error[256], *body = compose(base, a, b, NULL, 0, error, sizeof(error));
+    sh_decl_node *tree;
+    const sh_decl_node *edit, *target;
+    CHECK(body != NULL);
+    if (!body) return;
+    CHECK(strstr(body, "\"Fixture\" \"\" edit ="));
+    CHECK(strstr(body, "int x = 3;") && strstr(body, "int y = 4;"));
+    CHECK(strstr(body, "idDeclEntityDef * target = \"child\";"));
+    tree = sh_decl_tree_parse(view(body), error, sizeof(error));
+    CHECK(tree != NULL);
+    edit = sh_decl_tree_member(tree, "edit");
+    target = sh_decl_tree_member(edit, "target");
+    CHECK(edit && edit->annotation && !strcmp(edit->annotation, "\"Fixture\" \"\" "));
+    CHECK(target && target->annotation && !strcmp(target->annotation, "idDeclEntityDef * "));
+    sh_decl_tree_free(tree); free(body);
+}
+
 static void malformed(void)
 {
     const char *bad[] = {
@@ -654,8 +897,8 @@ static void malformed(void)
         CHECK(!result); CHECK(error[0]); free(result);
     }
     {
-        char *result = compose("/*base*/ { x = \"a;{}\\\"\"; }", "{ x = \"a;{}\\\"\"; }",
-                               "{ x = \"a;{}\\\"\"; }", NULL, 0, error, sizeof(error));
+        char *result = compose("/*base*/ { x = \"a;{}\\\"; }", "{ x = \"a;{}\\\"; }",
+                               "{ x = \"a;{}\\\"; }", NULL, 0, error, sizeof(error));
         CHECK(result); free(result);
     }
 }
@@ -699,7 +942,10 @@ static void large_text(void)
 int main(int argc, char **argv)
 {
     grouped_collections();
+    presentation_duplicates();
+    presentation_ordering(); control_behavior_identity();
     inherited_collection_patches();
+    typed_source_annotations();
     fields(); lists(); blocking(); editor_properties(); ordering(); derived_ordering(); added_objects(); conflict_sources(); typed_collections(); entity_header_order(); malformed(); large_text();
     if (argc == 2) native_file(argv[1]);
     if (failures) return 1;

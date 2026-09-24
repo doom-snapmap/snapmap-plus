@@ -36,7 +36,7 @@ int hook_is_installed(void *tramp);
  * retain the caller's trampoline pointer and retry; its record remains owned. */
 int hook_unpatch(void *tramp);
 
-/* Release all live patches in reverse slot order; return the number released. */
+/* Release all live patches in reverse preparation order; return the number released. */
 int hook_unpatch_all(void);
 
 /* Count successfully committed installations, or all owned records. */

@@ -425,6 +425,16 @@ int sh_package_archive_identity(const unsigned char *bytes, size_t length,
     pa_free(&z); return 1;
 }
 
+int sh_package_archive_tree_identity(const unsigned char *bytes, size_t length,
+    unsigned char fingerprint[32], char *error, size_t capacity)
+{
+    pa_zip z;
+    if (error && capacity) error[0] = 0;
+    if (fingerprint) memset(fingerprint, 0, 32);
+    if (!fingerprint || !pa_open(bytes, length, &z, 0, error, capacity)) return 0;
+    memcpy(fingerprint, z.fingerprint, 32); pa_free(&z); return 1;
+}
+
 void sh_package_archive_files_free(sh_package_archive_files *files)
 {
     size_t i;

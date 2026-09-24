@@ -155,6 +155,46 @@ static void resource_availability(const sh_package_compilation *map, const sh_pa
     }
 }
 
+static int alias_available(void *context, const char *path, char *error, size_t capacity)
+{
+    int present = *(int *)context;
+    CHECK(!strcmp(path, "generated/decls/entitydef/props/rock.decl"));
+    if (present < 0) snprintf(error, capacity, "fixture resource unreadable");
+    return present;
+}
+
+static void alias_availability(void)
+{
+    sh_package packages[2] = {0};
+    sh_package_source_file files[2] = {{0}, {0}};
+    sh_package_sources sources = {0};
+    sh_compiled_resource resources[2] = {{0}, {0}};
+    sh_package_compilation map = {0};
+    sh_package_missing missing = {0};
+    size_t indices[] = {0, 1};
+    const char *paths[] = {"generated/decls/entitydef/smp/green/rock.decl", "generated/decls/entitydef/smp/red/rock.decl"};
+    char error[256];
+    int present = 1;
+    sources.packages = packages; sources.package_count = 2; sources.files = files; sources.file_count = 2;
+    for (size_t i = 0; i < 2; i++) {
+        files[i].owner = i;
+        files[i].engine_path = "generated/decls/entitydef/props/rock.decl";
+        resources[i].engine_path = paths[i]; resources[i].original_path = files[i].engine_path;
+        resources[i].sources = &indices[i]; resources[i].source_count = 1;
+    }
+    map.sources = &sources; map.resources = resources; map.resource_count = 2;
+    CHECK(sh_package_compilation_missing(&map, paths, 2, alias_available, &present, &missing, error, sizeof(error)));
+    CHECK(!missing.count && !sh_package_owners_count(&missing.packages));
+    present = 0;
+    CHECK(sh_package_compilation_missing(&map, paths, 2, alias_available, &present, &missing, error, sizeof(error)));
+    CHECK(missing.count == 1 && !strcmp(missing.paths[0], files[0].engine_path));
+    CHECK(sh_package_owners_count(&missing.packages) == 2); /* Both authored delivery units remain whole. */
+    present = -1;
+    CHECK(!sh_package_compilation_missing(&map, paths, 2, alias_available, &present, &missing, error, sizeof(error)));
+    CHECK(!missing.paths && !missing.count && !sh_package_owners_count(&missing.packages));
+    sh_package_missing_free(&missing);
+}
+
 int main(void)
 {
     char temporary[MAX_PATH], error[2048], path[256], descriptor[160];
@@ -209,6 +249,12 @@ int main(void)
     resource_availability(map, local);
     local_count = local_sources->package_count; local_files = local_sources->file_count; map_files = map_sources->file_count;
     CHECK(local_count == 71);
+    alias_availability();
+    {
+        sh_compiled_resource *r = (sh_compiled_resource *)sh_package_compilation_find(map, "model.bmodel");
+        CHECK(r);
+        if (r) r->original_path = _strdup("model.bmodel");
+    }
     view = sh_package_compilation_overlay(local, map, error, sizeof(error));
     if (!view) fprintf(stderr, "%s\n", error);
     CHECK(view); if (!view) goto done;
@@ -286,6 +332,7 @@ int main(void)
     sh_package_compilation_free(local); local = NULL; sh_package_sources_free(local_sources); local_sources = NULL;
     sh_package_compilation_free(map); map = NULL; sh_package_sources_free(map_sources); map_sources = NULL;
     expect(view, health_path, "health = 10"); expect(view, "model.bmodel", "map model");
+    CHECK(!strcmp(sh_package_compilation_find(view, "model.bmodel")->original_path, "model.bmodel"));
     /* Recompiling the local library still finds its untouched authored values. */
     local = compile("library", &local_sources); CHECK(local); if (local) expect(local, health_path, "health = 12000");
     /* Contradictory edits by map peers still fail before creating a provider. */

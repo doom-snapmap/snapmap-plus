@@ -19,9 +19,9 @@
 /* Read cap allows larger chunks from other writers. */
 #define SH_SHARD_MAX_CHUNK    65536
 
-/* The longest header text a scanner will consider. Both families are far
- * shorter; a "name" longer than this is not a shard header. */
-#define SH_SHARD_HEADER_MAX   256
+/* Transport headers include the complete original tree and a hex-encoded
+ * legacy migration seed. This does not widen authored descriptor IDs. */
+#define SH_SHARD_HEADER_MAX   400
 
 /* Container storage grows geometrically up to this ceiling. Large maps exceed
  * 8192 containers; cap both count and depth without preallocating the
@@ -125,8 +125,9 @@ unsigned sh_shard_doc_array_count(const char *json, const sh_shard_doc *doc, int
 typedef int (*sh_shard_filter_fn)(const char *hdr, size_t hdr_len, void *ctx);
 
 /* Remove matching shard variables into an owned NUL-terminated process-heap
- * buffer. NULL retains the original; doc_failed distinguishes a structural
- * refusal from no matches. Never apply a partial splice.
+ * buffer. NULL retains the original; doc_failed distinguishes a structural,
+ * allocation or removal-budget refusal from no matches. Storage grows with
+ * actual removals; exhausting max_cuts refuses the whole splice.
  */
 char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t magic_len,
                      sh_shard_filter_fn filter, void *ctx, size_t max_cuts,

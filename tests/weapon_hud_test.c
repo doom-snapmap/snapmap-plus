@@ -7,6 +7,7 @@
 #include "weapon_hud.h"
 #include "packages.h"
 #include "package_runtime.h"
+#include "package_hud.h"
 static int failures;
 #define CHECK(x) do { if (!(x)) { printf("FAIL line %d: %s\n", __LINE__, #x); failures++; } } while (0)
 void backend_log(const char *s) { (void)s; }
@@ -25,8 +26,32 @@ static void write_text(const char *path, const char *s)
     CHECK(fopen_s(&f, path, "wb") == 0 && f);
     if (f) { CHECK(fwrite(s, 1, strlen(s), f) == strlen(s)); fclose(f); }
 }
+static void test_bound_policy(void)
+{
+    sh_package_policy all = {0}, selected = {0}; sh_package_owners local = {0}, map = {0};
+    CHECK(sh_package_owners_add(&local, 0) && sh_package_owners_add(&map, 70));
+    all.hud_bound = 1;
+    CHECK(sh_package_hud_bind(&all, "smp/weapon-a", 1, &local));
+    CHECK(sh_package_hud_bind(&all, "smp/weapon-b", 0, &map));
+    CHECK(sh_package_hud_bind(&all, "weapon/native", 1, &local));
+    CHECK(sh_package_hud_bind(&all, "weapon/native", 0, &map));
+    CHECK(sh_package_hud_publish(&all, 64, 1));
+    const char *raw = sh_json_object_get(&all.hud, "weapons"); sh_json_object rows = {0}; int mode = -1;
+    CHECK(raw && sh_json_parse_object(raw, strlen(raw), 3, &rows) && rows.count == 3);
+    CHECK(sh_package_hud_mode(sh_json_object_get(&rows, "weapon/native"), &mode) && mode == 0);
+    sh_json_object_free(&rows);
+    CHECK(sh_package_hud_copy(&selected, &all, &local, 71, 5));
+    CHECK(selected.hud_binding_count == 2 && sh_package_owners_contains(&selected.hud_bindings[0].owners, 5));
+    CHECK(sh_package_hud_publish(&selected, 64, 1));
+    raw = sh_json_object_get(&selected.hud, "weapons");
+    CHECK(raw && sh_json_parse_object(raw, strlen(raw), 3, &rows) && rows.count == 2);
+    CHECK(sh_package_hud_mode(sh_json_object_get(&rows, "weapon/native"), &mode) && mode == 1);
+    sh_json_object_free(&rows); sh_package_policy_free(&all); sh_package_policy_free(&selected);
+    sh_package_owners_free(&local); sh_package_owners_free(&map);
+}
 int main(void)
 {
+    test_bound_policy();
     sh_weapon_hud_test_reset();
     CHECK(parse(valid, "first"));
     CHECK(parse(valid, "second"));
@@ -35,9 +60,10 @@ int main(void)
     CHECK(sh_weapon_hud_select("weapon/test/unlimited", 0) == 0);
     CHECK(sh_weapon_hud_select("weapon/test/other", 1) == 1);
     CHECK(sh_weapon_hud_select(NULL, 1) == 1);
-    CHECK(!parse("{\"weapons\":{"
+    CHECK(parse("{\"weapons\":{"
         "\"weapon/test/unlimited\":{\"ammo_display\":\"engine\"}}}", "conflict"));
-    CHECK(sh_weapon_hud_test_count() == 0);
+    CHECK(sh_weapon_hud_test_count() == 1);
+    CHECK(sh_weapon_hud_select("weapon/test/unlimited", 1) == 0);
     const char *bad[] = {
         "null", "[]",
         "{\"schema\":\"future\",\"weapons\":{}}",
@@ -54,8 +80,8 @@ int main(void)
     for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
         CHECK(parse(valid, "first"));
         CHECK(!parse(bad[i], "bad"));
-        CHECK(sh_weapon_hud_test_count() == 0);
-        CHECK(sh_weapon_hud_select("weapon/test/unlimited", 1) == 1);
+        CHECK(sh_weapon_hud_test_count() == 1);
+        CHECK(sh_weapon_hud_select("weapon/test/unlimited", 1) == 0);
     }
     char rows[40000], row[160];
     strcpy_s(rows, sizeof rows, "{\"weapons\":{");
@@ -65,8 +91,9 @@ int main(void)
         strcat_s(rows, sizeof rows, row);
     }
     strcat_s(rows, sizeof rows, "}}");
-    CHECK(!parse(rows, "too-many"));
-    CHECK(sh_weapon_hud_test_count() == 0);
+    CHECK(parse(rows, "many-valid"));
+    CHECK(sh_weapon_hud_test_count() == 258);
+    sh_weapon_hud_test_reset();
 
     char temp[MAX_PATH], root[MAX_PATH], over[MAX_PATH], pkg[MAX_PATH], marker[MAX_PATH];
     char descriptor[1024], directories[4][MAX_PATH], resource[MAX_PATH];
@@ -159,6 +186,12 @@ int main(void)
     CHECK(sh_weapon_hud_test_count() == 0);
     CHECK(DeleteFileA(extra_marker)); CHECK(RemoveDirectoryA(extra));
     CHECK(sh_package_runtime_select_map(NULL, 0, NULL, policy_error, sizeof policy_error));
+    sh_package_runtime_test_dispose();
+    {
+        char cache[MAX_PATH]; snprintf(cache, sizeof(cache), "%s/package-cache/bundles", root);
+        CHECK(RemoveDirectoryA(cache)); snprintf(cache, sizeof(cache), "%s/package-cache", root);
+        CHECK(RemoveDirectoryA(cache));
+    }
     CHECK(RemoveDirectoryA(over)); CHECK(RemoveDirectoryA(root));
     printf("weapon_hud_test: %d failures\n", failures);
     return failures ? 1 : 0;

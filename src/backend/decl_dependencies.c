@@ -56,15 +56,26 @@ static int dd_push(dd_walk *walk, const sh_decl_node *node, sh_decl_value_type t
     return 1;
 }
 
+int sh_decl_reference_literal(const sh_decl_node *node, const char **name, size_t *length)
+{
+    if (!sh_decl_tree_literal(node, name, length)) return 0;
+    if (node->value && !strcmp(node->value, "NULL")) { *name = ""; *length = 0; }
+    return 1;
+}
+
 static int dd_reference(dd_walk *walk, const sh_decl_node *node,
                          const char *path, sh_decl_value_type type)
 {
     const char *name;
     size_t length;
-    if (!sh_decl_tree_literal(node, &name, &length))
+    if (!sh_decl_reference_literal(node, &name, &length))
         return dd_gap(walk, path, type, "resource value requires a native syntax adapter");
     if (!length) return 1;
     if (!walk->schema->reference(walk->schema->context, path, type, name, length)) return 0;
+    if (walk->schema->reference_site) {
+        sh_decl_reference_site site = {node, NULL, 0};
+        if (!walk->schema->reference_site(walk->schema->context, path, type, name, length, &site)) return 0;
+    }
     walk->result->references++;
     return 1;
 }
@@ -89,9 +100,10 @@ static int dd_index(const char *key, const char *prefix, size_t *index)
         dd_unsigned(key + a + 1, b - a - 2, index);
 }
 
-/* Graph object bodies come from an ordered syntax tree. Ordinary readers must
- * not certify a complete dependency set for duplicate assignment slots; custom
- * readers are handled before reaching this function and keep their own syntax. */
+/* Collection sizing/indexing needs unique controls until its custom sequential
+ * semantics are established. Reflected object assignments are retained and
+ * visited in source order, including repeated scalar/object fields. Binding
+ * rewrites each typed site without composing or removing an assignment. */
 static int dd_unique_fields(dd_walk *walk, const dd_pending *item)
 {
     const sh_decl_node *child;
@@ -129,7 +141,7 @@ static int dd_children(dd_walk *walk, const dd_pending *item, const sh_decl_valu
     const char *prefix = shape->item_key ? shape->item_key : item->node->key;
     if (!item->node->compound)
         return dd_gap(walk, item->path, item->type, "expected a state block");
-    if (!dd_unique_fields(walk, item)) return 0;
+    if (shape->kind == SH_DECL_VALUE_COLLECTION && !dd_unique_fields(walk, item)) return 0;
     if (shape->kind == SH_DECL_VALUE_COLLECTION && !prefix)
         return dd_gap(walk, item->path, item->type, "collection has no verified item spelling");
     if (shape->kind == SH_DECL_VALUE_COLLECTION && shape->count_key) {
@@ -202,6 +214,21 @@ static int dd_run(dd_walk *walk)
             else if (state.object) ok = dd_push(walk, state.object, state.type, item.path, "object");
             break;
         }
+        case SH_DECL_VALUE_SCRIPT: {
+            sh_decl_value_type selected;
+            sh_decl_node fields;
+            const char *reason;
+            if (!sh_decl_script_read(item.node, item.type, walk->schema, &selected, &fields, &reason))
+                dd_gap(walk, item.path, item.type, reason);
+            else if (selected.name) {
+                dd_pending object = {0};
+                sh_decl_value_shape object_shape = {0};
+                object.node = &fields; object.type = selected; object.path = item.path;
+                object_shape.kind = SH_DECL_VALUE_OBJECT;
+                ok = dd_children(walk, &object, &object_shape);
+            }
+            break;
+        }
         default:
             dd_gap(walk, item.path, item.type, "type requires a verified native reader adapter"); break;
         }
@@ -235,20 +262,30 @@ int sh_decl_state_dependencies(const sh_decl_node *state, sh_decl_value_type typ
     return dd_finish(&walk, state && dd_push(&walk, state, type, NULL, "edit") && dd_run(&walk));
 }
 
-int sh_decl_entity_dependencies(const sh_decl_node *definition, sh_decl_value_type entity_type,
-    const sh_decl_dependency_schema *schema, sh_decl_dependency_result *result)
+int sh_decl_envelope_dependencies(const sh_decl_node *definition, sh_decl_value_type state_type,
+    sh_decl_value_type parent_type, const sh_decl_dependency_schema *schema,
+    sh_decl_dependency_result *result)
 {
     dd_walk walk = {schema, result, NULL, 0, 0};
-    const sh_decl_node *inherit, *edit;
-    sh_decl_value_type reference_type = {"idDeclEntityDef", "*"};
+    const sh_decl_node *node;
     int ok = 0;
     if (!dd_valid(schema, result)) return 0;
     if (!definition || !definition->compound) return dd_finish(&walk, 0);
-    inherit = sh_decl_tree_member(definition, "inherit");
-    edit = sh_decl_tree_member(definition, "edit");
-    if (inherit && !dd_reference(&walk, inherit, "inherit", reference_type)) goto done;
-    if (edit && (!dd_push(&walk, edit, entity_type, NULL, "edit") || !dd_run(&walk))) goto done;
+    for (node = definition->children; node; node = node->next) {
+        if (!strcmp(node->key, "inherit")) {
+            if (!dd_reference(&walk, node, "inherit", parent_type)) goto done;
+        } else if (!strcmp(node->key, "edit")) {
+            if (!dd_push(&walk, node, state_type, NULL, "edit") || !dd_run(&walk)) goto done;
+        }
+    }
     ok = 1;
 done:
     return dd_finish(&walk, ok);
+}
+
+int sh_decl_entity_dependencies(const sh_decl_node *definition, sh_decl_value_type entity_type,
+    const sh_decl_dependency_schema *schema, sh_decl_dependency_result *result)
+{
+    return sh_decl_envelope_dependencies(definition, entity_type,
+        (sh_decl_value_type){"idDeclEntityDef", "*"}, schema, result);
 }

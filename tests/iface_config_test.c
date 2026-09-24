@@ -1,4 +1,5 @@
 #include <stddef.h>
+#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -32,7 +33,8 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_status) == 0x328);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_configure) == 0x330);
 /* ext 26, appended 2026-09-07: reload the editor map now, so a staged rawmap actually opens. */
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_load_now) == 0x338);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x340);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_export) == 0x340);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x348);
 SH_STATIC_ASSERT(offsetof(sh_iface, sub) == 0x58);
 SH_STATIC_ASSERT(sizeof(sh_iface) == 0x60);
 
@@ -54,6 +56,32 @@ static int stub_set(sh_iface *self, const char *key, const char *value_json)
     return key && value_json ? SH_CONFIG_SET_PERSISTED : SH_CONFIG_SET_REJECTED;
 }
 
+static int stub_prefab_export(sh_iface *self, int selection, char **bytes, size_t *length)
+{
+    (void)self; (void)selection; *bytes = NULL; *length = 0; return 0;
+}
+
+static void test_optional_extent(void)
+{
+    sh_iface old = {0};
+    sh_iface_vtbl mock = {0};
+    /* No read may reach the absent trailing table: use an unreadable address. */
+    old.vtbl = (const sh_iface_vtbl *)(uintptr_t)1;
+    assert(!sh_iface_prefab_export(&old));
+    old.abi_marker = SH_IFACE_EXTENT_MARKER; old.vtbl_bytes = 0x340;
+    assert(!sh_iface_prefab_export(&old));
+    old.vtbl_bytes = 0x349;
+    assert(!sh_iface_prefab_export(&old));
+    assert(!sh_iface_has_slot(&old, SIZE_MAX, 8));
+    old.vtbl = &mock; old.vtbl_bytes = sizeof(mock);
+    assert(!sh_iface_prefab_export(&old));
+    mock.prefab_export = stub_prefab_export;
+    assert(sh_iface_prefab_export(&old) == stub_prefab_export);
+    old.abi_marker ^= 1;
+    assert(!sh_iface_prefab_export(&old));
+    assert(!sh_iface_prefab_export(NULL));
+}
+
 int main(void)
 {
     sh_iface_config_slots slots;
@@ -61,6 +89,7 @@ int main(void)
     sh_iface *iface;
     char value[16] = {0};
     unsigned int flags = 0;
+    test_optional_extent();
 
     memset(&slots, 0, sizeof(slots));
     slots.config_get_json = stub_get;
@@ -73,7 +102,10 @@ int main(void)
     }
     sh_iface_bind_config_slots(&slots);
     memset(&engine_slots, 0, sizeof(engine_slots));
+    engine_slots.prefab_export = stub_prefab_export;
     sh_iface_bind_engine_slots(&engine_slots);
+    assert(iface->vtbl_bytes == sizeof(sh_iface_vtbl));
+    assert(sh_iface_prefab_export(iface) == stub_prefab_export);
     if (iface->vtbl->config_get_json != stub_get ||
         iface->vtbl->config_set_json != stub_set) {
         fprintf(stderr, "iface_config_test: config callbacks were not preserved\n");

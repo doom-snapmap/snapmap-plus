@@ -30,6 +30,81 @@ static char *dj_path(const char *parent, const char *key)
 static int dj_value(dj_walk *walk, const char *json, size_t length,
                     sh_decl_value_type type, const char *path, unsigned depth);
 
+typedef struct dj_object {
+    dj_walk *walk;
+    sh_decl_value_type type;
+    const char *path;
+    unsigned depth;
+} dj_object;
+
+/* Visit only the current object here; typed recursion selects each child.
+ * Keeping source spans avoids copied member strings losing their locations. */
+static int dj_shallow(void *context, const char *key, size_t length, unsigned depth)
+{
+    (void)context; (void)key; (void)length; (void)depth;
+    return 0;
+}
+
+static int dj_fields(void *context, const sh_json_field_span *fields, size_t count, unsigned depth)
+{
+    dj_object *object = context;
+    dj_walk *walk = object->walk;
+    size_t i;
+    (void)depth;
+    for (i = 0; i < count; i++) {
+        const sh_json_field_span *member = &fields[i];
+        sh_decl_value_type field = {0};
+        char *child_path;
+        int found, ok;
+        if (!strcmp(member->key, "~type") || !strcmp(member->key, "~version") ||
+            !strcmp(member->key, "editorVars")) continue;
+        found = walk->schema->field(walk->schema->context, object->type, member->key, &field);
+        if (!found) continue;
+        child_path = dj_path(object->path, member->key);
+        if (!child_path) return 0;
+        if (found < 0 || !field.name)
+            ok = dj_gap(walk, child_path, object->type, "field semantics are unavailable");
+        else ok = dj_value(walk, member->value, member->value_length, field, child_path, object->depth + 1);
+        free(child_path);
+        if (!ok) return 0;
+    }
+    return 1;
+}
+
+static int dj_script_type(dj_object *object, const char *json, size_t length,
+    int block_selector, sh_decl_value_type *selected)
+{
+    char *name;
+    size_t decoded = 0;
+    int ok;
+    *selected = (sh_decl_value_type){0};
+    if (length == 4 && !memcmp(json, "null", 4)) return 1;
+    if (length == SIZE_MAX || !(name = malloc(length + 1))) return 0;
+    ok = sh_native_json_decode_string(json, length, name, length + 1, &decoded) && strlen(name) == decoded;
+    if (ok && block_selector && !strcmp(name, "NULL")) { free(name); return 1; }
+    ok = ok && decoded && object->walk->schema->dynamic_type &&
+        object->walk->schema->dynamic_type(object->walk->schema->context, object->type,
+            name, decoded, selected) == 1 && selected->name;
+    free(name);
+    if (!ok) {
+        *selected = (sh_decl_value_type){0};
+        dj_gap(object->walk, object->path, object->type, "script class metadata is unavailable");
+    }
+    return 1;
+}
+static int dj_script_fields(void *context, const sh_json_field_span *fields, size_t count, unsigned depth)
+{
+    dj_object *object = context, selected = *object;
+    size_t i = 0;
+    while (i < count && (!strcmp(fields[i].key, "~type") || !strcmp(fields[i].key, "~version"))) i++;
+    if (i == count) return 1;
+    if (strcmp(fields[i].key, "object"))
+        return dj_gap(object->walk, object->path, object->type, "script class selector must precede its fields");
+    if (!dj_script_type(object, fields[i].value, fields[i].value_length, 1, &selected.type)) return 0;
+    if (!selected.type.name) return 1;
+    return dj_fields(&selected, fields + i + 1, count - i - 1, depth);
+}
+
 /* The complete input was validated before any callbacks. This only splits
  * already valid array elements, respecting nested values and quoted commas. */
 static int dj_array(dj_walk *walk, const char *json, size_t length,
@@ -75,8 +150,7 @@ static int dj_value(dj_walk *walk, const char *json, size_t length,
                     sh_decl_value_type type, const char *path, unsigned depth)
 {
     sh_decl_value_shape shape = {0};
-    sh_json_object object = {0};
-    size_t i;
+    dj_object object = {walk, type, path, depth};
     int ok = 1;
     if (depth > 128) return 0;
     while (length && strchr(" \r\n\t", *json)) { json++; length--; }
@@ -94,34 +168,30 @@ static int dj_value(dj_walk *walk, const char *json, size_t length,
             ok = dj_gap(walk, path, type, "resource JSON is not a literal name");
         else if (decoded) {
             ok = walk->schema->reference(walk->schema->context, path, type, name, decoded);
+            if (ok && walk->schema->reference_site) {
+                sh_decl_reference_site site = {NULL, json, length};
+                ok = walk->schema->reference_site(walk->schema->context, path, type, name, decoded, &site);
+            }
             if (ok) walk->result->references++;
         }
         free(name); return ok;
     }
     if (shape.kind == SH_DECL_VALUE_COLLECTION)
         return dj_array(walk, json, length, &shape, type, path, depth);
+    if (shape.kind == SH_DECL_VALUE_SCRIPT) {
+        if (length && (json[0] == '"' || json[0] == 'n')) {
+            sh_decl_value_type selected;
+            return dj_script_type(&object, json, length, 0, &selected);
+        }
+        if (length < 2 || json[0] != '{' || json[length - 1] != '}')
+            return dj_gap(walk, path, type, "script object state is not a JSON object or class name");
+        return sh_native_json_visit_objects_filtered(json, length, 128, dj_script_fields, dj_shallow, &object);
+    }
     if (shape.kind != SH_DECL_VALUE_OBJECT)
         return dj_gap(walk, path, type, "type requires a verified native reader adapter");
-    if (!sh_native_json_parse_object(json, length, 128, &object))
+    if (length < 2 || json[0] != '{' || json[length - 1] != '}')
         return dj_gap(walk, path, type, "native object state is not a JSON object");
-    for (i = 0; ok && i < object.count; i++) {
-        const sh_json_member *member = &object.members[i];
-        sh_decl_value_type field = {0};
-        char *child_path;
-        int found;
-        if (!strcmp(member->key, "~type") || !strcmp(member->key, "~version") ||
-            !strcmp(member->key, "editorVars")) continue;
-        found = walk->schema->field(walk->schema->context, type, member->key, &field);
-        if (!found) continue;
-        child_path = dj_path(path, member->key);
-        if (!child_path) { ok = 0; break; }
-        if (found < 0 || !field.name)
-            ok = dj_gap(walk, child_path, type, "field semantics are unavailable");
-        else ok = dj_value(walk, member->value_json, strlen(member->value_json), field, child_path, depth + 1);
-        free(child_path);
-    }
-    sh_json_object_free(&object);
-    return ok;
+    return sh_native_json_visit_objects_filtered(json, length, 128, dj_fields, dj_shallow, &object);
 }
 
 int sh_decl_json_state_dependencies(const char *json, size_t length, sh_decl_value_type type,

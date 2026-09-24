@@ -20,6 +20,7 @@
 #include "engine_globals.h"  /* engine data globals, resolved not hardcoded */
 #include "decl_server.h"
 #include "map_transition.h"
+#include "editor_transition.h"
 #include "rawmap.h"
 #include "hook.h"
 #include "package_requirements.h"
@@ -38,8 +39,19 @@
 #include "process_heap_scope.h"
 #include "audio_banks_native.h"
 #include "resource_resident.h"
+#include "package_shader_receipt.h"
+#include "package_native_assets.h"
+#include "resource_graph_native.h"
+#include "nav_bake.h"
 
 static sh_resource_resident *g_resident_pass;
+/* Additive admission shares scanners, never runtime reconstruction or the
+ * destructive whole-palette rebuild. Its own transaction owns those steps. */
+static int g_additive_scan;
+static __declspec(thread) int g_source_boot_scope, g_shader_prepare_scope;
+static int ds_shader_recovery_poll(void);
+static int ds_occurrence_maintenance(void);
+static int ds_occurrence_busy(void);
 
 #define DS_INTERNAL_COMMAND     "snapmap_plus_decl_server_apply"
 #define DS_REARM_COMMAND        "snapmap_plus_decl_server_rearm"
@@ -415,7 +427,6 @@ static int ds_decl_body_is_single_block(const unsigned char *text, size_t length
     int root_seen = 0;
     int root_closed = 0;
     int in_quote = 0;
-    int escaped = 0;
     int line_comment = 0;
     int block_comment = 0;
 
@@ -438,9 +449,7 @@ static int ds_decl_body_is_single_block(const unsigned char *text, size_t length
             continue;
         }
         if (in_quote) {
-            if (escaped) escaped = 0;
-            else if (c == '\\') escaped = 1;
-            else if (c == '"') in_quote = 0;
+            if (c == '"') in_quote = 0;
             i++;
             continue;
         }
@@ -474,7 +483,7 @@ static int ds_decl_body_is_single_block(const unsigned char *text, size_t length
         i++;
     }
     return root_seen && root_closed && depth == 0 && !in_quote &&
-           !escaped && !block_comment;
+           !block_comment;
 }
 
 static int ds_checked_add(size_t *value, size_t add)
@@ -1080,7 +1089,7 @@ static int ds_publish_missing_table(int missing_count)
      * on a re-arm drops identities an earlier pass published -- including packages this pass
      * never looked at -- and their decltree source stops resolving. */
     published = at == 0 ||
-                (InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)
+                (g_additive_scan || InterlockedCompareExchange(&g_rearm_is_runtime, 0, 0)
                      ? sh_overrides_internal_decl_table_merge(entries, (size_t)at)
                      : sh_overrides_internal_decl_table_install(entries,
                                                                 (size_t)at));
@@ -1326,6 +1335,7 @@ int sh_decl_server_registry_source(sh_decl_registry_source *source)
     source->registry = (uintptr_t)registry;
     source->read = ds_registry_read;
     source->source_exists = ds_registry_source_exists;
+    source->scripts = sh_package_runtime_script_schema();
     return 1;
 }
 
@@ -1664,6 +1674,7 @@ static void ds_runtime_premark(ds_materialize_context *context)
              * no parser or later map transition may see a demoted target. */
             __try {
                 if (*level == 4u) *level = 2u;
+                sh_package_shader_receipt_invalidate((uintptr_t)decl);
                 g_reconstruct(decl);
             } __finally {
                 *level = 4u;
@@ -2024,6 +2035,7 @@ static int ds_scan_and_materialize_missing(
         int registration;
 
         if (candidate->outcome != DS_CANDIDATE_MISSING) continue;
+        if (g_additive_scan && candidate->shadow_kind == DS_SHADOW_SOURCE) continue;
         if (!ds_candidate_source_name(candidate, source_name, sizeof(source_name))) {
             ds_log("REFUSED", candidate->source,
                    "native decltree source name exceeded its bounded path");
@@ -2101,7 +2113,7 @@ static int ds_scan_and_materialize_missing(
      * resolve the very resources this pass captured; rebuilding while they are
      * still marked pending drops their templates and the native entity bank
      * then reports a missing palette entry. */
-    if (g_resident_pass) {
+    if (g_resident_pass && !g_additive_scan) {
         char error[256];
         if (!sh_resource_resident_reconstruct(g_resident_pass, error, sizeof(error)) ||
             !sh_resource_resident_drain(g_resident_pass, error, sizeof(error))) {
@@ -2110,7 +2122,7 @@ static int ds_scan_and_materialize_missing(
             return 0;
         }
     }
-    {
+    if (!g_additive_scan) {
         int palette_ok = 0;
         int palette_fault = 0;
         __try {
@@ -2131,6 +2143,7 @@ void sh_decl_server_test_set_runtime(int active)
 {
     InterlockedExchange(&g_rearm_is_runtime, active ? 1 : 0);
 }
+void sh_decl_server_test_set_additive(int active) { g_additive_scan = active != 0; }
 void sh_decl_server_test_set_resident(void *pass)
 {
     g_resident_pass = (sh_resource_resident *)pass;
@@ -2474,8 +2487,8 @@ static int ds_runtime_boundary_safe(void)
 {
     const unsigned char *shell, *manager, *common;
     int current, next;
-    if (!g_module_base) return 0;
-    if (sh_map_transition_at_boundary()) return 1;
+    if (!g_module_base || g_shader_prepare_scope) return 0;
+    if (sh_map_transition_at_boundary() || sh_editor_transition_at_boundary()) return 1;
     if (!g_boundary_editor || !g_boundary_shell_slot ||
         !g_boundary_common_slot || !g_boundary_thread_slot) return 0;
     __try {
@@ -2798,9 +2811,23 @@ void sh_decl_server_request_rearm(void)
  */
 void sh_decl_server_rearm_poll(void)
 {
+    static ULONGLONG next_retirement;
+    if (!ds_shader_recovery_poll()) return;
+    if (!ds_occurrence_maintenance()) return;
     LONG state = InterlockedCompareExchange(&g_state, 0, 0);
     if (sh_rawmap_defers_install_commit()) return;
-    if (InterlockedCompareExchange(&g_auto_state, 0, 0) != DS_AUTO_RUN) return;
+    if (InterlockedCompareExchange(&g_auto_state, 0, 0) != DS_AUTO_RUN) {
+        /* Object destructors only release leases. Native cleanup happens here
+         * after confirmed map departure, using the ordinary recovery contract.
+         * An active map's promoted policy is never cleared by an idle tick. */
+        ULONGLONG now = GetTickCount64();
+        if (now >= next_retirement && sh_package_runtime_occurrences_pending() &&
+            !sh_package_runtime_has_map_provider() && sh_decl_server_map_retirement_safe()) {
+            next_retirement = now + 1000;
+            sh_decl_server_activate_occurrences(NULL);
+        }
+        return;
+    }
     if (!InterlockedCompareExchange(&g_runtime_ready, 0, 0)) {
         sh_mpkg_activation_cancel(); return;
     }
@@ -2860,7 +2887,7 @@ static void ds_boot_published(void)
     }
 }
 
-static int ds_activate_audio(char *error, size_t capacity)
+static int ds_activate_audio_mode(sh_audio_bank_addition *addition, char *error, size_t capacity)
 {
     const sh_package_compilation *compiled = sh_package_runtime_acquire();
     char **names = NULL;
@@ -2924,13 +2951,16 @@ static int ds_activate_audio(char *error, size_t capacity)
     }
     bank_count = sh_package_audio_banks(audio, &banks);
     media_count = sh_package_audio_media_files(audio, &media);
-    result = sh_audio_banks_native_activate(events, count, banks, bank_count,
+    result = addition ? sh_audio_banks_native_activate_additive(addition, events, count, banks, bank_count,
+        media, media_count, error, capacity) : sh_audio_banks_native_activate(events, count, banks, bank_count,
         media, media_count, error, capacity);
 done:
     sh_package_audio_close(audio);
     for (size_t i = 0; i < used; ++i) free(names[i]);
     free(names); free(events); return result;
 }
+static int ds_activate_audio(char *error, size_t capacity)
+{ return ds_activate_audio_mode(NULL, error, capacity); }
 
 /* One-shot activation-failure diagnostic, armed by placing an empty
  * "activation-fault" file in the private package-staging directory. It only
@@ -2957,8 +2987,8 @@ static int ds_activate_provider(void *context, int restoring,
     sh_resource_resident *resident = NULL;
     int succeeded = 0, heap_restored = 1;
     char transition[160];
-    snprintf(transition, sizeof(transition), "decl-server: package %s has %zu changed provider resources",
-        restoring ? "recovery" : "activation", changes->count);
+    snprintf(transition, sizeof(transition), "decl-server: package %s has %zu changed resources and %zu rebound native identities",
+        restoring ? "recovery" : "activation", changes->count, changes->rebound_count);
     backend_log(transition);
     InterlockedExchange(&g_state, context ? DS_STATE_ARMED : DS_STATE_INSTALLING);
     InterlockedExchange(&g_registration_succeeded, 0);
@@ -3035,6 +3065,171 @@ static int ds_activate_provider(void *context, int restoring,
     return succeeded;
 }
 
+typedef struct ds_shader_preparation {
+    sh_resource_resident *resident;
+    sh_resource_shader_state *state;
+    DWORD thread;
+    LONG previous_state, previous_registration;
+    int recovered;
+} ds_shader_preparation;
+static ds_shader_preparation *g_shader_recovery;
+
+int sh_decl_server_shader_preparation_ready(void)
+{
+    __try {
+        return !g_shader_prepare_scope && !g_shader_recovery && g_boundary_thread_slot &&
+            *(const DWORD *)g_boundary_thread_slot == GetCurrentThreadId() &&
+            InterlockedCompareExchange(&g_runtime_ready, 0, 0) &&
+            (g_source_boot_scope || ds_runtime_boundary_safe() ||
+             (g_boundary_editor && sh_editor_transition_frame_ready((void *)g_boundary_editor,
+                 sh_editor_transition_capture((const void *)g_boundary_editor))));
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+static int ds_shader_admitted(void *context)
+{
+    ds_shader_preparation *pass = context;
+    /* Admission happened before these scopes were acquired. Restoration must
+     * check their actual ownership, not demand that menu state remain frozen. */
+    return pass && pass->resident && g_shader_prepare_scope && pass->thread == GetCurrentThreadId() &&
+        sh_resource_resident_owned(pass->resident);
+}
+static int ds_shader_prepare_one(void *context, const sh_package_shader_request *request,
+    char *error, size_t capacity)
+{
+    ds_shader_preparation *pass = context;
+    void *resource = NULL;
+    if (!ds_shader_admitted(pass) || !request || !request->manager || !g_find_decl) return 0;
+    __try {
+        /* Program source cooking uses an unregistered workspace. Finding a
+         * cold native program first would parse GPU state, while reparsing a
+         * ready one destroys its live handles before source capture. */
+        if (!strcmp(request->family, "renderprog"))
+            return sh_resource_graph_native_prepare_program((void *)request->manager,
+                request->name, request->source, request->source_length,
+                ds_shader_admitted, pass, error, capacity);
+        resource = ds_peek_decl((void *)request->manager, request->name);
+        if (request->resource && resource != (void *)request->resource) return 0;
+        if (!resource) resource = g_find_decl((void *)request->manager, request->name, 1);
+        if (!resource) return 0;
+        sh_resource_resident_touch(resource);
+        return sh_resource_graph_native_prepare_shader(resource, request->family, request->name,
+            request->source, request->source_length, ds_shader_admitted, pass, error, capacity);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        snprintf(error, capacity, "native shader construction raised exception %08lx", GetExceptionCode());
+        return 0;
+    }
+}
+static int ds_shader_recover(void *context, const sh_package_shader_preparation *batch,
+    char *error, size_t capacity)
+{
+    ds_shader_preparation *pass = context;
+    (void)batch;
+    if (!pass || !pass->state || !ds_shader_admitted(pass)) return 0;
+    __try {
+        /* These reads inspect original sources without publishing a provider.
+         * Restoring a shared fixed slot by reconstruction would allocate a new
+         * ABI index. The native scope owns its exact old payload/live values. */
+        pass->recovered = sh_resource_graph_native_shader_state_restore(pass->state, error, capacity);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        pass->recovered = 0;
+        snprintf(error, capacity, "native shader recovery raised exception %08lx", GetExceptionCode());
+    }
+    return pass->recovered;
+}
+/* Returns -1 with ownership retained when native restoration is still owed.
+ * Every retained context is heap-owned and survives the request's stack/batch. */
+static int ds_shader_finish(ds_shader_preparation *pass, int accepted, char *error, size_t capacity)
+{
+    int restored = 1;
+    if (pass->state) {
+        restored = sh_resource_graph_native_shader_state_end(pass->state, accepted, error, capacity);
+        if (restored < 0) return -1;
+        pass->state = NULL;
+    }
+    if (pass->resident) {
+        sh_resource_resident *resident = pass->resident; pass->resident = NULL;
+        /* Even a rejected source read has been restored above. An empty
+         * preparation pass must never enqueue fixed-slot reconstruction. */
+        if (!sh_resource_resident_end(resident, 1, error, capacity)) restored = -1;
+    }
+    return restored;
+}
+static void ds_shader_dispose(ds_shader_preparation *pass, int failed)
+{
+    g_shader_prepare_scope--;
+    InterlockedExchange(&g_state, failed ? DS_STATE_FAILED : pass->previous_state);
+    InterlockedExchange(&g_registration_succeeded, failed ? 0 : pass->previous_registration);
+    free(pass);
+}
+static int ds_shader_recovery_poll(void)
+{
+    ds_shader_preparation *pass = g_shader_recovery;
+    char error[512] = "";
+    int result = -1;
+    if (!pass) return 1;
+    if (pass->thread != GetCurrentThreadId()) return 0;
+    __try { result = ds_shader_finish(pass, 0, error, sizeof(error)); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { }
+    if (pass->state || pass->resident) return 0;
+    g_shader_recovery = NULL;
+    /* The original compiler call already returned failure. Its saved DS state
+     * may have been INSTALLING; never resurrect that abandoned in-flight pass. */
+    ds_shader_dispose(pass, 1);
+    /* A failed preparation never commits its candidate. A subsequent admitted
+     * rescan may retry after recovery has released every captured obligation. */
+    sh_decl_server_request_rearm();
+    backend_log(result < 0 ? "decl-server: shader state restored; native scope cleanup requires recovery" :
+        "decl-server: retained shader preparation restored; a fresh compilation is scheduled");
+    return result >= 0;
+}
+
+int sh_decl_server_prepare_shaders(sh_package_shader_preparation *batch, char *error, size_t capacity)
+{
+    sh_package_changes unchanged = {0};
+    ds_shader_preparation *pass = NULL;
+    size_t count = sh_package_shader_preparation_count(batch);
+    int result = 0;
+    if (error && capacity) *error = 0;
+    if (!batch || !count || !sh_decl_server_shader_preparation_ready()) {
+        if (error && capacity) snprintf(error, capacity, "native shader source preparation awaits an admitted boundary");
+        return 0;
+    }
+    if (!(pass = calloc(1, sizeof(*pass)))) goto done;
+    pass->previous_state = InterlockedCompareExchange(&g_state, 0, 0);
+    pass->previous_registration = InterlockedCompareExchange(&g_registration_succeeded, 0, 0);
+    pass->thread = GetCurrentThreadId();
+    g_shader_prepare_scope++;
+    __try {
+        __try {
+            /* No provider bytes changed. Capture native scopes and known
+             * lifetimes, but do not select consumers for reconstruction. */
+            pass->resident = sh_resource_resident_begin(&unchanged, 0, g_source_boot_scope != 0, error, capacity);
+            if (pass->resident) pass->state = sh_resource_graph_native_shader_state_begin(
+                ds_shader_admitted, pass, error, capacity);
+            if (pass->state) result = sh_package_shader_preparation_run(batch,
+                ds_shader_prepare_one, ds_shader_recover, pass, error, capacity);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            snprintf(error, capacity, "native shader preparation raised exception %08lx", GetExceptionCode());
+            result = ds_shader_recover(pass, batch, error, capacity) ? 0 : -1;
+        }
+    } __finally {
+        int ended = -1;
+        __try { ended = ds_shader_finish(pass, result == 1, error, capacity); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { }
+        if (ended < 0) result = -1;
+        else if (!ended || result < 0) result = 0;
+        if (result != 1) sh_package_shader_preparation_revoke(batch);
+        if (pass->state || pass->resident) {
+            g_shader_recovery = pass;
+            InterlockedExchange(&g_state, DS_STATE_FAILED);
+            InterlockedExchange(&g_registration_succeeded, 0);
+        } else ds_shader_dispose(pass, result < 0);
+    }
+done:
+    if (!result && error && capacity && !*error) snprintf(error, capacity, "native shader source preparation did not complete");
+    return result;
+}
+
 static void ds_publish_before_boot_promotion(void)
 {
     /* Both native startup paths complete game-reader registration before
@@ -3070,7 +3265,7 @@ int sh_decl_server_map_preparation_ready(void)
 {
     LONG state = InterlockedCompareExchange(&g_state, 0, 0);
     __try {
-        return (state == DS_STATE_DONE || state == DS_STATE_FAILED) &&
+        return !g_shader_prepare_scope && !ds_occurrence_busy() && (state == DS_STATE_DONE || state == DS_STATE_FAILED) &&
             InterlockedCompareExchange(&g_runtime_ready, 0, 0) && g_boundary_thread_slot &&
             *(const DWORD *)g_boundary_thread_slot == GetCurrentThreadId();
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
@@ -3115,6 +3310,402 @@ int sh_decl_server_activate_map(sh_package_map_plan *plan)
     }
     return sh_decl_server_registration_succeeded();
 }
+
+int sh_decl_server_activate_occurrences(const sh_package_occurrence_snapshot *map)
+{
+    if (!sh_decl_server_map_boundary_safe()) return 0;
+    if (!sh_overrides_activate_occurrences(map, ds_activate_provider, NULL)) {
+        InterlockedExchange(&g_registration_succeeded, 0);
+        InterlockedExchange(&g_state, DS_STATE_FAILED);
+        backend_log("decl-server: retained resource activation failed; previous provider kept");
+        return 0;
+    }
+    return sh_decl_server_registration_succeeded();
+}
+
+typedef struct ds_occurrence_admission {
+    sh_decl_server_occurrence_hooks hooks;
+    sh_package_occurrence_snapshot *document;
+    sh_package_selector_hold *selectors;
+    sh_palette_entries *palette;
+    sh_palette_entry_source *palette_sources;
+    size_t palette_source_count;
+    sh_audio_bank_addition *audio;
+    sh_resource_resident *resident;
+    sh_package_changes recovery;
+    void **existing;
+    size_t existing_count;
+    void *editor, *map;
+    int has_plan, metadata, native_started, staging, rollback_done, attempted, recovered;
+    LONG old_state, old_registered;
+    struct ds_occurrence_admission *next;
+} ds_occurrence_admission;
+static ds_occurrence_admission *g_occurrence_recovery, *g_occurrence_palettes;
+static int ds_occurrence_busy(void) { return g_occurrence_recovery != NULL; }
+
+static int ds_occurrence_boundary(ds_occurrence_admission *admission)
+{
+    return !g_shader_prepare_scope && (sh_editor_transition_frame_ready(admission->editor, admission->map) ||
+        (ds_runtime_boundary_safe() && sh_decl_server_map_browser_present()));
+}
+static int ds_occurrence_owned(void *context)
+{
+    ds_occurrence_admission *admission = context;
+    return admission && ds_occurrence_boundary(admission) && sh_resource_resident_owned(admission->resident);
+}
+static int ds_occurrence_changes(ds_occurrence_admission *admission, const sh_package_changes *changes)
+{
+    sh_package_changes *out = &admission->recovery;
+    if (changes->removed_count || changes->rebound_count || changes->count > SIZE_MAX / sizeof(*out->items) ||
+        changes->added_count > SIZE_MAX / sizeof(*out->removed)) return 0;
+    out->identities_complete = changes->identities_complete;
+    out->items = calloc(changes->count ? changes->count : 1, sizeof(*out->items));
+    out->removed = calloc(changes->added_count ? changes->added_count : 1, sizeof(*out->removed));
+    if (!out->items || !out->removed) return 0;
+    for (size_t i = 0; i < changes->count; i++) {
+        const sh_package_change *source = changes->items + i;
+        sh_package_change *target = out->items + out->count++;
+        if (source->kind != SH_PACKAGE_RESOURCE_ADDED) return 0;
+        target->kind = SH_PACKAGE_RESOURCE_REMOVED;
+        target->path = _strdup(source->path);
+        target->type = source->type ? _strdup(source->type) : NULL;
+        target->name = source->name ? _strdup(source->name) : NULL;
+        if (!target->path || (source->type && !target->type) || (source->name && !target->name)) return 0;
+    }
+    for (size_t i = 0; i < changes->added_count; i++) {
+        sh_package_native_identity *target = out->removed + out->removed_count++;
+        target->type = _strdup(changes->added[i].type); target->name = _strdup(changes->added[i].name);
+        if (!target->type || !target->name) return 0;
+    }
+    return 1;
+}
+static int ds_occurrence_capture(const sh_package_changes *changes)
+{
+    sh_package_compilation projection = {0};
+    const sh_package_compilation *compiled = sh_package_runtime_acquire();
+    int result = 0;
+    if (!compiled || changes->count > SIZE_MAX / sizeof(*projection.resources)) goto done;
+    projection.resources = calloc(changes->count ? changes->count : 1, sizeof(*projection.resources));
+    if (!projection.resources) goto done;
+    for (size_t i = 0; i < changes->count; i++) {
+        const sh_compiled_resource *resource = sh_package_compilation_find(compiled, changes->items[i].path);
+        if (!resource) goto done;
+        if (resource->type) projection.resources[projection.resource_count++] = *resource;
+    }
+    result = ds_capture_snapshot_locked(&projection);
+done:
+    free(projection.resources); sh_package_runtime_release(); return result;
+}
+static int ds_occurrence_metadata(char *error, size_t capacity)
+{
+    char root[MAX_PATH];
+    if (sh_overrides_get_root(root, sizeof(root)) &&
+        sh_package_requirements_rearm(root, (void *)g_execute_commands, 1) && sh_strids_rearm()) return 1;
+    snprintf(error, capacity, "additive package requirements or scoped strings did not activate"); return 0;
+}
+static int ds_occurrence_source_row(void *decl, sh_palette_entry_source *row)
+{
+    void *entity = NULL; const char *name = NULL;
+    /* Palette lookup uses the entityDef accessor's name at +0x58, not
+     * the generic resource header name at +8. */
+    if (!decl || !row || !ds_safe_read((const unsigned char *)decl + DS_DECL_ENTITYDEF_OFFSET, &entity, sizeof(entity)) ||
+        !entity || !ds_safe_read((const unsigned char *)entity + 0x58, &name, sizeof(name)) || !name || !*name) return 0;
+    *row = (sh_palette_entry_source){name, decl}; return 1;
+}
+#ifdef SH_DECL_SERVER_TESTING
+const char *sh_decl_server_test_occurrence_source_name(void *decl)
+{
+    sh_palette_entry_source row = {0};
+    return ds_occurrence_source_row(decl, &row) ? row.entity_def_name : NULL;
+}
+#endif
+static int ds_occurrence_sources(ds_occurrence_admission *admission, char *error, size_t capacity)
+{
+    void *registry = NULL;
+    decl_type_by_name_fn type_by_name = NULL;
+    decl_register_file_fn register_file = NULL;
+    sh_palette_entry_source *rows = NULL;
+    size_t row_count = 0;
+    int result = 0, registered = 0, materialized = 0, refused = 0, phase = 0;
+    const char *failed = NULL;
+    if (!g_candidate_count) return 1;
+    __try {
+    if (!ds_decode_registry(&registry, &type_by_name, &register_file)) goto done;
+    rows = calloc((size_t)g_candidate_count, sizeof(*rows));
+    if (!rows) goto done;
+    for (int i = 0; i < g_candidate_count; i++) {
+        ds_candidate *candidate = g_candidates + i;
+        const char *reason = NULL;
+        int classification = ds_classify_candidate(candidate, registry, type_by_name,
+            g_find_source, ds_peek_decl, &reason);
+        if (classification != DS_CLASSIFY_MISSING && classification != DS_CLASSIFY_SHADOWED_SOURCE) {
+            snprintf(error, capacity, "%s: additive identity is not a fresh native declaration%s%s",
+                candidate->source, reason ? ": " : "", reason ? reason : ""); goto done;
+        }
+        if (classification == DS_CLASSIFY_SHADOWED_SOURCE) {
+            void *manager = type_by_name(registry, candidate->type);
+            if (ds_peek_decl(manager, candidate->name)) {
+                snprintf(error, capacity, "%s: additive source already has a live object", candidate->source); goto done;
+            }
+            candidate->shadow_kind = DS_SHADOW_SOURCE;
+        }
+        candidate->outcome = DS_CANDIDATE_MISSING;
+    }
+    if (!ds_publish_missing_table(g_candidate_count)) goto done;
+    admission->native_started = 1;
+    if (!ds_scan_and_materialize_missing(registry, type_by_name, register_file,
+        g_idstr_ctor, g_idstr_dtor, g_find_source, g_find_decl,
+        sh_palette_refresh_after_decl_registration, &registered, &materialized, &refused, &failed, &phase)) {
+        snprintf(error, capacity, "additive declaration publication failed in phase %d%s%s", phase,
+            failed ? ": " : "", failed ? failed : ""); goto done;
+    }
+    for (int i = 0; i < g_candidate_count; i++) {
+        const ds_candidate *candidate = g_candidates + i;
+        if (candidate->outcome != DS_CANDIDATE_MISSING || _stricmp(candidate->type, "snapeditorentitydef")) continue;
+        void *manager = type_by_name(registry, candidate->type);
+        void *decl = ds_peek_decl(manager, candidate->name);
+        if (!ds_occurrence_source_row(decl, rows + row_count)) goto done;
+        row_count++;
+    }
+    admission->palette_sources = rows; admission->palette_source_count = row_count; rows = NULL;
+    result = 1;
+done:
+        ;
+    } __finally { free(rows); }
+    if (!result && !*error) snprintf(error, capacity, "additive native source or template preparation did not complete");
+    return result;
+}
+static void ds_occurrence_free(ds_occurrence_admission *admission)
+{
+    if (!admission) return;
+    sh_package_runtime_selectors_release(admission->selectors);
+    sh_package_occurrence_release(admission->document);
+    free(admission->palette_sources);
+    if (admission->existing) HeapFree(GetProcessHeap(), 0, admission->existing);
+    sh_package_changes_free(&admission->recovery); free(admission);
+}
+static int ds_occurrence_activate(void *context, int restoring,
+    const sh_package_changes *changes, char *error, size_t capacity)
+{
+    ds_occurrence_admission *admission = context;
+    sh_resource_resident *resident = NULL;
+    sh_package_changes empty = {0};
+    int succeeded = 0;
+    if (!ds_occurrence_boundary(admission)) {
+        snprintf(error, capacity, "prefab admission no longer owns the editor frame"); return 0;
+    }
+    if (!restoring && !ds_occurrence_changes(admission, changes)) {
+        snprintf(error, capacity, "prefab admission could not retain its inverse changes"); return 0;
+    }
+    admission->attempted = 1;
+    __try {
+        resident = sh_resource_resident_begin(restoring && !admission->native_started ? &empty : changes,
+            restoring, 0, error, capacity);
+        admission->resident = g_resident_pass = resident;
+        if (!resident) goto done;
+        if (!restoring) {
+            if (sh_resource_resident_selected_count(resident)) {
+                snprintf(error, capacity, "additive resource admission selected an existing native consumer"); goto done;
+            }
+            if (!ds_res_watermark()) { snprintf(error, capacity, "prefab admission could not capture native ownership"); goto done; }
+            admission->existing = g_res_mark; admission->existing_count = g_res_mark_count;
+            g_res_mark = NULL; g_res_mark_count = 0;
+            if (admission->has_plan) {
+                if (!ds_occurrence_capture(changes)) goto done;
+                admission->metadata = 1;
+                if (!ds_occurrence_metadata(error, capacity) ||
+                    !(admission->audio = sh_audio_banks_native_additions_begin(error, capacity)) ||
+                    !ds_occurrence_sources(admission, error, capacity)) goto done;
+            }
+            if (!sh_resource_resident_reconstruct(resident, error, capacity) ||
+                !sh_resource_resident_drain_additions(resident, admission->existing, admission->existing_count, error, capacity) ||
+                (admission->audio && !ds_activate_audio_mode(admission->audio, error, capacity))) goto done;
+            if (admission->palette_source_count &&
+                !(admission->selectors = sh_package_runtime_selectors_retain(error, capacity))) goto done;
+            if (admission->palette_source_count &&
+                (sh_palette_entries_prepare(admission->palette_sources, admission->palette_source_count,
+                    ds_occurrence_owned, admission, &admission->palette, error, capacity) != 1 ||
+                 sh_palette_entries_prepare_authoring(admission->palette,
+                    ds_occurrence_owned, admission, error, capacity) != 1 ||
+                 sh_palette_entries_publish(admission->palette, ds_occurrence_owned, admission, error, capacity) != 1)) goto done;
+            /* Binary-only sources can first materialize in native staging. */
+            if (admission->has_plan) admission->native_started = 1;
+            admission->staging = 1;
+            if (!admission->hooks.prepare(admission->hooks.context, error, capacity)) goto done;
+            /* Template/entity construction may load additional dependencies.
+             * Complete those fresh caches under this same heap/renderer hold. */
+            if (!sh_resource_resident_drain_additions(resident, admission->existing, admission->existing_count, error, capacity)) goto done;
+        } else {
+            if (admission->staging && !admission->rollback_done) {
+                if (!admission->hooks.rollback(admission->hooks.context, error, capacity)) goto done;
+                admission->rollback_done = 1;
+            }
+            if (admission->palette && sh_palette_entries_end(&admission->palette,
+                ds_occurrence_owned, admission, error, capacity) != 1) goto done;
+            if (admission->audio && !sh_audio_banks_native_additions_end(&admission->audio, 0, error, capacity)) goto done;
+            if (admission->metadata && !ds_occurrence_metadata(error, capacity)) goto done;
+            for (size_t i = 0; i < admission->existing_count; i++)
+                if (sh_resource_resident_selected(resident, admission->existing[i])) {
+                    snprintf(error, capacity, "additive recovery selected a pre-existing native consumer"); goto done;
+                }
+            if (admission->native_started && (!sh_resource_resident_reconstruct(resident, error, capacity) ||
+                !sh_resource_resident_drain_additions(resident, admission->existing, admission->existing_count, error, capacity))) goto done;
+        }
+        succeeded = 1;
+done:;
+    } __finally {
+        ds_free_candidates();
+        if (resident) succeeded = sh_resource_resident_end(resident, succeeded, error, capacity);
+        admission->resident = g_resident_pass = NULL;
+    }
+    if (restoring) admission->recovered = succeeded;
+    return succeeded;
+}
+static int ds_occurrence_finalize(void *context, char *error, size_t capacity)
+{
+    ds_occurrence_admission *admission = context;
+    if (admission->audio && !sh_audio_banks_native_additions_ready(admission->audio, error, capacity)) return 0;
+    if (!admission->hooks.finalize(admission->hooks.context, error, capacity)) return 0;
+    if (admission->palette) sh_palette_entries_accept(admission->palette);
+    if (admission->audio) sh_audio_banks_native_additions_accept(&admission->audio);
+    return 1;
+}
+int sh_decl_server_occurrence_recovery_pending(void *context)
+{ return g_occurrence_recovery && g_occurrence_recovery->hooks.context == context; }
+
+int sh_decl_server_admit_occurrences(sh_package_map_plan *plan,
+    const sh_package_occurrence_snapshot *document, const sh_decl_server_occurrence_hooks *hooks,
+    char *error, size_t capacity)
+{
+    ds_occurrence_admission *admission;
+    sh_package_changes empty = {0};
+    int result = SH_PACKAGE_ADMISSION_FAILED, recovered = 1;
+    if (!error || !capacity) return 0;
+    *error = 0;
+    if (g_occurrence_recovery || g_additive_scan || g_candidates || !hooks || !hooks->prepare ||
+        !hooks->finalize || !hooks->rollback || !sh_decl_server_map_preparation_ready() ||
+        !sh_user_overrides_enabled_for_launch()) goto refused;
+    admission = calloc(1, sizeof(*admission)); if (!admission) goto refused;
+    admission->hooks = *hooks; admission->has_plan = plan != NULL;
+    admission->document = sh_package_occurrence_retain((sh_package_occurrence_snapshot *)document);
+    admission->editor = (void *)g_boundary_editor;
+    admission->map = sh_editor_transition_capture(admission->editor);
+    admission->old_state = g_state; admission->old_registered = g_registration_succeeded;
+    if (!sh_editor_transition_frame_ready(admission->editor, admission->map)) {
+        ds_occurrence_free(admission); goto refused;
+    }
+    g_additive_scan = 1;
+    __try {
+        if (plan) result = sh_package_runtime_admit_occurrences(plan, document,
+            (sh_package_activation_guard){sh_nav_bake_source_update_begin, sh_nav_bake_source_update_end},
+            ds_occurrence_activate, ds_occurrence_finalize, admission, error, capacity);
+        else {
+            __try {
+                if (ds_occurrence_activate(admission, 0, &empty, error, capacity) &&
+                    ds_occurrence_finalize(admission, error, capacity)) result = SH_PACKAGE_ADMISSION_READY;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                snprintf(error, capacity, "prefab native preparation raised exception 0x%08lx", GetExceptionCode());
+            }
+            if (result != SH_PACKAGE_ADMISSION_READY) {
+                char detail[1024] = "";
+                __try { recovered = ds_occurrence_activate(admission, 1, &empty, detail, sizeof(detail)); }
+                __except (EXCEPTION_EXECUTE_HANDLER) {
+                    recovered = 0;
+                    snprintf(detail, sizeof(detail), "prefab native recovery raised exception 0x%08lx", GetExceptionCode());
+                }
+                if (!recovered) backend_log(detail);
+            }
+        }
+    } __finally { g_additive_scan = 0; }
+    if (result == SH_PACKAGE_ADMISSION_READY) {
+        if (admission->palette) {
+            admission->hooks = (sh_decl_server_occurrence_hooks){0};
+            HeapFree(GetProcessHeap(), 0, admission->existing); admission->existing = NULL;
+            admission->existing_count = 0;
+            free(admission->palette_sources); admission->palette_sources = NULL;
+            admission->palette_source_count = 0; sh_package_changes_free(&admission->recovery);
+            admission->next = g_occurrence_palettes; g_occurrence_palettes = admission;
+        } else ds_occurrence_free(admission);
+        return result;
+    }
+    if (!recovered || (admission->attempted && !admission->recovered) || admission->palette ||
+        admission->audio || (admission->staging && !admission->rollback_done)) {
+        g_occurrence_recovery = admission;
+        InterlockedExchange(&g_registration_succeeded, 0); InterlockedExchange(&g_state, DS_STATE_FAILED);
+    } else ds_occurrence_free(admission);
+    return result;
+refused:
+    snprintf(error, capacity, "prefab source admission requires a ready, owned editor frame"); return result;
+}
+
+static int ds_occurrence_maintenance(void)
+{
+    ds_occurrence_admission *admission = g_occurrence_recovery;
+    char error[1024] = "";
+    if (admission) {
+        if (!ds_occurrence_boundary(admission)) return 0;
+        int restored = 0;
+        g_additive_scan = 1;
+        __try { restored = ds_occurrence_activate(admission, 1, &admission->recovery, error, sizeof(error)); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { snprintf(error, sizeof(error), "retained prefab recovery raised a native exception"); }
+        g_additive_scan = 0;
+        if (!restored) { backend_log(error); return 0; }
+        if (admission->has_plan && !sh_package_runtime_complete_occurrence_recovery(admission)) {
+            backend_log("retained prefab recovery no longer matches its restored provider"); return 0;
+        }
+        InterlockedExchange(&g_state, admission->old_state);
+        InterlockedExchange(&g_registration_succeeded, admission->old_registered);
+        g_occurrence_recovery = NULL; ds_occurrence_free(admission);
+    }
+    if (!g_occurrence_palettes || !sh_decl_server_map_retirement_safe()) return 1;
+    for (ds_occurrence_admission **slot = &g_occurrence_palettes; (admission = *slot) != NULL;) {
+        sh_package_changes empty = {0};
+        sh_resource_resident *resident = sh_resource_resident_begin(&empty, 0, 0, error, sizeof(error));
+        if (!resident) return 0;
+        admission->resident = resident;
+        int ended = admission->palette ? sh_palette_entries_end(&admission->palette,
+            ds_occurrence_owned, admission, error, sizeof(error)) : 1;
+        int released = sh_resource_resident_end(resident, ended >= 0, error, sizeof(error));
+        admission->resident = NULL;
+        if (!released || ended < 0) { backend_log(error); return 0; }
+        /* An accepted array still used by the native palette is ordinary
+         * retained ownership. Permit the rebuild which can replace it. */
+        if (!ended) { slot = &admission->next; continue; }
+        *slot = admission->next; ds_occurrence_free(admission);
+    }
+    return 1;
+}
+void sh_decl_server_occurrence_maintenance(void)
+{ (void)ds_occurrence_maintenance(); }
+#ifdef SH_DECL_SERVER_TESTING
+int sh_decl_server_test_palette_hold(void *batch)
+{
+    ds_occurrence_admission *admission = calloc(1, sizeof(*admission));
+    if (!admission) return 0;
+    admission->palette = batch; admission->editor = (void *)g_boundary_editor;
+    admission->map = sh_editor_transition_capture(admission->editor);
+    admission->next = g_occurrence_palettes; g_occurrence_palettes = admission;
+    return 1;
+}
+int sh_decl_server_test_palette_maintenance(void) { return ds_occurrence_maintenance(); }
+size_t sh_decl_server_test_palette_holds(void)
+{
+    size_t count = 0;
+    for (ds_occurrence_admission *a = g_occurrence_palettes; a; a = a->next) ++count;
+    return count;
+}
+void sh_decl_server_test_occurrence_ready(void *editor)
+{
+    g_module_base = (const uint8_t *)1;
+    g_boundary_editor = (uintptr_t)editor;
+    g_boundary_thread_slot = glb_resolve(g_module_base, "main_thread_id", NULL);
+    g_boundary_shell_slot = glb_resolve(g_module_base, "shell_ptr_slot", NULL);
+    g_boundary_common_slot = glb_resolve(g_module_base, "validator_manager", NULL);
+    InterlockedExchange(&g_runtime_ready, 1);
+    InterlockedExchange(&g_state, DS_STATE_DONE);
+    InterlockedExchange(&g_registration_succeeded, 1);
+}
+#endif
 
 /* After native promotion, look up one published identity without creating it
  * and read its resource level. Level 4 verifies the intended lifetime
@@ -3167,8 +3758,10 @@ static void ds_boot_promotion_detour(void)
      * pass-through. */
     if (InterlockedCompareExchange(&g_state, 0, 0) == DS_STATE_ARMED &&
         InterlockedCompareExchange(&g_boot_promotion_entered, 1, 0) == 0) {
+        g_source_boot_scope++;
         __try {
-            ds_publish_before_boot_promotion();
+            __try { ds_publish_before_boot_promotion(); }
+            __finally { g_source_boot_scope--; }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             backend_log("decl-server FAILED: publication faulted inside the engine boot promotion; the engine promotion still runs and startup continues");
             InterlockedExchange(&g_state, DS_STATE_FAILED);
@@ -3368,6 +3961,22 @@ int sh_decl_server_install(const sig_result *results, size_t count,
 #ifdef SH_DECL_SERVER_TESTING
 int sh_decl_server_test_lifetime_watermark(void) { return ds_res_watermark(); }
 int sh_decl_server_test_promote_delta(void) { return ds_res_promote_delta(4); }
+int sh_decl_server_test_prepare_shaders(sh_package_shader_preparation *batch,
+    sh_decl_server_test_find_decl_fn find, char *error, size_t capacity)
+{
+    static DWORD thread;
+    int result;
+    thread = GetCurrentThreadId(); g_boundary_thread_slot = (uintptr_t)&thread;
+    g_find_decl = (decl_find_fn)find; g_test_peek = (decl_find_fn)find;
+    InterlockedExchange(&g_runtime_ready, 1);
+    InterlockedExchange(&g_state, DS_STATE_DONE);
+    InterlockedExchange(&g_registration_succeeded, 1);
+    g_source_boot_scope++;
+    result = sh_decl_server_prepare_shaders(batch, error, capacity);
+    g_source_boot_scope--;
+    return result;
+}
+int sh_decl_server_test_shader_recovery(void) { return ds_shader_recovery_poll(); }
 
 void sh_decl_server_test_reset_install(void)
 {

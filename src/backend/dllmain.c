@@ -20,6 +20,7 @@
 #include "map_native.h"
 #include "map_published.h"
 #include "map_transition.h"
+#include "editor_transition.h"
 #include "palette_refresh.h"
 #include "engine_dialog.h"
 #include "../fault_shield/mapload_guards.h"
@@ -45,6 +46,7 @@
 #include "prefabpreview.h"
 #include "soundpreview.h"
 #include "audio_banks_native.h"
+#include "package_sound_native.h"
 #include "patch.h"
 #include "algo.h"
 #include "target_any.h"
@@ -54,7 +56,9 @@
 #include "config.h"
 #include "user_overrides.h"
 #include "package_runtime.h"
+#include "package_editor.h"
 #include "resource_graph_native.h"
+#include "virtual_material_runtime.h"
 #include "resource_resident.h"
 #include "audio_files_native.h"
 #include "iface_engine.h"
@@ -176,6 +180,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         /* Idempotent after early binding, or report unavailable dependencies
          * after a partial startup. Never infer that earlier loads were seen. */
         sh_resource_graph_native_install(results, db);
+        sh_virtual_material_runtime_install(results, db);
 
         /* Install rawmap load interception only on a clean prologue. The swap starts
          * disarmed; package admission also runs inside this detour. */
@@ -233,6 +238,8 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
                         ed_tojson = (void *)results[i].addr;
                 }
             }
+            if (!sh_editor_transition_install(results, db, g_doom_base))
+                backend_log("MPKG: editor saved-read activation boundary unavailable");
             sh_editor_frame_install(ed_frame, ed_frame_clean, ed_loadmap, g_doom_base);
             /* Save Rawmap serializes the open map, not the newest save on disk. The tag
              * function also derives the engine's idStr ctor/dtor. */
@@ -315,6 +322,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
         void *strids_ins   = (void *)sig_addr_by_name(results, db, "StridsInsert");
         void *strids_hash  = (void *)sig_addr_by_name(results, db, "StridsHash");
         void *idstr_ctor   = (void *)sig_addr_by_name(results, db, "IdStrAssign");
+        sh_strids_bind_native_localization((const void *)glb_resolve(g_doom_base, "cvar_system_slot", NULL));
         sh_strids_install(sort_body, sort_clean, strids_lea, strids_ins, strids_hash, idstr_ctor);
 
         /* Replace resource-provider open-by-name slot +0xF8 after validating the audited
@@ -399,6 +407,9 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
         /* Bind apply dependencies before publishing their interface slots. */
         sh_apply_engine_install(results, db, g_doom_base, cmdsys);
+        sh_package_editor_bind_native();
+        if (!sh_package_editor_install(results, db, g_doom_base))
+            backend_log("package editor ownership hooks could not be installed");
         if(grid_installed&&!sh_grid_editor_install(results,db,sh_grid_native_read,sh_grid_native_apply))
             backend_log("GRID: native dimension properties unavailable on this build");
         if(!sh_map_render_install(results,db,g_doom_base)||!sh_map_render_editor_install(results,db))
@@ -442,6 +453,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
 
         sh_audio_banks_native_install(results, db);
         sh_audio_files_native_install(results, db, g_doom_base);
+        sh_package_sound_native_install(results, db);
 
         /* Queue immutable new-declaration registration on the engine main thread.
          * The interface and palette callbacks must be ready before its command runs. */
@@ -482,6 +494,13 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
     /* Arm the resident fault shield after startup resolution. */
 
     shield_install(g_doom_base, g_doom_size);
+
+    {
+        char line[128];
+        _snprintf_s(line, sizeof(line), _TRUNCATE,
+            "startup hooks: %d installed, %d owned", hook_installed_count(), hook_owned_count());
+        backend_log(line);
+    }
 
     return 0;
 }

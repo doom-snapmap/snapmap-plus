@@ -15,7 +15,14 @@
 #include "map_native.h"
 #include "map_published.h"
 #include "map_transition.h"
+#include "editor_transition.h"
 #include "resource_resident.h"
+#include "audio_bank_commands.h"
+#include "audio_limits_native.h"
+#include "audio_environment_native.h"
+#include "audio_state_native.h"
+#include "audio_parameter_native.h"
+#include "audio_bank_gate.h"
 
 /* Binding checks must never invoke live reflection on the mapped PE. */
 int sh_typeinfo_class_derives(const char *name, const char *base)
@@ -138,6 +145,116 @@ int main(int argc, char **argv)
     size_t ok = 0;
     int bad = 0;
 
+    {
+        sig_result results[3] = {0};
+        sh_audio_bank_commands commands = {0};
+        sh_audio_registry registry = {0};
+        const char *names[] = {"AudioBankLoad", "AudioEventPost", "AudioBankPrepare"};
+        int resolved = 1;
+        for (size_t n = 0; n < 3; n++) {
+            const sig_entry *entry = NULL;
+            for (size_t i = 0; BACKEND_ENGINE_SIGNATURES[i].name; ++i)
+                if (!strcmp(BACKEND_ENGINE_SIGNATURES[i].name, names[n])) entry = BACKEND_ENGINE_SIGNATURES+i;
+            if (!entry || sig_resolve_one(base, entry, results+n) != SIG_OK) resolved = 0;
+        }
+        if (!resolved || !sh_audio_bank_commands_bind(&commands, base, results, 3)) {
+            puts("BAD numeric audio bank command binding"); ++bad;
+        } else puts("OK  numeric audio bank command binding");
+        uintptr_t index = pinned ? 0x70d4020u : 0x59df770u;
+        uintptr_t lock = pinned ? 0x70d4818u : 0x59dff68u;
+        if (!resolved || !sh_audio_registry_bind(&registry, base, results, 3) ||
+            (uintptr_t)registry.index_slot != (uintptr_t)base+index ||
+            (uintptr_t)registry.bank_lock != (uintptr_t)base+lock || registry.manager_slot != commands.manager_slot) {
+            puts("BAD read-only audio registry binding"); ++bad;
+        } else puts("OK  read-only audio registry binding");
+    }
+
+    {
+        const char *names[]={"AudioThresholdSet","AudioVoiceLimitSet","AudioRenderTick","AudioBankLoad"};
+        sig_result results[4]={0};sh_audio_limits_native limits={0};int resolved=1;
+        for(size_t n=0;n<4;n++) {
+            const sig_entry *entry=NULL;
+            for(size_t i=0;BACKEND_ENGINE_SIGNATURES[i].name;i++)
+                if(!strcmp(BACKEND_ENGINE_SIGNATURES[i].name,names[n]))entry=BACKEND_ENGINE_SIGNATURES+i;
+            if(!entry || sig_resolve_one(base,entry,results+n)!=SIG_OK)resolved=0;
+        }
+        uintptr_t threshold=pinned ? 0x55bd9d4u : 0x3ec0044u;
+        uintptr_t priority=pinned ? 0x55bd8a0u : 0x3ebff10u;
+        uintptr_t voices=pinned ? 0x70d4200u : 0x59df950u;
+        uintptr_t lock=pinned ? 0x70d40a0u : 0x59df7f0u;
+        uintptr_t manager=pinned ? 0x70d4030u : 0x59df780u;
+        if(!resolved || !sh_audio_limits_native_bind(&limits,base,results,4) ||
+            (uintptr_t)limits.threshold!=(uintptr_t)base+threshold ||
+            (uintptr_t)limits.amplitude!=(uintptr_t)base+threshold-4 ||
+            (uintptr_t)limits.threshold_priority!=(uintptr_t)base+priority ||
+            (uintptr_t)limits.voices_priority!=(uintptr_t)base+priority+4 ||
+            (uintptr_t)limits.voices!=(uintptr_t)base+voices ||
+            (uintptr_t)limits.render_lock!=(uintptr_t)base+lock ||
+            (uintptr_t)limits.manager_slot!=(uintptr_t)base+manager) {
+            puts("BAD native playback settings binding");bad++;
+        } else puts("OK  native playback settings binding");
+        const char *environment_names[]={"AudioEnvironmentRead","AudioEnvironmentSet"};
+        sig_result environment_results[2]={0};sh_audio_environment_native environment={0};
+        for(size_t n=0;n<2;n++) {
+            const sig_entry *entry=NULL;
+            for(size_t i=0;BACKEND_ENGINE_SIGNATURES[i].name;i++)
+                if(!strcmp(BACKEND_ENGINE_SIGNATURES[i].name,environment_names[n]))entry=BACKEND_ENGINE_SIGNATURES+i;
+            if(!entry || sig_resolve_one(base,entry,environment_results+n)!=SIG_OK)resolved=0;
+        }
+        uintptr_t environment_slot=pinned ? 0x70d3fc0u : 0x59df710u;
+        uintptr_t curve_set=pinned ? 0x1cedfb0u : 0x1d07590u;
+        if(!resolved || !sh_audio_environment_native_bind(&environment,base,environment_results,2,&limits) ||
+            (uintptr_t)environment.environment_slot!=(uintptr_t)base+environment_slot ||
+            (uintptr_t)environment.set_curve!=(uintptr_t)base+curve_set ||
+            environment.render_lock!=limits.render_lock || environment.manager_slot!=limits.manager_slot) {
+            puts("BAD native environment settings binding");bad++;
+        } else puts("OK  native environment settings binding");
+        const char *state_names[]={"AudioStateSettingsRead","AudioStateGroupEnsure"};
+        sig_result state_results[2]={0};sh_audio_state_native state={0};
+        for(size_t n=0;n<2;n++) {
+            const sig_entry *entry=NULL;
+            for(size_t i=0;BACKEND_ENGINE_SIGNATURES[i].name;i++)
+                if(!strcmp(BACKEND_ENGINE_SIGNATURES[i].name,state_names[n]))entry=BACKEND_ENGINE_SIGNATURES+i;
+            if(!entry || sig_resolve_one(base,entry,state_results+n)!=SIG_OK)resolved=0;
+        }
+        if(!resolved || !sh_audio_state_native_bind(&state,base,state_results,2,&limits) ||
+            (uintptr_t)state.state_slot!=(uintptr_t)base+(pinned ? 0x70d3fa0u : 0x59df6f0u) ||
+            (uintptr_t)state.ensure!=(uintptr_t)base+(pinned ? 0x1d28900u : 0x1d41da0u) ||
+            (uintptr_t)state.destroy!=(uintptr_t)base+(pinned ? 0x1d297d0u : 0x1d42c70u) ||
+            (uintptr_t)state.allocate!=(uintptr_t)base+(pinned ? 0x1ceb5b0u : 0x1d04b90u) ||
+            (uintptr_t)state.release!=(uintptr_t)base+(pinned ? 0x1ceb2e0u : 0x1d048c0u) ||
+            (uintptr_t)state.pool!=(uintptr_t)base+(pinned ? 0x55bd8a8u : 0x3ebff18u) ||
+            state.render_lock!=limits.render_lock || state.manager_slot!=limits.manager_slot) {
+            puts("BAD native state settings binding");bad++;
+        } else puts("OK  native state settings binding");
+        const char *parameter_names[]={"AudioStateSettingsRead","AudioParameterEnsure","AudioParameterDestroy"};
+        sig_result parameter_results[3]={0};sh_audio_parameter_native parameter={0};
+        for(size_t n=0;n<3;n++) {
+            const sig_entry *entry=NULL;
+            for(size_t i=0;BACKEND_ENGINE_SIGNATURES[i].name;i++)
+                if(!strcmp(BACKEND_ENGINE_SIGNATURES[i].name,parameter_names[n]))entry=BACKEND_ENGINE_SIGNATURES+i;
+            if(!entry || sig_resolve_one(base,entry,parameter_results+n)!=SIG_OK)resolved=0;
+        }
+        if(!resolved || !sh_audio_parameter_native_bind(&parameter,base,parameter_results,3,&limits) ||
+            (uintptr_t)parameter.parameter_slot!=(uintptr_t)base+(pinned ? 0x70d3fe0u : 0x59df730u) ||
+            (uintptr_t)parameter.ensure!=(uintptr_t)base+(pinned ? 0x1d1a340u : 0x1d33720u) ||
+            (uintptr_t)parameter.destroy!=(uintptr_t)base+(pinned ? 0x1d18b10u : 0x1d31fa0u) ||
+            parameter.allocate!=state.allocate || parameter.release!=state.release || parameter.pool!=state.pool ||
+            parameter.render_lock!=limits.render_lock || parameter.manager_slot!=limits.manager_slot) {
+            puts("BAD native parameter settings binding");bad++;
+        } else puts("OK  native parameter settings binding");
+        const sig_entry *dispatch=NULL;sig_result dispatch_result={0};sh_audio_bank_gate gate={0};
+        for(size_t i=0;BACKEND_ENGINE_SIGNATURES[i].name;i++)
+            if(!strcmp(BACKEND_ENGINE_SIGNATURES[i].name,"AudioBankDispatch"))dispatch=BACKEND_ENGINE_SIGNATURES+i;
+        uintptr_t dispatch_rva=pinned ? 0x1d2c030u : 0x1d454d0u;
+        if(!dispatch || sig_resolve_one(base,dispatch,&dispatch_result)!=SIG_OK ||
+            !sh_audio_bank_gate_bind(&gate,base,&dispatch_result,1,&limits) ||
+            (uintptr_t)gate.entry!=(uintptr_t)base+dispatch_rva || gate.render_lock!=limits.render_lock ||
+            gate.manager_slot!=limits.manager_slot || gate.initialized) {
+            puts("BAD native bank publication binding");bad++;
+        } else puts("OK  native bank publication binding");
+    }
+
     /* The native profile reader derives its filesystem/allocator slots from
      * instructions adjacent to the signed-length guard on each renderer. */
     {
@@ -190,6 +307,21 @@ int main(int argc, char **argv)
         if (!bound || !sh_resource_resident_bind(source, sizeof(source) / sizeof(source[0]), base)) {
             printf("BAD native resident refresh binding\n"); bad++;
         } else printf("OK  native resident refresh binding\n");
+    }
+    {
+        const char *names[] = {"EditorLoadMap", "EditorSetActive", "ResourceReloadRenderScope",
+            "MemLocalGet", "MemLocalPushHeap", "MemLocalPopHeap"};
+        sig_result source[sizeof(names) / sizeof(names[0])] = {0};
+        int bound = 1;
+        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+            const sig_entry *entry = NULL;
+            for (size_t j = 0; BACKEND_ENGINE_SIGNATURES[j].name; j++)
+                if (!strcmp(BACKEND_ENGINE_SIGNATURES[j].name, names[i])) entry = &BACKEND_ENGINE_SIGNATURES[j];
+            if (!entry || sig_resolve_one(base, entry, &source[i]) != SIG_OK) bound = 0;
+        }
+        if (!bound || !sh_editor_transition_bind(source, sizeof(source) / sizeof(source[0]), base)) {
+            printf("BAD native editor transition binding\n"); bad++;
+        } else printf("OK  native editor transition binding\n");
     }
     for (size_t i = 0; i < total; i++) {
         const global_entry *e = &BACKEND_ENGINE_GLOBALS[i];

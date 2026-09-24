@@ -568,7 +568,7 @@ char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t mag
 {
     sh_shard_doc doc;
     shard_cut *cuts = NULL;
-    size_t cut_count = 0, pos = 0, i, w = 0, elements = 0;
+    size_t cut_count = 0, cut_capacity = 0, pos = 0, i, w = 0, elements = 0;
     const char *hdr, *chunk;
     size_t hdr_len, chunk_len;
     char *out = NULL;
@@ -577,7 +577,7 @@ char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t mag
     if (elements_out) *elements_out = 0;
     if (runs_out) *runs_out = 0;
     if (doc_failed) *doc_failed = 0;
-    if (!json || len == 0 || max_cuts == 0) return NULL;
+    if (!json || len == 0) return NULL;
 
     /* Skip the structural pass for payload-free maps. */
     if (!sh_shard_find(json, len, magic, magic_len)) return NULL;
@@ -586,11 +586,7 @@ char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t mag
         return NULL;
     }
 
-    cuts = (shard_cut *)HeapAlloc(GetProcessHeap(), 0, max_cuts * sizeof(shard_cut));
-    if (!cuts) { sh_shard_doc_free(&doc); return NULL; }
-
-    while (cut_count < max_cuts &&
-           sh_shard_next(json, len, magic, magic_len, &pos, &hdr, &hdr_len, &chunk, &chunk_len)) {
+    while (sh_shard_next(json, len, magic, magic_len, &pos, &hdr, &hdr_len, &chunk, &chunk_len)) {
         int el;
         size_t from, to;
         if (filter && !filter(hdr, hdr_len, ctx)) continue;
@@ -604,6 +600,21 @@ char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t mag
         if (cut_count && cuts[cut_count - 1].from > from) {
             if (doc_failed) *doc_failed = 1;
             HeapFree(GetProcessHeap(), 0, cuts); sh_shard_doc_free(&doc); return NULL;
+        }
+
+        /* Allocate for actual removals, not the maximum representable map.
+         * A storage failure or exhausted caller budget cannot mean no match
+         * or publish a prefix of the requested removal. */
+        if (cut_count == max_cuts) goto strip_failed;
+        if (cut_count == cut_capacity) {
+            size_t next = cut_capacity ? cut_capacity * 2 : 32;
+            shard_cut *grown;
+            if (next < cut_capacity || next > max_cuts) next = max_cuts;
+            if (next > SIZE_MAX / sizeof(*cuts)) goto strip_failed;
+            grown = cuts ? HeapReAlloc(GetProcessHeap(), 0, cuts, next * sizeof(*cuts)) :
+                HeapAlloc(GetProcessHeap(), 0, next * sizeof(*cuts));
+            if (!grown) goto strip_failed;
+            cuts = grown; cut_capacity = next;
         }
 
         cuts[cut_count].from = from;
@@ -660,6 +671,7 @@ char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t mag
 
     out = (char *)HeapAlloc(GetProcessHeap(), 0, len + 1);
     if (!out) {
+        if (doc_failed) *doc_failed = 1;
         HeapFree(GetProcessHeap(), 0, cuts);
         sh_shard_doc_free(&doc);
         return NULL;
@@ -707,6 +719,10 @@ char *sh_shard_strip(const char *json, size_t len, const char *magic, size_t mag
     if (elements_out) *elements_out = (unsigned)elements;
     if (runs_out) *runs_out = (unsigned)cut_count;
     return out;
+strip_failed:
+    if (doc_failed) *doc_failed = 1;
+    if (cuts) HeapFree(GetProcessHeap(), 0, cuts);
+    sh_shard_doc_free(&doc); return NULL;
 }
 
 /* ==================================================================== */

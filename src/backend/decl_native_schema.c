@@ -27,8 +27,12 @@ struct sh_decl_native_schema {
     sh_decl_dependency_schema schema;
     dn_owned *owned;
     dn_index classes, enums;
-    uintptr_t references[3], string_reader, atomic_string_reader, list_reader, static_list_reader, float_wrapper_reader;
+    uintptr_t references[5], string_reader, atomic_string_reader, color_reader, list_reader, static_list_reader;
+    uintptr_t float_wrapper_reader, time_wrapper_reader, time_container_reader, random_value_reader;
+    uintptr_t anim_path_reader, atomic_anim_path_reader, type_info_reader, type_info_ptr_reader;
+    uintptr_t alias_handle_reader, atomic_alias_handle_reader, managed_handle_reader;
     uintptr_t polymorphic_reader;
+    uintptr_t script_reader;
 };
 
 static void *dn_allocate(sh_decl_native_schema *s, size_t size)
@@ -251,6 +255,47 @@ static int dn_array(sh_decl_native_schema *s, sh_decl_value_type type, sh_decl_v
     return 1;
 }
 
+/* These internal spellings distinguish the script module's field namespace
+ * from engine reflection. They never become resource or authored class names. */
+#define DN_SCRIPT_PREFIX "@script/"
+#define DN_SCRIPT_DECL "@script-decl"
+static int dn_script_value(sh_decl_native_schema *s, const char *name, sh_decl_value_type *value)
+{
+    const sh_decl_script_type *script = sh_decl_script_schema_find(s->source.scripts, name);
+    dn_type *native = dn_find(&s->classes, name);
+    size_t length = strlen(name), prefix = sizeof(DN_SCRIPT_PREFIX) - 1;
+    char *spelling;
+    int derives;
+    if (!script) return 0;
+    if (!script->has_fields && native) {
+        derives = sh_decl_native_schema_class_derives(s, name, "idDecl");
+        if (derives < 0) return 0;
+        if (derives) { *value = (sh_decl_value_type){native->name, DN_SCRIPT_DECL}; return 1; }
+    }
+    if (length > SIZE_MAX - prefix - 1 || !(spelling = dn_allocate(s, prefix + length + 1))) return 0;
+    memcpy(spelling, DN_SCRIPT_PREFIX, prefix); memcpy(spelling + prefix, name, length + 1);
+    *value = (sh_decl_value_type){spelling, ""}; return 1;
+}
+static int dn_script_describe(sh_decl_native_schema *s, const char *name, sh_decl_value_shape *shape)
+{
+    const sh_decl_script_type *script = sh_decl_script_schema_find(s->source.scripts, name);
+    char *inner;
+    int ok;
+    if (!script) return 0;
+    if (script->has_fields) { shape->kind = SH_DECL_VALUE_OBJECT; return 1; }
+    inner = sh_decl_script_template(name, "ssList<");
+    if (inner) {
+        ok = *inner && dn_script_value(s, inner, &shape->element); free(inner);
+        if (!ok) return 0;
+        shape->kind = SH_DECL_VALUE_COLLECTION; shape->count_key = "num"; shape->item_key = "item";
+        return 1;
+    }
+    /* After script structs/enums/list handling, the native dispatcher consumes
+     * primitive values, strings and live entity handles, reads idDecl pointers,
+     * or skips unknown types. Decl types were converted by dn_script_value. */
+    shape->kind = SH_DECL_VALUE_IGNORE; return 1;
+}
+
 static int dn_describe(void *context, sh_decl_value_type value, sh_decl_value_shape *shape)
 {
     sh_decl_native_schema *s = (sh_decl_native_schema *)context;
@@ -258,18 +303,37 @@ static int dn_describe(void *context, sh_decl_value_type value, sh_decl_value_sh
     const char *ops = value.ops ? value.ops : "";
     int array = dn_array(s, value, shape);
     size_t i;
+    if (!strcmp(ops, DN_SCRIPT_DECL)) {
+        if (!type || sh_decl_native_schema_class_derives(s, value.name, "idDecl") != 1) return 0;
+        shape->kind = SH_DECL_VALUE_REFERENCE; return 1;
+    }
+    if (!strncmp(value.name, DN_SCRIPT_PREFIX, sizeof(DN_SCRIPT_PREFIX) - 1))
+        return !*ops && dn_script_describe(s, value.name + sizeof(DN_SCRIPT_PREFIX) - 1, shape);
     if (array) return array > 0;
     if (!strcmp(ops, "*") && type) {
-        if (!type->pointer_reader) shape->kind = SH_DECL_VALUE_IGNORE;
-        else for (i = 0; i < 3; i++) if (s->references[i] && type->pointer_reader == s->references[i]) {
+        if (s->script_reader && type->pointer_reader == s->script_reader)
+            shape->kind = SH_DECL_VALUE_SCRIPT;
+        else if (!type->pointer_reader || (s->type_info_reader && type->pointer_reader == s->type_info_reader))
+            shape->kind = SH_DECL_VALUE_IGNORE;
+        else for (i = 0; i < sizeof(s->references) / sizeof(s->references[0]); i++) if (s->references[i] && type->pointer_reader == s->references[i]) {
             shape->kind = SH_DECL_VALUE_REFERENCE; break;
         }
     } else if (*ops) return 0;
     else if (type) {
         if ((s->string_reader && type->object_reader == s->string_reader) ||
-            (s->atomic_string_reader && type->object_reader == s->atomic_string_reader) || dn_primitive(value.name))
+            (s->atomic_string_reader && type->object_reader == s->atomic_string_reader) ||
+            (s->color_reader && type->object_reader == s->color_reader) ||
+            (s->anim_path_reader && type->object_reader == s->anim_path_reader) ||
+            (s->atomic_anim_path_reader && type->object_reader == s->atomic_anim_path_reader) ||
+            (s->alias_handle_reader && type->object_reader == s->alias_handle_reader) ||
+            (s->atomic_alias_handle_reader && type->object_reader == s->atomic_alias_handle_reader) ||
+            (s->managed_handle_reader && type->object_reader == s->managed_handle_reader) ||
+            (s->time_container_reader && type->object_reader == s->time_container_reader) ||
+            (s->random_value_reader && type->object_reader == s->random_value_reader) ||
+            (s->type_info_ptr_reader && type->object_reader == s->type_info_ptr_reader) || dn_primitive(value.name))
             shape->kind = SH_DECL_VALUE_IGNORE;
-        else if (s->float_wrapper_reader && type->object_reader == s->float_wrapper_reader) {
+        else if ((s->float_wrapper_reader && type->object_reader == s->float_wrapper_reader) ||
+            (s->time_wrapper_reader && type->object_reader == s->time_wrapper_reader)) {
             /* This registered reader consumes either a float or { value = float; }.
              * Verify the reflected element too; other templates remain unknown. */
             if (!dn_load(s, type) || !type->element.name || strcmp(type->element.name, "float") ||
@@ -298,6 +362,16 @@ static int dn_field_type(void *context, sh_decl_value_type value, const char *ke
     sh_decl_native_schema *s = (sh_decl_native_schema *)context;
     const char *name = value.name;
     size_t depth;
+    if (!strncmp(name, DN_SCRIPT_PREFIX, sizeof(DN_SCRIPT_PREFIX) - 1)) {
+        const sh_decl_script_type *script = sh_decl_script_schema_find(s->source.scripts,
+            name + sizeof(DN_SCRIPT_PREFIX) - 1);
+        const sh_decl_script_field *field;
+        if (!script) return -1;
+        if (!script->has_fields) return 0;
+        for (field = script->fields; field; field = field->next)
+            if (!strcmp(field->name, key)) return dn_script_value(s, field->type, out) ? 1 : -1;
+        return 0;
+    }
     for (depth = 0; name && *name && depth < s->classes.count; depth++) {
         dn_type *type = dn_find(&s->classes, name);
         dn_field *field;
@@ -320,6 +394,13 @@ static int dn_reference(void *context, const char *path, sh_decl_value_type type
     sh_decl_native_schema *s = (sh_decl_native_schema *)context;
     return s->observer.reference ? s->observer.reference(s->observer.context, path, type, name, length) : 0;
 }
+static int dn_reference_site(void *context, const char *path, sh_decl_value_type type,
+    const char *name, size_t length, const sh_decl_reference_site *site)
+{
+    sh_decl_native_schema *s = context;
+    return s->observer.reference_site ? s->observer.reference_site(s->observer.context,
+        path, type, name, length, site) : 1;
+}
 static void dn_gap(void *context, const char *path, sh_decl_value_type type, const char *reason)
 {
     sh_decl_native_schema *s = (sh_decl_native_schema *)context;
@@ -334,6 +415,17 @@ static int dn_dynamic_type(void *context, sh_decl_value_type base, const char *n
     dn_type *type;
     if (!selected) return 0;
     *selected = (sh_decl_value_type){0};
+    type = base.name ? dn_find(&s->classes, base.name) : NULL;
+    if (s && type && base.ops && !strcmp(base.ops, "*") && s->script_reader &&
+        type->pointer_reader == s->script_reader) {
+        const sh_decl_script_type *script;
+        if (!name || !length || length == SIZE_MAX || memchr(name, 0, length) ||
+            !(terminated = dn_copy(s, name, length))) return 0;
+        script = sh_decl_script_schema_find(s->source.scripts, terminated);
+        if (!script || !script->constructible) return 0;
+        /* The module may expose a constructible object with no serial fields. */
+        return dn_script_value(s, terminated, selected);
+    }
     if (!s || !base.name || (base.ops && *base.ops) || !name || !length || length == SIZE_MAX ||
         memchr(name, 0, length) || !(terminated = malloc(length + 1))) return 0;
     memcpy(terminated, name, length); terminated[length] = 0;
@@ -346,7 +438,8 @@ sh_decl_native_schema *sh_decl_native_schema_open(sh_decl_native_source source,
     sh_decl_dependency_observer observer, char *error, size_t error_capacity)
 {
     sh_decl_native_schema *s = NULL;
-    const char *const resources[] = {"idDeclEntityDef", "idImage", "idRenderModel"};
+    const char *const resources[] = {"idDeclEntityDef", "idImage", "idRenderModel", "idStaticModel",
+        "idStaticParticleModelData"};
     uintptr_t container;
     dn_type *type;
     size_t i;
@@ -357,7 +450,7 @@ sh_decl_native_schema *sh_decl_native_schema_open(sh_decl_native_source source,
     s->source = source; s->observer = observer;
     if (!dn_pointer(s, source.reflection, 0, &container) || !container ||
         !dn_registry(s, container, 1) || !dn_registry(s, container, 0)) goto failed;
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < sizeof(resources) / sizeof(resources[0]); i++) {
         type = dn_find(&s->classes, resources[i]);
         if (type) s->references[i] = type->pointer_reader;
     }
@@ -365,13 +458,51 @@ sh_decl_native_schema *sh_decl_native_schema_open(sh_decl_native_source source,
     /* The atomic-string reader only interns text. Later consumers can assign
      * resource meaning to that text, but deserialization itself has no edge. */
     type = dn_find(&s->classes, "idAtomicString"); if (type) s->atomic_string_reader = type->object_reader;
+    /* Both native readers consume four numeric channels and optional color
+     * space conversion. This registered reader creates no resource binding. */
+    type = dn_find(&s->classes, "idColor"); if (type) s->color_reader = type->object_reader;
+    /* These readers preserve animation-state paths (normalizing separators and
+     * optionally interning path components); they do not load asset files.
+     * Later animation consumers still need their own binding interpretation. */
+    type = dn_find(&s->classes, "idAnimWebPath"); if (type) s->anim_path_reader = type->object_reader;
+    type = dn_find(&s->classes, "idAnimWebPath_Atomic"); if (type) s->atomic_anim_path_reader = type->object_reader;
+    /* Alias handles intern model-local animation names; their readers do not
+     * resolve resource paths. The model/animation binding supplies the context.
+     * Other handle families are not covered by these two registrations. */
+    type = dn_find(&s->classes, "idHandle < unsigned short , invalidAliasHandle_t , INVALID_ALIAS_HANDLE >");
+    if (type) s->alias_handle_reader = type->object_reader;
+    type = dn_find(&s->classes, "idAtomicHandleT < aliasRefType_t >");
+    if (type) s->atomic_alias_handle_reader = type->object_reader;
+    /* These handles refer to entity instances in the current world or its
+     * unresolved-name table. Their strings are not declaration/resource names.
+     * Require the common registered reader across all native specializations. */
+    s->managed_handle_reader = dn_family(&s->classes, "idManagedClassPtr < ");
+    /* Native class identities refer to the executable's type registry, not
+     * idDeclTypeInfo resources. Object-pointer wrappers below remain polymorphic. */
+    type = dn_find(&s->classes, "idTypeInfo"); if (type) s->type_info_reader = type->pointer_reader;
+    s->type_info_ptr_reader = dn_family(&s->classes, "idTypeInfoPtr < ");
     type = dn_find(&s->classes, "idTypesafeNumber < float , DegreesUnique_t >");
     if (type) s->float_wrapper_reader = type->object_reader;
+    /* The game registers every float-time specialization with one numeric
+     * reader. Require matching registrations and a reflected float element. */
+    s->time_wrapper_reader = dn_family(&s->classes, "idTypesafeTime < float ,");
+    /* Consumes a millisecond integer or a block's milliseconds field, then
+     * derives seconds/ticks. Both registered renderer readers perform no
+     * resource lookup, including their skipped unknown field branch. */
+    type = dn_find(&s->classes, "timeContainer_t");
+    if (type) s->time_container_reader = type->object_reader;
+    /* Reads numeric min/max/granularity values (or one constant), skipping unknown
+     * fields. Its registered reader has no resource dependencies. */
+    type = dn_find(&s->classes, "randomValue_t");
+    if (type) s->random_value_reader = type->object_reader;
+    type = dn_find(&s->classes, "idSSObject");
+    if (type) s->script_reader = type->pointer_reader;
     s->list_reader = dn_family(&s->classes, "idList < ");
     s->static_list_reader = dn_family(&s->classes, "idStaticList < ");
     s->polymorphic_reader = dn_family(&s->classes, "idTypeInfoObjectPtr < ");
     s->schema.context = s; s->schema.describe = dn_describe; s->schema.field = dn_field_type;
     s->schema.reference = dn_reference; s->schema.gap = dn_gap;
+    s->schema.reference_site = dn_reference_site;
     s->schema.dynamic_type = dn_dynamic_type;
     return s;
 failed:
@@ -443,9 +574,13 @@ sh_decl_reference_reader sh_decl_native_schema_reader(sh_decl_native_schema *s,
 {
     dn_type *type;
     size_t i;
-    if (!s || !value.name || !value.ops || strcmp(value.ops, "*")) return SH_DECL_READER_UNKNOWN;
+    if (!s || !value.name || !value.ops) return SH_DECL_READER_UNKNOWN;
+    if (!strcmp(value.ops, DN_SCRIPT_DECL))
+        return sh_decl_native_schema_class_derives(s, value.name, "idDecl") == 1 ?
+            SH_DECL_READER_DECL : SH_DECL_READER_UNKNOWN;
+    if (strcmp(value.ops, "*")) return SH_DECL_READER_UNKNOWN;
     type = dn_find(&s->classes, value.name);
-    if (type && type->pointer_reader) for (i = 0; i < 3; i++)
+    if (type && type->pointer_reader) for (i = 0; i < sizeof(s->references) / sizeof(s->references[0]); i++)
         if (s->references[i] == type->pointer_reader) return (sh_decl_reference_reader)(i + 1);
     return SH_DECL_READER_UNKNOWN;
 }

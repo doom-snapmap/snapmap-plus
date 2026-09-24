@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "md6_binary.h"
+#include "resource_rebind.h"
 
 static unsigned char g_file[8192];
 static size_t g_used;
@@ -94,10 +95,62 @@ static void expect(size_t index, const char *type, const char *value)
     assert(!strcmp(g_seen[index].type, type) && !strcmp(g_seen[index].name, value));
 }
 
+static int bind_name(void *context, const char *family, const char *value, const char **out)
+{
+    static char name[256];
+    int *mode = context;
+    assert(!strcmp(family, "material") || !strcmp(family, "skeleton"));
+    if (*mode < 0) return -1;
+    if (!*mode) return 0;
+    snprintf(name, sizeof(name), "scope/%s", value); *out = name;
+    return 1;
+}
+
+static void binding_check(void)
+{
+    unsigned char original[8192], *out;
+    size_t before, length, changed;
+    char error[256];
+    int mode = 1;
+    head("models/rig.md6skl", 1, "mat/body");
+    u32be(1); mesh("mat/body", "mat/body", 2, 1, 0, 0, 0);
+    u32be(1); name("mat/body"); zeros(12); magic();
+    before = g_used; memcpy(original, g_file, before);
+    out = sh_resource_rebind(SH_REBIND_MD6_MESH, original, before,
+        bind_name, &mode, &length, &changed, error, sizeof(error));
+    assert(out && changed == 3 && !memcmp(original, g_file, before));
+    /* Shape names and mesh names are native records, not material pointers. */
+    head("scope/models/rig.md6skl", 1, "mat/body");
+    u32be(1); mesh("mat/body", "scope/mat/body", 2, 1, 0, 0, 0);
+    u32be(1); name("scope/mat/body"); zeros(12); magic();
+    assert(length == g_used && !memcmp(out, g_file, length)); free(out);
+    mode = 0;
+    out = sh_resource_rebind(SH_REBIND_MD6_MESH, original, before,
+        bind_name, &mode, &length, &changed, error, sizeof(error));
+    assert(out && !changed && length == before && !memcmp(out, original, length)); free(out);
+    mode = 1;
+    assert(!sh_resource_rebind(SH_REBIND_MD6_MESH, original, before - 1,
+        bind_name, &mode, &length, &changed, error, sizeof(error)) && !length && !changed);
+    mode = -1;
+    assert(!sh_resource_rebind(SH_REBIND_MD6_MESH, original, before,
+        bind_name, &mode, &length, &changed, error, sizeof(error)) && !length && !changed);
+    mode = 1;
+    g_used = 0; raw("\x26\x02\x41\x4d", 4); zeros(8); name("models/rig.md6skl"); zeros(32);
+    before = g_used; memcpy(original, g_file, before);
+    out = sh_resource_rebind(SH_REBIND_MD6_ANIMATION, original, before,
+        bind_name, &mode, &length, &changed, error, sizeof(error));
+    assert(out && changed == 1);
+    g_used = 0; raw("\x26\x02\x41\x4d", 4); zeros(8); name("scope/models/rig.md6skl"); zeros(32);
+    assert(length == g_used && !memcmp(out, g_file, length)); free(out);
+    assert(!sh_resource_rebind((sh_resource_rebind_format)99, original, before,
+        bind_name, &mode, &length, &changed, error, sizeof(error)) && !length && !changed);
+}
+
 int main(void)
 {
     char error[256];
     size_t complete;
+    binding_check();
     /* A complete mesh: the skeleton it loads, one material per mesh and the
      * material record table the engine builds its bindings from. */
     head("md6/boss/boss.md6skl", 1, "openShape");

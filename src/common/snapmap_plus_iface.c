@@ -27,8 +27,8 @@ typedef struct sub_impl {
     CRITICAL_SECTION lock;          /* guards both the map and the work-queue */
 } sub_impl;
 
-/* obj + 0x08 remains reserved for ABI compatibility. The subobject's critical
- * section is the live guard for both registry and queue. */
+/* The subobject's critical section guards both registry and queue. The fixed
+ * object prefix records table extent without moving any existing callback. */
 
 
 static void iface_register_cmd(sh_iface *self, const char *name, sh_cmd_handler handler, void *ctx)
@@ -277,6 +277,7 @@ void sh_iface_bind_engine_slots(const sh_iface_engine_slots *s)
     g_iface_vtbl_live.rawmap_status           = s->rawmap_status;           /* +0x328 */
     g_iface_vtbl_live.rawmap_configure        = s->rawmap_configure;        /* +0x330 */
     g_iface_vtbl_live.rawmap_load_now         = s->rawmap_load_now;         /* +0x338 */
+    g_iface_vtbl_live.prefab_export           = s->prefab_export;          /* +0x340 */
 }
 
 /* Allocate the fixed object and private subobject with an empty registry/queue. */
@@ -301,7 +302,8 @@ sh_iface *sh_iface_create(void)
     si->pinned.map_size = 0;
 
     obj->vtbl = &g_iface_vtbl_live;     /* +0x00 */
-    /* Reserved object mutex bytes stay zero; si->lock guards live state. */
+    obj->abi_marker = SH_IFACE_EXTENT_MARKER;
+    obj->vtbl_bytes = sizeof(g_iface_vtbl_live);
     obj->sub  = (sh_iface_sub *)si;     /* +0x58: sub_impl starts with the fixed header. */
 
     return obj;

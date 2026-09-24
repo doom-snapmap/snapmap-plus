@@ -13,9 +13,10 @@ static void write_absjmp(uint8_t *p, void *dest)
     *(uint64_t *)(p + 6) = (uint64_t)dest;     /* the absolute 8-byte target follows inline */
 }
 
-/* Fixed records retain original bytes and trampoline ownership until unpatch. */
-#define MAX_PATCHES 64
+/* Stable records retain original bytes and trampoline ownership until unpatch.
+ * Registry growth must not silently disable later feature installations. */
 typedef struct patch_record {
+    struct patch_record *next;
     void   *target;            /* engine fn whose prologue we overwrote */
     void   *tramp;             /* the trampoline (also this record's identity key) */
     void   *detour;
@@ -25,10 +26,10 @@ typedef struct patch_record {
     sh_patch_handle patch;    /* Includes partial writes and pending protection restoration. */
 } patch_record;
 
-static patch_record g_patches[MAX_PATCHES];
-static int          g_patch_count = 0;   /* high-water count of slots ever used */
+static patch_record *g_patches;
+static SRWLOCK g_patch_lock = SRWLOCK_INIT;
 
-static void *prepare(void *target, void *detour, size_t stolen, size_t offset, int relocation)
+static void *prepare_locked(void *target, void *detour, size_t stolen, size_t offset, int relocation)
 {
     uint8_t original[48];
     size_t emitted = stolen;
@@ -52,19 +53,15 @@ static void *prepare(void *target, void *detour, size_t stolen, size_t offset, i
         emitted += 11;
     }
 
-    patch_record *rec = NULL;
-    for (int i = 0; i < g_patch_count; i++) {
-        if (g_patches[i].tramp && g_patches[i].target == target) return NULL;
-        if (!g_patches[i].patch.live && !g_patches[i].tramp) rec = &g_patches[i];
-    }
-    if (!rec) {
-        if (g_patch_count >= MAX_PATCHES) return NULL;
-        rec = &g_patches[g_patch_count++];
-    }
+    patch_record *rec;
+    for (rec = g_patches; rec; rec = rec->next)
+        if (rec->target == target) return NULL;
+    rec = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*rec));
+    if (!rec) return NULL;
 
     uint8_t *tramp = (uint8_t *)VirtualAlloc(NULL, emitted + 14, MEM_COMMIT | MEM_RESERVE,
                                              PAGE_EXECUTE_READWRITE);
-    if (!tramp) return NULL;
+    if (!tramp) { HeapFree(GetProcessHeap(), 0, rec); return NULL; }
     if (relocation == 1) {
         const uint8_t *lea = original + offset;
         int32_t displacement;
@@ -93,6 +90,17 @@ static void *prepare(void *target, void *detour, size_t stolen, size_t offset, i
     memcpy(rec->original, original, stolen);
     rec->installed = 0;
     memset(&rec->patch, 0, sizeof rec->patch);
+    rec->next = g_patches;
+    g_patches = rec;
+    return tramp;
+}
+
+static void *prepare(void *target, void *detour, size_t stolen, size_t offset, int relocation)
+{
+    void *tramp;
+    AcquireSRWLockExclusive(&g_patch_lock);
+    tramp = prepare_locked(target, detour, stolen, offset, relocation);
+    ReleaseSRWLockExclusive(&g_patch_lock);
     return tramp;
 }
 
@@ -115,12 +123,12 @@ void *hook_prepare_relative_call(void *target, void *detour, size_t stolen, size
 static patch_record *find_record(void *tramp)
 {
     if (!tramp) return NULL;
-    for (int i = 0; i < g_patch_count; i++)
-        if (g_patches[i].tramp == tramp) return &g_patches[i];
+    for (patch_record *rec = g_patches; rec; rec = rec->next)
+        if (rec->tramp == tramp) return rec;
     return NULL;
 }
 
-sh_patch_status hook_commit(void *tramp)
+static sh_patch_status commit_locked(void *tramp)
 {
     patch_record *rec = find_record(tramp);
     if (!rec) return B2_PATCH_REFUSED_BADARG;
@@ -135,10 +143,23 @@ sh_patch_status hook_commit(void *tramp)
     return result;
 }
 
+sh_patch_status hook_commit(void *tramp)
+{
+    sh_patch_status result;
+    AcquireSRWLockExclusive(&g_patch_lock);
+    result = commit_locked(tramp);
+    ReleaseSRWLockExclusive(&g_patch_lock);
+    return result;
+}
+
 int hook_is_installed(void *tramp)
 {
+    int installed;
+    AcquireSRWLockShared(&g_patch_lock);
     patch_record *rec = find_record(tramp);
-    return rec && rec->installed;
+    installed = rec && rec->installed;
+    ReleaseSRWLockShared(&g_patch_lock);
+    return installed;
 }
 
 static int revert_record(patch_record *rec)
@@ -153,31 +174,52 @@ static int revert_record(patch_record *rec)
 
 int hook_unpatch(void *tramp)
 {
-    for (int i = 0; i < g_patch_count; i++) {
-        if (g_patches[i].tramp && g_patches[i].tramp == tramp)
-            return revert_record(&g_patches[i]);
+    int result = 0;
+    AcquireSRWLockExclusive(&g_patch_lock);
+    for (patch_record **slot = &g_patches; *slot; slot = &(*slot)->next) {
+        patch_record *rec = *slot;
+        if (rec->tramp != tramp) continue;
+        result = revert_record(rec);
+        if (result) {
+            *slot = rec->next;
+            HeapFree(GetProcessHeap(), 0, rec);
+        }
+        break;
     }
-    return 0;
+    ReleaseSRWLockExclusive(&g_patch_lock);
+    return result;
 }
 
 int hook_unpatch_all(void)
 {
     int n = 0;
-    for (int i = g_patch_count - 1; i >= 0; i--)   /* Walk records in reverse slot order. */
-        if (g_patches[i].tramp) n += revert_record(&g_patches[i]);
+    AcquireSRWLockExclusive(&g_patch_lock);
+    for (patch_record **slot = &g_patches; *slot;) {
+        patch_record *rec = *slot;
+        if (revert_record(rec)) {
+            *slot = rec->next;
+            HeapFree(GetProcessHeap(), 0, rec);
+            ++n;
+        } else slot = &rec->next;
+    }
+    ReleaseSRWLockExclusive(&g_patch_lock);
     return n;
 }
 
 int hook_installed_count(void)
 {
     int n = 0;
-    for (int i = 0; i < g_patch_count; i++) if (g_patches[i].installed) n++;
+    AcquireSRWLockShared(&g_patch_lock);
+    for (patch_record *rec = g_patches; rec; rec = rec->next) if (rec->installed) n++;
+    ReleaseSRWLockShared(&g_patch_lock);
     return n;
 }
 
 int hook_owned_count(void)
 {
     int n = 0;
-    for (int i = 0; i < g_patch_count; i++) if (g_patches[i].tramp) n++;
+    AcquireSRWLockShared(&g_patch_lock);
+    for (patch_record *rec = g_patches; rec; rec = rec->next) ++n;
+    ReleaseSRWLockShared(&g_patch_lock);
     return n;
 }

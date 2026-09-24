@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -702,12 +703,17 @@ static void poc_apply_deselect()
 }
 /* __try can't share a function with a C++ object needing unwinding (/EHsc, C2712) -- this leaf has only
  * PODs in scope, so the SEH guard around the engine call is safe here. */
-static int poc_serialize_selection_raw(char *buf, int cap)
+static int poc_export_selection_raw(char **bytes, size_t *length)
 {
-    int n = 0;
-    __try { n = g_iface->vtbl->serialize_selection(g_iface, buf, cap); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { n = 0; }
-    return n;
+    int ok = 0;
+    *bytes = nullptr; *length = 0;
+    __try {
+        sh_prefab_export_fn export_fn = sh_iface_prefab_export(g_iface);
+        if (export_fn) ok = export_fn(g_iface, 1, bytes, length);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    if (ok && *bytes && *length && *length <= static_cast<size_t>(INT_MAX)) return 1;
+    if (*bytes) HeapFree(GetProcessHeap(), 0, *bytes);
+    *bytes = nullptr; *length = 0; return 0;
 }
 /* Save the current selection as prefab JSON. The engine requires the hovered
  * entity to be selected; report that refusal separately from an empty selection.
@@ -716,7 +722,7 @@ static void poc_apply_create_prefab()
 {
     g_create_result = -1;
     { char l[300]; _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: START name='%s'", g_create_prefab_name.c_str()); poc_log(l); }
-    if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->resolve_prefab_path || !g_iface->vtbl->serialize_selection || g_create_prefab_name.empty()) {
+    if (!g_iface || !g_iface->vtbl || !g_iface->vtbl->resolve_prefab_path || !sh_iface_prefab_export(g_iface) || g_create_prefab_name.empty()) {
         poc_log("create-prefab: ABORT (iface/slot/name missing)");
         return;
     }
@@ -735,15 +741,16 @@ static void poc_apply_create_prefab()
         poc_log("create-prefab: ABORT (resolve_prefab_path failed)");
         return;
     }
-    { char l[1200]; _snprintf_s(l, sizeof l, _TRUNCATE, "create-prefab: path='%s' -- about to serialize_selection (+0xb0)", path); poc_log(l); }
-    static char buf[4 * 1024 * 1024];
-    int n = poc_serialize_selection_raw(buf, (int)sizeof buf);
-    poc_logf("create-prefab: serialize_selection returned n=%lu", (unsigned long)n);
-    if (n <= 0) { g_create_result = 0; return; }
+    char *bytes = nullptr; size_t length = 0;
+    if (!poc_export_selection_raw(&bytes, &length)) { g_create_result = 0; return; }
     FILE *fp = nullptr;
-    if (fopen_s(&fp, path, "wb") != 0 || !fp) { poc_log("create-prefab: ABORT (fopen failed)"); return; }
-    fwrite(buf, 1, (size_t)n, fp);
-    fclose(fp);
+    if (fopen_s(&fp, path, "wb") != 0 || !fp) {
+        HeapFree(GetProcessHeap(), 0, bytes); poc_log("create-prefab: ABORT (fopen failed)"); return;
+    }
+    bool written = fwrite(bytes, 1, length, fp) == length;
+    if (fclose(fp) != 0) written = false;
+    HeapFree(GetProcessHeap(), 0, bytes);
+    if (!written) { poc_log("create-prefab: ABORT (incomplete file write)"); return; }
     poc_log("create-prefab: WROTE file ok");
     g_create_result = 1;
 }
@@ -920,11 +927,19 @@ static void poc_apply_load_prefab()
     }
     FILE *fp = nullptr;
     if (fopen_s(&fp, path, "rb") != 0 || !fp) { poc_log("load-prefab: ABORT (fopen failed)"); return; }
-    fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
+    __int64 sz = -1;
+    if (_fseeki64(fp, 0, SEEK_END) == 0) sz = _ftelli64(fp);
+    if (sz <= 0 || sz > INT_MAX || _fseeki64(fp, 0, SEEK_SET) != 0) {
+        fclose(fp); poc_log("load-prefab: ABORT (invalid native text size)"); return;
+    }
     std::string body;
-    if (sz > 0) { body.resize((size_t)sz); size_t got = fread(&body[0], 1, (size_t)sz, fp); body.resize(got); }
-    fclose(fp);
-    if (body.empty()) { poc_log("load-prefab: ABORT (empty file)"); return; }
+    try { body.resize(static_cast<size_t>(sz)); }
+    catch (...) { fclose(fp); poc_log("load-prefab: ABORT (allocation failed)"); return; }
+    bool complete = fread(&body[0], 1, body.size(), fp) == body.size();
+    if (fclose(fp) != 0) complete = false;
+    if (!complete || body.find('\0') != std::string::npos) {
+        poc_log("load-prefab: ABORT (incomplete or NUL-containing file)"); return;
+    }
 
     /* Paste uses selection as its old-to-new ID map. Clear it first; the backend
      * rechecks before placement because a pending manipulation may refuse clearing. */

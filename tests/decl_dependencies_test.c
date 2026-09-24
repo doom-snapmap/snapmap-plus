@@ -178,7 +178,7 @@ int main(void)
     memset(&f, 0, sizeof(f));
     assert(!inspect("{ edit = { renderModelInfo = { model = \"escaped\\\\name\"; }"
                     " links = { links[184467440737095516160] = \"overflow\"; } } }", &f, &result));
-    assert(result.gaps == 2 && result.references == 0);
+    assert(result.gaps == 1 && result.references == 1 && strstr(f.references, "escaped\\\\name"));
 
     memset(&f, 0, sizeof(f));
     assert(inspect("{ edit = { arrays = { num = 1; item[0] = { item[2] = \"nested/ref\"; } } } }", &f, &result));
@@ -189,6 +189,10 @@ int main(void)
     assert(result.references == 0 && !result.gaps);
     assert(inspect("{ edit = { renderModelInfo = { model = \"\"; } } }", &f, &result));
     assert(result.references == 0 && !result.gaps);
+    assert(inspect("{ inherit = NULL; edit = { inventoryItemDecl = NULL; renderModelInfo = { model = NULL; } } }", &f, &result));
+    assert(result.references == 0 && !result.gaps);
+    assert(inspect("{ edit = { inventoryItemDecl = \"NULL\"; } }", &f, &result));
+    assert(result.references == 1 && strstr(f.references, "|NULL\n"));
 
     memset(&f, 0, sizeof(f)); f.refuse = 1;
     assert(!inspect(text, &f, &result) && result.aborted);
@@ -206,9 +210,24 @@ int main(void)
         sh_decl_dependency_schema schema = {&f, describe, field, reference, gap};
         memset(&f, 0, sizeof(f));
         assert(state);
-        assert(!sh_decl_state_dependencies(state, (sh_decl_value_type){"TestEntity", ""}, &schema, &result));
-        assert(result.gaps == 1 && result.references == 2 && !result.aborted);
-        assert(strstr(f.references, "first") && strstr(f.references, "second"));
+        assert(sh_decl_state_dependencies(state, (sh_decl_value_type){"TestEntity", ""}, &schema, &result));
+        assert(!result.gaps && result.references == 2 && !result.aborted);
+        assert(!strcmp(f.references, "edit.inventoryItemDecl|idDeclInventory|first\n"
+            "edit.inventoryItemDecl|idDeclInventory|second\n"));
+        sh_decl_tree_free(state);
+    }
+    {
+        const char *ordered = "{ inherit = \"base/first\"; edit = { inventoryItemDecl = \"first\"; }"
+            "inherit = \"base/second\"; edit = { inventoryItemDecl = \"second\"; } }";
+        sh_decl_node *state = sh_decl_tree_parse_ordered((sh_decl_source){ordered, strlen(ordered)}, NULL, 0);
+        sh_decl_dependency_schema schema = {&f, describe, field, reference, gap};
+        memset(&f, 0, sizeof(f));
+        assert(state && sh_decl_entity_dependencies(state, (sh_decl_value_type){"TestEntity", ""}, &schema, &result));
+        assert(!result.gaps && result.references == 4 && !result.aborted);
+        assert(!strcmp(f.references, "inherit|idDeclEntityDef|base/first\n"
+            "edit.inventoryItemDecl|idDeclInventory|first\n"
+            "inherit|idDeclEntityDef|base/second\n"
+            "edit.inventoryItemDecl|idDeclInventory|second\n"));
         sh_decl_tree_free(state);
     }
     puts("decl_dependencies_test: PASS");

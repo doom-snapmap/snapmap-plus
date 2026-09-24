@@ -36,7 +36,7 @@ sh_resource_graph_preparation *sh_resource_graph_prepare_open(sh_decl_registry_s
     uintptr_t reflection)
 {
     sh_resource_graph_preparation *p = (sh_resource_graph_preparation *)calloc(1, sizeof(*p));
-    sh_decl_native_source metadata = {source.context, source.read, reflection};
+    sh_decl_native_source metadata = {source.context, source.read, reflection, source.scripts};
     sh_decl_dependency_observer observer = {p, rp_reference, NULL};
     if (!p) return NULL;
     p->registry = sh_decl_native_registry_open(source, NULL, 0);

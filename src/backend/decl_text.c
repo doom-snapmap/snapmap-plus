@@ -38,6 +38,17 @@ static int decl_name_compare(const sh_decl_reference_item *items,
     return left < right ? -1 : (left > right ? 1 : 0);
 }
 
+static int resource_name_equal(const unsigned char *text, size_t length, const char *name)
+{
+    if (!text || !name || strlen(name) != length) return 0;
+    for (size_t i = 0; i < length; i++) {
+        int a = text[i] == '\\' ? '/' : ascii_lower(text[i]);
+        int b = name[i] == '\\' ? '/' : ascii_lower((unsigned char)name[i]);
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
 static int is_decl_space(unsigned char c)
 {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f';
@@ -80,7 +91,7 @@ static void add_reference(const sh_decl_reference_item *items, size_t count,
         if (required_type && (!items[i].type ||
             !ascii_equal_span((const unsigned char *)items[i].type,
                                strlen(items[i].type), required_type))) continue;
-        if (!ascii_equal_span(text, length, items[i].name)) continue;
+        if (!resource_name_equal(text, length, items[i].name)) continue;
         match = i;
         matches++;
         if (matches > 1) return;
@@ -136,17 +147,8 @@ static void scan_references(const sh_decl_reference_item *items, size_t count,
         if (c == '"') {
             size_t quote_start = i;
             size_t start = ++i;
-            int escaped = 0;
-            while (i < length && text[i] != '"') {
-                if (text[i] == '\\') {
-                    escaped = 1;
-                    if (i + 1 < length) i += 2;
-                    else i++;
-                } else {
-                    i++;
-                }
-            }
-            if (i < length && !escaped)
+            while (i < length && text[i] != '"') i++;
+            if (i < length)
                 add_reference(items, count, dependent, text + start,
                                      i - start, edges, inherit_edges, indegree,
                                      edge_count, quote_is_inherit_key(text, quote_start), NULL);
@@ -444,7 +446,6 @@ int sh_decl_text_well_formed(const unsigned char *text, size_t length)
     long depth = 0;
     int seen_brace = 0;
     int in_quote = 0;
-    int escaped = 0;
     int line_comment = 0;
     int block_comment = 0;
 
@@ -467,13 +468,7 @@ int sh_decl_text_well_formed(const unsigned char *text, size_t length)
         }
         if (in_quote) {
             if (c == '\n' || c == '\r') return 0;
-            if (escaped) {
-                escaped = 0;
-            } else if (c == '\\') {
-                escaped = 1;
-            } else if (c == '"') {
-                in_quote = 0;
-            }
+            if (c == '"') in_quote = 0;
             continue;
         }
         if (c == '/' && next == '/') {
@@ -492,7 +487,7 @@ int sh_decl_text_well_formed(const unsigned char *text, size_t length)
             depth--;
         }
     }
-    return seen_brace && depth == 0 && !in_quote && !escaped && !block_comment;
+    return seen_brace && depth == 0 && !in_quote && !block_comment;
 }
 
 enum sedef_lex_token_kind {
@@ -552,12 +547,9 @@ static int sedef_next_lex_token(const unsigned char *text, size_t length,
         }
         if (c == '"') {
             size_t start = i++;
-            int escaped = 0;
             while (i < length) {
                 c = text[i++];
-                if (escaped) escaped = 0;
-                else if (c == '\\') escaped = 1;
-                else if (c == '"') break;
+                if (c == '"') break;
             }
             token->kind = SEDEF_LEX_OTHER;
             token->start = start;

@@ -23,6 +23,7 @@
 #include "package_runtime.h"
 #include "user_overrides.h"
 #include "config_json.h"
+#include "engine_cvar_read.h"
 
 /* StridsSortBody prologue steal window (DIRECT, disasm of 0x1a2b490):
  *   48 89 5C 24 18        mov [rsp+0x18],rbx        (5)
@@ -54,6 +55,11 @@ static idstr_ctor_fn_t g_idstr_ctor  = NULL;
 
 static volatile LONG g_refresh_busy;
 static int g_pass_failed;
+static sh_strids_localization g_localization;
+static const void *g_native_cvars;
+static char g_native_language[48];
+static char g_loaded_language[48];
+static const char *g_native_locale_order[3];
 static volatile LONG g_injected      = 0;      /* one-shot latch (0 = not yet injected) */
 static volatile LONG g_in_sort       = 0;      /* recursion guard (>0 = inside the sort already) */
 static volatile LONG g_inject_count  = 0;      /* rows appended (observability) */
@@ -168,6 +174,7 @@ typedef struct strids_owned_row {
     void *key_handle;
     unsigned int hash;
     char *text;
+    char *mapping; /* complete source-bound mapping; NULL for native/global keys */
     unsigned char original[32]; /* borrowed native pointers, restored on retirement */
     int replaced;
 } strids_owned_row;
@@ -176,12 +183,32 @@ typedef struct strids_owned_row {
  * index or pointer. Existing keys update in place during main-thread rearm. */
 static strids_owned_row *g_owned_rows;
 static size_t g_owned_n, g_owned_capacity;
+
+static void strids_forget_owned(void)
+{
+    for (size_t i = 0; i < g_owned_n; i++) {
+        if (g_owned_rows[i].text) HeapFree(GetProcessHeap(), 0, g_owned_rows[i].text);
+        free(g_owned_rows[i].id); free(g_owned_rows[i].mapping);
+    }
+    free(g_owned_rows); g_owned_rows = NULL; g_owned_n = g_owned_capacity = 0;
+    g_injected_n = 0;
+}
 typedef struct strids_index_row {
     uint32_t hash, index;
     const char *key;
 } strids_index_row;
 static strids_index_row *g_index;
 static size_t g_index_n, g_index_capacity;
+
+typedef struct strids_reserved_key {
+    uint32_t hash;
+    char *key, *mapping;
+    int pending;
+} strids_reserved_key;
+struct sh_strids_reservation {
+    strids_reserved_key *keys;
+    size_t count, capacity;
+};
 
 static int strids_reserve(void **rows, size_t *capacity, size_t count, size_t stride)
 {
@@ -313,6 +340,275 @@ static int find_existing_key(unsigned int hash, const char *key, unsigned char *
     return 1;
 }
 
+void sh_strids_set_localization(const sh_strids_localization *localization)
+{
+    if (localization) g_localization = *localization;
+    else memset(&g_localization, 0, sizeof(g_localization));
+}
+
+static int strids_native_language(char out[48])
+{
+    const unsigned char *cvar = sh_engine_cvar_find(g_native_cvars, "sys_lang");
+    if (!cvar) return 0;
+    __try {
+        /* The paired language loaders read the registered idCVar's idStr data
+         * at +0x10, reset a missing language file to the cvar's default, and
+         * replace the dictionary. There is no per-key language fallback. */
+        const char *value = *(const char *const *)(cvar + 0x10);
+        size_t length = value ? strnlen_s(value, 48) : 0;
+        if (!length || length >= 48) return 0;
+        memcpy(out, value, length + 1); return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+static int strids_native_locales(void *context, const char *const **order, size_t *count,
+    char *error, size_t capacity)
+{
+    /* These are product spellings for the same native language, not extra
+     * dictionaries or a guessed English fallback. Native names remain usable. */
+    static const struct { const char *native, *locale, *alias; } names[] = {
+        {"english", "en", NULL}, {"french", "fr", NULL}, {"german", "de", NULL},
+        {"italian", "it", NULL}, {"spanish", "es", NULL}, {"russian", "ru", NULL},
+        {"polish", "pl", NULL}, {"japanese", "ja", NULL}, {"czech", "cs", NULL},
+        {"portuguese", "pt-BR", "pt"}, {"chinese", "zh-Hant", "zh"},
+        {"latin_spanish", "es-419", "latin-spanish"}
+    };
+    unsigned char *array; uint32_t rows;
+    (void)context; *order = NULL; *count = 0;
+    if (!g_loaded_language[0]) strids_native_language(g_loaded_language);
+    if (!g_table_desc || !strids_table(&array, &rows) || !rows || !g_loaded_language[0]) {
+        if (error && capacity) snprintf(error, capacity, "native language dictionary is still initializing");
+        return 0;
+    }
+    memcpy(g_native_language, g_loaded_language, sizeof(g_native_language));
+    for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++)
+        if (!_stricmp(names[i].native, g_native_language)) {
+            g_native_locale_order[(*count)++] = names[i].locale;
+            if (names[i].alias) g_native_locale_order[(*count)++] = names[i].alias;
+            break;
+        }
+    /* A native underscore is not a descriptor locale character. Its explicit
+     * aliases above already supply every supported spelling. */
+    if (!strchr(g_native_language, '_')) g_native_locale_order[(*count)++] = g_native_language;
+    *order = g_native_locale_order; return 1;
+}
+
+static int strids_native_original(void *context, const char *key, unsigned char **out,
+    size_t *length, char *error, size_t capacity)
+{
+    const char *value = ""; unsigned char *row = NULL;
+    (void)context; *out = NULL; *length = 0;
+    if (!g_hash || strcmp(g_loaded_language, g_native_language)) goto failed;
+    if (!find_existing_key(g_hash(key), key, &row)) goto failed;
+    if (row) {
+        const strids_owned_row *owned = !_strnicmp(key, "#str_", 5) ? find_owned(key + 5) : NULL;
+        if (owned) {
+            if (find_live_owned(owned) != row) goto failed;
+            /* A newly introduced native key was absent in the original table.
+             * Native idStrId construction then yields zero, whose value is empty. */
+            if (owned->replaced) value = *(const char *const *)(owned->original + 16);
+        } else value = *(const char *const *)(row + 16);
+    }
+    if (!value) goto failed;
+    *length = strnlen_s(value, (size_t)INT_MAX + 1u);
+    if (*length > INT_MAX || !(*out = malloc(*length ? *length : 1))) goto failed;
+    if (*length) memcpy(*out, value, *length);
+    return 1;
+failed:
+    if (error && capacity) snprintf(error, capacity, "original native string lookup is unavailable");
+    return 0;
+}
+
+int sh_strids_bind_native_localization(const void *cvar_system_slot)
+{
+    g_native_cvars = cvar_system_slot;
+    g_loaded_language[0] = 0;
+    sh_strids_localization native = {NULL, strids_native_locales, strids_native_original};
+    sh_strids_set_localization(cvar_system_slot ? &native : NULL);
+    return cvar_system_slot != NULL;
+}
+
+void sh_strids_reservation_free(sh_strids_reservation *reservation)
+{
+    if (!reservation) return;
+    for (size_t i = 0; i < reservation->count; i++) {
+        free(reservation->keys[i].key); free(reservation->keys[i].mapping);
+    }
+    free(reservation->keys); free(reservation);
+}
+
+static int strids_reservation_add(sh_strids_reservation *reservation, uint32_t hash,
+    const char *key, const char *mapping, int pending)
+{
+    strids_reserved_key value = {hash, NULL, NULL, pending};
+    if (reservation->count == SIZE_MAX || !strids_reserve((void **)&reservation->keys, &reservation->capacity,
+        reservation->count + 1, sizeof(*reservation->keys))) return 0;
+    value.key = key ? _strdup(key) : NULL; value.mapping = mapping ? _strdup(mapping) : NULL;
+    if ((key && !value.key) || (mapping && !value.mapping)) { free(value.key); free(value.mapping); return 0; }
+    reservation->keys[reservation->count++] = value; return 1;
+}
+
+static int strids_reservation_global(sh_strids_reservation *reservation, const char *id)
+{
+    size_t length = strlen(id);
+    if (!length || length > INT_MAX - 5u) return 0;
+    char *key = malloc(length + 6u); if (!key) return 0;
+    memcpy(key, "#str_", 5); memcpy(key + 5, id, length + 1u);
+    int ok = strids_reservation_add(reservation, g_hash(key), key, NULL, 0);
+    free(key); return ok;
+}
+
+static sh_strids_reservation *strids_reservation_snapshot(void)
+{
+    sh_strids_reservation *out = calloc(1, sizeof(*out));
+    strids_index_row *old_index = g_index;
+    size_t old_n = g_index_n, old_capacity = g_index_capacity;
+    int old_failure = g_pass_failed, ok = 0;
+    char *user = NULL; sh_json_object pairs = {0};
+    if (!out) return NULL;
+    g_index = NULL; g_index_n = g_index_capacity = 0;
+    __try {
+        __try {
+            unsigned char *array; uint32_t count;
+            if (!g_table_desc || !g_hash || !strids_index_begin() || !strids_table(&array, &count)) __leave;
+            for (uint32_t i = 0; i < count; i++) {
+                const unsigned char *row = array + (size_t)i * 32;
+                const char *key = *(const char **)(row + 8), *mapping = NULL;
+                if (key && !_strnicmp(key, "#str_", 5)) {
+                    const strids_owned_row *owned = find_owned(key + 5);
+                    if (owned && owned->mapping && !owned->replaced && owned->hash == *(uint32_t *)row &&
+                        owned->key_handle == *(void **)(row + 8)) mapping = owned->mapping;
+                }
+                if (!strids_reservation_add(out, *(uint32_t *)row, key, mapping, 0)) __leave;
+            }
+            size_t length = 0; g_pass_failed = 0;
+            user = read_source_file(&length);
+            if (g_pass_failed) __leave;
+            if (user) {
+                const char *json = user;
+                if (length >= 3 && !memcmp(json, "\xef\xbb\xbf", 3)) { json += 3; length -= 3; }
+                if (!sh_json_parse_object(json, length, 1, &pairs)) __leave;
+                for (size_t i = 0; i < pairs.count; i++) {
+                    const sh_json_member *m = pairs.members + i;
+                    size_t n = strlen(m->value_json), decoded_length;
+                    char *decoded = malloc(n + 1);
+                    int valid = decoded && strlen(m->key) == m->key_length &&
+                        sh_json_decode_string(m->value_json, n, decoded, n + 1, &decoded_length) &&
+                        strlen(decoded) == decoded_length && strids_reservation_global(out, m->key);
+                    free(decoded); if (!valid) __leave;
+                }
+            }
+            for (size_t i = 0; i < B1_STRIDS_BAKED_COUNT; i++)
+                if (!strids_reservation_global(out, g_strids_baked[i].id)) __leave;
+            ok = 1;
+        } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    } __finally {
+        free(g_index); g_index = old_index; g_index_n = old_n; g_index_capacity = old_capacity;
+        g_pass_failed = old_failure;
+        sh_json_object_free(&pairs); if (user) HeapFree(GetProcessHeap(), 0, user);
+    }
+    if (!ok) { sh_strids_reservation_free(out); out = NULL; }
+    return out;
+}
+
+sh_strids_reservation *sh_strids_reservation_open(char *error, size_t capacity)
+{
+    sh_strids_reservation *out = NULL;
+    if (error && capacity) *error = 0;
+    if (!InterlockedCompareExchange(&g_refresh_busy, 1, 0)) {
+        __try { out = strids_reservation_snapshot(); }
+        __finally { InterlockedExchange(&g_refresh_busy, 0); }
+    }
+    if (!out && error && capacity) snprintf(error, capacity, "native string dictionary reservation is unavailable");
+    return out;
+}
+
+static int strids_reserve_mapping(void *context, const char *key,
+    const unsigned char identity[32], const char *mapping)
+{
+    sh_strids_reservation *reservation = context; uint32_t hash; int known = 0;
+    (void)identity; /* Exact mapping bytes, not the content digest, authorize reuse. */
+    if (!reservation || !g_hash || !key || strncmp(key, "#str_", 5) || !key[5] || !mapping) return -1;
+    __try { hash = g_hash(key); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    for (size_t i = 0; i < reservation->count; i++) {
+        strids_reserved_key *value = reservation->keys + i;
+        if (value->hash != hash) continue;
+        if (!value->key || _stricmp(value->key, key) || !value->mapping || strcmp(value->mapping, mapping)) return 0;
+        if (value->pending) known = 1;
+    }
+    return known || strids_reservation_add(reservation, hash, key, mapping, 1) ? 1 : -1;
+}
+
+static int strids_reserve_global(void *context, const char *key)
+{
+    sh_strids_reservation *reservation = context;
+    if (!reservation || !g_hash || !key || strncmp(key, "#str_", 5) || !key[5]) return 0;
+    __try { return strids_reservation_add(reservation, g_hash(key), key, NULL, -1); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+static int strids_reserve_policy_keys(sh_strids_reservation *reservation,
+    const sh_json_object *strings, const sh_json_object *private_keys)
+{
+    for (size_t i = 0; i < strings->count; i++) {
+        const sh_json_member *locale = strings->members + i; sh_json_object pairs = {0};
+        if (!sh_json_parse_object(locale->value_json, strlen(locale->value_json), 2, &pairs)) return 0;
+        int ok = 1;
+        for (size_t j = 0; ok && j < pairs.count; j++) {
+            const sh_json_member *entry = pairs.members + j; size_t k = 0;
+            for (; k < private_keys->count; k++)
+                if (!_stricmp(entry->key, private_keys->members[k].key + 5)) break;
+            if (k == private_keys->count) {
+                char *key = entry->key_length <= SIZE_MAX - 6 ? malloc(entry->key_length + 6) : NULL;
+                ok = key && entry->key_length && strlen(entry->key) == entry->key_length;
+                if (ok) {
+                    memcpy(key, "#str_", 5); memcpy(key + 5, entry->key, entry->key_length + 1);
+                    ok = strids_reserve_global(reservation, key);
+                }
+                free(key);
+            }
+        }
+        sh_json_object_free(&pairs); if (!ok) return 0;
+    }
+    for (size_t i = 0; i < private_keys->count; i++)
+        if (strids_reserve_mapping(reservation, private_keys->members[i].key, NULL,
+            private_keys->members[i].value_json) != 1) return 0;
+    return 1;
+}
+
+int sh_strids_reservation_policy(sh_strids_reservation *reservation,
+    const sh_package_policy *policy, char *error, size_t capacity)
+{
+    sh_json_object keys = {0}; int ok = reservation && policy;
+    for (size_t i = 0; ok && i < policy->localized_count; i++)
+        ok = sh_json_object_set(&keys, policy->localized[i].key, policy->localized[i].mapping, 4);
+    if (ok) ok = strids_reserve_policy_keys(reservation, &policy->strings, &keys);
+    sh_json_object_free(&keys);
+    if (!ok && error && capacity) snprintf(error, capacity, "pending string policies have incompatible native IDs");
+    return ok;
+}
+
+sh_package_string_reservations sh_strids_reservation_adapter(sh_strids_reservation *reservation, size_t attempts)
+{
+    sh_package_string_reservations out = {strids_reserve_mapping, reservation, attempts, strids_reserve_global}; return out;
+}
+
+int sh_strids_reservation_validate(const sh_strids_reservation *reservation, char *error, size_t capacity)
+{
+    sh_strids_reservation *current = sh_strids_reservation_open(error, capacity);
+    int ok = reservation && current;
+    for (size_t i = 0; ok && i < reservation->count; i++)
+        if (reservation->keys[i].pending < 0 && !strids_reserve_global(current, reservation->keys[i].key)) ok = 0;
+    for (size_t i = 0; ok && i < reservation->count; i++) {
+        const strids_reserved_key *value = reservation->keys + i;
+        if (value->pending > 0 && strids_reserve_mapping(current, value->key, NULL, value->mapping) != 1) ok = 0;
+    }
+    sh_strids_reservation_free(current);
+    if (!ok && error && capacity && !*error) snprintf(error, capacity, "native string dictionary changed during preparation");
+    return ok;
+}
+
 
 static unsigned int strids_text_hash(const char *text)
 {
@@ -336,7 +632,7 @@ static const char *strids_owner_name(int owner)
 /* Append one #str_<id> row through native helpers unless this pass already
  * supplied the key.
  */
-static void inject_row_owned(const char *id, const char *text, size_t text_len, int owner)
+static void inject_row_mapping(const char *id, const char *text, size_t text_len, int owner, const char *mapping)
 {
     strids_row *seen = find_injected(id);
     if (seen != NULL) {
@@ -370,9 +666,11 @@ static void inject_row_owned(const char *id, const char *text, size_t text_len, 
         unsigned char original[32] = {0};
         int replaced = 0;
         char *key = NULL, *saved_id = NULL;
-        char *saved_text;
+        char *saved_text, *saved_mapping = NULL;
         uint32_t length = (uint32_t)text_len;
         if (owned) {
+            if ((owned->mapping == NULL) != (mapping == NULL) ||
+                (mapping && strcmp(owned->mapping, mapping))) { g_pass_failed = 1; return; }
             live = find_live_owned(owned);
             if (!live) { g_pass_failed = 1; return; }
             if (strcmp(owned->text, text) == 0 && *(char **)(live + 16) &&
@@ -402,7 +700,11 @@ static void inject_row_owned(const char *id, const char *text, size_t text_len, 
             free(key);
         }
         saved_text = (char *)HeapAlloc(GetProcessHeap(), 0, text_len + 1);
-        if (!saved_text) { free(saved_id); g_pass_failed = 1; return; }
+        if (mapping) saved_mapping = _strdup(mapping);
+        if (!saved_text || (mapping && !saved_mapping)) {
+            if (saved_text) HeapFree(GetProcessHeap(), 0, saved_text);
+            free(saved_mapping); free(saved_id); g_pass_failed = 1; return;
+        }
         memcpy(saved_text, text, text_len + 1);
         /* AtomicString assignment interns text and writes its borrowed pointer.
          * It does not release the old value; dictionary rows own no pool memory. */
@@ -411,13 +713,14 @@ static void inject_row_owned(const char *id, const char *text, size_t text_len, 
         memcpy(live ? live + 28 : rec + 28, &length, 4);
         if (owned) {
             HeapFree(GetProcessHeap(), 0, owned->text);
+            free(owned->mapping);
         } else {
             if (!live) {
                 uint32_t before = *(uint32_t *)((unsigned char *)g_table_desc + 8);
                 g_insert(g_table_desc, rec);
                 if (*(uint32_t *)((unsigned char *)g_table_desc + 8) != before + 1u) {
                     HeapFree(GetProcessHeap(), 0, saved_text);
-                    free(saved_id);
+                    free(saved_id); free(saved_mapping);
                     g_pass_failed = 1;
                     return;
                 }
@@ -432,12 +735,18 @@ static void inject_row_owned(const char *id, const char *text, size_t text_len, 
             memcpy(owned->original, original, sizeof(original));
         }
         owned->text = saved_text;
+        owned->mapping = saved_mapping;
 record_seen:
         g_injected_ids[g_injected_n].id = owned->id;
         g_injected_ids[g_injected_n].text_hash = strids_text_hash(text);
         g_injected_ids[g_injected_n].owner = owner;
         g_injected_n++;
     }
+}
+
+static void inject_row_owned(const char *id, const char *text, size_t length, int owner)
+{
+    inject_row_mapping(id, text, length, owner, NULL);
 }
 
 static void inject_row(const char *id, const char *text, size_t text_len)
@@ -493,7 +802,7 @@ static void retire_absent_rows(void)
     for (i = 0; i < g_owned_n; i++) {
         if (!find_injected(g_owned_rows[i].id)) {
             HeapFree(GetProcessHeap(), 0, g_owned_rows[i].text);
-            free(g_owned_rows[i].id);
+            free(g_owned_rows[i].id); free(g_owned_rows[i].mapping);
         } else g_owned_rows[kept++] = g_owned_rows[i];
     }
     g_owned_n = kept;
@@ -505,7 +814,7 @@ done:
  * shared JSON reader handles Unicode escapes and rejects malformed input.
  * Native text handles are NUL-terminated, so embedded NUL is unsupported.
  */
-static void inject_pairs(const char *buf, size_t length, int owner)
+static void inject_pairs_filtered(const char *buf, size_t length, int owner, const sh_json_object *private_keys)
 {
     sh_json_object pairs = {0};
     size_t i;
@@ -525,9 +834,14 @@ static void inject_pairs(const char *buf, size_t length, int owner)
             strlen(member->value_json) != decoded_length || decoded_length > INT_MAX)
             goto invalid;
     }
-    for (i = 0; i < pairs.count; i++)
-        inject_row_owned(pairs.members[i].key, pairs.members[i].value_json,
-                         strlen(pairs.members[i].value_json), owner);
+    for (i = 0; i < pairs.count; i++) {
+        size_t j = 0;
+        for (; private_keys && j < private_keys->count; j++)
+            if (!_stricmp(pairs.members[i].key, private_keys->members[j].key + 5)) break;
+        if (!private_keys || j == private_keys->count)
+            inject_row_owned(pairs.members[i].key, pairs.members[i].value_json,
+                strlen(pairs.members[i].value_json), owner);
+    }
     sh_json_object_free(&pairs);
     return;
 invalid:
@@ -536,12 +850,82 @@ invalid:
     sh_json_object_free(&pairs);
 }
 
+static void inject_pairs(const char *buf, size_t length, int owner)
+{
+    inject_pairs_filtered(buf, length, owner, NULL);
+}
+
+typedef struct strids_localized_row { unsigned char *text; size_t length; } strids_localized_row;
+
+/* Prepare every active-language value before inserting an alias. In particular,
+ * a missing authored locale materializes the original native lookup result at
+ * the private key; leaving that alias absent would change fallback behavior. */
+static int strids_localized_prepare(const sh_json_object *strings,
+    const sh_json_object *keys, strids_localized_row *rows)
+{
+    const char *const *order = NULL; size_t count = 0;
+    char error[512] = "";
+    sh_strids_reservation *reservation = NULL;
+    int ok = 0;
+    if (!keys->count) return 1;
+    if (!g_localization.locales ||
+        g_localization.locales(g_localization.context, &order, &count, error, sizeof(error)) != 1 ||
+        (count && !order)) goto done;
+    for (size_t i = 0; i < count; i++) if (!order[i] || !*order[i]) goto done;
+    reservation = strids_reservation_snapshot();
+    if (!reservation || !strids_reserve_policy_keys(reservation, strings, keys)) goto done;
+    for (size_t i = 0; i < keys->count; i++) {
+        const sh_json_member *key = keys->members + i;
+        sh_json_object mapping = {0}, locales = {0};
+        const char *raw_locales, *native, *text = NULL;
+        char *native_key = NULL; size_t native_length = 0;
+        int ready = sh_json_parse_object(key->value_json, strlen(key->value_json), 4, &mapping) &&
+            mapping.count == 2 && (raw_locales = sh_json_object_get(&mapping, "locales")) &&
+            (native = sh_json_object_get(&mapping, "native")) &&
+            sh_json_parse_object(raw_locales, strlen(raw_locales), 2, &locales) &&
+            strids_reserve_mapping(reservation, key->key, NULL, key->value_json) == 1;
+        for (size_t language = 0; ready && !text && language < count; language++)
+            for (size_t j = 0; j < locales.count; j++)
+                if (!_stricmp(order[language], locales.members[j].key)) { text = locales.members[j].value_json; break; }
+        if (ready && text) {
+            size_t size = strlen(text) + 1;
+            rows[i].text = malloc(size);
+            ready = rows[i].text && sh_json_decode_string(text, size - 1, (char *)rows[i].text,
+                size, &rows[i].length) && strlen((char *)rows[i].text) == rows[i].length;
+        } else if (ready) {
+            native_key = malloc(strlen(native) + 1);
+            ready = native_key && sh_json_decode_string(native, strlen(native), native_key,
+                strlen(native) + 1, &native_length) && strlen(native_key) == native_length &&
+                g_localization.original &&
+                g_localization.original(g_localization.context, native_key, &rows[i].text, &rows[i].length,
+                    error, sizeof(error)) == 1;
+            if (ready) {
+                unsigned char *terminated = rows[i].length < SIZE_MAX ? malloc(rows[i].length + 1) : NULL;
+                ready = terminated && (!rows[i].length || rows[i].text) &&
+                    (!rows[i].length || !memchr(rows[i].text, 0, rows[i].length));
+                if (ready) {
+                    if (rows[i].length) memcpy(terminated, rows[i].text, rows[i].length);
+                    terminated[rows[i].length] = 0; free(rows[i].text); rows[i].text = terminated;
+                } else free(terminated);
+            }
+        }
+        free(native_key); sh_json_object_free(&mapping); sh_json_object_free(&locales);
+        if (!ready || rows[i].length > INT_MAX) goto done;
+    }
+    ok = 1;
+done:
+    sh_strids_reservation_free(reservation);
+    if (!ok) backend_log(*error ? error : "B1: scoped localization preparation requires valid native IDs, locales and fallback");
+    return ok;
+}
+
 /* Policies are already composed and checked before any native insertion. */
 static void inject_packages(void)
 {
     size_t length = 0;
     char *json;
-    sh_json_object locales = {0};
+    sh_json_object locales = {0}, private_keys = {0};
+    strids_localized_row *rows = NULL;
     const char *english;
     const sh_package_compilation *compiled;
     if (!sh_user_overrides_enabled_for_launch()) return;
@@ -551,14 +935,28 @@ static void inject_packages(void)
     if (!compiled) { sh_package_runtime_release(); return; }
     /* A failed refresh may still have a valid prior snapshot. Copy it before
      * calling the native string pool; latest-refresh readiness is not ownership. */
-    json = compiled ? sh_json_serialize_object(&compiled->policy.strings, 0, &length) : NULL;
-    sh_package_runtime_release();
-    if (!json || !sh_json_parse_object(json, length, 4, &locales)) {
-        g_pass_failed = 1; free(json); return;
+    json = sh_json_serialize_object(&compiled->policy.strings, 0, &length);
+    int captured = json != NULL;
+    for (size_t i = 0; captured && i < compiled->policy.localized_count; i++) {
+        const sh_package_localized_string *value = compiled->policy.localized + i;
+        captured = sh_json_object_set(&private_keys, value->key, value->mapping, 4);
     }
+    sh_package_runtime_release();
+    if (!captured || !sh_json_parse_object(json, length, 4, &locales) ||
+        !(rows = calloc(private_keys.count ? private_keys.count : 1, sizeof(*rows))) ||
+        !strids_localized_prepare(&locales, &private_keys, rows)) {
+        g_pass_failed = 1; goto done;
+    }
+    for (size_t i = 0; i < private_keys.count; i++)
+        inject_row_mapping(private_keys.members[i].key + 5, (const char *)rows[i].text, rows[i].length,
+            STRIDS_OWNER_PACKAGES, private_keys.members[i].value_json);
+    /* Historical/global package keys retain the former English policy. Private
+     * aliases were selected above using the caller's actual language contract. */
     english = sh_json_object_get(&locales, "en");
-    if (english) inject_pairs(english, strlen(english), STRIDS_OWNER_PACKAGES);
-    sh_json_object_free(&locales); free(json);
+    if (english) inject_pairs_filtered(english, strlen(english), STRIDS_OWNER_PACKAGES, &private_keys);
+done:
+    if (rows) for (size_t i = 0; i < private_keys.count; i++) free(rows[i].text);
+    free(rows); sh_json_object_free(&private_keys); sh_json_object_free(&locales); free(json);
 }
 
 /* Inject the user, package and baked layers. Return the appended row count. */
@@ -649,6 +1047,20 @@ static void sh_sort_detour(void *ctx, void *arr, uint32_t count, uint32_t radix)
     if (g_sort_orig == NULL) return;   /* defensive: never happens once installed */
 
     LONG depth = InterlockedIncrement(&g_in_sort);
+    if (depth == 1 && g_native_cvars && radix == SORT_RADIX && g_table_desc) {
+        __try {
+            unsigned char *native_array; uint32_t native_count;
+            if (strids_table(&native_array, &native_count) && arr == native_array && count == native_count) {
+                /* The native language parser replaces the dictionary before
+                 * invoking this sort. Runtime refresh calls the trampoline,
+                 * so it never discards its own saved originals here. */
+                strids_forget_owned();
+                g_loaded_language[0] = 0;
+                strids_native_language(g_loaded_language);
+                InterlockedExchange(&g_injected, 0);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { g_pass_failed = 1; }
+    }
     if (depth == 1 && InterlockedCompareExchange(&g_injected, 1, 0) == 0) {
         /* If this top-level sort wins the latch, append now and let this
          * native sort order the enlarged table. Do not start a nested resort.
@@ -785,12 +1197,7 @@ unsigned long sh_strids_injected_count(void)
  */
 int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idstr_ctor)
 {
-    size_t i;
-    for (i = 0; i < g_owned_n; i++) {
-        if (g_owned_rows[i].text) HeapFree(GetProcessHeap(), 0, g_owned_rows[i].text);
-        free(g_owned_rows[i].id);
-    }
-    free(g_owned_rows); g_owned_rows = NULL; g_owned_capacity = 0;
+    strids_forget_owned(); g_loaded_language[0] = 0;
     free(g_injected_ids); g_injected_ids = NULL; g_injected_capacity = 0;
     g_owned_n = 0;
     g_pass_failed = 0;
@@ -806,6 +1213,15 @@ int sh_strids_test_inject(void *table_desc, void *insert, void *hash, void *idst
 void sh_strids_test_set_sort(void *sort)
 {
     g_sort_orig = (sort_fn_t)sort;
+}
+
+int sh_strids_test_native_sort(void)
+{
+    unsigned char *array; uint32_t count;
+    g_pass_failed = 0;
+    if (!g_table_desc || !strids_table(&array, &count)) return 0;
+    sh_sort_detour(g_table_desc, array, count, SORT_RADIX);
+    return !g_pass_failed;
 }
 
 /* How the injector attributed each row this pass: the id, and the owning package name ("<user>" for

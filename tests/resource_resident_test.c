@@ -1,5 +1,11 @@
 /* Exercise native refresh ordering, identity selection, recovery and scopes. */
 #include "../src/backend/resource_resident.c"
+static int vmr_failed, vmr_collected;
+int sh_virtual_material_runtime_status(char *error, size_t capacity)
+{
+    if (vmr_failed && error && capacity) snprintf(error, capacity, "synthetic atlas lookup failure");
+    return !vmr_failed;
+}
 static char g_log[4096];
 void backend_log(const char *message)
 {
@@ -9,11 +15,15 @@ void backend_log(const char *message)
 }
 
 static int failures, rebuilds, loads, updates, strings, defaults, fault, lookup_leaves_pending, source_mode = 3;
+static int render_fault, heap_pop_fault, expected_render_holds = 1;
 /* What the virtual-texture rebind observed: the heap on top of the scope stack,
  * how many reloads had finished, whether the consumer update had already run
  * and whether the renderer was still held. */
 static int rebinds, rebind_heap, rebind_loads, rebind_updates, rebind_held;
-static int font_resolves;
+static int font_resolves, fresh_rebinds;
+static int retained_alias;
+int sh_package_runtime_serves_native_identity(const char *type, const char *name)
+{ return retained_alias && !strcmp(type, "model") && !strcmp(name, "body.lwo"); }
 /* Bitmask of the objects a case expects the pass to reconstruct. */
 static int expect_reconstructed = 3;
 static unsigned char heap_object[0xd0], renderer_object[0x20], manager_object[0x30];
@@ -25,6 +35,11 @@ static DWORD main_thread;
 static const char *paths[3] = {"cooked/model/body.bmodel", "cooked/material/skin.bmaterial", "cooked/model/unrelated.bmodel"};
 static int counts[3];
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%d: %s\n", __LINE__, #x); failures++; } } while (0)
+void sh_virtual_material_runtime_collect(void)
+{
+    CHECK(*(int *)(renderer_object + 0x14) == expected_render_holds);
+    vmr_collected++;
+}
 uintptr_t glb_resolve(const uint8_t *base, const char *name, glb_status *status)
 { (void)base; (void)name; (void)status; return 0; }
 const sh_resource_catalog *sh_package_runtime_catalog(void) { return NULL; }
@@ -42,13 +57,21 @@ size_t sh_resource_catalog_find_path(const sh_resource_catalog *catalog, const c
     if (!strcmp(path, alias.path)) { *rows = found; return 1; }
     return 0;
 }
+size_t sh_resource_catalog_find(const sh_resource_catalog *catalog, const char *type, const char *name,
+    const sh_resource_catalog_entry *const **rows)
+{ (void)catalog; (void)type; (void)name; *rows = NULL; return 0; }
 static void *heap_get(void) { return heap_object; }
 static void heap_push(void *self, int index)
 {
     int *depth = (int *)((unsigned char *)self + 0xc4);
     *(int *)((unsigned char *)self + 0x44 + 4 * (*depth)++) = index;
 }
-static void heap_pop(void *self) { --*(int *)((unsigned char *)self + 0xc4); }
+static void heap_pop(void *self)
+{
+    if (heap_pop_fault == 1) RaiseException(0xe0800010, 0, 0, NULL);
+    --*(int *)((unsigned char *)self + 0xc4);
+    if (heap_pop_fault == 2) RaiseException(0xe0800011, 0, 0, NULL);
+}
 static int mode_get(void) { return source_mode; }
 static int index_of(void *self) { return (int)(((unsigned char *)self - objects[0]) / sizeof(objects[0])); }
 static void *path_get(void *self, void *out, int mode)
@@ -61,7 +84,14 @@ static void *path_get(void *self, void *out, int mode)
     return out;
 }
 static void string_free(void *self) { free(*(void **)((unsigned char *)self + 0x10)); strings--; }
-static void suspend_adjust(void *self, int delta) { *(int *)((unsigned char *)self + 0x14) += delta; }
+static void suspend_adjust(void *self, int delta)
+{
+    if ((delta > 0 && render_fault == 1) || (delta < 0 && render_fault == 3))
+        RaiseException(0xe0800012, 0, 0, NULL);
+    *(int *)((unsigned char *)self + 0x14) += delta;
+    if ((delta > 0 && render_fault == 2) || (delta < 0 && render_fault == 4))
+        RaiseException(0xe0800013, 0, 0, NULL);
+}
 static void synchronize(void *self, unsigned char a, unsigned char b, unsigned char c)
 { (void)self; CHECK(a == 0 && b == 0 && c == 1); }
 static void update(void *self)
@@ -88,6 +118,15 @@ static void rebind(void)
     rebind_loads = loads; rebind_updates = updates;
     rebind_held = *(int *)(renderer_object + 0x14);
     if (fault == 6) RaiseException(0xe0800006, 0, 0, NULL);
+}
+static void rebind_material(void *material)
+{
+    CHECK(material == objects[2]);
+    CHECK(*(int *)(heap_object + 0xc4) == 1 && *(int *)(heap_object + 0x44) == 0);
+    CHECK(*(int *)(renderer_object + 0x14) == 1);
+    CHECK(!rebinds && !rebuilds && !loads && !updates);
+    fresh_rebinds++;
+    if (fault == 10) RaiseException(0xe0800015, 0, 0, NULL);
 }
 static void *lookup(void *manager, const char *name);
 static void world_text_fonts(void *self)
@@ -137,13 +176,17 @@ static void *lookup(void *manager, const char *name)
 }
 static void reset(void)
 {
+    CHECK(!g_rr_scope_recovery && !g_rr_active);
+    render_fault = heap_pop_fault = 0; expected_render_holds = 1;
+    vmr_failed = vmr_collected = 0;
+    retained_alias = 0;
     sh_resource_graph_frame frame;
     rr_free(g_rr_recovery); g_rr_recovery = NULL;
     memset(heap_object, 0, sizeof(heap_object)); memset(objects, 0, sizeof(objects));
     memset(manager_object, 0, sizeof(manager_object)); memset(renderer_object, 0, sizeof(renderer_object));
     memset(counts, 0, sizeof(counts)); rebuilds = loads = updates = strings = defaults = fault = lookup_leaves_pending = 0;
     rebinds = 0; rebind_heap = rebind_loads = rebind_updates = rebind_held = -1;
-    font_resolves = 0;
+    font_resolves = fresh_rebinds = 0;
     expect_reconstructed = 3;
     source_mode = 3; main_thread = GetCurrentThreadId(); head = manager_object; renderer = renderer_object;
     *(const char **)(manager_object + 8) = "model";
@@ -161,6 +204,7 @@ static void reset(void)
     g_rr.mode = mode_get; g_rr.string_free = string_free;
     g_rr.reconstruct = reconstruct; g_rr.load = load; g_rr.lookup = lookup;
     g_rr.rebind = rebind;
+    g_rr.rebind_material = rebind_material;
     g_rr.world_text_fonts = world_text_fonts;
     sh_resource_graph_test_reset();
     /* Identity dependency exists, but the primary file was loaded before
@@ -184,6 +228,71 @@ static void check_restored(void)
 static void success_cases(void)
 {
     char error[256];
+    for (int recovery = 0; recovery < 2; recovery++) {
+        /* Constructor-only changes have no physical path row. Select both
+         * logical aliases and their recorded consumers without retiring them. */
+        reset(); expect_reconstructed = 7;
+        sh_package_native_identity rebound[] = {{"model", "body.lwo"}, {"model", "unrelated"}};
+        sh_package_changes changes = {0}; changes.identities_complete = 1;
+        changes.rebound = rebound; changes.rebound_count = 2;
+        sh_resource_resident *pass = sh_resource_resident_begin(&changes, recovery, 0, error, sizeof(error));
+        CHECK(pass && pass->count == 3);
+        if (pass) {
+            CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+            CHECK(sh_resource_resident_drain(pass, error, sizeof(error)) && loads == 3 && !defaults);
+            CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error))); check_restored();
+        }
+    }
+    {
+        /* A secondary native alias can outlive one of its physical paths.
+         * The current provider's full identity set owns that lifetime, even
+         * when the removed path's primary identity names something else. */
+        reset(); retained_alias = 1;
+        sh_package_change row = {(char *)paths[0], SH_PACKAGE_RESOURCE_REMOVED, "model", "primary"};
+        sh_package_changes changes = {&row, 1}; changes.identities_complete = 1;
+        sh_resource_resident *pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));
+        CHECK(pass && pass->count == 2);
+        if (pass) {
+            CHECK(!pass->items[0].retired);
+            CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+            CHECK(sh_resource_resident_drain(pass, error, sizeof(error)) && loads == 2 && !defaults);
+            CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error))); check_restored();
+        }
+    }
+    for (int retired = 0; retired < 2; retired++) {
+        /* A missing physical member does not retire a still-supplied native
+         * identity. Removing the complete identity does, including consumers. */
+        reset();
+        sh_package_change row = {(char *)paths[0], SH_PACKAGE_RESOURCE_REMOVED, "model", "body.lwo"};
+        sh_package_native_identity removed = {"model", "body.lwo"};
+        sh_package_changes changes = {&row, 1};
+        changes.identities_complete = 1; changes.removed = retired ? &removed : NULL; changes.removed_count = retired;
+        sh_resource_resident *pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));
+        CHECK(pass && pass->count == 2); if (!pass) continue;
+        CHECK(pass->items[0].retired == retired);
+        CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+        CHECK(sh_resource_resident_drain(pass, error, sizeof(error)));
+        CHECK(loads == (retired ? 1 : 2) && defaults == retired);
+        CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error))); check_restored();
+    }
+    {
+        /* Equal path bytes rebound to a different native object must select
+         * both identities, including the old one's dependent cached object. */
+        reset(); expect_reconstructed = 7;
+        sh_package_change row = {"compiled/shared.bin", SH_PACKAGE_RESOURCE_REPLACED,
+            "model", "unrelated", "model", "body.lwo"};
+        sh_package_native_identity added = {"model", "unrelated"}, removed = {"model", "body.lwo"};
+        sh_package_changes changes = {&row, 1};
+        changes.added = &added; changes.added_count = 1;
+        changes.removed = &removed; changes.removed_count = 1; changes.identities_complete = 1;
+        sh_resource_resident *pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));
+        CHECK(pass && pass->count == 3);
+        if (pass) {
+            CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+            CHECK(sh_resource_resident_drain(pass, error, sizeof(error)) && defaults == 1 && loads == 2);
+            CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error))); check_restored();
+        }
+    }
     for (int removed = 0; removed < 2; removed++) {
         /* A package-only declaration has no catalog row; its native path can
          * differ from the compiled source. Both publication and removal must
@@ -529,15 +638,174 @@ static void failure_cases(void)
     {
         sh_package_changes changes = {0};
         sh_resource_resident *pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));
-        CHECK(pass && !pass->count && pass->held); /* Declaration/policy rearm still needs renderer ownership. */
+        CHECK(pass && !pass->count && pass->render.active == 2); /* Policy rearm still needs renderer ownership. */
         CHECK(!sh_resource_resident_selected(pass, objects[0]));
         CHECK(!sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error))); /* Nested capture cannot replace its owner. */
         CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error))); check_restored();
     }
 }
+static void atlas_failure_cases(void)
+{
+    char error[256];
+    for (int stage = 0; stage < 3; stage++) {
+        sh_resource_resident *pass;
+        reset(); pass = begin(paths[0], 0, error); CHECK(pass);
+        CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+        if (stage) CHECK(sh_resource_resident_drain(pass, error, sizeof(error)));
+        vmr_failed = 1;
+        if (stage < 2) CHECK(!sh_resource_resident_drain(pass, error, sizeof(error)));
+        CHECK(!sh_resource_resident_end(pass, 1, error, sizeof(error)));
+        CHECK(vmr_collected == 1 && g_rr_recovery);
+        check_restored(); vmr_failed = 0;
+        pass = begin(paths[0], 1, error); CHECK(pass);
+        CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+        CHECK(sh_resource_resident_drain(pass, error, sizeof(error)));
+        CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error)) && !g_rr_recovery);
+        CHECK(vmr_collected == 2); check_restored();
+    }
+}
+static void scope_failure_cases(void)
+{
+    char error[256];
+    for (int stage = 1; stage <= 4; stage++) {
+        sh_package_changes changes = {0};
+        sh_resource_resident *pass;
+        reset(); render_fault = stage < 3 ? stage : 0;
+        pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));
+        if (stage < 3) {
+            CHECK(!pass && !g_rr_scope_recovery && !g_rr_recovery);
+            check_restored(); continue;
+        }
+        CHECK(pass); render_fault = stage;
+        CHECK(!sh_resource_resident_end(pass, 1, error, sizeof(error)));
+        if (stage == 3) {
+            CHECK(g_rr_scope_recovery == pass && *(int *)(renderer_object + 0x14) == 1);
+            CHECK(!sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error)));
+            CHECK(g_rr_scope_recovery == pass && !*(int *)(heap_object + 0xc4));
+        } else CHECK(!g_rr_scope_recovery && !g_rr_recovery);
+        render_fault = 0;
+        pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));
+        CHECK(pass && !g_rr_scope_recovery);
+        CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error)));
+        check_restored();
+    }
+    for (int stage = 1; stage <= 2; stage++) {
+        sh_package_changes changes = {0};
+        sh_resource_resident *pass;
+        reset(); pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));
+        CHECK(pass); heap_pop_fault = stage;
+        CHECK(!sh_resource_resident_end(pass, 1, error, sizeof(error)));
+        CHECK((g_rr_scope_recovery != NULL) == (stage == 1));
+        CHECK(!*(int *)(renderer_object + 0x14));
+        heap_pop_fault = 0;
+        pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));
+        CHECK(pass && !g_rr_scope_recovery);
+        CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error)));
+        check_restored();
+    }
+    {
+        sh_resource_resident *pass;
+        reset(); pass = begin(paths[0], 0, error); CHECK(pass);
+        CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+        render_fault = 3;
+        CHECK(!sh_resource_resident_end(pass, 0, error, sizeof(error)));
+        CHECK(g_rr_scope_recovery == pass && !g_rr_recovery);
+        render_fault = 0;
+        /* Even when the native scopes could not initially release, retain the
+         * affected identities for the restored provider's reconstruction. */
+        sh_resource_graph_test_reset();
+        pass = begin(paths[0], 1, error); CHECK(pass && pass->count == 2);
+        CHECK(!g_rr_scope_recovery && g_rr_recovery);
+        CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+        CHECK(sh_resource_resident_drain(pass, error, sizeof(error)));
+        CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error)));
+        check_restored();
+    }
+    {
+        sh_package_changes changes = {0};
+        sh_render_scope outer = {0};
+        sh_resource_resident *pass;
+        reset(); CHECK(sh_render_scope_enter(&renderer, &main_thread, &outer));
+        pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));
+        CHECK(pass && *(int *)(renderer_object + 0x14) == 2);
+        expected_render_holds = 2;
+        CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error)));
+        CHECK(*(int *)(renderer_object + 0x14) == 1);
+        CHECK(sh_render_scope_leave(&outer)); check_restored();
+    }
+}
+static void scope_ownership_cases(void)
+{
+    char error[256]; sh_package_changes changes = {0};
+    reset();
+    CHECK(!sh_resource_resident_owned(NULL));
+    sh_resource_resident *pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));
+    CHECK(pass && sh_resource_resident_owned(pass));
+    CHECK(sh_resource_resident_selected_count(pass) == 0);
+    (*(int *)(heap_object + 0xc4))++;
+    CHECK(!sh_resource_resident_owned(pass));
+    (*(int *)(heap_object + 0xc4))--;
+    CHECK(sh_resource_resident_owned(pass));
+    (*(int *)(renderer_object + 0x14))++;
+    CHECK(!sh_resource_resident_owned(pass));
+    (*(int *)(renderer_object + 0x14))--;
+    DWORD owner = main_thread; main_thread++;
+    CHECK(!sh_resource_resident_owned(pass)); main_thread = owner;
+    CHECK(sh_resource_resident_owned(pass));
+    CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error)));
+    check_restored();
+    pass = begin(paths[0], 0, error);
+    CHECK(pass && sh_resource_resident_selected_count(pass) > 0);
+    CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error)));
+    check_restored();
+}
+static void additive_finalization_cases(void)
+{
+    char error[256];
+    void *existing[] = {objects[0], objects[1]};
+    sh_package_changes empty = {0};
+    for (int failure = 0; failure < 2; failure++) {
+        reset();
+        *(const char **)(manager_object + 8) = "material";
+        *(int *)(manager_object + 0x28) = 2;
+        sh_resource_resident *pass = sh_resource_resident_begin(&empty, 0, 0, error, sizeof(error));
+        CHECK(pass && !sh_resource_resident_selected_count(pass));
+        *(int *)(manager_object + 0x28) = 3;
+        *(int *)(objects[2] + 0x28) = 1;
+        objects[0][0x100] = 19; objects[1][0x100] = 37;
+        CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+        fault = failure ? 10 : 0;
+        CHECK(sh_resource_resident_drain_additions(pass, existing, 2, error, sizeof(error)) == !failure);
+        CHECK(fresh_rebinds == 1 && !rebinds && !loads && !rebuilds && updates == !failure);
+        CHECK(objects[0][0x100] == 19 && objects[1][0x100] == 37);
+        CHECK(*(int *)(objects[2] + 0x28) == 4);
+        CHECK(sh_resource_resident_end(pass, !failure, error, sizeof(error)) == !failure);
+        check_restored();
+    }
+    reset();
+    *(const char **)(manager_object + 8) = "snapeditorsettings";
+    *(int *)(manager_object + 0x28) = 2;
+    sh_resource_resident *pass = sh_resource_resident_begin(&empty, 0, 0, error, sizeof(error));
+    CHECK(pass && !sh_resource_resident_selected_count(pass));
+    *(int *)(manager_object + 0x28) = 3;
+    CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+    CHECK(sh_resource_resident_drain_additions(pass, existing, 2, error, sizeof(error)));
+    CHECK(font_resolves == 1 && !rebinds && !fresh_rebinds);
+    CHECK(!*(void **)(objects[0] + 0x688) && !*(void **)(objects[1] + 0x688));
+    CHECK(*(void **)(objects[2] + 0x688) == objects[0]);
+    CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error))); check_restored();
+    reset();
+    pass = begin(paths[0], 0, error);
+    CHECK(pass && sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+    CHECK(!sh_resource_resident_drain_additions(pass, existing, 2, error, sizeof(error)));
+    CHECK(strstr(error, "pre-existing object") && !rebinds && !fresh_rebinds && !updates);
+    CHECK(!sh_resource_resident_end(pass, 0, error, sizeof(error)));
+    check_restored();
+}
 int main(void)
 {
-    success_cases(); world_text_cases(); initial_publication_cases(); failure_cases();
+    success_cases(); world_text_cases(); initial_publication_cases(); failure_cases(); atlas_failure_cases(); scope_failure_cases(); scope_ownership_cases();
+    additive_finalization_cases();
     rr_free(g_rr_recovery); g_rr_recovery = NULL;
     sh_resource_graph_test_reset();
     printf("resident refresh: %d failure(s)\n", failures); return failures ? 1 : 0;

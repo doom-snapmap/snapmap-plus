@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "overrides.h"
+#include "package_shader_receipt.h"
 
 static int g_failed;
 static int g_user_enabled;
@@ -281,6 +282,78 @@ static void test_file_stream_is_read_only(void)
 }
 
 
+static void test_owned_file_stream(void)
+{
+    char temp_dir[MAX_PATH], path[MAX_PATH], bytes[16] = {0};
+    CHECK(GetTempPathA(sizeof(temp_dir), temp_dir) != 0);
+    CHECK(GetTempFileNameA(temp_dir, "smp", 0, path) != 0);
+    FILE *file = fopen(path, "wb");
+    CHECK(file != NULL); if (!file) { DeleteFileA(path); return; }
+    CHECK(fwrite("owned-pages", 1, 11, file) == 11); fclose(file);
+    sh_overrides_test_stream_helpers_reset();
+    file = fopen(path, "rb"); CHECK(file != NULL);
+    CHECK(!sh_overrides_stream_take_file(file, 11, "virtualtextures/private.pages"));
+    /* Exclusive reopen proves the failed constructor released the owned file. */
+    HANDLE exclusive = CreateFileA(path, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+    CHECK(exclusive != INVALID_HANDLE_VALUE);
+    if (exclusive != INVALID_HANDLE_VALUE) CloseHandle(exclusive);
+    CHECK(sh_overrides_test_stream_helpers_configure((void *)(uintptr_t)0x1111, 1,
+        (void *)(uintptr_t)0x2222, 1, (void *)(uintptr_t)0x3333, 1));
+    file = fopen(path, "rb"); CHECK(file != NULL);
+    if (file) CHECK(_fseeki64(file, 8, SEEK_SET) == 0);
+    char name[] = "virtualtextures/private.pages";
+    void *stream = sh_overrides_stream_take_file(file, 11, name);
+    name[0] = 'X';
+    CHECK(stream != NULL);
+    if (stream) {
+        void **table = *(void ***)stream;
+        const char *(*get_name)(void *) = (void *)table[3];
+        CHECK(!strcmp(get_name(stream), "virtualtextures/private.pages"));
+        CHECK(sh_overrides_test_stream_read(stream, bytes, sizeof(bytes)) == 11);
+        CHECK(!strcmp(bytes, "owned-pages"));
+        CHECK(sh_overrides_test_stream_length(stream) == 11);
+        CHECK(sh_overrides_test_stream_write(stream, "x", 1) == 0);
+        sh_overrides_test_stream_close(stream);
+    }
+    file = fopen(path, "rb"); CHECK(file != NULL);
+    CHECK(!sh_overrides_stream_take_file(file, UINT64_MAX, "virtualtextures/private.pages"));
+    exclusive = CreateFileA(path, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+    CHECK(exclusive != INVALID_HANDLE_VALUE);
+    if (exclusive != INVALID_HANDLE_VALUE) CloseHandle(exclusive);
+    CHECK(!sh_overrides_stream_take_file(NULL, 0, "virtualtextures/private.pages"));
+    sh_overrides_test_stream_helpers_reset(); CHECK(DeleteFileA(path));
+}
+
+static void test_copied_byte_stream(void)
+{
+    unsigned char source[] = "private page bytes";
+    char name[] = "virtualtextures/private.pages", bytes[32] = {0};
+    sh_overrides_test_stream_helpers_reset();
+    CHECK(!sh_overrides_stream_copy_bytes(source, sizeof(source) - 1, name));
+    CHECK(sh_overrides_test_stream_helpers_configure((void *)(uintptr_t)0x1111, 1,
+        (void *)(uintptr_t)0x2222, 1, (void *)(uintptr_t)0x3333, 1));
+    CHECK(!sh_overrides_stream_copy_bytes(NULL, 1, name));
+    CHECK(!sh_overrides_stream_copy_bytes(source, sizeof(source), NULL));
+    CHECK(!sh_overrides_stream_copy_bytes(source, SIZE_MAX, name));
+    void *stream = sh_overrides_stream_copy_bytes(source, sizeof(source) - 1, name);
+    CHECK(stream != NULL); source[0] = 'X'; name[0] = 'X';
+    if (stream) {
+        void **table = *(void ***)stream;
+        CHECK(!strcmp(((const char *(*)(void *))table[3])(stream), "virtualtextures/private.pages"));
+        CHECK(sh_overrides_test_stream_read(stream, bytes, sizeof(bytes)) == sizeof(source) - 1);
+        CHECK(!strcmp(bytes, "private page bytes"));
+        CHECK(sh_overrides_test_stream_write(stream, "x", 1) == 0);
+        sh_overrides_test_stream_close(stream);
+    }
+    stream = sh_overrides_stream_copy_bytes(NULL, 0, "empty"); CHECK(stream != NULL);
+    if (stream) {
+        CHECK(sh_overrides_test_stream_length(stream) == 0);
+        CHECK(sh_overrides_test_stream_read(stream, bytes, sizeof(bytes)) == 0);
+        sh_overrides_test_stream_close(stream);
+    }
+    sh_overrides_test_stream_helpers_reset();
+}
+
 static void test_refresh_keeps_open_streams(void)
 {
     static const unsigned char old_body[] = "old body";
@@ -348,11 +421,48 @@ static void test_refresh_keeps_open_streams(void)
     sh_overrides_test_internal_decl_table_reset();
 }
 
+static unsigned char shader_header[0x90];
+static int shader_read_memory(void *context, uintptr_t address, void *out, size_t length)
+{
+    (void)context;
+    if (address != (uintptr_t)shader_header || length > sizeof(shader_header)) return 0;
+    memcpy(out, shader_header, length); return 1;
+}
+static void test_actual_stream_receipt(void)
+{
+    const char source[] = "{ Tex2D source }\r\n";
+    const char *path = "generated/decls/renderparm/test.decl";
+    sh_package_shader_receipt_frame frame;
+    void *stream = sh_overrides_test_memory_stream(source, strlen(source));
+    CHECK(stream != NULL); if (!stream) return;
+    void **original = *(void ***)stream; char body[64] = {0};
+    sh_package_shader_receipt_begin(&frame, (uintptr_t)shader_header, "renderparm", "test");
+    sh_overrides_test_receipt_attach(stream, path);
+    void **table = *(void ***)stream;
+    CHECK(table != original && table[5] != original[5] && table[0] != original[0]);
+    for (size_t i = 1; i < 31; i++) if (i != 5) CHECK(table[i] == original[i]);
+    long long (*read)(void *, void *, uint64_t) = (void *)table[5];
+    CHECK(read(stream, body, 4) == 4);
+    CHECK(read(stream, body + 4, sizeof(body) - 4) == (long long)strlen(source) - 4);
+    CHECK(!memcmp(body, source, strlen(source)));
+    CHECK(((long long (*)(void *))table[13])(stream) == (long long)strlen(source));
+    /* The native destructor receives its original table, and the private
+     * observer dies with this stream. No bytes were reread by path. */
+    ((void *(*)(void *, unsigned))table[0])(stream, 1);
+    sh_package_shader_receipt_end(&frame, 1, shader_read_memory, NULL);
+    CHECK(sh_package_shader_receipt_matches((uintptr_t)shader_header, "renderparm", "test",
+        source, strlen(source), shader_header, sizeof(shader_header)));
+    sh_package_shader_receipt_invalidate((uintptr_t)shader_header);
+}
+
 int main(void)
 {
     test_internal_decl_table();
     test_file_stream_is_read_only();
+    test_owned_file_stream();
+    test_copied_byte_stream();
     test_refresh_keeps_open_streams();
+    test_actual_stream_receipt();
     if (g_failed) {
         fprintf(stderr, "%d overrides internal-decl-table test(s) failed\n", g_failed);
         return 1;

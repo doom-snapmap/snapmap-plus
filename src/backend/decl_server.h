@@ -58,6 +58,35 @@ int sh_decl_server_map_browser_present(void);
 int sh_decl_server_map_editor_matches(const void *editor);
 struct sh_package_map_plan;
 int sh_decl_server_activate_map(struct sh_package_map_plan *plan);
+struct sh_package_occurrence_snapshot;
+int sh_decl_server_activate_occurrences(const struct sh_package_occurrence_snapshot *map);
+typedef struct sh_decl_server_occurrence_hooks {
+    void *context;
+    int (*prepare)(void *context, char *error, size_t capacity);
+    int (*finalize)(void *context, char *error, size_t capacity);
+    int (*rollback)(void *context, char *error, size_t capacity);
+} sh_decl_server_occurrence_hooks;
+/* Active-editor preThink admission. Prepare native staging only after fresh
+ * resources and named templates are available, while resident scopes are held.
+ * Finalize owns installation commit and a prevalidated no-fail staging transfer.
+ * Rollback releases temporary staging before native/provider recovery. A NULL
+ * plan performs the same staged native transaction for vanilla/local content.
+ * Returns a SH_PACKAGE_ADMISSION_* result; never switches the current map. */
+int sh_decl_server_admit_occurrences(struct sh_package_map_plan *plan,
+    const struct sh_package_occurrence_snapshot *document,
+    const sh_decl_server_occurrence_hooks *hooks, char *error, size_t capacity);
+/* A failed native teardown retains the copied hooks and their caller context.
+ * Keep that context alive until this returns zero; main-thread maintenance
+ * retries cleanup at the owning editor frame or a retired-map boundary. */
+int sh_decl_server_occurrence_recovery_pending(void *hooks_context);
+void sh_decl_server_occurrence_maintenance(void);
+struct sh_package_shader_preparation;
+/* Source construction is admitted separately from source compilation. The
+ * caller retains its immutable candidate and releases all provider locks.
+ * Returns 1 verified, 0 refused/recovered, or -1 if native recovery failed. */
+int sh_decl_server_shader_preparation_ready(void);
+int sh_decl_server_prepare_shaders(struct sh_package_shader_preparation *batch,
+    char *error, size_t capacity);
 
 /* Bind the verified native registry and read-only source existence for a
  * short main-thread dependency pass. No compiler snapshot lock may be held
@@ -71,6 +100,7 @@ struct sh_package_compilation;
 int sh_decl_server_test_capture(const struct sh_package_compilation *compiled,
                                  size_t *count, size_t *bytes);
 void sh_decl_server_test_fail_mark_allocation(int fail);
+void sh_decl_server_test_occurrence_ready(void *editor);
 
 typedef struct sh_decl_server_test_find_api {
     HANDLE (WINAPI *find_first)(LPCSTR pattern, LPWIN32_FIND_DATAA found);
@@ -173,6 +203,7 @@ int sh_decl_server_test_register_candidate(
  * protocol's outcome assertable. */
 typedef void (*sh_decl_server_test_generic_load_fn)(void *decl);
 void sh_decl_server_test_set_runtime(int active);
+void sh_decl_server_test_set_additive(int active);
 void sh_decl_server_test_set_resident(void *pass);
 void sh_decl_server_test_set_generic_load(sh_decl_server_test_generic_load_fn fn);
 void sh_decl_server_test_set_reconstruct(sh_decl_server_test_generic_load_fn fn,
@@ -204,10 +235,17 @@ int sh_decl_server_test_scan_and_materialize_missing(
     sh_decl_server_test_register_file_fn register_file,
     int *registered, int *materialized, int *failure_phase);
 void sh_decl_server_test_reset_install(void);
+const char *sh_decl_server_test_occurrence_source_name(void *decl);
+int sh_decl_server_test_palette_hold(void *batch);
+int sh_decl_server_test_palette_maintenance(void);
+size_t sh_decl_server_test_palette_holds(void);
 int sh_decl_server_test_apply(const sh_decl_server_test_materialize_item *items,
                               size_t count, int runtime);
 int sh_decl_server_test_lifetime_watermark(void);
 int sh_decl_server_test_promote_delta(void);
+int sh_decl_server_test_prepare_shaders(struct sh_package_shader_preparation *batch,
+    sh_decl_server_test_find_decl_fn find, char *error, size_t capacity);
+int sh_decl_server_test_shader_recovery(void);
 #endif
 
 #endif /* BACKEND_DECL_SERVER_H */

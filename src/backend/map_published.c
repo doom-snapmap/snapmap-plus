@@ -195,13 +195,13 @@ static int pub_select_decoded(void *context, const void *metadata, void *snapsho
     sh_map_render_select(&settings);
     return 1;
 }
-static int pub_select(void *context)
+static int pub_select(void *context, const char *json)
 {
     pub_request *request = context;
     char error[512];
     int ok;
     sh_rawmap_inspection_enter();
-    __try { ok = sh_map_native_enter(request->selection, sh_map_native_source(request->selection, NULL),
+    __try { ok = sh_map_native_enter(request->selection, json,
         pub_select_decoded, request, error, sizeof(error)); }
     __finally { sh_rawmap_inspection_leave(); }
     if (!ok && error[0]) backend_log(error);
@@ -237,6 +237,8 @@ static int pub_enter(void *context, const char *json)
     pub_request *request = context;
     char error[512];
     int ok;
+    /* This preliminary snapshot contains only lobby settings. Full gameplay
+     * decoding receives the prepared source through pub_select at activation. */
     (void)json;
     sh_rawmap_inspection_enter();
     __try { ok = sh_map_native_session(request->selection, pub_enter_native, request, error, sizeof(error)); }

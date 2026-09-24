@@ -156,9 +156,13 @@ still reference them. Save files contain the dimension-bearing module identity;
 players need Snapmap+ to reconstruct its resources. Vanilla loading is unsupported.
 
 The shared object uses an append-only vtable. Its original 77-slot prefix is
-retained, with extensions through `+0x338`; the current table occupies `0x340`
-bytes. The last three are the File menu's rawmap surface: `rawmap_status`
-(`+0x328`), `rawmap_configure` (`+0x330`) and `rawmap_load_now` (`+0x338`).
+retained, with extensions through `+0x340`; the current table occupies `0x348`
+bytes. The File menu's rawmap callbacks occupy `+0x328` through `+0x338`.
+`prefab_export` at `+0x340` returns one complete process-heap allocation,
+which the frontend releases with `HeapFree(GetProcessHeap(), 0, bytes)`.
+The fixed object records a marker and table extent in formerly reserved bytes
+at `+0x08` and `+0x10`. Check `sh_iface_prefab_export` before reading the new
+slot; an older zeroed marker safely reports that export is unavailable.
 Static assertions pin the layout. Do not insert, reorder or repurpose
 existing slots. Add new capability slots at the end and update both DLLs.
 
@@ -166,6 +170,12 @@ Headers define buffer ownership, return values and thread requirements. Keep
 engine pointers inside the backend where possible. Copy values across the
 boundary rather than exposing mutable engine storage. An accepted asynchronous
 request is distinct from completed engine work.
+
+Prefab export marshals native serialization and source capture to the engine
+thread, then transfers the completed bytes to its caller. Existing bounded
+export slots return zero if the complete payload does not fit. The owned slot
+and prefab import queue have no fixed payload buffer; native signed string
+lengths and allocation overflow remain checked.
 
 ## Threads and edit results
 
@@ -199,6 +209,17 @@ that every native engine operation can be undone.
 Prefab Load/Place stages data and queues the native paste action after checking
 editor state and the copy/paste cvar. Queue acceptance does not confirm that the
 engine has entered placement mode. The engine consumes that action later.
+
+Portable imports retain their original destination editor, map and load
+generation while compilation or consent is pending. `package_document` supplies
+the same source interpretation and typed rebinding used by map preparation;
+`prefab_import` drives admission only from the editor's verified pre-Think frame.
+Availability uses the imported document's actual resource closure. Covered
+resources do not prompt; missing resources request complete supplying bundles.
+Leaving the destination cancels that request rather than placing it in another
+map. Native staging and source ownership remain retained until either successful
+finalization or verified rollback. Imported content does not replace the current
+map's provider or authorize a global palette rebuild.
 
 ## Engine data ownership
 
@@ -272,6 +293,682 @@ files. Discovery, semantic compilation and native publication are separate
 operations. Incomplete inventories must not publish a partial package set.
 Author-facing format and examples live in the [player guide](../site/snapmap-plus-guide.md#overrides).
 
+### Package linker construction
+
+The variant linker is under development. Local library preparation now calls
+`package_library`; historical map preparation reconstructs its recorded composed
+sources before assigning native identities.
+Native implicit-binding coverage and live acceptance remain unfinished, so this
+route is not yet ready for deployment. Its source
+representation stays `package.json` plus `assets/`; compiled
+identities are internal. Gameplay resources bind within their authored package
+context. Shared editor collections retain native composition semantics, and
+map-wide settings still require one compatible effective policy. Existing maps
+must retain their historical composed bindings when loaded and saved again.
+
+`package_library` compiles each lexical component before comparing peer gameplay
+edits. The source walk retains its explicit dependency edges and propagates
+gameplay ownership through them, including cycles. Eligible shared editor and
+editor-only entity declarations compose using the existing collection adapters;
+editor definitions that reach private gameplay stay in that gameplay scope.
+The second binding pass projects those resources into the runtime provider and
+retains an internal source-context index for later map selection. Whole authored
+trees remain unchanged. Local/delivered folder conventions and matching package
+IDs do not suppress contributions in this compilation context. Historical
+composition and policy views retain their previous interpretation separately.
+
+Weapon HUD metadata binds the `weapon` declaration family after resource linking.
+Owner-tagged rows retain the actual native alias through source projection,
+map overlays, usage selection and occurrence-provider retention. Raw descriptor
+keys never replace those rows during later policy reconstruction. Distinct weapon
+bindings retain distinct presentation; equal bindings dedupe and choose `weapon`
+mode for differing peer requests. Map-authored rows override local rows for a
+shared weapon. The compiler and native HUD consumer share one schema codec, and
+a failed table refresh retains the previous policy until transaction recovery.
+
+Document contexts give changed editor declarations private identities as well.
+Reusing an original editor name requires exact native source bytes and unchanged
+reachable dependencies. This preserves vanilla names without treating arbitrary
+native readers as name-independent. Local authoring still composes its shared
+editor extensions; imported authored differences cannot rewrite those live
+objects. Temporary imported palette entries extend name lookup only on a native
+miss and retain exact source ownership independently of staging or placed entities.
+
+Dependency classification is not a native-original certificate. The local-library
+stage resolves `landPageFile` from scoped String defaults and ordered material
+writes, asks its native adapter for the actual page provider and resolved data
+identity, and includes the resulting atlas binding in deduplication. After linking,
+it prepares owned alias rows and transfers the view to the runtime provider. A
+missing adapter still refuses renamed non-generic materials. Production now uses
+`package_native_assets` for loose original tables and the engine-owned `_vmtr`
+provider. It pins original files without reading unrelated texture pages; an
+authored page copy must pass a complete byte-identity comparison before sharing
+that provider. Private page providers remain unfinished. The adapter admits the
+thirteen intrinsic images registered during startup in both renderers as
+engine-owned resources, retaining their native names. This is a finite native
+identity set; arbitrary underscore names and missing source files are not
+admitted. References to a cooked image file remain distinct from an intrinsic
+image even when their basenames match. Other zero-file native families still
+require admission rules. Both compiler passes and material inspection share captured original
+bytes, absence and read failures; they cannot reread different defaults mid-build.
+
+Articulated-figure inspection and relocation share one native grammar reader.
+Settings bind the MD6 definition and clip material; custom body shapes bind a
+collision-model resource. Joint/body names, constraints, geometric shapes and
+solver settings retain their authored bytes. Equal figures deduplicate only when
+their resolved dependencies also match. Nonempty skin fields still require a
+verified consumer, and collision-model payload relocation remains separate from
+identifying its reference; neither is treated as a dependency-free success.
+
+Native original snapshots are retained across provider refreshes. Capture and
+memoized identities are synchronized so preparation and availability queries can
+overlap without moving another reader's file position or invalidating its data.
+Pinned originals deny writes and deletion until their last owner releases them;
+editable package sources retain the existing verify-before-publication contract.
+
+`decl_rebind` uses the dependency schema's verified reference sites to prepare
+declaration and inline-state bindings. It does not search arbitrary string values.
+JSON sites point into the original document, so unrelated bytes, whitespace and
+native map strings survive unchanged. Unsupported coverage or a failed resolver
+publishes no modified output. `resource_rebind` provides the same transaction for
+verified idStr records in static and discrete models, MD6 meshes and animation headers; it
+preserves geometry and other opaque bytes. Format relocation alone does not prove
+native cache, checksum or late-reference behavior. Discrete-model inspection
+walks counted geometry records to locate material and optional base-collision
+references, preserving the other bytes. Equal binary payloads with different
+material bindings produce distinct model identities and distinct referring
+breakables. Static particle meshes use a checked stamp/count/vertex envelope;
+they contain no resource-name records, so their vertex bytes remain untouched.
+Their material dependencies belong to the consuming particle declaration.
+Uncatalogued images, discrete models and particle meshes acquire their identity
+from typed consumers before unused files receive a cooked-file identity; the
+compiler does not invent a second source extension for the same file.
+Particle meshes use the filesystem's native generated-filename rules, shared
+with shader path generation: replace the extension and partition long basenames.
+This differs from the image/discrete-model filename rules. Private names must
+resolve to the same physical path the corresponding native consumer will open.
+
+`swf_binary` traverses cooked UI movie dictionaries and sprite envelopes. It
+reports direct material/font idStr records and exposes command payloads without
+treating local text or script bytes as arbitrary resource paths. Its paired
+filename helper follows the native constructor: derive the atlas with the
+filesystem routine, then derive the movie from that atlas name. A successful
+envelope read is not a complete movie admission decision; the consumer adapter
+must also bind the paired atlas, native font fallback, generated atlas materials,
+fixed GUI materials and runtime script requests before publishing a linked movie.
+Atlas materials are generated from image and stage-program references, with names
+derived from their movie; they are additional native identities to retain.
+
+`font_binary` checks the native glyph header and counted glyph/index records,
+preserving uninterpreted metric bits and unread trailing data. It also derives
+the selected glyph filename and its main/world-text/label material names using
+the native space/hyphen normalization. These names are implicit dependencies;
+they are not serialized resource strings inside the glyph file. Distance-font
+selection, optional material availability and the movie's original-name/language
+fallback decisions remain consumer responsibilities. This envelope layer alone
+does not admit a complete linked font or substitute a default for an unusable file.
+The native naming adapter keeps the 48, 64_df and 12 glyph-file forms together
+under one font identity, including bounded collision-retry aliases. It validates
+the original physical filename of each present form rather than treating every
+dat file as interchangeable. This is a naming contract; it does not independently
+prove the font's implicit material and language-dependent bindings.
+
+`package_font` captures the main material for each nonempty glyph form and the
+optional world-text/label roles. The source linker resolves these in the font's
+authored scope, then verified SnapMap originals, and freezes them as constructor
+edges. A campaign-only optional original is unavailable unless supplied in that
+scope; a failed read aborts capture instead of pretending the material is absent.
+Uncatalogued glyph files first belong to any typed consumer that names them;
+remaining files receive their native path-derived font identity. Missing and empty
+selected forms use the native 12.dat fallback. Glyph bytes are never rewritten.
+
+These edges drive exact dedupe, private identity assignment, consumer catalogs and
+saved-context reconstruction. The routing helper matches only the proven material
+requests derived from a font's own native identity. It does not establish a global
+package namespace. The native font-read adapter holds the active provider's
+complete plan, prepares its bound materials without defaults and supplies those
+objects at generic materialization and the existing DeclFind boundary. Captured
+optional absence bypasses the cold source probe. Nested loads, direct parsers and
+entity-state readers mask the outer plan; nested fonts acquire their own plan.
+Holds and masks unwind on native exceptions. Uncompiled fonts retain ordinary
+resolution. The engine still selects the glyph form and performs 12.dat fallback;
+the adapter does not change the global distance-font setting.
+
+The native asset handle admits fonts only with a configured, ready constructor
+adapter. This capability is process wiring, not package metadata. Movie-level
+language fallback, generated materials and script requests remain separate
+admission requirements. Native-shaped callback tests and two-image signature
+checks do not replace live acceptance.
+
+Native custom readers preserve animation state paths, animation alias handles
+and C++ class names as data rather than treating their spelling as resource
+paths. Other handle readers remain unsupported until their native contract is
+known. Numeric table declarations use their own curve grammar in both source
+inspection and rebinding; they carry values and no resource references.
+
+`package_link_graph` determines which resolved resources can share an engine
+identity. Nodes compare native family, original path, content identity and bound
+presentation/reader semantics. Dependency bindings refine that partition until
+stable, including cycles. Exact duplicates share a class regardless of delivery
+grouping or package metadata; identical model bytes with different materials do
+not. Only predecessors affected by a split need reconsideration. Class numbers
+are temporary compiler data, not persistent map or package identifiers.
+
+`package_scope` supplies a borrowed source view with original ownership indices:
+the component's own assets override enclosing components, followed by the game
+baseline. Sibling components and other delivery units do not fill its gaps.
+`package_compilation_project` publishes proven equivalent contributions at one
+engine path while retaining every original source owner. Private paths carry
+their original authored path for installation checks. Source grouping, package
+IDs and display names do not create duplicate gameplay instances.
+
+Historical composed contexts select their recorded delivery owners through
+`package_scope_composed`; isolated additions use their own component views.
+Both retain original source indices. Source provenance resolves the full tree
+fingerprint and component-relative path, returning every identical delivery
+copy without relying on folder names or descriptor IDs. Composed tree selection
+requires every recorded tree and never substitutes a same-ID local package.
+
+`package_provenance` retains source contexts and the native reader, original name,
+saved name and supplying contexts for each used binding. One shared asset can
+retain several authored sources. Its internal payload is canonical across
+insertion order and exact duplicates; it does not include host paths, author IDs
+or asset bytes. `map_provenance` transports it through the existing shard envelope
+as `smpbind` variables, separately from intact package archives. Reading, replacing
+and stripping this metadata preserve native map text bytes and other payload
+families. Empty binding sets emit no metadata; absent metadata means historical
+composition. `package_link_provenance` captures selected map roots from the linked
+equivalence classes, retaining every equivalent supplier in one saved binding
+and excluding unused library contexts. Source reconstruction, linking and
+transport have synthetic integration coverage. Shared shard removal allocates
+for actual matches and refuses an exhausted removal budget atomically.
+Saved-map and retained-request preparation read this envelope before resource
+availability checks. Recorded contexts compile strictly from the map's source
+inventory. Typed rebinding replaces only observed native resource string sites,
+including instance fields; prose, editor data and legacy text bytes stay exact.
+Failed reconstruction publishes neither a partial buffer nor a partial provider.
+Native parsing strips binding carriers alongside package carriers.
+Deferred native cache selection receives that same compiled, stripped buffer
+through its activation callback. Captured metadata continues to identify the
+original request; its earlier cached source is used only for the preliminary
+lobby projection. Full gameplay decoding must not reread that original source
+and thereby discard the prepared resource aliases.
+
+Save selection acquires delivery ownership and binding provenance from one
+provider snapshot. It selects used declaration and binary identities, including
+all permutations, and carries every complete source tree required by their
+contexts. The map's context wins over equivalent local providers. Unused contexts
+are excluded. Historical providers retain one composed context internally, but
+legacy-only saves emit no new binding envelope; adding an isolated variant retains
+both contexts. Package packing and binding insertion must both finish before the
+save output is replaced. Files changed after selection fail that save atomically.
+Runtime activation, rawmap routing and delivery selection have offline regression
+coverage; this is not evidence of completed engine-family or live acceptance.
+
+`virtual_material` reads the engine's separate material-to-atlas table and projects
+deterministic alias records for one resolved atlas. Distinct material objects can
+share a texture region; duplicate bindings collapse. Atlas provider identity must
+be bound separately from rectangle coordinates. `virtual_material_native` owns
+private ABI rows; each native material has an independent mutable association.
+Native destruction clears that association without freeing the row. The runtime
+lookup hook selects only compiler-owned bindings, checks the resolved native page
+provider, and preserves native lookup for unclaimed names. Equivalent bindings
+can retain rows owned by a previous provider through activation and rollback;
+cleanup refuses to free live rows and runs inside the resident renderer barrier.
+Lookup faults are retained per candidate and checked before activation commits,
+including faults from loads after the first resident drain. Same-name unequal
+atlas bindings fail preparation/publication atomically. Exact duplicates still
+have one canonical material; temporary parser objects need separate mutable rows.
+
+The hook is wired into startup and resident cleanup, with native-shaped synthetic
+tests and independently resolved Vulkan/OpenGL signatures. Prepared map providers
+now accept compiler-resolved bindings before activation, verifying that every
+binding names a material in that compilation. Effective provider construction
+copies and deduplicates immutable bindings separately from their native rows.
+Resource/policy publication selects the atlas view in the same transaction, with
+allocation-free restoration before consumer recovery. Retiring a provider drops
+its package/source ownership immediately; live rows retain only their own metadata
+until native destruction and collection at a renderer barrier permit reclamation.
+
+Adding or removing an atlas binding adds a material reconstruction to the provider
+diff even when the file bytes are unchanged. Late native faults make admission
+unavailable and remain visible in the runtime diagnostic; retry rebuilds bindings
+from the failed view rather than treating equal source bytes as a repaired cache.
+The provider transaction tests cover these cases, cancellation and restoration,
+active-plan immutability, and unchanged installation availability. Binding input is
+an internal compiler result, never a package.json field or map-author setting.
+The scoped compiler now generates original-atlas rows automatically; private
+provider preparation and live alias acceptance remain pending. Native activation must refresh
+bindings when a native provider is reconstructed. The global virtual-texture page
+rebind does not apply per-material VMTR scale/bias; that setter is a distinct native
+operation. Merely renaming a material cannot supply its atlas record.
+
+`package_linker` now connects scoped reader callbacks to that graph and provider
+projection. Each unit is a native identity with all of its physical files;
+permutations participate in one deterministic content identity. It collects
+bindings, partitions equivalent units, assigns native names, then replays those
+same binding sites before preparing the provider. Changed sources, disappearing
+references and alias collisions abort the candidate. Duplicate owners remain
+attached to the one emitted file set. Unchanged opaque payloads retain their
+immutable source handles instead of an additional permanent memory copy.
+Native adapters must establish scope resolution, reader completeness and valid
+alias paths; the linker does not infer those contracts from arbitrary strings.
+
+Verified constructor requests that are absent from file bytes use captured
+dependency slots on the same graph. Each slot resolves in its owner's source
+scope before linking; physical-file sites and constructor slots have separate
+identities. Equal repeated requests collapse, and slot order is irrelevant.
+Their targets participate in variant equivalence, original certification and
+shared-collection eligibility. Source-free native intermediates retain reachable
+files, including through cycles. Linking rechecks every captured slot, including
+deduplicated suppliers, before returning an owned table of bound consumer roles.
+The library resolves that table to assigned native names and retains an immutable
+consumer catalog with its provider. Activation and recovery publish the matching
+catalog alongside file serving. A synchronous consumer can hold its exact snapshot
+across publication; that hold preserves the plan, while ordinary occurrence leases
+preserve the served files. Copy/undo retention filters the catalog by live roots and
+keeps its transitive closure, including source-free intermediate consumers.
+
+Captured binding changes for surviving identities join native reconstruction even
+when their physical bytes are unchanged. The diff lists these identities separately
+from paths, so multiple logical aliases and file-free consumers are not lost.
+Rollback reverses file additions/removals while reconstructing these same owners
+against the restored catalog. Additive admission cannot change an existing owner.
+Capturing and retaining these edges does not itself redirect native requests or
+make an unfinished family adapter ready for publication.
+
+Audio has a separate typed identity graph because bank, event, action, node and
+media IDs are native audio registries rather than declaration paths. The checked
+bank reader records actual identity fields and retains opaque media unchanged.
+The linker resolves those fields inside one captured source scope, fingerprints
+the dependency graph and verifies positive byte matches before sharing. Scoped
+absence gets a reserved ID so a control cannot accidentally reach a peer's object.
+Music selection leaves are optional node references: the native engine creates
+an empty playback context when the selected node is absent. Their absence stays
+scoped; it does not relax required play targets or media dependencies.
+Transition source/destination lists are match filters, also allowing absent
+nodes; an actual transition segment remains a required dependency.
+An unresolved optional reference from verified original bank bytes retains the
+engine's original lookup behavior, including targets loaded later by vanilla
+banks. This differs from private scoped absence and does not certify an empty
+native registry. Private assignments must stay clear of those original IDs.
+Native bank order is part of the construction recipe: duplicate events may be
+reused while other object kinds partially reparse. The compiler preserves those
+ordered definitions rather than selecting one whole-object winner.
+
+`package_audio_capture` reuses the current-locale package/original selection and
+the common bank closure. Selected banks are fully inspected, feeding plug-in media
+references back into that closure until it stabilizes. Resident media can pull in
+another bank's DATA without an explicit play-action bank reference. The final
+capture retains inventory order and bounded readers for memory, original and
+file-backed data. Prepared ID relocation replaces its prior output only after all
+reservations and bank edits succeed; the caller owns reservation rollback.
+`package_audio_program` collects the complete sound set during source discovery,
+then prepares one graph across the authored scopes before library equivalence.
+The sound fingerprint includes that graph's event binding and the native
+name-derived state. Equal event fingerprints are checked against exact graph
+classes before the outer linker can share them. The library retains the program
+and its output-name associations alongside the compiled declarations.
+After graph preparation, captures detach from temporary compiler scopes: memory
+payloads are owned copies, file payloads retain open handles, and originals stay
+with the owning provider. Bank streams and numeric media bindings remain usable
+after compilation ends. ID assignment validates declaration destinations before
+reserving anything; a failed assignment preserves both prior bank edits and
+sound event scalars. The local and saved-context library routes use the same
+preparation. Implicit delivery ownership is retained separately from equality:
+the audio graph visits its reachable captured records, and the program snapshots
+their supplying owners before compiler scopes close. These sets affect shared
+editor eligibility and the emitted resource's delivery ownership. They do not
+change equivalence or mix bank/media file indices into a declaration's physical
+source list. Exact original SnapMap behavior does not acquire a package owner
+from an unrelated edit in its container; campaign-only activation keeps its
+delivery ownership. Native bank-reference edges still follow their captured
+construction recipe; ownership collection does not remove those dependencies.
+When this adapter is supplied, raw PC bank/media inputs belong to the audio
+program instead of the generic declaration/resource-manager seeder. It inspects
+effective bank metadata, nominates supplied banks and banks using supplied media,
+and follows typed references backward to their event consumers before forward
+dependency closure. SnapMap sound declarations and affected palette roots are
+then discovered without requiring authors to copy stock declarations. Campaign-
+only declarations still require a supplied source in that scope. The nominations
+are conservative; exact graph comparison decides sharing and original behavior.
+Captured codecs are reused when explicit declaration discovery adds further
+events. Banks without named declarations remain retained native inputs, while
+inactive locales remain in the intact delivery bundle without current-language
+nomination. Source media lookup uses the numeric index and current locale, never
+a peer package. Malformed bank data rejects the candidate with its diagnostic.
+After numeric binding, the program materializer streams prepared banks and media
+into the same immutable resource cache used for ordinary package files. Numeric
+outputs preserve their native directory and locale; original availability paths,
+delivery owners and exact sound/bank dependency edges stay with the compiled
+resources. Exact duplicate outputs merge their owners, while unchanged SnapMap
+originals stay native. The unpublished provider is replaced only after all files
+and dependencies are ready; failed preparation leaves it unchanged and complete
+cache objects remain reusable. Open streams retain their bytes independently of
+the old compilation. The retained graph also moves authored file inputs onto
+immutable cache snapshots, allowing package authors to edit their files while
+an earlier provider still serves its captured content. Cache publication is serialized separately from streaming,
+and a damaged cached occupant is preserved rather than rejecting valid input.
+Private materialized banks omit STMG/ENVS/PLAT controls and HIRC bus definitions;
+the retained full bindings preserve recipes for separate shared-policy publication,
+including each bus's private effect and state references. The common HIRC reader
+also identifies the complete bus configuration sections for native publication,
+without running a separate parser or treating construction as a live update.
+It emits individual assignment records for properties, effect slots, mixer,
+ducking targets, parameter curves and state mappings, preserving authored order
+and native keys. Null effect slots are skipped, as in the engine. Curve identity
+uses the parameter and curve key; the parameter's accumulation mode is separate.
+These records enter the exact dependency graph: identical numeric effect/state
+references with different scoped definitions are distinct bindings. A property
+does not inherit unrelated changes elsewhere in its bank. Prepared programs
+retain each record's source and dependency owners, and export its bound value
+without rewriting authored files.
+For bus composition the program independently captures the installed Init and
+original counterparts in a separate source scope, using the same bank-root and
+typed dependency closure as normal audio. This distinguishes unchanged copied
+values from edits even when their containing authored bank differs. Baseline
+witnesses carry no delivery owners and cannot fill missing authored definitions.
+Typed forward closure includes required private objects defined in other banks;
+optional lookups do not pull unrelated definitions into a scope.
+`audio_bus_policy` composes complete recipes against those baseline values.
+Independent collection keys combine; identical bindings share contributors;
+unchanged copies cannot erase edits. Missing baseline collection entries represent
+removals. Conflicting edits to one shared value have a deterministic choice,
+with a changed present value preferred over a competing removal. Parent choices
+use available alternatives to avoid creating a cycle from valid overlapping
+edits. Surviving curves and state mappings retain their required parameter mode
+and state group. Equivalent contributors and selected removals retain delivery
+ownership without acquiring unrelated dependencies from the same bank.
+Packed configuration flags and effect-bypass bits use independent masked keys.
+Baseline-aware clears and sets compose separately, while the ten-bit count and
+unknown remainder groups stay atomic. Fingerprints, exact comparisons and bound
+value extraction use the same masked view, so changing a neighboring bit cannot
+manufacture a dependency conflict. Complete object identities and authored bank
+bytes remain unchanged by this normalization.
+Prepared graph binding can be committed or cancelled, allowing all selected bus
+values to receive their private effect/state IDs before bank streams, bus policy
+and declaration scalars commit together. A failure leaves the previous outputs
+intact. This is offline preparation, not native publication: native bus type/root
+constraints, update/restore operations and consumer lifetimes must still be
+handled by the runtime adapter before activation.
+Certified original references retain their native numeric names even when two
+captured scopes contain different subsets of vanilla definitions or optional
+lookups. Their scoped construction graphs need not compare equal. This is native
+ABI reuse, separate from private deduplication; private variants still require
+exact dependency equality to share a reservation and cannot occupy original IDs.
+Structural projection
+updates hierarchy lengths/counts and retains all other edits and opaque media.
+Unchanged native banks keep their original stream. Both full and private outputs
+commit together after successful binding. This materialization API does not reserve
+IDs or authorize native bank loading; activation must first publish the shared plan
+and its bound bus recipes, with verified lifetime and rollback handling.
+`audio_id_reservations` supplies main-thread leases for the numeric assignments.
+It compares retained audio graphs through the common exact partitioner, once per
+graph pair, before sharing an identity. Private IDs avoid other reserved domains
+as well as the native/original inventory supplied by the caller. Pending leases
+can be discarded without changing active peers; activation closes reservations
+to further changes. Before activation the caller rechecks occupancy: an occupied
+exact active peer is reusable, while private absence must remain unoccupied.
+Leases borrow immutable captured graphs and release before those graphs close,
+after actual native consumers retire. An occupied native ID without a retained
+ownership witness never counts as an equivalent package. The native occupancy
+adapter reads all twelve object tables, resident media and bank usages under
+their engine locks without acquiring references. Memory-loaded banks contribute
+their IDs even when their backing pointer puts them in another hash bucket.
+`audio_originals` also caches a sorted union of typed IDs in every effective
+installed bank and unused numeric media files. The process retains that union
+across providers, so unloaded originals cannot collide with private assignments.
+A newly reserved original cannot be justified by an older active private peer.
+Provider preparation reserves IDs and materializes the compiled banks before
+publishing; pending failure releases the lease before closing its captured graph.
+This preparation runs when the audio semantics adapter is supplied. Production
+still leaves that adapter unset pending shared policy and consumer retirement;
+the reservation and original inventory tests do not prove live activation.
+This preparation is not complete native audio admission. Shared audio policies,
+publication/retirement and outstanding native reference
+semantics still have to be connected and verified before private-bank activation.
+
+`audio_limits_native` implements the playback-constraint leg of that transaction.
+It binds the native threshold/count setters and their state without calling the
+image during startup. Each update and restoration holds the engine's audio render
+lock, after bank submissions have completed; no bank wait occurs under that lock.
+Setter return codes are checked against the resulting values because native
+priority can suppress a successful call. Pending receipts preserve the exact
+threshold, derived amplitude, count and priorities. Failed publication restores
+before releasing the lock when recovery succeeds. An unavailable native manager
+retains the receipt for recovery, while an unexpected intervening write is
+preserved rather than overwritten. Bank transitions reject overlapping pending
+settings publication. The enclosing activation must still serialize bank/control
+writers, publish the remaining shared controls/buses and retain native consumers;
+this scalar adapter alone does not enable production private audio.
+
+`audio_environment_native` handles the six shared environment curves separately
+from scalar settings. Native setters prepare detached allocations and perform
+their normal scaling conversion. Only changed curves and enable flags are
+published under the render lock; original allocations remain owned by a stable
+receipt. Rollback restores those exact pointers without allocating. Commit merely
+marks acceptance, and a subsequent release retires the old native allocations.
+Empty curves are explicit clears even though the native setter returns its
+no-points result. Allocation failure leaves the live environment unchanged;
+uncertain native frees retain ownership and are never retried blindly. The bank
+adapter guards pending curve receipts alongside playback constraints. These
+operations still require the enclosing writer-serialization boundary and do not
+publish state, switch, parameter or bus controls.
+
+`audio_state_native` publishes compiled state-group rules. Each represented group
+has a complete effective transition table, including retained original rules;
+groups outside that policy remain untouched. The real native constructor creates
+detached new groups, and native pool allocations hold prepared rule/manager arrays.
+Preparation completes before publication under the render lock. Existing group
+objects keep their current state and consumer lists, and equivalent rules retain
+their original allocation even when source ordering differs. New groups enter the
+manager together. A retained receipt restores exact old table pointers and rules;
+rollback waits when new groups have attached consumers. Readiness verifies rule
+contents as well as descriptors, so an intervening in-place edit is preserved.
+After commit, old detached allocations retire and the native manager owns the new
+live allocations through its ordinary group-clear/shutdown lifecycle. State receipts
+participate in the same publication/recovery gate as playback and environment
+settings. Switch controls, bus controls, preparatory identity admission
+before private HIRC loading, and complete bank/consumer lifetime integration remain
+required; this adapter does not enable production private audio on its own.
+
+`audio_parameter_native` prepares parameter defaults, smoothing settings and
+built-in memberships without replacing active values or subscriptions. New nodes
+are constructed detached, and every changed membership vector is allocated before
+publication. Existing node identity and unrelated manager collections survive.
+Native zero-selector no-ops are folded during bank composition; an effective map
+policy with no binding clears the represented parameter's old membership. Rollback
+restores exact pointers and settings, retaining newly admitted nodes until their
+consumers detach. Accepted nodes transfer to native ownership. Parameter receipts
+participate in the shared publication/recovery gate; this does not yet connect
+complete bank activation, switch/bus updates or consumer retirement.
+
+`audio_bank_gate` provides the bank-writer portion of that boundary. Both native
+bank-manager modes reach one dispatcher; the worker releases its queue lock
+before calling it. The startup-installed dispatcher detour forwards native
+results, callbacks and exceptions while taking a process-owned gate. Publication
+acquires that gate after bank preparation and before provider/render locks, then
+holds it across the shared settings and final commit. It never waits for a bank
+command while holding the gate. Readiness detects a changed manager or reentrant
+bank dispatch. Ending an owned scope always unlocks it, including failed recovery;
+resource receipts remain retained independently. Recovery can reacquire the gate
+without admitting new settings. Playback/environment/state/parameter entry points require
+this scope. This does not establish completed shared-control publication or safe
+voice retirement, and startup installation/live behavior still require acceptance
+on both executables.
+
+The native bank adapter distinguishes filename hashes from decimal file IDs using
+the indexed bank header. Named loads use the engine's name route; literal numeric
+banks use file-ID command mode, bypassing the bank name cache. Both synchronous
+and worker-backed managers run through native initialization, submission and
+completion. Queue failure still disposes initialized completion state, and native
+already-loaded results retain their existing ownership meaning. Callback storage
+has process lifetime if a native call faults; it is not a temporary stack pointer
+and cannot be reused while the outcome is uncertain. Both executable bindings are
+covered by the real-image globals tests. This adapter does not itself allocate
+private IDs or establish that every voice/stream consumer has retired.
+
+Some native consumers couple files in different resource managers. A unit can
+describe per-file native identities, retaining the primary identity on at least
+one member. These identities join the exact source comparison before dedupe.
+The linker checks all assigned names and native IDs against the stable engine
+snapshot, other candidate groups and siblings before reserving the group. A
+collision retries the whole assignment. Emitted files carry their own manager
+identity and a lifetime cycle retains every companion. Certified original groups
+can share a baseline companion only after comparing its exact files; equal bytes
+alone do not grant sharing between changed bindings.
+
+The movie naming adapter uses the verified constructor rule to assign a cooked
+`file` movie and its `image` atlas together, including filename partitioning and
+consumer capacities. It validates the original pair and preserves it for an
+original binding. This is an internal adapter, with no package descriptor change.
+It does not yet admit complete UI movie graphs: generated/fixed GUI materials, font fallback
+and script-driven resource requests still require their dependency bindings.
+
+`package_link_inputs` discovers these units from retained component compilations.
+Declarations use compiler identities; opaque resources use the installed catalog,
+including multiple physical permutations and multiple identities for one file.
+Repeated catalog rows collapse inside a unit. Different authored scopes remain
+separate inputs until dependency-sensitive equivalence runs. New cooked model,
+MD6 mesh and animation paths use the same verified naming contract as source
+dependency inspection. An unrecognized physical resource refuses discovery with
+its path; it is never silently discarded or presumed dependency-free. This index
+describes supplied files, not a complete native dependency closure: missing
+originals, implicit bindings and native alias admission remain reader duties.
+The source-linker integration test discovers its units through this index before
+checking duplicate collapse, scoped variants, provenance and installation reuse.
+
+`package_source_link` connects that discovery to the production typed source
+readers and linker. It walks each input scope through file references and registered
+constructor requests, including cycles, and captures original bytes and proven absence once per
+provider path. Linking uses that frozen snapshot, never a peer package or the
+currently loaded object. Native registry family labels are canonicalized at the
+source binding boundary. Required campaign-only files absent from the authored
+scope remain missing; original lookup cannot silently add them to its bundle.
+Engine-created identities with no source require native admission and retain
+their name. Catalog permutations stay grouped with their native identity.
+Image dependencies without a catalog row use the native generated-image naming
+contract, including option suffixes and explicit bimage paths. Indexed paths
+remain authoritative. Inferring image options from material keywords and mapping
+new physical images back to all source spellings still require reader support;
+the forward filename rule does not establish those bindings.
+Constructor discovery also participates in reverse nomination of affected stock
+toybox roots. Its callback receives an explicit observation flag and the
+original-only scope when inspecting candidates. An absent candidate is not an
+admitted native object, and discovery grants no permission to publish it. Saved
+contexts reconstruct those dependencies from their retained sources without
+repeating local-library nomination or borrowing peer package data.
+The native reader can now supply implicit state to each file-backed unit's
+equivalence identity. Original-binding certification requires both that native
+state and an exact comparison with captured engine-original bytes. Product
+baselines and mere installed availability do not certify an original binding.
+The linker propagates a changed or uncertified binding to all predecessors in
+linear time, including cycles. Equivalent suppliers use the most conservative
+certificate, so enumeration order cannot change the assigned identity.
+
+`package_native_names` assigns compact digest-based names using the native
+declaration, model, MD6 and image path contracts. Certified original graphs keep
+their original names and every physical permutation. Material aliases preserve
+the native `generic` prefix and `baked/` naming flags. Image aliases use explicit
+bimage paths so material options are not appended again. Fixed renderer ABI
+names and unknown permutation relocation rules are not blindly renamed. Native
+readers still must account for implicit state, and virtual-material row and atlas
+bindings must precede activation. The library stage is called by local runtime
+preparation, but native admission and editor entry selection remain unfinished.
+Integration tests now use these
+production names with scoped material variants and a shared original renderer
+parameter; they establish source compilation, not live rendering acceptance.
+
+`package_virtual_material` connects captured scoped atlas tables to those
+identities and to the immutable runtime view. It reads the six native table slots
+in order, retains the later same-name row, and resolves each physical table in its
+own compilation before consulting originals. All original tables, including
+absence, are captured once. A material's implicit identity includes its selected
+row, native table-origin slot, resolved page-provider name and complete page-data
+digest; unrelated table rows and package metadata do not enter it. Identical
+rectangles over different pages are different bindings. One native page-provider
+name cannot represent different data in the same candidate.
+
+After linking, the adapter derives runtime rows for assigned aliases and validates
+that every material was inspected with the same implicit state. The prepared view
+owns its records after source cleanup; original unchanged material names retain
+native lookup. Generic materials bypass VMTR lookup as the engine does. These
+operations neither rewrite original tables nor publish a provider. The native
+source adapter still must map the resolved `landPageFile` value to the native
+provider, table source and complete immutable page-data identity, including private
+provider names for changed pages. It must not certify those from a currently
+loaded, potentially modified material. Native rendering acceptance remains
+outstanding.
+
+The linked provider retains each resource's assigned native manager identity
+separately from its declaration-registration identity. Cooked model, image and
+shader aliases therefore remain binary resources while still participating in
+native graph selection and retirement. Projection validates declaration bindings
+against their generated paths; overlays own copies of the native metadata.
+Provider diffs retain both identities for replacements and compute sorted unique
+native additions/removals across all physical resources. Removing one permutation
+does not retire an identity supplied by another file. Resident refresh seeds both
+sides, retires removed identities with no shipped SnapMap fallback, and preserves
+path-based selection for resources without compiler identity metadata. Reversing
+a failed activation swaps the identity sets and replacement bindings without
+allocation, alongside the file add/remove directions.
+
+`package_source_graph` also exposes a retained scope reader for transactional
+source binding. It uses the same native schema and source registry as dependency
+inspection, then dispatches typed declarations, graph envelopes, material/MD6
+grammars and cooked model/animation records to their verified readers. Registered
+model pointer readers preserve extension dispatch; image pointers select their
+exact resource manager without declaration fallback. A source binding pass alone
+does not certify name-derived dependencies, shader ABI or late gameplay lookups.
+
+Native declaration strings retain literal backslashes under the engine's lexer
+flags. Parsing, reference binding and loading guards share that interpretation;
+JSON escaping applies only to map JSON. Resource identity comparison can normalize
+path separators without rewriting unrelated strings or unchanged source files.
+Dependency-free custom readers are recognized through verified registrations,
+such as numeric randomValue_t state, rather than assumed from type names.
+
+Custom declaration families share one dispatch for dependency discovery,
+reference relocation and exclusion from reflected string processing. Breakable
+declarations bind their model through the discrete-animation manager and their
+nested particle, FX and material operands through the corresponding managers.
+Local piece names, indices, armor/health data and damage spheres remain source
+data; they are not resource paths. The adapter preserves untouched bytes and
+leaves model-dependent validation to native loading.
+
+Animation webs bind their model/modelInfos entries to MD6 definitions, composite
+entries to other webs, and direct clip names and edge blend parameters to
+animations. Model aliases, the model-owned default animation marker, state and
+subweb selectors, tag names, and model-info labels retain their original spelling.
+Equal web text can therefore produce distinct native webs when its dependencies
+differ; identical complete dependency graphs share one compiled instance. Native
+inter-token whitespace follows the engine's signed-byte rule, including control
+and high bytes present in shipped declarations, without changing quoted strings
+or removing those bytes from source output.
+
+Script object fields use the script module's field tables, not the ordinary C++
+reflection namespace. `decl_script_schema` captures owned class/field metadata,
+including nested script types and verified absent tables. The preparation pass
+uses `decl_script_native` at the main-thread boundary: the supported DOOM module's
+metadata lookup borrows an allocation-only host, restores its previous context,
+and releases temporary storage. No script object or game world is constructed.
+The module implementation is verified by its file identity before this limited
+host is lent to it. A temporary module reference can be released immediately;
+dependency walks only use the copied snapshot. Capture faults return no partial
+schema. Typed script references participate in declaration and inline-map binding;
+ordinary script strings and live entity handles do not become resource paths.
+This covers serialized fields, not resource names looked up by running script code.
+
+Installation availability remains a separate question over original resource
+paths. Compiler aliases and differences in authored values must not request a
+reinstall; map-provided values must not merge with local edits. Whole authored
+bundles remain the embedding and installation unit, including duplicate sources.
+The following sections describe input isolation, shared contributions and the
+native publication lifecycle. The historical composer remains available for
+recorded map contexts; it does not decide collisions between isolated assets.
+
+### Current compilation and activation
+
 The local authoring library isolates defects that belong to one outer package.
 `sh_package_sources_scan_local` skips a package whose own content is invalid:
 its descriptor, an unusable or case-duplicate name, a link, or a path the
@@ -281,20 +978,31 @@ path under `generated/decls` that is not a declaration identity, a contribution
 the declaration parser cannot read, and a resource that fails composition again
 with only that package, the installed original and product defaults. Typical
 typed defects are an unknown class, a parent no package declares, an inheritance
-cycle inside the package, an out-of-range fixed array entry or a contradiction
-of a product default. The runtime removes that whole package with its nested
-components and compiles again. A local resource conflict between independently
-valid packages reports its changing owners through `conflicted_packages` and
-excludes those complete units together. Scalar field conflicts identify every
-source editing that value, preserving independent edits to the same resource.
-Structural conflicts and adapters without precise attribution conservatively
-identify the resource's changing owners. This includes duplicate contributors;
-none becomes a winner through discovery order. Policy conflicts identify all
-incompatible owner pairs, preserving unrelated policy keys and packages.
-The runtime recompiles the remaining library, including built-ins. Valid excluded
-peers remain in the physical installation inventory: a map's own valid authored
-provider can use their available paths without another installation. Invalid
-packages do not establish availability. Source files are never removed.
+cycle inside the package or an out-of-range fixed array entry. The runtime removes
+that complete unit from the candidate and compiles again. Invalid packages do not
+establish availability. This never deletes their source files.
+
+Independent gameplay scopes are linked before publication. Different valid edits
+to the same authored resource receive different native bindings; they are not
+passed to the historical peer-conflict exclusion loop. A contradiction within
+one authored context is distinct from two independently valid variants. Missing
+reader coverage and native preparation failures are product/environment failures,
+not evidence that a source package is corrupt.
+
+Registered semantic collections normalize duplicate members within each input
+before composition. Exact repeated members also collapse across presentation
+groups. Editor property controls use their target path as identity: if inspector
+and every behavioral field agree, differing display-name/description tags do not
+invalidate the package. The earliest authored page/slot keeps its labels; a later
+copy can fill a missing label. Counts and indices are rebuilt in the private
+compiled tree. Other fields must agree, fixed arrays and inherited sparse patches
+retain their slot semantics, and distinct target paths remain distinct controls.
+Assignment/reset operations also remain significant when comparing duplicates.
+For shared editor presentation, opposing valid cosmetic preferences resolve in
+a stable order. A private gameplay binding keeps its own edited presentation
+while accepting compatible collection contributions. Gameplay fields never use
+that cosmetic tie-break. Disk files and map-delivered bundles retain their
+complete authored bytes.
 
 Storage, hashing, read and allocation failures, sources that change during a scan,
 a parent that only another package declares, unavailable reader metadata and
@@ -384,8 +1092,9 @@ when needed; authored descriptors and member paths remain intact. Save packing a
 rechecks the selected tree identity so changed sources cannot publish a mismatched map.
 
 Compilation includes built-in overrides and package sources relative to verified
-originals. Compatible changes compose using native field and collection semantics;
-contradictions are reported before publication. Opaque payloads are selected whole.
+originals. Compatible shared contributions compose using native field and
+collection semantics. Private bindings retain their authored values and complete
+opaque payloads; binary data is never appended as text.
 The provider never modifies authored sources or installed game archives. Native
 reader and resource-family details belong alongside their implementation.
 
@@ -405,12 +1114,13 @@ layout and is refused rather than guessing identities from numeric positions.
 
 Grouped collection adapters separate stable member identity from presentation
 placement. All SnapMap editor property sheets use this contract: a property's
-`path` remains its identity across pages, and adding/removing pages or moving a
-property can compose with independent edits to its fields. Ordering constraints
-apply within the final page; conflicting moves, deletions versus edits, ambiguous
-duplicate identities and ordering cycles remain conflicts. The reusable adapter
-is registered by the product for known formats, never by an author switch or a
-specific resource filename. Sources and embedded delivery bundles stay intact.
+`path` and bound editing behavior identify a control across pages, and moving a
+control can compose with independent additions. Stable presentation ordering
+resolves opposing moves and layout cycles without discarding valid contributions.
+Native behavioral ordering and fixed-index storage retain their own contracts.
+The reusable adapter is registered by the product for known formats, never by an
+author switch or a specific resource filename. Sources and embedded delivery
+bundles stay intact.
 
 Package inventories and resource ownership grow with the installed set. There
 is no fixed package-count quota in discovery, compilation, saved-map selection,
@@ -456,6 +1166,15 @@ resource-level promotion separately retains the engine's resource objects.
 Every exit restores the previous heap scope. Failed admission or restoration
 keeps package-dependent maps gated.
 
+`render_scope` owns the native renderer synchronization, suspension counter and
+consumer update used by resource refresh. It requires the engine main thread,
+the same renderer instance and balanced nested ownership. It does not itself
+authorize a map transition. Native calls that throw after changing a counter
+are still failures, but cleanup observes the change before attempting another
+release. Resident refresh retains an owner whose renderer or heap scope could
+not close; a later pass must finish that cleanup before capturing resources.
+Affected resource identities remain available for provider recovery afterward.
+
 Refresh includes existing shadows and string changes, not only new declaration
 names. Reader synchronization keeps old snapshots valid until readers release
 them. Success includes materialization, required visibility and palette refresh;
@@ -481,6 +1200,27 @@ back the entire new install group. Recovery records prevent admission of an
 uncommitted group after interruption. Restoring the prior provider precedes native
 consumer recovery. Open streams retain immutable sources until released. No game
 restart/reset or forced map reload is an installation recovery mechanism.
+
+Distinct delivered trees remain installed even when their package IDs match.
+Exact tree equality reuses an existing installation; a new variant never removes
+an earlier bundle. Cancellation removes only additions from that transaction.
+Startup recovery still restores bundles moved aside by an interrupted installation
+from an older release, without using that supersession policy for new installs.
+
+Saved-map loads use the same retained-source continuation whether installed
+resources cover the map or its supplying bundles require consent. Both paths
+prepare the inventory, activate the authored view, require the native decoder to
+consume the prepared JSON, and commit only after native loading succeeds. A
+native parse failure, exception, canceled load or commit refusal cancels the
+owned editor load and retires its map context at the normal safe boundary.
+Availability skips installation; it does not skip completion or recovery checks.
+
+The editor reload control observes its exact retained saved-load request by
+editor identity and save ID. A deferred installation leaves the control pending
+until native loading and commit complete, and cancellation or failure completes
+it unsuccessfully. Completion runs once after request cleanup. The caller cannot
+queue another reload while that request is outstanding. A synchronous zero
+return without an actual map parse is also a failed reload, not success.
 
 `decl_server.h`, `overrides.h`, `resource_bridge.h`, `strids.h` and `map_package.h`
 define the detailed contracts.

@@ -1195,20 +1195,22 @@ static char *mc_argument_identity(mc_context *c, const mc_input *in, size_t i)
  * declaration an animation event argument resolves. Mesh kits and joint groups
  * name native records of the selected model, not resources. */
 static int mc_emit_reference(mc_context *c, sh_decl_md6_reference_visitor visitor,
+    sh_decl_md6_site_visitor site, const mc_input *in, size_t token,
     void *context, const char *type, char *name)
 {
-    int ok = name && visitor(context, type, name);
+    int ok = name && token < in->count && (site ? site(context, type, name,
+        in->tokens[token].begin, in->tokens[token].end - in->tokens[token].begin) : visitor(context, type, name));
     if (name && !ok) mc_fail(c, "reference visitor refused an identity");
     free(name); return ok;
 }
-int sh_decl_md6_references(sh_decl_source source, sh_decl_md6_reference_visitor visitor,
-    void *context, char *error, size_t capacity)
+static int mc_references(sh_decl_source source, sh_decl_md6_reference_visitor visitor,
+    sh_decl_md6_site_visitor site, void *context, char *error, size_t capacity)
 {
     mc_context c = {error, capacity, 0};
     mc_input in = {0};
     size_t i = 1;
     if (error && capacity) error[0] = 0;
-    if (!visitor) return 0;
+    if (!visitor && !site) return 0;
     in.source = source;
     if (!mc_tokenize(&c, &in)) goto done;
     if (!mc_is(&in, 0, "{") || in.tokens[0].close != in.count - 1) {
@@ -1230,10 +1232,10 @@ int sh_decl_md6_references(sh_decl_source source, sh_decl_md6_reference_visitor 
             while (f < end && !c.failed) {
                 if (mc_is(&in, f, "inherit")) {
                     if (!mc_is(&in, f + 1, "\"\"") &&
-                        !mc_emit_reference(&c, visitor, context, "md6def", mc_identity(&c, &in, f + 1, 0))) break;
+                        !mc_emit_reference(&c, visitor, site, &in, f + 1, context, "md6def", mc_identity(&c, &in, f + 1, 0))) break;
                     f += 2;
                 } else if (mc_is(&in, f, "mesh")) {
-                    if (!mc_emit_reference(&c, visitor, context, "basemodel", mc_identity(&c, &in, f + 1, 0))) break;
+                    if (!mc_emit_reference(&c, visitor, site, &in, f + 1, context, "basemodel", mc_identity(&c, &in, f + 1, 0))) break;
                     f += 2;
                 } else if (mc_is(&in, f, "offset")) {
                     if (!mc_is(&in, f + 1, "(") || in.tokens[f + 1].close >= end) { mc_fail(&c, "invalid init offset"); break; }
@@ -1266,7 +1268,7 @@ int sh_decl_md6_references(sh_decl_source source, sh_decl_md6_reference_visitor 
                             /* The reader skips the lookup for an empty name, and
                              * shipped content uses that to mean no declaration. */
                             if (family && !mc_is(&in, k + 1, "\"\"") &&
-                                !mc_emit_reference(&c, visitor, context, family,
+                                !mc_emit_reference(&c, visitor, site, &in, k + 1, context, family,
                                     mc_argument_identity(&c, &in, k + 1))) break;
                             k = stop;
                         }
@@ -1284,7 +1286,7 @@ int sh_decl_md6_references(sh_decl_source source, sh_decl_md6_reference_visitor 
                 }
                 body = in.tokens[a + 1].close;
                 for (size_t t = a + 2; t < body; t++) if (mc_is(&in, t, "anim")) {
-                    if (!mc_emit_reference(&c, visitor, context, "anim",
+                    if (!mc_emit_reference(&c, visitor, site, &in, t + 1, context, "anim",
                             mc_animation_identity(&c, &in, t + 1))) break;
                 }
                 a = body + 1;
@@ -1295,6 +1297,14 @@ done:
     mc_free(&in);
     return !c.failed;
 }
+int sh_decl_md6_references(sh_decl_source source, sh_decl_md6_reference_visitor visitor,
+    void *context, char *error, size_t capacity)
+{ return mc_references(source, visitor, NULL, context, error, capacity); }
+
+int sh_decl_md6_reference_sites(sh_decl_source source, sh_decl_md6_site_visitor visitor,
+    void *context, char *error, size_t capacity)
+{ return mc_references(source, NULL, visitor, context, error, capacity); }
+
 char *sh_decl_md6_compose(sh_decl_source baseline, const sh_decl_source *sources, size_t count,
     size_t *length, char *error, size_t capacity, sh_decl_conflict *conflict)
 {

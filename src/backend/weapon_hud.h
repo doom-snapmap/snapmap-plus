@@ -6,7 +6,7 @@
 #include "signatures.h"
 
 /* package.json hud rules from the map's automatically selected packages.
- * Reload publishes a complete table or clears it on refusal. Existing widgets
+ * Reload publishes a complete table or retains it on failure. Existing widgets
  * refresh on their next ammo/weapon change; no map means no package HUD rule. */
 int sh_weapon_hud_reload(const char *data_root);
 int sh_weapon_hud_install(const char *data_root, const uint8_t *module,

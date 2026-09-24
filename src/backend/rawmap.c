@@ -20,9 +20,15 @@
 #include "config.h"
 #include "overrides.h"
 #include "map_embed.h"
+#include "map_provenance.h"
 #include "package_runtime.h"
+#include "package_document.h"
+#include "prefab_import.h"
+#include "package_editor.h"
 #include "decl_server.h"
 #include "map_transition.h"
+#include "editor_transition.h"
+#include "typeinfo.h"
 #include "map_native.h"
 #include "weapon_hud.h"
 #include "navmesh.h"
@@ -390,15 +396,17 @@ int sh_rawmap_branch_install(const unsigned char *module_base)
 
 /* Prepare the chosen JSON before native parsing: migrate markers, rebuild
  * map-scoped navigation state, then strip package and navigation envelopes.
- * Each failed strip retains the preceding buffer. Returns an owned process-
- * heap buffer or NULL to use the original.
+ * Returns an owned process-heap buffer or NULL for no change. A failed package
+ * or binding strip must stop parsing, never expose private carrier variables.
  */
-static char *prepare_map_buffer_mode(const char *json, int publish)
+static char *prepare_map_buffer_mode(const char *json, int publish, int *failed)
 {
-    char *pkg, *nav, *migrated;
+    char *pkg, *nav, *migrated, *bound;
+    char error[512] = "";
     size_t len = json ? strlen(json) : 0;
-    size_t nav_len = 0;
+    size_t nav_len = 0, bound_len = 0;
 
+    *failed = 0;
     if (len == 0) return NULL;
 
     /* Convert the old bake marker before both the bake and native entity parse.
@@ -415,31 +423,40 @@ static char *prepare_map_buffer_mode(const char *json, int publish)
     if (publish) sh_nav_bake_set_map(json, len);
 
     pkg = mpkg_strip_guarded(json);
-    if (!publish && !pkg && sh_mpkg_scan(json, len, NULL, 0)) {
+    if (!pkg && sh_mpkg_scan(json, len, NULL, 0)) {
         if (migrated) HeapFree(GetProcessHeap(), 0, migrated);
+        *failed = 1;
         return NULL;
     }
-    nav = sh_navmesh_strip(pkg ? pkg : json, pkg ? strlen(pkg) : len, &nav_len);
-    if (!nav && !pkg) return migrated;
+    bound = sh_map_provenance_strip(pkg ? pkg : json, pkg ? strlen(pkg) : len,
+        &bound_len, error, sizeof(error));
     if (migrated) HeapFree(GetProcessHeap(), 0, migrated);
-    if (!nav) return pkg;
     if (pkg) HeapFree(GetProcessHeap(), 0, pkg);
+    if (!bound) {
+        *failed = 1;
+        if (error[0]) backend_log(error);
+        return NULL;
+    }
+    nav = sh_navmesh_strip(bound, bound_len, &nav_len);
+    if (!nav) return bound;
+    HeapFree(GetProcessHeap(), 0, bound);
     return nav;
 }
-static char *prepare_map_buffer(const char *json)
-{ return prepare_map_buffer_mode(json, 1); }
+static char *prepare_map_buffer(const char *json, int *failed)
+{ return prepare_map_buffer_mode(json, 1, failed); }
 
 /* Use a readable armed source or the engine JSON. Both pass the package gate;
  * refusal returns the native parse-failure value, 0.
  */
-static int select_map_policy(const char *json, size_t length)
+static int select_map_policy_owned(const char *json, size_t length,
+    const sh_package_occurrence_snapshot *ownership)
 {
     char error[1024] = "";
     sh_package_references references = {0};
     int ok = 0;
     __try {
         ok = sh_mpkg_prepare_map(json, length, &references, error, sizeof(error)) &&
-             sh_package_runtime_select_map(json, length, &references, error, sizeof(error));
+             sh_package_runtime_select_map_occurrences(json, length, &references, ownership, error, sizeof(error));
         if (ok && !sh_weapon_hud_reload(NULL)) {
             ok = 0;
             strcpy_s(error, sizeof(error), "The map's weapon HUD policy could not be activated.");
@@ -452,10 +469,13 @@ static int select_map_policy(const char *json, size_t length)
     return ok;
 }
 
+static int select_map_policy(const char *json, size_t length)
+{ return select_map_policy_owned(json, length, NULL); }
+
 static int inspection_decode(const char *json, void *out_map, const void *caller)
 {
     char *stripped = NULL;
-    int result = 0;
+    int result = 0, failed = 0;
     __try {
         size_t length = json ? strlen(json) : 0;
         if (g_initial_read && caller && g_initial_read->return_address == caller) {
@@ -469,10 +489,10 @@ static int inspection_decode(const char *json, void *out_map, const void *caller
                 goto done;
             }
         }
-        stripped = prepare_map_buffer_mode(json, 0);
+        stripped = prepare_map_buffer_mode(json, 0, &failed);
         /* A carrier or an inconclusive scan must not enter native metadata
          * with its delivery variables after a failed strip. */
-        if (stripped || !sh_mpkg_scan(json, length, NULL, 0))
+        if (!failed && (stripped || !sh_mpkg_scan(json, length, NULL, 0)))
             result = g_deser_orig(stripped ? stripped : json, out_map);
 done:;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -482,7 +502,27 @@ done:;
     return result;
 }
 
-static int sh_deser_detour(const char *json, void *out_map)
+static int attach_loaded_occurrences(const char *carried, const char *native_json, void *map)
+{
+    sh_package_provenance saved = {0};
+    sh_package_occurrence_snapshot *ownership = NULL;
+    char error[1024] = "", *bound = NULL;
+    size_t length = native_json ? strlen(native_json) : 0, bound_length = 0;
+    int present = 0, ok = 0;
+    if (!sh_package_editor_ready() || !sh_package_editor_healthy(error, sizeof(error))) goto done;
+    if (!sh_map_provenance_read(carried, carried ? strlen(carried) : 0,
+        &saved, &present, error, sizeof(error))) goto done;
+    bound = sh_package_runtime_capture_document(NULL, present ? &saved : NULL, NULL, 0,
+        native_json, length, &bound_length, &ownership, NULL, NULL, error, sizeof(error));
+    if (!bound || bound_length != length || memcmp(bound, native_json, length)) goto done;
+    ok = sh_package_editor_attach(SH_PACKAGE_EDITOR_MAP, map, ownership, error, sizeof(error)) &&
+        select_map_policy_owned(native_json, length, ownership);
+done:
+    if (!ok) sh_mpkg_report_error(error[0] ? error : "Map source ownership could not be attached before native construction.");
+    free(bound); sh_package_occurrence_release(ownership); sh_package_provenance_free(&saved); return ok;
+}
+
+static int sh_deser_owned(const char *json, void *out_map)
 {
     if (g_deser_orig == NULL) return 0;   /* defensive: should never happen once installed */
     if (g_inspection_depth) return inspection_decode(json, out_map, _ReturnAddress());
@@ -498,16 +538,22 @@ static int sh_deser_detour(const char *json, void *out_map)
 
     if (g_preflight_json && g_preflight_thread == GetCurrentThreadId() && !g_preflight_consumed) {
         char *prepared;
-        int rc;
+        int rc, failed;
         g_preflight_consumed = 1;
-        prepared = prepare_map_buffer(g_preflight_json);
+        prepared = prepare_map_buffer(g_preflight_json, &failed);
+        if (failed) return 0;
         const char *chosen = prepared ? prepared : g_preflight_json;
-        rc = g_deser_orig(chosen, out_map);
-        if (rc && !select_map_policy(chosen, strlen(chosen))) rc = 0;
-        if (rc) sh_map_render_loaded(out_map);
-        InterlockedExchange(&g_open_is_rawmap, g_preflight_rawmap);
-        if (g_preflight_rawmap) InterlockedIncrement(&g_swap_complete_count);
-        if (prepared) HeapFree(GetProcessHeap(), 0, prepared);
+        __try {
+            rc = g_deser_orig(chosen, out_map);
+            if (rc && !attach_loaded_occurrences(g_preflight_json, chosen, out_map)) rc = 0;
+            if (rc) sh_map_render_loaded(out_map);
+            InterlockedExchange(&g_open_is_rawmap, g_preflight_rawmap);
+            if (g_preflight_rawmap) InterlockedIncrement(&g_swap_complete_count);
+        } __finally {
+            /* The retained request owns its source; this carrier-stripped
+             * buffer belongs to this call even when native parsing faults. */
+            if (prepared) HeapFree(GetProcessHeap(), 0, prepared);
+        }
         return rc;
     }
 
@@ -539,10 +585,10 @@ static int sh_deser_detour(const char *json, void *out_map)
                 return 0;   /* refused: the engine never sees the bytes */
             }
             {
-                char *prepared = prepare_map_buffer(ours);
-                int rc = g_deser_orig(prepared ? prepared : ours, out_map);
-                if (rc && !select_map_policy(prepared ? prepared : ours,
-                                              prepared ? strlen(prepared) : len)) rc = 0;
+                int failed;
+                char *prepared = prepare_map_buffer(ours, &failed);
+                int rc = failed ? 0 : g_deser_orig(prepared ? prepared : ours, out_map);
+                if (rc && !attach_loaded_occurrences(ours, prepared ? prepared : ours, out_map)) rc = 0;
                 if (rc) sh_map_render_loaded(out_map);
                 /* The open map came from a rawmap, which is what the branch answer keys off. */
                 InterlockedExchange(&g_open_is_rawmap, 1);
@@ -557,15 +603,27 @@ static int sh_deser_detour(const char *json, void *out_map)
     if (!mpkg_gate_guarded(json)) return 0;   /* refused: engine json never parsed */
     InterlockedExchange(&g_open_is_rawmap, 0);   /* the engine's own map: let the engine answer */
     {
-        char *prepared = prepare_map_buffer(json);
+        int failed;
+        char *prepared = prepare_map_buffer(json, &failed);
         int rc;
-        rc = g_deser_orig(prepared ? prepared : json, out_map);
-        if (rc && !select_map_policy(prepared ? prepared : json,
-                                      strlen(prepared ? prepared : json))) rc = 0;
+        rc = failed ? 0 : g_deser_orig(prepared ? prepared : json, out_map);
+        if (rc && !attach_loaded_occurrences(json, prepared ? prepared : json, out_map)) rc = 0;
         if (rc) sh_map_render_loaded(out_map);
         if (prepared) HeapFree(GetProcessHeap(), 0, prepared);
         return rc;
     }
+}
+
+static int sh_deser_detour(const char *json, void *out_map)
+{
+    sh_package_occurrence_snapshot *previous = sh_package_editor_world();
+    int result = 0;
+    __try { result = sh_deser_owned(json, out_map); }
+    __finally {
+        if (!result && !g_inspection_depth) sh_package_editor_restore_world(previous);
+        sh_package_occurrence_release(previous);
+    }
+    return result;
 }
 
 int sh_rawmap_swap_install(void *deser_fn, int deser_status_ok)
@@ -1003,7 +1061,8 @@ static saved_map_text_fn g_saved_map_text;
 static struct {
     char *json;
     char save_id[21], root[MAX_PATH];
-    void *editor;
+    void *editor, *previous_map;
+    unsigned long generation;
     DWORD thread;
     int raw, state; /* 1 consent, 2 published, 3 canceled/finished, 4 native waiting, 5 loading */
     ULONGLONG published_at;
@@ -1011,6 +1070,10 @@ static struct {
     sh_rawmap_loading loading;
     sh_mpkg_context *sources;
     sh_package_map_plan *plan;
+    sh_package_occurrence_snapshot *previous_world;
+    sh_rawmap_saved_completion completion;
+    void *completion_context;
+    int loaded;
 } g_pending_map;
 static int g_transition_previous_busy;
 static char g_transition_error[2048];
@@ -1053,8 +1116,24 @@ static void preflight_install_completed(void *context, int outcome)
     g_pending_map.published_at = GetTickCount64();
 }
 
+int sh_rawmap_observe_saved_load(void *editor, const char *save_id,
+    sh_rawmap_saved_completion completion, void *context)
+{
+    if (!editor || !save_id || !completion || g_preflight_busy ||
+        !g_pending_map.state || g_pending_map.request.enter ||
+        g_pending_map.editor != editor || g_pending_map.completion ||
+        GetCurrentThreadId() != g_pending_map.thread ||
+        strcmp(save_id, g_pending_map.save_id)) return 0;
+    g_pending_map.completion = completion;
+    g_pending_map.completion_context = context;
+    return 1;
+}
+
 static int preflight_pending_discard(void)
 {
+    sh_rawmap_saved_completion completion;
+    void *completion_context;
+    int loaded;
     if (!g_pending_map.state) return 1;
     sh_mpkg_cancel_map_consent(&g_pending_map);
     if (!sh_mpkg_activation_cancel()) return 0;
@@ -1070,18 +1149,31 @@ static int preflight_pending_discard(void)
             backend_log("MPKG: retained map request cleanup raised an exception");
         }
     }
-    memset(&g_pending_map, 0, sizeof(g_pending_map)); return 1;
+    completion = g_pending_map.completion;
+    completion_context = g_pending_map.completion_context;
+    loaded = g_pending_map.loaded;
+    if (!loaded) sh_package_editor_restore_world(g_pending_map.previous_world);
+    sh_package_occurrence_release(g_pending_map.previous_world);
+    memset(&g_pending_map, 0, sizeof(g_pending_map));
+    if (completion) {
+        __try { completion(completion_context, loaded); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            backend_log("MPKG: saved-load completion raised an exception after request cleanup");
+        }
+    }
+    return 1;
 }
 
 static void preflight_retire_context(void)
 {
-    if (!g_map_context) return;
+    if (!g_map_context) { sh_package_editor_clear_world(); return; }
     g_map_context_await_departure = 0;
     if (g_map_context_active) {
         if (!sh_decl_server_activate_map(NULL)) return;
         g_map_context_active = 0;
     }
     sh_mpkg_context_retire(&g_map_context);
+    sh_package_editor_clear_world();
 }
 
 int sh_rawmap_cancel_pending_map(void)
@@ -1134,39 +1226,150 @@ static char *preflight_saved_json(const void *save_name)
     return copy;
 }
 
-/* Full supplied-payload coverage is sufficient to avoid reinstalling its
- * packages. Dependency discovery has a separate job: selecting packages and
- * diagnosing assets the author did not supply. A known-path subset cannot
- * establish this result. Return 1 covered, 0 missing, -1 failed inspection. */
-static int preflight_resource_availability(sh_package_map_plan *plan, sh_package_missing *missing,
-    char *error, size_t capacity)
+/* Unused files stay in the intact delivery bundle without creating an install
+ * requirement. Unsupported closure is a coverage error, not a missing package.
+ * Return 1 covered, 0 missing, -1 failed or incomplete inspection. */
+static int preflight_resource_availability(sh_package_map_plan *plan, const char *json,
+    size_t length, sh_package_missing *missing, char *error, size_t capacity)
 {
     char line[1400];
+    sh_decl_registry_source registry = {0};
+    sh_package_source_graph_report report = {0};
+    uintptr_t reflection = 0;
     int ok = 0, result = -1;
     __try {
-        ok = sh_package_map_plan_payload_missing(plan, missing, error, capacity);
+        if (!sh_decl_server_registry_source(&registry) ||
+            !(reflection = (uintptr_t)sh_typeinfo_get_reflect()))
+            snprintf(error, capacity, "Map resource coverage is incomplete: native dependency metadata is unavailable");
+        else ok = sh_package_map_plan_usage_missing(plan, registry, reflection, json, length,
+            missing, &report, error, capacity);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        snprintf(error, capacity, "payload inspection raised exception %08lx", (unsigned long)GetExceptionCode());
+        snprintf(error, capacity, "map resource inspection raised exception %08lx", (unsigned long)GetExceptionCode());
     }
     if (ok) {
         result = missing->count ? 0 : 1;
-        snprintf(line, sizeof(line), "MPKG: compiled payload availability: %zu checked, %zu missing, %zu supplying packages",
+        snprintf(line, sizeof(line), "MPKG: required map resource availability: %zu checked, %zu missing, %zu supplying packages",
             missing->checked, missing->count, sh_package_owners_count(&missing->packages));
     }
     else snprintf(line, sizeof(line), "MPKG: resource availability inspection incomplete: %s",
-        error[0] ? error : "compiled payload unavailable");
+        error[0] ? error : "map resource closure unavailable");
     backend_log(line);
     for (size_t i = 0; i < missing->count; i++) {
-        snprintf(line, sizeof(line), "MPKG: missing supplied resource: %s", missing->paths[i]); backend_log(line);
+        snprintf(line, sizeof(line), "MPKG: missing required map resource: %s", missing->paths[i]); backend_log(line);
     }
+    return result;
+}
+
+static int preflight_activate_pending(void *context)
+{
+    sh_mpkg_context *previous;
+    if (context != &g_pending_map) return 0;
+    if (g_pending_map.plan || g_map_context_active) {
+        if (!sh_decl_server_activate_map(g_pending_map.plan)) {
+            sh_package_runtime_error(g_transition_error, sizeof(g_transition_error)); return 0;
+        }
+        previous = g_map_context;
+        g_map_context = g_pending_map.sources; g_pending_map.sources = NULL;
+        g_map_context_active = g_pending_map.plan != NULL;
+        g_map_context_await_departure = 0;
+        sh_mpkg_context_retire(&previous);
+    }
+    return 1;
+}
+static int preflight_commit_pending(void *context)
+{
+    if (context != &g_pending_map) return 0;
+    if (!g_preflight_consumed) {
+        strcpy_s(g_transition_error, sizeof(g_transition_error), "The requested map was not loaded. Installation canceled.");
+        return 0;
+    }
+    return sh_package_runtime_commit_map(g_pending_map.plan, sh_mpkg_activation_commit,
+        g_transition_error, sizeof(g_transition_error));
+}
+
+/* Covered resources and accepted installations have the same native completion
+ * contract. Keep the request alive until the native load consumed its prepared
+ * source and returned successfully; only then may installation commit. */
+static int preflight_enter_ready(void)
+{
+    unsigned char name[IDSTR_SIZE] = {0};
+    char error[2048] = "";
+    int initialized = 0, entered_saved = 0, entered_transition = 0, result = 0;
+    int editor_reload = g_pending_map.previous_map != NULL;
+    const sh_editor_transition_callbacks callbacks = {&g_pending_map,
+        preflight_activate_pending, preflight_commit_pending};
+    if (g_pending_map.state != 2 || g_pending_map.loading.matches || g_preflight_busy ||
+        g_inspection_depth || (editor_reload ?
+            !sh_editor_transition_frame_ready(g_pending_map.editor, g_pending_map.previous_map) :
+            !sh_decl_server_map_boundary_safe())) return 0;
+    g_preflight_busy = 1;
+    g_transition_error[0] = 0;
+    __try {
+        if (GetCurrentThreadId() != g_pending_map.thread ||
+            (!g_pending_map.request.enter && !sh_decl_server_map_editor_matches(g_pending_map.editor)) ||
+            (editor_reload && sh_rawmap_load_generation() != g_pending_map.generation)) {
+            strcpy_s(error, sizeof(error), "The original map load is no longer available. Installation canceled."); goto done;
+        }
+        if (!g_pending_map.request.enter) {
+            g_idstr_ctor(name, g_pending_map.save_id); initialized = 1;
+        }
+        if (g_pending_map.plan) {
+            if (!sh_package_map_plan_prepare_inventory(g_pending_map.plan, g_pending_map.root, error, sizeof(error))) goto done;
+        }
+        g_preflight_json = g_pending_map.json; g_preflight_thread = GetCurrentThreadId();
+        g_preflight_consumed = 0; g_preflight_rawmap = g_pending_map.raw;
+        if (editor_reload) {
+            entered_transition = entered_saved = 1;
+            result = sh_editor_transition_load(g_pending_map.editor, g_pending_map.previous_map, name,
+                g_preflight_orig, &callbacks, error, sizeof(error));
+            if (g_transition_error[0]) strcpy_s(error, sizeof(error), g_transition_error);
+            goto done;
+        }
+        if (!preflight_activate_pending(&g_pending_map)) {
+            strcpy_s(error, sizeof(error), g_transition_error[0] ? g_transition_error :
+                "The prepared map resources could not activate."); goto done;
+        }
+        backend_log("MPKG: continuing the original map load with its retained source");
+        if (g_pending_map.request.enter) {
+            result = g_pending_map.request.enter(g_pending_map.request.context, g_pending_map.json);
+            if (result)
+                strcpy_s(error, sizeof(error), "The prepared map could not finish loading. Check the package log.");
+            else if (g_map_context_active)
+                g_map_context_await_departure = sh_decl_server_map_browser_present();
+        } else {
+            entered_saved = 1;
+            result = g_preflight_orig(g_pending_map.editor, name);
+            if (result)
+                strcpy_s(error, sizeof(error), "The prepared map could not finish loading. Check the package log.");
+        }
+        if (!error[0] && !preflight_commit_pending(&g_pending_map))
+            strcpy_s(error, sizeof(error), g_transition_error[0] ? g_transition_error :
+                "The map installation could not be committed.");
+done:;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        snprintf(error, sizeof(error), "Map continuation raised exception %08lx.", (unsigned long)GetExceptionCode());
+        result = 1;
+    }
+    g_preflight_json = NULL; g_preflight_thread = 0;
+    if (error[0] && entered_saved && !entered_transition && !g_preflight_abort(g_pending_map.editor))
+        backend_log("MPKG: native saved-map cancellation did not complete; its resource context remains held");
+    if (initialized) {
+        __try { g_idstr_dtor(name); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MPKG: saved-load string cleanup failed"); }
+    }
+    g_pending_map.loaded = !error[0] && !result && g_preflight_consumed;
+    g_pending_map.state = 3; preflight_pending_discard(); g_preflight_busy = 0;
+    if (error[0] && entered_saved) {
+        if (!result) result = 1;
+        sh_rawmap_map_context_poll();
+    }
+    if (error[0]) sh_mpkg_report_error(error);
     return result;
 }
 
 void sh_rawmap_pending_map_poll(void)
 {
-    unsigned char name[IDSTR_SIZE] = {0};
     char error[2048] = "";
-    int initialized = 0, entered_saved = 0;
     /* Read/completion callbacks can pump the menu while a preview decode is
      * still on the stack. Enter only after that read-only scope has unwound,
      * or the real load would be mistaken for another inspection. */
@@ -1182,6 +1385,15 @@ void sh_rawmap_pending_map_poll(void)
     }
     if (g_pending_map.state == 3) { preflight_pending_discard(); return; }
     if (g_pending_map.state != 2) return;
+    if (g_pending_map.previous_map) {
+        if (sh_rawmap_load_generation() != g_pending_map.generation ||
+            sh_editor_transition_capture(g_pending_map.editor) != g_pending_map.previous_map) {
+            g_pending_map.state = 3; preflight_pending_discard(); return;
+        }
+        if (sh_editor_transition_frame_ready(g_pending_map.editor, g_pending_map.previous_map))
+            preflight_enter_ready();
+        return;
+    }
     if (g_pending_map.loading.matches) {
         if (!sh_decl_server_map_preparation_ready()) return;
         g_preflight_busy = 1;
@@ -1212,54 +1424,7 @@ void sh_rawmap_pending_map_poll(void)
         }
         return;
     }
-    g_preflight_busy = 1;
-    __try {
-        if (GetCurrentThreadId() != g_pending_map.thread ||
-            (!g_pending_map.request.enter && !sh_decl_server_map_editor_matches(g_pending_map.editor))) {
-            strcpy_s(error, sizeof(error), "The original map load is no longer available. Installation canceled."); goto done;
-        }
-        if (!g_pending_map.request.enter) {
-            g_idstr_ctor(name, g_pending_map.save_id); initialized = 1;
-        }
-        if (g_pending_map.plan) {
-            if (!sh_package_map_plan_prepare_inventory(g_pending_map.plan, g_pending_map.root, error, sizeof(error))) goto done;
-            if (!sh_decl_server_activate_map(g_pending_map.plan)) {
-                sh_package_runtime_error(error, sizeof(error)); goto done;
-            }
-            g_map_context = g_pending_map.sources; g_pending_map.sources = NULL; g_map_context_active = 1;
-        }
-        g_preflight_json = g_pending_map.json; g_preflight_thread = GetCurrentThreadId();
-        g_preflight_consumed = 0; g_preflight_rawmap = g_pending_map.raw;
-        backend_log("MPKG: installation activated; continuing the original map load with its retained source");
-        if (g_pending_map.request.enter) {
-            if (g_pending_map.request.enter(g_pending_map.request.context, g_pending_map.json))
-                strcpy_s(error, sizeof(error), "The prepared map could not finish loading. Check the package log.");
-            else if (g_map_context_active)
-                g_map_context_await_departure = sh_decl_server_map_browser_present();
-        } else {
-            entered_saved = 1;
-            if (g_preflight_orig(g_pending_map.editor, name))
-                strcpy_s(error, sizeof(error), "The installed map could not finish loading. Check the package log.");
-        }
-        if (!error[0] && !g_preflight_consumed)
-            strcpy_s(error, sizeof(error), "The requested map was not loaded. Installation canceled.");
-        if (!error[0] && !sh_package_runtime_commit_map(g_pending_map.plan,
-            sh_mpkg_activation_commit, error, sizeof(error)) && !error[0])
-            strcpy_s(error, sizeof(error), "The map installation could not be committed.");
-done:;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        snprintf(error, sizeof(error), "Map installation continuation raised exception %08lx.", (unsigned long)GetExceptionCode());
-    }
-    g_preflight_json = NULL; g_preflight_thread = 0;
-    if (error[0] && entered_saved && !g_preflight_abort(g_pending_map.editor))
-        backend_log("MPKG: native saved-map cancellation did not complete; its resource context remains held");
-    if (initialized) {
-        __try { g_idstr_dtor(name); }
-        __except (EXCEPTION_EXECUTE_HANDLER) { backend_log("MPKG: saved-load string cleanup failed"); }
-    }
-    g_pending_map.state = 3; preflight_pending_discard(); g_preflight_busy = 0;
-    if (error[0] && entered_saved) sh_rawmap_map_context_poll();
-    if (error[0]) sh_mpkg_report_error(error);
+    preflight_enter_ready();
 }
 
 int sh_rawmap_transition_pending(void *manager, const void *parameters)
@@ -1283,7 +1448,7 @@ int sh_rawmap_transition_pending(void *manager, const void *parameters)
 int sh_rawmap_transition_activate(void)
 {
     char *prepared = NULL;
-    int ok = 0;
+    int ok = 0, failed;
     if (g_pending_map.state != 5 || GetCurrentThreadId() != g_pending_map.thread ||
         !sh_map_transition_at_boundary()) return 0;
     __try {
@@ -1299,10 +1464,11 @@ int sh_rawmap_transition_activate(void)
         g_map_context_active = g_pending_map.plan != NULL;
         g_map_context_await_departure = 0;
         sh_mpkg_context_retire(&previous);
-        prepared = prepare_map_buffer(g_pending_map.json);
+        prepared = prepare_map_buffer(g_pending_map.json, &failed);
+        if (failed) goto done;
         chosen = prepared ? prepared : g_pending_map.json;
         if (!select_map_policy(chosen, strlen(chosen)) ||
-            !g_pending_map.loading.select(g_pending_map.request.context)) goto done;
+            !g_pending_map.loading.select(g_pending_map.request.context, chosen)) goto done;
         InterlockedIncrement(&g_load_generation);
         sh_rawmap_clear_save_target_for_new_map();
         InterlockedExchange(&g_open_is_rawmap, 0);
@@ -1325,7 +1491,7 @@ int sh_rawmap_transition_commit(void)
 
 int sh_rawmap_defers_install_commit(void)
 {
-    return g_pending_map.state != 0;
+    return g_pending_map.state != 0 || sh_prefab_import_pending();
 }
 
 void sh_rawmap_transition_finished(int loaded)
@@ -1337,6 +1503,7 @@ void sh_rawmap_transition_finished(int loaded)
     if (!loaded) sh_mpkg_report_error(g_transition_error[0] ? g_transition_error :
         "The map load did not complete. Its pending installation was canceled.");
 }
+
 
 static int preflight_request(const char *json, size_t length,
     const sh_rawmap_request *request, const sh_rawmap_loading *loading,
@@ -1377,10 +1544,9 @@ static int preflight_request(const char *json, size_t length,
         }
         sources = sh_mpkg_context_open(root, copy, length, error, capacity);
         if (!sources) goto done;
-        if (sh_mpkg_context_count(sources)) {
-            plan = sh_package_runtime_prepare_map(root, sh_mpkg_context_root(sources), error, capacity);
-            if (!plan) goto done;
-            covered = preflight_resource_availability(plan, &missing, error, capacity);
+        if (!sh_package_document_bind(root, sources, &copy, &length, &plan, error, capacity)) goto done;
+        if (plan) {
+            covered = preflight_resource_availability(plan, copy, length, &missing, error, capacity);
             if (covered < 0) goto done;
         }
         if (covered && !sh_mpkg_activation_ready()) {
@@ -1393,6 +1559,7 @@ static int preflight_request(const char *json, size_t length,
         if (loading) g_pending_map.loading = *loading;
         published = 1;
         strcpy_s(g_pending_map.root, sizeof(g_pending_map.root), root);
+        g_pending_map.previous_world = sh_package_editor_world();
         g_pending_map.state = covered ? 2 : 1;
         g_pending_map.published_at = GetTickCount64();
         if (!covered && !sh_mpkg_request_map_install(g_pending_map.json, length,
@@ -1439,13 +1606,16 @@ static int preflight_load(void *editor, const void *save_name)
     sh_mpkg_context *sources = NULL;
     sh_package_map_plan *plan = NULL;
     sh_package_missing missing = {0};
-    int result = 0, raw = 0, flag = 0, oneshot, covered = 0;
+    int result = 0, raw = 0, flag = 0, oneshot, covered = 1, enter = 0;
     size_t length = 0;
+    void *previous_map = sh_editor_transition_capture(editor);
+    unsigned long generation = sh_rawmap_load_generation();
     if (!g_preflight_orig) return 1;
     if (!g_preflight_busy && g_pending_map.state && !preflight_pending_discard()) return 0;
-    if (g_preflight_busy || !sh_decl_server_map_boundary_safe()) return g_preflight_orig(editor, save_name);
-    sh_rawmap_map_context_poll();
-    if (g_map_context) {
+    if (g_preflight_busy || (!previous_map && !sh_decl_server_map_boundary_safe()))
+        return g_preflight_orig(editor, save_name);
+    if (!previous_map) sh_rawmap_map_context_poll();
+    if (!previous_map && g_map_context) {
         sh_mpkg_report_error("The previous map's resources could not be retired. Check the package log."); return 0;
     }
     g_preflight_busy = 1;
@@ -1472,44 +1642,40 @@ static int preflight_load(void *editor, const void *save_name)
         }
         sources = sh_mpkg_context_open(root, json, length, error, sizeof(error));
         if (!sources) goto done;
-        if (sh_mpkg_context_count(sources)) {
-            plan = sh_package_runtime_prepare_map(root, sh_mpkg_context_root(sources), error, sizeof(error));
-            if (!plan) goto done;
-            covered = preflight_resource_availability(plan, &missing, error, sizeof(error));
+        if (!sh_package_document_bind(root, sources, &json, &length, &plan, error, sizeof(error))) goto done;
+        if (plan) {
+            covered = preflight_resource_availability(plan, json, length, &missing, error, sizeof(error));
             if (covered < 0) goto done;
         }
-        if (plan && covered) {
-            if (!sh_mpkg_activation_ready()) goto done;
-            backend_log("MPKG: all supplied resources are available; activating map values without package installation");
-        } else if (plan) {
-            if (!sh_decl_server_map_editor_matches(editor) || !preflight_save_id(save_name, g_pending_map.save_id)) {
-                strcpy_s(error, sizeof(error), "The original map request cannot be retained for installation."); goto done;
-            }
-            g_pending_map.json = json; json = NULL;
-            g_pending_map.plan = plan; plan = NULL;
-            g_pending_map.sources = sources; sources = NULL;
-            g_pending_map.editor = editor; g_pending_map.thread = GetCurrentThreadId();
-            g_pending_map.raw = raw; g_pending_map.state = 1;
-            strcpy_s(g_pending_map.root, sizeof(g_pending_map.root), root);
+        if (covered && !sh_mpkg_activation_ready()) goto done;
+        if (!sh_decl_server_map_editor_matches(editor) || !preflight_save_id(save_name, g_pending_map.save_id)) {
+            strcpy_s(error, sizeof(error), "The original map request cannot be retained for package preparation."); goto done;
+        }
+        g_pending_map.json = json; json = NULL;
+        g_pending_map.plan = plan; plan = NULL;
+        g_pending_map.sources = sources; sources = NULL;
+        g_pending_map.editor = editor; g_pending_map.thread = GetCurrentThreadId();
+        g_pending_map.previous_map = previous_map; g_pending_map.generation = generation;
+        g_pending_map.previous_world = sh_package_editor_world();
+        g_pending_map.raw = raw; g_pending_map.state = covered ? 2 : 1;
+        g_pending_map.published_at = GetTickCount64();
+        strcpy_s(g_pending_map.root, sizeof(g_pending_map.root), root);
+        if (!covered) {
             if (!sh_mpkg_request_map_install(g_pending_map.json, length,
                 sh_package_map_plan_compilation(g_pending_map.plan), &missing.packages,
                 preflight_install_completed, &g_pending_map, error, sizeof(error))) preflight_pending_discard();
             goto done;
-        } else if (!mpkg_gate_guarded(json)) goto done;
-        if (plan) {
-            if (!sh_decl_server_activate_map(plan)) {
-                sh_package_runtime_error(error, sizeof(error)); goto done;
-            }
-            g_map_context = sources; sources = NULL; g_map_context_active = 1;
         }
-        g_preflight_json = json; g_preflight_thread = GetCurrentThreadId();
-        g_preflight_consumed = 0; g_preflight_rawmap = raw;
-        backend_log("MPKG: saved-map preflight complete; native load will parse the retained JSON");
-        result = g_preflight_orig(editor, save_name);
+        /* Availability changes whether consent is needed, not the native load
+         * contract. In particular, covered maps must commit their prepared
+         * inventory and cancel native failures just like installed maps. */
+        backend_log("MPKG: all required map resources are available; continuing without package installation");
+        enter = 1;
 done:;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         snprintf(error, sizeof(error), "Saved-map package preparation raised exception %08lx.", (unsigned long)GetExceptionCode());
         result = 1;
+        if (g_pending_map.state) { g_pending_map.state = 3; preflight_pending_discard(); }
     }
     g_preflight_json = NULL; g_preflight_thread = 0;
     if (json) HeapFree(GetProcessHeap(), 0, json);
@@ -1518,6 +1684,7 @@ done:;
     sh_mpkg_context_retire(&sources);
     g_preflight_busy = 0;
     if (error[0]) sh_mpkg_report_error(error);
+    if (enter && !error[0]) result = preflight_enter_ready();
     return result;
 }
 
@@ -1595,9 +1762,20 @@ int sh_rawmap_live_serialize_ready(void)
 
 /* Defined below, beside the save detour that is their other caller. Both writers put a
  * map through the same encoders, so a rawmap carries what an engine save carries. */
-static int mpkg_embed_on_save(void *out_idstr);
+static int mpkg_embed_on_save(void *out_idstr, const sh_package_occurrence_snapshot *ownership);
 static void nav_embed_on_save(void *out_idstr);
 static void nav_regions_on_save(void *out_idstr);
+static int capture_save_ownership(const void *map, const void *out_idstr, void *context)
+{
+    sh_package_occurrence_snapshot **ownership = context;
+    char error[512] = ""; (void)out_idstr;
+    if (!sh_package_editor_ready() || !sh_package_editor_healthy(error, sizeof(error))) goto failed;
+    sh_package_occurrence_snapshot *next = sh_package_editor_snapshot(SH_PACKAGE_EDITOR_MAP, map, error, sizeof(error));
+    if (!next) goto failed;
+    sh_package_occurrence_release(*ownership); *ownership = next; return 1;
+failed:
+    sh_mpkg_report_error(error[0] ? error : "Map source ownership could not be read before saving."); return 0;
+}
 
 /* Serialize `map` and write it to the rawmap destination. MAIN THREAD ONLY -- it reads engine state
  * and allocates through the engine's allocator, so it is called from the editor-frame hook, never
@@ -1610,6 +1788,7 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg,
     int len = 0;
     const char *data = NULL;
     unsigned char rc = 0;
+    sh_package_occurrence_snapshot *ownership = NULL;
 
     if (out_msg && msg_capacity > 0) out_msg[0] = '\0';
     if (out_bytes) *out_bytes = 0;
@@ -1633,15 +1812,14 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg,
         g_idstr_ctor(blk, "");
         /* SnapMapToJson calls the hooked serializer. Suppress its save side effects
          * here so the explicit export embeds and writes exactly once. */
-        g_snapshot_depth++;
-        __try { rc = g_map_to_json(map, blk, 1); }
-        __finally { g_snapshot_depth--; }
+        rc = (unsigned char)sh_rawmap_snapshot_inspect((void *)g_map_to_json, map, blk,
+            capture_save_ownership, &ownership);
         if (rc) {
             /* The same three encoders the save detour runs, in the same order. The engine
              * hands back map state with the shards already stripped at load, so writing
              * this buffer straight out drops the packages the map uses and the navigation
              * its author baked. Each one no-ops if its own dependencies are unresolved. */
-            rc = (unsigned char)mpkg_embed_on_save(blk);
+            rc = (unsigned char)mpkg_embed_on_save(blk, ownership);
             nav_embed_on_save(blk);
             nav_regions_on_save(blk);
 
@@ -1651,12 +1829,14 @@ int sh_rawmap_write_from_live(void *map, const char *destination, char *out_msg,
         }
         g_idstr_dtor(blk);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        sh_package_occurrence_release(ownership);
         InterlockedExchange(&g_live_faulted, 1);
         backend_log("B1: rawmap live-serialize FAULTED; disabled for this session");
         if (out_msg) strncpy_s(out_msg, (size_t)msg_capacity,
                                "serializing the open map faulted", _TRUNCATE);
         return 0;
     }
+    sh_package_occurrence_release(ownership);
 
     if (!rc) {
         backend_log("B1: rawmap live-serialize -- the engine declined to serialize the map");
@@ -1807,23 +1987,29 @@ void sh_rawmap_embed_install(const void *module_base)
 /* Build JSON with detected package payloads, or NULL for no replacement.
  * Reads package files but does not mutate engine objects.
  */
-static char *embed_used_packages(const char *json, size_t len, size_t *out_len, int *failed)
+static char *embed_used_packages_owned(const char *json, size_t len,
+    const sh_package_occurrence_snapshot *previous, sh_package_occurrence_snapshot **selected,
+    size_t *out_len, int *failed)
 {
     sh_mpkg_used *used = NULL;
+    sh_package_occurrence_snapshot *ownership = NULL;
     char root[MAX_PATH], error[SH_MPKG_ERR_CAP], message[SH_MPKG_ERR_CAP + 32];
-    char *cur = NULL;
-    size_t cur_len = len, count, i;
+    char *cur = NULL, *bound = NULL;
+    size_t cur_len = len, count = 0, i, rows_count = 0, bound_length = 0;
+    const sh_package_bundle_binding *rows = sh_package_occurrence_bundles(previous, &rows_count);
     *failed = 0;
     *out_len = 0;
     if (!sh_overrides_get_root(root, sizeof root)) return NULL;
 
-    count = sh_mpkg_used_packages(json, len, root, &used, error, sizeof(error));
-    if (count == SIZE_MAX) {
+    bound = sh_package_runtime_capture_document(NULL, sh_package_occurrence_provenance(previous),
+        rows, rows_count, json, len, &bound_length, &ownership, &used, &count, error, sizeof(error));
+    if (!bound) {
         *failed = 1;
         snprintf(message, sizeof(message), "Map save failed: %s", error);
-        sh_mpkg_report_error(message); return NULL;
+        sh_mpkg_report_error(message); goto done;
     }
-    if (count == 0) { free(used); return NULL; }
+    const char *native_json = json; size_t native_length = len;
+    json = bound; len = cur_len = bound_length;
 
     for (i = 0; i < count; i++) {
         unsigned char *payload;
@@ -1839,7 +2025,7 @@ static char *embed_used_packages(const char *json, size_t len, size_t *out_len, 
                         "MPKG: package '%s' could NOT be packed for this save (%s); the map is "
                         "not saved", label, err);
             sh_mpkg_report_error(line);
-            *failed = 1; free(used); if (cur) HeapFree(GetProcessHeap(), 0, cur); return NULL;
+            *failed = 1; goto done;
         }
         next = sh_mpkg_embed(cur ? cur : json, cur_len, used[i].id,
                              payload, payload_len, &next_len, err, sizeof err);
@@ -1849,18 +2035,44 @@ static char *embed_used_packages(const char *json, size_t len, size_t *out_len, 
                         "MPKG: package '%s' could NOT be embedded in this save (%s); the map is "
                         "not saved", label, err);
             sh_mpkg_report_error(line);
-            *failed = 1; free(used); if (cur) HeapFree(GetProcessHeap(), 0, cur); return NULL;
+            *failed = 1; goto done;
         }
         if (cur) HeapFree(GetProcessHeap(), 0, cur);
         cur = next;
         cur_len = next_len;
     }
 
-    free(used);
-    if (!cur) return NULL;
-    *out_len = cur_len;
+    {
+        size_t next_len = 0;
+        char *next = sh_map_provenance_write(cur ? cur : json, cur_len, sh_package_occurrence_provenance(ownership),
+            &next_len, error, sizeof(error));
+        if (!next) {
+            snprintf(message, sizeof(message), "Map save failed: %s", error);
+            sh_mpkg_report_error(message); *failed = 1; goto done;
+        }
+        if (cur) HeapFree(GetProcessHeap(), 0, cur);
+        cur = next; cur_len = next_len;
+    }
+    if (cur && cur_len == native_length && !memcmp(cur, native_json, native_length)) {
+        HeapFree(GetProcessHeap(), 0, cur); cur = NULL;
+    }
+done:
+    if (!*failed && ownership && selected) {
+        sh_package_occurrence_release(*selected); *selected = ownership; ownership = NULL;
+    }
+    sh_mpkg_used_free(used); sh_package_occurrence_release(ownership); free(bound);
+    if (*failed) {
+        if (cur) HeapFree(GetProcessHeap(), 0, cur);
+        cur = NULL;
+    }
+    if (cur) *out_len = cur_len;
     return cur;
 }
+
+#ifdef SH_RAWMAP_TESTING
+static char *embed_used_packages(const char *json, size_t len, size_t *out_len, int *failed)
+{ return embed_used_packages_owned(json, len, NULL, NULL, out_len, failed); }
+#endif
 
 /* Assign body through the native idStr helper. A zero flags word disables
  * stealing, so the engine copies the temporary bytes.
@@ -1907,16 +2119,20 @@ static editor_play_fn_t g_play_orig;
 static int activate_play_map(void *snapshot)
 {
     unsigned char str[IDSTR_SIZE] = {0};
-    char *json = NULL;
+    char *json = NULL, *bound = NULL;
+    char error[1024] = "";
+    size_t bound_length = 0, rows_count = 0;
+    sh_package_occurrence_snapshot *ownership = NULL, *selected = NULL;
     const char *data = NULL;
-    int initialized = 0, length = 0, ok = 0;
+    int initialized = 0, length = 0, ok = 0, reported = 0;
     if (!snapshot || !g_ser_orig || !g_map_to_json || !g_idstr_ctor || !g_idstr_dtor) {
         sh_mpkg_report_error("Play could not read the current map's package requirements.");
         return 0;
     }
     __try {
         g_idstr_ctor(str, ""); initialized = 1;
-        if (sh_rawmap_snapshot((void *)g_map_to_json, snapshot, str) &&
+        if (sh_rawmap_snapshot_inspect((void *)g_map_to_json, snapshot, str,
+            capture_save_ownership, &ownership) &&
             read_out_idstr(str, &data, &length)) {
             json = (char *)malloc((size_t)length + 1);
             if (json) {
@@ -1931,9 +2147,16 @@ static int activate_play_map(void *snapshot)
     }
     /* Release native storage before publishing a selection. Engine callbacks
      * used for dependency preparation also remain outside the compiler lock. */
-    if (ok) ok = select_map_policy(json, (size_t)length);
-    else sh_mpkg_report_error("Play could not read the current map's package requirements.");
-    free(json);
+    if (ok) {
+        const sh_package_bundle_binding *rows = sh_package_occurrence_bundles(ownership, &rows_count);
+        bound = sh_package_runtime_capture_document(NULL, sh_package_occurrence_provenance(ownership),
+            rows, rows_count, json, (size_t)length, &bound_length, &selected, NULL, NULL, error, sizeof(error));
+        ok = bound && bound_length == (size_t)length && !memcmp(bound, json, bound_length);
+        if (ok) { ok = select_map_policy_owned(json, (size_t)length, selected); reported = !ok; }
+    }
+    if (!ok && !reported) sh_mpkg_report_error(error[0] ? error : "Play could not read the current map's package requirements.");
+    sh_package_occurrence_release(ownership); sh_package_occurrence_release(selected);
+    free(bound); free(json);
     return ok;
 }
 
@@ -1976,19 +2199,22 @@ int sh_rawmap_play_install(void *play_fn, int status_ok)
 }
 
 /* A save is all-or-nothing: never publish map JSON with missing packages. */
-static int mpkg_embed_on_save(void *out_idstr)
+static int mpkg_embed_on_save(void *out_idstr, const sh_package_occurrence_snapshot *ownership)
 {
     const char *data = NULL;
     int len = 0, failed = 0;
     char *body = NULL;
+    sh_package_occurrence_snapshot *selected = NULL;
     size_t body_len = 0;
     if (!out_idstr || !read_out_idstr(out_idstr, &data, &len)) return 0;
-    __try { body = embed_used_packages(data, (size_t)len, &body_len, &failed); }
+    __try { body = embed_used_packages_owned(data, (size_t)len, ownership, &selected, &body_len, &failed); }
     __except (EXCEPTION_EXECUTE_HANDLER) { failed = 1; }
-    if (failed) { if (body) HeapFree(GetProcessHeap(), 0, body); return 0; }
+    if (failed) { if (body) HeapFree(GetProcessHeap(), 0, body); sh_package_occurrence_release(selected); return 0; }
     /* Embedding's dependency preparation has now observed the edited map.
      * Activate from its native JSON before transport shards are appended. */
-    if (!select_map_policy(data, (size_t)len)) {
+    int policy_ok = select_map_policy_owned(data, (size_t)len, selected);
+    sh_package_occurrence_release(selected);
+    if (!policy_ok) {
         if (body) HeapFree(GetProcessHeap(), 0, body);
         return 0;
     }
@@ -2055,7 +2281,11 @@ static unsigned char sh_ser_detour(void *map, void *out_idstr, unsigned char com
     }
 
     /* Embed used packages before mirroring; independent of the rawmap switch. */
-    if (!rc || !mpkg_embed_on_save(out_idstr)) return 0;
+    sh_package_occurrence_snapshot *ownership = NULL;
+    if (!rc || !capture_save_ownership(map, out_idstr, &ownership)) return 0;
+    int embedded = mpkg_embed_on_save(out_idstr, ownership);
+    sh_package_occurrence_release(ownership);
+    if (!embedded) return 0;
 
     /* Restore retained navigation shards after package embedding so ordinary
      * saves preserve delivered payloads.

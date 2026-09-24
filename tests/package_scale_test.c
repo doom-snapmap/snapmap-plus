@@ -13,10 +13,20 @@
 #include "package_fixture.h"
 
 static sh_package_compilation *compiled;
+static sh_package_provenance binding_index;
+static sh_package_bundle *bundles[130];
 static int acquired;
 const sh_package_compilation *sh_package_runtime_acquire(void) { CHECK(!acquired); acquired = 1; return compiled; }
 void sh_package_runtime_release(void) { CHECK(acquired); acquired = 0; }
 const sh_resource_catalog *sh_package_runtime_catalog(void) { CHECK(acquired); return NULL; }
+const sh_package_provenance *sh_package_runtime_bindings(void) { CHECK(acquired); return &binding_index; }
+sh_package_bundle *sh_package_runtime_source_bundle(size_t owner, const unsigned char tree[32])
+{
+    CHECK(acquired);
+    if (!compiled || owner >= 130 || owner >= compiled->sources->package_count ||
+        memcmp(tree, compiled->sources->fingerprints[owner], 32)) return NULL;
+    return sh_package_bundle_retain(bundles[owner]);
+}
 int sh_decl_server_registry_source(sh_decl_registry_source *source) { (void)source; CHECK(!acquired); return 0; }
 void *sh_typeinfo_get_reflect(void) { CHECK(0); return NULL; }
 sh_resource_graph_preparation *sh_resource_graph_prepare_open(sh_decl_registry_source source, uintptr_t reflect)
@@ -73,6 +83,9 @@ int main(void)
     if (!sources) goto done;
     compiled = sh_package_compile(sources, original, NULL, error, sizeof(error)); CHECK(compiled);
     if (!compiled) { fprintf(stderr, "%s\n", error); goto done; }
+    for (i = 0; i < 130; i++) {
+        bundles[i] = sh_package_bundle_capture(sources, i, root, error, sizeof(error)); CHECK(bundles[i]);
+    }
     {
         const sh_compiled_resource *r = sh_package_compilation_find(compiled, "generated/models/scale/shared.bmodel");
         CHECK(r && r->source_count == 129 && sh_package_owners_count(&r->owners) == 129 &&
@@ -111,6 +124,44 @@ int main(void)
     }
     CHECK(!strcmp(sources->components[0].descriptor.id, sources->components[1].descriptor.id));
     CHECK(strcmp(selected[0].id, selected[1].id));
+    {
+        sh_package_provenance saved = {0};
+        size_t private_context = sh_package_provenance_context_add(&binding_index,
+            SH_PACKAGE_CONTEXT_ISOLATED, sources->fingerprints + 128, 1, "");
+        size_t unused_context = sh_package_provenance_context_add(&binding_index,
+            SH_PACKAGE_CONTEXT_ISOLATED, sources->fingerprints, 1, "");
+        CHECK(sh_package_provenance_bind(&binding_index, "entitydef", "scale/high", "scale/high", &private_context, 1));
+        CHECK(sh_package_provenance_bind(&binding_index, "entitydef", "scale/shared", "scale/shared", &unused_context, 1));
+        count = sh_mpkg_used_packages_with_bindings(high_map, sizeof(high_map) - 1, root,
+            &selected, &saved, error, sizeof(error));
+        CHECK(count == 1 && saved.context_count == 1 && saved.binding_count == 1 && !acquired);
+        CHECK(!memcmp(saved.contexts[0].trees[0], sources->fingerprints[128], 32));
+        /* Equivalent current names can have both historical and isolated
+         * suppliers. Save retains every tree needed to reconstruct them. */
+        size_t historical = sh_package_provenance_context_add(&binding_index,
+            SH_PACKAGE_CONTEXT_COMPOSED, sources->fingerprints + 127, 2, NULL);
+        CHECK(sh_package_provenance_bind(&binding_index, "entitydef", "scale/high", "scale/high", &historical, 1));
+        count = sh_mpkg_used_packages_with_bindings(high_map, sizeof(high_map) - 1, root,
+            &selected, &saved, error, sizeof(error));
+        CHECK(count == 2 && saved.context_count == 2 && saved.binding_count == 1 && !acquired);
+        /* Removing the isolated supplier leaves a plain old-format save. */
+        sh_package_provenance_free(&binding_index);
+        historical = sh_package_provenance_context_add(&binding_index,
+            SH_PACKAGE_CONTEXT_COMPOSED, sources->fingerprints + 127, 2, NULL);
+        CHECK(sh_package_provenance_bind(&binding_index, "entitydef", "scale/high", "scale/high", &historical, 1));
+        count = sh_mpkg_used_packages_with_bindings(high_map, sizeof(high_map) - 1, root,
+            &selected, &saved, error, sizeof(error));
+        CHECK(count == 1 && !saved.context_count && !saved.binding_count && !acquired);
+        sh_package_provenance_free(&binding_index);
+        private_context = sh_package_provenance_context_add(&binding_index,
+            SH_PACKAGE_CONTEXT_ISOLATED, sources->fingerprints + 128, 1, "");
+        CHECK(sh_package_provenance_bind(&binding_index, "entitydef", "scale/high", "scale/high", &private_context, 1));
+        binding_index.contexts[0].trees[0][0] ^= 255;
+        count = sh_mpkg_used_packages_with_bindings(high_map, sizeof(high_map) - 1, root,
+            &selected, &saved, error, sizeof(error));
+        CHECK(count == SIZE_MAX && !saved.bindings && !selected && !acquired);
+        sh_package_provenance_free(&binding_index); sh_package_provenance_free(&saved);
+    }
     CHECK(sh_package_map_owners(compiled, NULL, all_map, sizeof(all_map) - 1, NULL, &owners, NULL));
     CHECK(sh_package_owners_count(&owners) == 129 && sh_package_owners_within(&owners, 129));
     CHECK(sh_package_owners_add(&owners, 4096));
@@ -137,15 +188,29 @@ int main(void)
         create("overrides/p128/assets/generated/decls/material/scale/composed.decl",
             "{ edit = { independent0 = 777; independent128 = 128; } }");
         changed = sh_mpkg_pack_used(&selected_before_edit, &length, error, sizeof(error));
-        CHECK(!changed && !length && strstr(error, "changed after"));
+        CHECK(changed && length && !error[0]);
+        if (changed) {
+            unsigned char fingerprint[32];
+            CHECK(sh_package_archive_tree_identity(changed, length, fingerprint, error, sizeof(error)) &&
+                !memcmp(fingerprint, sources->fingerprints[128], 32));
+        }
         if (changed) HeapFree(GetProcessHeap(), 0, changed);
         conflicting_sources = sh_package_sources_scan(root, error, sizeof(error)); CHECK(conflicting_sources);
         conflicting = sh_package_compile(conflicting_sources, original, NULL, error, sizeof(error));
         CHECK(!conflicting && strstr(error, "p000") && strstr(error, "p128"));
         sh_package_compilation_free(conflicting); sh_package_sources_free(conflicting_sources);
+        /* A selected save retains complete source bytes after provider and
+         * inventory retirement, including the old unused composed material. */
+        sh_package_compilation_free(compiled); compiled = NULL;
+        sh_package_sources_free(sources); sources = NULL;
+        for (i = 0; i < 130; i++) { sh_package_bundle_release(bundles[i]); bundles[i] = NULL; }
+        changed = sh_mpkg_pack_used(&selected_before_edit, &length, error, sizeof(error));
+        CHECK(changed && length && !error[0]);
+        if (changed) HeapFree(GetProcessHeap(), 0, changed);
     }
 done:
-    free(selected); sh_package_owners_free(&owners); sh_package_policy_free(&policy);
+    sh_mpkg_used_free(selected); sh_package_owners_free(&owners); sh_package_policy_free(&policy);
+    for (i = 0; i < 130; i++) sh_package_bundle_release(bundles[i]);
     sh_package_compilation_free(compiled); sh_package_sources_free(sources); cleanup();
     printf("package_scale_test: %d failures\n", failures); return failures ? 1 : 0;
 }

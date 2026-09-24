@@ -59,7 +59,7 @@ The header defines the complete ABI. These are the main entry points:
 | Entity list and state | Count, validity, classname, inherit, display name and serialization slots. |
 | Selection | `get_selection` at `+0x150`, `add_to_selection` at `+0x138`, and `clear_selection` at `+0x148`. |
 | Camera position | `get_editor_vec3` at `+0x08` and `set_editor_vec3` at `+0x00`. Position lock reapplies saved coordinates. |
-| Create prefab | `serialize_selection` at `+0xB0`; the engine requires hovering a selected entity. |
+| Create prefab | Capability-checked `prefab_export` at `+0x340` returns a complete owned snapshot; the engine requires hovering a selected entity. The host frees it with `HeapFree`. |
 | Load / Place | `apply_edit` at `+0xD0`, kind 2: stage the prefab and request the native paste action. Engine state can force a stage-only fallback, reported by toast. |
 | Save Timeline | `apply_sync` at `+0x290`, kind 0, with the target entity ID. |
 | Timeline inheritance | The normalization slot at `+0x298`. |

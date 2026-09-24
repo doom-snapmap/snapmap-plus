@@ -79,8 +79,75 @@ static void expect_change(const sh_package_changes *changes, size_t i,
     if (i < changes->count) CHECK(!strcmp(changes->items[i].path, path) && changes->items[i].kind == kind);
 }
 
+static void test_native_identity_changes(void)
+{
+    sh_compiled_resource a[2] = {0}, b[2] = {0};
+    sh_package_compilation before = {0}, after = {0};
+    sh_package_changes changes = {0};
+    char error[1024];
+    for (size_t i = 0; i < 2; i++) {
+        a[i].engine_path = i ? "compiled/vertex.bin" : "compiled/fragment.bin";
+        a[i].body = (unsigned char *)"same"; a[i].body_length = 4;
+        a[i].native_type = "renderprog"; a[i].native_name = "smp/shared";
+        b[i] = a[i];
+    }
+    before.resources = a; before.resource_count = 2;
+    after.resources = b; after.resource_count = 1;
+    /* One physical permutation disappears, but its native object still has a
+     * provider. Neither direction should retire/reintroduce that identity. */
+    CHECK(sh_package_compilation_changes(&before, &after, &changes, error, sizeof(error)));
+    CHECK(changes.count == 1 && changes.identities_complete && !changes.removed_count && !changes.added_count);
+    CHECK(changes.items[0].type && !strcmp(changes.items[0].type, "renderprog"));
+    CHECK(changes.items[0].name && !strcmp(changes.items[0].name, "smp/shared"));
+    sh_package_changes_reverse(&changes);
+    CHECK(changes.items[0].kind == SH_PACKAGE_RESOURCE_ADDED && !changes.removed_count && !changes.added_count);
+    sh_package_changes_reverse(&changes);
+    CHECK(changes.items[0].kind == SH_PACKAGE_RESOURCE_REMOVED);
+    /* Same path and bytes with a new native binding still needs activation.
+     * Both old and new identity sets must survive the rollback reversal. */
+    b[0].native_name = "smp/variant";
+    CHECK(sh_package_compilation_changes(&before, &after, &changes, error, sizeof(error)));
+    CHECK(changes.count == 1 && changes.removed_count == 1 && changes.added_count == 1);
+    CHECK(!strcmp(changes.items[0].path, "compiled/vertex.bin") &&
+        changes.items[0].kind == SH_PACKAGE_RESOURCE_REMOVED);
+    CHECK(!strcmp(changes.removed[0].name, "smp/shared") && !strcmp(changes.added[0].name, "smp/variant"));
+    sh_package_changes_reverse(&changes);
+    CHECK(changes.items[0].kind == SH_PACKAGE_RESOURCE_ADDED &&
+        !strcmp(changes.removed[0].name, "smp/variant") && !strcmp(changes.added[0].name, "smp/shared"));
+    sh_package_changes_reverse(&changes);
+    /* Changing bytes as well produces a physical replacement with its own
+     * previous identity, independently of the complete logical identity sets. */
+    b[0].body = (unsigned char *)"edit";
+    CHECK(sh_package_compilation_changes(&before, &after, &changes, error, sizeof(error)));
+    CHECK(changes.count == 2 && changes.removed_count == 1 && changes.added_count == 1);
+    CHECK(!strcmp(changes.removed[0].name, "smp/shared") && !strcmp(changes.added[0].name, "smp/variant"));
+    CHECK(!strcmp(changes.items[0].name, "smp/variant") && !strcmp(changes.items[0].previous_name, "smp/shared"));
+    CHECK(changes.items[0].name != b[0].native_name && changes.items[0].previous_name != a[0].native_name);
+    sh_package_changes_reverse(&changes);
+    CHECK(!strcmp(changes.items[0].name, "smp/shared") && !strcmp(changes.items[0].previous_name, "smp/variant"));
+    CHECK(!strcmp(changes.removed[0].name, "smp/variant") && !strcmp(changes.added[0].name, "smp/shared"));
+    sh_package_changes_reverse(&changes);
+    CHECK(!strcmp(changes.items[0].name, "smp/variant") && !strcmp(changes.removed[0].name, "smp/shared"));
+    /* Complete removal deduplicates all physical members to one retirement. */
+    CHECK(sh_package_compilation_changes(&before, NULL, &changes, error, sizeof(error)));
+    CHECK(changes.count == 2 && changes.removed_count == 1 && !changes.added_count);
+    before.resource_count = 1; a[0].native_type = a[0].native_name = NULL;
+    CHECK(sh_package_compilation_changes(&before, &after, &changes, error, sizeof(error)));
+    CHECK(changes.count == 1 && !changes.items[0].previous_type && !changes.removed_count && changes.added_count == 1);
+    sh_package_changes_reverse(&changes);
+    CHECK(!changes.items[0].type && !strcmp(changes.items[0].previous_name, "smp/variant") && changes.removed_count == 1);
+    /* Invalid half-bindings never publish partial file or native diffs. */
+    b[0].native_type = NULL;
+    CHECK(!sh_package_compilation_changes(&before, &after, &changes, error, sizeof(error)));
+    CHECK(!changes.items && !changes.added && !changes.removed && !changes.identities_complete);
+    b[0].native_type = "renderprog"; b[0].type = "material"; b[0].name = "smp/variant";
+    CHECK(!sh_package_compilation_changes(&before, &after, &changes, error, sizeof(error)));
+    sh_package_changes_free(&changes); sh_package_changes_reverse(NULL);
+}
+
 static void test_changes(const sh_package_compilation *compiled)
 {
+    test_native_identity_changes();
     sh_package_changes changes = {0};
     char error[1024];
     CHECK(sh_package_compilation_changes(NULL, NULL, &changes, error, sizeof(error)) && !changes.count);
@@ -467,6 +534,153 @@ static void test_native_original_provenance(void)
     }
 }
 
+static void test_duplicate_editor_controls(void)
+{
+    const char *path = "generated/decls/snapeditorentitydef/props/example.decl";
+    const char *relative = "overrides/editor/assets/generated/decls/snapeditorentitydef/props/example.decl";
+    const char *text = "{ edit = { propertySheets = { num = 2; "
+        "item[0] = { properties = { num = 1; item[0] = { path = \"size\"; "
+        "inspector = \"vec3\"; displayNameTag = \"custom\"; descriptionTag = \"custom help\"; } } } "
+        "item[1] = { properties = { num = 2; item[0] = { path = \"size\"; "
+        "inspector = \"vec3\"; displayNameTag = \"stock\"; descriptionTag = \"stock help\"; } "
+        "item[1] = { path = \"color\"; inspector = \"vec3\"; } } } } } }";
+    char error[1024];
+    sh_package_sources *sources;
+    sh_package_compilation *compiled;
+    const sh_compiled_resource *resource;
+    cleanup(); CHECK(CreateDirectoryA(root, NULL));
+    create("overrides/editor/package.json", "{\"id\":\"editor\",\"name\":\"Editor\"}");
+    create("overrides/healthy/package.json", "{\"id\":\"healthy\",\"name\":\"Healthy\"}");
+    create("overrides/healthy/assets/generated/decls/entitydef/example.decl", "{ edit = { health = 10; } }");
+    create(relative, text);
+    sources = sh_package_sources_scan(root, error, sizeof(error)); CHECK(sources);
+    compiled = sh_package_compile(sources, NULL, NULL, error, sizeof(error)); CHECK(compiled);
+    if (!compiled) fprintf(stderr, "editor control dedupe: %s\n", error);
+    if (compiled) {
+        CHECK(compiled->sources->package_count == 2 && compiled->resource_count == 2);
+        resource = sh_package_compilation_find(compiled, path); CHECK(resource && resource->body);
+        if (resource && resource->body) {
+            sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)resource->body, resource->body_length}, error, sizeof(error));
+            const sh_decl_node *sheets = sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), "propertySheets");
+            const sh_decl_node *first = sh_decl_tree_member(sh_decl_tree_member(sheets, "item[0]"), "properties");
+            const sh_decl_node *second = sh_decl_tree_member(sh_decl_tree_member(sheets, "item[1]"), "properties");
+            CHECK(!strcmp(sh_decl_tree_member(first, "num")->value, "1"));
+            CHECK(!strcmp(sh_decl_tree_member(second, "num")->value, "1"));
+            CHECK(strstr((char *)resource->body, "\"custom help\"") && !strstr((char *)resource->body, "\"stock help\""));
+            CHECK(!strcmp(sh_decl_tree_member(sh_decl_tree_member(second, "item[0]"), "path")->value, "\"color\""));
+            CHECK(!sh_package_owners_count(&resource->gameplay_owners));
+            sh_decl_tree_free(tree);
+        }
+        /* Normalization is compiled output only. Intact package delivery must
+         * retain the authored duplicate rows, not silently rewrite the file. */
+        int found = 0;
+        for (size_t i = 0; i < sources->file_count; i++) if (sources->files[i].engine_path &&
+            !strcmp(sources->files[i].engine_path, path)) {
+            size_t length = 0;
+            unsigned char *body = sh_package_source_read(sources->files + i, SIZE_MAX, &length, error, sizeof(error));
+            CHECK(body && length == strlen(text) && !memcmp(body, text, length)); free(body); found++;
+        }
+        CHECK(found == 1);
+    }
+    sh_package_compilation_free(compiled); sh_package_sources_free(sources);
+}
+
+static void test_requirement_reduction(void)
+{
+    const char *descriptors[] = {
+        "{\"id\":\"a\",\"name\":\"A\",\"requirements\":{\"cvars\":{"
+        "\"g_useResourceBlackList\":1,\"g_useImageBlackList\":false}}}",
+        "{\"id\":\"b\",\"name\":\"B\",\"requirements\":{\"cvars\":{"
+        "\"g_useImageBlackList\":true,\"g_useResourceBlackList\":0}}}"
+    };
+    const char *invalid[] = {"{\"unknownGate\":0}", "{\"g_useImageBlackList\":2}",
+        "{\"g_useImageBlackList\":\"0\"}", "{\"g_useImageBlackList\":null}",
+        "{\"g_useImageBlackList\":{}}", "{\"g_useImageBlackList\\u0000suffix\":0}"};
+    sh_package packages[2] = {0};
+    sh_package_component components[2] = {0};
+    sh_package_sources sources = {packages, 2, components, 2};
+    sh_package_compile_environment environment = {0};
+    sh_package_owners conflicted = {0}, selected = {0};
+    size_t rejected = 0;
+    char error[1024], descriptor[1024];
+    char *expected = NULL;
+    strcpy_s(packages[0].name, sizeof(packages[0].name), "a");
+    strcpy_s(packages[1].name, sizeof(packages[1].name), "b");
+    for (size_t i = 0; i < 2; i++) {
+        components[i].owner = i; components[i].relative = "";
+        CHECK(sh_package_descriptor_parse(descriptors[i], strlen(descriptors[i]),
+            &components[i].descriptor, error, sizeof(error)));
+    }
+    environment.invalid_package = &rejected; environment.conflicted_packages = &conflicted;
+    for (int independent = 0; independent < 2; independent++) {
+        environment.independent_sources = independent;
+        for (int reversed = 0; reversed < 2; reversed++) {
+            sh_package_compilation *compiled = sh_package_compile_with(&sources, &environment, error, sizeof(error));
+            CHECK(compiled && rejected == SIZE_MAX && !sh_package_owners_count(&conflicted));
+            if (compiled) {
+                sh_package_policy selected_policy = {0};
+                const char *cvars = sh_json_object_get(&compiled->policy.requirements, "cvars");
+                char *serialized = sh_json_serialize_object(&compiled->policy.requirements, 0, NULL);
+                CHECK(compiled->sources->package_count == 2 && cvars && !strcmp(cvars,
+                    "{\"g_useImageBlackList\":0,\"g_useResourceBlackList\":0}"));
+                if (!expected) expected = serialized;
+                else { CHECK(serialized && !strcmp(serialized, expected)); free(serialized); }
+                CHECK(sh_package_owners_add(&selected, 0));
+                CHECK(sh_package_compilation_policy(compiled, &selected, &selected_policy, error, sizeof(error)));
+                cvars = sh_json_object_get(&selected_policy.requirements, "cvars");
+                CHECK(cvars && !strcmp(cvars, "{\"g_useImageBlackList\":0}"));
+                sh_package_policy_free(&selected_policy); sh_package_owners_free(&selected);
+            }
+            sh_package_compilation_free(compiled);
+            sh_package_component temporary = components[0]; components[0] = components[1]; components[1] = temporary;
+        }
+    }
+    /* The derived union must not rewrite the descriptor retained for delivery. */
+    CHECK(!strcmp(sh_package_descriptor_section(&components[0].descriptor, "requirements"),
+        "{\"cvars\":{\"g_useResourceBlackList\":1,\"g_useImageBlackList\":false}}"));
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        sh_package_compilation *compiled;
+        snprintf(descriptor, sizeof(descriptor), "{\"id\":\"b\",\"name\":\"B\","
+            "\"requirements\":{\"cvars\":%s}}", invalid[i]);
+        sh_package_descriptor_free(&components[1].descriptor);
+        CHECK(sh_package_descriptor_parse(descriptor, strlen(descriptor), &components[1].descriptor, error, sizeof(error)));
+        compiled = sh_package_compile_with(&sources, &environment, error, sizeof(error));
+        CHECK(!compiled && rejected == 1 && strstr(error, "unsupported setting") &&
+            !sh_package_owners_count(&conflicted));
+        sh_package_compilation_free(compiled);
+        sources.package_count = sources.component_count = 1;
+        compiled = sh_package_compile_with(&sources, &environment, error, sizeof(error));
+        CHECK(compiled && rejected == SIZE_MAX);
+        sh_package_compilation_free(compiled);
+        sources.package_count = sources.component_count = 2;
+    }
+    /* Map policy overlay still owns presentation and historical string values.
+     * A map's restrictive permission request cannot close a local open gate. */
+    sh_package_descriptor_free(&components[0].descriptor);
+    sh_package_descriptor_free(&components[1].descriptor);
+    descriptors[0] = "{\"id\":\"a\",\"name\":\"A\",\"requirements\":{\"cvars\":{\"g_useImageBlackList\":0}},"
+        "\"strings\":{\"en\":{\"#str_demo\":\"Local\"}},\"hud\":{\"weapons\":{\"demo\":{\"ammo_display\":\"weapon\"}}}}";
+    descriptors[1] = "{\"id\":\"b\",\"name\":\"B\",\"requirements\":{\"cvars\":{\"g_useImageBlackList\":true}},"
+        "\"strings\":{\"en\":{\"#str_demo\":\"Map\"}},\"hud\":{\"weapons\":{\"demo\":{\"ammo_display\":\"engine\"}}}}";
+    for (size_t i = 0; i < 2; i++) CHECK(sh_package_descriptor_parse(descriptors[i], strlen(descriptors[i]),
+        &components[i].descriptor, error, sizeof(error)));
+    {
+        sh_package_compilation view = {0}; sh_package_policy policy = {0}; sh_package_owners selected = {0};
+        view.sources = &sources; view.map_overlay = 1; view.map_owner_begin = 1;
+        CHECK(sh_package_owners_add(&selected, 0) && sh_package_owners_add(&selected, 1));
+        CHECK(sh_package_compilation_policy(&view, &selected, &policy, error, sizeof(error)));
+        const char *cvars = sh_json_object_get(&policy.requirements, "cvars");
+        const char *strings = sh_json_object_get(&policy.strings, "en");
+        const char *weapons = sh_json_object_get(&policy.hud, "weapons");
+        CHECK(cvars && strstr(cvars, "g_useImageBlackList") && strstr(cvars, "0"));
+        CHECK(strings && strstr(strings, "Map") && !strstr(strings, "Local"));
+        CHECK(weapons && strstr(weapons, "engine") && !strstr(weapons, "weapon\""));
+        sh_package_policy_free(&policy); sh_package_owners_free(&selected);
+    }
+    for (size_t i = 0; i < 2; i++) sh_package_descriptor_free(&components[i].descriptor);
+    sh_package_owners_free(&conflicted); free(expected);
+}
+
 int main(int argc, char **argv)
 {
     char temp[MAX_PATH], error[2048];
@@ -552,7 +766,8 @@ int main(int argc, char **argv)
     CHECK(!compiled); CHECK(strstr(error, "opaque replacements")); CHECK(strstr(error, "[a; b]"));
 done:
     sh_package_compilation_free(compiled); sh_package_sources_free(sources);
-    test_new_declarations(); test_native_original_provenance(); cleanup();
+    test_new_declarations(); test_native_original_provenance(); test_duplicate_editor_controls();
+    test_requirement_reduction(); cleanup();
     if (failures) return 1;
     puts("package compiler checks passed"); return 0;
 }

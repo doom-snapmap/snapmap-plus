@@ -9,7 +9,13 @@ static int nl_alpha(unsigned char ch)
 static int nl_digit(unsigned char ch)
 { return ch >= '0' && ch <= '9'; }
 static int nl_space(unsigned char ch)
-{ return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v'; }
+{
+    /* ReadWhiteSpace uses a signed byte comparison with 0x20 in both native
+     * builds. Nonzero controls and high bytes between tokens are whitespace;
+     * quoted bytes still belong to their string. NUL is refused before lexing
+     * so an embedded terminator cannot silently hide the rest of a source. */
+    return (ch && ch <= 32) || ch >= 128;
+}
 static int nl_name(unsigned char ch)
 { return nl_alpha(ch) || nl_digit(ch) || (ch && strchr("/\\:.$", ch)); }
 

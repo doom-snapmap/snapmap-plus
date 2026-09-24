@@ -12,5 +12,9 @@
  * graph validity. No resources are loaded and no native readers are called. */
 int sh_decl_graph_dependencies(const sh_decl_graph *graph, const char *declaration_type,
     sh_decl_native_schema *schema, sh_decl_dependency_result *result);
+/* The same native contract with a caller's observation/rebinding view. */
+int sh_decl_graph_dependencies_with(const sh_decl_graph *graph, const char *declaration_type,
+    sh_decl_native_schema *schema, const sh_decl_dependency_schema *types,
+    sh_decl_dependency_result *result);
 
 #endif

@@ -42,6 +42,11 @@ int sh_package_archive_inspect(const unsigned char *bytes, size_t length,
 int sh_package_archive_identity(const unsigned char *bytes, size_t length,
                                 char id[SH_PACKAGE_ID_CAP], unsigned char fingerprint[32],
                                 char *error, size_t capacity);
+/* Structural/CRC-verified complete tree identity before legacy conversion.
+ * Requires package.json to exist, but does not validate or normalize descriptor
+ * semantics. Never substitute this for modern package admission. */
+int sh_package_archive_tree_identity(const unsigned char *bytes, size_t length,
+    unsigned char fingerprint[32], char *error, size_t capacity);
 /* A map transport slot identifies the complete authored tree, independently
  * of its author-chosen ID. Copies share a slot; different variants do not. */
 void sh_package_archive_delivery_id(const unsigned char fingerprint[32], char out[SH_PACKAGE_ID_CAP]);

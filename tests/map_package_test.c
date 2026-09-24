@@ -56,8 +56,7 @@ static void complete_install(void)
     CHECK(g_source_notices == notices + 1);
 }
 
-/* Most assertions are on returned state; supersession also has to be readable
- * in the log, because that is where the user learns a package was replaced. */
+/* Retain diagnostics so valid peer installation cannot regress to replacement. */
 static char g_log[4096];
 void backend_log(const char *message)
 {
@@ -687,18 +686,16 @@ static int variant_matches(const char *root, const char *id, const unsigned char
     sh_package_sources_free(sources); return matches;
 }
 
-/* One package identity can only supply one set of bytes: the library would
- * otherwise compile the same package twice with contradictory content. A second
- * delivery of the same identity supersedes the delivered copy inside the same
- * transaction; the user's own authored package is never moved. */
-static void test_supersession(const char *root)
+/* IDs do not replace installed authored trees. Same-ID deliveries coexist;
+ * canceling a later transaction removes only its own newly published tree. */
+static void test_delivered_variants(const char *root)
 {
     char author[MAX_PATH], client[MAX_PATH], overrides[MAX_PATH], authored[MAX_PATH], path[MAX_PATH];
     unsigned char first_print[32], second_print[32], third_print[32];
     char *first = NULL, *second = NULL, *third = NULL;
     size_t first_length = 0, second_length = 0, third_length = 0;
-    join(author, sizeof(author), root, "supersede-author");
-    join(client, sizeof(client), root, "supersede-client"); CHECK(make_dir(client));
+    join(author, sizeof(author), root, "variants-author");
+    join(client, sizeof(client), root, "variants-client"); CHECK(make_dir(client));
     join(overrides, sizeof(overrides), client, "overrides"); CHECK(make_dir(overrides));
     first = make_variant_map(author, "demons-variant", "variant one bytes", first_print, &first_length);
     second = make_variant_map(author, "demons-variant", "variant two bytes, longer", second_print, &second_length);
@@ -718,20 +715,64 @@ static void test_supersession(const char *root)
 
     g_log[0] = 0;
     CHECK(!sh_mpkg_gate(second, second_length));
-    CHECK(strstr(g_log, "superseding the previously delivered package"));
-    /* Exactly one variant is visible even before the commit. */
-    CHECK(installed_count(client) == 1 && variant_matches(client, "demons-variant", second_print));
+    CHECK(!strstr(g_log, "superseding"));
+    CHECK(installed_count(client) == 2 && variant_matches(client, "demons-variant", second_print));
+    CHECK(variant_matches(client, "demons-variant", first_print) == 1);
     complete_install();
-    CHECK(installed_count(client) == 1 && variant_matches(client, "demons-variant", second_print));
+    CHECK(installed_count(client) == 2 && variant_matches(client, "demons-variant", second_print));
+    CHECK(variant_matches(client, "demons-variant", first_print) == 1);
     CHECK(sh_mpkg_gate(second, second_length));
 
-    /* A canceled supersession puts the previous delivery back untouched. */
+    /* A canceled addition leaves both previous deliveries untouched. */
     CHECK(!sh_mpkg_gate(third, third_length));
-    CHECK(installed_count(client) == 1 && variant_matches(client, "demons-variant", third_print));
+    CHECK(installed_count(client) == 3 && variant_matches(client, "demons-variant", third_print));
     CHECK(sh_mpkg_activation_cancel());
-    CHECK(installed_count(client) == 1 && variant_matches(client, "demons-variant", second_print));
-    /* And the restored delivery is still a complete, usable installation. */
+    CHECK(installed_count(client) == 2 && variant_matches(client, "demons-variant", second_print));
+    CHECK(variant_matches(client, "demons-variant", first_print) == 1);
+    CHECK(variant_matches(client, "demons-variant", third_print) == 0);
+    /* Both earlier deliveries remain usable after a fresh process inventory. */
+    sh_mpkg_test_reset(); sh_mpkg_boot_capture(client);
+    sh_mpkg_test_set_consent_mode(SH_MPKG_CONSENT_ACCEPT);
+    g_registration_ready = 1;
+    CHECK(sh_mpkg_gate(first, first_length));
     CHECK(sh_mpkg_gate(second, second_length));
+
+    /* Upgrade recovery still restores a tree retired by an older release's
+     * pending supersession journal. New installations never create this form. */
+    {
+        char error[512], prior[MAX_PATH] = "", stage[MAX_PATH], batch[MAX_PATH];
+        char area[MAX_PATH], slot[MAX_PATH], content[MAX_PATH], origin[MAX_PATH];
+        const char marker[] = "Snapmap+ pending package installation\n";
+        sh_package_sources *inventory = sh_package_sources_scan(client, error, sizeof(error));
+        CHECK(inventory);
+        if (inventory) {
+            for (size_t owner = 0; owner < inventory->package_count; owner++)
+                if (!memcmp(inventory->fingerprints[owner], first_print, 32))
+                    strcpy_s(prior, sizeof(prior), inventory->packages[owner].root);
+            sh_package_sources_free(inventory);
+        }
+        CHECK(prior[0] && !strncmp(prior, overrides, strlen(overrides)));
+        if (prior[0]) {
+            join(stage, sizeof(stage), client, "package-staging"); CHECK(make_dir(stage));
+            join(batch, sizeof(batch), stage, "map-0000000000000001"); CHECK(make_dir(batch));
+            join(area, sizeof(area), batch, "superseded"); CHECK(make_dir(area));
+            join(slot, sizeof(slot), area, "0"); CHECK(make_dir(slot));
+            join(origin, sizeof(origin), slot, "origin");
+            CHECK(touch(origin, prior + strlen(overrides) + 1));
+            join(content, sizeof(content), slot, "content");
+            join(path, sizeof(path), batch, "pending");
+            FILE *file = NULL;
+            CHECK(!fopen_s(&file, path, "wb") && file);
+            if (file) { CHECK(fwrite(marker, 1, sizeof(marker), file) == sizeof(marker)); fclose(file); }
+            CHECK(MoveFileExA(prior, content, MOVEFILE_WRITE_THROUGH));
+            CHECK(!dir_exists(prior));
+            sh_mpkg_test_reset(); sh_mpkg_boot_capture(client);
+            CHECK(dir_exists(prior) && !dir_exists(batch));
+            CHECK(installed_count(client) == 2);
+            CHECK(variant_matches(client, "demons-variant", first_print) == 1);
+            CHECK(variant_matches(client, "demons-variant", second_print) == 1);
+        }
+    }
 
     /* An authored package of the same identity is the user's own work: it is
      * neither moved nor replaced, and it does not block the delivery. The map
@@ -754,7 +795,7 @@ static void test_supersession(const char *root)
         CHECK(read_file(path, bytes, sizeof(bytes)) == 14 && !memcmp(bytes, "authored bytes", 14));
     }
     complete_install();
-    CHECK(installed_count(client) == 2 && variant_matches(client, "demons-variant", second_print) >= 0);
+    CHECK(installed_count(client) == 2 && variant_matches(client, "demons-variant", second_print) == 1);
 done:
     sh_mpkg_test_reset();
     if (first) HeapFree(GetProcessHeap(), 0, first);
@@ -1233,6 +1274,113 @@ static void test_legacy_map_context(const char *root)
     HeapFree(GetProcessHeap(), 0, map); free(zip);
 }
 
+static void test_legacy_delivery_roundtrip(const char *root)
+{
+    const char marker[] = "{\"schema\":\"snapmap-plus.override-package.v1\",\"name\":\"Old boss\"}";
+    const char *decls[] = {"{ health = 10; }", "{ health = 20; }"};
+    sh_package_bundle_binding originals[2] = {0};
+    sh_mpkg_context *context = NULL;
+    char key[2][SH_MPKG_ID_CAP] = {{0}}, error[512], seed[SH_PACKAGE_ID_CAP];
+    char *combined = HeapAlloc(GetProcessHeap(), 0, strlen(EMPTY_MAP) + 1), *next = NULL;
+    size_t combined_length = strlen(EMPTY_MAP);
+    CHECK(combined); if (!combined) return;
+    strcpy_s(combined, combined_length + 1, EMPTY_MAP);
+    for (size_t v = 0; v < 2; v++) {
+        sh_package_archive_file members[] = {
+            {"package.json", (unsigned char *)marker, sizeof(marker) - 1, 0},
+            {"decls/entitydef/boss.decl", (unsigned char *)decls[v], strlen(decls[v]), 0}
+        };
+        sh_package_archive_files files = {members, 2};
+        size_t length, map_length, count;
+        unsigned char *zip = sh_package_archive_write(&files, &length, error, sizeof(error));
+        char *map = zip ? sh_mpkg_embed(EMPTY_MAP, strlen(EMPTY_MAP), "old-boss", zip, length,
+            &map_length, error, sizeof(error)) : NULL;
+        CHECK(zip && map);
+        if (!map) { free(zip); goto done; }
+        context = sh_mpkg_context_open(root, map, map_length, error, sizeof(error)); CHECK(context);
+        if (context) {
+            const sh_package_bundle_binding *bindings = sh_mpkg_context_bundles(context, &count);
+            CHECK(count == 1 && bindings && bindings[0].original);
+            if (count == 1 && bindings && bindings[0].original) {
+                originals[v] = bindings[0]; originals[v].original = sh_package_bundle_retain(bindings[0].original);
+                CHECK(memcmp(originals[v].compiler_tree, sh_package_bundle_fingerprint(originals[v].original), 32));
+                sh_package_bundle_delivery_key(originals[v].original, key[v]);
+                CHECK(sh_package_bundle_parse_key(key[v], NULL, seed) && !strcmp(seed, "old-boss"));
+                next = sh_mpkg_embed(combined, combined_length, key[v], zip, length,
+                    &combined_length, error, sizeof(error)); CHECK(next);
+                if (next) { HeapFree(GetProcessHeap(), 0, combined); combined = next; next = NULL; }
+            }
+        }
+        CHECK(sh_mpkg_context_close(&context));
+        HeapFree(GetProcessHeap(), 0, map); free(zip);
+    }
+    if (!originals[0].original || !originals[1].original) goto done;
+    CHECK(strcmp(key[0], key[1]));
+    context = sh_mpkg_context_open(root, combined, combined_length, error, sizeof(error));
+    if (!context) fprintf(stderr, "retained legacy roundtrip: %s\n", error);
+    CHECK(context && sh_mpkg_context_count(context) == 2);
+    if (context) {
+        size_t count;
+        const sh_package_bundle_binding *bindings = sh_mpkg_context_bundles(context, &count);
+        CHECK(count == 2);
+        for (size_t v = 0; v < 2; v++) {
+            size_t b;
+            for (b = 0; b < count; b++) if (!memcmp(sh_package_bundle_fingerprint(bindings[b].original),
+                sh_package_bundle_fingerprint(originals[v].original), 32)) break;
+            CHECK(b < count);
+            if (b < count) {
+                char stable[SH_MPKG_ID_CAP];
+                unsigned char *a, *z; size_t a_length, z_length;
+                CHECK(!memcmp(bindings[b].compiler_tree, originals[v].compiler_tree, 32));
+                sh_package_bundle_delivery_key(bindings[b].original, stable); CHECK(!strcmp(stable, key[v]));
+                a = sh_package_bundle_read(bindings[b].original, &a_length, error, sizeof(error));
+                z = sh_package_bundle_read(originals[v].original, &z_length, error, sizeof(error));
+                CHECK(a && z && a_length == z_length && !memcmp(a, z, a_length)); free(a); free(z);
+            }
+        }
+    }
+    CHECK(sh_mpkg_context_close(&context));
+    /* The maximum existing canonical ID fits the extended transport grammar;
+     * its private extraction directory remains bounded. */
+    {
+        size_t length, map_length, count;
+        unsigned char *zip = sh_package_bundle_read(originals[0].original, &length, error, sizeof(error));
+        char full_seed[SH_PACKAGE_ID_CAP], extended[SH_MPKG_ID_CAP];
+        memset(full_seed, 'a', sizeof(full_seed) - 1); full_seed[sizeof(full_seed) - 1] = 0;
+        sh_package_bundle *bundle = zip ? sh_package_bundle_from_legacy_archive(zip, length, full_seed,
+            root, error, sizeof(error)) : NULL;
+        sh_package_bundle_delivery_key(bundle, extended);
+        char *map = bundle ? sh_mpkg_embed(EMPTY_MAP, strlen(EMPTY_MAP), extended, zip, length,
+            &map_length, error, sizeof(error)) : NULL;
+        CHECK(map);
+        context = map ? sh_mpkg_context_open(root, map, map_length, error, sizeof(error)) : NULL;
+        CHECK(context && sh_mpkg_context_count(context) == 1);
+        if (context) {
+            const sh_package_bundle_binding *bindings = sh_mpkg_context_bundles(context, &count);
+            char roundtrip[SH_MPKG_ID_CAP];
+            CHECK(count == 1 && !strncmp(bindings[0].source_name, "source.", 7));
+            sh_package_bundle_delivery_key(bindings[0].original, roundtrip); CHECK(!strcmp(roundtrip, extended));
+        }
+        CHECK(sh_mpkg_context_close(&context)); sh_package_bundle_release(bundle);
+        free(zip); if (map) HeapFree(GetProcessHeap(), 0, map);
+    }
+    /* A forged original-tree segment cannot smuggle a seed into conversion. */
+    {
+        size_t length, map_length;
+        unsigned char *zip = sh_package_bundle_read(originals[0].original, &length, error, sizeof(error));
+        key[0][16] = key[0][16] == 'a' ? 'b' : 'a';
+        char *map = zip ? sh_mpkg_embed(EMPTY_MAP, strlen(EMPTY_MAP), key[0], zip, length,
+            &map_length, error, sizeof(error)) : NULL;
+        CHECK(map && !sh_mpkg_context_open(root, map, map_length, error, sizeof(error)));
+        CHECK(strstr(error, "complete delivery identity"));
+        free(zip); if (map) HeapFree(GetProcessHeap(), 0, map);
+    }
+done:
+    CHECK(sh_mpkg_context_close(&context));
+    for (size_t v = 0; v < 2; v++) sh_package_bundle_release(originals[v].original);
+    HeapFree(GetProcessHeap(), 0, combined);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 4 && !strcmp(argv[1], "--map-context"))
@@ -1251,13 +1399,14 @@ int main(int argc, char **argv)
     remove_tree(root);
     CHECK(make_dir(root));
     test_legacy_map_context(root);
+    test_legacy_delivery_roundtrip(root);
     join(overrides, sizeof overrides, root, "overrides");
     CHECK(make_dir(overrides));
     test_private_map_context(root);
     test_resource_owner_install(root);
     test_same_id_deliveries(root);
     test_batch_install(root);
-    test_supersession(root);
+    test_delivered_variants(root);
     test_refreshed_author_sources(root);
     test_consent_retirement(root, overrides);
 

@@ -85,13 +85,16 @@ int sh_audio_bank_names_identity(const char *filename, uint32_t id)
     return sh_audio_bank_identity(filename, &named) && named == id;
 }
 
-int sh_audio_media_identity(const char *filename, uint32_t *id)
+int sh_audio_bank_numeric_identity(const char *filename, uint32_t *id)
 {
     size_t length;
     if (!id) return 0;
     *id = 0;
     return ab_stem(filename, &length) && ab_decimal(filename, length, id) && *id != 0;
 }
+
+int sh_audio_media_identity(const char *filename, uint32_t *id)
+{ return sh_audio_bank_numeric_identity(filename, id); }
 
 int sh_audio_event_identity(const char *declaration, uint32_t *id)
 {
@@ -132,7 +135,7 @@ void sh_audio_bank_free(sh_audio_bank *bank)
 {
     if (!bank) return;
     free(bank->events); free(bank->banks); free(bank->required);
-    free(bank->optional); free(bank->media);
+    free(bank->optional); free(bank->media); free(bank->objects); free(bank->targets);
     memset(bank, 0, sizeof(*bank));
 }
 
@@ -231,8 +234,9 @@ static int ab_source(sh_audio_bank_source source, uint64_t body, uint32_t length
         *cursor += 4 + (uint64_t)extension;
     }
     if (stream > 2) return 0;
-    /* A resident source has no separate file; it is indexed by this bank. */
-    return id && !ab_media_push(media, id, stream, 0) ? -1 : 1;
+    /* Only codec sources carry MEDIA here. Other source plug-ins use a
+     * custom-object identity, even when its number resembles a .wem name. */
+    return (plugin & 0x0f) == 1 && id && !ab_media_push(media, id, stream, 0) ? -1 : 1;
 }
 
 int sh_audio_bank_read_source(sh_audio_bank_source source, sh_audio_bank *out,
@@ -326,6 +330,13 @@ int sh_audio_bank_read_source(sh_audio_bank_source source, sh_audio_bank *out,
                      * not missing. Anything else a play action names must be here. */
                     if (target && action_type == 0x0403 && (!owner || owner == out->id) &&
                         !ab_push(&hard, target)) goto memory;
+                    if (target && action_type == 0x0403 && owner && owner != out->id) {
+                        if (out->target_count >= SIZE_MAX / sizeof(*out->targets) - 1) goto memory;
+                        sh_audio_bank_target *grown = realloc(out->targets,
+                            (out->target_count + 1) * sizeof(*grown));
+                        if (!grown) goto memory;
+                        out->targets = grown; grown[out->target_count++] = (sh_audio_bank_target){owner, target};
+                    }
                     if (target && action_type != 0x0403 && !ab_push(&control, target)) goto memory;
                 } else if (kind == 2) {
                     position = 4;
@@ -370,7 +381,7 @@ int sh_audio_bank_read_source(sh_audio_bank_source source, sh_audio_bank *out,
         if (!ab_contains(defined.values, defined.count, control.values[i]))
             control.values[out->optional_count++] = control.values[i];
     out->optional = control.values; memset(&control, 0, sizeof(control));
-    free(defined.values);
+    out->objects = defined.values; out->object_count = defined.count;
     if (error && capacity) error[0] = 0;
     return 1;
 malformed:
@@ -512,5 +523,202 @@ int sh_audio_banks_reconcile(sh_audio_bank_slot *slots, size_t count,
     for (size_t i = 0; i < count; ++i) if (!wanted[i] && slots[i].owned)
         if (!ab_release(slots+i, ops, error, capacity)) return 0;
     if (error && capacity) error[0] = 0;
+    return 1;
+}
+
+static int ab_copy_rows(void **out, const void *source, size_t count, size_t size)
+{
+    if (!count) return 1;
+    if (!source || count > SIZE_MAX / size || !(*out = malloc(count * size))) return 0;
+    memcpy(*out, source, count * size); return 1;
+}
+int sh_audio_bank_copy(const sh_audio_bank *source, sh_audio_bank *out)
+{
+    sh_audio_bank copy = {0};
+    if (!source || !out) return 0;
+    if (!ab_copy_rows((void **)&copy.events, source->events, source->event_count, sizeof(*copy.events)) ||
+        !ab_copy_rows((void **)&copy.banks, source->banks, source->bank_count, sizeof(*copy.banks)) ||
+        !ab_copy_rows((void **)&copy.required, source->required, source->required_count, sizeof(*copy.required)) ||
+        !ab_copy_rows((void **)&copy.optional, source->optional, source->optional_count, sizeof(*copy.optional)) ||
+        !ab_copy_rows((void **)&copy.media, source->media, source->media_count, sizeof(*copy.media)) ||
+        !ab_copy_rows((void **)&copy.objects, source->objects, source->object_count, sizeof(*copy.objects)) ||
+        !ab_copy_rows((void **)&copy.targets, source->targets, source->target_count, sizeof(*copy.targets))) {
+        sh_audio_bank_free(&copy); return 0;
+    }
+    copy.id = source->id; copy.language = source->language;
+    copy.event_count = source->event_count; copy.bank_count = source->bank_count;
+    copy.required_count = source->required_count; copy.optional_count = source->optional_count;
+    copy.media_count = source->media_count; copy.object_count = source->object_count;
+    copy.target_count = source->target_count; *out = copy; return 1;
+}
+
+int sh_audio_bank_closure(const sh_audio_bank *const *banks, size_t bank_count,
+    const uint32_t *events, size_t event_count, int require_events,
+    unsigned char *selected, sh_audio_bank_closure_report *report,
+    char *error, size_t capacity)
+{
+    sh_audio_bank_closure_report result = {0};
+    if (report) memset(report, 0, sizeof(*report));
+    if (error && capacity) *error = 0;
+    if ((bank_count && (!banks || !selected)) || (event_count && !events))
+        return ab_error(error, capacity, "audio closure input is missing");
+    for (size_t i = 0; i < bank_count; i++) {
+        if (!banks[i]) {
+            if (selected[i]) return ab_error(error, capacity, "selected audio bank has no effective source");
+            continue;
+        }
+        if (!banks[i]->id || (banks[i]->event_count && !banks[i]->events) ||
+            (banks[i]->bank_count && !banks[i]->banks) ||
+            (banks[i]->required_count && !banks[i]->required) ||
+            (banks[i]->object_count && !banks[i]->objects) ||
+            (banks[i]->media_count && !banks[i]->media) ||
+            (banks[i]->target_count && !banks[i]->targets))
+            return ab_error(error, capacity, "audio closure bank metadata is incomplete");
+    }
+    for (size_t e = 0; e < event_count; e++) {
+        int found = 0;
+        for (size_t b = 0; b < bank_count; b++) if (sh_audio_bank_has_event(banks[b], events[e])) {
+            selected[b] = 1; found = 1;
+        }
+        if (!found && require_events) {
+            if (error && capacity) snprintf(error, capacity, "audio event %u has no bank in its source scope", events[e]);
+            return 0;
+        }
+        result.matched_events += found;
+    }
+    for (int changed = 1; changed;) {
+        changed = 0;
+        for (size_t b = 0; b < bank_count; b++) if (selected[b]) {
+            const sh_audio_bank *bank = banks[b];
+            for (size_t d = 0; d < bank->bank_count; d++) {
+                int found = 0;
+                for (size_t i = 0; i < bank_count; i++) if (banks[i] && banks[i]->id == bank->banks[d]) {
+                    found = 1;
+                    if (!selected[i]) { selected[i] = 1; changed = 1; result.dependency_banks++; }
+                }
+                if (!found) {
+                    if (error && capacity) snprintf(error, capacity, "audio bank %u requires absent bank %u", bank->id, bank->banks[d]);
+                    return 0;
+                }
+            }
+            /* A resident source can reuse DATA carried by another bank even
+             * without an explicit play-action bank edge. Prefer a selected
+             * provider, otherwise retain the first scoped inventory provider.
+             * A source without such a provider remains for the media resolver
+             * to check; this metadata-only pass cannot query external media. */
+            for (size_t m = 0; m < bank->media_count; m++) {
+                const sh_audio_bank_media *media = &bank->media[m];
+                if (media->stream || media->embedded) continue;
+                size_t provider = SIZE_MAX;
+                for (size_t i = 0; i < bank_count; i++) {
+                    const sh_audio_bank_media *candidate = sh_audio_bank_find_media(banks[i], media->id);
+                    if (!candidate || !candidate->embedded) continue;
+                    if (provider == SIZE_MAX || selected[i]) provider = i;
+                    if (selected[i]) break;
+                }
+                if (provider != SIZE_MAX && !selected[provider]) {
+                    selected[provider] = 1; changed = 1; result.dependency_banks++;
+                }
+            }
+        }
+    }
+    for (size_t b = 0; b < bank_count; b++) if (selected[b]) {
+        const sh_audio_bank *bank = banks[b];
+        if (bank->required_count) {
+            if (error && capacity) snprintf(error, capacity, "audio bank %u requires absent object %u", bank->id, bank->required[0]);
+            return 0;
+        }
+        for (size_t t = 0; t < bank->target_count; t++) {
+            const sh_audio_bank_target *target = bank->targets + t; int found = 0;
+            for (size_t i = 0; i < bank_count; i++) if (selected[i] && banks[i]->id == target->bank &&
+                ab_contains(banks[i]->objects, banks[i]->object_count, target->object)) { found = 1; break; }
+            if (!found) {
+                if (error && capacity) snprintf(error, capacity, "audio bank %u requires absent object %u in bank %u",
+                    bank->id, target->object, target->bank);
+                return 0;
+            }
+        }
+        result.optional_targets += bank->optional_count;
+    }
+    if (report) *report = result;
+    return 1;
+}
+
+int sh_audio_banks_append(sh_audio_bank_slot *slots, size_t count,
+    const unsigned char *wanted, const sh_package_file_identity *const *content,
+    sh_audio_bank_ops ops, char *error, size_t capacity)
+{
+    if ((count && (!slots || !wanted)) || !ops.load || !ops.unload)
+        return ab_error(error, capacity, "additive audio activation is unavailable");
+    /* Complete preflight precedes even an unrelated fresh load. */
+    for (size_t i = 0; i < count; i++) {
+        const sh_audio_bank_slot *slot = slots + i;
+        const sh_package_file_identity *next = content ? content[i] : NULL;
+        if (!slot->name || !*slot->name || !slot->id || slot->uncertain ||
+            (next && !wanted[i]) || (slot->owned && slot->loaded_id != slot->id))
+            return ab_error(error, capacity, "additive audio state is invalid or interrupted");
+        for (size_t j = 0; j < i; j++) if (slots[j].id == slot->id)
+            return ab_error(error, capacity, "duplicate additive audio bank identity");
+        if (wanted[i] && slot->owned &&
+            ((slot->content_known && (!next || !ab_same(&slot->content, next))) ||
+             (!slot->content_known && next)))
+            return ab_error(error, capacity, "additive audio would replace an existing bank");
+    }
+    for (size_t i = 0; i < count; i++) {
+        sh_audio_bank_slot *slot = slots + i;
+        const sh_package_file_identity *next = content ? content[i] : NULL;
+        int result;
+        if (!wanted[i]) continue;
+        if (!ab_load(slot, ops, &result, error, capacity)) return 0;
+        if (next) {
+            /* 69 is evidence of existing native ownership, never permission
+             * to unload its voices in order to install different bytes. */
+            if (result == 69 && (!slot->owned || !slot->content_known || !ab_same(&slot->content, next)))
+                return ab_error(error, capacity, "additive audio requires a distinct identity for already-loaded bank bytes");
+            slot->content = *next; slot->content_known = 1;
+        }
+    }
+    if (error && capacity) *error = 0;
+    return 1;
+}
+
+int sh_audio_banks_restore_additions(sh_audio_bank_slot *slots, size_t count,
+    const sh_audio_bank_slot *before, size_t before_count,
+    sh_audio_bank_ops ops, char *error, size_t capacity)
+{
+    if ((count && !slots) || (before_count && !before) || !ops.unload)
+        return ab_error(error, capacity, "additive audio recovery snapshot is unavailable");
+    for (size_t i = 0; i < before_count; i++) {
+        size_t matches = 0;
+        for (size_t j = 0; j < count; j++) if (slots[j].id == before[i].id) matches++;
+        if (matches != 1)
+            return ab_error(error, capacity, "preexisting audio catalog changed during additive admission");
+    }
+    /* A changed preexisting owner is outside this transaction's authority. */
+    for (size_t i = 0; i < count; i++) {
+        const sh_audio_bank_slot *old = NULL;
+        for (size_t j = 0; j < before_count; j++) if (before[j].id == slots[i].id) { old = before+j; break; }
+        if (slots[i].uncertain || (old && old->uncertain))
+            return ab_error(error, capacity, "additive audio recovery retains uncertain native ownership");
+        if (old && old->owned && (!slots[i].owned || slots[i].loaded_id != old->loaded_id ||
+            slots[i].content_known != old->content_known ||
+            (old->content_known && !ab_same(&slots[i].content, &old->content))))
+            return ab_error(error, capacity, "preexisting audio ownership changed during additive admission");
+    }
+    for (size_t i = count; i; i--) {
+        sh_audio_bank_slot *slot = slots+i-1;
+        const sh_audio_bank_slot *old = NULL;
+        for (size_t j = 0; j < before_count; j++) if (before[j].id == slot->id) { old = before+j; break; }
+        if (old && old->owned) continue;
+        if (slot->owned && !ab_release(slot, ops, error, capacity)) return 0;
+        if (old) {
+            const char *name = slot->name;
+            *slot = *old; slot->name = name;
+        } else {
+            slot->owned = slot->uncertain = slot->content_known = slot->restore_native = 0;
+            slot->loaded_id = 0; memset(&slot->content, 0, sizeof(slot->content));
+        }
+    }
+    if (error && capacity) *error = 0;
     return 1;
 }

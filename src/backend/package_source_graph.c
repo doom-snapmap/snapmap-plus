@@ -1,16 +1,32 @@
 #include "package_source_graph.h"
+#include "package_link_inputs.h"
 #include "decl_entity_class.h"
 #include "decl_graph_dependencies.h"
 #include "decl_material.h"
 #include "decl_md6_compose.h"
 #include "md6_binary.h"
 #include "model_binary.h"
+#include "decl_native_reference.h"
+#include "decl_native_rebind.h"
+#include "decl_rebind.h"
 #include "package_audio.h"
+#include "package_sound.h"
+#include "map_binding_sites.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct sg_walk {
+typedef struct sg_shader_abi {
+    struct sg_shader_abi *next;
+    char *name;
+    unsigned char *source;
+    size_t length;
+    int kind, supplied;
+    uint32_t index;
+    const char *family;
+    uint64_t mask;
+} sg_shader_abi;
+typedef struct sh_package_source_reader {
     const sh_package_compilation *compiled;
     const sh_resource_catalog *catalog;
     sh_package_baseline_reader original;
@@ -19,12 +35,21 @@ typedef struct sg_walk {
     sh_decl_native_registry *registry;
     sh_decl_native_schema *schema;
     sh_package_audio *audio;
+    sh_package_source_audio audio_source;
+    sh_package_audio_scope *audio_scope;
     sh_package_references queue, paths;
     sh_package_source_graph_report report;
     const char *current_type, *current_name;
     char *error;
     size_t capacity;
     int failed;
+    sh_package_binding_resolver saved_binding;
+    void *saved_context;
+    sh_package_bound_exists bound_exists;
+    void *bound_context;
+    sh_package_source_shader shader;
+    int shader_configured;
+    sg_shader_abi *shader_parameters;
 } sg_walk;
 
 static int sg_editor(const char *type)
@@ -104,11 +129,24 @@ static int sg_read_path(sg_walk *walk, const char *path, unsigned char **body, s
     }
 }
 
+static char *sg_lookup_path(sg_walk *walk, const char *type, const char *name)
+{
+    const char *replacement = NULL;
+    if (walk->saved_binding) {
+        char *family = sg_name(type);
+        int status = family ? walk->saved_binding(walk->saved_context, "source", family, name, &replacement) : -1;
+        free(family);
+        if (status < 0 || (status && (!replacement || !*replacement))) { walk->failed = 1; return NULL; }
+        if (status) name = replacement;
+    }
+    return sg_path(type, name);
+}
+
 static int sg_read_parent(void *context, const char *name, sh_decl_source *source)
 {
     sg_walk *walk = context;
     unsigned char *body = NULL;
-    char *path = sg_path("entitydef", name);
+    char *path = sg_lookup_path(walk, "entitydef", name);
     int status = path && sg_file(walk, path) ? sg_read_path(walk, path, &body, &source->length) : -1;
     free(path); source->text = (const char *)body; return status > 0 ? 1 : status;
 }
@@ -127,9 +165,18 @@ static int sg_exists(void *context, uintptr_t manager, const char *type, const c
     sg_walk *walk = context;
     unsigned char *body = NULL;
     size_t length = 0;
-    char *path = sg_path(type, name);
+    char *path;
     int status;
     (void)manager;
+    if (walk->bound_exists) {
+        char *family = sg_name(type);
+        int exists = -1;
+        status = family ? walk->bound_exists(walk->bound_context, family, name, &exists) : -1;
+        free(family);
+        if (status < 0 || (status && exists != 0 && exists != 1)) { walk->failed = 1; return -1; }
+        if (status) return exists;
+    }
+    path = sg_lookup_path(walk, type, name);
     if (!path) return -1;
     status = sg_read_path(walk, path, &body, &length);
     free(body); free(path); return status > 0 ? 1 : status;
@@ -139,19 +186,13 @@ static int sg_reference(void *context, const char *field, sh_decl_value_type typ
     const char *name, size_t length)
 {
     sg_walk *walk = context;
-    sh_decl_reference reference = {0};
-    char *copy;
+    sh_decl_native_reference reference = {0};
     int status, ok = 1;
     walk->report.references++;
-    if (sh_decl_native_schema_reader(walk->schema, type) != SH_DECL_READER_DECL) {
-        sg_gap(walk, field, type.name, "resource reader needs a source identity adapter"); return 1;
-    }
-    if (length == SIZE_MAX || !(copy = malloc(length + 1))) { walk->failed = 1; return 0; }
-    memcpy(copy, name, length); copy[length] = 0;
-    status = sh_decl_native_registry_resolve_source(walk->registry, type.name, copy, &reference);
-    if (status > 0) ok = sg_add(walk, reference.type, reference.name);
-    else sg_gap(walk, field, type.name, status < 0 ? "reference identity is unavailable" : "reference has no source identity");
-    sh_decl_reference_clear(&reference); free(copy); return ok;
+    status = sh_decl_native_reference_read(walk->schema, walk->registry, type, name, length, &reference);
+    if (status > 0) ok = sg_add(walk, reference.resource.type, reference.resource.name);
+    else if (status < 0) sg_gap(walk, field, type.name, "reference identity is unavailable");
+    sh_decl_native_reference_clear(&reference); return ok;
 }
 
 static void sg_field_gap(void *context, const char *field, sh_decl_value_type type, const char *reason)
@@ -209,6 +250,22 @@ static int sg_md6_reference(void *context, const char *type, const char *name)
     return sg_add(walk, type, name);
 }
 
+static int sg_native_site(void *context, const char *type, const char *name, size_t offset, size_t length)
+{
+    (void)offset; (void)length;
+    return sg_md6_reference(context, type, name);
+}
+
+static int sg_native_grammar(sg_walk *walk, sh_decl_source source,
+    sh_decl_native_binding_format format, const char *family)
+{
+    char detail[1024];
+    if (!sh_decl_native_reference_sites(format, source, NULL,
+        sg_native_site, walk, detail, sizeof(detail)) && !walk->failed)
+        sg_gap(walk, "", family, detail[0] ? detail : "native declaration source is unsupported");
+    return !walk->failed;
+}
+
 static int sg_md6(sg_walk *walk, sh_decl_source source)
 {
     char detail[1024];
@@ -236,59 +293,224 @@ static int sg_basemodel(sg_walk *walk, const char *path)
     free(body); return !walk->failed;
 }
 
-/* A render program's catalog rows already enumerate the files the cook consumed:
- * its permutation declarations, compiled binaries, SPIR-V (in the archive's own
- * split spelling) and every #include it used. Measured over the installed
- * corpus: of 1231 #include directives in 923 program declarations, 1230 appear
- * in that identity's own rows. The remaining one sits in a preprocessor branch
- * the cook did not take, so the text is also read and any include it names is
- * added as a known file. Includes are files, not typed identities. */
+static int sg_shader_error(sg_walk *walk, const char *reason, const char *name)
+{
+    if (walk->error && walk->capacity && !*walk->error)
+        snprintf(walk->error, walk->capacity, "%s: %s", reason, name ? name : "renderprog");
+    return 0;
+}
+int sh_package_source_reader_shader(sh_package_source_reader *reader,
+    const sh_package_source_shader *shader)
+{
+    if (!reader || !shader || reader->shader_configured ||
+        (shader->renderer != SH_PACKAGE_SHADER_OPENGL && shader->renderer != SH_PACKAGE_SHADER_VULKAN)) return 0;
+    reader->shader = *shader; reader->shader_configured = 1; return 1;
+}
+static void sg_shader_clear(sg_walk *walk)
+{
+    while (walk->shader_parameters) {
+        sg_shader_abi *item = walk->shader_parameters; walk->shader_parameters = item->next;
+        free(item->name); free(item->source); free(item);
+    }
+}
+static int sg_shader_parameter(void *context, const char *name, int *kind)
+{
+    sg_walk *walk = context;
+    unsigned char *body = NULL; size_t length = 0;
+    char *path = sg_path("renderparm", name), *canonical = sg_name(name);
+    int supplied, source_kind = -1, actual_kind = -1, ok = 0;
+    uint32_t index = UINT32_MAX;
+    if (!path || !canonical || !walk->shader_configured || !walk->shader.parameter) goto done;
+    supplied = sg_read_path(walk, path, &body, &length);
+    if (supplied < 0 || (supplied && !body)) goto done;
+    if (supplied && !sh_decl_material_parameter_kind((sh_decl_source){(const char *)body, length},
+        &source_kind, walk->error, walk->capacity)) goto done;
+    if (walk->shader.parameter(walk->shader.context, canonical,
+        (sh_decl_source){(const char *)body, length}, &actual_kind, &index, walk->error, walk->capacity) != 1 ||
+        actual_kind < 0 || actual_kind > 18 || index > 32767 ||
+        (supplied && source_kind != actual_kind)) goto done;
+    for (sg_shader_abi *item = walk->shader_parameters; item; item = item->next) {
+        if (strcmp(item->family, "renderparm") || strcmp(item->name, canonical)) continue;
+        if (item->kind != actual_kind || item->index != index || item->supplied != (supplied != 0) ||
+            item->length != length || (length && memcmp(item->source, body, length))) {
+            sg_shader_error(walk, "shader parameter ABI changed during source binding", name); goto done;
+        }
+        *kind = actual_kind; ok = 1; goto done;
+    }
+    sg_shader_abi *item = calloc(1, sizeof(*item));
+    if (!item) goto done;
+    item->name = canonical; canonical = NULL; item->source = body; body = NULL;
+    item->length = length; item->kind = actual_kind; item->index = index; item->supplied = supplied != 0;
+    item->family = "renderparm";
+    item->next = walk->shader_parameters; walk->shader_parameters = item;
+    *kind = actual_kind; ok = 1;
+done:
+    free(path); free(canonical); free(body);
+    if (!ok) sg_shader_error(walk, "shader parameter needs a compatible fixed native ABI", name);
+    return ok ? 1 : -1;
+}
+static int sg_shader_flag(sg_walk *walk, const char *name)
+{
+    unsigned char *body = NULL; size_t length = 0; uint64_t mask = 0;
+    char *path = sg_path("renderprogflag", name), *canonical = sg_name(name);
+    int supplied = -1, ok = 0;
+    if (!path || !canonical || !walk->shader_configured || !walk->shader.flag) goto done;
+    supplied = sg_read_path(walk, path, &body, &length);
+    if (supplied < 0 || (supplied && !body) || walk->shader.flag(walk->shader.context, canonical,
+        (sh_decl_source){(const char *)body, length}, &mask, walk->error, walk->capacity) != 1) goto done;
+    for (sg_shader_abi *item = walk->shader_parameters; item; item = item->next) {
+        if (strcmp(item->family, "renderprogflag") || strcmp(item->name, canonical)) continue;
+        if (item->mask != mask || item->supplied != (supplied != 0) || item->length != length ||
+            (length && memcmp(item->source, body, length))) {
+            sg_shader_error(walk, "shader flag ABI changed during source binding", name); goto done;
+        }
+        ok = 1; goto done;
+    }
+    sg_shader_abi *item = calloc(1, sizeof(*item));
+    if (!item) goto done;
+    item->family = "renderprogflag"; item->name = canonical; canonical = NULL;
+    item->source = body; body = NULL; item->length = length; item->mask = mask;
+    item->supplied = supplied != 0; item->next = walk->shader_parameters; walk->shader_parameters = item; ok = 1;
+done:
+    free(body); free(path); free(canonical);
+    if (!ok) sg_shader_error(walk, "shader flag needs a compatible fixed native mask", name);
+    return ok;
+}
+typedef struct sg_shader_paths { char declaration[256], binary[256]; } sg_shader_paths;
+static int sg_shader_first_paths(void *context, sh_package_shader_path_kind kind,
+    const char *original, const char *linked)
+{
+    sg_shader_paths *paths = context; (void)linked;
+    if (kind == SH_PACKAGE_SHADER_DECLARATION) snprintf(paths->declaration, 256, "%s", original);
+    if (kind == SH_PACKAGE_SHADER_BINARY) snprintf(paths->binary, 256, "%s", original);
+    return 1;
+}
+int sh_package_source_shader_open(sh_package_source_reader *reader, const char *name,
+    unsigned char **declaration, size_t *declaration_length,
+    unsigned char **binary, size_t *binary_length, sh_package_shader_program *program,
+    char *error, size_t capacity)
+{
+    sg_shader_paths paths = {0}; sh_package_shader_program empty = {0};
+    sh_package_shader_schema schema = {reader, sg_shader_parameter};
+    char *old_error; size_t old_capacity; int ok = 0;
+    if (error && capacity) *error = 0;
+    if (declaration) *declaration = NULL;
+    if (declaration_length) *declaration_length = 0;
+    if (binary) *binary = NULL;
+    if (binary_length) *binary_length = 0;
+    if (program) memset(program, 0, sizeof(*program));
+    if (!reader || !name || !declaration || !declaration_length || !binary || !binary_length || !program) return 0;
+    old_error = reader->error; old_capacity = reader->capacity;
+    reader->error = error; reader->capacity = capacity;
+    if (!reader->shader_configured) { sg_shader_error(reader, "shader renderer contract is unavailable", name); goto done; }
+    if (sh_package_shader_paths(reader->shader.renderer, name, name, &empty,
+        sg_shader_first_paths, &paths, error, capacity) != SH_PACKAGE_SHADER_OK) goto done;
+    int declaration_status = sg_read_path(reader, paths.declaration, declaration, declaration_length);
+    int binary_status = declaration_status > 0 ? sg_read_path(reader, paths.binary, binary, binary_length) : 0;
+    if (declaration_status > 0 && !binary_status && reader->shader.program)
+        reader->shader.program(reader->shader.context, name,
+            (sh_decl_source){(const char *)*declaration, *declaration_length}, error, capacity);
+    if (declaration_status <= 0 || binary_status <= 0) {
+        sg_shader_error(reader, "shader declaration or renderer binary is absent", name); goto done;
+    }
+    if (sh_package_shader_decode(*binary, *binary_length, &schema, program, error, capacity) != SH_PACKAGE_SHADER_OK) goto done;
+    if (program->declaration_checksum != sh_package_shader_declaration_checksum(*declaration, *declaration_length)) {
+        sg_shader_error(reader, "shader binary does not match its scoped declaration", name); goto done;
+    }
+    for (size_t i = 0; i < program->reference_count; i++) {
+        const sh_package_shader_reference *ref = program->references + i; int kind = -1;
+        if (ref->kind == SH_PACKAGE_SHADER_PARAMETER && sg_shader_parameter(reader, ref->name, &kind) != 1) goto done;
+        if (ref->kind == SH_PACKAGE_SHADER_FLAG && !sg_shader_flag(reader, ref->name)) goto done;
+    }
+    ok = 1;
+done:
+    if (!ok) {
+        free(*declaration); free(*binary); *declaration = *binary = NULL; *declaration_length = *binary_length = 0;
+        sh_package_shader_program_clear(program);
+    }
+    reader->error = old_error; reader->capacity = old_capacity; return ok;
+}
+typedef struct sg_shader_walk {
+    sg_walk *reader;
+    const unsigned char *binary;
+    const sh_package_shader_program *program;
+    const char *member;
+    int matched;
+} sg_shader_walk;
+static int sg_shader_path(void *context, sh_package_shader_path_kind kind,
+    const char *original, const char *linked)
+{
+    sg_shader_walk *shader = context; sg_walk *walk = shader->reader;
+    unsigned char *body = NULL; size_t length = 0; int ok = 0;
+    (void)linked;
+    if (kind == SH_PACKAGE_SHADER_PERMUTATION) return sg_add(walk, "renderprog", original);
+    if (shader->member && !strcmp(shader->member, original)) shader->matched = 1;
+    if (!sg_file(walk, original) || sg_read_path(walk, original, &body, &length) <= 0) {
+        sg_shader_error(walk, "shader companion is absent or unreadable", original); goto done;
+    }
+    if (kind == SH_PACKAGE_SHADER_SPIRV) {
+        const char *extension = strrchr(original, '.');
+        int stage = extension && !strcmp(extension, ".vspv") ? 0 :
+            extension && !strcmp(extension, ".fspv") ? 1 : extension && !strcmp(extension, ".cspv") ? 2 : -1;
+        if (stage < 0) goto done;
+        const sh_package_shader_stage *source = shader->program->stages + stage;
+        if (sh_package_shader_spirv(body, length, shader->binary + source->offset, source->length,
+            walk->error, walk->capacity) != SH_PACKAGE_SHADER_OK) goto done;
+    }
+    ok = 1;
+done:
+    free(body); return ok;
+}
 static int sg_renderprog(sg_walk *walk, const char *name)
 {
-    unsigned char *body = NULL;
-    size_t length = 0;
-    char *path = sg_path("renderprog", name);
-    int status;
-    if (!path) { walk->failed = 1; return 0; }
-    status = sg_read_path(walk, path, &body, &length);
-    free(path);
-    if (status <= 0 || !body) { free(body); return !walk->failed; }
-    walk->report.declarations++;
-    for (size_t at = 0; body && at + 10 < length; at++) {
-        const char *text = (const char *)body + at;
-        const char *quote, *end;
-        char *include;
-        size_t used;
-        if (memcmp(text, "#include", 8)) continue;
-        quote = memchr(text, '"', length - at);
-        if (!quote) break;
-        end = memchr(quote + 1, '"', length - (size_t)(quote + 1 - (const char *)body));
-        if (!end) break;
-        used = (size_t)(end - quote - 1);
-        if (!used || used > 512) { at = (size_t)(end - (const char *)body); continue; }
-        include = malloc(used + 32);
-        if (!include) { walk->failed = 1; break; }
-        snprintf(include, used + 32, "decls/renderprogs/%.*s", (int)used, quote + 1);
-        walk->report.references++;
-        if (!sg_file(walk, include)) { free(include); break; }
-        free(include);
-        at = (size_t)(end - (const char *)body);
+    unsigned char *declaration = NULL, *binary = NULL; size_t declaration_length = 0, binary_length = 0;
+    sh_package_shader_program program = {0}; char detail[1024] = "";
+    if (!sh_package_source_shader_open(walk, name, &declaration, &declaration_length,
+        &binary, &binary_length, &program, detail, sizeof(detail))) {
+        sg_gap(walk, "", "renderprog", detail[0] ? detail : "shader unit is unavailable"); return !walk->failed;
     }
-    free(body);
-    return !walk->failed;
+    walk->report.declarations++;
+    for (size_t i = 0; i < program.reference_count; i++) {
+        const sh_package_shader_reference *ref = program.references + i;
+        if (ref->kind == SH_PACKAGE_SHADER_INCLUDE) continue;
+        walk->report.references++;
+        if (!sg_add(walk, ref->family, ref->name)) break;
+    }
+    sg_shader_walk shader = {walk, binary, &program};
+    if (!walk->failed && sh_package_shader_paths(walk->shader.renderer, name, name, &program,
+        sg_shader_path, &shader, detail, sizeof(detail)) != SH_PACKAGE_SHADER_OK)
+        sg_gap(walk, "", "renderprog", detail[0] ? detail : "shader companion validation failed");
+    free(declaration); free(binary); sh_package_shader_program_clear(&program); return !walk->failed;
 }
 
 /* Families whose cooked payload names no other engine resource. Measured over
  * the installed corpus with a scan for resource-path-shaped text: image 7436
  * files / 2.78 GB, cm 20117 / 4.25 GB, aas 863 / 194 MB, skeleton 945 / 5.8 MB,
- * binaryfile 48 / 56 MB and md6rig 2 -- none contained one. A leaf reports no
- * gap: reading it could not add a dependency. */
+ * binaryfile 48 / 56 MB and md6rig 2 -- none contained one. A leaf still needs
+ * a verified payload path before it can establish resource availability. */
 static int sg_leaf_family(const char *type)
 {
     static const char *const leaves[] = {"image", "skeleton", "cm", "aas", "binaryfile", "md6rig"};
     for (size_t i = 0; i < sizeof(leaves) / sizeof(leaves[0]); i++)
         if (!strcmp(type, leaves[i])) return 1;
     return 0;
+}
+
+/* Leaves have no dependency grammar to read, but their source must still
+ * belong to the candidate or an original baseline. Local availability cannot
+ * supply an omitted authored image (or another same-named binary resource). */
+static int sg_leaf_file(sg_walk *walk, const char *path)
+{
+    unsigned char *body = NULL;
+    size_t length = 0;
+    int status;
+    if (!sg_file(walk, path)) return 0;
+    if (sh_package_compilation_find(walk->compiled, path)) return 1;
+    status = sg_read_path(walk, path, &body, &length);
+    free(body);
+    if (status <= 0) sg_gap(walk, "", walk->current_type,
+        status < 0 ? "original resource source is unreadable" : "candidate and original resource sources are absent");
+    return !walk->failed;
 }
 
 /* A cooked animation plays on exactly one skeleton, named in its header. The
@@ -330,8 +552,9 @@ static int sg_anim(sg_walk *walk, const char *path, const char *name)
     return !walk->failed;
 }
 
-/* A cooked static model binds its materials per surface. */
-static int sg_model(sg_walk *walk, const char *path)
+/* Static/discrete models bind material records. Particle meshes instead carry
+ * only counted vertices, but still need a verified envelope before admission. */
+static int sg_model(sg_walk *walk, const char *path, const char *family)
 {
     unsigned char *body = NULL;
     size_t length = 0;
@@ -339,31 +562,14 @@ static int sg_model(sg_walk *walk, const char *path)
     int status = sg_read_path(walk, path, &body, &length);
     if (status <= 0 || !body) {
         free(body);
-        sg_gap(walk, "", "model", status < 0 ? "cooked model is unreadable" : "cooked model is absent");
+        sg_gap(walk, "", family, status < 0 ? "cooked model is unreadable" : "cooked model is absent");
         return !walk->failed;
     }
-    if (!sh_model_references(body, length, sg_md6_reference, walk, detail, sizeof(detail)) && !walk->failed)
-        sg_gap(walk, "", "model", detail[0] ? detail : "cooked model envelope is unsupported");
+    int ok = !strcmp(family, "staticparticlemodel") ? sh_particle_model_read(body, length, detail, sizeof(detail)) :
+        !strcmp(family, "discreteanimation") ? sh_discrete_model_references(body, length, sg_md6_reference, walk, detail, sizeof(detail)) :
+        sh_model_references(body, length, sg_md6_reference, walk, detail, sizeof(detail));
+    if (!ok && !walk->failed) sg_gap(walk, "", family, detail[0] ? detail : "cooked model envelope is unsupported");
     free(body); return !walk->failed;
-}
-
-/* generated/basemodel/<mesh name without its .md6mesh suffix>.bmd6model, the
- * naming every shipped catalog row uses. Only needed for a mesh the installed
- * catalog has never seen, which a package can legitimately add. */
-static char *sg_cooked_path(const char *type, const char *name)
-{
-    int mesh = !strcmp(type, "basemodel"), clip = !strcmp(type, "anim");
-    const char *prefix = mesh ? "generated/basemodel/" : clip ? "cooked/anim/" : "cooked/model/";
-    const char *suffix = mesh ? ".bmd6model" : clip ? ".bmd6anim" : ".bmodel";
-    const char *source = mesh ? ".md6mesh" : clip ? ".md6anim" : ".lwo";
-    size_t length = strlen(name), drop = strlen(source), capacity;
-    char *raw, *path;
-    if (length > drop && !_stricmp(name + length - drop, source)) length -= drop;
-    capacity = length + strlen(prefix) + strlen(suffix) + 2;
-    raw = malloc(capacity);
-    if (!raw) return NULL;
-    snprintf(raw, capacity, "%s%.*s%s", prefix, (int)length, name, suffix);
-    path = sh_package_engine_path(raw); free(raw); return path;
 }
 
 static int sg_material(sg_walk *walk, sh_decl_source source)
@@ -388,12 +594,23 @@ static int sg_renderparm(sg_walk *walk, sh_decl_source source)
     sh_decl_renderparm_free(&parameter); return !walk->failed;
 }
 
+int sh_package_source_reader_audio(sh_package_source_reader *reader,
+    const sh_package_source_audio *audio)
+{
+    if (!reader || !audio || !audio->originals || reader->audio_scope) return 0;
+    reader->audio_source = *audio; return 1;
+}
+static int sg_audio_path(void *context, const char *path, int original)
+{
+    sg_walk *walk = context; (void)original;
+    walk->report.references++; return sg_file(walk, path);
+}
 static int sg_sound(sg_walk *walk, const char *name)
 {
     const sh_package_audio_reference *references;
     uint32_t event;
     size_t count;
-    if (!sh_audio_event_identity(name, &event)) {
+    if (!sh_package_sound_event(walk->compiled, name, &event) && !sh_audio_event_identity(name, &event)) {
         sg_gap(walk, "", "sound", "sound name cannot be represented by native event conversion"); return 1;
     }
     if (!walk->audio) {
@@ -402,24 +619,36 @@ static int sg_sound(sg_walk *walk, const char *name)
         if (!walk->audio) { walk->failed = 1; return 0; }
         if (report.invalid) sg_gap(walk, "", "sound bank", report.first_gap);
     }
+    if (walk->audio_source.originals) {
+        if (!walk->audio_scope) walk->audio_scope = sh_package_audio_scope_open(walk->compiled,
+            walk->audio_source.originals, walk->error, walk->capacity);
+        if (!walk->audio_scope || !sh_package_audio_scope_event(walk->audio_scope, event,
+            sg_audio_path, walk, walk->error, walk->capacity)) {
+            walk->failed = 1; return 0;
+        }
+        return 1;
+    }
     count = sh_package_audio_find(walk->audio, event, &references);
+    if (!count) sg_gap(walk, "", "sound", "event bank membership needs an original audio provider index");
     for (size_t i = 0; i < count; i++) {
         const sh_audio_bank *bank = references[i].metadata;
         walk->report.references++;
         if (!sg_file(walk, references[i].path)) return 0;
-        /* A bank streams media from separate files. Carry the ones this
-         * provider supplies; the rest stay installed originals. */
+        /* A bank streams media from separate files. An absent candidate entry
+         * needs an original provider index, not an assumption of installation. */
         for (size_t j = 0; bank && j < bank->media_count; j++) {
             const sh_package_audio_media *media;
             size_t supplied;
             if (!bank->media[j].stream) continue;
             supplied = sh_package_audio_find_media(walk->audio, bank->media[j].id, &media);
+            if (!supplied) sg_gap(walk, "", "sound media", "streamed media needs an original audio provider index");
             for (size_t k = 0; k < supplied; k++) {
                 walk->report.references++;
                 if (!sg_file(walk, media[k].path)) return 0;
             }
         }
     }
+    if (count) sg_gap(walk, "", "sound", "bank membership requires complete audio event dependency coverage");
     return 1;
 }
 
@@ -434,6 +663,7 @@ static int sg_inspect(sg_walk *walk, const char *type, const char *name)
     char *path = sg_path(type, name), *class_name = NULL;
     const char *native_class = NULL;
     const sh_compiled_resource *compiled_resource;
+    sh_decl_native_binding_format native_format;
     unsigned char *body = NULL;
     int status, ok = 1;
     walk->current_type = type; walk->current_name = name;
@@ -443,9 +673,15 @@ static int sg_inspect(sg_walk *walk, const char *type, const char *name)
      * declaration itself comes from the game or native default creation. */
     if (!strcmp(type, "sound") && !sg_sound(walk, name)) { ok = 0; goto done; }
     compiled_resource = sh_package_compilation_find(walk->compiled, path);
+    if (!strcmp(type, "renderprog")) { ok = sg_renderprog(walk, name); goto done; }
+    if (!strcmp(type, "renderprogflag")) {
+        if (!sg_file(walk, path) || !sg_shader_flag(walk, name))
+            sg_gap(walk, "", type, "shader flag needs its fixed native mask contract");
+        goto done;
+    }
     /* Material is a verified custom grammar, independent of reflected edit
      * classes. Read the prospective provider before considering loaded state. */
-    if (!strcmp(type, "material") || !strcmp(type, "renderparm") || !strcmp(type, "md6def")) {
+    if (sh_decl_native_binding_family(type, &native_format)) {
         if (!sg_file(walk, path)) { ok = 0; goto done; }
         status = sg_read_path(walk, path, &body, &source.length);
         if (status <= 0 || !body) {
@@ -453,39 +689,68 @@ static int sg_inspect(sg_walk *walk, const char *type, const char *name)
         }
         walk->report.declarations++; source.text = (const char *)body;
         ok = !strcmp(type, "material") ? sg_material(walk, source) :
-            !strcmp(type, "md6def") ? sg_md6(walk, source) : sg_renderparm(walk, source); goto done;
+            !strcmp(type, "md6def") ? sg_md6(walk, source) :
+            !strcmp(type, "renderparm") ? sg_renderparm(walk, source) :
+            sg_native_grammar(walk, source, native_format, type); goto done;
     }
     if (sh_decl_native_registry_type_class(walk->registry, type, &native_class) != 1 ||
         ((!compiled_resource || !compiled_resource->type) &&
          sh_decl_native_schema_reader(walk->schema, (sh_decl_value_type){native_class, "*"}) != SH_DECL_READER_DECL)) {
         const sh_resource_catalog_entry *const *entries;
-        size_t count = sh_resource_catalog_find(walk->catalog, type, name, &entries);
-        int cooked = !strcmp(type, "basemodel"), model = !strcmp(type, "model");
-        int anim = !strcmp(type, "anim"), program = !strcmp(type, "renderprog");
-        int leaf = sg_leaf_family(type), inspected = leaf;
-        if (program) inspected = sg_renderprog(walk, name);
+        size_t count = sh_resource_catalog_find(walk->catalog, type, name, &entries), known = 0;
+        int discrete = !strcmp(type, "discreteanimation");
+        int cooked = !strcmp(type, "basemodel"), model = !strcmp(type, "model") || discrete || !strcmp(type, "staticparticlemodel");
+        int anim = !strcmp(type, "anim");
+        int leaf = sg_leaf_family(type), inspected = 0;
         for (size_t i = 0; i < count; i++) {
             if (!*entries[i]->path) continue;
-            if (!sg_file(walk, entries[i]->path)) { ok = 0; break; }
-            if (leaf || program || (!cooked && !model && !anim)) continue;
+            known++;
+            if (!(leaf ? sg_leaf_file(walk, entries[i]->path) : sg_file(walk, entries[i]->path))) { ok = 0; break; }
+            if (leaf || (!cooked && !model && !anim)) continue;
             if (!(cooked ? sg_basemodel(walk, entries[i]->path) :
-                  model ? sg_model(walk, entries[i]->path) : sg_anim(walk, entries[i]->path, name))) { ok = 0; break; }
+                  model ? sg_model(walk, entries[i]->path, type) : sg_anim(walk, entries[i]->path, name))) { ok = 0; break; }
             inspected = 1;
+        }
+        /* Linked binary aliases have compiler-assigned native identities even
+         * when they do not occur in the game's catalog. Keep every companion
+         * belonging to that identity, and inspect its candidate bytes. */
+        for (size_t i = 0; ok && i < walk->compiled->resource_count; i++) {
+            const sh_compiled_resource *file = walk->compiled->resources + i;
+            int catalogued = 0;
+            if (!sh_package_resource_native_matches(file, type, name)) continue;
+            for (size_t j = 0; j < count; j++)
+                if (!strcmp(entries[j]->path, file->engine_path)) { catalogued = 1; break; }
+            if (catalogued) continue;
+            known++;
+            if (!sg_file(walk, file->engine_path)) { ok = 0; break; }
+            if (leaf || (!cooked && !model && !anim)) continue;
+            inspected = cooked ? sg_basemodel(walk, file->engine_path) :
+                model ? sg_model(walk, file->engine_path, type) : sg_anim(walk, file->engine_path, name);
+            if (!inspected) ok = 0;
+        }
+        if (leaf) inspected = known != 0;
+        /* Image generated-path spelling is a verified native rule. Other leaf
+         * families require catalog or compiler identities; no guessed paths. */
+        if (ok && !known && !strcmp(type, "image")) {
+            char *image_path = sh_package_cooked_path(type, name);
+            if (image_path) { inspected = sg_leaf_file(walk, image_path); free(image_path); }
+            ok = !walk->failed;
         }
         /* A mesh this candidate adds has no catalog row; its cooked path follows
          * the same naming rule, so the provider's own bytes can still be read. */
         if (ok && (cooked || model || anim) && !inspected) {
-            char *cooked_path = sg_cooked_path(type, name);
+            char *cooked_path = sh_package_cooked_path(type, name);
             if (!cooked_path) { walk->failed = 1; ok = 0; }
             else {
                 if (sg_file(walk, cooked_path))
                     inspected = cooked ? sg_basemodel(walk, cooked_path) :
-                        model ? sg_model(walk, cooked_path) : sg_anim(walk, cooked_path, name);
+                        model ? sg_model(walk, cooked_path, type) : sg_anim(walk, cooked_path, name);
                 ok = !walk->failed;
                 free(cooked_path);
             }
         }
-        if (ok && !inspected) sg_gap(walk, "", type, "non-declaration resource requires its format reader");
+        if (ok && !inspected) sg_gap(walk, "", type, leaf ?
+            "resource payload path is unavailable" : "non-declaration resource requires its format reader");
         goto done;
     }
     if (!sg_file(walk, path)) { ok = 0; goto done; }
@@ -526,7 +791,7 @@ static int sg_inspect(sg_walk *walk, const char *type, const char *name)
         const sh_decl_node *edit = sh_decl_tree_member(tree, "edit");
         if (inherit) {
             const char *parent; size_t length;
-            if (sh_decl_tree_literal(inherit, &parent, &length)) {
+            if (sh_decl_reference_literal(inherit, &parent, &length)) {
                 sh_decl_value_type pointer = {native_class, "*"};
                 if (length && !sg_reference(walk, "inherit", pointer, parent, length)) { ok = 0; goto done; }
             } else sg_gap(walk, "inherit", type, "inheritance syntax is unsupported");
@@ -565,9 +830,877 @@ static int sg_inline(void *context, const char *class_name, const char *inherit,
     free((void *)parent.text); free(inherited_class); return !walk->failed;
 }
 
-int sh_package_source_graph(const sh_package_compilation *compiled,
+sh_package_source_reader *sh_package_source_reader_open(const sh_package_compilation *compiled,
     const sh_resource_catalog *catalog, sh_package_baseline_reader original,
     void *original_context, sh_decl_registry_source registry, uintptr_t reflection,
+    char *error, size_t capacity)
+{
+    sg_walk *walk = calloc(1, sizeof(*walk));
+    if (!walk || !compiled || !registry.read || !reflection) goto failed;
+    walk->compiled = compiled; walk->catalog = catalog; walk->original = original;
+    walk->original_context = original_context; walk->native = registry;
+    walk->error = error; walk->capacity = capacity;
+    walk->registry = sh_decl_native_registry_open(
+        (sh_decl_registry_source){walk, sg_native_read, registry.registry, sg_exists}, error, capacity);
+    walk->schema = sh_decl_native_schema_open(
+        (sh_decl_native_source){walk, sg_native_read, reflection, registry.scripts},
+        (sh_decl_dependency_observer){walk, sg_reference, sg_field_gap}, error, capacity);
+    if (walk->registry && walk->schema) return walk;
+failed:
+    sh_package_source_reader_close(walk); return NULL;
+}
+
+void sh_package_source_reader_close(sh_package_source_reader *reader)
+{
+    if (!reader) return;
+    sh_package_references_free(&reader->paths); sh_package_references_free(&reader->queue);
+    sh_package_audio_close(reader->audio); sh_package_audio_scope_close(reader->audio_scope);
+    sg_shader_clear(reader);
+    sh_decl_native_registry_close(reader->registry); sh_decl_native_schema_close(reader->schema);
+    free(reader);
+}
+
+char *sh_package_source_material_path(sh_package_source_reader *reader,
+    const char *name, const char *parameter, char *error, size_t capacity)
+{
+    unsigned char *material_bytes = NULL, *parameter_bytes = NULL;
+    size_t material_length = 0, parameter_length = 0;
+    char *path = NULL, *out = NULL;
+    sh_decl_material material = {0}; sh_decl_renderparm defaults = {0};
+    sh_decl_tokens tokens = {0}; sh_decl_source selected = {0};
+    sh_decl_material_schema schema = {reader, sg_material_schema};
+    if (error && capacity) *error = 0;
+    if (!reader || !name || !parameter || !*parameter) goto done;
+    reader->error = error; reader->capacity = capacity; reader->failed = 0;
+    path = sg_path("renderparm", parameter);
+    if (!path || sg_read_path(reader, path, &parameter_bytes, &parameter_length) <= 0 ||
+        !sh_decl_renderparm_read((sh_decl_source){(char *)parameter_bytes, parameter_length},
+            &schema, &defaults, error, capacity) || defaults.kind != 12) goto done;
+    free(path); path = sg_path("material", name);
+    if (!path || sg_read_path(reader, path, &material_bytes, &material_length) <= 0 ||
+        !sh_decl_material_read((sh_decl_source){(char *)material_bytes, material_length},
+            &schema, &material, error, capacity)) goto done;
+    selected = defaults.value;
+    for (size_t i = 0; i < material.count; i++) {
+        const sh_decl_material_write *write = material.writes + i;
+        if (write->name.length == strlen(parameter) &&
+            !_strnicmp(write->name.text, parameter, write->name.length)) {
+            if (write->kind != 12) goto done;
+            selected = write->value;
+        }
+    }
+    if (!selected.text) selected = (sh_decl_source){"", 0};
+    if (reader->failed || !sh_decl_native_lex(selected, &tokens, error, capacity) || tokens.count > 1) goto done;
+    size_t begin = 0, length = 0;
+    if (tokens.count) {
+        const sh_decl_token *token = tokens.items;
+        if (token->kind != SH_DECL_TOKEN_NAME && token->kind != SH_DECL_TOKEN_STRING) goto done;
+        begin = token->begin; length = token->end - begin;
+        if (token->kind == SH_DECL_TOKEN_STRING) { begin++; length -= 2; }
+    }
+    if (length == SIZE_MAX || !(out = malloc(length + 1))) goto done;
+    memcpy(out, selected.text + begin, length); out[length] = 0;
+done:
+    sh_decl_tokens_free(&tokens); sh_decl_material_free(&material); sh_decl_renderparm_free(&defaults);
+    free(path); free(material_bytes); free(parameter_bytes);
+    if (reader) { reader->error = NULL; reader->capacity = 0; }
+    if (!out && error && capacity && !*error)
+        snprintf(error, capacity, "material path parameter is unavailable or invalid: %s/%s",
+            name ? name : "", parameter ? parameter : "");
+    return out;
+}
+
+typedef struct sg_binding {
+    sg_walk *reader;
+    sh_package_binding_resolver resolver;
+    void *context;
+    const char *family, *native_class;
+    const sh_decl_node *tree;
+    const sh_decl_graph *graph;
+    sh_decl_value_type state;
+    size_t references, record;
+    char *replacement;
+    int observe;
+} sg_binding;
+
+typedef struct sg_candidate { sg_binding *binding; const char *slot; } sg_candidate;
+static int sg_bind_candidate(void *context, const char *family, const char *name)
+{
+    sg_candidate *candidate = context; sg_binding *binding = candidate->binding;
+    const char *replacement = NULL; char *canonical = sg_name(family);
+    int ok = canonical && binding->resolver(binding->context, candidate->slot,
+        canonical, name, &replacement) == 0;
+    free(canonical); return ok;
+}
+
+static int sg_bind_typed(void *context, const char *slot, sh_decl_value_type type,
+    const char *name, size_t length, const char **replacement)
+{
+    sg_binding *binding = context;
+    sh_decl_native_reference reference = {0};
+    const char *target = NULL;
+    if (binding->observe && sh_decl_native_schema_reader(binding->reader->schema, type) == SH_DECL_READER_DECL) {
+        if (!name || length == SIZE_MAX || memchr(name, 0, length)) return -1;
+        if (!length) return 0;
+        char *copy = malloc(length + 1); if (!copy) return -1;
+        memcpy(copy, name, length); copy[length] = 0;
+        sg_candidate candidate = {binding, slot};
+        int ok = sh_decl_native_registry_source_candidates(binding->reader->registry,
+            type.name, copy, sg_bind_candidate, &candidate);
+        free(copy); binding->references++;
+        if (!ok) sg_gap(binding->reader, slot, type.name, "native candidate names could not be observed");
+        return ok ? 0 : -1;
+    }
+    int result = sh_decl_native_reference_read(binding->reader->schema, binding->reader->registry,
+        type, name, length, &reference);
+    if (result == 1) {
+        /* Native registry labels retain mixed case (entityDef, for example).
+         * Source-unit identities use the same canonical family as the source
+         * graph queue and catalog; do not create a second manager identity. */
+        char *family = sg_name(reference.resource.type);
+        binding->references++;
+        result = family ? binding->resolver(binding->context, slot, family, reference.resource.name, &target) : -1;
+        free(family);
+        if (result == 1) {
+            free(binding->replacement);
+            binding->replacement = sh_decl_native_reference_bind(&reference, target);
+            if (!binding->replacement) result = -1;
+            else *replacement = binding->replacement;
+        }
+    }
+    if (result < 0) sg_gap(binding->reader, slot, type.name, "native source binding could not be resolved");
+    sh_decl_native_reference_clear(&reference); return result;
+}
+
+static int sg_bind_native(void *context, const char *family, const char *name, const char **replacement)
+{
+    sg_binding *binding = context;
+    char slot[64];
+    if (binding->record == SIZE_MAX) return -1;
+    snprintf(slot, sizeof(slot), "native/%zu", binding->record++);
+    binding->references++;
+    /* Native custom grammars retain source spelling. Manager identities use
+     * canonical names, just like reflected references and catalog inputs. Keep
+     * the authored token intact unless the resolver actually replaces it. */
+    char *normalized_family = sg_name(family), *normalized_name = sg_name(name);
+    int result = normalized_family && normalized_name ?
+        binding->resolver(binding->context, slot, normalized_family, normalized_name, replacement) : -1;
+    free(normalized_family); free(normalized_name); return result;
+}
+
+static int sg_bind_envelope(void *context, const sh_decl_dependency_schema *view,
+    sh_decl_dependency_result *result)
+{
+    sg_binding *binding = context;
+    memset(result, 0, sizeof(*result));
+    if (binding->graph) return sh_decl_graph_dependencies_with(binding->graph, binding->family,
+        binding->reader->schema, view, result);
+    if (!strcmp(binding->family, "entitydef"))
+        return sh_decl_entity_dependencies(binding->tree, binding->state, view, result);
+    return sh_decl_envelope_dependencies(binding->tree, binding->state,
+        (sh_decl_value_type){binding->native_class, "*"}, view, result);
+}
+
+typedef struct sg_shader_token { size_t begin, end; char quote; } sg_shader_token;
+typedef struct sg_shader_cursor { sh_decl_source source; size_t at; } sg_shader_cursor;
+/* This only locates outer commands and opaque balanced source blocks. It does
+ * not expand shader preprocessing or interpret HLSL, state, flags or defines. */
+static int sg_shader_token_next(sg_shader_cursor *cursor, sg_shader_token *token)
+{
+    const char *s = cursor->source.text; size_t n = cursor->source.length, p = cursor->at;
+    for (;;) {
+        while (p < n && (unsigned char)s[p] <= 32) p++;
+        if (p + 1 < n && s[p] == '/' && s[p + 1] == '/') {
+            p += 2; while (p < n && s[p] != '\n') p++; continue;
+        }
+        if (p + 1 < n && s[p] == '/' && s[p + 1] == '*') {
+            p += 2; while (p + 1 < n && (s[p] != '*' || s[p + 1] != '/')) p++;
+            if (p + 1 >= n) return -1;
+            p += 2; continue;
+        }
+        break;
+    }
+    if (p == n) { cursor->at = p; return 0; }
+    token->begin = p; token->quote = 0;
+    if (s[p] == '"' || s[p] == '\'') {
+        token->quote = s[p++];
+        while (p < n && s[p] != token->quote) p++;
+        if (p == n) return -1;
+        p++;
+    } else if (strchr("{};", s[p])) p++;
+    else {
+        do { p++; } while (p < n && (unsigned char)s[p] > 32 && !strchr("{};\"'", s[p]) &&
+            !(s[p] == '/' && p + 1 < n && (s[p + 1] == '/' || s[p + 1] == '*')));
+    }
+    token->end = cursor->at = p; return 1;
+}
+static int sg_shader_token_is(sh_decl_source source, sg_shader_token token, const char *name)
+{ return !token.quote && token.end - token.begin == strlen(name) && !memcmp(source.text + token.begin, name, strlen(name)); }
+typedef struct sg_shader_sites {
+    sh_resource_binding_site visit;
+    void *context;
+    size_t base;
+} sg_shader_sites;
+static int sg_shader_site(void *context, const char *family, const char *name, size_t offset, size_t length)
+{
+    sg_shader_sites *sites = context;
+    return offset != SIZE_MAX && sites->visit(sites->context, family, name, sites->base + offset, length);
+}
+static int sg_shader_source_sites(void *context, const unsigned char *body, size_t length,
+    sh_resource_binding_site visit, void *visit_context, char *error, size_t capacity)
+{
+    sg_walk *reader = context; sh_decl_source source = {(const char *)body, length};
+    sg_shader_cursor cursor = {source, 0}; sg_shader_token token;
+    sh_decl_material_schema schema = {reader, sg_material_schema};
+    int inherited = 0, commands = 0;
+    if (memchr(body, 0, length) || sg_shader_token_next(&cursor, &token) != 1 ||
+        !sg_shader_token_is(source, token, "{")) goto gap;
+    while (sg_shader_token_next(&cursor, &token) == 1) {
+        if (sg_shader_token_is(source, token, "}"))
+            return sg_shader_token_next(&cursor, &token) == 0;
+        if (sg_shader_token_is(source, token, "inherit")) {
+            if (commands || inherited || sg_shader_token_next(&cursor, &token) != 1) goto gap;
+            size_t begin = token.begin + (token.quote != 0), end = token.end - (token.quote != 0);
+            if (end <= begin) goto gap;
+            char *name = malloc(end - begin + 1); if (!name) goto gap;
+            memcpy(name, body + begin, end - begin); name[end - begin] = 0;
+            int ok = visit(visit_context, "renderprog", name, begin, end - begin); free(name);
+            if (!ok) return 0;
+            inherited = 1; continue;
+        }
+        static const char *const blocks[] = {"permutations", "parms", "state", "flags", "inout",
+            "computelayout", "renderoutput", "buffer", "compileroptions", "wavelimits",
+            "hlsl_header", "hlsl_vp_header", "hlsl_fp_header", "hlsl_cp_header", "hlsl_vp", "hlsl_fp", "hlsl_cp"};
+        size_t kind = 0;
+        while (kind < sizeof(blocks) / sizeof(*blocks) && !sg_shader_token_is(source, token, blocks[kind])) kind++;
+        if (kind == sizeof(blocks) / sizeof(*blocks) || sg_shader_token_next(&cursor, &token) != 1 ||
+            !sg_shader_token_is(source, token, "{")) goto gap;
+        size_t begin = token.begin, depth = 1;
+        while (depth) {
+            if (sg_shader_token_next(&cursor, &token) != 1) goto gap;
+            if (sg_shader_token_is(source, token, "{")) depth++;
+            if (sg_shader_token_is(source, token, "}")) depth--;
+        }
+        if (kind == 1) {
+            sg_shader_sites sites = {visit, visit_context, begin};
+            if (!sh_decl_native_reference_sites(SH_BINDING_MATERIAL,
+                (sh_decl_source){source.text + begin, token.end - begin}, &schema,
+                sg_shader_site, &sites, error, capacity)) return 0;
+        }
+        commands++;
+    }
+gap:
+    if (error && capacity && !*error) snprintf(error, capacity,
+        "shader source relocation requires verified outer commands and unexpanded parameter blocks");
+    return 0;
+}
+typedef struct sg_shader_binding {
+    sg_walk *reader;
+    const sh_package_shader_program *program;
+    char **replacements;
+    unsigned char *used;
+    int parent_changed;
+} sg_shader_binding;
+static int sg_shader_source_reference(void *context, const char *family, const char *name, const char **replacement)
+{
+    sg_shader_binding *binding = context; char *canonical = sg_name(name); int result = 0;
+    if (!canonical) return -1;
+    for (size_t i = 0; i < binding->program->reference_count; i++) {
+        const sh_package_shader_reference *ref = binding->program->references + i;
+        if (!binding->replacements[i] || !ref->family || strcmp(ref->family, family) || _stricmp(ref->name, canonical)) continue;
+        if (result && strcmp(*replacement, binding->replacements[i])) { result = -1; break; }
+        *replacement = binding->replacements[i]; binding->used[i] = 1; result = 1;
+        if (ref->offset == 12 && !strcmp(family, "renderprog")) binding->parent_changed = 1;
+    }
+    free(canonical); return result;
+}
+static int sg_shader_binary_reference(void *context, const sh_package_shader_reference *reference,
+    const char **replacement)
+{
+    sg_shader_binding *binding = context;
+    for (size_t i = 0; i < binding->program->reference_count; i++) {
+        if (binding->program->references[i].offset != reference->offset) continue;
+        *replacement = binding->replacements[i]; return *replacement != NULL;
+    }
+    return -1;
+}
+unsigned char *sh_package_source_shader_bind(sh_package_source_reader *reader,
+    const char *name, const char *path, const unsigned char *body, size_t length,
+    int (*resolver)(void *, const char *, const char *, const char *, const char **),
+    void *context, size_t *output_length, char *error, size_t capacity)
+{
+    unsigned char *declaration = NULL, *binary = NULL, *linked_decl = NULL, *out = NULL;
+    size_t declaration_length = 0, binary_length = 0, linked_length = 0, changed = 0;
+    sh_package_shader_program program = {0}, empty = {0}; sg_shader_paths paths = {0};
+    sg_shader_binding binding = {reader, &program}; sh_package_shader_schema schema = {reader, sg_shader_parameter};
+    char fallback[1024]; char *old_error = NULL; size_t old_capacity = 0;
+    if (!error || !capacity) { error = fallback; capacity = sizeof(fallback); }
+    *error = 0; if (output_length) *output_length = 0;
+    if (!reader || !name || !path || !body || !resolver || !output_length || length == SIZE_MAX) goto done;
+    old_error = reader->error; old_capacity = reader->capacity; reader->error = error; reader->capacity = capacity;
+    if (!sh_package_source_shader_open(reader, name, &declaration, &declaration_length,
+        &binary, &binary_length, &program, error, capacity) ||
+        sh_package_shader_paths(reader->shader.renderer, name, name, &empty,
+        sg_shader_first_paths, &paths, error, capacity) != SH_PACKAGE_SHADER_OK) goto done;
+    int is_declaration = !strcmp(path, paths.declaration), is_binary = !strcmp(path, paths.binary);
+    if (!is_declaration && !is_binary) {
+        sg_shader_walk shader = {reader, binary, &program, path, 0};
+        if (sh_package_shader_paths(reader->shader.renderer, name, name, &program,
+            sg_shader_path, &shader, error, capacity) != SH_PACKAGE_SHADER_OK || !shader.matched) goto done;
+        unsigned char *original = NULL; size_t original_length = 0;
+        int exact = sg_read_path(reader, path, &original, &original_length) > 0 &&
+            length == original_length && !memcmp(body, original, length);
+        free(original); if (!exact) goto done;
+        out = malloc(length + 1);
+        if (out) { memcpy(out, body, length); out[length] = 0; *output_length = length; }
+        goto done;
+    }
+    const unsigned char *expected = is_declaration ? declaration : binary;
+    size_t expected_length = is_declaration ? declaration_length : binary_length;
+    if (length != expected_length || memcmp(body, expected, length)) {
+        sg_shader_error(reader, "shader member differs from its captured source unit", path); goto done;
+    }
+    binding.replacements = calloc(program.reference_count ? program.reference_count : 1, sizeof(*binding.replacements));
+    binding.used = calloc(program.reference_count ? program.reference_count : 1, 1);
+    if (!binding.replacements || !binding.used) goto done;
+    for (size_t i = 0; i < program.reference_count; i++) {
+        const sh_package_shader_reference *ref = program.references + i; const char *replacement = NULL;
+        if (ref->kind == SH_PACKAGE_SHADER_INCLUDE) continue;
+        char slot[64], *canonical = sg_name(ref->name);
+        snprintf(slot, sizeof(slot), "shader/record/%zu", ref->offset);
+        int action = canonical ? resolver(context, slot, ref->family, canonical, &replacement) : -1;
+        if (action < 0 || (action && (!replacement || !*replacement))) { free(canonical); goto done; }
+        int different = action && strcmp(canonical, replacement);
+        free(canonical);
+        if (!different) continue;
+        if (ref->kind == SH_PACKAGE_SHADER_PARAMETER || ref->kind == SH_PACKAGE_SHADER_FLAG) {
+            sg_shader_error(reader, "shader reference cannot change its fixed native ABI name", ref->name); goto done;
+        }
+        binding.replacements[i] = _strdup(replacement);
+        if (!binding.replacements[i]) goto done;
+        changed++;
+    }
+    if (changed) {
+        size_t source_changes = 0;
+        linked_decl = sh_resource_rebind_with(sg_shader_source_sites, reader, SH_BINDING_NATIVE_NAME,
+            declaration, declaration_length, sg_shader_source_reference, &binding,
+            &linked_length, &source_changes, error, capacity);
+        if (!linked_decl) goto done;
+        for (size_t i = 0; i < program.reference_count; i++) if (binding.replacements[i] && !binding.used[i] && !binding.parent_changed) {
+            sg_shader_error(reader, "changed cooked shader reference has no verified declaration origin", program.references[i].name); goto done;
+        }
+    } else {
+        linked_decl = malloc(declaration_length + 1);
+        if (!linked_decl) goto done;
+        memcpy(linked_decl, declaration, declaration_length); linked_decl[declaration_length] = 0; linked_length = declaration_length;
+    }
+    if (is_declaration) { out = linked_decl; linked_decl = NULL; *output_length = linked_length; }
+    else if (sh_package_shader_rebind(binary, binary_length, &schema,
+        (sh_package_shader_source){declaration, declaration_length},
+        (sh_package_shader_source){linked_decl, linked_length}, sg_shader_binary_reference, &binding,
+        &out, output_length, &changed, error, capacity) != SH_PACKAGE_SHADER_OK) { free(out); out = NULL; }
+done:
+    if (!out && !*error) snprintf(error, capacity, "shader source binding could not be completed: %s", path ? path : "");
+    if (binding.replacements) for (size_t i = 0; i < program.reference_count; i++) free(binding.replacements[i]);
+    free(binding.replacements); free(binding.used); free(declaration); free(binary); free(linked_decl);
+    sh_package_shader_program_clear(&program);
+    if (reader) { reader->error = old_error; reader->capacity = old_capacity; }
+    return out;
+}
+
+static unsigned char *sg_bind_source(sh_package_source_reader *reader,
+    const char *family, const char *name, const unsigned char *body, size_t length,
+    sh_package_binding_resolver resolver, void *context,
+    size_t *output_length, sh_package_source_binding *result, char *error, size_t capacity, int observe)
+{
+    sh_decl_source source = {(const char *)body, length};
+    sh_decl_node *tree = NULL;
+    sh_decl_graph *graph = NULL;
+    sh_decl_rebind_result rebound = {0};
+    sh_decl_entity_class_source classes = {reader, sg_read_parent, sg_derives};
+    sh_decl_native_binding_format native_format;
+    sg_binding binding = {0};
+    unsigned char *out = NULL;
+    char *class_name = NULL, fallback[1024];
+    size_t changed = 0, out_length = 0;
+    if (!error || !capacity) { error = fallback; capacity = sizeof(fallback); }
+    error[0] = 0;
+    if (output_length) *output_length = 0;
+    if (result) memset(result, 0, sizeof(*result));
+    if (reader) {
+        reader->failed = 0;
+        memset(&reader->report, 0, sizeof(reader->report));
+    }
+    if (!reader || !family || !name || !body || !resolver || length == SIZE_MAX) goto done;
+    reader->error = error; reader->capacity = capacity; reader->failed = 0;
+    reader->current_type = family; reader->current_name = name;
+    sh_package_references_free(&reader->queue); sh_package_references_free(&reader->paths);
+    binding.reader = reader; binding.resolver = resolver; binding.context = context; binding.family = family;
+    binding.observe = observe;
+    if (!strcmp(family, "renderprog")) {
+        sg_shader_paths paths = {0}; sh_package_shader_program empty = {0};
+        if (reader->shader_configured && sh_package_shader_paths(reader->shader.renderer, name, name,
+            &empty, sg_shader_first_paths, &paths, error, capacity) == SH_PACKAGE_SHADER_OK)
+            out = sh_package_source_shader_bind(reader, name, paths.declaration, body, length,
+                resolver, context, &out_length, error, capacity);
+    } else if (!strcmp(family, "renderprogflag")) {
+        unsigned char *captured = NULL; size_t captured_length = 0;
+        char *path = sg_path(family, name);
+        if (path && sg_shader_flag(reader, name) && sg_read_path(reader, path, &captured, &captured_length) > 0 &&
+            captured_length == length && !memcmp(captured, body, length)) {
+            out = malloc(length + 1);
+            if (out) { memcpy(out, body, length); out[length] = 0; out_length = length; }
+        }
+        free(path); free(captured);
+    } else if (sh_decl_native_binding_family(family, &native_format)) {
+        sh_decl_material_schema material_schema = {reader, sg_material_schema};
+        out = (unsigned char *)sh_decl_native_rebind(native_format, source, &material_schema,
+            sg_bind_native, &binding, &out_length, &changed, error, capacity);
+    } else if (!strcmp(family, "model") || !strcmp(family, "basemodel") || !strcmp(family, "anim") ||
+        !strcmp(family, "discreteanimation") || !strcmp(family, "staticparticlemodel")) {
+        sh_resource_rebind_format format = !strcmp(family, "model") ? SH_REBIND_STATIC_MODEL :
+            !strcmp(family, "basemodel") ? SH_REBIND_MD6_MESH :
+            !strcmp(family, "discreteanimation") ? SH_REBIND_DISCRETE_MODEL :
+            !strcmp(family, "staticparticlemodel") ? SH_REBIND_STATIC_PARTICLE : SH_REBIND_MD6_ANIMATION;
+        out = sh_resource_rebind(format, body, length, sg_bind_native, &binding,
+            &out_length, &changed, error, capacity);
+    } else if (sg_leaf_family(family)) {
+        out = malloc(length + 1);
+        if (out) { memcpy(out, body, length); out[length] = 0; out_length = length; }
+    } else {
+        int is_graph = 0;
+        if (!strcmp(family, "entitydef")) {
+            tree = sh_decl_tree_parse_ordered(source, error, capacity);
+            if (!tree || !(class_name = sh_decl_entity_tree_class(tree, &classes, error, capacity))) goto done;
+            binding.state = (sh_decl_value_type){class_name, ""};
+        } else {
+            if (sh_decl_native_schema_decl_type(reader->schema, family, &binding.state) != 1 ||
+                sh_decl_native_registry_type_class(reader->registry, family, &binding.native_class) != 1 ||
+                (is_graph = sh_decl_native_schema_graph_type(reader->schema, binding.state)) < 0) {
+                snprintf(error, capacity, "%s source requires its registered reader adapter", family); goto done;
+            }
+            if (is_graph) {
+                graph = sh_decl_graph_open(source, error, capacity);
+                if (!graph) goto done;
+            } else {
+                tree = sh_decl_tree_parse_ordered(source, error, capacity);
+                if (!tree) goto done;
+            }
+        }
+        binding.tree = tree; binding.graph = graph;
+        out = (unsigned char *)sh_decl_rebind_parsed(source, graph ? sh_decl_graph_syntax(graph) : tree,
+            sh_decl_native_schema_view(reader->schema), sg_bind_envelope, &binding,
+            sg_bind_typed, &binding, &out_length, &rebound);
+        changed = rebound.changed;
+    }
+done:
+    if (reader && reader->failed) { free(out); out = NULL; }
+    if (!out && !error[0]) snprintf(error, capacity, "%s source bindings could not be completed%s%s",
+        family ? family : "resource", reader && reader->report.first_gap[0] ? ": " : "",
+        reader ? reader->report.first_gap : "");
+    if (result) {
+        result->references = binding.references; result->changed = out ? changed : 0;
+        if (reader) result->inspection = reader->report;
+    }
+    if (output_length && out) *output_length = out_length;
+    free(binding.replacement); free(class_name); sh_decl_tree_free(tree); sh_decl_graph_close(graph);
+    if (reader) { reader->error = NULL; reader->capacity = 0; }
+    return out;
+}
+
+unsigned char *sh_package_source_bind(sh_package_source_reader *reader,
+    const char *family, const char *name, const unsigned char *body, size_t length,
+    sh_package_binding_resolver resolver, void *context,
+    size_t *output_length, sh_package_source_binding *result, char *error, size_t capacity)
+{
+    return sg_bind_source(reader, family, name, body, length, resolver, context,
+        output_length, result, error, capacity, 0);
+}
+
+typedef struct sg_observer { sh_package_binding_resolver visit; void *context; } sg_observer;
+static int sg_observe_only(void *context, const char *slot, const char *family,
+    const char *name, const char **replacement)
+{
+    sg_observer *observer = context;
+    int status = observer->visit(observer->context, slot, family, name, replacement);
+    *replacement = NULL; return status == 0 ? 0 : -1;
+}
+unsigned char *sh_package_source_observe(sh_package_source_reader *reader,
+    const char *family, const char *name, const unsigned char *body, size_t length,
+    sh_package_binding_resolver observer, void *context,
+    size_t *output_length, sh_package_source_binding *result, char *error, size_t capacity)
+{
+    sg_observer walk = {observer, context};
+    return sg_bind_source(reader, family, name, body, length, observer ? sg_observe_only : NULL,
+        &walk, output_length, result, error, capacity, 1);
+}
+
+typedef struct sg_string_binding {
+    sg_binding envelope;
+    const sh_decl_dependency_schema *native;
+    sh_package_string_site_resolver resolver;
+    void *context;
+} sg_string_binding;
+
+static int sg_string_describe(void *context, sh_decl_value_type type, sh_decl_value_shape *shape)
+{
+    sg_string_binding *binding = context;
+    if (!binding->native->describe(binding->native->context, type, shape)) return 0;
+    /* This is a separate observation projection, not a new resource edge.
+     * Require the registered reflected value type; pointers and collection
+     * wrappers retain the native shape and expose only their typed elements. */
+    if (type.name && !strcmp(type.name, "idStrId") && (!type.ops || !*type.ops)) {
+        if (shape->kind != SH_DECL_VALUE_IGNORE ||
+            sh_decl_native_schema_class_derives(binding->envelope.reader->schema,
+                "idStrId", "idStrId") != 1) return 0;
+        shape->kind = SH_DECL_VALUE_REFERENCE;
+    } else if (shape->kind == SH_DECL_VALUE_REFERENCE) shape->kind = SH_DECL_VALUE_IGNORE;
+    return 1;
+}
+static int sg_string_field(void *context, sh_decl_value_type type, const char *key, sh_decl_value_type *out)
+{
+    sg_string_binding *binding = context;
+    return binding->native->field(binding->native->context, type, key, out);
+}
+static int sg_string_dynamic(void *context, sh_decl_value_type base, const char *name,
+    size_t length, sh_decl_value_type *selected)
+{
+    sg_string_binding *binding = context;
+    return binding->native->dynamic_type &&
+        binding->native->dynamic_type(binding->native->context, base, name, length, selected);
+}
+static void sg_string_gap(void *context, const char *path, sh_decl_value_type type, const char *reason)
+{
+    sg_string_binding *binding = context;
+    if (binding->native->gap) binding->native->gap(binding->native->context, path, type, reason);
+}
+static int sg_string_site(void *context, const char *slot, sh_decl_value_type type,
+    const char *key, size_t length, const char **replacement)
+{
+    sg_string_binding *binding = context;
+    int status;
+    /* Some envelope readers directly emit inheritance resource references. */
+    if (!type.name || strcmp(type.name, "idStrId") || (type.ops && *type.ops)) return 0;
+    if (binding->envelope.references == SIZE_MAX) return -1;
+    binding->envelope.references++;
+    status = binding->resolver(binding->context, slot, key, length, replacement);
+    if (status < 0) sg_gap(binding->envelope.reader, slot, type.name, "localized string binding could not be resolved");
+    return status;
+}
+
+unsigned char *sh_package_source_bind_strings(sh_package_source_reader *reader,
+    const char *family, const char *name, const unsigned char *body, size_t length,
+    sh_package_string_site_resolver resolver, void *context,
+    size_t *output_length, sh_package_source_binding *result, char *error, size_t capacity)
+{
+    sh_decl_source source = {(const char *)body, length};
+    sh_decl_node *tree = NULL;
+    sh_decl_graph *graph = NULL;
+    sh_decl_rebind_result rebound = {0};
+    sh_decl_entity_class_source classes = {reader, sg_read_parent, sg_derives};
+    sg_string_binding binding = {0};
+    sh_decl_dependency_schema localized = {&binding, sg_string_describe, sg_string_field,
+        NULL, sg_string_gap, sg_string_dynamic, NULL};
+    unsigned char *out = NULL;
+    char *class_name = NULL, fallback[1024];
+    size_t out_length = 0;
+    if (!error || !capacity) { error = fallback; capacity = sizeof(fallback); }
+    error[0] = 0;
+    if (output_length) *output_length = 0;
+    if (result) memset(result, 0, sizeof(*result));
+    if (!reader || !family || !name || !body || !resolver || length == SIZE_MAX) goto done;
+    reader->failed = 0; memset(&reader->report, 0, sizeof(reader->report));
+    reader->error = error; reader->capacity = capacity;
+    reader->current_type = family; reader->current_name = name;
+    sh_package_references_free(&reader->queue); sh_package_references_free(&reader->paths);
+    binding.envelope.reader = reader; binding.envelope.family = family;
+    binding.native = sh_decl_native_schema_view(reader->schema);
+    binding.resolver = resolver; binding.context = context;
+    if (!strcmp(family, "entitydef")) {
+        tree = sh_decl_tree_parse_ordered(source, error, capacity);
+        if (!tree || !(class_name = sh_decl_entity_tree_class(tree, &classes, error, capacity))) goto done;
+        binding.envelope.state = (sh_decl_value_type){class_name, ""};
+    } else {
+        int is_graph;
+        if (sh_decl_native_schema_decl_type(reader->schema, family, &binding.envelope.state) != 1 ||
+            sh_decl_native_registry_type_class(reader->registry, family, &binding.envelope.native_class) != 1 ||
+            (is_graph = sh_decl_native_schema_graph_type(reader->schema, binding.envelope.state)) < 0) {
+            snprintf(error, capacity, "%s localization requires its registered reflected reader", family); goto done;
+        }
+        if (is_graph) {
+            graph = sh_decl_graph_open(source, error, capacity);
+            if (!graph) goto done;
+        } else {
+            tree = sh_decl_tree_parse_ordered(source, error, capacity);
+            if (!tree) goto done;
+        }
+    }
+    binding.envelope.tree = tree; binding.envelope.graph = graph;
+    out = (unsigned char *)sh_decl_rebind_parsed(source, graph ? sh_decl_graph_syntax(graph) : tree,
+        &localized, sg_bind_envelope, &binding.envelope, sg_string_site, &binding, &out_length, &rebound);
+done:
+    if (reader && reader->failed) { free(out); out = NULL; }
+    if (!out && !error[0]) snprintf(error, capacity, "%s localized string sites could not be completed%s%s",
+        family ? family : "resource", reader && reader->report.first_gap[0] ? ": " : "",
+        reader ? reader->report.first_gap : "");
+    if (result) {
+        result->references = binding.envelope.references; result->changed = out ? rebound.changed : 0;
+        if (reader) result->inspection = reader->report;
+    }
+    if (out && output_length) *output_length = out_length;
+    free(class_name); sh_decl_tree_free(tree); sh_decl_graph_close(graph);
+    if (reader) { reader->error = NULL; reader->capacity = 0; }
+    return out;
+}
+
+unsigned char *sh_package_source_bind_derived(sh_package_source_reader *reader,
+    const char *family, const char *name, const unsigned char *body, size_t length,
+    sh_package_binding_resolver resolver, void *context,
+    sh_package_bound_exists exists, void *exists_context,
+    size_t *output_length, sh_package_source_binding *result, char *error, size_t capacity)
+{
+    if (!reader) return sh_package_source_bind(reader, family, name, body, length,
+        resolver, context, output_length, result, error, capacity);
+    sh_package_bound_exists previous = reader->bound_exists;
+    void *previous_context = reader->bound_context;
+    reader->bound_exists = exists; reader->bound_context = exists_context;
+    unsigned char *out = sh_package_source_bind(reader, family, name, body, length,
+        resolver, context, output_length, result, error, capacity);
+    reader->bound_exists = previous; reader->bound_context = previous_context;
+    return out;
+}
+
+typedef struct sg_map_binding {
+    sg_binding binding;
+    const char *json;
+    size_t length;
+    const sh_decl_dependency_schema *view;
+    sh_decl_dependency_result *result;
+    sh_package_binding_resolver legacy;
+    sh_package_map_binding_resolver occurrence;
+    sh_package_map_binding_resolver observed;
+    void *context;
+    sh_map_binding_span *spans;
+    size_t span_count, span_capacity, located;
+    sh_package_provenance_site inherit_site, reference_site;
+    int collecting;
+} sg_map_binding;
+
+static int sg_map_span_order(const void *left, const void *right)
+{
+    const sh_map_binding_span *a = left, *b = right;
+    uintptr_t ap = (uintptr_t)a->json, bp = (uintptr_t)b->json;
+    if (ap != bp) return ap < bp ? -1 : 1;
+    return a->length < b->length ? -1 : a->length > b->length;
+}
+static int sg_map_span_add(sg_map_binding *map, const char *json, size_t length)
+{
+    if (map->span_count == map->span_capacity) {
+        size_t capacity = map->span_capacity ? map->span_capacity * 2 : 32;
+        if (capacity < map->span_capacity || capacity > SIZE_MAX / sizeof(*map->spans)) return 0;
+        sh_map_binding_span *grown = realloc(map->spans, capacity * sizeof(*grown));
+        if (!grown) return 0;
+        map->spans = grown; map->span_capacity = capacity;
+    }
+    map->spans[map->span_count++] = (sh_map_binding_span){json, length}; return 1;
+}
+static const sh_package_provenance_site *sg_map_span_find(sg_map_binding *map, const char *json, size_t length)
+{
+    sh_map_binding_span needle = {json, length};
+    sh_map_binding_span *span = bsearch(&needle, map->spans, map->located, sizeof(*map->spans), sg_map_span_order);
+    return span ? &span->site : NULL;
+}
+static int sg_map_locate(sg_map_binding *map)
+{
+    size_t count = 0;
+    qsort(map->spans, map->span_count, sizeof(*map->spans), sg_map_span_order);
+    for (size_t i = 0; i < map->span_count; i++) {
+        if (count && !sg_map_span_order(map->spans + count - 1, map->spans + i))
+            sh_map_binding_sites_clear(map->spans + i, 1);
+        else map->spans[count++] = map->spans[i];
+    }
+    map->span_count = count;
+    if (!sh_map_binding_sites_locate(map->json, map->length, map->spans, count,
+        map->binding.reader->error, map->binding.reader->capacity)) return 0;
+    map->located = count; return 1;
+}
+static int sg_map_collect_root(void *context, const char *native_class, const char *family,
+    const char *name, const char *json, size_t length)
+{
+    (void)native_class; (void)family; (void)name;
+    return sg_map_span_add(context, json, length);
+}
+static int sg_map_collect_state(void *context, const char *native_class, const char *inherit,
+    const char *json, size_t length)
+{
+    (void)native_class; (void)inherit;
+    return sg_map_span_add(context, json, length);
+}
+static int sg_map_resolve(void *context, const char *slot, const char *family,
+    const char *name, const char **replacement)
+{
+    sg_map_binding *map = context;
+    if (map->legacy) return map->legacy(map->context, slot, family, name, replacement);
+    const sh_package_provenance_site *site = map->reference_site.owner ? &map->reference_site :
+        map->inherit_site.owner ? &map->inherit_site : NULL;
+    return map->occurrence(map->context, site, family, name, replacement);
+}
+static int sg_map_observe(void *context, const char *slot, const char *family,
+    const char *name, const char **replacement)
+{
+    sg_map_binding *map = context;
+    /* Only sg_bind_typed's final source value calls this route. Metadata,
+     * inherited class and parent reads keep the lookup-only resolver. */
+    if (map->observed && !map->collecting && map->reference_site.owner)
+        return map->observed(map->context, &map->reference_site, family, name, replacement);
+    return sg_map_resolve(context, slot, family, name, replacement);
+}
+static int sg_map_typed_site(void *context, const char *slot, sh_decl_value_type type,
+    const char *name, size_t length, const sh_decl_reference_site *site, const char **replacement)
+{
+    sg_map_binding *map = context;
+    if (map->collecting) return site && !site->node && site->json &&
+        sg_map_span_add(map, site->json, site->json_length) ? 0 : -1;
+    const sh_package_provenance_site *location = site ? sg_map_span_find(map, site->json, site->json_length) : NULL;
+    if (!location) return -1;
+    map->reference_site = *location;
+    int ok = sg_bind_typed(&map->binding, slot, type, name, length, replacement);
+    memset(&map->reference_site, 0, sizeof(map->reference_site)); return ok;
+}
+
+static int sg_map_root(void *context, const char *native_class, const char *family,
+    const char *name, const char *json, size_t length)
+{
+    sg_map_binding *map = context;
+    sh_decl_value_type type = {native_class, "*"};
+    sh_decl_reference_site site = {NULL, json, length};
+    const sh_decl_dependency_schema *view = map->view;
+    (void)family;
+    const sh_package_provenance_site *location = sg_map_span_find(map, json, length);
+    if (!location) return 0;
+    map->inherit_site = *location;
+    if (!view->reference(view->context, "map/root", type, name, strlen(name)) ||
+        !view->reference_site(view->context, "map/root", type, name, strlen(name), &site)) return 0;
+    if (map->result->references == SIZE_MAX) return 0;
+    map->result->references++; return 1;
+}
+
+static int sg_map_inline(void *context, const char *class_name, const char *inherit,
+    const char *json, size_t length)
+{
+    sg_map_binding *map = context;
+    sg_walk *reader = map->binding.reader;
+    sh_decl_source parent = {0};
+    sh_decl_entity_class_source classes = {reader, sg_read_parent, sg_derives};
+    sh_decl_dependency_result result = {0};
+    char *inherited = NULL, *inherit_path = NULL;
+    int ok = 0;
+    /* The usage reader supplies state.edit inside an idDeclEntityDef envelope.
+     * Its inherit member belongs to that same envelope, irrespective of native
+     * IDs or where the envelope is nested in the serialized document. */
+    const sh_package_provenance_site *location = sg_map_span_find(map, json, length);
+    static const char suffix[] = "/k:state/k:edit";
+    if (!location) goto done;
+    size_t path_length = strlen(location->reference), suffix_length = sizeof(suffix) - 1;
+    if (path_length < suffix_length || strcmp(location->reference + path_length - suffix_length, suffix)) goto done;
+    inherit_path = malloc(path_length + 1);
+    if (!inherit_path) goto done;
+    memcpy(inherit_path, location->reference, path_length - suffix_length);
+    memcpy(inherit_path + path_length - suffix_length, "/k:inherit", sizeof("/k:inherit"));
+    map->inherit_site = *location; map->inherit_site.reference = inherit_path;
+    if (!class_name || !*class_name) {
+        if (!inherit || !*inherit || sg_read_parent(reader, inherit, &parent) != 1 ||
+            !(inherited = sh_decl_entity_class(parent, &classes, reader->error, reader->capacity))) goto done;
+        class_name = inherited;
+    }
+    ok = sh_decl_json_state_dependencies(json, length, (sh_decl_value_type){class_name, ""}, map->view, &result);
+    if (result.visited > SIZE_MAX - map->result->visited ||
+        result.references > SIZE_MAX - map->result->references || result.gaps > SIZE_MAX - map->result->gaps) ok = 0;
+    else {
+        map->result->visited += result.visited; map->result->references += result.references;
+        map->result->gaps += result.gaps; map->result->aborted |= result.aborted;
+    }
+done:
+    memset(&map->inherit_site, 0, sizeof(map->inherit_site));
+    free(inherit_path); free((void *)parent.text); free(inherited); return ok;
+}
+
+static int sg_map_walk(void *context, const sh_decl_dependency_schema *view, sh_decl_dependency_result *result)
+{
+    sg_map_binding *map = context;
+    map->view = view; map->result = result;
+    return sh_package_map_reference_sites(map->json, map->length, sg_map_root, map) &&
+        sh_package_map_state_sites(map->json, map->length, sg_map_inline, map);
+}
+
+static char *sg_bind_map(sh_package_source_reader *reader,
+    const char *json, size_t length, sh_package_binding_resolver legacy,
+    sh_package_map_binding_resolver occurrence, sh_package_map_binding_resolver observed, void *context,
+    size_t *output_length, sh_package_source_binding *result, char *error, size_t capacity)
+{
+    sg_map_binding map = {0}; sh_decl_rebind_result rebound = {0};
+    char *out = NULL, fallback[1024]; size_t out_length = 0;
+    if (!error || !capacity) { error = fallback; capacity = sizeof(fallback); }
+    *error = 0;
+    if (output_length) *output_length = 0;
+    if (result) memset(result, 0, sizeof(*result));
+    if (!reader || !json || (!legacy && !occurrence)) return NULL;
+    reader->failed = 0; reader->error = error; reader->capacity = capacity;
+    memset(&reader->report, 0, sizeof(reader->report));
+    reader->current_type = "map"; reader->current_name = "bindings";
+    reader->saved_binding = sg_map_resolve; reader->saved_context = &map;
+    map.binding.reader = reader; map.binding.resolver = sg_map_observe; map.binding.context = &map;
+    map.legacy = legacy; map.occurrence = occurrence; map.observed = observed; map.context = context;
+    map.json = json; map.length = length;
+    if (!sh_package_map_reference_sites(json, length, sg_map_collect_root, &map) ||
+        !sh_package_map_state_sites(json, length, sg_map_collect_state, &map) || !sg_map_locate(&map)) goto done;
+    /* Reflection determines which value spans are resources. Locate that exact
+     * set before binding, so equal names in two objects never share ownership.
+     * The collect pass does not use existence checks to choose native objects. */
+    map.collecting = 1;
+    out = sh_decl_rebind_json_walk_sites((sh_decl_source){json, length}, sh_decl_native_schema_view(reader->schema),
+        sg_map_walk, &map, sg_map_typed_site, &map, &out_length, &rebound);
+    if (!out) goto done;
+    free(out); out = NULL; map.collecting = 0;
+    memset(&map.inherit_site, 0, sizeof(map.inherit_site));
+    if (!sg_map_locate(&map)) goto done;
+    out = sh_decl_rebind_json_walk_sites((sh_decl_source){json, length}, sh_decl_native_schema_view(reader->schema),
+        sg_map_walk, &map, sg_map_typed_site, &map, &out_length, &rebound);
+done:
+    if (reader->failed) { free(out); out = NULL; }
+    if (!out && !*error) snprintf(error, capacity, "typed map bindings could not be completed%s%s",
+        reader->report.first_gap[0] ? ": " : "", reader->report.first_gap);
+    if (output_length && out) *output_length = out_length;
+    if (result) {
+        result->references = map.binding.references; result->changed = out ? rebound.changed : 0;
+        result->inspection = reader->report;
+    }
+    free(map.binding.replacement);
+    sh_map_binding_sites_clear(map.spans, map.span_count); free(map.spans);
+    reader->saved_binding = NULL; reader->saved_context = NULL;
+    reader->error = NULL; reader->capacity = 0; return out;
+}
+
+char *sh_package_source_bind_map(sh_package_source_reader *reader,
+    const char *json, size_t length, sh_package_binding_resolver resolver, void *context,
+    size_t *output_length, sh_package_source_binding *result, char *error, size_t capacity)
+{ return sg_bind_map(reader, json, length, resolver, NULL, NULL, context, output_length, result, error, capacity); }
+
+char *sh_package_source_bind_map_sites(sh_package_source_reader *reader,
+    const char *json, size_t length, sh_package_map_binding_resolver resolver, void *context,
+    size_t *output_length, sh_package_source_binding *result, char *error, size_t capacity)
+{ return sg_bind_map(reader, json, length, NULL, resolver, resolver, context, output_length, result, error, capacity); }
+
+char *sh_package_source_bind_map_sites_observed(sh_package_source_reader *reader,
+    const char *json, size_t length, sh_package_map_binding_resolver lookup,
+    sh_package_map_binding_resolver observe, void *context, size_t *output_length,
+    sh_package_source_binding *result, char *error, size_t capacity)
+{ return sg_bind_map(reader, json, length, NULL, lookup, observe, context, output_length, result, error, capacity); }
+
+int sh_package_source_graph_with_contracts(const sh_package_compilation *compiled,
+    const sh_resource_catalog *catalog, sh_package_baseline_reader original,
+    void *original_context, sh_decl_registry_source registry, uintptr_t reflection,
+    const sh_package_source_shader *shader, const sh_package_source_audio *audio,
     const char *json, size_t length, sh_package_references *out,
     sh_package_source_graph_report *report, char *error, size_t capacity)
 {
@@ -586,8 +1719,10 @@ int sh_package_source_graph(const sh_package_compilation *compiled,
     walk.compiled = compiled; walk.catalog = catalog; walk.original = original;
     walk.original_context = original_context; walk.native = registry;
     walk.error = error; walk.capacity = capacity;
+    if (shader && !sh_package_source_reader_shader(&walk, shader)) goto done;
+    if (audio && !sh_package_source_reader_audio(&walk, audio)) goto done;
     candidate = (sh_decl_registry_source){&walk, sg_native_read, registry.registry, sg_exists};
-    metadata = (sh_decl_native_source){&walk, sg_native_read, reflection};
+    metadata = (sh_decl_native_source){&walk, sg_native_read, reflection, registry.scripts};
     observer = (sh_decl_dependency_observer){&walk, sg_reference, sg_field_gap};
     walk.registry = sh_decl_native_registry_open(candidate, error, capacity);
     walk.schema = sh_decl_native_schema_open(metadata, observer, error, capacity);
@@ -608,6 +1743,27 @@ done:
     if (!ok && !error[0]) snprintf(error, capacity, "candidate source dependency inspection failed");
     if (report) *report = walk.report;
     sh_package_references_free(&walk.paths); sh_package_references_free(&walk.queue);
-    sh_package_audio_close(walk.audio);
+    sh_package_audio_close(walk.audio); sh_package_audio_scope_close(walk.audio_scope);
+    sg_shader_clear(&walk);
     sh_decl_native_registry_close(walk.registry); sh_decl_native_schema_close(walk.schema); return ok;
+}
+
+int sh_package_source_graph_with_shader(const sh_package_compilation *compiled,
+    const sh_resource_catalog *catalog, sh_package_baseline_reader original,
+    void *original_context, sh_decl_registry_source registry, uintptr_t reflection,
+    const sh_package_source_shader *shader, const char *json, size_t length,
+    sh_package_references *out, sh_package_source_graph_report *report, char *error, size_t capacity)
+{
+    return sh_package_source_graph_with_contracts(compiled, catalog, original, original_context,
+        registry, reflection, shader, NULL, json, length, out, report, error, capacity);
+}
+
+int sh_package_source_graph(const sh_package_compilation *compiled,
+    const sh_resource_catalog *catalog, sh_package_baseline_reader original,
+    void *original_context, sh_decl_registry_source registry, uintptr_t reflection,
+    const char *json, size_t length, sh_package_references *out,
+    sh_package_source_graph_report *report, char *error, size_t capacity)
+{
+    return sh_package_source_graph_with_shader(compiled, catalog, original, original_context,
+        registry, reflection, NULL, json, length, out, report, error, capacity);
 }

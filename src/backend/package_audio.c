@@ -37,25 +37,14 @@ static const char *pa_filename(const char *path, const char *suffix)
     name = strrchr(path, '/') + 1; length = strlen(name);
     return length > 4 && !strcmp(name + length - 4, suffix) ? name : NULL;
 }
+int sh_package_audio_path_kind(const char *path)
+{ return pa_filename(path, ".bnk") ? 1 : pa_filename(path, ".wem") ? 2 : 0; }
 
 static int pa_identity(const sh_package_compilation *compiled,
     const sh_compiled_resource *resource, sh_package_file_identity *out,
     char *error, size_t capacity)
 {
-    memset(out, 0, sizeof(*out));
-    if (resource->body || resource->cache_file) {
-        if (resource->body ? sh_package_bytes_identity(resource->body, resource->body_length, out)
-                           : sh_package_file_get_identity(resource->cache_file, out)) return 1;
-        snprintf(error, capacity, "audio dependency index allocation failed"); return 0;
-    }
-    if (!compiled->sources || !compiled->sources->files ||
-        resource->source >= compiled->sources->file_count) {
-        snprintf(error, capacity, "%s: audio resource has no captured source", resource->engine_path);
-        return 0;
-    }
-    out->length = compiled->sources->files[resource->source].length;
-    memcpy(out->digest, compiled->sources->files[resource->source].digest, sizeof(out->digest));
-    return 1;
+    return sh_package_compilation_identity(compiled, resource, out, error, capacity);
 }
 
 static int pa_contributed(const sh_compiled_resource *resource)
@@ -241,4 +230,254 @@ size_t sh_package_audio_find(const sh_package_audio *audio, uint32_t event,
     while (end < audio->event_count && audio->events[end].event == event) end++;
     if (end != low) *references = audio->events + low;
     return end - low;
+}
+
+typedef struct pa_effective_bank {
+    const char *path;
+    const sh_audio_bank *metadata;
+    int original;
+    const sh_audio_identity_span *spans;
+    size_t span_count;
+} pa_effective_bank;
+typedef struct pa_scope_ref { uint32_t id; unsigned domain, definition, required; size_t bank; } pa_scope_ref;
+struct sh_package_audio_scope {
+    sh_package_audio *candidate;
+    sh_audio_originals *originals;
+    pa_effective_bank *banks;
+    const sh_audio_bank **metadata;
+    size_t count;
+    pa_scope_ref *refs;
+    size_t ref_count;
+    int refs_ready;
+};
+void sh_package_audio_scope_close(sh_package_audio_scope *scope)
+{
+    if (!scope) return;
+    sh_package_audio_close(scope->candidate); free(scope->banks); free(scope->metadata); free(scope->refs); free(scope);
+}
+static int pa_scope_bank(sh_package_audio_scope *scope, const char *filename,
+    const sh_audio_original_bank *originals, size_t original_count, char *error, size_t capacity)
+{
+    char *paths[2] = {0}; pa_effective_bank selected = {0};
+    if (!sh_audio_originals_paths(scope->originals, filename, paths, paths + 1)) return 0;
+    for (size_t p = 0; p < 2 && !selected.path; p++) {
+        for (size_t i = 0; i < scope->candidate->count; i++) {
+            pa_bank *bank = scope->candidate->banks + i;
+            if (!strcmp(bank->path, paths[p])) { selected = (pa_effective_bank){bank->path, &bank->bank, 0}; break; }
+        }
+        for (size_t i = 0; i < original_count && !selected.path; i++)
+            if (!strcmp(originals[i].path, paths[p]))
+                selected = (pa_effective_bank){originals[i].path, &originals[i].metadata, 1};
+    }
+    free(paths[0]); free(paths[1]);
+    if (!selected.path) return 1; /* another locale is retained in its delivery */
+    for (size_t i = 0; i < scope->count; i++) if (scope->banks[i].metadata->id == selected.metadata->id) {
+        if (!strcmp(scope->banks[i].path, selected.path)) return 1;
+        if (error && capacity) snprintf(error, capacity, "audio bank %u has multiple native lookup names", selected.metadata->id);
+        return 0;
+    }
+    scope->banks[scope->count] = selected; scope->metadata[scope->count++] = selected.metadata; return 1;
+}
+sh_package_audio_scope *sh_package_audio_scope_open(const sh_package_compilation *compiled,
+    sh_audio_originals *originals, char *error, size_t capacity)
+{
+    sh_package_audio_scope *scope = calloc(1, sizeof(*scope));
+    const sh_audio_original_bank *banks = NULL; size_t count = 0, total;
+    sh_package_audio_report report = {0};
+    if (error && capacity) *error = 0;
+    if (!scope) goto failed;
+    scope->originals = originals;
+    scope->candidate = sh_package_audio_open(compiled, &report, error, capacity);
+    if (!scope->candidate) goto failed;
+    if (report.invalid) { if (error && capacity) snprintf(error, capacity, "%s", report.first_gap); goto failed; }
+    if (sh_audio_originals_banks(originals, &banks, &count, error, capacity) != 1) goto failed;
+    if (scope->candidate->count > SIZE_MAX - count) goto failed;
+    total = scope->candidate->count + count;
+    if (total > SIZE_MAX / sizeof(*scope->banks) || total > SIZE_MAX / sizeof(*scope->metadata)) goto failed;
+    scope->banks = calloc(total ? total : 1, sizeof(*scope->banks));
+    scope->metadata = calloc(total ? total : 1, sizeof(*scope->metadata));
+    if (!scope->banks || !scope->metadata) goto failed;
+    for (size_t i = 0; i < count; i++)
+        if (!pa_scope_bank(scope, banks[i].filename, banks, count, error, capacity)) goto failed;
+    for (size_t i = 0; i < scope->candidate->count; i++)
+        if (!pa_scope_bank(scope, scope->candidate->banks[i].filename, banks, count, error, capacity)) goto failed;
+    return scope;
+failed:
+    if (error && capacity && !*error) snprintf(error, capacity, "cannot capture audio source scope");
+    sh_package_audio_scope_close(scope); return NULL;
+}
+int sh_package_audio_scope_media(sh_package_audio_scope *scope, uint32_t id,
+    sh_package_audio_path_visit visit, void *context, char *error, size_t capacity)
+{
+    char name[32], *paths[2] = {0}; int result = -1;
+    if (error && capacity) *error = 0;
+    if (!scope || !id || !visit) goto done;
+    snprintf(name, sizeof(name), "%u.wem", id);
+    if (!sh_audio_originals_paths(scope->originals, name, paths, paths + 1)) goto done;
+    const sh_package_audio_media *media = NULL;
+    size_t media_count = sh_package_audio_find_media(scope->candidate, id, &media);
+    for (size_t p = 0; p < 2; p++) {
+        for (size_t i = 0; i < media_count; i++)
+            if (!strcmp(media[i].path, paths[p])) {
+                result = visit(context, media[i].path, 0) ? 1 : -1; goto done;
+            }
+        int present = sh_audio_originals_read(scope->originals, paths[p], 0, NULL, 0, NULL, error, capacity);
+        if (present < 0) goto done;
+        if (present) { result = visit(context, paths[p], 1) ? 1 : -1; goto done; }
+    }
+    result = 0;
+done:
+    if (result < 0 && error && capacity && !*error) snprintf(error, capacity, "cannot retain audio media %u dependency", id);
+    free(paths[0]); free(paths[1]); return result;
+}
+static int pa_candidate(void *context, const char *path, int original)
+{ (void)path; *(int *)context = !original; return 1; }
+static int pa_ref_order(const void *left, const void *right)
+{
+    const pa_scope_ref *a = left, *b = right;
+    if (a->domain != b->domain) return a->domain < b->domain ? -1 : 1;
+    return a->id < b->id ? -1 : a->id != b->id;
+}
+static int pa_scope_links(sh_package_audio_scope *scope, unsigned char *selected,int reverse)
+{
+    if (!scope->refs_ready) {
+        size_t count = 0;
+        for (size_t b = 0; b < scope->count; b++) {
+            if (scope->banks[b].span_count > SIZE_MAX - count) return 0;
+            count += scope->banks[b].span_count;
+        }
+        if (count > SIZE_MAX / sizeof(*scope->refs)) return 0;
+        pa_scope_ref *refs = calloc(count ? count : 1, sizeof(*refs)); if (!refs) return 0;
+        size_t at = 0;
+        for (size_t b = 0; b < scope->count; b++) for (size_t i = 0; i < scope->banks[b].span_count; i++) {
+            const sh_audio_identity_span *span = scope->banks[b].spans + i;
+            if (!span->value || span->domain > SH_AUDIO_ID_BANK || (span->flags & (SH_AUDIO_ID_SHARED | SH_AUDIO_ID_LITERAL))) continue;
+            unsigned definition=!!(span->flags & SH_AUDIO_ID_DEFINITION);
+            refs[at++] = (pa_scope_ref){span->value, span->domain, definition,
+                !definition && !(span->flags & SH_AUDIO_ID_OPTIONAL) && span->domain<SH_AUDIO_ID_MEDIA,b};
+        }
+        qsort(refs, at, sizeof(*refs), pa_ref_order);
+        free(scope->refs); scope->refs = refs; scope->ref_count = at; scope->refs_ready = 1;
+    }
+    /* A changed definition can be used by events in a different bank. Include
+     * every such consumer (and duplicate definition recipe) before forward
+     * closure. Exact event comparison later removes conservative nominations. */
+    for (int changed = 1; changed;) {
+        changed = 0;
+        for (size_t first = 0; first < scope->ref_count;) {
+            size_t end = first + 1,provider=SIZE_MAX; int affected = 0,required=0,provided=0;
+            while (end < scope->ref_count && !pa_ref_order(scope->refs + first, scope->refs + end)) end++;
+            for (size_t i = first; i < end; i++) {
+                if(scope->refs[i].definition && scope->refs[i].bank<provider)provider=scope->refs[i].bank;
+                if(selected[scope->refs[i].bank]) {
+                    provided|=scope->refs[i].definition;
+                    affected|=reverse && scope->refs[i].definition;required|=scope->refs[i].required;
+                }
+            }
+            /* A satisfied forward lookup does not load every dormant duplicate
+             * definition in the game. Otherwise choose the first scoped native
+             * provider, as the existing resident-media closure does. */
+            if(required && !provided && provider!=SIZE_MAX){selected[provider]=1;changed=1;}
+            for (size_t i = first; i < end; i++) if (affected &&
+                !selected[scope->refs[i].bank]) {
+                selected[scope->refs[i].bank] = 1; changed = 1;
+            }
+            first = end;
+        }
+    }
+    return 1;
+}
+static int pa_scope_select(sh_package_audio_scope *scope, const uint32_t *events, size_t count, int inventory,
+    const uint32_t *roots, size_t root_count,
+    sh_package_audio_path_visit visit, void *context, char *error, size_t capacity)
+{
+    unsigned char *selected = NULL; int ok = 0;
+    if (error && capacity) *error = 0;
+    if (!scope || (count && !events) || (root_count && !roots) || !visit) goto done;
+    for (size_t i = 0; i < count; i++) if (!events[i]) goto done;
+    selected = calloc(scope->count ? scope->count : 1, 1); if (!selected) goto done;
+    for(size_t r=0;r<root_count;r++) {
+        size_t b=0;while(b<scope->count && scope->banks[b].metadata->id!=roots[r])b++;
+        if(!roots[r] || b==scope->count) {
+            if(error && capacity)snprintf(error,capacity,"audio bank %u is absent from its source scope",roots[r]);
+            goto done;
+        }
+        selected[b]=1;
+    }
+    if (inventory) for (size_t i = 0; i < scope->count; i++) {
+        const pa_effective_bank *bank = scope->banks + i;
+        selected[i] = !bank->original;
+        for (size_t m = 0; !selected[i] && m < bank->metadata->media_count; m++) {
+            uint32_t id = bank->metadata->media[m].id;
+            const sh_package_audio_media *candidate = NULL;
+            if (!sh_package_audio_find_media(scope->candidate, id, &candidate)) continue;
+            int authored = 0;
+            int found = sh_package_audio_scope_media(scope, id, pa_candidate, &authored, error, capacity);
+            if (found < 0) goto done;
+            selected[i] = found && authored;
+        }
+    }
+    /* Light bank/media closure and typed object closure can each add roots the
+     * other needs. Iterate both to a fixed point; optional object lookups never
+     * pull in a definition merely because it exists in an unrelated bank. */
+    for(;;) {
+        size_t before=0,after=0;for(size_t i=0;i<scope->count;i++)before+=!!selected[i];
+        if(!pa_scope_links(scope,selected,inventory) ||
+            !sh_audio_bank_closure(scope->metadata, scope->count, events, count, 1, selected, NULL, error, capacity))goto done;
+        for(size_t i=0;i<scope->count;i++)after+=!!selected[i];if(before==after)break;
+    }
+    for (size_t i = 0; i < scope->count; i++) if (selected[i]) {
+        const pa_effective_bank *bank = scope->banks + i;
+        if (!visit(context, bank->path, bank->original)) goto done;
+        for (size_t m = 0; m < bank->metadata->media_count; m++)
+            if (bank->metadata->media[m].stream && sh_package_audio_scope_media(scope, bank->metadata->media[m].id,
+                visit, context, error, capacity) != 1) {
+                if (error && capacity && !*error) snprintf(error, capacity,
+                    "audio media %u is absent from its source scope", bank->metadata->media[m].id);
+                goto done;
+            }
+    }
+    ok = 1;
+done:
+    free(selected);
+    if (!ok && error && capacity && !*error) snprintf(error, capacity, "cannot resolve audio source dependencies");
+    return ok;
+}
+int sh_package_audio_scope_events(sh_package_audio_scope *scope, const uint32_t *events, size_t count,
+    sh_package_audio_path_visit visit, void *context, char *error, size_t capacity)
+{ return pa_scope_select(scope, events, count, 0, NULL, 0, visit, context, error, capacity); }
+int sh_package_audio_scope_inventory(sh_package_audio_scope *scope, const uint32_t *events, size_t count,
+    sh_package_audio_path_visit visit, void *context, char *error, size_t capacity)
+{ return pa_scope_select(scope, events, count, 1, NULL, 0, visit, context, error, capacity); }
+int sh_package_audio_scope_roots(sh_package_audio_scope *scope,const uint32_t *banks,size_t count,
+    sh_package_audio_path_visit visit,void *context,char *error,size_t capacity)
+{ return pa_scope_select(scope,NULL,0,0,banks,count,visit,context,error,capacity); }
+int sh_package_audio_scope_banks(sh_package_audio_scope *scope,
+    sh_package_audio_path_visit visit, void *context)
+{
+    if (!scope || !visit) return 0;
+    for (size_t i = 0; i < scope->count; i++)
+        if (!visit(context, scope->banks[i].path, scope->banks[i].original)) return 0;
+    return 1;
+}
+int sh_package_audio_scope_event(sh_package_audio_scope *scope, uint32_t event,
+    sh_package_audio_path_visit visit, void *context, char *error, size_t capacity)
+{ return sh_package_audio_scope_events(scope, &event, 1, visit, context, error, capacity); }
+int sh_package_audio_scope_refine(sh_package_audio_scope *scope, const char *path, const sh_audio_bank *metadata)
+{
+    if (!scope || !path || !metadata) return 0;
+    for (size_t i = 0; i < scope->count; i++) if (!strcmp(scope->banks[i].path, path)) {
+        if (metadata->id != scope->banks[i].metadata->id || metadata->language != scope->banks[i].metadata->language) return 0;
+        scope->banks[i].metadata = scope->metadata[i] = metadata; return 1;
+    }
+    return 0;
+}
+int sh_package_audio_scope_references(sh_package_audio_scope *scope, const char *path,
+    const sh_audio_identity_span *spans, size_t count)
+{
+    if (!scope || !path || (count && !spans)) return 0;
+    for (size_t i = 0; i < scope->count; i++) if (!strcmp(scope->banks[i].path, path)) {
+        scope->banks[i].spans = spans; scope->banks[i].span_count = count; scope->refs_ready = 0; return 1;
+    }
+    return 0;
 }

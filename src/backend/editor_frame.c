@@ -4,9 +4,9 @@
  * engine's calling convention. We add nothing to the frame except a bounded check on most frames,
  * and, on the one frame a request is serviced, a single engine call.
  *
- * ORDER: the engine's own Think runs FIRST, unconditionally, and our work runs after it returns.
- * That is the whole point of the file -- servicing before it would put our call ahead of the state
- * the frame is about to establish, which is the nested-context mistake this exists to avoid.
+ * Explicit map entry runs before Think emits renderer output, under the verified
+ * transition owner. Saves run after Think so they serialize settled editor state.
+ * The native Think still executes exactly once on every admitted frame.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -19,6 +19,8 @@
 #include "backend_log.h"
 #include "engine_globals.h"
 #include "rawmap.h"       /* sh_rawmap_source_ok + the arm the reload brackets its own call with */
+#include "editor_transition.h"
+#include "prefab_import.h"
 
 /* EditorFrame prologue steal window. The signature's own 33 bytes, every one of them whole and
  * position-independent (register/rsp/rbp only; no RIP-relative operand and no relative branch), so
@@ -53,6 +55,7 @@ static uintptr_t       g_editor_obj  = 0;
 
 static volatile LONG  g_faulted   = 0;
 static volatile LONG  g_pending   = 0;      /* 1 = a reload is queued for the next good frame */
+static volatile LONG  g_reload_waiting = 0; /* Native entry or its retained installation owns this request. */
 static volatile LONG  g_save_pending = 0;
 static SRWLOCK g_save_lock = SRWLOCK_INIT;
 typedef struct ef_save_request {
@@ -325,7 +328,16 @@ typedef struct ef_idstr {
     unsigned char pad2[0x30 - 0x18];
 } ef_idstr;
 
-/* Run the queued reload. Called from the frame hook only, after the engine's own Think returned. */
+static void ef_reload_completed(void *context, int loaded)
+{
+    (void)context;
+    InterlockedExchange(&g_reload_waiting, 0);
+    InterlockedExchange(&g_state, loaded ? SH_RELOAD_DONE : SH_RELOAD_FAILED);
+    ef_set_msg(loaded ? "the map was reloaded" : "the map load was canceled or could not finish");
+    backend_log(loaded ? "EF: retained reload completed" : "EF: retained reload canceled or failed");
+}
+
+/* Run the queued reload before Think emits output for the outgoing map. */
 static void ef_service_reload(void *editor)
 {
     ef_idstr s;
@@ -333,8 +345,10 @@ static void ef_service_reload(void *editor)
     char reason[128];
     int rc = 0;
     int prev_armed;
+    unsigned long before;
     char line[256];
 
+    if (InterlockedCompareExchange(&g_reload_waiting, 0, 0)) return;
     if (!ef_editor_live_with_map(editor, &why)) return;   /* stay pending; try again next frame */
 
     /* Re-check the SOURCE on the frame, not the arm. The request may have sat in the queue while the
@@ -354,6 +368,7 @@ static void ef_service_reload(void *editor)
     s.data = g_reload_id;
     s.len  = (int)strlen(g_reload_id);
 
+    InterlockedExchange(&g_reload_waiting, 1);
     InterlockedExchange(&g_pending, 0);   /* consume before the call: never retry a call that faults */
 
     /* THE ARM WINDOW. The swap is armed for the duration of this one LoadMap call and put back
@@ -369,10 +384,12 @@ static void ef_service_reload(void *editor)
     prev_armed = sh_rawmap_swap_is_armed();
     if (!prev_armed) sh_rawmap_swap_arm(1);
 
+    before = sh_rawmap_load_generation();
     __try {
         rc = g_load_map(editor, &s);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         if (!prev_armed) sh_rawmap_swap_arm(0);
+        InterlockedExchange(&g_reload_waiting, 0);
         InterlockedExchange(&g_faulted, 1);
         InterlockedExchange(&g_state, SH_RELOAD_FAILED);
         ef_set_msg("the reload faulted; the frame hook is off for this session");
@@ -382,14 +399,20 @@ static void ef_service_reload(void *editor)
 
     if (!prev_armed) sh_rawmap_swap_arm(0);
 
-    /* LoadMap returns 0 on the success path (it returns 9 when the editor asked to deactivate
-     * mid-load, and passes its inner loader's code through otherwise). */
-    if (rc == 0) {
-        InterlockedExchange(&g_state, SH_RELOAD_DONE);
-        ef_set_msg("the map was reloaded");
+    /* Package consent can retain the original request after native entry
+     * returns zero. Keep the status pending and the caller occupied until that
+     * exact request completes; another frame must not issue the load again. */
+    if (rc == 0 && sh_rawmap_observe_saved_load(editor, s.data, ef_reload_completed, NULL)) {
+        ef_set_msg("waiting for the map's package installation and load to finish");
+        backend_log("EF: reload retained through package installation");
+        return;
+    }
+    if (rc == 0 && sh_rawmap_load_generation() != before) {
+        ef_reload_completed(NULL, 1);
     } else {
-        InterlockedExchange(&g_state, SH_RELOAD_FAILED);
-        _snprintf_s(line, sizeof line, _TRUNCATE, "the engine refused the reload (code %d)", rc);
+        ef_reload_completed(NULL, 0);
+        if (rc) _snprintf_s(line, sizeof line, _TRUNCATE, "the engine refused the reload (code %d)", rc);
+        else strcpy_s(line, sizeof(line), "the requested map was not loaded");
         ef_set_msg(line);
     }
     _snprintf_s(line, sizeof line, _TRUNCATE, "EF: reload returned %d (id=%s)", rc, g_reload_id);
@@ -400,7 +423,16 @@ static void ef_service_reload(void *editor)
 
 static void sh_editor_frame_detour(void *editor, void *arg)
 {
-    g_frame_orig(editor, arg);     /* the engine's own frame, first and unconditionally */
+    if (!InterlockedCompareExchange(&g_faulted, 0, 0) && editor &&
+        sh_editor_transition_frame_enter(editor)) {
+        __try {
+            sh_prefab_import_poll(editor);
+            sh_rawmap_pending_map_poll();
+            if (g_load_map && InterlockedCompareExchange(&g_pending, 0, 0))
+                ef_service_reload(editor);
+        } __finally { sh_editor_transition_frame_leave(editor); }
+    }
+    g_frame_orig(editor, arg);
 
     InterlockedIncrement(&g_ticks);
 
@@ -410,10 +442,6 @@ static void sh_editor_frame_detour(void *editor, void *arg)
     /* Service only explicit save requests after the engine has settled this frame. */
     if (InterlockedCompareExchange(&g_save_pending, 0, 0) != 0) ef_service_rawmap_save(editor);
 
-    if (InterlockedCompareExchange(&g_pending, 0, 0) == 0) return;   /* the common frame: one read */
-    if (g_load_map == NULL) return;
-
-    ef_service_reload(editor);
 }
 
 /* ------------------------------------------------------------------ install + API --------------- */
@@ -577,6 +605,7 @@ int sh_editor_frame_request_reload(char *out_msg, int msg_capacity)
     else if (g_load_map == NULL)                                 why = "the engine's map loader was not found";
     else if (g_editor_obj == 0)                                  why = "the editor could not be located";
     else if (InterlockedCompareExchange(&g_pending, 0, 0) != 0)  why = "a reload is already waiting for the next frame";
+    else if (InterlockedCompareExchange(&g_reload_waiting, 0, 0) != 0) why = "a map load is still in progress";
     else if (!sh_rawmap_load_is_safe()) why = "rawmap overwrite protection is unavailable on this build";
     if (why) {
         /* LOG EVERY REFUSAL. These used to return the reason to the UI and write nothing, so a

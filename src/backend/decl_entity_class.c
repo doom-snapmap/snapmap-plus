@@ -19,6 +19,13 @@ static int ec_header(const sh_decl_node *tree, const char *key, char **value,
     const sh_decl_node *node = sh_decl_tree_member(tree, key);
     const char *text = "";
     size_t length = 0;
+    /* These are positional entityDef headers, not reflected edit fields.
+     * Native Parse consumes each header once before the state tail. Do not
+     * infer an effective class from a second, unconsumed header. */
+    for (const sh_decl_node *later = node ? node->next : NULL; later; later = later->next)
+        if (!strcmp(later->key, key)) {
+            snprintf(error, capacity, "%s: repeated entity header", key); return 0;
+        }
     if (node && (!node->assignment || node->reset || !sh_decl_tree_literal(node, &text, &length))) {
         snprintf(error, capacity, "%s: unsupported entity header value", key); return 0;
     }
@@ -26,7 +33,7 @@ static int ec_header(const sh_decl_node *tree, const char *key, char **value,
 }
 
 /* Match the verified native resource-name normalization, independently of
- * case-sensitive class names. Literal escapes remain the lexer adapter's job. */
+ * case-sensitive class names. Native declaration backslashes are path bytes. */
 static int ec_normalize(char *name)
 {
     size_t i;
@@ -66,7 +73,7 @@ char *sh_decl_entity_tree_class(const sh_decl_node *definition_tree,
             frames = grown; allocated = next;
         }
         frame = &frames[count++]; memset(frame, 0, sizeof(*frame));
-        tree = count == 1 ? definition_tree : (owned_tree = sh_decl_tree_parse(definition, error, capacity));
+        tree = count == 1 ? definition_tree : (owned_tree = sh_decl_tree_parse_ordered(definition, error, capacity));
         if (!tree) goto done;
         read = ec_header(tree, "class", &frame->class_name, error, capacity) &&
             ec_header(tree, "inherit", &frame->inherit, error, capacity);
@@ -118,7 +125,7 @@ done:
 char *sh_decl_entity_class(sh_decl_source definition,
     const sh_decl_entity_class_source *source, char *error, size_t capacity)
 {
-    sh_decl_node *tree = sh_decl_tree_parse(definition, error, capacity);
+    sh_decl_node *tree = sh_decl_tree_parse_ordered(definition, error, capacity);
     char *result;
     if (!tree) return NULL;
     result = sh_decl_entity_tree_class(tree, source, error, capacity);

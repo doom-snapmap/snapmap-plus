@@ -1,0 +1,164 @@
+/* Assemble scoped source dependencies for the resource linker. */
+#ifndef SH_PACKAGE_SOURCE_LINK_H
+#define SH_PACKAGE_SOURCE_LINK_H
+#include "package_link_inputs.h"
+#include "package_source_graph.h"
+
+typedef struct sh_package_source_link sh_package_source_link;
+typedef struct sh_package_audio_program sh_package_audio_program;
+typedef int (*sh_package_source_implicit)(void *context, size_t scope, int observing,
+    const sh_package_link_unit *unit,
+    int (*visit)(void *, const char *slot, const char *family, const char *name),
+    void *visit_context, char *error, size_t capacity);
+typedef struct sh_package_source_link_native {
+    void *context;
+    /* Admit a verified engine-created identity with no physical source. Never
+     * infer admission from a currently loaded/modded object or an absent file.
+     * 1 admits with stable semantics, 0 is unsupported, -1 is an error. This
+     * callback is used only after proven source absence, not a read failure.
+     * The linker requires admitted zero-file units to retain their native name. */
+    int (*admit)(void *context, size_t scope, const char *family, const char *name,
+        unsigned char semantics[32], char *error, size_t capacity);
+    /* Bind stable implicit/name-derived state for every file-backed unit into
+     * its equivalence identity. Return 1 if this state matches the engine
+     * original, 0 if different/uncertified, -1 on an incomplete/failed read.
+     * The driver independently checks exact original file bytes; the linker
+     * checks explicit dependencies transitively. No callback means no native
+     * original certificate. Zero-file units use admit's semantics instead.
+     * A product-provided baseline is not an engine-original certificate. */
+    int (*semantics)(void *context, size_t scope, const char *family,
+        const char *name, unsigned char semantics[32], char *error, size_t capacity);
+    /* The current renderer and verified fixed-parameter ABI. Its context is
+     * independent of the generic admission/semantics context above. */
+    const sh_package_source_shader *shader;
+    /* Add exact implicit page-source witnesses after the material's physical
+     * declaration is captured. The adapter owns returned metadata through
+     * source-link close; each role is unique and the visitor copies its name.
+     * These files are streamed for equality, never passed to a decl parser. */
+    int (*material_companions)(void *context, size_t scope, const char *material,
+        int (*visit)(void *, const char *, const sh_compiled_resource *), void *visit_context,
+        char *error, size_t capacity);
+    /* Seed materials reached by authored page/table families before reverse
+     * root nomination. The visitor captures their exact implicit witnesses. */
+    int (*material_seeds)(void *context, size_t scope,
+        int (*visit)(void *, const char *), void *visit_context,
+        char *error, size_t capacity);
+    /* Enumerate proven constructor/consumer resource requests outside the
+     * serialized bytes. The unit's physical members have already been captured.
+     * Return 1 after the complete walk, 0/-1 on unsupported/failed capture.
+     * Each nonempty semantic slot resolves in this scope, never a peer scope.
+     * Repeating the same slot/identity is harmless; changing its target is a
+     * capture error. Strings are borrowed for the visitor call and copied.
+     * observing is nonzero only for reverse-root discovery in the original-only
+     * scope. Such units may lack source and are not admitted runtime objects.
+     * No runtime load, mutation or assumption of original equivalence is allowed.
+     * Consumer publication remains a separate native adapter obligation. */
+    sh_package_source_implicit implicit;
+    /* Capture delivery ownership after complete discovery and implicit
+     * semantics. The adapter owns returned sets until source-link close.
+     * Null sets mean no additional owners. This cannot grant admission or
+     * substitute for a complete identity certificate. Return 1 on success. */
+    int (*owners)(void *context, size_t scope, const char *family, const char *name,
+        const sh_package_owners **owners, const sh_package_owners **gameplay,
+        char *error, size_t capacity);
+    /* Optional retained audio inventory for this exact scope list. Owns raw
+     * bank/media source accounting and reverse sound nomination. */
+    sh_package_audio_program *audio;
+} sh_package_source_link_native;
+
+/* Enumerate supplied units, complete their catalog permutations and walk the
+ * production typed source binders and registered constructor requests until
+ * every captured reference resolves.
+ * Each identity resolves in its input compilation, then verified originals.
+ * Peer scopes never supply missing files. Original reads/absence are captured
+ * once per path and shared as immutable bytes; package bytes are not changed.
+ * Campaign-only dependencies absent from the authored scope are not silently
+ * imported into a bundle. Unsupported/absent readers fail the whole candidate.
+ * Font units capture their available 48/64_df/12 glyph forms and exact material
+ * request slots. Optional materials use only this scope and SnapMap originals;
+ * confirmed absence is retained by omitting that slot from the complete plan.
+ * Read failures never count as absence. Native consumer admission remains
+ * separate: the production adapter must not enable unbound constructors.
+ *
+ * This establishes source closure for the registered readers. Complete implicit
+ * dependency enumeration and native ABI/alias admission still belong to the
+ * native adapter; this is not
+ * permission to rename every shader parameter or engine-created identity.
+ * Inputs/native metadata must stay stable through close. No native calls,
+ * runtime publication, author metadata changes or filesystem writes occur. */
+sh_package_source_link *sh_package_source_link_open(
+    const sh_package_compilation *const *scopes, size_t count,
+    const sh_resource_catalog *catalog, sh_package_baseline_reader original,
+    void *original_context, sh_decl_registry_source registry, uintptr_t reflection,
+    const sh_package_source_link_native *native, char *error, size_t capacity);
+typedef struct sh_package_source_root_plan {
+    /* One byte per scope. Discover baseline SnapMap palette roots affected by
+     * this scope's supplied units; never combine independent source scopes. */
+    const unsigned char *discover;
+    size_t baseline_scope; /* Existing original-only comparison scope. */
+    /* Recorded bindings seed their exact original names in their recorded
+     * context indices. This reconstructs derived roots without promoting
+     * unused authoring inventory into a document's selected occurrences. */
+    const sh_package_provenance *recorded;
+} sh_package_source_root_plan;
+sh_package_source_link *sh_package_source_link_open_roots(
+    const sh_package_compilation *const *scopes, size_t count,
+    const sh_resource_catalog *catalog, sh_package_baseline_reader original,
+    void *original_context, sh_decl_registry_source registry, uintptr_t reflection,
+    const sh_package_source_link_native *native, const sh_package_source_root_plan *roots,
+    char *error, size_t capacity);
+void sh_package_source_link_close(sh_package_source_link *source);
+/* Borrowed, captured source units, sorted by scope/family/name. */
+const sh_package_link_inputs *sh_package_source_link_inputs(const sh_package_source_link *source);
+/* One byte per input unit: its complete captured dependency closure has no
+ * gameplay contribution. Editor collection composition uses this eligibility;
+ * an editor resource reaching private gameplay must follow that asset scope.
+ * Zero-file originals and product-only sources contribute no gameplay owners.
+ * This is NOT native-original certification or a map-embedding decision: native
+ * implicit state and actual map usage remain separate. Borrowed until close. */
+const unsigned char *sh_package_source_link_shared(const sh_package_source_link *source);
+/* Assignment-free binding view for shared collection composition. These use
+ * exactly the frozen source snapshot and unit indices returned by inputs().
+ * bind_unit may inspect a derived body, but its inherited class/schema lookup
+ * remains in that unit's authored scope. Cross-scope entries must retain their
+ * captured target indices when subsequently replayed; their spelling is not a
+ * request to resolve again in the destination scope. Owned output bytes. */
+int sh_package_source_link_identify(sh_package_source_link *source,
+    sh_package_link_classes *out, char *error, size_t capacity);
+int sh_package_source_link_resolve_unit(sh_package_source_link *source, size_t unit,
+    const char *family, const char *name, size_t *target, char *error, size_t capacity);
+unsigned char *sh_package_source_link_bind_unit(sh_package_source_link *source, size_t unit,
+    const unsigned char *body, size_t length, sh_package_binding_resolver resolver,
+    void *context, size_t *output_length, char *error, size_t capacity);
+/* Typed idStrId sites use the same frozen source/inheritance scope. This pass
+ * neither treats prose as a key nor changes resource dependency collection. */
+unsigned char *sh_package_source_link_bind_strings(sh_package_source_link *source, size_t unit,
+    const unsigned char *body, size_t length, sh_package_string_site_resolver resolver,
+    void *context, size_t *output_length, char *error, size_t capacity);
+/* Physical members of multi-file units use their captured role. In particular,
+ * shader source, cooked records and stage modules are different formats. */
+unsigned char *sh_package_source_link_bind_file(sh_package_source_link *source, size_t unit,
+    const sh_compiled_resource *file, const unsigned char *body, size_t length,
+    sh_package_binding_resolver resolver, void *context, size_t *output_length,
+    char *error, size_t capacity);
+/* Enumerate a complete captured shader unit under a prospective root identity.
+ * PERMUTATION entries are native renderprog identities, not provider paths.
+ * The allocator must reserve/check every such ID along with the root before
+ * publication. Other entries map original member paths to linked paths. */
+int sh_package_source_link_shader_paths(sh_package_source_link *source, size_t unit,
+    const char *linked_name, sh_package_shader_path_visitor visitor, void *context,
+    char *error, size_t capacity);
+unsigned char *sh_package_source_link_bind_derived(sh_package_source_link *source, size_t unit,
+    const unsigned char *body, size_t length, sh_package_binding_resolver resolver,
+    void *context, sh_package_bound_exists exists, void *exists_context,
+    size_t *output_length, char *error, size_t capacity);
+/* resolve/bind use the retained scoped readers and frozen original snapshot.
+ * The supplied native assignment establishes valid aliases, including implicit
+ * ABI. Its registry callback checks native ID/name occupation as aliases are
+ * allocated; that callback retains its own context through this call.
+ * Output is independent of this builder after a successful link. */
+int sh_package_source_link_compile(sh_package_source_link *source,
+    const sh_package_sources *inventory, const sh_package_link_adapter *native,
+    const sh_package_policy *policy, char *(*canonical_path)(const char *),
+    sh_package_link_output *out, char *error, size_t capacity);
+#endif

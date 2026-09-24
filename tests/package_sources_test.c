@@ -374,11 +374,21 @@ static void sealed_streams(const sh_package_source_file *source)
         sh_package_source_file changed=*source;changed.digest[0]^=1;
         sealed=sh_package_file_seal(&changed,error,sizeof(error));CHECK(!sealed);sh_package_file_release(sealed);
     }
+    sealed=sh_package_file_pin(source->absolute,error,sizeof(error));CHECK(sealed);
+    CHECK(sh_package_file_length(sealed)==source->length);
+    /* Pinning already denies mutation before the digest is first requested. */
+    writer=CreateFileW(wide,GENERIC_WRITE,FILE_SHARE_READ,NULL,OPEN_EXISTING,0,NULL);
+    CHECK(writer==INVALID_HANDLE_VALUE);if(writer!=INVALID_HANDLE_VALUE)CloseHandle(writer);
+    CHECK(sh_package_file_get_identity(sealed,&identity));
+    CHECK(identity.length==source->length && !memcmp(identity.digest,source->digest,32));
+    CHECK(sh_package_file_get_identity(sealed,&memory));
+    CHECK(memory.length==identity.length && !memcmp(memory.digest,identity.digest,32));
+    writer=CreateFileW(wide,GENERIC_WRITE,FILE_SHARE_READ,NULL,OPEN_EXISTING,0,NULL);
+    CHECK(writer==INVALID_HANDLE_VALUE);if(writer!=INVALID_HANDLE_VALUE)CloseHandle(writer);
+    sh_package_file_release(sealed);
     sealed=sh_package_file_capture(source->absolute,error,sizeof(error));CHECK(sealed);
     CHECK(sh_package_file_get_identity(sealed,&identity));
     CHECK(identity.length==source->length && !memcmp(identity.digest,source->digest,32));
-    writer=CreateFileW(wide,GENERIC_WRITE,FILE_SHARE_READ,NULL,OPEN_EXISTING,0,NULL);
-    CHECK(writer==INVALID_HANDLE_VALUE);if(writer!=INVALID_HANDLE_VALUE)CloseHandle(writer);
     sh_package_file_release(sealed);
     sealed=sh_package_file_capture(NULL,error,sizeof(error));CHECK(!sealed && error[0]);
     sh_package_file_release(sealed);
@@ -387,6 +397,15 @@ static void sealed_streams(const sh_package_source_file *source)
     free(wide);
 }
 
+typedef struct identity_reader { const unsigned char *body; size_t length, calls, fail; uint64_t base; } identity_reader;
+static int read_identity(void *context, uint64_t offset, void *out, size_t length)
+{
+    identity_reader *reader = context;
+    CHECK(offset >= reader->base && offset - reader->base <= reader->length);
+    CHECK(length <= reader->length - (size_t)(offset - reader->base));
+    if (reader->calls++ == reader->fail) { if (length) memcpy(out, reader->body, 1); return 0; }
+    memcpy(out, reader->body + (size_t)(offset - reader->base), length); return 1;
+}
 static void memory_identities(void)
 {
     static const unsigned char abc[32]={0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea,
@@ -403,6 +422,16 @@ static void memory_identities(void)
     CHECK(!sh_package_bytes_identity(NULL,1,&identity) && !identity.length);
     for(size_t i=0;i<sizeof(identity.digest);i++)CHECK(!identity.digest[i]);
     CHECK(!sh_package_bytes_identity("abc",3,NULL));
+    unsigned char large[65539]; for (size_t i=0;i<sizeof(large);i++) large[i]=(unsigned char)i;
+    sh_package_file_identity expected; CHECK(sh_package_bytes_identity(large,sizeof(large),&expected));
+    identity_reader reader={large,sizeof(large),0,SIZE_MAX,UINT64_C(0x100000017)};
+    CHECK(sh_package_reader_identity(&reader,reader.base,sizeof(large),read_identity,&identity));
+    CHECK(reader.calls==2 && identity.length==sizeof(large) && !memcmp(identity.digest,expected.digest,32));
+    reader.calls=0;reader.fail=1;
+    CHECK(!sh_package_reader_identity(&reader,reader.base,sizeof(large),read_identity,&identity));
+    CHECK(!identity.length);for(size_t i=0;i<32;i++)CHECK(!identity.digest[i]);
+    reader.calls=0;
+    CHECK(!sh_package_reader_identity(&reader,UINT64_MAX,2,read_identity,&identity) && !reader.calls);
 }
 
 int main(int argc, char **argv)

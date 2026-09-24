@@ -10,23 +10,66 @@
 #include "engine_globals.h"
 #include "decl_server.h"
 int sh_map_transition_at_boundary(void) { return 0; }
+int sh_editor_transition_at_boundary(void) { return 0; }
+static int g_occurrence_frame;
+void *sh_editor_transition_capture(const void *editor)
+{ return g_occurrence_frame && editor ? (void *)2 : NULL; }
+int sh_editor_transition_frame_ready(void *editor, void *map)
+{ return g_occurrence_frame && editor && map == (void *)2; }
+void sh_nav_bake_source_update_begin(void) { }
+void sh_nav_bake_source_update_end(int committed) { (void)committed; }
 static int g_defer_install_commit;
 int sh_rawmap_defers_install_commit(void) { return g_defer_install_commit; }
 #include "package_runtime.h"
 #include "resource_resident.h"
+#include "resource_graph_native.h"
+#include "package_native_assets.h"
+#include "package_shader_receipt.h"
+#include "native_resource_id.h"
 static int g_resident_begin_calls, g_resident_drain_calls, g_resident_end_calls;
 static int g_resident_fail_begin, g_resident_fail_drain;
 static void *g_resident_only;
 static int g_resident_filter;
+static int g_shader_fixture_active, g_shader_scope_live, g_shader_resident_live;
+static int g_shader_mode, g_shader_hold_end, g_shader_restores;
+static int (*g_shader_admission)(void *);
+static void *g_shader_admission_context;
+static struct {
+    unsigned char head[8], manager[0x30], items[8], object[0x90];
+    char type[16], name[16];
+} g_shader_native;
+static const char g_shader_source[] = "{ Tex2D textures/fixture }";
+static int shader_native_read(void *context, uintptr_t address, void *out, size_t length)
+{
+    uintptr_t start = (uintptr_t)&g_shader_native;
+    (void)context;
+    if (address < start || address - start > sizeof(g_shader_native) ||
+        length > sizeof(g_shader_native) - (size_t)(address - start)) return 0;
+    memcpy(out, (const void *)address, length); return 1;
+}
+static char g_shader_events[64];
+static size_t g_shader_event_count;
+static void shader_event(char event)
+{
+    if (g_shader_fixture_active && g_shader_event_count + 1 < sizeof(g_shader_events)) {
+        g_shader_events[g_shader_event_count++] = event; g_shader_events[g_shader_event_count] = 0;
+    }
+}
 int sh_resource_resident_selected(const sh_resource_resident *pass, const void *object)
 { (void)pass; return !g_resident_filter || object == g_resident_only; }
+size_t sh_resource_resident_selected_count(const sh_resource_resident *pass)
+{ (void)pass; return g_resident_filter && !g_resident_only ? 0 : 1; }
 sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *changes, int restoring, int initial, char *error, size_t capacity)
 {
     (void)changes; (void)restoring; (void)initial; ++g_resident_begin_calls;
     if (g_resident_fail_begin) { g_resident_fail_begin = 0; snprintf(error, capacity, "resident capture failed"); return NULL; }
+    shader_event('R'); g_shader_resident_live = 1;
     return (sh_resource_resident *)1;
 }
+int sh_resource_resident_owned(const sh_resource_resident *pass)
+{ return pass == (sh_resource_resident *)1 && g_shader_resident_live; }
 void sh_resource_resident_external(sh_resource_resident *pass, void *object) { (void)pass; (void)object; }
+void sh_resource_resident_touch(void *object) { (void)object; }
 int sh_resource_resident_reconstruct(sh_resource_resident *pass, char *error, size_t capacity)
 { (void)pass; (void)error; (void)capacity; return 1; }
 int sh_resource_resident_defaults(sh_resource_resident *pass, char *error, size_t capacity)
@@ -37,8 +80,14 @@ int sh_resource_resident_drain(sh_resource_resident *pass, char *error, size_t c
     if (g_resident_fail_drain) { g_resident_fail_drain = 0; snprintf(error, capacity, "resident drain failed"); return 0; }
     return 1;
 }
+int sh_resource_resident_drain_additions(sh_resource_resident *pass, void *const *existing,
+    size_t count, char *error, size_t capacity)
+{ (void)existing; (void)count; return sh_resource_resident_drain(pass, error, capacity); }
 int sh_resource_resident_end(sh_resource_resident *pass, int succeeded, char *error, size_t capacity)
-{ (void)pass; (void)error; (void)capacity; ++g_resident_end_calls; return succeeded; }
+{
+    (void)pass; (void)error; (void)capacity; ++g_resident_end_calls;
+    shader_event('X'); g_shader_resident_live = 0; return succeeded;
+}
 #include "decl_server_path.h"
 #include "decl_text.h"
 #include "overrides.h"
@@ -55,14 +104,47 @@ static int g_fail_next_string_refresh;
 static int g_audio_refreshes, g_fail_next_audio_refresh;
 #include "audio_banks_native.h"
 int sh_audio_banks_native_activate(const uint32_t *events, size_t count,
-    const sh_package_audio_bank *banks, size_t bank_count, char *error, size_t capacity)
+    const sh_package_audio_bank *banks, size_t bank_count,
+    const sh_package_audio_media *media, size_t media_count, char *error, size_t capacity)
 {
-    (void)events; (void)count; (void)banks; (void)bank_count; ++g_audio_refreshes;
+    (void)events; (void)count; (void)banks; (void)bank_count; (void)media; (void)media_count; ++g_audio_refreshes;
     if (g_fail_next_audio_refresh) {
         g_fail_next_audio_refresh = 0;
         snprintf(error, capacity, "test audio activation failed"); return 0;
     }
     return 1;
+}
+sh_audio_bank_addition *sh_audio_banks_native_additions_begin(char *error, size_t capacity)
+{ (void)error; (void)capacity; return (sh_audio_bank_addition *)1; }
+int sh_audio_banks_native_activate_additive(sh_audio_bank_addition *addition,
+    const uint32_t *events, size_t count, const sh_package_audio_bank *banks, size_t bank_count,
+    const sh_package_audio_media *media, size_t media_count, char *error, size_t capacity)
+{ (void)addition; return sh_audio_banks_native_activate(events, count, banks, bank_count, media, media_count, error, capacity); }
+int sh_audio_banks_native_additions_end(sh_audio_bank_addition **addition, int accepted, char *error, size_t capacity)
+{ (void)accepted; (void)error; (void)capacity; *addition = NULL; return 1; }
+int sh_audio_banks_native_additions_ready(sh_audio_bank_addition *addition, char *error, size_t capacity)
+{ (void)error; (void)capacity; return addition != NULL; }
+void sh_audio_banks_native_additions_accept(sh_audio_bank_addition **addition) { *addition = NULL; }
+#include "palette_refresh.h"
+int sh_palette_entries_ready(void) { return 1; }
+int sh_palette_entries_prepare(const sh_palette_entry_source *sources, size_t count,
+    sh_palette_entries_admitted_fn admitted, void *context, sh_palette_entries **out, char *error, size_t capacity)
+{ (void)sources; (void)count; (void)error; (void)capacity; if (!admitted(context)) return 0; *out = (sh_palette_entries *)1; return 1; }
+int sh_palette_entries_publish(sh_palette_entries *batch, sh_palette_entries_admitted_fn admitted,
+    void *context, char *error, size_t capacity)
+{ (void)batch; (void)error; (void)capacity; return admitted(context); }
+int sh_palette_entries_prepare_authoring(sh_palette_entries *batch, sh_palette_entries_admitted_fn admitted,
+    void *context, char *error, size_t capacity)
+{ (void)batch; (void)error; (void)capacity; return admitted(context); }
+void sh_palette_entries_accept(sh_palette_entries *batch) { (void)batch; }
+static int g_palette_end_result = 1, g_palette_end_calls;
+int sh_palette_entries_end(sh_palette_entries **batch, sh_palette_entries_admitted_fn admitted,
+    void *context, char *error, size_t capacity)
+{
+    (void)error; (void)capacity; if (!admitted(context)) return 0;
+    ++g_palette_end_calls;
+    if (g_palette_end_result != 1) return g_palette_end_result;
+    *batch = NULL; return 1;
 }
 static int g_scan_calls, g_scan_fail;
 static int g_table_published;
@@ -340,6 +422,62 @@ unsigned long sh_overrides_rescan_packages_activated(sh_package_activation_fn ac
 int sh_overrides_activate_map(sh_package_map_plan *plan, sh_package_activation_fn activate, void *context)
 {
     return sh_package_runtime_activate_prepared_map(plan, (sh_package_activation_guard){0}, activate, context);
+}
+int sh_overrides_activate_occurrences(const sh_package_occurrence_snapshot *map,
+    sh_package_activation_fn activate, void *context)
+{
+    return sh_package_runtime_activate_occurrences(map, (sh_package_activation_guard){0}, activate, context);
+}
+sh_resource_shader_state *sh_resource_graph_native_shader_state_begin(
+    sh_resource_shader_admission admitted, void *context, char *error, size_t capacity)
+{
+    (void)error; (void)capacity;
+    CHECK(g_shader_fixture_active && !g_shader_scope_live && admitted(context));
+    g_shader_scope_live = 1; g_shader_admission = admitted; g_shader_admission_context = context;
+    shader_event('B'); return (sh_resource_shader_state *)1;
+}
+int sh_resource_graph_native_shader_state_restore(sh_resource_shader_state *state,
+    char *error, size_t capacity)
+{
+    (void)error; (void)capacity;
+    CHECK(state == (sh_resource_shader_state *)1 && g_shader_scope_live &&
+        g_shader_admission(g_shader_admission_context));
+    g_shader_restores++; shader_event('T'); return 1;
+}
+int sh_resource_graph_native_shader_state_end(sh_resource_shader_state *state,
+    int accepted, char *error, size_t capacity)
+{
+    CHECK(state == (sh_resource_shader_state *)1 && g_shader_scope_live &&
+        g_shader_admission(g_shader_admission_context));
+    shader_event('E');
+    if (g_shader_hold_end) { snprintf(error, capacity, "fixture restoration remains owed"); return -1; }
+    g_shader_scope_live = 0; g_shader_admission = NULL; g_shader_admission_context = NULL;
+    return accepted && g_shader_mode == 2 ? 0 : 1;
+}
+int sh_resource_graph_native_prepare_shader(void *resource, const char *family,
+    const char *name, const void *source, size_t length,
+    int (*admitted)(void *), void *context, char *error, size_t capacity)
+{
+    (void)error; (void)capacity;
+    CHECK(g_shader_fixture_active && g_shader_scope_live && admitted(context));
+    shader_event('P');
+    if (g_shader_mode == 3) RaiseException(0xe0504453, 0, 0, NULL);
+    if (g_shader_mode == 1) return 0;
+    sh_package_shader_receipt_frame receipt;
+    sh_package_shader_receipt_begin(&receipt, (uintptr_t)resource, family, name);
+    sh_package_shader_receipt_retained(source, length);
+    sh_package_shader_receipt_end(&receipt, 1, shader_native_read, NULL);
+    return 1;
+}
+int sh_resource_graph_native_prepare_program(void *manager, const char *name,
+    const void *source, size_t length, int (*admitted)(void *), void *context,
+    char *error, size_t capacity)
+{
+    (void)manager; (void)name; (void)source; (void)length; (void)error; (void)capacity;
+    CHECK(admitted(context));
+    /* Program cooking and its isolated receipt are exercised by the native
+     * graph fixture. Fixed-slot tests must never enter this route. */
+    CHECK(0); return 0;
 }
 
 int sh_strids_rearm(void)
@@ -1136,6 +1274,22 @@ static void test_integrated_scan_materialize_pipeline(void)
     CHECK(memcmp(g_pipeline_events, "CSDCSDTFFTFFP", 13) == 0);
     CHECK(sh_decl_server_registration_succeeded() == 0);
 
+    /* Active-editor admission uses the same scan/materialize ordering but
+     * leaves whole-palette and resident refresh to its fresh-only owner. */
+    pipeline_reset(); g_pipeline_decl = decl_memory;
+    sh_decl_server_test_set_additive(1);
+    sh_decl_server_test_set_resident((void *)1);
+    int drains_before = g_resident_drain_calls;
+    ok = sh_decl_server_test_scan_and_materialize_missing(
+        items, sizeof(items) / sizeof(items[0]), (void *)(uintptr_t)0x98760000u,
+        pipeline_type_by_name, pipeline_source_find, pipeline_find_decl,
+        pipeline_palette_refresh, pipeline_ctor, pipeline_dtor, pipeline_register_file,
+        &registered, &materialized, &failure_phase);
+    sh_decl_server_test_set_additive(0); sh_decl_server_test_set_resident(NULL);
+    CHECK(ok && registered == 2 && materialized == 2 && !failure_phase);
+    CHECK(!g_pipeline_palette_calls && g_resident_drain_calls == drains_before);
+    CHECK(g_pipeline_event_count == 12 && !memcmp(g_pipeline_events, "CSDCSDTFFTFF", 12));
+
     pipeline_reset();
     g_pipeline_decl = decl_memory;
     g_pipeline_scan_fail_on = 2;
@@ -1517,7 +1671,7 @@ static void test_text_validation(void)
     static const unsigned char valid[] =
         "// opening brace in a comment: {\n"
         "{\n"
-        "  inherit = \"player/{ignored}\\\"quoted\\\"\"\n"
+        "  inherit = \"player\\{ignored}\\\"\n"
         "  /* ignored close: } */\n"
         "}\n";
     static const unsigned char nested[] = "{ outer { inner } }";
@@ -1537,6 +1691,17 @@ static void test_text_validation(void)
     CHECK(sh_decl_text_well_formed(no_brace, sizeof(no_brace) - 1) == 0);
     CHECK(sh_decl_text_well_formed(embedded_nul, sizeof(embedded_nul)) == 0);
     CHECK(sh_decl_text_well_formed(NULL, 0) == 0);
+    CHECK(sh_decl_server_test_body_is_single_block(valid, sizeof(valid) - 1) == 1);
+    {
+        const unsigned char child[] = "{ inherit = \"z\\parent\"; }";
+        const unsigned char parent[] = "{}";
+        sh_decl_reference_item items[] = {
+            {"a/child", child, sizeof(child) - 1}, {"z/parent", parent, sizeof(parent) - 1}
+        };
+        size_t edges = 0, cycles = 0;
+        CHECK(sh_decl_text_order_by_references(items, 2, &edges, &cycles));
+        CHECK(edges == 1 && !cycles && !strcmp(items[0].name, "z/parent"));
+    }
 }
 
 static void test_single_body_validation(void)
@@ -3114,10 +3279,17 @@ static void test_empty_launch_and_runtime_results(void)
     {
         char path[MAX_PATH];
         g_linked_fixture = 0; runtime_fixture();
+        sh_package_runtime_test_dispose(); /* Close delete-on-close bundle snapshots first. */
         snprintf(path, sizeof path, "%s/overrides/fixture/package.json", g_fixture_root); CHECK(DeleteFileA(path));
         for (size_t i = sizeof(runtime_dirs)/sizeof(runtime_dirs[0]); i; i--) {
             snprintf(path, sizeof path, "%s/%s", g_fixture_root, runtime_dirs[i - 1]); CHECK(RemoveDirectoryA(path));
         }
+        /* The bundle cache leaves these known empty children under this
+         * fixture root. Remove only those exact directories, never recurse. */
+        snprintf(path, sizeof path, "%s/package-cache/bundles", g_fixture_root);
+        CHECK(RemoveDirectoryA(path) || GetLastError() == ERROR_PATH_NOT_FOUND);
+        snprintf(path, sizeof path, "%s/package-cache", g_fixture_root);
+        CHECK(RemoveDirectoryA(path) || GetLastError() == ERROR_PATH_NOT_FOUND);
     }
     CHECK(RemoveDirectoryA(g_fixture_root));
     g_fixture_root[0] = '\0';
@@ -3304,6 +3476,152 @@ done:
     g_many_undrained = SIZE_MAX;
 }
 
+static int shader_original(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    (void)context; *body = NULL; *length = 0;
+    if (strcmp(path, "generated/decls/renderparm/tex.decl")) return 0;
+    *body = (unsigned char *)_strdup(g_shader_source); *length = strlen(g_shader_source); return *body ? 1 : -1;
+}
+static void *shader_find(void *manager, const char *name, unsigned char make_default)
+{
+    (void)make_default;
+    CHECK(manager == g_shader_native.manager && !strcmp(name, "tex"));
+    CHECK(g_shader_scope_live); return g_shader_native.object;
+}
+static void test_shader_preparation_lifetime(void)
+{
+    char error[512]; uint32_t id = 0;
+    memset(&g_shader_native, 0, sizeof(g_shader_native));
+    strcpy(g_shader_native.type, "renderParm"); strcpy(g_shader_native.name, "tex");
+    *(void **)g_shader_native.head = g_shader_native.manager;
+    *(void **)(g_shader_native.manager + 8) = g_shader_native.type;
+    *(void **)(g_shader_native.manager + 0x20) = g_shader_native.items;
+    *(int *)(g_shader_native.manager + 0x28) = 1;
+    *(void **)g_shader_native.items = g_shader_native.object;
+    *(void **)(g_shader_native.object + 8) = g_shader_native.name;
+    *(void **)(g_shader_native.object + 0x10) = g_shader_native.manager;
+    CHECK(sh_native_resource_id(g_shader_native.type, g_shader_native.name, &id));
+    *(uint32_t *)(g_shader_native.object + 0x20) = id;
+    *(uint32_t *)(g_shader_native.object + 0x68) = 0x410;
+    *(uint32_t *)(g_shader_native.object + 0x6c) = 1;
+    for (int mode = 0; mode < 5; mode++) {
+        int kind = 0; uint32_t index = 0;
+        sh_decl_server_test_reset_install();
+        g_shader_fixture_active = 1; g_shader_mode = mode; g_shader_hold_end = mode == 4;
+        g_shader_restores = 0; g_shader_event_count = 0; g_shader_events[0] = 0;
+        sh_package_shader_receipt_invalidate((uintptr_t)g_shader_native.object);
+        sh_package_native_assets *assets = sh_package_native_assets_open("C:/shader-decl-server-fixture");
+        CHECK(assets && sh_package_native_assets_configure_shader(assets, SH_PACKAGE_SHADER_OPENGL,
+            (sh_native_resource_registry_source){NULL, shader_native_read, (uintptr_t)g_shader_native.head},
+            shader_original, NULL, error, sizeof(error)));
+        sh_package_library_native native = sh_package_native_assets_adapter(assets);
+        const sh_package_source_shader *shader = native.source.shader;
+        CHECK(!shader->parameter(shader->context, "tex", (sh_decl_source){g_shader_source, strlen(g_shader_source)},
+            &kind, &index, error, sizeof(error)));
+        sh_package_shader_preparation *batch = sh_package_native_assets_shader_take(assets);
+        CHECK(batch && sh_package_shader_preparation_count(batch) == 1);
+        int result = sh_decl_server_test_prepare_shaders(batch, shader_find, error, sizeof(error));
+        CHECK(result == (mode == 0 ? 1 : mode == 4 ? -1 : 0));
+        CHECK(!strcmp(g_shader_events, mode == 4 ? "RBPE" : mode == 1 || mode == 3 ? "RBPTEX" : "RBPEX"));
+        CHECK(g_shader_restores == ((mode == 1 || mode == 3) ? 1 : 0));
+        sh_package_shader_preparation_free(batch); sh_package_native_assets_close(assets);
+        if (mode == 4) {
+            CHECK(g_shader_scope_live && g_shader_resident_live);
+            /* Borrowed batch/stack is gone; the native state callback still
+             * owns a valid context until final restoration and scope exit. */
+            g_shader_hold_end = 0;
+            CHECK(sh_decl_server_test_shader_recovery());
+            CHECK(!strcmp(g_shader_events, "RBPEEX"));
+        }
+        CHECK(!g_shader_scope_live && !g_shader_resident_live);
+        g_shader_fixture_active = 0;
+        sh_package_shader_receipt_invalidate((uintptr_t)g_shader_native.object);
+        sh_decl_server_test_reset_install();
+    }
+}
+
+typedef struct occurrence_fixture { int mode, prepared, finalized, rolled_back; } occurrence_fixture;
+static int occurrence_prepare(void *context, char *error, size_t capacity)
+{
+    occurrence_fixture *fixture = context;
+    CHECK(g_shader_resident_live); fixture->prepared++;
+    if (fixture->mode == 1) { snprintf(error, capacity, "fixture stage refusal"); return 0; }
+    return 1;
+}
+static int occurrence_finalize(void *context, char *error, size_t capacity)
+{
+    occurrence_fixture *fixture = context;
+    CHECK(!g_shader_resident_live); fixture->finalized++;
+    if (fixture->mode >= 2) { snprintf(error, capacity, "fixture commit refusal"); return 0; }
+    return 1;
+}
+static int occurrence_rollback(void *context, char *error, size_t capacity)
+{
+    occurrence_fixture *fixture = context;
+    CHECK(g_shader_resident_live); fixture->rolled_back++;
+    if (fixture->mode == 4 && fixture->rolled_back == 1) RaiseException(0xe0340002, 0, 0, NULL);
+    if (fixture->mode == 3 && fixture->rolled_back == 1) {
+        snprintf(error, capacity, "fixture retained teardown"); return 0;
+    }
+    return 1;
+}
+static void test_occurrence_admission(void)
+{
+    unsigned char manager[0x30] = {0}, resource[0x90] = {0};
+    void *objects[] = {resource}; char error[1024];
+    *(void ***)(manager + 0x20) = objects; *(int *)(manager + 0x28) = 1;
+    {
+        unsigned char decl[0x1d0] = {0}, entity[0x60] = {0};
+        *(void **)(decl + 0x1c8) = entity;
+        *(const char **)(entity + 8) = "resource/header-name";
+        *(const char **)(entity + 0x58) = "palette/entity-name";
+        CHECK(!strcmp(sh_decl_server_test_occurrence_source_name(decl), "palette/entity-name"));
+        *(const char **)(entity + 0x58) = NULL;
+        CHECK(!sh_decl_server_test_occurrence_source_name(decl));
+    }
+    for (int mode = 0; mode < 5; mode++) {
+        sh_decl_server_test_reset_install();
+        g_occurrence_frame = g_user_enabled = 1;
+        g_boundary_thread = GetCurrentThreadId(); g_boundary_editor[9] = 1;
+        g_boundary_resource_head = manager;
+        g_resident_filter = 1; g_resident_only = NULL;
+        sh_decl_server_test_occurrence_ready(g_boundary_editor);
+        occurrence_fixture fixture = {mode};
+        sh_decl_server_occurrence_hooks hooks = {&fixture, occurrence_prepare, occurrence_finalize, occurrence_rollback};
+        int result = sh_decl_server_admit_occurrences(NULL, NULL, &hooks, error, sizeof(error));
+        CHECK(result == (mode ? SH_PACKAGE_ADMISSION_FAILED : SH_PACKAGE_ADMISSION_READY));
+        CHECK(fixture.prepared == 1 && fixture.finalized == (mode != 1));
+        CHECK(fixture.rolled_back == (mode != 0));
+        CHECK(!g_shader_resident_live);
+        CHECK(sh_decl_server_occurrence_recovery_pending(&fixture) == (mode >= 3));
+        if (mode >= 3) {
+            sh_decl_server_occurrence_maintenance();
+            CHECK(!sh_decl_server_occurrence_recovery_pending(&fixture) && fixture.rolled_back == 2);
+            CHECK(sh_decl_server_registration_succeeded());
+        }
+        g_occurrence_frame = 0; g_boundary_editor[9] = 0;
+        /* Retained successful batches leave with the browser; they never
+         * invoke a caller hook after its completed request is released. */
+        *(void **)(g_boundary_shell + 0x18) = g_boundary_manager;
+        *(int *)(g_boundary_manager + 8) = *(int *)(g_boundary_manager + 12) = 63;
+        *(int *)(g_boundary_manager + 0x910) = *(int *)(g_boundary_manager + 0x914) = 1;
+        sh_decl_server_occurrence_maintenance();
+    }
+    /* A live accepted palette must not block the native rebuild that will
+     * replace it. Only unsafe teardown failure blocks the rearm poll. */
+    CHECK(sh_decl_server_test_palette_hold((void *)1));
+    g_palette_end_result = 0; g_palette_end_calls = 0;
+    CHECK(sh_decl_server_test_palette_maintenance() == 1);
+    CHECK(g_palette_end_calls == 1 && sh_decl_server_test_palette_holds() == 1);
+    g_palette_end_result = -1;
+    CHECK(sh_decl_server_test_palette_maintenance() == 0);
+    CHECK(g_palette_end_calls == 2 && sh_decl_server_test_palette_holds() == 1);
+    g_palette_end_result = 1;
+    CHECK(sh_decl_server_test_palette_maintenance() == 1);
+    CHECK(g_palette_end_calls == 3 && sh_decl_server_test_palette_holds() == 0);
+    g_resident_filter = 0; g_boundary_resource_head = NULL;
+    sh_decl_server_test_reset_install();
+}
 int main(void)
 {
     test_native_idstr_boundary();
@@ -3340,6 +3658,8 @@ int main(void)
     test_large_snapshot();
     test_many_candidates();
     test_many_runtime_marks();
+    test_shader_preparation_lifetime();
+    test_occurrence_admission();
     if (g_failed) {
         fprintf(stderr, "%d decl-server test(s) failed\n", g_failed);
         return 1;

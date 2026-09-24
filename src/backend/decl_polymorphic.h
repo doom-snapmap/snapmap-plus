@@ -17,4 +17,11 @@ typedef struct sh_decl_polymorphic_state {
 int sh_decl_polymorphic_read(const sh_decl_node *node, sh_decl_value_type base_type,
     const sh_decl_dependency_schema *schema, sh_decl_polymorphic_state *state,
     const char **reason);
+
+/* idSSObject has an object selector followed by fields in the same block.
+ * Empty blocks and native NULL clear the object. The returned shallow block
+ * borrows the original field nodes so reference-site identities stay exact. */
+int sh_decl_script_read(const sh_decl_node *node, sh_decl_value_type base_type,
+    const sh_decl_dependency_schema *schema, sh_decl_value_type *selected,
+    sh_decl_node *fields, const char **reason);
 #endif

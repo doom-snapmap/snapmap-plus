@@ -85,7 +85,7 @@ static void invalid_envelopes(void)
         OBJECT("Node", "A", "") "layers = { layer = \"unknown\"; } } } } } } }", "does not resolve");
     reject("{ edit = { layers = { layer = \"a\"; layer = \"a\"; } } }", "duplicate layer");
     reject("{ edit = { layersConfigs = { config = { layer = \"a\"; } } } }", "does not resolve");
-    reject("{ edit = { layers = { layer = \"a\\nb\"; } } }", "unescaped literal");
+    reject("{ edit = { layers = { layer = \"a\" \"b\"; } } }", "literal");
     reject("{ edit = { subGraphs = { subGraph = { " OBJECT("SubGraph", "a", "") "nodes = { " NODE("A")
         "} links = { A = { " LINK("t", "A", "a", "") "} } } } } }", "endpoint node does not resolve");
     reject("{ edit = { subGraphs = { subGraph = { " OBJECT("SubGraph", "a", "") "nodes = { " NODE("A") NODE("B")
@@ -122,6 +122,8 @@ static void extent(void)
     g = parse("{ inherit = \"parent\"; edit = {} }", error);
     CHECK(g && !sh_decl_graph_count(g)); sh_decl_graph_close(g);
     g = parse("{}", error); CHECK(g && !sh_decl_graph_count(g)); sh_decl_graph_close(g);
+    g = parse("{ edit = { layers = { layer = \"a\\nb\"; } } }", error);
+    CHECK(g); sh_decl_graph_close(g);
     CHECK(!sh_decl_graph_at(NULL, 0) && !sh_decl_graph_count(NULL));
     CHECK(!sh_decl_graph_syntax(NULL) && !sh_decl_graph_state(NULL)); sh_decl_graph_close(NULL);
 }

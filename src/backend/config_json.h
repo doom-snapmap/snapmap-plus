@@ -92,6 +92,22 @@ int sh_native_json_validate(const char *json, size_t length, unsigned max_depth,
 int sh_native_json_visit_objects_filtered(const char *json, size_t length, unsigned max_depth,
                                           sh_json_object_visitor visitor,
                                           sh_json_field_filter filter, void *context);
+/* Borrowed ancestry of one value. A non-NULL key is a decoded object member,
+ * with explicit length (including embedded NUL bytes); NULL denotes an array
+ * index. The root value has a NULL path. Path nodes, keys and spans are valid
+ * only during the callback. Values are visited after their children. This
+ * exposes locations, not resource semantics: only a native typed reader may
+ * decide that a particular value refers to an asset. No strings are recoded.
+ * Callers must discard collected data unless the complete walk succeeds. */
+typedef struct sh_json_path {
+    const struct sh_json_path *parent;
+    const char *key;
+    size_t key_length, index;
+} sh_json_path;
+typedef int (*sh_json_value_visitor)(void *context, const sh_json_path *path,
+    const char *json, size_t length, sh_json_kind kind);
+int sh_native_json_visit_values(const char *json, size_t length, unsigned max_depth,
+    sh_json_value_visitor visitor, void *context);
 int sh_native_json_parse_object(const char *json, size_t length, unsigned max_depth,
                                 sh_json_object *out);
 int sh_native_json_decode_string(const char *json, size_t length,

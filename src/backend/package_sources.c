@@ -286,23 +286,25 @@ struct sh_package_file {
     uint64_t length;
     unsigned char digest[32];
     volatile LONG references;
+    SRWLOCK identity_lock;
+    int identity_ready;
 };
 
-int sh_package_bytes_identity(const void *body, size_t length, sh_package_file_identity *out)
+int sh_package_reader_identity(void *context, uint64_t offset, uint64_t length,
+    int (*read)(void *, uint64_t, void *, size_t), sh_package_file_identity *out)
 {
     BCRYPT_ALG_HANDLE algorithm = NULL;
     BCRYPT_HASH_HANDLE hash = NULL;
-    size_t offset = 0;
+    unsigned char bytes[65536]; uint64_t position = 0;
     int ok = 0;
     if (!out) return 0;
     memset(out, 0, sizeof(*out));
-    if ((!body && length) || BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0) < 0 ||
+    if (!read || length > UINT64_MAX - offset || BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0) < 0 ||
         BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0) < 0) goto done;
-    while (offset < length) {
-        size_t amount = length - offset;
-        if (amount > 1048576) amount = 1048576;
-        if (BCryptHashData(hash, (PUCHAR)body + offset, (ULONG)amount, 0) < 0) goto done;
-        offset += amount;
+    while (position < length) {
+        size_t amount = length - position > sizeof(bytes) ? sizeof(bytes) : (size_t)(length - position);
+        if (read(context, offset + position, bytes, amount) != 1 || BCryptHashData(hash, bytes, (ULONG)amount, 0) < 0) goto done;
+        position += amount;
     }
     if (BCryptFinishHash(hash, out->digest, sizeof(out->digest), 0) < 0) goto done;
     out->length = length; ok = 1;
@@ -312,14 +314,27 @@ done:
     if (!ok) memset(out, 0, sizeof(*out));
     return ok;
 }
+static int ps_identity_memory(void *context, uint64_t offset, void *out, size_t length)
+{ if (length) memcpy(out, (const unsigned char *)context + (size_t)offset, length); return 1; }
+int sh_package_bytes_identity(const void *body, size_t length, sh_package_file_identity *out)
+{
+    if (!body && length) { if (out) memset(out, 0, sizeof(*out)); return 0; }
+    return sh_package_reader_identity((void *)body, 0, length, ps_identity_memory, out);
+}
 
-sh_package_file *sh_package_file_capture(const char *absolute, char *error, size_t capacity)
+sh_package_file *sh_package_file_pin(const char *absolute, char *error, size_t capacity)
 {
     sh_package_file *out = calloc(1, sizeof(*out));
-    HANDLE handle = INVALID_HANDLE_VALUE;
-    if (out && absolute && ps_read_to(absolute, NULL, 0, &out->length, out->digest,
-            INVALID_HANDLE_VALUE, &handle)) {
-        out->handle = handle; out->references = 1;
+    wchar_t *wide = sh_package_source_wide_path(absolute);
+    HANDLE handle = wide ? CreateFileW(wide, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL) : INVALID_HANDLE_VALUE;
+    BY_HANDLE_FILE_INFORMATION info; LARGE_INTEGER size;
+    free(wide);
+    if (out && handle != INVALID_HANDLE_VALUE && GetFileInformationByHandle(handle, &info) &&
+        !(info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) &&
+        GetFileSizeEx(handle, &size) && size.QuadPart >= 0) {
+        out->handle = handle; out->references = 1; out->length = (uint64_t)size.QuadPart;
+        InitializeSRWLock(&out->identity_lock);
         if (error && capacity) error[0] = 0;
         return out;
     }
@@ -328,13 +343,53 @@ sh_package_file *sh_package_file_capture(const char *absolute, char *error, size
     return NULL;
 }
 
+sh_package_file *sh_package_file_capture(const char *absolute, char *error, size_t capacity)
+{
+    sh_package_file *out = sh_package_file_pin(absolute, error, capacity);
+    sh_package_file_identity identity;
+    if (out && !sh_package_file_get_identity(out, &identity)) {
+        sh_package_file_release(out); out = NULL;
+        ps_error(error, capacity, "cannot hash original resource file: %s", absolute);
+    }
+    return out;
+}
+
 int sh_package_file_get_identity(const sh_package_file *file, sh_package_file_identity *out)
 {
     if (!out) return 0;
     memset(out, 0, sizeof(*out));
     if (!file) return 0;
-    out->length = file->length; memcpy(out->digest, file->digest, sizeof(out->digest)); return 1;
+    /* The pinned bytes are immutable; only their memoized digest is mutable.
+     * Open an independent stream so a concurrent payload reader cannot change
+     * the hashing position. Failed reads leave the identity retryable. */
+    sh_package_file *mutable = (sh_package_file *)file;
+    AcquireSRWLockExclusive(&mutable->identity_lock);
+    if (!file->identity_ready) {
+        BCRYPT_ALG_HANDLE algorithm = NULL; BCRYPT_HASH_HANDLE hash = NULL;
+        uint64_t length = 0, total = 0;
+        FILE *stream = sh_package_file_open(file, &length, NULL, 0);
+        unsigned char chunk[65536];
+        int ok = stream && BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0) >= 0 &&
+            BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0) >= 0;
+        while (ok && total < length) {
+            size_t amount = length - total < sizeof(chunk) ? (size_t)(length - total) : sizeof(chunk);
+            size_t got = fread(chunk, 1, amount, stream);
+            if (got != amount || BCryptHashData(hash, chunk, (ULONG)got, 0) < 0) ok = 0;
+            total += got;
+        }
+        if (ok && BCryptFinishHash(hash, mutable->digest, sizeof(mutable->digest), 0) >= 0)
+            mutable->identity_ready = 1;
+        if (hash) BCryptDestroyHash(hash);
+        if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+        if (stream) fclose(stream);
+    }
+    int ok = file->identity_ready;
+    if (ok) { out->length = file->length; memcpy(out->digest, file->digest, sizeof(out->digest)); }
+    ReleaseSRWLockExclusive(&mutable->identity_lock); return ok;
 }
+
+uint64_t sh_package_file_length(const sh_package_file *file)
+{ return file ? file->length : 0; }
 
 sh_package_file *sh_package_file_seal(const sh_package_source_file *file,
     char *error, size_t capacity)
@@ -347,6 +402,7 @@ sh_package_file *sh_package_file_seal(const sh_package_source_file *file,
             &length, digest, INVALID_HANDLE_VALUE, &handle) && length == file->length &&
             !memcmp(digest, file->digest, sizeof(digest))) {
         out->handle = handle; out->length = length; out->references = 1;
+        InitializeSRWLock(&out->identity_lock); out->identity_ready = 1;
         memcpy(out->digest, digest, sizeof(out->digest));
         return out;
     }
@@ -355,6 +411,179 @@ sh_package_file *sh_package_file_seal(const sh_package_source_file *file,
     ps_error(error, capacity, "cannot seal verified resource cache: %s", file ? file->relative : "(null)");
     return NULL;
 }
+typedef struct ps_output {
+    HANDLE file;
+    BCRYPT_HASH_HANDLE hash;
+    uint64_t length, written;
+    int failed;
+} ps_output;
+
+static int ps_output_write(void *context, const void *bytes, size_t length)
+{
+    ps_output *out = context;
+    const unsigned char *at = bytes;
+    if (out->failed) return 0;
+    if ((length && !bytes) || length > out->length - out->written) { out->failed = 1; return 0; }
+    while (length) {
+        DWORD span = length > 65536 ? 65536 : (DWORD)length, written = 0;
+        if (!WriteFile(out->file, at, span, &written, NULL) || written != span ||
+            BCryptHashData(out->hash, (PUCHAR)at, span, 0) < 0) { out->failed = 1; return 0; }
+        out->written += span; at += span; length -= span;
+    }
+    return 1;
+}
+
+int sh_package_file_equal(const sh_package_file *left, const sh_package_file *right)
+{
+    uint64_t a_length = 0, b_length = 0;
+    FILE *a = sh_package_file_open(left, &a_length, NULL, 0);
+    FILE *b = sh_package_file_open(right, &b_length, NULL, 0);
+    unsigned char x[32768], y[32768];
+    int result = !a || !b ? -1 : a_length == b_length;
+    for (uint64_t at = 0; result == 1 && at < a_length;) {
+        size_t n = a_length - at < sizeof(x) ? (size_t)(a_length - at) : sizeof(x);
+        result = fread(x, 1, n, a) != n || fread(y, 1, n, b) != n ? -1 : !memcmp(x, y, n);
+        at += n;
+    }
+    if (a) fclose(a);
+    if (b) fclose(b);
+    return result;
+}
+
+sh_package_file *sh_package_file_generate(const char *directory, uint64_t length,
+    const unsigned char *expected, sh_package_file_producer produce, void *context,
+    char **path, char *error, size_t capacity)
+{
+    static LONG serial;
+    static SRWLOCK publication = SRWLOCK_INIT;
+    BCRYPT_ALG_HANDLE algorithm = NULL;
+    ps_output output = {INVALID_HANDLE_VALUE, NULL, length, 0, 0};
+    sh_package_file *file = NULL, *staged = NULL;
+    sh_package_source_file source = {0};
+    char leaf[160], hex[65], *temporary = NULL, *destination = NULL;
+    wchar_t *wide = NULL, *target = NULL, *folder = NULL;
+    DWORD attributes;
+    int owned = 0, locked = 0;
+    uint64_t collision = 0;
+    if (path) *path = NULL;
+    if (error && capacity) *error = 0;
+    if (!path || !directory || !produce || !(folder = sh_package_source_wide_path(directory))) goto done;
+    attributes = GetFileAttributesW(folder);
+    if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        attributes & FILE_ATTRIBUTE_REPARSE_POINT) goto done;
+    for (;;) {
+        snprintf(leaf, sizeof(leaf), ".building.%lu.%llu.%lu", GetCurrentProcessId(),
+            (unsigned long long)GetTickCount64(), (unsigned long)InterlockedIncrement(&serial));
+        temporary = ps_join(directory, leaf);
+        wide = temporary ? sh_package_source_wide_path(temporary) : NULL;
+        if (!wide) goto done;
+        output.file = CreateFileW(wide, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+        if (output.file != INVALID_HANDLE_VALUE) { owned = 1; break; }
+        if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS) goto done;
+        free(wide); wide = NULL; free(temporary); temporary = NULL;
+    }
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0) < 0 ||
+        BCryptCreateHash(algorithm, &output.hash, NULL, 0, NULL, 0, 0) < 0 ||
+        !produce(context, ps_output_write, &output, error, capacity) || output.failed ||
+        output.written != length || BCryptFinishHash(output.hash, source.digest, 32, 0) < 0 ||
+        (expected && memcmp(expected, source.digest, 32)) || !FlushFileBuffers(output.file)) goto done;
+    CloseHandle(output.file); output.file = INVALID_HANDLE_VALUE;
+    source.absolute = temporary; source.relative = temporary; source.length = length;
+    staged = sh_package_file_seal(&source, error, capacity);
+    if (!staged) goto done;
+    for (size_t i = 0; i < 32; ++i) snprintf(hex + i * 2, 3, "%02x", source.digest[i]);
+    snprintf(leaf, sizeof(leaf), "%s", hex);
+    /* Concurrent rename/open windows can transiently deny a reader and make a
+     * healthy occupant appear corrupt. Serialize only publication/comparison;
+     * producers still stream independently and existing readers never lock. */
+    AcquireSRWLockExclusive(&publication); locked = 1;
+    for (;;) {
+        destination = ps_join(directory, leaf);
+        target = destination ? sh_package_source_wide_path(destination) : NULL;
+        if (!target) goto done;
+        attributes = GetFileAttributesW(target);
+        if (attributes != INVALID_FILE_ATTRIBUTES) {
+            if (!(attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) {
+                source.absolute = destination;
+                file = sh_package_file_seal(&source, NULL, 0);
+                if (file && sh_package_file_equal(staged, file) == 1) break;
+                sh_package_file_release(file); file = NULL;
+            }
+            /* Never replace a pinned or mismatching cache entry. Private
+             * storage disagreement is not a reason to reject healthy sources. */
+            if (collision == UINT64_MAX) goto done;
+            snprintf(leaf, sizeof(leaf), "%s.%llu", hex, (unsigned long long)++collision);
+        } else {
+            if (GetLastError() != ERROR_FILE_NOT_FOUND) goto done;
+            sh_package_file_release(staged); staged = NULL;
+            if (MoveFileExW(wide, target, MOVEFILE_WRITE_THROUGH)) {
+                owned = 0; source.absolute = destination;
+                file = sh_package_file_seal(&source, error, capacity);
+                break;
+            }
+            if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS) goto done;
+            /* A concurrent compiler published this name. Re-pin our source
+             * before comparing rather than overwriting its publication. */
+            source.absolute = temporary;
+            staged = sh_package_file_seal(&source, error, capacity);
+            if (!staged) goto done;
+        }
+        free(destination); destination = NULL; free(target); target = NULL;
+    }
+    if (file) { *path = destination; destination = NULL; if (error && capacity) *error = 0; }
+done:
+    if (locked) ReleaseSRWLockExclusive(&publication);
+    if (output.file != INVALID_HANDLE_VALUE) CloseHandle(output.file);
+    if (output.hash) BCryptDestroyHash(output.hash);
+    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+    sh_package_file_release(staged);
+    if (owned) DeleteFileW(wide); /* Only the exact CREATE_NEW file from this call. */
+    free(temporary); free(destination); free(wide); free(target); free(folder);
+    if (!file && error && capacity && !*error) ps_error(error, capacity, "cannot prepare immutable resource cache output");
+    return file;
+}
+
+static int ps_cache_source(void *context, int (*write)(void *, const void *, size_t),
+    void *sink, char *error, size_t capacity)
+{
+    const sh_package_source_file *source = context;
+    sh_package_file *input = sh_package_file_pin(source->absolute, error, capacity);
+    uint64_t length = 0, at = 0;
+    FILE *stream = input ? sh_package_file_open(input, &length, error, capacity) : NULL;
+    unsigned char buffer[65536];
+    int ok = stream && length == source->length;
+    while (ok && at < length) {
+        size_t n = length - at < sizeof(buffer) ? (size_t)(length - at) : sizeof(buffer);
+        ok = fread(buffer, 1, n, stream) == n && write(sink, buffer, n); at += n;
+    }
+    if (stream) fclose(stream);
+    sh_package_file_release(input); return ok;
+}
+
+sh_package_file *sh_package_source_cache(const sh_package_source_file *source,
+    const char *directory, char **path, char *error, size_t capacity)
+{
+    char digest[65];
+    if (path) *path = NULL;
+    if (!source || source->directory || !directory || !path) {
+        ps_error(error, capacity, "invalid resource cache source"); return NULL;
+    }
+    /* Preserve the ordinary source-cache fast path. The scan already fixed
+     * this source identity; a verified cached snapshot need not be recopied. */
+    for (size_t i = 0; i < 32; ++i) snprintf(digest + i * 2, 3, "%02x", source->digest[i]);
+    char *cached_path = ps_join(directory, digest);
+    if (cached_path) {
+        sh_package_source_file cached = *source;
+        cached.absolute = cached_path;
+        sh_package_file *file = sh_package_file_seal(&cached, NULL, 0);
+        if (file) { *path = cached_path; if (error && capacity) *error = 0; return file; }
+        free(cached_path);
+    }
+    return sh_package_file_generate(directory, source->length, source->digest,
+        ps_cache_source, (void *)source, path, error, capacity);
+}
+
 sh_package_file *sh_package_file_retain(sh_package_file *file)
 { if (file) InterlockedIncrement(&file->references); return file; }
 void sh_package_file_release(sh_package_file *file)
@@ -828,6 +1057,9 @@ int sh_package_sources_remove(sh_package_sources *sources, size_t package)
         (sources->package_count - package - 1) * sizeof(*sources->packages));
     memmove(sources->fingerprints + package, sources->fingerprints + package + 1,
         (sources->package_count - package - 1) * sizeof(*sources->fingerprints));
+    if (sources->original_fingerprints) memmove(sources->original_fingerprints + package,
+        sources->original_fingerprints + package + 1,
+        (sources->package_count - package - 1) * sizeof(*sources->original_fingerprints));
     sources->package_count--; return 1;
 }
 
@@ -853,6 +1085,10 @@ sh_package_sources *sh_package_sources_join(const sh_package_sources *local,
     if (!out) goto bad;
     out->packages = calloc(packages ? packages : 1, sizeof(*out->packages));
     out->fingerprints = calloc(packages ? packages : 1, sizeof(*out->fingerprints));
+    if (local->original_fingerprints || map->original_fingerprints) {
+        out->original_fingerprints = calloc(packages ? packages : 1, sizeof(*out->original_fingerprints));
+        if (!out->original_fingerprints) goto bad;
+    }
     out->components = calloc(components ? components : 1, sizeof(*out->components));
     out->files = calloc(files ? files : 1, sizeof(*out->files));
     if (!out->packages || !out->fingerprints || !out->components || !out->files) goto bad;
@@ -862,6 +1098,9 @@ sh_package_sources *sh_package_sources_join(const sh_package_sources *local,
         if (in->package_count) {
             memcpy(out->packages + owner_offset, in->packages, in->package_count * sizeof(*in->packages));
             memcpy(out->fingerprints + owner_offset, in->fingerprints, in->package_count * sizeof(*in->fingerprints));
+            if (out->original_fingerprints) memcpy(out->original_fingerprints + owner_offset,
+                in->original_fingerprints ? in->original_fingerprints : in->fingerprints,
+                in->package_count * sizeof(*out->original_fingerprints));
         }
         out->package_count += in->package_count;
         for (i = 0; i < in->component_count; i++) {
@@ -908,5 +1147,6 @@ void sh_package_sources_free(sh_package_sources *sources)
         free(sources->components[i].relative); free(sources->components[i].root);
         sh_package_descriptor_free(&sources->components[i].descriptor);
     }
-    free(sources->components); free(sources->files); free(sources->packages); free(sources->fingerprints); free(sources);
+    free(sources->components); free(sources->files); free(sources->packages);
+    free(sources->fingerprints); free(sources->original_fingerprints); free(sources);
 }

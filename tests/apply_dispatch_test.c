@@ -131,7 +131,7 @@ static void test_maintenance_thread(void)
     for (int i = 0; i < 2; i++) {
         maintenance_step = 0;
         sh_apply_prefab_poll_play();
-        assert(maintenance_step == 6);
+        assert(maintenance_step == 7);
         assert(!g_nav_refresh_queued && !g_nav_refresh_registered);
         assert(g_last_load_state == -1);
     }
@@ -193,15 +193,9 @@ int main(void)
     append_fails = 1;
     assert(slot_schedule_apply(NULL, &item, 1, "test") == 0 && !g_pending_items);
     append_fails = 0;
-    {
-        char *oversize = (char *)malloc(APPLY_TEXT_CAP + 1);
-        sh_apply_item batch[2] = {item, item};
-        memset(oversize, 'x', APPLY_TEXT_CAP); oversize[APPLY_TEXT_CAP] = 0;
-        batch[1].text = oversize;
-        assert(slot_schedule_apply(NULL, batch, 2, "test") == 0 && !g_pending_items);
-        assert(slot_apply_sync(NULL, batch, 2, "test") == 0 && executions == 2);
-        free(oversize);
-    }
+    assert(ae_text_length_supported((size_t)INT_MAX));
+    assert(!ae_text_length_supported((size_t)INT_MAX + 1));
+    assert(!ae_text_length_supported(SIZE_MAX));
     engine_id = GetCurrentThreadId() + 1;
     assert(slot_apply_sync(NULL, &item, 1, "test") == 0);
     assert(g_sync_req.state == AE_SYNC_EMPTY && executions == 2);
@@ -243,7 +237,8 @@ void sh_map_published_poll(void) { maintenance_call(1); }
 void sh_rawmap_map_context_poll(void) { maintenance_call(2); }
 void sh_decl_server_rearm_poll(void) { maintenance_call(3); }
 void sh_mpkg_consent_poll(void) { maintenance_call(4); }
-void sh_rawmap_pending_map_poll(void) { maintenance_call(5); }
+void sh_prefab_import_maintenance(void) { maintenance_call(5); }
+void sh_rawmap_pending_map_poll(void) { maintenance_call(6); }
 void sh_package_requirements_poll(void) { maintenance_call(0); }
 void *sh_typeinfo_get_declmgr(void) { assert(0); return NULL; }
 int sh_iface_class_inherit_ok(int id, const char *c, const char *h) { (void)id; (void)c; (void)h; assert(0); return 0; }
@@ -268,3 +263,15 @@ void sh_nav_preview_clear(void) { assert(0); }
 void sh_nav_preview_colour(float r, float g, float b) { (void)r; (void)g; (void)b; assert(0); }
 
 int sh_iface_engine_copy_paste_enabled(void) { assert(0); return 0; }
+
+/* Native staging has its own ownership/transaction fixture. */
+sh_package_occurrence_snapshot *sh_package_occurrence_retain(sh_package_occurrence_snapshot *owner) { (void)owner; assert(0); return NULL; }
+void sh_package_occurrence_release(sh_package_occurrence_snapshot *owner) { (void)owner; assert(0); }
+int sh_package_editor_ready(void) { assert(0); return 0; }
+int sh_package_editor_healthy(char *error, size_t capacity) { (void)error; (void)capacity; assert(0); return 0; }
+sh_package_occurrence_snapshot *sh_package_editor_snapshot(unsigned kind, const void *flat, char *error, size_t capacity)
+{ (void)kind; (void)flat; (void)error; (void)capacity; assert(0); return NULL; }
+int sh_package_editor_attach(unsigned kind, const void *flat, const sh_package_occurrence_snapshot *owner, char *error, size_t capacity)
+{ (void)kind; (void)flat; (void)owner; (void)error; (void)capacity; assert(0); return 0; }
+void *sh_editor_transition_capture(const void *editor) { (void)editor; assert(0); return NULL; }
+int sh_editor_transition_frame_ready(void *editor, void *map) { (void)editor; (void)map; assert(0); return 0; }

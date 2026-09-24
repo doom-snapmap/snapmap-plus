@@ -21,10 +21,10 @@ static void binary(const char *relative,const unsigned char *bytes,size_t length
     CHECK(!fopen_s(&file,path,"wb"));if(!file)return;
     CHECK(fwrite(bytes,1,length,file)==length);CHECK(!fclose(file));
 }
-static void packed(const char *relative,unsigned kind,uint64_t id,uint32_t language,const char *body)
+static void packed_bytes(const char *relative,unsigned kind,uint64_t id,uint32_t language,const void *body,size_t length)
 {
     unsigned char bytes[1024]={0};uint32_t position=72,width=kind==2 ? 24 : 20;
-    size_t length=strlen(body);CHECK(length<=sizeof(bytes)-512);if(length>sizeof(bytes)-512)return;
+    CHECK(length<=sizeof(bytes)-512);if(length>sizeof(bytes)-512)return;
     memcpy(bytes,"AKPK",4);put(bytes+4,76+width);put(bytes+8,1);put(bytes+12,44);
     for(unsigned i=0;i<3;i++)put(bytes+16+4*i,4+(i==kind ? width : 0));
     put(bytes+28,2);put(bytes+32,20);put(bytes+36,1);put(bytes+40,36);put(bytes+44,0);
@@ -40,6 +40,8 @@ static void packed(const char *relative,unsigned kind,uint64_t id,uint32_t langu
     }
     memcpy(bytes+512,body,length);binary(relative,bytes,512+length);
 }
+static void packed(const char *relative,unsigned kind,uint64_t id,uint32_t language,const char *body)
+{ packed_bytes(relative,kind,id,language,body,strlen(body)); }
 static sh_audio_originals *open_prefixed(const char *base,const wchar_t *language,const char *prefix)
 {
     char path[4096];snprintf(path,sizeof(path),"%s/%s",root,base);
@@ -84,6 +86,62 @@ static int count_banks(void *context,uint32_t id,uint32_t language)
 static int stop_banks(void *context,uint32_t id,uint32_t language)
 { (void)id;(void)language;++*(size_t *)context;return 0; }
 
+static void cooked_bank(unsigned char bytes[49],uint32_t id,uint32_t event,uint32_t language)
+{
+    memset(bytes,0,49);memcpy(bytes,"BKHD",4);put(bytes+4,16);put(bytes+8,113);
+    put(bytes+12,id);put(bytes+16,language);memcpy(bytes+24,"HIRC",4);put(bytes+28,17);
+    put(bytes+32,1);bytes[36]=4;put(bytes+37,8);put(bytes+41,event);
+}
+static void bank_catalog(void)
+{
+    unsigned char bank[49],other[49];uint32_t foo;char error[512],path[4096];
+    CHECK(sh_audio_bank_identity("foo.bnk",&foo));cooked_bank(bank,foo,77,1);cooked_bank(other,foo,88,0);
+    binary("catalog/sound/soundbanks/pc/foo.bnk",other,sizeof(other));
+    binary("catalog/sound/soundbanks/pc/english/foo.bnk",other,sizeof(other));
+    packed_bytes("catalog/sound/soundbanks/pc/english/voice.pck",0,foo,1,bank,sizeof(bank));
+    cooked_bank(other,42,99,0);packed_bytes("catalog/sound/soundbanks/pc/a.pck",0,42,0,other,sizeof(other));
+    packed("catalog/sound/soundbanks/pc/media.pck",1,9001,0,"UNUSED MEDIA");
+    create("catalog/sound/soundbanks/pc/9002.wem","LOOSE UNUSED MEDIA");
+    create("catalog/sound/soundbanks/pc/english/9003.wem","LOCALIZED UNUSED MEDIA");
+    sh_audio_originals *originals=open_originals("catalog",L"english");
+    const sh_audio_original_bank *rows=NULL,*again=NULL;size_t count=0,next=0;
+    int result=sh_audio_originals_banks(originals,&rows,&count,error,sizeof(error));
+    if(result!=1)fprintf(stderr,"catalog: %s\n",error);
+    CHECK(result==1 && count==2);
+    if(count==2) {
+        CHECK(rows[0].metadata.id==foo && rows[0].metadata.events[0]==77);
+        CHECK(!strcmp(rows[0].path,"sound/soundbanks/pc/english/foo.bnk"));
+        CHECK(rows[1].metadata.id==42 && rows[1].metadata.events[0]==99);
+        CHECK(!strcmp(rows[1].filename,"42.bnk"));
+    }
+    CHECK(sh_audio_originals_banks(originals,&again,&next,error,sizeof(error))==1 && again==rows && next==count);
+    {
+        const uint32_t *ids=NULL,*reused=NULL;size_t used=0,reused_count=0;
+        CHECK(sh_audio_originals_ids(originals,&ids,&used,error,sizeof(error))==1 && used==7);
+        uint32_t expected[]={42,77,99,9001,9002,9003,foo};
+        for(size_t i=0;i<sizeof(expected)/sizeof(expected[0]);i++) {
+            size_t hits=0;for(size_t j=0;j<used;j++)hits+=ids[j]==expected[i];CHECK(hits==1);
+        }
+        for(size_t i=1;i<used;i++)CHECK(ids[i]>ids[i-1]);
+        CHECK(sh_audio_originals_ids(originals,&reused,&reused_count,error,sizeof(error))==1 && reused==ids && reused_count==used);
+    }
+    snprintf(path,sizeof(path),"%s/catalog/sound/soundbanks/pc/english/voice.pck",root);
+    HANDLE writer=CreateFileA(path,GENERIC_WRITE,FILE_SHARE_READ,NULL,OPEN_EXISTING,0,NULL);
+    CHECK(writer==INVALID_HANDLE_VALUE && GetLastError()==ERROR_SHARING_VIOLATION);
+    if(writer!=INVALID_HANDLE_VALUE)CloseHandle(writer);
+    sh_audio_originals_close(originals);
+    originals=open_originals("catalog-absent",L"english");
+    CHECK(sh_audio_originals_banks(originals,&rows,&count,error,sizeof(error))==1 && !count);
+    { const uint32_t *ids=NULL;size_t used=3;CHECK(sh_audio_originals_ids(originals,&ids,&used,error,sizeof(error))==1 && !used); }
+    sh_audio_originals_close(originals);
+    create("catalog-bad/sound/soundbanks/pc/bad.bnk","BROKEN");
+    originals=open_originals("catalog-bad",L"english");
+    CHECK(sh_audio_originals_banks(originals,&rows,&count,error,sizeof(error))==-1 && !rows && !count && *error);
+    { const uint32_t *ids=(const uint32_t *)1;size_t used=3;
+      CHECK(sh_audio_originals_ids(originals,&ids,&used,error,sizeof(error))==-1 && !ids && !used && *error); }
+    sh_audio_originals_close(originals);
+}
+
 static int activate(void *context,int restoring,const sh_package_changes *changes,char *error,size_t capacity)
 { (void)context;(void)restoring;(void)error;(void)capacity;CHECK(changes);return 1; }
 static void runtime_originals(void)
@@ -126,8 +184,32 @@ static void runtime_originals(void)
     }
     sh_package_runtime_test_dispose();sh_package_runtime_test_audio_originals(NULL,NULL);
 }
-int main(void)
+int main(int argc,char **argv)
 {
+    if(argc==3) {
+        wchar_t language[256];char error[2048];const sh_audio_original_bank *banks=NULL;size_t count=0,events=0,media=0,targets=0;
+        if(!MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,argv[2],-1,language,256))return 2;
+        sh_audio_originals *catalog=sh_audio_originals_open(argv[1],language,NULL);
+        int ok=catalog && sh_audio_originals_banks(catalog,&banks,&count,error,sizeof(error))==1;
+        if(!ok)fprintf(stderr,"installed audio catalog: %s\n",catalog ? error : "allocation failed");
+        for(size_t i=0;ok && i<count;i++){events+=banks[i].metadata.event_count;media+=banks[i].metadata.media_count;targets+=banks[i].metadata.target_count;}
+        if(ok) {
+            printf("installed audio catalog: %zu banks, %zu events, %zu media rows, %zu external targets\n",count,events,media,targets);
+            const uint32_t *ids=NULL;size_t id_count=0;
+            ok=sh_audio_originals_ids(catalog,&ids,&id_count,error,sizeof(error))==1;
+            printf("installed original identities: %zu, %s%s%s\n",id_count,ok ? "pass" : "failed",ok ? "" : ": ",ok ? "" : error);
+            if(!ok){sh_audio_originals_close(catalog);return 1;}
+            const sh_audio_bank **view=calloc(count ? count : 1,sizeof(*view));unsigned char *selected=malloc(count ? count : 1);
+            ok=view && selected;
+            if(ok) {
+                memset(selected,1,count);for(size_t i=0;i<count;i++)view[i]=&banks[i].metadata;
+                ok=sh_audio_bank_closure(view,count,NULL,0,1,selected,NULL,error,sizeof(error));
+                printf("installed complete inventory dependency closure: %s%s%s\n",ok ? "pass" : "failed",ok ? "" : ": ",ok ? "" : error);
+            }
+            free(view);free(selected);
+        }
+        sh_audio_originals_close(catalog);return ok ? 0 : 1;
+    }
     char temporary[MAX_PATH],path[4096],error[256];uint32_t foo,bar;
     sh_package_original_identity answer;
     CHECK(GetTempPathA(sizeof(temporary),temporary));CHECK(GetTempFileNameA(temporary,"aor",0,root));
@@ -242,7 +324,7 @@ int main(void)
     CHECK(sh_audio_originals_identity(originals,"sound/soundbanks/pc/foo.bnk",&answer,error,sizeof(error))==-1 && strstr(error,"metadata"));
     sh_audio_originals_close(originals);
     originals=open_originals("absent",L"english");expect(originals,"foo.bnk",0,NULL);sh_audio_originals_close(originals);
-    runtime_originals();
+    bank_catalog();runtime_originals();
     originals=open_originals("base",L"english");expect(originals,"foo.bnk",1,"PACK");sh_audio_originals_close(originals);
     cleanup();if(failures)return 1;puts("installed audio original and runtime availability checks passed");return 0;
 }

@@ -6,23 +6,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include "weapon_hud.h"
+#include "package_hud.h"
 #include "packages.h"
 #include "package_runtime.h"
 #include "config_json.h"
 #include "backend_log.h"
 #include "patch.h"
 
-#define HUD_MAX_RULES 256
-#define HUD_NAME_CAP 192
-#define HUD_FILE_CAP (64u * 1024u)
-#define HUD_TOTAL_CAP (256u * 1024u)
-
-typedef struct hud_rule {
-    char name[HUD_NAME_CAP];
-    char owner[SH_PACKAGE_NAME_CAP];
-    int weapon_mode;
-} hud_rule;
-typedef struct hud_table { size_t count; hud_rule rules[HUD_MAX_RULES]; } hud_table;
+typedef struct hud_rule { char *name; int weapon_mode; } hud_rule;
+typedef struct hud_table { size_t count; hud_rule *rules; } hud_table;
 static hud_table g_rules;
 static SRWLOCK g_lock = SRWLOCK_INIT;
 static int g_enabled;
@@ -33,96 +25,52 @@ typedef unsigned char (*hud_mode_fn)(void *game);
 static hud_mode_fn g_original;
 static volatile LONG g_reported;
 
-static int hud_name_valid(const char *s)
+static void hud_free(hud_table *table)
 {
-    const char *part = s;
-    size_t n = strlen(s);
-    if (!n || n >= HUD_NAME_CAP || s[0] == '/' || s[n-1] == '/') return 0;
-    for (size_t i = 0; i <= n; i++) {
-        unsigned char c = (unsigned char)s[i];
-        if (!c || c == '/') {
-            size_t len = (size_t)(s + i - part);
-            if (!len || (len == 1 && part[0] == '.') ||
-                (len == 2 && part[0] == '.' && part[1] == '.')) return 0;
-            part = s + i + 1;
-        } else if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-                     c == '_' || c == '-' || c == '.')) return 0;
-    }
-    return 1;
+    for (size_t i = 0; i < table->count; i++) free(table->rules[i].name);
+    free(table->rules); memset(table, 0, sizeof(*table));
 }
 
-static int hud_string(const char *raw, char *out, size_t cap)
+static int hud_parse(hud_table *table, const char *json, size_t length)
 {
-    size_t length = 0;
-    return raw && sh_json_decode_string(raw, strlen(raw), out, cap, &length) &&
-           strlen(out) == length;
-}
-
-static int hud_parse(hud_table *table, const char *json, size_t length, const char *owner)
-{
-    sh_json_object root = {0}, weapons = {0};
-    char message[512];
-    const char *raw;
+    sh_json_object source = {0}, canonical = {0}, weapons = {0};
     int ok = 0;
-    if (length > HUD_FILE_CAP || !sh_json_parse_object(json, length, 5, &root)) goto done;
-    if (!root.count) { ok = 1; goto done; }
-    if (root.count != 1) goto done;
-    raw = sh_json_object_get(&root, "weapons");
-    if (!raw || !sh_json_parse_object(raw, strlen(raw), 3, &weapons)) goto done;
+    if (!sh_json_parse_object(json, length, 5, &source) ||
+        !sh_package_hud_merge_provisional(&canonical, &source, NULL, 0, NULL)) goto done;
+    const char *raw = sh_json_object_get(&canonical, "weapons");
+    if (!raw) { ok = 1; goto done; }
+    if (!sh_json_parse_object(raw, strlen(raw), 3, &weapons) ||
+        weapons.count > SIZE_MAX / sizeof(*table->rules)) goto done;
+    table->rules = calloc(weapons.count ? weapons.count : 1, sizeof(*table->rules));
+    if (!table->rules) goto done;
     for (size_t i = 0; i < weapons.count; i++) {
-        sh_json_member *m = &weapons.members[i];
-        sh_json_object settings = {0};
-        char mode[24];
-        int weapon_mode;
-        size_t j;
-        if (strlen(m->key) != m->key_length || !hud_name_valid(m->key) ||
-            !sh_json_parse_object(m->value_json, strlen(m->value_json), 2, &settings)) goto done;
-        int valid = settings.count == 1 &&
-            hud_string(sh_json_object_get(&settings, "ammo_display"), mode, sizeof mode);
-        sh_json_object_free(&settings);
-        if (!valid || (strcmp(mode, "weapon") && strcmp(mode, "engine"))) goto done;
-        weapon_mode = strcmp(mode, "weapon") == 0;
-        for (j = 0; j < table->count; j++) {
-            if (strcmp(table->rules[j].name, m->key)) continue;
-            if (table->rules[j].weapon_mode != weapon_mode) {
-                _snprintf_s(message, sizeof message, _TRUNCATE,
-                    "weapon-hud REFUSED: conflicting ammo_display for %s in packages %s and %s",
-                    m->key, table->rules[j].owner, owner);
-                backend_log(message);
-                goto done;
-            }
-            break;
-        }
-        if (j < table->count) continue;
-        if (table->count == HUD_MAX_RULES) goto done;
-        hud_rule *r = &table->rules[table->count++];
-        strcpy_s(r->name, sizeof r->name, m->key);
-        strncpy_s(r->owner, sizeof r->owner, owner, _TRUNCATE);
-        r->weapon_mode = weapon_mode;
+        hud_rule *rule = table->rules + table->count++;
+        rule->name = _strdup(weapons.members[i].key);
+        if (!rule->name || !sh_package_hud_mode(weapons.members[i].value_json, &rule->weapon_mode)) goto done;
     }
     ok = 1;
 done:
-    sh_json_object_free(&weapons);
-    sh_json_object_free(&root);
+    sh_json_object_free(&source); sh_json_object_free(&canonical); sh_json_object_free(&weapons);
+    if (!ok) hud_free(table);
     return ok;
 }
 
 int sh_weapon_hud_reload(const char *data_root)
 {
-    hud_table *next = (hud_table *)calloc(1, sizeof(hud_table));
+    hud_table next = {0}, previous = {0};
     size_t length = 0;
     char *json = NULL, message[512];
     int ok = 0;
     (void)data_root;
-    if (!g_enabled) { free(next); return 1; }
+    if (!g_enabled) return 1;
     json = sh_package_runtime_active_policy("hud", &length);
-    if (next && json) ok = hud_parse(next, json, length, "compiled packages");
+    if (json) ok = hud_parse(&next, json, length);
     AcquireSRWLockExclusive(&g_lock);
-    if (ok) g_rules = *next; else memset(&g_rules, 0, sizeof(g_rules));
+    if (ok) { previous = g_rules; g_rules = next; memset(&next, 0, sizeof(next)); }
     InterlockedExchange(&g_reported, 0);
-    snprintf(message, sizeof(message), "weapon-hud %s: %zu rules", ok ? "compiled" : "REFUSED", g_rules.count);
+    snprintf(message, sizeof(message), "weapon-hud %s: %zu rules", ok ? "compiled" : "retained previous policy", g_rules.count);
     ReleaseSRWLockExclusive(&g_lock);
-    backend_log(message); free(json); free(next); return ok;
+    backend_log(message); free(json); hud_free(&previous); hud_free(&next); return ok;
 }
 
 unsigned char sh_weapon_hud_select(const char *weapon, unsigned char engine_mode)
@@ -130,30 +78,26 @@ unsigned char sh_weapon_hud_select(const char *weapon, unsigned char engine_mode
     unsigned char result = engine_mode;
     if (!weapon) return result;
     AcquireSRWLockShared(&g_lock);
+    __try {
     for (size_t i = 0; i < g_rules.count; i++) {
         if (!strcmp(weapon, g_rules.rules[i].name)) {
             if (g_rules.rules[i].weapon_mode) result = 0;
             break;
         }
     }
-    ReleaseSRWLockShared(&g_lock);
+    } __finally { ReleaseSRWLockShared(&g_lock); }
     return result;
 }
-
 /* The call-site relay passes the widget in RDX; RCX is the original game
  * argument. No widget writes, global predicate detour or TLS context is needed. */
 static unsigned char hud_mode(void *game, const unsigned char *widget)
 {
     unsigned char original = g_original(game), result = original;
-    char name[HUD_NAME_CAP];
+
     __try {
         const unsigned char *decl = *(const unsigned char *const *)(widget + 0x1f8);
         const char *source = decl ? *(const char *const *)(decl + 8) : NULL;
-        if (source) {
-            size_t i;
-            for (i = 0; i < sizeof name; i++) { name[i] = source[i]; if (!name[i]) break; }
-            if (i < sizeof name) result = sh_weapon_hud_select(name, original);
-        }
+        if (source) result = sh_weapon_hud_select(source, original);
     } __except (EXCEPTION_EXECUTE_HANDLER) { result = original; }
     if (result != original && InterlockedCompareExchange(&g_reported, 1, 0) == 0)
         backend_log("weapon-hud active: package weapon-capacity display selected");
@@ -243,18 +187,26 @@ refused:
 }
 
 #ifdef SH_WEAPON_HUD_TESTING
-void sh_weapon_hud_test_reset(void) { memset(&g_rules, 0, sizeof g_rules); g_enabled = 1; }
+void sh_weapon_hud_test_reset(void) { hud_free(&g_rules); g_enabled = 1; }
 size_t sh_weapon_hud_test_count(void) { return g_rules.count; }
 int sh_weapon_hud_test_parse(const char *json, size_t length, const char *owner)
 {
-    hud_table *next = (hud_table *)malloc(sizeof *next);
-    if (!next) return 0;
-    *next = g_rules;
-    int ok = hud_parse(next, json, length, owner);
-    if (ok) g_rules = *next;
-    else memset(&g_rules, 0, sizeof g_rules);
-    free(next);
-    return ok;
+    sh_json_object rows = {0}, combined = {0}, incoming = {0};
+    hud_table next = {0}; char *raw = NULL; int ok = 0;
+    (void)owner;
+    for (size_t i = 0; i < g_rules.count; i++)
+        if (!sh_json_object_set(&rows, g_rules.rules[i].name, g_rules.rules[i].weapon_mode ?
+            "{\"ammo_display\":\"weapon\"}" : "{\"ammo_display\":\"engine\"}", 2)) goto done;
+    raw = sh_json_serialize_object(&rows, 0, NULL);
+    if (!raw || !sh_json_object_set(&combined, "weapons", raw, 3) ||
+        !sh_json_parse_object(json, length, 5, &incoming) ||
+        !sh_package_hud_merge_provisional(&combined, &incoming, NULL, 0, NULL)) goto done;
+    free(raw); raw = sh_json_serialize_object(&combined, 0, &length);
+    if (!raw || !hud_parse(&next, raw, length)) goto done;
+    hud_free(&g_rules); g_rules = next; memset(&next, 0, sizeof(next)); ok = 1;
+done:
+    free(raw); hud_free(&next); sh_json_object_free(&rows);
+    sh_json_object_free(&combined); sh_json_object_free(&incoming); return ok;
 }
 
 typedef struct hud_test_runner {

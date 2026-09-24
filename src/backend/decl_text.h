@@ -54,8 +54,8 @@ int sh_decl_text_collect_entitydef_dependencies(const unsigned char *text,
 /* Reorder an already-admitted set so uniquely resolved logical names quoted by
  * one body are registered before the body that references them. Material
  * expressions also resolve unquoted name[index] references to table decls;
- * callers provide `type` to enable these typed edges. Comments and
- * escaped strings are ignored; ambiguous names create no edge. Strongly
+ * callers provide `type` to enable these typed edges. Comments are ignored;
+ * strings retain native literal backslashes. Ambiguous names create no edge. Strongly
  * connected components are condensed and selected by logical-name order, while
  * members of a component are also name-ordered unless explicit inherit edges
  * require a parent-first order. A true explicit-inherit cycle refuses the

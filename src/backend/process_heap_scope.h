@@ -48,7 +48,7 @@ static __inline int sh_process_heap_bind(sh_process_heap_api *api,
  * if restoration fails; a guessed pop can corrupt another native scope. */
 static __inline int sh_process_heap_leave(sh_process_heap_scope *scope)
 {
-    int depth;
+    int depth, faulted = 0;
     if (!scope || !scope->active) return 1;
     __try {
         depth = *(const int *)((const uint8_t *)scope->self + 0xc4);
@@ -59,11 +59,14 @@ static __inline int sh_process_heap_leave(sh_process_heap_scope *scope)
         if (depth != scope->depth + 1 ||
             *(const int *)((const uint8_t *)scope->self + 0x44 + scope->depth * 4) != 0)
             return 0;
-        scope->api->pop(scope->self);
+        __try { scope->api->pop(scope->self); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { faulted = 1; }
+        /* A fault after the pop still rejects the operation, but it must not
+         * leave an already-released scope pending or pop another owner's heap. */
         if (*(const int *)((const uint8_t *)scope->self + 0xc4) != scope->depth)
             return 0;
         scope->active = 0;
-        return 1;
+        return !faulted;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 

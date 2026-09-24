@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include "decl_dependencies.h"
+#include "decl_script_schema.h"
 
 typedef struct sh_decl_native_schema sh_decl_native_schema;
 
@@ -14,6 +15,7 @@ typedef struct sh_decl_native_source {
     void *context;
     int (*read)(void *context, uintptr_t address, void *destination, size_t length);
     uintptr_t reflection;
+    const sh_decl_script_schema *scripts; /* immutable, borrowed until close */
 } sh_decl_native_source;
 
 /* Locate the already-initialized reflection context through a signature-bound
@@ -38,6 +40,8 @@ typedef struct sh_decl_dependency_observer {
     int (*reference)(void *context, const char *path, sh_decl_value_type type,
                      const char *name, size_t name_length);
     void (*gap)(void *context, const char *path, sh_decl_value_type type, const char *reason);
+    int (*reference_site)(void *context, const char *path, sh_decl_value_type type,
+        const char *name, size_t name_length, const sh_decl_reference_site *site);
 } sh_decl_dependency_observer;
 
 /* Captures registry identities, then reads fields on demand. Custom readers
@@ -78,7 +82,9 @@ typedef enum sh_decl_reference_reader {
     SH_DECL_READER_UNKNOWN,
     SH_DECL_READER_DECL,
     SH_DECL_READER_IMAGE,
-    SH_DECL_READER_MODEL
+    SH_DECL_READER_MODEL,
+    SH_DECL_READER_STATIC_MODEL,
+    SH_DECL_READER_STATIC_PARTICLE
 } sh_decl_reference_reader;
 /* Select the identity resolver using the registered reader, including types
  * sharing it. Class-name spelling alone does not define a reader contract. */

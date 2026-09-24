@@ -15,12 +15,13 @@
 #include <limits.h>
 #include "package_compiler.h"
 #include "package_legacy.h"
+#include "package_bundle.h"
 /* Configure before map interception starts; callback owns catalog lifetime. */
 void sh_mpkg_set_legacy_reader(sh_package_legacy_reader reader, void *context);
 
 /* Format constants -- keep in lockstep with src/map_package.py. */
 #define SH_MPKG_DIGEST_CHARS   16          /* sha256 hexdigest prefix length */
-#define SH_MPKG_ID_CAP         128         /* package id buffer (incl NUL) */
+#define SH_MPKG_ID_CAP         SH_PACKAGE_BUNDLE_KEY_CAP /* transport, not authored ID */
 #define SH_MPKG_MAX_SHARDS     ((unsigned)INT_MAX / SH_MPKG_SHARD_CHARS + 1u)
 #define SH_MPKG_MAX_CHUNK      65536       /* b64 chars per shard (py emits 8192) */
 /* Only a representation bound: base64 must fit a signed native idStr. The
@@ -28,7 +29,7 @@ void sh_mpkg_set_legacy_reader(sh_package_legacy_reader reader, void *context);
 #define SH_MPKG_MAX_PAYLOAD    ((size_t)(INT_MAX / 4) * 3u)
 #define SH_MPKG_SHARD_CHARS    8192        /* b64 chars WRITTEN per shard; 16384 failed
                                               * to deserialize, so this is a measured cap */
-#define SH_MPKG_HEADER_CAP     192         /* "smpkg." + id + two indices + digest + NUL */
+#define SH_MPKG_HEADER_CAP     (SH_MPKG_ID_CAP + 64u) /* transport plus trailing fields */
 #define SH_MPKG_ERR_CAP        256
 
 /* One declared package, summarised from the shard headers (the cheap
@@ -76,6 +77,10 @@ sh_mpkg_context *sh_mpkg_context_open(const char *data_root, const char *json, s
     char *error, size_t capacity);
 const char *sh_mpkg_context_root(const sh_mpkg_context *context);
 size_t sh_mpkg_context_count(const sh_mpkg_context *context);
+/* Borrowed complete original archives and their exact normalized source owners.
+ * Attach them to an unpublished runtime plan before activation. */
+const sh_package_bundle_binding *sh_mpkg_context_bundles(const sh_mpkg_context *context,
+    size_t *count);
 int sh_mpkg_context_close(sh_mpkg_context **context);
 /* Only after the provider has released this context: transfer temporary-file
  * cleanup to the retry queue. A filesystem lock must not block the next map. */

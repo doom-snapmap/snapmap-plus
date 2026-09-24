@@ -123,8 +123,94 @@ static void relative_call_preserves_execution(void)
     VirtualFree(page, 0, MEM_RELEASE);
 }
 
+static int constant_detour(int value, volatile int *tag)
+{
+    *tag = 2;
+    return value + 1000;
+}
+
+static void many_simultaneous_hooks(void)
+{
+    enum { COUNT = 193, STRIDE = 64 };
+    void *prepared[COUNT] = {0};
+    unsigned char *code = VirtualAlloc(NULL, COUNT * STRIDE,
+        MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    int before = hook_owned_count();
+    CHECK(code != NULL); if (!code) return;
+    for (int i = 0; i < COUNT; ++i)
+        memcpy(code + i * STRIDE, ORIG_CODE, sizeof(ORIG_CODE));
+    FlushInstructionCache(GetCurrentProcess(), code, COUNT * STRIDE);
+    for (int i = 0; i < COUNT; ++i) {
+        volatile int tag = 0;
+        prepared[i] = hook_prepare(code + i * STRIDE, constant_detour, STOLEN);
+        CHECK(prepared[i] != NULL);
+        if (!prepared[i]) continue;
+        CHECK(((scratch_fn)prepared[i])(i, &tag) == 2 * i && tag == 1);
+        CHECK(hook_commit(prepared[i]) == B2_PATCH_OK);
+        CHECK(((scratch_fn)(code + i * STRIDE))(i, &tag) == i + 1000 && tag == 2);
+    }
+    CHECK(hook_owned_count() == before + COUNT);
+    CHECK(hook_installed_count() == COUNT);
+    CHECK(!hook_prepare(code, constant_detour, STOLEN));
+    /* Registry growth cannot move or invalidate the first callback. */
+    if (prepared[0]) {
+        volatile int tag = 0;
+        CHECK(((scratch_fn)prepared[0])(23, &tag) == 46 && tag == 1);
+    }
+    /* Bulk teardown retains just the failed record for a later retry. */
+    sh_patch_test_faults(1, 0, 0);
+    CHECK(hook_unpatch_all() == COUNT - 1);
+    CHECK(hook_owned_count() == before + 1 && hook_installed_count() == 0);
+    sh_patch_test_faults(0, 0, 0);
+    CHECK(hook_unpatch_all() == 1);
+    CHECK(hook_owned_count() == before);
+    for (int i = 0; i < COUNT; ++i)
+        CHECK(!memcmp(code + i * STRIDE, ORIG_CODE, sizeof(ORIG_CODE)));
+    VirtualFree(code, 0, MEM_RELEASE);
+}
+
+typedef struct preparation_race { void *target, *tramp; HANDLE start; } preparation_race;
+
+static DWORD WINAPI prepare_thread(void *context)
+{
+    preparation_race *race = context;
+    WaitForSingleObject(race->start, INFINITE);
+    race->tramp = hook_prepare(race->target, constant_detour, STOLEN);
+    return 0;
+}
+
+static void concurrent_preparation_has_one_owner(void)
+{
+    enum { COUNT = 8 };
+    HANDLE threads[COUNT], start = CreateEvent(NULL, TRUE, FALSE, NULL);
+    preparation_race race[COUNT] = {0};
+    unsigned char *code = VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    int created = 0, owners = 0, before = hook_owned_count();
+    CHECK(start && code);
+    if (!start || !code) goto done;
+    memcpy(code, ORIG_CODE, sizeof(ORIG_CODE));
+    for (int i = 0; i < COUNT; ++i) {
+        race[i].target = code; race[i].start = start;
+        HANDLE thread = CreateThread(NULL, 0, prepare_thread, &race[i], 0, NULL);
+        CHECK(thread != NULL);
+        if (thread) threads[created++] = thread;
+    }
+    SetEvent(start);
+    if (created) WaitForMultipleObjects(created, threads, TRUE, INFINITE);
+    for (int i = 0; i < created; ++i) CloseHandle(threads[i]);
+    for (int i = 0; i < COUNT; ++i) if (race[i].tramp) ++owners;
+    CHECK(owners == 1 && hook_owned_count() == before + 1);
+    for (int i = 0; i < COUNT; ++i) if (race[i].tramp) CHECK(hook_unpatch(race[i].tramp));
+    CHECK(hook_owned_count() == before);
+done:
+    if (start) CloseHandle(start);
+    if (code) VirtualFree(code, 0, MEM_RELEASE);
+}
+
 int main(void)
 {
+    many_simultaneous_hooks();
+    concurrent_preparation_has_one_owner();
     rip_lea_preserves_addresses();
     relative_call_preserves_execution();
     unsigned char *code = VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);

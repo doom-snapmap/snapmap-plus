@@ -15,6 +15,17 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
+
+/* Construct a native idFile stream for an exact compiled resource already
+ * opened by its owning subsystem. Takes ownership of file on every outcome;
+ * successful streams close it through their native destructor. Rewinds before
+ * publication and requires the verified idStr helpers to be installed. This
+ * does not resolve a path, consult local packages, or fall back to the game. */
+void *sh_overrides_stream_take_file(FILE *file, uint64_t length, const char *name);
+/* Copy a compiled in-memory resource into a stream with the same native ABI.
+ * Source bytes remain caller-owned. No partial stream is returned on failure. */
+void *sh_overrides_stream_copy_bytes(const void *bytes, size_t length, const char *name);
 
 /* Native DeclRegisterFile canonicalizes a source argument to decltree/<source>.
  * The dynamic decl server therefore publishes one exact provider entry per
@@ -100,6 +111,10 @@ struct sh_package_map_plan;
 int sh_overrides_activate_map(struct sh_package_map_plan *plan,
     int (*activate)(void *context, int restoring, const struct sh_package_changes *changes,
         char *error, size_t capacity), void *context);
+struct sh_package_occurrence_snapshot;
+int sh_overrides_activate_occurrences(const struct sh_package_occurrence_snapshot *map,
+    int (*activate)(void *context, int restoring, const struct sh_package_changes *changes,
+        char *error, size_t capacity), void *context);
 #define SH_OVERRIDES_RESCAN_FAILED ((unsigned long)-1)
 
 /* Prepare runtime rearm without hiding existing entries. This retains READY
@@ -153,6 +168,7 @@ int sh_overrides_test_supported_build_abi(const uint8_t *module_base,
 int sh_overrides_test_address_in_readonly_section(const uint8_t *module_base, const void *address);
 void *sh_overrides_test_stream_open_file(const char *path);
 void sh_overrides_test_stream_close(void *stream);
+void sh_overrides_test_receipt_attach(void *stream, const char *path);
 #endif
 
 #endif /* BACKEND_B1_OVERRIDES_H */

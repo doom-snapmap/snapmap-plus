@@ -5,6 +5,8 @@
 #include <string.h>
 #include <limits.h>
 #include "resource_resident.h"
+#include "package_shader_receipt.h"
+#include "render_scope.h"
 #include "resource_graph.h"
 #include "resource_catalog.h"
 #include "package_runtime.h"
@@ -12,6 +14,7 @@
 #include "process_heap_scope.h"
 #include "backend_log.h"
 #include "typeinfo.h"
+#include "virtual_material_runtime.h"
 
 #define RR_LIST_LIMIT 4096u
 #define RR_ENTRY_LIMIT 262144u
@@ -48,10 +51,8 @@ struct sh_resource_resident {
     rr_known *known;
     size_t known_count;
     sh_process_heap_scope heap;
-    void *renderer;
-    void (*adjust)(void *, int);
-    void (*update)(void *);
-    int render_count, held, rebuilt, defaults_ready, drained, mutated, touch_failed, restoring;
+    sh_render_scope render;
+    int rebuilt, defaults_ready, drained, mutated, touch_failed, restoring;
     DWORD thread;
 };
 static struct {
@@ -62,9 +63,13 @@ static struct {
     void *(*lookup)(void *, const char *);
     int (*mode)(void);
     void (*rebind)(void);
+    void (*rebind_material)(void *);
     void (*world_text_fonts)(void *);
 } g_rr;
 static sh_resource_resident *g_rr_recovery;
+/* Failed native scope restoration must retain its owner, even if resource
+ * reconstruction never began. Do not let a new pass inherit a stranded hold. */
+static sh_resource_resident *g_rr_scope_recovery;
 static __declspec(thread) sh_resource_resident *g_rr_active;
 
 static int rr_error(char *error, size_t capacity, const char *message)
@@ -205,17 +210,12 @@ int sh_resource_resident_bind(const sig_result *results, size_t count, const uin
         /* The rebind walks the material manager itself; its only list load is
          * lea rcx at +0x30. Any other manager means a different function. */
         if (memcmp(rebind + 0x30, "\x48\x8d\x0d", 3) || rr_relative(rebind + 0x30, 3, 7) != materials) return 0;
-        static const size_t slots[] = {0x1a, 0x39, 0x5e, 0x6e};
-        static const size_t calls[] = {0x33, 0x48, 0x68, 0x7b};
-        static const uint32_t virtuals[] = {0x80, 0x110, 0x108, 0x110};
-        renderer = rr_relative(command + slots[0], 3, 7);
-        for (size_t i = 0; i < 4; i++) {
-            uint32_t slot;
-            memcpy(&slot, command + calls[i] + 2, 4);
-            if (memcmp(command + slots[i], "\x48\x8b\x0d", 3) ||
-                rr_relative(command + slots[i], 3, 7) != renderer ||
-                memcmp(command + calls[i], "\xff\x90", 2) || slot != virtuals[i]) return 0;
-        }
+        /* Both verified walks pass one material at +0x59. Keep its helper
+         * separate so active-editor additions never rebind existing objects. */
+        if (memcmp(rebind + 0x50, "\x48\x8b\x4c\x24\x28\x48\x8b\x0c\x0f\xe8", 10)) return 0;
+        g_rr.rebind_material = (void (*)(void *))rr_relative(rebind + 0x59, 1, 5);
+        renderer = sh_render_scope_renderer(command);
+        if (!renderer) return 0;
         if (*mode != 0xe8 || complete[0xb9] != 0xe8) return 0;
         g_rr.string_free = (void (*)(void *))rr_relative(complete + 0xb9, 1, 5);
         g_rr.mode = (int (*)(void))rr_relative(mode, 1, 5);
@@ -281,6 +281,12 @@ static int rr_change_compare(const void *key, const void *row)
 {
     return strcmp((const char *)key, ((const sh_package_change *)row)->path);
 }
+static int rr_change_identity(const sh_package_change *change, const rr_entry *entry)
+{
+    return (change->type && change->name && !strcmp(change->type, entry->type) && !strcmp(change->name, entry->name)) ||
+        (change->previous_type && change->previous_name && !strcmp(change->previous_type, entry->type) &&
+            !strcmp(change->previous_name, entry->name));
+}
 static int rr_path(rr_entry *entry, const sh_package_changes *changes, int mode,
     const sh_resource_catalog *catalog)
 {
@@ -306,7 +312,9 @@ static int rr_path(rr_entry *entry, const sh_package_changes *changes, int mode,
             int stock = 0;
             for (size_t i = 0; i < count; i++) if (rows[i]->archive < 2) stock = 1;
             entry->selected = 1;
-            if (change->kind == SH_PACKAGE_RESOURCE_REMOVED && !stock) entry->retired = 1;
+            if (change->kind == SH_PACKAGE_RESOURCE_REMOVED && !stock &&
+                !(changes->identities_complete && (rr_change_identity(change, entry) ||
+                    sh_package_runtime_serves_native_identity(entry->type, entry->name)))) entry->retired = 1;
         }
         free(key); result = 1;
 done:;
@@ -324,8 +332,16 @@ sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *chang
     int ok = 0;
     if (error && capacity) error[0] = 0;
     if (!pass) { rr_error(error, capacity, "resident refresh allocation failed"); return NULL; }
+    if (g_rr_scope_recovery) {
+        sh_resource_resident_end(g_rr_scope_recovery, 0, error, capacity);
+        if (g_rr_scope_recovery) {
+            rr_free(pass); rr_error(error, capacity, "previous native refresh scopes remain held"); return NULL;
+        }
+    }
     __try {
-        if (g_rr_active || !changes || (changes->count && !changes->items)) goto done;
+        if (g_rr_active || !changes || (changes->count && !changes->items) ||
+            (changes->removed_count && !changes->removed) || (changes->added_count && !changes->added) ||
+            (changes->rebound_count && !changes->rebound)) goto done;
         for (size_t i = 0; i < changes->count; i++)
             if (!changes->items[i].path || !*changes->items[i].path ||
                 (i && strcmp(changes->items[i-1].path, changes->items[i].path) >= 0)) goto done;
@@ -335,7 +351,7 @@ sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *chang
             (g_rr.mode() != 2 && g_rr.mode() != 3) || !sh_process_heap_enter(&g_rr.heap, &pass->heap)) goto done;
         phase = "registry snapshot";
         if (!rr_known_snapshot(pass)) goto done;
-        if (!changes->count && !g_rr_recovery) goto render_scope;
+        if (!changes->count && !changes->rebound_count && !g_rr_recovery) goto render_scope;
         phase = "inventory";
         if (!rr_inventory(pass)) goto done;
         phase = "catalog identities";
@@ -344,18 +360,41 @@ sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *chang
             size_t count = sh_resource_catalog_find_path(catalog, changes->items[i].path, &rows);
             if (!rr_seed(&seeds, "", changes->items[i].path)) goto done;
             for (size_t j = 0; j < count; j++) if (!rr_seed(&seeds, rows[j]->type, rows[j]->name)) goto done;
-            /* A new declaration has no archive row, and its native GetPath
-             * may name a cooked file rather than the supplied source. Keep the
-             * compiler's identity so removing it retires the object instead
-             * of trying to reload a source that no longer exists. */
+            /* Compiler aliases have no archive row. Their manager identity
+             * selects native objects even when GetPath names another cooked
+             * representation. Replacements retain both sides of the binding. */
             const sh_package_change *change = &changes->items[i];
             if (change->type && change->name) {
                 if (!rr_seed(&seeds, change->type, change->name)) goto done;
                 int stock = 0;
                 for (size_t j = 0; j < count; j++) if (rows[j]->archive < 2) stock = 1;
-                if (change->kind == SH_PACKAGE_RESOURCE_REMOVED && !stock &&
+                if (!changes->identities_complete && change->kind == SH_PACKAGE_RESOURCE_REMOVED && !stock &&
                     !rr_seed(&retired, change->type, change->name)) goto done;
             }
+            if (change->previous_type && change->previous_name &&
+                !rr_seed(&seeds, change->previous_type, change->previous_name)) goto done;
+        }
+        /* Retirement uses the complete provider difference, not individual
+         * paths. One removed permutation can still leave its object supplied
+         * by other files. Stock identities retain their installed fallback. */
+        for (size_t i = 0; i < changes->removed_count; i++) {
+            const sh_package_native_identity *identity = changes->removed + i;
+            const sh_resource_catalog_entry *const *rows = NULL;
+            size_t count;
+            int stock = 0;
+            if (!identity->type || !identity->name || !rr_seed(&seeds, identity->type, identity->name)) goto done;
+            count = sh_resource_catalog_find(catalog, identity->type, identity->name, &rows);
+            for (size_t j = 0; j < count; j++) if (rows[j]->archive < 2) stock = 1;
+            if (!stock && !rr_seed(&retired, identity->type, identity->name)) goto done;
+        }
+        for (size_t i = 0; i < changes->added_count; i++) {
+            const sh_package_native_identity *identity = changes->added + i;
+            if (!identity->type || !identity->name || !rr_seed(&seeds, identity->type, identity->name)) goto done;
+        }
+        for (size_t i = 0; i < changes->rebound_count; i++) {
+            const sh_package_native_identity *identity = changes->rebound + i;
+            if (!identity->type || !*identity->type || !identity->name || !*identity->name ||
+                !rr_seed(&seeds, identity->type, identity->name)) goto done;
         }
         if (g_rr_recovery) {
             if (!restoring) goto done;
@@ -426,19 +465,8 @@ sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *chang
             pass->count = kept;
         }
 render_scope:
-        {
-            void **table;
-            phase = "renderer scope";
-            pass->renderer = *g_rr.renderer;
-            table = *(void ***)pass->renderer;
-            pass->render_count = *(int *)((unsigned char *)pass->renderer + 0x14);
-            if (pass->render_count < 0 || pass->render_count == INT_MAX) goto done;
-            pass->adjust = (void (*)(void *, int))table[0x110/8];
-            pass->update = (void (*)(void *))table[0x108/8];
-            ((void (*)(void *, unsigned char, unsigned char, unsigned char))table[0x80/8])(pass->renderer, 0, 0, 1);
-            pass->adjust(pass->renderer, 1); pass->held = 1;
-            if (*(int *)((unsigned char *)pass->renderer + 0x14) != pass->render_count + 1) goto done;
-        }
+        phase = "renderer scope";
+        if (!sh_render_scope_enter(g_rr.renderer, g_rr.thread, &pass->render)) goto done;
         ok = 1;
 done:;
     } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
@@ -451,6 +479,19 @@ done:;
     }
     g_rr_active = pass;
     return pass;
+}
+int sh_resource_resident_owned(const sh_resource_resident *pass)
+{
+    __try {
+        if (!pass || g_rr_active != pass || pass->thread != GetCurrentThreadId() ||
+            !g_rr.thread || *g_rr.thread != pass->thread || !sh_render_scope_owner(&pass->render) ||
+            pass->render.active != 2 || pass->heap.active != 2 || !pass->heap.api ||
+            pass->heap.api->get() != pass->heap.self) return 0;
+        const unsigned char *heap = pass->heap.self;
+        return *(const int *)((const unsigned char *)pass->render.renderer + 0x14) == pass->render.count + 1 &&
+            *(const int *)(heap + 0xc4) == pass->heap.depth + 1 &&
+            *(const int *)(heap + 0x44 + pass->heap.depth * 4) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 void sh_resource_resident_touch(void *resource)
 {
@@ -473,6 +514,8 @@ int sh_resource_resident_selected(const sh_resource_resident *pass, const void *
         if (pass->items[i].resource == resource) return 1;
     return 0;
 }
+size_t sh_resource_resident_selected_count(const sh_resource_resident *pass)
+{ return pass ? pass->count : SIZE_MAX; }
 void sh_resource_resident_external(sh_resource_resident *pass, void *resource)
 {
     if (pass && !pass->rebuilt) for (size_t i = 0; i < pass->count; i++)
@@ -497,6 +540,7 @@ int sh_resource_resident_reconstruct(sh_resource_resident *pass, char *error, si
             __try {
                 if (*(unsigned int *)(object + RR_LEVEL_OFFSET) == RR_LEVEL_PERMANENT)
                     *(unsigned int *)(object + RR_LEVEL_OFFSET) = 2;
+                sh_package_shader_receipt_invalidate((uintptr_t)object);
                 g_rr.reconstruct(object);
             } __finally { *(unsigned int *)(object + RR_LEVEL_OFFSET) = RR_LEVEL_PERMANENT; }
         }
@@ -560,14 +604,62 @@ int sh_resource_resident_defaults(sh_resource_resident *pass, char *error, size_
 }
 size_t sh_resource_resident_recovered_defaults(const sh_resource_resident *pass)
 { return pass ? pass->recovered_defaults : 0; }
-int sh_resource_resident_drain(sh_resource_resident *pass, char *error, size_t capacity)
+static int rr_pointer_compare(const void *a, const void *b)
+{
+    uintptr_t x = (uintptr_t)*(void *const *)a, y = (uintptr_t)*(void *const *)b;
+    return x < y ? -1 : x > y;
+}
+static int rr_existing(void *resource, void *const *existing, size_t count)
+{ return count && bsearch(&resource, existing, count, sizeof(*existing), rr_pointer_compare) != NULL; }
+static int rr_finalize_additions(sh_resource_resident *pass, void *const *existing,
+    size_t existing_count, char *error, size_t capacity)
+{
+    void *list = *g_rr.head;
+    size_t visited = 0, lists = 0;
+    while (list && lists++ < RR_LIST_LIMIT) {
+        unsigned char *manager = list;
+        const char *type = *(const char **)(manager + 8);
+        void **items = *(void ***)(manager + 0x20);
+        int count = *(int *)(manager + 0x28);
+        if (!type || count < 0 || count >= RR_ENTRY_LIMIT || (count && !items))
+            return rr_error(error, capacity, "fresh resource inventory is incomplete");
+        for (int i = 0; i < count; i++) if (items[i]) {
+            if (++visited > RR_ENTRY_LIMIT) return rr_error(error, capacity, "fresh resource inventory overflow");
+            void *resource = items[i];
+            if (rr_existing(resource, existing, existing_count)) continue;
+            /* Lookup observers cover ordinary loads; the complete registry walk
+             * also covers native objects created indirectly during parsing. */
+            *(unsigned int *)((unsigned char *)resource + RR_LEVEL_OFFSET) = RR_LEVEL_PERMANENT;
+            if (!_stricmp(type, "material")) g_rr.rebind_material(resource);
+            else if (!_stricmp(type, "snapeditorsettings")) {
+                void **fonts = (void **)((unsigned char *)resource + 0x688);
+                g_rr.world_text_fonts(fonts);
+                if (!fonts[0] || !fonts[1] || !fonts[2])
+                    return rr_error(error, capacity, "fresh world text fonts did not resolve");
+            }
+        }
+        list = *(void **)(manager + 0x18);
+    }
+    if (list || !sh_resource_resident_owned(pass))
+        return rr_error(error, capacity, "fresh resource finalization lost its admitted scope");
+    return 1;
+}
+static int rr_drain(sh_resource_resident *pass, void *const *existing,
+    size_t existing_count, int additions, char *error, size_t capacity)
 {
     if (!pass || pass->thread != GetCurrentThreadId() || !pass->rebuilt)
         return rr_error(error, capacity, "resident refresh was not reconstructed");
+    if (additions) {
+        if ((existing_count && !existing) || !g_rr.rebind_material || !sh_resource_resident_owned(pass))
+            return rr_error(error, capacity, "fresh resource finalization has no admitted ownership");
+        for (size_t i = 0; i < pass->count; i++)
+            if (rr_existing(pass->items[i].resource, existing, existing_count))
+                return rr_error(error, capacity, "fresh resource finalization selected a pre-existing object");
+    }
     if (!sh_resource_resident_defaults(pass, error, capacity)) return 0;
     /* Draining twice is legal: the declaration pass finishes this refresh
      * before its palette rebuild, and the provider transaction still calls it. */
-    if (pass->drained) return 1;
+    if (pass->drained && !additions) return sh_virtual_material_runtime_status(error, capacity);
     __try {
         for (size_t i = 0; i < pass->count; i++) {
             rr_entry *entry = pass->items + i;
@@ -625,7 +717,7 @@ int sh_resource_resident_drain(sh_resource_resident *pass, char *error, size_t c
          * that native finalizer after every load, including declaration-owned
          * loads, before palette previews can consume the settings. Both images
          * place snapWorldTextSettings_t at +0x688. */
-        for (size_t i = 0; i < pass->count; i++) {
+        for (size_t i = 0; !additions && i < pass->count; i++) {
             rr_entry *entry = pass->items + i;
             if (!strcmp(entry->type, "snapeditorsettings")) {
                 void **fonts = (void **)((unsigned char *)entry->resource + 0x688);
@@ -640,21 +732,33 @@ int sh_resource_resident_drain(sh_resource_resident *pass, char *error, size_t c
          * heap scope; a permanent material then owns storage ResetPersistHeap
          * frees when Play exits, and the following rebind writes through it.
          * Rebind every material here, still inside this pass's heap-0 scope. */
-        g_rr.rebind();
-        if (pass->held) pass->update(pass->renderer);
+        if (additions) {
+            if (!rr_finalize_additions(pass, existing, existing_count, error, capacity)) return 0;
+        } else g_rr.rebind();
+        if (!sh_virtual_material_runtime_status(error, capacity)) return 0;
+        if (!sh_render_scope_update(&pass->render))
+            return rr_error(error, capacity, "native resident renderer update failed");
         pass->drained = 1;
         return 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return rr_error(error, capacity, "native resident loading or consumer update failed");
     }
 }
+int sh_resource_resident_drain(sh_resource_resident *pass, char *error, size_t capacity)
+{ return rr_drain(pass, NULL, 0, 0, error, capacity); }
+int sh_resource_resident_drain_additions(sh_resource_resident *pass,
+    void *const *existing, size_t existing_count, char *error, size_t capacity)
+{ return rr_drain(pass, existing, existing_count, 1, error, capacity); }
 int sh_resource_resident_end(sh_resource_resident *pass, int succeeded, char *error, size_t capacity)
 {
     int clean = 1;
     if (!pass) return succeeded;
+    if (pass->thread && pass->thread != GetCurrentThreadId())
+        return rr_error(error, capacity, "native resident cleanup requires its owning thread");
     if (g_rr_active == pass) g_rr_active = NULL;
     if (pass->touch_failed) clean = 0;
     if (pass->rebuilt && !pass->drained) clean = 0;
+    if (succeeded && !sh_virtual_material_runtime_status(error, capacity)) succeeded = 0;
     for (size_t i = 0; i < pass->count; i++) if (pass->items[i].reconstructed) {
         __try {
             unsigned char *state = (unsigned char *)pass->items[i].resource + 0x2c;
@@ -667,13 +771,17 @@ int sh_resource_resident_end(sh_resource_resident *pass, int succeeded, char *er
                 pass->items[i].captured_level;
         } __except (EXCEPTION_EXECUTE_HANDLER) { clean = 0; }
     }
-    if (pass->held) {
-        __try {
-            pass->adjust(pass->renderer, -1); pass->held = 0;
-            if (*(int *)((unsigned char *)pass->renderer + 0x14) != pass->render_count) clean = 0;
-        } __except (EXCEPTION_EXECUTE_HANDLER) { clean = 0; }
+    if (pass->render.active) {
+        __try { sh_virtual_material_runtime_collect(); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { clean = 0; }
+        if (!sh_render_scope_leave(&pass->render)) clean = 0;
     }
     if (!sh_process_heap_leave(&pass->heap)) clean = 0;
+    if (pass->render.active || pass->heap.active) {
+        g_rr_scope_recovery = pass;
+        return rr_error(error, capacity, "native resident refresh scopes remain held for recovery");
+    }
+    if (g_rr_scope_recovery == pass) g_rr_scope_recovery = NULL;
     if (!clean) rr_error(error, capacity, "native resident refresh scope did not complete cleanly");
     succeeded = succeeded && clean;
     if (succeeded) { rr_free(g_rr_recovery); g_rr_recovery = NULL; rr_free(pass); }

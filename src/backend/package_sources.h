@@ -36,7 +36,17 @@ typedef struct sh_package_sources {
     sh_package_source_file *files;
     size_t file_count;
     unsigned char (*fingerprints)[32]; /* full source tree identities */
+    /* Optional original authored trees for private normalized map views.
+     * fingerprints above still validates the actual inventoried file bytes.
+     * Set only before compiling, from retained importer-verified deliveries. */
+    unsigned char (*original_fingerprints)[32];
 } sh_package_sources;
+
+static __inline const unsigned char *sh_package_source_tree(const sh_package_sources *sources, size_t owner)
+{
+    if (!sources || owner >= sources->package_count || !sources->fingerprints) return NULL;
+    return sources->original_fingerprints ? sources->original_fingerprints[owner] : sources->fingerprints[owner];
+}
 
 typedef struct sh_package_file_identity {
     uint64_t length;
@@ -45,6 +55,11 @@ typedef struct sh_package_file_identity {
 /* SHA-256 of already-owned bytes, in bounded updates without another payload
  * allocation. Clears the identity on failure. */
 int sh_package_bytes_identity(const void *body, size_t length, sh_package_file_identity *out);
+/* SHA-256 of a bounded span in an immutable random-access source. read must
+ * fill each requested span and return 1; a short/failed read returns 0. No
+ * payload-sized allocation. Offset and length stay 64-bit for packed files. */
+int sh_package_reader_identity(void *context, uint64_t offset, uint64_t length,
+    int (*read)(void *, uint64_t, void *, size_t), sh_package_file_identity *out);
 
 /* Returns an owned, complete inventory, or NULL with a diagnostic. A failed
  * scan never publishes a prefix. Sources and descriptors are never rewritten.
@@ -111,11 +126,33 @@ typedef struct sh_package_file sh_package_file;
  * snapshots whose owners retain the handle until their work is complete. */
 sh_package_file *sh_package_file_capture(const char *absolute,
     char *error, size_t error_capacity);
+/* Pin without reading payload bytes. Identity is hashed lazily on first request
+ * and then reused. Used for engine-owned external data; authored comparisons
+ * must request the full identity and cannot substitute file metadata for it. */
+sh_package_file *sh_package_file_pin(const char *absolute,
+    char *error, size_t error_capacity);
+uint64_t sh_package_file_length(const sh_package_file *file);
 int sh_package_file_get_identity(const sh_package_file *file, sh_package_file_identity *out);
 sh_package_file *sh_package_file_seal(const sh_package_source_file *file,
     char *error, size_t error_capacity);
+/* Stream compiler output into the existing private resource cache. The caller
+ * supplies an admitted cache directory and exact output length; expected may
+ * additionally require a preverified digest. No source package is modified.
+ * Only complete output is published. Equal cached bytes share the existing
+ * file; a differing/cache-corrupt occupant is preserved and a separate private
+ * cache name is used. On success path is malloc-owned and file is sealed. */
+typedef int (*sh_package_file_producer)(void *context,
+    int (*write)(void *, const void *, size_t), void *sink, char *error, size_t capacity);
+sh_package_file *sh_package_file_generate(const char *directory, uint64_t length,
+    const unsigned char *expected, sh_package_file_producer produce, void *context,
+    char **path, char *error, size_t capacity);
+sh_package_file *sh_package_source_cache(const sh_package_source_file *source,
+    const char *directory, char **path, char *error, size_t capacity);
 sh_package_file *sh_package_file_retain(sh_package_file *file);
 void sh_package_file_release(sh_package_file *file);
+/* Exact bounded comparison of sealed bytes: 1 equal, 0 different, -1 read
+ * failure. Independent streams leave every existing reader position intact. */
+int sh_package_file_equal(const sh_package_file *left, const sh_package_file *right);
 FILE *sh_package_file_open(const sh_package_file *file, uint64_t *length,
     char *error, size_t error_capacity);
 unsigned char *sh_package_file_read(const sh_package_file *file, size_t limit,

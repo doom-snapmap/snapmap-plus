@@ -1,7 +1,9 @@
 /* palette_refresh_test.c -- per-registration palette rebuild service and exact gating. */
 #include <windows.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "host_image.h"
@@ -18,7 +20,7 @@
 #define TEST_BUILDER_RVA          0x54AEE0u
 #define TEST_TEXT_RVA             0x0001000u
 #define TEST_RDATA_RVA            0x1001000u
-#define TEST_MODULE_BYTES         (TEST_EDITOR_SINGLETON_RVA + TEST_EDITOR_PALETTE_OFF + 0x2000u)
+#define TEST_MODULE_BYTES         (TEST_EDITOR_SINGLETON_RVA + TEST_EDITOR_PALETTE_OFF + 0x4000u)
 
 static const uint8_t *g_test_editor;
 static int g_builder_calls;
@@ -36,6 +38,33 @@ static void *g_last_decode_entity, *g_last_decode_data;
 static sh_patch_status g_commit_result = B2_PATCH_OK;
 static int g_unpatch_result = 1, g_prepare_fails, g_hook_contract_failed;
 static void (*g_detour)(void *, void *);
+static void *(*g_find_detour)(void *, const char *);
+static const char *g_native_name;
+static void *g_native_row[2];
+static int g_entry_ctor_calls, g_entry_dtor_calls, g_entry_ctor_raises, g_entry_dtor_raises;
+static void *g_invalid_entry;
+
+static void *fake_find(void *palette, const char *name)
+{
+    if (g_native_name && !strcmp(g_native_name, name)) return g_native_row;
+    return *(void **)((unsigned char *)palette + 0x28);
+}
+static unsigned char fake_entry_valid(void *decl) { return decl != g_invalid_entry; }
+static void *fake_entry_ctor(void *body, void *decl)
+{
+    ++g_entry_ctor_calls;
+    *(void **)body = decl;
+    *(void **)((unsigned char *)body + 0x150) = *(void **)((unsigned char *)decl + 0x1c8);
+    sh_palette_refresh_test_decode(g_template_entity, (void *)0x1234);
+    g_nested_result = sh_palette_refresh_after_decl_registration();
+    if (g_entry_ctor_raises) RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, NULL);
+    return body;
+}
+static void fake_entry_dtor(void *body)
+{
+    (void)body; ++g_entry_dtor_calls;
+    if (g_entry_dtor_raises) RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, NULL);
+}
 
 static void fake_decoder(void *entity, void *data)
 {
@@ -45,12 +74,23 @@ static void fake_decoder(void *entity, void *data)
 
 void *hook_prepare(void *target, void *detour, size_t stolen)
 {
+    if (stolen == 16) {
+        if (!target || !detour) g_hook_contract_failed++;
+        g_find_detour = (void *(*)(void *, const char *))detour;
+        return g_prepare_fails ? NULL : (void *)fake_find;
+    }
     if (!target || !detour || stolen != 18) g_hook_contract_failed++;
     g_detour = (void (*)(void *, void *))detour;
     return g_prepare_fails ? NULL : (void *)fake_decoder;
 }
 sh_patch_status hook_commit(void *trampoline)
 {
+    if (trampoline == (void *)fake_find) {
+        void *palette = (void *)(g_test_editor + TEST_EDITOR_PALETTE_OFF);
+        if (g_find_detour(palette, "absent") != *(void **)((unsigned char *)palette + 0x28))
+            g_hook_contract_failed++;
+        return g_commit_result;
+    }
     if (trampoline != (void *)fake_decoder) g_hook_contract_failed++;
     /* Even a failed commit may have exposed the detour to another caller. */
     g_detour(g_template_entity, (void *)0x1234);
@@ -296,6 +336,395 @@ static void test_template_scope(uint8_t *module, int *failed_out)
     *failed_out = failed;
 }
 
+static int fake_admitted(void *context) { return *(int *)context; }
+static void setup_entry(unsigned char *decl, unsigned char *entity, const char *name)
+{
+    memset(decl, 0, 0x500); memset(entity, 0, 0x70);
+    *(void **)(decl + 0x1c8) = entity;
+    *(const char **)(entity + 0x58) = name;
+}
+static void bind_entries(uint8_t *module)
+{
+    bind_fake(module); setup_editor(module, 1, 1);
+    sh_palette_entries_test_bind(fake_find, fake_entry_ctor, fake_entry_valid, fake_entry_dtor);
+    *(void **)(g_test_editor + TEST_EDITOR_PALETTE_OFF + 0x10) = (void *)0x1110;
+    *(void **)(g_test_editor + TEST_EDITOR_PALETTE_OFF + 0x28) = (void *)0x2220;
+    *(void **)(g_template_entity + 0x150) = g_template_decl;
+    *(const char **)(g_template_decl + 8) = "";
+    *(const char **)(g_template_decl + 0x60) = "idInfo_UniversalTraversal";
+    g_native_name = NULL; g_invalid_entry = NULL;
+    g_entry_ctor_calls = g_entry_dtor_calls = g_entry_ctor_raises = g_entry_dtor_raises = 0;
+}
+
+static void test_retained_entries(uint8_t *module, int *failed_out)
+{
+    int failed = *failed_out, admitted = 1;
+    unsigned char decl_a[0x500], entity_a[0x70], decl_b[0x500], entity_b[0x70];
+    sh_palette_entry_source rows[2];
+    sh_palette_entries *a = NULL, *b = NULL, *extra = NULL;
+    void *palette, *end, *first;
+    char error[256];
+    setup_entry(decl_a, entity_a, "private/a"); setup_entry(decl_b, entity_b, "private/b");
+    rows[0] = (sh_palette_entry_source){"private/a", decl_a};
+    rows[1] = (sh_palette_entry_source){"private/b", decl_b};
+    bind_entries(module); palette = (void *)(g_test_editor + TEST_EDITOR_PALETTE_OFF);
+    end = *(void **)((unsigned char *)palette + 0x28);
+    CHECK(sh_palette_entries_ready());
+    admitted = 0;
+    CHECK(sh_palette_entries_prepare(rows, 1, fake_admitted, &admitted, &a, error, sizeof(error)) == 0);
+    CHECK(!a && !g_entry_ctor_calls);
+    admitted = 1;
+    CHECK(sh_palette_entries_prepare(rows, 1, fake_admitted, &admitted, &a, error, sizeof(error)) == 1);
+    CHECK(g_entry_ctor_calls == 1 && g_decoder_calls == 0); /* Existing traversal guard applies. */
+    CHECK(g_nested_result == 0 && g_builder_calls == 0);
+    CHECK(sh_palette_entries_test_find(palette, "private/a") == end); /* Invisible until publish. */
+    CHECK(sh_palette_entries_publish(a, fake_admitted, &admitted, error, sizeof(error)) == 1);
+    first = sh_palette_entries_test_find(palette, "private/a");
+    CHECK(first != end && *(void **)first == decl_a);
+    CHECK(sh_palette_entries_test_find(palette, "PRIVATE/a") == end);
+    rows[1] = rows[0];
+    CHECK(sh_palette_entries_prepare(rows, 2, fake_admitted, &admitted, &b, error, sizeof(error)) == 1);
+    CHECK(g_entry_ctor_calls == 1 && sh_palette_entries_test_count() == 1);
+    CHECK(sh_palette_entries_publish(b, fake_admitted, &admitted, error, sizeof(error)) == 1);
+    CHECK(sh_palette_entries_end(&a, fake_admitted, &admitted, error, sizeof(error)) == 1 && !a);
+    CHECK(sh_palette_entries_test_find(palette, "private/a") == first && !g_entry_dtor_calls);
+    extra = b; CHECK(sh_palette_entries_retain(extra));
+    CHECK(sh_palette_entries_end(&b, fake_admitted, &admitted, error, sizeof(error)) == 1 && !b);
+    admitted = 0;
+    CHECK(sh_palette_entries_end(&extra, fake_admitted, &admitted, error, sizeof(error)) == 0 && extra);
+    CHECK(sh_palette_entries_test_find(palette, "private/a") == first);
+    admitted = 1;
+    CHECK(sh_palette_entries_end(&extra, fake_admitted, &admitted, error, sizeof(error)) == 1 && !extra);
+    CHECK(g_entry_dtor_calls == 1 && sh_palette_entries_test_count() == 0);
+    CHECK(*(void **)((unsigned char *)palette + 0x10) == (void *)0x1110);
+    CHECK(*(void **)((unsigned char *)palette + 0x28) == end);
+
+    /* Native storage remains authoritative; a conflicting declaration cannot
+     * acquire that alias, even before any extension row exists. */
+    g_native_name = "private/a"; g_native_row[0] = decl_b;
+    CHECK(sh_palette_entries_prepare(rows, 1, fake_admitted, &admitted, &a, error, sizeof(error)) == 0 && !a);
+    CHECK(g_entry_ctor_calls == 1);
+    g_native_row[0] = decl_a;
+    CHECK(sh_palette_entries_prepare(rows, 1, fake_admitted, &admitted, &a, error, sizeof(error)) == 1);
+    CHECK(sh_palette_entries_publish(a, fake_admitted, &admitted, error, sizeof(error)) == 1);
+    CHECK(sh_palette_entries_test_find(palette, "private/a") == g_native_row);
+    CHECK(sh_palette_entries_end(&a, fake_admitted, &admitted, error, sizeof(error)) == 1);
+    g_native_name = NULL;
+
+    /* Failure later in a batch destroys its earlier private preparation and
+     * leaves an already published owner intact. */
+    CHECK(sh_palette_entries_prepare(rows, 1, fake_admitted, &admitted, &a, error, sizeof(error)) == 1);
+    CHECK(sh_palette_entries_publish(a, fake_admitted, &admitted, error, sizeof(error)) == 1);
+    first = sh_palette_entries_test_find(palette, "private/a");
+    rows[1] = (sh_palette_entry_source){"private/b", decl_b}; g_invalid_entry = decl_b;
+    CHECK(sh_palette_entries_prepare(rows, 2, fake_admitted, &admitted, &b, error, sizeof(error)) == 0 && !b);
+    CHECK(sh_palette_entries_test_find(palette, "private/a") == first && sh_palette_entries_test_count() == 1);
+    g_invalid_entry = NULL;
+    *(const char **)(entity_b + 0x58) = "private/a";
+    rows[1].entity_def_name = "private/a";
+    CHECK(sh_palette_entries_prepare(rows + 1, 1, fake_admitted, &admitted, &b, error, sizeof(error)) == 0 && !b);
+    CHECK(sh_palette_entries_end(&a, fake_admitted, &admitted, error, sizeof(error)) == 1);
+
+    /* Native construction/destruction faults retain explicit bounded ownership;
+     * no retry destroys an incomplete object or silently drops source lifetime. */
+    g_entry_ctor_raises = 1;
+    CHECK(sh_palette_entries_prepare(rows, 1, fake_admitted, &admitted, &a, error, sizeof(error)) == -1 && a);
+    CHECK(sh_palette_entries_test_find(palette, "private/a") == end && !sh_palette_entries_ready());
+    int before = g_entry_dtor_calls;
+    CHECK(sh_palette_entries_end(&a, fake_admitted, &admitted, error, sizeof(error)) == -1 && a);
+    CHECK(g_entry_dtor_calls == before);
+    sh_palette_entries_test_discard_quarantine(&a);
+    bind_entries(module);
+    CHECK(sh_palette_entries_prepare(rows, 1, fake_admitted, &admitted, &a, error, sizeof(error)) == 1);
+    CHECK(sh_palette_entries_publish(a, fake_admitted, &admitted, error, sizeof(error)) == 1);
+    g_entry_dtor_raises = 1;
+    CHECK(sh_palette_entries_end(&a, fake_admitted, &admitted, error, sizeof(error)) == -1 && a);
+    CHECK(sh_palette_entries_test_find(palette, "private/a") == end && g_entry_dtor_calls == 1);
+    CHECK(sh_palette_entries_end(&a, fake_admitted, &admitted, error, sizeof(error)) == -1 && g_entry_dtor_calls == 1);
+    sh_palette_entries_test_discard_quarantine(&a);
+    CHECK(sh_palette_entries_test_count() == 0);
+    *failed_out = failed;
+}
+
+/* This model owns independent allocations like the native typed list helpers.
+ * The paired image gate proves the actual helper addresses and call paths. */
+typedef struct test_native_list {
+    void *data;
+    int count, capacity;
+    unsigned short granularity;
+    unsigned char tag, kind;
+    unsigned int padding;
+} test_native_list;
+typedef struct test_native_palette {
+    void *vtable;
+    int selected;
+    unsigned int padding;
+    test_native_list bodies;
+    void *end;
+    test_native_list groups, labels;
+} test_native_palette;
+static int g_auth_copies, g_auth_destroys, g_auth_resize_fail, g_auth_copy_raise;
+static int g_auth_add, g_auth_filter, g_auth_widget, g_auth_destroy_raise, g_auth_refresh_raise;
+static unsigned char g_auth_ui[0x9c8];
+static void *g_auth_mode = (void *)0x34560, *g_auth_addvt = (void *)0x34570, *g_auth_filtervt = (void *)0x34580;
+static test_native_palette *auth_palette(void)
+{ return (test_native_palette *)(g_test_editor + TEST_EDITOR_PALETTE_OFF); }
+static unsigned char auth_resize(void *value, int count)
+{
+    test_native_list *list = value;
+    if (g_auth_resize_fail) return 0;
+    list->data = calloc((size_t)count, 0x6f0); list->capacity = count;
+    return list->data != NULL;
+}
+static void auth_string_init(unsigned char *value)
+{
+    memset(value, 0, 0x30); *(void **)(value + 0x10) = value + 0x1c;
+    *(unsigned int *)(value + 0x18) = 0x80000014u;
+}
+static void auth_string_release(unsigned char *value)
+{
+    void *data = *(void **)(value + 0x10);
+    if (data && data != value + 0x1c) free(data);
+}
+static void auth_string_assign(void *destination, const void *source)
+{
+    unsigned char *dst = destination;
+    const unsigned char *src = source;
+    int length = *(const int *)(src + 8);
+    auth_string_release(dst); auth_string_init(dst);
+    *(int *)(dst + 8) = length;
+    if (length >= 20) *(void **)(dst + 0x10) = malloc((size_t)length + 1);
+    memcpy(*(void **)(dst + 0x10), *(const void *const *)(src + 0x10), (size_t)length + 1);
+}
+static void auth_string_set(unsigned char *dst, const char *text)
+{
+    unsigned char source[0x30] = {0};
+    *(int *)(source + 8) = (int)strlen(text); *(const char **)(source + 0x10) = text;
+    auth_string_assign(dst, source);
+}
+static void auth_groups_grow(void *value)
+{
+    test_native_list *list = value;
+    int capacity = list->capacity ? list->capacity * 2 : 1;
+    void *data = calloc((size_t)capacity, sizeof(void *));
+    if (list->count) memcpy(data, list->data, (size_t)list->count * sizeof(void *));
+    free(list->data); list->data = data; list->capacity = capacity;
+}
+static void auth_labels_grow(void *value)
+{
+    test_native_list *list = value;
+    int capacity = list->capacity ? list->capacity * 2 : 1;
+    unsigned char *data = calloc((size_t)capacity, 0x30);
+    for (int i = 0; i < capacity; i++) auth_string_init(data + (size_t)i * 0x30);
+    for (int i = 0; i < list->count; i++)
+        auth_string_assign(data + (size_t)i * 0x30, (unsigned char *)list->data + (size_t)i * 0x30);
+    for (int i = 0; i < list->capacity; i++) auth_string_release((unsigned char *)list->data + (size_t)i * 0x30);
+    free(list->data); list->data = data; list->capacity = capacity;
+}
+static void *auth_body_copy(void *destination, const void *source)
+{
+    ++g_auth_copies; memcpy(destination, source, 0x6f0);
+    if (g_auth_copy_raise) RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, NULL);
+    return destination;
+}
+static void auth_destroy(void *value)
+{
+    test_native_palette *palette = value;
+    ++g_auth_destroys;
+    if (g_auth_destroy_raise) RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, NULL);
+    for (int i = 0; i < palette->labels.capacity; i++)
+        auth_string_release((unsigned char *)palette->labels.data + (size_t)i * 0x30);
+    free(palette->labels.data); free(palette->groups.data); free(palette->bodies.data);
+    memset(&palette->bodies, 0, sizeof(*palette) - offsetof(test_native_palette, bodies));
+}
+static void auth_categories(test_native_palette *palette, int visible, const char *category)
+{
+    palette->end = (unsigned char *)palette->bodies.data + (size_t)visible * 0x6f0;
+    while (palette->groups.capacity < 2) auth_groups_grow(&palette->groups);
+    while (palette->labels.capacity < 1) auth_labels_grow(&palette->labels);
+    palette->groups.count = 2; palette->labels.count = 1;
+    ((void **)palette->groups.data)[0] = palette->bodies.data;
+    ((void **)palette->groups.data)[1] = palette->end;
+    auth_string_set(palette->labels.data, category);
+}
+static unsigned char auth_prepare_add(void *state, void *editor)
+{
+    (void)state; (void)editor; ++g_auth_add;
+    auth_categories(auth_palette(), auth_palette()->bodies.count, "Authored category - retained exact bytes");
+    if (g_auth_refresh_raise) RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, NULL);
+    return 1;
+}
+static void auth_prepare_filter(void *state, void *editor)
+{
+    (void)state; (void)editor; ++g_auth_filter;
+    auth_categories(auth_palette(), auth_palette()->bodies.count, "Filtered category");
+}
+static void auth_refresh_widget(void *widget, void *palette)
+{ (void)widget; (void)palette; ++g_auth_widget; }
+static void auth_rebuild(void *palette, void *progress)
+{ (void)progress; auth_destroy(palette); }
+static void auth_rebuild_same_address(void *value, void *progress)
+{
+    test_native_palette *palette = value;
+    (void)progress;
+    /* Model an engine allocator releasing and immediately recycling this
+     * backing block. All previous logical body contents are destroyed. */
+    ++g_auth_destroys;
+    memset(palette->bodies.data, 0x6b, (size_t)palette->bodies.capacity * 0x6f0);
+    auth_categories(palette, palette->bodies.count, "Rebuilt category");
+}
+static void auth_bind(uint8_t *module, void *old_decl, int tool)
+{
+    sh_palette_authoring_test_api api = {auth_resize, auth_groups_grow, auth_labels_grow,
+        auth_body_copy, auth_string_assign, auth_destroy, auth_prepare_add,
+        auth_prepare_filter, auth_refresh_widget, g_auth_mode, g_auth_addvt, g_auth_filtervt};
+    bind_entries(module); sh_palette_authoring_test_bind(&api);
+    test_native_palette *palette = auth_palette();
+    memset((unsigned char *)palette + 8, 0, sizeof(*palette) - 8);
+    auth_resize(&palette->bodies, 2); palette->bodies.count = 2;
+    *(void **)palette->bodies.data = old_decl;
+    *(void **)((unsigned char *)palette->bodies.data + 0x6f0) = old_decl;
+    ((unsigned char *)palette->bodies.data)[0x345] = 0x91;
+    auth_categories(palette, 1, "Original category \xce\xa9");
+    unsigned char *editor = (unsigned char *)g_test_editor, *mode = editor + 0x22330;
+    *(void **)mode = g_auth_mode; *(void **)(mode + 0x258) = g_auth_addvt;
+    *(void **)(mode + 0x3f0) = g_auth_filtervt;
+    *(int *)(mode + 0x1a8) = *(int *)(mode + 0x1ac) = tool;
+    *(int *)(editor + 0x23618) = 2;
+    *(void **)(editor + 0x21088) = g_auth_ui; *(void **)(g_auth_ui + 0x9c0) = g_auth_ui;
+    g_auth_copies = g_auth_destroys = g_auth_add = g_auth_filter = g_auth_widget = 0;
+    g_auth_copy_raise = g_auth_destroy_raise = g_auth_refresh_raise = 0;
+}
+static void test_authoring_snapshots(uint8_t *module, int *failed_out)
+{
+    int failed = *failed_out, admitted = 1;
+    unsigned char old_decl[0x500], old_entity[0x70], new_decl[0x500], new_entity[0x70];
+    unsigned char saved_rows[2 * 0x6f0];
+    sh_palette_entries *batch = NULL;
+    sh_palette_entry_source source = {"private/new", new_decl};
+    char error[256];
+    setup_entry(old_decl, old_entity, "old/entry"); setup_entry(new_decl, new_entity, "private/new");
+    for (int tool = 3; tool <= 10; tool += tool == 3 ? 6 : 1) {
+        auth_bind(module, old_decl, tool);
+        test_native_palette before = *auth_palette();
+        memcpy(saved_rows, before.bodies.data, sizeof(saved_rows));
+        CHECK(sh_palette_entries_prepare(&source, 1, fake_admitted, &admitted, &batch, error, sizeof(error)) == 1);
+        CHECK(sh_palette_entries_prepare_authoring(batch, fake_admitted, &admitted, error, sizeof(error)) == 1);
+        CHECK(g_auth_copies == 3 && !memcmp(auth_palette(), &before, sizeof(before)));
+        CHECK(sh_palette_entries_publish(batch, fake_admitted, &admitted, error, sizeof(error)) == 1);
+        test_native_palette *current = auth_palette();
+        CHECK(current->bodies.data != before.bodies.data && current->bodies.count == 3);
+        CHECK(*(void **)((unsigned char *)current->bodies.data + 2 * 0x6f0) == new_decl);
+        CHECK(!memcmp(saved_rows, before.bodies.data, sizeof(saved_rows)));
+        CHECK(current->groups.data != before.groups.data && current->labels.data != before.labels.data);
+        CHECK(g_auth_add == (tool == 3) && g_auth_filter == (tool == 9));
+        if (tool == 10) {
+            CHECK(current->end == (unsigned char *)current->bodies.data + 0x6f0);
+            CHECK(!strcmp(*(char **)((unsigned char *)current->labels.data + 0x10), "Original category \xce\xa9"));
+        } else {
+            CHECK(current->end == (unsigned char *)current->bodies.data + 3 * 0x6f0);
+            CHECK(!strcmp(*(char **)((unsigned char *)current->labels.data + 0x10),
+                tool == 3 ? "Authored category - retained exact bytes" : "Filtered category"));
+        }
+        admitted = 0;
+        CHECK(sh_palette_entries_end(&batch, fake_admitted, &admitted, error, sizeof(error)) == 0 && batch);
+        admitted = 1;
+        CHECK(sh_palette_entries_end(&batch, fake_admitted, &admitted, error, sizeof(error)) == 1 && !batch);
+        CHECK(!memcmp(auth_palette(), &before, sizeof(before)) && g_auth_destroys == 1);
+        CHECK(g_auth_widget == (tool != 10));
+        CHECK(!memcmp(saved_rows, before.bodies.data, sizeof(saved_rows)));
+        auth_destroy(auth_palette());
+    }
+    /* Accepted snapshots remain owned until a complete native replacement,
+     * even when the caller has an otherwise valid retirement boundary. */
+    auth_bind(module, old_decl, 3);
+    CHECK(sh_palette_entries_prepare(&source, 1, fake_admitted, &admitted, &batch, error, sizeof(error)) == 1);
+    CHECK(sh_palette_entries_prepare_authoring(batch, fake_admitted, &admitted, error, sizeof(error)) == 1);
+    CHECK(sh_palette_entries_publish(batch, fake_admitted, &admitted, error, sizeof(error)) == 1);
+    sh_palette_entries_accept(batch);
+    CHECK(sh_palette_entries_end(&batch, fake_admitted, &admitted, error, sizeof(error)) == 0 && batch && !g_auth_destroys);
+    CHECK(sh_palette_entries_end(&batch, fake_admitted, &admitted, error, sizeof(error)) == 0 && batch && !g_auth_destroys);
+    sh_palette_refresh_test_bind(module, auth_rebuild);
+    CHECK(sh_palette_refresh_after_decl_registration() == 1);
+    CHECK(sh_palette_entries_end(&batch, fake_admitted, &admitted, error, sizeof(error)) == 1 && !batch);
+    CHECK(g_auth_destroys == 2 && !sh_palette_entries_test_count());
+
+    auth_bind(module, old_decl, 3);
+    CHECK(sh_palette_entries_prepare(&source, 1, fake_admitted, &admitted, &batch, error, sizeof(error)) == 1);
+    CHECK(sh_palette_entries_prepare_authoring(batch, fake_admitted, &admitted, error, sizeof(error)) == 1);
+    CHECK(sh_palette_entries_publish(batch, fake_admitted, &admitted, error, sizeof(error)) == 1);
+    sh_palette_entries_accept(batch);
+    void *recycled = auth_palette()->bodies.data;
+    sh_palette_refresh_test_bind(module, auth_rebuild_same_address);
+    CHECK(sh_palette_refresh_after_decl_registration() == 1);
+    CHECK(auth_palette()->bodies.data == recycled && ((unsigned char *)recycled)[0x345] == 0x6b);
+    CHECK(sh_palette_entries_end(&batch, fake_admitted, &admitted, error, sizeof(error)) == 1 && !batch);
+    CHECK(auth_palette()->bodies.data == recycled && ((unsigned char *)recycled)[0x345] == 0x6b && g_auth_destroys == 2);
+    auth_destroy(auth_palette());
+
+    auth_bind(module, old_decl, 10);
+    test_native_palette before = *auth_palette();
+    CHECK(sh_palette_entries_prepare(&source, 1, fake_admitted, &admitted, &batch, error, sizeof(error)) == 1);
+    g_auth_resize_fail = 1;
+    CHECK(sh_palette_entries_prepare_authoring(batch, fake_admitted, &admitted, error, sizeof(error)) == 0);
+    CHECK(!memcmp(auth_palette(), &before, sizeof(before)) && !g_auth_copies);
+    g_auth_resize_fail = 0;
+    CHECK(sh_palette_entries_prepare_authoring(batch, fake_admitted, &admitted, error, sizeof(error)) == 1);
+    auth_palette()->bodies.granularity = 3; /* An intervening native change refuses the exchange. */
+    CHECK(sh_palette_entries_publish(batch, fake_admitted, &admitted, error, sizeof(error)) == 0);
+    auth_palette()->bodies.granularity = before.bodies.granularity;
+    CHECK(sh_palette_entries_end(&batch, fake_admitted, &admitted, error, sizeof(error)) == 1 && !batch);
+    CHECK(!memcmp(auth_palette(), &before, sizeof(before)));
+    auth_destroy(auth_palette());
+
+    auth_bind(module, old_decl, 10); before = *auth_palette();
+    CHECK(sh_palette_entries_prepare(&source, 1, fake_admitted, &admitted, &batch, error, sizeof(error)) == 1);
+    auth_palette()->bodies.kind = 1; /* Unsupported interior/static array stays untouched. */
+    CHECK(sh_palette_entries_prepare_authoring(batch, fake_admitted, &admitted, error, sizeof(error)) == 0 && !g_auth_copies);
+    auth_palette()->bodies.kind = before.bodies.kind;
+    auth_palette()->end = (unsigned char *)before.end + 1;
+    CHECK(sh_palette_entries_prepare_authoring(batch, fake_admitted, &admitted, error, sizeof(error)) == 0 && !g_auth_copies);
+    auth_palette()->end = before.end;
+    *(const char **)(old_entity + 0x58) = "private/new";
+    CHECK(sh_palette_entries_prepare_authoring(batch, fake_admitted, &admitted, error, sizeof(error)) == 0 && !g_auth_copies);
+    *(const char **)(old_entity + 0x58) = "old/entry";
+    CHECK(!memcmp(auth_palette(), &before, sizeof(before)));
+    CHECK(sh_palette_entries_end(&batch, fake_admitted, &admitted, error, sizeof(error)) == 1 && !batch);
+    auth_destroy(auth_palette());
+
+    /* Already represented declarations share native rows, without cloning. */
+    auth_bind(module, new_decl, 3); before = *auth_palette();
+    CHECK(sh_palette_entries_prepare(&source, 1, fake_admitted, &admitted, &batch, error, sizeof(error)) == 1);
+    CHECK(sh_palette_entries_prepare_authoring(batch, fake_admitted, &admitted, error, sizeof(error)) == 1 && !g_auth_copies);
+    CHECK(sh_palette_entries_publish(batch, fake_admitted, &admitted, error, sizeof(error)) == 1);
+    CHECK(!memcmp(auth_palette(), &before, sizeof(before)) && !g_auth_add);
+    CHECK(sh_palette_entries_end(&batch, fake_admitted, &admitted, error, sizeof(error)) == 1 && !batch);
+    auth_destroy(auth_palette());
+
+    /* A raised copy/refresh/destructor keeps explicit source ownership and
+     * never retries a potentially partial native destructor. */
+    for (int fault = 0; fault < 3; fault++) {
+        auth_bind(module, old_decl, 3); before = *auth_palette();
+        CHECK(sh_palette_entries_prepare(&source, 1, fake_admitted, &admitted, &batch, error, sizeof(error)) == 1);
+        g_auth_copy_raise = fault == 0;
+        CHECK(sh_palette_entries_prepare_authoring(batch, fake_admitted, &admitted, error, sizeof(error)) == (fault == 0 ? -1 : 1));
+        if (fault) {
+            g_auth_refresh_raise = fault == 1;
+            CHECK(sh_palette_entries_publish(batch, fake_admitted, &admitted, error, sizeof(error)) == (fault == 1 ? -1 : 1));
+        }
+        g_auth_destroy_raise = fault == 2;
+        CHECK(sh_palette_entries_end(&batch, fake_admitted, &admitted, error, sizeof(error)) == -1 && batch);
+        int destroys = g_auth_destroys;
+        CHECK(sh_palette_entries_end(&batch, fake_admitted, &admitted, error, sizeof(error)) == -1 && batch);
+        CHECK(g_auth_destroys == destroys);
+        g_auth_copy_raise = g_auth_refresh_raise = g_auth_destroy_raise = 0;
+        sh_palette_entries_test_discard_quarantine(&batch);
+        CHECK(!batch && !memcmp(auth_palette(), &before, sizeof(before)));
+        auth_destroy(auth_palette());
+    }
+    *failed_out = failed;
+}
+
 int main(void)
 {
     int failed = 0;
@@ -312,6 +741,8 @@ int main(void)
 
     test_install_exact_gate(module, &failed);
     test_template_scope(module, &failed);
+    test_retained_entries(module, &failed);
+    test_authoring_snapshots(module, &failed);
 
     bind_fake(module);
     setup_editor(module, 1, 1);

@@ -5,8 +5,12 @@
 #include "resource_types.h"
 #include "resource_graph.h"
 
-typedef struct pu_visit { sh_package_reference_visitor visitor; void *context; } pu_visit;
-typedef struct pu_states { sh_package_state_visitor visitor; void *context; } pu_states;
+typedef struct pu_visit {
+    sh_package_reference_visitor visitor;
+    void *context;
+    sh_package_reference_site_visitor site;
+} pu_visit;
+typedef struct pu_states { sh_package_state_visitor visitor; void *context; int borrowed; } pu_states;
 
 int sh_package_references_add(void *context, const char *type, const char *name)
 {
@@ -74,7 +78,9 @@ static int pu_object(void *context, const sh_json_field_span *fields, size_t cou
     for (i = 0; i < 2; i++) {
         const sh_json_field_span *field = pu_field(fields, count, i ? "value" : "inherit");
         if (!field || field->kind == SH_JSON_NULL) continue;
-        if (!pu_text(field, name, sizeof(name)) || (name[0] && !visit->visitor(visit->context, type, name))) return 0;
+        if (!pu_text(field, name, sizeof(name))) return 0;
+        if (name[0] && !(visit->site ? visit->site(visit->context, class_name, type, name,
+                field->value, field->value_length) : visit->visitor(visit->context, type, name))) return 0;
     }
     return 1;
 }
@@ -85,15 +91,21 @@ static int pu_gameplay_field(void *context, const char *key, size_t length, unsi
     return length != sizeof("editorVars") - 1 || memcmp(key, "editorVars", length) != 0;
 }
 
+static int pu_edit_span(void *context, const sh_json_field_span *fields, size_t count, unsigned depth)
+{
+    if (!depth) {
+        const sh_json_field_span *edit = pu_field(fields, count, "edit");
+        if (edit) *(sh_json_field_span *)context = *edit;
+    }
+    return 1;
+}
 static int pu_state(void *context, const sh_json_field_span *fields, size_t count, unsigned depth)
 {
     pu_states *visit = context;
     char target_name[256], class_name[256] = "", inherit[4096] = "";
     const sh_json_field_span *target = pu_field(fields, count, "targetType");
     const sh_json_field_span *state = pu_field(fields, count, "state"), *field;
-    const char *edit;
-    sh_json_object object = {0};
-    int ok = 1;
+    sh_json_field_span edit = {0};
     (void)depth;
     if (!state || state->kind == SH_JSON_NULL) return 1;
     if (!target) target = pu_field(fields, count, "~type");
@@ -104,11 +116,15 @@ static int pu_state(void *context, const sh_json_field_span *fields, size_t coun
     if (field && field->kind != SH_JSON_NULL && !pu_text(field, class_name, sizeof(class_name))) return 0;
     field = pu_field(fields, count, "inherit");
     if (field && field->kind != SH_JSON_NULL && !pu_text(field, inherit, sizeof(inherit))) return 0;
-    if (!sh_native_json_parse_object(state->value, state->value_length, 128, &object)) return 0;
-    edit = sh_json_object_get(&object, "edit");
-    if (edit && strcmp(edit, "null"))
-        ok = visit->visitor(visit->context, class_name, inherit, edit, strlen(edit));
-    sh_json_object_free(&object); return ok;
+    if (state->kind != SH_JSON_OBJECT || !sh_native_json_visit_objects_filtered(state->value,
+        state->value_length, 128, pu_edit_span, NULL, &edit)) return 0;
+    if (!edit.value || edit.kind == SH_JSON_NULL) return 1;
+    if (visit->borrowed) return visit->visitor(visit->context, class_name, inherit, edit.value, edit.value_length);
+    if (edit.value_length == SIZE_MAX) return 0;
+    char *copy = malloc(edit.value_length + 1); if (!copy) return 0;
+    memcpy(copy, edit.value, edit.value_length); copy[edit.value_length] = 0;
+    int ok = visit->visitor(visit->context, class_name, inherit, copy, edit.value_length);
+    free(copy); return ok;
 }
 
 int sh_package_map_states(const char *json, size_t length,
@@ -122,6 +138,20 @@ int sh_package_map_references(const char *json, size_t length,
                               sh_package_reference_visitor visitor, void *context)
 {
     pu_visit visit = {visitor, context};
+    return visitor && sh_native_json_visit_objects_filtered(json, length, 128, pu_object, pu_gameplay_field, &visit);
+}
+
+int sh_package_map_state_sites(const char *json, size_t length,
+    sh_package_state_visitor visitor, void *context)
+{
+    pu_states visit = {visitor, context, 1};
+    return visitor && sh_native_json_visit_objects_filtered(json, length, 128, pu_state, pu_gameplay_field, &visit);
+}
+
+int sh_package_map_reference_sites(const char *json, size_t length,
+    sh_package_reference_site_visitor visitor, void *context)
+{
+    pu_visit visit = {NULL, context, visitor};
     return visitor && sh_native_json_visit_objects_filtered(json, length, 128, pu_object, pu_gameplay_field, &visit);
 }
 
@@ -151,6 +181,13 @@ static int pu_collect(pu_owners *used, const char *type, const char *name)
     if (!*type) {
         resource = sh_package_compilation_find(used->compiled, name);
         return pu_resource(used, resource, resource ? resource->engine_path : name);
+    }
+    /* Compiled binary aliases have no stock catalog rows. Every permutation
+     * sharing that manager identity contributes its original delivery owners. */
+    for (i = 0; i < used->compiled->resource_count; i++) {
+        resource = used->compiled->resources + i;
+        if (sh_package_resource_native_matches(resource, type, name) &&
+            !pu_resource(used, resource, resource->engine_path)) return 0;
     }
     a = strlen(type); b = strlen(name);
     if (a > SIZE_MAX - 23 || b > SIZE_MAX - a - 23) return 0;

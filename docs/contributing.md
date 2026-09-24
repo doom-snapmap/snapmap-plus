@@ -251,11 +251,14 @@ exercise catalog parsing and metadata compaction against their own installed fil
 ```powershell
 tests\obj\imgpreview_index_test.exe --catalog-root "C:\path\to\DOOM\base"
 tests\obj\megapreview_io_test.exe --virtualtextures-root "C:\path\to\DOOM\virtualtextures"
+tests\obj\package_link_inputs_test.exe "C:\path\to\DOOM\base"
 ```
 
 These optional checks print recognized-record counts, streamed and retained metadata sizes, and the
 Mega2 table bytes left on disk. They read the indexes, Wwise manifest, VMTR tables, and Mega2 headers
 in place; they do not write to the game directory.
+The package input probe checks generated image filenames against the installed
+catalog and separately counts explicit catalog paths outside that naming rule.
 
 ### Website changelog
 

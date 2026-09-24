@@ -12,9 +12,15 @@ int sh_resource_resident_bind(const sig_result *results, size_t count, const uin
  * publication runs before startup lifetime promotion, with no map loaded. */
 sh_resource_resident *sh_resource_resident_begin(const sh_package_changes *changes,
     int restoring, int initial, char *error, size_t capacity);
+/* Verify a previously admitted scope still owns its main thread, renderer and
+ * heap. This permits recovery under held scopes without admitting new work. */
+int sh_resource_resident_owned(const sh_resource_resident *pass);
 /* Captured changed resources and their affected native consumers, including
  * identities retained for recovery. Unchanged loaded declarations stay intact. */
 int sh_resource_resident_selected(const sh_resource_resident *pass, const void *resource);
+/* Additive editor admission requires zero selected existing objects before
+ * entering a declaration parser or changing any native source registration. */
+size_t sh_resource_resident_selected_count(const sh_resource_resident *pass);
 /* A declaration pass owns these objects' reconstruction and pending marks.
  * Register exclusions before reconstruct. No object is rebuilt twice. */
 void sh_resource_resident_external(sh_resource_resident *pass, void *resource);
@@ -25,6 +31,12 @@ int sh_resource_resident_defaults(sh_resource_resident *pass, char *error, size_
 /* Reloads pending resources, then rebinds material virtual-texture parms inside
  * the heap-0 scope before the consumer update. Idempotent once it succeeds. */
 int sh_resource_resident_drain(sh_resource_resident *pass, char *error, size_t capacity);
+/* Active-editor additions/recovery use the sorted pre-admission native pointer
+ * snapshot. No selected object may belong to that snapshot. Finalize only fresh
+ * material/world-text caches; never run the whole-material rebind. Caller must
+ * make this same exclusion check before reconstructing on recovery. */
+int sh_resource_resident_drain_additions(sh_resource_resident *pass,
+    void *const *existing, size_t existing_count, char *error, size_t capacity);
 /* How many identities recovery left at the engine default because the restored
  * provider supplies no source for them. Reported, never hidden. */
 size_t sh_resource_resident_recovered_defaults(const sh_resource_resident *pass);

@@ -36,6 +36,14 @@ static void test_identities(void)
     CHECK(sh_audio_bank_identity("a.bnk",&id) && id==UINT32_C(84696446));
     CHECK(sh_audio_bank_identity("B.BNK",&id) && id==UINT32_C(84696445));
     CHECK(sh_audio_bank_identity("doom_weapon_sp.bnk",&id) && id==UINT32_C(835849565));
+    CHECK(sh_audio_bank_identity("777.bnk",&id) && id!=777);
+    CHECK(sh_audio_bank_names_identity("777.bnk",id)); /* A genuinely named numeric bank. */
+    CHECK(sh_audio_bank_numeric_identity("777.bnk",&id) && id==777);
+    CHECK(sh_audio_bank_numeric_identity("4294967295.bnk",&id) && id==UINT32_MAX);
+    CHECK(!sh_audio_bank_numeric_identity("4294967296.bnk",&id) && !id);
+    CHECK(!sh_audio_bank_numeric_identity("0777.bnk",&id) && !id);
+    CHECK(!sh_audio_bank_numeric_identity("+777.bnk",&id) && !id);
+    CHECK(!sh_audio_bank_numeric_identity("0.bnk",&id) && !id);
     CHECK(!sh_audio_bank_identity("locale/a.bnk",&id) && !id);
     CHECK(!sh_audio_bank_identity("locale\\a.bnk",&id) && !id);
     CHECK(!sh_audio_bank_identity(".bnk",&id) && !id);
@@ -71,7 +79,7 @@ static size_t fixture(unsigned char *p)
     for (int i=0;i<3;++i) { p[47+i*13]=4; put32(p+48+i*13,8); }
     put32(p+52,999); put32(p+65,7); put32(p+78,999);
     p[86]=2; put32(p+87,18); put32(p+91,123); /* A sound object is not an event. */
-    p[99]=1; put32(p+100,4242);
+    put32(p+95,0x20001); p[99]=1; put32(p+100,4242);
     return FIXTURE_BYTES;
 }
 static int parse(const unsigned char *p, size_t n, sh_audio_bank *bank)
@@ -95,6 +103,9 @@ static void test_reader(void)
     CHECK(!sh_audio_bank_find_media(&bank,123) && !bank.bank_count);
     CHECK(!bank.required_count && !bank.optional_count);
     sh_audio_bank_free(&bank); sh_audio_bank_free(&bank);
+    put32(data+95,0);
+    CHECK(parse(data,n,&bank) && !bank.media_count);
+    sh_audio_bank_free(&bank); fixture(data);
     for(size_t i=0;i<n;++i) {
         int result=parse(data,i,&bank);
         /* Complete BKHD and optional DATA alone are valid header-only banks. */
@@ -141,7 +152,7 @@ static size_t dependency_bank(unsigned char *p, unsigned properties, unsigned ra
     p[at]=3; put32(p+at+1,18); put32(p+at+5,51);           /* stop action */
     p[at+9]=0x03; p[at+10]=0x01; put32(p+at+11,601); at+=23;
     p[at]=2; put32(p+at+1,18); put32(p+at+5,600);          /* prefetched sound */
-    p[at+13]=2; put32(p+at+14,900); at+=23;
+    put32(p+at+9,0x20001); p[at+13]=2; put32(p+at+14,900); at+=23;
     put32(p+76,(uint32_t)(at-80));
     return at;
 }
@@ -152,6 +163,7 @@ static void test_dependencies(void)
     CHECK(parse(data,at,&bank));
     CHECK(bank.event_count==1 && bank.events[0]==7);
     CHECK(bank.bank_count==1 && bank.banks[0]==4242);
+    CHECK(bank.object_count==4 && bank.target_count==1 && bank.targets[0].bank==4242 && bank.targets[0].object==600);
     /* 601 is a stop action's target and defined nowhere here: legally absent,
      * so it is optional. A play target would have been required. */
     CHECK(bank.optional_count==1 && bank.optional[0]==601 && !bank.required_count);
@@ -430,10 +442,114 @@ static void test_content_recovery(void)
     CHECK(!f.load_calls && !f.unload_calls);
 }
 
+static void test_additive_ownership(void)
+{
+    fake_audio f; sh_audio_bank_slot slots[3], before[3]; char error[256];
+    const unsigned char first[] = {1,0,0}, all[] = {1,1,1};
+    sh_package_file_identity one = {4,{1}}, two = {4,{2}};
+    const sh_package_file_identity *content[] = {&one,NULL,NULL};
+    sh_audio_bank_ops ops = {&f,load,unload};
+    reset(slots,&f); f.desired[1] = 1;
+    CHECK(sh_audio_banks_reconcile(slots,3,first,content,ops,error,sizeof(error)));
+    memcpy(before,slots,sizeof(before));
+    CHECK(!sh_audio_banks_restore_additions(slots+1,2,before,3,ops,error,sizeof(error)));
+    CHECK(f.loaded[1] && !f.unload_calls);
+    content[0] = &two;
+    int calls = f.load_calls;
+    CHECK(!sh_audio_banks_append(slots,3,all,content,ops,error,sizeof(error)));
+    CHECK(f.load_calls == calls && !f.unload_calls && f.actual[1] == 1);
+    content[0] = &one; f.fail_load = 3;
+    CHECK(!sh_audio_banks_append(slots,3,all,content,ops,error,sizeof(error)));
+    CHECK(f.loaded[1] && f.loaded[2] && !f.loaded[3] && !f.unload_calls);
+    CHECK(sh_audio_banks_restore_additions(slots,3,before,3,ops,error,sizeof(error)));
+    CHECK(f.loaded[1] && !f.loaded[2] && !f.loaded[3] && f.unload_calls == 1);
+    CHECK(!memcmp(slots,before,sizeof(slots)));
+    f.fail_load = 0;
+    CHECK(sh_audio_banks_append(slots,3,all,content,ops,error,sizeof(error)));
+    f.fail_unload = 3;
+    CHECK(!sh_audio_banks_restore_additions(slots,3,before,3,ops,error,sizeof(error)));
+    CHECK(f.loaded[1] && f.loaded[2] && f.loaded[3]);
+    f.fail_unload = 0;
+    CHECK(sh_audio_banks_restore_additions(slots,3,before,3,ops,error,sizeof(error)));
+    CHECK(f.loaded[1] && !f.loaded[2] && !f.loaded[3]);
+    reset(slots,&f); f.loaded[1] = 1; memcpy(before,slots,sizeof(before));
+    CHECK(!sh_audio_banks_append(slots,3,all,content,ops,error,sizeof(error)));
+    CHECK(f.loaded[1] && !f.unload_calls && !slots[0].owned);
+    CHECK(sh_audio_banks_restore_additions(slots,3,before,3,ops,error,sizeof(error)));
+    CHECK(f.loaded[1] && !f.unload_calls);
+    reset(slots,&f); memcpy(before,slots,sizeof(before)); f.uncertain = 1;
+    CHECK(!sh_audio_banks_append(slots,3,all,NULL,ops,error,sizeof(error)));
+    CHECK(!sh_audio_banks_restore_additions(slots,3,before,3,ops,error,sizeof(error)));
+    CHECK(slots[0].uncertain && !f.unload_calls);
+}
+
+static void test_resident_media_closure(void)
+{
+    uint32_t event = 77; char error[256]; unsigned char selected[4] = {0};
+    sh_audio_bank_media needs[] = {{101, 0, 0}}, provides[] = {{101, 0, 1}, {202, 0, 0}};
+    sh_audio_bank_media next[] = {{202, 0, 1}}, other[] = {{303, 0, 1}};
+    sh_audio_bank banks[4] = {{0}}; const sh_audio_bank *view[] = {banks, banks + 1, banks + 2, banks + 3};
+    for (size_t i = 0; i < 4; i++) banks[i].id = (uint32_t)i + 1;
+    banks[0].events = &event; banks[0].event_count = 1; banks[0].media = needs; banks[0].media_count = 1;
+    banks[1].media = provides; banks[1].media_count = 2; banks[2].media = next; banks[2].media_count = 1;
+    banks[3].media = other; banks[3].media_count = 1;
+    sh_audio_bank_closure_report report;
+    CHECK(sh_audio_bank_closure(view, 4, &event, 1, 1, selected, &report, error, sizeof(error)));
+    CHECK(selected[0] && selected[1] && selected[2] && !selected[3] && report.dependency_banks == 2);
+    memset(selected, 0, sizeof(selected)); needs[0].stream = 1;
+    CHECK(sh_audio_bank_closure(view, 4, &event, 1, 1, selected, &report, error, sizeof(error)));
+    CHECK(selected[0] && !selected[1] && !selected[2] && !selected[3]);
+    /* An existing resident supplier wins over an unnecessary new bank. */
+    needs[0].stream = 0; other[0].id = 101; selected[3] = 1;
+    CHECK(sh_audio_bank_closure(view, 4, &event, 1, 1, selected, &report, error, sizeof(error)));
+    CHECK(!selected[1] && !selected[2] && selected[3]);
+    banks[0].media = NULL;
+    CHECK(!sh_audio_bank_closure(view, 4, &event, 1, 1, selected, NULL, error, sizeof(error)));
+}
+static void test_source_closure(void)
+{
+    uint32_t event = 77, missing = 88, next[] = {2}, back[] = {1}, absent[] = {9};
+    sh_audio_bank banks[3] = {{0}};
+    const sh_audio_bank *view[] = {banks, banks + 1, banks + 2};
+    banks[0].id = 1; banks[0].events = &event; banks[0].event_count = 1;
+    banks[0].banks = next; banks[0].bank_count = 1;
+    banks[1].id = 2; banks[1].banks = back; banks[1].bank_count = 1;
+    banks[2].id = 3;
+    unsigned char wanted[3] = {0}; char error[256]; sh_audio_bank_closure_report report;
+    CHECK(sh_audio_bank_closure(view, 3, &event, 1, 1, wanted, &report, error, sizeof(error)));
+    CHECK(wanted[0] && wanted[1] && !wanted[2] && report.matched_events == 1 && report.dependency_banks == 1);
+    memset(wanted, 0, sizeof(wanted)); wanted[2] = 1;
+    CHECK(sh_audio_bank_closure(view, 3, &missing, 1, 0, wanted, &report, error, sizeof(error)));
+    CHECK(!wanted[0] && !wanted[1] && wanted[2] && !report.matched_events);
+    CHECK(!sh_audio_bank_closure(view, 3, &missing, 1, 1, wanted, &report, error, sizeof(error)));
+    CHECK(strstr(error, "event 88"));
+    banks[1].banks = absent;
+    CHECK(!sh_audio_bank_closure(view, 3, &event, 1, 1, wanted, &report, error, sizeof(error)));
+    CHECK(strstr(error, "bank 2 requires absent bank 9"));
+    banks[1].banks = back; banks[1].required = absent; banks[1].required_count = 1;
+    CHECK(!sh_audio_bank_closure(view, 3, &event, 1, 1, wanted, &report, error, sizeof(error)));
+    CHECK(strstr(error, "absent object 9"));
+    banks[1].required_count = 0; banks[1].optional_count = 1;
+    CHECK(sh_audio_bank_closure(view, 3, &event, 1, 1, wanted, &report, error, sizeof(error)));
+    CHECK(report.optional_targets == 1);
+    sh_audio_bank_target target={2,123};uint32_t object=123;
+    banks[0].targets=&target;banks[0].target_count=1;
+    CHECK(!sh_audio_bank_closure(view,3,&event,1,1,wanted,&report,error,sizeof(error)) && strstr(error,"object 123 in bank 2"));
+    banks[1].objects=&object;banks[1].object_count=1;
+    CHECK(sh_audio_bank_closure(view,3,&event,1,1,wanted,&report,error,sizeof(error)));
+    sh_audio_bank copy={0};CHECK(sh_audio_bank_copy(banks,&copy));
+    CHECK(copy.targets!=banks[0].targets && copy.targets[0].object==123);sh_audio_bank_free(&copy);
+    view[2]=NULL;wanted[2]=0;
+    CHECK(sh_audio_bank_closure(view,3,&event,1,1,wanted,&report,error,sizeof(error)));
+    wanted[2]=1;CHECK(!sh_audio_bank_closure(view,3,&event,1,1,wanted,&report,error,sizeof(error)));
+}
+
 int main(int argc,char **argv)
 {
     test_identities(); test_name_aliases(); test_reader(); test_dependencies();
-    test_streaming_source(); test_recovery(); test_transition_order(); test_content_recovery();
+    test_streaming_source(); test_recovery(); test_transition_order(); test_content_recovery(); test_additive_ownership();
+    test_source_closure();
+    test_resident_media_closure();
     if(argc>1 && !strcmp(argv[1],"--sound-ids")) {
         for(int i=2;i<argc;i++) {
             uint32_t id=0;

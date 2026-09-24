@@ -2,7 +2,7 @@
  * interface object and callbacks; both DLLs must build against this header.
  * The 0x60-byte object has a vtable at +0 and subobject pointer at +0x58.
  * The original 77-slot prefix ends at +0x260; append-only extensions end
- * at +0x320, making the current vtable 0x328 bytes.
+ * at +0x340, making the current vtable 0x348 bytes.
  * Engine layouts remain private to backend implementations. Reserved cells
  * preserve ABI offsets; optional callbacks can be null. */
 #ifndef SNAPMAP_PLUS_IFACE_H
@@ -66,8 +66,15 @@ typedef void         (*sh_set_displayname_fn)(struct sh_iface *self, int id, con
 /* Rebuild canonical decl source from current class/inherit and the supplied body. */
 typedef void         (*sh_rebuild_declsource_fn)(struct sh_iface *self, int id, const char *cstr); /* +0x40 */
 
-/* Serialize selected entities as prefab JSON. Return copied bytes (up to cap - 1), or zero. */
+/* Serialize selected entities as portable prefab JSON. Return the complete
+ * copied byte count, or zero; insufficient capacity never returns a prefix. */
 typedef int          (*sh_serialize_selection_fn)(struct sh_iface *self, char *out_json, int cap);  /* +0xb0 */
+/* One complete engine-thread snapshot, without a fixed transport buffer.
+ * selection: 0 staged clipboard, 1 selected entities. Success transfers a
+ * NUL-terminated GetProcessHeap allocation; caller uses HeapFree, never free.
+ * length excludes the terminator. Failure clears both outputs. Native idStr
+ * representation and allocation overflow are the only payload bounds. */
+typedef int (*sh_prefab_export_fn)(struct sh_iface *self, int selection, char **out_json, size_t *length);
 
 /* Join the local app-data snapmap-plus root, prefix, and name into out_path.
  * Caller supplies separators and suffix. Return 1 when formatting succeeds. */
@@ -429,6 +436,7 @@ typedef struct sh_iface_vtbl {
     sh_rawmap_status_fn        rawmap_status;        /* +0x328 (ext 24) staged paths + arm state */
     sh_rawmap_configure_fn     rawmap_configure;     /* +0x330 (ext 25) choose those paths / arm */
     sh_rawmap_load_now_fn      rawmap_load_now;      /* +0x338 (ext 26) reload the map now */
+    sh_prefab_export_fn        prefab_export;       /* +0x340 (ext 27) complete owned prefab */
 } sh_iface_vtbl;
 
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, config_get_json) == 0x2B0);
@@ -449,11 +457,12 @@ SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, resolve_prefab_defaults) == 0x320);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_status) == 0x328);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_configure) == 0x330);
 SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, rawmap_load_now) == 0x338);
-SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x340);
+SH_STATIC_ASSERT(offsetof(sh_iface_vtbl, prefab_export) == 0x340);
+SH_STATIC_ASSERT(sizeof(sh_iface_vtbl) == 0x348);
 
-/* Fixed object layout: vtable +0, reserved bytes +0x08..+0x57, subobject
- * pointer +0x58. Reserved bytes stay zero; private subobject storage holds
- * the live lock. Frontends access state through callbacks. */
+/* Fixed object layout: vtable +0, extent marker +0x08..+0x17, remaining
+ * reserved bytes +0x18..+0x57, subobject pointer +0x58. Older backends left
+ * the marker zero. Check it before reading a newly appended callback. */
 #define SH_IFACE_VTBL_OFF   0x00
 #define SH_IFACE_MTX_OFF    0x08
 #define SH_IFACE_SUB_OFF    0x58    /* Pointer to the fixed 0x78-byte subobject header. */
@@ -474,12 +483,31 @@ typedef struct sh_iface_sub {
 
 struct sh_iface {
     const sh_iface_vtbl *vtbl;      /* +0x00 */
-    uint8_t              mtx[0x50]; /* +0x08..+0x57: reserved. */
+    uint64_t             abi_marker;/* +0x08: SH_IFACE_EXTENT_MARKER or zero on older backends. */
+    uint64_t             vtbl_bytes;/* +0x10: actual backend table extent, in bytes. */
+    uint8_t              mtx[0x40]; /* +0x18..+0x57: reserved. */
     sh_iface_sub        *sub;       /* +0x58  -> the cmd-map + work-queue sub-object */
 };
 
+SH_STATIC_ASSERT(offsetof(sh_iface, abi_marker) == 0x08);
+SH_STATIC_ASSERT(offsetof(sh_iface, vtbl_bytes) == 0x10);
 SH_STATIC_ASSERT(offsetof(sh_iface, sub) == 0x58);
 SH_STATIC_ASSERT(sizeof(sh_iface) == 0x60);
+
+#define SH_IFACE_EXTENT_MARKER UINT64_C(0x3154584546494853)
+/* This guard reads only the fixed object prefix, never an absent table slot.
+ * It is a compatibility contract for trusted matched DLLs, not a memory probe. */
+static __inline int sh_iface_has_slot(const sh_iface *iface, size_t offset, size_t bytes)
+{
+    return iface && iface->abi_marker == SH_IFACE_EXTENT_MARKER && iface->vtbl &&
+        iface->vtbl_bytes >= 0x268 && !(iface->vtbl_bytes % sizeof(void *)) &&
+        bytes && offset <= SIZE_MAX - bytes && iface->vtbl_bytes >= offset + bytes;
+}
+static __inline sh_prefab_export_fn sh_iface_prefab_export(const sh_iface *iface)
+{
+    return sh_iface_has_slot(iface, offsetof(sh_iface_vtbl, prefab_export),
+        sizeof(sh_prefab_export_fn)) ? iface->vtbl->prefab_export : NULL;
+}
 
 /* Frontend thread-init block: output-state slot, argc, argv, and the
  * backend-owned interface. Preserve alignment and field order across DLLs. */
@@ -586,6 +614,7 @@ typedef struct sh_iface_engine_slots {
     sh_rawmap_status_fn        rawmap_status;               /* +0x328 (ext 24) */
     sh_rawmap_configure_fn     rawmap_configure;            /* +0x330 (ext 25) */
     sh_rawmap_load_now_fn      rawmap_load_now;             /* +0x338 (ext 26) */
+    sh_prefab_export_fn        prefab_export;              /* +0x340 (ext 27) */
 } sh_iface_engine_slots;
 
 void sh_iface_bind_engine_slots(const sh_iface_engine_slots *slots);

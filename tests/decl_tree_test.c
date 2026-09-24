@@ -18,10 +18,11 @@ int main(void)
     char *text, *cursor;
     const char *bad[] = {"", "{} trailing", "{ a = 1; a = 2; }", "{ edit = { x = 1; }",
         "{ a = (1, 2; }", "{ a = 1); }", "{ a = \"broken; }", "{ a = !1; }", "{ /* broken }",
-        "{ a = 1 /* unsupported expression comment */; }", "{ a b; }"};
+        "{ a = 1 /* unsupported expression comment */; }", "{ a b; }",
+        "{ a = \"escaped\\\"name\"; }"};
     root = parse("/* lead */ { editorVars { placeable = true; } edit = ! {"
                  " position = (1, 2, 3); model = \"models/test\"; plain = bare/name;"
-                 " empty = \"\"; quoted = \"escaped\\\"name\"; expression = a+b; } } // end");
+                 " empty = \"\"; quoted = \"first\" \"second\"; expression = a+b; } } // end");
     assert(root && root->compound);
     node = (sh_decl_node *)sh_decl_tree_member(root, "edit");
     assert(node && node->reset && node->assignment);
@@ -35,6 +36,43 @@ int main(void)
     assert(!sh_decl_tree_literal(sh_decl_tree_member(node, "expression"), &literal, &length));
     sh_decl_tree_free(root);
     for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) assert(!parse(bad[i]));
+    {
+        const char *paths = "{ inherit = \"projectile\\player\\mp\\directional_melee\";"
+            " directory = \"folder\\\"; plain = folder\\name; }";
+        root = parse(paths); assert(root);
+        assert(sh_decl_tree_literal(sh_decl_tree_member(root, "inherit"), &literal, &length));
+        assert(length == strlen("projectile\\player\\mp\\directional_melee") &&
+            !memcmp(literal, "projectile\\player\\mp\\directional_melee", length));
+        assert(sh_decl_tree_literal(sh_decl_tree_member(root, "directory"), &literal, &length));
+        assert(length == 7 && !memcmp(literal, "folder\\", length));
+        assert(sh_decl_tree_literal(sh_decl_tree_member(root, "plain"), &literal, &length));
+        assert(length == 11 && !memcmp(literal, "folder\\name", length));
+        sh_decl_tree_free(root);
+    }
+    {
+        const char *annotated = "{ \"Entity\" \"\" edit = { \"State::Flags\" \"\" \"flags\" = {"
+            " \"bool\" \"\" \"enabled\" = true; } } }";
+        root = parse(annotated); assert(root);
+        node = (sh_decl_node *)sh_decl_tree_member(root, "edit");
+        assert(node && !strcmp(node->annotation, "\"Entity\" \"\" "));
+        node = (sh_decl_node *)sh_decl_tree_member(sh_decl_tree_member(node, "flags"), "enabled");
+        assert(node && !strcmp(node->annotation, "\"bool\" \"\" ") && !strcmp(node->value, "true"));
+        text = sh_decl_tree_write(root, &length); assert(text);
+        sh_decl_node *again = parse(text); assert(again);
+        assert(strstr(text, "\"bool\" \"\" enabled = true"));
+        sh_decl_tree_free(root); sh_decl_tree_free(again); free(text);
+        root = parse("{ \"key\" = 1; }"); assert(root && !root->children->annotation);
+        sh_decl_tree_free(root);
+        root = parse("{ idEntity \"\" edit = { idDeclInventory * target = \"one\"; int health = 1; } }");
+        assert(root && !strcmp(root->children->annotation, "idEntity \"\" "));
+        assert(!strcmp(root->children->children->annotation, "idDeclInventory * "));
+        assert(!strcmp(root->children->children->next->annotation, "int "));
+        sh_decl_tree_free(root);
+        assert(!parse("{ \"Type\" \"\" \"\" = 1; }"));
+        assert(!parse("{ \"Type\" \"\" \"extra\" key = 1; }"));
+        assert(!parse("{ \"Type\\bad\" key = 1; }"));
+        assert(!parse("{ \"Type\" \"\" key = 1; key = 2; }"));
+    }
     {
         const char *ordered = "{ nodes = { node = { name = \"first\"; } node = { name = \"second\"; } } }";
         sh_decl_node *again;
