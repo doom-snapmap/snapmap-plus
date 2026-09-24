@@ -5,6 +5,8 @@
 #include "../src/backend/audio_environment_native.c"
 #include "../src/backend/audio_state_native.c"
 #include "../src/backend/audio_parameter_native.c"
+#include "../src/backend/audio_subscription_native.c"
+#include "../src/backend/audio_switch_native.c"
 #include "../src/backend/audio_bank_gate.c"
 #include "../src/backend/audio_banks_native.c"
 
@@ -618,6 +620,9 @@ static rp_owner rp_owners[6];
 static void rp_release(void *owner) { rp_owner *o = owner; CHECK(o->references > 0); o->references--; }
 static sh_audio_active_program rp_ref(size_t owner, sh_package_audio_program *program, sh_audio_id_lease *lease)
 { rp_owners[owner].references++; return (sh_audio_active_program){rp_owners + owner, program, lease}; }
+/* Optional STMG switch record for the next built bank: group, RTPC
+ * controller and two points mapping inputs 0 and 10 to two switch values. */
+static uint32_t rp_switch_group, rp_switch_controller = 77;
 static size_t rp_bank(unsigned char *bank, const char *name, uint32_t event, float threshold)
 {
     uint32_t id = 0, version = 113, size = 16, count = 1, length = 8; CHECK(sh_audio_bank_identity(name, &id));
@@ -628,8 +633,61 @@ static size_t rp_bank(unsigned char *bank, const char *name, uint32_t event, flo
     if (!threshold) return 49;
     memcpy(bank + 49, "STMG", 4); size = 18; memcpy(bank + 53, &size, 4);
     uint16_t voices = 64; memcpy(bank + 57, &threshold, 4); memcpy(bank + 61, &voices, 2);
-    return 75;
+    if (!rp_switch_group) return 75;
+    uint32_t switches = 1, points = 2, shape = 4, values[2] = {5001, 5002}; float x[2] = {0, 10};
+    size = 55; memcpy(bank + 53, &size, 4);
+    memcpy(bank + 67, &switches, 4); memcpy(bank + 71, &rp_switch_group, 4); memcpy(bank + 75, &rp_switch_controller, 4);
+    bank[79] = 0; memcpy(bank + 80, &points, 4);
+    for (size_t i = 0; i < 2; i++) {
+        memcpy(bank + 84 + i * 12, x + i, 4); memcpy(bank + 88 + i * 12, values + i, 4); memcpy(bank + 92 + i * 12, &shape, 4);
+    }
+    return 112;
 }
+/* Switch groups and the subscription core with the verified layouts; the
+ * parameter controller list was reserved by the adapter before insertion. */
+static struct { sh_audio_switch_table table; unsigned char rest[0x700]; } rp_switches;
+static void *rp_switch_slot, *rp_modulator_table[193], *rp_modulator_slot;
+static sh_audio_parameter_native rp_subscription_parameters;
+static int rp_switch_refreshes;
+static void *rp_switch_ensure(void *t, uint32_t id)
+{
+    sh_audio_switch_table *table = t;
+    for (sh_audio_switch_node *n = table->buckets[id % 193]; n; n = n->next) if (n->id == id) return n;
+    sh_audio_switch_node *n = calloc(1, sizeof(*n)); if (!n) return NULL;
+    n->id = id; n->vtable = rp_vtable; n->next = table->buckets[id % 193]; table->buckets[id % 193] = n; table->count++;
+    return n;
+}
+static sh_audio_parameter_node *rp_parameter_ensure(sh_audio_parameter_table *table, uint32_t id)
+{
+    for (sh_audio_parameter_node *n = table->buckets[id % 193]; n; n = n->next) if (n->id == id) return n;
+    sh_audio_parameter_node *n = calloc(1, sizeof(*n)); if (!n) return NULL;
+    n->id = id; n->next = table->buckets[id % 193]; table->buckets[id % 193] = n; table->count++;
+    return n;
+}
+static void rp_parameter_destroy(sh_audio_parameter_node *node)
+{ for (unsigned i = 0; i < 2; i++) free(node->subscribers[i].items); memset(node->subscribers, 0, sizeof(node->subscribers)); }
+static int rp_reverse_add(sh_audio_parameter_node *node, void *record, char selector)
+{
+    sh_audio_parameter_vector *list = node->subscribers + (selector ? 0 : 1);
+    CHECK(list->count < list->capacity); if (list->count >= list->capacity) return 0x34;
+    ((void **)list->items)[list->count++] = record; return 1;
+}
+static char rp_reverse_remove(sh_audio_parameter_node *node, void *record)
+{
+    for (unsigned l = 0; l < 2; l++) {
+        void **items = node->subscribers[l].items;
+        for (uint32_t i = 0; i < node->subscribers[l].count; i++) if (items[i] == record) {
+            memmove(items + i, items + i + 1, (node->subscribers[l].count - i - 1) * sizeof(void *));
+            node->subscribers[l].count--; break;
+        }
+    }
+    return 1;
+}
+static int rp_modulator_add(void *m, uint32_t id, void *record) { (void)m; (void)id; (void)record; return 2; }
+static void rp_modulator_remove(void *m, void *record, uint32_t id) { (void)m; (void)record; (void)id; }
+static void rp_refresh(sh_audio_parameter_table *t, void *record, char flag) { (void)t; (void)record; (void)flag; rp_switch_refreshes++; }
+static sh_audio_switch_node *rp_switch(uint32_t id)
+{ for (sh_audio_switch_node *n = rp_switches.table.buckets[id % 193]; n; n = n->next) if (n->id == id) return n; return NULL; }
 typedef struct rp_program {
     unsigned char banks[2][160]; sh_compiled_resource files[2]; sh_package_compilation scope;
     char paths[2][64]; sh_package_audio_program *program; sh_audio_id_lease *lease;
@@ -703,6 +761,12 @@ static void retained_programs(void)
         program_state_release, &pool_id, &parameter_slot, &audio_manager, &lock, NULL};
     g_bank_gate.entry = g_bank_gate.original = program_dispatch; g_bank_gate.manager_slot = &audio_manager;
     g_bank_gate.render_lock = &lock; CHECK(sh_audio_bank_gate_initialize(&g_bank_gate)); g_bank_gate.installed = 1;
+    rp_switch_slot = &rp_switches.table; rp_modulator_slot = rp_modulator_table;
+    rp_subscription_parameters = (sh_audio_parameter_native){rp_parameter_ensure, rp_parameter_destroy, program_state_allocate,
+        program_state_release, &pool_id, &parameter_slot, &audio_manager, &lock, NULL};
+    g_subscription = (sh_audio_subscription_native){&rp_subscription_parameters, &rp_modulator_slot, rp_reverse_add,
+        rp_reverse_remove, rp_modulator_add, rp_modulator_remove, rp_refresh, program_curve, &rp_switch_slot, rp_switch_ensure};
+    CHECK(sh_audio_switch_native_bind(&g_switch, &g_subscription, &g_limits));
     /* Native Init baseline: -60 threshold, 64 voices. */
     unsigned char init[18] = {0}; float baseline_threshold = -60; uint16_t baseline_voices = 64;
     memcpy(init, &baseline_threshold, 4); memcpy(init + 4, &baseline_voices, 2);
@@ -710,12 +774,13 @@ static void retained_programs(void)
     sh_audio_shared_policy baseline = {0};
     CHECK(sh_audio_shared_policy_compile(&init_input, 1, &baseline, error, sizeof(error)));
     sh_audio_id_pool *pool = sh_audio_id_pool_open(rp_occupied, NULL); CHECK(pool);
-    static rp_program a, b, c, s, d;
+    static rp_program a, b, c, s, d, w;
     CHECK(rp_build(&a, originals, pool, "pa.bnk", NULL, 70, 0));
     CHECK(rp_build(&b, originals, pool, "pb.bnk", NULL, 80, 0));
     CHECK(rp_build(&c, originals, pool, "pc1.bnk", "pc2.bnk", 90, 0));
     CHECK(rp_build(&s, originals, pool, "ps.bnk", NULL, 100, -72));
     CHECK(rp_build(&d, originals, pool, "pd.bnk", NULL, 110, 0));
+    rp_switch_group = 620; CHECK(rp_build(&w, originals, pool, "pw.bnk", NULL, 120, -60)); rp_switch_group = 0;
     rp_plan pa = rp_loads_of(&a), pb = rp_loads_of(&b), pc = rp_loads_of(&c), pd = rp_loads_of(&d);
     uint32_t pa_id = 0; CHECK(sh_audio_bank_identity("pa.bnk", &pa_id));
     CHECK(pa.count == 1 && pa.ids[0] != pa_id && pc.count == 2 && pb.count == 1);
@@ -789,6 +854,20 @@ static void retained_programs(void)
     CHECK(!sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
     CHECK(playback.threshold == -60 && !g_limits.pending && !g_bank_gate.scope && rp_owners[3].references == 0);
     state_slot = &states;
+    /* 7b. A switch edit publishes through the switch leg; the departure
+     * returns the group to its original (unmapped) state. */
+    const sh_audio_shared_policy *bound = sh_package_audio_program_bound_shared(w.program); uint32_t controller = 0;
+    for (size_t i = 0; bound && i < bound->count; i++)
+        if (bound->settings[i].record.kind == SH_AUDIO_SHARED_SWITCH) memcpy(&controller, bound->settings[i].body + 4, 4);
+    CHECK(controller);
+    set[0] = rp_ref(5, w.program, w.lease);
+    CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
+    sh_audio_switch_node *group = rp_switch(620);
+    CHECK(group && group->controller == controller && group->values.count == 2 && ((uint32_t *)group->values.items)[1] == 5002);
+    CHECK(!g_switch.pending && g_switch.original_count == 1 && rp_switch_refreshes == 1 && playback.threshold == -60);
+    set[0] = rp_ref(1, b.program, b.lease);
+    CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
+    CHECK(rp_switch(620) == group && !group->controller && !group->values.count && !g_switch.original_count && !g_switch.pending);
     /* 8. Additive admission: rollback unloads, accept activates the lease. */
     sh_audio_bank_addition *addition = sh_audio_banks_native_additions_begin(error, sizeof(error)); CHECK(addition);
     set[0] = rp_ref(4, d.program, d.lease);
@@ -813,8 +892,8 @@ static void retained_programs(void)
     CHECK(sh_audio_banks_native_programs_count() == 0 && !rp_find_slot(pb.ids[0], NULL) && !rp_find_slot(pd.ids[0], NULL));
     for (size_t i = 0; i < 6; i++) CHECK(rp_owners[i].references == 0);
     CHECK(!rp_cut_voices && !g_pbank_count);
-    rp_program *all[] = {&a, &b, &c, &s, &d};
-    for (size_t i = 0; i < 5; i++) { sh_audio_id_lease_release(all[i]->lease); sh_package_audio_program_close(all[i]->program); }
+    rp_program *all[] = {&a, &b, &c, &s, &d, &w};
+    for (size_t i = 0; i < 6; i++) { sh_audio_id_lease_release(all[i]->lease); sh_package_audio_program_close(all[i]->program); }
     CHECK(sh_audio_id_pool_close(pool));
     sh_audio_shared_policy_free(&baseline); sh_audio_originals_close(originals);
     DeleteCriticalSection(&g_bank_gate.lock); memset(&g_bank_gate, 0, sizeof(g_bank_gate));
@@ -822,6 +901,15 @@ static void retained_programs(void)
     free(states.items); memset(&states, 0, sizeof(states));
     memset(&g_state, 0, sizeof(g_state)); memset(&g_parameter, 0, sizeof(g_parameter));
     memset(&g_environment, 0, sizeof(g_environment)); memset(&g_limits, 0, sizeof(g_limits));
+    for (unsigned i = 0; i < 193; i++) for (sh_audio_switch_node *n = rp_switches.table.buckets[i]; n;) {
+        sh_audio_switch_node *next = n->next; free(n->values.items); free(n); n = next;
+    }
+    for (unsigned i = 0; i < 193; i++) for (sh_audio_parameter_node *n = parameters.table.buckets[i]; n;) {
+        sh_audio_parameter_node *next = n->next; rp_parameter_destroy(n); free(n); n = next;
+    }
+    memset(&rp_switches, 0, sizeof(rp_switches)); memset(&parameters, 0, sizeof(parameters));
+    aw_originals_free(g_switch.originals, g_switch.original_count);
+    memset(&g_switch, 0, sizeof(g_switch)); memset(&g_subscription, 0, sizeof(g_subscription));
     DeleteCriticalSection(&lock);
     g_commands = saved_commands; g_registry = saved_registry; g_load = saved_load; g_unload = saved_unload;
     for (size_t i = 0; i < 12; i++) DeleteCriticalSection((CRITICAL_SECTION *)(rp_index + i * 0x638));
