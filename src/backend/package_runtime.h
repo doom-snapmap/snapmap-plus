@@ -9,6 +9,8 @@
 #include "package_bundle.h"
 #include "package_occurrence.h"
 #include "audio_originals.h"
+#include "package_audio_program.h"
+#include "audio_id_reservations.h"
 #include "virtual_material_runtime.h"
 #include "package_consumers.h"
 
@@ -315,6 +317,20 @@ sh_package_bundle *sh_package_runtime_source_bundle(size_t owner,
 /* Copy the compiled sound's bound Wwise event under the provider lock. Native
  * callbacks retain no resource/source pointer; absent names clear the output. */
 int sh_package_runtime_sound_event(const char *name, uint32_t *event);
+/* Audio programs served by the published view, in precedence order: current
+ * map, local library, then retained occurrence and selector owners. Each row
+ * retains its owning provider (and so its program, ID lease and originals)
+ * until sh_package_runtime_audio_release. The array itself is caller-owned. */
+typedef struct sh_package_runtime_audio {
+    void *owner;
+    sh_package_audio_program *program;
+    sh_audio_id_lease *lease;
+} sh_package_runtime_audio;
+int sh_package_runtime_audio_programs(sh_package_runtime_audio **rows, size_t *count,
+    char *error, size_t capacity);
+void sh_package_runtime_audio_release(void *owner);
+/* Native Init shared controls from the published provider's installed originals. */
+int sh_package_runtime_audio_baseline(sh_audio_shared_policy *out, char *error, size_t capacity);
 /* Installed audio identity used to mirror native localized-before-root bank
  * lookup. Acquires its own provider lock; call outside an acquired snapshot. */
 int sh_package_runtime_audio_original(const char *path, sh_package_original_identity *out,

@@ -37,4 +37,13 @@ int sh_audio_registry_bind(sh_audio_registry *registry, const unsigned char *ima
  * Includes memory-loaded banks and resident media, not just posted events. */
 int sh_audio_registry_occupied(const sh_audio_registry *registry, uint32_t id,
     char *error, size_t capacity);
+/* Usage slot of a file-loaded bank (memory key zero). A completed load holds
+ * one slot reference and every playback item using the bank's media holds
+ * another; preparation references are separate. Native unload stops those
+ * items, so only references == 1 with no preparation proves an unload cannot
+ * cut a voice. Read under the native bank lock without acquiring anything.
+ * 1 found, 0 absent, -1 unavailable/corrupt. */
+typedef struct sh_audio_bank_usage { int32_t references, prepared; int loaded; } sh_audio_bank_usage;
+int sh_audio_registry_bank(const sh_audio_registry *registry, uint32_t id,
+    sh_audio_bank_usage *out, char *error, size_t capacity);
 #endif

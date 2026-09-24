@@ -234,11 +234,44 @@ static void test_occupancy(void)
     DeleteCriticalSection((CRITICAL_SECTION *)(banks+0x48));DeleteCriticalSection(&bank_lock);
     free(index);free(banks);
 }
+/* Usage slots: file loads use memory key zero; playback items hold slot
+ * references. The probe reads them under the bank lock and never writes. */
+static void test_bank_usage(void)
+{
+    unsigned char *banks=calloc(1,0xca0),first[0x80]={0},other[0x80]={0},memory_bank[0x80]={0};
+    CRITICAL_SECTION bank_lock;char error[128];sh_audio_bank_usage usage;uint32_t id=421;
+    CHECK(banks);if(!banks)return;
+    InitializeCriticalSection(&bank_lock);
+    sh_audio_registry registry={(void **)&banks,NULL,&bank_lock};
+    CHECK(sh_audio_registry_bank(&registry,id,&usage,error,sizeof(error))==0 && !usage.references);
+    /* A memory-backed slot with the same ID is a different load, not ours. */
+    number(memory_bank+0x10,id);ptr(memory_bank+0x18,(void *)0x1000);number(memory_bank+0x70,5);
+    number(other+0x10,id+193);ptr(other+0x20,memory_bank);ptr(banks+0x690+(id%193)*8,other);
+    CHECK(sh_audio_registry_bank(&registry,id,&usage,error,sizeof(error))==0);
+    number(first+0x10,id);number(first+0x70,3);number(first+0x74,1);first[0x78]=1;ptr(memory_bank+0x20,first);
+    CHECK(sh_audio_registry_bank(&registry,id,&usage,error,sizeof(error))==1);
+    CHECK(usage.references==3 && usage.prepared==1 && usage.loaded==1);
+    uint32_t refs;memcpy(&refs,first+0x70,4);CHECK(refs==3);
+    first[0x78]=0;CHECK(sh_audio_registry_bank(&registry,id,&usage,error,sizeof(error))==1 && !usage.loaded);
+    /* Corrupt chains and a missing manager are unavailable, never "absent". */
+    ptr(first+0x20,other);
+    CHECK(sh_audio_registry_bank(&registry,id+1,&usage,error,sizeof(error))==-1 && *error);
+    ptr(first+0x20,NULL);
+    CHECK(sh_audio_registry_bank(&registry,0,&usage,error,sizeof(error))==-1);
+    void *none=NULL;registry.manager_slot=&none;
+    CHECK(sh_audio_registry_bank(&registry,id,&usage,error,sizeof(error))==-1 && !usage.references);
+    /* The probe waits for a native writer holding the bank lock. */
+    registry.manager_slot=(void **)&banks;
+    EnterCriticalSection(&bank_lock);
+    CHECK(sh_audio_registry_bank(&registry,id,&usage,error,sizeof(error))==1); /* recursive owner */
+    LeaveCriticalSection(&bank_lock);
+    DeleteCriticalSection(&bank_lock);free(banks);
+}
 int main(void)
 {
     queued=CreateEventA(NULL,TRUE,FALSE,NULL); allowed=CreateEventA(NULL,TRUE,FALSE,NULL);
     finished=CreateEventA(NULL,TRUE,FALSE,NULL); CHECK(queued && allowed && finished);
-    test_commands(); test_binding(); test_occupancy();
+    test_commands(); test_binding(); test_occupancy(); test_bank_usage();
     CloseHandle(queued); CloseHandle(allowed); CloseHandle(finished);
     if(failures)return 1;
     puts("native numeric bank command tests passed"); return 0;

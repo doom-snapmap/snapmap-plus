@@ -37,6 +37,13 @@ int sh_audio_id_lease_ready(sh_audio_id_lease *lease, char *error, size_t capaci
 /* Only after native publication succeeds. Drops temporary comparison tables;
  * no allocation/native call/fallible commit. Never call after partial failure. */
 void sh_audio_id_lease_activate(sh_audio_id_lease *lease);
+int sh_audio_id_lease_active(const sh_audio_id_lease *lease);
+/* Visit private identities that no other live lease claims: the IDs whose
+ * native objects must be gone before this lease may release. Originals and
+ * reserved absences never name a private native object. visit returns 0 to
+ * stop; the call then returns 0. No native state or claim changes. */
+int sh_audio_id_lease_exclusive(const sh_audio_id_lease *lease,
+    int (*visit)(void *, sh_audio_identity_domain, uint32_t), void *context);
 /* Pending: abort after native rollback. Active: only after all native users
  * and banks retire. This function does not unload or infer native retirement.
  * Release precedes destruction of the owning provider's captured graph. */

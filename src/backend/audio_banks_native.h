@@ -67,4 +67,32 @@ int sh_audio_banks_native_additions_end(sh_audio_bank_addition **addition,
 int sh_audio_banks_native_additions_ready(sh_audio_bank_addition *addition,
     char *error, size_t capacity);
 void sh_audio_banks_native_additions_accept(sh_audio_bank_addition **addition);
+/* Retained-program activation, the only production route once programs are
+ * compiled. programs lists the published view's programs in precedence order
+ * (current map, library, retained owners); each owner reference passes to this
+ * adapter, which calls release when it no longer needs one (duplicates, failed
+ * transitions and fully retired programs). Leases are readied before any bank
+ * load and activated only after every bank and shared-control leg succeeds.
+ * Banks load outside the publication gate; shared controls publish one
+ * effective policy (baseline plus per-key edits) inside it. Failure restores
+ * shared controls, unloads what this call loaded when idle and keeps the
+ * previous programs. Superseded programs retire later: never while any of
+ * their banks has a playing item or their private IDs remain registered. */
+typedef struct sh_audio_active_program {
+    void *owner;
+    sh_package_audio_program *program;
+    sh_audio_id_lease *lease;
+} sh_audio_active_program;
+int sh_audio_banks_native_programs_activate(const sh_audio_active_program *programs, size_t count,
+    const sh_audio_shared_policy *baseline, void (*release)(void *), char *error, size_t capacity);
+/* Additive editor admission inside an additions session: loads only newly
+ * admitted programs, activates their leases at accept, unloads at rollback. */
+int sh_audio_banks_native_programs_add(sh_audio_bank_addition *addition,
+    const sh_audio_active_program *programs, size_t count, void (*release)(void *),
+    char *error, size_t capacity);
+/* Main-thread maintenance at a boundary holding no provider/render lock.
+ * Returns programs still retiring, or -1 when retirement waits on a native
+ * failure/uncertain state (reported in error). Never unloads a bank in use. */
+int sh_audio_banks_native_programs_retire(char *error, size_t capacity);
+size_t sh_audio_banks_native_programs_count(void);
 #endif

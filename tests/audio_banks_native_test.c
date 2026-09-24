@@ -535,6 +535,300 @@ static void media_interaction(char *error,size_t capacity)
     CHECK(!loaded[1] && !loaded[2]);
 }
 
+
+/* Retained programs against a fake engine: bank usage slots, object tables and
+ * load/unload commands follow the verified native layouts. */
+static unsigned char *rp_manager, *rp_index;
+static CRITICAL_SECTION rp_bank_lock;
+static void *rp_vtable[6];
+static int rp_loads, rp_unloads, rp_cut_voices, rp_fail_id_count;
+static uint32_t rp_fail_id, rp_retained_object;
+typedef struct rp_object { unsigned char bytes[0x18]; uint32_t bank; } rp_object;
+static rp_object rp_objects[64];
+static size_t rp_object_count;
+static unsigned char *rp_find_slot(uint32_t id, unsigned char ***link)
+{
+    unsigned char **at = (unsigned char **)(rp_manager + 0x690 + (id % 193) * 8);
+    while (*at) {
+        uint32_t value; memcpy(&value, *at + 0x10, 4);
+        if (value == id) { if (link) *link = at; return *at; }
+        at = (unsigned char **)(*at + 0x20);
+    }
+    return NULL;
+}
+static void rp_register_object(uint32_t id, uint32_t bank)
+{
+    CHECK(rp_object_count < 64); if (rp_object_count >= 64) return;
+    rp_object *o = rp_objects + rp_object_count++; memset(o, 0, sizeof(*o));
+    memcpy(o->bytes + 0x10, &id, 4); o->bank = bank;
+    unsigned char **bucket = (unsigned char **)(rp_index + 0x28 + (id % 193) * 8);
+    memcpy(o->bytes + 8, bucket, sizeof(void *)); *bucket = o->bytes;
+}
+static void rp_rebuild_objects(void)
+{
+    for (size_t t = 0; t < 12; t++) memset(rp_index + t * 0x638 + 0x28, 0, 193 * 8);
+    size_t kept = 0; rp_object copy[64]; memcpy(copy, rp_objects, sizeof(copy));
+    size_t count = rp_object_count; rp_object_count = 0;
+    for (size_t i = 0; i < count; i++) { uint32_t id; memcpy(&id, copy[i].bytes + 0x10, 4); rp_register_object(id, copy[i].bank); kept++; }
+    (void)kept;
+}
+static void rp_drop_objects(uint32_t bank)
+{
+    size_t used = 0;
+    for (size_t i = 0; i < rp_object_count; i++) {
+        uint32_t id; memcpy(&id, rp_objects[i].bytes + 0x10, 4);
+        if (rp_objects[i].bank == bank && id != rp_retained_object) continue;
+        rp_objects[used++] = rp_objects[i];
+    }
+    rp_object_count = used; rp_rebuild_objects();
+}
+static int rp_bank_load(uint32_t id)
+{
+    ++rp_loads;
+    if (id == rp_fail_id && rp_fail_id_count-- > 0) return 2;
+    if (rp_find_slot(id, NULL)) return 69;
+    unsigned char *slot = calloc(1, 0x80); if (!slot) return 52;
+    int one = 1; memcpy(slot + 0x10, &id, 4); memcpy(slot + 0x70, &one, 4); slot[0x78] = 1;
+    unsigned char **bucket = (unsigned char **)(rp_manager + 0x690 + (id % 193) * 8);
+    memcpy(slot + 0x20, bucket, sizeof(void *)); *bucket = slot;
+    return 1;
+}
+static int rp_submit(void *manager, const abc_command *command)
+{ (void)manager; return rp_bank_load(command->id); }
+static int rp_init(void *manager, abc_completion *completion) { (void)manager; (void)completion; return 1; }
+static int rp_wait(void *manager, abc_completion *completion, int submitted) { (void)manager; (void)completion; return submitted; }
+static int rp_named_load(const char *name, int pool, uint32_t *id)
+{ CHECK(pool == -1); CHECK(sh_audio_bank_identity(name, id)); return rp_bank_load(*id); }
+static int rp_unload(uint32_t id, const void *memory, int *pool)
+{
+    unsigned char **link = NULL, *slot = rp_find_slot(id, &link); (void)memory; (void)pool;
+    ++rp_unloads;
+    if (!slot) return 2;
+    int32_t refs; memcpy(&refs, slot + 0x70, 4);
+    rp_cut_voices += refs - 1; /* Native unload stops every item holding the slot. */
+    memcpy(link, slot + 0x20, sizeof(void *)); free(slot);
+    rp_drop_objects(id); return 1;
+}
+static void rp_set_refs(uint32_t id, int32_t refs)
+{ unsigned char *slot = rp_find_slot(id, NULL); CHECK(slot); if (slot) memcpy(slot + 0x70, &refs, 4); }
+static int rp_occupied(void *context, sh_audio_identity_domain domain, uint32_t id, char *error, size_t capacity)
+{ (void)context; (void)domain; return sh_audio_registry_occupied(&g_registry, id, error, capacity); }
+typedef struct rp_owner { int references; } rp_owner;
+static rp_owner rp_owners[6];
+static void rp_release(void *owner) { rp_owner *o = owner; CHECK(o->references > 0); o->references--; }
+static sh_audio_active_program rp_ref(size_t owner, sh_package_audio_program *program, sh_audio_id_lease *lease)
+{ rp_owners[owner].references++; return (sh_audio_active_program){rp_owners + owner, program, lease}; }
+static size_t rp_bank(unsigned char *bank, const char *name, uint32_t event, float threshold)
+{
+    uint32_t id = 0, version = 113, size = 16, count = 1, length = 8; CHECK(sh_audio_bank_identity(name, &id));
+    memset(bank, 0, 160);
+    memcpy(bank, "BKHD", 4); memcpy(bank + 4, &size, 4); memcpy(bank + 8, &version, 4); memcpy(bank + 12, &id, 4);
+    memcpy(bank + 24, "HIRC", 4); size = 17; memcpy(bank + 28, &size, 4); memcpy(bank + 32, &count, 4);
+    bank[36] = 4; memcpy(bank + 37, &length, 4); memcpy(bank + 41, &event, 4);
+    if (!threshold) return 49;
+    memcpy(bank + 49, "STMG", 4); size = 18; memcpy(bank + 53, &size, 4);
+    uint16_t voices = 64; memcpy(bank + 57, &threshold, 4); memcpy(bank + 61, &voices, 2);
+    return 75;
+}
+typedef struct rp_program {
+    unsigned char banks[2][160]; sh_compiled_resource files[2]; sh_package_compilation scope;
+    char paths[2][64]; sh_package_audio_program *program; sh_audio_id_lease *lease;
+} rp_program;
+static int rp_build(rp_program *p, sh_audio_originals *originals, sh_audio_id_pool *pool,
+    const char *first, const char *second, uint32_t event, float threshold)
+{
+    char error[512]; const sh_package_compilation *scope = &p->scope;
+    memset(p, 0, sizeof(*p));
+    const char *names[2] = {first, second};
+    for (size_t i = 0; i < 2 && names[i]; i++) {
+        snprintf(p->paths[i], sizeof(p->paths[i]), "sound/soundbanks/pc/%s", names[i]);
+        p->files[i].engine_path = p->paths[i]; p->files[i].body = p->banks[i];
+        p->files[i].body_length = rp_bank(p->banks[i], names[i], event + (uint32_t)i, i ? 0 : threshold);
+        p->files[i].owners.bits = p->files[i].gameplay_owners.bits = 1; p->scope.resource_count++;
+    }
+    p->scope.resources = p->files;
+    p->program = sh_package_audio_program_open(&scope, 1, originals, error, sizeof(error));
+    int ok = p->program && sh_package_audio_program_prepare(p->program, error, sizeof(error));
+    if (ok) {
+        sh_package_compilation output = {0};
+        p->lease = sh_audio_id_lease_begin(pool);
+        ok = p->lease && sh_package_audio_program_bind(p->program, &output, sh_audio_id_reserve, p->lease, error, sizeof(error));
+    }
+    if (!ok) fprintf(stderr, "retained program fixture: %s\n", error);
+    CHECK(ok); return ok;
+}
+typedef struct rp_plan { uint32_t ids[4]; size_t count; } rp_plan;
+static int rp_plan_visit(void *context, uint32_t id, const char *filename, int numeric)
+{ rp_plan *plan = context; (void)filename; CHECK(numeric); if (plan->count < 4) plan->ids[plan->count++] = id; return 1; }
+static rp_plan rp_loads_of(const rp_program *p)
+{
+    rp_plan plan = {0}; char error[256];
+    CHECK(sh_package_audio_program_loads(p->program, rp_plan_visit, &plan, error, sizeof(error)));
+    return plan;
+}
+typedef struct rp_exclusive { uint32_t except, found; } rp_exclusive;
+static int rp_exclusive_visit(void *context, sh_audio_identity_domain domain, uint32_t id)
+{ rp_exclusive *e = context; (void)domain; if (id != e->except && !e->found) e->found = id; return 1; }
+static uint32_t rp_first_exclusive(sh_audio_id_lease *lease, uint32_t except)
+{ rp_exclusive e = {except, 0}; CHECK(sh_audio_id_lease_exclusive(lease, rp_exclusive_visit, &e) && e.found); return e.found; }
+static void retained_programs(void)
+{
+    char base[MAX_PATH], error[512];
+    snprintf(base, sizeof(base), "%s\\retained-base", root); CHECK(CreateDirectoryA(base, NULL));
+    sh_audio_originals *originals = sh_audio_originals_open(base, L"English(US)", NULL); CHECK(originals);
+    rp_manager = calloc(1, 0xca0); rp_index = calloc(1, 0x4aa0); CHECK(rp_manager && rp_index);
+    for (size_t i = 0; i < 12; i++) InitializeCriticalSection((CRITICAL_SECTION *)(rp_index + i * 0x638));
+    InitializeCriticalSection((CRITICAL_SECTION *)(rp_manager + 0x48)); InitializeCriticalSection(&rp_bank_lock);
+    rp_vtable[3] = (void *)rp_submit; rp_vtable[4] = (void *)rp_init; rp_vtable[5] = (void *)rp_wait;
+    void **table = rp_vtable; memcpy(rp_manager, &table, sizeof(table));
+    void *manager = rp_manager, *index = rp_index, *callback = NULL;
+    sh_audio_bank_commands saved_commands = g_commands; sh_audio_registry saved_registry = g_registry;
+    ab_load_fn saved_load = g_load; ab_unload_fn saved_unload = g_unload;
+    g_commands = (sh_audio_bank_commands){&manager, &callback, {0}, 0};
+    g_registry = (sh_audio_registry){&manager, &index, &rp_bank_lock};
+    g_load = rp_named_load; g_unload = rp_unload;
+    /* Shared-control legs with the fake playback/parameter/state natives. */
+    CRITICAL_SECTION lock; InitializeCriticalSection(&lock); void *audio_manager = &playback;
+    playback = (sh_audio_limits_value){-60, 0.001f, 0, 0, 64};
+    g_limits = (sh_audio_limits_native){playback_threshold, playback_voices, &playback.threshold, &playback.amplitude,
+        &playback.threshold_priority, &playback.voices_priority, &playback.voices, &audio_manager, &lock, NULL};
+    static sh_audio_environment environment; sh_audio_environment *environment_slot = &environment;
+    g_environment = (sh_audio_environment_native){program_environment, program_curve, &environment_slot, &audio_manager, &lock, NULL};
+    static sh_audio_state_table states; sh_audio_state_table *state_slot = &states; int pool_id = 17;
+    g_state = (sh_audio_state_native){program_state_ensure, program_state_destroy, program_state_allocate, program_state_release,
+        &pool_id, &state_slot, &audio_manager, &lock, NULL};
+    static struct { sh_audio_parameter_table table; unsigned char rest[0x680]; } parameters;
+    sh_audio_parameter_table *parameter_slot = &parameters.table;
+    g_parameter = (sh_audio_parameter_native){program_parameter_ensure, program_parameter_destroy, program_state_allocate,
+        program_state_release, &pool_id, &parameter_slot, &audio_manager, &lock, NULL};
+    g_bank_gate.entry = g_bank_gate.original = program_dispatch; g_bank_gate.manager_slot = &audio_manager;
+    g_bank_gate.render_lock = &lock; CHECK(sh_audio_bank_gate_initialize(&g_bank_gate)); g_bank_gate.installed = 1;
+    /* Native Init baseline: -60 threshold, 64 voices. */
+    unsigned char init[18] = {0}; float baseline_threshold = -60; uint16_t baseline_voices = 64;
+    memcpy(init, &baseline_threshold, 4); memcpy(init + 4, &baseline_voices, 2);
+    sh_audio_shared_input init_input = {"STMG", init, sizeof(init), 0, 1};
+    sh_audio_shared_policy baseline = {0};
+    CHECK(sh_audio_shared_policy_compile(&init_input, 1, &baseline, error, sizeof(error)));
+    sh_audio_id_pool *pool = sh_audio_id_pool_open(rp_occupied, NULL); CHECK(pool);
+    static rp_program a, b, c, s, d;
+    CHECK(rp_build(&a, originals, pool, "pa.bnk", NULL, 70, 0));
+    CHECK(rp_build(&b, originals, pool, "pb.bnk", NULL, 80, 0));
+    CHECK(rp_build(&c, originals, pool, "pc1.bnk", "pc2.bnk", 90, 0));
+    CHECK(rp_build(&s, originals, pool, "ps.bnk", NULL, 100, -72));
+    CHECK(rp_build(&d, originals, pool, "pd.bnk", NULL, 110, 0));
+    rp_plan pa = rp_loads_of(&a), pb = rp_loads_of(&b), pc = rp_loads_of(&c), pd = rp_loads_of(&d);
+    uint32_t pa_id = 0; CHECK(sh_audio_bank_identity("pa.bnk", &pa_id));
+    CHECK(pa.count == 1 && pa.ids[0] != pa_id && pc.count == 2 && pb.count == 1);
+    /* 1. Activation loads a private bank by file ID and activates the lease. */
+    sh_audio_active_program set[3];
+    set[0] = rp_ref(0, a.program, a.lease);
+    CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
+    CHECK(rp_find_slot(pa.ids[0], NULL) && sh_audio_id_lease_active(a.lease) && sh_audio_banks_native_programs_count() == 1);
+    CHECK(rp_owners[0].references == 1 && playback.threshold == -60);
+    /* 2. A transition loads the new program; the idle old one retires fully. */
+    set[0] = rp_ref(1, b.program, b.lease);
+    CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
+    CHECK(rp_find_slot(pb.ids[0], NULL) && !rp_find_slot(pa.ids[0], NULL) && !rp_cut_voices);
+    CHECK(sh_audio_banks_native_programs_count() == 1 && rp_owners[0].references == 0 && rp_owners[1].references == 1);
+    /* 3. Late playback keeps a superseded program and its bank until the voice ends. */
+    set[0] = rp_ref(0, a.program, a.lease);
+    CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
+    CHECK(rp_owners[1].references == 0 && rp_find_slot(pa.ids[0], NULL));
+    rp_set_refs(pa.ids[0], 2);
+    set[0] = rp_ref(1, b.program, b.lease);
+    CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
+    CHECK(sh_audio_banks_native_programs_count() == 2 && rp_find_slot(pa.ids[0], NULL) && rp_owners[0].references == 1);
+    CHECK(sh_audio_banks_native_programs_retire(error, sizeof(error)) == 1 && rp_find_slot(pa.ids[0], NULL));
+    rp_set_refs(pa.ids[0], 1);
+    CHECK(sh_audio_banks_native_programs_retire(error, sizeof(error)) == 0);
+    CHECK(!rp_find_slot(pa.ids[0], NULL) && rp_owners[0].references == 0 && !rp_cut_voices);
+    /* 4. Registered private objects outlive the bank: the lease waits for them. */
+    set[0] = rp_ref(0, a.program, a.lease);
+    CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
+    /* A streamed item still owns the private event object after the bank
+     * itself became idle and unloaded. */
+    uint32_t held = rp_first_exclusive(a.lease, pa.ids[0]);
+    rp_register_object(held, pa.ids[0]); rp_retained_object = held;
+    set[0] = rp_ref(1, b.program, b.lease);
+    CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
+    CHECK(!rp_find_slot(pa.ids[0], NULL) && sh_audio_banks_native_programs_count() == 2 && rp_owners[0].references == 1);
+    CHECK(sh_audio_banks_native_programs_retire(error, sizeof(error)) == 1);
+    rp_retained_object = 0; rp_drop_objects(pa.ids[0]);
+    CHECK(sh_audio_banks_native_programs_retire(error, sizeof(error)) == 0 && rp_owners[0].references == 0);
+    /* 5. A retiring program returns to service without another load. */
+    set[0] = rp_ref(0, a.program, a.lease);
+    CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
+    rp_set_refs(pa.ids[0], 2);
+    set[0] = rp_ref(1, b.program, b.lease);
+    CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
+    int loads_before = rp_loads;
+    set[0] = rp_ref(0, a.program, a.lease); set[1] = rp_ref(1, b.program, b.lease);
+    CHECK(sh_audio_banks_native_programs_activate(set, 2, &baseline, rp_release, error, sizeof(error)));
+    CHECK(rp_loads == loads_before + 0 && rp_owners[0].references == 1 && rp_owners[1].references == 1);
+    CHECK(sh_audio_banks_native_programs_count() == 2);
+    rp_set_refs(pa.ids[0], 1);
+    set[0] = rp_ref(1, b.program, b.lease);
+    CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
+    CHECK(rp_owners[0].references == 0 && sh_audio_banks_native_programs_count() == 1);
+    /* 6. A failed second load unloads the first and keeps the prior program. */
+    rp_fail_id = pc.ids[1]; rp_fail_id_count = 1;
+    set[0] = rp_ref(2, c.program, c.lease);
+    CHECK(!sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)) && *error);
+    CHECK(!rp_find_slot(pc.ids[0], NULL) && !rp_find_slot(pc.ids[1], NULL) && rp_find_slot(pb.ids[0], NULL));
+    CHECK(rp_owners[2].references == 0 && !sh_audio_id_lease_active(c.lease) && sh_audio_banks_native_programs_count() == 1);
+    /* 7. Shared controls: an edit publishes, a departure restores the baseline. */
+    set[0] = rp_ref(3, s.program, s.lease);
+    CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
+    CHECK(playback.threshold == -72 && !g_limits.pending && !g_bank_gate.scope);
+    set[0] = rp_ref(1, b.program, b.lease);
+    CHECK(sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
+    CHECK(playback.threshold == -60 && !g_limits.pending);
+    /* A failing later leg restores the playback edit and unloads the new bank. */
+    state_slot = NULL;
+    set[0] = rp_ref(3, s.program, s.lease);
+    CHECK(!sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
+    CHECK(playback.threshold == -60 && !g_limits.pending && !g_bank_gate.scope && rp_owners[3].references == 0);
+    state_slot = &states;
+    /* 8. Additive admission: rollback unloads, accept activates the lease. */
+    sh_audio_bank_addition *addition = sh_audio_banks_native_additions_begin(error, sizeof(error)); CHECK(addition);
+    set[0] = rp_ref(4, d.program, d.lease);
+    CHECK(sh_audio_banks_native_programs_add(addition, set, 1, rp_release, error, sizeof(error)));
+    CHECK(rp_find_slot(pd.ids[0], NULL) && !sh_audio_id_lease_active(d.lease));
+    CHECK(sh_audio_banks_native_additions_end(&addition, 0, error, sizeof(error)) && !addition);
+    CHECK(!rp_find_slot(pd.ids[0], NULL) && rp_owners[4].references == 0 && sh_audio_banks_native_programs_count() == 1);
+    addition = sh_audio_banks_native_additions_begin(error, sizeof(error)); CHECK(addition);
+    set[0] = rp_ref(4, d.program, d.lease); set[1] = rp_ref(1, b.program, b.lease);
+    CHECK(sh_audio_banks_native_programs_add(addition, set, 2, rp_release, error, sizeof(error)));
+    CHECK(sh_audio_banks_native_additions_ready(addition, error, sizeof(error)));
+    sh_audio_banks_native_additions_accept(&addition);
+    CHECK(sh_audio_id_lease_active(d.lease) && rp_owners[1].references == 1 && rp_owners[4].references == 1);
+    /* 9. An identity taken natively before activation refuses the program. */
+    rp_register_object(pc.ids[0], 0);
+    set[0] = rp_ref(2, c.program, c.lease);
+    CHECK(!sh_audio_banks_native_programs_activate(set, 1, &baseline, rp_release, error, sizeof(error)));
+    CHECK(rp_owners[2].references == 0 && rp_find_slot(pb.ids[0], NULL));
+    rp_drop_objects(0);
+    /* 10. Leaving every program restores baseline controls and retires all. */
+    CHECK(sh_audio_banks_native_programs_activate(NULL, 0, &baseline, rp_release, error, sizeof(error)));
+    CHECK(sh_audio_banks_native_programs_count() == 0 && !rp_find_slot(pb.ids[0], NULL) && !rp_find_slot(pd.ids[0], NULL));
+    for (size_t i = 0; i < 6; i++) CHECK(rp_owners[i].references == 0);
+    CHECK(!rp_cut_voices && !g_pbank_count);
+    rp_program *all[] = {&a, &b, &c, &s, &d};
+    for (size_t i = 0; i < 5; i++) { sh_audio_id_lease_release(all[i]->lease); sh_package_audio_program_close(all[i]->program); }
+    CHECK(sh_audio_id_pool_close(pool));
+    sh_audio_shared_policy_free(&baseline); sh_audio_originals_close(originals);
+    DeleteCriticalSection(&g_bank_gate.lock); memset(&g_bank_gate, 0, sizeof(g_bank_gate));
+    for (uint32_t n = 0; n < states.count; n++) { program_state_destroy(states.items[n].group); free(states.items[n].group); }
+    free(states.items); memset(&states, 0, sizeof(states));
+    memset(&g_state, 0, sizeof(g_state)); memset(&g_parameter, 0, sizeof(g_parameter));
+    memset(&g_environment, 0, sizeof(g_environment)); memset(&g_limits, 0, sizeof(g_limits));
+    DeleteCriticalSection(&lock);
+    g_commands = saved_commands; g_registry = saved_registry; g_load = saved_load; g_unload = saved_unload;
+    for (size_t i = 0; i < 12; i++) DeleteCriticalSection((CRITICAL_SECTION *)(rp_index + i * 0x638));
+    DeleteCriticalSection((CRITICAL_SECTION *)(rp_manager + 0x48)); DeleteCriticalSection(&rp_bank_lock);
+    printf("retained programs: %d native loads, %d unloads, %d voices cut\n", rp_loads, rp_unloads, rp_cut_voices);
+    free(rp_manager); free(rp_index); RemoveDirectoryA(base);
+}
 int main(void)
 {
     char temp[MAX_PATH], locale[MAX_PATH], other[MAX_PATH], path[MAX_PATH], error[256];
@@ -750,6 +1044,7 @@ int main(void)
     }
     an_clear_catalog();g_catalog_ready=0;
     compiled_playback_settings();
+    retained_programs();
     snprintf(path,sizeof(path),"%s\\a.bnk",root); CHECK(DeleteFileA(path));
     snprintf(path,sizeof(path),"%s\\b.bnk",root); CHECK(DeleteFileA(path));
     snprintf(path,sizeof(path),"%s\\777.bnk",root); CHECK(DeleteFileA(path));
