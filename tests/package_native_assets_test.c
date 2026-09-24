@@ -78,20 +78,30 @@ static int probe(const char *directory)
 
 static void intrinsic_images(void)
 {
+    /* Thirteen intrinsics, then images renderer and VT initialization create
+     * by name and DeclFind's reserved empty name. */
     static const char *const names[] = {"_default", "_default3d", "_white", "_borderedpointwhite",
         "_black", "_defaultcube", "_nofalloff", "_dither2", "_dither4", "_dither16", "_dither256",
-        "_fresnel", "_blackcube"};
+        "_fresnel", "_blackcube", "_vmtrpagetable", "_physicalvmtrpages0", "_physicalvmtrpages3",
+        "_physicalvmtrmappings", "_transsortimageatlas", "_lightimageatlas", "_augment", "_emptyname"};
+    enum { NAMES = sizeof(names) / sizeof(names[0]) };
     sh_package_library_native adapter = sh_package_native_assets_adapter(NULL);
-    unsigned char identities[13][32], again[32], zero[32] = {0}; char error[128];
+    unsigned char identities[NAMES][32], again[32], zero[32] = {0}; char error[128];
     assert(adapter.source.admit);
-    for (size_t i = 0; i < 13; i++) {
+    for (size_t i = 0; i < NAMES; i++) {
         assert(adapter.source.admit(NULL, 0, "image", names[i], identities[i], error, sizeof(error)) == 1);
         assert(adapter.source.admit(NULL, 999, "image", names[i], again, error, sizeof(error)) == 1);
         assert(!memcmp(identities[i], again, 32) && memcmp(again, zero, 32));
         for (size_t j = 0; j < i; j++) assert(memcmp(identities[i], identities[j], 32));
     }
+    /* Everything outside the verified set stays unadmitted: menu images the
+     * online services feed at run time, an unproven video index, pages the
+     * Vmtr pool never creates, pools stock materials never name, and
+     * non-canonical spellings. */
     static const char *const absent[] = {"_white.tga", "_white$borderclamp", "_flat", "_defaulted_",
-        "_missing", "textures/_white", "_WHITE"};
+        "_missing", "textures/_white", "_WHITE", "_video5", "_imagelivetile01", "_imagesnapmotd1",
+        "_imagecompmpmotd1", "_savedgamethumb", "_physicalvmtrpages4", "_physicaluniquemappings",
+        "_VMTRPAGETABLE", "_emptyName"};
     for (size_t i = 0; i < sizeof(absent) / sizeof(*absent); i++) {
         memset(again, 9, 32);
         assert(adapter.source.admit(NULL, 0, "image", absent[i], again, error, sizeof(error)) == 0);
