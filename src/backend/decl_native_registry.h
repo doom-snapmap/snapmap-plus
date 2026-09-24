@@ -97,6 +97,11 @@ int sh_native_resource_registry_identity(sh_native_resource_registry *registry,
     char *error, size_t capacity);
 int sh_native_resource_registry_validate(sh_native_resource_registry *registry,
     char *error, size_t capacity);
+/* Revalidate only what one identity query read: its manager header and the
+ * entries sharing its ID. For repeated queries of one stable snapshot; the
+ * owner must still run the full validate before relying on the whole set. */
+int sh_native_resource_registry_validate_identity(sh_native_resource_registry *registry,
+    const sh_native_resource_identity *identity, char *error, size_t capacity);
 
 /* Only for the generic declaration-pointer reader; image and render-model
  * readers have different contracts. Returns 1 resolved, 0 absent, -1 unknown.

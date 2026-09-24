@@ -543,6 +543,25 @@ changed:
     dr_identity_error(r, error, capacity, "native resource identity snapshot changed or is unreadable"); return 0;
 }
 
+/* The manager header (array and count) and every entry sharing the identity's
+ * ID are exactly those an identity query read. Registration and removal change
+ * the header, so this bounded check can stand in for a full revalidation
+ * between queries of one stable snapshot; the full check still ends its use. */
+static int dr_identity_bucket(sh_decl_native_registry *r, const sh_native_resource_identity *identity)
+{
+    dr_manager *m = NULL;
+    for (size_t i = 0; i < r->count; i++) if (r->managers[i].address == identity->manager) { m = r->managers + i; break; }
+    if (!m || m->ids_captured <= 0 || !dr_identity_header(r, m)) return 0;
+    size_t low = 0, high = m->id_count;
+    while (low < high) {
+        size_t mid = low + (high - low) / 2;
+        if (m->ids[mid]->id < identity->id) low = mid + 1; else high = mid;
+    }
+    for (size_t i = low; i < m->id_count && m->ids[i]->id == identity->id; i++)
+        if (!dr_identity_entry(r, m, (size_t)(m->ids[i] - m->entries))) return 0;
+    return dr_identity_header(r, m);
+}
+
 sh_native_resource_registry *sh_native_resource_registry_open(sh_native_resource_registry_source source,
     char *error, size_t capacity)
 {
@@ -585,3 +604,12 @@ int sh_native_resource_registry_identity(sh_native_resource_registry *registry,
 
 int sh_native_resource_registry_validate(sh_native_resource_registry *registry, char *error, size_t capacity)
 { return sh_decl_native_registry_identity_validate(registry ? &registry->view : NULL, error, capacity); }
+
+int sh_native_resource_registry_validate_identity(sh_native_resource_registry *registry,
+    const sh_native_resource_identity *identity, char *error, size_t capacity)
+{
+    sh_decl_native_registry *r = registry ? &registry->view : NULL;
+    if (error && capacity) *error = 0;
+    if (r && !r->identity_failed && identity && identity->manager && dr_identity_bucket(r, identity)) return 1;
+    dr_identity_error(r, error, capacity, "native resource identity changed or is unreadable"); return 0;
+}

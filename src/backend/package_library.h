@@ -42,7 +42,8 @@ typedef struct sh_package_library {
     sh_package_consumers *consumers;
     sh_package_audio_program *audio;
     /* Owned text accounting missing product coverage that did not refuse the
-     * library, one line per item; NULL when coverage was complete. */
+     * library, one line per item; NULL when coverage was complete. After a
+     * failed compile it may remain set, as a diagnostic, until library_free. */
     char *coverage;
 } sh_package_library;
 

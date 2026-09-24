@@ -9,6 +9,7 @@
 #include "audio_banks.h"
 #include "package_virtual_pages.h"
 #include "package_movie.h"
+#include "native_resource_id.h"
 
 typedef struct na_file {
     char *path;
@@ -58,6 +59,10 @@ struct sh_package_native_assets {
     size_t shader_request_count;
     uint64_t next_shader_task;
     na_shader_file *shader_files;
+    /* One compilation's shader ABI checks share this identity snapshot. Each
+     * check revalidates what it read; leaving the scope revalidates it all. */
+    sh_native_resource_registry *shader_snapshot;
+    int shader_scope, shader_scope_changed;
     char error[1024];
 };
 static int na_error(sh_package_native_assets *a, const char *reason, const char *path)
@@ -92,8 +97,52 @@ void sh_package_native_assets_close(sh_package_native_assets *a)
     }
     while (a->shader_files) { na_shader_file *file = a->shader_files; a->shader_files = file->next;
         free(file->path); free(file->body); free(file); }
+    sh_native_resource_registry_close(a->shader_snapshot);
     sh_resource_catalog_close(a->shader_catalog);
     free(a->files); free(a->root); free(a);
+}
+void sh_package_native_assets_shader_scope_begin(sh_package_native_assets *a)
+{
+    if (!a) return;
+    AcquireSRWLockExclusive(&a->lock);
+    if (!a->shader_scope++) a->shader_scope_changed = 0;
+    ReleaseSRWLockExclusive(&a->lock);
+}
+int sh_package_native_assets_shader_scope_end(sh_package_native_assets *a, char *error, size_t capacity)
+{
+    int ok = 1;
+    if (error && capacity) *error = 0;
+    if (!a) return 1;
+    AcquireSRWLockExclusive(&a->lock);
+    if (a->shader_scope && !--a->shader_scope) {
+        if (a->shader_snapshot && !sh_native_resource_registry_validate(a->shader_snapshot, error, capacity))
+            a->shader_scope_changed = 1;
+        ok = !a->shader_scope_changed;
+        if (!ok && error && capacity && !*error)
+            snprintf(error, capacity, "native shader identities changed during package compilation");
+        sh_native_resource_registry_close(a->shader_snapshot); a->shader_snapshot = NULL;
+    }
+    ReleaseSRWLockExclusive(&a->lock); return ok;
+}
+/* Caller holds the lock. Outside a scope every check owns a fresh snapshot. */
+static sh_native_resource_registry *na_shader_registry(sh_package_native_assets *a, char *error, size_t capacity)
+{
+    if (a->shader_scope && a->shader_snapshot) return a->shader_snapshot;
+    sh_native_resource_registry *registry = sh_native_resource_registry_open(a->shader_registry, error, capacity);
+    if (registry && a->shader_scope) a->shader_snapshot = registry;
+    return registry;
+}
+static void na_shader_registry_release(sh_package_native_assets *a, sh_native_resource_registry *registry)
+{ if (registry != a->shader_snapshot) sh_native_resource_registry_close(registry); }
+static int na_shader_registry_valid(sh_package_native_assets *a, sh_native_resource_registry *registry,
+    const sh_native_resource_identity *identity, char *error, size_t capacity)
+{
+    if (registry != a->shader_snapshot) return sh_native_resource_registry_validate(registry, error, capacity);
+    if (sh_native_resource_registry_validate_identity(registry, identity, error, capacity)) return 1;
+    /* A changed snapshot cannot serve later checks; the scope reports it. The
+     * caller's release now owns closing this detached snapshot. */
+    a->shader_scope_changed = 1; a->shader_snapshot = NULL;
+    return 0;
 }
 static na_file *na_capture(sh_package_native_assets *a, const char *path)
 {
@@ -374,10 +423,20 @@ static int na_shader_fixed(sh_package_native_assets *a, const char *family, cons
         na_shader_error(error, capacity, "shader ABI source differs from its installed original", name); goto done;
     }
     if (kind && !sh_decl_material_parameter_kind(source, &source_kind, error, capacity)) goto done;
-    registry = sh_native_resource_registry_open(a->shader_registry, error, capacity);
+    /* A name without native identity semantics is this check's own failure;
+     * rejecting it first keeps a shared snapshot's errors meaning a change. */
+    char *identity_name = sh_native_resource_name(name);
+    if (!identity_name) { na_shader_error(error, capacity, "shader ABI name has no native identity", name); goto done; }
+    free(identity_name);
+    registry = na_shader_registry(a, error, capacity);
     int identity_status = registry ? sh_native_resource_registry_identity(registry, family, name, &identity, error, capacity) : SH_NATIVE_RESOURCE_ID_ERROR;
+    if (identity_status == SH_NATIVE_RESOURCE_ID_ERROR && registry && registry == a->shader_snapshot) {
+        /* Native identities changed under the shared snapshot. Detach it; the
+         * release below closes it and the scope end reports the change. */
+        a->shader_scope_changed = 1; a->shader_snapshot = NULL;
+    }
     if (identity_status == SH_NATIVE_RESOURCE_ID_FREE) {
-        if (request_prepare && sh_native_resource_registry_validate(registry, error, capacity) &&
+        if (request_prepare && na_shader_registry_valid(a, registry, &identity, error, capacity) &&
             na_shader_request_add(a, family, name, source, &identity, original))
             na_shader_error(error, capacity, "shader environment needs verified native source preparation", name);
         goto done;
@@ -396,7 +455,7 @@ static int na_shader_fixed(sh_package_native_assets *a, const char *family, cons
         !(native_text = malloc(trimmed + 1)) ||
         !a->shader_registry.read(a->shader_registry.context, text, native_text, trimmed + 1) || native_text[trimmed] ||
         memcmp(native_text, source.text, trimmed))) {
-        if (request_prepare && sh_native_resource_registry_validate(registry, error, capacity) &&
+        if (request_prepare && na_shader_registry_valid(a, registry, &identity, error, capacity) &&
             na_shader_request_add(a, family, name, source, &identity, original))
             na_shader_error(error, capacity, "shader environment needs verified native source preparation", name);
         else na_shader_error(error, capacity, "native shader ABI needs exact retained text or a successful source receipt", name);
@@ -416,13 +475,13 @@ static int na_shader_fixed(sh_package_native_assets *a, const char *family, cons
     if (!a->shader_registry.read(a->shader_registry.context, identity.resource, after, bytes) || memcmp(before, after, bytes) ||
         (receipt ? !sh_package_shader_receipt_matches(identity.resource, family, name, source.text, source.length, after, bytes) :
          (!a->shader_registry.read(a->shader_registry.context, text, native_text, trimmed + 1) || native_text[trimmed] ||
-          memcmp(native_text, source.text, trimmed))) || !sh_native_resource_registry_validate(registry, error, capacity)) {
+          memcmp(native_text, source.text, trimmed))) || !na_shader_registry_valid(a, registry, &identity, error, capacity)) {
         na_shader_error(error, capacity, "native shader ABI changed during its snapshot", name); goto done;
     }
     ok = 1;
 done:
     if (!ok && error && capacity && !*error) na_shader_error(error, capacity, "shader ABI has no compatible ready native object", name);
-    free(native_text); sh_native_resource_identity_clear(&identity); sh_native_resource_registry_close(registry);
+    free(native_text); sh_native_resource_identity_clear(&identity); na_shader_registry_release(a, registry);
     ReleaseSRWLockExclusive(&a->lock); return ok;
 }
 static int na_shader_parameter(void *context, const char *name, sh_decl_source source,

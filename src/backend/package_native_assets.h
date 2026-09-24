@@ -18,6 +18,13 @@ typedef struct sh_package_shader_request {
  * retains this asset handle and its exact source expectations. Retry the same
  * immutable candidate after a successful run; no source rescanning is implied. */
 size_t sh_package_native_assets_shader_pending(sh_package_native_assets *assets);
+/* Bracket one compilation so its shader ABI checks share one native identity
+ * snapshot instead of recapturing whole managers per parameter. Each check
+ * still revalidates what it read. End revalidates the snapshot and returns 0,
+ * with an environment error, when native identities changed: discard that
+ * candidate. Nested scopes share the outermost; calls must pair. */
+void sh_package_native_assets_shader_scope_begin(sh_package_native_assets *assets);
+int sh_package_native_assets_shader_scope_end(sh_package_native_assets *assets, char *error, size_t capacity);
 sh_package_shader_preparation *sh_package_native_assets_shader_take(sh_package_native_assets *assets);
 size_t sh_package_shader_preparation_count(const sh_package_shader_preparation *batch);
 const sh_package_shader_request *sh_package_shader_preparation_request(const sh_package_shader_preparation *batch, size_t index);

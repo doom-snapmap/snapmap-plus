@@ -1298,7 +1298,9 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
 done:
     pl_close(&b);
     if (!ok) {
-        sh_package_library_free(out);
+        /* Accounted coverage survives a later failure as a diagnostic only. */
+        char *coverage = out->coverage; out->coverage = NULL;
+        sh_package_library_free(out); out->coverage = coverage;
         if (!*error) snprintf(error, capacity, "scoped package library could not be prepared");
     }
     return ok;
