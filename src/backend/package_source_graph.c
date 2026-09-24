@@ -506,6 +506,12 @@ static int sg_leaf_family(const char *type)
     return 0;
 }
 
+/* The effect Parse on both renderers resets its items and ends in the shared
+ * reflected reader, which ignores its braced section's end-of-file result.
+ * Stock fists_1st and a coop candle effect omit their final brace. */
+static int sg_open_body(const char *type)
+{ return type && !strcmp(type, "fx"); }
+
 /* Leaves have no dependency grammar to read, but their source must still
  * belong to the candidate or an original baseline. Local availability cannot
  * supply an omitted authored image (or another same-named binary resource). */
@@ -883,7 +889,8 @@ static int sg_inspect(sg_walk *walk, const char *type, const char *name)
             goto inspected;
         }
     }
-    tree = sh_decl_tree_parse(source, NULL, 0);
+    tree = sg_open_body(type) ? sh_decl_tree_parse_reflected_body(source, 0, NULL, 0) :
+        sh_decl_tree_parse(source, NULL, 0);
     if (!tree) { sg_gap(walk, "", type, "declaration source grammar is unsupported"); goto done; }
     if (!strcmp(type, "entitydef")) {
         char class_error[1024] = "";
@@ -1396,7 +1403,8 @@ static unsigned char *sg_bind_source(sh_package_source_reader *reader,
                 graph = sh_decl_graph_open(source, error, capacity);
                 if (!graph) goto done;
             } else {
-                tree = sh_decl_tree_parse_ordered(source, error, capacity);
+                tree = sg_open_body(family) ? sh_decl_tree_parse_reflected_body(source, 1, error, capacity) :
+                    sh_decl_tree_parse_ordered(source, error, capacity);
                 if (!tree) goto done;
             }
         }
@@ -1544,7 +1552,8 @@ unsigned char *sh_package_source_bind_strings(sh_package_source_reader *reader,
             graph = sh_decl_graph_open(source, error, capacity);
             if (!graph) goto done;
         } else {
-            tree = sh_decl_tree_parse_ordered(source, error, capacity);
+            tree = sg_open_body(family) ? sh_decl_tree_parse_reflected_body(source, 1, error, capacity) :
+                sh_decl_tree_parse_ordered(source, error, capacity);
             if (!tree) goto done;
         }
     }

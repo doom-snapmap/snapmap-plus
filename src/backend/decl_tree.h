@@ -31,6 +31,13 @@ sh_decl_node *sh_decl_tree_parse(sh_decl_source source, char *error, size_t erro
  * lookup or composition. The ordinary parser above continues to reject repeats. */
 sh_decl_node *sh_decl_tree_parse_ordered(sh_decl_source source, char *error, size_t error_capacity);
 
+/* The shared reflected declaration reader collects a body as a braced section
+ * and ignores that section's end-of-file result, so end of file may close the
+ * outermost brace. Nested blocks must still close. Use only for a family whose
+ * native Parse is verified to end in that reader. Ordered retains repeats. */
+sh_decl_node *sh_decl_tree_parse_reflected_body(sh_decl_source source, int ordered,
+    char *error, size_t error_capacity);
+
 /* Serialize an owned tree without recursion or an application payload cap.
  * Scalar spelling and sibling order are retained. The result is malloc-owned. */
 char *sh_decl_tree_write(const sh_decl_node *root, size_t *length);

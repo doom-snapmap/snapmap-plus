@@ -92,6 +92,38 @@ int main(void)
         assert(!sh_decl_tree_parse_ordered((sh_decl_source){"{ a = 1", 7}, NULL, 0));
     }
     {
+        /* The quoted reader keeps control bytes; only a newline is its error. */
+        root = parse("{ a = \"x\x1f\ry\"; }"); assert(root);
+        assert(sh_decl_tree_literal(sh_decl_tree_member(root, "a"), &literal, &length));
+        assert(length == 4 && !memcmp(literal, "x\x1f\ry", 4));
+        sh_decl_tree_free(root);
+        assert(!parse("{ a = \"x\ny\"; }"));
+    }
+    {
+        /* The shared reflected reader lets end of file close the outermost
+         * brace only. The default parsers keep requiring it. */
+        const char *open = "{ edit = { x = 1; } // unclosed body\r\n";
+        sh_decl_source source = {open, strlen(open)};
+        assert(!sh_decl_tree_parse(source, NULL, 0) && !sh_decl_tree_parse_ordered(source, NULL, 0));
+        root = sh_decl_tree_parse_reflected_body(source, 0, NULL, 0); assert(root);
+        node = (sh_decl_node *)sh_decl_tree_member(root, "edit");
+        assert(node && sh_decl_tree_member(node, "x") && !node->next);
+        text = sh_decl_tree_write(root, &length); assert(text);
+        sh_decl_tree_free(root); root = parse(text); assert(root); sh_decl_tree_free(root); free(text);
+        root = sh_decl_tree_parse_reflected_body((sh_decl_source){"{", 1}, 0, NULL, 0);
+        assert(root && !root->children); sh_decl_tree_free(root);
+        root = sh_decl_tree_parse_reflected_body((sh_decl_source){"{ a = 1; }", 10}, 0, NULL, 0);
+        assert(root); sh_decl_tree_free(root);
+        /* Open nested blocks, open scalars, trailing text and open comments
+         * remain unsupported rather than guessed. */
+        const char *refused[] ={"{ edit = { x = 1;", "{ a = 1", "{ a = 1; } }", "{ a = 1; /* open",
+            "{ a = 1; a = 2;", "edit = {}"};
+        for (i = 0; i < sizeof(refused) / sizeof(refused[0]); i++)
+            assert(!sh_decl_tree_parse_reflected_body((sh_decl_source){refused[i], strlen(refused[i])}, 0, NULL, 0));
+        root = sh_decl_tree_parse_reflected_body((sh_decl_source){"{ a = 1; a = 2;", 15}, 1, NULL, 0);
+        assert(root && root->children && root->children->next); sh_decl_tree_free(root);
+    }
+    {
         sh_decl_source embedded = {"{ a = 1; }\0ignored", 18};
         char error[128];
         assert(!sh_decl_tree_parse(embedded, error, sizeof(error)) && strstr(error, "NUL"));
