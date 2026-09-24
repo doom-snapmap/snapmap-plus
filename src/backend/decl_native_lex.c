@@ -70,9 +70,11 @@ int sh_decl_native_lex(sh_decl_source source, sh_decl_tokens *out, char *error, 
         if (ch == '"' || ch == '\'') {
             kind = ch == '"' ? SH_DECL_TOKEN_STRING : SH_DECL_TOKEN_LITERAL;
             p++;
-            /* Under 0x20 a backslash is a byte, even before the closing quote. */
+            /* Under 0x20 a backslash is a byte, even before the closing quote.
+             * The quoted reader appends every other byte, including controls;
+             * only a newline is its error. */
             while (p < source.length && s[p] != ch) {
-                if ((unsigned char)s[p] < 32 && s[p] != '\t') { reason = "control byte inside quoted token"; goto bad; }
+                if (s[p] == '\n') { reason = "newline inside quoted token"; goto bad; }
                 p++;
             }
             if (p == source.length) { reason = "unterminated quoted token"; goto bad; }

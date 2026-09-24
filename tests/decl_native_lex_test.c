@@ -37,6 +37,10 @@ int main(void)
     sh_decl_tokens_free(&t);
     t = read("/*first\nsecond*/ a\r\n b\n");
     CHECK(t.items[0].line == 2 && t.items[1].line == 3); sh_decl_tokens_free(&t);
+    /* The quoted reader appends control bytes; only a newline is its error. */
+    t = read("name \"charged\x1f_quad\" '\r'");
+    CHECK(t.count == 3 && sh_decl_token_is(&t, 1, "\"charged\x1f_quad\"") && sh_decl_token_is(&t, 2, "'\r'"));
+    sh_decl_tokens_free(&t);
     refused("{]"); refused("{"); refused("/* unfinished"); refused("/* /* nested */");
     refused("\"unfinished"); refused("\"line\nbreak\""); refused("#include \"file\""); refused("$eval(1)");
     refused("<%text%>"); refused("\"a\" \\\\ \"b\""); refused("0xff"); refused("0b10");

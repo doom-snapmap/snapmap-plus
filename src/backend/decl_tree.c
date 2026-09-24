@@ -158,9 +158,10 @@ static char *dt_value(dt_parser *p)
         unsigned char c = (unsigned char)p->text[p->offset++];
         if (quoted) {
             /* Declaration lexer flags disable escapes. A backslash before
-             * the closing quote is still a path byte, not an escape. */
+             * the closing quote is still a path byte, not an escape. The
+             * quoted reader keeps control bytes; a newline is its error. */
             if (c == '"') quoted = 0;
-            else if (c < 32 && c != '\t') return NULL;
+            else if (c == '\n') return NULL;
             continue;
         }
         if (c == '"') { quoted = 1; continue; }
@@ -233,7 +234,8 @@ static int dt_push(dt_parser *p, sh_decl_node *node)
     return 1;
 }
 
-static sh_decl_node *dt_parse(sh_decl_source source, int unique_fields, char *error, size_t error_capacity)
+static sh_decl_node *dt_parse(sh_decl_source source, int unique_fields, int open_body,
+    char *error, size_t error_capacity)
 {
     dt_parser p = {0};
     sh_decl_node *root = NULL;
@@ -251,6 +253,9 @@ static sh_decl_node *dt_parse(sh_decl_source source, int unique_fields, char *er
             free(p.stack[--p.depth].keys);
             if (p.depth) (void)dt_take(&p, ';');
             continue;
+        }
+        if (open_body && p.depth == 1 && !p.failed && p.offset == p.length) {
+            free(p.stack[--p.depth].keys); break;
         }
         node = (sh_decl_node *)calloc(1, sizeof(*node));
         if (!node) { dt_fail(&p, "allocation failed"); break; }
@@ -276,10 +281,14 @@ done:
 }
 
 sh_decl_node *sh_decl_tree_parse(sh_decl_source source, char *error, size_t error_capacity)
-{ return dt_parse(source, 1, error, error_capacity); }
+{ return dt_parse(source, 1, 0, error, error_capacity); }
 
 sh_decl_node *sh_decl_tree_parse_ordered(sh_decl_source source, char *error, size_t error_capacity)
-{ return dt_parse(source, 0, error, error_capacity); }
+{ return dt_parse(source, 0, 0, error, error_capacity); }
+
+sh_decl_node *sh_decl_tree_parse_reflected_body(sh_decl_source source, int ordered,
+    char *error, size_t error_capacity)
+{ return dt_parse(source, !ordered, 1, error, error_capacity); }
 
 typedef struct dt_output { char *text; size_t length, capacity; } dt_output;
 static int dt_append(dt_output *out, const char *text)

@@ -3165,6 +3165,90 @@ static void test_movie_source_link(void)
     }
     while (native->count) free(native->regions[--native->count].address);
 }
+/* Effects end in the shared reflected reader: end of file may close only the
+ * outermost brace, and quoted control bytes are ordinary string bytes. */
+static void test_open_effect_body(void)
+{
+    fixture storage; fixture *native = &storage; setup(native);
+    {
+        void *managers = alloc(native, 6 * 8), *manager = alloc(native, 0x90);
+        memcpy(managers, *(void **)((char *)native->registry + 8), 5 * 8);
+        pointer(managers, 5 * 8, manager); pointer(native->registry, 8, managers); number(native->registry, 0x10, 6);
+        pointer(manager, 8, string(native, "fx")); pointer(manager, 0x10, string(native, "idDeclFX"));
+        void *container = *(void **)native->reflection;
+        void *records = alloc(native, 21 * 0x38), *objects = alloc(native, 21 * 16), *pointers = alloc(native, 21 * 16);
+        memcpy(records, *(void **)((char *)container + 0x20), 20 * 0x38);
+        memcpy(objects, *(void **)((char *)native->reflection + 0x88), 20 * 16);
+        memcpy(pointers, *(void **)((char *)native->reflection + 0xa0), 20 * 16);
+        pointer(container, 0x20, records);
+        pointer(native->reflection, 0x88, objects); number(native->reflection, 0x90, 21);
+        pointer(native->reflection, 0xa0, pointers); number(native->reflection, 0xa8, 21);
+        pointer(records, 19 * 0x38, string(native, "idDeclFX"));
+        pointer(records, 19 * 0x38 + 8, string(native, "idDeclTypeInfo"));
+        pointer(pointers, 19 * 16 + 8, (void *)0x10);
+        const char *t[] = {"idDeclEntityDef", "idStr"}, *o[] = {"*", ""}, *n[] = {"target", "name"};
+        fields(native, (char *)records + 19 * 0x38, 2, t, o, n);
+    }
+    sh_decl_registry_source registry = {native, read_memory, (uintptr_t)native->registry, NULL};
+    static const char open[] = "{\r\n\tedit = {\r\n\t\ttarget = \"map-child\";\r\n"
+        "\t\tname = \"charged\x1f_quad\";\r\n\t}\r\n";
+    sh_package_compilation empty = {0};
+    sh_package_source_binding result;
+    bind_fixture bindings = {0};
+    char error[1024]; unsigned char *out; size_t length;
+    sh_package_source_reader *reader = sh_package_source_reader_open(&empty, NULL, original, native,
+        registry, (uintptr_t)native->reflection, error, sizeof(error));
+    assert(reader);
+    out = sh_package_source_observe(reader, "fx", "open", (const unsigned char *)open, strlen(open),
+        bind_reference, &bindings, &length, &result, error, sizeof(error));
+    if (!out) fprintf(stderr, "open effect: %s\n", error);
+    assert(out && length == strlen(open) && !memcmp(out, open, length) && result.references == 1); free(out);
+    bindings.replace = 1;
+    out = sh_package_source_bind(reader, "fx", "open", (const unsigned char *)open, strlen(open),
+        bind_reference, &bindings, &length, &result, error, sizeof(error));
+    assert(out && result.changed == 1 && strstr((char *)out, "\"bound/map-child\"") &&
+        strstr((char *)out, "\"charged\x1f_quad\""));
+    {
+        /* A rebound body is written complete and still parses strictly. */
+        sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)out, length}, error, sizeof(error));
+        assert(tree); sh_decl_tree_free(tree); free(out);
+    }
+    bindings = (bind_fixture){0};
+    /* Only a verified reader tolerates the missing brace; nested blocks and
+     * newlines inside strings stay native parse errors. */
+    assert(!sh_package_source_bind(reader, "actormodifier", "open", (const unsigned char *)open, strlen(open),
+        bind_reference, &bindings, &length, &result, error, sizeof(error)) && strstr(error, "closing brace"));
+    {
+        const char *nested = "{ edit = { target = \"map-child\";", *broken = "{ edit = { name = \"a\nb\"; } }";
+        assert(!sh_package_source_bind(reader, "fx", "nested", (const unsigned char *)nested, strlen(nested),
+            bind_reference, &bindings, &length, &result, error, sizeof(error)));
+        assert(!sh_package_source_bind(reader, "fx", "broken", (const unsigned char *)broken, strlen(broken),
+            bind_reference, &bindings, &length, &result, error, sizeof(error)));
+    }
+    sh_package_source_reader_close(reader);
+    {
+        /* Candidate inspection follows the open effect's reference. */
+        sh_compiled_resource resources[2] = {0};
+        sh_package_compilation compiled = {0};
+        sh_package_references paths = {0};
+        sh_package_source_graph_report report;
+        resources[0] = link_decl("amopen", "generated/decls/actormodifier/amopen.decl", open);
+        resources[0].type = "actormodifier";
+        resources[1] = link_decl("open", "generated/decls/fx/open.decl", open); resources[1].type = "fx";
+        compiled.resources = resources; compiled.resource_count = 2;
+        const char *json = "{\"targetType\":\"idDeclFX\",\"value\":\"open\"}";
+        assert(sh_package_source_graph(&compiled, NULL, original, native, registry, (uintptr_t)native->reflection,
+            json, strlen(json), &paths, &report, error, sizeof(error)));
+        assert(!paths.incomplete && !report.gaps && has(&paths, "fx/open.decl") && has(&paths, "map-child.decl"));
+        json = "{\"targetType\":\"idDeclActorModifier\",\"value\":\"amopen\"}";
+        assert(sh_package_source_graph(&compiled, NULL, original, native, registry, (uintptr_t)native->reflection,
+            json, strlen(json), &paths, &report, error, sizeof(error)));
+        assert(paths.incomplete && report.gaps && !has(&paths, "map-child.decl"));
+        sh_package_references_free(&paths);
+    }
+    assert(!native->object_state_reads);
+    while (native->count) free(native->regions[--native->count].address);
+}
 int main(void)
 {
     fixture f;
@@ -3189,6 +3273,7 @@ int main(void)
     test_font_source_link(&f, registry);
     test_font_library(&f, registry);
     test_movie_source_link();
+    test_open_effect_body();
     test_map_occurrences(&f, registry);
     test_library(&f, registry);
     test_library_hud();
