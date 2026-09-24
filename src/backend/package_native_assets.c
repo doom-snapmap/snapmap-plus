@@ -307,20 +307,32 @@ static int na_admit(void *context, size_t scope, const char *family, const char 
         "_defaultcube", "_nofalloff", "_dither2", "_dither4", "_dither16",
         "_dither256", "_fresnel", "_blackcube"
     };
+    /* Renderer initialization in both renderers also creates these by name:
+     * the global VMTR page table (its virtual texture's mode-0 construction),
+     * the Vmtr physical page cache, the transparency and light image atlases
+     * and the augment target. DeclFind reserves _emptyName for an empty name.
+     * Stock material text binds them by these names. */
+    static const char *const created[] = {
+        "_vmtrpagetable", "_physicalvmtrpages0", "_physicalvmtrpages3", "_physicalvmtrmappings",
+        "_transsortimageatlas", "_lightimageatlas", "_augment", "_emptyname"
+    };
+    const char *kind = NULL;
     (void)context; (void)scope;
     memset(semantics, 0, 32);
     if (!family || !name || strcmp(family, "image")) return 0;
-    for (size_t i = 0; i < sizeof(images) / sizeof(*images); i++) if (!strcmp(name, images[i])) {
-        char identity[128]; sh_package_file_identity digest;
-        int n = snprintf(identity, sizeof(identity), "doom2016:engine-owned-intrinsic-image:%s", name);
-        if (n < 0 || (size_t)n >= sizeof(identity) ||
-            !sh_package_bytes_identity(identity, (size_t)n, &digest)) {
-            if (error && capacity) snprintf(error, capacity, "cannot identify native intrinsic image: %s", name);
-            return -1;
-        }
-        memcpy(semantics, digest.digest, 32); return 1;
+    for (size_t i = 0; !kind && i < sizeof(images) / sizeof(*images); i++)
+        if (!strcmp(name, images[i])) kind = "intrinsic-image";
+    for (size_t i = 0; !kind && i < sizeof(created) / sizeof(*created); i++)
+        if (!strcmp(name, created[i])) kind = "renderer-image";
+    if (!kind) return 0;
+    char identity[128]; sh_package_file_identity digest;
+    int n = snprintf(identity, sizeof(identity), "doom2016:engine-owned-%s:%s", kind, name);
+    if (n < 0 || (size_t)n >= sizeof(identity) ||
+        !sh_package_bytes_identity(identity, (size_t)n, &digest)) {
+        if (error && capacity) snprintf(error, capacity, "cannot identify native engine image: %s", name);
+        return -1;
     }
-    return 0;
+    memcpy(semantics, digest.digest, 32); return 1;
 }
 
 static int na_semantics(void *context, size_t scope, const char *family, const char *name,
