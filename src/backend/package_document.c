@@ -38,4 +38,3 @@ done:
     sh_package_map_plan_free(plan); sh_package_provenance_free(&saved);
     return ok;
 }
-
