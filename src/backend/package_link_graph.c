@@ -166,7 +166,10 @@ static int lg_prepare(lg_work *work, const sh_package_link_node *nodes, size_t c
         if (node->edge_count > 1) qsort(item->edges, node->edge_count, sizeof(*item->edges), lg_edge_order);
         for (j = 0; j < node->edge_count; j++) {
             if (j && !strcmp(item->edges[j - 1].slot, item->edges[j].slot)) {
-                free(cursor); return lg_fail(error, capacity, "resource graph repeats a binding slot");
+                free(cursor);
+                if (error && capacity) snprintf(error, capacity, "resource graph repeats binding slot %s in %s %s",
+                    item->edges[j].slot, node->family, node->path);
+                return 0;
             }
             work->offsets[item->edges[j].target + 1]++;
         }

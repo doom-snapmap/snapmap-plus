@@ -31,7 +31,7 @@ typedef struct fixture {
     size_t count, assigned, bound;
     int unresolved, collision, changed_source, omit_replay, bad_inspection, abort_bind, shared_name;
     int original_paths, alias_rewrite;
-    int member_fault;
+    int member_fault, repeat_slot;
     int original_bindings[12];
     unsigned char *mutate_witness;
     sh_package_link_edge *mutate_implicit;
@@ -67,6 +67,15 @@ static unsigned char *bind_file(void *context, size_t unit, const sh_compiled_re
     unsigned char *result;
     (void)file; (void)error; (void)capacity; f->bound++;
     if (f->abort_bind) return NULL;
+    if (f->repeat_slot && !strcmp(f->units[unit].family, "entitydef")) {
+        /* Two assignments of one field in one file, as the native reader sees them. */
+        for (int k = 0; k < 2; k++) {
+            const char *replacement = NULL;
+            if (reference(reference_context, "edit.material", "material", "materials/stone", &replacement) < 0) return NULL;
+        }
+        result = malloc(length + 1); assert(result);
+        memcpy(result, body, length); result[length] = 0; *output_length = length; return result;
+    }
     if (!strcmp(f->units[unit].family, "entitydef") && !(f->assigned && f->omit_replay)) {
         bridge b = {reference, reference_context};
         sh_decl_rebind_result details;
@@ -667,6 +676,41 @@ static void implicit_bindings(const sh_package_sources *sources)
     sh_package_link_output_free(&out);
 }
 
+/* A declaration may assign one field twice (stock projectile impact effects
+ * repeat rumbleDecl); the native reader resolves both and keeps the last. Both
+ * references bind, each under its own replayable slot. */
+static void repeated_field_slots(void)
+{
+    char base[MAX_PATH + 32], error[1024];
+    snprintf(base, sizeof(base), "%s/repeated", root);
+    create("repeated/overrides/rock/package.json", "{\"id\":\"rock\",\"name\":\"Rock\"}");
+    create("repeated/overrides/rock/assets/generated/decls/entitydef/props/rock.decl", "{ edit = { } }");
+    sh_package_sources *sources = sh_package_sources_scan(base, error, sizeof(error)); assert(sources);
+    /* A captured original is read as the native reader reads it, not through
+     * the package compiler's authoring checks. */
+    sh_compiled_resource resources[2] = {0};
+    resources[0].engine_path = "generated/decls/entitydef/props/rock.decl"; resources[0].type = "entitydef";
+    resources[0].name = "props/rock"; resources[0].source = SIZE_MAX;
+    resources[0].body = (unsigned char *)"{ edit = { material = \"materials/stone\"; material = \"materials/stone\"; health = 10; } }";
+    resources[0].body_length = strlen((const char *)resources[0].body);
+    resources[1].engine_path = "generated/decls/material/materials/stone.decl"; resources[1].type = "material";
+    resources[1].name = "materials/stone"; resources[1].source = SIZE_MAX;
+    resources[1].body = (unsigned char *)"{ color {1,0,0,1} }"; resources[1].body_length = 19;
+    sh_package_compilation compiled = {0}; compiled.resources = resources; compiled.resource_count = 2;
+    compiled.sources = sources;
+    const sh_package_compilation *scope = &compiled;
+    sh_package_link_inputs discovered = {0};
+    assert(sh_package_link_inputs_open(&scope, 1, NULL, &discovered, error, sizeof(error)) && discovered.count == 2);
+    fixture f = {0}; f.count = 2; f.repeat_slot = 1;
+    for (size_t n = 0; n < 2; n++) f.units[n] = discovered.units[n];
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    sh_package_link_output out = {0};
+    int ok = sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error));
+    if (!ok) fprintf(stderr, "repeated field: %s\n", error);
+    assert(ok && out.compiled && out.classes.count == 2);
+    sh_package_link_output_free(&out); sh_package_link_inputs_free(&discovered); sh_package_sources_free(sources);
+}
+
 int main(void)
 {
     const char *folders[] = {"mars", "green", "duplicate"};
@@ -714,6 +758,7 @@ int main(void)
     native_collisions(sources, &f, &adapter, entities, materials);
     shared_replacement(sources, &f, materials);
     streamed_suppliers(sources);
+    repeated_field_slots();
     assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
     assert(out.classes.count == 4 && out.compiled->resource_count == 4 && out.compiled->duplicate_count == 2);
     assert(out.classes.nodes[entities[0]] == out.classes.nodes[entities[2]]);

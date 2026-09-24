@@ -122,6 +122,19 @@ static char *pl_slot(const char *path, const char *slot)
     return out;
 }
 
+/* A file can assign one field more than once; the native reflected reader
+ * resolves each assignment (loading its target) and keeps the last. Number the
+ * repeats so every binding keeps a unique, replayable slot. Owns key. */
+static char *pl_occurrence(const pl_unit *u, size_t begin, size_t end, char *key)
+{
+    size_t seen = 0, n = strlen(key);
+    for (size_t i = begin; i < end; i++)
+        if (!strncmp(u->edges[i].slot, key, n) && (!u->edges[i].slot[n] || u->edges[i].slot[n] == '#')) seen++;
+    if (!seen) return key;
+    char *out = n <= SIZE_MAX - 24 ? malloc(n + 24) : NULL;
+    if (out) snprintf(out, n + 24, "%s#%zu", key, seen + 1);
+    free(key); return out;
+}
 static int pl_edge_add(pl_work *w, char *key, size_t target)
 {
     pl_unit *u = &w->work[w->unit];
@@ -150,7 +163,8 @@ static int pl_reference(void *context, const char *slot, const char *family,
     if (!replacement || !slot || !*slot || !family || !*family || !name || !*name ||
         !w->adapter->resolve(w->adapter->context, w->unit, family, name, &target, w->error, w->capacity) ||
         target >= w->count || strcmp(w->units[target].family, family) || strcmp(w->units[target].name, name) ||
-        !(key = pl_slot(file->resource->engine_path, slot))) {
+        !(key = pl_slot(file->resource->engine_path, slot)) ||
+        !(key = pl_occurrence(u, file->edge_begin, w->replay ? w->next_edge : u->edge_count, key))) {
         pl_fail(w, "resource binding did not resolve to its scoped native identity"); return -1;
     }
     if (w->replay) {
