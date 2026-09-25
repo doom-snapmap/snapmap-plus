@@ -674,6 +674,22 @@ static int pc_editor_field(const char *type, const char *key)
     return 0;
 }
 
+/* The entity parser reads editorVars in its preamble, before the state reader
+ * starts at edit; editorVars after edit becomes part of the edit state, and so
+ * of every descendant's (dc_entity_headers). Composed entity editorVars take the
+ * place of the originals, or go before edit. Other editor fields keep the tail. */
+static sh_decl_node *pc_editor_anchor(sh_decl_node *parent, const char *type)
+{
+    int found = 0;
+    if (sh_package_editor_contribution_phase(type) != 2) return NULL;
+    for (sh_decl_node *node = parent->children; node; node = node->next) {
+        if (!strcmp(node->key, "edit")) return node;
+        if (pc_editor_field(type, node->key)) found = 1;
+        else if (found) return node;
+    }
+    return NULL;
+}
+
 /* Split an owned tree without copying native fields or changing their order. */
 static sh_decl_node *pc_editor_take(sh_decl_node *parent, const char *type)
 {
@@ -834,10 +850,14 @@ char *sh_package_editor_contributions(const char *type, sh_decl_source baseline,
         *tail = parent;
     }
     if (parent) {
+        sh_decl_node *anchor = pc_editor_anchor(parent, type), **link = &parent->children;
         sh_decl_tree_free(pc_editor_take(parent, type));
-        sh_decl_node **tail = &parent->children;
-        while (*tail) tail = &(*tail)->next;
-        if (added) { *tail = added->children; added->children = NULL; }
+        while (*link && *link != anchor) link = &(*link)->next;
+        if (added && added->children) {
+            sh_decl_node *last = added->children;
+            while (last->next) last = last->next;
+            last->next = *link; *link = added->children; added->children = NULL;
+        }
     }
     out = sh_decl_tree_write(tree, length);
 done:

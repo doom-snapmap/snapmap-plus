@@ -2654,7 +2654,25 @@ static void test_contribution_projection(void)
         parts, 2, parts[0], 1, &length, error, sizeof(error));
     assert(out && strstr(out, "a = 1") && strstr(out, "b = 2") && strstr(out, "\"red\"") &&
         !strstr(out, "\"green\"") && strstr(out, "item[2] = 9") && !strstr(out, "item[0]"));
+    /* The entity parser reads editorVars only before edit. */
+    assert(strstr(out, "editorVars") < strstr(out, "edit ="));
     free(out);
+    {
+        const char *late = "{ class = \"Entity\"; edit = { target = \"late\"; } editorVars = { c = 3; } }";
+        const char *bare = "{ class = \"Entity\"; edit = { target = \"bare\"; } }";
+        const char *placed = "{ class = \"Entity\"; editorVars = { c = 3; } poolCount = 2; edit = { target = \"placed\"; } }";
+        sh_decl_source targets[] = {{late, strlen(late)}, {bare, strlen(bare)}, {placed, strlen(placed)}};
+        for (size_t t = 0; t < 3; t++) {
+            out = sh_package_editor_contributions("entitydef", (sh_decl_source){base, strlen(base)},
+                parts, 2, targets[t], 0, &length, error, sizeof(error));
+            if (!out) fprintf(stderr, "entity editorVars order %zu: %s\n", t, error);
+            assert(out && strstr(out, "editorVars") && strstr(out, "edit =") &&
+                strstr(out, "editorVars") < strstr(out, "edit =") && strstr(out, "class") < strstr(out, "editorVars"));
+            /* Composed editorVars keep the original's place among the headers. */
+            if (t == 2) assert(strstr(out, "editorVars") < strstr(out, "poolCount"));
+            free(out);
+        }
+    }
     {
         /* A selector patching its parent's property by index keeps that sparse
          * inherited edit. Differing parents compose only complete lists. */
