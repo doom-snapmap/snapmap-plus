@@ -185,6 +185,12 @@ unsigned char *sh_package_source_link_bind_unit(sh_package_source_link *source, 
 unsigned char *sh_package_source_link_bind_strings(sh_package_source_link *source, size_t unit,
     const unsigned char *body, size_t length, sh_package_string_site_resolver resolver,
     void *context, size_t *output_length, char *error, size_t capacity);
+/* Registration-key sites of one captured unit, in its own scope; see
+ * sh_package_source_bind_keys for the status contract. */
+int sh_package_source_link_bind_keys(sh_package_source_link *source, size_t unit,
+    const unsigned char *body, size_t length, sh_package_key_site_resolver resolver, void *context,
+    unsigned char **output, size_t *output_length, char *error, size_t capacity);
+int sh_package_source_link_key_space(sh_package_source_link *source, struct sh_package_key_space *space);
 /* Physical members of multi-file units use their captured role. In particular,
  * shader source, cooked records and stage modules are different formats. */
 unsigned char *sh_package_source_link_bind_file(sh_package_source_link *source, size_t unit,

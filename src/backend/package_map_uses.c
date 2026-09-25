@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "package_map_uses.h"
+#include "package_keys.h"
 
 struct sh_package_map_uses {
     sh_package_provenance saved, selected;
@@ -250,17 +251,37 @@ done:
     free(mapped); return ok < 0 ? mu_fail(selection, "cannot retain the selected typed map use") : ok;
 }
 
+/* A key bit's site is "<value site>#<bit>". Once rebound, its occurrence is
+ * recorded under the bit the value now holds, so a later edit of that value
+ * never meets the stale spelling of another package's key. */
+static int mu_key_record_site(const sh_package_provenance_site *site, const char *resolved,
+    sh_package_provenance_site *out, char **owned)
+{
+    const char *hash = site && site->reference ? strrchr(site->reference, '#') : NULL;
+    size_t prefix, length;
+    *owned = NULL;
+    if (!hash || !resolved) return 0;
+    prefix = (size_t)(hash - site->reference) + 1; length = strlen(resolved);
+    if (!(*owned = malloc(prefix + length + 1))) return 0;
+    memcpy(*owned, site->reference, prefix); memcpy(*owned + prefix, resolved, length + 1);
+    *out = (sh_package_provenance_site){site->kind, site->owner, *owned};
+    return 1;
+}
 static int mu_choose(sh_package_map_uses *selection, const sh_package_provenance_site *site,
     const char *family, const char *name, const char **replacement, int observe)
 {
     const char *resolved = NULL;
     size_t saved_use = SIZE_MAX, current_binding, chosen = SIZE_MAX;
+    int key;
     if (replacement) *replacement = NULL;
     if (!selection || selection->failure[0] || selection->finished || !family || !name || !replacement)
         return mu_fail(selection, "invalid map occurrence callback");
     if (site && (!site->owner || !site->reference)) return mu_fail(selection, "map occurrence site is incomplete");
     if (observe && (!site || (site->kind != SH_PACKAGE_USE_OBJECT && site->kind != SH_PACKAGE_USE_WORLD)))
         return mu_fail(selection, "a typed map value has no portable occurrence site");
+    /* A registration key bit is no resource: it names the package whose AI it
+     * registers, and binds only while some current package registers it. */
+    key = !strcmp(family, SH_PACKAGE_KEY_FAMILY);
 
     /* An exact occurrence record, even an edited one, takes precedence over
      * historical name-level records retained for different copied objects. */
@@ -290,13 +311,21 @@ static int mu_choose(sh_package_map_uses *selection, const sh_package_provenance
     }
     if (saved_use != SIZE_MAX) {
         const sh_package_provenance_use *use = selection->saved.uses + saved_use;
-        if (observe && mu_append(selection, &selection->saved, use->binding,
-            use->contexts, use->context_count, site, resolved, use->kind == SH_PACKAGE_USE_HISTORICAL) < 0) return -1;
+        sh_package_provenance_site moved; char *owned = NULL;
+        const sh_package_provenance_site *record = site;
+        if (observe && key && resolved && strcmp(resolved, name)) {
+            if (!mu_key_record_site(site, resolved, &moved, &owned)) return mu_fail(selection, "cannot record a rebound map key");
+            record = &moved;
+        }
+        int appended = observe ? mu_append(selection, &selection->saved, use->binding,
+            use->contexts, use->context_count, record, resolved, use->kind == SH_PACKAGE_USE_HISTORICAL) : 1;
+        free(owned);
+        if (appended < 0) return -1;
     } else {
         /* Names are current compiled bindings, not authored aliases or IDs. */
         current_binding = mu_binding(selection->current, family, name);
-        int required = observe ? selection->required(selection->required_context, family, name,
-            selection->failure, sizeof(selection->failure)) : 1;
+        int required = !observe ? 1 : key ? current_binding != SIZE_MAX :
+            selection->required(selection->required_context, family, name, selection->failure, sizeof(selection->failure));
         if (required < 0) return mu_fail(selection, "new map reference gameplay classification is unavailable");
         if (observe && required && current_binding == SIZE_MAX)
             return mu_fail(selection, "a new gameplay reference has no current source catalog binding");
@@ -314,7 +343,7 @@ static int mu_choose(sh_package_map_uses *selection, const sh_package_provenance
             if (observe && required && mu_append(selection, selection->current, current_binding, &chosen, 1, site, resolved, 0) < 0) return -1;
         }
     }
-    if (observe && !sh_package_references_add(&selection->references, family, resolved ? resolved : name))
+    if (observe && !key && !sh_package_references_add(&selection->references, family, resolved ? resolved : name))
         return mu_fail(selection, "cannot retain typed map references");
     if (!resolved || !strcmp(resolved, name)) return 0;
     *replacement = resolved; return 1;

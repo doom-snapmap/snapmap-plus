@@ -612,6 +612,27 @@ sh_decl_reference_reader sh_decl_native_schema_reader(sh_decl_native_schema *s,
     return SH_DECL_READER_UNKNOWN;
 }
 
+int sh_decl_native_schema_enum_constants(sh_decl_native_schema *s, const char *enum_name,
+    int (*visit)(void *context, const char *name, uint32_t value), void *context)
+{
+    dn_type *type;
+    uintptr_t members;
+    if (!s || !enum_name || !visit) return -1;
+    if (!(type = dn_find(&s->enums, enum_name))) return 0;
+    if (!dn_pointer(s, type->address, 0x10, &members)) return -1;
+    for (size_t i = 0; members && i < 4096; i++) {
+        uintptr_t name_at;
+        uint32_t value;
+        char *name;
+        if (!dn_pointer(s, members, i * 0x10, &name_at)) return -1;
+        if (!name_at) return 1;
+        if (!(name = dn_string(s, name_at)) || !dn_read(s, members, i * 0x10 + 8, &value, sizeof(value))) return -1;
+        if (!*name) return 1;
+        if (!visit(context, name, value)) return -1;
+    }
+    return members ? -1 : 1;
+}
+
 void sh_decl_native_schema_close(sh_decl_native_schema *s)
 {
     if (s) {

@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "package_source_graph.h"
+#include "package_keys.h"
 #include "package_source_link.h"
 #include "package_native_names.h"
 #include "resource_graph.h"
@@ -3307,14 +3308,50 @@ static void test_native_original_gaps(fixture *f, sh_decl_registry_source regist
 static void conductor_reflection(fixture *native)
 {
     void *container = *(void **)native->reflection;
-    void *records = alloc(native, 22 * 0x38), *objects = alloc(native, 22 * 16), *pointers = alloc(native, 22 * 16);
-    void *element = alloc(native, 0x48);
+    void *records = alloc(native, 27 * 0x38), *objects = alloc(native, 27 * 16), *pointers = alloc(native, 27 * 16);
+    void *element = alloc(native, 0x48), *mods = alloc(native, 0x48), *choices = alloc(native, 0x48);
     memcpy(records, *(void **)((char *)container + 0x20), 20 * 0x38);
     memcpy(objects, *(void **)((char *)native->reflection + 0x88), 20 * 16);
     memcpy(pointers, *(void **)((char *)native->reflection + 0xa0), 20 * 16);
     pointer(container, 0x20, records);
-    pointer(native->reflection, 0x88, objects); number(native->reflection, 0x90, 22);
-    pointer(native->reflection, 0xa0, pointers); number(native->reflection, 0xa8, 22);
+    pointer(native->reflection, 0x88, objects); number(native->reflection, 0x90, 27);
+    pointer(native->reflection, 0xa0, pointers); number(native->reflection, 0xa8, 27);
+    /* A bit-flag property inspector declaration: enumType plus values of
+     * {enumValue, label}, registered as its own declaration family. */
+    pointer(records, 23 * 0x38, string(native, "idDeclSnapPropertyInspector_BitFlag"));
+    pointer(records, 23 * 0x38 + 8, string(native, "idDeclTypeInfo"));
+    pointer(pointers, 23 * 16 + 8, (void *)0x10);
+    pointer(records, 24 * 0x38, string(native, "InspectorChoice")); pointer(records, 24 * 0x38 + 8, string(native, ""));
+    pointer(records, 25 * 0x38, string(native, "idList < InspectorChoice >")); pointer(records, 25 * 0x38 + 8, string(native, ""));
+    pointer(objects, 25 * 16 + 8, (void *)0x80);
+    pointer(records, 25 * 0x38 + 0x18, choices);
+    pointer(choices, 0, string(native, "InspectorChoice")); pointer(choices, 8, string(native, ""));
+    pointer(choices, 0x10, string(native, "element")); number(choices, 0x1c, 8);
+    {
+        const char *t[] = {"idStr", "idList < InspectorChoice >"}, *o[] = {"", ""}, *n[] = {"enumType", "values"};
+        fields(native, (char *)records + 23 * 0x38, 2, t, o, n);
+        const char *ct[] = {"idStr", "idStr"}, *co[] = {"", ""}, *cn[] = {"enumValue", "label"};
+        fields(native, (char *)records + 24 * 0x38, 2, ct, co, cn);
+    }
+    {
+        void *managers = alloc(native, 6 * 8), *manager = alloc(native, 0x90);
+        memcpy(managers, *(void **)((char *)native->registry + 8), 5 * 8);
+        pointer(manager, 8, string(native, "snapPropertyInspector_BitFlag"));
+        pointer(manager, 0x10, string(native, "idDeclSnapPropertyInspector_BitFlag"));
+        pointer(managers, 5 * 8, manager);
+        pointer(native->registry, 8, managers); number(native->registry, 0x10, 6);
+    }
+    /* globalAIMods rows: {aiType, healthMod} (a string stands in for the float). */
+    pointer(records, 21 * 0x38, string(native, "AIMod")); pointer(records, 21 * 0x38 + 8, string(native, ""));
+    pointer(records, 22 * 0x38, string(native, "idList < AIMod >")); pointer(records, 22 * 0x38 + 8, string(native, ""));
+    pointer(objects, 22 * 16 + 8, (void *)0x80);
+    pointer(records, 22 * 0x38 + 0x18, mods);
+    pointer(mods, 0, string(native, "AIMod")); pointer(mods, 8, string(native, ""));
+    pointer(mods, 0x10, string(native, "element")); number(mods, 0x1c, 8);
+    {
+        const char *t[] = {"spawnAIType_t", "idStr"}, *o[] = {"", ""}, *n[] = {"aiType", "healthMod"};
+        fields(native, (char *)records + 21 * 0x38, 2, t, o, n);
+    }
     pointer(records, 19 * 0x38, string(native, "SpawnInfo")); pointer(records, 19 * 0x38 + 8, string(native, ""));
     pointer(records, 20 * 0x38, string(native, "idList < SpawnInfo >")); pointer(records, 20 * 0x38 + 8, string(native, ""));
     pointer(objects, 20 * 16 + 8, (void *)0x80);
@@ -3322,15 +3359,32 @@ static void conductor_reflection(fixture *native)
     pointer(element, 0, string(native, "SpawnInfo")); pointer(element, 8, string(native, ""));
     pointer(element, 0x10, string(native, "element")); number(element, 0x1c, 8);
     {
-        const char *t[] = {"idStr", "idDeclEntityDef"}, *o[] = {"", "*"}, *n[] = {"aiType", "entityDef"};
+        const char *t[] = {"spawnAIType_t", "idDeclEntityDef"}, *o[] = {"", "*"}, *n[] = {"aiType", "entityDef"};
         fields(native, (char *)records + 19 * 0x38, 2, t, o, n);
+    }
+    /* The spawn-type enum as reflection registers it: single-bit constants
+     * for bits 0-18 (IMP is bit 2, ANY_ZOMBIE bit 17), the "any" bit and the
+     * all-bits composite; one record plus terminator. */
+    {
+        void *enums = alloc(native, 2 * 0x18), *readers = alloc(native, 2 * 16), *members = alloc(native, 22 * 0x10);
+        pointer(enums, 0, string(native, "spawnAIType_t")); pointer(enums, 0x10, members);
+        for (int i = 0; i < 21; i++) {
+            char name[16];
+            snprintf(name, sizeof(name), "T%d", i);
+            pointer(members, i * 0x10, string(native, i == 2 ? "IMP" : i == 17 ? "ANY_ZOMBIE" : i == 19 ? "ANY" :
+                i == 20 ? "ALL" : name));
+            number(members, i * 0x10 + 8, i < 19 ? 1 << i : i == 19 ? 1 << 30 : -1);
+        }
+        pointer(container, 0x10, enums);
+        pointer(native->reflection, 0x58, readers); number(native->reflection, 0x60, 2);
     }
     {
         const char *t[] = {"idDeclEntityDef", "OpaqueStringReader", "idDeclActorModifier", "idDeclSnapEditorEntity",
-            "idRenderModel", "idImage", "idList < SpawnInfo >"};
-        const char *o[] = {"*", "", "*", "*", "*", "*", ""};
-        const char *n[] = {"target", "custom", "modifier", "preview", "model", "image", "aiTypeList"};
-        fields(native, (char *)records + 0x38, 7, t, o, n);
+            "idRenderModel", "idImage", "idList < SpawnInfo >", "spawnAIType_t", "idList < AIMod >"};
+        const char *o[] = {"*", "", "*", "*", "*", "*", "", "", ""};
+        const char *n[] = {"target", "custom", "modifier", "preview", "model", "image", "aiTypeList", "spawnType",
+            "globalAIMods"};
+        fields(native, (char *)records + 0x38, 9, t, o, n);
     }
 }
 static const char *stock_conductor = "{ class = \"Entity\"; edit = { aiTypeList = { num = 1; "
@@ -3349,17 +3403,103 @@ static void registration_package(const char *package, const char *key)
     snprintf(text, sizeof(text), "{\"id\":\"local.%s\",\"name\":\"%s\"}", package, package); create(path, text);
     snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/conductor.decl", package);
     snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; "
-        "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } item[1] = { aiType = \"%s\"; entityDef = \"%s_boss\"; } } } }",
-        key, package); create(path, text);
+        "item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } item[1] = { aiType = \"%s\"; entityDef = \"%s_boss\"; } } "
+        "globalAIMods = { num = 1; item[0] = { aiType = \"%s\"; healthMod = \"%s\"; } } } }",
+        key, package, key, package); create(path, text);
     snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s_boss.decl", package, package);
     snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { target = \"%s\"; } }",
         !strcmp(package, "alpha") ? "parent-only" : !strcmp(package, "beta") ? "modifier-child" : "local-only"); create(path, text);
+    /* A spawner naming the key, like an encounter member or spawn target. */
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/entitydef/%s_spawner.decl", package, package);
+    snprintf(text, sizeof(text), "{ class = \"Entity\"; edit = { spawnType = \"IMP %s\"; } }", key); create(path, text);
+    /* An author-facing choice for the key, as the AI filter's inspector offers. */
+    snprintf(path, sizeof(path), "overrides/%s/assets/generated/decls/snappropertyinspector_bitflag/%s_types.decl",
+        package, package);
+    snprintf(text, sizeof(text), "{ edit = { enumType = \"spawnAIType_t\"; values = { num = 2; "
+        "item[0] = { enumValue = \"IMP\"; label = \"imp\"; } item[1] = { enumValue = \"%s\"; label = \"%s\"; } } } }",
+        key, package); create(path, text);
+}
+/* The enumValue a package's inspector offers for its own AI, by authored path. */
+static const char *inspector_key(const sh_package_compilation *compiled, const char *package)
+{
+    static char value[64];
+    char authored[256], label[64];
+    snprintf(authored, sizeof(authored), "generated/decls/snappropertyinspector_bitflag/%s_types.decl", package);
+    snprintf(label, sizeof(label), "label = \"%s\"", package);
+    for (size_t i = 0; i < compiled->resource_count; i++) {
+        const sh_compiled_resource *file = compiled->resources + i;
+        if (strcmp(file->original_path ? file->original_path : file->engine_path, authored)) continue;
+        sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)file->body, file->body_length}, NULL, 0);
+        const sh_decl_node *values = sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), "values");
+        const char *found = NULL;
+        for (const sh_decl_node *item = values ? values->children : NULL; item && !found; item = item->next) {
+            if (!item->compound || strcmp(node_value(sh_decl_tree_member(item, "label")), package)) continue;
+            snprintf(value, sizeof(value), "%s", node_value(sh_decl_tree_member(item, "enumValue"))); found = value;
+        }
+        sh_decl_tree_free(tree); return found;
+    }
+    return NULL;
+}
+/* The spawn-type value a package's spawner ended with, by authored path. */
+static const char *spawner_key(const sh_package_compilation *compiled, const char *package)
+{
+    static char value[64];
+    char authored[256];
+    snprintf(authored, sizeof(authored), "generated/decls/entitydef/%s_spawner.decl", package);
+    for (size_t i = 0; i < compiled->resource_count; i++) {
+        const sh_compiled_resource *file = compiled->resources + i;
+        if (strcmp(file->original_path ? file->original_path : file->engine_path, authored)) continue;
+        const char *at = strstr((const char *)file->body, "spawnType = \"IMP ");
+        assert(at);
+        at += strlen("spawnType = \"IMP ");
+        size_t n = strcspn(at, "\"");
+        assert(n < sizeof(value)); memcpy(value, at, n); value[n] = 0; return value;
+    }
+    return NULL;
+}
+/* One conductor list's row under one key: the named field's value, or NULL
+ * (also NULL when two rows carry that key). */
+static const char *conductor_list_row(const sh_compiled_resource *conductor, const char *list_name,
+    const char *key, const char *field)
+{
+    static char value[256];
+    sh_decl_node *tree = sh_decl_tree_parse((sh_decl_source){(char *)conductor->body, conductor->body_length}, NULL, 0);
+    const sh_decl_node *list = sh_decl_tree_member(sh_decl_tree_member(tree, "edit"), list_name);
+    const char *found = NULL;
+    int rows = 0;
+    for (const sh_decl_node *item = list ? list->children : NULL; item; item = item->next) {
+        const sh_decl_node *type = item->compound ? sh_decl_tree_member(item, "aiType") : NULL;
+        if (!type || strcmp(node_value(type), key)) continue;
+        rows++;
+        snprintf(value, sizeof(value), "%s", node_value(sh_decl_tree_member(item, field))); found = value;
+    }
+    sh_decl_tree_free(tree); return rows == 1 ? found : NULL;
+}
+static const char *conductor_row(const sh_compiled_resource *conductor, const char *key)
+{ return conductor_list_row(conductor, "aiTypeList", key, "entityDef"); }
+/* Contexts of the library's key binding (authored bit, bit held here). */
+static size_t key_binding(const sh_package_provenance *bindings, const char *original, const char *name)
+{
+    for (size_t i = 0; i < bindings->binding_count; i++) {
+        const sh_package_provenance_binding *binding = bindings->bindings + i;
+        if (!strcmp(binding->family, SH_PACKAGE_KEY_FAMILY) && !strcmp(binding->original, original) &&
+            !strcmp(binding->name, name)) return binding->context_count;
+    }
+    return 0;
+}
+static const char *package_boss(const sh_package_compilation *compiled, const char *package)
+{
+    char authored[256];
+    snprintf(authored, sizeof(authored), "generated/decls/entitydef/%s_boss.decl", package);
+    for (size_t i = 0; i < compiled->resource_count; i++) {
+        const sh_compiled_resource *file = compiled->resources + i;
+        if (!strcmp(file->original_path ? file->original_path : file->engine_path, authored)) return file->name;
+    }
+    return NULL;
 }
 /* A conductor's aiTypeList is a shared gameplay registration list: each
  * package's rows join the stock-named declaration, each still naming its own
- * package's bound definition, so every package's AI type can spawn. Two
- * packages claiming one native key for different definitions cannot both be
- * registered (a relocated key is needed): the later is left unserved. */
+ * package's bound definition, so every package's AI type can spawn. */
 static void test_registration_lists(void)
 {
     fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
@@ -3398,18 +3538,158 @@ static void test_registration_lists(void)
         snprintf(bound, sizeof(bound), "\"%s\"", beta->name); assert(strstr(body, bound));
     }
     sh_package_library_free(&library); sh_package_sources_free(sources);
-    /* gamma claims alpha's key for its own definition. */
-    registration_package("gamma", "524288");
-    sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
-    ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals,
-        registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
-    if (ok || unserved >= sources->package_count) fprintf(stderr, "registration collision: ok=%d %s\n", ok, error);
-    assert(!ok && invalid == SIZE_MAX && unserved < sources->package_count &&
-        !strcmp(sources->packages[unserved].name, "gamma"));
-    assert(sh_package_sources_remove(sources, unserved));
-    assert(sh_package_library_compile(sources, &env, NULL, registration_original, &originals,
-        registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error)) && unserved == SIZE_MAX);
-    sh_package_library_free(&library); sh_package_sources_free(sources); cleanup(); assert(!failures);
+    /* gamma claims alpha's key for its own definition, and delta registers
+     * beta's key for an exactly equal definition. Both distinct AI stay
+     * registered: the package first in stable source order keeps 524288, the
+     * other moves to the lowest free unnamed bit (bit 20) at its conductor row
+     * and spawner alike; delta shares beta's key. Reversing discovery order
+     * (renamed folders, same trees) keeps the same choice. */
+    registration_package("gamma", "524288"); registration_package("delta", "16777216");
+    {
+        /* delta's row names beta's boss, of which it ships an exact copy. */
+        create("overrides/delta/assets/generated/decls/entitydef/beta_boss.decl",
+            "{ class = \"Entity\"; edit = { target = \"modifier-child\"; } }");
+        create("overrides/delta/assets/generated/decls/entitydef/conductor.decl",
+            "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } "
+            "item[1] = { aiType = \"16777216\"; entityDef = \"beta_boss\"; } } "
+            "globalAIMods = { num = 1; item[0] = { aiType = \"16777216\"; healthMod = \"beta\"; } } } }");
+    }
+    char moved[32] = "";
+    for (int round = 0; round < 2; round++) {
+        if (round) {
+            char from[MAX_PATH], to[MAX_PATH];
+            snprintf(from, sizeof(from), "%s\\overrides\\alpha", root); snprintf(to, sizeof(to), "%s\\overrides\\zz-alpha", root);
+            assert(MoveFileA(from, to));
+            snprintf(from, sizeof(from), "%s\\overrides\\gamma", root); snprintf(to, sizeof(to), "%s\\overrides\\aa-gamma", root);
+            assert(MoveFileA(from, to));
+        }
+        sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+        ok = sh_package_library_compile(sources, &env, NULL, registration_original, &originals,
+            registry, (uintptr_t)f->reflection, NULL, &library, error, sizeof(error));
+        if (!ok) fprintf(stderr, "registration collision %d: %s\n", round, error);
+        assert(ok && unserved == SIZE_MAX && invalid == SIZE_MAX);
+        const sh_compiled_resource *conductor = named_resource(library.compiled, "entitydef", "conductor");
+        char alpha[32], gamma[32];
+        assert(conductor && spawner_key(library.compiled, "alpha") && spawner_key(library.compiled, "gamma"));
+        snprintf(alpha, sizeof(alpha), "%s", spawner_key(library.compiled, "alpha"));
+        snprintf(gamma, sizeof(gamma), "%s", spawner_key(library.compiled, "gamma"));
+        assert(!strcmp(spawner_key(library.compiled, "beta"), "16777216") &&
+            !strcmp(spawner_key(library.compiled, "delta"), "16777216"));
+        const char *mover = !strcmp(alpha, "1048576") ? "alpha" : "gamma", *keeper = strcmp(mover, "alpha") ? "alpha" : "gamma";
+        if (strcmp(spawner_key(library.compiled, mover), "1048576") || strcmp(spawner_key(library.compiled, keeper), "524288"))
+            fprintf(stderr, "registration collision %d: alpha=%s gamma=%s\n", round, alpha, gamma);
+        assert(!strcmp(spawner_key(library.compiled, mover), "1048576") && !strcmp(spawner_key(library.compiled, keeper), "524288"));
+        const char *row = conductor_row(conductor, "1048576");
+        assert(row && !strcmp(row, package_boss(library.compiled, mover)));
+        row = conductor_row(conductor, "524288");
+        assert(row && !strcmp(row, package_boss(library.compiled, keeper)));
+        row = conductor_row(conductor, "16777216");
+        const char *beta_boss = package_boss(library.compiled, "beta"), *delta_boss = package_boss(library.compiled, "delta");
+        assert(row && ((beta_boss && !strcmp(row, beta_boss)) || (delta_boss && !strcmp(row, delta_boss))));
+        /* Each package's AI modifiers follow its (possibly moved) key; the
+         * exactly equal registration's equal modifier row appears once. */
+        const char *mod = conductor_list_row(conductor, "globalAIMods", "1048576", "healthMod");
+        assert(mod && !strcmp(mod, mover));
+        mod = conductor_list_row(conductor, "globalAIMods", "524288", "healthMod");
+        assert(mod && !strcmp(mod, keeper));
+        mod = conductor_list_row(conductor, "globalAIMods", "16777216", "healthMod");
+        assert(mod && !strcmp(mod, "beta"));
+        /* The moved package's author-facing choice follows its AI. */
+        assert(inspector_key(library.compiled, mover) && !strcmp(inspector_key(library.compiled, mover), "1048576"));
+        assert(inspector_key(library.compiled, keeper) && !strcmp(inspector_key(library.compiled, keeper), "524288"));
+        /* Every package key is bound for maps: the moved one to its new bit,
+         * the kept one to itself, the shared one in both equal sources. */
+        assert(key_binding(&library.bindings, "524288", "1048576") == 1 &&
+            key_binding(&library.bindings, "524288", "524288") == 1 &&
+            key_binding(&library.bindings, "16777216", "16777216") == 2);
+        if (!round) snprintf(moved, sizeof(moved), "%s", mover);
+        else assert(!strcmp(moved, mover));
+        sh_package_library_free(&library); sh_package_sources_free(sources);
+    }
+    {
+        char from[MAX_PATH], to[MAX_PATH];
+        snprintf(from, sizeof(from), "%s\\overrides\\zz-alpha", root); snprintf(to, sizeof(to), "%s\\overrides\\alpha", root);
+        assert(MoveFileA(from, to));
+        snprintf(from, sizeof(from), "%s\\overrides\\aa-gamma", root); snprintf(to, sizeof(to), "%s\\overrides\\gamma", root);
+        assert(MoveFileA(from, to));
+    }
+    cleanup(); assert(!failures);
+    while (f->count) free(f->regions[--f->count].address);
+}
+
+static int key_rewrite(void *context, const char *slot, const char *value, size_t length, const char **replacement)
+{
+    static char owned[256];
+    const unsigned char *to = context;
+    size_t out_length = 0; int failed = 0;
+    char *moved = sh_package_key_relocate(value, length, to, &out_length, &failed);
+    (void)slot;
+    if (failed) return -1;
+    if (!moved) return 0;
+    assert(out_length < sizeof(owned)); memcpy(owned, moved, out_length + 1); free(moved);
+    *replacement = owned; return 1;
+}
+/* Spawn-type values are flag lists of constant names and decimal numbers; a
+ * bit no single-bit constant names is a package's key. Relocation rewrites
+ * only decimal tokens, keeps names and spacing, and reaches every reflected
+ * spawn-type site of a declaration (both registration lists here). */
+static void test_registration_keys(void)
+{
+    fixture storage; fixture *f = &storage; setup(f); conductor_reflection(f);
+    sh_decl_registry_source registry = {f, read_memory, (uintptr_t)f->registry, NULL};
+    char error[1024];
+    sh_decl_native_schema *schema = sh_decl_native_schema_open(
+        (sh_decl_native_source){f, read_memory, (uintptr_t)f->reflection}, (sh_decl_dependency_observer){0},
+        error, sizeof(error));
+    sh_package_key_space space;
+    uint32_t bits = 0;
+    unsigned char to[SH_PACKAGE_KEY_BITS];
+    assert(schema && sh_package_key_space_read(schema, &space) == 1);
+    assert(space.named == (0x7ffffu | (1u << 30)) && space.pool == 0x3ff80000u);
+    assert(sh_package_key_custom_bits(&space, "IMP 524288", 10, &bits) && bits == 524288u);
+    assert(sh_package_key_custom_bits(&space, "1572868", 7, &bits) && bits == (524288u | 1048576u));
+    assert(sh_package_key_custom_bits(&space, "ALL ANY", 7, &bits) && !bits);
+    assert(!sh_package_key_custom_bits(&space, "12a", 3, &bits));
+    sh_decl_native_schema_close(schema);
+    memset(to, 0xff, sizeof(to)); to[19] = 25;
+    {
+        size_t length = 0; int failed = 1;
+        char *moved = sh_package_key_relocate("IMP  524288", 11, to, &length, &failed);
+        assert(!failed && moved && !strcmp(moved, "IMP  33554432") && length == 13); free(moved);
+        moved = sh_package_key_relocate("1572868", 7, to, &length, &failed);
+        assert(!failed && moved && !strcmp(moved, "34603012")); free(moved);
+        assert(!sh_package_key_relocate("IMP 1048576", 11, to, &length, &failed) && !failed);
+        const char *inspector = "{ edit = { enumType = \"spawnAIType_t\"; values = { num = 2; "
+            "item[0] = { enumValue = \"IMP\"; label = \"a\"; } item[1] = { enumValue = \"IMP 524288\"; label = \"b\"; } } } }";
+        moved = sh_package_key_relocate_inspector(inspector, strlen(inspector), to, &length, &failed);
+        assert(!failed && moved && strstr(moved, "\"IMP 33554432\"") && strstr(moved, "\"IMP\"") && !strstr(moved, "524288"));
+        free(moved);
+        const char *other = "{ edit = { enumType = \"teamFilter_t\"; values = { num = 1; "
+            "item[0] = { enumValue = \"524288\"; label = \"a\"; } } } }";
+        assert(!sh_package_key_relocate_inspector(other, strlen(other), to, &length, &failed) && !failed);
+    }
+    sh_compiled_resource file = link_decl("conductor", "generated/decls/entitydef/conductor.decl",
+        "{ class = \"Entity\"; edit = { aiTypeList = { num = 2; item[0] = { aiType = \"IMP\"; entityDef = \"imp\"; } "
+        "item[1] = { aiType = \"IMP 524288\"; entityDef = \"boss\"; } } } }");
+    sh_package_compilation compiled = {0}; compiled.resources = &file; compiled.resource_count = 1;
+    sh_package_source_reader *reader = sh_package_source_reader_open(&compiled, NULL, registration_original, f,
+        registry, (uintptr_t)f->reflection, error, sizeof(error));
+    assert(reader);
+    size_t length = 0; sh_package_source_binding result = {0};
+    unsigned char *out = NULL;
+    sh_package_key_space read_space;
+    assert(sh_package_source_key_space(reader, &read_space) == 1 && read_space.named == space.named);
+    int bound = sh_package_source_bind_keys(reader, "entitydef", "conductor", file.body, file.body_length,
+        key_rewrite, to, &out, &length, &result, error, sizeof(error));
+    if (bound != 1) fprintf(stderr, "registration key sites: %s\n", error);
+    assert(bound == 1 && out && result.references == 2 && result.changed == 1);
+    assert(strstr((char *)out, "aiType = \"IMP\";") && strstr((char *)out, "aiType = \"IMP 33554432\";") &&
+        !strstr((char *)out, "524288") && strstr((char *)out, "entityDef = \"boss\";"));
+    free(out); out = NULL;
+    /* A family with no reflected state reader has no key site. */
+    assert(sh_package_source_bind_keys(reader, "image", "conductor", file.body, file.body_length,
+        key_rewrite, to, &out, &length, &result, error, sizeof(error)) == 0 && !out && !*error);
+    sh_package_source_reader_close(reader);
     while (f->count) free(f->regions[--f->count].address);
 }
 
@@ -4291,6 +4571,7 @@ int main(void)
     test_movie_source_link();
     test_preview_model();
     test_registration_lists();
+    test_registration_keys();
     test_contribution_movie_token();
     test_open_effect_body();
     test_map_occurrences(&f, registry);

@@ -197,6 +197,22 @@ unsigned char *sh_package_source_bind_strings(sh_package_source_reader *reader,
     sh_package_string_site_resolver resolver, void *context,
     size_t *output_length, sh_package_source_binding *result, char *error, size_t capacity);
 
+/* Registration-key sites (package_keys.h): every reflected spawn-type value
+ * of one declaration, walked like localized string sites. The resolver sees
+ * the whole flag list and returns 1 with a replacement, 0 to keep it, or -1.
+ * Returns 1 with a malloc-owned copy (result->changed counts rewritten sites),
+ * 0 for a family with no reflected state reader, -1 on failure; source bytes
+ * are never modified. */
+typedef int (*sh_package_key_site_resolver)(void *context, const char *slot,
+    const char *value, size_t length, const char **replacement);
+int sh_package_source_bind_keys(sh_package_source_reader *reader,
+    const char *family, const char *name, const unsigned char *body, size_t length,
+    sh_package_key_site_resolver resolver, void *context, unsigned char **output,
+    size_t *output_length, sh_package_source_binding *result, char *error, size_t capacity);
+/* The key enum as this reader's reflection registers it (package_keys.h). */
+struct sh_package_key_space;
+int sh_package_source_key_space(sh_package_source_reader *reader, struct sh_package_key_space *space);
+
 /* Rebind typed map roots and inline entity state through the same native field
  * readers. The resolver maps saved identities to this candidate's names and
  * must be deterministic; source lookup also uses it to infer inherited classes.

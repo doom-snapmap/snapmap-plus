@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "package_map_uses.h"
+#include "package_keys.h"
 #include "map_embed.h"
 #include "package_runtime.h"
 #include "resource_graph_prepared.h"
@@ -68,7 +69,7 @@ static void setup(fixture *f)
     void *managers = allocation(f, 8), *manager = allocation(f, 0x90);
     void *container = allocation(f, 0x30), *records = allocation(f, 4 * 0x38);
     void *objects = allocation(f, 4 * 16), *pointers = allocation(f, 4 * 16);
-    void *fields = allocation(f, 3 * 0x48);
+    void *fields = allocation(f, 4 * 0x48);
     f->registry = allocation(f, 0x18); f->reflection = allocation(f, 0xb0);
     pointer(f->registry, 8, managers); number(f->registry, 0x10, 1); pointer(managers, 0, manager);
     pointer(manager, 8, string(f, "entityDef")); pointer(manager, 0x10, string(f, classes[0]));
@@ -84,6 +85,14 @@ static void setup(fixture *f)
     pointer(fields, 0x10, string(f, "target")); number(fields, 0x1c, 8);
     pointer(fields, 0x48, string(f, classes[2])); pointer(fields, 0x48 + 8, string(f, ""));
     pointer(fields, 0x48 + 0x10, string(f, "text")); number(fields, 0x48 + 0x1c, 8);
+    /* A spawn-type field and its enum: IMP (bit 2) and the all-bits composite. */
+    pointer(fields, 0x90, string(f, SH_PACKAGE_KEY_TYPE)); pointer(fields, 0x90 + 8, string(f, ""));
+    pointer(fields, 0x90 + 0x10, string(f, "spawnType")); number(fields, 0x90 + 0x1c, 8);
+    void *enums = allocation(f, 2 * 0x18), *readers = allocation(f, 2 * 16), *members = allocation(f, 3 * 0x10);
+    pointer(enums, 0, string(f, SH_PACKAGE_KEY_TYPE)); pointer(enums, 0x10, members);
+    pointer(members, 0, string(f, "IMP")); number(members, 8, 4);
+    pointer(members, 0x10, string(f, "ALL")); number(members, 0x18, -1);
+    pointer(container, 0x10, enums); pointer(f->reflection, 0x58, readers); number(f->reflection, 0x60, 2);
 }
 static int baseline(void *context, const char *path, unsigned char **body, size_t *length)
 {
@@ -381,6 +390,73 @@ static void run(sh_package_source_reader *reader, sh_package_compilation *compil
     sh_mpkg_used_free(deliveries); sh_package_provenance_free(&out);
     sh_package_references_free(&references); sh_package_references_free(&resources);
 }
+/* A map-authored spawn-type bit keeps the package it was chosen from: it is
+ * bound per bit at "<site>#<bit>" and rewritten through the bit that package
+ * holds in the current library, back and forth across differently keyed
+ * libraries. Keys are not resource references; a bit no current package
+ * registers binds nothing and stays as authored. */
+static void run_keys(sh_package_source_reader *reader, sh_package_compilation *compiled,
+    sh_package_bundle_binding rows[3])
+{
+    sh_package_provenance catalog = {0}, alone = {0}, saved = {0}, out = {0}, reopened = {0};
+    sh_package_references references = {0};
+    sh_package_source_binding inspection; size_t contexts[2], saved_context, alone_context, length;
+    sh_mpkg_use_requirements requirements = {compiled, NULL};
+    char error[1024], site[160];
+    static const char key_site[] = "/k:entityDef/k:state/k:edit/k:spawnType";
+    static const char authored[] = "{\"entities\":[{\"uniqueId\":42,\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
+        "\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"spawnType\":\"IMP 524288\"}}}}]}";
+    static const char moved[] = "{\"entities\":[{\"uniqueId\":42,\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
+        "\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"spawnType\":\"IMP 1048576\"}}}}]}";
+    /* This library moved rows[1]'s authored key 524288 to 1048576 and rows[0]
+     * kept 524288; rows[1] alone keeps it. */
+    for (size_t i = 0; i < 2; i++) contexts[i] = isolated(&catalog, rows + i);
+    assert(sh_package_provenance_bind(&catalog, SH_PACKAGE_KEY_FAMILY, "524288", "524288", contexts, 1));
+    assert(sh_package_provenance_bind(&catalog, SH_PACKAGE_KEY_FAMILY, "524288", "1048576", contexts + 1, 1));
+    alone_context = isolated(&alone, rows + 1);
+    assert(sh_package_provenance_bind(&alone, SH_PACKAGE_KEY_FAMILY, "524288", "524288", &alone_context, 1));
+    /* Saved where rows[1] alone held its key. */
+    saved_context = isolated(&saved, rows + 1);
+    assert(sh_package_provenance_bind(&saved, SH_PACKAGE_KEY_FAMILY, "524288", "524288", &saved_context, 1));
+    snprintf(site, sizeof(site), "%s#524288", key_site);
+    use(&saved, "entity/0", site, 0, saved_context);
+    char *text = sh_package_map_uses_select(reader, authored, sizeof(authored) - 1, &saved, &catalog, rows, 3,
+        sh_mpkg_new_use_required, &requirements, &length, &out, &references, &inspection, error, sizeof(error));
+    if (!text) fprintf(stderr, "map key selection: %s\n", error);
+    assert(text && !strcmp(text, moved) && inspection.changed == 1);
+    /* The occurrence is recorded under the bit it now holds; the only
+     * resource reference is the vanilla parent. */
+    assert(out.use_count == 1 && !strcmp(out.bindings[out.uses[0].binding].name, "1048576"));
+    assert(references.count == 1 && !strcmp(references.items[0].type, "entitydef"));
+    snprintf(site, sizeof(site), "%s#1048576", key_site);
+    assert(!memcmp(site_context(&out, "entity/0", site)->trees[0], sh_package_bundle_fingerprint(rows[1].original), 32));
+    free(text);
+    /* A new value binds the package now holding the bit, at the bit it has. */
+    text = sh_package_map_uses_select(reader, moved, sizeof(moved) - 1, NULL, &catalog, rows, 3,
+        sh_mpkg_new_use_required, &requirements, &length, &reopened, &references, &inspection, error, sizeof(error));
+    snprintf(site, sizeof(site), "%s#1048576", key_site);
+    assert(text && !strcmp(text, moved) && !inspection.changed && reopened.use_count == 1);
+    assert(!memcmp(site_context(&reopened, "entity/0", site)->trees[0], sh_package_bundle_fingerprint(rows[1].original), 32));
+    free(text);
+    /* That record reopened where rows[1] keeps its authored key. */
+    text = sh_package_map_uses_select(reader, moved, sizeof(moved) - 1, &reopened, &alone, rows, 3,
+        sh_mpkg_new_use_required, &requirements, &length, &out, &references, &inspection, error, sizeof(error));
+    assert(text && !strcmp(text, authored) && out.use_count == 1); free(text);
+    /* rows[0]'s kept key rebinds to itself; an unregistered bit stays. */
+    static const char dangling[] = "{\"entities\":[{\"uniqueId\":42,\"entityDef\":{\"targetType\":\"idDeclEntityDef\","
+        "\"inherit\":\"vanilla\",\"state\":{\"edit\":{\"spawnType\":\"2097152\"}}}}]}";
+    text = sh_package_map_uses_select(reader, dangling, sizeof(dangling) - 1, NULL, &catalog, rows, 3,
+        sh_mpkg_new_use_required, &requirements, &length, &out, &references, &inspection, error, sizeof(error));
+    assert(text && !strcmp(text, dangling) && !out.use_count); free(text);
+    text = sh_package_map_uses_select(reader, authored, sizeof(authored) - 1, NULL, &catalog, rows, 3,
+        sh_mpkg_new_use_required, &requirements, &length, &out, &references, &inspection, error, sizeof(error));
+    snprintf(site, sizeof(site), "%s#524288", key_site);
+    assert(text && !strcmp(text, authored) && out.use_count == 1 &&
+        !memcmp(site_context(&out, "entity/0", site)->trees[0], sh_package_bundle_fingerprint(rows[0].original), 32));
+    free(text);
+    sh_package_provenance_free(&catalog); sh_package_provenance_free(&alone); sh_package_provenance_free(&saved);
+    sh_package_provenance_free(&out); sh_package_provenance_free(&reopened); sh_package_references_free(&references);
+}
 int main(void)
 {
     fixture f = {0}; sh_package_sources sources = {0}; sh_package_compilation compiled = {0};
@@ -407,6 +483,7 @@ int main(void)
         registry, (uintptr_t)f.reflection, error, sizeof(error));
     if (!reader) fprintf(stderr, "reader: %s\n", error);
     assert(reader);
+    run_keys(reader, &compiled, rows);
     run(reader, &compiled, rows, archives, lengths);
     sh_package_source_reader_close(reader);
     while (f.count) free(f.regions[--f.count].address);

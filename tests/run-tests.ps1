@@ -234,7 +234,7 @@ $compiledConsumers = @("package_runtime_context_test", "weapon_hud_test", "packa
 $compiledConsumers += @("audio_originals_test", "package_native_preparation_runtime_test")
 $tests += @{ name = "package_native_preparation_runtime_test"; src = 'package_native_preparation_runtime_test.c'; defs = '/DSH_PACKAGE_RUNTIME_NATIVE_TESTING'; arg = "" }
 $compilerSources = @("grid_room_asset.c", "grid_room_nav.c", "aas_edit.c", "grid_room.c", "grid_room_resources.c", "grid_room_decl.c", "package_runtime.c", "resource_graph.c", "package_usage.c", "package_source_graph.c", "decl_native_registry.c", "decl_dependencies.c", "decl_json_dependencies.c", "decl_graph.c", "decl_graph_compose.c", "decl_md6_compose.c", "decl_block_compose.c", "decl_native_lex.c", "md6_binary.c", "model_binary.c", "decl_graph_dependencies.c", "package_compiler.c", "decl_entity_class.c", "decl_native_schema.c", "decl_script_schema.c", "package_sources.c", "packages.c", "package_descriptor.c", "config_json.c", "decl_compose.c", "decl_tree.c", "decl_polymorphic.c", "decl_server_path.c", "decl_text.c", "resource_catalog.c", "raw_deflate.c")
-$compilerSources += @("decl_native_lex.c", "decl_material.c", "decl_material_compose.c", "package_material.c")
+$compilerSources += @("decl_native_lex.c", "decl_material.c", "decl_material_compose.c", "package_material.c", "package_keys.c")
 $compilerSources += @("audio_banks.c", "audio_packages.c", "audio_originals.c", "package_audio.c", "package_sound.c")
 $compilerSources += @("virtual_material_runtime.c", "virtual_material_native.c", "virtual_material.c", "package_virtual_material.c")
 $compilerSources += @("package_link_inputs.c", "package_library.c", "package_source_link.c", "package_linker.c", "package_link_graph.c", "package_link_identity.c", "package_provenance.c", "package_scope.c", "package_native_names.c")
@@ -300,7 +300,7 @@ $tests += @{ name = "prefab_test"; src = $prefabSources; arg = "" }
 foreach ($t in $tests) {
     if ('..\src\backend\package_library.c' -in ($t.src -split ' ') -or $t.name -in $compiledConsumers -or
         $t.name -in @('package_source_graph_test', 'package_shader_link_test')) { $t.src += ' ..\src\backend\package_consumers.c' }
-    if ('..\src\backend\package_source_graph.c' -in ($t.src -split ' ')) { $t.src += ' ..\src\backend\map_binding_sites.c ..\src\backend\package_shader.c' }
+    if ('..\src\backend\package_source_graph.c' -in ($t.src -split ' ')) { $t.src += ' ..\src\backend\map_binding_sites.c ..\src\backend\package_shader.c ..\src\backend\package_keys.c' }
     if ($t.name -in @("map_package_test", "package_archive_test", "package_scale_test")) { $t.src += ' ..\src\backend\package_bundle.c' }
     if ($t.name -eq "package_scale_test") { $t.src += ' ..\src\backend\package_provenance.c ..\src\backend\package_scope.c ..\src\backend\package_link_inputs.c' }
     if ($t.name -in @("package_linker_test", "package_source_graph_test", "package_shader_link_test")) { $t.src += ' ..\src\backend\package_link_inputs.c' }

@@ -1,4 +1,5 @@
 #include "package_source_graph.h"
+#include "package_keys.h"
 #include "package_link_inputs.h"
 #include "decl_entity_class.h"
 #include "decl_graph_dependencies.h"
@@ -1870,6 +1871,130 @@ done:
     return out;
 }
 
+/* Registration-key sites: the same projection as localized strings, for the
+ * reflected spawn-type enum instead of idStrId. */
+typedef struct sg_key_binding {
+    sg_binding envelope;
+    const sh_decl_dependency_schema *native;
+    sh_package_key_site_resolver resolver;
+    void *context;
+} sg_key_binding;
+static int sg_key_type(sh_decl_value_type type)
+{ return type.name && !strcmp(type.name, SH_PACKAGE_KEY_TYPE) && (!type.ops || !*type.ops); }
+static int sg_key_describe(void *context, sh_decl_value_type type, sh_decl_value_shape *shape)
+{
+    sg_key_binding *binding = context;
+    if (!binding->native->describe(binding->native->context, type, shape)) return 0;
+    if (sg_key_type(type)) {
+        if (shape->kind != SH_DECL_VALUE_IGNORE) return 0;
+        shape->kind = SH_DECL_VALUE_REFERENCE;
+    } else if (shape->kind == SH_DECL_VALUE_REFERENCE) shape->kind = SH_DECL_VALUE_IGNORE;
+    return 1;
+}
+static int sg_key_field(void *context, sh_decl_value_type type, const char *key, sh_decl_value_type *out)
+{
+    sg_key_binding *binding = context;
+    return binding->native->field(binding->native->context, type, key, out);
+}
+static int sg_key_dynamic(void *context, sh_decl_value_type base, const char *name,
+    size_t length, sh_decl_value_type *selected)
+{
+    sg_key_binding *binding = context;
+    return binding->native->dynamic_type &&
+        binding->native->dynamic_type(binding->native->context, base, name, length, selected);
+}
+static void sg_key_gap(void *context, const char *path, sh_decl_value_type type, const char *reason)
+{
+    sg_key_binding *binding = context;
+    if (binding->native->gap) binding->native->gap(binding->native->context, path, type, reason);
+}
+static int sg_key_site(void *context, const char *slot, sh_decl_value_type type,
+    const char *value, size_t length, const char **replacement)
+{
+    sg_key_binding *binding = context;
+    int status;
+    if (!sg_key_type(type)) return 0;
+    if (binding->envelope.references == SIZE_MAX) return -1;
+    binding->envelope.references++;
+    status = binding->resolver(binding->context, slot, value, length, replacement);
+    if (status < 0) sg_gap(binding->envelope.reader, slot, type.name, "registration key site could not be resolved");
+    return status;
+}
+
+int sh_package_source_key_space(sh_package_source_reader *reader, sh_package_key_space *space)
+{ return reader ? sh_package_key_space_read(reader->schema, space) : -1; }
+
+int sh_package_source_bind_keys(sh_package_source_reader *reader,
+    const char *family, const char *name, const unsigned char *body, size_t length,
+    sh_package_key_site_resolver resolver, void *context, unsigned char **output,
+    size_t *output_length, sh_package_source_binding *result, char *error, size_t capacity)
+{
+    int status = -1;
+    sh_decl_source source = {(const char *)body, length};
+    sh_decl_node *tree = NULL;
+    sh_decl_graph *graph = NULL;
+    sh_decl_rebind_result rebound = {0};
+    sh_decl_entity_class_source classes = {reader, sg_read_parent, sg_derives};
+    sg_key_binding binding = {0};
+    sh_decl_dependency_schema keyed = {&binding, sg_key_describe, sg_key_field,
+        NULL, sg_key_gap, sg_key_dynamic, NULL};
+    unsigned char *out = NULL;
+    char *class_name = NULL, fallback[1024];
+    size_t out_length = 0;
+    if (!error || !capacity) { error = fallback; capacity = sizeof(fallback); }
+    error[0] = 0;
+    if (output) *output = NULL;
+    if (output_length) *output_length = 0;
+    if (result) memset(result, 0, sizeof(*result));
+    if (!reader || !family || !name || !body || !resolver || !output || length == SIZE_MAX) goto done;
+    reader->failed = 0; memset(&reader->report, 0, sizeof(reader->report));
+    reader->error = error; reader->capacity = capacity;
+    reader->current_type = family; reader->current_name = name;
+    sg_lists_free(reader);
+    binding.envelope.reader = reader; binding.envelope.family = family;
+    binding.native = sh_decl_native_schema_view(reader->schema);
+    binding.resolver = resolver; binding.context = context;
+    if (!strcmp(family, "entitydef")) {
+        tree = sh_decl_tree_parse_ordered(source, error, capacity);
+        if (!tree || !(class_name = sh_decl_entity_tree_class(tree, &classes, error, capacity))) goto done;
+        binding.envelope.state = (sh_decl_value_type){class_name, ""};
+    } else {
+        int is_graph, reflected = sh_decl_native_schema_decl_type(reader->schema, family, &binding.envelope.state);
+        /* A family with no reflected state reader has no typed key site. */
+        if (!reflected) { status = 0; goto done; }
+        if (reflected != 1 ||
+            sh_decl_native_registry_type_class(reader->registry, family, &binding.envelope.native_class) != 1 ||
+            (is_graph = sh_decl_native_schema_graph_type(reader->schema, binding.envelope.state)) < 0) {
+            snprintf(error, capacity, "%s registration keys require its registered reflected reader", family); goto done;
+        }
+        if (is_graph) {
+            graph = sh_decl_graph_open(source, error, capacity);
+            if (!graph) goto done;
+        } else {
+            tree = sg_open_body(family) ? sh_decl_tree_parse_reflected_body(source, 1, error, capacity) :
+                sh_decl_tree_parse_ordered(source, error, capacity);
+            if (!tree) goto done;
+        }
+    }
+    binding.envelope.tree = tree; binding.envelope.graph = graph;
+    out = (unsigned char *)sh_decl_rebind_parsed(source, graph ? sh_decl_graph_syntax(graph) : tree,
+        &keyed, sg_bind_envelope, &binding.envelope, sg_key_site, &binding, &out_length, &rebound);
+done:
+    if (reader && reader->failed) { free(out); out = NULL; }
+    if (out) status = 1;
+    else if (status && !error[0]) snprintf(error, capacity, "%s registration key sites could not be completed%s%s",
+        family ? family : "resource", reader && reader->report.first_gap[0] ? ": " : "",
+        reader ? reader->report.first_gap : "");
+    if (result) {
+        result->references = binding.envelope.references; result->changed = out ? rebound.changed : 0;
+        if (reader) result->inspection = reader->report;
+    }
+    if (out) { *output = out; if (output_length) *output_length = out_length; }
+    free(class_name); sh_decl_tree_free(tree); sh_decl_graph_close(graph);
+    if (reader) { reader->error = NULL; reader->capacity = 0; }
+    return status;
+}
+
 unsigned char *sh_package_source_bind_derived(sh_package_source_reader *reader,
     const char *family, const char *name, const unsigned char *body, size_t length,
     sh_package_binding_resolver resolver, void *context,
@@ -1901,6 +2026,12 @@ typedef struct sg_map_binding {
     size_t span_count, span_capacity, located;
     sh_package_provenance_site inherit_site, reference_site;
     int collecting;
+    /* Registration-key sites (package_keys.h) project through this view. */
+    const sh_decl_dependency_schema *native;
+    sh_decl_dependency_schema keyed;
+    sh_package_key_space key_space;
+    int key_state; /* 0 unread, 1 read, -1 no key enum */
+    char *key_replacement;
 } sg_map_binding;
 
 static int sg_map_span_order(const void *left, const void *right)
@@ -1972,6 +2103,73 @@ static int sg_map_observe(void *context, const char *slot, const char *family,
         return map->observed(map->context, &map->reference_site, family, name, replacement);
     return sg_map_resolve(context, slot, family, name, replacement);
 }
+static int sg_map_key_describe(void *context, sh_decl_value_type type, sh_decl_value_shape *shape)
+{
+    sg_map_binding *map = context;
+    if (!map->native->describe(map->native->context, type, shape)) return 0;
+    if (sg_key_type(type) && shape->kind == SH_DECL_VALUE_IGNORE) shape->kind = SH_DECL_VALUE_REFERENCE;
+    return 1;
+}
+static int sg_map_key_field(void *context, sh_decl_value_type type, const char *key, sh_decl_value_type *out)
+{
+    sg_map_binding *map = context;
+    return map->native->field(map->native->context, type, key, out);
+}
+static int sg_map_key_dynamic(void *context, sh_decl_value_type base, const char *name,
+    size_t length, sh_decl_value_type *selected)
+{
+    sg_map_binding *map = context;
+    return map->native->dynamic_type && map->native->dynamic_type(map->native->context, base, name, length, selected);
+}
+static void sg_map_key_gap(void *context, const char *path, sh_decl_value_type type, const char *reason)
+{
+    sg_map_binding *map = context;
+    if (map->native->gap) map->native->gap(map->native->context, path, type, reason);
+}
+/* A map-authored spawn-type value: every unnamed bit is a package key, bound
+ * like a typed reference of its own at "<site>#<bit>" so each keeps the
+ * package it was chosen from; the value is rewritten through the current bits. */
+static int sg_map_key_site(sg_map_binding *map, const char *slot, const sh_package_provenance_site *location,
+    const char *value, size_t length, const char **replacement)
+{
+    unsigned char to[SH_PACKAGE_KEY_BITS];
+    uint32_t bits = 0;
+    int moved = 0;
+    if (!map->key_state) map->key_state = sh_package_key_space_read(map->binding.reader->schema, &map->key_space) == 1 ? 1 : -1;
+    if (map->key_state < 0 || !sh_package_key_custom_bits(&map->key_space, value, length, &bits) || !bits) return 0;
+    memset(to, 0xff, sizeof(to));
+    for (unsigned bit = 0; bit < SH_PACKAGE_KEY_BITS; bit++) {
+        char decimal[16], *reference;
+        const char *target = NULL;
+        size_t reference_length;
+        int status;
+        if (!(bits >> bit & 1u)) continue;
+        snprintf(decimal, sizeof(decimal), "%u", 1u << bit);
+        reference_length = strlen(location->reference) + strlen(decimal) + 2;
+        if (!(reference = malloc(reference_length))) return -1;
+        snprintf(reference, reference_length, "%s#%s", location->reference, decimal);
+        sh_package_provenance_site site = {location->kind, location->owner, reference};
+        if (map->legacy) status = map->legacy(map->context, slot, SH_PACKAGE_KEY_FAMILY, decimal, &target);
+        else if (map->observed) status = map->observed(map->context, &site, SH_PACKAGE_KEY_FAMILY, decimal, &target);
+        else status = map->occurrence(map->context, &site, SH_PACKAGE_KEY_FAMILY, decimal, &target);
+        free(reference);
+        if (status < 0) return -1;
+        if (status == 1 && target) {
+            char *end = NULL;
+            unsigned long number = strtoul(target, &end, 10);
+            unsigned slot_bit;
+            if (!end || *end || !number || number > 0xffffffffu || (number & (number - 1))) return -1;
+            for (slot_bit = 0; !((uint32_t)number >> slot_bit & 1u); slot_bit++) {}
+            if (slot_bit != bit) { to[bit] = (unsigned char)slot_bit; moved = 1; }
+        }
+    }
+    if (!moved) return 0;
+    size_t out_length = 0; int failed = 0;
+    char *out = sh_package_key_relocate(value, length, to, &out_length, &failed);
+    if (failed) return -1;
+    if (!out) return 0;
+    free(map->key_replacement); map->key_replacement = out; *replacement = out; return 1;
+}
 static int sg_map_typed_site(void *context, const char *slot, sh_decl_value_type type,
     const char *name, size_t length, const sh_decl_reference_site *site, const char **replacement)
 {
@@ -1980,6 +2178,11 @@ static int sg_map_typed_site(void *context, const char *slot, sh_decl_value_type
         sg_map_span_add(map, site->json, site->json_length) ? 0 : -1;
     const sh_package_provenance_site *location = site ? sg_map_span_find(map, site->json, site->json_length) : NULL;
     if (!location) return -1;
+    if (sg_key_type(type)) {
+        int status = sg_map_key_site(map, slot, location, name, length, replacement);
+        if (status < 0) sg_gap(map->binding.reader, slot, type.name, "map registration key could not be bound");
+        return status;
+    }
     map->reference_site = *location;
     int ok = sg_bind_typed(&map->binding, slot, type, name, length, replacement);
     memset(&map->reference_site, 0, sizeof(map->reference_site)); return ok;
@@ -2069,19 +2272,22 @@ static char *sg_bind_map(sh_package_source_reader *reader,
     map.binding.reader = reader; map.binding.resolver = sg_map_observe; map.binding.context = &map;
     map.legacy = legacy; map.occurrence = occurrence; map.observed = observed; map.context = context;
     map.json = json; map.length = length;
+    map.native = sh_decl_native_schema_view(reader->schema);
+    map.keyed = (sh_decl_dependency_schema){&map, sg_map_key_describe, sg_map_key_field,
+        map.native->reference, sg_map_key_gap, sg_map_key_dynamic, map.native->reference_site};
     if (!sh_package_map_reference_sites(json, length, sg_map_collect_root, &map) ||
         !sh_package_map_state_sites(json, length, sg_map_collect_state, &map) || !sg_map_locate(&map)) goto done;
     /* Reflection determines which value spans are resources. Locate that exact
      * set before binding, so equal names in two objects never share ownership.
      * The collect pass does not use existence checks to choose native objects. */
     map.collecting = 1;
-    out = sh_decl_rebind_json_walk_sites((sh_decl_source){json, length}, sh_decl_native_schema_view(reader->schema),
+    out = sh_decl_rebind_json_walk_sites((sh_decl_source){json, length}, &map.keyed,
         sg_map_walk, &map, sg_map_typed_site, &map, &out_length, &rebound);
     if (!out) goto done;
     free(out); out = NULL; map.collecting = 0;
     memset(&map.inherit_site, 0, sizeof(map.inherit_site));
     if (!sg_map_locate(&map)) goto done;
-    out = sh_decl_rebind_json_walk_sites((sh_decl_source){json, length}, sh_decl_native_schema_view(reader->schema),
+    out = sh_decl_rebind_json_walk_sites((sh_decl_source){json, length}, &map.keyed,
         sg_map_walk, &map, sg_map_typed_site, &map, &out_length, &rebound);
 done:
     if (reader->failed) { free(out); out = NULL; }
@@ -2092,7 +2298,7 @@ done:
         result->references = map.binding.references; result->changed = out ? rebound.changed : 0;
         result->inspection = reader->report;
     }
-    free(map.binding.replacement);
+    free(map.binding.replacement); free(map.key_replacement);
     sh_map_binding_sites_clear(map.spans, map.span_count); free(map.spans);
     reader->saved_binding = NULL; reader->saved_context = NULL;
     reader->error = NULL; reader->capacity = 0; return out;

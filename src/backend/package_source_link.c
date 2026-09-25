@@ -1,4 +1,5 @@
 #include "package_source_link.h"
+#include "package_keys.h"
 #include "package_virtual_material.h"
 #include "package_font.h"
 #include "package_movie.h"
@@ -1507,6 +1508,33 @@ unsigned char *sh_package_source_link_bind_unit(sh_package_source_link *s, size_
 {
     return sh_package_source_link_bind_derived(s, index, body, length, reference,
         reference_context, NULL, NULL, output_length, error, capacity);
+}
+
+int sh_package_source_link_key_space(sh_package_source_link *s, sh_package_key_space *space)
+{
+    if (!s || !s->scope_count || !s->readers || !s->readers[0]) return -1;
+    return sh_package_source_key_space(s->readers[0], space);
+}
+
+int sh_package_source_link_bind_keys(sh_package_source_link *s, size_t index,
+    const unsigned char *body, size_t length, sh_package_key_site_resolver resolver, void *context,
+    unsigned char **output, size_t *output_length, char *error, size_t capacity)
+{
+    char fallback[1024]; int status;
+    if (!error || !capacity) { error = fallback; capacity = sizeof(fallback); }
+    *error = 0;
+    if (output) *output = NULL;
+    if (output_length) *output_length = 0;
+    if (!s || !s->frozen || index >= s->count || !body || !resolver || !output || !output_length) {
+        snprintf(error, capacity, "registration keys require a captured source unit"); return -1;
+    }
+    sl_unit *unit = s->units[index];
+    char *old_error = s->error; size_t old_capacity = s->error_capacity;
+    s->error = error; s->error_capacity = capacity; s->failed = 0;
+    status = sh_package_source_bind_keys(s->readers[unit->scope], unit->unit.family, unit->unit.name,
+        body, length, resolver, context, output, output_length, NULL, error, capacity);
+    if (s->failed && status == 1) { free(*output); *output = NULL; *output_length = 0; status = -1; }
+    s->error = old_error; s->error_capacity = old_capacity; return status;
 }
 
 unsigned char *sh_package_source_link_bind_strings(sh_package_source_link *s, size_t index,

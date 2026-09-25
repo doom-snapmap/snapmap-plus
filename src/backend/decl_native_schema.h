@@ -78,6 +78,14 @@ int sh_decl_native_schema_decl_type(sh_decl_native_schema *schema,
  * Returns 1 graph, 0 other type/indirection, -1 unavailable/inconsistent. */
 int sh_decl_native_schema_graph_type(sh_decl_native_schema *schema, sh_decl_value_type type);
 
+/* Visit the constants of one registered reflected enum in native order (the
+ * record's member array at +0x10, 0x10 stride, name then 32-bit value, NULL
+ * name last; the layout the engine's own enum walker reads). Returns 1 after
+ * visiting, 0 when no such enum is registered, -1 for unreadable metadata or a
+ * failed visit. Names are borrowed until close. */
+int sh_decl_native_schema_enum_constants(sh_decl_native_schema *schema, const char *enum_name,
+    int (*visit)(void *context, const char *name, uint32_t value), void *context);
+
 typedef enum sh_decl_reference_reader {
     SH_DECL_READER_UNKNOWN,
     SH_DECL_READER_DECL,

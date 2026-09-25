@@ -15,6 +15,7 @@
 #include "decl_graph_compose.h"
 #include "decl_md6_compose.h"
 #include "decl_block_compose.h"
+#include "package_keys.h"
 #include "package_material.h"
 #include "grid_room_asset.h"
 #include "resource_graph.h"
@@ -2416,6 +2417,22 @@ static int pr_update(const char *data_root, int change_map, const char *map_sour
         current->sources->package_count, current->sources->component_count, current->compiled->resource_count,
         current->compiled->duplicate_count, current->compiled->composed_count, map ? "; temporary map provider active" : "");
     backend_log(line);
+    /* Name each registration key this library moved, with its package. */
+    for (size_t i = 0; i < current->bindings.binding_count; i++) {
+        const sh_package_provenance_binding *binding = current->bindings.bindings + i;
+        const char *package = "a package";
+        if (strcmp(binding->family, SH_PACKAGE_KEY_FAMILY) || !strcmp(binding->original, binding->name)) continue;
+        for (size_t c = 0; c < binding->context_count && binding->contexts[c] < current->bindings.context_count; c++) {
+            const sh_package_provenance_context *context = current->bindings.contexts + binding->contexts[c];
+            for (size_t owner = 0; context->tree_count && owner < current->sources->package_count; owner++) {
+                const unsigned char *tree = sh_package_source_tree(current->sources, owner);
+                if (tree && !memcmp(tree, context->trees[0], 32)) package = current->sources->packages[owner].name;
+            }
+        }
+        snprintf(line, sizeof(line), "registration key %s of %s is served as %s: another package registers %s for different AI",
+            binding->original, package, binding->name, binding->original);
+        backend_log(line);
+    }
     if (library_rescanned) InterlockedExchange(&g_sources_changed, 0);
 #ifndef SH_PACKAGE_RUNTIME_TESTING
     sh_strids_reservation_free(current->strings); current->strings = NULL;
