@@ -315,15 +315,48 @@ static void test_prune_native(void)
     compiled->resources[3].restored_original = 1;
     compiled->resources[5].sound_authored_event = 7; compiled->resources[5].sound_event = 9;
     compiled->resources[6].native_original = 0; compiled->resources[6].baseline_known = 2;
-    CHECK(sh_package_compilation_prune_native(compiled) == 2);
+    CHECK(sh_package_compilation_prune_native(compiled, NULL, NULL) == 2);
     CHECK(compiled->resource_count == 6);
     CHECK(!sh_package_compilation_find(compiled, "generated/decls/material/stock.decl"));
     CHECK(!sh_package_compilation_find(compiled, "generated/image/stock.bimage"));
     CHECK(sh_package_compilation_find(compiled, "generated/image/campaign.bimage"));
     CHECK(sh_package_compilation_find(compiled, "generated/decls/material/restored.decl"));
     CHECK(changed->bound_dependency_count == 1 && !strcmp(changed->bound_dependencies[0], "generated/image/campaign.bimage"));
-    CHECK(sh_package_compilation_prune_native(compiled) == 0 && compiled->resource_count == 6);
+    CHECK(sh_package_compilation_prune_native(compiled, NULL, NULL) == 0 && compiled->resource_count == 6);
     sh_package_compilation_free(compiled);
+}
+
+/* One shipped file can carry several native names. It stays native only when
+ * SnapMap itself serves every name from that file: a kept stock image reloads
+ * every consumer at activation, a pruned campaign-only name is unreachable. */
+static int prune_served(void *context, const char *path, const char *type, const char *name)
+{
+    (void)context;
+    if (strcmp(type, "image")) return 0;
+    if (!strcmp(path, "generated/image/pair.bimage")) return !strcmp(name, "pair") || !strcmp(name, "pair.tga");
+    return !strcmp(path, "generated/image/split.bimage") && !strcmp(name, "split");
+}
+static void test_prune_native_names(void)
+{
+    static const char *const paths[] = {"generated/image/pair.bimage", "generated/image/split.bimage"};
+    static const char *const names[][2] = {{"pair", "pair.tga"}, {"split", "split.tga"}};
+    for (int served = 0; served < 2; served++) {
+        sh_package_compilation *compiled = calloc(1, sizeof(*compiled));
+        CHECK(compiled); if (!compiled) return;
+        compiled->resources = calloc(2, sizeof(*compiled->resources)); compiled->resource_count = 2;
+        CHECK(compiled->resources); if (!compiled->resources) { free(compiled); return; }
+        for (size_t i = 0; i < 2; i++) {
+            sh_compiled_resource *r = compiled->resources + i;
+            r->engine_path = _strdup(paths[i]); r->owns_engine_path = 1; r->source = SIZE_MAX;
+            r->native_original = 1; r->baseline_known = 1;
+            CHECK(sh_package_resource_native_add(r, "image", names[i][0]) &&
+                  sh_package_resource_native_add(r, "image", names[i][1]));
+        }
+        CHECK(sh_package_compilation_prune_native(compiled, served ? prune_served : NULL, NULL) == (size_t)served);
+        CHECK(!sh_package_compilation_find(compiled, paths[0]) == served);
+        CHECK(sh_package_compilation_find(compiled, paths[1]) != NULL);
+        sh_package_compilation_free(compiled);
+    }
 }
 
 static void test_restoration(const sh_package_compilation *previous)
@@ -787,6 +820,7 @@ int main(int argc, char **argv)
     test_changes(compiled);
     test_restoration(compiled);
     test_prune_native();
+    test_prune_native_names();
     test_builtin_composition(compiled);
     test_editor_wiring_collections();
     sh_package_compilation_free(compiled); compiled = NULL;

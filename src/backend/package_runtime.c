@@ -655,6 +655,15 @@ int sh_package_runtime_test_legacy_bindings(const sh_package_compilation *compil
 { return pr_legacy_bindings(compiled, catalog, out); }
 #endif
 
+/* SnapMap itself serves this name from this exact file. */
+static int pr_snapmap_serves(void *context, const char *path, const char *type, const char *name)
+{
+    const sh_resource_catalog_entry *const *rows = NULL;
+    size_t count = sh_resource_catalog_find((const sh_resource_catalog *)context, type, name, &rows);
+    for (size_t i = 0; i < count; i++) if (rows[i]->archive < 2 && !_stricmp(rows[i]->path, path)) return 1;
+    return 0;
+}
+
 static int pr_capture_bundles(pr_provider *provider, const sh_package_sources *sources,
     const char *data_root, char *error, size_t capacity)
 {
@@ -1163,7 +1172,8 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
     /* A linked library holds every scope's complete closure; its unchanged
      * SnapMap originals stay native rather than being published again. */
     if (library_output) {
-        size_t native = sh_package_compilation_prune_native(compiled);
+        size_t native = sh_package_compilation_prune_native(compiled,
+            catalog ? pr_snapmap_serves : NULL, (void *)catalog);
         char line[160];
         snprintf(line, sizeof(line), "package library: %zu published resources; %zu unchanged SnapMap resources stay native",
             compiled->resource_count, native);

@@ -2183,19 +2183,34 @@ bad:
     sh_package_compilation_free(out); return NULL;
 }
 
-static int pc_native_unchanged(const sh_compiled_resource *resource)
+static int pc_native_unchanged(const sh_compiled_resource *resource,
+    sh_package_native_served served, void *context)
 {
-    return resource->native_original && resource->baseline_known == 1 && !resource->original_path &&
-        !resource->restored_original && !resource->composed && sh_package_resource_native_count(resource) <= 1 &&
-        resource->sound_event == resource->sound_authored_event;
+    size_t names = sh_package_resource_native_count(resource);
+    if (!resource->native_original || resource->baseline_known != 1 || resource->original_path ||
+        resource->restored_original || resource->composed ||
+        resource->sound_event != resource->sound_authored_event) return 0;
+    if (names <= 1) return 1;
+    /* One shipped file can carry several names; a name only the campaign lists
+     * must stay published or it becomes unreachable. Publishing an unchanged
+     * stock file rebuilds every recorded consumer at activation. */
+    if (!served) return 0;
+    for (size_t i = 0; i < names; i++) {
+        sh_package_native_identity identity = sh_package_resource_native_at(resource, i);
+        if (!served(context, resource->engine_path, identity.type, identity.name)) return 0;
+    }
+    return 1;
 }
 
-size_t sh_package_compilation_prune_native(sh_package_compilation *compiled)
+size_t sh_package_compilation_prune_native(sh_package_compilation *compiled,
+    sh_package_native_served served, void *context)
 {
     size_t kept = 0, dropped = 0;
     if (!compiled || (compiled->resource_count && !compiled->resources)) return 0;
     for (size_t i = 0; i < compiled->resource_count; i++) {
-        if (pc_native_unchanged(compiled->resources + i)) { pc_resource_free(compiled->resources + i); dropped++; continue; }
+        if (pc_native_unchanged(compiled->resources + i, served, context)) {
+            pc_resource_free(compiled->resources + i); dropped++; continue;
+        }
         if (kept != i) compiled->resources[kept] = compiled->resources[i];
         kept++;
     }
