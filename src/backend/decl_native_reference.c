@@ -42,8 +42,9 @@ int sh_decl_native_reference_read(sh_decl_native_schema *schema,
             int typed = sh_decl_native_registry_class_type(registry, type.name, &family);
             result = typed < 0 || (typed && family && !_stricmp(family, "sound")) ? -1 : 2;
         }
-    } else if (reader == SH_DECL_READER_MODEL) {
-        result = sh_model_reference_read(copy, &out->model);
+    } else if (reader == SH_DECL_READER_MODEL || reader == SH_DECL_READER_PREVIEW_MODEL) {
+        result = reader == SH_DECL_READER_MODEL ? sh_model_reference_read(copy, &out->model) :
+            sh_model_preview_reference_read(copy, &out->model);
         if (result == 1) {
             out->resource.type = out->model.family;
             out->resource.name = _strdup(out->model.name);

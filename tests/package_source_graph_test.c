@@ -3633,6 +3633,111 @@ static void fileless_catalog(const char *relative, const char *name)
     sound_binary(relative, bytes, at);
 }
 
+/* idStrRenderModel_Preview shares idStr's registered reader; the editor passes
+ * its text to a model dispatcher, directly or as list elements. */
+static void preview_reflection(fixture *native, uintptr_t preview_reader)
+{
+    void *container = *(void **)native->reflection;
+    void *records = alloc(native, 22 * 0x38), *objects = alloc(native, 22 * 16), *pointers = alloc(native, 22 * 16);
+    void *element = alloc(native, 0x48);
+    memcpy(records, *(void **)((char *)container + 0x20), 20 * 0x38);
+    memcpy(objects, *(void **)((char *)native->reflection + 0x88), 20 * 16);
+    memcpy(pointers, *(void **)((char *)native->reflection + 0xa0), 20 * 16);
+    pointer(container, 0x20, records);
+    pointer(native->reflection, 0x88, objects); number(native->reflection, 0x90, 22);
+    pointer(native->reflection, 0xa0, pointers); number(native->reflection, 0xa8, 22);
+    pointer(records, 19 * 0x38, string(native, "idStrRenderModel_Preview")); pointer(records, 19 * 0x38 + 8, string(native, ""));
+    pointer(objects, 19 * 16 + 8, (void *)preview_reader);
+    pointer(records, 20 * 0x38, string(native, "idList < idStrRenderModel_Preview >")); pointer(records, 20 * 0x38 + 8, string(native, ""));
+    pointer(objects, 20 * 16 + 8, (void *)0x80);
+    pointer(records, 20 * 0x38 + 0x18, element);
+    pointer(element, 0, string(native, "idStrRenderModel_Preview")); pointer(element, 8, string(native, ""));
+    pointer(element, 0x10, string(native, "element")); number(element, 0x1c, 8);
+    const char *t[] = {"idDeclEntityDef", "OpaqueStringReader", "idDeclActorModifier", "idDeclSnapEditorEntity",
+        "idRenderModel", "idImage", "idStrRenderModel_Preview", "idList < idStrRenderModel_Preview >"};
+    const char *o[] = {"*", "", "*", "*", "*", "*", "", ""};
+    const char *n[] = {"target", "custom", "modifier", "preview", "model", "image", "previewModel", "previewModels"};
+    fields(native, (char *)records + 0x38, 8, t, o, n);
+}
+static void test_preview_model(void)
+{
+    for (int variant = 0; variant < 2; variant++) {
+        fixture storage; fixture *native = &storage; setup(native);
+        /* 0x70 is idStr's registered reader; any other reader is another contract. */
+        preview_reflection(native, variant ? 0x71 : 0x70);
+        sh_decl_registry_source registry = {native, read_memory, (uintptr_t)native->registry, NULL};
+        sh_compiled_resource resource = {0};
+        sh_package_compilation compiled = {0};
+        sh_package_source_binding result;
+        bind_fixture bindings = {0};
+        char error[1024]; unsigned char *out; size_t length;
+        sh_decl_native_registry *r = sh_decl_native_registry_open(registry, error, sizeof(error));
+        sh_decl_native_schema *schema = sh_decl_native_schema_open(
+            (sh_decl_native_source){native, read_memory, (uintptr_t)native->reflection},
+            (sh_decl_dependency_observer){0}, error, sizeof(error));
+        sh_decl_native_reference reference = {0}; char *bound;
+        const sh_decl_value_type preview = {"idStrRenderModel_Preview", ""};
+        assert(r && schema);
+        assert(sh_decl_native_schema_reader(schema, (sh_decl_value_type){"idStr", ""}) == SH_DECL_READER_UNKNOWN);
+        assert(sh_decl_native_schema_reader(schema, (sh_decl_value_type){"idStrRenderModel_Preview", "*"}) == SH_DECL_READER_UNKNOWN);
+        if (variant) {
+            assert(sh_decl_native_schema_reader(schema, preview) == SH_DECL_READER_UNKNOWN);
+            assert(sh_decl_native_reference_read(schema, r, preview, "zion/boss.md6", 13, &reference) == -1);
+        } else {
+            assert(sh_decl_native_schema_reader(schema, preview) == SH_DECL_READER_PREVIEW_MODEL);
+            /* MD6 definitions keep the .md6 dispatch suffix in their identity. */
+            assert(sh_decl_native_reference_read(schema, r, preview, "Zion\\Boss_SnapEditor.MD6", 24, &reference) == 1);
+            assert(!strcmp(reference.resource.type, "md6def") && !strcmp(reference.resource.name, "zion/boss_snapeditor.md6"));
+            bound = sh_decl_native_reference_bind(&reference, "smp/0123456789abcdef.md6");
+            assert(bound && !strcmp(bound, "smp/0123456789abcdef.md6")); free(bound);
+            assert(!sh_decl_native_reference_bind(&reference, "smp/0123456789abcdef"));
+            assert(sh_decl_native_reference_read(schema, r, preview, "models/crate.lwo", 16, &reference) == 1);
+            assert(!strcmp(reference.resource.type, "model") && !strcmp(reference.resource.name, "models/crate.lwo"));
+            assert(sh_decl_native_reference_read(schema, r, preview, "effects/glow.hotspot", 20, &reference) == 1);
+            assert(!strcmp(reference.resource.type, "hotspot") && !strcmp(reference.resource.name, "effects/glow"));
+            /* The editor builds an _empty model for fx and tests for _empty itself;
+             * the renderer's dispatcher asks FindModel for both. */
+            assert(sh_decl_native_reference_read(schema, r, preview, "fx/sparks.fx", 12, &reference) == -1 && !reference.resource.name);
+            assert(sh_decl_native_reference_read(schema, r, (sh_decl_value_type){"idRenderModel", "*"}, "fx/sparks.fx", 12, &reference) == 1);
+            assert(sh_decl_native_reference_read(schema, r, preview, "_EMPTY", 6, &reference) == 0 && !reference.resource.name);
+            assert(sh_decl_native_reference_read(schema, r, (sh_decl_value_type){"idRenderModel", "*"}, "_empty", 6, &reference) == 1);
+            assert(sh_decl_native_reference_read(schema, r, preview, "", 0, &reference) == 0);
+        }
+        sh_decl_native_reference_clear(&reference);
+        sh_decl_native_registry_close(r); sh_decl_native_schema_close(schema);
+
+        resource.engine_path = "generated/decls/entitydef/root.decl";
+        resource.body = (unsigned char *)"{ class = \"Entity\"; }";
+        resource.body_length = strlen((const char *)resource.body);
+        compiled.resources = &resource; compiled.resource_count = 1;
+        sh_package_source_reader *reader = sh_package_source_reader_open(&compiled, NULL, original, native, registry,
+            (uintptr_t)native->reflection, error, sizeof(error));
+        assert(reader);
+        const char *entity = "{ class = \"Entity\"; edit = { previewModel = \"zion/boss.md6\";"
+            " previewModels = { num = 3; item[0] = \"models/crate.lwo\"; item[1] = \"_empty\"; item[2] = \"\"; } } }";
+        bindings.replace = 1;
+        out = sh_package_source_bind(reader, "entitydef", "preview", (const unsigned char *)entity,
+            strlen(entity), bind_reference, &bindings, &length, &result, error, sizeof(error));
+        if (variant) {
+            /* The type name alone does not establish the consumer contract. */
+            assert(!out && !length && result.inspection.gaps && !bindings.count);
+        } else {
+            if (!out) fprintf(stderr, "preview binding: %s\n", error);
+            assert(out && result.references == 2 && result.changed == 2 && bindings.count == 2);
+            assert(strstr((char *)out, "previewModel = \"bound/zion/boss.md6\"") &&
+                strstr((char *)out, "item[0] = \"bound/models/crate.lwo\"") &&
+                strstr((char *)out, "item[1] = \"_empty\"") && strstr((char *)out, "item[2] = \"\""));
+            free(out);
+            const char *effect = "{ class = \"Entity\"; edit = { previewModel = \"fx/sparks.fx\"; } }";
+            out = sh_package_source_bind(reader, "entitydef", "preview", (const unsigned char *)effect,
+                strlen(effect), bind_reference, &bindings, &length, &result, error, sizeof(error));
+            assert(!out && result.inspection.gaps && strstr(error, "fx/sparks.fx"));
+        }
+        sh_package_source_reader_close(reader);
+        while (native->count) free(native->regions[--native->count].address);
+    }
+}
+
 int main(void)
 {
     fixture f;
@@ -3659,6 +3764,7 @@ int main(void)
     test_font_source_link(&f, registry);
     test_font_library(&f, registry);
     test_movie_source_link();
+    test_preview_model();
     test_contribution_movie_token();
     test_open_effect_body();
     test_map_occurrences(&f, registry);

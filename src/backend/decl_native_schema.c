@@ -34,6 +34,7 @@ struct sh_decl_native_schema {
     uintptr_t polymorphic_reader;
     uintptr_t script_reader;
     uintptr_t movie_file_reader;
+    const dn_type *preview_model;
 };
 
 static void *dn_allocate(sh_decl_native_schema *s, size_t size)
@@ -297,6 +298,11 @@ static int dn_script_describe(sh_decl_native_schema *s, const char *name, sh_dec
     shape->kind = SH_DECL_VALUE_IGNORE; return 1;
 }
 
+/* The exact preview type, still read through idStr's registered reader. A
+ * different reader would be a different contract and stays unknown. */
+static int dn_preview_model(const sh_decl_native_schema *s, const dn_type *type)
+{ return type && type == s->preview_model && s->string_reader && type->object_reader == s->string_reader; }
+
 static int dn_describe(void *context, sh_decl_value_type value, sh_decl_value_shape *shape)
 {
     sh_decl_native_schema *s = (sh_decl_native_schema *)context;
@@ -321,7 +327,7 @@ static int dn_describe(void *context, sh_decl_value_type value, sh_decl_value_sh
         }
     } else if (*ops) return 0;
     else if (type) {
-        if (s->movie_file_reader && type->object_reader == s->movie_file_reader)
+        if ((s->movie_file_reader && type->object_reader == s->movie_file_reader) || dn_preview_model(s, type))
             shape->kind = SH_DECL_VALUE_REFERENCE;
         else if ((s->string_reader && type->object_reader == s->string_reader) ||
             (s->atomic_string_reader && type->object_reader == s->atomic_string_reader) ||
@@ -506,6 +512,12 @@ sh_decl_native_schema *sh_decl_native_schema_open(sh_decl_native_source source,
      * a temporary movie). Only its registered reader establishes the contract. */
     type = dn_find(&s->classes, "idSWFFile");
     if (type) s->movie_file_reader = type->object_reader;
+    /* SnapMap preview-model fields share idStr's reader, so only the declared
+     * type identifies them. The editor's entity preview and interact models
+     * (Vulkan 0x140d33770 / OpenGL 0x140d32e30) and attachments (0x140d31a20 /
+     * 0x140d310e0) pass the text to its model dispatcher (0x1405df8a0 /
+     * 0x1405df180). Consumers of the type's other fields were not traced. */
+    s->preview_model = dn_find(&s->classes, "idStrRenderModel_Preview");
     s->list_reader = dn_family(&s->classes, "idList < ");
     s->static_list_reader = dn_family(&s->classes, "idStaticList < ");
     s->polymorphic_reader = dn_family(&s->classes, "idTypeInfoObjectPtr < ");
@@ -589,6 +601,7 @@ sh_decl_reference_reader sh_decl_native_schema_reader(sh_decl_native_schema *s,
             SH_DECL_READER_DECL : SH_DECL_READER_UNKNOWN;
     if (!*value.ops) {
         type = dn_find(&s->classes, value.name);
+        if (dn_preview_model(s, type)) return SH_DECL_READER_PREVIEW_MODEL;
         return type && s->movie_file_reader && type->object_reader == s->movie_file_reader ?
             SH_DECL_READER_MOVIE : SH_DECL_READER_UNKNOWN;
     }

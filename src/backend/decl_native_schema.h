@@ -87,7 +87,10 @@ typedef enum sh_decl_reference_reader {
     SH_DECL_READER_STATIC_PARTICLE,
     /* idSWF pointers and idSWFFile values construct a UI movie from the field
      * string; the native constructor derives its cooked file/atlas pair. */
-    SH_DECL_READER_MOVIE
+    SH_DECL_READER_MOVIE,
+    /* idStrRenderModel_Preview values are read as idStr text; SnapMap editor
+     * previews pass them to the editor's render-model dispatcher. */
+    SH_DECL_READER_PREVIEW_MODEL
 } sh_decl_reference_reader;
 /* Select the identity resolver using the registered reader, including types
  * sharing it. Class-name spelling alone does not define a reader contract.

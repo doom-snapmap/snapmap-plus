@@ -44,6 +44,27 @@ int sh_model_reference_read(const char *request, sh_model_reference *out)
     *out = (sh_model_reference){family, name, suffix, resource_suffix}; return 1;
 }
 
+/* Editor preview models (Vulkan 0x1405df8a0 / OpenGL 0x1405df180): an empty
+ * name is the default model; prt, cloth, md6/decl, breakabledecl, break,
+ * watersurf, hotspot and automap take the renderer's branches (Vulkan
+ * 0x140301520 / OpenGL 0x1403008f0); fx makes an _empty model named after the
+ * effect; anything else goes to FindModel. Runtime names reach FindModel
+ * there instead of being generated, but still name no source. */
+int sh_model_preview_reference_read(const char *request, sh_model_reference *out)
+{
+    int result = sh_model_reference_read(request, out);
+    const char *dot, *slash;
+    if (result != 1) return result;
+    /* The dispatcher's own fx branch asks FindModel for _empty, and the entity
+     * preview (Vulkan 0x140d33770) tests for it before dispatching. */
+    if (!strcmp(out->name, "_empty")) { sh_model_reference_clear(out); return 0; }
+    dot = strrchr(out->name, '.'); slash = strrchr(out->name, '/');
+    if (!strcmp(out->family, "model") && dot && (!slash || dot > slash) && !strcmp(dot, ".fx")) {
+        sh_model_reference_clear(out); return -1;
+    }
+    return 1;
+}
+
 char *sh_model_reference_bind(const sh_model_reference *reference, const char *replacement)
 {
     char *out;

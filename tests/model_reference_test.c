@@ -36,5 +36,19 @@ int main(void)
     assert(sh_model_reference_read("\xe9/model", &ref) == -1);
     assert(sh_model_reference_read("actors/robot.md6", &ref) == 1);
     assert(!sh_model_reference_bind(&ref, "scope/lost-extension"));
+    /* Editor previews share the renderer's managers, except fx and _empty. */
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        assert(sh_model_preview_reference_read(cases[i].request, &ref) == 1);
+        assert(!strcmp(ref.family, cases[i].family) && !strcmp(ref.name, cases[i].name));
+    }
+    assert(sh_model_reference_read("fx/sparks.FX", &ref) == 1 && !strcmp(ref.family, "model"));
+    assert(sh_model_preview_reference_read("fx/sparks.FX", &ref) == -1 && !ref.name);
+    assert(sh_model_preview_reference_read("folder.fx/rock.lwo", &ref) == 1 && !strcmp(ref.name, "folder.fx/rock.lwo"));
+    assert(sh_model_preview_reference_read("sparks.fx", &ref) == -1);
+    assert(sh_model_reference_read("_empty", &ref) == 1);
+    assert(sh_model_preview_reference_read("_Empty", &ref) == 0 && !ref.name);
+    assert(sh_model_preview_reference_read("_world", &ref) == 0);
+    assert(sh_model_preview_reference_read("", &ref) == 0);
+    assert(sh_model_preview_reference_read("test.watersurf", &ref) == -1);
     sh_model_reference_clear(&ref); puts("model reference tests passed"); return 0;
 }

@@ -16,6 +16,10 @@ typedef struct sh_model_reference {
  * spelling rules. Water/automap custom file loaders require their own adapters.
  * No engine calls or filename-existence guesses. Initialize output to zero. */
 int sh_model_reference_read(const char *request, sh_model_reference *out);
+/* The SnapMap editor's preview dispatcher selects the same managers with the
+ * same spelling rules, except that "fx" builds an empty model carrying an
+ * effect name (unsupported here) and _empty names the engine's empty model. */
+int sh_model_preview_reference_read(const char *request, sh_model_reference *out);
 /* Reconstruct a model-field spelling from a replacement manager identity.
  * The caller preserves dispatch-significant suffixes in that identity. */
 char *sh_model_reference_bind(const sh_model_reference *reference, const char *replacement);
