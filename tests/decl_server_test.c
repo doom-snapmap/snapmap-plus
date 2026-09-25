@@ -74,6 +74,16 @@ int sh_resource_resident_reconstruct(sh_resource_resident *pass, char *error, si
 { (void)pass; (void)error; (void)capacity; return 1; }
 int sh_resource_resident_defaults(sh_resource_resident *pass, char *error, size_t capacity)
 { (void)pass; (void)error; (void)capacity; return 1; }
+/* Leaves reload after defaults and before any declaration is re-parsed. */
+static int g_rt_load_total;
+static int g_resident_leaf_calls, g_resident_leaf_loads_seen = -1;
+int sh_resource_resident_drain_leaves(sh_resource_resident *pass, int (*leaf)(const char *family),
+    char *error, size_t capacity)
+{
+    (void)pass; (void)error; (void)capacity; ++g_resident_leaf_calls;
+    g_resident_leaf_loads_seen = g_rt_load_total;
+    return leaf && leaf("skeleton") && !leaf("md6def");
+}
 int sh_resource_resident_drain(sh_resource_resident *pass, char *error, size_t capacity)
 {
     (void)pass; ++g_resident_drain_calls;
@@ -2414,9 +2424,11 @@ static void test_runtime_preserves_unaffected_caches(void)
     /* A changed dependency can select a consumer even if its own bytes did
      * not change. The declaration pass follows the captured resident set. */
     g_resident_only = objects[1];
+    g_resident_leaf_calls = 0; g_resident_leaf_loads_seen = -1;
     CHECK(sh_decl_server_test_materialize_missing_sedefs(items, 2, (void *)1,
         rt_type_by_name, rt_source_find, rt_find_decl, &materialized));
     CHECK(g_rt_reconstructs == 1 && g_rt_loads[0] == 0 && g_rt_loads[1] == 1);
+    CHECK(g_resident_leaf_calls == 1 && g_resident_leaf_loads_seen == 0);
     CHECK(*(void **)(objects[0] + 0x688) == objects[0]);
     sh_decl_server_test_set_resident(NULL); sh_decl_server_test_set_runtime(0);
     g_resident_filter = 0; g_resident_only = NULL;

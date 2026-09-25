@@ -68,6 +68,9 @@ int sh_package_source_graph_with_shader(const sh_package_compilation *compiled,
     const sh_package_source_shader *shader, const char *json, size_t length,
     sh_package_references *out, sh_package_source_graph_report *report,
     char *error, size_t capacity);
+/* Families whose cooked payload names no other engine resource (image,
+ * skeleton, collision and similar), measured over the installed corpus. */
+int sh_package_source_leaf_family(const char *family);
 /* The library link's admission of a verified engine-created identity with no
  * physical source, such as an intrinsic image. It is asked only after no
  * catalogued or supplied file exists; 1 admits, 0 is unsupported, -1 fails.

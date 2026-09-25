@@ -860,10 +860,38 @@ static void fixed_renderer_cases(void)
         CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error))); check_restored();
     }
 }
+/* A rebuilt leaf reloads before declarations are re-parsed; other rebuilt
+ * resources wait for the drain, which still verifies every object. */
+static int leaf_family(const char *family) { return !strcmp(family, "skeleton"); }
+static void leaf_cases(void)
+{
+    char error[256];
+    static void *leaf_entries[1];
+    sh_package_change rows[] = {{(char *)paths[0], SH_PACKAGE_RESOURCE_REPLACED},
+        {(char *)paths[2], SH_PACKAGE_RESOURCE_REPLACED}};
+    sh_package_changes changes = {rows, 2};
+    sh_resource_resident *pass;
+    reset(); expect_reconstructed = 7;
+    memset(parm_manager, 0, sizeof(parm_manager));
+    *(const char **)(parm_manager + 8) = "skeleton";
+    leaf_entries[0] = objects[2];
+    *(void ***)(parm_manager + 0x20) = leaf_entries; *(int *)(parm_manager + 0x28) = 1;
+    *(void **)(manager_object + 0x18) = parm_manager; *(int *)(manager_object + 0x28) = 2;
+    *(void **)(objects[2] + 0x10) = parm_manager; *(const char **)(objects[2] + 8) = "bones";
+    pass = sh_resource_resident_begin(&changes, 0, 0, error, sizeof(error));
+    CHECK(pass && pass->count == 3); if (!pass) return;
+    CHECK(!sh_resource_resident_drain_leaves(pass, leaf_family, error, sizeof(error)));
+    CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+    lookup_leaves_pending = 1; /* The native lookup can leave the mark set. */
+    CHECK(sh_resource_resident_drain_leaves(pass, leaf_family, error, sizeof(error)));
+    CHECK(loads == 1 && !(objects[2][0x2c] & RR_PENDING) && (objects[0][0x2c] & RR_PENDING));
+    CHECK(sh_resource_resident_drain(pass, error, sizeof(error)) && loads == 3);
+    CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error))); check_restored();
+}
 int main(void)
 {
     success_cases(); world_text_cases(); initial_publication_cases(); failure_cases(); atlas_failure_cases(); scope_failure_cases(); scope_ownership_cases();
-    additive_finalization_cases(); fixed_renderer_cases();
+    additive_finalization_cases(); fixed_renderer_cases(); leaf_cases();
     rr_free(g_rr_recovery); g_rr_recovery = NULL;
     sh_resource_graph_test_reset();
     printf("resident refresh: %d failure(s)\n", failures); return failures ? 1 : 0;

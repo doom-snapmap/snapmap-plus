@@ -28,6 +28,12 @@ int sh_resource_resident_reconstruct(sh_resource_resident *pass, char *error, si
 /* Call after every declaration-owned pending mark exists, before its first
  * lookup. Drain also calls this for providers without declarations. */
 int sh_resource_resident_defaults(sh_resource_resident *pass, char *error, size_t capacity);
+/* Reload rebuilt resources whose family names no other engine resource, such
+ * as skeletons and images, before any declaration is re-parsed. An object the
+ * pass did not rebuild, a mesh for one, holds its skeleton directly and never
+ * looks it up again. Call after defaults; drain still verifies every object. */
+int sh_resource_resident_drain_leaves(sh_resource_resident *pass,
+    int (*leaf)(const char *family), char *error, size_t capacity);
 /* Reloads pending resources, then rebinds material virtual-texture parms inside
  * the heap-0 scope before the consumer update. Idempotent once it succeeds. */
 int sh_resource_resident_drain(sh_resource_resident *pass, char *error, size_t capacity);

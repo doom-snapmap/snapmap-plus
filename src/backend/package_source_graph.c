@@ -506,7 +506,7 @@ static int sg_renderprog(sg_walk *walk, const char *name)
  * entries (249 files / 88 MB, cooked images) and fga vector-field grids (7
  * files / 4 MB of comma-separated numbers) scanned the same way contain none.
  * A leaf still needs a verified payload path to establish availability. */
-static int sg_leaf_family(const char *type)
+int sh_package_source_leaf_family(const char *type)
 {
     static const char *const leaves[] = {"image", "skeleton", "cm", "aas", "binaryfile", "md6rig", "transsortatlas", "fga"};
     for (size_t i = 0; i < sizeof(leaves) / sizeof(leaves[0]); i++)
@@ -822,7 +822,7 @@ static int sg_inspect(sg_walk *walk, const char *type, const char *name)
         int discrete = !strcmp(type, "discreteanimation");
         int cooked = !strcmp(type, "basemodel"), model = !strcmp(type, "model") || discrete || !strcmp(type, "staticparticlemodel");
         int anim = !strcmp(type, "anim");
-        int leaf = sg_leaf_family(type), inspected = 0;
+        int leaf = sh_package_source_leaf_family(type), inspected = 0;
         for (size_t i = 0; i < count; i++) {
             if (!*entries[i]->path) continue;
             known++;
@@ -1491,7 +1491,7 @@ static unsigned char *sg_bind_source(sh_package_source_reader *reader,
             !strcmp(family, "staticparticlemodel") ? SH_REBIND_STATIC_PARTICLE : SH_REBIND_MD6_ANIMATION;
         out = sh_resource_rebind(format, body, length, sg_bind_native, &binding,
             &out_length, &changed, error, capacity);
-    } else if (sg_leaf_family(family)) {
+    } else if (sh_package_source_leaf_family(family)) {
         out = malloc(length + 1);
         if (out) { memcpy(out, body, length); out[length] = 0; out_length = length; }
     } else {

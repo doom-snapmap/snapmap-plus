@@ -661,6 +661,25 @@ static int rr_finalize_additions(sh_resource_resident *pass, void *const *existi
         return rr_error(error, capacity, "fresh resource finalization lost its admitted scope");
     return 1;
 }
+int sh_resource_resident_drain_leaves(sh_resource_resident *pass,
+    int (*leaf)(const char *family), char *error, size_t capacity)
+{
+    if (!pass || !leaf || pass->thread != GetCurrentThreadId() || !pass->rebuilt)
+        return rr_error(error, capacity, "resident leaf reload has no rebuilt scope");
+    __try {
+        for (size_t i = 0; i < pass->count; i++) {
+            rr_entry *entry = pass->items + i;
+            unsigned char *object = entry->resource;
+            if (entry->external || !leaf(entry->type) || !(object[0x2c] & RR_PENDING)) continue;
+            if (g_rr.lookup(entry->manager, entry->name) != object)
+                return rr_error(error, capacity, "native resident lookup changed its captured identity");
+            if (object[0x2c] & RR_PENDING) { object[0x2c] &= 0xfdu; g_rr.load(object); }
+        }
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return rr_error(error, capacity, "native resident leaf reload failed");
+    }
+}
 static int rr_drain(sh_resource_resident *pass, void *const *existing,
     size_t existing_count, int additions, char *error, size_t capacity)
 {

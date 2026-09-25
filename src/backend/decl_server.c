@@ -33,6 +33,7 @@
 #include "decl_visibility.h"
 #include "packages.h"
 #include "package_runtime.h"
+#include "package_source_graph.h"
 #include "map_package.h"
 #include "user_overrides.h"
 #include "strids.h"
@@ -1712,7 +1713,12 @@ static void ds_runtime_premark(ds_materialize_context *context)
     }
     if (g_resident_pass) {
         char error[256];
-        if (!sh_resource_resident_defaults(g_resident_pass, error, sizeof(error))) {
+        /* Rebuilt leaves reload before any declaration is re-parsed: a mesh the
+         * pass kept reads its rebuilt skeleton directly, and an md6Def parsed
+         * against it while pending faulted on the skeleton's missing joints. */
+        if (!sh_resource_resident_defaults(g_resident_pass, error, sizeof(error)) ||
+            !sh_resource_resident_drain_leaves(g_resident_pass, sh_package_source_leaf_family,
+                error, sizeof(error))) {
             backend_log(error); InterlockedIncrement(&g_rearm_drain_faults);
         }
     }
