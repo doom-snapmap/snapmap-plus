@@ -34,6 +34,7 @@ typedef struct sl_unit {
     size_t implicit_count;
     size_t reverse_gap; /* Observation only: 1 + index of its accounted reader gap. */
     struct sl_unit *parent; /* Unit whose discovery first requested it; NULL for seeds. */
+    char *seed; /* Why a unit without a same-scope parent entered the capture. */
     int nominated; /* Seeded as a stock root affected by its scope's changes. */
     int movie_captured; /* Constructor requests of a cooked movie were enumerated. */
     sh_package_link_file_identity *identities; /* Owned per-file identities (movie pairs). */
@@ -68,6 +69,7 @@ struct sh_package_source_link {
     sl_unit *discovering; /* Unit whose readers are requesting new units. */
     const sl_unit *failed_unit; /* Unit whose strict discovery failed, if known. */
     size_t failed_scope; /* Input scope whose supplied files failed seeding. */
+    char seed_note[320]; /* Current seeding site, copied into units it creates. */
     unsigned long long phase_ms[9]; /* Wall-clock capture phases, see sl_phase_names. */
 };
 static const char *const sl_phase_names[9] = {
@@ -161,6 +163,15 @@ static sl_unit *sl_find(sh_package_source_link *s, size_t scope, const char *fam
     }
     unit->scope = scope; unit->unit.compilation = s->scopes[scope];
     unit->parent = s->discovering && s->discovering->scope == scope ? s->discovering : NULL;
+    if (!unit->parent) {
+        /* Diagnostics only: a failed copy leaves the reason unknown. */
+        char note[400];
+        if (s->discovering)
+            snprintf(note, sizeof(note), "requested from scope %zu by %s %s", s->discovering->scope,
+                s->discovering->unit.family, s->discovering->unit.name);
+        else snprintf(note, sizeof(note), "%s", s->seed_note[0] ? s->seed_note : "unrecorded seed");
+        unit->seed = _strdup(note);
+    }
     unit->index = s->count; s->units[s->count++] = unit; s->unit_slots[at] = unit; return unit;
 bad:
     sl_env_fail(s, "cannot retain scoped resource identity", name); return NULL;
@@ -586,6 +597,7 @@ static int sl_seed_inputs(sh_package_source_link *s)
                 continue;
             }
             int shader = sl_shader_seed(file, &name);
+            snprintf(s->seed_note, sizeof(s->seed_note), "scope %zu shader file %s", scope, file->engine_path);
             if (shader < 0) ok = 0;
             else if (name) ok = sl_find(s, scope, "renderprog", name, 1) != NULL;
             else if (!shader) filtered.resources[filtered.resource_count++] = *file;
@@ -604,6 +616,8 @@ static int sl_seed_inputs(sh_package_source_link *s)
         const sh_package_compilation *one = &filtered;
         if (ok) ok = sh_package_link_inputs_open(&one, 1, s->catalog, &roots, s->error, s->error_capacity);
         for (size_t i = 0; ok && i < roots.count; i++) {
+            snprintf(s->seed_note, sizeof(s->seed_note), "scope %zu supplied %s", scope,
+                roots.units[i].file_count ? roots.units[i].files[0]->engine_path : roots.units[i].name);
             sl_unit *unit = sl_find(s, scope, roots.units[i].family, roots.units[i].name, 1);
             if (!unit) { ok = 0; break; }
             for (size_t f = 0; ok && f < roots.units[i].file_count; f++) {
@@ -614,11 +628,13 @@ static int sl_seed_inputs(sh_package_source_link *s)
         sh_package_link_inputs_free(&roots); free(filtered.resources);
         if (ok && s->native.material_seeds) {
             sl_material_seed walk = {s, scope};
+            snprintf(s->seed_note, sizeof(s->seed_note), "scope %zu material companion", scope);
             ok = s->native.material_seeds(s->native.context, scope, sl_seed_material, &walk,
                 s->error, s->error_capacity);
         }
         if (ok && s->native.audio) {
             sl_material_seed walk = {s, scope};
+            snprintf(s->seed_note, sizeof(s->seed_note), "scope %zu audio program", scope);
             ok = sh_package_audio_program_seed(s->native.audio, scope, s->catalog, sl_seed_sound, &walk,
                 s->error, s->error_capacity);
         }
@@ -634,6 +650,7 @@ static int sl_seed_orphan_binaries(sh_package_source_link *s)
             const sh_compiled_resource *file = compiled->resources + f;
             const char *family = sl_deferred_binary_family(s, file);
             if (!family) continue;
+            snprintf(s->seed_note, sizeof(s->seed_note), "scope %zu unowned binary %s", scope, file->engine_path);
             int owned = 0;
             for (size_t i = 0; !owned && i < s->count; i++) if (s->units[i]->scope == scope)
                 for (size_t j = 0; j < s->units[i]->unit.file_count; j++)
@@ -1000,6 +1017,7 @@ static int sl_reverse_changed(sh_package_source_link *s, size_t scope, const sl_
 static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_root_plan *plan,
     sh_decl_registry_source registry, uintptr_t reflection)
 {
+    snprintf(s->seed_note, sizeof(s->seed_note), "reverse root discovery");
     sh_package_source_link *base = NULL;
     sh_package_link_node *nodes = NULL;
     sh_package_link_edge *edges = NULL;
@@ -1218,6 +1236,10 @@ static void sl_attribute(const sh_package_source_link *s, sh_package_source_fail
             } else used += (size_t)n;
         }
     }
+    if (root && root->seed && used + 1 < sizeof(failure->chain)) {
+        int n = snprintf(failure->chain + used, sizeof(failure->chain) - used, " [%s]", root->seed);
+        used = n < 0 || (size_t)n >= sizeof(failure->chain) - used ? sizeof(failure->chain) : used + (size_t)n;
+    }
     if (supplier) {
         failure->kind = supplier == failed && s->malformed ?
             SH_PACKAGE_SOURCE_FAILURE_SOURCE : SH_PACKAGE_SOURCE_FAILURE_COVERAGE;
@@ -1233,6 +1255,7 @@ void sh_package_source_link_close(sh_package_source_link *s)
     for (size_t i = 0; s->readers && i < s->scope_count; i++) sh_package_source_reader_close(s->readers[i]);
     for (size_t i = 0; i < s->count; i++) {
         sl_unit *unit = s->units[i];
+        free(unit->seed);
         free((char *)unit->unit.family); free((char *)unit->unit.name); free((void *)unit->unit.files);
         for (size_t w = 0; w < unit->unit.witness_count; w++) free((char *)unit->unit.witnesses[w].role);
         free((void *)unit->unit.witnesses);

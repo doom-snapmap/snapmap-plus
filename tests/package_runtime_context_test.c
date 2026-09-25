@@ -2652,7 +2652,7 @@ static void test_unserved_coverage(void)
     summary = sh_package_runtime_summary();
     int reported = summary && strstr(summary, "Installed library: 2 packages") &&
         strstr(summary, "is not served yet (product coverage)") && strstr(summary, "campaign dependency") &&
-        strstr(summary, "(via entitydef ai/cyberdemon <- entitydef admission/gap)") &&
+        strstr(summary, "(via entitydef ai/cyberdemon <- entitydef admission/gap [scope ") &&
         strstr(summary, "need a Snapmap+ update") && !strstr(summary, "Skipped local package");
     if (!reported) fprintf(stderr, "unserved summary: %s\n", summary ? summary : "(none)");
     CHECK(reported); free(summary);

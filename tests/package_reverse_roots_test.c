@@ -407,8 +407,11 @@ static void test_failure_attribution(fixture *f, const sh_package_compile_enviro
         (uintptr_t)f->reflection, native, &out, error, sizeof(error)));
     if (unserved != owner(sources, "Broken") || invalid != SIZE_MAX) fprintf(stderr, "coverage owner: %s\n", error);
     assert(unserved == owner(sources, "Broken") && invalid == SIZE_MAX && !out.compiled);
+    /* The chain names how its root entered the capture. */
+    if (!strstr(error, "(via model models/campaign.lwo <- entitydef props/broken [scope ")) fprintf(stderr, "chain: %s\n", error);
     assert(strstr(error, "campaign dependency") &&
-        strstr(error, "(via model models/campaign.lwo <- entitydef props/broken)"));
+        strstr(error, "(via model models/campaign.lwo <- entitydef props/broken [scope ") &&
+        strstr(error, " supplied generated/decls/entitydef/props/broken.decl])"));
     sh_package_library_free(&out); sh_package_sources_free(sources);
     /* Text the product has no syntax adapter for is coverage, not malformation. */
     sources = sh_package_sources_scan(path, error, sizeof(error)); assert(sources);
@@ -418,7 +421,8 @@ static void test_failure_attribution(fixture *f, const sh_package_compile_enviro
         (uintptr_t)f->reflection, native, &out, error, sizeof(error)));
     if (unserved != owner(sources, "Unsupported") || invalid != SIZE_MAX) fprintf(stderr, "unsupported owner: %s\n", error);
     assert(unserved == owner(sources, "Unsupported") && invalid == SIZE_MAX &&
-        strstr(error, "(via entitydef props/unsupported)"));
+        strstr(error, "(via entitydef props/unsupported [scope ") &&
+        strstr(error, " supplied generated/decls/entitydef/props/unsupported.decl])"));
     sh_package_library_free(&out); sh_package_sources_free(sources);
     /* Text that does not parse in the native grammar is malformed. */
     sources = sh_package_sources_scan(path, error, sizeof(error)); assert(sources);
