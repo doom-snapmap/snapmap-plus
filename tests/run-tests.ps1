@@ -326,6 +326,10 @@ foreach ($t in $tests) {
         '..\src\backend\package_strings.c' -notin ($t.src -split ' ')) {
         $t.src += ' ..\src\backend\package_strings.c'
     }
+    if ('..\src\backend\package_library.c' -in ($t.src -split ' ') -and
+        '..\src\backend\decl_block_compose.c' -notin ($t.src -split ' ')) {
+        $t.src += ' ..\src\backend\decl_block_compose.c'
+    }
     if ('..\src\backend\package_library.c' -in ($t.src -split ' ')) {
         foreach ($source in @('package_audio_program.c', 'package_audio_capture.c', 'audio_link_graph.c', 'audio_id_reservations.c',
             'audio_bank_codec.c', 'audio_hirc.c', 'audio_shared_policy.c', 'audio_bus_policy.c')) {

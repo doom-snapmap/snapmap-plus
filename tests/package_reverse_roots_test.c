@@ -19,7 +19,7 @@ typedef struct region { void *address; size_t length; } region;
 typedef struct fixture {
     region regions[192]; size_t count;
     void *registry, *reflection;
-    int missing_unrelated, absent_target, implicit_root, reader_gap, absent_program;
+    int missing_unrelated, absent_target, implicit_root, reader_gap, absent_program, hands;
 } fixture;
 static void *allocate(fixture *f, size_t length)
 {
@@ -57,23 +57,24 @@ static void setup(fixture *f)
 {
     static const char *classes[] = {"idDeclEntityDef", "Entity", "idDeclTypeInfo",
         "idDeclSnapEditorEntity", "idImage", "idRenderModel", "idStaticModel", "idStr", "idDeclTypeInfoGraph",
-        "idDeclRenderProg"};
-    static const char *types[] = {"entityDef", "snapEditorEntityDef", "image", "renderProg"};
-    static const size_t indices[] = {0, 3, 4, 9};
+        "idDeclRenderProg", "idDeclAnimWeb"};
+    static const char *types[] = {"entityDef", "snapEditorEntityDef", "image", "renderProg", "animWeb"};
+    static const size_t indices[] = {0, 3, 4, 9, 10};
     f->registry = allocate(f, 0x18);
-    void *managers = allocate(f, 4 * 8);
-    pointer(f->registry, 8, managers); number(f->registry, 0x10, 4);
-    for (size_t i = 0; i < 4; i++) {
+    void *managers = allocate(f, 5 * 8);
+    pointer(f->registry, 8, managers); number(f->registry, 0x10, 5);
+    for (size_t i = 0; i < 5; i++) {
         void *manager = allocate(f, 0x90); pointer(managers, i * 8, manager);
         pointer(manager, 8, text(f, types[i])); pointer(manager, 0x10, text(f, classes[indices[i]]));
     }
     f->reflection = allocate(f, 0xb0);
-    void *container = allocate(f, 0x30), *records = allocate(f, 11 * 0x38);
-    void *objects = allocate(f, 11 * 16), *pointers = allocate(f, 11 * 16);
+    void *container = allocate(f, 0x30), *records = allocate(f, 12 * 0x38);
+    void *objects = allocate(f, 12 * 16), *pointers = allocate(f, 12 * 16);
     pointer(f->reflection, 0, container); pointer(container, 0x20, records);
-    pointer(f->reflection, 0x88, objects); number(f->reflection, 0x90, 11);
-    pointer(f->reflection, 0xa0, pointers); number(f->reflection, 0xa8, 11);
-    for (size_t i = 0; i < 10; i++) {
+    pointer(f->reflection, 0x88, objects); number(f->reflection, 0x90, 12);
+    pointer(f->reflection, 0xa0, pointers); number(f->reflection, 0xa8, 12);
+    pointer(pointers, 10 * 16 + 8, (void *)0x10);
+    for (size_t i = 0; i < 11; i++) {
         pointer(records, i * 0x38, text(f, classes[i]));
         pointer(records, i * 0x38 + 8, text(f, i == 3 || i == 8 ? "idDeclTypeInfo" : ""));
     }
@@ -82,9 +83,10 @@ static void setup(fixture *f)
     pointer(pointers, 6 * 16 + 8, (void *)0x60); pointer(objects, 7 * 16 + 8, (void *)0x70);
     pointer(objects, 8 * 16 + 8, (void *)0x30); pointer(pointers, 9 * 16 + 8, (void *)0x10);
     /* idSWF has no registered reader in this schema: a stock coverage gap. */
-    const char *et[] = {"idRenderModel", "idImage", "idDeclEntityDef", "idSWF", "idDeclRenderProg"};
-    const char *eo[] = {"*", "*", "*", "*", "*"}, *en[] = {"model", "image", "target", "gui", "program"};
-    fields(f, (char *)records + 0x38, 5, et, eo, en);
+    const char *et[] = {"idRenderModel", "idImage", "idDeclEntityDef", "idSWF", "idDeclRenderProg", "idDeclAnimWeb"};
+    const char *eo[] = {"*", "*", "*", "*", "*", "*"};
+    const char *en[] = {"model", "image", "target", "gui", "program", "handsAnimWeb"};
+    fields(f, (char *)records + 0x38, 6, et, eo, en);
     const char *st[] = {"idDeclEntityDef", "idStr", "idStr"};
     const char *so[] = {"*", "", ""}, *sn[] = {"entityDef", "category", "displayName"};
     fields(f, (char *)records + 3 * 0x38, 3, st, so, sn);
@@ -120,9 +122,14 @@ static int original(void *context, const char *path, unsigned char **body, size_
     else if (!strcmp(path, "generated/decls/entitydef/props/unrelated.decl")) {
         if (f->absent_target) return 0;
         value = f->reader_gap ? "{ class = \"Entity\"; edit = { image = \"textures/unrelated\"; "
-            "model = \"models/campaign.lwo\"; gui = \"swf/unrelated\"; } }" :
+            "model = \"models/campaign.lwo\"; gui = \"swf/unrelated\"; } }" : f->hands ?
+            "{ class = \"Entity\"; edit = { image = \"textures/unrelated\"; target = \"player-def\"; } }" :
             "{ class = \"Entity\"; edit = { image = \"textures/unrelated\"; } }";
     }
+    else if (f->hands && !strcmp(path, "generated/decls/entitydef/player-def.decl"))
+        value = "{ class = \"Entity\"; edit = { handsAnimWeb = \"hands\"; } }";
+    else if (f->hands && !strcmp(path, "generated/decls/animweb/hands.decl"))
+        value = "{ props { } states { } subWebs { subWeb \"pistol\" { } } }";
     else if (!strcmp(path, "cooked/model/models/campaign.bmodel")) {
         /* Present only in the campaign archive: absent from SnapMap. */
         b = model("generic/rock");
@@ -508,6 +515,51 @@ static void test_failure_attribution(fixture *f, const sh_package_compile_enviro
     sh_package_library_free(&out); sh_package_sources_free(sources);
 }
 
+/* A stock palette root reaches a player entity, whose handsAnimWeb names the
+ * one web the hands animator resolves every weapon's subweb in. A package
+ * changing that web (adding its weapon's subweb) changes the global web: it is
+ * served under its stock name, and roots reaching it only through the player
+ * gain no variant. A second such package composes by native records. */
+static void test_player_hands(fixture *f, const sh_package_compile_environment *base,
+    const sh_resource_catalog *catalog, sh_decl_registry_source registry, const sh_package_library_native *native)
+{
+    char error[1024], held[MAX_PATH], home[MAX_PATH];
+    sh_package_compile_environment env = *base;
+    sh_package_library library = {0};
+    /* The earlier Gap Image package changes this root's image; set it aside
+     * so only the player reaches the web (observed by reverse discovery). */
+    snprintf(home, sizeof(home), "%s\\overrides\\gap", root); snprintf(held, sizeof(held), "%s\\gap-held", root);
+    assert(MoveFileA(home, held));
+    f->hands = 1;
+    package("weapon", "Weapon", "generated/decls/animweb/hands.decl",
+        "{ props { } states { } subWebs { subWeb \"pistol\" { } subWeb \"sp_pistol\" { } } }");
+    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    int ok = sh_package_library_compile(sources, &env, catalog, original, f, registry,
+        (uintptr_t)f->reflection, native, &library, error, sizeof(error));
+    if (!ok) fprintf(stderr, "player hands: %s\n", error);
+    assert(ok);
+    const sh_compiled_resource *web = resource(&library, "animweb", "hands");
+    if (!web) for (size_t i = 0; i < library.compiled->resource_count; i++)
+        fprintf(stderr, "  %s %s\n", library.compiled->resources[i].engine_path, library.compiled->resources[i].name);
+    assert(web); contains(&library, web, "sp_pistol");
+    assert(!binding(&library, sources, "Weapon", "", "snapeditorentitydef", "unrelated"));
+    assert(!binding(&library, sources, "Weapon", "", "entitydef", "props/unrelated"));
+    sh_package_library_free(&library); sh_package_sources_free(sources);
+    /* A second weapon package adds its own subweb: both join the stock web. */
+    package("weapon2", "Weapon Two", "generated/decls/animweb/hands.decl",
+        "{ props { } states { } subWebs { subWeb \"pistol\" { } subWeb \"plasma\" { } } }");
+    sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    ok = sh_package_library_compile(sources, &env, catalog, original, f, registry,
+        (uintptr_t)f->reflection, native, &library, error, sizeof(error));
+    if (!ok) fprintf(stderr, "player hands composed: %s\n", error);
+    assert(ok);
+    web = resource(&library, "animweb", "hands");
+    assert(web); contains(&library, web, "sp_pistol"); contains(&library, web, "plasma");
+    sh_package_library_free(&library); sh_package_sources_free(sources);
+    f->hands = 0;
+    assert(MoveFileA(held, home));
+}
+
 int main(void)
 {
     char temporary[MAX_PATH], path[4096], error[1024]; fixture f = {0}; setup(&f);
@@ -728,6 +780,7 @@ int main(void)
     sh_package_library_free(&recorded); sh_package_sources_free(gap_sources); f.reader_gap = 0;
     test_failure_attribution(&f, &env, catalog, registry, &native);
     test_absent_program_boundary(&f, sources, &env, catalog, registry, &native);
+    test_player_hands(&f, &env, catalog, registry, &native);
     /* An unreadable baseline edge is a product coverage defect, never a package
      * invalidation or permission to publish a partially discovered library. */
     size_t invalid = 0; env.invalid_package = &invalid; f.missing_unrelated = 1;

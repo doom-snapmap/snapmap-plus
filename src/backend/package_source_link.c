@@ -37,6 +37,7 @@ typedef struct sl_unit {
     struct sl_unit *parent; /* Unit whose discovery first requested it; NULL for seeds. */
     char *seed; /* Why a unit without a same-scope parent entered the capture. */
     int nominated; /* Seeded as a stock root affected by its scope's changes. */
+    int player_hands; /* Named by an entity's idPlayer::handsAnimWeb (see sl_reference). */
     int movie_captured; /* Constructor requests of a cooked movie were enumerated. */
     sh_package_link_file_identity *identities; /* Owned per-file identities (movie pairs). */
 } sl_unit;
@@ -71,6 +72,8 @@ struct sh_package_source_link {
     const sl_unit *failed_unit; /* Unit whose strict discovery failed, if known. */
     size_t failed_scope; /* Input scope whose supplied files failed seeding. */
     char seed_note[320]; /* Current seeding site, copied into units it creates. */
+    char **player_hands; /* Names of animation webs a player's handsAnimWeb names. */
+    size_t player_hand_count;
     unsigned long long phase_ms[9]; /* Wall-clock capture phases, see sl_phase_names. */
 };
 static const char *const sl_phase_names[9] = {
@@ -699,13 +702,42 @@ static int sl_shader_accounted(sh_package_source_link *s)
     return 1;
 }
 typedef struct sl_discover { sh_package_source_link *source; sl_unit *unit; } sl_discover;
+/* idPlayer::handsAnimWeb (and its _D1 alternate) names the one animation web
+ * the hands animator resolves every weapon's subweb in by name (Vulkan
+ * FUN_1403c0e30 / FUN_1403c16f0 look subwebs up in the animator's single web).
+ * Only idPlayer reflects these fields. The game spawns the player from the
+ * game rules' playerSpawnDef, so that web is one global registry of weapon
+ * subwebs, not an asset a placed object selects. */
+static int sl_player_hands_slot(const char *slot)
+{
+    const char *last = slot, *at;
+    if (!slot) return 0;
+    for (at = slot; *at; at++) if (*at == '.' || *at == '/') last = at + 1;
+    return !strcmp(last, "handsAnimWeb") || !strcmp(last, "handsAnimWeb_D1");
+}
+static int sl_player_hands_add(sh_package_source_link *s, const char *name)
+{
+    for (size_t i = 0; i < s->player_hand_count; i++) if (!strcmp(s->player_hands[i], name)) return 1;
+    char *copy = _strdup(name);
+    char **grown = copy && s->player_hand_count < SIZE_MAX / sizeof(*grown) - 1 ?
+        realloc(s->player_hands, (s->player_hand_count + 1) * sizeof(*grown)) : NULL;
+    if (!grown) { free(copy); return 0; }
+    s->player_hands = grown; s->player_hands[s->player_hand_count++] = copy; return 1;
+}
 static int sl_reference(void *context, const char *slot, const char *family, const char *name, const char **replacement)
 {
     sl_discover *walk = context;
     sl_unit *unit = walk->unit;
     sl_unit *target = sl_find(walk->source, unit->scope, family, name, 1);
-    (void)slot; *replacement = NULL;
+    *replacement = NULL;
     if (!target) return -1;
+    if (!strcmp(target->unit.family, "animweb") && !strcmp(unit->unit.family, "entitydef") &&
+        sl_player_hands_slot(slot)) {
+        target->player_hands = 1;
+        if (!sl_player_hands_add(walk->source, target->unit.name)) {
+            sl_env_fail(walk->source, "cannot retain the player hands web", name); return -1;
+        }
+    }
     if (!sl_grow((void ***)&unit->dependencies, &unit->dependency_capacity, unit->dependency_count)) {
         sl_env_fail(walk->source, "cannot retain scoped dependency", name); return -1;
     }
@@ -1103,12 +1135,18 @@ static int sl_reverse_roots(sh_package_source_link *s, const sh_package_source_r
         for (size_t j = 0; j < unit->dependency_count; j++) edges[at++].target = unit->dependencies[j]->index;
         local[i] = !unit->reverse_gap;
     }
+    for (size_t i = 0; i < base->player_hand_count; i++)
+        if (!sl_player_hands_add(s, base->player_hands[i])) {
+            sl_env_fail(s, "cannot retain the player hands web", base->player_hands[i]); goto done;
+        }
     /* A root is completely observed only when no reachable unit stopped early. */
     if (!sh_package_link_originals(nodes, base->count, local, complete, s->error, s->error_capacity)) goto done;
     for (size_t scope = 0; scope < s->scope_count; scope++) if (plan->discover[scope]) {
         memset(local, 1, base->count);
+        /* A player hands web changes globally (the library composes it under
+         * its stock name), so reaching it gives a stock root no variant. */
         for (size_t i = 0; i < base->count; i++)
-            if (sl_reverse_changed(s, scope, base->units[i])) local[i] = 0;
+            if (!base->units[i]->player_hands && sl_reverse_changed(s, scope, base->units[i])) local[i] = 0;
         /* Reverse propagation is candidate discovery only. Final scoped graph
          * equality/certification still decides whether a private root exists. */
         if (!sh_package_link_originals(nodes, base->count, local, unchanged, s->error, s->error_capacity)) goto done;
@@ -1278,8 +1316,15 @@ void sh_package_source_link_close(sh_package_source_link *s)
         free((char *)s->reverse_gaps[i].reason);
     }
     free(s->reverse_gaps);
+    for (size_t i = 0; i < s->player_hand_count; i++) free(s->player_hands[i]);
+    free(s->player_hands);
     free(s->originals); free(s->original_slots); free(s->units); free(s->unit_slots);
     free(s->inputs.units); free(s->inputs.scopes); free(s->readers); free(s->scopes); free(s->shared); free(s);
+}
+int sh_package_source_link_player_hands(const sh_package_source_link *s, const char *name)
+{
+    for (size_t i = 0; s && name && i < s->player_hand_count; i++) if (!strcmp(s->player_hands[i], name)) return 1;
+    return 0;
 }
 size_t sh_package_source_link_reverse_gaps(const sh_package_source_link *source,
     const sh_package_reverse_gap **gaps)

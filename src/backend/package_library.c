@@ -5,6 +5,7 @@
 #include "package_hud.h"
 #include "package_sound.h"
 #include "decl_native_rebind.h"
+#include "decl_block_compose.h"
 #include "package_movie.h"
 #include "swf_binary.h"
 #include <stdio.h>
@@ -439,7 +440,11 @@ static int pl_baseline_scope(pl_build *b, const sh_package_sources *sources,
         for (size_t i = 0; i < compiled->resource_count; i++) {
             const sh_compiled_resource *file = compiled->resources + i;
             size_t prior;
-            if (!pl_shared_declaration(file->type)) continue;
+            int several = 0;
+            if (file->type && !strcmp(file->type, "animweb"))
+                for (size_t other = 0; other < b->count && !several; other++)
+                    several = other != scope && sh_package_compilation_find(b->scopes[other], file->engine_path) != NULL;
+            if (!pl_shared_declaration(file->type) && !several) continue;
             for (prior = 0; prior < count; prior++) if (!strcmp(projections[prior].engine_path, file->engine_path)) break;
             if (prior < count) continue;
             sh_compiled_resource *seed = seeds + count;
@@ -466,6 +471,7 @@ typedef struct pl_assignment {
     const sh_package_link_inputs *inputs;
     const unsigned char *shared;
     int materials_prepared;
+    const unsigned char *global; /* player hands webs (pl_hands_phase) */
 } pl_assignment;
 
 static int pl_assign(void *context, size_t index, const unsigned char identity[32], int original_binding,
@@ -474,7 +480,7 @@ static int pl_assign(void *context, size_t index, const unsigned char identity[3
 {
     pl_assignment *a = context;
     const sh_package_link_unit *unit = a->inputs->units + index;
-    if (a->shared[index] && pl_shared_declaration(unit->family)) {
+    if ((a->shared[index] && pl_shared_declaration(unit->family)) || (a->global && a->global[index])) {
         /* This is the one composed editor object, not a claim that its bytes
          * equal vanilla. Its private dependencies would have disqualified it. */
         *name = _strdup(unit->name); *paths = calloc(count ? count : 1, sizeof(**paths));
@@ -507,6 +513,7 @@ struct pl_contributions {
     char **tokens;
     size_t token_count, pending_unit, pending_target;
     unsigned char *shared;
+    unsigned char *global; /* members of a composed player hands web */
     pl_assignment *assignment;
     int dirty;
     /* Identity captures of untouched units, shared by every pass of this
@@ -530,7 +537,7 @@ static void pl_contributions_close(pl_contributions *c)
     if (c->units) for (size_t i = 0; i < c->inputs.count; i++) pl_contribution_unit_free(c->units + i);
     pl_tokens_free(c); sh_package_link_classes_free(&c->classes);
     sh_package_link_reuse_close(c->reuse);
-    free(c->units); free(c->inputs.units); free(c->shared); free(c);
+    free(c->units); free(c->inputs.units); free(c->shared); free(c->global); free(c);
 }
 /* A composed or localized unit binds through the current tokens, so only
  * untouched units may reuse an earlier identity capture. */
@@ -1732,6 +1739,108 @@ static int pl_registration_phase(pl_build *b, const sh_package_sources *sources,
     return 1;
 }
 
+/* ---- The player hands web -------------------------------------------------
+ * The web idPlayer::handsAnimWeb names is one global registry: the hands
+ * animator looks every weapon's subweb up in it by name. A package changing it
+ * (adding its weapon's subweb and switch edges) changes that global web, so
+ * package changes compose by native records (the animation web block grammar)
+ * into the stock-named declaration every player uses; one changing package
+ * supplies it whole. Records two packages change differently cannot compose,
+ * which leaves the later package unserved as a coverage gap. */
+static int pl_hands_group(pl_build *b, const sh_package_sources *sources,
+    const size_t *members, size_t count, char *error, size_t capacity)
+{
+    pl_contributions *c = b->contributions;
+    const sh_package_link_unit *input = c->inputs.units + members[0];
+    sh_decl_source *texts = calloc(count, sizeof(*texts)), *parts = calloc(count + 1, sizeof(*parts));
+    const sh_compiled_resource **peers = calloc(count + 1, sizeof(*peers));
+    pl_contribution_unit *pending = calloc(count, sizeof(*pending));
+    size_t *part_member = calloc(count + 1, sizeof(*part_member));
+    size_t base_member = SIZE_MAX, part_count = 0, culprit = SIZE_MAX, composed_length = 0;
+    char *composed = NULL;
+    int ok = 0, kind = SH_PACKAGE_EDITOR_FAILURE_ENVIRONMENT;
+    if (!texts || !parts || !peers || !pending || !part_member) {
+        snprintf(error, capacity, "player hands web allocation failed"); goto failed;
+    }
+    for (size_t i = 0; i < count; i++) {
+        size_t unit = members[i];
+        if (!(texts[i].text = pl_token_text(c, unit, &texts[i].length, error, capacity))) goto failed;
+        if (c->inputs.scopes[unit] == b->count - 1) base_member = i;
+        else if (!pl_stock_authored(c, unit)) { part_member[part_count] = i; parts[part_count++] = texts[i]; }
+    }
+    if (!part_count) { ok = 1; goto done; }
+    if (part_count == 1) {
+        if (!(composed = malloc(parts[0].length + 1))) { snprintf(error, capacity, "player hands web allocation failed"); goto failed; }
+        memcpy(composed, parts[0].text, parts[0].length); composed[parts[0].length] = 0; composed_length = parts[0].length;
+    } else {
+        sh_decl_conflict conflict = {SIZE_MAX, SIZE_MAX, 0, 0};
+        if (base_member == SIZE_MAX) {
+            kind = SH_PACKAGE_EDITOR_FAILURE_COVERAGE; culprit = members[part_member[part_count - 1]];
+            snprintf(error, capacity, "several packages change the player hands web without its captured stock original");
+            goto failed;
+        }
+        composed = sh_decl_block_compose("animweb", texts[base_member], parts, part_count, &composed_length,
+            error, capacity, &conflict);
+        if (!composed) {
+            if (!strstr(error, "allocation")) {
+                kind = SH_PACKAGE_EDITOR_FAILURE_COVERAGE;
+                size_t blamed = conflict.second < part_count ? conflict.second : conflict.first;
+                culprit = members[part_member[blamed < part_count ? blamed : part_count - 1]];
+            }
+            goto failed;
+        }
+    }
+    for (size_t i = 0; i < count; i++) {
+        size_t peer_count = 0;
+        for (size_t j = 0; j < count; j++) if (j != i && c->inputs.scopes[members[j]] != b->count - 1)
+            peers[peer_count++] = c->inputs.units[members[j]].files[0];
+        if (!pl_contribution_stage(b, sources, members[i], composed, composed_length, peers, peer_count,
+            pending + i, error, capacity)) goto failed;
+    }
+    for (size_t i = 0; i < count; i++) {
+        size_t unit = members[i];
+        c->global[unit] = 1;
+        if (!pending[i].owned) continue;
+        c->dirty = 1;
+        pl_contribution_unit_free(c->units + unit); c->units[unit] = pending[i]; memset(pending + i, 0, sizeof(*pending));
+        c->inputs.units[unit].compilation = c->units[unit].owned;
+        c->inputs.units[unit].files = &c->units[unit].file;
+        c->inputs.units[unit].original_binding = 0;
+    }
+    ok = 1;
+    goto done;
+failed:
+    pl_contribution_failure(b, sources, members, count, input, kind, culprit, error, capacity);
+done:
+    if (texts) for (size_t i = 0; i < count; i++) free((char *)texts[i].text);
+    if (pending) for (size_t i = 0; i < count; i++) pl_contribution_unit_free(pending + i);
+    free(texts); free(parts); free((void *)peers); free(pending); free(part_member); free(composed);
+    return ok;
+}
+static int pl_hands_phase(pl_build *b, const sh_package_sources *sources, char *error, size_t capacity)
+{
+    pl_contributions *c = b->contributions;
+    unsigned char *seen = calloc(c->inputs.count ? c->inputs.count : 1, 1);
+    size_t *members = calloc(c->inputs.count ? c->inputs.count : 1, sizeof(*members));
+    int ok = 0;
+    if (!seen || !members) { snprintf(error, capacity, "player hands web allocation failed"); goto done; }
+    for (size_t i = 0; i < c->inputs.count; i++) {
+        const sh_package_link_unit *unit = c->inputs.units + i;
+        size_t count = 0;
+        if (seen[i] || unit->file_count != 1 || strcmp(unit->family, "animweb") ||
+            !sh_package_source_link_player_hands(b->reader, unit->name)) continue;
+        for (size_t j = i; j < c->inputs.count; j++) {
+            const sh_package_link_unit *peer = c->inputs.units + j;
+            if (seen[j] || peer->file_count != 1 || strcmp(peer->family, unit->family) || strcmp(peer->name, unit->name)) continue;
+            seen[j] = 1; members[count++] = j;
+        }
+        if (!pl_hands_group(b, sources, members, count, error, capacity)) goto done;
+    }
+    ok = 1;
+done:
+    free(seen); free(members); return ok;
+}
+
 static int pl_unit_name_order(void *context, const void *left, const void *right)
 {
     const sh_package_link_unit *units = context;
@@ -1823,9 +1932,10 @@ static int pl_contributions_open(pl_build *b, const sh_package_sources *sources,
     c->inputs.units = calloc(original->count ? original->count : 1, sizeof(*c->inputs.units));
     c->units = calloc(original->count ? original->count : 1, sizeof(*c->units));
     c->shared = calloc(original->count ? original->count : 1, 1);
+    c->global = calloc(original->count ? original->count : 1, 1);
     members = calloc(original->count ? original->count : 1, sizeof(*members));
     done = calloc(original->count ? original->count : 1, 1);
-    if (!c->reuse || !c->inputs.units || !c->units || !c->shared || !members || !done) goto bad;
+    if (!c->reuse || !c->inputs.units || !c->units || !c->shared || !c->global || !members || !done) goto bad;
     memcpy(c->inputs.units, original->units, original->count * sizeof(*c->inputs.units));
     if (!pl_localize(b, sources, error, capacity)) goto bad;
     /* Group members once: eligible units sorted by family and name. */
@@ -1845,6 +1955,7 @@ static int pl_contributions_open(pl_build *b, const sh_package_sources *sources,
     }
     if (!pl_tokens(c, error, capacity) ||
         !pl_registration_phase(b, sources, members, eligible, error, capacity)) goto bad;
+    if (!pl_tokens(c, error, capacity) || !pl_hands_phase(b, sources, error, capacity)) goto bad;
     if (!pl_tokens(c, error, capacity)) goto bad;
     /* Keep a verified baseline selector/bank slot. Other bound variants get
      * private native identities; historical contexts are never overwritten by
@@ -2146,7 +2257,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
      * objects. Certified vanilla bindings still retain native names. Local
      * library compilation continues composing its one shared editor surface. */
     pl_assignment assignment = {&b.contributions->inputs, b.contributions->shared,
-        b.materials != NULL};
+        b.materials != NULL, b.contributions->global};
     b.contributions->assignment = &assignment;
     sh_package_link_registry identity_adapter = {0};
     if (native && native->identities.head_slot) {
@@ -2154,7 +2265,7 @@ static int pl_compile(const sh_package_sources *sources, const sh_package_proven
         if (!b.identities) goto done;
         for (size_t i = 0; i < assignment.inputs->count; i++) {
             const sh_package_link_unit *unit = assignment.inputs->units + i;
-            if (assignment.shared[i] && pl_shared_declaration(unit->family) &&
+            if (((assignment.shared[i] && pl_shared_declaration(unit->family)) || assignment.global[i]) &&
                 !sh_package_native_registry_share(b.identities, unit->family, unit->name)) goto done;
         }
         identity_adapter = sh_package_native_registry_adapter(b.identities);
