@@ -77,42 +77,104 @@ static int quote_is_inherit_key(const unsigned char *text, size_t quote_start)
     return ascii_equal_span(text + i, key_end - i, "inherit");
 }
 
-static void add_reference(const sh_decl_reference_item *items, size_t count,
-                                 size_t dependent, const unsigned char *text,
-                                 size_t length, unsigned char *edges,
-                                 unsigned char *inherit_edges,
-                                 size_t *indegree, size_t *edge_count,
-                                 int is_inherit, const char *required_type)
+/* Dependency ordering works on adjacency lists: a hashed name index resolves
+ * each quoted reference, and every scan below is linear in items and edges.
+ * The order equals the definition above: repeatedly emit the ready component
+ * whose first member sorts lowest, members parent-first then by name. */
+typedef struct decl_pair {
+    size_t from, to;
+} decl_pair;
+
+typedef struct decl_order_work {
+    const sh_decl_reference_item *items;
+    size_t count;
+    size_t *bucket_head;
+    size_t *bucket_next;
+    size_t bucket_mask;
+    decl_pair *edges;
+    size_t edge_count, edge_capacity;
+    decl_pair *inherits;
+    size_t inherit_count, inherit_capacity;
+    int failed;
+} decl_order_work;
+
+static uint64_t decl_name_hash(const unsigned char *text, size_t length)
 {
+    uint64_t hash = UINT64_C(14695981039346656037);
     size_t i;
-    size_t match = count;
-    size_t matches = 0;
-    for (i = 0; i < count; i++) {
-        if (required_type && (!items[i].type ||
-            !ascii_equal_span((const unsigned char *)items[i].type,
-                               strlen(items[i].type), required_type))) continue;
-        if (!resource_name_equal(text, length, items[i].name)) continue;
-        match = i;
-        matches++;
-        if (matches > 1) return;
+    for (i = 0; i < length; i++) {
+        int c = text[i] == '\\' ? '/' : ascii_lower(text[i]);
+        hash ^= (unsigned char)c;
+        hash *= UINT64_C(1099511628211);
     }
-    if (matches == 1) {
-        if (is_inherit) inherit_edges[match * count + dependent] = 1;
-        if (match != dependent && !edges[match * count + dependent]) {
-            edges[match * count + dependent] = 1;
-            indegree[dependent]++;
-            (*edge_count)++;
-        }
-    }
+    return hash;
 }
 
-static void scan_references(const sh_decl_reference_item *items, size_t count,
-                            size_t dependent, unsigned char *edges,
-                            unsigned char *inherit_edges, size_t *indegree,
-                            size_t *edge_count)
+static int decl_pair_push(decl_pair **pairs, size_t *count, size_t *capacity,
+                          size_t from, size_t to)
 {
-    const unsigned char *text = items[dependent].text;
-    size_t length = items[dependent].text_length;
+    if (*count == *capacity) {
+        size_t next = *capacity ? *capacity * 2 : 256;
+        decl_pair *grown = next > *capacity && next <= SIZE_MAX / sizeof(*grown) ?
+            (decl_pair *)realloc(*pairs, next * sizeof(*grown)) : NULL;
+        if (!grown) return 0;
+        *pairs = grown;
+        *capacity = next;
+    }
+    (*pairs)[*count].from = from;
+    (*pairs)[*count].to = to;
+    (*count)++;
+    return 1;
+}
+
+static int decl_pair_order(const void *left, const void *right)
+{
+    const decl_pair *a = (const decl_pair *)left, *b = (const decl_pair *)right;
+    if (a->from != b->from) return a->from < b->from ? -1 : 1;
+    return a->to < b->to ? -1 : (a->to > b->to ? 1 : 0);
+}
+
+static size_t decl_pair_unique(decl_pair *pairs, size_t count)
+{
+    size_t kept = 0, i;
+    if (count > 1) qsort(pairs, count, sizeof(*pairs), decl_pair_order);
+    for (i = 0; i < count; i++)
+        if (!kept || pairs[kept - 1].from != pairs[i].from || pairs[kept - 1].to != pairs[i].to)
+            pairs[kept++] = pairs[i];
+    return kept;
+}
+
+/* One quoted or typed reference: a single matching item gives an edge from
+ * that item to the dependent; an ambiguous name gives none. */
+static void add_reference(decl_order_work *w, size_t dependent,
+                          const unsigned char *text, size_t length,
+                          int is_inherit, const char *required_type)
+{
+    size_t match = w->count, matches = 0, i;
+    if (w->failed) return;
+    for (i = w->bucket_head[decl_name_hash(text, length) & w->bucket_mask];
+         i != SIZE_MAX; i = w->bucket_next[i]) {
+        const sh_decl_reference_item *item = w->items + i;
+        if (required_type && (!item->type ||
+            !ascii_equal_span((const unsigned char *)item->type,
+                              strlen(item->type), required_type))) continue;
+        if (!resource_name_equal(text, length, item->name)) continue;
+        match = i;
+        if (++matches > 1) return;
+    }
+    if (matches != 1) return;
+    if (is_inherit && !decl_pair_push(&w->inherits, &w->inherit_count,
+                                      &w->inherit_capacity, match, dependent))
+        w->failed = 1;
+    if (match != dependent && !decl_pair_push(&w->edges, &w->edge_count,
+                                              &w->edge_capacity, match, dependent))
+        w->failed = 1;
+}
+
+static void scan_references(decl_order_work *w, size_t dependent)
+{
+    const unsigned char *text = w->items[dependent].text;
+    size_t length = w->items[dependent].text_length;
     size_t i = 0;
     int line_comment = 0;
     int block_comment = 0;
@@ -149,9 +211,8 @@ static void scan_references(const sh_decl_reference_item *items, size_t count,
             size_t start = ++i;
             while (i < length && text[i] != '"') i++;
             if (i < length)
-                add_reference(items, count, dependent, text + start,
-                                     i - start, edges, inherit_edges, indegree,
-                                     edge_count, quote_is_inherit_key(text, quote_start), NULL);
+                add_reference(w, dependent, text + start, i - start,
+                              quote_is_inherit_key(text, quote_start), NULL);
             if (i < length) i++;
             continue;
         }
@@ -159,284 +220,262 @@ static void scan_references(const sh_decl_reference_item *items, size_t count,
          * not quoted paths. Match the complete token and only the table type:
          * an unrelated decl with the same name cannot make this ambiguous.
          * Array fields in other decl types are not material expressions. */
-        if (is_decl_key_char(c) && items[dependent].type &&
-            ascii_equal_span((const unsigned char *)items[dependent].type,
-                              strlen(items[dependent].type), "material")) {
+        if (is_decl_key_char(c) && w->items[dependent].type &&
+            ascii_equal_span((const unsigned char *)w->items[dependent].type,
+                              strlen(w->items[dependent].type), "material")) {
             size_t start = i;
             size_t end;
             while (i < length && is_decl_key_char(text[i])) i++;
             end = i;
             while (i < length && is_decl_space(text[i])) i++;
             if (i < length && text[i] == '[')
-                add_reference(items, count, dependent, text + start, end - start,
-                              edges, inherit_edges, indegree, edge_count, 0, "table");
+                add_reference(w, dependent, text + start, end - start, 0, "table");
             continue;
         }
         i++;
     }
 }
 
-typedef struct decl_scc_context {
-    const unsigned char *edges;
+/* Binary min-heap of item or component indices ordered by a first item. */
+typedef struct decl_heap {
+    size_t *slots;
     size_t count;
-    size_t next_index;
-    size_t *indices;
-    size_t *lowlink;
-    unsigned char *on_stack;
-    size_t *stack;
-    size_t stack_count;
-    size_t *component;
-    size_t component_count;
-} decl_scc_context;
+    const sh_decl_reference_item *items;
+    const size_t *key; /* NULL: the entry is its own item */
+} decl_heap;
 
-static void decl_scc_visit(decl_scc_context *context, size_t vertex)
+static int decl_heap_less(const decl_heap *heap, size_t left, size_t right)
 {
-    size_t adjacent;
-    size_t root;
-
-    context->indices[vertex] = context->next_index;
-    context->lowlink[vertex] = context->next_index;
-    context->next_index++;
-    context->stack[context->stack_count++] = vertex;
-    context->on_stack[vertex] = 1;
-
-    for (adjacent = 0; adjacent < context->count; adjacent++) {
-        if (!context->edges[vertex * context->count + adjacent]) continue;
-        if (context->indices[adjacent] == SIZE_MAX) {
-            decl_scc_visit(context, adjacent);
-            if (context->lowlink[adjacent] < context->lowlink[vertex])
-                context->lowlink[vertex] = context->lowlink[adjacent];
-        } else if (context->on_stack[adjacent] &&
-                   context->indices[adjacent] < context->lowlink[vertex]) {
-            context->lowlink[vertex] = context->indices[adjacent];
-        }
-    }
-
-    if (context->lowlink[vertex] != context->indices[vertex]) return;
-    do {
-        root = context->stack[--context->stack_count];
-        context->on_stack[root] = 0;
-        context->component[root] = context->component_count;
-    } while (root != vertex);
-    context->component_count++;
+    size_t a = heap->key ? heap->key[left] : left;
+    size_t b = heap->key ? heap->key[right] : right;
+    return decl_name_compare(heap->items, a, b) < 0;
 }
 
-static size_t component_first_member(const sh_decl_reference_item *items,
-                                     const size_t *component, size_t count,
-                                     size_t component_id)
+static void decl_heap_push(decl_heap *heap, size_t value)
 {
-    size_t i;
-    size_t first = count;
-    for (i = 0; i < count; i++) {
-        if (component[i] != component_id) continue;
-        if (first == count || decl_name_compare(items, i, first) < 0) first = i;
+    size_t at = heap->count++;
+    heap->slots[at] = value;
+    while (at && decl_heap_less(heap, heap->slots[at], heap->slots[(at - 1) / 2])) {
+        size_t parent = (at - 1) / 2, swap = heap->slots[parent];
+        heap->slots[parent] = heap->slots[at];
+        heap->slots[at] = swap;
+        at = parent;
     }
-    return first;
 }
 
-static int component_before(const sh_decl_reference_item *items,
-                            const size_t *component, size_t count,
-                            size_t left, size_t right)
+static size_t decl_heap_pop(decl_heap *heap)
 {
-    size_t left_first;
-    size_t right_first;
-    if (right == count) return 1;
-    left_first = component_first_member(items, component, count, left);
-    right_first = component_first_member(items, component, count, right);
-    return decl_name_compare(items, left_first, right_first) < 0;
-}
-
-static int order_component_members(const sh_decl_reference_item *items,
-                                   size_t count, size_t component_id,
-                                   const size_t *component,
-                                   const unsigned char *inherit_edges,
-                                   size_t *member_indegree,
-                                   unsigned char *member_emitted,
-                                   sh_decl_reference_item *ordered,
-                                   size_t *ordered_count)
-{
-    size_t i;
-
-    for (i = 0; i < count; i++) {
-        if (component[i] != component_id) continue;
-        member_indegree[i] = 0;
-        member_emitted[i] = 0;
-    }
-    for (i = 0; i < count; i++) {
-        size_t dependent;
-        if (component[i] != component_id) continue;
-        for (dependent = 0; dependent < count; dependent++) {
-            if (component[dependent] == component_id &&
-                inherit_edges[i * count + dependent]) {
-                member_indegree[dependent]++;
-            }
-        }
-    }
-
+    size_t top = heap->slots[0], at = 0;
+    heap->slots[0] = heap->slots[--heap->count];
     for (;;) {
-        size_t selected = count;
-        size_t dependent;
-        for (i = 0; i < count; i++) {
-            if (component[i] != component_id || member_emitted[i] ||
-                member_indegree[i] != 0) continue;
-            if (selected == count || decl_name_compare(items, i, selected) < 0)
-                selected = i;
-        }
-        if (selected == count) {
-            /* A cycle in explicit inheritance is unsafe: there is no valid
-             * parent-before-child order, so refuse the whole snapshot. */
-            for (i = 0; i < count; i++)
-                if (component[i] == component_id && !member_emitted[i]) return 0;
-            return 1;
-        }
-        member_emitted[selected] = 1;
-        ordered[(*ordered_count)++] = items[selected];
-        for (dependent = 0; dependent < count; dependent++) {
-            if (component[dependent] == component_id &&
-                inherit_edges[selected * count + dependent] &&
-                member_indegree[dependent] > 0) {
-                member_indegree[dependent]--;
-            }
-        }
+        size_t left = at * 2 + 1, right = left + 1, least = at, swap;
+        if (left < heap->count && decl_heap_less(heap, heap->slots[left], heap->slots[least])) least = left;
+        if (right < heap->count && decl_heap_less(heap, heap->slots[right], heap->slots[least])) least = right;
+        if (least == at) break;
+        swap = heap->slots[least];
+        heap->slots[least] = heap->slots[at];
+        heap->slots[at] = swap;
+        at = least;
     }
+    return top;
+}
+
+/* Compressed adjacency: offsets[from]..offsets[from + 1] index targets. */
+static int decl_adjacency(const decl_pair *pairs, size_t pair_count, size_t vertices,
+                          size_t **offsets, size_t **targets)
+{
+    size_t i;
+    *offsets = (size_t *)calloc(vertices + 1, sizeof(**offsets));
+    *targets = (size_t *)malloc((pair_count ? pair_count : 1) * sizeof(**targets));
+    if (!*offsets || !*targets) return 0;
+    for (i = 0; i < pair_count; i++) (*offsets)[pairs[i].from + 1]++;
+    for (i = 0; i < vertices; i++) (*offsets)[i + 1] += (*offsets)[i];
+    for (i = 0; i < pair_count; i++) (*targets)[i] = pairs[i].to; /* pairs are sorted by from */
+    return 1;
 }
 
 int sh_decl_text_order_by_references(sh_decl_reference_item *items, size_t count,
                                      size_t *out_edge_count,
                                      size_t *out_cycle_count)
 {
-    unsigned char *edges = NULL;
-    unsigned char *inherit_edges = NULL;
-    unsigned char *component_edges = NULL;
-    unsigned char *component_emitted = NULL;
-    unsigned char *member_emitted = NULL;
-    size_t *indegree = NULL;
-    size_t *component_indegree = NULL;
-    size_t *component = NULL;
-    size_t *indices = NULL;
-    size_t *lowlink = NULL;
-    size_t *stack = NULL;
-    size_t *member_indegree = NULL;
+    decl_order_work w;
+    size_t *edge_offsets = NULL, *edge_targets = NULL;
+    size_t *inherit_offsets = NULL, *inherit_targets = NULL;
+    size_t *indices = NULL, *lowlink = NULL, *stack = NULL, *frames = NULL, *positions = NULL;
+    size_t *component = NULL, *first = NULL, *member_offsets = NULL, *members = NULL, *cursor = NULL;
+    size_t *component_offsets = NULL, *component_targets = NULL, *component_indegree = NULL;
+    size_t *member_indegree = NULL, *heap_slots = NULL, *member_slots = NULL;
+    unsigned char *on_stack = NULL;
+    decl_pair *component_pairs = NULL;
     sh_decl_reference_item *ordered = NULL;
-    size_t edge_count = 0;
-    size_t ordered_count = 0;
-    size_t component_count = 0;
-    size_t cycle_count = 0;
-    size_t i;
+    size_t component_count = 0, cycle_count = 0, ordered_count = 0, next_index = 0;
+    size_t component_pair_count = 0, buckets = 1, i;
     int ok = 0;
 
     if (out_edge_count) *out_edge_count = 0;
     if (out_cycle_count) *out_cycle_count = 0;
     if (!items || count == 0) return count == 0;
-    if (count > SIZE_MAX / count) return 0;
-
-    edges = (unsigned char *)calloc(count * count, sizeof(edges[0]));
-    inherit_edges = (unsigned char *)calloc(count * count, sizeof(inherit_edges[0]));
-    component_edges = (unsigned char *)calloc(count * count, sizeof(component_edges[0]));
-    component_emitted = (unsigned char *)calloc(count, sizeof(component_emitted[0]));
-    member_emitted = (unsigned char *)calloc(count, sizeof(member_emitted[0]));
-    indegree = (size_t *)calloc(count, sizeof(indegree[0]));
-    component_indegree = (size_t *)calloc(count, sizeof(component_indegree[0]));
-    component = (size_t *)malloc(count * sizeof(component[0]));
-    indices = (size_t *)malloc(count * sizeof(indices[0]));
-    lowlink = (size_t *)malloc(count * sizeof(lowlink[0]));
-    stack = (size_t *)malloc(count * sizeof(stack[0]));
-    member_indegree = (size_t *)calloc(count, sizeof(member_indegree[0]));
-    ordered = (sh_decl_reference_item *)malloc(count * sizeof(ordered[0]));
-    if (!edges || !inherit_edges || !component_edges || !component_emitted ||
-        !member_emitted || !indegree || !component_indegree || !component ||
-        !indices || !lowlink || !stack || !member_indegree || !ordered) goto done;
-
-    for (i = 0; i < count; i++) {
-        component[i] = SIZE_MAX;
-        indices[i] = SIZE_MAX;
-        scan_references(items, count, i, edges, inherit_edges, indegree,
-                        &edge_count);
+    memset(&w, 0, sizeof(w));
+    w.items = items;
+    w.count = count;
+    if (count >= SIZE_MAX / 4) return 0;
+    while (buckets < count * 2) buckets <<= 1;
+    w.bucket_mask = buckets - 1;
+    w.bucket_head = (size_t *)malloc(buckets * sizeof(*w.bucket_head));
+    w.bucket_next = (size_t *)malloc(count * sizeof(*w.bucket_next));
+    indices = (size_t *)malloc(count * sizeof(*indices));
+    lowlink = (size_t *)malloc(count * sizeof(*lowlink));
+    stack = (size_t *)malloc(count * sizeof(*stack));
+    frames = (size_t *)malloc(count * sizeof(*frames));
+    positions = (size_t *)malloc(count * sizeof(*positions));
+    component = (size_t *)malloc(count * sizeof(*component));
+    on_stack = (unsigned char *)calloc(count, 1);
+    ordered = (sh_decl_reference_item *)malloc(count * sizeof(*ordered));
+    if (!w.bucket_head || !w.bucket_next || !indices || !lowlink || !stack || !frames ||
+        !positions || !component || !on_stack || !ordered) goto done;
+    for (i = 0; i < buckets; i++) w.bucket_head[i] = SIZE_MAX;
+    for (i = count; i-- > 0;) {
+        size_t slot;
+        w.bucket_next[i] = SIZE_MAX;
+        if (!items[i].name) continue;
+        slot = (size_t)decl_name_hash((const unsigned char *)items[i].name,
+                                      strlen(items[i].name)) & w.bucket_mask;
+        w.bucket_next[i] = w.bucket_head[slot];
+        w.bucket_head[slot] = i;
     }
+    for (i = 0; i < count; i++) scan_references(&w, i);
+    if (w.failed) goto done;
+    w.edge_count = decl_pair_unique(w.edges, w.edge_count);
+    w.inherit_count = decl_pair_unique(w.inherits, w.inherit_count);
+    if (!decl_adjacency(w.edges, w.edge_count, count, &edge_offsets, &edge_targets) ||
+        !decl_adjacency(w.inherits, w.inherit_count, count, &inherit_offsets, &inherit_targets))
+        goto done;
 
+    /* Tarjan's strongly connected components, iteratively. */
     {
-        decl_scc_context context;
-        memset(&context, 0, sizeof(context));
-        context.edges = edges;
-        context.count = count;
-        context.indices = indices;
-        context.lowlink = lowlink;
-        context.on_stack = member_emitted;
-        context.stack = stack;
-        context.component = component;
-        for (i = 0; i < count; i++)
-            if (indices[i] == SIZE_MAX) decl_scc_visit(&context, i);
-        component_count = context.component_count;
-    }
-
-    for (i = 0; i < count; i++) {
-        size_t dependent;
-        size_t source_component = component[i];
-        for (dependent = 0; dependent < count; dependent++) {
-            size_t dependent_component = component[dependent];
-            if (!edges[i * count + dependent]) continue;
-            if (source_component == dependent_component) continue;
-            if (!component_edges[source_component * count + dependent_component]) {
-                component_edges[source_component * count + dependent_component] = 1;
-                component_indegree[dependent_component]++;
+        size_t stack_count = 0, root;
+        for (i = 0; i < count; i++) { indices[i] = SIZE_MAX; component[i] = SIZE_MAX; on_stack[i] = 0; }
+        next_index = 0;
+        for (root = 0; root < count; root++) {
+            size_t depth = 0;
+            if (indices[root] != SIZE_MAX) continue;
+            indices[root] = lowlink[root] = next_index++;
+            stack[stack_count++] = root; on_stack[root] = 1;
+            frames[depth] = root; positions[depth] = edge_offsets[root]; depth++;
+            while (depth) {
+                size_t v = frames[depth - 1];
+                if (positions[depth - 1] < edge_offsets[v + 1]) {
+                    size_t u = edge_targets[positions[depth - 1]++];
+                    if (indices[u] == SIZE_MAX) {
+                        indices[u] = lowlink[u] = next_index++;
+                        stack[stack_count++] = u; on_stack[u] = 1;
+                        frames[depth] = u; positions[depth] = edge_offsets[u]; depth++;
+                    } else if (on_stack[u] && indices[u] < lowlink[v]) {
+                        lowlink[v] = indices[u];
+                    }
+                    continue;
+                }
+                if (lowlink[v] == indices[v]) {
+                    size_t member;
+                    do {
+                        member = stack[--stack_count];
+                        on_stack[member] = 0;
+                        component[member] = component_count;
+                    } while (member != v);
+                    component_count++;
+                }
+                depth--;
+                if (depth && lowlink[v] < lowlink[frames[depth - 1]])
+                    lowlink[frames[depth - 1]] = lowlink[v];
             }
         }
+    }
+
+    /* Members and first (lowest-named) member of every component. */
+    first = (size_t *)malloc(component_count * sizeof(*first));
+    member_offsets = (size_t *)calloc(component_count + 1, sizeof(*member_offsets));
+    members = (size_t *)malloc(count * sizeof(*members));
+    cursor = (size_t *)malloc(component_count * sizeof(*cursor));
+    member_indegree = (size_t *)calloc(count, sizeof(*member_indegree));
+    member_slots = (size_t *)malloc(count * sizeof(*member_slots));
+    heap_slots = (size_t *)malloc(component_count * sizeof(*heap_slots));
+    component_indegree = (size_t *)calloc(component_count, sizeof(*component_indegree));
+    component_pairs = (decl_pair *)malloc((w.edge_count ? w.edge_count : 1) * sizeof(*component_pairs));
+    if (!first || !member_offsets || !members || !cursor || !member_indegree || !member_slots ||
+        !heap_slots || !component_indegree || !component_pairs) goto done;
+    for (i = 0; i < component_count; i++) first[i] = SIZE_MAX;
+    for (i = 0; i < count; i++) {
+        size_t c = component[i];
+        member_offsets[c + 1]++;
+        if (first[c] == SIZE_MAX || decl_name_compare(items, i, first[c]) < 0) first[c] = i;
     }
     for (i = 0; i < component_count; i++) {
-        size_t member_count = 0;
-        size_t member;
-        for (member = 0; member < count; member++)
-            if (component[member] == i) member_count++;
+        member_offsets[i + 1] += member_offsets[i];
+        cursor[i] = member_offsets[i];
+    }
+    for (i = 0; i < count; i++) members[cursor[component[i]]++] = i;
+    for (i = 0; i < component_count; i++) {
+        size_t member_count = member_offsets[i + 1] - member_offsets[i];
         if (member_count > 1) cycle_count += member_count;
-        for (member = 0; member < count; member++) {
-            if (component[member] == i && inherit_edges[member * count + member])
-                cycle_count += member_count == 1 ? 1 : 0;
+    }
+    /* A self-inherit never reaches indegree zero and refuses below. */
+    for (i = 0; i < w.inherit_count; i++)
+        if (component[w.inherits[i].from] == component[w.inherits[i].to]) member_indegree[w.inherits[i].to]++;
+
+    /* Condensed edges and their indegrees. */
+    for (i = 0; i < w.edge_count; i++) {
+        size_t from = component[w.edges[i].from], to = component[w.edges[i].to];
+        if (from == to) continue;
+        component_pairs[component_pair_count].from = from;
+        component_pairs[component_pair_count].to = to;
+        component_pair_count++;
+    }
+    component_pair_count = decl_pair_unique(component_pairs, component_pair_count);
+    if (!decl_adjacency(component_pairs, component_pair_count, component_count,
+                        &component_offsets, &component_targets)) goto done;
+    for (i = 0; i < component_pair_count; i++) component_indegree[component_pairs[i].to]++;
+
+    {
+        decl_heap ready = {heap_slots, 0, items, first};
+        for (i = 0; i < component_count; i++)
+            if (!component_indegree[i]) decl_heap_push(&ready, i);
+        while (ready.count) {
+            size_t selected = decl_heap_pop(&ready), emitted = 0, k;
+            decl_heap order = {member_slots, 0, items, NULL};
+            for (k = member_offsets[selected]; k < member_offsets[selected + 1]; k++)
+                if (!member_indegree[members[k]]) decl_heap_push(&order, members[k]);
+            while (order.count) {
+                size_t member = decl_heap_pop(&order);
+                ordered[ordered_count++] = items[member];
+                emitted++;
+                for (k = inherit_offsets[member]; k < inherit_offsets[member + 1]; k++) {
+                    size_t dependent = inherit_targets[k];
+                    if (component[dependent] != selected || !member_indegree[dependent]) continue;
+                    if (!--member_indegree[dependent]) decl_heap_push(&order, dependent);
+                }
+            }
+            /* A cycle in explicit inheritance is unsafe: there is no valid
+             * parent-before-child order, so refuse the whole snapshot. */
+            if (emitted != member_offsets[selected + 1] - member_offsets[selected]) goto done;
+            for (k = component_offsets[selected]; k < component_offsets[selected + 1]; k++)
+                if (!--component_indegree[component_targets[k]]) decl_heap_push(&ready, component_targets[k]);
         }
     }
-    while (ordered_count < count) {
-        size_t selected_component = component_count;
-        size_t component_id;
-        for (component_id = 0; component_id < component_count; component_id++) {
-            if (component_emitted[component_id] || component_indegree[component_id] != 0)
-                continue;
-            if (selected_component == component_count ||
-                component_before(items, component, count, component_id,
-                                 selected_component)) {
-                selected_component = component_id;
-            }
-        }
-        if (selected_component == component_count) goto done;
-        if (!order_component_members(items, count, selected_component, component,
-                                     inherit_edges, member_indegree, member_emitted,
-                                     ordered, &ordered_count)) goto done;
-        component_emitted[selected_component] = 1;
-        for (component_id = 0; component_id < component_count; component_id++) {
-            if (component_edges[selected_component * count + component_id] &&
-                component_indegree[component_id] > 0) {
-                component_indegree[component_id]--;
-            }
-        }
-    }
+    if (ordered_count != count) goto done;
 
     memcpy(items, ordered, count * sizeof(items[0]));
-    if (out_edge_count) *out_edge_count = edge_count;
+    if (out_edge_count) *out_edge_count = w.edge_count;
     if (out_cycle_count) *out_cycle_count = cycle_count;
     ok = 1;
 
 done:
+    free(w.bucket_head); free(w.bucket_next); free(w.edges); free(w.inherits);
+    free(edge_offsets); free(edge_targets); free(inherit_offsets); free(inherit_targets);
+    free(indices); free(lowlink); free(stack); free(frames); free(positions); free(on_stack);
+    free(component); free(first); free(member_offsets); free(members); free(cursor);
+    free(component_offsets); free(component_targets); free(component_indegree);
+    free(component_pairs); free(member_indegree); free(heap_slots); free(member_slots);
     free(ordered);
-    free(member_indegree);
-    free(stack);
-    free(lowlink);
-    free(indices);
-    free(component);
-    free(component_indegree);
-    free(indegree);
-    free(member_emitted);
-    free(component_emitted);
-    free(component_edges);
-    free(inherit_edges);
-    free(edges);
     return ok;
 }
 
