@@ -63,6 +63,10 @@ int sh_package_audio_program_bus_edited(const sh_package_audio_program *program)
  * streams; failures preserve this entire prior view. This is prepared output,
  * not proof of native bus publication. Owners use the unbound policy indexes. */
 const sh_audio_bus_policy *sh_package_audio_program_bound_bus_policy(const sh_package_audio_program *program);
+/* The native baseline recipes alone, composed and bound in the same
+ * transaction (original IDs). Every key a program can edit has its native
+ * value here, including keys no active program leaves unedited. */
+const sh_audio_bus_policy *sh_package_audio_program_bound_baseline_bus(const sh_package_audio_program *program);
 int sh_package_audio_program_bus_policy_owners(const sh_package_audio_program *program,
     size_t setting,const sh_package_owners **owners,const sh_package_owners **gameplay);
 /* Prepared shared controls from selected banks and their installed originals.

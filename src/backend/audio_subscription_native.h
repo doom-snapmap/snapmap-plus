@@ -99,6 +99,10 @@ int sh_audio_subscription_valid(const sh_audio_subscription_native *native);
  * and mode, or when an empty request finds no record. */
 int sh_audio_subscription_matches(const sh_audio_subscription_native *native,
     const sh_audio_subscription_request *request);
+/* Parameters with a live record for consumer, ascending; at most capacity
+ * are stored, the total is returned. */
+size_t sh_audio_subscription_parameters(const sh_audio_subscription_native *native, const void *consumer,
+    uint32_t *out, size_t capacity);
 /* Curve count of the live record for (consumer, parameter), 0 without one; the
  * first curve is copied to first (points remain native memory, type 0). */
 size_t sh_audio_subscription_live(const sh_audio_subscription_native *native, const void *consumer,

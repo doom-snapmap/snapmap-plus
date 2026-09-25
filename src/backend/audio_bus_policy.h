@@ -23,6 +23,7 @@ typedef struct sh_audio_bus_setting {
     sh_audio_bus_record field; /* Owned unbound value, offset zero. */
     unsigned char *body;
     int removed;
+    int edited; /* Differs from the native baseline recipe, or has none. */
     size_t recipe,value; /* value=SIZE_MAX for inferred removal. */
     sh_audio_bus_contributor *contributors;
     size_t contributor_count;

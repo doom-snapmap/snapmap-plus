@@ -403,6 +403,23 @@ int sh_audio_subscription_matches(const sh_audio_subscription_native *native,
     }
     return 1;
 }
+size_t sh_audio_subscription_parameters(const sh_audio_subscription_native *native, const void *consumer,
+    uint32_t *out, size_t capacity)
+{
+    sh_audio_parameter_table *table = native && native->parameters && native->parameters->parameter_slot ?
+        *native->parameters->parameter_slot : NULL;
+    size_t found = 0;
+    if (!table) return 0;
+    for (size_t i = 0; i < 193; i++)
+        for (unsigned char *record = as_buckets(table)[i]; record; record = *as_next(record)) {
+            if (as_consumer(record) != consumer) continue;
+            if (out && found < capacity) out[found] = as_parameter(record);
+            found++;
+        }
+    for (size_t i = 1; out && i < found && i < capacity; i++)
+        for (size_t j = i; j > 0 && out[j - 1] > out[j]; j--) { uint32_t t = out[j]; out[j] = out[j - 1]; out[j - 1] = t; }
+    return found;
+}
 size_t sh_audio_subscription_live(const sh_audio_subscription_native *native, const void *consumer,
     uint32_t parameter, sh_audio_subscription_curve *first)
 {

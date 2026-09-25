@@ -140,14 +140,22 @@ static void edits_and_deletions(void)
     int baseline[]={1,0,0,0};trial *t=open_trial(r,baseline,4);sh_audio_bus_policy p=compile(t);
     check_value(&p,71,SH_AUDIO_BUS_FIELD_PROPERTY,7,11);check_value(&p,71,SH_AUDIO_BUS_FIELD_PROPERTY,8,21);
     check_value(&p,71,SH_AUDIO_BUS_FIELD_PROPERTY,9,30);check_value(&p,71,SH_AUDIO_BUS_FIELD_PROPERTY,10,40);
-    const sh_audio_bus_setting *s=find(&p,71,SH_AUDIO_BUS_FIELD_PROPERTY,7,0);assert(s->contributor_count==2);
+    const sh_audio_bus_setting *s=find(&p,71,SH_AUDIO_BUS_FIELD_PROPERTY,7,0);assert(s->contributor_count==2 && s->edited);
+    /* A key no recipe changes keeps the native value and is not an edit. */
+    r[3]=r[0];r[3].properties[3]=(pair){11,50};r[3].property_count=3;r[3].properties[2]=(pair){12,60};
+    {
+        sh_audio_bus_policy q;trial *u=open_trial(r,baseline,1);q=compile(u);
+        for(size_t i=0;i<q.count;i++)assert(!q.settings[i].edited);
+        sh_audio_bus_policy_free(&q);close_trial(u);
+    }
+    r[3]=r[1];
     for(size_t i=0;i<s->contributor_count;i++)assert(s->contributors[i].recipe==1 || s->contributors[i].recipe==3);
     permutations(t,&p,0);close_trial(t);
     /* Output bodies remain owned after every source/graph has gone away. */
     check_value(&p,71,SH_AUDIO_BUS_FIELD_PROPERTY,7,11);sh_audio_bus_policy_free(&p);
     r[1]=r[0];r[1].properties[0]=r[1].properties[1];r[1].property_count=1;r[2]=r[0];
     t=open_trial(r,baseline,3);p=compile(t);s=find(&p,71,SH_AUDIO_BUS_FIELD_PROPERTY,7,0);
-    assert(s->removed && !s->body && !s->field.length && s->contributor_count==1);
+    assert(s->removed && s->edited && !s->body && !s->field.length && s->contributor_count==1);
     assert(s->contributors[0].recipe==1 && s->contributors[0].value==SIZE_MAX);permutations(t,&p,0);
     sh_audio_bus_policy_free(&p);close_trial(t);
     r[2].properties[0].value=12;t=open_trial(r,baseline,3);p=compile(t);
