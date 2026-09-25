@@ -117,6 +117,7 @@ $tests = @(
     @{ name = "nav_heap_test"; src = 'nav_heap_test.c'; arg = "" }
     @{ name = "nav_heap_hook_test"; src = 'nav_heap_hook_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "patch_test"; src = 'patch_test.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
+    @{ name = "cvar_unlock_test"; src = 'cvar_unlock_test.c ..\src\backend\cvar_unlock.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "map_payload_test"; src = 'map_payload_test.c ..\src\backend\map_payload.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = "" }
     @{ name = "map_source_test"; src = 'map_source_test.c'; arg = "" }
     @{ name = "map_native_test"; src = 'map_native_test.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c'; arg = "" }
@@ -214,6 +215,7 @@ if ($Doom) {
     if (-not (Test-Path $Doom)) { throw "-Doom path not found: $Doom" }
     $da = (Resolve-Path $Doom).Path
     $tests += @{ name = "sig_test";     src = 'sig_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c';     arg = $da }
+    $tests += @{ name = "cvar_unlock_image_test"; src = 'cvar_unlock_test.c ..\src\backend\cvar_unlock.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = $da }
     $tests += @{ name = "hooktol_test"; src = 'hooktol_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $da }
     $tests += @{ name = "globals_test"; src = 'globals_test.c ..\src\backend\audio_bank_commands.c ..\src\backend\audio_limits_native.c ..\src\backend\audio_environment_native.c ..\src\backend\audio_state_native.c ..\src\backend\audio_parameter_native.c ..\src\backend\audio_subscription_native.c ..\src\backend\audio_switch_native.c ..\src\backend\audio_bank_gate.c map_published_bindings_stubs.c ..\src\backend\resource_resident.c ..\src\backend\resource_catalog.c ..\src\backend\resource_graph.c ..\src\backend\raw_deflate.c ..\src\backend\map_source.c ..\src\backend\map_native.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c ..\src\backend\map_published.c ..\src\backend\map_transition.c ..\src\backend\editor_transition.c ..\src\backend\decl_native_schema.c ..\src\backend\decl_script_schema.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = $da }
 }
@@ -222,6 +224,7 @@ if ($DoomAlt) {
     if (-not (Test-Path $DoomAlt)) { throw "-DoomAlt path not found: $DoomAlt" }
     $alt = (Resolve-Path $DoomAlt).Path
     $tests += @{ name = "sig_test_alt"; src = 'sig_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; arg = @($alt, "portable") }
+    $tests += @{ name = "cvar_unlock_image_test_alt"; src = 'cvar_unlock_test.c ..\src\backend\cvar_unlock.c ..\src\backend\patch.c ..\src\backend\hook.c'; defs = '/DSH_PATCH_TESTING'; arg = $alt }
     $tests += @{ name = "globals_test_alt"; src = 'globals_test.c ..\src\backend\audio_bank_commands.c ..\src\backend\audio_limits_native.c ..\src\backend\audio_environment_native.c ..\src\backend\audio_state_native.c ..\src\backend\audio_parameter_native.c ..\src\backend\audio_subscription_native.c ..\src\backend\audio_switch_native.c ..\src\backend\audio_bank_gate.c map_published_bindings_stubs.c ..\src\backend\resource_resident.c ..\src\backend\resource_catalog.c ..\src\backend\resource_graph.c ..\src\backend\raw_deflate.c ..\src\backend\map_source.c ..\src\backend\map_native.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c ..\src\backend\map_published.c ..\src\backend\map_transition.c ..\src\backend\editor_transition.c ..\src\backend\decl_native_schema.c ..\src\backend\decl_script_schema.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = @($alt, "portable") }
 }
 
