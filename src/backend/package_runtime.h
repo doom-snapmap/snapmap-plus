@@ -402,6 +402,9 @@ char *sh_package_runtime_summary(void);
 #include "package_source_link.h"
 /* Capture-only adapter for the synthetic native reader fixtures. */
 void sh_package_runtime_test_constructor_requests(sh_package_source_implicit capture, void *context);
+/* The historical bindings a map without recorded provenance receives. */
+int sh_package_runtime_test_legacy_bindings(const sh_package_compilation *compiled,
+    const sh_resource_catalog *catalog, sh_package_provenance *out);
 int sh_package_runtime_test_consumer_changes(const sh_package_consumers *before,
     const sh_package_consumers *after, sh_package_changes *changes);
 #ifdef SH_PACKAGE_RUNTIME_NATIVE_TESTING

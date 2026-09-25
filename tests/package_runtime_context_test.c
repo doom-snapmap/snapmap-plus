@@ -124,6 +124,66 @@ static int admission_activate(void *context, int restoring,
     return 1;
 }
 
+/* A map saved without recorded provenance gets a historical context from its
+ * old composition. A shared include it supplies binds the SnapMap programs
+ * catalogued beneath it, never a program only the campaign archive lists:
+ * such a binding could never be captured and would refuse the whole map. */
+typedef struct pindex_bytes { unsigned char data[512]; size_t length; } pindex_bytes;
+static void pindex_raw(pindex_bytes *b, const void *data, size_t n)
+{ memcpy(b->data + b->length, data, n); b->length += n; }
+static void pindex_be(pindex_bytes *b, uint32_t n)
+{ unsigned char p[4] = {(unsigned char)(n >> 24), (unsigned char)(n >> 16), (unsigned char)(n >> 8), (unsigned char)n}; pindex_raw(b, p, 4); }
+static void pindex_str(pindex_bytes *b, const char *text)
+{
+    uint32_t n = (uint32_t)strlen(text);
+    unsigned char p[4] = {(unsigned char)n, (unsigned char)(n >> 8), (unsigned char)(n >> 16), (unsigned char)(n >> 24)};
+    pindex_raw(b, p, 4); pindex_raw(b, text, n);
+}
+static void pindex_write(const char *relative, const char *program)
+{
+    pindex_bytes b = {{0}, 0}; unsigned char head[0x20] = {5, 'S', 'E', 'R'}, tail[21] = {0};
+    char path[MAX_PATH + 64]; FILE *file;
+    pindex_raw(&b, head, sizeof(head)); pindex_be(&b, 1);
+    pindex_be(&b, 0); pindex_str(&b, "renderProg"); pindex_str(&b, program);
+    pindex_str(&b, "decls/renderprogs/common.inc"); pindex_raw(&b, tail, sizeof(tail));
+    uint32_t size = (uint32_t)b.length - 0x20;
+    b.data[4] = (unsigned char)(size >> 24); b.data[5] = (unsigned char)(size >> 16);
+    b.data[6] = (unsigned char)(size >> 8); b.data[7] = (unsigned char)size;
+    create(relative, ""); /* Tracked for cleanup; the binary index replaces it. */
+    snprintf(path, sizeof(path), "%s\\%s", root, relative);
+    file = fopen(path, "wb"); CHECK(file);
+    if (file) { CHECK(fwrite(b.data, 1, b.length, file) == b.length); fclose(file); }
+}
+static void test_legacy_include_bindings(void)
+{
+    char base[MAX_PATH], path[MAX_PATH], error[1024];
+    create("legacy-catalog/snap_gameresources.resources", ""); create("legacy-catalog/snap_gameresources.patch", "");
+    create("legacy-catalog/gameresources.resources", ""); create("legacy-catalog/gameresources.patch", "");
+    pindex_write("legacy-catalog/snap_gameresources.pindex", "fixture");
+    pindex_write("legacy-catalog/gameresources.pindex", "campaignonly");
+    snprintf(base, sizeof(base), "%s\\legacy-catalog", root);
+    sh_resource_catalog *catalog = sh_resource_catalog_open(base, error, sizeof(error));
+    create("legacy-include/overrides/shader/package.json", "{\"id\":\"legacy-shader\",\"name\":\"Legacy shader\"}");
+    create("legacy-include/overrides/shader/assets/decls/renderprogs/common.inc", "// shared include\n");
+    snprintf(path, sizeof(path), "%s\\legacy-include", root);
+    sh_package_sources *sources = sh_package_sources_scan(path, error, sizeof(error));
+    sh_package_compilation *compiled = sources ? sh_package_compile(sources, NULL, NULL, error, sizeof(error)) : NULL;
+    sh_package_provenance historical = {0};
+    CHECK(catalog && sources && compiled);
+    CHECK(compiled && catalog && sh_package_runtime_test_legacy_bindings(compiled, catalog, &historical));
+    size_t snapmap = 0, campaign = 0;
+    for (size_t i = 0; i < historical.binding_count; i++) {
+        const sh_package_provenance_binding *binding = historical.bindings + i;
+        if (strcmp(binding->family, "renderprog")) continue;
+        snapmap += !strcmp(binding->original, "fixture");
+        campaign += !strcmp(binding->original, "campaignonly");
+    }
+    if (snapmap != 1 || campaign) fprintf(stderr, "legacy include bindings: %zu SnapMap, %zu campaign\n", snapmap, campaign);
+    CHECK(snapmap == 1 && !campaign);
+    sh_package_provenance_free(&historical); sh_package_compilation_free(compiled);
+    sh_package_sources_free(sources); sh_resource_catalog_close(catalog);
+}
+
 static void test_map_usage_admission(void)
 {
     const char *map_root_bytes = "{ class = \"Entity\"; edit = { target = \"admission/child\"; } }";
@@ -2632,6 +2692,7 @@ int main(int argc, char **argv)
     test_local_isolation();
     test_unserved_coverage();
     test_map_usage_admission();
+    test_legacy_include_bindings();
     snprintf(map_a, sizeof(map_a), "%s\\map-a", root); snprintf(map_b, sizeof(map_b), "%s\\map-b", root);
     create("overrides/local/package.json", descriptor);
     create("overrides/local/assets/generated/decls/entitydef/ai/cyberdemon.decl", "{ edit = { health = 12000; } }");

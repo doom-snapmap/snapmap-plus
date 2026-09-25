@@ -595,6 +595,14 @@ static int pr_unserved(char **report, const sh_package *package, const char *rea
     return 1;
 }
 
+/* A path without its own native identity, such as a shared shader include,
+ * names every program catalogued beneath it. Campaign-only programs are not
+ * SnapMap resources: the source link never captures them through a shared
+ * include, so a historical context must not require them either. A map that
+ * needs one supplies its declaration, which carries its own identity. */
+static int pr_campaign_program(const sh_resource_catalog_entry *row)
+{ return row->archive >= 2 && !strcmp(row->type, "renderprog"); }
+
 /* Derive old-name bindings from the historical composition before private
  * linking. Every known root retains the complete original contributor context;
  * this recipe is separate from the newly linked native binding catalog. */
@@ -627,9 +635,10 @@ static int pr_legacy_bindings(const sh_package_compilation *compiled,
                 sources->original_fingerprints : sources->fingerprints, sources->package_count, NULL);
         if (context == SIZE_MAX) { free(cooked); return 0; }
         if (count) {
-            for (size_t e = 0; e < count && ok; e++) if (*entries[e]->type && *entries[e]->name)
-                ok = sh_package_provenance_bind(out, entries[e]->type, entries[e]->name,
-                    entries[e]->name, &context, 1);
+            for (size_t e = 0; e < count && ok; e++)
+                if (*entries[e]->type && *entries[e]->name && !pr_campaign_program(entries[e]))
+                    ok = sh_package_provenance_bind(out, entries[e]->type, entries[e]->name,
+                        entries[e]->name, &context, 1);
         } else if (native_count) {
             for (size_t n = 0; n < native_count && ok; n++) {
                 native = sh_package_resource_native_at(resource, n);
@@ -640,6 +649,11 @@ static int pr_legacy_bindings(const sh_package_compilation *compiled,
     }
     return 1;
 }
+#ifdef SH_PACKAGE_RUNTIME_TESTING
+int sh_package_runtime_test_legacy_bindings(const sh_package_compilation *compiled,
+    const sh_resource_catalog *catalog, sh_package_provenance *out)
+{ return pr_legacy_bindings(compiled, catalog, out); }
+#endif
 
 static int pr_capture_bundles(pr_provider *provider, const sh_package_sources *sources,
     const char *data_root, char *error, size_t capacity)
