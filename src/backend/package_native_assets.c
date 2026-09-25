@@ -47,6 +47,11 @@ struct sh_package_native_assets {
     size_t count, capacity;
     unsigned char pages[32];
     int page_state;
+    /* Captured private page families, keyed by the scope's authored members.
+     * Every material of one scope shares its family; installed originals are
+     * fixed, so equal authored members describe the same capture. */
+    struct { unsigned char key[32]; sh_virtual_page_source *pages; } page_sources[4];
+    size_t page_source_next;
     sh_package_source_shader shader;
     sh_native_resource_registry_source shader_registry;
     sh_package_baseline_reader shader_original;
@@ -86,6 +91,8 @@ void sh_package_native_assets_close(sh_package_native_assets *a)
 {
     if (!a || InterlockedDecrement(&a->references)) return;
     for (size_t i = 0; i < a->count; i++) { free(a->files[i].path); sh_package_file_release(a->files[i].file); }
+    for (size_t i = 0; i < sizeof(a->page_sources) / sizeof(a->page_sources[0]); i++)
+        sh_virtual_page_source_release(a->page_sources[i].pages);
     while (a->shader_originals) {
         na_shader_original *entry = a->shader_originals; a->shader_originals = entry->next;
         free(entry->path); free(entry->body); free(entry);
@@ -295,6 +302,60 @@ static int na_original_pages(sh_package_native_assets *a, const sh_package_compi
         if (exact != 1) return exact;
     }
     return 1;
+}
+/* Page-source contract: a retained installed file, or 0 when it is absent. */
+static int na_page_original(void *context, const char *path, sh_package_file **file,
+    char *error, size_t capacity)
+{
+    sh_package_native_assets *a = context;
+    na_file *entry = na_capture(a, path);
+    *file = NULL;
+    if (!entry || entry->status < 0) {
+        if (error && capacity) snprintf(error, capacity, "cannot capture original page data: %s", path);
+        return -1;
+    }
+    if (!entry->status) return 0;
+    *file = sh_package_file_retain(entry->file);
+    return *file ? 1 : -1;
+}
+/* Identify the scope's authored page members, counting absent ones too. */
+static int na_page_key(const sh_package_compilation *compiled, unsigned char key[32],
+    char *error, size_t capacity)
+{
+    unsigned char fields[21 * 41] = {0};
+    sh_package_file_identity identity;
+    for (unsigned slot = 0; slot < 21; slot++) {
+        char *path = sh_package_virtual_page_companion("virtualtextures/_vmtr", slot);
+        const sh_compiled_resource *resource = path ? sh_package_compilation_find(compiled, path) : NULL;
+        free(path);
+        if (!resource) continue;
+        if (!sh_package_compilation_identity(compiled, resource, &identity, error, capacity)) return 0;
+        fields[slot * 41] = 1;
+        for (size_t j = 0; j < 8; j++) fields[slot * 41 + 1 + j] = (unsigned char)(identity.length >> (j * 8));
+        memcpy(fields + slot * 41 + 9, identity.digest, 32);
+    }
+    if (!sh_package_bytes_identity(fields, sizeof(fields), &identity)) return 0;
+    memcpy(key, identity.digest, 32); return 1;
+}
+/* Caller holds the lock. Every material of one scope shares the captured
+ * family; the owned reference is released by the atlas caller. */
+static sh_virtual_page_source *na_private_pages(sh_package_native_assets *a,
+    const sh_package_compilation *compiled, char *error, size_t capacity)
+{
+    const size_t count = sizeof(a->page_sources) / sizeof(a->page_sources[0]);
+    unsigned char key[32];
+    sh_virtual_page_source *pages;
+    if (!na_page_key(compiled, key, error, capacity)) return NULL;
+    for (size_t i = 0; i < count; i++)
+        if (a->page_sources[i].pages && !memcmp(a->page_sources[i].key, key, 32))
+            return sh_virtual_page_source_retain(a->page_sources[i].pages);
+    pages = sh_virtual_page_source_open(compiled, "virtualtextures/_vmtr", na_page_original, a, error, capacity);
+    if (!pages) return NULL;
+    size_t slot = a->page_source_next++ % count;
+    sh_virtual_page_source_release(a->page_sources[slot].pages);
+    memcpy(a->page_sources[slot].key, key, 32);
+    a->page_sources[slot].pages = sh_virtual_page_source_retain(pages);
+    return pages;
 }
 static int na_admit(void *context, size_t scope, const char *family, const char *name,
     unsigned char semantics[32], char *error, size_t capacity)
@@ -814,11 +875,19 @@ static int na_atlas(void *context, size_t scope, const sh_package_compilation *c
     AcquireSRWLockExclusive(&a->lock);
     int result = na_pages(a);
     if (result == 1) result = na_original_pages(a, compiled);
-    if (result < 0) {
-        if (error && capacity) snprintf(error, capacity, "%s", a->error);
-    } else if (!result) {
-        if (error && capacity) snprintf(error, capacity, "scoped virtual texture page data requires a private provider");
-    } else memcpy(out->content, a->pages, 32);
+    if (!result) {
+        /* Changed page data: the scope's complete family, served by a private
+         * kind-2 provider in the engine's unique-VMTR page mode. */
+        char reason[1024] = "";
+        out->pages = na_private_pages(a, compiled, reason, sizeof(reason));
+        if (!out->pages) {
+            na_error(a, *reason ? reason : "cannot capture private virtual texture page data", NULL); result = -1;
+        } else {
+            out->original = 0; out->page_kind = 2; out->page_mode = 2;
+            memcpy(out->content, sh_virtual_page_source_identity(out->pages), 32); result = 1;
+        }
+    } else if (result == 1) memcpy(out->content, a->pages, 32);
+    if (result < 0 && error && capacity) snprintf(error, capacity, "%s", a->error);
     ReleaseSRWLockExclusive(&a->lock);
     return result;
 }

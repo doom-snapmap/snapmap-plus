@@ -343,12 +343,25 @@ missing adapter still refuses renamed non-generic materials. Production now uses
 `package_native_assets` for loose original tables and the engine-owned `_vmtr`
 provider. It pins original files without reading unrelated texture pages; an
 authored page copy must pass a complete byte-identity comparison before sharing
-that provider. Private page providers remain unfinished. The adapter admits the
-thirteen intrinsic images registered during startup in both renderers as
-engine-owned resources, retaining their native names. This is a finite native
-identity set; arbitrary underscore names and missing source files are not
-admitted. References to a cooked image file remain distinct from an intrinsic
-image even when their basenames match. Other zero-file native families still
+that provider. Changed page data instead captures the scope's complete page family
+once (authored members, then installed originals) and binds a private provider named
+`smp/vt/` plus 24 hex digits, within the engine's 31-character name field and free
+of `_vmtr`. Each private material gains a top-level `landpagefile` naming it and the
+family is projected under that name. At run time `virtual_texture_provider` builds
+each such provider in an empty engine slot from 2 to 30 as kind 2 (it owns a VMTR
+owner) in the unique-VMTR page mode, or OpenGL's sparse mode 4 where the engine
+would convert. It runs inside the resident render scope before materials reparse,
+or right after the engine's VT initialization. Slot 31 is never used because the
+native selector releases it for every missing name. Collection releases a provider
+only when no retained view names it and no parsed material selects its slot. The
+adapter admits the thirteen intrinsic images registered during startup in both
+renderers, the images renderer and VT initialization create by name (the global VMTR
+page table, the Vmtr physical page cache, the transparency and light atlases and the
+augment target) and DeclFind's reserved `_emptyname` as engine-owned resources,
+retaining their native names. This is a finite native identity set; arbitrary
+underscore names and missing source files are not admitted. References to a
+cooked image file remain distinct from an intrinsic image even when their
+basenames match. Other zero-file native families still
 require admission rules. Both compiler passes and material inspection share captured original
 bytes, absence and read failures; they cannot reread different defaults mid-build.
 
@@ -905,11 +918,10 @@ that every material was inspected with the same implicit state. The prepared vie
 owns its records after source cleanup; original unchanged material names retain
 native lookup. Generic materials bypass VMTR lookup as the engine does. These
 operations neither rewrite original tables nor publish a provider. The native
-source adapter still must map the resolved `landPageFile` value to the native
-provider, table source and complete immutable page-data identity, including private
-provider names for changed pages. It must not certify those from a currently
-loaded, potentially modified material. Native rendering acceptance remains
-outstanding.
+source adapter maps the resolved `landPageFile` value to the engine-owned provider,
+or for changed pages to a captured private family and its identity; it never
+certifies either from a currently loaded, potentially modified material. Native
+rendering acceptance remains outstanding.
 
 The linked provider retains each resource's assigned native manager identity
 separately from its declaration-registration identity. Cooked model, image and

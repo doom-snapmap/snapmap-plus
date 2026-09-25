@@ -52,6 +52,7 @@ $tests = @(
     @{ name = "virtual_material_native_test"; src = 'virtual_material_native_test.c ..\src\backend\virtual_material_native.c ..\src\backend\virtual_material.c ..\src\backend\decl_native_lex.c'; arg = "" }
     @{ name = "virtual_material_runtime_test"; src = 'virtual_material_runtime_test.c ..\src\backend\virtual_material_native.c ..\src\backend\virtual_material.c ..\src\backend\decl_native_lex.c'; arg = "" }
     @{ name = "virtual_material_test"; src = 'virtual_material_test.c ..\src\backend\virtual_material.c ..\src\backend\decl_native_lex.c'; arg = "" }
+    @{ name = "virtual_texture_provider_test"; src = 'virtual_texture_provider_test.c ..\src\backend\virtual_texture_provider.c'; defs = '/DSH_VT_PROVIDER_TESTING'; arg = "" }
     @{ name = "package_virtual_pages_test"; src = 'package_virtual_pages_test.c ..\src\backend\package_virtual_pages.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; arg = "" }
     @{ name = "decl_native_rebind_test"; src = 'decl_native_rebind_test.c ..\src\backend\decl_native_rebind.c ..\src\backend\resource_rebind.c ..\src\backend\model_binary.c ..\src\backend\md6_binary.c ..\src\backend\decl_material.c ..\src\backend\decl_native_lex.c ..\src\backend\decl_md6_compose.c ..\src\backend\decl_compose.c ..\src\backend\decl_tree.c ..\src\backend\decl_polymorphic.c'; arg = "" }
     @{ name = "package_link_identity_test"; src = 'package_link_identity_test.c ..\src\backend\package_link_graph.c ..\src\backend\package_link_identity.c ..\src\backend\package_sources.c ..\src\backend\packages.c ..\src\backend\package_descriptor.c ..\src\backend\config_json.c'; arg = "" }
@@ -213,14 +214,14 @@ if ($Doom) {
     $da = (Resolve-Path $Doom).Path
     $tests += @{ name = "sig_test";     src = 'sig_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c';     arg = $da }
     $tests += @{ name = "hooktol_test"; src = 'hooktol_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; defs = '/DSH_HOST_IMAGE_TESTING'; arg = $da }
-    $tests += @{ name = "globals_test"; src = 'globals_test.c ..\src\backend\audio_bank_commands.c ..\src\backend\audio_limits_native.c ..\src\backend\audio_environment_native.c ..\src\backend\audio_state_native.c ..\src\backend\audio_parameter_native.c ..\src\backend\audio_bank_gate.c map_published_bindings_stubs.c ..\src\backend\resource_resident.c ..\src\backend\resource_catalog.c ..\src\backend\resource_graph.c ..\src\backend\raw_deflate.c ..\src\backend\map_source.c ..\src\backend\map_native.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c ..\src\backend\map_published.c ..\src\backend\map_transition.c ..\src\backend\editor_transition.c ..\src\backend\decl_native_schema.c ..\src\backend\decl_script_schema.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = $da }
+    $tests += @{ name = "globals_test"; src = 'globals_test.c ..\src\backend\audio_bank_commands.c ..\src\backend\audio_limits_native.c ..\src\backend\audio_environment_native.c ..\src\backend\audio_state_native.c ..\src\backend\audio_parameter_native.c ..\src\backend\audio_bank_gate.c map_published_bindings_stubs.c ..\src\backend\virtual_texture_provider.c ..\src\backend\resource_resident.c ..\src\backend\resource_catalog.c ..\src\backend\resource_graph.c ..\src\backend\raw_deflate.c ..\src\backend\map_source.c ..\src\backend\map_native.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c ..\src\backend\map_published.c ..\src\backend\map_transition.c ..\src\backend\editor_transition.c ..\src\backend\decl_native_schema.c ..\src\backend\decl_script_schema.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = $da }
 }
 # Check the second executable without requiring the pinned image's addresses.
 if ($DoomAlt) {
     if (-not (Test-Path $DoomAlt)) { throw "-DoomAlt path not found: $DoomAlt" }
     $alt = (Resolve-Path $DoomAlt).Path
     $tests += @{ name = "sig_test_alt"; src = 'sig_test.c ..\src\backend\signatures.c ..\src\backend\host_image.c'; arg = @($alt, "portable") }
-    $tests += @{ name = "globals_test_alt"; src = 'globals_test.c ..\src\backend\audio_bank_commands.c ..\src\backend\audio_limits_native.c ..\src\backend\audio_environment_native.c ..\src\backend\audio_state_native.c ..\src\backend\audio_parameter_native.c ..\src\backend\audio_bank_gate.c map_published_bindings_stubs.c ..\src\backend\resource_resident.c ..\src\backend\resource_catalog.c ..\src\backend\resource_graph.c ..\src\backend\raw_deflate.c ..\src\backend\map_source.c ..\src\backend\map_native.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c ..\src\backend\map_published.c ..\src\backend\map_transition.c ..\src\backend\editor_transition.c ..\src\backend\decl_native_schema.c ..\src\backend\decl_script_schema.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = @($alt, "portable") }
+    $tests += @{ name = "globals_test_alt"; src = 'globals_test.c ..\src\backend\audio_bank_commands.c ..\src\backend\audio_limits_native.c ..\src\backend\audio_environment_native.c ..\src\backend\audio_state_native.c ..\src\backend\audio_parameter_native.c ..\src\backend\audio_bank_gate.c map_published_bindings_stubs.c ..\src\backend\virtual_texture_provider.c ..\src\backend\resource_resident.c ..\src\backend\resource_catalog.c ..\src\backend\resource_graph.c ..\src\backend\raw_deflate.c ..\src\backend\map_source.c ..\src\backend\map_native.c ..\src\backend\map_session_json.c ..\src\backend\config_json.c ..\src\backend\map_published.c ..\src\backend\map_transition.c ..\src\backend\editor_transition.c ..\src\backend\decl_native_schema.c ..\src\backend\decl_script_schema.c ..\src\backend\engine_globals.c ..\src\backend\signatures.c ..\src\backend\host_image.c ..\src\backend\backend_log.c ..\src\backend\perf.c ..\src\common\log_rotate.c'; arg = @($alt, "portable") }
 }
 
 $compiledConsumers = @("package_runtime_context_test", "weapon_hud_test", "package_requirements_test", "strids_packages_test", "override_packages_test", "overrides_internal_test", "decl_server_test")
@@ -373,9 +374,16 @@ foreach ($t in $tests) {
         '..\src\backend\package_virtual_pages.c' -notin ($t.src -split ' ')) {
         $t.src += ' ..\src\backend\package_virtual_pages.c'
     }
-    if ('..\src\backend\package_virtual_material.c' -in ($t.src -split ' ') -and
+    if (('..\src\backend\package_virtual_material.c' -in ($t.src -split ' ') -or
+        '..\src\backend\package_native_assets.c' -in ($t.src -split ' ')) -and
         '..\src\backend\package_virtual_page_source.c' -notin ($t.src -split ' ')) {
         $t.src += ' ..\src\backend\package_virtual_page_source.c'
+    }
+    # The virtual material runtime builds private page providers.
+    if (($t.name -in @('virtual_material_runtime_test', 'package_virtual_material_test', 'package_source_graph_test') -or
+        '..\src\backend\virtual_material_runtime.c' -in ($t.src -split ' ')) -and
+        '..\src\backend\virtual_texture_provider.c' -notin ($t.src -split ' ')) {
+        $t.src += ' ..\src\backend\virtual_texture_provider.c'
     }
 }
 

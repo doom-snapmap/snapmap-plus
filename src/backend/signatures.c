@@ -599,6 +599,16 @@ const sig_entry BACKEND_ENGINE_SIGNATURES[] = {
       "0F 1F 84 00 00 00 00 00 48 8B 4C 24 28 48 8B 0C 0F E8 ?? ?? ?? ?? FF C3 "
       "48 8D 7F 08 3B 5C 24 30 7C E6",
       0xE1B0C0u },
+    { "VirtualTextureSystemInit", /* void(idVirtualTextureSystem*). Renderer init: resets
+                                   * providers 1..31, then builds the global _vmtr in slot 1.
+                                   * Same prologue in both renderers: Vulkan 0xe18440,
+                                   * OpenGL 0xe0a340. */
+      "40 55 41 54 41 55 41 56 41 57 48 8D AC 24 20 BF FF FF B8 E0 41 00 00 E8 ?? ?? ?? ?? "
+      "48 2B E0 48 C7 45 D8 FE FF FF FF 48 89 9C 24 18 42 00 00 48 89 B4 24 20 42 00 00 "
+      "48 89 BC 24 28 42 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 D0 40 00 00 48 8B D9 "
+      "C6 81 ?? ?? 02 00 00 48 8B 0D ?? ?? ?? ?? 48 8B 01 C7 44 24 30 FF FF FF FF "
+      "BF 80 00 00 00 89 7C 24 28 C6 44 24 20 01 44 8D 4F A7 41 B8 00 02 00 00 48 8D 15",
+      0xE18440u },
     { "ResourceGenericLoad", /* void(idResource*). Read source and run native post-parse.
                              * Reconstruction belongs to its fallback path, not every load.
                             * DeclFind normally reaches this through the pending-load path;

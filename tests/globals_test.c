@@ -17,6 +17,7 @@
 #include "map_transition.h"
 #include "editor_transition.h"
 #include "resource_resident.h"
+#include "virtual_texture_provider.h"
 #include "audio_bank_commands.h"
 #include "audio_limits_native.h"
 #include "audio_environment_native.h"
@@ -307,6 +308,34 @@ int main(int argc, char **argv)
         if (!bound || !sh_resource_resident_bind(source, sizeof(source) / sizeof(source[0]), base)) {
             printf("BAD native resident refresh binding\n"); bad++;
         } else printf("OK  native resident refresh binding\n");
+    }
+    {
+        /* Private page providers: the VT system and provider stride, SetSource,
+         * its quiesce and release calls, and OpenGL's sparse-mode globals. */
+        const char *names[] = {"MaterialVirtualTextureRebind", "VirtualTextureSystemInit"};
+        sig_result source[2] = {0};
+        sh_vt_native vt;
+        int bound = 1;
+        for (size_t i = 0; i < 2; i++) {
+            const sig_entry *entry = NULL;
+            for (size_t j = 0; BACKEND_ENGINE_SIGNATURES[j].name; j++)
+                if (!strcmp(BACKEND_ENGINE_SIGNATURES[j].name, names[i])) entry = &BACKEND_ENGINE_SIGNATURES[j];
+            if (!entry || sig_resolve_one(base, entry, &source[i]) != SIG_OK) bound = 0;
+        }
+        void *const *resources = (void *const *)glb_resolve(base, "decl_resource_head", NULL);
+        uintptr_t system = pinned ? 0x5861d10u : 0x415f210u, set = pinned ? 0xe11c50u : 0xe03770u;
+        uintptr_t release = pinned ? 0xe10460u : 0xe01f00u, quiesce = pinned ? 0xe1c290u : 0xe0e160u;
+        uintptr_t init = pinned ? 0xe18440u : 0xe0a340u;
+        size_t stride = pinned ? 0x458u : 0x520u;
+        if (!bound || !resources || !sh_vt_provider_decode(source, 2, resources, &vt) ||
+            (uintptr_t)vt.system != (uintptr_t)base + system || vt.stride != stride ||
+            (uintptr_t)vt.set_source != (uintptr_t)base + set || (uintptr_t)vt.release != (uintptr_t)base + release ||
+            (uintptr_t)vt.quiesce != (uintptr_t)base + quiesce || source[1].addr != (uintptr_t)base + init ||
+            (pinned ? vt.sparse_function || vt.sparse_enabled :
+                (uintptr_t)vt.sparse_function != (uintptr_t)base + 0x59d2d48u ||
+                (uintptr_t)vt.sparse_enabled != (uintptr_t)base + 0x415f1b0u)) {
+            printf("BAD private virtual texture provider binding\n"); bad++;
+        } else printf("OK  private virtual texture provider binding\n");
     }
     {
         const char *names[] = {"EditorLoadMap", "EditorSetActive", "ResourceReloadRenderScope",

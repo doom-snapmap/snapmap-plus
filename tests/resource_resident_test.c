@@ -40,6 +40,16 @@ void sh_virtual_material_runtime_collect(void)
     CHECK(*(int *)(renderer_object + 0x14) == expected_render_holds);
     vmr_collected++;
 }
+static int vmr_providers, vmr_provider_failed, vmr_provider_loads = -1;
+int sh_virtual_material_runtime_providers(char *error, size_t capacity)
+{
+    /* Private page providers are built inside the render scope, before any
+     * reconstructed material can parse. */
+    CHECK(*(int *)(renderer_object + 0x14) >= 1);
+    vmr_providers++; vmr_provider_loads = loads;
+    if (vmr_provider_failed && error && capacity) snprintf(error, capacity, "synthetic provider failure");
+    return !vmr_provider_failed;
+}
 uintptr_t glb_resolve(const uint8_t *base, const char *name, glb_status *status)
 { (void)base; (void)name; (void)status; return 0; }
 const sh_resource_catalog *sh_package_runtime_catalog(void) { return NULL; }
@@ -179,6 +189,7 @@ static void reset(void)
     CHECK(!g_rr_scope_recovery && !g_rr_active);
     render_fault = heap_pop_fault = 0; expected_render_holds = 1;
     vmr_failed = vmr_collected = 0;
+    vmr_providers = vmr_provider_failed = 0; vmr_provider_loads = -1;
     retained_alias = 0;
     sh_resource_graph_frame frame;
     rr_free(g_rr_recovery); g_rr_recovery = NULL;
@@ -647,9 +658,23 @@ static void failure_cases(void)
 static void atlas_failure_cases(void)
 {
     char error[256];
+    {
+        /* A private page provider that cannot be built fails the pass before
+         * any reload; the render and heap scopes are released and collected. */
+        sh_resource_resident *pass;
+        reset(); vmr_provider_failed = 1;
+        pass = begin(paths[0], 0, error);
+        CHECK(!pass && vmr_providers == 1 && vmr_collected == 1 && strstr(error, "virtual texture page providers"));
+        CHECK(!loads && !g_rr_scope_recovery); check_restored();
+        vmr_provider_failed = 0;
+        pass = begin(paths[0], 0, error); CHECK(pass && vmr_providers == 2 && vmr_provider_loads == 0 && !rebinds);
+        CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
+        CHECK(sh_resource_resident_drain(pass, error, sizeof(error)) && loads && rebinds);
+        CHECK(sh_resource_resident_end(pass, 1, error, sizeof(error))); check_restored();
+    }
     for (int stage = 0; stage < 3; stage++) {
         sh_resource_resident *pass;
-        reset(); pass = begin(paths[0], 0, error); CHECK(pass);
+        reset(); pass = begin(paths[0], 0, error); CHECK(pass && vmr_providers == 1);
         CHECK(sh_resource_resident_reconstruct(pass, error, sizeof(error)));
         if (stage) CHECK(sh_resource_resident_drain(pass, error, sizeof(error)));
         vmr_failed = 1;

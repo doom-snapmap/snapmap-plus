@@ -10,6 +10,7 @@
 #include "package_runtime.h"
 #include "resource_graph_prepared.h"
 #include "virtual_material_runtime.h"
+#include "hook.h"
 #include "package_fixture.h"
 
 /* These paths must use the supplied immutable reader and delivery rows. */
@@ -30,6 +31,10 @@ int sh_resource_graph_prepare_inline(sh_resource_graph_preparation *p, const cha
     int (*visitor)(void *, const char *, const char *), void *context, sh_decl_dependency_result *result)
 { (void)p; (void)class_name; (void)inherit; (void)json; (void)length; (void)visitor; (void)context; (void)result; assert(0); return 0; }
 void sh_resource_graph_prepare_close(sh_resource_graph_preparation *p) { (void)p; assert(0); }
+/* Linked through the virtual material runtime; never installed here. */
+void *hook_prepare(void *target, void *detour, size_t stolen)
+{ (void)target; (void)detour; (void)stolen; assert(0); return NULL; }
+sh_patch_status hook_commit(void *trampoline) { (void)trampoline; assert(0); return B2_PATCH_OK; }
 void backend_log(const char *message) { (void)message; }
 sh_virtual_material_view *sh_virtual_material_runtime_prepare(
     const sh_virtual_material_runtime_binding *bindings, size_t count, char *error, size_t capacity)

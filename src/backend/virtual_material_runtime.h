@@ -57,8 +57,15 @@ void sh_virtual_material_runtime_restore(sh_virtual_material_view *previous);
 /* Main-thread provider/render barrier only. Free detached rows. release refuses
  * an active view or any live native association and retains the caller handle.
  * An inactive view can still own rows used by equivalent bindings in the active
- * provider. Native material destruction clears each association before release. */
+ * provider. Native material destruction clears each association before release.
+ * Private page providers no retained view names, and no parsed material still
+ * selects, are released here. */
 void sh_virtual_material_runtime_collect(void);
+/* Main thread, after the active view's files are served and before its
+ * private materials parse: the resident render scope, or right after the
+ * engine's VT initialization. Build or re-verify each private page provider
+ * the active view names. Failure faults the active view's status. */
+int sh_virtual_material_runtime_providers(char *error, size_t capacity);
 int sh_virtual_material_runtime_release(sh_virtual_material_view **view);
 /* Drop a provider's inactive handle without retaining its source tree. Published
  * rows remain owned by the registry until collect observes native destruction

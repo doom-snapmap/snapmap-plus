@@ -1,4 +1,5 @@
 #include "package_virtual_material.h"
+#include "decl_native_lex.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -356,9 +357,74 @@ static char *pv_private_name(const pv_binding *binding)
     bytes[length + 33] = (unsigned char)binding->page_mode;
     int ok = sh_package_bytes_identity(bytes, length + 34, &key); free(bytes);
     if (!ok) { free(name); return NULL; }
+    /* The engine records provider names in 32-byte fields: 31 characters,
+     * 96 identity bits. Equal names still compare their page data exactly. */
     memcpy(name, "smp/vt/", 7);
-    for (size_t i = 0; i < 32; i++) snprintf(name + 7 + i * 2, 3, "%02x", key.digest[i]);
+    for (size_t i = 0; i < 12; i++) snprintf(name + 7 + i * 2, 3, "%02x", key.digest[i]);
     return name;
+}
+/* Native materials select their page provider by the top-level String parm
+ * landpagefile, written as name<TAB>"value". Replace one existing top-level
+ * value or insert it after the opening brace. Nested uses are unsupported. */
+static unsigned char *pv_page_selection(const char *text, size_t length, const char *provider,
+    size_t *out_length)
+{
+    sh_decl_tokens tokens = {0};
+    size_t depth = 0, open = SIZE_MAX, value = SIZE_MAX;
+    unsigned char *out = NULL;
+    char insert[96];
+    if (!sh_decl_native_lex((sh_decl_source){text, length}, &tokens, NULL, 0)) return NULL;
+    for (size_t i = 0; i < tokens.count; i++) {
+        const sh_decl_token *token = tokens.items + i;
+        if (sh_decl_token_is(&tokens, i, "{")) { if (!depth++ && open == SIZE_MAX) open = i; continue; }
+        if (sh_decl_token_is(&tokens, i, "}")) { if (depth) depth--; continue; }
+        if (token->kind != SH_DECL_TOKEN_NAME || token->end - token->begin != 12 ||
+            _strnicmp(text + token->begin, "landpagefile", 12)) continue;
+        if (depth != 1 || value != SIZE_MAX || i + 1 >= tokens.count ||
+            tokens.items[i + 1].kind != SH_DECL_TOKEN_STRING) goto done;
+        value = i + 1;
+    }
+    if (open == SIZE_MAX) goto done;
+    size_t begin, end;
+    if (value != SIZE_MAX) {
+        begin = tokens.items[value].begin; end = tokens.items[value].end;
+        snprintf(insert, sizeof(insert), "\"%s\"", provider);
+    } else {
+        begin = end = tokens.items[open].end;
+        snprintf(insert, sizeof(insert), "\n\tlandpagefile\t\"%s\"", provider);
+    }
+    size_t added = strlen(insert);
+    if (length - (end - begin) > SIZE_MAX - added - 1 || !(out = malloc(length - (end - begin) + added + 1))) goto done;
+    memcpy(out, text, begin); memcpy(out + begin, insert, added);
+    memcpy(out + begin + added, text + end, length - end);
+    *out_length = length - (end - begin) + added; out[*out_length] = 0;
+done:
+    sh_decl_tokens_free(&tokens);
+    return out;
+}
+static int pv_select_pages(const sh_package_compilation *compiled, sh_compiled_resource *resource,
+    const sh_virtual_material_runtime_binding *bindings, size_t used, const char *provider,
+    char *error, size_t capacity)
+{
+    size_t length = 0, selected_length = 0;
+    /* Every identity served by these bytes must select the same provider. */
+    for (size_t k = 0; k < sh_package_resource_native_count(resource); k++) {
+        sh_package_native_identity identity = sh_package_resource_native_at(resource, k);
+        size_t b = 0;
+        while (b < used && (!identity.name || strcmp(bindings[b].name, identity.name))) b++;
+        if (!identity.type || strcmp(identity.type, "material") || b == used ||
+            !bindings[b].pages || strcmp(bindings[b].atlas, provider)) {
+            pv_fail(error, capacity, "private material bytes serve a different page selection", resource->engine_path);
+            return 0;
+        }
+    }
+    unsigned char *body = sh_package_compilation_read(compiled, resource, SIZE_MAX, &length, error, capacity);
+    unsigned char *selected = body ? pv_page_selection((const char *)body, length, provider, &selected_length) : NULL;
+    free(body);
+    if (!selected) { pv_fail(error, capacity, "private material cannot name its page provider", resource->engine_path); return 0; }
+    free(resource->body); resource->body = selected; resource->body_length = selected_length;
+    resource->native_original = 0;
+    return 1;
 }
 static int pv_dependency(sh_compiled_resource *resource, const char *path)
 {
@@ -477,6 +543,8 @@ sh_virtual_material_view *sh_package_virtual_material_prepare(sh_package_virtual
              !sh_package_owners_union(&resource->gameplay_owners, &captured[i]->row_input->gameplay_owners))) goto failed;
         for (size_t slot = 0; bindings[i].page_paths && slot < 21; slot++)
             if (bindings[i].page_paths[slot] && !pv_dependency(resource, bindings[i].page_paths[slot])) goto failed;
+        if (bindings[i].pages && !pv_select_pages(linked->compiled, resource, bindings, used,
+            bindings[i].atlas, error, capacity)) goto failed;
     }
     out = sh_virtual_material_runtime_prepare(bindings, used, error, capacity);
 failed:

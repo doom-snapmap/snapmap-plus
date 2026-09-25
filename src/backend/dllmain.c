@@ -59,6 +59,7 @@
 #include "package_editor.h"
 #include "resource_graph_native.h"
 #include "virtual_material_runtime.h"
+#include "virtual_texture_provider.h"
 #include "resource_resident.h"
 #include "audio_files_native.h"
 #include "iface_engine.h"
@@ -181,6 +182,7 @@ static DWORD WINAPI bootstrap_thread(LPVOID p)
          * after a partial startup. Never infer that earlier loads were seen. */
         sh_resource_graph_native_install(results, db);
         sh_virtual_material_runtime_install(results, db);
+        sh_vt_provider_install(results, db, (void *const *)glb_resolve(g_doom_base, "decl_resource_head", NULL));
 
         /* Install rawmap load interception only on a clean prologue. The swap starts
          * disarmed; package admission also runs inside this detour. */

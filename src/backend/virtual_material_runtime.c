@@ -5,6 +5,7 @@
 #include <string.h>
 #include "virtual_material_runtime.h"
 #include "virtual_material_native.h"
+#include "virtual_texture_provider.h"
 #include "hook.h"
 #include "backend_log.h"
 
@@ -156,6 +157,11 @@ int sh_virtual_material_runtime_seal(sh_virtual_material_view *view,
             (const char *const *)view->entries[i].page_paths, error, capacity)) return 0;
     return 1;
 }
+static int vmr_private(const sh_virtual_material_view *view)
+{
+    for (size_t i = 0; view && i < view->count; i++) if (view->entries[i].pages) return 1;
+    return 0;
+}
 int sh_virtual_material_runtime_publish(sh_virtual_material_view *candidate,
     sh_virtual_material_view **previous, char *error, size_t capacity)
 {
@@ -164,6 +170,8 @@ int sh_virtual_material_runtime_publish(sh_virtual_material_view *candidate,
     if (!previous) return vmr_error(error, capacity, "missing virtual material rollback handle");
     if (candidate && candidate->count && !sh_virtual_material_runtime_ready())
         return vmr_error(error, capacity, "native virtual material lookup is unavailable");
+    if (vmr_private(candidate) && !sh_vt_provider_ready())
+        return vmr_error(error, capacity, "private virtual texture page providers are unavailable");
     AcquireSRWLockExclusive(&g_vmr_lock);
     if (candidate && candidate->retired) {
         vmr_error(error, capacity, "cannot publish retired virtual material bindings"); goto done;
@@ -250,8 +258,57 @@ static void vmr_collect(sh_virtual_material_view *view)
         }
     }
 }
+typedef struct vmr_atlases { char **names; size_t count, capacity; } vmr_atlases;
+static int vmr_atlas_add(vmr_atlases *set, const char *atlas)
+{
+    for (size_t i = 0; i < set->count; i++) if (!strcmp(set->names[i], atlas)) return 1;
+    if (set->count == set->capacity) {
+        size_t next = set->capacity ? set->capacity * 2 : 8;
+        char **grown = next > set->capacity && next <= SIZE_MAX / sizeof(*grown) ?
+            realloc(set->names, next * sizeof(*grown)) : NULL;
+        if (!grown) return 0;
+        set->names = grown; set->capacity = next;
+    }
+    if (!(set->names[set->count] = _strdup(atlas))) return 0;
+    set->count++; return 1;
+}
+static void vmr_atlases_free(vmr_atlases *set)
+{
+    for (size_t i = 0; i < set->count; i++) free(set->names[i]);
+    free(set->names); memset(set, 0, sizeof(*set));
+}
+static int vmr_atlas_kept(void *context, const char *name)
+{
+    const vmr_atlases *set = context;
+    for (size_t i = 0; i < set->count; i++) if (!strcmp(set->names[i], name)) return 1;
+    return 0;
+}
+int sh_virtual_material_runtime_providers(char *error, size_t capacity)
+{
+    vmr_atlases wanted = {0}; int ok = 1;
+    if (error && capacity) *error = 0;
+    AcquireSRWLockShared(&g_vmr_lock);
+    for (size_t i = 0; ok && g_vmr_active && i < g_vmr_active->count; i++)
+        if (g_vmr_active->entries[i].pages) ok = vmr_atlas_add(&wanted, g_vmr_active->entries[i].atlas);
+    ReleaseSRWLockShared(&g_vmr_lock);
+    if (!ok) vmr_error(error, capacity, "cannot list private virtual texture page providers");
+    else if (wanted.count) ok = sh_vt_provider_acquire((const char *const *)wanted.names, wanted.count, error, capacity);
+    if (!ok) {
+        /* A private material must not parse against a missing provider; the
+         * activation's status check reports this instead of a fallback. */
+        AcquireSRWLockExclusive(&g_vmr_lock);
+        if (g_vmr_active && !*g_vmr_active->error) {
+            snprintf(g_vmr_active->error, sizeof(g_vmr_active->error), "%s",
+                error && *error ? error : "private virtual texture page providers could not be built");
+            backend_log(g_vmr_active->error);
+        }
+        ReleaseSRWLockExclusive(&g_vmr_lock);
+    }
+    vmr_atlases_free(&wanted); return ok;
+}
 void sh_virtual_material_runtime_collect(void)
 {
+    vmr_atlases kept = {0}; int listed = 1;
     AcquireSRWLockExclusive(&g_vmr_lock);
     sh_virtual_material_view **slot = &g_vmr_views;
     while (*slot) {
@@ -261,7 +318,14 @@ void sh_virtual_material_runtime_collect(void)
         if (view->retired && !live) { *slot = view->next; vmr_free(view); }
         else slot = &view->next;
     }
+    /* Every retained view keeps its private providers; so does any parsed
+     * material still selecting one, which the provider scan checks itself. */
+    for (sh_virtual_material_view *view = g_vmr_views; listed && view; view = view->next)
+        for (size_t i = 0; listed && i < view->count; i++)
+            if (view->entries[i].pages) listed = vmr_atlas_add(&kept, view->entries[i].atlas);
     ReleaseSRWLockExclusive(&g_vmr_lock);
+    if (listed) (void)sh_vt_provider_collect(vmr_atlas_kept, &kept);
+    vmr_atlases_free(&kept);
 }
 int sh_virtual_material_runtime_retire(sh_virtual_material_view **handle)
 {
@@ -401,6 +465,7 @@ int sh_virtual_material_runtime_install(const sig_result *results, size_t count)
      * relative branch. Identical prologue verified in both retail renderers. */
     g_vmr_lookup = (vmr_lookup_fn)hook_prepare(target, vmr_lookup_hook, 16);
     if (!g_vmr_lookup || hook_commit((void *)g_vmr_lookup) != B2_PATCH_OK) goto failed;
+    sh_vt_provider_on_initialize(sh_virtual_material_runtime_providers);
     InterlockedExchange(&g_vmr_ready, 1); return 1;
 failed:
     backend_log("package virtual material lookup unavailable"); return 0;

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include "package_native_assets.h"
 #include "package_fixture.h"
 
@@ -173,6 +174,29 @@ static void constructor_admission(void)
     assert(adapter.source.implicit(held, 0, 0, &font, NULL, NULL, error, sizeof(error)) == 0);
     sh_package_native_assets_close(held);
 }
+/* Minimal valid mega2 member: one level-0 page of 17 payload bytes. */
+enum { PAGE_LENGTH = 0x199 };
+static void put32(unsigned char *p, uint32_t x)
+{ for (unsigned i = 0; i < 4; i++) p[i] = (unsigned char)(x >> (i * 8)); }
+static void put64(unsigned char *p, uint64_t x)
+{ for (unsigned i = 0; i < 8; i++) p[i] = (unsigned char)(x >> (i * 8)); }
+static void page(unsigned char bytes[PAGE_LENGTH], unsigned char payload)
+{
+    memset(bytes, 0, PAGE_LENGTH); put32(bytes, 0xa63fbb21u); put32(bytes + 4, 2);
+    put32(bytes + 0xc, 12); put64(bytes + 0x38, 0x170); put64(bytes + 0x40, 0x180);
+    put32(bytes + 0x48, 1); put32(bytes + 0x4c, 2);
+    put32(bytes + 0x58, 2); put32(bytes + 0x5c, 1); put32(bytes + 0x64, 2);
+    put64(bytes + 0x170, 0x188); put64(bytes + 0x178, 17);
+    put32(bytes + 0x184, UINT32_MAX); memset(bytes + 0x188, payload, 17);
+}
+static void create_page(const char *relative, unsigned char payload)
+{
+    unsigned char bytes[PAGE_LENGTH]; char path[4096];
+    page(bytes, payload); create(relative, "");
+    snprintf(path, sizeof(path), "%s/%s", root, relative);
+    FILE *file = fopen(path, "wb"); assert(file);
+    assert(fwrite(bytes, 1, PAGE_LENGTH, file) == PAGE_LENGTH && !fclose(file));
+}
 int main(int argc, char **argv)
 {
     if (argc == 2) return probe(argv[1]);
@@ -186,9 +210,11 @@ int main(int argc, char **argv)
     snprintf(root, sizeof(root), "%ssmp-native-assets-%lu-%llu", temporary, GetCurrentProcessId(), GetTickCount64());
     assert(CreateDirectoryA(root, NULL));
     create("virtualtextures/_vmtr.vmtr", "26\n0\n");
-    create("virtualtextures/_vmtr_sq1.mega2", "first synthetic immutable pages");
-    create("virtualtextures/_vmtr_sq16.mega2", "last high quality chunk");
-    create("virtualtextures/_vmtr_q4.mega2", "last low quality chunk");
+    create_page("virtualtextures/_vmtr_sq1.mega2", 0x11);
+    create_page("virtualtextures/_vmtr_sq16.mega2", 0x22);
+    create_page("virtualtextures/_vmtr_q4.mega2", 0x33);
+    unsigned char first_bytes[PAGE_LENGTH], changed_bytes[PAGE_LENGTH], other_bytes[PAGE_LENGTH], second_bytes[PAGE_LENGTH];
+    page(first_bytes, 0x11); page(changed_bytes, 0x44); page(other_bytes, 0x55); page(second_bytes, 0x66);
     sh_package_native_assets *assets = sh_package_native_assets_open(root); assert(assets);
     sh_package_native_assets *retained = sh_package_native_assets_retain(assets); assert(retained == assets);
     sh_package_library_native adapter = sh_package_native_assets_adapter(assets);
@@ -210,20 +236,46 @@ int main(int argc, char **argv)
     assert(adapter.atlas(adapter.source.context, 0, &compiled, "sample", "custom", &again, error, sizeof(error)) == 0);
     assert(strstr(error, "private native page provider"));
     sh_compiled_resource override = {0}; override.engine_path = "virtualtextures/_vmtr_sq1.mega2";
-    override.body = (unsigned char *)"different synthetic immutable pages";
-    override.body_length = strlen((char *)override.body);
+    override.body = changed_bytes; override.body_length = PAGE_LENGTH;
     compiled.resources = &override; compiled.resource_count = 1;
-    assert(adapter.atlas(adapter.source.context, 0, &compiled, "sample", "", &again, error, sizeof(error)) == 0);
-    assert(strstr(error, "private provider"));
+    /* Changed page data captures the scope's complete family for a private
+     * kind-2 provider in the unique-VMTR mode: the authored member, and every
+     * other member from the installed originals. */
+    assert(adapter.atlas(adapter.source.context, 0, &compiled, "sample", "", &again, error, sizeof(error)) == 1);
+    assert(!again.original && again.pages && again.page_kind == 2 && again.page_mode == 2);
+    assert(!strcmp(again.name, "_vmtr") && !strcmp(again.source, "virtualtextures/_vmtr"));
+    assert(!memcmp(again.content, sh_virtual_page_source_identity(again.pages), 32) && memcmp(again.content, first.content, 32));
+    assert(sh_virtual_page_source_member(again.pages, 0)->body && sh_virtual_page_source_member(again.pages, 15) &&
+        sh_virtual_page_source_member(again.pages, 19) && !sh_virtual_page_source_member(again.pages, 1) &&
+        !sh_virtual_page_source_member(again.pages, 20));
+    {
+        /* Every material of the scope shares one capture. */
+        sh_package_virtual_atlas shared = {0};
+        assert(adapter.atlas(adapter.source.context, 0, &compiled, "another", "_vmtr", &shared, error, sizeof(error)) == 1);
+        assert(shared.pages == again.pages && !memcmp(shared.content, again.content, 32));
+        sh_virtual_page_source_release(shared.pages);
+    }
+    sh_virtual_page_source_release(again.pages); memset(&again, 0, sizeof(again));
     /* An exact authored copy belongs to the same native provider. Distinct
      * same-size bytes still need isolation; metadata equality is not dedupe. */
-    override.body = (unsigned char *)"first synthetic immutable pages";
-    override.body_length = strlen((char *)override.body);
+    override.body = first_bytes;
     assert(adapter.atlas(adapter.source.context, 0, &compiled, "sample", "", &again, error, sizeof(error)) == 1);
-    assert(again.original && !memcmp(first.content, again.content, 32));
-    override.body = (unsigned char *)"other synthetic immutable pages";
-    assert(strlen((char *)override.body) == override.body_length);
-    assert(adapter.atlas(adapter.source.context, 0, &compiled, "sample", "", &again, error, sizeof(error)) == 0);
+    assert(again.original && !again.pages && !memcmp(first.content, again.content, 32));
+    override.body = other_bytes;
+    assert(adapter.atlas(adapter.source.context, 0, &compiled, "sample", "", &again, error, sizeof(error)) == 1);
+    assert(!again.original && again.pages);
+    {
+        unsigned char other[32]; memcpy(other, again.content, 32);
+        sh_virtual_page_source_release(again.pages); memset(&again, 0, sizeof(again));
+        override.body = changed_bytes;
+        assert(adapter.atlas(adapter.source.context, 0, &compiled, "sample", "", &again, error, sizeof(error)) == 1);
+        assert(again.pages && memcmp(other, again.content, 32));
+        sh_virtual_page_source_release(again.pages); memset(&again, 0, sizeof(again));
+        /* A member that is not valid mega2 cannot become a private family. */
+        override.body = (unsigned char *)"not a mega2 member"; override.body_length = 18;
+        assert(adapter.atlas(adapter.source.context, 0, &compiled, "sample", "", &again, error, sizeof(error)) == -1 && !again.pages);
+        override.body_length = PAGE_LENGTH;
+    }
     compiled.resource_count = 0;
     sh_package_native_assets_close(assets);
     assert(adapter.atlas(adapter.source.context, 0, &compiled, "sample", "", &again, error, sizeof(error)) == 1);
@@ -232,17 +284,19 @@ int main(int argc, char **argv)
 
     /* The original provider is one engine-owned object. Its nominal key is
      * stable across captures, but authored-copy comparisons use fresh bytes. */
-    create("virtualtextures/_vmtr_sq1.mega2", "second synthetic immutable pages");
+    create_page("virtualtextures/_vmtr_sq1.mega2", 0x66);
     assets = sh_package_native_assets_open(root); assert(assets);
     adapter = sh_package_native_assets_adapter(assets);
     assert(adapter.atlas(adapter.source.context, 0, &compiled, "sample", "", &again, error, sizeof(error)) == 1);
     assert(!memcmp(first.content, again.content, 32));
     compiled.resource_count = 1;
-    override.body = (unsigned char *)"first synthetic immutable pages";
-    assert(adapter.atlas(adapter.source.context, 0, &compiled, "sample", "", &again, error, sizeof(error)) == 0);
-    override.body = (unsigned char *)"second synthetic immutable pages";
-    override.body_length = strlen((char *)override.body);
+    override.body = first_bytes;
     assert(adapter.atlas(adapter.source.context, 0, &compiled, "sample", "", &again, error, sizeof(error)) == 1);
+    assert(!again.original && again.pages);
+    sh_virtual_page_source_release(again.pages); memset(&again, 0, sizeof(again));
+    override.body = second_bytes;
+    assert(adapter.atlas(adapter.source.context, 0, &compiled, "sample", "", &again, error, sizeof(error)) == 1);
+    assert(again.original && !again.pages);
     compiled.resource_count = 0;
     sh_package_native_assets_close(assets);
 
