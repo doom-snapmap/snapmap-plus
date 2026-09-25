@@ -2996,6 +2996,96 @@ static void test_inherited_editor_parent(fixture *f, sh_decl_registry_source reg
     sh_package_library_free(&library); sh_package_sources_free(sources); cleanup(); assert(!failures);
 }
 
+/* A reflected declaration of another family (a package weapon inheriting a
+ * stock weapon) is walked in its effective inherited state; its parent and
+ * the parent's closure stay dependencies, so the closure is complete. */
+static void test_inherited_reflected_state(fixture *f, sh_decl_registry_source registry)
+{
+    const char *texts[] = {"{ inherit = \"mod\"; edit = { } }", "{ inherit = \"mod\"; edit = { target = \"local-only\"; } }",
+        "{ inherit = \"absent-parent\"; edit = { } }"};
+    char error[1024];
+    for (size_t i = 0; i < 3; i++) {
+        sh_compiled_resource file = link_decl("child", "generated/decls/actormodifier/child.decl", texts[i]);
+        file.type = "actormodifier";
+        sh_package_compilation compiled = {0}; compiled.resources = &file; compiled.resource_count = 1;
+        sh_package_references paths = {0}; sh_package_source_graph_report report = {0};
+        const char *json = "{\"targetType\":\"idDeclActorModifier\",\"value\":\"child\"}";
+        int ok = sh_package_source_graph(&compiled, NULL, original, f, registry, (uintptr_t)f->reflection,
+            json, strlen(json), &paths, &report, error, sizeof(error));
+        if (i < 2 && (!ok || paths.incomplete || report.gaps))
+            fprintf(stderr, "inherited reflected state %zu: ok=%d gaps=%zu %s %s\n", i, ok, report.gaps, report.first_gap, error);
+        if (i < 2) {
+            assert(ok && !paths.incomplete && !report.gaps);
+            assert(has(&paths, "actormodifier/child.decl") && has(&paths, "actormodifier/mod.decl"));
+            assert(has(&paths, "entitydef/modifier-child.decl"));
+            assert(!!has(&paths, "entitydef/local-only.decl") == (i == 1));
+        } else assert(!ok || paths.incomplete);
+        sh_package_references_free(&paths);
+    }
+}
+
+/* A reader gap inside an unchanged SnapMap original cannot hide candidate
+ * content (a changed dependency binds a walked private unit), so it is native;
+ * the same gap in a campaign-only original or in candidate bytes still leaves
+ * the closure incomplete. */
+static int native_gap_scope;
+static int native_gap_original(void *context, const char *path, unsigned char **body, size_t *length)
+{
+    const char *text = NULL;
+    if (!strcmp(path, "generated/decls/actormodifier/stockbroken.decl"))
+        text = "{ edit = { target = \"modifier-child\"; } } trailing";
+    else if (!strcmp(path, "generated/decls/actormodifier/leafmod.decl")) text = "{ edit = { target = \"leaf-entity\"; } }";
+    else if (!strcmp(path, "generated/decls/entitydef/leaf-entity.decl"))
+        text = "{ class = \"Entity\"; edit = { image = \"absent/pic\"; } }";
+    if (!text) return original(context, path, body, length);
+    *length = strlen(text); *body = (unsigned char *)_strdup(text);
+    return *body ? native_gap_scope : -1;
+}
+static void test_native_original_gaps(fixture *f, sh_decl_registry_source registry)
+{
+    char error[1024];
+    for (int round = 0; round < 3; round++) {
+        sh_compiled_resource files[2];
+        files[0] = link_decl("stockbroken", "generated/decls/actormodifier/stockbroken.decl",
+            "{ edit = { target = \"modifier-child\"; } } trailing");
+        files[0].type = "actormodifier";
+        files[1] = link_decl("uses-stock", "generated/decls/entitydef/uses-stock.decl",
+            "{ class = \"Entity\"; edit = { modifier = \"stockbroken\"; } }");
+        sh_package_compilation compiled = {0};
+        compiled.resources = round == 2 ? files : files + 1; compiled.resource_count = round == 2 ? 2 : 1;
+        native_gap_scope = round == 1 ? 2 : 1;
+        sh_package_references paths = {0}; sh_package_source_graph_report report = {0};
+        const char *json = "{\"targetType\":\"idDeclEntityDef\",\"value\":\"uses-stock\"}";
+        assert(sh_package_source_graph(&compiled, NULL, native_gap_original, f, registry, (uintptr_t)f->reflection,
+            json, strlen(json), &paths, &report, error, sizeof(error)));
+        assert(has(&paths, "actormodifier/stockbroken.decl"));
+        if (!round) assert(!paths.incomplete && !report.gaps && report.native_gaps == 1);
+        else assert(paths.incomplete && report.gaps && !report.native_gaps);
+        sh_package_references_free(&paths);
+    }
+    /* A payload only unchanged SnapMap originals name, absent in the game
+     * too, is native and not a map requirement; the map naming it as well
+     * makes it a real gap and a requirement. */
+    native_gap_scope = 1;
+    for (int round = 0; round < 2; round++) {
+        sh_compiled_resource file = link_decl("uses-leaf", "generated/decls/entitydef/uses-leaf.decl", round ?
+            "{ class = \"Entity\"; edit = { modifier = \"leafmod\"; image = \"absent/pic\"; } }" :
+            "{ class = \"Entity\"; edit = { modifier = \"leafmod\"; } }");
+        sh_package_compilation compiled = {0}; compiled.resources = &file; compiled.resource_count = 1;
+        sh_package_references paths = {0}; sh_package_source_graph_report report = {0};
+        const char *json = "{\"targetType\":\"idDeclEntityDef\",\"value\":\"uses-leaf\"}";
+        assert(sh_package_source_graph(&compiled, NULL, native_gap_original, f, registry, (uintptr_t)f->reflection,
+            json, strlen(json), &paths, &report, error, sizeof(error)));
+        if (round ? !paths.incomplete : (paths.incomplete || !report.native_gaps))
+            fprintf(stderr, "native leaf %d: gaps=%zu native=%zu %s\n", round, report.gaps, report.native_gaps, report.first_gap);
+        assert(has(&paths, "entitydef/uses-leaf.decl") && has(&paths, "actormodifier/leafmod.decl"));
+        assert(!has(&paths, "entitydef/leaf-entity.decl") && !!has(&paths, "absent/pic") == round);
+        if (!round) assert(!paths.incomplete && !report.gaps && report.native_gaps);
+        else assert(paths.incomplete && report.gaps && strstr(report.first_gap, "absent/pic"));
+        sh_package_references_free(&paths);
+    }
+}
+
 static void test_material_path(fixture *f, sh_decl_registry_source registry)
 {
     char error[1024]; sh_package_compilation compiled = {0};
@@ -3886,6 +3976,8 @@ int main(void)
     test_contribution_projection();
     test_bound_contributions(&f, registry);
     test_inherited_editor_parent(&f, registry);
+    test_inherited_reflected_state(&f, registry);
+    test_native_original_gaps(&f, registry);
     test_material_path(&f, registry);
     test_library_atlas(&f, registry);
     {

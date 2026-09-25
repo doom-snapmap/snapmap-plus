@@ -55,6 +55,22 @@ typedef struct sh_package_source_reader {
     int shader_configured;
     sg_shader_abi *shader_parameters;
     sh_package_source_admission admission;
+    int native_origin; /* Inspecting an unchanged SnapMap original declaration. */
+    /* Hashed membership for the queue and paths (the stock closure is large),
+     * which queued identities a candidate declaration or the map itself names,
+     * and gaps of identities only unchanged SnapMap originals named so far. */
+    struct sg_set { size_t *slots; size_t capacity, count; } queue_set, paths_set;
+    unsigned char *candidate;
+    size_t candidate_capacity, current;
+    int native_leaf;
+    struct sg_deferred { size_t index; char *reason; } *deferred;
+    size_t deferred_count, deferred_capacity;
+    /* A path is required when collected for the map or a candidate; one only
+     * unchanged SnapMap originals need is the game's own business. */
+    unsigned char *required;
+    size_t required_capacity;
+    struct sg_deferred_path { size_t path, identity; } *deferred_paths;
+    size_t deferred_path_count, deferred_path_capacity;
 } sg_walk;
 
 static int sg_editor(const char *type)
@@ -91,10 +107,77 @@ static char *sg_path(const char *type, const char *name)
 
 static void sg_gap(sg_walk *walk, const char *field, const char *type, const char *reason)
 {
-    walk->report.gaps++;
-    if (!walk->report.first_gap[0]) snprintf(walk->report.first_gap, sizeof(walk->report.first_gap),
-        "%s/%s %s (%s): %s", walk->current_type ? walk->current_type : "map",
+    char text[sizeof(walk->report.first_gap)];
+    if (walk->native_origin) { walk->report.native_gaps++; return; }
+    snprintf(text, sizeof(text), "%s/%s %s (%s): %s", walk->current_type ? walk->current_type : "map",
         walk->current_name ? walk->current_name : "inline", field, type ? type : "?", reason);
+    if (walk->native_leaf) {
+        /* Decided when the walk ends: a later candidate reference makes it real. */
+        if (walk->deferred_count == walk->deferred_capacity) {
+            size_t next = walk->deferred_capacity ? walk->deferred_capacity * 2 : 8;
+            struct sg_deferred *grown = next <= SIZE_MAX / sizeof(*grown) ?
+                realloc(walk->deferred, next * sizeof(*grown)) : NULL;
+            if (!grown) { walk->failed = 1; return; }
+            walk->deferred = grown; walk->deferred_capacity = next;
+        }
+        if (!(walk->deferred[walk->deferred_count].reason = _strdup(text))) { walk->failed = 1; return; }
+        walk->deferred[walk->deferred_count++].index = walk->current; return;
+    }
+    walk->report.gaps++;
+    if (!walk->report.first_gap[0]) snprintf(walk->report.first_gap, sizeof(walk->report.first_gap), "%s", text);
+}
+
+static uint64_t sg_hash(const char *type, const char *name)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (const char *c = type; *c; c++) { hash ^= (unsigned char)*c; hash *= UINT64_C(1099511628211); }
+    hash ^= 0x1f; hash *= UINT64_C(1099511628211);
+    for (const char *c = name; *c; c++) { hash ^= (unsigned char)*c; hash *= UINT64_C(1099511628211); }
+    return hash;
+}
+/* Index of (type, name) in list, or SIZE_MAX. Slots hold index + 1. */
+static size_t sg_set_find(const struct sg_set *set, const sh_package_references *list, const char *type, const char *name)
+{
+    if (!set->capacity) return SIZE_MAX;
+    for (size_t at = (size_t)sg_hash(type, name) & (set->capacity - 1); set->slots[at]; at = (at + 1) & (set->capacity - 1)) {
+        const sh_package_reference *item = list->items + set->slots[at] - 1;
+        if (!strcmp(item->type, type) && !strcmp(item->name, name)) return set->slots[at] - 1;
+    }
+    return SIZE_MAX;
+}
+static int sg_set_insert(struct sg_set *set, const sh_package_references *list, size_t index)
+{
+    if ((set->count + 1) * 10 > set->capacity * 7) {
+        size_t capacity = set->capacity ? set->capacity * 2 : 256;
+        size_t *slots = capacity <= SIZE_MAX / sizeof(*slots) ? calloc(capacity, sizeof(*slots)) : NULL;
+        if (!slots) return 0;
+        for (size_t i = 0; i < set->capacity; i++) if (set->slots[i]) {
+            const sh_package_reference *item = list->items + set->slots[i] - 1;
+            size_t at = (size_t)sg_hash(item->type, item->name) & (capacity - 1);
+            while (slots[at]) at = (at + 1) & (capacity - 1);
+            slots[at] = set->slots[i];
+        }
+        free(set->slots); set->slots = slots; set->capacity = capacity;
+    }
+    const sh_package_reference *item = list->items + index;
+    size_t at = (size_t)sg_hash(item->type, item->name) & (set->capacity - 1);
+    while (set->slots[at]) at = (at + 1) & (set->capacity - 1);
+    set->slots[at] = index + 1; set->count++; return 1;
+}
+/* Add without the list's linear duplicate scan; returns the item's index. */
+static size_t sg_list_add(sg_walk *walk, sh_package_references *list, struct sg_set *set,
+    const char *type, const char *name)
+{
+    size_t index = sg_set_find(set, list, type, name);
+    if (index != SIZE_MAX) return index;
+    sh_package_reference *items = list->count < SIZE_MAX / sizeof(*items) - 1 ?
+        realloc(list->items, (list->count + 1) * sizeof(*items)) : NULL;
+    char *type_copy = _strdup(type), *name_copy = _strdup(name);
+    if (items) list->items = items;
+    if (!items || !type_copy || !name_copy) { free(type_copy); free(name_copy); walk->failed = 1; return SIZE_MAX; }
+    list->items[list->count] = (sh_package_reference){type_copy, name_copy};
+    if (!sg_set_insert(set, list, list->count)) { walk->failed = 1; return SIZE_MAX; }
+    return list->count++;
 }
 
 static int sg_add(void *context, const char *type, const char *name)
@@ -102,19 +185,69 @@ static int sg_add(void *context, const char *type, const char *name)
     sg_walk *walk = context;
     char *normalized_type = sg_name(type), *normalized_name = sg_name(name);
     int ok = normalized_type && normalized_name;
-    if (ok && *normalized_name && !sg_editor(normalized_type))
-        ok = sh_package_references_add(&walk->queue, normalized_type, normalized_name);
+    if (ok && *normalized_name && !sg_editor(normalized_type)) {
+        size_t index = sg_list_add(walk, &walk->queue, &walk->queue_set, normalized_type, normalized_name);
+        ok = index != SIZE_MAX;
+        if (ok && index >= walk->candidate_capacity) {
+            size_t next = walk->candidate_capacity ? walk->candidate_capacity * 2 : 256;
+            while (next <= index) next *= 2;
+            unsigned char *grown = realloc(walk->candidate, next);
+            if (!grown) ok = 0;
+            else {
+                memset(grown + walk->candidate_capacity, 0, next - walk->candidate_capacity);
+                walk->candidate = grown; walk->candidate_capacity = next;
+            }
+        }
+        /* Named by the map or a candidate declaration, not only by stock. */
+        if (ok && !walk->native_origin && !walk->native_leaf) walk->candidate[index] = 1;
+    }
     free(normalized_type); free(normalized_name);
     if (!ok) walk->failed = 1;
     return ok;
+}
+
+static void sg_lists_free(sg_walk *walk)
+{
+    free(walk->required); walk->required = NULL; walk->required_capacity = 0;
+    free(walk->deferred_paths); walk->deferred_paths = NULL;
+    walk->deferred_path_count = walk->deferred_path_capacity = 0;
+    sh_package_references_free(&walk->queue); sh_package_references_free(&walk->paths);
+    free(walk->queue_set.slots); free(walk->paths_set.slots);
+    memset(&walk->queue_set, 0, sizeof(walk->queue_set)); memset(&walk->paths_set, 0, sizeof(walk->paths_set));
+    free(walk->candidate); walk->candidate = NULL; walk->candidate_capacity = 0;
+    for (size_t i = 0; i < walk->deferred_count; i++) free(walk->deferred[i].reason);
+    free(walk->deferred); walk->deferred = NULL; walk->deferred_count = walk->deferred_capacity = 0;
 }
 
 static int sg_file(sg_walk *walk, const char *path)
 {
     char *canonical = walk->compiled->canonical_path ?
         walk->compiled->canonical_path(path) : sh_package_engine_path(path);
-    int ok = canonical && sh_package_references_add(&walk->paths, "", canonical);
-    free(canonical); if (!ok) walk->failed = 1; return ok;
+    size_t index = canonical ? sg_list_add(walk, &walk->paths, &walk->paths_set, "", canonical) : SIZE_MAX;
+    int ok = index != SIZE_MAX;
+    free(canonical);
+    if (ok && index >= walk->required_capacity) {
+        size_t next = walk->required_capacity ? walk->required_capacity * 2 : 256;
+        while (next <= index) next *= 2;
+        unsigned char *grown = realloc(walk->required, next);
+        if (!grown) ok = 0;
+        else {
+            memset(grown + walk->required_capacity, 0, next - walk->required_capacity);
+            walk->required = grown; walk->required_capacity = next;
+        }
+    }
+    if (ok && !walk->native_origin && !walk->native_leaf) walk->required[index] = 1;
+    else if (ok && walk->native_leaf) {
+        if (walk->deferred_path_count == walk->deferred_path_capacity) {
+            size_t next = walk->deferred_path_capacity ? walk->deferred_path_capacity * 2 : 64;
+            struct sg_deferred_path *grown = next <= SIZE_MAX / sizeof(*grown) ?
+                realloc(walk->deferred_paths, next * sizeof(*grown)) : NULL;
+            if (!grown) ok = 0;
+            else { walk->deferred_paths = grown; walk->deferred_path_capacity = next; }
+        }
+        if (ok) walk->deferred_paths[walk->deferred_path_count++] = (struct sg_deferred_path){index, walk->current};
+    }
+    if (!ok) walk->failed = 1; return ok;
 }
 
 static int sg_read_path(sg_walk *walk, const char *path, unsigned char **body, size_t *length)
@@ -154,6 +287,27 @@ static int sg_read_parent(void *context, const char *name, sh_decl_source *sourc
     char *path = sg_lookup_path(walk, "entitydef", name);
     int status = path && sg_file(walk, path) ? sg_read_path(walk, path, &body, &source->length) : -1;
     free(path); source->text = (const char *)body; return status > 0 ? 1 : status;
+}
+
+/* Parent reads for another reflected family follow the same bound names. An
+ * open-bodied family is normalized to ordinary assignment text first. */
+typedef struct sg_family_parent { sg_walk *walk; const char *type; } sg_family_parent;
+static int sg_read_family_parent(void *context, const char *name, sh_decl_source *source)
+{
+    sg_family_parent *parent = context;
+    unsigned char *body = NULL;
+    size_t length = 0;
+    char *path = sg_lookup_path(parent->walk, parent->type, name);
+    int status = path && sg_file(parent->walk, path) ? sg_read_path(parent->walk, path, &body, &length) : -1;
+    free(path);
+    if (status > 0 && body && sh_decl_text_open_body_family(parent->type)) {
+        sh_decl_node *tree = sh_decl_tree_parse_reflected_body((sh_decl_source){(const char *)body, length}, 0, NULL, 0);
+        char *text = tree ? sh_decl_tree_write(tree, &length) : NULL;
+        sh_decl_tree_free(tree); free(body); body = (unsigned char *)text;
+        if (!body) status = -1;
+    }
+    if (status <= 0) { free(body); body = NULL; }
+    source->text = (const char *)body; source->length = length; return status > 0 ? 1 : status;
 }
 
 static int sg_derives(void *context, const char *child, const char *parent)
@@ -799,6 +953,12 @@ static int sg_inspect(sg_walk *walk, const char *type, const char *name)
      * declaration itself comes from the game or native default creation. */
     if (!strcmp(type, "sound") && !sg_sound(walk, name)) { ok = 0; goto done; }
     compiled_resource = sh_package_compilation_find(walk->compiled, path);
+    /* Only unchanged SnapMap originals have named this identity so far and the
+     * candidate does not supply it: its gaps wait for the walk's end. */
+    walk->native_leaf = walk->current < walk->queue.count && walk->candidate &&
+        walk->current < walk->candidate_capacity && !walk->candidate[walk->current] && !compiled_resource;
+    for (size_t i = 0; walk->native_leaf && i < walk->compiled->resource_count; i++)
+        if (sh_package_resource_native_matches(walk->compiled->resources + i, type, name)) walk->native_leaf = 0;
     if (!strcmp(type, "renderprog")) { ok = sg_renderprog(walk, name); goto done; }
     if (sh_package_movie_owner(type, name)) { ok = sg_movie(walk, name); goto done; }
     if (!strcmp(type, "font")) { ok = sg_font(walk, name); goto done; }
@@ -815,6 +975,7 @@ static int sg_inspect(sg_walk *walk, const char *type, const char *name)
         if (status <= 0 || !body) {
             sg_gap(walk, "", type, status < 0 ? "candidate source is unreadable" : "candidate source is absent"); goto done;
         }
+        walk->native_origin = !compiled_resource && status == 1;
         walk->report.declarations++; source.text = (const char *)body;
         ok = !strcmp(type, "material") ? sg_material(walk, source) :
             !strcmp(type, "md6def") ? sg_md6(walk, source) :
@@ -900,6 +1061,7 @@ static int sg_inspect(sg_walk *walk, const char *type, const char *name)
     if (status <= 0 || !body) {
         sg_gap(walk, "", type, status < 0 ? "candidate source is unreadable" : "candidate source is absent"); goto done;
     }
+    walk->native_origin = !compiled_resource && status == 1;
     walk->report.declarations++; source.text = (const char *)body;
     if (strcmp(type, "entitydef")) {
         status = sh_decl_native_schema_decl_type(walk->schema, type, &state);
@@ -938,14 +1100,26 @@ static int sg_inspect(sg_walk *walk, const char *type, const char *name)
                 sh_decl_value_type pointer = {native_class, "*"};
                 if (length && !sg_reference(walk, "inherit", pointer, parent, length)) { ok = 0; goto done; }
             } else sg_gap(walk, "inherit", type, "inheritance syntax is unsupported");
+            /* The parent declaration and its whole closure stay dependencies
+             * above. Walk the child's fields in the effective state its
+             * inherited values establish, overlaid like entity state, so a
+             * field typed by the parent is read with that type. */
+            if (!walk->failed) {
+                char detail[512] = "";
+                sg_family_parent reader = {walk, type};
+                sh_decl_entity_class_source parents = {&reader, sg_read_family_parent, NULL};
+                sh_decl_node *effective = sh_decl_entity_expanded_state(tree, &parents, detail, sizeof(detail));
+                if (walk->failed) { sh_decl_tree_free(effective); ok = 0; goto done; }
+                if (effective) { sh_decl_tree_free(tree); tree = effective; edit = sh_decl_tree_member(tree, "edit"); }
+                else sg_gap(walk, "inherit", type, detail[0] ? detail : "effective inherited state is unsupported");
+            }
         }
         if (edit) (void)sh_decl_state_dependencies(edit, state, sh_decl_native_schema_view(walk->schema), &result);
     }
-    if (strcmp(type, "entitydef") && sh_decl_tree_member(tree, "inherit"))
-        sg_gap(walk, "inherit", type, "effective inherited field replacement is not expanded");
 inspected:
     if (result.aborted) { sg_gap(walk, "", type, "source dependency inspection aborted"); if (walk->failed) ok = 0; }
 done:
+    walk->native_origin = walk->native_leaf = 0;
     free(path); free(body); free(class_name); sh_decl_tree_free(tree); sh_decl_graph_close(graph); return ok && !walk->failed;
 }
 
@@ -996,7 +1170,7 @@ failed:
 void sh_package_source_reader_close(sh_package_source_reader *reader)
 {
     if (!reader) return;
-    sh_package_references_free(&reader->paths); sh_package_references_free(&reader->queue);
+    sg_lists_free(reader);
     sh_package_audio_close(reader->audio); sh_package_audio_scope_close(reader->audio_scope);
     sg_shader_clear(reader);
     sh_decl_native_registry_close(reader->registry); sh_decl_native_schema_close(reader->schema);
@@ -1474,7 +1648,7 @@ static unsigned char *sg_bind_source(sh_package_source_reader *reader,
     if (!reader || !family || !name || !body || !resolver || length == SIZE_MAX) goto done;
     reader->error = error; reader->capacity = capacity; reader->failed = 0;
     reader->current_type = family; reader->current_name = name;
-    sh_package_references_free(&reader->queue); sh_package_references_free(&reader->paths);
+    sg_lists_free(reader);
     binding.reader = reader; binding.resolver = resolver; binding.context = context; binding.family = family;
     binding.observe = observe;
     if (!strcmp(family, "renderprog")) {
@@ -1654,7 +1828,7 @@ unsigned char *sh_package_source_bind_strings(sh_package_source_reader *reader,
     reader->failed = 0; memset(&reader->report, 0, sizeof(reader->report));
     reader->error = error; reader->capacity = capacity;
     reader->current_type = family; reader->current_name = name;
-    sh_package_references_free(&reader->queue); sh_package_references_free(&reader->paths);
+    sg_lists_free(reader);
     binding.envelope.reader = reader; binding.envelope.family = family;
     binding.native = sh_decl_native_schema_view(reader->schema);
     binding.resolver = resolver; binding.context = context;
@@ -1977,7 +2151,26 @@ int sh_package_source_graph_with_contracts(const sh_package_compilation *compile
     for (size_t i = 0; i < walk.queue.count; i++) {
         /* Strings have independent ownership: enqueue may move queue.items. */
         const char *type = walk.queue.items[i].type, *name = walk.queue.items[i].name;
+        walk.current = i;
         if (!sg_inspect(&walk, type, name)) goto done;
+    }
+    /* A gap of an identity only unchanged SnapMap originals name is native;
+     * one the map or a candidate also names counts. */
+    for (size_t i = 0; i < walk.deferred_count; i++) {
+        if (!walk.candidate[walk.deferred[i].index]) { walk.report.native_gaps++; continue; }
+        walk.report.gaps++;
+        if (!walk.report.first_gap[0])
+            snprintf(walk.report.first_gap, sizeof(walk.report.first_gap), "%s", walk.deferred[i].reason);
+    }
+    for (size_t i = 0; i < walk.deferred_path_count; i++)
+        if (walk.candidate[walk.deferred_paths[i].identity]) walk.required[walk.deferred_paths[i].path] = 1;
+    {
+        size_t kept = 0;
+        for (size_t i = 0; i < walk.paths.count; i++) {
+            if (i < walk.required_capacity && walk.required[i]) { walk.paths.items[kept++] = walk.paths.items[i]; continue; }
+            free(walk.paths.items[i].type); free(walk.paths.items[i].name);
+        }
+        walk.paths.count = kept;
     }
     /* Closure is only claimed when nothing in this walk was left to an adapter:
      * every recorded gap (unsupported reader, unexpanded inheritance, late
@@ -1987,7 +2180,7 @@ int sh_package_source_graph_with_contracts(const sh_package_compilation *compile
 done:
     if (!ok && !error[0]) snprintf(error, capacity, "candidate source dependency inspection failed");
     if (report) *report = walk.report;
-    sh_package_references_free(&walk.paths); sh_package_references_free(&walk.queue);
+    sg_lists_free(&walk);
     sh_package_audio_close(walk.audio); sh_package_audio_scope_close(walk.audio_scope);
     sg_shader_clear(&walk);
     sh_decl_native_registry_close(walk.registry); sh_decl_native_schema_close(walk.schema); return ok;

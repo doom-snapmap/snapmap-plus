@@ -12,6 +12,11 @@
 typedef struct sh_package_source_graph_report {
     size_t declarations, references, gaps;
     char first_gap[1024];
+    /* Reader gaps inside an unchanged SnapMap original declaration. Such a
+     * declaration and its whole closure are natively available: any changed
+     * dependency binds a private or published unit instead, which is walked.
+     * These do not make the closure incomplete. */
+    size_t native_gaps;
 } sh_package_source_graph_report;
 
 /* Inspect candidate bytes without publishing them or changing the observed
