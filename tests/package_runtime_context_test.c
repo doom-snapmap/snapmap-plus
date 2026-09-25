@@ -2395,6 +2395,42 @@ done:
     for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
     cleanup_resources(data);
 }
+/* A newly captured local package that fails authoring composition excludes
+ * only itself. Map preparation succeeds with no message left behind: the load
+ * continuation reads any message as a failure and cancels a finished load. */
+static void test_local_authoring_defect(void)
+{
+    const char *descriptor = "{\"id\":\"defect-map\",\"name\":\"Defect map\"}";
+    char data[MAX_PATH], source[MAX_PATH], error[2048];
+    admission_fixture f; lease_collection_setup(&f);
+    sh_decl_registry_source registry = {&f, admission_read, (uintptr_t)f.registry, NULL};
+    sh_package_map_plan *plan = NULL;
+    char *summary = NULL;
+    create("authoring-defect-data/overrides", NULL);
+    authoring_bundle("authoring-defect-map/overrides/b", descriptor);
+    snprintf(data, sizeof(data), "%s/authoring-defect-data", root);
+    snprintf(source, sizeof(source), "%s/authoring-defect-map", root);
+    sh_package_runtime_test_dispose(); sh_package_runtime_test_baseline(lease_collection_baseline, NULL);
+    CHECK(sh_package_runtime_refresh(data));
+    sh_package_runtime_test_source_readers(registry, (uintptr_t)f.reflection);
+    plan = sh_package_runtime_prepare_map(data, source, error, sizeof(error)); CHECK(plan);
+    if (!plan) goto done;
+    create("authoring-defect-data/overrides/broken/package.json", "{\"id\":\"broken-local\",\"name\":\"Broken local\"}");
+    create("authoring-defect-data/overrides/broken/assets/generated/decls/entitydef/broken.decl", "{ edit = { ");
+    strcpy_s(error, sizeof(error), "stale");
+    int prepared = sh_package_map_plan_prepare_inventory(plan, data, error, sizeof(error));
+    if (!prepared || error[0]) fprintf(stderr, "local authoring defect: %d %s\n", prepared, error);
+    CHECK(prepared && !error[0]);
+    summary = sh_package_runtime_summary();
+    CHECK(summary && strstr(summary, "Local authoring composition unavailable"));
+    free(summary);
+done:
+    sh_package_map_plan_free(plan);
+    sh_package_runtime_test_source_readers((sh_decl_registry_source){0}, 0); sh_package_runtime_test_dispose();
+    sh_package_runtime_test_baseline(baseline, NULL);
+    for (size_t i = 0; i < f.count; i++) free(f.regions[i].address);
+    cleanup_resources(data);
+}
 typedef struct selector_slot_activation {
     const char *served;
     int calls;
@@ -2808,6 +2844,7 @@ int main(int argc, char **argv)
     test_additive_occurrence_admission();
     test_installed_authoring_admission();
     test_initial_installed_authoring();
+    test_local_authoring_defect();
     test_selector_shared_retirement();
     test_failed_local_compilation_admission();
     cleanup(); if (failures) return 1;

@@ -1079,7 +1079,8 @@ static pr_provider *pr_prepare_deliveries(const char *data_root, const char *sou
                 strcpy_s(error, sizeof(error), scope_error);
             }
             snprintf(line, sizeof(line), "package library compile (%s): %s in %llu ms%s%s",
-                contexts ? "map contexts" : "installed library", linked ? "linked" : "failed",
+                authoring_increment ? "local authoring" : contexts ? "map contexts" : "installed library",
+                linked ? "linked" : "failed",
                 (unsigned long long)(GetTickCount64() - started), linked ? "" : ": ", linked ? "" : error);
             backend_log(line);
             char phases[256];
@@ -2809,6 +2810,15 @@ int sh_package_map_plan_prepare_inventory(sh_package_map_plan *plan,
         &inventory, &composition_failed, NULL, NULL, 0, 0, plan->provider, error, capacity);
     if (!inventory || (!checked && !composition_failed)) {
         goto done;
+    }
+    /* A local authoring defect excludes only its own package, as in a library
+     * rescan: the map continues and the summary keeps the reason. The caller
+     * treats any message as a failed load, so none may remain. */
+    if (!checked && error && capacity) {
+        AcquireSRWLockExclusive(&g_lock);
+        strcpy_s(g_authoring_error, sizeof(g_authoring_error), error);
+        ReleaseSRWLockExclusive(&g_lock);
+        error[0] = 0;
     }
     if (g_library_provider != base) {
         if (error && capacity) snprintf(error, capacity, "the installed library changed during source preparation"); goto done;
