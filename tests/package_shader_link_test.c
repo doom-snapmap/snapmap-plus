@@ -55,6 +55,7 @@ typedef struct fixture {
     sh_package_compilation compiled;
     sh_compiled_resource files[20];
     int deny, kind, index, mutate, calls, admit_calls, absent, read_failure, flag_deny, flag_mutate, flag_calls;
+    int campaign, stale;
 } fixture;
 static unsigned char *memory(fixture *f, size_t length)
 {
@@ -133,7 +134,9 @@ static int original(void *context,const char *path,unsigned char **body,size_t *
     if(f->absent)return 0;
     const sh_compiled_resource *file=sh_package_compilation_find(&f->compiled,path);
     if(!file)return 0;
-    *body=malloc(file->body_length+1);assert(*body);memcpy(*body,file->body,file->body_length+1);*length=file->body_length;return 1;
+    *body=malloc(file->body_length+1);assert(*body);memcpy(*body,file->body,file->body_length+1);*length=file->body_length;
+    if(f->stale && strstr(path,"_pc_vulkan.bin"))(*body)[0]^=1; /* An installed original cooked differently. */
+    return f->campaign ? 2 : 1;
 }
 static int flag_abi(void *context,const char *name,sh_decl_source source,uint64_t *mask,char *error,size_t capacity)
 {
@@ -218,8 +221,9 @@ static void include_fanout_snapmap_only(void)
 {
     static const char *const archives[]={"snap_gameresources.resources","snap_gameresources.patch",
         "gameresources.resources","gameresources.patch","snap_gameresources.pindex","gameresources.pindex"};
-    fixture f;setup(&f,0);char error[512],base[128],path[256];
-    snprintf(base,sizeof(base),"obj/shader-include-catalog-%lu",(unsigned long)GetCurrentProcessId());
+    fixture f;setup(&f,0);char error[512],temporary[MAX_PATH],base[MAX_PATH+64],path[MAX_PATH+128];
+    assert(GetTempPathA(sizeof(temporary),temporary));
+    snprintf(base,sizeof(base),"%sshader-include-catalog-%lu",temporary,(unsigned long)GetCurrentProcessId());
     assert(CreateDirectoryA(base,NULL) || GetLastError()==ERROR_ALREADY_EXISTS);
     for(size_t i=0;i<4;i++){snprintf(path,sizeof(path),"%s/%s",base,archives[i]);write_file(path,"",0);}
     snprintf(path,sizeof(path),"%s/%s",base,archives[4]);include_index(path,"fixture");
@@ -239,6 +243,25 @@ static void include_fanout_snapmap_only(void)
     sh_package_source_link_close(s);sh_resource_catalog_close(catalog);clear(&f);
     for(size_t i=0;i<6;i++){snprintf(path,sizeof(path),"%s/%s",base,archives[i]);assert(DeleteFileA(path));}
     assert(RemoveDirectoryA(base));
+}
+/* A render program cannot be renamed. One SnapMap does not ship keeps the name
+ * its scope gives it (binding 2) even when re-cooked; a changed SnapMap one
+ * cannot keep it. */
+static void unshipped_program(void)
+{
+    static const struct { int absent, campaign, stale, binding; } cases[] = {
+        {0, 0, 0, 1}, {0, 0, 1, 0}, {0, 1, 0, 2}, {0, 1, 1, 2}, {1, 0, 0, 2}};
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        fixture f; setup(&f, 0); char error[512];
+        f.absent = cases[i].absent; f.campaign = cases[i].campaign; f.stale = cases[i].stale;
+        sh_package_source_link *s = open_link(&f, SH_PACKAGE_SHADER_VULKAN, error);
+        if (!s) fprintf(stderr, "unshipped program %zu: %s\n", i, error);
+        assert(s);
+        const sh_package_link_inputs *inputs = sh_package_source_link_inputs(s);
+        size_t unit = sh_package_link_inputs_find(inputs, 0, "renderprog", "fixture");
+        assert(unit != SIZE_MAX && inputs->units[unit].original_binding == cases[i].binding);
+        sh_package_source_link_close(s); clear(&f);
+    }
 }
 static void reject_incomplete(void)
 {
@@ -505,4 +528,4 @@ static void native_contract(void)
     sh_package_native_assets_close(assets);clear(&f);
 }
 int main(void)
-{ complete_and_bind(SH_PACKAGE_SHADER_VULKAN);complete_and_bind(SH_PACKAGE_SHADER_OPENGL);include_fanout_snapmap_only();reject_incomplete();native_contract();preparation_contract();shader_scope_contract();source_only_opengl(0);source_only_opengl(1);puts("package_shader_link_test: PASS");return 0; }
+{ complete_and_bind(SH_PACKAGE_SHADER_VULKAN);complete_and_bind(SH_PACKAGE_SHADER_OPENGL);include_fanout_snapmap_only();unshipped_program();reject_incomplete();native_contract();preparation_contract();shader_scope_contract();source_only_opengl(0);source_only_opengl(1);puts("package_shader_link_test: PASS");return 0; }

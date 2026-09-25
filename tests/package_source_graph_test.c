@@ -240,6 +240,10 @@ static int original(void *context, const char *path, unsigned char **body, size_
     if (!strcmp(path, "generated/skeleton/md6/present/present.bmd6skl")) {
         *length = 8; *body = (unsigned char *)_strdup("skeleton"); return *body ? 1 : -1;
     }
+    if (!strcmp(path, "generated/decls/renderprog/snapprog.decl")) {
+        /* The one program here that SnapMap itself ships. */
+        *length = 3; *body = (unsigned char *)_strdup("{ }"); return *body ? 1 : -1;
+    }
     if (!strcmp(path, "generated/image/image/snap.bimage")) {
         /* The one image here that SnapMap itself ships. */
         *length = 10; *body = (unsigned char *)_strdup("snap image"); return *body ? 1 : -1;
@@ -257,6 +261,7 @@ static int original(void *context, const char *path, unsigned char **body, size_
     else if (!strcmp(path, "generated/decls/renderparm/color.decl")) text = "{ Vec 0 }";
     else if (!strcmp(path, "generated/decls/renderparm/tex.decl")) text = "{ Tex2D textures/default/body }";
     else if (!strcmp(path, "generated/decls/renderparm/label.decl")) text = "{ String }";
+    else if (!strcmp(path, "generated/decls/renderparm/stageprogram.decl")) text = "{ Program }";
     else if (!strcmp(path, "generated/decls/renderparm/landpagefile.decl")) text = "{ String }";
     else if (!strcmp(path, "generated/decls/renderparm/buffer.decl")) text = "{ StructuredBuffer writable_cs boss_t }";
     else if (!strcmp(path, "generated/decls/renderparm/boss_t.decl")) text = "{ struct { uint offset; } }";
@@ -417,6 +422,22 @@ static void test_bind(fixture *f, sh_package_compilation *compiled, sh_decl_regi
             assert(out && result.references == 6 && result.changed == 5 && bindings.count == before + 5);
             assert(strstr((char *)out, kept[i])); free(out);
         }
+        /* A parm block finds a program strictly, but an unknown one only ends
+         * the block and the engine keeps the ill-formed material. A program
+         * neither this scope nor SnapMap has stays by name with no edge. */
+        const char *programs[] = {"{ stageProgram snapprog\n}", "{ stageProgram absentprog\n}",
+            "{ stageProgram glow\n}"};
+        const char *named[] = {"bound/stageprogram bound/snapprog", "bound/stageprogram absentprog",
+            "bound/stageprogram glow"};
+        for (size_t i = 0; i < 3; i++) {
+            size_t before = bindings.count;
+            out = sh_package_source_bind(reader, "material", "example", (const unsigned char *)programs[i],
+                strlen(programs[i]), bind_reference, &bindings, &length, &result, error, sizeof(error));
+            if (!out) fprintf(stderr, "material program: %s\n", error);
+            assert(out && result.references == 2 && result.changed == (i ? 1u : 2u) &&
+                bindings.count == before + (i ? 1u : 2u));
+            assert(strstr((char *)out, named[i])); free(out);
+        }
     }
     {
         const char *table = "{ clamp { -1:0, 2:1 } }";
@@ -443,6 +464,26 @@ static void test_bind(fixture *f, sh_package_compilation *compiled, sh_decl_regi
         assert(!sh_package_source_bind(reader, "articulatedfigure", "example", (const unsigned char *)af,
             strlen(af), bind_reference, &bindings, &length, &result, error, sizeof(error)));
         assert(!length && !result.changed && strstr(error, "skin"));
+    }
+    {
+        /* A cloth names its material and the md6 definition its data drapes;
+         * joint entries, counts and hit-test groups stay local. */
+        const char *cloth = "{\tmass\t\t1.0\tgravity\t-10000.0\tfriction\t1\ttype\tgeneric\tmaterial\tsurfaces/cloth\n"
+            "\tclothData { zion/monsters/archvile.md6\t\t40\t\tleftwing1\t{ anchored }\n"
+            "\t\tleftwing2\t{ physicsInfluence 0.125\tforward\t2\tright 11\t} }\n\thitTestGroups { group1 { a b } } }";
+        out = sh_package_source_bind(reader, "cloth", "example", (const unsigned char *)cloth, strlen(cloth),
+            bind_reference, &bindings, &length, &result, error, sizeof(error));
+        if (!out) fprintf(stderr, "cloth binding: %s\n", error);
+        assert(out && result.references == 2 && result.changed == 2 &&
+            strstr((char *)out, "material\tbound/surfaces/cloth") &&
+            strstr((char *)out, "clothData { bound/zion/monsters/archvile.md6")); free(out);
+        const char *none = "{ type rope clothData { none } }";
+        out = sh_package_source_bind(reader, "cloth", "example", (const unsigned char *)none, strlen(none),
+            bind_reference, &bindings, &length, &result, error, sizeof(error));
+        assert(out && !result.references); free(out);
+        const char *unknown = "{ clothDeclFX fx/sparks }";
+        assert(!sh_package_source_bind(reader, "cloth", "example", (const unsigned char *)unknown, strlen(unknown),
+            bind_reference, &bindings, &length, &result, error, sizeof(error)));
     }
     {
         /* An environment names its base env and a render parameter block read
@@ -550,6 +591,13 @@ static void test_bind(fixture *f, sh_package_compilation *compiled, sh_decl_regi
         assert(!sh_package_source_bind(reader, "breakable", "part", (const unsigned char *)breakable,
             strlen(breakable), bind_reference, &bindings, &length, &result, error, sizeof(error)));
         assert(!length && !result.changed && error[0]);
+        /* NULL is the stock sentinel for no effect or particle. */
+        breakable = "{ model models/part.lwo explosion {fx NULL} trail {particleTrail NULL particleBounce NULL} }";
+        bindings = (bind_fixture){0}; bindings.replace = 1;
+        out = sh_package_source_bind(reader, "breakable", "part", (const unsigned char *)breakable,
+            strlen(breakable), bind_reference, &bindings, &length, &result, error, sizeof(error));
+        if (!out) fprintf(stderr, "NULL breakable: %s\n", error);
+        assert(out && result.references == 1 && bindings.count == 1); free(out);
     }
     {
         const char *state = "{ edit = { target = \"map-child\"; } }";
@@ -1361,6 +1409,40 @@ static void test_implicit_source_link(fixture *native, sh_decl_registry_source r
     assert(!strcmp((const char *)files[0][1].body, root));
 }
 
+typedef struct unknown_bound { int calls; } unknown_bound;
+static int bound_unknown(void *context, const char *family, const char *name, int *exists)
+{ (void)family; (void)name; (void)exists; ((unknown_bound *)context)->calls++; return 0; }
+static int bound_absent(void *context, const char *family, const char *name, int *exists)
+{ (void)family; (void)name; ((unknown_bound *)context)->calls++; *exists = 0; return 1; }
+/* A composed body copies a stock-style reference the engine defaults (no
+ * source anywhere, absence captured in discovery): it keeps its bytes when the
+ * bound outputs do not claim the name, but a name the bound outputs positively
+ * lack still refuses the composition. */
+static void test_composed_stock_default(fixture *native, sh_decl_registry_source registry)
+{
+    const char *root = "{ class = \"Entity\"; edit = { target = \"stock/gone\"; } }";
+    sh_package_sources inventory = {0};
+    sh_compiled_resource files[1];
+    sh_package_compilation compiled = {0};
+    const sh_package_compilation *scope = &compiled;
+    source_link_fixture f = {native};
+    char error[1024]; size_t length = 0;
+    files[0] = link_decl("root", "generated/decls/entitydef/root.decl", root);
+    compiled.resources = files; compiled.resource_count = 1; compiled.sources = &inventory;
+    sh_package_source_link *source = sh_package_source_link_open(&scope, 1, NULL, link_original, &f,
+        registry, (uintptr_t)native->reflection, NULL, error, sizeof(error));
+    if (!source) fprintf(stderr, "composed default source: %s\n", error);
+    assert(source);
+    size_t unit = sh_package_link_inputs_find(sh_package_source_link_inputs(source), 0, "entitydef", "root");
+    unknown_bound bound = {0}; bind_fixture capture = {0};
+    unsigned char *out = sh_package_source_link_bind_derived(source, unit, (const unsigned char *)root, strlen(root),
+        bind_reference, &capture, bound_unknown, &bound, &length, error, sizeof(error));
+    if (!out) fprintf(stderr, "composed default: %s\n", error);
+    assert(out && bound.calls && !capture.count && length == strlen(root) && !memcmp(out, root, length)); free(out);
+    assert(!sh_package_source_link_bind_derived(source, unit, (const unsigned char *)root, strlen(root),
+        bind_reference, &capture, bound_absent, &bound, &length, error, sizeof(error)));
+    sh_package_source_link_close(source);
+}
 static void test_source_link(fixture *native, sh_decl_registry_source registry)
 {
     const char *root = "{ class = \"Entity\"; edit = { target = \"child\"; } }";
@@ -2151,6 +2233,35 @@ static int sound_delivery_owners(void *context, size_t scope, const char *family
     (void)context; (void)family; (void)name; (void)error; (void)capacity;
     *owners = *gameplay = scope == 1 ? &supplied : NULL; return 1;
 }
+/* Campaign-only bytes a scope supplies keep their native name, but they are that
+ * scope's content: another scope may rely on their absence. They certify as 2,
+ * so the linker keeps dependents private. SnapMap bytes certify as 1. */
+static void test_campaign_original_binding(fixture *f, sh_decl_registry_source registry)
+{
+    sh_compiled_resource files[4];
+    files[0] = link_decl("base", "generated/decls/entitydef/base.decl",
+        "{ class = \"Entity\"; edit = { target = \"parent-only\"; } }");
+    files[1] = link_decl("parent-only", "generated/decls/entitydef/parent-only.decl", "{ class = \"Entity\"; edit = {} }");
+    files[2] = link_decl("meshbound", "generated/decls/material/meshbound.decl", "{ }"); files[2].type = "material";
+    files[3] = link_decl("label", "generated/decls/renderparm/label.decl", "{ String }"); files[3].type = "renderparm";
+    sh_package_compilation scope = {0}; scope.resources = files; scope.resource_count = 4;
+    const sh_package_compilation *views[] = {&scope};
+    sh_package_library_native native = sh_package_native_assets_adapter(NULL);
+    char error[1024];
+    sh_package_source_link *source = sh_package_source_link_open(views, 1, NULL, original, f,
+        registry, (uintptr_t)f->reflection, &native.source, error, sizeof(error));
+    if (!source) fprintf(stderr, "campaign originals: %s\n", error);
+    assert(source);
+    const sh_package_link_inputs *inputs = sh_package_source_link_inputs(source);
+    const char *family[] = {"entitydef", "entitydef", "material", "renderparm"};
+    const char *name[] = {"base", "parent-only", "meshbound", "label"};
+    const int expected[] = {2, 2, 1, 2};
+    for (size_t i = 0; i < 4; i++) {
+        size_t unit = sh_package_link_inputs_find(inputs, 0, family[i], name[i]);
+        assert(unit < inputs->count && inputs->units[unit].original_binding == expected[i]);
+    }
+    sh_package_source_link_close(source);
+}
 static void test_sound_original_binding(void)
 {
     fixture f; setup_sound(&f);
@@ -2535,6 +2646,34 @@ static void test_contribution_projection(void)
     assert(out && strstr(out, "a = 1") && strstr(out, "b = 2") && strstr(out, "\"red\"") &&
         !strstr(out, "\"green\"") && strstr(out, "item[2] = 9") && !strstr(out, "item[0]"));
     free(out);
+    {
+        /* A selector patching its parent's property by index keeps that sparse
+         * inherited edit. Differing parents compose only complete lists. */
+        const char *patch = "{ inherit = \"demons/demon_base\"; edit = { propertySheets = { item[0] = { properties = { "
+            "item[4] = { descriptionTag = \"#str_patched\"; } } } } } }";
+        const char *other = "{ inherit = \"demons/other_base\"; edit = { propertySheets = { item[0] = { properties = { "
+            "item[4] = { descriptionTag = \"#str_other\"; } } } } } }";
+        const char *full[] = {"{ inherit = \"demons/demon_base\"; edit = { propertySheets = { num = 1; item[0] = { "
+            "properties = { num = 1; item[0] = { path = \"health\"; type = \"float\"; } } } } } }",
+            "{ inherit = \"demons/other_base\"; edit = { propertySheets = { num = 1; item[0] = { "
+            "properties = { num = 1; item[0] = { path = \"speed\"; type = \"float\"; } } } } } }"};
+        sh_decl_source one[] = {{patch, strlen(patch)}, {other, strlen(other)}};
+        sh_decl_source whole[] = {{full[0], strlen(full[0])}, {full[1], strlen(full[1])}};
+        out = sh_package_editor_contributions("snapeditorentitydef", (sh_decl_source){"{}", 2}, one, 1, one[0], 1,
+            &length, error, sizeof(error));
+        if (!out) fprintf(stderr, "sparse inherited selector: %s\n", error);
+        assert(out && strstr(out, "item[4]") && strstr(out, "#str_patched") && !strstr(out, "num") &&
+            strstr(out, "inherit = \"demons/demon_base\""));
+        free(out);
+        assert(!sh_package_editor_contributions("snapeditorentitydef", (sh_decl_source){"{}", 2}, one, 2, one[0], 1,
+            &length, error, sizeof(error)));
+        out = sh_package_editor_contributions("snapeditorentitydef", (sh_decl_source){"{}", 2}, whole, 2, whole[0], 1,
+            &length, error, sizeof(error));
+        if (!out) fprintf(stderr, "complete selectors with differing parents: %s\n", error);
+        assert(out && strstr(out, "\"health\"") && strstr(out, "\"speed\"") &&
+            strstr(out, "inherit = \"demons/demon_base\"") && !strstr(out, "other_base"));
+        free(out);
+    }
     assert(!sh_package_editor_contribution_phase("snapeditorentitybank"));
     {
         const char *original = "{ class = \"Entity\"; editorVars = { color = (1,1,1,1); flags = { first = 0; second = 0; label = \"base\"; } } edit = { target = \"base\"; } }";
@@ -3122,11 +3261,10 @@ static const sh_package_link_unit *movie_unit(const sh_package_link_inputs *inpu
     *index = sh_package_link_inputs_find(inputs, scope, family, name);
     return *index < inputs->count ? inputs->units + *index : NULL;
 }
-static void test_movie_source_link(void)
+/* Extend a private reflection fixture: Entity gains an idSWF* field whose
+ * registered pointer reader is distinct from every resource reader. */
+static void movie_reflection(fixture *native)
 {
-    /* Extend a private reflection fixture: Entity gains an idSWF* field whose
-     * registered pointer reader is distinct from every resource reader. */
-    fixture storage; fixture *native = &storage; setup(native);
     {
         void *container = *(void **)native->reflection;
         void *records = alloc(native, 21 * 0x38), *objects = alloc(native, 21 * 16), *pointers = alloc(native, 21 * 16);
@@ -3142,6 +3280,10 @@ static void test_movie_source_link(void)
         const char *o[] = {"*", "", "*", "*", "*", "*", "*"}, *n[] = {"target", "custom", "modifier", "preview", "model", "image", "gui"};
         fields(native, (char *)records + 0x38, 7, t, o, n);
     }
+}
+static void test_movie_source_link(void)
+{
+    fixture storage; fixture *native = &storage; setup(native); movie_reflection(native);
     sh_decl_registry_source registry = {native, read_memory, (uintptr_t)native->registry, NULL};
     static const unsigned char glyphs[14] = {'i','d','f','+',0,12,0,0,0,12,0,12,0,0};
     static const char atlas_red[] = "red atlas pixels", atlas_green[] = "green atlas pixels";
@@ -3310,6 +3452,53 @@ static void test_movie_source_link(void)
     }
     while (native->count) free(native->regions[--native->count].address);
 }
+/* Editor contributions compose an entity across scopes through class tokens.
+ * A token must read back through its field's reader, and a movie field only
+ * names a cooked generated/swf pair: its token keeps that spelling. */
+static movie_source_fixture token_movies;
+static int movie_token_original(void *context, const char *path, unsigned char **body, size_t *length)
+{ (void)context; return movie_original(&token_movies, path, body, length); }
+static void test_contribution_movie_token(void)
+{
+    fixture storage; fixture *native = &storage; setup(native); movie_reflection(native);
+    sh_decl_registry_source registry = {native, read_memory, (uintptr_t)native->registry, NULL};
+    const char *folders[] = {"red", "green"};
+    char temporary[MAX_PATH], relative[256], text[256], error[1024];
+    assert(GetTempPathA(sizeof(temporary), temporary));
+    snprintf(root, sizeof(root), "%ssmp-movie-token-%lu-%llu", temporary, GetCurrentProcessId(), GetTickCount64());
+    assert(CreateDirectoryA(root, NULL));
+    for (size_t i = 0; i < 2; i++) {
+        snprintf(relative, sizeof(relative), "overrides/%s/package.json", folders[i]);
+        create(relative, "{\"id\":\"same.id\",\"name\":\"Screens\"}");
+        snprintf(relative, sizeof(relative), "overrides/%s/assets/generated/decls/entitydef/screen.decl", folders[i]);
+        snprintf(text, sizeof(text), "{ class = \"Entity\"; editorVars = { %sControl = 1; } "
+            "edit = { gui = \"swf/stock/panel.swf\"; } }", folders[i]);
+        create(relative, text);
+    }
+    token_movies = (movie_source_fixture){0}; token_movies.stock = 1;
+    mv_build(&token_movies.stock_movie, "GUI/Paint", "Absent");
+    sh_package_sources *sources = sh_package_sources_scan(root, error, sizeof(error)); assert(sources);
+    sh_package_compile_environment env = {0}; env.baseline = movie_token_original;
+    sh_package_library_native certified = {0}; certified.source.semantics = movie_semantics;
+    sh_package_library library = {0};
+    int ok = sh_package_library_compile(sources, &env, NULL, movie_token_original, NULL, registry,
+        (uintptr_t)native->reflection, &certified, &library, error, sizeof(error));
+    if (!ok) fprintf(stderr, "contribution movie token: %s\n", error);
+    assert(ok);
+    size_t screens = 0;
+    for (size_t i = 0; i < library.compiled->resource_count; i++) {
+        const sh_compiled_resource *file = library.compiled->resources + i;
+        const char *authored = file->original_path ? file->original_path : file->engine_path;
+        assert(!strstr((char *)file->body, "smp-contribution/"));
+        if (strcmp(authored, "generated/decls/entitydef/screen.decl")) continue;
+        screens++;
+        assert(strstr((char *)file->body, "redControl = 1") && strstr((char *)file->body, "greenControl = 1") &&
+            strstr((char *)file->body, "gui = \"swf/stock/panel.swf\""));
+    }
+    assert(screens);
+    sh_package_library_free(&library); sh_package_sources_free(sources); cleanup(); assert(!failures);
+    while (native->count) free(native->regions[--native->count].address);
+}
 /* Effects end in the shared reflected reader: end of file may close only the
  * outermost brace, and quoted control bytes are ordinary string bytes. */
 static void test_open_effect_body(void)
@@ -3414,10 +3603,13 @@ int main(void)
     setup(&f);
     sh_decl_registry_source registry = {&f, read_memory, (uintptr_t)f.registry, NULL};
     test_source_link(&f, registry);
+    test_composed_stock_default(&f, registry);
+    test_campaign_original_binding(&f, registry);
     test_implicit_source_link(&f, registry);
     test_font_source_link(&f, registry);
     test_font_library(&f, registry);
     test_movie_source_link();
+    test_contribution_movie_token();
     test_open_effect_body();
     test_map_occurrences(&f, registry);
     test_library(&f, registry);

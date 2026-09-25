@@ -14,6 +14,7 @@
 #include "map_binding_sites.h"
 #include "package_movie.h"
 #include "package_font.h"
+#include "decl_text.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,6 +49,7 @@ typedef struct sh_package_source_reader {
     sh_package_binding_resolver saved_binding;
     void *saved_context;
     sh_package_bound_exists bound_exists;
+    int bound_absent; /* The last lookup was positively absent from bound outputs. */
     void *bound_context;
     sh_package_source_shader shader;
     int shader_configured;
@@ -176,7 +178,7 @@ static int sg_exists(void *context, uintptr_t manager, const char *type, const c
         status = family ? walk->bound_exists(walk->bound_context, family, name, &exists) : -1;
         free(family);
         if (status < 0 || (status && exists != 0 && exists != 1)) { walk->failed = 1; return -1; }
-        if (status) return exists;
+        if (status) { walk->bound_absent = !exists; return exists; }
     }
     path = sg_lookup_path(walk, type, name);
     if (!path) return -1;
@@ -186,10 +188,13 @@ static int sg_exists(void *context, uintptr_t manager, const char *type, const c
 
 /* Declaration text may keep a stock-style reference to a declaration that has
  * no source anywhere in its scope: the engine defaults it by name, as it does
- * for the stock original. A map's own reference, or a derived body checked
- * against bound outputs, must still resolve to an actual source. */
+ * for the stock original. A map's own reference must still resolve to an
+ * actual source. A composed body keeps such references copied from stock
+ * text; its composition tokens must always resolve (sg_composition_token). */
 static int sg_native_default(const sg_walk *walk)
-{ return walk->current_type && strcmp(walk->current_type, "map") && !walk->bound_exists; }
+{ return walk->current_type && strcmp(walk->current_type, "map"); }
+static int sg_composition_token(const char *name, size_t length)
+{ return name && length >= 17 && !memcmp(name, "smp-contribution/", 17); }
 
 static int sg_reference(void *context, const char *field, sh_decl_value_type type,
     const char *name, size_t length)
@@ -508,11 +513,8 @@ static int sg_leaf_family(const char *type)
     return 0;
 }
 
-/* The effect Parse on both renderers resets its items and ends in the shared
- * reflected reader, which ignores its braced section's end-of-file result.
- * Stock fists_1st and a coop candle effect omit their final brace. */
 static int sg_open_body(const char *type)
-{ return type && !strcmp(type, "fx"); }
+{ return sh_decl_text_open_body_family(type); }
 
 /* Leaves have no dependency grammar to read, but their source must still
  * belong to the candidate or an original baseline. Local availability cannot
@@ -1070,11 +1072,13 @@ static int sg_bind_typed(void *context, const char *slot, sh_decl_value_type typ
         if (!ok) sg_gap(binding->reader, slot, type.name, "native candidate names could not be observed");
         return ok ? 0 : -1;
     }
+    binding->reader->bound_absent = 0;
     int result = sh_decl_native_reference_read(binding->reader->schema, binding->reader->registry,
         type, name, length, &reference);
     /* Authored declaration text keeps an engine-defaulted absent declaration
      * unchanged, with no binding edge, like its stock counterpart. */
-    if (result == 2) result = sg_native_default(binding->reader) ? 0 : -1;
+    if (result == 2) result = sg_native_default(binding->reader) && !binding->reader->bound_absent &&
+        !sg_composition_token(name, length) ? 0 : -1;
     if (result == 1) {
         /* Native registry labels retain mixed case (entityDef, for example).
          * Source-unit identities use the same canonical family as the source
@@ -1090,7 +1094,13 @@ static int sg_bind_typed(void *context, const char *slot, sh_decl_value_type typ
             else *replacement = binding->replacement;
         }
     }
-    if (result < 0) sg_gap(binding->reader, slot, type.name, "native source binding could not be resolved");
+    if (result < 0) {
+        char reason[384];
+        snprintf(reason, sizeof(reason), "native source binding could not be resolved%s%s%s%s",
+            reference.resource.name ? ": " : "", reference.resource.type ? reference.resource.type : "",
+            reference.resource.name ? " " : "", reference.resource.name ? reference.resource.name : "");
+        sg_gap(binding->reader, slot, type.name, reason);
+    }
     sh_decl_native_reference_clear(&reference); return result;
 }
 
@@ -1112,7 +1122,7 @@ static int sg_native_default_target(sg_binding *binding, const char *family, con
 {
     unsigned char *body = NULL; size_t length = 0;
     char *path = NULL;
-    if (!binding->family || binding->reader->bound_exists) return 0;
+    if (!binding->family || sg_composition_token(name, strlen(name))) return 0;
     if (!strcmp(binding->family, "basemodel") && !strcmp(family, "material")) path = sg_path("material", name);
     else if (!strcmp(binding->family, "md6def") && strcmp(family, "md6def") && strcmp(family, "basemodel") &&
         strcmp(family, "anim") && strcmp(family, "skeleton") && strcmp(family, "image") && strcmp(family, "sound")) {
@@ -1149,6 +1159,19 @@ static int sg_native_default_target(sg_binding *binding, const char *family, con
          * creates a defaulted one, so the name alone is the identity. */
         path = sh_package_cooked_path("image", name);
         if (!path) return name[0] == '_';
+    } else if ((!strcmp(binding->family, "material") || !strcmp(binding->family, "renderparm") ||
+        !strcmp(binding->family, "env")) && !strcmp(family, "renderprog")) {
+        /* A parm block finds a program without makeDefault (Vulkan 0x140db3710 /
+         * OpenGL 0x140da9930): an unknown one reports "'%s' is an unknown
+         * renderProg." and ends the block, and idMaterial::Parse (0x140d76bb0 /
+         * 0x140d76df0) warns and keeps the ill-formed material. A renderparm's
+         * own value asks with makeDefault (0x140d7bae0 / 0x140d7bd20). A program
+         * that neither this scope nor SnapMap has gives that same result in every
+         * scope, as in stock (models/characters/eyes/eyelip names eyeLip). */
+        const sh_resource_catalog_entry *const *rows = NULL;
+        size_t count = sh_resource_catalog_find(binding->reader->catalog, "renderprog", name, &rows);
+        for (size_t i = 0; i < count; i++) if (rows[i]->archive < 2) return 0;
+        path = sg_path("renderprog", name);
     } else return 0;
     int status = path ? sg_read_path(binding->reader, path, &body, &length) : -1;
     free(body); free(path);

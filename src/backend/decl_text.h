@@ -19,6 +19,11 @@ typedef struct sh_decl_reference_item {
  * own decl parser remains the semantic authority. */
 int sh_decl_text_well_formed(const unsigned char *text, size_t length);
 
+/* Return 1 for a declaration family whose native Parse ends in the shared
+ * reflected reader, which ignores its braced section's end-of-file result:
+ * end of file may close the outermost brace (effects, on both renderers). */
+int sh_decl_text_open_body_family(const char *type);
+
 /* Return 1 when a snapEditorEntityDef body contains a real top-level
  * `inherit = ...` assignment or a direct `edit.entityDef = ...` assignment.
  * The check is lexical only: comments and quoted values are ignored, key

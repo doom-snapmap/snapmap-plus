@@ -786,6 +786,11 @@ int sh_package_audio_program_bind(sh_package_audio_program *p, sh_package_compil
             pap_sound *sound = p->scopes[i].sounds + j;
             if (name && sound->output && !strcmp(sound->output, name)) { found = sound; scope = i; break; }
         }
+        uint32_t native = 0;
+        /* A sound this program did not collect keeps its SnapMap name and the
+         * native event derived from it; only a renamed one needs an output. */
+        if (!found && name && r->sound_event && r->sound_event == r->sound_authored_event &&
+            sh_audio_event_identity(name, &native) && native == r->sound_event) continue;
         sh_compiled_resource probe = *r;
         if (!found || !sh_package_sound_rebind(&probe, found->event, found->event)) {
             pap_fail(error, capacity, "compiled sound has no captured event output", name); goto done;

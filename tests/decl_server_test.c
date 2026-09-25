@@ -1677,11 +1677,29 @@ static void test_identity_paths(void)
     refuse_path("actormodifier//cacodemon.decl", "empty");
     refuse_path("actormodifier/../cacodemon.decl", "traversal");
     refuse_path("actormodifier/./cacodemon.decl", "traversal");
+    /* Shipped declaration names use these characters. */
+    expect_path("material/models/weapons/bfg/bfg_3p_[3p_lp].decl",
+                "material", "models/weapons/bfg/bfg_3p_[3p_lp]",
+                "generated/decls/material/models/weapons/bfg/bfg_3p_[3p_lp].decl");
+    expect_path("table/autogen/creature/archvile/shockwave_single/stage 2/c_0.decl",
+                "table", "autogen/creature/archvile/shockwave_single/stage 2/c_0",
+                "generated/decls/table/autogen/creature/archvile/shockwave_single/stage 2/c_0.decl");
+    expect_path("unlockable/challenges/pvp/can't_fight_the_power_challenge.decl",
+                "unlockable", "challenges/pvp/can't_fight_the_power_challenge",
+                "generated/decls/unlockable/challenges/pvp/can't_fight_the_power_challenge.decl");
+    expect_path("material/models/mapobjects/prop/hell/soulcube_[mesh_(2)].decl",
+                "material", "models/mapobjects/prop/hell/soulcube_[mesh_(2)]",
+                "generated/decls/material/models/mapobjects/prop/hell/soulcube_[mesh_(2)].decl");
+
     refuse_path("actor modifier/cacodemon.decl", "type");
-    refuse_path("actormodifier/demon rune.decl", "character");
+    refuse_path("actormodifier/demon ;evil.decl", "character");
     refuse_path("actormodifier/demon;evil.decl", "character");
     refuse_path("actormodifier/demon{evil}.decl", "character");
     refuse_path("actormodifier/demon=evil.decl", "character");
+    refuse_path("actormodifier/demon\"evil.decl", "character");
+    refuse_path("actormodifier/demon,evil.decl", "character");
+    refuse_path("actormodifier/demon /rune.decl", "space");
+    refuse_path("actormodifier/demon .decl", "space");
     refuse_path("actormodifier/.decl", "name");
 }
 
@@ -3400,6 +3418,21 @@ static void test_many_candidates(void)
     CHECK(!sh_decl_server_test_capture(&compiled, &count, &bytes)); CHECK(count == 0 && bytes == 0);
     compiled.resource_count = SIZE_MAX;
     CHECK(!sh_decl_server_test_capture(&compiled, &count, &bytes)); CHECK(count == 0 && bytes == 0);
+    {
+        /* An effect's reader lets end of file close its outermost brace, as
+         * stock fists_1st does; other families and deeper gaps still refuse. */
+        static const char open[] = "{\r\n\tedit = {\r\n\t\teditEvents = {\r\n\t\t\tnum = 0;\r\n\t}\r\n}";
+        sh_compiled_resource effect = {0};
+        sh_package_compilation one = {0}; one.resources = &effect; one.resource_count = 1;
+        effect.name = "fx/weapons/fists/fists_1st"; effect.type = "fx";
+        effect.engine_path = "generated/decls/fx/fx/weapons/fists/fists_1st.decl";
+        effect.body = (unsigned char *)open; effect.body_length = sizeof(open) - 1;
+        CHECK(sh_decl_server_test_capture(&one, &count, &bytes)); CHECK(count == 1 && bytes == sizeof(open) - 1);
+        effect.type = "material";
+        CHECK(!sh_decl_server_test_capture(&one, &count, &bytes));
+        effect.type = "fx"; effect.body = (unsigned char *)"{ edit = { a = {"; effect.body_length = 16;
+        CHECK(!sh_decl_server_test_capture(&one, &count, &bytes));
+    }
 done:
     free(resources); free(names); free(paths);
 }

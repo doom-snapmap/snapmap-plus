@@ -682,10 +682,12 @@ static int pl_assign_one(pl_work *w, pl_registry *registry, size_t group)
     int ok = 0;
     if (!files || !identities) { pl_fail(w, "cannot allocate native path assignment"); goto done; }
     for (size_t i = 0; i < count; i++) files[i] = unit->files[i].resource;
+    char cause[384] = "";
     for (size_t attempt = 0; attempt < 1024; attempt++) {
         unsigned char token[32];
         size_t identity_count = 0;
         int collision = 0;
+        cause[0] = 0;
         *w->error = 0;
         if (!pl_name_token(classes->identities[group], attempt, token) ||
             !w->adapter->assign(w->adapter->context, index, token, w->originals[index],
@@ -702,23 +704,27 @@ static int pl_assign_one(pl_work *w, pl_registry *registry, size_t group)
             size_t slot = pl_path_slot(registry, unit->paths[i]);
             if (registry->paths[slot]) {
                 size_t other = registry->path_units[slot], file = registry->path_files[slot];
-                if (!w->originals[index] || !w->originals[other] ||
-                    strcmp(unit->files[i].resource->engine_path, w->work[other].files[file].resource->engine_path)) collision = 1;
-                else {
-                    int equal = pl_original_file_equal(w, index, i, other, file);
+                int equal = 0;
+                if (w->originals[index] && w->originals[other] &&
+                    !strcmp(unit->files[i].resource->engine_path, w->work[other].files[file].resource->engine_path)) {
+                    equal = pl_original_file_equal(w, index, i, other, file);
                     if (equal < 0) goto done;
-                    if (!equal) collision = 1;
                 }
+                if (!equal && !collision++) snprintf(cause, sizeof(cause), "path %s is already bound by %s %s",
+                    unit->paths[i], w->units[other].family, w->units[other].name);
             }
-            for (size_t j = 0; j < i; j++) if (!strcmp(unit->paths[i], unit->paths[j])) collision = 1;
+            for (size_t j = 0; j < i; j++) if (!strcmp(unit->paths[i], unit->paths[j]) && !collision++)
+                snprintf(cause, sizeof(cause), "path %s is assigned twice", unit->paths[i]);
         }
         for (size_t i = 0; i < identity_count; i++) {
             pl_native_identity *identity = identities + i;
             size_t occupied = registry->names[pl_name_slot(registry, identity, 0)];
             if (occupied) {
-                int shared = pl_same_original(w, identity, registry->identities + occupied - 1);
+                const pl_native_identity *held = registry->identities + occupied - 1;
+                int shared = pl_same_original(w, identity, held);
                 if (shared < 0) goto done;
-                if (!shared) collision = 1;
+                if (!shared && !collision++) snprintf(cause, sizeof(cause), "%s %s is already held by %s %s",
+                    identity->family, identity->name, w->units[held->unit].family, w->units[held->unit].name);
             }
             if (native) {
                 int state = native->check(native->context, identity->family, identity->name,
@@ -732,16 +738,20 @@ static int pl_assign_one(pl_work *w, pl_registry *registry, size_t group)
                     pl_fail(w, "native shared replacement requires a changed same-name binding"); goto done;
                 }
                 occupied = registry->ids[pl_name_slot(registry, identity, 1)];
-                if (state == SH_PACKAGE_LINK_REGISTRY_COLLISION) collision = 1;
+                if (state == SH_PACKAGE_LINK_REGISTRY_COLLISION && !collision++)
+                    snprintf(cause, sizeof(cause), "the native registry holds %s %s differently", identity->family, identity->name);
                 if (occupied) {
-                    int shared = pl_same_original(w, identity, registry->identities + occupied - 1);
+                    const pl_native_identity *held = registry->identities + occupied - 1;
+                    int shared = pl_same_original(w, identity, held);
                     if (shared < 0) goto done;
-                    if (!shared) collision = 1;
+                    if (!shared && !collision++) snprintf(cause, sizeof(cause), "native id of %s %s is already held by %s %s",
+                        identity->family, identity->name, w->units[held->unit].family, w->units[held->unit].name);
                 }
             }
             /* Candidates in this group are not in the shared index yet. */
             for (size_t j = 0; j < i; j++) if (!strcmp(identity->family, identities[j].family) &&
-                (!strcmp(identity->name, identities[j].name) || (native && identity->id == identities[j].id))) collision = 1;
+                (!strcmp(identity->name, identities[j].name) || (native && identity->id == identities[j].id)) && !collision++)
+                snprintf(cause, sizeof(cause), "members share %s %s", identity->family, identity->name);
         }
         if (!collision) {
             for (size_t i = 0; i < identity_count; i++) {
@@ -760,11 +770,17 @@ static int pl_assign_one(pl_work *w, pl_registry *registry, size_t group)
             *w->error = 0; ok = 1; break;
         }
         if (w->originals[index] || !count) {
-            pl_fail(w, "certified original resource has a native identity collision"); goto done;
+            snprintf(w->error, w->capacity, "certified original resource has a native identity collision: %s %s: %s",
+                w->units[index].family, w->units[index].name, cause);
+            w->failed = 1; goto done;
         }
         pl_assignment_clear(w, group);
     }
-    if (!ok) { *w->error = 0; pl_fail(w, "native identity collision allocation exhausted"); }
+    if (!ok) {
+        snprintf(w->error, w->capacity, "native identity collision allocation exhausted: %s %s: %s",
+            w->units[index].family, w->units[index].name, cause);
+        w->failed = 1;
+    }
 done:
     free(files); free(identities); return ok;
 }
@@ -787,7 +803,31 @@ static int pl_assign(pl_work *w)
         for (size_t i = w->member_offsets[c]; i < w->member_offsets[c + 1]; i++)
             w->originals[w->members[i]] = original;
     }
-    if (!sh_package_link_originals(w->nodes, w->count, w->originals, w->originals, w->error, w->capacity)) return 0;
+    /* Campaign-only data a scope supplies (original_binding 2) keeps the name
+     * the renderer or audio derives from it, but it is not SnapMap's: it never
+     * makes a dependent original, and keeps its own name only while every
+     * dependency it binds keeps its name too. */
+    unsigned char *own = pl_alloc(w->count, 1);
+    if (!own) return pl_fail(w, "cannot allocate original binding certification");
+    memcpy(own, w->originals, w->count);
+    for (size_t i = 0; i < w->count; i++) if (w->units[i].original_binding == 2) w->originals[i] = 0;
+    if (!sh_package_link_originals(w->nodes, w->count, w->originals, w->originals, w->error, w->capacity)) {
+        free(own); return 0;
+    }
+    for (int changed = 1; changed;) {
+        changed = 0;
+        for (size_t i = 0; i < w->count; i++) {
+            if (w->units[i].original_binding != 2 || !own[i]) continue;
+            int kept = 1;
+            for (size_t e = 0; kept && e < w->nodes[i].edge_count; e++) {
+                size_t target = w->nodes[i].edges[e].target;
+                kept = w->units[target].original_binding == 2 ? own[target] : w->originals[target];
+            }
+            if (!kept) { own[i] = 0; changed = 1; }
+        }
+    }
+    for (size_t i = 0; i < w->count; i++) if (w->units[i].original_binding == 2) w->originals[i] = own[i];
+    free(own);
     order = pl_alloc(classes->count, sizeof(*order));
     if (!order) goto allocation;
     for (size_t c = 0; c < classes->count; c++) {

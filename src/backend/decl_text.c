@@ -440,6 +440,14 @@ done:
     return ok;
 }
 
+/* The effect Parse on both renderers resets its items and ends in the shared
+ * reflected reader, which ignores its braced section's end-of-file result.
+ * Stock fists_1st and a coop candle effect omit their final brace. */
+int sh_decl_text_open_body_family(const char *type)
+{
+    return type && !strcmp(type, "fx");
+}
+
 int sh_decl_text_well_formed(const unsigned char *text, size_t length)
 {
     size_t i;

@@ -106,6 +106,7 @@ static char *dt_key(dt_parser *p)
 static char *dt_field(dt_parser *p, char **annotation)
 {
     size_t begin, starts[3], ends[3], token_begin[3], count = 0;
+    int indexed[3] = {0};
     dt_space(p); begin = p->offset;
     while (!p->failed && p->offset < p->length) {
         unsigned char c = (unsigned char)p->text[p->offset];
@@ -126,7 +127,22 @@ static char *dt_field(dt_parser *p, char **annotation)
             else {
                 char *token = dt_key(p);
                 if (!token) return NULL;
+                size_t n = strlen(token);
+                int open = n && token[n - 1] == '[';
                 free(token);
+                if (open) {
+                    indexed[count] = 1;
+                    /* The native lexer reads item[ 0 ] as separate tokens: an
+                     * array index may be surrounded by blanks. */
+                    size_t digits;
+                    while (p->offset < p->length && (p->text[p->offset] == ' ' || p->text[p->offset] == '\t')) p->offset++;
+                    digits = p->offset;
+                    while (p->offset < p->length && isdigit((unsigned char)p->text[p->offset])) p->offset++;
+                    if (digits == p->offset) return NULL;
+                    while (p->offset < p->length && (p->text[p->offset] == ' ' || p->text[p->offset] == '\t')) p->offset++;
+                    if (p->offset >= p->length || p->text[p->offset] != ']') return NULL;
+                    p->offset++;
+                }
             }
             ends[count++] = p->offset;
         }
@@ -137,6 +153,11 @@ static char *dt_field(dt_parser *p, char **annotation)
     size_t key_begin = token_begin[count];
     char *key = dt_copy(p->text + starts[count], ends[count] - starts[count]);
     if (!key || !*key) { free(key); return NULL; }
+    if (indexed[count]) {
+        size_t kept = 0;
+        for (size_t i = 0; key[i]; i++) if (key[i] != ' ' && key[i] != '\t') key[kept++] = key[i];
+        key[kept] = 0;
+    }
     for (size_t i = 0; key[i]; i++) {
         unsigned char c = (unsigned char)key[i];
         if (!(isalnum(c) || c == '_' || c == '.' || c == '[' || c == ']' || c == '-')) {

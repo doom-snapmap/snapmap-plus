@@ -326,6 +326,9 @@ static int sl_shader_files(sh_package_source_link *s, sl_unit *unit)
     if (sh_package_shader_paths(s->native.shader->renderer, unit->unit.name, unit->unit.name, &empty,
         sl_shader_collect_path, &probe, s->error, s->error_capacity) != SH_PACKAGE_SHADER_OK) return 0;
     if (!probe.declaration && !probe.cooked) {
+        /* A generic declaration pointer offers every manager as a candidate;
+         * like an absent declaration, an absent program is only a boundary. */
+        if (s->observe) return 1;
         int status = s->native.admit ? s->native.admit(s->native.context, unit->scope,
             unit->unit.family, unit->unit.name, unit->unit.semantics, s->error, s->error_capacity) : 0;
         if (status != 1) return sl_gap_fail(s, "source-free shader has no verified native admission", unit->unit.name);
@@ -1317,16 +1320,34 @@ sh_package_source_link *sh_package_source_link_open_attributed(const sh_package_
         int original_bytes = s->native.semantics(s->native.context, unit->scope, unit->unit.family,
             unit->unit.name, unit->unit.semantics, error, capacity);
         if (original_bytes < 0 || original_bytes > 1) { s->failed_unit = unit; goto failed; }
+        int campaign = 0, certified = original_bytes;
         for (size_t j = 0; original_bytes && j < unit->unit.file_count; j++) {
             sl_original *original = sl_original_get(s, unit->unit.files[j]->engine_path);
             size_t length = 0;
             if (!original || original->status < 0) goto failed;
             if (original->status != 1 && original->status != 2) { original_bytes = 0; break; }
+            campaign |= original->status == 2;
             unsigned char *body = sh_package_compilation_read(unit->unit.compilation, unit->unit.files[j],
                 SIZE_MAX, &length, error, capacity);
             if (!body) goto failed;
             original_bytes = original->resource.body_length == length && !memcmp(original->resource.body, body, length);
             free(body);
+        }
+        /* Campaign-only bytes a scope supplies keep their native name (the
+         * engine derives some names from others), but they are that scope's
+         * content, not SnapMap's: another scope may rely on their absence (an
+         * engine default), so a SnapMap unit reaching them is not original. */
+        if (original_bytes && campaign) original_bytes = 2;
+        else if (!original_bytes && certified && !strcmp(unit->unit.family, "renderprog")) {
+            /* A render program's name is its native identity and cannot be
+             * relocated yet. One SnapMap does not ship (a re-cooked campaign
+             * program, say) keeps the name its scope gives it the same way. */
+            char *path = sl_decl_path("renderprog", unit->unit.name);
+            if (!path) { sl_env_fail(s, "cannot construct render program path", unit->unit.name); goto failed; }
+            sl_original *declaration = sl_original_get(s, path);
+            free(path);
+            if (!declaration || declaration->status < 0) goto failed;
+            if (declaration->status != 1 && declaration->status != 3) original_bytes = 2;
         }
         unit->unit.original_binding = original_bytes;
     }

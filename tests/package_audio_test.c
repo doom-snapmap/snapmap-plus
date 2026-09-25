@@ -523,18 +523,31 @@ static void retained_program(void)
     size_t media_count = 0;
     CHECK(sh_package_audio_program_scopes(p) == 3);
     CHECK(!sh_package_audio_program_media(p, 2, program_media, &media_count, error, sizeof(error)) && !media_count);
-    sh_compiled_resource emitted[2] = {{0}, {0}}; sh_package_compilation compiled = {0};
+    sh_compiled_resource emitted[3] = {{0}, {0}, {0}}; sh_package_compilation compiled = {0};
     for (size_t i = 0; i < 2; i++) {
         emitted[i].engine_path = i ? "generated/decls/sound/bound/second.decl" : "generated/decls/sound/bound/first.decl";
         emitted[i].original_path = "generated/decls/sound/events/example.decl";
         emitted[i].type = "sound"; emitted[i].name = i ? "bound/second" : "bound/first";
         emitted[i].source = SIZE_MAX; emitted[i].body = (unsigned char *)"{}"; emitted[i].body_length = 2;
     }
-    compiled.resources = emitted; compiled.resource_count = 2;
+    /* A SnapMap sound the program did not collect keeps its native event. */
+    emitted[2] = emitted[0]; emitted[2].original_path = NULL;
+    emitted[2].engine_path = "generated/decls/sound/stock/native.decl"; emitted[2].name = "stock/native";
+    compiled.resources = emitted; compiled.resource_count = 3;
     CHECK(sh_package_sound_prepare(&compiled, error, sizeof(error)));
+    uint32_t stock = 0; CHECK(sh_audio_event_identity("stock/native", &stock) && emitted[2].sound_event == stock);
     program_ids ids = {0}; ids.remaining = 1000;
     CHECK(sh_package_audio_program_bind(p, &compiled, program_assign, &ids, error, sizeof(error)));
     CHECK(emitted[0].sound_event == event && emitted[1].sound_event != event && emitted[1].sound_event);
+    CHECK(emitted[2].sound_event == stock);
+    /* Renamed without a captured output, it has no event to play. */
+    emitted[2].original_path = "generated/decls/sound/stock/other.decl";
+    emitted[2].sound_event = emitted[2].sound_authored_event = 0;
+    CHECK(sh_package_sound_prepare(&compiled, error, sizeof(error)));
+    CHECK(!sh_package_audio_program_bind(p, &compiled, program_assign, &ids, error, sizeof(error)) &&
+        strstr(error, "no captured event output"));
+    compiled.resource_count = 2;
+    CHECK(sh_package_audio_program_bind(p, &compiled, program_assign, &ids, error, sizeof(error)));
     CHECK(sh_package_audio_program_media(p, 2, program_media, &media_count, error, sizeof(error)) && media_count == 1);
     uint32_t retained = emitted[1].sound_event;
     const sh_audio_bank_binding *binding = NULL;

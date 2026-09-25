@@ -885,6 +885,22 @@ int sh_decl_server_test_walk(const char *directory, const char *relative,
 }
 #endif
 
+/* One well-formed top-level block. An open-body family's reader lets end of
+ * file close the outermost brace, so its stock bodies may omit that byte. */
+static int ds_native_body(const char *type, const unsigned char *body, size_t length)
+{
+    unsigned char *closed;
+    int ok;
+    if (sh_decl_text_well_formed(body, length) && ds_decl_body_is_single_block(body, length)) return 1;
+    if (!sh_decl_text_open_body_family(type) || !length || length > SIZE_MAX - 2) return 0;
+    closed = (unsigned char *)malloc(length + 2);
+    if (!closed) return 0;
+    memcpy(closed, body, length); closed[length] = '\n'; closed[length + 1] = '}';
+    ok = ds_decl_body_is_single_block(closed, length + 2);
+    free(closed);
+    return ok;
+}
+
 static int ds_capture_snapshot_locked(const sh_package_compilation *compiled)
 {
     size_t i, count = 0;
@@ -914,7 +930,7 @@ static int ds_capture_snapshot_locked(const sh_package_compilation *compiled)
             resource->body_length > SIZE_MAX - g_total_bytes) goto done;
         body = resource->body; length = resource->body_length;
         if (length >= 3 && body[0] == 0xef && body[1] == 0xbb && body[2] == 0xbf) { body += 3; length -= 3; }
-        if (!sh_decl_text_well_formed(body, length) || !ds_decl_body_is_single_block(body, length)) {
+        if (!ds_native_body(resource->type, body, length)) {
             ds_log("REFUSED", resource->engine_path, "compiled declaration is not one valid native body"); goto done;
         }
         candidate = &g_candidates[g_candidate_count++];

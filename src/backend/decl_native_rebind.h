@@ -12,7 +12,8 @@ typedef enum sh_decl_native_binding_format {
     SH_BINDING_ARTICULATED_FIGURE,
     SH_BINDING_BREAKABLE,
     SH_BINDING_ANIMATION_WEB,
-    SH_BINDING_ENVIRONMENT
+    SH_BINDING_ENVIRONMENT,
+    SH_BINDING_CLOTH
 } sh_decl_native_binding_format;
 
 /* One family dispatch for discovery, relocation and reflected-string exclusion.

@@ -19,7 +19,7 @@ typedef struct region { void *address; size_t length; } region;
 typedef struct fixture {
     region regions[192]; size_t count;
     void *registry, *reflection;
-    int missing_unrelated, absent_target, implicit_root, reader_gap;
+    int missing_unrelated, absent_target, implicit_root, reader_gap, absent_program;
 } fixture;
 static void *allocate(fixture *f, size_t length)
 {
@@ -56,34 +56,35 @@ static void fields(fixture *f, void *record, size_t count,
 static void setup(fixture *f)
 {
     static const char *classes[] = {"idDeclEntityDef", "Entity", "idDeclTypeInfo",
-        "idDeclSnapEditorEntity", "idImage", "idRenderModel", "idStaticModel", "idStr", "idDeclTypeInfoGraph"};
-    static const char *types[] = {"entityDef", "snapEditorEntityDef", "image"};
-    static const size_t indices[] = {0, 3, 4};
+        "idDeclSnapEditorEntity", "idImage", "idRenderModel", "idStaticModel", "idStr", "idDeclTypeInfoGraph",
+        "idDeclRenderProg"};
+    static const char *types[] = {"entityDef", "snapEditorEntityDef", "image", "renderProg"};
+    static const size_t indices[] = {0, 3, 4, 9};
     f->registry = allocate(f, 0x18);
-    void *managers = allocate(f, 3 * 8);
-    pointer(f->registry, 8, managers); number(f->registry, 0x10, 3);
-    for (size_t i = 0; i < 3; i++) {
+    void *managers = allocate(f, 4 * 8);
+    pointer(f->registry, 8, managers); number(f->registry, 0x10, 4);
+    for (size_t i = 0; i < 4; i++) {
         void *manager = allocate(f, 0x90); pointer(managers, i * 8, manager);
         pointer(manager, 8, text(f, types[i])); pointer(manager, 0x10, text(f, classes[indices[i]]));
     }
     f->reflection = allocate(f, 0xb0);
-    void *container = allocate(f, 0x30), *records = allocate(f, 10 * 0x38);
-    void *objects = allocate(f, 10 * 16), *pointers = allocate(f, 10 * 16);
+    void *container = allocate(f, 0x30), *records = allocate(f, 11 * 0x38);
+    void *objects = allocate(f, 11 * 16), *pointers = allocate(f, 11 * 16);
     pointer(f->reflection, 0, container); pointer(container, 0x20, records);
-    pointer(f->reflection, 0x88, objects); number(f->reflection, 0x90, 10);
-    pointer(f->reflection, 0xa0, pointers); number(f->reflection, 0xa8, 10);
-    for (size_t i = 0; i < 9; i++) {
+    pointer(f->reflection, 0x88, objects); number(f->reflection, 0x90, 11);
+    pointer(f->reflection, 0xa0, pointers); number(f->reflection, 0xa8, 11);
+    for (size_t i = 0; i < 10; i++) {
         pointer(records, i * 0x38, text(f, classes[i]));
         pointer(records, i * 0x38 + 8, text(f, i == 3 || i == 8 ? "idDeclTypeInfo" : ""));
     }
     pointer(pointers, 8, (void *)0x10); pointer(pointers, 3 * 16 + 8, (void *)0x10);
     pointer(pointers, 4 * 16 + 8, (void *)0x40); pointer(pointers, 5 * 16 + 8, (void *)0x50);
     pointer(pointers, 6 * 16 + 8, (void *)0x60); pointer(objects, 7 * 16 + 8, (void *)0x70);
-    pointer(objects, 8 * 16 + 8, (void *)0x30);
+    pointer(objects, 8 * 16 + 8, (void *)0x30); pointer(pointers, 9 * 16 + 8, (void *)0x10);
     /* idSWF has no registered reader in this schema: a stock coverage gap. */
-    const char *et[] = {"idRenderModel", "idImage", "idDeclEntityDef", "idSWF"};
-    const char *eo[] = {"*", "*", "*", "*"}, *en[] = {"model", "image", "target", "gui"};
-    fields(f, (char *)records + 0x38, 4, et, eo, en);
+    const char *et[] = {"idRenderModel", "idImage", "idDeclEntityDef", "idSWF", "idDeclRenderProg"};
+    const char *eo[] = {"*", "*", "*", "*", "*"}, *en[] = {"model", "image", "target", "gui", "program"};
+    fields(f, (char *)records + 0x38, 5, et, eo, en);
     const char *st[] = {"idDeclEntityDef", "idStr", "idStr"};
     const char *so[] = {"*", "", ""}, *sn[] = {"entityDef", "category", "displayName"};
     fields(f, (char *)records + 3 * 0x38, 3, st, so, sn);
@@ -113,7 +114,8 @@ static int original(void *context, const char *path, unsigned char **body, size_
         if (f->missing_unrelated) return -1;
         value = "{ edit = { entityDef = \"props/unrelated\"; category = \"Unrelated\"; } }";
     } else if (!strcmp(path, "generated/decls/entitydef/props/rock.decl"))
-        value = f->implicit_root ? "{ class = \"Entity\"; edit = {} }" :
+        value = f->implicit_root ? "{ class = \"Entity\"; edit = {} }" : f->absent_program ?
+            "{ class = \"Entity\"; edit = { model = \"models/rock.lwo\"; program = \"absentprog\"; } }" :
             "{ class = \"Entity\"; edit = { model = \"models/rock.lwo\"; } }";
     else if (!strcmp(path, "generated/decls/entitydef/props/unrelated.decl")) {
         if (f->absent_target) return 0;
@@ -136,6 +138,7 @@ static int original(void *context, const char *path, unsigned char **body, size_
     else if (!strcmp(path, "generated/image/textures/other.bimage")) value = "other-image";
     else if (!strcmp(path, "generated/image/textures/unrelated.bimage")) value = "unrelated-image";
     else if (!strcmp(path, "generated/transsortatlas/textures/fx/glow.bimage")) value = "stock-atlas";
+    else if (!strcmp(path, "generated/decls/md6def/gore/chunk.md6.decl")) value = "{ init { } }";
     else if (!strcmp(path, "generated/transsortatlas/textures/fx/campaignglow.bimage")) {
         *length = 14; *body = malloc(15); assert(*body); memcpy(*body, "campaign-atlas", 15); return 2;
     }
@@ -338,6 +341,34 @@ static void test_implicit_roots(fixture *game, const sh_package_sources *sources
     sh_package_library_free(&out); game->implicit_root = game->absent_target = 0;
 }
 
+/* A declaration pointer naming a program neither SnapMap nor the scope has
+ * ends observation there, like an absent declaration: the stock root keeps
+ * its other edges, and the image it reaches still nominates its variant. */
+static int program_abi(void *context, const char *name, sh_decl_source source, int *kind,
+    uint32_t *index, char *error, size_t capacity)
+{ (void)context; (void)name; (void)source; (void)kind; (void)index; (void)error; (void)capacity; return 0; }
+static int program_flags(void *context, const char *name, sh_decl_source source, uint64_t *mask,
+    char *error, size_t capacity)
+{ (void)context; (void)name; (void)source; (void)mask; (void)error; (void)capacity; return 0; }
+static void test_absent_program_boundary(fixture *f, const sh_package_sources *sources,
+    const sh_package_compile_environment *env, const sh_resource_catalog *catalog,
+    sh_decl_registry_source registry, const sh_package_library_native *base)
+{
+    sh_package_source_shader shader = {SH_PACKAGE_SHADER_VULKAN, f, program_abi, program_flags};
+    sh_package_library_native native = *base; native.source.shader = &shader;
+    sh_package_library out = {0}; char error[1024];
+    f->absent_program = 1;
+    int ok = sh_package_library_compile(sources, env, catalog, original, f, registry,
+        (uintptr_t)f->reflection, &native, &out, error, sizeof(error));
+    if (!ok) fprintf(stderr, "absent program boundary: %s\n", error); assert(ok);
+    if (out.coverage && strstr(out.coverage, "absentprog")) fprintf(stderr, "absent program: %s\n", out.coverage);
+    assert(!out.coverage || !strstr(out.coverage, "absentprog"));
+    const sh_package_provenance_binding *red = binding(&out, sources, "Red", "", "entitydef", "props/rock");
+    assert(red);
+    contains(&out, resource(&out, "entitydef", red->name), "program = \"absentprog\"");
+    sh_package_library_free(&out); f->absent_program = 0;
+}
+
 /* Only content a package supplied can make it responsible for a failed
  * closure: its own refused unit is malformed; content reaching a unit the
  * product cannot link leaves it unserved; product-only chains blame nobody. */
@@ -400,6 +431,19 @@ static void test_failure_attribution(fixture *f, const sh_package_compile_enviro
     assert(ok && invalid == SIZE_MAX && unserved == SIZE_MAX);
     assert(binding(&out, sources, "Red", "", "entitydef", "props/rock"));
     sh_package_library_free(&out);
+    /* A model field names an md6 definition by its .md6 spelling; composition
+     * tokens and linked names keep it, so the entity still binds. */
+    create("attribution/overrides/gore/package.json", "{\"id\":\"gore\",\"name\":\"Gore\"}");
+    create("attribution/overrides/gore/assets/generated/decls/entitydef/props/gored.decl",
+        "{ class = \"Entity\"; edit = { model = \"gore/chunk.md6\"; } }");
+    sh_package_sources *gore_sources = sh_package_sources_scan(path, error, sizeof(error)); assert(gore_sources);
+    for (const char *const *name = (const char *const[]){"Broken", "Malformed", "Unsupported", NULL}; *name; name++)
+        assert(sh_package_sources_remove(gore_sources, owner(gore_sources, *name)));
+    ok = sh_package_library_compile(gore_sources, &env, catalog, original, f, registry,
+        (uintptr_t)f->reflection, native, &out, error, sizeof(error));
+    if (!ok) fprintf(stderr, "md6 model field: %s\n", error);
+    assert(ok && invalid == SIZE_MAX && unserved == SIZE_MAX);
+    sh_package_library_free(&out); sh_package_sources_free(gore_sources);
     /* A model SnapMap registers with no data loads defaulted natively; a
      * package naming it compiles with that name-only identity. */
     create("attribution/overrides/fileless/package.json", "{\"id\":\"fileless\",\"name\":\"Fileless\"}");
@@ -674,6 +718,7 @@ int main(void)
         assert(sh_package_source_verify(gap_sources->files + i));
     sh_package_library_free(&recorded); sh_package_sources_free(gap_sources); f.reader_gap = 0;
     test_failure_attribution(&f, &env, catalog, registry, &native);
+    test_absent_program_boundary(&f, sources, &env, catalog, registry, &native);
     /* An unreadable baseline edge is a product coverage defect, never a package
      * invalidation or permission to publish a partially discovered library. */
     size_t invalid = 0; env.invalid_package = &invalid; f.missing_unrelated = 1;

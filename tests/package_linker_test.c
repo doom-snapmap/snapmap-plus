@@ -31,7 +31,7 @@ typedef struct fixture {
     size_t count, assigned, bound;
     int unresolved, collision, changed_source, omit_replay, bad_inspection, abort_bind, shared_name;
     int original_paths, alias_rewrite;
-    int member_fault, repeat_slot;
+    int member_fault, repeat_slot, native_originals;
     int original_bindings[12];
     unsigned char *mutate_witness;
     sh_package_link_edge *mutate_implicit;
@@ -102,12 +102,13 @@ static int assign(void *context, size_t unit, const unsigned char identity[32], 
     for (size_t i = 0; i < 32; i++) snprintf(hex + i * 2, 3, "%02x", identity[i]);
     if (!count) { *name = _strdup(f->units[unit].name); return *name != NULL; }
     *name = malloc(strlen(f->units[unit].name) + 70); assert(*name);
-    if (f->shared_name || f->original_paths) sprintf(*name, "%s", f->units[unit].name);
+    int native = f->original_paths || (f->native_originals && original_binding);
+    if (f->shared_name || native) sprintf(*name, "%s", f->units[unit].name);
     else sprintf(*name, "smp/%s/%s", f->collision ? "same" : hex, f->units[unit].name);
     *paths = calloc(count, sizeof(**paths)); assert(*paths);
     for (size_t i = 0; i < count; i++) {
         (*paths)[i] = malloc(strlen(files[i]->engine_path) + strlen(*name) + 80); assert((*paths)[i]);
-        if (f->original_paths) sprintf((*paths)[i], "%s", files[i]->engine_path);
+        if (native) sprintf((*paths)[i], "%s", files[i]->engine_path);
         else if (files[i]->type) sprintf((*paths)[i], "generated/decls/%s/%s.decl", files[i]->type, *name);
         else sprintf((*paths)[i], "linked/%s/%s", hex, files[i]->engine_path);
     }
@@ -676,6 +677,53 @@ static void implicit_bindings(const sh_package_sources *sources)
     sh_package_link_output_free(&out);
 }
 
+/* Campaign-only bytes a scope supplies keep their native name (original binding
+ * 2), but never make a stock dependent original: that scope's consumer goes
+ * private while every other scope keeps the stock name. */
+static void campaign_originals(const sh_package_sources *sources)
+{
+    fixture f = {0}; sh_package_compilation first = {0}, second = {0};
+    first.sources = second.sources = sources;
+    sh_compiled_resource parts[4] = {0};
+    const sh_compiled_resource *files[4];
+    const char *paths[] = {"consumer/stock.bin", "consumer/stock.bin", "program/campaign.bin", "skeleton/campaign.bin"};
+    const char *bodies[] = {"stock consumer", "stock consumer", "campaign program", "campaign skeleton"};
+    sh_package_link_output out = {0};
+    sh_package_link_adapter adapter = {&f, resolve, bind_file, assign};
+    sh_package_link_edge program[] = {{"program", 2}}, skeleton[] = {{"skeleton", 3}};
+    char error[512];
+    for (size_t i = 0; i < 4; i++) {
+        parts[i].engine_path = paths[i]; parts[i].body = (unsigned char *)bodies[i];
+        parts[i].body_length = strlen(bodies[i]); parts[i].source = SIZE_MAX; files[i] = parts + i;
+    }
+    f.units[0] = (sh_package_link_unit){"consumer", "stock", &first, files, 1};
+    f.units[1] = (sh_package_link_unit){"consumer", "stock", &second, files + 1, 1};
+    f.units[2] = (sh_package_link_unit){"renderprog", "campaign", &second, files + 2, 1};
+    f.units[3] = (sh_package_link_unit){"skeleton", "campaign", &second, files + 3, 1};
+    f.units[1].implicit = program; f.units[1].implicit_count = 1;
+    f.units[2].implicit = skeleton; f.units[2].implicit_count = 1;
+    f.units[0].original_binding = f.units[1].original_binding = 1;
+    f.units[2].original_binding = f.units[3].original_binding = 2;
+    f.count = 4; f.native_originals = 1;
+    if (!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)))
+        fprintf(stderr, "campaign originals: %s\n", error);
+    assert(out.compiled && out.classes.nodes[0] != out.classes.nodes[1]);
+    assert(f.original_bindings[out.classes.representatives[out.classes.nodes[0]]]);
+    assert(!f.original_bindings[out.classes.representatives[out.classes.nodes[1]]]);
+    assert(!strcmp(out.names[out.classes.nodes[0]], "stock") && strcmp(out.names[out.classes.nodes[1]], "stock"));
+    /* Campaign data resting on campaign data keeps every name. */
+    assert(!strcmp(out.names[out.classes.nodes[2]], "campaign") && !strcmp(out.names[out.classes.nodes[3]], "campaign"));
+    /* A changed dependency still makes campaign data private. */
+    f.units[3].original_binding = 0; f.assigned = 0;
+    assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strcmp(out.names[out.classes.nodes[2]], "campaign") && !strcmp(out.names[out.classes.nodes[0]], "stock"));
+    /* Certified like SnapMap bytes, both stock consumers would claim one name. */
+    f.units[2].original_binding = f.units[3].original_binding = 1; f.assigned = 0;
+    assert(!sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
+    assert(strstr(error, "native identity collision") && strstr(error, "consumer stock"));
+    sh_package_link_output_free(&out);
+}
+
 /* A declaration may assign one field twice (stock projectile impact effects
  * repeat rumbleDecl); the native reader resolves both and keeps the last. Both
  * references bind, each under its own replayable slot. */
@@ -759,6 +807,7 @@ int main(void)
     shared_replacement(sources, &f, materials);
     streamed_suppliers(sources);
     repeated_field_slots();
+    campaign_originals(sources);
     assert(sh_package_link(sources, f.units, f.count, &adapter, NULL, NULL, &out, error, sizeof(error)));
     assert(out.classes.count == 4 && out.compiled->resource_count == 4 && out.compiled->duplicate_count == 2);
     assert(out.classes.nodes[entities[0]] == out.classes.nodes[entities[2]]);

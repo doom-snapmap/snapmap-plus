@@ -4,6 +4,8 @@
 #include "package_hud.h"
 #include "package_sound.h"
 #include "decl_native_rebind.h"
+#include "package_movie.h"
+#include "swf_binary.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -601,9 +603,26 @@ static int pl_tokens(pl_contributions *c, char *error, size_t capacity)
     if (!c->tokens) return 0;
     c->token_count = c->classes.count;
     for (size_t i = 0; i < c->token_count; i++) {
-        char token[96] = "smp-contribution/";
+        /* A token must read back through its field's reader: a movie field
+         * names a cooked pair by its generated/swf path, and model fields
+         * dispatch on the extension (an md6 definition by .md6 or .decl, a
+         * breakable declaration by .decl). Keep the class's own extension. */
+        const sh_package_link_unit *represented = c->inputs.units + c->classes.representatives[i];
+        char token[256] = "smp-contribution/", alias[128];
         size_t prefix = strlen(token);
         for (size_t k = 0; k < 32; k++) snprintf(token + prefix + k * 2, 3, "%02x", c->classes.identities[i][k]);
+        const char *slash = strrchr(represented->name, '/'), *dot = strrchr(represented->name, '.');
+        if (sh_package_movie_owner(represented->family, represented->name)) {
+            /* The generated movie path partitions a long stem like the native
+             * constructor does; derive it rather than spell it. */
+            sh_swf_binary_paths linked;
+            snprintf(alias, sizeof(alias), "swf/%s.swf", token);
+            if (!sh_swf_binary_paths_for(alias, &linked) || strlen(linked.movie) >= sizeof(token)) {
+                snprintf(error, capacity, "editor binding token has no movie spelling"); return 0;
+            }
+            strcpy_s(token, sizeof(token), linked.movie);
+        } else if (dot && dot > (slash ? slash : represented->name) && dot[1] && strlen(dot) < 16)
+            strcat_s(token, sizeof(token), dot);
         /* These tokens exist only while composing. Verify their disjointness
          * from captured native names and from every unequal exact class. */
         for (size_t j = 0; j < c->inputs.count; j++) if (!strcmp(token, c->inputs.units[j].name)) {

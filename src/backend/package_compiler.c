@@ -687,7 +687,7 @@ static sh_decl_node *pc_editor_take(sh_decl_node *parent, const char *type)
 }
 
 static char *pc_editor_projection(const char *type, sh_decl_source text, size_t *length, int *present,
-    char *error, size_t capacity)
+    int keep_inherit, char *error, size_t capacity)
 {
     sh_decl_node *tree = sh_decl_tree_parse(text, error, capacity), *parent, *selected = NULL;
     char *out = NULL;
@@ -700,11 +700,16 @@ static char *pc_editor_projection(const char *type, sh_decl_source text, size_t 
         if (selected) *present = 1;
     }
     if (parent && parent != tree) {
+        sh_decl_node *inherit = keep_inherit ? (sh_decl_node *)sh_decl_tree_member(tree, "inherit") : NULL;
         sh_decl_tree_free(parent->children); parent->children = selected; selected = NULL;
         sh_decl_node **link = &tree->children;
-        while (*link != parent) link = &(*link)->next;
-        *link = parent->next; parent->next = NULL;
+        while (*link) {
+            sh_decl_node *node = *link;
+            if (node == parent || node == inherit) { *link = node->next; node->next = NULL; }
+            else link = &node->next;
+        }
         sh_decl_tree_free(tree->children); tree->children = parent;
+        if (inherit) { inherit->next = parent; tree->children = inherit; }
     } else {
         sh_decl_tree_free(tree->children); tree->children = selected; selected = NULL;
     }
@@ -765,11 +770,31 @@ char *sh_package_editor_contributions(const char *type, sh_decl_source baseline,
     *error = 0; if (length) *length = 0;
     int phase = sh_package_editor_contribution_phase(type), present = 0;
     if (!phase || !length || (count && !sources) || count > SIZE_MAX / sizeof(*parts)) goto done;
+    /* A sparse inherited list patches its parent's entries by index and means
+     * nothing without that parent. Keep a parent the contributions share in
+     * the projections so composition recognizes such lists; with differing
+     * parents only complete lists compose. */
+    int keep_inherit = phase != 2;
+    char *shared_parent = NULL;
+    for (size_t i = 0; keep_inherit && i < count; i++) {
+        sh_decl_node *tree = sh_decl_tree_parse(sources[i], error, capacity);
+        const char *value = NULL; size_t value_length = 0;
+        if (!tree) { free(shared_parent); goto done; }
+        if (sh_decl_tree_literal(sh_decl_tree_member(tree, "inherit"), &value, &value_length)) {
+            if (!shared_parent) {
+                shared_parent = malloc(value_length + 1);
+                if (shared_parent) { memcpy(shared_parent, value, value_length); shared_parent[value_length] = 0; }
+                else keep_inherit = 0;
+            } else if (strlen(shared_parent) != value_length || memcmp(shared_parent, value, value_length)) keep_inherit = 0;
+        }
+        sh_decl_tree_free(tree);
+    }
+    free(shared_parent);
     parts = calloc(count ? count : 1, sizeof(*parts));
-    base = pc_editor_projection(type, baseline, &base_length, &present, error, capacity);
+    base = pc_editor_projection(type, baseline, &base_length, &present, keep_inherit, error, capacity);
     if (!parts || !base) goto done;
     for (size_t i = 0; i < count; i++) {
-        parts[i].text = pc_editor_projection(type, sources[i], &parts[i].length, &present, error, capacity);
+        parts[i].text = pc_editor_projection(type, sources[i], &parts[i].length, &present, keep_inherit, error, capacity);
         if (!parts[i].text) goto done;
         char *completed = pc_editor_complete(type, (sh_decl_source){base, base_length}, parts[i],
             &parts[i].length, error, capacity);
@@ -785,7 +810,7 @@ char *sh_package_editor_contributions(const char *type, sh_decl_source baseline,
     if (phase == 2) {
         size_t target_length = 0;
         char *projected = pc_editor_projection(type, private_binding ? target : baseline,
-            &target_length, &present, error, capacity);
+            &target_length, &present, 0, error, capacity);
         char *completed = projected ? pc_editor_complete(type, (sh_decl_source){base, base_length},
             (sh_decl_source){projected, target_length}, &target_length, error, capacity) : NULL;
         free(projected);

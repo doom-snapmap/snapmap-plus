@@ -286,12 +286,19 @@ static const nr_af_field nr_br_fields[] = {
 };
 
 static int nr_br_block(nr_walk *walk, const sh_decl_tokens *tokens, size_t *at, unsigned block);
+/* Stock breakables write NULL for an absent effect or particle (fx NULL,
+ * particleTrail NULL): a sentinel that names no resource. */
+static int nr_br_null(const sh_decl_tokens *tokens, size_t *at)
+{
+    if (!nr_keyword(tokens, *at, "NULL")) return 0;
+    (*at)++; return 1;
+}
 static int nr_br_pattern(nr_walk *walk, const sh_decl_tokens *tokens, size_t *at, const char *pattern)
 {
     for (; *pattern; pattern++) {
         const char *family = *pattern == 'D' ? "discreteanimation" :
             *pattern == 'P' ? "particle" : *pattern == 'R' ? "material" : *pattern == 'X' ? "fx" : NULL;
-        if (family) { if (!nr_reference(walk, tokens, at, family, 0)) return 0; continue; }
+        if (family) { if (!nr_br_null(tokens, at) && !nr_reference(walk, tokens, at, family, 0)) return 0; continue; }
         switch (*pattern) {
         case 'n': if (!nr_float(tokens, at)) return 0; break;
         case 'b': case 't': if (!nr_atom(tokens, at, 0)) return 0; break;
@@ -688,13 +695,63 @@ done:
     sh_decl_tokens_free(&tokens); return ok;
 }
 
+/* The cloth Parse (Vulkan 0x14143c5d0) reads flat keywords. material finds its
+ * declaration with makeDefault; clothData { model ... } and ropeModel { model
+ * ... } find their md6 definition without a default and fail fatally when it is
+ * missing ("Unable to find md6 decl"), unless clothData names none; the rest of
+ * those blocks and hitTestGroups hold joint names and numbers local to the
+ * cloth. clothDeclFX names a declaration type not yet mapped here: refused. */
+static int nr_cloth_block(const sh_decl_tokens *tokens, size_t *at)
+{
+    if (!sh_decl_token_is(tokens, *at, "{") || tokens->items[*at].close >= tokens->count) return 0;
+    *at = tokens->items[*at].close + 1; return 1;
+}
+static int nr_cloth(nr_walk *walk, char *error, size_t capacity)
+{
+    static const char *const scalars[] = {"width", "height", "vspacing", "hspacing", "springs", "mass",
+        "friction", "collisionfriction", "gravity", "springLength", "springFriction",
+        "springMaxLengthMultiplier", "collisionSphereRadiusMultiplier", "type"};
+    sh_decl_tokens tokens = {0}; size_t at = 0; int ok = 0;
+    if (!sh_decl_native_lex(walk->source, &tokens, error, capacity)) return 0;
+    if (!nr_take(&tokens, &at, "{")) goto done;
+    while (at < tokens.count && !sh_decl_token_is(&tokens, at, "}")) {
+        int scalar = 0;
+        for (size_t i = 0; i < sizeof(scalars) / sizeof(scalars[0]); i++) scalar |= nr_keyword(&tokens, at, scalars[i]);
+        if (scalar) {
+            at++;
+            if (!nr_float(&tokens, &at) && !nr_atom(&tokens, &at, 0)) goto done;
+        } else if (nr_keyword(&tokens, at, "material")) {
+            at++;
+            if (!nr_reference(walk, &tokens, &at, "material", 0)) goto done;
+        } else if (nr_keyword(&tokens, at, "clothData") || nr_keyword(&tokens, at, "ropeModel")) {
+            int cloth = nr_keyword(&tokens, at, "clothData");
+            at++;
+            if (!sh_decl_token_is(&tokens, at, "{")) goto done;
+            size_t block = at, end = tokens.items[at].close;
+            if (end >= tokens.count) goto done;
+            at++;
+            if (!(cloth && nr_keyword(&tokens, at, "none")) && !nr_reference(walk, &tokens, &at, "md6def", 0)) goto done;
+            at = block;
+            if (!nr_cloth_block(&tokens, &at)) goto done;
+        } else if (nr_keyword(&tokens, at, "hitTestGroups")) {
+            at++;
+            if (!nr_cloth_block(&tokens, &at)) goto done;
+        } else goto done;
+    }
+    ok = nr_take(&tokens, &at, "}") && at == tokens.count;
+done:
+    if (!ok && error && capacity && !*error) snprintf(error, capacity, "unsupported cloth grammar at byte %zu",
+        at < tokens.count ? tokens.items[at].begin : walk->source.length);
+    sh_decl_tokens_free(&tokens); return ok;
+}
+
 int sh_decl_native_binding_family(const char *family, sh_decl_native_binding_format *format)
 {
     static const struct { const char *family; sh_decl_native_binding_format format; } formats[] = {
         {"material", SH_BINDING_MATERIAL}, {"renderparm", SH_BINDING_RENDERPARM},
         {"md6def", SH_BINDING_MD6_DEFINITION}, {"table", SH_BINDING_TABLE},
         {"articulatedfigure", SH_BINDING_ARTICULATED_FIGURE}, {"breakable", SH_BINDING_BREAKABLE},
-        {"animweb", SH_BINDING_ANIMATION_WEB}, {"env", SH_BINDING_ENVIRONMENT}
+        {"animweb", SH_BINDING_ANIMATION_WEB}, {"env", SH_BINDING_ENVIRONMENT}, {"cloth", SH_BINDING_CLOTH}
     };
     if (family) for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); i++)
         if (!_stricmp(family, formats[i].family)) {
@@ -718,6 +775,7 @@ int sh_decl_native_reference_sites(sh_decl_native_binding_format format, sh_decl
     if (format == SH_BINDING_ANIMATION_WEB) return nr_animation_web(&walk, error, capacity);
     if (format == SH_BINDING_MD6_DEFINITION)
         return sh_decl_md6_reference_sites(source, nr_md6, &walk, error, capacity);
+    if (format == SH_BINDING_CLOTH) return nr_cloth(&walk, error, capacity);
     if (format == SH_BINDING_ENVIRONMENT)
         return schema && schema->resolve && nr_environment(&walk, schema, error, capacity);
     if (schema && schema->resolve && format == SH_BINDING_MATERIAL) {

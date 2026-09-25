@@ -37,6 +37,18 @@ int main(void)
     sh_decl_tree_free(root);
     for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) assert(!parse(bad[i]));
     {
+        /* The native lexer reads item[ 0 ] as separate tokens (stock damage
+         * declarations write list members that way): one index key. */
+        root = parse("{ list = { num = 1; item[ 0 ] = \"a\"; item[\t1\t] = \"b\"; } }"); assert(root);
+        node = (sh_decl_node *)sh_decl_tree_member(root, "list");
+        assert(sh_decl_tree_literal(sh_decl_tree_member(node, "item[0]"), &literal, &length) &&
+            length == 1 && *literal == 'a');
+        assert(sh_decl_tree_literal(sh_decl_tree_member(node, "item[1]"), &literal, &length) &&
+            length == 1 && *literal == 'b');
+        sh_decl_tree_free(root);
+        assert(!parse("{ item[ x ] = 1; }") && !parse("{ item[ 0 = 1; }"));
+    }
+    {
         const char *paths = "{ inherit = \"projectile\\player\\mp\\directional_melee\";"
             " directory = \"folder\\\"; plain = folder\\name; }";
         root = parse(paths); assert(root);

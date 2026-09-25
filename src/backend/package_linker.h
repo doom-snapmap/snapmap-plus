@@ -28,7 +28,9 @@ typedef struct sh_package_link_unit {
     size_t file_count;
     unsigned char semantics[32];
     /* Exact original bytes AND native implicit semantics, before dependency
-     * propagation. Never derive this from resource availability alone. */
+     * propagation. Never derive this from resource availability alone. 2 marks
+     * campaign-only bytes a scope supplied: the unit keeps its native name while
+     * its dependencies keep theirs, but never makes a dependent original. */
     int original_binding;
     /* Exact, potentially very large implicit source inputs. Sorted role/path
      * and streamed bytes participate in equivalence. These are not manager
